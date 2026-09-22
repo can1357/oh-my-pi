@@ -1,6 +1,18 @@
-import { describe, expect, it } from "bun:test";
-import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
+import { afterAll, describe, expect, it } from "bun:test";
+import type { FetchImpl } from "@oh-my-pi/pi-ai";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { searchZai, ZaiProvider } from "@oh-my-pi/pi-coding-agent/web/search/providers/zai";
+import { createInMemoryAuthStorage } from "../../helpers/agent-session-setup";
+
+const authStorage = createInMemoryAuthStorage();
+authStorage.setRuntimeApiKey("zai", "zai-test-key");
+const modelRegistry = new ModelRegistry(authStorage);
+const zaiModel = modelRegistry.find("web", "zai");
+if (!zaiModel) throw new Error("Expected bundled web/zai model");
+
+afterAll(() => {
+	authStorage.close();
+});
 
 interface CapturedRequest {
 	method: string | undefined;
@@ -75,17 +87,6 @@ describe("Z.AI web search provider", () => {
 				),
 			);
 		};
-		const authStorage = {
-			resolver(provider: string, options?: { sessionId?: string }) {
-				expect(provider).toBe("zai");
-				expect(options?.sessionId).toBe("session-zai-test");
-				return async () => "zai-test-key";
-			},
-			hasAuth(provider: string) {
-				return provider === "zai";
-			},
-		} as unknown as AuthStorage;
-
 		const response = await searchZai({
 			query: "omp z.ai search",
 			authStorage,
@@ -161,15 +162,6 @@ describe("Z.AI web search provider", () => {
 		return { fetchImpl, capturedRequests };
 	}
 
-	const authStorage = {
-		resolver() {
-			return async () => "zai-test-key";
-		},
-		hasAuth(provider: string) {
-			return provider === "zai";
-		},
-	} as unknown as AuthStorage;
-
 	function toolCallQuery(capturedRequests: CapturedRequest[]): unknown {
 		const toolCall = capturedRequests.find(request => request.body.method === "tools/call");
 		const params = toolCall?.body.params as { arguments?: { query?: unknown } } | undefined;
@@ -182,6 +174,8 @@ describe("Z.AI web search provider", () => {
 			query: 'pytest "fixture scope" site:docs.pytest.org -inurl:changelog filetype:html after:2024-01-01',
 			systemPrompt: "",
 			authStorage,
+			model: zaiModel,
+			modelRegistry,
 			fetch: fetchImpl,
 		});
 
@@ -196,6 +190,8 @@ describe("Z.AI web search provider", () => {
 			query: "latest bun release notes",
 			systemPrompt: "",
 			authStorage,
+			model: zaiModel,
+			modelRegistry,
 			fetch: fetchImpl,
 		});
 

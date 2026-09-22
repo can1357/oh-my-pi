@@ -15,7 +15,8 @@ import { resolveModelServiceTier, streamSimple } from "@oh-my-pi/pi-ai";
 import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
 import { formatDuration, formatNumber, prompt } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
-import { formatModelSelectorValue, formatModelString } from "../config/model-resolver";
+import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
+import { formatModelStringWithRouting } from "../config/model-resolver";
 import { buildServiceTierByFamily, serviceTierForAllFamilies, serviceTierSettingToTier } from "../config/service-tier";
 import cachePrefixTemplate from "../prompts/bench/cache-prefix.md" with { type: "text" };
 import cachePrefixChunk from "../prompts/bench/cache-prefix-chunk.md" with { type: "text" };
@@ -23,7 +24,7 @@ import cacheSuffixTemplate from "../prompts/bench/cache-suffix.md" with { type: 
 import chatTemplate from "../prompts/bench/chat.md" with { type: "text" };
 import generationTemplate from "../prompts/bench/generation.md" with { type: "text" };
 import prefillInstruction from "../prompts/bench/prefill-instruction.md" with { type: "text" };
-import { shouldDisableReasoning, toReasoningEffort } from "../thinking";
+import { shouldDisableReasoning, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
 import {
 	type BenchRuntime,
 	type BenchTarget,
@@ -31,7 +32,8 @@ import {
 	resolveBenchTargets,
 	type StreamSimpleFn,
 } from "./bench-runtime";
-import { createLiveBoard, type LiveBoardOutput } from "./live-board";
+import { createLiveBoard, type LiveBoardOutput } from "@oh-my-pi/pi-tui/chrome/live-board";
+import { formatCost } from "@oh-my-pi/pi-tui/overlays/agent-hub-renderer";
 
 const DEFAULT_PAR = 4;
 const DEFAULT_CACHE_MAX_TOKENS = 64;
@@ -531,12 +533,6 @@ async function runWithConcurrency<T>(
 	return results;
 }
 
-function formatCost(cost: number): string {
-	if (cost < 0.01) return `$${cost.toFixed(4)}`;
-	if (cost < 1) return `$${cost.toFixed(3)}`;
-	return `$${cost.toFixed(2)}`;
-}
-
 function formatCachePairLine(pair: BenchCachePairReport, index: number, total: number): string {
 	const formatPhase = (run: BenchCacheRunReport, alreadyWarm = false) => {
 		if (!run.result.ok) {
@@ -696,7 +692,7 @@ function buildModelReport(
 	}
 	return {
 		selector,
-		model: formatModelString(model),
+		model: formatModelStringWithRouting(model),
 		thinking,
 		results,
 		stats: successes.length === 0 ? null : computeBenchStats(successes),
@@ -943,7 +939,7 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 
 	const runtime = await (deps.createRuntime ?? createDefaultBenchRuntime)();
 	try {
-		const targets = resolveBenchTargets(command.models, runtime.modelRegistry, runtime.settings, writeStderr);
+		const targets = await resolveBenchTargets(command.models, runtime.modelRegistry, runtime.settings, writeStderr);
 		if (cacheMode) assertCacheModeSupported(targets);
 		// Explicit `--service-tier` (a single value broadcast across families) wins;
 		// otherwise fall back to the configured per-family `tier.*` settings. Each
@@ -960,7 +956,7 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 		const reports: BenchModelReport[] = [];
 		for (const { selector, model, thinking } of targets) {
 			if (!json) {
-				const resolvedModel = formatModelSelectorValue(formatModelString(model), thinking);
+				const resolvedModel = formatModelSelectorValue(formatModelStringWithRouting(model), thinking);
 				const resolvedNote = selector === resolvedModel ? "" : chalk.dim(` (${selector})`);
 				print(`${chalk.bold(resolvedModel)}${resolvedNote}`);
 				progress = {

@@ -11,7 +11,8 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { buildOutputValidator } from "@oh-my-pi/pi-coding-agent/tools/output-schema-validator";
 import { YieldTool } from "@oh-my-pi/pi-coding-agent/tools/yield";
 import { buildWorkPoolOutputSchema } from "../../src/task/workpool-yield";
-import { arrayValuedLabels, assembleYieldResult } from "../../src/task/yield-assembly";
+import { arrayValuedLabels } from "../../src/task/yield-assembly";
+import { assembleYieldResult } from "@oh-my-pi/pi-tui/tools/task-yield-assembly";
 
 function createSession(overrides: Partial<ToolSession> = {}): ToolSession {
 	return {
@@ -194,6 +195,49 @@ describe("YieldTool", () => {
 		await expect(tool.execute("call-schema-punt", { type: "result" } as never)).rejects.toThrow(
 			/structured output matching the declared schema/,
 		);
+	});
+	it("rejects a data-less useLastTurn finalize when the last turn carries no text", async () => {
+		// Thinking-only final turn: `useLastTurn` extraction resolves to empty, so
+		// finalization would fail the run post-mortem with a null-data warning and
+		// no retry. The free-form analog of the schema guard bounces it in-band.
+		const tool = new YieldTool(createSession({ getLastAssistantText: () => undefined }));
+		await expect(tool.execute("call-empty-last-turn", { type: "result" } as never)).rejects.toThrow(
+			/no text \(thinking only\)/,
+		);
+	});
+
+	it("rejects an empty incremental last-turn yield before it can mask an empty finalize", async () => {
+		const tool = new YieldTool(createSession({ getLastAssistantText: () => undefined }));
+		await expect(tool.execute("call-empty-section", { type: ["notes"] } as never)).rejects.toThrow(
+			/no text \(thinking only\)/,
+		);
+		await expect(tool.execute("call-empty-finalize", { type: "result" } as never)).rejects.toThrow(
+			/no text \(thinking only\)/,
+		);
+	});
+
+	it("accepts a data-less useLastTurn finalize when the last turn has text", async () => {
+		const tool = new YieldTool(createSession({ getLastAssistantText: () => "the actual answer" }));
+		const result = await tool.execute("call-text-last-turn", { type: "result" } as never);
+		expect(result.details).toEqual({
+			data: undefined,
+			status: "success",
+			error: undefined,
+			type: "result",
+			useLastTurn: true,
+		});
+	});
+
+	it("aborts a persistently empty last-turn finalize instead of retrying forever", async () => {
+		const tool = new YieldTool(createSession({ getLastAssistantText: () => undefined }));
+		for (let attempt = 0; attempt < 3; attempt++) {
+			await expect(tool.execute("call-empty-retry", { type: "result" } as never)).rejects.toThrow(
+				/retries remaining before abort/,
+			);
+		}
+		const aborted = await tool.execute("call-empty-final", { type: "result" } as never);
+		expect(aborted.details?.status).toBe("aborted");
+		expect(aborted.details?.error).toMatch(/empty last-turn result after \d+ consecutive attempt/);
 	});
 
 	it("accepts a data-less finalize after incremental sections even when schema-bound", async () => {
@@ -1421,6 +1465,115 @@ describe("YieldTool", () => {
 			status: "success",
 			error: undefined,
 		});
+	});
+
+	it("resets the schema-retry budget after a schema-valid incremental section", async () => {
+		// Reproduces the RolesFallbacksReview incident: two malformed findings
+		// must not exhaust the verdict section's budget when a valid section
+		// lands in between. Incremental sections stay nonterminal, so the
+		// counter reset is observable across submissions on one tool instance.
+		const tool = new YieldTool(
+			createSession({
+				outputSchema: {
+					properties: {
+						overall_correctness: { enum: ["correct", "incorrect"] },
+						explanation: { type: "string" },
+						confidence: { type: "number" },
+					},
+					optionalProperties: {
+						findings: {
+							elements: { properties: { title: { type: "string" }, body: { type: "string" } } },
+						},
+					},
+				},
+			}),
+		);
+		const finding = { title: "bug", body: "details" };
+		// Two malformed findings: bare string, then double-encoded wrapper.
+		await expect(
+			tool.execute("call-reset-bad-1", { type: ["findings"], data: "just text" } as never),
+		).rejects.toThrow(/Section "findings" does not match schema.*2 retry attempt\(s\) remain/);
+		await expect(
+			tool.execute("call-reset-bad-2", {
+				type: ["findings"],
+				data: JSON.stringify({ findings: [finding] }),
+			} as never),
+		).rejects.toThrow(/Section "findings" does not match schema.*1 retry attempt\(s\) remain/);
+		// One valid finding: budget resets to full.
+		const ok = await tool.execute("call-reset-good", { type: ["findings"], data: finding } as never);
+		expect(ok.details?.data).toEqual(finding);
+		// Three invalid verdicts must ALL reject again — the earlier two
+		// failures no longer count against this independent section.
+		await expect(
+			tool.execute("call-reset-v1", { type: ["overall_correctness"], data: "Correct" } as never),
+		).rejects.toThrow(/2 retry attempt\(s\) remain/);
+		await expect(
+			tool.execute("call-reset-v2", { type: ["overall_correctness"], data: "correct." } as never),
+		).rejects.toThrow(/1 retry attempt\(s\) remain/);
+		await expect(
+			tool.execute("call-reset-v3", { type: ["overall_correctness"], data: "approved" } as never),
+		).rejects.toThrow(/final retry/);
+		const override = await tool.execute("call-reset-v4", {
+			type: ["overall_correctness"],
+			data: "still-wrong",
+		} as never);
+		expect(override.details?.schemaOverridden).toBe(true);
+		expect(override.content).toEqual([
+			{ type: "text", text: "Result submitted (schema validation overridden after 4 failed attempt(s))." },
+		]);
+	});
+
+	it("recovers double-encoded JSON primitives only when raw validation fails", async () => {
+		const tool = new YieldTool(
+			createSession({
+				outputSchema: {
+					properties: {
+						overall_correctness: { enum: ["correct", "incorrect"] },
+						verdict_count: { type: "number" },
+					},
+				},
+			}),
+		);
+		// Double-encoded enum: raw `"correct"` (with quotes) fails the enum,
+		// decoded `correct` validates — adopted without spending retries twice.
+		const recovered = await tool.execute("call-prim-enum", {
+			type: ["overall_correctness"],
+			data: '"correct"',
+		} as never);
+		expect(recovered.details?.data).toBe("correct");
+		// Double-encoded number on its own label.
+		const recoveredNum = await tool.execute("call-prim-num", {
+			type: ["verdict_count"],
+			data: "42",
+		} as never);
+		expect(recoveredNum.details?.data).toBe(42);
+		// Decoded-but-still-invalid stays rejected: `"still-wrong"` parses to
+		// a string that still misses the enum.
+		await expect(
+			tool.execute("call-prim-bad", { type: ["overall_correctness"], data: '"still-wrong"' } as never),
+		).rejects.toThrow(/Section "overall_correctness" does not match schema/);
+		// Decoded `null` stays rejected with a retryable error: finalization
+		// treats null data as missing, so accepting it would warn post-mortem.
+		await expect(
+			tool.execute("call-prim-null", { type: ["overall_correctness"], data: "null" } as never),
+		).rejects.toThrow(/Section "overall_correctness" does not match schema/);
+	});
+
+	it("leaves raw-valid strings untouched by JSON recovery", async () => {
+		const tool = new YieldTool(
+			createSession({
+				outputSchema: {
+					properties: { explanation: { type: "string" } },
+				},
+			}),
+		);
+		// `"42"` is already a valid string but also parses as JSON — recovery
+		// must not run before raw validation and coerce it to `42`.
+		const result = await tool.execute("call-raw-str", {
+			type: ["explanation"],
+			data: "42",
+		} as never);
+		expect(result.details?.data).toBe("42");
 	});
 
 	it("does not treat literal $ref fields inside enum values as unresolved schema references", async () => {

@@ -190,6 +190,9 @@ it("does not let a reissued peer id inherit write permission", async () => {
 	// The host uplink drops transiently. The relay destroys the room, closes the
 	// guest, and issues ids from 1 again when the host comes back.
 	probe.hostSocket().close();
+	// The writer was closed with 4001 and would otherwise race the host back into
+	// the room; keep it out so the reissued id is taken by the viewer alone.
+	writer.close();
 	await waitFor(() => probe.hostSocket().readyState === FakeWebSocket.OPEN, "host never reconnected", 8_000);
 	await Bun.sleep(50);
 

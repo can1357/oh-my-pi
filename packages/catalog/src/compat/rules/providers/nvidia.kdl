@@ -1,6 +1,10 @@
 // Provider-wire compat for "nvidia"; regenerated from the frozen census using deployment contract selectors.
 
 provider "nvidia" {
+	default-model "nvidia/llama-3.1-nemotron-70b-instruct"
+	env "NVIDIA_API_KEY"
+	discovery label="NVIDIA"
+
 	thinking-mode "effort"
 	class "qwen" {
 		thinking-format "qwen-chat-template"

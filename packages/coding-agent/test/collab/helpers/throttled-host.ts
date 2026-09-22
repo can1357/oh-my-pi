@@ -74,7 +74,8 @@ export function makeHostContext(snapshot: Snapshot, seen: HostObservations): Int
 			},
 			emitNotice: (level: string, message: string, source?: string) => {
 				seen.notices.push(message);
-				for (const listener of [...listeners]) listener({ type: "notice", level, message, source });
+				// Snapshot: a listener may unsubscribe (splice) while being notified.
+				for (const listener of listeners.slice()) listener({ type: "notice", level, message, source });
 			},
 			promptCustomMessage: () => Promise.resolve(),
 			abort: () => Promise.resolve(),

@@ -9,7 +9,9 @@
  */
 import { logger, postmortem } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../../tools";
-import { callSessionTool, type JsStatusEvent } from "../js/tool-bridge";
+import type { RuntimeCallIdentity } from "../js/shared/runtime";
+import { bridgeValueFromToolResult, callSessionTool, type JsStatusEvent } from "../js/tool-bridge";
+import type { EvalShadowCellSession } from "../speculation/cell-session";
 
 export interface PyToolBridgeEntry {
 	toolSession: ToolSession;
@@ -26,6 +28,7 @@ export interface PyToolBridgeEntry {
 	 * cell on top of a still-running, abort-insensitive merge.
 	 */
 	shieldedSignal?: AbortSignal;
+	shadowCell?: EvalShadowCellSession;
 	emitStatus?: (event: JsStatusEvent) => void;
 	abortRequested?: () => boolean;
 }
@@ -53,6 +56,30 @@ function markExpectedBridgeShutdownError(error: unknown): error is Error {
 	return expected;
 }
 
+async function waitForSpeculativeClaim<T>(claim: Promise<T>, name: string, signal?: AbortSignal): Promise<T> {
+	if (!signal) return await claim;
+	if (signal.aborted) {
+		throw new Error(`bridge call ${JSON.stringify(name)} aborted: eval cell was interrupted`);
+	}
+	const { promise, resolve, reject } = Promise.withResolvers<T>();
+	let settled = false;
+	let onAbort: () => void = () => {};
+	const finish = (settle: () => void): void => {
+		if (settled) return;
+		settled = true;
+		signal.removeEventListener("abort", onAbort);
+		settle();
+	};
+	onAbort = (): void =>
+		finish(() => reject(new Error(`bridge call ${JSON.stringify(name)} aborted: eval cell was interrupted`)));
+	signal.addEventListener("abort", onAbort, { once: true });
+	void claim.then(
+		value => finish(() => resolve(value)),
+		error => finish(() => reject(error)),
+	);
+	return await promise;
+}
+
 /**
  * Forward a bridge call to {@link callSessionTool}, failing fast once the cell
  * has been interrupted.
@@ -67,21 +94,40 @@ function markExpectedBridgeShutdownError(error: unknown): error is Error {
  *   It is deferred across a critical `agent()` phase, so a cancel landing
  *   mid-merge cannot return early and let the cell settle while an
  *   abort-insensitive cherry-pick is still rewriting the repo.
- *
- * Calls arriving after an abort are rejected before starting. Otherwise the
- * usual path is that the tool observes its own abort and rejects; the race only
- * matters for tools that ignore the signal, keeping the kernel unwinding
- * promptly instead of being hard-killed.
+ * Calls arriving after an abort are rejected before starting. A speculative
+ * claim is also raced against cancellation, and its late outcome is observed
+ * after the bridge has settled. Otherwise the usual path is that the tool
+ * observes its own abort and rejects; the race only matters for tools that
+ * ignore the signal, keeping the kernel unwinding promptly instead of being
+ * hard-killed.
  */
-async function callSessionToolPromptOnAbort(name: string, args: unknown, entry: PyToolBridgeEntry): Promise<unknown> {
+async function callSessionToolPromptOnAbort(
+	name: string,
+	args: unknown,
+	entry: PyToolBridgeEntry,
+	identity?: RuntimeCallIdentity,
+): Promise<unknown> {
 	if (entry.abortRequested?.()) {
 		throw new Error(`bridge call ${JSON.stringify(name)} aborted: eval cell was interrupted`);
+	}
+	const claimSignal = entry.signal ?? entry.shieldedSignal;
+	if (entry.shadowCell && identity && name === "read") {
+		const claimed = await waitForSpeculativeClaim(
+			entry.shadowCell.claim(name, args, identity, Number.MAX_SAFE_INTEGER, claimSignal),
+			name,
+			claimSignal,
+		);
+		if (claimSignal?.aborted || entry.abortRequested?.()) {
+			throw new Error(`bridge call ${JSON.stringify(name)} aborted: eval cell was interrupted`);
+		}
+		if (claimed) return bridgeValueFromToolResult(name, args, claimed, entry.emitStatus);
 	}
 	const call = callSessionTool(name, args, {
 		session: entry.toolSession,
 		signal: entry.signal,
 		emitStatus: entry.emitStatus,
 		defaultIntent: "py prelude",
+		identity,
 	});
 	const signal = entry.shieldedSignal ?? entry.signal;
 	if (!signal) return await call;
@@ -116,9 +162,15 @@ async function startServer(): Promise<BridgeServer> {
 				return new Response("Forbidden", { status: 403 });
 			}
 
-			let body: { session?: unknown; run?: unknown; name?: unknown; args?: unknown };
+			let body: { session?: unknown; run?: unknown; name?: unknown; args?: unknown; identity?: unknown };
 			try {
-				body = (await req.json()) as { session?: unknown; run?: unknown; name?: unknown; args?: unknown };
+				body = (await req.json()) as {
+					session?: unknown;
+					run?: unknown;
+					name?: unknown;
+					args?: unknown;
+					identity?: unknown;
+				};
 			} catch {
 				return Response.json({ ok: false, error: "Invalid JSON body" }, { status: 400 });
 			}
@@ -138,7 +190,20 @@ async function startServer(): Promise<BridgeServer> {
 			}
 
 			try {
-				const value = await callSessionToolPromptOnAbort(name, body.args, entry);
+				const identityRecord =
+					body.identity && typeof body.identity === "object" && !Array.isArray(body.identity)
+						? body.identity
+						: undefined;
+				const siteId =
+					identityRecord && "siteId" in identityRecord && typeof identityRecord.siteId === "string"
+						? identityRecord.siteId
+						: undefined;
+				const occurrence =
+					identityRecord && "occurrence" in identityRecord && typeof identityRecord.occurrence === "number"
+						? identityRecord.occurrence
+						: undefined;
+				const identity = siteId !== undefined && occurrence !== undefined ? { siteId, occurrence } : undefined;
+				const value = await callSessionToolPromptOnAbort(name, body.args, entry, identity);
 				return Response.json({ ok: true, value });
 			} catch (err) {
 				return Response.json({

@@ -10,7 +10,7 @@ import * as path from "node:path";
 import type { WorkProfile } from "@oh-my-pi/pi-natives";
 import { APP_NAME, getLogPath, getLogsDir, getReportsDir, isEnoent } from "@oh-my-pi/pi-utils";
 import { writeArchive } from "@oh-my-pi/pi-utils/ar";
-import type { CpuProfile, HeapSnapshot } from "./profiler";
+import type { CpuProfile, MemoryStats } from "./profiler";
 import { collectSystemInfo, sanitizeEnv } from "./system-info";
 
 /** Maximum number of log lines to load into memory at once. */
@@ -44,8 +44,8 @@ export interface ReportBundleOptions {
 	settings?: Record<string, unknown>;
 	/** CPU profile (for performance reports) */
 	cpuProfile?: CpuProfile;
-	/** Heap snapshot (for memory reports) */
-	heapSnapshot?: HeapSnapshot;
+	/** Numeric memory statistics, never raw heap contents */
+	memoryStats?: MemoryStats;
 	/** Work profile (for work scheduling reports) */
 	workProfile?: WorkProfile;
 	/** Raw provider SSE diagnostics captured by the session buffer */
@@ -77,7 +77,7 @@ export interface DebugLogSource {
  * - profile.cpuprofile: CPU profile (performance report only)
  * - raw-sse.txt: Recent raw provider SSE diagnostics (when captured)
  * - profile.md: Markdown CPU profile (performance report only)
- * - heap.heapsnapshot: Heap snapshot (memory report only)
+ * - memory.json: Numeric process and heap statistics (memory report only)
  * - work.folded: Work profile folded stacks (work report only)
  * - work.md: Work profile summary (work report only)
  * - work.svg: Work profile flamegraph (work report only)
@@ -89,7 +89,7 @@ export async function createReportBundle(options: ReportBundleOptions): Promise<
 	const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
 	const outputPath = path.join(reportsDir, `omp-report-${timestamp}.tar.gz`);
 
-	const data: Record<string, string> = {};
+	const data: Record<string, string | Uint8Array> = {};
 	const files: string[] = [];
 
 	// Collect system info
@@ -148,10 +148,10 @@ export async function createReportBundle(options: ReportBundleOptions): Promise<
 		files.push("profile.md");
 	}
 
-	// Heap snapshot
-	if (options.heapSnapshot) {
-		data["heap.heapsnapshot"] = options.heapSnapshot.data;
-		files.push("heap.heapsnapshot");
+	// Memory statistics exclude heap contents, which can contain credentials.
+	if (options.memoryStats) {
+		data["memory.json"] = JSON.stringify(options.memoryStats, null, 2);
+		files.push("memory.json");
 	}
 
 	// Work profile
@@ -174,7 +174,7 @@ export async function createReportBundle(options: ReportBundleOptions): Promise<
 
 /** Recursively add every file under a directory to the archive. */
 async function addDirectoryToArchive(
-	data: Record<string, string>,
+	data: Record<string, string | Uint8Array>,
 	files: string[],
 	dirPath: string,
 	archivePrefix: string,

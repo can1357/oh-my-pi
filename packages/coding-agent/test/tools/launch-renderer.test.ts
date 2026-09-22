@@ -5,11 +5,10 @@
  * LLM-facing `[name: state; cursor=N]` suffix, list caps collapsed rows).
  */
 import { describe, expect, it } from "bun:test";
-import type { DaemonSnapshot } from "@oh-my-pi/pi-coding-agent/launch/protocol";
+import type { DaemonSnapshot } from "@oh-my-pi/pi-tui/tools/hub";
 import { renderTerminalOutput } from "@oh-my-pi/pi-coding-agent/launch/terminal-output";
-import { getThemeByName } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { hubToolRenderer, type LaunchToolDetails } from "@oh-my-pi/pi-coding-agent/tools/hub";
-import { toolRenderers } from "@oh-my-pi/pi-coding-agent/tools/renderers";
+import { getThemeByName } from "@oh-my-pi/pi-tui/theme";
+import { hubToolRenderer, type LaunchToolDetails } from "@oh-my-pi/pi-tui/tools/hub";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 
 async function theme() {
@@ -36,11 +35,6 @@ const daemon = (overrides: Partial<DaemonSnapshot>): DaemonSnapshot => ({
 });
 
 describe("hub launch rendering", () => {
-	it("is registered with merged call/result so the pending header is replaced, not stacked", () => {
-		expect(Object.is(toolRenderers.hub.renderResult, hubToolRenderer.renderResult)).toBe(true);
-		expect(toolRenderers.hub.mergeCallAndResult).toBe(true);
-	});
-
 	it("folds a stop result into one header with op, name, and exit state", async () => {
 		const uiTheme = await theme();
 		const rendered = lines(

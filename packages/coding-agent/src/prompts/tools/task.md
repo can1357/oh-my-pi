@@ -5,9 +5,9 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 {{#if asyncEnabled}}
 
 # Async Job Contract
-- Results auto-deliver. A settled `hub jobs`/`hub wait` snapshot is the delivery; no duplicate `async-result` follows.
-- Job IDs are process-local and expire roughly five minutes after settlement. Afterward, use the agent ID with `hub send`, `agent://<id>`, or `history://<id>`.
-- With `outputSchema`, a result's parsed payload — when present — is served at `agent://<id>` (fields via `agent://<id>?q=.<field>`) regardless of validity; a schema-violating (invalid) result also previews the payload inline in the auto-delivered follow-up.
+- Results auto-deliver. `hub jobs` summarizes without consuming; a `hub wait` snapshot of a settled job is the delivery, so no duplicate `async-result` follows.
+- Job IDs are process-local. An ID whose result was delivered or recovered by a snapshot expires shortly (~30s) after; unconsumed rows stay inspectable for up to five minutes after settlement. Afterward, use the agent ID with `hub send`, `agent://<id>`, or `history://<id>`.
+- With `outputSchema`, a result's parsed payload — when present — is served at `agent://<id>` (fields via `agent://<id>/<field>`, nested `agent://<id>/reports/0/data`) regardless of validity; a schema-violating (invalid) result also previews the payload inline in the auto-delivered follow-up.
 - `completed` means successful yield/job exit, not artifact acceptance. Verify claimed changes.
 {{/if}}
 
@@ -84,6 +84,9 @@ Pass large payloads via `local://<path>` URIs, NEVER inline text.
 Agent spawning is currently disabled.
 {{else}}
 Pick the most specific agent. Omit `agent` only when the spawn-policy default is that agent.
+{{#if hasModelMentions}}
+Agents named `m<N>` are models the user tagged in this conversation (`<model agent="m<N>" name="…"/>` in their message): the general-purpose task agent pinned to that model. Spawn one only when the user's request names it; never substitute it for a specialist on your own.
+{{/if}}
 {{#list agents join="\n"}}
 ### {{name}}{{#if readOnly}} (READ-ONLY){{/if}}{{#if blocking}} (BLOCKING: inline result){{/if}}
 {{description}}

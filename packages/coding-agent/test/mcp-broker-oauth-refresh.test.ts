@@ -12,8 +12,8 @@
  *      `Unknown OAuth provider` (auth-broker-cli.ts / auth-storage.ts).
  *
  * The test proves the fixed contract: a remote OAuth MCP server whose access
- * token has expired refreshes through the broker (which holds the only real
- * refresh token) and the client injects the freshly minted Bearer.
+ * token has expired can rotate through the broker repeatedly while the client
+ * receives freshly minted Bearer tokens.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
@@ -51,6 +51,8 @@ describe("broker-backed MCP OAuth refresh", () => {
 	let handle: AuthBrokerServerHandle | undefined;
 	let remote: RemoteAuthCredentialStore | undefined;
 	let clientStorage: AuthStorage | undefined;
+	let brokerClient: AuthBrokerClient | undefined;
+	let brokerCredentialId = 0;
 	let manager: MCPManager | undefined;
 
 	beforeEach(async () => {
@@ -60,7 +62,12 @@ describe("broker-backed MCP OAuth refresh", () => {
 			port: 0,
 			async fetch(req) {
 				tokenRequests.push(new URLSearchParams(await req.text()));
-				return Response.json({ access_token: "fresh-access", refresh_token: "rotated-refresh", expires_in: 3600 });
+				const refreshNumber = tokenRequests.length;
+				return Response.json({
+					access_token: `fresh-access-${refreshNumber}`,
+					refresh_token: `rotated-refresh-${refreshNumber}`,
+					expires_in: 3600,
+				});
 			},
 		});
 		tokenServer = server;
@@ -84,6 +91,9 @@ describe("broker-backed MCP OAuth refresh", () => {
 			...{ tokenUrl, clientId: "client-xyz" },
 		};
 		await serverStorage.set(MCP_PROVIDER, credential);
+		const stored = serverStorage.listStoredCredentials(MCP_PROVIDER)[0];
+		if (!stored) throw new Error("broker credential was not persisted");
+		brokerCredentialId = stored.id;
 
 		handle = startAuthBroker({
 			storage: serverStorage,
@@ -92,8 +102,9 @@ describe("broker-backed MCP OAuth refresh", () => {
 			disableRefresher: true,
 		});
 
+		brokerClient = new AuthBrokerClient({ url: handle.url, token: BEARER });
 		remote = new RemoteAuthCredentialStore({
-			client: new AuthBrokerClient({ url: handle.url, token: BEARER }),
+			client: brokerClient,
 			streamSnapshots: false,
 		});
 		clientStorage = new AuthStorage(remote);
@@ -111,8 +122,7 @@ describe("broker-backed MCP OAuth refresh", () => {
 		tokenServer?.stop(true);
 		await removeWithRetries(tempDir);
 	});
-
-	test("expired remote MCP token refreshes through the broker and injects the fresh Bearer", async () => {
+	test("remote MCP token refreshes repeatedly through the broker", async () => {
 		// Sanity: the client only ever sees the redacted refresh token.
 		const stored = clientStorage!.get(MCP_PROVIDER);
 		expect(stored?.type === "oauth" ? stored.refresh : undefined).toBe(REMOTE_REFRESH_SENTINEL);
@@ -124,12 +134,16 @@ describe("broker-backed MCP OAuth refresh", () => {
 		});
 
 		// Gap A + B fixed: fresh access token minted and injected.
-		expect(getAuthorizationHeader(prepared)).toBe("Bearer fresh-access");
+		expect(getAuthorizationHeader(prepared)).toBe("Bearer fresh-access-1");
 
 		// The grant ran on the BROKER with the real refresh token — the client
 		// never held it, and the broker no longer answers "Unknown OAuth provider".
 		expect(tokenRequests).toHaveLength(1);
 		expect(tokenRequests[0].get("grant_type")).toBe("refresh_token");
 		expect(tokenRequests[0].get("refresh_token")).toBe("real-refresh-token");
+
+		await brokerClient!.refreshCredential(brokerCredentialId);
+		expect(tokenRequests).toHaveLength(2);
+		expect(tokenRequests[1].get("refresh_token")).toBe("rotated-refresh-1");
 	});
 });

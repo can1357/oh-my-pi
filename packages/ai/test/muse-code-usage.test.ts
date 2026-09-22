@@ -61,6 +61,31 @@ describe("Muse Code subscription usage", () => {
 		});
 	});
 
+	test("reports quota without a tier when Meta returns null subscription tier fields", async () => {
+		const fetchImpl: FetchImpl = () =>
+			Promise.resolve(
+				Response.json({
+					api_key: "LLM|subscription-key",
+					user_email: "Muse@Example.com",
+					is_subs_active: true,
+					subs_tier_id: null,
+					subs_tier_name: null,
+					subs_usage: {
+						window: { used_percent: 42, resets_at: 1_800_000_000, window_duration_mins: 300 },
+					},
+				}),
+			);
+
+		const report = await museCodeUsageProvider.fetchUsage(
+			{ provider: "muse-code", credential },
+			{ fetch: fetchImpl },
+		);
+
+		expect(report?.limits).toHaveLength(1);
+		expect(report?.limits[0]?.scope.tier).toBeUndefined();
+		expect(report?.metadata).not.toHaveProperty("tier");
+	});
+
 	test("does not report Meta PAYG credentials as Muse subscription quota", () => {
 		expect(
 			museCodeUsageProvider.supports?.({
@@ -75,10 +100,15 @@ describe("Muse Code subscription usage", () => {
 		let now = startedAt;
 		vi.spyOn(Date, "now").mockImplementation(() => now);
 		vi.spyOn(Math, "random").mockReturnValue(0.5);
+		// Count only Muse key-endpoint calls: `fetchUsageReports` also fans out to
+		// every provider with an ambient env key (ZAI_API_KEY, SYNTHETIC_API_KEY…),
+		// and those hit the same mock.
 		let requests = 0;
 		const storage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), {
 			usageFetch: Object.assign(
-				() => {
+				(input: string | URL | Request) => {
+					const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+					if (!url.includes("/muse-code/key")) return Promise.resolve(new Response(null, { status: 503 }));
 					requests += 1;
 					return Promise.resolve(
 						requests === 1

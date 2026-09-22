@@ -54,9 +54,11 @@ export class FakeWebSocket {
 	send(data: Uint8Array): void {
 		if (this.readyState !== FakeWebSocket.OPEN) return;
 		// Snapshot: the relay rewrites the peerId in place, and the sender may
-		// reuse the buffer once send() returns.
+		// reuse the buffer once send() returns. Routing happens now, against the
+		// room as it is at send time, so a frame written just before close() still
+		// reaches peers the close will retire; delivery itself stays asynchronous.
 		const bytes = new Uint8Array(data);
-		queueMicrotask(() => this.#relay.forward(this, bytes));
+		this.#relay.forward(this, bytes);
 	}
 
 	close(_code?: number): void {

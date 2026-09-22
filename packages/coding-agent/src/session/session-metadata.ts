@@ -21,10 +21,6 @@ import type { AuthStorage } from "./auth-storage";
  * `provider` is the target provider string (e.g. `"anthropic"`) and gates the
  * `account_uuid` and `device_id` lookups — only `"anthropic"` requests carry them.
  *
- * `sessionId` is forwarded to the auth-storage session-sticky lookup so that
- * multi-credential setups attribute to the same OAuth account used for the
- * actual API request rather than always picking the first credential.
- *
  * `authStorage` is treated as optional so test fixtures that stub `modelRegistry`
  * without a real storage layer still work; the resolver simply skips the lookup
  * and emits `{ session_id }` alone, matching the no-OAuth-credential path.

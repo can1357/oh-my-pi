@@ -9,6 +9,7 @@ import type { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../../src/eval/bridge-timeout";
 import {
+	EVAL_HANDLE_CONCURRENCY,
 	getCompletionHandle,
 	releaseCompletionHandles,
 	runEvalCompletion,
@@ -21,7 +22,7 @@ import { disposeAllVmContexts } from "../../src/eval/js/context-manager";
 import { executeJs } from "../../src/eval/js/executor";
 import { disposeAllKernelSessions, type PythonResult } from "../../src/eval/py/executor";
 import type { ToolSession } from "../../src/tools";
-import { ToolError } from "../../src/tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 async function runEvalCompletionAndWait(
 	args: unknown,
@@ -234,6 +235,251 @@ describe("runEvalCompletion", () => {
 		expect(`${model.provider}/${model.id}`).toBe("p/slow");
 	});
 
+	it("uses the tier fallback chain after the primary model fails", async () => {
+		const fallback = makeModel("p", "fallback");
+		const session = makeSession({ available: [SMOL, fallback] });
+		session.settings.set("retry.fallbackChains", { smol: ["p/fallback"] });
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "quota exhausted" }))
+			.mockResolvedValueOnce(assistant({ text: "fallback answer" }));
+
+		const result = await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session });
+
+		expect(spy.mock.calls.map(call => (call[0] as Model<Api>).id)).toEqual(["smol", "fallback"]);
+		expect(result).toEqual({
+			text: "fallback answer",
+			details: { model: "p/fallback", tier: "smol", structured: false },
+		});
+	});
+
+	it("retries the same model at a lower effort when the fallback chain suffixes it", async () => {
+		const session = makeSession({ available: [SMOL, DEFAULT, REASONING_SLOW], roles: { slow: "p/slow" } });
+		session.settings.set("retry.fallbackChains", { slow: ["p/slow:low"] });
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "quota exhausted" }))
+			.mockResolvedValueOnce(assistant({ text: "low-effort answer" }));
+
+		const result = await runEvalCompletionAndWait({ prompt: "q", model: "slow" }, { session });
+		expect(spy.mock.calls.map(call => (call[0] as Model<Api>).id)).toEqual(["slow", "slow"]);
+		const primaryOpts = spy.mock.calls[0]?.[2] as { reasoning?: unknown };
+		const fallbackOpts = spy.mock.calls[1]?.[2] as { reasoning?: unknown };
+		expect(primaryOpts.reasoning).toBe(Effort.High);
+		expect(fallbackOpts.reasoning).toBe(Effort.Low);
+		expect(result.text).toBe("low-effort answer");
+	});
+
+	it("applies the tier chain when the role assignment is too unqualified to parse", async () => {
+		const fallback = makeModel("p", "fallback");
+		const session = makeSession({ available: [SMOL, fallback], roles: { smol: "smol" } });
+		session.settings.set("retry.fallbackChains", { smol: ["p/fallback"] });
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "quota exhausted" }))
+			.mockResolvedValueOnce(assistant({ text: "fallback answer" }));
+
+		const result = await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session });
+
+		expect(spy.mock.calls.map(call => (call[0] as Model<Api>).id)).toEqual(["smol", "fallback"]);
+		expect(result.text).toBe("fallback answer");
+	});
+
+	it("walks into a failed fallback's own model chain", async () => {
+		const b = makeModel("p", "b");
+		const c = makeModel("p", "c");
+		const session = makeSession({ available: [SMOL, b, c] });
+		session.settings.set("retry.fallbackChains", { smol: ["p/b"], "p/b": ["p/c"] });
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "smol down" }))
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "b down" }))
+			.mockResolvedValueOnce(assistant({ text: "c answer" }));
+
+		const result = await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session });
+
+		expect(spy.mock.calls.map(call => (call[0] as Model<Api>).id)).toEqual(["smol", "b", "c"]);
+		expect(result.text).toBe("c answer");
+	});
+
+	it("terminates on cyclic fallback chains instead of looping", async () => {
+		const b = makeModel("p", "b");
+		const session = makeSession({ available: [SMOL, b] });
+		session.settings.set("retry.fallbackChains", { smol: ["p/b"], "p/b": ["p/smol"] });
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValue(assistant({ stopReason: "error", errorMessage: "always down" }));
+
+		await expect(runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session })).rejects.toThrow(
+			"always down",
+		);
+		expect(spy.mock.calls.map(call => (call[0] as Model<Api>).id)).toEqual(["smol", "b"]);
+	});
+
+	it("resolves nested fallbacks without the root tier hint", async () => {
+		const [b, c, d, e] = ["b", "c", "d", "e"].map(id => makeModel("p", id));
+		const session = makeSession({ available: [SMOL, b, c, d, e] });
+		session.settings.setModelRole("vision", "p/b");
+		session.settings.set("retry.fallbackChains", { smol: ["p/b", "p/c"], vision: ["p/d", "p/e"] });
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "smol down" }))
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "b down" }))
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "d down" }))
+			.mockResolvedValueOnce(assistant({ text: "e answer" }));
+
+		const result = await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session });
+
+		expect(spy.mock.calls.map(call => (call[0] as Model<Api>).id)).toEqual(["smol", "b", "d", "e"]);
+		expect(result.text).toBe("e answer");
+	});
+
+	it("inherits the failed candidate's effort for bare nested entries", async () => {
+		const thinking = {
+			api: "anthropic-messages",
+			reasoning: true,
+			thinking: { efforts: [Effort.Low, Effort.Medium, Effort.High], mode: "anthropic-adaptive" },
+		} as const;
+		const b = makeModel("p", "b", { ...thinking });
+		const c = makeModel("p", "c", { ...thinking });
+		const session = makeSession({ available: [REASONING_SLOW, b, c], roles: { slow: "p/slow" } });
+		session.settings.set("retry.fallbackChains", { slow: ["p/b:low"], "p/b": ["p/c"] });
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "slow down" }))
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "b down" }))
+			.mockResolvedValueOnce(assistant({ text: "c answer" }));
+
+		await runEvalCompletionAndWait({ prompt: "q", model: "slow" }, { session });
+
+		const efforts = spy.mock.calls.map(call => (call[2] as { reasoning?: unknown }).reasoning);
+		expect(efforts).toEqual([Effort.High, Effort.Low, Effort.Low]);
+	});
+
+	it("keeps reasoning disabled for bare nested entries after an :off fallback", async () => {
+		const thinking = {
+			api: "anthropic-messages",
+			reasoning: true,
+			thinking: { efforts: [Effort.Low, Effort.Medium, Effort.High], mode: "anthropic-adaptive" },
+		} as const;
+		const b = makeModel("p", "b", { ...thinking });
+		const c = makeModel("p", "c", { ...thinking });
+		const session = makeSession({ available: [REASONING_SLOW, b, c], roles: { slow: "p/slow" } });
+		session.settings.set("retry.fallbackChains", { slow: ["p/b:off"], "p/b": ["p/c"] });
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "slow down" }))
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "b down" }))
+			.mockResolvedValueOnce(assistant({ text: "c answer" }));
+
+		await runEvalCompletionAndWait({ prompt: "q", model: "slow" }, { session });
+
+		const nested = spy.mock.calls[2]?.[2] as { reasoning?: unknown; disableReasoning?: unknown };
+		expect(nested.reasoning).toBeUndefined();
+		expect(nested.disableReasoning).toBe(true);
+	});
+
+	it("skips keyless fallbacks without spending retry budget", async () => {
+		const b = makeModel("p", "b");
+		const c = makeModel("p", "c");
+		const session = makeSession({ available: [SMOL, b, c] });
+		session.settings.set("retry.fallbackChains", { smol: ["p/b", "p/c"] });
+		session.settings.set("retry.maxRetries", 1);
+		const registry = session.modelRegistry;
+		if (!registry) throw new Error("test requires a model registry");
+		registry.getApiKey = async model => (model.id === "b" ? undefined : "test-key");
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "smol down" }))
+			.mockResolvedValueOnce(assistant({ text: "c answer" }));
+
+		const result = await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session });
+
+		// b never reaches completeSimple: the keyless preflight skips it.
+		expect(spy.mock.calls.map(call => (call[0] as Model<Api>).id)).toEqual(["smol", "c"]);
+		expect(result.text).toBe("c answer");
+	});
+
+	it("walks shared descendants once per inherited effort", async () => {
+		const thinking = {
+			api: "anthropic-messages",
+			reasoning: true,
+			thinking: { efforts: [Effort.Low, Effort.Medium, Effort.High], mode: "anthropic-adaptive" },
+		} as const;
+		const models = Object.fromEntries(["b", "d", "c", "e"].map(id => [id, makeModel("p", id, { ...thinking })]));
+		const session = makeSession({
+			available: [REASONING_SLOW, models.b, models.d, models.c, models.e],
+			roles: { slow: "p/slow" },
+		});
+		session.settings.set("retry.fallbackChains", {
+			slow: ["p/b:low", "p/d:high"],
+			"p/b": ["p/c"],
+			"p/d": ["p/c"],
+			"p/c": ["p/e"],
+		});
+		const failures = ["slow", "b", "c:low", "e:low", "d", "c:high"].map(
+			name => () => assistant({ stopReason: "error", errorMessage: `${name} down` }),
+		);
+		const spy = vi.spyOn(ai, "completeSimple");
+		for (const respond of failures) spy.mockResolvedValueOnce(respond());
+		spy.mockResolvedValue(assistant({ text: "e:high answer" }));
+
+		const result = await runEvalCompletionAndWait({ prompt: "q", model: "slow" }, { session });
+
+		expect(spy.mock.calls.map(call => (call[0] as Model<Api>).id)).toEqual(["slow", "b", "c", "e", "d", "c", "e"]);
+		const efforts = spy.mock.calls.map(call => (call[2] as { reasoning?: unknown }).reasoning);
+		expect(efforts).toEqual([Effort.High, Effort.Low, Effort.Low, Effort.Low, Effort.High, Effort.High, Effort.High]);
+		expect(result.text).toBe("e:high answer");
+	});
+
+	it("stops the candidate walk once retry.maxRetries is spent", async () => {
+		const models = ["b1", "b2", "b3"].map(id => makeModel("p", id));
+		const session = makeSession({ available: [SMOL, ...models] });
+		session.settings.set("retry.fallbackChains", { smol: ["p/b1", "p/b2", "p/b3"] });
+		session.settings.set("retry.maxRetries", 1);
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValue(assistant({ stopReason: "error", errorMessage: "quota exhausted" }));
+
+		await expect(runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session })).rejects.toThrow(
+			"quota exhausted",
+		);
+		expect(spy.mock.calls.map(call => (call[0] as Model<Api>).id)).toEqual(["smol", "b1"]);
+	});
+
+	it("attempts only the primary when retry.maxRetries is zero", async () => {
+		const fallback = makeModel("p", "fallback");
+		const session = makeSession({ available: [SMOL, fallback] });
+		session.settings.set("retry.fallbackChains", { smol: ["p/fallback"] });
+		session.settings.set("retry.maxRetries", 0);
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValue(assistant({ stopReason: "error", errorMessage: "quota exhausted" }));
+
+		await expect(runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session })).rejects.toThrow(
+			"quota exhausted",
+		);
+		expect(spy.mock.calls.map(call => (call[0] as Model<Api>).id)).toEqual(["smol"]);
+	});
+
+	it("forwards the session id to the API key lookup", async () => {
+		vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
+		const session = makeSession();
+		session.getSessionId = () => "sess-1";
+		const seen: unknown[][] = [];
+		const registry = session.modelRegistry;
+		if (!registry) throw new Error("test requires a model registry");
+		registry.getApiKey = async (model, sessionId, options) => {
+			seen.push([model, sessionId, options]);
+			return "test-key";
+		};
+
+		await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session });
+
+		expect(seen.length).toBe(1);
+		expect(seen[0]?.[1]).toBe("sess-1");
+	});
+
 	it("returns the completion text in plain mode", async () => {
 		vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "the answer" }));
 		const result = await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session: makeSession() });
@@ -350,6 +596,37 @@ describe("runEvalCompletion", () => {
 		await expect(
 			runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session: makeSession() }),
 		).rejects.toBeInstanceOf(ToolError);
+	});
+
+	it("bounds in-flight handles and admits queued ones as earlier requests settle", async () => {
+		const total = EVAL_HANDLE_CONCURRENCY + 8;
+		const gate = Promise.withResolvers<void>();
+		let inFlight = 0;
+		let peak = 0;
+		const admitted = Promise.withResolvers<void>();
+		vi.spyOn(ai, "completeSimple").mockImplementation(async () => {
+			inFlight++;
+			peak = Math.max(peak, inFlight);
+			if (inFlight === EVAL_HANDLE_CONCURRENCY) admitted.resolve();
+			await gate.promise;
+			inFlight--;
+			return assistant({ text: "ok" });
+		});
+		const session = makeSession();
+
+		const handles = await Promise.all(
+			Array.from({ length: total }, () => runEvalCompletion({ prompt: "q", model: "smol" }, { session })),
+		);
+		await admitted.promise;
+		expect(peak).toBe(EVAL_HANDLE_CONCURRENCY);
+		gate.resolve();
+		const waited = await runEvalWait(
+			{ items: handles.map(handle => ({ kind: "completion", id: handle.id })) },
+			{ session },
+		);
+
+		expect(waited.items.map(item => item.status)).toEqual(Array(total).fill("completed"));
+		expect(peak).toBe(EVAL_HANDLE_CONCURRENCY);
 	});
 
 	it("pauses the idle watchdog while a slow completion() request is in flight", async () => {

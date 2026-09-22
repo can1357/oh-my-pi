@@ -4,6 +4,7 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { getMemoryRoot } from "@oh-my-pi/pi-coding-agent/memories";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
@@ -46,6 +47,8 @@ describe("advisor memory context", () => {
 	async function createAdvisedSession(
 		backend: string,
 		sessionManager = SessionManager.create(tempDir.path(), tempDir.path()),
+		skills: Skill[] = [],
+		toolNames?: string[],
 	): Promise<AgentSession> {
 		const settings = Settings.isolated({
 			"async.enabled": false,
@@ -69,7 +72,8 @@ describe("advisor memory context", () => {
 			settings,
 			model,
 			disableExtensionDiscovery: true,
-			skills: [],
+			skills,
+			toolNames,
 			contextFiles: [],
 			workspaceTree: {
 				rootPath: tempDir.path(),
@@ -123,6 +127,37 @@ describe("advisor memory context", () => {
 		expect(names).not.toContain("edit");
 	});
 
+	it("keeps the advisor read hint tracking the primary snapshot", async () => {
+		tempDir = TempDir.createSync("@pi-advisor-hint-");
+		session = await createAdvisedSession(
+			"sharpshooter",
+			undefined,
+			[
+				{
+					name: "hint-skill",
+					description: "Hint tracking skill",
+					filePath: `${tempDir.path()}/SKILL.md`,
+					baseDir: tempDir.path(),
+					source: "test",
+				},
+			],
+			["read", "bash"],
+		);
+		const advisor = session.getAdvisorAgent();
+		const read = advisor?.state.tools.find(tool => tool.name === "read");
+		if (!read) throw new Error("Expected advisor read tool");
+		const schema = () => JSON.stringify(read.parameters.toJsonSchema());
+		expect(schema()).toContain("skill://");
+		session.settings.set("skillful", false);
+		// A live setting change alone must not mutate the frozen provider prefix.
+		expect(schema()).toContain("skill://");
+		await session.refreshBaseSystemPrompt();
+		expect(schema()).not.toContain("skill://");
+		session.settings.set("skillful", true);
+		await session.refreshBaseSystemPrompt();
+		expect(schema()).toContain("skill://");
+	});
+
 	it.each(["hindsight", "mnemopi"])("keeps in-memory advisor URL tools bound to the %s session", async backend => {
 		tempDir = TempDir.createSync("@pi-advisor-memory-urls-");
 		const previousAgentDir = getAgentDir();
@@ -131,6 +166,7 @@ describe("advisor memory context", () => {
 			const memoryRoot = getMemoryRoot(tempDir.path(), tempDir.path());
 			await fs.mkdir(memoryRoot, { recursive: true });
 			await Bun.write(`${memoryRoot}/memory_summary.md`, "Advisor project summary marker.\n");
+
 			session = await createAdvisedSession(backend, SessionManager.inMemory(tempDir.path()));
 			expect(session.sessionFile).toBeUndefined();
 			const advisor = session.getAdvisorAgent();
@@ -140,16 +176,16 @@ describe("advisor memory context", () => {
 			const glob = advisor.state.tools.find(tool => tool.name === "glob");
 			if (!read || !grep || !glob) throw new Error("Expected default advisor URL tools");
 
-			const readResult = await read.execute("advisor-root-read", { path: "memory://root" });
-			expect(JSON.stringify(readResult.content)).toContain("Advisor project summary marker.");
-			const grepResult = await grep.execute("advisor-root-grep", {
-				path: "memory://root",
-				pattern: "Advisor project summary marker",
-			});
-			expect(JSON.stringify(grepResult.content)).toContain("Advisor project summary marker.");
+			const unavailableRoot = `active backend: ${backend}`;
+			await expect(read.execute("advisor-root-read", { path: "memory://root" })).rejects.toThrow(unavailableRoot);
+			await expect(
+				grep.execute("advisor-root-grep", {
+					path: "memory://root",
+					pattern: "Advisor project summary marker",
+				}),
+			).rejects.toThrow(unavailableRoot);
 			for (const path of ["memory://root", "memory://root/*.md"]) {
-				const globResult = await glob.execute("advisor-root-glob", { path });
-				expect(JSON.stringify(globResult.content)).toContain("memory_summary.md");
+				await expect(glob.execute("advisor-root-glob", { path })).rejects.toThrow(unavailableRoot);
 			}
 
 			if (backend === "mnemopi") {

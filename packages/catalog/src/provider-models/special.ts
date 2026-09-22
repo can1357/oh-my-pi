@@ -1,8 +1,10 @@
 import { logger, once } from "@oh-my-pi/pi-utils";
 import { buildModel } from "../build";
 import { apiRouteFor } from "../compat/behavior";
+import { seedModels } from "../compat/providers";
 import { type CodexModelDiscoveryResult, fetchCodexModels } from "../discovery/codex";
 import type { DevinModelDiscoveryOptions } from "../discovery/devin";
+import { fetchTypeSafeModels, TYPESAFE_DEFAULT_BASE_URL } from "../discovery/typesafe";
 import { buildGitLabDuoWorkflowFallbackModel, fetchGitLabDuoWorkflowModels } from "../discovery/gitlab-duo-workflow";
 import type { ModelManagerOptions } from "../model-manager";
 import { getBundledModel } from "../models";
@@ -290,9 +292,7 @@ export function gitLabDuoWorkflowModelManagerOptions(
 		// Falls back to the bare provider id when no credential is present.
 		...(apiKey ? { cacheProviderId: gitLabDuoWorkflowModelCacheProviderId(apiKey, config) } : undefined),
 		dynamicModelsAuthoritative: true,
-		staticModels: [
-			buildGitLabDuoWorkflowFallbackModel("claude_sonnet_4_6_vertex", "Claude Sonnet 4.6 - Vertex", config.baseUrl),
-		],
+		staticModels: [buildGitLabDuoWorkflowFallbackModel(config.baseUrl)],
 		...(apiKey
 			? {
 					fetchDynamicModels: async () =>
@@ -330,61 +330,16 @@ export interface DevinModelManagerConfig {
 	fetch?: DevinModelDiscoveryOptions["fetch"];
 }
 
-/**
- * Curated Devin seed — the entire bundled surface for the provider. The
- * Cascade catalog is credential-scoped (gated per account/team), so catalog
- * generation never fetches it: baking one account's roster into the shared
- * bundle would misstate every other account's entitlements and leave zombie
- * rows behind (see CREDENTIAL_SCOPED_PROVIDERS in generate-models.ts). Both
- * SWE-1.6 lanes are verified live against `GetCliModelConfigs`; the
- * descriptor's `defaultModel` (`swe-1-6`) must resolve synchronously at
- * boot, before credential-scoped runtime discovery replaces the seed. Field
- * shape mirrors `devinModelSpec` so seeded and discovered rows are
- * indistinguishable downstream.
- */
-export const DEVIN_STATIC_MODELS: readonly ModelSpec<"devin-agent">[] = [
-	{
-		id: "swe-1-6-fast",
-		name: "SWE-1.6 Fast",
-		api: "devin-agent",
-		provider: "devin",
-		baseUrl: DEVIN_DEFAULT_BASE_URL,
-		reasoning: true,
-		// SWE-1.6 lanes ignore inline images despite upstream `supports_images`
-		// (see DEVIN_IMAGE_BLIND_UIDS in ../discovery/devin.ts).
-		input: ["text"],
-		supportsTools: true,
-		cost: { input: 0.3, output: 1.5, cacheRead: 0.03, cacheWrite: 0 },
-		contextWindow: 200_000,
-		maxTokens: 128_000,
-		compat: { supportsParallelToolCalls: true },
-	},
-	{
-		id: "swe-1-6",
-		name: "SWE-1.6",
-		api: "devin-agent",
-		provider: "devin",
-		baseUrl: DEVIN_DEFAULT_BASE_URL,
-		reasoning: true,
-		input: ["text"],
-		supportsTools: true,
-		// Included in the Coding Plan: upstream reports no cost dimensions.
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 200_000,
-		maxTokens: 128_000,
-		compat: { supportsParallelToolCalls: true },
-	},
-];
-
 export function devinModelManagerOptions(config: DevinModelManagerConfig = {}): ModelManagerOptions<"devin-agent"> {
 	const { apiKey, baseUrl, fetch } = config;
+	const staticModels = seedModels<"devin-agent">("devin");
 	return {
 		providerId: "devin",
 		// A configured host serves its own Cascade deployment; keep the seed on it.
 		staticModels:
 			baseUrl === undefined || baseUrl === DEVIN_DEFAULT_BASE_URL
-				? DEVIN_STATIC_MODELS
-				: DEVIN_STATIC_MODELS.map(model => ({ ...model, baseUrl })),
+				? staticModels
+				: staticModels.map(model => ({ ...model, baseUrl })),
 		...(apiKey ? { dynamicModelsAuthoritative: true } : undefined),
 		...(apiKey
 			? {
@@ -398,6 +353,58 @@ export function devinModelManagerOptions(config: DevinModelManagerConfig = {}): 
 }
 
 const devinDiscovery = once(() => import("../discovery/devin"));
+
+// ---------------------------------------------------------------------------
+// Synthetic role providers
+// ---------------------------------------------------------------------------
+
+export function localModelManagerOptions(): ModelManagerOptions<"local-inference"> {
+	return {
+		providerId: "local",
+		cacheProviderId: resolveModelCacheProviderId("local"),
+		staticModels: seedModels<"local-inference">("local"),
+	};
+}
+
+export function webModelManagerOptions(): ModelManagerOptions<"web-search"> {
+	return {
+		providerId: "web",
+		cacheProviderId: resolveModelCacheProviderId("web"),
+		staticModels: seedModels<"web-search">("web"),
+	};
+}
+
+/** Credentials and endpoint overrides for the TypeSafe catalog manager. */
+export interface TypeSafeModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/** Discover account-visible judge models while keeping the bundled offline seed. */
+export function typesafeModelManagerOptions(config: TypeSafeModelManagerConfig = {}): ModelManagerOptions<"typesafe"> {
+	const { apiKey } = config;
+	const envBaseUrl = Bun.env.TYPESAFE_BASE_URL?.trim();
+	const baseUrl = (config.baseUrl ?? (envBaseUrl || TYPESAFE_DEFAULT_BASE_URL)).replace(/\/+$/, "");
+	const staticModels = seedModels<"typesafe">("typesafe");
+	return {
+		providerId: "typesafe",
+		cacheProviderId: resolveModelCacheProviderId("typesafe"),
+		staticModels: staticModels.map(model => ({ ...model, baseUrl })),
+		...(apiKey ? { dynamicModelsAuthoritative: true } : undefined),
+		...(apiKey
+			? {
+					fetchDynamicModels: () =>
+						fetchTypeSafeModels({
+							apiKey,
+							baseUrl,
+							fetch: config.fetch,
+						}),
+				}
+			: undefined),
+	};
+}
+
 // ---------------------------------------------------------------------------
 // Zai
 // ---------------------------------------------------------------------------

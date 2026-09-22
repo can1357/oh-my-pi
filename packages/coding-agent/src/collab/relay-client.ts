@@ -2,15 +2,18 @@
  * Client-side WebSocket wrapper for collab live-session sharing.
  *
  * Connects to a relay room, seals/opens AES-GCM frames, and reconnects with
- * exponential backoff on transient drops. Fatal relay close codes (room gone,
- * host conflict, room full) and decryption failures never reconnect.
+ * exponential backoff on transient drops. Guests also survive the relay's
+ * host-drop room teardown while the host recreates the room; other fatal relay
+ * close codes (host conflict, room full) and guest decryption failures never
+ * reconnect. Hosts discard undecryptable guest frames without closing the room.
  */
+import { getProxyForUrl } from "@oh-my-pi/pi-ai/utils/proxy";
 import { logger } from "@oh-my-pi/pi-utils";
 import { open, sealSerialized } from "./crypto";
 import type { CollabFrame, RelayControlMessage } from "./protocol";
 import { describeThrown, packEnvelope, unpackEnvelope } from "./protocol";
 
-const FATAL_CLOSE_REASONS: Record<number, string> = {
+const RELAY_CLOSE_REASONS: Record<number, string> = {
 	4001: "room closed",
 	4004: "no such room",
 	4009: "a host is already connected for this room",
@@ -104,6 +107,11 @@ interface PendingSend {
 	 */
 	exempt: boolean;
 	cancelled: boolean;
+	eager: boolean;
+	onPrepared?: () => void;
+	preparedEnvelope?: Uint8Array;
+	/** Next batch frame, pulled right after a write so an exhausted batch leaves the head at once. */
+	head?: CollabFrame | string;
 }
 
 export interface CollabSocketOptions {
@@ -118,7 +126,7 @@ export class CollabSocket {
 	onOpen?: () => void;
 	onFrame?: (frame: CollabFrame, fromPeer: number) => void;
 	onControl?: (msg: RelayControlMessage) => void;
-	/** Fires once per terminal close (intentional, fatal code, or bad key). willReconnect=true for transient drops that will retry. */
+	/** Fires on each close; `willReconnect` distinguishes retries from terminal shutdown. */
 	onClose?: (reason: string, willReconnect: boolean) => void;
 	/** A targeted backlog was discarded to keep the room alive; the peer must resync. Always deferred to a microtask. */
 	onPeerOverload?: (peerId: number) => void;
@@ -130,6 +138,8 @@ export class CollabSocket {
 	#attempt = 0;
 	/** Terminal state: intentional close or fatal failure. Cleared by connect(). */
 	#closed = false;
+	/** Allows a previously joined guest to outlive room recreation races. */
+	#retryMissingRoom = false;
 	/** Set while a transient drop is being retried; the next open is a new room. */
 	#rejoining = false;
 	/**
@@ -147,6 +157,8 @@ export class CollabSocket {
 	#sending = false;
 	#sendGeneration = 0;
 	#wakeSender: (() => void) | undefined;
+	/** Resolves once regular frames queued before flush() have been sealed. */
+	#sendChain: Promise<void> = Promise.resolve();
 	/** Serializes open() so frames are delivered in arrival order. */
 	#recvChain: Promise<void> = Promise.resolve();
 	#pendingSends: PendingSend[] = [];
@@ -273,6 +285,7 @@ export class CollabSocket {
 	connect(): void {
 		if (this.#ws || this.#retryTimer) return;
 		this.#closed = false;
+		this.#retryMissingRoom = false;
 		this.#attempt = 0;
 		this.#openSocket();
 	}
@@ -282,7 +295,19 @@ export class CollabSocket {
 		if (this.#closed) return false;
 		try {
 			const serialized = JSON.stringify(frame);
-			return this.#enqueueSend([serialized].values(), targetPeer, Buffer.byteLength(serialized), false, false);
+			const prepared = Promise.withResolvers<void>();
+			this.#sendChain = Promise.all([this.#sendChain, prepared.promise]).then(() => {});
+			const admitted = this.#enqueueSend(
+				[serialized].values(),
+				targetPeer,
+				Buffer.byteLength(serialized),
+				false,
+				false,
+				prepared.resolve,
+				true,
+			);
+			if (!admitted) prepared.resolve();
+			return admitted;
 		} catch (err) {
 			this.#failFatal(
 				`could not serialize collab frame: ${describeThrown(err, THROWN_VALUE_MAX)}; rejoin to resync`,
@@ -376,6 +401,8 @@ export class CollabSocket {
 				continue;
 			}
 			pending.cancelled = true;
+			pending.onPrepared?.();
+			pending.onPrepared = undefined;
 			pending.frames.return?.(undefined);
 		}
 		const discarded = this.#pendingSends.length - keep.length;
@@ -413,100 +440,44 @@ export class CollabSocket {
 		bytes: number,
 		lazy: boolean,
 		advisory: boolean,
+		onPrepared?: () => void,
+		eager = false,
 	): boolean {
-		// The queue invariant, enforced in one place: targeted work is only ever
-		// admitted for a peer still being served. Covers a peer that left — its
-		// queued batch would hold the head of a queue shared with everyone else —
-		// and the window between a shed and its report, since CollabHost#handleHello
-		// queues a snapshot batch on the line after the welcome that shed the peer.
+		const refuse = (): false => {
+			onPrepared?.();
+			return false;
+		};
 		if (targetPeer !== 0 && this.#notServing.has(targetPeer)) {
 			logger.debug("collab: refusing frame for a peer that is not being served", {
 				targetPeer,
 				reason: this.#notServing.get(targetPeer)?.reason,
 			});
-			return false;
+			return refuse();
 		}
-		// Enforced once here rather than per capacity branch: while a report is on
-		// the stack a frame is admitted only if nothing has to be evicted to fit it,
-		// whoever it is addressed to. Both eviction paths count. The global budget
-		// sheds and then goes terminal, which the notice mirror reaches; and a peer
-		// already at its share is shed by the next frame for it, which the report
-		// reaches because what a report causes is not addressed only to the peer
-		// being reported — settling the asks that peer was holding fans
-		// `ui-request-end` out to every other writable guest.
 		if (this.#reporting && this.#wouldEvict(targetPeer, bytes)) {
 			logger.debug("collab: dropping frame emitted while reporting a shed", { targetPeer });
-			return false;
+			return refuse();
 		}
-		// Newest-wins supersede, not a shed: a second welcome re-primes the guest's
-		// accumulator, so only the newest welcome/batch pair is self-consistent.
-		// Keeping the older batch and refusing this one would let the older train's
-		// `final` terminate a replica that is missing everything the reset dropped.
-		// Nothing is reported, because superseding is the ordinary consequence of a
-		// second hello rather than a peer falling behind.
 		if (lazy && targetPeer !== 0 && this.#pendingBatchesFor(targetPeer) >= MAX_PEER_PENDING_BATCHES) {
 			const superseded = this.#discardWhere(pending => pending.targetPeer === targetPeer && pending.lazy);
 			logger.debug("collab: superseded queued snapshot batches", { targetPeer, superseded });
 		}
 		if (targetPeer === 0) {
-			// Broadcasts and every guest-role send land here. Shed guest-attributable
-			// backlog first so only a genuinely host-generated pile-up is fatal.
-			// Advisory first: a transcript line is the cheapest thing to lose, and it
-			// is the one kind of broadcast a guest can cause at will.
 			while (this.#overCapacity(bytes)) {
 				if (this.#discardWhere(pending => pending.advisory) > 0) continue;
-				// Before shedding anyone: a frame classified as safe to lose must never
-				// buy its own admission with a quota-abiding peer's backlog. Guests can
-				// cause advisory traffic at will, so the cheapest frame in the system
-				// would otherwise evict the most expensive.
 				if (advisory) {
 					logger.debug("collab: dropping advisory broadcast, only replica state is left to shed");
-					return false;
+					return refuse();
 				}
 				if (this.#shedHeaviestPeer()) continue;
 				this.#failOverload();
-				return false;
+				return refuse();
 			}
 		} else if (this.#pendingForPeer(targetPeer) >= MAX_PEER_PENDING_SENDS) {
 			this.#shedPeer(targetPeer);
-			return false;
+			return refuse();
 		} else if (this.#overCapacity(bytes)) {
-			// A welcome-plus-snapshot is the one frame a newcomer cannot obtain any
-			// other way, and without a reservation a handful of peers at their full
-			// share lock out every later join for as long as the uplink stays
-			// backpressured. So shed the heaviest holder for that, and never the
-			// requester itself: that would discard its backlog to make room for its
-			// own frame and report it as overloaded.
-			//
-			// Only for that. Ordinary targeted responses — read-only errors,
-			// transcript replies, ui-requests — answer something the peer asked for,
-			// and the host sends them without requiring a registered peer, so letting
-			// them evict would let a guest spam requests, be shed, resume once the
-			// mask lifts, and walk through everyone else's backlog. Those drop
-			// instead: the cost of a peer's own requests stays with that peer.
-			//
-			// Preflight before the first shed, never during it. Shedding peer by peer
-			// and stopping when it stops helping destroys a viable guest's snapshot to
-			// buy nothing: a broadcast the shed cannot touch is enough to keep the
-			// floor out of reach, so an oversized batch fails anyway and the peer it
-			// evicted on the way out is a second casualty of a join that never
-			// happened.
 			if (lazy && this.#shedCouldAdmit(bytes, targetPeer)) {
-				// Advisory first, the same order the broadcast branch above uses and for
-				// the same reason: a transcript line is the cheapest thing in the system
-				// to lose, so nothing else should be given up while one is still queued.
-				// Only broadcasts are ever advisory — {@link broadcastAdvisory} is the
-				// single caller that sets the flag — so this cannot reach a peer's own
-				// work, and it does not have to exclude anyone the way a shed does.
-				//
-				// Without it the cost is the join itself, not the join's fairness: the
-				// host broadcasts a notice for every accepted hello, so an ordinary join
-				// sequence leaves one queued, and one queued advisory used to be enough
-				// to refuse the next oversized welcome outright. Discounting it in the
-				// preflight without removing it here would change nothing — the loop
-				// below cannot reach a broadcast, so `#overCapacity` would still be true
-				// at the re-test and the batch refused. Whatever the preflight discounts
-				// has to be removed by the sequence the preflight is predicting.
 				this.#discardWhere(pending => pending.advisory);
 				while (this.#overCapacity(bytes)) {
 					if (!this.#shedHeaviestPeer(targetPeer)) break;
@@ -514,14 +485,21 @@ export class CollabSocket {
 			}
 			if (this.#overCapacity(bytes)) {
 				logger.debug("collab: dropping targeted frame, no shed can make room", { targetPeer, lazy });
-				return false;
+				return refuse();
 			}
 		}
-		// The floor below admits an entry with nothing ahead of it whatever it costs.
-		// Record when that is the only reason it fits, because its charge must not
-		// read as pressure afterwards — see #chargedBytes.
 		const exempt = this.#pendingSends.length === 0 && bytes > MAX_PENDING_SEND_BYTES;
-		this.#pendingSends.push({ frames, targetPeer, bytes, lazy, advisory, exempt, cancelled: false });
+		this.#pendingSends.push({
+			frames,
+			targetPeer,
+			bytes,
+			lazy,
+			advisory,
+			exempt,
+			cancelled: false,
+			eager,
+			onPrepared,
+		});
 		this.#pumpSends();
 		return true;
 	}
@@ -703,31 +681,64 @@ export class CollabSocket {
 		while (!this.#closed && generation === this.#sendGeneration) {
 			const pending = this.#pendingSends[0];
 			if (!pending) return;
-			// Advance before the writability gate, never behind it. Advancing is what
-			// resumes a batch's generator, and resuming past the last frame is what
-			// lets go of the snapshot it held — so gating it on the transport keeps a
-			// whole session clone reachable, and keeps the entry queued, charged,
-			// inside its peer's share and out of the empty-queue floor's way, for as
-			// long as the socket buffer takes to drain. The next admission then sheds
-			// that peer over a snapshot whose bytes are already in the buffer and
-			// cannot be retracted, and tells a guest with a complete replica to rejoin.
-			//
-			// The head is never a cancelled entry: `#discardWhere` marks and removes in
-			// one synchronous pass, so anything still in the array is live.
-			const next = pending.frames.next();
-			if (next.done) {
-				this.#pendingSends.shift();
+			if (pending.lazy) {
+				// Advance before the writability gate, never behind it. Advancing resumes
+				// a batch's generator, and resuming past the last frame lets go of the
+				// snapshot it held. Gating that on the transport keeps a whole session
+				// clone reachable and charged for as long as the socket buffer drains.
+				const next = pending.frames.next();
+				if (next.done) {
+					this.#pendingSends.shift();
+					continue;
+				}
+				if (!(await this.#waitForWritable(generation))) return;
+				if (this.#closed || generation !== this.#sendGeneration) return;
+				if (pending.cancelled) continue;
+				const serialized = typeof next.value === "string" ? next.value : JSON.stringify(next.value);
+				const sealed = await sealSerialized(this.#opts.key, serialized);
+				if (this.#closed || generation !== this.#sendGeneration) return;
+				if (pending.cancelled) continue;
+				if ((await this.#sendEnvelope(pending, packEnvelope(pending.targetPeer, sealed), generation)) === "stop") {
+					return;
+				}
 				continue;
 			}
-			if (!(await this.#waitForWritable(generation))) return;
+			// Regular sends are prepared eagerly so flush() can settle before close()
+			// hands their envelope to the open socket.
+			if (!pending.eager && !(await this.#waitForWritable(generation))) return;
 			if (this.#closed || generation !== this.#sendGeneration) return;
 			if (pending.cancelled) continue;
-			const serialized = typeof next.value === "string" ? next.value : JSON.stringify(next.value);
+			let value = pending.head;
+			pending.head = undefined;
+			if (value === undefined) {
+				const next = pending.frames.next();
+				if (next.done) {
+					pending.onPrepared?.();
+					pending.onPrepared = undefined;
+					this.#pendingSends.shift();
+					continue;
+				}
+				value = next.value;
+			}
+			const serialized = typeof value === "string" ? value : JSON.stringify(value);
 			const sealed = await sealSerialized(this.#opts.key, serialized);
 			if (this.#closed || generation !== this.#sendGeneration) return;
 			if (pending.cancelled) continue;
-			if ((await this.#sendEnvelope(pending, packEnvelope(pending.targetPeer, sealed), generation)) === "stop") {
-				return;
+			const envelope = packEnvelope(pending.targetPeer, sealed);
+			pending.preparedEnvelope = envelope;
+			pending.onPrepared?.();
+			pending.onPrepared = undefined;
+			const outcome = await this.#sendEnvelope(pending, envelope, generation);
+			if (outcome === "stop") return;
+			if (outcome === "sent") {
+				pending.preparedEnvelope = undefined;
+				if (pending.eager) {
+					this.#pendingSends.shift();
+				} else {
+					const next = pending.frames.next();
+					if (next.done) this.#pendingSends.shift();
+					else pending.head = next.value;
+				}
 			}
 		}
 	}
@@ -770,24 +781,44 @@ export class CollabSocket {
 		return undefined;
 	}
 
+	/**
+	 * Resolves once regular sends queued before this call have been sealed and are
+	 * either written to the transport or retained as a prepared envelope.
+	 */
+	flush(): Promise<void> {
+		return this.#sendChain;
+	}
+
+	/** Revoke unsent frames, including sealing work, before admitting a final frame. */
+	discardPendingSends(): void {
+		this.#sendGeneration++;
+		for (const pending of this.#pendingSends) {
+			pending.cancelled = true;
+			pending.onPrepared?.();
+			pending.frames.return?.(undefined);
+		}
+		this.#pendingSends.length = 0;
+		this.#sending = false;
+		this.#sendChain = Promise.resolve();
+		this.#clearBackpressureDrain();
+		this.#wakeSender?.();
+	}
+
 	/** Terminal-only: every caller is closing for good, so no peer is served any more. */
 	#discardPendingSends(): void {
-		this.#sendGeneration++;
+		this.discardPendingSends();
 		// The room ends here as surely as it does on a reconnect, and `connect()` may
 		// reopen this same socket onto a new one — a documented, tested reuse. Advance
 		// the generation with the records it clears, or bookkeeping deferred from the
 		// closed room applies to the reopened one, which is the reconnect hole with a
 		// synchronous trigger instead of a timer.
 		this.#roomGeneration++;
-		this.#pendingSends.length = 0;
 		this.#notServing.clear();
-		// With the records. A lease only exists to hold one against eviction, so
-		// leaving them behind protects nothing and, across a `connect()` that reopens
-		// this socket, would have the reopened room's trim skipping records for
-		// replies the closed room was owed.
+		// A lease only exists to hold one against eviction, so leaving peer ops
+		// behind protects nothing and, across a connect() that reopens this socket,
+		// would have the reopened room's trim skipping records for replies the closed
+		// room was owed.
 		this.#peerOps.clear();
-		this.#sending = false;
-		this.#wakeSender?.();
 	}
 
 	#clearBackpressureDrain(): void {
@@ -801,14 +832,23 @@ export class CollabSocket {
 	close(): void {
 		const hadActivity = this.#ws !== null || this.#retryTimer !== undefined;
 		this.#clearRetry();
-		this.#clearBackpressureDrain();
 		const wasClosed = this.#closed;
 		this.#closed = true;
-		this.#discardPendingSends();
+		this.#retryMissingRoom = false;
 		const ws = this.#ws;
 		this.#ws = null;
+		const prepared = this.#pendingSends.flatMap(pending =>
+			pending.preparedEnvelope ? [pending.preparedEnvelope] : [],
+		);
+		this.#discardPendingSends();
 		if (ws) {
 			try {
+				// Closing is terminal, so backpressure no longer matters: every
+				// prepared envelope (typically a final `bye`) enters the socket buffer
+				// ahead of the close frame.
+				if (ws.readyState === WebSocket.OPEN) {
+					for (const envelope of prepared) ws.send(envelope);
+				}
 				ws.close(1000);
 			} catch {
 				// already closing/closed
@@ -819,12 +859,16 @@ export class CollabSocket {
 
 	#openSocket(): void {
 		this.#clearBackpressureDrain();
-		const ws = new WebSocket(`${this.#opts.wsUrl}?role=${this.#opts.role}`);
+		const url = `${this.#opts.wsUrl}?role=${this.#opts.role}`;
+		const options = {
+			proxy: getProxyForUrl("collab", new URL(url)),
+		} satisfies Bun.WebSocketOptions;
+		const ws: WebSocket = Reflect.construct(WebSocket, [url, options]);
 		ws.binaryType = "arraybuffer";
 		this.#ws = ws;
 		ws.onopen = () => {
 			if (this.#ws !== ws) return;
-			this.#attempt = 0;
+			if (!this.#retryMissingRoom) this.#attempt = 0;
 			// Before waking the sender, or it resumes a stale targeted iterator.
 			if (this.#rejoining) {
 				this.#rejoining = false;
@@ -868,23 +912,32 @@ export class CollabSocket {
 		if (!bytes) return;
 		const envelope = unpackEnvelope(bytes);
 		if (!envelope) return;
+		// A frame received on the live socket belongs to this room even if the
+		// socket closes while it is still decrypting — a host's goodbye lands just
+		// before the relay tears the room down. Only a terminal close or a room
+		// recreation makes it stale; a mere disconnect ahead of a retry does not.
+		const generation = this.#roomGeneration;
+		const stale = (): boolean => this.#closed || generation !== this.#roomGeneration;
 		this.#recvChain = this.#recvChain
 			.then(async () => {
-				if (this.#ws !== ws) return;
+				if (stale()) return;
 				let frame: CollabFrame;
 				try {
 					frame = await open(this.#opts.key, envelope.payload);
 				} catch {
-					// The same identity check the success path makes below, for the same
-					// reason: decryption is awaited, so the connection that received this
-					// frame can be gone by now. A frame from a connection that is over
-					// says nothing about the key of the one that is open, and ending that
-					// one is fatal and does not reconnect — a corrupt tail from a dropped
-					// socket would take the healthy room it was replaced by with it.
-					if (this.#ws === ws) this.#failFatal("bad key or corrupted frame");
+					if (stale()) return;
+					if (this.#opts.role === "host") {
+						logger.debug("collab: ignoring undecryptable guest frame", { peer: envelope.peerId });
+					} else {
+						this.#failFatal("bad key or corrupted frame");
+					}
 					return;
 				}
-				if (this.#ws !== ws) return;
+				if (stale()) return;
+				if (this.#ws === ws) {
+					this.#retryMissingRoom = false;
+					this.#attempt = 0;
+				}
 				this.onFrame?.(frame, envelope.peerId);
 			})
 			.catch((err: unknown) => {
@@ -939,16 +992,25 @@ export class CollabSocket {
 
 	#handleClose(code: number, reason: string): void {
 		if (this.#closed) return;
-		this.#clearBackpressureDrain();
-		const fatalReason = FATAL_CLOSE_REASONS[code];
+		const fatalReason = RELAY_CLOSE_REASONS[code];
+		const closeReason = fatalReason ?? (reason || `connection lost (code ${code})`);
+		const retryRoom = this.#opts.role === "guest" && (code === 4001 || (code === 4004 && this.#retryMissingRoom));
+		if (retryRoom) {
+			this.#retryMissingRoom = true;
+			this.#rejoining = true;
+			this.onClose?.(closeReason, true);
+			this.#scheduleRetry();
+			return;
+		}
 		if (fatalReason !== undefined) {
 			this.#closed = true;
 			this.#discardPendingSends();
 			this.onClose?.(fatalReason, false);
 			return;
 		}
+		this.#clearBackpressureDrain();
 		this.#rejoining = true;
-		this.onClose?.(reason || `connection lost (code ${code})`, true);
+		this.onClose?.(closeReason, true);
 		this.#scheduleRetry();
 	}
 
@@ -960,7 +1022,6 @@ export class CollabSocket {
 		this.#discardPendingSends();
 		const ws = this.#ws;
 		this.#ws = null;
-		this.#clearBackpressureDrain();
 		if (ws) {
 			try {
 				ws.close(1000);

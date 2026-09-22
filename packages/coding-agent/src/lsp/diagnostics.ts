@@ -1,3 +1,4 @@
+import { type FileDiagnosticsResult } from "@oh-my-pi/pi-tui/tools/lsp";
 import * as fs from "node:fs";
 import path from "node:path";
 import { logger, untilAborted } from "@oh-my-pi/pi-utils";
@@ -328,20 +329,6 @@ export async function waitForDiagnostics(
 	return pulled;
 }
 
-/** Result from getDiagnosticsForFile */
-export interface FileDiagnosticsResult {
-	/** Name of the LSP server used (if available) */
-	server?: string;
-	/** Formatted diagnostic messages */
-	messages: string[];
-	/** Summary string (e.g., "2 error(s), 1 warning(s)") */
-	summary: string;
-	/** Whether there are any errors (severity 1) */
-	errored: boolean;
-	/** Whether the file was formatted */
-	formatter?: FileFormatResult;
-}
-
 export type ServerVersionMap = Map<string, number>;
 
 interface GetDiagnosticsForFileOptions {
@@ -520,13 +507,6 @@ export async function getDiagnosticsForFile(
 	};
 }
 
-export enum FileFormatResult {
-	UNCHANGED = "unchanged",
-	FORMATTED = "formatted",
-	FAILED = "failed",
-	UNSUPPORTED = "unsupported",
-}
-
 /**
  * Result from formatContent, distinguishing successful formatting
  * (formatted or unchanged) from a failure or unsupported file type.
@@ -561,7 +541,18 @@ export async function formatContent(
 	const uri = fileToUri(absolutePath);
 	let hadFailure = false;
 
-	for (const [serverName, serverConfig] of servers) {
+	// Prefer dedicated formatter/linter servers (`isLinter`) over type-checkers
+	// when choosing who formats. A type-checker such as tsserver also advertises
+	// `documentFormattingProvider` but only reindents; without this preference a
+	// configured external formatter (prettier via efm-langserver, ruff, dprint,
+	// gofumpt) could never win for a file type the type-checker also claims,
+	// since the loop returns at the first formatting-capable server. The sort is
+	// stable, so same-class ordering (and the type-checker-first order used for
+	// type-intelligence in `getServerForFile`) is otherwise preserved.
+	const ordered =
+		servers.length > 1 ? [...servers].sort((a, b) => (a[1].isLinter ? 0 : 1) - (b[1].isLinter ? 0 : 1)) : servers;
+
+	for (const [serverName, serverConfig] of ordered) {
 		try {
 			throwIfAborted(signal);
 			// Use custom linter client if configured

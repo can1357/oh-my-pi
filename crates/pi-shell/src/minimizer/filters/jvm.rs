@@ -132,8 +132,8 @@ pub fn filter(ctx: &MinimizerCtx<'_>, input: &str, _exit_code: i32) -> Minimizer
 	// fire. Route any non-passthrough phase to `filter_quiet`.
 	let text = if phase == MvnPhase::SpringBootRun {
 		// `mvn spring-boot:run` — application runtime output, not a build. The
-		// banner/INFO strip + keep-list lives in `filter_spring_boot`, shared with
-		// the gradle `bootRun` task.
+		// banner/INFO strip + keep-list lives in `filter_spring_boot`, shared
+		// with the gradle `bootRun` task.
 		filter_spring_boot(&primitives::strip_ansi(input))
 	} else if is_quiet(ctx.command) && phase != MvnPhase::Passthrough {
 		filter_quiet(input)
@@ -302,8 +302,8 @@ pub fn detect_phase(command: &str) -> MvnPhase {
 	// `spring-boot:run` is checked BEFORE the generic `:`-plugin-goal guard
 	// below: it is application runtime output, not a plugin build step, and
 	// routes to the dedicated banner/keep-list filter. Match the bare goal and
-	// the fully-qualified `org.springframework.boot:spring-boot-maven-plugin:run`
-	// form.
+	// the fully-qualified
+	// `org.springframework.boot:spring-boot-maven-plugin:run` form.
 	if last == "spring-boot:run" || last.ends_with(":spring-boot-maven-plugin:run") {
 		return MvnPhase::SpringBootRun;
 	}
@@ -627,7 +627,8 @@ impl FailuresSummaryCap {
 		if !self.in_summary || !line.starts_with("[ERROR]   ") {
 			return false;
 		}
-		// Per core cap policy, `0` means summary-only: no entries, tail still counts.
+		// Per core cap policy, `0` means summary-only: no entries, tail still
+		// counts.
 		if self.emitted < self.cap {
 			out.push_str(line);
 			out.push('\n');
@@ -870,7 +871,8 @@ fn filter_package_with_cap(raw: &str, cap: usize) -> String {
 		// Order matters: call reactor_summary_keep first so its BUILD_FOOT
 		// clears-flag side effect always runs regardless of `||` short-circuit.
 		let reactor_keep = reactor_summary_keep(line, &mut in_reactor_summary);
-		// Outside any Surefire block: compile-keep AND surefire-outside-keep merge.
+		// Outside any Surefire block: compile-keep AND surefire-outside-keep
+		// merge.
 		if reactor_keep || MODULE_BANNER.is_match(line) || keep_outside_block(line) {
 			summary.handle_aggregate(line, &mut out);
 			summary.handle_header(line);
@@ -944,7 +946,8 @@ pub fn filter_quiet(raw: &str) -> String {
 			continue;
 		}
 
-		// Failure-trail body: exception class, user-code frames; drop framework frames.
+		// Failure-trail body: exception class, user-code frames; drop framework
+		// frames.
 		if failure_trail {
 			if line.trim().is_empty() {
 				out.push('\n');
@@ -1093,8 +1096,8 @@ pub fn detect_task(command: &str) -> GradleTask {
 	// follow --tests, --rerun, etc. (e.g. "gradle test --tests FooSpec" → Test).
 	// When find returns None we need to distinguish two cases:
 	//   • no non-flag non-clean tokens at all  → only `clean` was given → Build
-	//   • non-flag non-clean tokens existed but none recognized → unrecognized task
-	// → Other
+	//   • non-flag non-clean tokens existed but none recognized → unrecognized
+	// task → Other
 	let mut non_clean_tokens = jvm_positional_tokens(command, &[
 		"-p",
 		"--project-dir",
@@ -1153,8 +1156,9 @@ pub fn detect_task(command: &str) -> GradleTask {
 	} else if task.contains("dependencies") {
 		GradleTask::Dependencies
 	} else if had_tokens {
-		// Non-flag non-clean tokens existed but none were recognized → unrecognized
-		// task (e.g. `gradlew signingReport`). Rtk parity: fall through to Other.
+		// Non-flag non-clean tokens existed but none were recognized →
+		// unrecognized task (e.g. `gradlew signingReport`). Rtk parity: fall
+		// through to Other.
 		GradleTask::Other
 	} else {
 		// No non-flag non-clean tokens at all — only `clean` was passed (filtered
@@ -1334,7 +1338,8 @@ fn filter_gradle_test(input: &str) -> String {
 		if in_failure_block {
 			let trimmed = line.trim();
 			if trimmed.starts_with("at ") {
-				// Stack frame: skip framework frames, keep first user-code frame then close.
+				// Stack frame: skip framework frames, keep first user-code frame
+				// then close.
 				if !is_gradle_framework_frame(trimmed) {
 					result_lines.push(line);
 					in_failure_block = false;
@@ -1804,7 +1809,8 @@ mod tests {
 	}
 	#[test]
 	fn detect_phase_ignores_pl_module_value() {
-		// "-pl module-a" option-value must not shadow the recognized lifecycle goal
+		// "-pl module-a" option-value must not shadow the recognized lifecycle
+		// goal
 		assert_eq!(detect_phase("mvn test -pl module-a"), MvnPhase::Test);
 		assert_eq!(detect_phase("mvn install -pl :sub1,:sub2"), MvnPhase::Package);
 	}
@@ -1814,7 +1820,8 @@ mod tests {
 		assert_eq!(detect_phase("mvn compile -pl test"), MvnPhase::Compile);
 		// "--projects test" — same, long form
 		assert_eq!(detect_phase("mvn install --projects test"), MvnPhase::Package);
-		// "-pl module-a" value is not a recognised goal; recognised goal still wins
+		// "-pl module-a" value is not a recognised goal; recognised goal still
+		// wins
 		assert_eq!(detect_phase("mvn test -pl module-a"), MvnPhase::Test);
 	}
 
@@ -2565,7 +2572,8 @@ mod tests {
 	}
 	#[test]
 	fn detect_task_skips_value_of_value_taking_options() {
-		// "-p test build" — "test" is the value of -p (project-dir), not a task name
+		// "-p test build" — "test" is the value of -p (project-dir), not a task
+		// name
 		assert_eq!(detect_task("gradle -p test build"), GradleTask::Build);
 		// "--project-dir test build" — long form
 		assert_eq!(detect_task("gradle --project-dir test build"), GradleTask::Build);
@@ -2694,16 +2702,17 @@ mod tests {
 		assert!(!o.contains("org.junit.Assert.fail"), "framework frames skipped; got:\n{o}");
 		assert!(!o.contains("PASSED"), "PASSED stripped; got:\n{o}");
 		assert!(o.contains("10 tests completed, 1 failed"), "summary kept; got:\n{o}");
-		// rtk asserts >=60% on its full TEST fixture; this inlined synthetic slice
-		// is smaller, so the floor is relaxed.
+		// rtk asserts >=60% on its full TEST fixture; this inlined synthetic
+		// slice is smaller, so the floor is relaxed.
 		let savings = savings_pct(input, &o);
 		assert!(savings >= 50.0, "test savings >=50%, got {savings:.1}%");
 	}
 
 	#[test]
 	fn gradle_unit_test_skips_framework_frames() {
-		// Built via `concat!` of one `\n`-terminated literal per line so rustfmt's
-		// soft-wrap `\`-continuation cannot mangle the leading-whitespace escapes.
+		// Built via `concat!` of one `\n`-terminated literal per line so
+		// rustfmt's soft-wrap `\`-continuation cannot mangle the
+		// leading-whitespace escapes.
 		let input = concat!(
 			"com.example.CalcTest > testAdd FAILED\n",
 			"    java.lang.AssertionError: expected:<5> but was:<3>\n",
@@ -2720,7 +2729,8 @@ mod tests {
 
 	#[test]
 	fn gradle_unit_test_no_testlogging_emits_hint() {
-		// Gradle default: no per-test lines shown. Empty output → rtk hint message.
+		// Gradle default: no per-test lines shown. Empty output → rtk hint
+		// message.
 		let input = "> Task :app:testDebugUnitTest\n\nBUILD SUCCESSFUL in 15s\n3 actionable tasks: \
 		             1 executed, 2 up-to-date";
 		let o = filter_gradle_test(input);
@@ -2737,10 +2747,11 @@ mod tests {
 	fn gradle_test_keeps_testlogging_hint_message() {
 		// The actionable testLogging hint an 'OK' cannot convey — deliberate. It
 		// fires only when the run produced NO per-test output AND no standalone
-		// build-status/summary line survived (a standalone `BUILD SUCCESSFUL` line
-		// is kept by `is_gradle_build_status`, which would otherwise satisfy the
-		// non-empty guard). The all-`> Task :` input below strips to empty while
-		// still containing the `BUILD SUCCESSFUL` substring, exercising the hint.
+		// build-status/summary line survived (a standalone `BUILD SUCCESSFUL`
+		// line is kept by `is_gradle_build_status`, which would otherwise
+		// satisfy the non-empty guard). The all-`> Task :` input below strips
+		// to empty while still containing the `BUILD SUCCESSFUL` substring,
+		// exercising the hint.
 		let input = "> Task :app:testDebugUnitTest\n> Task :app:check BUILD SUCCESSFUL";
 		let o = filter_gradle_test(input);
 		assert!(
@@ -2944,7 +2955,8 @@ mod tests {
 
 	#[test]
 	fn gradle_other_task_light_strip() {
-		// Unknown task: light Build-style daemon/progress/task strip, keep the rest.
+		// Unknown task: light Build-style daemon/progress/task strip, keep the
+		// rest.
 		let input = "Starting a Gradle Daemon (subsequent builds will be faster)\n> Task \
 		             :app:signingReport\nVariant: debug\nSHA1: AA:BB:CC\nBUILD SUCCESSFUL in 1s";
 		let o = filter_gradle_other(input);
@@ -2960,10 +2972,10 @@ mod tests {
 	fn gradle_def_strips_up_to_date_and_keeps_result() {
 		// defs/gradle.toml "strips UP-TO-DATE and keeps result". Build mode drops
 		// all `> Task :` lines (superset of UP-TO-DATE) + Configure noise; keeps
-		// the explicit `> Task :app:test` line? rtk gradle.toml kept the bare task
-		// line, but the Rust Build filter strips ALL `> Task :` lines and relies on
-		// the summary/status lines for signal. The build result + test summary are
-		// what carry the signal and they survive.
+		// the explicit `> Task :app:test` line? rtk gradle.toml kept the bare
+		// task line, but the Rust Build filter strips ALL `> Task :` lines and
+		// relies on the summary/status lines for signal. The build result +
+		// test summary are what carry the signal and they survive.
 		let input = "> Configure project :app\n> Task :app:compileJava UP-TO-DATE\n> Task \
 		             :app:compileKotlin UP-TO-DATE\n> Task :app:test\n3 tests completed, 1 \
 		             failed\nBUILD FAILED in 12s";
@@ -2976,8 +2988,8 @@ mod tests {
 
 	#[test]
 	fn gradle_def_clean_build_untouched() {
-		// defs/gradle.toml "clean build untouched": no noise → status + actionable
-		// survive unchanged.
+		// defs/gradle.toml "clean build untouched": no noise → status +
+		// actionable survive unchanged.
 		let input = "BUILD SUCCESSFUL in 8s\n7 actionable tasks: 7 executed";
 		let o = filter_gradle_build(input);
 		assert!(o.contains("BUILD SUCCESSFUL in 8s"), "status kept; got:\n{o}");
@@ -2987,7 +2999,8 @@ mod tests {
 	#[test]
 	fn gradle_def_empty_after_stripping() {
 		// defs/gradle.toml "empty after stripping": only a Configure line → all
-		// stripped → empty output (the engine's OK path covers the user-facing msg).
+		// stripped → empty output (the engine's OK path covers the user-facing
+		// msg).
 		let input = "> Configure project :app\n";
 		let o = filter_gradle_build(input);
 		assert!(o.trim().is_empty(), "all noise stripped to empty; got:\n{o}");

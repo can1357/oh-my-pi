@@ -3,10 +3,11 @@ import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import * as loopCondition from "@oh-my-pi/pi-coding-agent/modes/loop-condition";
 import type { LoopConditionVerdict } from "@oh-my-pi/pi-coding-agent/modes/loop-condition";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -363,7 +364,9 @@ describe("InteractiveMode loop auto-submit", () => {
 
 		// /vibe enabled while the gate is awaiting must kill a reset loop: the
 		// pre-gate guard is stale by then, and handleClearCommand would only
-		// warn while the iteration still submitted without resetting.
+		// warn while the iteration still submitted without resetting. Goes
+		// through the real /vibe command so the vibeModeEnabled transition is
+		// exercised instead of assigned directly.
 		it("disables a reset loop when vibe is enabled while the condition is in flight", async () => {
 			vi.useFakeTimers();
 			settings.set("loop.mode", "reset");
@@ -372,13 +375,15 @@ describe("InteractiveMode loop auto-submit", () => {
 			vi.spyOn(loopCondition, "evaluateLoopCondition").mockImplementation(async () => await pending.promise);
 			const clear = vi.spyOn(mode, "handleClearCommand");
 			const showStatus = vi.spyOn(mode, "showStatus");
+			vi.spyOn(session, "activateVibeTools").mockResolvedValue();
 			mode.loopCondition = { command: "sleep 30", until: false };
 
 			const resolved = armLoop("reset me");
 			vi.advanceTimersByTime(800);
 			await flushMicrotasks();
 
-			mode.vibeModeEnabled = true;
+			await mode.handleVibeModeCommand();
+			expect(mode.vibeModeEnabled).toBe(true);
 			pending.resolve({ kind: "continue" });
 			await flushMicrotasks();
 
@@ -388,5 +393,128 @@ describe("InteractiveMode loop auto-submit", () => {
 			expect(mode.loopPrompt).toBeUndefined();
 			expect(showStatus).toHaveBeenCalledWith("Exit vibe mode before using reset loops. Loop mode disabled.");
 		});
+
+		// The condition can resolve while /vibe tool activation is still in
+		// flight: vibeModeEnabled is still false, but the reset must not run
+		// concurrently with the toolset switch. The loop must disable on the
+		// entering transition, not just the settled flag.
+		it("disables a reset loop when the condition resolves during vibe activation", async () => {
+			vi.useFakeTimers();
+			settings.set("loop.mode", "reset");
+			idleSession();
+			const pending = Promise.withResolvers<LoopConditionVerdict>();
+			vi.spyOn(loopCondition, "evaluateLoopCondition").mockImplementation(async () => await pending.promise);
+			const clear = vi.spyOn(mode, "handleClearCommand");
+			const showStatus = vi.spyOn(mode, "showStatus");
+			const vibeGate = Promise.withResolvers<void>();
+			vi.spyOn(session, "activateVibeTools").mockImplementation(() => vibeGate.promise);
+			mode.loopCondition = { command: "sleep 30", until: false };
+
+			const resolved = armLoop("reset me");
+			vi.advanceTimersByTime(800);
+			await flushMicrotasks();
+
+			const vibeEnter = mode.handleVibeModeCommand();
+			await flushMicrotasks();
+			expect(mode.vibeModeEnabled).toBe(false);
+
+			pending.resolve({ kind: "continue" });
+			await flushMicrotasks();
+
+			expect(clear).not.toHaveBeenCalled();
+			expect(resolved).toHaveLength(0);
+			expect(mode.loopModeEnabled).toBe(false);
+			expect(mode.loopPrompt).toBeUndefined();
+			expect(showStatus).toHaveBeenCalledWith("Exit vibe mode before using reset loops. Loop mode disabled.");
+
+			vibeGate.resolve();
+			await vibeEnter;
+			expect(mode.vibeModeEnabled).toBe(true);
+		});
+	});
+
+	it("resubmits a /skill: prompt dispatched inline by the submit handler", async () => {
+		vi.useFakeTimers();
+		const skillPath = path.join(tempDir.path(), "recap.md");
+		await Bun.write(skillPath, "---\nname: recap\n---\nSummarize recent changes.\n");
+		mode.skillCommands.set("skill:recap", {
+			name: "recap",
+			description: "",
+			filePath: skillPath,
+			baseDir: tempDir.path(),
+			source: "test",
+		});
+		new InputController(mode).setupEditorSubmitHandler();
+		const promptCustomMessage = vi.spyOn(session, "promptCustomMessage").mockResolvedValue(true);
+		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => false });
+		Object.defineProperty(session, "isCompacting", { configurable: true, get: () => false });
+
+		mode.disableLoopMode();
+		mode.loopModeEnabled = true;
+		const resolved: SubmittedUserInput[] = [];
+		pendingInput = mode.getUserInput();
+		void pendingInput.then(input => resolved.push(input));
+
+		await mode.editor.onSubmit?.("/skill:recap go");
+
+		expect(promptCustomMessage).toHaveBeenCalledTimes(1);
+		expect(mode.loopPrompt).toBe("/skill:recap go");
+		expect(resolved).toHaveLength(0);
+
+		vi.advanceTimersByTime(800);
+		await flushMicrotasks();
+
+		expect(resolved).toHaveLength(1);
+		expect(resolved[0].text).toBe("/skill:recap go");
+		mode.skillCommands.delete("skill:recap");
+	});
+
+	it("paints no optimistic user row for a resubmitted /skill: loop prompt", async () => {
+		vi.useFakeTimers();
+		const skillPath = path.join(tempDir.path(), "recap.md");
+		await Bun.write(skillPath, "---\nname: recap\n---\nSummarize recent changes.\n");
+		mode.skillCommands.set("skill:recap", {
+			name: "recap",
+			description: "",
+			filePath: skillPath,
+			baseDir: tempDir.path(),
+			source: "test",
+		});
+		Object.defineProperty(session, "isCompacting", { configurable: true, get: () => false });
+		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => false });
+
+		mode.loopModeEnabled = true;
+		mode.loopPrompt = "/skill:recap go";
+		const resolved: SubmittedUserInput[] = [];
+		pendingInput = mode.getUserInput();
+		void pendingInput.then(input => resolved.push(input));
+
+		vi.advanceTimersByTime(800);
+		await flushMicrotasks();
+
+		expect(resolved).toHaveLength(1);
+		expect(resolved[0].text).toBe("/skill:recap go");
+		// A plain loop prompt paints one; the skill row comes from the dispatched
+		// custom message instead.
+		expect(mode.addMessageToChat).not.toHaveBeenCalled();
+		mode.skillCommands.delete("skill:recap");
+	});
+
+	it("paints an optimistic user row for a resubmitted plain loop prompt", async () => {
+		vi.useFakeTimers();
+		Object.defineProperty(session, "isCompacting", { configurable: true, get: () => false });
+		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => false });
+
+		mode.loopModeEnabled = true;
+		mode.loopPrompt = "repeat this";
+		const resolved: SubmittedUserInput[] = [];
+		pendingInput = mode.getUserInput();
+		void pendingInput.then(input => resolved.push(input));
+
+		vi.advanceTimersByTime(800);
+		await flushMicrotasks();
+
+		expect(resolved).toHaveLength(1);
+		expect(mode.addMessageToChat).toHaveBeenCalledTimes(1);
 	});
 });

@@ -1,0 +1,110 @@
+// On-device inference workers exposed as catalog models.
+
+provider "local" {
+	default-model "lfm2.5-230m"
+	allow-unauthenticated #true
+
+	seed api="local-inference" base-url="local://inference" bundle="always" {
+		model "kokoro" name="Kokoro-82M" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "parakeet-tdt-0.6b-v3" name="Parakeet TDT 0.6B v3" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "whisper-base" name="Whisper Base" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "whisper-small" name="Whisper Small" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "whisper-large-v3-turbo" name="Whisper Large v3 Turbo" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "lfm2.5-230m" name="LFM2.5 230M" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "lfm2.5-350m" name="LFM2.5 350M" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "falcon-h1-90m" name="Falcon H1 Tiny 90M" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "qwen3-1.7b" name="Qwen3 1.7B" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "llama3.2:3b" name="Llama 3.2 3B" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "gemma-3-1b" name="Gemma 3 1B" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "qwen2.5-1.5b" name="Qwen2.5 1.5B" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "lfm2-1.2b" name="LFM2 1.2B" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+	}
+
+	models "kokoro" {
+		kind "tts"
+	}
+	models "parakeet-tdt-0.6b-v3" "whisper-*" {
+		kind "stt"
+	}
+	models "lfm*" "falcon-*" "qwen*" "llama3.2:3b" "gemma-3-1b" {
+		kind "tiny"
+	}
+}

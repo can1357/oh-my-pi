@@ -201,6 +201,13 @@ describe("Input component", () => {
 		expect(renderedWidth(input, width)).toBeLessThanOrEqual(width);
 	});
 
+	it("clips an oversized prompt without losing the editable value after resize", () => {
+		const input = setupAtEnd("retained");
+		input.prompt = "Prompt: ";
+		expect(renderedWidth(input, 1)).toBeLessThanOrEqual(1);
+		expect(Bun.stripANSI(input.render(20)[0]!.replaceAll(CURSOR_MARKER, ""))).toContain("retained");
+	});
+
 	it("masks one bullet per grapheme without changing the submitted value", () => {
 		const input = new Input();
 		input.focused = true;
@@ -222,6 +229,16 @@ describe("Input component", () => {
 		};
 		input.handleInput("\n");
 		expect(submitted).toBe("a😀e\u0301z");
+	});
+
+	it("does not disclose masked input through debug inspection", () => {
+		const value = crypto.randomUUID();
+		const input = new Input();
+		input.mask = true;
+		input.setValue(value);
+
+		expect(JSON.stringify(input.debugState())).not.toContain(value);
+		expect(input.getValue()).toBe(value);
 	});
 
 	it("keeps masked Unicode input within narrow viewports", () => {

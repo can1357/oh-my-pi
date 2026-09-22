@@ -36,8 +36,10 @@ function createFlushHarness(): FlushHarness {
 			getHeader: () => undefined,
 			buildSessionContext: () => ({ messages: [] }),
 			getEntries: () => [],
+			onPersistenceError: () => () => {},
 		},
 		settings: { get: () => false },
+		getLastAssistantMessage: () => undefined,
 		extensionRunner: undefined,
 		subscribe: (listener: (event: AgentSessionEvent) => void) => {
 			subscriber = listener;
@@ -135,7 +137,7 @@ describe("print-mode JSON flush (#7635)", () => {
 		expect(harness.disposed()).toBe(false);
 
 		releaseAgentEnd?.();
-		await run;
+		expect(await run).toBe(0);
 
 		expect(settled).toBe(true);
 		expect(harness.disposed()).toBe(true);
