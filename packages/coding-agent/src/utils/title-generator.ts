@@ -160,6 +160,13 @@ function getTitleModels(registry: ModelRegistry, settings: Settings, currentMode
  * @param signal Session-lifecycle cancellation for background title requests
  * @param credentialSourceSessionId Optional foreground session whose selected
  *   OAuth credential should seed an isolated title-request session.
+ * @param applyStartupOAuthAccountPin Optional hook applying a candidate
+ *   provider's configured `auth.startupOAuthAccount` selector to the
+ *   isolated title session before its credential lookup. Only invoked when
+ *   `credentialSourceSessionId` has no active account for that provider (a
+ *   title candidate can resolve to a different provider than the foreground
+ *   model), so automatic ranking never silently consumes a sibling account
+ *   reserved as overflow-only for the foreground.
  */
 export async function generateSessionTitle(
 	firstMessage: string,
@@ -171,6 +178,7 @@ export async function generateSessionTitle(
 	customSystemPrompt?: string,
 	signal?: AbortSignal,
 	credentialSourceSessionId?: string,
+	applyStartupOAuthAccountPin?: (provider: string, sessionId: string) => void,
 ): Promise<string | null> {
 	// Defer titling for greetings / acknowledgements / empty input. The default
 	// tiny title model can't reliably decline trivial input, so this happens
@@ -199,6 +207,7 @@ export async function generateSessionTitle(
 			signal,
 			titleSystemPrompt,
 			credentialSourceSessionId,
+			applyStartupOAuthAccountPin,
 		);
 	}
 
@@ -249,6 +258,7 @@ export async function generateTitleOnline(
 	signal?: AbortSignal,
 	customSystemPrompt?: string,
 	credentialSourceSessionId?: string,
+	applyStartupOAuthAccountPin?: (provider: string, sessionId: string) => void,
 ): Promise<string | null> {
 	const models = getTitleModels(registry, settings, currentModel);
 	if (models.length === 0) {
@@ -264,6 +274,7 @@ export async function generateTitleOnline(
 		signal,
 		customSystemPrompt,
 		credentialSourceSessionId,
+		applyStartupOAuthAccountPin,
 	);
 }
 
@@ -276,6 +287,7 @@ async function generateTitleOnlineWithModels(
 	signal?: AbortSignal,
 	customSystemPrompt?: string,
 	credentialSourceSessionId?: string,
+	applyStartupOAuthAccountPin?: (provider: string, sessionId: string) => void,
 ): Promise<string | null> {
 	const titleSystemPrompt = customSystemPrompt?.trim() || undefined;
 	// The model is always asked to wrap the title in `<title>...</title>` and
@@ -305,6 +317,7 @@ async function generateTitleOnlineWithModels(
 		}
 
 		try {
+			let seededFromForeground = false;
 			if (credentialSourceSessionId && sessionId && credentialSourceSessionId !== sessionId) {
 				const foregroundCredential = registry.authStorage
 					.listOAuthAccounts(model.provider, credentialSourceSessionId)
@@ -315,7 +328,17 @@ async function generateTitleOnlineWithModels(
 						sessionId,
 						foregroundCredential.credentialId,
 					);
+					seededFromForeground = true;
 				}
+			}
+			// The foreground has no active account for this candidate's provider
+			// (e.g. the tiny/commit/smol role resolved to a different provider
+			// than the visible model) -- apply that provider's own startup pin
+			// to this isolated session before ranking, so it never falls through
+			// to automatic ranking and silently consumes a sibling account
+			// reserved as overflow-only for the foreground.
+			if (!seededFromForeground && sessionId) {
+				applyStartupOAuthAccountPin?.(model.provider, sessionId);
 			}
 			const apiKey = await registry.getApiKey(model, sessionId);
 			if (!apiKey) {

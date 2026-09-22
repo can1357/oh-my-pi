@@ -1,6 +1,12 @@
-import { describe, expect, test } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { afterEach, describe, expect, test, vi } from "bun:test";
 import { summarizeCode } from "@oh-my-pi/pi-natives";
-import { computeRepairRegion, repairParseRegression } from "./auto-repair";
+import * as ai from "@oh-my-pi/pi-ai";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { attemptEditAutoRepair, computeRepairRegion, repairParseRegression } from "./auto-repair";
+import { writethroughNoop } from "../lsp";
 
 const PATH = "/repo/src/sample.ts";
 
@@ -140,5 +146,74 @@ describe("repairParseRegression", () => {
 			async () => "const doubled = (b * 2; // still broken",
 		);
 		expect(repair).toBeUndefined();
+	});
+});
+
+describe("attemptEditAutoRepair", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	test("applies the startup pin before resolving the smol model's credential", async () => {
+		const model = getBundledModel("anthropic", "claude-haiku-4-5");
+		if (!model) throw new Error("Expected bundled model claude-haiku-4-5");
+
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-edit-auto-repair-"));
+		try {
+			const filePath = path.join(dir, "sample.ts");
+			const broken = BASE.replace("const doubled = b * 2;", "const doubled = (b * 2;");
+			await fs.writeFile(filePath, broken, "utf8");
+
+			const fixed = broken.replace("(b * 2;", "(b * 2);");
+			vi.spyOn(ai, "retryTransientCompletion").mockImplementation(async fn => fn(0));
+			vi.spyOn(ai, "completeSimple").mockImplementation(async (_model, request) => {
+				const builtPrompt = request.messages[0].content;
+				const afterRegion = String(builtPrompt).split("AFTER (broken):")[1].split("```")[1];
+				return {
+					stopReason: "stop",
+					content: [{ type: "text", text: afterRegion.replace("(b * 2;", "(b * 2);") }],
+				} as never;
+			});
+
+			const callOrder: string[] = [];
+			const getApiKey = vi.fn(async () => {
+				callOrder.push("getApiKey");
+				return "test-key";
+			});
+			const applyStartupOAuthAccountPin = vi.fn((_provider: string, _sessionId: string) => {
+				callOrder.push("pin");
+			});
+			const registry = {
+				getAvailable: () => [model],
+				getApiKey,
+				resolver: () => async () => "test-key",
+			} as never;
+			const session = {
+				settings: {
+					get(key: string) {
+						return key === "edit.autoRepair.enabled" ? true : undefined;
+					},
+					getModelRole(role: string) {
+						return role === "smol" ? `${model.provider}/${model.id}` : undefined;
+					},
+				},
+				modelRegistry: registry,
+				getSessionId: () => "primary-session-1",
+				applyStartupOAuthAccountPin,
+			} as never;
+
+			const outcome = await attemptEditAutoRepair({
+				session,
+				snapshot: { path: filePath, prev: BASE, next: broken },
+				writethrough: writethroughNoop,
+			});
+
+			expect(outcome).toBeDefined();
+			expect(await fs.readFile(filePath, "utf8")).toBe(fixed);
+			expect(applyStartupOAuthAccountPin).toHaveBeenCalledWith(model.provider, "primary-session-1");
+			expect(callOrder).toEqual(["pin", "getApiKey"]);
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
 	});
 });

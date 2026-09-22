@@ -827,6 +827,86 @@ describe("title generator", () => {
 		expect(completeSimpleMock.mock.calls[0]?.[0]).toBe(smolModel);
 		expect(completeSimpleMock.mock.calls[1]?.[0]).toBe(fallbackModel);
 	});
+
+	it("applies the provider's startup pin to the isolated title session when the foreground has no active account for its provider", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "<title>Fix login button</title>" }],
+		} as never);
+		const callOrder: string[] = [];
+		const listOAuthAccounts = vi.fn(() => []);
+		const pinSessionOAuthAccount = vi.fn(() => true);
+		const getApiKey = vi.fn(async () => {
+			callOrder.push("getApiKey");
+			return "test-key";
+		});
+		const applyStartupOAuthAccountPin = vi.fn((_provider: string, _sessionId: string) => {
+			callOrder.push("pin");
+		});
+		const registry = {
+			getAvailable: () => [model],
+			getApiKey,
+			getApiKeyForProvider: async () => "test-key",
+			authStorage: { listOAuthAccounts, pinSessionOAuthAccount, rotateSessionCredential: async () => false },
+			resolver: () => async () => "test-key",
+		} as never;
+
+		const title = await generateSessionTitle(
+			"the login button is broken on mobile",
+			registry,
+			createSettings(model),
+			"title-session-1",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			"foreground-session-1",
+			applyStartupOAuthAccountPin,
+		);
+
+		expect(title).toBe("Fix login button");
+		expect(listOAuthAccounts).toHaveBeenCalledWith(model.provider, "foreground-session-1");
+		expect(pinSessionOAuthAccount).not.toHaveBeenCalled();
+		expect(applyStartupOAuthAccountPin).toHaveBeenCalledWith(model.provider, "title-session-1");
+		expect(callOrder).toEqual(["pin", "getApiKey"]);
+	});
+
+	it("copies the foreground's active credential instead of applying the startup pin when one already matches the provider", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "<title>Fix login button</title>" }],
+		} as never);
+		const activeAccount = { credentialId: 7, active: true, position: 0 } as never;
+		const listOAuthAccounts = vi.fn(() => [activeAccount]);
+		const pinSessionOAuthAccount = vi.fn(() => true);
+		const applyStartupOAuthAccountPin = vi.fn();
+		const registry = {
+			getAvailable: () => [model],
+			getApiKey: async () => "test-key",
+			getApiKeyForProvider: async () => "test-key",
+			authStorage: { listOAuthAccounts, pinSessionOAuthAccount, rotateSessionCredential: async () => false },
+			resolver: () => async () => "test-key",
+		} as never;
+
+		const title = await generateSessionTitle(
+			"the login button is broken on mobile",
+			registry,
+			createSettings(model),
+			"title-session-1",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			"foreground-session-1",
+			applyStartupOAuthAccountPin,
+		);
+
+		expect(title).toBe("Fix login button");
+		expect(pinSessionOAuthAccount).toHaveBeenCalledWith(model.provider, "title-session-1", 7);
+		expect(applyStartupOAuthAccountPin).not.toHaveBeenCalled();
+	});
 });
 
 // The terminal title runtime is a module-global. `emitTerminalTitle()` composes

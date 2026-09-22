@@ -95,4 +95,38 @@ describe("task label generation", () => {
 		expect(labelEchoesHandle("AuthLoader", "authloader")).toBe(true);
 		expect(labelEchoesHandle("AuthLoader-3", "Migrate users")).toBe(false);
 	});
+
+	it("applies the startup pin before resolving the label model's credential", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "<title>Fix login button</title>" }],
+		} as never);
+		const callOrder: string[] = [];
+		const getApiKey = vi.fn(async () => {
+			callOrder.push("getApiKey");
+			return "test-key";
+		});
+		const applyStartupOAuthAccountPin = vi.fn((_provider: string, _sessionId: string) => {
+			callOrder.push("pin");
+		});
+		const registry = {
+			getAvailable: () => [model],
+			getApiKey,
+			resolver: () => async () => "test-key",
+		} as never;
+
+		const label = await generateTaskLabel(
+			"investigate the login button crash",
+			registry,
+			createSettings(model),
+			"task-session-1",
+			undefined,
+			applyStartupOAuthAccountPin,
+		);
+
+		expect(label).toBe("Fix login button");
+		expect(applyStartupOAuthAccountPin).toHaveBeenCalledWith(model.provider, "task-session-1");
+		expect(callOrder).toEqual(["pin", "getApiKey"]);
+	});
 });

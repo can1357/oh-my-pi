@@ -408,6 +408,44 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		}
 	});
 
+	test("clears stale index-keyed backoff after reload() reorders credentials mid-process", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		registerProvider();
+		await authStorage.set(PROVIDER, [
+			{ type: "oauth", access: "acc-A", refresh: "ref-A", expires: farExpiry() },
+			{ type: "oauth", access: "acc-B", refresh: "ref-B", expires: farExpiry() },
+			{ type: "oauth", access: "acc-C", refresh: "ref-C", expires: farExpiry() },
+		]);
+		const rows = store.listAuthCredentials(PROVIDER);
+		const rowA = rows[0];
+		if (!rowA) throw new Error("expected row a");
+
+		// Block A (index 0) with a real usage-limit hit -- this records the
+		// block in both the persisted (id-keyed, immune to this bug) store and
+		// the in-memory (index-keyed) backoff maps this fix targets.
+		const marked = await authStorage.markUsageLimitReached(PROVIDER, undefined, { credentialId: rowA.id });
+		expect(marked.switched).toBe(true);
+
+		// Remove A directly through the underlying store, bypassing every
+		// AuthStorage-level mutation method (set/removeCredential/disable all
+		// call #resetProviderAssignments and would trivially avoid this bug) --
+		// mirrors an external process write or an auth-broker snapshot
+		// delivery, surfaced to THIS SAME live AuthStorage instance only
+		// through reload(). B now moves from index 1 to index 0 -- exactly the
+		// slot A's block was recorded against.
+		store.deleteAuthCredential(rowA.id, "test: simulate external removal");
+		await authStorage.reload();
+
+		// If B inherited A's stale index-0 block, ranking would never select
+		// it -- sample several fresh sessions and confirm B is reachable.
+		const selections = new Set<string>();
+		for (let index = 0; index < 8; index += 1) {
+			const key = await authStorage.getApiKey(PROVIDER, `probe-reload-${index}`);
+			if (key) selections.add(key);
+		}
+		expect(selections.has("acc-B")).toBe(true);
+	});
+
 	test("explicit missing rotation targets do not fall back to stale stickiness", async () => {
 		if (!authStorage || !store) throw new Error("test setup failed");
 		await authStorage.set(PROVIDER, [

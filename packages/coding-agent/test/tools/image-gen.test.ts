@@ -184,6 +184,23 @@ describe("imageGenTool catalog routing", () => {
 		expect(result.details?.model).toBe("fallback-image");
 	});
 
+	it("reapplies the startup OAuth account pin before resolving each candidate's credentials", async () => {
+		const model = catalogModel("openrouter", "pinned-image", "openrouter-images");
+		const pinCalls: Array<{ provider: string; sessionId: string }> = [];
+		const settings = Settings.isolated({ modelRoles: { image: "openrouter/pinned-image" } });
+		const ctx: CustomToolContext = {
+			...createContext({ models: [model], settings, fetch: async () => imageResponse() }),
+			applyStartupOAuthAccountPin: (provider, sessionId) => {
+				pinCalls.push({ provider, sessionId });
+			},
+		};
+
+		const result = await imageGenTool.execute("pin-check", { subject: "a pinned cat" }, undefined, ctx);
+		collectPaths(result);
+
+		expect(pinCalls).toEqual([{ provider: "openrouter", sessionId: ctx.sessionManager.getSessionId() }]);
+	});
+
 	it("skips unsupported image APIs and continues the resolved chain", async () => {
 		const unsupported = catalogModel("custom", "unsupported-image", "openai-completions");
 		const fallback = catalogModel("openrouter", "fallback-image", "openrouter-images");

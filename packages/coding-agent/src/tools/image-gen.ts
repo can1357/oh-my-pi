@@ -230,6 +230,7 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 					continue;
 				}
 
+				if (sessionId) ctx.applyStartupOAuthAccountPin?.(model.provider, sessionId);
 				const initialKey = await ctx.modelRegistry.getApiKey(model, sessionId, { signal: requestSignal });
 				if (!isAuthenticated(initialKey)) {
 					skipped.push(`${model.provider}/${model.id} (credentials unavailable)`);

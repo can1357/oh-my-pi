@@ -11,7 +11,9 @@ import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
+import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { HindsightApi } from "@oh-my-pi/pi-coding-agent/hindsight/client";
 import type { HindsightConfig } from "@oh-my-pi/pi-coding-agent/hindsight/config";
 import { HindsightSessionState } from "@oh-my-pi/pi-coding-agent/hindsight/state";
@@ -187,6 +189,7 @@ function registerMnemopiState(
 				getCwd: () => options.cwd ?? "/tmp",
 			} as never,
 			emitNotice: () => {},
+			applyStartupOAuthAccountPin: () => {},
 			getHindsightSessionState: () => undefined,
 			subscribe: (listener: AgentSessionEventListener) => {
 				options.listeners?.add(listener);
@@ -663,6 +666,62 @@ describe("Mnemopi backend lifecycle", () => {
 		expect(memory.get(retainId)).not.toBeNull();
 	});
 
+	it("applies startup pins before Mnemopi embedding and smol credential lookups", async () => {
+		const model = getBundledModel("anthropic", "claude-haiku-4-5");
+		if (!model) throw new Error("Expected bundled model claude-haiku-4-5");
+		const settings = Settings.isolated({
+			"memory.backend": "mnemopi",
+			"mnemopi.noEmbeddings": true,
+			"mnemopi.llmMode": "smol",
+			"mnemopi.scoping": "global",
+			"mnemopi.bank": "default",
+			"mnemopi.dbPath": makeMnemopiConfig().dbPath,
+		});
+		settings.setModelRole("tiny", `${model.provider}/${model.id}`);
+		const callOrder: string[] = [];
+		const modelRegistry = {
+			getAvailable: () => [model],
+			getApiKeyForProvider: async (provider: string) => {
+				callOrder.push(`key:${provider}`);
+				return undefined;
+			},
+			getApiKey: async (candidate: Model<Api>) => {
+				callOrder.push(`key:${candidate.provider}`);
+				return undefined;
+			},
+			resolver: () => async () => undefined,
+		};
+		const session = {
+			sessionId: TEST_SESSION_ID,
+			settings,
+			modelRegistry,
+			sessionManager: { getEntries: () => [], getCwd: () => "/tmp" },
+			emitNotice: () => {},
+			getHindsightSessionState: () => undefined,
+			subscribe: () => () => {},
+			applyStartupOAuthAccountPin: (provider: string, sessionId: string) => {
+				expect(sessionId).toBe(TEST_SESSION_ID);
+				callOrder.push(`pin:${provider}`);
+			},
+		} as never;
+
+		await mnemopiBackend.start({
+			session,
+			settings,
+			modelRegistry: modelRegistry as never,
+			agentDir: path.dirname(tempDbPath!),
+			taskDepth: 0,
+		});
+		const state = getMnemopiSessionState(session);
+		if (!state) throw new Error("Expected Mnemopi state");
+		registeredMnemopiState = state;
+		const llm = state.config.providerOptions.llm;
+		if (typeof llm !== "function") throw new Error("Expected Mnemopi smol LLM");
+		await llm("remember this", {});
+
+		expect(callOrder).toEqual(["pin:openrouter", "key:openrouter", "pin:anthropic", "key:anthropic"]);
+	});
+
 	it("promotes aged working memory when the backend starts a top-level session (#10770)", async () => {
 		// Resolve seed and started session to the SAME bank/db: `global` scoping
 		// with the shared `default` bank maps the retain bank straight to dbPath.
@@ -700,6 +759,7 @@ describe("Mnemopi backend lifecycle", () => {
 			emitNotice: () => {},
 			getHindsightSessionState: () => undefined,
 			subscribe: () => () => {},
+			applyStartupOAuthAccountPin: () => {},
 		} as never;
 		await mnemopiBackend.start({
 			session,

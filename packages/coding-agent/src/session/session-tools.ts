@@ -68,6 +68,12 @@ export interface SessionToolsHost {
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
 	notifyCommandMetadataChanged(): void;
 	localProtocolOptions(): LocalProtocolOptions;
+	/**
+	 * Apply the session's configured `auth.startupOAuthAccount` pin for `provider`/`sessionId`
+	 * before a built-in custom tool resolves that provider's credential (e.g. `generate_image`'s
+	 * Codex-subscription fallback landing on a different provider than the foreground model).
+	 */
+	applyStartupOAuthAccountPin(provider: string, sessionId: string): void;
 	/** Publishes the current Codex Code Mode tool exposure snapshot for turn metadata; undefined clears it. */
 	setCodeModeNamespacesInfo?(info: unknown): void;
 }
@@ -307,6 +313,7 @@ export class SessionTools {
 		},
 		settings: this.#host.settings,
 		localProtocolOptions: this.#host.localProtocolOptions(),
+		applyStartupOAuthAccountPin: (provider, sessionId) => this.#host.applyStartupOAuthAccountPin(provider, sessionId),
 	});
 	#setActiveToolNames: SessionToolsOptions["setActiveToolNames"];
 	#ensureWriteRegistered: SessionToolsOptions["ensureWriteRegistered"];

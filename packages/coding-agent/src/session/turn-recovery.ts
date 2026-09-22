@@ -218,6 +218,15 @@ export interface TurnRecoveryHost {
 	resolveActiveEditMode(): EditMode;
 	/** Rebuilds the model-dependent base system prompt when a swap changed the edit mode or model policy. */
 	syncAfterModelChange(previousEditMode: EditMode): Promise<void>;
+	/**
+	 * Apply `auth.startupOAuthAccount` for `provider`/`sessionId` if nothing is
+	 * active yet. Call BEFORE any `getApiKey`/credential-resolution preflight
+	 * for a provider a fallback candidate is about to land on -- once ranking
+	 * resolves a credential and makes it active, the pin can no longer
+	 * override it (see `AgentSession#applyStartupOAuthAccountPin`'s
+	 * `#pendingStartupOAuthPins`).
+	 */
+	applyStartupOAuthAccountPin(provider: string, sessionId: string): void;
 	resetCurrentResponsesProviderSession(reason: string): void;
 	/**
 	 * Spend an eligible saved reset for the blocked provider pool.
@@ -955,6 +964,8 @@ export class TurnRecovery {
 					model: this.#host.model() ?? undefined,
 					metadataResolver: (provider: string) => this.#host.agent.metadataForProvider(provider),
 					signal: controller.signal,
+					applyStartupOAuthAccountPin: (provider, sessionId) =>
+						this.#host.applyStartupOAuthAccountPin(provider, sessionId),
 				});
 			} finally {
 				clearTimeout(timeout);
@@ -1776,6 +1787,10 @@ export class TurnRecovery {
 				if (signal.aborted || !modelsAreEqual(this.#host.model(), currentModel)) return false;
 				let apiKey: string | undefined;
 				try {
+					// See `applyRetryFallbackCandidate`: apply the target provider's
+					// startup default before this probe's own getApiKey call ranks and
+					// stickies a credential for it.
+					this.#host.applyStartupOAuthAccountPin(candidateModel.provider, this.#host.sessionId());
 					apiKey = await this.#host.modelRegistry.getApiKey(candidateModel, this.#host.sessionId(), { signal });
 				} catch {
 					if (signal.aborted || !modelsAreEqual(this.#host.model(), currentModel)) return false;
@@ -1848,6 +1863,11 @@ export class TurnRecovery {
 		if (!candidate) {
 			throw new Error(`Retry fallback model not found: ${selector.raw}`);
 		}
+		// Apply the target provider's startup default BEFORE resolving its API
+		// key: getApiKey ranks and stickies a credential the moment nothing is
+		// active yet for this session id, and once something is active the pin
+		// can no longer override it.
+		this.#host.applyStartupOAuthAccountPin(candidate.provider, this.#host.sessionId());
 		const apiKey =
 			options?.apiKey ??
 			(await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId(), { signal: options?.signal }));
@@ -1972,6 +1992,7 @@ export class TurnRecovery {
 				if (!this.#host.contextFitsModel(candidate, options?.preserveFailedTurn ? undefined : failedMessage)) {
 					continue;
 				}
+				this.#host.applyStartupOAuthAccountPin(candidate.provider, this.#host.sessionId());
 				const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
 				if (!apiKey) continue;
 				return this.applyRetryFallbackCandidate(role, selector, currentSelector, options);
@@ -2069,6 +2090,7 @@ export class TurnRecovery {
 		if (!model) return false;
 		const baseModel = this.#host.modelRegistry.find("fireworks", toFireworksBaseModelId(model.id));
 		if (!baseModel) return false;
+		this.#host.applyStartupOAuthAccountPin(baseModel.provider, this.#host.sessionId());
 		const apiKey = await this.#host.modelRegistry.getApiKey(baseModel, this.#host.sessionId());
 		if (!apiKey) return false;
 		const baseSelector = formatModelStringWithRouting(baseModel);
@@ -2129,6 +2151,7 @@ export class TurnRecovery {
 		const primaryModel =
 			resolvedPrimary.model ?? this.#host.modelRegistry.find(originalSelector.provider, originalSelector.id);
 		if (!primaryModel) return false;
+		this.#host.applyStartupOAuthAccountPin(primaryModel.provider, this.#host.sessionId());
 		const apiKey = await this.#host.modelRegistry.getApiKey(primaryModel, this.#host.sessionId());
 		if (!apiKey) return false;
 

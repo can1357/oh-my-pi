@@ -236,6 +236,8 @@ export class EventController {
 						registry: session.modelRegistry,
 						sessionId: session.sessionId,
 						metadataResolver: provider => session.agent.metadataForProvider(provider),
+						applyStartupOAuthAccountPin: (provider, sessionId) =>
+							session.applyStartupOAuthAccountPin(provider, sessionId),
 					})
 				: null,
 		);

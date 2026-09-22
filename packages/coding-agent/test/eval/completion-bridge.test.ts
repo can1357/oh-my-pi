@@ -466,18 +466,20 @@ describe("runEvalCompletion", () => {
 		vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
 		const session = makeSession();
 		session.getSessionId = () => "sess-1";
-		const seen: unknown[][] = [];
+		const callOrder: string[] = [];
+		session.applyStartupOAuthAccountPin = (provider, sessionId) => {
+			callOrder.push(`pin:${provider}:${sessionId}`);
+		};
 		const registry = session.modelRegistry;
 		if (!registry) throw new Error("test requires a model registry");
-		registry.getApiKey = async (model, sessionId, options) => {
-			seen.push([model, sessionId, options]);
+		registry.getApiKey = async (model, sessionId) => {
+			callOrder.push(`key:${model.provider}:${sessionId}`);
 			return "test-key";
 		};
 
 		await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session });
 
-		expect(seen.length).toBe(1);
-		expect(seen[0]?.[1]).toBe("sess-1");
+		expect(callOrder).toEqual(["pin:p:sess-1", "key:p:sess-1"]);
 	});
 
 	it("returns the completion text in plain mode", async () => {

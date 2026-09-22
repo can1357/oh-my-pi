@@ -169,6 +169,45 @@ describe("ChainJudge", () => {
 		);
 	});
 
+	it("reapplies the startup OAuth account pin before resolving a candidate's credential", async () => {
+		const settings = Settings.isolated({ modelRoles: { judge: "typesafe/jev-preview" } });
+		const registry = makeRegistry([JEV_PREVIEW], { typesafe: "ts-key" });
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async () =>
+				Response.json({
+					model: "jev-1.13.0",
+					answers: {
+						level: { type: "choice", choice: "high", probabilities: { low: 0.1, high: 0.9 }, confidence: 0.8 },
+					},
+					usage: { input_tokens: 8, output_tokens: 2 },
+				}),
+			),
+		);
+		const callOrder: string[] = [];
+		const originalGetApiKey = registry.getApiKey.bind(registry);
+		vi.spyOn(registry, "getApiKey").mockImplementation(async (...args) => {
+			callOrder.push("getApiKey");
+			return originalGetApiKey(...args);
+		});
+		const applyStartupOAuthAccountPin = vi.fn((_provider: string, _sessionId: string) => {
+			callOrder.push("pin");
+		});
+
+		const result = await new ChainJudge({
+			settings,
+			registry,
+			sessionId: "primary-session-1",
+			applyStartupOAuthAccountPin,
+		}).judge({
+			state: "redesign the scheduler",
+			questions: { level: TIER_QUESTION },
+		});
+
+		expect(result.answers.level.choice).toBe("high");
+		expect(applyStartupOAuthAccountPin).toHaveBeenCalledWith("typesafe", "primary-session-1");
+		expect(callOrder).toEqual(["pin", "getApiKey"]);
+	});
+
 	it("journals judgment usage on the active branch and stops once the session changes", async () => {
 		const settings = Settings.isolated({ modelRoles: { judge: "typesafe/jev-preview" } });
 		const registry = makeRegistry([JEV_PREVIEW], { typesafe: "ts-key" });

@@ -54,6 +54,16 @@ export interface JudgeDeps {
 	sessionId?: string;
 	metadataResolver?: (provider: string) => Record<string, unknown> | undefined;
 	onUsage?: (usage: JudgmentUsage) => void;
+	/**
+	 * Apply a candidate provider's configured `auth.startupOAuthAccount`
+	 * selector to `sessionId` before resolving that candidate's API key. A
+	 * `tiny`/`smol`/`default` judge candidate can resolve to a different
+	 * provider than the session's active model; without this, `getApiKey`
+	 * falls through to automatic ranking and can make a sibling account
+	 * (reserved as overflow-only for the active provider) sticky for this
+	 * session.
+	 */
+	applyStartupOAuthAccountPin?: (provider: string, sessionId: string) => void;
 }
 
 /** Session journal surface that records off-transcript model cost; journal-only managers omit it. */
@@ -197,6 +207,7 @@ export class ChainJudge implements Judge {
 	async #createJudge(candidate: RoleChainCandidate, signal: AbortSignal | undefined): Promise<Judge | undefined> {
 		const model = candidate.model;
 		if (model.api === "local-inference") return new TextJudge(new LocalTextBackend(model.id));
+		if (this.#deps.sessionId) this.#deps.applyStartupOAuthAccountPin?.(model.provider, this.#deps.sessionId);
 		if (!(await this.#deps.registry.getApiKey(model, this.#deps.sessionId, { signal }))) return undefined;
 		const apiKey = this.#deps.registry.resolver(model, this.#deps.sessionId);
 		if (isJudgmentApi(model.api)) {

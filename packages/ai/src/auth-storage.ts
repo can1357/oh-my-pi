@@ -1365,7 +1365,15 @@ export class AuthStorage {
 	#configOverrides: Map<string, string> = new Map();
 	/** Tracks next credential index per provider:type key for round-robin distribution (non-session use). */
 	#providerRoundRobinIndex: Map<string, number> = new Map();
-	/** Tracks the last used credential per provider for a session (used for rate-limit switching). */
+	/**
+	 * Tracks the last used credential per provider for a session (used for
+	 * rate-limit switching). `index` is a snapshot into `#getStoredCredentials`
+	 * at record time and can go stale the moment that array is reordered or
+	 * shrinks (a broker snapshot delivery, `/logout` of a sibling, credential
+	 * replacement) — `credentialId` is the durable key `#getSessionCredential`
+	 * re-resolves `index` against on every read so a stale in-memory entry
+	 * never silently repoints at whatever now occupies the old slot.
+	 */
 	#sessionLastCredential: Map<
 		string,
 		Map<string, { type: AuthCredential["type"]; index: number; credentialId?: number; lastUsedAtMs?: number }>
@@ -1430,7 +1438,52 @@ export class AuthStorage {
 	 */
 	#pendingDisabledEvents: CredentialDisabledEvent[] = [];
 	#generation = 1;
+	/**
+	 * Monotonic count of every completed credential-view refresh known to be
+	 * externally significant: each `#bumpGeneration` call (a real content
+	 * change, from `reload()` or an explicit mutation) AND each explicit
+	 * {@link notifyExternalRefresh} call (a confirmed-unchanged but genuinely
+	 * external refresh -- e.g. a broker-pushed snapshot delivery that turned
+	 * out identical to the cached view). Deliberately NOT bumped by a bare
+	 * `reload()` alone: `reload()` is also called from many unrelated
+	 * internal call sites (e.g. a plain status query) that must NOT count as
+	 * evidence the credential view had a genuine chance to catch up -- only
+	 * the caller that actually KNOWS an external event occurred can signal
+	 * it. `#generation`/`getGeneration()` cannot represent the
+	 * confirmed-unchanged case since nothing "changed"; a background broker
+	 * poll that finds a previously-missing account still absent otherwise
+	 * leaves `#generation` untouched forever if nothing else ever changes
+	 * again -- consumers that need to know "has the view had a genuine
+	 * chance to become authoritative" (e.g. `AgentSession`'s resumed-pin
+	 * grace window) must key off this counter instead, or they wait for a
+	 * generation bump that may never come.
+	 */
+	#refreshAttempts = 0;
+	/**
+	 * Subscribers notified on every completed credential-view refresh -- both
+	 * a real content change (mirroring `#generationListeners`) AND a
+	 * confirmed-unchanged `reload()`. Separate from `#generationListeners`
+	 * because that hook's OTHER subscribers (e.g. `auth-gateway/server.ts`
+	 * waking connections) intentionally fire only on a genuine change; a
+	 * consumer that needs to re-evaluate on every authoritative refresh
+	 * attempt (e.g. `AgentSession`'s startup-pin retry, which must not wait
+	 * forever for a generation bump a stable-but-confirmed-gone account will
+	 * never produce) subscribes here instead.
+	 */
+	#refreshListeners: Set<(refreshAttempts: number) => void> = new Set();
 	#generationListeners: Set<(generation: number) => void> = new Set();
+	/**
+	 * When set, `#setStoredCredentials` applies its update but skips its own
+	 * `#bumpGeneration` call. `reload()` sets this while looping over every
+	 * provider so a subscriber can never observe a partially-applied reload:
+	 * without it, the first provider's own generation bump fires listeners
+	 * synchronously while every LATER provider in the same loop still holds
+	 * its pre-reload data, and a subscriber re-reading `listOAuthAccounts`
+	 * for one of those not-yet-processed providers wrongly concludes a
+	 * resumed pin's account is absent when the very next iteration of this
+	 * same loop was about to restore it.
+	 */
+	#suppressGenerationBump = false;
 	#oauthRefreshInFlight: Map<number, Promise<AuthCredentialSnapshotEntry>> = new Map();
 	#oauthCredentialRefreshInFlight: Map<number, Promise<OAuthCredentials>> = new Map();
 	#closed = false;
@@ -1499,6 +1552,23 @@ export class AuthStorage {
 		return this.#generation;
 	}
 
+	/** See {@link AuthStorage.#refreshAttempts}. */
+	getRefreshAttempts(): number {
+		return this.#refreshAttempts;
+	}
+
+	/**
+	 * Identifies the physical credential store this instance reads from (e.g.
+	 * `local <dbPath>` or `broker <url>`). Autoincremented `credentialId`
+	 * values are only unique WITHIN one store -- a durable selector persisted
+	 * across process restarts (`auth.startupOAuthAccount`) must fold this into
+	 * its fingerprint, or a store change (broker toggled off, URL changed)
+	 * lets an unrelated credential silently take over the same numeric id.
+	 */
+	getSourceLabel(): string | undefined {
+		return this.#sourceLabel;
+	}
+
 	/**
 	 * Reload state after another process commits to the backing store, then
 	 * notify snapshot consumers even when only credential blocks changed.
@@ -1555,6 +1625,7 @@ export class AuthStorage {
 
 	#bumpGeneration(reason: string): void {
 		this.#generation += 1;
+		this.#recordRefreshAttempt();
 		this.#store.acknowledgeLocalChanges?.();
 		for (const listener of Array.from(this.#generationListeners)) {
 			try {
@@ -1564,6 +1635,45 @@ export class AuthStorage {
 					reason,
 					error: String(error),
 				});
+			}
+		}
+	}
+
+	onRefreshAttempted(listener: (refreshAttempts: number) => void): () => void {
+		this.#refreshListeners.add(listener);
+		return () => {
+			this.#refreshListeners.delete(listener);
+		};
+	}
+
+	offRefreshAttempted(listener: (refreshAttempts: number) => void): void {
+		this.#refreshListeners.delete(listener);
+	}
+
+	/**
+	 * Signal a genuine external credential-view event that reload()
+	 * confirmed left nothing changed -- e.g. `discover.ts`'s auth-broker
+	 * `onSnapshot` listener, fired on every broker-pushed snapshot delivery
+	 * whether or not its content differs from the cached view. Unlike a bare
+	 * `reload()` (called from many unrelated internal sites that must NOT
+	 * count as authoritative-refresh evidence), only call this where the
+	 * caller actually KNOWS an external delivery/poll occurred. Advances
+	 * {@link getRefreshAttempts} and notifies `onRefreshAttempted`
+	 * subscribers even when {@link getGeneration} does not change. Callers
+	 * should `await reload()` first so `listOAuthAccounts()` reflects the
+	 * delivery before subscribers re-evaluate it.
+	 */
+	notifyExternalRefresh(): void {
+		this.#recordRefreshAttempt();
+	}
+
+	#recordRefreshAttempt(): void {
+		this.#refreshAttempts += 1;
+		for (const listener of Array.from(this.#refreshListeners)) {
+			try {
+				listener(this.#refreshAttempts);
+			} catch (error) {
+				logger.debug("AuthStorage refresh listener failed", { error: String(error) });
 			}
 		}
 	}
@@ -1715,13 +1825,24 @@ export class AuthStorage {
 		}
 
 		const removedProviders = new Set(this.#data.keys());
-		for (const [provider, entries] of dedupedGrouped) {
-			this.#setStoredCredentials(provider, entries);
-			removedProviders.delete(provider);
+		// Suppress each provider's own generation bump while applying every
+		// update from this one `listAuthCredentials()` snapshot: without this,
+		// the FIRST changed provider can make startup-pin subscribers retry
+		// against a partially refreshed view.
+		this.#suppressGenerationBump = true;
+		let anyChanged = false;
+		try {
+			for (const [provider, entries] of dedupedGrouped) {
+				if (this.#setStoredCredentials(provider, entries)) anyChanged = true;
+				removedProviders.delete(provider);
+			}
+			for (const provider of removedProviders) {
+				if (this.#setStoredCredentials(provider, [])) anyChanged = true;
+			}
+		} finally {
+			this.#suppressGenerationBump = false;
 		}
-		for (const provider of removedProviders) {
-			this.#setStoredCredentials(provider, []);
-		}
+		if (anyChanged) this.#bumpGeneration("credentials");
 	}
 
 	/**
@@ -1739,9 +1860,40 @@ export class AuthStorage {
 	 * @param provider - Provider name (e.g., "anthropic", "openai")
 	 * @param credentials - Array of stored credentials to cache
 	 */
-	#setStoredCredentials(provider: string, credentials: StoredCredential[]): void {
+	#setStoredCredentials(provider: string, credentials: StoredCredential[]): boolean {
 		const current = this.#data.get(provider) ?? [];
-		if (storedCredentialArraysEqual(current, credentials)) return;
+		if (storedCredentialArraysEqual(current, credentials)) return false;
+		// Explicit mutations use `#setStoredCredentialsAndResetAssignments`,
+		// which purges index-keyed state before publishing the generation
+		// notification. `reload()` is the one path that funnels here WITHOUT
+		// that assignment reset, by design (a routine external-change poll
+		// should not also reset round-robin state on every no-op sync). An
+		// external process reordering or removing a credential (a broker
+		// `/logout`) still shifts every LATER credential's array index, and
+		// these maps key temporary rate-limit backoff by that index. Left
+		// stale, index N's block silently reapplies to whatever credential now
+		// sits at index N, either wrongly blocking an available account or
+		// wrongly clearing a block on one still rate-limited. Detect an
+		// id-ORDER change specifically (not just content, which the equality
+		// check above already handled) and purge just these index-keyed maps —
+		// session stickies use a separate, more precise durable-id
+		// reconciliation (see `#reconcileSessionCredentialIndex`) instead of a
+		// blanket clear, since losing a sticky account mid-session is far more
+		// disruptive than losing a temporary backoff window.
+		const idOrderChanged =
+			current.length !== credentials.length || current.some((entry, index) => entry.id !== credentials[index]?.id);
+		if (idOrderChanged) {
+			const scopedPrefix = `${provider}:`;
+			for (const key of this.#credentialBackoff.keys()) {
+				if (key === provider || key.startsWith(scopedPrefix)) this.#credentialBackoff.delete(key);
+			}
+			for (const key of this.#credentialBackoffProviderTimed.keys()) {
+				if (key === provider || key.startsWith(scopedPrefix)) this.#credentialBackoffProviderTimed.delete(key);
+			}
+			for (const key of this.#credentialBackoffProbeAfter.keys()) {
+				if (key === provider || key.startsWith(scopedPrefix)) this.#credentialBackoffProbeAfter.delete(key);
+			}
+		}
 		const trackedBearerFingerprints = this.#oauthBearerFingerprints.get(provider);
 		if (trackedBearerFingerprints) {
 			const activeOAuthIds = new Set(
@@ -1757,7 +1909,8 @@ export class AuthStorage {
 		} else {
 			this.#data.set(provider, credentials);
 		}
-		this.#bumpGeneration("credentials");
+		if (!this.#suppressGenerationBump) this.#bumpGeneration("credentials");
+		return true;
 	}
 
 	#recordOAuthBearerCredentialId(provider: string, bearer: string, credentialId: number | undefined): void {
@@ -2132,6 +2285,28 @@ export class AuthStorage {
 	}
 
 	/**
+	 * Re-derive a session-sticky's current array index from its durable
+	 * credential id against the live stored-credential array. That array can
+	 * be reordered or shrink between when a sticky was recorded and when it's
+	 * read (a broker snapshot delivery, `/logout` of a sibling, credential
+	 * replacement) — trusting a stale `index` on its own silently repoints
+	 * the sticky at whatever credential now occupies that slot instead of the
+	 * one that was actually pinned. Returns `undefined` when the credential no
+	 * longer exists (of the expected type), meaning the sticky itself is
+	 * stale and must not be trusted.
+	 */
+	#reconcileSessionCredentialIndex(
+		provider: string,
+		type: AuthCredential["type"],
+		credentialId: number,
+	): number | undefined {
+		const stored = this.#getStoredCredentials(provider);
+		const actualIndex = stored.findIndex(entry => entry.id === credentialId);
+		if (actualIndex === -1 || stored[actualIndex]?.credential.type !== type) return undefined;
+		return actualIndex;
+	}
+
+	/**
 	 * Records which credential was used for a session (for rate-limit switching).
 	 * `lastUsedAtMs` backdates the sticky (session-file pin restores on resume);
 	 * it defaults to now for live selections.
@@ -2150,46 +2325,41 @@ export class AuthStorage {
 		sessionMap.set(sessionId, { type, index, credentialId, lastUsedAtMs: nowMs });
 		this.#sessionLastCredential.set(provider, sessionMap);
 
+		if (credentialId === undefined) return;
 		try {
-			if (credentialId !== undefined) {
-				const cacheKey = `${SESSION_STICKY_CACHE_PREFIX}${provider}:${sessionId}`;
-				const cacheValue = JSON.stringify({
-					type,
-					index,
-					credentialId,
-					lastUsedAtMs: nowMs,
-				});
-				// Expires in 30 days
-				const expiresAtSec = Math.floor(nowMs / 1000) + 30 * 24 * 60 * 60;
-				this.#store.setCache(cacheKey, cacheValue, expiresAtSec);
-			}
+			const cacheKey = `${SESSION_STICKY_CACHE_PREFIX}${provider}:${sessionId}`;
+			const cacheValue = JSON.stringify({ type, index, credentialId, lastUsedAtMs: nowMs });
+			// Expires in 30 days
+			const expiresAtSec = Math.floor(nowMs / 1000) + 30 * 24 * 60 * 60;
+			this.#store.setCache(cacheKey, cacheValue, expiresAtSec);
 		} catch (err) {
 			logger.debug("Failed to write session sticky credential to persistent store cache", { err });
 		}
 	}
 
-	/** Retrieves the last credential used by a session. */
+	/**
+	 * Retrieves the last credential used by a session. Both the in-memory fast
+	 * path and the persisted-cache fallback reconcile `index` against the
+	 * sticky's durable `credentialId` on every call — never trust a
+	 * previously recorded `index` as-is, see
+	 * {@link AuthStorage.#reconcileSessionCredentialIndex}.
+	 */
 	#getSessionCredential(
 		provider: string,
 		sessionId: string | undefined,
 	): { type: AuthCredential["type"]; index: number; credentialId?: number; lastUsedAtMs?: number } | undefined {
 		if (!sessionId) return undefined;
 		let sessionMap = this.#sessionLastCredential.get(provider);
-		const live = sessionMap?.get(sessionId);
-		if (live) {
-			// Another process can add or drop rows mid-session and the pool is an
-			// index-ordered snapshot, so re-resolve the pin through its durable row
-			// id: a compacted array must not point the session at a different
-			// account, and a deleted account must not hand its slot to a sibling.
-			if (live.credentialId === undefined) return live;
-			const stored = this.#getStoredCredentials(provider);
-			const actualIndex = stored.findIndex(entry => entry.id === live.credentialId);
-			if (actualIndex === -1 || stored[actualIndex]?.credential.type !== live.type) {
+		const cached = sessionMap?.get(sessionId);
+		if (cached) {
+			if (cached.credentialId === undefined) return cached;
+			const actualIndex = this.#reconcileSessionCredentialIndex(provider, cached.type, cached.credentialId);
+			if (actualIndex === undefined) {
 				sessionMap?.delete(sessionId);
 				return undefined;
 			}
-			live.index = actualIndex;
-			return live;
+			if (actualIndex !== cached.index) sessionMap?.set(sessionId, { ...cached, index: actualIndex });
+			return { type: cached.type, index: actualIndex, lastUsedAtMs: cached.lastUsedAtMs };
 		}
 		try {
 			const cacheKey = `${SESSION_STICKY_CACHE_PREFIX}${provider}:${sessionId}`;
@@ -2202,19 +2372,17 @@ export class AuthStorage {
 					lastUsedAtMs?: number;
 				};
 
-				if (val.credentialId !== undefined) {
-					const stored = this.#getStoredCredentials(provider);
-					const actualIndex = stored.findIndex(entry => entry.id === val.credentialId);
-					if (actualIndex === -1 || stored[actualIndex]?.credential.type !== val.type) {
-						this.#store.setCache(cacheKey, "", 0);
-						return undefined;
-					}
-					val.index = actualIndex;
-				} else {
+				if (val.credentialId === undefined) {
 					// Fallback: drop unsafe index-only cache rows to prevent wrong-account routing
 					this.#store.setCache(cacheKey, "", 0);
 					return undefined;
 				}
+				const actualIndex = this.#reconcileSessionCredentialIndex(provider, val.type, val.credentialId);
+				if (actualIndex === undefined) {
+					this.#store.setCache(cacheKey, "", 0);
+					return undefined;
+				}
+				val.index = actualIndex;
 
 				if (!sessionMap) {
 					sessionMap = new Map();
@@ -2484,6 +2652,27 @@ export class AuthStorage {
 		}
 	}
 
+	/**
+	 * Replace a provider's cached credentials and invalidate every assignment
+	 * derived from their old order before notifying generation subscribers.
+	 * A generation listener may immediately pin a newly-added account; emitting
+	 * from `#setStoredCredentials` first would let the following reset erase
+	 * that fresh pin.
+	 */
+	#setStoredCredentialsAndResetAssignments(provider: string, credentials: StoredCredential[]): boolean {
+		const wasSuppressed = this.#suppressGenerationBump;
+		let changed = false;
+		this.#suppressGenerationBump = true;
+		try {
+			changed = this.#setStoredCredentials(provider, credentials);
+			this.#resetProviderAssignments(provider);
+		} finally {
+			this.#suppressGenerationBump = wasSuppressed;
+		}
+		if (changed && !wasSuppressed) this.#bumpGeneration("credentials");
+		return changed;
+	}
+
 	/** Updates credential at index in-place (used for OAuth token refresh) */
 	#replaceCredentialAt(provider: string, index: number, credential: AuthCredential): void {
 		const entries = this.#getStoredCredentials(provider);
@@ -2516,8 +2705,7 @@ export class AuthStorage {
 		const disabled = this.#store.tryDisableAuthCredentialIfMatches(target.id, serialized.data, disabledCause);
 		if (!disabled) return false;
 		const updated = entries.filter((_value, idx) => idx !== index);
-		this.#setStoredCredentials(provider, updated);
-		this.#resetProviderAssignments(provider);
+		this.#setStoredCredentialsAndResetAssignments(provider, updated);
 		this.#emitCredentialDisabled({ provider, disabledCause });
 		return true;
 	}
@@ -2628,14 +2816,13 @@ export class AuthStorage {
 		const stored = this.#store.replaceAuthCredentialsRemote
 			? await this.#store.replaceAuthCredentialsRemote(provider, deduped)
 			: this.#store.replaceAuthCredentialsForProvider(provider, deduped);
-		this.#setStoredCredentials(
+		this.#setStoredCredentialsAndResetAssignments(
 			provider,
 			stored.map(record => ({
 				id: record.id,
 				credential: record.credential,
 			})),
 		);
-		this.#resetProviderAssignments(provider);
 	}
 
 	/**
@@ -2816,7 +3003,7 @@ export class AuthStorage {
 							leasedCredentialId !== undefined ? { owner, nowMs: Date.now() } : undefined,
 						);
 						if (disabled) {
-							this.#setStoredCredentials(
+							this.#setStoredCredentialsAndResetAssignments(
 								provider,
 								rows
 									.filter(entry => entry.id !== row.id)
@@ -2825,7 +3012,6 @@ export class AuthStorage {
 										credential: entry.credential,
 									})),
 							);
-							this.#resetProviderAssignments(provider);
 							this.#emitCredentialDisabled({ provider, disabledCause });
 							return { credential: undefined, refreshed: false, removed: true };
 						}
@@ -2909,11 +3095,10 @@ export class AuthStorage {
 		const stored = this.#store.upsertAuthCredentialRemote
 			? await this.#store.upsertAuthCredentialRemote(provider, credential)
 			: this.#store.upsertAuthCredentialForProvider(provider, credential);
-		this.#setStoredCredentials(
+		this.#setStoredCredentialsAndResetAssignments(
 			provider,
 			stored.map(entry => ({ id: entry.id, credential: entry.credential })),
 		);
-		this.#resetProviderAssignments(provider);
 	}
 
 	/**
@@ -2925,8 +3110,7 @@ export class AuthStorage {
 		} else {
 			this.#store.deleteAuthCredentialsForProvider(provider, "deleted by user");
 		}
-		this.#setStoredCredentials(provider, []);
-		this.#resetProviderAssignments(provider);
+		this.#setStoredCredentialsAndResetAssignments(provider, []);
 	}
 
 	/**
@@ -2943,11 +3127,10 @@ export class AuthStorage {
 		} else {
 			this.#store.deleteAuthCredential(credentialId, "deleted by user");
 		}
-		this.#setStoredCredentials(
+		this.#setStoredCredentialsAndResetAssignments(
 			provider,
 			entries.filter((_entry, entryIndex) => entryIndex !== index),
 		);
-		this.#resetProviderAssignments(provider);
 		return true;
 	}
 
@@ -3278,11 +3461,10 @@ export class AuthStorage {
 			const stored = this.#store.upsertAuthCredentialRemote
 				? await this.#store.upsertAuthCredentialRemote(provider, newCredential)
 				: this.#store.upsertAuthCredentialForProvider(provider, newCredential);
-			this.#setStoredCredentials(
+			this.#setStoredCredentialsAndResetAssignments(
 				provider,
 				stored.map(entry => ({ id: entry.id, credential: entry.credential })),
 			);
-			this.#resetProviderAssignments(provider);
 			return { type: "api_key" };
 		}
 		// Stamp the interactive-login instant: providers with an absolute grant
@@ -7466,8 +7648,7 @@ export class AuthStorage {
 			if (index === -1) continue;
 			this.#store.deleteAuthCredential(id, disabledCause);
 			const next = entries.filter((_value, idx) => idx !== index);
-			this.#setStoredCredentials(provider, next);
-			this.#resetProviderAssignments(provider);
+			this.#setStoredCredentialsAndResetAssignments(provider, next);
 			this.#emitCredentialDisabled({ provider, disabledCause });
 			return true;
 		}
@@ -7485,11 +7666,10 @@ export class AuthStorage {
 	 */
 	upsertCredential(provider: string, credential: AuthCredential): AuthCredentialSnapshotEntry[] {
 		const stored = this.#store.upsertAuthCredentialForProvider(provider, credential);
-		this.#setStoredCredentials(
+		this.#setStoredCredentialsAndResetAssignments(
 			provider,
 			stored.map(entry => ({ id: entry.id, credential: entry.credential })),
 		);
-		this.#resetProviderAssignments(provider);
 		return stored.map(entry => {
 			const persisted = entry.credential;
 			const redacted: SnapshotCredential =
