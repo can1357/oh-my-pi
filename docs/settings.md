@@ -856,8 +856,9 @@ The `cost` segment shows recorded session costs. For an active provider/model wi
 | `interruptMode`        | enum    | `immediate`     | `immediate`, `wait`.                                                                                    |
 | `doubleEscapeAction`   | enum    | `rewind`          | `rewind`, `tree`, `none`: open the rewind selector, open the session tree, or do nothing. |
 | `autoResume`           | boolean | `false`         | Auto-resume the most recent session in the cwd.                                                         |
-| `plan.enabled`         | boolean | `true`          | Enable plan mode.                                                                                       |
-| `plan.defaultOnStartup` | boolean | `false`         | Start each fresh interactive session in plan mode when plan mode is enabled. Print/JSON (`--print`) mode ignores this and prints a note; use `--plan-yolo` for a headless plan flow. |
+| `plan.enabled`                       | boolean | `true`          | Enable plan mode.                                                                                       |
+| `plan.defaultOnStartup`              | boolean | `false`         | Start each fresh interactive session in plan mode when plan mode is enabled. Print/JSON (`--print`) mode ignores this and prints a note; use `--plan-yolo` for a headless plan flow. |
+| `plan.executeAfterCompactionFailure` | boolean | `true`          | Dispatch the approved plan on the plan model when compaction fails. Disable to halt because the intact context may exceed the configured execution model's window. |
 | `ask.timeout`          | number  | `0`             | Auto-select the recommended ask option after this many seconds; `0` disables automatic selection. |
 | `ask.notify`           | enum    | `on`            | `on`, `off`.                                                                                            |
 | `input.bareExitOnEmptySession` | boolean | `true` | Submitting exactly `exit`, `quit`, or `q` (case-insensitive) before the first message quits. |
