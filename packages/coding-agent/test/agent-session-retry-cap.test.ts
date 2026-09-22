@@ -250,7 +250,9 @@ describe("AgentSession retry delay cap", () => {
 		expect(scheduled).toBeGreaterThanOrEqual(16_000);
 		expect(scheduled).toBeLessThanOrEqual(19_500);
 		expect(scheduled).toBeLessThan(60_000);
-		expect(waitSpy.mock.calls.some(call => call[0] === scheduled)).toBe(true);
+		// sleepLong arms the timer from a monotonic clock, so the waited value
+		// can be a fraction of a millisecond under the announced delay.
+		expect(waitSpy.mock.calls.some(call => Math.abs(Number(call[0]) - scheduled) < 1)).toBe(true);
 		const last = lastAssistant(session);
 		expect(last.stopReason).toBe("stop");
 		expect(last.content).toContainEqual({ type: "text", text: "recovered after capped wait" });
