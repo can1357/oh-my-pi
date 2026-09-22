@@ -156,6 +156,19 @@ describe("routeTurn", () => {
 		expect(d.reason).toBe("high-complexity");
 	});
 
+	it("treats an explicit null complexity score as HARD (fail expensive)", async () => {
+		const d = await routeTurn(
+			mockJudge({
+				tier: { type: "choice", choice: "cheap", probabilities: {}, confidence: 0.95 },
+				complexity: { type: "score", score: null, probabilities: {}, confidence: 0.9 },
+			}),
+			"x",
+			TIERS,
+		);
+		expect(d.tier).toBe("frontier");
+		expect(d.reason).toBe("high-complexity");
+	});
+
 	it("degrades unknown tier ids to top", async () => {
 		const d = await routeTurn(
 			mockJudge({
