@@ -1,9 +1,9 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { setKeybindings } from "@oh-my-pi/pi-tui";
-import { KeybindingsManager } from "../../../src/config/keybindings";
+import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { PanelConfirmationComponent } from "../../../src/modes/components/panel-confirmation";
-import { getThemeByName, setThemeInstance } from "../../../src/modes/theme/theme";
+import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 
 const DOWN = "\x1b[B";
 const ENTER = "\r";

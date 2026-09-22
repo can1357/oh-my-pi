@@ -1,12 +1,12 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { setKeybindings, type TUI } from "@oh-my-pi/pi-tui";
-import { KeybindingsManager } from "../../../src/config/keybindings";
+import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import {
 	type PanelPersonaEditorCallbacks,
 	PanelPersonaEditorComponent,
 } from "../../../src/modes/components/panel-persona-editor";
-import { getThemeByName, setThemeInstance } from "../../../src/modes/theme/theme";
+import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 
 const DOWN = "\x1b[B";
 const UP = "\x1b[A";

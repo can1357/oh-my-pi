@@ -1,9 +1,9 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { setKeybindings } from "@oh-my-pi/pi-tui";
-import { KeybindingsManager } from "../../../src/config/keybindings";
+import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { PanelRolePickerComponent } from "../../../src/modes/components/panel-role-picker";
-import { getThemeByName, setThemeInstance } from "../../../src/modes/theme/theme";
+import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import type { PanelRole } from "../../../src/panel/types";
 
 const DOWN = "\x1b[B";
