@@ -6,6 +6,8 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { withOfficialAnthropicEndpoint } from "./helpers";
 
 const CACHE_REFRESH_DELAY_MS = 5 * 60_000 - 15_000;
+const CACHE_REFRESH_MAX_IDLE_MS = 45 * 60_000;
+const CACHE_REFRESH_LIMIT = Math.ceil(CACHE_REFRESH_MAX_IDLE_MS / CACHE_REFRESH_DELAY_MS);
 const CACHE_TOKENS = 1_200;
 
 const model: Model<"anthropic-messages"> = buildModel({
@@ -225,20 +227,23 @@ afterEach(() => {
 withOfficialAnthropicEndpoint();
 
 describe("Anthropic prompt-cache refresh", () => {
-	it("replays max_tokens=0 once per interval and stops after three refreshes", async () => {
+	it("replays max_tokens=0 once per interval until the idle budget is spent", async () => {
 		vi.useFakeTimers();
 		const capture: FetchCapture = { bodies: [], thinkingRefreshAborted: false };
-		const fetch = createFetch(["ordinary-write", "refresh-read", "refresh-read", "refresh-read"], capture);
+		const fetch = createFetch(
+			["ordinary-write", ...Array<ResponseMode>(CACHE_REFRESH_LIMIT).fill("refresh-read")],
+			capture,
+		);
 		const states = createProviderSessionState();
 
 		await finishRequest(fetch, states);
-		for (let requestCount = 2; requestCount <= 4; requestCount++) {
+		for (let requestCount = 2; requestCount <= CACHE_REFRESH_LIMIT + 1; requestCount++) {
 			await advanceToRefresh(capture, requestCount);
 		}
 		vi.advanceTimersByTime(CACHE_REFRESH_DELAY_MS * 2);
 		await Promise.resolve();
 
-		expect(capture.bodies).toHaveLength(4);
+		expect(capture.bodies).toHaveLength(CACHE_REFRESH_LIMIT + 1);
 		for (const refresh of capture.bodies.slice(1)) {
 			expect(refresh.max_tokens).toBe(0);
 			expect(refresh.stream).toBe(false);

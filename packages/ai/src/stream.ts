@@ -1199,7 +1199,24 @@ function emitBufferedEvents(stream: AssistantMessageEventStream, events: Assista
 
 const ANTHROPIC_CACHE_TTL_MS = 5 * 60_000;
 const ANTHROPIC_CACHE_REFRESH_LEAD_MS = 15_000;
-const ANTHROPIC_CACHE_REFRESH_LIMIT = 3;
+/**
+ * How long a session may sit idle and still find its prefix cached.
+ *
+ * A refresh costs one cache READ of the prefix; letting the cache lapse costs a
+ * full cache WRITE of it, and the write side is ~50x the read side per token
+ * (Anthropic prices a 5m write at 1.25x base input and a read at 0.1x), so the
+ * break-even is far past where a turn-count cap lands. Measured on a real
+ * large-context agent session: calls arriving 5-15min after the previous one
+ * averaged 556K write tokens against 30K read — a full prefix re-write — while
+ * calls under a minute apart averaged 11K write against 426K read.
+ *
+ * Capped rather than unbounded because past roughly an hour the operator has
+ * usually left, and an abandoned session should stop paying to stay warm.
+ */
+const ANTHROPIC_CACHE_REFRESH_MAX_IDLE_MS = 45 * 60_000;
+const ANTHROPIC_CACHE_REFRESH_LIMIT = Math.ceil(
+	ANTHROPIC_CACHE_REFRESH_MAX_IDLE_MS / (ANTHROPIC_CACHE_TTL_MS - ANTHROPIC_CACHE_REFRESH_LEAD_MS),
+);
 const ANTHROPIC_CACHE_REFRESH_STATE_KEY = "anthropic-cache-refresh";
 
 interface AnthropicCacheRefreshPlan {
