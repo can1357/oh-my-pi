@@ -175,6 +175,7 @@ import goalModeContextPrompt from "../prompts/goals/goal-mode-context.md" with {
 import goalTodoContextPrompt from "../prompts/goals/goal-todo-context.md" with { type: "text" };
 import autoContinuePrompt from "../prompts/system/auto-continue.md" with { type: "text" };
 import checkpointActiveNoticeTemplate from "../prompts/system/checkpoint-active-notice.md" with { type: "text" };
+import imageAttachmentPrompt from "../prompts/system/image-attachment.md" with { type: "text" };
 import interruptedThinkingTemplate from "../prompts/system/interrupted-thinking.md" with { type: "text" };
 import planModeActivePrompt from "../prompts/system/plan-mode-active.md" with { type: "text" };
 import planModeReferencePrompt from "../prompts/system/plan-mode-reference.md" with { type: "text" };
@@ -239,7 +240,7 @@ import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { extractFileMentions, generateFileMentionMessages } from "../utils/file-mentions";
 import { normalizeModelContextImages } from "../utils/image-loading";
 import { TokenRateMeter } from "../utils/token-rate";
-import { videoPreviewSource } from "@oh-my-pi/pi-tui/prompt/video";
+import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { resumeCommand } from "../utils/resume-command";
 import { generateSessionTitle } from "../utils/title-generator";
 import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
@@ -1735,7 +1736,6 @@ export class AgentSession {
 			model: () => this.model,
 			isDisposed: () => this.#isDisposed,
 			promptGeneration: () => this.#promptGeneration,
-			localProtocolOptions: () => this.#localProtocolOptions(),
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
 			schedulePostPromptTask: task => this.#schedulePostPromptTask(task),
 			discardAssistantTurn: message => this.#recovery.discardAssistantTurn(message),
@@ -1744,6 +1744,11 @@ export class AgentSession {
 		this.#loopGuards = new LoopGuards(streamGuardsHost);
 		this.#agentId = config.agentId;
 		this.#agentKind = config.agentKind ?? "main";
+		// A subagent's streamed text reaches no output sink until the run settles
+		// (the parent sees only the yield), so a failed turn's partial prose is
+		// replay-safe and transient provider errors after it stay retryable —
+		// same buffering contract print mode declares via setTextOutputCommitted.
+		this.#textOutputCommitted = this.#agentKind === "main";
 		this.#scoutAllowedBySpawnPolicy = config.scoutAllowedBySpawnPolicy ?? true;
 		this.#providerSessionId = config.providerSessionId;
 		this.#inheritedProviderPromptCacheKey =
@@ -1764,13 +1769,6 @@ export class AgentSession {
 			});
 		}
 		this.agent.setAssistantMessageEventInterceptor((message, assistantMessageEvent) => {
-			const event: AgentEvent = {
-				type: "message_update",
-				message,
-				assistantMessageEvent,
-			};
-			this.#streamingEditGuard.preCache(event);
-			this.#streamingEditGuard.maybeAbort(event);
 			this.#loopGuards.onAssistantEvent(message, assistantMessageEvent);
 		});
 		// Tool-result hook owns synchronous post-tool actions that must affect the current loop.
@@ -3271,22 +3269,6 @@ export class AgentSession {
 		if (event.type === "tool_stream_update") this.#streamingEditGuard.maybeAbort(event);
 
 		if (await this.#ttsr.checkMessageUpdate(event)) return;
-
-		if (
-			event.type === "message_update" &&
-			(event.assistantMessageEvent.type === "toolcall_start" ||
-				event.assistantMessageEvent.type === "toolcall_delta" ||
-				event.assistantMessageEvent.type === "toolcall_end")
-		) {
-			this.#streamingEditGuard.preCache(event);
-		}
-
-		if (
-			event.type === "message_update" &&
-			(event.assistantMessageEvent.type === "toolcall_end" || event.assistantMessageEvent.type === "toolcall_delta")
-		) {
-			this.#streamingEditGuard.maybeAbort(event);
-		}
 
 		// Handle session persistence
 		if (event.type === "message_end") {
@@ -6197,21 +6179,28 @@ export class AgentSession {
 	}
 
 	/**
-	 * Emit source paths for video contact-sheet images as hidden user context.
-	 * The visible message deliberately contains only its `[Video #N]` marker and
-	 * preview image, while the agent gets the path required for `read` frame
-	 * subselectors without exposing the user's filesystem layout in the TUI.
+	 * Emit source paths for file-backed attachments (path-pasted/drag-and-dropped
+	 * images, video contact-sheet previews) as hidden user context. The visible
+	 * message deliberately contains only its `[Image #N]`/`[Video #N]` marker and
+	 * the attachment itself, while the agent gets the path required to act on the
+	 * original file (e.g. `read`, or video frame subselectors) without exposing
+	 * the user's filesystem layout in the TUI. Clipboard bitmaps have no backing
+	 * file and are skipped — no path is invented for them.
 	 */
-	#createVideoAttachmentNotices(images: readonly ImageContent[] | undefined, timestamp: number): CustomMessage[] {
+	#createAttachmentSourceNotices(images: readonly ImageContent[] | undefined, timestamp: number): CustomMessage[] {
 		if (!images?.length) return [];
 		const notices: CustomMessage[] = [];
 		for (let index = 0; index < images.length; index++) {
-			const sourcePath = videoPreviewSource(images[index]!);
-			if (!sourcePath) continue;
+			const source = imageAttachmentSource(images[index]!);
+			if (!source) continue;
+			const isVideo = source.kind === "video";
 			notices.push({
 				role: "custom",
-				customType: "video-attachment",
-				content: prompt.render(videoAttachmentPrompt, { index: String(index + 1), path: sourcePath }),
+				customType: isVideo ? "video-attachment" : "image-attachment",
+				content: prompt.render(isVideo ? videoAttachmentPrompt : imageAttachmentPrompt, {
+					index: String(index + 1),
+					path: source.path,
+				}),
 				display: false,
 				attribution: "user",
 				timestamp,
@@ -6405,7 +6394,7 @@ export class AgentSession {
 			!options?.synthetic && !hasPendingUserDirective ? this.#todo.createEagerTodoPrelude(expandedText) : undefined;
 		const eagerTaskPrelude =
 			!options?.synthetic && !hasPendingUserDirective ? this.#todo.createEagerTaskPrelude(expandedText) : undefined;
-		const videoAttachmentNotices = this.#createVideoAttachmentNotices(options?.images, submittedAt);
+		const attachmentSourceNotices = this.#createAttachmentSourceNotices(options?.images, submittedAt);
 		const normalizedImages = await this.#normalizeImagesForModel(options?.images);
 
 		const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
@@ -6485,12 +6474,12 @@ export class AgentSession {
 				prependMessages:
 					preludeMessages.length > 0 ||
 					keywordNotices.length > 0 ||
-					videoAttachmentNotices.length > 0 ||
+					attachmentSourceNotices.length > 0 ||
 					imageDescriptionNotice
 						? [
 								...preludeMessages,
 								...keywordNotices,
-								...videoAttachmentNotices,
+								...attachmentSourceNotices,
 								...(imageDescriptionNotice ? [imageDescriptionNotice] : []),
 							]
 						: undefined,
@@ -7259,7 +7248,7 @@ export class AgentSession {
 		// The pre-dispatch re-check in prompt() arrives with normalization and the
 		// vision description already done — reuse them instead of paying a second
 		// vision-model request for the same attachment.
-		const videoAttachmentNotices = this.#createVideoAttachmentNotices(images, timestamp ?? Date.now());
+		const attachmentSourceNotices = this.#createAttachmentSourceNotices(images, timestamp ?? Date.now());
 		const normalizedImages = preprocessed ? preprocessed.images : await this.#normalizeImagesForModel(images);
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
 		if (normalizedImages?.length) {
@@ -7287,7 +7276,7 @@ export class AgentSession {
 		}
 		this.#allowQueuedMessageDrainRetry();
 		if (mode === "followUp") {
-			for (const notice of videoAttachmentNotices) this.agent.followUp(notice);
+			for (const notice of attachmentSourceNotices) this.agent.followUp(notice);
 			if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
 			this.agent.followUp({
 				role: "user",
@@ -7296,7 +7285,7 @@ export class AgentSession {
 				timestamp: timestamp ?? Date.now(),
 			});
 		} else {
-			for (const notice of videoAttachmentNotices) this.agent.steer(notice);
+			for (const notice of attachmentSourceNotices) this.agent.steer(notice);
 			if (imageDescriptionNotice) this.agent.steer(imageDescriptionNotice);
 			this.agent.steer({
 				role: "user",
@@ -7890,6 +7879,11 @@ export class AgentSession {
 	/** Skills loaded by SDK (empty if --no-skills or skills: [] was passed) */
 	get skills(): readonly Skill[] {
 		return this.#tools.skills;
+	}
+
+	/** Frozen skill-URI hint visibility snapshot (see {@link SessionTools.skillHintVisible}). */
+	getSkillHintVisible(): boolean {
+		return this.#tools.skillHintVisible;
 	}
 
 	/** Skill loading warnings captured by SDK */

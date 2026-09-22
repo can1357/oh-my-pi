@@ -61,6 +61,7 @@ import {
 	loadedNetworkConditions,
 } from "./launch";
 import { extractReadableFromHtml, type ReadableExtractOptions, type ReadableFormat } from "./readable";
+import { assertTabPressArgs } from "./tab-arguments";
 import {
 	type BrowserCookie,
 	type ClearCookiesOptions,
@@ -2020,6 +2021,7 @@ export class WorkerCore {
 				),
 			press: (key, opts) =>
 				op(`tab.press(${JSON.stringify(key)})`, actionOpMs, async sig => {
+					assertTabPressArgs(key, opts);
 					const selector = opts?.selector;
 					if (selector) {
 						if (parseAriaRefSelector(selector) !== null) {

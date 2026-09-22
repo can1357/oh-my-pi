@@ -77,6 +77,7 @@ import {
 	ensureLlamaCppV1BaseUrl,
 	getImplicitOllamaBaseUrl,
 	getOllamaContextLengthOverride,
+	isDiscoveryAuthRejection,
 	normalizeBareDiscoveryBaseUrl,
 	normalizeLiteLLMDiscoveryBaseUrl,
 	normalizeLlamaCppBaseUrl,
@@ -1801,6 +1802,7 @@ export class ModelRegistry {
 
 		const providerId = providerConfig.provider;
 		let discoveryError: string | undefined;
+		let discoveryAuthRejected = false;
 		const fetchDynamicModels = async (): Promise<readonly ModelSpec<Api>[] | null> => {
 			try {
 				const resolvedHeaders = await resolveConfigHeaders(providerConfig.headers);
@@ -1813,6 +1815,11 @@ export class ModelRegistry {
 				return models.map(toModelSpec);
 			} catch (error) {
 				discoveryError = error instanceof Error ? error.message : String(error);
+				// A 401/403 means the endpoint is reachable but rejected the
+				// request's credentials (or the keyless assumption). Surface it
+				// as an auth failure instead of a generic outage so the hub can
+				// tell the user to sign in (issue #12281).
+				discoveryAuthRejected = isDiscoveryAuthRejection(error);
 				return null;
 			}
 		};
@@ -1837,7 +1844,9 @@ export class ModelRegistry {
 		const status = discoveryError
 			? result.models.length > 0
 				? "cached"
-				: "unavailable"
+				: discoveryAuthRejected
+					? "unauthenticated"
+					: "unavailable"
 			: effectiveStrategy === "offline"
 				? cached
 					? "cached"
@@ -2189,9 +2198,13 @@ export class ModelRegistry {
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			const previous = this.#providerDiscoveryStates.get(options.providerId);
+			// Same auth-rejection surfacing as the configured-discovery path: a
+			// 401/403 with nothing to serve is a credential problem, not an
+			// outage (issue #12281).
+			const authRejected = (previous?.models.length ?? 0) === 0 && isDiscoveryAuthRejection(error);
 			this.#providerDiscoveryStates.set(options.providerId, {
 				provider: options.providerId,
-				status: "unavailable",
+				status: authRejected ? "unauthenticated" : "unavailable",
 				optional: previous?.optional ?? false,
 				stale: true,
 				...(previous?.fetchedAt !== undefined ? { fetchedAt: previous.fetchedAt } : {}),
@@ -2506,9 +2519,17 @@ export class ModelRegistry {
 		return provider => {
 			let available = byProvider.get(provider);
 			if (available === undefined) {
+				// A provider whose only credential is a keyless-fallback marker
+				// (empty paste at an optional-key login, e.g. `vllm-local`) is
+				// configured-but-keyless: `hasAuth` no longer counts it, but its
+				// models stay usable exactly like an `auth: none` endpoint's
+				// (issue #12281). Implicit local providers are already covered
+				// by `#keylessProviders`.
 				available =
 					!disabledProviders.has(provider) &&
-					(this.#keylessProviders.has(provider) || this.authStorage.hasAuth(provider));
+					(this.#keylessProviders.has(provider) ||
+						this.authStorage.hasAuth(provider) ||
+						this.authStorage.hasKeylessPlaceholder(provider));
 				byProvider.set(provider, available);
 			}
 			return available;

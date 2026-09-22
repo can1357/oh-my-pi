@@ -214,6 +214,13 @@ export interface ToolSession {
 	workspaceTree?: WorkspaceTree;
 	/** Pre-loaded skills */
 	skills?: readonly Skill[];
+	/**
+	 * Frozen skill-URI hint visibility: snapshot taken at the last system-prompt
+	 * rebuild. Tools with a provider-side `skill://` hint read this instead of
+	 * the live `skillful` setting so the tool prefix stays byte-stable between
+	 * rebuilds (mid-session `/skillful` toggles ride the prompt, not the prefix).
+	 */
+	skillHintVisible?: boolean;
 	/** Rediscover live session skills after a tool mutates their backing files. */
 	refreshSkills?: () => Promise<void>;
 	/** Pre-loaded prompt templates */
@@ -847,6 +854,10 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 }
 
 export type { AskToolDetails, QuestionResult } from "@oh-my-pi/pi-tui/tools/ask";
+// Issue #12680: extensions that shadow the built-in ask tool reach the native
+// renderer through the injected pi.pi namespace (the root barrel of this
+// package). Re-export it so the pi-tui renderer migration doesn't drop it.
+export { askToolRenderer } from "@oh-my-pi/pi-tui/tools/ask";
 export type {
 	TodoStatus,
 	TodoOperation,

@@ -39,6 +39,34 @@ export const DISCOVERY_DEFAULT_CONTEXT_WINDOW = OPENAI_COMPAT_DISCOVERY_DEFAULT_
 export const DISCOVERY_DEFAULT_MAX_TOKENS = OPENAI_COMPAT_DISCOVERY_DEFAULT_MAX_TOKENS;
 
 /**
+ * A discovery HTTP failure carrying the response status as a structured field
+ * so callers can classify auth rejections (401/403) without parsing messages.
+ * The message format is load-bearing: the model hub matches
+ * `HTTP <status> from <url>` for its 404 baseUrl hint, and auth-retry
+ * classification matches on the same text.
+ */
+export class DiscoveryHttpError extends Error {
+	readonly status: number;
+
+	constructor(status: number, url: string) {
+		super(`HTTP ${status} from ${url}`);
+		this.name = "DiscoveryHttpError";
+		this.status = status;
+	}
+}
+
+/**
+ * True when a discovery failure is an HTTP 401/403 auth rejection — the
+ * endpoint answered (so it is reachable) but refused the request's credentials
+ * (or lack of them). Callers surface these as an `unauthenticated` provider
+ * discovery state instead of a generic `unavailable`, so a credential problem
+ * never masquerades as a dead endpoint (issue #12281).
+ */
+export function isDiscoveryAuthRejection(error: unknown): boolean {
+	return error instanceof DiscoveryHttpError && (error.status === 401 || error.status === 403);
+}
+
+/**
  * Run `fn` with a hard deadline while also signalling cooperative transports
  * to abort. The independent rejection keeps discovery bounded when a runtime
  * leaves its fetch promise pending after `AbortSignal.abort()` (observed with
@@ -483,7 +511,7 @@ export async function discoverOllamaModels(
 			signal,
 		});
 		if (!response.ok) {
-			throw new Error(`HTTP ${response.status} from ${tagsUrl}`);
+			throw new DiscoveryHttpError(response.status, tagsUrl);
 		}
 		return (await response.json()) as { models?: Array<{ name?: string; model?: string }> };
 	});
@@ -570,7 +598,7 @@ export async function discoverLlamaCppModels(
 					signal,
 				});
 				if (!response.ok) {
-					throw new Error(`HTTP ${response.status} from ${modelsUrl}`);
+					throw new DiscoveryHttpError(response.status, modelsUrl);
 				}
 				headers = h;
 				return (await response.json()) as unknown;
@@ -789,7 +817,7 @@ export async function discoverOpenAIModelsList(
 					signal,
 				});
 				if (!res.ok) {
-					throw new Error(`HTTP ${res.status} from ${modelsUrl}`);
+					throw new DiscoveryHttpError(res.status, modelsUrl);
 				}
 				headers = h;
 				return (await res.json()) as {
@@ -893,12 +921,11 @@ export async function discoverLiteLLMModels(
 	const timeoutMs = providerConfig.discovery.timeoutMs ?? 10_000;
 	const attempt = async (h: Record<string, string>) => {
 		headers = h;
-		let authError: (Error & { status: number }) | undefined;
+		let authError: DiscoveryHttpError | undefined;
 		const authAwareFetch: FetchImpl = async (input, init) => {
 			const response = await ctx.fetch(input, init);
 			if (response.status === 401) {
-				authError = new Error(`HTTP ${response.status} from ${String(input)}`) as Error & { status: number };
-				authError.status = response.status;
+				authError = new DiscoveryHttpError(response.status, String(input));
 			}
 			return response;
 		};
@@ -971,7 +998,7 @@ export async function discoverProxyModels(
 				signal,
 			});
 			if (!res.ok) {
-				throw new Error(`HTTP ${res.status} from ${modelsUrl}`);
+				throw new DiscoveryHttpError(res.status, modelsUrl);
 			}
 			headers = h;
 			return (await res.json()) as {
