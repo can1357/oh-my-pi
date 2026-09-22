@@ -235,6 +235,8 @@ import {
 import { createBrowserPrelude } from "./tools/browser";
 import { isMCPToolName, normalizeToolNames } from "./tools/builtin-names";
 import { createComputerPrelude } from "./tools/computer";
+import { createRlmPrelude } from "./rlm/prelude";
+import { disposeRlmStore } from "./rlm/session";
 import { ToolContextStore } from "./tools/context";
 import { isIrcEnabled } from "./tools/hub";
 import { getImageGenTools } from "./tools/image-gen";
@@ -243,7 +245,9 @@ import { isFilesystemSourcePath } from "./tools/path-utils";
 import { isAutoQaEnabled } from "./tools/report-tool-issue";
 import { queueResolveHandler } from "./tools/resolve";
 import { USER_TODO_EDIT_CUSTOM_TYPE } from "./tools/todo";
+import { RlmTool } from "./tools/rlm";
 import { ttsTool } from "./tools/tts";
+
 import { resolveActiveRepoContext } from "./utils/active-repo-context";
 import { EventBus } from "./utils/event-bus";
 import { normalizeProviderContextImagesForModel } from "./utils/image-loading";
@@ -1814,6 +1818,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// mutation (any tool) bumped it in the meantime.
 		const fileMutationVersions = new Map<string, number>();
 		const disposeCallbacks = new Set<() => void>();
+		// Session-owned RLM store must die with the session (not process lifetime / cwd).
+		disposeCallbacks.add(() => disposeRlmStore(toolSession));
 		const activeToolNames = new Set<string>();
 		const toolRegistry = new Map<string, Tool & Pick<ToolDefinition, "defaultInactive">>();
 		const setActiveToolNames = (names: Iterable<string>): void => {
@@ -1867,6 +1873,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getSessionFile: () => sessionManager.getSessionFile() ?? null,
 			sessionManager,
 			getEvalKernelOwnerId: () => evalKernelOwnerId,
+			getRlmRuntimeId: () => evalKernelOwnerId,
 			getEvalSessionId: () =>
 				session?.getEvalSessionId() ?? options.parentEvalSessionId ?? defaultEvalSessionId(toolSession),
 			assertEvalExecutionAllowed: () => session?.assertEvalExecutionAllowed(),
@@ -1965,9 +1972,37 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// this undefined so tools and session job snapshots refuse async work
 			// instead of silently routing into the owning session (issue #1923).
 			asyncJobManager: scopedAsyncJobManager,
+			/** Isolated depth-0/1 llm_query: empty history, no root transcript, AbortSignal. */
+			rlmComplete: async (prompt: string, options?: { signal?: AbortSignal }) => {
+				if (!session) {
+					return { text: "rlm query unavailable: session not ready (fail-open)" };
+				}
+				try {
+					const { replyText, assistantMessage } = await session.runEphemeralTurn({
+						promptText: prompt,
+						// Isolated worker: never inherit this.messages / streaming root assistant.
+						history: [],
+						isolated: true,
+						// Unique key per call so provider routing cannot share lineage across workers.
+						conversationKey: `rlm:${Snowflake.next()}`,
+						signal: options?.signal,
+					});
+					const usage = assistantMessage.usage;
+					return {
+						text: replyText,
+						tokens: usage?.totalTokens,
+						cost: usage?.cost?.total,
+					};
+				} catch (error) {
+					const msg = error instanceof Error ? error.message : String(error);
+					return { text: `${msg} (fail-open)` };
+				}
+			},
 		};
+
 		let browserPrelude: EvalPreludeDefinition | undefined;
 		let computerPrelude: EvalPreludeDefinition | undefined;
+		let rlmPrelude: EvalPreludeDefinition | undefined;
 		const getEvalPreludes = (): readonly EvalPreludeDefinition[] => {
 			if (restrictToolNames || !toolRegistry.has("eval") || !activeToolNames.has("eval")) return [];
 			const builtins: EvalPreludeDefinition[] = [];
@@ -1978,6 +2013,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (settings.get("computer.enabled")) {
 				computerPrelude ??= createComputerPrelude(toolSession);
 				builtins.push(computerPrelude);
+			}
+			if (settings.get("rlm.enabled") || settings.get("context.engine") === "rlm") {
+				if (settings.get("rlm.kernelBind") === true) {
+					rlmPrelude ??= createRlmPrelude(toolSession);
+					builtins.push(rlmPrelude);
+				}
 			}
 			return getEnabledEvalPreludes(builtins);
 		};
@@ -3913,6 +3954,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						return tools.filter((tool): tool is AgentTool => tool !== null);
 					},
 			createThinkTool: async () => (await HIDDEN_TOOLS.think(toolSession)) ?? null,
+			createRlmTool: async () => new RlmTool(toolSession),
+
+
 			createVibeTools:
 				(options.taskDepth ?? 0) === 0 && !options.parentTaskPrefix
 					? () => createVibeTools(toolSession)

@@ -99,6 +99,35 @@ function applyExtendedContextCommand(settings: Settings, args: string): string |
 	return undefined;
 }
 
+async function applyRlmCommand(session: AgentSession, args: string): Promise<string | undefined> {
+	const arg = args.trim().toLowerCase();
+	const settings = session.settings;
+	if (arg === "status") {
+		const on = settings.get("rlm.enabled") || settings.get("context.engine") === "rlm" ? "on" : "off";
+		const hasTool = session.getEnabledToolNames().includes("rlm");
+		const engine = settings.get("context.engine") ?? "native";
+		return `RLM is ${on}. engine=${engine} tool=${hasTool ? "active" : "inactive"} spillBytes=${settings.get("rlm.spillBytes")} maxCalls=${settings.get("rlm.maxCalls")} maxDepth=${settings.get("rlm.maxDepth")} maxCost=${settings.get("rlm.maxCost")} wallClockMs=${settings.get("rlm.wallClockMs")}.`;
+	}
+	if (!arg || arg === "toggle" || arg === "on" || arg === "off") {
+		const enabled = arg === "on" ? true : arg === "off" ? false : !settings.get("rlm.enabled");
+		settings.override("rlm.enabled", enabled);
+		// Keep context.engine in sync for exclusive routing readers.
+		settings.override("context.engine", enabled ? "rlm" : "native");
+		const installed = await session.setRlmToolEnabled(enabled);
+		if (enabled && !installed) {
+			settings.override("rlm.enabled", false);
+			settings.override("context.engine", "native");
+			return "RLM could not install the rlm tool in this session.";
+		}
+		return `RLM ${enabled ? "enabled" : "disabled"} for this session (context.engine=${enabled ? "rlm" : "native"}).`;
+	}
+	return undefined;
+}
+
+
+
+
+
 /** Detailed, session-effective `/computer status` diagnostics. */
 function formatComputerUseStatus(session: AgentSession): string {
 	const enabled = session.settings.get("computer.enabled");
@@ -567,6 +596,35 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			runtime.ctx.editor.setText("");
 		},
 	},
+	{
+		name: "rlm",
+		icon: "expand",
+		description: "Toggle the RLM prompt-as-variable context engine",
+		acpDescription: "Toggle RLM context engine",
+		acpInputHint: "[on|off|status]",
+		subcommands: [
+			{ name: "on", description: "Spill oversized tool results and expose the rlm tool" },
+			{ name: "off", description: "Use native compaction only" },
+			{ name: "status", description: "Show RLM engine status" },
+		],
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime =>
+			`RLM: ${runtime.ctx.session.settings.get("rlm.enabled") ? "on" : "off"}`,
+		handle: async (command, runtime) => {
+			const output = await applyRlmCommand(runtime.session, command.args);
+			if (!output) return usage("Usage: /rlm [on|off|status]", runtime);
+			await runtime.output(output);
+			return commandConsumed();
+		},
+		handleTui: async (command, runtime) => {
+			const output = await applyRlmCommand(runtime.ctx.session, command.args);
+			refreshStatusLine(runtime.ctx);
+			runtime.ctx.showStatus(output ?? "Usage: /rlm [on|off|status]");
+			runtime.ctx.editor.setText("");
+		},
+
+	},
+
 	{
 		name: "computer",
 		icon: "computer",
