@@ -7,17 +7,18 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { prompt, TempDir } from "@oh-my-pi/pi-utils";
+import submitReminderTemplate from "../src/prompts/system/subagent-yield-reminder.md" with { type: "text" };
 import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 const sessions: AgentSession[] = [];
 const roots: TempDir[] = [];
 const stores: ModelRegistry[] = [];
 
-function reminder(): AgentMessage {
+function reminder(budgetStop = false): AgentMessage {
 	return {
 		role: "developer",
-		content: "<system-reminder>Submit the report with yield</system-reminder>",
+		content: prompt.render(submitReminderTemplate, { retryCount: 1, maxRetries: 3, budgetStop }),
 		timestamp: Date.now(),
 	};
 }
@@ -101,22 +102,19 @@ async function harness(
 }
 
 describe("SDK data-less yield report", () => {
-	for (const [doneOnly, delayed] of [
-		[false, false],
-		[true, false],
-		[false, true],
+	for (const [doneOnly, delayed, budgetStop] of [
+		[false, false, false],
+		[true, false, false],
+		[false, true, false],
+		[false, false, true],
 	]) {
-		it(`submits preceding prose through the real loop (done-only=${doneOnly}, delayed=${delayed})`, async () => {
+		it(`submits preceding prose through the real loop (done-only=${doneOnly}, delayed=${delayed}, budget-stop=${budgetStop})`, async () => {
 			const { session, releaseUpdate } = await harness(doneOnly, delayed);
 			const report = "# Review\nNo confirmed defects.\n";
 			const history: AgentMessage[] = [
 				{ role: "user", content: "Review the source", timestamp: Date.now() },
 				createAssistantMessage(report),
-				{
-					role: "developer",
-					content: "<system-reminder>Submit the report with yield</system-reminder>",
-					timestamp: Date.now(),
-				},
+				reminder(budgetStop),
 			];
 			session.agent.replaceMessages(history);
 			try {
