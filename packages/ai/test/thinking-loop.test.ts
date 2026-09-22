@@ -879,6 +879,34 @@ describe("thinking-loop retry budget (result path)", () => {
 		}
 	});
 
+	test("reports the guarded-retry backoff through providerRetryWait", async () => {
+		registerMockApi();
+		const waitSpy = spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		try {
+			const mock = createMockModel({ provider: "openrouter", id: "google/gemini-3.5-flash" });
+			for (let i = 0; i < 4; i++) mock.push(loopResponse());
+			const waits: Array<{ delayMs: number; attempt?: number; maxAttempts?: number }> = [];
+
+			const result = await completeSimple(mock.model, context(), {
+				providerRetryWait: async (delayMs, _signal, info) => {
+					waits.push({ delayMs, attempt: info?.attempt, maxAttempts: info?.maxAttempts });
+				},
+			});
+
+			expect(result.stopReason).toBe("error");
+			expect(mock.calls).toHaveLength(3);
+			// Each guarded attempt re-issues the whole request, so the caller must
+			// see both backoffs instead of two silent sleeps.
+			expect(waits).toEqual([
+				{ delayMs: 500, attempt: 1, maxAttempts: 2 },
+				{ delayMs: 1000, attempt: 2, maxAttempts: 2 },
+			]);
+		} finally {
+			waitSpy.mockRestore();
+			clearCustomApis();
+		}
+	});
+
 	test("complete (non-simple) also fails closed after three guarded attempts", async () => {
 		registerMockApi();
 		const waitSpy = spyOn(scheduler, "wait").mockResolvedValue(undefined);
