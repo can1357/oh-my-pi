@@ -1765,7 +1765,7 @@ function applyXAIOAuthCuration(dynamic: readonly ModelSpec<"openai-responses">[]
 	return [...curatedFirst, ...rest];
 }
 
-function isResponsesSeed(seed: ModelSpec<Api>): seed is ModelSpec<"openai-responses"> {
+export function isResponsesSeed(seed: ModelSpec<Api>): seed is ModelSpec<"openai-responses"> {
 	return seed.api === "openai-responses";
 }
 
@@ -4426,9 +4426,11 @@ export function coreWeaveModelManagerOptions(
 // 15.75 Meta Model API
 // ---------------------------------------------------------------------------
 
-const META_MODEL_API_BASE_URL = getDefaultModelDiscoveryBaseUrl("meta")!;
+export const META_MODEL_API_BASE_URL = getDefaultModelDiscoveryBaseUrl("meta")!;
 const META_MUSE_MODEL_BY_ID: Partial<Record<string, ModelSpec<"openai-responses">>> = Object.fromEntries(
-	seedModels<"openai-responses">("meta").map(model => [model.id, model]),
+	seedModels("meta")
+		.filter(isResponsesSeed)
+		.map(model => [model.id, model]),
 );
 
 /**
@@ -4450,7 +4452,7 @@ function museSparkLineageSpec(id: string): ModelSpec<"openai-responses"> | undef
 	const contributor = billingVariantPlain(id) !== undefined;
 	let template: ModelSpec<"openai-responses"> | undefined;
 	let templateRevision: readonly [number, number, number] | undefined;
-	for (const model of seedModels<"openai-responses">("meta")) {
+	for (const model of seedModels("meta").filter(isResponsesSeed)) {
 		if ((billingVariantPlain(model.id) !== undefined) !== contributor) continue;
 		const candidate = parseRevision(classifyModel("meta", model.id, { lenient: true }).revision ?? "");
 		if (candidate === undefined) continue;
@@ -4528,7 +4530,7 @@ export function metaModelManagerOptions(config?: MetaModelManagerConfig): ModelM
 					reference ?? META_MUSE_MODEL_BY_ID[defaults.id] ?? museSparkLineageSpec(defaults.id),
 				),
 		}),
-		staticModels: seedModels<"openai-responses">("meta"),
+		staticModels: seedModels("meta").filter(isResponsesSeed),
 	};
 }
 

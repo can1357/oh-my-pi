@@ -663,6 +663,11 @@ async function generateModels() {
 	allModels = allModels.map(model =>
 		model.provider === "github-copilot" ? { ...model, headers: mergeCopilotApiHeaders(model.headers) } : model,
 	);
+	// Exclusion policy applies to upstream/discovery/snapshot rows before the
+	// authored seed-precedence rows land: reviewed seeds (e.g. Meta's seeded
+	// image model, which shares its id with an excluded bare discovery SKU)
+	// outrank exclusion the same way they outrank upstream in dedup.
+	allModels = filterModelsDevCatalogRows(allModels);
 	// Seed rows that outrank upstream: prepended after the snapshot merge and
 	// reference fills, so dedup keeps the authored row and same-id rows from
 	// other providers never overwrite its name/capabilities.
@@ -676,7 +681,6 @@ async function generateModels() {
 	allModels = applyAntigravityPricingFallback(allModels);
 	allModels = applyKimiMaxTokensCap(allModels);
 	allModels = applyFireworksDeepSeekReasoningShape(allModels);
-	allModels = filterModelsDevCatalogRows(allModels);
 	allModels = normalizeAntigravityEndpoint(allModels);
 	// Normalize display names: gateway author prefixes ("OpenAI: …"), alias
 	// markers ("(latest)"), provider attribution ("(Antigravity)"), and

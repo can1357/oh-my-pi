@@ -118,6 +118,22 @@ export function hostedDefaultModel(provider: string): string | undefined {
 	return behavior.hostedDefaults.find(entry => entry.provider === provider)?.model;
 }
 
+/**
+ * The generate_image backend for an active chat provider, if declared.
+ * Unlisted providers do not bias auto order.
+ */
+export function imageProviderFor(provider: string): string | undefined {
+	return behavior.imageProviders.find(entry => entry.provider === provider)?.backend;
+}
+
+/**
+ * Whether a generate_image backend resolves its model from the active
+ * credential rather than a `<backend>-image` hosted default.
+ */
+export function isCredentialImageModel(backend: string): boolean {
+	return behavior.credentialImageModels.includes(backend);
+}
+
 /** One resolved API route for a provider model id. */
 export interface ApiRouteMatch {
 	/** Transport API the id rides. */

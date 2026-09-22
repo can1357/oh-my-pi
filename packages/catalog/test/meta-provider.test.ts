@@ -5,6 +5,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { seedModels } from "@oh-my-pi/pi-catalog/compat/providers";
 import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
 import {
+	isResponsesSeed,
 	metaModelManagerOptions,
 	museCodeModelManagerOptions,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
@@ -20,7 +21,7 @@ const MUSE_SPARK_MAX_THINKING: ThinkingConfig = {
 	efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
 };
 
-const metaMuseModels = seedModels<"openai-responses">("meta");
+const metaMuseModels = seedModels("meta").filter(isResponsesSeed);
 const museCodeModels = seedModels<"openai-responses">("muse-code");
 
 function modelListResponse(ids: readonly string[]): Response {

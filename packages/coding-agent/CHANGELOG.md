@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Meta Model API as an image generation and editing provider (`meta`, defaulting to Muse Image 1.0 via `MODEL_API_KEY` or `META_API_KEY`).
+
 ## [18.2.9] - 2026-09-22
 
 ### Added

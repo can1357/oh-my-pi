@@ -39,7 +39,7 @@ The custom tool is registered only when `generate_image.enabled=true` (default `
 3. The tool skips candidates with an unsupported API transport, unavailable credentials, or an unavailable hosted carrier. A provider HTTP failure advances to the next model in the resolved chain; validation, parsing, local I/O, cancellation, and timeout failures do not.
 4. Input images are resolved once, after the first usable model is found. A `path` is resolved relative to session cwd and content-sniffed. Inline `data` may be raw base64 (requiring `mime_type`) or a `data:<mime>;base64,...` URL.
 5. The selected catalog model's `api` determines the transport:
-   - `openai-images`: OpenAI-compatible `/images/generations` and `/images/edits` requests. This carries xAI Grok Imagine and DeepInfra image models; a `404` from the edit endpoint retries the generation endpoint with the edit payload.
+   - `openai-images`: OpenAI-compatible `/images/generations` and `/images/edits` requests. This carries xAI Grok Imagine, DeepInfra, and Meta Muse image models; a `404` from the edit endpoint retries the generation endpoint with the edit payload.
    - `openrouter-images`: OpenRouter's native `/images` endpoint. It does not use OpenRouter chat completions. The selected OpenRouter image model ID is sent directly, for example `openrouter/google/gemini-3-pro-image`.
    - `google-generative-ai`: Gemini `:generateContent` with `responseModalities: ["IMAGE"]`.
    - `google-gemini-cli`: Google Antigravity's internal SSE image endpoint, using the account-advertised image model when discovery provides one.

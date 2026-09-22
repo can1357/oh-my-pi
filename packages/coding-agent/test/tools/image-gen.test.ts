@@ -417,4 +417,25 @@ describe("imageGenTool catalog routing", () => {
 		expect(tools[0]).toMatchObject({ type: "image_generation" });
 		expect(tools[0]).not.toHaveProperty("model");
 	});
+
+	it("routes Meta image generation through the catalog openai-images model", async () => {
+		const model = catalogModel("meta", "muse-image-1.0", "openai-images");
+		let requestUrl: string | undefined;
+		let requestBody: Record<string, unknown> | undefined;
+		const fetchMock: FetchImpl = async (input, init) => {
+			requestUrl = input.toString();
+			requestBody = JSON.parse(String(init?.body));
+			return imageResponse();
+		};
+		const settings = Settings.isolated({ modelRoles: { image: "meta/muse-image-1.0" } });
+		const ctx = createContext({ models: [model], settings, fetch: fetchMock });
+
+		const result = await imageGenTool.execute("meta", { subject: "muse" }, undefined, ctx);
+		collectPaths(result);
+
+		expect(requestUrl).toBe("https://meta.example/v1/images/generations");
+		expect(requestBody).toMatchObject({ model: "muse-image-1.0", n: 1, response_format: "b64_json" });
+		expect(result.details?.provider).toBe("meta");
+		expect(result.details?.model).toBe("muse-image-1.0");
+	});
 });
