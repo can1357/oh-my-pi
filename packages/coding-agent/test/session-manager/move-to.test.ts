@@ -111,6 +111,152 @@ describe("SessionManager.moveTo", () => {
 		expect(hasAssistantEntry(entries)).toBe(true);
 	});
 
+	it("moves a custom session and artifacts when rename crosses devices", async () => {
+		const session = SessionManager.create(cwdA, path.join(testAgentDir, "custom"));
+		await session.ensureOnDisk();
+		const oldFile = session.getSessionFile()!;
+		const oldArtifacts = oldFile.slice(0, -6);
+		await fsp.mkdir(oldArtifacts);
+		await Bun.write(path.join(oldArtifacts, "1.bash.log"), "saved output");
+		const rename = fs.promises.rename.bind(fs.promises);
+		const renameSpy = spyOn(fs.promises, "rename").mockImplementation(async (from, to) => {
+			if (from.toString() === oldFile || from.toString() === oldArtifacts) {
+				throw Object.assign(new Error("cross-device move"), { code: "EXDEV" });
+			}
+			return rename(from, to);
+		});
+		try {
+			await session.moveTo(cwdB);
+		} finally {
+			renameSpy.mockRestore();
+		}
+		const newFile = session.getSessionFile()!;
+		expect(fs.existsSync(oldFile)).toBe(false);
+		expect(getHeader(await loadEntriesFromFile(newFile))?.cwd).toBe(cwdB);
+		expect(await Bun.file(path.join(newFile.slice(0, -6), "1.bash.log")).text()).toBe("saved output");
+		await session.close();
+	});
+
+	it("retains the source when cross-device publication finds an occupied destination", async () => {
+		const session = SessionManager.create(cwdA, path.join(testAgentDir, "custom"));
+		await session.ensureOnDisk();
+		const oldFile = session.getSessionFile()!;
+		const destinationDir = path.join(testAgentDir, "occupied");
+		await fsp.mkdir(destinationDir);
+		const destination = path.join(destinationDir, path.basename(oldFile));
+		await Bun.write(destination, "another session");
+		const rename = fs.promises.rename.bind(fs.promises);
+		const renameSpy = spyOn(fs.promises, "rename").mockImplementation(async (from, to) => {
+			if (from.toString() === oldFile) throw Object.assign(new Error("cross-device move"), { code: "EXDEV" });
+			return rename(from, to);
+		});
+		try {
+			await expect(session.moveTo(cwdB, destinationDir)).rejects.toThrow();
+		} finally {
+			renameSpy.mockRestore();
+		}
+		expect(session.getSessionFile()).toBe(oldFile);
+		expect(getHeader(await loadEntriesFromFile(oldFile))?.cwd).toBe(cwdA);
+		expect(await Bun.file(destination).text()).toBe("another session");
+		expect(await fsp.readdir(destinationDir)).toEqual([path.basename(oldFile)]);
+		await session.close();
+	});
+
+	it("includes completed appends made while a cross-device copy is staged", async () => {
+		const session = SessionManager.create(cwdA, path.join(testAgentDir, "custom"));
+		await session.ensureOnDisk();
+		const oldFile = session.getSessionFile()!;
+		const rename = fs.promises.rename.bind(fs.promises);
+		const copyFile = fs.promises.copyFile.bind(fs.promises);
+		let appended = false;
+		const renameSpy = spyOn(fs.promises, "rename").mockImplementation(async (from, to) => {
+			if (from.toString() === oldFile) throw Object.assign(new Error("cross-device move"), { code: "EXDEV" });
+			return rename(from, to);
+		});
+		const copySpy = spyOn(fs.promises, "copyFile").mockImplementation(async (from, to, flags) => {
+			await copyFile(from, to, flags);
+			if (from.toString() === oldFile && !appended) {
+				appended = true;
+				session.appendMessage({ role: "user", content: "during staged copy", timestamp: 2 });
+			}
+		});
+		try {
+			await session.moveTo(cwdB);
+		} finally {
+			renameSpy.mockRestore();
+			copySpy.mockRestore();
+		}
+		const entries = await loadEntriesFromFile(session.getSessionFile()!);
+		expect(
+			entries.some(
+				entry =>
+					entry.type === "message" &&
+					entry.message.role === "user" &&
+					entry.message.content === "during staged copy",
+			),
+		).toBe(true);
+		expect(fs.existsSync(oldFile)).toBe(false);
+		await session.close();
+	});
+
+	it("rolls a cross-device session back when its artifacts cannot be relocated", async () => {
+		const session = SessionManager.create(cwdA, path.join(testAgentDir, "custom"));
+		await session.ensureOnDisk();
+		const oldFile = session.getSessionFile()!;
+		const oldArtifacts = oldFile.slice(0, -6);
+		await fsp.mkdir(oldArtifacts);
+		await Bun.write(path.join(oldArtifacts, "1.bash.log"), "saved output");
+		const destinationDir = path.join(testAgentDir, "destination");
+		const destinationFile = path.join(destinationDir, path.basename(oldFile));
+		const rename = fs.promises.rename.bind(fs.promises);
+		const renameSpy = spyOn(fs.promises, "rename").mockImplementation(async (from, to) => {
+			if (from.toString() === oldFile || from.toString() === destinationFile) {
+				throw Object.assign(new Error("cross-device move"), { code: "EXDEV" });
+			}
+			if (from.toString() === oldArtifacts) {
+				throw Object.assign(new Error("artifact move denied"), { code: "EACCES" });
+			}
+			return rename(from, to);
+		});
+		try {
+			await expect(session.moveTo(cwdB, destinationDir)).rejects.toThrow("artifact move denied");
+		} finally {
+			renameSpy.mockRestore();
+		}
+		expect(session.getSessionFile()).toBe(oldFile);
+		expect(getHeader(await loadEntriesFromFile(oldFile))?.cwd).toBe(cwdA);
+		expect(await Bun.file(path.join(oldArtifacts, "1.bash.log")).text()).toBe("saved output");
+		expect(await fsp.readdir(destinationDir)).toEqual([]);
+		await session.close();
+	});
+
+	it("retains the source when cross-device source cleanup fails", async () => {
+		const session = SessionManager.create(cwdA, path.join(testAgentDir, "custom"));
+		await session.ensureOnDisk();
+		const oldFile = session.getSessionFile()!;
+		const destinationDir = path.join(testAgentDir, "destination");
+		const rename = fs.promises.rename.bind(fs.promises);
+		const unlink = fs.unlinkSync.bind(fs);
+		const renameSpy = spyOn(fs.promises, "rename").mockImplementation(async (from, to) => {
+			if (from.toString() === oldFile) throw Object.assign(new Error("cross-device move"), { code: "EXDEV" });
+			return rename(from, to);
+		});
+		const unlinkSpy = spyOn(fs, "unlinkSync").mockImplementation(file => {
+			if (file.toString() === oldFile) throw Object.assign(new Error("source removal denied"), { code: "EACCES" });
+			return unlink(file);
+		});
+		try {
+			await expect(session.moveTo(cwdB, destinationDir)).rejects.toThrow("source removal denied");
+		} finally {
+			renameSpy.mockRestore();
+			unlinkSpy.mockRestore();
+		}
+		expect(session.getSessionFile()).toBe(oldFile);
+		expect(getHeader(await loadEntriesFromFile(oldFile))?.cwd).toBe(cwdA);
+		expect(await fsp.readdir(destinationDir)).toEqual([]);
+		await session.close();
+	});
+
 	it("persists the captured header and workspace roots after a rollback relocation", async () => {
 		const session = SessionManager.create(cwdA);
 		session.appendMessage({ role: "user", content: "hello", timestamp: 1 });

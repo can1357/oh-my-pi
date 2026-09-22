@@ -109,16 +109,19 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 			// instructions are not yet present.
 			expect(session.systemPrompt.join("\n")).not.toContain(SERVER_INSTRUCTIONS);
 
-			// Background connect + `refreshMCPTools` rebuild must surface the
-			// instructions. This is a genuine integration wait: discovery spawns
-			// the fixture as a real subprocess and connects asynchronously, and
+			// Background connect + `refreshMCPTools` rebuild must surface both the
+			// instructions and mounted route. This is a genuine integration wait:
+			// discovery spawns the fixture as a real subprocess and connects asynchronously, and
 			// the SDK fires that work fire-and-forget with no completion promise
 			// or event exposed to await — so fake timers cannot drive it and we
 			// poll the live prompt with a generous ceiling, exiting the instant
-			// the rebuilt prompt carries the instructions.
+			// the rebuilt prompt carries the complete MCP section. The manager can
+			// expose server instructions before the serialized tool-registry refresh
+			// has mounted its route, so instructions alone are not a completion signal.
+			const toolRoute = '- "do\\u0060thing" → `xd://mcp__instr_do_thing`';
 			const deadline = Date.now() + 12_000;
 			let prompt = session.systemPrompt.join("\n");
-			while (!prompt.includes(SERVER_INSTRUCTIONS) && Date.now() < deadline) {
+			while ((!prompt.includes(SERVER_INSTRUCTIONS) || !prompt.includes(toolRoute)) && Date.now() < deadline) {
 				await Bun.sleep(10);
 				prompt = session.systemPrompt.join("\n");
 			}
@@ -128,7 +131,7 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 			// the escaped original tool name while routing through the exact
 			// normalized name actually mounted in the live xd:// registry.
 			expect(prompt).toContain("MCP Server Instructions");
-			expect(prompt).toContain('- "do\\u0060thing" → `xd://mcp__instr_do_thing`');
+			expect(prompt).toContain(toolRoute);
 		} finally {
 			await session.dispose();
 		}

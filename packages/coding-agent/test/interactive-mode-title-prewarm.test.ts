@@ -109,6 +109,12 @@ describe("InteractiveMode tiny-title prewarm", () => {
 		const prewarm = vi.spyOn(tinyTitleClient, "prewarm").mockImplementation(() => {});
 
 		await mode.init();
+		// Drain the startup immediate while the resumed-session name mock is
+		// still active. Otherwise it can outlive this test, run after afterEach
+		// restores the mock, and register against the next test's global spy.
+		const immediateFlushed = Promise.withResolvers<void>();
+		setImmediate(immediateFlushed.resolve);
+		await immediateFlushed.promise;
 
 		expect(prewarm).not.toHaveBeenCalled();
 	});
