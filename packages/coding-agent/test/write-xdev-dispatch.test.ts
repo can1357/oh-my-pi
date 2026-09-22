@@ -880,7 +880,14 @@ describe("device writes honor lenientArgValidation", () => {
 			name: lenient ? "lenient_dev" : "strict_dev",
 			label: "fixture",
 			description: "fixture",
-			parameters: type({ op: "string" }),
+			// A CLOSED schema: the beside-case below exercises the host's
+			// unrecognized-key heal, which must not fire for a lenient device.
+			parameters: {
+				type: "object",
+				additionalProperties: false,
+				properties: { op: { type: "string" } },
+				required: ["op"],
+			} as never,
 			...(lenient ? { lenientArgValidation: true } : {}),
 			async execute(_id: string, args: Record<string, unknown>) {
 				seen.push(args);
@@ -897,11 +904,22 @@ describe("device writes honor lenientArgValidation", () => {
 		expect(seen).toEqual([{ wrong: 1 }]);
 		expect(lenient.result.content.find(entry => entry.type === "text")?.text).toBe("tool-owned refusal");
 
+		// An unknown key BESIDE the valid required field: host validation must not
+		// heal it away for a lenient device (the raw shape is the tool's to judge).
+		const beside = await dispatchXdevTool(
+			state,
+			"lenient_dev",
+			JSON.stringify({ op: "done", extra: "typo" }),
+			"xd-lenient-2",
+		);
+		expect(seen).toEqual([{ wrong: 1 }, { op: "done", extra: "typo" }]);
+		expect(beside.result.content.find(entry => entry.type === "text")?.text).toBe("tool-owned refusal");
+
 		const strict = await dispatchXdevTool(state, "strict_dev", JSON.stringify({ wrong: 1 }), "xd-strict-1");
 		expect(strict.result.isError).toBe(true);
 		expect(strict.result.content.find(entry => entry.type === "text")?.text).toContain(
 			"Invalid args for xd://strict_dev",
 		);
-		expect(seen).toHaveLength(1);
+		expect(seen).toHaveLength(2);
 	});
 });
