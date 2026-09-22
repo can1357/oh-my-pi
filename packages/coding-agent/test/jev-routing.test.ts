@@ -122,7 +122,7 @@ describe("routeTurn", () => {
 		const d = await routeTurn(
 			mockJudge({
 				tier: { type: "choice", choice: "cheap", probabilities: {}, confidence: 0.95 },
-				complexity: { type: "score", score: 0.9, probabilities: {}, confidence: 0.9 },
+				complexity: { type: "score", score: 1.4, probabilities: {}, confidence: 0.9 }, // raw wire scale 0..2 → normalized 0.7 > 0.5
 			}),
 			"x",
 			TIERS,

@@ -59,7 +59,7 @@ export interface RoutingPolicy {
 	 * Routing down is the high-stakes action.
 	 */
 	minConfidenceToDegrade: number;
-	/** Complexity score at or below which degrading is allowed. */
+	/** Complexity score (normalized 0..1; the raw wire score is a weighted level index) at or below which degrading is allowed. */
 	maxComplexityForDegrade: number;
 	/** If we can't trust the complexity score, treat the task as hard. */
 	minComplexityConfidence: number;
