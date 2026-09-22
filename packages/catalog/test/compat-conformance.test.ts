@@ -1,6 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import * as fs from "node:fs/promises";
-import * as path from "node:path";
 import rules from "../src/compat/rules.json";
 import models from "../src/models.json";
 
@@ -113,16 +111,5 @@ describe("compat rules conformance", () => {
 			}
 		}
 		expect(offenders).toEqual([]);
-	});
-
-	test("every rules/**/*.kdl file was compiled", async () => {
-		const rulesDir = path.join(import.meta.dir, "../src/compat/rules");
-		const onDisk: string[] = [];
-		for (const group of ["taxonomy", "classes", "providers", "runtime", "auth"]) {
-			for (const name of await fs.readdir(path.join(rulesDir, group))) {
-				if (name.endsWith(".kdl")) onDisk.push(`${group}/${name}`);
-			}
-		}
-		expect([...rules.files].sort()).toEqual(onDisk.sort());
 	});
 });

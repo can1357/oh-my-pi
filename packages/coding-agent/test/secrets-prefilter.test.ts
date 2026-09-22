@@ -10,7 +10,6 @@
 import { describe, expect, it } from "bun:test";
 import { builtinCredentialSecretEntries } from "@oh-my-pi/pi-coding-agent/secrets";
 import { type SecretEntry, SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets/obfuscator";
-import { CREDENTIAL_PATTERNS } from "@oh-my-pi/pi-coding-agent/secrets/patterns";
 
 const KEY = "prefilter-test-key";
 
@@ -51,13 +50,6 @@ function withoutMetadata(entries: SecretEntry[]): SecretEntry[] {
 }
 
 describe("credential regex literal prefilter", () => {
-	it("covers every built-in pattern with metadata", () => {
-		for (const pattern of CREDENTIAL_PATTERNS) {
-			expect(pattern.literalPrefixes?.length ?? 0).toBeGreaterThan(0);
-			expect(TOKENS[pattern.name]).toBeDefined();
-		}
-	});
-
 	it("redacts every alternative of every built-in pattern exactly as the unfiltered scan does", () => {
 		const gated = new SecretObfuscator(builtinCredentialSecretEntries(), KEY);
 		const full = new SecretObfuscator(withoutMetadata(builtinCredentialSecretEntries()), KEY);

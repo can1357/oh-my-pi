@@ -7,7 +7,17 @@ Work incrementally: imports → define → test → use, each its own cell. Re-r
 {{#if py}}Top-level `await` works; `asyncio.run(…)` raises error.{{/if}}
 {{#if js}}JS runs under **Bun**: globals (`Bun.file`, `Bun.write`, `Bun.$`, `fetch`, `Buffer`) available; top-level `await`/`return` work.{{/if}}
 
-On error, fix and re-run only the failing step.
+On error, fix and re-run only the failing step. Earlier statements may already have produced side effects.
+
+<instruction>
+- Reusable setup → write a script once, then use `{{#if py}}%load ./setup.py{{else}}%load ./setup.ts{{/if}}` as `code`. Definitions persist; source is not echoed. Quote paths containing spaces; `local://` works.
+- `%load` executes again only when explicitly called. Editing a file alone does not reload it.
+{{#if py}}- Missing Python dependency → identify its distribution, then use `%pip install pillow` as `code`; it installs into the kernel's interpreter. Import names can differ (`PIL` → `pillow`); do not install an exception's name blindly.{{/if}}
+{{#if js}}- Missing JS dependency → use `%bun add csv-parse` as `code`.{{/if}}
+- Percent commands are standalone cells. After installation, retry only the failed import/step—not earlier side effects.
+{{#if js}}- JS packages go to a managed environment reused across sessions in the same project; kernel variables remain separate. Rare explicit target change → `%environment project` (permits project dependency changes) or `%environment managed`.{{#unless autoProvision}} Automatic environment provisioning is disabled: use an existing environment or `%environment project`.{{/unless}}{{/if}}
+- Package installation preserves kernel state. A kernel-loss notice means setup must be loaded again. Compaction alone does not reset a live kernel.
+</instruction>
 
 <prelude>
 {{#ifAll py js}}Python: sync, kwargs. JS: async, ONE trailing object literal, never positional.{{else}}{{#if py}}Sync; kwargs.{{/if}}{{#if js}}Async; ONE trailing object literal, never positional.{{/if}}{{/ifAll}}
@@ -28,7 +38,7 @@ await judge(state, questions) → `{id: answer}`
       `{type: "bool", instructions, criteria?: {true?: str, false?: str}}` → `{bool: P(yes)}`
       `{type: "score", instructions, criteria: [lowest, …, highest]}` → `{score, probabilities: {"0": p, …}, confidence}` (≥2 levels; score is the probability-weighted level index)
 {{#if py}}judge_batch(states, questions, concurrency?=32, retries?=1, min_ok?=1, intent?=None) → JudgmentBatch{{else}}judgeBatch(states, questions, { intent?, concurrency?, retries?, minOk? }) → JudgmentBatch{{/if}}
-    Same `questions` over every state (`{key: state}` or a list keyed by index), run and owned by the host — it outlives the cell. `intent` is an optional nonempty progress/job label (default `"Judging"`). Returns at once; pull settled items in bounded slices across cells: `await b.drain(timeout?)` → `[(key, item)]` settled since the last drain (`[]` on timeout; `item.answers` on success, else `item.error`, never raised); `{{#if py}}async for k, item in b.drain_iter(timeout){{else}}for await (const [k, item] of b.drainIter({ timeout })){{/if}}` until timeout or completion; `b.status()` → `{intent, done, total, failed, running, model}`; `b.results()` → `{key: answers}` so far; `b.failed()` → `{key: error}`; `b.cancel()`; `b.close()` releases it. `drain()` raises only when the run died wholesale (no judge, or fewer than `min_ok` answered). `b.id` is an async job id: completion auto-delivers a summary, `hub wait ids:[b.id]` works, `{{#if py}}judge_batch{{else}}judgeBatch{{/if}}.attach(id)` re-creates the ref after a reset.
+    Same `questions` over every state (`{key: state}` or a list keyed by index), run and owned by the host — it outlives the cell. `intent` is an optional nonempty progress/job label (default `"Judging"`). Returns at once; pull settled items in bounded slices across cells: `await b.drain(timeout?)` → `[(key, item)]` settled since the last drain (`[]` on timeout; `item.answers` on success, else `item.error`, never raised); `{{#if py}}async for k, item in b.drain_iter(timeout){{else}}for await (const [k, item] of b.drainIter({ timeout })){{/if}}` until timeout or completion; `b.status()` → `{intent, done, total, failed, cost, running, model}`; `b.results()` → `{key: answers}` so far; `b.failed()` → `{key: error}`; `b.cancel()`; `b.close()` releases it. `drain()` raises only when the run died wholesale (no judge, or fewer than `min_ok` answered). `b.id` is an async job id: completion auto-delivers a summary, `hub wait ids:[b.id]` works, `{{#if py}}judge_batch{{else}}judgeBatch{{/if}}.attach(id)` re-creates the ref after a reset.
 {{#if spawns}}agent(prompt, agent?="{{spawnDefaultAgent}}", label?=None, schema?=None, schema{{#if js}}Mode{{else}}_mode{{/if}}?="permissive", isolated?=None, apply?=None, merge?=None{{#if evalTools}}, tools?=None{{/if}}) → AgentHandle
     Spawns a background subagent and returns immediately. `agent` selects a discovered agent; omit it to use `{{spawnDefaultAgent}}`.{{#if spawnAllowedAgentsText}} Allowed agents: {{spawnAllowedAgentsText}}.{{/if}} Handle: `.id`, `.handle` ("agent://<id>"), `.status`, `.done()`, `.wait(timeout?)` → final text (parsed with `schema`), `.send(message)`, `.cancel()`, `.output()`. Unwaited results auto-deliver like async jobs. `schema` overrides agent/session schemas; `isolated` requests a worktree; `apply`/`merge` control its changes.{{#if evalTools}} `tools`: names of your @tool-defined tools the child may call.{{/if}}
 {{#if js}}    JS: ONE trailing object — agent(prompt, { agent, label, schema, schemaMode, isolated, apply, merge{{#if evalTools}}, tools{{/if}} }).{{/if}}
@@ -60,7 +70,7 @@ Acyclic waves of handles:
 {{/if}}
 
 <critical>
-Prior top-level names survive into the next cell — reuse; NEVER re-import/re-declare. Re-read only if file changed since last read.
+Prior top-level names survive into the next cell — reuse; NEVER repeat successful setup. After installing a missing dependency, retry its failed import, not the whole failed cell. Re-read only if file changed since last read.
 </critical>
 
 {{#if autoBackgroundEnabled}}Long-running cells may auto-background by the configured threshold and deliver later; the kernel stays busy until the cell finishes.

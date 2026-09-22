@@ -15,6 +15,8 @@ export interface JudgmentBatchProgress {
 	total: number;
 	/** Settled items that failed. */
 	failed: number;
+	/** Accumulated USD cost of every judgment attempt so far, including retries and failures. */
+	cost: number;
 	/** Whether the host is still processing the batch. */
 	running: boolean;
 	/** Whole-batch terminal error, when present. */
@@ -37,6 +39,9 @@ export function isJudgmentBatchProgress(value: unknown): value is JudgmentBatchP
 		!isNonNegativeInteger(progress.done) ||
 		!isNonNegativeInteger(progress.total) ||
 		!isNonNegativeInteger(progress.failed) ||
+		typeof progress.cost !== "number" ||
+		!Number.isFinite(progress.cost) ||
+		progress.cost < 0 ||
 		typeof progress.running !== "boolean" ||
 		(progress.error !== undefined && typeof progress.error !== "string")
 	) {

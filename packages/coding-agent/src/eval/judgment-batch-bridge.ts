@@ -18,6 +18,7 @@
  */
 import type { JudgmentState, Question } from "@oh-my-pi/pi-ai";
 import { isRecord, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { formatCost } from "@oh-my-pi/pi-tui/overlays/agent-hub-renderer";
 import type { ChainJudge } from "../judgment";
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { ToolSession } from "../tools";
@@ -66,6 +67,8 @@ export interface JudgmentBatchStatus {
 	total: number;
 	done: number;
 	failed: number;
+	/** Accumulated USD cost of every judgment attempt, including retries and failures. */
+	cost: number;
 	running: boolean;
 	/** Backend that answered the most recent item. */
 	model?: string;
@@ -165,6 +168,7 @@ export class JudgmentBatch {
 	readonly #finished = Promise.withResolvers<void>();
 	#cursor = 0;
 	#failed = 0;
+	#cost = 0;
 	#model: string | undefined;
 	#running = true;
 	#error: string | undefined;
@@ -236,6 +240,7 @@ export class JudgmentBatch {
 			total: this.total,
 			done: this.#settled.length,
 			failed: this.#failed,
+			cost: this.#cost,
 			running: this.#running,
 			...(this.#model === undefined ? {} : { model: this.#model }),
 			elapsedS: Math.round((Date.now() - this.#startedAt) / 100) / 10,
@@ -344,7 +349,9 @@ export class JudgmentBatch {
 		const signal = this.#controller.signal;
 		let judge: ChainJudge;
 		try {
-			judge = sessionJudge({ session: this.#session }, "judge_batch");
+			judge = sessionJudge({ session: this.#session }, "judge_batch", usage => {
+				this.#cost += usage.usage.cost.total;
+			});
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			for (const input of this.#inputs) this.#settle({ key: input.key, error: message });
@@ -392,7 +399,10 @@ export class JudgmentBatch {
 			}
 		}
 		if (signal.aborted) return { key: input.key, error: "cancelled" };
-		return { key: input.key, error: lastError instanceof Error ? lastError.message : String(lastError) };
+		return {
+			key: input.key,
+			error: lastError instanceof Error ? lastError.message : String(lastError),
+		};
 	}
 
 	#lastError(): string | undefined {
@@ -423,13 +433,14 @@ export class JudgmentBatch {
 			return;
 		}
 		this.#lastEventAt = now;
-		const { id, intent, done, total, failed, running, error } = this.status();
+		const { id, intent, done, total, failed, cost, running, error } = this.status();
 		const progress: JudgmentBatchProgress = {
 			id,
 			intent,
 			done,
 			total,
 			failed,
+			cost,
 			running,
 			...(error === undefined ? {} : { error }),
 		};
@@ -445,9 +456,9 @@ export class JudgmentBatch {
 	}
 
 	#summary(): string {
-		const { done, failed, model, elapsedS } = this.status();
+		const { done, failed, cost, model, elapsedS } = this.status();
 		const state = this.#running ? "judging" : this.#controller.signal.aborted ? "cancelled" : "judged";
-		return `${state} ${done}/${this.total}${failed ? ` · ${failed} failed` : ""}${model ? ` · ${model}` : ""} · ${elapsedS}s`;
+		return `${state} ${done}/${this.total}${failed ? ` · ${failed} failed` : ""}${cost > 0 ? ` · ${formatCost(cost)}` : ""}${model ? ` · ${model}` : ""} · ${elapsedS}s`;
 	}
 }
 
