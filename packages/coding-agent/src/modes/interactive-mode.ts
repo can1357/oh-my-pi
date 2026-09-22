@@ -1929,6 +1929,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Warm both on the native worker pool now so the first highlighted code
 		// block, bash command preview, or file diff does not stall the render thread.
 		setImmediate(() => {
+			// stop() can run before this fires (a fast test teardown, or a
+			// resumed-session switch right after startup); without this guard the
+			// callback re-reads live mocks/session state that the caller already
+			// tore down and can prewarm against a disposed session's settings.
+			if (!this.isInitialized) return;
 			void warmHighlighter();
 			if (!$env.PI_NO_TITLE && !this.sessionManager.getSessionName()) {
 				this.#inputController.prewarmTinyTitleModel();
