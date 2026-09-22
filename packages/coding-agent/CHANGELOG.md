@@ -37,6 +37,17 @@
 
 ### Added
 
+- Added `tui.titleSpinner` (`braille` | `dots` | `line`, default `braille`) to pick the terminal-title working-state spinner glyphs alongside the existing `tui.titleState` on/off toggle.
+- Customize the system prompt with Handlebars using live settings and tool data via `SYSTEM_TEMPLATE.md`, `--system-prompt-template`, or the SDK ([#12194](https://github.com/can1357/oh-my-pi/pull/12194) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+
+### Fixed
+
+- Fixed contradictory `systemPromptTemplate` and `customSystemPrompt` options being accepted with a fixed full `systemPrompt` replacement, including empty values ([#12194](https://github.com/can1357/oh-my-pi/pull/12194) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+- Added `Target.getTargets` to the browser relay's CDP surface so clients can enumerate eligible pages without attaching to or claiming them.
+- Added `images.maxDimension` (default 1568) to cap the long edge of images at insertion time, so a cost-sensitive user can send smaller images to the model ([#12573](https://github.com/can1357/oh-my-pi/pull/12573) by [@bse-ai](https://github.com/bse-ai)).
+- Added image, web, speech, dictation, judge, and memory model roles with ordered fallbacks, automatic migration of legacy backend settings, and `omp models --kind` filtering.
+- Added native OpenRouter image generation and model-selected web-plugin search, plus live TypeSafe judge-model discovery.
+- Fixed Codex rejecting the sloppy edit tool's grammar.
 - Added `find` tool for semantic workspace searching, allowing agents to locate behaviors and symbols using natural language
 - Added `find` CLI command for performing semantic workspace searches
 - Added batch evaluation with judge_batch(states, questions) / judgeBatch(...), including bounded background execution, incremental result and status access, per-item failure reporting, and the ability to wait for or reattach to jobs across turns or after a reset.

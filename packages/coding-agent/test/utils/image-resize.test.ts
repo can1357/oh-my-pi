@@ -1,6 +1,8 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
+import { ANTHROPIC_IMAGE_MAX_DIMENSION } from "@oh-my-pi/pi-ai/providers/anthropic";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { formatScreenshot, resizeImage } from "@oh-my-pi/pi-coding-agent/utils/image-resize";
 
 describe("formatScreenshot", () => {
@@ -192,6 +194,7 @@ describe("resizeImage defaults", () => {
 		expect(result.width).toBe(200);
 		expect(result.height).toBe(200);
 		expect(result.mimeType).toBe("image/png");
+		expect(result.data).toBe(smallPng);
 	});
 
 	it("respects custom maxWidth/maxHeight overrides (browser-tool case)", async () => {
@@ -255,6 +258,50 @@ describe("resizeImage defaults", () => {
 
 		expect(result.mimeType).not.toBe("image/webp");
 		expect(["image/png", "image/jpeg"]).toContain(result.mimeType);
+	});
+});
+
+describe("resizeImage long-edge cap", () => {
+	// 3000x1800 — a typical retina screenshot; exceeds the cap on the long edge only.
+	let screenshotPng: string;
+
+	beforeAll(async () => {
+		screenshotPng = await makeRedPng(3000, 1800);
+	});
+
+	afterEach(() => {
+		resetSettingsForTest();
+	});
+
+	it("caps the long edge at the shared Anthropic constant and preserves aspect ratio", async () => {
+		const result = await resizeImage({ type: "image", data: screenshotPng, mimeType: "image/png" });
+
+		expect(result.wasResized).toBe(true);
+		expect(result.width).toBe(ANTHROPIC_IMAGE_MAX_DIMENSION);
+		expect(result.height).toBe(Math.round((1800 * ANTHROPIC_IMAGE_MAX_DIMENSION) / 3000));
+		const meta = await new Bun.Image(Buffer.from(result.data, "base64")).metadata();
+		expect(meta.width).toBe(result.width);
+		expect(meta.height).toBe(result.height);
+	});
+
+	it("honors images.maxDimension once settings are initialized", async () => {
+		await Settings.init({ inMemory: true, overrides: { "images.maxDimension": 1024 } });
+
+		const result = await resizeImage({ type: "image", data: screenshotPng, mimeType: "image/png" });
+
+		expect(result.width).toBe(1024);
+		expect(result.height).toBe(Math.round((1800 * 1024) / 3000));
+	});
+
+	it("lets explicit maxWidth/maxHeight override images.maxDimension", async () => {
+		await Settings.init({ inMemory: true, overrides: { "images.maxDimension": 1024 } });
+
+		const result = await resizeImage(
+			{ type: "image", data: screenshotPng, mimeType: "image/png" },
+			{ maxWidth: 800, maxHeight: 800 },
+		);
+
+		expect(result.width).toBe(800);
 	});
 });
 

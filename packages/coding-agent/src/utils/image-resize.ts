@@ -1,5 +1,7 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { isSettingsInitialized, settings } from "../config/settings";
+import { getDefault } from "../config/settings-schema";
 
 export interface ImageResizeOptions {
 	maxWidth?: number;
@@ -24,7 +26,7 @@ export interface ResizedImage {
 }
 
 // 500KB target — aggressive compression; Anthropic's 5MB per-image cap is rarely the
-// binding constraint once images are downsized to 1568px (Anthropic's internal threshold).
+// binding constraint once images are downsized to the default 1568px long edge.
 const DEFAULT_MAX_BYTES = 500 * 1024;
 
 // Smallest edge length (px) vision backends reliably accept. They tile images into
@@ -34,11 +36,7 @@ const DEFAULT_MAX_BYTES = 500 * 1024;
 // documents as valid (200x200 = 64 visual tokens); undersized images are scaled up.
 const DEFAULT_MIN_DIMENSION = 200;
 
-const DEFAULT_OPTIONS: Required<Omit<ImageResizeOptions, "excludeWebP">> = {
-	// Anthropic's "internal recommended size" — Claude internally caps images at
-	// 1568px on the longest edge before vision processing.
-	maxWidth: 1568,
-	maxHeight: 1568,
+const DEFAULT_OPTIONS: Required<Omit<ImageResizeOptions, "excludeWebP" | "maxWidth" | "maxHeight">> = {
 	maxBytes: DEFAULT_MAX_BYTES,
 	jpegQuality: 80,
 	minDimension: DEFAULT_MIN_DIMENSION,
@@ -163,7 +161,10 @@ Buffer.prototype.toBase64 = function (this: Buffer) {
  */
 export async function resizeImage(img: ImageContent, options?: ImageResizeOptions): Promise<ResizedImage> {
 	const excludeWebP = options?.excludeWebP ?? isWebPExcluded();
-	const opts = { ...DEFAULT_OPTIONS, ...options, excludeWebP };
+	const maxDimension = isSettingsInitialized()
+		? settings.get("images.maxDimension")
+		: getDefault("images.maxDimension");
+	const opts = { ...DEFAULT_OPTIONS, maxWidth: maxDimension, maxHeight: maxDimension, ...options, excludeWebP };
 	const inputBuffer = Buffer.from(img.data, "base64");
 
 	try {

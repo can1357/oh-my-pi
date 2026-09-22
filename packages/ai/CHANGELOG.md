@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Changed the Anthropic many-image (>20) safety-net resize from 2000 px to the shared 1568 px long-edge cap (`ANTHROPIC_IMAGE_MAX_DIMENSION`), matching the standard-tier resolution limit ([#12573](https://github.com/can1357/oh-my-pi/pull/12573) by [@bse-ai](https://github.com/bse-ai)).
 ## [18.2.8] - 2026-09-21
 
 ### Added

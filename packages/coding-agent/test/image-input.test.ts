@@ -2,9 +2,13 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { ANTHROPIC_IMAGE_MAX_DIMENSION } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { readImageMetadata, removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 import { loadImageInput } from "../src/utils/image-loading";
 import { InvalidImageDataError } from "@oh-my-pi/pi-tui/chat/image-loading";
+
+const RED_1X1_PNG_BASE64 =
+	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
 
 describe("readImageMetadata", () => {
 	let testDir: string;
@@ -69,5 +73,32 @@ describe("readImageMetadata", () => {
 
 		const loading = loadImageInput({ path: imagePath, cwd: testDir, autoResize: false });
 		await expect(loading).rejects.toBeInstanceOf(InvalidImageDataError);
+	});
+
+	it("downscales an oversized image to the shared long-edge cap when reading it for the model", async () => {
+		const seed = Buffer.from(RED_1X1_PNG_BASE64, "base64");
+		const png = await new Bun.Image(seed).resize(3000, 1800, { filter: "nearest" }).png().bytes();
+		const imagePath = path.join(testDir, "screenshot.png");
+		fs.writeFileSync(imagePath, png);
+
+		const loaded = await loadImageInput({ path: imagePath, cwd: testDir, autoResize: true });
+
+		expect(loaded).toBeDefined();
+		const { width, height } = await new Bun.Image(Buffer.from(loaded!.data, "base64")).metadata();
+		expect(width).toBe(ANTHROPIC_IMAGE_MAX_DIMENSION);
+		expect(height).toBe(Math.round((1800 * ANTHROPIC_IMAGE_MAX_DIMENSION) / 3000));
+		expect(loaded!.dimensionNote).toContain("original 3000x1800");
+	});
+
+	it("keeps an image under the cap byte-identical", async () => {
+		const seed = Buffer.from(RED_1X1_PNG_BASE64, "base64");
+		const png = await new Bun.Image(seed).resize(400, 300, { filter: "nearest" }).png().bytes();
+		const imagePath = path.join(testDir, "small.png");
+		fs.writeFileSync(imagePath, png);
+
+		const loaded = await loadImageInput({ path: imagePath, cwd: testDir, autoResize: true });
+
+		expect(loaded?.data).toBe(Buffer.from(png).toString("base64"));
+		expect(loaded?.dimensionNote).toBeUndefined();
 	});
 });

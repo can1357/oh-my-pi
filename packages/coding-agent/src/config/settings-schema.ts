@@ -1,3 +1,4 @@
+import { ANTHROPIC_IMAGE_MAX_DIMENSION } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { ADVISOR_DEFAULT_BUDGET_PER_UPDATE } from "../advisor/emission-guard";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { DEFAULT_SHARE_URL, DEFAULT_STREAM_URL } from "@oh-my-pi/pi-wire";
@@ -853,7 +854,19 @@ export const SETTINGS_SCHEMA = {
 			tab: "appearance",
 			group: "Images",
 			label: "Auto-Resize Images",
-			description: "Resize large images to 2000x2000 max for better model compatibility",
+			description: "Downscale and recompress images to Max Image Dimension before they enter the conversation",
+		},
+	},
+
+	"images.maxDimension": {
+		type: "number",
+		default: ANTHROPIC_IMAGE_MAX_DIMENSION,
+		ui: {
+			tab: "appearance",
+			group: "Images",
+			label: "Max Image Dimension",
+			description:
+				"Longest edge in pixels for images entering the conversation (default 1568, Claude's standard-tier cap). Lowering it trades legibility for tokens on every request that carries the image: a 1000px square costs ~1296 visual tokens, a 4K screenshot on a high-resolution model up to 4784",
 		},
 	},
 

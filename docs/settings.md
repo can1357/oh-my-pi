@@ -746,7 +746,8 @@ tui:
 | `statusLine.transparent`    | boolean | `false`          | Use the terminal background for the status line.                          |
 | `statusLine.showHookStatus` | boolean | `true`           | Show hook status messages.                                                |
 | `terminal.showImages`       | boolean | `true`           | Render images inline (when the terminal supports it).                     |
-| `images.autoResize`         | boolean | `true`           | Resize large images for model compatibility.                              |
+| `images.autoResize`         | boolean | `true`           | Downscale and recompress images to `images.maxDimension` before they enter the conversation. |
+| `images.maxDimension`       | number  | `1568`           | Longest edge in pixels for images entering the conversation. 1568 is Claude's standard-tier cap; lower values trade legibility for tokens on every request that carries the image. |
 | `images.blockImages`        | boolean | `false`          | Never send images to providers.                                           |
 | `tui.hyperlinks`            | enum    | `auto`           | `off`, `auto`, `always`.                                                  |
 | `tui.mouse`                 | boolean | `false`          | Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target. Native text selection becomes Shift+drag and wheel scroll becomes Shift+wheel while on. |

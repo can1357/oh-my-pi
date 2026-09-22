@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
+import { ANTHROPIC_IMAGE_MAX_DIMENSION, streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { AssistantMessage, Context, ImageContent, Model, TextContent, Usage } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
@@ -140,8 +140,8 @@ describe("Anthropic many-image payload resizing", () => {
 		expect(largeImage.data).toBe(largeData);
 
 		const { width, height } = await new Bun.Image(Buffer.from(images[0].source.data, "base64")).metadata();
-		expect(width).toBeLessThanOrEqual(2000);
-		expect(height).toBeLessThanOrEqual(2000);
+		expect(width).toBe(ANTHROPIC_IMAGE_MAX_DIMENSION);
+		expect(height).toBe(ANTHROPIC_IMAGE_MAX_DIMENSION / 2);
 	});
 
 	it("leaves oversized images untouched below the many-image threshold", async () => {

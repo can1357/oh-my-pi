@@ -785,8 +785,17 @@ function decodeAnthropicToolName(name: string, isOAuthToken: boolean, escapeBuil
 	return name;
 }
 
+/**
+ * Longest edge (px) an image is downscaled to before it reaches an Anthropic
+ * model. 1568 is the standard-tier native cap; high-resolution models accept
+ * 2576 px but bill up to 4784 visual tokens per image, and every image stays
+ * resident in the cached prefix of each later request. It is also under the
+ * 2000 px per-image limit the API enforces on requests carrying more than 20
+ * images.
+ */
+export const ANTHROPIC_IMAGE_MAX_DIMENSION = 1568;
+
 const ANTHROPIC_MANY_IMAGE_THRESHOLD = 20;
-const ANTHROPIC_MANY_IMAGE_MAX_DIMENSION = 2000;
 
 function countAnthropicImageBlocks(messages: Message[]): number {
 	let count = 0;
@@ -845,11 +854,11 @@ async function resizeAnthropicManyImageBlock(block: ImageContent): Promise<Image
 		const inputBuffer = Buffer.from(block.data, "base64");
 		const { width, height } = await new Bun.Image(inputBuffer).metadata();
 		if (!width || !height) return block;
-		if (width <= ANTHROPIC_MANY_IMAGE_MAX_DIMENSION && height <= ANTHROPIC_MANY_IMAGE_MAX_DIMENSION) return block;
+		if (width <= ANTHROPIC_IMAGE_MAX_DIMENSION && height <= ANTHROPIC_IMAGE_MAX_DIMENSION) return block;
 
-		const scale = Math.min(ANTHROPIC_MANY_IMAGE_MAX_DIMENSION / width, ANTHROPIC_MANY_IMAGE_MAX_DIMENSION / height);
-		const targetWidth = Math.max(1, Math.min(ANTHROPIC_MANY_IMAGE_MAX_DIMENSION, Math.round(width * scale)));
-		const targetHeight = Math.max(1, Math.min(ANTHROPIC_MANY_IMAGE_MAX_DIMENSION, Math.round(height * scale)));
+		const scale = Math.min(ANTHROPIC_IMAGE_MAX_DIMENSION / width, ANTHROPIC_IMAGE_MAX_DIMENSION / height);
+		const targetWidth = Math.max(1, Math.min(ANTHROPIC_IMAGE_MAX_DIMENSION, Math.round(width * scale)));
+		const targetHeight = Math.max(1, Math.min(ANTHROPIC_IMAGE_MAX_DIMENSION, Math.round(height * scale)));
 
 		const [png, jpeg] = await Promise.all([
 			new Bun.Image(inputBuffer).resize(targetWidth, targetHeight).png().bytes(),
@@ -940,7 +949,7 @@ async function prepareAnthropicManyImageContext(context: Context, supportsImages
 	logger.debug("anthropic: resized oversized images for many-image request", {
 		imageCount,
 		resized: state.resized,
-		maxDimension: ANTHROPIC_MANY_IMAGE_MAX_DIMENSION,
+		maxDimension: ANTHROPIC_IMAGE_MAX_DIMENSION,
 	});
 	return { ...context, messages };
 }

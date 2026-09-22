@@ -30,7 +30,7 @@ export interface ProcessedFiles {
 }
 
 export interface ProcessFileOptions {
-	/** Whether to auto-resize images to 2000x2000 max. Default: true */
+	/** Whether to downscale images to `images.maxDimension`. Default: true */
 	autoResizeImages?: boolean;
 }
 
