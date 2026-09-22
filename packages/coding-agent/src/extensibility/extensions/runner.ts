@@ -493,6 +493,7 @@ interface ToolRegistrationScope {
 	signal?: AbortSignal;
 	closed: boolean;
 }
+type ToolRegistrationObserver = (tool: RegisteredTool, signal?: AbortSignal) => void | Promise<void>;
 
 /** Identity reported by a session that is not a subagent and received no explicit identity. */
 export const TOP_LEVEL_AGENT: ExtensionAgentIdentity = Object.freeze({
@@ -541,6 +542,8 @@ export class ExtensionRunner {
 	#commandDiagnostics: Array<{ type: string; message: string; path: string }> = [];
 	#toolRegistrationScope = new AsyncLocalStorage<ToolRegistrationScope>();
 	#toolRegistrationBarrier: Promise<void> | undefined;
+	#toolRegistrationObservers = new Set<ToolRegistrationObserver>();
+	#toolRegistrationUnsubscribers = new Map<ToolRegistrationObserver, () => void>();
 	#initialized = false;
 	/** Full load order, captured on the first {@link setSuspendedExtensions} call. */
 	#loadOrder: Extension[] | undefined;
@@ -861,6 +864,45 @@ export class ExtensionRunner {
 		this.#mode = mode;
 		this.#initialized = true;
 
+		// Re-initialize (for example, a mode switch rewiring runtime actions) must not
+		// accumulate process-wide registrations. Reload uses the same path after
+		// replacing the extension set.
+		this.#installFileFallbacks();
+
+		// Drain events buffered by emitCredentialDisabled() before initialize ran. The
+		// spread adds the `type` discriminator — `event` is the pi-ai shape (no `type`).
+		// Deferred by one microtask so callers that register an onError listener
+		// synchronously after initialize() see handler errors routed through it.
+		const pending = this.#pendingCredentialDisabled.splice(0);
+		queueMicrotask(() => {
+			for (const event of pending) {
+				this.emit({ type: "credential_disabled", ...event }).catch((error: unknown) => {
+					logger.warn("credential_disabled handler threw during initialize flush", {
+						provider: event.provider,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				});
+			}
+		});
+
+		// Drain events buffered by emitMcpNotification() before initialize ran, using the
+		// same deferred-microtask ordering as the credential-disabled drain above so any
+		// onError listener registered synchronously after initialize() still catches
+		// handler errors during flush.
+		const pendingMcp = this.#pendingMcpNotifications.splice(0);
+		queueMicrotask(() => {
+			for (const event of pendingMcp) {
+				this.emit({ type: "mcp_notification", ...event }).catch((error: unknown) => {
+					logger.warn("mcp_notification handler threw during initialize flush", {
+						server: event.server,
+						method: event.method,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				});
+			}
+		});
+	}
+	#installFileFallbacks(): void {
 		// Re-initialize (e.g. a mode switch rewiring UI/runtime actions) must not
 		// accumulate duplicate global registrations — drop the prior generation before
 		// installing this one's trampolines.
@@ -932,39 +974,6 @@ export class ExtensionRunner {
 				);
 			}
 		}
-
-		// Drain events buffered by emitCredentialDisabled() before initialize ran. The
-		// spread adds the `type` discriminator — `event` is the pi-ai shape (no `type`).
-		// Deferred by one microtask so callers that register an onError listener
-		// synchronously after initialize() see handler errors routed through it.
-		const pending = this.#pendingCredentialDisabled.splice(0);
-		queueMicrotask(() => {
-			for (const event of pending) {
-				this.emit({ type: "credential_disabled", ...event }).catch((error: unknown) => {
-					logger.warn("credential_disabled handler threw during initialize flush", {
-						provider: event.provider,
-						error: error instanceof Error ? error.message : String(error),
-					});
-				});
-			}
-		});
-
-		// Drain events buffered by emitMcpNotification() before initialize ran, using the
-		// same deferred-microtask ordering as the credential-disabled drain above so any
-		// onError listener registered synchronously after initialize() still catches
-		// handler errors during flush.
-		const pendingMcp = this.#pendingMcpNotifications.splice(0);
-		queueMicrotask(() => {
-			for (const event of pendingMcp) {
-				this.emit({ type: "mcp_notification", ...event }).catch((error: unknown) => {
-					logger.warn("mcp_notification handler threw during initialize flush", {
-						server: event.server,
-						method: event.method,
-						error: error instanceof Error ? error.message : String(error),
-					});
-				});
-			}
-		});
 	}
 
 	/**
@@ -1128,7 +1137,8 @@ export class ExtensionRunner {
 			const active = this.#loadOrder.filter(extension => !this.#suspendedExtensions.has(extension));
 			this.extensions.splice(0, this.extensions.length, ...active);
 		}
-
+		return { suspended, resumed };
+	}
 	/**
 	 * Supplies fresh `Extension` objects for {@link reloadExtensions}. Set by
 	 * whoever loaded the extensions in the first place, because only that caller
@@ -1157,15 +1167,14 @@ export class ExtensionRunner {
 	 *  1. `session_shutdown` lets extensions release what they own — file
 	 *     handles, sockets, child processes. From an extension's side this IS a
 	 *     shutdown: that instance never runs again.
-	 *  2. Managed timers are cleared unconditionally, including when a teardown
-	 *     handler throws. Otherwise a reloaded extension's `ctx.setInterval`
-	 *     keeps firing next to its replacement's, and two copies poll the same
-	 *     resource forever.
-	 *  3. Only then is the new set swapped in, in place (see
-	 *     {@link replaceExtensions}).
+	 *  2. Managed timers and process-wide file fallback registrations are cleared
+	 *     unconditionally, including when a teardown handler throws. Otherwise
+	 *     the old instance can keep acting beside its replacement.
+	 *  3. The new set is swapped in place (see {@link replaceExtensions}) and its
+	 *     file fallbacks are installed.
 	 *  4. `session_start` is re-emitted, because extensions do their
 	 *     per-session registration there. Without it the new modules are loaded
-	 *     but inert — which looks exactly like the reload not working.
+	 *     but inert, which looks exactly like the reload did nothing.
 	 *
 	 * A module that fails to import is reported in `errors` and is absent from
 	 * the new set; the others still load. A syntax error in one extension while
@@ -1189,9 +1198,12 @@ export class ExtensionRunner {
 			// the old code. The timer sweep below still runs.
 		}
 		this.clearManagedTimers();
+		this.disposeFileFallbacks();
 
 		const result = await reloader();
 		this.replaceExtensions(result.extensions);
+		this.#installFileFallbacks();
+		await this.#refreshRegisteredTools();
 		await this.emit({ type: "session_start" });
 		return { loaded: result.extensions.length, errors: result.errors };
 	}
@@ -1208,8 +1220,21 @@ export class ExtensionRunner {
 	replaceExtensions(next: readonly Extension[]): void {
 		this.#loadOrder = undefined;
 		this.#suspendedExtensions.clear();
+		for (const unsubscribe of this.#toolRegistrationUnsubscribers.values()) unsubscribe();
+		this.#toolRegistrationUnsubscribers.clear();
 		this.extensions.length = 0;
 		this.extensions.push(...next);
+		for (const observer of this.#toolRegistrationObservers) {
+			this.#toolRegistrationUnsubscribers.set(observer, this.#bindToolRegistrationObserver(observer));
+		}
+	}
+
+	async #refreshRegisteredTools(): Promise<void> {
+		for (const tool of this.getAllRegisteredTools()) {
+			for (const observer of this.#toolRegistrationObservers) {
+				await observer(tool, AbortSignal.timeout(extensionHandlerTimeoutMs));
+			}
+		}
 	}
 
 	/** Get all registered tools from all extensions. */
@@ -1237,7 +1262,17 @@ export class ExtensionRunner {
 	 * promises are drained before the lifecycle handler that registered them
 	 * completes, keeping the model tool snapshot and system prompt coherent.
 	 */
-	onToolRegistered(listener: (tool: RegisteredTool, signal?: AbortSignal) => void | Promise<void>): () => void {
+	onToolRegistered(listener: ToolRegistrationObserver): () => void {
+		this.#toolRegistrationObservers.add(listener);
+		this.#toolRegistrationUnsubscribers.set(listener, this.#bindToolRegistrationObserver(listener));
+		return () => {
+			this.#toolRegistrationObservers.delete(listener);
+			this.#toolRegistrationUnsubscribers.get(listener)?.();
+			this.#toolRegistrationUnsubscribers.delete(listener);
+		};
+	}
+
+	#bindToolRegistrationObserver(listener: ToolRegistrationObserver): () => void {
 		const subscriptions: Array<{ extension: Extension; listener: ToolRegistrationListener }> = [];
 		for (const extension of this.extensions) {
 			const trackRegistration = (pending: Promise<void>): void => {
