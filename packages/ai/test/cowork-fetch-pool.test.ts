@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as net from "node:net";
-import { coworkFetch, directAgent, MAX_SOCKETS_PER_HOST } from "@oh-my-pi/pi-ai/providers/cowork-fetch";
+import {
+	coworkFetch,
+	DEFAULT_MAX_SOCKETS_PER_HOST,
+	directAgent,
+	MAX_SOCKETS_PER_HOST,
+	resolveMaxSocketsPerHost,
+} from "@oh-my-pi/pi-ai/providers/cowork-fetch";
 
 /**
  * The Cowork transport shares one keepalive agent across every Anthropic
@@ -193,5 +199,22 @@ describe("coworkFetch connection pool", () => {
 		expect(queuedRequests()).toBe(0);
 		expect(server.opened).toBe(MAX_SOCKETS_PER_HOST + 1);
 		expect(openSockets()).toBeLessThanOrEqual(MAX_SOCKETS_PER_HOST);
+	});
+});
+
+describe("resolveMaxSocketsPerHost", () => {
+	it("uses the default when the override is unset or empty", () => {
+		expect(resolveMaxSocketsPerHost(undefined)).toBe(DEFAULT_MAX_SOCKETS_PER_HOST);
+		expect(resolveMaxSocketsPerHost("")).toBe(DEFAULT_MAX_SOCKETS_PER_HOST);
+	});
+
+	it("honours a positive integer override", () => {
+		expect(resolveMaxSocketsPerHost("16")).toBe(16);
+	});
+
+	it("ignores anything that is not a positive integer", () => {
+		for (const raw of ["0", "-4", "1.5", "lots", "Infinity"]) {
+			expect(resolveMaxSocketsPerHost(raw)).toBe(DEFAULT_MAX_SOCKETS_PER_HOST);
+		}
 	});
 });

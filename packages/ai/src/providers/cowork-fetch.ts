@@ -3,7 +3,7 @@ import * as https from "node:https";
 import * as stream from "node:stream";
 import * as tls from "node:tls";
 import * as zlib from "node:zlib";
-import { logger } from "@oh-my-pi/pi-utils";
+import { $env, logger } from "@oh-my-pi/pi-utils";
 import type { FetchImpl } from "../types";
 
 /** `host/path` for logging; query strings can carry keys. */
@@ -59,10 +59,23 @@ type RequestBody = string | Uint8Array;
  * surfacing the wait itself (a `providerRetryWait`-style event while a request
  * sits in the pool queue) is a deliberate follow-up, not this change.
  *
- * Deliberately not a knob: the value only has to sit above what the loop can
- * spawn, and `packages/ai` has no settings seam for a per-host socket budget.
+ * `PI_ANTHROPIC_MAX_SOCKETS` overrides it (positive integer; anything else is
+ * ignored with a debug log), following the `PI_CODEX_WEBSOCKET_*` precedent in
+ * this package. There is no settings knob: `packages/ai` has no settings seam
+ * for a per-host socket budget.
  */
-export const MAX_SOCKETS_PER_HOST = 128;
+export const DEFAULT_MAX_SOCKETS_PER_HOST = 128;
+
+/** Resolves the per-host cap from its env override, falling back to the default. */
+export function resolveMaxSocketsPerHost(raw: string | undefined): number {
+	if (raw === undefined || raw === "") return DEFAULT_MAX_SOCKETS_PER_HOST;
+	const value = Number(raw);
+	if (Number.isInteger(value) && value > 0) return value;
+	logger.debug("Ignoring PI_ANTHROPIC_MAX_SOCKETS: not a positive integer", { raw });
+	return DEFAULT_MAX_SOCKETS_PER_HOST;
+}
+
+export const MAX_SOCKETS_PER_HOST = resolveMaxSocketsPerHost($env.PI_ANTHROPIC_MAX_SOCKETS);
 
 /** Exported so tests can read the pool's socket and queue books. */
 export const directAgent = new https.Agent({ keepAlive: true, maxSockets: MAX_SOCKETS_PER_HOST });
