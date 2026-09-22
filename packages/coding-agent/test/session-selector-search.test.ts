@@ -1,9 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
-import {
-	rankSessionSearchMatches,
-	SessionSelectorComponent,
-} from "@oh-my-pi/pi-coding-agent/modes/components/session-selector";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { rankSessionSearchMatches, SessionSelectorComponent } from "@oh-my-pi/pi-tui/overlays/session-selector";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 
 /**
@@ -48,7 +45,7 @@ function makeCorpus(): SessionInfo[] {
 }
 
 interface Harness {
-	selector: SessionSelectorComponent;
+	selector: SessionSelectorComponent<SessionInfo>;
 	type: (text: string) => void;
 	/** Sessions currently in the filtered list, probed through the public selection surface. */
 	filtered: () => SessionInfo[];

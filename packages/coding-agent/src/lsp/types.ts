@@ -21,15 +21,6 @@ export const lspSchema = type({
 	payload: "string?",
 });
 
-export type LspParams = typeof lspSchema.infer;
-
-export interface LspToolDetails {
-	serverName?: string;
-	action: string;
-	success: boolean;
-	request?: LspParams;
-}
-
 // =============================================================================
 // Core LSP Protocol Types
 // =============================================================================
@@ -359,7 +350,12 @@ export interface ServerConfig {
 		statusRequestTimeoutMs?: number;
 	};
 	capabilities?: ServerCapabilities;
-	/** If true, this is a linter/formatter server (e.g., Biome) - used only for diagnostics/actions, not type intelligence */
+	/**
+	 * Marks a dedicated linter/formatter server (e.g. Biome, efm-langserver, ruff).
+	 * Excluded from type-intelligence (definition, hover, references), but preferred
+	 * over type-checkers when selecting the `formatOnWrite` formatter, so a configured
+	 * external formatter wins for file types a type-checker also claims.
+	 */
 	isLinter?: boolean;
 	/** Resolved absolute path to the command binary (set during config loading) */
 	resolvedCommand?: string;

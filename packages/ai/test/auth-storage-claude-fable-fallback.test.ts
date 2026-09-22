@@ -5,6 +5,7 @@ import {
 	AuthStorage,
 	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai/auth-storage";
+import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import * as claudeUsage from "@oh-my-pi/pi-ai/usage/claude";
 
@@ -298,6 +299,30 @@ describe("AuthStorage Claude Fable tier fallback", () => {
 		const retryKey = await storage.getApiKey("anthropic", "session-3", { modelId: "claude-fable-5" });
 		expect(retryKey).not.toBe(firstKey);
 		expect(["oat-2", "oat-3"]).toContain(retryKey as string);
+	});
+
+	it("keeps an organization denial blocked across model tiers and healthy usage reports", async () => {
+		const now = Date.now();
+		vi.spyOn(Date, "now").mockReturnValue(now);
+		vi.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage").mockImplementation(async params => {
+			const access = params.credential.type === "oauth" ? params.credential.accessToken : undefined;
+			const email = access === "oat-1" ? "a@example.com" : access === "oat-2" ? "b@example.com" : "c@example.com";
+			return withFable(baseReport(email), 0.2);
+		});
+		const deniedKey = await storage.getApiKey("anthropic", "session-3", { modelId: "claude-fable-5" });
+		expect(deniedKey).toBe("oat-1");
+		await storage.rotateSessionCredential("anthropic", "session-3", {
+			apiKey: deniedKey,
+			modelId: "claude-fable-5",
+			error: new ProviderHttpError("OAuth authentication is currently not allowed for this organization.", 403, {
+				code: "oauth_not_allowed_for_organization",
+			}),
+		});
+
+		expect(await storage.getApiKey("anthropic", "session-3", { modelId: "claude-sonnet-4-5" })).toBe("oat-2");
+		vi.spyOn(Date, "now").mockReturnValue(now + 6 * 60_000);
+		store.cache.clear();
+		expect(await storage.getApiKey("anthropic", "session-3", { modelId: "claude-fable-5" })).toBe("oat-2");
 	});
 
 	it("aborts a local usage lookup before marking the credential blocked", async () => {

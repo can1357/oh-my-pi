@@ -165,6 +165,22 @@ policies keyed on such a legacy name still apply to the renamed tool
 
 `tool-bridge.ts` passes each MCP `inputSchema` through `normalizeSchemaForMCP()` before registering it as a `CustomTool` schema.
 
+Before dispatch, shared tool-argument validation prefers an already matching
+`anyOf`/`oneOf` branch when normalizing null placeholders. Required nullable
+properties in that branch retain explicit `null` values; a nonmatching closed
+branch cannot remove them as unknown fields. Null cleanup/default substitution
+can combine with discriminator whitespace repair and schema-directed type
+coercion using the bounded repair pipeline inside a branch-local candidate.
+If no branch accepts that candidate, its repairs are discarded. The complete
+schema is still validated, including required fields, non-nullable properties,
+and `oneOf` exclusivity.
+Branch validation retains the complete schema's local-reference context,
+speculative-union restrictions on lossy repairs, and content-ancestor protection
+against identifier whitespace trimming.
+Bounded repair rounds reconsider null cleanup when a later normalization,
+such as identifier whitespace trimming, makes a branch viable; an invalid
+candidate is never carried forward solely because it changed.
+
 ### Outbound argument normalization
 
 Before either live or deferred tools send `tools/call`, the bridge normalizes

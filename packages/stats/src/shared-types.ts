@@ -586,6 +586,12 @@ export interface SessionTrace {
 	endedAt: number;
 	/** Root transcript mtime; doubles as the ETag. */
 	mtimeMs: number;
+	/**
+	 * Conditional-request fingerprint `"<rootMs>:<childHighMs>"` (see
+	 * traceFingerprintForEtag): the server ETag is built from this, so a
+	 * subagent-only append changes the ETag even when the root is untouched.
+	 */
+	etag: string;
 	/** DFS order, main first. */
 	tracks: TraceTrack[];
 	summary: TraceSummary;

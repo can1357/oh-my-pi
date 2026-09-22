@@ -6,6 +6,12 @@ import { parseStreamingJson } from "./json-parse";
 const LF = 0x0a;
 const CR = 0x0d;
 
+/**
+ * Split a byte stream on LF boundaries.
+ *
+ * Every yielded line owns its bytes and remains unchanged after the generator
+ * advances or drains. Line terminators are excluded.
+ */
 export async function* readLines(stream: ReadableStream<Uint8Array>, signal?: AbortSignal): AsyncGenerator<Uint8Array> {
 	const buffer = new ConcatSink();
 	const source = abortableSource(stream, signal);
@@ -131,7 +137,13 @@ export class ConcatSink {
 		this.#length = 0;
 	}
 
-	*appendAndFlushLines(chunk: Uint8Array) {
+	/**
+	 * Append a chunk and yield each complete LF-delimited line.
+	 *
+	 * Yielded lines are owned snapshots. Unlike {@link flush}, they remain
+	 * valid after this sink or the input chunk is mutated.
+	 */
+	*appendAndFlushLines(chunk: Uint8Array): Generator<Uint8Array> {
 		let pos = 0;
 		while (pos < chunk.length) {
 			const nl = chunk.indexOf(LF, pos);
@@ -142,12 +154,12 @@ export class ConcatSink {
 			const suffix = chunk.subarray(pos, nl);
 			pos = nl + 1;
 			if (this.isEmpty) {
-				yield suffix;
+				yield new Uint8Array(suffix);
 			} else {
 				this.append(suffix);
 				const payload = this.flush();
 				if (payload) {
-					yield payload;
+					yield new Uint8Array(payload);
 					this.clear();
 				}
 			}
@@ -288,7 +300,9 @@ async function* readSseFrames<T>(
 	signal?: AbortSignal,
 	onEvent?: SseEventObserver,
 ): AsyncGenerator<SseFrame<T>> {
-	for await (const sse of readSseEvents(stream, signal)) {
+	// The diagnostic observer is the only reader of `raw`; capture it exactly
+	// when one is attached so the hot path stays allocation-free.
+	for await (const sse of readSseEvents(stream, signal, onEvent ? { captureRaw: true } : undefined)) {
 		const isTrailing = trailingEvents.has(sse);
 		notifySseEventObserver(onEvent, sse);
 		const data = sse.data;
@@ -367,6 +381,15 @@ export async function* readSseJsonOrText<T>(
 export interface ServerSentEvent {
 	event: string | null;
 	data: string;
+	/**
+	 * Decoded wire lines for this event (`event:`/`data:`/etc.), for the
+	 * diagnostic pipeline. Populated only when the reader opts in via
+	 * {@link ReadSseEventsOptions.captureRaw} (or attaches an `onSseEvent`
+	 * observer to the JSON readers, which opt in automatically); otherwise
+	 * `[]`. Direct `readSseEvents` callers that need wire text must pass
+	 * `{ captureRaw: true }` — the field is allocation-free by default so
+	 * the token path pays no per-frame array/slice cost.
+	 */
 	raw: string[];
 	id?: string;
 	retry?: number;
@@ -379,7 +402,10 @@ interface SseEventState {
 	// of buffering an array and joining at flush. `null` means "no data: field
 	// seen yet" (distinct from a `data:` field with an empty value).
 	data: string | null;
-	raw: string[];
+	// Diagnostic wire lines, captured only when a reader asked for them (see
+	// `readSseEventsOptions.captureRaw`): per-frame array+slice allocation on
+	// the token path otherwise. `null` means capture is off.
+	raw: string[] | null;
 	id?: string;
 	retry?: number;
 }
@@ -390,19 +416,19 @@ const SSE_DECODER = new TextDecoder("utf-8");
 
 function flushSseEvent(state: SseEventState): ServerSentEvent | null {
 	if (state.event === null && state.data === null && state.id === undefined && state.retry === undefined) {
-		state.raw = [];
+		if (state.raw !== null) state.raw = [];
 		return null;
 	}
 	const event: ServerSentEvent = {
 		event: state.event,
 		data: state.data ?? "",
-		raw: state.raw,
+		raw: state.raw ?? [],
 	};
 	if (state.id !== undefined) event.id = state.id;
 	if (state.retry !== undefined) event.retry = state.retry;
 	state.event = null;
 	state.data = null;
-	state.raw = [];
+	if (state.raw !== null) state.raw = [];
 	state.id = undefined;
 	state.retry = undefined;
 	return event;
@@ -413,11 +439,11 @@ function pushSseLine(line: string, state: SseEventState): ServerSentEvent | null
 
 	// Comment line: keep in `raw` for diagnostic context, skip parsing.
 	if (line.charCodeAt(0) === 0x3a /* ':' */) {
-		state.raw.push(line);
+		state.raw?.push(line);
 		return null;
 	}
 
-	state.raw.push(line);
+	state.raw?.push(line);
 
 	const colon = line.indexOf(":");
 	const fieldName = colon === -1 ? line : line.slice(0, colon);
@@ -471,12 +497,24 @@ function pushSseLine(line: string, state: SseEventState): ServerSentEvent | null
  * }
  * ```
  */
+export interface ReadSseEventsOptions {
+	/**
+	 * Capture per-line wire text into `event.raw` for the diagnostic
+	 * pipeline (`onSseEvent` observers, raw-SSE viewer). Off by default:
+	 * every frame otherwise pays an array allocation plus one string slice
+	 * per line on the token path.
+	 */
+	captureRaw?: boolean;
+}
+
 export async function* readSseEvents(
 	stream: ReadableStream<Uint8Array>,
 	signal?: AbortSignal,
+	options?: ReadSseEventsOptions,
 ): AsyncGenerator<ServerSentEvent> {
 	const lineBuffer = new ConcatSink();
-	const state: SseEventState = { event: null, data: null, raw: [] };
+	const captureRaw = options?.captureRaw === true;
+	const state: SseEventState = { event: null, data: null, raw: captureRaw ? [] : null };
 	const source = abortableSource(stream, signal);
 	try {
 		for await (const chunk of source) {

@@ -257,7 +257,8 @@ describe("ModelRegistry runtime source cleanup", () => {
 		);
 		const registry = new ModelRegistry(authStorage, modelsPath);
 		await registry.refresh("offline");
-		expect(registry.find(provider, modelId)?.headers?.["X-Override"]).toBe("stale");
+		const configured = registry.find(provider, modelId);
+		expect(configured && (await registry.resolveModelHeaders(configured))?.["X-Override"]).toBe("stale");
 		registry.registerProvider(
 			"runtime-provider",
 			{
@@ -273,7 +274,8 @@ describe("ModelRegistry runtime source cleanup", () => {
 		await writeConfig(undefined);
 		registry.clearSourceRegistrations(sourceId);
 
-		expect(registry.find(provider, modelId)?.headers?.["X-Override"]).toBeUndefined();
+		const restored = registry.find(provider, modelId);
+		expect(restored && (await registry.resolveModelHeaders(restored))?.["X-Override"]).toBeUndefined();
 	});
 
 	test("unregisterProvider removes only the named provider and its login entry", () => {

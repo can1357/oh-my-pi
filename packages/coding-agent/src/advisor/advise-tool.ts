@@ -1,4 +1,6 @@
 import { type } from "@oh-my-pi/omptype";
+import { type AdvisorSeverity, type AdvisorNote } from "@oh-my-pi/pi-tui/chat/messages";
+export { type AdvisorSeverity, type AdvisorNote, type AdvisorMessageDetails } from "@oh-my-pi/pi-tui/chat/messages";
 import type {
 	AgentIdentity,
 	AgentTelemetryConfig,
@@ -20,26 +22,11 @@ const adviseSchema = type({
 
 export type AdviseParams = typeof adviseSchema.infer;
 
-export type AdvisorSeverity = "nit" | "concern" | "blocker";
-
 export interface AdviseDetails {
 	note: string;
 	severity?: AdvisorSeverity;
 	/** Which configured advisor produced this note (omitted for the default advisor). */
 	advisor?: string;
-}
-
-/** One queued advice note. */
-export interface AdvisorNote {
-	note: string;
-	severity?: AdvisorSeverity;
-	/** Which configured advisor produced this note (omitted for the default advisor). */
-	advisor?: string;
-}
-
-/** Details payload on the batched `advisor` custom message rendered in the transcript. */
-export interface AdvisorMessageDetails {
-	notes: AdvisorNote[];
 }
 
 /**

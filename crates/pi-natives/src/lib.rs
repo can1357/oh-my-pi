@@ -43,6 +43,7 @@ pub mod iofs;
 pub mod js;
 pub mod keys;
 pub mod live;
+pub mod mermaid;
 pub mod oauth_callback;
 /// PDF inspection and Markdown conversion.
 pub mod pdf;
@@ -265,7 +266,7 @@ fn create_windows_napi_tokio_runtime() -> Option<tokio::runtime::Runtime> {
 /// MUST stay in sync with `VERSION_SENTINEL_EXPORT` in
 /// `packages/natives/native/index.js` (which derives the name from
 /// `package.json#version`).
-#[napi(js_name = "__piNativesV18_2_2")]
+#[napi(js_name = "__piNativesV18_2_9")]
 pub const fn pi_natives_version_sentinel() {}
 
 /// Native module entry point: install crash diagnostics before any tool can

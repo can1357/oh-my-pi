@@ -20,8 +20,10 @@ import { EventEmitter } from "events";
 import { isKittyProtocolActive } from "./keys";
 
 const ESC = "\x1b";
-const BRACKETED_PASTE_START = "\x1b[200~";
-const BRACKETED_PASTE_END = "\x1b[201~";
+/** Terminal bracketed-paste open marker wrapping pasted input. */
+export const BRACKETED_PASTE_START = "\x1b[200~";
+/** Terminal bracketed-paste close marker wrapping pasted input. */
+export const BRACKETED_PASTE_END = "\x1b[201~";
 // Paste-mode recovery bounds: a lost/corrupted end marker (ssh/tmux
 // truncation) must not hang input forever or grow memory unboundedly.
 const PASTE_INACTIVITY_TIMEOUT_MS = 1000;
@@ -421,6 +423,12 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 	#escapeSearchOffset = 0;
 	#rawPasteCandidate = "";
 	#rawPasteTimer?: NodeJS.Timeout;
+	// Unbracketed raw-paste classification is a fallback for terminals that do
+	// not wrap pastes in DECSET 2004 markers. When the terminal confirms mode
+	// 2004 support, a genuine paste always arrives bracketed, so the heuristic
+	// can only misfire on keystrokes an event-loop stall batched into one read
+	// (issue #12540) — Terminal disables it via `setRawPasteClassification`.
+	#rawPasteClassificationEnabled = true;
 	#stringDiscardActive = false;
 	#stringDiscardBytes = 0;
 	#stringDiscardEscHeld = false;
@@ -490,6 +498,7 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		}
 
 		if (
+			this.#rawPasteClassificationEnabled &&
 			this.#buffer.length === 0 &&
 			str.indexOf(ESC) === -1 &&
 			(str.indexOf("\r") !== -1 || str.indexOf("\n") !== -1)
@@ -637,6 +646,21 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		this.#pasteOverlap = "";
 		this.#pasteBytes = 0;
 		this.emit("paste", content);
+	}
+
+	/**
+	 * Enable or disable unbracketed raw-paste classification. Terminal disables
+	 * it once DECRQM confirms bracketed-paste (mode 2004) support: a genuine
+	 * paste then always arrives wrapped, so the heuristic can only misfire on
+	 * keystrokes an event-loop stall batched into one read (issue #12540).
+	 * Disabling flushes any candidate already held by the classification window
+	 * as ordinary key events so no buffered input is lost.
+	 */
+	setRawPasteClassification(enabled: boolean): void {
+		this.#rawPasteClassificationEnabled = enabled;
+		if (!enabled && this.#rawPasteCandidate.length > 0) {
+			this.#flushRawPasteCandidate();
+		}
 	}
 
 	/** Start one fixed window from the first break-bearing raw read. */

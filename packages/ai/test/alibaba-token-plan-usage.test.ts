@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, mock, test } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import type { UsageFetchParams } from "@oh-my-pi/pi-ai/usage";
 import {
@@ -159,7 +159,6 @@ describe("QwenCloud Token Plan opt-in usage", () => {
 					protocol: "V2",
 					console: "ONE_CONSOLE",
 					productCode: "p_efm",
-					switchAgent: 12608464,
 					switchUserType: 3,
 					domain: "bailian.console.aliyun.com",
 					consoleSite: "BAILIAN_ALIYUN",
@@ -170,6 +169,7 @@ describe("QwenCloud Token Plan opt-in usage", () => {
 			},
 			V: "1.0",
 		});
+		expect(gatewayParams).not.toHaveProperty("Data.cornerstoneParam.switchAgent");
 		expect(report).toMatchObject({
 			provider: "alibaba-token-plan",
 			limits: [
@@ -181,6 +181,43 @@ describe("QwenCloud Token Plan opt-in usage", () => {
 			],
 		});
 		expect(report?.limits).toHaveLength(1);
+	});
+
+	test("warns with the gateway error code when China quota access is rejected", async () => {
+		let requestCount = 0;
+		const fetchMock: FetchImpl = () => {
+			requestCount++;
+			return Promise.resolve(
+				requestCount === 1
+					? new Response('<script>window.ALIYUN_CONSOLE_CONFIG = { SEC_TOKEN: "cn-sec-token" };</script>')
+					: Response.json({
+							code: "200",
+							data: {
+								success: false,
+								httpStatus: 200,
+								errorCode: "BailianGateway.Workspace.NotAuthorised",
+							},
+							successResponse: true,
+						}),
+			);
+		};
+		const warn = mock(() => {});
+		const credential = serializeAlibabaTokenPlanCredential(
+			"sk-sp-beijing",
+			"session_id=test",
+			ALIBABA_TOKEN_PLAN_CN_BASE_URL,
+		);
+
+		expect(
+			await alibabaTokenPlanUsageProvider.fetchUsage(params(credential), {
+				fetch: fetchMock,
+				logger: { warn, debug: () => {} },
+			}),
+		).toBeNull();
+		expect(warn).toHaveBeenCalledWith("Alibaba Token Plan usage request rejected", {
+			provider: "alibaba-token-plan",
+			errorCode: "BailianGateway.Workspace.NotAuthorised",
+		});
 	});
 
 	test("does not claim quota support for API-key-only credentials", async () => {

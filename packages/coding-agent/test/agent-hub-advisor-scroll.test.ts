@@ -1,3 +1,4 @@
+import { agentTranscriptSource } from "@oh-my-pi/pi-coding-agent/modes/agent-hub-runtime";
 /**
  * Regression: the fullscreen transcript viewer must align the header, body, and
  * footer on a single shared gutter. The transcript components carry their own
@@ -11,9 +12,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { AgentHubRemote } from "@oh-my-pi/pi-coding-agent/modes/components/agent-hub";
-import { AgentTranscriptViewer } from "@oh-my-pi/pi-coding-agent/modes/components/agent-transcript-viewer";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import type { AgentHubRemote } from "@oh-my-pi/pi-tui/overlays/agent-hub";
+import { AgentTranscriptViewer } from "@oh-my-pi/pi-tui/overlays/agent-transcript-viewer";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import {
@@ -149,6 +150,7 @@ function makeViewer(file: string, remote?: AgentHubRemote, ui?: TUI) {
 		status: "parked",
 	});
 	return new AgentTranscriptViewer({
+		transcript: agentTranscriptSource,
 		agentId: "Main/advisor",
 		registry: agents,
 		ui: ui ?? ({ requestRender: () => {}, requestComponentRender: () => {} } as never),

@@ -1,9 +1,10 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import * as path from "node:path";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { litellmModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models";
+import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -24,8 +25,10 @@ function expectSameModelObjects(models: readonly Model<Api>[], allModels: readon
 describe("ModelRegistry lazy bundled composition", () => {
 	const tempDirs: TempDir[] = [];
 	const authStorages: AuthStorage[] = [];
+	const spies: Array<{ mockRestore: () => void }> = [];
 
 	afterEach(async () => {
+		for (const spy of spies.splice(0)) spy.mockRestore();
 		for (const authStorage of authStorages.splice(0)) authStorage.close();
 		await Promise.all(tempDirs.splice(0).map(tempDir => tempDir.remove().catch(() => {})));
 	});
@@ -79,16 +82,39 @@ describe("ModelRegistry lazy bundled composition", () => {
 	});
 
 	test("query order preserves ordering, snapshots, and model identity", async () => {
-		const createRegistry = async (name: string): Promise<ModelRegistry> => {
+		const createRegistry = async (name: string, maskTypeSafeEnvAuth = false): Promise<ModelRegistry> => {
 			const tempDir = TempDir.createSync(`@model-registry-lazy-${name}-`);
 			tempDirs.push(tempDir);
 			const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
 			authStorages.push(authStorage);
 			authStorage.setRuntimeApiKey("anthropic", "test-key");
+			if (maskTypeSafeEnvAuth) {
+				const hasAuth = authStorage.hasAuth.bind(authStorage);
+				spies.push(
+					spyOn(authStorage, "hasAuth").mockImplementation(provider =>
+						provider === "typesafe" ? false : hasAuth(provider),
+					),
+				);
+			}
 			return new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 		};
 
 		const findFirstRegistry = await createRegistry("find-first");
+		const scopedRegistry = await createRegistry("scoped-first", true);
+		const scopedProviders = new Set(["anthropic", "local", "web", "typesafe"]);
+		const startupPool = scopedRegistry.getAvailableForProviders(scopedProviders);
+		expect(startupPool.some(model => model.provider === "anthropic")).toBe(true);
+		expect(startupPool.every(model => modelKind(model) === "chat")).toBe(true);
+		expect(startupPool.some(model => ["local", "web", "typesafe"].includes(model.provider))).toBe(false);
+		const scopedAllKinds = scopedRegistry.getAvailableForProviders(scopedProviders, "all");
+		expect(scopedAllKinds).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ provider: "local", kind: "tiny" }),
+				expect.objectContaining({ provider: "web", kind: "search" }),
+			]),
+		);
+		expect(scopedAllKinds.some(model => model.provider === "typesafe")).toBe(false);
+
 		const foundBeforeAll = findFirstRegistry.find("anthropic", "claude-sonnet-4-5");
 		expect(foundBeforeAll).toBeDefined();
 		const availableBeforeAll = findFirstRegistry.getAvailable();

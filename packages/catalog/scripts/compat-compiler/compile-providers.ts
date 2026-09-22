@@ -5,9 +5,9 @@
  * A provider file's root `provider "<id>"` node mixes two vocabularies: the
  * cascade (selectors + compat axes, `compile-cascade.ts`) and the catalog
  * entry nodes handled here — `default-model`, `env`, the boolean flags,
- * `discovery`, and `seed`. A file that declares `default-model` is a catalog
- * provider; a file without it is wire-compat only and may not carry any other
- * catalog node.
+ * `discovery`, `kind-apis`, and `seed`. A file that declares `default-model`
+ * is a catalog provider; a file without it is wire-compat only and may not
+ * carry any other catalog node.
  *
  * Seed rows *define* models rather than patching them. Wire and thinking axis
  * directives inside a seed `model` block become the row's explicit `compat` /
@@ -22,7 +22,14 @@ import type {
 	CompiledSeedModel,
 	SeedBundlePolicy,
 } from "../../src/compat/types";
-import type { KnownApi, TokenCost } from "../../src/types";
+import {
+	KIND_API_KINDS,
+	RUNNER_APIS,
+	type Api,
+	type KindApiKind,
+	type KnownApi,
+	type TokenCost,
+} from "../../src/types";
 import { axisFor, collectAxis, type RuleAxes } from "./compile-axes";
 import {
 	CompatCompileError,
@@ -72,16 +79,13 @@ export const PROVIDER_CATALOG_NODES: ReadonlySet<string> = new Set([
 	"dynamic-models-authoritative",
 	"skip-cross-provider-reference-fills",
 	"discovery",
+	"kind-apis",
 	"seed",
 ]);
 
 interface SeedDefaults {
-	api?: KnownApi;
+	api?: Api;
 	baseUrl?: string;
-}
-
-function isKnownApi(value: string): value is KnownApi {
-	return (KNOWN_APIS as readonly string[]).includes(value);
 }
 
 function isBundlePolicy(value: string): value is SeedBundlePolicy {
@@ -93,13 +97,16 @@ function requiredName(node: KdlNodeView): string {
 	return node.args[0];
 }
 
-function propApi(node: KdlNodeView): KnownApi | undefined {
-	const api = propString(node, "api");
-	if (api === undefined) return undefined;
-	if (!isKnownApi(api)) {
+function validateApi(node: KdlNodeView, api: string): Api {
+	if (!KNOWN_APIS.some(value => value === api) && !RUNNER_APIS.some(value => value === api)) {
 		throw new CompatCompileError(node.file, node.line, `unknown api \`${api}\``);
 	}
 	return api;
+}
+
+function propApi(node: KdlNodeView): Api | undefined {
+	const api = propString(node, "api");
+	return api === undefined ? undefined : validateApi(node, api);
 }
 
 function propNumber(node: KdlNodeView, name: string): number | undefined {
@@ -284,6 +291,21 @@ function parseSeed(node: KdlNodeView, provider: string): ParsedSeed {
 	return { seed: { bundle: bundle ?? DEFAULT_BUNDLE, precedence, models }, modelsFrom, node };
 }
 
+function parseKindApis(node: KdlNodeView): Partial<Record<KindApiKind, Api>> {
+	validateProps(node, []);
+	if (node.args.length > 0 || !node.children || node.children.length === 0) malformed(node);
+	const kindApis: Partial<Record<KindApiKind, Api>> = {};
+	for (const child of node.children) {
+		const kind = KIND_API_KINDS.find(value => value === child.name);
+		if (kind === undefined) unexpected(child, "kind-apis");
+		if (kindApis[kind] !== undefined) malformed(child);
+		validateProps(child, []);
+		if (child.children) malformed(child);
+		kindApis[kind] = validateApi(child, requiredName(child));
+	}
+	return kindApis;
+}
+
 function parseDiscovery(node: KdlNodeView): CompiledProviderDiscovery {
 	validateProps(node, DISCOVERY_PROPS);
 	if (node.args.length > 0) malformed(node);
@@ -342,6 +364,10 @@ function parseProvider(node: KdlNodeView): ParsedProvider | undefined {
 			case "discovery":
 				if (provider.discovery !== undefined) malformed(child);
 				provider.discovery = parseDiscovery(child);
+				break;
+			case "kind-apis":
+				if (provider.kindApis !== undefined) malformed(child);
+				provider.kindApis = parseKindApis(child);
 				break;
 			case "seed":
 				if (seed !== undefined) malformed(child);

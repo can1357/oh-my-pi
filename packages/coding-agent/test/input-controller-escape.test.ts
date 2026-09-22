@@ -372,7 +372,7 @@ describe("InputController escape behavior", () => {
 		expect(spies.abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL });
 	});
 
-	it("aborts a streaming loop iteration without pausing the loop", () => {
+	it("suspends a streaming loop iteration and pauses the loop", () => {
 		const { ctx, editor, spies } = createContext();
 		const pauseLoop = vi.fn();
 		ctx.loopModeEnabled = true;
@@ -383,9 +383,9 @@ describe("InputController escape behavior", () => {
 		controller.setupKeyHandlers();
 		editor.onEscape?.();
 
-		expect(pauseLoop).not.toHaveBeenCalled();
-		expect(spies.cancelPendingSubmission).not.toHaveBeenCalled();
 		expect(spies.abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL });
+		expect(pauseLoop).toHaveBeenCalledTimes(1);
+		expect(spies.cancelPendingSubmission).toHaveBeenCalledTimes(1);
 	});
 
 	it("pauses an idle loop and cancels its pending submission", () => {

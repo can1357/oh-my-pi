@@ -1,7 +1,6 @@
-import { type ApiKey, type ApiKeyResolver, type AuthStorage, withAuth } from "@oh-my-pi/pi-ai";
-import { $env } from "@oh-my-pi/pi-utils";
-import { resolveXAIHttpTransport, type XAIHttpProvider, type XAIHttpTransport } from "../../../lib/xai-http";
-import type { SearchCitation, SearchResponse, SearchSource, SearchUsage } from "../../../web/search/types";
+import { type Api, type AuthStorage, type Model, withAuth } from "@oh-my-pi/pi-ai";
+import type { XAIHttpTransport } from "../../../lib/xai-http";
+import type { SearchCitation, SearchResponse, SearchSource, SearchUsage } from "../types";
 import { SearchProviderError } from "../../../web/search/types";
 import { formatQuery, parseSearchQuery, type QuerySyntax } from "../query";
 import { clampNumResults } from "../utils";
@@ -10,11 +9,8 @@ import { SearchProvider } from "./base";
 import { classifyProviderHttpError, withHardTimeout } from "./utils";
 
 const XAI_DEFAULT_BASE_URL = "https://api.x.ai/v1";
-const XAI_WEB_SEARCH_MODEL = "grok-4.5";
-// grok-4.5 defaults reasoning.effort to "high"; xAI documents "low" for
-// latency-sensitive agentic use and simple tool calling
-// (docs.x.ai/developers/model-capabilities/text/reasoning). Web search is
-// latency-sensitive, so pin these calls low regardless of their configured timeout.
+// xAI web search is latency-sensitive, so keep reasoning effort low regardless
+// of the selected model's configured timeout.
 const XAI_WEB_SEARCH_REASONING_EFFORT = "low";
 const DEFAULT_NUM_RESULTS = 10;
 const MAX_NUM_RESULTS = 30;
@@ -122,7 +118,7 @@ function buildRequestBody(params: SearchParams): Record<string, unknown> {
 	}
 
 	const body: Record<string, unknown> = {
-		model: XAI_WEB_SEARCH_MODEL,
+		model: params.model.id,
 		input: [
 			{ role: "system", content: params.systemPrompt },
 			{ role: "user", content: query },
@@ -360,7 +356,11 @@ function applyResultCap(
 	};
 }
 
-function parseResponse(response: XAIResponsesResponse, resultCap: number): SearchResponse {
+function parseResponse(
+	response: XAIResponsesResponse,
+	resultCap: number,
+	authMode: "api_key" | "oauth",
+): SearchResponse {
 	const sources: SearchSource[] = [];
 	const citations: SearchCitation[] = [];
 	const seenUrls = new Set<string>();
@@ -395,66 +395,30 @@ function parseResponse(response: XAIResponsesResponse, resultCap: number): Searc
 		usage: parseUsage(response.usage),
 		model: response.model,
 		requestId: response.id,
-		authMode: "api_key",
+		authMode,
 	};
-}
-
-/**
- * Prefer `xai-oauth` only when its resolver cannot be shadowed by the shared
- * `XAI_API_KEY` fallback before reaching a lower-priority dedicated source.
- */
-function shouldPreferXAIOAuth(authStorage: AuthStorage): boolean {
-	if ($env.XAI_OAUTH_TOKEN) return true;
-
-	const origin = authStorage.getCredentialOrigin("xai-oauth");
-	if (!origin || origin.kind === "env") return false;
-	if ((origin.kind === "api_key" || origin.kind === "fallback") && $env.XAI_API_KEY) return false;
-	return true;
-}
-
-interface XAIWebSearchAuth {
-	provider: XAIHttpProvider;
-	keyOrResolver: ApiKey;
-}
-
-function resolveXAIWebSearchAuth(params: SearchParams): XAIWebSearchAuth {
-	const xaiResolver = params.authStorage.resolver("xai", {
-		sessionId: params.sessionId,
-	});
-	const xaiOAuthOrigin = params.authStorage.getCredentialOrigin("xai-oauth");
-	if (!shouldPreferXAIOAuth(params.authStorage)) {
-		return { provider: "xai", keyOrResolver: xaiResolver };
-	}
-
-	const xaiOAuthResolver = params.authStorage.resolver("xai-oauth", {
-		sessionId: params.sessionId,
-	});
-	const keyOrResolver: ApiKeyResolver = async ctx => {
-		const xaiOAuthKey = await xaiOAuthResolver(ctx);
-		if (xaiOAuthKey) {
-			const borrowedSharedEnvKey =
-				xaiOAuthOrigin?.kind === "oauth" &&
-				Boolean($env.XAI_API_KEY) &&
-				xaiOAuthKey === $env.XAI_API_KEY &&
-				xaiOAuthKey !== $env.XAI_OAUTH_TOKEN;
-			if (!borrowedSharedEnvKey) return xaiOAuthKey;
-		}
-		return xaiResolver(ctx);
-	};
-	return { provider: "xai-oauth", keyOrResolver };
 }
 
 /** Execute xAI Responses API web search. */
 export async function searchXAI(params: SearchParams): Promise<SearchResponse> {
-	const auth = resolveXAIWebSearchAuth(params);
-	const transport = params.modelRegistry
-		? resolveXAIHttpTransport(params.modelRegistry, auth.provider, XAI_WEB_SEARCH_MODEL)
-		: { baseURL: XAI_DEFAULT_BASE_URL };
+	if (params.model.provider !== "xai" && params.model.provider !== "xai-oauth") {
+		throw new SearchProviderError(
+			"xai",
+			`Selected model ${params.model.provider}/${params.model.id} is not an xAI model`,
+			400,
+		);
+	}
+	const transport: XAIHttpTransport = {
+		baseURL: params.model.baseUrl,
+		headers: await params.modelRegistry.resolveModelHeaders(params.model, params.signal),
+	};
 	const customEndpoint = transport.baseURL.replace(/\/+$/, "") !== XAI_DEFAULT_BASE_URL;
-	const credentialOrigin = params.authStorage.getCredentialOrigin(auth.provider);
+	const credentialOrigin = params.authStorage.getCredentialOrigin(params.model.provider);
+	const hasCommandBackedKey = params.modelRegistry.hasCommandBackedApiKey(params.model.provider);
 	if (
 		customEndpoint &&
-		auth.provider === "xai-oauth" &&
+		params.model.provider === "xai-oauth" &&
+		!hasCommandBackedKey &&
 		(credentialOrigin?.kind === "oauth" || credentialOrigin?.kind === "env")
 	) {
 		throw new SearchProviderError(
@@ -462,16 +426,27 @@ export async function searchXAI(params: SearchParams): Promise<SearchResponse> {
 			`Refusing to send official xAI OAuth credentials to custom endpoint ${transport.baseURL}. Configure an API key for provider "xai-oauth".`,
 		);
 	}
-	const keyOrResolver: ApiKey = customEndpoint
-		? params.authStorage.resolver(auth.provider, { sessionId: params.sessionId })
-		: auth.keyOrResolver;
-
+	const keyOrResolver = params.modelRegistry.resolver(params.model, params.sessionId);
 	const resultCap = clampNumResults(params.numSearchResults ?? params.limit, DEFAULT_NUM_RESULTS, MAX_NUM_RESULTS);
-	const response = await withAuth(keyOrResolver, (key: string) => callXAIResponses(key, params, transport), {
-		signal: params.signal,
-		missingKeyMessage: 'xAI credentials not found. Set XAI_API_KEY or configure an API key for provider "xai".',
-	});
-	const parsed = parseResponse(response, resultCap);
+	const response = await withAuth(
+		keyOrResolver,
+		async key => {
+			const requestTransport: XAIHttpTransport = {
+				baseURL: params.model.baseUrl,
+				headers: await params.modelRegistry.resolveModelHeaders(params.model, params.signal),
+			};
+			return callXAIResponses(key, params, requestTransport);
+		},
+		{
+			signal: params.signal,
+			missingKeyMessage: `xAI credentials not found for selected provider "${params.model.provider}".`,
+		},
+	);
+	const authMode =
+		params.model.provider === "xai-oauth" && (credentialOrigin?.kind === "oauth" || credentialOrigin?.kind === "env")
+			? "oauth"
+			: "api_key";
+	const parsed = parseResponse(response, resultCap, authMode);
 	if (!parsed.answer && parsed.sources.length === 0) {
 		throw new SearchProviderError("xai", "xAI web_search returned no answer or sources", 502);
 	}
@@ -483,8 +458,8 @@ export class XAIProvider extends SearchProvider {
 	readonly id = "xai";
 	readonly label = "xAI";
 
-	isAvailable(authStorage: AuthStorage): boolean {
-		return shouldPreferXAIOAuth(authStorage) || authStorage.hasAuth("xai");
+	isAvailable(authStorage: AuthStorage, model?: Model<Api>): boolean {
+		return authStorage.hasAuth(model?.provider ?? "xai");
 	}
 
 	search(params: SearchParams): Promise<SearchResponse> {

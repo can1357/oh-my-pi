@@ -3,8 +3,9 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { isVertexExpressOpenAIUrl } from "@oh-my-pi/pi-catalog/hosts";
 import { PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
+import { modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
 import { isRecord } from "@oh-my-pi/pi-utils";
-import { createLiveConfigHeaders } from "./model-config-values";
+import { createConfigHeaderResolver } from "./resolve-config-value";
 import type { ModelOverride } from "./models-config-schema";
 /** Provider override config (baseUrl, headers, apiKey, compat, transport). */
 export interface ProviderOverride {
@@ -71,17 +72,11 @@ export function resolveProviderBaseUrl<TApi extends Api>(
  * refresh — so the first `/model` switch after boot hits the raw OpenAI
  * chat-completions URL instead of the gateway's `/v1/pi/stream` (#2555).
  *
- * Merged headers are wrapped in `createLiveConfigHeaders` so `!command`
- * values keep resolving per request on the inference path, matching the
- * `modelOverrides`/`applyModelPatch` behavior — otherwise a discovery
- * provider would send the raw `!command` literal upstream (#10457).
- * The `authHeader`/`apiKey` override fields are threaded into the live
- * resolver too, so an `authHeader: true` + `apiKey` provider with no explicit
- * `headers:` block re-derives `Authorization` from the current `apiKey`
- * resolution each request — a 401 force-refresh (command-cache invalidation)
- * reaches the retry instead of resending the discovery-time baked bearer
- * (#10551). See `xiaomi-tp-discovery-merge.test.ts` and the `refresh()`
- * baseUrl-override regression in `model-registry.test.ts`.
+ * Merged config headers are retained behind an async request-boundary
+ * resolver so discovery and catalog composition never execute `!command`
+ * values. `authHeader` is resolved through the same hook, allowing a 401
+ * invalidation to re-mint both the API key and header credentials before the
+ * retry without exposing command-evaluating property access.
  */
 export function mergeDiscoveredModel<TApi extends Api>(
 	model: Model<TApi>,
@@ -96,14 +91,18 @@ export function mergeDiscoveredModel<TApi extends Api>(
 		return buildModel({
 			...toModelSpec(model),
 			baseUrl: resolveProviderBaseUrl(model.api, model.baseUrl ?? existing.baseUrl, providerOverride),
-			// providerOverride.headers (raw `!command`) must be the last live
-			// source: `model.headers` is a discovery-time resolved snapshot, so
-			// without this a rotated credential (401 → cache invalidation) would
-			// stay shadowed by the stale snapshot on the inference path (#10458).
-			headers: createLiveConfigHeaders([existing.headers, model.headers, providerOverride?.headers], {
-				authHeader: providerOverride?.authHeader,
-				apiKeyConfig: providerOverride?.apiKey,
-			}),
+			headers: undefined,
+			resolveHeaders: createConfigHeaderResolver(
+				[
+					existing.resolveHeaders ?? existing.headers,
+					model.resolveHeaders ?? model.headers,
+					providerOverride?.headers,
+				],
+				{
+					authHeader: providerOverride?.authHeader,
+					apiKeyConfig: providerOverride?.apiKey,
+				},
+			),
 			transport: providerOverride?.transport ?? existing.transport ?? model.transport,
 			remoteCompaction: mergeProviderRemoteCompactionConfig(
 				mergeRemoteCompactionConfig(existing.remoteCompaction, model.remoteCompaction),
@@ -117,7 +116,8 @@ export function mergeDiscoveredModel<TApi extends Api>(
 		return buildModel({
 			...toModelSpec(model),
 			baseUrl: resolveProviderBaseUrl(model.api, model.baseUrl, providerOverride),
-			headers: createLiveConfigHeaders([model.headers, providerOverride.headers], {
+			headers: undefined,
+			resolveHeaders: createConfigHeaderResolver([model.resolveHeaders ?? model.headers, providerOverride.headers], {
 				authHeader: providerOverride.authHeader,
 				apiKeyConfig: providerOverride.apiKey,
 			}),
@@ -156,8 +156,15 @@ export function providersWithAuthoritativeProjectCatalog(models: readonly Model<
 	return providers;
 }
 
-export function dropProviderModels(models: readonly Model<Api>[], providers: ReadonlySet<string>): Model<Api>[] {
-	return models.filter(model => !providers.has(model.provider));
+/** Removes a registry layer's provider models, optionally limited to one catalog kind. */
+export function dropProviderModels(
+	models: readonly Model<Api>[],
+	providers: ReadonlySet<string>,
+	options?: { kind?: ModelKind },
+): Model<Api>[] {
+	return models.filter(
+		model => !providers.has(model.provider) || (options?.kind !== undefined && modelKind(model) !== options.kind),
+	);
 }
 
 /**
@@ -239,6 +246,7 @@ export interface ModelPatch {
 	/** Whether Codex requests should prefer WebSocket transport. */
 	preferWebsockets?: boolean;
 	headers?: Record<string, string>;
+	resolveHeaders?: Model<Api>["resolveHeaders"];
 	compat?: ModelSpec<Api>["compat"];
 	contextPromotionTarget?: string;
 	compactionModel?: string;
@@ -285,15 +293,17 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 	}
 	let compat: ModelSpec<Api>["compat"];
 	if (transport === "merge") {
-		if (patch.headers) {
-			// Route merged headers through the live proxy so command-backed (`!cmd`)
-			// override values stay re-resolvable — a 401 refresh invalidates their
-			// cache and the next request re-runs the command (#9760).
-			result.headers = createLiveConfigHeaders([base.headers, patch.headers]);
+		if (patch.headers || patch.resolveHeaders) {
+			result.headers = undefined;
+			result.resolveHeaders = createConfigHeaderResolver([
+				base.resolveHeaders ?? base.headers,
+				patch.resolveHeaders ?? patch.headers,
+			]);
 		}
 		compat = mergeCompat(base.compatConfig, patch.compat);
 	} else {
 		result.headers = patch.headers;
+		result.resolveHeaders = patch.resolveHeaders;
 		compat = patch.compat;
 	}
 	const built = buildModel({ ...toModelSpec(result), compat } as ModelSpec<Api>);

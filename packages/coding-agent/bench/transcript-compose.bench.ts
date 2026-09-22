@@ -14,9 +14,9 @@
 
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { Settings } from "../src/config/settings";
-import { AssistantMessageComponent } from "../src/modes/components/assistant-message";
-import { TranscriptContainer } from "../src/modes/components/transcript-container";
-import { initTheme } from "../src/modes/theme/theme";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 
 const WIDTH = 100;
 const SIZES = [500, 5000, 50_000];

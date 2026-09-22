@@ -1,5 +1,5 @@
 import type { Settings } from "../config/settings";
-import type { SlashCommandIconName } from "../modes/theme/symbols";
+import type { SlashCommandIconName } from "@oh-my-pi/pi-tui/theme/symbols";
 import type { InteractiveModeContext, SubmittedUserInput } from "../modes/types";
 import type { AgentSession } from "../session/agent-session";
 import type { SessionManager } from "../session/session-manager";

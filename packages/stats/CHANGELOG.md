@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [18.2.9] - 2026-09-22
+
+### Fixed
+
+- Fixed background statistics spans to use unique identifiers and close jobs correctly.
+
+## [18.2.5] - 2026-09-17
+
+### Fixed
+
+- Improved session and fork-detection polling performance, reducing unnecessary filesystem and database work when monitoring sessions.
+
 ## [18.2.1] - 2026-09-15
 
 ### Fixed

@@ -394,6 +394,7 @@ function readRowUncached<TApi extends Api>(
 
 /** Whether a live model carries at least one request header. */
 function hasModelHeaders(model: Model<Api>): boolean {
+	if (model.resolveHeaders) return true;
 	const headers = model.headers;
 	if (!headers) return false;
 	for (const _key in headers) return true;
@@ -409,7 +410,7 @@ function hasModelHeaders(model: Model<Api>): boolean {
  * so a compatible cache can be consumed without running `buildModel`.
  */
 function toCachedModel<TApi extends Api>(model: Model<TApi>): PersistedModel<TApi> {
-	const { headers: _headers, ...rest } = model;
+	const { headers: _headers, resolveHeaders: _resolveHeaders, ...rest } = model;
 	return {
 		...rest,
 		supportsComputerUseConfig: model.supportsComputerUseConfig ?? null,
@@ -458,9 +459,11 @@ export function writeModelCache<TApi extends Api>(
 					// headers equal a trusted provider-wide fallback that the reader can
 					// re-derive without persisting it. This keeps reference-less models
 					// with constant or configured headers alive offline.
-					const matchesStatic = staticHeaderSource
-						? headersEqual(model.headers, staticHeaderSource.headers)
-						: headersEqual(model.headers, restorableHeaderFallback);
+					const matchesStatic = model.resolveHeaders
+						? staticHeaderSource?.resolveHeaders === model.resolveHeaders
+						: staticHeaderSource
+							? headersEqual(model.headers, staticHeaderSource.headers)
+							: headersEqual(model.headers, restorableHeaderFallback);
 					if (!matchesStatic) {
 						unrestorableHeaderModelIds.push(model.id);
 					}

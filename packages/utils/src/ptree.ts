@@ -464,7 +464,7 @@ export class ChildProcess<In extends InMask = InMask> {
 		return out + dec.decode();
 	}
 
-	async #readBytes(): Promise<Uint8Array> {
+	async #readBytes(): Promise<Uint8Array<ArrayBuffer>> {
 		const reader = this.proc.stdout.getReader();
 		this.#openPipeReaders++;
 		const chunks: Uint8Array[] = [];
@@ -498,7 +498,7 @@ export class ChildProcess<In extends InMask = InMask> {
 		return bytes;
 	}
 
-	async #readOutputBytes(waitForCleanExit = false): Promise<Uint8Array> {
+	async #readOutputBytes(waitForCleanExit = false): Promise<Uint8Array<ArrayBuffer>> {
 		const p = this.#readBytes();
 		if (this.#nothrow) return p;
 		const bytes = waitForCleanExit ? (await Promise.all([p, this.exitedCleanly]))[0] : await p;
@@ -515,7 +515,7 @@ export class ChildProcess<In extends InMask = InMask> {
 	}
 
 	async arrayBuffer(): Promise<ArrayBuffer> {
-		return (await this.#readOutputBytes()).buffer as ArrayBuffer;
+		return (await this.#readOutputBytes()).buffer;
 	}
 
 	async bytes(): Promise<Uint8Array> {

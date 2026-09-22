@@ -35,7 +35,8 @@ import pragmaticPersonality from "./prompts/system/personalities/pragmatic.md" w
 import projectPromptTemplate from "./prompts/system/project-prompt.md" with { type: "text" };
 import systemPromptTemplate from "./prompts/system/system-prompt.md" with { type: "text" };
 import { normalizeConcurrencyLimit } from "./task/parallel";
-import { type ActiveRepoContext, resolveActiveRepoContext } from "./utils/active-repo-context";
+import type { ActiveRepoContext } from "@oh-my-pi/pi-tui/status-line/host";
+import { resolveActiveRepoContext } from "./utils/active-repo-context";
 import { normalizePromptPath } from "./utils/prompt-path";
 import { AGENTS_MD_LIMIT, buildWorkspaceTree, type WorkspaceTree } from "./workspace-tree";
 
@@ -383,10 +384,53 @@ export function discoverTitleSystemPromptFile(cwd?: string): string | undefined 
 	return undefined;
 }
 
+export interface SystemPromptOverride {
+	kind: "template" | "text";
+	path: string;
+	/** Already-loaded capability content; it must not be resolved as a path again. */
+	content?: string;
+}
+
+/**
+ * Unified discovery for literal and template overrides. Project scope beats
+ * user scope; within each scope a literal beats a template: SYSTEM.md is the
+ * long-established override, so an existing literal keeps working until its
+ * author deliberately removes it in favor of a template. Ancestor walk-up
+ * and `.agent/.agents` coverage come from the capability providers, so a
+ * repo-root file wins from a nested cwd.
+ */
+export async function discoverSystemPromptOverride(cwd?: string): Promise<SystemPromptOverride | undefined> {
+	const result = await loadCapability<SystemPromptFile>(systemPromptCapability.id, {
+		cwd: cwd ?? getProjectDir(),
+	});
+	for (const level of ["project", "user"] as const) {
+		const text = result.items.find(item => item.level === level && (item.kind ?? "text") === "text");
+		if (text) return { kind: "text", path: text.path, content: text.content };
+		const template = result.items.find(item => item.level === level && (item.kind ?? "text") === "template");
+		if (template) {
+			if (!template.content.trim()) {
+				logger.warn("Ignoring empty system prompt template", { path: template.path });
+				continue;
+			}
+			return { kind: "template", path: template.path, content: template.content };
+		}
+	}
+	return undefined;
+}
+
+/** Unlike literal prompt inputs, explicit template paths never fall back to inline text. */
+export async function loadSystemPromptTemplateFile(filePath: string): Promise<string> {
+	const text = await Bun.file(filePath).text();
+	if (!text.trim()) {
+		throw new Error(`System prompt template must not be empty: ${filePath}`);
+	}
+	return text;
+}
+
 /** Resolve input as file path or literal string */
 export async function resolvePromptInput(input: string | undefined, description: string): Promise<string | undefined> {
 	if (!input) {
-		return undefined;
+		return input;
 	} else if (input.includes("\n")) {
 		return input;
 	}
@@ -594,6 +638,8 @@ export interface BuildSystemPromptOptions {
 	customPrompt?: string;
 	/** Already-loaded custom system prompt text; bypasses path resolution. */
 	resolvedCustomPrompt?: string;
+	/** Raw Handlebars template rendered with the default prompt's live context. */
+	systemPromptTemplate?: string;
 	/** Tools to include in prompt. */
 	tools?: Map<string, SystemPromptToolMetadata>;
 	/** Tool names to include in prompt. */
@@ -778,6 +824,30 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	} = options;
 	const inlineToolDescriptors = providedInlineToolDescriptors ?? false;
 	const resolvedCwd = cwd ?? getProjectDir();
+	let resolvedSystemPromptTemplate = options.systemPromptTemplate;
+	let resolvedCustomPromptInput = providedResolvedCustomPrompt;
+	const hasExplicitCustomPrompt = customPrompt !== undefined || providedResolvedCustomPrompt !== undefined;
+	if (resolvedSystemPromptTemplate !== undefined && hasExplicitCustomPrompt) {
+		throw new Error("systemPromptTemplate cannot be combined with a literal custom system prompt");
+	}
+	if (resolvedSystemPromptTemplate === undefined && !hasExplicitCustomPrompt) {
+		const override = await discoverSystemPromptOverride(resolvedCwd);
+		if (override?.kind === "template" && override.content !== undefined) {
+			resolvedSystemPromptTemplate = override.content;
+		} else if (override?.content !== undefined) {
+			resolvedCustomPromptInput = override.content;
+		}
+	}
+	const hasDiscoveredTemplate =
+		resolvedSystemPromptTemplate !== undefined && options.systemPromptTemplate === undefined;
+	if (resolvedSystemPromptTemplate !== undefined && !resolvedSystemPromptTemplate.trim()) {
+		if (hasDiscoveredTemplate) {
+			logger.warn("Ignoring empty discovered system prompt template; using the bundled prompt");
+			resolvedSystemPromptTemplate = undefined;
+		} else {
+			throw new Error("System prompt template must not be empty");
+		}
+	}
 
 	const prepDefaults = {
 		resolvedCustomPrompt: undefined as string | undefined,
@@ -828,12 +898,10 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		return result.value;
 	}
 
-	// Caller-supplied `customPrompt` / `resolvedCustomPrompt` owns block 0; the
-	// secondary capability-path `SYSTEM.md` walk-up MUST NOT silently augment it,
-	// because that would defeat CLI precedence over project/user `SYSTEM.md`.
+	// An explicit literal prompt or selected template owns block 0; the secondary
+	// capability-path SYSTEM.md walk-up must not silently augment either.
 	const callerControlsCustomPrompt =
-		(typeof providedResolvedCustomPrompt === "string" && providedResolvedCustomPrompt.length > 0) ||
-		(typeof customPrompt === "string" && customPrompt.length > 0);
+		hasExplicitCustomPrompt || resolvedSystemPromptTemplate !== undefined || resolvedCustomPromptInput !== undefined;
 	const systemPromptCustomizationPromise: Promise<string | null> = callerControlsCustomPrompt
 		? Promise.resolve(null)
 		: logger.time("loadSystemPromptFiles", loadSystemPromptFiles, { cwd: resolvedCwd });
@@ -908,8 +976,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	] = await Promise.all([
 		withDeadline(
 			"customPrompt",
-			providedResolvedCustomPrompt !== undefined
-				? Promise.resolve(providedResolvedCustomPrompt)
+			resolvedCustomPromptInput !== undefined
+				? Promise.resolve(resolvedCustomPromptInput)
 				: resolvePromptInput(customPrompt, "system prompt"),
 			prepDefaults.resolvedCustomPrompt,
 		),
@@ -1080,13 +1148,29 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		autoQaEnabled,
 		writeTransportOnly,
 	};
-	const rendered = prompt.render(resolvedCustomPrompt ? customSystemPromptTemplate : systemPromptTemplate, data);
+	const selectedTemplate = resolvedCustomPrompt
+		? customSystemPromptTemplate
+		: (resolvedSystemPromptTemplate ?? systemPromptTemplate);
+	let rendered: string;
+	try {
+		rendered = prompt.render(selectedTemplate, data);
+	} catch (error) {
+		if (resolvedSystemPromptTemplate === undefined) throw error;
+		if (!hasDiscoveredTemplate) {
+			throw new Error(`Invalid system prompt template: ${String(error)}`, { cause: error });
+		}
+		logger.warn("Ignoring invalid discovered system prompt template; using the bundled prompt", {
+			error: String(error),
+		});
+		resolvedSystemPromptTemplate = undefined;
+		rendered = prompt.render(systemPromptTemplate, data);
+	}
 	const systemPrompt = [rendered];
 	if (computerEnabled) {
 		systemPrompt.push(computerSafetyPrompt.trim());
 	}
-	// Custom prompt templates already render context files and append text; the
-	// project footer still carries environment, cwd, workspace, and dir-context.
+	// Literal overrides render context files and append text in their wrapper.
+	// Both the bundled template and user templates receive them in the footer.
 	const projectPrompt = prompt
 		.render(projectPromptTemplate, resolvedCustomPrompt ? { ...data, contextFiles: [], appendPrompt: "" } : data)
 		.trim();
@@ -1097,9 +1181,12 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		systemPrompt.push(activeRepoContextPrompt);
 	}
 
-	// The xd:// protocol section (with its device catalog) is only rendered by the
-	// default template; a resolved custom prompt uses a template that omits it.
+	// Claim delivery only when the rendered block 0 actually carries the xd://
+	// section, so a template that references {{xdevDocs}} keeps mount-notice
+	// dedupe while one that omits it stays honest.
 	const xdevCatalogNames =
-		!resolvedCustomPrompt && xdevTools.length > 0 ? xdevTools.map(mounted => mounted.name) : undefined;
+		!resolvedCustomPrompt && xdevTools.length > 0 && rendered.includes("xd://")
+			? xdevTools.map(mounted => mounted.name)
+			: undefined;
 	return { systemPrompt, xdevCatalogNames };
 }
