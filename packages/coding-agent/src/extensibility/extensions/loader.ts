@@ -344,8 +344,11 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		return { ...this.runtime.getServiceTiers() };
 	}
 
-	setServiceTier(family: ServiceTierFamily, tier: ServiceTier | undefined): void {
-		if (!isServiceTierFamily(family) || (tier !== undefined && !isServiceTierForFamily(family, tier))) {
+	setServiceTier(family: ServiceTierFamily, tier: ServiceTier | "none" | undefined): void {
+		if (
+			!isServiceTierFamily(family) ||
+			(tier !== undefined && tier !== "none" && !isServiceTierForFamily(family, tier))
+		) {
 			throw new TypeError(`Invalid service tier "${String(tier)}" for family "${String(family)}"`);
 		}
 		this.runtime.setServiceTier(family, tier);

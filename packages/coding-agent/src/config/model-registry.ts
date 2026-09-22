@@ -44,6 +44,7 @@ import {
 } from "@oh-my-pi/pi-catalog/provider-models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import { modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
+import { normalizeDoublewordBaseUrl } from "@oh-my-pi/pi-catalog/wire/doubleword";
 import { getAgentDir, isBunTestRuntime, logger, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
 import { resolveProviderModelReference } from "../config/model-resolver";
 import { generateCodexAttestation } from "../live/attestation";
@@ -1547,7 +1548,14 @@ export class ModelRegistry {
 							: providerConfig.discovery?.type === "openai-models-list" &&
 								  providerConfig.discovery.injectV1 === false
 								? normalizeBareDiscoveryBaseUrl(providerConfig.baseUrl)
-								: providerConfig.baseUrl,
+								: // Doubleword discovery normalizes onto `/v1`, but the raw
+									// override would otherwise win at merge time and point
+									// inference at `<base>/responses` instead of
+									// `<base>/v1/responses`. Normalize through the same
+									// helper so discovery and inference agree.
+									providerName === "doubleword" && providerConfig.baseUrl
+									? normalizeDoublewordBaseUrl(providerConfig.baseUrl)
+									: providerConfig.baseUrl,
 					headers: providerConfig.headers,
 					apiKey: providerConfig.apiKey,
 					authHeader: providerConfig.authHeader,

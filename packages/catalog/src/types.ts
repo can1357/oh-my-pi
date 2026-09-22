@@ -230,6 +230,28 @@ export type OpenAIReasoningDisableMode =
 export type OpenAIStreamMarkupHealingPattern = "kimi" | "dsml" | "qwen" | "thinking";
 
 /**
+ * Service tier hint for processing priority / cost control. These are the
+ * values providers consume on the wire:
+ *
+ * - OpenAI / OpenAI-Codex: sent verbatim as the `service_tier` field
+ *   (`flex`/`scale`/`priority`).
+ * - Google (Gemini API + Vertex AI): sent as the top-level `serviceTier`
+ *   field (`flex`/`priority`).
+ * - OpenRouter: passed through as `service_tier`; OpenRouter realizes it for
+ *   the OpenAI- and Google-family upstreams it supports and ignores it
+ *   otherwise.
+ * - Direct Anthropic: `"priority"` is translated into `speed: "fast"` plus the
+ *   fast-mode beta on supported Opus models. Other tiers are ignored.
+ * - OpenAI-compatible hosts that opt in with `supportsServiceTier`: sent as
+ *   `service_tier`, with `defaultServiceTier` supplying the value when the
+ *   session pins no tier of its own.
+ *
+ * Per-family scoping is expressed by `ServiceTierByFamily`, not by scoped
+ * sentinel values — see `serviceTierFamily` in `@oh-my-pi/pi-ai`.
+ */
+export type ServiceTier = "auto" | "default" | "flex" | "scale" | "priority";
+
+/**
  * Compatibility settings for openai-completions API.
  * Use this to override URL-based auto-detection for custom providers.
  */
@@ -388,6 +410,22 @@ export interface OpenAICompat {
 	wireModelIdMode?: "raw" | "cline-pass" | "firepass" | "fireworks" | "openrouter";
 	/** Extra fields to include in request body (e.g. gateway routing hints for OpenClaw-style proxies). */
 	extraBody?: Record<string, unknown>;
+	/**
+	 * Whether this endpoint accepts OpenAI's `service_tier` request field.
+	 * Opting in also enrolls the model in the `openai` service-tier family, so
+	 * the OpenAI tier setting and `/fast` drive it. Default: false for hosts
+	 * that aren't otherwise recognized as serving OpenAI-family models, so an
+	 * unknown gateway is never sent a field it may reject.
+	 */
+	supportsServiceTier?: boolean;
+	/**
+	 * Tier sent when the session resolves no tier of its own. For hosts whose
+	 * cheaper asynchronous path is opt-in on the wire (Doubleword serves
+	 * realtime unless `flex` is requested), this makes the reduced-rate tier
+	 * the default while leaving `/fast` free to override it per turn. Requires
+	 * `supportsServiceTier`. Default: unset (omit `service_tier`).
+	 */
+	defaultServiceTier?: ServiceTier;
 	/** Request-session header that should mirror the normalized prompt-cache key. Default: unset. */
 	promptCacheSessionHeader?: "x-grok-conv-id";
 	/** Whether chat-completions payloads should include provider-specific prompt-cache markers. */
@@ -742,6 +780,14 @@ export interface ResolvedOpenAISharedCompat {
 	supportsReasoningParams: boolean;
 	supportsSamplingParams: boolean;
 	supportsPenaltyAndStopParams: boolean;
+	/**
+	 * Whether the endpoint accepts `service_tier` (and joins the `openai` tier
+	 * family). Unset unless a provider/model rule opts in — an unknown host is
+	 * never sent a field it may reject.
+	 */
+	supportsServiceTier?: boolean;
+	/** Tier to send when the session resolves none; only consulted when `supportsServiceTier`. */
+	defaultServiceTier?: ServiceTier;
 	thinkingFormat: OpenAIReasoningFormat;
 	/** Kimi Code transport selected by live per-model protocol metadata. */
 	kimiApiFormat?: OpenAICompat["kimiApiFormat"];
@@ -823,6 +869,8 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "supportsReasoningSummary"
 			| "supportsSamplingParams"
 			| "supportsPenaltyAndStopParams"
+			| "supportsServiceTier"
+			| "defaultServiceTier"
 			| "thinkingFormat"
 			| "kimiApiFormat"
 			| "reasoningDisableMode"

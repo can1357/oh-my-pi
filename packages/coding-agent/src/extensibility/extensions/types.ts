@@ -1166,12 +1166,12 @@ export interface RegisteredCommand {
 /** Handler function type for events */
 export type ExtensionHandler<E, R = undefined> = (event: E, ctx: ExtensionContext) => Promise<R | void> | R | void;
 
-/** Service tiers accepted by each provider family. */
+/** Service tiers accepted by each provider family (`"none"` explicitly omits the field). */
 export type ExtensionServiceTier<Family extends ServiceTierFamily> = Family extends "anthropic"
-	? "priority"
+	? "priority" | "none"
 	: Family extends "google"
-		? "flex" | "priority"
-		: ServiceTier;
+		? "flex" | "priority" | "none"
+		: ServiceTier | "none";
 
 /**
  * ExtensionAPI passed to extension factory functions.
@@ -1437,8 +1437,9 @@ export interface ExtensionAPI {
 	getServiceTiers(): Readonly<ServiceTierByFamily>;
 
 	/**
-	 * Set one provider family's service tier for subsequent requests, or clear
-	 * its session override with `undefined`.
+	 * Set one provider family's service tier for subsequent requests, `"none"`
+	 * to explicitly omit the field (suppressing the model's default tier), or
+	 * clear its session override with `undefined`.
 	 */
 	setServiceTier<Family extends ServiceTierFamily>(
 		family: Family,
@@ -1653,7 +1654,7 @@ export type SetThinkingLevelHandler = (level: ThinkingLevel, persist?: boolean) 
 
 export type GetServiceTiersHandler = () => ServiceTierByFamily;
 
-export type SetServiceTierHandler = (family: ServiceTierFamily, tier: ServiceTier | undefined) => void;
+export type SetServiceTierHandler = (family: ServiceTierFamily, tier: ServiceTier | "none" | undefined) => void;
 
 /** Shared state created by loader, used during registration and runtime. */
 export interface ExtensionRuntimeState {

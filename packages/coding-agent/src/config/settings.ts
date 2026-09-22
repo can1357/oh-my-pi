@@ -2583,6 +2583,14 @@ export class Settings {
 				case "claude-only":
 					setTier("anthropic", "priority");
 					break;
+				case "none":
+					// Legacy explicit omit stays an explicit omit — distinct from
+					// the new "provider" default, which defers to the model's own
+					// defaultServiceTier.
+					setTier("openai", "none");
+					setTier("anthropic", "none");
+					setTier("google", "none");
+					break;
 				case "auto":
 				case "default":
 				case "flex":

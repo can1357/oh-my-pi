@@ -13,6 +13,7 @@ import {
 	type Model,
 	resolveApiKeyOnce,
 	seedApiKeyResolver,
+	serviceTierCompat,
 	streamSimple,
 	stripSchemaDescriptions,
 	type ToolCallProviderMetadata,
@@ -1789,8 +1790,14 @@ async function streamAssistantResponse(
 	const dynamicDisableReasoning = config.getDisableReasoning?.();
 	// `getServiceTier` is authoritative when present (replaces the static tier
 	// for both the wire request and telemetry), so callers can scope priority
-	// per model without touching the shared session `serviceTier`.
-	const effectiveServiceTier = config.getServiceTier ? config.getServiceTier(model) : config.serviceTier;
+	// per model without touching the shared session `serviceTier`. An absent
+	// tier falls back to the model's `defaultServiceTier` here — not just at
+	// the `mapOptionsForApi` boundary — so the span, usage events, and cost
+	// estimate agree with what is actually sent on the wire. `"none"` is the
+	// explicit omit sentinel and is preserved, never defaulted over.
+	const effectiveServiceTier =
+		(config.getServiceTier ? config.getServiceTier(model) : config.serviceTier) ??
+		serviceTierCompat(model)?.defaultServiceTier;
 	const harmonyMitigationEnabled = isHarmonyLeakMitigationTarget(model);
 	const harmonyAbortController = harmonyMitigationEnabled ? new AbortController() : undefined;
 	const requestSignal = harmonyAbortController

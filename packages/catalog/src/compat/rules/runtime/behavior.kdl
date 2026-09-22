@@ -146,6 +146,9 @@ behavior {
 	// the Muse Spark chat models.
 	exclude-models provider="meta" prefix="muse-image-" prefix="muse-voice-"
 	exclude-models provider="muse-code" prefix="muse-image-" prefix="muse-voice-"
+	// Doubleword's roster interleaves an embedding model and OCR SKUs with the
+	// chat weights; `/v1/models` carries no type field to tell them apart.
+	exclude-models provider="doubleword" substring="-embedding-" substring="ocr"
 	// NanoGPT's roster interleaves non-text SKUs by name token.
 	exclude-models provider="nanogpt" substring="embedding" substring="image" substring="vision" \
 		substring="audio" substring="speech" substring="transcribe" substring="moderation" \
