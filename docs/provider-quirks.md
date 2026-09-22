@@ -1416,6 +1416,28 @@ SiliconFlow (China) is the domestic China deployment of SiliconFlow's AI model p
 - **Dynamic-Only Model Discovery**: Deliberately omitted from `MODELS_DEV_PROVIDER_DESCRIPTORS` and static catalog generation (`scripts/generate-models.ts`), fetching available chat models live from `https://api.siliconflow.cn/v1/models`.
 - **Runtime Reference Hydration**: Live discovered models are cross-referenced with models.dev catalog entries (`SILICONFLOW_MODELS_DEV_DESCRIPTORS`) with a 5-second timeout (`SILICONFLOW_MODELS_DEV_REFERENCE_TIMEOUT_MS`) in `loadSiliconFlowModelsDevReferences` (`packages/catalog/src/provider-models/openai-compat.ts`) to hydrate pricing and limit metadata.
 
+## StepFun Step Plan (China) (`stepfun-cn`)
+
+StepFun Step Plan (China) is the Step Plan subscription on the China console (`https://platform.stepfun.com`). It uses the OpenAI Chat Completions transport at `https://api.stepfun.com/step_plan/v1`. The same key on `https://api.stepfun.com/v1` is the separate pay-as-you-go channel and is not this provider.
+
+### Special casings
+- **Output cap field**: The chat API documents `max_tokens`. The provider rule sets `max-tokens-field "max_tokens"` so requests do not send `max_completion_tokens`.
+- **Reasoning effort**: `step-5-preview`, `step-3.7-flash`, and `step-router-v1` take `low` / `medium` / `high`. `step-3.5-flash` and `step-3.5-flash-2603` take only `low` / `high`; an exact `models` rule sets that because the `step` family ladder includes `medium`. Apart from a 250K `max_tokens` ceiling, image and document input, and the `web_search` tool, the router takes the standard chat fields, `reasoning_effort` included.
+- **Reasoning replay**: Thinking arrives as both `reasoning` and the DeepSeek-compatible `reasoning_content`; the completions parser keeps the first non-empty field. Tool-call turns send the prior thinking back as `reasoning_content` (`requires-reasoning-content-for-tool-calls`), and an empty string rather than a synthetic placeholder when none was captured (`allows-synthetic-reasoning-content-for-tool-calls #false`). `step-router-v1` can hand multi-turn tool work to `deepseek-v4-pro`, which rejects tool-call history without the real text.
+- **No `store` or `developer` role**: Both are turned off. The published chat parameters do not include them.
+- **Router window**: `step-router-v1` can run on `step-3.7-flash` (256K) or `deepseek-v4-pro` (1M). The bundled row uses 256K so a flash route is not handed a longer prompt than that engine accepts. Images are not declared for the router or the 3.5 models.
+- **Subscription cost**: Bundled prices are zero. Step Plan debits monthly credits.
+
+### Auth & usage
+- **Environment variable**: `STEPFUN_CN_API_KEY` only. `STEP_API_KEY`, the name StepFun's docs use, is not read, so a pay-as-you-go key does not enable this provider.
+- **API Key Login**: `packages/catalog/src/compat/rules/auth/stepfun-cn.kdl` probes `POST https://api.stepfun.com/step_plan/v1/chat/completions` with `step-3.5-flash` and `max_tokens: 1`. The same key also works on the pay-as-you-go host, so a chat call on the Step Plan path is what exercises the plan. The probe is optional: only 401/403 reject the key. The key page is `https://platform.stepfun.com/interface-key`.
+- **No Usage Tracking**: No quota module under `packages/ai/src/usage/`.
+
+### Catalog model handling
+- **Catalog entry**: `packages/catalog/src/compat/rules/providers/stepfun-cn.kdl` (default model `step-5-preview`, `dynamic-models-authoritative`), paired with `stepfunCnModelManagerOptions` in `packages/catalog/src/provider-models/descriptors.ts`.
+- **Seeded windows**: `step-5-preview` is 1M context and 64K output. `step-3.7-flash` and both `step-3.5-flash` ids are 256K context with no pinned completion cap. `step-5-preview` and `step-3.7-flash` accept image input.
+- **Live roster**: With a key, `stepfunCnModelManagerOptions` fetches `/models` and drops the stepaudio speech SKUs via the `stepfun-cn` exclude-models rule. Known ids keep their seeded rows, so the listing cannot widen a documented effort ladder. An id the seed does not know takes the row's `enable_reason`, `max_input_tokens`, and `reasoning_effort_support_list` when present.
+
 ## Synthetic (`synthetic`)
 Synthetic is an AI platform offering dual API format support for its models, exposing both OpenAI-compatible (`https://api.synthetic.new/openai/v1/chat/completions`) and Anthropic-compatible (`https://api.synthetic.new/anthropic/v1/messages`) endpoints. Calls default to the `OpenAI Chat Completions` transport, but can switch dynamically to the `Anthropic Messages` transport when configured.
 

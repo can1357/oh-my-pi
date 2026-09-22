@@ -1,0 +1,114 @@
+// Step Plan, the China console's monthly Credit subscription.
+// Chat Completions base URL: https://api.stepfun.com/step_plan/v1
+// Pay-as-you-go `stepfun` stays unshipped. The Messages API is a documented
+// field subset, so this provider stays on openai-completions.
+// Costs are zero because the plan debits credits, not a USD meter.
+// The seed carries the documented roster's windows and effort ladders, and
+// live discovery keeps them for known ids (see stepfunCnModelManagerOptions).
+// step-3.5 and step-3.7 publish a 256K window and no completion cap.
+// step-router-v1 can land on step-3.7-flash (256K) or deepseek-v4-pro (1M);
+// the shared id keeps the smaller window so a flash route is not overfilled.
+// Its API ceiling is 250K output, which this client does not pin: the chat
+// completions transport still clamps a sent cap at 64K. Apart from that cap,
+// image input, and the web_search tool, the router takes the standard chat
+// fields, `reasoning_effort` included.
+
+provider "stepfun-cn" {
+	default-model "step-5-preview"
+	env "STEPFUN_CN_API_KEY"
+	dynamic-models-authoritative #true
+	skip-cross-provider-reference-fills #true
+
+	seed api="openai-completions" base-url="https://api.stepfun.com/step_plan/v1" bundle="always" {
+		model "step-5-preview" name="Step 5 Preview" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1000000 max-tokens=64000
+			thinking-mode "effort"
+			thinking-efforts "low" "medium" "high"
+			max-tokens-field "max_tokens"
+			supports-developer-role #false
+			supports-store #false
+			supports-reasoning-effort #true
+		}
+		model "step-3.7-flash" name="Step 3.7 Flash" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=256000
+			thinking-mode "effort"
+			thinking-efforts "low" "medium" "high"
+			max-tokens-field "max_tokens"
+			supports-developer-role #false
+			supports-store #false
+			supports-reasoning-effort #true
+		}
+		model "step-3.5-flash" name="Step 3.5 Flash" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=256000
+			thinking-mode "effort"
+			thinking-efforts "low" "high"
+			max-tokens-field "max_tokens"
+			supports-developer-role #false
+			supports-store #false
+			supports-reasoning-effort #true
+		}
+		model "step-3.5-flash-2603" name="Step 3.5 Flash 2603" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=256000
+			thinking-mode "effort"
+			thinking-efforts "low" "high"
+			max-tokens-field "max_tokens"
+			supports-developer-role #false
+			supports-store #false
+			supports-reasoning-effort #true
+		}
+		model "step-router-v1" name="Step Router V1" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=256000
+			thinking-mode "effort"
+			thinking-efforts "low" "medium" "high"
+			max-tokens-field "max_tokens"
+			supports-developer-role #false
+			supports-store #false
+			supports-reasoning-effort #true
+		}
+	}
+
+	// The chat API documents `max_tokens`. `store` and `developer` are absent
+	// from that surface.
+	max-tokens-field "max_tokens"
+	supports-developer-role #false
+	supports-store #false
+	supports-reasoning-effort #true
+	// Step Plan returns thinking as `reasoning` and as the DeepSeek-compatible
+	// `reasoning_content`. step-router-v1 can hand multi-turn tool work to
+	// deepseek-v4-pro, which needs the prior reasoning text on tool-call turns
+	// and rejects a synthetic placeholder, so the real text is replayed.
+	reasoning-content-field "reasoning_content"
+	requires-reasoning-content-for-tool-calls #true
+	allows-synthetic-reasoning-content-for-tool-calls #false
+	thinking-mode "effort"
+	class "stepfun" {
+		family "step" {
+			thinking-efforts "low" "medium" "high"
+		}
+	}
+	// residue: only low and high are documented for the step-3.5 pair (the
+	// Chat Completion reference for 2603, models.dev's Step Plan entry for
+	// step-3.5-flash), so the family ladder must not offer them medium.
+	models "step-3.5-flash" "step-3.5-flash-2603" {
+		thinking-efforts "low" "high"
+	}
+	// `/models` carries no modality. These two SKUs accept images.
+	models "step-5-preview" "step-3.7-flash" {
+		input-modalities "text" "image"
+	}
+}

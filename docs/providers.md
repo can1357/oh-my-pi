@@ -109,6 +109,7 @@ Each provider has one or more environment variables that supply a key when no st
 | `deepseek`                       | `DEEPSEEK_API_KEY`                                                            |
 | `siliconflow`                    | `SILICONFLOW_API_KEY`                                                         |
 | `siliconflow-cn`                 | `SILICONFLOW_CN_API_KEY`                                                      |
+| `stepfun-cn`                     | `STEPFUN_CN_API_KEY`                                                          |
 | `fireworks`                      | `FIREWORKS_API_KEY`                                                           |
 | `together`                       | `TOGETHER_API_KEY`                                                            |
 | `coreweave`                      | `COREWEAVE_API_KEY`, then `WANDB_API_KEY`                                     |

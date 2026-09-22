@@ -63,6 +63,7 @@ export type KnownProvider =
 	| "siliconflow-cn"
 	| "singularityapi-dev"
 	| "singularityapi-tech"
+	| "stepfun-cn"
 	| "synthetic"
 	| "together"
 	| "typesafe"

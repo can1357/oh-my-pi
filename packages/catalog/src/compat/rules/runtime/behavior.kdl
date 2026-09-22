@@ -156,6 +156,12 @@ behavior {
 		token="i2i" token="i2v" token="image" token="speech" token="t2i" token="t2v" token="tts" token="video" \
 		substring="dall-e" substring="dalle" substring="flux" substring="imagen" substring="sora" \
 		substring="veo" substring="whisper"
+	// Step Plan's /v1/models carries no type field. The plan roster includes the
+	// stepaudio speech SKUs (realtime, chat, TTS, ASR); the other markers keep
+	// StepFun's image, embedding, and moderation ids out if the listing adds them.
+	exclude-models provider="stepfun-cn" substring="audio" substring="-tts" substring="-asr" \
+		substring="realtime" substring="music" substring="embed" substring="image" substring="rerank" \
+		substring="voice" substring="speech" substring="moderation"
 	// SiliconFlow's /v1/models lists embeddings, rerankers, and image/audio/
 	// video generators with no per-model type field.
 	exclude-models provider="siliconflow" substring="embedding" substring="reranker" substring="bge-" \

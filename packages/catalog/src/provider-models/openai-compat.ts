@@ -2009,6 +2009,77 @@ export function siliconflowCnModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// StepFun Step Plan (China)
+// ---------------------------------------------------------------------------
+
+const STEPFUN_CN_BASE_URL = "https://api.stepfun.com/step_plan/v1";
+
+export interface StepFunCnModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * A Step Plan `/models` row. The documented example shows bare ids, but the
+ * live listings also report a reasoning switch, the input window, and the
+ * accepted `reasoning_effort` values (recorded by models.dev's StepFun
+ * entries, 2026-09). Every field may be absent.
+ */
+interface StepFunModelRecord extends OpenAICompatibleModelRecord {
+	enable_reason?: unknown;
+	max_input_tokens?: unknown;
+	reasoning_effort_support_list?: unknown;
+}
+
+/**
+ * Known ids keep their reviewed seed row through the bundled reference, so a
+ * listing cannot widen a documented effort ladder. An id the seed does not
+ * know yet takes the row's own metadata, so a model added to the plan gets
+ * its advertised efforts and window before the seed catches up.
+ */
+function mapStepFunCnModel(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+	reference: ModelSpec<"openai-completions"> | undefined,
+): ModelSpec<"openai-completions"> {
+	const model = mapWithBundledReference(entry, defaults, reference);
+	if (reference) return model;
+	const record = entry as StepFunModelRecord;
+	const advertised: readonly unknown[] = Array.isArray(record.reasoning_effort_support_list)
+		? record.reasoning_effort_support_list
+		: [];
+	const efforts = THINKING_EFFORTS.filter(effort => advertised.includes(effort));
+	const thinking: ThinkingConfig | undefined = efforts.length > 0 ? { mode: "effort", efforts } : undefined;
+	return {
+		...model,
+		reasoning: record.enable_reason === true || thinking !== undefined,
+		...(thinking && { thinking }),
+		contextWindow: toPositiveNumber(record.max_input_tokens, model.contextWindow),
+	};
+}
+
+/**
+ * Step Plan's `/models` lists the stepaudio speech SKUs next to the chat
+ * roster and carries no per-model type field. The `stepfun-cn`
+ * exclude-models rule drops them; the live list is authoritative.
+ */
+export function stepfunCnModelManagerOptions(
+	config?: StepFunCnModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return createOpenAICompatibleModelManagerOptions({
+		api: "openai-completions",
+		providerId: "stepfun-cn",
+		defaultBaseUrl: STEPFUN_CN_BASE_URL,
+		config,
+		requireApiKey: true,
+		dynamicModelsAuthoritative: true,
+		filterModel: (_entry, model) => !isExcludedModel("stepfun-cn", model.id),
+		mapModel: mapStepFunCnModel,
+	});
+}
+
+// ---------------------------------------------------------------------------
 // 6.7 Zhipu Coding Plan
 // ---------------------------------------------------------------------------
 
