@@ -6,10 +6,6 @@
 
 - Explicit CLI model selection now discovers a requested live-only provider when its cache is empty.
 
-### Changed
-
-- Updated server-side fallback documentation and logic to target claude-opus-5-5
-- Added support for claude-opus-5-5 to model priority registry
 ## [18.2.10] - 2026-09-22
 
 ### Added
