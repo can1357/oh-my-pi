@@ -36,16 +36,47 @@ export function formatKernelRssRecycleAnnotation(rssMb: number, maxRssMb: number
 	return `eval kernel RSS ${rssMb}MB exceeded python.maxRssMb=${maxRssMb}; the kernel was recycled and the next cell starts fresh.`;
 }
 
-/** Read a process's RSS in kilobytes, or undefined when it cannot be sampled. */
+type RssAnnotatedOutput = {
+	output: string;
+	totalLines: number;
+	totalBytes: number;
+	outputLines: number;
+	outputBytes: number;
+};
+
+/** Append the recycle note and keep line/byte summaries describing the returned text. */
+export function appendRssRecycleAnnotation<T extends RssAnnotatedOutput>(result: T, note: string): T {
+	const prefix = result.output.length === 0 || result.output.endsWith("\n") ? result.output : `${result.output}\n`;
+	const output = `${prefix}${note}\n`;
+	const addedBytes = Buffer.byteLength(output, "utf8") - Buffer.byteLength(result.output, "utf8");
+	return {
+		...result,
+		output,
+		totalLines: result.totalLines + 1,
+		totalBytes: result.totalBytes + addedBytes,
+		outputLines: result.outputLines + 1,
+		outputBytes: result.outputBytes + addedBytes,
+	};
+}
+
+/**
+ * Read a process's RSS in kilobytes, or undefined when it cannot be sampled.
+ * Spawn, read, and exit failures are best-effort: a missing `ps` must not turn
+ * a successful Python cell into a tool failure. Windows has no `ps -o rss=`.
+ */
 export async function readProcessRssKb(pid: number): Promise<number | undefined> {
 	if (process.platform === "win32") return undefined;
 	if (!Number.isInteger(pid) || pid <= 1) return undefined;
-	const proc = Bun.spawn(["ps", "-o", "rss=", "-p", String(pid)], {
-		stdout: "pipe",
-		stderr: "ignore",
-	});
-	const text = await new Response(proc.stdout).text();
-	const code = await proc.exited;
-	if (code !== 0) return undefined;
-	return parsePsRssKb(text);
+	try {
+		const proc = Bun.spawn(["ps", "-o", "rss=", "-p", String(pid)], {
+			stdout: "pipe",
+			stderr: "ignore",
+		});
+		const text = await new Response(proc.stdout).text();
+		const code = await proc.exited;
+		if (code !== 0) return undefined;
+		return parsePsRssKb(text);
+	} catch {
+		return undefined;
+	}
 }

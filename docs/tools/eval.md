@@ -129,7 +129,7 @@ With `eval.autoBackground.enabled` (default `false`), a cell that outlives `eval
 
 ### Python (`py`)
 
-- Retained kernels are keyed by `python:${sessionId}`, normalized cwd, and interpreter. `python.kernelMode="per-call"` instead creates and shuts down a fresh kernel for each invocation. In session mode, a kernel whose RSS exceeds `python.maxRssMb` (default 1024; `0` disables) is recycled after the cell.
+- Retained kernels are keyed by `python:${sessionId}`, normalized cwd, and interpreter. `python.kernelMode="per-call"` instead creates and shuts down a fresh kernel for each invocation. In session mode on POSIX, a kernel whose `ps` RSS exceeds `python.maxRssMb` (default 1024; `0` disables) is recycled after in-flight cells on that kernel finish. Windows cannot sample RSS, so the cap does not recycle there.
 - The runner uses one persistent asyncio event loop, so top-level `await` works; `asyncio.run(...)` is invalid there.
 - MIME frames support status, PNG, JSON, markdown, plain text, and HTML-to-markdown conversion.
 - Interactive stdin is rejected with `Kernel requested stdin; interactive input is not supported.`

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
 	DEFAULT_PYTHON_MAX_RSS_MB,
+	appendRssRecycleAnnotation,
 	formatKernelRssRecycleAnnotation,
 	kernelRssExceedsLimit,
 	normalizeMaxRssMb,
@@ -58,10 +59,43 @@ describe("formatKernelRssRecycleAnnotation", () => {
 	});
 });
 
+describe("appendRssRecycleAnnotation", () => {
+	test("updates line and byte summaries for a truncated cell", () => {
+		const note = formatKernelRssRecycleAnnotation(2, 1);
+		const next = appendRssRecycleAnnotation(
+			{
+				output: "partial",
+				totalLines: 40,
+				totalBytes: 4000,
+				outputLines: 1,
+				outputBytes: 7,
+			},
+			note,
+		);
+		expect(next.output.endsWith(`${note}\n`)).toBe(true);
+		expect(next.outputLines).toBe(2);
+		expect(next.outputBytes).toBe(Buffer.byteLength(next.output, "utf8"));
+		expect(next.totalLines).toBe(41);
+		expect(next.totalBytes).toBe(4000 + (next.outputBytes - 7));
+	});
+});
+
 describe("readProcessRssKb", () => {
 	test("reads a live pid on posix", async () => {
 		if (process.platform === "win32") return;
 		const rssKb = await readProcessRssKb(process.pid);
 		expect(rssKb).toBeGreaterThan(0);
+	});
+
+	test("returns undefined when ps cannot be spawned", async () => {
+		const original = Bun.spawn;
+		Bun.spawn = (() => {
+			throw new Error('Executable not found in $PATH: "ps"');
+		}) as typeof Bun.spawn;
+		try {
+			expect(await readProcessRssKb(process.pid)).toBeUndefined();
+		} finally {
+			Bun.spawn = original;
+		}
 	});
 });

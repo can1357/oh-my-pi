@@ -111,7 +111,7 @@ Unknown magic names raise `NameError: UsageError: ...` inside the cell.
   - Calls through the tool are exclusive, so tool invocations do not overlap.
   - A dead retained subprocess is replaced before execution.
   - If the subprocess dies during execution, it is replaced and the call is retried once.
-  - After each cell, if the kernel RSS exceeds `python.maxRssMb` (default 1024; `0` disables), the kernel is recycled. The just-finished cell result is kept; the next cell starts a fresh interpreter.
+  - After each cell, on POSIX, if `ps` reports kernel RSS above `python.maxRssMb` (default 1024; `0` disables), the kernel is recycled once in-flight cells on that kernel finish. The just-finished cell result is kept; the next cell starts a fresh interpreter. Windows cannot sample RSS, so the cap does not recycle there.
 - `per-call`
   - Spawns a fresh subprocess for each call.
   - Shuts the subprocess down after the call.

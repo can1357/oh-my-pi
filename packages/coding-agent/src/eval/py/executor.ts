@@ -28,6 +28,7 @@ import {
 	requireRemainingKernelTimeoutMs,
 } from "../kernel-session-registry";
 import {
+	appendRssRecycleAnnotation,
 	formatKernelRssRecycleAnnotation,
 	kernelRssExceedsLimit,
 	normalizeMaxRssMb,
@@ -195,6 +196,12 @@ interface SessionKernelReplacement {
 interface PythonSession extends KernelSession<PythonKernel> {
 	generation: number;
 	replacement?: SessionKernelReplacement;
+	/** Cells currently inside executeWithKernel on this session. */
+	activeCells: number;
+	resolveIdle?: () => void;
+	whenIdle?: Promise<void>;
+	/** Serializes RSS recycles so two finished cells cannot replace two generations. */
+	rssRecycle?: Promise<void>;
 }
 
 function normalizeExplicitInterpreter(cwd: string, interpreter: string | undefined): string {
@@ -371,17 +378,24 @@ async function executeWithKernel(
 		options?.signal,
 		Math.max(1, remainingMs ?? 10_000),
 	);
-	return executeWithKernelBase<PythonExecutorOptions>({
-		kernel,
-		code,
-		options,
-		runIdPrefix: "py",
-		errorLogLabel: "Python",
-		cancelledErrorClass: PythonExecutionCancelledError,
-		buildKernelEnvPatch: buildManagedKernelEnvPatch,
-		formatKernelTimeoutAnnotation,
-		formatTimeoutAnnotation,
-	});
+	const cwd = options?.cwd;
+	const session = cwd ? sessionRegistry.getPresentSession(cwd, options ?? {}) : undefined;
+	if (session) beginPythonCell(session);
+	try {
+		return await executeWithKernelBase<PythonExecutorOptions>({
+			kernel,
+			code,
+			options,
+			runIdPrefix: "py",
+			errorLogLabel: "Python",
+			cancelledErrorClass: PythonExecutionCancelledError,
+			buildKernelEnvPatch: buildManagedKernelEnvPatch,
+			formatKernelTimeoutAnnotation,
+			formatTimeoutAnnotation,
+		});
+	} finally {
+		if (session) endPythonCell(session);
+	}
 }
 
 async function ensureKernelAvailable(cwd: string, options: PythonExecutorOptions): Promise<void> {
@@ -396,8 +410,30 @@ async function ensureKernelAvailable(cwd: string, options: PythonExecutorOptions
 }
 
 function appendKernelAnnotation(result: PythonResult, note: string): PythonResult {
-	const prefix = result.output.length === 0 || result.output.endsWith("\n") ? result.output : `${result.output}\n`;
-	return { ...result, output: `${prefix}${note}\n` };
+	return appendRssRecycleAnnotation(result, note);
+}
+
+function beginPythonCell(session: PythonSession): void {
+	session.activeCells += 1;
+}
+
+function endPythonCell(session: PythonSession): void {
+	session.activeCells = Math.max(0, session.activeCells - 1);
+	if (session.activeCells === 0) {
+		session.resolveIdle?.();
+		session.resolveIdle = undefined;
+		session.whenIdle = undefined;
+	}
+}
+
+function waitForPythonSessionIdle(session: PythonSession): Promise<void> {
+	if (session.activeCells === 0) return Promise.resolve();
+	if (!session.whenIdle) {
+		session.whenIdle = new Promise(resolve => {
+			session.resolveIdle = resolve;
+		});
+	}
+	return session.whenIdle;
 }
 
 async function recycleRetainedPythonKernelIfOverRss(
@@ -406,13 +442,38 @@ async function recycleRetainedPythonKernelIfOverRss(
 ): Promise<string | undefined> {
 	const maxRssMb = normalizeMaxRssMb(options.maxRssMb);
 	if (maxRssMb <= 0) return undefined;
-	const kernel = sessionRegistry.peekLiveKernel(cwd, options);
+	const session = sessionRegistry.getPresentSession(cwd, options);
+	const kernel = session?.kernel.isAlive() ? session.kernel : undefined;
 	const pid = kernel?.pid;
-	if (pid === undefined) return undefined;
-	const rssKb = await (options.readRssKb ?? readProcessRssKb)(pid);
+	if (!session || pid === undefined) return undefined;
+	const sampledGeneration = session.generation;
+	let rssKb: number | undefined;
+	try {
+		rssKb = await (options.readRssKb ?? readProcessRssKb)(pid);
+	} catch {
+		return undefined;
+	}
 	if (!kernelRssExceedsLimit(rssKb, maxRssMb)) return undefined;
 	const rssMb = Math.max(1, Math.round((rssKb ?? 0) / 1024));
+	if (session.rssRecycle) {
+		await session.rssRecycle.catch(() => undefined);
+		return undefined;
+	}
+	let finishRecycle: () => void = () => undefined;
+	session.rssRecycle = new Promise(resolve => {
+		finishRecycle = resolve;
+	});
 	try {
+		while (session.activeCells > 0) {
+			await waitForPythonSessionIdle(session);
+		}
+		if (
+			session.generation !== sampledGeneration ||
+			session.kernel.pid !== pid ||
+			!session.kernel.isAlive()
+		) {
+			return undefined;
+		}
 		await sessionRegistry.recycleLiveKernel(cwd, options);
 	} catch (err) {
 		logger.warn("Failed to recycle Python kernel after RSS cap", {
@@ -422,6 +483,9 @@ async function recycleRetainedPythonKernelIfOverRss(
 			maxRssMb,
 		});
 		return undefined;
+	} finally {
+		if (session.rssRecycle) session.rssRecycle = undefined;
+		finishRecycle();
 	}
 	logger.warn("Recycled Python kernel after RSS exceeded python.maxRssMb", { pid, rssMb, maxRssMb });
 	return formatKernelRssRecycleAnnotation(rssMb, maxRssMb);
@@ -457,7 +521,7 @@ const sessionRegistry = createKernelSessionRegistry<PythonKernel, PythonExecutor
 		const normalizedCwd = normalizeKernelSessionCwd(cwd);
 		return `${sessionId}\0${normalizedCwd}\0${normalizeExplicitInterpreter(normalizedCwd, interpreter)}`;
 	},
-	createSession: session => ({ ...session, generation: 0 }),
+	createSession: session => ({ ...session, generation: 0, activeCells: 0 }),
 	startKernel,
 	executeWithKernel,
 	replaceSessionKernel,

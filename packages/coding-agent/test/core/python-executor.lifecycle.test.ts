@@ -15,7 +15,7 @@ Bun.env.PI_PYTHON_SKIP_CHECK = "1";
 
 class FakeKernel {
 	#result: KernelExecuteResult;
-	#onExecute?: (options?: KernelExecuteOptions) => void;
+	#onExecute?: (options?: KernelExecuteOptions) => void | Promise<void>;
 	#alive: boolean;
 	readonly executeCalls: string[] = [];
 	shutdownCalls = 0;
@@ -23,7 +23,11 @@ class FakeKernel {
 
 	constructor(
 		result: KernelExecuteResult,
-		options: { alive?: boolean; onExecute?: (options?: KernelExecuteOptions) => void; pid?: number } = {},
+		options: {
+			alive?: boolean;
+			onExecute?: (options?: KernelExecuteOptions) => void | Promise<void>;
+			pid?: number;
+		} = {},
 	) {
 		this.#result = result;
 		this.#onExecute = options.onExecute;
@@ -41,7 +45,7 @@ class FakeKernel {
 
 	async execute(code: string, options?: KernelExecuteOptions): Promise<KernelExecuteResult> {
 		this.executeCalls.push(code);
-		this.#onExecute?.(options);
+		await this.#onExecute?.(options);
 		return this.#result;
 	}
 
@@ -438,6 +442,45 @@ describe("executePython session lifecycle", () => {
 			readRssKb: async () => 1,
 		});
 		expect(secondKernel.executeCalls).toEqual(["print('two')"]);
+	});
+
+	it("waits for a sibling cell before recycling the sampled kernel", async () => {
+		let releaseHold: () => void = () => undefined;
+		const hold = new Promise<void>(resolve => {
+			releaseHold = resolve;
+		});
+		let holding = true;
+		const firstKernel = new FakeKernel(okResult, {
+			pid: 5151,
+			onExecute: async () => {
+				if (!holding) return;
+				holding = false;
+				await hold;
+			},
+		});
+		const secondKernel = new FakeKernel(okResult, { pid: 5152 });
+		const kernels = [firstKernel, secondKernel];
+		PythonKernel.start = async () => kernels.shift() as unknown as PythonKernel;
+
+		const sibling = executePython("hold", {
+			sessionId: "session-rss-concurrent",
+			maxRssMb: 1,
+			readRssKb: async () => 1 * 1024 + 1,
+		});
+		await flushMicrotasks();
+		const finished = executePython("print('done')", {
+			sessionId: "session-rss-concurrent",
+			maxRssMb: 1,
+			readRssKb: async () => 1 * 1024 + 1,
+		});
+		await flushMicrotasks();
+		expect(firstKernel.shutdownCalls).toBe(0);
+		releaseHold();
+		const done = await finished;
+		await sibling;
+		expect(firstKernel.shutdownCalls).toBe(1);
+		expect(firstKernel.executeCalls).toEqual(["hold", "print('done')"]);
+		expect(done.output).toContain("python.maxRssMb=1");
 	});
 
 	it("does not recycle when python.maxRssMb is 0", async () => {

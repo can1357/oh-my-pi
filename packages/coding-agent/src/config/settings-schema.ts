@@ -4115,7 +4115,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Eval & Runtimes",
 			label: "Python Kernel RSS Cap (MB)",
 			description:
-				"Recycle the retained Python eval kernel after a cell when its RSS exceeds this many megabytes. 0 disables. Prevents a long-lived session from pinning tens of GB.",
+				"POSIX only. Recycle the retained Python eval kernel after a cell when ps reports RSS above this many megabytes. 0 disables. Windows cannot sample RSS, so the cap does not recycle there.",
 			options: [
 				{ value: "0", label: "Off", description: "No RSS cap" },
 				{ value: "512", label: "512 MB" },
