@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { appleSpeechClient } from "@oh-my-pi/pi-coding-agent/stt/apple-speech-client";
 import * as asrClient from "@oh-my-pi/pi-coding-agent/stt/asr-client";
 import * as downloader from "@oh-my-pi/pi-coding-agent/stt/downloader";
 import { STTController, type STTControllerDependencies } from "@oh-my-pi/pi-coding-agent/stt/stt-controller";
@@ -22,6 +23,21 @@ const registry: STTControllerDependencies["registry"] = {
 	getError: () => undefined,
 	getAvailable: () => DICTATION_MODELS,
 	getAll: () => DICTATION_MODELS,
+	resolver: () => () => "test-key",
+};
+// Synthetic system-engine entry: Apple SpeechAnalyzer is selected through the
+// dictation role like any other local STT model, but resolves to the
+// speech-analyzer engine instead of the ONNX/sherpa worker.
+const APPLE_SPEECH_MODEL = {
+	...getBundledModel("local", "whisper-base"),
+	id: "macos",
+	name: "Apple SpeechAnalyzer",
+};
+const APPLE_DICTATION_MODELS = [...DICTATION_MODELS, APPLE_SPEECH_MODEL];
+const appleRegistry: STTControllerDependencies["registry"] = {
+	getError: () => undefined,
+	getAvailable: () => APPLE_DICTATION_MODELS,
+	getAll: () => APPLE_DICTATION_MODELS,
 	resolver: () => () => "test-key",
 };
 
@@ -123,7 +139,7 @@ describe("STTController preflight", () => {
 		const isCached = vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(true);
 		// A warmup that never resolves would hang #ensureDeps if it were awaited;
 		// reaching "recording" proves the fast path does not block on it.
-		const download = vi.spyOn(downloader, "downloadSttModel").mockReturnValue(new Promise<void>(() => {}));
+		const download = vi.spyOn(downloader, "downloadSttModel").mockReturnValue(Promise.withResolvers<void>().promise);
 
 		const editor = makeEditor();
 		controller = new STTController(() => ({ stop: vi.fn() }), { settings, registry });
@@ -169,7 +185,7 @@ describe("STTController preflight", () => {
 
 	it("re-runs preflight when the model changes mid-session", async () => {
 		const isCached = vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(true);
-		vi.spyOn(downloader, "downloadSttModel").mockReturnValue(new Promise<void>(() => {}));
+		vi.spyOn(downloader, "downloadSttModel").mockReturnValue(Promise.withResolvers<void>().promise);
 
 		const editor = makeEditor();
 		controller = new STTController(() => ({ stop: vi.fn() }), { settings, registry });
@@ -195,6 +211,114 @@ describe("STTController preflight", () => {
 		expect(isCached).toHaveBeenCalledTimes(2);
 	});
 
+	it("re-runs Apple preflight when the locale changes mid-session", async () => {
+		settings.setModelRole("dictation", "local/macos");
+		settings.set("stt.language", "en");
+		const status = vi.spyOn(appleSpeechClient, "status").mockImplementation(async language => ({
+			success: true,
+			available: true,
+			supported: true,
+			installed: true,
+			locale: language,
+			displayName: "Apple SpeechAnalyzer",
+			systemManaged: true,
+		}));
+		vi.spyOn(appleSpeechClient, "startStream").mockResolvedValue({
+			pushAudio: vi.fn(),
+			stop: vi.fn().mockResolvedValue(""),
+			cancel: vi.fn(),
+		});
+
+		const editor = makeEditor();
+		controller = new STTController(() => ({ stop: vi.fn() }), { settings, registry: appleRegistry });
+		await controller.toggle(editor, makeOptions());
+		expect(controller.state).toBe("recording");
+		expect(status).toHaveBeenLastCalledWith("en", expect.any(AbortSignal));
+
+		await controller.toggle(editor, makeOptions());
+		settings.set("stt.language", "zh-Hant");
+		await controller.toggle(editor, makeOptions());
+
+		expect(controller.state).toBe("recording");
+		expect(status).toHaveBeenCalledTimes(2);
+		expect(status).toHaveBeenLastCalledWith("zh-Hant", expect.any(AbortSignal));
+	});
+
+	it("forwards cancellation to Apple locale preparation", async () => {
+		const prepare = vi.spyOn(appleSpeechClient, "prepare").mockResolvedValue({
+			success: true,
+			available: true,
+			supported: true,
+			installed: true,
+			locale: "zh_TW",
+			displayName: "Apple SpeechAnalyzer",
+			systemManaged: true,
+		});
+		const active = new AbortController();
+		await downloader.ensureSTTDependencies({
+			modelId: "macos",
+			language: "zh-Hant",
+			signal: active.signal,
+		});
+		expect(prepare).toHaveBeenCalledWith("zh-Hant", active.signal);
+
+		const aborted = new AbortController();
+		aborted.abort();
+		const onProgress = vi.fn();
+		await expect(
+			downloader.ensureSTTDependencies({
+				modelId: "macos",
+				language: "zh-Hant",
+				signal: aborted.signal,
+				onProgress,
+			}),
+		).rejects.toHaveProperty("name", "AbortError");
+		expect(prepare).toHaveBeenCalledTimes(1);
+		expect(onProgress).not.toHaveBeenCalled();
+	});
+
+	it("does not start capture when disposed during Apple locale preparation", async () => {
+		settings.setModelRole("dictation", "local/macos");
+		const entered = Promise.withResolvers<AbortSignal>();
+		vi.spyOn(appleSpeechClient, "status").mockResolvedValue({
+			success: true,
+			available: true,
+			supported: true,
+			installed: false,
+			locale: "en",
+			displayName: "Apple SpeechAnalyzer",
+			systemManaged: true,
+		});
+		vi.spyOn(appleSpeechClient, "prepare").mockImplementation((_language, signal) => {
+			if (!signal) throw new Error("Apple locale preparation requires a cancellation signal");
+			entered.resolve(signal);
+			const { promise, reject } = Promise.withResolvers<never>();
+			const fail = (): void => {
+				reject(
+					signal.reason instanceof Error
+						? signal.reason
+						: new DOMException("The operation was aborted.", "AbortError"),
+				);
+			};
+			if (signal.aborted) fail();
+			else signal.addEventListener("abort", fail, { once: true });
+			return promise;
+		});
+		const startStream = vi.spyOn(appleSpeechClient, "startStream");
+		const createCapture = vi.fn(() => ({ stop: vi.fn() }));
+		controller = new STTController(createCapture, { settings, registry: appleRegistry });
+		const options = makeOptions();
+		const toggling = controller.toggle(makeEditor(), options);
+		const signal = await entered.promise;
+		controller.dispose();
+		expect(signal.aborted).toBe(true);
+		await toggling;
+		expect(controller.state).toBe("idle");
+		expect(startStream).not.toHaveBeenCalled();
+		expect(createCapture).not.toHaveBeenCalled();
+		expect(options.showWarning).not.toHaveBeenCalled();
+	});
+
 	it("falls back to the full parakeet id when the dictation chain is empty", async () => {
 		settings.setModelRole("dictation", "missing/model");
 		const emptyRegistry: STTControllerDependencies["registry"] = {
@@ -215,7 +339,7 @@ describe("STTController preflight", () => {
 
 	it("stops recording and surfaces asynchronous microphone failures", async () => {
 		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(true);
-		vi.spyOn(downloader, "downloadSttModel").mockReturnValue(new Promise<void>(() => {}));
+		vi.spyOn(downloader, "downloadSttModel").mockReturnValue(Promise.withResolvers<void>().promise);
 		let onAudio: ((error: Error | null, samples: Float32Array) => void) | undefined;
 		const stopCapture = vi.fn();
 		const editor = makeEditor();

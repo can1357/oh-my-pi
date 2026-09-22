@@ -3,6 +3,8 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
+import { canCompileAppleSpeechSidecar } from "../src/stt/apple-speech-compiler";
+import { buildAppleSpeechSidecar } from "./apple-speech-sidecar";
 import { buildDocsIndexPayload } from "./generate-docs-index";
 import { createJsonParsePlugin } from "./json-parse-plugin";
 import { createLegacyPiVirtualModulePlugin } from "./legacy-pi-virtual-module";
@@ -63,6 +65,7 @@ async function cleanBundleOutputs(outDir: string): Promise<void> {
 					entry === "cli.js" ||
 					entry === "docs-index.generated.txt" ||
 					entry.endsWith(".node") ||
+					(process.platform === "darwin" && entry.startsWith("omp-speech-analyzer-")) ||
 					entry.endsWith(".js.map") ||
 					(entry.startsWith("CHANGELOG-") && entry.endsWith(".md")) ||
 					legacyHtmlExportAssetPattern.test(entry),
@@ -76,6 +79,12 @@ export async function bundleDist(outDir: string = defaultOutDir): Promise<void> 
 	const cliPath = path.join(outDir, "cli.js");
 	const start = Bun.nanoseconds();
 	await cleanBundleOutputs(outDir);
+	if (process.platform === "darwin" && (await canCompileAppleSpeechSidecar())) {
+		await Promise.all([
+			buildAppleSpeechSidecar("arm64", path.join(outDir, "omp-speech-analyzer-arm64")),
+			buildAppleSpeechSidecar("x64", path.join(outDir, "omp-speech-analyzer-x64")),
+		]);
+	}
 	// The npm bundle ships no stats dashboard sources, so embed the dashboard
 	// archive the same way compiled binaries do (scripts/build-binary.ts). Reset
 	// afterwards to keep the checked-in placeholder empty.
@@ -97,6 +106,7 @@ export async function bundleDist(outDir: string = defaultOutDir): Promise<void> 
 			external: [...ALWAYS_EXTERNAL, ...RUNTIME_EXTERNAL],
 			define: {
 				"process.env.PI_BUNDLED": JSON.stringify("true"),
+				"process.env.PI_APPLE_SPEECH_SIDECAR_BASE64": JSON.stringify(""),
 				"process.env.PI_DOCS_EMBED": JSON.stringify(docsPayload.payload),
 			},
 			minify: {

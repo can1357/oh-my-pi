@@ -7,9 +7,10 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { resolveRoleChain } from "../config/model-resolver";
 import { roleCandidatePool } from "../config/model-roles";
 import { type Settings, settings } from "../config/settings";
+import { appleSpeechClient } from "./apple-speech-client";
 import { type SttStreamHandle, sttClient } from "./asr-client";
 import { downloadSttModel, isSttModelCached } from "./downloader";
-import { resolveSttModelSpec, type SttModelKey } from "./models";
+import { resolveSttModelSpec, type ConfiguredSttModelKey, type SttModelKey } from "./models";
 import { evaluateSubmitTrigger } from "./submit-trigger";
 import { encodePcm16Wav } from "./wav";
 
@@ -50,10 +51,11 @@ export interface STTControllerDependencies {
 /** Coordinates native microphone capture with streaming local or buffered cloud transcription. */
 export class STTController {
 	#state: SttState = "idle";
-	#resolvedModelKey: SttModelKey | null = null;
+	#resolvedDependencyKey: string | null = null;
 	#toggling = false;
 	#stopAfterStart = false;
 	#disposed = false;
+	readonly #lifetimeAbort = new AbortController();
 	readonly #createCapture: CaptureFactory;
 	readonly #settings: Settings;
 	readonly #registry: SttRegistry | undefined;
@@ -137,38 +139,58 @@ export class STTController {
 		return resolveRoleChain("dictation", this.#settings, pool)[0]?.model;
 	}
 
-	#resolveModelKey(model = this.#resolveModel()): SttModelKey {
+	#resolveModelKey(model = this.#resolveModel()): ConfiguredSttModelKey {
 		return resolveSttModelSpec(model?.id).key;
 	}
 
-	async #ensureDeps(options: ToggleOptions, modelKey = this.#resolveModelKey()): Promise<SttModelKey | null> {
-		// Keyed on the resolved role model rather than a one-shot flag: changing
-		// modelRoles.dictation mid-session re-runs preflight for the new model.
-		if (this.#resolvedModelKey === modelKey) return modelKey;
+	async #ensureDeps(
+		options: ToggleOptions,
+		modelKey = this.#resolveModelKey(),
+	): Promise<ConfiguredSttModelKey | null> {
+		const spec = resolveSttModelSpec(modelKey);
+		const language = this.#settings.get("stt.language");
+		// Apple speech assets are locale-specific. A language change must repeat
+		// the native status/prepare probe even when the engine itself is unchanged.
+		const dependencyKey = spec.engine === "speech-analyzer" ? `${spec.key}\0${language?.trim() || "auto"}` : spec.key;
+		// Keyed on the resolved role model (plus locale for system engines) rather
+		// than a one-shot flag: changing modelRoles.dictation mid-session re-runs
+		// preflight for the new model.
+		if (this.#resolvedDependencyKey === dependencyKey) return modelKey;
 		try {
-			// Only clear the status line when preflight emitted progress; the
-			// cached-model fast path emits nothing.
+			// Only clear the status line when preflight emitted progress; cached
+			// worker models and already-installed Apple locales emit nothing.
 			let wroteStatus = false;
 			const status = (msg: string): void => {
 				wroteStatus = true;
 				options.showStatus(msg);
 			};
-			// Loading the multi-hundred-MB speech model into the worker is what made
-			// the old "Checking STT dependencies…" step slow. Don't pay it before
-			// recording: when the weights are already cached, start now and warm the
-			// model in the background — the stream/transcribe paths load it on demand
-			// (memoized in the worker) and it is hot by the time recording stops.
-			// Only a genuine first-use download blocks, with explicit progress, so we
-			// never record silently against missing weights.
-			if (await isSttModelCached(modelKey)) {
-				this.#warmModel(modelKey);
+			if (spec.engine === "speech-analyzer") {
+				const signal = this.#lifetimeAbort.signal;
+				const availability = await appleSpeechClient.status(language, signal);
+				if (!availability.success || !availability.available || !availability.supported) {
+					throw new Error(availability.error ?? "Apple SpeechAnalyzer is unavailable for the selected locale.");
+				}
+				if (!availability.installed) {
+					const locale = availability.locale ?? language?.trim() ?? "system locale";
+					status(`Preparing system-managed Apple speech recognition (${locale})...`);
+					await appleSpeechClient.prepare(language, signal);
+				}
+			} else if (await isSttModelCached(spec.key)) {
+				// Loading the multi-hundred-MB worker model used to block before
+				// recording. Cached models start now and warm in the background;
+				// only a genuine first-use download blocks.
+				this.#warmModel(spec.key);
 			} else {
-				await downloadSttModel(modelKey, p => status(`Downloading speech model ${p.label} (${p.percent}%)`));
+				await downloadSttModel(spec.key, progress =>
+					status(`Downloading speech model ${progress.label} (${progress.percent}%)`),
+				);
 			}
+			if (this.#disposed) return null;
 			if (wroteStatus) options.showStatus("");
-			this.#resolvedModelKey = modelKey;
+			this.#resolvedDependencyKey = dependencyKey;
 			return modelKey;
 		} catch (err) {
+			if (this.#disposed) return null;
 			const msg = err instanceof Error ? err.message : "Failed to setup STT dependencies";
 			options.showWarning(msg);
 			logger.error("STT dependency setup failed", { error: msg });
@@ -185,7 +207,7 @@ export class STTController {
 	#warmModel(modelKey: SttModelKey): void {
 		void downloadSttModel(modelKey).catch(err => {
 			// Guard against a concurrent model switch clobbering a newer resolution.
-			if (!this.#disposed && this.#resolvedModelKey === modelKey) this.#resolvedModelKey = null;
+			if (!this.#disposed && this.#resolvedDependencyKey === modelKey) this.#resolvedDependencyKey = null;
 			logger.debug("stt: background model warmup failed", {
 				error: err instanceof Error ? err.message : String(err),
 			});
@@ -351,20 +373,22 @@ export class STTController {
 		return this.#streamCommitted ? ` ${normalized}` : normalized;
 	}
 
-	async #startStreaming(editor: Editor, options: ToggleOptions, modelKey: SttModelKey): Promise<void> {
+	async #startStreaming(editor: Editor, options: ToggleOptions, modelKey: ConfiguredSttModelKey): Promise<void> {
+		if (this.#disposed) return;
+		const spec = resolveSttModelSpec(modelKey);
 		const language = this.#settings.get("stt.language");
 		this.#streamEditor = editor;
 		this.#streamCommitted = false;
 		this.#streamUtterance = "";
 		this.#streamAbort = new AbortController();
-		const stream = sttClient.startStream(modelKey, {
+		const streamOptions = {
 			language: language || undefined,
 			signal: this.#streamAbort.signal,
-			onPartial: text => {
+			onPartial: (text: string) => {
 				if (this.#disposed || this.#state !== "recording") return;
 				this.#streamEditor?.setVolatileText(this.#prefixed(text));
 			},
-			onSegment: text => {
+			onSegment: (text: string) => {
 				if (this.#disposed) return;
 				const prefixed = this.#prefixed(text);
 				if (prefixed) {
@@ -375,8 +399,30 @@ export class STTController {
 					this.#streamEditor?.clearVolatileText();
 				}
 			},
-		});
+		};
+		let stream: SttStreamHandle;
+		try {
+			// SpeechAnalyzer performs an async ready handshake before microphone
+			// capture begins; worker streams are ready synchronously.
+			stream =
+				spec.engine === "speech-analyzer"
+					? await appleSpeechClient.startStream(language, streamOptions)
+					: sttClient.startStream(spec.key, streamOptions);
+		} catch (err) {
+			this.#cleanupStream();
+			if (!this.#disposed) {
+				const msg = err instanceof Error ? err.message : "Failed to start speech recognition";
+				options.showWarning(msg);
+				logger.error("STT stream failed to start", { error: msg });
+			}
+			return;
+		}
 		this.#stream = stream;
+		if (this.#disposed) {
+			stream.cancel();
+			this.#cleanupStream();
+			return;
+		}
 		let recorder: CaptureHandle;
 		try {
 			recorder = this.#createCapture((error, samples) => {
@@ -412,7 +458,7 @@ export class STTController {
 		}
 		this.#streamRecorder = recorder;
 		this.#setState("recording", options);
-		logger.debug("STT live recording started", { modelKey });
+		logger.debug("STT live recording started", { modelKey: spec.key });
 	}
 
 	async #stopStreaming(options: ToggleOptions): Promise<void> {
@@ -488,6 +534,7 @@ export class STTController {
 
 	dispose(): void {
 		this.#disposed = true;
+		this.#lifetimeAbort.abort();
 		if (this.#streamAbort) {
 			this.#streamAbort.abort();
 			this.#streamAbort = null;
@@ -502,6 +549,6 @@ export class STTController {
 		this.#cloudModel = null;
 		this.#cloudAudio = [];
 		this.#state = "idle";
-		this.#resolvedModelKey = null;
+		this.#resolvedDependencyKey = null;
 	}
 }

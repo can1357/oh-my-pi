@@ -18,6 +18,8 @@ export interface CodingAgentCompileOptions {
 	readonly outfile: string;
 	/** Concrete Transformers.js version baked into the tiny-model worker. */
 	readonly transformersVersion: string;
+	/** Base64-encoded native SpeechAnalyzer helper for the selected Darwin architecture. */
+	readonly appleSpeechSidecarBase64?: string;
 	/** Optional cross-compilation runtime target. */
 	readonly target?: Bun.Build.CompileTarget;
 	/** Optional unmodified Bun executable used as the standalone runtime template. */
@@ -45,6 +47,7 @@ export async function compileCodingAgent(options: CodingAgentCompileOptions): Pr
 			define: {
 				"process.env.PI_COMPILED": JSON.stringify("true"),
 				"process.env.PI_TINY_TRANSFORMERS_VERSION": JSON.stringify(options.transformersVersion),
+				"process.env.PI_APPLE_SPEECH_SIDECAR_BASE64": JSON.stringify(options.appleSpeechSidecarBase64 ?? ""),
 				"process.env.PI_DOCS_EMBED": JSON.stringify((await buildDocsIndexPayload()).payload),
 			},
 			// Precompiled bytecode skips parsing the ~20 MB bundle at boot:

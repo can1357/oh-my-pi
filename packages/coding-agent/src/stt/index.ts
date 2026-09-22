@@ -1,3 +1,4 @@
+export * from "./apple-speech-client";
 export * from "./asr-client";
 export * from "./asr-protocol";
 export * from "./downloader";

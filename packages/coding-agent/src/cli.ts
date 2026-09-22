@@ -40,6 +40,7 @@ import {
 } from "./cli/worker-selectors";
 import type * as JsProcessEntry from "./eval/js/process-entry";
 import type { WorkerInbound as JsWorkerInbound, WorkerOutbound as JsWorkerOutbound } from "./eval/js/worker-protocol";
+import { smokeTestAppleSpeechSidecar } from "./stt/apple-speech-client";
 
 if (Bun.semver.order(Bun.version, MIN_BUN_VERSION) < 0) {
 	process.stderr.write(
@@ -161,6 +162,7 @@ async function runSmokeTest(): Promise<void> {
 
 	await smokeTestTinyTitleWorker();
 	await smokeTestSttWorker();
+	await smokeTestAppleSpeechSidecar();
 	await smokeTestJsEvalWorker();
 	const { smokeTestComputerWorker } = await import("./tools/computer/supervisor");
 	await smokeTestComputerWorker();

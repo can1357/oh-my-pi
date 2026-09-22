@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in Apple SpeechAnalyzer speech-to-text on macOS 26+, with live partials and system-managed locale assets ([#10019](https://github.com/can1357/oh-my-pi/pull/10019)).
+
 ## [18.2.9] - 2026-09-22
 
 ### Added
