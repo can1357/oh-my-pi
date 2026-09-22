@@ -1004,6 +1004,26 @@ describe("model thinking derivation", () => {
 		expect(clampThinkingLevelForModel(model, Effort.High)).toBeUndefined();
 	});
 
+	it("upgrades neutral Copilot GPT-6 Luna and Sol discovery to their effort ladder (#12895)", () => {
+		const models = ["gpt-6-luna", "gpt-6-sol"].map(id =>
+			createModel({
+				id,
+				api: "openai-responses",
+				provider: "github-copilot",
+				baseUrl: "https://api.githubcopilot.com",
+				reasoning: false,
+			}),
+		);
+
+		for (const model of models) {
+			expect(model.reasoning).toBe(true);
+			expect(model.thinking).toEqual({
+				mode: "effort",
+				efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+			});
+		}
+	});
+
 	it("bakes the wire-exact five-tier low..max ladder on GPT-5.6 wire-effort APIs", () => {
 		const codex = createModel({
 			id: "gpt-5.6-sol",
