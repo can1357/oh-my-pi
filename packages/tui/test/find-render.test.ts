@@ -71,6 +71,36 @@ describe("findToolRenderer", () => {
 		expect(uris.filter(uri => uri.endsWith("/repo/src/other.ts"))).toHaveLength(2);
 	});
 
+	it("links omp hits to their doc URL instead of joining them onto cwd", async () => {
+		applyHyperlinkSetting("always");
+		const uiTheme = (await getThemeByName("dark"))!;
+		const ompDetails: FindToolDetails = {
+			...details,
+			scopePath: "omp://",
+			hits: [
+				{
+					rel: "omp://tools/read.md",
+					contentScore: 0.9,
+					linesSeen: 40,
+					truncated: false,
+					ranges: [{ start: 10, end: 20, p: 0.9, snippet: "read docs" }],
+				},
+			],
+		};
+		const lines = findToolRenderer
+			.renderResult(
+				{ content: [{ type: "text", text: "" }], details: ompDetails },
+				{ expanded: true, isPartial: false },
+				uiTheme,
+				args,
+			)
+			.render(200);
+		const uris = extractLinkUris(lines.join("\n"));
+		expect(uris).toContain("omp://tools/read.md");
+		expect(uris).toContain("omp://tools/read.md:10");
+		expect(uris.every(uri => !uri.endsWith("/repo/omp://tools/read.md"))).toBe(true);
+	});
+
 	it("shows one range per hit collapsed and all ranges plus failures expanded", async () => {
 		const uiTheme = (await getThemeByName("dark"))!;
 		const collapsed = sanitizeText(

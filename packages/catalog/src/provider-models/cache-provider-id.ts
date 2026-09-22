@@ -1,6 +1,10 @@
 import { CHARM_HYPER_API_BASE_URL, normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
 import { PERSONAL_GITHUB_COPILOT_BASE_URL } from "../wire/github-copilot";
-import { normalizeSingularityApiBaseUrl } from "../wire/singularityapi";
+import {
+	SINGULARITYAPI_DEV_API_BASE_URL,
+	SINGULARITYAPI_TECH_API_BASE_URL,
+	normalizeSingularityApiBaseUrl,
+} from "../wire/singularityapi";
 // Cycle-safe: openzoo.ts imports resolveModelCacheProviderId from this module,
 // but both edges bind at call time, and sharing the resolver is the point —
 // two normalizers is exactly how the cache id and the fetch URL drifted apart.
@@ -16,10 +20,11 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	"opencode-zen": true,
 	"github-copilot": true,
 	"muse-code": true,
-	// The lane roster is issued per key, so the namespace must be resolved with
-	// the credential (`hydrateCredentialScopedModelCaches`) rather than from the
-	// synchronous, credential-less startup read.
-	singularityapi: true,
+	// Both SingularityAPI rosters are issued per key, so the namespace must be
+	// resolved with the credential (`hydrateCredentialScopedModelCaches`) rather
+	// than from the synchronous, credential-less startup read.
+	"singularityapi-dev": true,
+	"singularityapi-tech": true,
 };
 
 /** Whether a provider's model-cache namespace requires its resolved credential. */
@@ -98,21 +103,26 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
 			return `muse-code:models-v1:${Bun.hash(scope).toString(36)}`;
 		}
-		case "singularityapi": {
-			// The roster is lane-scoped: one key sees only its reserved lanes, and a
-			// configured proxy publishes its own. Discovery is authoritative, so a
-			// shared namespace would serve the previous key's lanes for the full
-			// 24h TTL — including ids the current key cannot call. Hashing the pair
-			// means switching either re-runs discovery instead.
+		case "singularityapi-dev":
+		case "singularityapi-tech": {
+			// Both products issue their roster per key, and a configured proxy
+			// publishes its own. Discovery is authoritative, so a shared namespace
+			// would serve the previous key's roster for the full 24h TTL — including
+			// ids the current key cannot call. Hashing the pair means switching
+			// either re-runs discovery instead, and the provider-id prefix keeps the
+			// two products from ever reading each other's rows behind one proxy.
 			//
 			// Both call paths must land on one namespace: `ModelRegistry` resolves
 			// this provider through the credential-scoped hydration pass (it is in
 			// CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS), while discovery hashes the
-			// `/v1`-suffixed endpoint `singularityApiModelManagerOptions` passes —
-			// which is why both normalize through `normalizeSingularityApiBaseUrl`.
-			const baseUrl = normalizeSingularityApiBaseUrl(options.baseUrl);
+			// `/v1`-suffixed endpoint the matching `singularityApi*ModelManagerOptions`
+			// passes — which is why both normalize through
+			// `normalizeSingularityApiBaseUrl` against their own canonical host.
+			const canonical =
+				providerId === "singularityapi-tech" ? SINGULARITYAPI_TECH_API_BASE_URL : SINGULARITYAPI_DEV_API_BASE_URL;
+			const baseUrl = normalizeSingularityApiBaseUrl(options.baseUrl, canonical);
 			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
-			return `singularityapi:models-v1:${Bun.hash(scope).toString(36)}`;
+			return `${providerId}:models-v1:${Bun.hash(scope).toString(36)}`;
 		}
 		case "litellm": {
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;

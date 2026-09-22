@@ -7,7 +7,15 @@ import * as path from "node:path";
 import { formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
 import { renderProgressBar } from "../components/progress-bar";
 import { Text } from "../components/text";
-import { Ellipsis, fileHyperlink, getTreeBranch, renderStatusLine, renderTreeList, truncateToWidth } from "../render";
+import {
+	Ellipsis,
+	fileHyperlink,
+	getTreeBranch,
+	renderStatusLine,
+	renderTreeList,
+	truncateToWidth,
+	uriHyperlink,
+} from "../render";
 import {
 	createCachedComponent,
 	formatCount,
@@ -31,7 +39,7 @@ export interface FindRange {
 
 /** A file whose verified passages cleared the threshold; `ranges` are merged positive spans, strongest first. */
 export interface FindHit {
-	/** Display path relative to {@link FindToolDetails.cwd}. */
+	/** Display path relative to {@link FindToolDetails.cwd}, or an `omp://` doc URL for docs scopes. */
 	rel: string;
 	/** Filename judgment, when the name batch answered. */
 	nameScore?: number;
@@ -116,9 +124,14 @@ function gauge(p: number, theme: Theme): string {
 }
 
 function renderHit(hit: FindHit, rangeLimit: number, cwd: string | undefined, theme: Theme): string[] {
-	const absPath = cwd === undefined ? undefined : path.join(cwd, hit.rel);
-	const link = (text: string, line?: number) =>
-		absPath === undefined ? text : fileHyperlink(absPath, text, { line });
+	// `omp://` hits are virtual docs, not files under `cwd`: link the URL
+	// itself instead of joining it onto a filesystem base.
+	const isOmpHit = /^omp:\/\//i.test(hit.rel);
+	const link = (text: string, line?: number): string => {
+		if (isOmpHit) return uriHyperlink(line === undefined ? hit.rel : `${hit.rel}:${line}`, text);
+		const absPath = cwd === undefined ? undefined : path.join(cwd, hit.rel);
+		return absPath === undefined ? text : fileHyperlink(absPath, text, { line });
+	};
 	const coverage = hit.truncated ? `${hit.linesSeen} lines judged, partial` : `${hit.linesSeen} lines judged`;
 	const lines = [
 		`${gauge(hit.contentScore, theme)} ${theme.fg(scoreColor(hit.contentScore), hit.contentScore.toFixed(2))} ${link(theme.fg("accent", hit.rel))} ${theme.fg("dim", coverage)}`,

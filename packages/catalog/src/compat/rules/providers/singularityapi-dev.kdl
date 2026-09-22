@@ -10,9 +10,14 @@
 // and enrolling would freeze one account's snapshot into models.json on every
 // credential-less regen. The provider stays runtime-only and
 // `dynamic-models-authoritative` prunes stale rows.
-provider "singularityapi" {
+// The vendor's second product — slot-reserved DeepSeek lanes on
+// api.singularityapi.tech — lives in `singularityapi-tech`: separate provider
+// id because the two gateways publish conflicting effort ladders (`max`
+// passes there and 400s here; `medium` is the reverse, both measured live
+// 2026-09-22) and neither key works on the other host.
+provider "singularityapi-dev" {
 	default-model "deepseek-v4-flash"
-	env "SINGULARITYAPI_API_KEY"
+	env "SINGULARITYAPI_DEV_API_KEY"
 	dynamic-models-authoritative #true
 
 	// Gateway-wide request shape, from the OpenAI-compatibility contract
@@ -31,20 +36,28 @@ provider "singularityapi" {
 	// raw id verbatim while the compiler lowercases them, so exact rules
 	// can never match mixed-case wire ids). DeepSeek V4 Flash rows classify
 	// deepseek/flash by taxonomy but publish no reasoning metadata, so the
-	// upgrade rule owns the low/high/max ladder; reasoning arrives as
-	// top-level `reasoning_content` on messages and streamed deltas, and
+	// upgrade rule owns the measured low/medium/high ladder; reasoning arrives
+	// as top-level `reasoning_content` on messages and streamed deltas, and
 	// `none` forces it off. V4 Pro the same, with the Pro ladder.
+	//
+	// Ladder measured against the live gateway 2026-09-22: `none`, `minimal`,
+	// `low`, `medium`, `high` pass admission while `xhigh`, `max`, integer and
+	// unknown efforts answer 400 `invalid_request` — admission validation runs
+	// before the credit reservation, so the probe sorted accepted from rejected
+	// at 402 vs 400 without spending a cent. `max` in particular is a
+	// reserve-lane-only tier (`singularityapi-tech`); sending it here turned
+	// every DeepSeek request into a 400.
 	models "*deepseek-v4-flash*" {
 		thinking-upgrade-neutral #true
 		max-tokens-field "max_tokens"
-		thinking-efforts "low" "high" "max"
+		thinking-efforts "low" "medium" "high"
 		reasoning-disable-mode "none-effort"
 		reasoning-content-field "reasoning_content"
 	}
 	models "*deepseek-v4-pro*" {
 		thinking-upgrade-neutral #true
 		max-tokens-field "max_tokens"
-		thinking-efforts "low" "high" "max"
+		thinking-efforts "low" "medium" "high"
 		reasoning-disable-mode "none-effort"
 		reasoning-content-field "reasoning_content"
 	}
