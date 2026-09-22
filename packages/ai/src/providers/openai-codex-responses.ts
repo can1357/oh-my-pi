@@ -1628,6 +1628,9 @@ async function openInitialCodexEventStream(
 				if (!activateFallback) {
 					websocketRetries += 1;
 					const websocketRetryDelayMs = CODEX_WEBSOCKET_RETRY_DELAY_MS * Math.max(1, websocketRetries);
+					// A caller abort wins over the budget, as in the in-class recoveries:
+					// an already-cancelled request must not read as a budget exhaustion.
+					if (requestSetup.requestSignal.aborted) throw new AIError.AbortError();
 					const deadlineError = operationDeadlineExceeded(options, websocketRetryDelayMs);
 					if (deadlineError) throw deadlineError;
 					await scheduler.wait(websocketRetryDelayMs, {
