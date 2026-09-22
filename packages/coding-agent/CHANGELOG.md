@@ -820,6 +820,14 @@
 - `#readProjectSettings` now logs capability warnings when a project `.claude/settings.json` fails to parse, instead of silently dropping them ([#11570](https://github.com/can1357/oh-my-pi/issues/11570)).
 - A malformed project `.claude/settings.json` now produces a warning instead of being silently ignored ([#11570](https://github.com/can1357/oh-my-pi/issues/11570)).
 - Reduced memory usage during long responses while thinking is hidden ([#11632](https://github.com/can1357/oh-my-pi/pull/11632) by [@redsolver](https://github.com/redsolver)).
+- Added opt-in `tier.autoFastMode` and `tier.autoFastModeDurationMinutes` settings for temporary priority processing after primary-session user prompts ([#7207](https://github.com/can1357/oh-my-pi/pull/7207) by [@mvid](https://github.com/mvid)).
+- Added a blocked fast-mode status for provider refusals and ineligible accounts, with `/fast status` reporting the same state ([#7751](https://github.com/can1357/oh-my-pi/pull/7751) by [@mvid](https://github.com/mvid)).
+- Added Anthropic priority entitlement to usage reports so automatic fast mode skips known-ineligible accounts ([#7751](https://github.com/can1357/oh-my-pi/pull/7751) by [@mvid](https://github.com/mvid)).
+- Added OpenAI priority downgrade detection without treating Codex service-tier echoes as served-tier evidence ([#7751](https://github.com/can1357/oh-my-pi/pull/7751) by [@mvid](https://github.com/mvid)).
+
+### Changed
+
+- Bumped the Anthropic usage-report cache key so older processes cannot keep refilling entitlement-free cached reports ([#7751](https://github.com/can1357/oh-my-pi/pull/7751) by [@mvid](https://github.com/mvid)).
 
 ## [18.1.17] - 2026-09-10
 
