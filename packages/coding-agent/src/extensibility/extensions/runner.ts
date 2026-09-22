@@ -513,6 +513,7 @@ interface ToolRegistrationScope {
 	signal?: AbortSignal;
 	closed: boolean;
 }
+type ToolRegistrationObserver = (tool: RegisteredTool, signal?: AbortSignal) => void | Promise<void>;
 
 /** Identity reported by a session that is not a subagent and received no explicit identity. */
 export const TOP_LEVEL_AGENT: ExtensionAgentIdentity = Object.freeze({
@@ -566,6 +567,8 @@ export class ExtensionRunner {
 	#warnedLinkSchemes = new Set<string>();
 	#toolRegistrationScope = new AsyncLocalStorage<ToolRegistrationScope>();
 	#toolRegistrationBarrier: Promise<void> | undefined;
+	#toolRegistrationObservers = new Set<ToolRegistrationObserver>();
+	#toolRegistrationUnsubscribers = new Map<ToolRegistrationObserver, () => void>();
 	#initialized = false;
 	/** Full load order, captured on the first {@link setSuspendedExtensions} call. */
 	#loadOrder: Extension[] | undefined;
@@ -901,12 +904,10 @@ export class ExtensionRunner {
 		this.#mode = mode;
 		this.#initialized = true;
 
-		// Re-initialize (e.g. a mode switch rewiring UI/runtime actions) must not
-		// accumulate duplicate global registrations — drop the prior generation before
-		// installing this one's trampolines.
-		this.disposeFileFallbacks();
-		// Suspended extensions keep a (gated) trampoline so resuming them needs no rewire.
-		for (const ext of this.getLoadedExtensions()) this.#installFileFallbacks(ext);
+		// Re-initialize (for example, a mode switch rewiring runtime actions) must not
+		// accumulate process-wide registrations. Reload uses the same path after
+		// replacing the extension set.
+		this.#reinstallFileFallbacks();
 
 		// Drain events buffered by emitCredentialDisabled() before initialize ran. The
 		// spread adds the `type` discriminator — `event` is the pi-ai shape (no `type`).
@@ -940,6 +941,14 @@ export class ExtensionRunner {
 				});
 			}
 		});
+	}
+	#reinstallFileFallbacks(): void {
+		// Re-initialize (e.g. a mode switch rewiring UI/runtime actions) must not
+		// accumulate duplicate global registrations — drop the prior generation before
+		// installing this one's trampolines.
+		this.disposeFileFallbacks();
+		// Suspended extensions keep a (gated) trampoline so resuming them needs no rewire.
+		for (const ext of this.getLoadedExtensions()) this.#installFileFallbacks(ext);
 	}
 
 	/**
@@ -1231,7 +1240,8 @@ export class ExtensionRunner {
 			this.extensions.splice(0, this.extensions.length, ...active);
 			for (const listener of this.#suspensionListeners) listener();
 		}
-
+		return { suspended, resumed };
+	}
 	/**
 	 * Supplies fresh `Extension` objects for {@link reloadExtensions}. Set by
 	 * whoever loaded the extensions in the first place, because only that caller
@@ -1260,15 +1270,14 @@ export class ExtensionRunner {
 	 *  1. `session_shutdown` lets extensions release what they own — file
 	 *     handles, sockets, child processes. From an extension's side this IS a
 	 *     shutdown: that instance never runs again.
-	 *  2. Managed timers are cleared unconditionally, including when a teardown
-	 *     handler throws. Otherwise a reloaded extension's `ctx.setInterval`
-	 *     keeps firing next to its replacement's, and two copies poll the same
-	 *     resource forever.
-	 *  3. Only then is the new set swapped in, in place (see
-	 *     {@link replaceExtensions}).
+	 *  2. Managed timers and process-wide file fallback registrations are cleared
+	 *     unconditionally, including when a teardown handler throws. Otherwise
+	 *     the old instance can keep acting beside its replacement.
+	 *  3. The new set is swapped in place (see {@link replaceExtensions}) and its
+	 *     file fallbacks are installed.
 	 *  4. `session_start` is re-emitted, because extensions do their
 	 *     per-session registration there. Without it the new modules are loaded
-	 *     but inert — which looks exactly like the reload not working.
+	 *     but inert, which looks exactly like the reload did nothing.
 	 *
 	 * A module that fails to import is reported in `errors` and is absent from
 	 * the new set; the others still load. A syntax error in one extension while
@@ -1292,9 +1301,12 @@ export class ExtensionRunner {
 			// the old code. The timer sweep below still runs.
 		}
 		this.clearManagedTimers();
+		this.disposeFileFallbacks();
 
 		const result = await reloader();
 		this.replaceExtensions(result.extensions);
+		this.#reinstallFileFallbacks();
+		await this.#refreshRegisteredTools();
 		await this.emit({ type: "session_start" });
 		return { loaded: result.extensions.length, errors: result.errors };
 	}
@@ -1311,8 +1323,21 @@ export class ExtensionRunner {
 	replaceExtensions(next: readonly Extension[]): void {
 		this.#loadOrder = undefined;
 		this.#suspendedExtensions.clear();
+		for (const unsubscribe of this.#toolRegistrationUnsubscribers.values()) unsubscribe();
+		this.#toolRegistrationUnsubscribers.clear();
 		this.extensions.length = 0;
 		this.extensions.push(...next);
+		for (const observer of this.#toolRegistrationObservers) {
+			this.#toolRegistrationUnsubscribers.set(observer, this.#bindToolRegistrationObserver(observer));
+		}
+	}
+
+	async #refreshRegisteredTools(): Promise<void> {
+		for (const tool of this.getAllRegisteredTools()) {
+			for (const observer of this.#toolRegistrationObservers) {
+				await observer(tool, AbortSignal.timeout(extensionHandlerTimeoutMs));
+			}
+		}
 	}
 
 	/**
@@ -1349,7 +1374,17 @@ export class ExtensionRunner {
 	 * promises are drained before the lifecycle handler that registered them
 	 * completes, keeping the model tool snapshot and system prompt coherent.
 	 */
-	onToolRegistered(listener: (tool: RegisteredTool, signal?: AbortSignal) => void | Promise<void>): () => void {
+	onToolRegistered(listener: ToolRegistrationObserver): () => void {
+		this.#toolRegistrationObservers.add(listener);
+		this.#toolRegistrationUnsubscribers.set(listener, this.#bindToolRegistrationObserver(listener));
+		return () => {
+			this.#toolRegistrationObservers.delete(listener);
+			this.#toolRegistrationUnsubscribers.get(listener)?.();
+			this.#toolRegistrationUnsubscribers.delete(listener);
+		};
+	}
+
+	#bindToolRegistrationObserver(listener: ToolRegistrationObserver): () => void {
 		const subscriptions: Array<{ extension: Extension; listener: ToolRegistrationListener }> = [];
 		const attach = (extension: Extension): ToolRegistrationListener => {
 			const trackRegistration = (pending: Promise<void>): void => {
