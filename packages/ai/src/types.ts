@@ -419,6 +419,11 @@ export interface ProviderRetryAttemptInfo {
 /**
  * Retry delay hook. `info` is omitted by retry loops with no attempt counter to
  * report, so a UI must degrade to "no count" rather than assume one.
+ *
+ * Contract: the hook MUST sleep for the full `delayMs` (honoring `signal`)
+ * and MUST reject/throw when `signal` aborts. A hook that returns early
+ * silently removes all provider backoff; one that swallows the abort turns a
+ * cancelled turn into a retried one.
  */
 export type ProviderRetryWaitFn = (
 	delayMs: number,
@@ -619,6 +624,9 @@ export interface StreamOptions {
 	codexSseMaxAttempts?: number;
 	/**
 	 * Optional retry delay hook for tests and transports that need custom scheduling.
+	 * A custom hook takes over the backoff entirely, so it inherits the
+	 * {@link ProviderRetryWaitFn} contract: sleep the full `delayMs` and
+	 * rethrow on abort.
 	 */
 	providerRetryWait?: ProviderRetryWaitFn;
 	/**

@@ -175,8 +175,10 @@ export class EventController {
 	#retryPending = false;
 	// Countdown for a provider-internal retry backoff. Kept out of
 	// `ctx.retryLoader` so a session-level retry overlay and this one can never
-	// clobber each other's slot.
+	// clobber each other's slot. `#providerRetryWaitId` is the `waitId` of the
+	// wait that mounted it: only that wait's `_end` may take the countdown down.
 	#providerRetryLoader: Loader | undefined;
+	#providerRetryWaitId: number | undefined;
 	#idleCompactionTimer?: NodeJS.Timeout;
 	#idleRecapTimer?: NodeJS.Timeout;
 	// In-flight ephemeral recap turn; aborted by #cancelIdleRecap when any
@@ -2288,9 +2290,27 @@ export class EventController {
 		// A session-level retry/compaction overlay owns the status container and
 		// carries the more important message; leave it alone.
 		if (this.ctx.retryLoader || this.ctx.autoCompactionLoader) return;
-		this.#providerRetryLoader?.stop();
+		// Background waits are not this turn's story: advisor turns and side
+		// streams (title generation, idle recap, handoff summaries) share the
+		// session, and side streams also run while idle — where the row holds
+		// e.g. the F5 retry hint. Only the main turn's wait mounts a countdown,
+		// and only while the turn is actually streaming.
+		if (event.role !== undefined && event.role !== "main") return;
+		if (!this.ctx.viewSession.isStreaming) return;
+		// A newer wait supersedes the mounted one: the newest wait is what the
+		// user is waiting on, so only its `_end` clears the countdown. Detach
+		// just the loaders this controller owns — never `disposeChildren()`,
+		// which would unmount a retry/compaction overlay mounted afterwards or
+		// a hint row the countdown never owned.
+		const previous = this.#providerRetryLoader;
+		const working = this.ctx.loadingAnimation;
+		previous?.stop();
 		this.#stopWorkingLoader();
-		this.ctx.statusContainer.disposeChildren();
+		for (const loader of [previous, working]) {
+			if (loader && this.ctx.statusContainer.children.includes(loader)) {
+				this.ctx.statusContainer.removeChild(loader);
+			}
+		}
 		const waitStartMs = Date.now();
 		// Only the loops that count their retries send the counters; without them
 		// the label stays bare rather than claiming a made-up attempt.
@@ -2298,7 +2318,7 @@ export class EventController {
 			event.attempt !== undefined && event.maxAttempts !== undefined
 				? ` (${event.attempt}/${event.maxAttempts})`
 				: "";
-		this.#providerRetryLoader = new Loader(
+		const loader = new Loader(
 			this.ctx.ui,
 			spinner => theme.fg("warning", spinner),
 			text => theme.fg("muted", text),
@@ -2308,17 +2328,28 @@ export class EventController {
 			},
 			getSymbolTheme().spinnerFrames,
 		);
-		this.ctx.statusContainer.addChild(this.#providerRetryLoader);
+		this.#providerRetryLoader = loader;
+		this.#providerRetryWaitId = event.waitId;
+		this.ctx.statusContainer.addChild(loader);
 		this.ctx.ui.requestRender();
 	}
 
 	async #handleProviderRetryWaitEnd(
-		_event: Extract<AgentSessionEvent, { type: "provider_retry_wait_end" }>,
+		event: Extract<AgentSessionEvent, { type: "provider_retry_wait_end" }>,
 	): Promise<void> {
-		if (!this.#providerRetryLoader) return;
-		this.#providerRetryLoader.stop();
+		const loader = this.#providerRetryLoader;
+		if (!loader) return;
+		// Only the mounted wait's `_end` takes the countdown down. A stale end —
+		// an earlier wait superseded by a newer one, or a background wait that
+		// ended while a session-level overlay owns the row — must never unmount
+		// someone else's loader.
+		if (event.waitId !== this.#providerRetryWaitId) return;
 		this.#providerRetryLoader = undefined;
-		this.ctx.statusContainer.disposeChildren();
+		this.#providerRetryWaitId = undefined;
+		loader.stop();
+		if (this.ctx.statusContainer.children.includes(loader)) {
+			this.ctx.statusContainer.removeChild(loader);
+		}
 		// The turn never ended: put "Working…" back so the stream keeps its
 		// indicator whether the retry succeeds or the wait was aborted.
 		this.#ensureWorkingLoaderWhileStreaming();

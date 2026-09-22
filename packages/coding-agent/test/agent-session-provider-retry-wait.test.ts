@@ -141,9 +141,14 @@ describe("createAgentSession provider retry wait visibility", () => {
 			model: model.id,
 			provider: model.provider,
 			api: model.api,
+			// Driven through `session.agent.streamFn`: the main-turn role, and the
+			// session's first wait id.
+			role: "main",
+			waitId: 1,
 		});
 		expect((start as Extract<AgentSessionEvent, { type: "provider_retry_wait_start" }>).delayMs).toBeGreaterThan(0);
-		expect(end).toEqual({ type: "provider_retry_wait_end", aborted: false });
+		// The end echoes the start's correlation id so concurrent waits pair up.
+		expect(end).toEqual({ type: "provider_retry_wait_end", aborted: false, waitId: 1 });
 	}
 
 	it("reports the provider's own stream-retry backoff as session events, with no auto-retry", async () => {

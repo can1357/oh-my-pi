@@ -656,7 +656,7 @@ function renderAgentProgress(
 
 	const fullDescription = progress.description ? replaceTabs(sanitizeText(progress.description)).trim() : undefined;
 	let statusBadge: string | undefined;
-	if (progress.retryState && progress.status === "running") {
+	if ((progress.retryState ?? progress.providerRetryState) && progress.status === "running") {
 		statusBadge = ` ${formatBadge("retrying", "warning", theme)}`;
 	} else if (progress.retryFailure && (progress.status === "failed" || progress.status === "aborted")) {
 		statusBadge = ` ${formatBadge("rate-limited", "error", theme)}`;
@@ -727,6 +727,14 @@ function renderAgentProgress(
 		const summary =
 			`retrying ${progress.retryState.attempt}/${progress.retryState.maxAttempts} ${waitLabel}: ` +
 			previewLine(sanitizeText(progress.retryState.errorMessage), 60);
+		lines.push(`${continuePrefix}${theme.tree.hook} ${theme.fg("warning", summary)}`);
+	} else if (progress.providerRetryState && progress.status === "running") {
+		const state = progress.providerRetryState;
+		const remainingMs = Math.max(0, state.startedAtMs + state.delayMs - nowMs);
+		const waitLabel = remainingMs > 0 ? `in ${formatDuration(remainingMs)}` : "now";
+		const count =
+			state.attempt !== undefined && state.maxAttempts !== undefined ? ` ${state.attempt}/${state.maxAttempts}` : "";
+		const summary = `provider retrying${count} ${waitLabel}: ${previewLine(sanitizeText(state.model), 60)}`;
 		lines.push(`${continuePrefix}${theme.tree.hook} ${theme.fg("warning", summary)}`);
 	} else if (progress.retryFailure && progress.status !== "running") {
 		const summary = `auto-retry gave up after ${progress.retryFailure.attempt} attempt${
@@ -1875,6 +1883,21 @@ export interface AgentProgress {
 		delayMs: number;
 		errorMessage: string;
 		startedAtMs: number;
+	};
+	/**
+	 * Provider-internal retry backoff the subagent is sleeping through (pi-ai's
+	 * own stream retry, e.g. an Anthropic `retry-after`). Unlike `retryState`
+	 * no turn was superseded and there is no error to quote — the model and
+	 * the wait's correlation id identify it. Cleared when the matching
+	 * `provider_retry_wait_end` arrives.
+	 */
+	providerRetryState?: {
+		waitId: number;
+		delayMs: number;
+		model: string;
+		startedAtMs: number;
+		attempt?: number;
+		maxAttempts?: number;
 	};
 	/**
 	 * Terminal retry failure surfaced once the subagent gave up retrying

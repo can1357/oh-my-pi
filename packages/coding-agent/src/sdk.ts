@@ -175,7 +175,11 @@ import {
 import { getRestorableSessionModels } from "./session/session-context";
 import { SessionManager } from "./session/session-manager";
 import { collectMountedMCPToolRoutes, projectMountedMCPXdevGuidance } from "./session/session-tools";
-import { createSettingsAwareStreamFn, type ProviderRetryWaitInfo } from "./session/settings-stream-fn";
+import {
+	createSettingsAwareStreamFn,
+	type ProviderRetryWaitObserver,
+	type ProviderRetryWaitStreamRole,
+} from "./session/settings-stream-fn";
 import { SnapcompactInlineTransformer } from "./session/snapcompact-inline";
 import { createSnapcompactSavingsRecorder } from "./session/snapcompact-savings-journal";
 import { createSpeculativeToolExecutionConfig } from "./speculation/host";
@@ -3640,21 +3644,34 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// retries) are otherwise invisible — the UI shows a stalled turn. Relay
 		// them to the session so the TUI can show a countdown. `session` is
 		// late-bound below, so events raised before construction are dropped.
-		const providerRetryWaitObserver = {
-			onStart: (info: ProviderRetryWaitInfo) => {
-				if (hasSession) session.emitProviderRetryWait({ type: "provider_retry_wait_start", ...info });
+		let nextProviderRetryWaitId = 0;
+		const makeProviderRetryWaitObserver = (role: ProviderRetryWaitStreamRole): ProviderRetryWaitObserver => ({
+			onStart: info => {
+				nextProviderRetryWaitId += 1;
+				const waitId = nextProviderRetryWaitId;
+				if (hasSession) session.emitProviderRetryWait({ type: "provider_retry_wait_start", ...info, waitId, role });
+				return waitId;
 			},
-			onEnd: (result: { aborted: boolean }) => {
-				if (hasSession) session.emitProviderRetryWait({ type: "provider_retry_wait_end", aborted: result.aborted });
+			onEnd: result => {
+				if (hasSession)
+					session.emitProviderRetryWait({
+						type: "provider_retry_wait_end",
+						aborted: result.aborted,
+						waitId: result.waitId,
+					});
 			},
-		};
-		const settingsAwareStreamFn = wrapStreamFnWithBlobUrlFallback(
-			wrapStreamFnWithProviderConcurrency(
-				settings,
-				createSettingsAwareStreamFn(settings, undefined, providerRetryWaitObserver),
-			),
-			blobBroker,
-		);
+		});
+		const wrapSettingsAwareStreamFn = (role: ProviderRetryWaitStreamRole) =>
+			wrapStreamFnWithBlobUrlFallback(
+				wrapStreamFnWithProviderConcurrency(
+					settings,
+					createSettingsAwareStreamFn(settings, undefined, makeProviderRetryWaitObserver(role)),
+				),
+				blobBroker,
+			);
+		const mainStreamFn = wrapSettingsAwareStreamFn("main");
+		const sideStreamFn = wrapSettingsAwareStreamFn("side");
+		const advisorStreamFn = wrapSettingsAwareStreamFn("advisor");
 		const codeModeState: { namespacesInfo?: unknown } = {};
 		const transformToolCallArguments = (args: Record<string, unknown>): Record<string, unknown> => {
 			let result = args;
@@ -3729,7 +3746,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					settings.get("externalThinking") &&
 					agent.state.tools.some(tool => tool.name === "think") &&
 					supportsExternalThinking(streamModel);
-				return settingsAwareStreamFn(streamModel, context, {
+				return mainStreamFn(streamModel, context, {
 					...streamOptions,
 					anthropicCacheRefresh: true,
 					forceReasoningOff: externalThinking || streamOptions?.forceReasoningOff,
@@ -3938,8 +3955,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			transformProviderContext,
 			onPayload,
 			onResponse,
-			sideStreamFn: settingsAwareStreamFn,
-			advisorStreamFn: settingsAwareStreamFn,
+			sideStreamFn,
+			advisorStreamFn,
 			preferWebsockets: preferOpenAICodexWebsockets,
 			convertToLlm: convertToLlmFinal,
 			rebuildSystemPrompt,
@@ -4319,7 +4336,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					kimiApiFormat,
 					preferWebsockets: preferOpenAICodexWebsockets,
 					getToolContext: toolCall => toolContextStore.getContext(toolCall),
-					streamFn: settingsAwareStreamFn,
+					streamFn: mainStreamFn,
 					transformToolCallArguments,
 					// No fallback resolver. The capture agent advertises only
 					// `learn`/`manage_skill`, both of which stay top-level and never

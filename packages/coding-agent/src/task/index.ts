@@ -1168,6 +1168,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 							progress.recentTools = nextProgress.recentTools.slice();
 							progress.recentOutput = nextProgress.recentOutput.slice();
 							progress.retryState = nextProgress.retryState;
+							progress.providerRetryState = nextProgress.providerRetryState;
 							progress.retryFailure = nextProgress.retryFailure;
 						}
 						const updateText =
@@ -1216,9 +1217,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					progress.contextTokens = singleResult?.contextTokens;
 					progress.contextWindow = singleResult?.contextWindow;
 					progress.cost = singleResult?.usage?.cost.total ?? 0;
-					progress.extractedToolData = singleResult?.extractedToolData;
 					progress.retryFailure = singleResult?.retryFailure;
 					progress.retryState = undefined;
+					progress.providerRetryState = undefined;
 					progress.modelRole = singleResult?.modelRole ?? progress.modelRole;
 					progress.advisor = singleResult?.advisor ?? progress.advisor;
 					if (singleResult?.resolvedModel) {

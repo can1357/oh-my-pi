@@ -7,6 +7,7 @@
  * OpenRouter sticky-routing / response caching behaves the same on advisor turns
  * (can1357/oh-my-pi#3639).
  */
+import { scheduler } from "node:timers/promises";
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
 import type { Context, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
@@ -265,13 +266,18 @@ describe("createSettingsAwareStreamFn", () => {
 
 		function captureObserver() {
 			const starts: ProviderRetryWaitInfo[] = [];
-			const ends: Array<{ aborted: boolean }> = [];
+			const ends: Array<{ aborted: boolean; waitId: number }> = [];
+			let nextWaitId = 0;
 			return {
 				starts,
 				ends,
 				observer: {
-					onStart: (info: ProviderRetryWaitInfo) => starts.push(info),
-					onEnd: (result: { aborted: boolean }) => ends.push(result),
+					onStart: (info: ProviderRetryWaitInfo) => {
+						starts.push(info);
+						nextWaitId += 1;
+						return nextWaitId;
+					},
+					onEnd: (result: { aborted: boolean; waitId: number }) => ends.push(result),
 				},
 			};
 		}
@@ -294,7 +300,7 @@ describe("createSettingsAwareStreamFn", () => {
 			expect(starts).toEqual([
 				{ delayMs: 1234, model: "claude-sonnet-4-5", provider: "anthropic", api: "anthropic-messages" },
 			]);
-			expect(ends).toEqual([{ aborted: false }]);
+			expect(ends).toEqual([{ aborted: false, waitId: 1 }]);
 		});
 
 		it("leaves a caller-supplied providerRetryWait untouched", async () => {
@@ -357,7 +363,39 @@ describe("createSettingsAwareStreamFn", () => {
 
 			await expect(pending).rejects.toThrow();
 			expect(starts).toHaveLength(1);
-			expect(ends).toEqual([{ aborted: true }]);
+			expect(ends).toEqual([{ aborted: true, waitId: 1 }]);
+		});
+
+		it("threads each wait's own id to its end when waits overlap", async () => {
+			const settings = Settings.isolated({});
+			const { fn: base, calls } = captureBase();
+			const { starts, ends, observer } = captureObserver();
+			const wrapped = createSettingsAwareStreamFn(settings, base, observer);
+
+			wrapped(stubAnthropicModel, stubContext, { apiKey: "k" });
+			const installed = calls[0]?.options?.providerRetryWait;
+			expect(installed).toBeDefined();
+
+			// Hold both sleeps open so the two waits overlap: the second wait
+			// starts before the first ends.
+			const releases = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+			let waitCalls = 0;
+			vi.spyOn(scheduler, "wait").mockImplementation(async () => {
+				await releases.at(waitCalls++)?.promise;
+			});
+
+			const first = installed!(1000);
+			const second = installed!(2000);
+			expect(starts).toHaveLength(2);
+			// Resolve out of order: each end must still carry its own wait's id.
+			releases.at(1)?.resolve();
+			await second;
+			releases.at(0)?.resolve();
+			await first;
+			expect(ends).toEqual([
+				{ aborted: false, waitId: 2 },
+				{ aborted: false, waitId: 1 },
+			]);
 		});
 	});
 });

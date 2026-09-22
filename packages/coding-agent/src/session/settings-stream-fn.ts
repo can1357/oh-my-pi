@@ -29,18 +29,21 @@ export interface ProviderRetryWaitInfo {
 	maxAttempts?: number;
 }
 
+/** Which stream role a provider-internal retry backoff was observed on. */
+export type ProviderRetryWaitStreamRole = "main" | "advisor" | "side";
+
 /**
  * Observer notified around provider-internal retry backoffs.
  *
- * pi-ai retries a failed stream on its own (anthropic stream backoff, the
- * openai-responses transient retry, the empty-completion retry) and simply
- * sleeps between attempts. Without this hook those sleeps are invisible: no
- * loader, no log line — the session just looks frozen until pi-ai gives up and
- * the session-level saga finally emits `auto_retry_start`.
+ * `onStart` allocates the wait's correlation id and returns it; the wrapper
+ * threads it back into `onEnd` so concurrent waits on different streams pair
+ * up even when their sleeps overlap. Ids must be unique across every role
+ * sharing the session — a per-role counter would collide the moment a main
+ * turn and an advisor turn back off together.
  */
 export interface ProviderRetryWaitObserver {
-	onStart(info: ProviderRetryWaitInfo): void;
-	onEnd(result: { aborted: boolean }): void;
+	onStart(info: ProviderRetryWaitInfo): number;
+	onEnd(result: { aborted: boolean; waitId: number }): void;
 }
 
 function timeoutSecondsToMs(value: number): number | undefined {
@@ -120,18 +123,18 @@ export function createSettingsAwareStreamFn(
 								: {}),
 						};
 						logger.info("Provider retry wait", { ...info });
-						retryWaitObserver.onStart(info);
+						const waitId = retryWaitObserver.onStart(info);
 						try {
 							await scheduler.wait(delayMs, { signal });
 						} catch (error) {
 							// `scheduler.wait` only rejects on abort; treat any rejection as
 							// one so the indicator always clears, and rethrow so pi-ai's
 							// cancellation handling is byte-for-byte what it was before.
-							logger.debug("Provider retry wait aborted", { ...info });
-							retryWaitObserver.onEnd({ aborted: true });
+							logger.debug("Provider retry wait aborted", { ...info, waitId });
+							retryWaitObserver.onEnd({ aborted: true, waitId });
 							throw error;
 						}
-						retryWaitObserver.onEnd({ aborted: false });
+						retryWaitObserver.onEnd({ aborted: false, waitId });
 					}
 				: undefined);
 		const merged: SimpleStreamOptions = {

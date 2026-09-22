@@ -3,7 +3,7 @@ import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-ag
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { Loader, TERMINAL } from "@oh-my-pi/pi-tui";
+import { Loader, TERMINAL, Text } from "@oh-my-pi/pi-tui";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
 /**
@@ -73,12 +73,18 @@ const RETRY_START = {
 } as unknown as AgentSessionEvent;
 const PROVIDER_RETRY_WAIT_START = {
 	type: "provider_retry_wait_start",
+	waitId: 1,
+	role: "main",
 	delayMs: 2000,
 	model: "claude-sonnet-4-5",
 	provider: "anthropic",
 	api: "anthropic-messages",
 } as unknown as AgentSessionEvent;
-const PROVIDER_RETRY_WAIT_END = { type: "provider_retry_wait_end", aborted: false } as unknown as AgentSessionEvent;
+const PROVIDER_RETRY_WAIT_END = {
+	type: "provider_retry_wait_end",
+	aborted: false,
+	waitId: 1,
+} as unknown as AgentSessionEvent;
 const TASK_TOOL_EXECUTION_END = {
 	type: "tool_execution_end",
 	toolCallId: "call-task-1",
@@ -342,5 +348,132 @@ describe("EventController loader recovery after overflow maintenance", () => {
 		} finally {
 			if (previousWarpProtocol !== undefined) process.env.WARP_CLI_AGENT_PROTOCOL_VERSION = previousWarpProtocol;
 		}
+	});
+
+	it("keeps the newest countdown until its own end arrives", async () => {
+		const { ctx, streamState, statusContainer } = createContext();
+		const controller = new EventController(ctx);
+
+		await controller.handleEvent(AGENT_START);
+		streamState.isStreaming = true;
+
+		await controller.handleEvent(PROVIDER_RETRY_WAIT_START);
+		const first = statusContainer.children[0];
+		expect(first).toBeDefined();
+
+		// A second wait supersedes the first while it still sleeps.
+		await controller.handleEvent({
+			...(PROVIDER_RETRY_WAIT_START as unknown as Record<string, unknown>),
+			waitId: 2,
+			delayMs: 9000,
+		} as unknown as AgentSessionEvent);
+		const second = statusContainer.children[0];
+		expect(second).toBeDefined();
+		expect(second).not.toBe(first);
+
+		// The stale end for the superseded wait must not take the countdown down.
+		await controller.handleEvent(PROVIDER_RETRY_WAIT_END);
+		expect(statusContainer.children).toEqual([second]);
+		expect(ctx.loadingAnimation).toBeUndefined();
+
+		// The mounted wait's own end restores Working….
+		await controller.handleEvent({
+			...(PROVIDER_RETRY_WAIT_END as unknown as Record<string, unknown>),
+			waitId: 2,
+		} as unknown as AgentSessionEvent);
+		expect(statusContainer.children).not.toContain(second);
+		expect(ctx.loadingAnimation).toBeDefined();
+		expect(statusContainer.children).toContain(ctx.loadingAnimation!);
+	});
+
+	it("never unmounts a session-level retry overlay on a provider wait end", async () => {
+		const { ctx, streamState, statusContainer } = createContext();
+		const controller = new EventController(ctx);
+
+		await controller.handleEvent(AGENT_START);
+		streamState.isStreaming = true;
+		await controller.handleEvent(PROVIDER_RETRY_WAIT_START);
+		expect(statusContainer.children).toHaveLength(1);
+
+		// The main turn fails mid-wait: the session-level retry takes over the row.
+		await controller.handleEvent(RETRY_START);
+		const sessionRetryLoader = ctx.retryLoader;
+		expect(sessionRetryLoader).toBeDefined();
+		expect(statusContainer.children).toEqual([sessionRetryLoader!]);
+
+		// The provider wait's own end must only drop its reference, never the row.
+		await controller.handleEvent(PROVIDER_RETRY_WAIT_END);
+		expect(ctx.retryLoader).toBe(sessionRetryLoader);
+		expect(statusContainer.children).toEqual([sessionRetryLoader!]);
+	});
+
+	it("leaves a session-level retry overlay alone across an advisor wait lifecycle", async () => {
+		const { ctx, streamState, statusContainer } = createContext();
+		const controller = new EventController(ctx);
+
+		await controller.handleEvent(AGENT_START);
+		streamState.isStreaming = true;
+
+		// Advisor backoff while the main turn runs: background role, never mounted.
+		await controller.handleEvent({
+			...(PROVIDER_RETRY_WAIT_START as unknown as Record<string, unknown>),
+			role: "advisor",
+			waitId: 7,
+		} as unknown as AgentSessionEvent);
+		await controller.handleEvent(RETRY_START);
+		const sessionRetryLoader = ctx.retryLoader;
+		expect(sessionRetryLoader).toBeDefined();
+
+		await controller.handleEvent({
+			...(PROVIDER_RETRY_WAIT_END as unknown as Record<string, unknown>),
+			waitId: 7,
+		} as unknown as AgentSessionEvent);
+		expect(ctx.retryLoader).toBe(sessionRetryLoader);
+		expect(statusContainer.children).toEqual([sessionRetryLoader!]);
+	});
+
+	it("leaves the idle status row alone for background waits", async () => {
+		const { ctx, streamState, statusContainer } = createContext();
+		const controller = new EventController(ctx);
+
+		// Idle prompt: the row holds the retry hint, no turn is streaming.
+		const hint = new Text("F5 to Retry", 0, 0);
+		statusContainer.addChild(hint);
+		expect(streamState.isStreaming).toBe(false);
+
+		await controller.handleEvent({
+			...(PROVIDER_RETRY_WAIT_START as unknown as Record<string, unknown>),
+			role: "side",
+			waitId: 3,
+		} as unknown as AgentSessionEvent);
+		expect(statusContainer.children).toEqual([hint]);
+
+		// Even the main role never mounts while nothing is streaming.
+		await controller.handleEvent({
+			...(PROVIDER_RETRY_WAIT_START as unknown as Record<string, unknown>),
+			role: "main",
+			waitId: 5,
+		} as unknown as AgentSessionEvent);
+		expect(statusContainer.children).toEqual([hint]);
+
+		await controller.handleEvent({
+			...(PROVIDER_RETRY_WAIT_END as unknown as Record<string, unknown>),
+			waitId: 5,
+		} as unknown as AgentSessionEvent);
+		expect(statusContainer.children).toEqual([hint]);
+		await controller.handleEvent({
+			...(PROVIDER_RETRY_WAIT_END as unknown as Record<string, unknown>),
+			waitId: 3,
+		} as unknown as AgentSessionEvent);
+		expect(statusContainer.children).toEqual([hint]);
+
+		// Even while streaming, a non-main role never mounts.
+		streamState.isStreaming = true;
+		await controller.handleEvent({
+			...(PROVIDER_RETRY_WAIT_START as unknown as Record<string, unknown>),
+			role: "advisor",
+			waitId: 4,
+		} as unknown as AgentSessionEvent);
+		expect(statusContainer.children).toEqual([hint]);
 	});
 });
