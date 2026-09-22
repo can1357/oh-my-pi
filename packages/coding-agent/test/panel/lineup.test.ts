@@ -133,8 +133,8 @@ describe("family policy", () => {
 	});
 
 	test("a one-seat lineup resolves an unclassified model, claiming no diversity", () => {
-		const opaque = { ...gpt, identity: { ...gpt.identity, class: "unknown" as const } };
-		const role = independent([{ model: "openai/gpt-5.4" }]);
+		const opaque = { ...gpt, provider: "opaque", id: "opaque-model" };
+		const role = independent([{ model: "opaque/opaque-model" }]);
 
 		const lineup = resolvePanelLineup({ context: context([opaque]), roleId: "r", role, taskMode: "answer" });
 
@@ -142,8 +142,8 @@ describe("family policy", () => {
 	});
 
 	test("a multi-seat lineup still fails closed on an unclassified model", () => {
-		const opaque = { ...gptMini, identity: { ...gptMini.identity, class: "unknown" as const } };
-		const role = independent([{ model: "anthropic/claude-sonnet-4-5" }, { model: "openai/gpt-5-mini" }]);
+		const opaque = { ...gptMini, provider: "opaque", id: "opaque-model" };
+		const role = independent([{ model: "anthropic/claude-sonnet-4-5" }, { model: "opaque/opaque-model" }]);
 
 		expect(() =>
 			resolvePanelLineup({ context: context([claude, opaque]), roleId: "r", role, taskMode: "answer" }),
