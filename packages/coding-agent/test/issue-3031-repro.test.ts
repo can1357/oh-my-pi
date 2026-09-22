@@ -130,6 +130,8 @@ describe("issue #3031 — mnemopi embeddings live in an isolated subprocess", ()
 				onError() {
 					return () => {};
 				},
+				ref() {},
+				unref() {},
 				async terminate() {
 					messageHandler = undefined;
 				},

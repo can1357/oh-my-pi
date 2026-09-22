@@ -58,8 +58,8 @@ pub fn filter(ctx: &MinimizerCtx<'_>, input: &str, exit_code: i32) -> MinimizerO
 	// Success no-op short-circuits, moved here from defs/poetry-install.toml and
 	// defs/uv-sync.toml so they fire regardless of overlay ordering. Each is
 	// scoped per (program, subcommand) so unrelated package managers are
-	// untouched. A non-empty message means ensure_success_visible leaves it as-is
-	// (no bare 'OK' rewrite).
+	// untouched. A non-empty message means ensure_success_visible leaves it
+	// as-is (no bare 'OK' rewrite).
 	if exit_code == 0
 		&& let Some(message) = success_up_to_date_short_circuit(ctx, &cleaned)
 	{
@@ -119,9 +119,10 @@ fn success_up_to_date_short_circuit(ctx: &MinimizerCtx<'_>, cleaned: &str) -> Op
 	// environment path …') alongside the Audited line on exit 0, and eagerly
 	// collapsing to 'ok (up to date)' would destroy them. On HEAD the global
 	// is_noise_line stripped the Audited line but the surviving warning kept the
-	// output non-empty, so it was reported; preserve that by short-circuiting only
-	// when no warning/error line co-occurs. (poetry's branch above deliberately
-	// collapses warnings too — its deleted overlay did the same, so it stays.)
+	// output non-empty, so it was reported; preserve that by short-circuiting
+	// only when no warning/error line co-occurs. (poetry's branch above
+	// deliberately collapses warnings too — its deleted overlay did the same,
+	// so it stays.)
 	if ctx.program == "uv"
 		&& matches!(ctx.subcommand, Some("sync" | "add" | "remove"))
 		&& !uv_has_actionable_diagnostic(cleaned)
@@ -154,7 +155,8 @@ fn strip_package_noise(ctx: &MinimizerCtx<'_>, input: &str, exit_code: i32) -> S
 	// 'up to date', pnpm 'Done in Xs'/'Packages: +N', yarn 'Done in Xs'): the
 	// count confirms lockfile/node_modules state. Keep the first such line and
 	// treat later duplicates as noise. This check precedes is_noise_line so the
-	// 'audited N packages' strip cannot eat the combined 'added…audited' summary.
+	// 'audited N packages' strip cannot eat the combined 'added…audited'
+	// summary.
 	let mut kept_install_summary = false;
 	for line in input.lines() {
 		let trimmed = line.trim();
@@ -591,10 +593,11 @@ fn is_ruby_php_brew_noise(program: &str, _line: &str, lower: &str) -> bool {
 		return false;
 	}
 	if program == "bundle" {
-		// Keep 'Bundle complete! … N gems now installed' / 'Bundle updated!' — the
-		// one-line gem-count signal (replaces the defs/bundle-install.toml
-		// short-circuit). Strip the 'Use `bundle info [gemname]`…' follow-up hint.
-		// Using/Fetching/Installing rows are still per-gem progress noise.
+		// Keep 'Bundle complete! … N gems now installed' / 'Bundle updated!' —
+		// the one-line gem-count signal (replaces the defs/bundle-install.toml
+		// short-circuit). Strip the 'Use `bundle info [gemname]`…' follow-up
+		// hint. Using/Fetching/Installing rows are still per-gem progress
+		// noise.
 		if lower.starts_with("bundle complete") || lower.starts_with("bundle updated") {
 			return false;
 		}
@@ -1060,9 +1063,10 @@ mod tests {
 
 	#[test]
 	fn poetry_install_with_real_work_is_not_short_circuited() {
-		// A genuine install (no 'No changes'/'No dependencies…' no-op marker) must
-		// NOT collapse to 'ok (up to date)'. An actionable warning survives the
-		// progress strip and proves the short-circuit did not fire.
+		// A genuine install (no 'No changes'/'No dependencies…' no-op marker)
+		// must NOT collapse to 'ok (up to date)'. An actionable warning
+		// survives the progress strip and proves the short-circuit did not
+		// fire.
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let context = ctx("poetry", Some("install"), "poetry install", &cfg);
 		let input = "Installing dependencies from lock file\n\n  - Downloading \
@@ -1094,9 +1098,9 @@ mod tests {
 		// co-printed actionable diagnostic. uv on exit 0 can print
 		// 'warning: VIRTUAL_ENV=… does not match the project environment path …'
 		// before the Resolved/Audited summary; collapsing to 'ok (up to date)'
-		// would hide that the sync may have targeted the wrong environment. On HEAD
-		// the global is_noise_line stripped 'Audited' but the surviving warning
-		// kept the output, so it was reported — preserve that.
+		// would hide that the sync may have targeted the wrong environment. On
+		// HEAD the global is_noise_line stripped 'Audited' but the surviving
+		// warning kept the output, so it was reported — preserve that.
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let context = ctx("uv", Some("sync"), "uv sync", &cfg);
 		let input = "warning: VIRTUAL_ENV=.venv does not match the project environment path \
@@ -1150,9 +1154,9 @@ mod tests {
 
 	#[test]
 	fn bundle_install_keeps_complete_line_strips_info_hint() {
-		// Replaces defs/bundle-install.toml; keep the 'Bundle complete!' gem-count
-		// signal, strip Using/Fetching/Installing rows and the 'Use `bundle info`'
-		// hint. Scoped to program=bundle.
+		// Replaces defs/bundle-install.toml; keep the 'Bundle complete!'
+		// gem-count signal, strip Using/Fetching/Installing rows and the 'Use
+		// `bundle info`' hint. Scoped to program=bundle.
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let context = ctx("bundle", Some("install"), "bundle install", &cfg);
 		let input = "Fetching gem metadata from https://rubygems.org/.........\nResolving \
@@ -1200,7 +1204,8 @@ mod tests {
 		let input = r#"[{"name":"pip","version":"23.0"},{"name":"requests","version":"2.28.0"}]"#;
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 
-		// --format=json form: output must be byte-identical to input (no JSON rewrite)
+		// --format=json form: output must be byte-identical to input (no JSON
+		// rewrite)
 		let context = ctx("pip", Some("list"), "pip list --format=json", &cfg);
 		let out = filter(&context, input, 0);
 		assert!(!out.changed, "pip list --format=json must not be modified");

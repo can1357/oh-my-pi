@@ -9,5 +9,6 @@ Searches files/internal URLs: Rust regex, PCRE2 fallback.
 
 <critical>
 - MUST use instead of shell `grep`/`rg`.
+{{#if hasFind}}- Describing a behavior rather than a literal pattern, or guessing symbol names → `find` first; grep for exact strings, regexes, and known symbols.{{/if}}
 {{#if eagerDelegation}}- Open-ended multi-round search MUST use {{#if scoutAvailable}}Task + scout,{{else}}Task,{{/if}} not chained calls.{{/if}}
 </critical>

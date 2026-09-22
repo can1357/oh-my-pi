@@ -8,7 +8,7 @@ import * as logger from "@oh-my-pi/pi-utils/logger";
 import { SUPPORTED_IMAGE_MIME_TYPES } from "@oh-my-pi/pi-utils/mime";
 import MAC_FILE_URL_SCRIPT from "./mac-file-urls.applescript" with { type: "text" };
 
-type SpawnCaptureOptions = { input?: string; timeoutMs?: number };
+type SpawnCaptureOptions = { input?: string; timeoutMs?: number; env?: Record<string, string | undefined> };
 
 /**
  * Run a subprocess and capture its stdout without blocking the event loop.
@@ -36,6 +36,7 @@ async function spawnCapture(
 		stdout: "pipe",
 		stderr: "ignore",
 		stdin: options.input !== undefined ? Buffer.from(options.input) : "ignore",
+		...(options.env ? { env: options.env } : {}),
 	});
 	let timedOut = false;
 	const timer = setTimeout(() => {
@@ -64,6 +65,17 @@ function hasDisplay(): boolean {
 }
 
 /**
+ * True when `pbcopy(1)` would type this text as a document instead of as text:
+ * it sniffs the leading bytes and puts input opening with a PDF (`%PDF-`),
+ * EPS (`%!PS`), or RTF (`{\rtf`) header on the pasteboard as that data type.
+ * A code block or diff whose first line is such a header must not go through it,
+ * or a plain-text paste target receives document data — or nothing.
+ */
+function isPasteboardTypedByHeader(text: string): boolean {
+	return text.startsWith("%PDF-") || text.startsWith("%!PS") || text.startsWith("{\\rtf");
+}
+
+/**
  * Read file paths from the macOS pasteboard's `public.file-url` representation.
  *
  * Used to reach the Finder `Cmd+C` pasteboard (which exposes only file URLs,
@@ -85,6 +97,8 @@ export async function readMacFileUrlsFromClipboard(): Promise<string[]> {
 		return [];
 	}
 }
+
+let macClipboardWrite = Promise.resolve();
 
 /**
  * Copy text to the system clipboard.
@@ -124,6 +138,16 @@ export async function copyToClipboard(text: string): Promise<void> {
 		}
 	}
 
+	// Keep pbcopy, document-header writes, and native fallbacks in invocation order.
+	let releaseWrite: (() => void) | undefined;
+	if (process.platform === "darwin") {
+		const previousWrite = macClipboardWrite;
+		const { promise, resolve } = Promise.withResolvers<void>();
+		macClipboardWrite = promise;
+		releaseWrite = resolve;
+		await previousWrite;
+	}
+
 	// Also try native tools (best effort for local sessions)
 	try {
 		if (process.env.TERMUX_VERSION) {
@@ -134,10 +158,40 @@ export async function copyToClipboard(text: string): Promise<void> {
 				// Fall through to native
 			}
 		}
+		// macOS: prefer `pbcopy` over the in-process AppKit write, mirroring the
+		// read path which already shells out to `pbpaste`. An in-process
+		// NSPasteboard write logs
+		// `-[NSPasteboard _setData:forType:index:usesPboardTypes:] returns false`
+		// straight to stderr whenever it loses pasteboard ownership — during
+		// process teardown, or to another app that writes at the same moment. The
+		// copy itself is best-effort and the failure is swallowed here, but the
+		// AppKit line still lands in the user's terminal. The child's stderr is
+		// discarded by spawnCapture, and `pbcopy` ships with every macOS.
+		//
+		// Two `pbcopy(1)` behaviours are worked around. It types input by sniffing
+		// the leading bytes: text opening with a PDF, EPS, or RTF header lands on the
+		// pasteboard as that document type instead of as text, so such text keeps
+		// the in-process write. And it decodes stdin per `LANG`, defaulting to
+		// ASCII when unset, which mangles non-ASCII input under `LANG=C` or a bare
+		// launchd/SSH environment — so the child gets an explicit UTF-8 locale.
+		if (process.platform === "darwin" && !isPasteboardTypedByHeader(text)) {
+			try {
+				await spawnCapture(["pbcopy"], {
+					input: text,
+					timeoutMs: 5000,
+					env: { ...process.env, LANG: "en_US.UTF-8", LC_ALL: "en_US.UTF-8" },
+				});
+				return;
+			} catch {
+				// Fall through to native.
+			}
+		}
 
 		await nativeCopyToClipboard(text);
 	} catch {
 		// Ignore — clipboard copy is best-effort
+	} finally {
+		releaseWrite?.();
 	}
 }
 

@@ -376,6 +376,19 @@ export interface CodexCompactionRequestContext extends CodexCompactionMetadata {
 	operationId: string;
 }
 
+/** Anthropic `compact_20260112` context-management edit (`compact-2026-01-12` beta). */
+export interface AnthropicCompactionRequest {
+	/**
+	 * Prompt input-token count at which the API compacts. The API enforces a
+	 * 50,000-token floor and defaults to 150,000 when omitted.
+	 */
+	triggerInputTokens?: number;
+	/** Stop after the compaction block instead of continuing the response. */
+	pauseAfterCompaction?: boolean;
+	/** Custom summarization prompt; replaces the API default entirely when set. */
+	instructions?: string;
+}
+
 /** OpenAI's GPT-5.6+ explicit prompt-cache controls. */
 export interface OpenAIPromptCacheOptions {
 	/** `explicit` disables OpenAI's automatic latest-message breakpoint. */
@@ -433,6 +446,15 @@ export interface StreamOptions {
 	anthropicPrefixMismatchBehavior?: "drop_block" | "error";
 	/** @internal Marks a replay-only Anthropic request that must use non-streaming `max_tokens: 0`. */
 	anthropicCacheRefreshRequest?: boolean;
+	/**
+	 * Anthropic server-side compaction (`compact-2026-01-12` beta). Sends the
+	 * `compact_20260112` context-management edit so the API summarizes the
+	 * prompt in-band once its input reaches the trigger; the resulting summary
+	 * arrives as an {@link AnthropicCompactionPayload} on the assistant message.
+	 * Ignored by every other provider and by Anthropic-compatible endpoints
+	 * without context-management support.
+	 */
+	anthropicCompaction?: AnthropicCompactionRequest;
 	/**
 	 * Additional headers to include in provider requests.
 	 * These are merged on top of model-defined headers.
@@ -886,7 +908,33 @@ export interface AnthropicMessagePayload {
 	toolChanges?: Array<{ type: "tool_addition" | "tool_removal"; name: string }>;
 }
 
-export type ProviderPayload = OpenAIResponsesHistoryPayload | AnthropicMessagePayload;
+/**
+ * Anthropic server-side compaction summary (`compact-2026-01-12` beta).
+ *
+ * Produced by the Anthropic provider on the assistant message of a request
+ * that streamed a `compaction` content block, and attached to the user-role
+ * compaction summary message that replaces the compacted history so the
+ * provider can replay the block verbatim: the API drops every block that
+ * precedes it. `content` is the plain-text summary, so every other provider
+ * reads the message text and ignores the payload.
+ */
+export interface AnthropicCompactionPayload {
+	type: "anthropicCompaction";
+	/** Provider that produced the summary; only that provider replays it natively. */
+	provider: string;
+	content: string;
+	/** Opaque provider state the API attached to the block; replayed verbatim when present. */
+	encryptedContent?: string;
+	/**
+	 * Harness-appended file metadata (`<files>` section) kept out of the
+	 * byte-identical block. Replayed as a user message after the native block:
+	 * the converter replaces the summary message with the block and skips its
+	 * text, so without this the metadata would be invisible to this provider.
+	 */
+	filesText?: string;
+}
+
+export type ProviderPayload = OpenAIResponsesHistoryPayload | AnthropicMessagePayload | AnthropicCompactionPayload;
 
 /** Provider-reported rewrite applied to request content before inference. */
 export interface ProviderInputTransformation {
@@ -993,7 +1041,13 @@ export interface AssistantMessage {
 	 * providers that expose no such field.
 	 */
 	upstreamProvider?: string;
-	/** Provider-reported concrete model when a router selected one for this turn. */
+	/**
+	 * Concrete model that produced this turn when it is knowable independently
+	 * of the requested id: reported by a router that selected one, or recovered
+	 * from a signed thinking block (Anthropic signatures name the serving
+	 * model). Compared against `model` to notice a gateway serving something
+	 * other than what was requested.
+	 */
 	upstreamModel?: string;
 	usage: Usage;
 	stopReason: StopReason;
@@ -1001,6 +1055,8 @@ export interface AssistantMessage {
 	errorMessage?: string;
 	/** Stable recovery-classification text when errorMessage includes display-only diagnostics. */
 	errorClassificationMessage?: string;
+	/** True only when an exact request-body-read timeout failed on a full Responses replay, not a previous-response delta. */
+	requestBodyReadTimeoutFullReplay?: boolean;
 	/** Per-tool abort messages used when an aborted assistant turn needs different placeholder results per tool call. */
 	toolCallAbortMessages?: Record<string, string>;
 	/** HTTP status surfaced by the provider when the request failed. Populated by every provider's catch block alongside `errorMessage` so consumers (auth retry, telemetry, UI) can branch without regex-scraping the message. */
@@ -1133,6 +1189,7 @@ export type CursorTodoSyncHandler = (
 	snapshot: CursorTodoSnapshot | null,
 	toolCallId: string,
 	error: string | null,
+	origin?: "read" | "update",
 ) => ToolResultMessage;
 
 export interface CursorShellStreamCallbacks {

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as path from "node:path";
+import { setImmediate } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Context, ImageContent } from "@oh-my-pi/pi-ai";
@@ -7,12 +8,15 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { IrcBridge, type IrcBridgeHost } from "@oh-my-pi/pi-coding-agent/session/irc-bridge";
 import { convertToLlm, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionAdvisors } from "@oh-my-pi/pi-coding-agent/session/session-advisors";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import * as imageLoading from "@oh-my-pi/pi-coding-agent/utils/image-loading";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -886,17 +890,26 @@ describe("AgentSession aside delivery", () => {
 		expect(irc.hasPending()).toBe(false);
 	});
 
-	it("drops a queued aside whose normalization outlives a concurrent newSession()", async () => {
-		// Regression: #queueUserMessage's aside branch used to enqueue into IrcBridge
-		// unconditionally after its normalization/vision-description awaits. If a
-		// newSession()/switchSession() completes (clearing the queue and, per the earlier
-		// stranded-aside fix, discarding whatever was queued at that instant) WHILE this
-		// call's own normalization is still in flight, the record lands in the queue only
-		// after the clear already ran — leaking the outgoing session's aside into the new
-		// session's transcript. Gate normalizeImagesForModel (always awaited, even without
-		// images) to force that exact interleaving.
+	it("drops a queued aside before a committed newSession() hook finishes", async () => {
 		const modelRegistry = new ModelRegistry(authStorage);
 		const started = Promise.withResolvers<void>();
+		const hookReached = Promise.withResolvers<void>();
+		const releaseHook = Promise.withResolvers<void>();
+		const sessionManager = SessionManager.inMemory(tempDir.path());
+		const runtime = new ExtensionRuntime();
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("session_switch", async () => {
+					hookReached.resolve();
+					await releaseHook.promise;
+				});
+			},
+			tempDir.path(),
+			new EventBus(),
+			runtime,
+			"held-new-session-hook",
+		);
+		const extensionRunner = new ExtensionRunner([extension], runtime, tempDir.path(), sessionManager, modelRegistry);
 		const mock = createMockModel({
 			provider: "openai",
 			id: "gpt-test",
@@ -917,10 +930,11 @@ describe("AgentSession aside delivery", () => {
 		settings.setModelRole("default", `${mock.model.provider}/${mock.model.id}`);
 		session = new AgentSession({
 			agent,
-			sessionManager: SessionManager.inMemory(tempDir.path()),
+			sessionManager,
 			settings,
 			modelRegistry,
 			toolRegistry: new Map(),
+			extensionRunner,
 		});
 
 		const run = session.prompt("go");
@@ -933,21 +947,43 @@ describe("AgentSession aside delivery", () => {
 			await releaseNormalize.promise;
 			return images;
 		});
+		let asideSettled = false;
+		const asidePromise = session.sendUserMessage("GENERATION_RACE_ASIDE", { deliverAs: "aside" }).then(() => {
+			asideSettled = true;
+		});
+		let newSessionPromise: Promise<boolean> | undefined;
 		try {
-			const asidePromise = session.sendUserMessage("GENERATION_RACE_ASIDE", { deliverAs: "aside" });
 			await normalizeStarted.promise;
+			const previousId = session.sessionId;
+			newSessionPromise = session.newSession();
+			await hookReached.promise;
+			expect(session.sessionId).not.toBe(previousId);
+			let ready = false;
+			const waiting = session.waitForSessionTransition().then(() => {
+				ready = true;
+			});
 
-			// The session transition completes (clearing the queue and bumping
-			// #sessionGeneration) while the aside above is still gated in normalization.
-			await session.newSession();
-			await run.catch(() => {});
-
+			// newSession never rolls its generation back. Let normalization and its
+			// continuation drain, but keep the readiness hook explicitly held.
 			releaseNormalize.resolve();
-			await asidePromise;
-			await session.waitForIdle();
+			await setImmediate();
+			expect(asideSettled).toBe(true);
+			expect(session.isSessionTransitioning).toBe(true);
+			expect(ready).toBe(false);
+			expect(JSON.stringify(session.agent.state.messages)).not.toContain("GENERATION_RACE_ASIDE");
 
+			releaseHook.resolve();
+			expect(await newSessionPromise).toBe(true);
+			await waiting;
+			await session.waitForIdle();
+			expect(session.isSessionTransitioning).toBe(false);
 			expect(JSON.stringify(session.agent.state.messages)).not.toContain("GENERATION_RACE_ASIDE");
 		} finally {
+			releaseNormalize.resolve();
+			releaseHook.resolve();
+			await newSessionPromise;
+			await asidePromise;
+			await run.catch(() => {});
 			normalizeSpy.mockRestore();
 		}
 	});
@@ -1212,25 +1248,53 @@ describe("AgentSession aside delivery", () => {
 			throw new Error("forced switchSession failure");
 		});
 
+		const rollbackReached = Promise.withResolvers<void>();
+		const releaseRollback = Promise.withResolvers<void>();
+		session.setSessionSwitchReconciler(async () => {
+			rollbackReached.resolve();
+			await releaseRollback.promise;
+		});
+		let asideSettled = false;
+		const asidePromise = session.sendUserMessage("ROLLBACK_ASIDE", { deliverAs: "aside" }).then(() => {
+			asideSettled = true;
+		});
+		let switchedPromise: Promise<boolean> | undefined;
 		try {
-			const asidePromise = session.sendUserMessage("ROLLBACK_ASIDE", { deliverAs: "aside" });
 			await normalizeStarted.promise;
-
-			const switchedPromise = session.switchSession(targetFile);
+			switchedPromise = session.switchSession(targetFile);
 			// #sessionGeneration has bumped by now; setSessionFile is paused before it fails.
 			await setSessionFileReached.promise;
+			let ready = false;
+			const waiting = session.waitForSessionTransition().then(() => {
+				ready = true;
+			});
 
 			releaseNormalize.resolve();
+			await setImmediate();
+			expect(asideSettled).toBe(false);
 			releaseSetSessionFileFailure.resolve();
+			await rollbackReached.promise;
+			await setImmediate();
+			// The restored generation belongs to the aside again, even while
+			// Collab readiness still waits for rollback reconciliation.
+			expect(asideSettled).toBe(true);
+			expect(session.isSessionTransitioning).toBe(true);
+			expect(ready).toBe(false);
 
+			releaseRollback.resolve();
 			await expect(switchedPromise).rejects.toThrow("forced switchSession failure");
-			await asidePromise;
-			await run.catch(() => {});
+			await waiting;
 			await session.waitForIdle();
-
+			expect(session.isSessionTransitioning).toBe(false);
 			expect(contexts).toHaveLength(1);
 			expect(JSON.stringify(contexts[0]!.messages)).toContain("ROLLBACK_ASIDE");
 		} finally {
+			releaseNormalize.resolve();
+			releaseSetSessionFileFailure.resolve();
+			releaseRollback.resolve();
+			await switchedPromise?.catch(() => {});
+			await asidePromise;
+			await run.catch(() => {});
 			normalizeSpy.mockRestore();
 			setSessionFileSpy.mockRestore();
 		}

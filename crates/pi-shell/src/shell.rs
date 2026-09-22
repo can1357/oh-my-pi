@@ -6,7 +6,6 @@ use std::{
 	collections::HashMap,
 	fs,
 	io::{self},
-	str,
 	sync::Arc,
 	time::Duration,
 };
@@ -31,7 +30,9 @@ use tokio_util::sync::CancellationToken;
 use crate::windows::configure_windows_path;
 use crate::{
 	cancel::{AbortReason, AbortToken, CancelToken},
-	minimizer, process,
+	minimizer,
+	output_decode::{OutputDecoder, decode_bytes},
+	process,
 };
 
 struct ShellSessionCore {
@@ -607,7 +608,7 @@ fn copy_env_into_shell(
 			continue;
 		};
 		let normalized_key = normalize_env_key(key);
-		if should_skip_env_var(normalized_key) {
+		if should_skip_env_var(normalized_key) || is_git_repo_location_var(normalized_key) {
 			continue;
 		}
 		if normalized_key == "PATH" {
@@ -675,11 +676,12 @@ async fn create_session_for_run(
 		shell.register_builtin(name, registration);
 	}
 	// In-process command-line utility builtins (see
-	// `pi_builtins::utility_builtins`): consistent, cross-platform implementations
-	// that run without spawning a process and resolve paths against the shell
-	// working directory. The whole set can be disabled (falling back to system
-	// binaries) via PI_DISABLE_UUTILS_BUILTINS; the destructive trio additionally
-	// honors PI_DISABLE_UUTILS_DESTRUCTIVE, and `rm`/`mv` have their own switches.
+	// `pi_builtins::utility_builtins`): consistent, cross-platform
+	// implementations that run without spawning a process and resolve paths
+	// against the shell working directory. The whole set can be disabled
+	// (falling back to system binaries) via PI_DISABLE_UUTILS_BUILTINS; the
+	// destructive trio additionally honors PI_DISABLE_UUTILS_DESTRUCTIVE, and
+	// `rm`/`mv` have their own switches.
 	if !uutils_env_disabled(config, "PI_DISABLE_UUTILS_BUILTINS") {
 		let destructive_disabled = uutils_env_disabled(config, "PI_DISABLE_UUTILS_DESTRUCTIVE");
 		let rm_disabled =
@@ -705,7 +707,7 @@ async fn create_session_for_run(
 	if let Some(env) = config.session_env.as_ref() {
 		for (key, value) in env {
 			let normalized_key = normalize_env_key(key);
-			if should_skip_env_var(normalized_key) {
+			if should_skip_env_var(normalized_key) || is_git_repo_location_var(normalized_key) {
 				continue;
 			}
 			let mut var = ShellVariable::new(ShellValue::String(value.clone()));
@@ -883,9 +885,9 @@ async fn run_shell_command_single(
 		// When the capture cap is exceeded the output was streamed raw and never
 		// buffered, so nothing was minimized — leave `minimized` absent, matching
 		// every other passthrough path and `apply_shell_minimizer`. Previously a
-		// `too-large` result with empty `text`/`original_text` was emitted, which a
-		// consumer keying off `minimized` presence could mistake for a real rewrite
-		// that produced empty output.
+		// `too-large` result with empty `text`/`original_text` was emitted, which
+		// a consumer keying off `minimized` presence could mistake for a real
+		// rewrite that produced empty output.
 		if !buffered.exceeded {
 			let minimized = match minimizer_mode {
 				minimizer::engine::MinimizerMode::WholeCommand => minimizer::apply(
@@ -902,12 +904,13 @@ async fn run_shell_command_single(
 				},
 			};
 			// Surface telemetry only when the filter actually rewrote the output
-			// and kept the original buffer — same contract as `apply_shell_minimizer`
-			// in `pi-natives`. A supported filter that runs but leaves the output
-			// unchanged (e.g. a short `git diff --name-only`) reports `changed:
-			// false` with no `original_text` and must NOT set `minimized`, or API
-			// consumers keying off `result.minimized` are misled. The separate
-			// `too-large` reason path above is unaffected.
+			// and kept the original buffer — same contract as
+			// `apply_shell_minimizer` in `pi-natives`. A supported filter that
+			// runs but leaves the output unchanged (e.g. a short `git diff
+			// --name-only`) reports `changed: false` with no `original_text`
+			// and must NOT set `minimized`, or API consumers keying off
+			// `result.minimized` are misled. The separate `too-large` reason
+			// path above is unaffected.
 			if minimized.changed
 				&& let Some(original_text) = minimized.original_text
 			{
@@ -945,7 +948,8 @@ async fn run_shell_command_segmented_chain(
 		.await;
 	};
 
-	// When minimizer is disabled, don't segment — stream the original single path.
+	// When minimizer is disabled, don't segment — stream the original single
+	// path.
 	if !config.enabled {
 		return run_shell_command_single(
 			session,
@@ -1529,6 +1533,35 @@ fn is_macos_malloc_stack_logging_var(key: &str) -> bool {
 	matches!(key, "MallocStackLogging" | "MallocStackLoggingNoCompact")
 }
 
+/// Git variables that pin a repository location to the launch checkout.
+///
+/// Forwarding them into a shell makes `git` ignore the command's working
+/// directory and mutate the wrong worktree or index, so the shell rediscovers
+/// the repository from `cwd` instead. Mirrors the `env_remove` list in
+/// `crates/pi-vcs/src/git/cli.rs`.
+pub const GIT_REPO_LOCATION_ENV_VARS: [&str; 6] = [
+	"GIT_DIR",
+	"GIT_COMMON_DIR",
+	"GIT_WORK_TREE",
+	"GIT_INDEX_FILE",
+	"GIT_OBJECT_DIRECTORY",
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES",
+];
+
+/// Windows environment lookups are case-insensitive, so `git_dir` binds there
+/// exactly like `GIT_DIR`; POSIX names are case-sensitive.
+#[cfg(windows)]
+fn is_git_repo_location_var(key: &str) -> bool {
+	GIT_REPO_LOCATION_ENV_VARS
+		.iter()
+		.any(|name| key.eq_ignore_ascii_case(name))
+}
+
+#[cfg(not(windows))]
+fn is_git_repo_location_var(key: &str) -> bool {
+	GIT_REPO_LOCATION_ENV_VARS.contains(&key)
+}
+
 fn should_skip_env_var(key: &str) -> bool {
 	if key.starts_with("BASH_FUNC_") && key.ends_with("%%") {
 		return true;
@@ -1624,10 +1657,9 @@ async fn read_output(
 	cancel_token: CancellationToken,
 	activity: Sender<()>,
 ) {
-	const REPLACEMENT: &str = "\u{FFFD}";
 	const BUF: usize = 65536;
-	let mut buf = vec![0u8; BUF + 4]; // +4 for max UTF-8 char
-	let mut it = 0;
+	let mut buf = vec![0u8; BUF];
+	let mut decoder = OutputDecoder::new();
 
 	#[cfg(unix)]
 	let Ok(reader) = register_nonblocking_pipe(reader) else {
@@ -1647,7 +1679,7 @@ async fn read_output(
 			}) else {
 				break;
 			};
-			match readiness.try_io(|inner| read_nonblocking(inner.get_ref(), &mut buf[it..BUF])) {
+			match readiness.try_io(|inner| read_nonblocking(inner.get_ref(), &mut buf)) {
 				Ok(Ok(0)) => break,
 				Ok(Ok(n)) => n,
 				Ok(Err(e)) if e.kind() == io::ErrorKind::Interrupted => continue,
@@ -1657,7 +1689,7 @@ async fn read_output(
 		};
 		#[cfg(not(unix))]
 		let n = {
-			let read_future = reader.read(&mut buf[it..BUF]);
+			let read_future = reader.read(&mut buf);
 			tokio::pin!(read_future);
 			match tokio::select! {
 				res = &mut read_future => res,
@@ -1671,58 +1703,16 @@ async fn read_output(
 		};
 		if n > 0 {
 			let _ = activity.try_send(());
-		}
-		it += n;
-
-		// Consume as much of `pending` as is decodable *right now*.
-		while it > 0 {
-			let pending = &buf[..it];
-			match str::from_utf8(pending) {
-				Ok(text) => {
-					emit_chunk(text, on_chunk.as_ref()).await;
-					it = 0;
-					break;
-				},
-				Err(err) => {
-					let p = err.valid_up_to();
-					if p > 0 {
-						// SAFETY: [..p] is guaranteed valid UTF-8 by valid_up_to().
-						let text = unsafe { str::from_utf8_unchecked(&pending[..p]) };
-						emit_chunk(text, on_chunk.as_ref()).await;
-						// copy p..it to the beginning of the buffer
-						buf.copy_within(p..it, 0);
-						it -= p;
-					}
-
-					match err.error_len() {
-						Some(p) => {
-							// Invalid byte sequence: emit replacement and drop those bytes.
-							emit_chunk(REPLACEMENT, on_chunk.as_ref()).await;
-							// copy p..it to the beginning of the buffer
-							buf.copy_within(p..it, 0);
-							it -= p;
-							// continue loop in case more bytes remain after the
-							// invalid sequence
-						},
-						None => {
-							// Incomplete UTF-8 sequence at end: keep bytes for next read.
-							break;
-						},
-					}
-				},
+			let text = decoder.push(&buf[..n]);
+			if !text.is_empty() {
+				emit_chunk(&text, on_chunk.as_ref()).await;
 			}
 		}
 	}
 
-	// Flush whatever is left at EOF (including an incomplete final sequence).
-	for chunk in buf[..it].utf8_chunks() {
-		let valid = chunk.valid();
-		if !valid.is_empty() {
-			emit_chunk(valid, on_chunk.as_ref()).await;
-		}
-		if !chunk.invalid().is_empty() {
-			emit_chunk(REPLACEMENT, on_chunk.as_ref()).await;
-		}
+	let rest = decoder.finish();
+	if !rest.is_empty() {
+		emit_chunk(&rest, on_chunk.as_ref()).await;
 	}
 }
 
@@ -1733,16 +1723,12 @@ async fn read_output_buffered(
 	activity: Sender<()>,
 	max_capture_bytes: usize,
 ) -> BufferedOutput {
-	const REPLACEMENT: &str = "\u{FFFD}";
 	const BUF: usize = 65536;
 	let mut buf = vec![0u8; BUF];
 	let mut input_bytes = 0usize;
 	let mut captured = Vec::new();
 	let mut exceeded = false;
-	// Pending bytes from a prior read that ended mid-UTF-8 sequence. We hold
-	// them back so we emit only valid UTF-8 to the streaming callback while
-	// still capturing every byte into `captured` for post-processing.
-	let mut pending = Vec::<u8>::new();
+	let mut decoder = OutputDecoder::new();
 
 	#[cfg(unix)]
 	let Ok(reader) = register_nonblocking_pipe(reader) else {
@@ -1800,52 +1786,18 @@ async fn read_output_buffered(
 			}
 		}
 
-		// Stream whatever is validly decodable *right now* to the callback,
-		// carrying incomplete trailing UTF-8 bytes over to the next iteration.
-		if let Some(cb) = on_chunk.as_ref() {
-			pending.extend_from_slice(&buf[..n]);
-			while !pending.is_empty() {
-				match str::from_utf8(&pending) {
-					Ok(text) => {
-						emit_chunk(text, Some(cb)).await;
-						pending.clear();
-						break;
-					},
-					Err(err) => {
-						let p = err.valid_up_to();
-						if p > 0 {
-							// SAFETY: [..p] is valid UTF-8 per valid_up_to().
-							let text = unsafe { str::from_utf8_unchecked(&pending[..p]) };
-							emit_chunk(text, Some(cb)).await;
-							pending.drain(..p);
-						}
-						match err.error_len() {
-							Some(skip) => {
-								emit_chunk(REPLACEMENT, Some(cb)).await;
-								pending.drain(..skip);
-							},
-							None => break,
-						}
-					},
-				}
-			}
+		let text = decoder.push(&buf[..n]);
+		if !text.is_empty() {
+			emit_chunk(&text, on_chunk.as_ref()).await;
 		}
 	}
 
-	// Flush any trailing bytes the streaming decoder held back at EOF.
-	if let Some(cb) = on_chunk.as_ref() {
-		for chunk in pending.utf8_chunks() {
-			let valid = chunk.valid();
-			if !valid.is_empty() {
-				emit_chunk(valid, Some(cb)).await;
-			}
-			if !chunk.invalid().is_empty() {
-				emit_chunk(REPLACEMENT, Some(cb)).await;
-			}
-		}
+	let rest = decoder.finish();
+	if !rest.is_empty() {
+		emit_chunk(&rest, on_chunk.as_ref()).await;
 	}
 
-	BufferedOutput { text: String::from_utf8_lossy(&captured).into_owned(), input_bytes, exceeded }
+	BufferedOutput { text: decode_bytes(&captured), input_bytes, exceeded }
 }
 
 #[cfg(unix)]
@@ -1910,7 +1862,8 @@ fn pipe_to_files(label: &str) -> Result<(fs::File, fs::File)> {
 		use std::os::unix::io::{FromRawFd, IntoRawFd};
 		let r = r.into_raw_fd();
 		let w = w.into_raw_fd();
-		// SAFETY: We just obtained these fds from os_pipe and own them exclusively.
+		// SAFETY: We just obtained these fds from os_pipe and own them
+		// exclusively.
 		unsafe { (FromRawFd::from_raw_fd(r), FromRawFd::from_raw_fd(w)) }
 	};
 
@@ -1919,7 +1872,8 @@ fn pipe_to_files(label: &str) -> Result<(fs::File, fs::File)> {
 		use std::os::windows::io::{FromRawHandle, IntoRawHandle};
 		let r = r.into_raw_handle();
 		let w = w.into_raw_handle();
-		// SAFETY: We just obtained these handles from os_pipe and own them exclusively.
+		// SAFETY: We just obtained these handles from os_pipe and own them
+		// exclusively.
 		unsafe { (FromRawHandle::from_raw_handle(r), FromRawHandle::from_raw_handle(w)) }
 	};
 
@@ -2001,6 +1955,22 @@ mod tests {
 		(result, output)
 	}
 
+	/// Native Windows tools write the ANSI code page to pipes. On a Chinese
+	/// system that is GBK; treating it as UTF-8 used to turn `echo 中文` into
+	/// replacement characters.
+	#[cfg(windows)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn cmd_echo_chinese_decodes_from_system_acp() {
+		// SAFETY: GetACP has no preconditions.
+		let acp = unsafe { windows_sys::Win32::Globalization::GetACP() };
+		if acp != 936 {
+			return;
+		}
+		let (result, output) = execute_captured("cmd.exe /c echo 中文".to_string()).await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert!(output.contains("中文"), "garbled command output: {output:?}");
+	}
+
 	/// Regression for issue #8925: a host env entry whose key or value is not
 	/// valid Unicode must be skipped, not fatal. `std::env::vars()` panics on
 	/// the first one (e.g. the corrupt `GHOSTTY_BIN_DIR` cmux/Ghostty stages,
@@ -2051,6 +2021,86 @@ mod tests {
 		assert_eq!(value("HOME").as_deref(), Some("/home/tester"), "valid entry copied");
 		assert!(value("GHOSTTY_BIN_DIR").is_none(), "non-UTF-8 value must be skipped");
 		assert!(value("BAD").is_none(), "non-UTF-8 key must be skipped");
+	}
+
+	/// The strip must stay narrowly scoped: unrelated `GIT_*` names are part of
+	/// the shell contract (`GIT_EDITOR`, author identity) and must survive.
+	#[test]
+	fn git_repo_location_vars_exclude_unrelated_git_names() {
+		assert!(!is_git_repo_location_var("GIT_EDITOR"));
+		assert!(!is_git_repo_location_var("GIT_AUTHOR_NAME"));
+	}
+
+	/// Regression for issue #11082: the embedded shell copies the host
+	/// environment, and repo-location overrides in it (git hooks, `git
+	/// --git-dir` wrappers) must not reach child commands — `git` would ignore
+	/// the command's `cwd` and mutate the worktree the agent was launched from.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn copy_env_skips_git_repo_location_overrides() {
+		let mut shell = BrushShell::builder()
+			.do_not_inherit_env(true)
+			.profile(ProfileLoadBehavior::Skip)
+			.rc(RcLoadBehavior::Skip)
+			.builtins(default_builtins(BuiltinSet::BashMode))
+			.build()
+			.await
+			.expect("build shell");
+
+		let entries = vec![
+			(std::ffi::OsString::from("GIT_DIR"), std::ffi::OsString::from("/primary/.git")),
+			(std::ffi::OsString::from("GIT_WORK_TREE"), std::ffi::OsString::from("/primary")),
+			(
+				std::ffi::OsString::from("GIT_INDEX_FILE"),
+				std::ffi::OsString::from("/primary/.git/index"),
+			),
+			(std::ffi::OsString::from("GIT_EDITOR"), std::ffi::OsString::from("true")),
+		];
+		copy_env_into_shell(&mut shell, entries.into_iter()).expect("copy host env");
+
+		let value = |name: &str| {
+			shell
+				.env()
+				.get(name)
+				.and_then(|(_, var)| match var.value() {
+					ShellValue::String(value) => Some(value.clone()),
+					_ => None,
+				})
+		};
+		assert!(value("GIT_DIR").is_none(), "GIT_DIR must not reach child commands");
+		assert!(value("GIT_WORK_TREE").is_none(), "GIT_WORK_TREE must not reach child commands");
+		assert!(value("GIT_INDEX_FILE").is_none(), "GIT_INDEX_FILE must not reach child commands");
+		assert_eq!(value("GIT_EDITOR").as_deref(), Some("true"), "unrelated git vars are kept");
+	}
+
+	/// The per-session env overlay is built from the same host environment, so
+	/// it must not reintroduce the repo-location overrides.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn session_env_does_not_export_git_repo_location_overrides() {
+		let dir = tempfile::tempdir().expect("probe directory");
+		let out = dir.path().join("probe");
+		let mut env = HashMap::new();
+		env.insert("GIT_DIR".to_string(), "/primary/.git".to_string());
+		env.insert("OMP_GIT_ENV_PROBE".to_string(), "kept".to_string());
+		let config =
+			ShellConfig { session_env: Some(env), snapshot_path: None, minimizer: None };
+		let mut session = create_session(&config).await.expect("create_session");
+
+		let mut params = session.shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null stdin"));
+		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null stdout"));
+		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null stderr"));
+
+		let command = format!(
+			"printf '%s|%s' \"${{GIT_DIR-unset}}\" \"$OMP_GIT_ENV_PROBE\" > {}",
+			quote_arg(out.to_str().expect("utf8 probe path"))
+		);
+		session
+			.shell
+			.run_string(command, &SourceInfo::from("pi-natives:test"), &params)
+			.await
+			.expect("run_string");
+
+		assert_eq!(fs::read_to_string(&out).expect("probe output"), "unset|kept");
 	}
 
 	#[cfg(unix)]
@@ -3044,8 +3094,8 @@ mod tests {
 			"signalling an ancestor must be refused: {output:?}"
 		);
 		assert!(output.contains("ancestor=1"), "the ancestor kill must report failure: {output:?}");
-		// The same guard must leave a process outside our ancestry alone, or `kill`
-		// would be useless.
+		// The same guard must leave a process outside our ancestry alone, or
+		// `kill` would be useless.
 		assert!(output.contains("child=0"), "an unrelated child must remain signallable: {output:?}");
 	}
 
@@ -3493,9 +3543,9 @@ mod tests {
 		let source_info = SourceInfo::from("pi-natives:test");
 
 		// Bounded, side-effect-free invocations. `pgrep`/`pkill`/`pidwait` render
-		// their own help; `sleep`/`timeout`/`top` are given the smallest amount of
-		// work that still exercises dispatch; `nohup` with no operand is a usage
-		// error, which is still the builtin answering.
+		// their own help; `sleep`/`timeout`/`top` are given the smallest amount
+		// of work that still exercises dispatch; `nohup` with no operand is a
+		// usage error, which is still the builtin answering.
 		let probes = [
 			("nohup", "nohup"),
 			("pgrep", "pgrep --help"),
@@ -3508,7 +3558,8 @@ mod tests {
 		];
 
 		// Pin the registry contents rather than deriving the probe list from it:
-		// a test that skips whatever the registry omits cannot notice an omission.
+		// a test that skips whatever the registry omits cannot notice an
+		// omission.
 		let mut registered: Vec<&'static str> =
 			pi_builtins::process_builtins::<brush_core::extensions::DefaultShellExtensions>()
 				.into_iter()
@@ -3759,7 +3810,8 @@ mod tests {
 			.await
 			.expect("tail");
 		assert_eq!(read("tail.txt"), "3\n4\n");
-		// grep: matching lines from a cwd-resolved file (single file => no prefix).
+		// grep: matching lines from a cwd-resolved file (single file => no
+		// prefix).
 		session
 			.shell
 			.run_string("grep ba data.txt > grep.txt", &si, &params)
@@ -4237,7 +4289,8 @@ mod tests {
 		assert!(tmp.join("keep.log").exists(), "-delete must not touch unmatched files");
 
 		// -exec substitutes the operand-relative path and runs in the shell cwd,
-		// so the relative `{}` resolves and the child's redirect lands in the cwd.
+		// so the relative `{}` resolves and the child's redirect lands in the
+		// cwd.
 		session
 			.shell
 			.run_string(
@@ -4661,8 +4714,8 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 		// while the background job cannot write the marker until its 1s sleep
 		// elapses. Wait well past that delay so a job that outlived the dropped
 		// session has demonstrably had its chance to run — the pre-fix leak fires
-		// at ~1s and is caught here; the fixed path aborts the task on drop and the
-		// marker never appears.
+		// at ~1s and is caught here; the fixed path aborts the task on drop and
+		// the marker never appears.
 		time::sleep(Duration::from_millis(2000)).await;
 
 		assert!(
@@ -4729,8 +4782,8 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 		assert!(!result.cancelled);
 		assert!(!result.timed_out);
 		assert_eq!(output, "");
-		// `false && printf` short-circuits: nothing is rewritten, so a no-op chain
-		// must surface no minimizer telemetry (None).
+		// `false && printf` short-circuits: nothing is rewritten, so a no-op
+		// chain must surface no minimizer telemetry (None).
 		assert!(result.minimized.is_none(), "chain noop must not surface telemetry");
 	}
 
@@ -4800,7 +4853,8 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		assert!(output.ends_with('x'));
 		// Output exceeded the capture cap: streamed raw and never buffered, so
 		// nothing was minimized. `minimized` must be absent (not a `too-large`
-		// result with empty `text`, which would mislead presence-keyed consumers).
+		// result with empty `text`, which would mislead presence-keyed
+		// consumers).
 		assert!(result.minimized.is_none());
 	}
 
@@ -4987,11 +5041,12 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 	async fn embedded_external_command_runs_in_its_own_session() {
 		use std::io::Read as _;
 
-		// SAFETY: `getsid(0)` only queries the current process session; the return
-		// value is checked. Inside a PID namespace (the containerized CI runner)
-		// the host's session leader can live outside the namespace, so `getsid(0)`
-		// legitimately reports 0 — only -1 is a real failure. The child-session
-		// invariants below (own session, distinct from host) stay meaningful.
+		// SAFETY: `getsid(0)` only queries the current process session; the
+		// return value is checked. Inside a PID namespace (the containerized CI
+		// runner) the host's session leader can live outside the namespace, so
+		// `getsid(0)` legitimately reports 0 — only -1 is a real failure. The
+		// child-session invariants below (own session, distinct from host) stay
+		// meaningful.
 		let host_sid = unsafe { libc::getsid(0) };
 		assert!(host_sid >= 0, "getsid(0) failed: {}", std::io::Error::last_os_error());
 
@@ -5010,7 +5065,8 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		params.set_fd(OpenFiles::STDOUT_FD, stdout_file);
 		params.set_fd(OpenFiles::STDERR_FD, stderr_file);
 
-		// (pid_tx, pid_rx) — reader task signals the test as soon as it has the PID.
+		// (pid_tx, pid_rx) — reader task signals the test as soon as it has the
+		// PID.
 		let (pid_tx, pid_rx) = tokio::sync::oneshot::channel::<i32>();
 		let reader_handle = tokio::task::spawn_blocking(move || {
 			let mut buf = Vec::new();
@@ -5059,8 +5115,8 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		// Snapshot the child's session ID immediately, while the child is still
 		// in `sleep`. POSIX guarantees `getsid` against a live PID returns the
 		// session of that process.
-		// SAFETY: `child_pid` is a positive PID from the child; errors are reported via
-		// the checked return value.
+		// SAFETY: `child_pid` is a positive PID from the child; errors are
+		// reported via the checked return value.
 		let child_sid = unsafe { libc::getsid(child_pid) };
 		assert!(
 			child_sid > 0,
@@ -5255,7 +5311,8 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		let child_dead = time::timeout(Duration::from_secs(5), async {
 			loop {
 				// SAFETY: `child_pid` came from the foreground `sh` spawned by the
-				// snapshot; `kill(pid, 0)` only probes whether that process still exists.
+				// snapshot; `kill(pid, 0)` only probes whether that process still
+				// exists.
 				let kill_result = unsafe { libc::kill(child_pid, 0) };
 				if kill_result == -1 {
 					let err = std::io::Error::last_os_error();
@@ -5367,8 +5424,8 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 			.expect("reader closed pid channel without sending");
 		assert!(child_pid > 0, "got non-positive child pid: {child_pid}");
 
-		// SAFETY: `child_pid` is a live positive PID (still in `sleep`); the return
-		// value is checked.
+		// SAFETY: `child_pid` is a live positive PID (still in `sleep`); the
+		// return value is checked.
 		let child_sid = unsafe { libc::getsid(child_pid) };
 		assert!(
 			child_sid > 0,

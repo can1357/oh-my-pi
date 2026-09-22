@@ -7,7 +7,6 @@
 use std::{
 	collections::HashMap,
 	io::{Read, Write},
-	str,
 	sync::{
 		Arc,
 		atomic::{AtomicBool, Ordering},
@@ -22,6 +21,7 @@ use napi::{
 };
 use napi_derive::napi;
 use parking_lot::Mutex;
+use pi_shell::output_decode::OutputDecoder;
 use portable_pty::{Child, CommandBuilder, PtySize, native_pty_system};
 
 use crate::{js::into_string, ps, task};
@@ -229,7 +229,8 @@ impl PtySession {
 		let ct = task::CancelToken::new(timeout_ms, signal);
 		let core = Arc::clone(&self.core);
 
-		// Register control channel synchronously so write()/kill() work immediately.
+		// Register control channel synchronously so write()/kill() work
+		// immediately.
 		let (control_tx, control_rx) = flume::unbounded::<ControlMessage>();
 		{
 			let mut guard = core.lock();
@@ -359,6 +360,13 @@ fn run_pty_sync(
 	if let Some(cwd) = config.cwd.as_ref() {
 		cmd.cwd(cwd);
 	}
+	// `CommandBuilder` starts from this process's environment, so drop
+	// repo-location overrides before the explicit env below is applied: the
+	// terminal's `git` rediscovers the repository from `cwd`, while a
+	// caller-supplied value still wins.
+	for name in pi_shell::shell::GIT_REPO_LOCATION_ENV_VARS {
+		cmd.env_remove(name);
+	}
 	if let Some(env) = config.env.as_ref() {
 		for (key, value) in env {
 			cmd.env(key, value);
@@ -418,84 +426,24 @@ fn run_pty_sync(
 	let (reader_tx, reader_rx) = flume::bounded::<ReaderEvent>(READER_QUEUE_CHUNKS);
 	let queued = reader_tx.clone();
 	let reader_thread = std::thread::spawn(move || {
-		const REPLACEMENT: &str = "\u{FFFD}";
 		const BUF: usize = 65536;
-		let mut buf = vec![0u8; BUF + 4];
-		let mut it = 0;
+		let mut buf = vec![0u8; BUF];
+		let mut decoder = OutputDecoder::new();
 		loop {
-			match reader.read(&mut buf[it..BUF]) {
-				Ok(0) => {
-					break;
-				},
+			match reader.read(&mut buf) {
+				Ok(0) => break,
 				Ok(n) => {
-					it += n;
-					while it > 0 {
-						let pending = &buf[..it];
-						match str::from_utf8(pending) {
-							Ok(text) => {
-								if reader_tx
-									.send(ReaderEvent::Chunk(text.to_string()))
-									.is_err()
-								{
-									return;
-								}
-								it = 0;
-								break;
-							},
-							Err(err) => {
-								let valid_up_to = err.valid_up_to();
-								if valid_up_to > 0 {
-									// SAFETY: [..valid_up_to] is guaranteed valid UTF-8 by valid_up_to().
-									let text = unsafe { str::from_utf8_unchecked(&pending[..valid_up_to]) };
-									if reader_tx
-										.send(ReaderEvent::Chunk(text.to_string()))
-										.is_err()
-									{
-										return;
-									}
-									buf.copy_within(valid_up_to..it, 0);
-									it -= valid_up_to;
-								}
-								match err.error_len() {
-									Some(invalid_len) => {
-										if reader_tx
-											.send(ReaderEvent::Chunk(REPLACEMENT.to_string()))
-											.is_err()
-										{
-											return;
-										}
-										buf.copy_within(invalid_len..it, 0);
-										it -= invalid_len;
-									},
-									None => {
-										break;
-									},
-								}
-							},
-						}
+					let text = decoder.push(&buf[..n]);
+					if !text.is_empty() && reader_tx.send(ReaderEvent::Chunk(text)).is_err() {
+						return;
 					}
 				},
-				Err(_) => {
-					break;
-				},
+				Err(_) => break,
 			}
 		}
-		for chunk in buf[..it].utf8_chunks() {
-			let valid = chunk.valid();
-			if !valid.is_empty()
-				&& reader_tx
-					.send(ReaderEvent::Chunk(valid.to_string()))
-					.is_err()
-			{
-				return;
-			}
-			if !chunk.invalid().is_empty()
-				&& reader_tx
-					.send(ReaderEvent::Chunk(REPLACEMENT.to_string()))
-					.is_err()
-			{
-				return;
-			}
+		let rest = decoder.finish();
+		if !rest.is_empty() && reader_tx.send(ReaderEvent::Chunk(rest)).is_err() {
+			return;
 		}
 		let _ = reader_tx.send(ReaderEvent::Done);
 	});
@@ -611,8 +559,8 @@ fn run_pty_sync(
 		}
 	}
 	if exit_code.is_none() {
-		// `std::process::Child` (what `portable-pty` wraps on Unix) never waits on
-		// `Drop`, so a child left unwaited here leaks as a permanent zombie.
+		// `std::process::Child` (what `portable-pty` wraps on Unix) never waits
+		// on `Drop`, so a child left unwaited here leaks as a permanent zombie.
 		//
 		// On Windows, child.wait() can hang indefinitely in ConPTY.
 		// Poll try_wait() with a short timeout instead.
@@ -666,9 +614,10 @@ fn run_pty_sync(
 	// --- Teardown ---
 
 	// Step 1: Close the ConPTY input pipe first.
-	// Per Microsoft docs, close the input handle before calling ClosePseudoConsole.
-	// This signals to ConPTY that no more input will arrive, allowing its internal
-	// I/O threads to finish processing and eventually close the output pipe.
+	// Per Microsoft docs, close the input handle before calling
+	// ClosePseudoConsole. This signals to ConPTY that no more input will
+	// arrive, allowing its internal I/O threads to finish processing and
+	// eventually close the output pipe.
 	drop(writer);
 
 	// Step 2: Drop master so the reader sees EOF if the slave is gone, then
@@ -1105,7 +1054,8 @@ mod zombie_repro_tests {
 				continue;
 			};
 			// `/proc/[pid]/stat` is `pid (comm) state ppid ...`; comm can itself
-			// contain spaces and parens, so bound it by the first `(` and last `)`.
+			// contain spaces and parens, so bound it by the first `(` and last
+			// `)`.
 			let (Some(open), Some(close)) = (stat.find('('), stat.rfind(')')) else {
 				continue;
 			};

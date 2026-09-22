@@ -69,6 +69,7 @@ const ALLOWED_OPTION_KEYS: ReadonlySet<keyof SimpleStreamOptions> = new Set([
 	"streamIdleTimeoutMs",
 	"reasoning",
 	"disableReasoning",
+	"forceReasoningOff",
 	"hideThinkingSummary",
 	"thinkingBudgets",
 	"toolChoice",
@@ -83,6 +84,9 @@ const ALLOWED_OPTION_KEYS: ReadonlySet<keyof SimpleStreamOptions> = new Set([
 	"openrouterVariant",
 	"loopGuard",
 	"acceptEmptyResponse",
+	// Anthropic server-side compaction request: the gateway builds the
+	// `compact_20260112` edit itself, so the option must survive the hop.
+	"anthropicCompaction",
 ] as const satisfies readonly (keyof SimpleStreamOptions)[]);
 
 // ---------------------------------------------------------------------------

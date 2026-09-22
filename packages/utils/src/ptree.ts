@@ -17,6 +17,8 @@ type PipedSubprocess<In extends InMask = InMask> = Subprocess<In, "pipe", "pipe"
 
 const LINUX_SUBREAPER_COMMAND_ENV = "OMP_PTREE_SUBREAPER_COMMAND";
 const LINUX_SUBREAPER_BUN_BE_BUN_ENV = "OMP_PTREE_SUBREAPER_BUN_BE_BUN";
+const SUBREAPER_KILL_WINDOW_MS = 100;
+const SUBREAPER_KILL_POLL_MS = 5;
 
 /**
  * Build the Linux child-subreaper entrypoint.
@@ -188,6 +190,8 @@ export class ChildProcess<In extends InMask = InMask> {
 	#stderrStream?: ReadableStream<Uint8Array>;
 	// Termination in flight after kill(); aborted exits await it before reporting.
 	#terminating?: Promise<boolean | void>;
+	// A hard subreaper sweep must remain authoritative across overlapping kill requests.
+	#hardKillSweep?: Promise<void>;
 	#terminateGroup: boolean;
 	#hardKillTree: boolean;
 	// The root's own native handle, retained from before it could exit. One
@@ -395,6 +399,7 @@ export class ChildProcess<In extends InMask = InMask> {
 			// group leader; wait() still needs to report the later deadline.
 			if (this.proc.exitCode !== null) this.#exitReason = reason;
 		}
+		if (this.#hardKillSweep) return;
 		if (this.#hardKillTree && this.#unpinnedRoot) {
 			// Refused before anything is probed or opened, because every answer
 			// available from here is about a number rather than about our child.
@@ -432,8 +437,12 @@ export class ChildProcess<In extends InMask = InMask> {
 			// the number would be the right answer here.
 			const root = this.#pinnedRoot;
 			if (root) {
-				this.#terminating = Promise.try(() => root.killTreeAndWait());
-				void this.#terminating.catch(() => {});
+				const sweep = this.#hardKillSubreaperTree(root);
+				this.#hardKillSweep = sweep;
+				this.#terminating = sweep;
+				void sweep.finally(() => {
+					if (this.#hardKillSweep === sweep) this.#hardKillSweep = undefined;
+				});
 				return;
 			}
 		}
@@ -517,6 +526,25 @@ export class ChildProcess<In extends InMask = InMask> {
 		await this.proc.exited;
 	}
 
+	async #hardKillSubreaperTree(root: Process): Promise<void> {
+		try {
+			const deadline = Date.now() + SUBREAPER_KILL_WINDOW_MS;
+			let emptySweeps = 0;
+			while (emptySweeps < 2 && Date.now() < deadline) {
+				const children = root.children();
+				if (children.length === 0) {
+					emptySweeps++;
+				} else {
+					emptySweeps = 0;
+					for (const child of children) child.killTree(9);
+				}
+				if (emptySweeps < 2) await Bun.sleep(SUBREAPER_KILL_POLL_MS);
+			}
+		} finally {
+			root.killTree(9);
+		}
+	}
+
 	// ── Output helpers ───────────────────────────────────────────────────
 
 	async #throwIfAborted(): Promise<void> {
@@ -560,7 +588,7 @@ export class ChildProcess<In extends InMask = InMask> {
 		return out + dec.decode();
 	}
 
-	async #readBytes(): Promise<Uint8Array> {
+	async #readBytes(): Promise<Uint8Array<ArrayBuffer>> {
 		const reader = this.stdout.getReader();
 		const chunks: Uint8Array[] = [];
 		let length = 0;
@@ -593,7 +621,7 @@ export class ChildProcess<In extends InMask = InMask> {
 		return bytes;
 	}
 
-	async #readOutputBytes(waitForCleanExit = false): Promise<Uint8Array> {
+	async #readOutputBytes(waitForCleanExit = false): Promise<Uint8Array<ArrayBuffer>> {
 		const p = this.#readBytes();
 		if (this.#nothrow) return p;
 		const bytes = waitForCleanExit ? (await Promise.all([p, this.exitedCleanly]))[0] : await p;
@@ -610,7 +638,7 @@ export class ChildProcess<In extends InMask = InMask> {
 	}
 
 	async arrayBuffer(): Promise<ArrayBuffer> {
-		return (await this.#readOutputBytes()).buffer as ArrayBuffer;
+		return (await this.#readOutputBytes()).buffer;
 	}
 
 	async bytes(): Promise<Uint8Array> {

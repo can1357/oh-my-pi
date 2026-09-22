@@ -26,6 +26,118 @@
 - Fixed the Linux subreaper hard-kill path reporting a swept tree over descendants it never signalled. It entered on the runtime's exit field, which can lag the kernel by a loop turn or more, so a root already gone was still opened and walked — and a walk rooted at an exited pid comes back empty and *complete*, because the survivors have been reparented out of it. The path now enters only on the kernel's own liveness answer. Past that point a subreaper root that also leads a group attempts a sweep through its pinned leader, and one that does not is refused: its adopted descendants are reachable through no handle the object holds, and the graceful path it would otherwise fall through to answers a dead root with an empty plan and reports the tree gone. The refusal is deliberately wider than the race that prompted it — a dead subreaper root whose descendants had all exited anyway now reports failure, because the walk that would show the tree empty is the same walk that answers empty for a tree full of reparented survivors, and after the root is gone there is nothing else to ask. A clean exit code does imply the entrypoint's wait loop ran to completion, but it is not available in the unreaped window the fix exists for, so it is not used to narrow the refusal. The refusal also covers a root that is still running but cannot be referenced at all, which is unwalkable for a different reason and equally unswept. Descendants that called `setsid(2)` left the group and so are outside the dead-root group sweep; the live walk still enumerates them.
 - Fixed `killAndWait()` reporting success when no reference to the child could be opened at all — a host that refuses `pidfd_open`, or one without `/proc`. Nothing had been signalled, so the call reported whatever the child did next as the termination's own result, and never settled at all while the child stayed alive. It now rejects, and so does a termination whose root the constructor needed to pin and could not — a detached child leads a process group that outlives it, and a Windows root's retained handle is what keeps its tree enumerable, so in both cases the root's exit says nothing about what it left running. An ordinary child the runtime has already seen exit is unchanged and still reports success: it led no group, and its survivors were reparented past the reach of any handle before the call.
 
+## [18.2.7] - 2026-09-21
+
+### Changed
+
+- Mermaid diagrams are now rendered with the native renderer, with output remaining unchanged.
+- PI_TIMING span lines now include their start offset to make unspanned gaps easier to identify.
+
+### Fixed
+
+- Fixed a startup crash when PI_TIMING profiled modules loaded via require() or TypeScript declaration assets.
+
+## [18.2.5] - 2026-09-17
+
+### Added
+
+- Added utilities for reading dotenv-sourced environment values, customizing filtered child-shell environment values, converting color palettes to RGB, cleaning trailing spaces from YAML block headers, and counting newlines in text.
+
+### Fixed
+
+- Improved rotating file logging performance by reusing an append file descriptor for each active log file.
+- Improved JSON serialization performance by avoiding unnecessary bigint handling when serializing values without bigints.
+- Fixed `$which` cache collisions for lookups using different PATH or working-directory options.
+- SSE token reads now expose raw wire-line data only when explicitly requested; the default token path no longer includes per-line raw slices.
+
+## [18.2.3] - 2026-09-17
+
+### Fixed
+
+- Optimized model configuration command execution by deduplicating requests and adding failure backoff
+- Prevented unnecessary credential command execution when runtime API keys are configured
+- Retained `readLines()` results no longer change when later chunks reuse the internal buffer.
+- Long sleeps honor elapsed time and re-arm after premature timer wakes without overflowing native timer delays.
+
+## [18.2.2] - 2026-09-16
+
+### Added
+
+- Added asynchronous and synchronous SQLite database opening APIs with path-attributed errors, optional corruption recovery that preserves private database and sidecar backups, and automatic retries for transient busy errors during asynchronous opens.
+
+## [18.2.1] - 2026-09-15
+
+### Added
+
+- Added the public `postmortem.exitProcess()` utility for host-owned hard exits that must bypass temporary process-exit guards ([#11789](https://github.com/can1357/oh-my-pi/issues/11789)).
+- Added `readSseJsonOrText`: like `readSseJson`, but a `data:` frame that is not valid JSON is yielded as its raw text instead of raising a `SyntaxError`, so a consumer can classify a reverse proxy's plain-text throttle page (`429 Too Many Requests`) that arrives after the stream headers were already sent. `readSseJson` is unchanged and shares the framing with it.
+
+### Fixed
+
+- Reading an EPUB, PPTX or XLSX whose XML has a mismatched or stray end tag no longer hangs the session forever; the parser recovers and the document converts ([#12018](https://github.com/can1357/oh-my-pi/pull/12018) by [@kaluli123123](https://github.com/kaluli123123)).
+- Fixed `filterChildShellEnv` forwarding the host process's `GIT_DIR`, `GIT_WORK_TREE`, and related repo-location overrides to child shells, where `git` would ignore the command's `cwd`.
+- ACP JSON-RPC now drains accepted inbound requests on clean stdin EOF before resolving `closed`, so in-flight methods such as `session/new` still receive a success or explicit error response instead of being dropped on exit 0 ([#11567](https://github.com/can1357/oh-my-pi/issues/11567)).
+- Fixed provider-local usage-limit reset timestamps making `waitForUsageReset` sessions resume up to eight hours late while preserving longest-window semantics for naive UTC timestamps ([#11014](https://github.com/can1357/oh-my-pi/issues/11014)).
+- `registerStdioDisconnectHandling()` now drives graceful shutdown from `process.stdout`'s own `error` event, so a closed stdout consumer exits cleanly while an unrelated write EPIPE (subprocess stdin, socket) stays fatal ([#10930](https://github.com/can1357/oh-my-pi/issues/10930)).
+- Fixed Linux `ptree` timeout cleanup occasionally leaving session-escaped descendants running during subreaper adoption.
+
+## [18.2.0] - 2026-09-15
+
+### Breaking Changes
+
+- Removed the unused `globPaths`, `loadGitignorePatterns`, and `GlobPathsOptions` exports.
+- Browser helpers now manage Chrome only: removed `Browser`, `BrowserTag`, `resolveBuildId()`, `getInstalledBrowsers()`, and `browser` options/metadata; `getDownloadUrl()` now takes `(platform, buildId, baseUrl?)`.
+
+### Added
+
+- Added `relativePathWithinNormalizedRoot()` for reusing canonical paths across containment checks.
+- Added `sleepLong()` and `MAX_TIMER_DELAY_MS`: an abortable sleep that chunks delays past the signed 32-bit timer ceiling so day-scale provider waits elapse instead of overflowing the timer.
+
+### Changed
+
+- Log-retention cleanup now runs after logger construction without keeping short-lived commands alive.
+- Debugger support now loads only when SIGUSR1 requests it.
+
+### Fixed
+
+- Fixed `extractRetryHint` dropping OpenCode Go's `Resets in …` quota window (`45min`, `2hr 15min`, `3 days`): the `reset in` pattern now accepts `Resets` phrasing, `hr`/`day` units, and compound `2hr 15min` remainders, so exhausted Go credentials block for the server-stated window instead of the 60s heuristic guess. ([#12091](https://github.com/can1357/oh-my-pi/pull/12091) by [@H4vC](https://github.com/H4vC))
+- Async file-peek callbacks now receive stable `Uint8Array` windows with copying `slice()` semantics.
+- Dotenv loading now handles multiline values and escapes consistently with Bun, preventing project values from leaking into child-shell environments.
+- SSE readers now support lone-CR line endings and CRLF split across chunks without merging or delaying events.
+
+## [18.1.22] - 2026-09-14
+
+### Fixed
+
+- Fixed `extractRetryHint` sleeping hours past the provider's stated wait when a timezone-naive `reset at` timestamp overshoots the relative retry hint: the skewed stamp is now ignored instead of winning longest-wins ([#12070](https://github.com/can1357/oh-my-pi/pull/12070) by [@H4vC](https://github.com/H4vC)).
+
+## [18.1.21] - 2026-09-14
+
+### Added
+
+- Added `getBrowserProfilesDir()` (`~/.omp/browser-profiles`; XDG: `$XDG_STATE_HOME/omp/browser-profiles`) for profiles of Chromium browsers spawned by the browser tool.
+
+### Fixed
+
+- Timed out stalled Chrome-for-Testing metadata requests after 30 seconds when looking up download metadata
+- Concurrent browser installations share one download without replacing a running browser, and stalled downloads time out with partial files cleaned up for retry.
+
+## [18.1.19] - 2026-09-12
+
+### Added
+
+- Added public `acquireFileLock()` and `FileLockHandle` APIs for holding and explicitly releasing exclusive OS-backed file locks.
+
+### Fixed
+
+- Child-shell environment filtering now tolerates a removed process working directory by retaining the resolved project directory ([#11828](https://github.com/can1357/oh-my-pi/issues/11828)).
+
+## [18.1.16] - 2026-09-09
+
+### Fixed
+
+- Fixed `$which` capturing `Bun.which` at import on Linux and Windows, so `Bun.which` stubs installed later (e.g. per-test spies) are honoured and PATH-only language servers no longer leak into test results.
+
 ## [18.1.13] - 2026-09-07
 
 ### Fixed
@@ -510,7 +622,7 @@
 
 ### Changed
 
-- Mermaid diagrams are now rendered to ASCII by a first-party vendored renderer (`src/vendor/mermaid-ascii`, derived from the MIT-licensed `beautiful-mermaid`, ASCII pipeline only) with terminal display width measured via `Bun.stringWidth` (grapheme-aware, correct for wide/East-Asian glyphs and emoji). Inline label formatting (HTML formatting tags and markdown emphasis) is now reduced to plain text instead of printed raw.
+- Mermaid diagrams are now rendered to ASCII by a first-party renderer (initially derived from the MIT-licensed `beautiful-mermaid`, ASCII pipeline only) with terminal display width measured via `Bun.stringWidth` (grapheme-aware, correct for wide/East-Asian glyphs and emoji). Inline label formatting (HTML formatting tags and markdown emphasis) is now reduced to plain text instead of printed raw.
 
 ### Removed
 

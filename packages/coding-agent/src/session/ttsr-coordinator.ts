@@ -18,12 +18,19 @@ import ttsrToolReminderTemplate from "../prompts/system/ttsr-tool-reminder.md" w
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { SessionManager } from "./session-manager";
 
+type TtsrContinueSkipReason =
+	| "aborted"
+	| "stale-generation"
+	| "session-unavailable"
+	| "should-continue-false"
+	| "post-restore-unavailable";
+
 interface TtsrContinueOptions {
 	source: string;
 	delayMs?: number;
 	generation?: number;
 	shouldContinue?: () => boolean;
-	onSkip?: () => void;
+	onSkip?: (reason: TtsrContinueSkipReason) => void;
 	onError?: () => void;
 }
 
@@ -44,10 +51,15 @@ export class TtsrCoordinator {
 	readonly #manager: TtsrManager | undefined;
 	#pendingInjections: Rule[] = [];
 	#perToolInjections = new Map<string, Rule[]>();
+	#deferredReservations = new Map<string, number>();
+	#nextDeferredDeliveryId = 0;
 	#abortPending = false;
 	#retryToken = 0;
 	#resumePromise: Promise<void> | undefined;
 	#resumeResolve: (() => void) | undefined;
+	/** Rule names already announced per stream key: a delta match re-confirmed
+	 *  at finalization must not emit a second `ttsr_triggered` (#12184). */
+	#emittedTriggerRules = new Map<string, Set<string>>();
 
 	constructor(host: TtsrCoordinatorHost, manager: TtsrManager | undefined) {
 		this.#host = host;
@@ -74,15 +86,32 @@ export class TtsrCoordinator {
 		this.#manager?.resetBuffer();
 	}
 
+	/**
+	 * Resets stream buffers when an assistant message begins. The agent loop
+	 * turns the first provider `start` of every response into `message_start`,
+	 * so this is the boundary between two responses inside one turn (an aborted
+	 * response and its retry, or a continuation after an interruption); without
+	 * it, text from the earlier response would combine with the later one.
+	 */
+	onAssistantMessageStart(): void {
+		this.#manager?.resetBuffer();
+	}
+
 	/** Advances repeat-after-gap tracking at turn end. */
 	onTurnEnd(): void {
 		this.#manager?.incrementMessageCount();
+		this.#emittedTriggerRules.clear();
 	}
-
 	/** Checks one streamed message update and reports whether TTSR consumed it by aborting. */
 	async checkMessageUpdate(event: AgentEvent): Promise<boolean> {
 		if (event.type !== "message_update" || !this.#manager?.hasRules()) return false;
 		const assistantEvent = event.assistantMessageEvent;
+		// A later `start` inside one response restarts its partial; the buffers
+		// describe the discarded attempt and must not survive it.
+		if (assistantEvent.type === "start") {
+			this.#manager.resetBuffer();
+			return false;
+		}
 		let matchContext: TtsrMatchContext | undefined;
 		let streamingToolCall: ToolCall | undefined;
 		let delta: string | undefined;
@@ -105,9 +134,13 @@ export class TtsrCoordinator {
 		const targetMessageTimestamp = event.message.role === "assistant" ? event.message.timestamp : undefined;
 		const matches = this.#checkStream(delta, matchContext, streamingToolCall, assistantEvent.type === "toolcall_end");
 		if (matches.length > 0 && this.#handleMatches(matches, matchContext, targetMessageTimestamp)) return true;
-		// AST rules use the reconstructed edit/write snapshot and are awaited so
-		// the manager self-throttles native matching.
-		if (matchContext.source === "tool" && this.#manager.hasAstRules()) {
+		// AST rules match whole-file structure against the reconstructed edit/write
+		// snapshot, so they run once on the finalized call: per-delta snapshots are
+		// always partial source (a truncated prefix of the final arguments) and
+		// each run costs a native `astMatch` pass (~90ms at 150KB × entries ×
+		// rules). Awaiting that per delta serializes hundreds of milliseconds onto
+		// the streaming event path and wedges the loop (ui.loop-blocked).
+		if (assistantEvent.type === "toolcall_end" && matchContext.source === "tool" && this.#manager.hasAstRules()) {
 			const astMatches = await this.#checkAstStream(matchContext, streamingToolCall);
 			if (astMatches.length > 0 && this.#handleMatches(astMatches, matchContext, targetMessageTimestamp))
 				return true;
@@ -127,7 +160,19 @@ export class TtsrCoordinator {
 		if (!details || typeof details !== "object" || Array.isArray(details)) return;
 		const rules = "rules" in details ? details.rules : undefined;
 		if (!Array.isArray(rules)) return;
-		this.#markInjected(rules.filter((ruleName): ruleName is string => typeof ruleName === "string"));
+		const ruleNames = rules.filter((ruleName): ruleName is string => typeof ruleName === "string");
+		this.#markInjected(ruleNames);
+		this.releaseDeferredReservationFromDetails(details);
+	}
+
+	/** Releases a queued delivery that was discarded before persistence. */
+	releaseDeferredReservationFromDetails(details: unknown): void {
+		if (!details || typeof details !== "object" || Array.isArray(details)) return;
+		const rules = "rules" in details ? details.rules : undefined;
+		const deliveryId = "deliveryId" in details ? details.deliveryId : undefined;
+		if (!Array.isArray(rules) || typeof deliveryId !== "number") return;
+		const ruleNames = rules.filter((ruleName): ruleName is string => typeof ruleName === "string");
+		this.#releaseDeferredReservation(deliveryId, ruleNames);
 	}
 
 	/** Folds per-tool reminders into the matched tool's result. */
@@ -202,9 +247,21 @@ export class TtsrCoordinator {
 	#addPendingInjections(rules: Rule[]): void {
 		const seen = new Set(this.#pendingInjections.map(rule => rule.name));
 		for (const rule of rules) {
-			if (seen.has(rule.name)) continue;
+			if (seen.has(rule.name) || this.#deferredReservations.has(rule.name)) continue;
 			this.#pendingInjections.push(rule);
 			seen.add(rule.name);
+		}
+	}
+
+	#reserveDeferredInjection(rules: Rule[]): number {
+		const deliveryId = ++this.#nextDeferredDeliveryId;
+		for (const rule of rules) this.#deferredReservations.set(rule.name, deliveryId);
+		return deliveryId;
+	}
+
+	#releaseDeferredReservation(deliveryId: number, ruleNames: string[]): void {
+		for (const ruleName of ruleNames) {
+			if (this.#deferredReservations.get(ruleName) === deliveryId) this.#deferredReservations.delete(ruleName);
 		}
 	}
 
@@ -245,6 +302,26 @@ export class TtsrCoordinator {
 		this.#host.sessionManager.appendTtsrInjection(uniqueRuleNames);
 	}
 
+	/**
+	 * Announce a trigger unless this stream already announced these rules.
+	 * A delta match re-confirmed at `toolcall_end` evaluates the same buffer
+	 * twice before the message_end cooldown commits; subscribers must see one
+	 * event per violation, not one per evaluation.
+	 */
+	#emitTriggerOnce(matchContext: TtsrMatchContext, matches: Rule[]): void {
+		const key = matchContext.streamKey;
+		if (key) {
+			let seen = this.#emittedTriggerRules.get(key);
+			if (matches.every(match => seen?.has(match.name))) return;
+			if (!seen) {
+				seen = new Set();
+				this.#emittedTriggerRules.set(key, seen);
+			}
+			for (const match of matches) seen.add(match.name);
+		}
+		this.#host.emitSessionEvent({ type: "ttsr_triggered", rules: matches }).catch(() => {});
+	}
+
 	#findAssistantIndex(targetTimestamp: number | undefined): number {
 		const messages = this.#host.agent.state.messages;
 		for (let index = messages.length - 1; index >= 0; index--) {
@@ -279,29 +356,48 @@ export class TtsrCoordinator {
 		}
 		const injection = this.#getInjectionContent();
 		if (!injection) return;
-		this.#host.agent.followUp({
-			role: "custom",
-			customType: "ttsr-injection",
-			content: injection.content,
-			display: false,
-			details: { rules: injection.rules.map(rule => rule.name) },
-			attribution: "agent",
-			timestamp: Date.now(),
-		});
+		const ruleNames = injection.rules.map(rule => rule.name);
+		const deliveryId = this.#reserveDeferredInjection(injection.rules);
+		try {
+			this.#host.agent.followUp({
+				role: "custom",
+				customType: "ttsr-injection",
+				content: injection.content,
+				display: false,
+				details: { rules: ruleNames, deliveryId },
+				attribution: "agent",
+				timestamp: Date.now(),
+			});
+		} catch (error) {
+			this.#releaseDeferredReservation(deliveryId, ruleNames);
+			throw error;
+		}
 		this.#ensureResumePromise();
+		const releaseReservation = () => {
+			this.#releaseDeferredReservation(deliveryId, ruleNames);
+			this.resolveResume();
+		};
 		this.#host.scheduleAgentContinue({
 			source: "ttsr-injection",
 			delayMs: 1,
 			generation: this.#host.promptGeneration(),
-			onSkip: () => this.resolveResume(),
+			onSkip: reason => {
+				if (reason !== "should-continue-false") releaseReservation();
+			},
 			shouldContinue: () => {
-				if (this.#host.agent.state.isStreaming || !this.#host.agent.hasQueuedMessages()) {
+				// A running agent may already have taken the queued message. In that
+				// case message_end remains the authority for committing the cooldown.
+				if (this.#host.agent.state.isStreaming) {
 					this.resolveResume();
+					return false;
+				}
+				if (!this.#host.agent.hasQueuedMessages()) {
+					releaseReservation();
 					return false;
 				}
 				return true;
 			},
-			onError: () => this.resolveResume(),
+			onError: releaseReservation,
 		});
 	}
 
@@ -413,7 +509,7 @@ export class TtsrCoordinator {
 		const perToolId = shouldInterrupt ? undefined : matchedToolId;
 		if (perToolId) {
 			this.#addPerToolInjections(perToolId, matches);
-			this.#host.emitSessionEvent({ type: "ttsr_triggered", rules: matches }).catch(() => {});
+			this.#emitTriggerOnce(matchContext, matches);
 			return false;
 		}
 		this.#addPendingInjections(matches);
@@ -431,7 +527,7 @@ export class TtsrCoordinator {
 					)
 				: abortReason,
 		);
-		this.#host.emitSessionEvent({ type: "ttsr_triggered", rules: matches }).catch(() => {});
+		this.#emitTriggerOnce(matchContext, matches);
 		const retryToken = ++this.#retryToken;
 		const generation = this.#host.promptGeneration();
 		this.#host.schedulePostPromptTask(

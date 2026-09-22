@@ -30,6 +30,58 @@ Completeness reporting is Linux-only. **macOS and Windows descendant walks and p
 - `kill` and `pkill` derive the ancestor chain they refuse to signal from an unchecked process-table snapshot, so a short snapshot can leave an ancestor unprotected; Windows `kill -0` answers process existence from the same snapshot.
 - A cancelled shell run counts the children it could never pin and reports that count nowhere. Plumbing is not what blocks it: all three cancellation paths already await the termination bridge (`shell.rs:347`, `:417`, `:483`) and all three normal paths abort and then await it (`:359-360`, `:428-429`, `:494-495`), so a value can come back without restructuring. The cost is result handling in the three cancellation arms, six result literals (`:348`, `:368`, `:418`, `:433`, `:484`, `:499` — `ShellExecuteResult` at `:143` is an alias of the same struct, not a second one), two native fixtures, and a new field on each of two parallel structs — the serde wire type in `pi-shell` and the `#[napi(object)]` in `pi-natives` that converts from it. What actually defers it is the decision at the end: on the cancellation path the JS caller never reads the native result at all, quarantining the pending run and returning a synthetic cancellation notice, so surfacing the count means first deciding what a cancelled run should tell the agent about children it could not account for. Deferred with the `kill`/`pkill` residual above.
 
+## [18.2.9] - 2026-09-22
+
+### Fixed
+
+- Fixed stale workspace addons failing when first used; the error now identifies the addon and provides the command to rebuild native addons.
+- Fixed background bash jobs hanging indefinitely when output forwarding stalls.
+
+## [18.2.7] - 2026-09-21
+
+### Added
+
+- Added `renderMermaidAscii`, a native Mermaid-to-ASCII/Unicode renderer supporting flowcharts, state, sequence, class, ER, and xychart diagrams with color modes, themes, and direction overrides.
+- Added a `default` package export condition so CommonJS consumers, including bytecode bundles, can load the native bindings.
+
+### Changed
+
+- Improved Mermaid flowchart rendering to respect dependency order, reduce crossings, align branches, and wrap long labels without truncation.
+
+### Fixed
+
+- Fixed Mermaid rendering issues involving arrowhead alignment and duplicate edge junctions around mixed-width node shapes.
+- Fixed sloppy edit grammar compatibility with Codex constrained decoding.
+
+## [18.2.1] - 2026-09-15
+
+### Added
+
+- Added `maxBytes` to `VcsGitRepo.diffText` options: rendering stops and the call rejects with an `OutputTooLarge` VcsError once the patch crosses the cap, so callers can bound the memory a large change set may consume ([#11454](https://github.com/can1357/oh-my-pi/pull/11454) by [@sjawhar](https://github.com/sjawhar)).
+- Native addon embedding now rejects stale release binaries before standalone builds can package them ([#11831](https://github.com/can1357/oh-my-pi/issues/11831)).
+- Fixed git repository discovery treating an unpopulated `.git` directory (no `HEAD`) as a checkout, which made `/wt` and isolated tasks fail with a raw "No such file or directory (os error 2)" instead of reporting that no Git repository was found. Discovery now skips such entries and keeps walking toward the root, matching `git rev-parse`.
+- Added `vcsDiscoverForDisplay` (`repoForDisplay`): like repository discovery, but equal-root jj+git ties prefer Jujutsu for the status line and footer. Git-safe automation must keep using `vcsDiscover` ([#11071](https://github.com/can1357/oh-my-pi/issues/11071), [#11325](https://github.com/can1357/oh-my-pi/pull/11325) by [@boazy](https://github.com/boazy)).
+- Shell and PTY command output on Windows now falls back from UTF-8 to the system ANSI code page (e.g. GBK on Chinese locales) instead of emitting replacement characters.
+
+### Changed
+
+- Workspace startup scans skip excluded build directories and retain a bounded set of entries and directory rules.
+- Limited newest-file searches use less memory on large directory trees when scan caching is disabled.
+
+### Fixed
+
+- Bounded filesystem scan cache memory and prevented stale scans from repopulating the cache after file changes. ([#11240](https://github.com/can1357/oh-my-pi/pull/11240) by [@iliaal](https://github.com/iliaal))
+- Fixed the embedded shell and PTY sessions inheriting `GIT_DIR`, `GIT_WORK_TREE`, and related repo-location overrides from the host process, which made `git` run in a secondary worktree mutate the primary one ([#11082](https://github.com/can1357/oh-my-pi/issues/11082)).
+- Added a vendored Astro grammar so `.astro` files highlight the `---` TypeScript frontmatter and `{…}` template expressions instead of falling back to plain HTML ([#11164](https://github.com/can1357/oh-my-pi/pull/11164) by [@byigitt](https://github.com/byigitt)).
+- Fixed the TUI sometimes stopping repainting while the agent continued running.
+- Fixed native Darwin OAuth helper compilation under sandboxed and custom build environments by respecting `$CC` ([#11869](https://github.com/can1357/oh-my-pi/pull/11869) by [@Malix-Labs](https://github.com/Malix-Labs)).
+
+## [18.1.17] - 2026-09-10
+
+### Fixed
+
+- Fixed Wayland computer-use clicks landing in the wrong place on scaled monitors by mapping captures through the portal's logical monitor geometry ([#11540](https://github.com/can1357/oh-my-pi/issues/11540)).
+
 ## [18.1.15] - 2026-09-08
 
 ### Fixed

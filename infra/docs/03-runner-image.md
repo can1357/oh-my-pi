@@ -84,15 +84,16 @@ reproduced verbatim (it contains no secrets or redactable host identifiers; the
 #   - C/build toolchain the native + canvas builds need
 #   - bun (system-wide, on PATH)
 #   - sccache + Zig + cargo-nextest/cargo-zigbuild/cargo-xwin for native builds
-#   - rust nightly (pinned) + clippy/rustfmt/rust-analyzer + linux-arm64/windows-msvc targets
+#   - rust nightly (pinned) + clippy/rustfmt/rust-analyzer + the rust-toolchain.toml
+#     targets (linux-x64, windows-msvc x64/arm64) and linux-arm64 for zigbuild
 #
 # Rebuild + reimport (see /root/omp-kata-runner.md) after bumping the ARGs below
 # or the apt set. Keep the apt set in sync with .github/actions/setup-system-deps.
 FROM ghcr.io/actions/actions-runner:latest
 
-ARG RUST_NIGHTLY=nightly-2026-04-29
-ARG BUN_VERSION=1.4.0
-ARG SCCACHE_VERSION=0.15.0
+ARG RUST_NIGHTLY=nightly-2026-09-14
+ARG BUN_VERSION=1.4.2
+ARG SCCACHE_VERSION=0.18.0
 ARG ZIG_VERSION=0.16.0
 
 USER root
@@ -139,7 +140,7 @@ ENV RUSTUP_HOME=/home/runner/.rustup \
 RUN curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
       | sh -s -- -y --default-toolchain "${RUST_NIGHTLY}" --profile minimal \
  && rustup component add clippy rustfmt rust-analyzer \
- && rustup target add aarch64-unknown-linux-gnu x86_64-pc-windows-msvc \
+ && rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-pc-windows-msvc aarch64-pc-windows-msvc \
  && cargo install --locked cargo-nextest cargo-zigbuild cargo-xwin \
  && cargo --version \
  && rustc --version \
@@ -161,9 +162,10 @@ runner agent itself is never modified.
 **`ARG RUST_NIGHTLY` / `ARG BUN_VERSION`.** The two version knobs you bump. They
 are build args so you can also override them ad hoc with
 `docker build --build-arg RUST_NIGHTLY=... --build-arg BUN_VERSION=...` without
-editing the file. `RUST_NIGHTLY` must match what the repo's
-`dtolnay/rust-toolchain@nightly` step expects so the toolchain install in CI is a
-no-op (see step 4 below).
+editing the file. `RUST_NIGHTLY` must match the `channel` in the repo's
+`rust-toolchain.toml` - CI has no explicit toolchain step; rustup reads that
+file on the first `cargo` call and installs whatever is missing - so the
+toolchain install in CI is a no-op (see step 4 below). Bump both together.
 
 **`USER root` + `ENV DEBIAN_FRONTEND=noninteractive`.** Switch to root for the
 apt and bun system installs; `noninteractive` suppresses debconf/tzdata prompts
@@ -214,9 +216,11 @@ the **`runner` user** - the UID jobs execute as - so cargo/rustc are owned by an
 visible to the job without sudo. `RUSTUP_HOME`/`CARGO_HOME` are pinned under
 `/home/runner`, and `~/.cargo/bin` is prepended to `PATH`. rustup installs the
 pinned nightly as the **default toolchain** (`--profile minimal`), then adds the
-`clippy`, `rustfmt`, and `rust-analyzer` components plus the
-`aarch64-unknown-linux-gnu` (Linux arm64) and `x86_64-pc-windows-msvc` (Windows
-cross) targets. The same layer also `cargo install`s the Rust-native helper CLIs
+`clippy`, `rustfmt`, and `rust-analyzer` components plus the targets listed in
+`rust-toolchain.toml` (`x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`,
+`aarch64-pc-windows-msvc`) and `aarch64-unknown-linux-gnu` for the zigbuild
+Linux arm64 cross path. The target set must stay a superset of the toml's, or
+rustup fetches the difference per job. The same layer also `cargo install`s the Rust-native helper CLIs
 `cargo-nextest`, `cargo-zigbuild`, and `cargo-xwin`, so the self-hosted native
 build path no longer fetches those tools job-by-job. Because the default toolchain
 already *is* the pinned nightly with these components/targets, the corresponding
@@ -388,9 +392,9 @@ next job's microVM starts cold but with warm dependencies from the local store.
 
 1. **bun:** edit `ARG BUN_VERSION=` in the Dockerfile (or pass
    `--build-arg BUN_VERSION=...`).
-2. **Rust:** edit `ARG RUST_NIGHTLY=` to the new pinned nightly. Keep it equal to
-   what the repo's `dtolnay/rust-toolchain@nightly` step resolves, so the CI
-   toolchain install stays a no-op.
+2. **Rust:** edit `ARG RUST_NIGHTLY=` to the `channel` in `rust-toolchain.toml`,
+   and keep the `rustup target add` list a superset of the toml's `targets`, so
+   rustup's per-job install stays a no-op.
 3. **apt set:** edit the `apt-get install` line. You **must** mirror the change in
    `.github/actions/setup-system-deps` (and, if you add a tool the action probes
    for, in its detection block - currently `fd`, `rg`, `magick`,

@@ -5,9 +5,9 @@
  * `discoverModelsByProviderType` with a `DiscoveryContext`; built-in provider
  * discovery lives in pi-catalog's provider-models.
  */
-import { type ApiKey, type FetchImpl, withAuth } from "@oh-my-pi/pi-ai";
-import type { Api, Model, RemoteCompactionConfig } from "@oh-my-pi/pi-ai/types";
-import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { type ApiKey, withAuth } from "@oh-my-pi/pi-ai/auth-retry";
+import type { Api, FetchImpl, Model, RemoteCompactionConfig } from "@oh-my-pi/pi-ai/types";
+import { buildDiscoveredModel, buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	getBundledModelReferenceIndex,
 	inheritReferenceThinking,
@@ -17,6 +17,7 @@ import {
 import {
 	fetchLiteLLMRichModels,
 	fetchLmStudioNativeModelMetadata,
+	isSelectableLiteLLMModelMode,
 	OPENAI_COMPAT_DISCOVERY_DEFAULT_CONTEXT_WINDOW,
 	OPENAI_COMPAT_DISCOVERY_DEFAULT_MAX_TOKENS,
 	resolveLiteLLMApi,
@@ -36,6 +37,34 @@ import type { ProviderDiscovery } from "./models-config-schema";
 // "socket connection was closed unexpectedly").
 export const DISCOVERY_DEFAULT_CONTEXT_WINDOW = OPENAI_COMPAT_DISCOVERY_DEFAULT_CONTEXT_WINDOW;
 export const DISCOVERY_DEFAULT_MAX_TOKENS = OPENAI_COMPAT_DISCOVERY_DEFAULT_MAX_TOKENS;
+
+/**
+ * A discovery HTTP failure carrying the response status as a structured field
+ * so callers can classify auth rejections (401/403) without parsing messages.
+ * The message format is load-bearing: the model hub matches
+ * `HTTP <status> from <url>` for its 404 baseUrl hint, and auth-retry
+ * classification matches on the same text.
+ */
+export class DiscoveryHttpError extends Error {
+	readonly status: number;
+
+	constructor(status: number, url: string) {
+		super(`HTTP ${status} from ${url}`);
+		this.name = "DiscoveryHttpError";
+		this.status = status;
+	}
+}
+
+/**
+ * True when a discovery failure is an HTTP 401/403 auth rejection — the
+ * endpoint answered (so it is reachable) but refused the request's credentials
+ * (or lack of them). Callers surface these as an `unauthenticated` provider
+ * discovery state instead of a generic `unavailable`, so a credential problem
+ * never masquerades as a dead endpoint (issue #12281).
+ */
+export function isDiscoveryAuthRejection(error: unknown): boolean {
+	return error instanceof DiscoveryHttpError && (error.status === 401 || error.status === 403);
+}
 
 /**
  * Run `fn` with a hard deadline while also signalling cooperative transports
@@ -482,7 +511,7 @@ export async function discoverOllamaModels(
 			signal,
 		});
 		if (!response.ok) {
-			throw new Error(`HTTP ${response.status} from ${tagsUrl}`);
+			throw new DiscoveryHttpError(response.status, tagsUrl);
 		}
 		return (await response.json()) as { models?: Array<{ name?: string; model?: string }> };
 	});
@@ -551,48 +580,6 @@ async function discoverLlamaCppServerMetadata(
 	}
 }
 
-/**
- * PrismLM Ternary/1-bit Bonsai GGUFs are Qwen3.6-27B derivatives served locally
- * via llama.cpp; their ids do not carry classifiable Qwen lineage, so this
- * reviewed local alias supplements the structured identity.
- */
-function isBonsaiQwenGguf(id: string): boolean {
-	return /(?:ternary-)?bonsai-27b/i.test(id);
-}
-
-/**
- * applyLlamaCppQwenThinking rewrites a discovered or cached llama.cpp model so a
- * Qwen-family chat template (which defaults `enable_thinking: true`) can be
- * turned off. Qwen ids and the Qwen3.6-based PrismLM Ternary Bonsai GGUFs are
- * routed through chat-completions (the implicit llama.cpp provider defaults to
- * `openai-responses`, whose disable path has no Qwen encoding) with the
- * `qwen-template-false` dialect; omp emits `preserve_thinking` inside
- * `chat_template_kwargs` for Qwen, so the toggle rides there too and history
- * `<think>` blocks survive (`qwenPreserveThinking`). The runtime base URL gets a
- * `/v1` suffix because the chat-completions request would otherwise POST to the
- * native root, which does not serve it. A model with a custom transport (e.g.
- * `pi-native`, whose client appends `/v1/pi/stream`) keeps its base URL so the
- * suffix is not doubled. Non-Qwen models pass through unchanged. Applied on both
- * fresh discovery and cache load, so an upgraded cache is corrected without
- * waiting for re-discovery.
- */
-export function applyLlamaCppQwenThinking(model: Model<Api>): Model<Api> {
-	if (model.identity.class !== "qwen" && !isBonsaiQwenGguf(model.id)) return model;
-	return buildModel({
-		...model,
-		api: "openai-completions",
-		baseUrl: model.transport ? model.baseUrl : ensureLlamaCppV1BaseUrl(normalizeLlamaCppBaseUrl(model.baseUrl)),
-		reasoning: true,
-		compat: {
-			...model.compatConfig,
-			supportsReasoningParams: true,
-			thinkingFormat: "qwen-chat-template",
-			reasoningDisableMode: "qwen-template-false",
-			qwenPreserveThinking: true,
-		},
-	} as unknown as ModelSpec<Api>);
-}
-
 export async function discoverLlamaCppModels(
 	providerConfig: DiscoveryProviderConfig,
 	ctx: DiscoveryContext,
@@ -611,7 +598,7 @@ export async function discoverLlamaCppModels(
 					signal,
 				});
 				if (!response.ok) {
-					throw new Error(`HTTP ${response.status} from ${modelsUrl}`);
+					throw new DiscoveryHttpError(response.status, modelsUrl);
 				}
 				headers = h;
 				return (await response.json()) as unknown;
@@ -635,12 +622,9 @@ export async function discoverLlamaCppModels(
 			serverMetadata?.contextWindow ??
 			item.trainingContextWindow ??
 			DISCOVERY_DEFAULT_CONTEXT_WINDOW;
-		// Local llama.cpp models stamp `reasoning: false` with a minimal compat;
-		// applyLlamaCppQwenThinking upgrades Qwen-family ids (which cannot disable
-		// their default-on thinking otherwise) after the base model is built.
 		discovered.push(
-			applyLlamaCppQwenThinking(
-				buildModel({
+			buildDiscoveredModel(
+				{
 					id,
 					name: id,
 					api: providerConfig.api,
@@ -653,12 +637,8 @@ export async function discoverLlamaCppModels(
 					contextWindow,
 					maxTokens: resolveLlamaCppMaxTokens(contextWindow, serverMetadata?.maxTokens),
 					headers,
-					compat: {
-						supportsStore: false,
-						supportsDeveloperRole: false,
-						supportsReasoningEffort: false,
-					},
-				} as ModelSpec<Api>),
+				},
+				providerConfig.discovery.type,
 			),
 		);
 	}
@@ -837,7 +817,7 @@ export async function discoverOpenAIModelsList(
 					signal,
 				});
 				if (!res.ok) {
-					throw new Error(`HTTP ${res.status} from ${modelsUrl}`);
+					throw new DiscoveryHttpError(res.status, modelsUrl);
 				}
 				headers = h;
 				return (await res.json()) as {
@@ -848,6 +828,7 @@ export async function discoverOpenAIModelsList(
 						input?: unknown;
 						input_modalities?: unknown;
 						architecture?: unknown;
+						mode?: unknown;
 					}>;
 				};
 			}),
@@ -865,6 +846,7 @@ export async function discoverOpenAIModelsList(
 	for (const item of models) {
 		const id = item.id;
 		if (!id) continue;
+		if (providerConfig.discovery.type === "litellm" && !isSelectableLiteLLMModelMode(item.mode)) continue;
 		const nativeMetadataForModel = nativeMetadata?.get(id);
 		// Thin OpenAI-compatible proxies frequently omit `context_length`/
 		// `max_model_len` on `/v1/models`, leaving discovered models pinned at
@@ -939,12 +921,11 @@ export async function discoverLiteLLMModels(
 	const timeoutMs = providerConfig.discovery.timeoutMs ?? 10_000;
 	const attempt = async (h: Record<string, string>) => {
 		headers = h;
-		let authError: (Error & { status: number }) | undefined;
+		let authError: DiscoveryHttpError | undefined;
 		const authAwareFetch: FetchImpl = async (input, init) => {
 			const response = await ctx.fetch(input, init);
 			if (response.status === 401) {
-				authError = new Error(`HTTP ${response.status} from ${String(input)}`) as Error & { status: number };
-				authError.status = response.status;
+				authError = new DiscoveryHttpError(response.status, String(input));
 			}
 			return response;
 		};
@@ -971,14 +952,15 @@ export async function discoverLiteLLMModels(
 		richModels = apiKey
 			? await withAuth(apiKey, key => attempt({ ...baseHeaders, Authorization: `Bearer ${key}` }))
 			: await attempt(baseHeaders);
-	} catch (error) {
-		const status = typeof error === "object" && error !== null && "status" in error ? error.status : undefined;
-		if (status !== 401) {
-			throw error;
-		}
+	} catch {
+		// The rich-metadata probes failed (auth, timeout, or network). The cheap
+		// `/v1/models` fallback runs under its own independent budget and usually
+		// still resolves the catalog, so try it rather than aborting discovery and
+		// letting the caller cache an empty result (#10964). If the fallback also
+		// fails, its error propagates.
 		richModels = null;
 	}
-	if (!richModels || richModels.length === 0) {
+	if (richModels === null) {
 		return discoverOpenAIModelsList({ ...providerConfig, baseUrl }, ctx);
 	}
 	return richModels.map(spec => buildModel({ ...spec, headers }));
@@ -1016,7 +998,7 @@ export async function discoverProxyModels(
 				signal,
 			});
 			if (!res.ok) {
-				throw new Error(`HTTP ${res.status} from ${modelsUrl}`);
+				throw new DiscoveryHttpError(res.status, modelsUrl);
 			}
 			headers = h;
 			return (await res.json()) as {
