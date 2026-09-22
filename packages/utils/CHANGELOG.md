@@ -12,6 +12,12 @@
 ### Fixed
 
 - Fixed log rotation near local-day boundaries so dated log files are consistently assigned to the correct local date.
+### Changed
+
+- Migrated internal cryptographic utilities to `Bun` performance-optimized hashers
+### Fixed
+
+- Fixed a broken pipe to any vanished peer (closed subprocess stdin, socket, or terminal) raising a fatal `EPIPE: broken pipe, write` that killed the whole agent session mid-task; pipe-write EPIPEs are now contained with sampled logging while every non-EPIPE failure stays fatal.
 
 ## [18.2.7] - 2026-09-21
 
