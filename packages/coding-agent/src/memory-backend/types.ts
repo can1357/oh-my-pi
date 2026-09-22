@@ -156,7 +156,11 @@ export interface MemoryBackend {
 	 * commit publishes the cached snippet and first-turn consumption together.
 	 * Return undefined for an ineligible or failed recall, not an empty success.
 	 */
-	beforeAgentStartPrompt?(session: AgentSession, promptText: string): Promise<MemoryPromptPreparation | undefined>;
+	beforeAgentStartPrompt?(
+		session: AgentSession,
+		promptText: string,
+		signal?: AbortSignal,
+	): Promise<MemoryPromptPreparation | undefined>;
 
 	/**
 	 * Optional hook to splice extra context into a compaction summarization.

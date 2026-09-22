@@ -161,6 +161,10 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	}
 	if (options.reasoning !== undefined) opts.reasoning = options.reasoning;
 	if (options.disableReasoning !== undefined) opts.disableReasoning = options.disableReasoning;
+	if (options.forceReasoningOff !== undefined) {
+		opts.disableReasoning = options.forceReasoningOff;
+		opts.forceReasoningOff = options.forceReasoningOff;
+	}
 	if (options.hideThinkingSummary !== undefined) opts.hideThinkingSummary = options.hideThinkingSummary;
 	if (options.taskBudget !== undefined) opts.taskBudget = options.taskBudget;
 	if (options.anthropicPrefixMismatchBehavior !== undefined) {

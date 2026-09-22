@@ -547,6 +547,69 @@ describe("AgentSession retry fallback", () => {
 		]);
 	});
 
+	it("walks the default chain when the live model matches no role primary (#12421)", async () => {
+		// A lead session whose model belongs to no role (a `/model` switch onto a
+		// model no role names) resolved no chain at all, so a provider wait
+		// longer than `retry.maxDelayMs` aborted the session after one attempt
+		// instead of walking `default`. The walk starts at that role's primary,
+		// which is deliberately not the live model.
+		const liveModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const rolePrimary = getBundledModel("openai", "gpt-4o");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!liveModel || !rolePrimary || !fallbackModel) {
+			throw new Error("Expected bundled test models to exist");
+		}
+
+		const requestedModels: string[] = [];
+		const agent = createFallbackAgent(liveModel, requestedModels, {
+			// ≈3.1h — past `retry.maxDelayMs`, the shape reported in #12421.
+			firstError: "429 rate_limit_error retry-after-ms=11180001",
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 100,
+			"retry.fallbackChains": {
+				default: [`${fallbackModel.provider}/${fallbackModel.id}`],
+			},
+		});
+		settings.setModelRole("default", `${rolePrimary.provider}/${rolePrimary.id}`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		const retryEndEvents: Array<Extract<AgentSessionEvent, { type: "auto_retry_end" }>> = [];
+		const fallbackAppliedEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_end") retryEndEvents.push(event);
+			if (event.type === "retry_fallback_applied") fallbackAppliedEvents.push(event);
+		});
+
+		await session.prompt("Recover from a long provider wait on an off-role model");
+		await session.waitForIdle();
+
+		expect(fallbackAppliedEvents).toEqual([
+			{
+				type: "retry_fallback_applied",
+				from: `${liveModel.provider}/${liveModel.id}`,
+				to: `${rolePrimary.provider}/${rolePrimary.id}`,
+				role: "default",
+			},
+		]);
+		expect(requestedModels).toEqual([
+			`${liveModel.provider}/${liveModel.id}`,
+			`${rolePrimary.provider}/${rolePrimary.id}`,
+		]);
+		expect(session.model?.provider).toBe(rolePrimary.provider);
+		expect(session.model?.id).toBe(rolePrimary.id);
+		expect(retryEndEvents).toHaveLength(1);
+		expect(retryEndEvents[0]).toMatchObject({ success: true });
+	});
+
 	it("keeps non-Gemini empty-body errors on the model-fallback path", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");

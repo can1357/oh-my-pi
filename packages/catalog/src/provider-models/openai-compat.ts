@@ -55,7 +55,11 @@ import {
 	mergeCopilotApiHeaders,
 	parseGitHubCopilotApiKey,
 } from "../wire/github-copilot";
-import { normalizeSingularityApiBaseUrl } from "../wire/singularityapi";
+import {
+	SINGULARITYAPI_DEV_API_BASE_URL,
+	SINGULARITYAPI_TECH_API_BASE_URL,
+	normalizeSingularityApiBaseUrl,
+} from "../wire/singularityapi";
 import { createBundledReferenceMap, createReferenceResolver, toModelSpec } from "./bundled-references";
 import { getDefaultModelDiscoveryBaseUrl, resolveModelCacheProviderId } from "./cache-provider-id";
 import { getClinePassModelMetadata } from "./cline-pass";
@@ -5049,6 +5053,9 @@ export function xiaomiModelManagerOptions(
 	// would incorrectly pin to the standard endpoint (api.xiaomimimo.com).
 	const baseUrl = isTokenPlanKey ? tokenPlanBaseUrls[0] : (config?.baseUrl ?? XIAOMI_STANDARD_BASE_URL);
 	const references = createBundledReferenceMap<"openai-completions">("xiaomi");
+	for (const seed of seedModels<"openai-completions">(providerId)) {
+		references.set(seed.id, seed);
+	}
 	const fetchModels = (url: string) =>
 		fetchOpenAICompatibleModels({
 			api: "openai-completions",
@@ -7487,8 +7494,40 @@ function mapSingularityApiModel(entry: OpenAICompatibleModelRecord, defaults: Mo
 	};
 }
 /**
- * SingularityAPI universal inference gateway: chat completions over a 300+
- * model catalog, plus image generation for the rows that advertise it.
+ * Core options shared by both SingularityAPI products. `mapModel` is supplied
+ * only by the universal gateway, whose rows publish capability metadata; the
+ * lane roster answers with bare ids and keeps the discovery defaults.
+ */
+function singularityApiModelManagerOptions(
+	providerId: "singularityapi-dev" | "singularityapi-tech",
+	canonical: string,
+	config: SingularityApiModelManagerConfig | undefined,
+	mapModel?: (entry: OpenAICompatibleModelRecord, defaults: ModelSpec<Api>) => ModelSpec<Api>,
+): ModelManagerOptions<Api> {
+	const apiKey = config?.apiKey;
+	const baseUrl = normalizeSingularityApiBaseUrl(config?.baseUrl, canonical);
+	return {
+		providerId,
+		cacheProviderId: resolveModelCacheProviderId(providerId, { apiKey, baseUrl }),
+		dynamicModelsAuthoritative: true,
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels<Api>({
+					api: "openai-completions",
+					provider: providerId,
+					baseUrl,
+					apiKey,
+					...(mapModel && { mapModel }),
+					fetch: config?.fetch,
+				}),
+		}),
+	};
+}
+
+/**
+ * `singularityapi-dev` — SingularityAPI's pay-as-you-go universal gateway
+ * (`api.singularityapi.dev`): chat completions over a 300+ model catalog,
+ * plus image generation for the rows that advertise it.
  * `GET /v1/models` publishes each row's per-endpoint capabilities — context
  * window, max output tokens, and per-million pricing as 12-decimal strings —
  * with `cache-control: no-store`, so discovery reads limits and tariffs
@@ -7498,23 +7537,25 @@ function mapSingularityApiModel(entry: OpenAICompatibleModelRecord, defaults: Mo
  * flagships), because a model discovered as non-reasoning never sends a
  * `reasoning_effort` and the gateway requires one alongside tools.
  */
-export function singularityApiModelManagerOptions(config?: SingularityApiModelManagerConfig): ModelManagerOptions<Api> {
-	const apiKey = config?.apiKey;
-	const baseUrl = normalizeSingularityApiBaseUrl(config?.baseUrl);
-	return {
-		providerId: "singularityapi",
-		cacheProviderId: resolveModelCacheProviderId("singularityapi", { apiKey, baseUrl }),
-		dynamicModelsAuthoritative: true,
-		...(apiKey && {
-			fetchDynamicModels: () =>
-				fetchOpenAICompatibleModels<Api>({
-					api: "openai-completions",
-					provider: "singularityapi",
-					baseUrl,
-					apiKey,
-					mapModel: (entry, defaults) => mapSingularityApiModel(entry, defaults),
-					fetch: config?.fetch,
-				}),
-		}),
-	};
+export function singularityApiDevModelManagerOptions(
+	config?: SingularityApiModelManagerConfig,
+): ModelManagerOptions<Api> {
+	return singularityApiModelManagerOptions(
+		"singularityapi-dev",
+		SINGULARITYAPI_DEV_API_BASE_URL,
+		config,
+		mapSingularityApiModel,
+	);
+}
+
+/**
+ * `singularityapi-tech` — SingularityAPI's slot-reserved DeepSeek lanes
+ * (`api.singularityapi.tech`). `/v1/models` answers with bare `{id}` rows and
+ * no capability metadata, so rows keep the discovery defaults and the
+ * reviewed KDL rules own the wire shape, limits patch, and effort ladder.
+ */
+export function singularityApiTechModelManagerOptions(
+	config?: SingularityApiModelManagerConfig,
+): ModelManagerOptions<Api> {
+	return singularityApiModelManagerOptions("singularityapi-tech", SINGULARITYAPI_TECH_API_BASE_URL, config);
 }
