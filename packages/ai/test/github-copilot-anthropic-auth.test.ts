@@ -297,4 +297,26 @@ describe("Anthropic Copilot auth config", () => {
 		expect(result.stopReason).toBe("error");
 		expect(requestedInitiators[0]).toBe("agent");
 	});
+
+	it("keeps the CLI identity on Enterprise message requests", async () => {
+		const requestedUrls: string[] = [];
+		const requestedIntegrationIds: Array<string | null> = [];
+		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+			requestedUrls.push(input instanceof Request ? input.url : input.toString());
+			requestedIntegrationIds.push(getRequestHeader(input, init, "Copilot-Integration-Id"));
+			return new Response(JSON.stringify({ error: { type: "authentication_error", message: "Unauthorized" } }), {
+				status: 401,
+				headers: { "Content-Type": "application/json" },
+			});
+		});
+
+		const result = await streamAnthropic(makeCopilotClaudeModel(), testContext, {
+			apiKey: JSON.stringify({ token: "ghu_test_token_12345", enterpriseUrl: "ghe.example.com" }),
+			fetch: fetchMock as unknown as typeof fetch,
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(requestedUrls[0]).toBe("https://copilot-api.ghe.example.com/v1/messages");
+		expect(requestedIntegrationIds[0]).toBe("copilot-developer-cli");
+	});
 });

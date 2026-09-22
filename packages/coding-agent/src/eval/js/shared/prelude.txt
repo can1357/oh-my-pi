@@ -185,6 +185,55 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		}
 	}
 
+	// Immediate-return wrapper for the async `completion()`/`agent()` factories.
+	// JS cannot hand back a handle synchronously — the bridge allocates the id
+	// over an async round-trip — so the factory returns this thenable instead:
+	// `await` it to get the resolved handle (for dag wiring via `.id`/`.handle`),
+	// or call the handle methods directly (`h.wait()`, `h.status()`, …) and they
+	// await resolution internally. This matches the documented immediate-handle
+	// contract that Python satisfies natively via its synchronous bridge.
+	class PendingHandle {
+		constructor(promise) {
+			this._promise = promise;
+		}
+
+		then(onFulfilled, onRejected) {
+			return this._promise.then(onFulfilled, onRejected);
+		}
+
+		catch(onRejected) {
+			return this._promise.catch(onRejected);
+		}
+
+		finally(onFinally) {
+			return this._promise.finally(onFinally);
+		}
+
+		async status() {
+			return (await this._promise).status();
+		}
+
+		async done() {
+			return (await this._promise).done();
+		}
+
+		async wait(options) {
+			return (await this._promise).wait(options);
+		}
+
+		async cancel() {
+			return (await this._promise).cancel();
+		}
+
+		async send(message) {
+			return (await this._promise).send(message);
+		}
+
+		async output(options) {
+			return (await this._promise).output(options);
+		}
+	}
+
 	const resolveHandleSnapshot = (handle, snapshot) => {
 		const status = snapshot?.status ?? "failed";
 		if (status === "running") throw timeoutError(`${handle.kind} handle ${handle.id} is still running`);
@@ -201,7 +250,8 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 	};
 
 	const wait = async (handles, { timeout, raiseErrors = true } = {}) => {
-		const raw = handles instanceof EvalHandle ? [handles] : Array.from(handles ?? []);
+		const isHandleLike = value => value instanceof EvalHandle || value instanceof PendingHandle;
+		const raw = isHandleLike(handles) ? [handles] : Array.from(handles ?? []);
 		const items = await Promise.all(raw);
 		for (const handle of items) {
 			if (!(handle instanceof EvalHandle)) throw new TypeError("wait() expects agent or completion handles");
@@ -241,24 +291,153 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		return results;
 	};
 
-	const completion = async (prompt, opts, ...rest) => {
-		const options = optionsArg("completion", opts, rest, ["model", "system", "schema"], "{ model, system, schema }");
-		const result = await globalThis.__omp_call_tool__("__completion__", { prompt, ...options });
-		if (!result || typeof result.id !== "string") throw new Error("completion() did not return a handle");
-		return new CompletionHandle(result.id, options.schema);
+	const completion = (prompt, opts, ...rest) => {
+		const promise = (async () => {
+			const options = optionsArg("completion", opts, rest, ["model", "system", "schema"], "{ model, system, schema }");
+			const result = await globalThis.__omp_call_tool__("__completion__", { prompt, ...options });
+			if (!result || typeof result.id !== "string") throw new Error("completion() did not return a handle");
+			return new CompletionHandle(result.id, options.schema);
+		})();
+		return new PendingHandle(promise);
 	};
 
-	const agent = async (prompt, opts, ...rest) => {
+	const checkQuestions = questions => {
+		if (questions === null || typeof questions !== "object" || Array.isArray(questions)) {
+			throw new TypeError("judge(state, questions) expects questions as an object keyed by id");
+		}
+	};
+
+	const judge = async (state, questions) => {
+		checkQuestions(questions);
+		const result = await globalThis.__omp_call_tool__("__judge__", { state, questions });
+		if (!result || !isPlainObject(result.answers)) throw new Error("judge() did not return answers");
+		return result.answers;
+	};
+
+	// One settled judgeBatch item: `answers` on success, else `error`.
+	class JudgmentItem {
+		constructor(item) {
+			this.key = item.key;
+			this.answers = item.answers;
+			this.error = item.error;
+			this.model = item.model;
+		}
+
+		get ok() {
+			return this.error === undefined;
+		}
+
+		toString() {
+			return this.error === undefined
+				? `<judgment ${JSON.stringify(this.key)} ${JSON.stringify(this.answers)}>`
+				: `<judgment ${JSON.stringify(this.key)} error=${JSON.stringify(this.error)}>`;
+		}
+	}
+
+	// Host-owned bulk judgment run. Pull settled items with `drain()` across as
+	// many cells as needed; the run outlives any single cell.
+	class JudgmentBatch {
+		constructor(id, total) {
+			this.id = id;
+			this.total = total;
+		}
+
+		async _call(op, args = {}) {
+			return await globalThis.__omp_call_tool__("__judge_batch__", { op, id: this.id, ...args });
+		}
+
+		async status() {
+			return await this._call("status");
+		}
+
+		// Items settled since the last drain as `[[key, JudgmentItem]]`; waits up
+		// to `timeout` seconds for at least one, else returns `[]`.
+		async drain(opts, ...rest) {
+			const { timeout } = optionsArg("JudgmentBatch.drain", opts, rest, ["timeout"], "{ timeout }");
+			const args = timeout === undefined ? {} : { timeoutMs: Math.max(0, Number(timeout) * 1000) };
+			const result = await this._call("drain", args);
+			const items = Array.isArray(result?.items) ? result.items : [];
+			return items.map(item => [item.key, new JudgmentItem(item)]);
+		}
+
+		// Yield `[key, JudgmentItem]` as items settle until `timeout` seconds
+		// elapse or the run completes.
+		async *drainIter(opts, ...rest) {
+			const { timeout } = optionsArg("JudgmentBatch.drainIter", opts, rest, ["timeout"], "{ timeout }");
+			const deadline = timeout === undefined ? undefined : Date.now() + Number(timeout) * 1000;
+			while (true) {
+				const remaining = deadline === undefined ? undefined : Math.max(0, (deadline - Date.now()) / 1000);
+				const items = await this.drain({ timeout: remaining });
+				if (items.length === 0) return;
+				yield* items;
+			}
+		}
+
+		async results() {
+			return (await this._call("results"))?.results ?? {};
+		}
+
+		async failed() {
+			return (await this._call("failed"))?.failed ?? {};
+		}
+
+		async cancel() {
+			return Boolean((await this._call("cancel"))?.cancelled);
+		}
+
+		async close() {
+			await this._call("close");
+		}
+
+		toString() {
+			return `<judgeBatch ${this.id} total=${this.total}>`;
+		}
+	}
+
+	const judgeBatchFrom = result => {
+		if (!result || typeof result.id !== "string") throw new Error("judgeBatch() did not return a batch");
+		return new JudgmentBatch(result.id, Number(result.total) || 0);
+	};
+
+	// Judge every state with the same questions on the host. `states` is
+	// `{ key: state }` or an array (keys are indices). Item failures land in
+	// `JudgmentItem.error`; only a run that dies wholesale rejects `drain()`.
+	const judgeBatch = async (states, questions, opts, ...rest) => {
+		checkQuestions(questions);
 		const options = optionsArg(
-			"agent",
+			"judgeBatch",
 			opts,
 			rest,
-			["agent", "label", "schema", "isolated", "apply", "merge", "schemaMode", "tools"],
-			"{ agent, label, schema, schemaMode, isolated, apply, merge, tools }",
+			["concurrency", "retries", "minOk"],
+			"{ concurrency, retries, minOk }",
 		);
-		const result = await globalThis.__omp_call_tool__("__agent__", { prompt, ...options });
-		if (!result || typeof result.id !== "string") throw new Error("agent() did not return a handle");
-		return new AgentHandle(result.id, result.agent, options.schema);
+		let items;
+		if (Array.isArray(states)) items = states.map((state, key) => ({ key, state }));
+		else if (isPlainObject(states)) items = Object.entries(states).map(([key, state]) => ({ key, state }));
+		else throw new TypeError("judgeBatch(states, questions) expects states as an object or array");
+		return judgeBatchFrom(
+			await globalThis.__omp_call_tool__("__judge_batch__", { op: "create", items, questions, ...options }),
+		);
+	};
+
+	// Re-create a batch ref by id (after a VM reset or from another runtime).
+	judgeBatch.attach = async id =>
+		judgeBatchFrom(await globalThis.__omp_call_tool__("__judge_batch__", { op: "attach", id: String(id) }));
+
+	const agent = (prompt, opts, ...rest) => {
+		const promise = (async () => {
+			const options = optionsArg(
+				"agent",
+				opts,
+				rest,
+				["agent", "label", "schema", "isolated", "apply", "merge", "schemaMode", "tools"],
+				"{ agent, label, schema, schemaMode, isolated, apply, merge, tools }",
+			);
+			const result = await globalThis.__omp_call_tool__("__agent__", { prompt, ...options });
+			if (!result || typeof result.id !== "string") throw new Error("agent() did not return a handle");
+			return new AgentHandle(result.id, result.agent, options.schema);
+		})();
+		return new PendingHandle(promise);
 	};
 
 	class WorkPool {
@@ -431,6 +610,10 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 	globalThis.wait = wait;
 	globalThis.AgentHandle = AgentHandle;
 	globalThis.CompletionHandle = CompletionHandle;
+	globalThis.judge = judge;
+	globalThis.judgeBatch = judgeBatch;
+	globalThis.JudgmentBatch = JudgmentBatch;
+	globalThis.JudgmentItem = JudgmentItem;
 	globalThis.workpool = workpool;
 	globalThis.WorkPool = WorkPool;
 	globalThis.log = log;

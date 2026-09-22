@@ -355,18 +355,24 @@ function buildQuotaSummaryReport(
 		);
 		const amount = buildQuotaSummaryAmount(bucket);
 		const counterKeys = getQuotaSummaryCounterKeys(group, bucket);
+		const sharedGroup =
+			counterKeys.length > 1
+				? `${bucket.bucketId ?? group?.displayName ?? "third-party"}:${window?.id ?? bucket.window ?? "default"}`
+				: undefined;
 		for (const counterKey of counterKeys) {
 			const counterName = getQuotaSummaryCounterName(counterKey);
 			const windowId = window?.id ?? bucket.window ?? bucket.bucketId ?? "default";
+			const label =
+				sharedGroup !== undefined ? "Claude & GPT (shared)" : counterKey === "google" ? "Gemini" : counterName;
 			limits.push({
 				id: `${params.provider}:${counterKey}:default:${bucket.bucketId ?? windowId}`,
-				label: counterName ? `Usage (${counterName})` : (group?.displayName ?? bucket.displayName ?? "Usage"),
+				label: label ?? group?.displayName ?? bucket.displayName ?? "Usage",
 				scope: {
 					provider: params.provider,
 					accountId: params.credential.accountId,
 					projectId: params.credential.projectId,
 					windowId,
-					...(counterKeys.length > 1 ? { shared: true } : {}),
+					...(sharedGroup !== undefined ? { shared: true, sharedGroup } : {}),
 				},
 				window,
 				amount,

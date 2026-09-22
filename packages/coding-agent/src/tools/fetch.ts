@@ -1,3 +1,5 @@
+import { repairCollapsedScheme, tryExtractEmbeddedUrlSelector } from "@oh-my-pi/pi-tui/tools/fetch";
+import type { ReadUrlToolDetails } from "@oh-my-pi/pi-tui/tools/fetch";
 import type { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -5,18 +7,13 @@ import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { type FetchImpl, getEnvApiKey, type ImageContent, type TextContent } from "@oh-my-pi/pi-ai";
 import { htmlToMarkdown, notebookToEditableText } from "@oh-my-pi/pi-natives";
-import { type Component, Text } from "@oh-my-pi/pi-tui";
-import { $which, ptree, truncate } from "@oh-my-pi/pi-utils";
+import { $which, ptree } from "@oh-my-pi/pi-utils";
 import { type ArchiveFormat, listArchiveRoot, sniffArchiveFormat } from "@oh-my-pi/pi-utils/ar";
 import type { Settings } from "../config/settings";
-import type { RenderResultOptions } from "../extensibility/custom-tools/types";
-import { type Theme, theme } from "../modes/theme/theme";
 import type { ToolSession } from "../sdk";
 import type { AgentStorage } from "../session/agent-storage";
-import { DEFAULT_MAX_BYTES, truncateHead } from "../session/streaming-output";
-import { renderStatusLine, urlHyperlink } from "../tui";
-import { CachedOutputBlock, markFramedBlockComponent } from "../tui/output-block";
-import { webpExclusionForModel } from "../utils/image-loading";
+import { DEFAULT_MAX_BYTES, truncateHead } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { webpExclusionForModel } from "@oh-my-pi/pi-tui/chat/image-loading";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";
 import { CONVERTIBLE_EXTENSIONS } from "../utils/markit";
 import { ensureTool } from "../utils/tools-manager";
@@ -26,13 +23,15 @@ import type { RenderResult, SpecialHandler } from "../web/scrapers/types";
 import { finalizeOutput, loadPage, looksLikeHtml, MAX_BYTES, MAX_OUTPUT_CHARS } from "../web/scrapers/types";
 import { convertWithMarkit, fetchBinary } from "../web/scrapers/utils";
 import { findCredential } from "../web/search/providers/utils";
-import { applyListLimit } from "./list-limit";
-import { formatStyledArtifactReference, type OutputMeta } from "./output-meta";
-import { isReadableUrlPath, type LineRange, parseLineRanges, parseTailCount } from "./path-utils";
+import { applyListLimit } from "@oh-my-pi/pi-tui/tools/list-limit";
+import { parseTailCount } from "./path-utils";
+import { type LineRange, parseLineRanges } from "@oh-my-pi/pi-tui/tools/line-ranges";
+import { isReadableUrlPath } from "@oh-my-pi/pi-tui/tools/read";
 import type { ParsedSelector } from "./read-selector";
-import { formatBytes, formatExpandHint, getDomain, replaceTabs } from "./render-utils";
+import { formatBytes } from "@oh-my-pi/pi-tui/render/render-utils";
 import { listTables, looksLikeSqlite, openSqliteReadConnection, renderTableList } from "./sqlite-reader";
-import { ToolAbortError, ToolError } from "./tool-errors";
+import { ToolAbortError } from "./tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
 
@@ -122,17 +121,6 @@ function buildLlmEndpointCandidates(url: string): string[] {
 }
 
 /**
- * Repair a URL whose scheme `//` collapsed to a single `/`. Node's `path.normalize`/
- * `path.resolve` collapse `//` → `/`, so any URL routed through path normalization arrives
- * as `https:/host/x` instead of `https://host/x`. No local filesystem path begins with
- * `http:/` or `https:/`, so repairing the scheme back to `//` is unambiguous.
- */
-function repairCollapsedScheme(value: string): string {
-	const m = value.match(/^(https?):\/(?!\/)/i);
-	return m ? `${m[1]}://${value.slice(m[0].length)}` : value;
-}
-
-/**
  * Normalize URL (repair a collapsed scheme, then add a scheme if one is missing).
  */
 function normalizeUrl(url: string): string {
@@ -152,19 +140,6 @@ function normalizeUrl(url: string): string {
 export interface ParsedReadUrlTarget {
 	path: string;
 	sel: ParsedSelector;
-}
-
-/** Recognize a single selector token (`raw`, a tail, or one/many line ranges). */
-function isUrlSelectorToken(token: string): boolean {
-	if (token.toLowerCase() === "raw") return true;
-	try {
-		return parseLineRanges(token) !== null || parseTailCount(token) !== null;
-	} catch {
-		// `parseLineRanges` throws `ToolError` for malformed ranges (e.g. `5+0`). Only treat the
-		// token as a selector when it parses cleanly so URL ports like `:80` keep flowing
-		// through to the URL path.
-		return false;
-	}
 }
 
 export function parseReadUrlTarget(readPath: string): ParsedReadUrlTarget | null {
@@ -207,39 +182,6 @@ export function parseReadUrlTarget(readPath: string): ParsedReadUrlTarget | null
 				? { kind: "raw" }
 				: { kind: "none" };
 	return { path: urlPath, sel };
-}
-
-/**
- * Peel one or more selector tokens off the right of a URL string. Walks back through
- * trailing `:tok` segments while each token (a) looks like a selector and (b) leaves
- * behind a string that still parses as a URL. Returns selectors left-to-right so callers
- * can apply them in source order.
- */
-function tryExtractEmbeddedUrlSelector(readPath: string): { path: string; sels: string[] } | null {
-	let basePath = readPath;
-	const sels: string[] = [];
-	while (true) {
-		const lastColonIndex = basePath.lastIndexOf(":");
-		if (lastColonIndex <= 0) break;
-
-		const candidate = basePath.slice(lastColonIndex + 1);
-		const remainder = basePath.slice(0, lastColonIndex);
-		if (!isReadableUrlPath(remainder)) break;
-		if (!isUrlSelectorToken(candidate)) break;
-
-		try {
-			new URL(
-				remainder.startsWith("http://") || remainder.startsWith("https://") ? remainder : `https://${remainder}`,
-			);
-		} catch {
-			break;
-		}
-
-		sels.unshift(candidate);
-		basePath = remainder;
-	}
-	if (sels.length === 0) return null;
-	return { path: basePath, sels };
 }
 
 /**
@@ -406,23 +348,32 @@ function getHtmlAttribute(tag: string, attribute: string): string | null {
 }
 
 /**
- * Extract bounded <head> markup to avoid expensive whole-page parsing
+ * Extract bounded <head> markup to avoid expensive whole-page parsing.
+ * Case-insensitive scan over a bounded prefix: the previous version lowercased
+ * the entire page (0.3ms/MB) before searching for two markers.
  */
 function extractHeadHtml(html: string): string {
-	const lower = html.toLowerCase();
-	const headStart = lower.indexOf("<head");
+	const SCAN_LIMIT = 256 * 1024;
+	const window = html.length > SCAN_LIMIT ? html.slice(0, SCAN_LIMIT) : html;
+	const headStart = window.search(/<head[\s>]/i);
 	if (headStart === -1) {
 		return html.slice(0, 32 * 1024);
 	}
 
 	const headTagEnd = html.indexOf(">", headStart);
-	if (headTagEnd === -1) {
+	if (headTagEnd === -1 || headTagEnd - headStart > 4096) {
 		return html.slice(headStart, headStart + 32 * 1024);
 	}
 
-	const headEnd = lower.indexOf("</head>", headTagEnd + 1);
-	const fallbackEnd = Math.min(html.length, headTagEnd + 1 + 32 * 1024);
-	return html.slice(headStart, headEnd === -1 ? fallbackEnd : headEnd + 7);
+	const tail = html.slice(headTagEnd + 1, headTagEnd + 1 + 128 * 1024);
+	const relativeEnd = tail.search(/<\/head\s*>/i);
+	if (relativeEnd === -1) {
+		// No close tag inside the scanned window: the head may legitimately
+		// run longer, so return everything scanned rather than shrinking to
+		// the first 32 KiB and dropping valid alternate links.
+		return html.slice(headStart, headTagEnd + 1 + tail.length);
+	}
+	return html.slice(headStart, headTagEnd + 1 + relativeEnd + 7);
 }
 
 /**
@@ -1570,17 +1521,6 @@ async function renderUrl(
 // Tool Definition
 // =============================================================================
 
-export interface ReadUrlToolDetails {
-	kind: "url";
-	url: string;
-	finalUrl: string;
-	contentType: string;
-	method: string;
-	truncated: boolean;
-	notes: string[];
-	meta?: OutputMeta;
-}
-
 interface ReadUrlEntry {
 	artifactId?: string;
 	artifactPath?: string;
@@ -1761,161 +1701,4 @@ export async function executeReadUrl(
 	}
 
 	return resultBuilder.done();
-}
-
-// =============================================================================
-// TUI Rendering
-// =============================================================================
-
-/** Count non-empty lines */
-function countNonEmptyLines(text: string): number {
-	return text.split("\n").filter(l => l.trim()).length;
-}
-
-function readUrlLinkTarget(input: string): string {
-	try {
-		return parseReadUrlTarget(input)?.path ?? input;
-	} catch {
-		return input;
-	}
-}
-
-function formatReadUrlDescription(input: string): string {
-	const target = readUrlLinkTarget(input);
-	const displayUrl = target.match(/^www\./i) ? `https://${target}` : target;
-	const domain = getDomain(displayUrl);
-	const urlPath = truncate(displayUrl.replace(/^https?:\/\/[^/]+/, ""), 50, "…");
-	const label = `${domain}${urlPath ? ` ${urlPath}` : ""}`.trim();
-	return urlHyperlink(target, label);
-}
-
-function formatReadUrlMetadataValue(url: string, uiTheme: Theme): string {
-	return urlHyperlink(url, uiTheme.fg("mdLinkUrl", url));
-}
-
-/** Render URL read call (URL preview) */
-export function renderReadUrlCall(
-	args: { path?: string; url?: string; raw?: boolean },
-	_options: RenderResultOptions,
-	uiTheme: Theme = theme,
-): Component {
-	const url = args.path ?? args.url ?? "";
-	const description = formatReadUrlDescription(url);
-	const meta: string[] = [];
-	if (args.raw) meta.push("raw");
-	const text = renderStatusLine({ icon: "pending", title: "Read", description, meta }, uiTheme);
-	return new Text(text, 0, 0);
-}
-
-/** Render URL read result with tree-based layout */
-export function renderReadUrlResult(
-	result: { content: Array<{ type: string; text?: string }>; details?: ReadUrlToolDetails; isError?: boolean },
-	options: RenderResultOptions,
-	uiTheme: Theme = theme,
-): Component {
-	const details = result.details;
-
-	if (result.isError || !details) {
-		const rawErrorText = result.content?.find(c => c.type === "text")?.text ?? "";
-		const errorText = (rawErrorText || "No response data").replace(/^Error:\s*/, "");
-		const urlText = details?.finalUrl ?? details?.url ?? "";
-		const description = urlText ? formatReadUrlDescription(urlText) : undefined;
-		const header = renderStatusLine({ icon: "error", title: "Read", description }, uiTheme);
-		const errorLines = errorText.split("\n").map(line => uiTheme.fg("error", replaceTabs(line)));
-		const outputBlock = new CachedOutputBlock();
-		return markFramedBlockComponent({
-			render: (width: number) =>
-				outputBlock.render({ header, state: "error", sections: [{ lines: errorLines }], width }, uiTheme),
-			invalidate: () => outputBlock.invalidate(),
-		});
-	}
-
-	const description = formatReadUrlDescription(details.finalUrl);
-	const hasRedirect = details.url !== details.finalUrl;
-	const hasNotes = details.notes.length > 0;
-	const truncation = details.meta?.truncation;
-	const truncated = Boolean(details.truncated || truncation);
-
-	const header = renderStatusLine(
-		{
-			icon: truncated ? "warning" : "success",
-			title: "Read",
-			description,
-		},
-		uiTheme,
-	);
-
-	const contentText = result.content[0]?.text ?? "";
-	const contentBody = contentText.includes("---\n\n")
-		? contentText.split("---\n\n").slice(1).join("---\n\n")
-		: contentText;
-	const lineCount = countNonEmptyLines(contentBody);
-	const charCount = contentBody.trim().length;
-	const contentLines = contentBody.split("\n").filter(l => l.trim());
-
-	const metadataLines: string[] = [
-		`${uiTheme.fg("muted", "Content-Type:")} ${details.contentType || "unknown"}`,
-		`${uiTheme.fg("muted", "Method:")} ${details.method}`,
-	];
-	if (hasRedirect) {
-		metadataLines.push(
-			`${uiTheme.fg("muted", "Final URL:")} ${formatReadUrlMetadataValue(details.finalUrl, uiTheme)}`,
-		);
-	}
-	const lineLabel = `${lineCount} line${lineCount === 1 ? "" : "s"}`;
-	metadataLines.push(`${uiTheme.fg("muted", "Lines:")} ${lineLabel}`);
-	metadataLines.push(`${uiTheme.fg("muted", "Chars:")} ${charCount}`);
-	if (truncated) {
-		metadataLines.push(uiTheme.fg("warning", `${uiTheme.status.warning} Output truncated`));
-		if (truncation?.artifactId) metadataLines.push(formatStyledArtifactReference(truncation.artifactId, uiTheme));
-	}
-	if (hasNotes) {
-		metadataLines.push(`${uiTheme.fg("muted", "Notes:")} ${details.notes.join("; ")}`);
-	}
-
-	const outputBlock = new CachedOutputBlock();
-	let lastExpanded: boolean | undefined;
-	let contentPreviewLines: string[] | undefined;
-
-	return markFramedBlockComponent({
-		render: (width: number) => {
-			const { expanded } = options;
-
-			if (contentPreviewLines === undefined || lastExpanded !== expanded) {
-				const previewLimit = expanded ? 12 : 3;
-				const previewList = applyListLimit(contentLines, { headLimit: previewLimit });
-				const previewLines = previewList.items.map(line => line.trimEnd());
-				const remaining = Math.max(0, contentLines.length - previewList.items.length);
-				contentPreviewLines =
-					previewLines.length > 0
-						? previewLines.map(line => uiTheme.fg("dim", line))
-						: [uiTheme.fg("dim", "(no content)")];
-				if (remaining > 0) {
-					const hint = formatExpandHint(uiTheme, expanded, true);
-					contentPreviewLines.push(uiTheme.fg("muted", `… ${remaining} more lines${hint ? ` ${hint}` : ""}`));
-				}
-				lastExpanded = expanded;
-				outputBlock.invalidate();
-			}
-
-			return outputBlock.render(
-				{
-					header,
-					state: truncated ? "warning" : "success",
-					sections: [
-						{ label: uiTheme.fg("toolTitle", "Metadata"), lines: metadataLines },
-						{ label: uiTheme.fg("toolTitle", "Content Preview"), lines: contentPreviewLines },
-					],
-					width,
-					applyBg: false,
-				},
-				uiTheme,
-			);
-		},
-		invalidate: () => {
-			outputBlock.invalidate();
-			contentPreviewLines = undefined;
-			lastExpanded = undefined;
-		},
-	});
 }

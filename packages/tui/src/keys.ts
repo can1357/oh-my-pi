@@ -111,7 +111,7 @@ type Letter =
 
 type Digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9";
 
-type SymbolKey =
+type KeySymbol =
 	| "`"
 	| "-"
 	| "="
@@ -176,7 +176,7 @@ type SpecialKey =
 	| "f11"
 	| "f12";
 
-type BaseKey = Letter | Digit | SymbolKey | SpecialKey;
+type BaseKey = Letter | Digit | KeySymbol | SpecialKey;
 type ModifierName = "ctrl" | "shift" | "alt" | "super";
 
 type ModifiedKeyId<Key extends string, RemainingModifiers extends ModifierName = ModifierName> = {

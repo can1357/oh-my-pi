@@ -5,6 +5,8 @@
  * `InternalUrlRouter.instance()`. Handlers are stateless; per-session and
  * shared state lives in `./state.ts`.
  */
+import { setInternalUrlCompletionHost } from "@oh-my-pi/pi-tui/prompt/internal-url-autocomplete";
+import { setInternalReadTargetPredicate } from "@oh-my-pi/pi-tui/chat/read-target";
 import { AgentProtocolHandler } from "./agent-protocol";
 import { ArtifactProtocolHandler } from "./artifact-protocol";
 import { HistoryProtocolHandler } from "./history-protocol";
@@ -28,6 +30,13 @@ import type {
 } from "./types";
 import { VaultProtocolHandler } from "./vault-protocol";
 import { XdProtocolHandler } from "./xd-protocol";
+
+setInternalUrlCompletionHost({
+	completionSchemes: () => InternalUrlRouter.instance().completionSchemes(),
+	resolveCompletions: (scheme, query, context) => InternalUrlRouter.instance().complete(scheme, query, context),
+});
+
+setInternalReadTargetPredicate(target => InternalUrlRouter.instance().canHandle(target));
 
 export class InternalUrlRouter {
 	static #instance: InternalUrlRouter | undefined;

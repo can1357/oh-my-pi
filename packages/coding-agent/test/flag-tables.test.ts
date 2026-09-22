@@ -86,10 +86,10 @@ describe("--session-dir", () => {
 });
 
 describe("--tools validation", () => {
-	it("maps search and find to grep and glob", () => {
+	it("maps legacy search to grep and keeps find canonical", () => {
 		const result = parseArgs(["--tools", "search,find,grep"]);
 
-		expect(result.tools).toEqual(["grep", "glob"]);
+		expect(result.tools).toEqual(["grep", "find"]);
 	});
 
 	it("defers unknown-name validation until all session tools are discovered", () => {
@@ -221,5 +221,22 @@ describe("restartArgv (/restart relaunch argv)", () => {
 
 	it("omits --resume for a session that never materialized on disk", () => {
 		expect(restartArgv(["--no-session", "hello"], undefined)).toEqual(["--no-session"]);
+	});
+});
+describe("--system-prompt-template", () => {
+	it("parses a template path without leaking it into the prompt", () => {
+		const result = parseArgs(["--system-prompt-template", "/tmp/SYSTEM_TEMPLATE.md", "hello"]);
+
+		expect(result.systemPromptTemplate).toBe("/tmp/SYSTEM_TEMPLATE.md");
+		expect(result.systemPrompt).toBeUndefined();
+		expect(result.messages).toEqual(["hello"]);
+	});
+
+	it("supports equals syntax and consumes flag-looking values", () => {
+		const result = parseArgs(["--system-prompt-template=--profile", "hello"]);
+
+		expect(result.systemPromptTemplate).toBe("--profile");
+		expect(result.profile).toBeUndefined();
+		expect(result.messages).toEqual(["hello"]);
 	});
 });

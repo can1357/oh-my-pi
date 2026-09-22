@@ -32,7 +32,8 @@ import type { SessionManager } from "../session/session-manager";
 import type { ToolChoiceQueue } from "../session/tool-choice-queue";
 import { TaskTool } from "../task";
 import type { AgentOutputManager } from "../task/output-manager";
-import { canSpawnAtDepth, type StructuredSubagentSchemaMode } from "../task/types";
+import { type AgentDefinition, canSpawnAtDepth } from "../task/types";
+import { type StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { EventBus } from "../utils/event-bus";
 import { WebSearchTool } from "../web/search";
@@ -43,6 +44,7 @@ import { AstGrepTool } from "./ast-grep";
 import { BashTool } from "./bash";
 import { type BuiltinToolName, type HiddenToolName, normalizeToolNames } from "./builtin-names";
 import { type CheckpointState, CheckpointTool, type CompletedRewindState, RewindTool } from "./checkpoint";
+import { ContextNotesTool, NewContextTool } from "./context-notes";
 import { DebugTool } from "./debug";
 import { EvalTool } from "./eval";
 import { resolveEvalBackends } from "./eval-backends";
@@ -50,6 +52,7 @@ import { GithubTool } from "./gh";
 import { GlobTool } from "./glob";
 import { GrepTool } from "./grep";
 import { HubTool, isIrcEnabled } from "./hub";
+import { FindTool } from "./jfind";
 import { LearnTool } from "./learn";
 import { ManageSkillTool } from "./manage-skill";
 import { MemoryEditTool } from "./memory-edit";
@@ -61,7 +64,8 @@ import { ReadTool } from "./read";
 import type { PlanProposalHandler } from "./resolve";
 import { SecurityScanTool } from "./security-scan";
 import { supportsExternalThinking, ThinkTool } from "./think";
-import { type TodoPhase, TodoTool } from "./todo";
+import { type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import { TodoTool } from "./todo";
 import { WriteTool } from "./write";
 import { isMountableUnderXdev, type XdevState } from "./xdev";
 import { YieldTool } from "./yield";
@@ -69,17 +73,24 @@ import { YieldTool } from "./yield";
 export * from "../edit";
 export * from "../goals";
 export * from "../lsp";
-export * from "../session/streaming-output";
+export * from "@oh-my-pi/pi-tui/tools/streaming-output";
 export * from "../task";
 export * from "../web/search";
 export * from "./ask";
 export * from "./ast-edit";
 export * from "./ast-grep";
 export * from "./bash";
+export type {
+	BashToolDetails,
+	BashRenderArgs,
+	BashRenderContext,
+	ShellRendererConfig,
+} from "@oh-my-pi/pi-tui/tools/bash";
 export * from "./browser";
 export * from "./checkpoint";
 export * from "./computer";
 export * from "./computer/supervisor";
+export * from "./context-notes";
 export * from "./debug";
 export * from "./essential-tools";
 export * from "./eval";
@@ -89,6 +100,20 @@ export * from "./gh";
 export * from "./glob";
 export * from "./grep";
 export * from "./hub";
+export * from "./jfind";
+export type {
+	HubOp,
+	HubPeerInfo,
+	HubListStatus,
+	HubRosterCounts,
+	JobSnapshot,
+	CancelStatus,
+	CancelOutcome,
+	AgentActivitySnapshot,
+	CoordinationDetails,
+	HubDetails,
+	HubRenderArgs,
+} from "@oh-my-pi/pi-tui/tools/hub";
 export * from "./image-gen";
 export * from "./learn";
 export * from "./manage-skill";
@@ -99,12 +124,18 @@ export * from "./memory-retain";
 export * from "./read";
 export * from "./report-tool-issue";
 export * from "./resolve";
-export * from "./review";
+export type {
+	FindingPriority,
+	FindingPriorityInfo,
+	FindingDetails,
+	SubmitReviewDetails,
+} from "@oh-my-pi/pi-tui/tools/task";
 export * from "./security-scan";
 export * from "./think";
 export * from "./todo";
 export * from "./tts";
 export * from "./vibe";
+export type { VibeToolDetails } from "@oh-my-pi/pi-tui/tools/vibe";
 export * from "./write";
 export * from "./xdev";
 export * from "./yield";
@@ -173,6 +204,8 @@ export interface ToolSession {
 	fetch?: FetchImpl;
 	/** Provider credential resolver forwarded unchanged to restricted child sessions. */
 	getApiKey?: AgentOptions["getApiKey"];
+	/** Current session whose stored credential affinities should seed a child session. */
+	getCredentialSourceSessionId?: () => string | undefined;
 	/** Skip subprocess-kernel availability checks and warmup */
 	skipPythonPreflight?: boolean;
 	/** Pre-loaded context files (AGENTS.md, etc) */
@@ -261,11 +294,12 @@ export interface ToolSession {
 	getEvalSessionId?: () => string | null;
 	/** Get session file */
 	getSessionFile: () => string | null;
-	/** Owning journal; full SDK managers also supply registered identity without changing advisor-local IDs. */
-	sessionManager?: Pick<
-		SessionManager,
-		"appendCustomEntry" | "ensureOnDisk" | "flush" | "getBranch" | "getEntries"
-	> & { getSessionId?: SessionManager["getSessionId"] };
+	/**
+	 * Owning journal; full SDK managers also supply registered identity and the
+	 * cost ledger (`appendModelUsage`) without changing advisor-local IDs.
+	 */
+	sessionManager?: Pick<SessionManager, "appendCustomEntry" | "ensureOnDisk" | "flush" | "getBranch" | "getEntries"> &
+		Partial<Pick<SessionManager, "getSessionId" | "getLeafId" | "appendModelUsage">>;
 	/** Get eval kernel owner ID for session-scoped retained-kernel cleanup. */
 	getEvalKernelOwnerId?: () => string | null;
 	/** Current enabled eval prelude definitions. */
@@ -326,6 +360,8 @@ export interface ToolSession {
 	allocateOutputArtifact?: (toolType: string) => Promise<{ id?: string; path?: string }>;
 	/** Get session spawns */
 	getSessionSpawns: () => string | null;
+	/** Session-scoped agent definitions (user-tagged model pseudonyms) merged after discovered agents. */
+	getSessionAgents?: () => readonly AgentDefinition[];
 	/** Get resolved model string if explicitly set for this session */
 	getModelString?: () => string | undefined;
 	/** Get the current session model string, regardless of how it was chosen */
@@ -381,10 +417,22 @@ export interface ToolSession {
 	getTodoPhases?: () => TodoPhase[];
 	/** Replace cached todo phases for this session. */
 	setTodoPhases?: (phases: TodoPhase[]) => void;
+	/**
+	 * Record todo phases on the session branch. Direct `todo` calls persist via
+	 * their toolResult entry; callers that produce none (the eval bridge) use this
+	 * so branch rehydration agrees with the in-memory list.
+	 */
+	persistTodoPhases?: (phases: TodoPhase[]) => void;
 	/** Active workpool items whose incremental yields complete the current turn. */
 	getWorkPoolYieldItems?: () => readonly WorkPoolYieldItem[];
-	/** Replace the active workpool item contract before a pooled turn starts. */
-	setWorkPoolYieldItems?: (items: readonly WorkPoolYieldItem[]) => void;
+	/**
+	 * Trimmed text of the most recent assistant message, or `undefined` when the
+	 * turn carries no text (e.g. thinking-only). The yield tool uses it to reject
+	 * a data-less `useLastTurn` finalize that would assemble to an empty result.
+	 */
+	getLastAssistantText?: () => string | undefined;
+	/** Replace the active workpool item contract and refresh its provider-facing prompt. */
+	setWorkPoolYieldItems?: (items: readonly WorkPoolYieldItem[]) => Promise<void>;
 	/** The tool-choice queue used to force forthcoming tool invocations and carry invocation handlers. */
 	getToolChoiceQueue?(): ToolChoiceQueue;
 	/** Build a model-provider-specific ToolChoice that targets the named tool, or undefined if unsupported. */
@@ -469,9 +517,12 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	github: GithubTool.createIf,
 	glob: s => new GlobTool(s, { rootPathAlias: true }),
 	grep: s => new GrepTool(s),
+	find: s => new FindTool(s),
 	lsp: LspTool.createIf,
 	checkpoint: CheckpointTool.createIf,
 	rewind: RewindTool.createIf,
+	context_notes: ContextNotesTool.createIf,
+	new_context: NewContextTool.createIf,
 	task: s => TaskTool.create(s),
 	hub: s => new HubTool(s),
 	todo: s => new TodoTool(s),
@@ -563,6 +614,14 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	// Auto-include AST counterparts when their text-based sibling is present.
 	// Restricted callers own the active list and must not have it widened.
 	if (requestedTools && !restrictToolNames) {
+		if (
+			session.settings.get("compaction.experimentalContextManagement") &&
+			requestedTools.includes("read") &&
+			requestedTools.includes("grep")
+		) {
+			if (!requestedTools.includes("context_notes")) requestedTools.push("context_notes");
+			if (!requestedTools.includes("new_context")) requestedTools.push("new_context");
+		}
 		if (goalModeActive && !requestedTools.includes("goal")) {
 			requestedTools.push("goal");
 		}
@@ -627,6 +686,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			return (!includeYield || session.prewalkArmed === true) && session.settings.get("todo.enabled");
 		if (name === "glob") return session.settings.get("glob.enabled");
 		if (name === "grep") return session.settings.get("grep.enabled");
+		if (name === "find") return session.settings.get("find.enabled");
 		if (name === "github") return session.settings.get("github.enabled");
 		if (name === "ast_grep") return session.settings.get("astGrep.enabled");
 		if (name === "ast_edit") return session.settings.get("astEdit.enabled");
@@ -785,3 +845,24 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 
 	return tools;
 }
+
+export type { AskToolDetails, QuestionResult } from "@oh-my-pi/pi-tui/tools/ask";
+export type {
+	TodoStatus,
+	TodoOperation,
+	TodoItem,
+	TodoPhase,
+	TodoCompletionTransition,
+	TodoToolDetails,
+	CollapsedTodoSelection,
+} from "@oh-my-pi/pi-tui/tools/todo";
+export type { ThinkRenderArgs } from "@oh-my-pi/pi-tui/tools/think";
+export type { ResolutionDeviceName, ResolveDetails } from "@oh-my-pi/pi-tui/tools/resolve";
+export type {
+	GhToolDetails,
+	GhPrCheckoutSummary,
+	GhRunWatchJobDetails,
+	GhRunWatchRunDetails,
+	GhRunWatchFailedLogDetails,
+	GhRunWatchViewDetails,
+} from "@oh-my-pi/pi-tui/tools/github";

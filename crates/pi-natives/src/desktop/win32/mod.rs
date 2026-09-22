@@ -36,8 +36,9 @@ pub(crate) struct Win32Backend {
 #[cfg(target_os = "windows")]
 impl Win32Backend {
 	pub(crate) fn new(display: DisplaySelector) -> CoreResult<Self> {
-		// Initialize DPI awareness before xcap or input observes desktop geometry,
-		// keeping both APIs in the same per-monitor physical coordinate regime.
+		// Initialize DPI awareness before xcap or input observes desktop
+		// geometry, keeping both APIs in the same per-monitor physical
+		// coordinate regime.
 		let global_input = input::create_global_input()?;
 		let _ = capture::displays(&display)?;
 		Ok(Self { display, global_input, ax: Win32Ax::new() })

@@ -86,9 +86,19 @@ For a dispatch, set the agent name and task:
 
 `/model`'s Roles view can assign and persist custom role mappings such as `review`, `fast`, and `good`. Changing only the active or default session selection does not remap those roles.
 
+## User-tagged model agents
+
+Type `^` in the composer to choose a model from the same scope and ranking as the `Alt+P` session picker. Accepting a completion inserts an atomic chip showing its display name. For example, type `Have ^`, pick a model, then finish with `review this change`.
+
+On submit, each first-mentioned model receives a branch-local pseudonym (`m1`, `m2`, …). The user message carries `<model agent="m1" name="Display Name"/>`; the task description lists its provider/model selector. `task`, eval `agent()`, and `workpool()` accept that pseudonym as their `agent`. These agents use the bundled general-purpose task template, not a specialist template, and are intended only for requests explicitly naming the tagged model.
+
+Pseudonyms survive `/resume`; rewinding before a model's first mention frees its number. Repeating a selector reuses its pseudonym. Unknown selectors remain literal, as do mentions in `!`/`$` local-execution drafts. Tokens require whitespace boundaries: autocomplete adds the trailing space. When two models share a display name in one draft, the second remains a literal selector to avoid ambiguous expansion.
+
+Session definitions are appended after discovered agents, so an existing agent with the same name wins. Normal spawn restrictions and model-override precedence still apply. Synthetic prompts cannot register models.
+
 ## Watch running agents
 
-After dispatch, press `Alt+A` to open [Agent Hub](./agent-hub.md). Its live roster shows each task agent's status, current activity, model, age, and usage. Select an agent to read its transcript and steer it directly; parked agents can be revived from the same view.
+After dispatch, press `Alt+A` to open [Agent Hub](./agent-hub.md). Its live roster shows each task agent's status, current activity, model, age, and usage. Select an agent to read its transcript and steer it directly; parked agents can be revived from the same view. Enable `tui.mouse` to click live task cards and jump-list rows instead, or watch the pinned `Subagents` block above the editor.
 
 ### `vibe_spawn` tier routing
 
@@ -188,7 +198,7 @@ Lookup is exact-name linear search:
 1. atomically reloads the live session's persisted global, project, and explicit overlay settings while preserving runtime overrides
 2. resolves the omitted or explicit agent name from the parent spawn policy
 3. enforces depth, blocked-self-recursion, and parent spawn-policy guards
-4. rediscovers agents with `discoverAgents(session.cwd)` and performs exact lookup
+4. rediscovers agents with `discoverAgents(session.cwd)`, appends user-tagged session agents, and performs exact lookup
 5. checks `task.disabledAgents`
 6. resolves plan-mode restrictions, output schema, model policy, and isolation policy
 
@@ -196,7 +206,7 @@ A missing name fails preflight with `Unknown agent "...". Available: ...`; no su
 
 ### Description vs execution-time discovery
 
-`TaskTool.create()` memoizes discovery per resolved working directory when building the model-facing tool description. Execution rediscovers agents, so the runtime set can differ from the earlier description if agent or extension files changed mid-session. Blocking behavior is determined after policy resolution rather than from a stale description-time agent object.
+`TaskTool.create()` memoizes discovery per resolved working directory when building the model-facing tool description. Each description read also includes the current session's user-tagged model agents. Execution rediscovers agents and merges those session agents, so the runtime set can differ from the earlier description if agent or extension files changed mid-session. Blocking behavior is determined after policy resolution rather than from a stale description-time agent object.
 
 ## Model and structured-output precedence
 
@@ -207,6 +217,19 @@ For task dispatch, model precedence is:
 3. the parent's active model, then its configured/default model fallback
 
 Role aliases in either of the first two sources are expanded through `modelRoles`. The shared eval bridge can also supply an invocation-local model override ahead of the settings override; the task wire schema does not expose that field.
+
+Service-tier precedence is independent of model selection: an exact, case-sensitive
+`task.agentServiceTierOverrides[agentName]` entry overrides `tier.subagent`; an absent entry preserves
+the global behavior. `inherit` snapshots the parent session's live per-family tiers (including
+`/fast` changes) for the next spawn. The child session resolves a concrete value against the model
+it finally settles on — after auth fallback and after patterns only the session can resolve, such as
+extension-registered models — and populates only that model's provider family when the family
+supports the value, so same-family retry fallbacks retain the tier and cross-family fallbacks never
+inherit it. The resolved map is persisted with the child's session, even when it is empty, so a
+parked agent revived after a restart keeps its per-agent tier instead of re-deriving
+`tier.subagent`. The entry is looked up by task/eval dispatch only; Vibe workers launched through
+the same executor keep `tier.subagent`. Service tiers are configuration-only; agent frontmatter and
+the task/eval wire formats do not expose a tier field or automatic Fast policy.
 
 Runtime output schema precedence is:
 

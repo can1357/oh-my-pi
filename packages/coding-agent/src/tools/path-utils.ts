@@ -1,3 +1,11 @@
+import { extractUriScheme } from "../internal-urls/parse";
+import { type LineRange } from "@oh-my-pi/pi-tui/tools/line-ranges";
+import {
+	FILE_LINE_RANGE_RE,
+	splitPathAndSel,
+	splitInternalUrlSel,
+	isReadableUrlPath,
+} from "@oh-my-pi/pi-tui/tools/read";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -15,7 +23,8 @@ import type { Rule } from "../capability/rule";
 import type { Skill } from "../extensibility/skills";
 import type { AgentRegistry } from "../registry/agent-registry";
 import { InternalUrlRouter, type LocalProtocolOptions } from "../internal-urls";
-import { ToolAbortError, ToolError } from "./tool-errors";
+import { ToolAbortError } from "./tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
 
@@ -23,54 +32,6 @@ const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
 export function isFilesystemSourcePath(value: string): boolean {
 	return path.posix.isAbsolute(value) || path.win32.isAbsolute(value);
 }
-// A single line-range chunk: `N`, `N-M`, `N+K`, or open-ended `N-`. `..` is
-// accepted everywhere `-` is, as a forgiving alias for Rust/Python-style ranges
-// (e.g. `2724..2727` == `2724-2727`, `2724..` == `2724-`); it is normalized to
-// `-` in parseLineRangeChunk. Keep this fragment and LINE_RANGE_CHUNK_RE in sync.
-const RANGE_CHUNK_SRC = String.raw`L?\d+(?:(?:[-+]|\.\.)L?\d+|-|\.\.)?`;
-const RANGE_LIST_SRC = `${RANGE_CHUNK_SRC}(?:,${RANGE_CHUNK_SRC})*`;
-// A tail selector: `-N` reads the last N lines. Keep in sync with TAIL_SELECTOR_RE.
-const TAIL_CHUNK_SRC = String.raw`-\d+`;
-const FILE_LINE_RANGE_RE = new RegExp(`^(?:${RANGE_LIST_SRC}|${TAIL_CHUNK_SRC}|raw|conflicts|img)$`, "i");
-const FILE_LINE_RANGE_ONLY_RE = new RegExp(`^(?:${RANGE_LIST_SRC}|${TAIL_CHUNK_SRC})$`, "i");
-const FILE_RAW_ONLY_RE = /^raw$/i;
-// Permissive selector chunk for internal URLs — accepts well-formed selectors
-// plus common malformed shapes (e.g. `:-N-M`) so the read tool peels the entire
-// selector chain off before dispatching to a protocol handler.
-const INTERNAL_URL_SELECTOR_PART_RE = new RegExp(
-	String.raw`^(?:raw|conflicts|img|${RANGE_LIST_SRC}|-\d+(?:[-+]\d+)?)$`,
-	"i",
-);
-// Schemes whose host grammar is identifier-shaped, so any trailing
-// `:<selector-chunk>` is unambiguously a read-tool selector. `mcp://` is
-// excluded because mcp resource URIs may legitimately contain colons. `ssh://`
-// is included despite an optional `:port`; `splitInternalUrlSel` skips the peel
-// for an `ssh://host:port` that has no `/path`, so the port colon is never
-// mistaken for a selector (a real ssh selector trails the `/path`, e.g.
-// `ssh://h/f:1-5`).
-const INTERNAL_SCHEMES_WITH_SELECTORS: Record<string, true> = {
-	agent: true,
-	artifact: true,
-	issue: true,
-	history: true,
-	local: true,
-	memory: true,
-	omp: true,
-	pr: true,
-	rule: true,
-	security: true,
-	skill: true,
-	ssh: true,
-	vault: true,
-};
-// Schemes whose resource URIs are server-defined and may legitimately end
-// with selector-shaped tails (e.g. `:raw`, `:conflicts`, `:1-50`, `/:raw`).
-// `McpProtocolHandler` resolves by exact URI match (`r.uri === uri`), so
-// peeling syntactically can make valid resources unreachable. Keep these
-// schemes opaque; selector support for them needs a resolver-aware path that
-// tries the exact URI before interpreting any suffix as a read selector.
-const OPAQUE_RESOURCE_SCHEMES: ReadonlySet<string> = new Set(["mcp"]);
-const INTERNAL_URL_SCHEME_RE = /^([a-z][a-z0-9+.-]*):\/\//i;
 const NARROW_NO_BREAK_SPACE = "\u202F";
 const TOP_LEVEL_INTERNAL_URL_PREFIXES = [
 	"agent://",
@@ -111,6 +72,15 @@ function tryShellEscapedPath(filePath: string): string {
 function fileExists(filePath: string): boolean {
 	try {
 		fs.accessSync(filePath, fs.constants.F_OK);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+async function fileExistsAsync(filePath: string): Promise<boolean> {
+	try {
+		await fs.promises.access(filePath, fs.constants.F_OK);
 		return true;
 	} catch {
 		return false;
@@ -228,80 +198,6 @@ export function normalizeWindowsDriveAliasPath(
 	return filePath;
 }
 
-/**
- * Inclusive line range describing one selector segment (e.g. `50-100`,
- * `301-`, or `50+10`). `endLine` is `undefined` for open-ended ranges.
- */
-export interface LineRange {
-	startLine: number;
-	endLine: number | undefined;
-}
-
-const LINE_RANGE_CHUNK_RE = /^L?(\d+)(?:(\.\.|[-+])L?(\d+)?)?$/i;
-
-/** Parse a single `N`, `N-M`, `N-`, `N+K`, or `..`-aliased (`N..M`, `N..`) chunk. Throws via {@link ToolError} on invalid bounds. */
-export function parseLineRangeChunk(sel: string): LineRange | null {
-	const lineMatch = LINE_RANGE_CHUNK_RE.exec(sel);
-	if (!lineMatch) return null;
-	const rawStart = Number.parseInt(lineMatch[1]!, 10);
-	if (rawStart < 1) {
-		throw new ToolError("Line selector 0 is invalid; lines are 1-indexed. Use :1.");
-	}
-	// `..` is a forgiving alias for `-` (e.g. `2724..2727` == `2724-2727`).
-	const sep = lineMatch[2] === ".." ? "-" : lineMatch[2];
-	const rhs = lineMatch[3] ? Number.parseInt(lineMatch[3], 10) : undefined;
-	let rawEnd: number | undefined;
-	if (sep === "+") {
-		if (rhs === undefined || rhs < 1) {
-			throw new ToolError(`Invalid range ${rawStart}+${rhs ?? 0}: count must be >= 1.`);
-		}
-		rawEnd = rawStart + rhs - 1;
-	} else if (sep === "-") {
-		// `301-` is shorthand for "from 301 onward" — equivalent to bare `301`.
-		if (rhs !== undefined) {
-			if (rhs < rawStart) {
-				throw new ToolError(`Invalid range ${rawStart}-${rhs}: end must be >= start.`);
-			}
-			rawEnd = rhs;
-		}
-	}
-	return { startLine: rawStart, endLine: rawEnd };
-}
-
-/**
- * Parse a comma-separated list of line ranges (e.g. `5-16,960-973`). Returns
- * the ranges in ascending order with overlapping/adjacent ranges merged so
- * downstream consumers can stream the file in a single forward pass per range.
- */
-export function parseLineRanges(sel: string): [LineRange, ...LineRange[]] | null {
-	const chunks = sel.split(",");
-	const parsed: LineRange[] = [];
-	for (const chunk of chunks) {
-		const range = parseLineRangeChunk(chunk);
-		if (!range) return null;
-		parsed.push(range);
-	}
-	if (parsed.length === 0) return null;
-	parsed.sort((a, b) => a.startLine - b.startLine);
-
-	const merged: LineRange[] = [parsed[0]];
-	for (let i = 1; i < parsed.length; i++) {
-		const current = parsed[i];
-		const last = merged[merged.length - 1];
-		// Open-ended (endLine undefined) means "to EOF" — any later range is absorbed.
-		if (last.endLine === undefined) continue;
-		// Merge when current starts within (or immediately after) the last range.
-		if (current.startLine <= last.endLine + 1) {
-			if (current.endLine === undefined || current.endLine > last.endLine) {
-				merged[merged.length - 1] = { startLine: last.startLine, endLine: current.endLine };
-			}
-			continue;
-		}
-		merged.push(current);
-	}
-	return merged as [LineRange, ...LineRange[]];
-}
-
 const TAIL_SELECTOR_RE = /^-(\d+)$/;
 
 /**
@@ -316,27 +212,6 @@ export function parseTailCount(sel: string): number | null {
 	return count;
 }
 
-/**
- * Extract the line-range component from a read-tool selector that may also
- * carry a verbatim/index display mode (`raw`, `conflicts`) — alone or compounded
- * with a range (`raw:50-100`, `50-100:raw`). Returns the parsed ranges when the
- * selector names any, otherwise `undefined` (pure `raw`/`conflicts`/none).
- *
- * Used by content search, which honors line ranges as a match filter but has no
- * use for verbatim/conflict display modes — so those selectors are accepted and
- * treated as an unfiltered, whole-resource search rather than rejected.
- */
-export function selectorLineRanges(sel: string | undefined): [LineRange, ...LineRange[]] | undefined {
-	if (!sel) return undefined;
-	for (const chunk of sel.split(":")) {
-		const lower = chunk.toLowerCase();
-		if (lower === "raw" || lower === "conflicts") continue;
-		const ranges = parseLineRanges(chunk);
-		if (ranges) return ranges;
-	}
-	return undefined;
-}
-
 /** Return `true` when `lineNumber` (1-indexed) falls in any of the supplied ranges. */
 export function isLineInRanges(lineNumber: number, ranges: readonly LineRange[]): boolean {
 	for (const range of ranges) {
@@ -344,35 +219,6 @@ export function isLineInRanges(lineNumber: number, ranges: readonly LineRange[])
 		if (range.endLine === undefined || lineNumber <= range.endLine) return true;
 	}
 	return false;
-}
-
-export function splitPathAndSel(rawPath: string): { path: string; sel?: string } {
-	const colon = rawPath.lastIndexOf(":");
-	if (colon <= 0) return { path: rawPath };
-
-	const candidate = rawPath.slice(colon + 1);
-	if (!FILE_LINE_RANGE_RE.test(candidate)) return { path: rawPath };
-
-	let basePath = rawPath.slice(0, colon);
-	let sel = candidate;
-
-	// Allow a compound trailing selector: `path:1-50:raw`, `path:raw:1-50`, or
-	// `path:raw:-60`. The two chunks must be one line-range (or tail) plus one
-	// `raw`, in either order.
-	const innerColon = basePath.lastIndexOf(":");
-	if (innerColon > 0) {
-		const innerCandidate = basePath.slice(innerColon + 1);
-		const innerIsRaw = FILE_RAW_ONLY_RE.test(innerCandidate);
-		const outerIsRaw = FILE_RAW_ONLY_RE.test(candidate);
-		const innerIsRange = FILE_LINE_RANGE_ONLY_RE.test(innerCandidate);
-		const outerIsRange = FILE_LINE_RANGE_ONLY_RE.test(candidate);
-		if ((innerIsRaw && outerIsRange) || (innerIsRange && outerIsRaw)) {
-			sel = `${innerCandidate}:${candidate}`;
-			basePath = basePath.slice(0, innerColon);
-		}
-	}
-
-	return { path: basePath, sel };
 }
 
 /**
@@ -415,13 +261,11 @@ export async function probeLiteralPathExists(filePath: string, cwd: string): Pro
 
 /**
  * Async sibling of {@link splitPathAndSel} that prefers a literal filesystem
- * path over selector interpretation. Filenames whose tail matches the selector
- * grammar (e.g. `test:1-2`, `log:raw`) are legal on POSIX; without this the
- * strict splitter peels the tail and both `read` and `grep` refuse to open the
- * real file (issue #4618). The literal wins on a confirmed `lstat`, and also
- * on `"unknown"` (`EACCES` on a parent, transient I/O), so an unreachable
- * literal is never silently reinterpreted as `path + selector`. Only a
- * definitive `ENOENT`/`ENOTDIR` falls back to the strict split.
+ * path over selector interpretation. Selector-shaped tails may be POSIX
+ * filenames or NTFS alternate data streams, so a confirmed `lstat` always
+ * preserves the literal path. Ambiguous probe errors preserve the literal on
+ * POSIX, where colon filenames are valid, but fall back to the strict split on
+ * Windows, where only a confirmed alternate data stream can be literal.
  */
 export async function splitPathAndSelPreferringLiteral(
 	rawPath: string,
@@ -430,7 +274,7 @@ export async function splitPathAndSelPreferringLiteral(
 	const strict = splitPathAndSel(rawPath);
 	if (strict.sel === undefined) return strict;
 	const probe = await probeLiteralPathExists(rawPath, cwd);
-	return probe === "missing" ? strict : { path: rawPath };
+	return probe === "exists" || (probe === "unknown" && process.platform !== "win32") ? { path: rawPath } : strict;
 }
 
 /**
@@ -451,68 +295,14 @@ export function probeLiteralPathExistsSync(filePath: string, cwd: string): "exis
 }
 
 /**
- * Synchronous sibling of {@link splitPathAndSelPreferringLiteral}. Identical
- * literal-path precedence — a real file named `report:1-20` keeps its colon —
- * for callers that cannot await, such as the ACP event mapper's location
- * builder.
+ * Synchronous sibling of {@link splitPathAndSelPreferringLiteral}. It applies
+ * the same platform-specific handling for inconclusive literal-path probes.
  */
 export function splitPathAndSelPreferringLiteralSync(rawPath: string, cwd: string): { path: string; sel?: string } {
 	const strict = splitPathAndSel(rawPath);
 	if (strict.sel === undefined) return strict;
 	const probe = probeLiteralPathExistsSync(rawPath, cwd);
-	return probe === "missing" ? strict : { path: rawPath };
-}
-
-/**
- * Variant of {@link splitPathAndSel} for internal URLs (`scheme://...`).
- *
- * The filesystem-path splitter is intentionally conservative: it refuses to
- * peel a trailing `:<chunk>` unless that chunk matches the strict selector
- * grammar. That rule is right for filesystem paths (a file named `a:1-50` is
- * legal) but wrong for internal URLs, where any trailing `:<chunk>` after the
- * scheme is unambiguously a read-tool selector — even if malformed (e.g.
- * `artifact://3:raw:-100-5`).
- *
- * This function iteratively peels selector-shaped chunks (well-formed plus
- * common malformed shapes like `:-N-M`) so the rest of the read tool can pass a
- * clean URL to the protocol handler and surface selector errors via parseSel
- * instead of as misleading "host invalid" errors from the handler. Schemes
- * whose resource URIs may legitimately contain colons (`mcp://`) are skipped.
- *
- * Falls back to the input unchanged when nothing matches.
- */
-
-export function splitInternalUrlSel(rawPath: string): { path: string; sel?: string } {
-	const schemeMatch = rawPath.match(INTERNAL_URL_SCHEME_RE);
-	if (!schemeMatch) return { path: rawPath };
-	const scheme = schemeMatch[1].toLowerCase();
-	// Opaque schemes (mcp://, etc.) carry server-defined resource URIs that may
-	// legitimately end in selector-shaped tails. Forward verbatim — see
-	// OPAQUE_RESOURCE_SCHEMES.
-	if (OPAQUE_RESOURCE_SCHEMES.has(scheme)) return { path: rawPath };
-	if (!INTERNAL_SCHEMES_WITH_SELECTORS[scheme]) return { path: rawPath };
-
-	const schemeEnd = schemeMatch[0].length;
-	// ssh:// authority carries an optional `:port`; with no `/path` after the
-	// authority, a trailing `:NNNN` is the port, not a read selector
-	// (e.g. ssh://host:2222). Other schemes' authority-trailing selectors
-	// (artifact://5:1-50) still peel, so this guard is ssh-specific.
-	if (scheme === "ssh" && rawPath.indexOf("/", schemeEnd) === -1) {
-		return { path: rawPath };
-	}
-	let path = rawPath;
-	const chunks: string[] = [];
-	while (true) {
-		const colon = path.lastIndexOf(":");
-		// Stop before crossing into the scheme separator `://`.
-		if (colon < schemeEnd) break;
-		const tail = path.slice(colon + 1);
-		if (!INTERNAL_URL_SELECTOR_PART_RE.test(tail)) break;
-		chunks.unshift(tail);
-		path = path.slice(0, colon);
-	}
-	if (chunks.length === 0) return { path: rawPath };
-	return { path, sel: chunks.join(":") };
+	return probe === "exists" || (probe === "unknown" && process.platform !== "win32") ? { path: rawPath } : strict;
 }
 
 /**
@@ -567,7 +357,7 @@ export function isInternalUrlPath(filePath: string): boolean {
 export function resolveFileWriteApprovalTier(filePath: string): "read" | "write" {
 	const normalized = normalizeLocalScheme(expandPath(normalizeLocalScheme(filePath)));
 	if (!TOP_LEVEL_INTERNAL_URL_PREFIXES.some(prefix => normalized.startsWith(prefix))) return "write";
-	const scheme = INTERNAL_URL_SCHEME_RE.exec(normalized)?.[1]?.toLowerCase();
+	const scheme = extractUriScheme(normalized);
 	const handler = scheme ? InternalUrlRouter.instance().getHandler(scheme) : undefined;
 	return handler?.write ? "write" : "read";
 }
@@ -594,16 +384,6 @@ export function pathTargetsSsh(path: string): boolean {
  */
 export function isSshUrl(path: string): boolean {
 	return /^ssh:\/\//i.test(path.trim());
-}
-
-/**
- * True when the read tool's URL parser (`parseReadUrlTarget` in fetch.ts) would
- * recognize this path as a readable external URL: a strict `http(s)://`, a
- * collapsed `http(s):/host` (Node path normalization folds `//` → `/`), or a
- * scheme-less `www.` spelling. Keep in sync with `parseReadUrlTarget`.
- */
-export function isReadableUrlPath(value: string): boolean {
-	return /^https?:\/\/?/i.test(value) || /^www\./i.test(value);
 }
 
 /**
@@ -838,39 +618,6 @@ export function normalizePathLikeInput(input: string): string {
 	return stripOuterDoubleQuotes(input.trim());
 }
 
-/**
- * Parse a JSON-encoded array of path strings (e.g. `'["a.ts","b.ts"]'`).
- * Returns `null` when the input is not a bracketed JSON string array, so the
- * caller can fall back to treating the input as a single literal path.
- */
-function parseStringEncodedPathArray(input: string): string[] | null {
-	const trimmed = input.trim();
-	if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) return null;
-
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(trimmed);
-	} catch {
-		return null;
-	}
-
-	if (!Array.isArray(parsed) || parsed.some(entry => typeof entry !== "string")) {
-		return null;
-	}
-	return parsed;
-}
-
-/**
- * Normalize a path argument that may arrive as a single string, a JSON-encoded
- * string array (`'["a.ts"]'`), or an actual array into a flat `string[]`.
- * Delimited single strings (`"a.ts b.ts"`) are left for
- * {@link expandDelimitedPathEntries} to split.
- */
-export function toPathList(input: string | string[] | undefined): string[] {
-	if (typeof input === "string") return parseStringEncodedPathArray(input) ?? [input];
-	return input ?? [];
-}
-
 const GLOB_PATH_CHARS = ["*", "?", "[", "{"] as const;
 
 export function hasGlobPathChars(filePath: string): boolean {
@@ -1008,13 +755,17 @@ export async function splitDelimitedPathEntry(
 		return parts?.every(options.routedUrlPredicate) ? parts : null;
 	}
 	if (isInternalUrlPath(normalizedEntry)) return null;
-	// A real POSIX file may contain the delimiter and a selector-shaped tail
+	// A real POSIX file may contain a delimiter and a selector-shaped tail
 	// (`a;b:1-2`, `a b:1-2`). Preserve the raw entry whenever the full literal
 	// resolves — or is only ambiguous — so downstream literal-preferring
-	// splitters see it before delimiter expansion peels or splits (issue #4618
-	// reviewer feedback: delimited expansion ran before the literal check).
+	// splitters see it before delimiter expansion peels or splits (issue #4618).
 	if ((await probeLiteralPathExists(normalizedEntry, cwd)) !== "missing") return null;
-	const peeledEntry = splitPathAndSel(normalizedEntry).path;
+	const selectorSplit = splitPathAndSel(normalizedEntry);
+	const peeledEntry = selectorSplit.path;
+	// A range may instead target a literal file whose name combines delimiters
+	// with glob syntax (`a;b[1].md:1-2`). Check the exact peeled path before the
+	// search splitter interprets those characters and semicolon fan-out wins.
+	if (selectorSplit.sel !== undefined && (await probeLiteralPathExists(peeledEntry, cwd)) !== "missing") return null;
 	if (!hasGlobPathChars(peeledEntry) && (await delimitedPathPartResolves(normalizedEntry, cwd, splitter))) {
 		return null;
 	}
@@ -1186,6 +937,15 @@ function buildBraceUnion(patterns: string[]): string | undefined {
 	return `{${uniquePatterns.join(",")}}`;
 }
 
+// Comparison key for deciding whether two absolute paths denote the same search
+// scope. A Windows drive letter is case-insensitive by OS guarantee, so `c:` and
+// `C:` unify; every other component is compared exactly. Blanket-lowercasing
+// would conflate distinct entries under a per-directory case-sensitive dir
+// (FILE_CASE_SENSITIVE_DIR / WSL), collapsing `C:\repo\src` with `C:\repo\Src`.
+function pathComparisonKey(component: string): string {
+	return process.platform === "win32" ? component.replace(/^[a-zA-Z]:/, drive => drive.toLowerCase()) : component;
+}
+
 function findCommonBasePath(paths: string[]): string {
 	if (paths.length === 0) return ".";
 	let commonParts = path.resolve(paths[0]).split(path.sep);
@@ -1193,7 +953,10 @@ function findCommonBasePath(paths: string[]): string {
 		const candidateParts = path.resolve(candidatePath).split(path.sep);
 		let sharedCount = 0;
 		const maxShared = Math.min(commonParts.length, candidateParts.length);
-		while (sharedCount < maxShared && commonParts[sharedCount] === candidateParts[sharedCount]) {
+		while (
+			sharedCount < maxShared &&
+			pathComparisonKey(commonParts[sharedCount]!) === pathComparisonKey(candidateParts[sharedCount]!)
+		) {
 			sharedCount += 1;
 		}
 		commonParts = commonParts.slice(0, sharedCount);
@@ -1258,7 +1021,16 @@ async function resolveSearchPathItems(
 	// disjoint trees → `/`), a collapsed walk traverses every unrelated sibling
 	// under it — fan out into per-item targets so each scan stays bounded to a
 	// requested path.
-	const commonIsRequestedScope = parsedItems.some(item => item.absoluteBasePath === commonBasePath);
+	// resolveToCwd returns absolute inputs verbatim (so the kernel, not a lexical
+	// pass, resolves `..` across symlinks for real filesystem operations), while
+	// findCommonBasePath and path.relative compare lexically via path.resolve. To
+	// decide overlap on the same footing, canonicalize both sides here — this key
+	// never reaches the filesystem, so lexical `..`/separator collapse is safe.
+	// pathComparisonKey folds only the Windows drive letter, so a differently
+	// cased drive cannot force a fan-out while distinct components stay distinct.
+	const commonIsRequestedScope = parsedItems.some(
+		item => pathComparisonKey(path.resolve(item.absoluteBasePath)) === pathComparisonKey(commonBasePath),
+	);
 	// Walkers prune `.git` unconditionally and honor gitignore, so a plain-file
 	// item folded into a directory walk's glob union (`.` + `.git/config`) can
 	// silently never match. Callers that dedupe overlapping results opt in via
@@ -1378,6 +1150,57 @@ export async function partitionExistingPaths(
 		else missing.push(entry.item);
 	}
 	return { valid, missing };
+}
+
+/**
+ * Async variant of {@link resolveReadPath} for async tool paths: identical
+ * variant order and winner semantics, but non-blocking probes. The sync
+ * variant stays for genuinely synchronous contexts (renderers, ACP mapper).
+ *
+ * The macOS-only filename variants (NFD storage, curly quotes, AM/PM narrow
+ * spaces) run on every platform, exactly like the sync resolver: a file
+ * copied from macOS keeps its NFD/curly bytes wherever it lands, so the
+ * normalization must not be darwin-gated. The wins here are non-blocking
+ * probes, not fewer probes.
+ */
+export async function resolveReadPathAsync(filePath: string, cwd: string): Promise<string> {
+	const resolved = resolveToCwd(filePath, cwd);
+	const shellEscapedVariant = tryShellEscapedPath(resolved);
+	const baseCandidates = shellEscapedVariant !== resolved ? [resolved, shellEscapedVariant] : [resolved];
+
+	for (const baseCandidate of baseCandidates) {
+		if (await fileExistsAsync(baseCandidate)) {
+			return baseCandidate;
+		}
+	}
+
+	for (const baseCandidate of baseCandidates) {
+		// Try macOS AM/PM variant (narrow no-break space before AM/PM)
+		const amPmVariant = tryMacOSScreenshotPath(baseCandidate);
+		if (amPmVariant !== baseCandidate && (await fileExistsAsync(amPmVariant))) {
+			return amPmVariant;
+		}
+
+		// Try NFD variant (macOS stores filenames in NFD form)
+		const nfdVariant = tryNFDVariant(baseCandidate);
+		if (nfdVariant !== baseCandidate && (await fileExistsAsync(nfdVariant))) {
+			return nfdVariant;
+		}
+
+		// Try curly quote variant (macOS uses U+2019 in screenshot names)
+		const curlyVariant = tryCurlyQuoteVariant(baseCandidate);
+		if (curlyVariant !== baseCandidate && (await fileExistsAsync(curlyVariant))) {
+			return curlyVariant;
+		}
+
+		// Try combined NFD + curly quote (for French macOS screenshots like "Capture d'écran")
+		const nfdCurlyVariant = tryCurlyQuoteVariant(nfdVariant);
+		if (nfdCurlyVariant !== baseCandidate && (await fileExistsAsync(nfdCurlyVariant))) {
+			return nfdCurlyVariant;
+		}
+	}
+
+	return resolved;
 }
 
 export function resolveReadPath(filePath: string, cwd: string): string {

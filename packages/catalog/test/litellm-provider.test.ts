@@ -7,6 +7,7 @@ import {
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { Api, FetchImpl, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import * as logger from "@oh-my-pi/pi-utils/logger";
+import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 
 const ORIGINAL_LITELLM_BASE_URL = Bun.env.LITELLM_BASE_URL;
 const MODELS_DEV_URL = "https://catalog.stencil.so/models.json.zstd";
@@ -114,6 +115,52 @@ function makeCollisionFetchMock(): FetchImpl {
 	}) as FetchImpl;
 }
 
+function makeClinePassCollisionFetchMock(): FetchImpl {
+	return vi.fn(async (input: string | URL | Request) => {
+		const url = inputUrl(input);
+		if (url === MODELS_DEV_URL) {
+			return Response.json({
+				"cline-pass": {
+					models: {
+						"cline-pass/glm-5.3-flash": {
+							id: "cline-pass/glm-5.3-flash",
+							name: "cline-pass/glm-5.3-flash",
+							tool_call: true,
+							reasoning: true,
+							limit: { context: 1_000_000, output: 131_072 },
+							cost: { input: 0.15, output: 0.5, cache_read: 0.03 },
+						},
+					},
+				},
+				zai: {
+					models: {
+						"glm-5.3-flash": {
+							id: "glm-5.3-flash",
+							name: "GLM-5.3-Flash",
+							tool_call: true,
+							reasoning: true,
+							limit: { context: 1_000_000, output: 131_072 },
+							cost: { input: 0.075, output: 0.25, cache_read: 0.015 },
+						},
+					},
+				},
+			});
+		}
+		if (url === "http://primary:4000/model_group/info") {
+			return Response.json({
+				data: [
+					{
+						model_group: "glm-5.3-flash",
+						model_name: "glm-5.3-flash",
+						litellm_params: { model: "openrouter/z-ai/glm-5.3-flash" },
+					},
+				],
+			});
+		}
+		return new Response("Not found", { status: 404 });
+	}) as FetchImpl;
+}
+
 afterEach(() => {
 	restoreLiteLLMBaseUrl();
 	vi.restoreAllMocks();
@@ -131,7 +178,7 @@ describe("LiteLLM provider discovery", () => {
 		const models = await options.fetchDynamicModels?.();
 
 		expect(options.cacheProviderId).toBe(
-			`litellm:rich-v8:${Bun.hash("http://litellm.example:4100/v1").toString(36)}`,
+			`litellm:rich-v11:${Bun.hash("http://litellm.example:4100/v1").toString(36)}`,
 		);
 		expect(fetchMock).toHaveBeenCalledTimes(6);
 		expect(models).toHaveLength(1);
@@ -155,7 +202,7 @@ describe("LiteLLM provider discovery", () => {
 		const models = await options.fetchDynamicModels?.();
 
 		expect(options.cacheProviderId).toBe(
-			`litellm:rich-v8:${Bun.hash("http://litellm-config.example:4200/v1/").toString(36)}`,
+			`litellm:rich-v11:${Bun.hash("http://litellm-config.example:4200/v1/").toString(36)}`,
 		);
 		expect(fetchMock).toHaveBeenCalledTimes(6);
 		expect(models).toHaveLength(1);
@@ -184,6 +231,28 @@ describe("LiteLLM provider discovery", () => {
 			cost: {
 				input: 1,
 				output: 2,
+			},
+		});
+	});
+
+	test("does not inherit ClinePass metadata through a colliding bare model id (#10932)", async () => {
+		const options = litellmModelManagerOptions({
+			apiKey: "sk-litellm-test",
+			baseUrl: "http://primary:4000/v1",
+			fetch: makeClinePassCollisionFetchMock(),
+		});
+
+		const models = await options.fetchDynamicModels?.();
+
+		expect(models).toHaveLength(1);
+		expect(models?.[0]).toMatchObject({
+			id: "glm-5.3-flash",
+			name: "GLM-5.3-Flash",
+			provider: "litellm",
+			cost: {
+				input: 0.075,
+				output: 0.25,
+				cacheRead: 0.015,
 			},
 		});
 	});
@@ -413,6 +482,121 @@ describe("LiteLLM provider discovery", () => {
 			},
 			supportsTools: true,
 		});
+	});
+
+	test("filters only known non-conversational modes from rich discovery", async () => {
+		const fetchMock = vi.fn(async (input: string | URL | Request) => {
+			const url = inputUrl(input);
+			if (url === "http://primary:4000/model_group/info") {
+				return Response.json({
+					data: [
+						{ model_group: "drop-audio-speech", mode: "audio_speech", supports_vision: false },
+						{
+							model_group: "drop-audio-transcription",
+							model_info: { mode: "audio_transcription", supports_vision: false },
+						},
+						{ model_group: "drop-batch", mode: "batch", supports_vision: false },
+						{ model_group: "drop-embedding", mode: "embedding", supports_vision: false },
+						{ model_group: "drop-guardrail", mode: "guardrail", supports_vision: false },
+						{ model_group: "drop-image-edit", mode: "image_edit", supports_vision: false },
+						{ model_group: "drop-image-generation", mode: "image_generation", supports_vision: false },
+						{ model_group: "drop-moderation", mode: "moderation", supports_vision: false },
+						{ model_group: "drop-ocr", mode: "ocr", supports_vision: false },
+						{ model_group: "drop-rerank", mode: "rerank", supports_vision: false },
+						{ model_group: "drop-search", mode: "search", supports_vision: false },
+						{ model_group: "drop-vector-store", mode: "vector_store", supports_vision: false },
+						{ model_group: "drop-video-generation", mode: "video_generation", supports_vision: false },
+						{ model_group: "keep-chat", mode: "chat", supports_vision: false },
+						{ model_group: "keep-completion", mode: "completion", supports_vision: false },
+						{ model_group: "keep-realtime", mode: "realtime", supports_vision: false },
+						{ model_group: "keep-responses", mode: "responses", supports_vision: false },
+						{ model_group: "keep-null", mode: null, supports_vision: false },
+						{ model_group: "keep-missing", supports_vision: false },
+						{ model_group: "keep-unknown", mode: "future_mode", supports_vision: false },
+						{ model_group: "keep-malformed", mode: { unexpected: true }, supports_vision: false },
+					],
+				});
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		}) as FetchImpl;
+
+		const models = await fetchLiteLLMRichModels({
+			api: "openai-completions",
+			provider: "litellm",
+			baseUrl: "http://primary:4000/v1",
+			fetch: fetchMock,
+		});
+
+		expect(models?.map(model => model.id)).toEqual([
+			"keep-chat",
+			"keep-completion",
+			"keep-malformed",
+			"keep-missing",
+			"keep-null",
+			"keep-realtime",
+			"keep-responses",
+			"keep-unknown",
+		]);
+	});
+
+	test("does not reintroduce a non-conversational model from later rich metadata", async () => {
+		const calls: string[] = [];
+		const fetchMock = vi.fn(async (input: string | URL | Request) => {
+			const url = inputUrl(input);
+			calls.push(url);
+			if (url === "http://primary:4000/model_group/info") {
+				return Response.json({ data: [{ model_group: "shared-model", mode: "embedding" }] });
+			}
+			if (url === "http://primary:4000/v2/model/info") {
+				return Response.json({
+					data: [
+						{ model_name: "shared-model", model_info: { supports_vision: false } },
+						{ model_name: "keep-chat", model_info: { mode: "chat", supports_vision: false } },
+					],
+				});
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		}) as FetchImpl;
+
+		const models = await fetchLiteLLMRichModels({
+			api: "openai-completions",
+			provider: "litellm",
+			baseUrl: "http://primary:4000/v1",
+			fetch: fetchMock,
+		});
+
+		expect(calls).toEqual(["http://primary:4000/model_group/info", "http://primary:4000/v2/model/info"]);
+		expect(models?.map(model => model.id)).toEqual(["keep-chat"]);
+	});
+
+	test("does not fall back when rich discovery contains only non-conversational models", async () => {
+		const calls: string[] = [];
+		const fetchMock = vi.fn(async (input: string | URL | Request) => {
+			const url = inputUrl(input);
+			calls.push(url);
+			if (url === MODELS_DEV_URL) {
+				return Response.json({});
+			}
+			if (url === "http://primary:4000/model_group/info") {
+				return Response.json({ data: [{ model_group: "embedding-only", mode: "embedding" }] });
+			}
+			if (
+				url === "http://primary:4000/v2/model/info" ||
+				url === "http://primary:4000/model/info" ||
+				url === "http://primary:4000/v1/model/info"
+			) {
+				return new Response("Not Found", { status: 404 });
+			}
+			throw new Error(`/v1/models must not reintroduce the excluded model: ${url}`);
+		}) as FetchImpl;
+
+		const models = await litellmModelManagerOptions({
+			baseUrl: "http://primary:4000/v1",
+			fetch: fetchMock,
+		}).fetchDynamicModels?.();
+
+		expect(models).toEqual([]);
+		expect(calls).not.toContain("http://primary:4000/v1/models");
 	});
 
 	test("warns once when forbidden rich metadata forces /v1/models fallback", async () => {
@@ -658,6 +842,46 @@ describe("LiteLLM provider discovery", () => {
 			});
 		},
 	);
+
+	test("ignores excluded modes on sentinel placeholders before /v1/models fallback", async () => {
+		const calls: string[] = [];
+		const fetchMock = vi.fn(async (input: string | URL | Request) => {
+			const url = inputUrl(input);
+			calls.push(url);
+			if (url === MODELS_DEV_URL) {
+				return Response.json({});
+			}
+			if (url === "http://primary:4000/model_group/info") {
+				return Response.json({
+					data: [
+						{
+							...ALL_TEAM_MODELS_PLACEHOLDER,
+							model_info: { ...ALL_TEAM_MODELS_PLACEHOLDER.model_info, mode: "embedding" },
+						},
+					],
+				});
+			}
+			if (
+				url === "http://primary:4000/v2/model/info" ||
+				url === "http://primary:4000/model/info" ||
+				url === "http://primary:4000/v1/model/info"
+			) {
+				return new Response("Not Found", { status: 404 });
+			}
+			if (url === "http://primary:4000/v1/models") {
+				return Response.json({ data: [{ id: "fallback-chat", mode: "chat" }] });
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		}) as FetchImpl;
+
+		const models = await litellmModelManagerOptions({
+			baseUrl: "http://primary:4000/v1",
+			fetch: fetchMock,
+		}).fetchDynamicModels?.();
+
+		expect(calls).toContain("http://primary:4000/v1/models");
+		expect(models?.map(model => model.id)).toEqual(["fallback-chat"]);
+	});
 
 	test("filters all-team-models placeholder from mixed model_group info", async () => {
 		const calls: string[] = [];
@@ -1203,6 +1427,67 @@ describe("LiteLLM provider discovery", () => {
 		});
 	});
 
+	test("filters known non-conversational modes from the built-in /v1/models fallback", async () => {
+		const fetchMock = vi.fn(async (input: string | URL | Request) => {
+			const url = inputUrl(input);
+			if (url === MODELS_DEV_URL) {
+				return Response.json({});
+			}
+			if (
+				url === "http://fallback:4000/model_group/info" ||
+				url === "http://fallback:4000/v2/model/info" ||
+				url === "http://fallback:4000/model/info" ||
+				url === "http://fallback:4000/v1/model/info"
+			) {
+				return new Response("Not Found", { status: 404 });
+			}
+			if (url === "http://fallback:4000/v1/models") {
+				return Response.json({
+					data: [
+						{ id: "drop-audio-speech", mode: "audio_speech" },
+						{ id: "drop-audio-transcription", mode: "audio_transcription" },
+						{ id: "drop-batch", mode: "batch" },
+						{ id: "drop-embedding", mode: "embedding" },
+						{ id: "drop-guardrail", mode: "guardrail" },
+						{ id: "drop-image-edit", mode: "image_edit" },
+						{ id: "drop-image-generation", mode: "image_generation" },
+						{ id: "drop-moderation", mode: "moderation" },
+						{ id: "drop-ocr", mode: "ocr" },
+						{ id: "drop-rerank", mode: "rerank" },
+						{ id: "drop-search", mode: "search" },
+						{ id: "drop-vector-store", mode: "vector_store" },
+						{ id: "drop-video-generation", mode: "video_generation" },
+						{ id: "keep-chat", mode: "chat" },
+						{ id: "keep-completion", mode: "completion" },
+						{ id: "keep-realtime", mode: "realtime" },
+						{ id: "keep-responses", mode: "responses" },
+						{ id: "keep-null", mode: null },
+						{ id: "keep-missing" },
+						{ id: "keep-unknown", mode: "future_mode" },
+						{ id: "keep-malformed", mode: ["embedding"] },
+					],
+				});
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		}) as FetchImpl;
+
+		const models = await litellmModelManagerOptions({
+			baseUrl: "http://fallback:4000/v1",
+			fetch: fetchMock,
+		}).fetchDynamicModels?.();
+
+		expect(models?.map(model => model.id)).toEqual([
+			"keep-chat",
+			"keep-completion",
+			"keep-malformed",
+			"keep-missing",
+			"keep-null",
+			"keep-realtime",
+			"keep-responses",
+			"keep-unknown",
+		]);
+	});
+
 	test("enriches LiteLLM /v1/models fallback entries missing from stencil.so with bundled reasoning metadata", async () => {
 		const calls: string[] = [];
 		const fetchMock = vi.fn(async (input: string | URL | Request) => {
@@ -1249,5 +1534,112 @@ describe("LiteLLM provider discovery", () => {
 				},
 			},
 		});
+	});
+});
+
+describe("LiteLLM declared model capabilities", () => {
+	// The deployment is the only party that knows what its aliases resolve to
+	// and what they accept, and it reports that through more than one management
+	// endpoint. Its declarations therefore have to survive both the compat merge
+	// and the class-wide DeepSeek guard (`classes/deepseek.kdl`), which keys on
+	// the model id alone (issues #11602, #11982).
+	const limits = { max_input_tokens: 1_048_576, max_output_tokens: 384_000, supports_reasoning: true };
+	const stripOf = (spec: ModelSpec<Api> | undefined) =>
+		(spec?.compat as { stripImageInput?: boolean } | undefined)?.stripImageInput;
+	const effortOf = (spec: ModelSpec<Api> | undefined) =>
+		(spec?.compat as { supportsReasoningEffort?: boolean } | undefined)?.supportsReasoningEffort;
+	const richFetch = (
+		groupInfo: Record<string, unknown>,
+		modelInfo: Record<string, unknown>,
+		reference: Record<string, unknown> = {},
+	): FetchImpl =>
+		vi.fn(async (input: string | URL | Request) => {
+			const url = inputUrl(input);
+			if (url === MODELS_DEV_URL) return Response.json(reference);
+			if (url.endsWith("/model_group/info")) {
+				return Response.json({ data: [{ model_name: "deepseek-v4.1-flash", model_info: groupInfo }] });
+			}
+			if (url.endsWith("/model/info")) {
+				return Response.json({ data: [{ model_name: "deepseek-v4.1-flash", model_info: modelInfo }] });
+			}
+			return new Response("{}", { status: 404 });
+		}) as FetchImpl;
+	const discover = async (fetchImpl: FetchImpl) => {
+		const options = litellmModelManagerOptions({
+			apiKey: "sk-rich",
+			baseUrl: "http://primary:4000/v1",
+			fetch: fetchImpl,
+		});
+		const specs = await options.fetchDynamicModels?.();
+		return specs?.find(model => model.id === "deepseek-v4.1-flash");
+	};
+
+	test("keeps the deployment's image input when a later endpoint declares it", async () => {
+		// `/model_group/info` establishes the row without a vision verdict, so
+		// discovery continues to `/model/info`; a management endpoint enriches the
+		// row instead of retracting the axes the other one did not report.
+		const spec = await discover(richFetch(limits, { ...limits, supports_vision: true }));
+		expect(spec).toBeDefined();
+
+		expect(stripOf(spec)).toBe(false);
+		const model = buildModel(spec as ModelSpec<"openai-completions">);
+		expect(model.input).toContain("image");
+		expect(sendsImageInputOnWire(model)).toBe(true);
+	});
+
+	test("still strips a group the deployment declares text-only", async () => {
+		const spec = await discover(richFetch(limits, { ...limits, supports_vision: false }));
+		expect(stripOf(spec)).toBeUndefined();
+
+		const model = buildModel(spec as ModelSpec<"openai-completions">);
+		expect(sendsImageInputOnWire(model)).toBe(false);
+	});
+
+	test("keeps the reported params list's verdict over a reference fallback", async () => {
+		// `supportsReasoningEffort` has two sources: the endpoint's own
+		// `supported_openai_params` list and the models.dev reference it falls back
+		// to. The deepseek descriptor carries `supportsReasoningEffort: true`, so an
+		// endpoint with no list answers from the reference — and that inferred value
+		// must not override the verdict an earlier endpoint reported by omitting
+		// `reasoning_effort`, or a reasoning request would send the unsupported field.
+		const reference = {
+			deepseek: {
+				models: {
+					"deepseek-v4.1-flash": {
+						name: "DeepSeek V4.1 Flash",
+						tool_call: true,
+						reasoning: true,
+						limit: { context: 1_000_000, output: 384_000 },
+					},
+				},
+			},
+		};
+		const spec = await discover(richFetch({ ...limits, supported_openai_params: ["tools"] }, limits, reference));
+
+		expect(effortOf(spec)).toBe(false);
+	});
+
+	test("takes the reported params list's verdict when a later endpoint reports one", async () => {
+		const reference = {
+			deepseek: {
+				models: {
+					"deepseek-v4.1-flash": {
+						name: "DeepSeek V4.1 Flash",
+						tool_call: true,
+						reasoning: true,
+						limit: { context: 1_000_000, output: 384_000 },
+					},
+				},
+			},
+		};
+		const spec = await discover(
+			richFetch(
+				{ ...limits, supported_openai_params: ["tools"] },
+				{ ...limits, supported_openai_params: ["reasoning_effort"] },
+				reference,
+			),
+		);
+
+		expect(effortOf(spec)).toBe(true);
 	});
 });

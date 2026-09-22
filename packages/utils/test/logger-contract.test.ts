@@ -48,6 +48,9 @@ async function runScenario(scenario: string): Promise<ScenarioResult> {
 			env: {
 				...process.env,
 				HOME: primaryDir,
+				// os.homedir() on Windows reads USERPROFILE, not HOME: without
+				// this the default-file scenario logs into the real profile.
+				USERPROFILE: primaryDir,
 				PI_CONFIG_DIR: ".omp",
 				OMP_PROFILE: "",
 				PI_PROFILE: "",

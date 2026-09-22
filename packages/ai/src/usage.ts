@@ -54,6 +54,8 @@ export interface UsageScope {
 	tier?: string;
 	windowId?: string;
 	shared?: boolean;
+	/** Stable identity shared by routing-specific copies of one upstream quota. */
+	sharedGroup?: string;
 }
 
 /** Normalized limit entry for a single window or quota bucket. */
@@ -271,6 +273,7 @@ export const usageScopeSchema = type({
 	"tier?": "string",
 	"windowId?": "string",
 	"shared?": "boolean",
+	"sharedGroup?": "string",
 });
 
 export const usageLimitSchema = type({
@@ -353,7 +356,11 @@ export interface UsageProvider {
 	id: Provider;
 	fetchUsage(params: UsageFetchParams, ctx: UsageFetchContext): Promise<UsageReport | null>;
 	/** Parse provider rate-limit response headers (lowercased keys) into a usage report, if supported. */
-	parseRateLimitHeaders?(headers: Record<string, string>, now?: number): UsageReport | null;
+	parseRateLimitHeaders?(
+		headers: Record<string, string>,
+		now?: number,
+		context?: { responseStatus?: number },
+	): UsageReport | null;
 	supports?(params: UsageFetchParams): boolean;
 	/** True when fetchUsage contacts upstream and can authenticate the credential for health checks. */
 	validatesCredentials?: boolean;

@@ -1,10 +1,35 @@
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import type { Model } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { BlockAccumulator, SpeechEnhancer } from "@oh-my-pi/pi-coding-agent/tts/speech-enhancer";
+
+const authStorages: AuthStorage[] = [];
+const modelConfigDirs: string[] = [];
+
+async function createRegistry(settings: Settings, models: Model[]): Promise<ModelRegistry> {
+	const authStorage = await AuthStorage.create(":memory:");
+	authStorages.push(authStorage);
+	for (const model of models) {
+		authStorage.setRuntimeApiKey(model.provider, model.provider === "local" ? "local-inference" : "test-key");
+	}
+	const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-speech-enhancer-"));
+	modelConfigDirs.push(configDir);
+	const registry = new ModelRegistry(authStorage, path.join(configDir, "models.yml"), { settings });
+	vi.spyOn(registry, "getAvailable").mockReturnValue(models);
+	return registry;
+}
 
 afterEach(() => {
 	vi.restoreAllMocks();
+	for (const authStorage of authStorages.splice(0)) authStorage.close();
+	for (const configDir of modelConfigDirs.splice(0)) fs.rmSync(configDir, { recursive: true, force: true });
 });
 
 describe("SpeechEnhancer rewriting", () => {
@@ -12,22 +37,8 @@ describe("SpeechEnhancer rewriting", () => {
 		const baseModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!baseModel) throw new Error("Expected bundled Claude Sonnet 4.5 model");
 		const model = { ...baseModel, reasoning: false };
-		const settings = {
-			get() {
-				return undefined;
-			},
-			getModelRole(role: string) {
-				return role === "tiny" ? `${model.provider}/${model.id}` : undefined;
-			},
-			getStorage() {
-				return undefined;
-			},
-		} as never;
-		const registry = {
-			getAvailable: () => [model],
-			getApiKey: async () => "test-key",
-			resolver: () => async () => "test-key",
-		} as never;
+		const settings = Settings.isolated({ modelRoles: { tiny: `${model.provider}/${model.id}` } });
+		const registry = await createRegistry(settings, [model]);
 		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
 			stopReason: "stop",
 			content: [{ type: "text", text: "Spoken text" }],
@@ -42,6 +53,26 @@ describe("SpeechEnhancer rewriting", () => {
 
 		expect(rewritten).toBe("Spoken text");
 		expect(options).toMatchObject({ disableReasoning: true, maxTokens: 1536 });
+	});
+
+	it("selects an available local-inference tiny model", async () => {
+		const localModel = getBundledModel("local", "lfm2.5-230m");
+		if (!localModel) throw new Error("Expected bundled local tiny model");
+		const paidModel = getBundledModel("anthropic", "claude-haiku-4-5");
+		if (!paidModel) throw new Error("Expected bundled Claude Haiku 4.5 model");
+		const settings = Settings.isolated({ modelRoles: { tiny: `${localModel.provider}/${localModel.id}` } });
+		const registry = await createRegistry(settings, [localModel, paidModel]);
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "Local spoken text" }],
+		} as never);
+
+		const rewritten = await new SpeechEnhancer({ settings, registry, sessionId: "session-local" }).rewrite(
+			"**Local spoken text**",
+		);
+
+		expect(rewritten).toBe("Local spoken text");
+		expect(completeSimpleMock.mock.calls[0]?.[0]).toBe(localModel);
 	});
 });
 

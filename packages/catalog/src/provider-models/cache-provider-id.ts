@@ -1,4 +1,6 @@
+import { CHARM_HYPER_API_BASE_URL, normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
 import { PERSONAL_GITHUB_COPILOT_BASE_URL } from "../wire/github-copilot";
+import { normalizeSingularityApiBaseUrl } from "../wire/singularityapi";
 
 export interface ModelCacheProviderIdOptions {
 	apiKey?: string;
@@ -10,6 +12,10 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	"opencode-zen": true,
 	"github-copilot": true,
 	"muse-code": true,
+	// The lane roster is issued per key, so the namespace must be resolved with
+	// the credential (`hydrateCredentialScopedModelCaches`) rather than from the
+	// synchronous, credential-less startup read.
+	singularityapi: true,
 };
 
 /** Whether a provider's model-cache namespace requires its resolved credential. */
@@ -19,6 +25,8 @@ export function isCredentialScopedModelCacheProvider(providerId: string): boolea
 
 export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | undefined {
 	switch (providerId) {
+		case "charm-hyper":
+			return CHARM_HYPER_API_BASE_URL;
 		case "meta":
 		case "muse-code":
 			return "https://api.meta.ai/v1";
@@ -62,18 +70,61 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// carry `requestModelId: *-low`, which the Start plan refuses; refetch
 			// so the collapsed default is re-pointed to `-medium` (issue #9478).
 			return "cursor:default-effort-v4";
+		case "charm-hyper": {
+			// Discovery is authoritative for this gateway, so a warm cache is served
+			// for its full TTL without re-probing: the namespace must follow the
+			// configured endpoint, or a self-hosted proxy keeps serving the canonical
+			// host's roster, capabilities and tariffs until expiry.
+			//
+			// Endpoint-only scope is deliberate. `/v1/models` is public here, so the
+			// roster does not vary by key, and `charm-hyper` is absent from
+			// CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS — `ModelRegistry` resolves this
+			// namespace with no credential at all, so hashing one would split it
+			// against the namespace discovery computes and miss forever.
+			//
+			// Normalized through the shared helper because the registry passes the
+			// raw configured value while `charmHyperModelManagerOptions` passes a
+			// `/v1`-suffixed one; both must land on one namespace.
+			return `charm-hyper:models-v1:${Bun.hash(normalizeCharmHyperBaseUrl(options.baseUrl)).toString(36)}`;
+		}
 		case "muse-code": {
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
 			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
 			return `muse-code:models-v1:${Bun.hash(scope).toString(36)}`;
 		}
+		case "singularityapi": {
+			// The roster is lane-scoped: one key sees only its reserved lanes, and a
+			// configured proxy publishes its own. Discovery is authoritative, so a
+			// shared namespace would serve the previous key's lanes for the full
+			// 24h TTL — including ids the current key cannot call. Hashing the pair
+			// means switching either re-runs discovery instead.
+			//
+			// Both call paths must land on one namespace: `ModelRegistry` resolves
+			// this provider through the credential-scoped hydration pass (it is in
+			// CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS), while discovery hashes the
+			// `/v1`-suffixed endpoint `singularityApiModelManagerOptions` passes —
+			// which is why both normalize through `normalizeSingularityApiBaseUrl`.
+			const baseUrl = normalizeSingularityApiBaseUrl(options.baseUrl);
+			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
+			return `singularityapi:models-v1:${Bun.hash(scope).toString(36)}`;
+		}
 		case "litellm": {
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
-			// rich-v8 invalidates rows whose `compatConfig` retained a colliding
-			// bundled model's provider-specific transport (e.g. Fireworks
-			// `wireModelIdMode`) before that leak was fixed (issue #9938).
-			return `litellm:rich-v8:${Bun.hash(baseUrl).toString(36)}`;
+			// rich-v11 invalidates rows that inherited ClinePass gateway metadata
+			// through generic models.dev bare-id enrichment (issue #10932). rich-v10
+			// filtered known non-conversational LiteLLM modes, unioned compat across
+			// the management endpoints, and keyed the deployment's `supports_vision`
+			// declaration into it; earlier versions invalidated rows whose
+			// `compatConfig` retained a colliding bundled model's provider-specific
+			// transport (e.g. Fireworks `wireModelIdMode`) (issue #9938).
+			return `litellm:rich-v11:${Bun.hash(baseUrl).toString(36)}`;
 		}
+		case "gmi-cloud":
+		case "siliconflow":
+		case "siliconflow-cn":
+			// models-v1 moves rows enriched before cross-provider reference
+			// isolation out of the legacy bare-provider namespaces (#10932).
+			return `${providerId}:models-v1`;
 		case "opencode-go":
 		case "opencode-zen": {
 			// v3: gateway-first rows cached before stencil enrichment carry null

@@ -16,10 +16,10 @@ import {
 	getSegmentGalleryInventory,
 } from "@oh-my-pi/pi-coding-agent/cli/gallery-fixtures";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { getComposerShapeOptions } from "@oh-my-pi/pi-coding-agent/modes/components/composer-shape-registry";
-import { ALL_SEGMENT_IDS } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/segments";
-import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { toolRenderers } from "@oh-my-pi/pi-coding-agent/tools/renderers";
+import { getComposerShapeOptions } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
+import { ALL_SEGMENT_IDS } from "@oh-my-pi/pi-tui/status-line/segments";
+import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
+import { toolRenderers } from "@oh-my-pi/pi-tui/tools";
 
 beforeAll(async () => {
 	resetSettingsForTest();

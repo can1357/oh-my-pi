@@ -2,6 +2,7 @@
 
 import type { Agent, AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { CompactionPreparation } from "@oh-my-pi/pi-agent-core/compaction";
+import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import type { AssistantMessage, ImageContent, Message, Model, SimpleStreamOptions, TextContent } from "@oh-my-pi/pi-ai";
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
@@ -15,7 +16,7 @@ import type { SecretObfuscator } from "../secrets/obfuscator";
 import { stripPendingSecretPlaceholderSuffix } from "../secrets/placeholder";
 import { normalizeModelContextImages } from "../utils/image-loading";
 import { describeAttachedImagesForTextModel } from "../utils/image-vision-fallback";
-import { blobExtensionForImageMimeType } from "./blob-store";
+import { blobExtensionForImageMimeType } from "@oh-my-pi/pi-tui/prompt/image-format";
 import { type CustomMessage, convertToLlm } from "./messages";
 import { IMAGE_ATTACHMENT_DESCRIPTION_TYPE } from "./queued-messages";
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
@@ -228,7 +229,7 @@ export class SessionProviderBoundary {
 		const model = this.#host.model();
 		const shouldDescribe =
 			!!model &&
-			!model.input.includes("image") &&
+			!sendsImageInputOnWire(model) &&
 			!this.#host.settings.get("images.blockImages") &&
 			this.#host.settings.get("images.describeForTextModels");
 		if (!shouldDescribe || !model) return undefined;

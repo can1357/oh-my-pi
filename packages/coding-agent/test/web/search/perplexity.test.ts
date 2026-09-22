@@ -620,6 +620,7 @@ describe("Perplexity anonymous fallback", () => {
 			query: "anonymous search",
 			authStorage: anonymousAuthStorage,
 			fetch: fetchMock,
+			explicit: true,
 		});
 		const requestParams = body?.params as Record<string, unknown>;
 
@@ -640,6 +641,15 @@ describe("Perplexity anonymous fallback", () => {
 				ageSeconds: undefined,
 			},
 		]);
+	});
+
+	it("rejects an automatic authless request before using the anonymous transport", async () => {
+		const fetchMock = vi.fn<FetchImpl>();
+
+		await expect(
+			searchPerplexity({ query: "automatic search", authStorage: anonymousAuthStorage, fetch: fetchMock }),
+		).rejects.toThrow("No authentication method available.");
+		expect(fetchMock).not.toHaveBeenCalled();
 	});
 
 	it("keeps anonymous Perplexity out of auto provider selection but allows explicit selection", () => {

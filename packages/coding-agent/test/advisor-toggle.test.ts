@@ -540,6 +540,30 @@ describe("AgentSession advisor toggle", () => {
 		expect(session.getAdvisorCost()).toBeCloseTo(0.5, 8);
 		expect(session.formatAdvisorStatus()).toContain("$0.5000");
 	});
+	it("applies a replacement advisor roster to the live status", () => {
+		enableAdvisor();
+
+		// Apply first roster.
+		expect(session.applyAdvisorConfigs([{ name: "Security" }], undefined)).toBe(1);
+		expect(session.getAdvisorStats().advisors.map(advisor => advisor.name)).toEqual(["Security"]);
+
+		// Apply a second, different roster over the live one.
+		expect(
+			session.applyAdvisorConfigs(
+				[
+					{ name: "Architecture", instructions: "Review module boundaries." },
+					{ name: "Testing", instructions: "Require regression coverage." },
+				],
+				"Keep advice concrete.",
+			),
+		).toBe(2);
+		expect(session.getAdvisorStats().advisors.map(advisor => advisor.name)).toEqual(["Architecture", "Testing"]);
+		const advisor = session.getAdvisorAgent();
+		if (!advisor) throw new Error("Expected Architecture advisor");
+		const advisorPrompt = advisor.state.systemPrompt.join("\n");
+		expect(advisorPrompt).toContain("Keep advice concrete.");
+		expect(advisorPrompt).toContain("Review module boundaries.");
+	});
 	it("retains cumulative advisor cost after an in-session history rewrite", async () => {
 		const advisor = enableAdvisor();
 		appendAdvisorCost(advisor, 0.5, 1);
@@ -970,8 +994,87 @@ describe("AgentSession advisor toggle", () => {
 			await branchDir.remove().catch(() => {});
 		}
 	});
-	it("marks structurally classified advisor usage limits", async () => {
+	it("retries an advisor after a short authoritative usage-limit block", async () => {
 		const mock = createMockModel({ responses: [{ content: ["primary complete"] }] });
+		const primaryAgent = new Agent({
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: mock.stream,
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.enabled": true,
+			"retry.baseDelayMs": 0,
+			"retry.maxDelayMs": 100,
+			"retry.maxRetries": 1,
+			"retry.modelFallback": false,
+		});
+		settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		const quotaSession = new AgentSession({
+			agent: primaryAgent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			advisorTools: [],
+		});
+
+		try {
+			expect(quotaSession.setAdvisorEnabled(true)).toBe(true);
+			const advisorAgent = quotaSession.getAdvisorAgent();
+			if (!advisorAgent) throw new Error("Expected advisor agent to exist");
+			const prompt = vi
+				.spyOn(advisorAgent, "prompt")
+				.mockRejectedValueOnce(
+					new AIError.ProviderHttpError("Generic provider failure", 429, {
+						code: "insufficient_quota",
+					}),
+				)
+				.mockResolvedValue(undefined);
+			const markUsageLimitReached = vi.spyOn(authStorage, "markUsageLimitReached").mockImplementation(async () => {
+				const deadline = Date.now() + 20;
+				return {
+					switched: false,
+					blockedUntilMs: deadline,
+					requestedBlockedUntilMs: deadline,
+					reportResetAtMs: deadline,
+				};
+			});
+			const advisorYielded = Promise.withResolvers<void>();
+			const unsubscribe = quotaSession.subscribe(event => {
+				if (event.type === "advisor_yielded") advisorYielded.resolve();
+			});
+
+			await quotaSession.prompt("Trigger advisor");
+			await quotaSession.waitForIdle();
+			await advisorYielded.promise;
+			unsubscribe();
+
+			expect(markUsageLimitReached).toHaveBeenCalledTimes(1);
+			expect(prompt).toHaveBeenCalledTimes(2);
+			expect(quotaSession.getAdvisorStatusOverview().advisors[0]).toMatchObject({
+				status: "running",
+				yielded: true,
+			});
+		} finally {
+			await quotaSession.dispose();
+			vi.restoreAllMocks();
+		}
+	});
+	it("marks structurally classified advisor usage limits", async () => {
+		const mock = createMockModel({
+			responses: [
+				{ content: ["primary complete"] },
+				{
+					content: [{ type: "toolCall", id: "continuing-turn", name: "missing-tool", arguments: {} }],
+					stopReason: "toolUse",
+				},
+				{ content: ["primary still complete"] },
+			],
+		});
 		const primaryAgent = new Agent({
 			initialState: {
 				model,
@@ -1022,9 +1125,103 @@ describe("AgentSession advisor toggle", () => {
 			// failed batch stays requeued (the quota latch makes yielded true).
 			await advisorYielded.promise;
 			unsubscribe();
+
+			const adviseTool = advisorAgent.state.tools.find(tool => tool.name === "advise");
+			if (!(adviseTool instanceof advisorModule.AdviseTool)) throw new Error("Expected advisor advise tool");
+			adviseTool.beginUpdate(true);
+			const deferred = await adviseTool.execute("deferred-before-quota", {
+				note: "The final result still needs a regression test.",
+				severity: "nit",
+			});
+			if (deferred.content.length === 0) throw new Error("Expected the advise tool to acknowledge the call");
+			// Behavior, not wording: a note deferred behind an in-progress turn
+			// holds only a reservation — it must stay out of the primary
+			// transcript until the terminal-boundary flush below releases it.
+			expect(
+				quotaSession.messages.some(message =>
+					JSON.stringify(message).includes("The final result still needs a regression test."),
+				),
+			).toBe(false);
+
+			// The quota latch prevents another advisor dispatch. The tool boundary
+			// must keep the note out of the continuing model request; terminal
+			// completion may then release it into the primary transcript.
+			await quotaSession.prompt("Complete another primary turn");
+			await quotaSession.waitForIdle();
+			const continuingCall = mock.calls[2];
+			if (!continuingCall) throw new Error("Expected primary continuation call");
+			expect(
+				continuingCall.context.messages.some(message =>
+					JSON.stringify(message).includes("The final result still needs a regression test."),
+				),
+			).toBe(false);
+			expect(
+				quotaSession.messages.some(
+					message =>
+						message.role === "custom" &&
+						typeof message.content === "string" &&
+						message.content.includes("The final result still needs a regression test."),
+				),
+			).toBe(true);
 		} finally {
 			await quotaSession.dispose();
 			vi.restoreAllMocks();
 		}
+	});
+
+	it("propagates the resolved budget into the advisor model-visible system prompt", () => {
+		// Contract: SessionAdvisors must render the resolved budget into the
+		// prompt the advisor model actually receives. If the runtime stopped
+		// supplying it, the template falls back to 4 and this fails.
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		session.applyAdvisorConfigs([{ name: "Strict", maxNotesPerUpdate: 1 }], undefined);
+		let advisor = session.getAdvisorAgent();
+		if (!advisor) throw new Error("Expected advisor agent");
+		expect(advisor.state.systemPrompt.join("\n")).toContain("max 1 non-blockers/update (`blocker` exempt)");
+
+		session.settings.set("advisor.maxNotesPerUpdate", 3);
+		session.applyAdvisorConfigs([{ name: "Lenient" }], undefined, undefined);
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		advisor = session.getAdvisorAgent();
+		if (!advisor) throw new Error("Expected advisor agent");
+		expect(advisor.state.systemPrompt.join("\n")).toContain("max 3 non-blockers/update (`blocker` exempt)");
+	});
+
+	it("enforces budget precedence through advisor calls: per-advisor > shared WATCHDOG.yml > settings > default", async () => {
+		const exerciseBudget = async (prefix: string, budget: number): Promise<void> => {
+			const advisor = session.getAdvisorAgent();
+			if (!advisor) throw new Error("Expected advisor agent");
+			const tool = advisor.state.tools?.find(candidate => candidate.name === "advise");
+			if (!(tool instanceof advisorModule.AdviseTool)) throw new Error("Expected advise tool");
+
+			tool.beginUpdate(true);
+			for (let i = 1; i <= budget; i++) {
+				const result = await tool.execute(`${prefix}-${i}`, {
+					note: `${prefix} note ${i}`,
+					severity: "concern",
+				});
+				expect(JSON.stringify(result.content)).toContain("Queued for the end of the turn");
+			}
+			const rejected = await tool.execute(`${prefix}-${budget + 1}`, {
+				note: `${prefix} note ${budget + 1}`,
+				severity: "concern",
+			});
+			expect(JSON.stringify(rejected.content)).toContain("budget is spent");
+		};
+
+		session.settings.set("advisor.maxNotesPerUpdate", 2);
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+
+		// Per-advisor (5) overrides shared (3) and settings (2).
+		expect(session.applyAdvisorConfigs([{ name: "Specific", maxNotesPerUpdate: 5 }], undefined, 3)).toBe(1);
+		await exerciseBudget("specific", 5);
+
+		// Shared (3) overrides settings (2) when per-advisor is undefined.
+		expect(session.applyAdvisorConfigs([{ name: "Inheriting" }], undefined, 3)).toBe(1);
+		await exerciseBudget("inheriting", 3);
+
+		// Settings (2) overrides the default (4) when shared and per-advisor are undefined.
+		expect(session.applyAdvisorConfigs([{ name: "SettingsOnly" }], undefined, undefined)).toBe(1);
+		await exerciseBudget("settings", 2);
 	});
 });
