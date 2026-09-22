@@ -337,9 +337,10 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 	// Host-owned bulk judgment run. Pull settled items with `drain()` across as
 	// many cells as needed; the run outlives any single cell.
 	class JudgmentBatch {
-		constructor(id, total) {
+		constructor(id, total, intent) {
 			this.id = id;
 			this.total = total;
+			this.intent = intent;
 		}
 
 		async _call(op, args = {}) {
@@ -396,21 +397,28 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 
 	const judgeBatchFrom = result => {
 		if (!result || typeof result.id !== "string") throw new Error("judgeBatch() did not return a batch");
-		return new JudgmentBatch(result.id, Number(result.total) || 0);
+		return new JudgmentBatch(result.id, Number(result.total) || 0, result.intent ?? "Judging");
 	};
 
 	// Judge every state with the same questions on the host. `states` is
-	// `{ key: state }` or an array (keys are indices). Item failures land in
-	// `JudgmentItem.error`; only a run that dies wholesale rejects `drain()`.
+	// `{ key: state }` or an array (keys are indices). `intent` is an optional
+	// nonempty progress/job label. Item failures land in `JudgmentItem.error`;
+	// only a run that dies wholesale rejects `drain()`.
 	const judgeBatch = async (states, questions, opts, ...rest) => {
 		checkQuestions(questions);
 		const options = optionsArg(
 			"judgeBatch",
 			opts,
 			rest,
-			["concurrency", "retries", "minOk"],
-			"{ concurrency, retries, minOk }",
+			["concurrency", "retries", "minOk", "intent"],
+			"{ intent, concurrency, retries, minOk }",
 		);
+		if (
+			options.intent !== undefined &&
+			(typeof options.intent !== "string" || options.intent.trim().length === 0)
+		) {
+			throw new TypeError("judgeBatch() intent must be a non-empty string");
+		}
 		let items;
 		if (Array.isArray(states)) items = states.map((state, key) => ({ key, state }));
 		else if (isPlainObject(states)) items = Object.entries(states).map(([key, state]) => ({ key, state }));

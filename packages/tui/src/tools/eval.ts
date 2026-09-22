@@ -139,16 +139,28 @@ function getRenderCells(args: EvalRenderArgs | undefined): EvalRenderCell[] {
 type AgentEventStatus = "pending" | "running" | "completed" | "failed" | "aborted";
 
 /**
- * Append or replace a status event. `agent` and `judge_batch` events are
- * progress snapshots keyed by `id`, so they coalesce in place (preserving
- * first-seen order); every other op is a discrete action and simply appends.
- * Keeps the persisted event list bounded even when a subagent or batch emits
- * hundreds of throttled progress ticks.
+ * Coalescing key of a progress-snapshot event: `agent` and `judge_batch`
+ * events keyed by `id`, where only the newest snapshot matters. Discrete
+ * actions (everything else) have no key. Shared by {@link upsertStatusEvent}
+ * and the executors' display collectors so both coalesce identically.
+ */
+export function statusEventKey(event: { op: string; [key: string]: unknown }): string | undefined {
+	if ((event.op === "agent" || event.op === "judge_batch") && typeof event.id === "string") {
+		return `${event.op}\0${event.id}`;
+	}
+	return undefined;
+}
+
+/**
+ * Append or replace a status event. Progress snapshots (see
+ * {@link statusEventKey}) coalesce in place, preserving first-seen order; every
+ * other op is a discrete action and simply appends. Keeps the persisted event
+ * list bounded even when a subagent or batch emits hundreds of progress ticks.
  */
 export function upsertStatusEvent(events: EvalStatusEvent[], event: EvalStatusEvent): void {
-	if ((event.op === "agent" || event.op === "judge_batch") && typeof event.id === "string") {
-		const { op, id } = event;
-		const idx = events.findIndex(e => e.op === op && e.id === id);
+	const key = statusEventKey(event);
+	if (key !== undefined) {
+		const idx = events.findIndex(e => statusEventKey(e) === key);
 		if (idx >= 0) {
 			events[idx] = event;
 			return;

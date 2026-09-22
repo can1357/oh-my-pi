@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Coalesced status event updates for progress-based operations to reduce TUI render overhead
+
 ## [18.2.9] - 2026-09-22
 
 ### Added
