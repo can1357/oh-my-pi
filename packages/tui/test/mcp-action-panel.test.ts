@@ -157,4 +157,93 @@ describe("MCPActionPanel", () => {
 
 		expect(panel.render(80).join("\n")).toContain("Action cancelled.");
 	});
+
+	test("sanitizes every server-controlled field before rendering", () => {
+		const maliciousState: MCPActionPanelState = {
+			...state([
+				{
+					...action("test"),
+					label: "Test\x1b[2J label",
+					description: "Description\x1b]0;owned\x07 safe",
+				},
+			]),
+			name: "github\x1b]8;;https://evil.example\x07 spoof\x1b]8;;\x07",
+			transport: "http\x1b[2J",
+			source: "Native\x1b]0;owned\x07 user",
+			authentication: "OAuth\x1b[31m managed",
+			lastError: "Failed\x1b]0;owned\x07 safely",
+		};
+		const runtime: MCPActionPanelRuntime = {
+			loadState: async () => maliciousState,
+			runAction: async () => "unused",
+		};
+
+		const rendered = new MCPActionPanel(extension, maliciousState, runtime, 24).render(160).join("\n");
+
+		expect(rendered).not.toContain("\x1b]");
+		expect(rendered).not.toContain("\x07");
+		expect(rendered).not.toContain("\x1b[2J");
+		expect(Bun.stripANSI(rendered)).toContain("github spoof");
+		expect(Bun.stripANSI(rendered)).toContain("Failed safely");
+	});
+
+	test("keeps OAuth, manual input, results, and the footer visible at minimum height", async () => {
+		const continueToInput = Promise.withResolvers<void>();
+		const didChange = Promise.withResolvers<void>();
+		let manualInput = "";
+		const actions = [
+			action("test"),
+			action("reconnect"),
+			action("reauthenticate"),
+			action("clear-authentication"),
+			action("disable"),
+		];
+		const runtime: MCPActionPanelRuntime = {
+			loadState: async () => state(actions),
+			runAction: async (_extension, _id, context) => {
+				context.onAuthorization({
+					instructions: "Open the browser\x1b[2J now",
+					url: "https://auth.example/callback\x1b]0;owned\x07",
+				});
+				await continueToInput.promise;
+				manualInput = await context.requestManualInput(context.signal);
+				return "Authenticated\x1b]0;owned\x07 safely\nsecond line";
+			},
+		};
+		const panel = new MCPActionPanel(extension, state(actions), runtime, 14);
+		panel.onChanged = () => didChange.resolve();
+
+		panel.handleInput("\r");
+		await flushAsyncWork();
+		const oauthFrame = panel.render(120);
+		const oauthText = oauthFrame.join("\n");
+		expect(oauthFrame).toHaveLength(14);
+		expect(Bun.stripANSI(oauthText)).toContain("Open the browser now");
+		expect(Bun.stripANSI(oauthText)).toContain("https://auth.example/callback");
+		expect(Bun.stripANSI(oauthText)).toContain("Esc: cancel action · Ctrl+C: close");
+		expect(oauthText).not.toContain("\x1b[2J");
+		expect(oauthText).not.toContain("\x1b]");
+		expect(oauthText).not.toContain("\x07");
+
+		continueToInput.resolve();
+		await flushAsyncWork();
+		panel.handleInput("\x1b[200~code=abc\x1b]0;owned\x07\x1b[201~");
+		const manualFrame = panel.render(120).join("\n");
+		expect(Bun.stripANSI(manualFrame)).toContain("code=abc");
+		expect(Bun.stripANSI(manualFrame)).toContain("Esc: cancel action · Ctrl+C: close");
+		expect(manualFrame).not.toContain("\x1b]");
+		expect(manualFrame).not.toContain("\x07");
+
+		panel.handleInput("\r");
+		await didChange.promise;
+		expect(manualInput).toContain("code=abc");
+		const resultFrame = panel.render(120);
+		const resultText = resultFrame.join("\n");
+		expect(resultFrame).toHaveLength(14);
+		expect(Bun.stripANSI(resultText)).toContain("Authenticated safely");
+		expect(Bun.stripANSI(resultText)).toContain("second line");
+		expect(Bun.stripANSI(resultText)).toContain("↑/↓: select · Enter: run · Esc: back · Ctrl+C: close");
+		expect(resultText).not.toContain("\x1b]");
+		expect(resultText).not.toContain("\x07");
+	});
 });

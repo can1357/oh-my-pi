@@ -178,13 +178,11 @@ describe("/mcp auth commands", () => {
 		await controller.handle("/mcp reauth MaaS Slack");
 
 		expect(showError).not.toHaveBeenCalled();
-		expect(prepareConfig).toHaveBeenCalledWith(
-			expect.objectContaining({ url: EXPANDED_SERVER_URL }),
-			expect.objectContaining({ oauth: false }),
-		);
+		expect(prepareConfig).not.toHaveBeenCalled();
 		expect(connectToServer).toHaveBeenCalledWith(
 			expect.any(String),
 			expect.objectContaining({ url: EXPANDED_SERVER_URL }),
+			expect.objectContaining({ signal: expect.any(AbortSignal) }),
 		);
 		expect(authStorage.get(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL))).toMatchObject({
 			type: "oauth",

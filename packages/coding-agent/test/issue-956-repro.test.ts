@@ -130,13 +130,57 @@ describe("interactive /mcp test", () => {
 
 		expect(showError).not.toHaveBeenCalled();
 		expect(connectToServer).toHaveBeenCalledWith(
-			"github",
+			expect.stringMatching(/^__mcp_test_/),
 			expect.objectContaining({ command: "github-mcp-server", args: ["serve"] }),
 			expect.objectContaining({ signal: expect.any(AbortSignal) }),
 		);
 		expect(listTools).toHaveBeenCalledWith(connection, expect.objectContaining({ signal: expect.any(AbortSignal) }));
 		expect(disconnectServer).toHaveBeenCalledWith(connection);
 		expect(ctx.ui.requestRender).toHaveBeenCalled();
+	});
+
+	it("syncs a disconnected manager after the shared isolated test succeeds", async () => {
+		const connection = {
+			name: "github",
+			config: { type: "stdio" as const, command: "github-mcp-server", args: ["serve"] },
+			transport: { connected: true, request: vi.fn(), notify: vi.fn(), close: vi.fn(async () => {}) },
+			serverInfo: { name: "GitHub MCP", version: "1.0.0" },
+			capabilities: {},
+		};
+		vi.spyOn(mcpClient, "connectToServer").mockResolvedValue(connection);
+		vi.spyOn(mcpClient, "listTools").mockResolvedValue([{ name: "search_issues" }] as never);
+		vi.spyOn(mcpClient, "disconnectServer").mockResolvedValue();
+		const getConnectionStatus = vi
+			.fn((): "connected" | "disconnected" => "connected")
+			.mockReturnValueOnce("disconnected")
+			.mockReturnValueOnce("disconnected");
+		const connectServers = vi.fn(async () => ({
+			tools: [],
+			errors: new Map<string, string>(),
+			connectedServers: ["github"],
+			exaApiKeys: [],
+		}));
+		const runtimeTools = [{ name: "mcp__github_search_issues" }] as never;
+		const refreshMCPTools = vi.fn(async () => {});
+		const { controller } = createController({
+			mcpManager: { getConnectionStatus, connectServers, getTools: vi.fn(() => runtimeTools) },
+			session: { refreshMCPTools },
+		});
+
+		await controller.handle("/mcp test github");
+
+		expect(connectServers).toHaveBeenCalledWith(
+			{ github: { type: "stdio", command: "github-mcp-server", args: ["serve"] } },
+			{
+				github: expect.objectContaining({
+					provider: "mcp-json",
+					path: path.join(projectDir, ".mcp.json"),
+				}),
+			},
+			undefined,
+			expect.any(AbortSignal),
+		);
+		expect(refreshMCPTools).toHaveBeenCalledWith(runtimeTools);
 	});
 
 	it("cancelling a pending test consumes Esc ownership without a grace window", async () => {
@@ -208,73 +252,6 @@ describe("interactive /mcp test", () => {
 		expect(rendered).toContain(`Cancelled connection test for "github".`);
 		expect(rendered).not.toContain("(esc to cancel)");
 		expect(presented[0]?.isTranscriptBlockFinalized()).toBe(true);
-	});
-
-	it("treats an abort landing during manager sync as a completed test", async () => {
-		const transport = {
-			connected: true,
-			request: vi.fn(),
-			notify: vi.fn(),
-			close: vi.fn(async () => {}),
-		};
-		const connection = {
-			name: "github",
-			config: { type: "stdio" as const, command: "github-mcp-server", args: ["serve"] },
-			transport,
-			serverInfo: { name: "GitHub MCP", version: "1.0.0" },
-			capabilities: {},
-		};
-		vi.spyOn(mcpClient, "connectToServer").mockResolvedValue(connection);
-		vi.spyOn(mcpClient, "listTools").mockResolvedValue([{ name: "search_issues" }] as never);
-		vi.spyOn(mcpClient, "disconnectServer").mockResolvedValue();
-		const { promise: hintPresented, resolve: hintResolve } = Promise.withResolvers<void>();
-		const { promise: syncStarted, resolve: syncStartedResolve } = Promise.withResolvers<void>();
-		const { promise: syncGate, resolve: syncResolve } = Promise.withResolvers<void>();
-		const mcpTestEscapeHandlers = new Set<() => void>();
-		const { controller, ctx } = createController({
-			mcpTestEscapeHandlers,
-			mcpManager: {
-				getConnectionStatus: vi.fn(() => "disconnected" as const),
-				connectServers: vi.fn(async () => {
-					syncStartedResolve();
-					await syncGate;
-					return {
-						tools: [],
-						errors: new Map<string, string>(),
-						connectedServers: [],
-						exaApiKeys: [],
-					};
-				}),
-			},
-		});
-		const { showStatus } = ctx;
-		const addChild = ctx.chatContainer.addChild.bind(ctx.chatContainer);
-		vi.spyOn(ctx.chatContainer, "addChild").mockImplementation(component => {
-			addChild(component);
-			hintResolve();
-		});
-
-		const pending = controller.handle("/mcp test github");
-		await hintPresented;
-		const presented = ctx.chatContainer.children;
-
-		// Wait until the test is past listTools and inside #syncManagerConnection:
-		// an abort here does not observe the signal, so the flow still completes.
-		await syncStarted;
-		// oxlint-disable-next-line unicorn/no-useless-spread -- handlers are removed while dispatching
-		for (const handler of [...mcpTestEscapeHandlers]) {
-			mcpTestEscapeHandlers.delete(handler);
-			handler();
-		}
-		syncResolve();
-		await pending;
-
-		const rendered = presented.map(block => block.render(80).join("\n")).join("\n");
-		expect(rendered).toContain(`Successfully connected to "github"`);
-		expect(rendered).toContain(`Tested connection to "github".`);
-		expect(rendered).not.toContain("Cancelled connection test");
-		expect(showStatus).not.toHaveBeenCalledWith(`Cancelled MCP test for "github"`);
-		expect(presented.find(isRenderableBlock)?.isTranscriptBlockFinalized()).toBe(true);
 	});
 
 	it("aborts during the awaited lookup without ever advertising esc", async () => {

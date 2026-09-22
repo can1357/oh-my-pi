@@ -577,13 +577,23 @@ export class ExtensionDashboard implements Component {
 		this.onRequestRender?.();
 	}
 
-	/**
-	 * Live MCP health is joined at render time. Connection-status events and
-	 * list-changed notifications only need to request a repaint — they must not
-	 * rewrite Extension.raw.
-	 */
+	/** Keep an open action panel synchronized with live MCP lifecycle changes. */
 	#subscribeMcpRuntime(): void {
-		this.#unsubscribers.push(...this.#runtime.subscribeMcpChanges(() => this.onRequestRender?.()));
+		this.#unsubscribers.push(
+			...this.#runtime.subscribeMcpChanges(() => {
+				const panel = this.#mcpActionPanel;
+				if (!panel) {
+					this.onRequestRender?.();
+					return;
+				}
+				void panel.reloadState().catch(error => {
+					logger.warn("Failed to reload open MCP action panel", {
+						name: panel.extension.name,
+						error: String(error),
+					});
+				});
+			}),
+		);
 	}
 
 	dispose(): void {

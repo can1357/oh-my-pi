@@ -7,6 +7,8 @@ import { initializeWithSettings } from "@oh-my-pi/pi-coding-agent/discovery";
 import { createMCPActionRuntime } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/mcp-action-runtime";
 import { loadAllExtensions } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/state-manager";
 import type { MCPServerConnection } from "@oh-my-pi/pi-coding-agent/mcp/types";
+import { mcpOAuthCredentialId } from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
+import { MCPServerActions } from "@oh-my-pi/pi-coding-agent/mcp/server-actions";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createMcpManagerStub } from "./helpers/interactive-mode-context";
@@ -99,7 +101,55 @@ describe("extensions dashboard MCP actions", () => {
 		});
 		expect(message).toBe("Reconnected. 1 tool(s) available.");
 		expect(progress).toEqual(["Reconnecting github..."]);
-		expect(reconnectServer).toHaveBeenCalledWith("github", { manual: true });
+		expect(reconnectServer).toHaveBeenCalledWith("github", {
+			manual: true,
+			signal: expect.any(AbortSignal),
+		});
 		expect(refreshTools).toHaveBeenCalledTimes(1);
+	});
+
+	test("completes enable and disable persistence without a runtime manager", async () => {
+		const actions = new MCPServerActions({ cwd: projectDir, refreshMCPTools: async () => {} });
+		const source = { provider: "omp", providerName: "OMP", path: configPath, level: "project" as const };
+
+		await expect(actions.setEnabled({ name: "github", source }, false)).resolves.toMatchObject({ action: "disable" });
+		let saved = JSON.parse(await Bun.file(configPath).text());
+		expect(saved.mcpServers.github.enabled).toBe(false);
+
+		await expect(actions.setEnabled({ name: "github", source }, true)).resolves.toMatchObject({ action: "enable" });
+		saved = JSON.parse(await Bun.file(configPath).text());
+		expect(saved.mcpServers.github.enabled).toBe(true);
+	});
+
+	test("completes clear authentication without a runtime manager", async () => {
+		const credentialId = mcpOAuthCredentialId(CONFIG.url);
+		let credential: { type: "oauth" } | undefined = { type: "oauth" };
+		const authStorage = {
+			get: (id: string) => (id === credentialId ? credential : undefined),
+			remove: vi.fn(async (id: string) => {
+				if (id === credentialId) credential = undefined;
+			}),
+		} as unknown as AuthStorage;
+		const config = {
+			...CONFIG,
+			auth: { type: "oauth" as const, credentialId, tokenUrl: "https://auth.example.com/token" },
+		};
+		await Bun.write(configPath, `${JSON.stringify({ mcpServers: { github: config } }, null, 2)}\n`);
+		const actions = new MCPServerActions({
+			cwd: projectDir,
+			authStorage,
+			refreshMCPTools: async () => {},
+		});
+
+		await expect(
+			actions.clearAuthentication({
+				name: "github",
+				config,
+				source: { provider: "omp", providerName: "OMP", path: configPath, level: "project" },
+			}),
+		).resolves.toMatchObject({ action: "clear-authentication" });
+		expect(credential).toBeUndefined();
+		const saved = JSON.parse(await Bun.file(configPath).text());
+		expect(saved.mcpServers.github.auth).toBeUndefined();
 	});
 });

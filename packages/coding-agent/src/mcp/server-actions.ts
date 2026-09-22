@@ -47,11 +47,18 @@ export interface MCPServerActionTarget {
 	disabled?: boolean;
 }
 
+export interface MCPServerToggleTarget {
+	name: string;
+	source?: SourceMeta;
+	shadowed?: boolean;
+}
+
 export interface MCPServerActionResult {
 	action: MCPServerActionName;
 	message: string;
 	tools?: MCPToolDefinition[];
 	connectionErrors?: ReadonlyMap<string, string>;
+	config?: MCPServerConfig;
 }
 
 export interface MCPServerActionsOptions {
@@ -91,6 +98,7 @@ async function testMCPConfig(options: {
 	config: MCPServerConfig;
 	signal?: AbortSignal;
 	oauth?: boolean;
+	verifyTools?: boolean;
 }): Promise<MCPToolDefinition[]> {
 	const manager = new TemporaryMCPManager(options.cwd);
 	if (options.authStorage) manager.setAuthStorage(options.authStorage);
@@ -104,7 +112,7 @@ async function testMCPConfig(options: {
 				signal: options.signal,
 			},
 		);
-		return await listTools(connection, { signal: options.signal });
+		return options.verifyTools === false ? [] : await listTools(connection, { signal: options.signal });
 	} finally {
 		if (connection) await disconnectServer(connection).catch(() => undefined);
 		await manager.disconnectAll().catch(() => undefined);
@@ -133,7 +141,7 @@ async function resolveOAuthEndpointsFromServer(options: {
 	let connectionSucceeded = false;
 	let connectionError: Error | undefined;
 	try {
-		await testMCPConfig({ ...options, oauth: false });
+		await testMCPConfig({ ...options, oauth: false, verifyTools: false });
 		connectionSucceeded = true;
 	} catch (error) {
 		connectionError = error instanceof Error ? error : new Error(String(error));
@@ -192,6 +200,22 @@ export class MCPServerActions {
 			config: target.config,
 			signal,
 		});
+		if (manager && manager.getConnectionStatus(target.name) === "disconnected") {
+			await raceAbortSignal(
+				manager.connectServers(
+					{ [target.name]: target.config },
+					target.source ? { [target.name]: target.source } : {},
+					undefined,
+					signal,
+				),
+				signal,
+			);
+			signal?.throwIfAborted();
+			if (manager.getConnectionStatus(target.name) === "connected") {
+				await raceAbortSignal(Promise.resolve(this.#options.refreshMCPTools(manager.getTools())), signal);
+				signal?.throwIfAborted();
+			}
+		}
 		return {
 			action: "test",
 			message:
@@ -207,26 +231,39 @@ export class MCPServerActions {
 		const manager = this.#options.manager;
 		if (!manager) throw new Error("MCP runtime manager is unavailable");
 		const timeout = getServerTimeout(target.config);
-		const connection = await withTimeout(
-			raceAbortSignal(manager.reconnectServer(target.name, { manual: true }), signal),
-			timeout,
-			`Reconnect timed out after ${timeout}ms`,
-		);
-		if (!connection) throw new Error("Reconnect failed");
-		const tools = await listTools(connection, { signal });
-		await this.#options.refreshMCPTools(manager.getTools());
-		return {
-			action: "reconnect",
-			message:
-				tools.length > 0 ? `Reconnected. ${tools.length} tool(s) available.` : "Reconnected. No tools reported.",
-			tools,
-		};
+		const controller = new AbortController();
+		const abort = () => controller.abort(signal?.reason ?? new DOMException("Aborted", "AbortError"));
+		if (signal?.aborted) abort();
+		else signal?.addEventListener("abort", abort, { once: true });
+		try {
+			const connection = await withTimeout(
+				raceAbortSignal(
+					manager.reconnectServer(target.name, { manual: true, signal: controller.signal }),
+					controller.signal,
+				),
+				timeout,
+				`Reconnect timed out after ${timeout}ms`,
+				() => controller.abort(new Error(`Reconnect timed out after ${timeout}ms`)),
+			);
+			if (!connection) throw new Error("Reconnect failed");
+			const tools = await listTools(connection, { signal: controller.signal });
+			await this.#options.refreshMCPTools(manager.getTools());
+			return {
+				action: "reconnect",
+				message:
+					tools.length > 0 ? `Reconnected. ${tools.length} tool(s) available.` : "Reconnected. No tools reported.",
+				tools,
+			};
+		} finally {
+			signal?.removeEventListener("abort", abort);
+		}
 	}
 
 	async reauthenticate(
 		target: MCPServerActionTarget,
 		interaction: MCPInteractiveOAuthInteraction,
 		signal?: AbortSignal,
+		options?: { authChallenge?: MCPAuthChallenge; reload?: boolean },
 	): Promise<MCPServerActionResult> {
 		this.#assertActionAvailable(target, "reauthenticate");
 		const authStorage = this.#requireAuthStorage();
@@ -239,6 +276,7 @@ export class MCPServerActions {
 				authStorage,
 				config: runtimeBaseConfig,
 				signal,
+				authChallenge: options?.authChallenge,
 			}),
 			signal,
 		);
@@ -282,7 +320,7 @@ export class MCPServerActions {
 				redirectUri: target.config.oauth?.redirectUri,
 				prompt: target.config.oauth?.prompt,
 			},
-			oauthEndpoints: oauth,
+			oauthEndpoints: { ...oauth, clientId: flowClientId },
 			resource: oauthResource,
 			stripSameOriginResource: oauthResourceIsFallback,
 			authStorage,
@@ -300,9 +338,10 @@ export class MCPServerActions {
 
 		const sourcePath = writableSourcePath(target.source);
 		const shouldPersist = Boolean(currentAuth) || result.credentialId !== mcpOAuthCredentialId(url);
+		let updatedConfig = baseConfig;
 		if (sourcePath && shouldPersist) {
 			const clientId = result.credentials.clientId?.trim() || oauth.clientId?.trim();
-			await updateMCPServer(sourcePath, target.name, {
+			updatedConfig = {
 				...baseConfig,
 				auth: {
 					type: "oauth",
@@ -316,10 +355,16 @@ export class MCPServerActions {
 					...baseConfig.oauth,
 					clientId: hasConfiguredOnlySecret ? undefined : clientId,
 				},
-			});
+			};
+			await updateMCPServer(sourcePath, target.name, updatedConfig);
 		}
-		if (this.#options.manager) await this.reload();
-		return { action: "reauthenticate", message: "Authentication successful. MCP runtime reloaded." };
+		const reloaded = Boolean(this.#options.manager && options?.reload !== false);
+		if (reloaded) await this.reload();
+		return {
+			action: "reauthenticate",
+			message: reloaded ? "Authentication successful. MCP runtime reloaded." : "Authentication successful.",
+			config: updatedConfig,
+		};
 	}
 
 	async clearAuthentication(target: MCPServerActionTarget): Promise<MCPServerActionResult> {
@@ -341,12 +386,12 @@ export class MCPServerActions {
 			patchedConfig = true;
 		}
 		if (!removed && !patchedConfig) throw new Error("No OMP-managed OAuth credential found");
-		await this.reload();
+		if (this.#options.manager) await this.reload();
 		return { action: "clear-authentication", message: "Stored authentication cleared." };
 	}
 
-	async setEnabled(target: MCPServerActionTarget, enabled: boolean): Promise<MCPServerActionResult> {
-		this.#assertActionAvailable(target, enabled ? "enable" : "disable");
+	async setEnabled(target: MCPServerToggleTarget, enabled: boolean): Promise<MCPServerActionResult> {
+		if (target.shadowed) throw new Error("Shadowed MCP rows cannot be changed");
 		const cwd = this.#options.cwd;
 		await setMcpServerEnabled({
 			userPath: getMCPConfigPath("user", cwd),
@@ -355,7 +400,7 @@ export class MCPServerActions {
 			name: target.name,
 			enabled,
 		});
-		await this.reload();
+		if (this.#options.manager) await this.reload();
 		return { action: enabled ? "enable" : "disable", message: `${target.name} ${enabled ? "enabled" : "disabled"}.` };
 	}
 
@@ -398,10 +443,7 @@ export class MCPServerActions {
 			disabled: target.disabled,
 			shadowed: target.shadowed,
 		});
-		if (action === "enable" || action === "disable") {
-			if (!capabilities.canToggle) throw new Error("Shadowed MCP rows cannot be changed");
-			return;
-		}
+		if (action === "enable" || action === "disable") return;
 		if (action === "test" && !capabilities.canTest) throw new Error("Enable the MCP server before testing it");
 		if (action === "reconnect" && !capabilities.canReconnect)
 			throw new Error("Enable the MCP server before reconnecting it");
