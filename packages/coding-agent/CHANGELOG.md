@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- A message typed while the agent is streaming now gets an explicit "Queued — will apply after the current response" status instead of only a pending-bar repaint, so typed input is never silently swallowed. When the model call it lands on has produced no output yet, the loop cancels that call and applies the steer immediately; `interruptMode` (Settings → Interaction → Interrupt Mode) now governs that cancellation as well as tool execution.
+- A message typed while the agent is streaming now gets an explicit "Queued — will apply after the current response" status instead of only a pending-bar repaint, so typed input is never silently swallowed. When the model call it lands on has produced no output yet, the loop cancels that call and applies the steer immediately; `interruptMode` (Settings → Interaction → Interrupt Mode) now governs that cancellation as well as tool execution ([#12787](https://github.com/can1357/oh-my-pi/pull/12787) by [@geoyws](https://github.com/geoyws)).
 
 ## [18.2.8] - 2026-09-21
 
