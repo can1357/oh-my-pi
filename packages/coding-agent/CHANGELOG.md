@@ -10,7 +10,6 @@
 
 - Fixed provider-internal retry backoffs looking like a frozen turn: pi-ai's own stream retry waits — including the Anthropic HTTP client's 429/529 overload sleeps — now surface as `provider_retry_wait_start`/`provider_retry_wait_end` session events, a "Provider retrying (2/10) in …" status countdown that shows the retry position when the waiting loop reports one, and a structured log line. Retry delays, attempt counts, and abort behaviour are unchanged.
 
-
 ## [18.2.8] - 2026-09-21
 
 ### Added
