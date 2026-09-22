@@ -186,6 +186,7 @@ export class RelayBridge {
 	#rpcSeq = 0;
 	#ext: RelaySocket | null = null;
 	#extInfo: { userAgent: string; browserVersion: string } | null = null;
+	#extensionSeen = false;
 	#pendingRpc = new Map<
 		number,
 		{ resolve: (value: unknown) => void; reject: (err: Error) => void; timer: NodeJS.Timeout }
@@ -214,6 +215,11 @@ export class RelayBridge {
 	/** True once the extension has completed its hello handshake. */
 	get ready(): boolean {
 		return this.#ext !== null && this.#extInfo !== null;
+	}
+
+	/** True after the first hello, and stays true: separates a reaped service worker from an absent extension. */
+	get extensionSeen(): boolean {
+		return this.#extensionSeen;
 	}
 
 	/** Payload for `GET /json/version`. */
@@ -325,6 +331,7 @@ export class RelayBridge {
 
 	#onHello(msg: Extract<ExtToRelayMessage, { t: "hello" }>): void {
 		this.#extInfo = { userAgent: msg.userAgent, browserVersion: msg.browserVersion };
+		this.#extensionSeen = true;
 		const seen = new Set<number>();
 		const attachedNow = new Set(msg.attachedTabIds);
 		for (const snap of msg.tabs) {
@@ -637,6 +644,14 @@ export class RelayBridge {
 			case "Target.getBrowserContexts":
 				this.#reply(conn, msg, { browserContextIds: [] });
 				return;
+			case "Target.getTargets": {
+				const targetInfos: TargetInfo[] = [];
+				for (const tab of this.#tabs.values()) {
+					if (this.#eligible(tab)) targetInfos.push(this.#pageInfo(tab, tab.attached));
+				}
+				this.#reply(conn, msg, { targetInfos });
+				return;
+			}
 			case "Target.setDiscoverTargets": {
 				conn.discover = true;
 				for (const tab of this.#tabs.values()) {

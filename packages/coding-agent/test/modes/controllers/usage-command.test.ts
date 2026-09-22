@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import type { UsageReport } from "@oh-my-pi/pi-ai";
 import { renderUsageReports } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
-import { getThemeByName, setThemeInstance, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { getThemeByName, setThemeInstance, theme } from "@oh-my-pi/pi-tui/theme";
 
 describe("renderUsageReports content", () => {
 	beforeAll(async () => {
@@ -70,19 +70,21 @@ describe("renderUsageReports content", () => {
 		expect(output).toContain("resets in 1d");
 	});
 
-	it("renders saved reset expiry lines for future and expired credits", () => {
+	it("renders Claude banked reset availability and the next expiry", () => {
 		const now = Date.now();
 		const dayMs = 24 * 60 * 60 * 1000;
 		const futureIso = new Date(now + 2 * dayMs).toISOString();
 		const expiredIso = new Date(now - 2 * dayMs).toISOString();
 		const reports: UsageReport[] = [
 			{
-				provider: "openai-codex",
+				provider: "anthropic",
 				fetchedAt: now,
 				limits: [],
 				metadata: { email: "user@example.com" },
 				resetCredits: {
 					availableCount: 2,
+					redeemableCount: 0,
+					reason: "weekly cooldown",
 					credits: [{ expiresAt: futureIso }, { expiresAt: expiredIso }],
 				},
 			},
@@ -93,7 +95,9 @@ describe("renderUsageReports content", () => {
 		expect(output).toContain("user@example.com: 2 saved resets");
 		expect(output).toContain(`expires in`);
 		expect(output).toContain(`(${futureIso.slice(0, 10)})`);
-		expect(output).toContain(`expired (${expiredIso.slice(0, 10)})`);
+		expect(output).toContain("0 usable now");
+		expect(output).toContain("unavailable: weekly cooldown");
+		expect(output).not.toContain(`expired (${expiredIso.slice(0, 10)})`);
 	});
 
 	it("shows one prepaid balance for a provider whose keys share an account pool", () => {

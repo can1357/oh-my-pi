@@ -25,7 +25,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { encodeRpcFrame, MAX_RPC_FRAME_BYTES } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-frame";
-import { computeNonMessageTokens } from "@oh-my-pi/pi-coding-agent/modes/utils/context-usage";
+import { computeNonMessageTokens } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -170,7 +170,7 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 		// numFrames × FRAME_TOKEN_ESTIMATE + non-message + kept-recent.
 		const preparation = prepareCompaction(branchEntries, settings);
 		if (!preparation) throw new Error("Expected non-empty preparation");
-		let baseTokens = computeNonMessageTokens(session, session.agent.tokenizer);
+		let baseTokens = computeNonMessageTokens(session, session.agent.tokenizer, session.settings.revision);
 		baseTokens += session.agent.tokenizer.countMessages(preparation.recentMessages);
 		const shape = snapcompact.resolveShape(model);
 		const edgeCap = snapcompact.geometry(shape).capacity;

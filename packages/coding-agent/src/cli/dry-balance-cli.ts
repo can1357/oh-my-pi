@@ -13,6 +13,7 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { streamSimple } from "@oh-my-pi/pi-ai";
 import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
+import { SPINNER_FRAMES } from "@oh-my-pi/pi-tui/theme/symbols";
 import { formatDuration, getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
@@ -33,7 +34,6 @@ const BENCH_MAX_TOKENS = 512;
 const BENCH_RENDER_INTERVAL_MS = 80;
 const BENCH_ACCOUNT_WIDTH = 60;
 const BENCH_ERROR_WIDTH = 110;
-const BENCH_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
 const DRY_BALANCE_BENCH_PROMPT = dryBalanceBenchPrompt.trim();
 
 export interface DryBalanceCommandArgs {
@@ -317,7 +317,8 @@ function renderBenchStatusLine(
 		case "waiting":
 			return `${chalk.dim("○")} ${prefix} ${chalk.dim("waiting")}`;
 		case "running": {
-			const spinner = BENCH_SPINNER_FRAMES[frame % BENCH_SPINNER_FRAMES.length] ?? "*";
+			const frames = SPINNER_FRAMES.unicode.activity;
+			const spinner = frames[frame % frames.length] ?? "*";
 			return `${chalk.yellow(spinner)} ${prefix} ${formatBenchAccount(status.account)} ${chalk.dim("sending request")}`;
 		}
 		case "success":

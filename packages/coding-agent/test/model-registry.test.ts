@@ -1,17 +1,22 @@
 import { Database } from "bun:sqlite";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Effort, type FetchImpl, type Model, type OpenAICompat, type ThinkingConfig } from "@oh-my-pi/pi-ai";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { fingerprintStaticModels } from "@oh-my-pi/pi-catalog/model-manager";
+import * as catalogModels from "@oh-my-pi/pi-catalog/models";
 import { calculateUsageCost, getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { finalizeCustomModel } from "@oh-my-pi/pi-coding-agent/config/custom-models";
 import { applyModelPatch, mergeDiscoveredModel } from "@oh-my-pi/pi-coding-agent/config/model-patch";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { resolveRoleChain } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import { roleCandidatePool } from "@oh-my-pi/pi-coding-agent/config/model-roles";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
@@ -35,6 +40,7 @@ describe("ModelRegistry", () => {
 	let bootOllamaBaseUrl: string | undefined;
 	let bootOllamaHost: string | undefined;
 	let bootOllamaContextLength: string | undefined;
+	const spies: Array<{ mockRestore: () => void }> = [];
 
 	beforeEach(async () => {
 		resetSettingsForTest();
@@ -55,6 +61,7 @@ describe("ModelRegistry", () => {
 
 	afterEach(() => {
 		resetSettingsForTest();
+		for (const spy of spies.splice(0)) spy.mockRestore();
 		if (originalOllamaBaseUrl === undefined) {
 			delete Bun.env.OLLAMA_BASE_URL;
 		} else {
@@ -234,6 +241,139 @@ describe("ModelRegistry", () => {
 		);
 	}
 
+	describe("model kind pools", () => {
+		test("zero-argument pools remain chat-only while find remains kind-agnostic", () => {
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+
+			expect(registry.getAll().every(model => modelKind(model) === "chat")).toBe(true);
+			expect(registry.getAvailable().every(model => modelKind(model) === "chat")).toBe(true);
+			expect(registry.getAll().some(model => ["local", "web", "typesafe"].includes(model.provider))).toBe(false);
+			expect(registry.getAvailable().some(model => ["local", "web", "typesafe"].includes(model.provider))).toBe(
+				false,
+			);
+			expect(registry.find("local", "falcon-h1-90m")).toMatchObject({ kind: "tiny" });
+			expect(registry.find("web", "duckduckgo")).toMatchObject({ kind: "search" });
+			expect(registry.find("typesafe", "jev-latest")).toMatchObject({ kind: "judge" });
+		});
+
+		test("all and kind pools expose keyless runners and authenticated TypeSafe models", () => {
+			let allowTypeSafeAuth = false;
+			const hasAuth = authStorage.hasAuth.bind(authStorage);
+			spies.push(
+				spyOn(authStorage, "hasAuth").mockImplementation(provider =>
+					provider === "typesafe" && !allowTypeSafeAuth ? false : hasAuth(provider),
+				),
+			);
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+
+			expect(registry.getAll("all")).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({ provider: "local", id: "falcon-h1-90m", kind: "tiny" }),
+					expect.objectContaining({ provider: "local", id: "kokoro", kind: "tts" }),
+					expect.objectContaining({ provider: "local", id: "whisper-base", kind: "stt" }),
+					expect.objectContaining({ provider: "web", id: "duckduckgo", kind: "search" }),
+					expect.objectContaining({ provider: "typesafe", id: "jev-latest", kind: "judge" }),
+				]),
+			);
+			expect(registry.getAvailable("tiny")).toContainEqual(
+				expect.objectContaining({ provider: "local", id: "falcon-h1-90m" }),
+			);
+			expect(registry.getAvailable("tts")).toContainEqual(
+				expect.objectContaining({ provider: "local", id: "kokoro" }),
+			);
+			expect(registry.getAvailable("stt")).toContainEqual(
+				expect.objectContaining({ provider: "local", id: "whisper-base" }),
+			);
+			expect(registry.getAvailable("search")).toContainEqual(
+				expect.objectContaining({ provider: "web", id: "duckduckgo" }),
+			);
+			expect(registry.getAvailable("judge").some(model => model.provider === "typesafe")).toBe(false);
+			expect(registry.getAvailable("all").some(model => model.provider === "typesafe")).toBe(false);
+
+			authStorage.setRuntimeApiKey("typesafe", "typesafe-test-key");
+			allowTypeSafeAuth = true;
+			expect(registry.getAvailable("judge")).toContainEqual(
+				expect.objectContaining({ provider: "typesafe", id: "jev-latest" }),
+			);
+			expect(registry.getAvailable("all")).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({ provider: "local", id: "falcon-h1-90m" }),
+					expect.objectContaining({ provider: "web", id: "duckduckgo" }),
+					expect.objectContaining({ provider: "typesafe", id: "jev-latest" }),
+				]),
+			);
+		});
+
+		test("keeps image and speech fallback runners across authoritative chat cache and refresh", async () => {
+			authStorage.setRuntimeApiKey("deepinfra", "deepinfra-test-key");
+			const settings = Settings.isolated({
+				modelRoles: { image: "deepinfra/missing-image", speech: "deepinfra/missing-speech" },
+				"retry.fallbackChains": {
+					image: ["deepinfra/black-forest-labs/FLUX-2-pro"],
+					speech: ["deepinfra/hexgrad/Kokoro-82M"],
+				},
+			});
+			const cachedChat = buildModel({
+				id: "cached-chat",
+				name: "Cached Chat",
+				provider: "deepinfra",
+				api: "openai-completions",
+				baseUrl: "https://api.deepinfra.com/v1/openai",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 32_000,
+				maxTokens: 4096,
+			});
+			writeModelCache(
+				"deepinfra",
+				Date.now(),
+				[cachedChat],
+				true,
+				fingerprintStaticModels(getBundledModels("deepinfra"), true),
+				path.join(tempDir, "models.db"),
+			);
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+				settings,
+				fetch: async () => Response.json({ data: [] }),
+			});
+			const runnerRoutes = () =>
+				["image", "speech"].flatMap(role =>
+					resolveRoleChain(role, settings, roleCandidatePool(role, settings, registry)).map(
+						({ model }) => `${model.provider}/${model.id}`,
+					),
+				);
+			const expectedRoutes = ["deepinfra/black-forest-labs/FLUX-2-pro", "deepinfra/hexgrad/Kokoro-82M"];
+
+			expect(runnerRoutes()).toEqual(expectedRoutes);
+			expect(
+				registry
+					.getAll()
+					.filter(model => model.provider === "deepinfra")
+					.map(model => model.id),
+			).toEqual([cachedChat.id]);
+			expect(runnerRoutes()).toEqual(expectedRoutes);
+
+			await registry.refreshProvider("deepinfra", "online");
+
+			expect(runnerRoutes()).toEqual(expectedRoutes);
+			expect(registry.getAll().filter(model => model.provider === "deepinfra")).toEqual([]);
+		});
+
+		test("disabled runner providers remain excluded from available kind and all pools", () => {
+			authStorage.setRuntimeApiKey("typesafe", "typesafe-test-key");
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+				settings: Settings.isolated({ disabledProviders: ["local", "web", "typesafe"] }),
+			});
+
+			for (const kind of ["tiny", "tts", "stt", "search", "judge", "all"] as const) {
+				expect(
+					registry.getAvailable(kind).some(model => ["local", "web", "typesafe"].includes(model.provider)),
+				).toBe(false);
+			}
+		});
+	});
+
 	describe("OpenRouter routed suffix fallback", () => {
 		let registry: ModelRegistry;
 		beforeAll(() => {
@@ -353,18 +493,18 @@ describe("ModelRegistry", () => {
 			}
 		});
 
-		test("overriding headers merges with model headers", () => {
+		test("overriding headers merges with model headers", async () => {
 			const anthropicModels = getModelsForProvider(anthropicProxyHeaders, "anthropic");
 			for (const model of anthropicModels) {
-				expect(model.headers?.["X-Custom-Header"]).toBe("custom-value");
+				expect((await anthropicProxyHeaders.resolveModelHeaders(model))?.["X-Custom-Header"]).toBe("custom-value");
 			}
 		});
 
-		test("headers-only override applies to built-in models", () => {
+		test("headers-only override applies to built-in models", async () => {
 			const anthropicModels = getModelsForProvider(anthropicHeadersOnly, "anthropic");
 			expect(anthropicModels.length).toBeGreaterThan(1);
 			for (const model of anthropicModels) {
-				expect(model.headers?.["X-Custom-Header"]).toBe("custom-only");
+				expect((await anthropicHeadersOnly.resolveModelHeaders(model))?.["X-Custom-Header"]).toBe("custom-only");
 			}
 		});
 
@@ -375,20 +515,21 @@ describe("ModelRegistry", () => {
 			expect(model?.supportsComputerUse).toBe(false);
 		});
 
-		test("provider header lookup excludes unrelated model overrides", () => {
-			expect(xaiModelScopedHeaders.find("xai", otherXaiModelId)?.headers?.["X-Model-Tenant"]).toBe(
+		test("provider header lookup excludes unrelated model overrides", async () => {
+			const model = xaiModelScopedHeaders.find("xai", otherXaiModelId);
+			expect(model && (await xaiModelScopedHeaders.resolveModelHeaders(model))?.["X-Model-Tenant"]).toBe(
 				"other-model-tenant",
 			);
-			expect({ ...xaiModelScopedHeaders.getProviderHeaders("xai") }).toEqual({
+			expect({ ...(await xaiModelScopedHeaders.getProviderHeaders("xai")) }).toEqual({
 				"X-Provider-Tenant": "search-tenant",
 			});
 		});
 
-		test("authHeader override applies bearer auth to built-in models without custom models", () => {
+		test("authHeader override applies bearer auth to built-in models without custom models", async () => {
 			const anthropicModels = getModelsForProvider(anthropicAuthHeader, "anthropic");
 			expect(anthropicModels.length).toBeGreaterThan(1);
 			for (const model of anthropicModels) {
-				expect(model.headers?.Authorization).toBe("Bearer issue-929-key");
+				expect((await anthropicAuthHeader.resolveModelHeaders(model))?.Authorization).toBe("Bearer issue-929-key");
 			}
 		});
 
@@ -1241,6 +1382,154 @@ describe("ModelRegistry", () => {
 			});
 		});
 
+		describe("provider transport on custom models", () => {
+			const customModel = {
+				id: "transport-fixture",
+				name: "Transport Fixture",
+				api: "openai-completions" as const,
+				reasoning: false,
+				input: ["text" as const],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 32000,
+				maxTokens: 4000,
+				headers: { "X-Route": "model" },
+			};
+
+			async function loadRegistry(transport?: "pi-native", modelBaseUrl?: string): Promise<ModelRegistry> {
+				const modelsPath = path.join(tempDir, "models.yml");
+				await Bun.write(
+					modelsPath,
+					Bun.YAML.stringify({
+						providers: {
+							openai: {
+								baseUrl: "https://gateway.example",
+								apiKey: "gateway-bearer",
+								api: "openai-completions",
+								...(transport && { transport }),
+								headers: { "X-Route": "provider" },
+								models: [{ ...customModel, ...(modelBaseUrl && { baseUrl: modelBaseUrl }) }],
+							},
+						},
+					}),
+				);
+				return new ModelRegistry(authStorage, modelsPath);
+			}
+
+			async function requestModel(registry: ModelRegistry, model: Model | undefined, native: boolean) {
+				if (!model) throw new Error("custom transport fixture was not loaded");
+				let request: Request | undefined;
+				const fetch: FetchImpl = async (input, init) => {
+					request = input instanceof Request ? new Request(input, init) : new Request(String(input), init);
+					const events = native
+						? [
+								{
+									type: "done",
+									reason: "stop",
+									message: {
+										role: "assistant",
+										api: "openai-completions",
+										provider: "openai",
+										model: customModel.id,
+										content: [{ type: "text", text: "OK" }],
+										usage: {
+											input: 1,
+											output: 1,
+											cacheRead: 0,
+											cacheWrite: 0,
+											totalTokens: 2,
+											cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+										},
+										stopReason: "stop",
+										timestamp: 0,
+									},
+								},
+							]
+						: [
+								{
+									id: "chatcmpl-transport-fixture",
+									choices: [{ index: 0, delta: { role: "assistant", content: "OK" } }],
+								},
+								{
+									id: "chatcmpl-transport-fixture",
+									choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+									usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+								},
+							];
+					return new Response(
+						`${events.map(event => `data: ${JSON.stringify(event)}\n\n`).join("")}data: [DONE]\n\n`,
+						{ headers: { "Content-Type": "text/event-stream" } },
+					);
+				};
+				const result = await streamSimple(
+					model,
+					{ messages: [{ role: "user", content: "Reply OK.", timestamp: 0 }] },
+					{ apiKey: await registry.getApiKey(model), fetch },
+				).result();
+				if (!request) throw new Error("custom transport fixture did not make a request");
+				const body = (await request.json()) as Record<string, unknown>;
+				return { request, body, result };
+			}
+
+			test("new custom model uses native gateway routing instead of /chat/completions on lazy find", async () => {
+				const registry = await loadRegistry("pi-native");
+				const { request, body, result } = await requestModel(
+					registry,
+					registry.find("openai", customModel.id),
+					true,
+				);
+
+				expect(request.url).toBe("https://gateway.example/v1/pi/stream");
+				expect(request.method).toBe("POST");
+				expect(body.modelId).toBe(`openai/${customModel.id}`);
+				expect(body.stream).toBe(true);
+				expect(request.headers.get("Authorization")).toBe("Bearer gateway-bearer");
+				expect(request.headers.get("X-Route")).toBe("model");
+				expect(result.content).toEqual([{ type: "text", text: "OK" }]);
+				expect(result.stopReason).toBe("stop");
+			});
+
+			test("same-ID custom replacement sends native requests to the provider gateway, not its model baseUrl", async () => {
+				const bundledModel = buildModel({
+					...customModel,
+					provider: "openai",
+					baseUrl: "https://bundled.example/v1",
+				});
+				const originalGetBundledModels = catalogModels.getBundledModels;
+				spies.push(
+					spyOn(catalogModels, "getBundledModels").mockImplementation(provider =>
+						provider === "openai" ? [bundledModel] : originalGetBundledModels(provider),
+					),
+				);
+				const registry = await loadRegistry("pi-native", "https://model.example/v1");
+				// A fresh full snapshot must not reuse a model already composed by find().
+				const model = registry.getAll().find(model => model.provider === "openai" && model.id === customModel.id);
+				const { request, body, result } = await requestModel(registry, model, true);
+
+				expect(request.url).toBe("https://gateway.example/v1/pi/stream");
+				expect(body.modelId).toBe(`openai/${customModel.id}`);
+				expect(request.headers.get("Authorization")).toBe("Bearer gateway-bearer");
+				expect(request.headers.get("X-Route")).toBe("model");
+				expect(result.content).toEqual([{ type: "text", text: "OK" }]);
+				expect(result.stopReason).toBe("stop");
+			});
+
+			test("without provider transport, custom model keeps /chat/completions at its explicit model baseUrl", async () => {
+				const registry = await loadRegistry(undefined, "https://model.example/v1");
+				const { request, body, result } = await requestModel(
+					registry,
+					registry.find("openai", customModel.id),
+					false,
+				);
+
+				expect(request.url).toBe("https://model.example/v1/chat/completions");
+				expect(body.model).toBe(customModel.id);
+				expect(body.modelId).toBeUndefined();
+				expect(request.headers.get("X-Route")).toBe("model");
+				expect(result.content).toEqual(expect.arrayContaining([{ type: "text", text: "OK" }]));
+				expect(result.stopReason).toBe("stop");
+			});
+		});
+
 		test("custom provider with same name as built-in merges with built-in models", () => {
 			const anthropicModels = getModelsForProvider(anthropicCustom, "anthropic");
 			// Built-in models still present, custom model merged in
@@ -1257,11 +1546,12 @@ describe("ModelRegistry", () => {
 			expect(sonnetModels[0].baseUrl).toBe("https://my-proxy.example.com/v1");
 		});
 
-		test("custom same-id replacement does not keep bundled headers", () => {
+		test("custom same-id replacement does not keep bundled headers", async () => {
 			const model = copilotReplace.find("github-copilot", "gpt-4o");
-			expect(model?.headers).toEqual({ "X-Proxy": "proxy" });
-			expect(model?.headers?.["User-Agent"]).toBeUndefined();
-			expect(model?.headers?.["Editor-Version"]).toBeUndefined();
+			const headers = model ? await copilotReplace.resolveModelHeaders(model) : undefined;
+			expect(headers).toEqual({ "X-Proxy": "proxy" });
+			expect(headers?.["User-Agent"]).toBeUndefined();
+			expect(headers?.["Editor-Version"]).toBeUndefined();
 		});
 
 		test("custom provider with same name as built-in does not affect other built-in providers", () => {
@@ -1455,8 +1745,9 @@ describe("ModelRegistry", () => {
 
 			const discovered = registry.find("openai", "gpt-5.5");
 			expect(discovered?.baseUrl).toBe("https://provider.example.com/v1");
-			expect(discovered?.headers?.["X-Provider"]).toBe("provider");
-			expect(discovered?.headers?.["X-Model"]).toBeUndefined();
+			const headers = discovered ? await registry.resolveModelHeaders(discovered) : undefined;
+			expect(headers?.["X-Provider"]).toBe("provider");
+			expect(headers?.["X-Model"]).toBeUndefined();
 		});
 
 		test("same-id replacement uses configured compat without bundled compat leak", () => {
@@ -1826,9 +2117,9 @@ describe("ModelRegistry", () => {
 			}
 		});
 
-		test("model override can add headers", () => {
+		test("model override can add headers", async () => {
 			const sonnet = getModelsForProvider(addHeaders, "openrouter").find(m => m.id === "anthropic/claude-sonnet-4");
-			expect(sonnet?.headers?.["X-Custom-Model-Header"]).toBe("value");
+			expect(sonnet && (await addHeaders.resolveModelHeaders(sonnet))?.["X-Custom-Model-Header"]).toBe("value");
 		});
 
 		test("refresh() picks up model override changes", async () => {
@@ -2471,7 +2762,7 @@ describe("ModelRegistry", () => {
 			expect(model?.guardrailTrace).toBeUndefined();
 		});
 
-		test("transport and header overrides apply to a synthesized ARN model", () => {
+		test("transport and header overrides apply to a synthesized ARN model", async () => {
 			const transportOverride = readonlyRegistry({
 				providers: {
 					"amazon-bedrock": {
@@ -2485,7 +2776,9 @@ describe("ModelRegistry", () => {
 			const model = transportOverride.find("amazon-bedrock", profileArn);
 			expect(model).toBeDefined();
 			expect(model?.transport).toBe("pi-native");
-			expect(model?.headers).toEqual({ "X-Custom-Header": "custom-value" });
+			expect(model && (await transportOverride.resolveModelHeaders(model))).toEqual({
+				"X-Custom-Header": "custom-value",
+			});
 			expect(model?.guardrailIdentifier).toBe("arn:aws:bedrock:eu-west-2:123456789012:guardrail/abcd1234");
 		});
 	});

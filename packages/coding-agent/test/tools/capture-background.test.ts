@@ -5,19 +5,18 @@ import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as evalIndex from "@oh-my-pi/pi-coding-agent/eval";
 import * as bashExecutor from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
-import { getThemeByName } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { getThemeByName } from "@oh-my-pi/pi-tui/theme";
 import { ArtifactManager } from "@oh-my-pi/pi-coding-agent/session/artifacts";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
-import { HubTool, hubToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/hub";
-import type { CoordinationDetails, JobSnapshot } from "@oh-my-pi/pi-coding-agent/tools/hub/types";
-import {
-	formatOutputNotice,
-	type OutputMeta,
-	wrapToolWithMetaNotice,
-} from "@oh-my-pi/pi-coding-agent/tools/output-meta";
+import { HubTool } from "@oh-my-pi/pi-coding-agent/tools/hub";
+import { hubToolRenderer } from "@oh-my-pi/pi-tui/tools/hub";
+import type { CoordinationDetails, JobSnapshot } from "@oh-my-pi/pi-tui/tools/hub";
+import { type OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -166,7 +165,13 @@ describe("capture failure across background and cancellation boundaries", () => 
 		const completeId = registerResult(manager, "complete-capture", complete);
 		try {
 			await Promise.all([manager.getJob(failedCaptureId)!.promise, manager.getJob(completeId)!.promise]);
-			const snapshot = await tool.execute("mixed", { op: "jobs" }, undefined, undefined, context);
+			const snapshot = await tool.execute(
+				"mixed",
+				{ op: "wait", ids: [failedCaptureId, completeId] },
+				undefined,
+				undefined,
+				context,
+			);
 			const text = snapshot.content.map(block => (block.type === "text" ? block.text : "")).join("\n");
 			expect(text).not.toContain(marker);
 			expect(text).toMatch(/artifact:\/\/\d+ for full report/);
@@ -194,7 +199,7 @@ describe("capture failure across background and cancellation boundaries", () => 
 
 			const next = await tool.execute("consumed", { op: "jobs" }, undefined, undefined, context);
 			const nextText = next.content.map(block => (block.type === "text" ? block.text : "")).join("\n");
-			expect(nextText).toContain("already delivered or recovered");
+			expect(nextText).toContain("## Jobs (2)");
 			expect(nextText).not.toContain("surviving preview");
 			expect(nextText).not.toContain(marker);
 			const reread = await reader.execute("recover-again", { path: `${artifactUrl}:raw:1-1000` });
@@ -231,9 +236,9 @@ describe("capture failure across background and cancellation boundaries", () => 
 			expect(text).not.toContain("artifact://");
 			expect(text.match(/artifact open failed/g)).toHaveLength(1);
 			expect(text.match(/artifact write failed/g)).toHaveLength(1);
-			expect(text).toContain("successful-command [bash] — completed");
-			expect(text).toContain("failed-command [bash] — failed");
-			expect(text).toContain("Command exited with code 7");
+			expect(text).toContain("`successful-command` [bash] — completed");
+			expect(text).toContain("`failed-command` [bash] — failed");
+			expect(text).not.toContain("Command exited with code 7");
 			const uiTheme = await getThemeByName("dark");
 			if (!uiTheme) throw new Error("Expected dark theme");
 			const persisted = JSON.parse(JSON.stringify(snapshot)) as typeof snapshot;
@@ -262,6 +267,7 @@ describe("capture failure across background and cancellation boundaries", () => 
 				status: "completed",
 				label: "short command",
 				durationMs: 1,
+				exitCode: 7,
 				artifactError: "open",
 				resultText: "short preview" + formatOutputNotice({ artifactError: "open" }),
 			},
@@ -287,6 +293,7 @@ describe("capture failure across background and cancellation boundaries", () => 
 				.map(line => Bun.stripANSI(line))
 				.join("\n");
 			expect(rendered.match(/artifact open failed/g)).toHaveLength(1);
+			expect(rendered).toContain("exit 7");
 			expect(rendered.match(/artifact write failed/g)).toHaveLength(1);
 		}
 	});

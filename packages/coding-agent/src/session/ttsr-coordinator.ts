@@ -57,6 +57,9 @@ export class TtsrCoordinator {
 	#retryToken = 0;
 	#resumePromise: Promise<void> | undefined;
 	#resumeResolve: (() => void) | undefined;
+	/** Rule names already announced per stream key: a delta match re-confirmed
+	 *  at finalization must not emit a second `ttsr_triggered` (#12184). */
+	#emittedTriggerRules = new Map<string, Set<string>>();
 
 	constructor(host: TtsrCoordinatorHost, manager: TtsrManager | undefined) {
 		this.#host = host;
@@ -97,8 +100,8 @@ export class TtsrCoordinator {
 	/** Advances repeat-after-gap tracking at turn end. */
 	onTurnEnd(): void {
 		this.#manager?.incrementMessageCount();
+		this.#emittedTriggerRules.clear();
 	}
-
 	/** Checks one streamed message update and reports whether TTSR consumed it by aborting. */
 	async checkMessageUpdate(event: AgentEvent): Promise<boolean> {
 		if (event.type !== "message_update" || !this.#manager?.hasRules()) return false;
@@ -299,6 +302,26 @@ export class TtsrCoordinator {
 		this.#host.sessionManager.appendTtsrInjection(uniqueRuleNames);
 	}
 
+	/**
+	 * Announce a trigger unless this stream already announced these rules.
+	 * A delta match re-confirmed at `toolcall_end` evaluates the same buffer
+	 * twice before the message_end cooldown commits; subscribers must see one
+	 * event per violation, not one per evaluation.
+	 */
+	#emitTriggerOnce(matchContext: TtsrMatchContext, matches: Rule[]): void {
+		const key = matchContext.streamKey;
+		if (key) {
+			let seen = this.#emittedTriggerRules.get(key);
+			if (matches.every(match => seen?.has(match.name))) return;
+			if (!seen) {
+				seen = new Set();
+				this.#emittedTriggerRules.set(key, seen);
+			}
+			for (const match of matches) seen.add(match.name);
+		}
+		this.#host.emitSessionEvent({ type: "ttsr_triggered", rules: matches }).catch(() => {});
+	}
+
 	#findAssistantIndex(targetTimestamp: number | undefined): number {
 		const messages = this.#host.agent.state.messages;
 		for (let index = messages.length - 1; index >= 0; index--) {
@@ -486,7 +509,7 @@ export class TtsrCoordinator {
 		const perToolId = shouldInterrupt ? undefined : matchedToolId;
 		if (perToolId) {
 			this.#addPerToolInjections(perToolId, matches);
-			this.#host.emitSessionEvent({ type: "ttsr_triggered", rules: matches }).catch(() => {});
+			this.#emitTriggerOnce(matchContext, matches);
 			return false;
 		}
 		this.#addPendingInjections(matches);
@@ -504,7 +527,7 @@ export class TtsrCoordinator {
 					)
 				: abortReason,
 		);
-		this.#host.emitSessionEvent({ type: "ttsr_triggered", rules: matches }).catch(() => {});
+		this.#emitTriggerOnce(matchContext, matches);
 		const retryToken = ++this.#retryToken;
 		const generation = this.#host.promptGeneration();
 		this.#host.schedulePostPromptTask(

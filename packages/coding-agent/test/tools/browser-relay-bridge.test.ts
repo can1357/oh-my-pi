@@ -143,6 +143,35 @@ async function claimTab(
 	await flush();
 }
 
+describe("RelayBridge target discovery", () => {
+	it("enumerates current eligible pages without attaching or claiming tabs", () => {
+		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [
+			tab({ tabId: 1 }),
+			tab({ tabId: 2, url: "about:blank" }),
+			tab({ tabId: 3, url: "chrome://extensions/" }),
+		]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		bridge.cdpMessage(connId, JSON.stringify({ id: 1, method: "Target.getTargets" }));
+		const first = cdp.messages.find(message => message.id === 1)?.result as
+			| { targetInfos: Array<{ targetId: string; type: string }> }
+			| undefined;
+		expect(first?.targetInfos.map(info => [info.targetId, info.type]).sort()).toEqual([
+			["PAGE1", "page"],
+			["PAGE2", "page"],
+		]);
+		bridge.extMessage(ext, JSON.stringify({ t: "tabRemoved", tabId: 2 }));
+		bridge.cdpMessage(connId, JSON.stringify({ id: 2, method: "Target.getTargets" }));
+		const second = cdp.messages.find(message => message.id === 2)?.result as
+			| { targetInfos: Array<{ targetId: string }> }
+			| undefined;
+		expect(second?.targetInfos.map(info => info.targetId)).toEqual(["PAGE1"]);
+		expect(ext.messages.filter(message => message.t === "rpc")).toEqual([]);
+	});
+});
+
 describe("RelayBridge tab grouping", () => {
 	it("groups nothing on hello or tab lifecycle events — only claimed tabs join the omp group", () => {
 		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });

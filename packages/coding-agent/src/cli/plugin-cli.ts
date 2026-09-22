@@ -18,7 +18,7 @@ import {
 	parsePluginId,
 } from "../extensibility/plugins/marketplace/index.js";
 import type { InstalledPlugin } from "../extensibility/plugins/types";
-import { theme } from "../modes/theme/theme";
+import { theme } from "@oh-my-pi/pi-tui/theme";
 
 // =============================================================================
 // Types
