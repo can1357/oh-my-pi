@@ -22,6 +22,13 @@ import {
 	type MessageCountOptions,
 	Tokenizer,
 } from "@oh-my-pi/pi-agent-core";
+import { findCutPoint as computeCutPoint, type CutPointResult } from "@oh-my-pi/pi-agent-core/compaction";
+import type { SessionEntry as CompactionSessionEntry } from "@oh-my-pi/pi-agent-core/compaction/entries";
+import {
+	createBranchSummaryMessage,
+	createCompactionSummaryMessage,
+	createCustomMessage,
+} from "@oh-my-pi/pi-agent-core/compaction/messages";
 import { type AuthCredential, SqliteAuthCredentialStore, type TSchema } from "@oh-my-pi/pi-ai";
 import { piEscapeRegexLiteral, piJoinPath } from "@oh-my-pi/pi-ai/providers/cursor-pi-args";
 import { getKeybindings, type Keybinding, Text } from "@oh-my-pi/pi-tui";
@@ -33,7 +40,7 @@ import {
 	parseFrontmatter as parseOmpFrontmatter,
 } from "@oh-my-pi/pi-utils";
 import { getPackageDir as getOmpPackageDir } from "../config";
-import { formatKeyHints } from "../config/keybindings";
+import { formatKeyHints } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { PromptTemplate } from "../config/prompt-templates";
 import { findScopedSettings, type SettingPath, Settings } from "../config/settings";
 import { EditTool } from "../edit";
@@ -51,16 +58,17 @@ import {
 	type TruncationResult,
 	truncateHead,
 	truncateTail,
-} from "../session/streaming-output";
+} from "@oh-my-pi/pi-tui/tools/streaming-output";
+import type { SessionEntry } from "../session/session-entries";
 import type { Tool, ToolSession } from "../tools";
 import { BashTool } from "../tools/bash";
 import { GlobTool } from "../tools/glob";
 import { GrepTool } from "../tools/grep";
 import { ReadTool } from "../tools/read";
-import { formatBytes } from "../tools/render-utils";
+import { formatBytes } from "@oh-my-pi/pi-tui/render/render-utils";
 import { WriteTool } from "../tools/write";
 import { EventBus } from "../utils/event-bus";
-import { convertImageToPng } from "../utils/image-loading";
+import { convertImageToPng } from "@oh-my-pi/pi-tui/chat/image-loading";
 import { discoverExtensionPaths, loadExtensionFromFactory, loadExtensions } from "./extensions";
 import { ExtensionRuntime } from "./extensions/loader";
 import type {
@@ -1506,6 +1514,74 @@ export function estimateTokens(message: AgentMessage, tokenizer?: Tokenizer, opt
 	return (tokenizer ?? legacyTokenizer).countMessage(message, options);
 }
 
+// Legacy pi's `@earendil-works/pi-coding-agent` also exported `findCutPoint` and
+// `sessionEntryToContextMessages` from its package root (upstream Pi 0.84.2
+// public API). In omp `findCutPoint` moved to `@oh-my-pi/pi-agent-core/compaction`
+// AND grew a required `Tokenizer` parameter, and `sessionEntryToContextMessages`
+// has no canonical equivalent, so neither reaches the barrel below and legacy
+// extensions importing them (e.g. NVlabs/SoL-Pi's online-context-compact) fail
+// Bun's static export check during validation (issue #11796).
+
+/**
+ * Legacy `findCutPoint(entries, startIndex, endIndex, keepRecentTokens)` export.
+ * The canonical helper now requires an explicit `Tokenizer`; legacy callers use
+ * the tokenizer-less 4-arg shape, so adapt it with the shared model-agnostic
+ * tokenizer (mirroring `estimateTokens`). A raw re-export would instead misread
+ * the caller's `startIndex` as the tokenizer argument at runtime.
+ */
+export function findCutPoint(
+	entries: SessionEntry[],
+	startIndex: number,
+	endIndex: number,
+	keepRecentTokens: number,
+): CutPointResult {
+	// The coding-agent `SessionEntry` union is a superset of the compaction
+	// module's (the package split makes them nominally distinct); findCutPoint
+	// only walks message entries, so the extra variants are inert.
+	return computeCutPoint(entries as CompactionSessionEntry[], legacyTokenizer, startIndex, endIndex, keepRecentTokens);
+}
+
+/**
+ * Legacy `sessionEntryToContextMessages(entry)` export: project one session entry
+ * into its LLM/runtime messages. Plain custom/state entries do not participate in
+ * context and yield `[]`. omp's `buildSessionContext` only projects whole branches,
+ * so this ports upstream Pi's per-entry mapper.
+ */
+export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage[] {
+	if (entry.type === "message") {
+		const message = entry.message;
+		if (
+			(message.role === "user" ||
+				message.role === "assistant" ||
+				message.role === "toolResult" ||
+				message.role === "custom") &&
+			message.content == null
+		) {
+			return [{ ...message, content: [] }];
+		}
+		return [message];
+	}
+	if (entry.type === "custom_message") {
+		return [
+			createCustomMessage(
+				entry.customType,
+				entry.content ?? [],
+				entry.display,
+				entry.details,
+				entry.timestamp,
+				entry.attribution,
+			),
+		];
+	}
+	if (entry.type === "branch_summary" && entry.summary) {
+		return [createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp)];
+	}
+	if (entry.type === "compaction") {
+		return [createCompactionSummaryMessage(entry.summary, entry.tokensBefore, entry.timestamp)];
+	}
+	return [];
+}
+
 // Same barrel gap for two more legacy package-root exports: pi re-exported the
 // `CONFIG_DIR_NAME` constant and the CLI parser `parseArgs`. In omp
 // `CONFIG_DIR_NAME` lives in `@oh-my-pi/pi-utils` and `parseArgs` in
@@ -1515,7 +1591,7 @@ export { CONFIG_DIR_NAME } from "@oh-my-pi/pi-utils";
 export { parseArgs } from "../cli/args";
 
 export * from "../index";
-export { formatBytes as formatSize } from "../tools/render-utils";
+export { formatBytes as formatSize } from "@oh-my-pi/pi-tui/render/render-utils";
 export { copyToClipboard } from "../utils/clipboard";
 export { Type } from "./legacy-typebox";
 

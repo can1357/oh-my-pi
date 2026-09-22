@@ -51,6 +51,125 @@ describe("error-id classification", () => {
 		}
 	});
 
+	it.each([
+		"Transport error reading Codex response body: error decoding response body",
+		"Anthropic stream error (api_error): Transport error reading Codex response body: error decoding response body",
+	])("retries Codex HTTP body transport failures: %s", errorMessage => {
+		const error = new AIError.ProviderResponseError(errorMessage, { provider: "anthropic", kind: "output" });
+		for (const id of [
+			AIError.classify(error, "anthropic-messages"),
+			AIError.classifyMessage(message({ errorMessage })),
+		]) {
+			expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
+			expect(AIError.is(id, AIError.Flag.UsageLimit)).toBe(false);
+			expect(AIError.retriable(id)).toBe(true);
+		}
+		expect(AIError.isProviderRetryableError(error)).toBe(true);
+		expect(AIError.isStreamReadErrorText(errorMessage)).toBe(false);
+	});
+
+	it.each([400, 401, 403])("keeps Codex body-read diagnostics on HTTP %s terminal", errorStatus => {
+		const errorMessage = "Transport error reading Codex response body: error decoding response body";
+		const error = new AIError.ProviderHttpError(errorMessage, errorStatus);
+		const wrapped = new AIError.ProviderHttpError("Request rejected", errorStatus, {
+			cause: new Error(errorMessage),
+		});
+		for (const id of [
+			AIError.classify(error, "anthropic-messages"),
+			AIError.classify(wrapped, "anthropic-messages"),
+			AIError.classifyMessage(message({ errorMessage, errorStatus })),
+			AIError.classifyMessage(message({ errorMessage: `${errorStatus} ${errorMessage}` })),
+		]) {
+			expect(AIError.is(id, AIError.Flag.Transient)).toBe(false);
+			expect(AIError.retriable(id)).toBe(false);
+		}
+		expect(AIError.isProviderRetryableError(error)).toBe(false);
+	});
+
+	it.each([408, 429, 500])("allows Codex body-read recovery on HTTP %s", errorStatus => {
+		const errorMessage = "Transport error reading Codex response body: error decoding response body";
+		const error = new AIError.ProviderHttpError(errorMessage, errorStatus);
+		expect(AIError.retriable(AIError.classifyMessage(message({ errorMessage, errorStatus })))).toBe(true);
+		expect(AIError.isProviderRetryableError(error)).toBe(true);
+	});
+
+	it.each([
+		"error decoding response body",
+		"Anthropic stream error (api_error): invalid response",
+		"Failed to parse tool call arguments as JSON",
+		"Anthropic stream error (authentication_error): 401 Unauthorized",
+	])("does not infer a transport retry from unrelated failures: %s", errorMessage => {
+		const error = new AIError.ProviderResponseError(errorMessage, { provider: "anthropic", kind: "output" });
+		const id = AIError.classifyMessage(message({ errorMessage }));
+		expect(AIError.is(id, AIError.Flag.Transient)).toBe(false);
+		expect(AIError.retriable(id)).toBe(false);
+		expect(AIError.isProviderRetryableError(error)).toBe(false);
+	});
+
+	it("classifies bare stream-truncation diagnostics as transient + retryable", () => {
+		for (const errorMessage of ["unexpected EOF", "unexpected end of json input", "eof while parsing"]) {
+			const id = AIError.classifyMessage(message({ errorMessage }));
+			expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
+			expect(AIError.retriable(id)).toBe(true);
+		}
+	});
+
+	it("keeps a truncation phrase riding on a terminal 4xx terminal", () => {
+		const messages = [
+			message({ errorStatus: 400, errorMessage: "unexpected EOF" }),
+			message({ errorMessage: "HTTP 400: unexpected EOF" }),
+			message({ errorMessage: "400 Bad Request: eof while parsing" }),
+		];
+		for (const assistant of messages) {
+			const id = AIError.classifyMessage(assistant);
+			expect(AIError.is(id, AIError.Flag.Transient)).toBe(false);
+			expect(AIError.retriable(id)).toBe(false);
+		}
+	});
+
+	it("keeps a truncation on a retryable 408/429 status transient + retryable", () => {
+		for (const errorStatus of [408, 429]) {
+			const id = AIError.classifyMessage(message({ errorStatus, errorMessage: "unexpected EOF" }));
+			expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
+			expect(AIError.retriable(id)).toBe(true);
+		}
+	});
+
+	it("keeps low-signal truncation words unclassified on persisted text", () => {
+		for (const errorMessage of ["truncated", "end of file"]) {
+			const id = AIError.classifyMessage(message({ errorMessage }));
+			expect(AIError.is(id, AIError.Flag.Transient)).toBe(false);
+			expect(AIError.retriable(id)).toBe(false);
+		}
+	});
+
+	it.each([
+		"stream error: stream disconnected before completion: stream closed before response.completed",
+		"Upstream response stream was interrupted",
+		"Upstream stream ended before terminal chunk",
+		"Client network socket disconnected before secure TLS connection was established",
+	])("classifies statusless stream-drop families as transient + retryable on both paths: %s", errorMessage => {
+		const id = AIError.classifyMessage(message({ errorMessage }));
+		expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
+		expect(AIError.retriable(id)).toBe(true);
+		expect(AIError.isProviderRetryableError(new Error(errorMessage))).toBe(true);
+	});
+
+	it("keeps a stream-drop phrase riding on a terminal 4xx terminal", () => {
+		const errorMessage = "stream closed before response.completed";
+		const id = AIError.classifyMessage(message({ errorStatus: 400, errorMessage }));
+		expect(AIError.is(id, AIError.Flag.Transient)).toBe(false);
+		expect(AIError.retriable(id)).toBe(false);
+		expect(AIError.isProviderRetryableError(new AIError.ProviderHttpError(errorMessage, 400))).toBe(false);
+	});
+
+	it("keeps Flag.Timeout when a timeout message also reads as a truncation", () => {
+		const id = AIError.classifyMessage(message({ errorMessage: "read timed out: unexpected EOF" }));
+		expect(AIError.is(id, AIError.Flag.Timeout)).toBe(true);
+		expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
+		expect(AIError.retriable(id)).toBe(true);
+	});
+
 	it("keeps authenticated connection rejections non-retryable", () => {
 		const assistant = message({
 			errorMessage: "Unable to connect: 401 Unauthorized",
@@ -147,6 +266,34 @@ describe("error-id classification", () => {
 		expect(AIError.codexChatGPTAccountPolicyModel(oversized)).toBeUndefined();
 		expect(AIError.is(AIError.classifyMessage(oversized), AIError.Flag.AccountPolicy)).toBe(false);
 	});
+
+	it("classifies Anthropic permission and oauth organization policy denials as account policy without content blocked", () => {
+		const errorMessage =
+			'403 {"type":"error","error":{"type":"permission_error","message":"OAuth authentication is currently not allowed for this organization.","details":{"error_code":"oauth_not_allowed_for_organization"}},"request_id":"req_011CfDQosvzzsyor4jWjLsz8"}';
+		const denial = message({
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			errorStatus: 403,
+			errorMessage,
+		});
+		const denialId = AIError.classifyMessage(denial);
+		expect(AIError.is(denialId, AIError.Flag.AccountPolicy)).toBe(true);
+		expect(AIError.is(denialId, AIError.Flag.ContentBlocked)).toBe(false);
+		expect(AIError.retriable(denialId)).toBe(false);
+		expect(AIError.isAccountPolicyError(denial)).toBe(true);
+		expect(AIError.isAuthRetryableError(denial)).toBe(true);
+
+		const typedError = new AIError.AnthropicApiError(403, errorMessage, new Headers(), {
+			code: "oauth_not_allowed_for_organization",
+		});
+		const classifiedTyped = AIError.classify(typedError, "anthropic-messages");
+		expect(AIError.is(classifiedTyped, AIError.Flag.AccountPolicy)).toBe(true);
+		expect(AIError.is(classifiedTyped, AIError.Flag.ContentBlocked)).toBe(false);
+		expect(AIError.isAccountPolicyError(typedError)).toBe(true);
+		expect(AIError.isAuthRetryableError(typedError)).toBe(true);
+	});
+
 	it("classifies only Cursor plan-gate resource exhaustion as account policy", () => {
 		for (const errorMessage of [
 			'Connect error resource_exhausted: Error [details: {"error":"ERROR_RATE_LIMITED_CHANGEABLE","details":{"title":"Named models unavailable","detail":"Free plans can only use Auto."}}]',

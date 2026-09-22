@@ -1,6 +1,6 @@
 {
   "name": "@oh-my-pi/pi-natives",
-  "version": "18.1.17",
+  "version": "18.2.9",
   "description": "Native Rust bindings for PDF conversion, audio, WebRTC, grep, clipboard, image processing, syntax highlighting, PTY, and shell operations via N-API",
   "type": "module",
   "homepage": "https://omp.sh",
@@ -70,20 +70,23 @@
   "exports": {
     ".": {
       "types": "./native/index.d.ts",
-      "import": "./native/index.js"
+      "import": "./native/index.js",
+      "default": "./native/index.js"
     },
     "./desktop": {
       "types": "./native/desktop.d.ts",
-      "import": "./native/desktop.js"
+      "import": "./native/desktop.js",
+      "default": "./native/desktop.js"
     },
     "./clipboard": {
       "types": "./native/clipboard.d.ts",
-      "import": "./native/clipboard.js"
-    }
-    ,
+      "import": "./native/clipboard.js",
+      "default": "./native/clipboard.js"
+    },
     "./vcs": {
       "types": "./native/vcs.d.ts",
-      "import": "./native/vcs.js"
+      "import": "./native/vcs.js",
+      "default": "./native/vcs.js"
     }
   }
 }

@@ -78,21 +78,27 @@ function requestOnSocket(
 		reject(new Error(`LSP mux ${request.method} timed out`));
 	}, timeoutMs);
 	const onData = (chunk: Buffer) => {
-		framer.push(chunk);
-		for (const text of framer.drain(() => {})) {
-			let message: LspJsonRpcResponse;
-			try {
-				message = JSON.parse(text);
-			} catch (error) {
+		try {
+			framer.push(chunk);
+			for (const text of framer.drain(() => {})) {
+				let message: LspJsonRpcResponse;
+				try {
+					message = JSON.parse(text);
+				} catch (error) {
+					cleanup();
+					reject(error instanceof Error ? error : new Error(String(error)));
+					return;
+				}
+				if (message.id !== request.id) continue;
 				cleanup();
-				reject(error instanceof Error ? error : new Error(String(error)));
+				if (message.error) reject(new Error(`LSP mux ${request.method} failed: ${message.error.message}`));
+				else resolve({ response: message, leftover: framer.remainder() });
 				return;
 			}
-			if (message.id !== request.id) continue;
+		} catch (error) {
 			cleanup();
-			if (message.error) reject(new Error(`LSP mux ${request.method} failed: ${message.error.message}`));
-			else resolve({ response: message, leftover: framer.remainder() });
-			return;
+			socket.destroy();
+			reject(error instanceof Error ? error : new Error(String(error)));
 		}
 	};
 	const onClose = () => {

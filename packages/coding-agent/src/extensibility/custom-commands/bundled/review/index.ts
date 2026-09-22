@@ -479,9 +479,13 @@ export class ReviewCommand implements CustomCommand {
 	constructor(private api: CustomCommandAPI) {}
 
 	async execute(args: string[], ctx: HookCommandContext): Promise<string | undefined> {
+		// api.cwd freezes at command-load time; after /move or /wt the live
+		// session cwd comes from the session manager (issue #12501).
+		const liveCwd = ctx.sessionManager?.getCwd?.() || this.api.cwd;
+		const api: CustomCommandAPI = liveCwd === this.api.cwd ? this.api : { ...this.api, cwd: liveCwd };
 		const parsedArgs = extractReviewPrRefFromArgs(args);
 		if (parsedArgs.prRef) {
-			return buildPrReviewPrompt(this.api, ctx, parsedArgs.prRef, parsedArgs.extraInstructions);
+			return buildPrReviewPrompt(api, ctx, parsedArgs.prRef, parsedArgs.extraInstructions);
 		}
 
 		const extraInstructions = parsedArgs.extraInstructions || undefined;
@@ -526,10 +530,10 @@ export class ReviewCommand implements CustomCommand {
 
 		switch (selectedChoice.kind) {
 			case "detected-pr":
-				return buildPrReviewPrompt(this.api, ctx, selectedChoice.ref, extraInstructions ?? "");
+				return buildPrReviewPrompt(api, ctx, selectedChoice.ref, extraInstructions ?? "");
 
 			case "base-branch": {
-				const branches = await getGitBranches(this.api);
+				const branches = await getGitBranches(api);
 				if (branches.length === 0) {
 					ctx.ui.notify("No git branches found", "error");
 					return undefined;
@@ -538,10 +542,10 @@ export class ReviewCommand implements CustomCommand {
 				const baseBranch = await ctx.ui.select("Select base branch to compare against", branches);
 				if (!baseBranch) return undefined;
 
-				const currentBranch = await getCurrentBranch(this.api);
+				const currentBranch = await getCurrentBranch(api);
 				let diffText: string;
 				try {
-					const repository = vcs.requireGit(this.api.cwd);
+					const repository = vcs.requireGit(api.cwd);
 					// PR-style review compares the merge base against the current
 					// branch (`base...head`), so base-only commits are excluded.
 					const mergeBase = await repository.mergeBase(baseBranch, currentBranch);
@@ -567,7 +571,7 @@ export class ReviewCommand implements CustomCommand {
 			}
 
 			case "uncommitted": {
-				const reviewDiff = await getUncommittedReviewDiff(this.api).catch(err => {
+				const reviewDiff = await getUncommittedReviewDiff(api).catch(err => {
 					ctx.ui.notify(`Failed to get diff: ${err instanceof Error ? err.message : String(err)}`, "error");
 					return undefined;
 				});
@@ -584,7 +588,7 @@ export class ReviewCommand implements CustomCommand {
 			}
 
 			case "commit": {
-				const commits = await getRecentCommits(this.api, 20);
+				const commits = await getRecentCommits(api, 20);
 				if (commits.length === 0) {
 					ctx.ui.notify("No commits found", "error");
 					return undefined;
@@ -597,7 +601,7 @@ export class ReviewCommand implements CustomCommand {
 
 				let diffText: string;
 				try {
-					const result = await vcs.requireGit(this.api.cwd).showCommit(hash);
+					const result = await vcs.requireGit(api.cwd).showCommit(hash);
 					diffText = result.data.toString("utf8");
 				} catch (err) {
 					ctx.ui.notify(`Failed to get commit: ${err instanceof Error ? err.message : String(err)}`, "error");
@@ -623,7 +627,7 @@ export class ReviewCommand implements CustomCommand {
 				);
 				if (!instructions?.trim()) return undefined;
 
-				const reviewDiff = await getUncommittedReviewDiff(this.api).catch(() => undefined);
+				const reviewDiff = await getUncommittedReviewDiff(api).catch(() => undefined);
 
 				if (reviewDiff?.diffText.trim()) {
 					const stats = parseDiff(reviewDiff.diffText);

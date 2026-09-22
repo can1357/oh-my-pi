@@ -339,9 +339,10 @@ impl CompiledPipeline {
 			stage7
 		};
 
-		// Stage 9: preserve the source when a keep-only filter removed every line.
-		// This prevents a successful query/diagnostic command's meaningful output
-		// from being replaced by the engine's generic "OK" sentinel.
+		// Stage 9: preserve the source when a keep-only filter removed every
+		// line. This prevents a successful query/diagnostic command's
+		// meaningful output from being replaced by the engine's generic "OK"
+		// sentinel.
 		if self.preserve_if_empty && stage8.trim().is_empty() {
 			return Cow::Borrowed(input);
 		}

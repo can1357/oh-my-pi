@@ -1,7 +1,6 @@
-import { type ApiKey, type ApiKeyResolver, type AuthStorage, withAuth } from "@oh-my-pi/pi-ai";
-import { $env } from "@oh-my-pi/pi-utils";
-import { resolveXAIHttpTransport, type XAIHttpProvider, type XAIHttpTransport } from "../../../lib/xai-http";
-import type { SearchCitation, SearchResponse, SearchSource, SearchUsage } from "../../../web/search/types";
+import { type Api, type AuthStorage, type Model, withAuth } from "@oh-my-pi/pi-ai";
+import type { XAIHttpTransport } from "../../../lib/xai-http";
+import type { SearchCitation, SearchResponse, SearchSource, SearchUsage } from "../types";
 import { SearchProviderError } from "../../../web/search/types";
 import { formatQuery, parseSearchQuery, type QuerySyntax } from "../query";
 import { clampNumResults } from "../utils";
@@ -10,14 +9,13 @@ import { SearchProvider } from "./base";
 import { classifyProviderHttpError, withHardTimeout } from "./utils";
 
 const XAI_DEFAULT_BASE_URL = "https://api.x.ai/v1";
-const XAI_WEB_SEARCH_MODEL = "grok-4.5";
-// grok-4.5 defaults reasoning.effort to "high"; xAI documents "low" for
-// latency-sensitive agentic use and simple tool calling
-// (docs.x.ai/developers/model-capabilities/text/reasoning). Web search is
-// latency-sensitive, so pin these calls low regardless of their configured timeout.
+// xAI web search is latency-sensitive, so keep reasoning effort low regardless
+// of the selected model's configured timeout.
 const XAI_WEB_SEARCH_REASONING_EFFORT = "low";
 const DEFAULT_NUM_RESULTS = 10;
 const MAX_NUM_RESULTS = 30;
+/** Messages at least this long are treated as substantive content, not relay narration. */
+const SUBSTANTIVE_MIN_CHARS = 300;
 
 interface XAIUrlCitationAnnotation {
 	type?: string;
@@ -45,6 +43,7 @@ interface XAIWebSearchSource {
 
 interface XAIResponseOutputItem {
 	type?: string;
+	phase?: "commentary" | "final_answer" | null;
 	content?: XAIResponseContentPart[] | null;
 	annotations?: XAIUrlCitationAnnotation[] | null;
 	action?: { sources?: XAIWebSearchSource[] | null } | null;
@@ -119,7 +118,7 @@ function buildRequestBody(params: SearchParams): Record<string, unknown> {
 	}
 
 	const body: Record<string, unknown> = {
-		model: XAI_WEB_SEARCH_MODEL,
+		model: params.model.id,
 		input: [
 			{ role: "system", content: params.systemPrompt },
 			{ role: "user", content: query },
@@ -266,23 +265,70 @@ function collectWebSearchSources(
 }
 
 function parseAnswer(response: XAIResponsesResponse): string | undefined {
-	const topLevelText = response.output_text?.trim();
-	if (topLevelText) return topLevelText;
-
-	const answerParts: string[] = [];
 	const output = Array.isArray(response.output) ? response.output : [];
-	for (const item of output) {
-		if (!item || typeof item !== "object") continue;
-		const content = Array.isArray(item.content) ? item.content : [];
-		for (const part of content) {
-			if (!part || typeof part !== "object") continue;
-			const text = part.output_text ?? part.text;
-			if (text?.trim()) answerParts.push(text.trim());
-		}
-	}
+	// A top-level aggregate can contain narration even without explicit phases.
+	// Prefer filtered messages; use the aggregate only when no messages exist.
 
-	const answer = answerParts.join("\n").trim();
-	return answer ? answer : undefined;
+	// Explicit phases take precedence. Unphased relay messages use the last
+	// message/citation/length heuristic; keep commentary positions so removing
+	// one cannot promote preceding unphased narration into a final answer.
+	const messages: Array<{ texts: string[]; hasCitations: boolean; phase: XAIResponseOutputItem["phase"] }> = [];
+	for (const item of output) {
+		if (!item || typeof item !== "object" || (item.type != null && item.type !== "message")) continue;
+		const content = Array.isArray(item.content) ? item.content : null;
+		if (content === null && item.type == null) continue;
+		// Relays cast external JSON into the typed interface; normalize the
+		// phase to a recognized value so "" or unknown strings cannot strand a
+		// message outside both the final_answer branch and the unphased
+		// heuristic.
+		const phase = item.phase === "commentary" || item.phase === "final_answer" ? item.phase : null;
+		const entry = { texts: [] as string[], hasCitations: false, phase };
+		for (const part of content ?? []) {
+			if (!part || typeof part !== "object") continue;
+			const text = (part.output_text ?? part.text)?.trim();
+			if (text) entry.texts.push(text);
+			for (const annotation of Array.isArray(part.annotations) ? part.annotations : []) {
+				if (annotation?.type === "url_citation" && typeof annotation.url === "string" && annotation.url.trim()) {
+					entry.hasCitations = true;
+					break;
+				}
+			}
+		}
+		for (const annotation of Array.isArray(item.annotations) ? item.annotations : []) {
+			if (annotation?.type === "url_citation" && typeof annotation.url === "string" && annotation.url.trim()) {
+				entry.hasCitations = true;
+				break;
+			}
+		}
+		messages.push(entry);
+	}
+	const hasFinalAnswerContent = messages.some(m => m.phase === "final_answer" && m.texts.length > 0);
+	if (!hasFinalAnswerContent) {
+		// A tagged-but-empty final is authoritative: the relay uses the phase
+		// protocol and produced no answer, so the aggregate — which mixes the
+		// narration in — must not be promoted either.
+		if (messages.some(m => m.phase === "final_answer")) return undefined;
+		// Without authoritative phased content, an empty final message means
+		// no answer — do not promote heuristic-kept earlier content.
+		const lastMessage = messages.at(-1);
+		if (!lastMessage) return response.output_text?.trim() || undefined;
+		if (lastMessage.texts.length === 0 && lastMessage.phase !== "commentary") return undefined;
+	}
+	const kept = hasFinalAnswerContent
+		? messages.filter(entry => entry.phase === "final_answer")
+		: messages.filter(
+				(entry, index) =>
+					entry.phase == null &&
+					(index === messages.length - 1 ||
+						entry.hasCitations ||
+						entry.texts.join("").length >= SUBSTANTIVE_MIN_CHARS),
+			);
+
+	const answer = kept
+		.flatMap(entry => entry.texts)
+		.join("\n")
+		.trim();
+	return answer || undefined;
 }
 
 function parseUsage(usage: XAIResponsesUsage | null | undefined): SearchUsage | undefined {
@@ -310,7 +356,11 @@ function applyResultCap(
 	};
 }
 
-function parseResponse(response: XAIResponsesResponse, resultCap: number): SearchResponse {
+function parseResponse(
+	response: XAIResponsesResponse,
+	resultCap: number,
+	authMode: "api_key" | "oauth",
+): SearchResponse {
 	const sources: SearchSource[] = [];
 	const citations: SearchCitation[] = [];
 	const seenUrls = new Set<string>();
@@ -345,66 +395,30 @@ function parseResponse(response: XAIResponsesResponse, resultCap: number): Searc
 		usage: parseUsage(response.usage),
 		model: response.model,
 		requestId: response.id,
-		authMode: "api_key",
+		authMode,
 	};
-}
-
-/**
- * Prefer `xai-oauth` only when its resolver cannot be shadowed by the shared
- * `XAI_API_KEY` fallback before reaching a lower-priority dedicated source.
- */
-function shouldPreferXAIOAuth(authStorage: AuthStorage): boolean {
-	if ($env.XAI_OAUTH_TOKEN) return true;
-
-	const origin = authStorage.getCredentialOrigin("xai-oauth");
-	if (!origin || origin.kind === "env") return false;
-	if ((origin.kind === "api_key" || origin.kind === "fallback") && $env.XAI_API_KEY) return false;
-	return true;
-}
-
-interface XAIWebSearchAuth {
-	provider: XAIHttpProvider;
-	keyOrResolver: ApiKey;
-}
-
-function resolveXAIWebSearchAuth(params: SearchParams): XAIWebSearchAuth {
-	const xaiResolver = params.authStorage.resolver("xai", {
-		sessionId: params.sessionId,
-	});
-	const xaiOAuthOrigin = params.authStorage.getCredentialOrigin("xai-oauth");
-	if (!shouldPreferXAIOAuth(params.authStorage)) {
-		return { provider: "xai", keyOrResolver: xaiResolver };
-	}
-
-	const xaiOAuthResolver = params.authStorage.resolver("xai-oauth", {
-		sessionId: params.sessionId,
-	});
-	const keyOrResolver: ApiKeyResolver = async ctx => {
-		const xaiOAuthKey = await xaiOAuthResolver(ctx);
-		if (xaiOAuthKey) {
-			const borrowedSharedEnvKey =
-				xaiOAuthOrigin?.kind === "oauth" &&
-				Boolean($env.XAI_API_KEY) &&
-				xaiOAuthKey === $env.XAI_API_KEY &&
-				xaiOAuthKey !== $env.XAI_OAUTH_TOKEN;
-			if (!borrowedSharedEnvKey) return xaiOAuthKey;
-		}
-		return xaiResolver(ctx);
-	};
-	return { provider: "xai-oauth", keyOrResolver };
 }
 
 /** Execute xAI Responses API web search. */
 export async function searchXAI(params: SearchParams): Promise<SearchResponse> {
-	const auth = resolveXAIWebSearchAuth(params);
-	const transport = params.modelRegistry
-		? resolveXAIHttpTransport(params.modelRegistry, auth.provider, XAI_WEB_SEARCH_MODEL)
-		: { baseURL: XAI_DEFAULT_BASE_URL };
+	if (params.model.provider !== "xai" && params.model.provider !== "xai-oauth") {
+		throw new SearchProviderError(
+			"xai",
+			`Selected model ${params.model.provider}/${params.model.id} is not an xAI model`,
+			400,
+		);
+	}
+	const transport: XAIHttpTransport = {
+		baseURL: params.model.baseUrl,
+		headers: await params.modelRegistry.resolveModelHeaders(params.model, params.signal),
+	};
 	const customEndpoint = transport.baseURL.replace(/\/+$/, "") !== XAI_DEFAULT_BASE_URL;
-	const credentialOrigin = params.authStorage.getCredentialOrigin(auth.provider);
+	const credentialOrigin = params.authStorage.getCredentialOrigin(params.model.provider);
+	const hasCommandBackedKey = params.modelRegistry.hasCommandBackedApiKey(params.model.provider);
 	if (
 		customEndpoint &&
-		auth.provider === "xai-oauth" &&
+		params.model.provider === "xai-oauth" &&
+		!hasCommandBackedKey &&
 		(credentialOrigin?.kind === "oauth" || credentialOrigin?.kind === "env")
 	) {
 		throw new SearchProviderError(
@@ -412,16 +426,27 @@ export async function searchXAI(params: SearchParams): Promise<SearchResponse> {
 			`Refusing to send official xAI OAuth credentials to custom endpoint ${transport.baseURL}. Configure an API key for provider "xai-oauth".`,
 		);
 	}
-	const keyOrResolver: ApiKey = customEndpoint
-		? params.authStorage.resolver(auth.provider, { sessionId: params.sessionId })
-		: auth.keyOrResolver;
-
+	const keyOrResolver = params.modelRegistry.resolver(params.model, params.sessionId);
 	const resultCap = clampNumResults(params.numSearchResults ?? params.limit, DEFAULT_NUM_RESULTS, MAX_NUM_RESULTS);
-	const response = await withAuth(keyOrResolver, (key: string) => callXAIResponses(key, params, transport), {
-		signal: params.signal,
-		missingKeyMessage: 'xAI credentials not found. Set XAI_API_KEY or configure an API key for provider "xai".',
-	});
-	const parsed = parseResponse(response, resultCap);
+	const response = await withAuth(
+		keyOrResolver,
+		async key => {
+			const requestTransport: XAIHttpTransport = {
+				baseURL: params.model.baseUrl,
+				headers: await params.modelRegistry.resolveModelHeaders(params.model, params.signal),
+			};
+			return callXAIResponses(key, params, requestTransport);
+		},
+		{
+			signal: params.signal,
+			missingKeyMessage: `xAI credentials not found for selected provider "${params.model.provider}".`,
+		},
+	);
+	const authMode =
+		params.model.provider === "xai-oauth" && (credentialOrigin?.kind === "oauth" || credentialOrigin?.kind === "env")
+			? "oauth"
+			: "api_key";
+	const parsed = parseResponse(response, resultCap, authMode);
 	if (!parsed.answer && parsed.sources.length === 0) {
 		throw new SearchProviderError("xai", "xAI web_search returned no answer or sources", 502);
 	}
@@ -433,8 +458,8 @@ export class XAIProvider extends SearchProvider {
 	readonly id = "xai";
 	readonly label = "xAI";
 
-	isAvailable(authStorage: AuthStorage): boolean {
-		return shouldPreferXAIOAuth(authStorage) || authStorage.hasAuth("xai");
+	isAvailable(authStorage: AuthStorage, model?: Model<Api>): boolean {
+		return authStorage.hasAuth(model?.provider ?? "xai");
 	}
 
 	search(params: SearchParams): Promise<SearchResponse> {

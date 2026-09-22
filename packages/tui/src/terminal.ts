@@ -1,16 +1,18 @@
 import { dlopen, FFIType, ptr } from "bun:ffi";
 import * as fs from "node:fs";
 import { TtyWriter } from "@oh-my-pi/pi-natives";
+import { $env, isBunTestRuntime, isTerminalHeadless, isWsl } from "@oh-my-pi/pi-utils/env";
+import * as logger from "@oh-my-pi/pi-utils/logger";
+import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
+import { restoreTerminalStderr, suppressTerminalStderr } from "@oh-my-pi/pi-utils/stderr-guard";
 import {
-	$env,
-	isBunTestRuntime,
-	isTerminalHeadless,
-	isWsl,
-	logger,
-	postmortem,
-	restoreTerminalStderr,
-	suppressTerminalStderr,
-} from "@oh-my-pi/pi-utils";
+	encodeBundledGlyphRegistrations,
+	encodeGlyphCoverageQuery,
+	encodeGlyphSupportQuery,
+	GLYPH_CONFIRMATION_CODEPOINT,
+	isGlyphProtocolSequence,
+	parseGlyphProtocolReply,
+} from "./glyph-protocol";
 import { setKittyProtocolActive } from "./keys";
 import { StdinBuffer } from "./stdin-buffer";
 import {
@@ -18,6 +20,7 @@ import {
 	NotifyProtocol,
 	setCellDimensions,
 	setOsc99Supported,
+	setTerminalGlyphProtocol,
 	TERMINAL,
 } from "./terminal-capabilities";
 import { isInsideTmux, wrapTmuxPassthrough } from "./tmux";
@@ -462,6 +465,13 @@ export type TerminalAppearanceRequestToken = number;
  * set, 4 permanently reset) when the terminal answered DECRQM.
  */
 export type PrivateModeReportHandler = (mode: number, supported: boolean, confirmed?: boolean, status?: number) => void;
+/**
+ * Fired once when the Glyph Protocol handshake resolves. `supported` is true
+ * only after the bundled icons were written and the terminal confirmed (via a
+ * `q` coverage query) that a registered codepoint is served from its
+ * glossary, so a host can safely repaint — or switch to the nerd preset.
+ */
+export type GlyphProtocolReportHandler = (supported: boolean) => void;
 
 /**
  * Cursor shapes addressable via DECSCUSR (`CSI <n> SP q`). `"default"` (0) hands the shape back to
@@ -519,6 +529,20 @@ export interface Terminal {
 	 * built against older pi-tui versions keep working.
 	 */
 	readonly pendingOutputBytes?: number;
+
+	/**
+	 * Whether a pseudoconsole host owns the grid this terminal writes to, so
+	 * neither the cursor nor the painted rows survive a resize under the
+	 * application's own model. Measured on Windows conhost: resizing the
+	 * pseudoconsole makes it re-emit its whole viewport from `CSI H` with
+	 * absolute addressing while the application writes nothing, and it re-homes
+	 * the cursor, so a DSR reply after a resize reports column 1 instead of the
+	 * column the application parked. The renderer's resize anchor recovery needs
+	 * both properties, so it takes the rebuild path instead when this is set.
+	 * Optional so custom Terminals built against older pi-tui versions keep
+	 * working; absent means the terminal itself owns the grid.
+	 */
+	readonly hostOwnsGridOnResize?: boolean;
 
 	// Whether Kitty keyboard protocol is active
 	get kittyProtocolActive(): boolean;
@@ -608,6 +632,14 @@ export interface Terminal {
 	 * `status` is the DECRPM value when the terminal answered DECRQM.
 	 */
 	onPrivateModeReport?(callback: PrivateModeReportHandler): void;
+	/**
+	 * Register a callback fired once the startup Glyph Protocol handshake
+	 * resolves (see {@link GlyphProtocolReportHandler}). A subscriber that
+	 * arrives after the handshake already resolved is called immediately with
+	 * the stored outcome. Optional so custom Terminals built against older
+	 * pi-tui versions keep working.
+	 */
+	onGlyphProtocolReport?(callback: GlyphProtocolReportHandler): void;
 }
 
 /**
@@ -629,7 +661,8 @@ type Da1SentinelOwner =
 	| { kind: "keyboard" }
 	| { kind: "osc11" }
 	| { kind: "privateMode"; mode: number }
-	| { kind: "osc99Probe"; id: string };
+	| { kind: "osc99Probe"; id: string }
+	| { kind: "glyphProtocol"; phase: "support" | "confirm" };
 
 let nextOsc99ProbeId = 1;
 
@@ -662,8 +695,9 @@ function isPrivateModeSupported(status: string): boolean {
 export interface ProcessTerminalOptions {
 	/**
 	 * Force ConPTY-hosted behavior on or off. Defaults to live detection via
-	 * {@link isConPTYHosted}. Tests set this so the kitty-flag and write-chunking
-	 * paths stay hermetic regardless of the ambient WSL env (`WSL_DISTRO_NAME` /
+	 * {@link isConPTYHosted}. Tests set this so the kitty-flag, write-chunking
+	 * and resize-routing ({@link Terminal.hostOwnsGridOnResize}) paths stay
+	 * hermetic regardless of the ambient WSL env (`WSL_DISTRO_NAME` /
 	 * `WSL_INTEROP`) — the suite must behave identically on WSL and on CI.
 	 */
 	conpty?: boolean;
@@ -752,6 +786,14 @@ export class ProcessTerminal implements Terminal {
 	#osc99PendingId: string | undefined;
 	#osc99ResponseBuffer = "";
 	#osc99Capabilities = new Map<string, string>();
+	/**
+	 * Handshake phase: `support` awaits the `s` reply, `confirm` awaits the `q`
+	 * coverage reply sent after the bundle was written.
+	 */
+	#glyphProtocolPhase: "idle" | "support" | "confirm" = "idle";
+	#glyphProtocolReplyBuffer = "";
+	#glyphProtocolResult: boolean | undefined;
+	#glyphProtocolCallbacks: GlyphProtocolReportHandler[] = [];
 	#privateCsiResponseBuffer = "";
 	#da1SentinelOwners: Da1SentinelOwner[] = [];
 	/** Resolved DECRQM support per private mode (mode → supported). */
@@ -849,6 +891,13 @@ export class ProcessTerminal implements Terminal {
 
 	onPrivateModeReport(callback: PrivateModeReportHandler): void {
 		this.#privateModeCallbacks.push(callback);
+	}
+
+	onGlyphProtocolReport(callback: GlyphProtocolReportHandler): void {
+		this.#glyphProtocolCallbacks.push(callback);
+		// The handshake runs from enableInput(), which can precede the host's
+		// subscription during startup; replay so the outcome is never missed.
+		if (this.#glyphProtocolResult !== undefined) callback(this.#glyphProtocolResult);
 	}
 
 	start(
@@ -987,6 +1036,11 @@ export class ProcessTerminal implements Terminal {
 		// without leaking probe bytes to application input.
 		this.#queryOsc99Support();
 
+		// Glyph Protocol support query (`s` verb), same DA1 sentinel FIFO. A reply
+		// triggers the bundled icon registration so the nerd symbol preset renders
+		// without a patched font installed.
+		this.#queryGlyphProtocolSupport();
+
 		// Subscribe to Mode 2031 appearance change notifications.
 		// When the terminal reports a change, we re-query OSC 11 to get the
 		// actual background color (following Neovim convention) with 100ms debounce.
@@ -1012,6 +1066,11 @@ export class ProcessTerminal implements Terminal {
 		this.#queryPrivateMode(2026);
 		this.#queryPrivateMode(2048);
 		this.#queryPrivateMode(2031);
+		// 2004 (bracketed paste) is queried only to confirm the terminal brackets
+		// pastes; once confirmed, the unbracketed raw-paste heuristic in
+		// StdinBuffer is disabled so keystrokes an event-loop stall batches into
+		// one read are never misclassified as a paste (#12540).
+		this.#queryPrivateMode(2004);
 		for (const mode of XTERM_SCROLL_TO_BOTTOM_MODES) {
 			this.#queryPrivateMode(mode);
 		}
@@ -1124,7 +1183,8 @@ export class ProcessTerminal implements Terminal {
 				this.#privateCsiResponseBuffer.length === 0 &&
 				this.#inBandResizeBuffer.length === 0 &&
 				this.#osc11ResponseBuffer.length === 0 &&
-				this.#osc99ResponseBuffer.length === 0
+				this.#osc99ResponseBuffer.length === 0 &&
+				this.#glyphProtocolReplyBuffer.length === 0
 			) {
 				if (this.#inputHandler) {
 					this.#inputHandler(sequence);
@@ -1283,6 +1343,13 @@ export class ProcessTerminal implements Terminal {
 						this.#resolveOsc99Support(owner.id, false);
 						break;
 					}
+					case "glyphProtocol": {
+						// The support-phase sentinel is answered after the `s` reply that
+						// already advanced the handshake; only a sentinel from the phase
+						// still awaiting its reply means that reply never came.
+						if (owner.phase === this.#glyphProtocolPhase) this.#resolveGlyphProtocolSupport(false);
+						break;
+					}
 				}
 				return;
 			}
@@ -1363,6 +1430,23 @@ export class ProcessTerminal implements Terminal {
 					const [, meta, payload] = osc99Match;
 					this.#osc99ResponseBuffer = "";
 					this.#handleOsc99CapabilityResponse(meta!, payload!);
+					return;
+				}
+			}
+
+			// Glyph Protocol APC replies (`ESC _ 25a1 ; … ESC \`). Swallowed for
+			// the whole session, not just while the probe is outstanding: an APC is
+			// exclusively terminal->host data, and registrations use `reply=0`, so
+			// any late `r`/`c` acknowledgement must never reach the composer.
+			if (this.#glyphProtocolReplyBuffer || sequence.startsWith("\x1b_25a1;")) {
+				if (this.#glyphProtocolReplyBuffer && sequence.startsWith("\x1b") && sequence !== "\x1b\\") {
+					this.#glyphProtocolReplyBuffer = "";
+				} else {
+					this.#glyphProtocolReplyBuffer += sequence;
+					if (!this.#glyphProtocolReplyBuffer.endsWith("\x1b\\")) return;
+					const reply = this.#glyphProtocolReplyBuffer;
+					this.#glyphProtocolReplyBuffer = "";
+					this.#handleGlyphProtocolReply(reply);
 					return;
 				}
 			}
@@ -1495,6 +1579,80 @@ export class ProcessTerminal implements Terminal {
 		setOsc99Supported(supported);
 	}
 
+	#shouldQueryGlyphProtocolSupport(): boolean {
+		// `PI_NO_GLYPH_PROTOCOL=1` keeps the terminal's own font coverage (tofu
+		// included) — the registration shadows a system Nerd Font at render time.
+		if ($env.PI_NO_GLYPH_PROTOCOL === "1") return false;
+		// Same multiplexer rule as the OSC 99 probe: tmux/screen cannot route the
+		// APC reply back to the sending pane, so it would leak as literal text.
+		if (isInsideTerminalMultiplexer($env)) return false;
+		return !isBunTestRuntime() || $env.PI_TUI_GLYPH_PROTOCOL_PROBE === "1";
+	}
+
+	#queryGlyphProtocolSupport(): void {
+		setTerminalGlyphProtocol(false);
+		this.#glyphProtocolPhase = "idle";
+		this.#glyphProtocolResult = undefined;
+		this.#glyphProtocolReplyBuffer = "";
+		if (this.#dead || !this.#shouldQueryGlyphProtocolSupport()) return;
+		this.#glyphProtocolPhase = "support";
+		this.#da1SentinelOwners.push({ kind: "glyphProtocol", phase: "support" });
+		this.#safeWrite(`${encodeGlyphSupportQuery()}\x1b[c`);
+	}
+
+	#handleGlyphProtocolReply(sequence: string): void {
+		if (!isGlyphProtocolSequence(sequence)) return;
+		const reply = parseGlyphProtocolReply(sequence);
+		if (!reply) {
+			logger.debug("Glyph Protocol: unparsable reply", { sequence });
+			return;
+		}
+		if (reply.verb === "s" && this.#glyphProtocolPhase === "support") {
+			// Every bundled payload is `fmt=glyf`; a terminal that recognises the
+			// protocol but advertises no formats would reject each registration.
+			if (!reply.formats.includes("glyf") || this.#dead) {
+				this.#resolveGlyphProtocolSupport(false);
+				return;
+			}
+			// Registrations are fire-and-forget (`reply=0`); the coverage query
+			// that follows them is the success check — the terminal processes the
+			// stream in order, so a `glossary` answer proves the bundle landed.
+			this.#glyphProtocolPhase = "confirm";
+			this.#da1SentinelOwners.push({ kind: "glyphProtocol", phase: "confirm" });
+			this.#safeWrite(
+				`${encodeBundledGlyphRegistrations()}${encodeGlyphCoverageQuery(GLYPH_CONFIRMATION_CODEPOINT)}\x1b[c`,
+			);
+			return;
+		}
+		if (reply.verb === "q" && this.#glyphProtocolPhase === "confirm" && reply.cp === GLYPH_CONFIRMATION_CODEPOINT) {
+			const confirmed = reply.coverage.includes("glossary");
+			if (!confirmed) logger.warn("Glyph Protocol: registered codepoint not served from glossary", reply);
+			this.#resolveGlyphProtocolSupport(confirmed);
+			return;
+		}
+		// Registrations are sent with `reply=0`, so this is a terminal that
+		// ignored the reply gate or a stray acknowledgement: keep it out of input.
+		if ((reply.verb === "r" || reply.verb === "c") && reply.status !== 0) {
+			logger.warn("Glyph Protocol: registration rejected", reply);
+		}
+	}
+
+	/** Finish the handshake in either phase and notify subscribers once. */
+	#resolveGlyphProtocolSupport(supported: boolean): void {
+		if (this.#glyphProtocolPhase === "idle") return;
+		this.#glyphProtocolPhase = "idle";
+		this.#glyphProtocolReplyBuffer = "";
+		this.#glyphProtocolResult = supported;
+		setTerminalGlyphProtocol(supported);
+		for (const cb of this.#glyphProtocolCallbacks) {
+			try {
+				cb(supported);
+			} catch {
+				// Ignore subscriber errors — capability reporting must not crash input.
+			}
+		}
+	}
+
 	/**
 	 * Parse an OSC 11 background color response and compute BT.601 luminance.
 	 * Handles 1-, 2-, 3-, and 4-digit XParseColor hex components.
@@ -1596,6 +1754,11 @@ export class ProcessTerminal implements Terminal {
 		}
 		if (mode === 2048 && supported) this.#enableInBandResize();
 		if (mode === 2031) this.#syncWindowsTerminalAppearancePolling(supported);
+		// Confirmed bracketed-paste support makes the unbracketed raw-paste
+		// heuristic pure downside — turn it off so stall-batched keystrokes are
+		// not misread as a paste (#12540). `supported` is only true here after an
+		// explicit DECRPM reply (the DA1-sentinel fallback resolves unsupported).
+		if (mode === 2004 && supported) this.#stdinBuffer?.setRawPasteClassification(false);
 	}
 
 	#syncWindowsTerminalAppearancePolling(mode2031Supported: boolean): void {
@@ -1801,6 +1964,11 @@ export class ProcessTerminal implements Terminal {
 		this.#osc99ResponseBuffer = "";
 		this.#osc99Capabilities.clear();
 		setOsc99Supported(false);
+		this.#glyphProtocolPhase = "idle";
+		this.#glyphProtocolResult = undefined;
+		this.#glyphProtocolReplyBuffer = "";
+		this.#glyphProtocolCallbacks = [];
+		setTerminalGlyphProtocol(false);
 		this.#privateCsiResponseBuffer = "";
 		this.#inBandResizeBuffer = "";
 		this.#da1SentinelOwners.length = 0;
@@ -1993,6 +2161,14 @@ export class ProcessTerminal implements Terminal {
 		if (this.#outputPump) return this.#outputPump.pending();
 		// Stream fallback: bytes queued past the high-water mark by refused writes.
 		return process.stdout.writableLength ?? 0;
+	}
+
+	get hostOwnsGridOnResize(): boolean {
+		// #conpty, not a fresh isConPTYHosted() call: the construction override
+		// must gate every ConPTY-dependent path uniformly, or an injected
+		// `conpty` value models one host for writes and kitty flags and the
+		// opposite host for resize routing.
+		return this.#conpty;
 	}
 
 	/**

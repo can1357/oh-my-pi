@@ -1,6 +1,27 @@
 // Provider-wire compat for "openai-codex"; regenerated from the frozen census using deployment contract selectors.
 
 provider "openai-codex" {
+	default-model "gpt-5.5"
+	env "OPENAI_CODEX_OAUTH_TOKEN"
+	kind-apis {
+		image "openai-codex-responses"
+	}
+	web-search "codex"
+
+	seed api="openai-codex-responses" base-url="https://chatgpt.com/backend-api" bundle="always" {
+		model "gpt-image-1" name="GPT Image 1" {
+			reasoning #false
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+	}
+
+	models "gpt-image-1" {
+		kind "image"
+	}
+
 	// Replaces the Codex provider's handwritten flex/priority pricing fallback.
 	service-tier-cost {
 		flex 0.5

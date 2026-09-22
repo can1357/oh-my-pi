@@ -1,6 +1,59 @@
 // Provider-wire compat for "anthropic"; regenerated from the frozen census using deployment contract selectors.
 
 provider "anthropic" {
+	default-model "claude-opus-5-5"
+	env "ANTHROPIC_API_KEY"
+	discovery label="Anthropic"
+	web-search "anthropic"
+
+	// Curated Anthropic models that are live or limited-availability on the
+	// first-party `/v1/models` endpoint but that stencil.so has not catalogued
+	// yet. Seeded so the bundled catalog is never gated on stencil.so's update
+	// cadence; deduped behind upstream catalog / stencil.so entries once those
+	// appear. Token limits and pricing are pinned here or in
+	// `applyAnthropicCatalogPolicy`; `thinking` is re-baked by the generator's
+	// policy pass (scripts/generated-policies.ts).
+	seed api="anthropic-messages" base-url="https://api.anthropic.com" bundle="always" {
+		model "claude-sonnet-5" name="Claude Sonnet 5" {
+			reasoning #true
+			input "text" "image"
+			cost input=3 output=15 cache-read=0.3 cache-write=3.75
+			limits context=1000000 max-tokens=128000
+		}
+		model "claude-fable-5" name="Claude Fable 5" {
+			reasoning #true
+			input "text" "image"
+			cost input=10 output=50 cache-read=1 cache-write=12.5
+			limits context=1000000 max-tokens=128000
+		}
+		model "claude-mythos-5" name="Claude Mythos 5" {
+			reasoning #true
+			input "text" "image"
+			cost input=10 output=50 cache-read=1 cache-write=12.5
+			limits context=1000000 max-tokens=128000
+		}
+		model "claude-fable-5-1" name="Claude Fable 5.1" {
+			reasoning #true
+			input "text" "image"
+			cost input=10 output=50 cache-read=0.25 cache-write=12.5
+			limits context=1000000 max-tokens=128000
+		}
+		model "claude-mythos-5-1" name="Claude Mythos 5.1" {
+			reasoning #true
+			input "text" "image"
+			cost input=10 output=50 cache-read=0.25 cache-write=12.5
+			limits context=1000000 max-tokens=128000
+		}
+	}
+
+	// First-party provider: models served through this provider reach the
+	// official API unless rerouted. A dedicated axis rather than
+	// `official-endpoint`, which stays URL-derived: a custom `baseUrl` on this
+	// provider must keep `officialEndpoint: false` (SDK `X-Api-Key`
+	// suppression and friends read that flag). The compaction transport
+	// combines this fact with a per-request effective-URL check, so it never
+	// authorizes a block on its own.
+	first-party-provider #true
 	class "anthropic" {
 		revision ">=3.7 <4.6" {
 			thinking-efforts "minimal" "low" "medium" "high" "xhigh"

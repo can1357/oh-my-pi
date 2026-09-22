@@ -879,10 +879,10 @@ fn condense_branch(input: &str) -> String {
 }
 
 fn has_local_tracking_branch(remote: &str, current: Option<&str>, local: &[String]) -> bool {
-	// Only the conventional `origin/<branch>` mirror is treated as redundant with
-	// a local branch of the same name. Same-named branches on other remotes
-	// (e.g. `upstream/main` alongside `origin/main`) are distinct refs and must
-	// be preserved in the summary.
+	// Only the conventional `origin/<branch>` mirror is treated as redundant
+	// with a local branch of the same name. Same-named branches on other
+	// remotes (e.g. `upstream/main` alongside `origin/main`) are distinct refs
+	// and must be preserved in the summary.
 	let Some(branch) = remote.strip_prefix("origin/") else {
 		return false;
 	};
@@ -1213,8 +1213,8 @@ fn condense_push(input: &str, exit_code: i32) -> String {
 				out.push('\n');
 				continue;
 			}
-			// Keep ref update lines: "* [new ...]", "- [deleted] ...", branch setup,
-			// or "hash..hash ref -> ref"
+			// Keep ref update lines: "* [new ...]", "- [deleted] ...", branch
+			// setup, or "hash..hash ref -> ref"
 			if trimmed.starts_with("* [new")
 				|| trimmed.starts_with("- [deleted]")
 				|| trimmed.starts_with("Branch ")
@@ -1350,8 +1350,8 @@ fn condense_fetch(input: &str, exit_code: i32) -> String {
 				kept.push(trimmed.to_string());
 				continue;
 			}
-			// Branch fetch lines: " * branch       name -> FETCH_HEAD", " * [new branch]
-			// name -> origin/name", or "   hash..hash name -> name"
+			// Branch fetch lines: " * branch       name -> FETCH_HEAD", " * [new
+			// branch] name -> origin/name", or "   hash..hash name -> name"
 			if trimmed.starts_with('*') || trimmed.starts_with(" *") {
 				if is_fetch_ref_update(trimmed) {
 					updates += 1;
@@ -1956,7 +1956,8 @@ mod tests {
 			"commit abcdef1234567890\nAuthor: A <a@x.com>\nDate: today\n\n    {long_subject}\n"
 		);
 		let out = filter(&ctx, &input, 0);
-		// 200 chars → first 160 kept, 40 dropped, surfaced by truncate_line's marker.
+		// 200 chars → first 160 kept, 40 dropped, surfaced by truncate_line's
+		// marker.
 		assert!(
 			out.text
 				.contains(&format!("abcdef1 {}…[+40]", "x".repeat(160))),
@@ -2160,7 +2161,8 @@ mod tests {
 ";
 		let out = filter(&ctx, input, 0);
 
-		// Best-of: the change summary from the stat line is folded into `ok <hash>`.
+		// Best-of: the change summary from the stat line is folded into `ok
+		// <hash>`.
 		assert_eq!(out.text, "ok 5f490f764 (70 files +3081 -403)\n");
 		assert!(!out.text.contains("files changed"));
 		assert!(!out.text.contains("create mode"));
@@ -2370,7 +2372,8 @@ hint: See the 'Note about fast-forwards' in 'git push --help' for details.
 	fn status_detects_interactive_rebase_edit() {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let ctx = test_ctx(Some("status"), "git status", &cfg);
-		// Realistic default long-format body for an interactive-rebase `edit` stop.
+		// Realistic default long-format body for an interactive-rebase `edit`
+		// stop.
 		let input = "On branch feature\n\ninteractive rebase in progress; onto abc1234\nLast \
 		             command done (1 command done):\n   edit abc123 some message\nNo commands \
 		             remaining.\nYou are currently editing a commit while rebasing branch 'feature' \
@@ -2387,7 +2390,8 @@ hint: See the 'Note about fast-forwards' in 'git push --help' for details.
 	fn status_detects_merge_all_conflicts_fixed() {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let ctx = test_ctx(Some("status"), "git status", &cfg);
-		// Realistic default long-format body after all merge conflicts are resolved.
+		// Realistic default long-format body after all merge conflicts are
+		// resolved.
 		let input = "On branch main\n\nAll conflicts fixed but you are still merging.\n  (use \"git \
 		             commit\" to conclude merge)\n\nChanges to be committed:\n  modified:   \
 		             src/main.rs\n";
@@ -2639,7 +2643,8 @@ hint: See the 'Note about fast-forwards' in 'git push --help' for details.
 		let out = filter(&ctx, input, 0);
 		assert!(out.changed);
 		// Branch is preserved (re-emitted as `[branch]`) — it's the primary thing
-		// users scan stash lists for — while the "WIP on "/"On " noise is stripped.
+		// users scan stash lists for — while the "WIP on "/"On " noise is
+		// stripped.
 		assert!(
 			out.text
 				.contains("stash@{0}: [feature-x] abc1234 fix: something")
@@ -2747,7 +2752,8 @@ error: could not apply abc1234... fix: something\nhint: Resolve all conflicts ma
 	fn worktree_list_caps_and_abbreviates_home() {
 		let home = "/home/alice";
 		let mut input = String::new();
-		// 22 listing entries under $HOME, including a bare and a detached-HEAD row.
+		// 22 listing entries under $HOME, including a bare and a detached-HEAD
+		// row.
 		input.push_str("/home/alice/repo                  abc1234 (bare)\n");
 		input.push_str("/home/alice/repo-detached         def5678 (detached HEAD)\n");
 		for idx in 0..20 {
@@ -2796,7 +2802,8 @@ error: could not apply abc1234... fix: something\nhint: Resolve all conflicts ma
 
 	#[test]
 	fn worktree_null_passthrough() {
-		// `git worktree list -z` also produces machine-readable NUL-delimited output.
+		// `git worktree list -z` also produces machine-readable NUL-delimited
+		// output.
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let ctx = test_ctx(Some("worktree"), "git worktree list -z", &cfg);
 		let input = "worktree /home/user/project\0HEAD abc1234def\0branch refs/heads/main\0";
@@ -2808,9 +2815,9 @@ error: could not apply abc1234... fix: something\nhint: Resolve all conflicts ma
 	#[test]
 	fn worktree_non_porcelain_still_condensed() {
 		// Normal (non-porcelain) listing should still go through the condenser.
-		// Build 22 listing-shaped entries so the cap (20) is exceeded; the condenser
-		// would insert an "[…N worktrees elided…]" marker that a passthrough would
-		// never emit.
+		// Build 22 listing-shaped entries so the cap (20) is exceeded; the
+		// condenser would insert an "[…N worktrees elided…]" marker that a
+		// passthrough would never emit.
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let ctx = test_ctx(Some("worktree"), "git worktree list", &cfg);
 		let mut input = String::new();

@@ -1,6 +1,10 @@
 // Provider-wire compat for "venice"; regenerated from the frozen census using deployment contract selectors.
 
 provider "venice" {
+	default-model "llama-3.3-70b"
+	env "VENICE_API_KEY"
+	discovery label="Venice" allow-unauthenticated=#true
+
 	class "qwen" {
 		// Replaces the Venice Qwen thinking-format branch.
 		thinking-format "openai"

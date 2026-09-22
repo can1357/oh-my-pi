@@ -113,6 +113,9 @@ describe("EvalTool auto-background", () => {
 		expect(result.details?.async).toBeUndefined();
 		expect(result.details?.cells?.[0]?.status).toBe("complete");
 		await asyncJobManager.drainDeliveries({ timeoutMs: 1 });
+		const [job] = asyncJobManager.getAllJobs();
+		await job?.promise;
+		expect(job && asyncJobManager.isJobResultConsumed(job.id)).toBe(true);
 		expect(deliveries).toEqual([]);
 		await asyncJobManager.dispose();
 	});

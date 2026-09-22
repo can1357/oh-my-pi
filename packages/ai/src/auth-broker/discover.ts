@@ -4,6 +4,7 @@
  * token file → local SQLite) in one place so build-time tooling sees the same
  * credentials as the TUI.
  */
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
 	$envExact,
@@ -60,7 +61,7 @@ async function defaultResolveConfigValue(config: string): Promise<string | undef
 
 async function readTokenFile(): Promise<string | null> {
 	try {
-		const raw = await Bun.file(getAuthBrokerTokenFilePath()).text();
+		const raw = await fs.readFile(getAuthBrokerTokenFilePath(), "utf8");
 		const trimmed = raw.trim();
 		return trimmed.length > 0 ? trimmed : null;
 	} catch (err) {
@@ -99,7 +100,7 @@ async function readConfigYaml(agentDir: string): Promise<ConfigSnapshot> {
 	for (const filename of MAIN_CONFIG_FILENAMES) {
 		const configPath = path.join(agentDir, filename);
 		try {
-			const raw = await Bun.file(configPath).text();
+			const raw = await fs.readFile(configPath, "utf8");
 			const parsed = YAML.parse(raw);
 			if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
 			const record = parsed as Record<string, unknown>;
@@ -121,7 +122,8 @@ export async function loadAuthBrokerAccountPool(): Promise<AuthBrokerAccountPool
 
 	let parsed: unknown;
 	try {
-		parsed = await Bun.file(filePath).json();
+		const raw = await fs.readFile(filePath, "utf8");
+		parsed = JSON.parse(raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw);
 	} catch (error) {
 		throw new AIError.ConfigurationError(`Unable to read OMP_AUTH_BROKER_ACCOUNT_POOL_FILE at ${filePath}`, {
 			cause: error,

@@ -2,6 +2,7 @@
 mod capture;
 mod libei;
 mod portal;
+mod xkb;
 
 use image::RgbaImage;
 
@@ -452,7 +453,8 @@ mod tests {
 
 	#[test]
 	fn scaled_monitor_maps_screenshot_pixel_to_logical_point() {
-		// 2560x2880 buffer for a 1280x1440 logical region at scale 2 (issue #11540).
+		// 2560x2880 buffer for a 1280x1440 logical region at scale 2 (issue
+		// #11540).
 		let geometry = PortalGeometry::new(Some((0, 0)), Some((1280, 1440)), 2560, 2880);
 		let display = geometry.display();
 		assert_eq!((display.width, display.height), (1280, 1440));

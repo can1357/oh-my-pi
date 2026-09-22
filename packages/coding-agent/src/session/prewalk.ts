@@ -12,7 +12,7 @@ import planYoloHandoffPrompt from "../prompts/system/plan-yolo-handoff.md" with 
 import prewalkChecklistPrompt from "../prompts/system/prewalk-checklist.md" with { type: "text" };
 import prewalkContinuePrompt from "../prompts/system/prewalk-continue.md" with { type: "text" };
 import prewalkPlanPrompt from "../prompts/system/prewalk-plan.md" with { type: "text" };
-import { type ConfiguredThinkingLevel, prewalkWouldBeNoop } from "../thinking";
+import { type ConfiguredThinkingLevel, prewalkWouldBeNoop } from "@oh-my-pi/pi-tui/thinking";
 import { isMCPToolName } from "../tools/builtin-names";
 import {
 	replaceTabs,
@@ -20,9 +20,9 @@ import {
 	shortenPath,
 	TRUNCATE_LENGTHS,
 	truncateToWidth,
-} from "../tools/render-utils";
+} from "@oh-my-pi/pi-tui/render/render-utils";
 import type { PlanProposalHandler } from "../tools/resolve";
-import { ToolError } from "../tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { PlanYolo, Prewalk } from "./agent-session-types";
 import { PREWALK_PLAN_MESSAGE_TYPE } from "./messages";
 import type { SessionManager } from "./session-manager";
@@ -95,6 +95,8 @@ export interface PrewalkCoordinatorOptions {
 }
 
 /** Coordinates one-way model prewalks and automatic plan-yolo handoffs. */
+
+export type PrewalkRestartResult = "armed" | "reset" | "rejected";
 export class PrewalkCoordinator {
 	readonly #host: PrewalkCoordinatorHost;
 	#prewalk: Prewalk | undefined;
@@ -261,6 +263,37 @@ export class PrewalkCoordinator {
 		return true;
 	}
 
+	/**
+	 * Restores the planning model and reuses or creates the requested one-shot handoff.
+	 * A different active arm rejects the restart before the current model changes.
+	 */
+	async restart(
+		source: Model,
+		sourceThinkingLevel: ConfiguredThinkingLevel | undefined,
+		target: Model,
+		targetThinkingLevel: ConfiguredThinkingLevel | undefined,
+	): Promise<PrewalkRestartResult> {
+		const active = this.#prewalk;
+		if (
+			active &&
+			(active.target.provider !== target.provider ||
+				active.target.id !== target.id ||
+				active.thinkingLevel !== targetThinkingLevel)
+		) {
+			this.arm(target, targetThinkingLevel);
+			return "rejected";
+		}
+
+		await this.#host.setModelTemporary(source, sourceThinkingLevel, { ephemeral: true });
+		if (!active) return this.arm(target, targetThinkingLevel) ? "armed" : "reset";
+		if (this.#isNoop(active)) {
+			this.#scrubPlanNudge();
+			this.#disarmNoop(active);
+			return "reset";
+		}
+		return "armed";
+	}
+
 	/** Lazily enables plan-yolo's plan phase before the first prompt is built. */
 	async armPlanYoloIfNeeded(): Promise<void> {
 		if (!this.#planYolo || this.#planYoloArmed) return;
@@ -292,13 +325,15 @@ export class PrewalkCoordinator {
 		this.#host.setPlanProposalHandler(title => this.#finalizePlanYoloProposal(title));
 	}
 
-	#scrubPlanNudge(liveMessages: AgentMessage[]): void {
+	#scrubPlanNudge(liveMessages?: AgentMessage[]): void {
 		if (!this.#planInjected) return;
 		const isPlanNudge = isPrewalkPlanNudge;
-		for (let index = liveMessages.length - 1; index >= 0; index--) {
-			if (!isPlanNudge(liveMessages[index])) continue;
-			invalidateMessageCache(liveMessages[index]);
-			liveMessages.splice(index, 1);
+		if (liveMessages) {
+			for (let index = liveMessages.length - 1; index >= 0; index--) {
+				if (!isPlanNudge(liveMessages[index])) continue;
+				invalidateMessageCache(liveMessages[index]);
+				liveMessages.splice(index, 1);
+			}
 		}
 		const stateMessages = this.#host.agent.state.messages;
 		const filtered = stateMessages.filter(message => !isPlanNudge(message));
