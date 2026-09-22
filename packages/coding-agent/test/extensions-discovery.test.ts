@@ -190,6 +190,57 @@ describe("extensions discovery", () => {
 		]);
 	});
 
+	it("uses inherited roots instead of local extension inputs during cold discovery", async () => {
+		const inherited = tempDir.join("inherited.ts");
+		const configured = tempDir.join("configured.ts");
+		const unwanted = path.join(extensionsDir, "unwanted.ts");
+		await Bun.write(inherited, extensionCodeWithTool("inherited-tool"));
+		await Bun.write(configured, extensionCodeWithTool("configured-tool"));
+		await Bun.write(unwanted, extensionCodeWithTool("unwanted-tool"));
+		const settings = Settings.isolated({ extensions: [unwanted] });
+		const paths = await discoverSessionExtensionPaths(
+			{
+				additionalExtensionPaths: [unwanted],
+				extensionRoots: () => ({
+					explicit: [inherited],
+					mode: "explicit-only",
+					configured: [configured],
+					configuredLevel: "project",
+				}),
+			},
+			tempDir.path(),
+			settings,
+		);
+		const result = await loadExtensions(paths, tempDir.path());
+		expect(result.extensions.flatMap(extension => [...extension.tools.keys()])).toEqual(["inherited-tool"]);
+	});
+
+	it("uses the inherited configured lane when merging cold extension discovery", async () => {
+		const inherited = tempDir.join("inherited.ts");
+		const unwanted = tempDir.join("unwanted.ts");
+		await Bun.write(inherited, extensionCodeWithTool("inherited-tool"));
+		await Bun.write(unwanted, extensionCodeWithTool("unwanted-tool"));
+		const settings = Settings.isolated({ extensions: [unwanted] });
+		const paths = await discoverSessionExtensionPaths(
+			{
+				disableExtensionDiscovery: true,
+				additionalExtensionPaths: [unwanted],
+				extensionRoots: () => ({
+					explicit: [],
+					mode: "merge",
+					configured: [inherited],
+					configuredLevel: "project",
+				}),
+			},
+			tempDir.path(),
+			settings,
+		);
+		const result = await loadExtensions(paths, tempDir.path());
+		const tools = result.extensions.flatMap(extension => [...extension.tools.keys()]);
+		expect(tools).toContain("inherited-tool");
+		expect(tools).not.toContain("unwanted-tool");
+	});
+
 	it("explicit-only discovery ignores unreadable optional hook directories", async () => {
 		const packageDir = path.join(tempDir.path(), "explicit-package");
 		const sourceDir = path.join(packageDir, "src");

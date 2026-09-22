@@ -1,13 +1,30 @@
-# Embedded Local Tiny-Model Experiments
+# Local Model Catalog and Experiments
 
-This document summarizes the experiments behind the optional **local** tiny-model paths for
-session-title generation (`providers.tinyModel`), Mnemopi memory extraction/consolidation
-(`providers.memoryModel`), and the `auto` thinking-level difficulty classifier
-(`providers.autoThinkingModel`, which uses the memory-model registry). It is a factual engineering
-record for maintainers: what we measured, which recipes won, and which models we shipped. All three
-settings default to `online`, so existing users incur no downloads or on-device inference cost unless
-they opt in. On the online path, the configured `tiny` role is preferred and the task-specific online
-fallback is used when that role is unset.
+This document covers the on-device models in the `local` catalog and records the tiny-model experiments behind the shipped title and memory recommendations. Model selection is role-based: use `modelRoles.<role>` for the primary selector and `retry.fallbackChains.<role>` for ordered alternatives.
+
+```yaml
+modelRoles:
+  tiny: local/lfm2.5-230m
+  memory: local/lfm2-1.2b
+  speech: local/kokoro
+  dictation: local/parakeet-tdt-0.6b-v3
+  # A local tiny model may also serve typed judgments:
+  judge: local/lfm2-1.2b
+
+retry:
+  fallbackChains:
+    tiny: []
+    memory: []
+    speech: []
+    dictation: []
+    judge: []
+```
+
+An explicit empty chain keeps each workload local. Leaving a model-kind chain unset instead uses that role's built-in priority list. The `default` fallback chain does not apply to `speech`, `dictation`, or `judge`.
+
+Inspect the catalog with `omp models --kind tiny`, `omp models --kind tts`, and `omp models --kind stt`. Download tiny models with `omp tiny-models list`, `omp tiny-models download <model-id>`, or `omp tiny-models download all`. Run `omp setup speech` to choose, persist, and download the local speech and dictation models selected by their roles.
+
+The tiny-model CLI and source registry retain **title** and **memory** groupings because those are the workloads used to benchmark and recommend model sizes. They are not runtime model classes: every entry in both groups has catalog kind `tiny`, and any compatible entry can be assigned to `tiny`, `memory`, or `judge`. Choose based on quality and resource needs rather than the CLI grouping alone.
 
 ## Runtime / environment findings
 
@@ -83,7 +100,7 @@ fallback is used when that role is unset.
   on model); subsequent **warm** loads are sub-second to ~3s. Inference is async and
   background-friendly for memory tasks; titles are semi-interactive.
 
-## Task 1: Session title generation (`providers.tinyModel`)
+## Task 1: Session title generation (`modelRoles.tiny`)
 
 **Task**: turn the first user message into a 3–7 word title. Tiny models (sub-1B) suffice.
 
@@ -111,9 +128,9 @@ fallback is used when that role is unset.
 | LFM2.5-350M        | 292MB |     166 / 266ms |        4/30 | Aggressively terse, often a one-word label       |
 
 **Shipped local options**: `lfm2.5-230m`, `lfm2.5-350m`, `falcon-h1-90m`.
-**Default setting**: `online`. The default local download for `omp tiny-models` is `lfm2.5-230m`.
+When `modelRoles.tiny` is unset, title generation resolves its built-in online role path; no local weights are downloaded automatically. The default download for a bare `omp tiny-models` command is `lfm2.5-230m`.
 
-## Task 2: Mnemopi memory (`providers.memoryModel`)
+## Task 2: Mnemopi memory (`modelRoles.memory`)
 
 Mnemopi runs two small-LLM tasks:
 
@@ -166,22 +183,44 @@ runtime rejects this choice before loading the model rather than failing during 
 Of the runnable options, the registry marks `lfm2-1.2b` as the recommended local memory model.
 `gemma-3-1b` favors consolidation quality, while `qwen2.5-1.5b` favors fine-grained extraction.
 
-**Configured local options**: `llama3.2:3b`, `qwen3-1.7b` (currently disabled as described above),
+**Configured local options**: `llama3.2:3b`, `qwen3-1.7b` (ONNX-disabled as described above),
 `gemma-3-1b`, `qwen2.5-1.5b`, `lfm2-1.2b`.
-**Default setting**: `online`.
+When `modelRoles.memory` is unset, it resolves through the effective `tiny` role and then the built-in smol priority list; no local weights are downloaded automatically.
 
 ### Known Mnemopi parser bugs (surfaced by these experiments)
 
 - `String(item)` produces `[object Object]` on object array items.
 - The line-fallback drops items `<=10` chars, so a correct short fact like `Name: Can` is discarded.
 
+## Local speech and dictation models
+
+The `speech` role accepts TTS catalog models and the `dictation` role accepts STT catalog models. `omp setup speech` offers the local entries accepted by those roles, persists the selected `modelRoles.speech` and `modelRoles.dictation` values, and downloads their model/runtime files.
+
+### Text to speech
+
+| Selector       | Repository                                | Precision | Download | Notes                                  |
+| -------------- | ----------------------------------------- | --------- | -------- | -------------------------------------- |
+| `local/kokoro` | `onnx-community/Kokoro-82M-v1.0-ONNX`    | q8        | ~100 MB  | 24 kHz Kokoro-82M, fully local ONNX TTS |
+
+Kokoro voice selection remains independent of the model role. Set `tts.localVoice` for the `tts` tool and `speech.voice` for assistant-output vocalization. Available local voice ids are `af_heart` (default), `af_bella`, `af_nicole`, `af_aoede`, `af_kore`, `af_sarah`, `am_michael`, `am_fenrir`, `am_puck`, `bf_emma`, `bm_george`, and `bm_fable`. Changing voices does not download another model.
+
+### Speech to text
+
+Use these canonical catalog model ids:
+
+| Selector                         | Repository                                                    | Runtime / precision | Download | Notes                                      |
+| -------------------------------- | ------------------------------------------------------------- | ------------------- | -------- | ------------------------------------------ |
+| `local/whisper-base`             | `onnx-community/whisper-base`                                 | transformers.js q8  | ~60 MB   | Smallest multilingual Whisper option       |
+| `local/whisper-small`            | `onnx-community/whisper-small`                                | transformers.js q8  | ~190 MB  | Balanced multilingual Whisper option       |
+| `local/whisper-large-v3-turbo`   | `onnx-community/whisper-large-v3-turbo`                       | transformers.js q4  | ~600 MB  | Whisper large-v3-turbo, 99 languages       |
+| `local/parakeet-tdt-0.6b-v3`     | `csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8`      | sherpa-onnx int8    | ~680 MB  | Default; fast multilingual Parakeet TDT v3 |
+
+Kokoro and the transformers.js Whisper models use the same `providers.tinyModelDevice` / `PI_TINY_DEVICE` device policy and `providers.tinyModelDtype` / `PI_TINY_DTYPE` precision override as the tiny-model workers. Parakeet uses its shipped sherpa-onnx int8 files. Keep `stt.language`, `stt.submitTrigger`, `tts.localVoice`, and the other speech/live settings for behavior; only model selection moved into roles.
+
 ## Integration notes
 
-- `providers.tinyModel`, `providers.memoryModel`, and `providers.autoThinkingModel` default to
-  `online`, so existing users get **no downloads or on-device inference cost** unless they opt in.
-- Local inference runs **in a worker** (off the main thread); models are cached on disk and
-  downloaded on first use.
-- The memory local path applies the refined recipes (line-format + small-talk-guarded extraction
-  prompt, hardened consolidation prompt) via Mnemopi prompt overrides; the **online path is
-  unchanged**.
-- `providers.autoThinkingModel` uses the same shipped local options as `providers.memoryModel`.
+- Local tiny inference for title, memory, or judgment workloads is selected with a `local/<model-id>` role assignment. An unset `tiny` role stays on its online default; an unset `memory` role follows the effective `tiny` role and can therefore become local when `tiny` is local. Unset `speech` and `dictation` roles use their own built-in priority lists, whose first candidates are local.
+- Local inference runs **in a worker** (off the main thread); weights are downloaded only when a local candidate is used or explicitly prefetched with `omp tiny-models` or `omp setup speech`, then cached on disk.
+- Session-title generation uses `modelRoles.tiny`; Mnemopi extraction and consolidation use `modelRoles.memory` when its LLM mode is enabled. Their distinct prompts and benchmark groups do not impose separate runtime model types.
+- Auto-thinking, Smart unexpected-stop detection, typed Eval judgments, and AI-assisted git staging use the `judge` role. Assign `typesafe/jev-latest` for TypeSafe or a compatible local tiny model for on-device judgment; order alternatives under `retry.fallbackChains.judge`.
+- The memory local path applies the refined line-format and small-talk-guarded extraction prompt plus the hardened consolidation prompt; selecting an online chat model for the role keeps the online transport path.

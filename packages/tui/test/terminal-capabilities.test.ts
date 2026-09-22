@@ -1,4 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import {
 	detectStyledUnderlineSupport,
 	detectTerminalId,
@@ -68,6 +71,21 @@ describe("isInsideTerminalMultiplexer", () => {
 });
 
 describe("detectTerminalId", () => {
+	it("recognizes rio via TERM_PROGRAM", () => {
+		expect(detectTerminalId({ TERM_PROGRAM: "rio", COLORTERM: "truecolor" })).toBe("rio");
+	});
+
+	it("maps rio to kitty graphics with conservative unverified capabilities", () => {
+		// Reporter-verified (#12205): kitty graphics + true color. Everything
+		// else stays on the base defaults until proven inside rio itself.
+		const info = getTerminalInfo("rio");
+		expect(info.id).toBe("rio");
+		expect(info.imageProtocol).toBe(ImageProtocol.Kitty);
+		expect(info.trueColor).toBe(true);
+		expect(info.hyperlinks).toBe(false);
+		expect(info.notifyProtocol).toBe(NotifyProtocol.Bell);
+	});
+
 	it("recognizes Warp before the true-color fallback", () => {
 		expect(detectTerminalId({ TERM_PROGRAM: "WarpTerminal", COLORTERM: "truecolor" })).toBe("warp");
 	});
@@ -76,6 +94,57 @@ describe("detectTerminalId", () => {
 		const env = { TERM: "xterm-256color", TERM_PROGRAM: "", COLORTERM: "truecolor", VTE_VERSION: "8400" };
 
 		expect(detectTerminalId(env)).toBe("trueColor");
+	});
+});
+
+describe("tmux client terminal resolution", () => {
+	it.skipIf(process.platform === "win32")("uses the attached client's terminal profile", async () => {
+		const binDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-tmux-client-"));
+		try {
+			const tmux = path.join(binDir, "tmux");
+			await Bun.write(
+				tmux,
+				`#!/bin/sh
+[ "$1" = "display-message" ] && [ "$2" = "-p" ] && [ "$3" = '#{client_termtype}' ] || exit 64
+printf "%s\\n" "WezTerm 20260905-175422-0f4b5596"
+`,
+			);
+			await fs.chmod(tmux, 0o755);
+			const env = subprocessEnv({
+				PI_TEST_RUNTIME: undefined,
+				BUN_ENV: undefined,
+				NODE_ENV: undefined,
+				TERM: "tmux-256color",
+				TERM_PROGRAM: "tmux",
+				TERM_PROGRAM_VERSION: "3.6b",
+				COLORTERM: "truecolor",
+				TMUX: "/tmp/tmux-1000/default,4242,0",
+				SSH_CONNECTION: "client 1 server 22",
+				PATH: `${binDir}${path.delimiter}${Bun.env.PATH ?? ""}`,
+			});
+			const proc = Bun.spawn({
+				cmd: [
+					process.execPath,
+					"--eval",
+					`import { TERMINAL, TERMINAL_ID } from "@oh-my-pi/pi-tui/terminal-capabilities";
+console.log(JSON.stringify({ id: TERMINAL_ID, notifyProtocol: TERMINAL.notifyProtocol }));`,
+				],
+				env,
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			const [stdout, stderr, exitCode] = await Promise.all([
+				new Response(proc.stdout).text(),
+				new Response(proc.stderr).text(),
+				proc.exited,
+			]);
+
+			expect(stderr).toBe("");
+			expect(exitCode).toBe(0);
+			expect(stdout).toBe('{"id":"wezterm","notifyProtocol":"\\u001b]9;"}\n');
+		} finally {
+			await fs.rm(binDir, { force: true, recursive: true });
+		}
 	});
 });
 
@@ -312,6 +381,69 @@ function subprocessEnv(overrides: Record<string, string | undefined>): Record<st
 	}
 	return { ...env, ...overrides };
 }
+
+describe("otty terminal capabilities", () => {
+	it("recognizes TERM_PROGRAM=otty before the true-color fallback", () => {
+		// Env as reported in #12660: otty sets TERM_PROGRAM=otty with a plain
+		// xterm TERM, so detection used to fall through to trueColor.
+		const env = {
+			TERM_PROGRAM: "otty",
+			TERM_PROGRAM_VERSION: "1.5.1",
+			TERM: "xterm-256color",
+			COLORTERM: "truecolor",
+		};
+		expect(detectTerminalId(env)).toBe("otty");
+	});
+
+	it("is Kitty-capable with true color, OSC 8 hyperlinks and OSC 99 notifications", () => {
+		const otty = getTerminalInfo("otty");
+		expect(otty.imageProtocol).toBe(ImageProtocol.Kitty);
+		expect(otty.trueColor).toBe(true);
+		expect(otty.hyperlinks).toBe(true);
+		expect(otty.notifyProtocol).toBe(NotifyProtocol.Osc99);
+		// Unverified capabilities stay off (docs confirm Kitty graphics,
+		// hyperlinks, notifications and synchronized output only).
+		expect(otty.deccara).toBe(false);
+		expect(otty.supportsTextSizing).toBe(false);
+	});
+
+	it("resolves the Kitty image protocol for an otty session", () => {
+		const env = { TERM_PROGRAM: "otty", TERM: "xterm-256color", COLORTERM: "truecolor" };
+		expect(resolveImageProtocol("otty", env, true)).toBe(ImageProtocol.Kitty);
+	});
+
+	it("resolves the process-wide terminal id and image protocol from TERM_PROGRAM=otty", async () => {
+		const env = subprocessEnv({
+			TERM_PROGRAM: "otty",
+			TERM_PROGRAM_VERSION: "1.5.1",
+			TERM: "xterm-256color",
+			COLORTERM: "truecolor",
+		});
+
+		const proc = Bun.spawn({
+			cmd: [
+				process.execPath,
+				"--eval",
+				`import { ImageProtocol, TERMINAL, TERMINAL_ID } from "@oh-my-pi/pi-tui/terminal-capabilities";
+console.log(JSON.stringify({ id: TERMINAL_ID, imageProtocol: TERMINAL.imageProtocol, expected: ImageProtocol.Kitty }));`,
+			],
+			env,
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+
+		expect(stderr).toBe("");
+		expect(exitCode).toBe(0);
+		const resolved = JSON.parse(stdout) as { id: string; imageProtocol: string | null; expected: string };
+		expect(resolved.id).toBe("otty");
+		expect(resolved.imageProtocol).toBe(resolved.expected);
+	});
+});
 
 describe("Herdr image protocol mask", () => {
 	it("rejects a leaked Ghostty protocol when Herdr owns the pane grid", () => {

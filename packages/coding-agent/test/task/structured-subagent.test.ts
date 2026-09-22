@@ -19,7 +19,8 @@ import {
 	StructuredSubagentError,
 	type StructuredSubagentRequest,
 } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
-import type { AgentDefinition, SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 const AGENT: AgentDefinition = {
@@ -104,6 +105,30 @@ afterEach(() => {
 });
 
 describe("structured subagent primitive", () => {
+	it("resolves user-tagged model agents for task and eval but rejects untagged names", async () => {
+		mockDiscovery();
+		const taggedSession = session();
+		taggedSession.getSessionAgents = () => [{ ...AGENT, name: "m1", model: ["a/x"] }];
+		for (const invocationKind of ["task", "eval"] satisfies StructuredSubagentRequest["invocationKind"][]) {
+			const policy = await resolveEffectiveSubagentPolicy(
+				request({ session: taggedSession, agent: "m1", invocationKind }),
+			);
+			expect(policy.agent.name).toBe("m1");
+			expect(policy.modelOverride).toEqual(["a/x"]);
+		}
+		await expect(resolveEffectiveSubagentPolicy(request({ session: taggedSession, agent: "m9" }))).rejects.toThrow(
+			'Unknown agent "m9". Available: worker, m1',
+		);
+	});
+
+	it("keeps discovered agents authoritative on pseudonym collisions", async () => {
+		mockDiscovery({ ...AGENT, name: "m1", model: ["b/y"] });
+		const taggedSession = session();
+		taggedSession.getSessionAgents = () => [{ ...AGENT, name: "m1", model: ["a/x"] }];
+		const policy = await resolveEffectiveSubagentPolicy(request({ session: taggedSession, agent: "m1" }));
+		expect(policy.modelOverride).toEqual(["b/y"]);
+	});
+
 	it("uses caller, agent, then session schemas in precedence order", async () => {
 		mockDiscovery();
 		const callerSchema = { type: "object", properties: { caller: { type: "string" } } };
@@ -705,12 +730,40 @@ describe("structured subagent primitive", () => {
 		await expect(fs.stat(artifactsDir ?? "")).rejects.toThrow();
 	});
 
+	it("reports a run that failed before yielding as unavailable, not schema-invalid", async () => {
+		// Production 2026-09-21: a scout whose model stream died mid-prose
+		// ("Anthropic stream envelope error: stream ended before message_stop")
+		// was delivered as `Structured output: schema invalid: <provider error>`
+		// with its half-streamed text as the offending payload. No payload was
+		// ever validated, so the status is "unavailable", the error is the
+		// provider's, and the partial prose is not presented as data.
+		mockDiscovery();
+		const error = "Anthropic stream envelope error: stream ended before message_stop";
+		vi.spyOn(executorModule, "runSubprocess").mockResolvedValue({
+			...result(),
+			exitCode: 1,
+			output: "I'll systematically investigate the codebase",
+			stderr: error,
+			error,
+		});
+
+		const settled = await runStructuredSubagent(request());
+
+		expect(settled.result.structuredOutput).toEqual({
+			source: "agent",
+			mode: "permissive",
+			status: "unavailable",
+			error,
+		});
+		expect(settled.result.structuredOutput).not.toHaveProperty("data");
+	});
+
 	it("retains a detached task's artifacts on failure even without valid structured output", async () => {
-		// Regression: a detached (async) task job that fails with schema
-		// status "invalid" (not "valid") previously had its temp dir wiped
-		// immediately, breaking the "failed agent stays interrogable"
-		// invariant (task/index.ts) — the model could no longer read the
-		// failure via agent://<id> or history://<id> (PR #10625 review).
+		// Regression: a detached (async) task job that fails without a valid
+		// structured payload previously had its temp dir wiped immediately,
+		// breaking the "failed agent stays interrogable" invariant
+		// (task/index.ts) — the model could no longer read the failure via
+		// agent://<id> or history://<id> (PR #10625 review).
 		mockDiscovery();
 		let artifactsDir: string | undefined;
 		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
@@ -721,7 +774,7 @@ describe("structured subagent primitive", () => {
 		const settled = await runStructuredSubagent(request({ retainArtifacts: true, detached: true }));
 
 		expect(settled.result.exitCode).toBe(1);
-		expect(settled.result.structuredOutput?.status).toBe("invalid");
+		expect(settled.result.structuredOutput?.status).toBe("unavailable");
 		expect(artifactsDirsFromRegistry()).toContain(settled.artifactsDir);
 		await expect(fs.stat(artifactsDir ?? "")).resolves.toBeDefined();
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });

@@ -9,6 +9,7 @@ import type { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../../src/eval/bridge-timeout";
 import {
+	EVAL_HANDLE_CONCURRENCY,
 	getCompletionHandle,
 	releaseCompletionHandles,
 	runEvalCompletion,
@@ -21,7 +22,7 @@ import { disposeAllVmContexts } from "../../src/eval/js/context-manager";
 import { executeJs } from "../../src/eval/js/executor";
 import { disposeAllKernelSessions, type PythonResult } from "../../src/eval/py/executor";
 import type { ToolSession } from "../../src/tools";
-import { ToolError } from "../../src/tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 async function runEvalCompletionAndWait(
 	args: unknown,
@@ -595,6 +596,37 @@ describe("runEvalCompletion", () => {
 		await expect(
 			runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session: makeSession() }),
 		).rejects.toBeInstanceOf(ToolError);
+	});
+
+	it("bounds in-flight handles and admits queued ones as earlier requests settle", async () => {
+		const total = EVAL_HANDLE_CONCURRENCY + 8;
+		const gate = Promise.withResolvers<void>();
+		let inFlight = 0;
+		let peak = 0;
+		const admitted = Promise.withResolvers<void>();
+		vi.spyOn(ai, "completeSimple").mockImplementation(async () => {
+			inFlight++;
+			peak = Math.max(peak, inFlight);
+			if (inFlight === EVAL_HANDLE_CONCURRENCY) admitted.resolve();
+			await gate.promise;
+			inFlight--;
+			return assistant({ text: "ok" });
+		});
+		const session = makeSession();
+
+		const handles = await Promise.all(
+			Array.from({ length: total }, () => runEvalCompletion({ prompt: "q", model: "smol" }, { session })),
+		);
+		await admitted.promise;
+		expect(peak).toBe(EVAL_HANDLE_CONCURRENCY);
+		gate.resolve();
+		const waited = await runEvalWait(
+			{ items: handles.map(handle => ({ kind: "completion", id: handle.id })) },
+			{ session },
+		);
+
+		expect(waited.items.map(item => item.status)).toEqual(Array(total).fill("completed"));
+		expect(peak).toBe(EVAL_HANDLE_CONCURRENCY);
 	});
 
 	it("pauses the idle watchdog while a slow completion() request is in flight", async () => {

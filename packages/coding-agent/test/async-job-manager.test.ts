@@ -592,7 +592,7 @@ describe("AsyncJobManager", () => {
 			await manager.waitForAll();
 			await waitForCondition(() => manager.getDeliveryState({ ownerId: "Main" }).delivering);
 
-			// Foreground `hub jobs` read consumes the result mid-park.
+			// A foreground recovery read consumes the result mid-park.
 			expect(manager.consumeJobResults([jobId])).toBe(1);
 			vi.advanceTimersByTime(1_000);
 

@@ -7,6 +7,7 @@ import {
 	type SessionStorageWriteOptions,
 	type WriteTextAtomicOptions,
 } from "./session-storage";
+import { isAssistantMessageLine } from "./session-entries";
 import {
 	overlayTitleSlotContent,
 	overlayTitleSlotPrefix,
@@ -288,6 +289,13 @@ export class IndexedSessionStorage implements SessionStorage {
 		return [title ? overlayTitleSlotPrefix(prefix, prefixLimit, title) : prefix, suffix];
 	}
 
+	async hasAssistantTurn(path: string): Promise<boolean> {
+		for (const line of (await this.readText(path)).split("\n")) {
+			if (isAssistantMessageLine(line)) return true;
+		}
+		return false;
+	}
+
 	async writeText(path: string, content: string): Promise<void> {
 		await this.#awaitPath(path);
 		const previous = this.#index.get(path);
@@ -356,6 +364,10 @@ export class IndexedSessionStorage implements SessionStorage {
 		await this.#awaitPath(dst);
 		const entry = this.#index.get(src);
 		if (!entry) throw enoent(src);
+		if (src === dst) {
+			await this.#enqueuePath(src, () => this.#backend.move(src, dst, entry.mtimeMs), { trackDrain: false });
+			return;
+		}
 		const dstPrevious = this.#index.get(dst);
 		this.#index.delete(src);
 		this.#index.set(dst, { ...entry });

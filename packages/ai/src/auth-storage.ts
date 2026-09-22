@@ -8,6 +8,7 @@
  * - re-exported `SqliteAuthCredentialStore`: concrete SQLite-backed implementation
  */
 import { createHash } from "node:crypto";
+import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 import { planRequirementFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { $env, $envExact, getAgentDbPath, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import {
@@ -26,6 +27,7 @@ import type {
 	OAuthAuthInfo,
 	OAuthController,
 	OAuthCredentials,
+	OAuthPrompt,
 	OAuthProvider,
 	OAuthProviderId,
 } from "./registry/oauth/types";
@@ -49,11 +51,14 @@ import type {
 	UsageLogger,
 	UsageProvider,
 	UsageReport,
+	UsageResetCredit,
+	UsageResetCredits,
 } from "./usage";
 import { resolveUsedFraction } from "./usage";
 import { alibabaTokenPlanRankingStrategy, alibabaTokenPlanUsageProvider } from "./usage/alibaba-token-plan";
 import { charmHyperUsageProvider } from "./usage/charm-hyper";
 import { claudeRankingStrategy, claudeUsageProvider } from "./usage/claude";
+import { consumeClaudeResetCredit, listClaudeResetCredits } from "./usage/claude-reset";
 import { clinePassUsageProvider } from "./usage/cline-pass";
 import { cursorUsageProvider } from "./usage/cursor";
 import { devinUsageProvider } from "./usage/devin";
@@ -65,13 +70,7 @@ import { museCodeUsageProvider } from "./usage/muse-code";
 import { minimaxCodeUsageProvider } from "./usage/minimax-code";
 import { ollamaCloudUsageProvider, ollamaUsageProvider } from "./usage/ollama";
 import { codexRankingStrategy, openaiCodexUsageProvider } from "./usage/openai-codex";
-import {
-	type CodexResetConsumeCode,
-	type CodexResetCredit,
-	consumeCodexResetCredit,
-	listCodexResetCredits,
-	pickSoonestExpiringCredit,
-} from "./usage/openai-codex-reset";
+import { consumeCodexResetCredit, listCodexResetCredits, pickSoonestExpiringCredit } from "./usage/openai-codex-reset";
 import { opencodeGoRankingStrategy, opencodeGoUsageProvider } from "./usage/opencode-go";
 import { syntheticUsageProvider } from "./usage/synthetic";
 import { umansUsageProvider } from "./usage/umans";
@@ -988,14 +987,15 @@ export interface StoredOAuthRefreshResult<T extends OAuthCredential = OAuthCrede
 	removed: boolean;
 }
 
-/**
- * Identifies which stored account to redeem a saved rate-limit reset for.
- * Any one field is enough; `credentialId` is the most precise.
- */
+/** A saved-reset option bound to one provider and durable stored credential. */
 export interface ResetCreditTarget {
-	credentialId?: number;
+	provider: string;
+	credentialId: number;
+	/** Grant selected by the caller; a changed offer must be confirmed again. */
+	creditId?: string;
 	accountId?: string;
 	email?: string;
+	orgId?: string;
 }
 
 /** Outcome of {@link AuthStorage.redeemResetCredit}. */
@@ -1010,21 +1010,28 @@ export interface ResetCreditRedeemOutcome {
 	 * retryable, unlike a genuine `no_credit`), `http_<status>` (unexpected
 	 * HTTP).
 	 */
-	code: CodexResetConsumeCode;
+	code: string;
+	provider?: string;
 	accountId?: string;
 	email?: string;
+	orgId?: string;
+	/** Provider explanation for an unavailable or refused reset. */
+	reason?: string;
+	/** Normalized usage limit IDs the provider confirmed it cleared. */
+	cleared?: string[];
 	/** The credit that was spent (when one was). */
 	creditId?: string;
 }
 
 /** One stored account's live saved-reset status, from {@link AuthStorage.listResetCredits}. */
-export interface ResetCreditAccountStatus {
-	credentialId?: number;
+export interface ResetCreditAccountStatus extends UsageResetCredits {
+	provider: string;
+	credentialId: number;
 	accountId?: string;
 	email?: string;
-	/** Resets redeemable for this account right now (live, not cached). */
-	availableCount: number;
-	credits: CodexResetCredit[];
+	orgId?: string;
+	orgName?: string;
+	credits: UsageResetCredit[];
 	/** Whether this is the given session's active account. */
 	active: boolean;
 	/** Set when the account's token refresh or list call failed. */
@@ -1397,6 +1404,13 @@ export class AuthStorage {
 	#usageHeaderIngestAt: Map<string, number> = new Map();
 	#usageReportsInFlight: Map<string, Promise<UsageReport[] | null>> = new Map();
 	#usageFetch: typeof fetch;
+	/** Manual and automatic attempts on one stored account share a mutation. */
+	#resetInFlight = new Map<string, { creditId?: string; promise: Promise<ResetCreditRedeemOutcome> }>();
+	/** Ambiguous Claude claims retain their idempotency key until reconciled. */
+	#pendingClaudeResets = new Map<
+		string,
+		{ creditId: string; requestId: string; program?: string; remainingCount?: number; startedAt: number }
+	>();
 	#usageRequestTimeoutMs: number;
 	#usageLogger?: UsageLogger;
 	#fallbackResolver?: (provider: string) => string | undefined;
@@ -1635,8 +1649,8 @@ export class AuthStorage {
 	 * Lower priority than {@link setRuntimeApiKey} so a CLI `--api-key`
 	 * still wins for the duration of a single invocation.
 	 */
-	setConfigApiKey(provider: string, apiKey: string): void {
-		this.#configOverrides.set(provider, apiKey);
+	setConfigApiKey(provider: string, apiKeyConfig: string): void {
+		this.#configOverrides.set(provider, apiKeyConfig);
 	}
 
 	/**
@@ -1660,6 +1674,15 @@ export class AuthStorage {
 	 */
 	setFallbackResolver(resolver: (provider: string) => string | undefined): void {
 		this.#fallbackResolver = resolver;
+	}
+	/**
+	 * Install the host's async config-value resolver. Coding-agent uses this so
+	 * every stored/config credential reference shares command caching,
+	 * failure backoff, and process hardening even when AuthStorage was created
+	 * independently and later attached to a registry.
+	 */
+	setConfigValueResolver(resolver: (config: string) => Promise<string | undefined>): void {
+		this.#configValueResolver = resolver;
 	}
 
 	/**
@@ -2943,15 +2966,56 @@ export class AuthStorage {
 	}
 
 	/**
+	 * True when a stored credential is the provider's KDL `empty-fallback`
+	 * keyless-mode marker — what an empty paste at an "Optional: paste API key"
+	 * login prompt stores (e.g. `lm-studio-local` for lm-studio). The wire layer
+	 * never sends these as a bearer (`isDiscoveryBearerApiKey` strips them), so
+	 * auth-status surfaces must not count them either; otherwise the model hub
+	 * and `/login` report the provider as authenticated while every request
+	 * goes out bare (issue #12281). The credential itself stays stored: `/logout`
+	 * can still remove it, and availability treats the provider as keyless.
+	 */
+	#isKeylessFallbackCredential(provider: string, credential: AuthCredential): boolean {
+		if (credential.type !== "api_key") return false;
+		const login = authPolicyFor(provider)?.login;
+		if (login?.kind !== "api-key") return false;
+		const fallback = login.emptyFallback;
+		return fallback !== undefined && fallback !== "" && credential.key === fallback;
+	}
+
+	/** Stored credentials that carry real auth — keyless-fallback markers excluded. */
+	#getAuthBearingCredentials(provider: string): AuthCredential[] {
+		return this.#getCredentialsForProvider(provider).filter(
+			credential => !this.#isKeylessFallbackCredential(provider, credential),
+		);
+	}
+
+	/**
+	 * True when the provider has stored credentials but none of them carries
+	 * auth — i.e. its only credential is the KDL `empty-fallback` keyless-mode
+	 * marker (an empty paste at an optional-key login prompt). Such a provider
+	 * is configured-but-keyless: model availability treats it like an
+	 * `auth: none` endpoint instead of locking it out (issue #12281).
+	 */
+	hasKeylessPlaceholder(provider: string): boolean {
+		const stored = this.#getCredentialsForProvider(provider);
+		return stored.length > 0 && stored.every(credential => this.#isKeylessFallbackCredential(provider, credential));
+	}
+
+	/**
 	 * Dedicated auth for default-model availability (picker / `getAvailable`).
 	 * Unlike {@link getApiKey}, this does not refresh OAuth tokens, and unlike
 	 * {@link hasResolvableAuth} it ignores cross-provider env aliases so
 	 * `XAI_API_KEY` does not auto-select SuperGrok (`xai-oauth`).
+	 *
+	 * A stored keyless-fallback marker (empty paste at an optional-key login)
+	 * does not count: it never reaches the wire as a bearer, so treating it as
+	 * auth would present the provider as signed-in while requests go out bare.
 	 */
 	hasAuth(provider: string): boolean {
 		if (this.#runtimeOverrides.has(provider)) return true;
 		if (this.#configOverrides.has(provider)) return true;
-		if (this.#getCredentialsForProvider(provider).length > 0) return true;
+		if (this.#getAuthBearingCredentials(provider).length > 0) return true;
 		if (this.#hasDedicatedEnvAuth(provider)) return true;
 		if (this.#fallbackResolver?.(provider)) return true;
 		return false;
@@ -2971,7 +3035,7 @@ export class AuthStorage {
 	hasConcreteAuth(provider: string): boolean {
 		if (this.#runtimeOverrides.has(provider)) return true;
 		if (this.#configOverrides.has(provider)) return true;
-		if (this.#getCredentialsForProvider(provider).length > 0) return true;
+		if (this.#getAuthBearingCredentials(provider).length > 0) return true;
 		if ((provider === "amazon-bedrock" || provider === "bedrock-mantle") && $env.AWS_BEARER_TOKEN_BEDROCK?.trim()) {
 			return true;
 		}
@@ -3011,7 +3075,7 @@ export class AuthStorage {
 	hasNonEnvCredential(provider: string): boolean {
 		if (this.#runtimeOverrides.has(provider)) return true;
 		if (this.#configOverrides.has(provider)) return true;
-		if (this.#getCredentialsForProvider(provider).length > 0) return true;
+		if (this.#getAuthBearingCredentials(provider).length > 0) return true;
 		if (this.#fallbackResolver?.(provider)) return true;
 		return false;
 	}
@@ -3043,7 +3107,7 @@ export class AuthStorage {
 	getCredentialOrigin(provider: string): CredentialOrigin | undefined {
 		if (this.#runtimeOverrides.has(provider)) return { kind: "runtime" };
 		if (this.#configOverrides.has(provider)) return { kind: "config" };
-		const stored = this.#getCredentialsForProvider(provider);
+		const stored = this.#getAuthBearingCredentials(provider);
 		if (stored.some(credential => credential.type === "oauth")) return { kind: "oauth" };
 		if (stored.some(credential => credential.type === "api_key" && credential.source === "login")) {
 			return { kind: "api_key" };
@@ -3169,7 +3233,7 @@ export class AuthStorage {
 			/** onAuth is required by auth-storage but optional in OAuthController */
 			onAuth: (info: OAuthAuthInfo) => void;
 			/** onPrompt is required for some providers (github-copilot, openai-codex) */
-			onPrompt: (prompt: { message: string; placeholder?: string }) => Promise<string>;
+			onPrompt: (prompt: OAuthPrompt) => Promise<string>;
 		},
 	): Promise<OAuthLoginIdentity | undefined> {
 		// Only paste-code providers (fixed non-loopback redirect, e.g. GitLab Duo
@@ -4697,7 +4761,7 @@ export class AuthStorage {
 	async #resolveCredentialTarget(
 		provider: string,
 		sessionId: string | undefined,
-		options?: { credentialId?: number; apiKey?: string },
+		options?: { credentialId?: number; apiKey?: string; allowStaleOAuthBearer?: boolean },
 	): Promise<{ type: AuthCredential["type"]; index: number; explicit: boolean } | undefined> {
 		const explicit = options?.credentialId !== undefined || options?.apiKey !== undefined;
 		if (explicit) {
@@ -4720,6 +4784,15 @@ export class AuthStorage {
 				if (entry && (await this.#credentialMatchesApiKey(entry.credential, options.apiKey))) {
 					return { type: entry.credential.type, index, explicit: true };
 				}
+			}
+			// Quota and account policy survive token refresh; hard auth failures do not.
+			if (options.allowStaleOAuthBearer && options.credentialId === undefined) {
+				const credentialId = this.#findOAuthCredentialIdForBearer(provider, options.apiKey);
+				const index =
+					credentialId === undefined
+						? -1
+						: stored.findIndex(entry => entry.id === credentialId && entry.credential.type === "oauth");
+				if (index >= 0) return { type: "oauth", index, explicit: true };
 			}
 		}
 		if (explicit) return undefined;
@@ -4856,23 +4929,11 @@ export class AuthStorage {
 		},
 	): Promise<UsageLimitMarkResult> {
 		await this.#adoptExternalCredentialChanges();
-		let sessionCredential = await this.#resolveCredentialTarget(provider, sessionId, {
+		const sessionCredential = await this.#resolveCredentialTarget(provider, sessionId, {
 			credentialId: options?.credentialId,
 			apiKey: options?.apiKey,
+			allowStaleOAuthBearer: true,
 		});
-		if (!sessionCredential && options?.credentialId === undefined && options?.apiKey !== undefined) {
-			// Account quota survives OAuth bearer rotation. Attribute a delayed
-			// usage-limit response through the durable row id captured when this
-			// exact bearer was resolved; never use this alias for hard auth errors.
-			const credentialId = this.#findOAuthCredentialIdForBearer(provider, options.apiKey);
-			const index =
-				credentialId === undefined
-					? -1
-					: this.#getStoredCredentials(provider).findIndex(
-							entry => entry.id === credentialId && entry.credential.type === "oauth",
-						);
-			if (index >= 0) sessionCredential = { type: "oauth", index, explicit: true };
-		}
 		if (!sessionCredential) return { switched: false };
 		const target = this.#getStoredCredentials(provider)[sessionCredential.index];
 		if (!target || target.credential.type !== sessionCredential.type) return { switched: false };
@@ -5960,8 +6021,8 @@ export class AuthStorage {
 		}
 
 		const configKey = this.#configOverrides.get(provider);
-		if (configKey) {
-			return configKey;
+		if (configKey !== undefined) {
+			return await this.#configValueResolver(configKey);
 		}
 
 		await this.#adoptExternalCredentialChanges();
@@ -5987,7 +6048,10 @@ export class AuthStorage {
 			provider,
 			"api_key",
 			undefined,
-			credential => credential.type === "api_key" && credential.source === "login",
+			credential =>
+				credential.type === "api_key" &&
+				credential.source === "login" &&
+				!this.#isKeylessFallbackCredential(provider, credential),
 		);
 		if (loginApiKeySelection) {
 			return this.#configValueResolver(loginApiKeySelection.credential.key);
@@ -6028,8 +6092,8 @@ export class AuthStorage {
 		// honor it instead of forwarding an upstream OAuth token that the proxy
 		// won't accept.
 		const configKey = this.#configOverrides.get(provider);
-		if (configKey) {
-			return configKey;
+		if (configKey !== undefined) {
+			return await this.#configValueResolver(configKey);
 		}
 
 		// Precedence: a deliberate OAuth/login credential wins, then an explicit env var,
@@ -6042,7 +6106,7 @@ export class AuthStorage {
 			provider,
 			sessionId,
 			options,
-			credential => credential.source === "login",
+			credential => credential.source === "login" && !this.#isKeylessFallbackCredential(provider, credential),
 		);
 		if (loginApiKeySelection) {
 			this.#recordSessionCredential(provider, sessionId, "api_key", loginApiKeySelection.index);
@@ -6339,16 +6403,7 @@ export class AuthStorage {
 		return this.#resolveStoredOAuthAccess(provider, selection, providerKey, options);
 	}
 
-	/**
-	 * List saved rate-limit resets for every stored OAuth account of `provider`
-	 * (Codex), fetched LIVE from the dedicated `rate-limit-reset-credits` route.
-	 *
-	 * This deliberately bypasses the usage-report cache: `/wham/usage` is
-	 * IP-rate-limited and may serve stale (or pre-feature) snapshots when many
-	 * accounts are polled, which would hide redeemable credits. One entry per
-	 * account, with the session's active account flagged and unreachable
-	 * accounts carrying an `error`.
-	 */
+	/** List live saved-reset balances and eligibility for one provider's stored OAuth accounts. */
 	async listResetCredits(options?: {
 		provider?: string;
 		sessionId?: string;
@@ -6356,36 +6411,25 @@ export class AuthStorage {
 		signal?: AbortSignal;
 	}): Promise<ResetCreditAccountStatus[]> {
 		const provider = options?.provider ?? "openai-codex";
-		const accesses = await this.getOAuthAccesses(provider);
-		if (accesses.length === 0) return [];
+		if (provider !== "openai-codex" && provider !== "anthropic") return [];
+		const accounts = this.listOAuthAccounts(provider, options?.sessionId);
 		const baseUrl = options?.baseUrlResolver?.(provider);
-		const activeId = this.getOAuthAccountIdentity(provider, options?.sessionId);
 		return Promise.all(
-			accesses.map(async (access): Promise<ResetCreditAccountStatus> => {
-				const active =
-					!!activeId &&
-					((!!activeId.accountId && activeId.accountId === access.accountId) ||
-						(!!activeId.email && activeId.email === access.email));
-				const base = {
-					credentialId: access.credentialId,
-					accountId: access.accountId,
-					email: access.email,
-					active,
-				};
-				if (!access.ok)
+			accounts.map(async (account): Promise<ResetCreditAccountStatus> => {
+				const base = { ...account, provider };
+				const access = await this.getOAuthAccessByCredentialId(provider, account.credentialId, {
+					signal: options?.signal,
+				});
+				if (!access?.ok)
 					return {
 						...base,
 						availableCount: 0,
 						credits: [],
-						error: access.error,
+						error: access?.error ?? "Account no longer available",
 					};
-				const list = await listCodexResetCredits({
-					accessToken: access.accessToken,
-					accountId: access.accountId,
-					baseUrl,
-					fetch: this.#usageFetch,
-					signal: options?.signal,
-				});
+				const auth = { ...access, baseUrl, fetch: this.#usageFetch, signal: options?.signal };
+				const list =
+					provider === "anthropic" ? await listClaudeResetCredits(auth) : await listCodexResetCredits(auth);
 				if (!list)
 					return {
 						...base,
@@ -6393,115 +6437,195 @@ export class AuthStorage {
 						credits: [],
 						error: "Failed to load saved resets",
 					};
-				return {
-					...base,
-					availableCount: list.availableCount,
-					credits: list.credits,
-				};
+				return { ...base, ...list };
 			}),
 		);
 	}
 
 	/**
-	 * Redeem one saved rate-limit reset (OpenAI Codex "saved resets") for a
-	 * specific stored account.
-	 *
-	 * Resolves a fresh access token for the target account, picks an available
-	 * credit (the given `creditId`, else the first redeemable one), spends it,
-	 * and invalidates the cached usage report so the next `/usage` reflects the
-	 * reset. Never throws for business outcomes — inspect the returned `code`.
+	 * Redeem a stored account's saved reset after checking its live offer.
+	 * Business refusals return a code; transport errors may throw without losing Claude's request ID.
 	 */
 	async redeemResetCredit(options: {
 		target: ResetCreditTarget;
-		provider?: string;
-		creditId?: string;
 		baseUrlResolver?: (provider: string) => string | undefined;
 		signal?: AbortSignal;
 	}): Promise<ResetCreditRedeemOutcome> {
-		const provider = options.provider ?? "openai-codex";
-		const baseUrl = options.baseUrlResolver?.(provider);
 		const { target } = options;
-		const accesses = await this.getOAuthAccesses(provider);
-		const match = accesses.find(
-			access =>
-				(target.credentialId !== undefined && access.credentialId === target.credentialId) ||
-				(!!target.accountId && access.accountId === target.accountId) ||
-				(!!target.email && access.email === target.email),
-		);
-		if (!match)
-			return {
-				ok: false,
-				code: "no_account",
-				accountId: target.accountId,
-				email: target.email,
-			};
-		if (!match.ok) {
-			return {
-				ok: false,
-				code: "account_unavailable",
-				accountId: match.accountId,
-				email: match.email,
-			};
+		const { provider, creditId } = target;
+		const identity = { provider, accountId: target.accountId, email: target.email, orgId: target.orgId };
+		if (provider !== "openai-codex" && provider !== "anthropic") {
+			return { ...identity, ok: false, code: "unsupported_provider" };
 		}
+		const baseUrl = options.baseUrlResolver?.(provider);
+		const match = await this.getOAuthAccessByCredentialId(provider, target.credentialId, { signal: options.signal });
+		if (!match) return { ...identity, ok: false, code: "no_account" };
+		const resolvedIdentity = {
+			provider,
+			accountId: match.accountId,
+			email: match.email,
+			orgId: match.orgId,
+		};
+		if (!match.ok) return { ...resolvedIdentity, ok: false, code: "account_unavailable" };
+		const accountKey = JSON.stringify([provider, baseUrl, target.credentialId]);
+		const inFlight = this.#resetInFlight.get(accountKey);
+		if (inFlight) {
+			if (inFlight.creditId !== creditId) return { ...resolvedIdentity, ok: false, code: "reset_in_progress" };
+			return inFlight.promise;
+		}
+		const promise = this.#redeemAccountReset(provider, match, accountKey, {
+			creditId,
+			baseUrl,
+			signal: options.signal,
+		}).finally(() => this.#resetInFlight.delete(accountKey));
+		this.#resetInFlight.set(accountKey, { creditId, promise });
+		return promise;
+	}
 
+	async #redeemAccountReset(
+		provider: string,
+		access: OAuthAccess,
+		accountKey: string,
+		options: { creditId?: string; baseUrl?: string; signal?: AbortSignal },
+	): Promise<ResetCreditRedeemOutcome> {
+		const identity = { provider, accountId: access.accountId, email: access.email, orgId: access.orgId };
+		const auth = { ...access, baseUrl: options.baseUrl, fetch: this.#usageFetch, signal: options.signal };
 		let creditId = options.creditId;
-		if (!creditId) {
-			const list = await listCodexResetCredits({
-				accessToken: match.accessToken,
-				accountId: match.accountId,
-				baseUrl,
-				fetch: this.#usageFetch,
-				signal: options.signal,
-			});
-			// Transport/auth failure is NOT "no credits": callers treat `no_credit`
-			// as terminal for the episode, so conflating them would bury a live
-			// credit behind one flaky request.
-			if (!list) {
+		let result: ResetCreditRedeemOutcome;
+		let report: UsageReport | null = null;
+		if (provider === "anthropic") {
+			const list = await listClaudeResetCredits(auth);
+			if (!list) return { ...identity, ok: false, code: "credit_list_failed" };
+			const selected = list.credits.find(credit => credit.id === list.nextCreditId);
+			if (creditId && creditId !== list.nextCreditId) {
+				return { ...identity, ok: false, code: "offer_changed", creditId };
+			}
+			if (!list.eligible || !selected || !selected.usable || (list.redeemableCount ?? 0) < 1) {
 				return {
+					...identity,
 					ok: false,
-					code: "credit_list_failed",
-					accountId: match.accountId,
-					email: match.email,
+					code: list.availableCount > 0 ? "ineligible" : "no_credit",
+					reason: list.reason,
 				};
 			}
-			const credit = pickSoonestExpiringCredit(list.credits);
-			if (!credit)
-				return {
-					ok: false,
-					code: "no_credit",
-					accountId: match.accountId,
-					email: match.email,
-				};
-			creditId = credit.id;
+			creditId = selected.id;
+			let pending = this.#pendingClaudeResets.get(accountKey);
+			if (pending && Date.now() - pending.startedAt >= 10 * 60_000) {
+				this.#pendingClaudeResets.delete(accountKey);
+				pending = undefined;
+			}
+			if (pending) {
+				if (pending.creditId !== creditId) return { ...identity, ok: false, code: "reset_unconfirmed", creditId };
+				if (
+					pending.remainingCount !== undefined &&
+					selected.remainingCount !== undefined &&
+					selected.remainingCount < pending.remainingCount
+				) {
+					this.#pendingClaudeResets.delete(accountKey);
+					this.#invalidateUsageReportCache(provider, options.baseUrl);
+					return { ...identity, ok: false, code: "already_redeemed", creditId };
+				}
+				if (pending.program === "juniper_tide") {
+					return { ...identity, ok: false, code: "reset_unconfirmed", creditId };
+				}
+			}
+			const credential = this.#getStoredCredentials(provider).find(entry => entry.id === access.credentialId);
+			if (credential?.credential.type === "oauth") {
+				report = await this.#getUsageReport(provider, credential.credential, {
+					baseUrl: options.baseUrl,
+					signal: options.signal,
+				});
+			}
+			const requestId = pending?.requestId ?? crypto.randomUUID();
+			options.signal?.throwIfAborted();
+			this.#pendingClaudeResets.set(accountKey, {
+				creditId,
+				requestId,
+				program: selected.program,
+				remainingCount: selected.remainingCount,
+				startedAt: pending?.startedAt ?? Date.now(),
+			});
+			const consumed = await consumeClaudeResetCredit({
+				...auth,
+				baseUrl: list.baseUrl ?? auth.baseUrl,
+				orgId: list.orgId ?? access.orgId,
+				credit: selected,
+				redeemRequestId: requestId,
+			});
+			if (
+				consumed.ok ||
+				consumed.code === "already_redeemed" ||
+				consumed.code === "nothing_to_reset" ||
+				consumed.code === "ineligible" ||
+				(!pending &&
+					(consumed.code === "cooldown" ||
+						consumed.status === 401 ||
+						consumed.status === 403 ||
+						consumed.status === 429))
+			) {
+				this.#pendingClaudeResets.delete(accountKey);
+			}
+			result = {
+				...identity,
+				ok: consumed.ok,
+				code: consumed.code,
+				reason: consumed.reason,
+				cleared: consumed.cleared,
+				creditId,
+			};
+		} else {
+			if (!creditId) {
+				const list = await listCodexResetCredits(auth);
+				if (!list) return { ...identity, ok: false, code: "credit_list_failed" };
+				const credit = pickSoonestExpiringCredit(list.credits);
+				if (!credit) return { ...identity, ok: false, code: "no_credit" };
+				creditId = credit.id;
+			}
+			const consumed = await consumeCodexResetCredit({ ...auth, creditId });
+			result = { ...identity, ok: consumed.ok, code: consumed.code, creditId };
 		}
-
-		const result = await consumeCodexResetCredit({
-			creditId,
-			accessToken: match.accessToken,
-			accountId: match.accountId,
-			baseUrl,
-			fetch: this.#usageFetch,
-			signal: options.signal,
-		});
 		if (result.ok) {
-			this.#invalidateUsageReportCache(provider, baseUrl);
+			this.#invalidateUsageReportCache(provider, options.baseUrl);
 			if (this.#store.invalidateUsageCache) {
 				await this.#store.invalidateUsageCache(options.signal).catch(err => {
 					logger.debug("Failed to notify store of stale usage", { err });
 				});
 			}
-			// The window this credential was blocked on (by markUsageLimitReached)
-			// is now reset, so lift its temporary block — otherwise selection
-			// keeps skipping/under-ranking the freshly-reset account.
-			if (match.credentialId !== undefined) this.#clearCredentialBlocks(provider, match.credentialId);
+			if (access.credentialId !== undefined) {
+				if (provider === "anthropic")
+					this.#clearClaudeResetBlocks(access.credentialId, result.cleared ?? [], report);
+				else this.#clearCredentialBlocks(provider, access.credentialId);
+			}
 		}
-		return {
-			ok: result.ok,
-			code: result.code,
-			accountId: match.accountId,
-			email: match.email,
-			creditId,
-		};
+		return result;
+	}
+
+	/** Partial Claude resets must leave blocks for uncovered weekly/model limits intact. */
+	#clearClaudeResetBlocks(credentialId: number, cleared: readonly string[], report: UsageReport | null): void {
+		if (!report || Date.now() - report.fetchedAt > USAGE_REPORT_TTL_MS || cleared.length === 0) return;
+		const provider = "anthropic";
+		const index = this.#getStoredCredentials(provider).findIndex(entry => entry.id === credentialId);
+		if (index < 0) return;
+		const shared = report.limits.filter(limit => limit.scope.shared);
+		if (!["anthropic:5h", "anthropic:7d"].every(id => shared.some(limit => limit.id === id))) return;
+		const unscoped = report.limits.filter(
+			limit => limit.scope.shared || limit.scope.tier === "opus" || limit.scope.tier === "sonnet",
+		);
+		const scopes = [
+			{ blockScope: undefined, limits: unscoped },
+			...(claudeRankingStrategy.healableBlockScopes?.(report) ?? []),
+		];
+		for (const scope of scopes) {
+			if (!scope.limits.some(limit => cleared.includes(limit.id))) continue;
+			if (this.#isUsageLimitReached(scope.limits.filter(limit => !cleared.includes(limit.id)))) continue;
+			this.#clearCredentialBlockScope(
+				provider,
+				credentialId,
+				index,
+				this.#getProviderTypeKey(provider, "oauth"),
+				scope.blockScope,
+			);
+		}
 	}
 
 	/**
@@ -6964,8 +7088,8 @@ export class AuthStorage {
 	 * stale session stickiness. Fall back to the session-sticky credential only
 	 * when neither explicit target is available. For hard-auth errors, an explicit
 	 * target that no longer matches storage returns `false` without mutation.
-	 * Delayed usage-limit errors may instead recover the durable OAuth row from
-	 * the bearer fingerprint recorded when the request resolved.
+	 * Delayed usage-limit and account-policy errors may instead recover the durable
+	 * OAuth row from the bearer fingerprint recorded when the request resolved.
 	 *
 	 * - usage-limit / account-rate-limit error → {@link AuthStorage.markUsageLimitReached}
 	 *   (temporary block via its own backoff — default plus server usage-report
@@ -7014,16 +7138,16 @@ export class AuthStorage {
 			).switched;
 		}
 
-		const sessionCredential = await this.#resolveCredentialTarget(provider, sessionId, {
-			credentialId: options?.credentialId,
-			apiKey: options?.apiKey,
-		});
-		if (!sessionCredential) return false;
-
 		const deniedModel = AIError.codexChatGPTAccountPolicyModel(error);
 		const exactCodexModelPolicy =
 			deniedModel !== undefined && AIError.isCodexChatGPTAccountPolicyError(error, provider, options?.modelId);
 		const exactModelPolicy = exactCodexModelPolicy || exactCursorModelPolicy;
+		const sessionCredential = await this.#resolveCredentialTarget(provider, sessionId, {
+			credentialId: options?.credentialId,
+			apiKey: options?.apiKey,
+			allowStaleOAuthBearer: accountPolicy || exactModelPolicy,
+		});
+		if (!sessionCredential) return false;
 		// The exact sentence is provider-controlled input. A non-Codex provider,
 		// absent request model, or mismatched model must not turn it into either a
 		// global block or a hard-auth invalidation.
@@ -7039,6 +7163,15 @@ export class AuthStorage {
 				options?.modelId,
 				modelPolicyScope,
 			);
+			// Account-wide denials must not inherit a quota scope that healthy usage can heal.
+			routing.blockScope = modelPolicyScope;
+			const sticky = this.#getSessionCredential(provider, sessionId);
+			if (
+				!sessionCredential.explicit ||
+				(sticky?.type === sessionCredential.type && sticky.index === sessionCredential.index)
+			) {
+				this.#clearSessionCredential(provider, sessionId);
+			}
 			return this.#blockCredentialForRotation(
 				provider,
 				sessionCredential.type,
@@ -7289,6 +7422,9 @@ export class AuthStorage {
 				throw error;
 			}
 			const updated: OAuthCredential = {
+				// Preserve credential-subtype metadata, such as MCP token endpoints,
+				// that the provider's bare OAuth response cannot reproduce.
+				...attempted,
 				type: "oauth",
 				access: refreshed.access,
 				refresh: refreshed.refresh,
@@ -7477,7 +7613,10 @@ export class AuthStorage {
 		if (oauthSource) return oauthSource;
 		const loginApiKeySource = describeStored(
 			"api_key",
-			credential => credential.type === "api_key" && credential.source === "login",
+			credential =>
+				credential.type === "api_key" &&
+				credential.source === "login" &&
+				!this.#isKeylessFallbackCredential(provider, credential),
 		);
 		if (loginApiKeySource) return loginApiKeySource;
 		if (getEnvApiKey(provider)) return `env (over ${baseLabel})`;

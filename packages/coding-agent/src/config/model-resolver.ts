@@ -1,3 +1,10 @@
+import {
+	MAX_THINKING_SUFFIX_OPTIONS,
+	parseThinkingSuffix,
+	splitThinkingSuffix,
+	parseModelString,
+	splitUpstreamRouting,
+} from "@oh-my-pi/pi-tui/overlays/model-selector";
 /**
  * Model resolution, scoping, and initial selection.
  *
@@ -16,6 +23,7 @@
  */
 
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { ModelRoleLookup } from "@oh-my-pi/pi-tui/overlays/model-browser";
 import type { Api, Effort, KnownProvider, Model, ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resolveBareVariantSelector, resolveVariantSelector } from "@oh-my-pi/pi-catalog/compat/collapse";
@@ -33,14 +41,14 @@ import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
 	concreteThinkingLevel,
-	parseThinkingLevel,
 	resolveThinkingLevelForModel,
-} from "../thinking";
+} from "@oh-my-pi/pi-tui/thinking";
 import { isAuthenticated, kNoAuth, type ModelRegistry } from "./model-registry";
 import {
 	DEFAULT_MODEL_ROLE_ALIAS,
 	formatModelRoleAlias,
 	LEGACY_MODEL_ROLE_ALIAS_PREFIX,
+	CHAT_MODEL_ROLE_IDS,
 	MODEL_ROLE_ALIAS_PREFIX,
 	MODEL_ROLE_IDS,
 	type ModelRole,
@@ -111,50 +119,6 @@ export interface ScopedModel {
 	explicitThinkingLevel: boolean;
 }
 
-interface ThinkingSuffixOptions {
-	allowMaxSuffix?: boolean;
-	allowAutoAlias?: boolean;
-}
-
-interface ModelStringParseOptions extends ThinkingSuffixOptions {
-	isLiteralModelId?: (provider: string, id: string) => boolean;
-}
-// Suffix recognition for the model-pattern parser: `:max` is a real thinking
-// level and `:auto` maps to the auto sentinel. Both are gated behind flags
-// (and the literal-id / exact-match guards on the callers) because real model
-// ids end in `:max` (e.g. `glm-4.7:max`) — an ungated split would silently
-// reinterpret them as a thinking suffix.
-const MAX_THINKING_SUFFIX_OPTIONS: ThinkingSuffixOptions = { allowMaxSuffix: true, allowAutoAlias: true };
-
-function parseThinkingSuffix(value: string, options?: ThinkingSuffixOptions): ConfiguredThinkingLevel | undefined {
-	const level = parseThinkingLevel(value);
-	if (level === ThinkingLevel.Max) return options?.allowMaxSuffix === true ? level : undefined;
-	if (level !== undefined) return level;
-	if (options?.allowAutoAlias === true && value === AUTO_THINKING) return AUTO_THINKING;
-	return undefined;
-}
-
-/**
- * Split a trailing `:<level>` thinking selector off a model pattern.
- *
- * `level` is set when the suffix parses as a concrete thinking level (or, when
- * the caller opts in via `allowMaxSuffix`/`allowAutoAlias`, the guarded `:max`
- * level / `:auto` sentinel); `base` then has the suffix stripped. Otherwise
- * `base` is the input.
- * `minColonIndex` requires the colon to appear strictly after that index —
- * role-alias callers pass the matched alias prefix length.
- */
-function splitThinkingSuffix(
-	pattern: string,
-	minColonIndex = -1,
-	options?: ThinkingSuffixOptions,
-): { base: string; level?: ConfiguredThinkingLevel } {
-	const colonIdx = pattern.lastIndexOf(":");
-	if (colonIdx <= minColonIndex) return { base: pattern };
-	const level = parseThinkingSuffix(pattern.slice(colonIdx + 1), options);
-	return level ? { base: pattern.slice(0, colonIdx), level } : { base: pattern };
-}
-
 function matchingGlobModels(pattern: string, availableModels: readonly Model<Api>[]): Model<Api>[] {
 	const glob = new Bun.Glob(pattern.toLowerCase());
 	return availableModels.filter(model => {
@@ -203,32 +167,6 @@ function resolveGlobScopePattern(
 }
 
 /**
- * Parse a model string in "provider/modelId" format.
- * Returns undefined if the format is invalid.
- */
-export function parseModelString(
-	modelStr: string,
-	options?: ModelStringParseOptions,
-): { provider: string; id: string; thinkingLevel?: ConfiguredThinkingLevel } | undefined {
-	const slashIdx = modelStr.indexOf("/");
-	if (slashIdx <= 0) return undefined;
-	const id = modelStr.slice(slashIdx + 1);
-	const provider = modelStr.slice(0, slashIdx);
-	// Strip strict thinking level suffixes first (e.g. "claude-sonnet-4-6:high" -> id "claude-sonnet-4-6", thinkingLevel "high").
-	const strict = splitThinkingSuffix(id);
-	if (strict.level) return { provider, id: strict.base, thinkingLevel: strict.level };
-	// `max` is a real thinking level, but real model IDs can also end in
-	// `:max`. Context-aware callers pass a literal lookup so those models win.
-	const maxAlias = splitThinkingSuffix(id, -1, options);
-	if (maxAlias.level) {
-		return options?.isLiteralModelId?.(provider, id) === true
-			? { provider, id }
-			: { provider, id: maxAlias.base, thinkingLevel: maxAlias.level };
-	}
-	return { provider, id };
-}
-
-/**
  * Format a model as "provider/modelId" string.
  */
 export function formatModelString(model: Model<Api>): string {
@@ -260,10 +198,6 @@ export function formatModelStringWithRouting(model: Model<Api>): string {
 	const selector = formatModelString(model);
 	const upstream = getSingleUpstreamRoute(model);
 	return upstream ? `${selector}@${upstream}` : selector;
-}
-
-export function formatModelSelectorValue(selector: string, thinkingLevel: ConfiguredThinkingLevel | undefined): string {
-	return thinkingLevel && thinkingLevel !== ThinkingLevel.Inherit ? `${selector}:${thinkingLevel}` : selector;
 }
 
 function getOpenRouterRouteSuffix(modelId: string): { baseId: string; suffix: string } | undefined {
@@ -356,6 +290,7 @@ function resolveBedrockInferenceProfileModelId(
 		contextWindow: null,
 		maxTokens: null,
 		...(template.headers ? { headers: template.headers } : {}),
+		...(template.resolveHeaders ? { resolveHeaders: template.resolveHeaders } : {}),
 		...(template.transport !== undefined ? { transport: template.transport } : {}),
 		...(template.guardrailIdentifier !== undefined ? { guardrailIdentifier: template.guardrailIdentifier } : {}),
 		...(template.guardrailVersion !== undefined ? { guardrailVersion: template.guardrailVersion } : {}),
@@ -371,30 +306,6 @@ function resolveBedrockInferenceProfileReference(
 ): Model<Api> | undefined {
 	if (provider.toLowerCase() !== AMAZON_BEDROCK_PROVIDER) return undefined;
 	return resolveBedrockInferenceProfileModelId(modelId, availableModels);
-}
-
-/** Bare slug (`cerebras`) or tiered/regional slug (`google-ai-studio/priority`, `google-vertex/global/flex`). */
-const UPSTREAM_ROUTING_SLUG = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\/[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$/i;
-
-/**
- * Split a trailing `@<upstream>` provider-routing selector off a model pattern.
- *
- * `openrouter/z-ai/glm-4.7@cerebras` -> base `openrouter/z-ai/glm-4.7`, upstream
- * `cerebras`. Tiered upstreams keep their path (`...@google-ai-studio/priority`).
- * A `:thinking` suffix after the slug is kept on the base
- * (`...@cerebras:high` -> base `...:high`). Returns undefined when there is no
- * `@` or the suffix is not a bare provider slug, so model ids that legitimately
- * contain `@` (`claude-opus-4-8@default`, `workers-ai/@cf/...`) are never split.
- */
-export function splitUpstreamRouting(pattern: string): { base: string; upstream: string } | undefined {
-	const at = pattern.lastIndexOf("@");
-	if (at <= 0) return undefined;
-	const rest = pattern.slice(at + 1);
-	const colon = rest.indexOf(":");
-	const upstream = colon === -1 ? rest : rest.slice(0, colon);
-	if (!UPSTREAM_ROUTING_SLUG.test(upstream)) return undefined;
-	const trailing = colon === -1 ? "" : rest.slice(colon);
-	return { base: pattern.slice(0, at) + trailing, upstream };
 }
 
 /** OpenRouter and Vercel AI Gateway are the aggregators that honor per-request upstream routing. */
@@ -1073,10 +984,6 @@ export function parseModelPattern(
 const DEFAULT_MODEL_ROLE = "default";
 const MODEL_ROLE_ALIAS_PREFIXES = [MODEL_ROLE_ALIAS_PREFIX, LEGACY_MODEL_ROLE_ALIAS_PREFIX];
 
-export interface ModelRoleLookup {
-	getModelRole(role: ModelRole | string): string | undefined;
-}
-
 function isModelRole(role: string): role is ModelRole {
 	return (MODEL_ROLE_IDS as string[]).includes(role);
 }
@@ -1152,12 +1059,14 @@ function shouldInheritDefaultBeforePriority(role: ModelRole): boolean {
  * list. The advisor — a second-opinion reviewer — uses a configured `slow`
  * role before that list, but never inherits the primary's model when `slow`
  * is unset, so it stays a distinct strong model out of the box. The `tiny`
- * role — the override for online title/memory/classifier tasks — resolves
- * through `smol` so it picks the same configured, inherited, or built-in fast
- * model.
+ * role — the override for online title/classifier tasks — resolves through
+ * `smol` so it picks the same configured, inherited, or built-in fast model.
+ * The `memory` role first reuses a configured/effective `tiny` role, then the
+ * same `smol` priority list.
  */
 const ROLE_PRIORITY_ALIAS: Partial<Record<ModelRole, keyof typeof MODEL_PRIO>> = {
 	advisor: "slow",
+	memory: "smol",
 	tiny: "smol",
 };
 
@@ -1169,13 +1078,19 @@ interface ConfiguredRoleFallback {
 
 const ROLE_CONFIGURED_FALLBACK: Partial<Record<ModelRole, ConfiguredRoleFallback>> = {
 	advisor: { role: "slow", configuredOnly: true },
+	memory: { role: "tiny", configuredOnly: false },
 	tiny: { role: "smol", configuredOnly: false },
 };
 
+function hasOwnKey<T extends object>(value: T, key: PropertyKey): key is keyof T {
+	return Object.hasOwn(value, key);
+}
+
 /** Built-in priority patterns for a role, following {@link ROLE_PRIORITY_ALIAS}. */
-function rolePriorityDefaults(role: ModelRole): string[] {
-	const key = ROLE_PRIORITY_ALIAS[role] ?? (role as keyof typeof MODEL_PRIO);
-	return normalizeModelPatternList(MODEL_PRIO[key]);
+export function rolePriorityDefaults(role: string): string[] {
+	const alias = hasOwnKey(ROLE_PRIORITY_ALIAS, role) ? ROLE_PRIORITY_ALIAS[role] : undefined;
+	const key = alias ?? role;
+	return hasOwnKey(MODEL_PRIO, key) ? normalizeModelPatternList(MODEL_PRIO[key]) : [];
 }
 
 /** Resolve aliases inside a configured pattern list without leaking cycles to model matching. */
@@ -1566,7 +1481,7 @@ export function resolveModelFromSettings(options: {
 	roleOrder?: readonly ModelRole[];
 }): Model<Api> | undefined {
 	const { settings, availableModels, matchPreferences, roleOrder } = options;
-	const roles = roleOrder ?? MODEL_ROLE_IDS;
+	const roles = roleOrder ?? CHAT_MODEL_ROLE_IDS;
 	let sawConfiguredProviderQualifiedRole = false;
 	for (const role of roles) {
 		const configured = settings.getModelRole(role);
@@ -1579,6 +1494,58 @@ export function resolveModelFromSettings(options: {
 		if (resolved) return resolved;
 	}
 	return sawConfiguredProviderQualifiedRole ? undefined : availableModels[0];
+}
+
+/** A resolved role-chain attempt and whether configuration explicitly admitted it. */
+export interface RoleChainCandidate {
+	model: Model<Api>;
+	explicit: boolean;
+	thinkingLevel?: ConfiguredThinkingLevel;
+}
+
+/** Resolve a role's primary and retry candidates in effective attempt order. */
+export function resolveRoleChain(
+	role: string,
+	settings: Settings,
+	pool: Model<Api>[],
+	options?: { hoistProvider?: string },
+): RoleChainCandidate[] {
+	const configuredRoles = settings.getModelRoles();
+	const configured = settings.getModelRole(role)?.trim();
+	const primarySelector = configured || formatModelRoleAlias(role);
+	const configuredFallbacks = settings.get("retry.fallbackChains")[role];
+	const hasConfiguredFallbackChain = Array.isArray(configuredFallbacks);
+	const fallbackSelectors = hasConfiguredFallbackChain ? configuredFallbacks : rolePriorityDefaults(role);
+	const selectors = [
+		{ selector: primarySelector, explicit: Object.hasOwn(configuredRoles, role) },
+		...fallbackSelectors.map(selector => ({ selector, explicit: hasConfiguredFallbackChain })),
+	];
+	const candidates: RoleChainCandidate[] = [];
+	const candidateByRoute = new Map<string, RoleChainCandidate>();
+	for (const { selector, explicit } of selectors) {
+		const resolved = resolveModelRoleValue(selector, pool, { settings });
+		if (!resolved.model) continue;
+		const key = formatModelStringWithRouting(resolved.model);
+		const existing = candidateByRoute.get(key);
+		if (existing) {
+			if (explicit) existing.explicit = true;
+			continue;
+		}
+		const candidate: RoleChainCandidate = { model: resolved.model, explicit };
+		if (resolved.thinkingLevel !== undefined) candidate.thinkingLevel = resolved.thinkingLevel;
+		candidateByRoute.set(key, candidate);
+		candidates.push(candidate);
+	}
+
+	const hoistProvider = options?.hoistProvider;
+	if (!hoistProvider) return candidates;
+	const nonExplicit = candidates.filter(candidate => !candidate.explicit);
+	const hoisted = nonExplicit.filter(candidate => candidate.model.provider === hoistProvider);
+	if (hoisted.length === 0) return candidates;
+	const remaining = nonExplicit.filter(candidate => candidate.model.provider !== hoistProvider);
+	const reordered = [...hoisted, ...remaining];
+	let reorderedIndex = 0;
+	return candidates.map(candidate => (candidate.explicit ? candidate : reordered[reorderedIndex++]!));
 }
 
 /**

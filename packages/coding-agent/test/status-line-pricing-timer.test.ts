@@ -3,8 +3,9 @@ import { stripVTControlCharacters } from "node:util";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { StatusLineComponent } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
+import { statusLineHost } from "@oh-my-pi/pi-coding-agent/modes/status-line-host";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 
 beforeAll(async () => {
@@ -52,7 +53,7 @@ function fixture() {
 		getContextUsage: () => undefined,
 		contextUsageRevision: 0,
 	} as unknown as AgentSession;
-	const component = new StatusLineComponent(session);
+	const component = new StatusLineComponent(session, statusLineHost);
 	const showCost = () =>
 		component.updateSettings({
 			preset: "custom",

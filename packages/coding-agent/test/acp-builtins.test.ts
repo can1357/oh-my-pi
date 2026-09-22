@@ -387,10 +387,11 @@ describe("ACP builtin slash commands", () => {
 	});
 
 	it("routes saved reset redemption through /usage reset", async () => {
-		const { output, runtime } = createRuntime();
+		const { runtime } = createRuntime();
 		let redeemedTarget: ResetCreditTarget | undefined;
 		runtime.session.listResetCredits = async () => [
 			{
+				provider: "openai-codex",
 				credentialId: 42,
 				accountId: "account-1",
 				email: "user@example.com",
@@ -404,11 +405,74 @@ describe("ACP builtin slash commands", () => {
 			return { ok: true, code: "reset", email: target.email };
 		};
 
-		const result = await executeAcpBuiltinSlashCommand("/usage reset active", runtime);
+		const result = await executeAcpBuiltinSlashCommand("/usage reset openai-codex/active", runtime);
 
 		expect(result).toEqual({ consumed: true });
-		expect(redeemedTarget).toEqual({ credentialId: 42, accountId: "account-1", email: "user@example.com" });
-		expect(output).toEqual(["Reset applied for user@example.com — your rate-limit window has been refreshed."]);
+		expect(redeemedTarget).toEqual({
+			provider: "openai-codex",
+			credentialId: 42,
+			accountId: "account-1",
+			email: "user@example.com",
+		});
+	});
+
+	it("pins Claude's provider, credential, organization, and selected grant for same-email accounts", async () => {
+		const { runtime } = createRuntime();
+		let redeemedTarget: ResetCreditTarget | undefined;
+		runtime.session.listResetCredits = async () => [
+			{
+				provider: "openai-codex",
+				credentialId: 7,
+				email: "shared@example.com",
+				availableCount: 1,
+				credits: [],
+				active: true,
+			},
+			{
+				provider: "anthropic",
+				credentialId: 9,
+				accountId: "claude-account",
+				email: "shared@example.com",
+				orgId: "org-claude",
+				availableCount: 2,
+				redeemableCount: 1,
+				nextCreditId: "grant-next",
+				credits: [
+					{
+						id: "grant-next",
+						title: "Claude reset",
+						program: "cedar_ember",
+						remainingCount: 2,
+						usable: true,
+						requiresLimit: true,
+						clears: ["anthropic:5h", "anthropic:7d"],
+						blocking: [],
+						usedFractions: {},
+					},
+				],
+				active: true,
+			},
+		];
+		runtime.session.redeemResetCredit = async target => {
+			redeemedTarget = target;
+			return {
+				ok: true,
+				code: "reset",
+				provider: "anthropic",
+				cleared: ["anthropic:5h", "anthropic:7d"],
+			};
+		};
+
+		await executeAcpBuiltinSlashCommand("/usage reset anthropic/9", runtime);
+
+		expect(redeemedTarget).toEqual({
+			provider: "anthropic",
+			credentialId: 9,
+			accountId: "claude-account",
+			email: "shared@example.com",
+			orgId: "org-claude",
+			creditId: "grant-next",
+		});
 	});
 
 	it("does not dispatch the legacy /reset-usage command", async () => {

@@ -293,6 +293,16 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * The host owns message injection at the next boundary.
 	 */
 	hasIrcInterrupts?: () => boolean | Promise<boolean>;
+	/**
+	 * Peeks whether a background completion (finished job, exited supervised
+	 * process) is queued for aside injection at the next boundary.
+	 *
+	 * Same rules as {@link hasIrcInterrupts}: non-consuming, only cuts
+	 * *interruptible* waits short, ignored when interruptMode is "wait". Without
+	 * it a completion notice sits behind an hour-long `hub wait` that the agent
+	 * would have abandoned had it seen the notice.
+	 */
+	hasBackgroundCompletions?: () => boolean | Promise<boolean>;
 
 	/**
 	 * Returns follow-up messages to process after the agent would otherwise stop.
