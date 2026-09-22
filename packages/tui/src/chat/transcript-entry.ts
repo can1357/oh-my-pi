@@ -70,8 +70,11 @@ export function isUserRequestEntry(entry: TranscriptEntryLike | { type: string }
 
 /**
  * Recent transcript tail starting at a user-request boundary, so tool calls
- * and results stay together.
- * ponytail: a whole user turn may exceed `limit`; paginate rendering if one turn grows too large.
+ * and results stay together. ChatTranscriptBuilder drops a tool result whose
+ * initiating call was sliced away, so a tail of orphaned results can leave
+ * the picker without any target.
+ *
+ * A whole user turn may exceed `limit`; paginate rendering if one turn grows too large.
  */
 export function recentTranscriptEntries(entries: TranscriptEntryLike[], limit = 600): TranscriptEntryLike[] {
 	if (entries.length <= limit) return entries;
