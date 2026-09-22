@@ -128,6 +128,8 @@ export interface SegmentContext {
 	} | null;
 	collab: CollabStatus | null;
 	stream: { viewers: number } | null;
+	/** A `/record` capture of this screen is running. */
+	recording: boolean;
 	// Cached values for performance (computed once per render)
 	usageStats: {
 		input: number;

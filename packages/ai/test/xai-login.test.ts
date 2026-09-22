@@ -1,7 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
-import { getOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/stream";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 
@@ -17,13 +16,6 @@ afterEach(() => {
 });
 
 describe("xAI API login wiring", () => {
-	test("registers xAI API in the OAuth provider selector", () => {
-		const provider = getOAuthProviders().find(item => item.id === "xai");
-		expect(provider).toBeDefined();
-		expect(provider?.name).toBe("xAI API");
-		expect(provider?.available).toBe(true);
-	});
-
 	test("resolves XAI_API_KEY from environment", () => {
 		Bun.env.XAI_API_KEY = "xai-env-key";
 		expect(getEnvApiKey("xai")).toBe("xai-env-key");

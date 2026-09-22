@@ -545,6 +545,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#vibeWorkerTokenRate: (() => number | null) | null = null;
 	#collabStatus: CollabStatus | null = null;
 	#streamStatus: { viewers: number } | null = null;
+	#recording = false;
 	#focusedAgentId: string | undefined;
 	#activeRepoCache: ActiveRepoCache | undefined;
 
@@ -960,6 +961,13 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	setStreamStatus(status: { viewers: number } | null): void {
 		if (this.#streamStatus?.viewers === status?.viewers) return;
 		this.#streamStatus = status;
+		this.#invalidateStatusLineRenderCache();
+	}
+
+	/** Toggle the `● REC` badge shown while `/record` captures the screen. */
+	setRecording(recording: boolean): void {
+		if (this.#recording === recording) return;
+		this.#recording = recording;
 		this.#invalidateStatusLineRenderCache();
 	}
 
@@ -2207,6 +2215,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			vim: this.#vimStatus,
 			collab: this.#collabStatus,
 			stream: this.#streamStatus,
+			recording: this.#recording,
 			usageStats,
 			contextPercent,
 			contextTokens,

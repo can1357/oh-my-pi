@@ -71,6 +71,5 @@ it("reports complete diff, history-append, and destructive-reset paints", () => 
 	expect(plain(paints[0]!.viewport)).toEqual(["replacement", "status"]);
 	expect(paints[0]).toMatchObject({ reset: true, alt: false, columns: 20, rows: 4 });
 
-	tui.setPaintListener(null);
 	tui.stop();
 });
