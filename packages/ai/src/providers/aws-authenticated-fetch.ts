@@ -6,6 +6,7 @@ import { resolveAwsRegion } from "../utils/aws-profile";
 import { invalidateAwsCredentialCache, resolveAwsCredentials } from "./aws-credentials";
 import { signRequest } from "./aws-sigv4";
 
+/** Options for {@link createAwsAuthenticatedFetch}: transport override plus the AWS credential/bearer inputs used to sign requests. */
 export interface AwsAuthenticatedFetchOptions {
 	fetch?: FetchImpl;
 	/** Bearer API key; authentication sentinels fall back to the AWS credential chain. */

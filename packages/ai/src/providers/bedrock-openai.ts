@@ -30,6 +30,7 @@ function dropBedrockGuardrailHeaders(headers: Record<string, string> | undefined
 	return kept;
 }
 
+/** Options for Bedrock Chat Completions: OpenAI-completions streaming options extended with AWS provider settings and guardrails. */
 export interface BedrockOpenAIOptions extends OpenAICompletionsOptions {
 	providerOptions?: AwsBedrockProviderOptions;
 	/** Guardrail id or ARN. Model-level settings take precedence. */
@@ -116,6 +117,7 @@ function resolveBedrockOpenAIUrls(
 	};
 }
 
+/** Fully resolved model and streaming options for a Bedrock Chat Completions request (endpoint, guardrail headers, authenticated fetch). */
 export interface PreparedBedrockOpenAIRequest {
 	model: Model<"openai-completions">;
 	options: OpenAICompletionsOptions;

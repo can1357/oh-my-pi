@@ -1,6 +1,7 @@
 /** Region resolution shared by Bedrock Converse and Chat Completions. */
 import { resolveAwsAmbientRegion } from "./aws-profile";
 
+/** Region inputs for {@link resolveBedrockRegion}: explicit region, AWS profile, and guardrail ARN fallback. */
 export interface BedrockRegionSource {
 	/** Explicit region takes precedence over model and profile regions. */
 	region?: string;
@@ -12,7 +13,7 @@ export interface BedrockRegionSource {
 
 // Geographic profiles require a source region in the same geography.
 // Global profiles use the ambient region instead.
-export const INFERENCE_PROFILE_GEO_DEFAULT_REGION: Record<string, string> = {
+const INFERENCE_PROFILE_GEO_DEFAULT_REGION: Record<string, string> = {
 	us: "us-east-1",
 	"us-gov": "us-gov-west-1",
 	eu: "eu-west-1",
@@ -21,11 +22,16 @@ export const INFERENCE_PROFILE_GEO_DEFAULT_REGION: Record<string, string> = {
 	jp: "ap-northeast-1",
 };
 
-// Rewrite standard AWS hosts; preserve FIPS, VPC endpoints, and gateways.
+/**
+ * Matches the standard regional host `bedrock-runtime.<region>.amazonaws.com` so
+ * its region segment can be rewritten. FIPS (`bedrock-runtime-fips.*`), dual-stack
+ * (`*.api.aws`), VPC endpoint, proxy, and gateway hosts deliberately do not
+ * match and pass through unchanged.
+ */
 export const AWS_REGIONAL_BEDROCK_HOST = /^bedrock-runtime\.[a-z0-9-]+\.amazonaws\.com$/;
 
 /** Extract the region embedded in a Bedrock model/guardrail ARN, if any. */
-export function inferRegionFromBedrockArn(modelId: string): string | undefined {
+function inferRegionFromBedrockArn(modelId: string): string | undefined {
 	const parts = modelId.split(":", 6);
 	if (parts[0] !== "arn" || parts[2] !== "bedrock") return undefined;
 	const region = parts[3];
@@ -33,7 +39,7 @@ export function inferRegionFromBedrockArn(modelId: string): string | undefined {
 }
 
 /** Geo prefix of a cross-region inference-profile id, e.g. `eu.anthropic.…` → `eu`. */
-export function inferenceProfileGeo(modelId: string): string | undefined {
+function inferenceProfileGeo(modelId: string): string | undefined {
 	const dot = modelId.indexOf(".");
 	if (dot <= 0) return undefined;
 	const prefix = modelId.slice(0, dot);
@@ -41,7 +47,7 @@ export function inferenceProfileGeo(modelId: string): string | undefined {
 }
 
 /** Match source regions to inference-profile geography. */
-export function regionServesGeo(region: string, geo: string): boolean {
+function regionServesGeo(region: string, geo: string): boolean {
 	switch (geo) {
 		case "us-gov":
 			return region.startsWith("us-gov-");

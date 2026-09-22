@@ -14,7 +14,8 @@
  *   captured response body for the strict-tools fallback and the responses
  *   chain-state detectors, which regex over `error.message`.
  */
-import { fetchWithRetry, readSseJsonOrText, type SseEventObserver } from "@oh-my-pi/pi-utils";
+import { fetchWithRetry, isRetryableStatus, readSseJsonOrText, type SseEventObserver } from "@oh-my-pi/pi-utils";
+import { AwsCredentialsError } from "../error/aws";
 import * as AIError from "../error";
 import { OpenAIHttpError } from "../error";
 
@@ -103,6 +104,14 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 		shouldRetryResponse: async (response, bodyText) =>
 			!isConcurrencyAdmissionRejection(response, bodyText) &&
 			(init.shouldRetryResponse === undefined || (await init.shouldRetryResponse(response, bodyText))),
+		// Setup/expired/missing AWS credentials are deterministic: a transport
+		// retry would resend against the same broken configuration for ~15.7s.
+		// Only real credential-service statuses (408/429/5xx via
+		// `AwsCredentialsError.status`) and generic non-AWS network failures
+		// stay retryable.
+		shouldRetryError: (error) =>
+			!(error instanceof AwsCredentialsError) ||
+			(error.status !== undefined && isRetryableStatus(error.status)),
 		// Bun's native fetch enforces a hard ~300s pre-response timeout (issue #2422).
 		// Cold large-context streams legitimately exceed it; the caller's
 		// `firstEventTimeoutMs`/`AbortSignal` already govern stuck requests.
