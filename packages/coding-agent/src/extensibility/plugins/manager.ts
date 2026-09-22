@@ -644,11 +644,7 @@ export class PluginManager {
 			if (!gitSource) {
 				const depsAfterInstall = await this.#readDeps(pkgJsonPath);
 				if (!(actualName in depsAfterInstall)) {
-					await this.#restoreDependencyEntry(
-						pkgJsonPath,
-						actualName,
-						prunedDependencyValue ?? `^${pkg.version}`,
-					);
+					await this.#restoreDependencyEntry(pkgJsonPath, actualName, prunedDependencyValue ?? `^${pkg.version}`);
 				}
 			}
 			const manifest: PluginManifest = pkg.omp || pkg.pi || { version: pkg.version };
