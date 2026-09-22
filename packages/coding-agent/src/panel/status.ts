@@ -1,4 +1,4 @@
-import type { AgentProgress } from "../task/types";
+import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
 import type { PanelRunResult } from "./runtime";
 
 /** Render a compact live status line from the latest progress of every panel member. */

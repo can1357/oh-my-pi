@@ -40,9 +40,9 @@ import {
 	type PanelStrategy,
 	type PanelTaskMode,
 } from "../../panel/types";
-import type { ConfiguredThinkingLevel } from "../../thinking";
-import { getSelectListTheme, theme } from "../theme/theme";
-import { buildBrowserItems, ModelBrowser, type ModelBrowserItem, sortModelItems } from "./model-browser";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import { getSelectListTheme, theme } from "@oh-my-pi/pi-tui/theme";
+import { buildBrowserItems, ModelBrowser, type ModelBrowserItem, sortModelItems } from "@oh-my-pi/pi-tui/overlays/model-browser";
 import {
 	bottomBorder,
 	divider,
@@ -52,7 +52,8 @@ import {
 	splitRow,
 	topBorder,
 	topBorderSplit,
-} from "./overlay-box";
+} from "@oh-my-pi/pi-tui/chrome/overlay-box";
+import { createModelBrowserSource } from "../model-browser-source";
 
 /** Host callbacks: dispatch and overlay lifecycle stay host-owned. */
 export interface PanelLineupBuilderCallbacks {
@@ -631,7 +632,7 @@ export class PanelLineupBuilderOverlayComponent implements Component {
 		const items = buildBrowserItems(models);
 		sortModelItems(items, { mruOrder });
 
-		const picker = new ModelBrowser(this.#settings, {});
+		const picker = new ModelBrowser(createModelBrowserSource(this.#settings), {});
 		picker.setMruOrder(mruOrder);
 		picker.setPerfStats(storage?.getModelPerf() ?? new Map());
 		picker.setItems(items);

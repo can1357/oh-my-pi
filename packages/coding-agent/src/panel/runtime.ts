@@ -8,8 +8,9 @@ import {
 } from "../config/model-resolver";
 import { mapWithConcurrencyLimitAllSettled } from "../task/parallel";
 import { runStructuredSubagent } from "../task/structured-subagent";
-import type { AgentDefinition, AgentProgress, SingleResult } from "../task/types";
-import { AUTO_THINKING, type ConfiguredThinkingLevel } from "../thinking";
+import type { AgentDefinition } from "../task/types";
+import { AUTO_THINKING, type ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import type { AgentProgress, SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "../tools";
 import { createPanelPersonaAgent, PANEL_INDEPENDENT_AGENT } from "./agents";
 import {

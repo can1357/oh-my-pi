@@ -74,7 +74,7 @@ import type { LogoutAccount } from "@oh-my-pi/pi-tui/overlays/logout-account-sel
 import { describeRedeemOutcome, toResetUsageAccounts } from "../../slash-commands/helpers/reset-usage";
 import { toSessionPinAccounts } from "../../slash-commands/helpers/session-pin";
 import { loadDailyActivity } from "../../stats/activity-client";
-import type { AgentProgress } from "../../task/types";
+import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
