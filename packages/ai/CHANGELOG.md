@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.2.9] - 2026-09-22
+
 ### Added
 
 - Added keyless OpenZoo authentication, with optional credentials for protected proxy endpoints.
@@ -9,6 +11,7 @@
 - Added automatic retry mechanism on version-related request failures
 
 ## [18.2.9] - 2026-09-22
+- Added Claude saved-reset discovery and redemption, including session-only resets, grant eligibility, expiry, and safe retry handling.
 
 ### Fixed
 
