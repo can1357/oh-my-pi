@@ -4,6 +4,7 @@
 
 ### Added
 
+- Supported invoking multiple skills in a single prompt submission (`/skill:foo /skill:bar`) ([#12535](https://github.com/can1357/oh-my-pi/pull/12535) by [@aleister1102](https://github.com/aleister1102)).
 - `find` (and `omp find`) accepts an `omp://` docs scope: `omp://` searches every embedded harness doc and `omp://<file>.md` searches one, reporting hits as canonical `omp://` URLs that `read` opens directly, including with `:start-end` selectors ([#12758](https://github.com/can1357/oh-my-pi/pull/12758) by [@H4vC](https://github.com/H4vC)).
 
 ### Changed
@@ -101,9 +102,6 @@
 - Fixed llama.cpp discovery and routing for PrismML Bonsai 2 27B GGUF models, including support for cached models and the Qwen 3.8 thinking-level ladder.
 
 ## [18.2.6] - 2026-09-18
-### Added
-
-- Supported invoking multiple skills in a single prompt submission (`/skill:foo /skill:bar`) ([#12535](https://github.com/can1357/oh-my-pi/pull/12535) by [@aleister1102](https://github.com/aleister1102)).
 
 ### Fixed
 
