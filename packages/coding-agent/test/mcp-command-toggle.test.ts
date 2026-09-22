@@ -49,7 +49,7 @@ function createController() {
 	});
 	const controller = new MCPCommandController(ctx);
 
-	return { controller, mcpManager, refreshMCPTools, connectServers };
+	return { controller, ctx, mcpManager, refreshMCPTools, connectServers };
 }
 
 async function writeProjectConfig(projectDir: string, servers: Record<string, MCPServerConfig>): Promise<void> {
@@ -88,7 +88,7 @@ describe("/mcp enable and disable", () => {
 		await removeWithRetries(agentDir);
 	});
 
-	test("disabling one configured server does not reload other MCP servers", async () => {
+	test("disabling a configured server uses the shared reload lifecycle", async () => {
 		await writeProjectConfig(projectDir, {
 			mcp1: { type: "stdio", command: "mcp-one" },
 			mcp2: { type: "stdio", command: "mcp-two" },
@@ -97,27 +97,63 @@ describe("/mcp enable and disable", () => {
 
 		await controller.handle("/mcp disable mcp1");
 
-		expect(mcpManager.disconnectServer).toHaveBeenCalledWith("mcp1");
+		expect(mcpManager.disconnectAll).toHaveBeenCalledTimes(1);
+		expect(mcpManager.discoverAndConnect).toHaveBeenCalledTimes(1);
 		expect(refreshMCPTools).toHaveBeenCalledWith([]);
-		expect(mcpManager.disconnectAll).not.toHaveBeenCalled();
-		expect(mcpManager.discoverAndConnect).not.toHaveBeenCalled();
-		expect(mcpManager.connectServers).not.toHaveBeenCalled();
+		const config = JSON.parse(await Bun.file(getMCPConfigPath("project", projectDir)).text());
+		expect(config.mcpServers.mcp1.enabled).toBe(false);
 	});
 
-	test("enabling one configured server connects only that MCP server", async () => {
+	test("enabling a configured server reports success only after the shared reload", async () => {
 		await writeProjectConfig(projectDir, {
 			mcp1: { type: "stdio", command: "mcp-one", enabled: false },
 			mcp2: { type: "stdio", command: "mcp-two" },
 		});
-		const { controller, mcpManager, connectServers } = createController();
+		const { controller, mcpManager, refreshMCPTools } = createController();
 
 		await controller.handle("/mcp enable mcp1");
 
-		expect(mcpManager.disconnectAll).not.toHaveBeenCalled();
-		expect(mcpManager.discoverAndConnect).not.toHaveBeenCalled();
-		expect(connectServers).toHaveBeenCalledTimes(1);
-		const [configs] = connectServers.mock.calls[0]!;
-		expect(Object.keys(configs)).toEqual(["mcp1"]);
-		expect(configs.mcp1).toEqual({ type: "stdio", command: "mcp-one", enabled: true });
+		expect(mcpManager.disconnectAll).toHaveBeenCalledTimes(1);
+		expect(mcpManager.discoverAndConnect).toHaveBeenCalledTimes(1);
+		expect(refreshMCPTools).toHaveBeenCalledWith([]);
+		const config = JSON.parse(await Bun.file(getMCPConfigPath("project", projectDir)).text());
+		expect(config.mcpServers.mcp1.enabled).toBe(true);
+	});
+
+	test("does not report enable success when the shared reload fails", async () => {
+		await writeProjectConfig(projectDir, {
+			mcp1: { type: "stdio", command: "mcp-one", enabled: false },
+		});
+		const { controller, ctx, mcpManager } = createController();
+		vi.spyOn(mcpManager, "discoverAndConnect").mockRejectedValueOnce(new Error("reload failed"));
+
+		await controller.handle("/mcp enable mcp1");
+
+		expect(ctx.showError).toHaveBeenCalledWith("Failed to enable server: reload failed");
+		const output = ctx.chatContainer.render(120).join("\n");
+		expect(output).not.toContain("mcp1 enabled.");
+	});
+	test("reconciles profile lists when a disabled foreign server is absent from manager state", async () => {
+		await writeProjectConfig(projectDir, {});
+		await Bun.write(
+			getMCPConfigPath("user", projectDir),
+			`${JSON.stringify({ mcpServers: {}, disabledServers: ["foreign"] }, null, 2)}\n`,
+		);
+		const mcpManager = createMcpManagerStub({
+			getSource: vi.fn(() => undefined),
+			getServerConfig: vi.fn(() => undefined),
+		});
+		const ctx = createInteractiveModeContext({ mcpManager, session: { refreshMCPTools: vi.fn(async () => {}) } });
+		const controller = new MCPCommandController(ctx);
+
+		await controller.handle("/mcp enable foreign");
+		let userConfig = JSON.parse(await Bun.file(getMCPConfigPath("user", projectDir)).text());
+		expect(userConfig.disabledServers).toBeUndefined();
+		expect(userConfig.enabledServers).toEqual(["foreign"]);
+
+		await controller.handle("/mcp disable foreign");
+		userConfig = JSON.parse(await Bun.file(getMCPConfigPath("user", projectDir)).text());
+		expect(userConfig.enabledServers).toBeUndefined();
+		expect(userConfig.disabledServers).toEqual(["foreign"]);
 	});
 });

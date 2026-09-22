@@ -129,6 +129,23 @@ describe("MCP lost remote server retry schedule", () => {
 		expect(manager.getConnectionStatus("flaky")).toBe("disconnected");
 	});
 
+	it("keeps retrying a lost remote after a caller aborts its reconnect", async () => {
+		const { manager, flaky, statuses } = await connected(FAST);
+		flaky.setDown(true);
+		const controller = new AbortController();
+
+		const reconnect = manager.reconnectServer("flaky", { manual: true, signal: controller.signal });
+		await until(() => manager.getConnectionStatus("flaky") === "connecting", "reconnect to start");
+		controller.abort();
+		expect(await reconnect).toBeNull();
+
+		flaky.setDown(false);
+		await until(
+			() => statuses.filter(status => status === "connected").length >= 2,
+			"scheduled recovery after abort",
+		);
+		expect(manager.getConnectionStatus("flaky")).toBe("connected");
+	});
 	it("a declined auth challenge on a working server does not schedule a teardown", async () => {
 		const { manager, flaky, statuses } = await connected(FAST);
 		const initializesBefore = flaky.initializes;

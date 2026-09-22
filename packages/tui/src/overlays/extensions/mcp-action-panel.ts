@@ -3,6 +3,7 @@ import { extractPrintableText, matchesKey } from "../../keys";
 import { matchesSelectDown, matchesSelectUp } from "../../keybinding-matchers";
 import { bottomBorder, row, topBorder } from "../../chrome/overlay-box";
 import { theme } from "../../theme";
+import { sanitizeDisplayLine, sanitizeDisplayText } from "./display-text";
 import type { Component } from "../../tui";
 import type { Extension } from "./types";
 
@@ -52,16 +53,41 @@ interface PendingInput {
 function isCancellation(error: unknown): boolean {
 	return error instanceof Error && (error.name === "AbortError" || error.name === "MCPOAuthCancelledError");
 }
+type StatusColor = "muted" | "warning" | "success" | "error";
+
+interface StatusMessage {
+	text: string;
+	color: StatusColor;
+}
+
+function sanitizePanelState(state: MCPActionPanelState): MCPActionPanelState {
+	return {
+		...state,
+		name: sanitizeDisplayLine(state.name),
+		transport: sanitizeDisplayLine(state.transport),
+		source: sanitizeDisplayLine(state.source),
+		authentication: sanitizeDisplayLine(state.authentication),
+		lastError: state.lastError ? sanitizeDisplayLine(state.lastError) : undefined,
+		actions: state.actions.map(action => ({
+			...action,
+			label: sanitizeDisplayLine(action.label),
+			description: sanitizeDisplayLine(action.description),
+			disabledReason: action.disabledReason ? sanitizeDisplayLine(action.disabledReason) : undefined,
+		})),
+	};
+}
 
 export class MCPActionPanel implements Component {
 	readonly #pasteHandler = new BracketedPasteHandler({ byteLimit: 64 * 1024 });
 	#state: MCPActionPanelState;
 	#selectedIndex = 0;
-	#statusMessage = "";
+	#statusMessage?: StatusMessage;
 	#authorization?: { url: string; instructions?: string };
 	#confirmationAction?: MCPActionId;
 	#running?: { action: MCPActionId; controller: AbortController };
 	#pendingInput?: PendingInput;
+	#reloadToken = 0;
+	#disposed = false;
 
 	onClose?: () => void;
 	onChanged?: () => void;
@@ -73,13 +99,13 @@ export class MCPActionPanel implements Component {
 		readonly runtime: MCPActionPanelRuntime,
 		readonly terminalHeight: number,
 	) {
-		this.#state = state;
+		this.#state = sanitizePanelState(state);
 		this.#selectedIndex = this.#firstEnabledIndex();
 	}
 
 	render(width: number): readonly string[] {
 		const height = Math.max(14, process.stdout.rows || this.terminalHeight || 24);
-		const lines: string[] = [topBorder(width, `MCP Server · ${this.#state.name}`)];
+		const lines: string[] = [topBorder(width, `MCP Server · ${sanitizeDisplayLine(this.#state.name)}`)];
 		const push = (text = "") => lines.push(row(text, width));
 		const statusColor =
 			this.#state.connectionStatus === "connected"
@@ -87,38 +113,73 @@ export class MCPActionPanel implements Component {
 				: this.#state.connectionStatus === "connecting"
 					? "warning"
 					: "muted";
-
-		push(`${theme.fg("dim", "Status:")} ${theme.fg(statusColor, this.#state.connectionStatus)}`);
-		push(`${theme.fg("dim", "Transport:")} ${this.#state.transport}`);
-		push(`${theme.fg("dim", "Authentication:")} ${this.#state.authentication}`);
-		push(`${theme.fg("dim", "Source:")} ${this.#state.source}`);
-		push(
+		const infoRows = [
+			`${theme.fg("dim", "Status:")} ${theme.fg(statusColor, this.#state.connectionStatus)} ${theme.fg("dim", `· Transport: ${sanitizeDisplayLine(this.#state.transport)}`)}`,
+			`${theme.fg("dim", "Authentication:")} ${sanitizeDisplayLine(this.#state.authentication)}`,
+			`${theme.fg("dim", "Source:")} ${sanitizeDisplayLine(this.#state.source)}`,
 			`${theme.fg("dim", "Capabilities:")} ${this.#state.tools} tools · ${this.#state.prompts} prompts · ${this.#state.resources} resources`,
-		);
-		if (this.#state.lastError) push(`${theme.fg("error", "Last error:")} ${this.#state.lastError}`);
-		push();
-		push(theme.bold("Actions"));
-		for (const [index, action] of this.#state.actions.entries()) {
-			const selected = index === this.#selectedIndex;
-			const marker = selected ? theme.fg("accent", ">") : " ";
-			const label = action.enabled ? action.label : theme.fg("dim", action.label);
-			const suffix = action.enabled ? action.description : (action.disabledReason ?? "Unavailable");
-			push(`${marker} ${label} ${theme.fg("dim", `· ${suffix}`)}`);
+		];
+		if (this.#state.lastError) {
+			infoRows.push(`${theme.fg("error", "Last error:")} ${sanitizeDisplayLine(this.#state.lastError)}`);
 		}
-		push();
+		for (const info of infoRows) push(info);
 
+		const transientRows: string[] = [];
 		if (this.#pendingInput) {
-			push(theme.fg("warning", "Paste the OAuth redirect URL or authorization code, then press Enter:"));
-			push(theme.fg("accent", `> ${this.#pendingInput.buffer}`));
+			transientRows.push(
+				theme.fg("warning", "Paste the OAuth redirect URL or authorization code, then press Enter:"),
+			);
+			transientRows.push(theme.fg("accent", `> ${sanitizeDisplayLine(this.#pendingInput.buffer)}`));
 		} else if (this.#authorization) {
-			push(theme.fg("warning", "Waiting for OAuth authorization"));
-			push(this.#authorization.instructions ?? "Complete authentication in the browser.");
-			push(theme.fg("dim", this.#authorization.url));
+			transientRows.push(theme.fg("warning", "Waiting for OAuth authorization"));
+			transientRows.push(
+				sanitizeDisplayLine(this.#authorization.instructions ?? "Complete authentication in the browser."),
+			);
+			transientRows.push(theme.fg("dim", sanitizeDisplayLine(this.#authorization.url)));
 		}
 		if (this.#confirmationAction) {
-			push(theme.fg("warning", "Press Enter again to confirm this action."));
+			transientRows.push(theme.fg("warning", "Press Enter again to confirm this action."));
 		}
-		if (this.#statusMessage) push(this.#statusMessage);
+		if (this.#statusMessage) {
+			transientRows.push(
+				...sanitizeDisplayText(this.#statusMessage.text)
+					.split("\n")
+					.map(line => theme.fg(this.#statusMessage!.color, line)),
+			);
+		}
+
+		// Top border, server summary, Actions heading, footer, and bottom border are
+		// fixed. Transient OAuth/result rows take precedence over the action list;
+		// the selected action stays inside the remaining window.
+		const variableRows = Math.max(1, height - 1 - infoRows.length - 1 - 2);
+		const actionCount = this.#state.actions.length;
+		const maxTransientRows = Math.max(0, variableRows - (actionCount > 0 ? 1 : 0));
+		const visibleTransientRows = transientRows.slice(0, maxTransientRows);
+		const actionCapacity = Math.max(0, variableRows - visibleTransientRows.length);
+		const actionWindowSize = Math.min(actionCount, actionCapacity);
+		const maxWindowStart = Math.max(0, actionCount - actionWindowSize);
+		const actionWindowStart = Math.min(
+			maxWindowStart,
+			Math.max(0, this.#selectedIndex - Math.floor(actionWindowSize / 2)),
+		);
+		const actionWindowEnd = actionWindowStart + actionWindowSize;
+		const actionWindowLabel =
+			actionWindowSize < actionCount
+				? `Actions (${actionWindowStart + 1}-${actionWindowEnd} of ${actionCount})`
+				: "Actions";
+		push(theme.bold(actionWindowLabel));
+		for (let index = actionWindowStart; index < actionWindowEnd; index++) {
+			const action = this.#state.actions[index]!;
+			const selected = index === this.#selectedIndex;
+			const marker = selected ? theme.fg("accent", ">") : " ";
+			const cleanLabel = sanitizeDisplayLine(action.label);
+			const label = action.enabled ? cleanLabel : theme.fg("dim", cleanLabel);
+			const suffix = action.enabled
+				? sanitizeDisplayLine(action.description)
+				: sanitizeDisplayLine(action.disabledReason ?? "Unavailable");
+			push(`${marker} ${label} ${theme.fg("dim", `· ${suffix}`)}`);
+		}
+		for (const transient of visibleTransientRows) push(transient);
 
 		const footer = this.#running
 			? " Esc: cancel action · Ctrl+C: close"
@@ -142,7 +203,7 @@ export class MCPActionPanel implements Component {
 		if (matchesKey(data, "escape")) {
 			if (this.#running) {
 				this.#cancelRunning();
-				this.#statusMessage = theme.fg("muted", "Cancelling action...");
+				this.#statusMessage = { text: "Cancelling action...", color: "muted" };
 				this.onRequestRender?.();
 				return;
 			}
@@ -166,8 +227,30 @@ export class MCPActionPanel implements Component {
 	invalidate(): void {}
 
 	dispose(): void {
+		this.#disposed = true;
+		this.#reloadToken++;
 		this.#cancelRunning();
 		this.#rejectManualInput(new Error("MCP action panel closed"));
+	}
+
+	/** Reload live MCP state without allowing an older request to overwrite a newer lifecycle event. */
+	async reloadState(): Promise<void> {
+		const reloadToken = ++this.#reloadToken;
+		const selectedAction = this.#state.actions[this.#selectedIndex]?.id;
+		const nextState = sanitizePanelState(await this.runtime.loadState(this.extension));
+		if (this.#disposed || reloadToken !== this.#reloadToken) return;
+		this.#state = nextState;
+		const selectedIndex = selectedAction
+			? this.#state.actions.findIndex(action => action.id === selectedAction && action.enabled)
+			: -1;
+		this.#selectedIndex = selectedIndex >= 0 ? selectedIndex : this.#firstEnabledIndex();
+		if (
+			this.#confirmationAction &&
+			!this.#state.actions.some(action => action.id === this.#confirmationAction && action.enabled)
+		) {
+			this.#confirmationAction = undefined;
+		}
+		this.onRequestRender?.();
 	}
 
 	#firstEnabledIndex(): number {
@@ -194,7 +277,10 @@ export class MCPActionPanel implements Component {
 		if (!action?.enabled) return;
 		if (action.requiresConfirmation && this.#confirmationAction !== action.id) {
 			this.#confirmationAction = action.id;
-			this.#statusMessage = theme.fg("warning", `${action.label} requires confirmation.`);
+			this.#statusMessage = {
+				text: sanitizeDisplayText(`${action.label} requires confirmation.`),
+				color: "warning",
+			};
 			this.onRequestRender?.();
 			return;
 		}
@@ -203,31 +289,36 @@ export class MCPActionPanel implements Component {
 		this.#authorization = undefined;
 		const controller = new AbortController();
 		this.#running = { action: action.id, controller };
-		this.#statusMessage = theme.fg("muted", `${action.label}...`);
+		this.#statusMessage = { text: sanitizeDisplayText(`${action.label}...`), color: "muted" };
 		this.onRequestRender?.();
 		try {
 			const message = await this.runtime.runAction(this.extension, action.id, {
 				signal: controller.signal,
 				onProgress: progress => {
-					this.#statusMessage = theme.fg("muted", progress);
+					this.#statusMessage = { text: sanitizeDisplayText(progress), color: "muted" };
 					this.onRequestRender?.();
 				},
 				onAuthorization: info => {
-					this.#authorization = info;
+					this.#authorization = {
+						url: sanitizeDisplayLine(info.url),
+						instructions: info.instructions ? sanitizeDisplayLine(info.instructions) : undefined,
+					};
 					this.onRequestRender?.();
 				},
 				requestManualInput: signal => this.#requestManualInput(signal),
 			});
-			this.#statusMessage = theme.fg("success", message);
+			this.#statusMessage = { text: sanitizeDisplayText(message), color: "success" };
 			this.#authorization = undefined;
-			this.#state = await this.runtime.loadState(this.extension);
-			this.#selectedIndex = Math.min(this.#selectedIndex, Math.max(0, this.#state.actions.length - 1));
+			await this.reloadState();
 			this.onChanged?.();
 		} catch (error) {
 			this.#authorization = undefined;
 			this.#statusMessage = isCancellation(error)
-				? theme.fg("muted", "Action cancelled.")
-				: theme.fg("error", error instanceof Error ? error.message : String(error));
+				? { text: "Action cancelled.", color: "muted" }
+				: {
+						text: sanitizeDisplayText(error instanceof Error ? error.message : String(error)),
+						color: "error",
+					};
 		} finally {
 			this.#running = undefined;
 			this.#rejectManualInput(new Error("OAuth input no longer required"));

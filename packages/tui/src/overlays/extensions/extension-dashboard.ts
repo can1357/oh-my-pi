@@ -840,7 +840,19 @@ export class ExtensionDashboard implements Component {
 	 * rewrite Extension.raw.
 	 */
 	#subscribeMcpRuntime(): void {
-		this.#unsubscribers.push(...this.#runtime.subscribeMcpChanges(() => this.#requestRender()));
+		this.#unsubscribers.push(
+			...this.#runtime.subscribeMcpChanges(() => {
+				this.#requestRender();
+				const panel = this.#mcpActionPanel;
+				if (!panel) return;
+				void panel.reloadState().catch(error => {
+					logger.warn("Failed to reload open MCP action panel", {
+						name: panel.extension.name,
+						error: String(error),
+					});
+				});
+			}),
+		);
 	}
 
 	dispose(): void {
