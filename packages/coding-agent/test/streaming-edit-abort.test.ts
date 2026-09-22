@@ -30,7 +30,6 @@ function createGuard(
 		model: () => undefined,
 		isDisposed: () => false,
 		promptGeneration: () => 0,
-		localProtocolOptions: () => ({}),
 		emitNotice() {},
 		schedulePostPromptTask() {},
 		discardAssistantTurn() {},

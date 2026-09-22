@@ -905,6 +905,23 @@ export class FileSessionStorage implements SessionStorage {
 				},
 			);
 		}
+
+		// Remove EPERM-rewrite leftovers (`<name>.jsonl.<snowflake>.bak`): the
+		// picker scan would otherwise resurrect the deleted session from the
+		// newest stale backup (#11499). Best-effort — a locked file warns
+		// instead of failing the delete the user asked for.
+		const base = path.basename(sessionPath);
+		for (const bak of this.listFilesSync(path.dirname(sessionPath), "*.bak")) {
+			if (!path.basename(bak).startsWith(`${base}.`)) continue;
+			try {
+				await fsp.unlink(bak);
+			} catch (err) {
+				logger.warn("Failed to remove stale session backup during delete", {
+					path: bak,
+					error: toError(err).message,
+				});
+			}
+		}
 	}
 }
 
