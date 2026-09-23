@@ -1636,14 +1636,21 @@ export class Editor implements Component, Focusable {
 					kb.matchesCanonical(canonical, "tui.select.pageUp") ||
 					kb.matchesCanonical(canonical, "tui.select.pageDown")
 				) {
-					this.#autocompleteList.handleInput(data);
-					this.onAutocompleteUpdate?.();
-					return;
+					// An `@` popup whose narrowing filter matched nothing holds no candidate;
+					// let the key fall through instead of swallowing it.
+					if (!this.#autocompleteList.getSelectedItem()) {
+						this.#cancelAutocomplete();
+						this.onAutocompleteUpdate?.();
+					} else {
+						this.#autocompleteList.handleInput(data);
+						this.onAutocompleteUpdate?.();
+						return;
+					}
 				}
 
 				// If Tab was pressed, always apply the selection
 				if (kb.matchesCanonical(canonical, "tui.input.tab") || rightArrowAccepts) {
-					const selected = this.#autocompleteList.getSelectedItem();
+					const selected = this.#autocompleteList?.getSelectedItem();
 					// Check for stale autocomplete state due to buffer edits since last refresh
 					// (destructive keys or paste can outrun the debounced update).
 					const currentLine = this.#state.lines[this.#state.cursorLine] ?? "";
@@ -1653,7 +1660,14 @@ export class Editor implements Component, Focusable {
 						this.#cancelAutocomplete();
 						return;
 					}
-					if (selected && this.#autocompleteProvider) {
+					if (!selected) {
+						// An `@` popup whose narrowing filter matched nothing stays open with no
+						// candidate (see #debouncedUpdateAutocomplete). Nothing to accept: cancel the
+						// popup and fall through so Tab keeps its normal completion role and a right
+						// arrow at end of line moves the cursor.
+						this.#cancelAutocomplete();
+						this.onAutocompleteUpdate?.();
+					} else if (this.#autocompleteProvider) {
 						const shouldChainAutocomplete =
 							this.#isSlashCommandNameAutocompleteSelection() || isDirectoryCompletionValue(selected.value);
 						const result = this.#autocompleteProvider.applyCompletion(
@@ -1679,7 +1693,8 @@ export class Editor implements Component, Focusable {
 							queueMicrotask(() => void this.#tryTriggerAutocomplete());
 						}
 					}
-					return;
+					// Only an accepted candidate consumes the key; an empty list falls through.
+					if (selected) return;
 				}
 
 				// If Enter was pressed on a submitted slash command (not an absolute-path
@@ -1719,13 +1734,19 @@ export class Editor implements Component, Focusable {
 				}
 				// Otherwise, apply the completion without submitting the surrounding draft.
 				else if (kb.matchesCanonical(canonical, "tui.input.submit") || data === "\n") {
-					const selected = this.#autocompleteList.getSelectedItem();
+					const selected = this.#autocompleteList?.getSelectedItem();
 					// Check for stale autocomplete state due to buffer edits since last refresh.
 					const currentLine = this.#state.lines[this.#state.cursorLine] ?? "";
 					const currentTextBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
 					if (!this.#autocompletePrefixMatchesCursorText(currentTextBeforeCursor, selected)) {
 						// Autocomplete is stale - cancel and fall through to normal submission
 						this.#cancelAutocomplete();
+					} else if (!selected) {
+						// An `@` popup whose narrowing filter matched nothing stays open with no
+						// candidate (see #debouncedUpdateAutocomplete). Nothing to accept: cancel the
+						// popup and fall through so Enter submits the draft instead of being swallowed.
+						this.#cancelAutocomplete();
+						this.onAutocompleteUpdate?.();
 					} else {
 						if (selected && this.#autocompleteProvider) {
 							const shouldChainSlashCommandAutocomplete = this.#isSlashCommandNameAutocompleteSelection();
@@ -4243,6 +4264,17 @@ export class Editor implements Component, Focusable {
 	}
 
 	#debouncedUpdateAutocomplete(): void {
+		// Network filesystem discovery can outlive cancellation. Filter the known
+		// candidates immediately instead of leaving an unrelated selection active.
+		if (this.#autocompletePrefix.startsWith("@") && this.#autocompleteList) {
+			const line = this.#state.lines[this.#state.cursorLine] ?? "";
+			const beforeCursor = line.slice(0, this.#state.cursorCol);
+			const match = /(?:^|[\s"'=])@(?:"([^"]*)|([^\s"']*))$/.exec(beforeCursor);
+			if (match) {
+				this.#autocompleteList.setFilter(match[1] ?? match[2] ?? "");
+				this.onAutocompleteUpdate?.();
+			}
+		}
 		if (this.#autocompleteTimeout) {
 			clearTimeout(this.#autocompleteTimeout);
 		}

@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import {
 	type AutocompleteItem,
 	type AutocompleteProvider,
@@ -28,6 +29,109 @@ async function untilAutocompleteShown(editor: Editor): Promise<void> {
 	}
 }
 describe("Editor async autocomplete scheduling", () => {
+	it("filters and accepts known files while a slow search ignores cancellation", async () => {
+		const editor = new Editor(defaultEditorTheme);
+		const pending = Promise.withResolvers<{ items: AutocompleteItem[]; prefix: string } | null>();
+		const started = Promise.withResolvers<void>();
+		const base = new CombinedAutocompleteProvider();
+		const items = [
+			{ label: "alpha.ts", value: "@alpha.ts" },
+			{ label: "beta.ts", value: "@beta.ts" },
+		];
+		editor.setAutocompleteProvider({
+			async getSuggestions(lines) {
+				if (lines[0] === "@") return { items, prefix: "@" };
+				started.resolve();
+				return pending.promise;
+			},
+			applyCompletion: base.applyCompletion.bind(base),
+		});
+		const screen = () => editor.render(80).map(stripVTControlCharacters).join("\n");
+		try {
+			editor.handleInput("@");
+			await untilAutocompleteShown(editor);
+			editor.handleInput("a");
+			await started.promise;
+			editor.handleInput("l");
+			expect(screen()).toContain("alpha.ts");
+			expect(screen()).not.toContain("beta.ts");
+			editor.handleInput("z");
+			expect(screen()).not.toContain("alpha.ts");
+			editor.handleInput("\x7f");
+			expect(screen()).toContain("alpha.ts");
+			editor.handleInput("\t");
+			expect(editor.getText()).toBe("@alpha.ts ");
+		} finally {
+			editor.handleInput("\x1b");
+			pending.resolve({ items, prefix: "@a" });
+		}
+	});
+
+	it("falls back to Enter, Tab, and cursor movement when the @ filter empties the popup", async () => {
+		const items = [
+			{ label: "alpha.ts", value: "@alpha.ts" },
+			{ label: "beta.ts", value: "@beta.ts" },
+		];
+		const base = new CombinedAutocompleteProvider();
+		const forcedItems = [{ label: "zeta.ts", value: "@zeta.ts" }];
+		const pending: Array<PromiseWithResolvers<{ items: AutocompleteItem[]; prefix: string } | null>> = [];
+		// Prime the zero-candidate state: `@` opens the popup, then the narrowing filter (`z`,
+		// see Editor#debouncedUpdateAutocomplete) empties the list while the popup stays open.
+		const primed = async (): Promise<Editor> => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setAutocompleteProvider({
+				async getSuggestions(lines, cursorLine) {
+					if (lines[cursorLine] === "@") return { items, prefix: "@" };
+					const deferred = Promise.withResolvers<{ items: AutocompleteItem[]; prefix: string } | null>();
+					pending.push(deferred);
+					return deferred.promise;
+				},
+				// Reached only by Tab's fallback path (Editor#handleTabCompletion).
+				async getForceFileSuggestions(lines, cursorLine) {
+					if (lines[cursorLine] !== "@z") return null;
+					return { items: forcedItems, prefix: "@z" };
+				},
+				applyCompletion: base.applyCompletion.bind(base),
+			});
+			editor.handleInput("@");
+			await untilAutocompleteShown(editor);
+			editor.handleInput("z");
+			expect(editor.isShowingAutocomplete()).toBeTrue();
+			return editor;
+		};
+		try {
+			// Enter: nothing to accept, so the draft submits instead of being swallowed.
+			const enter = await primed();
+			let submitted: string | undefined;
+			enter.onSubmit = text => {
+				submitted = text;
+			};
+			enter.handleInput("\r");
+			expect(submitted).toBe("@z");
+			expect(enter.isShowingAutocomplete()).toBeFalse();
+			expect(enter.getText()).toBe("");
+
+			// Tab: falls back to the normal completion path instead of being swallowed.
+			const tab = await primed();
+			const forced = untilAutocompleteShown(tab);
+			tab.handleInput("\t");
+			await forced;
+			expect(tab.getText()).toBe("@z");
+			tab.handleInput("\t");
+			expect(tab.getText()).toBe("@zeta.ts ");
+
+			// Right arrow at end of line: the key reaches normal cursor movement instead of being
+			// trapped; the cursor already sits at the line end, so it stays put.
+			const arrow = await primed();
+			arrow.handleInput("\x1b[C");
+			expect(arrow.isShowingAutocomplete()).toBeFalse();
+			expect(arrow.getText()).toBe("@z");
+			expect(arrow.getCursor()).toEqual({ line: 0, col: 2 });
+		} finally {
+			for (const deferred of pending) deferred.resolve(null);
+		}
+	});
+
 	it("keeps only the latest request queued while the provider is busy", async () => {
 		const requests: Array<{
 			text: string;
