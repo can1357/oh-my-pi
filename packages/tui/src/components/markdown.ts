@@ -3229,15 +3229,20 @@ export class Markdown implements Component {
 					const href = typeof token.href === "string" ? token.href : "";
 					const target = (href && this.#theme.resolveLink?.(href)) || href;
 					const clickableLinkText = formatHyperlink(styledLinkText, target);
-					// If link text matches href, only show the link once. A missing
-					// href (malformed/partial link token) renders as plain link text
-					// instead of crashing the renderer or emitting an empty "()"
-					// (issue #10283).
+					// Only show the link once when the label already carries it: the
+					// link text matches href, or the label was wrapped in an OSC 8 link
+					// to that same http(s) URL. Resolved links (artifact://, local://,
+					// relative paths) keep the suffix since it is the only visible form
+					// of the internal URI. A missing href (malformed/partial link token)
+					// renders as plain link text instead of crashing the renderer or
+					// emitting an empty "()" (issue #10283).
 					// Compare raw text (token.text) not styled text (linkText) since linkText has ANSI codes
 					// For mailto: links, strip the prefix before comparing (autolinked emails have
 					// text="foo@bar.com" but href="mailto:foo@bar.com")
 					const hrefForComparison = href.startsWith("mailto:") ? href.slice(7) : href;
-					if (!href || token.text === href || token.text === hrefForComparison)
+					const labelCarriesHref =
+						clickableLinkText !== styledLinkText && target === href && /^https?:\/\//i.test(href);
+					if (!href || labelCarriesHref || token.text === href || token.text === hrefForComparison)
 						result += clickableLinkText + stylePrefix;
 					else {
 						const styledLinkUrl = this.#theme.linkUrl(`(${href})`);
