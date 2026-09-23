@@ -96,7 +96,8 @@ function model(baseUrl: string): Model<"openai-responses"> {
 
 type ResponseFactory = (body: string, requestNumber: number) => Response | Promise<Response>;
 
-type HarnessTool = AgentTool<any, any, any>;
+const probeParameters = type({});
+type HarnessTool = AgentTool<typeof probeParameters, unknown, unknown>;
 
 type SessionHarnessOptions = {
 	compactionEnabled?: boolean;
@@ -576,7 +577,7 @@ describe("AgentSession Responses request-body timeout recovery", () => {
 					name: "probe",
 					label: "probe",
 					description: "probe test tool",
-					parameters: type({}),
+					parameters: probeParameters,
 					execute: async () => {
 						probeCalls++;
 						return {
