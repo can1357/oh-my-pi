@@ -10,6 +10,15 @@ import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
 import { classifyDifficulty } from "../auto-thinking/classifier";
+import {
+	applicableFastModeScopes,
+	applyFastModeAction,
+	type FastModeAction,
+	type FastModeScope,
+	fastModeScopeRevision,
+	type FastModeStatus,
+	readFastModeScopes,
+} from "../config/fast-mode";
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	filterAvailableModelsByEnabledPatterns,
@@ -48,6 +57,7 @@ export interface ModelControlsHost {
 	providerSessionState: Map<string, ProviderSessionState>;
 	model(): Model | undefined;
 	sessionId(): string;
+	fastModeSessionId(): string;
 	promptGeneration(): number;
 	resolveActiveEditMode(): EditMode;
 	syncAfterModelChange(previousEditMode: EditMode): Promise<void>;
@@ -70,6 +80,7 @@ export class ModelControls {
 	#autoThinking = false;
 	#autoResolvedLevel: Effort | undefined;
 	#serviceTierByFamily: ServiceTierByFamily;
+	#anthropicFastModeRevision = 0;
 
 	constructor(
 		host: ModelControlsHost,
@@ -664,17 +675,30 @@ export class ModelControls {
 	}
 
 	/**
-	 * True when the currently selected model's family is set to `priority` — the
-	 * `/fast` on/off state for the active model. Returns false when no model is
-	 * selected or the model exposes no service-tier family (e.g. Fireworks, which
-	 * has its own Providers › Fireworks Tier toggle).
+	 * True when a persisted `/fast` scope applies to requests for `model`.
+	 * Advisors consult this to let a scoped selection overlay their own
+	 * `tier.advisor` base setting.
+	 */
+	isFastModeScoped(model: Model | undefined = this.#model): boolean {
+		return fastModeScopeRevision(readFastModeScopes(), this.#host.fastModeSessionId(), model?.provider) > 0;
+	}
+
+	/**
+	 * True when the currently selected model is set to `priority` — the `/fast`
+	 * on/off state for the active model, whether the selection came from a
+	 * scoped `/fast` action or the per-family tier map. A conversation-wide
+	 * scope (session/global) reports true even with no model selected;
+	 * otherwise returns false when the model exposes no service-tier family
+	 * (e.g. Fireworks, which has its own Providers › Fireworks Tier toggle).
 	 *
 	 * For "is priority actually applied to the next request?" use
 	 * {@link isFastModeActive} instead.
 	 */
 	isFastModeEnabled(): boolean {
-		const family = this.#model ? serviceTierFamily(this.#model) : undefined;
-		return family ? this.#serviceTierByFamily[family] === "priority" : false;
+		const model = this.#model;
+		if (this.isFastModeScoped(model)) return true;
+		const family = model ? serviceTierFamily(model) : undefined;
+		return family ? this.effectiveServiceTier(model) === "priority" : false;
 	}
 
 	/**
@@ -692,13 +716,7 @@ export class ModelControls {
 		return true;
 	}
 
-	/**
-	 * Effective wire service-tier for a request to `model`. Fireworks models take
-	 * the Priority serving path only when the Providers › Fireworks Tier setting
-	 * is `"priority"` (and never for `-fast` variants, whose Fast serving path is
-	 * mutually exclusive with Priority). Every other model resolves the live
-	 * per-family tier map down to the entry for its family.
-	 */
+	/** Effective wire tier, including the user-wide scoped actions. Fireworks keeps its separate control. */
 	effectiveServiceTier(model: Model | undefined = this.#model): ServiceTier | undefined {
 		if (model?.provider === "fireworks") {
 			return this.#host.settings.get("providers.fireworksTier") === "priority" && !isFireworksFastModelId(model.id)
@@ -706,7 +724,51 @@ export class ModelControls {
 				: undefined;
 		}
 		if (!model) return undefined;
-		return resolveModelServiceTier(this.#serviceTierByFamily, model);
+		return this.resolveFastModeServiceTier(model, resolveModelServiceTier(this.#serviceTierByFamily, model));
+	}
+
+	/** Apply the same scoped decision to a main, subagent, or advisor's own base tier. */
+	resolveFastModeServiceTier(model: Model, baseTier: ServiceTier | undefined): ServiceTier | undefined {
+		if (!serviceTierFamily(model)) return baseTier;
+		const state = readFastModeScopes();
+		const revision = fastModeScopeRevision(state, this.#host.fastModeSessionId(), model.provider);
+		if (revision > 0) {
+			if (model.provider === "anthropic" && revision !== this.#anthropicFastModeRevision) {
+				clearAnthropicFastModeFallback(this.#host.providerSessionState);
+				this.#anthropicFastModeRevision = revision;
+			}
+			return "priority";
+		}
+		return state.off && baseTier === "priority" ? undefined : baseTier;
+	}
+
+	/** Enable one target without changing peers; Off resets every target and older priority tiers. */
+	setFastModeAction(action: FastModeAction): void {
+		if (action === "provider" && !this.#model) {
+			throw new Error("No model is selected; /fast provider has nothing to target.");
+		}
+		applyFastModeAction(action, {
+			sessionId: this.#host.fastModeSessionId(),
+			provider: this.#model?.provider,
+		});
+	}
+
+	/** `/fast` status for the active model: enablement, wire realization, and applying scopes. */
+	fastModeStatus(): FastModeStatus {
+		return {
+			enabled: this.isFastModeEnabled(),
+			active: this.isFastModeActive(),
+			scopes: applicableFastModeScopes(readFastModeScopes(), this.#host.fastModeSessionId(), this.#model?.provider),
+		};
+	}
+
+	/**
+	 * The broadest `/fast` scope applying to the active model (global, then
+	 * provider, then session), or `undefined` when only baseline tier settings
+	 * govern the request — drives the status-line scope label.
+	 */
+	fastModeScope(): FastModeScope | undefined {
+		return applicableFastModeScopes(readFastModeScopes(), this.#host.fastModeSessionId(), this.#model?.provider)[0];
 	}
 
 	/** The live per-family tier map, or `null` when empty (for session persistence). */
@@ -735,10 +797,8 @@ export class ModelControls {
 	}
 
 	/**
-	 * `/fast on|off` targets the family of the currently selected model: it sets
-	 * (or clears) that family's `priority` tier. Returns `false` when the model
-	 * has no service-tier family, so callers can report that fast mode is
-	 * unavailable instead of claiming success.
+	 * The boolean API sets or clears the active model family's base priority
+	 * tier. Explicit scoped actions overlay this base choice.
 	 */
 	setFastMode(enabled: boolean): boolean {
 		const family = this.#model ? serviceTierFamily(this.#model) : undefined;

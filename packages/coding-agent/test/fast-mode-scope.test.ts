@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import * as os from "node:os";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
@@ -151,5 +152,26 @@ describe("/fast targets the current model's service-tier family", () => {
 		expect(session.serviceTierByFamily.anthropic).toBe("priority");
 		expect(session.toggleFastMode()).toBe(false);
 		expect(session.serviceTierByFamily.anthropic).toBeUndefined();
+	});
+
+	it("Off everywhere suppresses a peer's existing priority without suppressing flex", async () => {
+		const issuer = await createSession("openai", "gpt-5.2");
+		const peer = await createSession("openai", "gpt-5.2");
+		const previousConfigDir = process.env.PI_CONFIG_DIR;
+		try {
+			// No await while the config-root override is installed: other tests
+			// cannot observe it, and the user's shared fast-mode state is untouched.
+			process.env.PI_CONFIG_DIR = path.relative(os.homedir(), tempDir.path());
+			peer.setFastMode(true);
+			issuer.setFastModeAction("off");
+			expect(peer.isFastModeEnabled()).toBe(false);
+			expect(peer.agent.serviceTierResolver?.(peer.model!)).toBeUndefined();
+			peer.setServiceTierFamily("openai", "flex");
+			expect(peer.agent.serviceTierResolver?.(peer.model!)).toBe("flex");
+		} finally {
+			if (previousConfigDir === undefined) delete process.env.PI_CONFIG_DIR;
+			else process.env.PI_CONFIG_DIR = previousConfigDir;
+			await issuer.dispose();
+		}
 	});
 });

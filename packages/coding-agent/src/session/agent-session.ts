@@ -106,6 +106,7 @@ import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager } fro
 import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
+import type { FastModeAction, FastModeScope, FastModeStatus } from "../config/fast-mode";
 import type { ModelRegistry } from "../config/model-registry";
 import type { ResolvedModelRoleValue } from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
@@ -736,6 +737,8 @@ export class AgentSession {
 	#agentKind: "main" | "sub" = "main";
 	#scoutAllowedBySpawnPolicy = true;
 	#providerSessionId: string | undefined;
+	/** Owning conversation id for `/fast` session scope; inherited by subagents. */
+	#fastModeSessionId: string | undefined;
 	#freshProviderSessionId: string | undefined;
 	#inheritedProviderPromptCacheKey: string | undefined;
 	#autolearnCaptureAbortController: AbortController | undefined;
@@ -1421,6 +1424,7 @@ export class AgentSession {
 			providerSessionState: this.#providerSessionState,
 			model: () => this.model,
 			sessionId: () => this.sessionId,
+			fastModeSessionId: () => this.fastModeSessionId,
 			promptGeneration: () => this.#promptGeneration,
 			resolveActiveEditMode: () => this.#tools.resolveActiveEditMode(),
 			syncAfterModelChange: previousEditMode => this.#tools.syncAfterModelChange(previousEditMode),
@@ -1772,6 +1776,7 @@ export class AgentSession {
 		this.#textOutputCommitted = this.#agentKind === "main";
 		this.#scoutAllowedBySpawnPolicy = config.scoutAllowedBySpawnPolicy ?? true;
 		this.#providerSessionId = config.providerSessionId;
+		this.#fastModeSessionId = config.fastModeSessionId;
 		this.#inheritedProviderPromptCacheKey =
 			config.providerPromptCacheKeySource === "fork" ? this.agent.promptCacheKey : undefined;
 		// Owner-routed async delivery: completions for jobs this agent owns are
@@ -1877,6 +1882,7 @@ export class AgentSession {
 				this.#pendingNextTurnMessages = this.#pendingNextTurnMessages.filter(message => !isAdvisorCard(message));
 			},
 			preserveAdvisorCard: card => this.#preserveAdvisorCard(card),
+			resolveFastModeServiceTier: (model, baseTier) => this.#models.resolveFastModeServiceTier(model, baseTier),
 			hasPendingNextTurnMessages: () => this.#pendingNextTurnMessages.length > 0,
 			convertToLlmForSideRequest: messages => this.#convertToLlmForSideRequest(messages),
 			effectiveServiceTier: model => this.#models.effectiveServiceTier(model),
@@ -3350,16 +3356,25 @@ export class AgentSession {
 						ttftMs: assistantMsg.ttft,
 					});
 				}
-				if (
-					assistantMsg.disabledFeatures?.includes("priority") &&
-					this.serviceTierByFamily.anthropic === "priority"
-				) {
-					this.setServiceTierFamily("anthropic", undefined);
-					this.emitNotice(
-						"warning",
-						"Priority/fast mode rejected for this model; retried without it. Fast mode is now off.",
-						"priority",
-					);
+				if (assistantMsg.disabledFeatures?.includes("priority")) {
+					if (this.serviceTierByFamily.anthropic === "priority") {
+						this.setServiceTierFamily("anthropic", undefined);
+						this.emitNotice(
+							"warning",
+							"Priority/fast mode rejected for this model; retried without it. Fast mode is now off.",
+							"priority",
+						);
+					} else if (this.#models.isFastModeScoped(this.model)) {
+						// A scoped /fast selection stays enabled — the per-session
+						// sticky fallback already suppresses `speed: "fast"` until the
+						// user re-enables a scope — so report the rejection without
+						// claiming fast mode turned off.
+						this.emitNotice(
+							"warning",
+							"Priority/fast mode rejected for this model; retried without it.",
+							"priority",
+						);
+					}
 				}
 				this.#ttsr.onAssistantMessageEnd(assistantMsg);
 				if (this.#handoff.isGeneratingHandoff) {
@@ -5818,6 +5833,17 @@ export class AgentSession {
 	get sessionId(): string {
 		return this.#activeProviderSessionId();
 	}
+
+	/**
+	 * Owning conversation id for `/fast` session-scope resolution: the
+	 * inherited owner id when this session is a descendant, otherwise the
+	 * current conversation's {@link sessionId} (so `/new` and session switches
+	 * re-key the scope automatically).
+	 */
+	get fastModeSessionId(): string {
+		return this.#fastModeSessionId ?? this.sessionId;
+	}
+
 	getEvalSessionId(): string | null {
 		return this.#eval.getSessionId();
 	}
@@ -8684,6 +8710,26 @@ export class AgentSession {
 	/** Toggles priority service for the active model family. */
 	toggleFastMode(): boolean {
 		return this.#models.toggleFastMode();
+	}
+
+	/**
+	 * Apply a scoped `/fast` action: `session` (this conversation and its
+	 * subagents), `provider` (the active model's exact `model.provider`),
+	 * `global` (every session), or `off` (clears every remembered scope and
+	 * this session's live priority tiers). Enables are additive and persist.
+	 */
+	setFastModeAction(action: FastModeAction): void {
+		this.#models.setFastModeAction(action);
+	}
+
+	/** `/fast` status for the active model: enablement, realization, and applying scopes. */
+	fastModeStatus(): FastModeStatus {
+		return this.#models.fastModeStatus();
+	}
+
+	/** Broadest `/fast` scope applying to the active model, or `undefined` for baseline tiers. */
+	fastModeScope(): FastModeScope | undefined {
+		return this.#models.fastModeScope();
 	}
 
 	/** Flips the `skillful` setting for this session only. See {@link setSkillful}. */
