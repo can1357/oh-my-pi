@@ -5,6 +5,7 @@ import * as path from "node:path";
 import * as tls from "node:tls";
 import { type as arkType } from "@oh-my-pi/omptype";
 import { Effort } from "@oh-my-pi/pi-ai";
+import { NO_AUTH_SENTINEL } from "@oh-my-pi/pi-ai/auth-retry";
 import {
 	applyClaudeToolPrefix,
 	buildAnthropicClientOptions,
@@ -895,6 +896,20 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(headers["X-Api-Key"]).toBeUndefined();
 	});
 
+	it("sends no Authorization for keyless sentinel credentials on non-official endpoints", () => {
+		// Providers with `auth: none` resolve to the N/A sentinel rather than a
+		// real key; emitting `Authorization: Bearer N/A` makes keyless local
+		// proxies reject the request. Same sentinel guard as the openai transports.
+		const headers = buildAnthropicHeaders({
+			apiKey: NO_AUTH_SENTINEL,
+			baseUrl: "https://proxy.example.com",
+			stream: true,
+		});
+
+		expect(headers.Authorization).toBeUndefined();
+		expect(headers["X-Api-Key"]).toBeUndefined();
+	});
+
 	it("honors caller-supplied Authorization on non-official Anthropic endpoints (#3391)", () => {
 		const headers = buildAnthropicHeaders({
 			apiKey: "sk-ant-api-test",
@@ -980,6 +995,23 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(options.defaultHeaders["x-app"]).toBe("custom-app-token");
 		expect(options.defaultHeaders["X-Stainless-Runtime-Version"]).toBe("custom-runtime-token");
 		expect(options.defaultHeaders.Authorization).toBe("Bearer sk-ant-oat-test");
+	});
+
+	it("suppresses the client X-Api-Key for keyless sentinel credentials", () => {
+		// With the sentinel, no Authorization was built; without this guard the
+		// Anthropic client would inject its own `X-Api-Key: N/A` instead.
+		const options = buildAnthropicClientOptions({
+			model: buildModel({
+				...ANTHROPIC_MODEL_SPEC,
+				provider: "custom-anthropic",
+				baseUrl: "https://proxy.example.com/anthropic",
+			}),
+			apiKey: NO_AUTH_SENTINEL,
+			stream: true,
+		});
+
+		expect(options.defaultHeaders.Authorization).toBeUndefined();
+		expect(options.apiKey).toBeNull();
 	});
 
 	it("keeps OAuth fingerprint defaults on official endpoints despite the compat opt-in", () => {
