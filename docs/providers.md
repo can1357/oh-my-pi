@@ -98,6 +98,8 @@ Each provider has one or more environment variables that supply a key when no st
 
 Kimi K3 uses Bedrock's Chat Completions endpoint under the same `amazon-bedrock` provider. Select `amazon-bedrock/global.moonshotai.kimi-k3` or `amazon-bedrock/us.moonshotai.kimi-k3`; both support `low`, `high`, and `max` reasoning effort, with `max` as the model default. Existing AWS profiles, IAM credential chains, and `AWS_BEARER_TOKEN_BEDROCK` work without a separate OpenAI API key or provider. Existing Claude and GPT model routes are unchanged. See the [AWS Kimi K3 model card](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-moonshot-ai-kimi-k3.html).
 
+Missing or rejected AWS credentials fail without transport retry delays. Temporary credential-service failures still retry, including SSO token refresh when the cached access token has expired.
+
 ### Additional hosted providers
 
 | Provider ID                      | Environment variable(s)                                                       |

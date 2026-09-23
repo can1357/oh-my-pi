@@ -5,6 +5,8 @@
 ### Fixed
 
 - Fixed Claude Opus 5.5 ignoring a mid-session switch to high effort when the session started without an explicit effort; the change is now sent as a cache-preserving per-message effort control ([#12909](https://github.com/can1357/oh-my-pi/pull/12909) by [@h4vc](https://github.com/h4vc)).
+- Fixed AWS credential-chain authentication for `amazon-bedrock` Chat Completions, including regional routing, request-scoped options, and guardrails.
+- Bedrock Chat Completions now fail without retry delays for missing or rejected credentials, while transient STS/SSO service errors and refresh failures remain retryable.
 
 ## [18.2.9] - 2026-09-22
 
@@ -37,7 +39,6 @@
 - Fixed Kimi usage reporting so monthly totals and code quotas are shown alongside the five-hour usage window.
 - Bedrock no longer sends provider-invalid payloads when an errored tool result contains an image; the image is hoisted into a sibling block ([#12865](https://github.com/can1357/oh-my-pi/pull/12865) by [@roboomp](https://github.com/roboomp)).
 - Gemini, Vertex, and Cloud Code Assist requests no longer include the unsupported `minP`/`repetitionPenalty` sampling fields, which caused 400s when set globally ([#12850](https://github.com/can1357/oh-my-pi/pull/12850) by [@roboomp](https://github.com/roboomp)).
-- Fixed AWS credential-chain authentication for `amazon-bedrock` Chat Completions, including regional routing, request-scoped options, and guardrails.
 
 ## [18.2.8] - 2026-09-21
 
