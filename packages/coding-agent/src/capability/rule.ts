@@ -297,6 +297,59 @@ const INLINE_FLAG_PREFIX = /^\(\?([a-z]+)\)/;
 const TRANSLATABLE_INLINE_FLAGS = /^[ims]+$/;
 
 /**
+ * A sequence of positive lookaheads whose bodies all begin with greedy `[\s\S]*`
+ * has the same result at index zero as it does at any later index. Each body
+ * can consume the prefix itself before testing its predicate, so asking the
+ * RegExp engine to retry the sequence at every character only repeats work.
+ * Lazy `[\s\S]*?` prefixes are excluded because captures chosen by one
+ * lookahead can make a later backreference depend on the starting position.
+ */
+function canMatchWholeBufferFromStart(source: string): boolean {
+	let offset = 0;
+	let lookaheads = 0;
+	const prefix = "(?=[\\s\\S]*";
+	while (source.startsWith(prefix, offset) && source[offset + prefix.length] !== "?") {
+		let depth = 1;
+		let inCharacterClass = false;
+		let end = -1;
+		for (let index = offset + 3; index < source.length; index++) {
+			const char = source[index];
+			if (char === "\\") {
+				index++;
+				continue;
+			}
+			if (inCharacterClass) {
+				if (char === "]") inCharacterClass = false;
+				continue;
+			}
+			if (char === "[") {
+				inCharacterClass = true;
+				continue;
+			}
+			if (char === "(") {
+				depth++;
+				continue;
+			}
+			if (char !== ")") continue;
+			depth--;
+			if (depth === 0) {
+				end = index + 1;
+				break;
+			}
+		}
+		if (end === -1) return false;
+		offset = end;
+		lookaheads++;
+	}
+	return lookaheads > 0 && offset === source.length;
+}
+
+function optimizeRuleCondition(condition: RegExp): RegExp {
+	if (condition.sticky || !canMatchWholeBufferFromStart(condition.source)) return condition;
+	return new RegExp(condition.source, `${condition.flags}y`);
+}
+
+/**
  * Compile a rule `condition` into a `RegExp`, translating a leading PCRE-style
  * inline flag group into native `RegExp` flags.
  *
@@ -311,9 +364,9 @@ export function compileRuleCondition(pattern: string): RegExp {
 	const match = INLINE_FLAG_PREFIX.exec(pattern);
 	if (match && TRANSLATABLE_INLINE_FLAGS.test(match[1])) {
 		const flags = Array.from(new Set(match[1])).join("");
-		return new RegExp(pattern.slice(match[0].length), flags);
+		return optimizeRuleCondition(new RegExp(pattern.slice(match[0].length), flags));
 	}
-	return new RegExp(pattern);
+	return optimizeRuleCondition(new RegExp(pattern));
 }
 
 let activeRules: readonly Rule[] = [];

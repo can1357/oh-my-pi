@@ -55,6 +55,18 @@ const BRAND_FADE_MS = 450;
 /** Repaint cadence while the brand fade is in flight (rust omp's `FADE_FRAME`). */
 const BRAND_FADE_FRAME_MS = 40;
 
+/**
+ * Providers whose subscription quota is a single monthly bucket, so their
+ * `monthly`/`30d` window is the one the usage segment must show. Providers that
+ * merely report a monthly side-counter (GitHub Copilot's premium requests) stay
+ * out: their monthly row is not the session quota.
+ */
+const MONTHLY_SUBSCRIPTION_PROVIDERS: Record<string, true> = {
+	"alibaba-token-plan": true,
+	cursor: true,
+	"opencode-go": true,
+};
+
 /** A displayable limit after provider, account, model, and window filtering. */
 interface UsageWindowCandidate {
 	id?: string;
@@ -1875,6 +1887,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const activeModelId = normalizeUsageScopeValue(context.modelId);
 		const activeAntigravityCounter =
 			context.provider === "google-antigravity" ? getAntigravityCounterKeyForModel(context.modelId) : undefined;
+		const monthlySubscriptionProvider =
+			context.provider !== undefined && MONTHLY_SUBSCRIPTION_PROVIDERS[context.provider] === true;
 		const scopeGroups = new Map<string, UsageScopeGroup>();
 		for (const report of reports) {
 			if (!report || typeof report !== "object") continue;
@@ -1937,10 +1951,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 										: undefined;
 				const windowClass =
 					subscriptionWindow ??
-					((context.provider === "cursor" || context.provider === "opencode-go") &&
-					(windowId === "monthly" || windowId === "30d")
-						? "monthly"
-						: undefined);
+					(monthlySubscriptionProvider && (windowId === "monthly" || windowId === "30d") ? "monthly" : undefined);
 				if (!windowClass) continue;
 
 				const modelId = normalizeUsageScopeValue("modelId" in scope ? scope.modelId : undefined);

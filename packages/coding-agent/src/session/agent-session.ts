@@ -4452,6 +4452,7 @@ export class AgentSession {
 				from: event.from,
 				to: event.to,
 				role: event.role,
+				reason: event.reason,
 			});
 		} else if (event.type === "retry_fallback_succeeded") {
 			await this.#extensionRunner.emit({
