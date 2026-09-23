@@ -1,3 +1,5 @@
+import * as path from "node:path";
+import { parseArchivePathCandidates } from "@oh-my-pi/pi-utils/ar";
 import type { HighlightStream } from "@oh-my-pi/pi-natives";
 import type { Component } from "../tui";
 import { Text } from "../components/text";
@@ -56,6 +58,13 @@ interface WriteRenderArgs {
 	path?: unknown;
 	file_path?: unknown;
 	content?: unknown;
+}
+
+function pendingWriteLinkPath(rawPath: string): string {
+	if (!rawPath.includes(":")) return path.resolve(rawPath);
+	const archive = parseArchivePathCandidates(rawPath).find(candidate => candidate.archivePath !== rawPath);
+	const sqlite = rawPath.match(/^(.+\.(?:sqlite3?|db3?))(?=[:?])/i);
+	return path.resolve(archive?.archivePath ?? sqlite?.[1] ?? rawPath);
 }
 
 const WRITE_PREVIEW_LINES = 6;
@@ -412,10 +421,10 @@ export const writeToolRenderer = {
 		const lang = rawPath ? (getLanguageFromPath(rawPath) ?? "text") : "text";
 		const langIcon = uiTheme.fg("muted", uiTheme.getLangIcon(lang));
 		const styledPath = filePath ? uiTheme.fg("accent", filePath) : uiTheme.fg("toolOutput", "…");
-		// A pending write has no result details yet, but its header is still a
-		// file-path field. Link it directly instead of letting terminals guess a
-		// relative path is an HTTP(S) URL before the file exists.
-		const pathDisplay = filePath ? fileHyperlink(rawPath, styledPath) : styledPath;
+		// The result has not resolved its target yet. Link the containing file
+		// rather than an archive member or database row selector.
+		const pathDisplay =
+			filePath && args.content !== undefined ? fileHyperlink(pendingWriteLinkPath(rawPath), styledPath) : styledPath;
 		// No status icon on the head row: it's the head of the framed block, and
 		// native-scrollback commits are prefix-only — an animated glyph would pin
 		// the commit boundary at the top, and the pending hourglass just adds

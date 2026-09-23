@@ -219,6 +219,9 @@ export interface ReadRenderArgs {
 }
 
 const INTERNAL_URL_LIKE_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
+// A scheme-less host followed by a slash can be a web target. Do not force a
+// file: link onto it; explicit relative paths (./host/path) remain filesystem paths.
+const BARE_WEB_HOST_RE = /^(?:(?:[a-z][a-z0-9-]*|\[[0-9a-f:]+\])(?::\d+)|(?:[a-z0-9-]+\.)+[a-z0-9-]+(?::\d+)?)\//i;
 
 function splitReadRenderPath(rawPath: string): { path: string; sel?: string } {
 	if (INTERNAL_URL_LIKE_RE.test(rawPath)) {
@@ -263,7 +266,7 @@ function formatReadPathLink(
 	// protocol resources as plain text, but resolve direct relative file paths
 	// so terminals receive an explicit file: link rather than guessing HTTPS.
 	const relativeInputPath =
-		basePath && !INTERNAL_URL_LIKE_RE.test(basePath) && !path.isAbsolute(basePath)
+		basePath && !INTERNAL_URL_LIKE_RE.test(basePath) && !BARE_WEB_HOST_RE.test(basePath) && !path.isAbsolute(basePath)
 			? path.resolve(basePath)
 			: undefined;
 	const absoluteInputPath = path.isAbsolute(basePath) ? basePath : undefined;
