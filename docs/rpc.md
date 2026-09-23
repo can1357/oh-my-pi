@@ -51,7 +51,9 @@ Clients that support protocol v2 SHOULD immediately send:
 { "id": "protocol-1", "type": "negotiate_protocol", "protocolVersion": 2 }
 ```
 
-After the success response, oversized stdout objects are emitted losslessly as an uninterrupted sequence of `rpc_chunk` frames. Each chunk carries a base64 segment of the original UTF-8 JSON object:
+Any version listed in `supportedProtocolVersions` may be negotiated; the success response reports the granted version (`{"protocolVersion": 1}` for an explicit baseline selection) and the server frames later output with it. A version outside the advertised list is refused with an error naming the supported versions.
+
+After a successful v2 response, oversized stdout objects are emitted losslessly as an uninterrupted sequence of `rpc_chunk` frames. Each chunk carries a base64 segment of the original UTF-8 JSON object:
 
 ```json
 {
@@ -123,7 +125,7 @@ Important edge behavior from runtime:
 
 ### Protocol
 
-- `{ id?, type: "negotiate_protocol", protocolVersion: 2 }`
+- `{ id?, type: "negotiate_protocol", protocolVersion: 1 | 2 }` — any version the ready frame advertised; the response reports the granted version and the server frames subsequent output with it.
 
 ### State
 

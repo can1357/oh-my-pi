@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added explicit RPC protocol v1 negotiation, including switching back from v2 framing ([#12591](https://github.com/can1357/oh-my-pi/pull/12591) by [@anthonyrisinger](https://github.com/anthonyrisinger)).
+
 ## [18.2.11] - 2026-09-23
 
 ### Fixed

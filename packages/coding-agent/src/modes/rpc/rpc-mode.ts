@@ -44,7 +44,12 @@ import { formatPersistenceDurabilityFailure, formatPersistenceFailure } from "..
 import { initializeExtensions } from "../runtime-init";
 import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./host-tools";
 import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
-import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameEncoder } from "./rpc-frame";
+import {
+	MAX_RPC_FRAME_BYTES,
+	MAX_RPC_REASSEMBLED_BYTES,
+	RpcFrameEncoder,
+	SUPPORTED_RPC_PROTOCOL_VERSIONS,
+} from "./rpc-frame";
 import { claimRpcInput, readRpcInputFrames } from "./rpc-input";
 import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } from "./rpc-messages";
 import { RpcOutputWriter } from "./rpc-output";
@@ -108,6 +113,38 @@ type RpcOutput = (
 		| RpcHostUriCancelRequest
 		| object,
 ) => void;
+
+/** Write each frame using the current protocol, then apply an acknowledged selection. */
+export function createRpcOutput(encoder: RpcFrameEncoder, writer: Pick<RpcOutputWriter, "write">): RpcOutput {
+	return obj => {
+		writer.write(encoder.encodeFrames(obj));
+		if (isRecord(obj) && obj.type === "response" && obj.command === "negotiate_protocol" && obj.success === true) {
+			const granted = isRecord(obj.data) ? obj.data.protocolVersion : undefined;
+			if (typeof granted === "number") encoder.setProtocolVersion(granted);
+		}
+	};
+}
+
+/** Accept an advertised protocol version without changing framing before its acknowledgement. */
+export function negotiateRpcProtocol(command: Extract<RpcCommand, { type: "negotiate_protocol" }>): RpcResponse {
+	const version = SUPPORTED_RPC_PROTOCOL_VERSIONS.find(version => version === command.protocolVersion);
+	if (version === undefined) {
+		return {
+			id: command.id,
+			type: "response",
+			command: command.type,
+			success: false,
+			error: `Unsupported RPC protocol version: ${command.protocolVersion} (supported: ${SUPPORTED_RPC_PROTOCOL_VERSIONS.join(", ")})`,
+		};
+	}
+	return {
+		id: command.id,
+		type: "response",
+		command: command.type,
+		success: true,
+		data: { protocolVersion: version },
+	};
+}
 
 export type RpcSessionChangeCommand = Extract<
 	RpcCommand,
@@ -842,16 +879,12 @@ export async function runRpcMode(
 		frameEncoder.encodeFrames({
 			type: "ready",
 			protocolVersion: 1,
-			supportedProtocolVersions: [1, 2],
+			supportedProtocolVersions: SUPPORTED_RPC_PROTOCOL_VERSIONS,
 			maxFrameBytes: MAX_RPC_FRAME_BYTES,
 			maxReassembledFrameBytes: MAX_RPC_REASSEMBLED_BYTES,
 		}),
 	);
-	const output = (obj: RpcResponse | RpcExtensionUIRequest | object) => {
-		outputWriter.write(frameEncoder.encodeFrames(obj));
-		if (isRecord(obj) && obj.type === "response" && obj.command === "negotiate_protocol" && obj.success === true)
-			frameEncoder.setProtocolVersion(2);
-	};
+	const output = createRpcOutput(frameEncoder, outputWriter);
 	const emitRpcTitles = shouldEmitRpcTitles();
 
 	const success = <T extends RpcCommand["type"]>(
@@ -1174,11 +1207,8 @@ export async function runRpcMode(
 		const id = command.id;
 
 		switch (command.type) {
-			case "negotiate_protocol": {
-				if (command.protocolVersion !== 2)
-					return error(id, "negotiate_protocol", `Unsupported RPC protocol version: ${command.protocolVersion}`);
-				return success(id, "negotiate_protocol", { protocolVersion: 2 });
-			}
+			case "negotiate_protocol":
+				return negotiateRpcProtocol(command);
 
 			// =================================================================
 			// Prompting

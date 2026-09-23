@@ -15,6 +15,7 @@ import type { AvailableSlashCommandSource } from "../../slash-commands/available
 import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
 import type { SubagentEventPayload, SubagentLifecyclePayload, SubagentProgressPayload } from "../../task";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import type { RpcProtocolVersion } from "./rpc-frame";
 import type { RpcMessagesPage } from "./rpc-messages";
 
 // ============================================================================
@@ -199,7 +200,7 @@ export type RpcResponse =
 			type: "response";
 			command: "negotiate_protocol";
 			success: true;
-			data: { protocolVersion: 2 };
+			data: { protocolVersion: RpcProtocolVersion };
 	  }
 
 	// Prompting (async - events follow)

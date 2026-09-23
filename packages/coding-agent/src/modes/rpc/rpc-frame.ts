@@ -9,7 +9,9 @@ export const MAX_RPC_REASSEMBLED_BYTES = 64 * 1024 * 1024;
 
 const RPC_CHUNK_PAYLOAD_BYTES = 256 * 1024;
 
-export type RpcProtocolVersion = 1 | 2;
+/** Protocol versions advertised by the server and accepted during negotiation. */
+export const SUPPORTED_RPC_PROTOCOL_VERSIONS = [1, 2] as const;
+export type RpcProtocolVersion = (typeof SUPPORTED_RPC_PROTOCOL_VERSIONS)[number];
 
 interface PendingRpcChunks {
 	chunkId: string;
@@ -275,8 +277,9 @@ export class RpcFrameEncoder {
 	#chunkCounter = 0;
 
 	setProtocolVersion(version: number): void {
-		if (version !== 1 && version !== 2) throw new Error(`Unsupported RPC protocol version: ${version}`);
-		this.#protocolVersion = version;
+		const supported = SUPPORTED_RPC_PROTOCOL_VERSIONS.find(candidate => candidate === version);
+		if (supported === undefined) throw new Error(`Unsupported RPC protocol version: ${version}`);
+		this.#protocolVersion = supported;
 	}
 
 	/**
