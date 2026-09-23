@@ -9714,7 +9714,8 @@
 					"authUrl": "https://console.mistral.ai/api-keys",
 					"instructions": "Create or copy your API key from the Mistral console",
 					"prompt": "Paste your Mistral API key",
-					"placeholder": "...",
+					"placeholder": "API key",
+					"normalize": "strip-bearer",
 					"validate": { "kind": "models-endpoint", "label": "mistral", "url": "https://api.mistral.ai/v1/models" }
 				}
 			},
