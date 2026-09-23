@@ -16,6 +16,7 @@ export interface CustomProviderInput {
 export interface CustomProviderContext {
 	readonly authStorage: AuthStorage;
 	refreshProvider(id: string): Promise<void>;
+	discoverySucceeded(id: string): boolean;
 	hasChatModels(id: string): boolean;
 	readonly config?: ConfigFile<ModelsConfig>;
 }
@@ -73,7 +74,7 @@ export async function addCustomProvider(input: CustomProviderInput, context: Cus
 		configSaved = true;
 		configFile.invalidate();
 		await context.refreshProvider(id);
-		if (!context.hasChatModels(id)) {
+		if (!context.discoverySucceeded(id) || !context.hasChatModels(id)) {
 			throw new Error("No chat models were discovered. Check the endpoint and API key, then try again.");
 		}
 	} catch (error) {
