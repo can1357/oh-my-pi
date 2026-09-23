@@ -85,6 +85,8 @@ When the primary transcript is rewritten, the advisor runtime is reset:
 
 Reset clears the advisor's private in-memory transcript and rewinds its cursor. The next advisor update replays the current bounded primary transcript instead of continuing from stale pre-rewrite context.
 
+The primary's per-turn prune passes, which blank superseded, useless, or aged tool results in place and mark them with `prunedAt`, do not reset the advisor. The advisor received the full result when it was delivered and keeps that copy in its own context, and the prune mutates the delivered message in place, so the delivered prefix is unchanged. Every other rewrite of an already-delivered message (rollback, branch, edited content) still triggers the reset above.
+
 When the advisor is enabled mid-session, the cursor seeds to the current primary transcript length. That avoids replaying the whole old conversation on the first enabled turn.
 
 ## Tools and isolation
@@ -305,6 +307,22 @@ Subagents run unadvised by default; advisors are opted in **per agent** instead 
 The legacy `advisor.subagents: true` setting migrates to `task.agentAdvisor: { task: "on" }` — the bundled generic `task` agent keeps its advisor, other agents start unadvised.
 
 An advised subagent session builds its own advisor subsystem with the same settings/model-role resolution (an explicit pattern lands on the spawned session's `modelRoles.advisor`), then reruns both `WATCHDOG.md` and `WATCHDOG.yml` discovery for that subagent session's `cwd` and agent directory. Subagent advisors remain isolated from the subagent's primary tool session in the same way the main advisor is isolated from the main agent.
+
+## Review cadence
+
+By default the advisor reviews every primary agent-loop step, so one user turn can trigger several reviews. `advisor.reviewOn` controls which boundaries trigger one:
+
+- `step` (default): review every agent-loop boundary.
+- `mutation`: skip a mid-turn boundary when every tool call since the last review is review-exempt.
+- `turn`: review only the terminal boundary.
+
+The terminal boundary is always reviewed, whatever the setting. Skipped content is never dropped: the review cursor advances only when a delta is rendered, so the next review sees everything accumulated since the previous one. The setting is read at every step, so changing it from `/settings` applies without rebuilding the advisor.
+
+The review-exempt set is [`READ_ONLY_TOOL_NAMES`](../packages/coding-agent/src/task/read-only-policy.ts) minus `retain`, `memory_edit`, `checkpoint`, and `rewind`, which are read-tier but change durable state. `hub` is judged by its `op` via [`isHubReviewExempt`](../packages/coding-agent/src/tools/hub/approval.ts): the inspection ops `list`, `jobs`, `inbox`, `logs`, `ps`, `describe`, and `wait` are exempt, while `start`, `stop`, `restart`, `cancel`, `send`, and missing or unknown ops force a review. Every other tool, including MCP and extension tools, forces a review, so an unrecognized tool costs an extra review rather than creating a blind spot.
+
+The trade-off is latency: under `mutation` a mid-turn blocker arrives at the next non-exempt step, and under `turn` only at the terminal boundary.
+
+A review ends when the advisor's turn calls only `advise`; the advisor is not prompted again just to close the review. A turn that advises and keeps investigating continues. Expanded edit diffs in the delta are middle-truncated with the same 8 KiB / 80-line per-tool budget as other expanded tool input and output.
 
 ## Cost and context behavior
 

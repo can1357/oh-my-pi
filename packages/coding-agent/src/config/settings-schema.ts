@@ -429,6 +429,28 @@ export const SETTINGS_SCHEMA = {
 			condition: "advisorEnabled",
 		},
 	},
+	"advisor.reviewOn": {
+		type: "enum",
+		values: ["step", "mutation", "turn"] as const,
+		default: "step",
+		ui: {
+			tab: "model",
+			group: "Advisor",
+			label: "Advisor Review Cadence",
+			description:
+				"How often the advisor reviews the main agent while a turn is still running. The final turn boundary is always reviewed; lowering the cadence cuts advisor requests (and cost) proportionally.",
+			options: [
+				{ value: "step", label: "Every step", description: "Default." },
+				{
+					value: "mutation",
+					label: "Risky steps",
+					description: "Mid-turn: skip steps that only ran read tools (read/grep/glob/ast_grep/…)",
+				},
+				{ value: "turn", label: "Turn end", description: "Review once per turn, when the main agent stops." },
+			],
+			condition: "advisorEnabled",
+		},
+	},
 	shellPath: { type: "string", default: undefined },
 	"git.enabled": {
 		type: "boolean",
@@ -6138,6 +6160,9 @@ export type { TreeFilterMode } from "@oh-my-pi/pi-tui/overlays/tree-selector";
 
 /** Personality preset - derived from schema */
 export type Personality = SettingValue<"personality">;
+
+/** Advisor mid-turn review cadence - derived from schema */
+export type AdvisorReviewCadence = SettingValue<"advisor.reviewOn">;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Typed Group Definitions

@@ -162,4 +162,40 @@ describe("AgentSession per-turn prune persistence", () => {
 		const rebuiltText = rebuilt.content.find(block => block.type === "text");
 		expect(rebuiltText?.type === "text" ? rebuiltText.text : undefined).toBe(USELESS_NOTICE);
 	});
+
+	it("keeps the advisor's own context when the per-turn prune elides a primary result", async () => {
+		// The prune blanks a delivered tool result in place; the advisor already
+		// holds that result in its own context, so a full re-prime (replaying the
+		// whole primary transcript) is pure cost.
+		session.settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		const advisor = session.getAdvisorAgent();
+		if (!advisor) throw new Error("Expected advisor agent to be live");
+		const advisorHistory = { role: "user" as const, content: "prior advisor context", timestamp: 1 };
+		advisor.state.messages.push(advisorHistory);
+
+		const finalAssistant = {
+			role: "assistant" as const,
+			content: [{ type: "text" as const, text: "Continuing." }],
+			api: "anthropic-messages" as const,
+			provider: "anthropic" as const,
+			model: "claude-sonnet-4-5",
+			stopReason: "stop" as const,
+			usage: {
+				input: 100,
+				output: 10,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 110,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		};
+		session.agent.emitExternalEvent({ type: "message_end", message: finalAssistant });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [finalAssistant] });
+		await session.waitForIdle();
+
+		expect(liveResultText()).toBe(USELESS_NOTICE);
+		expect(advisor.state.messages).toEqual([advisorHistory]);
+	});
 });

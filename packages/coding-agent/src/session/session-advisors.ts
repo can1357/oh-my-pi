@@ -8,6 +8,7 @@ import {
 	type CompactionSummaryMessage,
 	resolveTelemetry,
 	type StreamFn,
+	TERMINAL_TOOL_RESULT_ABORT_REASON,
 	ThinkingLevel,
 	type Tokenizer,
 } from "@oh-my-pi/pi-agent-core";
@@ -84,6 +85,7 @@ import type { PlanModeState } from "../plan-mode/state";
 import advisorSystemPrompt from "../prompts/advisor/system.md" with { type: "text" };
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import {
+	AUTO_THINKING,
 	concreteThinkingLevel,
 	resolveThinkingLevelForModel,
 	shouldDisableReasoning,
@@ -263,6 +265,12 @@ interface ActiveAdvisor {
 	agentUnsubscribe?: () => void;
 	model: Model;
 	thinkingLevel: ThinkingLevel;
+	/**
+	 * The user selected `auto` for this advisor's effort. The classifier only
+	 * runs for the primary turn, so the advisor tracks the level `auto` resolved
+	 * to there, retuned at each review boundary.
+	 */
+	autoThinking: boolean;
 	providerSessionId: string | undefined;
 	retryFallback?: AdvisorRetryFallbackState;
 	retryFallbackPendingSuccess: boolean;
@@ -289,6 +297,7 @@ interface AdvisorRuntimeDescriptor {
 	slug: string;
 	model: Model;
 	thinkingLevel: ThinkingLevel;
+	autoThinking: boolean;
 	signature: string;
 }
 
@@ -404,6 +413,14 @@ export interface SessionAdvisorsHost {
 		phase: CodexCompactionContext["phase"];
 	}): CodexCompactionContext;
 	sessionId(): string;
+	/** True when the primary session runs `auto` per-turn effort classification. */
+	isAutoThinking(): boolean;
+	/**
+	 * The primary session's live concrete effort. Under `auto` this is the level
+	 * the classifier resolved for the current turn (the provisional level until
+	 * the first classification lands).
+	 */
+	primaryThinkingLevel(): ThinkingLevel | undefined;
 }
 
 /**
@@ -488,7 +505,11 @@ export class SessionAdvisors {
 		const terminalBoundary = willContinue !== true;
 		if (terminalBoundary) this.#terminalUnwindActive = true;
 		try {
+			this.#retuneAutoThinkingAdvisors();
 			this.#advisorPrimaryTurnsCompleted++;
+			// Re-read per step so a cadence change applies immediately (no rebuild).
+			// Left `undefined` at the terminal boundary: that step is always reviewed.
+			const cadence = terminalBoundary ? undefined : this.#host.settings.get("advisor.reviewOn");
 			for (const advisor of this.#advisors) {
 				if (advisor.runtime.disposed) continue;
 				// Only the terminal primary boundary owns the deferred flush. Continuing
@@ -496,7 +517,7 @@ export class SessionAdvisors {
 				// resets the per-update budget — no new advisor update starts here.
 				if (willContinue !== true) advisor.adviseTool.flushDeferredNotes();
 				try {
-					advisor.runtime.onTurnEnd(messages, { willContinue });
+					advisor.runtime.onTurnEnd(messages, { willContinue, cadence });
 				} catch (error) {
 					logger.warn("advisor onTurnEnd threw; delta dropped", { advisor: advisor.name, err: String(error) });
 				}
@@ -876,9 +897,14 @@ export class SessionAdvisors {
 			// `advisor` role chain. A model that fails to resolve skips just this advisor.
 			let model: Model | undefined;
 			let thinkingLevel: ThinkingLevel | undefined;
+			// `auto` is a session-level selector with no per-advisor classifier, so
+			// `concreteThinkingLevel` erases it. Remember the choice: the advisor
+			// then tracks whatever the primary turn's classifier resolved to.
+			let autoThinking = false;
 			if (config.model) {
 				const resolved = resolveModelOverride([config.model], this.#host.modelRegistry, this.#host.settings);
 				model = resolved.model;
+				autoThinking = resolved.thinkingLevel === AUTO_THINKING;
 				thinkingLevel = concreteThinkingLevel(resolved.thinkingLevel);
 				if (!model) {
 					this.#advisorStatuses.set(slug, { name: config.name, status: "no_model" });
@@ -903,6 +929,7 @@ export class SessionAdvisors {
 					continue;
 				}
 				model = sel.model;
+				autoThinking = sel.thinkingLevel === AUTO_THINKING;
 				thinkingLevel = concreteThinkingLevel(sel.thinkingLevel);
 			}
 			// Clamp the effort against the resolved model. Historically we defaulted
@@ -915,7 +942,8 @@ export class SessionAdvisors {
 			// controllable efforts — for that case we forward `Inherit` so no effort
 			// is sent and reasoning stays enabled (matching the `auto`-path fix for
 			// Devin models via `clampAutoThinkingEffort`). See #4579.
-			const requestedLevel = thinkingLevel ?? ThinkingLevel.Medium;
+			const requestedLevel =
+				(autoThinking ? this.#inheritedAutoThinkingLevel() : undefined) ?? thinkingLevel ?? ThinkingLevel.Medium;
 			const resolvedLevel = resolveThinkingLevelForModel(model, requestedLevel);
 			const advisorThinkingLevel: ThinkingLevel = resolvedLevel ?? ThinkingLevel.Inherit;
 			// Record the status entry now (in roster order) so the Map's insertion
@@ -929,13 +957,27 @@ export class SessionAdvisors {
 				slug,
 				model,
 				thinkingLevel: advisorThinkingLevel,
-				signature: this.#advisorRuntimeSignature(config, slug, model, advisorThinkingLevel),
+				autoThinking,
+				// An `auto` advisor's concrete level changes every turn; signing the
+				// resolved level would make each change look like a config edit and
+				// rebuild the advisor, losing its context. Sign the selector instead.
+				signature: this.#advisorRuntimeSignature(
+					config,
+					slug,
+					model,
+					autoThinking ? AUTO_THINKING : advisorThinkingLevel,
+				),
 			});
 		}
 		return descriptors;
 	}
 
-	#advisorRuntimeSignature(config: AdvisorConfig, slug: string, model: Model, thinkingLevel: ThinkingLevel): string {
+	#advisorRuntimeSignature(
+		config: AdvisorConfig,
+		slug: string,
+		model: Model,
+		thinkingLevel: ThinkingLevel | typeof AUTO_THINKING,
+	): string {
 		const tools = config.tools?.length ? config.tools.join("\u001e") : "";
 		const instructions = config.instructions?.trim() ?? "";
 		const budget = this.#advisorMaxNotesPerUpdate(config);
@@ -987,6 +1029,7 @@ export class SessionAdvisors {
 				model: advisorModel,
 				name: advisorName,
 				thinkingLevel: advisorThinkingLevel,
+				autoThinking: advisorAutoThinking,
 				signature,
 			} = descriptor;
 
@@ -1142,6 +1185,26 @@ export class SessionAdvisors {
 						message,
 						buildAdvisorQuarantineSourceText(currentAdvisorInput, advisorAgent.state.messages),
 					);
+				},
+				// A turn whose only tool calls are `advise` has nothing left to do:
+				// without this the model is re-invoked over the whole prefix just to
+				// say "done". Stop the review through the same graceful terminal path
+				// the primary's `yield` tool uses — the tool batch persists and
+				// `onTurnEnd` still runs. A turn that advises and keeps investigating
+				// is untouched. Fire on the LAST advise block, not the first: the
+				// batch starts records in index order and a not-yet-started sibling
+				// would see the aborted signal and become a skipped placeholder — a
+				// lost note.
+				afterToolCall: ctx => {
+					if (ctx.toolCall.name !== adviseTool.name || ctx.isError) return undefined;
+					let lastAdviseId: string | undefined;
+					for (const block of ctx.assistantMessage.content) {
+						if (block.type !== "toolCall") continue;
+						if (block.name !== adviseTool.name) return undefined;
+						lastAdviseId = block.id;
+					}
+					if (ctx.toolCall.id === lastAdviseId) advisorAgent.abort(TERMINAL_TOOL_RESULT_ABORT_REASON);
+					return undefined;
 				},
 				telemetry: advisorTelemetry,
 				serviceTier: undefined,
@@ -1303,6 +1366,7 @@ export class SessionAdvisors {
 				recorderClosed: Promise.resolve(),
 				model: advisorModel,
 				thinkingLevel: advisorThinkingLevel,
+				autoThinking: advisorAutoThinking,
 				providerSessionId: advisorProviderSessionId,
 				retryFallbackPendingSuccess: false,
 				usageLimitRetries: 0,
@@ -1501,6 +1565,35 @@ export class SessionAdvisors {
 		advisor.model = model;
 		advisor.thinkingLevel = nextThinkingLevel;
 		return nextThinkingLevel;
+	}
+
+	/**
+	 * The level the primary turn is running at, when the session is on `auto`.
+	 * `undefined` otherwise — an advisor then keeps its configured level.
+	 */
+	#inheritedAutoThinkingLevel(): ThinkingLevel | undefined {
+		if (!this.#host.isAutoThinking()) return undefined;
+		return this.#host.primaryThinkingLevel();
+	}
+
+	/**
+	 * Re-point every `auto` advisor at the level the primary turn resolved to.
+	 *
+	 * Deliberately not {@link #setAdvisorModel}: the model is unchanged, and that
+	 * path invalidates the append-only context, which would throw away the
+	 * advisor's cached prefix on every turn. Only the effort moves here.
+	 */
+	#retuneAutoThinkingAdvisors(): void {
+		const inherited = this.#inheritedAutoThinkingLevel();
+		if (inherited === undefined) return;
+		for (const advisor of this.#advisors) {
+			if (!advisor.autoThinking || advisor.runtime.disposed) continue;
+			const next = resolveThinkingLevelForModel(advisor.model, inherited) ?? ThinkingLevel.Inherit;
+			if (next === advisor.thinkingLevel) continue;
+			advisor.agent.setThinkingLevel(toReasoningEffort(next));
+			advisor.agent.setDisableReasoning(shouldDisableReasoning(next));
+			advisor.thinkingLevel = next;
+		}
 	}
 
 	#canReplayAdvisorHistory(advisor: ActiveAdvisor, model: Model): boolean {

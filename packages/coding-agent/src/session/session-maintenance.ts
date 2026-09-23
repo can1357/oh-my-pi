@@ -639,7 +639,9 @@ export class SessionMaintenance {
 		await this.#host.sessionManager.rewriteEntries();
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
-		this.#host.resetAdvisorRuntimes("prune-tool-outputs");
+		// No advisor reset: the prune elides delivered tool results in place and
+		// the advisor keeps its own copy, so a re-prime would only replay the
+		// whole transcript and rebuild its prompt cache.
 		this.#host.syncTodoPhasesFromBranch();
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
 		return result;
@@ -685,7 +687,7 @@ export class SessionMaintenance {
 		await this.#host.sessionManager.rewriteEntries();
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
-		this.#host.resetAdvisorRuntimes("prune-stale-tool-results");
+		// No advisor reset — same reasoning as `#pruneToolOutputs`.
 		this.#host.syncTodoPhasesFromBranch();
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
 		return result;

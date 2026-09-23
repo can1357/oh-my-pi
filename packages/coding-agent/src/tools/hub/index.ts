@@ -16,13 +16,7 @@
  */
 
 import { type } from "@oh-my-pi/omptype";
-import type {
-	AgentTool,
-	AgentToolContext,
-	AgentToolResult,
-	AgentToolUpdateCallback,
-	ToolApprovalDecision,
-} from "@oh-my-pi/pi-agent-core";
+import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { ToolExample } from "@oh-my-pi/pi-ai";
 
 import { prompt } from "@oh-my-pi/pi-utils";
@@ -45,6 +39,7 @@ import {
 } from "./jobs";
 
 import { executeLaunch } from "./launch";
+import { hubApproval } from "./approval";
 import { type LaunchParams } from "@oh-my-pi/pi-tui/tools/hub";
 import {
 	drainPendingInbox,
@@ -121,32 +116,6 @@ interface MessagingDeps {
 }
 
 const PROGRESS_INTERVAL_MS = 500;
-
-/** Mutating process ops require exec approval; messaging, jobs, and inspection are read-only. */
-function hubApproval(params: unknown): ToolApprovalDecision {
-	if (typeof params !== "object" || params === null || !("op" in params)) return "exec";
-	const op = params.op;
-	switch (op) {
-		case "wait":
-		case "inbox":
-		case "list":
-		case "jobs":
-		case "cancel":
-		case "ps":
-		case "logs":
-		case "describe":
-			return "read";
-		case "send": {
-			// Peer DMs are read-tier; writing to a process stdin is exec-tier.
-			const name = "name" in params ? params.name : undefined;
-			const to = "to" in params ? params.to : undefined;
-			return typeof name === "string" && name.length > 0 && !to ? "exec" : "read";
-		}
-		default:
-			// start / stop / restart and anything unrecognized.
-			return "exec";
-	}
-}
 
 export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 	readonly name = "hub";

@@ -42,9 +42,11 @@ export interface HistoryFormatOptions {
 	 */
 	expandPrimaryContext?: boolean;
 	/**
-	 * Append the full unified diff (from a tool result's `details.diff`) below
+	 * Append the unified diff (from a tool result's `details.diff`) below
 	 * edit/apply_patch tool lines, instead of just the path. The advisor sets
-	 * this so it sees what changed without re-reading the file.
+	 * this so it sees what changed without re-reading the file. Bounded by the
+	 * same per-tool budget as expanded tool IO: a huge diff is middle-truncated
+	 * rather than admitted whole.
 	 */
 	expandEditDiffs?: boolean;
 	/**
@@ -194,19 +196,14 @@ export function formatToolResultErrorPreview(content: string | readonly (TextCon
 }
 
 /**
- * Wrap a diff body in a backtick fence sized to outlast the longest backtick
- * run inside it, so a diff that touches markdown (triple backticks) can't break
- * out of the fence. Info string `diff` for syntax highlighting.
+ * Wrap a body in a backtick fence sized to outlast the longest backtick run
+ * inside it, so content that touches markdown (triple backticks) can't break
+ * out of the fence. `language` is the info string for syntax highlighting.
  */
 function fencedText(text: string, language: string): string {
 	const longest = text.match(/`+/g)?.reduce((max, run) => Math.max(max, run.length), 0) ?? 0;
 	const fence = "`".repeat(Math.max(3, longest + 1));
 	return `${fence}${language}\n${text}\n${fence}`;
-}
-
-/** Wrap a diff in the shared adaptive Markdown fence. */
-function fenceDiff(diff: string): string {
-	return fencedText(diff, "diff");
 }
 
 function boundedToolContext(text: string): string {
@@ -329,7 +326,7 @@ function toolCallLine(
 	if (expandEditDiffs) {
 		const diff = (result?.details as { diff?: unknown } | undefined)?.diff;
 		if (typeof diff === "string" && diff.trim()) {
-			base = `${base}\n${fenceDiff(diff)}`;
+			base = `${base}\n${boundedFencedToolContext(diff, "diff")}`;
 		}
 	}
 

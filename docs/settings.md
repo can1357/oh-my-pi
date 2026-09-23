@@ -420,9 +420,9 @@ See [Models](./models.md) for the `models.yml` schema and custom-provider defini
 
 ### Advisor
 
-The advisor is a second model that reviews each completed turn and can inject advice into the primary session. Assign a model with `modelRoles.advisor`, then enable it with `advisor.enabled`, `/advisor on`, or by launching with the `--advisor` flag.
+The advisor is a second model that reviews every primary agent-loop step by default (see `advisor.reviewOn`) and can inject advice into the primary session. Assign a model with `modelRoles.advisor`, then enable it with `advisor.enabled`, `/advisor on`, or by launching with the `--advisor` flag.
 
-See [Advisor and WATCHDOG.md](./advisor-watchdog.md) for runtime behavior, `WATCHDOG.md` discovery, and bounded catch-up semantics.
+See [Advisor and WATCHDOG.md](./advisor-watchdog.md) for runtime behavior, `WATCHDOG.md` discovery, bounded catch-up semantics, and [review cadence](./advisor-watchdog.md#review-cadence).
 
 | Key                   | Type    | Default | Notes                                                                                                                                                |
 | --------------------- | ------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -431,6 +431,7 @@ See [Advisor and WATCHDOG.md](./advisor-watchdog.md) for runtime behavior, `WATC
 | `advisor.syncBacklog` | enum    | `off`   | Bounded advisor catch-up delay: `off`, `1`, `3`, or `5`. The primary waits up to 30 seconds only while advisor backlog is at or above the threshold. |
 | `advisor.immuneTurns` | number  | `3`     | After a `concern`/`blocker` interrupts, route further concerns/blockers as non-interrupting asides for this many completed primary turns.            |
 | `advisor.maxNotesPerUpdate` | number | `4` | Non-blocker notes accepted per advisor review, from 1–32. Higher-severity notes can replace only pending notes from the same review. `WATCHDOG.yml` top-level or per-advisor values override this default. |
+| `advisor.reviewOn` | enum | `step` | Which agent-loop boundaries trigger a review: `step` (every step), `mutation` (skip mid-turn steps that ran only review-exempt tools), or `turn` (terminal boundary only). The terminal boundary is always reviewed and skipped content is never dropped. |
 
 ### Thinking
 

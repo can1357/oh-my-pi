@@ -2,10 +2,21 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `advisor.reviewOn` setting (`step`, `mutation`, `turn`; default `step`) to control which agent-loop boundaries trigger an advisor review; `mutation` skips mid-turn steps that ran only read-only tools, and the terminal boundary is always reviewed.
+
 ### Changed
 
 - Extensions load faster on warm starts: their dependencies are no longer re-parsed on every launch ([#12908](https://github.com/can1357/oh-my-pi/pull/12908) by [@H4vC](https://github.com/H4vC)).
 - The first highlighted code block, bash preview, or diff no longer stalls the screen while syntax highlighting initializes ([#12908](https://github.com/can1357/oh-my-pi/pull/12908) by [@H4vC](https://github.com/H4vC)).
+
+### Fixed
+
+- Fixed the advisor replaying the whole primary transcript after the primary's per-turn prune blanked delivered tool results in place.
+- Fixed advisor reviews spending an extra model request after a turn whose only tool calls were `advise`.
+- Fixed advisors configured with `auto` thinking falling back to `medium` instead of following the primary turn's resolved effort.
+- Fixed large edit diffs being sent in full in advisor reviews; they are now truncated to the same 8 KiB / 80-line budget as other tool output.
 
 ## [18.2.10] - 2026-09-22
 
