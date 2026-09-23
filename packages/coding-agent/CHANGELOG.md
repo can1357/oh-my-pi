@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added the `advisor.reviewOn` setting (`step`, `mutation`, `turn`; default `step`) to control which agent-loop boundaries trigger an advisor review; `mutation` skips mid-turn steps that ran only read-only tools, and the terminal boundary is always reviewed.
+- Added the `advisor.reviewOn` setting (`step`, `mutation`, `turn`; default `step`) to control which agent-loop boundaries trigger an advisor review; `mutation` skips mid-turn steps that ran only read-only tools, and the terminal boundary is always reviewed ([#12920](https://github.com/can1357/oh-my-pi/pull/12920) by [@alnaggar-dev](https://github.com/alnaggar-dev)).
 
 ### Changed
 
@@ -13,10 +13,10 @@
 
 ### Fixed
 
-- Fixed the advisor replaying the whole primary transcript after the primary's per-turn prune blanked delivered tool results in place.
-- Fixed advisor reviews spending an extra model request after a turn whose only tool calls were `advise`.
-- Fixed advisors configured with `auto` thinking falling back to `medium` instead of following the primary turn's resolved effort.
-- Fixed large edit diffs being sent in full in advisor reviews; they are now truncated to the same 8 KiB / 80-line budget as other tool output.
+- Fixed the advisor replaying the whole primary transcript after the primary's per-turn prune blanked delivered tool results in place ([#12920](https://github.com/can1357/oh-my-pi/pull/12920) by [@alnaggar-dev](https://github.com/alnaggar-dev)).
+- Fixed advisor reviews spending an extra model request after a turn whose only tool calls were `advise` ([#12920](https://github.com/can1357/oh-my-pi/pull/12920) by [@alnaggar-dev](https://github.com/alnaggar-dev)).
+- Fixed advisors configured with `auto` thinking falling back to `medium` instead of following the primary turn's resolved effort ([#12920](https://github.com/can1357/oh-my-pi/pull/12920) by [@alnaggar-dev](https://github.com/alnaggar-dev)).
+- Fixed large edit diffs being sent in full in advisor reviews; they are now truncated to the same 8 KiB / 80-line budget as other tool output ([#12920](https://github.com/can1357/oh-my-pi/pull/12920) by [@alnaggar-dev](https://github.com/alnaggar-dev)).
 
 ## [18.2.10] - 2026-09-22
 
