@@ -21,7 +21,7 @@ export type OAuthCredentials = {
 	orgName?: string;
 	/**
 	 * Epoch ms of the interactive login that minted this grant. Set by
-	 * `AuthStorage.login`; token refreshes preserve it. Providers with an
+	 * `AuthStorage.oauth.login`; token refreshes preserve it. Providers with an
 	 * absolute grant lifetime (Anthropic expires the whole refresh-token
 	 * family ~30 days after authorization regardless of rotation) use it to
 	 * surface re-login deadlines before the grant dies.

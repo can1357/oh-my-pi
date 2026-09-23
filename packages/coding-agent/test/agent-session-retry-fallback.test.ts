@@ -246,14 +246,14 @@ describe("AgentSession retry fallback", () => {
 		tempDir = TempDir.createSync("@pi-retry-fallback-");
 		await initTheme();
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "anthropic-test-key");
-		authStorage.setRuntimeApiKey("openai", "openai-test-key");
-		authStorage.setRuntimeApiKey("fireworks", "fireworks-test-key");
-		authStorage.setRuntimeApiKey("google", "google-test-key");
-		authStorage.setRuntimeApiKey("google-vertex", "google-vertex-test-key");
-		authStorage.setRuntimeApiKey("openrouter", "openrouter-test-key");
-		authStorage.setRuntimeApiKey("devin", "devin-test-key");
-		authStorage.setRuntimeApiKey("openai-codex", "openai-codex-test-key");
+		authStorage.keys.setRuntime("anthropic", "anthropic-test-key");
+		authStorage.keys.setRuntime("openai", "openai-test-key");
+		authStorage.keys.setRuntime("fireworks", "fireworks-test-key");
+		authStorage.keys.setRuntime("google", "google-test-key");
+		authStorage.keys.setRuntime("google-vertex", "google-vertex-test-key");
+		authStorage.keys.setRuntime("openrouter", "openrouter-test-key");
+		authStorage.keys.setRuntime("devin", "devin-test-key");
+		authStorage.keys.setRuntime("openai-codex", "openai-codex-test-key");
 		sharedRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 	});
 
@@ -749,7 +749,7 @@ describe("AgentSession retry fallback", () => {
 			},
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
-		vi.spyOn(modelRegistry.authStorage, "getModelUsageHealth").mockImplementation(async provider =>
+		vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async provider =>
 			provider === primaryModel.provider
 				? {
 						state: "reserve",
@@ -812,23 +812,21 @@ describe("AgentSession retry fallback", () => {
 			},
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
-		const usageHealth = vi
-			.spyOn(modelRegistry.authStorage, "getModelUsageHealth")
-			.mockImplementation(async provider =>
-				provider === primaryModel.provider
-					? {
-							state: "reserve",
-							accounts: [
-								{
-									credentialId: 1,
-									credentialType: "oauth",
-									state: "reserve",
-									remainingFraction: 0.05,
-								},
-							],
-						}
-					: { state: "healthy", accounts: [] },
-			);
+		const usageHealth = vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async provider =>
+			provider === primaryModel.provider
+				? {
+						state: "reserve",
+						accounts: [
+							{
+								credentialId: 1,
+								credentialType: "oauth",
+								state: "reserve",
+								remainingFraction: 0.05,
+							},
+						],
+					}
+				: { state: "healthy", accounts: [] },
+		);
 		const confirmFallback = vi.fn(async () => false);
 		session = new AgentSession({
 			agent,
@@ -869,7 +867,7 @@ describe("AgentSession retry fallback", () => {
 			},
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
-		vi.spyOn(modelRegistry.authStorage, "getModelUsageHealth").mockResolvedValue({
+		vi.spyOn(modelRegistry.authStorage.health, "model").mockResolvedValue({
 			state: "healthy",
 			accounts: [
 				{
@@ -882,9 +880,7 @@ describe("AgentSession retry fallback", () => {
 				{ credentialId: 2, credentialType: "oauth", state: "healthy", remainingFraction: 0.8 },
 			],
 		});
-		const release = vi
-			.spyOn(modelRegistry.authStorage, "releaseSessionCredentialForReselection")
-			.mockReturnValue(true);
+		const release = vi.spyOn(modelRegistry.authStorage.sessions, "release").mockReturnValue(true);
 		const confirmFallback = vi.fn(async () => true);
 		session = new AgentSession({
 			agent,
@@ -923,7 +919,7 @@ describe("AgentSession retry fallback", () => {
 			},
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
-		vi.spyOn(modelRegistry.authStorage, "getModelUsageHealth").mockImplementation(async (_provider, options) =>
+		vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async (_provider, options) =>
 			options.modelId === primaryModel.id
 				? {
 						state: "reserve",
@@ -956,9 +952,7 @@ describe("AgentSession retry fallback", () => {
 						],
 					},
 		);
-		const release = vi
-			.spyOn(modelRegistry.authStorage, "releaseSessionCredentialForReselection")
-			.mockReturnValue(true);
+		const release = vi.spyOn(modelRegistry.authStorage.sessions, "release").mockReturnValue(true);
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
@@ -990,7 +984,7 @@ describe("AgentSession retry fallback", () => {
 			"retry.usageAwareFallback": true,
 		});
 		const probeStarted = Promise.withResolvers<void>();
-		vi.spyOn(modelRegistry.authStorage, "getModelUsageHealth").mockImplementation(async (_provider, options) => {
+		vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async (_provider, options) => {
 			probeStarted.resolve();
 			const aborted = Promise.withResolvers<ModelUsageHealth>();
 			options.signal?.addEventListener(
@@ -1036,7 +1030,7 @@ describe("AgentSession retry fallback", () => {
 			},
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
-		vi.spyOn(modelRegistry.authStorage, "getModelUsageHealth").mockImplementation(async provider =>
+		vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async provider =>
 			provider === primaryModel.provider
 				? {
 						state: "reserve",
@@ -1109,35 +1103,33 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 		let useReserve = false;
-		const usageHealth = vi
-			.spyOn(modelRegistry.authStorage, "getModelUsageHealth")
-			.mockImplementation(async provider =>
-				provider === primaryModel.provider
-					? useReserve
-						? {
-								state: "reserve",
-								accounts: [
-									{
-										credentialId: 1,
-										credentialType: "oauth",
-										state: "reserve",
-										remainingFraction: 0.05,
-									},
-								],
-							}
-						: {
-								state: "healthy",
-								accounts: [
-									{
-										credentialId: 1,
-										credentialType: "oauth",
-										state: "healthy",
-										remainingFraction: 0.8,
-									},
-								],
-							}
-					: { state: "healthy", accounts: [] },
-			);
+		const usageHealth = vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async provider =>
+			provider === primaryModel.provider
+				? useReserve
+					? {
+							state: "reserve",
+							accounts: [
+								{
+									credentialId: 1,
+									credentialType: "oauth",
+									state: "reserve",
+									remainingFraction: 0.05,
+								},
+							],
+						}
+					: {
+							state: "healthy",
+							accounts: [
+								{
+									credentialId: 1,
+									credentialType: "oauth",
+									state: "healthy",
+									remainingFraction: 0.8,
+								},
+							],
+						}
+				: { state: "healthy", accounts: [] },
+		);
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
@@ -1184,7 +1176,7 @@ describe("AgentSession retry fallback", () => {
 			},
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
-		vi.spyOn(modelRegistry.authStorage, "getModelUsageHealth").mockImplementation(async provider =>
+		vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async provider =>
 			provider === primaryModel.provider
 				? {
 						state: "reserve",
@@ -1270,7 +1262,7 @@ describe("AgentSession retry fallback", () => {
 			"retry.usageAwareFallback": true,
 			"retry.usageReservePolicy": "fail-closed",
 		});
-		vi.spyOn(modelRegistry.authStorage, "getModelUsageHealth").mockResolvedValue({
+		vi.spyOn(modelRegistry.authStorage.health, "model").mockResolvedValue({
 			state: "reserve",
 			accounts: [
 				{
@@ -1325,7 +1317,7 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 		let useReserve = false;
-		const usageHealth = vi.spyOn(modelRegistry.authStorage, "getModelUsageHealth").mockImplementation(async () =>
+		const usageHealth = vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async () =>
 			useReserve
 				? {
 						state: "reserve",
@@ -1399,7 +1391,7 @@ describe("AgentSession retry fallback", () => {
 			"retry.usageReservePolicy": "fail-closed",
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
-		const usageHealth = vi.spyOn(modelRegistry.authStorage, "getModelUsageHealth").mockImplementation(async () =>
+		const usageHealth = vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async () =>
 			useReserve
 				? {
 						state: "reserve",
@@ -1474,7 +1466,7 @@ describe("AgentSession retry fallback", () => {
 			"retry.usageReservePolicy": "fail-closed",
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
-		const usageHealth = vi.spyOn(modelRegistry.authStorage, "getModelUsageHealth").mockImplementation(async () =>
+		const usageHealth = vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async () =>
 			useReserve
 				? {
 						state: "reserve",
@@ -1534,7 +1526,7 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 		const usageHealth = vi
-			.spyOn(modelRegistry.authStorage, "getModelUsageHealth")
+			.spyOn(modelRegistry.authStorage.health, "model")
 			.mockImplementation(async (_provider, options) => {
 				usageChecks.push(options.modelId ?? "");
 				const reserve = options.modelId === setupTarget.id;
@@ -1598,7 +1590,7 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 		const usageHealth = vi
-			.spyOn(modelRegistry.authStorage, "getModelUsageHealth")
+			.spyOn(modelRegistry.authStorage.health, "model")
 			.mockImplementation(async (_provider, options) => {
 				usageChecks.push(options.modelId ?? "");
 				if (options.modelId === primaryModel.id) {
@@ -1810,7 +1802,7 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("commit", `${advisorPrimarySelector}:medium`);
 		settings.setModelRole("advisor", advisorRoleSelector);
-		vi.spyOn(modelRegistry.authStorage, "markUsageLimitReached").mockResolvedValue({ switched: false });
+		vi.spyOn(modelRegistry.authStorage.limits, "markReached").mockResolvedValue({ switched: false });
 
 		session = new AgentSession({
 			agent,
@@ -1936,7 +1928,7 @@ describe("AgentSession retry fallback", () => {
 				wrongAnthropicApi,
 				compatible,
 			]);
-			vi.spyOn(modelRegistry.authStorage, "markUsageLimitReached").mockResolvedValue({ switched: false });
+			vi.spyOn(modelRegistry.authStorage.limits, "markReached").mockResolvedValue({ switched: false });
 			session = new AgentSession({
 				agent: new Agent({
 					getApiKey: () => "test-key",
@@ -2011,7 +2003,7 @@ describe("AgentSession retry fallback", () => {
 			});
 			settings.setModelRole("advisor", primarySelector);
 			vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([primary, fallback]);
-			vi.spyOn(modelRegistry.authStorage, "markUsageLimitReached").mockResolvedValue({ switched: false });
+			vi.spyOn(modelRegistry.authStorage.limits, "markReached").mockResolvedValue({ switched: false });
 			session = new AgentSession({
 				agent: new Agent({
 					getApiKey: () => "test-key",
@@ -2266,7 +2258,7 @@ describe("AgentSession retry fallback", () => {
 			"advisor.syncBacklog": "1",
 		});
 		settings.setModelRole("advisor", advisorRoleSelector);
-		vi.spyOn(modelRegistry.authStorage, "markUsageLimitReached").mockResolvedValue({ switched: false });
+		vi.spyOn(modelRegistry.authStorage.limits, "markReached").mockResolvedValue({ switched: false });
 
 		session = new AgentSession({
 			agent,
@@ -2528,7 +2520,7 @@ describe("AgentSession retry fallback", () => {
 		// Rotation always claims a sibling credential is available — the shape
 		// of a multi-account pool where the sibling check passes but every
 		// subsequent request keeps failing on the same capped account.
-		vi.spyOn(modelRegistry.authStorage, "markUsageLimitReached").mockResolvedValue({ switched: true });
+		vi.spyOn(modelRegistry.authStorage.limits, "markReached").mockResolvedValue({ switched: true });
 
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
@@ -2598,7 +2590,7 @@ describe("AgentSession retry fallback", () => {
 		});
 
 		const markUsageLimitSpy = vi
-			.spyOn(modelRegistry.authStorage, "markUsageLimitReached")
+			.spyOn(modelRegistry.authStorage.limits, "markReached")
 			.mockImplementation(async () => {
 				currentKey = "key-B";
 				return { switched: true };
@@ -2676,7 +2668,7 @@ describe("AgentSession retry fallback", () => {
 			// its accumulated call history, so clear it between the parameterized
 			// iterations — each must observe exactly one credential rotation.
 			const markUsageLimitSpy = vi
-				.spyOn(modelRegistry.authStorage, "markUsageLimitReached")
+				.spyOn(modelRegistry.authStorage.limits, "markReached")
 				.mockClear()
 				.mockImplementation(async () => {
 					currentKey = "key-B";
@@ -2748,7 +2740,7 @@ describe("AgentSession retry fallback", () => {
 			},
 		});
 
-		vi.spyOn(modelRegistry.authStorage, "markUsageLimitReached").mockResolvedValue({ switched: false });
+		vi.spyOn(modelRegistry.authStorage.limits, "markReached").mockResolvedValue({ switched: false });
 
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
@@ -5558,7 +5550,7 @@ describe("AgentSession retry fallback", () => {
 			},
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
-		vi.spyOn(modelRegistry.authStorage, "getModelUsageHealth").mockImplementation(async (_provider, options) => {
+		vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async (_provider, options) => {
 			usageChecks.push(options.modelId ?? "");
 			return options.modelId === primaryModel.id
 				? {
@@ -5812,7 +5804,7 @@ describe("AgentSession retry fallback", () => {
 		// window the pre-discovery snapshot carried at startup — the same class as
 		// the GitHub Copilot gpt-5.6-sol split, where the bundled base ships the
 		// full long-context window and discovery caps it to the default tier.
-		authStorage.setRuntimeApiKey("ollama-cloud", "ollama-cloud-test-key");
+		authStorage.keys.setRuntime("ollama-cloud", "ollama-cloud-test-key");
 		const buildTieredModel = (contextWindow: number, input: Model<"ollama-chat">["input"]): Model<"ollama-chat"> =>
 			buildModel({
 				id: "deepseek-v4-tiered",
@@ -6506,7 +6498,7 @@ describe("AgentSession retry fallback", () => {
 			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
-		vi.spyOn(modelRegistry.authStorage, "getModelUsageHealth").mockImplementation(async provider =>
+		vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async provider =>
 			provider === primaryModel.provider
 				? {
 						state: "depleted",

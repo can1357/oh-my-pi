@@ -30,7 +30,7 @@ describe("AgentSession tool-call loop guard", () => {
 	beforeEach(async () => {
 		tempDir = TempDir.createSync("@pi-tool-call-loop-guard-");
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
-		authStorage.setRuntimeApiKey("openai", "openai-test-key");
+		authStorage.keys.setRuntime("openai", "openai-test-key");
 	});
 
 	afterEach(async () => {

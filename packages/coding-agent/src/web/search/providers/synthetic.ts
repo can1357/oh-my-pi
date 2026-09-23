@@ -34,7 +34,7 @@ export function findApiKey(
 	sessionId?: string,
 	signal?: AbortSignal,
 ): Promise<string | undefined> {
-	return authStorage.getApiKey("synthetic", sessionId, { signal });
+	return authStorage.keys.get("synthetic", sessionId, { signal });
 }
 
 /** Call Synthetic search API. */
@@ -71,7 +71,7 @@ async function callSyntheticSearch(
 
 /** Execute Synthetic web search. */
 export async function searchSynthetic(params: SearchParamsWithFetch): Promise<SearchResponse> {
-	const keyOrResolver: ApiKey = params.authStorage.resolver("synthetic", {
+	const keyOrResolver: ApiKey = params.authStorage.keys.resolver("synthetic", {
 		sessionId: params.sessionId,
 	});
 
@@ -117,7 +117,7 @@ export class SyntheticProvider extends SearchProvider {
 	readonly label = "Synthetic";
 
 	isAvailable(authStorage: AuthStorage): boolean {
-		return authStorage.hasAuth("synthetic") || !!getEnvApiKey("synthetic");
+		return authStorage.keys.source("synthetic") !== undefined || !!getEnvApiKey("synthetic");
 	}
 
 	search(params: SearchParamsWithFetch): Promise<SearchResponse> {

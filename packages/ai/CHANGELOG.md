@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- Implemented `SessionAffinity` for persistent, sticky session-to-credential mapping
+- Added persistent rate-limit block tracking with auto-healing and account-specific routing policy support
+- Introduced `KeyCascade` for unified hierarchical authentication resolution
+- Added per-account OAuth routing policies with strict selectors, deterministic priority, and protected quota reserves ([#12243](https://github.com/can1357/oh-my-pi/pull/12243) by [@schickling-assistant](https://github.com/schickling-assistant)).
+
+### Changed
+
+- Refactored `AuthStorage` into namespaced sub-modules (`credentials`, `keys`, `oauth`, `limits`, `health`, `blocks`, `resets`, `usage`)
+- Migrated all internal crypto-hashing to native `Bun` performance primitives
+
 ## [18.2.11] - 2026-09-23
 
 ### Fixed

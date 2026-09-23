@@ -1,4 +1,6 @@
-import type { UsageResetCredit, UsageResetCredits } from "../usage";
+import type { UsageReport, UsageResetCredit, UsageResetCredits } from "../usage";
+import { isUsageLimitReached } from "../auth/usage-report";
+import { claudeRankingStrategy } from "./claude";
 import type { FetchImpl } from "../types";
 import { isRecord } from "../utils";
 import {
@@ -23,6 +25,23 @@ const CLAUDE_RESET_WINDOW_IDS: Readonly<Record<string, string>> = {
 	seven_day_opus: "anthropic:7d:opus",
 	seven_day_sonnet: "anthropic:7d:sonnet",
 };
+
+/** Return the block scopes healed by a partial Claude reset, without mutating stored blocks. */
+export function claudeResetClearedBlockScopes(cleared: readonly string[], report: UsageReport): (string | undefined)[] {
+	const shared = report.limits.filter(limit => limit.scope.shared);
+	if (!["anthropic:5h", "anthropic:7d"].every(id => shared.some(limit => limit.id === id))) return [];
+	const unscoped = report.limits.filter(
+		limit => limit.scope.shared || limit.scope.tier === "opus" || limit.scope.tier === "sonnet",
+	);
+	const scopes = [
+		{ blockScope: undefined, limits: unscoped },
+		...(claudeRankingStrategy.healableBlockScopes?.(report) ?? []),
+	];
+	return scopes
+		.filter(scope => scope.limits.some(limit => cleared.includes(limit.id)))
+		.filter(scope => !isUsageLimitReached(scope.limits.filter(limit => !cleared.includes(limit.id))))
+		.map(scope => scope.blockScope);
+}
 
 /** OAuth credential and transport used for an account's Claude reset operations. */
 export interface ClaudeResetAuth {
