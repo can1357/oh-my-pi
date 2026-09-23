@@ -1,9 +1,9 @@
-import { Container } from "../../tui";
+import { Container, type Component } from "../../tui";
 import { Input } from "../../components/input";
 import { Text } from "../../components/text";
 import { WizardStep } from "../../components/wizard-step";
 import { theme } from "../../theme/theme";
-import type { SetupSceneHost, SetupTab } from "./types";
+import type { SetupSceneHost } from "./types";
 
 const FIELDS = [
 	{ id: "id", label: "Provider ID", prompt: "Provider ID: " },
@@ -12,9 +12,7 @@ const FIELDS = [
 ] as const;
 
 /** Register an OpenAI-compatible endpoint and discover its models. */
-export class CustomProviderTab implements SetupTab {
-	readonly id = "custom";
-	readonly label = "Custom endpoint";
+export class CustomProviderForm implements Component {
 	#host: SetupSceneHost;
 	#inputs = FIELDS.map(field => {
 		const input = new Input();
@@ -26,11 +24,11 @@ export class CustomProviderTab implements SetupTab {
 	#saving = false;
 	#status: string | undefined;
 
-	constructor(host: SetupSceneHost) {
+	constructor(host: SetupSceneHost, onCancel: () => void = () => host.finish("skipped")) {
 		this.#host = host;
 		this.#inputs.forEach((input, index) => {
 			input.onSubmit = value => void this.#submit(index, value);
-			input.onEscape = () => host.finish("skipped");
+			input.onEscape = onCancel;
 		});
 	}
 
@@ -57,7 +55,7 @@ export class CustomProviderTab implements SetupTab {
 			intro,
 			content,
 			status,
-			footer: new Text(theme.fg("dim", "Enter continues · Esc closes provider setup"), 0, 0),
+			footer: new Text(theme.fg("dim", "Enter continues · Esc returns to provider list"), 0, 0),
 		});
 		step.setMaxHeight(maxLines);
 		return step.render(width);
@@ -73,6 +71,7 @@ export class CustomProviderTab implements SetupTab {
 	}
 
 	dispose(): void {
+		for (const input of this.#inputs) input.focused = false;
 		this.#host.restoreFocus();
 	}
 
@@ -115,7 +114,7 @@ export class CustomProviderTab implements SetupTab {
 			this.#status = theme.fg(
 				"error",
 				message.includes("already configured")
-					? `${message} Press Esc to continue to model selection, or enter a different provider ID.`
+					? `${message} Press Esc to return to the provider list, or enter a different provider ID.`
 					: message,
 			);
 		} finally {
@@ -125,6 +124,11 @@ export class CustomProviderTab implements SetupTab {
 	}
 
 	#focusCurrent(): void {
-		this.#host.setFocus(this.#inputs[this.#index]);
+		this.#inputs.forEach((input, index) => {
+			input.focused = index === this.#index;
+		});
+		// Keep keyboard routing at the providers scene so Tab can switch panels
+		// while the form is open; the active input still renders its cursor.
+		this.#host.restoreFocus();
 	}
 }
