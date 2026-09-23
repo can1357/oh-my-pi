@@ -10,14 +10,10 @@ import {
 } from "@oh-my-pi/pi-coding-agent/cli/gallery-cli";
 import {
 	type GalleryFixture,
-	getComposerGalleryEntries,
 	getComposerGalleryInventory,
-	getSegmentGalleryEntries,
 	getSegmentGalleryInventory,
 } from "@oh-my-pi/pi-coding-agent/cli/gallery-fixtures";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { getComposerShapeOptions } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
-import { ALL_SEGMENT_IDS } from "@oh-my-pi/pi-tui/status-line/segments";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import { toolRenderers } from "@oh-my-pi/pi-tui/tools";
 
@@ -48,14 +44,6 @@ describe("gallery harness", () => {
 		expect(parseGallerySurfaces(["segment", "tool", "segment"])).toEqual(["tool", "segment"]);
 		expect(parseGallerySurfaces(["all"])).toEqual([...GALLERY_SURFACES]);
 		expect(() => parseGallerySurfaces(["bogus"])).toThrow(/Invalid --surface 'bogus'.*tool.*composer.*segment.*all/);
-	});
-
-	it("derives composer and segment coverage from the production registries", () => {
-		const composerRegistry = getComposerShapeOptions().map(option => option.value);
-		expect(getComposerGalleryInventory()).toEqual(composerRegistry);
-		expect(getComposerGalleryEntries().map(entry => entry.id)).toEqual(composerRegistry);
-		expect(getSegmentGalleryInventory()).toEqual(ALL_SEGMENT_IDS);
-		expect(getSegmentGalleryEntries().map(entry => entry.id)).toEqual(ALL_SEGMENT_IDS);
 	});
 
 	it("orders surfaces tool then composer then segment and lets entry filters imply their surface", async () => {

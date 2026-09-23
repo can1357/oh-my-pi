@@ -1,7 +1,7 @@
 import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { OAuthAccountIdentity } from "../../session/auth-storage";
-import { collapseSharedUsageReports } from "@oh-my-pi/pi-tui/overlays/usage-display";
+import { collapseSharedUsageReports, summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
 import type { SlashCommandRuntime } from "../types";
 import { reportMatchesActiveAccount } from "./active-oauth-account";
 import { formatCoarseDuration, formatProviderName, renderAsciiBar } from "@oh-my-pi/pi-tui/chrome/format";
@@ -85,34 +85,42 @@ function renderUsageReports(
 			lines.push(`  ${sanitizeText(note.replace(/[\r\n]+/g, " ").replace(/\t/g, "  "))}`);
 		for (const report of providerReports) {
 			const inUse = reportMatchesActiveAccount(report, activeAccount);
-			const savedResets = report.resetCredits?.availableCount ?? 0;
-			if (savedResets > 0) {
-				const resetLabel =
+			const resets = summarizeUsageResetCredits(report.resetCredits, nowMs);
+			if (resets && resets.bankedCount > 0) {
+				const resetIdentity =
 					typeof report.metadata?.email === "string"
 						? report.metadata.email
 						: typeof report.metadata?.accountId === "string"
 							? report.metadata.accountId
 							: "account";
+				const resetOrg =
+					typeof report.metadata?.orgName === "string" && report.metadata.orgName
+						? report.metadata.orgName
+						: typeof report.metadata?.orgId === "string"
+							? report.metadata.orgId
+							: undefined;
+				const rawResetLabel =
+					resetOrg && resetOrg !== resetIdentity ? `${resetIdentity} (${resetOrg})` : resetIdentity;
+				const resetLabel = sanitizeText(rawResetLabel.replace(/[\r\n\t]+/g, " "));
+				const availability =
+					resets.redeemableCount === resets.bankedCount ? "available" : `${resets.redeemableCount} usable now`;
 				lines.push(
-					`- ${resetLabel}: ${savedResets} saved rate-limit reset${savedResets === 1 ? "" : "s"} available — /usage reset to spend`,
+					`- ${resetLabel}: ${resets.bankedCount} saved rate-limit reset${resets.bankedCount === 1 ? "" : "s"} — ${availability} — /usage reset to spend`,
 				);
-				const credits = report.resetCredits?.credits;
-				if (credits) {
-					for (const credit of credits) {
-						if (credit.expiresAt) {
-							const expiryMs = Date.parse(credit.expiresAt);
-							if (!Number.isNaN(expiryMs)) {
-								const remaining = expiryMs - nowMs;
-								if (remaining > 0) {
-									lines.push(
-										`  expires in ${formatCoarseDuration(remaining)} (${credit.expiresAt.slice(0, 10)})`,
-									);
-								} else {
-									lines.push(`  expired (${credit.expiresAt.slice(0, 10)})`);
-								}
-							}
-						}
+				if (resets.soonestExpiry) {
+					const expiryMs = Date.parse(resets.soonestExpiry);
+					const remaining = expiryMs - nowMs;
+					if (remaining > 0) {
+						lines.push(
+							`  soonest expires in ${formatCoarseDuration(remaining)} (${resets.soonestExpiry.slice(0, 10)})`,
+						);
+					} else {
+						lines.push(`  expired (${resets.soonestExpiry.slice(0, 10)})`);
 					}
+				}
+				if (resets.redeemableCount === 0 && resets.unavailableReason) {
+					const reason = sanitizeText(resets.unavailableReason.replace(/[\r\n\t]+/g, " "));
+					lines.push(`  unavailable: ${reason}`);
 				}
 			}
 			if (report.limits.length === 0) {
@@ -164,10 +172,7 @@ export async function buildUsageReportText(runtime: SlashCommandRuntime): Promis
 		if (reports && reports.length > 0) {
 			const currentProvider = runtime.session.model?.provider;
 			const activeAccount = currentProvider
-				? runtime.session.modelRegistry.authStorage.getOAuthAccountIdentity(
-						currentProvider,
-						runtime.session.sessionId,
-					)
+				? runtime.session.modelRegistry.authStorage.oauth.identity(currentProvider, runtime.session.sessionId)
 				: undefined;
 			const usageModelSelectors = provider.getUsageReportingModelSelectors?.(reports) ?? [];
 			return renderUsageReports(

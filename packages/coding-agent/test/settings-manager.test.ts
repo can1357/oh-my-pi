@@ -921,9 +921,9 @@ describe("Settings", () => {
 			await writeSettings({ setupVersion: 1 });
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			const canonicalConfigPath = await fs.promises.realpath(getConfigPath());
-			const rename = fsp.rename.bind(fsp);
+			const rename = fs.promises.rename.bind(fs.promises);
 			let injected = false;
-			vi.spyOn(fsp, "rename").mockImplementation(async (source, target) => {
+			vi.spyOn(fs.promises, "rename").mockImplementation(async (source, target) => {
 				if (!injected && String(source).endsWith(".tmp") && String(target) === canonicalConfigPath) {
 					injected = true;
 					throw new FsCodeError("EPERM", "injected Windows replacement failure");
@@ -2386,12 +2386,12 @@ describe("Settings", () => {
 			expect(settings.get("grep.enabled")).toBe(true);
 		});
 
-		it("keeps find.enabled as the semantic find tool toggle across reloads", async () => {
+		it("migrates a boolean find.enabled to its explicit on/off mode without touching glob", async () => {
 			await writeSettings({ find: { enabled: true }, glob: { enabled: false } });
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("find.enabled")).toBe(true);
+			expect(settings.get("find.enabled")).toBe("on");
 			expect(settings.get("glob.enabled")).toBe(false);
 		});
 

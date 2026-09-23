@@ -273,7 +273,7 @@ describe("pi-native gateway cache controls", () => {
 		registerMockApi();
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-cache-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-		storage.setRuntimeApiKey("openrouter", "test-key");
+		storage.keys.setRuntime("openrouter", "test-key");
 		const mock = createMockModel({ provider: "openrouter", id: "pi-native-cache" });
 		const handle = startAuthGateway({
 			bind: "127.0.0.1:0",
@@ -312,12 +312,55 @@ describe("pi-native gateway cache controls", () => {
 	});
 });
 
+describe("pi-native gateway reasoning flags", () => {
+	it("delivers a forced reasoning-off to the provider stream", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-reasoning-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.keys.setRuntime("openrouter", "test-key");
+		const mock = createMockModel({ provider: "openrouter", id: "pi-native-reasoning" });
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: () => mock,
+			version: "test",
+		});
+
+		try {
+			mock.push({ content: ["ok"] });
+			const response = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({
+					modelId: "pi-native-reasoning",
+					context: baseContext,
+					options: { reasoning: Effort.Medium, forceReasoningOff: true },
+					stream: false,
+				}),
+			});
+
+			expect(response.status).toBe(200);
+			await response.json();
+			expect(mock.calls).toHaveLength(1);
+			// A gateway-routed side turn must be able to force reasoning off, not
+			// only disable it — dropping the flag here silently re-enables thinking.
+			expect(mock.calls[0]?.options).toMatchObject({ reasoning: Effort.Medium, forceReasoningOff: true });
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+			clearCustomApis();
+		}
+	});
+});
+
 describe("pi-native gateway usage attribution", () => {
 	it("records observed usage under the caller's x-omp-* identity, host-fallback when absent", async () => {
 		registerMockApi();
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-usage-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-		storage.setRuntimeApiKey("openrouter", "test-key");
+		storage.keys.setRuntime("openrouter", "test-key");
 		const recorded: Array<{
 			provider: string;
 			model: string;
@@ -325,7 +368,7 @@ describe("pi-native gateway usage attribution", () => {
 			costUsd?: number;
 			client?: { installId: string; hostname?: string; app?: string };
 		}> = [];
-		const spy = vi.spyOn(storage, "recordObservedUsage").mockImplementation(entry => {
+		const spy = vi.spyOn(storage.usage, "observe").mockImplementation(entry => {
 			recorded.push(entry);
 		});
 		const mock = createMockModel({ provider: "openrouter", id: "pi-native-usage" });

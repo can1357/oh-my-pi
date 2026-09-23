@@ -8,7 +8,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
 import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
-import { resolveAgentModelSelection } from "../config/model-resolver";
+import { resolveAgentModelSelection, resolveConfiguredModelPatterns } from "../config/model-resolver";
 import { type ServiceTierInheritSettingValue, validateAgentServiceTierOverrides } from "../config/service-tier";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { LocalProtocolOptions } from "../internal-urls";
@@ -135,9 +135,11 @@ export interface EffectiveSubagentPolicy {
 	agentName: string;
 	agent: AgentDefinition;
 	effectiveAgent: AgentDefinition;
-	modelOverride?: string | string[];
+	modelOverride?: string[];
 	/** Explicit pre-expansion model role alias selected for this run. */
 	modelRole?: string;
+	/** Extension routing note explaining a `before_subagent_spawn` model replacement. */
+	modelRoute?: string;
 	/** Exact-name `task.agentServiceTierOverrides` entry for this agent, applied after model resolution. */
 	serviceTierOverride?: ServiceTierInheritSettingValue;
 	parentActiveModelPattern?: string;
@@ -353,6 +355,42 @@ export async function resolveEffectiveSubagentPolicy(
 	};
 }
 
+/**
+ * Fire `before_subagent_spawn` for an actual child dispatch. Kept out of
+ * {@link resolveEffectiveSubagentPolicy} because frontends run that as a
+ * side-effect-free preflight too; stateful routing handlers must see exactly
+ * one event per spawned child.
+ */
+async function applySpawnHook(
+	request: StructuredSubagentRequest,
+	policy: EffectiveSubagentPolicy,
+): Promise<EffectiveSubagentPolicy> {
+	const emit = request.session.emitBeforeSubagentSpawn;
+	if (!emit) return policy;
+	const spawnKey =
+		request.identity?.id ??
+		request.identity?.label ??
+		(request.parentToolCallId !== undefined ? `${request.parentToolCallId}:${request.index ?? 0}` : undefined);
+	const spawnResult = await emit(
+		{
+			type: "before_subagent_spawn",
+			agent: policy.agentName,
+			invocationKind: request.invocationKind,
+			modelRole: policy.modelRole,
+			patterns: policy.modelOverride ?? [],
+			spawnKey,
+		},
+		request.signal,
+	);
+	if (spawnResult?.block) {
+		throw new StructuredSubagentError("preflight", spawnResult.reason ?? "Subagent spawn blocked by extension.");
+	}
+	if (spawnResult?.model === undefined) return policy;
+	const replacement = resolveConfiguredModelPatterns(spawnResult.model, request.session.settings);
+	if (replacement.length === 0) return policy;
+	return { ...policy, modelOverride: replacement, modelRoute: spawnResult.note };
+}
+
 /** Reserve a session-global agent id only after preflight has succeeded. */
 export async function reserveStructuredSubagentId(
 	session: ToolSession,
@@ -433,6 +471,7 @@ function buildExecutorOptions(
 		acquiredAt: request.acquiredAt,
 		modelOverride: policy.modelOverride,
 		modelRole: policy.modelRole,
+		modelRoute: policy.modelRoute,
 		serviceTierOverride: policy.serviceTierOverride,
 		parentActiveModelPattern: policy.parentActiveModelPattern,
 		thinkingLevel: policy.effectiveAgent.thinkingLevel,
@@ -583,18 +622,32 @@ function attachStructuredOutputMetadata(result: SingleResult, schema: Structured
 		return;
 	}
 	if (result.structuredOutput) return;
+	// The executor attaches metadata for every payload it validated, so a
+	// failed run reaching here never submitted one: the model stream died, the
+	// run was cancelled, or the agent exited without yielding. That is not a
+	// schema verdict — `result.output` is partial prose, not a payload — and
+	// labelling it "invalid" reported provider errors as schema failures with
+	// the half-streamed text as the offending data (production 2026-09-21).
+	if (result.exitCode !== 0) {
+		result.structuredOutput = {
+			source: schema.source,
+			mode: schema.mode,
+			status: "unavailable",
+			...(result.error ? { error: result.error } : {}),
+		};
+		return;
+	}
 	let fallbackData: unknown = result.output;
 	try {
 		fallbackData = JSON.parse(result.output);
 	} catch {}
-	const output: StructuredSubagentOutput = {
+	result.structuredOutput = {
 		source: schema.source,
 		mode: schema.mode,
-		status: result.exitCode === 0 ? "valid" : "invalid",
+		status: "valid",
 		data: fallbackData,
 		...(result.error ? { error: result.error } : {}),
 	};
-	result.structuredOutput = output;
 }
 
 /**
@@ -602,7 +655,7 @@ function attachStructuredOutputMetadata(result: SingleResult, schema: Structured
  * lease or child dispatch; callers keep responsibility for their result text.
  */
 export async function runStructuredSubagent(request: StructuredSubagentRequest): Promise<StructuredSubagentResult> {
-	const policy = await resolveEffectiveSubagentPolicy(request);
+	const policy = await applySpawnHook(request, await resolveEffectiveSubagentPolicy(request));
 	const lease = await leaseArtifacts(request.session, request.invocationKind);
 	let changesApplied: boolean | null = null;
 	let mergeSummary = "";

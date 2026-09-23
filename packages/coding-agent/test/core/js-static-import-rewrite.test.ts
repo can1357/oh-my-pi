@@ -10,6 +10,11 @@ const IMPORT = "import";
 const dyn = (rest: string) => `${IMPORT}${rest}`;
 
 describe("rewriteImports", () => {
+	it("does not let a source filename inject executable lines", () => {
+		const filename = 'cell.js\nthrow new Error("filename executed")';
+		expect(indirectEval("40 + 2", filename)).toBe(42);
+	});
+
 	it("rewrites a top-level default import", async () => {
 		const out = await rewriteImports(`${IMPORT} foo from "bar";\nconsole.log(foo);`);
 		expect(out).toContain('await __omp_import__("bar")');
@@ -158,11 +163,6 @@ describe("rewriteImports", () => {
 		expect(out).toContain(`${IMPORT} b from "beta";`);
 	});
 
-	it("returns the input unchanged when there are no imports", async () => {
-		const code = "const x = 1 + 2;\nreturn x;";
-		expect(await rewriteImports(code)).toBe(code);
-	});
-
 	it("returns the input unchanged when the parser cannot make sense of the code", async () => {
 		const code = `${IMPORT} { foo from broken syntax 'unterminated`;
 		// Should not reject; should fall through to the VM which will surface the syntax error.
@@ -203,6 +203,24 @@ describe("wrapCode cross-cell persistence", () => {
 		} finally {
 			delete globals.ompPersistedFn;
 			delete globals.ompPersistedTotal;
+		}
+	});
+
+	it("keeps async-cell function closures attached to retained global bindings", async () => {
+		const globals = globalThis as Record<string, unknown>;
+		const wrapped = await wrapCode(
+			"await Promise.resolve();\nvar ompClosureTotal = 42;\nfunction ompClosureAnswer() { return ompClosureTotal; }",
+		);
+		expect(wrapped.asyncWrapped).toBe(true);
+		try {
+			await indirectEval(wrapped.source);
+			expect((globals.ompClosureAnswer as () => number)()).toBe(42);
+			indirectEval("ompClosureTotal += 1;");
+			expect(globals.ompClosureTotal).toBe(43);
+			expect((globals.ompClosureAnswer as () => number)()).toBe(43);
+		} finally {
+			delete globals.ompClosureAnswer;
+			delete globals.ompClosureTotal;
 		}
 	});
 

@@ -43,6 +43,7 @@ import { canUseInteractiveBashPty } from "./bash-pty-selection";
 import { expandInternalUrls, type InternalUrlExpansionOptions } from "./bash-skill-urls";
 import { resolveEvalBackends } from "./eval-backends";
 import { invalidateGithubCacheForBashCommand } from "./gh-cache-invalidation";
+import { isFindEnabled } from "./jfind";
 import { formatArtifactErrorNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { resolveInlineByteCapBudget } from "./output-meta";
@@ -514,12 +515,14 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			hasAstEdit: isToolActive("ast_edit", this.session.settings.get("astEdit.enabled")),
 			hasGrep: isToolActive("grep", this.session.settings.get("grep.enabled")),
 			hasGlob: isToolActive("glob", this.session.settings.get("glob.enabled")),
-			hasFind: isToolActive("find", this.session.settings.get("find.enabled")),
+			hasFind: this.session.isToolActive?.("find") ?? isFindEnabled(this.session),
 			hasRead: isToolActive("read", true),
+			// Frozen at the last prompt rebuild (managed sessions). SDK consumers
+			// building a bare ToolSession lack the rebuild lifecycle, so fall back
+			// to the derived form (skillful && skills) instead of dropping the hint.
 			hasSkills:
-				// `skillful: false` removes the system-prompt catalog and must also
-				// strip the provider-side `skill://` hint, matching sdk.ts:3186.
-				this.session.settings.get("skillful") && (this.session.skills?.length ?? 0) > 0,
+				(this.session.skillHintVisible ??
+					(this.session.settings.get("skillful") && (this.session.skills?.length ?? 0) > 0)) === true,
 			hasLaunch: isToolActive("hub", this.session.settings.get("launch.enabled")),
 			hasEval: isToolActive("eval", evalBackends.python || evalBackends.js),
 			hasShellBuiltins: !shellBuiltinsDisabled(this.session.settings),
@@ -999,9 +1002,11 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				ctx?.toolCall?.steeringSignal,
 			);
 			if (waitResult.kind === "completed") {
+				autoBgManager.consumeJobResultWhenSettled(job.jobId);
 				return waitResult.result;
 			}
 			if (waitResult.kind === "failed") {
+				autoBgManager.consumeJobResultWhenSettled(job.jobId);
 				throw waitResult.error;
 			}
 			if (waitResult.kind === "aborted") {

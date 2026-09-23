@@ -37,7 +37,7 @@ describe("AgentSession aside delivery", () => {
 	beforeEach(async () => {
 		tempDir = TempDir.createSync("@pi-aside-delivery-");
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
-		authStorage.setRuntimeApiKey("openai", "openai-test-key");
+		authStorage.keys.setRuntime("openai", "openai-test-key");
 	});
 
 	afterEach(async () => {

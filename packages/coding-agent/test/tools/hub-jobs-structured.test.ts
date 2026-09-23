@@ -95,6 +95,31 @@ describe("hub jobs structured output rendering", () => {
 		expect(text).toContain('"wrong": "shape"');
 	});
 
+	test("a run that failed before yielding reports the provider error, not a schema verdict", async () => {
+		// Production 2026-09-21: the delivery read `Structured output: schema
+		// invalid: Anthropic stream envelope error: ...` with the half-streamed
+		// prose as a JSON preview. No payload existed to judge.
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const error = "Anthropic stream envelope error: stream ended before message_stop";
+		const jobId = registerSettledJob(
+			manager,
+			"DeadStream",
+			'<task-result status="failed (exit 1)">partial</task-result>',
+			{ source: "agent", mode: "permissive", status: "unavailable", error },
+			"DeadStream",
+		);
+		const tool = new HubTool(makeSession(manager));
+
+		const result = await tool.execute("call_4", { op: "wait", ids: [jobId] });
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+
+		expect(text).toContain(`Structured output: unavailable: ${error}`);
+		expect(text).not.toContain("schema invalid");
+		expect(text).not.toContain("schema unavailable");
+		expect(text).not.toContain("full payload at");
+		expect(text).not.toContain("```json");
+	});
+
 	test("advertises the disambiguated agentId, not the collision-suffixed job id", async () => {
 		// A task job can reuse a vibe turn's job id, forcing the manager to
 		// suffix `jobId` (e.g. `Foo` -> `Foo-2`) while the task's artifacts
@@ -110,7 +135,14 @@ describe("hub jobs structured output rendering", () => {
 			"Foo",
 		);
 		expect(jobId).not.toBe("Foo");
+		await manager.getJob(jobId)!.promise;
 		const tool = new HubTool(makeSession(manager));
+		const summary = await tool.execute("summary", { op: "jobs" });
+		const summaryText = summary.content[0]?.type === "text" ? summary.content[0].text : "";
+		expect(summaryText).toContain(`- \`${jobId}\` [task] — completed — Foo — delivery pending — agent://Foo`);
+		expect(summaryText).not.toContain("<task-result>done</task-result>");
+		if (!summary.details || !("jobs" in summary.details)) throw new Error("Expected job summary details");
+		expect(summary.details.jobs?.find(job => job.id === jobId)?.structured).toBeUndefined();
 
 		const result = await tool.execute("call_3", { op: "wait", ids: [jobId] });
 		const text = result.content[0]?.type === "text" ? result.content[0].text : "";

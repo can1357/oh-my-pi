@@ -152,7 +152,7 @@ discovery {
 
 ## Cascade grammar
 
-A cascade document starts with `class` or `provider`. Every selector adds a conjunct to the current rule. `on` scopes by deployment provider; `on-api` scopes by request adapter, including custom provider names. Axis directives may appear directly in any permitted scope, and nested selector blocks may appear alongside them.
+A cascade document starts with `class`, `provider`, or `on-api`. Root `on-api` declares a transport contract independent of model identity and provider name. Every selector adds a conjunct to the current rule. `on` scopes by deployment provider; `on-api` scopes by request adapter, including custom provider names. Axis directives may appear directly in any permitted scope, and nested selector blocks may appear alongside them.
 
 ```kdl
 class "gemini" {
@@ -179,15 +179,15 @@ provider "openrouter" {
 
 ### Selectors and nesting
 
-| Selector   | Form                                     | Matching semantics                                                                                                                                                      |
-| ---------- | ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `class`    | `class "id" { ... }`                     | Exact class ID. At document root it may contain `on`, `on-api`, `family`, `revision`, and `models`. Under `provider` it may contain `family`, `revision`, and `models`. |
-| `provider` | `provider "id" { ... }`                  | Exact provider ID. It is root-only and may contain `class` and `models`.                                                                                                |
-| `on`       | `on "provider-a" "provider-b" { ... }`   | One or more provider IDs, combined as OR. It is allowed only under a root `class`, and may contain `family`, `revision`, and `models`.                                  |
-| `on-api`   | `on-api "adapter-a" "adapter-b" { ... }` | One or more request adapter IDs, combined as OR. It is allowed only under a root `class`, and may contain `family`, `revision`, and `models`.                           |
-| `family`   | `family "id" { ... }`                    | Exact classified family ID. It may contain `revision` and `models`. A target with no family does not match.                                                             |
-| `revision` | `revision ">=2.5 <4" { ... }`            | A non-empty, whitespace-separated conjunction of comparisons. It may contain `models`. A target with no revision does not match.                                        |
-| `models`   | `models "id" "vendor/*" { ... }`         | One or more alternatives, combined as OR. It cannot contain another selector. `token="name"` matches an ASCII-case-insensitive token bounded by non-alphanumerics.      |
+| Selector   | Form                                     | Matching semantics                                                                                                                                                             |
+| ---------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `class`    | `class "id" { ... }`                     | Exact class ID. At document root it may contain `on`, `on-api`, `family`, `revision`, and `models`. Under `provider` it may contain `family`, `revision`, and `models`.        |
+| `provider` | `provider "id" { ... }`                  | Exact provider ID. It is root-only and may contain `class` and `models`.                                                                                                       |
+| `on`       | `on "provider-a" "provider-b" { ... }`   | One or more provider IDs, combined as OR. It is allowed only under a root `class`, and may contain `family`, `revision`, and `models`.                                         |
+| `on-api`   | `on-api "adapter-a" "adapter-b" { ... }` | One or more request adapter IDs, combined as OR. At document root it may contain `class` and `models`; under a root `class` it may contain `family`, `revision`, and `models`. |
+| `family`   | `family "id" { ... }`                    | Exact classified family ID. It may contain `revision` and `models`. A target with no family does not match.                                                                    |
+| `revision` | `revision ">=2.5 <4" { ... }`            | A non-empty, whitespace-separated conjunction of comparisons. It may contain `models`. A target with no revision does not match.                                               |
+| `models`   | `models "id" "vendor/*" { ... }`         | One or more alternatives, combined as OR. It cannot contain another selector. `token="name"` matches an ASCII-case-insensitive token bounded by non-alphanumerics.             |
 
 Class, provider/`on`, `on-api`, and family selector values are compared exactly and case-sensitively to the structured resolve target. Revision operators are `>=`, `>`, `<=`, `<`, and `=`; operands have one to three dot-separated unsigned 8-bit components, omitted components zero.
 
@@ -346,11 +346,15 @@ auth "anthropic" {
     expiry "jwt-or-never"                        // session-JWT expiry policy
     result "api-key"                             // OAuth login persists only credentials.access as a plain API key
     allows-missing-api-key #true
+    org-scoped-identity #true                   // qualify credential/report identity by org (one email can have multiple subscriptions)
+    oauth-token-env "PROVIDER_OAUTH_TOKEN"      // dedicated OAuth bearer env vars, excluding borrowed API-key aliases in provider env
     native-auth-api "bedrock-converse-stream"     // provider transport resolves auth; scan plans pin this API without secrets
     available #false
     show-in-login-list #false
 }
 ```
+
+`org-scoped-identity #true` keeps credentials and usage reports for different organizations separate even when they share an email; absent or `#false` uses ordinary account identity. `oauth-token-env` takes one or more ordered, non-empty env names carrying this provider's own OAuth bearer. When present, availability ignores other provider-env aliases, and usage probes accept only stored OAuth credentials or the first set bearer from that list; absent providers keep the ordinary API-key env behavior.
 
 Login kinds:
 

@@ -481,6 +481,36 @@ fn source_end(normalized: &NormalizedText, offset: usize, fallback: usize) -> us
 		normalized.ends.get(offset - 1).copied().unwrap_or(fallback)
 	}
 }
+
+/// Whether a candidate's selection spans can be applied without corrupting the
+/// rewrite.
+///
+/// Consumers ([`rewrite_selection_spans`], the ambiguity-outcome projector, and
+/// [`rewrite_proves_whole_span`]) assume the spans are ordered,
+/// non-overlapping, distinct-start sub-ranges of `[start, end]`. Garbled `⟪…⟫`
+/// marker glyphs can resolve pairs that overlap or fall outside that range;
+/// splicing such a pair would index `content` (or the mutated
+/// `content[start..end]` buffer) on an out-of-range or mid-char edge and panic
+/// the worker instead of reporting a miss. Rejecting the candidate lets the
+/// miss surface as an [`EditError`].
+fn selection_spans_usable(spans: &[(usize, usize)], start: usize, end: usize) -> bool {
+	let mut ordered: Vec<(usize, usize)> = spans.to_vec();
+	ordered.sort_unstable();
+	let mut cursor = start;
+	let mut previous_start: Option<usize> = None;
+	for (span_start, span_end) in ordered {
+		if span_start < cursor
+			|| span_start > span_end
+			|| span_end > end
+			|| previous_start == Some(span_start)
+		{
+			return false;
+		}
+		previous_start = Some(span_start);
+		cursor = span_end;
+	}
+	true
+}
 fn preceding_literal(tokens: &[PatternToken], boundary: usize) -> Option<usize> {
 	(0..boundary)
 		.rev()
@@ -717,7 +747,14 @@ fn collect_candidates(
 						)
 					})
 					.collect::<Vec<_>>();
-				if selection_spans.iter().any(|(start, end)| start > end) {
+				// Every selection span must be an ordered, non-overlapping,
+				// char-boundary sub-range of the candidate's own [start, end].
+				// Garbled marker glyphs can otherwise resolve overlapping or
+				// out-of-range pairs that later slice `content` (or the
+				// `content[start..end]` rewrite buffer) on a mid-char or
+				// out-of-range edge and panic the worker instead of reporting a
+				// miss.
+				if !selection_spans_usable(&selection_spans, start, end) {
 					return;
 				}
 				let candidate = Candidate {

@@ -78,12 +78,10 @@ describe("Tavily searchTavily request shape (integration)", () => {
 	});
 
 	const fakeAuthStorage = {
-		async getApiKey() {
-			return process.env.TAVILY_API_KEY ?? undefined;
-		},
-		resolver: vi.fn(() => async () => process.env.TAVILY_API_KEY ?? undefined),
-		hasAuth() {
-			return Boolean(process.env.TAVILY_API_KEY);
+		keys: {
+			get: async () => process.env.TAVILY_API_KEY ?? undefined,
+			resolver: vi.fn(() => async () => process.env.TAVILY_API_KEY ?? undefined),
+			source: () => (process.env.TAVILY_API_KEY ? { kind: "env", concrete: true } : undefined),
 		},
 	} as unknown as AuthStorage;
 
