@@ -62,7 +62,7 @@ export function resolveGatewayAccount(
 	sessionId: string,
 	apiKey: string,
 ): string {
-	const identity = storage.getOAuthAccountIdentity(provider, sessionId);
+	const identity = storage.oauth.identity(provider, sessionId);
 	if (identity) {
 		return `oauth:${JSON.stringify([
 			identity.accountId ?? "",
@@ -92,7 +92,7 @@ export async function resolveGatewayApiKey(
 ): Promise<string | GatewayErrorClassification> {
 	let apiKey: string | undefined;
 	try {
-		apiKey = await storage.getApiKey(model.provider, sessionId, { modelId: model.id, signal });
+		apiKey = await storage.keys.get(model.provider, sessionId, { modelId: model.id, signal });
 	} catch (error) {
 		const classified = classifyGatewayError(error);
 		logger.warn("auth-gateway getApiKey threw", { provider: model.provider, peer, error: classified.message });
@@ -113,14 +113,14 @@ export async function resolveGatewayApiKey(
  * `usage_limit_reached`, Anthropic's `usage_limit_reached`, Google's
  * `resource_exhausted`, …). The two cases need different storage actions:
  *
- * - **usage-limit** → {@link AuthStorage.markUsageLimitReached}. Marks just
+ * - **usage-limit** → {@link AuthStorage.limits.markReached}. Marks just
  *   the current session's credential as temporarily blocked (honouring
  *   `retry-after` / `resets_at` hints when present) and returns `true` only
  *   when a sibling credential is still available. Burning the credential
  *   with `invalidateCredentialMatching` here would orphan accounts whose
  *   reset window is several hours away — exactly the bug this helper exists
  *   to avoid.
- * - **auth-failure** → {@link AuthStorage.invalidateCredentialMatching}.
+ * - **auth-failure** → {@link AuthStorage.limits.invalidateMatching}.
  *   Suspect/delete the row so it doesn't get re-picked next request.
  *
  * In both branches we return the next `getApiKey` result (sticky on the
@@ -143,7 +143,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 	const status = extractHttpStatusFromError(error);
 	if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) {
 		const retryAfterMs = extractProviderRetryHint(provider, message);
-		const { switched, retryAtMs } = await storage.markUsageLimitReached(provider, sessionId, {
+		const { switched, retryAtMs } = await storage.limits.markReached(provider, sessionId, {
 			retryAfterMs,
 			providerTimed: retryAfterMs !== undefined,
 			baseUrl: model.baseUrl,
@@ -161,16 +161,16 @@ async function refreshGatewayApiKeyAfterAuthError(
 			error: message,
 		});
 		if (!switched) return undefined;
-		return storage.getApiKey(provider, sessionId, { modelId: model.id, signal });
+		return storage.keys.get(provider, sessionId, { modelId: model.id, signal });
 	}
-	await storage.invalidateCredentialMatching(provider, oldKey, { sessionId, signal });
+	await storage.limits.invalidateMatching(provider, oldKey, { sessionId, signal });
 	logger.debug("auth-gateway retrying provider request after credential invalidation", {
 		format,
 		provider,
 		peer,
 		error: message,
 	});
-	return storage.getApiKey(provider, sessionId, { modelId: model.id, signal });
+	return storage.keys.get(provider, sessionId, { modelId: model.id, signal });
 }
 
 /**
@@ -206,7 +206,7 @@ export function buildGatewayApiKeyResolver(
 			return initialKey;
 		}
 		if (!lastChance) {
-			const refreshed = await storage.getApiKey(model.provider, sessionId, {
+			const refreshed = await storage.keys.get(model.provider, sessionId, {
 				modelId: model.id,
 				signal: sig,
 				forceRefresh: true,
@@ -234,7 +234,7 @@ export function buildGatewayApiKeyResolver(
 
 /**
  * Attribute one settled upstream request to the originating client via the
- * broker's observed-usage channel (`AuthStorage.recordObservedUsage`, batched
+ * broker's observed-usage channel (`AuthStorage.usage.observe`, batched
  * by the remote store). Error/aborted turns still record — the provider
  * billed whatever tokens the partial turn consumed; zero-usage results
  * (pre-flight failures) are skipped. `at` defaults to now.
@@ -247,7 +247,7 @@ export function recordGatewayUsage(
 	at?: number,
 ): void {
 	if (usage.input + usage.output + usage.cacheRead + usage.cacheWrite === 0) return;
-	storage.recordObservedUsage({
+	storage.usage.observe({
 		provider: model.provider,
 		model: model.id,
 		at,

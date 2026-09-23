@@ -90,6 +90,7 @@ export function buildCustomModelOverlay(
 		supportsTools: modelDef.supportsTools,
 		cost: modelDef.cost,
 		contextWindow: modelDef.contextWindow,
+		maxContextWindow: modelDef.maxContextWindow,
 		maxTokens: modelDef.maxTokens,
 		omitMaxOutputTokens: modelDef.omitMaxOutputTokens,
 		preferWebsockets: modelDef.preferWebsockets,

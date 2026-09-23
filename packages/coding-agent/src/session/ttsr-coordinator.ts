@@ -8,15 +8,17 @@ import {
 	type AgentMessage,
 	createToolScopedAbortReason,
 } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ToolCall } from "@oh-my-pi/pi-ai";
-import { isRecord, prompt, relativePathWithinRoot } from "@oh-my-pi/pi-utils";
+import type { AssistantMessage, Judge, ToolCall } from "@oh-my-pi/pi-ai";
+import { logger, prompt, relativePathWithinRoot, withTimeout } from "@oh-my-pi/pi-utils";
 import type { Rule } from "../capability/rule";
 import type { Settings } from "../config/settings";
-import type { TtsrManager, TtsrMatchContext } from "../export/ttsr";
+import { judgeRules, type TtsrManager, type TtsrMatchContext, type TtsrOutput } from "../export/ttsr";
 import ttsrInterruptTemplate from "../prompts/system/ttsr-interrupt.md" with { type: "text" };
 import ttsrToolReminderTemplate from "../prompts/system/ttsr-tool-reminder.md" with { type: "text" };
+import ttsrWarningTemplate from "../prompts/system/ttsr-warning.md" with { type: "text" };
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { SessionManager } from "./session-manager";
+import { TtsrToolInspector } from "./ttsr-outputs";
 
 type TtsrContinueSkipReason =
 	| "aborted"
@@ -24,6 +26,9 @@ type TtsrContinueSkipReason =
 	| "session-unavailable"
 	| "should-continue-false"
 	| "post-restore-unavailable";
+
+/** How long a finishing run waits for in-flight judgments; later verdicts still arrive as asides. */
+const JUDGED_SETTLE_TIMEOUT_MS = 5_000;
 
 interface TtsrContinueOptions {
 	source: string;
@@ -43,12 +48,19 @@ export interface TtsrCoordinatorHost {
 	schedulePostPromptTask(task: (signal: AbortSignal) => Promise<void>, options?: { delayMs?: number }): void;
 	scheduleAgentContinue(options: TtsrContinueOptions): void;
 	promptGeneration(): number;
+	/** Judge for `question` rules, or `undefined` while judged rules are off (`ttsr.judge`). */
+	ruleJudge(): Judge | undefined;
+	/** Delivers a judged-rule warning without interrupting the run. */
+	deliverRuleWarning(content: string, ruleNames: string[]): Promise<void>;
+	/** Changes when the session is replaced; verdicts from an older generation are dropped. */
+	sessionGeneration(): number;
 }
 
 /** Coordinates TTSR stream matching, interruption, injection, and resume gates. */
 export class TtsrCoordinator {
 	readonly #host: TtsrCoordinatorHost;
 	readonly #manager: TtsrManager | undefined;
+	readonly #inspector: TtsrToolInspector;
 	#pendingInjections: Rule[] = [];
 	#perToolInjections = new Map<string, Rule[]>();
 	#deferredReservations = new Map<string, number>();
@@ -60,10 +72,16 @@ export class TtsrCoordinator {
 	/** Rule names already announced per stream key: a delta match re-confirmed
 	 *  at finalization must not emit a second `ttsr_triggered` (#12184). */
 	#emittedTriggerRules = new Map<string, Set<string>>();
+	/** In-flight judged-rule checks, each already guarded against rejection. */
+	#pendingJudgments = new Set<Promise<void>>();
 
 	constructor(host: TtsrCoordinatorHost, manager: TtsrManager | undefined) {
 		this.#host = host;
 		this.#manager = manager;
+		this.#inspector = new TtsrToolInspector(
+			() => host.agent.state.tools,
+			() => host.sessionManager.getCwd(),
+		);
 	}
 
 	/** Configured TTSR manager, when stream rules are enabled. */
@@ -123,11 +141,11 @@ export class TtsrCoordinator {
 			delta = assistantEvent.delta;
 		} else if (assistantEvent.type === "toolcall_delta") {
 			streamingToolCall = this.#getStreamingToolCallBlock(event.message, assistantEvent.contentIndex);
-			matchContext = this.#getToolMatchContext(streamingToolCall, assistantEvent.contentIndex);
+			matchContext = this.#inspector.matchContext(streamingToolCall, assistantEvent.contentIndex);
 			delta = assistantEvent.delta;
 		} else if (assistantEvent.type === "toolcall_end") {
 			streamingToolCall = assistantEvent.toolCall;
-			matchContext = this.#getToolMatchContext(streamingToolCall, assistantEvent.contentIndex);
+			matchContext = this.#inspector.matchContext(streamingToolCall, assistantEvent.contentIndex);
 			delta = "";
 		}
 		if (!matchContext || delta === undefined) return false;
@@ -148,11 +166,28 @@ export class TtsrCoordinator {
 		return false;
 	}
 
-	/** Settles the previous resume gate and queues any deferred injection. */
+	/** Settles the previous resume gate, queues any deferred injection, and starts judged-rule checks. */
 	onAssistantMessageEnd(message: AssistantMessage): void {
 		// Gate on abortPending, not stopReason: unrelated aborts have no TTSR continuation.
 		if (!this.#abortPending) this.resolveResume();
 		this.#queueDeferredInjectionIfNeeded(message);
+		this.#judgeCompletedMessage(message);
+	}
+
+	/**
+	 * Waits (bounded) for in-flight judged-rule checks. The session runs this
+	 * before the agent yields, so warnings about the final output join the run
+	 * as asides instead of reopening an idle session.
+	 */
+	async settleJudgments(): Promise<void> {
+		if (this.#pendingJudgments.size === 0) return;
+		try {
+			await withTimeout(Promise.all(this.#pendingJudgments), JUDGED_SETTLE_TIMEOUT_MS, "judged rules still pending");
+		} catch (error) {
+			logger.debug("TTSR judged rules unsettled at yield", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
 	}
 
 	/** Marks names persisted with a delivered TTSR injection as injected. */
@@ -401,32 +436,63 @@ export class TtsrCoordinator {
 		});
 	}
 
+	/**
+	 * Asks the judge about each completed output of `message` in the background.
+	 * Aborted and failed messages are skipped: their output never took effect.
+	 */
+	#judgeCompletedMessage(message: AssistantMessage): void {
+		if (!this.#manager?.hasJudgedRules() || message.stopReason === "aborted" || message.stopReason === "error") {
+			return;
+		}
+		const generation = this.#host.sessionGeneration();
+		for (const output of this.#inspector.outputs(message)) {
+			const pending: Promise<void> = this.#judgeOutput(output, generation)
+				.catch(error => {
+					logger.warn("TTSR judged rule check failed", {
+						subject: output.subject,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				})
+				.finally(() => this.#pendingJudgments.delete(pending));
+			this.#pendingJudgments.add(pending);
+		}
+	}
+
+	/** One judge request per output: every eligible rule's question shares the billed state. */
+	async #judgeOutput(output: TtsrOutput, generation: number): Promise<void> {
+		const manager = this.#manager;
+		if (!manager) return;
+		const candidates = await manager.judgedCandidates(output.content, output.context);
+		if (candidates.length === 0) return;
+		const judge = this.#host.ruleJudge();
+		if (!judge) return;
+		const flagged = await judgeRules(judge, output, candidates);
+		if (flagged.length === 0 || this.#host.sessionGeneration() !== generation) return;
+		const rules = manager.claim(flagged);
+		if (rules.length === 0) return;
+		this.#host.emitSessionEvent({ type: "ttsr_triggered", rules }).catch(() => {});
+		const warning = rules
+			.map(rule =>
+				prompt.render(ttsrWarningTemplate, {
+					name: rule.name,
+					path: this.#displayRulePath(rule.path),
+					subject: output.subject,
+					content: rule.content,
+				}),
+			)
+			.join("\n\n");
+		await this.#host.deliverRuleWarning(
+			warning,
+			rules.map(rule => rule.name),
+		);
+	}
+
 	#getStreamingToolCallBlock(message: AgentMessage, contentIndex: number): ToolCall | undefined {
 		if (message.role !== "assistant") return undefined;
 		const content = message.content;
 		if (!Array.isArray(content) || contentIndex < 0 || contentIndex >= content.length) return undefined;
 		const block = content[contentIndex];
 		return block && typeof block === "object" && block.type === "toolCall" ? (block as ToolCall) : undefined;
-	}
-
-	#getToolMatchContext(toolCall: ToolCall | undefined, contentIndex: number): TtsrMatchContext {
-		const context: TtsrMatchContext = { source: "tool" };
-		if (!toolCall) return context;
-		context.toolName = toolCall.name;
-		context.streamKey = toolCall.id ? `toolcall:${toolCall.id}` : `tool:${toolCall.name}:${contentIndex}`;
-		context.filePaths = this.#extractToolFilePaths(toolCall);
-		return context;
-	}
-
-	#extractToolFilePaths(toolCall: ToolCall): string[] | undefined {
-		const args = toolCall.arguments ?? {};
-		const tool = this.#resolveTool(toolCall);
-		const toolPaths = tool?.matcherPaths?.(args);
-		if (toolPaths && toolPaths.length > 0) {
-			const normalized = toolPaths.flatMap(filePath => this.#normalizePathCandidates(filePath));
-			if (normalized.length > 0) return Array.from(new Set(normalized));
-		}
-		return this.#extractFilePathsFromArgs(args);
 	}
 
 	#checkStream(
@@ -436,15 +502,17 @@ export class TtsrCoordinator {
 		isFinal = false,
 	): Rule[] {
 		if (!this.#manager) return [];
-		const entries = this.#resolveMatcherEntries(toolCall);
+		const entries = this.#inspector.entries(toolCall);
 		if (entries) {
 			const matches: Rule[] = [];
 			for (const entry of entries) {
-				matches.push(...this.#manager.checkSnapshot(entry.digest, this.#perFileContext(matchContext, entry.path)));
+				matches.push(
+					...this.#manager.checkSnapshot(entry.digest, this.#inspector.perFileContext(matchContext, entry.path)),
+				);
 			}
 			return matches;
 		}
-		const digest = this.#resolveMatcherDigest(toolCall);
+		const digest = this.#inspector.digest(toolCall);
 		if (digest !== undefined) return this.#manager.checkSnapshot(digest, matchContext);
 		// Tools without matcher hooks accumulate raw argument deltas. Providers
 		// that emit toolcall_start -> toolcall_end with no intermediate deltas
@@ -458,48 +526,22 @@ export class TtsrCoordinator {
 		return this.#manager.checkDelta(delta, matchContext);
 	}
 
-	#resolveMatcherDigest(toolCall: ToolCall | undefined): string | undefined {
-		const tool = this.#resolveTool(toolCall);
-		return tool?.matcherDigest?.(toolCall?.arguments ?? {});
-	}
-
-	#resolveMatcherEntries(toolCall: ToolCall | undefined): readonly { path: string; digest: string }[] | undefined {
-		const tool = this.#resolveTool(toolCall);
-		const entries = tool?.matcherEntries?.(toolCall?.arguments ?? {});
-		return entries && entries.length > 0 ? entries : undefined;
-	}
-
-	#resolveTool(toolCall: ToolCall | undefined) {
-		if (!toolCall) return undefined;
-		const tools = this.#host.agent.state.tools;
-		return (
-			tools.find(tool => tool.name === toolCall.name) ??
-			tools.find(tool => tool.customWireName !== undefined && tool.customWireName === toolCall.name)
-		);
-	}
-
-	#perFileContext(base: TtsrMatchContext, filePath: string): TtsrMatchContext {
-		const filePaths = this.#normalizePathCandidates(filePath);
-		return {
-			...base,
-			filePaths: filePaths.length > 0 ? filePaths : [filePath],
-			streamKey: base.streamKey ? `${base.streamKey}#${filePath}` : undefined,
-		};
-	}
-
 	async #checkAstStream(matchContext: TtsrMatchContext, toolCall: ToolCall | undefined): Promise<Rule[]> {
 		if (!this.#manager) return [];
-		const entries = this.#resolveMatcherEntries(toolCall);
+		const entries = this.#inspector.entries(toolCall);
 		if (entries) {
 			const matches: Rule[] = [];
 			for (const entry of entries) {
 				matches.push(
-					...(await this.#manager.checkAstSnapshot(entry.digest, this.#perFileContext(matchContext, entry.path))),
+					...(await this.#manager.checkAstSnapshot(
+						entry.digest,
+						this.#inspector.perFileContext(matchContext, entry.path),
+					)),
 				);
 			}
 			return matches;
 		}
-		const digest = this.#resolveMatcherDigest(toolCall);
+		const digest = this.#inspector.digest(toolCall);
 		return digest === undefined ? [] : this.#manager.checkAstSnapshot(digest, matchContext);
 	}
 
@@ -579,37 +621,5 @@ export class TtsrCoordinator {
 			{ delayMs: 50 },
 		);
 		return true;
-	}
-
-	#extractFilePathsFromArgs(args: unknown): string[] | undefined {
-		if (!isRecord(args)) return undefined;
-		const rawPaths: string[] = [];
-		for (const key in args) {
-			const value = args[key];
-			const normalizedKey = key.toLowerCase();
-			if (typeof value === "string" && (normalizedKey === "path" || normalizedKey.endsWith("path"))) {
-				rawPaths.push(value);
-				continue;
-			}
-			if (Array.isArray(value) && (normalizedKey === "paths" || normalizedKey.endsWith("paths"))) {
-				for (const candidate of value) if (typeof candidate === "string") rawPaths.push(candidate);
-			}
-		}
-		const normalizedPaths = rawPaths.flatMap(filePath => this.#normalizePathCandidates(filePath));
-		return normalizedPaths.length === 0 ? undefined : Array.from(new Set(normalizedPaths));
-	}
-
-	#normalizePathCandidates(rawPath: string): string[] {
-		const trimmed = rawPath.trim();
-		if (trimmed.length === 0) return [];
-		const normalizedInput = trimmed.replaceAll("\\", "/");
-		const candidates = new Set<string>([normalizedInput]);
-		if (normalizedInput.startsWith("./")) candidates.add(normalizedInput.slice(2));
-		const cwd = this.#host.sessionManager.getCwd();
-		const absolutePath = path.isAbsolute(trimmed) ? path.normalize(trimmed) : path.resolve(cwd, trimmed);
-		candidates.add(absolutePath.replaceAll("\\", "/"));
-		const relative = path.relative(cwd, absolutePath).replaceAll("\\", "/");
-		if (relative && relative !== "." && !relative.startsWith("../") && relative !== "..") candidates.add(relative);
-		return Array.from(candidates);
 	}
 }

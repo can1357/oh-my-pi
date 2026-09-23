@@ -24,8 +24,8 @@ let upstreamAudio: Uint8Array<ArrayBuffer>;
 
 beforeEach(async () => {
 	storage = await AuthStorage.create(":memory:");
-	storage.setRuntimeApiKey("deepinfra", "deepinfra-secret");
-	storage.setRuntimeApiKey("xai", "xai-secret");
+	storage.keys.setRuntime("deepinfra", "deepinfra-secret");
+	storage.keys.setRuntime("xai", "xai-secret");
 	calls = [];
 	upstreamAudio = new Uint8Array([1, 3, 3, 7]);
 	const fetchImpl: FetchImpl = async (input, init) => {

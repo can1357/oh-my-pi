@@ -33,7 +33,7 @@ describe.each([false, true])("AgentSession compaction cancellation source (exper
 			new Error("Network access is forbidden in compaction cancellation tests"),
 		);
 		authStorage = await AuthStorage.create(":memory:");
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 	});
 
 	afterEach(async () => {

@@ -687,6 +687,11 @@ export class Settings {
 		return globalInstance;
 	}
 
+	/** Return the initialized or in-flight global settings without starting a writable load. */
+	static get current(): Promise<Settings> | null {
+		return globalInstancePromise;
+	}
+
 	// ─────────────────────────────────────────────────────────────────────────
 	// Core API
 	// ─────────────────────────────────────────────────────────────────────────

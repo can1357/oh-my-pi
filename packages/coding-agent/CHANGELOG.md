@@ -6,10 +6,37 @@
 
 - Explicit CLI model selection now discovers a requested live-only provider when its cache is empty.
 
+### Added
+
+- Added `omp login` command for terminal-based OAuth authentication, including automated model discovery refresh and browser-opening support
+- Enabled `org-scoped-identity` and `oauth-token-env` configuration parsing for authentication providers
+- Adopted namespaced `authStorage` API for CLI and session management
+- Added usage reporting for failed native judgments, including error stop reason and message
+- Added openrouter/~typesafe/jev-latest as a native judge candidate in priority configuration
+- Added `OMP_MCP_STARTUP_TIMEOUT_MS` and `mcp.startupTimeoutMs` to configure the initial MCP discovery window, plus `OMP_MCP_REQUIRE_READY=1` to fail headless print runs before the first turn when a server is unavailable.
+- Added `auth.accountPolicies` for per-account OAuth priority and reserve controls, with matching policy state in `omp usage` ([#12243](https://github.com/can1357/oh-my-pi/pull/12243) by [@schickling-assistant](https://github.com/schickling-assistant)).
+
 ### Changed
 
-- Extensions load faster on warm starts: their dependencies are no longer re-parsed on every launch ([#12908](https://github.com/can1357/oh-my-pi/pull/12908) by [@H4vC](https://github.com/H4vC)).
-- The first highlighted code block, bash preview, or diff no longer stalls the screen while syntax highlighting initializes ([#12908](https://github.com/can1357/oh-my-pi/pull/12908) by [@H4vC](https://github.com/H4vC)).
+- Unified terminal OAuth flow logic across `omp login` and `omp auth-broker login`
+- Included identity account/organization info in terminal login success messages
+- Changed judgment fallback to consider only native candidates, preventing prompted models from replacing failed natives
+
+### Fixed
+
+- Fixed headless print mode (`-p`) silently dropping MCP servers slower than the startup window; print mode now waits for configured servers (bounded by `OMP_MCP_TIMEOUT_MS`) and warns on stderr when one is not ready ([#12188](https://github.com/can1357/oh-my-pi/issues/12188), reported by [@aaronjmars](https://github.com/aaronjmars)).
+
+## [18.2.11] - 2026-09-23
+
+### Fixed
+
+- Fixed nested `eval` Todo updates not being reflected by the Todo tracker, including cases where a cell fails after committing an update.
+- Fixed strict-mode structured-output validation for JSON Schemas without a root `type`, preserving their `items` and `required` keywords.
+- Improved streamed TTSR whole-buffer matching to avoid repeated scans from the beginning of the buffer.
+- Fixed plural browser queries when compiled binaries provide shallow stack traces.
+- Fixed browser `tab.fill` timing out on pages whose animation frames stall.
+- Fixed the first LSP diagnostics request returning no results while a newly started language server is still analyzing.
+- `/shake thinking` now reports the number of tokens freed.
 
 ## [18.2.10] - 2026-09-22
 

@@ -102,7 +102,7 @@ function recordCompletedUsage(
 	job: VideoJob,
 ): void {
 	if (job.status !== "completed" || job.usage === undefined) return;
-	bootOpts.storage.recordObservedUsage({
+	bootOpts.storage.usage.observe({
 		provider: resolved.model.provider,
 		model: resolved.model.id,
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
