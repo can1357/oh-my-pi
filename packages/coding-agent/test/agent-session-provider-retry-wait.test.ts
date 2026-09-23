@@ -234,6 +234,7 @@ describe("createAgentSession provider retry wait visibility", () => {
 		});
 		mockSchedulerWaitWithClock();
 
+		authStorage.keys.setRuntime("anthropic", "sk-ant-test");
 		let regressionSession: AgentSession | undefined;
 		try {
 			const result = await createAgentSession({
@@ -259,7 +260,6 @@ describe("createAgentSession provider retry wait visibility", () => {
 			});
 			const session = result.session;
 			regressionSession = session;
-			session.agent.getApiKey = () => "sk-ant-test";
 			sessions.push(session);
 
 			let mainCalls = 0;
@@ -293,16 +293,20 @@ describe("createAgentSession provider retry wait visibility", () => {
 				return stream;
 			};
 
+			let signalFirstAgentEnd!: () => void;
+			const firstAgentEnded = new Promise<void>(resolve => (signalFirstAgentEnd = resolve));
 			const starts: Extract<AgentSessionEvent, { type: "provider_retry_wait_start" }>[] = [];
 			let signalWait!: () => void;
 			const waitObserved = new Promise<void>(resolve => (signalWait = resolve));
 			session.subscribe(event => {
+				if (event.type === "agent_end") signalFirstAgentEnd();
 				if (event.type !== "provider_retry_wait_start") return;
 				starts.push(event);
 				signalWait();
 			});
 
 			await session.prompt("finish the first turn");
+			await firstAgentEnded;
 			await captureFetchStarted;
 			const activeMain = session.prompt("keep the next real turn active");
 			while (!session.agent.state.isStreaming) await Promise.resolve();
@@ -320,6 +324,7 @@ describe("createAgentSession provider retry wait visibility", () => {
 		} finally {
 			releaseCaptureFetch();
 			await regressionSession?.dispose();
+			authStorage.keys.removeRuntime("anthropic");
 		}
 	});
 });
