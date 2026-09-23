@@ -15,6 +15,7 @@ import { getStreamingPartialJson, setStreamingPartialJson } from "@oh-my-pi/pi-a
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { wrapLeakedThinkingStream } from "@oh-my-pi/pi-ai/utils/leaked-thinking-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { withOfficialAnthropicEndpoint } from "./helpers";
 
 /** Minimal assistant message; `content`/`stopReason` overridden per event. */
 function msg(overrides: Partial<AssistantMessage> = {}): AssistantMessage {
@@ -91,6 +92,8 @@ async function nextToolSnapshot(iterator: AsyncIterator<AssistantMessageEvent>):
 		};
 	}
 }
+
+withOfficialAnthropicEndpoint();
 
 describe("wrapLeakedThinkingStream", () => {
 	async function runLeakedText(chunks: readonly string[]): Promise<{
@@ -184,6 +187,107 @@ describe("wrapLeakedThinkingStream", () => {
 			});
 		}
 	}
+
+	// DeepSeek-R1 / Qwen3-Thinking chat templates prefill `<think>` into the
+	// prompt, so a host that does not split reasoning into its own field streams
+	// `reasoning</think>answer`: the healer sees no opener and the whole chain of
+	// thought used to land in the visible answer with a stray `</think>`.
+	describe("implied-open reasoning (template-prefilled `<think>`)", () => {
+		for (const { name, chunks } of [
+			{ name: "whole chunk", chunks: ["Let me think. 2 plus 2.\n</think>\n\nThe answer is 4."] },
+			{ name: "character stream", chunks: [..."Let me think. 2 plus 2.\n</think>\n\nThe answer is 4."] },
+			{ name: "close split across deltas", chunks: ["Let me think. 2 plus 2.\n</th", "ink>\n\nThe answer is 4."] },
+		]) {
+			it(`re-projects the leading text as a closed thinking block in ${name}`, async () => {
+				const { events, result } = await runLeakedText(chunks);
+				expect(result.content.map(b => b.type)).toEqual(["thinking", "text"]);
+				expect(thinks(result).map(b => b.thinking)).toEqual(["Let me think. 2 plus 2.\n"]);
+				expect(texts(result)).toEqual(["\n\nThe answer is 4."]);
+
+				// Wire contract for event-replaying consumers: the text block at index 0
+				// is closed, then replaced in place by a thinking block carrying the
+				// full reasoning, and the answer opens a fresh text block at index 1.
+				const boundary = events.findIndex(e => e.type === "thinking_start");
+				expect(boundary).toBeGreaterThan(0);
+				const [textEnd, thinkingStart, thinkingDelta, thinkingEnd, answerStart] = events.slice(boundary - 1);
+				expect(textEnd).toMatchObject({ type: "text_end", contentIndex: 0, content: "Let me think. 2 plus 2.\n" });
+				expect(thinkingStart).toMatchObject({ type: "thinking_start", contentIndex: 0 });
+				expect(thinkingStart?.type === "thinking_start" && thinkingStart.partial.content[0]?.type).toBe("thinking");
+				expect(thinkingDelta).toMatchObject({
+					type: "thinking_delta",
+					contentIndex: 0,
+					delta: "Let me think. 2 plus 2.\n",
+				});
+				expect(thinkingEnd).toMatchObject({ type: "thinking_end", contentIndex: 0 });
+				expect(answerStart).toMatchObject({ type: "text_start", contentIndex: 1 });
+			});
+		}
+
+		it("leaves an ordinary answer with no close tag as visible text", async () => {
+			const { result } = await runLeakedText(["The answer ", "is 4."]);
+			expect(result.content.map(b => b.type)).toEqual(["text"]);
+			expect(texts(result)).toEqual(["The answer is 4."]);
+		});
+
+		it("keeps a literal close tag inside inline code as visible text", async () => {
+			const { result } = await runLeakedText(["Qwen ends reasoning with `</think>` on its own line."]);
+			expect(result.content.map(b => b.type)).toEqual(["text"]);
+			expect(texts(result)).toEqual(["Qwen ends reasoning with `</think>` on its own line."]);
+		});
+
+		it("drops a stray close after an explicit reasoning block instead of re-projecting the answer", async () => {
+			const { result } = await runLeakedText(["<think>plan</think>answer</think> more"]);
+			expect(result.content.map(b => b.type)).toEqual(["thinking", "text"]);
+			expect(thinks(result).map(b => b.thinking)).toEqual(["plan"]);
+			expect(texts(result)).toEqual(["answer more"]);
+		});
+
+		it("drops a stray close when a native reasoning field already preceded the text", async () => {
+			const { result } = await runWrapper(inner => {
+				const thinking = { type: "thinking" as const, thinking: "structured reasoning" };
+				inner.push({ type: "start", partial: msg() });
+				inner.push({ type: "thinking_start", contentIndex: 0, partial: msg({ content: [thinking] }) });
+				inner.push({
+					type: "thinking_delta",
+					contentIndex: 0,
+					delta: "structured reasoning",
+					partial: msg({ content: [thinking] }),
+				});
+				inner.push({
+					type: "thinking_end",
+					contentIndex: 0,
+					content: "structured reasoning",
+					partial: msg({ content: [thinking] }),
+				});
+				const text = "answer</think> more";
+				inner.push({
+					type: "text_start",
+					contentIndex: 1,
+					partial: msg({ content: [thinking, { type: "text", text: "" }] }),
+				});
+				inner.push({
+					type: "text_delta",
+					contentIndex: 1,
+					delta: text,
+					partial: msg({ content: [thinking, { type: "text", text }] }),
+				});
+				inner.push({
+					type: "done",
+					reason: "stop",
+					message: msg({ content: [thinking, { type: "text", text }] }),
+				});
+			});
+			expect(result.content.map(b => b.type)).toEqual(["thinking", "text"]);
+			expect(thinks(result).map(b => b.thinking)).toEqual(["structured reasoning"]);
+			expect(texts(result)).toEqual(["answer more"]);
+		});
+
+		it("drops the close of an empty prefilled block without inventing a thinking block", async () => {
+			const { result } = await runLeakedText(["\n</think>\n", "The answer is 4."]);
+			expect(result.content.map(b => b.type)).toEqual(["text"]);
+			expect(texts(result)).toEqual(["\n\nThe answer is 4."]);
+		});
+	});
 
 	it("preserves text, thinking, and tool-call signatures across the split", async () => {
 		const leaked = "before ```thinking\nhmm\n``` after";
@@ -417,6 +521,58 @@ describe("wrapLeakedThinkingStream", () => {
 
 		expect(result.content).toEqual(content);
 		expect(result.content.slice(1, 3)).toEqual(serverBlocks);
+	});
+
+	it("preserves complete Anthropic tool-search history through the custom-endpoint projector", async () => {
+		const firstThinking: ThinkingContent = {
+			type: "thinking",
+			thinking: "find the deferred tool",
+			thinkingSignature: "sig-1",
+		};
+		const serverBlocks: AnthropicServerToolContent[] = [
+			{
+				type: "anthropicServerTool",
+				block: {
+					type: "server_tool_use",
+					id: "srvtoolu_search",
+					name: "tool_search_tool_regex",
+					input: { pattern: "read" },
+				},
+			},
+			{
+				type: "anthropicServerTool",
+				block: {
+					type: "tool_search_tool_result",
+					tool_use_id: "srvtoolu_search",
+					content: {
+						type: "tool_search_tool_search_result",
+						tool_references: [{ type: "tool_reference", tool_name: "_read" }],
+					},
+				},
+			},
+		];
+		const secondThinking: ThinkingContent = {
+			type: "thinking",
+			thinking: "use the discovered tool",
+			thinkingSignature: "sig-2",
+		};
+		const call: ToolCall = {
+			type: "toolCall",
+			id: "toolu_read",
+			name: "_read",
+			arguments: { path: "notes.txt" },
+		};
+		const content: AssistantMessage["content"] = [firstThinking, ...serverBlocks, secondThinking, call];
+		const terminal = msg({ content, stopReason: "toolUse" });
+
+		const { result } = await runWrapper(inner => {
+			inner.push({ type: "start", partial: msg() });
+			inner.push({ type: "toolcall_start", contentIndex: 4, partial: terminal });
+			inner.push({ type: "toolcall_end", contentIndex: 4, toolCall: call, partial: terminal });
+			inner.push({ type: "done", reason: "toolUse", message: terminal });
+		});
+
+		expect(result.content).toEqual(content);
 	});
 
 	it("drops incomplete Anthropic web-search history instead of replaying orphan blocks", async () => {
@@ -659,6 +815,43 @@ describe("leaked thinking healing through stream()", () => {
 		return Object.assign(fn, { preconnect: fetch.preconnect });
 	}
 
+	function anthropicThinkingFetch(): FetchImpl {
+		const body = [
+			sseFrame("message_start", {
+				type: "message_start",
+				message: { id: "msg_thinking_prefix", usage: { input_tokens: 5, output_tokens: 0 } },
+			}),
+			sseFrame("content_block_start", {
+				type: "content_block_start",
+				index: 0,
+				content_block: { type: "thinking", thinking: "Summary prefix" },
+			}),
+			sseFrame("content_block_delta", {
+				type: "content_block_delta",
+				index: 0,
+				delta: { type: "thinking_delta", thinking: " summary tail" },
+			}),
+			sseFrame("content_block_delta", {
+				type: "content_block_delta",
+				index: 0,
+				delta: { type: "signature_delta", signature: "sig_thinking" },
+			}),
+			sseFrame("content_block_stop", { type: "content_block_stop", index: 0 }),
+			sseFrame("message_delta", {
+				type: "message_delta",
+				delta: { stop_reason: "end_turn" },
+				usage: { input_tokens: 5, output_tokens: 4 },
+			}),
+			sseFrame("message_stop", { type: "message_stop" }),
+		].join("");
+		const fn = async (_input: string | URL | Request, _init?: RequestInit): Promise<Response> =>
+			new Response(body, {
+				status: 200,
+				headers: { "content-type": "text/event-stream", "request-id": "req_thinking_prefix" },
+			});
+		return Object.assign(fn, { preconnect: fetch.preconnect });
+	}
+
 	function anthropicModel(overrides: Partial<Model<"anthropic-messages">> = {}): Model<"anthropic-messages"> {
 		return buildModel({
 			id: "claude-sonnet-4-5",
@@ -677,6 +870,53 @@ describe("leaked thinking healing through stream()", () => {
 
 	const leaked = "```thinking\nDeliberate.\n```\nFinal answer.";
 	const context: Context = { messages: [{ role: "user", content: "hi", timestamp: Date.now() }] };
+
+	/** OpenAI-compatible SSE whose `content` deltas carry the given strings, then `[DONE]`. */
+	function completionsContentFetch(deltas: readonly string[]): FetchImpl {
+		const chunk = (delta: Record<string, unknown>, finish: string | null = null): string =>
+			`data: ${JSON.stringify({
+				id: "chatcmpl-prefill",
+				object: "chat.completion.chunk",
+				created: 0,
+				model: "qwen3-thinking",
+				choices: [{ index: 0, delta, finish_reason: finish }],
+			})}\n\n`;
+		const body = [
+			chunk({ role: "assistant", content: "" }),
+			...deltas.map(content => chunk({ content })),
+			chunk({}, "stop"),
+			"data: [DONE]\n\n",
+		].join("");
+		const fn = async (_input: string | URL | Request, _init?: RequestInit): Promise<Response> =>
+			new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+		return Object.assign(fn, { preconnect: fetch.preconnect });
+	}
+
+	// A local host serving a template that prefills `<think>` (DeepSeek-R1,
+	// Qwen3-Thinking) without splitting reasoning into a field streams the chain
+	// of thought inline, terminated only by `</think>`. Issue #10571's shape.
+	it("recovers template-prefilled reasoning from a local openai-completions host", async () => {
+		const model = buildModel({
+			id: "qwen3-thinking",
+			name: "Qwen3 Thinking",
+			api: "openai-completions",
+			provider: "localai",
+			baseUrl: "http://localhost:8080/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 32_000,
+			maxTokens: 8_192,
+		});
+		const result = await stream(model, context, {
+			apiKey: "test",
+			fetch: completionsContentFetch(["Let me think.", " 2 plus 2.\n</th", "ink>\n\nThe answer is 4."]),
+		}).result();
+
+		expect(result.content.map(b => b.type)).toEqual(["thinking", "text"]);
+		expect(thinks(result).map(b => b.thinking)).toEqual(["Let me think. 2 plus 2.\n"]);
+		expect(texts(result).join("").trim()).toBe("The answer is 4.");
+	});
 
 	it("leaves a leaked fence intact for the official Anthropic API", async () => {
 		// Official first-party endpoints return structured thinking and are exempt
@@ -709,6 +949,25 @@ describe("leaked thinking healing through stream()", () => {
 			.join("");
 		expect(thinking).toContain("Deliberate.");
 		expect(texts(result).join("").trim()).toBe("Final answer.");
+	});
+
+	it("preserves thinking bytes from content_block_start through a non-official endpoint", async () => {
+		const result = await stream(
+			anthropicModel({ provider: "zai", baseUrl: "https://api.z.ai/api/anthropic" }),
+			context,
+			{
+				apiKey: "test",
+				fetch: anthropicThinkingFetch(),
+			},
+		).result();
+
+		expect(thinks(result)).toEqual([
+			{
+				type: "thinking",
+				thinking: "Summary prefix summary tail",
+				thinkingSignature: "sig_thinking",
+			},
+		]);
 	});
 
 	it("replays native web-search history on a custom Anthropic continuation", async () => {

@@ -130,8 +130,8 @@ describe("AgentSession eager prelude re-injection after compaction", () => {
 	beforeAll(async () => {
 		sharedDir = TempDir.createSync("@pi-agent-session-eager-compaction-shared-");
 		sharedAuthStorage = await AuthStorage.create(path.join(sharedDir.path(), "auth.db"));
-		sharedAuthStorage.setRuntimeApiKey("anthropic", "test-key");
-		sharedAuthStorage.setRuntimeApiKey("openai-codex", "test-key");
+		sharedAuthStorage.keys.setRuntime("anthropic", "test-key");
+		sharedAuthStorage.keys.setRuntime("openai-codex", "test-key");
 		sharedModelRegistry = new ModelRegistry(sharedAuthStorage, path.join(sharedDir.path(), "models.yml"));
 	});
 
@@ -172,8 +172,11 @@ describe("AgentSession eager prelude re-injection after compaction", () => {
 		const modelRegistry = sharedModelRegistry;
 		const settings = Settings.isolated({
 			"compaction.enabled": true,
+			// These suites assert the blocking threshold pass itself; keep the
+			// speculation grace band from deferring it.
+			"compaction.asyncEnabled": false,
 			"compaction.autoContinue": true,
-			"compaction.strategy": "context-full",
+			"compaction.methodOrder": ["soft"],
 			"task.eager": "always",
 			"todo.enabled": false,
 			"todo.eager": "default",
@@ -209,7 +212,6 @@ describe("AgentSession eager prelude re-injection after compaction", () => {
 			? [todoTool as unknown as AgentTool, mockTaskTool, mockBashTool]
 			: [mockTaskTool, mockBashTool];
 
-		let session: AgentSession;
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: ["Test"], tools, messages: [] },
@@ -245,7 +247,7 @@ describe("AgentSession eager prelude re-injection after compaction", () => {
 		]);
 		if (todoTool) toolRegistry.set(todoTool.name, todoTool as unknown as AgentTool);
 
-		session = new AgentSession({
+		const session = new AgentSession({
 			agent,
 			sessionManager,
 			settings,

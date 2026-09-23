@@ -25,23 +25,19 @@
  * `read xd://<tool>` remains for on-demand re-fetch.
  *
  * Rendering: the write renderer draws NOTHING until the streamed `path` is
- * known and provably does not target `xd://`; device writes then delegate to
- * the wrapped tool's own renderer with the decoded inner args.
+ * known and provably does not target `xd://`. Device writes then show as
+ * queued/planning until `tool_execution_start`, and only then delegate to the
+ * wrapped tool's own renderer with the decoded inner args.
  */
 import type { AgentToolContext, AgentToolResult, AgentToolUpdateCallback, ToolLoadMode } from "@oh-my-pi/pi-agent-core";
 import { type Tool as AiTool, jsonSchemaToTypeScript, toolWireSchema, validateToolArguments } from "@oh-my-pi/pi-ai";
-import { type Component, Container, Text } from "@oh-my-pi/pi-tui";
-import { parseStreamingJson } from "@oh-my-pi/pi-utils";
-import type { RenderResultOptions } from "../extensibility/custom-tools/types";
-import { XD_URL_PREFIX } from "../internal-urls/xd-protocol";
-import type { Theme } from "../modes/theme/theme";
-import { truncateHeadBytes } from "../session/streaming-output";
+import { schemaDeclaresIntentField } from "../utils/tool-schema";
+import { stripXdUrlPrefix, XD_URL_PREFIX } from "@oh-my-pi/pi-tui/tools/xd-url";
+import { truncateHeadBytes } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { resolveToolTier, type ToolTier } from "./approval";
-import { renderDefaultToolExecution } from "./default-renderer";
 import type { Tool } from "./index";
-import { replaceTabs } from "./render-utils";
-import type { ToolRenderer } from "./renderers";
-import { renderError, ToolAbortError, ToolError } from "./tool-errors";
+import { renderError, ToolAbortError } from "./tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 /**
  * Discoverable built-ins that must stay top-level even when xdev mounting is
@@ -49,11 +45,13 @@ import { renderError, ToolAbortError, ToolError } from "./tool-errors";
  * model's user-interaction affordance, `grep` is the redirect target of the
  * bash interceptor rules, and `web_search` is invoked directly by most models
  * (which have no notion of the `xd://` protocol) so hiding it behind dispatch
- * makes it unreachable in practice (issue #5973) — each loses its harness
+ * makes it unreachable in practice (issue #5973). `yield` terminates structured
+ * subagent runs and must stay directly callable — each loses its harness
  * integration or usability if hidden behind dispatch.
  */
 export const XDEV_KEEP_TOP_LEVEL: Record<string, true> = {
 	todo: true,
+	yield: true,
 	ask: true,
 	grep: true,
 	web_search: true,
@@ -98,25 +96,6 @@ export interface XdevDispatch {
 	tier?: ToolTier;
 	/** Details object returned by the wrapped tool, when executed. */
 	inner?: unknown;
-}
-
-/**
- * Renderer lookup injected by `renderers.ts` at module init. Kept as a setter
- * to avoid the xdev → renderers → tool modules → sdk → tools/index → xdev
- * import cycle.
- */
-let rendererLookup: ((name: string) => ToolRenderer | undefined) | undefined;
-
-/** Wire the wrapped-renderer lookup. Called once by `renderers.ts`. */
-export function setXdevRendererLookup(lookup: (name: string) => ToolRenderer | undefined): void {
-	rendererLookup = lookup;
-}
-
-/** Whether a wire JSON schema declares a top-level `i` (intent) property. */
-function schemaDeclaresIntentField(schema: unknown): boolean {
-	if (!schema || typeof schema !== "object" || !("properties" in schema)) return false;
-	const props = schema.properties;
-	return !!props && typeof props === "object" && "i" in props;
 }
 
 function renderDocs(inst: Tool, heading = "#", descriptionCap?: number): string {
@@ -229,15 +208,6 @@ function compileInlineGlobs(patterns: readonly string[]): Bun.Glob[] {
 	return globs;
 }
 
-/** Decode the (possibly partially streamed) inner args JSON string into display args. */
-function decodeInnerArgs(raw: unknown): Record<string, unknown> {
-	if (typeof raw !== "string" || raw.length === 0) return {};
-	const parsed = parseStreamingJson<Record<string, unknown>>(raw);
-	const args: Record<string, unknown> = parsed && typeof parsed === "object" ? { ...parsed } : {};
-	args.__partialJson = raw;
-	return args;
-}
-
 /** Device-write content that requests docs instead of executing: empty, `?`, or `help`. */
 const HELP_CONTENT_RE = /^\s*(\?|help)?\s*$/i;
 
@@ -268,16 +238,30 @@ export function resolveXdevTool(state: XdevState, name: string): Tool | undefine
 	return state.tools.get(name);
 }
 
-/** Resolve a mounted tool for top-level fallback execution. */
+/**
+ * Resolve a mounted tool by name. Presentation-only: `xd://` docs and renderer
+ * lookup ask for names they already hold in canonical form.
+ */
 export function resolveMountedXdevTool(state: XdevState, name: string): Tool | undefined {
-	return state.mountedNames.has(name) ? state.tools.get(name) : undefined;
+	const canonicalName = stripXdUrlPrefix(name);
+	return state.mountedNames.has(canonicalName) ? state.tools.get(canonicalName) : undefined;
 }
 
-/** Resolve a mounted tool with its execution-only permission decorator. */
+/**
+ * Resolve a mounted tool with its execution-only permission decorator.
+ *
+ * Mounted-only, matching {@link resolveMountedXdevTool}, and a published export
+ * under `@oh-my-pi/pi-coding-agent/tools/xdev`, so its semantics must not
+ * drift. `sdk.ts` composes this with the calling agent's advertised tools to
+ * recover a Claude Code-spelled MCP name: the union has to be resolved in one
+ * pass for the ambiguity rule to hold, so that composition lives with the
+ * caller that knows both presentation sets rather than here.
+ */
 export function resolveMountedXdevExecutable(state: XdevState, name: string): Tool | undefined {
 	const tool = resolveMountedXdevTool(state, name);
 	return tool && state.decorateExecution ? state.decorateExecution(tool) : tool;
 }
+
 /** Mounted tools in presentation order, resolved from the canonical map. */
 export function listXdevTools(state: XdevState): Tool[] {
 	return [...state.mountedNames].flatMap(name => {
@@ -470,91 +454,4 @@ export async function dispatchXdevTool(
 			xdev,
 		};
 	}
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Render delegation (consumed by the write renderer)
-// ═══════════════════════════════════════════════════════════════════════════
-
-/** Renderer for a mounted device: the live mounted tool's own render callbacks
- *  (custom/MCP/image tools carry them) first, then the static built-in renderer
- *  map keyed by name. */
-function resolveDeviceRenderer(
-	name: string,
-	mounted: Tool | undefined,
-): Pick<ToolRenderer, "renderCall" | "renderResult" | "mergeCallAndResult"> | undefined {
-	if (mounted && (mounted.renderCall || mounted.renderResult)) {
-		// A mounted AgentTool exposes the same renderCall/renderResult/mergeCallAndResult
-		// surface as a static ToolRenderer; only the parameter generics differ, so unify
-		// through a single cast rather than fabricating a per-field shape.
-		return mounted as unknown as Pick<ToolRenderer, "renderCall" | "renderResult" | "mergeCallAndResult">;
-	}
-	return rendererLookup?.(name);
-}
-
-/**
- * Streaming-safe call preview for an `xd://` write: forwards the decoded inner
- * args to the mounted tool's renderer (session instance first, then the static
- * map). Returns `undefined` (render nothing) when no renderer produces output.
- */
-export function renderXdevCall(
-	name: string,
-	content: unknown,
-	options: RenderResultOptions,
-	theme: Theme,
-	resolveMounted?: (name: string) => Tool | undefined,
-): Component | undefined {
-	const mounted = resolveMounted?.(name);
-	const renderer = resolveDeviceRenderer(name, mounted);
-	const args = decodeInnerArgs(content);
-	if (renderer?.renderCall) {
-		return renderer.renderCall(args, options, theme);
-	}
-	return renderDefaultToolExecution({ label: mounted?.label ?? name, args, options }, theme);
-}
-
-/** Forward an `xd://` dispatch result to the mounted tool's renderer. */
-export function renderXdevResult(
-	dispatch: XdevDispatch,
-	result: { content: Array<{ type: string; text?: string }>; isError?: boolean },
-	options: RenderResultOptions,
-	theme: Theme,
-	resolveMounted?: (name: string) => Tool | undefined,
-): Component | undefined {
-	const text = result.content
-		.map(block => (block.type === "text" ? block.text : ""))
-		.filter(Boolean)
-		.join("\n");
-	if (dispatch.mode === "help") {
-		return text ? new Text(theme.fg("toolOutput", replaceTabs(text)), 0, 0) : undefined;
-	}
-	const mounted = resolveMounted?.(dispatch.tool);
-	const renderer = resolveDeviceRenderer(dispatch.tool, mounted);
-	const innerResult = { content: result.content, details: dispatch.inner, isError: result.isError };
-	if (renderer?.renderResult) {
-		const parts: Component[] = [];
-		// Emulate the unmerged call+result topology inside the write block for
-		// renderers that expect a separate call header.
-		if (!renderer.mergeCallAndResult && renderer.renderCall) {
-			const call = renderer.renderCall(dispatch.args ?? {}, { ...options, isPartial: false }, theme);
-			if (call) parts.push(call);
-		}
-		const rendered = renderer.renderResult(innerResult, options, theme, dispatch.args ?? {});
-		if (rendered) parts.push(rendered);
-		if (parts.length === 1) return parts[0];
-		if (parts.length > 1) {
-			const box = new Container();
-			for (const part of parts) box.addChild(part);
-			return box;
-		}
-	}
-	return renderDefaultToolExecution(
-		{
-			label: mounted?.label ?? dispatch.tool,
-			args: dispatch.args ?? {},
-			result: { output: text, isError: result.isError },
-			options,
-		},
-		theme,
-	);
 }

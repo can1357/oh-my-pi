@@ -7,14 +7,18 @@ import {
 	sanitizeManagedDescription,
 } from "../autolearn/managed-skills";
 import { skillCapability } from "../capability/skill";
-import type { SourceMeta } from "../capability/types";
+import type { EffectiveExtensionRoots, SourceMeta } from "../capability/types";
 import type { SkillsSettings } from "../config/settings";
-import { type Skill as CapabilitySkill, loadCapability } from "../discovery";
+import { type Skill as CapabilitySkill, isUserSourceEnabled, loadCapability } from "../discovery";
 import { compareSkillOrder, scanSkillsFromDir } from "../discovery/helpers";
+import { allowsSkillTokens, SKILL_TOKEN_RE } from "@oh-my-pi/pi-tui/prompt/skill-tokens";
 import autoloadTemplate from "../prompts/skills/autoload.md" with { type: "text" };
 import userInvocationTemplate from "../prompts/skills/user-invocation.md" with { type: "text" };
 import type { SkillPromptDetails } from "../session/messages";
 import { expandTilde } from "../tools/path-utils";
+
+export { allowsSkillTokens, SKILL_TOKEN_RE };
+
 export interface Skill {
 	name: string;
 	description: string;
@@ -120,6 +124,12 @@ export async function loadSkillsFromDir(options: LoadSkillsFromDirOptions): Prom
 export interface LoadSkillsOptions extends SkillsSettings {
 	/** Working directory for project-local skills. Default: getProjectDir() */
 	cwd?: string;
+	/**
+	 * Session-local extension roots. Post-startup reloads pass their live
+	 * session value so explicit roots, discovery mode, and configured
+	 * extensions all survive outside the construction-time invocation scope.
+	 */
+	extensionRoots?: EffectiveExtensionRoots;
 }
 
 /**
@@ -130,8 +140,8 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 	const {
 		cwd = getProjectDir(),
 		enabled = true,
-		enableCodexUser = true,
-		enableClaudeUser = true,
+		enableCodexUser = false,
+		enableClaudeUser = false,
 		enableClaudeProject = true,
 		enablePiUser = true,
 		enablePiProject = true,
@@ -141,41 +151,43 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		ignoredSkills = [],
 		includeSkills = [],
 		disabledExtensions = [],
+		extensionRoots,
 	} = options;
 
 	// Early return if skills are disabled
 	if (!enabled) {
 		return { skills: [], warnings: [] };
 	}
-	// Fall-through gate for third-party CLI providers (claude-plugins, opencode,
-	// gemini, github, ...) that share user intent with the named third-party
-	// source toggles but don't have a dedicated control of their own. Only the
-	// third-party toggles count here: the OMP-native providers (`agents`,
-	// `native`) get explicit branches in `isSourceEnabled` below, so folding
-	// them into the fallback would re-enable unrelated third-party CLIs whenever
-	// the user kept the default `.agent[s]/skills` toggles on while turning off
-	// Codex/Claude/Pi (issue #2401 / PR #2405 review).
-	const anyThirdPartySkillToggleEnabled =
-		enableCodexUser || enableClaudeUser || enableClaudeProject || enablePiUser || enablePiProject;
-
 	function isSourceEnabled(source: SourceMeta): boolean {
 		const { provider, level } = source;
 		// Managed skills (auto-learn) are OMP-native and discovered unconditionally
 		// — third-party CLI toggles must never silently hide them (cf. #2401). The
 		// master `enabled` flag above still gates them.
 		if (provider === MANAGED_SKILLS_PROVIDER_ID) return true;
-		if (provider === "codex" && level === "user") return enableCodexUser;
-		if (provider === "claude" && level === "user") return enableClaudeUser;
+		if (provider === "codex" && level === "user") return enableCodexUser || isUserSourceEnabled("codex");
+		if (provider === "claude" && level === "user") return enableClaudeUser || isUserSourceEnabled("claude");
 		if (provider === "claude" && level === "project") return enableClaudeProject;
 		if (provider === "native" && level === "user") return enablePiUser;
 		if (provider === "native" && level === "project") return enablePiProject;
 		if (provider === "agents" && level === "user") return enableAgentsUser;
 		if (provider === "agents" && level === "project") return enableAgentsProject;
-		return anyThirdPartySkillToggleEnabled;
+		// User-scope claude-plugins skills carry the root's origin (#10743). omp's
+		// own installs (`omp` registry, `--plugin-dir`) are not the foreign
+		// ~/.claude/plugins tree, so the foreign opt-in gate applies only to
+		// claude-origin roots — parity with allowedRoots() in
+		// discovery/claude-plugins.ts. Without this, #10666's root-level fix is
+		// re-dropped here for every user-level claude-plugins skill.
+		if (provider === "claude-plugins" && source.origin !== undefined && source.origin !== "claude") return true;
+		if (level === "user") return isUserSourceEnabled(provider);
+		return true;
 	}
 
 	// Use capability API to load all skills
-	const result = await loadCapability<CapabilitySkill>(skillCapability.id, { cwd, disabledExtensions });
+	const result = await loadCapability<CapabilitySkill>(skillCapability.id, {
+		cwd,
+		disabledExtensions,
+		extensionRoots,
+	});
 
 	const skillMap = new Map<string, Skill>();
 	const realPathSet = new Set<string>();
@@ -420,9 +432,9 @@ export interface ParsedSkillInvocation {
 	name: string;
 	/** User-supplied arguments (everything outside the `/skill:<name>` token). */
 	args: string;
+	/** The draft as submitted (trimmed), token in place — drives the transcript layout. */
+	prompt: string;
 }
-
-const MID_PROMPT_SKILL_RE = /(^|\s)\/skill:([^\s/]+)(\s|$)/;
 
 /**
  * Detect a `/skill:<name>` invocation in a user draft.
@@ -433,69 +445,48 @@ const MID_PROMPT_SKILL_RE = /(^|\s)\/skill:([^\s/]+)(\s|$)/;
  *     args=`fix the bug focus on auth` — the surrounding prose collapsed
  *     into a single args string.
  *
- * Mid-prompt detection is disabled when the draft itself starts with a
- * different slash command (e.g. `/compact /skill:foo`) or a local-execution
- * sigil — `!cmd` / `!!cmd` for the bash tool and `$ cmd` / `$$ cmd` for the
- * python tool. Those handlers run after the skill-command dispatcher and
- * their bodies routinely contain `/skill:<name>` references that are not
- * meant as skill invocations.
+ * Mid-prompt detection is gated by {@link allowsSkillTokens}.
  */
 export function parseSkillInvocation(text: string): ParsedSkillInvocation | undefined {
 	const trimmedStart = text.trimStart();
+	const prompt = trimmedStart.trimEnd();
 	if (trimmedStart.startsWith("/skill:")) {
-		const spaceIndex = trimmedStart.indexOf(" ");
+		const spaceIndex = trimmedStart.search(/\s/);
 		const name =
 			spaceIndex === -1 ? trimmedStart.slice("/skill:".length) : trimmedStart.slice("/skill:".length, spaceIndex);
 		if (!name) return undefined;
 		const args = spaceIndex === -1 ? "" : trimmedStart.slice(spaceIndex + 1).trim();
-		return { name, args };
+		return { name, args, prompt };
 	}
-	if (trimmedStart.startsWith("/")) return undefined;
-	if (startsWithLocalExecutionPrefix(trimmedStart)) return undefined;
-	const match = MID_PROMPT_SKILL_RE.exec(text);
+	if (!allowsSkillTokens(trimmedStart)) return undefined;
+	SKILL_TOKEN_RE.lastIndex = 0;
+	const match = SKILL_TOKEN_RE.exec(text);
 	if (!match) return undefined;
-	const leading = match[1] ?? "";
-	const trailing = match[3] ?? "";
-	const tokenStart = match.index + leading.length;
-	const tokenEnd = match.index + match[0].length - trailing.length;
-	const name = match[2] ?? "";
-	if (!name) return undefined;
+	const tokenStart = match.index + match[1].length;
+	const tokenEnd = match.index + match[0].length;
+	const name = match[2];
 	const before = text.slice(0, tokenStart).trimEnd();
 	const after = text.slice(tokenEnd).trimStart();
 	const args = [before, after]
 		.filter(part => part.length > 0)
 		.join(" ")
 		.trim();
-	return { name, args };
-}
-
-/**
- * Whether the (already left-trimmed) draft begins with a TUI local-execution
- * sigil that downstream branches will consume verbatim — `!`/`!!` for the bash
- * tool and `$`/`$$` followed by ASCII whitespace for the python tool. Mirrors
- * `pythonCommandPrefixLength` in `modes/controllers/input-controller` so the
- * two checks agree without forcing a circular import.
- */
-function startsWithLocalExecutionPrefix(trimmedStart: string): boolean {
-	if (trimmedStart.startsWith("!")) return true;
-	if (trimmedStart.charCodeAt(0) !== 36 /* $ */) return false;
-	if (trimmedStart.charCodeAt(1) === 123 /* { */) return false;
-	const sigilLength = trimmedStart.charCodeAt(1) === 36 /* $ */ ? 2 : 1;
-	const next = trimmedStart.charCodeAt(sigilLength);
-	if (Number.isNaN(next)) return true;
-	return next === 32 /* space */ || next === 9 /* tab */ || next === 10 /* LF */ || next === 13 /* CR */;
+	return { name, args, prompt };
 }
 
 export type SkillInvocationKind = "user" | "autoload";
 
+/** What the user typed around a skill token: `args` feed the template, `prompt` only the transcript. */
+export type SkillPromptInput = Pick<ParsedSkillInvocation, "args"> & Partial<Pick<ParsedSkillInvocation, "prompt">>;
+
 export async function buildSkillPromptMessage(
 	skill: Pick<Skill, "name" | "filePath" | "baseDir">,
-	args: string,
+	input: SkillPromptInput,
 	invocation: SkillInvocationKind = "user",
 ): Promise<BuiltSkillPromptMessage> {
 	const content = await Bun.file(skill.filePath).text();
 	const body = content.replace(/^---\n[\s\S]*?\n---\n/, "").trim();
-	const trimmedArgs = args.trim();
+	const trimmedArgs = input.args.trim();
 	let message: string;
 	if (invocation === "user") {
 		// User-invoked skills announce themselves and expose their skill directory
@@ -525,6 +516,7 @@ export async function buildSkillPromptMessage(
 			name: skill.name,
 			path: skill.filePath,
 			args: trimmedArgs || undefined,
+			prompt: input.prompt,
 			lineCount: body ? body.split("\n").length : 0,
 		},
 	};

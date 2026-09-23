@@ -1,37 +1,44 @@
-import { type AssistantMessage, completeSimple } from "@oh-my-pi/pi-ai";
-import { logger, prompt } from "@oh-my-pi/pi-utils";
-
+/**
+ * Smart unexpected-stop detection: asks one {@link NoulQuestion} whether a
+ * text-only assistant turn promised to act and then ended. The judge comes
+ * from the live `judge` role chain resolved by {@link resolveJudge}.
+ */
+import type { AssistantMessage, Model, NoulQuestion } from "@oh-my-pi/pi-ai";
+import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
-import { resolveRoleSelection } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
-import unexpectedStopClassifierPrompt from "../prompts/system/unexpected-stop-classifier.md" with { type: "text" };
-import { isTinyMemoryLocalModelKey, ONLINE_MEMORY_MODEL_KEY } from "../tiny/models";
-import { tinyModelClient } from "../tiny/title-client";
-
-const CLASSIFIER_SYSTEM_PROMPT = prompt.render(unexpectedStopClassifierPrompt);
+import { resolveJudge } from "../judgment";
 
 /**
- * The answer is a single word. OpenAI-compatible endpoints reject values below
- * 16, so 16 is the smallest portable budget for this classifier.
+ * Yes-probability at or above which a turn counts as an unexpected stop.
+ * Keyword judges answer exactly 0 or 1; TypeSafe's calibrated probability
+ * lands in between, and a coin-flip message must not trigger a retry.
  */
-const ANSWER_MAX_TOKENS = 16;
-/**
- * Online classifier budget. Sized to survive backends that ignore
- * `disableReasoning` (e.g. Qwen3 via llama.cpp catalogued `reasoning: false`
- * but still emitting thinking): the yes/no keyword needs to land after any
- * unavoidable thinking preamble. `maxTokens` is a hard cap — non-thinking
- * completions still return in a single word (issue #4355).
- */
-const REASONING_SAFE_MAX_TOKENS = 1024;
+const UNEXPECTED_STOP_THRESHOLD = 0.5;
+
+const UNEXPECTED_STOP_QUESTION: NoulQuestion = {
+	type: "noul",
+	// Wording and bulleted examples measured on lfm2-1.2b / qwen2.5-1.5b: prose
+	// criteria cost ~3 points of recall on the 1.2B model.
+	instructions:
+		"Classify whether this assistant message is an unexpected stop: it says it will act, continue working, or call a tool, then ends without doing so.",
+	criteria: {
+		true: 'Unexpected stops:\n- "I should do the same for the JS eval worker. Doing that now."\n- "Let me run the tests next."\n- "I\'ll fix that now."\n- "Should I do that for you?"',
+		false: 'Not an unexpected stop:\n- "I\'ve completed the task."\n- "Is there anything else I can help with?"\n- "The fix is done and tests pass."',
+	},
+};
 
 export interface ClassifyUnexpectedStopDeps {
 	settings: Settings;
 	registry: ModelRegistry;
 	sessionId: string;
+	/** Active session model; last resort of the judge role chain. */
+	model?: Model;
 	metadataResolver?: (provider: string) => Record<string, unknown> | undefined;
 	signal?: AbortSignal;
 }
 
+/** Detects terminal turns eligible for mechanical recovery or smart classification. */
 export function isUnexpectedStopCandidate(message: AssistantMessage): boolean {
 	if (message.stopReason !== "stop") return false;
 	let hasContent = false;
@@ -53,89 +60,28 @@ export function isUnexpectedStopCandidate(message: AssistantMessage): boolean {
 	return hasContent;
 }
 
+/** `true` for an unexpected stop, `false` for a normal end of turn, `undefined` when no judge could answer. */
 export async function classifyUnexpectedStop(
 	text: string,
 	deps: ClassifyUnexpectedStopDeps,
 ): Promise<boolean | undefined> {
-	const backend = deps.settings.get("providers.unexpectedStopModel");
 	try {
-		if (backend === ONLINE_MEMORY_MODEL_KEY) {
-			return await classifyOnline(text, deps);
-		}
-		if (isTinyMemoryLocalModelKey(backend)) {
-			return await classifyLocal(text, backend, deps);
-		}
-		return undefined;
+		const judge = resolveJudge({
+			settings: deps.settings,
+			registry: deps.registry,
+			sessionModel: deps.model,
+			sessionId: deps.sessionId,
+			metadataResolver: deps.metadataResolver,
+		});
+		const { answers } = await judge.judge(
+			{ state: { message: text }, questions: { stopped: UNEXPECTED_STOP_QUESTION } },
+			{ signal: deps.signal },
+		);
+		return answers.stopped.noul >= UNEXPECTED_STOP_THRESHOLD;
 	} catch (error) {
 		logger.debug("unexpected-stop: classification failed", {
 			error: error instanceof Error ? error.message : String(error),
-			backend,
 		});
 		return undefined;
 	}
-}
-
-async function classifyOnline(text: string, deps: ClassifyUnexpectedStopDeps): Promise<boolean | undefined> {
-	const resolved = resolveRoleSelection(["tiny", "smol"], deps.settings, deps.registry.getAvailable());
-	const model = resolved?.model;
-	if (!model) {
-		throw new Error("unexpected-stop: no tiny/smol model available for classification");
-	}
-	const apiKey = await deps.registry.getApiKey(model, deps.sessionId);
-	if (!apiKey) {
-		throw new Error(`unexpected-stop: no API key for ${model.provider}/${model.id}`);
-	}
-	const metadata = deps.metadataResolver?.(model.provider);
-	const maxTokens = REASONING_SAFE_MAX_TOKENS;
-
-	const response = await completeSimple(
-		model,
-		{
-			systemPrompt: [CLASSIFIER_SYSTEM_PROMPT],
-			messages: [{ role: "user", content: text, timestamp: Date.now() }],
-		},
-		{
-			apiKey: deps.registry.resolver(model, deps.sessionId),
-			maxTokens,
-			disableReasoning: true,
-			metadata,
-			signal: deps.signal,
-		},
-	);
-
-	if (response.stopReason === "error") {
-		throw new Error(`unexpected-stop: online classification failed: ${response.errorMessage ?? "unknown error"}`);
-	}
-
-	const outputText = response.content
-		.filter((part): part is { type: "text"; text: string } => part.type === "text")
-		.map(part => part.text)
-		.join("\n");
-	return parseUnexpectedStopClassification(outputText);
-}
-
-async function classifyLocal(
-	text: string,
-	modelKey: string,
-	deps: ClassifyUnexpectedStopDeps,
-): Promise<boolean | undefined> {
-	if (!isTinyMemoryLocalModelKey(modelKey)) {
-		throw new Error(`unexpected-stop: unsupported local classifier model: ${modelKey}`);
-	}
-	const builtPrompt = prompt.render(unexpectedStopClassifierPrompt, { message: text });
-	const output = await tinyModelClient.complete(modelKey, builtPrompt, {
-		maxTokens: ANSWER_MAX_TOKENS,
-		signal: deps.signal,
-	});
-	if (!output) {
-		return undefined;
-	}
-	return parseUnexpectedStopClassification(output);
-}
-
-export function parseUnexpectedStopClassification(text: string): boolean | undefined {
-	const trimmed = text.trim().toLowerCase();
-	if (trimmed.startsWith("yes")) return true;
-	if (trimmed.startsWith("no")) return false;
-	return undefined;
 }

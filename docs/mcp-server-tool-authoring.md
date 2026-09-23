@@ -143,9 +143,11 @@ mcp__<sanitized_server_name>_<sanitized_tool_name>
 Rules:
 
 - lowercases
-- non-`[a-z_]` chars become `_`
+- non-`[a-z0-9_]` chars become `_`
 - repeated underscores collapse
 - redundant `<server>_` prefix in tool name is stripped once
+- names longer than 64 characters keep a readable prefix and append `_` plus the first eight base-36
+  characters of `Bun.hash()` over the full uncapped generated name
 
 Different raw names can still sanitize to the same identifier (for example
 `my-server` and `my.server` both sanitize similarly). Before registry
@@ -154,9 +156,30 @@ lexicographically comparing the original `<server-name>\0<tool-name>` origin
 key. The losing origin is logged and omitted, so reconnect or discovery order
 cannot change ownership.
 
+Before digits were kept, digit-bearing servers minted digit-stripped names
+(`context7` → `mcp__context_query_docs`). User `tools.approval` `deny`/`prompt`
+policies keyed on such a legacy name still apply to the renamed tool
+(fail-closed); legacy `allow` entries are not inherited and must be re-keyed.
+
 ### Schema mapping
 
 `tool-bridge.ts` passes each MCP `inputSchema` through `normalizeSchemaForMCP()` before registering it as a `CustomTool` schema.
+
+Before dispatch, shared tool-argument validation prefers an already matching
+`anyOf`/`oneOf` branch when normalizing null placeholders. Required nullable
+properties in that branch retain explicit `null` values; a nonmatching closed
+branch cannot remove them as unknown fields. Null cleanup/default substitution
+can combine with discriminator whitespace repair and schema-directed type
+coercion using the bounded repair pipeline inside a branch-local candidate.
+If no branch accepts that candidate, its repairs are discarded. The complete
+schema is still validated, including required fields, non-nullable properties,
+and `oneOf` exclusivity.
+Branch validation retains the complete schema's local-reference context,
+speculative-union restrictions on lossy repairs, and content-ancestor protection
+against identifier whitespace trimming.
+Bounded repair rounds reconsider null cleanup when a later normalization,
+such as identifier whitespace trimming, makes a branch viable; an invalid
+candidate is never carried forward solely because it changed.
 
 ### Outbound argument normalization
 

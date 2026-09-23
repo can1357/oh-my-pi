@@ -79,6 +79,17 @@ Keep each pull request to one logical change. Avoid unrelated cleanup,
 drive-by refactors, generated noise, or features that were not part of the
 agreed scope.
 
+## Contribution licensing
+
+A contribution intentionally submitted for inclusion in OMP is licensed under
+the MIT License.
+
+This policy does not relicense third-party or vendored code. You must have the
+right to submit your contribution and must preserve applicable copyright,
+license, attribution, and notice material. Submitting a contribution does not
+require signing a Contributor License Agreement (CLA) or certifying a
+Developer Certificate of Origin (DCO).
+
 ## Review
 
 Maintainers review the submitted behavior and the contributor's understanding

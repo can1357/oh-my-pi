@@ -29,8 +29,8 @@ static GET_WINDOW_ID: LazyLock<Option<GetWindowIdFn>> = LazyLock::new(|| {
 	if symbol.is_null() {
 		None
 	} else {
-		// SAFETY: `_AXUIElementGetWindow` has the exact AXUIElementRef, CGWindowID* ->
-		// AXError ABI above.
+		// SAFETY: `_AXUIElementGetWindow` has the exact AXUIElementRef,
+		// CGWindowID* -> AXError ABI above.
 		Some(unsafe { mem::transmute::<*mut c_void, GetWindowIdFn>(symbol) })
 	}
 });
@@ -96,8 +96,8 @@ impl AxBackend for MacAx {
 		if let (Some(get_id), Some(expected_id)) = (*GET_WINDOW_ID, expected_id) {
 			for element in &windows {
 				let mut actual_id = 0u32;
-				// SAFETY: `actual_id` is writable and this retained AX element remains alive
-				// for the call.
+				// SAFETY: `actual_id` is writable and this retained AX element
+				// remains alive for the call.
 				if unsafe { get_id(element, &mut actual_id) } == AXError::Success
 					&& actual_id == expected_id
 				{
@@ -106,8 +106,8 @@ impl AxBackend for MacAx {
 				}
 			}
 		}
-		// Older systems may hide the private window-id SPI. Match title and global
-		// frame together, then title alone only when it is unique.
+		// Older systems may hide the private window-id SPI. Match title and
+		// global frame together, then title alone only when it is unique.
 		let mut title_match = None;
 		for element in windows {
 			let title = copy_string(&element, "AXTitle").unwrap_or_default();
@@ -180,8 +180,8 @@ impl AxBackend for MacAx {
 		let element = mac_handle(h)?;
 		let attribute = CFString::from_str("AXValue");
 		let value = CFString::from_str(value);
-		// SAFETY: The element, attribute, and value remain retained for the synchronous
-		// setter call.
+		// SAFETY: The element, attribute, and value remain retained for the
+		// synchronous setter call.
 		let error = unsafe { element.set_attribute_value(&attribute, &value) };
 		ax_result(error, "AXValue is not settable; no typing fallback was attempted")
 	}
@@ -189,8 +189,8 @@ impl AxBackend for MacAx {
 	fn focus(&mut self, h: &AxHandle) -> CoreResult<()> {
 		let element = mac_handle(h)?;
 		let attribute = CFString::from_str("AXFocused");
-		// SAFETY: The singleton CFBoolean and retained element remain valid for the
-		// synchronous setter call.
+		// SAFETY: The singleton CFBoolean and retained element remain valid for
+		// the synchronous setter call.
 		let error = unsafe { element.set_attribute_value(&attribute, CFBoolean::new(true)) };
 		ax_result(error, "setting AXFocused=true failed")
 	}
@@ -260,8 +260,8 @@ fn ensure_trusted() -> CoreResult<()> {
 }
 
 fn create_application(pid: libc::pid_t) -> CoreResult<CFRetained<AXUIElement>> {
-	// SAFETY: AXUIElementCreateApplication accepts any process id and returns a +1
-	// retained CF object.
+	// SAFETY: AXUIElementCreateApplication accepts any process id and returns a
+	// +1 retained CF object.
 	let raw = unsafe { AXUIElementCreateApplication(pid) };
 	let pointer = NonNull::new(raw).ok_or_else(|| {
 		DesktopError::ax_failed(format!("AXUIElementCreateApplication({pid}) returned null"))
@@ -321,8 +321,8 @@ fn copy_attribute_result(
 	let attribute = CFString::from_str(attribute);
 	let mut output: *const CFType = ptr::null();
 	let slot = NonNull::from(&mut output);
-	// SAFETY: `slot` is writable and receives a create-rule retained CF object on
-	// success.
+	// SAFETY: `slot` is writable and receives a create-rule retained CF object
+	// on success.
 	let error = unsafe { element.copy_attribute_value(&attribute, slot) };
 	if error != AXError::Success {
 		return Err(error);
@@ -409,7 +409,8 @@ fn copy_attribute_names(element: &AXUIElement) -> CoreResult<Vec<CFRetained<CFTy
 		.ok_or_else(|| DesktopError::ax_failed("AX attribute names returned null"))?;
 	// SAFETY: The successful copy call returned this array at +1 retain count.
 	let array: CFRetained<CFArray> = unsafe { CFRetained::from_raw(pointer) };
-	// SAFETY: AXUIElementCopyAttributeNames returns a CFArray of CFString CFTypes.
+	// SAFETY: AXUIElementCopyAttributeNames returns a CFArray of CFString
+	// CFTypes.
 	let array = unsafe { CFRetained::cast_unchecked::<CFArray<CFType>>(array) };
 	Ok(array.iter().collect())
 }

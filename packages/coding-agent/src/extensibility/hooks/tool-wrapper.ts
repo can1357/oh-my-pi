@@ -16,9 +16,10 @@ import type { ToolCallEventResult, ToolResultEventResult } from "./types";
  * - Emits tool_result event after execution (can modify result)
  * - Forwards onUpdate callback to wrapped tool for progress streaming
  */
-export class HookToolWrapper<TParameters extends TSchema = TSchema, TDetails = unknown>
-	implements AgentTool<TParameters, TDetails>
-{
+export class HookToolWrapper<TParameters extends TSchema = TSchema, TDetails = unknown> implements AgentTool<
+	TParameters,
+	TDetails
+> {
 	declare name: string;
 	declare description: string;
 	declare parameters: TParameters;

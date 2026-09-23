@@ -2,8 +2,7 @@ import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { type ResolveContext, resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
-import { expandInternalUrls, expandSkillUrls } from "@oh-my-pi/pi-coding-agent/tools/bash-skill-urls";
-import { ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
+import { expandInternalUrls } from "@oh-my-pi/pi-coding-agent/tools/bash-skill-urls";
 
 function shellEscape(p: string): string {
 	return `'${p.replace(/'/g, "'\\''")}'`;
@@ -19,6 +18,13 @@ function createSkill(name: string, baseDir: string): Skill {
 		source: "test",
 	};
 }
+
+const imageAttachment = {
+	label: "Image #1",
+	uri: "attachment://1",
+	sourcePath: "/tmp/session blobs/image 1.png",
+	image: { type: "image", data: "image-bytes", mimeType: "image/png" },
+} as const;
 
 function createInternalRouter(resources: Record<string, { sourcePath?: string; error?: string }>): {
 	canHandle: (input: string) => boolean;
@@ -47,110 +53,6 @@ function createInternalRouter(resources: Record<string, { sourcePath?: string; e
 		},
 	};
 }
-
-describe("expandSkillUrls", () => {
-	it("expands a basic skill:// URI to an absolute path", () => {
-		const skills = [createSkill("valid-skill", "/tmp/skills/valid-skill")];
-		const command = "python skill://valid-skill/scripts/init.py";
-		const expectedPath = path.join(skills[0].baseDir, "scripts/init.py");
-
-		expect(expandSkillUrls(command, skills)).toBe(`python ${shellEscape(expectedPath)}`);
-	});
-
-	it("expands multiple skill:// URIs in one command", () => {
-		const skills = [
-			createSkill("first-skill", "/tmp/skills/first-skill"),
-			createSkill("second-skill", "/tmp/skills/second-skill"),
-		];
-		const command = "cp skill://first-skill/a.txt skill://second-skill/b.txt";
-		const firstPath = path.join(skills[0].baseDir, "a.txt");
-		const secondPath = path.join(skills[1].baseDir, "b.txt");
-
-		expect(expandSkillUrls(command, skills)).toBe(`cp ${shellEscape(firstPath)} ${shellEscape(secondPath)}`);
-	});
-
-	it("throws ToolError for unknown skills with available names", () => {
-		const skills = [
-			createSkill("first-skill", "/tmp/skills/first-skill"),
-			createSkill("second-skill", "/tmp/skills/second-skill"),
-		];
-
-		expect(() => expandSkillUrls("python skill://missing/run.py", skills)).toThrow(
-			"Unknown skill: missing. Available: first-skill, second-skill",
-		);
-	});
-
-	it("throws ToolError for path traversal attempts", () => {
-		const skills = [createSkill("valid-skill", "/tmp/skills/valid-skill")];
-
-		expect(() => expandSkillUrls("cat skill://valid-skill/../../../etc/passwd", skills)).toThrow(
-			"Path traversal (..) is not allowed in skill:// URLs",
-		);
-	});
-
-	it("returns command unchanged when there are no skill:// tokens", () => {
-		const skills = [createSkill("valid-skill", "/tmp/skills/valid-skill")];
-		const command = "git status";
-
-		expect(expandSkillUrls(command, skills)).toBe(command);
-	});
-
-	it("does not expand non-skill internal URIs", () => {
-		const skills = [createSkill("valid-skill", "/tmp/skills/valid-skill")];
-		const command = "echo agent://1 artifact://abc rule://security";
-
-		expect(expandSkillUrls(command, skills)).toBe(command);
-	});
-
-	it("expands URI in double quotes", () => {
-		const skills = [createSkill("valid-skill", "/tmp/skills/valid-skill")];
-		const command = 'python "skill://valid-skill/scripts/init.py"';
-		const expectedPath = path.join(skills[0].baseDir, "scripts/init.py");
-
-		expect(expandSkillUrls(command, skills)).toBe(`python ${shellEscape(expectedPath)}`);
-	});
-
-	it("expands URI in single quotes", () => {
-		const skills = [createSkill("valid-skill", "/tmp/skills/valid-skill")];
-		const command = "python 'skill://valid-skill/scripts/init.py'";
-		const expectedPath = path.join(skills[0].baseDir, "scripts/init.py");
-
-		expect(expandSkillUrls(command, skills)).toBe(`python ${shellEscape(expectedPath)}`);
-	});
-
-	it("shell-escapes paths with spaces", () => {
-		const skills = [createSkill("space-skill", "/tmp/skills/with space")];
-		const command = "python skill://space-skill/scripts/my%20file.py";
-		const expectedPath = path.join(skills[0].baseDir, "scripts/my file.py");
-
-		expect(expandSkillUrls(command, skills)).toBe(`python ${shellEscape(expectedPath)}`);
-	});
-
-	it("shell-escapes paths containing single quotes", () => {
-		const skills = [createSkill("quote-skill", "/tmp/skills/with'quote")];
-		const command = "python skill://quote-skill/scripts/init.py";
-		const expectedPath = path.join(skills[0].baseDir, "scripts/init.py");
-
-		expect(expandSkillUrls(command, skills)).toBe(`python ${shellEscape(expectedPath)}`);
-	});
-
-	it("resolves skill://name with no relative path to the skill directory", () => {
-		const skills = [createSkill("valid-skill", "/tmp/skills/valid-skill")];
-		const command = "printf '%s\n' skill://valid-skill";
-
-		expect(expandSkillUrls(command, skills)).toBe(`printf '%s\n' ${shellEscape(skills[0].baseDir)}`);
-	});
-
-	it("returns command unchanged when no skills are loaded", () => {
-		const command = "python skill://valid-skill/scripts/init.py";
-		expect(expandSkillUrls(command, [])).toBe(command);
-	});
-
-	it("throws ToolError when traversal is attempted with encoded segments", () => {
-		const skills = [createSkill("valid-skill", "/tmp/skills/valid-skill")];
-		expect(() => expandSkillUrls("cat skill://valid-skill/%2E%2E/%2E%2E/etc/passwd", skills)).toThrow(ToolError);
-	});
-});
 
 describe("expandInternalUrls", () => {
 	it("expands skill/agent/artifact/memory/rule URLs in one command", async () => {
@@ -197,6 +99,37 @@ describe("expandInternalUrls", () => {
 		expect(observedPathOnly).toBe(true);
 	});
 
+	it("forwards the session's scoped rules to the router when expanding rule:// URLs", async () => {
+		const sourcePath = "/tmp/rules/scout-only.md";
+		const scopedRules = [
+			{
+				name: "scout-only",
+				path: sourcePath,
+				content: "stay on plan",
+				_source: { provider: "test", providerName: "test", path: sourcePath, level: "user" as const },
+			},
+		];
+		let observedRules: unknown;
+		const router = {
+			canHandle: (input: string) => input === "rule://scout-only",
+			resolve: async (input: string, context?: ResolveContext) => {
+				observedRules = context?.rules;
+				return {
+					url: input,
+					content: "",
+					contentType: "text/plain" as const,
+					sourcePath,
+					immutable: true,
+				};
+			},
+		};
+
+		await expect(
+			expandInternalUrls("cat rule://scout-only", { skills: [], internalRouter: router, rules: scopedRules }),
+		).resolves.toBe(`cat ${shellEscape(sourcePath)}`);
+		expect(observedRules).toBe(scopedRules);
+	});
+
 	it("expands quoted non-skill URLs and shell-escapes quotes in paths", async () => {
 		const router = createInternalRouter({
 			"artifact://7": { sourcePath: "/tmp/artifacts/with'quote.log" },
@@ -204,6 +137,29 @@ describe("expandInternalUrls", () => {
 		await expect(expandInternalUrls('cat "artifact://7"', { skills: [], internalRouter: router })).resolves.toBe(
 			`cat ${shellEscape("/tmp/artifacts/with'quote.log")}`,
 		);
+	});
+
+	it("expands attachment URLs and shell-escapes source paths with spaces", async () => {
+		await expect(
+			expandInternalUrls("cp attachment://1 saved.png", { skills: [], attachments: [imageAttachment] }),
+		).resolves.toBe(`cp ${shellEscape(imageAttachment.sourcePath)} saved.png`);
+	});
+
+	it("expands attachment URLs used as quoted command arguments", async () => {
+		const command = `cmp "attachment://1" 'attachment://1'`;
+		await expect(expandInternalUrls(command, { skills: [], attachments: [imageAttachment] })).resolves.toBe(
+			`cmp ${shellEscape(imageAttachment.sourcePath)} ${shellEscape(imageAttachment.sourcePath)}`,
+		);
+	});
+
+	it("leaves unknown attachment references unchanged", async () => {
+		const command = "cp attachment://2 saved.png";
+		await expect(expandInternalUrls(command, { skills: [], attachments: [imageAttachment] })).resolves.toBe(command);
+	});
+
+	it("preserves attachment mentions embedded in quoted text", async () => {
+		const command = `printf '%s\\n' 'copy attachment://1 to save the original'`;
+		await expect(expandInternalUrls(command, { skills: [], attachments: [imageAttachment] })).resolves.toBe(command);
 	});
 
 	it("expands an unquoted URL inside a double-quoted command substitution", async () => {
@@ -300,6 +256,16 @@ describe("expandInternalUrls", () => {
 		);
 	});
 
+	it("keeps query parameters in an unquoted internal URL", async () => {
+		const router = createInternalRouter({
+			"agent://reviewer?q=needle": { sourcePath: "/tmp/session/reviewer.md" },
+		});
+
+		await expect(
+			expandInternalUrls("cat agent://reviewer?q=needle", { skills: [], internalRouter: router }),
+		).resolves.toBe(`cat ${shellEscape("/tmp/session/reviewer.md")}`);
+	});
+
 	it("expands local:// URLs to filesystem paths without requiring preexisting files", async () => {
 		const localOptions = {
 			getArtifactsDir: () => "/tmp/session-artifacts",
@@ -310,6 +276,19 @@ describe("expandInternalUrls", () => {
 
 		await expect(expandInternalUrls(command, { skills: [], localOptions })).resolves.toBe(
 			`mv /tmp/source.json ${shellEscape(expectedPath)}`,
+		);
+	});
+
+	it("preserves an adjacent command separator after an unquoted local URL", async () => {
+		const localOptions = {
+			getArtifactsDir: () => "/tmp/session-artifacts",
+			getSessionId: () => "session-1",
+		};
+		const command = 'bb review-packet gates --body-file local://body.txt; echo "exit=$?"';
+		const expectedPath = resolveLocalUrlToPath("local://body.txt", localOptions);
+
+		await expect(expandInternalUrls(command, { skills: [], localOptions })).resolves.toBe(
+			`bb review-packet gates --body-file ${shellEscape(expectedPath)}; echo "exit=$?"`,
 		);
 	});
 

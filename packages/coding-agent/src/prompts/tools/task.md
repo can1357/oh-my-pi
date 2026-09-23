@@ -5,16 +5,17 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 {{#if asyncEnabled}}
 
 # Async Job Contract
-- Results auto-deliver. A settled `hub jobs`/`hub wait` snapshot is the delivery; no duplicate `async-result` follows.
-- Job IDs are process-local and expire roughly five minutes after settlement. Afterward, use the agent ID with `hub send`, `agent://<id>`, or `history://<id>`.
+- Results auto-deliver. `hub jobs` summarizes without consuming; a `hub wait` snapshot of a settled job is the delivery, so no duplicate `async-result` follows.
+- Job IDs are process-local. An ID whose result was delivered or recovered by a snapshot expires shortly (~30s) after; unconsumed rows stay inspectable for up to five minutes after settlement. Afterward, use the agent ID with `hub send`, `agent://<id>`, or `history://<id>`.
+- With `outputSchema`, a result's parsed payload — when present — is served at `agent://<id>` (fields via `agent://<id>/<field>`, nested `agent://<id>/reports/0/data`) regardless of validity; a schema-violating (invalid) result also previews the payload inline in the auto-delivered follow-up.
 - `completed` means successful yield/job exit, not artifact acceptance. Verify claimed changes.
 {{/if}}
 
 # Task Design
-- **Agent typing:** Pick each item's `agent` type.{{#if scoutAvailable}} Read-only research MUST use `agent: "scout"` (faster model).{{/if}} Use default worker only when no specialist fits.
+- **Agent typing:** Pick each item's most specific available agent.{{#if scoutAvailable}} Read-only research MUST run on `scout` (faster model).{{/if}} Omit `agent` when the spawn-policy default is the best fit; otherwise pass the specialist explicitly.
 - **No overhead:** Each `task` MUST instruct its agent to skip formatters, linters, and project-wide test suites. Run those once at the end.
 - **One-pass:** Prefer agents that investigate AND edit in one pass;{{#if scoutAvailable}} spin a read-only scout only when affected files are genuinely unknown.{{/if}}
-- **Overlap is safe:** Concurrent edits to the same files auto-resolve{{#if ircEnabled}}; worst case, agents coordinate directly over IRC{{/if}}. NEVER shrink or serialize a batch to avoid file overlap. Two prerequisites:
+- **Overlap:** Parallelize independent ownership. Same-file edits are not guaranteed to merge.{{#if ircEnabled}} Have siblings coordinate through `hub` before editing shared files.{{/if}} Name one integration owner and serialize only the irreducibly shared mutation boundary. Every concurrent batch has two prerequisites:
   1. Every task MUST skip validation (build/lint/tests) — validating mid-flight blocks agents on each other's edits.
   2. Decide cross-task contracts up front (e.g. the interface A implements and B consumes) and state them in the {{#if batchEnabled}}batch `context`{{else}}task{{/if}}, not left for agents to negotiate.
 
@@ -23,8 +24,12 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 - `context`: Shared project state, constraints, and contracts. Applies to the entire batch; do not duplicate this background into individual tasks.
 - `tasks[]`: Array of subagents to spawn.
   - `name`: A stable CamelCase identifier (≤32 chars), used to address the agent (IRC, job ids). Generated automatically if omitted.
-  - `agent`: The agent type running this item (e.g. {{#if scoutAvailable}}`scout`, {{/if}}`reviewer`). Omitting it gives you the general-purpose worker (`{{defaultAgent}}`) — NEVER pass that name explicitly. Only omit it after checking the agent list below and finding no specialist that fits.{{#if allowedAgentsText}} Current spawn policy allows: {{allowedAgentsText}}.{{/if}}
+  - `agent`: The agent type to spawn (e.g. {{#if scoutAvailable}}`scout`, {{/if}}`reviewer`).
+    Omitting `agent` selects the spawn-policy default (`{{defaultAgent}}`). Use it only when that agent fits the task.{{#if allowedAgentsText}} Current spawn policy allows: {{allowedAgentsText}}.{{/if}}
+    NEVER pass the spawn-policy default explicitly. Only omit it after checking the available agents below.
   - `task`: Complete, self-contained instructions. One-liners or missing acceptance criteria are PROHIBITED.
+{{#if evalToolsEnabled}}  - `tools`: Names of eval-defined tools (`@tool` in Python, `tool(fn, {…})` in JS) to expose to this subagent; each runs inside your kernel when the subagent calls it.
+{{/if}}
 {{#if effortEnabled}}  - `effort`: Scale w/ complexity of this task: `"lo"`|`"med"`|`"hi"`
 {{/if}}
   - `outputSchema`: Invocation-specific JSON Schema. Overrides the selected agent and parent-session schemas.
@@ -38,8 +43,12 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 {{/if}}
 {{else}}
 - `name`: A stable CamelCase identifier (≤32 chars), used to address the agent (IRC, job ids). Generated automatically if omitted.
-- `agent`: The agent type to spawn (e.g. {{#if scoutAvailable}}`scout`, {{/if}}`reviewer`). Omitting it gives you the general-purpose worker (`{{defaultAgent}}`) — NEVER pass that name explicitly. Only omit it after checking the agent list below and finding no specialist that fits.{{#if allowedAgentsText}} Current spawn policy allows: {{allowedAgentsText}}.{{/if}}
+- `agent`: The agent type to spawn (e.g. {{#if scoutAvailable}}`scout`, {{/if}}`reviewer`).
+  Omitting `agent` selects the spawn-policy default (`{{defaultAgent}}`). Use it only when that agent fits the task.{{#if allowedAgentsText}} Current spawn policy allows: {{allowedAgentsText}}.{{/if}}
+  NEVER pass the spawn-policy default explicitly. Only omit it after checking the available agents below.
 - `task`: Complete, self-contained instructions. One-liners or missing acceptance criteria are PROHIBITED.
+{{#if evalToolsEnabled}}- `tools`: Names of eval-defined tools (`@tool` in Python, `tool(fn, {…})` in JS) to expose to this subagent; each runs inside your kernel when the subagent calls it.
+{{/if}}
 {{#if effortEnabled}}- `effort`: Scale w/ complexity of this task: `"lo"`|`"med"`|`"hi"`
 {{/if}}
 - `outputSchema`: Invocation-specific JSON Schema. Overrides the selected agent and parent-session schemas.
@@ -74,7 +83,10 @@ Pass large payloads via `local://<path>` URIs, NEVER inline text.
 {{#if spawningDisabled}}
 Agent spawning is currently disabled.
 {{else}}
-Pick the most specific agent; use default worker only when no specialist fits.
+Pick the most specific agent. Omit `agent` only when the spawn-policy default is that agent.
+{{#if hasModelMentions}}
+Agents named `m<N>` are models the user tagged in this conversation (`<model agent="m<N>" name="…"/>` in their message): the general-purpose task agent pinned to that model. Spawn one only when the user's request names it; never substitute it for a specialist on your own.
+{{/if}}
 {{#list agents join="\n"}}
 ### {{name}}{{#if readOnly}} (READ-ONLY){{/if}}{{#if blocking}} (BLOCKING: inline result){{/if}}
 {{description}}

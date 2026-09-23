@@ -15,6 +15,7 @@ import * as path from "node:path";
 import { $ } from "bun";
 
 const root = path.resolve(import.meta.dir, "..");
+const repoRoot = path.resolve(root, "../..");
 const dist = path.join(root, "dist");
 const distExtension = path.join(dist, "extension");
 const assetsDir = path.resolve(root, "../coding-agent/src/tools/browser/relay/extension-assets");
@@ -36,6 +37,9 @@ if (!bundle.success) {
 for (const file of ["manifest.json", "options.html", "options.js"]) {
 	await Bun.write(path.join(distExtension, file), Bun.file(path.join(root, "extension", file)));
 }
+for (const file of ["LICENSE", "THIRD-PARTY-NOTICES.txt"]) {
+	await Bun.write(path.join(distExtension, file), Bun.file(path.join(repoRoot, file)));
+}
 
 const zip = await $`zip -qr ../omp-browser-relay-extension.zip .`.cwd(distExtension).nothrow();
 if (zip.exitCode !== 0) {
@@ -44,8 +48,16 @@ if (zip.exitCode !== 0) {
 }
 
 await fs.rm(assetsDir, { recursive: true, force: true });
-for (const file of ["background.js", "manifest.json", "options.html", "options.js"]) {
-	await Bun.write(path.join(assetsDir, `${file}.txt`), Bun.file(path.join(distExtension, file)));
+const embeddedAssets = [
+	["background.js", "background.js.txt"],
+	["manifest.json", "manifest.json.txt"],
+	["options.html", "options.html.txt"],
+	["options.js", "options.js.txt"],
+	["LICENSE", "LICENSE.txt"],
+	["THIRD-PARTY-NOTICES.txt", "THIRD-PARTY-NOTICES.txt"],
+] as const;
+for (const [source, destination] of embeddedAssets) {
+	await Bun.write(path.join(assetsDir, destination), Bun.file(path.join(distExtension, source)));
 }
 
 console.log("built:");

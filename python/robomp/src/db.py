@@ -29,6 +29,8 @@ IssueState = Literal[
     "abandoned",
 ]
 
+ReleaseState = Literal["awaiting_ci", "fixing", "green", "failed", "superseded"]
+
 SCHEMA = """
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
@@ -67,6 +69,23 @@ CREATE TABLE IF NOT EXISTS issues (
   classification TEXT,         -- bug|enhancement|question|proposal|documentation|wontfix|invalid|duplicate
   updated_at     TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS releases (
+  key             TEXT PRIMARY KEY,
+  repo            TEXT NOT NULL,
+  tag             TEXT NOT NULL,
+  version         TEXT NOT NULL,
+  state           TEXT NOT NULL
+    CHECK (state IN ('awaiting_ci','fixing','green','failed','superseded')),
+  current_sha     TEXT NOT NULL,
+  last_failed_sha TEXT,
+  rounds          INTEGER NOT NULL DEFAULT 0,
+  last_error      TEXT,
+  session_dir     TEXT,
+  created_at      TEXT NOT NULL,
+  updated_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS releases_repo ON releases(repo, updated_at);
 
 CREATE TABLE IF NOT EXISTS tool_calls (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -206,6 +225,24 @@ class IssueRow:
 
 
 @dataclass(slots=True, frozen=True)
+class ReleaseRow:
+    """Durable state for one release tag's CI repair loop."""
+
+    key: str
+    repo: str
+    tag: str
+    version: str
+    state: ReleaseState
+    current_sha: str
+    last_failed_sha: str | None
+    rounds: int
+    last_error: str | None
+    session_dir: str | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass(slots=True, frozen=True)
 class StagedReviewComment:
     id: int
     issue_key: str
@@ -229,6 +266,23 @@ def _event_row_from_db_row(row: sqlite3.Row) -> EventRow:
         state=row["state"],
         attempts=int(row["attempts"]),
         last_error=row["last_error"],
+    )
+
+
+def _release_row_from_db_row(row: sqlite3.Row) -> ReleaseRow:
+    return ReleaseRow(
+        key=row["key"],
+        repo=row["repo"],
+        tag=row["tag"],
+        version=row["version"],
+        state=row["state"],
+        current_sha=row["current_sha"],
+        last_failed_sha=row["last_failed_sha"],
+        rounds=int(row["rounds"]),
+        last_error=row["last_error"],
+        session_dir=row["session_dir"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
     )
 
 
@@ -722,6 +776,108 @@ class Database:
                 (error, _utc_after(delay_seconds), delivery_id),
             )
             return cur.rowcount > 0
+
+    # ---- releases ----
+    def upsert_release(
+        self,
+        *,
+        repo: str,
+        tag: str,
+        version: str,
+        current_sha: str,
+        session_dir: str | None,
+    ) -> ReleaseRow:
+        """Create release state once and preserve later lifecycle transitions."""
+        key = f"{repo}#{tag}"
+        now = _utcnow()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT OR IGNORE INTO releases
+                  (key, repo, tag, version, state, current_sha, session_dir, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 'awaiting_ci', ?, ?, ?, ?)
+                """,
+                (key, repo, tag, version, current_sha, session_dir, now, now),
+            )
+        row = self.get_release(key)
+        assert row is not None
+        return row
+
+    def get_release(self, key: str) -> ReleaseRow | None:
+        """Return state for one repository tag."""
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT key, repo, tag, version, state, current_sha, last_failed_sha,
+                       rounds, last_error, session_dir, created_at, updated_at
+                FROM releases
+                WHERE key=?
+                """,
+                (key,),
+            ).fetchone()
+        return _release_row_from_db_row(row) if row is not None else None
+
+    def get_active_release(self, repo: str) -> ReleaseRow | None:
+        """Return the newest release still awaiting or repairing CI."""
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT key, repo, tag, version, state, current_sha, last_failed_sha,
+                       rounds, last_error, session_dir, created_at, updated_at
+                FROM releases
+                WHERE repo=? AND state IN ('awaiting_ci','fixing')
+                ORDER BY updated_at DESC, rowid DESC
+                LIMIT 1
+                """,
+                (repo,),
+            ).fetchone()
+        return _release_row_from_db_row(row) if row is not None else None
+
+    def set_release_state(self, key: str, state: ReleaseState, *, error: str | None = None) -> None:
+        """Transition a release and replace its surfaced error."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE releases SET state=?, last_error=?, updated_at=? WHERE key=?",
+                (state, error, _utcnow(), key),
+            )
+
+    def set_release_sha(self, key: str, sha: str) -> None:
+        """Record the tag's current authoritative commit."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE releases SET current_sha=?, updated_at=? WHERE key=?",
+                (sha, _utcnow(), key),
+            )
+
+    def bump_release_round(self, key: str, *, failed_sha: str) -> ReleaseRow:
+        """Start another fix round for a failing release commit."""
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE releases
+                SET rounds=rounds+1, last_failed_sha=?, state='fixing', last_error=NULL, updated_at=?
+                WHERE key=?
+                """,
+                (failed_sha, _utcnow(), key),
+            )
+        row = self.get_release(key)
+        assert row is not None
+        return row
+
+    def list_releases(self, limit: int = 50) -> list[ReleaseRow]:
+        """List recently updated releases."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT key, repo, tag, version, state, current_sha, last_failed_sha,
+                       rounds, last_error, session_dir, created_at, updated_at
+                FROM releases
+                ORDER BY updated_at DESC, rowid DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [_release_row_from_db_row(row) for row in rows]
 
     # ---- issues ----
     def upsert_issue(

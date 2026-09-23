@@ -1,4 +1,5 @@
-import { isAnthropicWebSearchHistoryBlock } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
+import { isAnthropicServerToolHistoryBlock } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
+import { countNewlines } from "@oh-my-pi/pi-utils";
 import {
 	type BlobStore,
 	externalizeImageDataSync,
@@ -13,6 +14,12 @@ const TRUNCATION_NOTICE = "\n\n[Session persistence truncated large content]";
 /** Minimum base64 length to externalize to blob store (skip tiny inline images) */
 const BLOB_EXTERNALIZE_THRESHOLD = 1024;
 const TEXT_CONTENT_KEY = "content";
+/** Parent key under which snapcompact persists its base64 PNG frame archive
+ *  (`preserveData.snapcompact.frames[]`). Frame objects are image payloads, so
+ *  their base64 must externalize to the blob store rather than fall through to
+ *  generic string truncation, which appends {@link TRUNCATION_NOTICE} and
+ *  corrupts the base64 the provider decodes on resume. */
+const SNAPCOMPACT_FRAMES_KEY = "frames";
 
 function truncateString(value: string, maxLength: number): string {
 	if (value.length <= maxLength) return value;
@@ -24,6 +31,11 @@ function truncateString(value: string, maxLength: number): string {
 		}
 	}
 	return truncated;
+}
+
+/** Detect strings damaged by an older persistence pass so loaders can migrate them safely. */
+export function isPersistenceTruncatedString(value: unknown): value is string {
+	return typeof value === "string" && value.endsWith(TRUNCATION_NOTICE);
 }
 
 export function isImageBlock(value: unknown): value is { type: "image"; data: string; mimeType?: string } {
@@ -51,13 +63,28 @@ export function isImageDataPayload(value: unknown): value is { data: string; mim
 	);
 }
 
-function shouldExternalizeImagePayload(
+/**
+ * True when an image payload sits in a persistence position whose base64 is
+ * externalized to the blob store instead of truncated as a generic string: a
+ * `content` image block, an `images[]` entry, or a snapcompact frame under
+ * `frames[]`. The eager load path uses the same position check but deliberately
+ * leaves snapcompact frames as references for lazy context rebuilding.
+ */
+export function isExternalizableImagePosition(
 	value: unknown,
 	key: string | undefined,
 ): value is { data: string; mimeType?: string } {
 	if (!isImageDataPayload(value)) return false;
+	return (key === TEXT_CONTENT_KEY && isImageBlock(value)) || key === "images" || key === SNAPCOMPACT_FRAMES_KEY;
+}
+
+function shouldExternalizeImagePayload(
+	value: unknown,
+	key: string | undefined,
+): value is { data: string; mimeType?: string } {
+	if (!isExternalizableImagePosition(value, key)) return false;
 	if (isBlobRef(value.data) || value.data.length < BLOB_EXTERNALIZE_THRESHOLD) return false;
-	return (key === TEXT_CONTENT_KEY && isImageBlock(value)) || key === "images";
+	return true;
 }
 
 /** True for a non-empty string — marks signature/encrypted fields whose block must persist verbatim. */
@@ -100,8 +127,8 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 	// Persist signed blocks verbatim — never truncate, externalize, or descend.
 	// Unsigned blocks (e.g. an interrupted stream) have no such binding and stay
 	// truncatable for size control.
-	// Anthropic validates native web-search history byte-for-byte on replay.
-	// Keep the complete typed block atomic, including nested encrypted_content.
+	// Anthropic validates native web-search and tool-search history byte-for-byte
+	// on replay. Keep the complete typed block atomic, including opaque content.
 	if (typeof obj === "object" && "type" in obj && obj.type === "anthropicServerTool" && "block" in obj) {
 		const block = obj.block;
 		if (typeof block === "object" && block !== null && "type" in block && typeof block.type === "string") {
@@ -112,8 +139,21 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 				...("tool_use_id" in block ? { tool_use_id: block.tool_use_id } : {}),
 				...("content" in block ? { content: block.content } : {}),
 			};
-			if (isAnthropicWebSearchHistoryBlock(validationView)) return obj;
+			if (isAnthropicServerToolHistoryBlock(validationView)) return obj;
 		}
+	}
+	// Anthropic server-side compaction replay state: `encrypted_content` is
+	// opaque provider state the API validates byte-for-byte on replay, so the
+	// carrier persists atomically with its summary and metadata — both as a
+	// message `providerPayload` (`type: "anthropicCompaction"`) and under the
+	// preserveData slot, whose object carries no `type` marker of its own.
+	if (
+		typeof obj === "object" &&
+		obj !== null &&
+		(("type" in obj && obj.type === "anthropicCompaction") ||
+			(key === "anthropicCompaction" && "content" in obj && typeof obj.content === "string"))
+	) {
+		return obj;
 	}
 	if (typeof obj === "object" && "type" in obj) {
 		const signed =
@@ -148,6 +188,7 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 
 	if (Array.isArray(obj)) {
 		let changed = false;
+		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 		const result: unknown[] = new Array(obj.length);
 		for (let i = 0; i < obj.length; i++) {
 			const item = obj[i];
@@ -159,9 +200,16 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 	}
 
 	if (typeof obj === "object") {
+		// Two-phase: first a no-allocation scan for the only things that can
+		// change (jsonlEvents presence, oversized/image/signature strings).
+		// The common persisted entry is already clean and returns here with
+		// zero array/tuple allocation; only a dirty node pays for the rebuild.
+		if (!persistenceNodeNeedsRewrite(obj)) return obj;
 		let changed = false;
 		const entries: Array<readonly [string, unknown]> = [];
-		for (const [childKey, value] of Object.entries(obj)) {
+		for (const childKey in obj) {
+			if (!Object.hasOwn(obj, childKey)) continue;
+			const value = (obj as Record<string, unknown>)[childKey];
 			// Strip transient/redundant properties that shouldn't be persisted.
 			// - jsonlEvents: raw subprocess streaming events (already saved to artifact files)
 			if (childKey === "jsonlEvents") {
@@ -182,9 +230,10 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 			lineCountEntry &&
 			typeof lineCountEntry[1] === "number"
 		) {
-			const content = contentEntry[1];
+			// Same count as `content.split("\n").length` without the array.
+			const lineCount = countNewlines(contentEntry[1]) + 1;
 			const updatedEntries = entries.map(([childKey, value]) =>
-				childKey === "lineCount" ? ([childKey, content.split("\n").length] as const) : ([childKey, value] as const),
+				childKey === "lineCount" ? ([childKey, lineCount] as const) : ([childKey, value] as const),
 			);
 			return Object.fromEntries(updatedEntries);
 		}
@@ -192,6 +241,120 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 	}
 
 	return obj;
+}
+
+/**
+ * Whether this node can possibly change under `truncateForPersistence`:
+ * carries `jsonlEvents`, an oversized or image-position string, or (for
+ * objects) any child that can. Mirrors the change conditions of the rebuild
+ * pass exactly — a false negative silently keeps oversized content, so when
+ * in doubt this must return true.
+ */
+function persistenceNodeNeedsRewrite(obj: unknown, key?: string): boolean {
+	if (obj === null || obj === undefined) return false;
+	if (typeof obj === "string") {
+		if (
+			obj.length > MAX_PERSIST_CHARS &&
+			key !== "thinkingSignature" &&
+			key !== "thoughtSignature" &&
+			key !== "textSignature"
+		)
+			return true;
+		if (key === "image_url" && isImageDataUrl(obj)) return true;
+		return false;
+	}
+	if (Array.isArray(obj)) {
+		for (const item of obj) {
+			if (
+				item !== null && typeof item === "object"
+					? persistenceNodeNeedsRewrite(item, key)
+					: persistenceNodeNeedsRewrite(item, key)
+			)
+				return true;
+		}
+		return false;
+	}
+	if (typeof obj === "object") {
+		if ("jsonlEvents" in obj) return true;
+		// Externalize shapes rewrite (not verbatim): check before the
+		// atomic/verbatim classification below.
+		if (typeof obj === "object" && "type" in obj) {
+			const typed = obj as Record<string, unknown>;
+			if (
+				typed.type === "image_generation_call" &&
+				"result" in typed &&
+				typeof typed.result === "string" &&
+				!isBlobRef(typed.result) &&
+				typed.result.length >= BLOB_EXTERNALIZE_THRESHOLD
+			) {
+				return true;
+			}
+		}
+		if (shouldExternalizeImagePayload(obj, key)) return true;
+		if (isAtomicPersistenceNode(obj, key)) return false;
+		for (const childKey in obj) {
+			if (!Object.hasOwn(obj, childKey)) continue;
+			if (persistenceNodeNeedsRewrite((obj as Record<string, unknown>)[childKey], childKey)) return true;
+		}
+		return false;
+	}
+	return false;
+}
+
+/**
+ * True for nodes `truncateForPersistence` returns verbatim without
+ * descending: image-generation results, externalizable image payloads,
+ * anthropic server-tool/compaction carriers, and signed/encrypted blocks.
+ * Must stay in sync with the early-return guards above the recursion.
+ */
+function isAtomicPersistenceNode(obj: object, key?: string): boolean {
+	// NOTE: image_generation_call results and externalizable image payloads
+	// are NOT atomic — truncateForPersistence rewrites them via the blob
+	// store. They are checked explicitly in the predicate and must never be
+	// classified here.
+	if (typeof obj === "object" && "type" in obj) {
+		const typed = obj as Record<string, unknown>;
+		// Mirror the truncate guard exactly: only a block that passes
+		// isAnthropicServerToolHistoryBlock is atomic. An interrupted,
+		// corrupt, or forward-version block that FAILS validation falls
+		// through here (and in the main function) into the generic
+		// recursion, so oversized strings and jsonlEvents inside it are
+		// still truncated/stripped instead of bypassing size controls.
+		if (typed.type === "anthropicServerTool" && "block" in typed) {
+			const block = typed.block;
+			if (
+				typeof block === "object" &&
+				block !== null &&
+				"type" in block &&
+				typeof (block as { type?: unknown }).type === "string"
+			) {
+				const asBlock = block as Record<string, unknown>;
+				const validationView = {
+					type: asBlock.type as string,
+					...("name" in asBlock ? { name: asBlock.name } : {}),
+					...("id" in asBlock ? { id: asBlock.id } : {}),
+					...("tool_use_id" in asBlock ? { tool_use_id: asBlock.tool_use_id } : {}),
+					...("content" in asBlock ? { content: asBlock.content } : {}),
+				};
+				if (isAnthropicServerToolHistoryBlock(validationView)) return true;
+			}
+			return false;
+		}
+		if (
+			typed.type === "anthropicCompaction" ||
+			(key === "anthropicCompaction" && "content" in typed && typeof typed.content === "string")
+		)
+			return true;
+		const signed =
+			(typed.type === "thinking" && "thinkingSignature" in typed && isNonEmptyString(typed.thinkingSignature)) ||
+			(typed.type === "text" && "textSignature" in typed && isNonEmptyString(typed.textSignature)) ||
+			(typed.type === "toolCall" && "thoughtSignature" in typed && isNonEmptyString(typed.thoughtSignature));
+		const redacted = typed.type === "redactedThinking" && "data" in typed && isNonEmptyString(typed.data);
+		const encryptedReasoning =
+			typed.type === "reasoning" && "encrypted_content" in typed && isNonEmptyString(typed.encrypted_content);
+		if (signed || redacted || encryptedReasoning) return true;
+	}
+	return false;
 }
 
 /**

@@ -80,6 +80,7 @@ const geminiBudgetModel: Model<"google-generative-ai"> = buildModel({
 	thinking: {
 		mode: "budget",
 		efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+		effortBudgets: { [Effort.Low]: 2_048 },
 	},
 });
 

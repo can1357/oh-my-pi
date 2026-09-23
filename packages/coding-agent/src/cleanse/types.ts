@@ -54,6 +54,19 @@ export interface CleanseAssignment {
 	weight: number;
 }
 
+export type { CleanseTargetChoice } from "@oh-my-pi/pi-tui/apps/cleanse-picker";
+
+/** Terminal status of one cleanse run. */
+export type CleanseRunStatus = "clean" | "unresolved" | "unsupported" | "cancelled";
+
+/** Observable completion state returned to the CLI and overlay adapters. */
+export interface CleanseCommandResult {
+	exitCode: number;
+	status: CleanseRunStatus;
+	report: CleanseDiagnosticReport;
+	sessionFile?: string;
+}
+
 /** Settled result from one cleanse subagent. */
 export interface CleanseAgentOutcome {
 	name: string;
@@ -63,10 +76,11 @@ export interface CleanseAgentOutcome {
 	resolvedModel?: string;
 }
 
-/** Final state after one bounded repair wave and verification pass. */
+/** Final state after streamed repair dispatch and the verification pass. */
 export interface CleanseLoopResult {
 	status: "clean" | "stalled" | "cancelled";
-	waves: number;
+	/** Total repair subagents dispatched during the run. */
+	workers: number;
 	report: CleanseDiagnosticReport;
 	outcomes: CleanseAgentOutcome[];
 }

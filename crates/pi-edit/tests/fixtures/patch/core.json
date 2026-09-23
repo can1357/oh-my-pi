@@ -1,0 +1,100 @@
+{
+ "cases": [
+  {
+   "name": "creates a new file",
+   "files": {},
+   "args": {"path":"new.txt","edits":[{"op":"create","diff":"+hello\n+world"}]},
+   "expect": {"files":{"new.txt":"hello\nworld\n"}}
+  },
+  {
+   "name": "JSON patch create overwrites an existing file",
+   "files": {"existing.txt":"old\n"},
+   "args": {"path":"existing.txt","edits":[{"op":"create","diff":"replacement"}]},
+   "expect": {"files":{"existing.txt":"replacement\n"}}
+  },
+  {
+   "name": "updates a file with a unified hunk",
+   "files": {"a.txt":"one\ntwo\nthree\n"},
+   "args": {"path":"a.txt","edits":[{"op":"update","diff":"@@\n two\n-three\n+THREE"}]},
+   "expect": {"files":{"a.txt":"one\ntwo\nTHREE\n"}}
+  },
+  {
+   "name": "deletes an existing file",
+   "files": {"gone.txt":"bye\n"},
+   "args": {"path":"gone.txt","edits":[{"op":"delete"}]},
+   "expect": {"deleted":["gone.txt"]}
+  },
+  {
+   "name": "renames an updated file",
+   "files": {"old.txt":"before\n"},
+   "args": {"path":"old.txt","edits":[{"op":"update","rename":"dir/new.txt","diff":"@@\n-before\n+after"}]},
+   "expect": {"files":{"dir/new.txt":"after\n"},"deleted":["old.txt"]}
+  },
+  {
+   "name": "rejects a rename to the source path",
+   "files": {"same.txt":"x\n"},
+   "args": {"path":"same.txt","edits":[{"op":"update","rename":"same.txt","diff":"@@\n-x\n+y"}]},
+   "expect": {"error":"rename path is the same as source path","writes":0}
+  },
+  {
+   "name": "rejects a rename to an existing destination",
+   "files": {"from.txt":"x\n","to.txt":"occupied\n"},
+   "args": {"path":"from.txt","edits":[{"op":"update","rename":"to.txt","diff":"@@\n-x\n+y"}]},
+   "expect": {"error":"Cannot rename from.txt to to.txt: destination already exists.","writes":0}
+  },
+  {
+   "name": "applies batch entries sequentially",
+   "files": {"batch.txt":"one\n"},
+   "args": {"path":"batch.txt","edits":[{"op":"update","diff":"@@\n-one\n+two"},{"op":"update","diff":"@@\n-two\n+three"}]},
+   "expect": {"files":{"batch.txt":"three\n"},"writes":1}
+  },
+  {
+   "name": "respects changeContext for pure additions",
+   "files": {"add-context.ts":"function foo() {\n  return 1;\n}\nfunction bar() {\n  return 2;\n}\n"},
+   "args": {"path":"add-context.ts","edits":[{"op":"update","diff":"@@ function bar\n+  console.log('x');"}]},
+   "expect": {"files":{"add-context.ts":"function foo() {\n  return 1;\n}\nfunction bar() {\n  console.log('x');\n  return 2;\n}\n"}}
+  },
+  {
+   "name": "applies hunks regardless of order",
+   "files": {"order.txt":"first\nkeep\nsecond\nkeep\n"},
+   "args": {"path":"order.txt","edits":[{"op":"update","diff":"@@ second\n-keep\n+KEEP2\n@@ first\n-keep\n+KEEP1"}]},
+   "expect": {"files":{"order.txt":"first\nKEEP1\nsecond\nKEEP2\n"}}
+  },
+  {
+   "name": "preserves CRLF endings and trailing newline",
+   "files": {"crlf.txt":"foo\r\nbar\r\n"},
+   "args": {"path":"crlf.txt","edits":[{"op":"update","diff":"@@\n-foo\n+FOO"}]},
+   "expect": {"files":{"crlf.txt":"FOO\r\nbar\r\n"}}
+  },
+  {
+   "name": "preserves UTF-8 BOM and CRLF endings",
+   "files": {"bom.txt":"﻿foo\r\nbar\r\n"},
+   "args": {"path":"bom.txt","edits":[{"op":"update","diff":"@@\n-foo\n+FOO"}]},
+   "expect": {"files":{"bom.txt":"﻿FOO\r\nbar\r\n"}}
+  },
+  {
+   "name": "preserves missing trailing newline",
+   "files": {"nonewline.txt":"foo\nbar"},
+   "args": {"path":"nonewline.txt","edits":[{"op":"update","diff":"@@\n-bar\n+baz"}]},
+   "expect": {"files":{"nonewline.txt":"foo\nbaz"}}
+  },
+  {
+   "name": "rejects out-of-range line hints for insertions",
+   "files": {"line-hint.txt":"a\nb\n"},
+   "args": {"path":"line-hint.txt","edits":[{"op":"update","diff":"@@ -999,0 +999,1 @@\n+tail"}]},
+   "expect": {"error":"Line hint 999 is out of range for insertion in line-hint.txt (file has 2 lines)","writes":0}
+  },
+  {
+   "name":"context lines preserve original file indentation when fuzzy matched",
+   "files":{"context-indent.js":"export function describeWithPointerEvent(message, describeFn) {\n  const pointerEvent = 'PointerEvent';\n  const fallback = 'MouseEvent/TouchEvent';\n  describe.each`\n    value    | name\n    $true  | $pointerEvent\n    $true | $fallback\n  `(`${message}: $name`, entry => {\n    const hasPointerEvents = entry.value;\n  });\n}\n"},
+   "args":{"path":"context-indent.js","edits":[{"op":"update","diff":"@@ describe.each`\n   value    | name\n   $true  | $pointerEvent\n-   $true | $fallback\n+   $false | $fallback\n  `(`${message}: $name`, entry => {"}]},
+   "expect":{"files":{"context-indent.js":"export function describeWithPointerEvent(message, describeFn) {\n  const pointerEvent = 'PointerEvent';\n  const fallback = 'MouseEvent/TouchEvent';\n  describe.each`\n    value    | name\n    $true  | $pointerEvent\n    $false | $fallback\n  `(`${message}: $name`, entry => {\n    const hasPointerEvents = entry.value;\n  });\n}\n"}}
+  },
+  {
+   "name":"duplicate context lines are resolved via adjacent match to @@ anchor",
+   "files":{"ReactFlightDOMClientNode.js":"const handleEnd = () => {\n  if (--streamEndedCount === 2) {\n    cleanup();\n  }\n  if (--streamEndedCount === 2) {\n    finalize();\n  }\n};\n"},
+   "args":{"path":"ReactFlightDOMClientNode.js","edits":[{"op":"update","diff":"@@     const handleEnd = () => {\n       if (--streamEndedCount === 2) {\n-      if (--streamEndedCount === 2) {\n+      if (++streamEndedCount === 2) {"}]},
+   "expect":{"files":{"ReactFlightDOMClientNode.js":"const handleEnd = () => {\n  if (--streamEndedCount === 2) {\n    cleanup();\n  }\n  if (++streamEndedCount === 2) {\n    finalize();\n  }\n};\n"}}
+  }
+ ]
+}

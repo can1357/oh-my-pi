@@ -3,6 +3,7 @@ import { getKeybindings } from "../keybindings";
 import { extractPrintableText } from "../keys";
 import { KillRing } from "../kill-ring";
 import { type Component, CURSOR_MARKER, type Focusable } from "../tui";
+import { cursorColumnWindow } from "./scroll-viewport";
 import {
 	getSegmenter,
 	getWordNavKind,
@@ -50,6 +51,19 @@ export class Input implements Component, Focusable {
 
 	getValue(): string {
 		return this.#value;
+	}
+	/** Return bounded input content and cursor state for debug inspection. */
+	debugState(): Record<string, unknown> {
+		return {
+			textPreview: this.mask ? "********" : this.#value.slice(0, 120),
+			textLength: this.#value.length,
+			previewTruncated: this.#value.length > 120,
+			cursor: this.#cursor,
+			cursorLine: 0,
+			selection: null,
+			placeholderActive: false,
+			masked: this.mask,
+		};
 	}
 
 	setValue(value: string): void {
@@ -409,12 +423,13 @@ export class Input implements Component, Focusable {
 	}
 
 	render(width: number): readonly string[] {
+		width = Number.isFinite(width) ? Math.max(0, Math.trunc(width)) : 0;
 		// Calculate visible window
 		const prompt = this.prompt;
 		const availableWidth = width - visibleWidth(prompt);
 
 		if (availableWidth <= 0) {
-			return [prompt];
+			return [sliceWithWidth(prompt, 0, width, true).text];
 		}
 
 		let cursorIndex = this.#cursor;
@@ -427,32 +442,9 @@ export class Input implements Component, Focusable {
 		}
 		const displayValue = this.#cursor >= this.#value.length ? `${visibleValue} ` : visibleValue;
 
-		const totalCols = visibleWidth(displayValue);
-		const cursorCols = visibleWidth(displayValue.slice(0, cursorIndex));
-
-		// Width of the grapheme at the cursor, for ensuring it fits in the viewport.
-		const cursorIter = segmenter.segment(displayValue.slice(cursorIndex))[Symbol.iterator]();
-		const cursorG = cursorIter.next().value?.segment ?? " ";
-		const cursorGWidth = visibleWidth(cursorG);
-
-		const maxStart = Math.max(0, totalCols - availableWidth);
-		let startCol = 0;
-		if (totalCols > availableWidth) {
-			const half = Math.floor(availableWidth / 2);
-			startCol = Math.max(0, Math.min(maxStart, cursorCols - half));
-
-			// Ensure the cursor grapheme is inside the viewport (and fits fully if wide).
-			const maxCursorRel = Math.max(0, availableWidth - cursorGWidth);
-			const cursorRel = cursorCols - startCol;
-			if (cursorRel > maxCursorRel) {
-				startCol = Math.max(0, Math.min(maxStart, cursorCols - maxCursorRel));
-			}
-		}
-
-		const visibleText = sliceWithWidth(displayValue, startCol, availableWidth, true).text;
-		const prefixText = sliceWithWidth(displayValue, startCol, Math.max(0, cursorCols - startCol), true).text;
-		let cursorDisplay = prefixText.length;
-		cursorDisplay = Math.max(0, Math.min(cursorDisplay, visibleText.length));
+		const window = cursorColumnWindow(displayValue, cursorIndex, availableWidth);
+		const visibleText = window.text;
+		const cursorDisplay = window.cursorIndex;
 
 		// Build the visible line and insert the cursor marker at the buffer cursor.
 		const graphemes = [...segmenter.segment(visibleText.slice(cursorDisplay))];

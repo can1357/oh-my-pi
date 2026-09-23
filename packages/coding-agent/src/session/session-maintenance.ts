@@ -5,7 +5,7 @@ import {
 	type Agent,
 	type AgentMessage,
 	type AgentTurnEndContext,
-	countTokens,
+	type MessageCountOptions,
 	resolveTelemetry,
 	type StreamFn,
 	type ThinkingLevel,
@@ -15,29 +15,32 @@ import {
 	AUTO_HANDOFF_THRESHOLD_FOCUS,
 	applyShakeRegions,
 	CompactionCancelledError,
+	type CompactionDetails,
 	type CompactionPreparation,
 	type CompactionResult,
-	type CompactionSettings,
 	calculateContextTokens,
 	collectShakeRegions,
 	compact,
 	compactionContextTokens,
+	computeFileLists,
 	createCompactionSummaryMessage,
 	DEFAULT_SHAKE_CONFIG,
+	type CompactionSettings as EngineCompactionSettings,
 	effectiveReserveTokens,
-	estimateTokens,
-	hasContextTokenUsage,
+	invalidateMessageCache,
+	isTranscriptUsageAnchor,
 	NativeCompactionError,
 	prepareCompaction,
 	RESCUE_SHAKE_CONFIG,
+	remotePreserveReusable,
 	resolveBudgetReserveTokens,
 	resolveThresholdTokens,
 	type ShakeConfig,
 	type ShakeRegion,
 	type SummaryOptions,
 	shouldCompact,
-	shouldUseOpenAiRemoteCompaction,
 	shouldUseProviderNativeCompaction,
+	upsertFileOperations,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	DEFAULT_PRUNE_CONFIG,
@@ -46,29 +49,48 @@ import {
 	readToolSupersedeKey,
 } from "@oh-my-pi/pi-agent-core/compaction/pruning";
 import type { ProtectedToolMatcher } from "@oh-my-pi/pi-agent-core/compaction/tool-protection";
-import type { AssistantMessage, CodexCompactionContext, Message, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
+import type {
+	AssistantMessage,
+	CodexCompactionContext,
+	Message,
+	Model,
+	OpenAIResponsesHistoryPayload,
+	ProviderSessionState,
+} from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import { logger } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, Snowflake, stringifyJson } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
+import { writeArtifact } from "./artifacts";
 import type { ModelRegistry } from "../config/model-registry";
-import { MODEL_ROLE_IDS } from "../config/model-roles";
-import type { Settings } from "../config/settings";
-import { getDefault } from "../config/settings";
+import { CHAT_MODEL_ROLE_IDS } from "../config/model-roles";
+import type { CompactionSettings as ConfiguredCompactionSettings, Settings } from "../config/settings";
 import type { ExtensionRunner, SessionBeforeCompactResult } from "../extensibility/extensions";
 import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
 import type { GoalModeState } from "../goals/state";
 import { resolveMemoryBackend } from "../memory-backend/resolve";
 import type { MemoryBackendOperationContext } from "../memory-backend/types";
-import type { NonMessageTokenSource } from "../modes/utils/context-usage";
-import { computeNonMessageTokens } from "../modes/utils/context-usage";
+import { computeNonMessageTokens, type NonMessageTokenSource } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import { createPlanReadMatcher } from "../plan-mode/plan-protection";
-import type { ConfiguredThinkingLevel } from "../thinking";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ContextUsageBreakdown, HandoffResult, SessionHandoffOptions } from "./agent-session-types";
 import { findCompactMode } from "./compact-modes";
-import { convertToLlm, stripImagesFromMessage } from "./messages";
+import {
+	type CompactionMethod,
+	canUseRemoteCompaction,
+	DEFAULT_COMPACTION_METHOD_ORDER,
+	resolveCompactionMethodOrder,
+	resolveMethodSettings,
+	resolveSpeculationMethod,
+} from "./compaction-methods";
+import {
+	assistantTurnProducedOutput,
+	convertToLlm,
+	invalidateConvertToLlmArrayCache,
+	stripImagesFromMessage,
+} from "./messages";
 import { isTerminalTextAssistantAnswer } from "./queued-messages";
 import {
 	resolveCompactionConfiguredTarget,
@@ -76,10 +98,13 @@ import {
 	resolveRoleModelFull,
 } from "./role-models";
 import type { SessionContext } from "./session-context";
-import { getLatestCompactionEntry, getOpenAiRemoteCompactionPayload } from "./session-context";
+import { buildSessionContext, getLatestCompactionEntry, getOpenAiRemoteCompactionPayload } from "./session-context";
 import type { CompactionEntry, SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 import type { ShakeMode, ShakeResult } from "./shake-types";
+import { resolveSpeculationLeadTokens, SPECULATION_LEAD_MIN_TOKENS } from "./speculation-lead";
+import experimentalContextNotesReminderPrompt from "../prompts/system/experimental-context-notes-reminder.md" with { type: "text" };
+import experimentalContextRolloverPrompt from "../prompts/system/experimental-context-rollover.md" with { type: "text" };
 
 export type CompactionCheckResult = Readonly<{
 	deferredHandoff: boolean;
@@ -108,6 +133,99 @@ const COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION: CompactionCheckResult = {
 };
 
 /**
+ * Consecutive `response.incomplete` (length-stop) recoveries that produce no
+ * actionable output before recovery gives up. A model that keeps returning an
+ * empty `length` turn (seen with `zai/glm-4.5-flash`, #10594) would otherwise
+ * re-trigger compaction + `shake-retry` forever, persisting an empty assistant
+ * turn on every attempt. Mirrors the empty-stop / unexpected-stop retry caps in
+ * {@link TurnRecovery}; any turn that produces actionable output resets the
+ * counter, so legitimate multi-step recoveries are never cut short.
+ */
+export const INCOMPLETE_RECOVERY_MAX_RETRIES = 3;
+
+/** Whether a configured preference list contains at least one automatic method. */
+function hasConfiguredCompactionMethod(settings: ConfiguredCompactionSettings): boolean {
+	return resolveCompactionMethodOrder(settings.methodOrder).length > 0;
+}
+
+/**
+ * Whether `candidate` is actually selectable for `reason` on `model` — mirrors the
+ * per-candidate availability check in {@link SessionMaintenance.runAutoCompaction}'s
+ * method-order loop so every caller agrees with what would really be selected.
+ *
+ * `excludeMedia` skips `snapcompact` regardless of model support: it archives
+ * history onto base64-encoded image frames (up to ~3 MB), which is the opposite
+ * of what a byte/payload-limit 413 recovery needs — a request already rejected
+ * for being too large in bytes should not be retried with an even larger,
+ * media-heavy one (#11482).
+ */
+function isCompactionMethodUsable(
+	candidate: CompactionMethod,
+	reason: "overflow" | "threshold" | "idle" | "incomplete",
+	model: Model | undefined,
+	settings: ConfiguredCompactionSettings,
+	excludeMedia = false,
+): boolean {
+	return candidate === "remote"
+		? canUseRemoteCompaction(model, resolveMethodSettings(settings, candidate))
+		: candidate === "snapcompact"
+			? !excludeMedia && model?.input.includes("image") === true
+			: candidate === "handoff"
+				? reason !== "overflow"
+				: true;
+}
+
+/**
+ * Whether the configured method order contains at least one method that
+ * `runAutoCompaction` would actually select for `reason` on `model` — a non-empty
+ * `methodOrder` alone (see {@link hasConfiguredCompactionMethod}) is not enough: an
+ * unusable-for-this-reason configuration (e.g. `methodOrder: ["handoff"]` for an
+ * `"overflow"` reason, or `snapcompact`-only on a text-only model) would otherwise be
+ * reported as available and then silently no-op in `runAutoCompaction` (#11482).
+ */
+function hasUsableCompactionMethod(
+	reason: "overflow" | "threshold" | "idle" | "incomplete",
+	model: Model | undefined,
+	settings: ConfiguredCompactionSettings,
+	excludeMedia = false,
+): boolean {
+	return resolveCompactionMethodOrder(settings.methodOrder).some(candidate =>
+		isCompactionMethodUsable(candidate, reason, model, settings, excludeMedia),
+	);
+}
+
+/**
+ * Concrete media-limit wording in a payload-rejection error (e.g.
+ * `request_too_large: too many images`, `image count exceeds the limit of
+ * 20`). `ambiguousPayloadRejection` (dual `ContextOverflow` + `PayloadRejected`)
+ * only catches text that *also* matches a generic numeric-limit pattern — a
+ * digit-free media rejection like the first example sails through as
+ * non-ambiguous. That text is still definitive media-budget evidence: token
+ * compaction can't raise a provider's image-count limit, and some methods
+ * (snapcompact) *add* image frames, making it worse. Such rejections must
+ * stay on the terminal payload-dead-end path regardless of compaction
+ * availability (#11482).
+ *
+ * Deliberately narrower than matching bare "images"/"media"/"vision"/"frames"/
+ * "pixels" anywhere in the text: a custom provider's error that merely names a
+ * vision model (`llava-vision`) or an unrelated `Content-Type` (`media type
+ * application/json`) is not evidence the *request* was rejected for a media
+ * budget — treating it as such would permanently dead-end an unknown-window
+ * session that ordinary compaction could actually recover (#11482). Require
+ * the noun to co-occur with a count/limit signal instead — covering the
+ * common phrasings: "too many images", "image count"/"image limit", "limit
+ * of N images", "maximum (of N) images", "number/count of images",
+ * "images exceeds ... maximum", and per-image size/dimension rejections
+ * like "image is too large" or "image dimensions exceed 8000 pixels"
+ * (#11482).
+ */
+const PAYLOAD_MEDIA_LIMIT_EVIDENCE_PATTERN =
+	/\btoo many (?:images?|frames?|pixels?)\b|\b(?:images?|frames?|pixels?)\s*(?:count|limit)\b|\blimit of \d+\s*(?:images?|frames?|pixels?)\b|\bmaximum(?: of \d+)? (?:images?|frames?|pixels?)\b|\b(?:number|count) of (?:images?|frames?|pixels?)\b|\b(?:images?|frames?|pixels?)\b.{0,20}\bexceeds?\b.{0,20}\bmaximum\b|\b(?:images?|frames?) (?:is |are )?too large\b|\b(?:images?|frames?) dimensions?\b.{0,30}\bexceeds?\b.{0,30}\b(?:pixels?|\d+)\b/i;
+function hasExplicitMediaRejectionEvidence(errorMessage: string | undefined): boolean {
+	return errorMessage !== undefined && PAYLOAD_MEDIA_LIMIT_EVIDENCE_PATTERN.test(errorMessage);
+}
+
+/**
  * User-facing notice for a compaction dead end: maintenance freed too little
  * to retry safely. `remedies` names the recovery actions left on the emitting
  * path — by the time the post-pass dead end fires, the tiered rescue has
@@ -117,6 +235,26 @@ function compactionDeadEndWarning(remedies: string): string {
 	return (
 		"Compaction freed too little context to make progress — pausing automatic maintenance to avoid a compaction loop. " +
 		`The most recent turn alone is too large to reduce further; ${remedies} or switch to a larger-context model.`
+	);
+}
+
+/** Honest-skip notice for a payload-shaped HTTP 413 where compaction was correctly withheld (#9235). */
+function payloadRejectionNotice(storedTokens: number, contextWindow: number): string {
+	const remedies =
+		"Token compaction cannot shrink bytes or image budgets; reduce or remove archived image frames (e.g. switch compaction.methodOrder away from snapcompact) or raise the server/proxy body limit.";
+	if (contextWindow <= 0) {
+		return `The provider rejected the request size or media budget (HTTP 413), and this model has no known context window to compare against — this is NOT a token-context problem. ${remedies}`;
+	}
+	const headroom = Math.max(0, Math.floor(contextWindow - storedTokens));
+	return `The provider rejected the request size or media budget (HTTP 413), but ~${headroom.toLocaleString("en-US")} tokens of headroom remain locally — this is NOT a token-context problem. ${remedies}`;
+}
+
+/** Dead-end notice when provider-reported usage proves context overflow but no recovery exists (#9235). */
+function usageOverflowDeadEndNotice(reportedInputTokens: number, contextWindow: number): string {
+	const windowLabel = contextWindow > 0 ? contextWindow.toLocaleString("en-US") : "unknown";
+	return (
+		`The provider reports ~${reportedInputTokens.toLocaleString("en-US")} input tokens against a ${windowLabel}-token context window — this IS a token-context problem, but automatic compaction is unavailable to shrink it. ` +
+		"Enable a compaction method (compaction.enabled with a configured methodOrder), reduce the conversation's token usage, or switch to a larger-context model."
 	);
 }
 
@@ -165,12 +303,73 @@ const PRUNE_IDLE_FLUSH_MS = 90 * 60_000;
  */
 const COMPACTION_RECOVERY_BAND = 0.8;
 
+/** Payload-shaped 413s share text patterns with overflow; trust the payload classification when local
+ *  occupancy stays under this ceiling (≥10% headroom) and reported usage stays within the window (#9235). */
+const PAYLOAD_REJECTION_OCCUPANCY_CEILING = 0.9;
+
+/** A speculation-produced compaction result, ready to commit at threshold. */
+interface ArmedSpeculation {
+	result: CompactionResult;
+	action: "context-full" | "handoff" | "remote";
+	method: CompactionMethod;
+	codexCompaction?: CodexCompactionContext;
+	/** Last branch entry covered by the speculated summary's source snapshot. */
+	snapshotLeafId: string;
+	/** Context size when speculation started; drives refresh-on-growth. */
+	contextTokensAtStart: number;
+}
+
+type CompactionProjectionArgs = {
+	summary: string;
+	shortSummary?: string;
+	tokensBefore: number;
+	firstKeptEntryId: string;
+	preserveData?: Record<string, unknown>;
+	details?: unknown;
+	method?: CompactionMethod;
+	providerReplayThroughEntryId?: string;
+};
+
+/** One background speculative-compaction run and (once resolved) its armed result. */
+interface SpeculationRun {
+	controller: AbortController;
+	promise: Promise<void>;
+	contextTokensAtStart: number;
+	armed?: ArmedSpeculation;
+}
+
 function mergeLlmCompactionPreserveData(
 	hookPreserveData: Record<string, unknown> | undefined,
 	resultPreserveData: Record<string, unknown> | undefined,
 ): Record<string, unknown> | undefined {
-	const preserveData = { ...(hookPreserveData ?? {}), ...(resultPreserveData ?? {}) };
+	const preserveData = { ...hookPreserveData, ...resultPreserveData };
 	return snapcompact.stripPreservedArchive(Object.keys(preserveData).length > 0 ? preserveData : undefined);
+}
+
+/** Wrap a handoff document as a compaction summary: append the cumulative file-operations tag and derive entry details. */
+function handoffSummaryFromDocument(
+	document: string,
+	preparation: CompactionPreparation,
+): { summary: string; details: CompactionDetails } {
+	const { readFiles, modifiedFiles } = computeFileLists(preparation.fileOps);
+	return {
+		summary: upsertFileOperations(document, readFiles, modifiedFiles, preparation.fileOps.read),
+		details: { readFiles, modifiedFiles },
+	};
+}
+
+/**
+ * Manual compaction rejected as a no-op: the session is too small, or its
+ * branch already ends in a compaction entry. Thrown before this pass runs a
+ * method or appends anything, so — unlike a hook cancel or a summarizer
+ * failure — a turn the pass aborted (or a resume it inherited from an earlier
+ * pass) is resumed exactly as after a committed summary.
+ */
+class ManualCompactionNoOpError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "ManualCompactionNoOpError";
+	}
 }
 
 /** Capabilities borrowed from the owning AgentSession. */
@@ -195,14 +394,18 @@ export interface SessionMaintenanceHost {
 	goalModeState(): GoalModeState | undefined;
 	planReferencePath(): string;
 	nonMessageTokenSource(): NonMessageTokenSource;
+	hasExperimentalContextRolloverTools(): boolean;
+	takeExperimentalContextRolloverRequest(context: AgentTurnEndContext | undefined): boolean;
+	queueExperimentalContextNotesReminder(prompt: string): void;
 	memoryBackendSession(): MemoryBackendOperationContext["session"];
-	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
+	emitSessionEvent(event: AgentSessionEvent, options?: { detachExtensions?: boolean }): Promise<void>;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
 	schedulePostPromptTask(
 		task: (signal: AbortSignal) => Promise<void>,
 		options?: { delayMs?: number; generation?: number; onSkip?: (reason: "aborted" | "stale-generation") => void },
 	): void;
-	scheduleAgentContinue(options?: {
+	scheduleAgentContinue(options: {
+		source: string;
 		delayMs?: number;
 		generation?: number;
 		shouldContinue?: () => boolean;
@@ -245,14 +448,17 @@ export interface SessionMaintenanceHost {
 	getContextUsage(options?: { contextWindow?: number }): ContextUsage | undefined;
 	shake(mode: ShakeMode, options?: { config?: ShakeConfig; signal?: AbortSignal }): Promise<ShakeResult>;
 	dropImages(): Promise<{ removed: number }>;
-	runHandoff(customInstructions?: string, options?: SessionHandoffOptions): Promise<HandoffResult | undefined>;
+	generateHandoffDocument(
+		customInstructions?: string,
+		options?: SessionHandoffOptions,
+	): Promise<HandoffResult | undefined>;
 	removeAssistantMessageFromActiveContext(message: AssistantMessage): void;
-	dropPersistedAssistantTurn(message: AssistantMessage): Promise<void>;
+	dropPersistedAssistantTurn(message: AssistantMessage): Promise<string | undefined>;
 	runRecoveryCompactionWithRollback(
 		reason: "overflow" | "incomplete",
 		message: AssistantMessage,
 		allowDefer: boolean,
-		options: { autoContinue: boolean; triggerContextTokens?: number },
+		options: { autoContinue: boolean; triggerContextTokens?: number; excludeMediaMethods?: boolean },
 	): Promise<CompactionCheckResult>;
 	parseRetryAfterMsFromError(errorMessage: string): number | undefined;
 	setModelTemporary(
@@ -271,6 +477,12 @@ export interface SessionMaintenanceHost {
 /** Owns compaction, pruning, shake, promotion, and automatic context maintenance. */
 export class SessionMaintenance {
 	#compactionAbortController: AbortController | undefined;
+	/** Resolves after an active manual compaction has reconnected the agent subscription. */
+	#manualCompactionCleanup: Promise<void> | undefined;
+	/** Dispatches holding an unreleased claim from {@link waitForManualCompactionCleanup}/{@link claimPendingResume}; any one may supersede the interrupted-turn resume. */
+	#promptsAwaitingCleanup = 0;
+	/** Interrupted-turn resume withheld from a compaction `finally` because a claim was open; consumed by `release(false)`, {@link noteTurnStarted}, or the next manual pass. */
+	#deferredResumeGeneration: number | undefined;
 	#autoCompactionAbortController: AbortController | undefined;
 	/**
 	 * Live tool-loop contexts parked after mid-turn maintenance hit a no-progress
@@ -285,11 +497,26 @@ export class SessionMaintenance {
 	 * persisted turn, but a new agent loop still gets its own live-array guard.
 	 */
 	#midTurnDeadEndPendingPrePrompt = false;
+	/** In-flight or armed background speculative compaction, if any. */
+	#speculation: SpeculationRun | undefined;
 	#skipPostTurnMaintenanceAssistantTimestamp: number | undefined;
+	/**
+	 * Consecutive no-progress `response.incomplete` (length-stop) recoveries in
+	 * the current continuation loop. Bounded by {@link INCOMPLETE_RECOVERY_MAX_RETRIES};
+	 * reset by any turn that produces actionable output and on every new user
+	 * prompt ({@link resetForNewPrompt}).
+	 */
+	#incompleteRecoveryAttempts = 0;
+	/** Latest rollover boundary that already received its pre-threshold notebook reminder. */
+	#experimentalNotesReminderBoundaryId: string | undefined;
 	readonly #host: SessionMaintenanceHost;
 
 	get #model(): Model | undefined {
 		return this.#host.model();
+	}
+
+	get #tokenizer() {
+		return this.#host.agent.tokenizer;
 	}
 
 	get #goalModeState(): GoalModeState | undefined {
@@ -300,9 +527,64 @@ export class SessionMaintenance {
 		this.#host = host;
 	}
 
+	/** Experimental rollover is safe only when the current effective tool surface can recover its state. */
+	#usesExperimentalContextManagement(): boolean {
+		return (
+			this.#host.settings.getGroup("compaction").experimentalContextManagement === true &&
+			this.#host.hasExperimentalContextRolloverTools()
+		);
+	}
+
+	/**
+	 * The notebook prompt is deliberately single-shot per rollover window. It is
+	 * injected by the owner at the next normal aside boundary, never by rewriting
+	 * a completed provider turn.
+	 */
+	#maybeQueueExperimentalNotesReminder(contextTokens: number, contextWindow: number): void {
+		if (!this.#usesExperimentalContextManagement()) return;
+		const settings = this.#host.settings.getGroup("compaction");
+		if (!settings.enabled || this.isCompacting || this.#host.isGeneratingHandoff()) return;
+		const thresholdTokens = resolveThresholdTokens(contextWindow, settings);
+		if (contextTokens >= thresholdTokens) return;
+		if (thresholdTokens - contextTokens > resolveSpeculationLeadTokens(thresholdTokens)) return;
+		const branch = this.#host.sessionManager.getBranch();
+		const boundaryId =
+			branch.findLast(entry => entry.type === "compaction" || entry.type === "reset_boundary")?.id ??
+			branch[0]?.id ??
+			"empty";
+		if (this.#experimentalNotesReminderBoundaryId === boundaryId) return;
+		this.#experimentalNotesReminderBoundaryId = boundaryId;
+		this.#host.queueExperimentalContextNotesReminder(experimentalContextNotesReminderPrompt);
+	}
+
+	/** Clears per-prompt recovery counters when a new user prompt starts. */
+	resetForNewPrompt(): void {
+		this.#incompleteRecoveryAttempts = 0;
+	}
+
 	/** Whether manual or automatic context maintenance is active. */
 	get isCompacting(): boolean {
 		return this.#autoCompactionAbortController !== undefined || this.#compactionAbortController !== undefined;
+	}
+
+	/** Background speculative-compaction state, for UI indicators. */
+	get speculationState(): "idle" | "running" | "armed" {
+		const run = this.#speculation;
+		if (!run) return "idle";
+		return run.armed ? "armed" : "running";
+	}
+
+	/** Completion of the current speculative pass, used to resume maintenance skipped during its handoff. */
+	get speculationCompletion(): Promise<void> | undefined {
+		return this.#speculation?.promise;
+	}
+
+	/** Abort and discard any in-flight or armed speculative compaction. */
+	cancelSpeculation(): void {
+		const run = this.#speculation;
+		if (!run) return;
+		this.#speculation = undefined;
+		run.controller.abort();
 	}
 
 	/** Assistant timestamp whose post-turn maintenance must be skipped once. */
@@ -312,6 +594,15 @@ export class SessionMaintenance {
 
 	set skipPostTurnMaintenanceAssistantTimestamp(timestamp: number | undefined) {
 		this.#skipPostTurnMaintenanceAssistantTimestamp = timestamp;
+	}
+
+	/**
+	 * Emit a compaction lifecycle event. Mid-turn callers detach only extension
+	 * fan-out for post-commit events; ordered subscriber delivery still completes
+	 * before maintenance returns.
+	 */
+	#emitLifecycleEvent(event: AgentSessionEvent, detach: boolean): Promise<void> {
+		return this.#host.emitSessionEvent(event, detach ? { detachExtensions: true } : undefined);
 	}
 	/**
 	 * Append plan-read protection to a prune/shake config so the active plan
@@ -329,13 +620,16 @@ export class SessionMaintenance {
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
 		const result = pruneToolOutputs(
 			branchEntries,
+			this.#tokenizer,
 			this.#withPlanProtection({
 				...DEFAULT_PRUNE_CONFIG,
 				pruneUseless: this.#host.settings.getGroup("compaction").dropUseless,
 				// Cache-stable boundary: never re-write the warm, already-sent prefix
 				// (deep stale/age victims) or summarized-away entries every turn.
 				keepBoundaryId,
-				cacheWarmSuffixTokens: PRUNE_CACHE_WARM_SUFFIX_TOKENS,
+				// Prefix-bound thinking cannot survive rewrites inside a warm provider prefix.
+				cacheWarmSuffixTokens:
+					this.#host.model()?.thinking?.prefixBinding === true ? 0 : PRUNE_CACHE_WARM_SUFFIX_TOKENS,
 			}),
 		);
 		if (result.prunedCount === 0) {
@@ -371,6 +665,7 @@ export class SessionMaintenance {
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
 		const result = pruneSupersededToolResults(
 			branchEntries,
+			this.#tokenizer,
 			this.#withPlanProtection({
 				supersedeKey: supersedeReads ? readToolSupersedeKey : undefined,
 				pruneUseless: dropUseless,
@@ -379,6 +674,8 @@ export class SessionMaintenance {
 				// region once the cache is genuinely cold (idle exceeds the 1h TTL).
 				keepBoundaryId,
 				idleFlushMs: PRUNE_IDLE_FLUSH_MS,
+				// Prefix-bound thinking cannot survive rewrites inside a warm provider prefix.
+				suffixTokenLimit: this.#host.model()?.thinking?.prefixBinding === true ? 0 : undefined,
 			}),
 		);
 		if (result.prunedCount === 0) {
@@ -448,6 +745,7 @@ export class SessionMaintenance {
 	 * Surgically reduce context by dropping heavy content ("shake").
 	 *
 	 * - `images` delegates to {@link dropImages}.
+	 * - `thinking` removes assistant reasoning blocks without replacement text.
 	 * - `elide` replaces whole tool-call results and large fenced/XML blocks
 	 *   with short placeholders that embed an `artifact://` recovery link.
 	 *
@@ -457,44 +755,142 @@ export class SessionMaintenance {
 	 *
 	 * No-op (zero counts) when nothing is eligible.
 	 */
-	async shake(mode: ShakeMode, opts: { config?: ShakeConfig; signal?: AbortSignal } = {}): Promise<ShakeResult> {
+	async shake(
+		mode: ShakeMode,
+		opts: {
+			config?: ShakeConfig;
+			signal?: AbortSignal;
+			requireArtifact?: boolean;
+			isCurrent?: () => boolean;
+			toolResultsOnly?: boolean;
+		} = {},
+	): Promise<ShakeResult> {
 		if (mode === "images") {
 			const { removed } = await this.#host.dropImages();
 			return { mode, toolResultsDropped: 0, blocksDropped: 0, imagesDropped: removed, tokensFreed: 0 };
 		}
 
+		if (mode === "thinking") {
+			const branchEntries = this.#host.sessionManager.getBranch();
+			const latestCompaction = getLatestCompactionEntry(branchEntries);
+			const compactionIndex = latestCompaction ? branchEntries.lastIndexOf(latestCompaction) : -1;
+			const hasRemoteReplacementHistory = getOpenAiRemoteCompactionPayload(latestCompaction) !== undefined;
+			let anchorIndex = -1;
+			for (let index = branchEntries.length - 1; index > compactionIndex; index--) {
+				const entry = branchEntries[index];
+				if (entry.type !== "message" || !isTranscriptUsageAnchor(entry.message)) continue;
+				anchorIndex = index;
+				break;
+			}
+			let removed = 0;
+			let tokensFreed = 0;
+			let anchoredTokensRemoved = 0;
+			const countOptions = { excludeEncryptedReasoning: true } as const;
+			for (const [index, entry] of branchEntries.entries()) {
+				if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+				const message = entry.message;
+				const kept = message.content.filter(
+					block => block.type !== "thinking" && block.type !== "redactedThinking",
+				);
+				const dropped = message.content.length - kept.length;
+				if (dropped === 0) continue;
+				// Match the stored-context floor: opaque signatures and encrypted
+				// reasoning bytes do not have a reliable provider-token equivalent.
+				const before = this.#tokenizer.countMessage(message, countOptions);
+				// Provider serializers omit empty assistant turns, so don't invent model-authored text.
+				message.content = kept;
+				invalidateMessageCache(message);
+				const saved = Math.max(0, before - this.#tokenizer.countMessage(message, countOptions));
+				tokensFreed += saved;
+				if (index < anchorIndex && (!hasRemoteReplacementHistory || index > compactionIndex)) {
+					anchoredTokensRemoved += saved;
+				}
+				removed += dropped;
+			}
+			if (removed === 0) {
+				return { mode, toolResultsDropped: 0, blocksDropped: 0, thinkingBlocksDropped: 0, tokensFreed: 0 };
+			}
+			this.#host.recordAnchoredHistoryRewrite(anchoredTokensRemoved);
+			await this.#host.sessionManager.rewriteEntries();
+			const sessionContext = this.#host.buildDisplaySessionContext();
+			this.#host.agent.replaceMessages(sessionContext.messages);
+			this.#host.resetAdvisorRuntimes("shake");
+			this.#host.closeCodexProviderSessionsForHistoryRewrite();
+			return { mode, toolResultsDropped: 0, blocksDropped: 0, thinkingBlocksDropped: removed, tokensFreed };
+		}
+
+		const assertCurrent = () => {
+			if (opts.signal?.aborted || opts.isCurrent?.() === false) throw new CompactionCancelledError();
+		};
+		assertCurrent();
 		const branchEntries = this.#host.sessionManager.getBranch();
 		const latestCompaction = getLatestCompactionEntry(branchEntries);
 		const config = this.#withPlanProtection({
 			...(opts.config ?? AGGRESSIVE_SHAKE_CONFIG),
 			// Skip entries summarized away by the latest compaction — shaking them
-			// only churns persisted history with no prompt/cache effect.
+			// only churns persisted history with no prompt/cache effect. The cut is
+			// unconditional on the wire (see `buildSessionContext`), so a compaction
+			// the active model cannot replay still hides its prefix from the prompt.
 			keepBoundaryId: latestCompaction?.firstKeptEntryId,
 		});
-		const regions = collectShakeRegions(branchEntries, config);
+		let regions = collectShakeRegions(branchEntries, this.#tokenizer, config);
+		if (opts.toolResultsOnly) regions = regions.filter(region => region.kind === "toolResult");
 		if (regions.length === 0) {
 			return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
 		}
 
-		const artifactId = await this.#saveShakeArtifact(regions);
-		const replacements = regions.map((region, index) => this.#shakeElidePlaceholder(region, index, artifactId));
+		let reservedArtifact: { id?: string; path?: string } = {};
+		try {
+			reservedArtifact = await this.#host.sessionManager.allocateArtifactPath("shake");
+		} catch {
+			if (opts.requireArtifact) throw new Error("shake could not save a recovery artifact");
+		}
+		assertCurrent();
+		let artifactId = reservedArtifact.id;
+		const calculateReplacementState = (id: string | undefined) => {
+			const replacements = regions.map((region, index) => this.#shakeElidePlaceholder(region, index, id));
+			const replacementTokenCounts = replacements.map(replacement =>
+				replacement.length > 0 ? this.#tokenizer.countTokens(replacement) : 0,
+			);
+			const savings = regions.reduce(
+				(total, region, index) => total + region.tokens - (replacementTokenCounts[index] ?? 0),
+				0,
+			);
+			return { replacements, replacementTokenCounts, savings };
+		};
+		let { replacements, replacementTokenCounts, savings } = calculateReplacementState(artifactId);
+		if (opts.toolResultsOnly && savings < config.minSavings) {
+			return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
+		}
+		if (reservedArtifact.path && reservedArtifact.id) {
+			try {
+				await writeArtifact(reservedArtifact.path, this.#shakeArtifactText(regions));
+			} catch {
+				if (opts.requireArtifact) throw new Error("shake could not save a recovery artifact");
+				artifactId = undefined;
+				({ replacements, replacementTokenCounts, savings } = calculateReplacementState(artifactId));
+			}
+		} else {
+			artifactId = await this.#saveShakeArtifact(regions);
+			assertCurrent();
+			if (opts.requireArtifact && !artifactId) {
+				throw new Error("shake could not save a recovery artifact");
+			}
+			({ replacements, replacementTokenCounts, savings } = calculateReplacementState(artifactId));
+			if (opts.toolResultsOnly && savings < config.minSavings) {
+				return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
+			}
+		}
 
+		assertCurrent();
 		const hasRemoteReplacementHistory = getOpenAiRemoteCompactionPayload(latestCompaction) !== undefined;
 		const compactionIndex = latestCompaction ? branchEntries.lastIndexOf(latestCompaction) : -1;
 		let anchorIndex = -1;
 		for (let index = branchEntries.length - 1; index > compactionIndex; index--) {
 			const entry = branchEntries[index];
-			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
-			const assistant = entry.message;
-			if (
-				assistant.stopReason !== "aborted" &&
-				assistant.stopReason !== "error" &&
-				assistant.usage &&
-				hasContextTokenUsage(assistant.usage)
-			) {
-				anchorIndex = index;
-				break;
-			}
+			if (entry.type !== "message" || !isTranscriptUsageAnchor(entry.message)) continue;
+			anchorIndex = index;
+			break;
 		}
 		const entryIndexes = new Map(branchEntries.map((entry, index) => [entry, index]));
 
@@ -508,7 +904,7 @@ export class SessionMaintenance {
 			else blocksDropped++;
 			originalTokens += region.tokens;
 			const replacement = replacements[index];
-			const replacementTokenCount = replacement.length > 0 ? countTokens(replacement) : 0;
+			const replacementTokenCount = replacementTokenCounts[index] ?? 0;
 			replacementTokens += replacementTokenCount;
 			const entryIndex = entryIndexes.get(region.entry) ?? -1;
 			if (
@@ -521,10 +917,23 @@ export class SessionMaintenance {
 			return { region, replacement };
 		});
 
+		const entrySnapshots = new Map<SessionEntry, SessionEntry>();
+		for (const { region } of items) {
+			if (!entrySnapshots.has(region.entry)) entrySnapshots.set(region.entry, structuredClone(region.entry));
+		}
+		const anchorEntry = anchorIndex >= 0 ? branchEntries[anchorIndex] : undefined;
+		if (anchorEntry && !entrySnapshots.has(anchorEntry))
+			entrySnapshots.set(anchorEntry, structuredClone(anchorEntry));
 		applyShakeRegions(items);
-		this.#host.recordAnchoredHistoryRewrite(anchoredTokensRemoved);
-
-		await this.#host.sessionManager.rewriteEntries();
+		try {
+			this.#host.recordAnchoredHistoryRewrite(anchoredTokensRemoved);
+			await this.#host.sessionManager.rewriteEntries();
+		} catch (error) {
+			for (const [entry, snapshot] of entrySnapshots) Object.assign(entry, snapshot);
+			const sessionContext = this.#host.buildDisplaySessionContext();
+			this.#host.agent.replaceMessages(sessionContext.messages);
+			throw error;
+		}
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
 		this.#host.resetAdvisorRuntimes("shake");
@@ -539,27 +948,48 @@ export class SessionMaintenance {
 		};
 	}
 
+	/** One-shot, artifact-backed mechanical reduction for a pre-output Responses body-read timeout. */
+	async shakeForRequestBodyReadTimeout(generation: number): Promise<boolean> {
+		const settings = this.#host.settings.getGroup("compaction");
+		if (!settings.enabled || !resolveCompactionMethodOrder(settings.methodOrder).includes("shake")) return false;
+		const isCurrent = () => !this.#host.isDisposed() && this.#host.promptGeneration() === generation;
+		if (!isCurrent()) return false;
+		try {
+			const result = await this.shake("elide", {
+				config: DEFAULT_SHAKE_CONFIG,
+				requireArtifact: true,
+				isCurrent,
+				toolResultsOnly: true,
+			});
+			return isCurrent() && result.toolResultsDropped + result.blocksDropped > 0;
+		} catch (error) {
+			if (!(error instanceof CompactionCancelledError)) {
+				this.#host.emitNotice("warning", "Could not safely reduce this request before retrying it.", "compaction");
+			}
+			return false;
+		}
+	}
+
 	#shakeElidePlaceholder(region: ShakeRegion, index: number, artifactId: string | undefined): string {
 		if (artifactId) {
 			return `[shaken ~${region.tokens} tokens — recover: artifact://${artifactId} (region ${index + 1})]`;
 		}
 		return `[shaken ~${region.tokens} tokens]`;
 	}
-
-	/**
-	 * Concatenate the original region contents into one session artifact so the
-	 * agent can read them back via `artifact://<id>`. Returns `undefined` when
-	 * the session is not persisted or the write fails — callers degrade to a
-	 * bare placeholder.
-	 */
-	async #saveShakeArtifact(regions: ShakeRegion[]): Promise<string | undefined> {
+	/** Concatenate original regions into the persisted shake artifact body. */
+	#shakeArtifactText(regions: ShakeRegion[]): string {
 		const parts: string[] = [];
 		for (let i = 0; i < regions.length; i++) {
 			const region = regions[i];
 			parts.push(`### region ${i + 1} (${region.label}, ~${region.tokens} tok)`, "", region.originalText, "");
 		}
+		return parts.join("\n");
+	}
+
+	/** Persist the shake artifact, using the session manager's in-memory fallback when needed. */
+	async #saveShakeArtifact(regions: ShakeRegion[]): Promise<string | undefined> {
 		try {
-			return await this.#host.sessionManager.saveArtifact(parts.join("\n"), "shake");
+			return await this.#host.sessionManager.saveArtifact(this.#shakeArtifactText(regions), "shake");
 		} catch {
 			return undefined;
 		}
@@ -570,9 +1000,20 @@ export class SessionMaintenance {
 	 * Aborts current agent operation first.
 	 * @param customInstructions Optional instructions for the compaction summary
 	 * @param options Optional callbacks for completion/error handling
+	 * @param onCommitted Internal: nested fallback frames report their commit to
+	 * the owning frame the moment the entry lands, so a late rejection (a
+	 * `session_compact` hook or `onComplete` throwing after the append) still
+	 * resumes the interrupted turn exactly as the direct path does.
 	 */
-	async compact(customInstructions?: string, options?: CompactOptions): Promise<CompactionResult> {
-		if (this.#compactionAbortController) {
+	async compact(
+		customInstructions?: string,
+		options?: CompactOptions,
+		methodOffset = 0,
+		retryController?: AbortController,
+		onCommitted?: () => void,
+	): Promise<CompactionResult> {
+		const ownsCompactionController = retryController === undefined;
+		if (this.#compactionAbortController && this.#compactionAbortController !== retryController) {
 			throw new Error("Compaction already in progress");
 		}
 		// Resolve the `/compact <mode>` subcommand up front so input validation
@@ -580,6 +1021,7 @@ export class SessionMaintenance {
 		const compactMode = options?.mode ? findCompactMode(options.mode) : undefined;
 		// Modes that produce no LLM summary (snapcompact) have nothing to focus.
 		// Reject focus text loudly so programmatic callers don't silently lose
+
 		// instructions (the slash path pre-validates via parseCompactArgs).
 		// `internalGuidance` counts the same way — plan-mode approval never
 		// combines with a rejects-focus mode, but reject early if a caller ever
@@ -588,53 +1030,152 @@ export class SessionMaintenance {
 		if (compactMode?.rejectsFocus && (customInstructions || options?.internalGuidance)) {
 			throw new Error(`/compact ${compactMode.name} does not take focus instructions.`);
 		}
-		const compactionAbortController = new AbortController();
-		this.#compactionAbortController = compactionAbortController;
+		let methods: CompactionMethod[] = [];
+		let selectedMethodIndex = -1;
+		let compactionCommitted = false;
+		const markCommitted = (): void => {
+			compactionCommitted = true;
+			onCommitted?.();
+		};
+		let methodAttempted = false;
+		// No-op rejections (too small / already compacted) make no history change
+		// in this pass, so an interrupted or inherited turn resumes on them like on
+		// a commit; a hook cancel or summarizer failure does not resume.
+		let rejectedAsNoOp = false;
+		// Set when this manual pass aborted a live turn — or inherited a resume an
+		// earlier pass withheld for a still-parked prompt (see
+		// `waitForManualCompactionCleanup`): the turn is resumed once the summary
+		// lands (see the `finally`). Generation is captured after the abort bump so
+		// a reset/new-session in between skips the resume as stale. This pass's
+		// options gate both (a `suppressContinuation` caller owns whatever turn
+		// follows, e.g. plan-mode approve-and-compact); its outcome gates only the
+		// turn it interrupted itself — see the `finally`.
+		let resumeInterruptedTurn = false;
+		let interruptedTurnGeneration = 0;
+		let inheritedResume = false;
+		const compactionAbortController = retryController ?? new AbortController();
+		const manualCompactionCleanup = ownsCompactionController ? Promise.withResolvers<void>() : undefined;
+		if (ownsCompactionController) {
+			this.#compactionAbortController = compactionAbortController;
+			this.#manualCompactionCleanup = manualCompactionCleanup?.promise;
+			// A resume still withheld from an earlier pass belongs to this pass now:
+			// the earlier pass's abort already bumped the generation it captured, so
+			// re-decide with this pass's generation instead of stranding the turn.
+			inheritedResume = this.#deferredResumeGeneration !== undefined;
+			this.#deferredResumeGeneration = undefined;
+		}
+		// A manual pass supersedes any background speculation; running both would
+		// double-bill the summarizer and race the commit.
+		this.cancelSpeculation();
 
 		try {
-			this.#host.disconnectFromAgent();
-			await this.#host.abort({ goalReason: "internal", preserveCompaction: true });
-			if (!this.#model) {
+			if (ownsCompactionController) {
+				// A manual compaction aborts the live turn, tool loop included. Without a
+				// resume the agent sits idle on a half-finished loop (an autoresearch run,
+				// a pending tool result) until the user types "continue" by hand.
+				// Only a turn the agent actually owns counts: the session-level busy flag
+				// is also true while a prompt is still in async setup (before its message
+				// reaches the agent). The abort bump drops that prompt, so resuming on
+				// its behalf would nudge the model on the previous transcript instead.
+				const interruptedActiveTurn = this.#host.agent.state.isStreaming;
+				this.#host.disconnectFromAgent();
+				await this.#host.abort({ goalReason: "internal", preserveCompaction: true });
+				resumeInterruptedTurn =
+					(interruptedActiveTurn || inheritedResume) &&
+					options?.suppressContinuation !== true &&
+					this.#host.settings.get("compaction.autoContinue") !== false;
+				interruptedTurnGeneration = this.#host.promptGeneration();
+			}
+			const activeModel = this.#model;
+			if (!activeModel) {
 				throw new Error("No model selected");
+			}
+			if (
+				this.#usesExperimentalContextManagement() &&
+				!options?.mode &&
+				!customInstructions &&
+				!options?.internalGuidance
+			) {
+				const result = await this.#compactExperimentalContext(
+					activeModel,
+					compactionAbortController,
+					markCommitted,
+				);
+				options?.onComplete?.(result);
+				return result;
 			}
 
 			const compactionSettings = this.#host.settings.getGroup("compaction");
-			// The `/compact <mode>` override (resolved above) replaces the configured
-			// strategy/remote flags for this one invocation. Merged before
-			// prepareCompaction so the remote gating (preparation.settings.
-			// remoteEnabled/endpoint) and the snapcompact decision below both see it.
-			const effectiveSettings = compactMode
-				? { ...compactionSettings, ...compactMode.overrides }
-				: compactionSettings;
-			// /compact remote demands provider-native compaction. When no remote
-			// endpoint is configured (one would override per-model gating in
-			// compact()), drop fallback candidates that aren't remote-capable so the
-			// engine never silently runs a local summary on a configured-but-non-
-			// remote compactionModel. If filtering empties the chain, warn and fall
-			// back to the full chain so the operation still completes.
+			methods = resolveCompactionMethodOrder(compactMode?.overrides.methodOrder ?? compactionSettings.methodOrder);
+			const explicitSnapcompact = compactMode?.name === "snapcompact";
+			let selectedMethod: CompactionMethod | undefined;
+			for (let index = methodOffset; index < methods.length; index++) {
+				const method = methods[index];
+				if (method === "remote") {
+					if (canUseRemoteCompaction(activeModel, resolveMethodSettings(compactionSettings, method))) {
+						selectedMethod = method;
+						selectedMethodIndex = index;
+						break;
+					}
+					continue;
+				}
+				if (method === "snapcompact") {
+					if (
+						explicitSnapcompact ||
+						(!customInstructions && !options?.internalGuidance && activeModel.input.includes("image"))
+					) {
+						selectedMethod = method;
+						selectedMethodIndex = index;
+						break;
+					}
+					continue;
+				}
+				if (method === "soft") {
+					selectedMethod = method;
+					selectedMethodIndex = index;
+					break;
+				}
+			}
+			if (!selectedMethod) {
+				throw new Error("No configured compaction method can run manually.");
+			}
+
+			const effectiveSettings = resolveMethodSettings(compactionSettings, selectedMethod);
 			const availableModels = this.#host.modelRegistry.getAvailable();
-			const requireProviderRemote = Boolean(compactMode?.requiresRemote && !effectiveSettings.remoteEndpoint);
-			let compactionCandidates = this.#getCompactionModelCandidates(
+			const requireProviderRemote = selectedMethod === "remote" && !effectiveSettings.remoteEndpoint;
+			const compactionCandidates = this.#getCompactionModelCandidates(
 				availableModels,
-				requireProviderRemote ? shouldUseOpenAiRemoteCompaction : undefined,
+				requireProviderRemote
+					? candidate =>
+							candidate.provider === activeModel.provider &&
+							shouldUseProviderNativeCompaction(candidate, effectiveSettings)
+					: undefined,
 			);
 			if (requireProviderRemote && compactionCandidates.length === 0) {
 				this.#host.emitNotice(
 					"warning",
-					`remote compaction is unavailable for ${this.#model.id} (no remote endpoint configured and no provider-native remote-capable model in the fallback chain) — using a local summary instead`,
+					`remote compaction is unavailable for ${activeModel.id}; trying the next preferred method`,
 					"compaction",
 				);
-				compactionCandidates = this.#getCompactionModelCandidates(availableModels);
+				// The nested call runs on this controller, so it never owns the resume;
+				// it reports its commit back here instead.
+				return await this.compact(
+					customInstructions,
+					options,
+					selectedMethodIndex + 1,
+					compactionAbortController,
+					markCommitted,
+				);
 			}
 			const pathEntries = this.#host.sessionManager.getBranch();
-			const preparation = prepareCompaction(pathEntries, effectiveSettings, this.#model);
+			const preparation = prepareCompaction(pathEntries, effectiveSettings, activeModel, this.#tokenizer);
 			if (!preparation) {
 				// Check why we can't compact
 				const lastEntry = pathEntries[pathEntries.length - 1];
 				if (lastEntry?.type === "compaction") {
-					throw new Error("Already compacted");
+					throw new ManualCompactionNoOpError("Already compacted");
 				}
-				throw new Error("Nothing to compact (session too small)");
+				throw new ManualCompactionNoOpError("Nothing to compact (session too small)");
 			}
 
 			let hookCompaction: CompactionResult | undefined;
@@ -661,23 +1202,12 @@ export class SessionMaintenance {
 			}
 
 			const compactionPrep = await this.#prepareCompactionFromHooks(preparation, hookCompaction);
+			if (compactionPrep.kind !== "fromHook") methodAttempted = true;
 
-			// Strategy honored on manual /compact too. Custom instructions (public
-			// user focus OR internal plan-mode guidance) imply a directed LLM
-			// summary; a text-only model cannot read snapcompact frames.
-			const wantsSnapcompact =
-				compactionPrep.kind !== "fromHook" &&
-				effectiveSettings.strategy === "snapcompact" &&
-				!customInstructions &&
-				!options?.internalGuidance;
-			// `/compact snapcompact` is an explicit no-LLM archive request: honor
-			// its contract by failing locally rather than silently shipping the
-			// transcript to a provider. The default-configured snapcompact
-			// strategy, in contrast, falls back to LLM compaction (mirroring the
-			// auto-compaction path) so a routine /compact still completes on a
-			// text-only model (issue #5064).
-			const explicitSnapcompact = compactMode?.name === "snapcompact";
-			let snapcompactReady = wantsSnapcompact;
+			// Focus instructions require an LLM summary, so the preference resolver
+			// only selects snapcompact for an undirected manual compaction.
+			const wantsSnapcompact = compactionPrep.kind !== "fromHook" && selectedMethod === "snapcompact";
+			const snapcompactReady = wantsSnapcompact;
 			const snapcompactShapeSetting = this.#host.settings.get("snapcompact.shape");
 			let snapcompactShape: snapcompact.Shape | undefined;
 			// Claude refuses inputs that reproduce its own reasoning as text
@@ -686,20 +1216,12 @@ export class SessionMaintenance {
 			// Anthropic-dialect targets (issue #6093).
 			const snapcompactIncludeThinking = preferredDialect(this.#model.id) !== "anthropic";
 			if (wantsSnapcompact && !this.#model.input.includes("image")) {
-				if (explicitSnapcompact) {
-					this.#host.emitNotice(
-						"warning",
-						`snapcompact needs a vision-capable model (${this.#model.id} is text-only)`,
-						"compaction",
-					);
-					throw new Error(`snapcompact cannot run locally: ${this.#model.id} is text-only.`);
-				}
 				this.#host.emitNotice(
 					"warning",
-					`snapcompact needs a vision-capable model (${this.#model.id} is text-only); falling back to LLM compaction`,
+					`snapcompact needs a vision-capable model (${this.#model.id} is text-only)`,
 					"compaction",
 				);
-				snapcompactReady = false;
+				throw new Error(`snapcompact cannot run locally: ${this.#model.id} is text-only.`);
 			} else if (snapcompactReady) {
 				const text = snapcompact.serializeConversation(
 					convertToLlm(preparation.messagesToSummarize.concat(preparation.turnPrefixMessages)),
@@ -716,7 +1238,7 @@ export class SessionMaintenance {
 					const percent = (renderScan.unrenderableRatio * 100).toFixed(1);
 					this.#host.emitNotice(
 						"warning",
-						`snapcompact disabled: unsupported characters for selected snapcompact font (${percent}%). No LLM fallback was attempted.`,
+						`snapcompact disabled: unsupported characters for selected snapcompact font (${percent}%).`,
 						"compaction",
 					);
 					throw new Error(
@@ -734,8 +1256,8 @@ export class SessionMaintenance {
 
 			// Snapcompact runs locally first. The frame cap is sized from the live
 			// model window via #computeSnapcompactMaxFrames so the post-render context
-			// fits without the warning loop (issue #3247). Zero-frame budget now fails
-			// the snapcompact request locally rather than falling back to an LLM call.
+			// fits without the warning loop (issue #3247). A local blocker rejects
+			// this method, allowing the configured preference order to continue.
 			let snapcompactResult: snapcompact.CompactionResult | undefined;
 			if (snapcompactReady) {
 				const maxFrames = this.#computeSnapcompactMaxFrames(preparation, effectiveSettings);
@@ -745,7 +1267,7 @@ export class SessionMaintenance {
 					});
 					this.#host.emitNotice(
 						"warning",
-						"snapcompact: kept history alone exceeds the context budget. No LLM fallback was attempted.",
+						"snapcompact: kept history alone exceeds the context budget.",
 						"compaction",
 					);
 					throw new Error("snapcompact cannot run locally: kept history alone exceeds the context budget.");
@@ -770,7 +1292,7 @@ export class SessionMaintenance {
 						});
 						this.#host.emitNotice(
 							"warning",
-							"snapcompact produced too much standing image payload. No LLM fallback was attempted.",
+							"snapcompact produced too much standing image payload.",
 							"compaction",
 						);
 						throw new Error(
@@ -782,13 +1304,33 @@ export class SessionMaintenance {
 						ctxWindow > 0
 							? ctxWindow - effectiveReserveTokens(ctxWindow, effectiveSettings)
 							: Number.POSITIVE_INFINITY;
-					if (this.#projectSnapcompactContextTokens(preparation, snapcompactResult) > budget) {
+					const projected = this.#projectSnapcompactContextTokens(preparation, snapcompactResult);
+					// No-reduction decision runs in the encrypted-reasoning-excluded domain
+					// on both sides: opaque replay signatures (thinkingSignature /
+					// redactedThinking) have no trustworthy local token price, so counting
+					// them in the archived region's baseline while the imaged projection
+					// drops them lets an inflating result pass the guard (#10716). The
+					// window-fit check below keeps the conservative `projected`.
+					const projectedForReduction = this.#projectSnapcompactContextTokens(preparation, snapcompactResult, {
+						excludeEncryptedReasoning: true,
+					});
+					const reductionBaseline = this.#projectPreSnapcompactContextTokens(preparation);
+					if (projectedForReduction >= reductionBaseline) {
+						logger.warn("Snapcompact projection would not reduce context", {
+							model: this.#model?.id,
+							projected: projectedForReduction,
+							reductionBaseline,
+						});
+						this.#host.emitNotice("warning", "snapcompact would not reduce context.", "compaction");
+						throw new Error("snapcompact would not reduce context locally.");
+					}
+					if (projected > budget) {
 						logger.warn("Snapcompact still overflows the window after frame-budget sizing", {
 							model: this.#model?.id,
 						});
 						this.#host.emitNotice(
 							"warning",
-							"snapcompact could not bring the context under the limit. No LLM fallback was attempted.",
+							"snapcompact could not bring the context under the limit.",
 							"compaction",
 						);
 						throw new Error("snapcompact could not bring the context under the limit locally.");
@@ -809,7 +1351,7 @@ export class SessionMaintenance {
 				firstKeptEntryId = snapcompactResult.firstKeptEntryId;
 				tokensBefore = snapcompactResult.tokensBefore;
 				details = snapcompactResult.details;
-				preserveData = { ...(compactionPrep.preserveData ?? {}), ...(snapcompactResult.preserveData ?? {}) };
+				preserveData = { ...compactionPrep.preserveData, ...snapcompactResult.preserveData };
 			} else {
 				codexCompaction = createCodexCompactionContext({
 					trigger: "manual",
@@ -835,7 +1377,10 @@ export class SessionMaintenance {
 						{
 							promptOverride: this.#host.obfuscateTextForProvider(compactionPrep.hookPrompt),
 							extraContext: compactionPrep.hookContext,
-							remoteInstructions: this.#host.baseSystemPrompt().join("\n\n"),
+							// The prompt the live turn actually sent — a per-turn
+							// `before_agent_start` override included — so a provider-native
+							// compaction shares the live request's cached prefix.
+							remoteSystemPrompt: this.#host.agent.state.systemPrompt,
 							convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
 							codexCompaction,
 						},
@@ -849,20 +1394,28 @@ export class SessionMaintenance {
 					preserveData = mergeLlmCompactionPreserveData(compactionPrep.preserveData, result.preserveData);
 				} catch (err) {
 					if (err instanceof CompactionCancelledError) {
-						throw err;
+						if (!compactionAbortController.signal.aborted || err.cause !== undefined) throw err;
+						throw new CompactionCancelledError(err.message, {
+							cause: compactionAbortController.signal.reason,
+						});
 					}
 					if (compactionAbortController.signal.aborted && err instanceof Error && err.name === "AbortError") {
-						throw new CompactionCancelledError();
+						throw new CompactionCancelledError(undefined, {
+							cause: compactionAbortController.signal.reason,
+						});
 					}
 					throw err;
 				}
 			}
 
 			if (compactionAbortController.signal.aborted) {
-				throw new CompactionCancelledError();
+				throw new CompactionCancelledError(undefined, {
+					cause: compactionAbortController.signal.reason,
+				});
 			}
 
-			this.#host.sessionManager.appendCompaction(
+			markCommitted();
+			await this.#commitCompactionEntry({
 				summary,
 				shortSummary,
 				firstKeptEntryId,
@@ -870,35 +1423,10 @@ export class SessionMaintenance {
 				details,
 				fromExtension,
 				preserveData,
-			);
-			const newEntries = this.#host.sessionManager.getEntries();
-			const sessionContext = this.#host.buildDisplaySessionContext();
-			this.#host.agent.replaceMessages(sessionContext.messages);
-			this.#host.rebaseAfterCompaction();
-			// Compaction discarded the conversation history that carried the approved
-			// plan reference. Clear the sent-flag so #buildPlanReferenceMessage re-reads
-			// the plan from disk and re-injects it on the next turn (issue #1246).
-			this.#host.resetPlanReference();
-			this.#host.resetAdvisorRuntimes("compact");
-			this.#host.syncTodoPhasesFromBranch();
-			if (codexCompaction) {
-				this.#host.resetCodexProviderAfterCompaction(codexCompaction);
-			} else {
-				this.#host.closeCodexProviderSessionsForHistoryRewrite();
-			}
-
-			// Get the saved compaction entry for the hook
-			const savedCompactionEntry = newEntries.find(e => e.type === "compaction" && e.summary === summary) as
-				| CompactionEntry
-				| undefined;
-
-			if (this.#host.extensionRunner && savedCompactionEntry) {
-				await this.#host.extensionRunner.emit({
-					type: "session_compact",
-					compactionEntry: savedCompactionEntry,
-					fromExtension,
-				});
-			}
+				method: fromExtension ? undefined : selectedMethod,
+				codexCompaction,
+				advisorResetReason: "compact",
+			});
 
 			const compactionResult: CompactionResult = {
 				summary,
@@ -912,21 +1440,372 @@ export class SessionMaintenance {
 			return compactionResult;
 		} catch (error) {
 			const err = error instanceof Error ? error : new Error(String(error));
+			if (error instanceof ManualCompactionNoOpError) rejectedAsNoOp = true;
+			if (
+				methodAttempted &&
+				!compactionCommitted &&
+				!compactionAbortController.signal.aborted &&
+				!(error instanceof CompactionCancelledError) &&
+				selectedMethodIndex >= 0 &&
+				selectedMethodIndex + 1 < methods.length
+			) {
+				this.#host.emitNotice(
+					"warning",
+					`${methods[selectedMethodIndex]} compaction failed; trying the next preferred method`,
+					"compaction",
+				);
+				return await this.compact(
+					customInstructions,
+					options,
+					selectedMethodIndex + 1,
+					compactionAbortController,
+					markCommitted,
+				);
+			}
 			options?.onError?.(err);
 			throw error;
 		} finally {
-			if (this.#compactionAbortController === compactionAbortController) {
-				this.#compactionAbortController = undefined;
+			if (ownsCompactionController) {
+				if (this.#compactionAbortController === compactionAbortController) {
+					this.#compactionAbortController = undefined;
+				}
+				this.#host.reconnectToAgent();
+				// Compaction disconnected before `await abort()`, so abort's finally drain
+				// (and any steer/follow-up that arrived mid-compaction — async IRC, an
+				// `xd://` mount notice, an SDK/RPC steer) was suppressed while disconnected
+				// (issue #5800). Unlike `/new`/switchSession, compaction preserves the agent
+				// queues, so nothing else resumes them: re-drain now that the listener is back
+				// and `isCompacting` is false, or the queued turn hangs until the next prompt.
+				this.#host.drainStrandedQueuedMessages();
+				if (this.#manualCompactionCleanup === manualCompactionCleanup?.promise) {
+					this.#manualCompactionCleanup = undefined;
+				}
+				manualCompactionCleanup?.resolve();
+				// An inherited resume was earned by the pass that committed it; this
+				// pass's own outcome (hook cancel, summarizer failure) only decides the
+				// turn it interrupted itself, so the inherited one stays owed.
+				if ((compactionCommitted || rejectedAsNoOp || inheritedResume) && resumeInterruptedTurn) {
+					if (this.#promptsAwaitingCleanup > 0) {
+						// A prompt parked on the barrier just resolved is the user's next
+						// intent and takes the session instead (its continuation is a
+						// microtask away). It reports back via `release`: a turn drops the
+						// resume, a locally handled command hands it back.
+						this.#deferredResumeGeneration = interruptedTurnGeneration;
+					} else {
+						this.#scheduleInterruptedTurnResume(interruptedTurnGeneration);
+					}
+				}
 			}
-			this.#host.reconnectToAgent();
-			// Compaction disconnected before `await abort()`, so abort's finally drain
+		}
+	}
 
-			// (and any steer/follow-up that arrived mid-compaction — async IRC, an
-			// `xd://` mount notice, an SDK/RPC steer) was suppressed while disconnected
-			// (issue #5800). Unlike `/new`/switchSession, compaction preserves the agent
-			// queues, so nothing else resumes them: re-drain now that the listener is back
-			// and `isCompacting` is false, or the queued turn hangs until the next prompt.
-			this.#host.drainStrandedQueuedMessages();
+	/**
+	 * Commit a notebook-backed boundary without generating, imaging, or otherwise
+	 * rewriting the canonical transcript. Explicit compact modes and focused
+	 * manual compactions deliberately bypass this path.
+	 */
+	async #compactExperimentalContext(
+		model: Model,
+		signalController: AbortController,
+		onCommitted: () => void,
+	): Promise<CompactionResult> {
+		const entries = this.#host.sessionManager.getBranch();
+		const settings = this.#host.settings.getGroup("compaction");
+		const preparation = prepareCompaction(entries, settings, model, this.#tokenizer);
+		if (!preparation)
+			throw new ManualCompactionNoOpError("Nothing to compact (session too small or already rolled over)");
+
+		const sourceLeafId = entries.at(-1)?.id;
+		const sourceSessionId = this.#host.sessionId();
+		const sourceModel = `${model.provider}/${model.id}`;
+		let hookCompaction: CompactionResult | undefined;
+		let fromExtension = false;
+		if (this.#host.extensionRunner?.hasHandlers("session_before_compact")) {
+			const hookResult = (await this.#host.extensionRunner.emit({
+				type: "session_before_compact",
+				preparation,
+				branchEntries: entries,
+				customInstructions: undefined,
+				signal: signalController.signal,
+			})) as SessionBeforeCompactResult | undefined;
+			if (hookResult?.cancel) throw new CompactionCancelledError();
+			if (hookResult?.compaction) {
+				hookCompaction = hookResult.compaction;
+				fromExtension = true;
+			}
+		}
+		if (
+			signalController.signal.aborted ||
+			!this.#usesExperimentalContextManagement() ||
+			this.#host.sessionId() !== sourceSessionId ||
+			this.#host.sessionManager.getBranch().at(-1)?.id !== sourceLeafId ||
+			(this.#model && `${this.#model.provider}/${this.#model.id}` !== sourceModel)
+		) {
+			throw new CompactionCancelledError(undefined, { cause: signalController.signal.reason });
+		}
+		const prepared = await this.#prepareCompactionFromHooks(preparation, hookCompaction, {
+			collectMemoryContext: false,
+		});
+		if (
+			signalController.signal.aborted ||
+			!this.#usesExperimentalContextManagement() ||
+			this.#host.sessionId() !== sourceSessionId ||
+			this.#host.sessionManager.getBranch().at(-1)?.id !== sourceLeafId ||
+			(this.#model && `${this.#model.provider}/${this.#model.id}` !== sourceModel)
+		) {
+			throw new CompactionCancelledError(undefined, { cause: signalController.signal.reason });
+		}
+		const result =
+			prepared.kind === "fromHook"
+				? {
+						summary: prepared.summary,
+						shortSummary: prepared.shortSummary,
+						firstKeptEntryId: prepared.firstKeptEntryId,
+						tokensBefore: prepared.tokensBefore,
+						details: {
+							kind: "experimental-context-rollover",
+							version: 1,
+							hookDetails: prepared.details,
+						},
+						preserveData: prepared.preserveData,
+					}
+				: {
+						summary: experimentalContextRolloverPrompt,
+						shortSummary: undefined,
+						firstKeptEntryId: preparation.firstKeptEntryId,
+						tokensBefore: preparation.tokensBefore,
+						details: { kind: "experimental-context-rollover", version: 1 },
+						preserveData: prepared.preserveData,
+					};
+		// Report before `#commitCompactionEntry`, as the direct path does: it appends
+		// the entry and then awaits post-append bookkeeping and the `session_compact`
+		// hook, and a rejection there must still count as committed for the
+		// interrupted-turn resume.
+		onCommitted();
+		await this.#commitCompactionEntry({
+			...result,
+			fromExtension,
+			method: undefined,
+			codexCompaction: undefined,
+			advisorResetReason: "experimental-context-rollover",
+		});
+		this.#experimentalNotesReminderBoundaryId = undefined;
+		return {
+			...result,
+			preserveData: snapcompact.stripPreservedArchive(result.preserveData),
+		};
+	}
+	/**
+	 * Automatic notebook rollover. This deliberately avoids the ordinary
+	 * method-order pipeline: snapcompact, shake, provider-native replacement,
+	 * and LLM summaries all rewrite the active representation of raw history.
+	 */
+	async #runExperimentalContextRollover(
+		reason: "overflow" | "threshold" | "idle" | "incomplete",
+		willRetry: boolean,
+		options: {
+			autoContinue?: boolean;
+			suppressContinuation?: boolean;
+			terminalTextAnswer?: boolean;
+			triggerContextTokens?: number;
+			detachPostCommit?: boolean;
+		},
+	): Promise<CompactionCheckResult> {
+		const model = this.#model;
+		if (!model || this.isCompacting) return COMPACTION_CHECK_NONE;
+		const settings = this.#host.settings.getGroup("compaction");
+		const branch = this.#host.sessionManager.getBranch();
+		const preparation = prepareCompaction(branch, settings, model, this.#tokenizer);
+		if (!preparation) return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
+		const sourceLeafId = branch.at(-1)?.id;
+		const sourceSessionId = this.#host.sessionId();
+		const sourceModel = `${model.provider}/${model.id}`;
+
+		this.cancelSpeculation();
+		this.#autoCompactionAbortController?.abort();
+		const controller = new AbortController();
+		this.#autoCompactionAbortController = controller;
+		const generation = this.#host.promptGeneration();
+		const suppressContinuation = options.suppressContinuation === true;
+		const shouldAutoContinue =
+			!suppressContinuation && options.autoContinue !== false && settings.autoContinue !== false;
+		const terminalTextAnswer =
+			options.terminalTextAnswer ?? isTerminalTextAssistantAnswer(this.#host.findLastAssistantMessage());
+		const detachPostCommit = options.detachPostCommit === true;
+		try {
+			await this.#emitLifecycleEvent({ type: "auto_compaction_start", reason, action: "context-full" }, false);
+			if (controller.signal.aborted) {
+				await this.#emitLifecycleEvent(
+					{
+						type: "auto_compaction_end",
+						action: "context-full",
+						result: undefined,
+						aborted: true,
+						willRetry: false,
+					},
+					detachPostCommit,
+				);
+				return COMPACTION_CHECK_NONE;
+			}
+
+			let hookCompaction: CompactionResult | undefined;
+			let fromExtension = false;
+			if (this.#host.extensionRunner?.hasHandlers("session_before_compact")) {
+				const hookResult = (await this.#host.extensionRunner.emit({
+					type: "session_before_compact",
+					preparation,
+					branchEntries: this.#host.sessionManager.getBranch(),
+					customInstructions: undefined,
+					signal: controller.signal,
+				})) as SessionBeforeCompactResult | undefined;
+				if (hookResult?.cancel) {
+					await this.#emitLifecycleEvent(
+						{
+							type: "auto_compaction_end",
+							action: "context-full",
+							result: undefined,
+							aborted: true,
+							willRetry: false,
+						},
+						detachPostCommit,
+					);
+					return COMPACTION_CHECK_NONE;
+				}
+				if (hookResult?.compaction) {
+					hookCompaction = hookResult.compaction;
+					fromExtension = true;
+				}
+			}
+			if (controller.signal.aborted || !this.#usesExperimentalContextManagement()) {
+				await this.#emitLifecycleEvent(
+					{
+						type: "auto_compaction_end",
+						action: "context-full",
+						result: undefined,
+						aborted: controller.signal.aborted,
+						willRetry: false,
+						skipped: !controller.signal.aborted,
+					},
+					detachPostCommit,
+				);
+				return COMPACTION_CHECK_NONE;
+			}
+
+			const prepared = await this.#prepareCompactionFromHooks(preparation, hookCompaction, {
+				collectMemoryContext: false,
+			});
+			if (
+				controller.signal.aborted ||
+				!this.#usesExperimentalContextManagement() ||
+				this.#host.sessionId() !== sourceSessionId ||
+				this.#host.sessionManager.getBranch().at(-1)?.id !== sourceLeafId ||
+				(this.#model && `${this.#model.provider}/${this.#model.id}` !== sourceModel)
+			) {
+				await this.#emitLifecycleEvent(
+					{
+						type: "auto_compaction_end",
+						action: "context-full",
+						result: undefined,
+						aborted: controller.signal.aborted,
+						willRetry: false,
+						skipped: !controller.signal.aborted,
+					},
+					detachPostCommit,
+				);
+				return COMPACTION_CHECK_NONE;
+			}
+			const result =
+				prepared.kind === "fromHook"
+					? {
+							summary: prepared.summary,
+							shortSummary: prepared.shortSummary,
+							firstKeptEntryId: prepared.firstKeptEntryId,
+							tokensBefore: options.triggerContextTokens ?? prepared.tokensBefore,
+							details: {
+								kind: "experimental-context-rollover",
+								version: 1,
+								hookDetails: prepared.details,
+							},
+							preserveData: prepared.preserveData,
+						}
+					: {
+							summary: experimentalContextRolloverPrompt,
+							shortSummary: undefined,
+							firstKeptEntryId: preparation.firstKeptEntryId,
+							tokensBefore: options.triggerContextTokens ?? preparation.tokensBefore,
+							details: { kind: "experimental-context-rollover", version: 1 },
+							preserveData: prepared.preserveData,
+						};
+			await this.#commitCompactionEntry({
+				...result,
+				fromExtension,
+				method: undefined,
+				codexCompaction: undefined,
+				advisorResetReason: "experimental-context-rollover",
+				detachExtensionEmit: detachPostCommit,
+			});
+			this.#experimentalNotesReminderBoundaryId = undefined;
+
+			const compactionResult: CompactionResult = {
+				...result,
+				preserveData: snapcompact.stripPreservedArchive(result.preserveData),
+			};
+			const safeToContinue = willRetry
+				? this.#compactionCreatedRetryFit()
+				: reason === "idle" || this.#compactionCreatedHeadroom();
+			await this.#emitLifecycleEvent(
+				{
+					type: "auto_compaction_end",
+					action: "context-full",
+					result: compactionResult,
+					aborted: false,
+					willRetry,
+				},
+				detachPostCommit,
+			);
+			if (!safeToContinue) {
+				const warning = compactionDeadEndWarning("clear large tool output");
+				const entry = getLatestCompactionEntry(this.#host.sessionManager.getBranch());
+				if (entry) {
+					entry.warning = warning;
+					await this.#host.sessionManager.rewriteEntries();
+				}
+				this.#host.emitNotice("warning", warning, "compaction");
+				return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
+			}
+			if (willRetry) {
+				this.#host.scheduleAgentContinue({
+					source: "experimental-context-rollover-retry",
+					delayMs: 100,
+					generation,
+				});
+				return COMPACTION_CHECK_CONTINUATION;
+			}
+			return this.#host.scheduleCompactionContinuation({
+				generation,
+				autoContinue: shouldAutoContinue,
+				terminalTextAnswer,
+				suppressContinuation,
+			})
+				? COMPACTION_CHECK_CONTINUATION
+				: COMPACTION_CHECK_NONE;
+		} catch (error) {
+			await this.#emitLifecycleEvent(
+				{
+					type: "auto_compaction_end",
+					action: "context-full",
+					result: undefined,
+					aborted: controller.signal.aborted,
+					willRetry: false,
+					errorMessage: error instanceof Error ? error.message : String(error),
+				},
+				detachPostCommit,
+			);
+			throw error;
+		} finally {
+			if (this.#autoCompactionAbortController === controller) {
+				this.#autoCompactionAbortController = undefined;
+			}
 		}
 	}
 
@@ -957,12 +1836,95 @@ export class SessionMaintenance {
 	}
 
 	/**
-	 * Cancel in-progress context maintenance (manual compaction, auto-compaction, or auto-handoff).
+	 * Cancel in-progress context maintenance and return the active manual pass's
+	 * cleanup barrier. The barrier resolves only after its agent subscription reconnects.
 	 */
-	abortCompaction(): void {
-		this.#compactionAbortController?.abort();
-		this.#autoCompactionAbortController?.abort();
+	abortCompaction(reason?: unknown): Promise<void> | undefined {
+		const manualCompactionCleanup = this.#manualCompactionCleanup;
+		this.#compactionAbortController?.abort(reason);
+		this.#autoCompactionAbortController?.abort(reason);
 		this.#host.abortHandoff();
+		return manualCompactionCleanup;
+	}
+
+	/**
+	 * Same continuation the context-full path uses: a queued steer/follow-up
+	 * (drained in compact()'s `finally`) drives the resume, otherwise the
+	 * auto-continue nudge does. `terminalTextAnswer` is false by construction —
+	 * the turn was cut mid-run, so there is no finished answer to preserve.
+	 */
+	#scheduleInterruptedTurnResume(generation: number): void {
+		this.#host.scheduleCompactionContinuation({
+			generation,
+			autoContinue: true,
+			terminalTextAnswer: false,
+			suppressContinuation: false,
+		});
+	}
+
+	/**
+	 * Park an ordinary prompt until an in-flight manual compaction has reconnected
+	 * the agent subscription and re-drained its preserved queues. A prompt waiting
+	 * here is the user's next intent, so it supersedes the interrupted-turn
+	 * resume: the cleanup `finally` defers the synthetic continuation while any
+	 * waiter is parked, otherwise the nudge claims the session first and the
+	 * prompt lands on `AgentBusyError`.
+	 *
+	 * Returns `undefined` at once when no manual compaction is active and no
+	 * resume decision is open. Otherwise the caller MUST invoke the returned
+	 * `release` once the prompt settles — see {@link claimPendingResume}.
+	 */
+	async waitForManualCompactionCleanup(): Promise<((startedTurn: boolean) => void) | undefined> {
+		const cleanup = this.#manualCompactionCleanup;
+		// No compaction to wait for, but an earlier parked prompt is still settling:
+		// this prompt competes for the same session, so it takes part in the
+		// resume decision (a turn it starts must not be followed by the stale nudge).
+		if (!cleanup) return this.claimPendingResume();
+		const release = this.#claimResume();
+		await cleanup;
+		return release;
+	}
+
+	/**
+	 * Register a dispatch that may start a turn while an interrupted-turn resume
+	 * decision is open (a prompt parked by {@link waitForManualCompactionCleanup}
+	 * has not released yet). `undefined` when no decision is open.
+	 *
+	 * The caller MUST invoke the returned `release` once the dispatch settles.
+	 * `startedTurn: true` (dispatched or queued) drops the deferred resume for
+	 * good; `false` (an extension/custom command handled locally, a pre-dispatch
+	 * throw) hands it back so the interrupted work is not stranded, once no other
+	 * participant can still claim the session.
+	 */
+	claimPendingResume(): ((startedTurn: boolean) => void) | undefined {
+		return this.#promptsAwaitingCleanup > 0 ? this.#claimResume() : undefined;
+	}
+
+	#claimResume(): (startedTurn: boolean) => void {
+		this.#promptsAwaitingCleanup++;
+		let released = false;
+		return (startedTurn: boolean): void => {
+			if (released) return;
+			released = true;
+			this.#promptsAwaitingCleanup--;
+			if (startedTurn) {
+				this.#deferredResumeGeneration = undefined;
+				return;
+			}
+			if (this.#promptsAwaitingCleanup > 0 || this.#deferredResumeGeneration === undefined) return;
+			const generation = this.#deferredResumeGeneration;
+			this.#deferredResumeGeneration = undefined;
+			this.#scheduleInterruptedTurnResume(generation);
+		};
+	}
+
+	/**
+	 * A turn started, by whatever path (a released prompt, an extension's
+	 * `sendMessage({ triggerTurn })`, the queued-message drain). It owns the
+	 * session now, so a resume still withheld for a parked prompt is moot.
+	 */
+	noteTurnStarted(): void {
+		this.#deferredResumeGeneration = undefined;
 	}
 
 	/** Cancel only automatic maintenance while preserving a manual compaction. */
@@ -977,6 +1939,423 @@ export class SessionMaintenance {
 	}
 
 	/**
+	 * Manual handoff: generate a handoff document and commit it as a compaction
+	 * entry on the current session — the document becomes the summary and recent
+	 * history is kept per `compaction.keepRecentTokens`. Unlike `/compact`, the
+	 * live agent is not aborted; generation reads a snapshot of the live
+	 * messages through the cache-friendly side-request pipeline.
+	 */
+	async handoff(customInstructions?: string, options?: SessionHandoffOptions): Promise<HandoffResult | undefined> {
+		if (this.isCompacting) throw new Error("Compaction already in progress");
+		this.cancelSpeculation();
+		const model = this.#model;
+		if (!model) throw new Error("No model selected for handoff");
+		const entries = this.#host.sessionManager.getBranch();
+		const messageCount = entries.filter(e => e.type === "message").length;
+		if (messageCount < 2) throw new Error("Nothing to hand off (no messages yet)");
+		const compactionSettings = this.#host.settings.getGroup("compaction");
+		const preparation = prepareCompaction(
+			entries,
+			resolveMethodSettings(compactionSettings, "handoff"),
+			model,
+			this.#tokenizer,
+		);
+		if (!preparation) throw new Error("Nothing to hand off (already compacted)");
+		const result = await this.#host.generateHandoffDocument(customInstructions, options);
+		if (!result) return undefined;
+		const { summary, details } = handoffSummaryFromDocument(result.document, preparation);
+		await this.#commitCompactionEntry({
+			summary,
+			shortSummary: undefined,
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details,
+			fromExtension: false,
+			preserveData: undefined,
+			method: "handoff",
+			codexCompaction: undefined,
+			advisorResetReason: "handoff",
+		});
+		return result;
+	}
+
+	/**
+	 * Start a background speculative compaction when context has entered the
+	 * pre-threshold band `[threshold − lead, threshold)`. The produced summary
+	 * is held (armed) and committed instantly by the next real maintenance
+	 * pass, hiding summarization latency. Only LLM-backed methods
+	 * (remote/handoff/soft) are speculated — shake and snapcompact are local
+	 * and effectively instant. Never rewrites history itself; stale results are
+	 * discarded by apply-time branch validation in {@link #claimArmedSpeculation}.
+	 * A turn that jumps past the threshold before a run armed is handled by
+	 * {@link deferThresholdCompactionToSpeculation}'s grace band instead.
+	 */
+	maybeStartSpeculativeCompaction(contextTokens: number, contextWindow: number): void {
+		if (contextWindow <= 0 || this.#host.isDisposed()) return;
+		const settings = this.#host.settings.getGroup("compaction");
+		if (this.#usesExperimentalContextManagement()) {
+			this.#maybeQueueExperimentalNotesReminder(contextTokens, contextWindow);
+			return;
+		}
+		if (!settings.enabled || settings.asyncEnabled === false || !hasConfiguredCompactionMethod(settings)) return;
+		if (this.isCompacting || this.#host.isGeneratingHandoff()) return;
+		// Extensions that intercept compaction (cancel/replace) keep exact
+		// blocking semantics; a speculated result would bypass their veto.
+		if (this.#host.extensionRunner?.hasHandlers("session_before_compact")) return;
+		const thresholdTokens = resolveThresholdTokens(contextWindow, settings);
+		if (contextTokens >= thresholdTokens) return; // real maintenance owns it now
+		if (thresholdTokens - contextTokens > resolveSpeculationLeadTokens(thresholdTokens)) return;
+		const current = this.#speculation;
+		if (current) {
+			if (!current.armed) return; // one run at a time
+			// Refresh-on-growth: the armed summary's kept tail grows with every
+			// turn; once the growth exceeds the keep-recent budget, a fresh cut
+			// reclaims materially more context at apply time.
+			const growth = contextTokens - current.armed.contextTokensAtStart;
+			const refreshBudget = Math.max(settings.keepRecentTokens, SPECULATION_LEAD_MIN_TOKENS);
+			if (growth <= refreshBudget && this.#armedSpeculationValid(current.armed, contextTokens)) return;
+			this.cancelSpeculation();
+		}
+		const model = this.#model;
+		if (!model) return;
+		const method = resolveSpeculationMethod(model, settings);
+		if (!method) return;
+		this.#startSpeculationRun(contextTokens, method);
+	}
+
+	/** Install and launch one background speculation run for `method`. */
+	#startSpeculationRun(contextTokens: number, method: "remote" | "handoff" | "soft"): void {
+		const controller = new AbortController();
+		const run: SpeculationRun = { controller, promise: Promise.resolve(), contextTokensAtStart: contextTokens };
+		this.#speculation = run;
+		run.promise = this.#runSpeculation(run, method, contextTokens).catch(error => {
+			logger.debug("Speculative compaction failed", {
+				method,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			if (this.#speculation === run) this.#speculation = undefined;
+		});
+	}
+
+	/**
+	 * Grace band above the compaction threshold: when a single turn jumps past
+	 * the threshold before the background speculation armed (or even started),
+	 * the threshold pass keeps serving the user instead of blocking on a
+	 * synchronous summarization — the speculation finishes in the background
+	 * and the next maintenance boundary splices it in for free. Returns true
+	 * while deferral is in effect (a run was live, or one was started here);
+	 * the caller MUST skip its blocking compaction then.
+	 *
+	 * Deferral ends — and the blocking pass resumes — once context grows past
+	 * `threshold + lead`, clamped to keep {@link SPECULATION_LEAD_MIN_TOKENS}
+	 * of headroom below the window. A provider overflow inside the band is
+	 * recovered by the existing overflow path (compact + retry). Never defers
+	 * for local-first method orders (shake/snapcompact are instant), when
+	 * async compaction is disabled, or when a `session_before_compact`
+	 * extension must keep exact blocking semantics.
+	 */
+	deferThresholdCompactionToSpeculation(contextTokens: number, contextWindow: number): boolean {
+		if (contextWindow <= 0 || this.#host.isDisposed()) return false;
+		const settings = this.#host.settings.getGroup("compaction");
+		if (this.#usesExperimentalContextManagement()) return false;
+		if (!settings.enabled || settings.asyncEnabled === false || !hasConfiguredCompactionMethod(settings))
+			return false;
+		if (this.isCompacting || this.#host.isGeneratingHandoff()) return false;
+		if (this.#host.extensionRunner?.hasHandlers("session_before_compact")) return false;
+		const model = this.#model;
+		if (!model) return false;
+		const method = resolveSpeculationMethod(model, settings);
+		if (!method) return false;
+		const thresholdTokens = resolveThresholdTokens(contextWindow, settings);
+		const graceCapTokens = Math.min(
+			thresholdTokens + resolveSpeculationLeadTokens(thresholdTokens),
+			contextWindow - SPECULATION_LEAD_MIN_TOKENS,
+		);
+		if (contextTokens >= graceCapTokens) return false;
+		const run = this.#speculation;
+		if (run) {
+			if (run.armed) {
+				if (!this.#armedSpeculationValid(run.armed, contextTokens)) {
+					this.cancelSpeculation();
+					return false;
+				}
+				return false; // ready — the real pass splices it in now
+			}
+			return true; // still summarizing in the background
+		}
+		this.#startSpeculationRun(contextTokens, method);
+		return true;
+	}
+
+	/** Produce and arm one speculative compaction result off a branch snapshot. */
+	async #runSpeculation(
+		run: SpeculationRun,
+		method: "remote" | "handoff" | "soft",
+		contextTokens: number,
+	): Promise<void> {
+		const clear = () => {
+			if (this.#speculation === run) this.#speculation = undefined;
+		};
+		const model = this.#model;
+		if (!model) return clear();
+		const settings = this.#host.settings.getGroup("compaction");
+		const effectiveSettings = resolveMethodSettings(settings, method);
+		const branch = this.#host.sessionManager.getBranch();
+		const snapshotLeafId = branch[branch.length - 1]?.id;
+		if (!snapshotLeafId) return clear();
+		const preparation = prepareCompaction(branch, effectiveSettings, model, this.#tokenizer);
+		if (!preparation) return clear();
+		const signal = run.controller.signal;
+		let armed: ArmedSpeculation;
+		if (method === "handoff") {
+			const generated = await this.#host.generateHandoffDocument(AUTO_HANDOFF_THRESHOLD_FOCUS, {
+				autoTriggered: true,
+				signal,
+			});
+			if (!generated) return clear();
+			const { summary, details } = handoffSummaryFromDocument(generated.document, preparation);
+			armed = {
+				result: {
+					summary,
+					shortSummary: undefined,
+					firstKeptEntryId: preparation.firstKeptEntryId,
+					tokensBefore: preparation.tokensBefore,
+					details,
+				},
+				action: "handoff",
+				method,
+				snapshotLeafId,
+				contextTokensAtStart: contextTokens,
+			};
+		} else {
+			const compactionPrep = await this.#prepareCompactionFromHooks(preparation, undefined);
+			// No hookCompaction is passed above, so "fromHook" is unreachable;
+			// the guard just narrows the union.
+			if (compactionPrep.kind === "fromHook") return clear();
+			const candidates = this.#getCompactionModelCandidates(
+				this.#host.modelRegistry.getAvailable(),
+				method === "remote" && !effectiveSettings.remoteEndpoint
+					? candidate =>
+							candidate.provider === model.provider &&
+							shouldUseProviderNativeCompaction(candidate, effectiveSettings)
+					: undefined,
+			);
+			if (candidates.length === 0) return clear();
+			const codexCompaction = createCodexCompactionContext({
+				trigger: "auto",
+				reason: "context_limit",
+				phase: "standalone_turn",
+			});
+			const result = await this.#compactWithFallbackModel(
+				preparation,
+				undefined,
+				signal,
+				{
+					promptOverride: this.#host.obfuscateTextForProvider(compactionPrep.hookPrompt),
+					extraContext: compactionPrep.hookContext,
+					remoteSystemPrompt: this.#host.agent.state.systemPrompt,
+					codexCompaction,
+					// Isolate from the live turn: remote compaction transports key
+					// sticky provider sessions by sessionId, and a speculation
+					// overlapping the live stream must never interleave with it.
+					sessionId: `${this.#host.sessionId()}:spec:${Snowflake.next()}`,
+					preferWebsockets: false,
+				},
+				candidates,
+			);
+			armed = {
+				result: {
+					...result,
+					preserveData: mergeLlmCompactionPreserveData(compactionPrep.preserveData, result.preserveData),
+				},
+				action: method === "remote" ? "remote" : "context-full",
+				method,
+				codexCompaction,
+				snapshotLeafId,
+				contextTokensAtStart: contextTokens,
+			};
+		}
+		if (signal.aborted || this.#speculation !== run) return;
+		run.armed = armed;
+		logger.debug("Speculative compaction armed", {
+			method,
+			snapshotLeafId,
+			tokensBefore: armed.result.tokensBefore,
+		});
+	}
+
+	/**
+	 * An armed result is committable only when the branch prefix it summarized
+	 * is still intact: its snapshot leaf is on the active path with no later
+	 * compaction or reset boundary, and any provider-native replay payload is
+	 * still readable by the active model.
+	 *
+	 * When the branch has grown past the snapshot leaf, the speculation is only
+	 * valid if applying it would still create sufficient headroom under the
+	 * recovery band without net context expansion.
+	 */
+	#armedSpeculationValid(
+		armed: ArmedSpeculation,
+		triggerContextTokens?: number,
+		pendingContextTokens?: number,
+	): boolean {
+		const model = this.#model;
+		if (!model) return false;
+		const settings = this.#host.settings.getGroup("compaction");
+		if (
+			armed.result.preserveData &&
+			!remotePreserveReusable(armed.result.preserveData, model, resolveMethodSettings(settings, armed.method))
+		) {
+			return false;
+		}
+		const branch = this.#host.sessionManager.getBranch();
+		const leafIdx = branch.findIndex(entry => entry.id === armed.snapshotLeafId);
+		if (leafIdx < 0) return false;
+		for (let i = leafIdx + 1; i < branch.length; i++) {
+			const type = branch[i].type;
+			if (type === "compaction" || type === "reset_boundary") return false;
+		}
+		if (leafIdx < branch.length - 1) {
+			const keptIdx = branch.findIndex(entry => entry.id === armed.result.firstKeptEntryId);
+			if (keptIdx < 0) return false;
+
+			const projected = this.#projectCompactedContextTokens({
+				...armed.result,
+				method: armed.method,
+				providerReplayThroughEntryId: isRecord(armed.result.preserveData?.openaiRemoteCompaction)
+					? armed.snapshotLeafId
+					: undefined,
+			});
+			const pendingTokens = Math.max(0, pendingContextTokens ?? 0);
+			const projectedWithPending = projected + pendingTokens;
+			const contextWindow = model.contextWindow ?? 0;
+			if (contextWindow > 0) {
+				const thresholdTokens = resolveThresholdTokens(contextWindow, settings);
+				const recoveryBand = Math.floor(thresholdTokens * COMPACTION_RECOVERY_BAND);
+				if (projectedWithPending > recoveryBand) {
+					return false;
+				}
+			}
+			// Anchor net-expansion check on local stored token count (same basis
+			// as `projected`) to avoid basis mismatch against provider-billed tokens.
+			// Also ensure projected tokens do not exceed the trigger context if provided.
+			const storedCurrentTokens = this.#estimateStoredContextTokens();
+			const storedCurrentTokensWithPending = storedCurrentTokens + pendingTokens;
+			if (storedCurrentTokens > 0 && projectedWithPending >= storedCurrentTokensWithPending) {
+				return false;
+			}
+			if (
+				triggerContextTokens !== undefined &&
+				triggerContextTokens > 0 &&
+				projectedWithPending >= triggerContextTokens
+			) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	/**
+	 * Consume the speculation slot for a real maintenance pass. An in-flight run
+	 * is aborted (the real pass supersedes it); an armed result is returned only
+	 * when still valid for the current branch, model, and settings.
+	 */
+	#claimArmedSpeculation(triggerContextTokens?: number, pendingContextTokens?: number): ArmedSpeculation | undefined {
+		const run = this.#speculation;
+		if (!run) return undefined;
+		this.#speculation = undefined;
+		if (!run.armed) {
+			run.controller.abort();
+			return undefined;
+		}
+		const settings = this.#host.settings.getGroup("compaction");
+		if (settings.asyncEnabled === false) return undefined;
+		if (this.#host.extensionRunner?.hasHandlers("session_before_compact")) return undefined;
+		if (!this.#armedSpeculationValid(run.armed, triggerContextTokens, pendingContextTokens)) {
+			logger.debug("Armed speculative compaction invalidated by branch growth or headroom check", {
+				method: run.armed.method,
+				snapshotLeafId: run.armed.snapshotLeafId,
+			});
+			return undefined;
+		}
+		return run.armed;
+	}
+
+	/**
+	 * Append a compaction entry and run the shared post-commit sequence:
+	 * rebuild the display context, swap live agent messages, re-anchor stats,
+	 * reset plan/advisor/todo runtime state derived from the replaced history,
+	 * reset provider sessions, and emit the `session_compact` extension hook.
+	 */
+	async #commitCompactionEntry(args: {
+		summary: string;
+		shortSummary: string | undefined;
+		firstKeptEntryId: string;
+		tokensBefore: number;
+		details: unknown;
+		fromExtension: boolean;
+		preserveData: Record<string, unknown> | undefined;
+		method: CompactionMethod | undefined;
+		codexCompaction: CodexCompactionContext | undefined;
+		providerReplayThroughEntryId?: string;
+		advisorResetReason: string;
+		detachExtensionEmit?: boolean;
+	}): Promise<CompactionEntry | undefined> {
+		const entryId = this.#host.sessionManager.appendCompaction(
+			args.summary,
+			args.shortSummary,
+			args.firstKeptEntryId,
+			args.tokensBefore,
+			{
+				details: args.details,
+				fromExtension: args.fromExtension,
+				preserveData: args.preserveData,
+				method: args.method,
+				providerReplayThroughEntryId: args.providerReplayThroughEntryId,
+				tokensAfter:
+					isRecord(args.details) && args.details.kind === "experimental-context-rollover"
+						? this.#projectExperimentalContextRolloverTokens(args)
+						: this.#projectCompactedContextTokens(args),
+			},
+		);
+		const newEntries = this.#host.sessionManager.getEntries();
+		const sessionContext = this.#host.buildDisplaySessionContext();
+		this.#host.agent.replaceMessages(sessionContext.messages);
+		this.#host.rebaseAfterCompaction();
+		// Compaction discarded the conversation history that carried the approved
+		// plan reference. Clear the sent-flag so #buildPlanReferenceMessage re-reads
+		// the plan from disk and re-injects it on the next turn (issue #1246).
+		this.#host.resetPlanReference();
+		this.#host.resetAdvisorRuntimes(args.advisorResetReason);
+		this.#host.syncTodoPhasesFromBranch();
+		if (args.codexCompaction) {
+			this.#host.resetCodexProviderAfterCompaction(args.codexCompaction);
+		} else {
+			this.#host.closeCodexProviderSessionsForHistoryRewrite();
+		}
+		const savedCompactionEntry = newEntries.find(e => e.type === "compaction" && e.id === entryId) as
+			| CompactionEntry
+			| undefined;
+		if (this.#host.extensionRunner && savedCompactionEntry) {
+			const compactEmit = this.#host.extensionRunner.emit({
+				type: "session_compact",
+				compactionEntry: savedCompactionEntry,
+				fromExtension: args.fromExtension,
+			});
+			if (args.detachExtensionEmit) {
+				void compactEmit.catch(error => {
+					logger.warn("Detached session_compact emit failed", {
+						error: error instanceof Error ? error.message : String(error),
+					});
+				});
+			} else {
+				await compactEmit;
+			}
+		}
+		return savedCompactionEntry;
+	}
+
+	/**
 	 * Local token estimate of the stored conversation (plus any pending messages),
 	 * independent of provider-reported usage. A `before_provider_request` hook
 	 * (e.g. a compression extension such as Headroom) or other on-wire payload
@@ -988,15 +2367,17 @@ export class SessionMaintenance {
 	 * suppress it.
 	 */
 	#estimateStoredContextTokens(pendingMessages: AgentMessage[] = []): number {
-		// Exclude encrypted reasoning (thinkingSignature / redactedThinking): its
-		// local byte size diverges from what the provider bills, so counting it here
-		// would let a thinking-heavy turn falsely trip the floor. The provider usage
-		// (the other arm of compactionContextTokens) already accounts for it.
+		// Local counting is the whole point of this arm: provider usage is
+		// exactly what it must not trust. Exclude encrypted reasoning
+		// (thinkingSignature / redactedThinking) too — its local byte size
+		// diverges from what the provider bills, so counting it would let a
+		// thinking-heavy turn falsely trip the floor. The provider usage (the
+		// other arm of compactionContextTokens) already accounts for it.
 		const opts = { excludeEncryptedReasoning: true } as const;
 		return (
-			computeNonMessageTokens(this.#host.nonMessageTokenSource()) +
-			this.#host.messages().reduce((sum, msg) => sum + estimateTokens(msg, opts), 0) +
-			pendingMessages.reduce((sum, msg) => sum + estimateTokens(msg, opts), 0)
+			computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer, this.#host.settings.revision) +
+			this.#tokenizer.countMessages(this.#host.messages(), opts) +
+			this.#tokenizer.countMessages(pendingMessages, opts)
 		);
 	}
 
@@ -1009,6 +2390,40 @@ export class SessionMaintenance {
 		return compactionContextTokens(breakdown?.usedTokens ?? 0, localEstimate);
 	}
 
+	/**
+	 * Local pre-compaction context for a snapcompact preparation, measured on the
+	 * exact same non-message overhead and tokenizer as
+	 * {@link #projectSnapcompactContextTokens}: fixed overhead + the region that
+	 * would be archived (`messagesToSummarize` + `turnPrefixMessages`) + the kept
+	 * tail (`recentMessages`). Comparing the projection against this
+	 * self-consistent baseline isolates the single thing snapcompact changes —
+	 * the archived region becomes an imaged summary — so a result whose frames
+	 * cost more tokens than the text they replace is rejected, while genuine
+	 * reductions are not. Recomputed from the live messages rather than
+	 * `preparation.tokensBefore`, which carries only provider usage (zero for
+	 * imported sessions with no usage metadata, or a deflated figure behind a
+	 * payload-shrinking hook) and would falsely reject reducing archives (#10023).
+	 *
+	 * Opaque provider-replay payloads (`thinkingSignature` / `redactedThinking`)
+	 * are excluded from every region: their local byte size is not a trustworthy
+	 * token price (#2628), and counting them in the archived region — which the
+	 * imaged projection drops — inflated this baseline enough to accept an
+	 * inflating result (#10716). The caller's reduction-side projection excludes
+	 * them symmetrically so the comparison stays in one local token domain.
+	 */
+	#projectPreSnapcompactContextTokens(preparation: CompactionPreparation): number {
+		const opts = { excludeEncryptedReasoning: true } as const;
+		let tokens = computeNonMessageTokens(
+			this.#host.nonMessageTokenSource(),
+			this.#tokenizer,
+			this.#host.settings.revision,
+		);
+		tokens += this.#tokenizer.countMessages(preparation.messagesToSummarize, opts);
+		tokens += this.#tokenizer.countMessages(preparation.turnPrefixMessages, opts);
+		tokens += this.#tokenizer.countMessages(preparation.recentMessages, opts);
+		return tokens;
+	}
+
 	async runPrePromptCompactionIfNeeded(messages: AgentMessage[]): Promise<void> {
 		const model = this.#model;
 		if (!model) return;
@@ -1018,14 +2433,28 @@ export class SessionMaintenance {
 		const contextTokens = this.#estimatePrePromptContextTokens(messages, contextWindow);
 		const pendingMidTurnDeadEnd = this.#midTurnDeadEndPendingPrePrompt;
 		this.#midTurnDeadEndPendingPrePrompt = false;
-		if (!shouldCompact(contextTokens, contextWindow, compactionSettings)) return;
+		if (!shouldCompact(contextTokens, contextWindow, compactionSettings)) {
+			this.maybeStartSpeculativeCompaction(contextTokens, contextWindow);
+			return;
+		}
 		if (
 			pendingMidTurnDeadEnd &&
-			prepareCompaction(this.#host.sessionManager.getBranch(), compactionSettings, model) === undefined
+			prepareCompaction(this.#host.sessionManager.getBranch(), compactionSettings, model, this.#tokenizer) ===
+				undefined
 		) {
 			// The prior tool loop already attempted the rescue and warned for this
 			// persisted oversized turn. Only a later persisted cut point makes a
 			// pre-prompt retry useful; the new agent loop may warn for its own turn.
+			return;
+		}
+		// Grace band: a live (or just-started) background speculation absorbs the
+		// blocking summarization; the user's prompt goes out immediately and the
+		// armed result is spliced in at the next boundary.
+		if (this.deferThresholdCompactionToSpeculation(contextTokens, contextWindow)) {
+			logger.debug("Pre-prompt threshold deferred to speculative compaction", {
+				contextTokens,
+				contextWindow,
+			});
 			return;
 		}
 
@@ -1050,6 +2479,8 @@ export class SessionMaintenance {
 		await this.runAutoCompaction("threshold", false, false, false, {
 			autoContinue: false,
 			triggerContextTokens: contextTokens,
+			pendingContextTokens: this.#tokenizer.countMessages(messages, { excludeEncryptedReasoning: true }),
+			preparedContextTokens: this.#estimateStoredContextTokens(),
 			phase: "pre_turn",
 		});
 	}
@@ -1061,9 +2492,7 @@ export class SessionMaintenance {
 	 * are already paired in `activeMessages`, the live array the agent loop reads
 	 * before its next model call. Before compacting, the just-finished turn is
 	 * synchronously persisted if async message hooks have not reached the normal
-	 * append path yet. Mid-run handoff is suppressed because resetting the session
-	 * while the loop owns `activeMessages` would race the next request; handoff
-	 * strategy falls back to in-place context-full compaction here.
+	 * append path yet.
 	 */
 	async maintainContextMidRun(
 		activeMessages: AgentMessage[],
@@ -1082,13 +2511,44 @@ export class SessionMaintenance {
 		const model = this.#model;
 		const contextWindow = model?.contextWindow ?? 0;
 		if (contextWindow <= 0) return;
-
 		const compactionSettings = this.#host.settings.getGroup("compaction");
+		const experimentalNewContextRequest =
+			this.#usesExperimentalContextManagement() && this.#host.takeExperimentalContextRolloverRequest(context);
+
+		// An explicit model-requested rollover bypasses the Auto-Compact toggle:
+		// `new_context` already acknowledged the request, so silently dropping it
+		// here would leave the model believing a boundary landed. Automatic
+		// threshold rollover remains gated by `compaction.enabled`.
 		if (
-			!compactionSettings.enabled ||
-			compactionSettings.strategy === "off" ||
-			compactionSettings.midTurnEnabled === false
+			(!compactionSettings.enabled && !experimentalNewContextRequest) ||
+			(!this.#usesExperimentalContextManagement() && !hasConfiguredCompactionMethod(compactionSettings)) ||
+			(!experimentalNewContextRequest && compactionSettings.midTurnEnabled === false)
 		) {
+			return;
+		}
+		if (experimentalNewContextRequest) {
+			if (!(await this.#host.persistTurnMessagesForMidRunCompaction(context))) return;
+			// An abort or disposal that raced the awaited persistence barrier must
+			// not commit a boundary the interrupted turn never observed.
+			if (signal?.aborted || this.#host.isDisposed()) return;
+			const result = await this.runAutoCompaction("threshold", false, false, false, {
+				autoContinue: false,
+				suppressContinuation: true,
+				phase: "mid_turn",
+				detachPostCommit: true,
+				explicitNewContextRequest: true,
+			});
+
+			if (result.automaticContinuationBlocked) {
+				this.#midTurnCompactionDeadEnds.add(activeMessages);
+				this.#midTurnDeadEndPendingPrePrompt = true;
+			}
+			if (signal?.aborted) return;
+			const compactedMessages = this.#host.agent.state.messages;
+			if (compactedMessages !== activeMessages) {
+				activeMessages.splice(0, activeMessages.length, ...compactedMessages);
+				invalidateConvertToLlmArrayCache(activeMessages);
+			}
 			return;
 		}
 
@@ -1105,7 +2565,20 @@ export class SessionMaintenance {
 		const billedContextTokens = calculateContextTokens(lastAssistant.usage);
 		const storedContextTokens = this.#estimateStoredContextTokens();
 		const contextTokens = compactionContextTokens(billedContextTokens, storedContextTokens);
-		if (!shouldCompact(contextTokens, contextWindow, compactionSettings)) return;
+		if (!shouldCompact(contextTokens, contextWindow, compactionSettings)) {
+			this.maybeStartSpeculativeCompaction(contextTokens, contextWindow);
+			return;
+		}
+		// Grace band: keep the tool loop moving while a background speculation
+		// (live or started here) produces the summary; checked before the
+		// persistence barrier so deferred boundaries never await the journal.
+		if (this.deferThresholdCompactionToSpeculation(contextTokens, contextWindow)) {
+			logger.debug("Mid-run threshold deferred to speculative compaction", {
+				contextTokens,
+				contextWindow,
+			});
+			return;
+		}
 
 		if (!(await this.#host.persistTurnMessagesForMidRunCompaction(context))) return;
 		if (this.#midTurnCompactionDeadEnds.has(activeMessages)) {
@@ -1120,7 +2593,8 @@ export class SessionMaintenance {
 			// soon as one appears.
 			if (
 				!model ||
-				prepareCompaction(this.#host.sessionManager.getBranch(), compactionSettings, model) === undefined
+				prepareCompaction(this.#host.sessionManager.getBranch(), compactionSettings, model, this.#tokenizer) ===
+					undefined
 			) {
 				return;
 			}
@@ -1147,9 +2621,9 @@ export class SessionMaintenance {
 		const result = await this.runAutoCompaction("threshold", false, false, false, {
 			autoContinue: false,
 			suppressContinuation: true,
-			suppressHandoff: true,
 			triggerContextTokens: contextTokens,
 			phase: "mid_turn",
+			detachPostCommit: true,
 		});
 		if (result.automaticContinuationBlocked) {
 			this.#midTurnCompactionDeadEnds.add(activeMessages);
@@ -1160,11 +2634,12 @@ export class SessionMaintenance {
 		const compactedMessages = this.#host.agent.state.messages;
 		if (compactedMessages !== activeMessages) {
 			activeMessages.splice(0, activeMessages.length, ...compactedMessages);
+			invalidateConvertToLlmArrayCache(activeMessages);
 		}
 		logger.debug("Mid-run compaction ran between provider calls", {
 			contextTokens,
 			contextWindow,
-			strategy: compactionSettings.strategy,
+			methods: resolveCompactionMethodOrder(compactionSettings.methodOrder),
 			goalActive: this.#goalModeState?.enabled === true && this.#goalModeState.goal.status === "active",
 			messagesBefore,
 			messagesAfter: activeMessages.length,
@@ -1185,11 +2660,11 @@ export class SessionMaintenance {
 	 *
 	 * @param assistantMessage The assistant message to check
 	 * @param skipAbortedCheck If false, include aborted messages (for pre-prompt check). Default: true
-	 * @param allowDefer If true, threshold-driven handoff strategy may schedule itself as a
-	 *   deferred post-prompt task instead of running inline. Callers running inside the
-	 *   `agent_end` handler set this to true so `session.prompt()` resolves cleanly; callers
-	 *   on the pre-prompt path (where the next agent turn is about to start) set it to false
-	 *   to avoid racing the deferred handoff against the new turn.
+	 * @param allowDefer If true, a threshold-driven handoff preference may schedule
+	 *   itself as a deferred post-prompt task instead of running inline. Callers running
+	 *   inside the `agent_end` handler set this to true so `session.prompt()` resolves
+	 *   cleanly; callers on the pre-prompt path (where the next agent turn is about to
+	 *   start) set it to false to avoid racing the deferred handoff against the new turn.
 	 * @param autoContinue Whether maintenance may schedule the agent-authored continuation prompt.
 	 * @returns whether compaction/recovery scheduled a handoff, retry, auto-continue, or
 	 *   queued-message drain that already owns the next turn. Callers MUST skip
@@ -1206,6 +2681,10 @@ export class SessionMaintenance {
 		if (skipAbortedCheck && assistantMessage.stopReason === "aborted") return COMPACTION_CHECK_NONE;
 		const contextWindow = this.#model?.contextWindow ?? 0;
 		const generation = this.#host.promptGeneration();
+		// A turn that produced actionable output means the incomplete-recovery loop
+		// broke through: clear the counter so a later isolated `length` stop starts
+		// fresh rather than inheriting a stale count from an earlier loop.
+		if (assistantTurnProducedOutput(assistantMessage)) this.#incompleteRecoveryAttempts = 0;
 		// Skip overflow check if the message came from a different model.
 		// This handles the case where user switched from a smaller-context model (e.g. opus)
 		// to a larger-context model (e.g. codex) - the overflow error from the old model
@@ -1219,13 +2698,105 @@ export class SessionMaintenance {
 		const compactionEntry = getLatestCompactionEntry(this.#host.sessionManager.getBranch());
 		const errorIsFromBeforeCompaction =
 			compactionEntry !== null && assistantMessage.timestamp < new Date(compactionEntry.timestamp).getTime();
-		if (sameModel && !errorIsFromBeforeCompaction && AIError.isContextOverflow(assistantMessage, contextWindow)) {
-			// Clear the failed turn from active context so the retry (or the next
-			// user prompt) does not replay it. The persisted branch entry stays
-			// for now: when no recovery path runs, the user-facing transcript
-			// MUST keep the only assistant message explaining why the turn
-			// stopped. The branch entry is dropped further down, but only on the
-			// paths that actually schedule a retry/compaction.
+		const payloadRejection =
+			sameModel && !errorIsFromBeforeCompaction && AIError.isPayloadRejection(assistantMessage);
+		const ambiguousPayloadRejection =
+			payloadRejection && AIError.is(assistantMessage.errorId, AIError.Flag.ContextOverflow);
+		const storedTokens = payloadRejection && contextWindow > 0 ? this.#estimateStoredContextTokens() : 0;
+		const reportedInputTokens =
+			assistantMessage.usage.input + assistantMessage.usage.cacheRead + assistantMessage.usage.cacheWrite;
+		const trustedPayloadRejection =
+			payloadRejection &&
+			contextWindow > 0 &&
+			reportedInputTokens <= contextWindow &&
+			storedTokens < contextWindow * PAYLOAD_REJECTION_OCCUPANCY_CEILING;
+		// Provider-reported usage above a known window is authoritative proof of a
+		// genuine token overflow (not a byte/media-only rejection), computed once
+		// up front so both the media-exclusion decision below and the terminal
+		// dead-end check further down agree with each other.
+		const usageBackedOverflow = AIError.isUsageBackedContextOverflow(assistantMessage, contextWindow);
+		// Concrete media-limit wording (e.g. "image count exceeds the limit of 20")
+		// in the error text — computed up front (independent of window or
+		// compaction availability) so both the media-exclusion decision below and
+		// the terminal dead-end check further down agree with each other.
+		const explicitMediaRejection =
+			payloadRejection && hasExplicitMediaRejectionEvidence(assistantMessage.errorMessage);
+		// `payloadRejection` alone is not sufficient reason to exclude media
+		// compaction methods (snapcompact): a *usage-backed* overflow proves the
+		// rejection is a genuine token-context problem, not a byte/media budget
+		// one, so a user configured with e.g. `methodOrder: ["snapcompact"]` must
+		// still be able to use it instead of being told no recovery exists.
+		// Explicit media-limit evidence overrides that exception, though: usage
+		// proving a token overflow doesn't negate a provider *simultaneously*
+		// reporting an image-count limit, and snapcompact adds image frames before
+		// retrying — guaranteeing the retry stays over that limit (#11482).
+		const excludeMediaForPayloadRejection = payloadRejection && (!usageBackedOverflow || explicitMediaRejection);
+		// Whether a compaction method actually exists to attempt shrinking the
+		// history. Computed up front so the unknown-context-window branch below
+		// can fall through to a real attempt instead of always assuming defeat.
+		// Uses the same reason/model-specific selection as `runAutoCompaction`
+		// (not just a non-empty `methodOrder`) so an unusable-for-overflow
+		// configuration — e.g. `methodOrder: ["handoff"]`, or `snapcompact`-only
+		// on a text-only model — isn't reported as available and then silently
+		// no-ops instead of surfacing the payload-rejection notice (#11482).
+		// For a payload rejection specifically, `snapcompact` is excluded from
+		// this availability check too: it archives history onto base64 image
+		// frames, which only grows the byte size a payload/byte-limit 413 is
+		// already complaining about (#11482).
+		// (Named distinctly from the `compactionSettings` used further down in
+		// this function's later, unrelated threshold check.)
+		const payloadCompactionSettings = this.#host.settings.getGroup("compaction");
+		const compactionAvailable =
+			payloadCompactionSettings.enabled &&
+			(this.#usesExperimentalContextManagement() ||
+				hasUsableCompactionMethod(
+					"overflow",
+					this.#model,
+					payloadCompactionSettings,
+					excludeMediaForPayloadRejection,
+				));
+		// Unknown context window (common for custom/self-hosted models the
+		// registry has no metadata for) used to be treated the same as a
+		// confirmed media/byte-budget rejection and blocked outright — even
+		// when the payload bloat is plain message-count growth that ordinary
+		// compaction would shrink just fine (#11479). Only skip straight to the
+		// honest "can't help" notice here when there is genuinely no compaction
+		// method configured to try — an absence of proof, gated to the
+		// unknown-window case since a known window's own evidence (below) already
+		// covers it.
+		const unknownWindowDeadEnd =
+			payloadRejection && contextWindow <= 0 && !ambiguousPayloadRejection && !compactionAvailable;
+		// Explicit media evidence is a terminal signal independent of whether the
+		// context window is known: a known window's `trustedPayloadRejection` only
+		// requires local headroom, so a message like "too many images" can still
+		// fail that check (e.g. the local estimate is near the occupancy ceiling)
+		// and fall through to promotion/compaction despite proving an image-count
+		// limit neither can raise. Gated to `!usageBackedOverflow` though: when
+		// provider-reported usage *also* proves a genuine token overflow, that's a
+		// real, separately fixable problem — compaction should still get a shot at
+		// it (with media methods excluded per `excludeMediaForPayloadRejection`
+		// above), not be discarded just because the same response also named a
+		// media limit (#11482).
+		if (unknownWindowDeadEnd || trustedPayloadRejection || (explicitMediaRejection && !usageBackedOverflow)) {
+			// Every disjunct above implies `!usageBackedOverflow` (unknown window ⇒
+			// `isUsageBackedContextOverflow` is false by definition; trusted requires
+			// `reportedInputTokens <= contextWindow`; the third is explicit), so this
+			// is always the honest "NOT a token-context problem" notice — the sibling
+			// usage-backed selection lives further down, where that case is reachable.
+			this.#host.removeAssistantMessageFromActiveContext(assistantMessage);
+			this.#host.emitNotice("warning", payloadRejectionNotice(storedTokens, contextWindow), "compaction");
+			logger.debug("Payload-shaped 413 withheld from token compaction", {
+				provider: assistantMessage.provider,
+				model: assistantMessage.model,
+				message: assistantMessage.errorMessage,
+				storedTokens,
+				contextWindow,
+			});
+			return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
+		}
+		const overflowEvidence =
+			sameModel && !errorIsFromBeforeCompaction && AIError.isContextOverflow(assistantMessage, contextWindow);
+		if (overflowEvidence || (payloadRejection && !trustedPayloadRejection)) {
 			this.#host.removeAssistantMessageFromActiveContext(assistantMessage);
 
 			// Try context promotion first - switch to a larger model and retry without compacting
@@ -1233,16 +2804,97 @@ export class SessionMaintenance {
 			if (promoted) {
 				await this.#host.dropPersistedAssistantTurn(assistantMessage);
 				// Retry on the promoted (larger) model without compacting
-				this.#host.scheduleAgentContinue({ delayMs: 100, generation });
+				this.#host.scheduleAgentContinue({
+					source: "context-promotion-overflow",
+					delayMs: 100,
+					generation,
+				});
 				return COMPACTION_CHECK_CONTINUATION;
 			}
 
 			// No promotion target available fall through to compaction
-			const compactionSettings = this.#host.settings.getGroup("compaction");
-			if (compactionSettings.enabled && compactionSettings.strategy !== "off") {
-				return await this.#host.runRecoveryCompactionWithRollback("overflow", assistantMessage, allowDefer, {
-					autoContinue,
+			if (compactionAvailable) {
+				const compactionResult = await this.#host.runRecoveryCompactionWithRollback(
+					"overflow",
+					assistantMessage,
+					allowDefer,
+					{ autoContinue, excludeMediaMethods: excludeMediaForPayloadRejection },
+				);
+				// A statically usable method (per `hasUsableCompactionMethod`) can still
+				// reclaim nothing at runtime — e.g. `methodOrder: ["shake"]` with no
+				// heavy/droppable content on a plain text history — or `runAutoCompaction`
+				// itself can already return `automaticContinuationBlocked` without a
+				// rewrite (e.g. a single oversized latest turn `prepareCompaction` can't
+				// shrink). Either way, when a payload rejection sees no history rewrite
+				// and no scheduled continuation, `runRecoveryCompactionWithRollback` has
+				// already restored the failed turn into active context (and, unless
+				// already blocked, an unconverted no-op result here has neither a
+				// scheduled continuation nor a block: the caller would treat it as an
+				// ordinary turn end and could resubmit the same oversized history on the
+				// next auto-continue, looping the same 413 silently with no notice ever
+				// shown) (#11482).
+				if (
+					payloadRejection &&
+					!compactionResult.continuationScheduled &&
+					compactionResult.historyRewritten !== true
+				) {
+					// `runRecoveryCompactionWithRollback`'s no-rewrite path re-appends the
+					// failed turn to active context (so it isn't silently lost) before
+					// returning here. Unlike the immediate and no-method dead ends above/
+					// below, this branch discovers the no-progress outcome only *after*
+					// that restoration, so it must re-remove the turn itself — otherwise
+					// the next prompt's pre-prompt maintenance finds the same error via
+					// `#findLastAssistantMessage()` and repeats this entire no-progress
+					// compaction + warning before accepting new input (#11482). The
+					// persisted session history (separate from this active-context view)
+					// still keeps the turn visible.
+					this.#host.removeAssistantMessageFromActiveContext(assistantMessage);
+					if (compactionResult.automaticContinuationBlocked === true) {
+						// `runAutoCompaction` already blocked and emitted its own notice for
+						// this outcome (e.g. its own compaction dead end) — only the cleanup
+						// above was missing; forward its result unchanged (#11482).
+						return compactionResult;
+					}
+					// Same usage-backed/byte-shaped notice selection as the sibling
+					// "no compaction available" dead end below: a payload rejection
+					// with provider-reported usage above the window IS a genuine
+					// token-context problem even though compaction (attempted here,
+					// unsuccessfully) couldn't resolve it — say so accurately instead
+					// of always claiming "not a token problem" (#11482).
+					this.#host.emitNotice(
+						"warning",
+						usageBackedOverflow
+							? usageOverflowDeadEndNotice(reportedInputTokens, contextWindow)
+							: payloadRejectionNotice(storedTokens, contextWindow),
+						"compaction",
+					);
+					logger.debug("Payload-shaped 413 compaction attempt made no progress; blocking automatic continuation", {
+						provider: assistantMessage.provider,
+						model: assistantMessage.model,
+						message: assistantMessage.errorMessage,
+						storedTokens,
+						contextWindow,
+					});
+					return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
+				}
+				return compactionResult;
+			}
+			if (payloadRejection) {
+				this.#host.emitNotice(
+					"warning",
+					usageBackedOverflow
+						? usageOverflowDeadEndNotice(reportedInputTokens, contextWindow)
+						: payloadRejectionNotice(storedTokens, contextWindow),
+					"compaction",
+				);
+				logger.debug("Payload-shaped 413 has no runnable recovery; blocking automatic continuation", {
+					provider: assistantMessage.provider,
+					model: assistantMessage.model,
+					message: assistantMessage.errorMessage,
+					storedTokens,
+					contextWindow,
 				});
+				return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
 			}
 			return COMPACTION_CHECK_NONE;
 		}
@@ -1284,7 +2936,11 @@ export class SessionMaintenance {
 					failed: `${assistantMessage.provider}/${assistantMessage.model}`,
 					current: `${this.#model.provider}/${this.#model.id}`,
 				});
-				this.#host.scheduleAgentContinue({ delayMs: 100, generation });
+				this.#host.scheduleAgentContinue({
+					source: "promoted-model-overflow",
+					delayMs: 100,
+					generation,
+				});
 				return COMPACTION_CHECK_CONTINUATION;
 			}
 		}
@@ -1293,8 +2949,8 @@ export class SessionMaintenance {
 		// (and Codex) maps to stopReason === "length". The model burned its
 		// `max_output_tokens` budget on reasoning/text and emitted no actionable
 		// deliverable. Same recovery class as overflow: promotion if available,
-		// otherwise compaction/handoff. Unlike overflow, the *input* is fine, so we
-		// allow the handoff strategy to actually run.
+		// otherwise compaction/handoff. Unlike overflow, the *input* is fine, so a
+		// reachable handoff preference may run.
 		if (sameModel && !errorIsFromBeforeCompaction && assistantMessage.stopReason === "length") {
 			// Same active-context vs persisted-history split as the overflow path
 			// above: clear the dead turn from agent state so it cannot be replayed,
@@ -1304,18 +2960,53 @@ export class SessionMaintenance {
 			const promoted = await this.#tryContextPromotion(assistantMessage);
 			if (promoted) {
 				await this.#host.dropPersistedAssistantTurn(assistantMessage);
+				this.#incompleteRecoveryAttempts = 0;
 				logger.debug("Context promotion triggered by response.incomplete (length stop)", {
 					from: `${assistantMessage.provider}/${assistantMessage.model}`,
 				});
-				this.#host.scheduleAgentContinue({ delayMs: 100, generation });
+				this.#host.scheduleAgentContinue({
+					source: "context-promotion-incomplete",
+					delayMs: 100,
+					generation,
+				});
 				return COMPACTION_CHECK_CONTINUATION;
 			}
 
 			const incompleteCompactionSettings = this.#host.settings.getGroup("compaction");
-			if (incompleteCompactionSettings.enabled && incompleteCompactionSettings.strategy !== "off") {
+			if (
+				incompleteCompactionSettings.enabled &&
+				(this.#usesExperimentalContextManagement() || hasConfiguredCompactionMethod(incompleteCompactionSettings))
+			) {
+				// Bound the loop: a model that keeps returning an empty `length` turn
+				// (zero usage, no content) re-triggers compaction + shake-retry forever
+				// otherwise, persisting an empty assistant turn each pass (#10594). Count
+				// no-progress incomplete recoveries; past the cap, drop the dead turn,
+				// surface an actionable error, and stop scheduling continuations. Any
+				// turn that produced actionable output already reset the counter at the
+				// top of checkCompaction, so a genuinely truncated turn that resumes
+				// after compaction is never cut short.
+				if (this.#incompleteRecoveryAttempts >= INCOMPLETE_RECOVERY_MAX_RETRIES) {
+					const attempts = this.#incompleteRecoveryAttempts;
+					this.#incompleteRecoveryAttempts = 0;
+					const droppedEntryId = await this.#host.dropPersistedAssistantTurn(assistantMessage);
+					// Reparenting the live branch is insufficient when this terminal path
+					// appends no successor: on restart, the loader selects the last physical
+					// journal entry and revives the discarded length turn. Persist the branch
+					// marker/rewrite before blocking further continuation.
+					if (droppedEntryId) await this.#host.sessionManager.discardEntryDurably(droppedEntryId);
+					const finalError = `Compaction recovery gave up after ${attempts} consecutive empty \`length\` responses from ${assistantMessage.provider}/${assistantMessage.model}; the model produced no output. Try switching models or raising the model's max output tokens.`;
+					logger.warn("response.incomplete recovery cap reached; halting retries", {
+						model: `${assistantMessage.provider}/${assistantMessage.model}`,
+						attempts,
+					});
+					this.#host.emitNotice("error", finalError, "compaction");
+					return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
+				}
+				this.#incompleteRecoveryAttempts++;
 				logger.debug("Compaction triggered by response.incomplete (length stop, no promotion target)", {
 					model: `${assistantMessage.provider}/${assistantMessage.model}`,
-					strategy: incompleteCompactionSettings.strategy,
+					methods: resolveCompactionMethodOrder(incompleteCompactionSettings.methodOrder),
+					attempt: this.#incompleteRecoveryAttempts,
 				});
 				return await this.#host.runRecoveryCompactionWithRollback("incomplete", assistantMessage, allowDefer, {
 					autoContinue,
@@ -1333,15 +3024,21 @@ export class SessionMaintenance {
 		// Stale-result pass runs every turn, before any threshold gating: it is
 		// cheap (bails when no candidate) and independent of the compaction
 		// setting.
-		const supersedeResult = await this.#pruneStaleToolResults();
+		const supersedeResult = this.#usesExperimentalContextManagement()
+			? undefined
+			: await this.#pruneStaleToolResults();
 
 		const compactionSettings = this.#host.settings.getGroup("compaction");
-		if (!compactionSettings.enabled || compactionSettings.strategy === "off") return COMPACTION_CHECK_NONE;
+		if (
+			!compactionSettings.enabled ||
+			(!this.#usesExperimentalContextManagement() && !hasConfiguredCompactionMethod(compactionSettings))
+		)
+			return COMPACTION_CHECK_NONE;
 
 		// Case 4: Threshold - turn succeeded but context is getting large
 		// Skip if this was an error (non-overflow errors don't have usage data)
 		if (assistantMessage.stopReason === "error") return COMPACTION_CHECK_NONE;
-		const pruneResult = await this.#pruneToolOutputs();
+		const pruneResult = this.#usesExperimentalContextManagement() ? undefined : await this.#pruneToolOutputs();
 		const maintenanceTokensFreed = (supersedeResult?.tokensSaved ?? 0) + (pruneResult?.tokensSaved ?? 0);
 		// `errorIsFromBeforeCompaction` (computed above) is the general
 		// "this assistant message predates the latest compaction" predicate here,
@@ -1383,7 +3080,7 @@ export class SessionMaintenance {
 			stopReason: assistantMessage.stopReason,
 			sameModel: sameModel === true,
 			contextWindow,
-			strategy: compactionSettings.strategy,
+			methods: resolveCompactionMethodOrder(compactionSettings.methodOrder),
 			thresholdTokens,
 			assistantUsageContextTokens,
 			storedContextTokens,
@@ -1394,6 +3091,17 @@ export class SessionMaintenance {
 			contextPromotionEnabled: this.#host.settings.get("contextPromotion.enabled") === true,
 		});
 		if (shouldThresholdCompact) {
+			// Grace band: a live (or just-started) background speculation absorbs
+			// the blocking summarization; the session stays responsive and the
+			// armed result lands at the next boundary. Deferral delays promotion
+			// by at most the band — the eventual real pass still promotes first.
+			if (this.deferThresholdCompactionToSpeculation(postMaintenanceContextTokens, contextWindow)) {
+				logger.debug("Post-turn threshold deferred to speculative compaction", {
+					postMaintenanceContextTokens,
+					contextWindow,
+				});
+				return COMPACTION_CHECK_NONE;
+			}
 			// Try promotion first — if a larger model is available, switch instead of compacting
 			const promoted = await this.#tryContextPromotion(assistantMessage);
 			if (!promoted) {
@@ -1409,6 +3117,8 @@ export class SessionMaintenance {
 				contextWindow,
 				model: `${assistantMessage.provider}/${assistantMessage.model}`,
 			});
+		} else {
+			this.maybeStartSpeculativeCompaction(contextTokens, contextWindow);
 		}
 		return COMPACTION_CHECK_NONE;
 	}
@@ -1507,7 +3217,7 @@ export class SessionMaintenance {
 			addCandidate(resolveCompactionConfiguredTarget(preferredModel, availableModels));
 		}
 		addCandidate(preferredModel ?? undefined);
-		for (const role of MODEL_ROLE_IDS) {
+		for (const role of CHAT_MODEL_ROLE_IDS) {
 			addCandidate(
 				resolveRoleModelFull(this.#host.settings, role, availableModels, preferredModel ?? undefined).model,
 			);
@@ -1614,6 +3324,18 @@ export class SessionMaintenance {
 	async #prepareCompactionFromHooks(
 		preparation: CompactionPreparation,
 		hookCompaction: CompactionResult | undefined,
+		options?: {
+			/**
+			 * Collect built-in remote memory-backend recall context for the LLM
+			 * summary. Notes-backed rollover consumes only preservation data, so
+			 * it passes `false`: no remote `recallForCompaction()` round-trip
+			 * whose recalled context would be discarded. Extension
+			 * `session.compacting` handlers still run for their preservation
+			 * data; this does not promise arbitrary extension hooks are
+			 * network-free.
+			 */
+			collectMemoryContext?: boolean;
+		},
 	): Promise<
 		| {
 				kind: "fromHook";
@@ -1648,9 +3370,11 @@ export class SessionMaintenance {
 			preserveData = result?.preserveData;
 		}
 
-		const memoryBackendContext = await this.#collectMemoryBackendContext(preparation);
-		if (memoryBackendContext) {
-			hookContext = hookContext ? [...hookContext, memoryBackendContext] : [memoryBackendContext];
+		if (options?.collectMemoryContext !== false) {
+			const memoryBackendContext = await this.#collectMemoryBackendContext(preparation);
+			if (memoryBackendContext) {
+				hookContext = hookContext ? [...hookContext, memoryBackendContext] : [memoryBackendContext];
+			}
 		}
 
 		if (hookCompaction) {
@@ -1701,20 +3425,28 @@ export class SessionMaintenance {
 	 * ~402k frame-token projection always overflows any sub-1M-token window
 	 * (issue #3247).
 	 */
-	#computeSnapcompactMaxFrames(preparation: CompactionPreparation, settings: CompactionSettings): number {
+	#computeSnapcompactMaxFrames(preparation: CompactionPreparation, settings: EngineCompactionSettings): number {
 		const ctxWindow = this.#model?.contextWindow ?? 0;
-		if (ctxWindow <= 0) return Math.min(snapcompact.MAX_FRAMES_DEFAULT, snapcompact.maxFramesForDataBudget());
-		const reserve = effectiveReserveTokens(ctxWindow, settings);
-		let baseTokens = computeNonMessageTokens(this.#host.nonMessageTokenSource());
-		for (const message of preparation.recentMessages) {
-			baseTokens += estimateTokens(message);
+		if (ctxWindow <= 0) {
+			return Math.min(
+				snapcompact.MAX_FRAMES_DEFAULT,
+				snapcompact.maxFramesForDataBudget(),
+				snapcompact.providerFrameBudget(this.#model?.provider),
+			);
 		}
+		const reserve = effectiveReserveTokens(ctxWindow, settings);
+		let baseTokens = computeNonMessageTokens(
+			this.#host.nonMessageTokenSource(),
+			this.#tokenizer,
+			this.#host.settings.revision,
+		);
+		baseTokens += this.#tokenizer.countMessages(preparation.recentMessages);
 		const totalBudget = ctxWindow - reserve;
 		// Skip iff there is no headroom whatsoever; a text-only archive costs
 		// far less than the cap reserve below, so any positive residual is
 		// worth attempting and the projection guard catches actual overflow.
 		if (baseTokens >= totalBudget) return 0;
-		// Cap reserve mirrors what `estimateTokens(summaryMessage)` will charge
+		// Cap reserve mirrors what `countMessage(summaryMessage)` will charge
 		// when frames > 0: `countTokens(summaryTemplate ‖ textHead ‖ textTail)`
 		// plus `numFrames × FRAME_TOKEN_ESTIMATE`. Resolve the shape this
 		// snapcompact pass will actually use (matches the `shape` argument
@@ -1746,12 +3478,18 @@ export class SessionMaintenance {
 			Math.floor(frameBudget / snapcompact.FRAME_TOKEN_ESTIMATE),
 			snapcompact.MAX_FRAMES_DEFAULT,
 			snapcompact.maxFramesForDataBudget(),
+			snapcompact.providerFrameBudget(this.#model?.provider),
 		);
 	}
 
 	#snapcompactFramePayloadBytes(result: snapcompact.CompactionResult): number {
 		const archive = snapcompact.getPreservedArchive(result.preserveData);
 		return archive ? snapcompact.frameDataBytes(archive.frames) : 0;
+	}
+
+	#deadEndRemedies(defaultRemedies: string, implicatedFrames: number): string {
+		if (implicatedFrames <= 0) return defaultRemedies;
+		return `reduce archived image frames (${implicatedFrames} held) — providers often bill vision media separately from tokens; ${defaultRemedies}`;
 	}
 
 	/**
@@ -1762,7 +3500,11 @@ export class SessionMaintenance {
 	 * lets the caller decide whether snapcompact brought the context under the
 	 * window or should fall back to an LLM summary.
 	 */
-	#projectSnapcompactContextTokens(preparation: CompactionPreparation, result: snapcompact.CompactionResult): number {
+	#projectSnapcompactContextTokens(
+		preparation: CompactionPreparation,
+		result: snapcompact.CompactionResult,
+		options?: MessageCountOptions,
+	): number {
 		const archive = snapcompact.getPreservedArchive(result.preserveData);
 		const blocks = archive
 			? snapcompact.historyBlocks(archive, { maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET })
@@ -1771,16 +3513,111 @@ export class SessionMaintenance {
 			result.summary,
 			result.tokensBefore,
 			new Date().toISOString(),
-			result.shortSummary,
-			undefined,
-			undefined,
-			blocks,
+			{
+				shortSummary: result.shortSummary,
+				blocks,
+			},
 		);
-		let tokens = computeNonMessageTokens(this.#host.nonMessageTokenSource()) + estimateTokens(summaryMessage);
-		for (const message of preparation.recentMessages) {
-			tokens += estimateTokens(message);
-		}
+		let tokens =
+			computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer, this.#host.settings.revision) +
+			this.#tokenizer.countMessage(summaryMessage);
+		tokens += this.#tokenizer.countMessages(preparation.recentMessages, options);
 		return tokens;
+	}
+
+	/**
+	 * Estimated context tokens after a compaction commit. The projection uses the
+	 * same synthetic compaction boundary and `buildSessionContext` conversion as
+	 * the post-commit rebuild, so message-bearing custom entries and branch
+	 * summaries are counted alongside ordinary messages. The result is persisted
+	 * as `tokensAfter` on the entry so the transcript divider can show the before
+	 * → after amounts.
+	 */
+	#projectCompactedContextTokens(args: CompactionProjectionArgs): number {
+		return this.#projectCompactionContextTokens(args);
+	}
+
+	#projectCompactionContextTokens(args: CompactionProjectionArgs): number {
+		const nonMessageTokens = computeNonMessageTokens(
+			this.#host.nonMessageTokenSource(),
+			this.#tokenizer,
+			this.#host.settings.revision,
+		);
+		const branch = this.#host.sessionManager.getBranch();
+		const leaf = branch.at(-1);
+		const archive = snapcompact.getPreservedArchive(args.preserveData);
+		const blocks = archive
+			? snapcompact.historyBlocks(archive, { maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET })
+			: undefined;
+		const projectionOptions = { excludeEncryptedReasoning: true } as const;
+		if (!leaf) {
+			const summaryMessage = createCompactionSummaryMessage(
+				args.summary,
+				args.tokensBefore,
+				new Date().toISOString(),
+				{
+					shortSummary: args.shortSummary,
+					method: args.method,
+					blocks,
+				},
+			);
+			return nonMessageTokens + this.#tokenizer.countMessages(convertToLlm([summaryMessage]), projectionOptions);
+		}
+		const pending: CompactionEntry = {
+			type: "compaction",
+			id: `${leaf.id}:compaction-tokens-projection`,
+			parentId: leaf.id,
+			timestamp: new Date().toISOString(),
+			summary: args.summary,
+			shortSummary: args.shortSummary,
+			firstKeptEntryId: args.firstKeptEntryId,
+			tokensBefore: args.tokensBefore,
+			method: args.method,
+			details: args.details,
+			preserveData: args.preserveData,
+			providerReplayThroughEntryId: args.providerReplayThroughEntryId,
+		};
+		const rebuilt = buildSessionContext([...branch, pending]);
+		const rebuiltMessages = convertToLlm(rebuilt.messages);
+		const providerPayload = getOpenAiRemoteCompactionPayload(pending);
+		if (!providerPayload) {
+			return nonMessageTokens + this.#tokenizer.countMessages(rebuiltMessages, projectionOptions);
+		}
+
+		const summaryMessage = createCompactionSummaryMessage(args.summary, args.tokensBefore, new Date().toISOString(), {
+			shortSummary: args.shortSummary,
+			providerPayload,
+			method: args.method,
+			blocks,
+		});
+		const summaryTokens = this.#tokenizer.countMessages(convertToLlm([summaryMessage]), projectionOptions);
+		const nativeHistoryTokens = this.#countOpenAiNativeHistoryTokens(providerPayload);
+		return (
+			nonMessageTokens +
+			this.#tokenizer.countMessages(rebuiltMessages, projectionOptions) -
+			summaryTokens +
+			nativeHistoryTokens
+		);
+	}
+
+	#countOpenAiNativeHistoryTokens(providerPayload: OpenAIResponsesHistoryPayload): number {
+		const serialized = stringifyJson(providerPayload.items);
+		return serialized === undefined ? 0 : this.#tokenizer.countTokens(serialized);
+	}
+
+	/**
+	 * Project `tokensAfter` for a notes-backed rollover from the same
+	 * reconstruction the commit will perform. The rollover details cause
+	 * `buildSessionContext` to retain the user-attributed request and injected
+	 * notebook in addition to the summary and kept tail. Pure projection: the
+	 * synthetic entry never reaches the journal, and the value remains a local
+	 * estimate, not provider-billed usage.
+	 */
+	#projectExperimentalContextRolloverTokens(args: CompactionProjectionArgs): number {
+		return this.#projectCompactionContextTokens({
+			...args,
+			details: { kind: "experimental-context-rollover", version: 1 },
+		});
 	}
 
 	/**
@@ -1848,9 +3685,9 @@ export class SessionMaintenance {
 		if (contextWindow <= 0) return true;
 		const activeExcludedMessage =
 			excludedMessage && this.#host.messages().includes(excludedMessage) ? excludedMessage : undefined;
-		const providerExcludedTokens = activeExcludedMessage ? estimateTokens(activeExcludedMessage) : 0;
+		const providerExcludedTokens = activeExcludedMessage ? this.#tokenizer.countMessage(activeExcludedMessage) : 0;
 		const storedExcludedTokens = activeExcludedMessage
-			? estimateTokens(activeExcludedMessage, { excludeEncryptedReasoning: true })
+			? this.#tokenizer.countMessage(activeExcludedMessage, { excludeEncryptedReasoning: true })
 			: 0;
 		const compactionSettings = this.#host.settings.getGroup("compaction");
 		const residualTokens = compactionContextTokens(
@@ -1908,7 +3745,7 @@ export class SessionMaintenance {
 		// a threshold-derived frame budget.
 		const frameRescue = await this.#rescueSnapcompactFrameOverflow(
 			this.#host.sessionManager.getBranch(),
-			this.#host.settings.getGroup("compaction"),
+			resolveMethodSettings(this.#host.settings.getGroup("compaction"), "snapcompact"),
 			signal,
 		);
 		if (frameRescue !== undefined && options.hasProgress()) return true;
@@ -1981,12 +3818,22 @@ export class SessionMaintenance {
 	 * Returns 0 when not even one frame fits that budget — the rebuild could
 	 * never create headroom, so the caller must not append it.
 	 */
-	#computeSnapcompactRescueMaxFrames(settings: CompactionSettings, keptTailTokens: number): number {
+	#computeSnapcompactRescueMaxFrames(settings: EngineCompactionSettings, keptTailTokens: number): number {
 		const ctxWindow = this.#model?.contextWindow ?? 0;
-		if (ctxWindow <= 0) return Math.min(snapcompact.MAX_FRAMES_DEFAULT, snapcompact.maxFramesForDataBudget());
+		if (ctxWindow <= 0) {
+			return Math.min(
+				snapcompact.MAX_FRAMES_DEFAULT,
+				snapcompact.maxFramesForDataBudget(),
+				snapcompact.providerFrameBudget(this.#model?.provider),
+			);
+		}
 		const thresholdTokens = resolveThresholdTokens(ctxWindow, settings);
 		const recoveryBandTokens = Math.floor(thresholdTokens * COMPACTION_RECOVERY_BAND);
-		const baseTokens = computeNonMessageTokens(this.#host.nonMessageTokenSource());
+		const baseTokens = computeNonMessageTokens(
+			this.#host.nonMessageTokenSource(),
+			this.#tokenizer,
+			this.#host.settings.revision,
+		);
 		const shape = snapcompact.resolveShape(this.#model, this.#host.settings.get("snapcompact.shape"));
 		const edgeCap = snapcompact.geometry(shape).capacity;
 		const textEdgeTokens = Math.ceil((2 * edgeCap * 1.15) / 4);
@@ -1994,12 +3841,14 @@ export class SessionMaintenance {
 		const frameBudget = recoveryBandTokens - baseTokens - keptTailTokens - textEdgeTokens - SUMMARY_TEMPLATE_TOKENS;
 		if (frameBudget < snapcompact.FRAME_TOKEN_ESTIMATE) return 0;
 		// Same hard caps as #computeSnapcompactMaxFrames: a threshold-derived
-		// count above the per-request payload budget would "shrink" a huge
-		// archive to a frame count the rebuilt prompt can never attach anyway.
+		// count above the per-request payload or provider image budget would
+		// "shrink" a huge archive to a frame count the rebuilt prompt can never
+		// attach anyway.
 		return Math.min(
 			Math.floor(frameBudget / snapcompact.FRAME_TOKEN_ESTIMATE),
 			snapcompact.MAX_FRAMES_DEFAULT,
 			snapcompact.maxFramesForDataBudget(),
+			snapcompact.providerFrameBudget(this.#model?.provider),
 		);
 	}
 
@@ -2025,12 +3874,12 @@ export class SessionMaintenance {
 	 */
 	async #rescueSnapcompactFrameOverflow(
 		branchEntries: SessionEntry[],
-		settings: CompactionSettings,
+		settings: EngineCompactionSettings,
 		signal: AbortSignal,
 	): Promise<snapcompact.CompactionResult | undefined> {
 		if (signal.aborted) return undefined;
 		// Re-rendering frames needs a vision-capable model, same gate as the
-		// snapcompact strategy path.
+		// snapcompact method.
 		if (!this.#model?.input.includes("image")) return undefined;
 		const staleEntry = getLatestCompactionEntry(branchEntries);
 		if (!staleEntry) return undefined;
@@ -2057,7 +3906,7 @@ export class SessionMaintenance {
 			}
 			if (!inKeptRegion) continue;
 			const message = (entry as { message?: AgentMessage }).message;
-			if (message) keptTailTokens += estimateTokens(message);
+			if (message) keptTailTokens += this.#tokenizer.countMessage(message);
 		}
 		const archive = snapcompact.getPreservedArchive(staleEntry.preserveData);
 		if (!archive || archive.frames.length <= 1) return undefined;
@@ -2106,9 +3955,18 @@ export class SessionMaintenance {
 			result.shortSummary,
 			result.firstKeptEntryId,
 			result.tokensBefore,
-			result.details,
-			false,
-			result.preserveData,
+			{
+				details: result.details,
+				preserveData: result.preserveData,
+				method: "snapcompact",
+				tokensAfter: this.#projectCompactedContextTokens({
+					summary: result.summary,
+					shortSummary: result.shortSummary,
+					tokensBefore: result.tokensBefore,
+					firstKeptEntryId: result.firstKeptEntryId,
+					preserveData: result.preserveData,
+				}),
+			},
 		);
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
@@ -2144,14 +4002,11 @@ export class SessionMaintenance {
 	/**
 	 * Internal: Run auto-compaction with events.
 	 *
-	 * @param allowDefer If true (default), threshold-driven handoff strategy is allowed to
-	 *   schedule itself as a deferred post-prompt task and return a deferred-handoff result
-	 *   immediately. The caller MUST treat that as "compaction will happen async — do not
-	 *   also schedule `agent.continue()` for this turn", otherwise the deferred handoff
-	 *   races a fresh streaming turn (the symptom: "Auto-handoff" loader + assistant
-	 *   message still streaming). Callers on a path that is about to start a new agent
-	 *   turn (e.g. the pre-prompt check in `#promptWithMessage`) pass `false` to force
-	 *   inline execution so the handoff completes before the new turn begins.
+	 * @param allowDefer If true (default), a threshold-driven handoff preference
+	 *   may schedule itself as a deferred post-prompt task and return a
+	 *   deferred-handoff result immediately. The caller MUST avoid separately
+	 *   scheduling `agent.continue()` then; pre-prompt callers pass `false` to
+	 *   complete the handoff before the next agent turn begins.
 	 * @returns whether auto-compaction scheduled a follow-up turn.
 	 */
 	async runAutoCompaction(
@@ -2162,27 +4017,95 @@ export class SessionMaintenance {
 		options: {
 			autoContinue?: boolean;
 			triggerContextTokens?: number;
+			/** Tokens from pending messages included in triggerContextTokens but absent from the prepared history. */
+			pendingContextTokens?: number;
+			/** Stored context before pending messages, measured before preparation rewrites its representation. */
+			preparedContextTokens?: number;
 			suppressContinuation?: boolean;
-			suppressHandoff?: boolean;
 			phase?: CodexCompactionContext["phase"];
 			terminalTextAnswer?: boolean;
+			/** Mid-turn: splice history then return; do not await UI/extension fan-out. */
+			detachPostCommit?: boolean;
+			/** Index to resume from after an earlier preferred method failed. */
+			methodIndex?: number;
+			/** A preceding shake already rewrote history before this fallback attempt. */
+			fallbackFromShake?: boolean;
+			/**
+			 * This call services an explicit model-requested rollover
+			 * (`new_context`): it bypasses the Auto-Compact toggle, and never
+			 * falls through to ordinary summary compaction when the experimental
+			 * capability is no longer present at dispatch time.
+			 */
+			explicitNewContextRequest?: boolean;
+			/**
+			 * Skip `snapcompact` regardless of model image support — a byte/payload-
+			 * limit 413 recovery must not retry with an even larger, media-heavy
+			 * request (#11482).
+			 */
+			excludeMediaMethods?: boolean;
 		} = {},
 	): Promise<CompactionCheckResult> {
 		const compactionSettings = this.#host.settings.getGroup("compaction");
-		if (compactionSettings.strategy === "off") return COMPACTION_CHECK_NONE;
-		if (reason !== "idle" && !compactionSettings.enabled) return COMPACTION_CHECK_NONE;
+		// An explicit model-requested rollover bypasses the Auto-Compact toggle;
+		// automatic threshold rollover stays gated exactly as before.
+		const explicitNewContextRequest = options.explicitNewContextRequest === true;
+		if (reason !== "idle" && !compactionSettings.enabled && !explicitNewContextRequest) {
+			return COMPACTION_CHECK_NONE;
+		}
+		if (this.#usesExperimentalContextManagement()) {
+			return await this.#runExperimentalContextRollover(reason, willRetry, options);
+		}
+		// The explicit request is valid only on the notes-backed rollover path.
+		// If the experimental capability disappeared between request recognition
+		// and this dispatch (tool surface or settings changed while tool results
+		// were being persisted), drop the stale request rather than fall through
+		// to ordinary summary compaction: no summary-provider request was agreed.
+		if (explicitNewContextRequest) return COMPACTION_CHECK_NONE;
+		const methods = resolveCompactionMethodOrder(compactionSettings.methodOrder);
+		if (methods.length === 0) return COMPACTION_CHECK_NONE;
 		const generation = this.#host.promptGeneration();
 		const terminalTextAnswer =
 			options.terminalTextAnswer ?? isTerminalTextAssistantAnswer(this.#host.findLastAssistantMessage());
 		const suppressContinuation = options.suppressContinuation === true;
 		const shouldAutoContinue =
 			!suppressContinuation && options.autoContinue !== false && compactionSettings.autoContinue !== false;
-		const suppressHandoff = options.suppressHandoff === true;
-		let fallbackFromShake = false;
-		// Shake runs inline (cheap, no remote LLM). On overflow recovery, if shake
-		// reclaims nothing we fall through to the summary-compaction body below so
-		// the oversized input still gets resolved.
-		if (compactionSettings.strategy === "shake") {
+		const startIndex = options.methodIndex ?? 0;
+		let methodIndex = -1;
+		let method: CompactionMethod | undefined;
+		for (let index = startIndex; index < methods.length; index++) {
+			const candidate = methods[index];
+			if (
+				!isCompactionMethodUsable(
+					candidate,
+					reason,
+					this.#model,
+					compactionSettings,
+					options.excludeMediaMethods === true,
+				)
+			)
+				continue;
+			method = candidate;
+			methodIndex = index;
+			break;
+		}
+
+		if (!method) return COMPACTION_CHECK_NONE;
+
+		// A speculative pass may have already produced this compaction's summary
+		// in the background. Claiming consumes the slot either way: an in-flight
+		// run is aborted (this real pass supersedes it) and an armed result is
+		// returned only when still valid for the current branch/model/settings.
+		// Snapcompact is local and instant, so an armed LLM summary (possible
+		// only when settings/model changed since arming) never overrides it.
+		const claimedSpec = this.#claimArmedSpeculation(options.triggerContextTokens, options.pendingContextTokens);
+		const armedSpec = method === "snapcompact" ? undefined : claimedSpec;
+
+		const effectiveSettings = resolveMethodSettings(compactionSettings, method);
+		const fallbackFromShake = options.fallbackFromShake === true;
+		// Shake runs inline (cheap, no remote LLM). If it cannot recover enough
+		// context, resume from the next configured method instead of hardcoding a
+		// context-full summary.
+		if (method === "shake" && !armedSpec) {
 			const outcome = await this.#runAutoShake(
 				reason,
 				willRetry,
@@ -2191,21 +4114,26 @@ export class SessionMaintenance {
 				terminalTextAnswer,
 				options.triggerContextTokens,
 				suppressContinuation,
+				options.detachPostCommit === true,
 			);
 			if (outcome !== "fallback") return outcome;
-			fallbackFromShake = true;
+			return await this.runAutoCompaction(reason, willRetry, deferred, allowDefer, {
+				...options,
+				methodIndex: methodIndex + 1,
+				fallbackFromShake: true,
+			});
 		}
 		// "overflow" and "incomplete" force inline execution because they are recovery
 		// paths the caller wants resolved before scheduling the next turn. "idle" is
 		// triggered by the idle loop and does its own scheduling.
 		if (
-			!suppressHandoff &&
+			method === "handoff" &&
+			!armedSpec &&
 			!deferred &&
 			allowDefer &&
 			reason !== "overflow" &&
 			reason !== "incomplete" &&
-			reason !== "idle" &&
-			compactionSettings.strategy === "handoff"
+			reason !== "idle"
 		) {
 			this.#host.schedulePostPromptTask(
 				async signal => {
@@ -2213,6 +4141,7 @@ export class SessionMaintenance {
 					if (signal.aborted) return;
 					await this.runAutoCompaction(reason, willRetry, true, true, {
 						...options,
+						methodIndex,
 						terminalTextAnswer,
 					});
 				},
@@ -2224,114 +4153,104 @@ export class SessionMaintenance {
 			};
 		}
 
-		// "overflow" forces context-full because the input itself is broken — a handoff
-		// LLM call would hit the same overflow. "incomplete" is an output-side problem,
-		// so a handoff request on the existing context is still viable.
-		let action: "context-full" | "handoff" | "snapcompact" =
-			compactionSettings.strategy === "snapcompact"
-				? "snapcompact"
-				: compactionSettings.strategy === "handoff" && reason !== "overflow" && !suppressHandoff
-					? "handoff"
-					: "context-full";
-		if (action === "snapcompact" && this.#model && !this.#model.input.includes("image")) {
-			this.#host.emitNotice(
-				"warning",
-				`snapcompact needs a vision-capable active model (${this.#model.id} is text-only); using context-full auto-compaction instead.`,
-				"compaction",
-			);
-			action = "context-full";
-		}
+		const action: "context-full" | "handoff" | "snapcompact" | "remote" =
+			armedSpec?.action ??
+			(method === "remote"
+				? "remote"
+				: method === "snapcompact"
+					? "snapcompact"
+					: method === "handoff"
+						? "handoff"
+						: "context-full");
 		// Abort any older auto-compaction before installing this run's controller.
 		this.#autoCompactionAbortController?.abort();
 		const autoCompactionAbortController = new AbortController();
 		this.#autoCompactionAbortController = autoCompactionAbortController;
 		const autoCompactionSignal = autoCompactionAbortController.signal;
 
+		let compactionCommitted = false;
 		try {
 			// Emit start AFTER the controller is installed so isCompacting is already true
 			// for any listener — and for input routed during this emit's event-loop yield:
 			// a message typed as the compaction loader appears must land in the compaction
 			// queue, not the core steering queue (which handoff's agent.reset() would wipe).
-			await this.#host.emitSessionEvent({ type: "auto_compaction_start", reason, action });
-			if (action === "handoff") {
-				let handoffSwitchCancelled = false;
-				const handoffFocus = AUTO_HANDOFF_THRESHOLD_FOCUS;
-				const handoffResult = await this.#host.runHandoff(handoffFocus, {
-					autoTriggered: true,
-					signal: autoCompactionSignal,
-					onSwitchCancelled: () => {
-						handoffSwitchCancelled = true;
+			const startEvent = { type: "auto_compaction_start" as const, reason, action };
+			await this.#emitLifecycleEvent(startEvent, false);
+			if (armedSpec) {
+				// A background speculation already produced this compaction's
+				// summary; splice it in instead of paying for a blocking
+				// summarization. tokensBefore reflects the live trigger size when
+				// known — the armed value measured the smaller prefix at compute
+				// time.
+				logger.debug("Applying armed speculative compaction", {
+					method: armedSpec.method,
+					action,
+					reason,
+				});
+				return await this.#commitAutoCompactionResult({
+					summary: armedSpec.result.summary,
+					shortSummary: armedSpec.result.shortSummary,
+					firstKeptEntryId: armedSpec.result.firstKeptEntryId,
+					tokensBefore: options.triggerContextTokens ?? armedSpec.result.tokensBefore,
+					details: armedSpec.result.details,
+					preserveData: armedSpec.result.preserveData,
+					fromExtension: false,
+					codexCompaction: armedSpec.codexCompaction,
+					method: armedSpec.method,
+					providerReplayThroughEntryId: armedSpec.result.preserveData?.openaiRemoteCompaction
+						? armedSpec.snapshotLeafId
+						: undefined,
+					action,
+					reason,
+					willRetry,
+					generation,
+					shouldAutoContinue,
+					terminalTextAnswer,
+					suppressContinuation,
+					fallbackFromShake,
+					detachPostCommit: options.detachPostCommit === true,
+					autoCompactionSignal,
+					onCommitted: () => {
+						compactionCommitted = true;
 					},
 				});
-				if (!handoffResult) {
-					const aborted = autoCompactionSignal.aborted || handoffSwitchCancelled;
-					if (aborted) {
-						await this.#host.emitSessionEvent({
-							type: "auto_compaction_end",
-							action,
-							result: undefined,
-							aborted: true,
-							willRetry: false,
-						});
-						return COMPACTION_CHECK_NONE;
-					}
-					logger.warn("Auto-handoff returned no document; falling back to context-full maintenance", {
-						reason,
-					});
-					action = "context-full";
-				}
-				if (handoffResult) {
-					await this.#host.emitSessionEvent({
+			}
+
+			if (!this.#model) {
+				await this.#emitLifecycleEvent(
+					{
 						type: "auto_compaction_end",
 						action,
 						result: undefined,
 						aborted: false,
 						willRetry: false,
-					});
-					const continuationScheduled =
-						!autoCompactionSignal.aborted &&
-						this.#host.scheduleCompactionContinuation({
-							generation,
-							autoContinue: reason !== "idle" && shouldAutoContinue,
-							terminalTextAnswer,
-							suppressContinuation,
-						});
-					return {
-						...(continuationScheduled ? COMPACTION_CHECK_CONTINUATION : COMPACTION_CHECK_NONE),
-						historyRewritten: true,
-					};
-				}
-			}
-
-			if (!this.#model) {
-				await this.#host.emitSessionEvent({
-					type: "auto_compaction_end",
-					action,
-					result: undefined,
-					aborted: false,
-					willRetry: false,
-					skipped: true,
-				});
+						skipped: true,
+					},
+					options.detachPostCommit === true,
+				);
 				return COMPACTION_CHECK_NONE;
 			}
 
 			const availableModels = this.#host.modelRegistry.getAvailable();
 			if (availableModels.length === 0) {
-				await this.#host.emitSessionEvent({
-					type: "auto_compaction_end",
-					action,
-					result: undefined,
-					aborted: false,
-					willRetry: false,
-					skipped: true,
-				});
+				await this.#emitLifecycleEvent(
+					{
+						type: "auto_compaction_end",
+						action,
+						result: undefined,
+						aborted: false,
+						willRetry: false,
+						skipped: true,
+					},
+					options.detachPostCommit === true,
+				);
 				return COMPACTION_CHECK_NONE;
 			}
 
 			const pathEntries = this.#host.sessionManager.getBranch();
 
 			let pathEntriesForCompaction = pathEntries;
-			let preparation = prepareCompaction(pathEntriesForCompaction, compactionSettings, this.#model);
+			let preparation = prepareCompaction(pathEntriesForCompaction, effectiveSettings, this.#model, this.#tokenizer);
 			if (!preparation) {
 				// prepareCompaction found nothing to summarize because the kept region
 				// is a single oversized recent turn — findCutPoint never cuts inside a
@@ -2347,8 +4266,8 @@ export class SessionMaintenance {
 				// a compaction entry anchors the stale billed usage so the
 				// auto-continue re-check cannot re-trip and loop the warning — issue
 				// #4786). `skipElide` when we already fell through from a shake
-				// strategy pass (it tried and found nothing); skip entirely on the
-				// idle timer (it re-checks usage on its own cadence).
+				// method (it tried and found nothing); skip entirely on the idle timer
+				// (it re-checks usage on its own cadence).
 				let rescueRewroteHistory = false;
 				// A snapcompact CompactionEntry is invisible to both rescue tiers
 				// below (they only inspect message entries) and to prepareCompaction
@@ -2365,7 +4284,7 @@ export class SessionMaintenance {
 				if (reason !== "idle") {
 					frameRescueResult = await this.#rescueSnapcompactFrameOverflow(
 						pathEntriesForCompaction,
-						compactionSettings,
+						effectiveSettings,
 						autoCompactionSignal,
 					);
 					if (frameRescueResult) {
@@ -2381,7 +4300,12 @@ export class SessionMaintenance {
 								// branch has been rewritten either way.
 								rescueRewroteHistory = true;
 								pathEntriesForCompaction = this.#host.sessionManager.getBranch();
-								preparation = prepareCompaction(pathEntriesForCompaction, compactionSettings, this.#model);
+								preparation = prepareCompaction(
+									pathEntriesForCompaction,
+									effectiveSettings,
+									this.#model,
+									this.#tokenizer,
+								);
 								return preparation !== undefined;
 							},
 						});
@@ -2389,8 +4313,14 @@ export class SessionMaintenance {
 				}
 				if (!preparation) {
 					const noProgressDeadEnd = reason !== "idle" && !frameRescueCreatedHeadroom;
+					const implicatedFrames =
+						frameRescueResult && !frameRescueCreatedHeadroom
+							? (snapcompact.getPreservedArchive(frameRescueResult.preserveData)?.frames.length ?? 0)
+							: 0;
 					const deadEndWarning = noProgressDeadEnd
-						? compactionDeadEndWarning("shrink it (e.g. clear large tool output)")
+						? compactionDeadEndWarning(
+								this.#deadEndRemedies("shrink it (e.g. clear large tool output)", implicatedFrames),
+							)
 						: undefined;
 					// A rescue that appended a rebuilt archive without creating
 					// headroom must carry the dead-end badge on the entry the
@@ -2411,17 +4341,20 @@ export class SessionMaintenance {
 					// compaction entry — surface it as a real (non-skipped) result so
 					// the TUI rebuilds the transcript instead of treating the pass as
 					// a benign no-op.
-					await this.#host.emitSessionEvent({
-						type: "auto_compaction_end",
-						action,
-						result: frameRescueResult && {
-							...frameRescueResult,
-							preserveData: snapcompact.stripPreservedArchive(frameRescueResult.preserveData),
+					await this.#emitLifecycleEvent(
+						{
+							type: "auto_compaction_end",
+							action,
+							result: frameRescueResult && {
+								...frameRescueResult,
+								preserveData: snapcompact.stripPreservedArchive(frameRescueResult.preserveData),
+							},
+							aborted: false,
+							willRetry: false,
+							skipped: frameRescueResult === undefined,
 						},
-						aborted: false,
-						willRetry: false,
-						skipped: frameRescueResult === undefined,
-					});
+						options.detachPostCommit === true,
+					);
 					let continuationScheduled = false;
 					if (frameRescueCreatedHeadroom) {
 						continuationScheduled = this.#host.scheduleCompactionContinuation({
@@ -2432,6 +4365,7 @@ export class SessionMaintenance {
 						});
 					} else if (!suppressContinuation && this.#host.agent.hasQueuedMessages()) {
 						this.#host.scheduleAgentContinue({
+							source: "frame-rescue-queued-message",
 							delayMs: 100,
 							generation,
 							shouldContinue: () => this.#host.agent.hasQueuedMessages(),
@@ -2469,13 +4403,16 @@ export class SessionMaintenance {
 				})) as SessionBeforeCompactResult | undefined;
 
 				if (hookResult?.cancel) {
-					await this.#host.emitSessionEvent({
-						type: "auto_compaction_end",
-						action,
-						result: undefined,
-						aborted: true,
-						willRetry: false,
-					});
+					await this.#emitLifecycleEvent(
+						{
+							type: "auto_compaction_end",
+							action,
+							result: undefined,
+							aborted: true,
+							willRetry: false,
+						},
+						options.detachPostCommit === true,
+					);
 					return COMPACTION_CHECK_NONE;
 				}
 
@@ -2487,6 +4424,51 @@ export class SessionMaintenance {
 
 			const compactionPrep = await this.#prepareCompactionFromHooks(preparation, hookCompaction);
 
+			// Handoff runs as a summary source: generate the document off the live
+			// context (cache-friendly side request), then commit it like any other
+			// compaction summary. A failed generation advances to the next
+			// configured preference.
+			let handoffDocument: HandoffResult | undefined;
+			if (action === "handoff" && compactionPrep.kind !== "fromHook") {
+				handoffDocument = await this.#host.generateHandoffDocument(AUTO_HANDOFF_THRESHOLD_FOCUS, {
+					autoTriggered: true,
+					signal: autoCompactionSignal,
+				});
+				if (autoCompactionSignal.aborted) {
+					await this.#emitLifecycleEvent(
+						{
+							type: "auto_compaction_end",
+							action,
+							result: undefined,
+							aborted: true,
+							willRetry: false,
+						},
+						options.detachPostCommit === true,
+					);
+					return COMPACTION_CHECK_NONE;
+				}
+				if (!handoffDocument) {
+					logger.warn("Auto-handoff returned no document; trying next preferred compaction method", {
+						reason,
+					});
+					await this.#emitLifecycleEvent(
+						{
+							type: "auto_compaction_end",
+							action,
+							result: undefined,
+							aborted: false,
+							willRetry: false,
+							errorMessage: "Auto-handoff returned no document; trying the next preferred compaction method.",
+						},
+						options.detachPostCommit === true,
+					);
+					return await this.runAutoCompaction(reason, willRetry, deferred, allowDefer, {
+						...options,
+						methodIndex: methodIndex + 1,
+					});
+				}
+			}
+
 			let summary: string;
 			let shortSummary: string | undefined;
 			let firstKeptEntryId: string;
@@ -2497,12 +4479,11 @@ export class SessionMaintenance {
 			// + a summary message carrying the imaged archive at FRAME_TOKEN_ESTIMATE
 			// per frame; #computeSnapcompactMaxFrames sizes the frame cap from the
 			// live window so we don't run snapcompact just to overflow every threshold
-			// tick. Any local blocker (unsupported snapcompact glyphs, kept-history too large,
-			// post-render overflow) downgrades auto maintenance to a context-full LLM
-			// summary instead of wedging the session (#3659) — auto runs the default
-			// strategy on the user's behalf, so a fallback that lets the session keep
-			// running is the right behavior. Manual `/compact snapcompact` keeps the
-			// local-only contract (#3599): the user explicitly picked it.
+			// tick. Any local blocker (unsupported snapcompact glyphs, kept-history too
+			// large, post-render overflow) advances automatic maintenance to the next
+			// configured preference instead of wedging the session (#3659). Manual
+			// `/compact snapcompact` remains local-only because its one-method override
+			// leaves no fallback.
 			let snapcompactResult: snapcompact.CompactionResult | undefined;
 			let snapcompactBlocker: string | undefined;
 			if (action === "snapcompact" && compactionPrep.kind !== "fromHook") {
@@ -2528,15 +4509,15 @@ export class SessionMaintenance {
 						model: this.#model?.id,
 						unrenderableRatio: renderScan.unrenderableRatio,
 					});
-					snapcompactBlocker = `snapcompact disabled: unsupported characters for selected snapcompact font (${percent}%); using context-full auto-compaction instead.`;
+					snapcompactBlocker = `snapcompact disabled: unsupported characters for selected snapcompact font (${percent}%); trying the next preferred compaction method.`;
 				} else {
-					const maxFrames = this.#computeSnapcompactMaxFrames(preparation, compactionSettings);
+					const maxFrames = this.#computeSnapcompactMaxFrames(preparation, effectiveSettings);
 					if (maxFrames < 1) {
 						logger.warn("Snapcompact skipped: kept history alone exceeds the context budget", {
 							model: this.#model?.id,
 						});
 						snapcompactBlocker =
-							"snapcompact: kept history alone exceeds the context budget; using context-full auto-compaction instead.";
+							"snapcompact: kept history alone exceeds the context budget; trying the next preferred compaction method.";
 					} else {
 						snapcompactResult = await snapcompact.compact(preparation, {
 							convertToLlm,
@@ -2553,24 +4534,53 @@ export class SessionMaintenance {
 								budget: snapcompact.FRAME_DATA_BYTES_BUDGET,
 							});
 							snapcompactBlocker =
-								"snapcompact produced too much standing image payload; using context-full auto-compaction instead.";
+								"snapcompact produced too much standing image payload; trying the next preferred compaction method.";
 							snapcompactResult = undefined;
 						}
 						if (snapcompactResult) {
 							const ctxWindow = this.#model?.contextWindow ?? 0;
 							const budget =
 								ctxWindow > 0
-									? ctxWindow - effectiveReserveTokens(ctxWindow, compactionSettings)
+									? ctxWindow - effectiveReserveTokens(ctxWindow, effectiveSettings)
 									: Number.POSITIVE_INFINITY;
 							const projected = this.#projectSnapcompactContextTokens(preparation, snapcompactResult);
-							if (projected > budget) {
+							// Reduction check in the encrypted-reasoning-excluded domain so opaque
+							// replay signatures cannot inflate the removable baseline (#10716);
+							// `triggerContextTokens` is already an encrypted-excluded stored
+							// estimate, and `#projectPreSnapcompactContextTokens` now matches it.
+							const projectedForReduction = this.#projectSnapcompactContextTokens(
+								preparation,
+								snapcompactResult,
+								{
+									excludeEncryptedReasoning: true,
+								},
+							);
+							const reductionBaseline =
+								options.triggerContextTokens !== undefined
+									? Math.max(0, options.triggerContextTokens - (options.pendingContextTokens ?? 0))
+									: this.#projectPreSnapcompactContextTokens(preparation);
+							const preparedReductionBaseline =
+								options.preparedContextTokens === undefined
+									? reductionBaseline
+									: Math.max(0, reductionBaseline - options.preparedContextTokens) +
+										this.#projectPreSnapcompactContextTokens(preparation);
+							if (projectedForReduction >= preparedReductionBaseline) {
+								logger.warn("Snapcompact projection would not reduce context", {
+									model: this.#model?.id,
+									projected: projectedForReduction,
+									reductionBaseline: preparedReductionBaseline,
+								});
+								snapcompactBlocker =
+									"snapcompact would not reduce context; trying the next preferred compaction method.";
+								snapcompactResult = undefined;
+							} else if (projected > budget) {
 								logger.warn("Snapcompact still overflows the window after frame-budget sizing", {
 									model: this.#model?.id,
 									projected,
 									budget,
 								});
 								snapcompactBlocker =
-									"snapcompact could not bring the context under the limit; using context-full auto-compaction instead.";
+									"snapcompact could not bring the context under the limit; trying the next preferred compaction method.";
 								snapcompactResult = undefined;
 							}
 						}
@@ -2578,7 +4588,21 @@ export class SessionMaintenance {
 				}
 				if (snapcompactBlocker) {
 					this.#host.emitNotice("warning", snapcompactBlocker, "compaction");
-					action = "context-full";
+					await this.#emitLifecycleEvent(
+						{
+							type: "auto_compaction_end",
+							action,
+							result: undefined,
+							aborted: false,
+							willRetry: false,
+							errorMessage: snapcompactBlocker,
+						},
+						options.detachPostCommit === true,
+					);
+					return await this.runAutoCompaction(reason, willRetry, deferred, allowDefer, {
+						...options,
+						methodIndex: methodIndex + 1,
+					});
 				}
 			}
 
@@ -2589,15 +4613,30 @@ export class SessionMaintenance {
 				tokensBefore = compactionPrep.tokensBefore;
 				details = compactionPrep.details;
 				preserveData = compactionPrep.preserveData;
+			} else if (handoffDocument) {
+				const handoffSummary = handoffSummaryFromDocument(handoffDocument.document, preparation);
+				summary = handoffSummary.summary;
+				shortSummary = undefined;
+				firstKeptEntryId = preparation.firstKeptEntryId;
+				tokensBefore = preparation.tokensBefore;
+				details = handoffSummary.details;
+				preserveData = compactionPrep.preserveData;
 			} else if (snapcompactResult) {
 				summary = snapcompactResult.summary;
 				shortSummary = snapcompactResult.shortSummary;
 				firstKeptEntryId = snapcompactResult.firstKeptEntryId;
 				tokensBefore = snapcompactResult.tokensBefore;
 				details = snapcompactResult.details;
-				preserveData = { ...(compactionPrep.preserveData ?? {}), ...(snapcompactResult.preserveData ?? {}) };
+				preserveData = { ...compactionPrep.preserveData, ...snapcompactResult.preserveData };
 			} else {
-				const candidates = this.#getCompactionModelCandidates(availableModels);
+				const candidates = this.#getCompactionModelCandidates(
+					availableModels,
+					method === "remote" && !effectiveSettings.remoteEndpoint
+						? candidate =>
+								candidate.provider === this.#model?.provider &&
+								shouldUseProviderNativeCompaction(candidate, effectiveSettings)
+						: undefined,
+				);
 				const retrySettings = this.#host.settings.getGroup("retry");
 				const telemetry = resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId());
 				let compactResult: CompactionResult | undefined;
@@ -2636,7 +4675,7 @@ export class SessionMaintenance {
 								{
 									promptOverride: this.#host.obfuscateTextForProvider(compactionPrep.hookPrompt),
 									extraContext: compactionPrep.hookContext,
-									remoteInstructions: this.#host.baseSystemPrompt().join("\n\n"),
+									remoteSystemPrompt: this.#host.agent.state.systemPrompt,
 									metadata: this.#host.agent.metadataForProvider(candidate.provider),
 									initiatorOverride: "agent",
 									convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
@@ -2652,6 +4691,11 @@ export class SessionMaintenance {
 									providerSessionState: this.#host.providerSessionState,
 									preferWebsockets: this.#host.preferWebsockets,
 									codexCompaction,
+									// This loop already retries the whole compaction attempt on
+									// transient errors, so the summarization oneshots must not
+									// retry too — the budgets would multiply and each outer
+									// wait would stack on top of an inner backoff.
+									oneshotRetry: false,
 								},
 							);
 							break;
@@ -2692,9 +4736,16 @@ export class SessionMaintenance {
 							}
 
 							const retryAfterMs = this.#host.parseRetryAfterMsFromError(message);
+							// An input the summarizer cannot fit is deterministic: the same
+							// prompt fails identically every attempt, so the retry budget is
+							// pure latency and the next candidate (a larger window) is the
+							// only move that can succeed. Overflow therefore vetoes the
+							// transient/usage-limit arms, which a provider blob can trip on
+							// coincidence alone.
 							const shouldRetry =
 								retrySettings.enabled &&
 								attempt < retrySettings.maxRetries &&
+								!AIError.is(id, AIError.Flag.ContextOverflow) &&
 								(retryAfterMs !== undefined ||
 									AIError.is(id, AIError.Flag.Transient) ||
 									AIError.is(id, AIError.Flag.UsageLimit));
@@ -2762,198 +4813,83 @@ export class SessionMaintenance {
 				preserveData = mergeLlmCompactionPreserveData(compactionPrep.preserveData, compactResult.preserveData);
 			}
 
-			if (autoCompactionSignal.aborted) {
-				await this.#host.emitSessionEvent({
-					type: "auto_compaction_end",
-					action,
-					result: undefined,
-					aborted: true,
-					willRetry: false,
-				});
-				return COMPACTION_CHECK_NONE;
-			}
-
-			this.#host.sessionManager.appendCompaction(
+			return await this.#commitAutoCompactionResult({
 				summary,
 				shortSummary,
 				firstKeptEntryId,
 				tokensBefore,
 				details,
-				fromExtension,
 				preserveData,
-			);
-			const newEntries = this.#host.sessionManager.getEntries();
-			const sessionContext = this.#host.buildDisplaySessionContext();
-			this.#host.agent.replaceMessages(sessionContext.messages);
-			this.#host.rebaseAfterCompaction();
-			// Compaction discarded the conversation history that carried the approved
-			// plan reference. Clear the sent-flag so #buildPlanReferenceMessage re-reads
-			// the plan from disk and re-injects it on the next turn (issue #1246).
-			this.#host.resetPlanReference();
-			this.#host.resetAdvisorRuntimes("auto-compaction");
-			this.#host.syncTodoPhasesFromBranch();
-			if (codexCompaction) {
-				this.#host.resetCodexProviderAfterCompaction(codexCompaction);
-			} else {
-				this.#host.closeCodexProviderSessionsForHistoryRewrite();
-			}
-
-			// Get the saved compaction entry for the hook
-			const savedCompactionEntry = newEntries.find(e => e.type === "compaction" && e.summary === summary) as
-				| CompactionEntry
-				| undefined;
-
-			if (this.#host.extensionRunner && savedCompactionEntry) {
-				await this.#host.extensionRunner.emit({
-					type: "session_compact",
-					compactionEntry: savedCompactionEntry,
-					fromExtension,
-				});
-			}
-
-			const result: CompactionResult = {
-				summary,
-				shortSummary,
-				firstKeptEntryId,
-				tokensBefore,
-				details,
-				preserveData: snapcompact.stripPreservedArchive(preserveData),
-			};
-			// Post-maintenance progress guard — evaluated BEFORE emitting
-			// auto_compaction_end so the TUI rebuild triggered by that event
-			// already reflects any rescue rewrite (elide / image-drop) and the
-			// dead-end warning stamped on the compaction entry. Snapcompact can
-			// project over budget and fall back to a context-full summary; the
-			// summarizer keeps `keepRecentTokens` of recent history verbatim and
-			// findCutPoint can only cut at turn boundaries (never tool results),
-			// so a single oversized recent turn (e.g. a huge tool result) leaves
-			// the rewritten context still above threshold. Scheduling the
-			// continuation regardless means the next agent_end re-enters
-			// checkCompaction over the same oversized tail and re-fires forever.
-			// The retry and the threshold auto-continue use different progress
-			// tests (a recoverable overflow only has to fit; the auto-continue
-			// thrash needs the stricter recovery band), so each branch evaluates
-			// its own below.
-			let continuationScheduled = false;
-			// A non-idle pass that wanted to continue (retry or auto-continue) but freed
-			// too little for that path to proceed is a dead-end: warn once so the user
-			// understands why maintenance paused instead of silently looping.
-			let noProgressDeadEnd = false;
-			let retryFits = false;
-			let hasHeadroom = false;
-
-			if (willRetry) {
-				const messages = this.#host.agent.state.messages;
-				const lastMsg = messages[messages.length - 1];
-				if (lastMsg?.role === "assistant") {
-					const lastAssistant = lastMsg as AssistantMessage;
-					// Drop the prior turn before retry when it carries no actionable deliverable:
-					// - "error": failure was kept in history but must not re-enter the next turn's prompt.
-					// - reason === "incomplete" && stopReason === "length": truncated output (typically
-					//   reasoning-only) — re-running it produces the same dead-end.
-					const shouldDrop =
-						lastAssistant.stopReason === "error" ||
-						(reason === "incomplete" && lastAssistant.stopReason === "length");
-					if (shouldDrop) {
-						this.#host.agent.replaceMessages(messages.slice(0, -1));
-						this.#host.rebaseAfterCompaction();
-					}
-				}
-
-				// Retry only needs the rebuilt prompt to fit the window again — measured
-				// AFTER the drop above so the just-failed turn (which the retry prompt
-				// won't include) is excluded. Reusing the auto-continue recovery band
-				// here turned recoverable overflows into manual dead-ends (#3412 review),
-				// so use the looser fit budget.
-				retryFits = this.#compactionCreatedRetryFit();
-				if (!retryFits) {
-					retryFits = await this.#rescueCompactionDeadEnd(autoCompactionSignal, {
-						skipElide: fallbackFromShake,
-						hasProgress: () => this.#compactionCreatedRetryFit(),
-					});
-				}
-				if (!retryFits) {
-					noProgressDeadEnd = true;
-				}
-			} else if (reason !== "idle") {
-				// Mirror the shake recovery-band check: only auto-continue when compaction
-				// landed residual context under `COMPACTION_RECOVERY_BAND × threshold`.
-				// Re-firing on a history that still sits just over the line is the
-				// snapcompact thrash, so require genuine headroom, not a bare fit. Even
-				// when auto-continue is disabled, a no-headroom threshold pass must still
-				// block later automatic continuations (todo reminders/session_stop hooks)
-				// from re-entering the same oversized context.
-				hasHeadroom = this.#compactionCreatedHeadroom();
-				if (!hasHeadroom) {
-					hasHeadroom = await this.#rescueCompactionDeadEnd(autoCompactionSignal, {
-						skipElide: fallbackFromShake,
-						hasProgress: () => this.#compactionCreatedHeadroom(),
-					});
-				}
-				if (!hasHeadroom) {
-					noProgressDeadEnd = true;
-				}
-			}
-
-			const deadEndWarning = noProgressDeadEnd ? compactionDeadEndWarning("clear large tool output") : undefined;
-			if (deadEndWarning) {
-				// Stamp the divider: the compaction bar badges the dead-end and
-				// carries the full warning in its ctrl+o detail, so the pause
-				// stays explained even after the notice row scrolls away. Stamp
-				// the branch's LATEST compaction entry — a frame rescue may have
-				// superseded `savedCompactionEntry` with a rebuilt one, and the
-				// collapsed transcript badges only the active entry.
-				const stampEntry = getLatestCompactionEntry(this.#host.sessionManager.getBranch()) ?? savedCompactionEntry;
-				if (stampEntry) {
-					stampEntry.warning = deadEndWarning;
-					await this.#host.sessionManager.rewriteEntries();
-				}
-			}
-
-			await this.#host.emitSessionEvent({ type: "auto_compaction_end", action, result, aborted: false, willRetry });
-
-			if (retryFits) {
-				this.#host.scheduleAgentContinue({ delayMs: 100, generation });
-				continuationScheduled = true;
-			} else {
-				continuationScheduled = this.#host.scheduleCompactionContinuation({
-					generation,
-					autoContinue: hasHeadroom && shouldAutoContinue,
-					terminalTextAnswer,
-					suppressContinuation,
-				});
-			}
-
-			if (deadEndWarning) {
-				this.#host.emitNotice("warning", deadEndWarning, "compaction");
-			}
-			if (continuationScheduled) return COMPACTION_CHECK_CONTINUATION;
-			return noProgressDeadEnd ? COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION : COMPACTION_CHECK_NONE;
+				fromExtension,
+				codexCompaction,
+				method: fromExtension ? undefined : method,
+				action,
+				reason,
+				willRetry,
+				generation,
+				shouldAutoContinue,
+				terminalTextAnswer,
+				suppressContinuation,
+				fallbackFromShake,
+				detachPostCommit: options.detachPostCommit === true,
+				autoCompactionSignal,
+				onCommitted: () => {
+					compactionCommitted = true;
+				},
+			});
 		} catch (error) {
 			if (autoCompactionSignal.aborted) {
-				await this.#host.emitSessionEvent({
-					type: "auto_compaction_end",
-					action,
-					result: undefined,
-					aborted: true,
-					willRetry: false,
-				});
+				await this.#emitLifecycleEvent(
+					{
+						type: "auto_compaction_end",
+						action,
+						result: undefined,
+						aborted: true,
+						willRetry: false,
+					},
+					options.detachPostCommit === true,
+				);
 				return COMPACTION_CHECK_NONE;
 			}
 			const errorMessage = error instanceof Error ? error.message : "compaction failed";
-			await this.#host.emitSessionEvent({
-				type: "auto_compaction_end",
-				action,
-				result: undefined,
-				aborted: false,
-				willRetry: false,
-				errorMessage:
-					reason === "overflow"
-						? `Context overflow recovery failed: ${errorMessage}`
-						: reason === "incomplete"
-							? `Incomplete response recovery failed: ${errorMessage}`
-							: `Auto-compaction failed: ${errorMessage}`,
-			});
+			const contextErrorMessage =
+				reason === "overflow"
+					? `Context overflow recovery failed: ${errorMessage}`
+					: reason === "incomplete"
+						? `Incomplete response recovery failed: ${errorMessage}`
+						: `Auto-compaction failed: ${errorMessage}`;
+			if (!compactionCommitted && methodIndex + 1 < methods.length) {
+				logger.warn("Automatic compaction method failed; trying next preference", {
+					method,
+					error: errorMessage,
+				});
+				await this.#emitLifecycleEvent(
+					{
+						type: "auto_compaction_end",
+						action,
+						result: undefined,
+						aborted: false,
+						willRetry: false,
+						errorMessage: `${contextErrorMessage}; trying the next preferred compaction method.`,
+					},
+					options.detachPostCommit === true,
+				);
+				return await this.runAutoCompaction(reason, willRetry, deferred, allowDefer, {
+					...options,
+					methodIndex: methodIndex + 1,
+				});
+			}
+			await this.#emitLifecycleEvent(
+				{
+					type: "auto_compaction_end",
+					action,
+					result: undefined,
+					aborted: false,
+					willRetry: false,
+					errorMessage: contextErrorMessage,
+				},
+				options.detachPostCommit === true,
+			);
 		} finally {
 			if (this.#autoCompactionAbortController === autoCompactionAbortController) {
 				this.#autoCompactionAbortController = undefined;
@@ -2963,14 +4899,201 @@ export class SessionMaintenance {
 	}
 
 	/**
-	 * Run a shake-strategy auto-maintenance pass. Emits the
+	 * Shared auto-maintenance commit tail: append the compaction entry, splice
+	 * the rebuilt context into the live agent, run the post-commit progress
+	 * checks (retry fit / recovery band with the tiered dead-end rescue), emit
+	 * `auto_compaction_end`, and schedule the follow-up turn. Used by both the
+	 * blocking production path and the armed speculative-apply path.
+	 */
+	async #commitAutoCompactionResult(args: {
+		summary: string;
+		shortSummary: string | undefined;
+		firstKeptEntryId: string;
+		tokensBefore: number;
+		details: unknown;
+		preserveData: Record<string, unknown> | undefined;
+		fromExtension: boolean;
+		codexCompaction: CodexCompactionContext | undefined;
+		method: CompactionMethod | undefined;
+		providerReplayThroughEntryId?: string;
+		action: "context-full" | "handoff" | "snapcompact" | "remote";
+		reason: "overflow" | "threshold" | "idle" | "incomplete";
+		willRetry: boolean;
+		generation: number;
+		shouldAutoContinue: boolean;
+		terminalTextAnswer: boolean;
+		suppressContinuation: boolean;
+		fallbackFromShake: boolean;
+		detachPostCommit: boolean;
+		autoCompactionSignal: AbortSignal;
+		onCommitted: () => void;
+	}): Promise<CompactionCheckResult> {
+		const { action, reason, willRetry, detachPostCommit, autoCompactionSignal } = args;
+		if (autoCompactionSignal.aborted) {
+			await this.#emitLifecycleEvent(
+				{
+					type: "auto_compaction_end",
+					action,
+					result: undefined,
+					aborted: true,
+					willRetry: false,
+				},
+				detachPostCommit,
+			);
+			return COMPACTION_CHECK_NONE;
+		}
+
+		args.onCommitted();
+		const savedCompactionEntry = await this.#commitCompactionEntry({
+			summary: args.summary,
+			shortSummary: args.shortSummary,
+			firstKeptEntryId: args.firstKeptEntryId,
+			tokensBefore: args.tokensBefore,
+			details: args.details,
+			fromExtension: args.fromExtension,
+			preserveData: args.preserveData,
+			codexCompaction: args.codexCompaction,
+			method: args.method,
+			providerReplayThroughEntryId: args.providerReplayThroughEntryId,
+			advisorResetReason: "auto-compaction",
+			detachExtensionEmit: detachPostCommit,
+		});
+
+		const result: CompactionResult = {
+			summary: args.summary,
+			shortSummary: args.shortSummary,
+			firstKeptEntryId: args.firstKeptEntryId,
+			tokensBefore: args.tokensBefore,
+			details: args.details,
+			preserveData: snapcompact.stripPreservedArchive(args.preserveData),
+		};
+		// Post-maintenance progress guard — evaluated BEFORE emitting
+		// auto_compaction_end so the TUI rebuild triggered by that event
+		// already reflects any rescue rewrite (elide / image-drop) and the
+		// dead-end warning stamped on the compaction entry. Snapcompact can
+		// project over budget and fall back to a context-full summary; the
+		// summarizer keeps `keepRecentTokens` of recent history verbatim and
+		// findCutPoint can only cut at turn boundaries (never tool results),
+		// so a single oversized recent turn (e.g. a huge tool result) leaves
+		// the rewritten context still above threshold. Scheduling the
+		// continuation regardless means the next agent_end re-enters
+		// checkCompaction over the same oversized tail and re-fires forever.
+		// The retry and the threshold auto-continue use different progress
+		// tests (a recoverable overflow only has to fit; the auto-continue
+		// thrash needs the stricter recovery band), so each branch evaluates
+		// its own below.
+		let continuationScheduled = false;
+		// A non-idle pass that wanted to continue (retry or auto-continue) but freed
+		// too little for that path to proceed is a dead-end: warn once so the user
+		// understands why maintenance paused instead of silently looping.
+		let noProgressDeadEnd = false;
+		let retryFits = false;
+		let hasHeadroom = false;
+
+		if (willRetry) {
+			const messages = this.#host.agent.state.messages;
+			const lastMsg = messages[messages.length - 1];
+			if (lastMsg?.role === "assistant") {
+				const lastAssistant = lastMsg as AssistantMessage;
+				// Drop the prior turn before retry when it carries no actionable deliverable:
+				// - "error": failure was kept in history but must not re-enter the next turn's prompt.
+				// - reason === "incomplete" && stopReason === "length": truncated output (typically
+				//   reasoning-only) — re-running it produces the same dead-end.
+				const shouldDrop =
+					lastAssistant.stopReason === "error" ||
+					(reason === "incomplete" && lastAssistant.stopReason === "length");
+				if (shouldDrop) {
+					this.#host.agent.replaceMessages(messages.slice(0, -1));
+					this.#host.rebaseAfterCompaction();
+				}
+			}
+
+			// Retry only needs the rebuilt prompt to fit the window again — measured
+			// AFTER the drop above so the just-failed turn (which the retry prompt
+			// won't include) is excluded. Reusing the auto-continue recovery band
+			// here turned recoverable overflows into manual dead-ends (#3412 review),
+			// so use the looser fit budget.
+			retryFits = this.#compactionCreatedRetryFit();
+			if (!retryFits) {
+				retryFits = await this.#rescueCompactionDeadEnd(autoCompactionSignal, {
+					skipElide: args.fallbackFromShake,
+					hasProgress: () => this.#compactionCreatedRetryFit(),
+				});
+			}
+			if (!retryFits) {
+				noProgressDeadEnd = true;
+			}
+		} else if (reason !== "idle") {
+			// Mirror the shake recovery-band check: only auto-continue when compaction
+			// landed residual context under `COMPACTION_RECOVERY_BAND × threshold`.
+			// Re-firing on a history that still sits just over the line is the
+			// snapcompact thrash, so require genuine headroom, not a bare fit. Even
+			// when auto-continue is disabled, a no-headroom threshold pass must still
+			// block later automatic continuations (todo reminders/session_stop hooks)
+			// from re-entering the same oversized context.
+			hasHeadroom = this.#compactionCreatedHeadroom();
+			if (!hasHeadroom) {
+				hasHeadroom = await this.#rescueCompactionDeadEnd(autoCompactionSignal, {
+					skipElide: args.fallbackFromShake,
+					hasProgress: () => this.#compactionCreatedHeadroom(),
+				});
+			}
+			if (!hasHeadroom) {
+				noProgressDeadEnd = true;
+			}
+		}
+
+		const deadEndWarning = noProgressDeadEnd ? compactionDeadEndWarning("clear large tool output") : undefined;
+		if (deadEndWarning) {
+			// Stamp the divider: the compaction bar badges the dead-end and
+			// carries the full warning in its ctrl+o detail, so the pause
+			// stays explained even after the notice row scrolls away. Stamp
+			// the branch's LATEST compaction entry — a frame rescue may have
+			// superseded `savedCompactionEntry` with a rebuilt one, and the
+			// collapsed transcript badges only the active entry.
+			const stampEntry = getLatestCompactionEntry(this.#host.sessionManager.getBranch()) ?? savedCompactionEntry;
+			if (stampEntry) {
+				stampEntry.warning = deadEndWarning;
+				await this.#host.sessionManager.rewriteEntries();
+			}
+		}
+
+		await this.#emitLifecycleEvent(
+			{ type: "auto_compaction_end", action, result, aborted: false, willRetry },
+			detachPostCommit,
+		);
+
+		if (retryFits) {
+			this.#host.scheduleAgentContinue({
+				source: "compaction-retry",
+				delayMs: 100,
+				generation: args.generation,
+			});
+			continuationScheduled = true;
+		} else {
+			continuationScheduled = this.#host.scheduleCompactionContinuation({
+				generation: args.generation,
+				autoContinue: hasHeadroom && args.shouldAutoContinue,
+				terminalTextAnswer: args.terminalTextAnswer,
+				suppressContinuation: args.suppressContinuation,
+			});
+		}
+
+		if (deadEndWarning) {
+			this.#host.emitNotice("warning", deadEndWarning, "compaction");
+		}
+		if (continuationScheduled) return COMPACTION_CHECK_CONTINUATION;
+		return noProgressDeadEnd ? COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION : COMPACTION_CHECK_NONE;
+	}
+
+	/**
+	 * Run a shake-method auto-maintenance pass. Emits the
 	 * `auto_compaction_start`/`auto_compaction_end` pair with a shake `action`,
 	 * runs {@link shake} inline against the protect-window config, and schedules
 	 * continuation exactly like the context-full tail.
 	 *
-	 * Returns `"fallback"` only for an overflow recovery where shake reclaimed
-	 * nothing (or threw) — the caller then runs the summary-compaction body so
-	 * the oversized input still gets resolved. Returns `"handled"` otherwise.
+	 * Returns `"fallback"` when the caller should advance to the next configured
+	 * method; returns a check result when shake handled the maintenance itself.
 	 */
 	async #runAutoShake(
 		reason: "overflow" | "threshold" | "idle" | "incomplete",
@@ -2980,6 +5103,7 @@ export class SessionMaintenance {
 		terminalTextAnswer: boolean,
 		triggerContextTokens?: number,
 		suppressContinuation = false,
+		detachPostCommit = false,
 	): Promise<CompactionCheckResult | "fallback"> {
 		const action = "shake";
 		this.#autoCompactionAbortController?.abort();
@@ -2987,16 +5111,19 @@ export class SessionMaintenance {
 		this.#autoCompactionAbortController = controller;
 		const signal = controller.signal;
 		try {
-			await this.#host.emitSessionEvent({ type: "auto_compaction_start", reason, action });
+			await this.#emitLifecycleEvent({ type: "auto_compaction_start", reason, action }, false);
 			const result = await this.#host.shake("elide", { config: DEFAULT_SHAKE_CONFIG, signal });
 			if (signal.aborted) {
-				await this.#host.emitSessionEvent({
-					type: "auto_compaction_end",
-					action,
-					result: undefined,
-					aborted: true,
-					willRetry: false,
-				});
+				await this.#emitLifecycleEvent(
+					{
+						type: "auto_compaction_end",
+						action,
+						result: undefined,
+						aborted: true,
+						willRetry: false,
+					},
+					detachPostCommit,
+				);
 				return COMPACTION_CHECK_NONE;
 			}
 			const reclaimed = result.toolResultsDropped + result.blocksDropped > 0;
@@ -3006,9 +5133,9 @@ export class SessionMaintenance {
 			// new to drop on the second pass, so the loop spins until the user kills it.
 			// Same hazard for "incomplete" (the retry would re-hit the length cap) and
 			// for the existing "overflow + nothing reclaimed" case. In every recovery
-			// reason we hand off to the summarization-driven context-full path so the
-			// situation actually resolves; "idle" is exempt because its 60s+ timer
-			// re-checks usage before re-firing and cannot dead-loop on its own.
+			// reason we advance to the next preferred method so the situation actually
+			// resolves; "idle" is exempt because its 60s+ timer re-checks usage before
+			// re-firing and cannot dead-loop on its own.
 			//
 			// #2275: the post-shake check MUST stay provider-anchored when caller
 			// usage and local estimates diverge. The local estimator undercounts
@@ -3018,7 +5145,7 @@ export class SessionMaintenance {
 			// hysteresis (80% recovery band) so we don't oscillate at the boundary.
 			// Threshold callers pass the provider-billed trigger after accounting for
 			// any supersede/drop-useless pruning that already rewrote the next prompt;
-			// without that pre-shake savings, shake can fall through to context-full
+			// without that pre-shake savings, shake can advance to the next preference
 			// even though the post-prune history is already inside the recovery band.
 			const contextWindow = this.#model?.contextWindow ?? 0;
 			const compactionSettings = this.#host.settings.getGroup("compaction");
@@ -3037,27 +5164,33 @@ export class SessionMaintenance {
 			const shouldFallBack = reason !== "idle" && ((reason === "overflow" && !reclaimed) || stillOverThreshold);
 			if (shouldFallBack) {
 				const errorMessage = reclaimed
-					? `Auto-shake reclaimed ~${result.tokensFreed} tokens but context is still above the threshold; falling back to context-full compaction.`
-					: "Auto-shake found nothing eligible to drop; falling back to context-full compaction.";
-				await this.#host.emitSessionEvent({
+					? `Auto-shake reclaimed ~${result.tokensFreed} tokens but context is still above the threshold; trying the next preferred compaction method.`
+					: "Auto-shake found nothing eligible to drop; trying the next preferred compaction method.";
+				await this.#emitLifecycleEvent(
+					{
+						type: "auto_compaction_end",
+						action,
+						result: undefined,
+						aborted: false,
+						willRetry: false,
+						skipped: !reclaimed,
+						errorMessage,
+					},
+					detachPostCommit,
+				);
+				return "fallback";
+			}
+			await this.#emitLifecycleEvent(
+				{
 					type: "auto_compaction_end",
 					action,
 					result: undefined,
 					aborted: false,
-					willRetry: false,
+					willRetry,
 					skipped: !reclaimed,
-					errorMessage,
-				});
-				return "fallback";
-			}
-			await this.#host.emitSessionEvent({
-				type: "auto_compaction_end",
-				action,
-				result: undefined,
-				aborted: false,
-				willRetry,
-				skipped: !reclaimed,
-			});
+				},
+				detachPostCommit,
+			);
 
 			let continuationScheduled = false;
 			if (willRetry) {
@@ -3073,7 +5206,11 @@ export class SessionMaintenance {
 						(reason === "incomplete" && lastAssistant.stopReason === "length");
 					if (shouldDrop) this.#host.agent.replaceMessages(messages.slice(0, -1));
 				}
-				this.#host.scheduleAgentContinue({ delayMs: 100, generation });
+				this.#host.scheduleAgentContinue({
+					source: "shake-retry",
+					delayMs: 100,
+					generation,
+				});
 				continuationScheduled = true;
 			} else {
 				continuationScheduled = this.#host.scheduleCompactionContinuation({
@@ -3096,25 +5233,31 @@ export class SessionMaintenance {
 			};
 		} catch (error) {
 			if (signal.aborted) {
-				await this.#host.emitSessionEvent({
-					type: "auto_compaction_end",
-					action,
-					result: undefined,
-					aborted: true,
-					willRetry: false,
-				});
+				await this.#emitLifecycleEvent(
+					{
+						type: "auto_compaction_end",
+						action,
+						result: undefined,
+						aborted: true,
+						willRetry: false,
+					},
+					detachPostCommit,
+				);
 				return COMPACTION_CHECK_NONE;
 			}
 			const message = error instanceof Error ? error.message : "shake failed";
-			await this.#host.emitSessionEvent({
-				type: "auto_compaction_end",
-				action,
-				result: undefined,
-				aborted: false,
-				willRetry: false,
-				errorMessage: message,
-				skipped: false,
-			});
+			await this.#emitLifecycleEvent(
+				{
+					type: "auto_compaction_end",
+					action,
+					result: undefined,
+					aborted: false,
+					willRetry: false,
+					errorMessage: message,
+					skipped: false,
+				},
+				detachPostCommit,
+			);
 			// Overflow still needs recovery even if shake threw.
 			return reason === "overflow" ? "fallback" : COMPACTION_CHECK_NONE;
 		} finally {
@@ -3125,18 +5268,33 @@ export class SessionMaintenance {
 	}
 
 	/**
-	 * Toggle auto-compaction setting.
+	 * Toggle auto-compaction. When `persist` is false (the default) the change is
+	 * applied as a session-scoped runtime override — like `setThinkingLevel` — so
+	 * transient callers (e.g. the `set_auto_compaction` RPC command) configure
+	 * only their own session instead of mutating the machine-global `config.yml`.
+	 * The settings panel passes `persist: true` to save the preference durably.
 	 */
-	setAutoCompactionEnabled(enabled: boolean): void {
-		this.#host.settings.set("compaction.enabled", enabled);
-		if (enabled && this.#host.settings.get("compaction.strategy") === "off") {
-			const defaultStrategy = getDefault("compaction.strategy");
-			this.#host.settings.set("compaction.strategy", defaultStrategy === "off" ? "context-full" : defaultStrategy);
+	setAutoCompactionEnabled(enabled: boolean, persist = false): void {
+		if (persist) {
+			this.#host.settings.set("compaction.enabled", enabled);
+			this.#host.settings.clearOverride("compaction.enabled");
+		} else {
+			this.#host.settings.override("compaction.enabled", enabled);
+		}
+		if (enabled && resolveCompactionMethodOrder(this.#host.settings.get("compaction.methodOrder")).length === 0) {
+			if (persist) {
+				this.#host.settings.set("compaction.methodOrder", [...DEFAULT_COMPACTION_METHOD_ORDER]);
+			} else {
+				this.#host.settings.override("compaction.methodOrder", [...DEFAULT_COMPACTION_METHOD_ORDER]);
+			}
 		}
 	}
 
-	/** Whether auto-compaction is enabled */
+	/** Whether automatic maintenance has an enabled method to run. */
 	get autoCompactionEnabled(): boolean {
-		return this.#host.settings.get("compaction.enabled") && this.#host.settings.get("compaction.strategy") !== "off";
+		return (
+			this.#host.settings.get("compaction.enabled") &&
+			resolveCompactionMethodOrder(this.#host.settings.get("compaction.methodOrder")).length > 0
+		);
 	}
 }

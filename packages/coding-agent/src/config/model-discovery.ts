@@ -5,21 +5,22 @@
  * `discoverModelsByProviderType` with a `DiscoveryContext`; built-in provider
  * discovery lives in pi-catalog's provider-models.
  */
-import { type ApiKey, type FetchImpl, withAuth } from "@oh-my-pi/pi-ai";
-import type { Api, Model, RemoteCompactionConfig } from "@oh-my-pi/pi-ai/types";
-import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { type ApiKey, withAuth } from "@oh-my-pi/pi-ai/auth-retry";
+import type { Api, FetchImpl, Model, RemoteCompactionConfig } from "@oh-my-pi/pi-ai/types";
+import { buildDiscoveredModel, buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	getBundledModelReferenceIndex,
 	inheritReferenceThinking,
-	isQwenModelId,
 	resolveModelReference,
 	stripBracketedModelIdAffixes,
 } from "@oh-my-pi/pi-catalog/identity";
 import {
 	fetchLiteLLMRichModels,
 	fetchLmStudioNativeModelMetadata,
+	isSelectableLiteLLMModelMode,
 	OPENAI_COMPAT_DISCOVERY_DEFAULT_CONTEXT_WINDOW,
 	OPENAI_COMPAT_DISCOVERY_DEFAULT_MAX_TOKENS,
+	resolveLiteLLMApi,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { isRecord } from "@oh-my-pi/pi-utils";
@@ -36,6 +37,34 @@ import type { ProviderDiscovery } from "./models-config-schema";
 // "socket connection was closed unexpectedly").
 export const DISCOVERY_DEFAULT_CONTEXT_WINDOW = OPENAI_COMPAT_DISCOVERY_DEFAULT_CONTEXT_WINDOW;
 export const DISCOVERY_DEFAULT_MAX_TOKENS = OPENAI_COMPAT_DISCOVERY_DEFAULT_MAX_TOKENS;
+
+/**
+ * A discovery HTTP failure carrying the response status as a structured field
+ * so callers can classify auth rejections (401/403) without parsing messages.
+ * The message format is load-bearing: the model hub matches
+ * `HTTP <status> from <url>` for its 404 baseUrl hint, and auth-retry
+ * classification matches on the same text.
+ */
+export class DiscoveryHttpError extends Error {
+	readonly status: number;
+
+	constructor(status: number, url: string) {
+		super(`HTTP ${status} from ${url}`);
+		this.name = "DiscoveryHttpError";
+		this.status = status;
+	}
+}
+
+/**
+ * True when a discovery failure is an HTTP 401/403 auth rejection — the
+ * endpoint answered (so it is reachable) but refused the request's credentials
+ * (or lack of them). Callers surface these as an `unauthenticated` provider
+ * discovery state instead of a generic `unavailable`, so a credential problem
+ * never masquerades as a dead endpoint (issue #12281).
+ */
+export function isDiscoveryAuthRejection(error: unknown): boolean {
+	return error instanceof DiscoveryHttpError && (error.status === 401 || error.status === 403);
+}
 
 /**
  * Run `fn` with a hard deadline while also signalling cooperative transports
@@ -88,7 +117,7 @@ export function discoveryProbeTimeoutMs(baseUrl: string, loopbackMs: number, cus
 	}
 	hostname = hostname.replace(/^\[/, "").replace(/\]$/, "");
 	const isLoopback =
-		hostname === "localhost" || hostname === "0.0.0.0" || hostname === "::1" || /^127\./.test(hostname);
+		hostname === "localhost" || hostname === "0.0.0.0" || hostname === "::1" || hostname.startsWith("127.");
 	return isLoopback ? loopbackMs : REMOTE_DISCOVERY_TIMEOUT_MS;
 }
 
@@ -182,7 +211,7 @@ type LlamaCppDiscoveredServerMetadata = {
 	maxTokens?: "contextWindow";
 };
 
-type LlamaCppDiscoveredModelRuntimeMetadata = {
+type DiscoveredModelRuntimeMetadata = {
 	contextWindow?: number;
 	maxTokens?: number;
 	input?: ("text" | "image")[];
@@ -425,7 +454,7 @@ async function discoverOllamaModelMetadata(
 		const payload = await withTimeoutSignal(discoveryProbeTimeoutMs(endpoint, 150, customTimeoutMs), async signal => {
 			const response = await ctx.fetch(showUrl, {
 				method: "POST",
-				headers: { ...(headers ?? {}), "Content-Type": "application/json" },
+				headers: { ...headers, "Content-Type": "application/json" },
 				body: JSON.stringify({ model: modelId }),
 				signal,
 			});
@@ -474,7 +503,7 @@ export async function discoverOllamaModels(
 ): Promise<Model<Api>[]> {
 	const endpoint = normalizeOllamaBaseUrl(providerConfig.baseUrl);
 	const tagsUrl = `${endpoint}/api/tags`;
-	const headers = { ...(providerConfig.headers ?? {}) };
+	const headers = { ...providerConfig.headers };
 	const customTimeoutMs = providerConfig.discovery.timeoutMs;
 	const payload = await withTimeoutSignal(discoveryProbeTimeoutMs(endpoint, 250, customTimeoutMs), async signal => {
 		const response = await ctx.fetch(tagsUrl, {
@@ -482,7 +511,7 @@ export async function discoverOllamaModels(
 			signal,
 		});
 		if (!response.ok) {
-			throw new Error(`HTTP ${response.status} from ${tagsUrl}`);
+			throw new DiscoveryHttpError(response.status, tagsUrl);
 		}
 		return (await response.json()) as { models?: Array<{ name?: string; model?: string }> };
 	});
@@ -551,48 +580,6 @@ async function discoverLlamaCppServerMetadata(
 	}
 }
 
-/**
- * PrismLM Ternary/1-bit Bonsai GGUFs are Qwen3.6-27B derivatives served locally
- * via llama.cpp; their ids do not contain "qwen", so match them explicitly here
- * rather than broadening the global `isQwenModelId` predicate.
- */
-function isBonsaiQwenGguf(id: string): boolean {
-	return /(?:ternary-)?bonsai-27b/i.test(id);
-}
-
-/**
- * applyLlamaCppQwenThinking rewrites a discovered or cached llama.cpp model so a
- * Qwen-family chat template (which defaults `enable_thinking: true`) can be
- * turned off. Qwen ids and the Qwen3.6-based PrismLM Ternary Bonsai GGUFs are
- * routed through chat-completions (the implicit llama.cpp provider defaults to
- * `openai-responses`, whose disable path has no Qwen encoding) with the
- * `qwen-template-false` dialect; omp emits `preserve_thinking` inside
- * `chat_template_kwargs` for Qwen, so the toggle rides there too and history
- * `<think>` blocks survive (`qwenPreserveThinking`). The runtime base URL gets a
- * `/v1` suffix because the chat-completions request would otherwise POST to the
- * native root, which does not serve it. A model with a custom transport (e.g.
- * `pi-native`, whose client appends `/v1/pi/stream`) keeps its base URL so the
- * suffix is not doubled. Non-Qwen models pass through unchanged. Applied on both
- * fresh discovery and cache load, so an upgraded cache is corrected without
- * waiting for re-discovery.
- */
-export function applyLlamaCppQwenThinking(model: Model<Api>): Model<Api> {
-	if (!isQwenModelId(model.id) && !isBonsaiQwenGguf(model.id)) return model;
-	return buildModel({
-		...model,
-		api: "openai-completions",
-		baseUrl: model.transport ? model.baseUrl : ensureLlamaCppV1BaseUrl(normalizeLlamaCppBaseUrl(model.baseUrl)),
-		reasoning: true,
-		compat: {
-			...model.compatConfig,
-			supportsReasoningParams: true,
-			thinkingFormat: "qwen-chat-template",
-			reasoningDisableMode: "qwen-template-false",
-			qwenPreserveThinking: true,
-		},
-	} as unknown as ModelSpec<Api>);
-}
-
 export async function discoverLlamaCppModels(
 	providerConfig: DiscoveryProviderConfig,
 	ctx: DiscoveryContext,
@@ -600,7 +587,7 @@ export async function discoverLlamaCppModels(
 	const baseUrl = normalizeLlamaCppBaseUrl(providerConfig.baseUrl);
 	const modelsUrl = `${baseUrl}/models`;
 
-	const baseHeaders: Record<string, string> = { ...(providerConfig.headers ?? {}) };
+	const baseHeaders: Record<string, string> = { ...providerConfig.headers };
 	let headers = baseHeaders;
 	const customTimeoutMs = providerConfig.discovery.timeoutMs;
 	const attempt = async (h: Record<string, string>) => {
@@ -611,7 +598,7 @@ export async function discoverLlamaCppModels(
 					signal,
 				});
 				if (!response.ok) {
-					throw new Error(`HTTP ${response.status} from ${modelsUrl}`);
+					throw new DiscoveryHttpError(response.status, modelsUrl);
 				}
 				headers = h;
 				return (await response.json()) as unknown;
@@ -635,17 +622,14 @@ export async function discoverLlamaCppModels(
 			serverMetadata?.contextWindow ??
 			item.trainingContextWindow ??
 			DISCOVERY_DEFAULT_CONTEXT_WINDOW;
-		// Local llama.cpp models stamp `reasoning: false` with a minimal compat;
-		// applyLlamaCppQwenThinking upgrades Qwen-family ids (which cannot disable
-		// their default-on thinking otherwise) after the base model is built.
 		discovered.push(
-			applyLlamaCppQwenThinking(
-				buildModel({
+			buildDiscoveredModel(
+				{
 					id,
 					name: id,
 					api: providerConfig.api,
 					provider: providerConfig.provider,
-					baseUrl,
+					baseUrl: ensureLlamaCppV1BaseUrl(baseUrl),
 					reasoning: false,
 					input: item.input ?? serverMetadata?.input ?? ["text"],
 					imageInputDecoder: "stb",
@@ -653,12 +637,8 @@ export async function discoverLlamaCppModels(
 					contextWindow,
 					maxTokens: resolveLlamaCppMaxTokens(contextWindow, serverMetadata?.maxTokens),
 					headers,
-					compat: {
-						supportsStore: false,
-						supportsDeveloperRole: false,
-						supportsReasoningEffort: false,
-					},
-				} as ModelSpec<Api>),
+				},
+				providerConfig.discovery.type,
 			),
 		);
 	}
@@ -669,7 +649,7 @@ export async function discoverLlamaCppModelRuntimeMetadata(
 	model: Pick<Model<Api>, "provider" | "id" | "baseUrl" | "headers">,
 	ctx: DiscoveryContext,
 	customTimeoutMs?: number,
-): Promise<LlamaCppDiscoveredModelRuntimeMetadata | undefined> {
+): Promise<DiscoveredModelRuntimeMetadata | undefined> {
 	const baseUrl = normalizeLlamaCppBaseUrl(model.baseUrl);
 	// Probe the native `/models` endpoint (not the OpenAI-compatible `/v1/models`)
 	// so the runtime `meta`, `status.args`, and `architecture.input_modalities`
@@ -677,7 +657,7 @@ export async function discoverLlamaCppModelRuntimeMetadata(
 	// base URL, which would otherwise send this to `/v1/models`.
 	const nativeBaseUrl = toLlamaCppNativeBaseUrl(baseUrl);
 	const modelsUrl = `${nativeBaseUrl}/models`;
-	const baseHeaders: Record<string, string> = { ...(model.headers ?? {}) };
+	const baseHeaders: Record<string, string> = { ...model.headers };
 	const attempt = async (headers: Record<string, string>) => {
 		const [entries, serverMetadata] = await Promise.all([
 			withTimeoutSignal(discoveryProbeTimeoutMs(nativeBaseUrl, 250, customTimeoutMs), async signal => {
@@ -725,6 +705,61 @@ export async function discoverLlamaCppModelRuntimeMetadata(
 }
 
 /**
+ * Re-probe LM Studio's native `/api/v0/models` for a single selected model so
+ * its context window tracks the runtime lifecycle rather than the snapshot
+ * captured at discovery time.
+ *
+ * A model discovered while unloaded is registered with `max_context_length`
+ * (the architectural ceiling). When LM Studio JIT-loads it on first inference,
+ * the running instance may serve a smaller `loaded_context_length` (user load
+ * settings or context auto-fit). `getLmStudioNativeContextWindow` — invoked
+ * inside `fetchLmStudioNativeModelMetadata` — prefers `loaded_context_length`
+ * once `state === "loaded"`, so refreshing after selection swaps the stale
+ * ceiling for the window the backend actually accepts (issue #9001). A later
+ * unload re-probes back to `max_context_length`. This mirrors the llama.cpp
+ * lazy-load refresh from #3310/#3311.
+ *
+ * `maxTokens` is carried through so the caller can re-cap output at the new
+ * (possibly smaller) window; LM Studio native metadata reports no output cap
+ * of its own.
+ */
+export async function discoverLmStudioModelRuntimeMetadata(
+	model: Pick<Model<Api>, "provider" | "id" | "baseUrl" | "headers" | "maxTokens">,
+	ctx: DiscoveryContext,
+	customTimeoutMs?: number,
+): Promise<DiscoveredModelRuntimeMetadata | undefined> {
+	const baseUrl = normalizeOpenAIModelsListBaseUrl(model.baseUrl);
+	const timeoutMs = customTimeoutMs ?? 10_000;
+	const baseHeaders: Record<string, string> = { ...model.headers };
+	const attempt = async (headers: Record<string, string>) => {
+		const metadata = await withTimeoutSignal(timeoutMs, signal =>
+			fetchLmStudioNativeModelMetadata(baseUrl, ctx.fetch, { headers, signal }),
+		);
+		const entry = metadata?.get(model.id);
+		if (!entry) {
+			return undefined;
+		}
+		const contextWindow = entry.contextWindow;
+		if (contextWindow === undefined) {
+			return entry.input === undefined ? undefined : { input: entry.input };
+		}
+		return {
+			contextWindow,
+			...(typeof model.maxTokens === "number" ? { maxTokens: model.maxTokens } : {}),
+			...(entry.input !== undefined ? { input: entry.input } : {}),
+		};
+	};
+	try {
+		const apiKey = await ctx.getBearerApiKeyResolver(model.provider);
+		return apiKey
+			? await withAuth(apiKey, key => attempt({ ...baseHeaders, Authorization: `Bearer ${key}` }))
+			: await attempt(baseHeaders);
+	} catch {
+		return undefined;
+	}
+}
+
+/**
  * Read image-input support from an OpenAI-compatible `/v1/models` row. Handles
  * direct `input` arrays, Synthetic-style top-level `input_modalities`, and
  * OpenRouter-style `architecture.input_modalities`; returns undefined when none
@@ -753,10 +788,19 @@ export async function discoverOpenAIModelsList(
 	providerConfig: DiscoveryProviderConfig,
 	ctx: DiscoveryContext,
 ): Promise<Model<Api>[]> {
-	const baseUrl = normalizeOpenAIModelsListBaseUrl(providerConfig.baseUrl);
-	const modelsUrl = `${baseUrl}/models`;
+	const injectV1 = providerConfig.discovery.injectV1 ?? true;
+	// `injectV1: false` resolves `/models` against the configured base URL
+	// verbatim — no `/v1` suffix is injected. Gateways that root their
+	// OpenAI-compatible surface at a versioned path (e.g.
+	// `https://api.opper.ai/v3/compat`) serve a different, often much smaller,
+	// model list under a forced `/v1/models`; discovery must match the chat
+	// base URL exactly so the full catalog is surfaced.
+	const baseUrl = injectV1
+		? normalizeOpenAIModelsListBaseUrl(providerConfig.baseUrl)
+		: normalizeBareDiscoveryBaseUrl(providerConfig.baseUrl);
+	const modelsUrl = appendModelsPath(baseUrl);
 
-	const baseHeaders: Record<string, string> = { ...(providerConfig.headers ?? {}) };
+	const baseHeaders: Record<string, string> = { ...providerConfig.headers };
 	let headers = baseHeaders;
 	const timeoutMs = providerConfig.discovery.timeoutMs ?? 10_000;
 	const attempt = async (h: Record<string, string>) => {
@@ -773,7 +817,7 @@ export async function discoverOpenAIModelsList(
 					signal,
 				});
 				if (!res.ok) {
-					throw new Error(`HTTP ${res.status} from ${modelsUrl}`);
+					throw new DiscoveryHttpError(res.status, modelsUrl);
 				}
 				headers = h;
 				return (await res.json()) as {
@@ -784,6 +828,7 @@ export async function discoverOpenAIModelsList(
 						input?: unknown;
 						input_modalities?: unknown;
 						architecture?: unknown;
+						mode?: unknown;
 					}>;
 				};
 			}),
@@ -801,6 +846,7 @@ export async function discoverOpenAIModelsList(
 	for (const item of models) {
 		const id = item.id;
 		if (!id) continue;
+		if (providerConfig.discovery.type === "litellm" && !isSelectableLiteLLMModelMode(item.mode)) continue;
 		const nativeMetadataForModel = nativeMetadata?.get(id);
 		// Thin OpenAI-compatible proxies frequently omit `context_length`/
 		// `max_model_len` on `/v1/models`, leaving discovered models pinned at
@@ -813,6 +859,10 @@ export async function discoverOpenAIModelsList(
 		// headers/baseUrl/cost stay local.
 		const reference = resolveModelReference(id, references) as ModelSpec<Api> | undefined;
 		const referenceCompat = reference?.compat as OpenAICompat | undefined;
+		const api =
+			providerConfig.discovery.type === "litellm"
+				? resolveLiteLLMApi(undefined, id, providerConfig.api)
+				: providerConfig.api;
 		const contextWindow =
 			toPositiveNumberOrUndefined(item.max_model_len) ??
 			toPositiveNumberOrUndefined(item.context_length) ??
@@ -823,7 +873,7 @@ export async function discoverOpenAIModelsList(
 			buildModel({
 				id,
 				name: reference?.name ?? id,
-				api: providerConfig.api,
+				api,
 				provider: providerConfig.provider,
 				baseUrl,
 				reasoning: reference?.reasoning ?? false,
@@ -840,7 +890,7 @@ export async function discoverOpenAIModelsList(
 				// Cap the reference's output limit at the discovered context
 				// window so an ID collision with a larger bundled model can
 				// never request more tokens than the local runtime advertises.
-				maxTokens: Math.min(reference?.maxTokens ?? discoveryDefaultMaxTokens(providerConfig.api), contextWindow),
+				maxTokens: Math.min(reference?.maxTokens ?? discoveryDefaultMaxTokens(api), contextWindow),
 				headers,
 				compat: {
 					supportsStore: false,
@@ -866,28 +916,28 @@ export async function discoverLiteLLMModels(
 	const baseUrl = normalizeLiteLLMDiscoveryBaseUrl(providerConfig.baseUrl);
 	const references = getBundledModelReferenceIndex();
 	const resolveReference = (id: string) => resolveModelReference(id, references) as ModelSpec<Api> | undefined;
-	const baseHeaders: Record<string, string> = { ...(providerConfig.headers ?? {}) };
+	const baseHeaders: Record<string, string> = { ...providerConfig.headers };
 	let headers = baseHeaders;
 	const timeoutMs = providerConfig.discovery.timeoutMs ?? 10_000;
 	const attempt = async (h: Record<string, string>) => {
 		headers = h;
-		let authError: (Error & { status: number }) | undefined;
+		let authError: DiscoveryHttpError | undefined;
 		const authAwareFetch: FetchImpl = async (input, init) => {
 			const response = await ctx.fetch(input, init);
 			if (response.status === 401) {
-				authError = new Error(`HTTP ${response.status} from ${String(input)}`) as Error & { status: number };
-				authError.status = response.status;
+				authError = new DiscoveryHttpError(response.status, String(input));
 			}
 			return response;
 		};
 		const models = await withTimeoutSignal(timeoutMs, signal =>
-			fetchLiteLLMRichModels({
+			fetchLiteLLMRichModels<Api>({
 				api: providerConfig.api,
 				provider: providerConfig.provider,
 				baseUrl,
 				headers: h,
 				fetch: authAwareFetch,
 				referenceResolver: resolveReference,
+				resolveApi: (entry, id) => resolveLiteLLMApi(entry, id, providerConfig.api),
 				signal,
 			}),
 		);
@@ -902,14 +952,15 @@ export async function discoverLiteLLMModels(
 		richModels = apiKey
 			? await withAuth(apiKey, key => attempt({ ...baseHeaders, Authorization: `Bearer ${key}` }))
 			: await attempt(baseHeaders);
-	} catch (error) {
-		const status = typeof error === "object" && error !== null && "status" in error ? error.status : undefined;
-		if (status !== 401) {
-			throw error;
-		}
+	} catch {
+		// The rich-metadata probes failed (auth, timeout, or network). The cheap
+		// `/v1/models` fallback runs under its own independent budget and usually
+		// still resolves the catalog, so try it rather than aborting discovery and
+		// letting the caller cache an empty result (#10964). If the fallback also
+		// fails, its error propagates.
 		richModels = null;
 	}
-	if (!richModels || richModels.length === 0) {
+	if (richModels === null) {
 		return discoverOpenAIModelsList({ ...providerConfig, baseUrl }, ctx);
 	}
 	return richModels.map(spec => buildModel({ ...spec, headers }));
@@ -937,7 +988,7 @@ export async function discoverProxyModels(
 	const baseUrl = normalizeOpenAIModelsListBaseUrl(providerConfig.baseUrl);
 	const modelsUrl = `${baseUrl}/models`;
 
-	const baseHeaders: Record<string, string> = { ...(providerConfig.headers ?? {}) };
+	const baseHeaders: Record<string, string> = { ...providerConfig.headers };
 	let headers = baseHeaders;
 	const timeoutMs = providerConfig.discovery.timeoutMs ?? 10_000;
 	const attempt = async (h: Record<string, string>) =>
@@ -947,7 +998,7 @@ export async function discoverProxyModels(
 				signal,
 			});
 			if (!res.ok) {
-				throw new Error(`HTTP ${res.status} from ${modelsUrl}`);
+				throw new DiscoveryHttpError(res.status, modelsUrl);
 			}
 			headers = h;
 			return (await res.json()) as {
@@ -1018,7 +1069,7 @@ export async function discoverProxyModels(
 	return discovered;
 }
 
-function normalizeLlamaCppBaseUrl(baseUrl?: string): string {
+export function normalizeLlamaCppBaseUrl(baseUrl?: string): string {
 	const defaultBaseUrl = "http://127.0.0.1:8080";
 	const raw = baseUrl || defaultBaseUrl;
 	try {
@@ -1033,7 +1084,7 @@ function normalizeLlamaCppBaseUrl(baseUrl?: string): string {
 // ensureLlamaCppV1BaseUrl appends the OpenAI-compatible `/v1` prefix a
 // chat-completions request needs; native discovery keeps the bare root, which
 // serves `/models` and `/props` but not `/chat/completions`.
-function ensureLlamaCppV1BaseUrl(baseUrl: string): string {
+export function ensureLlamaCppV1BaseUrl(baseUrl: string): string {
 	return baseUrl.endsWith("/v1") ? baseUrl : `${baseUrl}/v1`;
 }
 
@@ -1063,6 +1114,43 @@ export function normalizeOpenAIModelsListBaseUrl(baseUrl?: string): string {
 		return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
 	} catch {
 		return raw;
+	}
+}
+
+/**
+ * Bare-shape discovery root: the configured base URL with trailing slashes
+ * trimmed and any query/hash dropped. Unlike
+ * {@link normalizeOpenAIModelsListBaseUrl} it never appends `/v1` — the
+ * configured URL is the full OpenAI-compatible root (e.g.
+ * `https://api.opper.ai/v3/compat`), and injecting `/v1` would point discovery
+ * at a different endpoint than chat. Query strings are stripped exactly like
+ * the default normalizer does: chat appends `/chat/completions` to the base
+ * string, so a retained query would corrupt the inference URL.
+ */
+export function normalizeBareDiscoveryBaseUrl(baseUrl: string | undefined): string {
+	const raw = baseUrl || "http://127.0.0.1:1234";
+	try {
+		const parsed = new URL(raw);
+		parsed.search = "";
+		parsed.hash = "";
+		return `${parsed.protocol}//${parsed.host}${parsed.pathname.replace(/\/+$/g, "")}`;
+	} catch {
+		return raw.replace(/\/+$/g, "");
+	}
+}
+
+/**
+ * Build the `/models` discovery URL by appending to the parsed pathname so
+ * query parameters survive (`https://host/root?token=x` must become
+ * `https://host/root/models?token=x`, not `https://host/root?token=x/models`).
+ */
+function appendModelsPath(baseUrl: string): string {
+	try {
+		const url = new URL(baseUrl);
+		url.pathname = `${url.pathname.replace(/\/+$/g, "")}/models`;
+		return url.toString();
+	} catch {
+		return `${baseUrl}/models`;
 	}
 }
 

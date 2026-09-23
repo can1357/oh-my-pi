@@ -7,10 +7,13 @@
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
+import { $flag, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
+import type { MCPManager } from "../mcp/manager";
+import { resolveMCPTimeoutMs } from "../mcp/timeout";
 import { type AgentSession, type AgentSessionEvent, SHUTDOWN_CONSOLIDATE_BUDGET_MS } from "../session/agent-session";
 import { isSilentAbort } from "../session/messages";
 import { flushTelemetryExport } from "../telemetry-export";
+import { formatPersistenceDurabilityFailure, formatPersistenceFailure } from "./persistence-failure";
 import { initializeExtensions } from "./runtime-init";
 
 /**
@@ -29,12 +32,19 @@ export interface PrintModeOptions {
 	printThoughts?: boolean;
 	/** Whether the caller explicitly started the headless plan flow. */
 	planYolo?: boolean;
+	/** Manager returned by session creation; only print mode waits for its servers. */
+	mcpManager?: MCPManager;
 }
 
 /** Matches the longest built-in provider request deadline while bounding tool-loop stalls. */
 export const PRINT_MODE_ADVISOR_DRAIN_TIMEOUT_MS = 10 * 60_000;
 /** Error exits cannot hold automation for the full normal drain budget. */
 export const PRINT_MODE_ERROR_ADVISOR_DRAIN_TIMEOUT_MS = 30_000;
+
+/** Sanitize untrusted text (server names, errors) into one stderr-safe line. */
+function singleLine(text: string): string {
+	return sanitizeText(text).replace(/[\r\n\t]+/g, " ");
+}
 
 /** Drop the provider-opaque replay payload (e.g. encrypted reasoning items) before printing. */
 function stripProviderPayload<T extends AgentMessage>(message: T): T {
@@ -57,6 +67,8 @@ function stripProviderPayload<T extends AgentMessage>(message: T): T {
  */
 export function printableEvent(event: AgentSessionEvent): unknown {
 	switch (event.type) {
+		case "tool_stream_update":
+			return { type: event.type, toolCallId: event.toolCallId, toolName: event.toolName };
 		case "message_update": {
 			const streamEvent = event.assistantMessageEvent;
 			if (streamEvent.type === "done" || streamEvent.type === "error") {
@@ -86,9 +98,31 @@ export function printableEvent(event: AgentSessionEvent): unknown {
 
 /**
  * Run in print (single-shot) mode.
- * Sends prompts to the agent and outputs the result.
+ *
+ * Sends prompts, writes the selected output format, disposes the session, and
+ * returns the process exit code for the completed turn.
  */
-export async function runPrintMode(session: AgentSession, options: PrintModeOptions): Promise<void> {
+export async function runPrintMode(session: AgentSession, options: PrintModeOptions): Promise<number> {
+	// A signal (SIGINT/SIGTERM/SIGHUP) landing mid-turn drives the exit code
+	// through postmortem (130/143/129). Record the reason so the aborted-response
+	// branch below never races that with its own ordinary failure status.
+	let signalReason: postmortem.Reason | undefined;
+	const cancelSignalTeardown = postmortem.register("print-mode-session", reason => {
+		signalReason = reason;
+		return session.dispose({ reason, mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
+	});
+	try {
+		return await runPrintModeCore(session, options, () => signalReason !== undefined);
+	} finally {
+		cancelSignalTeardown();
+	}
+}
+
+async function runPrintModeCore(
+	session: AgentSession,
+	options: PrintModeOptions,
+	signalTeardownActive: () => boolean,
+): Promise<number> {
 	const { mode, messages = [], initialMessage, initialImages, printThoughts, planYolo = false } = options;
 
 	// process.stdout.write is fire-and-forget: a large final record (e.g. a
@@ -157,6 +191,69 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 		}
 	});
 
+	// process.stderr.write is fire-and-forget as well: a diagnostic buffered
+	// behind a backpressured pipe would still be undelivered when runPrintMode
+	// returns, and the caller drains stdout only. Serialize the persistence
+	// diagnostics and await the tail before returning.
+	let stderrTail: Promise<void> = Promise.resolve();
+	const writeStderrLine = (line: string): void => {
+		stderrTail = stderrTail
+			.then(async () => {
+				if (process.stderr.write(`${line}\n`)) return;
+				const { promise, resolve } = Promise.withResolvers<void>();
+				// A closed stream never emits `drain`; resolve on error/close too so
+				// an undeliverable diagnostic cannot strand the tail.
+				const settle = (): void => {
+					process.stderr.off("drain", settle);
+					process.stderr.off("error", settle);
+					process.stderr.off("close", settle);
+					resolve();
+				};
+				process.stderr.on("drain", settle);
+				process.stderr.on("error", settle);
+				process.stderr.on("close", settle);
+				await promise;
+			})
+			// A stderr that throws (EPIPE) must not poison the tail: it would skip
+			// every later diagnostic and reject the awaited tail below.
+			.catch(() => {});
+	};
+
+	// Discriminates a store failure from any other dispose rejection below.
+	let persistenceFailure: Error | undefined;
+	session.sessionManager.onPersistenceError(error => {
+		persistenceFailure = error;
+		writeStderrLine(formatPersistenceFailure(error.message));
+	});
+
+	const timeoutMs = resolveMCPTimeoutMs();
+	let strictMCPFailure = false;
+	if (options.mcpManager) {
+		const readiness = await options.mcpManager.waitForStartup(timeoutMs);
+		// The manager's initial callback may have fired before SDK wiring, or a
+		// reconnect may have fired it without awaiting the session mutation.
+		// Refresh is serialized by AgentSession, so turn one sees the final snapshot.
+		await session.refreshMCPTools(options.mcpManager.getTools());
+		const unavailable: string[] = [];
+		for (const name of readiness.pending) {
+			const server = singleLine(name);
+			unavailable.push(server);
+			const after = timeoutMs > 0 ? ` after ${timeoutMs}ms` : "";
+			writeStderrLine(`Warning: MCP server "${server}" not ready${after}; its tools are unavailable for this run.`);
+		}
+		for (const { name, error } of readiness.failed) {
+			const server = singleLine(name);
+			unavailable.push(server);
+			writeStderrLine(
+				`Warning: MCP server "${server}" failed to connect: ${singleLine(error)}; its tools are unavailable for this run.`,
+			);
+		}
+		if ($flag("OMP_MCP_REQUIRE_READY") && unavailable.length > 0) {
+			writeStderrLine(`Error: MCP servers not ready: ${unavailable.join(", ")}`);
+			strictMCPFailure = true;
+		}
+	}
+
 	let wroteTextWorkingIndicator = false;
 	const writeTextWorkingIndicator = (): void => {
 		if (mode !== "text" || wroteTextWorkingIndicator) return;
@@ -165,56 +262,47 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 	};
 
 	// Send initial message with attachments
-	if (initialMessage !== undefined) {
+	if (!strictMCPFailure && initialMessage !== undefined) {
 		writeTextWorkingIndicator();
 		if (mode === "text") session.setTextOutputCommitted(false);
 		await logger.time("print:prompt:initial", () => session.prompt(initialMessage, { images: initialImages }));
 	}
 
 	// Send remaining messages
-	for (const message of messages) {
-		writeTextWorkingIndicator();
-		if (mode === "text") session.setTextOutputCommitted(false);
-		await logger.time("print:prompt:next", () => session.prompt(message));
+	if (!strictMCPFailure) {
+		for (const message of messages) {
+			writeTextWorkingIndicator();
+			if (mode === "text") session.setTextOutputCommitted(false);
+			await logger.time("print:prompt:next", () => session.prompt(message));
+		}
 	}
 
 	// From this point onward a late blocker must be recorded without starting a
 	// primary turn whose response print mode would never emit.
 	session.prepareForHeadlessAdvisorDrain();
 
-	// In text mode, output final response
-	if (mode === "text") {
-		// Read via the session accessor, not the raw state tail: a classifier
-		// refusal is pruned from active context at settle, and an aborted turn
-		// can trail synthetic tool results — both would hide the terminal
-		// assistant message (and its error) from a last-element read.
-		const assistantMsg = session.getLastAssistantMessage();
+	// Read via the session accessor, not the raw state tail: a classifier
+	// refusal is pruned from active context at settle, and an aborted turn
+	// can trail synthetic tool results — both would hide the terminal
+	// assistant message (and its error) from a last-element read.
+	const assistantMsg = session.getLastAssistantMessage();
+	// The terminal stop reason decides the process exit code in every output
+	// mode: `--mode json` used to report success for the same turn-fatal error
+	// text mode exits 1 on (issue #11498). Silent aborts (plan-mode compaction
+	// transitions) and aborts initiated by signal teardown stay non-fatal here;
+	// postmortem owns the signal-specific exit code (130/143/129).
+	const terminalFailure =
+		!strictMCPFailure &&
+		assistantMsg !== undefined &&
+		(assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") &&
+		!isSilentAbort(assistantMsg) &&
+		!signalTeardownActive();
 
+	// In text mode, output the final response. A terminal failure prints only
+	// the error line below; JSON mode already emitted the assistant message and
+	// stop reason through the event subscription.
+	if (mode === "text" && !terminalFailure && !strictMCPFailure) {
 		if (assistantMsg) {
-			// Check for error/aborted — skip silent-abort (plan-mode compaction transition)
-			if (
-				(assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") &&
-				!isSilentAbort(assistantMsg)
-			) {
-				const errorLine = sanitizeText(assistantMsg.errorMessage || `Request ${assistantMsg.stopReason}`);
-				// This branch hard-exits, bypassing the `await session.dispose()` at
-				// the end of runPrintMode. Flush telemetry and dispose the session
-				// HERE so error spans reach the exporter (the postmortem `exit`
-				// handler can't await) and the browser reaper installed in
-				// `dispose()` (releaseTabsForOwner) actually runs — otherwise an
-				// OMP-owned Chromium survives this exit (issue #5643). `dispose()`
-				// is idempotent, so the unreachable call below is a harmless no-op.
-				await session.waitForAdvisorCatchup(PRINT_MODE_ERROR_ADVISOR_DRAIN_TIMEOUT_MS);
-				await flushTelemetryExport();
-				await session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
-				const flushed = process.stderr.write(`${errorLine}\n`);
-				if (flushed) {
-					process.exit(1);
-				} else {
-					process.stderr.once("drain", () => process.exit(1));
-				}
-			}
-
 			if (
 				assistantMsg.errorMessage &&
 				assistantMsg.stopReason !== "error" &&
@@ -235,11 +323,48 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 		session.setTextOutputCommitted(true);
 	}
 
-	await session.waitForAdvisorCatchup(PRINT_MODE_ADVISOR_DRAIN_TIMEOUT_MS);
+	// A turn-fatal exit cannot hold automation for the full normal drain budget.
+	if (!strictMCPFailure) {
+		await session.waitForAdvisorCatchup(
+			terminalFailure ? PRINT_MODE_ERROR_ADVISOR_DRAIN_TIMEOUT_MS : PRINT_MODE_ADVISOR_DRAIN_TIMEOUT_MS,
+		);
+	}
+	// Error spans must reach the exporter; the postmortem `exit` handler can't await.
+	if (terminalFailure) await flushTelemetryExport();
 
 	// Block shutdown until every serialized stdout write (including the final
 	// agent_end and late JSON advisor events) has drained; process.exit would
 	// otherwise discard the buffered tail and truncate the last record.
 	await stdoutTail;
-	await session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
+	// Dispose before returning the status instead of hard-exiting ahead of it:
+	// the awaited `dispose()` runs the browser reaper (releaseTabsForOwner), so
+	// an OMP-owned Chromium cannot survive the exit (issue #5643).
+	//
+	// A latched store failure rethrows from `dispose()`; report it as lost
+	// durability rather than letting it escape as a raw fatal dump.
+	let durabilityFailure = false;
+	try {
+		await session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
+	} catch (error) {
+		if (!persistenceFailure || error !== persistenceFailure) throw error;
+		durabilityFailure = true;
+		// The store is still failing at teardown, so this is the moment the
+		// transcript stops being retryable and becomes lost.
+		writeStderrLine(formatPersistenceDurabilityFailure(persistenceFailure.message));
+		await stderrTail;
+	}
+
+	// Text mode reports the terminal failure on stderr exactly as before: same
+	// line, same ordering after dispose, without terminating the process here.
+	if (mode === "text" && terminalFailure && assistantMsg) {
+		const errorLine = sanitizeText(assistantMsg.errorMessage || `Request ${assistantMsg.stopReason}`);
+		if (!process.stderr.write(`${errorLine}\n`)) {
+			const { promise, resolve } = Promise.withResolvers<void>();
+			process.stderr.once("drain", resolve);
+			await promise;
+		}
+	}
+
+	await stderrTail;
+	return terminalFailure || durabilityFailure || strictMCPFailure ? 1 : 0;
 }

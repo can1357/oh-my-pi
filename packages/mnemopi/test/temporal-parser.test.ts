@@ -1,12 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import {
-	DAY_MAP,
-	extractDateFromText,
-	extractTemporal,
-	MONTH_MAP,
-	NAMED_TIMES,
-	parseNlDate,
-} from "@oh-my-pi/pi-mnemopi/core/temporal-parser";
+import { extractDateFromText, extractTemporal, parseNlDate } from "@oh-my-pi/pi-mnemopi/core/temporal-parser";
 
 const REF = new Date("2026-05-20T15:30:00Z"); // Wednesday
 
@@ -15,15 +8,6 @@ function iso(value: Date): string {
 }
 
 describe("temporal parser", () => {
-	it("exports day, month, and named-time constants", () => {
-		expect(DAY_MAP.monday).toBe(0);
-		expect(DAY_MAP.sun).toBe(6);
-		expect(MONTH_MAP.may).toBe(5);
-		expect(MONTH_MAP.dec).toBe(12);
-		expect(NAMED_TIMES.morning).toEqual([6, 12]);
-		expect(NAMED_TIMES.night).toEqual([21, 6]);
-	});
-
 	it("extracts ISO absolute dates", () => {
 		const result = extractTemporal("Meeting was on 2026-05-15", REF);
 		expect(result.event_date).toBe("2026-05-15");

@@ -1,11 +1,17 @@
 import { describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
-import { BlobStore, isBlobRef } from "@oh-my-pi/pi-coding-agent/session/blob-store";
-import type { FileEntry, SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { BlobStore, isBlobRef, lazyImageDataSync } from "@oh-my-pi/pi-coding-agent/session/blob-store";
+import type {
+	CompactionEntry,
+	FileEntry,
+	SessionMessageEntry,
+} from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { resolveBlobRefsInEntries } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { prepareEntryForPersistence } from "@oh-my-pi/pi-coding-agent/session/session-persistence";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import type { Archive } from "@oh-my-pi/snapcompact";
+import * as snapcompact from "@oh-my-pi/snapcompact";
 
 type ImagePayload = { data: string; mimeType: string; type?: "image" };
 type ToolResultMessage = Extract<AgentMessage, { role: "toolResult" }>;
@@ -107,7 +113,11 @@ describe("session image persistence", () => {
 			throw new Error("expected persisted assistant message");
 		}
 		const persistedImage = persisted.message.content.find(block => block.type === "image");
-		const persistedItem = persisted.message.providerPayload?.items[0];
+		const persistedPayload = persisted.message.providerPayload;
+		if (persistedPayload?.type !== "openaiResponsesHistory") {
+			throw new Error("expected persisted Responses history");
+		}
+		const persistedItem = persistedPayload.items[0];
 		if (!persistedItem || typeof persistedItem.result !== "string") {
 			throw new Error("expected persisted image generation item");
 		}
@@ -121,7 +131,11 @@ describe("session image persistence", () => {
 			throw new Error("expected resolved assistant message");
 		}
 		const resolvedImage = resolved.message.content.find(block => block.type === "image");
-		const resolvedItem = resolved.message.providerPayload?.items[0];
+		const resolvedPayload = resolved.message.providerPayload;
+		if (resolvedPayload?.type !== "openaiResponsesHistory") {
+			throw new Error("expected resolved Responses history");
+		}
+		const resolvedItem = resolvedPayload.items[0];
 		expect(resolvedImage?.data).toBe(data);
 		expect(resolvedItem?.result).toBe(data);
 	});
@@ -166,5 +180,194 @@ describe("session image persistence", () => {
 		const resolved = loaded[loaded.length - 1] as ToolResultEntry;
 		const resolvedImage = resolved.message.content.find((block): block is ImageContent => block.type === "image");
 		expect(resolvedImage?.data).toBe(imageData);
+	});
+});
+
+/** Strict base64 the way a provider's decoder validates it: only the base64
+ *  alphabet, canonical padding, length a multiple of 4. Buffer.from is lenient
+ *  and would silently accept the corrupted payload this test guards against. */
+function isStrictBase64(data: string): boolean {
+	return /^[A-Za-z0-9+/]*={0,2}$/.test(data) && data.length % 4 === 0;
+}
+
+describe("snapcompact frame persistence", () => {
+	it("externalizes oversized frame base64 to the blob store instead of truncating it", async () => {
+		using tempDir = TempDir.createSync("@snapcompact-frame-persistence-");
+		const blobStore = new BlobStore(tempDir.path());
+		// 400k bytes -> ~533k base64 chars, comfortably past the 500k persist cap
+		// that previously truncated the frame and appended the notice.
+		const frameData = Buffer.alloc(400_000, 7).toString("base64");
+		expect(isStrictBase64(frameData)).toBe(true);
+		expect(frameData.length).toBeGreaterThan(500_000);
+
+		const archive: Archive = {
+			frames: [{ data: frameData, mimeType: "image/png", cols: 100, rows: 100, chars: 5000 }],
+			totalChars: 5000,
+			truncatedChars: 0,
+			text: "archived source text",
+		};
+		const entry: CompactionEntry = {
+			type: "compaction",
+			id: "compaction-1",
+			parentId: null,
+			timestamp: new Date(0).toISOString(),
+			summary: "summary",
+			firstKeptEntryId: "entry-1",
+			tokensBefore: 5000,
+			preserveData: { [snapcompact.PRESERVE_KEY]: archive },
+		};
+
+		const persisted = prepareEntryForPersistence(entry, blobStore) as CompactionEntry;
+		const persistedArchive = persisted.preserveData![snapcompact.PRESERVE_KEY] as Archive;
+		expect(isBlobRef(persistedArchive.frames[0]!.data)).toBe(true);
+		expect(persistedArchive.frames[0]!.data).not.toContain("[Session persistence truncated large content]");
+
+		// The payload stays a reference after load; `historyBlocks` materializes it
+		// through the resolver. Kept from the eager version of this test so the
+		// round trip still proves a frame reaches the model as usable base64.
+		const loaded: CompactionEntry[] = [structuredClone(persisted)];
+		await resolveBlobRefsInEntries(loaded, blobStore);
+		const loadedArchive = snapcompact.getPreservedArchive(loaded[0]!.preserveData)!;
+		const blocks = snapcompact.historyBlocks(loadedArchive, {
+			maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET,
+			resolveFrameData: data => lazyImageDataSync(blobStore, data),
+		});
+		const imageBlocks = blocks.filter((block): block is ImageContent => block.type === "image");
+		expect(imageBlocks).toHaveLength(1);
+		expect(imageBlocks[0]!.data).toBe(frameData);
+		expect(imageBlocks.every(block => isStrictBase64(block.data))).toBe(true);
+
+		// Without a resolver the reference must never leave as image data: a
+		// dropped picture is recoverable, a rejected request is not.
+		const unresolved = snapcompact
+			.historyBlocks(loadedArchive, { maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET })
+			.filter((block): block is ImageContent => block.type === "image");
+		expect(unresolved).toHaveLength(0);
+	});
+
+	it("marks a missing frame blob in place instead of claiming a budget omission", () => {
+		const archive: Archive = {
+			frames: [{ data: "blob:sha256:missing", mimeType: "image/png", cols: 100, rows: 100, chars: 5000 }],
+			totalChars: 5000,
+			truncatedChars: 0,
+			textHead: "head",
+			textTail: "tail",
+		};
+
+		const text = snapcompact
+			.historyBlocks(archive, { resolveFrameData: () => undefined })
+			.filter((block): block is { type: "text"; text: string } => block.type === "text")
+			.map(block => block.text)
+			.join("");
+
+		expect(text).toContain("archived image frame unavailable here");
+		// A missing payload is not a byte-budget omission, so it must not borrow
+		// that notice: the budget notice claims the OLDEST frames were dropped.
+		expect(text).not.toContain("snapcompact image middle omitted");
+		expect(text).not.toBe("headtail");
+	});
+
+	it("keeps a missing-frame gap after the older frame it follows", () => {
+		const available = Buffer.alloc(64, 3).toString("base64");
+		const archive: Archive = {
+			frames: [
+				{ data: available, mimeType: "image/png", cols: 10, rows: 10, chars: 100 },
+				{ data: "blob:sha256:missing", mimeType: "image/png", cols: 10, rows: 10, chars: 100 },
+			],
+			totalChars: 200,
+			truncatedChars: 0,
+		};
+
+		const blocks = snapcompact.historyBlocks(archive, {
+			resolveFrameData: data => (data === available ? { bytes: data.length, read: () => data } : undefined),
+		});
+		const shape = blocks.map(block => (block.type === "image" ? "image" : "text"));
+
+		// Oldest to newest: the surviving picture, then the gap where the newer
+		// one was. A leading notice would date the gap before the image.
+		expect(shape).toEqual(["image", "text"]);
+		expect(blocks[1]).toMatchObject({ type: "text" });
+		expect((blocks[1] as { text: string }).text).toContain("archived image frame unavailable here");
+	});
+
+	it("keeps unavailable and budget gaps in frame chronology", () => {
+		const unavailable = "blob:sha256:missing";
+		const omitted = Buffer.alloc(80, 2).toString("base64");
+		const newest = Buffer.alloc(40, 3).toString("base64");
+		const archive: Archive = {
+			frames: [
+				{ data: unavailable, mimeType: "image/png", cols: 10, rows: 10, chars: 100 },
+				{ data: omitted, mimeType: "image/png", cols: 10, rows: 10, chars: 100 },
+				{ data: omitted, mimeType: "image/png", cols: 10, rows: 10, chars: 100 },
+				{ data: newest, mimeType: "image/png", cols: 10, rows: 10, chars: 100 },
+			],
+			totalChars: 400,
+			truncatedChars: 0,
+		};
+
+		const blocks = snapcompact.historyBlocks(archive, {
+			maxFrameDataBytes: newest.length,
+			resolveFrameData: data => (data === unavailable ? undefined : { bytes: data.length, read: () => data }),
+		});
+
+		const order = blocks.map(block => {
+			if (block.type === "image") return "image";
+			return block.text.includes("unavailable here") ? "unavailable" : "budget";
+		});
+		expect(order).toEqual(["unavailable", "budget", "image"]);
+		const budgetNotice = blocks[1];
+		if (budgetNotice?.type !== "text") throw new Error("Expected an in-place budget notice");
+		expect(budgetNotice.text).toContain("2 archived image frames");
+	});
+
+	it("drops malformed frame blob references before provider input", () => {
+		using tempDir = TempDir.createSync("@snapcompact-malformed-frame-ref-");
+		const blobStore = new BlobStore(tempDir.path());
+		const archive: Archive = {
+			frames: [{ data: "blob:sha256:not-a-hash", mimeType: "image/png", cols: 100, rows: 100, chars: 5000 }],
+			totalChars: 5000,
+			truncatedChars: 0,
+			textHead: "head",
+			textTail: "tail",
+		};
+
+		const blocks = snapcompact.historyBlocks(archive, {
+			resolveFrameData: data => lazyImageDataSync(blobStore, data),
+		});
+		expect(blocks.filter(block => block.type === "image")).toHaveLength(0);
+		expect(blocks.map(block => (block.type === "text" ? block.text : "")).join("")).toContain(
+			"archived image frame unavailable here",
+		);
+	});
+
+	it("recovers frames corrupted by older persistence versions as retained source text", async () => {
+		using tempDir = TempDir.createSync("@snapcompact-frame-recovery-");
+		const blobStore = new BlobStore(tempDir.path());
+		const sourceText = "complete normalized archived source";
+		const corruptedData = `${Buffer.alloc(400_000, 7).toString("base64").slice(0, 499_953)}\n\n[Session persistence truncated large content]`;
+		const entry: CompactionEntry = {
+			type: "compaction",
+			id: "compaction-1",
+			parentId: null,
+			timestamp: new Date(0).toISOString(),
+			summary: "summary",
+			firstKeptEntryId: "entry-1",
+			tokensBefore: 5000,
+			preserveData: {
+				[snapcompact.PRESERVE_KEY]: {
+					frames: [{ data: corruptedData, mimeType: "image/png", cols: 100, rows: 100, chars: 5000 }],
+					totalChars: 5000,
+					truncatedChars: 0,
+					text: sourceText,
+				} satisfies Archive,
+			},
+		};
+
+		await resolveBlobRefsInEntries([entry], blobStore);
+		const recovered = snapcompact.getPreservedArchive(entry.preserveData)!;
+		const blocks = snapcompact.historyBlocks(recovered, {
+			maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET,
+		});
+		expect(blocks).toEqual([{ type: "text", text: sourceText }]);
 	});
 });

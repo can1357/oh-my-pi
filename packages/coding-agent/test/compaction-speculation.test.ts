@@ -1,0 +1,746 @@
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
+import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
+import type { AssistantMessage, Model, UserMessage } from "@oh-my-pi/pi-ai";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import type { CompactionMethod } from "@oh-my-pi/pi-coding-agent/session/compaction-methods";
+import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { SessionMaintenance, type SessionMaintenanceHost } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import * as snapcompactModule from "@oh-my-pi/snapcompact";
+
+const CONTEXT_WINDOW = 100_000;
+const THRESHOLD = 50_000;
+const SPECULATION_BAND_START = THRESHOLD - 8_192;
+
+function userMessage(text: string): UserMessage {
+	return { role: "user", content: [{ type: "text", text }], timestamp: Date.now() };
+}
+
+function assistantMessage(text: string, model: Model): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [{ type: "text", text }],
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		stopReason: "stop",
+		usage: {
+			input: 10_000,
+			output: 100,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 10_100,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		timestamp: Date.now(),
+	};
+}
+
+describe("async speculative compaction", () => {
+	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
+	let model: Model;
+	let defaultModel: Model;
+	let sessionManager: SessionManager;
+	let maintenance: SessionMaintenance;
+	let agent: Agent;
+	let events: string[];
+
+	function appendSummarizableConversation(): void {
+		const text = "conversation ".repeat(8_000);
+		sessionManager.appendMessage(userMessage(text));
+		sessionManager.appendMessage(assistantMessage("response ".repeat(8_000), model));
+		sessionManager.appendMessage(userMessage(text));
+		sessionManager.appendMessage(assistantMessage("final response", model));
+	}
+
+	let maintenanceSettings: Settings;
+
+	function createMaintenance(
+		options: {
+			asyncEnabled?: boolean;
+			methodOrder?: CompactionMethod[];
+			experimental?: boolean;
+			recoveryTools?: boolean;
+			obfuscateTextForProvider?: (text: string | undefined) => string | undefined;
+			obfuscatePreparationForProvider?: <T>(preparation: T) => T;
+			convertToLlmForSideRequest?: (messages: AgentMessage[]) => never;
+			generateHandoffDocument?: (
+				focus: string,
+				options?: { autoTriggered?: boolean; signal?: AbortSignal },
+			) => Promise<{ document: string } | undefined>;
+		} = {},
+	): SessionMaintenance {
+		agent = new Agent({
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": true,
+			"compaction.asyncEnabled": options.asyncEnabled ?? true,
+			"compaction.methodOrder": options.methodOrder ?? ["soft"],
+			"compaction.thresholdPercent": 50,
+			"compaction.keepRecentTokens": 1,
+			"compaction.autoContinue": false,
+			"compaction.experimentalContextManagement": options.experimental ?? false,
+		});
+		maintenanceSettings = settings;
+		const host = {
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+			extensionRunner: undefined,
+			sideStreamFn: async () => {
+				throw new Error("The compact seam should be used instead of the side stream");
+			},
+			providerSessionState: new Map(),
+			preferWebsockets: undefined,
+			model: () => model,
+			thinkingLevel: () => undefined,
+			isDisposed: () => false,
+			isStreaming: () => false,
+			isGeneratingHandoff: () => false,
+			promptGeneration: () => 0,
+			hasExperimentalContextRolloverTools: () => options.recoveryTools ?? true,
+			queueExperimentalContextNotesReminder: () => events.push("notes-reminder"),
+			sessionId: () => sessionManager.getSessionId(),
+			messages: () => agent.state.messages,
+			baseSystemPrompt: () => ["Test"],
+			goalModeState: () => undefined,
+			planReferencePath: () => "",
+			nonMessageTokenSource: () => ({}),
+			memoryBackendSession: () => undefined,
+			emitSessionEvent: async (event: { type: string }) => {
+				events.push(event.type);
+			},
+			emitNotice: () => {},
+			schedulePostPromptTask: () => {},
+			scheduleAgentContinue: () => {},
+			scheduleCompactionContinuation: () => false,
+			persistTurnMessagesForMidRunCompaction: async () => false,
+			findLastAssistantMessage: () => undefined,
+			disconnectFromAgent: () => {},
+			reconnectToAgent: () => {},
+			drainStrandedQueuedMessages: () => {},
+			buildDisplaySessionContext: () => sessionManager.buildSessionContext(),
+			convertToLlmForSideRequest:
+				options.convertToLlmForSideRequest ?? ((messages: AgentMessage[]) => messages as never),
+			obfuscateTextForProvider: options.obfuscateTextForProvider ?? ((text: string | undefined) => text),
+			obfuscatePreparationForProvider:
+				options.obfuscatePreparationForProvider ?? (<T>(preparation: T) => preparation),
+			closeCodexProviderSessionsForHistoryRewrite: () => {},
+			resetCodexProviderAfterCompaction: () => {},
+			resetPlanReference: () => {},
+			syncTodoPhasesFromBranch: () => {},
+			resetAdvisorRuntimes: () => {},
+			rebaseAfterCompaction: () => {},
+			recordAnchoredHistoryRewrite: () => {},
+			getContextBreakdown: () => undefined,
+			getContextUsage: () => undefined,
+			shake: async () => ({ modified: false, tokensRemoved: 0 }),
+			dropImages: async () => ({ removed: 0 }),
+			generateHandoffDocument: options.generateHandoffDocument ?? (async () => undefined),
+			removeAssistantMessageFromActiveContext: () => {},
+			dropPersistedAssistantTurn: async () => undefined,
+			runRecoveryCompactionWithRollback: async () => ({ deferredHandoff: false, continuationScheduled: false }),
+			parseRetryAfterMsFromError: () => undefined,
+			setModelTemporary: async () => {},
+			abort: async () => {},
+			abortHandoff: () => {},
+		} as unknown as SessionMaintenanceHost;
+		return new SessionMaintenance(host);
+	}
+
+	async function waitForState(state: "idle" | "running" | "armed"): Promise<void> {
+		for (let microtask = 0; microtask < 100 && maintenance.speculationState !== state; microtask++) {
+			await Promise.resolve();
+		}
+		if (maintenance.speculationState !== state) {
+			throw new Error(`Speculation did not become ${state}`);
+		}
+	}
+
+	beforeAll(async () => {
+		authStorage = await AuthStorage.create(":memory:");
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		modelRegistry = new ModelRegistry(authStorage);
+		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!bundled) throw new Error("Expected built-in model");
+		defaultModel = { ...bundled, contextWindow: CONTEXT_WINDOW };
+		model = defaultModel;
+	});
+
+	beforeEach(() => {
+		model = defaultModel;
+		sessionManager = SessionManager.inMemory();
+		events = [];
+		appendSummarizableConversation();
+		maintenance = createMaintenance();
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	afterAll(() => {
+		authStorage.close();
+	});
+
+	it("reminds only near threshold once per experimental window, including the first and reset windows", async () => {
+		maintenance = createMaintenance({ experimental: true });
+		const network = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Unexpected network request"));
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START - 1, CONTEXT_WINDOW);
+		expect(events).not.toContain("notes-reminder");
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		maintenance.resetForNewPrompt();
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START + 1, CONTEXT_WINDOW);
+		expect(events.filter(event => event === "notes-reminder")).toHaveLength(1);
+		expect(maintenance.speculationState).toBe("idle");
+
+		await maintenance.runAutoCompaction("threshold", false, false, false, { triggerContextTokens: THRESHOLD });
+		expect(sessionManager.getEntries().findLast(entry => entry.type === "compaction")?.details).toEqual({
+			kind: "experimental-context-rollover",
+			version: 1,
+		});
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		expect(events.filter(event => event === "notes-reminder")).toHaveLength(2);
+		sessionManager.appendResetBoundary();
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		expect(events.filter(event => event === "notes-reminder")).toHaveLength(3);
+		expect(network).not.toHaveBeenCalled();
+	});
+
+	it("keeps legacy speculation when experimental recovery tools are unavailable", async () => {
+		maintenance = createMaintenance({ experimental: true, recoveryTools: false });
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "legacy summary",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+		}));
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("armed");
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		expect(events).not.toContain("notes-reminder");
+	});
+
+	it("does not call the summarizer below the speculative band, then arms inside it", async () => {
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "speculative summary",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+		}));
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START - 1, CONTEXT_WINDOW);
+		expect(maintenance.speculationState).toBe("idle");
+		expect(compactSpy).not.toHaveBeenCalled();
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		expect(maintenance.speculationState).toBe("running");
+		await waitForState("armed");
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("commits an armed summary at threshold without paying for another summarizer call", async () => {
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "armed summary",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+		}));
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("armed");
+
+		await maintenance.runAutoCompaction("threshold", false, false, false, { triggerContextTokens: THRESHOLD });
+
+		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
+		expect(entry?.type === "compaction" ? entry.summary : undefined).toBe("armed summary");
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		expect(events).toEqual(expect.arrayContaining(["auto_compaction_start", "auto_compaction_end"]));
+	});
+
+	it("preserves an in-flight native interval through the next compaction", async () => {
+		const bundled = getBundledModel("openai", "gpt-5");
+		if (!bundled) throw new Error("Expected built-in OpenAI model");
+		model = { ...bundled, contextWindow: CONTEXT_WINDOW };
+		authStorage.keys.setRuntime("openai", "test-key");
+		maintenance = createMaintenance({ methodOrder: ["remote"] });
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
+			started.resolve();
+			await release.promise;
+			return {
+				summary: "remote speculative summary",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+				preserveData: {
+					openaiRemoteCompaction: {
+						version: "v2",
+						provider: model.provider,
+						replacementHistory: [{ type: "compaction_summary", summary: "snapshot" }],
+						usedTokens: 1_000,
+					},
+				},
+			};
+		});
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await started.promise;
+		sessionManager.appendMessage(userMessage("post-snapshot request"));
+		sessionManager.appendMessage({
+			...assistantMessage("", model),
+			content: [{ type: "toolCall", id: "call-after-snapshot", name: "read", arguments: { path: "src/index.ts" } }],
+			stopReason: "toolUse",
+		});
+		sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: "call-after-snapshot",
+			toolName: "read",
+			content: [{ type: "text", text: "file contents" }],
+			isError: false,
+			timestamp: Date.now(),
+		});
+		sessionManager.appendMessage(userMessage("post-snapshot follow-up"));
+		release.resolve();
+		await waitForState("armed");
+
+		await maintenance.runAutoCompaction("threshold", false, false, false, { triggerContextTokens: THRESHOLD });
+
+		expect(agent.state.messages.map(message => message.role)).toEqual([
+			"compactionSummary",
+			"user",
+			"assistant",
+			"toolResult",
+			"user",
+		]);
+		expect(agent.state.messages[1]).toEqual(
+			expect.objectContaining({
+				role: "user",
+				content: [{ type: "text", text: "post-snapshot request" }],
+			}),
+		);
+
+		const replayedInterval = agent.state.messages.slice(1);
+		// The journal still ends at the compaction record, but the payload does
+		// not cover the user/tool exchange appended after its snapshot.
+		const next = compactionModule.prepareCompaction(
+			sessionManager.getBranch(),
+			{ ...compactionModule.DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 1 },
+			model,
+			agent.tokenizer,
+		);
+		if (!next) throw new Error("Expected the uncovered native interval to remain compactable");
+		expect([...next.messagesToSummarize, ...next.turnPrefixMessages, ...next.recentMessages]).toEqual(
+			replayedInterval,
+		);
+		expect(next.recentMessages.map(message => message.role)).toEqual(["user"]);
+
+		const afterCommit = userMessage("request after native commit");
+		sessionManager.appendMessage(afterCommit);
+		const later = compactionModule.prepareCompaction(
+			sessionManager.getBranch(),
+			{ ...compactionModule.DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 1 },
+			model,
+			agent.tokenizer,
+		);
+		if (!later) throw new Error("Expected compaction after the native commit");
+		expect([...later.messagesToSummarize, ...later.turnPrefixMessages, ...later.recentMessages]).toEqual([
+			...replayedInterval,
+			afterCommit,
+		]);
+		expect(later.previousPreserveData).toEqual(next.previousPreserveData);
+
+		sessionManager.appendResetBoundary();
+		const fresh = userMessage("fresh history after clear");
+		const kept = userMessage("fresh retained request");
+		sessionManager.appendMessage(fresh);
+		sessionManager.appendMessage(kept);
+		const cleared = compactionModule.prepareCompaction(
+			sessionManager.getBranch(),
+			{ ...compactionModule.DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 1 },
+			model,
+			agent.tokenizer,
+		);
+		if (!cleared) throw new Error("Expected fresh post-clear compaction");
+		expect(cleared.previousPreserveData).toBeUndefined();
+		expect([...cleared.messagesToSummarize, ...cleared.turnPrefixMessages, ...cleared.recentMessages]).toEqual([
+			fresh,
+			kept,
+		]);
+	});
+
+	it("routes speculative compaction through the session secret boundary", async () => {
+		const bundled = getBundledModel("openai", "gpt-5");
+		if (!bundled) throw new Error("Expected built-in OpenAI model");
+		model = { ...bundled, contextWindow: CONTEXT_WINDOW };
+		authStorage.keys.setRuntime("openai", "test-key");
+		maintenance = createMaintenance({
+			methodOrder: ["remote"],
+			obfuscatePreparationForProvider: preparation => ({ ...preparation, previousSummary: "MARKED PREVIOUS" }),
+			convertToLlmForSideRequest: messages =>
+				messages.map(message =>
+					"content" in message && typeof message.content === "string"
+						? { ...message, content: `MARKED:${message.content}` }
+						: message,
+				) as never,
+		});
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "speculative summary",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+		}));
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("armed");
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+
+		const [capturedPreparation, , , , , capturedOptions] = compactSpy.mock.calls[0] ?? [];
+		expect(capturedPreparation?.previousSummary).toBe("MARKED PREVIOUS");
+		const converted = capturedOptions?.convertToLlm?.([{ role: "user", content: "probe", timestamp: 1 }]);
+		expect(converted?.[0]).toMatchObject({ role: "user", content: "MARKED:probe" });
+	});
+
+	it("discards stale remote speculation when native replacement history exceeds recovery headroom", async () => {
+		const bundled = getBundledModel("openai", "gpt-5");
+		if (!bundled) throw new Error("Expected built-in OpenAI model");
+		model = { ...bundled, contextWindow: CONTEXT_WINDOW };
+		authStorage.keys.setRuntime("openai", "test-key");
+		maintenance = createMaintenance({ methodOrder: ["remote"] });
+		let invocation = 0;
+		const nativeCompactionItem = {
+			type: "compaction",
+			encrypted_content: "native-history-token ".repeat(45_000),
+		};
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: `remote summary ${++invocation}`,
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+			...(invocation === 1
+				? {
+						preserveData: {
+							openaiRemoteCompaction: {
+								provider: model.provider,
+								replacementHistory: [nativeCompactionItem],
+								compactionItem: nativeCompactionItem,
+							},
+						},
+					}
+				: {}),
+		}));
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("armed");
+		sessionManager.appendMessage(userMessage("post-snapshot request"));
+
+		await maintenance.runAutoCompaction("threshold", false, false, false, {
+			triggerContextTokens: THRESHOLD + 1_000,
+		});
+
+		expect(compactSpy).toHaveBeenCalledTimes(2);
+		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
+		expect(entry?.type === "compaction" ? entry.summary : undefined).toBe("remote summary 2");
+	});
+
+	it("discards an armed summary after a reset boundary and re-summarizes the new branch", async () => {
+		let invocation = 0;
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: `summary ${++invocation}`,
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+		}));
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("armed");
+		sessionManager.appendResetBoundary();
+		appendSummarizableConversation();
+
+		await maintenance.runAutoCompaction("threshold", false, false, false, { triggerContextTokens: THRESHOLD });
+
+		expect(compactSpy).toHaveBeenCalledTimes(2);
+		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
+		expect(entry?.type === "compaction" ? entry.summary : undefined).toBe("summary 2");
+	});
+
+	it("does not start speculative work when async compaction is disabled", () => {
+		maintenance = createMaintenance({ asyncEnabled: false });
+		const compactSpy = vi.spyOn(compactionModule, "compact");
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+
+		expect(maintenance.speculationState).toBe("idle");
+		expect(compactSpy).not.toHaveBeenCalled();
+	});
+
+	it("does not speculate when snapcompact leads the configured methods", () => {
+		// Snapcompact is local and effectively instant — there is no
+		// summarization latency to hide, so no background run may start.
+		const compactSpy = vi.spyOn(compactionModule, "compact");
+		maintenance = createMaintenance({ methodOrder: ["snapcompact", "soft"] });
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+
+		expect(maintenance.speculationState).toBe("idle");
+		expect(compactSpy).not.toHaveBeenCalled();
+	});
+
+	it("discards an armed summary when the real pass resolves to snapcompact", async () => {
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "armed summary",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+		}));
+		const snapSpy = vi.spyOn(snapcompactModule, "compact").mockImplementation(async preparation => ({
+			summary: "snapcompact archive",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+		}));
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("armed");
+		// Method order changed after arming: the real pass now runs the instant
+		// local method, and the stale LLM summary must not override it.
+		maintenanceSettings.override("compaction.methodOrder", ["snapcompact"]);
+
+		await maintenance.runAutoCompaction("threshold", false, false, false, { triggerContextTokens: THRESHOLD });
+
+		expect(snapSpy).toHaveBeenCalledTimes(1);
+		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
+		expect(entry?.type === "compaction" ? entry.summary : undefined).toBe("snapcompact archive");
+		// Exactly the speculation's summarizer call — the pass never re-summarized.
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("clears an armed speculation when manual compaction starts", async () => {
+		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "manual summary",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+		}));
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("armed");
+
+		await maintenance.compact();
+
+		expect(maintenance.speculationState).toBe("idle");
+	});
+
+	it("re-issues the agent's effective system prompt, not the base, on every compaction path", async () => {
+		// A per-turn `before_agent_start` override lives only on the agent
+		// (`agent.state.systemPrompt`); provider-native compaction re-issues the
+		// live request, so it must carry that prompt to share the cached prefix.
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "summary",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+		}));
+		agent.setSystemPrompt(["per-turn override"]);
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("armed");
+		await maintenance.compact();
+
+		// The speculative pass and the manual pass both carried the agent's
+		// prompt; the threshold auto-compaction pass reads the same source.
+		expect(compactSpy).toHaveBeenCalledTimes(2);
+		for (const call of compactSpy.mock.calls) {
+			expect(call[5]?.remoteSystemPrompt).toEqual(["per-turn override"]);
+		}
+	});
+
+	it("defers a threshold pass that jumped past the band, then commits the armed result for free", async () => {
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "grace summary",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+		}));
+
+		// One large turn skipped the pre-threshold band entirely: deferral must
+		// start the speculation itself and keep the pass non-blocking.
+		expect(maintenance.deferThresholdCompactionToSpeculation(THRESHOLD + 1_000, CONTEXT_WINDOW)).toBe(true);
+		expect(maintenance.speculationState).toBe("running");
+		// While the run is in flight, later boundaries inside the band keep deferring.
+		expect(maintenance.deferThresholdCompactionToSpeculation(THRESHOLD + 1_500, CONTEXT_WINDOW)).toBe(true);
+		await waitForState("armed");
+
+		// Armed: deferral ends so the real pass splices the result in immediately.
+		expect(maintenance.deferThresholdCompactionToSpeculation(THRESHOLD + 2_000, CONTEXT_WINDOW)).toBe(false);
+		await maintenance.runAutoCompaction("threshold", false, false, false, {
+			triggerContextTokens: THRESHOLD + 2_000,
+		});
+
+		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
+		expect(entry?.type === "compaction" ? entry.summary : undefined).toBe("grace summary");
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("stops deferring at the grace cap so the blocking pass reclaims context", () => {
+		const compactSpy = vi.spyOn(compactionModule, "compact");
+
+		// Lead floor (8192) bounds the band for a 50K threshold: at the cap the
+		// blocking pass must own the recovery again.
+		const graceCap = THRESHOLD + 8_192;
+		expect(maintenance.deferThresholdCompactionToSpeculation(graceCap, CONTEXT_WINDOW)).toBe(false);
+		expect(maintenance.speculationState).toBe("idle");
+		expect(compactSpy).not.toHaveBeenCalled();
+	});
+
+	it("never defers when async compaction is disabled or a local method leads", () => {
+		maintenance = createMaintenance({ asyncEnabled: false });
+		expect(maintenance.deferThresholdCompactionToSpeculation(THRESHOLD + 1, CONTEXT_WINDOW)).toBe(false);
+		expect(maintenance.speculationState).toBe("idle");
+
+		// Snapcompact is local and effectively instant — blocking on it is fine.
+		maintenance = createMaintenance({ methodOrder: ["snapcompact", "soft"] });
+		expect(maintenance.deferThresholdCompactionToSpeculation(THRESHOLD + 1, CONTEXT_WINDOW)).toBe(false);
+		expect(maintenance.speculationState).toBe("idle");
+	});
+
+	it("discards an armed summary when post-snapshot branch growth prevents recovery headroom", async () => {
+		let invocation = 0;
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: `summary ${++invocation}`,
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+		}));
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("armed");
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+
+		// Post-snapshot branch growth pushes projected tokens above the recovery band (recoveryBand is 40k)
+		const largeText = "large-tail-token ".repeat(45_000);
+		sessionManager.appendMessage(assistantMessage(largeText, model));
+
+		await maintenance.runAutoCompaction("threshold", false, false, false, {
+			triggerContextTokens: THRESHOLD + 40_000,
+		});
+
+		// Stale speculation was discarded and a fresh compaction was run on the new branch
+		expect(compactSpy).toHaveBeenCalledTimes(2);
+		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
+		expect(entry?.type === "compaction" ? entry.summary : undefined).toBe("summary 2");
+	});
+
+	it("discards an armed summary when a persisted custom message prevents recovery headroom", async () => {
+		let invocation = 0;
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: `summary ${++invocation}`,
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+		}));
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("armed");
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+
+		// Custom messages participate in the rebuilt model context and can be large
+		// enough to invalidate the stale projection just like an assistant turn.
+		sessionManager.appendCustomMessageEntry(
+			"skill-prompt",
+			"large-custom-token ".repeat(45_000),
+			true,
+			undefined,
+			"user",
+		);
+
+		await maintenance.runAutoCompaction("threshold", false, false, false, {
+			triggerContextTokens: THRESHOLD + 40_000,
+		});
+
+		// The custom-message growth is included in the projection, so stale
+		// speculation is discarded and fresh compaction runs on the new branch.
+		expect(compactSpy).toHaveBeenCalledTimes(2);
+		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
+		expect(entry?.type === "compaction" ? entry.summary : undefined).toBe("summary 2");
+	});
+
+	it("discards an armed summary when a pending prompt exhausts recovery headroom", async () => {
+		let invocation = 0;
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: `summary ${++invocation}`,
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+		}));
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("armed");
+		sessionManager.appendMessage(userMessage("post-snapshot request"));
+
+		await maintenance.runAutoCompaction("threshold", false, false, false, {
+			triggerContextTokens: THRESHOLD + 45_000,
+			pendingContextTokens: 45_000,
+		});
+
+		expect(compactSpy).toHaveBeenCalledTimes(2);
+		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
+		expect(entry?.type === "compaction" ? entry.summary : undefined).toBe("summary 2");
+	});
+
+	it("discards an armed handoff summary when post-snapshot branch growth prevents recovery headroom", async () => {
+		let handoffInvocation = 0;
+		const generateHandoffDocument = vi.fn(async () => ({
+			document: `handoff plan ${++handoffInvocation}`,
+		}));
+		maintenance = createMaintenance({
+			methodOrder: ["handoff"],
+			generateHandoffDocument,
+		});
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("armed");
+		expect(generateHandoffDocument).toHaveBeenCalledTimes(1);
+
+		// A massive turn is committed after snapshot, blowing past the recovery band
+		const largeText = "large-tail-token ".repeat(45_000);
+		sessionManager.appendMessage(assistantMessage(largeText, model));
+
+		await maintenance.runAutoCompaction("threshold", false, false, false, {
+			triggerContextTokens: THRESHOLD + 40_000,
+		});
+
+		// Stale handoff speculation was discarded and fresh handoff compaction ran
+		expect(generateHandoffDocument).toHaveBeenCalledTimes(2);
+		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
+		expect(entry?.type === "compaction" ? entry.summary : undefined).toContain("handoff plan 2");
+	});
+
+	it("retains and claims an armed handoff summary when post-snapshot growth fits comfortably within recovery band", async () => {
+		let handoffInvocation = 0;
+		const generateHandoffDocument = vi.fn(async () => ({
+			document: `handoff plan ${++handoffInvocation}`,
+		}));
+		maintenance = createMaintenance({
+			methodOrder: ["handoff"],
+			generateHandoffDocument,
+		});
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("armed");
+		expect(generateHandoffDocument).toHaveBeenCalledTimes(1);
+
+		// A modest assistant turn is committed after the snapshot leaf
+		sessionManager.appendMessage(assistantMessage("brief acknowledgment", model));
+
+		await maintenance.runAutoCompaction("threshold", false, false, false, { triggerContextTokens: THRESHOLD });
+
+		// The armed handoff summary is claimed without paying for another LLM generation
+		expect(generateHandoffDocument).toHaveBeenCalledTimes(1);
+		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
+		expect(entry?.type === "compaction" ? entry.summary : undefined).toContain("handoff plan 1");
+		expect(entry?.type === "compaction" ? entry.tokensAfter : undefined).toBe(
+			agent.tokenizer.countMessages(convertToLlm(agent.state.messages), { excludeEncryptedReasoning: true }),
+		);
+	});
+});

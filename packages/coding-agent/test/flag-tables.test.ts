@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { parseArgs, validateToolNames } from "../src/cli/args";
-import { OPTIONAL_VALUE_FLAGS, STRING_VALUE_FLAGS } from "../src/cli/flag-tables";
+import { OPTIONAL_VALUE_FLAGS, restartArgv, STRING_VALUE_FLAGS } from "../src/cli/flag-tables";
 import { CliUsageError } from "../src/cli/usage-error";
 
 /**
@@ -86,10 +86,10 @@ describe("--session-dir", () => {
 });
 
 describe("--tools validation", () => {
-	it("maps search and find to grep and glob", () => {
+	it("maps legacy search to grep and keeps find canonical", () => {
 		const result = parseArgs(["--tools", "search,find,grep"]);
 
-		expect(result.tools).toEqual(["grep", "glob"]);
+		expect(result.tools).toEqual(["grep", "find"]);
 	});
 
 	it("defers unknown-name validation until all session tools are discovered", () => {
@@ -182,5 +182,61 @@ describe("foreign session import flags", () => {
 		expect(codex.fromCodex).toBe(true);
 		expect(codex.messages).toEqual(["continue this session"]);
 		expect(codex.unrecognizedFlags).toEqual([]);
+	});
+});
+
+describe("restartArgv (/restart relaunch argv)", () => {
+	it("keeps configuration flags, drops positionals, and appends --resume", () => {
+		expect(restartArgv(["--model", "gpt-5", "fix the bug", "@notes.md"], "sid")).toEqual([
+			"--model",
+			"gpt-5",
+			"--resume",
+			"sid",
+		]);
+	});
+
+	it("drops every session-source flag, including inline = and value forms", () => {
+		expect(
+			restartArgv(["--resume=old", "-r", "old2", "--continue", "-c", "--fork", "xyz", "--from-claude"], "sid"),
+		).toEqual(["--resume", "sid"]);
+	});
+
+	it("keeps the value of an unknown extension flag instead of dropping it as a positional", () => {
+		expect(restartArgv(["--myext-flag", "val", "--no-tools"], "sid")).toEqual([
+			"--myext-flag",
+			"val",
+			"--no-tools",
+			"--resume",
+			"sid",
+		]);
+	});
+
+	it("treats everything after -- as prompt text and drops it", () => {
+		expect(restartArgv(["--print-thoughts", "--", "--model", "opus"], "sid")).toEqual([
+			"--print-thoughts",
+			"--resume",
+			"sid",
+		]);
+	});
+
+	it("omits --resume for a session that never materialized on disk", () => {
+		expect(restartArgv(["--no-session", "hello"], undefined)).toEqual(["--no-session"]);
+	});
+});
+describe("--system-prompt-template", () => {
+	it("parses a template path without leaking it into the prompt", () => {
+		const result = parseArgs(["--system-prompt-template", "/tmp/SYSTEM_TEMPLATE.md", "hello"]);
+
+		expect(result.systemPromptTemplate).toBe("/tmp/SYSTEM_TEMPLATE.md");
+		expect(result.systemPrompt).toBeUndefined();
+		expect(result.messages).toEqual(["hello"]);
+	});
+
+	it("supports equals syntax and consumes flag-looking values", () => {
+		const result = parseArgs(["--system-prompt-template=--profile", "hello"]);
+
+		expect(result.systemPromptTemplate).toBe("--profile");
+		expect(result.profile).toBeUndefined();
+		expect(result.messages).toEqual(["hello"]);
 	});
 });

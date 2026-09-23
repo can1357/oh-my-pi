@@ -1,0 +1,8 @@
+auth "litellm" {
+	name "LiteLLM"
+	login "api-key" {
+		auth-url "https://docs.litellm.ai/docs/proxy/deploy"
+		instructions "Run LiteLLM proxy (default http://localhost:4000/v1; set LITELLM_BASE_URL to customize it), then copy your master key or virtual key"
+		prompt "Paste your LiteLLM API key (master key or virtual key)" placeholder="sk-..."
+	}
+}

@@ -17,6 +17,7 @@ target/
 
 # Environment
 .env
+.venv
 
 # Editors
 .vscode/
@@ -91,3 +92,5 @@ packages/coding-agent/bench/boot-baseline.json
 /bazel-pi
 /bazel-oh-my-pi
 /.bazelrc.user
+
+.parity/

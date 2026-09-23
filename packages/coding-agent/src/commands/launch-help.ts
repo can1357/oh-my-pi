@@ -1,7 +1,7 @@
 import { Args, type CommandMetadata, Flags } from "@oh-my-pi/pi-utils/cli";
 import { APP_NAME } from "@oh-my-pi/pi-utils/dirs";
+import { CLI_EFFORT_LEVELS, CLI_THINKING_MODES } from "@oh-my-pi/pi-tui/thinking";
 import { SERVICE_TIER_OPENAI_VALUES } from "../config/service-tier";
-import { CLI_EFFORT_LEVELS, CLI_THINKING_MODES } from "../thinking";
 
 export const launchHelp = {
 	description: "AI coding assistant",
@@ -34,6 +34,9 @@ export const launchHelp = {
 		provider: Flags.string({ description: "Provider to use (legacy; prefer --model)" }),
 		"api-key": Flags.string({ description: "API key (defaults to env vars)" }),
 		"system-prompt": Flags.string({ description: "System prompt (default: coding assistant prompt)" }),
+		"system-prompt-template": Flags.string({
+			description: "Handlebars system prompt template (mutually exclusive with --system-prompt)",
+		}),
 		"append-system-prompt": Flags.string({ description: "Append text or file contents to the system prompt" }),
 		"allow-home": Flags.boolean({ description: "Allow starting in ~ without auto-switching to a temp dir" }),
 		profile: Flags.string({ description: "Use an isolated profile for auth, sessions, settings, and caches" }),
@@ -85,7 +88,8 @@ export const launchHelp = {
 			description: "Enable the advisor runtime (passively reviews each turn and injects notes)",
 		}),
 		"external-thinking": Flags.boolean({
-			description: "Use a private scratchpad while disabling supported GPT, Claude, and Gemini reasoning",
+			description:
+				"Use a private scratchpad while disabling supported GPT, Claude, and Gemini reasoning (at your own risk: providers have flagged this request shape as abuse)",
 		}),
 		hook: Flags.string({ description: "Load a hook/extension file (can be used multiple times)", multiple: true }),
 		extension: Flags.string({

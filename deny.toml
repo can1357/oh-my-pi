@@ -1,0 +1,61 @@
+# cargo-deny 0.20.2 policy. Empty targets evaluates every target-specific
+# dependency represented by Cargo.lock; all-features includes optional edges.
+[graph]
+targets = []
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+include-dev = true
+include-build = true
+unused-allowed-license = "deny"
+unused-license-exception = "deny"
+confidence-threshold = 0.8
+# cargo-deny evaluates SPDX expressions existentially across OR and
+# conjunctively across AND: a permissive OR branch may be selected, but every
+# obligation in the selected branch must be allowed.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Zlib",
+]
+# inferno is CDDL-1.0-licensed. Keep this
+# package-scoped: distributions disclose source availability in the aggregate
+# notice rather than globally admitting CDDL dependencies.
+exceptions = [
+    { allow = ["CDDL-1.0"], crate = "inferno@0.12.8" },
+    { allow = ["WTFPL"], crate = "terminfo@0.9.0" },
+    # uluru (via pi-vcs → jj-lib → gix → gix-pack) is MPL-2.0: file-level
+    # copyleft, satisfied by upstream source availability; no obligations
+    # attach to our unmodified use. Keep it package-scoped like inferno.
+    { allow = ["MPL-2.0"], crate = "uluru@3.1.0" },
+]
+
+# tree-sitter-graphql 0.1.0 has no SPDX expression in Cargo.toml. Its packaged
+# LICENSE is MIT; cargo-about pins the exact license-file checksum.
+[[licenses.clarify]]
+crate = "tree-sitter-graphql@0.1.0"
+expression = "MIT"
+license-files = [
+    { path = "LICENSE", hash = 0xda88ff2a },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

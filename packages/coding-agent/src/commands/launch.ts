@@ -4,9 +4,15 @@
 
 import { Command } from "@oh-my-pi/pi-utils/cli";
 import { type Args as ParsedArgs, parseArgs, reportCliUsageError, reportCliWarnings } from "../cli/args";
-import { runRootCommand } from "../main";
 import { prepareAcpTerminalAuthArgs } from "../modes/acp/terminal-auth";
 import { launchHelp } from "./launch-help";
+
+/** Load the session/runtime graph only after the launch command has accepted its argv. */
+async function loadRunRootCommand() {
+	// Startup boundary: a static import makes command construction evaluate the
+	// provider, browser-prelude, codec, and interactive-mode graphs.
+	return (await import("../main")).runRootCommand;
+}
 
 export default class Index extends Command {
 	static description = launchHelp.description;
@@ -30,6 +36,7 @@ export default class Index extends Command {
 			throw error;
 		}
 		reportCliWarnings(parsed);
+		const runRootCommand = await loadRunRootCommand();
 		await runRootCommand(parsed, args);
 	}
 }

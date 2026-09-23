@@ -7,11 +7,10 @@ RUN apt-get update && apt-get install -y curl ca-certificates unzip build-essent
 RUN curl -fsSL https://bun.sh/install | bash
 ENV PATH="/root/.bun/bin:$PATH"
 
-# Install Rust. The natives build defaults to Bazel; this image has no
-# bazelisk and needs only the host addon, so route it through cargo/napi-rs.
+# Install Rust — the host native addon builds through the default
+# cargo/napi-rs backend, so no bazelisk is needed.
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly
-ENV PATH="/root/.cargo/bin:$PATH" \
-    OMP_NATIVE_BUILD_BACKEND=cargo
+ENV PATH="/root/.cargo/bin:$PATH"
 
 # Copy local repo
 WORKDIR /repo

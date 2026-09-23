@@ -17,6 +17,7 @@ import * as AIError from "../error";
 import type { Tool, ToolCall } from "../types";
 import { upgradeJsonSchemaTo202012 } from "./schema/draft";
 import {
+	getTagSelectedUnionBranch,
 	isJsonSchemaValueValid,
 	type JsonSchemaValidationIssue,
 	validateJsonSchemaValue,
@@ -136,12 +137,20 @@ function tryCoerceBooleanToNumber(value: unknown, expectedTypes: string[]): { va
 	return { value: value ? 1 : 0, changed: true };
 }
 
-function tryCoerceString(value: unknown, expectedTypes: string[]): { value: unknown; changed: boolean } {
+function tryCoerceString(
+	value: unknown,
+	expectedTypes: string[],
+	allowLossy: boolean,
+): { value: unknown; changed: boolean } {
 	if (!expectedTypes.includes("string") || typeof value === "string" || value === null || value === undefined) {
 		return { value, changed: false };
 	}
 
 	if (Array.isArray(value) || typeof value === "object") {
+		// JSON.stringify is irreversible (downstream consumers receive encoded
+		// text where they expected structure), so it requires an authoritative
+		// diagnosis — never a union-branch guess.
+		if (!allowLossy) return { value, changed: false };
 		try {
 			const stringified = JSON.stringify(value);
 			if (stringified === undefined) return { value, changed: false };
@@ -158,7 +167,16 @@ function tryCoerceString(value: unknown, expectedTypes: string[]): { value: unkn
 	return { value: String(value), changed: true };
 }
 
-function tryCoerceForExpectedTypes(value: unknown, expectedTypes: string[]): { value: unknown; changed: boolean } {
+/**
+ * Schema-directed value repair for a single type issue. `allowLossy` gates the
+ * irreversible repairs (container→string stringification); lossless repairs
+ * (JSON parsing, boolean spellings, scalar stringification) always apply.
+ */
+function tryCoerceForExpectedTypes(
+	value: unknown,
+	expectedTypes: string[],
+	allowLossy: boolean,
+): { value: unknown; changed: boolean } {
 	if (typeof value === "string") {
 		const parsed = tryParseJsonForTypes(value, expectedTypes);
 		if (parsed.changed) return parsed;
@@ -171,7 +189,7 @@ function tryCoerceForExpectedTypes(value: unknown, expectedTypes: string[]): { v
 	const numericCoercion = tryCoerceBooleanToNumber(value, expectedTypes);
 	if (numericCoercion.changed) return numericCoercion;
 
-	return tryCoerceString(value, expectedTypes);
+	return tryCoerceString(value, expectedTypes, allowLossy);
 }
 
 function tryParseLeadingJsonContainer(value: string): unknown | undefined {
@@ -648,14 +666,17 @@ function deleteAtSegment(node: unknown, segments: string[], depth: number): unkn
  * small and synchronous so validation does not need to compile legacy schemas
  * into another schema language.
  */
-function branchMatchesSchema(branch: unknown, value: unknown): boolean {
-	return isJsonSchemaValueValid(branch, value);
+function branchMatchesSchema(branch: unknown, value: unknown, root: unknown = branch): boolean {
+	return isJsonSchemaValueValid(branch, value, root);
 }
 
 function normalizeOptionalNullsForSchema(
 	schema: unknown,
 	value: unknown,
 	isRoot = true,
+	root: unknown = schema,
+	insideContent = false,
+	speculativeUnion = false,
 ): { value: unknown; changed: boolean } {
 	if (value === null || value === undefined) return { value, changed: false };
 	if (schema === null || typeof schema !== "object") return { value, changed: false };
@@ -666,22 +687,64 @@ function normalizeOptionalNullsForSchema(
 		const branches = schemaObject[keyword];
 		if (!Array.isArray(branches)) return { value, changed: false };
 
-		let changedCandidate: { value: unknown; changed: true } | null = null;
-
+		// Prefer an already matching branch before trying repairs against other
+		// alternatives. Normalize each match independently: a closed sibling can
+		// delete nullable keys and invalidate itself while a later matching branch
+		// still requires that data.
 		for (const branch of branches) {
-			const normalized = normalizeOptionalNullsForSchema(branch, value, isRoot);
-			if (!normalized.changed) continue;
-
-			if (branchMatchesSchema(branch, normalized.value)) {
+			if (!branchMatchesSchema(branch, value, root)) continue;
+			const normalized = normalizeOptionalNullsForSchema(
+				branch,
+				value,
+				isRoot,
+				root,
+				insideContent,
+				speculativeUnion,
+			);
+			if (
+				branchMatchesSchema(branch, normalized.value, root) &&
+				branchMatchesSchema(schemaObject, normalized.value, root)
+			) {
 				return normalized;
-			}
-
-			if (!changedCandidate) {
-				changedCandidate = { value: normalized.value, changed: true };
 			}
 		}
 
-		return changedCandidate ?? { value, changed: false };
+		const selectedBranch = getTagSelectedUnionBranch(branches, value);
+		for (const branch of branches) {
+			// Only unresolved ancestors restrict descendants. A failed branch
+			// with a unique discriminator is still authoritative.
+			const normalized = normalizeOptionalNullsForSchema(
+				branch,
+				value,
+				isRoot,
+				root,
+				insideContent,
+				speculativeUnion || selectedBranch !== branch,
+			);
+			if (!normalized.changed) continue;
+
+			const branchContext: ValidationContext = {
+				kind: "json",
+				json: branch,
+				root,
+				union: schemaObject,
+				unionBranches: branches,
+				speculativeUnion,
+			};
+			const result = validateContext(branchContext, normalized.value);
+			if (result.success && branchMatchesSchema(branch, normalized.value, root)) return normalized;
+
+			// Diagnose against the enclosing union to retain authoritative vs.
+			// speculative issue provenance, but normalize only this candidate's
+			// branch. Failed candidates never escape to a sibling.
+			const repaired = runCoercionPasses(branchContext, normalized.value, result, isRoot, insideContent);
+			if (repaired.result.success && branchMatchesSchema(branch, repaired.args, root)) {
+				return { value: repaired.args, changed: true };
+			}
+		}
+
+		// Never adopt a destructive repair from a branch that still rejects it.
+		return { value, changed: false };
 	};
 
 	const anyOfNormalization = normalizeAnyOfLike("anyOf");
@@ -694,7 +757,14 @@ function normalizeOptionalNullsForSchema(
 		let changed = false;
 		let nextValue: unknown = value;
 		for (const branch of schemaObject.allOf) {
-			const normalized = normalizeOptionalNullsForSchema(branch, nextValue, isRoot);
+			const normalized = normalizeOptionalNullsForSchema(
+				branch,
+				nextValue,
+				isRoot,
+				root,
+				insideContent,
+				speculativeUnion,
+			);
 			if (!normalized.changed) continue;
 			nextValue = normalized.value;
 			changed = true;
@@ -711,7 +781,14 @@ function normalizeOptionalNullsForSchema(
 		let changed = false;
 		let nextValue = value;
 		for (let i = 0; i < value.length; i += 1) {
-			const normalized = normalizeOptionalNullsForSchema(itemSchema, value[i], false);
+			const normalized = normalizeOptionalNullsForSchema(
+				itemSchema,
+				value[i],
+				false,
+				root,
+				insideContent,
+				speculativeUnion,
+			);
 			if (!normalized.changed) continue;
 			if (!changed) {
 				nextValue = [...value];
@@ -747,7 +824,7 @@ function normalizeOptionalNullsForSchema(
 		const currentValue = nextValue[key];
 		const isNullish = currentValue === null || currentValue === "null";
 		const isInvalidEmptyString =
-			currentValue === "" && !required.has(key) && !branchMatchesSchema(propertySchema, currentValue);
+			currentValue === "" && !required.has(key) && !branchMatchesSchema(propertySchema, currentValue, root);
 
 		// Strip null/string "null" from optional fields, and strip empty
 		// strings only when the property schema would reject the explicit value.
@@ -777,7 +854,14 @@ function normalizeOptionalNullsForSchema(
 				continue;
 			}
 		}
-		const normalized = normalizeOptionalNullsForSchema(propertySchema, currentValue, false);
+		const normalized = normalizeOptionalNullsForSchema(
+			propertySchema,
+			currentValue,
+			false,
+			root,
+			insideContent || CONTENT_CARRYING_KEYS.has(key),
+			speculativeUnion,
+		);
 		if (!normalized.changed) continue;
 
 		if (!changed) {
@@ -796,7 +880,9 @@ function normalizeOptionalNullsForSchema(
 	//
 	// At the root level unknown null-valued keys stay intact; the
 	// post-validation `preserveUnknownRootFields` pass re-attaches root extras.
-	if (!isRoot && schemaObject.additionalProperties === false) {
+	// They also stay intact while guessing a union branch because another
+	// candidate may require the nullable data.
+	if (!isRoot && !speculativeUnion && schemaObject.additionalProperties === false) {
 		const knownKeys = new Set(Object.keys(properties));
 		for (const key of Object.keys(nextValue)) {
 			if (knownKeys.has(key)) continue;
@@ -847,26 +933,15 @@ function normalizeEnumStringWhitespace(
 		return normalizeEnumStringWhitespace(resolved, value, root, new Set([...refs, ref]));
 	}
 
-	const branchMatches = (branch: unknown, candidate: unknown): boolean => {
-		if (branch !== null && typeof branch === "object") {
-			const branchRef = (branch as Record<string, unknown>).$ref;
-			if (typeof branchRef === "string" && !refs.has(branchRef)) {
-				const resolved = resolveLocalJsonSchemaRef(root, branchRef);
-				if (resolved !== undefined) return branchMatchesSchema(resolved, candidate);
-			}
-		}
-		return branchMatchesSchema(branch, candidate);
-	};
-
 	const normalizeAnyOfLike = (keyword: "anyOf" | "oneOf"): { value: unknown; changed: boolean } => {
 		const branches = schemaObject[keyword];
 		if (!Array.isArray(branches)) return { value, changed: false };
-		if (branches.some(branch => branchMatches(branch, value))) return { value, changed: false };
+		if (branches.some(branch => branchMatchesSchema(branch, value, root))) return { value, changed: false };
 
 		for (const branch of branches) {
 			const normalized = normalizeEnumStringWhitespace(branch, value, root, refs);
 			if (!normalized.changed) continue;
-			if (branchMatches(branch, normalized.value)) return normalized;
+			if (branchMatchesSchema(branch, normalized.value, root)) return normalized;
 		}
 		return { value, changed: false };
 	};
@@ -1029,7 +1104,11 @@ function trimIdentifierStringLeaf(input: unknown): unknown {
  * key matches {@link IDENTIFIER_STRING_KEYS}. Runs by property name only so it
  * fires uniformly across ArkType and plain JSON Schema tools.
  */
-function normalizeIdentifierStringWhitespace(value: unknown): { value: unknown; changed: boolean } {
+function normalizeIdentifierStringWhitespace(
+	value: unknown,
+	insideContent = false,
+): { value: unknown; changed: boolean } {
+	if (insideContent) return { value, changed: false };
 	if (Array.isArray(value)) {
 		let changed = false;
 		let next = value;
@@ -1360,6 +1439,184 @@ function normalizeSingleStringField(schema: unknown, value: unknown): { value: u
 	return { value, changed: false };
 }
 
+// ============================================================================
+// Flattened array-property normalization (LLM quirk).
+// ============================================================================
+//
+// Some providers (notably Gemini) serialize array arguments using flattened
+// property paths — `questions[0].id`, `questions[0].options[0].label`, ... —
+// instead of a nested `questions` array of objects. The schema sees only
+// unrecognized extra keys and rejects the call. This pass rebuilds the nested
+// structure before the schema ever runs.
+//
+// Conservative by design:
+//   - fires only when at least one key is a well-formed array-index path
+//     (`name[i]`, `name[i].prop`, `name[i][j]`, ...); plain keys and
+//     non-array dotted keys (`a.b`) never match;
+//   - aborts wholesale (returns unchanged) on any shape conflict so genuine
+//     schema mistakes still surface as validation errors;
+//   - array indices are capped so a runaway/hostile payload cannot allocate
+//     oversized arrays.
+// ============================================================================
+
+/** Cap on array indices accepted by the flattened-path parser. */
+const MAX_FLATTENED_INDEX = 100_000;
+
+interface FlattenedPathStep {
+	kind: "prop" | "index";
+	/** For `kind: "prop"` — the property name. */
+	name?: string;
+	/** For `kind: "index"` — the resolved array index. */
+	index: number;
+}
+
+interface ParsedFlattenedPath {
+	steps: FlattenedPathStep[];
+}
+
+const FLATTENED_IDENT_RE = /^[A-Za-z_$][A-Za-z0-9_$]*/;
+const FLATTENED_INDEX_RE = /^\[(\d+)\]/;
+
+/**
+ * Parse a single flattened array-path key into build steps. Returns `null` for
+ * keys that are not flattened array paths:
+ *   - no `[<digits>]` index anywhere (`questions`, `a.b`),
+ *   - a malformed or non-numeric index (`foo[bar]`),
+ *   - an index-first path (`[0].x`),
+ *   - an index outside the safety cap.
+ */
+function parseFlattenedPath(key: string): ParsedFlattenedPath | null {
+	if (key.length === 0) return null;
+	const steps: FlattenedPathStep[] = [];
+	// The path must start with a property name so `[0].x` / `[0]` are left alone.
+	const first = FLATTENED_IDENT_RE.exec(key);
+	if (!first) return null;
+	steps.push({ kind: "prop", name: first[0], index: 0 });
+	let pos = first[0].length;
+	let sawIndex = false;
+	while (pos < key.length) {
+		if (key[pos] === ".") {
+			pos++;
+			const m = FLATTENED_IDENT_RE.exec(key.slice(pos));
+			if (!m || m[0].length === 0) return null;
+			steps.push({ kind: "prop", name: m[0], index: 0 });
+			pos += m[0].length;
+			continue;
+		}
+		if (key[pos] === "[") {
+			const m = FLATTENED_INDEX_RE.exec(key.slice(pos));
+			if (!m) return null;
+			const index = Number(m[1]);
+			if (!Number.isSafeInteger(index) || index < 0 || index > MAX_FLATTENED_INDEX) return null;
+			steps.push({ kind: "index", index });
+			sawIndex = true;
+			pos += m[0].length;
+			continue;
+		}
+		// Any other character (lone `[foo]`, whitespace, invalid ident chars) is
+		// not a flattened array path.
+		return null;
+	}
+	if (!sawIndex) return null;
+	return { steps };
+}
+
+/**
+ * Write a leaf value into `root` along `steps`, creating intermediate objects
+ * and arrays as needed. Returns `false` (and leaves `root` in an undefined
+ * partial state — the caller aborts the whole normalization on that) when an
+ * existing node has a shape that contradicts the path.
+ */
+function buildFlattenedPath(root: Record<string, unknown>, steps: FlattenedPathStep[], value: unknown): boolean {
+	let node: unknown = root;
+	for (let i = 0; i < steps.length - 1; i++) {
+		const step = steps[i];
+		const nextIsArray = steps[i + 1].kind === "index";
+		if (step.kind === "prop") {
+			const obj = node as Record<string, unknown>;
+			if (obj === null || typeof obj !== "object" || Array.isArray(obj)) return false;
+			const existing = Object.hasOwn(obj, step.name!) ? obj[step.name!] : undefined;
+			let child: unknown;
+			if (existing === undefined && !Object.hasOwn(obj, step.name!)) {
+				child = nextIsArray ? [] : {};
+			} else {
+				if (Array.isArray(existing) !== nextIsArray) return false;
+				child = existing;
+			}
+			// `defineProperty` so a decoded `__proto__` step becomes an own property.
+			Object.defineProperty(obj, step.name!, {
+				value: child,
+				writable: true,
+				enumerable: true,
+				configurable: true,
+			});
+			node = child;
+			continue;
+		}
+		const arr = node;
+		if (!Array.isArray(arr)) return false;
+		while (arr.length <= step.index) arr.push(undefined);
+		let child = arr[step.index];
+		if (child === undefined) {
+			child = nextIsArray ? [] : {};
+			arr[step.index] = child;
+		} else {
+			if (Array.isArray(child)) {
+				if (!nextIsArray) return false;
+			} else if (typeof child !== "object" || child === null) {
+				return false;
+			} else if (nextIsArray) {
+				return false;
+			}
+		}
+		node = child;
+	}
+	const last = steps[steps.length - 1];
+	if (last.kind === "prop") {
+		const obj = node as Record<string, unknown>;
+		if (obj === null || typeof obj !== "object" || Array.isArray(obj)) return false;
+		Object.defineProperty(obj, last.name!, {
+			value,
+			writable: true,
+			enumerable: true,
+			configurable: true,
+		});
+	} else {
+		const arr = node;
+		if (!Array.isArray(arr)) return false;
+		while (arr.length <= last.index) arr.push(undefined);
+		arr[last.index] = value;
+	}
+	return true;
+}
+
+/**
+ * Rebuild nested arrays/objects from LLM-emitted flattened property paths.
+ * See https://github.com/can1357/oh-my-pi/issues/8886.
+ */
+function normalizeFlattenedArrayProperties(value: unknown): { value: unknown; changed: boolean } {
+	if (!isPlainRecord(value)) return { value, changed: false };
+	const source = value as Record<string, unknown>;
+	const out: Record<string, unknown> = {};
+	let changed = false;
+	for (const [key, entry] of Object.entries(source)) {
+		const parsed = parseFlattenedPath(key);
+		if (!parsed) {
+			// Preserve non-flattened sibling keys. A plain key colliding with an
+			// already-built path is ambiguous — bail to the safer failure path so
+			// genuine schema mistakes still surface.
+			if (Object.hasOwn(out, key)) return { value, changed: false };
+			Object.defineProperty(out, key, { value: entry, writable: true, enumerable: true, configurable: true });
+			continue;
+		}
+		if (entry === undefined) continue;
+		if (!buildFlattenedPath(out, parsed.steps, entry)) return { value, changed: false };
+		changed = true;
+	}
+	if (!changed) return { value, changed: false };
+	return { value: out, changed: true };
+}
+
 // Validation issue → coercion bridge
 
 interface FlatIssue {
@@ -1398,9 +1655,11 @@ function coerceArgsFromIssues(args: unknown, issues: FlatIssue[]): { value: unkn
 	// a type coercion actually needs to write into a leaf.
 	let owned = false;
 	let nextArgs: unknown = args;
-
 	for (const issue of issues) {
+		// Failed union branches still contribute schema-directed type repairs.
+		// Container-to-string conversion remains enabled for string branches.
 		if (issue.keyword === "unrecognized") {
+			if (issue.unionBranch) continue;
 			const previous = nextArgs;
 			nextArgs = deleteValueAtPointer(nextArgs, issue.instancePath);
 			if (nextArgs !== previous) changed = true;
@@ -1410,7 +1669,7 @@ function coerceArgsFromIssues(args: unknown, issues: FlatIssue[]): { value: unkn
 		if (issue.expectedTypes.length === 0) continue;
 
 		const currentValue = getValueAtPointer(nextArgs, issue.instancePath);
-		const result = tryCoerceForExpectedTypes(currentValue, issue.expectedTypes);
+		const result = tryCoerceForExpectedTypes(currentValue, issue.expectedTypes, true);
 		let coercedValue = result.changed ? result.value : undefined;
 		if (
 			coercedValue === undefined &&
@@ -1453,6 +1712,10 @@ type ValidationContext =
 	| {
 			kind: "json";
 			json: Record<string, unknown>;
+			root?: unknown;
+			union?: Record<string, unknown>;
+			unionBranches?: readonly unknown[];
+			speculativeUnion?: boolean;
 	  };
 
 /**
@@ -1483,9 +1746,12 @@ function preserveUnknownRootFields(input: unknown, parsed: unknown): unknown {
 	return { ...input, ...parsed };
 }
 
-function flattenJsonSchemaIssues(issues: ReadonlyArray<JsonSchemaValidationIssue>): FlatIssue[] {
+function flattenJsonSchemaIssues(
+	issues: ReadonlyArray<JsonSchemaValidationIssue>,
+	speculativeUnion = false,
+): FlatIssue[] {
 	return issues.map(issue => {
-		const unionBranch = issue.fromUnionBranch === true;
+		const unionBranch = speculativeUnion || issue.fromUnionBranch === true;
 		if (issue.keyword === "additionalProperties") {
 			return {
 				keyword: "unrecognized",
@@ -1526,11 +1792,11 @@ function validateContext(ctx: ValidationContext, value: unknown): ContextValidat
 		};
 	}
 
-	const result = validateJsonSchemaValue(ctx.json, value);
+	const result = validateJsonSchemaValue(ctx.union ?? ctx.json, value, ctx.root);
 	if (result.success) return { success: true, value };
 	return {
 		success: false,
-		flatIssues: flattenJsonSchemaIssues(result.issues),
+		flatIssues: flattenJsonSchemaIssues(result.issues, ctx.speculativeUnion),
 		messages: result.issues.map(issue => `  - ${formatIssuePath(issue.path)}: ${issue.message}`),
 	};
 }
@@ -1765,6 +2031,16 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): ToolCall[
 		changed = true;
 	}
 
+	// Rebuild nested arrays/objects from flattened property paths some
+	// providers emit instead of real arrays (`questions[0].id`, ...). Runs
+	// after key unwrapping but before any schema pass so the validator sees the
+	// structurally correct payload.
+	const flattenedArgs = normalizeFlattenedArrayProperties(normalizedArgs);
+	if (flattenedArgs.changed) {
+		normalizedArgs = flattenedArgs.value;
+		changed = true;
+	}
+
 	const initialNormalization = normalizeOptionalNullsForSchema(json, normalizedArgs);
 	if (initialNormalization.changed) {
 		normalizedArgs = initialNormalization.value;
@@ -1858,27 +2134,28 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): ToolCall[
 }
 
 /**
- * Runs up to {@link MAX_COERCION_PASSES} issue-driven coercion rounds,
- * re-applying the schema normalizations after each round because a coercion
- * may unwrap JSON-string containers and expose fields the pre-validation
- * passes could not reach.
+ * Runs up to {@link MAX_COERCION_PASSES} repair rounds, re-applying the schema
+ * normalizations even when issue-driven coercion cannot change the value.
+ * Later passes (such as identifier trimming) can make an earlier branch-local
+ * repair viable. Stop once neither coercion nor normalization makes progress.
  */
 function runCoercionPasses(
 	ctx: ValidationContext,
 	args: unknown,
 	initial: ContextValidationResult,
+	isRoot = true,
+	insideContent = false,
 ): { args: unknown; result: ContextValidationResult; changed: boolean } {
 	const { json } = ctx;
+	const root = ctx.kind === "json" ? (ctx.root ?? json) : json;
 	let normalizedArgs = args;
 	let result = initial;
 	let changed = false;
 	for (let pass = 0; pass < MAX_COERCION_PASSES; pass += 1) {
 		if (result.success) break;
 		const coercion = coerceArgsFromIssues(normalizedArgs, result.flatIssues);
-		if (!coercion.changed) break;
-
+		let passChanged = coercion.changed;
 		normalizedArgs = coercion.value;
-		changed = true;
 
 		// `coerceArgsFromIssues` may have just parsed a JSON-string container at
 		// the root or a nested field, exposing double-encoded keys the initial
@@ -1887,21 +2164,36 @@ function runCoercionPasses(
 		const keyNormalizationPass = normalizeDoubleEncodedKeys(normalizedArgs);
 		if (keyNormalizationPass.changed) {
 			normalizedArgs = keyNormalizationPass.value;
+			passChanged = true;
 		}
 
-		const nullNormalization = normalizeOptionalNullsForSchema(json, normalizedArgs);
+		const speculativeUnion =
+			ctx.kind === "json" &&
+			(ctx.speculativeUnion === true ||
+				(ctx.unionBranches !== undefined && getTagSelectedUnionBranch(ctx.unionBranches, normalizedArgs) !== json));
+		const nullNormalization = normalizeOptionalNullsForSchema(
+			json,
+			normalizedArgs,
+			isRoot,
+			root,
+			insideContent,
+			speculativeUnion,
+		);
 		if (nullNormalization.changed) {
 			normalizedArgs = nullNormalization.value;
+			passChanged = true;
 		}
 
-		const enumStringNormalizationPass = normalizeEnumStringWhitespace(json, normalizedArgs);
+		const enumStringNormalizationPass = normalizeEnumStringWhitespace(json, normalizedArgs, root);
 		if (enumStringNormalizationPass.changed) {
 			normalizedArgs = enumStringNormalizationPass.value;
+			passChanged = true;
 		}
 
-		const identifierStringNormalizationPass = normalizeIdentifierStringWhitespace(normalizedArgs);
+		const identifierStringNormalizationPass = normalizeIdentifierStringWhitespace(normalizedArgs, insideContent);
 		if (identifierStringNormalizationPass.changed) {
 			normalizedArgs = identifierStringNormalizationPass.value;
+			passChanged = true;
 		}
 
 		// Re-run the union-string coercion because `coerceArgsFromIssues` may
@@ -1911,21 +2203,31 @@ function runCoercionPasses(
 		const stringEncodedArrayNormPass = normalizeStringEncodedArrayUnions(json, normalizedArgs);
 		if (stringEncodedArrayNormPass.changed) {
 			normalizedArgs = stringEncodedArrayNormPass.value;
+			passChanged = true;
 		}
 
-		const identifierStringNormalizationAfterArrayPass = normalizeIdentifierStringWhitespace(normalizedArgs);
+		const identifierStringNormalizationAfterArrayPass = normalizeIdentifierStringWhitespace(
+			normalizedArgs,
+			insideContent,
+		);
 		if (identifierStringNormalizationAfterArrayPass.changed) {
 			normalizedArgs = identifierStringNormalizationAfterArrayPass.value;
+			passChanged = true;
 		}
 
 		// Re-run single-string remap: `coerceArgsFromIssues` may have just
 		// unwrapped a JSON-stringified root object, exposing a mislabelled lone
 		// string field the initial pre-pass could not see.
-		const singleStringNormPass = normalizeSingleStringField(json, normalizedArgs);
-		if (singleStringNormPass.changed) {
-			normalizedArgs = singleStringNormPass.value;
+		if (isRoot && !(ctx.kind === "json" && ctx.union)) {
+			const singleStringNormPass = normalizeSingleStringField(json, normalizedArgs);
+			if (singleStringNormPass.changed) {
+				normalizedArgs = singleStringNormPass.value;
+				passChanged = true;
+			}
 		}
 
+		if (!passChanged) break;
+		changed = true;
 		result = validateContext(ctx, normalizedArgs);
 	}
 	return { args: normalizedArgs, result, changed };

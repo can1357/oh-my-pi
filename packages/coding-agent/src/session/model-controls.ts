@@ -7,14 +7,11 @@ import type {
 	ServiceTierFamily,
 	ThinkingMode,
 } from "@oh-my-pi/pi-ai";
+import { Effort, realizesPriorityServiceTier, resolveModelServiceTier, serviceTierFamily } from "@oh-my-pi/pi-ai";
 import {
 	clearAnthropicFastModeFallback,
-	Effort,
 	isAnthropicFastModeFallbackDisabled,
-	realizesPriorityServiceTier,
-	resolveModelServiceTier,
-	serviceTierFamily,
-} from "@oh-my-pi/pi-ai";
+} from "@oh-my-pi/pi-ai/providers/anthropic-state";
 import { isFireworksFastModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
@@ -30,7 +27,8 @@ import {
 } from "../config/model-resolver";
 import { getKnownRoleIds } from "../config/model-roles";
 import type { Settings } from "../config/settings";
-import { containsUltrathink } from "../modes/ultrathink";
+import { containsMagicKeyword } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
+import type { MagicKeywordId } from "../modes/magic-keywords";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -41,8 +39,8 @@ import {
 	resolveThinkingModeForModel,
 	shouldDisableReasoning,
 	toReasoningEffort,
-} from "../thinking";
-import type { EditMode } from "../utils/edit-mode";
+} from "@oh-my-pi/pi-tui/thinking";
+import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ModelCycleResult, ResolvedRoleModel, RoleModelCycle, RoleModelCycleResult } from "./agent-session-types";
 import { formatRoleModelValue, resolveRoleModelFull } from "./role-models";
@@ -64,7 +62,7 @@ export interface ModelControlsHost {
 	setModelWithProviderSessionReset(model: Model): Promise<void>;
 	clearActiveRetryFallback(): void;
 	clearInheritedProviderPromptCacheKey(): void;
-	magicKeywordEnabled(keyword: "orchestrate" | "ultrathink" | "workflow"): boolean;
+	magicKeywordEnabled(keyword: MagicKeywordId): boolean;
 	emit(event: AgentSessionEvent): void;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
@@ -163,6 +161,16 @@ export class ModelControls {
 	/** Models explicitly scoped to the session's cycle command. */
 	get scopedModels(): ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }> {
 		return this.#scopedModels;
+	}
+
+	/**
+	 * Replace the Ctrl+P cycle scope. Startup resolves the scope before background
+	 * provider discovery runs; the CLI re-pushes the fuller list here once discovery
+	 * completes so a newly-discovered `enabledModels` model joins the cycle and the
+	 * scoped `/models` picker (issue #9220).
+	 */
+	setScopedModels(scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>): void {
+		this.#scopedModels = scopedModels;
 	}
 
 	/** Live per-provider-family service-tier selection. */
@@ -671,7 +679,7 @@ export class ModelControls {
 		if (getSupportedEfforts(model).length === 0) return;
 
 		let resolved: Effort | undefined;
-		if (this.#host.magicKeywordEnabled("ultrathink") && containsUltrathink(promptText)) {
+		if (this.#host.magicKeywordEnabled("ultrathink") && containsMagicKeyword(promptText, "ultrathink")) {
 			// The user explicitly asked for maximum thinking; bypass the classifier
 			// (and the `providers.autoThinkingMaxEffort` ceiling) and jump straight
 			// to the highest supported level for this model.
@@ -679,6 +687,10 @@ export class ModelControls {
 		} else {
 			const controller = new AbortController();
 			const timer = setTimeout(() => controller.abort(), ModelControls.#AUTO_THINKING_TIMEOUT_MS);
+			const usageOwner = {
+				sessionId: this.#host.sessionManager.getSessionId(),
+				parentId: this.#host.sessionManager.getLeafId(),
+			};
 			try {
 				resolved = await classifyDifficulty(promptText, {
 					settings: this.#host.settings,
@@ -687,6 +699,13 @@ export class ModelControls {
 					sessionId: this.#host.sessionId(),
 					signal: controller.signal,
 					metadataResolver: provider => this.#host.agent.metadataForProvider(provider),
+					onUsage: usage => {
+						const entryId = this.#host.sessionManager.appendModelUsage(
+							{ purpose: "auto-thinking", ...usage },
+							usageOwner,
+						);
+						if (entryId) usageOwner.parentId = entryId;
+					},
 				});
 			} catch (error) {
 				logger.debug("auto-thinking: classification failed; using fallback level", {

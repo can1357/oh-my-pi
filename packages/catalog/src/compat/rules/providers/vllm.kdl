@@ -1,0 +1,12 @@
+// Provider-wire compat for "vllm".
+
+provider "vllm" {
+	default-model "gpt-oss-20b"
+	env "VLLM_API_KEY"
+	discovery label="vLLM" allow-unauthenticated=#true
+
+	class "qwen" {
+		// Replaces the vLLM Qwen thinking-format branch.
+		thinking-format "qwen-chat-template"
+	}
+}

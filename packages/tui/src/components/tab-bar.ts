@@ -74,6 +74,17 @@ export class TabBar implements Component {
 		this.#theme = theme;
 		this.#activeIndex = initialIndex;
 	}
+	/** Return tab identities and active-tab state for debug inspection. */
+	debugState(): Record<string, unknown> {
+		const active = this.#tabs[this.#activeIndex];
+		return {
+			label: this.#label,
+			tabs: this.#tabs.map(tab => ({ id: tab.id, label: tab.label })),
+			activeIndex: this.#tabs.length > 0 ? this.#activeIndex : -1,
+			activeTabId: active?.id ?? null,
+			activeTabLabel: active?.label ?? null,
+		};
+	}
 
 	/** Get the currently active tab */
 	getActiveTab(): Tab {

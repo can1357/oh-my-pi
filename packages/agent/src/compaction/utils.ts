@@ -208,13 +208,20 @@ export function truncateToolResultForSummary(text: string): string {
 	return `${text.slice(0, TOOL_RESULT_MAX_CHARS)}\n\n[... ${truncatedChars} more characters truncated]`;
 }
 
+const SUMMARY_BOUNDARY_TAG_RE = /<\s*\/?\s*(?:conversation|previous-summary)\s*>/gi;
+
+/** Keep untrusted summary input from closing or impersonating harness-owned boundaries. */
+export function escapeSummaryBoundaryTags(text: string): string {
+	return text.replace(SUMMARY_BOUNDARY_TAG_RE, tag => `&lt;${tag.slice(1)}`);
+}
+
 /**
  * Serialize LLM messages as plain summary input without provider control tokens.
  */
 export function serializeConversationForSummary(messages: Message[], dialect?: Dialect): string {
 	const conversation = serializeConversation(messages, dialect);
-	if (dialect !== "harmony") return conversation;
-	return escapeHarmonyControlTokens(conversation);
+	const escaped = dialect === "harmony" ? escapeHarmonyControlTokens(conversation) : conversation;
+	return escapeSummaryBoundaryTags(escaped);
 }
 
 /**

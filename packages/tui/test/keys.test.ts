@@ -206,10 +206,15 @@ describe("Raw 0x08 backspace disambiguation", () => {
 		"STY",
 		"ZELLIJ",
 		"HERDR_ENV",
+		"HERDR_PANE_ID",
+		"HERDR_TAB_ID",
+		"HERDR_WORKSPACE_ID",
 		"TERM",
 		"CMUX_WORKSPACE_ID",
 		"CMUX_SURFACE_ID",
 		"CMUX_REMOTE_TRANSPORT",
+		"WMUX",
+		"WMUX_SURFACE_ID",
 	] as const;
 	function withEnv(overrides: Partial<Record<(typeof envKeys)[number], string>>, run: () => void): void {
 		const saved: Record<string, string | undefined> = {};

@@ -2,9 +2,9 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import * as SessionSelector from "@oh-my-pi/pi-coding-agent/modes/components/session-selector";
+import * as SessionSelector from "@oh-my-pi/pi-tui/overlays/session-selector";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -17,11 +17,18 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-function createResumeContext(opts: { flushFails?: boolean; sourceCwd?: string } = {}) {
+type ResumeSwitchOptions = {
+	onCwdChange?: (newCwd: string, previousCwd: string) => Promise<boolean>;
+};
+
+function createResumeContext(opts: { flushFails?: boolean; sourceCwd?: string; previousSessionFile?: string } = {}) {
 	const sourceCwd = opts.sourceCwd ?? "/tmp/source-project";
 	const state = { cwd: sourceCwd };
-	const switchSession = vi.fn(async () => true);
-	const applyCwdChange = vi.fn(async () => {});
+	const switchSession = vi.fn(async (_sessionPath: string, _options?: ResumeSwitchOptions) => true);
+	const applyCwdChange = vi.fn(async () => true);
+	const moveTo = vi.fn(async (cwd: string) => {
+		state.cwd = cwd;
+	});
 	const editor = {};
 	let selector: SessionSelector.SessionSelectorComponent | undefined;
 	const hide = vi.fn();
@@ -31,8 +38,15 @@ function createResumeContext(opts: { flushFails?: boolean; sourceCwd?: string } 
 	});
 	const ctx = {
 		session: { switchSession },
-		sessionManager: { getCwd: () => state.cwd, getSessionDir: () => "/tmp" },
+		sessionManager: {
+			getCwd: () => state.cwd,
+			getSessionDir: () => "/tmp",
+			getSessionFile: () => opts.previousSessionFile,
+			moveTo,
+		},
 		settings: { flush },
+		prepareSessionSwitch: vi.fn(async () => {}),
+		resetObserverRegistry: vi.fn(),
 		clearTransientSessionUi: vi.fn(),
 		applyCwdChange,
 		updateEditorBorderColor: vi.fn(),
@@ -53,7 +67,18 @@ function createResumeContext(opts: { flushFails?: boolean; sourceCwd?: string } 
 		editor,
 		editorContainer: { children: [editor], clear: vi.fn(), addChild: vi.fn() },
 	} as unknown as InteractiveModeContext;
-	return { ctx, switchSession, applyCwdChange, state, editor, hide, setFocus, flush, getSelector: () => selector };
+	return {
+		ctx,
+		switchSession,
+		applyCwdChange,
+		moveTo,
+		state,
+		editor,
+		hide,
+		setFocus,
+		flush,
+		getSelector: () => selector,
+	};
 }
 
 describe("SelectorController.handleResumeSession preflight flush", () => {
@@ -76,9 +101,9 @@ describe("SelectorController.handleResumeSession preflight flush", () => {
 		try {
 			const { ctx, switchSession, applyCwdChange, state } = createResumeContext({ sourceCwd: tmpDir });
 			const targetCwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-resume-target-"));
-			switchSession.mockImplementation(async () => {
+			switchSession.mockImplementation(async (_sessionPath, options) => {
 				state.cwd = targetCwd;
-				return true;
+				return options?.onCwdChange ? options.onCwdChange(targetCwd, tmpDir) : true;
 			});
 			const controller = new SelectorController(ctx);
 
@@ -87,7 +112,10 @@ describe("SelectorController.handleResumeSession preflight flush", () => {
 			expect(result).toBe(true);
 			expect(ctx.settings.flush).toHaveBeenCalled();
 			expect(ctx.clearTransientSessionUi).toHaveBeenCalled();
-			expect(switchSession).toHaveBeenCalledWith("/tmp/some-session.jsonl");
+			expect(switchSession).toHaveBeenCalledWith(
+				"/tmp/some-session.jsonl",
+				expect.objectContaining({ onCwdChange: expect.any(Function) }),
+			);
 			expect(applyCwdChange).toHaveBeenCalledWith(targetCwd);
 			expect(ctx.showError).not.toHaveBeenCalled();
 			expect(ctx.showStatus).toHaveBeenCalled();
@@ -98,14 +126,71 @@ describe("SelectorController.handleResumeSession preflight flush", () => {
 		}
 	});
 
+	it("restores an in-memory source when cwd application fails", async () => {
+		const sourceCwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-resume-memory-source-"));
+		const targetCwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-resume-memory-target-"));
+		try {
+			const { ctx, switchSession, applyCwdChange, moveTo, state } = createResumeContext({ sourceCwd });
+			applyCwdChange.mockResolvedValue(false);
+			switchSession.mockImplementation(async (_sessionPath, options) => {
+				state.cwd = targetCwd;
+				const applied = options?.onCwdChange ? await options.onCwdChange(targetCwd, sourceCwd) : true;
+				if (!applied) state.cwd = sourceCwd;
+				return applied;
+			});
+			const controller = new SelectorController(ctx);
+
+			const result = await controller.handleResumeSession("/tmp/memory-session.jsonl");
+
+			expect(result).toBe(false);
+			expect(state.cwd).toBe(sourceCwd);
+			expect(moveTo).not.toHaveBeenCalled();
+			expect(ctx.clearTransientSessionUi).not.toHaveBeenCalled();
+			expect(ctx.showStatus).not.toHaveBeenCalled();
+		} finally {
+			await fs.rm(sourceCwd, { recursive: true, force: true });
+			await fs.rm(targetCwd, { recursive: true, force: true });
+		}
+	});
+
+	it("does not retry a cancelled rollback switch", async () => {
+		const sourceCwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-resume-cancel-source-"));
+		const targetCwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-resume-cancel-target-"));
+		try {
+			const { ctx, switchSession, applyCwdChange, moveTo, state } = createResumeContext({
+				sourceCwd,
+				previousSessionFile: "/tmp/source-session.jsonl",
+			});
+			applyCwdChange.mockResolvedValue(false);
+			switchSession.mockImplementation(async (sessionPath, options) => {
+				if (sessionPath === "/tmp/source-session.jsonl") return false;
+				state.cwd = targetCwd;
+				const applied = options?.onCwdChange ? await options.onCwdChange(targetCwd, sourceCwd) : true;
+				if (!applied) state.cwd = sourceCwd;
+				return applied;
+			});
+			const controller = new SelectorController(ctx);
+
+			const result = await controller.handleResumeSession("/tmp/target-session.jsonl");
+
+			expect(result).toBe(false);
+			expect(switchSession).toHaveBeenCalledTimes(1);
+			expect(moveTo).not.toHaveBeenCalled();
+			expect(state.cwd).toBe(sourceCwd);
+		} finally {
+			await fs.rm(sourceCwd, { recursive: true, force: true });
+			await fs.rm(targetCwd, { recursive: true, force: true });
+		}
+	});
+
 	it("skips flush when settingsFlushed option is true", async () => {
 		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-resume-preflight-skip-"));
 		try {
 			const { ctx, switchSession, state } = createResumeContext({ sourceCwd: tmpDir });
 			const targetCwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-resume-target-skip-"));
-			switchSession.mockImplementation(async () => {
+			switchSession.mockImplementation(async (_sessionPath, options) => {
 				state.cwd = targetCwd;
-				return true;
+				return options?.onCwdChange ? options.onCwdChange(targetCwd, tmpDir) : true;
 			});
 			const controller = new SelectorController(ctx);
 
@@ -133,7 +218,7 @@ describe("SelectorController.handleResumeSession preflight flush", () => {
 			firstMessage: "first",
 			allMessagesText: "first",
 		};
-		vi.spyOn(SessionManager, "list").mockResolvedValue([session]);
+		vi.spyOn(SessionManager, "listForPicker").mockResolvedValue([session]);
 		const OriginalSelector = SessionSelector.SessionSelectorComponent;
 		const selectionPromises: Promise<void>[] = [];
 		vi.spyOn(SessionSelector, "SessionSelectorComponent").mockImplementation(
@@ -142,9 +227,9 @@ describe("SelectorController.handleResumeSession preflight flush", () => {
 				onSelect: (session: SessionInfo) => void,
 				onCancel: () => void,
 				onExit: () => void,
-				options: SessionSelector.SessionSelectorOptions,
+				options: SessionSelector.SessionSelectorOptions<SessionInfo>,
 			) =>
-				new OriginalSelector(
+				new OriginalSelector<SessionInfo>(
 					sessions,
 					selected => {
 						selectionPromises.push(onSelect(selected) as unknown as Promise<void>);
@@ -189,7 +274,7 @@ describe("SelectorController.handleResumeSession preflight flush", () => {
 			firstMessage: "first",
 			allMessagesText: "first",
 		};
-		vi.spyOn(SessionManager, "list").mockResolvedValue([session]);
+		vi.spyOn(SessionManager, "listForPicker").mockResolvedValue([session]);
 		const OriginalSelector = SessionSelector.SessionSelectorComponent;
 		let selectionPromise: Promise<void> | undefined;
 		vi.spyOn(SessionSelector, "SessionSelectorComponent").mockImplementation(
@@ -198,9 +283,9 @@ describe("SelectorController.handleResumeSession preflight flush", () => {
 				onSelect: (session: SessionInfo) => void,
 				onCancel: () => void,
 				onExit: () => void,
-				options: SessionSelector.SessionSelectorOptions,
+				options: SessionSelector.SessionSelectorOptions<SessionInfo>,
 			) =>
-				new OriginalSelector(
+				new OriginalSelector<SessionInfo>(
 					sessions,
 					selected => {
 						selectionPromise = onSelect(selected) as unknown as Promise<void>;
@@ -224,7 +309,10 @@ describe("SelectorController.handleResumeSession preflight flush", () => {
 
 		expect(ctx.showError).toHaveBeenCalledWith("switch failed");
 		expect(ctx.settings.flush).toHaveBeenCalledTimes(1);
-		expect(switchSession).toHaveBeenCalledWith(session.path);
+		expect(switchSession).toHaveBeenCalledWith(
+			session.path,
+			expect.objectContaining({ onCwdChange: expect.any(Function) }),
+		);
 		expect(hide).toHaveBeenCalledTimes(1);
 		expect(setFocus).toHaveBeenLastCalledWith(editor);
 	});

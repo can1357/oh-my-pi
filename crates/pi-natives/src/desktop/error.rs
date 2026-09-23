@@ -50,6 +50,7 @@ impl DesktopError {
 		Self { code, message: message.into() }
 	}
 
+	#[cfg_attr(windows, allow(dead_code, reason = "used by unix desktop backends"))]
 	pub(crate) fn permission_denied(message: impl Into<String>) -> Self {
 		Self::new(ErrorCode::PermissionDenied, message)
 	}

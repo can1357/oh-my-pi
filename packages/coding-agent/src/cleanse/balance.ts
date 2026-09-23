@@ -1,4 +1,4 @@
-import type { CleanseAssignment, CleanseDiagnostic, CleanseFileIssues, CleanseSeverity } from "./types";
+import type { CleanseDiagnostic, CleanseFileIssues, CleanseSeverity } from "./types";
 
 const SEVERITY_WEIGHT: Record<CleanseSeverity, number> = {
 	error: 5,
@@ -31,42 +31,6 @@ export function groupDiagnosticsByFile(diagnostics: readonly CleanseDiagnostic[]
 			weight: entries.reduce((sum, diagnostic) => sum + diagnosticWeight(diagnostic), 0),
 		}))
 		.sort((left, right) => right.weight - left.weight || (left.file ?? "").localeCompare(right.file ?? ""));
-}
-
-/** Balance whole-file workloads with longest-processing-time bin packing. */
-export function balanceDiagnostics(diagnostics: readonly CleanseDiagnostic[], maxAgents: number): CleanseAssignment[] {
-	if (!Number.isInteger(maxAgents) || maxAgents <= 0) {
-		throw new Error("maxAgents must be a positive integer");
-	}
-	const groups = groupDiagnosticsByFile(diagnostics);
-	if (groups.length === 0) return [];
-	const count = Math.min(maxAgents, groups.length);
-	const assignments: CleanseAssignment[] = Array.from({ length: count }, (_, index) => ({
-		index,
-		groups: [],
-		weight: 0,
-	}));
-	for (const group of groups) {
-		let lightest = assignments[0];
-		for (let index = 1; index < assignments.length; index += 1) {
-			const candidate = assignments[index];
-			if (
-				candidate.weight < lightest.weight ||
-				(candidate.weight === lightest.weight && candidate.groups.length < lightest.groups.length) ||
-				(candidate.weight === lightest.weight &&
-					candidate.groups.length === lightest.groups.length &&
-					candidate.index < lightest.index)
-			) {
-				lightest = candidate;
-			}
-		}
-		lightest.groups.push(group);
-		lightest.weight += group.weight;
-	}
-	for (const assignment of assignments) {
-		assignment.groups.sort((left, right) => (left.file ?? "").localeCompare(right.file ?? ""));
-	}
-	return assignments;
 }
 
 function compareDiagnostics(left: CleanseDiagnostic, right: CleanseDiagnostic): number {

@@ -71,6 +71,7 @@ rust_library(
         "util.base32",
         "util.base64",
         "util.basename",
+        "util.bre",
         "util.cat",
         "util.cksum",
         "util.cmp",

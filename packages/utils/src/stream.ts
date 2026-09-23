@@ -4,26 +4,14 @@ import { abortableSource } from "./abortable";
 import { parseStreamingJson } from "./json-parse";
 
 const LF = 0x0a;
-type JsonlChunkResult = {
-	values: unknown[];
-	error: unknown;
-	read: number;
-	done: boolean;
-};
+const CR = 0x0d;
 
-function parseJsonlChunkCompat(input: Uint8Array, beg?: number, end?: number): JsonlChunkResult;
-function parseJsonlChunkCompat(input: string): JsonlChunkResult;
-function parseJsonlChunkCompat(input: Uint8Array | string, beg?: number, end?: number): JsonlChunkResult {
-	if (typeof input === "string") {
-		const { values, error, read, done } = Bun.JSONL.parseChunk(input);
-		return { values, error, read, done };
-	}
-	const start = beg ?? 0;
-	const stop = end ?? input.length;
-	const { values, error, read, done } = Bun.JSONL.parseChunk(input, start, stop);
-	return { values, error, read, done };
-}
-
+/**
+ * Split a byte stream on LF boundaries.
+ *
+ * Every yielded line owns its bytes and remains unchanged after the generator
+ * advances or drains. Line terminators are excluded.
+ */
 export async function* readLines(stream: ReadableStream<Uint8Array>, signal?: AbortSignal): AsyncGenerator<Uint8Array> {
 	const buffer = new ConcatSink();
 	const source = abortableSource(stream, signal);
@@ -58,7 +46,7 @@ export async function* readJsonl<T>(stream: ReadableStream<Uint8Array>, signal?:
 			const tail = buffer.flush();
 			if (tail) {
 				buffer.clear();
-				const { values, error, done } = parseJsonlChunkCompat(tail, 0, tail.length);
+				const { values, error, done } = Bun.JSONL.parseChunk(tail, 0, tail.length);
 				if (values.length > 0) {
 					yield* values as T[];
 				}
@@ -75,13 +63,19 @@ export async function* readJsonl<T>(stream: ReadableStream<Uint8Array>, signal?:
 	}
 }
 
-// =============================================================================
-// SSE (Server-Sent Events)
-// =============================================================================
-
-class ConcatSink {
+/**
+ * Amortized byte accumulator for chunked stream readers.
+ *
+ * Holds the unconsumed tail of a stream in a single growing `Buffer` so that
+ * appending N chunks costs O(total bytes) instead of re-copying the whole
+ * prefix per chunk. Backs {@link readLines}, {@link readJsonl} and
+ * {@link readSseEvents}; also usable directly when a reader needs its own
+ * framing loop (see `consume` and `flush`).
+ */
+export class ConcatSink {
 	#space?: Buffer;
 	#length = 0;
+	#skipLeadingLf = false;
 
 	#ensureCapacity(size: number): Buffer {
 		const space = this.#space;
@@ -119,16 +113,37 @@ class ConcatSink {
 		return this.#length === 0;
 	}
 
+	/**
+	 * The buffered bytes as a live view — invalidated by the next `append`,
+	 * `reset` or `consume`.
+	 */
 	flush(): Uint8Array | undefined {
 		if (!this.#length) return undefined;
 		return this.#space!.subarray(0, this.#length);
+	}
+
+	/** Drop the first `count` buffered bytes, keeping the remainder. */
+	consume(count: number) {
+		if (count <= 0) return;
+		if (count >= this.#length) {
+			this.#length = 0;
+			return;
+		}
+		this.#space!.copyWithin(0, count, this.#length);
+		this.#length -= count;
 	}
 
 	clear() {
 		this.#length = 0;
 	}
 
-	*appendAndFlushLines(chunk: Uint8Array) {
+	/**
+	 * Append a chunk and yield each complete LF-delimited line.
+	 *
+	 * Yielded lines are owned snapshots. Unlike {@link flush}, they remain
+	 * valid after this sink or the input chunk is mutated.
+	 */
+	*appendAndFlushLines(chunk: Uint8Array): Generator<Uint8Array> {
 		let pos = 0;
 		while (pos < chunk.length) {
 			const nl = chunk.indexOf(LF, pos);
@@ -139,12 +154,12 @@ class ConcatSink {
 			const suffix = chunk.subarray(pos, nl);
 			pos = nl + 1;
 			if (this.isEmpty) {
-				yield suffix;
+				yield new Uint8Array(suffix);
 			} else {
 				this.append(suffix);
 				const payload = this.flush();
 				if (payload) {
-					yield payload;
+					yield new Uint8Array(payload);
 					this.clear();
 				}
 			}
@@ -152,19 +167,27 @@ class ConcatSink {
 	}
 
 	appendAndFlushText(chunk: Uint8Array, decoder: TextDecoder): string | undefined {
-		const lastNewline = chunk.lastIndexOf(LF);
-		if (lastNewline === -1) {
-			this.append(chunk);
+		let start = 0;
+		if (this.#skipLeadingLf) {
+			if (chunk.length === 0) return undefined;
+			this.#skipLeadingLf = false;
+			if (chunk[0] === LF) start = 1;
+		}
+
+		const lastLineEnd = Math.max(chunk.lastIndexOf(LF), chunk.lastIndexOf(CR));
+		if (lastLineEnd < start) {
+			if (start < chunk.length) this.append(chunk.subarray(start));
 			return undefined;
 		}
 
-		const completeEnd = lastNewline + 1;
+		const completeEnd = lastLineEnd + 1;
+		this.#skipLeadingLf = chunk[lastLineEnd] === CR && completeEnd === chunk.length;
 		let text: string;
 		if (this.isEmpty) {
-			const complete = completeEnd === chunk.length ? chunk : chunk.subarray(0, completeEnd);
+			const complete = start === 0 && completeEnd === chunk.length ? chunk : chunk.subarray(start, completeEnd);
 			text = decoder.decode(complete);
 		} else {
-			this.append(completeEnd === chunk.length ? chunk : chunk.subarray(0, completeEnd));
+			this.append(chunk.subarray(start, completeEnd));
 			text = decoder.decode(this.flush());
 			this.clear();
 		}
@@ -174,8 +197,15 @@ class ConcatSink {
 		return text;
 	}
 	*pullJSONL<T>(chunk: Uint8Array, beg: number, end: number) {
+		const newline = chunk.indexOf(LF, beg);
+		if (newline === -1 || newline >= end) {
+			if (this.isEmpty) this.reset(chunk.subarray(beg, end));
+			else this.append(chunk.subarray(beg, end));
+			return;
+		}
+
 		if (this.isEmpty) {
-			const { values, error, read, done } = parseJsonlChunkCompat(chunk, beg, end);
+			const { values, error, read, done } = Bun.JSONL.parseChunk(chunk, beg, end);
 			if (values.length > 0) {
 				yield* values as T[];
 			}
@@ -192,7 +222,7 @@ class ConcatSink {
 		space.set(chunk.subarray(beg, end), offset);
 		this.#length = total;
 
-		const { values, error, read, done } = parseJsonlChunkCompat(space.subarray(0, total), 0, total);
+		const { values, error, read, done } = Bun.JSONL.parseChunk(space, 0, total);
 		if (values.length > 0) {
 			yield* values as T[];
 		}
@@ -208,6 +238,10 @@ class ConcatSink {
 		this.#length = rem;
 	}
 }
+
+// =============================================================================
+// SSE (Server-Sent Events)
+// =============================================================================
 
 /**
  * Stream parsed JSON objects from SSE `data:` lines.
@@ -248,12 +282,27 @@ function isRecoverableTrailingJson(data: string): boolean {
 	return typeof recovered === "object" && recovered !== null;
 }
 
-export async function* readSseJson<T>(
+/**
+ * One dispatched `data:` frame from {@link readSseFrames}: either the parsed JSON
+ * value, or the text of a frame `JSON.parse` rejected together with the
+ * `SyntaxError` it raised (so the strict reader can rethrow it unchanged).
+ */
+type SseFrame<T> = { ok: true; value: T } | { ok: false; raw: string; error: SyntaxError };
+
+/**
+ * Shared `data:`-line framing for {@link readSseJson} and
+ * {@link readSseJsonOrText}: skips empty events, stops at the OpenAI `[DONE]`
+ * sentinel, notifies the diagnostic observer, and treats a container-shaped
+ * stream tail as a clean end of iteration.
+ */
+async function* readSseFrames<T>(
 	stream: ReadableStream<Uint8Array>,
 	signal?: AbortSignal,
 	onEvent?: SseEventObserver,
-): AsyncGenerator<T> {
-	for await (const sse of readSseEvents(stream, signal)) {
+): AsyncGenerator<SseFrame<T>> {
+	// The diagnostic observer is the only reader of `raw`; capture it exactly
+	// when one is attached so the hot path stays allocation-free.
+	for await (const sse of readSseEvents(stream, signal, onEvent ? { captureRaw: true } : undefined)) {
 		const isTrailing = trailingEvents.has(sse);
 		notifySseEventObserver(onEvent, sse);
 		const data = sse.data;
@@ -262,13 +311,57 @@ export async function* readSseJson<T>(
 			continue;
 		}
 		try {
-			yield JSON.parse(data) as T;
+			yield { ok: true, value: JSON.parse(data) as T };
 		} catch (err) {
 			if (err instanceof SyntaxError && isTrailing && isRecoverableTrailingJson(data)) {
 				return;
 			}
+			if (err instanceof SyntaxError) {
+				yield { ok: false, raw: data, error: err };
+				continue;
+			}
 			throw err;
 		}
+	}
+}
+
+export async function* readSseJson<T>(
+	stream: ReadableStream<Uint8Array>,
+	signal?: AbortSignal,
+	onEvent?: SseEventObserver,
+): AsyncGenerator<T> {
+	for await (const frame of readSseFrames<T>(stream, signal, onEvent)) {
+		if (!frame.ok) throw frame.error;
+		yield frame.value;
+	}
+}
+
+/**
+ * Like {@link readSseJson}, but a `data:` frame that is not valid JSON is yielded
+ * as its raw text instead of raising a `SyntaxError`. Cut-off container-shaped
+ * stream tails stay recoverable, exactly as they are in {@link readSseJson}.
+ *
+ * Consumers that only understand objects must treat a `string` yield as a
+ * transport-level failure (for example a `429 Too Many Requests` or an HTML
+ * throttle page from a reverse proxy that already committed to the stream). This
+ * exists because `readSseJson`'s baseline consumers span unrelated transports
+ * whose error handling a text yield would subtly change; new call sites opt in.
+ *
+ * Note that the text lane is only the frames `JSON.parse` *rejected*: a frame
+ * carrying a JSON-encoded string (`data: "429 Too Many Requests"`) parses, so it
+ * is yielded as that string and is indistinguishable from a rejected frame by
+ * type alone. Consumers branching on `typeof === "string"` therefore see both,
+ * which is the safe direction — each is classified as text rather than trusted as
+ * an event object.
+ */
+export async function* readSseJsonOrText<T>(
+	stream: ReadableStream<Uint8Array>,
+	signal?: AbortSignal,
+	onEvent?: SseEventObserver,
+): AsyncGenerator<T | string> {
+	for await (const frame of readSseFrames<T>(stream, signal, onEvent)) {
+		if (!frame.ok) yield frame.raw;
+		else yield frame.value;
 	}
 }
 
@@ -288,6 +381,15 @@ export async function* readSseJson<T>(
 export interface ServerSentEvent {
 	event: string | null;
 	data: string;
+	/**
+	 * Decoded wire lines for this event (`event:`/`data:`/etc.), for the
+	 * diagnostic pipeline. Populated only when the reader opts in via
+	 * {@link ReadSseEventsOptions.captureRaw} (or attaches an `onSseEvent`
+	 * observer to the JSON readers, which opt in automatically); otherwise
+	 * `[]`. Direct `readSseEvents` callers that need wire text must pass
+	 * `{ captureRaw: true }` — the field is allocation-free by default so
+	 * the token path pays no per-frame array/slice cost.
+	 */
 	raw: string[];
 	id?: string;
 	retry?: number;
@@ -300,50 +402,48 @@ interface SseEventState {
 	// of buffering an array and joining at flush. `null` means "no data: field
 	// seen yet" (distinct from a `data:` field with an empty value).
 	data: string | null;
-	raw: string[];
+	// Diagnostic wire lines, captured only when a reader asked for them (see
+	// `readSseEventsOptions.captureRaw`): per-frame array+slice allocation on
+	// the token path otherwise. `null` means capture is off.
+	raw: string[] | null;
 	id?: string;
 	retry?: number;
 }
 
 // Complete lines are decoded in one batch per source chunk. Each batch ends on
-// LF, which cannot split a multi-byte UTF-8 sequence.
+// an ASCII line-ending byte, which cannot split a multi-byte UTF-8 sequence.
 const SSE_DECODER = new TextDecoder("utf-8");
 
 function flushSseEvent(state: SseEventState): ServerSentEvent | null {
 	if (state.event === null && state.data === null && state.id === undefined && state.retry === undefined) {
-		state.raw = [];
+		if (state.raw !== null) state.raw = [];
 		return null;
 	}
 	const event: ServerSentEvent = {
 		event: state.event,
 		data: state.data ?? "",
-		raw: state.raw,
+		raw: state.raw ?? [],
 	};
 	if (state.id !== undefined) event.id = state.id;
 	if (state.retry !== undefined) event.retry = state.retry;
 	state.event = null;
 	state.data = null;
-	state.raw = [];
+	if (state.raw !== null) state.raw = [];
 	state.id = undefined;
 	state.retry = undefined;
 	return event;
 }
 
 function pushSseLine(line: string, state: SseEventState): ServerSentEvent | null {
-	// Complete-line batches split on LF only; strip a trailing CR so CRLF sources
-	// don't leak `\r` into field values.
-	if (line.charCodeAt(line.length - 1) === 0x0d /* '\r' */) {
-		line = line.slice(0, -1);
-	}
 	if (line.length === 0) return flushSseEvent(state);
 
 	// Comment line: keep in `raw` for diagnostic context, skip parsing.
 	if (line.charCodeAt(0) === 0x3a /* ':' */) {
-		state.raw.push(line);
+		state.raw?.push(line);
 		return null;
 	}
 
-	state.raw.push(line);
+	state.raw?.push(line);
 
 	const colon = line.indexOf(":");
 	const fieldName = colon === -1 ? line : line.slice(0, colon);
@@ -397,12 +497,24 @@ function pushSseLine(line: string, state: SseEventState): ServerSentEvent | null
  * }
  * ```
  */
+export interface ReadSseEventsOptions {
+	/**
+	 * Capture per-line wire text into `event.raw` for the diagnostic
+	 * pipeline (`onSseEvent` observers, raw-SSE viewer). Off by default:
+	 * every frame otherwise pays an array allocation plus one string slice
+	 * per line on the token path.
+	 */
+	captureRaw?: boolean;
+}
+
 export async function* readSseEvents(
 	stream: ReadableStream<Uint8Array>,
 	signal?: AbortSignal,
+	options?: ReadSseEventsOptions,
 ): AsyncGenerator<ServerSentEvent> {
 	const lineBuffer = new ConcatSink();
-	const state: SseEventState = { event: null, data: null, raw: [] };
+	const captureRaw = options?.captureRaw === true;
+	const state: SseEventState = { event: null, data: null, raw: captureRaw ? [] : null };
 	const source = abortableSource(stream, signal);
 	try {
 		for await (const chunk of source) {
@@ -410,13 +522,21 @@ export async function* readSseEvents(
 			if (text === undefined) continue;
 			let start = 0;
 			while (start < text.length) {
-				const newline = text.indexOf("\n", start);
-				const event = pushSseLine(text.slice(start, newline), state);
+				let lineEnd = start;
+				while (lineEnd < text.length) {
+					const code = text.charCodeAt(lineEnd);
+					if (code === LF || code === CR) break;
+					lineEnd++;
+				}
+				const event = pushSseLine(text.slice(start, lineEnd), state);
 				if (event) yield event;
-				start = newline + 1;
+				if (text.charCodeAt(lineEnd) === CR && text.charCodeAt(lineEnd + 1) === LF) {
+					lineEnd++;
+				}
+				start = lineEnd + 1;
 			}
 		}
-		// Treat any trailing partial line (no terminating LF) as a complete line.
+		// Treat any trailing partial line (no terminating line ending) as complete.
 		if (!lineBuffer.isEmpty) {
 			const tail = lineBuffer.flush();
 			if (tail) {
@@ -446,16 +566,17 @@ export async function* readSseEvents(
  * Uses `Bun.JSONL.parseChunk` internally. On parse errors, the malformed
  * region is skipped up to the next newline and parsing continues.
  *
+ * @param options.onMalformedRecord Called once for every skipped JSONL record.
  * @example
  * ```ts
  * const entries = parseJsonlLenient<MyType>(fileContents);
  * ```
  */
-export function parseJsonlLenient<T>(buffer: string): T[] {
+export function parseJsonlLenient<T>(buffer: string, options: { onMalformedRecord?: () => void } = {}): T[] {
 	let entries: T[] | undefined;
 
 	while (buffer.length > 0) {
-		const { values, error, read, done } = parseJsonlChunkCompat(buffer);
+		const { values, error, read, done } = Bun.JSONL.parseChunk(buffer);
 		if (values.length > 0) {
 			const ext = values as T[];
 			if (!entries) {
@@ -466,11 +587,16 @@ export function parseJsonlLenient<T>(buffer: string): T[] {
 		}
 		if (error) {
 			const nextNewline = buffer.indexOf("\n", read);
+			const malformedEnd = nextNewline === -1 ? buffer.length : nextNewline;
+			if (buffer.substring(read, malformedEnd).trim().length > 0) options.onMalformedRecord?.();
 			if (nextNewline === -1) break;
 			buffer = buffer.substring(nextNewline + 1);
 			continue;
 		}
-		if (read === 0) break;
+		if (read === 0) {
+			if (buffer.trim().length > 0) options.onMalformedRecord?.();
+			break;
+		}
 		buffer = buffer.substring(read);
 		if (done) break;
 	}

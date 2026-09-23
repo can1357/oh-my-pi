@@ -303,10 +303,16 @@
 			const message = document.getElementById("message");
 
 			if (serverState.ok) {
+				const closeButton = document.querySelector(".btn");
 				app.classList.add("success", "countdown");
 				title.textContent = "Authentication Successful";
-				message.innerHTML = "You have successfully logged in.<br>You can now close this tab.";
-				setTimeout(() => window.close(), 3000);
+				message.textContent = "You have successfully logged in.";
+				window.close();
+				setTimeout(() => {
+					app.classList.remove("countdown");
+					closeButton.remove();
+					message.innerHTML = "You have successfully logged in.<br>Please close this tab manually.";
+				}, 300);
 			} else {
 				app.classList.add("error");
 				title.textContent = "Authentication Failed";

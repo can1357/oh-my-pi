@@ -1,16 +1,20 @@
 import type { DeviceType } from "@huggingface/transformers";
 import { $env } from "@oh-my-pi/pi-utils";
 
-export type TinyModelDevice = DeviceType;
+/** ONNX Runtime execution provider accepted by transformers.js pipelines. */
+export type TinyOnnxDevice = DeviceType;
+/** `PI_TINY_DEVICE` value selecting the mlx-lm Python backend (Apple silicon). */
+export const MLX_DEVICE = "mlx";
+export type TinyModelDevice = TinyOnnxDevice | typeof MLX_DEVICE;
 
 export interface TinyModelDevicePreference {
 	device: TinyModelDevice;
 	raw: string | undefined;
 }
 
-const CPU_DEVICE: TinyModelDevice = "cpu";
-const CPU_ONLY_ORDER: readonly TinyModelDevice[] = [CPU_DEVICE];
-const DARWIN_WEBGPU_UNSAFE_ORDER: readonly TinyModelDevice[] = [CPU_DEVICE];
+const CPU_DEVICE: TinyOnnxDevice = "cpu";
+const CPU_ONLY_ORDER: readonly TinyOnnxDevice[] = [CPU_DEVICE];
+const DARWIN_WEBGPU_UNSAFE_ORDER: readonly TinyOnnxDevice[] = [CPU_DEVICE];
 
 const DEVICE_VALUES: Record<TinyModelDevice, true> = {
 	auto: true,
@@ -25,19 +29,25 @@ const DEVICE_VALUES: Record<TinyModelDevice, true> = {
 	"webnn-npu": true,
 	"webnn-gpu": true,
 	"webnn-cpu": true,
+	[MLX_DEVICE]: true,
 };
 
 function usesDarwinWorkerWebGpu(device: TinyModelDevice): boolean {
 	return process.platform === "darwin" && (device === "gpu" || device === "webgpu" || device === "auto");
 }
 
+/** Whether the mlx-lm backend can run here: MLX ships Metal wheels for Apple silicon only. */
+export function tinyMlxSupported(platform = process.platform, arch = process.arch): boolean {
+	return platform === "darwin" && arch === "arm64";
+}
+
 export function normalizeTinyModelDevice(value: string | undefined): TinyModelDevice | undefined {
 	const raw = value?.trim().toLowerCase();
 	if (!raw) return undefined;
-	if (raw === "metal") return "webgpu";
+	if (raw === "metal") return MLX_DEVICE;
 	if (raw in DEVICE_VALUES) return raw as TinyModelDevice;
 	throw new Error(
-		`Unsupported PI_TINY_DEVICE=${JSON.stringify(value)}. Use cpu, gpu, metal, webgpu, auto, cuda, dml, coreml, wasm, webnn, webnn-gpu, webnn-cpu, or webnn-npu.`,
+		`Unsupported PI_TINY_DEVICE=${JSON.stringify(value)}. Use cpu, gpu, mlx, metal, webgpu, auto, cuda, dml, coreml, wasm, webnn, webnn-gpu, webnn-cpu, or webnn-npu.`,
 	);
 }
 
@@ -50,8 +60,13 @@ export function resolveTinyModelDevicePreference(
 	};
 }
 
-export function tinyModelDeviceLoadOrder(preference: TinyModelDevicePreference): readonly TinyModelDevice[] {
-	if (preference.device === CPU_DEVICE) return CPU_ONLY_ORDER;
+/**
+ * ONNX execution providers to try, in order, for the requested device. `mlx`
+ * is not an ONNX provider: workers that only speak ONNX (STT/TTS, or the tiny
+ * worker after an MLX bootstrap failure) run CPU-only for it.
+ */
+export function tinyModelDeviceLoadOrder(preference: TinyModelDevicePreference): readonly TinyOnnxDevice[] {
+	if (preference.device === CPU_DEVICE || preference.device === MLX_DEVICE) return CPU_ONLY_ORDER;
 	if (usesDarwinWorkerWebGpu(preference.device)) return DARWIN_WEBGPU_UNSAFE_ORDER;
 	return [preference.device, CPU_DEVICE];
 }
@@ -64,6 +79,7 @@ export const TINY_MODEL_DEVICE_SETTING_VALUES = [
 	TINY_MODEL_DEVICE_DEFAULT,
 	"gpu",
 	"cpu",
+	MLX_DEVICE,
 	"metal",
 	"webgpu",
 	"cuda",
@@ -82,7 +98,8 @@ export const TINY_MODEL_DEVICE_SETTING_OPTIONS = [
 	{ value: "default", label: "Default", description: "CPU-only inference" },
 	{ value: "gpu", label: "GPU", description: "Accelerated provider (WebGPU/Metal, CUDA, or DirectML)" },
 	{ value: "cpu", label: "CPU", description: "CPU-only inference" },
-	{ value: "metal", label: "Metal", description: "WebGPU alias for Apple GPUs" },
+	{ value: MLX_DEVICE, label: "MLX", description: "Apple silicon GPU via mlx-lm (Python subprocess; macOS arm64)" },
+	{ value: "metal", label: "Metal", description: "Alias for MLX" },
 	{ value: "webgpu", label: "WebGPU", description: "WebGPU/Metal backend" },
 	{ value: "cuda", label: "CUDA", description: "NVIDIA CUDA (Linux x64)" },
 	{ value: "dml", label: "DirectML", description: "DirectML backend (Windows)" },

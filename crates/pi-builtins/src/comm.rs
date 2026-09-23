@@ -6,7 +6,7 @@ use std::{
 	cmp::Ordering,
 	ffi::{OsStr, OsString},
 	fs::{self, File},
-	io::{self, BufRead, BufReader, BufWriter, Read, Write},
+	io::{self, BufRead, BufReader, Read, Write},
 	path::Path,
 };
 
@@ -148,7 +148,6 @@ fn compare(
 		usize::from(!opts.get_flag(options::COLUMN_1))
 			+ usize::from(!opts.get_flag(options::COLUMN_2)),
 	);
-	let mut writer = BufWriter::new(stdout);
 	let (mut ra, mut rb) = (Vec::new(), Vec::new());
 	let mut na = read_context(a, &mut ra, name1)?;
 	let mut nb = read_context(b, &mut rb, name2)?;
@@ -172,7 +171,7 @@ fn compare(
 					break;
 				}
 				if !opts.get_flag(options::COLUMN_1) {
-					writer.write_all(&ra).map_err(|e| format!("write error: {e}"))?;
+					stdout.write_all(&ra).map_err(|e| format!("write error: {e}"))?;
 				}
 				ra.clear();
 				na = read_context(a, &mut ra, name1)?;
@@ -183,7 +182,7 @@ fn compare(
 					break;
 				}
 				if !opts.get_flag(options::COLUMN_2) {
-					write_delimited(&mut writer, col2.as_bytes(), &rb)
+					write_delimited(&mut *stdout, col2.as_bytes(), &rb)
 						.map_err(|e| format!("write error: {e}"))?;
 				}
 				rb.clear();
@@ -197,7 +196,7 @@ fn compare(
 					break;
 				}
 				if !opts.get_flag(options::COLUMN_3) {
-					write_delimited(&mut writer, col3.as_bytes(), &ra)
+					write_delimited(&mut *stdout, col3.as_bytes(), &ra)
 						.map_err(|e| format!("write error: {e}"))?;
 				}
 				ra.clear();
@@ -213,10 +212,10 @@ fn compare(
 	}
 	if opts.get_flag(options::TOTAL) {
 		let ending = LineEnding::from_zero_flag(opts.get_flag(options::ZERO_TERMINATED));
-		write!(writer, "{n1}{delim}{n2}{delim}{n3}{delim}total{ending}")
+		write!(stdout, "{n1}{delim}{n2}{delim}{n3}{delim}total{ending}")
 			.map_err(|e| format!("write error: {e}"))?;
 	}
-	writer.flush().map_err(|e| format!("write error: {e}"))?;
+	stdout.flush().map_err(|e| format!("write error: {e}"))?;
 	if should_check && (c1.has_error || c2.has_error) {
 		if delayed_error {
 			let _ = writeln!(stderr, "comm: input is not in sorted order");
@@ -277,6 +276,9 @@ impl Utility for Comm {
 			files_identical(&path1, &path2).unwrap_or(false)
 		};
 		let ending = LineEnding::from_zero_flag(self.matches.get_flag(options::ZERO_TERMINATED));
+		// Taken before the `LineReader`s below hold `&mut host.stdin`; a
+		// method borrow of `host` would otherwise conflict with them.
+		let mut stdout = host.stdout_writer();
 		let opened: Result<_, (&OsStr, io::Error)> = if name1 == "-" {
 			open_file(name2, &path2, None, ending)
 				.map_err(|e| (name2.as_os_str(), e))
@@ -317,7 +319,7 @@ impl Utility for Comm {
 			delim,
 			&self.matches,
 			identical,
-			&mut host.stdout,
+			&mut stdout,
 			&mut host.stderr,
 		) {
 			Ok(true) => 0,

@@ -9,11 +9,11 @@
 Webhook → durable queue → async dispatcher → per-issue git worktree → omp RPC subprocess + host tools.
 
 1. `POST /webhook/github` — HMAC-SHA256 verified against `GITHUB_WEBHOOK_SECRET` (`server.py` + `github_events.verify_signature`). Bad signature returns `401`.
-2. `github_events.route()` decides one of `triage_issue` / `handle_comment` / `handle_pr_conversation` / `handle_review` / `cleanup_workspace` / `skip`. Bot-authored events (`*[bot]`, `user.type == "Bot"`, configured `bot_login`) and non-allowlisted repos are dropped here.
+2. `github_events.route()` decides one of `triage_issue` / `handle_comment` / `handle_pr_conversation` / `handle_review` / `handle_release_ci` / `cleanup_workspace` / `skip`. Bot-authored issue/PR events (`*[bot]`, `user.type == "Bot"`, configured `bot_login`) are dropped; `workflow_run` release verdicts are routed before that guard because repair pushes use the bot account.
 3. `db.record_event()` inserts the event with `INSERT OR IGNORE` on `X-GitHub-Delivery` (dedup). Endpoint returns `202`.
-4. `queue.WorkerPool._dispatch_loop` atomically claims `state='queued'` rows under `BEGIN IMMEDIATE`, guarded by an in-process `_inflight` set keyed by `(owner, repo, number)` to serialize per-issue work. Cap: `ROBOMP_MAX_CONCURRENCY` (default 8).
-5. `sandbox.SandboxManager.ensure_workspace()` produces a worktree at `/data/workspaces/<owner>__<repo>__<n>/repo` on a deterministic branch `farm/<8hex>/<slug>`, backed by a shared `--filter=blob:none` clone pool. Credentialed remote URL and git identity are reset every time.
-6. `tasks.*` dispatchers build `TaskInputs` and call `worker.run_task()` which spawns `omp --mode rpc` with `cwd=worktree`, persistent `session_dir`, and a randomly-picked model from `ROBOMP_MODEL` (CSV pool). When `<session_dir>/*.jsonl` already exists the worker passes `--continue`, so both follow-up events and crash-restarted events resume the same session.
+4. `queue.WorkerPool._dispatch_loop` atomically claims `state='queued'` rows under `BEGIN IMMEDIATE`, guarded by an in-process `_inflight` set keyed by `issue_key`. Issue work serializes per issue; release work serializes per repo under `<repo>#release`. Cap: `ROBOMP_MAX_CONCURRENCY` (default 8).
+5. `sandbox.SandboxManager.ensure_workspace()` produces issue worktrees at `/data/workspaces/<owner>__<repo>__<n>/repo` on deterministic `farm/<8hex>/<slug>` branches. `ensure_release_workspace()` reuses `<owner>__<repo>__release/repo` on the default branch with a per-tag session.
+6. `tasks.*` dispatchers build `TaskInputs` and call `worker.run_task()` which spawns `omp --mode rpc` with `cwd=worktree`, persistent `session_dir`, and a randomly-picked task-appropriate model pool. Existing `<session_dir>/*.jsonl` resumes with `--continue`.
 7. Inside the subprocess the agent uses **built-in omp tools** (read/edit/write/bash/lsp, scoped to the worktree) and **host tools** from `host_tools.py` (the only surface allowed to mutate GitHub or write audit rows).
 8. Success → event `state='done'`. Exception → `state='failed'` with a credential-redacted traceback in `events.last_error`. The `_inflight` slot is released either way.
 
@@ -75,7 +75,7 @@ Lint + format: TypeScript via Biome (config in `biome.json`), Python via Ruff (c
 - **Async style**: FastAPI handlers and `queue.WorkerPool` are async. `worker.run_task` is **synchronous** and runs in a worker thread because `omp-rpc` is blocking — keep it that way; don't try to async it. CLI commands wrap with `asyncio.run`.
 - **Config**: `pydantic-settings` `Settings` in `config.py` with `ROBOMP_*` env prefix (e.g. `ROBOMP_MAX_CONCURRENCY`, `ROBOMP_REPO_ALLOWLIST`). Access only via `get_settings()` (`@cache` singleton). Tests must call `reset_settings_cache()` after mutating env.
 - **Dependency injection**: pass `Settings`, `Database`, `GitHubClient`, `SandboxManager` explicitly into `create_app()`, `WorkerPool`, and `ToolBindings`. No module-level globals other than the singleton accessors (`get_settings`, `get_database`).
-- **State**: SQLite (`db.Database`) is the source of truth for `events`, `issues`, `tool_calls`. Thread-safe via an internal `_lock`; `BEGIN IMMEDIATE` for claim contention. In-memory state is only the `_inflight` set in `WorkerPool`.
+- **State**: SQLite (`db.Database`) is the source of truth for `events`, `issues`, `releases`, and `tool_calls`. Release rows transition through `awaiting_ci` / `fixing` / `green` / `failed` / `superseded`. Thread-safe via an internal `_lock`; `BEGIN IMMEDIATE` for claim contention. In-memory state is only the `_inflight` set in `WorkerPool`.
 - **Error handling**: custom exception types (`GitHubError` with `retry_after`, `GitCommandError`, `InvalidIssueRef`, `RpcCommandError`). `sandbox.redact_credentials()` strips `user:pass@` from any URL before it lands in logs, audit rows, or exception messages. **Never** include credentialed URLs in error strings.
 - **Logging**: structured JSON via `logging_config.JsonFormatter`. Use `logger.info("event", extra={...})`; do not collide with `_RESERVED` keys. Configure once via `configure_logging()`.
 - **Host tools** (`host_tools.py`): every tool is built from a per-task `ToolBindings` closure and audits through `_audit()` into `tool_calls`. Audit only ever sees agent-supplied args, never internal credentials. New tools follow the same pattern: validate args → call `GitHubClient` / `SandboxManager` → return structured dict → audit.
@@ -84,15 +84,15 @@ Lint + format: TypeScript via Biome (config in `biome.json`), Python via Ruff (c
 
 ## Important Files
 
-- `src/server.py` — FastAPI app, `/webhook/github`, `/healthz`, `/readyz`, `/events`, `/issues`, manual triage/replay endpoints, dashboard at `/`.
+- `src/server.py` — FastAPI app, `/webhook/github`, `/healthz`, `/readyz`, `/events`, `/issues`, `/releases`, manual triage/replay endpoints, dashboard at `/`.
 - `src/queue.py` — `WorkerPool` dispatcher and `_inflight` serialization.
-- `src/tasks.py` — the five task entry points the dispatcher calls.
+- `src/tasks.py` — issue/PR handlers plus `handle_release_ci`.
 - `src/worker.py` — synchronous omp RPC driver, prompt assembly via `persona`.
-- `src/host_tools.py` — agent's GitHub surface; tool list: `classify_issue`, `set_issue_labels`, `gh_post_comment`, `repro_record`, `gh_push_branch`, `gh_open_pr`, `gh_request_review`, `mark_unable_to_reproduce`, `abort_task`, `fetch_issue_thread`.
-- `src/sandbox.py` — clone pool + worktree lifecycle, `GitCommandError`, credential redaction.
-- `src/github_client.py` — typed httpx client; parses webhook payloads into `IssueInfo` / `CommentInfo` / `PullRequestInfo`.
+- `src/host_tools.py` — issue/PR tools plus `release_ci_status`, `release_job_log`, and terminal `release_retag`.
+- `src/sandbox.py` — clone pool + issue/release worktree lifecycle, `GitCommandError`, credential redaction.
+- `src/github_client.py` — typed httpx client including Actions, tag, and GitHub Release reads.
 - `src/github_events.py` — routing and HMAC verification.
-- `src/db.py` — sqlite schema and DAOs (`record_event`, `claim_next_event`, `upsert_issue`, `log_tool_call`).
+- `src/db.py` — sqlite schema and DAOs for events, issues, releases, and audited tool calls.
 - `src/config.py` — `Settings` model and `get_settings()`.
 - `src/cli.py` — Click CLI (`serve`, `triage`, `replay`, `status`, `cleanup`).
 - `src/dashboard.py` — single-page HTML dashboard served from `/`.

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { MCPTransportError } from "@oh-my-pi/pi-coding-agent/mcp/errors";
 import { resolveStdioSpawnCommand, StdioTransport, writeFrame } from "@oh-my-pi/pi-coding-agent/mcp/transports/stdio";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
@@ -764,6 +765,55 @@ describe("StdioTransport.notify", () => {
 		} finally {
 			tracker.release();
 		}
+	});
+});
+
+describe("StdioTransport request failure diagnostics", () => {
+	let transport: StdioTransport | undefined;
+
+	afterEach(async () => {
+		await transport?.close().catch(() => {});
+		transport = undefined;
+	});
+
+	it("reports abrupt subprocess termination as EOF instead of a generic close", async () => {
+		transport = new StdioTransport({
+			type: "stdio",
+			command: "bun",
+			args: ["-e", "process.stdin.once('data', () => process.exit(23)); process.stdin.resume()"],
+			timeout: 1_000,
+		});
+		await transport.connect();
+		const error = await transport.request("tools/list").then(
+			() => undefined,
+			reason => reason,
+		);
+		if (!(error instanceof MCPTransportError)) throw error;
+
+		expect(error).toMatchObject({
+			transport: "stdio",
+			stage: "receive",
+			failure: "eof",
+			retryable: true,
+		});
+		expect(error.message).toContain("MCP subprocess");
+	});
+
+	it("reports malformed subprocess JSON at the decode stage", async () => {
+		transport = new StdioTransport({
+			type: "stdio",
+			command: "bun",
+			args: ["-e", "process.stdin.once('data', () => console.log('{not-json')); process.stdin.resume()"],
+			timeout: 1_000,
+		});
+		await transport.connect();
+
+		await expect(transport.request("tools/list")).rejects.toMatchObject({
+			transport: "stdio",
+			stage: "decode",
+			failure: "malformed_response",
+			retryable: false,
+		});
 	});
 });
 

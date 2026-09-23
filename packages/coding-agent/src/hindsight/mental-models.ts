@@ -197,6 +197,38 @@ function sameStringSet(left: readonly string[], right: readonly string[]): boole
  */
 export const MENTAL_MODEL_RENDER_BUDGET_CHARS_DEFAULT = 16_000;
 
+/** Outcome of loading a rendered mental-model block with fetch failure kept distinct from empty content. */
+export type MentalModelsBlockLoadResult = { ok: true; block: string | undefined } | { ok: false };
+
+/**
+ * Pull the current mental-model snapshot while preserving whether the server
+ * request failed. Boundary reloads use this distinction to retain a previously
+ * rendered snapshot when Hindsight is unavailable.
+ */
+export async function tryLoadMentalModelsBlock(
+	client: HindsightApi,
+	bankId: string,
+	budgetChars: number = MENTAL_MODEL_RENDER_BUDGET_CHARS_DEFAULT,
+	visibleTags?: readonly string[],
+): Promise<MentalModelsBlockLoadResult> {
+	let response: MentalModelListResponse;
+	try {
+		response = await client.listMentalModels(bankId, { detail: "content" });
+	} catch (err) {
+		logger.debug("Hindsight: loadMentalModelsBlock list failed", { bankId, error: String(err) });
+		return { ok: false };
+	}
+
+	const models = (response.items ?? []).filter(
+		m => modelVisibleForTags(m, visibleTags) && typeof m.content === "string" && m.content.trim().length > 0,
+	);
+	if (models.length === 0) return { ok: true, block: undefined };
+
+	models.sort((a, b) => a.name.localeCompare(b.name));
+	const block = renderMentalModelsBlock(models, budgetChars);
+	return { ok: true, block: block || undefined };
+}
+
 /**
  * Pull the current mental-model snapshot from the server and render it into a
  * `<mental_models>` block ready to be appended to developer instructions.
@@ -218,22 +250,8 @@ export async function loadMentalModelsBlock(
 	budgetChars: number = MENTAL_MODEL_RENDER_BUDGET_CHARS_DEFAULT,
 	visibleTags?: readonly string[],
 ): Promise<string | undefined> {
-	let response: MentalModelListResponse;
-	try {
-		response = await client.listMentalModels(bankId, { detail: "content" });
-	} catch (err) {
-		logger.debug("Hindsight: loadMentalModelsBlock list failed", { bankId, error: String(err) });
-		return undefined;
-	}
-
-	const models = (response.items ?? []).filter(
-		m => modelVisibleForTags(m, visibleTags) && typeof m.content === "string" && m.content.trim().length > 0,
-	);
-	if (models.length === 0) return undefined;
-
-	models.sort((a, b) => a.name.localeCompare(b.name));
-	const block = renderMentalModelsBlock(models, budgetChars);
-	return block || undefined;
+	const result = await tryLoadMentalModelsBlock(client, bankId, budgetChars, visibleTags);
+	return result.ok ? result.block : undefined;
 }
 
 function modelVisibleForTags(model: MentalModelSummary, visibleTags?: readonly string[]): boolean {
@@ -290,9 +308,11 @@ export function renderMentalModelsBlock(models: MentalModelSummary[], budgetChar
 	let consumed = 0;
 	let truncated = false;
 	for (const model of models) {
-		const heading = `# ${model.name}`;
-		const refreshed = model.last_refreshed_at ? ` _(refreshed ${model.last_refreshed_at})_` : "";
-		const headerLine = `${heading}${refreshed}`;
+		// Volatile `last_refreshed_at` is deliberately kept OUT of the model-facing
+		// heading: a background reflect that only bumps the timestamp would
+		// otherwise rewrite the cached prefix on identical content (#11961). The
+		// timestamp still surfaces in the user-facing `/memory mm list`/`show`.
+		const headerLine = `# ${model.name}`;
 		const body = (model.content ?? "").trim();
 		const truncatedBody = truncateTo(body, perModelBudget);
 		if (truncatedBody.length < body.length) truncated = true;
@@ -396,6 +416,7 @@ function longestCommonSubsequence(a: string[], b: string[]): string[] {
 	const n = a.length;
 	const m = b.length;
 	if (n === 0 || m === 0) return [];
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const table: number[][] = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
 	for (let i = 0; i < n; i++) {
 		for (let j = 0; j < m; j++) {
@@ -421,9 +442,6 @@ function longestCommonSubsequence(a: string[], b: string[]): string[] {
 
 /** Awaited only by the first-turn race in `beforeAgentStartPrompt`. */
 export const MENTAL_MODEL_FIRST_TURN_DEADLINE_MS = 1500;
-
-/** Cache TTL: re-list models on `agent_end` once this many ms have elapsed. */
-export const MENTAL_MODEL_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 
 /** Need-only export of the raw seed list for tests. */
 export const builtinSeedsForTest: ReadonlyArray<Readonly<RawSeed>> = BUILTIN_SEEDS;

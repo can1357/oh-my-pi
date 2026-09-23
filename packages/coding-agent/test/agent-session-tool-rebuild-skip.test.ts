@@ -7,8 +7,10 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CustomTool } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { type CustomMessage, convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { SessionMaintenance } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import {
 	collectMountedMCPToolRoutes,
@@ -66,7 +68,7 @@ function createMcpCustomTool(name: string, serverName: string, mcpToolName: stri
 }
 
 /** Rendered xd:// mount notices within one provider call's messages. */
-function mountNoticesIn(messages: Message[]): string[] {
+function mountNoticesIn(messages: readonly Message[]): string[] {
 	return messages.flatMap(message => {
 		const { content } = message;
 		const text =
@@ -98,9 +100,9 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 
 	interface NewSessionOptions {
 		getMcpServerInstructions?: () => Map<string, string> | undefined;
-		getLocalCalendarDate?: () => string;
 		xdev?: XdevState;
 		lazyWrite?: boolean;
+		deviceOnlyWrite?: boolean;
 		/** Scripted mock model responses; enables driving `session.prompt()`. */
 		responses?: MockResponseSource;
 		/** Persisted history seeded into the agent, e.g. to model a resumed session. */
@@ -113,6 +115,8 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		exposeXdevCatalog?: boolean;
 		/** Optional per-turn system prompt replacement returned by before_agent_start. */
 		beforeAgentStartSystemPrompt?: string[];
+		/** Pre-loaded skills handed to the session's hint snapshot. */
+		skills?: Skill[];
 	}
 
 	function newSession(
@@ -126,11 +130,16 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		systemPrompts: string[][];
 		/** Mutable registry shared with the session, for lifecycle-only mount fixtures. */
 		toolRegistry: Map<string, AgentTool>;
+		isDeviceOnlyWrite: () => boolean;
+		isPendingFullWriteDescription: () => boolean;
+		isToolActive: (name: string) => boolean;
 	} {
 		const readTool = createBasicTool("read", "Read");
 		const initialMcp = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
 		const writeTool = createBasicTool("write", "Write");
 		const toolRegistry = options.xdev?.tools ?? new Map<string, AgentTool>();
+		let deviceOnlyWrite = options.deviceOnlyWrite === true;
+		let pendingFullWriteDescription = false;
 		toolRegistry.set(readTool.name, readTool);
 		toolRegistry.set(initialMcp.name, initialMcp as unknown as AgentTool);
 		if (options.xdev && !options.lazyWrite) toolRegistry.set(writeTool.name, writeTool);
@@ -158,6 +167,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 					}
 				: undefined,
 		});
+		const activeToolNames = new Set(agent.state.tools.map(tool => tool.name));
 		const session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
@@ -169,6 +179,17 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 				if (!options.xdev) return false;
 				if (!toolRegistry.has("write")) toolRegistry.set("write", writeTool);
 				return true;
+			},
+			setActiveToolNames: names => {
+				activeToolNames.clear();
+				for (const name of names) activeToolNames.add(name);
+			},
+			isDeviceOnlyWrite: () => deviceOnlyWrite,
+			setDeviceOnlyWrite: enabled => {
+				deviceOnlyWrite = enabled;
+			},
+			setPendingFullWriteDescription: enabled => {
+				pendingFullWriteDescription = enabled;
 			},
 			extensionRunner: options.beforeAgentStartSystemPrompt
 				? ({
@@ -183,11 +204,19 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 				return { systemPrompt: [`${base}\nxd:// catalog: ${catalog.join(",")}`], xdevCatalogNames: catalog };
 			},
 			getMcpServerInstructions: options.getMcpServerInstructions,
-			getLocalCalendarDate: options.getLocalCalendarDate,
 			xdev: options.xdev,
+			skills: options.skills,
 		});
 		sessions.push(session);
-		return { session, contexts, systemPrompts, toolRegistry };
+		return {
+			session,
+			contexts,
+			systemPrompts,
+			toolRegistry,
+			isDeviceOnlyWrite: () => deviceOnlyWrite,
+			isPendingFullWriteDescription: () => pendingFullWriteDescription,
+			isToolActive: name => activeToolNames.has(name),
+		};
 	}
 
 	it("skips rebuild when an MCP refresh produces an identical tool set", async () => {
@@ -640,6 +669,123 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		expect(rebuildCount).toBe(2);
 	});
 
+	it("does not commit an asynchronous prompt rebuild after its producer becomes stale", async () => {
+		const rebuild = Promise.withResolvers<void>();
+		const { session } = newSession(async () => {
+			await rebuild.promise;
+			return "stale rebuild";
+		});
+
+		const refresh = session.refreshBaseSystemPrompt(() => false);
+		rebuild.resolve();
+		await refresh;
+
+		expect(session.systemPrompt).toEqual(["initial"]);
+	});
+
+	it("keeps the committed skill hint frozen when a conditional refresh is discarded", async () => {
+		const rebuild = Promise.withResolvers<void>();
+		const { session } = newSession(
+			async () => {
+				await rebuild.promise;
+				return "abandoned rebuild";
+			},
+			{
+				skills: [
+					{
+						name: "rebuild-skip-skill",
+						description: "Skill loaded for hint rollback coverage",
+						filePath: "/skills/rebuild-skip-skill/SKILL.md",
+						baseDir: "/skills/rebuild-skip-skill",
+						source: "test",
+					},
+				],
+			},
+		);
+
+		// Default skillful=true with a loaded skill: the committed snapshot
+		// starts true.
+		expect(session.getSkillHintVisible()).toBe(true);
+		// Flip the live setting mid-flight: a global pre-commit stage would
+		// publish false before the producer is refused and never restore it.
+		session.settings.set("skillful", false);
+
+		const refresh = session.refreshBaseSystemPrompt(() => false);
+		rebuild.resolve();
+		await refresh;
+
+		// The declined commit leaves the committed hint untouched: the candidate
+		// lived only inside the render frame.
+		expect(session.getSkillHintVisible()).toBe(true);
+		expect(session.systemPrompt).toEqual(["initial"]);
+	});
+
+	it("renders the prompt from the candidate hint visibility before publishing it", async () => {
+		const entered = Promise.withResolvers<void>();
+		const resume = Promise.withResolvers<void>();
+		const { session } = newSession(
+			async () => {
+				entered.resolve();
+				await resume.promise;
+				// The rebuild stub renders what the tool getters currently see:
+				// inside the frame the candidate, outside it the committed value.
+				return session.getSkillHintVisible() ? "hint-visible" : "hint-hidden";
+			},
+			{
+				skills: [
+					{
+						name: "scoped-render-skill",
+						description: "Skill loaded for scoped render coverage",
+						filePath: "/skills/scoped-render-skill/SKILL.md",
+						baseDir: "/skills/scoped-render-skill",
+						source: "test",
+					},
+				],
+			},
+		);
+
+		// Committed baseline: skillful=true + skill loaded.
+		expect(session.getSkillHintVisible()).toBe(true);
+		session.settings.set("skillful", false);
+
+		const refresh = session.refreshBaseSystemPrompt();
+		await entered.promise;
+		// Readers outside the suspended render still see the committed prefix.
+		expect(session.getSkillHintVisible()).toBe(true);
+		session.settings.set("skillful", true);
+		resume.resolve();
+		await refresh;
+
+		// The frame rendered the candidate false and the commit published it:
+		// prompt and committed snapshot describe the same state.
+		expect(session.systemPrompt).toEqual(["hint-hidden"]);
+		expect(session.getSkillHintVisible()).toBe(false);
+	});
+
+	it("preserves the committed prompt and hint when descriptor preparation throws", async () => {
+		const { session, toolRegistry } = newSession(async () => "uncommitted", {
+			skills: [
+				{
+					name: "test",
+					description: "test",
+					filePath: "/skills/test/SKILL.md",
+					baseDir: "/skills/test",
+					source: "test",
+				},
+			],
+		});
+		const read = toolRegistry.get("read")!;
+		Object.defineProperty(read, "description", {
+			get: () => {
+				throw new Error("descriptor unavailable");
+			},
+		});
+		session.settings.set("skillful", false);
+		await expect(session.refreshBaseSystemPrompt()).rejects.toThrow("descriptor unavailable");
+		expect(session.systemPrompt).toEqual(["initial"]);
+		expect(session.getSkillHintVisible()).toBe(true);
+	});
+
 	it("rebuilds when the refresh argument tool order changes", async () => {
 		let rebuildCount = 0;
 		const { session } = newSession(async toolNames => {
@@ -776,7 +922,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 	it("rebuilds when a tool's getter-based description reflects new settings state", async () => {
 		// Built-in tools whose prompt-rendered metadata depends on settings expose
 		// `description` via getters that re-evaluate on every access (TaskTool reads
-		// task.disabledAgents/maxConcurrency/isolation.mode/simple/async.enabled, and
+		// task.disabledAgents/maxConcurrency/isolation.enabled/simple/async.enabled, and
 		// EditTool resolves through the current edit-mode definition). The signature
 		// reads `tool.description` live each call, so a settings flip that mutates the
 		// rendered string must change the signature on the next
@@ -822,39 +968,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		await session.refreshMCPTools([dynamicTool]);
 		expect(rebuildCount).toBe(baseline + 1);
 	});
-	it("rebuilds when the local calendar date rolls over between tool-stable MCP refreshes", async () => {
-		// `buildSystemPrompt` injects today's local date into the prompt body. The
-		// signature reads the same date provider so a session spanning local midnight
-		// must rebuild after an MCP reconnect with an otherwise identical tool set.
-		let currentDate = "2026-06-30";
-		let rebuildCount = 0;
-		const { session } = newSession(
-			async toolNames => {
-				rebuildCount++;
-				return `tools:${toolNames.join(",")}`;
-			},
-			{ getLocalCalendarDate: () => currentDate },
-		);
-		const tool = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search");
 
-		// First refresh: no signature yet, must rebuild.
-		await session.refreshMCPTools([tool]);
-		expect(rebuildCount).toBe(1);
-
-		// Same tools, same local day: signature matches, skip.
-		await session.refreshMCPTools([tool]);
-		expect(rebuildCount).toBe(1);
-
-		currentDate = "2026-07-01";
-
-		// Same tools, new local calendar day: date segment changed, must rebuild.
-		await session.refreshMCPTools([tool]);
-		expect(rebuildCount).toBe(2);
-
-		// Same tools, same new local day: skip again.
-		await session.refreshMCPTools([tool]);
-		expect(rebuildCount).toBe(2);
-	});
 	it("does not rebuild when MCP server instructions change only beyond the 4000-char truncation boundary", async () => {
 		// `rebuildSystemPrompt` (sdk.ts) truncates each server instruction to 4000 chars
 		// before embedding it. The `getMcpServerInstructions` callback must therefore
@@ -980,14 +1094,103 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		session.settings.set("tools.xdevDocs", "builtins");
 		session.settings.set("tools.xdevInlineDevices", ["mcp__nucleus_*"]);
 		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
+		const maintenanceMessages: AgentMessage[][] = [];
+		const maintenanceSpy = vi
+			.spyOn(SessionMaintenance.prototype, "runPrePromptCompactionIfNeeded")
+			.mockImplementation(async messages => {
+				maintenanceMessages.push([...messages]);
+			});
 
 		await session.refreshMCPTools([search]);
 		await session.prompt("hello");
+		expect(maintenanceSpy).toHaveBeenCalledTimes(1);
+		const estimatedNotice = (maintenanceMessages[0] ?? []).find(
+			(message): message is CustomMessage => message.role === "custom" && message.customType === "xdev-mount-notice",
+		);
+		expect(estimatedNotice).toBeDefined();
+		const estimatedText =
+			typeof estimatedNotice?.content === "string"
+				? estimatedNotice.content
+				: (estimatedNotice?.content ?? []).flatMap(part => (part.type === "text" ? [part.text] : [])).join("");
+		expect(estimatedText).toContain("## mcp__nucleus_search");
+		expect(estimatedText).toContain("## Schema");
 
 		const notices = mountNoticesIn(contexts[0]);
 		expect(notices).toHaveLength(1);
 		expect(notices[0]).toContain("## mcp__nucleus_search");
 		expect(notices[0]).toContain("## Schema");
+	});
+
+	it("defers a mount delta queued after its pre-prompt preview", async () => {
+		const { session, contexts } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {
+			xdev: createTestXdevState(),
+			responses: [{ content: ["ok"] }, { content: ["ok"] }],
+		});
+		session.settings.set("tools.xdevDocs", "builtins");
+		session.settings.set("tools.xdevInlineDevices", ["mcp__nucleus_*"]);
+		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
+		const fetch = createMcpCustomTool("mcp__nucleus_fetch", "nucleus", "fetch", "Fetch nucleus");
+		await session.refreshMCPTools([search]);
+
+		// The first prompt previews search for context maintenance. Fetch arrives
+		// during that await, after the only context-size check; consuming the now
+		// larger notice would add unbudgeted inline docs to this request.
+		const maintenanceSpy = vi
+			.spyOn(SessionMaintenance.prototype, "runPrePromptCompactionIfNeeded")
+			.mockImplementationOnce(async () => {
+				await session.refreshMCPTools([search, fetch]);
+			});
+		await session.prompt("first");
+
+		expect(mountNoticesIn(contexts[0])).toHaveLength(0);
+		maintenanceSpy.mockRestore();
+
+		// The complete coalesced delta survives and is previewed afresh on the next
+		// user turn, so both devices and their inline docs are delivered together.
+		await session.prompt("second");
+		const notices = mountNoticesIn(contexts[1]);
+		expect(notices).toHaveLength(1);
+		expect(notices[0]).toContain("xd://mcp__nucleus_search");
+		expect(notices[0]).toContain("xd://mcp__nucleus_fetch");
+		expect(notices[0]).toContain("## Schema");
+	});
+
+	it("defers a mount notice whose docs change via a same-name schema replacement", async () => {
+		const { session, contexts } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {
+			xdev: createTestXdevState(),
+			responses: [{ content: ["ok"] }, { content: ["ok"] }],
+		});
+		session.settings.set("tools.xdevDocs", "builtins");
+		session.settings.set("tools.xdevInlineDevices", ["mcp__nucleus_*"]);
+		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
+		const searchReconnected = createMcpCustomTool(
+			"mcp__nucleus_search",
+			"nucleus",
+			"search",
+			"Search nucleus, now reconnected with a different documented schema",
+		);
+		await session.refreshMCPTools([search]);
+
+		// The preview estimates the notice for the original schema. During the await
+		// a same-named tool reconnects with different docs: the mount set and the
+		// schema-excluding applied signature are unchanged, so the revision never
+		// moves, but the rendered docs differ. The notice must defer rather than
+		// slip its (potentially XDEV_DOCS_TOTAL_BUDGET-sized) docs past the estimate.
+		const maintenanceSpy = vi
+			.spyOn(SessionMaintenance.prototype, "runPrePromptCompactionIfNeeded")
+			.mockImplementationOnce(async () => {
+				await session.refreshMCPTools([searchReconnected]);
+			});
+		await session.prompt("first");
+		expect(mountNoticesIn(contexts[0])).toHaveLength(0);
+		maintenanceSpy.mockRestore();
+
+		// The next user turn re-previews against the new schema and delivers it.
+		await session.prompt("second");
+		const notices = mountNoticesIn(contexts[1]);
+		expect(notices).toHaveLength(1);
+		expect(notices[0]).toContain("xd://mcp__nucleus_search");
+		expect(notices[0]).toContain("reconnected with a different documented schema");
 	});
 
 	it("drops a mount delta that cancels out before the next prompt", async () => {
@@ -1110,6 +1313,40 @@ These tools became available:
 		).toHaveLength(0);
 	});
 
+	it("announces an unmount after a maintenance rebuild delivered the pending addition", async () => {
+		const { session, contexts, systemPrompts } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {
+			xdev: createTestXdevState(),
+			responses: [{ content: ["ok"] }, { content: ["ok"] }],
+			exposeXdevCatalog: true,
+		});
+		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
+		await session.refreshMCPTools([search]);
+
+		// The pending addition is previewed, then maintenance rebuilds the base
+		// catalog before delivery. The rebuild carries the device to the provider
+		// but invalidates the preview revision.
+		const rebuildDuringMaintenance = vi
+			.spyOn(SessionMaintenance.prototype, "runPrePromptCompactionIfNeeded")
+			.mockImplementationOnce(async () => {
+				await session.refreshBaseSystemPrompt();
+			});
+		await session.prompt("first");
+		expect(rebuildDuringMaintenance).toHaveBeenCalledTimes(1);
+		expect(systemPrompts[0]?.join("\n")).toContain("mcp__nucleus_search");
+		expect(mountNoticesIn(contexts[0] ?? [])).toHaveLength(0);
+		rebuildDuringMaintenance.mockRestore();
+
+		// Since the model learned the device from the delivered base, a subsequent
+		// unmount must produce a removal notice rather than cancelling the stale
+		// pending addition as though it had never been announced.
+		await session.refreshMCPTools([]);
+		await session.prompt("second");
+		const notices = mountNoticesIn(contexts[1] ?? []);
+		expect(notices).toHaveLength(1);
+		expect(notices[0]).toContain("Unmounted; writes fail:");
+		expect(notices[0]).toContain("xd://mcp__nucleus_search");
+	});
+
 	it("keeps the mount notice when before_agent_start replaces the catalog prompt (#7139)", async () => {
 		const replacementPrompt = ["extension replacement"];
 		const { session, contexts, systemPrompts } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {
@@ -1121,11 +1358,20 @@ These tools became available:
 		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
 
 		// The base prompt rebuild exposes the device, but the per-turn extension
-		// replaces that prompt before the provider call. The mount notice is now
-		// the only channel making the newly mounted device visible on this turn.
+		// replaces that prompt before the provider call. A second rebuild during
+		// maintenance advances the internal catalog revision, yet remains hidden by
+		// the same override and leaves the budgeted notice byte-identical. That
+		// notice is the only channel making the newly mounted device visible on this
+		// turn, so the revision change alone must not defer it.
 		await session.refreshMCPTools([search]);
+		const hiddenRebuild = vi
+			.spyOn(SessionMaintenance.prototype, "runPrePromptCompactionIfNeeded")
+			.mockImplementationOnce(async () => {
+				await session.refreshBaseSystemPrompt();
+			});
 		await session.prompt("hi");
 
+		expect(hiddenRebuild).toHaveBeenCalledTimes(1);
 		expect(systemPrompts[0]).toEqual(replacementPrompt);
 		const notices = mountNoticesIn(contexts[0]);
 		expect(notices).toHaveLength(1);
@@ -1237,6 +1483,107 @@ These tools became available:
 		expect(delivered).toHaveLength(1);
 		expect(delivered[0]).toContain("xd://mcp__nucleus_search");
 	});
+	it("keeps device-only write access until a full-write activation commits", async () => {
+		let blockRebuild = false;
+		const rebuildStarted = Promise.withResolvers<void>();
+		const releaseRebuild = Promise.withResolvers<void>();
+		const { session, isDeviceOnlyWrite, isPendingFullWriteDescription } = newSession(
+			async toolNames => {
+				if (blockRebuild) {
+					rebuildStarted.resolve();
+					await releaseRebuild.promise;
+				}
+				return `tools:${toolNames.join(",")}`;
+			},
+			{ xdev: createTestXdevState(), deviceOnlyWrite: true },
+		);
+
+		blockRebuild = true;
+		const activation = session.setActiveToolsByName(["read", "write"]);
+		try {
+			await rebuildStarted.promise;
+			expect(isDeviceOnlyWrite()).toBe(true);
+			expect(isPendingFullWriteDescription()).toBe(true);
+		} finally {
+			releaseRebuild.resolve();
+		}
+		await activation;
+
+		expect(isDeviceOnlyWrite()).toBe(false);
+		expect(isPendingFullWriteDescription()).toBe(false);
+	});
+
+	it("restores device-only write access when a full-write prompt rebuild fails", async () => {
+		let failRebuild = false;
+		const { session, isDeviceOnlyWrite } = newSession(
+			async toolNames => {
+				if (failRebuild) throw new Error("rebuild failed");
+				return `tools:${toolNames.join(",")}`;
+			},
+			{ xdev: createTestXdevState(), deviceOnlyWrite: true },
+		);
+		expect(isDeviceOnlyWrite()).toBe(true);
+		const activeBefore = session.getActiveToolNames();
+
+		failRebuild = true;
+		await expect(session.setActiveToolsByName(["read", "write"])).rejects.toThrow("rebuild failed");
+
+		expect(isDeviceOnlyWrite()).toBe(true);
+		expect(session.getActiveToolNames()).toEqual(activeBefore);
+	});
+
+	it("restores full write mode when transport reactivation fails", async () => {
+		let failRebuild = false;
+		const { session, isDeviceOnlyWrite } = newSession(
+			async toolNames => {
+				if (failRebuild) throw new Error("rebuild failed");
+				return `tools:${toolNames.join(",")}`;
+			},
+			{ xdev: createTestXdevState() },
+		);
+		await session.setActiveToolsByName(["read"]);
+		expect(isDeviceOnlyWrite()).toBe(false);
+		const activeBefore = session.getActiveToolNames();
+
+		session.setPlanModeState({ enabled: true, planFilePath: "local://PLAN.md" });
+		failRebuild = true;
+		await expect(session.setActiveToolsByName(["read", "write"])).rejects.toThrow("rebuild failed");
+
+		expect(isDeviceOnlyWrite()).toBe(false);
+		expect(session.getActiveToolNames()).toEqual(activeBefore);
+	});
+
+	it("revokes the active write predicate during rebuild and restores it on failure", async () => {
+		let blockRebuild = false;
+		const rebuildStarted = Promise.withResolvers<void>();
+		const releaseRebuild = Promise.withResolvers<void>();
+		const { session, isToolActive } = newSession(
+			async toolNames => {
+				if (blockRebuild) {
+					rebuildStarted.resolve();
+					await releaseRebuild.promise;
+					throw new Error("rebuild failed");
+				}
+				return `tools:${toolNames.join(",")}`;
+			},
+			{ xdev: createTestXdevState() },
+		);
+		expect(isToolActive("write")).toBe(true);
+
+		blockRebuild = true;
+		const deactivation = session.setActiveToolsByName(["read"]);
+		try {
+			await rebuildStarted.promise;
+			expect(isToolActive("write")).toBe(false);
+			expect(session.getActiveToolNames()).toContain("write");
+		} finally {
+			releaseRebuild.resolve();
+		}
+		await expect(deactivation).rejects.toThrow("rebuild failed");
+
+		expect(isToolActive("write")).toBe(true);
+		expect(session.getActiveToolNames()).toContain("write");
+	});
 
 	it("does not register write while rolling back a direct-tool rebuild failure", async () => {
 		let failRebuild = true;
@@ -1268,19 +1615,17 @@ These tools became available:
 
 	it("rolls back MCP catalog replacement when prompt rebuild fails", async () => {
 		let failRebuild = false;
-		let date = "2026-07-16";
 		const xdevState = createTestXdevState();
 		const { session } = newSession(
 			async toolNames => {
 				if (failRebuild) throw new Error("rebuild failed");
 				return `tools:${toolNames.join(",")}`;
 			},
-			{ xdev: xdevState, getLocalCalendarDate: () => date },
+			{ xdev: xdevState },
 		);
 		const oldTool = createMcpCustomTool("mcp__nucleus_old", "nucleus", "old", "Old tool");
 		const newTool = createMcpCustomTool("mcp__nucleus_new", "nucleus", "new", "New tool");
 		await session.refreshMCPTools([oldTool]);
-		date = "2026-07-17";
 		failRebuild = true;
 
 		await expect(session.refreshMCPTools([newTool])).rejects.toThrow("rebuild failed");
@@ -1297,30 +1642,96 @@ These tools became available:
 
 	it("rolls back RPC catalog replacement when prompt rebuild fails", async () => {
 		let failRebuild = false;
-		let date = "2026-07-16";
 		const xdevState = createTestXdevState();
 		const { session } = newSession(
 			async toolNames => {
 				if (failRebuild) throw new Error("rebuild failed");
 				return `tools:${toolNames.join(",")}`;
 			},
-			{ xdev: xdevState, getLocalCalendarDate: () => date },
+			{ xdev: xdevState },
 		);
-		const oldTool = { ...createBasicTool("rpc_old", "RPC Old"), loadMode: "discoverable" as const };
-		const newTool = { ...createBasicTool("rpc_new", "RPC New"), loadMode: "discoverable" as const };
+		// Non-discoverable RPC tools stay active top-level, so replacing the catalog
+		// (old → new) changes the rebuild signature on its own — the replacement
+		// itself must trigger the failing rebuild that gets rolled back.
+		const oldTool = createBasicTool("rpc_old", "RPC Old");
+		const newTool = createBasicTool("rpc_new", "RPC New");
 		await session.refreshRpcHostTools([oldTool]);
-		date = "2026-07-17";
 		failRebuild = true;
 
 		await expect(session.refreshRpcHostTools([newTool])).rejects.toThrow("rebuild failed");
 		expect(session.getToolByName(oldTool.name)).toBeDefined();
 		expect(session.getToolByName(newTool.name)).toBeUndefined();
-		expect(session.getMountedXdevToolNames()).toContain(oldTool.name);
+		expect(session.getActiveToolNames()).toContain(oldTool.name);
+		expect(session.getActiveToolNames()).not.toContain(newTool.name);
 
 		failRebuild = false;
 		await session.refreshRpcHostTools([newTool]);
 		expect(session.getToolByName(oldTool.name)).toBeUndefined();
 		expect(session.getToolByName(newTool.name)).toBeDefined();
-		expect(session.getMountedXdevToolNames()).toContain(newTool.name);
+		expect(session.getActiveToolNames()).toContain(newTool.name);
+	});
+
+	it("keeps mixed-case plugin devices mounted when MCP tools refresh", async () => {
+		const xdevState = createTestXdevState();
+		const { session, toolRegistry } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {
+			xdev: xdevState,
+		});
+		const pluginTool = { ...createBasicTool("CaseAdd", "Case Add"), loadMode: "discoverable" as const };
+		toolRegistry.set(pluginTool.name, pluginTool);
+		xdevState.mountedNames.add(pluginTool.name);
+
+		await session.refreshMCPTools([
+			createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus"),
+		]);
+
+		expect(session.getMountedXdevToolNames()).toContain("CaseAdd");
+		expect(session.getToolByName("CaseAdd")).toBeDefined();
+	});
+
+	it("rebuilds when an RPC host read tool gains skill URI capability", async () => {
+		// `readsSkillUris` drives skill catalog/URI guidance, so a same-name
+		// replacement that flips it must change the rebuild signature even when
+		// name, label, description, and wire name are identical.
+		let rebuildCount = 0;
+		const xdevState = createTestXdevState();
+		const { session } = newSession(
+			async toolNames => {
+				rebuildCount++;
+				return `tools:${toolNames.join(",")}`;
+			},
+			{ xdev: xdevState },
+		);
+		const plainRead = createBasicTool("rpc_read", "RPC Read");
+		const capableRead = { ...createBasicTool("rpc_read", "RPC Read"), readsSkillUris: true } as AgentTool;
+
+		await session.refreshRpcHostTools([plainRead]);
+		expect(rebuildCount).toBe(1);
+
+		await session.refreshRpcHostTools([capableRead]);
+		expect(rebuildCount).toBe(2);
+	});
+
+	it("rebuilds when a mounted RPC reader gains skill URI capability", async () => {
+		// Discoverable non-builtins mount under xd:// instead of staying direct:
+		// the same-name capability flip must still change the rebuild signature.
+		let rebuildCount = 0;
+		const xdevState = createTestXdevState();
+		const { session } = newSession(
+			async toolNames => {
+				rebuildCount++;
+				return `tools:${toolNames.join(",")}`;
+			},
+			{ xdev: xdevState },
+		);
+		const plainReader = { ...createBasicTool("rpc_reader", "RPC Reader"), loadMode: "discoverable" as const };
+		const capableReader = { ...plainReader, readsSkillUris: true } as AgentTool;
+
+		await session.refreshRpcHostTools([plainReader]);
+		expect(session.getMountedXdevToolNames()).toContain("rpc_reader");
+		const mountedRebuilds = rebuildCount;
+
+		await session.refreshRpcHostTools([capableReader]);
+		expect(session.getMountedXdevToolNames()).toContain("rpc_reader");
+		expect(rebuildCount).toBeGreaterThan(mountedRebuilds);
 	});
 });

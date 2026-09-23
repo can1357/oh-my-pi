@@ -12,7 +12,7 @@ import {
 	type ConfiguredThinkingMode,
 	parseCliEffort,
 	parseCliThinkingMode,
-} from "../thinking";
+} from "@oh-my-pi/pi-tui/thinking";
 import { normalizeToolNames } from "../tools/builtin-names";
 import {
 	createParseState,
@@ -51,6 +51,7 @@ export interface Args {
 	maxTime?: number;
 	apiKey?: string;
 	systemPrompt?: string;
+	systemPromptTemplate?: string;
 	appendSystemPrompt?: string;
 	thinkingMode?: ConfiguredThinkingMode;
 	effort?: ConfiguredThinkingLevel;
@@ -343,6 +344,9 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 		}
 	}
 
+	if (result.systemPrompt !== undefined && result.systemPromptTemplate !== undefined) {
+		throw new CliUsageError("--system-prompt and --system-prompt-template cannot be combined");
+	}
 	return result;
 }
 

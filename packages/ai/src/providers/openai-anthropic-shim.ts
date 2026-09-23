@@ -56,7 +56,7 @@ export function streamOpenAIAnthropicShim(
 	(async () => {
 		try {
 			const mergedHeaders = {
-				...(config.extraHeaders?.() ?? {}),
+				...config.extraHeaders?.(),
 				...options?.headers,
 			};
 
@@ -65,7 +65,7 @@ export function streamOpenAIAnthropicShim(
 			const reasoningEffort = options?.reasoning;
 
 			if (format === "anthropic") {
-				const anthropicModel = buildModel({
+				const anthropicSpec = {
 					id: model.id,
 					name: model.name,
 					api: "anthropic-messages",
@@ -75,12 +75,24 @@ export function streamOpenAIAnthropicShim(
 					contextWindow: model.contextWindow,
 					maxTokens: model.maxTokens,
 					reasoning: model.reasoning,
-					thinking: undefined,
-					...(config.anthropicThinkingMode && model.thinking
-						? { thinking: { ...model.thinking, mode: config.anthropicThinkingMode } }
-						: {}),
 					input: model.input,
 					cost: model.cost,
+				} as ModelSpec<"anthropic-messages">;
+				// Provider-wide catalog policy describes this provider's OpenAI-format
+				// rows, so a Claude id rebuilt for the Anthropic wire would inherit
+				// OpenAI effort metadata. Re-derive Claude thinking from the Anthropic
+				// lineage instead.
+				const claudeThinking =
+					config.anthropicThinkingMode === undefined && model.identity.class === "anthropic"
+						? buildModel({ ...anthropicSpec, provider: "anthropic" }).thinking
+						: undefined;
+				const anthropicModel = buildModel({
+					...anthropicSpec,
+					...(config.anthropicThinkingMode && model.thinking
+						? { thinking: { ...model.thinking, mode: config.anthropicThinkingMode } }
+						: claudeThinking
+							? { thinking: claudeThinking }
+							: {}),
 				} as ModelSpec<"anthropic-messages">);
 				const forwardsAnthropicReasoning =
 					config.anthropicThinkingMode !== undefined ||

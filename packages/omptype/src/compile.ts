@@ -1108,11 +1108,12 @@ export function compile(ir: IR): (value: unknown) => unknown {
 		// array), and each re-entry must reuse this build instead of starting a
 		// fresh one forever. The wrapper resolves to the built validator by call
 		// time; the interpreter is a safety net that never triggers post-build.
-		let built: ((value: unknown) => unknown) | undefined;
-		compiledCache.set(root, value => (built === undefined ? walk(root, value) : built(value)));
-		built = new Builder().build(root);
-		compiledCache.set(root, built);
-		return built;
+		const built: { value?: (value: unknown) => unknown } = {};
+		compiledCache.set(root, value => (built.value === undefined ? walk(root, value) : built.value(value)));
+		const compiled = new Builder().build(root);
+		built.value = compiled;
+		compiledCache.set(root, compiled);
+		return compiled;
 	}
 	return validator;
 }
@@ -1122,14 +1123,15 @@ export function compileAllows(ir: IR): (value: unknown) => value is unknown {
 	const root = resolvedRoot(ir);
 	const validator = allowsCache.get(root);
 	if (validator === undefined) {
-		let built: ((value: unknown) => value is unknown) | undefined;
+		const built: { value?: (value: unknown) => value is unknown } = {};
 		allowsCache.set(root, ((value: unknown) =>
-			built === undefined ? !(walk(root, value) instanceof OmpErrors) : built(value)) as (
+			built.value === undefined ? !(walk(root, value) instanceof OmpErrors) : built.value(value)) as (
 			value: unknown,
 		) => value is unknown);
-		built = new Builder().buildAllows(root);
-		allowsCache.set(root, built);
-		return built;
+		const compiled = new Builder().buildAllows(root);
+		built.value = compiled;
+		allowsCache.set(root, compiled);
+		return compiled;
 	}
 	return validator;
 }

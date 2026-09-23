@@ -79,6 +79,48 @@ bun run serve --port 4700
 State lives in `<jobs-dir>/_manager/metaharness.sqlite`; the filesystem
 stays the source of truth and historical CLI runs are auto-discovered.
 
+## Native Terminal-Bench 2.1 runner
+
+`bench:tb` bypasses Harbor and Docker. It boots each task's published OCI
+image as an x86_64 KVM microVM on a Vibemon host, streams omp's `--mode rpc`
+protocol through `vmon exec --pipe`, runs the verifier in the same mutated VM,
+and writes resumable epochs plus artifacts under `runs/tb`.
+
+```bash
+bun run bench:tb \
+  --dataset /path/to/terminal-bench-2-1 \
+  --concurrency 4 --forever --budget 25
+```
+
+For the measured workstation defaults (seven-model pool, `:floor`, concurrency
+20), use the resumable wrapper:
+
+```bash
+bun --cwd packages/metaharness run bench:tb-floor
+```
+
+It writes to `runs/tb-floor`; rerunning resumes an incomplete epoch or starts
+the next epoch after completion. Environment overrides: `TB_JOBS_DIR`,
+`TB_CONCURRENCY`, `TB_DATASET`, `TB_BUDGET_USD`, `TB_ATTEMPTS`, and
+`TB_FOREVER=1`. Extra CLI flags pass through and win over wrapper defaults.
+
+The default pool is Ling 3.0 Flash, both DeepSeek V4 Flash routes (0731 and
+unversioned/0423), Nemotron 3.5 Lightning, Laguna S 2.1, Tencent Hy3, and Step
+3.7 Flash through OpenRouter. Requests default to OpenRouter's `:floor`
+cheapest-provider routing; use `--openrouter-variant default|nitro|online|exacto`
+to override it. Repeat `--model provider/id` to replace the pool.
+
+Defaults target the workstation's `xeon.internal` KVM host and the local
+`/work/vibevmm` checkout. The runner cross-builds and caches a patched `vmon`
+binary when the remote copy lacks raw pipe support, owns a privileged TAP
+broker for its lifetime, and reverse-tunnels the loopback omp auth gateway so
+provider credentials never enter task VMs. Trial agents use a lean terminal
+tool allowlist, `edit.mode: replace`, and the same low-cost
+`openrouter/qwen/qwen3.7-flash` vision role; general orchestration tools are
+omitted from the benchmark prompt. Override infrastructure with
+`--vmon-host`, `--vmon-source`, `--vmon-bin`, `--vmon-home`,
+`--vmon-kernel`, `--vmon-agent`, and `--gateway-url`.
+
 ## Harbor runner options (excerpt)
 
 | Option | Default | Notes |

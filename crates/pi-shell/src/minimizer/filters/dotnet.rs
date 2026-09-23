@@ -31,7 +31,8 @@ fn filter_build_like(label: &str, input: &str, exit_code: i32) -> String {
 
 	if exit_code == 0 && matches!(label, "dotnet build" | "dotnet restore") {
 		let lines: Vec<&str> = input.lines().collect();
-		// Find the LAST occurrence of "0 Warning(s)" followed by indented "0 Error(s)".
+		// Find the LAST occurrence of "0 Warning(s)" followed by indented "0
+		// Error(s)".
 		let mut last_match = None;
 		for i in 0..lines.len().saturating_sub(1) {
 			if lines[i].trim() == "0 Warning(s)"

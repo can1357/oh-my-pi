@@ -5,7 +5,7 @@ This document describes how MCP servers are discovered, connected, exposed as to
 ## Lifecycle at a glance
 
 1. **SDK startup** kicks off MCP discovery (unless MCP is disabled): headless/SDK sessions await `discoverAndLoadMCPTools()`; interactive sessions (`hasUI: true`) create the manager up front and defer `discoverAndConnect()` until the session is live.
-2. **Discovery** (`loadAllMCPConfigs`) resolves MCP server configs from capability sources, filters disabled/project/Exa entries and browser MCP servers when the built-in browser tool is enabled, and preserves source metadata.
+2. **Discovery** (`loadAllMCPConfigs`) resolves MCP server configs from capability sources, filters disabled/project/Exa entries and browser MCP servers when the built-in browser prelude is enabled, and preserves source metadata.
 3. **Manager connect phase** (`MCPManager.connectServers`) starts per-server connect + `tools/list` in parallel.
 4. **Fast startup gate** waits up to 250ms, then may return:
    - fully loaded `MCPTool`s,
@@ -22,12 +22,12 @@ This document describes how MCP servers are discovered, connected, exposed as to
 
 `createAgentSession()` in `src/sdk.ts` performs MCP startup when `enableMCP` is true (default). There are two paths:
 
-- **Headless/SDK** (no UI, no provided manager): awaits `discoverAndLoadMCPTools(cwd, { ... })` and merges the returned tools into the startup `customTools` set.
+- **Headless/SDK** (no UI, no provided manager): awaits `discoverAndLoadMCPTools(cwd, { ... })` and merges the returned tools into the startup `customTools` set. Print mode alone then waits for configured servers' tool handshakes or failures before its first prompt (bounded by `OMP_MCP_TIMEOUT_MS`, default 30 seconds), refreshes the session's tool registry, and warns per unavailable server; `OMP_MCP_REQUIRE_READY=1` instead exits 1 without sending the prompt. `OMP_MCP_TIMEOUT_MS=0` disables this barrier deadline and may wait indefinitely.
 - **Interactive/TUI** (`hasUI: true`, no provided manager): constructs `MCPManager` immediately (with cache + auth storage), defers `discoverAndConnect()` to a background task started after the session exists, then binds tools via `session.refreshMCPTools(...)` (disposing the manager if the session was torn down mid-connect).
 
 Both paths:
 
-- pass `authStorage`, cache storage, `mcp.enableProjectConfig`, and browser-MCP filtering based on the `browser.enabled` setting,
+- pass `authStorage`, cache storage, `mcp.enableProjectConfig`, and browser-MCP filtering based on the `browser.enabled` prelude setting,
 - always set `filterExa: true`,
 - log per-server load/connect errors,
 - store the manager in `toolSession.mcpManager` and the session result.
@@ -42,7 +42,7 @@ Filtering behavior:
 
 - `enableProjectConfig: false` removes project-level entries (`_source.level === "project"`).
 - `enabled: false` entries are suppressed unless the active-profile user `enabledServers` allowlist names them; the user `disabledServers` denylist always suppresses a same-named entry.
-- Exa servers are filtered out by default and API keys are extracted for native Exa tool integration; browser automation MCP servers are filtered when `filterBrowser` is true.
+- Exa servers are filtered out by default and API keys are extracted for native Exa tool integration, unless the config explicitly requests Exa tools the native integration does not provide (`web_fetch_exa`, `web_search_advanced_exa`); browser automation MCP servers are filtered when `filterBrowser` is true.
 
 Result includes both `configs` and `sources` (metadata used later for provider labeling).
 
@@ -95,10 +95,10 @@ For each discovered server in `connectServers()`:
 `connectToServer()` behavior (`src/mcp/client.ts`):
 
 - creates stdio or HTTP/SSE transport,
-- performs MCP `initialize` using protocol version `2025-03-26` and advertises the `roots` capability,
+- performs MCP `initialize` using protocol version `2025-11-25` and advertises the `roots` capability,
 - answers server-to-client `ping` and `roots/list` requests; unsupported request methods return JSON-RPC `-32601`,
-- for HTTP/SSE, starts the background SSE listener before `notifications/initialized`,
-- sends `notifications/initialized`,
+- sends `notifications/initialized` before any further session traffic,
+- for Streamable HTTP, starts the background SSE listener only after `notifications/initialized`,
 - uses timeout precedence `OMP_MCP_TIMEOUT_MS`, then `config.timeout`, then 30s; `0` disables the client-side timeout,
 - closes transport on init failure.
 
@@ -107,9 +107,9 @@ For each discovered server in `connectServers()`:
 `connectServers()` waits on a race between:
 
 - all connect/tool-load tasks settled, and
-- `STARTUP_TIMEOUT_MS = 250`.
+- `resolveMCPStartupTimeoutMs`: `OMP_MCP_STARTUP_TIMEOUT_MS` env override, else `mcp.startupTimeoutMs`, else 250 ms; `0` waits until initial loads settle.
 
-After 250ms:
+After the startup window:
 
 - fulfilled tasks become live `MCPTool`s,
 - rejected tasks produce per-server errors,
@@ -233,7 +233,7 @@ Top-level sessions own managers they create. `AgentSession.dispose()` disconnect
 
 ## Public API surface
 
-`src/mcp/index.ts` re-exports client operations, config loader/writer APIs, loader and manager APIs, OAuth discovery, tool bridges/cache, HTTP and stdio transports, protocol types, plus `callMCP`/`parseSSE`. `src/sdk.ts` exposes `discoverMCPServers()` as a convenience wrapper over `discoverAndLoadMCPTools`; it returns `{ manager, tools, errors, connectedServers, exaApiKeys }`.
+`src/mcp/index.ts` re-exports client operations, config loader/writer APIs, loader and manager APIs, OAuth discovery, tool bridges/cache, HTTP and stdio transports, protocol types, plus the lightweight HTTP helpers `callMCP`, `readMcpJsonRpcResponse`, and `redactUrlForLog`. `src/sdk.ts` exposes `discoverMCPServers()` as a convenience wrapper over `discoverAndLoadMCPTools`; it returns `{ manager, tools, errors, connectedServers, exaApiKeys }`.
 
 ## Implementation files
 

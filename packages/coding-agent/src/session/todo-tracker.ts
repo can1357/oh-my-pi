@@ -5,7 +5,8 @@ import type { Settings } from "../config/settings";
 import eagerTaskPrompt from "../prompts/system/eager-task.md" with { type: "text" };
 import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
 import midRunTodoNudgePrompt from "../prompts/system/mid-run-todo-nudge.md" with { type: "text" };
-import { getLatestTodoPhasesFromEntries, isTodoPhase, type TodoItem, type TodoPhase } from "../tools/todo";
+import { getLatestTodoPhasesFromEntries, isTodoPhase } from "../tools/todo";
+import { type TodoItem, type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { SessionManager } from "./session-manager";
@@ -50,12 +51,15 @@ export interface TodoTrackerHost {
 	model(): Model | undefined;
 	agentKind(): "main" | "sub";
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
-	scheduleAgentContinue(options: { generation?: number }): void;
+	scheduleAgentContinue(options: { source: string; generation?: number }): void;
 	promptGeneration(): number;
 	hasPendingAsyncWake(): boolean;
 	getActiveToolNames(): string[];
+	getEnabledToolNames(): string[];
 	toolRegistry(): Map<string, AgentTool>;
 	planModeEnabled(): boolean;
+	/** Whether prewalk will hand off after its plan nudge owns todo creation. */
+	prewalkWillHandoff(): boolean;
 	consumeLastServedToolChoiceLabel(): string | undefined;
 }
 
@@ -133,6 +137,9 @@ export class TodoTracker {
 		const mode = this.#host.settings.get("todo.eager");
 		if (mode === "default" || !this.#host.settings.get("todo.enabled")) return undefined;
 		if (this.#host.planModeEnabled() || this.#phases.length > 0) return undefined;
+		// An actionable prewalk drives todo creation in a plan-first-then-todo order;
+		// the forced eager prelude's "call todo first this turn" contradicts it (#10510).
+		if (this.#host.prewalkWillHandoff()) return undefined;
 		if (promptText !== undefined) {
 			if (this.#host.agent.state.messages.some(message => message.role === "user")) return undefined;
 			const trimmedPromptText = promptText.trimEnd();
@@ -173,7 +180,7 @@ export class TodoTracker {
 			const trimmed = promptText.trimEnd();
 			if (trimmed.endsWith("?") || trimmed.endsWith("!")) return undefined;
 		}
-		if (!this.#host.getActiveToolNames().includes("task")) return undefined;
+		if (!this.#host.getEnabledToolNames().includes("task")) return undefined;
 		return {
 			role: "custom",
 			customType: "eager-task-prelude",
@@ -279,7 +286,10 @@ export class TodoTracker {
 		this.#reminderAwaitingProgress = true;
 		this.#host.agent.appendMessage(reminderMessage);
 		this.#host.sessionManager.appendMessage(reminderMessage);
-		this.#host.scheduleAgentContinue({ generation: this.#host.promptGeneration() });
+		this.#host.scheduleAgentContinue({
+			source: "todo-reminder",
+			generation: this.#host.promptGeneration(),
+		});
 		return true;
 	}
 

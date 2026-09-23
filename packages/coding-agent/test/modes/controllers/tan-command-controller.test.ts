@@ -1,8 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import type { AsyncJobRegisterOptions } from "@oh-my-pi/pi-coding-agent/async/job-manager";
+import type { EffectiveExtensionRoots } from "@oh-my-pi/pi-coding-agent/capability/types";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { PreparedExtension } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { resolveLocalRoot } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
 import { TanCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/tan-command-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -54,13 +57,20 @@ function createCloneStub(overrides?: {
 	abort?: () => void;
 	sessionManager?: { appendSessionInit: (init: unknown) => void };
 	lastAssistantText?: string;
+	activeToolNames?: string[];
+	enabledToolNames?: string[];
 }) {
-	const appendMessage = vi.fn();
+	const messages: AgentMessage[] = [];
+	const appendMessage = vi.fn((message: AgentMessage) => {
+		messages.push(message);
+	});
 	let listener: ((event: TanSessionEvent) => void) | undefined;
 	const clone = {
-		agent: { appendMessage },
+		agent: { appendMessage, state: { messages } },
 		sessionManager: overrides?.sessionManager,
 		setTodoPhases: vi.fn(),
+		getActiveToolNames: vi.fn(() => overrides?.activeToolNames ?? ["read", "bash"]),
+		getEnabledToolNames: vi.fn(() => overrides?.enabledToolNames ?? overrides?.activeToolNames ?? ["read", "bash"]),
 		subscribe: vi.fn((l: (event: TanSessionEvent) => void) => {
 			listener = l;
 			return () => {
@@ -69,6 +79,8 @@ function createCloneStub(overrides?: {
 		}),
 		prompt: vi.fn(overrides?.prompt ?? (async () => {})),
 		waitForIdle: vi.fn(async () => {}),
+		hasPendingAsyncWork: vi.fn(() => false),
+		settleAsyncWork: vi.fn(async () => {}),
 		getLastAssistantMessage: vi.fn(() => assistantText(overrides?.lastAssistantText ?? "done")),
 		abort: vi.fn(overrides?.abort ?? (() => {})),
 		dispose: vi.fn(async () => {}),
@@ -76,6 +88,7 @@ function createCloneStub(overrides?: {
 	return {
 		clone,
 		appendMessage,
+		messages,
 		get compactionListener() {
 			return listener;
 		},
@@ -88,6 +101,11 @@ function createContext(overrides?: {
 	agentId?: string;
 	parentPromptCacheKey?: string;
 	register?: (run: CapturedJobRun, options?: AsyncJobRegisterOptions) => string;
+	activeToolNames?: string[];
+	enabledToolNames?: string[];
+	preparedExtensions?: unknown;
+	effectiveExtensionRoots?: unknown;
+	extensionPaths?: unknown;
 }) {
 	const tempDir = TempDir.createSync("@omp-tan-controller-");
 	const parentFile = path.join(tempDir.path(), "parent.jsonl");
@@ -112,8 +130,12 @@ function createContext(overrides?: {
 		sessionId: "parent-session",
 		configuredThinkingLevel: vi.fn(() => undefined),
 		systemPrompt: ["system prompt"],
-		getActiveToolNames: vi.fn(() => ["read", "bash"]),
+		getActiveToolNames: vi.fn(() => overrides?.activeToolNames ?? ["read", "bash"]),
+		getEnabledToolNames: vi.fn(() => overrides?.enabledToolNames ?? overrides?.activeToolNames ?? ["read", "bash"]),
 		modelRegistry: { authStorage: { marker: "auth" } },
+		preparedExtensions: overrides?.preparedExtensions,
+		effectiveExtensionRoots: overrides?.effectiveExtensionRoots,
+		extensionPaths: overrides?.extensionPaths,
 		getAgentId: vi.fn(() => overrides?.agentId),
 		sendCustomMessage: vi.fn(async () => {
 			sequence.push("sendCustomMessage");
@@ -211,7 +233,13 @@ describe("TanCommandController", () => {
 			harness.tempDir.path(),
 			harness.parentFile.slice(0, -6),
 			undefined,
-			{ suppressBreadcrumb: true, sessionFile: expect.stringMatching(/Tan-.+\.jsonl$/) },
+			{
+				copyArtifacts: false,
+				suppressBreadcrumb: true,
+				sessionFile: expect.stringMatching(/Tan-.+\.jsonl$/),
+				resetInheritedCost: true,
+				repairInterruptedTail: true,
+			},
 		);
 		expect(harness.register).toHaveBeenCalledWith("task", "/tan write the release note", expect.any(Function), {
 			ownerId: MAIN_AGENT_ID,
@@ -258,6 +286,168 @@ describe("TanCommandController", () => {
 		// The local mapping keys off the session-manager id (not `session.sessionId`,
 		// still "parent-session"), matching the parent's large-paste / local:// writes.
 		expect(opts.getSessionId?.()).toBe("parent-local-session");
+	});
+
+	it("keeps the tangent alive until successive descendant results produce the final answer", async () => {
+		const harness = createContext();
+		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);
+		const { clone } = createCloneStub();
+		const firstEntered = Promise.withResolvers<void>();
+		const secondEntered = Promise.withResolvers<void>();
+		const firstResult = Promise.withResolvers<void>();
+		const secondResult = Promise.withResolvers<void>();
+		let generation = 0;
+		let answer = "preliminary answer";
+		clone.hasPendingAsyncWork.mockImplementation(() => generation < 2);
+		clone.settleAsyncWork.mockImplementation(async () => {
+			if (generation === 0) {
+				firstEntered.resolve();
+				await firstResult.promise;
+				answer = "first descendant result; another descendant is pending";
+			} else {
+				secondEntered.resolve();
+				await secondResult.promise;
+				answer = "final answer incorporating both descendant results";
+			}
+			generation++;
+		});
+		clone.getLastAssistantMessage.mockImplementation(() => assistantText(answer));
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({
+			session: clone,
+		} as unknown as CreateAgentSessionResult);
+		await new TanCommandController(harness.ctx).start("integrate descendant results");
+		const run = harness.capturedRun;
+		if (!run) throw new Error("run function was not captured");
+		let returned = false;
+		const result = run({
+			jobId: "job-123",
+			signal: new AbortController().signal,
+			reportProgress: async () => {},
+		}).then(value => {
+			returned = true;
+			return value;
+		});
+		try {
+			// Racing the first wait against completion makes the old premature return
+			// fail immediately rather than waiting for a test timeout.
+			expect(await Promise.race([firstEntered.promise.then(() => "waiting"), result.then(() => "returned")])).toBe(
+				"waiting",
+			);
+			expect(clone.dispose).not.toHaveBeenCalled();
+			firstResult.resolve();
+			await secondEntered.promise;
+			expect(returned).toBe(false);
+			expect(clone.dispose).not.toHaveBeenCalled();
+			secondResult.resolve();
+			expect(await result).toBe("final answer incorporating both descendant results");
+			expect(clone.dispose).toHaveBeenCalledTimes(1);
+		} finally {
+			firstResult.resolve();
+			secondResult.resolve();
+			await result;
+		}
+	});
+
+	it("cancels a tangent while descendant settlement is pending and disposes its clone", async () => {
+		const harness = createContext();
+		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);
+		const { clone } = createCloneStub();
+		const settling = Promise.withResolvers<void>();
+		const settled = Promise.withResolvers<void>();
+		clone.hasPendingAsyncWork.mockReturnValue(true);
+		clone.settleAsyncWork.mockImplementation(async () => {
+			settling.resolve();
+			await settled.promise;
+		});
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({
+			session: clone,
+		} as unknown as CreateAgentSessionResult);
+		await new TanCommandController(harness.ctx).start("wait for a descendant");
+		const run = harness.capturedRun;
+		if (!run) throw new Error("run function was not captured");
+		const abort = new AbortController();
+		const result = run({ jobId: "job-123", signal: abort.signal, reportProgress: async () => {} });
+		try {
+			await settling.promise;
+			abort.abort();
+			await expect(result).rejects.toThrow();
+			expect(clone.abort).toHaveBeenCalledTimes(1);
+			expect(clone.dispose).toHaveBeenCalledTimes(1);
+			expect(clone.getLastAssistantMessage).not.toHaveBeenCalled();
+		} finally {
+			clone.hasPendingAsyncWork.mockReturnValue(false);
+			settled.resolve();
+			await result.catch(() => {});
+		}
+	});
+
+	it("forwards the parent's prepared extensions and root policy so the tan child rebinds runtime providers", async () => {
+		// Regression: the tan clone reuses the parent's shared ModelRegistry. If it
+		// is built without the parent's extensions, the SDK's syncExtensionSources
+		// prune unregisters extension-provided providers from that shared registry,
+		// so the child fails its API-key check ("No API key found for <provider>")
+		// and the parent loses the registration too. The child MUST rebind the
+		// parent's prepared extensions before that prune runs.
+		const preparedExtensions: PreparedExtension[] = [
+			{ path: "/ext/provider.ts", resolvedPath: "/ext/provider.ts", factory: null, error: null },
+		];
+		const effectiveExtensionRoots: EffectiveExtensionRoots = {
+			explicit: ["/ext/provider.ts"],
+			mode: "explicit-only",
+			configured: [],
+			configuredLevel: "user",
+		};
+		const extensionPaths = ["/ext/provider.ts"];
+		const harness = createContext({ preparedExtensions, effectiveExtensionRoots, extensionPaths });
+		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);
+		const { clone } = createCloneStub({ lastAssistantText: "done" });
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: clone } as unknown as CreateAgentSessionResult;
+		});
+		const controller = new TanCommandController(harness.ctx);
+
+		await controller.start("chase the tangent");
+		const capturedRun = harness.capturedRun;
+		if (!capturedRun) throw new Error("run function was not captured");
+		await capturedRun({ jobId: "job-123", signal: new AbortController().signal, reportProgress: async () => {} });
+
+		expect(capturedOptions?.preloadedPreparedExtensions).toBe(preparedExtensions);
+		// Path-list fallback is forwarded (fresh copy) for parent builds without prepared factories.
+		expect(capturedOptions?.preloadedExtensionPaths).toEqual(extensionPaths);
+		expect(capturedOptions?.extensionRoots?.()).toBe(effectiveExtensionRoots);
+		expect(capturedOptions?.disableExtensionDiscovery).toBe(true);
+	});
+
+	it("collapses an empty prepared-extensions list to undefined so the child selects the path fallback", async () => {
+		// `[]` is truthy: if forwarded verbatim the child would bind an empty
+		// factory list and skip the populated path fallback, then prune the shared
+		// registry from an empty source set — the exact failure the fix prevents.
+		const effectiveExtensionRoots: EffectiveExtensionRoots = {
+			explicit: ["/ext/provider.ts"],
+			mode: "explicit-only",
+			configured: [],
+			configuredLevel: "user",
+		};
+		const extensionPaths = ["/ext/provider.ts"];
+		const harness = createContext({ preparedExtensions: [], effectiveExtensionRoots, extensionPaths });
+		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);
+		const { clone } = createCloneStub({ lastAssistantText: "done" });
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: clone } as unknown as CreateAgentSessionResult;
+		});
+		const controller = new TanCommandController(harness.ctx);
+
+		await controller.start("chase the tangent");
+		const capturedRun = harness.capturedRun;
+		if (!capturedRun) throw new Error("run function was not captured");
+		await capturedRun({ jobId: "job-123", signal: new AbortController().signal, reportProgress: async () => {} });
+
+		expect(capturedOptions?.preloadedPreparedExtensions).toBeUndefined();
+		expect(capturedOptions?.preloadedExtensionPaths).toEqual(extensionPaths);
 	});
 
 	it("aborts the cloned agent when the background job signal aborts", async () => {
@@ -386,14 +576,40 @@ describe("TanCommandController", () => {
 		expect(unregister).not.toHaveBeenCalled();
 	});
 
-	it("isolates the fork: clears inherited todos, injects the fork notice, and re-injects after compaction", async () => {
+	it("copies and persists the full enabled tool set", async () => {
+		const enabledToolNames = ["eval", "read", "bash"];
+		const harness = createContext({ activeToolNames: ["eval"], enabledToolNames });
+		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);
+		const appendSessionInit = vi.fn();
+		const { clone } = createCloneStub({
+			sessionManager: { appendSessionInit },
+			activeToolNames: ["eval"],
+			enabledToolNames,
+		});
+		const createAgentSessionSpy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({
+			session: clone,
+		} as unknown as CreateAgentSessionResult);
+		const controller = new TanCommandController(harness.ctx);
+
+		await controller.start("preserve bridge tools");
+		const run = harness.capturedRun;
+		if (!run) throw new Error("run function was not captured");
+		await run({ jobId: "job-123", signal: new AbortController().signal, reportProgress: async () => {} });
+
+		expect(createAgentSessionSpy.mock.calls[0]?.[0]?.toolNames).toEqual(enabledToolNames);
+		expect(appendSessionInit).toHaveBeenCalledWith(expect.objectContaining({ tools: enabledToolNames }));
+	});
+
+	it("restores the request when compaction summarizes an already-dispatched turn", async () => {
 		const harness = createContext();
 		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);
 		const compacted = Promise.withResolvers<void>();
 		const stub = createCloneStub({
 			prompt: async () => {
-				// Simulate the clone's history compacting mid-run: the summarizer
-				// erases the fork notice, so the controller must append it again.
+				// The request has been dispatched (agent_start), then the summarizer
+				// erases both the fork notice and the request from history, so the
+				// controller must append both again in order.
+				stub.compactionListener?.({ type: "agent_start" });
 				stub.compactionListener?.({ type: "auto_compaction_end", result: {}, aborted: false });
 				compacted.resolve();
 			},
@@ -414,17 +630,95 @@ describe("TanCommandController", () => {
 		// onto the parent's task.
 		expect(stub.clone.setTodoPhases).toHaveBeenCalledWith([]);
 		expect(harness.cloneManager.appendCustomEntry).toHaveBeenCalledWith("user_todo_edit", { phases: [] });
-		// Fork notice injected before the prompt and again after compaction.
-		expect(stub.appendMessage).toHaveBeenCalledTimes(2);
-		for (const call of stub.appendMessage.mock.calls) {
-			expect(call[0]).toEqual(
-				expect.objectContaining({
-					role: "developer",
-					content: expect.stringContaining('<system-notice cause="fork">'),
-				}),
-			);
-		}
+		// Initial dispatch places the fork notice before prompt(); after a
+		// post-dispatch compaction, the listener restores both messages in order
+		// so the notice's "request below" contract holds.
+		expect(stub.appendMessage.mock.calls.map(([message]) => message.role)).toEqual([
+			"developer",
+			"developer",
+			"user",
+		]);
+		expect(stub.appendMessage.mock.calls[2]?.[0]).toEqual(
+			expect.objectContaining({
+				role: "user",
+				content: [{ type: "text", text: "follow the tangent" }],
+				attribution: "user",
+			}),
+		);
 		// The compaction listener is released once the tan finishes.
 		expect(stub.compactionListener).toBeUndefined();
+	});
+
+	it("does not duplicate the request when compaction runs before the initial dispatch", async () => {
+		const harness = createContext();
+		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);
+		const compacted = Promise.withResolvers<void>();
+		const stub = createCloneStub({
+			prompt: async () => {
+				// Pre-prompt compaction on the inherited context fires before the
+				// pending request is dispatched (no agent_start yet). The dispatch
+				// appends the request itself, so the listener must restore only the
+				// notice here — appending the request would send it twice.
+				stub.compactionListener?.({ type: "auto_compaction_end", result: {}, aborted: false });
+				compacted.resolve();
+			},
+		});
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({
+			session: stub.clone,
+		} as unknown as CreateAgentSessionResult);
+		const controller = new TanCommandController(harness.ctx);
+
+		await controller.start("follow the tangent");
+		const run = harness.capturedRun;
+		if (!run) throw new Error("run function was not captured");
+		await run({ jobId: "job-123", signal: new AbortController().signal, reportProgress: async () => {} });
+		await compacted.promise;
+
+		// Only the two fork notices are re-appended (dispatch + pre-prompt
+		// restore); the request is left for the real dispatch, never duplicated.
+		expect(stub.appendMessage.mock.calls.map(([message]) => message.role)).toEqual(["developer", "developer"]);
+	});
+
+	it("does not re-append the request when compaction keeps it in context", async () => {
+		const harness = createContext();
+		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);
+		const compacted = Promise.withResolvers<void>();
+		const stub = createCloneStub({
+			prompt: async () => {
+				// Model the real dispatch appending the request, then a post-dispatch
+				// compaction that keeps the recent turn: the request survives in the
+				// rebuilt context, so the listener must not append it a second time.
+				stub.compactionListener?.({ type: "agent_start" });
+				stub.clone.agent.appendMessage({
+					role: "user",
+					content: [{ type: "text", text: "follow the tangent" }],
+					attribution: "user",
+					timestamp: Date.now(),
+				});
+				stub.compactionListener?.({ type: "auto_compaction_end", result: {}, aborted: false });
+				compacted.resolve();
+			},
+		});
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({
+			session: stub.clone,
+		} as unknown as CreateAgentSessionResult);
+		const controller = new TanCommandController(harness.ctx);
+
+		await controller.start("follow the tangent");
+		const run = harness.capturedRun;
+		if (!run) throw new Error("run function was not captured");
+		await run({ jobId: "job-123", signal: new AbortController().signal, reportProgress: async () => {} });
+		await compacted.promise;
+
+		// Only the initial-dispatch fork notice and the dispatched request are
+		// appended; the retained request is left in place, not duplicated.
+		expect(stub.appendMessage.mock.calls.map(([message]) => message.role)).toEqual(["developer", "user"]);
+		const requestCount = stub.messages.filter(
+			message =>
+				message.role === "user" &&
+				Array.isArray(message.content) &&
+				message.content.some(part => part.type === "text" && part.text === "follow the tangent"),
+		).length;
+		expect(requestCount).toBe(1);
 	});
 });

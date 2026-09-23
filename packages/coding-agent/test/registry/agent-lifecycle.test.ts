@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
@@ -87,6 +88,38 @@ describe("AgentLifecycleManager", () => {
 		expect(registry.get("generation-Sub")).toBeUndefined();
 	});
 
+	it("global() rebinds to the current registry after a lone AgentRegistry reset so release still emits aborted", async () => {
+		// A prior test file constructed the lifecycle global against registry A,
+		// then reset only the registry — the global is now registry B. The stranded
+		// manager (issue #11432) would run the terminal transition on the dead A
+		// while consumers subscribe to B, so status_changed never arrives.
+		const staleManager = lifecycle;
+		AgentRegistry.resetGlobalForTests();
+		const rebound = AgentLifecycleManager.global();
+		expect(rebound).not.toBe(staleManager);
+
+		const current = AgentRegistry.global();
+		const ref = current.register({
+			id: "Remote-Killed-Sub",
+			displayName: "remote kill",
+			kind: "sub",
+			session: makeSessionStub().session,
+			sessionFile: null,
+			status: "running",
+		});
+		const killed = deferred();
+		const unsubscribe = current.onChange(event => {
+			if (event.ref === ref && event.type === "status_changed" && event.ref.status === "aborted") killed.resolve();
+		});
+		try {
+			await rebound.release("Remote-Killed-Sub", ref, { tombstone: true });
+			await killed.promise;
+			expect(current.get("Remote-Killed-Sub")).toMatchObject({ status: "aborted", session: null });
+		} finally {
+			unsubscribe();
+		}
+	});
+
 	it("adopt arms the TTL: an idle agent is parked — session disposed, ref + sessionFile retained", async () => {
 		vi.useFakeTimers();
 		const stub = makeSessionStub();
@@ -143,6 +176,86 @@ describe("AgentLifecycleManager", () => {
 		expect(ref?.status).toBe("idle");
 		expect(ref?.session).toBe(revived.session);
 		expect(ref?.sessionFile).toBe("/tmp/3-Sub.jsonl");
+	});
+
+	it("reclaimDeadCorpse frees a parked, session-less, unadopted id and refuses live/adopted refs (#8490)", async () => {
+		// A corpse: registered running, then parked with no session and no adoption
+		// (the isolated-run finalize / interrupted-construction outcome). It cannot
+		// be revived and would otherwise poison its id for the process lifetime.
+		const corpse = registry.register({
+			id: "Corpse-Sub",
+			displayName: "task",
+			kind: "sub",
+			session: null,
+			sessionFile: "/tmp/Corpse-Sub.jsonl",
+			status: "running",
+		});
+		registry.setStatus("Corpse-Sub", "parked", corpse);
+		await expect(lifecycle.ensureLive("Corpse-Sub")).rejects.toThrow(/parked and cannot be revived/);
+
+		// A live ref is never reclaimed.
+		const live = makeSessionStub();
+		registry.register({
+			id: "Live-Sub",
+			displayName: "task",
+			kind: "sub",
+			session: live.session,
+			status: "running",
+		});
+		expect(await lifecycle.reclaimDeadCorpse("Live-Sub", registry.get("Live-Sub")!)).toBe(false);
+		expect(registry.get("Live-Sub")?.session).toBe(live.session);
+
+		// An adopted (revivable) parked agent is never reclaimed.
+		const adopted = registry.register({
+			id: "Adopted-Sub",
+			displayName: "task",
+			kind: "sub",
+			session: null,
+			sessionFile: "/tmp/Adopted-Sub.jsonl",
+			status: "parked",
+		});
+		lifecycle.adopt("Adopted-Sub", { idleTtlMs: 0, revive: async () => makeSessionStub().session }, adopted);
+		expect(await lifecycle.reclaimDeadCorpse("Adopted-Sub", adopted)).toBe(false);
+		expect(registry.get("Adopted-Sub")).toBe(adopted);
+
+		// A stale expected ref (points at a different agent) is never reclaimed.
+		expect(await lifecycle.reclaimDeadCorpse("Corpse-Sub", adopted)).toBe(false);
+
+		// The corpse is reclaimed, and its id becomes registerable again.
+		expect(await lifecycle.reclaimDeadCorpse("Corpse-Sub", corpse)).toBe(true);
+		expect(registry.get("Corpse-Sub")).toBeUndefined();
+		const respawn = registry.registerIfAvailable(
+			{ id: "Corpse-Sub", displayName: "task", kind: "sub", session: null, status: "running" },
+			null,
+		);
+		expect(respawn?.status).toBe("running");
+		expect(registry.get("Corpse-Sub")).toBe(respawn);
+	});
+
+	it("reclaimDeadCorpse preserves an unadopted parked ref when its persisted session can cold-revive", async () => {
+		const revived = makeSessionStub();
+		const cold = registry.register({
+			id: "Cold-Sub",
+			displayName: "task",
+			kind: "sub",
+			session: null,
+			sessionFile: "/tmp/Cold-Sub.jsonl",
+			status: "parked",
+		});
+		let factoryCalls = 0;
+		lifecycle.setPersistedSubagentReviverFactory(async ref => {
+			factoryCalls++;
+			expect(ref).toBe(cold);
+			return async () => revived.session;
+		}, 0);
+
+		expect(await lifecycle.reclaimDeadCorpse("Cold-Sub", cold)).toBe(false);
+		expect(registry.get("Cold-Sub")).toBe(cold);
+		expect(factoryCalls).toBe(1);
+
+		// The preserved ref remains messageable through the normal cold-revive path.
+		expect(await lifecycle.ensureLive("Cold-Sub")).toBe(revived.session);
+		expect(registry.get("Cold-Sub")?.session).toBe(revived.session);
 	});
 
 	it("concurrent ensureLive calls during a slow revive coalesce into one reviver run", async () => {
@@ -312,6 +425,25 @@ describe("AgentLifecycleManager", () => {
 		await flushAsync();
 		expect(stub.disposeCalls()).toBe(1);
 		expect(registry.get("6-Sub")).toBeUndefined();
+	});
+
+	it("keeps owned resources through parking and releases them with the agent", async () => {
+		vi.useFakeTimers();
+		const stub = makeSessionStub();
+		const releaseResource = vi.fn(async () => {});
+		registerIdleSub("Owned-Sub", stub.session);
+		lifecycle.adopt("Owned-Sub", { idleTtlMs: TTL, onRelease: releaseResource });
+
+		vi.advanceTimersByTime(TTL);
+		await flushAsync();
+
+		expect(registry.get("Owned-Sub")?.status).toBe("parked");
+		expect(stub.disposeCalls()).toBe(1);
+		expect(releaseResource).not.toHaveBeenCalled();
+
+		await lifecycle.release("Owned-Sub");
+
+		expect(releaseResource).toHaveBeenCalledTimes(1);
 	});
 
 	it("does not let one stuck adopted agent block sibling disposal", async () => {
@@ -620,6 +752,101 @@ describe("AgentLifecycleManager", () => {
 		const restoredRegistry = new AgentRegistry();
 		await registerPersistedSubagents(restoredRegistry, rootSessionFile);
 		expect(restoredRegistry.get(workerId)?.status).toBe("aborted");
+	});
+
+	it("publishes an aborted status only after the session is detached", async () => {
+		const stub = makeSessionStub();
+		const ref = registry.register({
+			id: "Published-Aborted",
+			displayName: "task",
+			kind: "sub",
+			session: stub.session,
+			sessionFile: null,
+			status: "running",
+		});
+		let observed: { status: string; session: AgentSession | null } | undefined;
+		const unsubscribe = registry.onChange(event => {
+			if (event.type === "status_changed" && event.ref.id === ref.id) {
+				observed = { status: event.ref.status, session: event.ref.session };
+			}
+		});
+
+		await lifecycle.release(ref.id, ref, { tombstone: true });
+		unsubscribe();
+
+		expect(observed).toEqual({ status: "aborted", session: null });
+	});
+
+	it("tombstone release survives the dispose-path unregister racing the sidecar write (#10531)", async () => {
+		using tempDir = TempDir.createSync("@omp-lifecycle-tombstone-race-");
+		const workerId = "Raced-Sub";
+		const workerSessionFile = path.join(tempDir.path(), `${workerId}.jsonl`);
+		await Bun.write(workerSessionFile, "");
+
+		let disposeCalls = 0;
+		const session = {
+			dispose: async () => {
+				disposeCalls++;
+			},
+		} as unknown as AgentSession;
+		const ref = registry.register({
+			id: workerId,
+			displayName: "task",
+			kind: "sub",
+			session,
+			sessionFile: workerSessionFile,
+			status: "running",
+		});
+
+		// The dying subagent's own dispose finally-block runs unregisterUnlessParked
+		// (sdk.ts) on a separate async chain. Fire it during the sidecar write await —
+		// the exact window the reporter observed — mirroring its real bail-out guard:
+		// spare a ref only when it is already parked, or aborted AND detached.
+		const disposePathUnregister = () => {
+			const cur = registry.get(workerId);
+			if (!cur) return;
+			if (cur.status === "parked" || (cur.status === "aborted" && !cur.session)) return;
+			registry.unregister(workerId, cur);
+		};
+		let injected = false;
+		vi.spyOn(fsp, "writeFile").mockImplementation((async (target: string) => {
+			if (!injected && target.endsWith(".tombstone")) {
+				injected = true;
+				disposePathUnregister();
+				await Bun.write(target, "");
+			}
+		}) as typeof fsp.writeFile);
+
+		expect(await lifecycle.release(workerId, ref, { tombstone: true })).toBe(true);
+		expect(injected).toBe(true);
+		// The terminal transition ran before the await, so the racing unregister
+		// saw an aborted, detached ref and bailed: the row survives as `aborted`
+		// instead of vanishing from the registry.
+		expect(registry.get(workerId)?.status).toBe("aborted");
+		expect(registry.get(workerId)?.session).toBeNull();
+		expect(disposeCalls).toBe(1);
+		expect(await Bun.file(`${workerSessionFile}.tombstone`).exists()).toBe(true);
+	});
+
+	it("tombstone release disposes the detached session when sidecar persistence fails", async () => {
+		const stub = makeSessionStub();
+		const ref = registry.register({
+			id: "Persist-Failure",
+			displayName: "task",
+			kind: "sub",
+			session: stub.session,
+			sessionFile: "/tmp/Persist-Failure.jsonl",
+			status: "running",
+		});
+		const failure = Object.assign(new Error("no space left on device"), { code: "ENOSPC" });
+		vi.spyOn(fsp, "writeFile").mockRejectedValueOnce(failure);
+
+		await expect(lifecycle.release("Persist-Failure", ref, { tombstone: true })).rejects.toBe(failure);
+
+		// Persistence still surfaces to the caller, but the detached session cannot
+		// leak its MCP, kernel, browser, or nested-job resources.
+		expect(stub.disposeCalls()).toBe(1);
+		expect(registry.get("Persist-Failure")).toMatchObject({ status: "aborted", session: null });
 	});
 
 	it("a cold revive whose factory resolves after dispose rejects without adopting or arming a TTL", async () => {

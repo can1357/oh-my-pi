@@ -14,8 +14,9 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { daemonClientForProject } from "../../launch/client";
 import { describeQuietly, stopQuietly, waitReady } from "../../launch/ensure";
 import { daemonRuntimeDir } from "../../launch/paths";
-import type { DaemonSnapshot } from "../../launch/protocol";
+import type { DaemonSnapshot } from "@oh-my-pi/pi-tui/tools/hub";
 import { throwIfAborted } from "../tool-errors";
+import { probeCdpStatus } from "./attach";
 import { resolveSharedBrowserLaunchSpec } from "./launch";
 
 /** Chrome prints this on stderr once the CDP listener is up; the broker's ready probe captures the line. */
@@ -50,13 +51,8 @@ async function probeEndpoint(wsEndpoint: string): Promise<boolean> {
 	} catch {
 		return false;
 	}
-	try {
-		const res = await fetch(`http://${host}/json/version`, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
-		await res.body?.cancel();
-		return res.ok;
-	} catch {
-		return false;
-	}
+	const status = await probeCdpStatus(`http://${host}/json/version`, { timeoutMs: PROBE_TIMEOUT_MS });
+	return status !== null && status >= 200 && status < 300;
 }
 
 /**
@@ -66,6 +62,10 @@ async function probeEndpoint(wsEndpoint: string): Promise<boolean> {
  * describe round. Returns null when the shared path is unavailable (no
  * resolvable Chromium, broker failure, or a daemon that never becomes
  * reachable); callers fall back to a process-local launch.
+ *
+ * Per-open process flags are intentionally absent: a running shared Chromium
+ * cannot be relaunched for one tab. `allow_file_access` is rejected before this
+ * boundary; invalid-certificate handling remains page-scoped through CDP.
  */
 export async function ensureSharedBrowser(opts: {
 	projectDir: string;

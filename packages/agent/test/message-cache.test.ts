@@ -1,16 +1,17 @@
 import { describe, expect, test } from "bun:test";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type { SessionMessageEntry } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	applyShakeRegion,
 	collectShakeRegions,
 	DEFAULT_PRUNE_CONFIG,
-	estimateTokens,
 	invalidateMessageCache,
 	isEstimateCacheable,
 	pruneToolOutputs,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ToolResultMessage, Usage } from "@oh-my-pi/pi-ai";
+
+const tokenizer = new Tokenizer();
 
 let idCounter = 0;
 function nextId(): string {
@@ -83,9 +84,9 @@ describe("estimate cache settle gate", () => {
 			usage: usage(0),
 			stopReason: "stop",
 		};
-		const before = estimateTokens(streaming as AgentMessage);
+		const before = tokenizer.countMessage(streaming as AgentMessage);
 		streaming.content = [{ type: "text", text: "first chunk plus a much longer continuation of streamed text" }];
-		const after = estimateTokens(streaming as AgentMessage);
+		const after = tokenizer.countMessage(streaming as AgentMessage);
 		// Unsettled assistants never read the cache, so the grown content is recounted.
 		expect(after).toBeGreaterThan(before);
 	});
@@ -103,12 +104,12 @@ describe("estimate cache option split", () => {
 		};
 		// Prime the default map first, then the floored one; the floored estimate
 		// (which drops the encrypted-reasoning blob) must not read the default entry.
-		const withBlob = estimateTokens(msg as AgentMessage);
-		const floored = estimateTokens(msg as AgentMessage, { excludeEncryptedReasoning: true });
+		const withBlob = tokenizer.countMessage(msg as AgentMessage);
+		const floored = tokenizer.countMessage(msg as AgentMessage, { excludeEncryptedReasoning: true });
 		expect(withBlob).toBeGreaterThan(floored + 500);
 		// Cached reads return the same split values.
-		expect(estimateTokens(msg as AgentMessage)).toBe(withBlob);
-		expect(estimateTokens(msg as AgentMessage, { excludeEncryptedReasoning: true })).toBe(floored);
+		expect(tokenizer.countMessage(msg as AgentMessage)).toBe(withBlob);
+		expect(tokenizer.countMessage(msg as AgentMessage, { excludeEncryptedReasoning: true })).toBe(floored);
 	});
 
 	test("counts native server-tool blocks by default and drops them from the compaction floor", () => {
@@ -127,12 +128,12 @@ describe("estimate cache option split", () => {
 				},
 			],
 		};
-		const textOnly = estimateTokens({
+		const textOnly = tokenizer.countMessage({
 			...settledAssistant("x"),
 			content: [{ type: "text", text: "answer" }],
 		} as AgentMessage);
-		const withServerTool = estimateTokens(msg as AgentMessage);
-		const floored = estimateTokens(msg as AgentMessage, { excludeEncryptedReasoning: true });
+		const withServerTool = tokenizer.countMessage(msg as AgentMessage);
+		const floored = tokenizer.countMessage(msg as AgentMessage, { excludeEncryptedReasoning: true });
 		// Default estimate charges for the serialized server-tool payload…
 		expect(withServerTool).toBeGreaterThan(floored + 500);
 		// …while the compaction floor ignores the opaque encrypted blob entirely.
@@ -144,24 +145,28 @@ describe("estimate cache invalidation seams", () => {
 	test("pruneToolOutputs drops the cached estimate of a pruned result", () => {
 		const big = toolResult("x".repeat(20_000));
 		const entries = [messageEntry(big as AgentMessage)];
-		const before = estimateTokens(big as AgentMessage);
+		const before = tokenizer.countMessage(big as AgentMessage);
 		expect(before).toBeGreaterThan(1000);
 
-		const result = pruneToolOutputs(entries, { ...DEFAULT_PRUNE_CONFIG, protectTokens: 0, minimumSavings: 0 });
+		const result = pruneToolOutputs(entries, tokenizer, {
+			...DEFAULT_PRUNE_CONFIG,
+			protectTokens: 0,
+			minimumSavings: 0,
+		});
 		expect(result.prunedCount).toBe(1);
 
 		// After the in-place prune the estimate must reflect the short placeholder,
 		// not the stale full-content count.
-		const after = estimateTokens(big as AgentMessage);
+		const after = tokenizer.countMessage(big as AgentMessage);
 		expect(after).toBeLessThan(before);
 	});
 
 	test("applyShakeRegion drops the cached estimate of a shaken result", () => {
 		const big = toolResult(`\`\`\`ts\n${"const value = compute(a, b, c, d, e);\n".repeat(400)}\`\`\``);
 		const entry = messageEntry(big as AgentMessage);
-		const before = estimateTokens(big as AgentMessage);
+		const before = tokenizer.countMessage(big as AgentMessage);
 
-		const regions = collectShakeRegions([entry], {
+		const regions = collectShakeRegions([entry], tokenizer, {
 			protectTokens: 0,
 			minSavings: 0,
 			protectedTools: [],
@@ -170,18 +175,23 @@ describe("estimate cache invalidation seams", () => {
 		expect(regions.length).toBeGreaterThan(0);
 		applyShakeRegion(regions[0], "[shaken]");
 
-		const after = estimateTokens(big as AgentMessage);
+		const after = tokenizer.countMessage(big as AgentMessage);
 		expect(after).toBeLessThan(before);
 	});
 
-	test("explicit invalidateMessageCache forces a recount", () => {
+	test("explicit invalidateMessageCache forces a recount in every tokenizer instance", () => {
 		const result = toolResult("original content here");
-		const before = estimateTokens(result as AgentMessage);
-		// Mutate content directly (simulating an owner rewrite) then invalidate.
+		const second = new Tokenizer();
+		const before = tokenizer.countMessage(result as AgentMessage);
+		expect(second.countMessage(result as AgentMessage)).toBe(before);
+		// Mutate content directly (simulating an owner rewrite); without
+		// invalidation both instances still return their stale memo.
 		result.content = [{ type: "text", text: "a much longer replacement body that should count higher than before" }];
-		// Without invalidation the stale cached value would still be returned.
-		expect(estimateTokens(result as AgentMessage)).toBe(before);
+		expect(tokenizer.countMessage(result as AgentMessage)).toBe(before);
+		expect(second.countMessage(result as AgentMessage)).toBe(before);
+		// One version-tag bump invalidates the memo in BOTH instances.
 		invalidateMessageCache(result as AgentMessage);
-		expect(estimateTokens(result as AgentMessage)).toBeGreaterThan(before);
+		expect(tokenizer.countMessage(result as AgentMessage)).toBeGreaterThan(before);
+		expect(second.countMessage(result as AgentMessage)).toBeGreaterThan(before);
 	});
 });

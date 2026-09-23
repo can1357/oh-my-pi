@@ -100,29 +100,29 @@ function expectOrderedToolResults(items: ResponseInput): void {
 		"call_bash_38",
 	]);
 	expect(items.slice(3)).toEqual([
-		{ type: "function_call_output", call_id: "call_read_36", output: "first" },
-		{ type: "function_call_output", call_id: "call_read_37", output: "second" },
-		{ type: "function_call_output", call_id: "call_bash_38", output: "done" },
 		{
-			role: "user",
-			content: [
-				{ type: "input_text", text: "Attached image(s) from tool result:" },
+			type: "function_call_output",
+			call_id: "call_read_36",
+			output: [
+				{ type: "input_text", text: "first" },
 				{ type: "input_image", detail: "auto", image_url: "data:image/png;base64,AAAA" },
 			],
 		},
 		{
-			role: "user",
-			content: [
-				{ type: "input_text", text: "Attached image(s) from tool result:" },
+			type: "function_call_output",
+			call_id: "call_read_37",
+			output: [
+				{ type: "input_text", text: "second" },
 				{ type: "input_image", detail: "auto", image_url: "data:image/png;base64,BBBB" },
 			],
 		},
+		{ type: "function_call_output", call_id: "call_bash_38", output: "done" },
 		{ role: "user", content: [{ type: "input_text", text: "continue" }] },
 	]);
 }
 
 describe("parallel Responses tool-result images", () => {
-	it("keeps generic Responses outputs ahead of synthetic image messages", () => {
+	it("encodes generic Responses images inside their tool outputs", () => {
 		const items = buildResponsesInput({
 			model: genericModel,
 			context: makeContext(genericModel),
@@ -133,7 +133,7 @@ describe("parallel Responses tool-result images", () => {
 		expectOrderedToolResults(items);
 	});
 
-	it("keeps Codex Responses outputs ahead of synthetic image messages", () => {
+	it("encodes Codex Responses images inside their tool outputs", () => {
 		const items = convertCodexResponsesMessages(codexModel, makeContext(codexModel));
 
 		expectOrderedToolResults(items);

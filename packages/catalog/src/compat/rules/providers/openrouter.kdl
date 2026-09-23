@@ -1,0 +1,208 @@
+// Provider-wire compat for "openrouter"; regenerated from the frozen census using deployment contract selectors.
+
+provider "openrouter" {
+	default-model "openai/gpt-5.5"
+	env "OPENROUTER_API_KEY"
+	discovery label="OpenRouter" allow-unauthenticated=#true
+	kind-apis {
+		embedding "openai-embeddings"
+		image "openrouter-images"
+		rerank "openrouter-rerank"
+		video "openrouter-video"
+		tts "openai-speech"
+		stt "openai-transcriptions"
+	}
+	web-search "openrouter"
+
+	// TypeSafe's Jev answers only through the Decisions API (`/api/alpha/decisions`,
+	// System One wire shape); the default `/models` roster omits `text->decisions`
+	// rows, so the alias is authored here and discovery refreshes the family.
+	seed api="openrouter-decisions" base-url="https://openrouter.ai/api/alpha" bundle="always" {
+		model "~typesafe/jev-latest" name="TypeSafe: Jev Latest" {
+			reasoning #false
+			input "text"
+			cost input=0.042 output=0 cache-read=0 cache-write=0
+			limits context=32000 max-tokens=28800
+		}
+
+		// OpenRouter's STT roster mixes per-token and duration-based prices.
+		// Token-priced GPT rows map per-token rates to catalog per-million costs;
+		// duration-priced rows remain zero because ModelCost has no seconds axis.
+		model "openai/whisper-1" name="OpenAI: Whisper 1" api="openai-transcriptions" base-url="https://openrouter.ai/api/v1" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "openai/whisper-large-v3" name="OpenAI: Whisper Large V3" api="openai-transcriptions" base-url="https://openrouter.ai/api/v1" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "openai/gpt-4o-transcribe" name="OpenAI: GPT-4o Transcribe" api="openai-transcriptions" base-url="https://openrouter.ai/api/v1" {
+			reasoning #false
+			input "text"
+			cost input=2.5 output=10 cache-read=0 cache-write=0
+			limits context=128000 max-tokens=115200
+			supports-tools #false
+		}
+		model "microsoft/mai-transcribe-1.5" name="Microsoft AI: MAI-Transcribe 1.5" api="openai-transcriptions" base-url="https://openrouter.ai/api/v1" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "microsoft/mai-transcribe-2" name="Microsoft AI: MAI-Transcribe 2" api="openai-transcriptions" base-url="https://openrouter.ai/api/v1" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+
+		// OpenRouter bills reranking per 1,000 searches, which has no catalog cost
+		// axis. Keep token costs at zero; the provider-reported response cost is authoritative.
+		model "cohere/rerank-v3.5" name="Cohere: Rerank v3.5" api="openrouter-rerank" base-url="https://openrouter.ai/api/v1" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=4096 max-tokens=3686
+			supports-tools #false
+		}
+		// Bundled fallbacks keep the gateway useful offline; live
+		// `/embeddings/models` discovery refreshes this roster and its per-token
+		// pricing. Catalog token costs are per million input tokens.
+		model "openai/text-embedding-3-small" name="OpenAI: Text Embedding 3 Small" api="openai-embeddings" base-url="https://openrouter.ai/api/v1" {
+			reasoning #false
+			input "text"
+			cost input=0.02 output=0 cache-read=0 cache-write=0
+			limits context=8192
+			supports-tools #false
+		}
+		model "qwen/qwen3-embedding-8b" name="Qwen: Qwen3 Embedding 8B" api="openai-embeddings" base-url="https://openrouter.ai/api/v1" {
+			reasoning #false
+			input "text"
+			cost input=0.01 output=0 cache-read=0 cache-write=0
+			limits context=32768
+			supports-tools #false
+		}
+		// OpenRouter bills generated video by output second and resolution/SKU,
+		// which ModelCost cannot represent. Keep token costs at zero; poll-reported
+		// cost is authoritative. Live `/videos/models` discovery refreshes the roster.
+		model "google/veo-3.1" name="Google: Veo 3.1" api="openrouter-video" base-url="https://openrouter.ai/api/v1" {
+			reasoning #false
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "minimax/hailuo-3" name="MiniMax: H3" api="openrouter-video" base-url="https://openrouter.ai/api/v1" {
+			reasoning #false
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "alibaba/wan-2.7" name="Alibaba: Wan 2.7" api="openrouter-video" base-url="https://openrouter.ai/api/v1" {
+			reasoning #false
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+	}
+	models "~typesafe/*" "typesafe/*" {
+		kind "judge"
+	}
+	models "cohere/rerank-v3.5" {
+		kind "rerank"
+	}
+	models "openai/text-embedding-3-small" "qwen/qwen3-embedding-8b" {
+		kind "embedding"
+	}
+	models "google/veo-3.1" "minimax/hailuo-3" "alibaba/wan-2.7" {
+		kind "video"
+	}
+	models "openai/whisper-1" "openai/whisper-large-v3" "openai/gpt-4o-transcribe" \
+		"microsoft/mai-transcribe-1.5" "microsoft/mai-transcribe-2" {
+		kind "stt"
+	}
+
+	// Replaces the OpenRouter provider wire-model-id dispatch branch.
+	wire-model-id-mode "openrouter"
+	// Replaces the strict-mode provider whitelist entry.
+	supports-strict-mode #true
+	thinking-format "openrouter"
+	thinking-mode "effort"
+	class "anthropic" {
+		// OpenRouter's Anthropic upstream rejects oversized compiled strict-tool
+		// grammars; retry the turn without strict tools. Replaces the
+		// isOpenRouterAnthropicModel checks in the OpenAI request builders.
+		retry-without-strict-on-grammar-error #true
+	}
+	class "meta" {
+		family "muse-spark" {
+			filter-reasoning-history #true
+			allows-synthetic-reasoning-content-for-tool-calls #false
+		}
+	}
+	class "minimax" {
+		family "m3" {
+			thinking-efforts "minimal" "low" "medium" "high"
+		}
+	}
+	class "openai" {
+		family "o-series" {
+			thinking-efforts "minimal" "low" "medium" "high"
+		}
+	}
+	class "stepfun" {
+		family "step" {
+			thinking-efforts "minimal" "low" "medium" "high"
+		}
+	}
+	class "unknown" {
+		thinking-efforts "minimal" "low" "medium" "high"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "*thinking-2507" "*thinking:free" "arcee-ai/trinity-large-thinking" \
+		"nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free" {
+		thinking-requires-effort #true
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "deepseek/deepseek-chat-v3.1" "deepseek/deepseek-v4-pro" {
+		thinking-efforts "high"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "openai/gpt-5.1-codex-mini" {
+		thinking-efforts "medium" "high"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "openai/o1:batch" "openai/o3:batch" {
+		thinking-efforts "minimal" "low" "medium" "high"
+		thinking-requires-effort #true
+	}
+	// The proxy conservatively classifies this tool-capable text+image output row
+	// as chat; OpenRouter's dedicated image roster confirms the image transport.
+	models "google/gemini-3-pro-image" {
+		kind "image"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "qwen/qwen3-coder" {
+		thinking-format "openrouter"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "z*5" "z-ai/glm-4.6*" "z-ai/glm-4.7*" "amazon/nova-2-lite-v1" "baidu/ernie-4.5-vl-28b-a3b" "cohere/north-mini-code:free" \
+		"minimax/minimax-m1" "nvidia/llama-3.3-nemotron-super-49b-v1.5" "openai/gpt-5.1-codex" \
+		"openai/gpt-5.1-codex-max" "openai/gpt-chat-latest" "z-ai/glm-4.5v" "z-ai/glm-5.1" {
+		thinking-efforts "minimal" "low" "medium" "high"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "z-ai/glm-5.2*" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+}

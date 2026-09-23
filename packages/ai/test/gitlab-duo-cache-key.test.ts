@@ -1,12 +1,14 @@
 import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
-import type { Context } from "@oh-my-pi/pi-ai";
+import { Effort, type Context } from "@oh-my-pi/pi-ai";
 import {
 	clearGitLabDuoDirectAccessCache,
 	getGitLabDuoModels,
 	streamGitLabDuo,
 } from "@oh-my-pi/pi-ai/providers/gitlab-duo";
 import * as registerBuiltins from "@oh-my-pi/pi-ai/providers/register-builtins";
-import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { apiRouteFor } from "@oh-my-pi/pi-catalog/compat/behavior";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { resolveGitLabDuoModelIdentity } from "@oh-my-pi/pi-catalog/provider-models";
 
 const context: Context = {
 	systemPrompt: ["You are helpful."],
@@ -19,7 +21,183 @@ afterEach(() => {
 	mock.restore();
 });
 
+describe("GitLab Duo catalog mapping", () => {
+	it("builds the complete alias roster from canonical metadata and KDL routes", () => {
+		const expectedUpstreamIds: Readonly<Record<string, string>> = {
+			"duo-chat-opus-4-6": "claude-opus-4-6",
+			"duo-chat-sonnet-4-6": "claude-sonnet-4-6",
+			"duo-chat-opus-4-5": "claude-opus-4-5-20251101",
+			"duo-chat-sonnet-4-5": "claude-sonnet-4-5-20250929",
+			"duo-chat-haiku-4-5": "claude-haiku-4-5-20251001",
+			"duo-chat-gpt-5-1": "gpt-5.1-2025-11-13",
+			"duo-chat-gpt-5-2": "gpt-5.2-2025-12-11",
+			"duo-chat-gpt-5-mini": "gpt-5-mini-2025-08-07",
+			"duo-chat-gpt-5-codex": "gpt-5-codex",
+			"duo-chat-gpt-5-2-codex": "gpt-5.2-codex",
+		};
+		const models = getGitLabDuoModels();
+		expect(models).toHaveLength(10);
+
+		for (const alias in expectedUpstreamIds) {
+			const model = models.find(candidate => candidate.id === alias);
+			const identity = resolveGitLabDuoModelIdentity(alias);
+			expect(model).toBeDefined();
+			expect(identity?.upstreamModelId).toBe(expectedUpstreamIds[alias]);
+			if (!model || !identity) continue;
+
+			const reference = getBundledModel(identity.referenceProvider, identity.referenceModelId);
+			expect(reference).toBeDefined();
+			expect(apiRouteFor("gitlab-duo", alias)?.api).toBe(model.api);
+			expect(model).toMatchObject({
+				reasoning: reference.reasoning,
+				input: reference.input,
+				cost: reference.cost,
+				contextWindow: reference.contextWindow,
+				maxTokens: reference.maxTokens,
+			});
+		}
+	});
+});
+
+describe("GitLab Duo reasoning-off dispatch", () => {
+	it("honors disableReasoning for capped Anthropic-routed requests", async () => {
+		// Budget-mode thinking is the case that raises `max_tokens` from a
+		// thinking budget, so the cap assertion has to run on this route.
+		const model = getGitLabDuoModels().find(candidate => candidate.id === "duo-chat-sonnet-4-5");
+		if (!model) throw new Error("GitLab Duo Anthropic model is missing");
+		const anthropicSpy = spyOn(registerBuiltins, "streamAnthropic");
+		let payload: { max_tokens?: number; thinking?: { type?: string } } | undefined;
+		const controller = new AbortController();
+
+		await streamGitLabDuo(model, context, {
+			apiKey: "gitlab-thinking-token",
+			maxTokens: 32,
+			reasoning: Effort.Medium,
+			disableReasoning: true,
+			signal: controller.signal,
+			fetch: async input => {
+				if (String(input).includes("/direct_access")) {
+					return new Response(JSON.stringify({ token: "direct-access-token", headers: {} }), {
+						status: 200,
+						headers: { "content-type": "application/json" },
+					});
+				}
+				throw new Error("the payload hook should stop the proxy request before fetch");
+			},
+			onPayload: captured => {
+				payload = captured as { max_tokens?: number; thinking?: { type?: string } };
+				controller.abort();
+				return undefined;
+			},
+		}).result();
+
+		expect(anthropicSpy).toHaveBeenCalledTimes(1);
+		if (!payload) throw new Error("the capped Anthropic request payload was not captured");
+		expect(payload.max_tokens).toBe(32);
+		expect(payload.thinking).toEqual({ type: "disabled" });
+	});
+
+	it("forwards reasoning-off flags to the OpenAI-routed transports", async () => {
+		const completionsModel = getGitLabDuoModels().find(candidate => candidate.id === "duo-chat-gpt-5-1");
+		const responsesModel = getGitLabDuoModels().find(candidate => candidate.id === "duo-chat-gpt-5-codex");
+		if (!completionsModel || !responsesModel) throw new Error("GitLab Duo OpenAI fixtures are missing");
+		const fetchStub = async (input: string | Request | URL) => {
+			if (String(input).includes("/direct_access")) {
+				return new Response(JSON.stringify({ token: "direct-access-token", headers: {} }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			throw new Error("the payload hook should stop the proxy request before fetch");
+		};
+		const stop = () => {
+			throw new Error("stop after dispatch capture");
+		};
+
+		const completionsSpy = spyOn(registerBuiltins, "streamOpenAICompletions");
+		await streamGitLabDuo(completionsModel, context, {
+			apiKey: "gitlab-thinking-token",
+			reasoning: Effort.Medium,
+			disableReasoning: true,
+			fetch: fetchStub,
+			onPayload: stop,
+		}).result();
+		expect(completionsSpy).toHaveBeenCalledTimes(1);
+		expect(completionsSpy.mock.calls[0]?.[2]).toMatchObject({ disableReasoning: true });
+		expect((completionsSpy.mock.calls[0]?.[2] as { reasoning?: unknown } | undefined)?.reasoning).toBeUndefined();
+		completionsSpy.mockRestore();
+
+		// forceReasoningOff has no completions-native field; the wrapper folds it.
+		const foldedSpy = spyOn(registerBuiltins, "streamOpenAICompletions");
+		await streamGitLabDuo(completionsModel, context, {
+			apiKey: "gitlab-thinking-token",
+			reasoning: Effort.Medium,
+			forceReasoningOff: true,
+			fetch: fetchStub,
+			onPayload: stop,
+		}).result();
+		expect(foldedSpy).toHaveBeenCalledTimes(1);
+		expect(foldedSpy.mock.calls[0]?.[2]).toMatchObject({ disableReasoning: true });
+		foldedSpy.mockRestore();
+
+		const responsesSpy = spyOn(registerBuiltins, "streamOpenAIResponses");
+		await streamGitLabDuo(responsesModel, context, {
+			apiKey: "gitlab-thinking-token",
+			reasoning: Effort.Medium,
+			disableReasoning: true,
+			forceReasoningOff: true,
+			fetch: fetchStub,
+			onPayload: stop,
+		}).result();
+		expect(responsesSpy).toHaveBeenCalledTimes(1);
+		expect(responsesSpy.mock.calls[0]?.[2]).toMatchObject({
+			disableReasoning: true,
+			forceReasoningOff: true,
+		});
+		expect((responsesSpy.mock.calls[0]?.[2] as { reasoning?: unknown } | undefined)?.reasoning).toBeUndefined();
+	});
+});
+
 describe("GitLab Duo prompt cache affinity", () => {
+	it("dispatches Anthropic and chat aliases to their catalog-selected transports and upstream ids", async () => {
+		const models = getGitLabDuoModels();
+		const anthropicModel = models.find(candidate => candidate.id === "duo-chat-sonnet-4-5");
+		const completionsModel = models.find(candidate => candidate.id === "duo-chat-gpt-5-1");
+		if (!anthropicModel || !completionsModel) throw new Error("GitLab Duo dispatch fixtures are missing");
+
+		const anthropicSpy = spyOn(registerBuiltins, "streamAnthropic");
+		const completionsSpy = spyOn(registerBuiltins, "streamOpenAICompletions");
+		const options = {
+			apiKey: "gitlab-dispatch-token",
+			fetch: async (input: string | Request | URL) => {
+				if (String(input).includes("/direct_access")) {
+					return new Response(JSON.stringify({ token: "direct-access-token", headers: {} }), {
+						status: 200,
+						headers: { "content-type": "application/json" },
+					});
+				}
+				throw new Error("the payload hook should stop the proxy request before fetch");
+			},
+			onPayload: () => {
+				throw new Error("stop after dispatch capture");
+			},
+		};
+
+		await streamGitLabDuo(anthropicModel, context, options).result();
+		await streamGitLabDuo(completionsModel, context, options).result();
+
+		expect(anthropicSpy).toHaveBeenCalledTimes(1);
+		expect(anthropicSpy.mock.calls[0]?.[0]).toMatchObject({
+			id: "claude-sonnet-4-5-20250929",
+			api: "anthropic-messages",
+		});
+		expect(completionsSpy).toHaveBeenCalledTimes(1);
+		expect(completionsSpy.mock.calls[0]?.[0]).toMatchObject({
+			id: "gpt-5.1-2025-11-13",
+			api: "openai-completions",
+		});
+	});
+
 	it("forwards explicit cache affinity and disabled Responses chaining to the proxy", async () => {
 		const model = getGitLabDuoModels().find(candidate => candidate.id === "duo-chat-gpt-5-codex");
 		if (!model) throw new Error("GitLab Duo Responses model is missing");
@@ -48,6 +226,7 @@ describe("GitLab Duo prompt cache affinity", () => {
 		await stream.result();
 
 		expect(responsesSpy).toHaveBeenCalledTimes(1);
+		expect(responsesSpy.mock.calls[0]?.[0].id).toBe("gpt-5-codex");
 		expect(responsesSpy.mock.calls[0]?.[2]).toMatchObject({
 			promptCacheKey: cacheKey,
 			statefulResponses: false,

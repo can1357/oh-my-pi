@@ -42,7 +42,7 @@ omp plugin install name@marketplace / omp install name@marketplace
 
 ## On-disk model
 
-User plugin state lives under the plugins data root (`~/.omp/plugins` by default). On Linux and macOS, `omp config init-xdg` creates the XDG data, state, and cache roots but does not move existing data; after the relevant roots exist and the XDG variables are set, new user plugin state resolves under `$XDG_DATA_HOME/omp/plugins`:
+User plugin state lives under the plugins data root (`~/.omp/plugins` by default). On Linux and macOS, `omp config init-xdg` initializes the XDG data, state, and cache roots but does not move existing data; with the XDG variables set, initialized roots store new user plugin state under `$XDG_DATA_HOME/omp/plugins`:
 
 - `package.json` — dependency manifest used by `bun install`/`bun uninstall` for npm-installed plugins
 - `node_modules/` — installed npm packages plus link and marketplace-cache symlinks
@@ -142,6 +142,8 @@ If uninstall command fails, runtime state is not changed.
    - project `disabled` list masks the plugin as disabled
 
 `omp plugin list` combines this result with `MarketplaceManager.listInstalledPlugins()`.
+
+`PluginManager.getPlugin()` resolves one runtime package directly, including a marketplace symlink intentionally omitted from `list()`. Config commands use this path so marketplace settings remain addressable without duplicating marketplace entries in list and status output.
 
 ## Link flow (`PluginManager.link`)
 

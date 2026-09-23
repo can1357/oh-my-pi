@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { CompactionCancelledError, type CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
-import { getThemeByName, setThemeInstance, type Theme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { getThemeByName, setThemeInstance, type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { Container, Spacer } from "@oh-my-pi/pi-tui";
 
@@ -105,9 +105,11 @@ describe("executeCompaction UI lifecycle", () => {
 	});
 
 	it("drains the loader after a successful compaction resolves", async () => {
-		const compact = vi.fn(
-			async (): Promise<CompactionResult<unknown>> => ({ summary: "", firstKeptEntryId: "", tokensBefore: 0 }),
-		);
+		const compact = vi.fn(async (): Promise<CompactionResult<unknown>> => ({
+			summary: "",
+			firstKeptEntryId: "",
+			tokensBefore: 0,
+		}));
 		const { ctx, statusContainer, rebuildChatFromMessages, statusAtRebuild } = buildCtx(compact);
 
 		const controller = new CommandController(ctx);

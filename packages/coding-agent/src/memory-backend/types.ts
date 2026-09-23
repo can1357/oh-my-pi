@@ -13,7 +13,7 @@ import type { HindsightSessionState } from "../hindsight/state";
 import type { MnemopiSessionState } from "../mnemopi/state";
 import type { AgentSession } from "../session/agent-session";
 
-export type MemoryBackendId = "off" | "local" | "hindsight" | "mnemopi";
+export type MemoryBackendId = "off" | "local" | "hindsight" | "mnemopi" | "sharpshooter";
 
 export interface MemoryBackendStatus {
 	backend: MemoryBackendId;
@@ -92,6 +92,13 @@ export interface MemoryBackendStartOptions {
 	parentMnemopiSessionState?: MnemopiSessionState;
 }
 
+/** A successful recall, including an empty result, staged until user-turn delivery. */
+export interface MemoryPromptPreparation {
+	context?: string;
+	/** Commit synchronously after delivery validation; false rejects lost ownership without state writes. */
+	commit(): boolean;
+}
+
 export interface MemoryBackend {
 	readonly id: MemoryBackendId;
 
@@ -138,16 +145,22 @@ export interface MemoryBackend {
 
 	/** Render backend-specific memory diagnostics as markdown (`/memory diagnose`). */
 	diagnose?(agentDir: string, cwd: string, session?: AgentSession): Promise<string | undefined>;
+	/** Render pending deltas awaiting consolidation (`/memory queue`). */
+	queuePreview?(context: MemoryBackendOperationContext): Promise<string | undefined>;
 	/**
 	 * Optional hook to inject a backend-specific block into the current turn's
 	 * system prompt before the agent starts generating.
 	 *
 	 * This is the only place a backend can affect the very first answer of a
-	 * fresh session. The returned text is appended to the already-built base
-	 * system prompt for this turn only; callers may separately cache it and
-	 * surface it through `buildDeveloperInstructions()` on later rebuilds.
+	 * fresh session. Context is appended to the winning base prompt at delivery;
+	 * commit publishes the cached snippet and first-turn consumption together.
+	 * Return undefined for an ineligible or failed recall, not an empty success.
 	 */
-	beforeAgentStartPrompt?(session: AgentSession, promptText: string): Promise<string | undefined>;
+	beforeAgentStartPrompt?(
+		session: AgentSession,
+		promptText: string,
+		signal?: AbortSignal,
+	): Promise<MemoryPromptPreparation | undefined>;
 
 	/**
 	 * Optional hook to splice extra context into a compaction summarization.

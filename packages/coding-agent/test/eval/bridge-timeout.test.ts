@@ -343,3 +343,68 @@ it("holds the cell open through a deferred phase while still aborting the tool a
 	// ...and the turn is still reported as cancelled.
 	expect(result.cancelled).toBe(true);
 });
+it("expires the wall-clock timeout through the shield so blocked bridge calls unwind instead of the kernel dying", async () => {
+	// Regression: the cell timeout used to arm only a kernel-internal timer.
+	// SIGINT then raised KeyboardInterrupt in the runner's main thread while
+	// a runner worker thread stayed parked in a blocking urllib bridge call
+	// nobody rejected; the runner wedged waiting for that thread,
+	// never emitted `done`, and the 5s escalation killed the kernel with all
+	// session state. The timeout must abort the same signals a turn cancel
+	// does: the bridge's raced signal (rejecting in-flight calls) and the
+	// kernel's execute signal (delivering SIGINT).
+	const bridge = await pyToolBridge.ensurePyToolBridge();
+	const toolSession = makeToolSession({
+		name: "parked",
+		label: "Parked",
+		description: "Never settles on its own; the raced bridge abort must answer instead",
+		parameters: type({}),
+		execute: async () => {
+			await new Promise<never>(() => {});
+			throw new Error("unreachable");
+		},
+	});
+
+	const bridgeSessionId = `bridge-${crypto.randomUUID()}`;
+	let kernelAbortReason: unknown;
+	const kernel: GenericKernel<Record<string, string | null>> = {
+		async execute(_code, options) {
+			// Mirrors the Python prelude: a worker thread blocked in a loopback
+			// bridge call that only settles if the host rejects it.
+			const pending = fetch(`${bridge.url}/v1/tool`, {
+				method: "POST",
+				headers: { authorization: `Bearer ${bridge.token}`, "content-type": "application/json" },
+				body: JSON.stringify({ session: bridgeSessionId, run: options.id, name: "parked", args: {} }),
+			}).then(res => res.json() as Promise<{ ok: boolean; error?: string }>);
+
+			// Like the real runner, the cell only finishes once the timeout abort
+			// arrives (SIGINT) AND the blocked bridge call has been answered.
+			const aborted = Promise.withResolvers<void>();
+			options.signal?.addEventListener("abort", () => aborted.resolve(), { once: true });
+			await aborted.promise;
+			kernelAbortReason = options.signal?.reason;
+			const reply = await pending;
+			expect(reply.ok).toBe(false);
+			expect(reply.error).toContain("interrupted");
+			return { status: "error", cancelled: true, timedOut: true };
+		},
+	};
+
+	const result = await executeWithKernelBase({
+		kernel,
+		code: "import asyncio, threading\nt = threading.Thread(target=lambda: asyncio.run(tool.parked({})))\nt.start()\nt.join()",
+		options: { timeoutMs: 100, toolSession, bridgeSessionId },
+		runIdPrefix: "test",
+		errorLogLabel: "test",
+		cancelledErrorClass: TestCancelledError,
+		buildKernelEnvPatch: () => ({}),
+		formatKernelTimeoutAnnotation: () => "kernel timed out",
+		formatTimeoutAnnotation: () => "timed out",
+	});
+
+	// The kernel saw a timeout abort, not a plain cancel...
+	expect(kernelAbortReason).toBeInstanceOf(DOMException);
+	expect((kernelAbortReason as DOMException).name).toBe("TimeoutError");
+	// ...the cell settled as a timed-out cancellation with the kernel alive.
+	expect(result.cancelled).toBe(true);
+	expect(result.output).toContain("kernel timed out");
+});

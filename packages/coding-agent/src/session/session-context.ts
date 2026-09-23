@@ -1,17 +1,31 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { coerceServiceTierByFamily, type ProviderPayload, type ServiceTierByFamily } from "@oh-my-pi/pi-ai";
+import { customMessageEntryMessage, isUserRequestEntry } from "@oh-my-pi/pi-tui/chat/transcript-entry";
+import { getAnthropicCompactionPayload, isTurnStartEntry } from "@oh-my-pi/pi-agent-core/compaction";
+import {
+	coerceServiceTierByFamily,
+	type OpenAIResponsesHistoryPayload,
+	type ServiceTierByFamily,
+} from "@oh-my-pi/pi-ai";
 import * as snapcompact from "@oh-my-pi/snapcompact";
-import { parseThinkingLevel, toReasoningEffort } from "../thinking";
+import { isRecord } from "@oh-my-pi/pi-utils";
+import { parseThinkingLevel, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
 import {
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 	createCustomMessage,
 	INTERRUPTED_THINKING_MESSAGE_TYPE,
-	isCustomMessageContent,
-	normalizeCustomMessagePayload,
+	isEmptyErrorTurn,
 	PREWALK_PLAN_MESSAGE_TYPE,
+	VIBE_MODE_CONTEXT_MESSAGE_TYPE,
 } from "./messages";
-import { type CompactionEntry, EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry } from "./session-entries";
+import { CONTEXT_NOTES_ENTRY_TYPE, getContextNotes, renderContextNotes } from "./context-notes";
+import {
+	type CompactionEntry,
+	type CustomMessageEntry,
+	EPHEMERAL_MODEL_CHANGE_ROLE,
+	type SessionEntry,
+	type SessionMessageEntry,
+} from "./session-entries";
 
 // #4470 crash artifacts had legacy frames (no shape metadata) with 17 frames,
 // ~306k archive chars, and ~1.5M truncated chars. Current snapcompact frames
@@ -27,10 +41,23 @@ function hasLegacySnapcompactFrames(archive: snapcompact.Archive): boolean {
 	return archive.frames.some(frame => frame.font === undefined && frame.variant === undefined);
 }
 
-function hasCrashRiskSnapcompactFramePayload(archive: snapcompact.Archive): boolean {
+function snapcompactFrameDataBytes(
+	archive: snapcompact.Archive,
+	resolveFrameData: BuildSessionContextOptions["resolveFrameData"],
+): number {
+	if (!resolveFrameData) return snapcompact.frameDataBytes(archive.frames);
+	let total = 0;
+	for (const frame of archive.frames) total += resolveFrameData(frame.data)?.bytes ?? frame.data.length;
+	return total;
+}
+
+function hasCrashRiskSnapcompactFramePayload(
+	archive: snapcompact.Archive,
+	resolveFrameData: BuildSessionContextOptions["resolveFrameData"],
+): boolean {
 	return (
 		archive.frames.length >= LEGACY_SNAPCOMPACT_FRAME_COUNT_GUARD ||
-		snapcompact.frameDataBytes(archive.frames) >= snapcompact.FRAME_DATA_BYTES_BUDGET
+		snapcompactFrameDataBytes(archive, resolveFrameData) >= snapcompact.FRAME_DATA_BYTES_BUDGET
 	);
 }
 
@@ -42,10 +69,13 @@ function hasCrashRiskSnapcompactArchiveSize(archive: snapcompact.Archive): boole
 	);
 }
 
-function isCrashRiskLegacySnapcompactArchive(archive: snapcompact.Archive): boolean {
+function isCrashRiskLegacySnapcompactArchive(
+	archive: snapcompact.Archive,
+	resolveFrameData: BuildSessionContextOptions["resolveFrameData"],
+): boolean {
 	return (
 		hasLegacySnapcompactFrames(archive) &&
-		hasCrashRiskSnapcompactFramePayload(archive) &&
+		hasCrashRiskSnapcompactFramePayload(archive, resolveFrameData) &&
 		hasCrashRiskSnapcompactArchiveSize(archive)
 	);
 }
@@ -53,10 +83,16 @@ function isCrashRiskLegacySnapcompactArchive(archive: snapcompact.Archive): bool
 function snapcompactHistoryBlockOptions(
 	archive: snapcompact.Archive,
 	options: BuildSessionContextOptions | undefined,
-): snapcompact.HistoryBlockOptions | undefined {
-	if (options?.transcript) return undefined;
-	if (isCrashRiskLegacySnapcompactArchive(archive)) return { maxFrameDataBytes: 0 };
-	return { maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET };
+): snapcompact.HistoryBlockOptions {
+	const resolveFrameData = options?.resolveFrameData;
+	if (options?.transcript) return resolveFrameData ? { resolveFrameData } : {};
+	if (isCrashRiskLegacySnapcompactArchive(archive, resolveFrameData)) {
+		return { maxFrameDataBytes: 0, ...(resolveFrameData ? { resolveFrameData } : {}) };
+	}
+	return {
+		maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET,
+		...(resolveFrameData ? { resolveFrameData } : {}),
+	};
 }
 
 export interface SessionContext {
@@ -134,6 +170,8 @@ export interface BuildSessionContextOptions {
 	 * hides the call the agent is still waiting on.
 	 */
 	keepDanglingToolCalls?: boolean;
+	/** Price and resolve persisted snapcompact frame payloads on demand. */
+	resolveFrameData?: (data: string) => snapcompact.LazyFrameData | undefined;
 }
 
 /**
@@ -160,19 +198,26 @@ function snapcompactHistoryBlocksForContext(
 	return snapcompact.historyBlocks(archive, snapcompactHistoryBlockOptions(archive, options));
 }
 
+/** Reads validated OpenAI Responses replacement history from a compaction entry. */
 export function getOpenAiRemoteCompactionPayload(
-	compaction: CompactionEntry | null | undefined,
-): ProviderPayload | undefined {
+	compaction: Pick<CompactionEntry, "preserveData"> | null | undefined,
+): OpenAIResponsesHistoryPayload | undefined {
 	const candidate = compaction?.preserveData?.openaiRemoteCompaction;
-	if (!candidate || typeof candidate !== "object") return undefined;
-	const remote = candidate as { provider?: unknown; replacementHistory?: unknown };
-	if (typeof remote.provider !== "string" || remote.provider.length === 0) return undefined;
-	if (!Array.isArray(remote.replacementHistory)) return undefined;
+	if (!isRecord(candidate)) return undefined;
+	if (typeof candidate.provider !== "string" || candidate.provider.length === 0) return undefined;
+	if (!Array.isArray(candidate.replacementHistory) || !candidate.replacementHistory.every(isRecord)) return undefined;
 	return {
 		type: "openaiResponsesHistory",
-		provider: remote.provider,
-		items: remote.replacementHistory as Array<Record<string, unknown>>,
+		provider: candidate.provider,
+		items: candidate.replacementHistory,
 	};
+}
+
+/** Session entries that replay as transcript messages: persisted messages and custom messages. */
+export type TranscriptEntry = SessionMessageEntry | CustomMessageEntry;
+
+export function isTranscriptEntry(entry: SessionEntry): entry is TranscriptEntry {
+	return entry.type === "message" || entry.type === "custom_message";
 }
 
 export function buildSessionContext(
@@ -332,42 +377,42 @@ export function buildSessionContext(
 		}
 	};
 
+	const trackMessageCacheState = (msg: AgentMessage): boolean => {
+		if (msg.role !== "assistant") return false;
+		const currentModel = `${msg.provider}/${msg.model}`;
+		const modelChanged = lastAssistantModel !== undefined && lastAssistantModel !== currentModel;
+		lastAssistantModel = currentModel;
+		const cacheMissExplained = pendingReset || modelChanged;
+		pendingReset = false;
+		return cacheMissExplained;
+	};
+
 	const pushMessage = (msg: AgentMessage) => {
 		messages.push(msg);
 		if (!options?.transcript) return;
-		if (msg.role === "assistant") {
-			const currentModel = `${msg.provider}/${msg.model}`;
-			const modelChanged = lastAssistantModel !== undefined && lastAssistantModel !== currentModel;
-			lastAssistantModel = currentModel;
-			cacheMissExplainedAt.push(pendingReset || modelChanged);
-			pendingReset = false;
-		} else {
-			cacheMissExplainedAt.push(false);
-		}
+		cacheMissExplainedAt.push(trackMessageCacheState(msg));
 	};
 
 	const appendMessage = (entry: SessionEntry) => {
 		handleEntryResetTracking(entry);
 		if (entry.type === "message") {
-			if (!options?.transcript && entry.message.role === "assistant" && entry.message.retryRecovery) {
+			if (
+				!options?.transcript &&
+				entry.message.role === "assistant" &&
+				(entry.message.retryRecovery || isEmptyErrorTurn(entry.message))
+			) {
 				return;
 			}
 			pushMessage(entry.message);
 		} else if (entry.type === "custom_message") {
-			if (!options?.transcript && entry.customType === PREWALK_PLAN_MESSAGE_TYPE) return;
-			if (!isCustomMessageContent(entry.content)) return;
-			const normalized = normalizeCustomMessagePayload(entry);
-			const attribution = entry.attribution === undefined ? undefined : normalized.attribution;
-			pushMessage(
-				createCustomMessage(
-					normalized.customType,
-					normalized.content,
-					normalized.display,
-					normalized.details,
-					entry.timestamp,
-					attribution,
-				),
-			);
+			if (
+				!options?.transcript &&
+				(entry.customType === PREWALK_PLAN_MESSAGE_TYPE || entry.customType === VIBE_MODE_CONTEXT_MESSAGE_TYPE)
+			) {
+				return;
+			}
+			const message = customMessageEntryMessage(entry);
+			if (message) pushMessage(message);
 		} else if (entry.type === "branch_summary" && entry.summary) {
 			pushMessage(createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp));
 		}
@@ -377,10 +422,23 @@ export function buildSessionContext(
 		// Display transcript: every entry in chronological order. Compactions do
 		// not erase prior history here — each renders inline (as a divider in the
 		// TUI) at the point it fired, with any snapcompact frames re-attached so
-		// the component can report them.
-		for (const entry of path) {
+		// the component can report them. An immediate frame-rescue replacement is
+		// the same compaction point and supersedes its source entry below.
+		for (let index = 0; index < path.length; index++) {
+			const entry = path[index];
 			handleEntryResetTracking(entry);
 			if (entry.type === "compaction") {
+				const replacement = path[index + 1];
+				if (
+					replacement?.type === "compaction" &&
+					entry.method === "snapcompact" &&
+					replacement.method === "snapcompact" &&
+					replacement.parentId === entry.id &&
+					replacement.firstKeptEntryId === entry.firstKeptEntryId &&
+					replacement.tokensBefore === entry.tokensBefore
+				) {
+					continue;
+				}
 				const active = entry.id === compaction?.id;
 				const snapcompactArchive = active ? snapcompact.getPreservedArchive(entry.preserveData) : undefined;
 				pushMessage(
@@ -388,11 +446,13 @@ export function buildSessionContext(
 						active ? entry.summary : SUPERSEDED_COMPACTION_SUMMARY,
 						entry.tokensBefore,
 						entry.timestamp,
-						active ? entry.shortSummary : SUPERSEDED_COMPACTION_SHORT_SUMMARY,
-						undefined,
-						undefined,
-						snapcompactHistoryBlocksForContext(snapcompactArchive, options),
-						entry.warning,
+						{
+							shortSummary: active ? entry.shortSummary : SUPERSEDED_COMPACTION_SHORT_SUMMARY,
+							blocks: snapcompactHistoryBlocksForContext(snapcompactArchive, options),
+							warning: entry.warning,
+							method: entry.method,
+							tokensAfter: entry.tokensAfter,
+						},
 					),
 				);
 			} else {
@@ -420,8 +480,32 @@ export function buildSessionContext(
 			appendMessage(path[i]);
 		}
 	} else if (compaction) {
-		const providerPayload = getOpenAiRemoteCompactionPayload(compaction);
-		const remoteReplacementHistory = providerPayload?.items;
+		const remotePayload = getOpenAiRemoteCompactionPayload(compaction);
+		const remoteReplacementHistory = remotePayload?.items;
+		// Anthropic server compaction persists a plain-text summary plus its
+		// native replay; the kept tail still comes from entries below.
+		const anthropicPayload = getAnthropicCompactionPayload(compaction.preserveData);
+		const providerPayload = remotePayload ?? anthropicPayload;
+
+		// Find compaction index in path
+		const compactionIdx = path.findIndex(e => e.type === "compaction" && e.id === compaction.id);
+
+		// A natively replayed summary must not invalidate the retained tail's
+		// bound thinking: stamping it with the entry commit timestamp would
+		// expose that as historyRewriteAt newer than the tail and strip its
+		// signatures on the next request. Predate the marker before the first
+		// retained entry instead (other lanes keep the commit timestamp).
+		let summaryTimestamp = compaction.timestamp;
+		if (anthropicPayload !== undefined) {
+			const firstKeptIdx = path.findIndex(entry => entry.id === compaction.firstKeptEntryId);
+			const firstRetained =
+				(firstKeptIdx >= 0 && firstKeptIdx < compactionIdx ? path[firstKeptIdx] : undefined) ??
+				path[compactionIdx + 1];
+			const retainedAt = firstRetained ? new Date(firstRetained.timestamp).getTime() : NaN;
+			if (Number.isFinite(retainedAt)) {
+				summaryTimestamp = new Date(retainedAt - 1).toISOString();
+			}
+		}
 
 		// Re-attach any archived snapcompact frames so the model can keep
 		// reading the archived history after every context rebuild.
@@ -429,12 +513,15 @@ export function buildSessionContext(
 		const compactionSummaryMsg = createCompactionSummaryMessage(
 			compaction.summary,
 			compaction.tokensBefore,
-			compaction.timestamp,
-			compaction.shortSummary,
-			providerPayload,
-			undefined,
-			snapcompactHistoryBlocksForContext(snapcompactArchive, options),
-			compaction.warning,
+			summaryTimestamp,
+			{
+				shortSummary: compaction.shortSummary,
+				providerPayload,
+				blocks: snapcompactHistoryBlocksForContext(snapcompactArchive, options),
+				warning: compaction.warning,
+				method: compaction.method,
+				tokensAfter: compaction.tokensAfter,
+			},
 		);
 		// Agent context (non-transcript): summary first so the LLM sees the
 		// compacted context before recent messages.
@@ -442,8 +529,26 @@ export function buildSessionContext(
 			pushMessage(compactionSummaryMsg);
 		}
 
-		// Find compaction index in path
-		const compactionIdx = path.findIndex(e => e.type === "compaction" && e.id === compaction.id);
+		// Notes-backed windows do not summarize a discarded turn prefix. Recover
+		// its latest user request verbatim, independently of the disposable tail.
+		// Resolve from the branch journal so repeated rollovers and resume retain
+		// it too, without copying messages into compaction metadata or transcripts.
+		// Attribution follows the shared turn-initiator semantics so a
+		// user-invoked skill or writable-collab request is retained like an
+		// ordinary one instead of being skipped for an older plain user message.
+		if (
+			!options?.transcript &&
+			isRecord(compaction.details) &&
+			compaction.details.kind === "experimental-context-rollover"
+		) {
+			const firstKeptIdx = path.findIndex(entry => entry.id === compaction.firstKeptEntryId);
+			for (let i = compactionIdx - 1; i > resetBoundaryIdx; i--) {
+				const entry = path[i];
+				if (!isUserRequestEntry(entry)) continue;
+				if (i < firstKeptIdx) appendMessage(entry);
+				break;
+			}
+		}
 
 		// The remote replacement payload (OpenAI remote compaction) carries the
 		// kept turns for the LLM context only; it is not rendered as visible
@@ -451,15 +556,41 @@ export function buildSessionContext(
 		// SessionEntry rows so a remotely-compacted session keeps its recent
 		// turns visible instead of showing only the summary and post-compaction.
 		if (!remoteReplacementHistory || options?.transcript) {
-			// Emit kept messages (before compaction, starting from firstKeptEntryId)
-			let foundFirstKept = false;
-			for (let i = 0; i < compactionIdx; i++) {
-				const entry = path[i];
-				if (entry.id === compaction.firstKeptEntryId) {
-					foundFirstKept = true;
+			// Emit kept messages (before compaction, starting from firstKeptEntryId).
+			const firstKeptIdx = path.findIndex(
+				(entry, index) => index < compactionIdx && entry.id === compaction.firstKeptEntryId,
+			);
+			if (firstKeptIdx >= 0) {
+				let displayStartIdx = firstKeptIdx;
+				if (options?.transcript) {
+					// `findCutPoint` may leave the collapsed display's kept region
+					// mid-turn. Prefer the next turn boundary, but retain the original
+					// suffix when there is no later boundary: the compaction summary
+					// does not include that kept content.
+					for (let i = firstKeptIdx; i < compactionIdx; i++) {
+						if (isTurnStartEntry(path[i])) {
+							displayStartIdx = i;
+							break;
+						}
+					}
 				}
-				if (foundFirstKept) {
+				for (let i = firstKeptIdx; i < compactionIdx; i++) {
+					const entry = path[i];
+					if (i < displayStartIdx) {
+						// Hidden assistants still consume pending resets and update the
+						// previous-model state exactly as they do in the visible walk.
+						handleEntryResetTracking(entry);
+						if (entry.type === "message") trackMessageCacheState(entry.message);
+						continue;
+					}
 					appendMessage(entry);
+				}
+			}
+		} else if (compaction.providerReplayThroughEntryId) {
+			const replayThroughIdx = path.findIndex(entry => entry.id === compaction.providerReplayThroughEntryId);
+			if (replayThroughIdx >= 0 && replayThroughIdx < compactionIdx) {
+				for (let i = replayThroughIdx + 1; i < compactionIdx; i++) {
+					appendMessage(path[i]);
 				}
 			}
 		}
@@ -483,6 +614,19 @@ export function buildSessionContext(
 		// No compaction - emit all messages, handle branch summaries and custom messages
 		for (const entry of path) {
 			appendMessage(entry);
+		}
+	}
+
+	if (!options?.transcript) {
+		const notes = getContextNotes(path);
+		const renderedNotes = renderContextNotes(path);
+		if (notes && renderedNotes.length > 0) {
+			const sourceEntry = path.find(entry => entry.id === notes.entryId);
+			if (sourceEntry) {
+				messages.unshift(
+					createCustomMessage(CONTEXT_NOTES_ENTRY_TYPE, renderedNotes, false, undefined, sourceEntry.timestamp),
+				);
+			}
 		}
 	}
 

@@ -5,8 +5,8 @@ import { initTelemetryExport, isTelemetryExportEnabled } from "@oh-my-pi/pi-codi
 /**
  * Gating contract for the OTLP export bootstrap. These cases all short-circuit
  * before a provider is registered, so they never mutate the module singleton
- * and are order-independent. The positive export path runs in a subprocess (see
- * the "exports spans" test) so the registered global provider can't leak here.
+ * and are order-independent. Transport-path probes run in subprocesses so any
+ * registered global provider can't leak into the test runner.
  */
 const OTEL_KEYS = [
 	"OTEL_EXPORTER_OTLP_ENDPOINT",
@@ -93,6 +93,25 @@ describe("initTelemetryExport gating", () => {
 	});
 });
 
+describe("initTelemetryExport exporter selection", () => {
+	it("does not send OTLP when console is explicitly selected for every signal", async () => {
+		const probe = fileURLToPath(new URL("./otel-non-otlp-probe.ts", import.meta.url));
+		const proc = Bun.spawn([process.execPath, probe], {
+			env: { ...process.env },
+			stdin: "ignore",
+			stdout: "pipe",
+			stderr: "ignore",
+		});
+		const output = new Response(proc.stdout).text();
+		const exitCode = await proc.exited;
+
+		expect({ exitCode, output: (await output).trim() }).toEqual({
+			exitCode: 0,
+			output: "PROBE: NO_EXPORT",
+		});
+	}, 10_000);
+});
+
 describe("initTelemetryExport signals export path", () => {
 	it("exports every OTLP/proto signal and merged resource attributes", async () => {
 		// Positive initialization registers process-global providers, so each
@@ -107,6 +126,9 @@ describe("initTelemetryExport signals export path", () => {
 			probes.map(async ([name, relativePath]) => {
 				const probe = fileURLToPath(new URL(relativePath, import.meta.url));
 				const proc = Bun.spawn([process.execPath, probe], {
+					// Bun otherwise inherits the process's original native environment,
+					// including external OTEL kill-switches removed in beforeEach.
+					env: { ...process.env },
 					stdin: "ignore",
 					stdout: "ignore",
 					stderr: "ignore",

@@ -71,8 +71,9 @@ NEVER speculate `provider`/`platform`; require explicit issue/comment evidence.
 7. MAY run formatter pre-commit. Safe to skip: `gh_push_branch`/`gh_open_pr` run `bun run fix`, amend formatter diff into HEAD.
 8. Commit conventional `fix(scope): …` / `docs: …`; body REAL newlines (`-m` flags or `git commit -F <file>`, NEVER quoted `\n` in `-m`, which displays literal backslash-n). End body `Fixes #{{issue.number}}`.
 9. `gh_push_branch`, then `gh_open_pr`. Both run `bun run fix` (amend remaining diff), then `bun check`, before remote; every follow-up push same gate; refuse dirty tree/author mismatch.
-   - `bun check` failure: fix source, commit, retry.
-   - `skip_checks=true`: ONLY verified pre-existing default-branch breakage—same command/paths on clean default checkout, identical failure. NEVER bypass diff-caused, transient, or unclear failure. PR `## Verification` MUST include: ``bun check` fails on `main` for unrelated reason X; skipped pre-publish gate.`
+   - `gh_open_pr` additionally runs the repo's full `bun run test` and creates NO PR while it is red. Expect it to take a while; do not re-issue the call because it is slow.
+   - `bun check` / `bun run test` failure: fix source, commit, retry.
+   - `skip_checks=true` (bypasses `bun run fix`, `bun check`, AND `bun run test`): ONLY verified pre-existing default-branch breakage—same command/paths on clean default checkout, identical failure. NEVER bypass diff-caused, transient, or unclear failure; NEVER to escape a test your own diff broke. PR `## Verification` MUST name the bypassed gate and reason, e.g. ``bun check` fails on `main` for unrelated reason X; skipped pre-publish gate.`
    - NEVER tamper git internals: edit `.git`/`gitdir:` pointers, chown/chmod worktree, `safe.directory` override, fabricated-commit HEAD. Unresolvable push refusal → `gh_post_comment` maintainer. Reporter-irrelevant environment/orchestrator fault (permissions, corrupt metadata, missing tools) → `abort_task` diagnosis; silent, no reporter comment; NEVER improvise.
    - Two consecutive same-error `gh_push_branch` rejections: fix, justified `skip_checks=true`, or `gh_post_comment` escalate; NEVER loop.
 10. PR opened → one final `gh_post_comment` link.

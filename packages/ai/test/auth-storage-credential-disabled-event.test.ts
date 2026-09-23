@@ -8,7 +8,7 @@ import {
 } from "@oh-my-pi/pi-ai/auth-storage";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 
-// Env vars short-circuit AuthStorage.getApiKey before the OAuth refresh path runs; suppress
+// Env vars short-circuit AuthStorage.keys.get before the OAuth refresh path runs; suppress
 // them for every test in this file so the credential-disable code path can be exercised.
 const SUPPRESS_ANTHROPIC_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN"] as const;
 const savedEnv: Partial<Record<(typeof SUPPRESS_ANTHROPIC_ENV)[number], string | undefined>> = {};
@@ -46,9 +46,11 @@ class MemoryAuthCredentialStore implements AuthCredentialStore {
 		if (row) row.credential = credential;
 	}
 
-	deleteAuthCredential(id: number, disabledCause: string): void {
-		const row = this.#rows.find(entry => entry.id === id);
-		if (row) row.disabledCause = disabledCause;
+	async deleteAuthCredential(id: number, disabledCause: string): Promise<boolean> {
+		const row = this.#rows.find(entry => entry.id === id && entry.disabledCause === null);
+		if (!row) return false;
+		row.disabledCause = disabledCause;
+		return true;
 	}
 
 	tryDisableAuthCredentialIfMatches(id: number, expectedData: string, disabledCause: string): boolean {
@@ -58,29 +60,27 @@ class MemoryAuthCredentialStore implements AuthCredentialStore {
 		return true;
 	}
 
-	replaceAuthCredentialsForProvider(provider: string, credentials: AuthCredential[]): StoredAuthCredential[] {
+	async replaceAuthCredentials(provider: string, credentials: AuthCredential[]): Promise<StoredAuthCredential[]> {
 		for (const row of this.#rows) {
 			if (row.provider === provider && row.disabledCause === null) {
 				row.disabledCause = "replaced by newer credential";
 			}
 		}
-		const rows = credentials.map(
-			(credential): StoredAuthCredential => ({
-				id: this.#nextId++,
-				provider,
-				credential,
-				disabledCause: null,
-			}),
-		);
+		const rows = credentials.map((credential): StoredAuthCredential => ({
+			id: this.#nextId++,
+			provider,
+			credential,
+			disabledCause: null,
+		}));
 		this.#rows.push(...rows);
 		return rows;
 	}
 
-	upsertAuthCredentialForProvider(provider: string, credential: AuthCredential): StoredAuthCredential[] {
-		return this.replaceAuthCredentialsForProvider(provider, [credential]);
+	async upsertAuthCredential(provider: string, credential: AuthCredential): Promise<StoredAuthCredential[]> {
+		return await this.replaceAuthCredentials(provider, [credential]);
 	}
 
-	deleteAuthCredentialsForProvider(provider: string, disabledCause: string): void {
+	async deleteAuthCredentials(provider: string, disabledCause: string): Promise<void> {
 		for (const row of this.#rows) {
 			if (row.provider === provider && row.disabledCause === null) row.disabledCause = disabledCause;
 		}
@@ -104,9 +104,9 @@ function serializeTestCredential(credential: AuthCredential): string {
 	return "";
 }
 
-function disableCredential(authStorage: AuthStorage, id: number, provider = "anthropic"): void {
-	expect(authStorage.disableCredentialById(id, "oauth refresh failed: invalid_grant")).toBe(true);
-	expect(authStorage.list()).not.toContain(provider);
+async function disableCredential(authStorage: AuthStorage, id: number, provider = "anthropic"): Promise<void> {
+	expect(await authStorage.credentials.disable(id, "oauth refresh failed: invalid_grant")).toBe(true);
+	expect(authStorage.credentials.has(provider)).toBe(false);
 }
 
 describe("AuthStorage credential_disabled subscriptions", () => {
@@ -148,10 +148,10 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 					events.push(event);
 				},
 			});
-			await authStorage.set("anthropic", [expiredOAuth()]);
+			await authStorage.credentials.set("anthropic", [expiredOAuth()]);
 			failOAuthRefresh();
 
-			const apiKey = await authStorage.getApiKey("anthropic", "session-disabled-event");
+			const apiKey = await authStorage.keys.get("anthropic", "session-disabled-event");
 
 			expect(apiKey).toBeUndefined();
 			expect(events).toHaveLength(1);
@@ -166,10 +166,10 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 					events.push(event);
 				},
 			});
-			await authStorage.set("anthropic", [expiredOAuth()]);
+			await authStorage.credentials.set("anthropic", [expiredOAuth()]);
 			failOAuthRefresh("fetch failed: ECONNRESET");
 
-			await authStorage.getApiKey("anthropic", "session-transient-failure");
+			await authStorage.keys.get("anthropic", "session-transient-failure");
 			expect(events).toHaveLength(0);
 		});
 
@@ -179,8 +179,8 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 					throw new Error("subscriber exploded");
 				},
 			});
-			await authStorage.set("anthropic", [expiredOAuth()]);
-			disableCredential(authStorage, 1);
+			await authStorage.credentials.set("anthropic", [expiredOAuth()]);
+			await disableCredential(authStorage, 1);
 		});
 
 		test("swallows async handler rejections so the disable path still completes", async () => {
@@ -193,7 +193,7 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 					throw new Error("async subscriber exploded");
 				},
 			});
-			await authStorage.set("anthropic", [expiredOAuth()]);
+			await authStorage.credentials.set("anthropic", [expiredOAuth()]);
 
 			const unhandled: unknown[] = [];
 			const onUnhandled = (reason: unknown): void => {
@@ -201,7 +201,7 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 			};
 			process.on("unhandledRejection", onUnhandled);
 			try {
-				disableCredential(authStorage, 1);
+				await disableCredential(authStorage, 1);
 				await settled.promise;
 				await Bun.sleep(0);
 				expect(unhandled).toHaveLength(0);
@@ -220,12 +220,12 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 					constructorEvents.push(event);
 				},
 			});
-			authStorage.onCredentialDisabled(event => {
+			authStorage.credentials.onDisabled(event => {
 				runtimeEvents.push(event);
 			});
 
-			await authStorage.set("anthropic", [expiredOAuth()]);
-			disableCredential(authStorage, 1);
+			await authStorage.credentials.set("anthropic", [expiredOAuth()]);
+			await disableCredential(authStorage, 1);
 			expect(constructorEvents).toHaveLength(1);
 			expect(runtimeEvents).toHaveLength(1);
 			expect(constructorEvents[0]?.provider).toBe("anthropic");
@@ -236,16 +236,16 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 			const aEvents: CredentialDisabledEvent[] = [];
 			const bEvents: CredentialDisabledEvent[] = [];
 			const authStorage = openStorage();
-			authStorage.onCredentialDisabled(event => {
+			authStorage.credentials.onDisabled(event => {
 				aEvents.push(event);
 			});
-			authStorage.onCredentialDisabled(event => {
+			authStorage.credentials.onDisabled(event => {
 				bEvents.push(event);
 			});
-			await authStorage.set("anthropic", [expiredOAuth()]);
-			await authStorage.set("openai", [expiredOAuth()]);
-			disableCredential(authStorage, 1);
-			disableCredential(authStorage, 2, "openai");
+			await authStorage.credentials.set("anthropic", [expiredOAuth()]);
+			await authStorage.credentials.set("openai", [expiredOAuth()]);
+			await disableCredential(authStorage, 1);
+			await disableCredential(authStorage, 2, "openai");
 
 			expect(aEvents.map(event => event.provider)).toEqual(["anthropic", "openai"]);
 			expect(bEvents.map(event => event.provider)).toEqual(["anthropic", "openai"]);
@@ -255,23 +255,23 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 			const authStorage = openStorage();
 			const aEvents: CredentialDisabledEvent[] = [];
 			const bEvents: CredentialDisabledEvent[] = [];
-			const unsubscribeA = authStorage.onCredentialDisabled(event => {
+			const unsubscribeA = authStorage.credentials.onDisabled(event => {
 				aEvents.push(event);
 			});
-			authStorage.onCredentialDisabled(event => {
+			authStorage.credentials.onDisabled(event => {
 				bEvents.push(event);
 			});
 
-			await authStorage.set("anthropic", [expiredOAuth()]);
-			await authStorage.set("openai", [expiredOAuth()]);
+			await authStorage.credentials.set("anthropic", [expiredOAuth()]);
+			await authStorage.credentials.set("openai", [expiredOAuth()]);
 
-			disableCredential(authStorage, 1);
+			await disableCredential(authStorage, 1);
 			expect(aEvents).toHaveLength(1);
 			expect(bEvents).toHaveLength(1);
 
 			unsubscribeA();
 
-			disableCredential(authStorage, 2, "openai");
+			await disableCredential(authStorage, 2, "openai");
 			expect(aEvents).toHaveLength(1);
 			expect(bEvents).toHaveLength(2);
 		});
@@ -280,18 +280,18 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 			const authStorage = openStorage();
 			const aEvents: CredentialDisabledEvent[] = [];
 			const bEvents: CredentialDisabledEvent[] = [];
-			const unsubscribeA = authStorage.onCredentialDisabled(event => {
+			const unsubscribeA = authStorage.credentials.onDisabled(event => {
 				aEvents.push(event);
 			});
-			authStorage.onCredentialDisabled(event => {
+			authStorage.credentials.onDisabled(event => {
 				bEvents.push(event);
 			});
 
 			unsubscribeA();
 			unsubscribeA();
 
-			await authStorage.set("anthropic", [expiredOAuth()]);
-			disableCredential(authStorage, 1);
+			await authStorage.credentials.set("anthropic", [expiredOAuth()]);
+			await disableCredential(authStorage, 1);
 
 			expect(aEvents).toHaveLength(0);
 			expect(bEvents).toHaveLength(1);
@@ -300,16 +300,16 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 		test("a throwing subscriber does not block other subscribers from receiving the event", async () => {
 			const authStorage = openStorage();
 			const tailEvents: CredentialDisabledEvent[] = [];
-			authStorage.onCredentialDisabled(() => {
+			authStorage.credentials.onDisabled(() => {
 				throw new Error("first subscriber exploded");
 			});
-			authStorage.onCredentialDisabled(event => {
+			authStorage.credentials.onDisabled(event => {
 				tailEvents.push(event);
 			});
 
-			await authStorage.set("anthropic", [expiredOAuth()]);
+			await authStorage.credentials.set("anthropic", [expiredOAuth()]);
 
-			disableCredential(authStorage, 1);
+			await disableCredential(authStorage, 1);
 			expect(tailEvents).toHaveLength(1);
 		});
 
@@ -317,16 +317,16 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 			const authStorage = openStorage();
 			const tailEvents: CredentialDisabledEvent[] = [];
 			const settled = Promise.withResolvers<void>();
-			authStorage.onCredentialDisabled(async () => {
+			authStorage.credentials.onDisabled(async () => {
 				await Promise.resolve();
 				settled.resolve();
 				throw new Error("async subscriber exploded");
 			});
-			authStorage.onCredentialDisabled(event => {
+			authStorage.credentials.onDisabled(event => {
 				tailEvents.push(event);
 			});
 
-			await authStorage.set("anthropic", [expiredOAuth()]);
+			await authStorage.credentials.set("anthropic", [expiredOAuth()]);
 
 			const unhandled: unknown[] = [];
 			const onUnhandled = (reason: unknown): void => {
@@ -334,7 +334,7 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 			};
 			process.on("unhandledRejection", onUnhandled);
 			try {
-				disableCredential(authStorage, 1);
+				await disableCredential(authStorage, 1);
 				await settled.promise;
 				await Bun.sleep(0);
 				expect(tailEvents).toHaveLength(1);
@@ -349,11 +349,11 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 		test("replays buffered events to the first subscriber that triggers the empty→non-empty transition", async () => {
 			const authStorage = openStorage();
 
-			await authStorage.set("anthropic", [expiredOAuth()]);
-			disableCredential(authStorage, 1);
+			await authStorage.credentials.set("anthropic", [expiredOAuth()]);
+			await disableCredential(authStorage, 1);
 
 			const replayed: CredentialDisabledEvent[] = [];
-			authStorage.onCredentialDisabled(event => {
+			authStorage.credentials.onDisabled(event => {
 				replayed.push(event);
 			});
 			// Drain may schedule async invocations.
@@ -367,18 +367,18 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 		test("drains once: a later subscriber attached after the first does not re-receive past events", async () => {
 			const authStorage = openStorage();
 
-			await authStorage.set("anthropic", [expiredOAuth()]);
-			disableCredential(authStorage, 1);
+			await authStorage.credentials.set("anthropic", [expiredOAuth()]);
+			await disableCredential(authStorage, 1);
 
 			const firstEvents: CredentialDisabledEvent[] = [];
-			authStorage.onCredentialDisabled(event => {
+			authStorage.credentials.onDisabled(event => {
 				firstEvents.push(event);
 			});
 			await Promise.resolve();
 			expect(firstEvents).toHaveLength(1);
 
 			const secondEvents: CredentialDisabledEvent[] = [];
-			authStorage.onCredentialDisabled(event => {
+			authStorage.credentials.onDisabled(event => {
 				secondEvents.push(event);
 			});
 			await Promise.resolve();
@@ -389,22 +389,22 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 		test("after every subscriber unsubscribes, subsequent events buffer until the next subscribe", async () => {
 			const authStorage = openStorage();
 			const events: CredentialDisabledEvent[] = [];
-			const unsubscribe = authStorage.onCredentialDisabled(event => {
+			const unsubscribe = authStorage.credentials.onDisabled(event => {
 				events.push(event);
 			});
 
-			await authStorage.set("anthropic", [expiredOAuth()]);
-			disableCredential(authStorage, 1);
+			await authStorage.credentials.set("anthropic", [expiredOAuth()]);
+			await disableCredential(authStorage, 1);
 			expect(events).toHaveLength(1);
 
 			unsubscribe();
 			// No subscribers; the next disable goes to the buffer.
-			await authStorage.set("openai", [expiredOAuth()]);
-			disableCredential(authStorage, 2, "openai");
+			await authStorage.credentials.set("openai", [expiredOAuth()]);
+			await disableCredential(authStorage, 2, "openai");
 			expect(events).toHaveLength(1);
 
 			const replayed: CredentialDisabledEvent[] = [];
-			authStorage.onCredentialDisabled(event => {
+			authStorage.credentials.onDisabled(event => {
 				replayed.push(event);
 			});
 			await Promise.resolve();

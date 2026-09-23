@@ -4,57 +4,105 @@ import type {
 	ApiKeyResolver,
 	AssistantMessage,
 	AssistantMessageEvent,
-	AssistantMessageEventStream,
 	Context,
 	Effort,
 	Model,
 	ProviderSessionState,
 	ServiceTier,
 	ServiceTierByFamily,
-	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
 import { resolveModelServiceTier, streamSimple } from "@oh-my-pi/pi-ai";
-import { buildModelProviderPriorityRank } from "@oh-my-pi/pi-catalog/identity";
-import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
-import { formatDuration, getProjectDir, prompt } from "@oh-my-pi/pi-utils";
-import chalk from "@oh-my-pi/pi-utils/chalk";
-import type { ApiKeyResolverModel } from "../config/api-key-resolver";
-import { ModelRegistry } from "../config/model-registry";
 import {
-	formatModelSelectorValue,
-	formatModelString,
-	getModelMatchPreferences,
-	resolveCliModel,
-} from "../config/model-resolver";
+	renderTableRow,
+	replaceTabs,
+	type TableCell,
+	type TableColumn,
+	truncateToWidth,
+	visibleWidth,
+} from "@oh-my-pi/pi-tui";
+import { formatDuration, formatNumber, prompt } from "@oh-my-pi/pi-utils";
+import chalk from "@oh-my-pi/pi-utils/chalk";
+import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
+import { formatModelStringWithRouting } from "../config/model-resolver";
 import { buildServiceTierByFamily, serviceTierForAllFamilies, serviceTierSettingToTier } from "../config/service-tier";
-import { Settings } from "../config/settings";
 import cachePrefixTemplate from "../prompts/bench/cache-prefix.md" with { type: "text" };
 import cachePrefixChunk from "../prompts/bench/cache-prefix-chunk.md" with { type: "text" };
 import cacheSuffixTemplate from "../prompts/bench/cache-suffix.md" with { type: "text" };
-import benchPrompt from "../prompts/bench.md" with { type: "text" };
-import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
+import chatTemplate from "../prompts/bench/chat.md" with { type: "text" };
+import generationTemplate from "../prompts/bench/generation.md" with { type: "text" };
+import prefillInstruction from "../prompts/bench/prefill-instruction.md" with { type: "text" };
+import { shouldDisableReasoning, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
 import {
-	concreteThinkingLevel,
-	resolveThinkingLevelForModel,
-	shouldDisableReasoning,
-	toReasoningEffort,
-} from "../thinking";
+	type BenchRuntime,
+	type BenchTarget,
+	createDefaultBenchRuntime,
+	resolveBenchTargets,
+	type StreamSimpleFn,
+} from "./bench-runtime";
+import { createLiveBoard, type LiveBoardOutput } from "@oh-my-pi/pi-tui/chrome/live-board";
+import { formatCost } from "@oh-my-pi/pi-tui/overlays/agent-hub-renderer";
 
-const DEFAULT_RUNS = 10;
 const DEFAULT_PAR = 4;
-const DEFAULT_MAX_TOKENS = 512;
 const DEFAULT_CACHE_MAX_TOKENS = 64;
 const DEFAULT_CACHE_PREFIX_BYTES = 8_192;
 const DEFAULT_CACHE_PAIRS = 1;
 const DEFAULT_CACHE_CONCURRENCY = 1;
+const DEFAULT_PREFILL_BYTES = 32_768;
 const ERROR_WIDTH = 110;
-const BENCH_PROMPT = benchPrompt.trim();
 const UTF8_ENCODER = new TextEncoder();
 const UTF8_DECODER = new TextDecoder();
 const CACHE_PREFIX_CHUNK = cachePrefixChunk;
 const CACHE_PREFIX_PLACEHOLDER = "__OMP_CACHE_BENCH_RAW_PREFIX__";
 const CACHE_PREFIX_CHUNK_BYTES = UTF8_ENCODER.encode(CACHE_PREFIX_CHUNK).byteLength;
 const RESPONSE_CACHE_STATUS_HEADERS = ["cf-aig-cache-status"] as const;
+
+/**
+ * One built-in workload a bench run exercises:
+ * - `chat`: balanced prompt/output — the everyday latency + throughput picture.
+ * - `prefill`: large cache-busted input, tiny output — isolates input-token
+ *   processing (TTFT and prefill tok/s).
+ * - `generation`: tiny prompt, long forced output — isolates sustained decode
+ *   throughput.
+ */
+export type BenchChallengeKind = "chat" | "prefill" | "generation";
+
+/** One challenge kind (`chat` by default), or `mix` to rotate through every kind. */
+export type BenchProfile = "mix" | BenchChallengeKind;
+
+/** `mix` rotation order; the lead kind (chat) supplies a mixed table's latency and ranking. */
+const CHALLENGE_KINDS = ["chat", "prefill", "generation"] as const;
+
+/** Default max output tokens per challenge kind (`--max-tokens` overrides all). */
+const CHALLENGE_MAX_TOKENS: Record<BenchChallengeKind, number> = { chat: 512, prefill: 64, generation: 2048 };
+
+/** Default requests per model; mix needs a multiple of the kind count. */
+const PROFILE_DEFAULT_RUNS: Record<BenchProfile, number> = { mix: 9, chat: 10, prefill: 5, generation: 5 };
+
+/** Chat-challenge topics; one is drawn at random per run so runs never repeat a request. */
+const CHAT_TOPICS = [
+	"how a web browser turns an HTML payload into pixels on screen",
+	"how a garbage collector reclaims memory in a managed runtime",
+	"how TCP congestion control adapts to packet loss",
+	"how a B-tree index accelerates database lookups",
+	"how DNS resolves a hostname to an IP address",
+	"how an operating system scheduler shares a CPU between processes",
+	"how public-key cryptography secures a TLS handshake",
+	"how a compiler lowers source code to optimized machine code",
+	"how a CPU cache hierarchy hides memory latency",
+	"how a distributed consensus protocol keeps replicas consistent",
+] as const;
+
+/** Generation-challenge topics; long, low-ambiguity narrations that sustain decoding. */
+const GENERATION_TOPICS = [
+	"the history of computing",
+	"the history of aviation",
+	"the history of astronomy",
+	"the history of railways",
+	"the history of medicine",
+	"the history of telecommunications",
+	"the history of cartography",
+	"the history of shipbuilding",
+] as const;
 
 export interface BenchCommandArgs {
 	models: string[];
@@ -66,6 +114,10 @@ export interface BenchCommandArgs {
 		serviceTier?: string;
 		json?: boolean;
 		par?: number;
+		/** Benchmark workload: a challenge kind (default `chat`), or `mix` to rotate through every kind. */
+		profile?: string;
+		/** Synthetic input size for prefill challenges (default: 32768 bytes). */
+		prefillBytes?: number;
 		cache?: boolean;
 		cachePrefixFile?: string;
 		cachePrefixBytes?: number;
@@ -74,31 +126,36 @@ export interface BenchCommandArgs {
 	};
 }
 
-export interface BenchModelRegistry {
-	getAll(): Model<Api>[];
-	getAvailable(): Model<Api>[];
-	getApiKey(model: Model<Api>, sessionId?: string): Promise<string | undefined>;
-	resolver(model: ApiKeyResolverModel, sessionId?: string): ApiKeyResolver;
-	hasConfiguredAuth?(model: Model<Api>): boolean;
-}
-
-export interface BenchRuntime {
-	modelRegistry: BenchModelRegistry;
-	settings?: Settings;
-	close?: () => void;
-}
-
 export interface BenchRunSuccess {
 	ok: true;
+	/** Challenge kind this run exercised; absent in `--cache` mode. */
+	challenge?: BenchChallengeKind;
+	/** Request start → first streamed token: queue + prefill window. */
 	ttftMs: number;
+	/** First streamed token → done: decode window (0 when the response arrived buffered). */
+	generationMs: number;
 	durationMs: number;
+	/** Total prompt tokens: `usage.input` plus cache reads/writes (providers report cached prompt tokens outside `input`). */
+	inputTokens: number;
 	outputTokens: number;
 	/** Output tokens/sec over the total request duration. */
 	tokensPerSecond: number;
+	/**
+	 * Output tokens/sec over the decode window. Inflated on providers that hide
+	 * reasoning until completion (tiny decode window); 0 for fully buffered
+	 * responses. Compare `tokensPerSecond` for a buffering-proof number.
+	 */
+	generationTps: number;
+	/** Prompt tokens/sec over the TTFT window (queue-inclusive prefill rate). */
+	prefillTps: number;
+	/** Priced cost of the request; 0 when pricing is unavailable. */
+	cost: number;
 }
 
 export interface BenchRunFailure {
 	ok: false;
+	/** Challenge kind this run exercised; absent in `--cache` mode. */
+	challenge?: BenchChallengeKind;
 	error: string;
 }
 
@@ -142,11 +199,30 @@ export interface BenchCachePairReport {
 	payloadStructureStable: boolean | "unavailable";
 }
 
-export interface BenchAverages {
-	ttftMs: number;
-	durationMs: number;
+/** Distribution summary over successful runs. */
+export interface MetricStats {
+	mean: number;
+	min: number;
+	/** Median (nearest-rank). */
+	p50: number;
+	/** 95th percentile (nearest-rank). */
+	p95: number;
+	max: number;
+}
+
+/** Aggregates over successful runs. */
+export interface BenchStats {
+	ttftMs: MetricStats;
+	durationMs: MetricStats;
+	tokensPerSecond: MetricStats;
+	generationTps: MetricStats;
+	prefillTps: MetricStats;
+	/** Mean input tokens per successful run. */
+	inputTokens: number;
+	/** Mean output tokens per successful run. */
 	outputTokens: number;
-	tokensPerSecond: number;
+	/** Mean priced cost per successful run; 0 when pricing is unavailable. */
+	cost: number;
 }
 
 export interface BenchModelReport {
@@ -157,14 +233,19 @@ export interface BenchModelReport {
 	/** Explicit thinking level from a `:level` selector suffix; undefined = provider default. */
 	thinking?: ResolvedThinkingLevel;
 	results: BenchRunResult[];
-	/** Averages over successful runs; null when every run failed. */
-	average: BenchAverages | null;
+	/** Aggregates over successful runs; null when every run failed. */
+	stats: BenchStats | null;
+	/** Aggregates per challenge kind; empty in `--cache` mode. */
+	byChallenge: Partial<Record<BenchChallengeKind, BenchStats>>;
 	cachePairs?: BenchCachePairReport[];
 }
 
 export interface BenchSummary {
 	runs: number;
-	maxTokens: number;
+	/** Explicit `--max-tokens` override (cache mode: resolved value); absent when per-challenge defaults apply. */
+	maxTokens?: number;
+	/** Benchmark workload; absent in `--cache` mode. */
+	profile?: BenchProfile;
 	models: BenchModelReport[];
 	failures: number;
 	/** Requested per-family service tiers, resolved per model before reaching the wire. */
@@ -175,20 +256,16 @@ export interface BenchSummary {
 	};
 }
 
-type BenchStreamSimple = (
-	model: Model<Api>,
-	context: Context,
-	options?: SimpleStreamOptions,
-) => AssistantMessageEventStream;
-
 export interface BenchDependencies {
 	createRuntime?: () => Promise<BenchRuntime>;
 	randomSessionId?: () => string;
 	writeStdout?: (text: string) => void;
 	writeStderr?: (text: string) => void;
 	setExitCode?: (code: number) => void;
-	streamSimple?: BenchStreamSimple;
+	streamSimple?: StreamSimpleFn;
 	now?: () => number;
+	/** Uniform [0,1) source for challenge randomization; default `Math.random`. */
+	random?: () => number;
 	readTextFile?: (path: string, maxBytes: number) => Promise<string>;
 	stdoutIsTTY?: boolean;
 }
@@ -269,6 +346,23 @@ function payloadStructure(payload: unknown): string {
 
 function asNonNegativeNumber(value: unknown): number {
 	return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+}
+/** Nearest-rank distribution summary; `values` MUST be non-empty. */
+function metricStats(values: number[]): MetricStats {
+	const sorted = [...values].sort((a, b) => a - b);
+	const at = (q: number): number =>
+		sorted[Math.max(0, Math.min(sorted.length - 1, Math.ceil(q * sorted.length) - 1))]!;
+	return {
+		mean: sorted.reduce((sum, value) => sum + value, 0) / sorted.length,
+		min: sorted[0]!,
+		p50: at(0.5),
+		p95: at(0.95),
+		max: sorted[sorted.length - 1]!,
+	};
+}
+
+function mean(values: number[]): number {
+	return values.length === 0 ? 0 : values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
 function captureUsage(message: AssistantMessage): BenchCacheUsage {
@@ -376,12 +470,65 @@ function cacheBenchmarkMessages(stablePrefix: string, suffix: string): Context["
 		{ role: "user", content: suffix, timestamp, attribution: "user" },
 	];
 }
+/** One concrete bench request: kind, output budget, and randomized messages. */
+interface BenchChallenge {
+	kind: BenchChallengeKind;
+	maxTokens: number;
+	messages: Context["messages"];
+}
+
+interface BenchChallengeOptions {
+	/** Replaces the built-in prompt (chat/generation only). */
+	promptOverride?: string;
+	/** Synthetic input size for prefill challenges. */
+	prefillBytes: number;
+	/** Per-run unique token; leads the prefill body so provider prefix caches can never reuse an earlier run's prefill. */
+	nonce: string;
+	/** Uniform [0,1) source for topic selection. */
+	random: () => number;
+	/** Explicit `--max-tokens`; overrides the kind default. */
+	maxTokensOverride?: number;
+}
+
+/** Build a randomized challenge so repeated runs never send a byte-identical request. */
+function buildBenchChallenge(kind: BenchChallengeKind, opts: BenchChallengeOptions): BenchChallenge {
+	const maxTokens = opts.maxTokensOverride ?? CHALLENGE_MAX_TOKENS[kind];
+	const pick = (topics: readonly string[]): string => topics[Math.floor(opts.random() * topics.length)] ?? topics[0]!;
+	const user = (content: string): Context["messages"] => [
+		{ role: "user", content, timestamp: Date.now(), attribution: "user" },
+	];
+	switch (kind) {
+		case "chat":
+			return {
+				kind,
+				maxTokens,
+				messages: user(opts.promptOverride ?? prompt.render(chatTemplate, { topic: pick(CHAT_TOPICS) }).trim()),
+			};
+		case "generation":
+			return {
+				kind,
+				maxTokens,
+				messages: user(
+					opts.promptOverride ?? prompt.render(generationTemplate, { topic: pick(GENERATION_TOPICS) }).trim(),
+				),
+			};
+		case "prefill":
+			return {
+				kind,
+				maxTokens,
+				messages: user(
+					`Benchmark run ${opts.nonce}.\n\n${generatedCachePrefix(opts.prefillBytes)}\n\n${opts.promptOverride ?? prefillInstruction.trim()}`,
+				),
+			};
+	}
+}
 
 async function runWithConcurrency<T>(
 	count: number,
 	concurrency: number,
 	run: (index: number) => Promise<T>,
 ): Promise<T[]> {
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const results = new Array<T>(count);
 	let next = 0;
 	const worker = async (): Promise<void> => {
@@ -394,19 +541,13 @@ async function runWithConcurrency<T>(
 	return results;
 }
 
-function formatCacheCost(cost: number): string {
-	if (cost < 0.01) return `$${cost.toFixed(4)}`;
-	if (cost < 1) return `$${cost.toFixed(3)}`;
-	return `$${cost.toFixed(2)}`;
-}
-
 function formatCachePairLine(pair: BenchCachePairReport, index: number, total: number): string {
 	const formatPhase = (run: BenchCacheRunReport, alreadyWarm = false) => {
 		if (!run.result.ok) {
 			return `${run.phase} failed: ${truncateToWidth(replaceTabs(run.result.error), ERROR_WIDTH)}`;
 		}
 		const usage = run.usage;
-		return `${run.phase}${alreadyWarm ? " (already warm)" : ""} ${run.observations.join(", ")} ${chalk.dim("input")} ${usage?.inputTokens ?? 0} ${chalk.dim("cache-read")} ${usage?.cacheReadTokens ?? 0} ${chalk.dim("cache-write")} ${usage?.cacheWriteTokens ?? 0} ${chalk.dim("output")} ${usage?.outputTokens ?? run.result.outputTokens} ${chalk.dim("total")} ${usage?.totalTokens ?? 0} ${chalk.dim("cost")} ${formatCacheCost(usage?.cost ?? 0)} ${chalk.dim("TTFT")} ${formatMs(run.result.ttftMs)} ${chalk.dim("duration")} ${formatMs(run.result.durationMs)} ${chalk.dim("throughput")} ${run.result.tokensPerSecond.toFixed(1)}/s`;
+		return `${run.phase}${alreadyWarm ? " (already warm)" : ""} ${run.observations.join(", ")} ${chalk.dim("input")} ${usage?.inputTokens ?? 0} ${chalk.dim("cache-read")} ${usage?.cacheReadTokens ?? 0} ${chalk.dim("cache-write")} ${usage?.cacheWriteTokens ?? 0} ${chalk.dim("output")} ${usage?.outputTokens ?? run.result.outputTokens} ${chalk.dim("total")} ${usage?.totalTokens ?? 0} ${chalk.dim("cost")} ${formatCost(usage?.cost ?? 0)} ${chalk.dim("TTFT")} ${formatMs(run.result.ttftMs)} ${chalk.dim("duration")} ${formatMs(run.result.durationMs)} ${chalk.dim("throughput")} ${run.result.tokensPerSecond.toFixed(1)}/s`;
 	};
 	return `  ${chalk.dim(`pair ${index + 1}/${total}`)} ${formatPhase(pair.cold, pair.coldAlreadyWarm)}; ${formatPhase(pair.warm)}`;
 }
@@ -414,9 +555,8 @@ function formatCachePairLine(pair: BenchCachePairReport, index: number, total: n
 interface BenchRequestOptions {
 	apiKey: ApiKeyResolver;
 	sessionId: string;
-	prompt: string;
 	/** Native OMP messages; cache mode splits the stable prefix from the suffix. */
-	contextMessages?: Context["messages"];
+	messages: Context["messages"];
 	maxTokens: number;
 	/** Explicit effort from a `:level` selector suffix; absent = provider default. */
 	reasoning?: Effort;
@@ -432,7 +572,7 @@ interface BenchRequestOptions {
 async function runBenchRequest(
 	model: Model<Api>,
 	options: BenchRequestOptions,
-	streamFn: BenchStreamSimple,
+	streamFn: StreamSimpleFn,
 	now: () => number,
 ): Promise<BenchRunResult> {
 	const startedAt = now();
@@ -443,9 +583,7 @@ async function runBenchRequest(
 			// Codex's Responses endpoint 400s with "Instructions are required" when no
 			// system prompt is present — same guard as eval's completion bridge.
 			systemPrompt: ["You are a helpful assistant."],
-			messages: options.contextMessages ?? [
-				{ role: "user", content: options.prompt, timestamp: Date.now(), attribution: "user" },
-			],
+			messages: options.messages,
 		};
 		const stream = streamFn(model, context, {
 			apiKey: options.apiKey,
@@ -516,10 +654,20 @@ async function runBenchRequest(
 			};
 		}
 		if (options.cacheCapture) options.cacheCapture.usage = captureUsage(message);
+		// Providers report cache-written/read prompt tokens outside `usage.input`
+		// (e.g. Anthropic auto-caching moves nearly the whole prompt into
+		// cacheWrite), so total prompt size must sum all three.
+		const inputTokens =
+			asNonNegativeNumber(message.usage.input) +
+			asNonNegativeNumber(message.usage.cacheRead) +
+			asNonNegativeNumber(message.usage.cacheWrite);
+		const generationMs = Math.max(0, durationMs - ttftMs);
 		return {
 			ok: true,
 			ttftMs,
+			generationMs,
 			durationMs,
+			inputTokens,
 			outputTokens,
 			// TPS over the TOTAL request duration, deliberately not the post-TTFT
 			// decode window: reasoning models can spend seconds generating hidden
@@ -527,6 +675,9 @@ async function runBenchRequest(
 			// byte, so "duration - TTFT" inflates TPS several-fold on providers
 			// that buffer or hide reasoning (e.g. google vs google-vertex).
 			tokensPerSecond: durationMs > 0 ? (outputTokens * 1000) / durationMs : 0,
+			generationTps: generationMs > 0 ? (outputTokens * 1000) / generationMs : 0,
+			prefillTps: ttftMs > 0 ? (inputTokens * 1000) / ttftMs : 0,
+			cost: asNonNegativeNumber(message.usage.cost?.total),
 		};
 	} catch (error) {
 		return { ok: false, error: getErrorMessage(error) };
@@ -542,16 +693,31 @@ function buildModelReport(
 	results: BenchRunResult[],
 ): BenchModelReport {
 	const successes = results.filter((result): result is BenchRunSuccess => result.ok);
-	const average =
-		successes.length === 0
-			? null
-			: {
-					ttftMs: successes.reduce((sum, r) => sum + r.ttftMs, 0) / successes.length,
-					durationMs: successes.reduce((sum, r) => sum + r.durationMs, 0) / successes.length,
-					outputTokens: successes.reduce((sum, r) => sum + r.outputTokens, 0) / successes.length,
-					tokensPerSecond: successes.reduce((sum, r) => sum + r.tokensPerSecond, 0) / successes.length,
-				};
-	return { selector, model: formatModelString(model), thinking, results, average };
+	const byChallenge: BenchModelReport["byChallenge"] = {};
+	for (const kind of CHALLENGE_KINDS) {
+		const kindRuns = successes.filter(r => r.challenge === kind);
+		if (kindRuns.length > 0) byChallenge[kind] = computeBenchStats(kindRuns);
+	}
+	return {
+		selector,
+		model: formatModelStringWithRouting(model),
+		thinking,
+		results,
+		stats: successes.length === 0 ? null : computeBenchStats(successes),
+		byChallenge,
+	};
+}
+function computeBenchStats(successes: BenchRunSuccess[]): BenchStats {
+	return {
+		ttftMs: metricStats(successes.map(r => r.ttftMs)),
+		durationMs: metricStats(successes.map(r => r.durationMs)),
+		tokensPerSecond: metricStats(successes.map(r => r.tokensPerSecond)),
+		generationTps: metricStats(successes.map(r => r.generationTps)),
+		prefillTps: metricStats(successes.map(r => r.prefillTps)),
+		inputTokens: mean(successes.map(r => r.inputTokens)),
+		outputTokens: mean(successes.map(r => r.outputTokens)),
+		cost: mean(successes.map(r => r.cost)),
+	};
 }
 
 function formatBenchModelLabel(report: BenchModelReport): string {
@@ -562,185 +728,154 @@ function formatMs(ms: number): string {
 	return formatDuration(Math.max(0, Math.round(ms)));
 }
 
-function formatRunLine(result: BenchRunResult, index: number, total: number): string {
+/** One run's result line; `tagKind` labels the challenge (only informative when kinds are mixed). */
+function formatRunLine(result: BenchRunResult, index: number, total: number, opts: { tagKind: boolean }): string {
 	const prefix = chalk.dim(`run ${index + 1}/${total}`);
+	const kind = opts.tagKind && result.challenge ? `${chalk.cyan(result.challenge.padEnd(10))} ` : "";
 	if (result.ok) {
-		return `  ${chalk.green("✓")} ${prefix} ${chalk.dim("TTFT")} ${formatMs(result.ttftMs)} ${chalk.dim("TPS")} ${result.tokensPerSecond.toFixed(1)}/s ${chalk.dim("tokens")} ${result.outputTokens} ${chalk.dim("total")} ${formatMs(result.durationMs)}`;
+		// A prefill run emits a handful of tokens: its output rates are noise, the input rate is the result.
+		const gen = result.generationTps > 0 ? `${result.generationTps.toFixed(1)}/s` : "-";
+		const rates =
+			result.challenge === "prefill"
+				? `${chalk.dim("prefill")} ${result.prefillTps.toFixed(0)}/s`
+				: `${chalk.dim("tok/s")} ${result.tokensPerSecond.toFixed(1)} ${chalk.dim("gen")} ${gen}`;
+		return `  ${chalk.green("✓")} ${prefix} ${kind}${chalk.dim("TTFT")} ${formatMs(result.ttftMs)} ${rates} ${chalk.dim("in")} ${formatNumber(result.inputTokens)} ${chalk.dim("out")} ${formatNumber(result.outputTokens)} ${chalk.dim("total")} ${formatMs(result.durationMs)}`;
 	}
-	return `  ${chalk.red("✗")} ${prefix} ${chalk.red(truncateToWidth(replaceTabs(result.error).replace(/\r?\n/g, " "), ERROR_WIDTH))}`;
+	return `  ${chalk.red("✗")} ${prefix} ${kind}${chalk.red(truncateToWidth(replaceTabs(result.error).replace(/\r?\n/g, " "), ERROR_WIDTH))}`;
 }
 
-export function formatBenchTable(summary: BenchSummary): string {
-	const ranked = [...summary.models].sort((a, b) => {
-		if (a.average === null && b.average === null) return 0;
-		if (a.average === null) return 1;
-		if (b.average === null) return -1;
-		return b.average.tokensPerSecond - a.average.tokensPerSecond;
-	});
-	const rows = ranked.map(report => ({
-		model: formatBenchModelLabel(report),
-		ttft: report.average ? formatMs(report.average.ttftMs) : "-",
-		tps: report.average ? `${report.average.tokensPerSecond.toFixed(1)}/s` : "-",
-		tokens: report.average ? String(Math.round(report.average.outputTokens)) : "-",
-		total: report.average ? formatMs(report.average.durationMs) : "-",
-		failed: report.results.filter(result => !result.ok).length,
-	}));
-	const headers = { model: "model", ttft: "TTFT", tps: "TPS", tokens: "tokens", total: "total" } as const;
-	const width = (key: keyof typeof headers): number =>
-		Math.max(headers[key].length, ...rows.map(row => row[key].length));
-	const lines = [
-		[
-			headers.model.padEnd(width("model")),
-			headers.ttft.padEnd(width("ttft")),
-			headers.tps.padEnd(width("tps")),
-			headers.tokens.padEnd(width("tokens")),
-			headers.total.padEnd(width("total")),
-		]
-			.join("  ")
-			.trimEnd(),
+/** Placeholder cell for a value the live footer has not measured yet. */
+const PENDING_CELL = "…";
+
+/** Run (cache mode: pair) counters for one model. */
+interface BenchProgress {
+	total: number;
+	completed: number;
+	failed: number;
+	inFlight: number;
+}
+
+/** One model's comparison-table row; the live footer repaints it as runs finish. */
+interface BenchTableRow {
+	/** Aggregates over the runs finished so far. */
+	report: BenchModelReport;
+	state: "queued" | "running" | "done";
+	progress: BenchProgress;
+}
+
+function formatProgress(progress: BenchProgress, unit: "runs" | "pairs"): string {
+	const parts = [`${progress.completed}/${progress.total} ${unit}`];
+	if (progress.inFlight > 0) parts.push(`${progress.inFlight} in flight`);
+	if (progress.failed > 0) parts.push(chalk.red(`${progress.failed} failed`));
+	return parts.join(chalk.dim(" · "));
+}
+
+function formatRowStatus(row: BenchTableRow, spinner: string): string {
+	switch (row.state) {
+		case "queued":
+			return chalk.dim("queued");
+		case "running":
+			return `${chalk.yellow(spinner)} ${formatProgress(row.progress, "runs")}`;
+		case "done": {
+			const failed = row.report.results.filter(result => !result.ok).length;
+			return failed > 0 ? chalk.red(`(${failed} failed)`) : "";
+		}
+	}
+}
+
+interface BenchTableColumn {
+	header: string;
+	/** Undefined when the model has no data for this column (yet). */
+	value(report: BenchModelReport): string | undefined;
+}
+
+/** Headline column per challenge kind: output tok/s, or input tok/s for prefill (p50 of `metric`). */
+const KIND_HEADLINES: Record<
+	BenchChallengeKind,
+	{ header: string; metric: "tokensPerSecond" | "prefillTps"; digits: number }
+> = {
+	chat: { header: "tok/s", metric: "tokensPerSecond", digits: 1 },
+	prefill: { header: "prefill", metric: "prefillTps", digits: 0 },
+	generation: { header: "decode", metric: "tokensPerSecond", digits: 1 },
+};
+
+function benchTableColumns(kinds: readonly BenchChallengeKind[]): BenchTableColumn[] {
+	// The lead kind (chat when mixed) carries the representative latency.
+	const lead = kinds[0]!;
+	const columns: BenchTableColumn[] = [
+		{ header: "model", value: formatBenchModelLabel },
+		{
+			header: "TTFT p50",
+			value: r => {
+				const ttft = r.byChallenge[lead]?.ttftMs;
+				return ttft ? formatMs(ttft.p50) : undefined;
+			},
+		},
+		{
+			header: "p95",
+			value: r => {
+				const ttft = r.byChallenge[lead]?.ttftMs;
+				return ttft ? formatMs(ttft.p95) : undefined;
+			},
+		},
 	];
-	for (const row of rows) {
-		const failedSuffix = row.failed > 0 ? `  ${chalk.red(`(${row.failed} failed)`)}` : "";
-		lines.push(
-			[
-				row.model.padEnd(width("model")),
-				row.ttft.padEnd(width("ttft")),
-				row.tps.padEnd(width("tps")),
-				row.tokens.padEnd(width("tokens")),
-				row.total.padEnd(width("total")),
-			]
-				.join("  ")
-				.trimEnd() + failedSuffix,
-		);
+	for (const kind of kinds) {
+		const { header, metric, digits } = KIND_HEADLINES[kind];
+		columns.push({ header, value: r => r.byChallenge[kind]?.[metric].p50.toFixed(digits) });
 	}
-	return `${lines.map((line, index) => (index === 0 ? chalk.dim(line) : line)).join("\n")}\n`;
-}
-
-async function createDefaultRuntime(): Promise<BenchRuntime> {
-	const authStorage = await discoverAuthStorage();
-	try {
-		const cwd = getProjectDir();
-		const settings = await Settings.init({ cwd });
-		const modelRegistry = new ModelRegistry(authStorage);
-		await loadCliExtensionProviders(modelRegistry, settings, cwd);
-		return {
-			modelRegistry,
-			settings,
-			close: () => authStorage.close(),
-		};
-	} catch (error) {
-		authStorage.close();
-		throw error;
-	}
-}
-
-interface BenchTarget {
-	selector: string;
-	model: Model<Api>;
-	thinking: ResolvedThinkingLevel | undefined;
-}
-
-/** Highest-priority provider variant: native/OAuth transports outrank mirrors. */
-function pickHighestPriorityProvider(models: Model<Api>[], providerOrder?: readonly string[]): Model<Api> | undefined {
-	if (models.length <= 1) return models[0];
-	const priority = buildModelProviderPriorityRank(providerOrder);
-	return [...models].sort((a, b) => {
-		const aRank = priority.get(a.provider.toLowerCase()) ?? Number.POSITIVE_INFINITY;
-		const bRank = priority.get(b.provider.toLowerCase()) ?? Number.POSITIVE_INFINITY;
-		return aRank - bRank;
-	})[0];
+	columns.push({
+		header: "cost/run",
+		value: r => {
+			if (!r.stats) return undefined;
+			// Zero cost means the model is unpriced, not free.
+			return r.stats.cost > 0 ? formatCost(r.stats.cost) : "-";
+		},
+	});
+	return columns;
 }
 
 /**
- * Bench resolves selectors against the entire catalog (credentials are ignored),
- * so an ambiguous id shared by several providers can land on one the user never
- * authenticated. For non-pinned selectors, redirect to an equivalent model under
- * a provider with configured auth. An explicit `provider/id` selector is honored
- * verbatim — even unauthenticated — so forced benchmarking keeps working.
+ * Comparison table ranked by the lead kind's headline rate (chat tok/s when
+ * mixed); medians, not means, so one queue hiccup cannot reorder rows. It is
+ * also the live footer: unfinished rows show {@link PENDING_CELL} for
+ * unmeasured cells and a trailing status animated by `spinner`.
  */
-function resolveAuthenticatedAlternative(
-	selector: string,
-	model: Model<Api>,
-	modelRegistry: BenchModelRegistry,
-	providerOrder?: readonly string[],
-): Model<Api> | undefined {
-	if (!modelRegistry.hasConfiguredAuth) return undefined;
-	// A pinned `provider/...` selector is authoritative; never redirect off it.
-	if (selector.trim().toLowerCase().startsWith(`${model.provider.toLowerCase()}/`)) return undefined;
-	if (modelRegistry.hasConfiguredAuth(model)) return undefined;
-
-	const seen = new Set<string>();
-	const authenticated: Model<Api>[] = [];
-	const consider = (candidate: Model<Api>): void => {
-		const key = `${candidate.provider}/${candidate.id}`;
-		if (seen.has(key)) return;
-		seen.add(key);
-		if (modelRegistry.hasConfiguredAuth?.(candidate)) authenticated.push(candidate);
-	};
-	// Same-id fallback for equivalent entries under providers with configured auth.
-	for (const candidate of modelRegistry.getAll()) {
-		if (candidate.id === model.id) consider(candidate);
+function formatBenchTable(
+	rows: readonly BenchTableRow[],
+	kinds: readonly BenchChallengeKind[],
+	spinner = "",
+): string[] {
+	const lead = kinds[0]!;
+	const { metric } = KIND_HEADLINES[lead];
+	const ranked = rows
+		.map(row => ({ row, rate: row.report.byChallenge[lead]?.[metric].p50 ?? Number.NEGATIVE_INFINITY }))
+		.sort((a, b) => b.rate - a.rate);
+	const columns = benchTableColumns(kinds);
+	const texts = ranked.map(({ row }) =>
+		columns.map(column => column.value(row.report) ?? (row.state === "done" ? "-" : PENDING_CELL)),
+	);
+	const layout = columns.map((column, index): TableColumn => ({
+		width: Math.max(visibleWidth(column.header), ...texts.map(cells => visibleWidth(cells[index]!))),
+		align: "left",
+		overflow: "allow",
+	}));
+	// Unpadded trailing status: progress, queue position, or failures.
+	layout.push({ width: 0, align: "left", overflow: "allow" });
+	const table: TableCell[][] = [columns.map(column => ({ text: column.header, style: chalk.dim }))];
+	for (const [index, { row, rate }] of ranked.entries()) {
+		const cells = texts[index]!.map((text): TableCell => ({
+			text,
+			style: text === PENDING_CELL ? chalk.dim : undefined,
+		}));
+		// Green marks the leader: the top row once it has a headline rate.
+		if (index === 0 && rate > Number.NEGATIVE_INFINITY) cells[0] = { text: cells[0]!.text, style: chalk.green };
+		const status = formatRowStatus(row, spinner);
+		if (status) cells.push({ text: status });
+		table.push(cells);
 	}
-	return pickHighestPriorityProvider(authenticated, providerOrder);
+	return table.map(cells => renderTableRow(cells, layout, undefined, { gap: "  " }).trimEnd());
 }
 
-function resolveBenchModels(
-	selectors: string[],
-	modelRegistry: BenchModelRegistry,
-	settings: Settings | undefined,
-	writeStderr: (text: string) => void,
-): BenchTarget[] {
-	const preferences = getModelMatchPreferences(settings);
-	const resolved: BenchTarget[] = [];
-	const errors: string[] = [];
-	for (const selector of selectors) {
-		// Bench intentionally resolves against the full catalog first, then applies
-		// its own exact-id credential fallback below. Using the CLI resolver's
-		// authenticated default here would silently redirect non-equivalent bare
-		// ids and suppress the warning for equivalent cross-provider models.
-		const result = resolveCliModel({
-			cliModel: selector,
-			modelRegistry,
-			availableModels: modelRegistry.getAll(),
-			settings,
-			preferences,
-		});
-		if (result.error) {
-			errors.push(`${selector}: ${result.error}`);
-			continue;
-		}
-		if (!result.model) {
-			errors.push(`${selector}: model not found`);
-			continue;
-		}
-		if (result.warning) writeStderr(`${chalk.yellow(`Warning: ${result.warning}`)}\n`);
-		let model = result.model;
-		const authSelector = result.configuredPatterns?.[result.configuredPatternIndex ?? 0] ?? selector;
-		const authenticated = resolveAuthenticatedAlternative(
-			authSelector,
-			model,
-			modelRegistry,
-			preferences.providerOrder,
-		);
-		if (authenticated) {
-			writeStderr(
-				`${chalk.yellow(
-					`Warning: no credentials for "${model.provider}"; benchmarking ${formatModelString(authenticated)} instead. Pin "${formatModelString(model)}" to force it.`,
-				)}\n`,
-			);
-			model = authenticated;
-		}
-		resolved.push({
-			selector,
-			model,
-			thinking: resolveThinkingLevelForModel(model, concreteThinkingLevel(result.thinkingLevel)),
-		});
-	}
-	if (errors.length > 0) {
-		throw new Error(`Could not resolve ${errors.length === 1 ? "model" : "models"}:\n${errors.join("\n")}`);
-	}
-	return resolved;
-}
 function assertCacheModeSupported(targets: BenchTarget[]): void {
 	if (targets.some(({ model }) => model.api === "openai-codex-responses")) {
 		throw new Error(
@@ -760,8 +895,26 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 	if (cacheMode && command.flags.runs !== undefined)
 		throw new Error("Use --cache-pairs instead of --runs with --cache");
 	if (cacheMode && command.flags.prompt !== undefined) throw new Error("--cache builds its own stable-prefix prompts");
+	if (cacheMode && command.flags.profile !== undefined) throw new Error("--profile cannot be combined with --cache");
 	if (cacheMode && (command.flags.par ?? 1) > 1) {
 		throw new Error("--par cannot parallelize cold/warm pairs; use --cache-concurrency instead");
+	}
+	const profileFlag = command.flags.profile;
+	if (
+		profileFlag !== undefined &&
+		profileFlag !== "mix" &&
+		profileFlag !== "chat" &&
+		profileFlag !== "prefill" &&
+		profileFlag !== "generation"
+	) {
+		throw new Error(`Unknown --profile "${profileFlag}" (expected chat, prefill, generation, or mix)`);
+	}
+	const profile: BenchProfile = profileFlag ?? "chat";
+	if (!cacheMode && command.flags.prompt !== undefined && profile !== "chat" && profile !== "generation") {
+		throw new Error("--prompt requires --profile chat or generation");
+	}
+	if (command.flags.prefillBytes !== undefined && (cacheMode || (profile !== "mix" && profile !== "prefill"))) {
+		throw new Error("--prefill-bytes requires prefill challenges (--profile mix or prefill)");
 	}
 
 	const cachePairs = cacheMode
@@ -770,15 +923,21 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 	const cacheConcurrency = cacheMode
 		? normalizePositiveInteger("cache-concurrency", command.flags.cacheConcurrency, DEFAULT_CACHE_CONCURRENCY)
 		: undefined;
-	const runs = cacheMode ? cachePairs! * 2 : normalizePositiveInteger("runs", command.flags.runs, DEFAULT_RUNS);
-	const maxTokens = normalizePositiveInteger(
-		"max-tokens",
-		command.flags.maxTokens,
-		cacheMode ? DEFAULT_CACHE_MAX_TOKENS : DEFAULT_MAX_TOKENS,
-	);
+	const runs = cacheMode
+		? cachePairs! * 2
+		: normalizePositiveInteger("runs", command.flags.runs, PROFILE_DEFAULT_RUNS[profile]);
+	const maxTokensOverride =
+		command.flags.maxTokens !== undefined
+			? normalizePositiveInteger("max-tokens", command.flags.maxTokens, 1)
+			: undefined;
+	const cacheMaxTokens = cacheMode ? (maxTokensOverride ?? DEFAULT_CACHE_MAX_TOKENS) : undefined;
 	const par =
 		command.flags.par !== undefined ? normalizePositiveInteger("par", command.flags.par, DEFAULT_PAR) : DEFAULT_PAR;
-	const benchmarkPrompt = command.flags.prompt?.trim() || BENCH_PROMPT;
+	const promptOverride = command.flags.prompt?.trim() || undefined;
+	const prefillBytes = normalizePositiveInteger("prefill-bytes", command.flags.prefillBytes, DEFAULT_PREFILL_BYTES);
+	const kinds: readonly BenchChallengeKind[] = profile === "mix" ? CHALLENGE_KINDS : [profile];
+	const tagKind = kinds.length > 1;
+	const random = deps.random ?? Math.random;
 	const json = command.flags.json === true;
 	const randomSessionId = deps.randomSessionId ?? (() => Bun.randomUUIDv7());
 	const readTextFile = deps.readTextFile ?? readBoundedUtf8File;
@@ -796,10 +955,41 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 	if (command.models.length === 0) {
 		throw new Error("Pass at least one model selector, e.g. `omp bench opus gpt-5.2`");
 	}
+	// One row per model, filled as runs finish. Outside cache mode the comparison
+	// table doubles as the live footer; cache mode shows a one-line status.
+	let rows: BenchTableRow[] = [];
+	const renderLive = (spinner: string): string[] => {
+		if (!cacheMode) {
+			return rows.some(row => row.state !== "done") ? ["", ...formatBenchTable(rows, kinds, spinner)] : [];
+		}
+		const running = rows.find(row => row.state === "running");
+		if (!running) return [];
+		const label = chalk.bold(formatBenchModelLabel(running.report));
+		return [`  ${chalk.yellow(spinner)} ${label}${chalk.dim(" · ")}${formatProgress(running.progress, "pairs")}`];
+	};
+	const board = json
+		? undefined
+		: createLiveBoard(renderLive, {
+				isTTY: interactive,
+				get columns() {
+					return process.stdout.columns;
+				},
+				get rows() {
+					return process.stdout.rows;
+				},
+				write(text: string): boolean {
+					writeStdout(text);
+					return true;
+				},
+			} satisfies LiveBoardOutput);
+	const print = (text: string): void => {
+		if (board) board.log(text);
+		else writeStdout(`${text}\n`);
+	};
 
-	const runtime = await (deps.createRuntime ?? createDefaultRuntime)();
+	const runtime = await (deps.createRuntime ?? createDefaultBenchRuntime)();
 	try {
-		const targets = resolveBenchModels(command.models, runtime.modelRegistry, runtime.settings, writeStderr);
+		const targets = await resolveBenchTargets(command.models, runtime.modelRegistry, runtime.settings, writeStderr);
 		if (cacheMode) assertCacheModeSupported(targets);
 		// Explicit `--service-tier` (a single value broadcast across families) wins;
 		// otherwise fall back to the configured per-family `tier.*` settings. Each
@@ -812,14 +1002,22 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 					runtime.settings?.get("tier.anthropic") ?? "none",
 					runtime.settings?.get("tier.google") ?? "none",
 				);
-		if (!json && flagTier) writeStdout(`${chalk.dim(`service tier: ${flagTier}`)}\n`);
-		const reports: BenchModelReport[] = [];
-		for (const { selector, model, thinking } of targets) {
+		if (!json && flagTier) print(chalk.dim(`service tier: ${flagTier}`));
+		const total = cacheMode ? cachePairs! : runs;
+		rows = targets.map(({ selector, model, thinking }): BenchTableRow => ({
+			report: buildModelReport(selector, model, thinking, []),
+			state: "queued",
+			progress: { total, completed: 0, failed: 0, inFlight: 0 },
+		}));
+		for (const [targetIndex, { selector, model, thinking }] of targets.entries()) {
+			const row = rows[targetIndex]!;
+			const { progress } = row;
 			if (!json) {
-				const resolvedModel = formatModelSelectorValue(formatModelString(model), thinking);
-				const resolvedNote = selector === resolvedModel ? "" : chalk.dim(` (${selector})`);
-				writeStdout(`${chalk.bold(resolvedModel)}${resolvedNote}\n`);
+				const label = formatBenchModelLabel(row.report);
+				print(`${chalk.bold(label)}${selector === label ? "" : chalk.dim(` (${selector})`)}`);
 			}
+			row.state = "running";
+			board?.repaint();
 			const results: BenchRunResult[] = [];
 
 			// Preflight check: let's verify credentials before starting any runs.
@@ -833,10 +1031,10 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 					error: `No credentials for provider "${model.provider}". Run \`omp\` and use /login, or set the provider API key.`,
 				};
 				results.push(failure);
-				if (!json) writeStdout(`${formatRunLine(failure, 0, runs)}\n`);
-				const report = buildModelReport(selector, model, thinking, results);
-				if (cacheMode) report.cachePairs = [];
-				reports.push(report);
+				if (!json) print(formatRunLine(failure, 0, runs, { tagKind }));
+				row.report = buildModelReport(selector, model, thinking, results);
+				if (cacheMode) row.report.cachePairs = [];
+				row.state = "done";
 				continue;
 			}
 
@@ -847,6 +1045,8 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 					cacheConcurrency!,
 					async (pairIndex): Promise<BenchCachePairReport> => {
 						const cacheNamespace = randomSessionId();
+						progress.inFlight++;
+						board?.repaint();
 						const promptCacheKey = `bench-cache:${cacheNamespace}`;
 						const stablePrefix = renderCacheBenchmarkPrefix(cachePrefix!, cacheNamespace);
 						const coldSuffix = prompt.render(cacheSuffixTemplate, { variant: "A" }).trim();
@@ -865,9 +1065,8 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 							{
 								apiKey: credentialResolver,
 								sessionId: credentialAffinitySessionId,
-								prompt: coldSuffix,
-								contextMessages: cacheBenchmarkMessages(stablePrefix, coldSuffix),
-								maxTokens,
+								messages: cacheBenchmarkMessages(stablePrefix, coldSuffix),
+								maxTokens: cacheMaxTokens!,
 								reasoning: toReasoningEffort(thinking),
 								disableReasoning: shouldDisableReasoning(thinking) ? true : undefined,
 								serviceTier,
@@ -887,9 +1086,8 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 							{
 								apiKey: credentialResolver,
 								sessionId: credentialAffinitySessionId,
-								prompt: warmSuffix,
-								contextMessages: cacheBenchmarkMessages(stablePrefix, warmSuffix),
-								maxTokens,
+								messages: cacheBenchmarkMessages(stablePrefix, warmSuffix),
+								maxTokens: cacheMaxTokens!,
 								reasoning: toReasoningEffort(thinking),
 								disableReasoning: shouldDisableReasoning(thinking) ? true : undefined,
 								serviceTier,
@@ -900,6 +1098,11 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 							streamFn,
 							now,
 						);
+						progress.inFlight--;
+						progress.completed++;
+						if (!coldResult.ok) progress.failed++;
+						if (!warmResult.ok) progress.failed++;
+						board?.repaint();
 						return {
 							cold: cacheRunReport("cold", coldResult, coldCapture),
 							warm: cacheRunReport("warm", warmResult, warmCapture),
@@ -917,12 +1120,12 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 					},
 				);
 				for (const pair of pairs) results.push(pair.cold.result, pair.warm.result);
-				const report = buildModelReport(selector, model, thinking, results);
-				report.cachePairs = pairs;
-				reports.push(report);
+				row.report = buildModelReport(selector, model, thinking, results);
+				row.report.cachePairs = pairs;
+				row.state = "done";
 				if (!json) {
 					for (const [index, pair] of pairs.entries()) {
-						writeStdout(`${formatCachePairLine(pair, index, pairs.length)}\n`);
+						print(formatCachePairLine(pair, index, pairs.length));
 					}
 				}
 				continue;
@@ -933,13 +1136,20 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 			let nextToPrint = 0;
 			const runWorker = async (index: number) => {
 				const sessionId = index === 0 ? testSessionId : randomSessionId();
+				const challenge = buildBenchChallenge(kinds[index % kinds.length]!, {
+					promptOverride,
+					prefillBytes,
+					nonce: randomSessionId(),
+					random,
+					maxTokensOverride,
+				});
 				const result = await runBenchRequest(
 					model,
 					{
 						apiKey: runtime.modelRegistry.resolver(model, sessionId),
 						sessionId,
-						prompt: benchmarkPrompt,
-						maxTokens,
+						messages: challenge.messages,
+						maxTokens: challenge.maxTokens,
 						reasoning: toReasoningEffort(thinking),
 						disableReasoning: shouldDisableReasoning(thinking) ? true : undefined,
 						serviceTier,
@@ -947,18 +1157,24 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 					streamFn,
 					now,
 				);
-				results[index] = result;
+				results[index] = { ...result, challenge: challenge.kind };
 			};
 			const queue = Array.from({ length: runs }, (_, i) => i);
 			const activeWorkers: Promise<void>[] = [];
 			const processNext = async (): Promise<void> => {
 				if (queue.length === 0) return;
 				const index = queue.shift()!;
-				if (!json && interactive) writeStdout(chalk.dim(`  … run ${index + 1}/${runs} streaming\n`));
+				progress.inFlight++;
+				board?.repaint();
 				await runWorker(index);
+				progress.inFlight--;
+				progress.completed++;
+				if (!results[index]!.ok) progress.failed++;
+				row.report = buildModelReport(selector, model, thinking, results);
+				board?.repaint();
 				if (!json) {
 					while (nextToPrint < runs && results[nextToPrint] !== undefined) {
-						writeStdout(`${formatRunLine(results[nextToPrint], nextToPrint, runs)}\n`);
+						print(formatRunLine(results[nextToPrint], nextToPrint, runs, { tagKind }));
 						nextToPrint++;
 					}
 				}
@@ -966,25 +1182,31 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 			};
 			for (let worker = 0; worker < Math.min(par, runs); worker++) activeWorkers.push(processNext());
 			await Promise.all(activeWorkers);
-			reports.push(buildModelReport(selector, model, thinking, results));
+			row.state = "done";
 		}
+		const reports = rows.map(row => row.report);
 		const failures = reports.reduce((sum, report) => sum + report.results.filter(result => !result.ok).length, 0);
 		const summary: BenchSummary = {
 			runs,
-			maxTokens,
+			...(cacheMode
+				? { maxTokens: cacheMaxTokens }
+				: maxTokensOverride !== undefined
+					? { maxTokens: maxTokensOverride }
+					: {}),
 			models: reports,
 			failures,
 			serviceTierByFamily,
-			...(cacheMode ? { cache: { pairs: cachePairs!, concurrency: cacheConcurrency! } } : {}),
+			...(cacheMode ? { cache: { pairs: cachePairs!, concurrency: cacheConcurrency! } } : { profile }),
 		};
 		if (json) {
 			writeStdout(`${JSON.stringify(summary, null, 2)}\n`);
 		} else if (!cacheMode && (reports.length > 1 || runs > 1)) {
-			writeStdout(`\n${formatBenchTable(summary)}`);
+			print(["", ...formatBenchTable(rows, kinds)].join("\n"));
 		}
 		if (failures > 0) setExitCode(1);
 		return summary;
 	} finally {
+		board?.close();
 		runtime.close?.();
 	}
 }

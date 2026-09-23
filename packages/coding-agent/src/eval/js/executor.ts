@@ -1,8 +1,11 @@
-import { DEFAULT_MAX_BYTES, OutputSink } from "../../session/streaming-output";
+import { DEFAULT_MAX_BYTES, type OutputArtifactError, OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import type { ToolSession } from "../../tools";
 import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "../../tools/output-meta";
-import { isEvalTimeoutControlEvent } from "../bridge-timeout";
+import { isEvalTimeoutControlEvent, withBridgeTimeoutPause } from "../bridge-timeout";
+import { DisplayOutputCollector } from "../executor-base";
 import { executeInVmContext, type JsDisplayOutput } from "./context-manager";
+import { installJsPackages } from "./package-installer";
+import type { JsPackageEnvironmentMode } from "./package-installer";
 import type { JsStatusEvent } from "./shared/types";
 
 export interface JsExecutorOptions {
@@ -23,6 +26,12 @@ export interface JsExecutorOptions {
 	kernelOwnerId?: string;
 	reset?: boolean;
 	sessionFile?: string;
+	/** Absolute source path for file-backed cells. */
+	filename?: string;
+	/** Explicit package requirements reconciled before cell execution. */
+	packages?: string[];
+	/** Package target. Repository mutation requires explicit project selection. */
+	environment?: JsPackageEnvironmentMode;
 	artifactPath?: string;
 	artifactId?: string;
 	session: ToolSession;
@@ -36,6 +45,7 @@ export interface JsResult {
 	cancelled: boolean;
 	truncated: boolean;
 	artifactId?: string;
+	artifactError?: OutputArtifactError;
 	totalLines: number;
 	totalBytes: number;
 	outputLines: number;
@@ -64,6 +74,8 @@ function isTimeoutReason(reason: unknown): boolean {
 	);
 }
 
+const JS_PACKAGE_INSTALL_TIMEOUT_MS = 10 * 60_000;
+
 function formatJsTimeoutAnnotation(timeoutMs: number | undefined): string {
 	// Timeout cancellation force-kills the worker (the only way to interrupt
 	// synchronous user code), which discards the persistent VM state. Say so,
@@ -74,8 +86,19 @@ function formatJsTimeoutAnnotation(timeoutMs: number | undefined): string {
 	return `Command timed out after ${secs} seconds. ${reset}`;
 }
 
+function formatPackageInstallTimeoutAnnotation(installDeadlineReached: boolean): string {
+	const timing = installDeadlineReached
+		? `timed out after ${Math.round(JS_PACKAGE_INSTALL_TIMEOUT_MS / 1000)} seconds`
+		: "was cancelled by the caller's timeout";
+	return (
+		`JavaScript package installation ${timing}. ` +
+		"Any existing retained JS worker was not restarted; earlier variables, if any, remain available."
+	);
+}
+
 export async function executeJs(code: string, options: JsExecutorOptions): Promise<JsResult> {
-	const displayOutputs: JsDisplayOutput[] = [];
+	const display = new DisplayOutputCollector<JsDisplayOutput>();
+	const displayOutputs = display.outputs;
 	const outputSink = new OutputSink({
 		artifactPath: options.artifactPath,
 		artifactId: options.artifactId,
@@ -85,31 +108,62 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 		onChunk: chunk => options.onChunk?.(chunk),
 	});
 	const legacyTimeoutMs = getExecutionTimeoutMs(options);
-	const timeoutSignal =
-		typeof legacyTimeoutMs === "number" && Number.isFinite(legacyTimeoutMs) && legacyTimeoutMs > 0
-			? AbortSignal.timeout(legacyTimeoutMs)
-			: undefined;
-	const signal =
-		options.signal && timeoutSignal
-			? AbortSignal.any([options.signal, timeoutSignal])
-			: (options.signal ?? timeoutSignal);
-	// The eval tool drives cancellation via its own watchdog `signal` and passes
-	// only the runtime-work budget; use it solely as worker cold-start headroom
-	// and never derive a competing fixed timer from it.
-	const acquireBudgetMs = legacyTimeoutMs ?? options.idleTimeoutMs;
+	let runtimeTimeoutMs = legacyTimeoutMs;
+	let timeoutSignal: AbortSignal | undefined;
+	let signal: AbortSignal | undefined;
+	const packages = options.packages ?? [];
+	const packageTimeoutSignal = packages.length > 0 ? AbortSignal.timeout(JS_PACKAGE_INSTALL_TIMEOUT_MS) : undefined;
+	const packageSignal = packageTimeoutSignal
+		? options.signal
+			? AbortSignal.any([options.signal, packageTimeoutSignal])
+			: packageTimeoutSignal
+		: options.signal;
+	let packageWorkComplete = false;
+	let runtimeEntered = false;
 
 	try {
+		const cwd = options.cwd ?? options.session.cwd;
+		const installOptions = {
+			cwd,
+			packages,
+			environment: options.environment,
+			autoProvision: options.session.settings.get("eval.autoProvision") ?? true,
+			signal: packageSignal,
+		};
+		const install =
+			packages.length > 0
+				? await withBridgeTimeoutPause(options.onStatus, () => installJsPackages(installOptions))
+				: await installJsPackages(installOptions);
+		packageSignal?.throwIfAborted();
+		if (install.summary) outputSink.push(`${install.summary}\n`);
+		packageWorkComplete = true;
+		// Start the legacy compute timer only after host-side package work. The
+		// eval tool's normal idle watchdog is already paused by the status
+		// wrapper above; direct timeoutMs callers need the same semantics.
+		runtimeTimeoutMs = options.deadlineMs === undefined ? legacyTimeoutMs : getExecutionTimeoutMs(options);
+		timeoutSignal =
+			typeof runtimeTimeoutMs === "number" && Number.isFinite(runtimeTimeoutMs) && runtimeTimeoutMs > 0
+				? AbortSignal.timeout(runtimeTimeoutMs)
+				: undefined;
+		signal =
+			options.signal && timeoutSignal
+				? AbortSignal.any([options.signal, timeoutSignal])
+				: (options.signal ?? timeoutSignal);
+		signal?.throwIfAborted();
+		runtimeEntered = true;
 		await executeInVmContext({
 			sessionKey: options.sessionId,
 			sessionId: options.sessionId,
 			ownerId: options.kernelOwnerId,
-			cwd: options.cwd ?? options.session.cwd,
+			cwd,
 			session: options.session,
 			localRoots: options.localRoots,
+			packageRoot: install.environment.packageRoot,
+			packageEnvironment: install.environment.description,
 			reset: options.reset,
 			code,
-			filename: `js-cell-${crypto.randomUUID()}.js`,
-			timeoutMs: acquireBudgetMs,
+			filename: options.filename ?? `js-cell-${crypto.randomUUID()}.js`,
+			timeoutMs: runtimeTimeoutMs ?? options.idleTimeoutMs,
 			runState: {
 				signal,
 				onText: chunk => outputSink.push(chunk),
@@ -120,7 +174,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 						options.onStatus?.(output.event);
 						if (isEvalTimeoutControlEvent(output.event)) return;
 					}
-					displayOutputs.push(output);
+					display.push(output);
 				},
 			},
 		});
@@ -131,6 +185,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 			cancelled: false,
 			truncated: summary.truncated,
 			artifactId: summary.artifactId,
+			artifactError: summary.artifactError,
 			totalLines: summary.totalLines,
 			totalBytes: summary.totalBytes,
 			outputLines: summary.outputLines,
@@ -138,10 +193,18 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 			displayOutputs,
 		};
 	} catch (error) {
-		if (signal?.aborted || isAbortError(error)) {
-			const timedOut = Boolean(timeoutSignal?.aborted) || isTimeoutReason(options.signal?.reason);
+		const activeSignal = packageWorkComplete ? signal : packageSignal;
+		if (activeSignal?.aborted || isAbortError(error)) {
+			const timedOut = packageWorkComplete
+				? Boolean(timeoutSignal?.aborted) || isTimeoutReason(options.signal?.reason)
+				: isTimeoutReason(packageSignal?.reason);
 			if (timedOut) {
-				outputSink.push(formatJsTimeoutAnnotation(legacyTimeoutMs ?? options.idleTimeoutMs));
+				const annotation = runtimeEntered
+					? formatJsTimeoutAnnotation(runtimeTimeoutMs ?? options.idleTimeoutMs)
+					: packageWorkComplete
+						? "Command timed out before JavaScript execution began. Any existing retained JS worker remains available."
+						: formatPackageInstallTimeoutAnnotation(packageTimeoutSignal?.aborted === true);
+				outputSink.push(annotation);
 			}
 			const summary = await outputSink.dump();
 			return {
@@ -150,6 +213,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 				cancelled: true,
 				truncated: summary.truncated,
 				artifactId: summary.artifactId,
+				artifactError: summary.artifactError,
 				totalLines: summary.totalLines,
 				totalBytes: summary.totalBytes,
 				outputLines: summary.outputLines,
@@ -166,6 +230,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 			cancelled: false,
 			truncated: summary.truncated,
 			artifactId: summary.artifactId,
+			artifactError: summary.artifactError,
 			totalLines: summary.totalLines,
 			totalBytes: summary.totalBytes,
 			outputLines: summary.outputLines,

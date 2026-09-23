@@ -43,13 +43,30 @@ description = "Push the workspace branch to origin. Pre-publish gate (when the r
 branch = "Optional branch override; defaults to the workspace branch."
 skip_checks = "Bypass `bun run fix` + `bun check`. Use ONLY after verifying (e.g. `git diff origin/<default>..HEAD` against the failing paths) the failure exists on `main` and is NOT caused by your diff. Dirty-tree gate still runs — commit everything first."
 
+[release_ci_status]
+description = "Refresh every GitHub Actions run for the release tag's expected commit and list non-green jobs with failed steps. Release tasks only."
+
+[release_job_log]
+description = "Fetch the tail of one GitHub Actions job log when the failure dossier lacks enough detail. Release tasks only."
+
+[release_job_log.parameters]
+job_id = "GitHub Actions job id from the failure dossier or `release_ci_status`."
+tail_lines = "Lines from the end of the log, 1-1000. Default 200."
+
+[release_retag]
+description = "Terminal release action: run the pre-publish gates, verify release invariants, then atomically push the default branch and move the release tag to the new HEAD. End the turn after success; the next CI verdict resumes the session."
+
+[release_retag.parameters]
+summary = "One sentence naming the root-cause fix and local verification completed this round."
+skip_checks = "Bypass `bun run fix` + `bun check` only for verified pre-existing breakage unrelated to this fix. Clean-tree, identity, subject, SHA, and remote-tag gates always run."
+
 [gh_open_pr]
-description = "Open a PR from the workspace branch using the four-section body template. Same pre-publish gate as `gh_push_branch`: `bun run fix` → amend formatter diff into HEAD → `bun check`. On failure, fix and retry. Pre-existing `main` breakage NOT caused by your diff → `skip_checks=true` and document the bypass in the PR's `## Verification` section."
+description = "Open a PR from the workspace branch using the four-section body template. Pre-publish gate: `bun run fix` → amend formatter diff into HEAD → `bun check` → `bun run test`. No PR is created unless the full suite passes; on failure, fix and retry. Pre-existing `main` breakage NOT caused by your diff → `skip_checks=true` and document the bypass in the PR's `## Verification` section."
 
 [gh_open_pr.parameters]
 body = "Markdown body. MUST contain the four template sections in order: `## Repro`, `## Cause`, `## Fix`, `## Verification`."
 base = "Optional base branch override (default: repo default)."
-skip_checks = "Bypass `bun run fix` + `bun check`. Use ONLY after verifying the failure exists on `main` and is NOT caused by your diff. When set, document in `## Verification` (e.g. ``Skipped pre-publish gate: `bun check` fails on `main` due to <link>``). Dirty-tree gate still runs."
+skip_checks = "Bypass `bun run fix` + `bun check` + `bun run test`. Use ONLY after verifying the failure exists on `main` and is NOT caused by your diff. When set, document in `## Verification` (e.g. ``Skipped pre-publish gate: `bun run test` fails on `main` due to <link>``). Dirty-tree gate still runs."
 
 [gh_request_review]
 description = "Request reviewers and/or add assignees on the open PR."

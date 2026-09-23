@@ -5,11 +5,12 @@ import {
 	ASIDE_MESSAGE_DISCARD,
 	type CommittableAsideMessage,
 } from "@oh-my-pi/pi-agent-core";
-import { type AsyncJob, AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
+import { type AsyncJob, AsyncJobManager, type AsyncJobType } from "@oh-my-pi/pi-coding-agent/async";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { YieldQueue } from "@oh-my-pi/pi-coding-agent/session/yield-queue";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { type CoordinationDetails, HubTool } from "../src/tools/hub";
+import { type CoordinationDetails } from "@oh-my-pi/pi-tui/tools/hub";
+import { HubTool } from "../src/tools/hub";
 
 type AsyncEntry = {
 	jobId: string;
@@ -21,7 +22,7 @@ type AsyncEntry = {
 type AsyncDetails = {
 	jobs: Array<{
 		jobId: string;
-		type?: "bash" | "task";
+		type?: AsyncJobType;
 		label?: string;
 		durationMs?: number;
 	}>;
@@ -57,7 +58,7 @@ function createToolSession(asyncJobManager?: AsyncJobManager): ToolSession {
 		cwd: process.cwd(),
 		hasUI: false,
 		settings: {
-			get: (key: string) => (key === "async.pollWaitDuration" ? "5s" : undefined),
+			get: () => undefined,
 		},
 		getSessionFile: () => null,
 		getSessionSpawns: () => null,
@@ -83,12 +84,11 @@ function createHarness(initialStreaming: boolean) {
 			scheduledFlushes.push(run);
 		},
 	});
-	let manager!: AsyncJobManager;
 	queue.register<AsyncEntry>("async-result", {
 		isStale: entry => manager.isDeliverySuppressed(entry.jobId),
 		build: buildAsyncMessage,
 	});
-	manager = new AsyncJobManager({
+	const manager = new AsyncJobManager({
 		onJobComplete: (jobId, result, job) => {
 			if (manager.isDeliverySuppressed(jobId)) return;
 			queue.enqueue<AsyncEntry>("async-result", {

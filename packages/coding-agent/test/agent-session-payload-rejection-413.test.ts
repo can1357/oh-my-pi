@@ -1,0 +1,1562 @@
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { Agent } from "@oh-my-pi/pi-agent-core";
+import type { CompactionPreparation } from "@oh-my-pi/pi-agent-core/compaction";
+import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionMaintenance } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+
+/** #9235: byte/media HTTP 413s must not route into token-context compaction. */
+
+const PAYLOAD_ERROR_MESSAGE =
+	"413 request body exceeds the configured payload limit (type=invalid_request_error param=request_too_large)";
+const NO_PROGRESS_FRAGMENT = "Compaction freed too little context to make progress";
+const TRANSIENT_ERROR_MESSAGE = "503 Service Unavailable: upstream connect error";
+
+describe("AgentSession payload-rejection 413 handling", () => {
+	let session: AgentSession;
+	let sessionManager: SessionManager;
+	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
+
+	const NOTICE_SOURCE = "compaction";
+
+	beforeAll(async () => {
+		authStorage = await AuthStorage.create(":memory:");
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		authStorage.keys.setRuntime("openai", "openai-test-key");
+		modelRegistry = new ModelRegistry(authStorage);
+	});
+
+	beforeEach(() => {
+		sessionManager = SessionManager.inMemory();
+	});
+
+	afterEach(async () => {
+		await session?.dispose();
+		modelRegistry.clearSuppressedSelectors();
+		vi.restoreAllMocks();
+	});
+
+	afterAll(() => {
+		authStorage?.close();
+	});
+	async function createSession(
+		contextWindow: number | null,
+		seed?: { toolText: string },
+		options?: {
+			streamFn?: NonNullable<ConstructorParameters<typeof Agent>[0]>["streamFn"];
+			extraSettings?: Parameters<typeof Settings.isolated>[0];
+		},
+	): Promise<void> {
+		const extensionRunner = {
+			hasHandlers: (type: string) => type === "session_before_compact",
+			emit: async (event: { type: string; preparation?: CompactionPreparation }) => {
+				if (event.type !== "session_before_compact" || !event.preparation) return undefined;
+				return {
+					compaction: {
+						summary: "compacted",
+						shortSummary: undefined,
+						firstKeptEntryId: event.preparation.firstKeptEntryId,
+						tokensBefore: event.preparation.tokensBefore,
+						details: {},
+					},
+				};
+			},
+			emitBeforeAgentStart: async () => undefined,
+		};
+
+		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!bundled) {
+			throw new Error("Expected built-in anthropic model to exist");
+		}
+		const model = {
+			...bundled,
+			contextWindow,
+			maxTokens: contextWindow ? Math.min(64_000, Math.floor(contextWindow / 2)) : bundled.maxTokens,
+		};
+
+		const initialMessages: AgentMessage[] = [
+			{ role: "user", content: "hello", timestamp: Date.now() } as AgentMessage,
+			...(seed
+				? [
+						{
+							role: "toolResult",
+							toolCallId: "call-big",
+							toolName: "bash",
+							content: [{ type: "text", text: seed.toolText }],
+							isError: false,
+							timestamp: Date.now(),
+						} as AgentMessage,
+					]
+				: []),
+		];
+		for (const message of initialMessages) {
+			sessionManager.appendMessage(message as never);
+		}
+		const agent = new Agent({
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: initialMessages,
+			},
+			...(options?.streamFn ? { streamFn: options.streamFn } : {}),
+		});
+
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({
+				"compaction.autoContinue": true,
+				"contextPromotion.enabled": false,
+				...options?.extraSettings,
+			}),
+			modelRegistry,
+			extensionRunner: extensionRunner as never,
+		});
+	}
+
+	function collectNotices() {
+		const notices: { level: string; message: string; source?: string }[] = [];
+		session.subscribe(event => {
+			if (event.type === "notice") {
+				notices.push({ level: event.level, message: event.message, source: event.source });
+			}
+		});
+		return notices;
+	}
+
+	function countCompactionEvents(type: "auto_compaction_start" | "auto_compaction_end") {
+		let count = 0;
+		session.subscribe(event => {
+			if (event.type === type) count++;
+		});
+		return () => count;
+	}
+
+	function payloadRejectionAssistant(): AssistantMessage {
+		const message = {
+			role: "assistant",
+			content: [{ type: "text", text: "" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "error",
+			errorMessage: PAYLOAD_ERROR_MESSAGE,
+			usage: {
+				input: 1000,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		} as AssistantMessage;
+		message.errorId = AIError.classifyMessage(message);
+		return message;
+	}
+
+	function statusOnlyPayloadAssistant(): AssistantMessage {
+		const message = {
+			role: "assistant",
+			content: [{ type: "text", text: "" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "error",
+			errorStatus: 413,
+			errorMessage: "Content Too Large",
+			usage: {
+				input: 1000,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		} as AssistantMessage;
+		message.errorId = AIError.classifyMessage(message);
+		return message;
+	}
+
+	function mediaBudgetPayloadAssistant(): AssistantMessage {
+		const message = {
+			role: "assistant",
+			content: [{ type: "text", text: "" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "error",
+			errorMessage: "request_too_large: image count exceeds the limit of 20",
+			usage: {
+				input: 1000,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		} as AssistantMessage;
+		message.errorId = AIError.classifyMessage(message);
+		return message;
+	}
+
+	/** Incidental "vision"/"media" wording with no count/limit evidence — a
+	 *  model name and an unrelated Content-Type, not proof the *request* was
+	 *  rejected for a media budget. Classifies non-ambiguous (PayloadRejected
+	 *  only, no ContextOverflow), same shape as `explicitMediaNoDigitPayloadAssistant`,
+	 *  but must NOT be treated as explicit media evidence (#11482). */
+	function incidentalMediaWordPayloadAssistant(): AssistantMessage {
+		const message = {
+			role: "assistant",
+			content: [{ type: "text", text: "" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "error",
+			errorMessage: `${PAYLOAD_ERROR_MESSAGE} for model llava-vision`,
+			usage: {
+				input: 1000,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		} as AssistantMessage;
+		message.errorId = AIError.classifyMessage(message);
+		return message;
+	}
+
+	/** Digit-free media wording: doesn't match GENERIC_LIMIT_OVERFLOW_PATTERN
+	 *  (no "exceeds the limit of N"), so unlike `mediaBudgetPayloadAssistant`
+	 *  this is classified non-ambiguous (PayloadRejected only, no ContextOverflow). */
+	function explicitMediaNoDigitPayloadAssistant(): AssistantMessage {
+		const message = {
+			role: "assistant",
+			content: [{ type: "text", text: "" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "error",
+			errorMessage: "request_too_large: too many images",
+			usage: {
+				input: 1000,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		} as AssistantMessage;
+		message.errorId = AIError.classifyMessage(message);
+		return message;
+	}
+
+	/** "maximum of N images" phrasing — doesn't match "exceeds the limit of N"
+	 *  so classifies non-ambiguous (PayloadRejected only, no ContextOverflow),
+	 *  same shape as `explicitMediaNoDigitPayloadAssistant` (#11482). */
+	function mediaMaximumLimitPayloadAssistant(): AssistantMessage {
+		const message = {
+			role: "assistant",
+			content: [{ type: "text", text: "" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "error",
+			errorMessage: "request_too_large: maximum of 20 images allowed",
+			usage: {
+				input: 1000,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		} as AssistantMessage;
+		message.errorId = AIError.classifyMessage(message);
+		return message;
+	}
+
+	/** "number of images exceeds the maximum" phrasing — no digit, so classifies
+	 *  non-ambiguous (PayloadRejected only, no ContextOverflow) (#11482). */
+	function mediaNumberOfImagesPayloadAssistant(): AssistantMessage {
+		const message = {
+			role: "assistant",
+			content: [{ type: "text", text: "" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "error",
+			errorMessage: "request_too_large: the number of images exceeds the maximum",
+			usage: {
+				input: 1000,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		} as AssistantMessage;
+		message.errorId = AIError.classifyMessage(message);
+		return message;
+	}
+
+	/** Per-image size rejection: "image is too large" — no count/limit/digit,
+	 *  so classifies non-ambiguous (PayloadRejected only, no ContextOverflow).
+	 *  A definitive per-image constraint that token compaction cannot fix —
+	 *  the oversized image stays in the kept region regardless (#11482). */
+	function imageSizeTooLargePayloadAssistant(): AssistantMessage {
+		const message = {
+			role: "assistant",
+			content: [{ type: "text", text: "" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "error",
+			errorMessage: "request_too_large: image is too large",
+			usage: {
+				input: 1000,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		} as AssistantMessage;
+		message.errorId = AIError.classifyMessage(message);
+		return message;
+	}
+
+	/** Per-image dimension rejection: "image dimensions exceed 8000 pixels" —
+	 *  no count/limit noun, so classifies non-ambiguous (PayloadRejected only,
+	 *  no ContextOverflow). A definitive per-image pixel constraint that token
+	 *  compaction cannot fix — the oversized image stays in the kept region
+	 *  regardless (#11482). */
+	function imageDimensionsExceedPayloadAssistant(): AssistantMessage {
+		const message = {
+			role: "assistant",
+			content: [{ type: "text", text: "" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "error",
+			errorMessage: "request_too_large: image dimensions exceed 8000 pixels",
+			usage: {
+				input: 1000,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		} as AssistantMessage;
+		message.errorId = AIError.classifyMessage(message);
+		return message;
+	}
+
+	function usageBackedMediaBudgetAssistant(): AssistantMessage {
+		const message = {
+			role: "assistant",
+			content: [{ type: "text", text: "" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "error",
+			errorMessage: "request_too_large: image count exceeds the limit of 20",
+			usage: {
+				input: 250_000,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 250_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		} as AssistantMessage;
+		message.errorId = AIError.classifyMessage(message);
+		return message;
+	}
+
+	/** Plain (non-media) payload rejection whose reported usage exceeds a known
+	 *  context window — `isUsageBackedContextOverflow` proves a genuine token
+	 *  overflow, unlike `usageBackedMediaBudgetAssistant` this carries no media
+	 *  wording, so it should not disqualify media compaction methods (#11482). */
+	function usageBackedPlainPayloadAssistant(): AssistantMessage {
+		const message = {
+			role: "assistant",
+			content: [{ type: "text", text: "" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "error",
+			errorMessage: PAYLOAD_ERROR_MESSAGE,
+			usage: {
+				input: 250_000,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 250_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		} as AssistantMessage;
+		message.errorId = AIError.classifyMessage(message);
+		return message;
+	}
+
+	it("honestly skips token compaction for a low-token payload-shaped 413", async () => {
+		await createSession(200_000);
+		const checkSpy = vi.spyOn(SessionMaintenance.prototype, "checkCompaction");
+		const prepareSpy = vi.spyOn(compactionModule, "prepareCompaction");
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		const notices = collectNotices();
+		const endCount = countCompactionEvents("auto_compaction_end");
+
+		const assistantMsg = payloadRejectionAssistant();
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await session.waitForIdle();
+
+		expect(endCount()).toBe(0);
+		expect(prepareSpy).not.toHaveBeenCalled();
+		expect(promptSpy).not.toHaveBeenCalled();
+		expect(continueSpy).not.toHaveBeenCalled();
+
+		const payloadNotices = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes("413"));
+		expect(payloadNotices.length).toBe(1);
+		expect(payloadNotices[0].level).toBe("warning");
+		expect(payloadNotices[0].message).not.toContain(NO_PROGRESS_FRAGMENT);
+
+		const checkResults = await Promise.all(
+			checkSpy.mock.results.map(r => r.value as { automaticContinuationBlocked?: boolean }),
+		);
+		expect(checkResults.some(r => r.automaticContinuationBlocked === true)).toBe(true);
+	});
+
+	it("falls through to overflow recovery when the local gauge shows no headroom", async () => {
+		await createSession(8_000, { toolText: "y".repeat(60_000) });
+
+		const prepareSpy = vi.spyOn(compactionModule, "prepareCompaction");
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		const notices = collectNotices();
+		const startCount = countCompactionEvents("auto_compaction_start");
+		const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_end") onCompactionDone();
+		});
+
+		const assistantMsg = payloadRejectionAssistant();
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await compactionDone;
+		await session.waitForIdle();
+
+		expect(startCount()).toBeGreaterThanOrEqual(1);
+		expect(prepareSpy).toHaveBeenCalled();
+		expect(notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes("413")).length).toBe(0);
+		expect(promptSpy).not.toHaveBeenCalled();
+		expect(continueSpy).not.toHaveBeenCalled();
+	});
+
+	it("keeps genuine token-worded overflows on the normal overflow path", async () => {
+		await createSession(200_000);
+		const prepareSpy = vi.spyOn(compactionModule, "prepareCompaction");
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		const notices = collectNotices();
+		const startCount = countCompactionEvents("auto_compaction_start");
+		const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_end") onCompactionDone();
+		});
+		const assistantMsg = {
+			role: "assistant",
+			content: [{ type: "text", text: "" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "error",
+			errorMessage: "prompt is too long: 300000 tokens > 200000 maximum",
+			usage: {
+				input: 1000,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		} as AssistantMessage;
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await compactionDone;
+		await session.waitForIdle();
+
+		expect(startCount()).toBeGreaterThanOrEqual(1);
+
+		expect(prepareSpy).toHaveBeenCalled();
+		expect(notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes("413")).length).toBe(0);
+		expect(promptSpy).not.toHaveBeenCalled();
+		expect(continueSpy).not.toHaveBeenCalled();
+	});
+
+	it("treats a payload-only 413 as terminal without a local context window when no compaction method is configured", async () => {
+		// Unknown context window used to always dead-end here regardless of
+		// compaction availability (#11479). With no compaction method configured
+		// there is genuinely nothing to attempt, so this case still blocks — see
+		// the sibling test below for the case where compaction *is* configured.
+		await createSession(null, undefined, { extraSettings: { "compaction.enabled": false } });
+		const checkSpy = vi.spyOn(SessionMaintenance.prototype, "checkCompaction");
+		const prepareSpy = vi.spyOn(compactionModule, "prepareCompaction");
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		const notices = collectNotices();
+		const endCount = countCompactionEvents("auto_compaction_end");
+
+		const assistantMsg = payloadRejectionAssistant();
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await session.waitForIdle();
+
+		expect(endCount()).toBe(0);
+		expect(prepareSpy).not.toHaveBeenCalled();
+		expect(promptSpy).not.toHaveBeenCalled();
+		expect(continueSpy).not.toHaveBeenCalled();
+
+		const payloadNotices = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes("413"));
+		expect(payloadNotices.length).toBe(1);
+		expect(payloadNotices[0].level).toBe("warning");
+		expect(payloadNotices[0].message).not.toContain("headroom");
+		expect(payloadNotices[0].message).not.toContain(NO_PROGRESS_FRAGMENT);
+
+		const checkResults = await Promise.all(
+			checkSpy.mock.results.map(r => r.value as { automaticContinuationBlocked?: boolean }),
+		);
+		expect(checkResults.some(r => r.automaticContinuationBlocked === true)).toBe(true);
+	});
+
+	it("attempts compaction for a payload-only 413 with no local context window when a compaction method is configured (#11479)", async () => {
+		// Self-hosted/custom-provider models the registry has no metadata for
+		// report contextWindow: null. The 413 text here carries no media/image
+		// evidence, so byte bloat driven by plain message-count growth should
+		// get the same compaction chance a known-window overflow would, instead
+		// of being lumped in with a confirmed media/byte-budget rejection.
+		await createSession(null);
+		const prepareSpy = vi.spyOn(compactionModule, "prepareCompaction");
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		const notices = collectNotices();
+		const startCount = countCompactionEvents("auto_compaction_start");
+		const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_end") onCompactionDone();
+		});
+
+		const assistantMsg = payloadRejectionAssistant();
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await compactionDone;
+		await session.waitForIdle();
+
+		expect(startCount()).toBeGreaterThanOrEqual(1);
+		expect(prepareSpy).toHaveBeenCalled();
+		expect(notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes("413")).length).toBe(0);
+		expect(promptSpy).not.toHaveBeenCalled();
+		expect(continueSpy).not.toHaveBeenCalled();
+	});
+
+	it("skips snapcompact and lands on soft for a payload-rejection compaction attempt (#11482)", async () => {
+		// The `session_before_compact` hook mocked in `createSession` supplies a
+		// canned summary regardless of which method actually runs, so it can't
+		// distinguish methods by that side effect. Assert on the compaction
+		// lifecycle's own `action` field instead (session-maintenance.ts: the
+		// dispatched `action` is literally "snapcompact" for that method, and
+		// "context-full" for "soft"/"handoff"-summary methods) — a real,
+		// observable proof of which method ran, not just that an option was
+		// forwarded. The bundled test model supports image input
+		// (`input: ["text","image"]`), so with `methodOrder: ["snapcompact",
+		// "soft"]` an unfixed selection loop would pick snapcompact first.
+		await createSession(null, undefined, {
+			extraSettings: { "compaction.methodOrder": ["snapcompact", "soft"] },
+		});
+		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		const startActions: unknown[] = [];
+		const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_start") startActions.push((event as { action?: unknown }).action);
+			if (event.type === "auto_compaction_end") onCompactionDone();
+		});
+
+		const assistantMsg = payloadRejectionAssistant();
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await compactionDone;
+		await session.waitForIdle();
+
+		expect(startActions.length).toBeGreaterThanOrEqual(1);
+		expect(startActions).not.toContain("snapcompact");
+		expect(startActions).toContain("context-full");
+	});
+
+	it("still blocks a payload-only 413 with no context window when the only configured method can't run for overflow (#11482)", async () => {
+		// `handoff` explicitly refuses reason === "overflow" (session-maintenance.ts
+		// `isCompactionMethodUsable`). A methodOrder of just `["handoff"]` must not
+		// be treated as "compaction available" for this dead end — otherwise
+		// `runAutoCompaction` finds no usable method, silently no-ops, and neither
+		// the payload notice nor the automatic-continuation block ever fires.
+		await createSession(null, undefined, { extraSettings: { "compaction.methodOrder": ["handoff"] } });
+		const checkSpy = vi.spyOn(SessionMaintenance.prototype, "checkCompaction");
+		const prepareSpy = vi.spyOn(compactionModule, "prepareCompaction");
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		const notices = collectNotices();
+		const endCount = countCompactionEvents("auto_compaction_end");
+
+		const assistantMsg = payloadRejectionAssistant();
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await session.waitForIdle();
+
+		expect(endCount()).toBe(0);
+		expect(prepareSpy).not.toHaveBeenCalled();
+		expect(promptSpy).not.toHaveBeenCalled();
+		expect(continueSpy).not.toHaveBeenCalled();
+
+		const payloadNotices = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes("413"));
+		expect(payloadNotices.length).toBe(1);
+		const checkResults = await Promise.all(
+			checkSpy.mock.results.map(r => r.value as { automaticContinuationBlocked?: boolean }),
+		);
+		expect(checkResults.some(r => r.automaticContinuationBlocked === true)).toBe(true);
+	});
+
+	it("blocks a payload-only 413 with no context window when a usable method is configured but reclaims nothing (#11482)", async () => {
+		// `shake` is statically usable for reason "overflow" (unlike `handoff`),
+		// so it passes `hasUsableCompactionMethod` and `runRecoveryCompactionWithRollback`
+		// is attempted. With no seeded heavy tool output there is nothing to elide,
+		// so shake reclaims 0 tokens, the method list is exhausted, and the
+		// underlying `runAutoCompaction` returns a plain no-op. Without converting
+		// that no-progress outcome back into the payload dead end, the failed turn
+		// would be silently restored with neither a notice nor a block, letting
+		// the next auto-continue resubmit the same oversized history.
+		await createSession(null, undefined, { extraSettings: { "compaction.methodOrder": ["shake"] } });
+		const checkSpy = vi.spyOn(SessionMaintenance.prototype, "checkCompaction");
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		const notices = collectNotices();
+
+		const assistantMsg = payloadRejectionAssistant();
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await session.waitForIdle();
+
+		expect(promptSpy).not.toHaveBeenCalled();
+		expect(continueSpy).not.toHaveBeenCalled();
+
+		const payloadNotices = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes("413"));
+		expect(payloadNotices.length).toBe(1);
+		const checkResults = await Promise.all(
+			checkSpy.mock.results.map(r => r.value as { automaticContinuationBlocked?: boolean }),
+		);
+		expect(checkResults.some(r => r.automaticContinuationBlocked === true)).toBe(true);
+
+		// `runRecoveryCompactionWithRollback`'s no-rewrite path re-appends the
+		// failed turn to active context before the no-progress conversion runs;
+		// the block must remove it again so the next prompt's pre-prompt
+		// maintenance doesn't find the same error and repeat this whole cycle.
+		const lastActiveMessage = session.agent.state.messages.at(-1);
+		expect(lastActiveMessage?.role === "assistant" && lastActiveMessage.stopReason === "error").toBe(false);
+	});
+
+	it("reports a usage-backed payload-shaped dead end as a token-context problem", async () => {
+		await createSession(200_000, undefined, { extraSettings: { "compaction.enabled": false } });
+		const checkSpy = vi.spyOn(SessionMaintenance.prototype, "checkCompaction");
+		const prepareSpy = vi.spyOn(compactionModule, "prepareCompaction");
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		const notices = collectNotices();
+
+		const assistantMsg = usageBackedMediaBudgetAssistant();
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await session.waitForIdle();
+
+		expect(prepareSpy).not.toHaveBeenCalled();
+		expect(promptSpy).not.toHaveBeenCalled();
+		expect(continueSpy).not.toHaveBeenCalled();
+
+		const deadEndNotices = notices.filter(n => n.source === NOTICE_SOURCE && n.level === "warning");
+		expect(deadEndNotices.length).toBe(1);
+		expect(deadEndNotices[0].message).toContain("IS a token-context problem");
+		expect(deadEndNotices[0].message).not.toContain("NOT a token-context problem");
+
+		const checkResults = await Promise.all(
+			checkSpy.mock.results.map(r => r.value as { automaticContinuationBlocked?: boolean }),
+		);
+		expect(checkResults.some(r => r.automaticContinuationBlocked === true)).toBe(true);
+	});
+
+	it("reports a usage-backed dead end (not 'not a token problem') when a configured method reclaims nothing (#11482)", async () => {
+		// Same usage-backed evidence as above, but this time compaction IS
+		// enabled with a method ("shake") that's statically usable yet reclaims
+		// nothing on this minimal session. The no-progress conversion path must
+		// select the same usage-backed notice the "no compaction available"
+		// path already does, not unconditionally claim "not a token problem".
+		await createSession(200_000, undefined, { extraSettings: { "compaction.methodOrder": ["shake"] } });
+		const checkSpy = vi.spyOn(SessionMaintenance.prototype, "checkCompaction");
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		const notices = collectNotices();
+
+		const assistantMsg = usageBackedMediaBudgetAssistant();
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await session.waitForIdle();
+
+		expect(promptSpy).not.toHaveBeenCalled();
+		expect(continueSpy).not.toHaveBeenCalled();
+
+		const deadEndNotices = notices.filter(n => n.source === NOTICE_SOURCE && n.level === "warning");
+		expect(deadEndNotices.length).toBe(1);
+		expect(deadEndNotices[0].message).toContain("IS a token-context problem");
+		expect(deadEndNotices[0].message).not.toContain("NOT a token-context problem");
+
+		const checkResults = await Promise.all(
+			checkSpy.mock.results.map(r => r.value as { automaticContinuationBlocked?: boolean }),
+		);
+		expect(checkResults.some(r => r.automaticContinuationBlocked === true)).toBe(true);
+	});
+
+	it("removes the restored turn when runAutoCompaction itself blocks without rewriting history (#11482)", async () => {
+		// Reproduces `prepareCompaction` finding nothing to summarize (a single
+		// oversized latest turn) with nothing seeded for the tiered rescue to elide
+		// either — `runAutoCompaction` returns `automaticContinuationBlocked: true`
+		// directly (its own compaction-dead-end notice), with no history rewrite.
+		// `runRecoveryCompactionWithRollback` still restores the failed turn into
+		// active context before returning that result; the immediate/no-method
+		// dead ends clean that restoration up, but this already-blocked shape
+		// used to skip the cleanup entirely.
+		vi.spyOn(compactionModule, "prepareCompaction").mockReturnValue(undefined);
+		await createSession(200_000, undefined, { extraSettings: { "compaction.methodOrder": ["soft"] } });
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		const notices = collectNotices();
+
+		// Usage-backed overflow (not local-headroom-driven) so the top dead-end
+		// check doesn't intercept it before a compaction attempt is even made.
+		const assistantMsg = usageBackedPlainPayloadAssistant();
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await session.waitForIdle();
+
+		expect(promptSpy).not.toHaveBeenCalled();
+		expect(continueSpy).not.toHaveBeenCalled();
+		expect(notices.some(n => n.message.includes("Compaction freed too little context to make progress"))).toBe(true);
+
+		const lastActiveMessage = session.agent.state.messages.at(-1);
+		expect(lastActiveMessage?.role === "assistant" && lastActiveMessage.stopReason === "error").toBe(false);
+	});
+
+	it("keeps snapcompact excluded when usage-backed overflow and explicit media evidence co-occur (#11482)", async () => {
+		// `usageBackedMediaBudgetAssistant` reports usage above the window AND
+		// explicit media wording ("image count exceeds the limit of 20") in the
+		// same response. Usage proving a token overflow doesn't negate the
+		// provider's simultaneous image-count rejection — snapcompact must stay
+		// excluded (it would only add more image frames before retrying), even
+		// though the usage-backed exception alone would otherwise re-admit it.
+		await createSession(200_000, undefined, {
+			extraSettings: { "compaction.methodOrder": ["snapcompact"] },
+		});
+		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		const notices = collectNotices();
+		const startCount = countCompactionEvents("auto_compaction_start");
+
+		const assistantMsg = usageBackedMediaBudgetAssistant();
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await session.waitForIdle();
+
+		// `snapcompact` is the only configured method; excluded, there is nothing
+		// left to attempt, so no compaction ever starts.
+		expect(startCount()).toBe(0);
+		const deadEndNotices = notices.filter(n => n.source === NOTICE_SOURCE && n.level === "warning");
+		expect(deadEndNotices.length).toBe(1);
+		expect(deadEndNotices[0].message).toContain("IS a token-context problem");
+	});
+
+	it("does not exclude snapcompact from a usage-backed payload rejection with a known context window (#11482)", async () => {
+		// Plain (non-media) payload rejection, but reported usage (250k) exceeds
+		// the known 200k context window: `isUsageBackedContextOverflow` proves
+		// this is a genuine token overflow, not a byte/media-only rejection.
+		// A user configured with `methodOrder: ["snapcompact"]` must still be
+		// able to use their only configured method instead of being told no
+		// recovery exists just because the error is payload-shaped.
+		await createSession(200_000, undefined, {
+			extraSettings: { "compaction.methodOrder": ["snapcompact"] },
+		});
+		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		const notices = collectNotices();
+		const startActions: unknown[] = [];
+		const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_start") startActions.push((event as { action?: unknown }).action);
+			if (event.type === "auto_compaction_end") onCompactionDone();
+		});
+
+		const assistantMsg = usageBackedPlainPayloadAssistant();
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await compactionDone;
+		await session.waitForIdle();
+
+		expect(startActions).toContain("snapcompact");
+		const unavailableNotices = notices.filter(
+			n => n.source === NOTICE_SOURCE && n.message.includes("automatic compaction is unavailable"),
+		);
+		expect(unavailableNotices.length).toBe(0);
+	});
+
+	it("keeps a digit-free explicit media rejection ('too many images') on the terminal path even with no context window and compaction available (#11482)", async () => {
+		// "request_too_large: too many images" matches PAYLOAD_REJECTION_PATTERNS
+		// but none of the token-context or generic-numeric-limit patterns, so it
+		// classifies as non-ambiguous PayloadRejected only. Without positive
+		// media evidence gating, the default (compaction-available) install
+		// would route this into a compaction attempt — including snapcompact,
+		// which can *add* image frames — even though the text already proves
+		// this is a media budget, not message-count bloat.
+		await createSession(null);
+		const checkSpy = vi.spyOn(SessionMaintenance.prototype, "checkCompaction");
+		const prepareSpy = vi.spyOn(compactionModule, "prepareCompaction");
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		const notices = collectNotices();
+		const startCount = countCompactionEvents("auto_compaction_start");
+
+		const assistantMsg = explicitMediaNoDigitPayloadAssistant();
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await session.waitForIdle();
+
+		expect(startCount()).toBe(0);
+		expect(prepareSpy).not.toHaveBeenCalled();
+		expect(promptSpy).not.toHaveBeenCalled();
+		expect(continueSpy).not.toHaveBeenCalled();
+
+		const payloadNotices = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes("413"));
+		expect(payloadNotices.length).toBe(1);
+		const checkResults = await Promise.all(
+			checkSpy.mock.results.map(r => r.value as { automaticContinuationBlocked?: boolean }),
+		);
+		expect(checkResults.some(r => r.automaticContinuationBlocked === true)).toBe(true);
+	});
+
+	it.each([
+		["maximum of N images", mediaMaximumLimitPayloadAssistant] as const,
+		["number of images exceeds the maximum", mediaNumberOfImagesPayloadAssistant] as const,
+		["per-image size too large", imageSizeTooLargePayloadAssistant] as const,
+		["per-image dimensions exceed pixels", imageDimensionsExceedPayloadAssistant] as const,
+	])(
+		"keeps a %s media rejection on the terminal path even with no context window and compaction available (#11482)",
+		async (_label, buildAssistant) => {
+			// "maximum of 20 images allowed", "the number of images exceeds the
+			// maximum", "image is too large", and "image dimensions exceed 8000
+			// pixels" are all definitive media-limit evidence but matched neither
+			// the original bare-word pattern's replacement nor "too many images" /
+			// "image count/limit" / "limit of N images" — the narrowed matcher
+			// needs explicit coverage for these common phrasings too, or they fall
+			// through to a compaction attempt that may drop or retry with images.
+			await createSession(null);
+			const prepareSpy = vi.spyOn(compactionModule, "prepareCompaction");
+			const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+			const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+			const notices = collectNotices();
+			const startCount = countCompactionEvents("auto_compaction_start");
+
+			const assistantMsg = buildAssistant();
+			session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+			session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+			await session.waitForIdle();
+
+			expect(startCount()).toBe(0);
+			expect(prepareSpy).not.toHaveBeenCalled();
+			expect(promptSpy).not.toHaveBeenCalled();
+			expect(continueSpy).not.toHaveBeenCalled();
+
+			const payloadNotices = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes("413"));
+			expect(payloadNotices.length).toBe(1);
+		},
+	);
+
+	it("keeps a dual-flagged media rejection ('image count exceeds the limit of 20') on the terminal path even with no context window (#11482)", async () => {
+		// Unlike the digit-free case above, "image count exceeds the limit of 20"
+		// also trips GENERIC_LIMIT_OVERFLOW_PATTERN, so AIError.classifyMessage
+		// dual-flags it (PayloadRejected + ContextOverflow) and
+		// ambiguousPayloadRejection is true. Explicit media evidence must win
+		// over that ambiguity guard — otherwise this falls into the same
+		// overflow-compaction attempt (including snapcompact, which can add
+		// image frames) despite the text proving a media/image-count budget.
+		await createSession(null);
+		const checkSpy = vi.spyOn(SessionMaintenance.prototype, "checkCompaction");
+		const prepareSpy = vi.spyOn(compactionModule, "prepareCompaction");
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		const notices = collectNotices();
+		const startCount = countCompactionEvents("auto_compaction_start");
+
+		const assistantMsg = mediaBudgetPayloadAssistant();
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await session.waitForIdle();
+
+		expect(startCount()).toBe(0);
+		expect(prepareSpy).not.toHaveBeenCalled();
+		expect(promptSpy).not.toHaveBeenCalled();
+		expect(continueSpy).not.toHaveBeenCalled();
+
+		const payloadNotices = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes("413"));
+		expect(payloadNotices.length).toBe(1);
+		const checkResults = await Promise.all(
+			checkSpy.mock.results.map(r => r.value as { automaticContinuationBlocked?: boolean }),
+		);
+		expect(checkResults.some(r => r.automaticContinuationBlocked === true)).toBe(true);
+	});
+
+	it("attempts compaction for a payload-only 413 that merely names a vision model, not an actual media-limit rejection (#11482)", async () => {
+		// "for model llava-vision" contains "vision" but no count/limit evidence —
+		// the request wasn't rejected for exceeding an image/frame/pixel budget,
+		// it just happens to run a vision-capable model. Before narrowing the
+		// media-evidence pattern, bare "vision"/"media" occurrences anywhere in
+		// the text were enough to permanently dead-end the session even when
+		// ordinary text compaction could recover it.
+		await createSession(null);
+		const prepareSpy = vi.spyOn(compactionModule, "prepareCompaction");
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		const notices = collectNotices();
+		const startCount = countCompactionEvents("auto_compaction_start");
+		const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_end") onCompactionDone();
+		});
+
+		const assistantMsg = incidentalMediaWordPayloadAssistant();
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await compactionDone;
+		await session.waitForIdle();
+
+		expect(startCount()).toBeGreaterThanOrEqual(1);
+		expect(prepareSpy).toHaveBeenCalled();
+		expect(notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes("413")).length).toBe(0);
+		expect(promptSpy).not.toHaveBeenCalled();
+		expect(continueSpy).not.toHaveBeenCalled();
+	});
+
+	it("keeps an explicit media rejection terminal on a known context window with no local headroom (#11482)", async () => {
+		// A known context window's `trustedPayloadRejection` only proves *local*
+		// headroom (`storedTokens < 90% of contextWindow`) — a low reported-usage,
+		// digit-free media rejection ("too many images") can still fail that check
+		// when the local estimate is near the ceiling, same as any other payload
+		// rejection. Before gating the terminal dead end to `contextWindow <= 0`,
+		// this fell through to a real promotion/compaction attempt despite the
+		// text already proving an image-count limit neither can raise.
+		await createSession(8_000, { toolText: "y".repeat(60_000) });
+		const prepareSpy = vi.spyOn(compactionModule, "prepareCompaction");
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		const notices = collectNotices();
+		const startCount = countCompactionEvents("auto_compaction_start");
+
+		const assistantMsg = explicitMediaNoDigitPayloadAssistant();
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await session.waitForIdle();
+
+		expect(startCount()).toBe(0);
+		expect(prepareSpy).not.toHaveBeenCalled();
+		expect(promptSpy).not.toHaveBeenCalled();
+		expect(continueSpy).not.toHaveBeenCalled();
+
+		const payloadNotices = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes("413"));
+		expect(payloadNotices.length).toBe(1);
+	});
+
+	function activateOngoingGoal(id: string): void {
+		const now = Date.now();
+		session.setGoalModeState({
+			enabled: true,
+			mode: "active",
+			goal: {
+				id,
+				objective: "finish the ongoing work",
+				status: "active",
+				tokensUsed: 0,
+				timeUsedSeconds: 0,
+				createdAt: now,
+				updatedAt: now,
+			},
+		});
+	}
+
+	it("consults a configured fallback chain in goal mode before any maintenance outcome stands", async () => {
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!fallbackModel) {
+			throw new Error("Expected bundled openai fallback model to exist");
+		}
+
+		const requestedModels: string[] = [];
+		const primaryMock = createMockModel({ id: "claude-sonnet-4-5", provider: "anthropic" });
+		const fallbackMock = createMockModel({ id: fallbackModel.id, provider: fallbackModel.provider });
+		const fallbackEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
+		await createSession(200_000, undefined, {
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				if (model.provider === "anthropic") {
+					primaryMock.push({ throw: PAYLOAD_ERROR_MESSAGE });
+					return primaryMock.stream(model, context, options);
+				}
+				fallbackMock.push({ content: ["recovered on configured fallback"] });
+				return fallbackMock.stream(model, context, options);
+			},
+			extraSettings: {
+				"retry.baseDelayMs": 5,
+				"retry.modelFallback": true,
+				"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+			},
+		});
+		activateOngoingGoal("goal-fallback");
+		session.subscribe(event => {
+			if (event.type === "retry_fallback_applied") fallbackEvents.push(event);
+		});
+
+		const notices = collectNotices();
+		const endCount = countCompactionEvents("auto_compaction_end");
+
+		await session.prompt("work on the goal");
+		await session.waitForIdle();
+
+		expect(endCount()).toBe(0);
+		const payloadNotices = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes("413"));
+		expect(payloadNotices.length).toBe(0);
+		expect(requestedModels).toEqual(["anthropic/claude-sonnet-4-5", `${fallbackModel.provider}/${fallbackModel.id}`]);
+		expect(fallbackEvents).toHaveLength(1);
+		expect(fallbackEvents[0].to).toBe(`${fallbackModel.provider}/${fallbackModel.id}`);
+		expect(session.model?.provider).toBe(fallbackModel.provider);
+	});
+
+	it("consults a configured fallback chain for dual-flag bare-413 rejections", async () => {
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!fallbackModel) {
+			throw new Error("Expected bundled openai fallback model to exist");
+		}
+
+		const requestedModels: string[] = [];
+		const primaryMock = createMockModel({ id: "claude-sonnet-4-5", provider: "anthropic" });
+		const fallbackMock = createMockModel({ id: fallbackModel.id, provider: fallbackModel.provider });
+		const fallbackEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
+		await createSession(200_000, undefined, {
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				if (model.provider === "anthropic") {
+					primaryMock.push({ throw: "413 status code (no body)" });
+					return primaryMock.stream(model, context, options);
+				}
+				fallbackMock.push({ content: ["recovered on configured fallback"] });
+				return fallbackMock.stream(model, context, options);
+			},
+			extraSettings: {
+				"retry.baseDelayMs": 5,
+				"retry.modelFallback": true,
+				"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+			},
+		});
+		activateOngoingGoal("goal-dual-flag-fallback");
+		session.subscribe(event => {
+			if (event.type === "retry_fallback_applied") fallbackEvents.push(event);
+		});
+
+		const notices = collectNotices();
+		const endCount = countCompactionEvents("auto_compaction_end");
+
+		await session.prompt("work on the goal");
+		await session.waitForIdle();
+
+		expect(endCount()).toBe(0);
+		const payloadNotices = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes("413"));
+		expect(payloadNotices.length).toBe(0);
+		expect(requestedModels).toEqual(["anthropic/claude-sonnet-4-5", `${fallbackModel.provider}/${fallbackModel.id}`]);
+		expect(fallbackEvents).toHaveLength(1);
+		expect(fallbackEvents[0].to).toBe(`${fallbackModel.provider}/${fallbackModel.id}`);
+		expect(session.model?.provider).toBe(fallbackModel.provider);
+	});
+
+	it("routes goal-mode transient failures exactly like the non-goal ladder", async () => {
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!fallbackModel) {
+			throw new Error("Expected bundled openai fallback model to exist");
+		}
+
+		const requestedModels: string[] = [];
+		const primaryMock = createMockModel({ id: "claude-sonnet-4-5", provider: "anthropic" });
+		const chainMock = createMockModel({ id: fallbackModel.id, provider: fallbackModel.provider });
+		await createSession(200_000, undefined, {
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				if (model.provider === "anthropic") {
+					primaryMock.push({ throw: TRANSIENT_ERROR_MESSAGE });
+					return primaryMock.stream(model, context, options);
+				}
+				chainMock.push({ content: ["recovered on configured fallback"] });
+				return chainMock.stream(model, context, options);
+			},
+			extraSettings: {
+				"retry.baseDelayMs": 5,
+				"retry.modelFallback": true,
+				"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+			},
+		});
+		activateOngoingGoal("goal-transient-ladder");
+
+		await session.prompt("work on the goal");
+		await session.waitForIdle();
+
+		expect(requestedModels.slice(0, 2)).toEqual([
+			"anthropic/claude-sonnet-4-5",
+			`${fallbackModel.provider}/${fallbackModel.id}`,
+		]);
+		expect(session.model?.provider).toBe(fallbackModel.provider);
+	});
+
+	it("keeps usage-backed payload overflows off the configured chain", async () => {
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!fallbackModel) {
+			throw new Error("Expected bundled openai fallback model to exist");
+		}
+
+		const requestedModels: string[] = [];
+		const primaryMock = createMockModel({ id: "claude-sonnet-4-5", provider: "anthropic" });
+		const fallbackEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
+		let failedOnce = false;
+		await createSession(200_000, undefined, {
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				primaryMock.push(
+					failedOnce
+						? { content: ["made progress after compaction"] }
+						: {
+								content: [],
+								stopReason: "error",
+								errorMessage: "request_too_large: image count exceeds the limit of 20",
+								usage: { input: 250_000 },
+							},
+				);
+				failedOnce = true;
+				return primaryMock.stream(model, context, options);
+			},
+			extraSettings: {
+				"retry.baseDelayMs": 5,
+				"retry.modelFallback": true,
+				"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+			},
+		});
+		activateOngoingGoal("goal-usage-backed");
+		session.subscribe(event => {
+			if (event.type === "retry_fallback_applied") fallbackEvents.push(event);
+		});
+		const startCount = countCompactionEvents("auto_compaction_start");
+
+		await session.prompt("work on the goal");
+		await session.waitForIdle();
+
+		expect(fallbackEvents).toHaveLength(0);
+		expect(requestedModels.every(m => m.startsWith("anthropic/"))).toBe(true);
+		expect(startCount()).toBeGreaterThanOrEqual(1);
+	});
+
+	it("keeps the goal-mode BLOCK terminal when no fallback chain is configured", async () => {
+		const requestedModels: string[] = [];
+		const primaryMock = createMockModel({ id: "claude-sonnet-4-5", provider: "anthropic" });
+		await createSession(200_000, undefined, {
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				primaryMock.push({ throw: PAYLOAD_ERROR_MESSAGE });
+				return primaryMock.stream(model, context, options);
+			},
+		});
+		activateOngoingGoal("goal-terminal");
+
+		const notices = collectNotices();
+
+		await session.prompt("work on the goal");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual(["anthropic/claude-sonnet-4-5"]);
+		const payloadNotices = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes("413"));
+		expect(payloadNotices.length).toBe(1);
+		expect(payloadNotices[0].level).toBe("warning");
+	});
+	it("does not blind-resend a transient-wrapped payload rejection before maintenance sees it", async () => {
+		const requestedModels: string[] = [];
+		const primaryMock = createMockModel({ id: "claude-sonnet-4-5", provider: "anthropic" });
+		await createSession(
+			200_000,
+			{ toolText: "seed" },
+			{
+				streamFn: (model, context, options) => {
+					requestedModels.push(`${model.provider}/${model.id}`);
+					primaryMock.push({ throw: "Provider returned error: 413 Payload Too Large" });
+					return primaryMock.stream(model, context, options);
+				},
+				extraSettings: { "retry.baseDelayMs": 5 },
+			},
+		);
+
+		const notices = collectNotices();
+		const startCount = countCompactionEvents("auto_compaction_start");
+		await session.prompt("hello");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual(["anthropic/claude-sonnet-4-5"]);
+		const payloadNotices = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes("413"));
+		expect(payloadNotices.length).toBe(1);
+		expect(payloadNotices[0].level).toBe("warning");
+		expect(startCount()).toBe(0);
+	});
+	it("consults the chain before overflow maintenance absorbs a high-occupancy payload rejection", async () => {
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!fallbackModel) {
+			throw new Error("Expected bundled openai fallback model to exist");
+		}
+
+		const requestedModels: string[] = [];
+		const primaryMock = createMockModel({ id: "claude-sonnet-4-5", provider: "anthropic" });
+		const fallbackMock = createMockModel({ id: fallbackModel.id, provider: fallbackModel.provider });
+		const fallbackEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
+		await createSession(
+			2_000,
+			{ toolText: "x".repeat(40_000) },
+			{
+				streamFn: (model, context, options) => {
+					requestedModels.push(`${model.provider}/${model.id}`);
+					if (model.provider === "anthropic") {
+						primaryMock.push({ throw: PAYLOAD_ERROR_MESSAGE });
+						return primaryMock.stream(model, context, options);
+					}
+					fallbackMock.push({ content: ["recovered on configured fallback"] });
+					return fallbackMock.stream(model, context, options);
+				},
+				extraSettings: {
+					"retry.baseDelayMs": 5,
+					"retry.modelFallback": true,
+					"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+					"contextPromotion.enabled": true,
+					"compaction.enabled": false,
+				},
+			},
+		);
+		activateOngoingGoal("goal-high-occupancy");
+		session.subscribe(event => {
+			if (event.type === "retry_fallback_applied") fallbackEvents.push(event);
+		});
+		const notices = collectNotices();
+		const startCount = countCompactionEvents("auto_compaction_start");
+		const endCount = countCompactionEvents("auto_compaction_end");
+		await session.prompt("work on the goal");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual(["anthropic/claude-sonnet-4-5", `${fallbackModel.provider}/${fallbackModel.id}`]);
+		expect(fallbackEvents).toHaveLength(1);
+		expect(session.model?.provider).toBe(fallbackModel.provider);
+		expect(startCount()).toBe(0);
+		expect(endCount()).toBe(0);
+		expect(notices.filter(n => n.source === NOTICE_SOURCE)).toHaveLength(0);
+	});
+	it("believes provider-reported usage when it contradicts a payload-only body", async () => {
+		const requestedModels: string[] = [];
+		const primaryMock = createMockModel({ id: "claude-sonnet-4-5", provider: "anthropic" });
+		await createSession(
+			200_000,
+			{ toolText: "seed" },
+			{
+				streamFn: (model, context, options) => {
+					requestedModels.push(`${model.provider}/${model.id}`);
+					primaryMock.push({
+						stopReason: "error",
+						errorMessage: PAYLOAD_ERROR_MESSAGE,
+						usage: { input: 250_000 },
+					});
+					return primaryMock.stream(model, context, options);
+				},
+			},
+		);
+		const overflowStarts: Array<Extract<AgentSessionEvent, { type: "auto_compaction_start" }>> = [];
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_start" && event.reason === "overflow") overflowStarts.push(event);
+		});
+		const notices = collectNotices();
+		await session.prompt("trigger usage-backed overflow");
+		await session.waitForIdle();
+
+		expect(requestedModels[0]).toBe("anthropic/claude-sonnet-4-5");
+		expect(overflowStarts.length).toBeGreaterThanOrEqual(1);
+		expect(notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes("413"))).toHaveLength(0);
+	});
+
+	it("blocks automatic continuation when a high-occupancy payload rejection has no runnable recovery", async () => {
+		const requestedModels: string[] = [];
+		const primaryMock = createMockModel({ id: "claude-sonnet-4-5", provider: "anthropic" });
+		await createSession(
+			2_000,
+			{ toolText: "x".repeat(40_000) },
+			{
+				streamFn: (model, context, options) => {
+					requestedModels.push(`${model.provider}/${model.id}`);
+					primaryMock.push({ throw: PAYLOAD_ERROR_MESSAGE });
+					return primaryMock.stream(model, context, options);
+				},
+				extraSettings: {
+					"compaction.enabled": false,
+					"contextPromotion.enabled": false,
+				},
+			},
+		);
+		activateOngoingGoal("goal-no-runnable-recovery");
+		const notices = collectNotices();
+		const startCount = countCompactionEvents("auto_compaction_start");
+		await session.prompt("work on the goal");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual(["anthropic/claude-sonnet-4-5"]);
+		const payloadNotices = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes("413"));
+		expect(payloadNotices.length).toBe(1);
+		expect(payloadNotices[0].level).toBe("warning");
+		expect(startCount()).toBe(0);
+	});
+	it("persists the terminal payload 413 when an active goal dead ends", async () => {
+		const requestedModels: string[] = [];
+		const primaryMock = createMockModel({ id: "claude-sonnet-4-5", provider: "anthropic" });
+		await createSession(
+			2_000,
+			{ toolText: "x".repeat(40_000) },
+			{
+				streamFn: (model, context, options) => {
+					requestedModels.push(`${model.provider}/${model.id}`);
+					primaryMock.push({ throw: PAYLOAD_ERROR_MESSAGE });
+					return primaryMock.stream(model, context, options);
+				},
+				extraSettings: {
+					"compaction.enabled": false,
+					"contextPromotion.enabled": false,
+				},
+			},
+		);
+		activateOngoingGoal("goal-persist-terminal-413");
+		await session.prompt("work on the goal");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual(["anthropic/claude-sonnet-4-5"]);
+		const terminalErrors = sessionManager
+			.getBranch()
+			.filter(entry => entry.type === "message")
+			.map(entry => (entry as { message?: AssistantMessage }).message)
+			.filter(message => message?.role === "assistant" && message.stopReason === "error");
+		expect(terminalErrors).toHaveLength(1);
+		expect(terminalErrors[0]?.errorMessage).toContain("413");
+		const providerCtx = sessionManager.buildSessionContext().messages;
+		expect(providerCtx.some(m => m.role === "assistant" && (m as AssistantMessage).stopReason === "error")).toBe(
+			false,
+		);
+	});
+	it("blocks dual-flag bare-413 dead ends even though overflow evidence is present", async () => {
+		const requestedModels: string[] = [];
+		const primaryMock = createMockModel({ id: "claude-sonnet-4-5", provider: "anthropic" });
+		await createSession(
+			2_000,
+			{ toolText: "x".repeat(40_000) },
+			{
+				streamFn: (model, context, options) => {
+					requestedModels.push(`${model.provider}/${model.id}`);
+					primaryMock.push({ throw: "413 status code (no body)" });
+					return primaryMock.stream(model, context, options);
+				},
+				extraSettings: {
+					"compaction.enabled": false,
+					"contextPromotion.enabled": false,
+				},
+			},
+		);
+		activateOngoingGoal("goal-dual-flag-dead-end");
+		const notices = collectNotices();
+		const startCount = countCompactionEvents("auto_compaction_start");
+		await session.prompt("work on the goal");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual(["anthropic/claude-sonnet-4-5"]);
+		const payloadNotices = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes("413"));
+		expect(payloadNotices.length).toBe(1);
+		expect(payloadNotices[0].level).toBe("warning");
+		expect(startCount()).toBe(0);
+		const terminalErrors = sessionManager
+			.getBranch()
+			.filter(entry => entry.type === "message")
+			.map(entry => (entry as { message?: AssistantMessage }).message)
+			.filter(message => message?.role === "assistant" && message.stopReason === "error");
+		expect(terminalErrors).toHaveLength(1);
+		expect(terminalErrors[0]?.errorMessage).toContain("413");
+		const providerCtx = sessionManager.buildSessionContext().messages;
+		expect(providerCtx.some(m => m.role === "assistant" && (m as AssistantMessage).stopReason === "error")).toBe(
+			false,
+		);
+	});
+
+	it("persists a blocked dual-flag 413 outside goal mode", async () => {
+		const primaryMock = createMockModel({ id: "claude-sonnet-4-5", provider: "anthropic" });
+		await createSession(
+			2_000,
+			{ toolText: "x".repeat(40_000) },
+			{
+				streamFn: (model, context, options) => {
+					primaryMock.push({ throw: "413 status code (no body)" });
+					return primaryMock.stream(model, context, options);
+				},
+				extraSettings: {
+					"compaction.enabled": false,
+					"contextPromotion.enabled": false,
+				},
+			},
+		);
+
+		await session.prompt("continue normally");
+		await session.waitForIdle();
+
+		const terminalErrors = sessionManager
+			.getBranch()
+			.flatMap(entry => (entry.type === "message" ? [entry.message] : []))
+			.filter(
+				(message): message is AgentMessage & { role: "assistant" } =>
+					message.role === "assistant" && message.stopReason === "error",
+			);
+		expect(terminalErrors).toHaveLength(1);
+		expect(terminalErrors[0]?.errorMessage).toContain("413");
+		const providerCtx = sessionManager.buildSessionContext().messages;
+		expect(providerCtx.some(m => m.role === "assistant" && m.stopReason === "error")).toBe(false);
+	});
+	it("blocks status-only Content Too Large rejections with no context window and no compaction method configured", async () => {
+		// See the "attempts compaction ... (#11479)" test above: with unknown
+		// context window this now only dead-ends when there is genuinely no
+		// compaction method available to try.
+		await createSession(null, undefined, { extraSettings: { "compaction.enabled": false } });
+		const checkSpy = vi.spyOn(SessionMaintenance.prototype, "checkCompaction");
+		const prepareSpy = vi.spyOn(compactionModule, "prepareCompaction");
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		const notices = collectNotices();
+		const startCount = countCompactionEvents("auto_compaction_start");
+
+		const assistantMsg = statusOnlyPayloadAssistant();
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await session.waitForIdle();
+
+		expect(startCount()).toBe(0);
+		expect(prepareSpy).not.toHaveBeenCalled();
+		expect(promptSpy).not.toHaveBeenCalled();
+		expect(continueSpy).not.toHaveBeenCalled();
+		const payloadNotices = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes("413"));
+		expect(payloadNotices.length).toBe(1);
+		const checkResults = await Promise.all(
+			checkSpy.mock.results.map(r => r.value as { automaticContinuationBlocked?: boolean }),
+		);
+		expect(checkResults.some(r => r.automaticContinuationBlocked === true)).toBe(true);
+	});
+
+	it("honestly skips compaction for media-budget numeric-limit rejections", async () => {
+		await createSession(200_000);
+		const checkSpy = vi.spyOn(SessionMaintenance.prototype, "checkCompaction");
+		const prepareSpy = vi.spyOn(compactionModule, "prepareCompaction");
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		const notices = collectNotices();
+		const startCount = countCompactionEvents("auto_compaction_start");
+
+		const assistantMsg = mediaBudgetPayloadAssistant();
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await session.waitForIdle();
+
+		expect(startCount()).toBe(0);
+		expect(prepareSpy).not.toHaveBeenCalled();
+		expect(promptSpy).not.toHaveBeenCalled();
+		expect(continueSpy).not.toHaveBeenCalled();
+		const payloadNotices = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes("413"));
+		expect(payloadNotices.length).toBe(1);
+		const checkResults = await Promise.all(
+			checkSpy.mock.results.map(r => r.value as { automaticContinuationBlocked?: boolean }),
+		);
+		expect(checkResults.some(r => r.automaticContinuationBlocked === true)).toBe(true);
+	});
+});

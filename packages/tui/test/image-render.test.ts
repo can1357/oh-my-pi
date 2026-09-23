@@ -260,3 +260,30 @@ describe("Windows Terminal Preview SIXEL detection", () => {
 		).toBe(false);
 	});
 });
+
+describe("isImageLine — composed placeholder rows", () => {
+	const originalProtocol = TERMINAL.imageProtocol;
+	afterEach(() => {
+		terminal.imageProtocol = originalProtocol;
+	});
+
+	it("keeps deeply prefixed Kitty placeholder rows on the verbatim image-line path", () => {
+		terminal.imageProtocol = ImageProtocol.Kitty;
+		// Composer attachment chip interior row: border SGR + │ + reset + pad +
+		// image-id fg + placement-id underline put the first placeholder cell at
+		// code unit 63 — past the old 64-unit needle window, which silently sent
+		// the row through SGR coalescing/truncation instead of verbatim output.
+		const cells = "\u{10eeee}\u030d\u0305".repeat(9);
+		const chipRow = `\x1b[38;2;255;179;102m│\x1b[39m \x1b[38;2;122;231;55m\x1b[58:2::122:231:55m${cells}\x1b[39;59m  \x1b[38;2;255;179;102m│\x1b[39m`;
+		expect(TERMINAL.isImageLine(chipRow)).toBe(true);
+		// Second card in the band: the needle sits hundreds of units in.
+		const secondCard = `${chipRow}  ${chipRow}`;
+		expect(TERMINAL.isImageLine(secondCard.slice(chipRow.length + 2))).toBe(true);
+		expect(TERMINAL.isImageLine(secondCard)).toBe(true);
+	});
+
+	it("still rejects plain styled text rows", () => {
+		terminal.imageProtocol = ImageProtocol.Kitty;
+		expect(TERMINAL.isImageLine("\x1b[38;2;255;179;102m│\x1b[39m plain text row")).toBe(false);
+	});
+});

@@ -1000,7 +1000,7 @@ describe("Generate E2E Tests", () => {
 		);
 	});
 
-	describe.skipIf(!e2eApiKey("XAI_API_KEY"))("xAI Provider (grok-code-fast-1 via OpenAI Completions)", () => {
+	describe.skipIf(!e2eApiKey("XAI_API_KEY"))("xAI Provider (grok-code-fast-1 via OpenAI Responses)", () => {
 		const llm = getBundledModel("xai", "grok-code-fast-1");
 
 		it(

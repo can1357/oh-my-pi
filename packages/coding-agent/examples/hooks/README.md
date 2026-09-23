@@ -26,7 +26,7 @@ cp permission-gate.ts ~/.omp/agent/hooks/
 | `custom-compaction.ts`   | Custom compaction that summarizes entire conversation                          |
 | `qna.ts`                 | Extracts questions from last response into editor via `ctx.ui.setEditorText()` |
 | `snake.ts`               | Snake game with custom UI, keyboard handling, and session persistence          |
-| `status-line.ts`         | Shows turn progress in footer via `ctx.ui.setStatus()` with themed colors      |
+| `status-line.ts`         | Shows plain-text turn progress in the footer via `ctx.ui.setStatus()`          |
 | `handoff.ts`             | Transfer context to a new focused session via `/handoff <goal>`                |
 
 ## Writing Hooks

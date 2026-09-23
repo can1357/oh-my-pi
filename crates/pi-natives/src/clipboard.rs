@@ -8,10 +8,10 @@ use std::io::Cursor;
 
 use arboard::{Clipboard, Error as ClipboardError, ImageData};
 use image::{DynamicImage, ImageFormat, RgbaImage};
-use napi::bindgen_prelude::*;
+use napi::{JsString, bindgen_prelude::*};
 use napi_derive::napi;
 
-use crate::task;
+use crate::{js, task};
 
 /// Clipboard image payload encoded as PNG bytes.
 #[napi(object)]
@@ -135,8 +135,8 @@ fn read_raw_cf_dib() -> Option<Vec<u8>> {
 /// # Errors
 /// Returns an error if clipboard access fails.
 #[napi]
-pub fn copy_to_clipboard(text: String) -> Result<()> {
-	set_clipboard_text(text)
+pub fn copy_to_clipboard(text: JsString) -> Result<()> {
+	set_clipboard_text(&js::utf8(text)?)
 }
 
 /// Linux: keep a single `arboard::Clipboard` alive for the whole process.
@@ -153,7 +153,7 @@ pub fn copy_to_clipboard(text: String) -> Result<()> {
 /// (`wl-clipboard-rs` forks its own serving process) but sharing the instance
 /// is harmless there.
 #[cfg(target_os = "linux")]
-fn set_clipboard_text(text: String) -> Result<()> {
+fn set_clipboard_text(text: &str) -> Result<()> {
 	use std::sync::OnceLock;
 
 	use parking_lot::Mutex;
@@ -180,7 +180,7 @@ fn set_clipboard_text(text: String) -> Result<()> {
 /// calling thread also avoids worker-thread `AppKit` pasteboard warnings on
 /// macOS.
 #[cfg(not(target_os = "linux"))]
-fn set_clipboard_text(text: String) -> Result<()> {
+fn set_clipboard_text(text: &str) -> Result<()> {
 	let mut clipboard = Clipboard::new()
 		.map_err(|err| Error::from_reason(format!("Failed to access clipboard: {err}")))?;
 	clipboard

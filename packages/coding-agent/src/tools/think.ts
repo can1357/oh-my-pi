@@ -1,19 +1,28 @@
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
-import { type Component, Markdown } from "@oh-my-pi/pi-tui";
-import type { RenderResultOptions } from "../extensibility/custom-tools/types";
-import { getMarkdownTheme, type Theme } from "../modes/theme/theme";
 
 /** Whether a model transport can suppress native reasoning while private scratchpad thoughts are active. */
 export function supportsExternalThinking(model: Model | null | undefined): boolean {
 	if (!model) return false;
+	const compat = model.compat;
 	const requiresThinking =
 		model.api === "anthropic-messages" &&
-		model.compat !== undefined &&
-		"requiresThinkingEnabled" in model.compat &&
-		model.compat.requiresThinkingEnabled === true;
+		compat !== undefined &&
+		"requiresThinkingEnabled" in compat &&
+		compat.requiresThinkingEnabled === true;
 	if (model.reasoning && (requiresThinking || (model.thinking?.requiresEffort && !model.thinking.suppressWhenOff))) {
+		return false;
+	}
+	// Transports that reject `reasoning.effort` (xAI Grok 4 and the other
+	// reasoning-only Responses models) cannot honour `forceReasoningOff`, so the
+	// scratchpad would run alongside native reasoning instead of replacing it.
+	if (
+		model.reasoning &&
+		compat !== undefined &&
+		(("omitReasoningEffort" in compat && compat.omitReasoningEffort === true) ||
+			("supportsReasoningEffort" in compat && compat.supportsReasoningEffort === false))
+	) {
 		return false;
 	}
 	if (model.api === "google-generative-ai" || model.api === "google-gemini-cli" || model.api === "google-vertex") {
@@ -33,27 +42,6 @@ const thinkSchema = type({
 }).describe("private scratchpad; not shown to user");
 
 type ThinkParams = typeof thinkSchema.infer;
-
-export type ThinkRenderArgs = {
-	thoughts?: string;
-};
-
-export const thinkToolRenderer = {
-	inline: true,
-	renderCall(args: ThinkRenderArgs, _options: RenderResultOptions, uiTheme: Theme): Component {
-		const thoughts =
-			typeof args === "object" && args !== null && "thoughts" in args && typeof args.thoughts === "string"
-				? args.thoughts
-				: "";
-		return new Markdown(thoughts, 1, 0, getMarkdownTheme(), {
-			color: (text: string) => uiTheme.fg("thinkingText", text),
-			italic: true,
-		});
-	},
-	renderResult(): Component {
-		return undefined as unknown as Component;
-	},
-};
 
 interface ThinkToolDetails {
 	recorded: true;

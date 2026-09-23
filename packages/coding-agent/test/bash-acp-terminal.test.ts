@@ -3,6 +3,7 @@ import * as os from "node:os";
 import type { ClientBridge, ClientBridgeTerminalHandle } from "@oh-my-pi/pi-coding-agent/session/client-bridge";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
+import { encodeTerminalImage } from "@oh-my-pi/pi-coding-agent/utils/terminal-graphics";
 
 function makeSession(bridge: ClientBridge): ToolSession {
 	return {
@@ -60,7 +61,7 @@ afterEach(() => {
 });
 
 describe("BashTool ACP terminal routing", () => {
-	it("routes through bridge, emits terminalId update, and releases the handle", async () => {
+	it("emits a live terminal update but releases it before the completed result", async () => {
 		const stubText = "hello from terminal\n";
 
 		const handle: ClientBridgeTerminalHandle = {
@@ -103,11 +104,38 @@ describe("BashTool ACP terminal routing", () => {
 		const text = result.content.find(c => c.type === "text");
 		expect(text?.text).toContain("hello from terminal");
 
-		// The result details must carry terminalId for the ACP event mapper
-		expect(result.details?.terminalId).toBe("term-xyz");
+		// Completed tool updates must not refer clients to the released terminal.
+		expect(result.details?.terminalId).toBeUndefined();
 
 		// The handle must always be released
 		expect(releaseSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("extracts graphics from cumulative terminal snapshots without leaking escapes", async () => {
+		const frame = await encodeTerminalImage({
+			type: "image",
+			mimeType: "image/png",
+			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+		});
+		const handle: ClientBridgeTerminalHandle = {
+			terminalId: "term-image",
+			waitForExit: async () => ({ exitCode: 7, signal: null }),
+			currentOutput: async () => ({ output: `before${frame}after`, truncated: false }),
+			kill: async () => {},
+			release: async () => {},
+		};
+		const bridge: ClientBridge = {
+			capabilities: { terminal: true },
+			createTerminal: async () => handle,
+		};
+
+		const result = await new BashTool(makeSession(bridge)).execute("call-image", { command: "remote-image" });
+		expect(result.isError).toBe(true);
+		expect(result.content.find(block => block.type === "text")?.text).toContain("beforeafter");
+		expect(result.content.find(block => block.type === "text")?.text).not.toContain("\x1b_G");
+		expect(result.content.filter(block => block.type === "image")).toEqual([
+			expect.objectContaining({ type: "image", mimeType: "image/png" }),
+		]);
 	});
 
 	it("wraps shell metacharacters into args instead of packing them into command", async () => {
@@ -285,10 +313,11 @@ describe("BashTool ACP terminal routing", () => {
 		const releaseSpy = spyOn(handle, "release");
 
 		const tool = new BashTool(makeSession(bridge));
-		const executePromise = tool.execute("call-timeout", { command: "sleep 60", timeout: 1 });
+		const result = await tool.execute("call-timeout", { command: "sleep 60", timeout: 1 });
 
-		await expect(executePromise).rejects.toThrow(/Command timed out after 1 seconds/);
-
+		expect(result.isError).toBe(true);
+		expect(result.details?.timedOut).toBe(true);
+		expect(result.content.find(block => block.type === "text")?.text).toContain("Command timed out after 1 seconds");
 		expect(killSpy).toHaveBeenCalledTimes(1);
 		expect(releaseSpy).toHaveBeenCalledTimes(1);
 		expect(currentOutputAfterKill).toBeGreaterThan(0);
@@ -316,9 +345,11 @@ describe("BashTool ACP terminal routing", () => {
 		const releaseSpy = spyOn(handle, "release");
 
 		const tool = new BashTool(makeSession(bridge));
-		const executePromise = tool.execute("call-hung-poll", { command: "sleep 60", timeout: 1 });
+		const result = await tool.execute("call-hung-poll", { command: "sleep 60", timeout: 1 });
 
-		await expect(executePromise).rejects.toThrow(/Command timed out after 1 seconds/);
+		expect(result.isError).toBe(true);
+		expect(result.details?.timedOut).toBe(true);
+		expect(result.content.find(block => block.type === "text")?.text).toContain("Command timed out after 1 seconds");
 		expect(killSpy).toHaveBeenCalledTimes(1);
 		expect(releaseSpy).toHaveBeenCalledTimes(1);
 	}, 8000);

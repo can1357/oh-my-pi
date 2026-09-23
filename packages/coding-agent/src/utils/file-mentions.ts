@@ -7,16 +7,15 @@
  */
 import * as fs from "node:fs/promises";
 import path from "node:path";
-import {
-	formatHashlineHeader,
-	formatNumberedLines,
-	type SnapshotStore,
-	splitAddressableFileLines,
-} from "@oh-my-pi/hashline";
+import type { EditStore } from "@oh-my-pi/pi-natives";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { formatAge, formatBytes, isProbablyBinary, readImageMetadata } from "@oh-my-pi/pi-utils";
-import { canonicalSnapshotKey } from "../edit/file-snapshot-store";
+import {
+	formatHashlineHeader,
+	formatNumberedLines,
+	splitAddressableFileLines,
+} from "@oh-my-pi/pi-tui/tools/hashline-format";
 import { normalizeToLF } from "../edit/normalize";
 import type { FileMentionMessage } from "../session/messages";
 import {
@@ -24,9 +23,11 @@ import {
 	formatHeadTruncationNotice,
 	truncateHead,
 	truncateHeadBytes,
-} from "../session/streaming-output";
+} from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { resolveReadPath } from "../tools/path-utils";
 import { formatDimensionNote, resizeImage } from "./image-resize";
+import { VideoError, buildVideoContactSheetPng, formatVideoDetails, probeVideo, videoMimeForPath } from "./video";
+import { createVideoPreviewImage, isVideoPath } from "@oh-my-pi/pi-tui/prompt/video";
 
 /** Regex to match @filepath patterns in text */
 const FILE_MENTION_REGEX = /@(?:"([^"]+)"|'([^']+)'|([^\s@]+))/g;
@@ -53,22 +54,21 @@ function sanitizeMentionPath(rawPath: string): string | null {
 	return cleaned.length > 0 ? cleaned : null;
 }
 
-async function pathExists(filePath: string): Promise<boolean> {
-	try {
-		await Bun.file(filePath).stat();
-		return true;
-	} catch {
-		return false;
-	}
-}
-
-async function resolveMentionPath(filePath: string, cwd: string): Promise<string | null> {
+async function resolveMentionPath(
+	filePath: string,
+	cwd: string,
+): Promise<{ resolvedPath: string; absolutePath: string } | null> {
 	// Exact resolution only. The TUI @-selector inserts the real, complete path, so a
 	// mention that does not resolve to an existing file or directory is prose, not a file
 	// reference. Fuzzy/prefix guessing here previously dragged in unrelated same-named
 	// files; that disambiguation belongs to the selector's display, not post-send.
 	const absolutePath = resolveReadPath(filePath, cwd);
-	return (await pathExists(absolutePath)) ? filePath : null;
+	try {
+		await Bun.file(absolutePath).stat();
+		return { resolvedPath: filePath, absolutePath };
+	} catch {
+		return null;
+	}
 }
 
 function buildTextOutput(textContent: string): { output: string; lineCount: number } {
@@ -192,7 +192,7 @@ export function extractFileMentions(text: string): string[] {
 export async function generateFileMentionMessages(
 	filePaths: string[],
 	cwd: string,
-	options?: { autoResizeImages?: boolean; useHashLines?: boolean; snapshotStore?: SnapshotStore },
+	options?: { autoResizeImages?: boolean; useHashLines?: boolean; snapshotStore?: EditStore },
 ): Promise<AgentMessage[]> {
 	if (filePaths.length === 0) return [];
 
@@ -201,11 +201,11 @@ export async function generateFileMentionMessages(
 	const files: FileMentionMessage["files"] = [];
 
 	for (const filePath of filePaths) {
-		const resolvedPath = await resolveMentionPath(filePath, cwd);
-		if (!resolvedPath) {
+		const resolved = await resolveMentionPath(filePath, cwd);
+		if (!resolved) {
 			continue;
 		}
-		const absolutePath = resolveReadPath(resolvedPath, cwd);
+		const { resolvedPath, absolutePath } = resolved;
 		try {
 			const stat = await Bun.file(absolutePath).stat();
 			if (stat.isDirectory()) {
@@ -253,6 +253,39 @@ export async function generateFileMentionMessages(
 				continue;
 			}
 
+			if (isVideoPath(absolutePath)) {
+				try {
+					const meta = await probeVideo(absolutePath);
+					const sheet = await buildVideoContactSheetPng(absolutePath, meta);
+					let image: ImageContent = { type: "image", data: sheet.png.data, mimeType: sheet.png.mimeType };
+					let dimensionNote: string | undefined;
+					if (autoResizeImages) {
+						try {
+							const resized = await resizeImage(image);
+							dimensionNote = formatDimensionNote(resized);
+							image = { type: "image", mimeType: resized.mimeType, data: resized.data };
+						} catch {
+							// Keep the extracted sheet when resize fails.
+						}
+					}
+					const details = formatVideoDetails(resolvedPath, meta, stat.size, videoMimeForPath(absolutePath));
+					files.push({
+						path: resolvedPath,
+						content: `${details}\nPreview grid: ${sheet.thumbs} frames (${sheet.cols}x${sheet.rows})${dimensionNote ? `\n${dimensionNote}` : ""}`,
+						image: createVideoPreviewImage(image, absolutePath),
+					});
+				} catch (error) {
+					const reason = error instanceof VideoError ? error.message : "video preview failed";
+					files.push({
+						path: resolvedPath,
+						content: `(skipped auto-read: ${reason})`,
+						byteSize: stat.size,
+						skippedReason: "binary",
+					});
+				}
+				continue;
+			}
+
 			if (stat.size > MAX_AUTO_READ_TEXT_BYTES) {
 				files.push({
 					path: resolvedPath,
@@ -276,9 +309,11 @@ export async function generateFileMentionMessages(
 			const snapshotStore = options?.useHashLines ? options.snapshotStore : undefined;
 			const normalized = snapshotStore ? normalizeToLF(content) : content;
 			const displayText = snapshotStore ? splitAddressableFileLines(normalized).join("\n") : normalized;
-			let { output, lineCount } = buildTextOutput(displayText);
+			const textOutput = buildTextOutput(displayText);
+			let { output } = textOutput;
+			const { lineCount } = textOutput;
 			if (snapshotStore) {
-				const tag = snapshotStore.record(canonicalSnapshotKey(absolutePath), normalized);
+				const tag = snapshotStore.recordSnapshot(absolutePath, normalized);
 				output = `${formatHashlineHeader(resolvedPath, tag)}\n${formatNumberedLines(output)}`;
 			}
 			files.push({ path: resolvedPath, content: output, lineCount });

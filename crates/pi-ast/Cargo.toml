@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+homepage.workspace = true
 repository.workspace = true
 
 [lints]
@@ -73,3 +74,4 @@ tree-sitter-vue.workspace = true
 tree-sitter-xml.workspace = true
 tree-sitter-yaml.workspace = true
 tree-sitter-zig.workspace = true
+xxhash-rust.workspace = true

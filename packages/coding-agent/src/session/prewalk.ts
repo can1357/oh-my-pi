@@ -1,22 +1,31 @@
 import type { Agent, AgentMessage, AgentToolResult, AgentTurnEndContext } from "@oh-my-pi/pi-agent-core";
 import { invalidateMessageCache } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Model, ToolResultMessage } from "@oh-my-pi/pi-ai";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { logger, prompt } from "@oh-my-pi/pi-utils";
+import type { Settings } from "../config/settings";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { resolveApprovedPlan } from "../plan-mode/approved-plan";
+import { autosaveApprovedPlan } from "../plan-mode/plan-autosave";
 import { listPlanFiles, readPlanFile } from "../plan-mode/plan-files";
 import type { PlanModeState } from "../plan-mode/state";
 import planYoloHandoffPrompt from "../prompts/system/plan-yolo-handoff.md" with { type: "text" };
 import prewalkChecklistPrompt from "../prompts/system/prewalk-checklist.md" with { type: "text" };
 import prewalkContinuePrompt from "../prompts/system/prewalk-continue.md" with { type: "text" };
 import prewalkPlanPrompt from "../prompts/system/prewalk-plan.md" with { type: "text" };
-import { type ConfiguredThinkingLevel, prewalkWouldBeNoop } from "../thinking";
+import { type ConfiguredThinkingLevel, prewalkWouldBeNoop } from "@oh-my-pi/pi-tui/thinking";
+import { isMCPToolName } from "../tools/builtin-names";
+import {
+	replaceTabs,
+	shortenEmbeddedPaths,
+	shortenPath,
+	TRUNCATE_LENGTHS,
+	truncateToWidth,
+} from "@oh-my-pi/pi-tui/render/render-utils";
 import type { PlanProposalHandler } from "../tools/resolve";
-import { ToolError } from "../tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { PlanYolo, Prewalk } from "./agent-session-types";
 import { PREWALK_PLAN_MESSAGE_TYPE } from "./messages";
 import type { SessionManager } from "./session-manager";
-
 const PREWALK_CONTINUE_MESSAGE_TYPE = "prewalk-continue";
 const PREWALK_CHECKLIST_MESSAGE_TYPE = "prewalk-checklist";
 
@@ -56,6 +65,7 @@ function isPrewalkImplementationAction(result: ToolResultMessage): boolean {
 export interface PrewalkCoordinatorHost {
 	agent: Agent;
 	sessionManager: SessionManager;
+	settings: Pick<Settings, "get">;
 	model(): Model | undefined;
 	configuredThinkingLevel(): ConfiguredThinkingLevel | undefined;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
@@ -65,8 +75,10 @@ export interface PrewalkCoordinatorHost {
 		options?: { ephemeral?: boolean },
 	): Promise<void>;
 	setActiveToolsByName(names: string[]): Promise<void>;
+	restoreNonMCPToolPresentation(nonMCPToolNames: string[], nonMCPMountedToolNames: string[]): Promise<void>;
 	getActiveToolNames(): string[];
 	getEnabledToolNames(): string[];
+	getMountedXdevToolNames(): string[];
 	hasBuiltInTool(name: string): boolean;
 	getPlanModeState(): PlanModeState | undefined;
 	setPlanModeState(state: PlanModeState | undefined): void;
@@ -83,6 +95,8 @@ export interface PrewalkCoordinatorOptions {
 }
 
 /** Coordinates one-way model prewalks and automatic plan-yolo handoffs. */
+
+export type PrewalkRestartResult = "armed" | "reset" | "rejected";
 export class PrewalkCoordinator {
 	readonly #host: PrewalkCoordinatorHost;
 	#prewalk: Prewalk | undefined;
@@ -90,7 +104,7 @@ export class PrewalkCoordinator {
 	#continuePending = false;
 	#todoSeen = false;
 	#planYolo: PlanYolo | undefined;
-	#planYoloPreviousTools: string[] | undefined;
+	#planYoloPreviousNonMCPPresentation: { enabled: string[]; mounted: string[] } | undefined;
 	#planYoloArmed = false;
 
 	constructor(host: PrewalkCoordinatorHost, options: PrewalkCoordinatorOptions = {}) {
@@ -102,6 +116,12 @@ export class PrewalkCoordinator {
 	/** Current prewalk target, if the one-way switch remains armed. */
 	get state(): Prewalk | undefined {
 		return this.#prewalk;
+	}
+
+	/** Whether the armed prewalk would perform a model or thinking-level handoff. */
+	get willHandoff(): boolean {
+		const prewalk = this.#prewalk;
+		return prewalk !== undefined && !this.#isNoop(prewalk);
 	}
 
 	#isNoop(prewalk: Prewalk): boolean {
@@ -243,29 +263,77 @@ export class PrewalkCoordinator {
 		return true;
 	}
 
+	/**
+	 * Restores the planning model and reuses or creates the requested one-shot handoff.
+	 * A different active arm rejects the restart before the current model changes.
+	 */
+	async restart(
+		source: Model,
+		sourceThinkingLevel: ConfiguredThinkingLevel | undefined,
+		target: Model,
+		targetThinkingLevel: ConfiguredThinkingLevel | undefined,
+	): Promise<PrewalkRestartResult> {
+		const active = this.#prewalk;
+		if (
+			active &&
+			(active.target.provider !== target.provider ||
+				active.target.id !== target.id ||
+				active.thinkingLevel !== targetThinkingLevel)
+		) {
+			this.arm(target, targetThinkingLevel);
+			return "rejected";
+		}
+
+		await this.#host.setModelTemporary(source, sourceThinkingLevel, { ephemeral: true });
+		if (!active) return this.arm(target, targetThinkingLevel) ? "armed" : "reset";
+		if (this.#isNoop(active)) {
+			this.#scrubPlanNudge();
+			this.#disarmNoop(active);
+			return "reset";
+		}
+		return "armed";
+	}
+
 	/** Lazily enables plan-yolo's plan phase before the first prompt is built. */
 	async armPlanYoloIfNeeded(): Promise<void> {
 		if (!this.#planYolo || this.#planYoloArmed) return;
 		this.#planYoloArmed = true;
-		const previousTools = this.#host.getEnabledToolNames();
-		const augmentations = this.#host.hasBuiltInTool("write") ? ["write"] : [];
-		await this.#host.setActiveToolsByName([...new Set([...previousTools, ...augmentations])]);
-		this.#planYoloPreviousTools = previousTools;
-		this.#host.setPlanModeState({
+		const previousEnabledTools = this.#host.getEnabledToolNames();
+		const previousMountedTools = this.#host.getMountedXdevToolNames();
+		const previousPlanModeState = this.#host.getPlanModeState();
+		const planModeState: PlanModeState = {
 			enabled: true,
 			planFilePath: this.#host.getPlanReferencePath() || "local://PLAN.md",
 			workflow: "parallel",
-		});
+		};
+		// PlanYolo's injected write is a plan transport, not a user grant. Publish
+		// plan mode before applying the tool set so SessionTools keeps an existing
+		// device-only write restricted.
+		this.#host.setPlanModeState(planModeState);
+		const augmentations = this.#host.hasBuiltInTool("write") ? ["write"] : [];
+		try {
+			await this.#host.setActiveToolsByName([...new Set([...previousEnabledTools, ...augmentations])]);
+		} catch (error) {
+			this.#host.setPlanModeState(previousPlanModeState);
+			this.#planYoloArmed = false;
+			throw error;
+		}
+		this.#planYoloPreviousNonMCPPresentation = {
+			enabled: previousEnabledTools.filter(name => !isMCPToolName(name)),
+			mounted: previousMountedTools.filter(name => !isMCPToolName(name)),
+		};
 		this.#host.setPlanProposalHandler(title => this.#finalizePlanYoloProposal(title));
 	}
 
-	#scrubPlanNudge(liveMessages: AgentMessage[]): void {
+	#scrubPlanNudge(liveMessages?: AgentMessage[]): void {
 		if (!this.#planInjected) return;
 		const isPlanNudge = isPrewalkPlanNudge;
-		for (let index = liveMessages.length - 1; index >= 0; index--) {
-			if (!isPlanNudge(liveMessages[index])) continue;
-			invalidateMessageCache(liveMessages[index]);
-			liveMessages.splice(index, 1);
+		if (liveMessages) {
+			for (let index = liveMessages.length - 1; index >= 0; index--) {
+				if (!isPlanNudge(liveMessages[index])) continue;
+				invalidateMessageCache(liveMessages[index]);
+				liveMessages.splice(index, 1);
+			}
 		}
 		const stateMessages = this.#host.agent.state.messages;
 		const filtered = stateMessages.filter(message => !isPlanNudge(message));
@@ -276,7 +344,11 @@ export class PrewalkCoordinator {
 		const planYolo = this.#planYolo;
 		const state = this.#host.getPlanModeState();
 		if (!planYolo || !state?.enabled) throw new ToolError("Plan mode is not active.");
-		const { planFilePath, title: resolvedTitle } = await resolveApprovedPlan({
+		const {
+			planFilePath,
+			planContent,
+			title: resolvedTitle,
+		} = await resolveApprovedPlan({
 			suppliedTitle: title,
 			statePlanFilePath: state.planFilePath,
 			readPlan: url =>
@@ -286,17 +358,47 @@ export class PrewalkCoordinator {
 				}),
 			listPlanFiles: () => listPlanFiles({ localProtocolOptions: this.#host.localProtocolOptions() }),
 		});
-		this.#host.setPlanModeState(undefined);
-		const previousTools = this.#planYoloPreviousTools;
+		let autosavedPlan: string | null = null;
 		try {
-			if (previousTools) await this.#host.setActiveToolsByName(previousTools);
+			autosavedPlan = await autosaveApprovedPlan({
+				settings: this.#host.settings,
+				cwd: this.#host.sessionManager.getCwd(),
+				title: resolvedTitle,
+				planContent,
+			});
+			if (autosavedPlan) {
+				const displayPath = truncateToWidth(replaceTabs(shortenPath(autosavedPlan)), TRUNCATE_LENGTHS.CONTENT);
+				this.#host.emitNotice("info", `Plan autosaved to ${displayPath}.`, "plan-yolo");
+			}
+		} catch (error) {
+			logger.warn("Failed to autosave approved plan", { error });
+			const detail = truncateToWidth(
+				shortenEmbeddedPaths(
+					replaceTabs(error instanceof Error ? error.message : String(error))
+						.replace(/[\r\n]+/g, " ")
+						.trim(),
+				),
+				TRUNCATE_LENGTHS.CONTENT,
+			);
+			this.#host.emitNotice(
+				"warning",
+				`Plan autosave failed: ${detail} Continuing with implementation.`,
+				"plan-yolo",
+			);
+		}
+		this.#host.setPlanModeState(undefined);
+		const previousPresentation = this.#planYoloPreviousNonMCPPresentation;
+		try {
+			if (previousPresentation) {
+				await this.#host.restoreNonMCPToolPresentation(previousPresentation.enabled, previousPresentation.mounted);
+			}
 		} catch (error) {
 			this.#host.setPlanModeState(state);
 			throw error;
 		}
 		this.#host.setPlanProposalHandler(null);
 		this.#planYolo = undefined;
-		this.#planYoloPreviousTools = undefined;
+		this.#planYoloPreviousNonMCPPresentation = undefined;
 		await this.#host.setModelTemporary(planYolo.target, planYolo.thinkingLevel, { ephemeral: true });
 		this.#host.emitNotice(
 			"info",

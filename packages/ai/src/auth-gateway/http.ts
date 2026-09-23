@@ -5,7 +5,10 @@
  * and peer-resolution logic.
  */
 import { timingSafeEqual as nodeTimingSafeEqual } from "node:crypto";
-import type { Api, AssistantMessage, Model } from "../types";
+import * as os from "node:os";
+import { getInstallId } from "@oh-my-pi/pi-utils";
+import type { Api, Model } from "../types";
+import type { ClientUsageIdentity } from "../usage";
 
 const JSON_HEADERS = {
 	"Content-Type": "application/json",
@@ -25,14 +28,13 @@ export function json(status: number, body: unknown, headers?: Record<string, str
  * `request-id` (surfaced as `_request_id` by the OpenAI and Anthropic SDKs,
  * matches the gateway log line), LiteLLM's model-resolution and cost headers,
  * and OpenAI's `openai-processing-ms`. Model/request-id headers are always
- * present; `message` — the final assistant message, available only on
- * non-streaming responses — adds the computed cost, and `startedAt` the wall
- * time. Streaming responses send headers before usage exists, so they carry
- * only the identity headers.
+ * present; `costUsd` — known only once a non-streaming response has settled —
+ * adds the computed cost, and `startedAt` the wall time. Streaming responses
+ * send headers before usage exists, so they carry only the identity headers.
  */
 export function gatewayResponseHeaders(
 	model: Model<Api>,
-	info: { requestId: string; message?: AssistantMessage; startedAt?: number },
+	info: { requestId: string; costUsd?: number; startedAt?: number },
 ): Record<string, string> {
 	const headers: Record<string, string> = {
 		"x-request-id": info.requestId,
@@ -40,7 +42,7 @@ export function gatewayResponseHeaders(
 		"x-litellm-model-id": model.id,
 	};
 	if (model.baseUrl) headers["x-litellm-model-api-base"] = model.baseUrl;
-	if (info.message) headers["x-litellm-response-cost"] = info.message.usage.cost.total.toString();
+	if (info.costUsd !== undefined) headers["x-litellm-response-cost"] = info.costUsd.toString();
 	if (info.startedAt !== undefined) {
 		const elapsed = (performance.now() - info.startedAt).toFixed(0);
 		headers["x-litellm-response-duration-ms"] = elapsed;
@@ -136,6 +138,31 @@ export function captureRequestHeaders(headers: Headers): Record<string, string> 
 		}
 	});
 	return out;
+}
+
+/**
+ * Resolve the usage-attribution identity for an inbound gateway request.
+ *
+ * pi-native omp clients send `x-omp-install-id` / `x-omp-hostname` /
+ * `x-omp-app` (see `providers/pi-native-client.ts`); any client may set them.
+ * Requests without an install id fall back to the gateway host's identity
+ * under the `gateway` app label, so unlabeled foreign-SDK traffic (llm-git,
+ * openai/anthropic SDKs) still lands in per-client burn tracking instead of
+ * vanishing. These headers are attribution-only — they are deliberately
+ * absent from {@link captureRequestHeaders}'s allow-list and never reach the
+ * upstream provider.
+ */
+export function resolveClientIdentity(headers: Headers): ClientUsageIdentity {
+	const read = (name: string): string | undefined => {
+		const value = headers.get(name)?.trim();
+		return value ? value : undefined;
+	};
+	const installId = read("x-omp-install-id");
+	const app = read("x-omp-app");
+	if (!installId) {
+		return { installId: getInstallId(), hostname: os.hostname(), app: app ?? "gateway" };
+	}
+	return { installId, hostname: read("x-omp-hostname"), app: app ?? "gateway" };
 }
 
 /**

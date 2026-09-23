@@ -73,6 +73,11 @@ export interface AuthGatewayParsedRequestOptions {
 	 */
 	anthropicThinkingMode?: "adaptive";
 	/**
+	 * Preserve an explicit wire-level reasoning-off request through providers
+	 * that distinguish it from the generic disable hint.
+	 */
+	forceReasoningOff?: boolean;
+	/**
 	 * Explicit Anthropic `thinking.budget_tokens`. Mirrors Rust's
 	 * `resolve_thinking_budget`: pins onto whichever effort the client
 	 * requested (defaulting to High when unspecified). Preferred over the
@@ -85,6 +90,8 @@ export interface AuthGatewayParsedRequestOptions {
 	hideThinkingSummary?: boolean;
 	/** Anthropic `output_config.task_budget` advisory loop budget. */
 	taskBudget?: TokenTaskBudget;
+	/** Anthropic preserved-thinking behavior for a changed conversation prefix. */
+	anthropicPrefixMismatchBehavior?: "drop_block" | "error";
 
 	// ── Service / routing ─────────────────────────────────────────────────
 	/** OpenAI service tier (auto|default|flex|scale|priority). */

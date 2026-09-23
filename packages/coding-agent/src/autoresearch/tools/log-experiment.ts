@@ -1,37 +1,25 @@
+import { logExperimentToolRenderer } from "@oh-my-pi/pi-tui/tools/autoresearch";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import { Text } from "@oh-my-pi/pi-tui";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
+
 import type { ToolDefinition } from "../../extensibility/extensions";
-import type { Theme } from "../../modes/theme/theme";
-import { replaceTabs, truncateToWidth } from "../../tools/render-utils";
-import * as git from "../../utils/git";
+
 import { computeRunModifiedPaths, getCurrentAutoresearchBranch, parseWorkDirDirtyPaths } from "../git";
-import {
-	ensureNumericMetricMap,
-	formatNum,
-	mergeAsi,
-	pathMatchesSpec,
-	sanitizeAsi,
-	tryGitPrefix,
-	tryGitStatus,
-} from "../helpers";
-import {
-	buildExperimentState,
-	computeConfidence,
-	currentResults,
-	findBaselineSecondary,
-	findBestKeptMetric,
-} from "../state";
+import { ensureNumericMetricMap, mergeAsi, pathMatchesSpec, sanitizeAsi, tryGitPrefix, tryGitStatus } from "../helpers";
+import { formatNum } from "@oh-my-pi/pi-tui/tools/autoresearch";
+import { currentResults, findBaselineSecondary } from "@oh-my-pi/pi-tui/apps/autoresearch-data";
+import { buildExperimentState, computeConfidence, findBestKeptMetric } from "../state";
 import { openAutoresearchStorageIfExists, type SessionRow } from "../storage";
 import type {
 	ASIData,
-	AutoresearchToolFactoryOptions,
 	ExperimentResult,
 	ExperimentState,
 	LogDetails,
 	NumericMetricMap,
-} from "../types";
+} from "@oh-my-pi/pi-tui/tools/autoresearch";
+import type { AutoresearchToolFactoryOptions } from "../types";
 
 const EXPERIMENT_TOOL_NAMES = ["init_experiment", "run_experiment", "log_experiment", "update_notes"];
 
@@ -55,6 +43,7 @@ export function createLogExperimentTool(
 	options: AutoresearchToolFactoryOptions,
 ): ToolDefinition<typeof logExperimentSchema, LogDetails> {
 	return {
+		...logExperimentToolRenderer,
 		name: "log_experiment",
 		label: "Log Experiment",
 		description:
@@ -63,7 +52,7 @@ export function createLogExperimentTool(
 		defaultInactive: true,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const storage = await openAutoresearchStorageIfExists(ctx.cwd);
-			const currentBranch = (await git.branch.current(ctx.cwd)) ?? null;
+			const currentBranch = (await vcs.git(ctx.cwd)?.currentBranch()) ?? null;
 			const session = storage?.getActiveSessionForBranch(currentBranch) ?? null;
 			if (!storage || !session) {
 				return {
@@ -279,22 +268,6 @@ export function createLogExperimentTool(
 				},
 			};
 		},
-		renderCall(args, _options, theme): Text {
-			const color = args.status === "keep" ? "success" : args.status === "discard" ? "warning" : "error";
-			const description = truncateToWidth(replaceTabs(args.description), 100);
-			return new Text(
-				`${theme.fg("toolTitle", theme.bold("log_experiment"))} ${theme.fg(color, args.status)} ${theme.fg("muted", description)}`,
-				0,
-				0,
-			);
-		},
-		renderResult(result, _options, theme): Text {
-			const details = result.details;
-			if (!details) {
-				return new Text(replaceTabs(result.content.find(part => part.type === "text")?.text ?? ""), 0, 0);
-			}
-			return new Text(renderSummary(details, theme), 0, 0);
-		},
 	};
 }
 
@@ -313,12 +286,13 @@ async function commitKeptExperiment(
 	primaryMetric: string,
 ): Promise<KeepCommitResult> {
 	if (files.length === 0) return { note: "nothing to commit" };
+	const repository = vcs.requireGit(cwd);
 	try {
-		await git.stage.files(cwd, files);
+		await repository.stageFiles(files);
 	} catch (err) {
 		return { error: `git add failed: ${err instanceof Error ? err.message : String(err)}` };
 	}
-	if (!(await git.diff.has(cwd, { cached: true, files }))) {
+	if (!(await repository.hasDiff({ cached: true, files }))) {
 		return { note: "nothing to commit" };
 	}
 	const payload: { [key: string]: string | number } = {
@@ -330,9 +304,8 @@ async function commitKeptExperiment(
 	}
 	const commitMessage = `${description}\n\nResult: ${JSON.stringify(payload)}`;
 	try {
-		const commitResult = await git.commit(cwd, commitMessage, { files });
-		const summary = `${commitResult.stdout}${commitResult.stderr}`.split("\n").find(line => line.trim().length > 0);
-		return { note: summary?.trim() ?? "committed" };
+		const commitSha = await repository.commitCreate(commitMessage, { files });
+		return { note: `committed ${commitSha.slice(0, 12)}` };
 	} catch (err) {
 		return { error: `git commit failed: ${err instanceof Error ? err.message : String(err)}` };
 	}
@@ -348,8 +321,9 @@ async function revertFailedExperiment(
 		// rewinds prior `keep` commits. Reset to HEAD so any kept improvements
 		// already on the branch survive.
 		try {
-			await git.reset(cwd, { hard: true, target: "HEAD" });
-			await git.clean(cwd);
+			const repository = vcs.requireGit(cwd);
+			await repository.reset("hard", "HEAD");
+			await repository.clean({});
 			return { note: "worktree reset to HEAD" };
 		} catch (err) {
 			return { error: `git reset/clean failed: ${err instanceof Error ? err.message : String(err)}` };
@@ -363,7 +337,7 @@ async function revertFailedExperiment(
 	if (total === 0) return { note: "nothing to revert" };
 	if (tracked.length > 0) {
 		try {
-			await git.restore(cwd, { files: tracked, source: "HEAD", staged: true, worktree: true });
+			await vcs.requireGit(cwd).restore({ files: tracked, source: "HEAD", staged: true, worktree: true });
 		} catch (err) {
 			return { error: `git restore failed: ${err instanceof Error ? err.message : String(err)}` };
 		}
@@ -420,7 +394,7 @@ function mergeMetrics(
 
 async function tryReadHeadSha(cwd: string): Promise<string | null> {
 	try {
-		return (await git.head.sha(cwd)) ?? null;
+		return (await vcs.git(cwd)?.headSha()) ?? null;
 	} catch {
 		return null;
 	}
@@ -500,21 +474,4 @@ function buildLogText(
 function truncateAsiValue(value: ASIData[string]): string {
 	const text = typeof value === "string" ? value : JSON.stringify(value);
 	return text.length > 120 ? `${text.slice(0, 117)}...` : text;
-}
-
-function renderSummary(details: LogDetails, theme: Theme): string {
-	const { experiment, state } = details;
-	const color = experiment.status === "keep" ? "success" : experiment.status === "discard" ? "warning" : "error";
-	let summary = `${theme.fg(color, experiment.status.toUpperCase())} ${theme.fg("muted", truncateToWidth(replaceTabs(experiment.description), 100))}`;
-	summary += ` ${theme.fg("accent", `${state.metricName}=${formatNum(experiment.metric, state.metricUnit)}`)}`;
-	if (state.bestMetric !== null) {
-		summary += ` ${theme.fg("dim", `baseline ${formatNum(state.bestMetric, state.metricUnit)}`)}`;
-	}
-	if (state.confidence !== null) {
-		summary += ` ${theme.fg("dim", `conf ${state.confidence.toFixed(1)}x`)}`;
-	}
-	if (details.scopeDeviations.length > 0) {
-		summary += ` ${theme.fg("warning", `deviations:${details.scopeDeviations.length}`)}`;
-	}
-	return summary;
 }

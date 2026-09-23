@@ -6,6 +6,7 @@ var RECONNECT_MAX_MS = 1e4;
 var ws = null;
 var reconnectDelay = RECONNECT_MIN_MS;
 var pingTimer = null;
+var relayInitiatedDetachTabs = new Set;
 async function loadSettings() {
   const stored = await chrome.storage.local.get({ port: DEFAULT_PORT, token: "" });
   const port = Number(stored.port);
@@ -123,8 +124,14 @@ async function runRpc(msg) {
       await chrome.debugger.attach({ tabId: msg.tabId }, "1.3");
       return {};
     case "detach":
-      await chrome.debugger.detach({ tabId: msg.tabId });
-      return {};
+      relayInitiatedDetachTabs.add(msg.tabId);
+      try {
+        await chrome.debugger.detach({ tabId: msg.tabId });
+        return {};
+      } catch (error) {
+        relayInitiatedDetachTabs.delete(msg.tabId);
+        throw error;
+      }
     case "send":
       return await chrome.debugger.sendCommand(msg.sessionId ? { tabId: msg.tabId, sessionId: msg.sessionId } : { tabId: msg.tabId }, msg.method, msg.params);
     case "createTab": {
@@ -210,7 +217,8 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
 chrome.debugger.onDetach.addListener((source, reason) => {
   if (source.tabId === undefined)
     return;
-  post({ t: "detached", tabId: source.tabId, reason });
+  const relayInitiated = relayInitiatedDetachTabs.delete(source.tabId);
+  post({ t: "detached", tabId: source.tabId, reason, relayInitiated });
 });
 chrome.tabs.onCreated.addListener((tab) => {
   const snap = snapshot(tab);

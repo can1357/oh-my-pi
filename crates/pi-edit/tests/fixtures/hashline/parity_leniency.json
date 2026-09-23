@@ -1,0 +1,955 @@
+{
+	"source": "packages/hashline/test/leniency.test.ts",
+	"cases": [
+		{
+			"name": "accepts paths with spaces in anchored section headers",
+			"parse": [
+				{
+					"input": "PUT 1-1:\n+after",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "before",
+					"input": "PUT 1-1:\n+after",
+					"path": "dir with spaces/file.ts",
+					"expect": {
+						"text": "after",
+						"firstChangedLine": 1
+					}
+				}
+			]
+		},
+		{
+			"name": "recovers apply_patch-contaminated headers whose paths contain spaces",
+			"parse": [
+				{
+					"input": "PUT 1-1:\n+after",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "before",
+					"input": "PUT 1-1:\n+after",
+					"path": "dir with spaces/file.ts",
+					"expect": {
+						"text": "after",
+						"firstChangedLine": 1
+					}
+				}
+			]
+		},
+		{
+			"name": "rejects a bare single-number hunk header with verb guidance",
+			"parse": [
+				{
+					"input": "2\n+B",
+					"error": "Error: line 1: hunk headers need a verb and both endpoints. Use `PUT 2.=2:` to replace, or `CUT 2.=2` to delete."
+				}
+			]
+		},
+		{
+			"name": "rejects a bare numeric range with verb guidance",
+			"parse": [
+				{
+					"input": "2 3\n+X",
+					"error": "Error: line 1: bare range hunk header \"2 3\" is not valid. Hunk headers need a verb: use `PUT N.=M:` or `CUT N.=M`."
+				}
+			]
+		},
+		{
+			"name": "accepts canonical dot-equals replace/cut and gap forms",
+			"parse": [
+				{
+					"input": "PUT 2.=3:\n+X",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				},
+				{
+					"input": "CUT 2.=3",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				},
+				{
+					"input": "PUT <2:\n+X",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				},
+				{
+					"input": "PUT >2:\n+X",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				},
+				{
+					"input": "PUT <1:\n+X",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				},
+				{
+					"input": "PUT >$:\n+X",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb\nc\nd\ne",
+					"input": "PUT 2.=3:\n+X",
+					"expect": {
+						"text": "a\nX\nd\ne",
+						"firstChangedLine": 2
+					}
+				},
+				{
+					"text": "a\nb\nc\nd\ne",
+					"input": "CUT 2.=3",
+					"expect": {
+						"text": "a\nd\ne",
+						"firstChangedLine": 2
+					}
+				},
+				{
+					"text": "a\nb\nc\nd\ne",
+					"input": "PUT <2:\n+X",
+					"expect": {
+						"text": "a\nX\nb\nc\nd\ne",
+						"firstChangedLine": 2
+					}
+				},
+				{
+					"text": "a\nb\nc\nd\ne",
+					"input": "PUT >2:\n+X",
+					"expect": {
+						"text": "a\nb\nX\nc\nd\ne",
+						"firstChangedLine": 2
+					}
+				},
+				{
+					"text": "a\nb\nc\nd\ne",
+					"input": "PUT <1:\n+X",
+					"expect": {
+						"text": "X\na\nb\nc\nd\ne",
+						"firstChangedLine": 1
+					}
+				},
+				{
+					"text": "a\nb\nc\nd\ne",
+					"input": "PUT >$:\n+X",
+					"expect": {
+						"text": "a\nb\nc\nd\ne\nX",
+						"firstChangedLine": 6
+					}
+				}
+			]
+		},
+		{
+			"name": "leniently accepts single-number replace and cut shorthand",
+			"parse": [
+				{
+					"input": "PUT 2:\n+X",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				},
+				{
+					"input": "CUT 2",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb\nc\nd\ne",
+					"input": "PUT 2:\n+X",
+					"expect": {
+						"text": "a\nX\nc\nd\ne",
+						"firstChangedLine": 2
+					}
+				},
+				{
+					"text": "a\nb\nc\nd\ne",
+					"input": "CUT 2",
+					"expect": {
+						"text": "a\nc\nd\ne",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "recovers a dangling range separator as a single-line range",
+			"parse": [
+				{
+					"input": "PUT 2.=:\n+X",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				},
+				{
+					"input": "PUT 2-:\n+X",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				},
+				{
+					"input": "CUT 2.=",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb\nc\nd\ne",
+					"input": "PUT 2.=:\n+X",
+					"expect": {
+						"text": "a\nX\nc\nd\ne",
+						"firstChangedLine": 2
+					}
+				},
+				{
+					"text": "a\nb\nc\nd\ne",
+					"input": "PUT 2-:\n+X",
+					"expect": {
+						"text": "a\nX\nc\nd\ne",
+						"firstChangedLine": 2
+					}
+				},
+				{
+					"text": "a\nb\nc\nd\ne",
+					"input": "CUT 2.=",
+					"expect": {
+						"text": "a\nc\nd\ne",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "still rejects a dangling separator followed by junk",
+			"parse": [
+				{
+					"input": "PUT 2.= junk:\n+X",
+					"error": "Error: line 1: payload line has no preceding hunk header. Use `PUT N.=M:`, `CUT N.=M`, or `PUT <N:`/`PUT >N:` above the body. Got \"PUT 2.= junk:\"."
+				}
+			]
+		},
+		{
+			"name": "recovers top-level numbered snapshot rows as single-line replacements",
+			"parse": [
+				{
+					"input": "2:B\n4:D",
+					"expect": {
+						"editCount": 4,
+						"warnings": [
+							"Recovered top-level `N:TEXT` snapshot row(s) as single-line `PUT N.=N:` replacements. Use explicit `PUT` headers for reliable edits."
+						]
+					}
+				},
+				{
+					"input": "2|B\n4|D",
+					"expect": {
+						"editCount": 4,
+						"warnings": [
+							"Recovered top-level `N:TEXT` snapshot row(s) as single-line `PUT N.=N:` replacements. Use explicit `PUT` headers for reliable edits."
+						]
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb\nc\nd\ne",
+					"input": "2:B\n4:D",
+					"expect": {
+						"text": "a\nB\nc\nD\ne",
+						"firstChangedLine": 2
+					}
+				},
+				{
+					"text": "a\nb\nc\nd\ne",
+					"input": "2|B\n4|D",
+					"expect": {
+						"text": "a\nB\nc\nD\ne",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "rejects repeated snapshot-row line numbers instead of keeping only the last",
+			"parse": [
+				{
+					"input": "2:B\n4:first\n4:second",
+					"error": "Error: line 3: two or more pasted `4:TEXT` read-output rows name line 4. Such rows are recovered as single-line `PUT 4.=4:` replacements, so repeating a number would keep only the last row and drop the rest. Write the hunk explicitly: one `PUT 4.=M:` header covering exactly the lines that change, followed by `+TEXT` body rows holding their complete final content."
+				},
+				{
+					"input": "2:B\n4:first\n4:second",
+					"error": "Error: line 3: two or more pasted `4:TEXT` read-output rows name line 4. Such rows are recovered as single-line `PUT 4.=4:` replacements, so repeating a number would keep only the last row and drop the rest. Write the hunk explicitly: one `PUT 4.=M:` header covering exactly the lines that change, followed by `+TEXT` body rows holding their complete final content."
+				}
+			]
+		},
+		{
+			"name": "warns when a body row is itself a hunk header written with the payload prefix",
+			"parse": [
+				{
+					"input": "PUT >1:\n+inserted();\n+CUT 1266.=1277",
+					"expect": {
+						"editCount": 2,
+						"warnings": [
+							"line 3: body row `+CUT 1266.=1277` is itself a valid hunk header, so it was inserted into the file as literal text rather than executed. Ops are never `+`-prefixed — drop the `+` to run it, and re-issue if this line landed in the file by mistake."
+						]
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb\nc\nd\ne",
+					"input": "PUT >1:\n+inserted();\n+CUT 1266.=1277",
+					"expect": {
+						"text": "a\ninserted();\nCUT 1266.=1277\nb\nc\nd\ne",
+						"firstChangedLine": 1
+					}
+				}
+			]
+		},
+		{
+			"name": "recovers a bare range header as an implicit PUT",
+			"parse": [
+				{
+					"input": "2.=3:\n+X",
+					"expect": {
+						"editCount": 3,
+						"warnings": [
+							"Recovered a bare `N.=M:` header as `PUT N.=M:`. Prefix replacement ranges with `PUT`."
+						]
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb\nc\nd\ne",
+					"input": "2.=3:\n+X",
+					"expect": {
+						"text": "a\nX\nd\ne",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "ignores copied read elisions instead of writing them",
+			"parse": [
+				{
+					"input": "1:a\n2-3:  omitted() { … }\n4:d\n[…2ln elided; re-read needed ranges with a.ts:2-3]",
+					"expect": {
+						"editCount": 4,
+						"warnings": [
+							"Recovered top-level `N:TEXT` snapshot row(s) as single-line `PUT N.=N:` replacements. Use explicit `PUT` headers for reliable edits.",
+							"Ignored copied read-output elision row(s). Re-read elided ranges before editing them."
+						]
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb\nc\nd\ne",
+					"input": "1:a\n2-3:  omitted() { … }\n4:d\n[…2ln elided; re-read needed ranges with a.ts:2-3]",
+					"expect": {
+						"text": "a\nb\nc\nd\ne",
+						"firstChangedLine": 1
+					}
+				}
+			]
+		},
+		{
+			"name": "accepts a harmless trailing colon on bodyless CUT",
+			"parse": [
+				{
+					"input": "CUT 2-3:",
+					"expect": {
+						"editCount": 3,
+						"warnings": [
+							"Ignored a trailing `:` on bodyless `CUT`. Prefer `CUT N.=M` / `CUT N*` without a colon."
+						]
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb\nc\nd\ne",
+					"input": "CUT 2-3:",
+					"expect": {
+						"text": "a\nd\ne",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "keeps the final hunk when numbered context targets the same exact line",
+			"parse": [
+				{
+					"input": "2:b\nPUT 2:\n+B",
+					"expect": {
+						"editCount": 2,
+						"warnings": [
+							"Recovered top-level `N:TEXT` snapshot row(s) as single-line `PUT N.=N:` replacements. Use explicit `PUT` headers for reliable edits.",
+							"Multiple hunks targeted the same exact range; kept only the last. Issue one `PUT` or `CUT` hunk per range."
+						]
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb\nc\nd\ne",
+					"input": "2:b\nPUT 2:\n+B",
+					"expect": {
+						"text": "a\nB\nc\nd\ne",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "lets a CUT supersede a placeholder PUT over the same exact range",
+			"parse": [
+				{
+					"input": "PUT 2-3:\n+// moved block removed\nCUT 2-3 @block",
+					"expect": {
+						"editCount": 3,
+						"warnings": [
+							"Multiple hunks targeted the same exact range; kept only the last. Issue one `PUT` or `CUT` hunk per range."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "rejects missing colon on body-bearing insert headers",
+			"parse": [
+				{
+					"input": "PUT < 2\n+X",
+					"error": "Error: line 2: `PUT` without `:` is clipboard-backed and takes no body rows. Add `:` after the locator to write literal content (`PUT >40:` then `+TEXT` rows)."
+				},
+				{
+					"input": "PUT <1\n+X",
+					"error": "Error: line 2: `PUT` without `:` is clipboard-backed and takes no body rows. Add `:` after the locator to write literal content (`PUT >40:` then `+TEXT` rows)."
+				}
+			]
+		},
+		{
+			"name": "auto-pipes a bare body row while warning",
+			"parse": [
+				{
+					"input": "PUT 2-2:\n  hello",
+					"expect": {
+						"editCount": 2,
+						"warnings": [
+							"Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."
+						]
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb\nc\nd\ne",
+					"input": "PUT 2-2:\n  hello",
+					"expect": {
+						"text": "a\n  hello\nc\nd\ne",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "strips read-output line number prefixes from auto-piped bare body rows",
+			"parse": [
+				{
+					"input": "PUT 2-2:\n2:hello",
+					"expect": {
+						"editCount": 2,
+						"warnings": [
+							"Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."
+						]
+					}
+				},
+				{
+					"input": "PUT 2-2:\n2|hello",
+					"expect": {
+						"editCount": 2,
+						"warnings": [
+							"Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."
+						]
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb\nc\nd\ne",
+					"input": "PUT 2-2:\n2:hello",
+					"expect": {
+						"text": "a\nhello\nc\nd\ne",
+						"firstChangedLine": 2
+					}
+				},
+				{
+					"text": "a\nb\nc\nd\ne",
+					"input": "PUT 2-2:\n2|hello",
+					"expect": {
+						"text": "a\nhello\nc\nd\ne",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "preserves `+N:` literal payloads without stripping",
+			"parse": [
+				{
+					"input": "PUT 2-2:\n+3:keep",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb\nc\nd\ne",
+					"input": "PUT 2-2:\n+3:keep",
+					"expect": {
+						"text": "a\n3:keep\nc\nd\ne",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "strips only one N: prefix from bare body rows (preserves nested digits:colon)",
+			"parse": [
+				{
+					"input": "PUT 2-2:\n2:42:hello",
+					"expect": {
+						"editCount": 2,
+						"warnings": [
+							"Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."
+						]
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb\nc\nd\ne",
+					"input": "PUT 2-2:\n2:42:hello",
+					"expect": {
+						"text": "a\n42:hello\nc\nd\ne",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "strips N: prefixes only when every bare body row carries one",
+			"parse": [
+				{
+					"input": "PUT 2-3:\n2:foo\n3:bar",
+					"expect": {
+						"editCount": 4,
+						"warnings": [
+							"Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."
+						]
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb\nc\nd\ne",
+					"input": "PUT 2-3:\n2:foo\n3:bar",
+					"expect": {
+						"text": "a\nfoo\nbar\nd\ne",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "leaves bare body rows untouched when only some carry an N: prefix",
+			"parse": [
+				{
+					"input": "PUT 2-3:\n3:keep\nplain",
+					"expect": {
+						"editCount": 4,
+						"warnings": [
+							"Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."
+						]
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb\nc\nd\ne",
+					"input": "PUT 2-3:\n3:keep\nplain",
+					"expect": {
+						"text": "a\n3:keep\nplain\nd\ne",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "keeps interior blank rows in a bare replace body",
+			"parse": [
+				{
+					"input": "PUT 2-3:\nfoo\n\nbar",
+					"expect": {
+						"editCount": 5,
+						"warnings": [
+							"Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."
+						]
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb\nc\nd\ne",
+					"input": "PUT 2-3:\nfoo\n\nbar",
+					"expect": {
+						"text": "a\nfoo\n\nbar\nd\ne",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "drops trailing blank rows between a bare body and the next hunk",
+			"parse": [
+				{
+					"input": "PUT 2-2:\nfoo\n\nPUT 4-4:\nbaz",
+					"expect": {
+						"editCount": 4,
+						"warnings": [
+							"Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."
+						]
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb\nc\nd\ne",
+					"input": "PUT 2-2:\nfoo\n\nPUT 4-4:\nbaz",
+					"expect": {
+						"text": "a\nfoo\nc\nbaz\ne",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "skips blank rows when checking N: prefix uniformity",
+			"parse": [
+				{
+					"input": "PUT 2-3:\n2:foo\n\n3:bar",
+					"expect": {
+						"editCount": 5,
+						"warnings": [
+							"Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."
+						]
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb\nc\nd\ne",
+					"input": "PUT 2-3:\n2:foo\n\n3:bar",
+					"expect": {
+						"text": "a\nfoo\n\nbar\nd\ne",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "leaves numeric-keyed literal bodies untouched (dict/YAML shape)",
+			"parse": [
+				{
+					"input": "PUT 2-3:\n1: \"one\",\n2: \"two\",",
+					"expect": {
+						"editCount": 4,
+						"warnings": [
+							"Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."
+						]
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb\nc\nd\ne",
+					"input": "PUT 2-3:\n1: \"one\",\n2: \"two\",",
+					"expect": {
+						"text": "a\n1: \"one\",\n2: \"two\",\nd\ne",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "rejects ambiguous standalone `-` body rows with Markdown bullet guidance",
+			"parse": [
+				{
+					"input": "PUT 2-2:\n-old",
+					"error": "Error: line 2: `-` rows are not valid; the range already names the lines being changed. For Markdown bullets or other literal `-` lines, prefix the literal row with `+`: `+- item`."
+				}
+			]
+		},
+		{
+			"name": "auto-pipes a fully bare Markdown bullet body with a warning",
+			"parse": [
+				{
+					"input": "PUT 2-2:\n- item\n  - nested",
+					"expect": {
+						"editCount": 3,
+						"warnings": [
+							"Auto-prefixed bare `- ` bullet row(s) as literal content. `-` rows never remove lines — the range does that; always prefix literal body rows with `+`: `+- item`."
+						]
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb\nc\nd\ne",
+					"input": "PUT 2-2:\n- item\n  - nested",
+					"expect": {
+						"text": "a\n- item\n  - nested\nc\nd\ne",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "auto-pipes a bare bullet row next to explicit `+- item` siblings",
+			"parse": [
+				{
+					"input": "PUT 2-2:\n+### Fixed\n+- one\n- two",
+					"expect": {
+						"editCount": 4,
+						"warnings": [
+							"Auto-prefixed bare `- ` bullet row(s) as literal content. `-` rows never remove lines — the range does that; always prefix literal body rows with `+`: `+- item`."
+						]
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb\nc\nd\ne",
+					"input": "PUT 2-2:\n+### Fixed\n+- one\n- two",
+					"expect": {
+						"text": "a\n### Fixed\n- one\n- two\nc\nd\ne",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "still rejects non-bullet bare `-` rows even in a fully bare body",
+			"parse": [
+				{
+					"input": "PUT 2-2:\n-old()",
+					"error": "Error: line 2: `-` rows are not valid; the range already names the lines being changed. For Markdown bullets or other literal `-` lines, prefix the literal row with `+`: `+- item`."
+				}
+			]
+		},
+		{
+			"name": "still rejects bullet-shaped `-` rows beside a plain `+new` row (diff paste)",
+			"parse": [
+				{
+					"input": "PUT 2-2:\n- x\n+new()",
+					"error": "Error: line 2: `-` rows are not valid; the range already names the lines being changed. For Markdown bullets or other literal `-` lines, prefix the literal row with `+`: `+- item`."
+				}
+			]
+		},
+		{
+			"name": "allows literal Markdown bullets and plus-prefixed text when prefixed with `+`",
+			"parse": [
+				{
+					"input": "PUT 2-2:\n+- item\n+  - nested\n++plus",
+					"expect": {
+						"editCount": 4,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb\nc\nd\ne",
+					"input": "PUT 2-2:\n+- item\n+  - nested\n++plus",
+					"expect": {
+						"text": "a\n- item\n  - nested\n+plus\nc\nd\ne",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "treats an empty replace as deletion and still rejects an empty insert",
+			"parse": [
+				{
+					"input": "PUT 2-2:",
+					"expect": {
+						"editCount": 1,
+						"warnings": [
+							"Interpreted an empty `PUT` body as deletion. Use `CUT N.=M` or `CUT N*` for bodyless deletes."
+						]
+					}
+				},
+				{
+					"input": "PUT >$:",
+					"error": "Error: line 1: `PUT <N:` / `PUT >N:` promises body rows and got none. Write `+TEXT` rows, or drop the `:` to paste a register (`PUT >N` = anonymous, `PUT >N @name` = named)."
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb\nc\nd\ne",
+					"input": "PUT 2-2:",
+					"expect": {
+						"text": "a\nc\nd\ne",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "rejects cut with a body",
+			"parse": [
+				{
+					"input": "CUT 2\n+X",
+					"error": "Error: line 2: `CUT` deletes (and captures) the named lines and takes no body rows. To write new content, use `PUT N.=M:` with `+TEXT` rows."
+				}
+			]
+		},
+		{
+			"name": "rejects apply_patch sentinels as contamination",
+			"parse": [
+				{
+					"input": "*** Update File: a.ts\nPUT 2-2:\n+X",
+					"error": "Error: line 1: apply_patch sentinel \"*** Update File: a.ts\" is not valid in hashline. File sections start with `[path#HASH]` (no `Update File:` / `Add File:` keyword). Use `PUT N.=M:`, `CUT N.=M`, or `PUT <N:`/`PUT >N:` ops."
+				},
+				{
+					"input": "*** Add File: a.ts\nPUT 2-2:\n+X",
+					"error": "Error: line 1: apply_patch sentinel \"*** Add File: a.ts\" is not valid in hashline. File sections start with `[path#HASH]` (no `Update File:` / `Add File:` keyword). Use `PUT N.=M:`, `CUT N.=M`, or `PUT <N:`/`PUT >N:` ops."
+				}
+			]
+		},
+		{
+			"name": "rejects unified-diff hunk headers as contamination",
+			"parse": [
+				{
+					"input": "@@ -1,3 +1,3 @@\nPUT 2-2:\n+X",
+					"error": "Error: line 1: unified-diff hunk header (`@@ -N,M +N,M @@`) is not valid in hashline. Use `PUT N.=M:`, `CUT N.=M`, or `PUT <N:`/`PUT >N:` ops."
+				}
+			]
+		},
+		{
+			"name": "discards unified-diff old rows when explicit new rows follow",
+			"parse": [
+				{
+					"input": "PUT 2:\n-b\n+B",
+					"expect": {
+						"editCount": 2,
+						"warnings": [
+							"Ignored unified-diff `-old` row(s); the range already removes old content, so only `+new` rows were kept."
+						]
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb\nc\nd\ne",
+					"input": "PUT 2:\n-b\n+B",
+					"expect": {
+						"text": "a\nB\nc\nd\ne",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "treats top-level `+TEXT` as an orphan literal payload",
+			"parse": [
+				{
+					"input": "+const X = 1;\nPUT 2-2:",
+					"error": "Error: line 1: payload line has no preceding hunk header. Got \"+const X = 1;\"."
+				}
+			]
+		},
+		{
+			"name": "keeps replacement boundary echoes literal unless balance repair applies",
+			"parse": [
+				{
+					"input": "PUT 3-3:\n+// one\n+// two\n+new();",
+					"expect": {
+						"editCount": 4,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "// one\n// two\nold();",
+					"input": "PUT 3-3:\n+// one\n+// two\n+new();",
+					"expect": {
+						"text": "// one\n// two\n// one\n// two\nnew();",
+						"firstChangedLine": 3
+					}
+				}
+			]
+		},
+		{
+			"name": "keeps pure-insert context echoes literal",
+			"parse": [
+				{
+					"input": "PUT >$:\n+bbb\n+ccc\n+NEW",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "aaa\nbbb\nccc",
+					"input": "PUT >$:\n+bbb\n+ccc\n+NEW",
+					"expect": {
+						"text": "aaa\nbbb\nccc\nbbb\nccc\nNEW",
+						"firstChangedLine": 4
+					}
+				}
+			]
+		}
+	]
+}

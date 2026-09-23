@@ -24,7 +24,7 @@ describe("autocompleteMaxVisible setting", () => {
 	});
 
 	afterEach(async () => {
-		AgentStorage.resetInstance();
+		AgentStorage.close();
 		restoreSettingsTestState(settingsState);
 		settingsState = undefined;
 		if (tempDir) {
@@ -73,10 +73,5 @@ describe("autocompleteMaxVisible setting", () => {
 		controller.handleSettingChange("autocompleteMaxVisible", "10");
 
 		expect(setAutocompleteMaxVisible).toHaveBeenCalledWith(10);
-	});
-
-	it("should work with isolated instances", () => {
-		const settings = Settings.isolated({ autocompleteMaxVisible: 12 });
-		expect(settings.get("autocompleteMaxVisible")).toBe(12);
 	});
 });

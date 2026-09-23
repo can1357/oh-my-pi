@@ -13,15 +13,15 @@
   - `packages/coding-agent/src/dap/types.ts` — request/response/capability shapes
   - `packages/coding-agent/src/tools/tool-timeouts.ts` — per-tool timeout clamp
   - `packages/coding-agent/src/debug/index.ts` — interactive debug selector menu
-  - `packages/coding-agent/src/debug/log-viewer.ts` — recent-log TUI viewer
-  - `packages/coding-agent/src/debug/raw-sse.ts` — raw SSE TUI viewer
-  - `packages/coding-agent/src/debug/raw-sse-buffer.ts` — bounded SSE capture buffer
+  - `packages/tui/src/apps/debug/log-viewer.ts` — recent-log TUI viewer
+  - `packages/tui/src/apps/debug/raw-sse.ts` — raw SSE TUI viewer
+  - `packages/tui/src/apps/debug/raw-sse-buffer.ts` — bounded SSE capture buffer
   - `packages/coding-agent/src/debug/remote-debugger.ts` — one-shot JavaScriptCore remote inspector socket
   - `packages/coding-agent/src/debug/profiler.ts` — CPU/heap profiling helpers
   - `packages/coding-agent/src/debug/report-bundle.ts` — `.tar.gz` report bundling, log source, cache cleanup
   - `packages/coding-agent/src/debug/system-info.ts` — system snapshot collection and env redaction
-  - `packages/coding-agent/src/debug/terminal-info.ts` — terminal state collection/formatting
-  - `packages/coding-agent/src/debug/protocol-probe.ts` — terminal protocol probe panel and sample image
+  - `packages/tui/src/apps/debug/terminal-info.ts` — terminal state collection/formatting
+  - `packages/tui/src/apps/debug/protocol-probe.ts` — terminal protocol probe panel and sample image
 
 ## Inputs
 
@@ -43,7 +43,7 @@
 | `frame_id` | `number` | No | Frame selector for `evaluate`, `scopes`, `data_breakpoint_info`. `scopes` and `evaluate` default to the current stopped frame when omitted. |
 | `scope_id` | `number` | No | Variables reference from a scope. Accepted by `variables`; also used as a fallback variables reference for `data_breakpoint_info`. |
 | `variable_ref` | `number` | No | Variables reference for `variables`; preferred over `scope_id` when both are present. |
-| `pid` | `number` | No | Local process id for `attach`. `attach` requires `pid` or `port`. |
+| `pid` | `number` | No | Local process id for `attach`. Required with `port` only when no explicit adapter is selected. |
 | `port` | `number` | No | Remote attach port. If no adapter is forced, attach prefers `debugpy` when `port` is present. |
 | `host` | `string` | No | Remote attach host for `attach`. |
 | `levels` | `number` | No | Max stack frames for `stack_trace`. |
@@ -66,7 +66,7 @@
 
 ### Action-specific requirements
 - `launch`: `program`
-- `attach`: `pid` or `port`
+- `attach`: `pid` or `port`, unless an explicit adapter supplies its attach arguments
 - `set_breakpoint` / `remove_breakpoint`: `function`, or `file` + `line`
 - `set_instruction_breakpoint` / `remove_instruction_breakpoint`: `instruction_reference`
 - `data_breakpoint_info`: `name`
@@ -123,7 +123,7 @@ Side-channel artifacts outside the model tool result:
 
 1. Tool registration is conditional: `DebugTool.createIf()` in `packages/coding-agent/src/tools/debug.ts` returns `null` unless `session.settings.get("debug.enabled")` is true (default `true`). `packages/coding-agent/src/tools/index.ts` wires the factory and rechecks the same setting in tool filtering.
 2. `DebugTool.execute()` clamps `params.timeout` through `clampTimeout("debug", params.timeout)`, applying the optional positive `tools.maxTimeout` cap before the tool's 5-second floor and 300-second ceiling, and composes the caller `AbortSignal` with `AbortSignal.timeout(...)`.
-3. `launch` resolves cwd/program paths, classifies the target as file/directory/missing, rejects directories unless the chosen adapter sets `acceptsDirectoryProgram`, and delegates to `dapSessionManager.launch()`. `attach` requires `pid` or `port`, resolves cwd, selects an adapter, and delegates to `.attach()`.
+3. `launch` resolves cwd/program paths, classifies the target as file/directory/missing, rejects directories unless the chosen adapter sets `acceptsDirectoryProgram`, and delegates to `dapSessionManager.launch()`. `attach` resolves cwd and selects an adapter; it requires `pid` or `port` only without an explicit adapter.
 4. `DapSessionManager.launch()` / `.attach()` enforce one root session, spawn the adapter through `DapClient.spawn()`, register listeners, send `initialize`, cache capabilities, subscribe for tree-wide stop events, send `launch`/`attach`, then complete the `initialized` → `configurationDone` handshake.
 5. `DapClient.spawn()` starts adapters detached with `NON_INTERACTIVE_ENV`. `stdio` uses the adapter pipes; `socket` uses a Unix socket on Linux or an adapter callback to a local TCP listener elsewhere; `tcp` substitutes `${port}` in adapter args, starts its local server, then connects. Child sessions reuse a root `tcp` server through `DapClient.connect()`.
 6. `#registerSession()` in `packages/coding-agent/src/dap/session.ts` installs reverse-request handlers:
@@ -141,7 +141,7 @@ Side-channel artifacts outside the model tool result:
    - `performance`: `startCpuProfile()`, wait for Enter/Escape, stop profiling, read a 30-second work profile with `getWorkProfile(30)`, then bundle via `createReportBundle()`
    - `work`: read `getWorkProfile(30)`, write a temp SVG, open it externally
    - `dump`: create a report bundle immediately
-   - `memory`: force GC, call `Bun.generateHeapSnapshot("v8")`, then bundle
+   - `memory`: force GC, collect numeric process and heap statistics with `collectMemoryStats()`, then bundle
    - `logs`: build a `DebugLogSource` and mount `DebugLogViewerComponent`
    - `raw-sse`: resolve a `RawSseDebugBuffer` from the session and mount `RawSseViewerComponent`
    - `remote-debugger`: reuse or start a loopback JavaScriptCore `RemoteInspectorServer` socket and display its host/port; the Bun API is process-wide and has no stop operation
@@ -170,7 +170,7 @@ Side-channel artifacts outside the model tool result:
     - `fileTypes`: lowercase file extensions used for launch auto-selection.
     - `rootMarkers`: files/directories used to rank adapters for a project.
     - `launchDefaults`: default DAP launch arguments merged before the selected program/cwd/args.
-    - `attachDefaults`: default DAP attach arguments merged before pid/port/host/cwd.
+    - `attachDefaults`: default DAP attach arguments. An explicit adapter may attach without a PID or port; its adapter validates these arguments.
     - `connectMode`: `"stdio"` (default), `"socket"` (Delve-style platform-dependent socket/callback), or `"tcp"` (spawn a local DAP server with `${port}` substituted into `args`).
     - `acceptsDirectoryProgram`: set `true` for adapters such as `dlv` that can launch a package/project directory.
 
@@ -192,6 +192,28 @@ Example `.omp/dap.json`:
       "attachDefaults": {
         "request": "attach",
         "host": "127.0.0.1"
+      }
+    }
+  }
+}
+```
+
+GDB example for an OpenOCD remote target:
+
+```json
+{
+  "adapters": {
+    "pico-openocd": {
+      "command": "gdb",
+      "args": [
+        "-q",
+        "-ex",
+        "file zig-out/firmware/gc9a01-test.elf",
+        "-i",
+        "dap"
+      ],
+      "attachDefaults": {
+        "target": ":3334"
       }
     }
   }
@@ -230,7 +252,7 @@ Example `.omp/dap.json`:
   - `raw-sse` — live view over the session’s `RawSseDebugBuffer`; supports tail-follow, scrolling, copy-all.
   - `remote-debugger` — starts or reuses the process-wide JavaScriptCore WebKit inspector on `127.0.0.1` and an automatically reserved port; it is experimental, cannot be stopped/rebound, and requires a compatible Safari/WebKit inspector client.
   - `performance` — CPU profile + 30-second work profile + report bundle.
-  - `memory` — heap snapshot + report bundle.
+  - `memory` — numeric memory statistics (`memory.json`) + report bundle.
   - `dump` — report bundle without profiler artifacts.
   - `work` — standalone work-profile flamegraph export/open.
   - `system` — formatted OS/arch/CPU/memory/version/cwd/shell/terminal dump.
@@ -242,6 +264,8 @@ Example `.omp/dap.json`:
 - Filesystem
   - Resolves program/file/cwd paths against the session cwd.
   - Report creation writes `.tar.gz` bundles and may read the session JSONL, artifact files, subagent session JSONLs, and log files.
+  - Memory reports include only numeric process/heap counters, not heap snapshots or runtime-derived type names. Session data, artifacts, logs, settings, raw SSE diagnostics, and environment values may still contain private data; review the archive before sharing. Environment redaction matches variable names, not arbitrary secrets in values.
+  - Older memory reports containing `heap.heapsnapshot` must be treated as credential-bearing files. Do not share them; if one was already shared, revoke or rotate exposed provider and MCP credentials, including OAuth refresh tokens, and remove shared copies.
   - Work-profile export writes `/tmp/work-profile-<timestamp>.svg`.
   - Log source reads daily log files from the logs dir.
   - Artifact-cache cleanup removes session artifact directories older than the cutoff.
@@ -253,7 +277,7 @@ Example `.omp/dap.json`:
   - Spawns debugger adapters (`gdb`, `lldb-dap`, `python -m debugpy.adapter`, `dlv`, and others from `defaults.json`) detached.
   - Reverse DAP `runInTerminal` requests spawn the debuggee detached via `ptree.spawn()`.
   - `getWorkProfile(30)` comes from `@oh-my-pi/pi-natives`.
-  - CPU profiling uses `node:inspector/promises`; heap snapshots use `Bun.generateHeapSnapshot("v8")`; raw/log viewers sanitize text via `sanitizeText()` from `@oh-my-pi/pi-utils`.
+  - CPU profiling uses `node:inspector/promises`; memory statistics use `process.memoryUsage()` and numeric counters from `bun:jsc`'s `heapStats()` after GC; raw/log viewers sanitize text via `sanitizeText()` from `@oh-my-pi/pi-utils`.
   - `openPath()` launches the OS default file/browser handler for artifact dirs and SVGs.
   - Log/raw-SSE viewers can call `copyToClipboard()`.
 - Session state (transcript, memory, jobs, checkpoints, registries)
@@ -280,11 +304,11 @@ Example `.omp/dap.json`:
 - Output capture cap: `MAX_OUTPUT_BYTES = 128 * 1024`; whole chunks are dropped from the front (then the front chunk is byte-sliced so exactly the cap remains) and `outputTruncated` is recorded.
 - Initial stop capture timeout after launch/attach: `STOP_CAPTURE_TIMEOUT_MS = 5_000`.
 - Socket-mode adapter readiness timeout: `10_000` ms in `waitForCondition()` and TCP connect timeout logic in `packages/coding-agent/src/dap/client.ts`.
-- Raw SSE buffer caps in `packages/coding-agent/src/debug/raw-sse-buffer.ts`:
+- Raw SSE buffer caps in `packages/tui/src/apps/debug/raw-sse-buffer.ts`:
   - `MAX_RAW_SSE_EVENTS = 1_000`
   - `MAX_RAW_SSE_CHARS = 512_000`
   - `MAX_RAW_SSE_EVENT_CHARS = 64_000` per event; over-budget events first get `tools` schemas compacted (name kept, schema/description elided), then a head+tail trim that keeps the first and last portions with a `: omp-debug-elided chars=...` comment in the middle and a final `: omp-debug-truncated originalChars=...` marker
-- Log viewer window in `packages/coding-agent/src/debug/log-viewer.ts`:
+- Log viewer window in `packages/tui/src/apps/debug/log-viewer.ts`:
   - `INITIAL_LOG_CHUNK = 50`
   - `LOAD_OLDER_CHUNK = 50`
 - Report/log ingestion caps in `packages/coding-agent/src/debug/report-bundle.ts`:
@@ -298,7 +322,7 @@ Example `.omp/dap.json`:
 ## Errors
 - Parameter validation in `packages/coding-agent/src/tools/debug.ts` throws `ToolError` with explicit messages such as:
   - `program is required for launch`
-  - `attach requires pid or port`
+  - `attach requires pid or port` when no explicit adapter is selected
   - `set_breakpoint requires file+line or function`
   - `variables requires variable_ref or scope_id`
   - `instruction_count is required for disassemble`

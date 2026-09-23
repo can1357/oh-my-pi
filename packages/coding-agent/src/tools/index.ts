@@ -1,16 +1,21 @@
-import type { Clipboard, InMemorySnapshotStore } from "@oh-my-pi/hashline";
-import type { AgentOptions, AgentTelemetryConfig, AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { AgentOptions, AgentTelemetryConfig, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import type { EditStore } from "@oh-my-pi/pi-natives";
 import type { FetchImpl, ImageContent, Model, ServiceTierByFamily, ToolChoice } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AsyncJobManager } from "../async/job-manager";
 import type { Rule } from "../capability/rule";
+import type { EffectiveExtensionRoots } from "../capability/types";
+import type { EvalPreludeDefinition } from "../eval/preludes";
 import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings } from "../config/settings";
 import { EditTool } from "../edit";
-import { checkJuliaKernelAvailability } from "../eval/jl/kernel";
 import { checkPythonKernelAvailability } from "../eval/py/kernel";
-import { checkRubyKernelAvailability } from "../eval/rb/kernel";
 import type { ToolPathWithSource } from "../extensibility/custom-tools";
+import type {
+	BeforeSubagentSpawnEvent,
+	BeforeSubagentSpawnEventResult,
+	PreparedExtension,
+} from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import type { GoalModeState, GoalRuntime } from "../goals";
 import { GoalTool } from "../goals/tools/goal-tool";
@@ -31,19 +36,19 @@ import type { SessionManager } from "../session/session-manager";
 import type { ToolChoiceQueue } from "../session/tool-choice-queue";
 import { TaskTool } from "../task";
 import type { AgentOutputManager } from "../task/output-manager";
-import { canSpawnAtDepth, type StructuredSubagentSchemaMode } from "../task/types";
+import { type AgentDefinition, canSpawnAtDepth } from "../task/types";
+import { type StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
+import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { EventBus } from "../utils/event-bus";
-import { type InspectImageMode, isInspectImageToolActive } from "../utils/inspect-image-mode";
 import { WebSearchTool } from "../web/search";
 import type { WorkspaceTree } from "../workspace-tree";
 import { AskTool } from "./ask";
 import { AstEditTool } from "./ast-edit";
 import { AstGrepTool } from "./ast-grep";
 import { BashTool } from "./bash";
-import { BrowserTool } from "./browser";
 import { type BuiltinToolName, type HiddenToolName, normalizeToolNames } from "./builtin-names";
 import { type CheckpointState, CheckpointTool, type CompletedRewindState, RewindTool } from "./checkpoint";
-import { ComputerTool } from "./computer";
+import { ContextNotesTool, NewContextTool } from "./context-notes";
 import { DebugTool } from "./debug";
 import { EvalTool } from "./eval";
 import { resolveEvalBackends } from "./eval-backends";
@@ -51,7 +56,7 @@ import { GithubTool } from "./gh";
 import { GlobTool } from "./glob";
 import { GrepTool } from "./grep";
 import { HubTool, isIrcEnabled } from "./hub";
-import { InspectImageTool } from "./inspect-image";
+import { FindTool, isFindEnabled } from "./jfind";
 import { LearnTool } from "./learn";
 import { ManageSkillTool } from "./manage-skill";
 import { MemoryEditTool } from "./memory-edit";
@@ -63,7 +68,8 @@ import { ReadTool } from "./read";
 import type { PlanProposalHandler } from "./resolve";
 import { SecurityScanTool } from "./security-scan";
 import { supportsExternalThinking, ThinkTool } from "./think";
-import { type TodoPhase, TodoTool } from "./todo";
+import { type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import { TodoTool } from "./todo";
 import { WriteTool } from "./write";
 import { isMountableUnderXdev, type XdevState } from "./xdev";
 import { YieldTool } from "./yield";
@@ -71,27 +77,48 @@ import { YieldTool } from "./yield";
 export * from "../edit";
 export * from "../goals";
 export * from "../lsp";
-export * from "../session/streaming-output";
+export * from "@oh-my-pi/pi-tui/tools/streaming-output";
 export * from "../task";
 export * from "../web/search";
 export * from "./ask";
 export * from "./ast-edit";
 export * from "./ast-grep";
 export * from "./bash";
+export type {
+	BashToolDetails,
+	BashRenderArgs,
+	BashRenderContext,
+	ShellRendererConfig,
+} from "@oh-my-pi/pi-tui/tools/bash";
 export * from "./browser";
 export * from "./checkpoint";
 export * from "./computer";
 export * from "./computer/supervisor";
+export * from "./context-notes";
 export * from "./debug";
 export * from "./essential-tools";
 export * from "./eval";
 export * from "./eval-backends";
+export * from "./file-write-fallback";
 export * from "./gh";
 export * from "./glob";
 export * from "./grep";
 export * from "./hub";
+export * from "./jfind";
+export type {
+	HubOp,
+	HubPeerInfo,
+	HubListStatus,
+	HubRosterCounts,
+	JobSnapshot,
+	CancelStatus,
+	CancelOutcome,
+	AgentActivitySnapshot,
+	CoordinationDetails,
+	HubDetails,
+	HubRenderArgs,
+} from "@oh-my-pi/pi-tui/tools/hub";
 export * from "./image-gen";
-export * from "./inspect-image";
 export * from "./learn";
 export * from "./manage-skill";
 export * from "./memory-edit";
@@ -101,12 +128,18 @@ export * from "./memory-retain";
 export * from "./read";
 export * from "./report-tool-issue";
 export * from "./resolve";
-export * from "./review";
+export type {
+	FindingPriority,
+	FindingPriorityInfo,
+	FindingDetails,
+	SubmitReviewDetails,
+} from "@oh-my-pi/pi-tui/tools/task";
 export * from "./security-scan";
 export * from "./think";
 export * from "./todo";
 export * from "./tts";
 export * from "./vibe";
+export type { VibeToolDetails } from "@oh-my-pi/pi-tui/tools/vibe";
 export * from "./write";
 export * from "./xdev";
 export * from "./yield";
@@ -125,6 +158,8 @@ export type ImageAttachmentEntry = {
 	label: string;
 	uri: string;
 	image: ImageContent;
+	/** Existing content-addressed file path containing the original image bytes. */
+	sourcePath: string;
 };
 
 /**
@@ -158,6 +193,8 @@ export interface ToolSession {
 	additionalDirectories?: string[];
 	/** Whether UI is available */
 	hasUI: boolean;
+	/** Whether `ask` can reach a human. Defaults to `hasUI`. */
+	canPromptUser?: boolean;
 	/** Whether this session has begun disposal. */
 	isDisposed?: () => boolean;
 	/**
@@ -171,6 +208,8 @@ export interface ToolSession {
 	fetch?: FetchImpl;
 	/** Provider credential resolver forwarded unchanged to restricted child sessions. */
 	getApiKey?: AgentOptions["getApiKey"];
+	/** Current session whose stored credential affinities should seed a child session. */
+	getCredentialSourceSessionId?: () => string | undefined;
 	/** Skip subprocess-kernel availability checks and warmup */
 	skipPythonPreflight?: boolean;
 	/** Pre-loaded context files (AGENTS.md, etc) */
@@ -179,6 +218,13 @@ export interface ToolSession {
 	workspaceTree?: WorkspaceTree;
 	/** Pre-loaded skills */
 	skills?: readonly Skill[];
+	/**
+	 * Frozen skill-URI hint visibility: snapshot taken at the last system-prompt
+	 * rebuild. Tools with a provider-side `skill://` hint read this instead of
+	 * the live `skillful` setting so the tool prefix stays byte-stable between
+	 * rebuilds (mid-session `/skillful` toggles ride the prompt, not the prefix).
+	 */
+	skillHintVisible?: boolean;
 	/** Rediscover live session skills after a tool mutates their backing files. */
 	refreshSkills?: () => Promise<void>;
 	/** Pre-loaded prompt templates */
@@ -186,12 +232,31 @@ export interface ToolSession {
 	/** Pre-loaded rules (forwarded to subagents to skip re-discovery). */
 	rules?: Rule[];
 	/**
+	 * This session's agent-scoped applicable rule set — rulebook + always-apply
+	 * + triggered TTSR rules, already bucketed against this session's `agents`
+	 * frontmatter. Distinct from {@link rules} (the full unfiltered discovery
+	 * result forwarded to children): this is what `rule://` resolution needs so
+	 * a subagent-only rule stays readable from inside that subagent, instead of
+	 * only from the top-level session's process-global snapshot.
+	 */
+	activeRules?: readonly Rule[];
+	/**
 	 * Pre-discovered extension source paths. Forwarded to subagents so they
 	 * skip the FS scan but still re-bind extensions to their own session-scoped
 	 * `ExtensionAPI` (cwd, eventBus, runtime). Inline extension factories
 	 * (`<inline-N>`) are NOT included — those are session-local.
 	 */
 	extensionPaths?: string[];
+	/** Imported extension factories safe to rebind in child sessions. */
+	preparedExtensions?: PreparedExtension[];
+	/**
+	 * Session-local extension roots for post-startup sub-discovery: explicit SDK
+	 * roots, discovery mode, and configured `extensions:`. A provider (not a
+	 * stored value) so it is materialized live per discovery call — a runtime
+	 * override or settings reload is reflected, never a construction-time
+	 * snapshot. Keeps the task surface byte-identical to the scoped load.
+	 */
+	effectiveExtensionRoots?(): EffectiveExtensionRoots;
 	/**
 	 * Pre-discovered custom-tool source paths from `.omp/tools/`, `.claude/tools/`,
 	 * plugins, etc. Forwarded to subagents so they skip the FS scan but still
@@ -213,6 +278,13 @@ export interface ToolSession {
 	hasEditTool?: boolean;
 	/** Event bus for tool/extension communication */
 	eventBus?: EventBus;
+	/**
+	 * Root-scoped bus for `task:subagent:*` observability frames. The root
+	 * session creates it; every spawned subagent session inherits it, so RPC
+	 * and HUD surfaces see spawns at any depth without crossing into another
+	 * root session's traffic.
+	 */
+	subagentEventBus?: EventBus;
 	/** Output schema for structured completion (subagents). */
 	outputSchema?: unknown;
 	/** Enforcement policy for {@link outputSchema}; defaults to legacy permissive behavior. */
@@ -229,19 +301,25 @@ export interface ToolSession {
 	restrictToolNames?: boolean;
 	/** Task recursion depth (0 = top-level, 1 = first child, etc.) */
 	taskDepth?: number;
-	/** Get shared eval executor session ID. Subagents inherit this to share JS/Python/Ruby/Julia state. */
+	/** Get shared eval executor session ID. Subagents inherit this to share JS/Python state. */
 	getEvalSessionId?: () => string | null;
 	/** Get session file */
 	getSessionFile: () => string | null;
-	/** Parent session journal used by tools that persist runtime lifecycle state. */
-	sessionManager?: Pick<SessionManager, "appendCustomEntry" | "ensureOnDisk" | "flush" | "getBranch" | "getEntries">;
+	/**
+	 * Owning journal; full SDK managers also supply registered identity and the
+	 * cost ledger (`appendModelUsage`) without changing advisor-local IDs.
+	 */
+	sessionManager?: Pick<SessionManager, "appendCustomEntry" | "ensureOnDisk" | "flush" | "getBranch" | "getEntries"> &
+		Partial<Pick<SessionManager, "getSessionId" | "getLeafId" | "appendModelUsage">>;
 	/** Get eval kernel owner ID for session-scoped retained-kernel cleanup. */
 	getEvalKernelOwnerId?: () => string | null;
+	/** Current enabled eval prelude definitions. */
+	getEvalPreludes?: () => readonly EvalPreludeDefinition[];
 	/** Reject new eval work once session disposal has started. */
 	assertEvalExecutionAllowed?: () => void;
 	/** Track tool-owned eval work so session disposal can await/abort it like direct session eval runs. */
 	trackEvalExecution?<T>(execution: Promise<T>, abortController: AbortController): Promise<T>;
-	/** Get session ID */
+	/** Get tool-state session ID (distinct from the owning session for advisors). */
 	getSessionId?: () => string | null;
 	/** Get Hindsight runtime state for this agent session. */
 	getHindsightSessionState?: () => HindsightSessionState | undefined;
@@ -251,6 +329,14 @@ export interface ToolSession {
 	getAgentId?: () => string | null;
 	/** Look up a registered tool by name (used by the eval js backend's tool bridge). */
 	getToolByName?: (name: string) => AgentTool | undefined;
+	/** Look up an enabled tool through the eval bridge's normal permission pipeline. */
+	getToolForEvalBridge?: (name: string) => AgentTool | undefined;
+	/** Current session context for eval-bridged tool execution. */
+	getToolContext?: () => AgentToolContext | undefined;
+	/** Names currently authorized for invocation through the eval bridge. */
+	getEvalBridgeToolNames?: () => readonly string[];
+	/** Direct partition of the active Code Mode surface; undefined when Code Mode is inactive. */
+	getCodeModeDirectToolNames?: () => readonly string[] | undefined;
 	/** Return whether a built-in tool is active in this turn's tool set. */
 	isToolActive?: (name: string) => boolean;
 	/** Update the active built-in tool predicate when a session changes tools mid-run. */
@@ -259,6 +345,20 @@ export interface ToolSession {
 	toolRegistry?: Map<string, Tool>;
 	/** `xd://` presentation state backed by {@link toolRegistry}. */
 	xdev?: XdevState;
+	/**
+	 * Set when this session's `write` tool was granted only as the `xd://`
+	 * transport: `write xd://<tool>` dispatches mounted devices, but filesystem
+	 * writes are rejected. Granted by {@link createTools} to sessions whose
+	 * explicit tool list includes `read` but omits `write`, so xd:// mounting
+	 * can engage without expanding the write contract.
+	 */
+	deviceOnlyWrite?: boolean;
+	/**
+	 * Prompt-only preview used while a full-write activation rebuilds. It changes
+	 * the advertised schema without relaxing {@link deviceOnlyWrite}; execution
+	 * remains restricted until the activation commits.
+	 */
+	pendingFullWriteDescription?: boolean;
 	/** Agent registry for IRC routing across live sessions. */
 	agentRegistry?: AgentRegistry;
 	/** Idle→parked→revive lifecycle owner; lets the hub kill a non-job-backed agent registration. Default: AgentLifecycleManager.global(). */
@@ -271,16 +371,25 @@ export interface ToolSession {
 	allocateOutputArtifact?: (toolType: string) => Promise<{ id?: string; path?: string }>;
 	/** Get session spawns */
 	getSessionSpawns: () => string | null;
+	/** Session-scoped agent definitions (user-tagged model pseudonyms) merged after discovered agents. */
+	getSessionAgents?: () => readonly AgentDefinition[];
 	/** Get resolved model string if explicitly set for this session */
 	getModelString?: () => string | undefined;
 	/** Get the current session model string, regardless of how it was chosen */
 	getActiveModelString?: () => string | undefined;
 	/** Get the current session model object (provider/api capabilities), regardless of how it was chosen. */
 	getActiveModel?: () => Model | undefined;
-	/** Session-scoped inspect_image mode override set by `/vision`; wins over the persisted setting. */
-	getInspectImageModeOverride?: () => InspectImageMode | undefined;
 	/** Get the session's live per-family service tiers (undefined = none). Source of truth for subagent `tier.subagent: inherit`. */
 	getServiceTierByFamily?: () => ServiceTierByFamily | undefined;
+	/**
+	 * Fires `before_subagent_spawn` on this session's extensions before a child's
+	 * model resolves. `signal` cancels awaiting handlers. Undefined when the
+	 * session has no extension runner.
+	 */
+	emitBeforeSubagentSpawn?(
+		event: BeforeSubagentSpawnEvent,
+		signal?: AbortSignal,
+	): Promise<BeforeSubagentSpawnEventResult | undefined>;
 	/** Auth storage for passing to subagents (avoids re-discovery) */
 	authStorage?: import("../session/auth-storage").AuthStorage;
 	/** Model registry for passing to subagents (avoids re-discovery) */
@@ -328,6 +437,22 @@ export interface ToolSession {
 	getTodoPhases?: () => TodoPhase[];
 	/** Replace cached todo phases for this session. */
 	setTodoPhases?: (phases: TodoPhase[]) => void;
+	/**
+	 * Record todo phases on the session branch. Direct `todo` calls persist via
+	 * their toolResult entry; callers that produce none (the eval bridge) use this
+	 * so branch rehydration agrees with the in-memory list.
+	 */
+	persistTodoPhases?: (phases: TodoPhase[]) => void;
+	/** Active workpool items whose incremental yields complete the current turn. */
+	getWorkPoolYieldItems?: () => readonly WorkPoolYieldItem[];
+	/**
+	 * Trimmed text of the most recent assistant message, or `undefined` when the
+	 * turn carries no text (e.g. thinking-only). The yield tool uses it to reject
+	 * a data-less `useLastTurn` finalize that would assemble to an empty result.
+	 */
+	getLastAssistantText?: () => string | undefined;
+	/** Replace the active workpool item contract and refresh its provider-facing prompt. */
+	setWorkPoolYieldItems?: (items: readonly WorkPoolYieldItem[]) => Promise<void>;
 	/** The tool-choice queue used to force forthcoming tool invocations and carry invocation handlers. */
 	getToolChoiceQueue?(): ToolChoiceQueue;
 	/** Build a model-provider-specific ToolChoice that targets the named tool, or undefined if unsupported. */
@@ -356,15 +481,8 @@ export interface ToolSession {
 	/** Get the most recent completed rewind, if this session just rewound a checkpoint. */
 	getLastCompletedRewind?: () => CompletedRewindState | undefined;
 
-	/** Per-session snapshot store of file contents as last shown to the model
-	 *  by `read`/`search`. Used by hashline anchor-stale recovery to
-	 *  reconstruct the version the model authored anchors against when the
-	 *  file changed out-of-band. Lazily initialized by `getFileSnapshotStore`. */
-	fileSnapshotStore?: InMemorySnapshotStore;
-
-	/** Per-session `CUT`/`PASTE` clipboard register shared across edit
-	 *  calls. Lazily initialized by `getEditClipboard`. */
-	editClipboard?: Clipboard;
+	/** Native snapshots, clipboard registers, and no-op guard shared by edit calls. */
+	editStore?: EditStore;
 
 	/** Per-session log of unresolved git merge conflict regions surfaced by
 	 *  `read`. Each entry gets a stable id N referenced by `write conflict://N`
@@ -375,13 +493,6 @@ export interface ToolSession {
 	/** Per-session ledger of post-edit LSP diagnostics already surfaced to the
 	 *  model for each file. Lazily initialized by `getDiagnosticsLedger`. */
 	diagnosticsLedger?: import("../lsp/diagnostics-ledger").DiagnosticsLedger;
-
-	/** Per-session ledger of consecutive byte-identical no-op edits, keyed by
-	 *  canonical file path. The hashline executor escalates a soft no-op hint
-	 *  to a thrown error once the same payload no-ops `NOOP_HARD_LIMIT` times,
-	 *  breaking subagent loops that ignore the textual hint (issue #2081).
-	 *  Lazily initialized by `getNoopLoopGuard`. */
-	noopLoopGuard?: import("../edit/hashline/noop-loop-guard").NoopLoopGuard;
 
 	/** Queue a hidden message to be injected at the next agent turn. */
 	queueDeferredMessage?(message: CustomMessage): void;
@@ -426,12 +537,12 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	github: GithubTool.createIf,
 	glob: s => new GlobTool(s, { rootPathAlias: true }),
 	grep: s => new GrepTool(s),
+	find: s => new FindTool(s),
 	lsp: LspTool.createIf,
-	inspect_image: s => new InspectImageTool(s),
-	browser: s => new BrowserTool(s),
-	computer: s => new ComputerTool(s),
 	checkpoint: CheckpointTool.createIf,
 	rewind: RewindTool.createIf,
+	context_notes: ContextNotesTool.createIf,
+	new_context: NewContextTool.createIf,
 	task: s => TaskTool.create(s),
 	hub: s => new HubTool(s),
 	todo: s => new TodoTool(s),
@@ -462,9 +573,16 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	const enableLsp = session.enableLsp ?? true;
 	const requestedTools = restrictToolNames
 		? normalizeToolNames(toolNames ?? [])
-		: toolNames && toolNames.length > 0
+		: toolNames
 			? normalizeToolNames(toolNames)
 			: undefined;
+	// createTools may be called more than once for the same ToolSession. A later
+	// explicit (or full-set) write request is a real grant and must upgrade any
+	// device-only transport left by an earlier read-only call.
+	if (requestedTools === undefined || requestedTools.includes("write")) {
+		session.deviceOnlyWrite = undefined;
+		session.pendingFullWriteDescription = undefined;
+	}
 	const goalEnabled = session.settings.get("goal.enabled");
 	const goalModeActive = !restrictToolNames && goalEnabled && session.getGoalModeState?.()?.enabled === true;
 	const externalThinkingActive =
@@ -475,15 +593,11 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	const backends = resolveEvalBackends(session);
 	const allowPython = backends.python;
 	const allowJs = backends.js;
-	const allowRuby = backends.ruby;
-	const allowJulia = backends.julia;
 	const skipEvalPreflight = session.skipPythonPreflight === true;
 	// Eval tool is enabled if ANY backend is reachable. JS needs no preflight, so
-	// we only probe Python/Ruby/Julia when JS is disabled — otherwise allowEval is
+	// we only probe Python when JS is disabled — otherwise allowEval is
 	// already true and per-backend availability is checked at first invocation.
 	let pythonAvailable = true;
-	let rubyAvailable = true;
-	let juliaAvailable = true;
 	const evalRequested = requestedTools === undefined || requestedTools.includes("eval");
 	if (!skipEvalPreflight && !allowJs && evalRequested) {
 		if (allowPython) {
@@ -498,34 +612,12 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 				logger.warn("Python kernel unavailable and JS backend disabled", { reason: availability.reason });
 			}
 		}
-		if (allowRuby) {
-			const availability = await checkRubyKernelAvailability(
-				session.cwd,
-				session.settings.get("ruby.interpreter")?.trim() || undefined,
-			);
-			rubyAvailable = availability.ok;
-			if (!availability.ok) {
-				logger.warn("Ruby kernel unavailable and JS backend disabled", { reason: availability.reason });
-			}
-		}
-		if (allowJulia) {
-			const availability = await checkJuliaKernelAvailability(
-				session.cwd,
-				session.settings.get("julia.interpreter")?.trim() || undefined,
-			);
-			juliaAvailable = availability.ok;
-			if (!availability.ok) {
-				logger.warn("Julia kernel unavailable and JS backend disabled", { reason: availability.reason });
-			}
-		}
 	}
 
 	const effectivePythonAllowed = allowPython && pythonAvailable;
-	const effectiveRubyAllowed = allowRuby && rubyAvailable;
-	const effectiveJuliaAllowed = allowJulia && juliaAvailable;
 	// Eval is exposed whenever any backend is reachable. A backend may be
 	// unreachable, in which case eval dispatches exclusively to the others.
-	const allowEval = effectivePythonAllowed || allowJs || effectiveRubyAllowed || effectiveJuliaAllowed;
+	const allowEval = effectivePythonAllowed || allowJs;
 
 	// Checkpoint and rewind are a pair: listing one without the other strands
 	// the agent (it can checkpoint but not rewind, or vice versa). Auto-include
@@ -542,6 +634,14 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	// Auto-include AST counterparts when their text-based sibling is present.
 	// Restricted callers own the active list and must not have it widened.
 	if (requestedTools && !restrictToolNames) {
+		if (
+			session.settings.get("compaction.experimentalContextManagement") &&
+			requestedTools.includes("read") &&
+			requestedTools.includes("grep")
+		) {
+			if (!requestedTools.includes("context_notes")) requestedTools.push("context_notes");
+			if (!requestedTools.includes("new_context")) requestedTools.push("new_context");
+		}
 		if (goalModeActive && !requestedTools.includes("goal")) {
 			requestedTools.push("goal");
 		}
@@ -606,16 +706,14 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			return (!includeYield || session.prewalkArmed === true) && session.settings.get("todo.enabled");
 		if (name === "glob") return session.settings.get("glob.enabled");
 		if (name === "grep") return session.settings.get("grep.enabled");
+		if (name === "find") return isFindEnabled(session);
 		if (name === "github") return session.settings.get("github.enabled");
 		if (name === "ast_grep") return session.settings.get("astGrep.enabled");
 		if (name === "ast_edit") return session.settings.get("astEdit.enabled");
-		if (name === "inspect_image") return isInspectImageToolActive(session);
 		if (name === "web_search") return session.settings.get("web_search.enabled");
 		if (name === "security_scan") return session.settings.get("security.enabled");
 		if (name === "think") return externalThinkingActive;
 		if (name === "ask") return session.settings.get("ask.enabled");
-		if (name === "browser") return session.settings.get("browser.enabled");
-		if (name === "computer") return session.settings.get("computer.enabled");
 		if (name === "checkpoint" || name === "rewind")
 			return (
 				session.settings.get("checkpoint.enabled") &&
@@ -683,15 +781,40 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	const builtInNames = new Set(tools.map(tool => tool.name));
 	for (const tool of tools) toolRegistry.set(tool.name, tool);
 
+	const xdevRequested = !restrictToolNames && session.settings.get("tools.xdev");
+	// xd:// mounting rides the write tool as its execution transport, so a
+	// session whose explicit tool list grants `read` but omits `write` would
+	// allocate no xd:// state and expose every later-registered MCP/extension
+	// tool top-level with its full schema on every request — the opposite of
+	// the intended restriction, and enough to overflow narrow provider context
+	// windows on MCP-heavy sessions. Grant a device-only `write` instead:
+	// `write xd://<tool>` dispatches mounted devices while filesystem writes
+	// stay rejected (enforced by WriteTool via `session.deviceOnlyWrite`). No
+	// capability is expanded: without mounting, those tools were already
+	// presented — and callable — top-level.
+	if (
+		xdevRequested &&
+		requestedTools !== undefined &&
+		!tools.some(tool => tool.name === "write") &&
+		tools.some(tool => tool.name === "read")
+	) {
+		session.deviceOnlyWrite = true;
+		const writeTool = await logger.time("createTools:write:xdev-transport", BUILTIN_TOOLS.write, session);
+		if (writeTool) {
+			const wrapped = wrapToolWithMetaNotice(writeTool);
+			tools.push(wrapped);
+			toolRegistry.set(wrapped.name, wrapped);
+			builtInNames.add(wrapped.name);
+		} else {
+			session.deviceOnlyWrite = undefined;
+		}
+	}
+
 	// Ordinary sessions use xd:// for discoverable built-ins, custom tools, and
 	// MCP tools. Structured children must expose only their host-provided names,
 	// so never allocate a registry that later SDK assembly could populate.
-	// The transport rides read/write, so a session granted no write tool never
-	// allocates xd:// state — its tools are exposed top-level directly instead
-	// of auto-granting a write transport the session was denied.
 	// Explicitly requested built-ins retain their top-level presentation.
-	const xdevEnabled =
-		!restrictToolNames && session.settings.get("tools.xdev") && tools.some(tool => tool.name === "write");
+	const xdevEnabled = xdevRequested && tools.some(tool => tool.name === "write");
 	const mountBuiltinTools = requestedTools === undefined;
 	if (xdevEnabled) {
 		const mountedNames = new Set<string>();
@@ -711,8 +834,6 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	}
 	// Staged previews from deferrable tools (e.g. ast_edit) resolve through a
 	// `write` to xd://resolve/reject, so retain write whenever one can stage.
-	// xd:// mounting itself never registers write: sessions without a granted
-	// write tool skip mounting entirely (see xdevEnabled above).
 	const xdevMounted = (session.xdev?.mountedNames.size ?? 0) > 0;
 	if (
 		!restrictToolNames &&
@@ -744,3 +865,28 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 
 	return tools;
 }
+
+export type { AskToolDetails, QuestionResult } from "@oh-my-pi/pi-tui/tools/ask";
+// Issue #12680: extensions that shadow the built-in ask tool reach the native
+// renderer through the injected pi.pi namespace (the root barrel of this
+// package). Re-export it so the pi-tui renderer migration doesn't drop it.
+export { askToolRenderer } from "@oh-my-pi/pi-tui/tools/ask";
+export type {
+	TodoStatus,
+	TodoOperation,
+	TodoItem,
+	TodoPhase,
+	TodoCompletionTransition,
+	TodoToolDetails,
+	CollapsedTodoSelection,
+} from "@oh-my-pi/pi-tui/tools/todo";
+export type { ThinkRenderArgs } from "@oh-my-pi/pi-tui/tools/think";
+export type { ResolutionDeviceName, ResolveDetails } from "@oh-my-pi/pi-tui/tools/resolve";
+export type {
+	GhToolDetails,
+	GhPrCheckoutSummary,
+	GhRunWatchJobDetails,
+	GhRunWatchRunDetails,
+	GhRunWatchFailedLogDetails,
+	GhRunWatchViewDetails,
+} from "@oh-my-pi/pi-tui/tools/github";

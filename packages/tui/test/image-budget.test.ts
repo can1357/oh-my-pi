@@ -15,11 +15,16 @@ import {
 	encodeKittyPlacement,
 	encodeKittyTransmit,
 	getCellDimensions,
+	imageFallback,
 	ImageProtocol,
 	setCellDimensions,
 	TERMINAL,
 	wrapTmuxPassthrough,
 } from "@oh-my-pi/pi-tui/terminal-capabilities";
+import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
+
+withoutTerminalMultiplexer();
+
 import { VirtualTerminal } from "./virtual-terminal";
 
 type MutableTerminalInfo = { id: string; imageProtocol: ImageProtocol | null };
@@ -30,10 +35,16 @@ const BASE64_ONE_PIXEL_PNG =
 
 const ORIGINAL_TMUX = Bun.env.TMUX;
 const ORIGINAL_HERDR_ENV = Bun.env.HERDR_ENV;
+const ORIGINAL_HERDR_PANE_ID = Bun.env.HERDR_PANE_ID;
+const ORIGINAL_HERDR_TAB_ID = Bun.env.HERDR_TAB_ID;
+const ORIGINAL_HERDR_WORKSPACE_ID = Bun.env.HERDR_WORKSPACE_ID;
 
 beforeEach(() => {
 	delete Bun.env.TMUX;
 	delete Bun.env.HERDR_ENV;
+	delete Bun.env.HERDR_PANE_ID;
+	delete Bun.env.HERDR_TAB_ID;
+	delete Bun.env.HERDR_WORKSPACE_ID;
 });
 
 afterEach(() => {
@@ -41,16 +52,22 @@ afterEach(() => {
 	else Bun.env.TMUX = ORIGINAL_TMUX;
 	if (ORIGINAL_HERDR_ENV === undefined) delete Bun.env.HERDR_ENV;
 	else Bun.env.HERDR_ENV = ORIGINAL_HERDR_ENV;
+	if (ORIGINAL_HERDR_PANE_ID === undefined) delete Bun.env.HERDR_PANE_ID;
+	else Bun.env.HERDR_PANE_ID = ORIGINAL_HERDR_PANE_ID;
+	if (ORIGINAL_HERDR_TAB_ID === undefined) delete Bun.env.HERDR_TAB_ID;
+	else Bun.env.HERDR_TAB_ID = ORIGINAL_HERDR_TAB_ID;
+	if (ORIGINAL_HERDR_WORKSPACE_ID === undefined) delete Bun.env.HERDR_WORKSPACE_ID;
+	else Bun.env.HERDR_WORKSPACE_ID = ORIGINAL_HERDR_WORKSPACE_ID;
 });
 
 /** Drive one render pass against the budget with `count` images (ids 1..count, stable across passes). */
-function pass(budget: ImageBudget, count: number): { suppressed: boolean[]; reset: boolean; purge: readonly number[] } {
+function pass(budget: ImageBudget, count: number): { suppressed: boolean[]; retry: boolean; purge: readonly number[] } {
 	budget.beginPass();
 	const suppressed: boolean[] = [];
 	for (let i = 0; i < count; i++) suppressed.push(budget.observe(i + 1));
-	const reset = budget.endPass();
+	const retry = budget.endPass();
 	const purge = [...budget.takePurgeIds()];
-	return { suppressed, reset, purge };
+	return { suppressed, retry, purge };
 }
 
 describe("ImageBudget", () => {
@@ -58,15 +75,15 @@ describe("ImageBudget", () => {
 		const budget = new ImageBudget(3, () => {});
 		const first = pass(budget, 2);
 		expect(first.suppressed).toEqual([false, false]);
-		expect(first.reset).toBe(false);
+		expect(first.retry).toBe(false);
 
 		const second = pass(budget, 3);
 		expect(second.suppressed).toEqual([false, false, false]);
-		expect(second.reset).toBe(false);
+		expect(second.retry).toBe(false);
 		expect(second.purge).toEqual([]);
 	});
 
-	it("demotes the oldest image on the frame after the cap is exceeded, purging its graphics id", () => {
+	it("repeats an over-cap pass before emission and purges the oldest graphics id", () => {
 		let renders = 0;
 		const budget = new ImageBudget(2, () => {
 			renders += 1;
@@ -75,31 +92,31 @@ describe("ImageBudget", () => {
 		// At cap: nothing demoted.
 		expect(pass(budget, 2).suppressed).toEqual([false, false]);
 
-		// Over cap: the new image still shows this frame; a follow-up render is scheduled.
+		// Discovery identifies the stricter split and requires a retry before emit.
 		const overflow = pass(budget, 3);
 		expect(overflow.suppressed).toEqual([false, false, false]);
-		expect(overflow.reset).toBe(false);
+		expect(overflow.retry).toBe(true);
 		expect(renders).toBe(1);
 
-		// The scheduled frame demotes the oldest image and purges its id (1) with a full redraw.
+		// The retry demotes the oldest image and purges its id (1).
 		const demote = pass(budget, 3);
 		expect(demote.suppressed).toEqual([true, false, false]);
-		expect(demote.reset).toBe(true);
+		expect(demote.retry).toBe(false);
 		expect(demote.purge).toEqual([1]);
 
-		// Steady state: no further resets while the count is unchanged.
+		// Steady state: no further retries while the count is unchanged.
 		const steady = pass(budget, 3);
 		expect(steady.suppressed).toEqual([true, false, false]);
-		expect(steady.reset).toBe(false);
+		expect(steady.retry).toBe(false);
 		expect(steady.purge).toEqual([]);
 	});
 
 	it("keeps exactly `cap` images live as more arrive", () => {
 		const budget = new ImageBudget(2, () => {});
-		// Walk up to 5 images; each addition settles into a demotion frame.
+		// Walk up to 5 images; each addition settles in a pre-emission retry.
 		for (let count = 3; count <= 5; count++) {
-			pass(budget, count); // overflow frame (schedules reset)
-			pass(budget, count); // reset frame (applies demotion)
+			pass(budget, count); // discovery pass requests a retry
+			pass(budget, count); // retry applies the demotion
 		}
 		const settled = pass(budget, 5);
 		// Newest 2 live, oldest 3 demoted.
@@ -114,7 +131,7 @@ describe("ImageBudget", () => {
 		expect(budget.enabled).toBe(false);
 		const result = pass(budget, 6);
 		expect(result.suppressed).toEqual([false, false, false, false, false, false]);
-		expect(result.reset).toBe(false);
+		expect(result.retry).toBe(false);
 		expect(result.purge).toEqual([]);
 		expect(renders).toBe(0);
 	});
@@ -129,7 +146,7 @@ describe("ImageBudget", () => {
 		pass(budget, 2);
 		const restored = pass(budget, 2);
 		expect(restored.suppressed).toEqual([false, false]);
-		expect(restored.reset).toBe(false);
+		expect(restored.retry).toBe(false);
 		expect(restored.purge).toEqual([]);
 	});
 
@@ -171,16 +188,16 @@ describe("ImageBudget", () => {
 		budget.observe(id3);
 		budget.endPass(); // schedules demotion of id1
 
-		// The key map should STILL hold id1 because it's not purged until the demotion frame.
+		// The key map still holds id1 until the retry applies the demotion.
 		expect(budget.acquireId("keyA")).toBe(id1);
 
-		// Demotion frame: applies the purge of id1.
+		// Retry pass: applies the purge of id1 without requiring another pass.
 		budget.beginPass();
 		budget.observe(id1);
 		budget.observe(id2);
 		budget.observe(id3);
-		const reset = budget.endPass();
-		expect(reset).toBe(true);
+		const retry = budget.endPass();
+		expect(retry).toBe(false);
 
 		// id1 was purged. Acquiring "keyA" now yields a fresh ID.
 		const id1Fresh = budget.acquireId("keyA");
@@ -207,7 +224,7 @@ describe("ImageBudget", () => {
 		budget.observe(oldId);
 		budget.observe(id2);
 		budget.observe(id3);
-		expect(budget.endPass()).toBe(true);
+		expect(budget.endPass()).toBe(false);
 		expect([...budget.takePurgeIds()]).toEqual([oldId]);
 
 		const suppressedId = budget.acquireId("keyA");
@@ -275,7 +292,7 @@ describe("ImageBudget", () => {
 		// the same split and schedules no purge or redraw.
 		const after = pass(budget, 4);
 		expect(after.suppressed).toEqual([true, true, false, false]);
-		expect(after.reset).toBe(false);
+		expect(after.retry).toBe(false);
 		expect(after.purge).toEqual([]);
 	});
 });
@@ -679,11 +696,788 @@ describe("TUI inline-image budget", () => {
 		}
 	});
 
-	it("reuses a visible Kitty placement across zero-commit width-epoch repaints", async () => {
+	for (const fullscreen of [false, true]) {
+		it(`bounds resident graphics across ${fullscreen ? "fullscreen overlay" : "retired provider"} frames and replays evicted images`, async () => {
+			const term = new VirtualTerminal(40, 12);
+			const resident = new Set<number>();
+			let peak = 0;
+			const realWrite = term.write.bind(term);
+			vi.spyOn(term, "write").mockImplementation(data => {
+				for (const match of data.matchAll(/\x1b_G([^;\x1b]+)(?:;[^\x1b]*)?\x1b\\/g)) {
+					const fields = new Map(match[1]!.split(",").map(field => field.split("=") as [string, string]));
+					const id = Number(fields.get("i"));
+					if (fields.get("a") === "t") resident.add(id);
+					if (fields.get("a") === "d" && fields.get("d") === "I") resident.delete(id);
+					if (fields.get("a") === "d" && fields.get("d") === "A") resident.clear();
+					peak = Math.max(peak, resident.size);
+				}
+				realWrite(data);
+			});
+			const tui = new TUI(term);
+			tui.setMaxInlineImages(2);
+			const images = Array.from({ length: 5 }, (_, i) => makeImage(tui.imageBudget, `retired-${i}`));
+			const ids = images.map((_, i) => tui.imageBudget.acquireId(`retired-${i}`));
+			let current = 0;
+			tui.setFrameProvider({
+				renderFrame: size => ({ viewport: images[current]!.render(size.columns) }),
+				acknowledgeHistory: () => {},
+			});
+			const overlay = fullscreen
+				? tui.showOverlay(
+						{ render: width => images[current]!.render(width), invalidate: () => {} },
+						{ fullscreen: true },
+					)
+				: undefined;
+			try {
+				tui.start();
+				await settle(term);
+				for (current = 1; current < images.length; current++) {
+					tui.requestRender();
+					await settle(term);
+					if (current === 1) {
+						expect([...resident]).toEqual(ids.slice(0, 2));
+						tui.resetDisplay();
+						await settle(term);
+						// A latched reset deletes nothing until its own repaint runs. In
+						// the fullscreen arm the overlay is installed before start(),
+						// so no normal frame is ever painted and that repaint never
+						// comes: both ids stay resident, still within the cap. The
+						// retired one here belongs to an earlier alternate frame — this
+						// fixture says nothing about normal-buffer placements.
+						expect([...resident]).toEqual(fullscreen ? ids.slice(0, 2) : [ids[1]!]);
+					}
+				}
+				expect([...resident]).toEqual(ids.slice(-2));
+				expect(peak).toBe(2);
+				current = 0;
+				tui.requestRender();
+				await settle(term);
+				expect(resident.has(ids[0]!)).toBe(true);
+				expect(resident.size).toBe(2);
+				tui.setMaxInlineImages(1);
+				await settle(term);
+				expect([...resident]).toEqual([ids[0]!]);
+				tui.resetDisplay();
+				await settle(term);
+				expect([...resident]).toEqual([ids[0]!]);
+				if (overlay) {
+					overlay.hide();
+					await settle(term);
+					expect([...resident]).toEqual([ids[0]!]);
+				}
+			} finally {
+				current = 0;
+				tui.stop();
+			}
+		});
+	}
+
+	/** One screen's graphics store: loaded image data and the ids with a standing placement. */
+	interface GraphicsStore {
+		resident: Set<number>;
+		placed: Set<number>;
+		virtual: Set<number>;
+	}
+
+	/**
+	 * Track what the terminal's graphics stores actually hold and which images
+	 * still have a placement on screen: an eviction that deletes a visible image
+	 * is only repaired if the frame re-emits its placement, and the frame diff
+	 * skips rows whose text is unchanged.
+	 *
+	 * Models kitty/Ghostty: the normal and alternate screens keep separate
+	 * stores, `?1049h` hands over an empty alternate store, and ED2 clears the
+	 * active screen's placements and reclaims every image left without one — a
+	 * transmit that precedes the erase is lost. `resident`/`placed`/`virtual`
+	 * are the normal screen's store; `alt` is the alternate one.
+	 *
+	 * `deleted` is append-only because `d=I` drops every placement of the id,
+	 * scrollback copies included, and only the current frame is ever repainted —
+	 * so a later re-place does not undo it.
+	 */
+	function trackKittyGraphics(term: VirtualTerminal): GraphicsStore & {
+		alt: GraphicsStore;
+		deleted: number[];
+		writes: string[];
+	} {
+		const screen: GraphicsStore = { resident: new Set(), placed: new Set(), virtual: new Set() };
+		const alt: GraphicsStore = { resident: new Set(), placed: new Set(), virtual: new Set() };
+		let active = screen;
+		const deleted: number[] = [];
+		const writes: string[] = [];
+		const realWrite = term.write.bind(term);
+		vi.spyOn(term, "write").mockImplementation((data: string) => {
+			writes.push(data);
+			for (const match of data.matchAll(/\x1b\[\?1049([hl])|\x1b\[2J|\x1b_G([^;\x1b]+)(?:;[^\x1b]*)?\x1b\\/g)) {
+				if (match[1] === "h") {
+					alt.resident.clear();
+					alt.placed.clear();
+					alt.virtual.clear();
+					active = alt;
+					continue;
+				}
+				if (match[1] === "l") {
+					active = screen;
+					continue;
+				}
+				if (match[2] === undefined) {
+					// ED2: placements on the active screen are gone, and so is every
+					// image that no placement references any more.
+					for (const held of active.resident) {
+						if (active.virtual.has(held)) continue;
+						active.placed.delete(held);
+						active.resident.delete(held);
+					}
+					continue;
+				}
+				const fields = new Map(match[2].split(",").map(field => field.split("=") as [string, string]));
+				const id = Number(fields.get("i"));
+				const action = fields.get("a");
+				if (action === "t") active.resident.add(id);
+				if (action === "p") {
+					if (fields.get("U") === "1") active.virtual.add(id);
+					if (active.resident.has(id)) active.placed.add(id);
+				}
+				if (action === "d" && fields.get("d") === "I") {
+					active.resident.delete(id);
+					active.placed.delete(id);
+					active.virtual.delete(id);
+					deleted.push(id);
+				}
+				if (action === "d" && fields.get("d") === "A") {
+					// Kitty's `d=A` deletes images and their placements but spares
+					// *virtual* placements, so a placeholder image survives it. Model
+					// that: an oracle that clears everything here reports an id as
+					// gone when the terminal still holds it, and then a missing
+					// explicit delete looks like no leak at all.
+					for (const held of active.resident) {
+						if (active.virtual.has(held)) continue;
+						deleted.push(held);
+						active.resident.delete(held);
+						active.placed.delete(held);
+					}
+				}
+			}
+			realWrite(data);
+		});
+		return { ...screen, alt, deleted, writes };
+	}
+
+	it("keeps normal-buffer placements visible across a fullscreen overlay pass", async () => {
 		const originalGraphics = { ...getKittyGraphics() };
-		const originalResizeMode = Bun.env.PI_TUI_RESIZE_IN_PLACE;
-		const originalZellij = Bun.env.ZELLIJ;
-		const term = new VirtualTerminal(20, 8);
+		const term = new VirtualTerminal(40, 12);
+		const { resident, placed, alt } = trackKittyGraphics(term);
+
+		setKittyGraphics({ unicodePlaceholders: false });
+		const tui = new TUI(term);
+		tui.setMaxInlineImages(2);
+		const behind = [makeImage(tui.imageBudget, "behind-0"), makeImage(tui.imageBudget, "behind-1")];
+		const behindIds = behind.map((_, i) => tui.imageBudget.acquireId(`behind-${i}`));
+		const modal = makeImage(tui.imageBudget, "modal");
+		const modalId = tui.imageBudget.acquireId("modal");
+		const ascending = (a: number, b: number) => a - b;
+		tui.setFrameProvider({
+			renderFrame: size => ({ viewport: behind.flatMap(image => image.render(size.columns)) }),
+			acknowledgeHistory: () => {},
+		});
+
+		try {
+			tui.start();
+			await settle(term);
+			expect([...placed].sort(ascending)).toEqual([...behindIds].sort(ascending));
+
+			// The modal's own image lives in the alternate screen's store while
+			// the transcript's two stay untouched behind the alt buffer. Paying
+			// for it by deleting one of them blanks a row the restored normal
+			// frame never rewrites.
+			const overlay = tui.showOverlay(
+				{ render: width => modal.render(width), invalidate: () => {} },
+				{ fullscreen: true },
+			);
+			await settle(term);
+			expect(alt.placed.has(modalId)).toBe(true);
+			expect(resident.has(modalId)).toBe(false);
+
+			overlay.hide();
+			await settle(term);
+
+			expect([...placed].sort(ascending)).toEqual([...behindIds].sort(ascending));
+			expect([...resident].sort(ascending)).toEqual([...behindIds].sort(ascending));
+		} finally {
+			tui.stop();
+			setKittyGraphics(originalGraphics);
+		}
+	});
+
+	it("keeps a shared image placed when an over-cap fullscreen overlay demotes it", async () => {
+		const originalGraphics = { ...getKittyGraphics() };
+		const term = new VirtualTerminal(40, 12);
+		const { resident, placed } = trackKittyGraphics(term);
+
+		setKittyGraphics({ unicodePlaceholders: false });
+		const tui = new TUI(term);
+		tui.setMaxInlineImages(2);
+		const behind = makeImage(tui.imageBudget, "behind");
+		const shared = makeImage(tui.imageBudget, "shared");
+		const sharedId = tui.imageBudget.acquireId("shared");
+		// Same imageKey, so the modal's copy carries the transcript's graphics id.
+		// Rendering it first puts that id in the over-cap demotion prefix while its
+		// normal-buffer placement still stands behind the alt screen.
+		const modalImages = [
+			makeImage(tui.imageBudget, "shared"),
+			makeImage(tui.imageBudget, "modal-0"),
+			makeImage(tui.imageBudget, "modal-1"),
+		];
+		tui.setFrameProvider({
+			renderFrame: size => ({ viewport: [behind, shared].flatMap(image => image.render(size.columns)) }),
+			acknowledgeHistory: () => {},
+		});
+
+		try {
+			tui.start();
+			await settle(term);
+			expect(placed.has(sharedId)).toBe(true);
+
+			const overlay = tui.showOverlay(
+				{ render: width => modalImages.flatMap(image => image.render(width)), invalidate: () => {} },
+				{ fullscreen: true },
+			);
+			await settle(term);
+
+			overlay.hide();
+			await settle(term);
+
+			expect(placed.has(sharedId)).toBe(true);
+			expect(resident.has(sharedId)).toBe(true);
+		} finally {
+			tui.stop();
+			setKittyGraphics(originalGraphics);
+		}
+	});
+
+	it("spares a screen image whose suppression the reconcile undercut", async () => {
+		const originalGraphics = { ...getKittyGraphics() };
+		const term = new VirtualTerminal(40, 12);
+		const { placed, resident, deleted } = trackKittyGraphics(term);
+
+		setKittyGraphics({ unicodePlaceholders: false });
+		const tui = new TUI(term);
+		tui.setMaxInlineImages(1);
+		const older = makeImage(tui.imageBudget, "older");
+		const kept = makeImage(tui.imageBudget, "kept");
+		const keptId = tui.imageBudget.acquireId("kept");
+		const modal = makeImage(tui.imageBudget, "modal");
+		const modalId = tui.imageBudget.acquireId("modal");
+		let transcript = [older, kept];
+		tui.setFrameProvider({
+			renderFrame: size => ({ viewport: transcript.flatMap(image => image.render(size.columns)) }),
+			acknowledgeHistory: () => {},
+		});
+
+		try {
+			tui.start();
+			await settle(term);
+			expect(placed.has(keptId)).toBe(true);
+
+			const overlay = tui.showOverlay(
+				{ render: width => modal.render(width), invalidate: () => {} },
+				{ fullscreen: true },
+			);
+			await settle(term);
+
+			// Dropping the older image relaxes the threshold, but the pass already
+			// decided suppression under the old one. That stale text fallback lasts
+			// a frame; deleting the graphic behind it lasts forever.
+			overlay.hide();
+			transcript = [kept];
+			await settle(term);
+
+			expect(deleted).not.toContain(keptId);
+			expect(placed.has(keptId)).toBe(true);
+			expect(tui.imageBudget.acquireId("kept")).toBe(keptId);
+			// The modal's image only ever reached the alternate store, which the
+			// next `?1049h` wipes; the normal screen's store never grew for it.
+			expect(resident.has(modalId)).toBe(false);
+			expect([...resident]).toEqual([keptId]);
+		} finally {
+			tui.stop();
+			setKittyGraphics(originalGraphics);
+		}
+	});
+
+	it("names forgotten placeholder images in a reset's own deletions", async () => {
+		const originalGraphics = { ...getKittyGraphics() };
+		const term = new VirtualTerminal(40, 12);
+		const { writes } = trackKittyGraphics(term);
+
+		setKittyGraphics({ unicodePlaceholders: true });
+		const tui = new TUI(term);
+		tui.setMaxInlineImages(3);
+		const gone = makeImage(tui.imageBudget, "gone");
+		const goneId = tui.imageBudget.acquireId("gone");
+		let showImage = true;
+		tui.setFrameProvider({
+			renderFrame: size => ({ viewport: showImage ? [...gone.render(size.columns)] : ["transcript"] }),
+			acknowledgeHistory: () => {},
+		});
+
+		try {
+			tui.start();
+			await settle(term);
+			expect(writes.join("")).toContain(BASE64_ONE_PIXEL_PNG);
+
+			// Drop it from the frame, then reset. `d=A` spares virtual placements
+			// and erasing placeholder text leaves the prototype, so the reset has to
+			// name this id: forgetting drops it from tracking, and no later sweep
+			// can reach a placement it no longer knows about.
+			showImage = false;
+			writes.length = 0;
+			tui.resetDisplay();
+			await settle(term);
+
+			const output = writes.join("");
+			const deleteAll = output.indexOf("\x1b_Ga=d,d=A");
+			expect(deleteAll).toBeGreaterThanOrEqual(0);
+			expect(output).toContain(`\x1b_Ga=d,d=I,i=${goneId}`);
+		} finally {
+			tui.stop();
+			setKittyGraphics(originalGraphics);
+		}
+	});
+
+	it("holds a reset's deletions until the repaint that restores them", async () => {
+		const originalGraphics = { ...getKittyGraphics() };
+		const term = new VirtualTerminal(40, 12);
+		const { placed, deleted } = trackKittyGraphics(term);
+
+		setKittyGraphics({ unicodePlaceholders: false });
+		const tui = new TUI(term);
+		tui.setMaxInlineImages(3);
+		const transcript = makeImage(tui.imageBudget, "transcript");
+		const transcriptId = tui.imageBudget.acquireId("transcript");
+		tui.addChild(transcript);
+
+		try {
+			tui.start();
+			await settle(term);
+			expect(placed.has(transcriptId)).toBe(true);
+
+			// The modal carries no images of its own, so nothing on the alternate
+			// buffer has any claim on the transcript's graphic.
+			tui.showOverlay(new Text("MODAL", 0, 0), { fullscreen: true });
+			await settle(term);
+			tui.resetDisplay();
+			await settle(term);
+			expect(deleted).not.toContain(transcriptId);
+
+			// stop() restores the normal screen and drops the reset latch, so no
+			// destructive repaint ever runs — a deletion issued at latch time would
+			// leave the transcript blank with nothing left to re-place it.
+			tui.stop();
+			await settle(term);
+			expect(deleted).not.toContain(transcriptId);
+			expect(placed.has(transcriptId)).toBe(true);
+		} finally {
+			setKittyGraphics(originalGraphics);
+		}
+	});
+
+	/** Deterministic scheduler so a settled resize can be driven step by step. */
+	class StepScheduler {
+		#now = 0;
+		#pending = new Set<() => void>();
+
+		now(): number {
+			return this.#now;
+		}
+
+		scheduleImmediate(callback: () => void): void {
+			callback();
+		}
+
+		scheduleRender(callback: () => void, _delayMs: number) {
+			this.#pending.add(callback);
+			return { cancel: () => this.#pending.delete(callback) };
+		}
+
+		settle(): void {
+			this.#now += 120;
+			const pending = [...this.#pending];
+			this.#pending.clear();
+			for (const callback of pending) callback();
+		}
+	}
+
+	for (const placeholders of [false, true]) {
+		it(`keeps a ${placeholders ? "placeholder" : "direct"} image placed through a rebuild-mode resize`, () => {
+			const originalGraphics = { ...getKittyGraphics() };
+			const term = new VirtualTerminal(40, 8);
+			const { writes, placed, alt } = trackKittyGraphics(term);
+
+			setKittyGraphics({ unicodePlaceholders: placeholders });
+			const scheduler = new StepScheduler();
+			const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+			tui.setMaxInlineImages(2);
+			const shown = makeImage(tui.imageBudget, "shown");
+			const shownId = tui.imageBudget.acquireId("shown");
+			tui.setResizeScrollback("rebuild");
+			tui.setFrameProvider({
+				renderFrame: size => ({ viewport: [...shown.render(size.columns)] }),
+				renderResizeFrame: size => [...shown.render(size.columns)],
+				acknowledgeHistory: () => {},
+				beginHistoryReplay: () => {},
+			});
+
+			try {
+				tui.start();
+				expect(placed.has(shownId)).toBe(true);
+
+				writes.length = 0;
+				term.resize(30, 8);
+				// The drag paints on the borrowed alternate buffer, whose store starts
+				// empty: the image must be transmitted there too or the drag frame
+				// shows blank cells until the resize settles.
+				expect(alt.placed.has(shownId)).toBe(true);
+				scheduler.settle();
+				scheduler.settle();
+				scheduler.settle();
+
+				// The settled rebuild deletes every placement (`d=A`), erases screen
+				// and history, then re-sends the data and re-places it. The erase
+				// reclaims any image that has no placement, so the transmit must
+				// follow it — otherwise the replay places an image the terminal just
+				// freed and the picture vanishes after the resize.
+				const output = writes.join("");
+				const deleteAll = output.indexOf("\x1b_Ga=d,d=A");
+				const erase = output.indexOf("\x1b[2J\x1b[3J");
+				const transmit = output.indexOf(BASE64_ONE_PIXEL_PNG, deleteAll);
+				expect(deleteAll).toBeGreaterThanOrEqual(0);
+				expect(erase).toBeGreaterThan(deleteAll);
+				expect(transmit).toBeGreaterThan(erase);
+				expect(placed.has(shownId)).toBe(true);
+			} finally {
+				tui.stop();
+				setKittyGraphics(originalGraphics);
+			}
+		});
+	}
+
+	it("releases a demoted image's key once its graphic is actually retired", async () => {
+		const originalGraphics = { ...getKittyGraphics() };
+		const term = new VirtualTerminal(40, 20);
+		trackKittyGraphics(term);
+
+		setKittyGraphics({ unicodePlaceholders: false });
+		const tui = new TUI(term);
+		tui.setMaxInlineImages(2);
+		const transcript = Array.from({ length: 3 }, (_, i) => makeImage(tui.imageBudget, `row-${i}`));
+		const oldestId = tui.imageBudget.acquireId("row-0");
+		tui.setFrameProvider({
+			renderFrame: size => ({ viewport: transcript.flatMap(image => image.render(size.columns)) }),
+			acknowledgeHistory: () => {},
+		});
+
+		try {
+			tui.start();
+			await settle(term);
+
+			// Over cap, so the oldest is demoted and its graphic really is gone.
+			// Its key must not hand that id back to a recreated component.
+			expect(tui.imageBudget.acquireId("row-0")).not.toBe(oldestId);
+			expect(tui.imageBudget.acquireId("row-2")).toBe(tui.imageBudget.acquireId("row-2"));
+		} finally {
+			tui.stop();
+			setKittyGraphics(originalGraphics);
+		}
+	});
+
+	it("keeps a shared image's key when the overlay's demotion is refused", async () => {
+		const originalGraphics = { ...getKittyGraphics() };
+		const term = new VirtualTerminal(40, 12);
+		const { placed, deleted } = trackKittyGraphics(term);
+
+		setKittyGraphics({ unicodePlaceholders: false });
+		const tui = new TUI(term);
+		tui.setMaxInlineImages(2);
+		const other = makeImage(tui.imageBudget, "other");
+		const shared = makeImage(tui.imageBudget, "shared");
+		const sharedId = tui.imageBudget.acquireId("shared");
+		// Rendered first inside an over-cap modal, so the alt pass suppresses this
+		// id while the transcript behind still shows its graphic.
+		const modalImages = [
+			makeImage(tui.imageBudget, "shared"),
+			makeImage(tui.imageBudget, "modal-0"),
+			makeImage(tui.imageBudget, "modal-1"),
+		];
+		let transcript = [shared, other];
+		tui.setFrameProvider({
+			renderFrame: size => ({ viewport: transcript.flatMap(image => image.render(size.columns)) }),
+			acknowledgeHistory: () => {},
+		});
+
+		try {
+			tui.start();
+			await settle(term);
+			expect(placed.has(sharedId)).toBe(true);
+
+			const overlay = tui.showOverlay(
+				{ render: width => modalImages.flatMap(image => image.render(width)), invalidate: () => {} },
+				{ fullscreen: true },
+			);
+			await settle(term);
+			overlay.hide();
+			await settle(term);
+
+			// Suppression is not retirement: the graphic survived, so the key must
+			// still resolve to it. A fresh id here orphans the old one, and the next
+			// pass deletes every placement it ever made, scrollback included.
+			transcript = [makeImage(tui.imageBudget, "shared"), other];
+			expect(tui.imageBudget.acquireId("shared")).toBe(sharedId);
+
+			tui.requestRender();
+			await settle(term);
+			expect(deleted).not.toContain(sharedId);
+			expect(placed.has(sharedId)).toBe(true);
+		} finally {
+			tui.stop();
+			setKittyGraphics(originalGraphics);
+		}
+	});
+
+	it("starts each alternate-buffer lifecycle without the previous overlay's split", async () => {
+		const originalGraphics = { ...getKittyGraphics() };
+		const term = new VirtualTerminal(40, 12);
+		const { writes } = trackKittyGraphics(term);
+
+		setKittyGraphics({ unicodePlaceholders: false });
+		const tui = new TUI(term);
+		tui.setMaxInlineImages(2);
+		tui.setFrameProvider({
+			renderFrame: () => ({ viewport: ["transcript"] }),
+			acknowledgeHistory: () => {},
+		});
+		// Over cap, so its own pass settles at a stricter threshold.
+		const firstModal = Array.from({ length: 3 }, (_, i) => makeImage(tui.imageBudget, `first-${i}`));
+		const secondModal = makeImage(tui.imageBudget, "second");
+		const secondId = tui.imageBudget.acquireId("second");
+		const fallback = imageFallback("image/png", { widthPx: 1, heightPx: 1 });
+
+		try {
+			tui.start();
+			await settle(term);
+
+			const first = tui.showOverlay(
+				{ render: width => firstModal.flatMap(image => image.render(width)), invalidate: () => {} },
+				{ fullscreen: true },
+			);
+			await settle(term);
+			first.hide();
+			await settle(term);
+
+			writes.length = 0;
+			const second = tui.showOverlay(
+				{ render: width => secondModal.render(width), invalidate: () => {} },
+				{ fullscreen: true },
+			);
+			await settle(term);
+
+			// `?1049h` starts a cleared buffer, so the previous modal's split says
+			// nothing about this one. Carrying it renders the sole image as text for
+			// a frame and drops its key on the way.
+			expect(writes.join("")).not.toContain(fallback);
+			expect(tui.imageBudget.acquireId("second")).toBe(secondId);
+			second.hide();
+		} finally {
+			tui.stop();
+			setKittyGraphics(originalGraphics);
+		}
+	});
+
+	it("keeps transcript placements when the shutdown flush runs under a fullscreen overlay", async () => {
+		const originalGraphics = { ...getKittyGraphics() };
+		const term = new VirtualTerminal(40, 12);
+		const { placed, deleted } = trackKittyGraphics(term);
+
+		setKittyGraphics({ unicodePlaceholders: false });
+		const tui = new TUI(term);
+		tui.setMaxInlineImages(2);
+		const behind = [makeImage(tui.imageBudget, "behind-0"), makeImage(tui.imageBudget, "behind-1")];
+		const behindIds = behind.map((_, i) => tui.imageBudget.acquireId(`behind-${i}`));
+		const modalImages = [makeImage(tui.imageBudget, "modal-0"), makeImage(tui.imageBudget, "modal-1")];
+		let flushing = false;
+		let nextHistoryId = 1;
+		let pendingHistory: string[] | undefined = ["retired row"];
+		tui.setFrameProvider({
+			renderFrame: size => ({
+				history: flushing && pendingHistory !== undefined ? { id: nextHistoryId, rows: pendingHistory } : undefined,
+				viewport: behind.flatMap(image => image.render(size.columns)),
+			}),
+			acknowledgeHistory: id => {
+				if (id !== nextHistoryId) return;
+				pendingHistory = undefined;
+				nextHistoryId++;
+			},
+			beginHistoryFlush: () => {
+				flushing = true;
+			},
+		});
+
+		try {
+			tui.start();
+			await settle(term);
+			expect(behindIds.every(id => placed.has(id))).toBe(true);
+
+			tui.showOverlay(
+				{ render: width => modalImages.flatMap(image => image.render(width)), invalidate: () => {} },
+				{ fullscreen: true },
+			);
+			await settle(term);
+
+			// stop() leaves the alternate buffer but not the overlay stack, so the
+			// flush must not count a modal that is no longer painted: its images
+			// would push the transcript's over the cap and delete them for good.
+			tui.stop();
+			await settle(term);
+
+			expect(deleted.filter(id => behindIds.includes(id))).toEqual([]);
+			expect(behindIds.every(id => placed.has(id))).toBe(true);
+		} finally {
+			setKittyGraphics(originalGraphics);
+		}
+	});
+
+	it("does not demote transcript images under a closing overlay's suppression threshold", async () => {
+		const originalGraphics = { ...getKittyGraphics() };
+		const term = new VirtualTerminal(40, 12);
+		const { placed, deleted, writes } = trackKittyGraphics(term);
+
+		setKittyGraphics({ unicodePlaceholders: false });
+		const tui = new TUI(term);
+		tui.setMaxInlineImages(2);
+		const behind = [makeImage(tui.imageBudget, "behind-0"), makeImage(tui.imageBudget, "behind-1")];
+		const behindIds = behind.map((_, i) => tui.imageBudget.acquireId(`behind-${i}`));
+		// Three modal images against a cap of 2: the overlay's own pass demotes one
+		// and leaves a stricter threshold behind for whichever pass runs next.
+		const modalImages = Array.from({ length: 3 }, (_, i) => makeImage(tui.imageBudget, `modal-${i}`));
+		tui.setFrameProvider({
+			renderFrame: size => ({ viewport: behind.flatMap(image => image.render(size.columns)) }),
+			acknowledgeHistory: () => {},
+		});
+
+		try {
+			tui.start();
+			await settle(term);
+			expect(behindIds.every(id => placed.has(id))).toBe(true);
+
+			const overlay = tui.showOverlay(
+				{ render: width => modalImages.flatMap(image => image.render(width)), invalidate: () => {} },
+				{ fullscreen: true },
+			);
+			await settle(term);
+
+			writes.length = 0;
+			overlay.hide();
+			await settle(term);
+
+			// The modal's split must not reach the transcript. A `d=I` here also
+			// takes the id's scrollback placements, which no repaint restores, and
+			// the retransmit that follows is the visible placement/text flicker.
+			expect(deleted.filter(id => behindIds.includes(id))).toEqual([]);
+			expect(behindIds.every(id => placed.has(id))).toBe(true);
+			expect(writes.join("")).not.toContain(BASE64_ONE_PIXEL_PNG);
+			// Nor may the modal's threshold flip one to its text fallback for a
+			// frame on the way: each surface reconciles against its own split.
+			expect(writes.join("")).not.toContain(imageFallback("image/png", { widthPx: 1, heightPx: 1 }));
+		} finally {
+			tui.stop();
+			setKittyGraphics(originalGraphics);
+		}
+	});
+
+	it("keeps a non-fullscreen overlay image placed while the provider frame fills the cap", async () => {
+		const originalGraphics = { ...getKittyGraphics() };
+		const term = new VirtualTerminal(40, 12);
+		const { resident, placed } = trackKittyGraphics(term);
+
+		setKittyGraphics({ unicodePlaceholders: false });
+		const tui = new TUI(term);
+		tui.setMaxInlineImages(2);
+		const behind = [makeImage(tui.imageBudget, "behind-0"), makeImage(tui.imageBudget, "behind-1")];
+		const modal = makeImage(tui.imageBudget, "modal");
+		const modalId = tui.imageBudget.acquireId("modal");
+		tui.setFrameProvider({
+			renderFrame: size => ({ viewport: behind.flatMap(image => image.render(size.columns)) }),
+			acknowledgeHistory: () => {},
+		});
+
+		try {
+			tui.start();
+			await settle(term);
+			tui.showOverlay({ render: width => modal.render(width), invalidate: () => {} }, { anchor: "center" });
+			await settle(term);
+			expect(placed.has(modalId)).toBe(true);
+
+			// Overlays composite after the budget pass closes, so a later repaint
+			// that leaves them byte-identical must not mistake them for retired.
+			tui.requestRender();
+			await settle(term);
+			expect(placed.has(modalId)).toBe(true);
+			expect(resident.has(modalId)).toBe(true);
+		} finally {
+			tui.stop();
+			setKittyGraphics(originalGraphics);
+		}
+	});
+
+	it("holds the cap over a provider frame plus its non-fullscreen overlay", async () => {
+		const originalGraphics = { ...getKittyGraphics() };
+		const term = new VirtualTerminal(40, 12);
+		const { resident, placed } = trackKittyGraphics(term);
+
+		setKittyGraphics({ unicodePlaceholders: false });
+		const tui = new TUI(term);
+		tui.setMaxInlineImages(2);
+		const behind = [makeImage(tui.imageBudget, "behind-0"), makeImage(tui.imageBudget, "behind-1")];
+		const modalImages = [makeImage(tui.imageBudget, "modal-0"), makeImage(tui.imageBudget, "modal-1")];
+		const modalIds = modalImages.map((_, i) => tui.imageBudget.acquireId(`modal-${i}`));
+		tui.setFrameProvider({
+			renderFrame: size => ({ viewport: behind.flatMap(image => image.render(size.columns)) }),
+			acknowledgeHistory: () => {},
+		});
+
+		try {
+			tui.start();
+			await settle(term);
+			expect(resident.size).toBe(2);
+
+			const overlay = tui.showOverlay(
+				{ render: width => modalImages.flatMap(image => image.render(width)), invalidate: () => {} },
+				{ anchor: "center" },
+			);
+			await settle(term);
+
+			// The overlay's images are the newest in display order, so the cap keeps
+			// them and demotes the transcript's — it may not simply stop counting.
+			const sizes: number[] = [];
+			for (let i = 0; i < 4; i++) {
+				tui.requestRender();
+				await settle(term);
+				sizes.push(resident.size);
+			}
+			expect(sizes).toEqual([2, 2, 2, 2]);
+			expect(modalIds.every(id => placed.has(id))).toBe(true);
+
+			overlay.hide();
+			await settle(term);
+			expect(resident.size).toBe(2);
+		} finally {
+			tui.stop();
+			setKittyGraphics(originalGraphics);
+		}
+	});
+
+	it("applies the image budget before emitting the first frame", async () => {
+		const term = new VirtualTerminal(40, 12);
 		const writes: string[] = [];
 		const realWrite = term.write.bind(term);
 		vi.spyOn(term, "write").mockImplementation((data: string) => {
@@ -691,78 +1485,22 @@ describe("TUI inline-image budget", () => {
 			realWrite(data);
 		});
 
-		setKittyGraphics({ unicodePlaceholders: false });
-		Bun.env.PI_TUI_RESIZE_IN_PLACE = "1";
 		const tui = new TUI(term);
-		const imageKey = "width-epoch-direct";
-		const imageId = tui.imageBudget.acquireId(imageKey);
-		tui.addChild(new Text("P".repeat(120), 0, 0));
-		tui.addChild(
-			new Image(
-				BASE64_ONE_PIXEL_PNG,
-				"image/png",
-				{ fallbackColor: t => t },
-				{ maxWidthCells: 4, maxHeightCells: 4, budget: tui.imageBudget, imageKey },
-				{ widthPx: 40, heightPx: 40 },
-			),
-		);
-		tui.addChild(new Text("tail-0\ntail-1\ntail-2", 0, 0));
-
-		const expectStablePlacement = (output: string): void => {
-			const placementIds = [...output.matchAll(new RegExp(`i=${imageId},p=(\\d+),`, "g"))].map(match =>
-				Number(match[1]),
-			);
-			expect(placementIds.length).toBeGreaterThan(0);
-			expect(placementIds).toEqual(placementIds.map(() => 1));
-		};
+		tui.setMaxInlineImages(1);
+		tui.addChild(makeImage(tui.imageBudget, "first"));
+		tui.addChild(makeImage(tui.imageBudget, "second"));
+		tui.addChild(makeImage(tui.imageBudget, "third"));
 
 		try {
 			tui.start();
 			await settle(term);
-			writes.length = 0;
-			term.resize(40, 8);
-			await settle(term);
-			expectStablePlacement(writes.join(""));
 
-			writes.length = 0;
-			const overlay = tui.showOverlay(new Text("overlay", 0, 0), { anchor: "top-left", row: 0, col: 0 });
-			await settle(term);
-			const shown = writes.join("");
-			expect(shown).not.toContain("\r\n");
-			expectStablePlacement(shown);
-
-			writes.length = 0;
-			overlay.hide();
-			await settle(term);
-			const hidden = writes.join("");
-			expect(hidden).not.toContain("\r\n");
-			expectStablePlacement(hidden);
-
-			writes.length = 0;
-			term.resize(30, 8);
-			await settle(term);
-			expectStablePlacement(writes.join(""));
-
-			// A forced, non-destructive paint coalesced with another mux width
-			// reset also uses the previous width epoch's seam, not the newly
-			// reflowed frame's chunk target.
-			Bun.env.HERDR_ENV = "1";
-			Bun.env.ZELLIJ = "1";
-			writes.length = 0;
-			term.resize(20, 8);
-			tui.requestRender(true, { clearScrollback: true });
-			await settle(term);
-			const forced = writes.join("");
-			expect(forced).toContain("\x1b[2J");
-			expect(forced).not.toContain("\x1b[3J");
-			expectStablePlacement(forced);
+			const output = writes.join("");
+			expect(output.match(/\x1b_Ga=t/g)).toHaveLength(1);
+			const viewport = term.getViewport().map(line => line.trimEnd());
+			expect(viewport.filter(line => line.includes("[Image:"))).toHaveLength(2);
 		} finally {
 			tui.stop();
-			setKittyGraphics(originalGraphics);
-			if (originalResizeMode === undefined) delete Bun.env.PI_TUI_RESIZE_IN_PLACE;
-			else Bun.env.PI_TUI_RESIZE_IN_PLACE = originalResizeMode;
-			if (originalZellij === undefined) delete Bun.env.ZELLIJ;
-			else Bun.env.ZELLIJ = originalZellij;
 		}
 	});
 
@@ -836,6 +1574,28 @@ describe("TUI inline-image budget", () => {
 			tui.stop();
 		}
 	});
+	it("leaves transmitted images in the terminal store on stop so scrollback keeps them", async () => {
+		const term = new VirtualTerminal(40, 12);
+		const writes: string[] = [];
+		const realWrite = term.write.bind(term);
+		vi.spyOn(term, "write").mockImplementation((data: string) => {
+			writes.push(data);
+			realWrite(data);
+		});
+
+		const tui = new TUI(term);
+		tui.addChild(makeImage(tui.imageBudget, "persist"));
+		tui.start();
+		await settle(term);
+		writes.length = 0;
+
+		tui.stop();
+
+		// Regression: stop() used to delete every transmitted image (`a=d,d=I`),
+		// blanking placeholder cells already committed to native scrollback the
+		// moment the session exited.
+		expect(writes.join("")).not.toContain("a=d,d=I");
+	});
 
 	it("lets a full-width non-fullscreen overlay replace Unicode image placeholder rows", async () => {
 		const originalGraphics = { ...getKittyGraphics() };
@@ -879,7 +1639,7 @@ describe("TUI inline-image budget", () => {
 		}
 	});
 
-	it("transmits image data only once; a later full redraw re-emits just the placement", async () => {
+	it("retransmits current images after a destructive redraw", async () => {
 		const term = new VirtualTerminal(40, 12);
 		const writes: string[] = [];
 		const realWrite = term.write.bind(term);
@@ -905,12 +1665,50 @@ describe("TUI inline-image budget", () => {
 			tui.requestRender(true, { clearScrollback: true });
 			await settle(term);
 
-			// The repaint re-emits the placement but never re-sends the base64.
+			// The repaint re-sends the base64.
 			const repaint = writes.join("");
 			expect(repaint).toContain("\x1b_Ga=p");
-			expect(repaint).not.toContain(BASE64_ONE_PIXEL_PNG);
+			expect(repaint).toContain(BASE64_ONE_PIXEL_PNG);
 		} finally {
 			tui.stop();
+		}
+	});
+	it("deletes every kitty image on a destructive display reset", async () => {
+		const originalGraphics = { ...getKittyGraphics() };
+		const term = new VirtualTerminal(40, 12);
+		const writes: string[] = [];
+		const realWrite = term.write.bind(term);
+		vi.spyOn(term, "write").mockImplementation((data: string) => {
+			writes.push(data);
+			realWrite(data);
+		});
+
+		setKittyGraphics({ unicodePlaceholders: false });
+		const tui = new TUI(term);
+		tui.setMaxInlineImages(3);
+		tui.addChild(makeImage(tui.imageBudget, "only"));
+
+		try {
+			tui.start();
+			await settle(term);
+			writes.length = 0;
+
+			tui.resetDisplay();
+			await settle(term);
+
+			// ED2/ED3 erase text but leave graphics untouched. d=A also removes
+			// untracked placements; current images must be re-sent and re-placed.
+			const repaint = writes.join("");
+			const deleteIndex = repaint.indexOf("\x1b_Ga=d,d=A,q=2\x1b\\");
+			expect(deleteIndex).toBeGreaterThanOrEqual(0);
+			const transmitIndex = repaint.indexOf("\x1b_Ga=t", deleteIndex);
+			const placeIndex = repaint.indexOf("\x1b_Ga=p", transmitIndex);
+			expect(transmitIndex).toBeGreaterThan(deleteIndex);
+			expect(placeIndex).toBeGreaterThan(transmitIndex);
+			expect(repaint).toContain(BASE64_ONE_PIXEL_PNG);
+		} finally {
+			tui.stop();
+			setKittyGraphics(originalGraphics);
 		}
 	});
 
@@ -966,71 +1764,6 @@ describe("TUI inline-image budget", () => {
 			setKittyGraphics(originalGraphics);
 		}
 	});
-
-	it("keeps a deferred fullscreen exit until a Ghostty image repaint can emit it", () => {
-		const originalId = terminal.id;
-		const originalGraphics = { ...getKittyGraphics() };
-		const term = new VirtualTerminal(40, 12);
-		const writes: string[] = [];
-		const realWrite = term.write.bind(term);
-		vi.spyOn(term, "write").mockImplementation((data: string) => {
-			writes.push(data);
-			realWrite(data);
-		});
-		let now = 0;
-		const scheduled: Array<{ delayMs: number; callback: () => void; canceled: boolean }> = [];
-		const renderScheduler = {
-			now: () => now,
-			scheduleImmediate: (callback: () => void) => callback(),
-			scheduleRender: (callback: () => void, delayMs: number) => {
-				const entry = { delayMs, callback, canceled: false };
-				scheduled.push(entry);
-				return {
-					cancel: () => {
-						entry.canceled = true;
-					},
-				};
-			},
-		};
-
-		terminal.id = "ghostty";
-		terminal.imageProtocol = ImageProtocol.Kitty;
-		setKittyGraphics({ unicodePlaceholders: true });
-		const tui = new TUI(term, undefined, { renderScheduler });
-		tui.addChild(new Text("old session", 0, 0));
-
-		try {
-			tui.start();
-			const overlay = tui.showOverlay(new Text("session selector", 0, 0), {
-				width: "100%",
-				maxHeight: "100%",
-				fullscreen: true,
-			});
-			tui.addChild(makeImage(tui.imageBudget, "resumed-image"));
-			tui.requestRender(true, { clearScrollback: true });
-			overlay.hide();
-
-			const queued = scheduled.find(entry => !entry.canceled);
-			expect(queued).toBeDefined();
-			now = 40;
-			queued!.canceled = true;
-			queued!.callback();
-
-			const delayed = scheduled.find(entry => !entry.canceled);
-			expect(delayed).toBeDefined();
-			now = 100;
-			delayed!.canceled = true;
-			delayed!.callback();
-
-			const exitPaint = writes.find(write => write.includes("\x1b[?1049l"));
-			expect(exitPaint).toContain("\x1b[3J");
-			expect(exitPaint).toContain(BASE64_ONE_PIXEL_PNG);
-		} finally {
-			tui.stop();
-			terminal.id = originalId;
-			setKittyGraphics(originalGraphics);
-		}
-	});
 });
 
 describe("kitty transmit / placement encoding", () => {
@@ -1075,11 +1808,12 @@ describe("ImageBudget transmit tracking", () => {
 	it("re-transmits an image after a purge frees its data", () => {
 		const budget = new ImageBudget(2, () => {});
 		budget.enqueueTransmit(1, "TX1");
+		expect([...budget.takeTransmits()]).toEqual(["TX1"]);
 		expect(budget.shouldTransmit(1)).toBe(false);
 
 		// Push past the cap so the oldest image (id 1) is demoted and purged.
-		pass(budget, 3); // overflow frame schedules the demotion
-		const demote = pass(budget, 3); // demotion frame purges id 1
+		pass(budget, 3); // discovery pass requests a retry
+		const demote = pass(budget, 3); // retry purges id 1
 		expect(demote.purge).toEqual([1]);
 
 		// d=I freed the data, so the image must transmit again if it returns.

@@ -86,8 +86,6 @@ const codingAgentBucketPlans: Record<CodingAgentBucket, { label: string; paralle
 // their short TS suites can run together. CI still downloads the Linux x64 native
 // addon before this bucket: shared utility barrels may load native-backed modules.
 const fastWorkspacePackages = [
-	"packages/hashline",
-	"packages/wire",
 	"packages/omptype",
 	"packages/utils",
 	"packages/catalog",
@@ -417,19 +415,25 @@ async function runTestCommand(testCommand: TestCommand): Promise<void> {
 			stdout: "inherit",
 			stderr: "inherit",
 		});
-		const killTimer = setTimeout(() => proc.kill("SIGKILL"), chunkTimeoutMs());
+		// Watchdog, mirroring the parallel path: record that *we* killed the child,
+		// otherwise the resulting 137 is indistinguishable from an OOM kill.
+		let timedOut = false;
+		const killTimer = setTimeout(() => {
+			timedOut = true;
+			proc.kill("SIGKILL");
+		}, chunkTimeoutMs());
 		const exitCode = await proc.exited;
 		clearTimeout(killTimer);
 		if (exitCode === 0) {
 			return;
 		}
-		if (BUN_CRASH_EXITS[exitCode] && attempt < MAX_CHUNK_ATTEMPTS) {
+		if (!timedOut && BUN_CRASH_EXITS[exitCode] && attempt < MAX_CHUNK_ATTEMPTS) {
 			console.log(
 				`==> ${testCommand.label}: bun crashed (exit ${exitCode}); retrying (attempt ${attempt + 1}/${MAX_CHUNK_ATTEMPTS})`,
 			);
 			continue;
 		}
-		throw new Error(`${testCommand.label} failed with exit code ${exitCode}: ${renderedCommand}`);
+		throw new Error(`${testCommand.label} ${describeChunkFailure(exitCode, timedOut)}: ${renderedCommand}`);
 	}
 }
 
@@ -504,6 +508,21 @@ const BUN_CRASH_EXITS: Record<number, true> = {
 // heap-timing dependent — a fresh process nearly always passes — while a
 // deterministic crash still fails every attempt and is reported normally.
 const MAX_CHUNK_ATTEMPTS = 3;
+
+// Why a chunk failed, in words. Exit 137 is SIGKILL, which this runner reaches
+// two very different ways -- the per-chunk watchdog firing, or the kernel OOM
+// killer reaping a chunk that outgrew the runner -- and the bare exit code
+// cannot tell them apart. Which one it was is the difference between "raise
+// OMP_TEST_CHUNK_TIMEOUT" and "lower this bucket's chunkSize", so say it.
+export function describeChunkFailure(exitCode: number, timedOut: boolean): string {
+	if (timedOut) {
+		return `exceeded the ${Math.round(chunkTimeoutMs() / 1000)}s chunk watchdog and was killed (exit ${exitCode}; OMP_TEST_CHUNK_TIMEOUT to change)`;
+	}
+	if (exitCode === 137) {
+		return "was SIGKILLed (exit 137) without reaching the chunk watchdog, which on a CI runner means the OOM killer; lower this bucket's chunkSize";
+	}
+	return `failed with exit code ${exitCode}`;
+}
 
 // The standard `CI` signal is authoritative. In CI each bucket is its own
 // memory-capped runner job (a single fat invocation gets OOM-killed at 137), so
@@ -897,6 +916,27 @@ export async function runTestCommandsInParallel(commands: TestCommand[], concurr
 	}
 }
 
+// `OMP_TEST_SHARD=i/n` splits a mode's chunk commands across n CI jobs; job i
+// runs every chunk whose index ≡ i-1 (mod n). Round-robin rather than
+// contiguous ranges because the chunk list follows sorted file order, so slow
+// neighbouring suites spread evenly instead of piling into one shard. Every
+// chunk lands in exactly one shard; unset/empty runs everything.
+export function selectShard<T>(commands: T[], spec: string | undefined): T[] {
+	const trimmed = spec?.trim();
+	if (!trimmed) return commands;
+	const match = /^(\d+)\/(\d+)$/.exec(trimmed);
+	const index = match ? Number(match[1]) : 0;
+	const count = match ? Number(match[2]) : 0;
+	if (!match || count < 1 || index < 1 || index > count) {
+		throw new Error(`Invalid OMP_TEST_SHARD=${JSON.stringify(trimmed)}; expected i/n with 1 <= i <= n`);
+	}
+	const selected = commands.filter((_, i) => i % count === index - 1);
+	if (selected.length === 0) {
+		throw new Error(`OMP_TEST_SHARD=${trimmed} selects no chunks (${commands.length} available)`);
+	}
+	return selected;
+}
+
 // Skipped when imported (e.g. by the runner's own unit tests), where
 // `process.argv` carries test-file paths rather than a mode/flags.
 if (import.meta.main) {
@@ -906,7 +946,7 @@ if (import.meta.main) {
 		);
 	}
 
-	const requestedCommands = await commandsForMode(requestedMode as Mode);
+	const requestedCommands = selectShard(await commandsForMode(requestedMode as Mode), Bun.env.OMP_TEST_SHARD);
 	const explicitConcurrency = Boolean(Bun.env.OMP_TEST_CONCURRENCY?.trim());
 	// CI defaults to one process at a time, but memory-sized workflow buckets
 	// explicitly opt into bounded process concurrency. Local runs fan out by

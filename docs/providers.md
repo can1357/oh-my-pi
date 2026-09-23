@@ -47,9 +47,13 @@ Use the interactive slash commands inside a session:
 - `/login` — opens the OAuth/key selector. `/login <provider>` jumps straight to one provider (e.g. `/login anthropic`); for an OAuth flow that needs a pasted callback, run `/login <redirect-url>` to complete it.
 - `/logout` — opens the provider selector to remove stored credentials.
 
+Outside a session, `omp login [<provider>]` runs the same login from the terminal: it prints the auth URL (and opens it in your browser), reads any prompts from stdin, and saves to the same store sessions use — local `agent.db`, or the configured auth broker. Without a provider it shows a numbered picker.
+
 For headless or remote setups backed by a shared auth broker, the CLI exposes `omp auth-broker login <provider>` / `omp auth-broker logout` (and `status`, `list`, `import`, `migrate`). See [Secrets and credentials](./secrets.md) for the broker model.
 
 When a model has no credentials, `omp` tells you to run `/login` or set the provider's environment variable.
+
+For ClinePass, set `CLINE_API_KEY` or run `/login cline-pass` to open the Cline dashboard and validate a newly created API key. OMP refreshes membership from Cline's public recommended-models endpoint and bundles the current sixteen-model roster with Cline-authored limits, subscription pricing, modalities, and per-model reasoning controls for offline startup. New live ids remain selectable before regeneration, using conservative metadata rather than guessed controls. `omp usage` reports five-hour, weekly, and monthly quota windows. Free-tier models are marked `(free)` and work with the same key on any Cline account; subscription models show API-equivalent reference pricing, while streamed gateway cost remains authoritative for actual billed or discounted usage. Requests mirror Cline CLI client headers and a stable per-session task id, Qwen routes use Cline's prompt-cache shape, and Qwen3.7 Plus maps thinking levels to the gateway's token-budget field.
 
 ### Pinning a key in `models.yml`
 
@@ -103,6 +107,7 @@ Each provider has one or more environment variables that supply a key when no st
 | `alibaba-token-plan`             | `ALIBABA_TOKEN_PLAN_API_KEY`, then `BAILIAN_TOKEN_PLAN_API_KEY`               |
 | `baseten`                        | `BASETEN_API_KEY`                                                             |
 | `bedrock-mantle`                 | `AWS_BEARER_TOKEN_BEDROCK`                                                    |
+| `deepinfra`                      | `DEEPINFRA_API_KEY`                                                           |
 | `deepseek`                       | `DEEPSEEK_API_KEY`                                                            |
 | `siliconflow`                    | `SILICONFLOW_API_KEY`                                                         |
 | `siliconflow-cn`                 | `SILICONFLOW_CN_API_KEY`                                                      |
@@ -114,12 +119,13 @@ Each provider has one or more environment variables that supply a key when no st
 | `gmi-cloud`                      | `GMI_API_KEY`                                                                 |
 | `huggingface`                    | `HUGGINGFACE_HUB_TOKEN`, then `HF_TOKEN`                                      |
 | `moonshot`                       | `MOONSHOT_API_KEY`, then `KIMI_API_KEY`                                       |
+| `stepfun`                        | `STEPFUN_API_KEY`                                                             |
 | `meta`                           | `MODEL_API_KEY`, then `META_API_KEY`                                          |
 | `nanogpt`                        | `NANO_GPT_API_KEY`                                                            |
 | `novita`                         | `NOVITA_API_KEY`                                                              |
 | `venice`                         | `VENICE_API_KEY`                                                              |
 | `vercel-ai-gateway`              | `AI_GATEWAY_API_KEY` (also `VERCEL_AI_GATEWAY_API_KEY` for catalog discovery) |
-| `cloudflare-ai-gateway`          | `CLOUDFLARE_AI_GATEWAY_API_KEY`                                               |
+| `cloudflare-ai-gateway`          | `CLOUDFLARE_AI_GATEWAY_API_KEY` + `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_GATEWAY_ID` |
 | `litellm`                        | `LITELLM_API_KEY`; optional `LITELLM_BASE_URL` for the proxy endpoint         |
 | `kilo`                           | `KILO_API_KEY`                                                                |
 | `zai`                            | `ZAI_API_KEY`                                                                 |
@@ -137,6 +143,7 @@ Each provider has one or more environment variables that supply a key when no st
 | `aimlapi`                        | `AIMLAPI_API_KEY`                                                             |
 | `gitlab-duo`, `gitlab-duo-agent` | `GITLAB_TOKEN`                                                                |
 | `opencode-zen`, `opencode-go`    | `OPENCODE_API_KEY`                                                            |
+| `cline-pass`                     | `CLINE_API_KEY`                                                               |
 | `firepass`                       | `FIREPASS_API_KEY`                                                            |
 | `wafer-serverless`               | `WAFER_SERVERLESS_API_KEY`                                                    |
 | `xiaomi`                         | `XIAOMI_API_KEY`                                                              |
@@ -148,8 +155,22 @@ Each provider has one or more environment variables that supply a key when no st
 | `lm-studio`                      | `LM_STUDIO_API_KEY` (optional; keyless by default)                            |
 | `llama.cpp`                      | `LLAMA_CPP_API_KEY` (only when the server requires auth)                      |
 | `vllm`                           | `VLLM_API_KEY` (optional for an unauthenticated local server)                 |
+| `yolo-auto`                      | `YOLO_AUTO_API_KEY`                                                            |
+| `charm-hyper`                    | `CHARM_HYPER_API_KEY`, then `HYPER_API_KEY`                                   |
+| `singularityapi-dev`             | `SINGULARITYAPI_DEV_API_KEY`                                                  |
+| `singularityapi-tech`            | `SINGULARITYAPI_TECH_API_KEY`                                                 |
 
-OAuth-backed providers such as `anthropic`, `github-copilot`, `cursor`, `ollama-cloud`, `qwen-portal`, `kimi-code`, `xai-oauth`, `wafer-serverless`, `google-gemini-cli`, and `google-antigravity` are normally reached through `/login` rather than an environment variable. See [Environment variables](./environment-variables.md) for search-tool and configuration variables not listed here.
+`/login cloudflare-ai-gateway` prompts for the gateway token, Cloudflare account ID, and gateway ID, then stores all three together. To use environment variables, set all three values listed above. OMP selects the Anthropic, OpenAI, or Workers AI gateway route for each model; you do not need a `models.yml` base URL override.
+
+`charm-hyper` is Charm's OpenAI-compatible inference gateway for coding agents. Issue or manage a key at `https://hyper.charm.land/`; the model list is discovered live from the provider's public `/v1/models` endpoint, and `HYPER_API_KEY` is accepted as a fallback alias for `CHARM_HYPER_API_KEY`.
+
+SingularityAPI sells two unrelated products behind one brand, so OMP models them as two providers: they share no key, no billing model, and no effort ladder, and neither key is accepted by the other host.
+
+`singularityapi-dev` is the pay-as-you-go universal inference gateway (300+ models: DeepSeek, Kimi, GLM, frontier flagships). Create a `sk-sapi-...` key at `https://app.singularityapi.dev` (or run `/login singularityapi-dev`) and set `SINGULARITYAPI_DEV_API_KEY`; the roster, limits, and tariffs are discovered live from `https://api.singularityapi.dev/v1/models`.
+
+`singularityapi-tech` is the reserved DeepSeek lanes gateway. Usage bills against a booked reservation slot rather than prepaid credit, so a valid key with no active slot answers 403 until you book one at `https://app.singularityapi.tech`. Create an `sk-...` key there (or run `/login singularityapi-tech`), set `SINGULARITYAPI_TECH_API_KEY`, and the lane roster is discovered live from `https://api.singularityapi.tech/v1/models`.
+
+OAuth-backed providers such as `anthropic`, `github-copilot`, `cursor`, `ollama-cloud`, `qwen-portal`, `kimi-code`, `xai-oauth`, `wafer-serverless`, `google-gemini-cli`, `google-antigravity`, `devin`, and the GitLab providers (`gitlab-duo`, `gitlab-duo-agent`) are normally reached through `/login` rather than an environment variable. Interactive API-key logins exist too: `/login baseten`, `/login coreweave`, `/login sakana`, `/login singularityapi-dev`, and `/login singularityapi-tech` prompt for a dashboard/API key (`coreweave` additionally requires `COREWEAVE_PROJECT` for the `OpenAI-Project` header). See [Environment variables](./environment-variables.md) for search-tool and configuration variables not listed here.
 
 ### `.env` discovery and precedence
 
@@ -317,6 +338,25 @@ providers:
         contextWindow: 128000
         maxTokens: 8192
 ```
+
+### Zhipu BigModel account-balance keys
+
+`/login zai` targets the global Z.AI Coding Plan endpoint, and `/login zhipu-coding-plan` targets the domestic Zhipu Coding Plan endpoint. Neither flow configures the general pay-as-you-go BigModel endpoint at `https://open.bigmodel.cn/api/paas/v4`.
+
+Use a custom provider for an API key issued from a standard BigModel account balance:
+
+```yaml
+providers:
+  bigmodel:
+    baseUrl: https://open.bigmodel.cn/api/paas/v4
+    api: openai-completions
+    apiKey: BIGMODEL_API_KEY
+    models:
+      - id: glm-4.6
+        name: GLM-4.6 (BigModel)
+```
+
+Set `BIGMODEL_API_KEY` to the `<id>.<secret>` key before starting `omp`, then select `bigmodel/glm-4.6`. The key does not use an `sk-` prefix.
 
 Keyless local provider (no credentials required):
 

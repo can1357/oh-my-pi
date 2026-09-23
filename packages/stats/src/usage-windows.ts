@@ -14,6 +14,7 @@
  */
 import { Database } from "bun:sqlite";
 import { AuthBrokerClient, resolveAuthBrokerConfig } from "@oh-my-pi/pi-ai/auth-broker";
+import type { ClientUsageClientSummary } from "@oh-my-pi/pi-ai/usage";
 import { getAgentDbPath, logger } from "@oh-my-pi/pi-utils";
 import type { ProviderWindowInsight, UsageWindowPoint, UsageWindowSeries } from "./shared-types";
 
@@ -38,6 +39,19 @@ export interface UsageSnapshotRow {
 export interface UsageWindowStats {
 	usageSeries: UsageWindowSeries[];
 	windowInsights: ProviderWindowInsight[];
+}
+
+/** Usage snapshots plus, in broker mode, fleet-wide token burn per provider. */
+export interface UsageDataSnapshot {
+	rows: UsageSnapshotRow[];
+	/**
+	 * Total tokens (input + output + cache read/write) per provider summed
+	 * across every install reporting to the auth broker, or `null` when no
+	 * broker is configured or no client reports exist for the range. Matches
+	 * the fleet-wide window fractions in `rows`, unlike local message stats
+	 * which only see this install's burn.
+	 */
+	fleetTokensByProvider: Map<string, number> | null;
 }
 
 /** A used-fraction drop smaller than this is jitter, not a window reset. */
@@ -101,35 +115,74 @@ export function readUsageSnapshots(sinceMs: number, dbPath = getAgentDbPath()): 
 }
 
 /**
- * Fetch usage snapshots from wherever they actually accumulate: the auth
- * broker's durable history when a broker is configured (the broker performs
- * every upstream usage fetch in that mode, so the local `usage_history` stays
- * frozen), else the local agent DB. Broker errors fall back to the local read
- * so the dashboard degrades to stale-but-present data instead of failing.
+ * Fetch usage data from wherever it actually accumulates: the auth broker's
+ * durable history plus per-client observed-usage reports when a broker is
+ * configured (the broker performs every upstream usage fetch in that mode, so
+ * the local `usage_history` stays frozen), else the local agent DB. Broker
+ * errors fall back to the local read so the dashboard degrades to
+ * stale-but-present data instead of failing.
  */
-export async function fetchUsageSnapshots(sinceMs: number): Promise<UsageSnapshotRow[]> {
+export async function fetchUsageData(sinceMs: number): Promise<UsageDataSnapshot> {
 	try {
 		const brokerConfig = await resolveAuthBrokerConfig();
 		if (brokerConfig) {
 			const client = new AuthBrokerClient({ url: brokerConfig.url, token: brokerConfig.token });
-			const response = await client.fetchUsageHistory({ sinceMs });
-			return response.entries.map(entry => ({
-				recordedAt: entry.recordedAt,
-				provider: entry.provider,
-				accountKey: entry.accountKey,
-				email: entry.email ?? null,
-				accountId: entry.accountId ?? null,
-				limitId: entry.limitId,
-				label: entry.label,
-				windowLabel: entry.windowLabel ?? null,
-				usedFraction: entry.usedFraction ?? null,
-				status: entry.status ?? null,
-			}));
+			const [response, fleetTokensByProvider] = await Promise.all([
+				client.fetchUsageHistory({ sinceMs }),
+				fetchFleetTokens(client, sinceMs),
+			]);
+			return {
+				rows: response.entries.map(entry => ({
+					recordedAt: entry.recordedAt,
+					provider: entry.provider,
+					accountKey: entry.accountKey,
+					email: entry.email ?? null,
+					accountId: entry.accountId ?? null,
+					limitId: entry.limitId,
+					label: entry.label,
+					windowLabel: entry.windowLabel ?? null,
+					usedFraction: entry.usedFraction ?? null,
+					status: entry.status ?? null,
+				})),
+				fleetTokensByProvider,
+			};
 		}
 	} catch (err) {
 		logger.debug("broker usage history unavailable, falling back to local", { error: String(err) });
 	}
-	return readUsageSnapshots(sinceMs);
+	return { rows: readUsageSnapshots(sinceMs), fleetTokensByProvider: null };
+}
+
+/**
+ * Sum broker-recorded client token burn per provider since `sinceMs`.
+ * Returns `null` on fetch failure or when no client has reported usage, so
+ * callers fall back to local message stats instead of zeroing estimates.
+ */
+async function fetchFleetTokens(client: AuthBrokerClient, sinceMs: number): Promise<Map<string, number> | null> {
+	try {
+		const summary = await client.fetchClientUsageSummary({ sinceMs });
+		return sumFleetTokens(summary.clients);
+	} catch (err) {
+		logger.debug("broker client usage summary unavailable", { error: String(err) });
+		return null;
+	}
+}
+
+/**
+ * Fold per-client provider aggregates into total tokens per provider
+ * (input + output + cache read/write, matching message-stat `totalTokens`).
+ * Returns `null` when no client reported anything, signalling "no data"
+ * rather than "zero burn".
+ */
+export function sumFleetTokens(clients: ClientUsageClientSummary[]): Map<string, number> | null {
+	const tokens = new Map<string, number>();
+	for (const client of clients) {
+		for (const p of client.providers) {
+			const total = p.inputTokens + p.outputTokens + p.cacheReadTokens + p.cacheWriteTokens;
+			tokens.set(p.provider, (tokens.get(p.provider) ?? 0) + total);
+		}
+	}
+	return tokens.size > 0 ? tokens : null;
 }
 
 /** True when a snapshot reports an exhausted window, by status or by fraction. */
@@ -176,13 +229,32 @@ interface WindowGroup {
 }
 
 /**
+ * Display label for one limit window: the limit label, plus the window label
+ * when it adds information ("Usage (Google) · Daily"). The limit label alone
+ * distinguishes same-duration windows ("Claude 7 Day" vs "Claude 7 Day
+ * (Fable)"); the window-label suffix distinguishes same-named limits with
+ * different durations (Antigravity's daily vs weekly "Usage (Google)").
+ */
+function windowDisplayLabel(row: UsageSnapshotRow): string {
+	const { label, windowLabel } = row;
+	if (!windowLabel || label.toLowerCase().includes(windowLabel.toLowerCase())) return label;
+	return `${label} · ${windowLabel}`;
+}
+
+/**
  * Derive utilization series and per-window insights from raw snapshots.
  *
+ * Windows are grouped by `(provider, limitId)` — never by display label.
+ * Distinct limits can share a duration label (Anthropic's overall and
+ * model-scoped 7-day windows, Codex's base and Spark weeklies); merging them
+ * interleaves unrelated fractions per account and wildly inflates consumption.
+ *
  * `tokensByProvider` supplies each provider's token burn over the same time
- * range (from the local message stats); it converts consumed window fraction
- * into an estimated token capacity per window. Attribution note: tokens are
- * per provider, not per account, so the estimate treats the account fleet as
- * one pooled subscription — which is exactly how round-robin auth uses it.
+ * range (fleet-wide broker client reports when available, else local message
+ * stats); it converts consumed window fraction into an estimated token
+ * capacity per window. Attribution note: tokens are per provider, not per
+ * account, so the estimate treats the account fleet as one pooled
+ * subscription — which is exactly how round-robin auth uses it.
  */
 export function computeUsageWindowStats(
 	rows: UsageSnapshotRow[],
@@ -190,15 +262,19 @@ export function computeUsageWindowStats(
 ): UsageWindowStats {
 	const groups = new Map<string, WindowGroup>();
 	for (const row of rows) {
-		const windowKey = row.windowLabel ?? row.limitId;
-		const groupKey = `${row.provider}\u0000${windowKey}`;
+		const groupKey = `${row.provider}\u0000${row.limitId}`;
 		let group = groups.get(groupKey);
 		if (!group) {
-			group = { provider: row.provider, windowKey, windowLabel: row.windowLabel ?? row.label, accounts: new Map() };
+			group = {
+				provider: row.provider,
+				windowKey: row.limitId,
+				windowLabel: windowDisplayLabel(row),
+				accounts: new Map(),
+			};
 			groups.set(groupKey, group);
 		}
 		// Labels can change across snapshots (provider renames); latest wins.
-		group.windowLabel = row.windowLabel ?? row.label;
+		group.windowLabel = windowDisplayLabel(row);
 		let account = group.accounts.get(row.accountKey);
 		if (!account) {
 			account = { accountKey: row.accountKey, accountLabel: row.email ?? row.accountId ?? row.accountKey, rows: [] };

@@ -204,6 +204,8 @@ pub fn utility_builtins<SE: brush_core::ShellExtensions>()
 	m.push(("basename", basename::basename_builtin::<SE>()));
 	#[cfg(feature = "util.cat")]
 	m.push(("cat", cat::cat_builtin::<SE>()));
+	#[cfg(feature = "util.cksum")]
+	m.push(("cksum", cksum::cksum_builtin::<SE>()));
 	#[cfg(feature = "util.cmp")]
 	m.push(("cmp", cmp::cmp_builtin::<SE>()));
 	#[cfg(feature = "util.comm")]

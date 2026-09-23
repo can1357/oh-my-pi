@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -154,6 +154,16 @@ describe("pi-native parseRequest", () => {
 		expect(parsed.options.acceptEmptyResponse).toBe(true);
 	});
 
+	it("forwards anthropicCompaction so gateway compaction survives the hop", () => {
+		const compaction = { triggerInputTokens: 50_000, pauseAfterCompaction: true, instructions: "Summarize." };
+		const parsed = parseRequest({
+			modelId: "anthropic/claude-fable-5",
+			context: baseContext,
+			options: { anthropicCompaction: compaction },
+		});
+		expect(parsed.options.anthropicCompaction).toEqual(compaction);
+	});
+
 	it("forwards an explicit statefulResponses disablement to the native stream", () => {
 		const parsed = parseRequest({
 			modelId: "openai/gpt-5",
@@ -164,7 +174,7 @@ describe("pi-native parseRequest", () => {
 		expect(parsed.options.statefulResponses).toBe(false);
 	});
 
-	it("preserves headers, metadata, sessionId, thinkingBudgets, Anthropic thinking mode", () => {
+	it("preserves headers, metadata, sessionId, thinkingBudgets, hidden thinking summaries, Anthropic thinking mode", () => {
 		const parsed = parseRequest({
 			modelId: "x",
 			context: baseContext,
@@ -173,6 +183,7 @@ describe("pi-native parseRequest", () => {
 				metadata: { user_id: "u" },
 				sessionId: "explicit-session",
 				thinkingBudgets: { high: 8192 },
+				hideThinkingSummary: true,
 				anthropicThinkingMode: "adaptive",
 				stopSequences: ["\n\n"],
 				toolChoice: "required",
@@ -184,11 +195,38 @@ describe("pi-native parseRequest", () => {
 		expect(parsed.options.metadata).toEqual({ user_id: "u" });
 		expect(parsed.options.sessionId).toBe("explicit-session");
 		expect(parsed.options.thinkingBudgets).toEqual({ high: 8192 });
+		expect(parsed.options.hideThinkingSummary).toBe(true);
 		expect(parsed.options.anthropicThinkingMode).toBe("adaptive");
 		expect(parsed.options.stopSequences).toEqual(["\n\n"]);
 		expect(parsed.options.toolChoice).toBe("required");
 		expect(parsed.options.serviceTier).toBe("priority");
 		expect(parsed.options.cacheRetention).toBe("long");
+	});
+	it("preserves Bedrock guardrails in the canonical options bag", () => {
+		const parsed = parseRequest({
+			modelId: "amazon-bedrock/amazon.nova-lite-v1:0",
+			context: baseContext,
+			options: {
+				guardrailIdentifier: "arn:aws:bedrock:eu-west-1:123456789012:guardrail/example",
+				guardrailVersion: "7",
+				guardrailTrace: "enabled_full",
+			},
+		});
+
+		expect(parsed.options).toMatchObject({
+			guardrailIdentifier: "arn:aws:bedrock:eu-west-1:123456789012:guardrail/example",
+			guardrailVersion: "7",
+			guardrailTrace: "enabled_full",
+		});
+	});
+	it("preserves requestMetadata in the canonical options bag", () => {
+		const parsed = parseRequest({
+			modelId: "amazon-bedrock/amazon.nova-lite-v1:0",
+			context: baseContext,
+			options: { requestMetadata: { team: "growth" } },
+		});
+
+		expect(parsed.options.requestMetadata).toEqual({ team: "growth" });
 	});
 
 	it("forwards the explicit prompt-cache policy through the canonical options bag", () => {
@@ -237,7 +275,7 @@ describe("pi-native gateway cache controls", () => {
 		registerMockApi();
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-cache-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-		storage.setRuntimeApiKey("openrouter", "test-key");
+		storage.keys.setRuntime("openrouter", "test-key");
 		const mock = createMockModel({ provider: "openrouter", id: "pi-native-cache" });
 		const handle = startAuthGateway({
 			bind: "127.0.0.1:0",
@@ -275,6 +313,134 @@ describe("pi-native gateway cache controls", () => {
 		}
 	});
 });
+
+describe("pi-native gateway reasoning flags", () => {
+	it("delivers a forced reasoning-off to the provider stream", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-reasoning-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.keys.setRuntime("openrouter", "test-key");
+		const mock = createMockModel({ provider: "openrouter", id: "pi-native-reasoning" });
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: () => mock,
+			version: "test",
+		});
+
+		try {
+			mock.push({ content: ["ok"] });
+			const response = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({
+					modelId: "pi-native-reasoning",
+					context: baseContext,
+					options: { reasoning: Effort.Medium, forceReasoningOff: true },
+					stream: false,
+				}),
+			});
+
+			expect(response.status).toBe(200);
+			await response.json();
+			expect(mock.calls).toHaveLength(1);
+			// A gateway-routed side turn must be able to force reasoning off, not
+			// only disable it — dropping the flag here silently re-enables thinking.
+			expect(mock.calls[0]?.options).toMatchObject({ reasoning: Effort.Medium, forceReasoningOff: true });
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+			clearCustomApis();
+		}
+	});
+});
+
+describe("pi-native gateway usage attribution", () => {
+	it("records observed usage under the caller's x-omp-* identity, host-fallback when absent", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-usage-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.keys.setRuntime("openrouter", "test-key");
+		const recorded: Array<{
+			provider: string;
+			model: string;
+			usage: { input: number; output: number; cacheRead: number; cacheWrite: number };
+			costUsd?: number;
+			client?: { installId: string; hostname?: string; app?: string };
+		}> = [];
+		const spy = vi.spyOn(storage.usage, "observe").mockImplementation(entry => {
+			recorded.push(entry);
+		});
+		const mock = createMockModel({ provider: "openrouter", id: "pi-native-usage" });
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: () => mock,
+			version: "test",
+		});
+
+		try {
+			const usage = { input: 100, output: 20, cacheRead: 5, cacheWrite: 2, cost: { total: 0.75 } };
+			mock.push({ content: ["ok"], usage });
+			const attributed = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: {
+					Authorization: "Bearer test-token",
+					"Content-Type": "application/json",
+					"x-omp-install-id": "robomp-install",
+					"x-omp-hostname": "robomp-box",
+					"x-omp-app": "robomp",
+				},
+				body: JSON.stringify({ modelId: "pi-native-usage", context: baseContext, stream: false }),
+			});
+			expect(attributed.status).toBe(200);
+			await attributed.json();
+			expect(recorded).toHaveLength(1);
+			expect(recorded[0]).toMatchObject({
+				provider: "openrouter",
+				model: "pi-native-usage",
+				usage: { input: 100, output: 20, cacheRead: 5, cacheWrite: 2 },
+				costUsd: 0.75,
+				client: { installId: "robomp-install", hostname: "robomp-box", app: "robomp" },
+			});
+
+			// No identity headers → the burn still lands somewhere: the gateway
+			// host's own install id under the `gateway` app label.
+			mock.push({ content: ["ok"], usage });
+			const anonymous = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({ modelId: "pi-native-usage", context: baseContext, stream: false }),
+			});
+			expect(anonymous.status).toBe(200);
+			await anonymous.json();
+			expect(recorded).toHaveLength(2);
+			expect(recorded[1]?.client?.app).toBe("gateway");
+			expect(recorded[1]?.client?.installId.length).toBeGreaterThan(0);
+
+			// Zero-usage turns (pre-flight failures) never record.
+			mock.push({ content: ["ok"] });
+			const zeroUsage = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({ modelId: "pi-native-usage", context: baseContext, stream: false }),
+			});
+			expect(zeroUsage.status).toBe(200);
+			await zeroUsage.json();
+			expect(recorded).toHaveLength(2);
+		} finally {
+			spy.mockRestore();
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+			clearCustomApis();
+		}
+	});
+});
+
 describe("pi-native encodeStream", () => {
 	it("ships every AssistantMessageEvent verbatim, terminated by [DONE]", async () => {
 		// Pi-native is omp-talks-to-omp: the client feeds parsed events directly

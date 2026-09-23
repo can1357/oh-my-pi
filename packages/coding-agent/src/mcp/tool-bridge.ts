@@ -1,10 +1,11 @@
+import { MCP_TOOL_NAME_PREFIX, type MCPToolDetails } from "@oh-my-pi/pi-tui/tools/mcp";
 /**
  * MCP to CustomTool bridge.
  *
  * Converts MCP tool definitions to CustomTool format for the agent.
  */
 import type { AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import type { TSchema } from "@oh-my-pi/pi-ai";
+import type { ImageContent, TextContent, TSchema } from "@oh-my-pi/pi-ai";
 import { normalizeSchemaForMCP } from "@oh-my-pi/pi-ai/utils/schema";
 import { logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
@@ -16,20 +17,22 @@ import type {
 	RenderResultOptions,
 } from "../extensibility/custom-tools/types";
 import { resolveLocalUrlToFile } from "../internal-urls/local-protocol";
-import type { Theme } from "../modes/theme/theme";
-import type { OutputMeta } from "../tools/output-meta";
+import type { Theme } from "@oh-my-pi/pi-tui/theme";
+
 import { normalizeLocalScheme } from "../tools/path-utils";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
+import { schemaDeclaresIntentField } from "../utils/tool-schema";
 import { callTool } from "./client";
-import { renderMCPCall, renderMCPResult } from "./render";
+import { formatMCPToolFailure, MCPTransportError } from "./errors";
+import { renderMCPCall, renderMCPResult } from "@oh-my-pi/pi-tui/tools/mcp";
 import type {
 	MCPAuthChallenge,
-	MCPContent,
 	MCPServerConnection,
 	MCPToolCallParams,
 	MCPToolCallResult,
 	MCPToolDefinition,
 } from "./types";
+import type { MCPContent } from "@oh-my-pi/pi-tui/tools/mcp";
 
 /** Reconnect callback: tears down a stale connection, optionally authorizing first. */
 export type MCPReconnect = (options?: { authChallenge?: MCPAuthChallenge }) => Promise<MCPServerConnection | null>;
@@ -50,9 +53,19 @@ const RETRIABLE_PATTERNS = [
 	"transport closed",
 	"network error",
 ];
-
 export function isRetriableConnectionError(error: unknown): boolean {
 	if (!(error instanceof Error)) return false;
+	if (error instanceof MCPTransportError) {
+		if (
+			error.failure === "connect" ||
+			error.failure === "reset" ||
+			error.failure === "eof" ||
+			error.failure === "closed"
+		) {
+			return error.retryable;
+		}
+		return error.failure === "http_status" && (error.code === 404 || error.code === 502 || error.code === 503);
+	}
 	const msg = error.message.toLowerCase();
 	// Stale session (server restarted, old session ID is gone)
 	if (/^http (404|502|503):/.test(msg)) return true;
@@ -103,12 +116,12 @@ function omitUnusedOptionalArgs(args: MCPToolArgs, inputSchema: MCPToolDefinitio
  * carries `i`. The MCP boundary is the authoritative guard so callers don't
  * have to pre-strip.
  *
- * Leaves `i` in place when the server's own `inputSchema.properties` declares
- * it, so a server that legitimately uses `i` as a parameter is unaffected.
+ * Leaves `i` in place when the server's own input schema declares or
+ * constrains it, so legitimate tool data is not discarded at forwarding.
  */
 function stripHarnessIntent(args: MCPToolArgs, inputSchema: MCPToolDefinition["inputSchema"]): MCPToolArgs {
 	if (!Object.hasOwn(args, INTENT_FIELD)) return args;
-	if (inputSchema.properties && Object.hasOwn(inputSchema.properties, INTENT_FIELD)) return args;
+	if (schemaDeclaresIntentField(inputSchema)) return args;
 	const { [INTENT_FIELD]: _intent, ...rest } = args;
 	return rest;
 }
@@ -171,50 +184,78 @@ async function prepareOutboundArgs(
 	return (await resolveOutboundLocalUrlArgs(args, context)) as MCPToolArgs;
 }
 
-/** Details included in MCP tool results for rendering */
-export interface MCPToolDetails {
-	/** Server name */
-	serverName: string;
-	/** Original MCP tool name */
-	mcpToolName: string;
-	/** Whether the call resulted in an error */
-	isError?: boolean;
-	/** Raw content from MCP response */
-	rawContent?: MCPContent[];
-	/** Structured metadata from the MCP response */
-	mcpMeta?: Record<string, unknown>;
-	/** Provider ID (e.g., "claude", "mcp-json") */
-	provider?: string;
-	/** Provider display name (e.g., "Claude Code", "MCP Config") */
-	providerName?: string;
-	/** Structured output metadata (set by the spill wrapper when output is truncated to an artifact). */
-	meta?: OutputMeta;
-}
 /**
- * Format MCP content for LLM consumption.
+ * Convert MCP content to agent content while retaining image payloads.
  */
-function formatMCPContent(content: MCPContent[]): string {
-	const parts: string[] = [];
+function formatMCPContent(content: MCPContent[]): Array<TextContent | ImageContent> {
+	const blocks: Array<TextContent | ImageContent> = [];
+	let text = "";
+	const flushText = () => {
+		if (!text) return;
+		blocks.push({ type: "text", text });
+		text = "";
+	};
+	const appendText = (value: string) => {
+		text += text ? `\n\n${value}` : value;
+	};
 
 	for (const item of content) {
 		switch (item.type) {
 			case "text":
-				parts.push(item.text);
+				appendText(item.text);
 				break;
 			case "image":
-				parts.push(`[Image: ${item.mimeType}]`);
+				flushText();
+				blocks.push(item);
 				break;
 			case "resource":
-				if (item.resource.text) {
-					parts.push(`[Resource: ${item.resource.uri}]\n${item.resource.text}`);
-				} else {
-					parts.push(`[Resource: ${item.resource.uri}]`);
-				}
+				appendText(
+					item.resource.text
+						? `[Resource: ${item.resource.uri}]\n${item.resource.text}`
+						: `[Resource: ${item.resource.uri}]`,
+				);
 				break;
 		}
 	}
+	flushText();
+	return blocks.length > 0 ? blocks : [{ type: "text", text: "" }];
+}
 
-	return parts.join("\n\n");
+/**
+ * Serialize an MCP result's structured payload as a fenced JSON block so it
+ * reaches the model through the standard content channel — and the eval
+ * `tool.*` and subagent proxy bridges that read the same result. Subject to the
+ * usual spill/byte-cap machinery like any other text block.
+ */
+function formatStructuredContent(structured: Record<string, unknown>): string {
+	let json: string;
+	try {
+		json = JSON.stringify(structured, null, 2);
+	} catch {
+		return "";
+	}
+	return `\`\`\`json\n${json}\n\`\`\``;
+}
+
+/**
+ * True when a text block already carries the structured payload verbatim. A
+ * spec-compliant server duplicates `structuredContent` into a TextContent block
+ * for back-compat; detecting that avoids emitting the JSON twice.
+ */
+function structuredContentAlreadyInText(structured: Record<string, unknown>, content: MCPContent[]): boolean {
+	for (const item of content) {
+		if (item.type !== "text") continue;
+		const trimmed = item.text.trim();
+		if (trimmed.length === 0) continue;
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(trimmed);
+		} catch {
+			continue;
+		}
+		if (Bun.deepEquals(parsed, structured)) return true;
+	}
+	return false;
 }
 
 /** Build a CustomToolResult from a callTool response. */
@@ -225,7 +266,7 @@ function buildResult(
 	provider?: string,
 	providerName?: string,
 ): CustomToolResult<MCPToolDetails> {
-	const text = formatMCPContent(result.content);
+	const content = formatMCPContent(result.content);
 	const details: MCPToolDetails = {
 		serverName,
 		mcpToolName,
@@ -235,8 +276,21 @@ function buildResult(
 		provider,
 		providerName,
 	};
-	const contentText = result.isError ? `Error: ${text}` : text;
-	const toolResult: CustomToolResult<MCPToolDetails> = { content: [{ type: "text", text: contentText }], details };
+	if (result.isError) {
+		if (content[0]?.type === "text") {
+			content[0] = { type: "text", text: `Error: ${content[0].text}` };
+		} else {
+			content.unshift({ type: "text", text: "Error:" });
+		}
+	}
+	const structured = result.structuredContent;
+	if (structured !== undefined && !structuredContentAlreadyInText(structured, result.content)) {
+		const rendered = formatStructuredContent(structured);
+		if (rendered.length > 0) {
+			content.push({ type: "text", text: rendered });
+		}
+	}
+	const toolResult: CustomToolResult<MCPToolDetails> = { content, details };
 	if (result.isError) {
 		toolResult.isError = true;
 	}
@@ -251,9 +305,9 @@ function buildErrorResult(
 	provider?: string,
 	providerName?: string,
 ): CustomToolResult<MCPToolDetails> {
-	const message = error instanceof Error ? error.message : String(error);
+	const message = formatMCPToolFailure(error, serverName, mcpToolName);
 	return {
-		content: [{ type: "text", text: `MCP error: ${message}` }],
+		content: [{ type: "text", text: message }],
 		details: { serverName, mcpToolName, isError: true, provider, providerName },
 		isError: true,
 	};
@@ -332,19 +386,26 @@ async function reconnectWithAbort(
  * "puppeteer_screenshot"), strips the redundant prefix to produce
  * "mcp__puppeteer_screenshot" instead of "mcp__puppeteer_puppeteer_screenshot".
  */
-function sanitizeMCPToolNamePart(value: string, fallback: string): string {
+function sanitizeMCPToolNamePart(value: string, fallback: string, keepDigits: boolean): string {
 	const sanitized = value
 		.toLowerCase()
-		.replace(/[^a-z_]+/g, "_")
+		.replace(keepDigits ? /[^a-z0-9_]+/g : /[^a-z_]+/g, "_")
 		.replace(/_+/g, "_")
 		.replace(/^_+|_+$/g, "");
 
 	return sanitized.length > 0 ? sanitized : fallback;
 }
 
-export function createMCPToolName(serverName: string, toolName: string): string {
-	const sanitizedServerName = sanitizeMCPToolNamePart(serverName, "server");
-	const sanitizedToolName = sanitizeMCPToolNamePart(toolName, "tool");
+/**
+ * Shared mint pipeline. `keepDigits` selects the sanitizer variant: the
+ * current mint keeps `0-9`, the legacy variant strips them exactly as the
+ * pre-fix `sanitizeMCPToolNamePart` did. Both halves route through this one
+ * function so the two mints can only ever differ by that character class —
+ * if the prefix-strip or cap rules change, the legacy alias changes with them.
+ */
+function mintMCPToolName(serverName: string, toolName: string, keepDigits: boolean): string {
+	const sanitizedServerName = sanitizeMCPToolNamePart(serverName, "server", keepDigits);
+	const sanitizedToolName = sanitizeMCPToolNamePart(toolName, "tool", keepDigits);
 
 	// Strip redundant server name prefix from tool name if present
 	const prefixWithUnderscore = `${sanitizedServerName}_`;
@@ -354,7 +415,159 @@ export function createMCPToolName(serverName: string, toolName: string): string 
 		normalizedToolName = sanitizedToolName.slice(prefixWithUnderscore.length);
 	}
 
-	return `mcp__${sanitizedServerName}_${normalizedToolName}`;
+	return capMCPToolNameLength(`mcp__${sanitizedServerName}_${normalizedToolName}`);
+}
+
+/**
+ * Mint the name {@link createMCPToolName} produced before digits were kept in
+ * sanitized parts (`[^a-z_]+` collapsed to `_`). Digit-bearing servers/tools
+ * were renamed by that fix, so user config keys written against the old form
+ * (`tools.approval`, `tools.xdevInlineDevices`) would no longer match.
+ * Approval resolution consults this legacy key as a fail-closed fallback.
+ * Returns `undefined` when minting is unchanged (no digits involved).
+ */
+export function createLegacyMCPToolName(serverName: string, toolName: string): string | undefined {
+	const legacyName = mintMCPToolName(serverName, toolName, false);
+	const currentName = createMCPToolName(serverName, toolName);
+	return legacyName !== currentName ? legacyName : undefined;
+}
+
+/**
+ * Longest tool name strict validators accept. OpenAI Responses/Completions and
+ * Meta Responses enforce `^[a-zA-Z0-9_-]{1,64}$`; names over 64 chars are
+ * rejected with HTTP 400 `name must be at most 64 characters` (#9130).
+ */
+const MAX_MCP_TOOL_NAME_LENGTH = 64;
+/** Length of the deterministic hash suffix appended when a minted name overflows. */
+const MCP_TOOL_NAME_HASH_LENGTH = 8;
+
+/**
+ * Cap a minted MCP tool name at {@link MAX_MCP_TOOL_NAME_LENGTH}. An overlong
+ * name keeps a readable prefix and gains a deterministic base-36 hash suffix of
+ * the full name, so distinct long names stay unique and the same name is stable
+ * across turns — the model must call the exact registry key, and the hash is
+ * seed-fixed so it never shifts between processes.
+ */
+function capMCPToolNameLength(name: string): string {
+	if (name.length <= MAX_MCP_TOOL_NAME_LENGTH) return name;
+	const hash = Bun.hash(name).toString(36).slice(0, MCP_TOOL_NAME_HASH_LENGTH);
+	const keep = MAX_MCP_TOOL_NAME_LENGTH - hash.length - 1;
+	return `${name.slice(0, keep)}_${hash}`;
+}
+
+export function createMCPToolName(serverName: string, toolName: string): string {
+	return mintMCPToolName(serverName, toolName, true);
+}
+
+/**
+ * Registry keys a model-emitted MCP tool name may have meant, in priority
+ * order. Empty when the name is not `mcp__`-prefixed or is already canonical.
+ *
+ * {@link createMCPToolName} joins the sanitized server and tool with a SINGLE
+ * underscore, but OMP presents itself as Claude Code, whose convention is
+ * `mcp__<server>__<tool>` — so a primed model reliably emits the doubled
+ * separator, often keeping the raw unsanitized server spelling as well
+ * (`mcp__seedpatch-client__bank` for a server named `seedpatch-client`). Those
+ * names are strictly unregistered, so dispatch dead-ends on a tool the session
+ * really does expose.
+ *
+ * Candidates, because the doubled separator carries information the collapsed
+ * form loses:
+ *
+ * 1. Split at a `__` and re-mint through the whole of `createMCPToolName`.
+ *    Re-minting (rather than only sanitizing) is what reproduces
+ *    redundant-server-prefix stripping — server `puppeteer` + tool
+ *    `puppeteer_screenshot` registers as `mcp__puppeteer_screenshot`, not
+ *    `mcp__puppeteer_puppeteer_screenshot` — and the 64-char
+ *    {@link capMCPToolNameLength} hash. EVERY `__` is tried as the boundary:
+ *    a *sanitized* server segment can never contain one, but the model
+ *    routinely emits the RAW server name, which can (`foo__bar`), so the first
+ *    occurrence is not necessarily the split. Earlier boundaries rank first
+ *    since a server name without `__` is overwhelmingly the common case.
+ * 2. Sanitize the whole suffix, for a single-separator name whose punctuation
+ *    still differs from the minted key (`mcp__seedpatch-client_bank`). This
+ *    candidate is capped too: without a boundary there is nothing to re-mint,
+ *    but the registered key was still length-capped, so an overlong spelling
+ *    would otherwise never match its hashed form. Unlike a split, it has no
+ *    minted fallback shape to reproduce, so a suffix that sanitizes away yields
+ *    nothing.
+ *
+ * This is normalization, not fuzzy matching: every candidate is derived from
+ * the emitted name by the same rules that minted the registry, never selected
+ * from siblings. `sanitizeMCPToolNamePart` is idempotent and registry keys are
+ * already in its output form, so an already-registered name yields no
+ * candidates at all and stays on the exact-match path. Callers try each
+ * candidate as an exact lookup and keep failing when none is registered.
+ */
+export function canonicalMCPToolNameCandidates(name: string): string[] {
+	if (!name.startsWith(MCP_TOOL_NAME_PREFIX)) return [];
+	const suffix = name.slice(MCP_TOOL_NAME_PREFIX.length);
+	if (suffix.length === 0) return [];
+	const candidates: string[] = [];
+	const add = (candidate: string): void => {
+		if (candidate !== name && !candidates.includes(candidate)) candidates.push(candidate);
+	};
+
+	// A split needs both halves NONEMPTY — not to survive sanitization.
+	// `createMCPToolName` substitutes its `server`/`tool` placeholder for a part
+	// that sanitizes away, and it is the same function registration uses, so a
+	// server named `123` (valid per `validateServerName`) really does register as
+	// `mcp__server_bank`. Re-minting therefore reproduces that key instead of
+	// inventing one, and requiring the halves to survive sanitization would drop
+	// exactly the names that need recovering. Only a genuinely absent half
+	// (`mcp____bank`, `mcp__srv__`) describes no split at all.
+	for (let boundary = suffix.indexOf("__"); boundary >= 0; boundary = suffix.indexOf("__", boundary + 1)) {
+		const serverName = suffix.slice(0, boundary);
+		const toolName = suffix.slice(boundary + 2);
+		if (serverName.length > 0 && toolName.length > 0) add(createMCPToolName(serverName, toolName));
+	}
+	// The whole-suffix candidate has no boundary, so there is no minted fallback
+	// shape to reproduce: a suffix that sanitizes away is a dead end.
+	const sanitizedSuffix = sanitizeMCPToolNamePart(suffix, "", true);
+	if (sanitizedSuffix.length > 0) {
+		add(capMCPToolNameLength(`${MCP_TOOL_NAME_PREFIX}${sanitizedSuffix}`));
+	}
+	return candidates;
+}
+
+/**
+ * Resolve a Claude Code-spelled MCP call through an EXPLICIT lookup.
+ *
+ * The lookup is a required argument rather than something read from ambient
+ * state, because the set a call must resolve against is the one offered to the
+ * agent that emitted it. A resolver closing over one agent's tools and then
+ * shared with another — the primary session's resolver also handed to the
+ * isolated auto-learn capture agent, say — would let a capture response reach a
+ * main-session tool it was never offered. Naming the source at every call site
+ * makes that mistake unrepresentable.
+ *
+ * A caller whose tools span several presentation sets (mounted `xd://` devices
+ * plus advertised top-level tools) MUST pass one lookup covering the union.
+ * Checking each set with its own call and taking the first hit would let set
+ * order silently break the uniqueness rule below.
+ *
+ * Resolution requires a UNIQUE match. Two different boundaries can both name a
+ * registered tool — server `foo` + tool `bar__foo_bar_baz` and server
+ * `foo__bar` + tool `foo_bar_baz` mint distinct keys yet share the spelling
+ * `mcp__foo__bar__foo_bar_baz` — and nothing in the emitted name says which was
+ * meant. Picking whichever boundary sorts first would execute an MCP operation
+ * the model did not ask for, side effects included, so an ambiguous alias
+ * resolves to nothing and the call stays a recoverable `not found`.
+ *
+ * Returns `undefined` unless exactly one {@link canonicalMCPToolNameCandidates}
+ * entry resolves, so an already-registered name never reaches here and a
+ * non-MCP name can never resolve at all.
+ */
+export function resolveMCPToolAlias<T extends { readonly name: string }>(
+	name: string,
+	lookup: (candidate: string) => T | undefined,
+): T | undefined {
+	const matches: T[] = [];
+	for (const candidate of canonicalMCPToolNameCandidates(name)) {
+		const match = lookup(candidate);
+		if (match !== undefined && !matches.some(seen => seen.name === match.name)) matches.push(match);
+	}
+	return matches.length === 1 ? matches[0] : undefined;
 }
 
 export interface MCPToolOriginSource {
@@ -418,29 +631,16 @@ export function deduplicateMCPToolsByName<T extends MCPToolOriginSource>(tools: 
 }
 
 /**
- * Parse an MCP tool name back to server and tool components.
- *
- * Note: This returns the normalized tool name (with server prefix stripped).
- * The original MCP tool name may have had the server name as a prefix.
- */
-export function parseMCPToolName(name: string): { serverName: string; toolName: string } | null {
-	if (!name.startsWith("mcp__")) return null;
-
-	const rest = name.slice(5);
-	const underscoreIdx = rest.indexOf("_");
-	if (underscoreIdx === -1) return null;
-
-	return {
-		serverName: rest.slice(0, underscoreIdx),
-		toolName: rest.slice(underscoreIdx + 1),
-	};
-}
-
-/**
  * CustomTool wrapping an MCP tool with an active connection.
  */
 export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	readonly name: string;
+	/**
+	 * Name this tool had before digits were kept in minted names, if different.
+	 * Approval resolution honors `deny`/`prompt` user policies written against
+	 * this key so the rename cannot silently unblock a restricted MCP server.
+	 */
+	readonly legacyName?: string;
 	readonly label: string;
 	readonly description: string;
 	readonly parameters: TSchema;
@@ -470,6 +670,7 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		private readonly reconnect?: MCPReconnect,
 	) {
 		this.name = createMCPToolName(connection.name, tool.name);
+		this.legacyName = createLegacyMCPToolName(connection.name, tool.name);
 		this.label = `${connection.name}/${tool.name}`;
 		this.description = tool.description ?? `MCP tool from ${connection.name}`;
 		this.parameters = normalizeSchemaForMCP(tool.inputSchema) as TSchema;
@@ -553,6 +754,8 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
  */
 export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	readonly name: string;
+	/** See {@link MCPTool.legacyName}. */
+	readonly legacyName?: string;
 	readonly label: string;
 	readonly description: string;
 	readonly parameters: TSchema;
@@ -588,6 +791,7 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		private readonly reconnect?: MCPReconnect,
 	) {
 		this.name = createMCPToolName(serverName, tool.name);
+		this.legacyName = createLegacyMCPToolName(serverName, tool.name);
 		this.label = `${serverName}/${tool.name}`;
 		this.description = tool.description ?? `MCP tool from ${serverName}`;
 		this.parameters = normalizeSchemaForMCP(tool.inputSchema) as TSchema;

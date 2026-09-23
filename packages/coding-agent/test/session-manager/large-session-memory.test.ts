@@ -82,15 +82,9 @@ describe("large session memory guards", () => {
 				textTail: "frame",
 			},
 		};
-		const firstCompactionId = session.appendCompaction(
-			firstSummary,
-			undefined,
-			firstKeptEntryId,
-			1000,
-			undefined,
-			undefined,
-			firstPreserve,
-		);
+		const firstCompactionId = session.appendCompaction(firstSummary, undefined, firstKeptEntryId, 1000, {
+			preserveData: firstPreserve,
+		});
 		const rewindId = session.appendMessage({ role: "user", content: "between compactions", timestamp: 3 });
 		session.appendCompaction(secondSummary, undefined, rewindId, 2000);
 		await session.flush();
@@ -188,15 +182,9 @@ describe("large session memory guards", () => {
 
 		const branchACompactionSummary = `branch-a-${"x".repeat(1024)}`;
 		const branchAPreserve = { openaiRemoteCompaction: { provider: "anthropic", replacementHistory: [] } };
-		session.appendCompaction(
-			branchACompactionSummary,
-			undefined,
-			rootId,
-			1000,
-			undefined,
-			undefined,
-			branchAPreserve,
-		);
+		session.appendCompaction(branchACompactionSummary, undefined, rootId, 1000, {
+			preserveData: branchAPreserve,
+		});
 		const branchACompactionId = session.getLeafId();
 		if (!branchACompactionId) throw new Error("Expected branch A compaction id");
 

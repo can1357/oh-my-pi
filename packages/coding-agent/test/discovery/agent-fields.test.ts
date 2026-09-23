@@ -1,9 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import { Effort } from "@oh-my-pi/pi-ai";
 import { parseAgentFields } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
-import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
+import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 
 describe("parseAgentFields", () => {
+	test("rejects the reserved `main` and `sub` agent definition names", () => {
+		expect(parseAgentFields({ name: "main", description: "desc" })).toBeNull();
+		expect(parseAgentFields({ name: " Main ", description: "desc" })).toBeNull();
+		expect(parseAgentFields({ name: "sub", description: "desc" })).toBeNull();
+		expect(parseAgentFields({ name: " Sub ", description: "desc" })).toBeNull();
+	});
+
 	test("parses blocking from boolean frontmatter", () => {
 		const fields = parseAgentFields({
 			name: "reviewer",
@@ -86,15 +93,19 @@ describe("parseAgentFields", () => {
 
 		expect(fields?.tools).toEqual(["read", "grep", "yield"]);
 	});
+	test("keeps an explicitly empty tools list distinct from an absent one", () => {
+		expect(parseAgentFields({ name: "quiet", description: "desc", tools: [] })?.tools).toEqual(["yield"]);
+		expect(parseAgentFields({ name: "quiet", description: "desc" })?.tools).toBeUndefined();
+	});
 
-	test("maps legacy search and find tool names", () => {
+	test("maps legacy search alias to grep and keeps find canonical", () => {
 		const fields = parseAgentFields({
 			name: "reviewer",
 			description: "desc",
 			tools: ["Find", "Glob", "Search", "Grep"],
 		});
 
-		expect(fields?.tools).toEqual(["glob", "grep", "yield"]);
+		expect(fields?.tools).toEqual(["find", "glob", "grep", "yield"]);
 	});
 
 	test("parses autoloadSkills from array frontmatter", () => {

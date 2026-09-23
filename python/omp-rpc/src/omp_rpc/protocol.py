@@ -4,7 +4,7 @@ import base64
 import mimetypes
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Final, Literal, NotRequired, TypedDict, TypeAlias, cast
+from typing import Any, Final, Literal, NotRequired, TypeAlias, TypedDict, cast
 
 JsonPrimitive: TypeAlias = str | int | float | bool | None
 JsonValue: TypeAlias = JsonPrimitive | list["JsonValue"] | dict[str, "JsonValue"]
@@ -169,6 +169,16 @@ def _optional_json_object(value: object, *, field: str) -> JsonObject | None:
     return _clone_json_object(value, field=field)
 
 
+def _optional_json_objects(
+    values: object, *, field: str
+) -> tuple[JsonObject, ...] | None:
+    if values is None:
+        return None
+    if not isinstance(values, list):
+        raise ValueError(f"{field} must be a list")
+    return tuple(_clone_json_object(item, field=f"{field}[]") for item in values)
+
+
 def _clone_json_objects(values: object, *, field: str) -> tuple[JsonObject, ...]:
     if values is None:
         return ()
@@ -325,12 +335,13 @@ def parse_assistant_message_event(payload: JsonObject) -> AssistantMessageEvent:
     )
     if event_type == "start":
         return AssistantMessageStartEvent(
+            type="start",
             partial=_parse_assistant_message(
                 _clone_json_object(
                     payload.get("partial"), field="assistantMessageEvent.partial"
                 ),
                 field="assistantMessageEvent.partial",
-            )
+            ),
         )
     if event_type in {"text_start", "thinking_start", "toolcall_start"}:
         partial = _parse_assistant_message(
@@ -343,12 +354,16 @@ def parse_assistant_message_event(payload: JsonObject) -> AssistantMessageEvent:
         if content_index is None:
             raise ValueError("assistantMessageEvent.contentIndex must be an integer")
         if event_type == "text_start":
-            return AssistantTextStartEvent(contentIndex=content_index, partial=partial)
+            return AssistantTextStartEvent(
+                type="text_start", contentIndex=content_index, partial=partial
+            )
         if event_type == "thinking_start":
             return AssistantThinkingStartEvent(
-                contentIndex=content_index, partial=partial
+                type="thinking_start", contentIndex=content_index, partial=partial
             )
-        return AssistantToolCallStartEvent(contentIndex=content_index, partial=partial)
+        return AssistantToolCallStartEvent(
+            type="toolcall_start", contentIndex=content_index, partial=partial
+        )
     if event_type in {"text_delta", "thinking_delta", "toolcall_delta"}:
         partial = _parse_assistant_message(
             _clone_json_object(
@@ -364,14 +379,23 @@ def parse_assistant_message_event(payload: JsonObject) -> AssistantMessageEvent:
             raise ValueError("assistantMessageEvent.delta must be a string")
         if event_type == "text_delta":
             return AssistantTextDeltaEvent(
-                contentIndex=content_index, delta=delta, partial=partial
+                type="text_delta",
+                contentIndex=content_index,
+                delta=delta,
+                partial=partial,
             )
         if event_type == "thinking_delta":
             return AssistantThinkingDeltaEvent(
-                contentIndex=content_index, delta=delta, partial=partial
+                type="thinking_delta",
+                contentIndex=content_index,
+                delta=delta,
+                partial=partial,
             )
         return AssistantToolCallDeltaEvent(
-            contentIndex=content_index, delta=delta, partial=partial
+            type="toolcall_delta",
+            contentIndex=content_index,
+            delta=delta,
+            partial=partial,
         )
     if event_type in {"text_end", "thinking_end"}:
         partial = _parse_assistant_message(
@@ -388,10 +412,16 @@ def parse_assistant_message_event(payload: JsonObject) -> AssistantMessageEvent:
             raise ValueError("assistantMessageEvent.content must be a string")
         if event_type == "text_end":
             return AssistantTextEndEvent(
-                contentIndex=content_index, content=content, partial=partial
+                type="text_end",
+                contentIndex=content_index,
+                content=content,
+                partial=partial,
             )
         return AssistantThinkingEndEvent(
-            contentIndex=content_index, content=content, partial=partial
+            type="thinking_end",
+            contentIndex=content_index,
+            content=content,
+            partial=partial,
         )
     if event_type == "toolcall_end":
         partial = _parse_assistant_message(
@@ -407,12 +437,14 @@ def parse_assistant_message_event(payload: JsonObject) -> AssistantMessageEvent:
             payload.get("toolCall"), field="assistantMessageEvent.toolCall"
         )
         return AssistantToolCallEndEvent(
+            type="toolcall_end",
             contentIndex=content_index,
             toolCall=cast(ToolCall, tool_call),
             partial=partial,
         )
     if event_type == "done":
         return AssistantDoneEvent(
+            type="done",
             reason=cast(
                 Literal["stop", "length", "toolUse"],
                 _require_literal(
@@ -429,6 +461,7 @@ def parse_assistant_message_event(payload: JsonObject) -> AssistantMessageEvent:
             ),
         )
     return AssistantErrorEvent(
+        type="error",
         reason=cast(
             Literal["aborted", "error"],
             _require_literal(
@@ -926,6 +959,7 @@ class ExtensionUiRequest:
     title: str | None = None
     options: tuple[str, ...] | None = None
     message: str | None = None
+    option_details: tuple[JsonObject, ...] | None = field(default=None, kw_only=True)
     placeholder: str | None = None
     prefill: str | None = None
     timeout: int | None = None
@@ -1550,6 +1584,9 @@ def parse_extension_ui_request(payload: JsonObject) -> ExtensionUiRequest:
         title=_optional_str(payload, "title"),
         options=_tuple_of_strings(
             payload.get("options"), field="extension_ui_request.options"
+        ),
+        option_details=_optional_json_objects(
+            payload.get("optionDetails"), field="extension_ui_request.optionDetails"
         ),
         message=_optional_str(payload, "message"),
         placeholder=_optional_str(payload, "placeholder"),

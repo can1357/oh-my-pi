@@ -26,13 +26,13 @@ import {
 	piLsPath,
 	piReadPath,
 	piTimeout,
-} from "@oh-my-pi/pi-ai/providers/cursor/exec-modern";
+} from "@oh-my-pi/pi-ai/providers/cursor-pi-args";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { cursorMcpPrefersReplaceEdit, normalizeCursorReplaceArgs } from "./cursor-bridge-tools";
 import type { MCPResourceReadResult } from "./mcp/types";
-import type { ApprovalMode } from "./tools/approval";
-import { resolveApproval } from "./tools/approval";
+import { resolveApproval, resolveApprovalFromContext } from "./tools/approval";
 import { confineToWorkspace, resolveToCwd } from "./tools/path-utils";
-import type { TodoPhase, TodoStatus } from "./tools/todo";
+import type { TodoPhase, TodoStatus } from "@oh-my-pi/pi-tui/tools/todo";
 
 /** Phase used for Cursor-owned tasks with no local phase grouping. */
 const CURSOR_TODO_PHASE = "Tasks";
@@ -87,15 +87,15 @@ interface CursorExecBridgeOptions {
 	 *
 	 * This is a grant, not a policy: it answers "did the session hand this
 	 * channel a file-writing tool", which callers derive from their own roster
-	 * before any bridge-specific rewriting. The primary Cursor session moves
-	 * `edit` out of {@link tools} and serves it through
-	 * {@link getEditReplaceTool}, so reading the map here would deny an
-	 * edit-only session. Defaults to allowed
-	 * to preserve the primary agent's behavior; callers with a restricted tool
-	 * set (advisors) opt out. The user's approval policy is resolved separately,
-	 * per call.
+	 * before any bridge-specific rewriting. A resolver keeps that answer current
+	 * when runtime tool selection upgrades a restricted transport. The primary
+	 * Cursor session moves `edit` out of {@link tools} and serves it through
+	 * {@link getEditReplaceTool}, so reading the map here would deny an edit-only
+	 * session. Defaults to allowed to preserve the primary agent's behavior;
+	 * callers with a restricted tool set (advisors) opt out. The user's approval
+	 * policy is resolved separately, per call.
 	 */
-	allowDirectFileMutation?: boolean;
+	allowDirectFileMutation?: boolean | (() => boolean);
 	/**
 	 * Mirror Cursor's server-owned todo list into local session state. Cursor
 	 * resolves `update_todos` / `read_todos` remotely, so without this bridge
@@ -289,6 +289,11 @@ async function executeTool(
 	return createToolResultMessage(toolCallId, toolName, result, isError);
 }
 
+function allowsDirectFileMutation(options: CursorExecBridgeOptions): boolean {
+	const grant = options.allowDirectFileMutation;
+	return typeof grant === "function" ? grant() : grant !== false;
+}
+
 /**
  * Resolve the user's policy for a frame that mutates the filesystem directly.
  *
@@ -298,15 +303,12 @@ async function executeTool(
  * proceed, or the refusal text to answer with.
  */
 function refuseByWritePolicy(options: CursorExecBridgeOptions, toolName: string, pathArg: string): string | null {
-	const context = options.getToolContext?.();
-	const settings = context?.settings;
-	const approvalMode: ApprovalMode =
-		context?.autoApprove === true ? "yolo" : (settings?.get("tools.approvalMode") ?? "yolo");
+	const { approvalMode, userPolicies } = resolveApprovalFromContext(options.getToolContext?.());
 	const approval = resolveApproval(
 		{ name: toolName, approval: "write" },
 		{ path: pathArg },
 		approvalMode,
-		(settings?.get("tools.approval") ?? {}) as Record<string, unknown>,
+		userPolicies,
 	);
 	if (approval.policy === "allow") return null;
 	return approval.policy === "deny"
@@ -317,7 +319,7 @@ function refuseByWritePolicy(options: CursorExecBridgeOptions, toolName: string,
 async function executeDelete(options: CursorExecBridgeOptions, pathArg: string, toolCallId: string) {
 	const toolName = "delete";
 
-	if (options.allowDirectFileMutation === false) {
+	if (!allowsDirectFileMutation(options)) {
 		const result = buildToolErrorResult(`Tool "${toolName}" not available`);
 		return createToolResultMessage(toolCallId, toolName, result, true);
 	}
@@ -783,7 +785,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		downloadPath?: string;
 	}): Promise<CursorMcpResourceContent | null> {
 		if (downloadPath) {
-			if (this.options.allowDirectFileMutation === false) {
+			if (!allowsDirectFileMutation(this.options)) {
 				throw new Error('Tool "write" not available: this session cannot download resources to disk.');
 			}
 			const refusal = refuseByWritePolicy(this.options, "write", downloadPath);
@@ -860,7 +862,12 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	 * feeds `details.phases` straight into `setTodos`, so echoing the current list
 	 * back would let a call that changed nothing overwrite live UI state.
 	 */
-	todoSync(snapshot: CursorTodoSnapshot | null, toolCallId: string, error: string | null = null): ToolResultMessage {
+	todoSync(
+		snapshot: CursorTodoSnapshot | null,
+		toolCallId: string,
+		error: string | null = null,
+		origin: "read" | "update" = "update",
+	): ToolResultMessage {
 		const setPhases = this.options.setTodoPhases;
 		const existing = this.options.getTodoPhases?.() ?? [];
 
@@ -895,9 +902,13 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 				grouped.delete(phase.name);
 			}
 			for (const [name, tasks] of grouped) next.push({ name, tasks });
-			setPhases(next);
-			this.options.persistTodoPhases?.(next);
-			phases = next;
+			if (origin === "read" && JSON.stringify(next) === JSON.stringify(existing)) {
+				phases = undefined;
+			} else {
+				setPhases(next);
+				this.options.persistTodoPhases?.(next);
+				phases = next;
+			}
 		}
 
 		const result = buildTodoSyncResult(toolCallId, phases, error);
@@ -924,6 +935,16 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	async mcp(call: CursorMcpCall) {
 		const toolName = call.toolName || call.name;
 		const toolCallId = decodeToolCallId(call.toolCallId);
+		const args = Object.keys(call.args ?? {}).length > 0 ? call.args : decodeMcpArgs(call.rawArgs ?? {});
+		if (cursorMcpPrefersReplaceEdit(toolName, args)) {
+			const replaceTool = this.options.getEditReplaceTool?.();
+			if (!replaceTool) {
+				const availableTools = Array.from(this.options.tools.keys()).filter(name => name.startsWith("mcp__"));
+				const message = formatMcpToolErrorMessage(toolName, availableTools);
+				return createToolResultMessage(toolCallId, toolName, buildToolErrorResult(message), true);
+			}
+			return await executeTool(this.options, "edit", toolCallId, normalizeCursorReplaceArgs(args), replaceTool);
+		}
 		const tool = this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName);
 		if (!tool) {
 			const availableTools = Array.from(this.options.tools.keys()).filter(name => name.startsWith("mcp__"));
@@ -932,7 +953,6 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			return createToolResultMessage(toolCallId, toolName, result, true);
 		}
 
-		const args = Object.keys(call.args ?? {}).length > 0 ? call.args : decodeMcpArgs(call.rawArgs ?? {});
 		const toolResultMessage = await executeTool(this.options, toolName, toolCallId, args);
 		return toolResultMessage;
 	}
@@ -947,18 +967,18 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	 */
 	async mcpApprovalPreflight(call: CursorMcpCall) {
 		const toolName = call.toolName || call.name;
-		const tool = this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName);
-		if (!tool) return false;
-		const context = this.options.getToolContext?.();
-		const settings = context?.settings;
-		const approvalMode: ApprovalMode =
-			context?.autoApprove === true ? "yolo" : (settings?.get("tools.approvalMode") ?? "yolo");
 		const args = Object.keys(call.args ?? {}).length > 0 ? call.args : decodeMcpArgs(call.rawArgs ?? {});
+		const preferReplace = cursorMcpPrefersReplaceEdit(toolName, args);
+		const tool = preferReplace
+			? this.options.getEditReplaceTool?.()
+			: (this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName));
+		if (!tool) return false;
+		const { approvalMode, userPolicies } = resolveApprovalFromContext(this.options.getToolContext?.());
 		const approval = resolveApproval(
 			tool,
-			args,
+			preferReplace ? normalizeCursorReplaceArgs(args) : args,
 			approvalMode,
-			(settings?.get("tools.approval") ?? {}) as Record<string, unknown>,
+			userPolicies,
 		);
 		return approval.policy === "allow";
 	}

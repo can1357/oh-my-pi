@@ -44,7 +44,7 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 		}
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "auth-broker-remote-"));
 		serverStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
-		serverStore.saveOAuth("anthropic", {
+		await serverStore.saveOAuth("anthropic", {
 			access: "server-access-1",
 			refresh: "server-refresh-1",
 			expires: Date.now() - 60_000, // expired so refresh is forced
@@ -59,7 +59,7 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 						? claudeUsage.claudeUsageProvider
 						: undefined,
 		});
-		await serverStorage.reload();
+		await serverStorage.credentials.reload();
 		handle = startAuthBroker({
 			storage: serverStorage,
 			bind: "127.0.0.1:0",
@@ -118,9 +118,9 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 				};
 			},
 		});
-		await clientStorage.reload();
+		await clientStorage.credentials.reload();
 
-		const apiKey = await clientStorage.getApiKey("anthropic");
+		const apiKey = await clientStorage.keys.get("anthropic");
 		expect(apiKey).toBe("server-access-rotated");
 		expect(overrideCalls).toBe(1);
 		// The local oauth refresh helper was used exactly once — by the broker server.
@@ -162,7 +162,7 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 	});
 
 	test("invalidated OAuth tokens disable the remote row and rotate to a sibling", async () => {
-		serverStore!.upsertAuthCredentialForProvider("anthropic", {
+		await serverStore!.upsertAuthCredential("anthropic", {
 			type: "oauth",
 			access: "server-access-2",
 			refresh: "server-refresh-2",
@@ -170,7 +170,7 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 			accountId: "account-2",
 			email: "b@example.com",
 		});
-		await serverStorage!.reload();
+		await serverStorage!.credentials.reload();
 		const seededRows = serverStore!.listAuthCredentials("anthropic");
 		expect(seededRows).toHaveLength(2);
 		const failedRow = seededRows[0];
@@ -189,7 +189,7 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 			credentialId: failedRow.id,
 		};
 
-		const rotated = await clientStorage.rotateSessionCredential("anthropic", "invalidated-session", {
+		const rotated = await clientStorage.limits.rotate("anthropic", "invalidated-session", {
 			error: new Error("Encountered invalidated oauth token for user, failing request"),
 			apiKey: first.accessToken,
 			credentialId: first.credentialId,
@@ -197,21 +197,9 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 
 		expect(rotated).toBe(true);
 		expect(serverStore!.listAuthCredentials("anthropic").map(row => row.id)).not.toContain(first.credentialId);
-		const next = await clientStorage.getOAuthAccess("anthropic", "invalidated-session");
+		const next = await clientStorage.oauth.access("anthropic", "invalidated-session");
 		expect(next?.credentialId).not.toBe(first.credentialId);
 		clientStorage.close();
-		remoteStore.close();
-	});
-
-	test("RemoteAuthCredentialStore rejects writes from the client", () => {
-		const remoteStore = new RemoteAuthCredentialStore({
-			client: new AuthBrokerClient({ url: handle!.url, token }),
-		});
-		expect(() => remoteStore.replaceAuthCredentialsForProvider("anthropic", [])).toThrow(/read-only/);
-		expect(() => remoteStore.upsertAuthCredentialForProvider("anthropic", { type: "api_key", key: "x" })).toThrow(
-			/read-only/,
-		);
-		expect(() => remoteStore.deleteAuthCredentialsForProvider("anthropic", "x")).toThrow(/read-only/);
 		remoteStore.close();
 	});
 
@@ -558,10 +546,10 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 		}
 	});
 
-	test("getUsageReport gates same-org siblings on the member's own identity", async () => {
-		// Two Team members share the org id but draw on per-user pools: the
-		// shared org is a gate, not a match, so Bob must never receive Alice's
-		// report just because it is the first (or only) same-org candidate.
+	test("getUsageReport gates same-org siblings on the member's email when their account ID is shared", async () => {
+		// Two Team members share the org and account ids but draw on per-user
+		// pools: Bob must never receive Alice's report just because the shared
+		// workspace identifiers match first.
 		const brokerClient = new AuthBrokerClient({ url: "http://127.0.0.1:9", token: "unused" });
 		const now = Date.now();
 		const makeMemberCredential = (name: string, orgId?: string) => ({
@@ -569,7 +557,7 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 			access: `remote-access-${name}`,
 			refresh: REMOTE_REFRESH_SENTINEL,
 			expires: now + 120_000,
-			...(name === "org-only" ? {} : { accountId: `account-${name}`, email: `${name}@example.com` }),
+			...(name === "org-only" ? {} : { accountId: "account-shared", email: `${name}@example.com` }),
 			orgId,
 		});
 		const makeMemberReport = (
@@ -590,7 +578,7 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 					status,
 				},
 			],
-			metadata: { email: `${name}@example.com`, accountId: `account-${name}`, orgId },
+			metadata: { email: `${name}@example.com`, accountId: "account-shared", orgId },
 		});
 		// Bob's report deliberately precedes Alice's so a first-same-org match
 		// would hand his pool to Alice; org-duo holds only Dave's report.
@@ -616,10 +604,10 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 		try {
 			// Each member routes to their OWN pool inside the shared org.
 			const aliceReport = await remoteStore.getUsageReport("anthropic", makeMemberCredential("alice", "org-team"));
-			expect(aliceReport?.metadata?.accountId).toBe("account-alice");
+			expect(aliceReport?.metadata?.email).toBe("alice@example.com");
 			expect(requireLimit(aliceReport!, "anthropic:5h").status).toBe("exhausted");
 			const bobReport = await remoteStore.getUsageReport("anthropic", makeMemberCredential("bob", "org-team"));
-			expect(bobReport?.metadata?.accountId).toBe("account-bob");
+			expect(bobReport?.metadata?.email).toBe("bob@example.com");
 			expect(requireLimit(bobReport!, "anthropic:5h").status).toBe("ok");
 
 			// Erin's own report is missing: the lone same-org sibling report
@@ -629,7 +617,7 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 			// An org-only credential (no base identifiers) still matches on the
 			// org alone, but only when the same-org report is unambiguous.
 			const duoReport = await remoteStore.getUsageReport("anthropic", makeMemberCredential("org-only", "org-duo"));
-			expect(duoReport?.metadata?.accountId).toBe("account-dave");
+			expect(duoReport?.metadata?.email).toBe("dave@example.com");
 			expect(await remoteStore.getUsageReport("anthropic", makeMemberCredential("org-only", "org-team"))).toBeNull();
 
 			// Header-ingest overlays partition per member too: Alice's ingest
@@ -647,14 +635,14 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 						status: "ok",
 					},
 				],
-				metadata: { email: "alice@example.com", accountId: "account-alice", orgId: "org-team" },
+				metadata: { email: "alice@example.com", accountId: "account-shared", orgId: "org-team" },
 			};
 			expect(remoteStore.ingestUsageReport("anthropic", makeMemberCredential("alice", "org-team"), overlay)).toBe(
 				true,
 			);
 			const merged = await remoteStore.fetchUsageReports();
-			const mergedAlice = merged?.find(report => report.metadata?.accountId === "account-alice");
-			const mergedBob = merged?.find(report => report.metadata?.accountId === "account-bob");
+			const mergedAlice = merged?.find(report => report.metadata?.email === "alice@example.com");
+			const mergedBob = merged?.find(report => report.metadata?.email === "bob@example.com");
 			expect(requireLimit(mergedAlice!, "anthropic:5h").amount.used).toBe(90);
 			expect(requireLimit(mergedBob!, "anthropic:5h").amount.used).toBe(10);
 			const bobAfterIngest = await remoteStore.getUsageReport("anthropic", makeMemberCredential("bob", "org-team"));
@@ -830,6 +818,47 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 			await Promise.resolve();
 			expect(fetchSnapshotSpy).not.toHaveBeenCalled();
 			expect(remoteStore.getCredentialBlock(7, "anthropic:oauth", "tier:fable")).toBe(laterBlock);
+		} finally {
+			remoteStore.close();
+		}
+	});
+	test("retains the legacy Codex shared block from an older broker snapshot", () => {
+		const blockedUntilMs = Date.now() + 60_000;
+		const remoteStore = new RemoteAuthCredentialStore({
+			client: new AuthBrokerClient({ url: "http://127.0.0.1:9", token: "unused" }),
+			streamSnapshots: false,
+			initialSnapshot: {
+				generation: 1,
+				generatedAt: Date.now(),
+				serverNowMs: Date.now(),
+				refresher: { enabled: false, intervalMs: 0, skewMs: 0, nextSweepInMs: Number.MAX_SAFE_INTEGER },
+				credentials: [
+					{
+						id: 7,
+						provider: "openai-codex",
+						credential: {
+							type: "oauth",
+							access: "remote-codex-access",
+							refresh: REMOTE_REFRESH_SENTINEL,
+							expires: blockedUntilMs,
+							accountId: "remote-codex-account",
+							email: "remote-codex@example.com",
+						},
+						identityKey: "email:remote-codex@example.com",
+						rotatesInMs: null,
+						blocks: [
+							{
+								providerKey: "openai-codex:oauth",
+								blockScope: "shared",
+								blockedUntilMs,
+							},
+						],
+					},
+				],
+			},
+		});
+		try {
+			expect(remoteStore.getCredentialBlock(7, "openai-codex:oauth", "shared")).toBe(blockedUntilMs);
 		} finally {
 			remoteStore.close();
 		}
@@ -1031,8 +1060,8 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 	test("client AuthStorage.set forwards api_key login to the broker (replace semantics)", async () => {
 		// Pre-existing api_key for the same provider on the server side — a fresh
 		// login should disable it and replace it with the new key.
-		serverStore!.saveApiKey("kagi", "old-key");
-		await serverStorage!.reload();
+		await serverStore!.saveApiKey("kagi", "old-key");
+		await serverStorage!.credentials.reload();
 
 		const brokerClient = new AuthBrokerClient({ url: handle!.url, token });
 		const initialResult = await brokerClient.fetchSnapshot();
@@ -1042,9 +1071,9 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 			initialSnapshot: initialResult.snapshot,
 		});
 		const clientStorage = new AuthStorage(remoteStore);
-		await clientStorage.reload();
+		await clientStorage.credentials.reload();
 
-		await clientStorage.set("kagi", { type: "api_key", key: "new-key" });
+		await clientStorage.credentials.set("kagi", { type: "api_key", key: "new-key" });
 
 		// Server is the source of truth — only the new key should be active.
 		const activeOnServer = serverStore!.listAuthCredentials("kagi");
@@ -1053,14 +1082,14 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 
 		// Client reflects the new key through the broker's `POST /v1/credential`
 		// response without waiting for the long-poll snapshot tick.
-		expect(clientStorage.get("kagi")).toEqual({ type: "api_key", key: "new-key" });
+		expect(clientStorage.credentials.get("kagi")).toEqual({ type: "api_key", key: "new-key" });
 		clientStorage.close();
 	});
 	test("snapshot with a login-sourced api_key passes client wire validation", async () => {
 		// Regression: keys stored via the /login flow carry `source: "login"`.
 		// exportSnapshot() forwards them verbatim; the client wire schema used
 		// to reject the field ("credentials[0].credential.source must be removed").
-		await serverStorage!.set("custom-host", { type: "api_key", key: "sk-custom", source: "login" });
+		await serverStorage!.credentials.set("custom-host", { type: "api_key", key: "sk-custom", source: "login" });
 
 		const brokerClient = new AuthBrokerClient({ url: handle!.url, token });
 		const result = await brokerClient.fetchSnapshot();
@@ -1069,16 +1098,16 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 		expect(entry?.credential).toEqual({ type: "api_key", key: "sk-custom", source: "login" });
 	});
 
-	test("client AuthStorage.remove disables every broker-side credential for the provider (logout)", async () => {
-		serverStore!.saveApiKey("kagi", "k1");
-		serverStore!.saveOAuth("kagi", {
+	test("client credentials.remove disables every broker-side credential for the provider (logout)", async () => {
+		await serverStore!.saveApiKey("kagi", "k1");
+		await serverStore!.saveOAuth("kagi", {
 			access: "oauth-access",
 			refresh: "oauth-refresh",
 			expires: Date.now() + 120_000,
 			accountId: "acct-kagi",
 			email: "user@example.com",
 		});
-		await serverStorage!.reload();
+		await serverStorage!.credentials.reload();
 
 		const brokerClient = new AuthBrokerClient({ url: handle!.url, token });
 		const initialResult = await brokerClient.fetchSnapshot();
@@ -1088,16 +1117,16 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 			initialSnapshot: initialResult.snapshot,
 		});
 		const clientStorage = new AuthStorage(remoteStore);
-		await clientStorage.reload();
+		await clientStorage.credentials.reload();
 
-		await clientStorage.remove("kagi");
+		await clientStorage.credentials.remove("kagi");
 
 		expect(serverStore!.listAuthCredentials("kagi")).toEqual([]);
-		expect(clientStorage.get("kagi")).toBeUndefined();
+		expect(clientStorage.credentials.get("kagi")).toBeUndefined();
 		clientStorage.close();
 	});
 
-	test("client AuthStorage invalidateUsageCache notifies broker to invalidate server-side cache", async () => {
+	test("remote store cache invalidation notifies broker to invalidate server-side cache", async () => {
 		const brokerClient = new AuthBrokerClient({ url: handle!.url, token });
 		const initialResult = await brokerClient.fetchSnapshot();
 		if (initialResult.status !== 200) throw new Error("expected snapshot");
@@ -1106,9 +1135,9 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 			initialSnapshot: initialResult.snapshot,
 		});
 		const clientStorage = new AuthStorage(remoteStore);
-		await clientStorage.reload();
+		await clientStorage.credentials.reload();
 
-		const serverInvalidateSpy = vi.spyOn(serverStorage!, "invalidateUsageCache");
+		const serverInvalidateSpy = vi.spyOn(serverStorage!.usage, "invalidate");
 
 		await remoteStore.invalidateUsageCache();
 
@@ -1123,7 +1152,7 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 			...credential.credential,
 			expires: Date.now() + 3_600_000,
 		});
-		await serverStorage!.reload();
+		await serverStorage!.credentials.reload();
 
 		let calls = 0;
 		const fetchSpy = vi.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage").mockImplementation(async () => {
@@ -1152,11 +1181,11 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 			initialSnapshot: initialResult.snapshot,
 		});
 		const clientStorage = new AuthStorage(remoteStore);
-		await clientStorage.reload();
+		await clientStorage.credentials.reload();
 		try {
-			expect(await clientStorage.fetchUsageReports()).toHaveLength(1);
-			await clientStorage.invalidateUsageCache();
-			expect(await clientStorage.fetchUsageReports()).toEqual([]);
+			expect(await clientStorage.usage.reports()).toHaveLength(1);
+			await clientStorage.usage.invalidate();
+			expect(await clientStorage.usage.reports()).toEqual([]);
 			expect(fetchSpy).toHaveBeenCalledTimes(2);
 		} finally {
 			clientStorage.close();
@@ -1206,7 +1235,7 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 		};
 		testUsageProviders = new Map([["openai-codex", usageProvider]]);
 		for (const accountId of accountIds) {
-			serverStore!.upsertAuthCredentialForProvider("openai-codex", {
+			await serverStore!.upsertAuthCredential("openai-codex", {
 				type: "oauth",
 				access: `access-${accountId}`,
 				refresh: `refresh-${accountId}`,
@@ -1215,7 +1244,7 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 				email: `${accountId.slice("account-".length)}@example.com`,
 			});
 		}
-		await serverStorage!.reload();
+		await serverStorage!.credentials.reload();
 
 		const brokerClient = new AuthBrokerClient({ url: handle!.url, token, timeoutMs: 10_000 });
 		const initialResult = await brokerClient.fetchSnapshot();
@@ -1225,10 +1254,10 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 			initialSnapshot: initialResult.snapshot,
 		});
 		const clientStorage = new AuthStorage(remoteStore);
-		await clientStorage.reload();
+		await clientStorage.credentials.reload();
 		try {
-			await clientStorage.invalidateUsageCache();
-			const refresh = clientStorage.fetchUsageReports();
+			await clientStorage.usage.invalidate();
+			const refresh = clientStorage.usage.reports();
 			const freeStarted = refreshStarted.get("account-free");
 			const freeRelease = refreshReleases.get("account-free");
 			if (!freeStarted || !freeRelease) throw new Error("missing free-account refresh gates");
@@ -1538,7 +1567,7 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 			expect(fetchSpy).toHaveBeenCalledTimes(1);
 			// Snapshot replacement (credential removal) invalidates the memo: the
 			// previously matching report is no longer attributable and disappears.
-			remoteStore.deleteAuthCredential(1, "test");
+			await remoteStore.deleteAuthCredential(1, "test");
 			const third = await remoteStore.fetchUsageReports();
 			expect(third).not.toBe(first!);
 			expect(third).toEqual([nonPooledReport]);

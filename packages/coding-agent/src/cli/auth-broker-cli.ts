@@ -27,17 +27,20 @@ import {
 	listProvidersWithEnvKey,
 	type OAuthCredential,
 	type OAuthProvider,
-	type OAuthProviderInfo,
-	PASTE_CODE_LOGIN_PROVIDERS,
 	PROVIDER_REGISTRY,
 	SqliteAuthCredentialStore,
 } from "@oh-my-pi/pi-ai";
 import { AuthBrokerClient, DEFAULT_AUTH_BROKER_BIND, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
+import { refreshOAuthToken } from "@oh-my-pi/pi-ai/oauth";
+import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
 import { $which, APP_NAME, getAgentDbPath, getConfigRootDir, isEnoent, logger, VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { setTransports as setLoggerTransports } from "@oh-my-pi/pi-utils/logger";
 import { $ } from "bun";
+import { refreshManagedMcpOAuthCredential } from "../mcp/oauth-credentials";
+import { isManagedMCPOAuthCredentialId, mcpOAuthServerUrlFromCredentialId } from "../mcp/oauth-flow";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
+import { pickIndex, pickOAuthProvider, runTerminalOAuthLogin } from "./oauth-terminal";
 
 export type AuthBrokerAction = "serve" | "token" | "login" | "logout" | "status" | "import" | "migrate" | "list";
 
@@ -87,7 +90,7 @@ function getTokenFilePath(): string {
 
 async function readToken(): Promise<string | null> {
 	try {
-		const raw = await Bun.file(getTokenFilePath()).text();
+		const raw = await fs.readFile(getTokenFilePath(), "utf8");
 		const trimmed = raw.trim();
 		return trimmed.length > 0 ? trimmed : null;
 	} catch (err) {
@@ -99,7 +102,7 @@ async function readToken(): Promise<string | null> {
 async function writeToken(token: string): Promise<void> {
 	const file = getTokenFilePath();
 	await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-	await Bun.write(file, token);
+	await fs.writeFile(file, token, { mode: 0o600 });
 	try {
 		await fs.chmod(file, 0o600);
 	} catch {
@@ -119,6 +122,34 @@ async function ensureToken(): Promise<string> {
 	return token;
 }
 
+/**
+ * OAuth refresh handler for `omp auth-broker serve`'s {@link AuthStorage}.
+ *
+ * The vault holds provider OAuth rows AND OMP-managed `mcp_oauth:*` rows.
+ * Provider rows refresh through the per-provider registry. MCP rows are
+ * self-describing — the embedded token endpoint and client credentials are the
+ * only refresh material — so they refresh with a generic `refresh_token` grant.
+ * The serve process never loads the MCP manager, so this is the only place that
+ * teaches the broker to refresh MCP tokens; without it
+ * `POST /v1/credential/:id/refresh` fails with "Unknown OAuth provider" and the
+ * background refresher lets MCP access tokens expire (issue #8933).
+ */
+export function refreshBrokerOAuthCredential(
+	provider: string,
+	credential: OAuthCredential,
+	signal?: AbortSignal,
+): Promise<OAuthCredentials> {
+	if (isManagedMCPOAuthCredentialId(provider)) {
+		return refreshManagedMcpOAuthCredential(credential, {
+			serverUrl: mcpOAuthServerUrlFromCredentialId(provider),
+			signal,
+		});
+	}
+	// Non-MCP rows: same per-provider path AuthStorage would take by default
+	// (the serve process registers no custom OAuth providers).
+	return refreshOAuthToken(provider as OAuthProvider, credential);
+}
+
 async function runServe(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 	// The broker is a long-running headless service: route structured logs to
 	// stdout so a process supervisor (pm2, journald, k8s) captures them, and
@@ -129,8 +160,11 @@ async function runServe(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 	const token = await ensureToken();
 	const dbPath = getAgentDbPath();
 	const store = await SqliteAuthCredentialStore.open(dbPath);
-	const storage = new AuthStorage(store);
-	await storage.reload();
+	const storage = new AuthStorage(store, {
+		refreshOAuthCredential: (provider, _credentialId, credential, signal) =>
+			refreshBrokerOAuthCredential(provider, credential, signal),
+	});
+	await storage.credentials.reload();
 	const handle = startAuthBroker({
 		storage,
 		bind,
@@ -140,7 +174,7 @@ async function runServe(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 	logger.info("auth-broker listening", { url: handle.url });
 	logger.info("auth-broker bearer token loaded", { path: getTokenFilePath(), mode: "0600" });
 
-	const credentialDisabledUnsub = storage.onCredentialDisabled((event: CredentialDisabledEvent) => {
+	const credentialDisabledUnsub = storage.credentials.onDisabled((event: CredentialDisabledEvent) => {
 		logger.warn("auth-broker credential disabled", { ...event });
 	});
 
@@ -178,160 +212,45 @@ async function runToken(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 }
 
 async function runLogin(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
+	if (flags.via && !flags.provider) {
+		throw new Error("Usage: omp auth-broker login <provider> --via=user@host (provider required for remote login)");
+	}
 	const providers = getOAuthProviders();
-	let providerArg = flags.provider;
-	if (!providerArg) {
-		if (flags.via) {
+	// One interface for picker + login prompts; closed before `--via` hands
+	// stdin to ssh.
+	const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+	let providerArg: string;
+	try {
+		providerArg = flags.provider ?? (await pickOAuthProvider(rl, providers));
+		if (!providers.some(p => p.id === providerArg)) {
 			throw new Error(
-				"Usage: omp auth-broker login <provider> --via=user@host (provider required for remote login)",
+				`Unknown OAuth provider '${providerArg}'. Known: ${providers
+					.map(p => p.id)
+					.sort()
+					.join(", ")}`,
 			);
 		}
-		providerArg = await pickProviderInteractively(providers);
+		if (!flags.via) {
+			await runLocalLogin(rl, providerArg);
+			return;
+		}
+	} finally {
+		rl.close();
 	}
-	if (!providers.some(p => p.id === providerArg)) {
-		throw new Error(
-			`Unknown OAuth provider '${providerArg}'. Known: ${providers
-				.map(p => p.id)
-				.sort()
-				.join(", ")}`,
-		);
-	}
-	if (flags.via) {
-		await runRemoteLogin(providerArg, flags.via, flags.dryRun ?? false);
-		return;
-	}
-	await runLocalLogin(providerArg as OAuthProvider);
+	await runRemoteLogin(providerArg, flags.via, flags.dryRun ?? false);
 }
 
-async function runLocalLogin(provider: OAuthProvider): Promise<void> {
+async function runLocalLogin(rl: readline.Interface, provider: string): Promise<void> {
 	// Drive the per-provider OAuth dance in-process. Persists into the same
 	// SQLite store the broker uses.
-	const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-	const ask = (msg: string) => promptLine(rl, `${msg} `);
 	const store = await SqliteAuthCredentialStore.open(getAgentDbPath());
 	const storage = new AuthStorage(store);
-	await storage.reload();
+	await storage.credentials.reload();
 	try {
-		// Only paste-code providers (fixed non-loopback redirect, e.g. GitLab Duo
-		// Agent's vscode:// URI) get the manual paste fallback. An explicit
-		// `onManualCodeInput` is honored for ANY provider (the storage escape hatch),
-		// so for loopback providers we must not pass it: it would make
-		// `OAuthCallbackFlow` race a readline prompt against the HTTP callback and, if
-		// the callback wins, leave that prompt outstanding (dirty/blocked terminal).
-		// `AuthStorage.login` independently refuses to synthesize the default prompt
-		// for non-paste-code providers, so this is defense-in-depth on the same gate.
-		const usesManualInput = PASTE_CODE_LOGIN_PROVIDERS.has(provider);
-		await storage.login(provider, {
-			onAuth({ url, launchUrl, instructions }) {
-				process.stdout.write("\nOpen this URL in your browser:\n");
-				// Full URL first so the CLI works from any machine, including SSH
-				// sessions where a `launchUrl` (loopback `/launch` on the OMP
-				// host) would resolve against the caller's browser and fail.
-				// Headless capture is unaffected: it reads the first URL line.
-				process.stdout.write(`${url}\n`);
-				if (launchUrl && launchUrl !== url) {
-					// Local shortcut for the machine running OMP. Terminals or
-					// screen-scrapers narrower than the full URL still get an
-					// unbroken copy target here.
-					process.stdout.write(`Local shortcut (this machine only): ${launchUrl}\n`);
-				}
-				if (instructions) process.stdout.write(`${instructions}\n`);
-				process.stdout.write("\n");
-			},
-			onProgress(message) {
-				process.stdout.write(`${message}\n`);
-			},
-			onPrompt(p) {
-				return ask(`${p.message}${p.placeholder ? ` (${p.placeholder})` : ""}:`);
-			},
-			...(usesManualInput
-				? {
-						onManualCodeInput() {
-							return ask("Paste the authorization code (or full redirect URL):");
-						},
-					}
-				: undefined),
-		});
+		await runTerminalOAuthLogin(rl, storage, provider);
 		process.stdout.write(`\nCredentials saved to ${getAgentDbPath()}\n`);
 	} finally {
 		store.close();
-		rl.close();
-	}
-}
-
-/**
- * Interactive `readline` prompt that cleanly tears down on Ctrl-C / Escape so
- * cancelling a half-finished login flow doesn't leave the terminal in raw mode.
- */
-function promptLine(rl: readline.Interface, question: string): Promise<string> {
-	const { promise, resolve, reject } = Promise.withResolvers<string>();
-	const input = process.stdin as NodeJS.ReadStream;
-	const supportsRawMode = input.isTTY && typeof input.setRawMode === "function";
-	const wasRaw = supportsRawMode ? input.isRaw : false;
-	let settled = false;
-
-	const cleanup = () => {
-		rl.off("SIGINT", onSigint);
-		if (supportsRawMode) {
-			input.off("keypress", onKeypress);
-			input.setRawMode?.(wasRaw);
-		}
-	};
-
-	const finish = (result: () => void) => {
-		if (settled) return;
-		settled = true;
-		cleanup();
-		result();
-	};
-
-	const cancel = () => {
-		finish(() => reject(new Error("Login cancelled")));
-	};
-
-	const onSigint = () => {
-		cancel();
-	};
-
-	const onKeypress = (_str: string, key: readline.Key) => {
-		if (key.name === "escape" || (key.ctrl && key.name === "c")) {
-			cancel();
-			rl.close();
-		}
-	};
-
-	if (supportsRawMode) {
-		readline.emitKeypressEvents(input, rl);
-		input.setRawMode(true);
-		input.on("keypress", onKeypress);
-	}
-
-	rl.once("SIGINT", onSigint);
-	rl.question(question, answer => {
-		finish(() => resolve(answer));
-	});
-	return promise;
-}
-
-async function pickProviderInteractively(providers: readonly OAuthProviderInfo[]): Promise<string> {
-	if (providers.length === 0) {
-		throw new Error("No OAuth providers registered");
-	}
-	const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-	try {
-		process.stdout.write("Select a provider:\n\n");
-		for (let i = 0; i < providers.length; i++) {
-			process.stdout.write(`  ${i + 1}. ${providers[i].name}\n`);
-		}
-		process.stdout.write("\n");
-		const choice = await promptLine(rl, `Enter number (1-${providers.length}): `);
-		const index = Number.parseInt(choice, 10) - 1;
-		if (Number.isNaN(index) || index < 0 || index >= providers.length) {
-			throw new Error(`Invalid selection: ${choice}`);
-		}
-		return providers[index].id;
-	} finally {
-		rl.close();
 	}
 }
 
@@ -380,31 +299,17 @@ async function runLogout(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 				process.stdout.write("No credentials stored.\n");
 				return;
 			}
-			providerArg = await pickStoredProviderInteractively(stored);
+			const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+			try {
+				providerArg = stored[await pickIndex(rl, "Select a provider to logout:", stored)];
+			} finally {
+				rl.close();
+			}
 		}
-		store.deleteAuthCredentialsForProvider(providerArg, "logged out by user");
+		await store.deleteAuthCredentials(providerArg, "logged out by user");
 		process.stdout.write(`Logged out of ${providerArg}\n`);
 	} finally {
 		store.close();
-	}
-}
-
-async function pickStoredProviderInteractively(providers: string[]): Promise<string> {
-	const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-	try {
-		process.stdout.write("Select a provider to logout:\n\n");
-		for (let i = 0; i < providers.length; i++) {
-			process.stdout.write(`  ${i + 1}. ${providers[i]}\n`);
-		}
-		process.stdout.write("\n");
-		const choice = await promptLine(rl, `Enter number (1-${providers.length}): `);
-		const index = Number.parseInt(choice, 10) - 1;
-		if (Number.isNaN(index) || index < 0 || index >= providers.length) {
-			throw new Error(`Invalid selection: ${choice}`);
-		}
-		return providers[index];
-	} finally {
-		rl.close();
 	}
 }
 
@@ -506,7 +411,7 @@ async function loadImportPlan(
 	for (const file of files) {
 		let json: CliProxyCredentialJson;
 		try {
-			json = (await Bun.file(file).json()) as CliProxyCredentialJson;
+			json = JSON.parse(await fs.readFile(file, "utf8")) as CliProxyCredentialJson;
 		} catch (err) {
 			skipped.push({ file, reason: `unreadable JSON: ${String(err)}` });
 			continue;
@@ -634,7 +539,7 @@ async function runImport(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 	const store = await SqliteAuthCredentialStore.open(getAgentDbPath());
 	try {
 		for (const entry of entries) {
-			store.upsertAuthCredentialForProvider(entry.provider, entry.credential);
+			await store.upsertAuthCredential(entry.provider, entry.credential);
 			if (!flags.json) process.stdout.write(`${chalk.green("imported")} ${describeImportEntry(entry)}\n`);
 		}
 	} finally {

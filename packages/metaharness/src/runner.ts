@@ -2,6 +2,7 @@
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 /**
  * Harbor benchmark runner for the local `omp` build.
  *
@@ -28,6 +29,11 @@ const PKG_DIR = path.resolve(import.meta.dir, "..");
 const AGENT_DIR = path.join(PKG_DIR, "agent");
 const CODING_AGENT_DIR = path.join(REPO_ROOT, "packages", "coding-agent");
 const AGENT_IMPORT_PATH = "omp_local:OmpLocal";
+const PI_UPSTREAM_IMPORT_PATH = "pi_upstream:PiUpstream";
+/** Upstream `@earendil-works/pi-coding-agent` version pinned for `--agent pi`. */
+const PI_UPSTREAM_VERSION = "0.86.1";
+/** Agents this runner installs itself (config + secrets travel via `OMP_BENCH_*`). */
+const MANAGED_AGENTS: Record<string, true> = { omp: true, pi: true };
 
 /** Container-side mount points for `--install source` (must match omp_local.py defaults). */
 const SOURCE_SRC_MOUNT = "/opt/omp/src";
@@ -55,6 +61,10 @@ export interface Config {
 	thinking: string | null;
 	/** Extra args forwarded verbatim to the in-container omp CLI invocation (repeatable). */
 	agentArgs: string[];
+	/** omp tool allowlist (`--tools`); `null` keeps omp's default tool set. */
+	tools: string[] | null;
+	/** Extra omp settings written into the container config (dotted key → JSON value). */
+	settings: Record<string, unknown>;
 
 	agent: string;
 	install: "source" | "local" | "published";
@@ -98,6 +108,8 @@ function defaultConfig(): Config {
 		exclude: [],
 		thinking: null,
 		agentArgs: [],
+		tools: null,
+		settings: {},
 
 		agent: "omp",
 		install: "source",
@@ -148,6 +160,8 @@ Model / agent:
       --tarball <path>           Reuse a prebuilt omp tarball (implies --install local, --no-build)
       --no-build                 Skip packing; reuse newest tarball in bench dir (--install local)
       --agent-arg <arg>          Extra arg forwarded verbatim to the in-container omp CLI (repeatable)
+      --tools <a,b,c>            omp tool allowlist; enables the find tool when listed
+      --setting <key=value>      omp setting for the container config, e.g. edit.mode=sloppy (repeatable; JSON values)
       --env <KEY[=VALUE]>        Forward env into omp container (repeatable).
                                  KEY alone forwards host value; host PI_* auto-forwarded.
 
@@ -251,6 +265,27 @@ export function parseArgs(argv: string[]): Config {
 				break;
 			case "--agent-arg":
 				cfg.agentArgs.push(take(arg));
+				break;
+			case "--setting": {
+				const spec = take(arg);
+				const eq = spec.indexOf("=");
+				if (eq <= 0) throw new Error("--setting expects key=value");
+				const raw = spec.slice(eq + 1);
+				let value: unknown = raw;
+				try {
+					value = JSON.parse(raw);
+				} catch {
+					// bare strings stay strings
+				}
+				cfg.settings[spec.slice(0, eq)] = value;
+				break;
+			}
+			case "--tools":
+				cfg.tools = take(arg)
+					.split(",")
+					.map(tool => tool.trim())
+					.filter(tool => tool.length > 0);
+				if (cfg.tools.length === 0) throw new Error("--tools must name at least one tool");
 				break;
 			case "-l":
 			case "--tasks":
@@ -1037,7 +1072,7 @@ function repoBunVersion(): string {
 		const pm = (raw as Record<string, unknown>).packageManager;
 		if (typeof pm === "string" && pm.startsWith("bun@")) return pm.slice("bun@".length);
 	}
-	return "1.3.14";
+	return "1.4.0";
 }
 
 /** Native arch of the docker daemon (what non-emulated task containers run as). */
@@ -1221,6 +1256,33 @@ function buildMountsJson(source: SourceMount | null): string | null {
 	return JSON.stringify(mounts);
 }
 
+/** Neutralized upstream system prompt template uploaded into `pi` trials (see pi_upstream.py). */
+const PI_UPSTREAM_SYSTEM_PROMPT = path.join(AGENT_DIR, "pi-upstream-system.md");
+
+/**
+ * Catalog facts for each `provider/model` the upstream agent needs in its
+ * `models.json`: wire api, limits, modalities and cost, so its usage accounting
+ * matches omp's for the same model.
+ */
+function upstreamModelSpecs(cfg: Config): Array<Record<string, unknown>> {
+	return cfg.models.map(spec => {
+		const slash = spec.indexOf("/");
+		const provider = spec.slice(0, slash) as GeneratedProvider;
+		const id = spec.slice(slash + 1);
+		const model = getBundledModel(provider, id);
+		return {
+			provider,
+			id,
+			api: model.api,
+			reasoning: model.reasoning,
+			input: model.input,
+			contextWindow: model.contextWindow,
+			maxTokens: model.maxTokens,
+			cost: model.cost,
+		};
+	});
+}
+
 function deriveProviders(cfg: Config): string[] {
 	// Explicit --providers is authoritative: it's the escape hatch for routing
 	// only SOME providers through the gateway (e.g. oauth-only openai-codex)
@@ -1314,7 +1376,8 @@ function buildHarborArgs(
 	composeOverlayPath: string | null,
 	mountsJson: string | null,
 ): string[] {
-	const a: string[] = ["run", "-d", cfg.dataset, "-o", cfg.jobsDir, "--job-name", jobName];
+	const datasetFlag = fs.existsSync(cfg.dataset) ? "-p" : "-d";
+	const a: string[] = ["run", datasetFlag, cfg.dataset, "-o", cfg.jobsDir, "--job-name", jobName];
 	a.push("-n", String(cfg.concurrency), "-k", String(cfg.attempts), "-l", String(cfg.tasks));
 	for (const m of cfg.models) a.push("-m", m);
 	for (const inc of cfg.include) a.push("-i", inc);
@@ -1328,9 +1391,9 @@ function buildHarborArgs(
 	if (cfg.envType !== "docker") a.push("-e", cfg.envType);
 	if (mountsJson) a.push("--mounts", mountsJson);
 
-	if (cfg.agent === "omp") {
+	if (MANAGED_AGENTS[cfg.agent]) {
 		// Config + secrets travel via env (OMP_BENCH_*); the agent reads os.environ.
-		a.push("--agent-import-path", AGENT_IMPORT_PATH);
+		a.push("--agent-import-path", cfg.agent === "pi" ? PI_UPSTREAM_IMPORT_PATH : AGENT_IMPORT_PATH);
 		void modelsYaml;
 		void tarball;
 	} else {
@@ -1393,11 +1456,16 @@ export function buildHarborEnv(
 	// Drop any stale OMP_BENCH_FORWARD_ENV inherited from the caller's shell before
 	// the agent-type early return, so it never leaks (incl. into the dry-run dump).
 	delete env.OMP_BENCH_FORWARD_ENV;
-	if (cfg.agent !== "omp") return env;
+	if (!MANAGED_AGENTS[cfg.agent]) return env;
 	const prepend = (k: string, v: string): void => {
 		env[k] = env[k] ? `${v}:${env[k]}` : v;
 	};
 	prepend("PYTHONPATH", AGENT_DIR);
+	if (cfg.agent === "pi") {
+		env.OMP_BENCH_PI_VERSION = cfg.version ?? PI_UPSTREAM_VERSION;
+		env.OMP_BENCH_PI_MODELS = JSON.stringify(upstreamModelSpecs(cfg));
+		env.OMP_BENCH_PI_SYSTEM_PROMPT = PI_UPSTREAM_SYSTEM_PROMPT;
+	}
 	env.OMP_BENCH_INSTALL = cfg.install;
 	env.OMP_BENCH_VERSION = cfg.version ?? version;
 	if (tarball) env.OMP_BENCH_TARBALL = tarball;
@@ -1410,6 +1478,8 @@ export function buildHarborEnv(
 	if (cfg.binaryX64) env.OMP_BENCH_BINARY_X64 = cfg.binaryX64;
 	if (cfg.thinking) env.OMP_BENCH_THINKING = cfg.thinking;
 	if (cfg.agentArgs.length > 0) env.OMP_BENCH_AGENT_ARGS = JSON.stringify(cfg.agentArgs);
+	if (cfg.tools) env.OMP_BENCH_TOOLS = cfg.tools.join(",");
+	if (Object.keys(cfg.settings).length > 0) env.OMP_BENCH_SETTINGS = JSON.stringify(cfg.settings);
 	if (cfg.webSearch) env.OMP_BENCH_WEB_SEARCH = "1";
 	env.OMP_BENCH_GATEWAY = cfg.gateway ? "1" : "0";
 	if (cfg.gateway) {

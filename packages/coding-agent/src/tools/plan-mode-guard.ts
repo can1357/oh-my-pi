@@ -1,6 +1,11 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { HL_FILE_HASH_LENGTH, HL_FILE_HASH_SEP, HL_FILE_PREFIX, HL_FILE_SUFFIX } from "@oh-my-pi/hashline";
+import {
+	HL_FILE_HASH_LENGTH,
+	HL_FILE_HASH_SEP,
+	HL_FILE_PREFIX,
+	HL_FILE_SUFFIX,
+} from "@oh-my-pi/pi-tui/tools/hashline-format";
 import {
 	type LocalProtocolOptions,
 	resolveLocalRoot,
@@ -9,7 +14,7 @@ import {
 } from "../internal-urls";
 import type { ToolSession } from ".";
 import { normalizeLocalScheme, resolveToCwd } from "./path-utils";
-import { ToolError } from "./tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 const VAULT_SCHEME_PREFIX = "vault:";
 const LOCAL_SCHEME_PREFIX = "local:";
@@ -22,7 +27,7 @@ const HL_TRAILING_TAG_RE = new RegExp(`${HL_FILE_HASH_SEP}[0-9A-Fa-f]{${HL_FILE_
  *  root via `localProtocolOptions`; the sandbox root the plan-mode guard derives
  *  must match where the artifact actually lives, or it rejects a legitimate plan
  *  edit (and tag-based path recovery onto the sandbox would miss it). */
-function planLocalProtocolOptions(session: ToolSession): LocalProtocolOptions {
+export function planLocalProtocolOptions(session: ToolSession): LocalProtocolOptions {
 	return (
 		session.localProtocolOptions ?? {
 			getArtifactsDir: () => session.getArtifactsDir?.() ?? null,

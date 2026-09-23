@@ -1,7 +1,8 @@
 import * as path from "node:path";
-import { isEnoent, logger, postmortem, ptree, untilAborted } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger, postmortem, ptree, stableStringifyJson, untilAborted } from "@oh-my-pi/pi-utils";
 import { MessageFramer } from "../jsonrpc/message-framing";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
+import { getConfig } from "./config";
 import { applyWorkspaceEdit, type ExecutedWorkspaceChange } from "./edits";
 import { getLspmuxCommand, isLspmuxSupported } from "./lspmux";
 import { connectSharedLspTransport } from "./mux/daemon";
@@ -24,8 +25,25 @@ import { detectLanguageId, EquivalentUriMap, fileToUri, uriToFile } from "./util
 // =============================================================================
 
 const clients = new Map<string, LspClient>();
-const clientLocks = new Map<string, Promise<LspClient>>();
+interface PendingClient {
+	promise: Promise<LspClient>;
+	cwd: string;
+	config: ServerConfig;
+	token: symbol;
+}
+const clientLocks = new Map<string, PendingClient>();
+const invalidatedClientKeys = new Set<string>();
+const clientReloadBarriers = new Map<string, Promise<unknown>>();
 const fileOperationLocks = new Map<string, Promise<void>>();
+/**
+ * URIs whose server overlay OMP has intentionally advanced ahead of the on-disk
+ * file for an in-flight write/edit: the writethrough syncs the new (and possibly
+ * formatted) text to the language server before committing it to disk, so while
+ * a write is pending the file on disk is *older* than the overlay. Refcounted by
+ * {@link beginPendingDiskWrite}/{@link endPendingDiskWrite} so overlapping writes
+ * to the same file stay marked until the last one commits.
+ */
+const pendingDiskWrites = new Map<string, number>();
 
 /** Negative cache of recent init failures so a broken server fails fast instead of re-spawning per call. */
 const INIT_FAILURE_BACKOFF_MS = 3 * 60 * 1000;
@@ -49,29 +67,98 @@ export function setSharedLspEnabled(enabled: boolean): void {
 }
 
 /**
- * Configure the idle timeout for LSP clients.
- * @param ms - Timeout in milliseconds, or null/undefined to disable
+ * Configure the global fallback idle timeout for LSP clients (used in tests/overrides).
+ * When unset, each client evaluates against its workspace config (`getConfig(client.cwd).idleTimeoutMs`).
+ * @param ms - Timeout in milliseconds, or null/undefined to disable global override
  */
 export function setIdleTimeout(ms: number | null | undefined): void {
 	idleTimeoutMs = ms ?? null;
+	reconcileIdleChecker();
+}
 
-	if (idleTimeoutMs && idleTimeoutMs > 0) {
+/**
+ * Whether a client may be reaped by the idle checker.
+ *
+ * A client with in-flight requests is *busy*, never idle. `lastActivity` is
+ * stamped when a request is written, not while it is outstanding, so a single
+ * request that runs longer than the idle timeout used to look like silence:
+ * the checker tore the client down mid-flight and `shutdownClientInstance`
+ * rejected the caller's still-pending promise with "LSP client shutdown"
+ * (issue #8390). Requests that settle refresh `lastActivity`, so a client
+ * becomes eligible again only after the final one lands and the full idle
+ * window then elapses.
+ *
+ * Exported for tests; the idle checker is the only production caller.
+ */
+export function isIdleClient(client: LspClient, now: number, timeoutMs: number): boolean {
+	if (client.pendingRequests.size > 0) return false;
+	return now - client.lastActivity > timeoutMs;
+}
+
+function hasConfiguredIdleTimeout(client?: LspClient): boolean {
+	if (idleTimeoutMs && idleTimeoutMs > 0) return true;
+	if (client) {
+		const timeoutMs = getConfig(client.cwd).idleTimeoutMs;
+		if (timeoutMs && timeoutMs > 0) return true;
+	}
+	for (const c of clients.values()) {
+		const timeoutMs = getConfig(c.cwd).idleTimeoutMs;
+		if (timeoutMs && timeoutMs > 0) return true;
+	}
+	return false;
+}
+
+function maybeStartIdleChecker(client?: LspClient): void {
+	if (hasConfiguredIdleTimeout(client)) {
+		startIdleChecker();
+	}
+}
+
+/**
+ * Whether the background idle checker interval is currently active.
+ * Exported for tests.
+ */
+export function isIdleCheckerRunning(): boolean {
+	return idleCheckInterval !== null;
+}
+
+/**
+ * Reconcile the background idle checker interval against currently configured timeouts.
+ * Starts the checker if any registered client or workspace has a positive timeout,
+ * or stops it if none do.
+ */
+export function reconcileIdleChecker(): void {
+	if (hasConfiguredIdleTimeout()) {
 		startIdleChecker();
 	} else {
 		stopIdleChecker();
 	}
 }
 
+function maybeStopIdleChecker(): void {
+	if (!hasConfiguredIdleTimeout()) {
+		stopIdleChecker();
+	}
+}
+
+/**
+ * Sweeps all registered LSP clients against their workspace idle timeout.
+ * Exported for tests.
+ */
+export async function checkIdleClients(): Promise<void> {
+	const now = Date.now();
+	for (const [key, client] of Array.from(clients.entries())) {
+		const timeoutMs = idleTimeoutMs ?? getConfig(client.cwd).idleTimeoutMs;
+		if (timeoutMs && timeoutMs > 0 && isIdleClient(client, now, timeoutMs)) {
+			await shutdownClient(key);
+		}
+	}
+}
+
 function startIdleChecker(): void {
 	if (idleCheckInterval) return;
 	idleCheckInterval = setInterval(() => {
-		if (!idleTimeoutMs) return;
-		const now = Date.now();
-		for (const [key, client] of Array.from(clients.entries())) {
-			if (now - client.lastActivity > idleTimeoutMs) {
-				void shutdownClient(key);
-			}
-		}
+		void checkIdleClients();
 	}, IDLE_CHECK_INTERVAL_MS);
 }
 
@@ -296,7 +383,11 @@ function queueWriteMessage(
 		throw err;
 	});
 	client.writeQueue = result.catch(() => {});
-	return result;
+	// Keep the internal queue chained so writes stay serialized, but do not make
+	// this caller wait forever behind an earlier wedged write. `writeMessage`
+	// observes the same signal once this write reaches the sink; until then the
+	// abort race only releases the caller and deliberately leaves the client alive.
+	return untilAborted(signal, result);
 }
 
 // =============================================================================
@@ -539,7 +630,7 @@ async function reconcileExecutedChanges(
 	);
 
 	for (const activeClient of activeClients) {
-		for (const uri of [...activeClient.openFiles.keys()]) {
+		for (const uri of Array.from(activeClient.openFiles.keys())) {
 			let deleted = false;
 			for (const root of deletedRoots) {
 				if (uriIsWithin(uri, root)) {
@@ -746,7 +837,13 @@ function commandBasename(command: string): string {
 	return separator === -1 ? command : command.slice(separator + 1);
 }
 
-function isRustAnalyzerClient(client: LspClient): boolean {
+/**
+ * True when this client speaks the rust-analyzer protocol, detected by the
+ * command basename (`rust-analyzer[.exe]`) of the configured or resolved
+ * binary. Callers use it to gate rust-analyzer-only requests such as
+ * `rust-analyzer/reloadWorkspace` (see {@link reloadServer}).
+ */
+export function isRustAnalyzerClient(client: LspClient): boolean {
 	return (
 		commandBasename(client.config.command) === "rust-analyzer" ||
 		(client.config.resolvedCommand ? commandBasename(client.config.resolvedCommand) === "rust-analyzer" : false)
@@ -798,8 +895,98 @@ const PROJECT_LOAD_TIMEOUT_MS = 15_000;
 const SHUTDOWN_TIMEOUT_MS = 5_000;
 const EXIT_TIMEOUT_MS = 1_000;
 
+/**
+ * Identity of a server process *and* its initialization: everything that makes
+ * two configs unsafe to share one client. `command` + `cwd` alone handed a
+ * config with different args/settings the client another config had spawned
+ * (#8382), and left a changed config resolving to the stale client after
+ * `reload *` (#8384). The command component mirrors the spawn site
+ * (`resolvedCommand ?? command`), so two configs naming the same binary
+ * differently still share, while the same name resolving to different binaries
+ * does not. JSON-encoded so no value can forge the separator.
+ */
 function clientKey(config: ServerConfig, cwd: string): string {
-	return `${config.command}:${cwd}`;
+	const spawnCommand = config.resolvedCommand ?? config.command;
+	const identity = stableStringifyJson([
+		config.args ?? [],
+		config.initOptions ?? null,
+		config.settings ?? null,
+		config.languageId ?? null,
+	]);
+	return `${spawnCommand}:${cwd}:${identity}`;
+}
+
+/**
+ * Shut down clients for `cwd` whose identity is absent from `configs`, and
+ * return the server commands torn down.
+ *
+ * `reload *` re-reads config from disk. Identity-aware keys make a changed
+ * server resolve to a fresh client, but the process spawned from the old
+ * config would stay registered and running — the idle checker that would
+ * eventually reap it is opt-in and off by default.
+ */
+export function shutdownStaleClients(
+	cwd: string,
+	configs: readonly ServerConfig[],
+	signal?: AbortSignal,
+): Promise<string[]> {
+	const fresh = new Set(configs.map(config => clientKey(config, cwd)));
+	const resolvedCwd = path.resolve(cwd);
+	const previousBarrier = clientReloadBarriers.get(resolvedCwd);
+	const cleanup = (async (): Promise<string[]> => {
+		if (previousBarrier) {
+			try {
+				await untilAborted(signal, previousBarrier);
+			} catch {
+				throwIfAborted(signal);
+				// A later explicit reload retries teardown after an earlier one
+				// failed; ordinary client creation remains blocked in between.
+			}
+		}
+		for (const key of fresh) invalidatedClientKeys.delete(key);
+		// Tombstone stale identities before awaiting initialization. Existing
+		// callers keep sharing their in-flight promise; later callers cannot spawn
+		// another stale process while reload is blocked on teardown.
+		const stalePending = Array.from(clientLocks.entries()).filter(
+			([key, pending]) => path.resolve(pending.cwd) === resolvedCwd && !fresh.has(key),
+		);
+		for (const [key] of stalePending) invalidatedClientKeys.add(key);
+		for (const client of clients.values()) {
+			if (path.resolve(client.cwd) === resolvedCwd && !fresh.has(client.name)) {
+				invalidatedClientKeys.add(client.name);
+			}
+		}
+		await Promise.all(
+			stalePending.map(async ([, pending]) => {
+				try {
+					await untilAborted(signal, pending.promise);
+				} catch {
+					throwIfAborted(signal);
+				}
+			}),
+		);
+
+		const stale = Array.from(clients.values()).filter(
+			client => path.resolve(client.cwd) === resolvedCwd && !fresh.has(client.name),
+		);
+		const results = await Promise.all(stale.map(client => shutdownClientInstance(client)));
+		const failed = stale.filter((_client, index) => results[index] !== true);
+		if (failed.length > 0) {
+			throw new Error(
+				"Failed to stop LSP server(s) with superseded configuration: " +
+					failed.map(client => client.config.command).join(", "),
+			);
+		}
+		return stale.map(client => client.config.command);
+	})();
+	clientReloadBarriers.set(resolvedCwd, cleanup);
+	void cleanup.then(
+		() => {
+			if (clientReloadBarriers.get(resolvedCwd) === cleanup) clientReloadBarriers.delete(resolvedCwd);
+		},
+		() => {},
+	);
+	return cleanup;
 }
 
 /** Allow an explicit user reload to retry a matching initialization failure immediately. */
@@ -824,18 +1011,43 @@ export async function getOrCreateClient(
 	signal?: AbortSignal,
 ): Promise<LspClient> {
 	const key = clientKey(config, cwd);
-
 	// Check if client already exists
 	const existingClient = clients.get(key);
-	if (existingClient) {
+	if (existingClient && !invalidatedClientKeys.has(key)) {
 		existingClient.lastActivity = Date.now();
+		maybeStartIdleChecker(existingClient);
 		return existingClient;
 	}
 
 	// Check if another coroutine is already creating this client
 	const existingLock = clientLocks.get(key);
 	if (existingLock) {
-		return existingLock;
+		return existingLock.promise;
+	}
+	if (invalidatedClientKeys.has(key)) {
+		throw new Error(`LSP configuration was superseded during reload: ${config.command}`);
+	}
+
+	// Do not start a fresh identity until superseded processes are confirmed stopped.
+	const reloadBarrier = clientReloadBarriers.get(path.resolve(cwd));
+	if (reloadBarrier) {
+		try {
+			await untilAborted(signal, reloadBarrier);
+		} catch (error) {
+			throwIfAborted(signal);
+			throw error;
+		}
+		const clientAfterReload = clients.get(key);
+		if (clientAfterReload && !invalidatedClientKeys.has(key)) {
+			clientAfterReload.lastActivity = Date.now();
+			maybeStartIdleChecker(clientAfterReload);
+			return clientAfterReload;
+		}
+		const lockAfterReload = clientLocks.get(key);
+		if (lockAfterReload) return lockAfterReload.promise;
+		if (invalidatedClientKeys.has(key)) {
+			throw new Error(`LSP configuration was superseded during reload: ${config.command}`);
+		}
 	}
 
 	// Fail fast on a recent deterministic init failure instead of re-spawning
@@ -849,6 +1061,7 @@ export async function getOrCreateClient(
 	}
 
 	// Create new client with lock
+	const lockToken = Symbol();
 	const clientPromise = (async () => {
 		const baseCommand = config.resolvedCommand ?? config.command;
 		const baseArgs = config.args ?? [];
@@ -898,6 +1111,7 @@ export async function getOrCreateClient(
 			isReading: false,
 			status: "connecting",
 			lastActivity: Date.now(),
+			startedAt: Date.now(),
 			writeQueue: Promise.resolve(),
 			activeProgressTokens: new Set(),
 			projectLoaded,
@@ -907,7 +1121,8 @@ export async function getOrCreateClient(
 		// Register crash recovery - remove client on process exit
 		proc.exited.then(() => {
 			if (clients.get(key) === client) clients.delete(key);
-			if (clientLocks.get(key) === clientPromise) clientLocks.delete(key);
+			maybeStopIdleChecker();
+			if (clientLocks.get(key)?.token === lockToken) clientLocks.delete(key);
 			client.resolveProjectLoaded();
 
 			// Reject any pending requests — the server is gone, they will never complete.
@@ -970,7 +1185,11 @@ export async function getOrCreateClient(
 			// Publish only after init succeeds: pre-init clients are reachable
 			// solely through clientLocks, so concurrent callers (warmup vs first
 			// tool call) wait for init instead of using an unacknowledged client.
+			if (invalidatedClientKeys.has(key)) {
+				throw new Error(`LSP configuration was superseded during initialization: ${config.command}`);
+			}
 			clients.set(key, client);
+			maybeStartIdleChecker(client);
 			initFailures.delete(key);
 			return client;
 		} catch (err) {
@@ -988,11 +1207,11 @@ export async function getOrCreateClient(
 			}
 			throw err;
 		} finally {
-			clientLocks.delete(key);
+			if (clientLocks.get(key)?.token === lockToken) clientLocks.delete(key);
 		}
 	})();
 
-	clientLocks.set(key, clientPromise);
+	clientLocks.set(key, { promise: clientPromise, cwd, config, token: lockToken });
 	return clientPromise;
 }
 
@@ -1012,10 +1231,41 @@ export async function getActiveOrPendingClient(
 	const pending = clientLocks.get(clientKey(config, cwd));
 	if (!pending) return undefined;
 	try {
-		return await untilAborted(signal, pending);
+		return await untilAborted(signal, pending.promise);
 	} catch {
 		throwIfAborted(signal);
 		return undefined;
+	}
+}
+
+/**
+ * Signature of the document text last handed to the server, used to detect when
+ * disk contents have diverged (e.g. an external edit) from the server's copy.
+ */
+function documentSignature(content: string): number | bigint {
+	return Bun.hash(content);
+}
+
+/**
+ * Mark a file whose server overlay OMP has advanced ahead of disk for an in-flight
+ * write. While marked, {@link reconcileFileFromDisk} skips reading disk back into
+ * the server, because the on-disk file is the *stale* side until the write commits.
+ * Every call MUST be balanced by {@link endPendingDiskWrite}.
+ */
+export function beginPendingDiskWrite(filePath: string): void {
+	const uri = fileToUri(filePath);
+	pendingDiskWrites.set(uri, (pendingDiskWrites.get(uri) ?? 0) + 1);
+}
+
+/** Release a mark set by {@link beginPendingDiskWrite}; the overlay is authoritative until then. */
+export function endPendingDiskWrite(filePath: string): void {
+	const uri = fileToUri(filePath);
+	const count = pendingDiskWrites.get(uri);
+	if (count === undefined) return;
+	if (count > 1) {
+		pendingDiskWrites.set(uri, count - 1);
+	} else {
+		pendingDiskWrites.delete(uri);
 	}
 }
 
@@ -1073,7 +1323,7 @@ export async function ensureFileOpen(client: LspClient, filePath: string, signal
 			signal,
 		);
 
-		client.openFiles.set(uri, { version: 1, languageId });
+		client.openFiles.set(uri, { version: 1, languageId, syncedHash: documentSignature(content) });
 		client.lastActivity = Date.now();
 	})();
 
@@ -1083,6 +1333,100 @@ export async function ensureFileOpen(client: LspClient, filePath: string, signal
 	} finally {
 		fileOperationLocks.delete(lockKey);
 	}
+}
+
+/**
+ * Reconcile an already-open document with current disk contents before a semantic query.
+ *
+ * {@link ensureFileOpen} opens an untracked file but no-ops when the URI is already
+ * open, so an external edit — one not routed through OMP's write/edit tools, which
+ * announce their changes via {@link notifyWorkspaceWatchedFiles}/{@link refreshFile} —
+ * leaves the server holding the pre-edit document while callers compute query
+ * positions from disk. This reads the file and, when its contents diverge from the
+ * text last sent to the server, pushes a `didChange` so the server's copy matches
+ * the disk text the position was derived from. Untracked files fall through to
+ * {@link ensureFileOpen}; unchanged files send nothing.
+ * Returns `true` only when a `didChange` was pushed for a reconciled overlay — the
+ * caller can then wait for fresh diagnostics, since the stale ones were dropped.
+ * A file with an in-flight OMP write ({@link beginPendingDiskWrite}) is skipped
+ * entirely: its overlay leads disk, so reading disk back would revert the server
+ * to pre-write content.
+ */
+export async function reconcileFileFromDisk(
+	client: LspClient,
+	filePath: string,
+	signal?: AbortSignal,
+): Promise<boolean> {
+	throwIfAborted(signal);
+	const uri = fileToUri(filePath);
+	if (!client.openFiles.has(uri)) {
+		await ensureFileOpen(client, filePath, signal);
+		return false;
+	}
+
+	// An in-flight OMP write has already synced newer (possibly formatted) text to
+	// the server ahead of committing it to disk; the on-disk file is the stale side,
+	// so reconciling from it would clobber the overlay. Leave it to the write.
+	if (pendingDiskWrites.has(uri)) {
+		return false;
+	}
+
+	const lockKey = `${client.name}:${uri}`;
+	const existingLock = fileOperationLocks.get(lockKey);
+	if (existingLock) {
+		await untilAborted(signal, () => existingLock);
+	}
+
+	let didChange = false;
+	const reconcilePromise = (async () => {
+		throwIfAborted(signal);
+		const info = client.openFiles.get(uri);
+		if (!info) {
+			await ensureFileOpen(client, filePath, signal);
+			return;
+		}
+
+		let content: string;
+		try {
+			content = await Bun.file(filePath).text();
+			throwIfAborted(signal);
+		} catch (err) {
+			if (isEnoent(err)) return;
+			throw err;
+		}
+
+		// Re-check after the (awaited) disk read: a write may have started and
+		// synced its overlay in the meantime, making this disk snapshot stale.
+		if (pendingDiskWrites.has(uri)) return;
+		const signature = documentSignature(content);
+		if (signature === info.syncedHash) return;
+
+		// Drop cached diagnostics computed against the stale document before the
+		// server recomputes them for the reconciled content.
+		client.diagnostics.delete(uri);
+		const version = ++info.version;
+		throwIfAborted(signal);
+		await sendNotification(
+			client,
+			"textDocument/didChange",
+			{
+				textDocument: { uri, version },
+				contentChanges: [{ text: content }],
+			},
+			signal,
+		);
+		info.syncedHash = signature;
+		client.lastActivity = Date.now();
+		didChange = true;
+	})();
+
+	fileOperationLocks.set(lockKey, reconcilePromise);
+	try {
+		await reconcilePromise;
+	} finally {
+		fileOperationLocks.delete(lockKey);
+	}
+	return didChange;
 }
 
 /**
@@ -1145,7 +1489,7 @@ export async function syncContent(
 				},
 				signal,
 			);
-			client.openFiles.set(uri, { version: 1, languageId });
+			client.openFiles.set(uri, { version: 1, languageId, syncedHash: documentSignature(content) });
 			client.lastActivity = Date.now();
 			return;
 		}
@@ -1161,6 +1505,7 @@ export async function syncContent(
 			},
 			signal,
 		);
+		info.syncedHash = documentSignature(content);
 		client.lastActivity = Date.now();
 	})();
 
@@ -1206,7 +1551,9 @@ const WATCHED_FILES_NOTIFY_TIMEOUT_MS = 2_000;
 /**
  * Announce harness-authored filesystem changes to active LSP clients for `cwd`.
  *
- * This covers sibling files that are not open text documents, such as generated
+ * Created or deleted files can change module resolution for otherwise untouched
+ * open documents, so those overlays are refreshed after the watcher notification.
+ * This also covers sibling files that are not open text documents, such as generated
  * CSS modules or type files that another edited document imports immediately.
  *
  * The underlying stdin write drain is self-bounded by
@@ -1240,6 +1587,8 @@ export async function notifyWorkspaceWatchedFiles(
 				});
 			if (clientChanges.length === 0) return;
 			await sendNotification(client, "workspace/didChangeWatchedFiles", { changes: clientChanges }, sendSignal);
+			if (clientChanges.every(change => change.type === FileChangeType.Changed)) return;
+			await Promise.all(Array.from(client.openFiles.keys(), uri => refreshFile(client, uriToFile(uri), sendSignal)));
 		}),
 	);
 	throwIfAborted(signal);
@@ -1309,6 +1658,7 @@ export async function refreshFile(client: LspClient, filePath: string, signal?: 
 			signal,
 		);
 
+		info.syncedHash = documentSignature(content);
 		client.lastActivity = Date.now();
 	})();
 
@@ -1343,6 +1693,7 @@ async function waitForExit(client: LspClient, timeoutMs: number): Promise<boolea
  */
 export async function shutdownClientInstance(client: LspClient): Promise<boolean> {
 	if (clients.get(client.name) === client) clients.delete(client.name);
+	maybeStopIdleChecker();
 
 	const err = new Error("LSP client shutdown");
 	for (const pending of Array.from(client.pendingRequests.values())) {
@@ -1360,7 +1711,12 @@ export async function shutdownClientInstance(client: LspClient): Promise<boolean
 	}
 
 	client.proc.kill();
-	return await waitForExit(client, EXIT_TIMEOUT_MS);
+	const exited = await waitForExit(client, EXIT_TIMEOUT_MS);
+	if (!exited && !clients.has(client.name)) {
+		clients.set(client.name, client);
+		maybeStartIdleChecker(client);
+	}
+	return exited;
 }
 
 /**
@@ -1456,15 +1812,22 @@ export async function sendRequest(
 		}
 	}
 
-	// Register pending request with timeout wrapper
+	// Register pending request with timeout wrapper.
+	// Settling stamps `lastActivity`: the idle window must be measured from when
+	// the exchange finished, not from when it started. Without this a request
+	// that outlives the timeout would leave the client instantly reapable the
+	// moment it lands, so the next idle sweep would kill a server that had just
+	// answered (issue #8390).
 	client.pendingRequests.set(id, {
 		resolve: result => {
 			if (timeout) clearTimeout(timeout);
+			client.lastActivity = Date.now();
 			cleanup();
 			resolve(result);
 		},
 		reject: err => {
 			if (timeout) clearTimeout(timeout);
+			client.lastActivity = Date.now();
 			cleanup();
 			reject(err);
 		},
@@ -1509,12 +1872,14 @@ export async function sendNotification(
  */
 export async function shutdownAll(): Promise<void> {
 	stopIdleChecker();
+	invalidatedClientKeys.clear();
+	clientReloadBarriers.clear();
 	const clientsToShutdown = Array.from(clients.values());
 	clients.clear();
 	// Mid-initialize clients live only in clientLocks (publication is deferred
 	// until init succeeds) — without this, their server processes outlive
 	// shutdown. Failed init promises already cleaned up after themselves.
-	const pendingClients = Array.from(clientLocks.values());
+	const pendingClients = Array.from(clientLocks.values(), pending => pending.promise);
 	clientLocks.clear();
 	const seen = new Set<LspClient>(clientsToShutdown);
 	await Promise.allSettled([

@@ -8,21 +8,34 @@ import {
 	type AgentMessage,
 	createToolScopedAbortReason,
 } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ToolCall } from "@oh-my-pi/pi-ai";
-import { isRecord, prompt, relativePathWithinRoot } from "@oh-my-pi/pi-utils";
+import type { AssistantMessage, Judge, ToolCall } from "@oh-my-pi/pi-ai";
+import { logger, prompt, relativePathWithinRoot, withTimeout } from "@oh-my-pi/pi-utils";
 import type { Rule } from "../capability/rule";
 import type { Settings } from "../config/settings";
-import type { TtsrManager, TtsrMatchContext } from "../export/ttsr";
+import { judgeRules, type TtsrManager, type TtsrMatchContext, type TtsrOutput } from "../export/ttsr";
 import ttsrInterruptTemplate from "../prompts/system/ttsr-interrupt.md" with { type: "text" };
 import ttsrToolReminderTemplate from "../prompts/system/ttsr-tool-reminder.md" with { type: "text" };
+import ttsrWarningTemplate from "../prompts/system/ttsr-warning.md" with { type: "text" };
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { SessionManager } from "./session-manager";
+import { TtsrToolInspector } from "./ttsr-outputs";
+
+type TtsrContinueSkipReason =
+	| "aborted"
+	| "stale-generation"
+	| "session-unavailable"
+	| "should-continue-false"
+	| "post-restore-unavailable";
+
+/** How long a finishing run waits for in-flight judgments; later verdicts still arrive as asides. */
+const JUDGED_SETTLE_TIMEOUT_MS = 5_000;
 
 interface TtsrContinueOptions {
+	source: string;
 	delayMs?: number;
 	generation?: number;
 	shouldContinue?: () => boolean;
-	onSkip?: () => void;
+	onSkip?: (reason: TtsrContinueSkipReason) => void;
 	onError?: () => void;
 }
 
@@ -35,22 +48,40 @@ export interface TtsrCoordinatorHost {
 	schedulePostPromptTask(task: (signal: AbortSignal) => Promise<void>, options?: { delayMs?: number }): void;
 	scheduleAgentContinue(options: TtsrContinueOptions): void;
 	promptGeneration(): number;
+	/** Judge for `question` rules, or `undefined` while judged rules are off (`ttsr.judge`). */
+	ruleJudge(): Judge | undefined;
+	/** Delivers a judged-rule warning without interrupting the run. */
+	deliverRuleWarning(content: string, ruleNames: string[]): Promise<void>;
+	/** Changes when the session is replaced; verdicts from an older generation are dropped. */
+	sessionGeneration(): number;
 }
 
 /** Coordinates TTSR stream matching, interruption, injection, and resume gates. */
 export class TtsrCoordinator {
 	readonly #host: TtsrCoordinatorHost;
 	readonly #manager: TtsrManager | undefined;
+	readonly #inspector: TtsrToolInspector;
 	#pendingInjections: Rule[] = [];
 	#perToolInjections = new Map<string, Rule[]>();
+	#deferredReservations = new Map<string, number>();
+	#nextDeferredDeliveryId = 0;
 	#abortPending = false;
 	#retryToken = 0;
 	#resumePromise: Promise<void> | undefined;
 	#resumeResolve: (() => void) | undefined;
+	/** Rule names already announced per stream key: a delta match re-confirmed
+	 *  at finalization must not emit a second `ttsr_triggered` (#12184). */
+	#emittedTriggerRules = new Map<string, Set<string>>();
+	/** In-flight judged-rule checks, each already guarded against rejection. */
+	#pendingJudgments = new Set<Promise<void>>();
 
 	constructor(host: TtsrCoordinatorHost, manager: TtsrManager | undefined) {
 		this.#host = host;
 		this.#manager = manager;
+		this.#inspector = new TtsrToolInspector(
+			() => host.agent.state.tools,
+			() => host.sessionManager.getCwd(),
+		);
 	}
 
 	/** Configured TTSR manager, when stream rules are enabled. */
@@ -73,32 +104,61 @@ export class TtsrCoordinator {
 		this.#manager?.resetBuffer();
 	}
 
+	/**
+	 * Resets stream buffers when an assistant message begins. The agent loop
+	 * turns the first provider `start` of every response into `message_start`,
+	 * so this is the boundary between two responses inside one turn (an aborted
+	 * response and its retry, or a continuation after an interruption); without
+	 * it, text from the earlier response would combine with the later one.
+	 */
+	onAssistantMessageStart(): void {
+		this.#manager?.resetBuffer();
+	}
+
 	/** Advances repeat-after-gap tracking at turn end. */
 	onTurnEnd(): void {
 		this.#manager?.incrementMessageCount();
+		this.#emittedTriggerRules.clear();
 	}
-
 	/** Checks one streamed message update and reports whether TTSR consumed it by aborting. */
 	async checkMessageUpdate(event: AgentEvent): Promise<boolean> {
 		if (event.type !== "message_update" || !this.#manager?.hasRules()) return false;
 		const assistantEvent = event.assistantMessageEvent;
+		// A later `start` inside one response restarts its partial; the buffers
+		// describe the discarded attempt and must not survive it.
+		if (assistantEvent.type === "start") {
+			this.#manager.resetBuffer();
+			return false;
+		}
 		let matchContext: TtsrMatchContext | undefined;
 		let streamingToolCall: ToolCall | undefined;
+		let delta: string | undefined;
 		if (assistantEvent.type === "text_delta") {
 			matchContext = { source: "text" };
+			delta = assistantEvent.delta;
 		} else if (assistantEvent.type === "thinking_delta") {
 			matchContext = { source: "thinking" };
+			delta = assistantEvent.delta;
 		} else if (assistantEvent.type === "toolcall_delta") {
 			streamingToolCall = this.#getStreamingToolCallBlock(event.message, assistantEvent.contentIndex);
-			matchContext = this.#getToolMatchContext(streamingToolCall, assistantEvent.contentIndex);
+			matchContext = this.#inspector.matchContext(streamingToolCall, assistantEvent.contentIndex);
+			delta = assistantEvent.delta;
+		} else if (assistantEvent.type === "toolcall_end") {
+			streamingToolCall = assistantEvent.toolCall;
+			matchContext = this.#inspector.matchContext(streamingToolCall, assistantEvent.contentIndex);
+			delta = "";
 		}
-		if (!matchContext || !("delta" in assistantEvent)) return false;
+		if (!matchContext || delta === undefined) return false;
 		const targetMessageTimestamp = event.message.role === "assistant" ? event.message.timestamp : undefined;
-		const matches = this.#checkStream(assistantEvent.delta, matchContext, streamingToolCall);
+		const matches = this.#checkStream(delta, matchContext, streamingToolCall, assistantEvent.type === "toolcall_end");
 		if (matches.length > 0 && this.#handleMatches(matches, matchContext, targetMessageTimestamp)) return true;
-		// AST rules use the reconstructed edit/write snapshot and are awaited so
-		// the manager self-throttles native matching.
-		if (matchContext.source === "tool" && this.#manager.hasAstRules()) {
+		// AST rules match whole-file structure against the reconstructed edit/write
+		// snapshot, so they run once on the finalized call: per-delta snapshots are
+		// always partial source (a truncated prefix of the final arguments) and
+		// each run costs a native `astMatch` pass (~90ms at 150KB × entries ×
+		// rules). Awaiting that per delta serializes hundreds of milliseconds onto
+		// the streaming event path and wedges the loop (ui.loop-blocked).
+		if (assistantEvent.type === "toolcall_end" && matchContext.source === "tool" && this.#manager.hasAstRules()) {
 			const astMatches = await this.#checkAstStream(matchContext, streamingToolCall);
 			if (astMatches.length > 0 && this.#handleMatches(astMatches, matchContext, targetMessageTimestamp))
 				return true;
@@ -106,11 +166,28 @@ export class TtsrCoordinator {
 		return false;
 	}
 
-	/** Settles the previous resume gate and queues any deferred injection. */
+	/** Settles the previous resume gate, queues any deferred injection, and starts judged-rule checks. */
 	onAssistantMessageEnd(message: AssistantMessage): void {
 		// Gate on abortPending, not stopReason: unrelated aborts have no TTSR continuation.
 		if (!this.#abortPending) this.resolveResume();
 		this.#queueDeferredInjectionIfNeeded(message);
+		this.#judgeCompletedMessage(message);
+	}
+
+	/**
+	 * Waits (bounded) for in-flight judged-rule checks. The session runs this
+	 * before the agent yields, so warnings about the final output join the run
+	 * as asides instead of reopening an idle session.
+	 */
+	async settleJudgments(): Promise<void> {
+		if (this.#pendingJudgments.size === 0) return;
+		try {
+			await withTimeout(Promise.all(this.#pendingJudgments), JUDGED_SETTLE_TIMEOUT_MS, "judged rules still pending");
+		} catch (error) {
+			logger.debug("TTSR judged rules unsettled at yield", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
 	}
 
 	/** Marks names persisted with a delivered TTSR injection as injected. */
@@ -118,7 +195,19 @@ export class TtsrCoordinator {
 		if (!details || typeof details !== "object" || Array.isArray(details)) return;
 		const rules = "rules" in details ? details.rules : undefined;
 		if (!Array.isArray(rules)) return;
-		this.#markInjected(rules.filter((ruleName): ruleName is string => typeof ruleName === "string"));
+		const ruleNames = rules.filter((ruleName): ruleName is string => typeof ruleName === "string");
+		this.#markInjected(ruleNames);
+		this.releaseDeferredReservationFromDetails(details);
+	}
+
+	/** Releases a queued delivery that was discarded before persistence. */
+	releaseDeferredReservationFromDetails(details: unknown): void {
+		if (!details || typeof details !== "object" || Array.isArray(details)) return;
+		const rules = "rules" in details ? details.rules : undefined;
+		const deliveryId = "deliveryId" in details ? details.deliveryId : undefined;
+		if (!Array.isArray(rules) || typeof deliveryId !== "number") return;
+		const ruleNames = rules.filter((ruleName): ruleName is string => typeof ruleName === "string");
+		this.#releaseDeferredReservation(deliveryId, ruleNames);
 	}
 
 	/** Folds per-tool reminders into the matched tool's result. */
@@ -193,9 +282,21 @@ export class TtsrCoordinator {
 	#addPendingInjections(rules: Rule[]): void {
 		const seen = new Set(this.#pendingInjections.map(rule => rule.name));
 		for (const rule of rules) {
-			if (seen.has(rule.name)) continue;
+			if (seen.has(rule.name) || this.#deferredReservations.has(rule.name)) continue;
 			this.#pendingInjections.push(rule);
 			seen.add(rule.name);
+		}
+	}
+
+	#reserveDeferredInjection(rules: Rule[]): number {
+		const deliveryId = ++this.#nextDeferredDeliveryId;
+		for (const rule of rules) this.#deferredReservations.set(rule.name, deliveryId);
+		return deliveryId;
+	}
+
+	#releaseDeferredReservation(deliveryId: number, ruleNames: string[]): void {
+		for (const ruleName of ruleNames) {
+			if (this.#deferredReservations.get(ruleName) === deliveryId) this.#deferredReservations.delete(ruleName);
 		}
 	}
 
@@ -236,6 +337,26 @@ export class TtsrCoordinator {
 		this.#host.sessionManager.appendTtsrInjection(uniqueRuleNames);
 	}
 
+	/**
+	 * Announce a trigger unless this stream already announced these rules.
+	 * A delta match re-confirmed at `toolcall_end` evaluates the same buffer
+	 * twice before the message_end cooldown commits; subscribers must see one
+	 * event per violation, not one per evaluation.
+	 */
+	#emitTriggerOnce(matchContext: TtsrMatchContext, matches: Rule[]): void {
+		const key = matchContext.streamKey;
+		if (key) {
+			let seen = this.#emittedTriggerRules.get(key);
+			if (matches.every(match => seen?.has(match.name))) return;
+			if (!seen) {
+				seen = new Set();
+				this.#emittedTriggerRules.set(key, seen);
+			}
+			for (const match of matches) seen.add(match.name);
+		}
+		this.#host.emitSessionEvent({ type: "ttsr_triggered", rules: matches }).catch(() => {});
+	}
+
 	#findAssistantIndex(targetTimestamp: number | undefined): number {
 		const messages = this.#host.agent.state.messages;
 		for (let index = messages.length - 1; index >= 0; index--) {
@@ -270,29 +391,100 @@ export class TtsrCoordinator {
 		}
 		const injection = this.#getInjectionContent();
 		if (!injection) return;
-		this.#host.agent.followUp({
-			role: "custom",
-			customType: "ttsr-injection",
-			content: injection.content,
-			display: false,
-			details: { rules: injection.rules.map(rule => rule.name) },
-			attribution: "agent",
-			timestamp: Date.now(),
-		});
+		const ruleNames = injection.rules.map(rule => rule.name);
+		const deliveryId = this.#reserveDeferredInjection(injection.rules);
+		try {
+			this.#host.agent.followUp({
+				role: "custom",
+				customType: "ttsr-injection",
+				content: injection.content,
+				display: false,
+				details: { rules: ruleNames, deliveryId },
+				attribution: "agent",
+				timestamp: Date.now(),
+			});
+		} catch (error) {
+			this.#releaseDeferredReservation(deliveryId, ruleNames);
+			throw error;
+		}
 		this.#ensureResumePromise();
+		const releaseReservation = () => {
+			this.#releaseDeferredReservation(deliveryId, ruleNames);
+			this.resolveResume();
+		};
 		this.#host.scheduleAgentContinue({
+			source: "ttsr-injection",
 			delayMs: 1,
 			generation: this.#host.promptGeneration(),
-			onSkip: () => this.resolveResume(),
+			onSkip: reason => {
+				if (reason !== "should-continue-false") releaseReservation();
+			},
 			shouldContinue: () => {
-				if (this.#host.agent.state.isStreaming || !this.#host.agent.hasQueuedMessages()) {
+				// A running agent may already have taken the queued message. In that
+				// case message_end remains the authority for committing the cooldown.
+				if (this.#host.agent.state.isStreaming) {
 					this.resolveResume();
+					return false;
+				}
+				if (!this.#host.agent.hasQueuedMessages()) {
+					releaseReservation();
 					return false;
 				}
 				return true;
 			},
-			onError: () => this.resolveResume(),
+			onError: releaseReservation,
 		});
+	}
+
+	/**
+	 * Asks the judge about each completed output of `message` in the background.
+	 * Aborted and failed messages are skipped: their output never took effect.
+	 */
+	#judgeCompletedMessage(message: AssistantMessage): void {
+		if (!this.#manager?.hasJudgedRules() || message.stopReason === "aborted" || message.stopReason === "error") {
+			return;
+		}
+		const generation = this.#host.sessionGeneration();
+		for (const output of this.#inspector.outputs(message)) {
+			const pending: Promise<void> = this.#judgeOutput(output, generation)
+				.catch(error => {
+					logger.warn("TTSR judged rule check failed", {
+						subject: output.subject,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				})
+				.finally(() => this.#pendingJudgments.delete(pending));
+			this.#pendingJudgments.add(pending);
+		}
+	}
+
+	/** One judge request per output: every eligible rule's question shares the billed state. */
+	async #judgeOutput(output: TtsrOutput, generation: number): Promise<void> {
+		const manager = this.#manager;
+		if (!manager) return;
+		const candidates = await manager.judgedCandidates(output.content, output.context);
+		if (candidates.length === 0) return;
+		const judge = this.#host.ruleJudge();
+		if (!judge) return;
+		const flagged = await judgeRules(judge, output, candidates);
+		if (flagged.length === 0 || this.#host.sessionGeneration() !== generation) return;
+		const rules = manager.claim(flagged);
+		if (rules.length === 0) return;
+		this.#host.emitSessionEvent({ type: "ttsr_triggered", rules }).catch(() => {});
+		const warning = rules
+			.map(rule =>
+				prompt.render(ttsrWarningTemplate, {
+					name: rule.name,
+					path: this.#displayRulePath(rule.path),
+					subject: output.subject,
+					content: rule.content,
+				}),
+			)
+			.join("\n\n");
+		await this.#host.deliverRuleWarning(
+			warning,
+			rules.map(rule => rule.name),
+		);
 	}
 
 	#getStreamingToolCallBlock(message: AgentMessage, contentIndex: number): ToolCall | undefined {
@@ -303,84 +495,53 @@ export class TtsrCoordinator {
 		return block && typeof block === "object" && block.type === "toolCall" ? (block as ToolCall) : undefined;
 	}
 
-	#getToolMatchContext(toolCall: ToolCall | undefined, contentIndex: number): TtsrMatchContext {
-		const context: TtsrMatchContext = { source: "tool" };
-		if (!toolCall) return context;
-		context.toolName = toolCall.name;
-		context.streamKey = toolCall.id ? `toolcall:${toolCall.id}` : `tool:${toolCall.name}:${contentIndex}`;
-		context.filePaths = this.#extractToolFilePaths(toolCall);
-		return context;
-	}
-
-	#extractToolFilePaths(toolCall: ToolCall): string[] | undefined {
-		const args = toolCall.arguments ?? {};
-		const tool = this.#resolveTool(toolCall);
-		const toolPaths = tool?.matcherPaths?.(args);
-		if (toolPaths && toolPaths.length > 0) {
-			const normalized = toolPaths.flatMap(filePath => this.#normalizePathCandidates(filePath));
-			if (normalized.length > 0) return Array.from(new Set(normalized));
-		}
-		return this.#extractFilePathsFromArgs(args);
-	}
-
-	#checkStream(delta: string, matchContext: TtsrMatchContext, toolCall: ToolCall | undefined): Rule[] {
+	#checkStream(
+		delta: string,
+		matchContext: TtsrMatchContext,
+		toolCall: ToolCall | undefined,
+		isFinal = false,
+	): Rule[] {
 		if (!this.#manager) return [];
-		const entries = this.#resolveMatcherEntries(toolCall);
-		if (entries) {
-			const matches: Rule[] = [];
-			for (const entry of entries) {
-				matches.push(...this.#manager.checkSnapshot(entry.digest, this.#perFileContext(matchContext, entry.path)));
-			}
-			return matches;
-		}
-		const digest = this.#resolveMatcherDigest(toolCall);
-		return digest !== undefined
-			? this.#manager.checkSnapshot(digest, matchContext)
-			: this.#manager.checkDelta(delta, matchContext);
-	}
-
-	#resolveMatcherDigest(toolCall: ToolCall | undefined): string | undefined {
-		const tool = this.#resolveTool(toolCall);
-		return tool?.matcherDigest?.(toolCall?.arguments ?? {});
-	}
-
-	#resolveMatcherEntries(toolCall: ToolCall | undefined): readonly { path: string; digest: string }[] | undefined {
-		const tool = this.#resolveTool(toolCall);
-		const entries = tool?.matcherEntries?.(toolCall?.arguments ?? {});
-		return entries && entries.length > 0 ? entries : undefined;
-	}
-
-	#resolveTool(toolCall: ToolCall | undefined) {
-		if (!toolCall) return undefined;
-		const tools = this.#host.agent.state.tools;
-		return (
-			tools.find(tool => tool.name === toolCall.name) ??
-			tools.find(tool => tool.customWireName !== undefined && tool.customWireName === toolCall.name)
-		);
-	}
-
-	#perFileContext(base: TtsrMatchContext, filePath: string): TtsrMatchContext {
-		const filePaths = this.#normalizePathCandidates(filePath);
-		return {
-			...base,
-			filePaths: filePaths.length > 0 ? filePaths : [filePath],
-			streamKey: base.streamKey ? `${base.streamKey}#${filePath}` : undefined,
-		};
-	}
-
-	async #checkAstStream(matchContext: TtsrMatchContext, toolCall: ToolCall | undefined): Promise<Rule[]> {
-		if (!this.#manager) return [];
-		const entries = this.#resolveMatcherEntries(toolCall);
+		const entries = this.#inspector.entries(toolCall);
 		if (entries) {
 			const matches: Rule[] = [];
 			for (const entry of entries) {
 				matches.push(
-					...(await this.#manager.checkAstSnapshot(entry.digest, this.#perFileContext(matchContext, entry.path))),
+					...this.#manager.checkSnapshot(entry.digest, this.#inspector.perFileContext(matchContext, entry.path)),
 				);
 			}
 			return matches;
 		}
-		const digest = this.#resolveMatcherDigest(toolCall);
+		const digest = this.#inspector.digest(toolCall);
+		if (digest !== undefined) return this.#manager.checkSnapshot(digest, matchContext);
+		// Tools without matcher hooks accumulate raw argument deltas. Providers
+		// that emit toolcall_start -> toolcall_end with no intermediate deltas
+		// (Cursor exec synthesis, OpenAI lossy-proxy fallback) leave that buffer
+		// empty, so the finalized arguments must seed the snapshot themselves.
+		const finalArgs = isFinal ? toolCall?.arguments : undefined;
+		if (finalArgs !== undefined && finalArgs !== null) {
+			const snapshot = typeof finalArgs === "string" ? finalArgs : JSON.stringify(finalArgs);
+			return this.#manager.checkSnapshot(snapshot, matchContext);
+		}
+		return this.#manager.checkDelta(delta, matchContext);
+	}
+
+	async #checkAstStream(matchContext: TtsrMatchContext, toolCall: ToolCall | undefined): Promise<Rule[]> {
+		if (!this.#manager) return [];
+		const entries = this.#inspector.entries(toolCall);
+		if (entries) {
+			const matches: Rule[] = [];
+			for (const entry of entries) {
+				matches.push(
+					...(await this.#manager.checkAstSnapshot(
+						entry.digest,
+						this.#inspector.perFileContext(matchContext, entry.path),
+					)),
+				);
+			}
+			return matches;
+		}
+		const digest = this.#inspector.digest(toolCall);
 		return digest === undefined ? [] : this.#manager.checkAstSnapshot(digest, matchContext);
 	}
 
@@ -390,7 +551,7 @@ export class TtsrCoordinator {
 		const perToolId = shouldInterrupt ? undefined : matchedToolId;
 		if (perToolId) {
 			this.#addPerToolInjections(perToolId, matches);
-			this.#host.emitSessionEvent({ type: "ttsr_triggered", rules: matches }).catch(() => {});
+			this.#emitTriggerOnce(matchContext, matches);
 			return false;
 		}
 		this.#addPendingInjections(matches);
@@ -408,7 +569,7 @@ export class TtsrCoordinator {
 					)
 				: abortReason,
 		);
-		this.#host.emitSessionEvent({ type: "ttsr_triggered", rules: matches }).catch(() => {});
+		this.#emitTriggerOnce(matchContext, matches);
 		const retryToken = ++this.#retryToken;
 		const generation = this.#host.promptGeneration();
 		this.#host.schedulePostPromptTask(
@@ -460,37 +621,5 @@ export class TtsrCoordinator {
 			{ delayMs: 50 },
 		);
 		return true;
-	}
-
-	#extractFilePathsFromArgs(args: unknown): string[] | undefined {
-		if (!isRecord(args)) return undefined;
-		const rawPaths: string[] = [];
-		for (const key in args) {
-			const value = args[key];
-			const normalizedKey = key.toLowerCase();
-			if (typeof value === "string" && (normalizedKey === "path" || normalizedKey.endsWith("path"))) {
-				rawPaths.push(value);
-				continue;
-			}
-			if (Array.isArray(value) && (normalizedKey === "paths" || normalizedKey.endsWith("paths"))) {
-				for (const candidate of value) if (typeof candidate === "string") rawPaths.push(candidate);
-			}
-		}
-		const normalizedPaths = rawPaths.flatMap(filePath => this.#normalizePathCandidates(filePath));
-		return normalizedPaths.length === 0 ? undefined : Array.from(new Set(normalizedPaths));
-	}
-
-	#normalizePathCandidates(rawPath: string): string[] {
-		const trimmed = rawPath.trim();
-		if (trimmed.length === 0) return [];
-		const normalizedInput = trimmed.replaceAll("\\", "/");
-		const candidates = new Set<string>([normalizedInput]);
-		if (normalizedInput.startsWith("./")) candidates.add(normalizedInput.slice(2));
-		const cwd = this.#host.sessionManager.getCwd();
-		const absolutePath = path.isAbsolute(trimmed) ? path.normalize(trimmed) : path.resolve(cwd, trimmed);
-		candidates.add(absolutePath.replaceAll("\\", "/"));
-		const relative = path.relative(cwd, absolutePath).replaceAll("\\", "/");
-		if (relative && relative !== "." && !relative.startsWith("../") && relative !== "..") candidates.add(relative);
-		return Array.from(candidates);
 	}
 }

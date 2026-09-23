@@ -12,11 +12,12 @@
 import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { isEnoent, pathIsWithin } from "@oh-my-pi/pi-utils";
-import * as git from "../../../utils/git";
 
 import type { MarketplaceCatalogMetadata, MarketplacePluginEntry, PluginSource } from "./types";
+
+const GIT_CLONE_TIMEOUT_MS = 30 * 60 * 1000;
 
 export interface ResolveContext {
 	/** Absolute path to the cloned/local marketplace directory. Required for relative sources. */
@@ -45,33 +46,78 @@ export async function resolvePluginSource(
 	return resolveObjectSource(source, context);
 }
 
+/**
+ * Validate source constraints that can be checked without cloning or mutating files.
+ */
+export async function validatePluginSource(
+	entry: MarketplacePluginEntry,
+	context: Pick<ResolveContext, "marketplaceClonePath" | "catalogMetadata">,
+): Promise<string | undefined> {
+	const { source } = entry;
+	if (typeof source === "string") {
+		const resolved = resolveRelativeSourcePath(source, context);
+		await verifyDirExists(resolved, `Plugin source directory does not exist: "${resolved}"`);
+		return resolved;
+	}
+
+	switch (source.source) {
+		case "url":
+		case "github":
+			return undefined;
+		case "git-subdir": {
+			const syntheticRoot = path.join(path.parse(process.cwd()).root, "omp-marketplace-validation");
+			const resolved = path.resolve(syntheticRoot, source.path);
+			if (!pathIsWithin(syntheticRoot, resolved)) {
+				throw new Error(`git-subdir path "${source.path}" escapes the cloned repository`);
+			}
+			return undefined;
+		}
+		case "npm":
+			throw new Error("npm plugin sources are not yet supported. Use git-based sources instead.");
+		default: {
+			const unknownSource: unknown = source;
+			if (
+				unknownSource &&
+				typeof unknownSource === "object" &&
+				"source" in unknownSource &&
+				typeof unknownSource.source === "string"
+			) {
+				throw new Error(`Unknown plugin source type: "${unknownSource.source}"`);
+			}
+			throw new Error("Unknown plugin source type");
+		}
+	}
+}
+
 // ── Relative string source ("./plugins/foo") ────────────────────────
 
-async function resolveRelativeSource(
+function resolveRelativeSourcePath(
 	source: string,
-	context: ResolveContext,
-): Promise<{ dir: string; tempCloneRoot?: string }> {
+	context: Pick<ResolveContext, "marketplaceClonePath" | "catalogMetadata">,
+): string {
 	if (!source.startsWith("./")) {
 		throw new Error(`Relative plugin source paths must start with "./" — got: "${source}"`);
 	}
-
 	if (!context.marketplaceClonePath) {
 		throw new Error(`Cannot resolve relative source "${source}": marketplaceClonePath is required`);
 	}
 
-	// If pluginRoot is set, prepend it to the path segment after "./"
 	const pluginRoot = context.catalogMetadata?.pluginRoot;
 	const relativePath = pluginRoot ? `./${path.join(pluginRoot, source.slice(2))}` : source;
-
-	// Resolve against marketplace root (not the .claude-plugin/ catalog subdirectory)
 	const resolved = path.resolve(context.marketplaceClonePath, relativePath);
-
 	if (!pathIsWithin(context.marketplaceClonePath, resolved)) {
 		throw new Error(
 			`Plugin source "${source}" resolves outside marketplace root ("${context.marketplaceClonePath}")`,
 		);
 	}
+	return resolved;
+}
 
+async function resolveRelativeSource(
+	source: string,
+	context: ResolveContext,
+): Promise<{ dir: string; tempCloneRoot?: string }> {
+	const resolved = resolveRelativeSourcePath(source, context);
 	await verifyDirExists(resolved, `Plugin source directory does not exist: "${resolved}"`);
 	return { dir: resolved };
 }
@@ -87,7 +133,11 @@ async function resolveObjectSource(
 			// { source: "url", url: "https://github.com/owner/repo.git" }
 			// Despite the name, this is typically a git clone URL
 			const targetDir = path.join(context.tmpDir, `plugin-${crypto.randomUUID()}`);
-			await git.clone(source.url, targetDir, { ref: source.ref, sha: source.sha });
+			await vcs.clone(source.url, targetDir, {
+				refName: source.ref,
+				sha: source.sha,
+				timeoutMs: GIT_CLONE_TIMEOUT_MS,
+			});
 			return { dir: targetDir, tempCloneRoot: targetDir };
 		}
 
@@ -95,7 +145,11 @@ async function resolveObjectSource(
 			// { source: "github", repo: "owner/repo" }
 			const url = `https://github.com/${source.repo}.git`;
 			const targetDir = path.join(context.tmpDir, `plugin-${crypto.randomUUID()}`);
-			await git.clone(url, targetDir, { ref: source.ref, sha: source.sha });
+			await vcs.clone(url, targetDir, {
+				refName: source.ref,
+				sha: source.sha,
+				timeoutMs: GIT_CLONE_TIMEOUT_MS,
+			});
 			return { dir: targetDir, tempCloneRoot: targetDir };
 		}
 
@@ -106,7 +160,11 @@ async function resolveObjectSource(
 					? source.url
 					: `https://github.com/${source.url}.git`;
 			const cloneDir = path.join(context.tmpDir, `plugin-repo-${crypto.randomUUID()}`);
-			await git.clone(url, cloneDir, { ref: source.ref, sha: source.sha });
+			await vcs.clone(url, cloneDir, {
+				refName: source.ref,
+				sha: source.sha,
+				timeoutMs: GIT_CLONE_TIMEOUT_MS,
+			});
 
 			const subdirPath = path.resolve(cloneDir, source.path);
 			if (!pathIsWithin(cloneDir, subdirPath)) {

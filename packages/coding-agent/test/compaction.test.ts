@@ -1,13 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import {
 	type CompactionSettings,
 	calculateContextTokens,
 	compact,
 	compactionContextTokens,
 	DEFAULT_COMPACTION_SETTINGS,
-	estimateTokens,
 	findCutPoint,
 	getLastAssistantUsage,
 	hasContextTokenUsage,
@@ -31,6 +30,8 @@ import { parseSessionEntries } from "@oh-my-pi/pi-coding-agent/session/session-l
 import { migrateSessionEntries } from "@oh-my-pi/pi-coding-agent/session/session-migrations";
 import { mockFetch } from "./helpers/fetch-mock";
 import { e2eApiKey } from "./utilities";
+
+const tokenizer = new Tokenizer();
 
 // ============================================================================
 // Test fixtures
@@ -372,7 +373,7 @@ describe("compactionContextTokens", () => {
 	});
 });
 
-describe("estimateTokens excludeEncryptedReasoning (compaction floor)", () => {
+describe("Tokenizer.countMessage excludeEncryptedReasoning (compaction floor)", () => {
 	it("drops encrypted reasoning from the floor estimate but counts it by default", () => {
 		const blob = "blob ".repeat(8_000); // large opaque encrypted-reasoning payload
 		const msg: AssistantMessage = {
@@ -388,8 +389,8 @@ describe("estimateTokens excludeEncryptedReasoning (compaction floor)", () => {
 			provider: "openai",
 			model: "gpt-5.5",
 		};
-		const withBlob = estimateTokens(msg);
-		const flooredEstimate = estimateTokens(msg, { excludeEncryptedReasoning: true });
+		const withBlob = tokenizer.countMessage(msg);
+		const flooredEstimate = tokenizer.countMessage(msg, { excludeEncryptedReasoning: true });
 		// Default counts the blob (providers bill it on replay); the floor excludes it,
 		// so a thinking-heavy turn can't falsely trip compaction on local byte size.
 		expect(withBlob).toBeGreaterThan(flooredEstimate + 1_000);
@@ -408,7 +409,7 @@ describe("estimateTokens excludeEncryptedReasoning (compaction floor)", () => {
 		// Even with the floor option, tool-result content is fully counted — that is
 		// exactly what a before_provider_request compressor (e.g. Headroom) shrinks,
 		// so the floor must still see its real size.
-		expect(estimateTokens(toolMsg, { excludeEncryptedReasoning: true })).toBeGreaterThan(1_000);
+		expect(tokenizer.countMessage(toolMsg, { excludeEncryptedReasoning: true })).toBeGreaterThan(1_000);
 	});
 });
 
@@ -702,7 +703,7 @@ describe("remote compaction setting", () => {
 		]);
 	});
 
-	it("uses the ChatGPT Codex compact endpoint for openai-codex models", async () => {
+	it("uses the explicitly configured Codex compact endpoint for openai-codex models", async () => {
 		const baseModel = getBundledModel("openai", "gpt-5.1");
 		if (!baseModel) throw new Error("Expected openai/gpt-5.1 model to exist");
 
@@ -711,6 +712,11 @@ describe("remote compaction setting", () => {
 			api: "openai-codex-responses",
 			provider: "openai-codex",
 			baseUrl: "https://chatgpt.com/backend-api",
+			remoteCompaction: {
+				...baseModel.remoteCompaction,
+				enabled: true,
+				endpoint: "https://chatgpt.com/backend-api/codex/responses/compact",
+			},
 		};
 
 		const entries: SessionEntry[] = [
@@ -749,6 +755,11 @@ describe("remote compaction setting", () => {
 			api: "openai-codex-responses",
 			provider: "openai-codex",
 			baseUrl: "https://chatgpt.com/backend-api",
+			remoteCompaction: {
+				...baseModel.remoteCompaction,
+				enabled: true,
+				endpoint: "https://chatgpt.com/backend-api/codex/responses/compact",
+			},
 		};
 		const assistant: AssistantMessage = {
 			role: "assistant",
@@ -833,7 +844,7 @@ describe("remote compaction setting", () => {
 		vi.spyOn(ai, "completeSimple").mockResolvedValue(createAssistantMessage("Short summary"));
 
 		const result = await compact(preparation, model, "test-api-key", undefined, undefined, {
-			remoteInstructions: "BASE INSTRUCTIONS",
+			remoteSystemPrompt: ["BASE INSTRUCTIONS"],
 			fetch: fetchSpy,
 		});
 		const requestBody = JSON.parse(String(fetchHandler.mock.calls[0]?.[1]?.body)) as {
@@ -953,7 +964,8 @@ describe("remote compaction setting", () => {
 
 		const oldUser = createMessageEntry(createUserMessage("Archived turn"));
 		const oldAssistant = createMessageEntry(createAssistantMessage("Archived answer"));
-		const previousCompaction = createCompactionEntry("Split snapcompact frame summary", oldAssistant.id);
+		const retainedUser = createMessageEntry(createUserMessage("Turn spanning archive"));
+		const previousCompaction = createCompactionEntry("Split snapcompact frame summary", retainedUser.id);
 		previousCompaction.preserveData = {
 			otherState: "keep-me",
 			snapcompact: {
@@ -967,8 +979,8 @@ describe("remote compaction setting", () => {
 		const entries: SessionEntry[] = [
 			oldUser,
 			oldAssistant,
+			retainedUser,
 			previousCompaction,
-			createMessageEntry(createUserMessage("Turn after archive")),
 			createMessageEntry(createAssistantMessage("Prefix answer")),
 			createMessageEntry(createAssistantMessage("Kept answer")),
 		];
@@ -981,7 +993,10 @@ describe("remote compaction setting", () => {
 		if (!preparation) throw new Error("Expected compaction preparation");
 		expect(preparation.isSplitTurn).toBe(true);
 		expect(preparation.messagesToSummarize).toHaveLength(0);
-		expect(preparation.turnPrefixMessages.length).toBeGreaterThan(0);
+		expect(preparation.turnPrefixMessages).toMatchObject([
+			{ role: "user", content: "Turn spanning archive" },
+			{ role: "assistant", content: [{ type: "text", text: "Prefix answer" }] },
+		]);
 
 		const completeSimpleSpy = vi
 			.spyOn(ai, "completeSimple")
@@ -1121,7 +1136,279 @@ describe("remote compaction setting", () => {
 	});
 });
 
+describe("prepareCompaction retained history", () => {
+	const settings = { ...DEFAULT_COMPACTION_SETTINGS, remoteEnabled: false };
+
+	it("partitions retained history across successive compactions without rewriting the journal", () => {
+		const a = createMessageEntry(createUserMessage("Already summarized A"));
+		const b1 = createMessageEntry(createUserMessage("Retained B1"));
+		const modelChange = createModelChangeEntry("anthropic", "claude-sonnet-4-5");
+		const b2 = createMessageEntry(createUserMessage("Retained B2"));
+		const entries: SessionEntry[] = [a, b1, modelChange, b2];
+		const first = prepareCompaction(entries, {
+			...settings,
+			keepRecentTokens: tokenizer.countMessages([b1.message, b2.message]),
+		});
+		if (!first) throw new Error("Expected first compaction");
+		expect(first.messagesToSummarize).toEqual([a.message]);
+		expect(first.recentMessages).toEqual([b1.message, b2.message]);
+		entries.push(createCompactionEntry("Summary A", first.firstKeptEntryId));
+		entries.push(createThinkingLevelEntry("high"));
+		const c = createMessageEntry(createUserMessage("New C"));
+		entries.push(c);
+
+		// C alone fits the budget; B1 must still be summarized rather than returning a no-op.
+		const second = prepareCompaction(entries, {
+			...settings,
+			keepRecentTokens: tokenizer.countMessages([b2.message, c.message]),
+		});
+		if (!second) throw new Error("Expected retained history to remain compactable");
+		expect(second.previousSummary).toBe("Summary A");
+		expect(second.messagesToSummarize).toEqual([b1.message]);
+		expect(second.turnPrefixMessages).toEqual([]);
+		expect(second.recentMessages).toEqual([b2.message, c.message]);
+		expect(second.firstKeptEntryId).toBe(b2.id);
+		entries.push(createCompactionEntry("Summary A+B1", second.firstKeptEntryId));
+		expect(buildSessionContext(entries).messages.slice(1)).toEqual([b2.message, c.message]);
+
+		const d = createMessageEntry(createUserMessage("New D"));
+		entries.push(d);
+		const originalJournal = structuredClone(entries);
+		// The keep boundary still precedes both old compaction records.
+		const third = prepareCompaction(entries, {
+			...settings,
+			keepRecentTokens: tokenizer.countMessage(d.message),
+		});
+		if (!third) throw new Error("Expected third compaction");
+		expect(third.previousSummary).toBe("Summary A+B1");
+		expect(third.messagesToSummarize).toEqual([b2.message, c.message]);
+		expect(third.turnPrefixMessages).toEqual([]);
+		expect(third.recentMessages).toEqual([d.message]);
+		expect(third.firstKeptEntryId).toBe(d.id);
+		expect(entries).toEqual(originalJournal);
+		entries.push(createCompactionEntry("Summary A+B1+B2+C", third.firstKeptEntryId));
+		expect(buildSessionContext(entries).messages.slice(1)).toEqual([d.message]);
+	});
+
+	it("summarizes a retained tool turn prefix across the previous compaction record", () => {
+		const a = createMessageEntry(createUserMessage("Summarized request"));
+		const b = createMessageEntry(createUserMessage("Inspect retained.ts"));
+		const call = createMessageEntry({
+			...createAssistantMessage("", createMockUsage(0, 0)),
+			content: [{ type: "toolCall", id: "read-retained", name: "read", arguments: { path: "retained.ts" } }],
+			stopReason: "toolUse",
+		});
+		const result = createMessageEntry({
+			role: "toolResult",
+			toolCallId: "read-retained",
+			toolName: "read",
+			content: [{ type: "text", text: "Retained file contents" }],
+			isError: false,
+			timestamp: 1,
+		});
+		const previous = createCompactionEntry("Summary A", b.id);
+		const answer = createMessageEntry(createAssistantMessage("Inspection complete", createMockUsage(0, 0)));
+		const preparation = prepareCompaction([a, b, call, result, previous, answer], {
+			...settings,
+			keepRecentTokens: 1,
+		});
+		if (!preparation) throw new Error("Expected split-turn compaction");
+		expect(preparation.previousSummary).toBe("Summary A");
+		expect(preparation.isSplitTurn).toBe(true);
+		expect(preparation.messagesToSummarize).toEqual([]);
+		expect(preparation.turnPrefixMessages).toEqual([b.message, call.message, result.message]);
+		expect(preparation.recentMessages).toEqual([answer.message]);
+		expect(preparation.firstKeptEntryId).toBe(answer.id);
+	});
+
+	it("includes the retained region when calibrating the keep budget against provider usage", () => {
+		const a = createMessageEntry(createUserMessage("Summarized A"));
+		const b = createMessageEntry(createUserMessage("Uncompressed reasoning in B. ".repeat(256)));
+		const previous = createCompactionEntry("Summary A", b.id);
+		const c = createMessageEntry(createUserMessage("Recent request C"));
+		const answer = createAssistantMessage("Recent answer C", createMockUsage(0, 0));
+		answer.usage = createMockUsage(tokenizer.countMessages([b.message, c.message, answer]), 0);
+		const last = createMessageEntry(answer);
+		const preparation = prepareCompaction([a, b, previous, c, last], {
+			...settings,
+			keepRecentTokens: tokenizer.countMessages([c.message, answer]),
+		});
+		if (!preparation) throw new Error("Expected compaction of B");
+		expect(preparation.messagesToSummarize).toEqual([b.message]);
+		expect(preparation.turnPrefixMessages).toEqual([]);
+		expect(preparation.recentMessages).toEqual([c.message, answer]);
+		expect(preparation.firstKeptEntryId).toBe(c.id);
+	});
+
+	it("keeps message-bearing custom entries and branch summaries out of journal metadata", () => {
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "a",
+				parentId: null,
+				timestamp: "2026-09-10T00:00:00Z",
+				message: createUserMessage("A"),
+			},
+			{
+				type: "custom_message",
+				id: "custom",
+				parentId: "a",
+				timestamp: "2026-09-10T00:00:01Z",
+				customType: "note",
+				content: "Retained note",
+				display: true,
+			},
+			{
+				type: "branch_summary",
+				id: "branch",
+				parentId: "custom",
+				timestamp: "2026-09-10T00:00:02Z",
+				fromId: "a",
+				summary: "Retained branch context",
+			},
+			{
+				type: "compaction",
+				id: "compact",
+				parentId: "branch",
+				timestamp: "2026-09-10T00:00:03Z",
+				summary: "Summary A",
+				firstKeptEntryId: "custom",
+				tokensBefore: 0,
+			},
+			{
+				type: "custom",
+				id: "metadata",
+				parentId: "compact",
+				timestamp: "2026-09-10T00:00:04Z",
+				customType: "state",
+				data: { secret: "not a message" },
+			},
+			{
+				type: "message",
+				id: "c1",
+				parentId: "metadata",
+				timestamp: "2026-09-10T00:00:05Z",
+				message: createUserMessage("New C1"),
+			},
+			{
+				type: "message",
+				id: "c2",
+				parentId: "c1",
+				timestamp: "2026-09-10T00:00:06Z",
+				message: createUserMessage("New C2"),
+			},
+		];
+		const preparation = prepareCompaction(entries, { ...settings, keepRecentTokens: 1 });
+		if (!preparation) throw new Error("Expected custom history compaction");
+		expect(preparation.messagesToSummarize).toMatchObject([
+			{ role: "custom", customType: "note", content: "Retained note" },
+			{ role: "branchSummary", summary: "Retained branch context" },
+			{ role: "user", content: "New C1" },
+		]);
+		expect(preparation.turnPrefixMessages).toEqual([]);
+		expect(preparation.recentMessages).toMatchObject([{ role: "user", content: "New C2" }]);
+	});
+
+	it("preserves all post-summary messages in reindexed advisor snapshots", () => {
+		const previous = createCompactionEntry("Summary A", "pending");
+		const b = createMessageEntry(createUserMessage("Retained B"));
+		const c = createMessageEntry(createUserMessage("New C"));
+		const d = createMessageEntry(createUserMessage("New D"));
+		// Advisor snapshots rebuild IDs; an old keep ID can name a later message now.
+		previous.firstKeptEntryId = d.id;
+		const preparation = prepareCompaction([previous, b, c, d], { ...settings, keepRecentTokens: 1 });
+		if (!preparation) throw new Error("Expected advisor compaction");
+		expect(preparation.messagesToSummarize).toEqual([b.message, c.message]);
+		expect(preparation.recentMessages).toEqual([d.message]);
+	});
+
+	it("recovers a local kept region behind an unreadable remote compaction without duplicating reusable replay", () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected anthropic test model");
+		const a = createMessageEntry(createUserMessage("Summarized A"));
+		const b = createMessageEntry(createUserMessage("Retained B"));
+		const local = createCompactionEntry("Summary A", b.id);
+		const c = createMessageEntry(createUserMessage("Original remote C"));
+		const remote = createCompactionEntry("Opaque remote summary", c.id);
+		remote.preserveData = {
+			openaiRemoteCompaction: {
+				provider: "openai",
+				replacementHistory: [{ type: "compaction", encrypted_content: "replay" }],
+				compactionItem: { type: "compaction", encrypted_content: "replay" },
+			},
+		};
+		const d = createMessageEntry(createUserMessage("New D"));
+		const e = createMessageEntry(createUserMessage("New E"));
+		const entries: SessionEntry[] = [a, b, local, c, remote, d, e];
+		const reused = prepareCompaction(entries, { ...settings, remoteEnabled: true, keepRecentTokens: 1 });
+		if (!reused) throw new Error("Expected native replay reuse");
+		expect(reused.messagesToSummarize).toEqual([d.message]);
+		expect(reused.recentMessages).toEqual([e.message]);
+		const expanded = prepareCompaction(entries, { ...settings, keepRecentTokens: 1 }, model);
+		if (!expanded) throw new Error("Expected local history re-expansion");
+		expect(expanded.previousSummary).toBe("Summary A");
+		expect(expanded.messagesToSummarize).toEqual([b.message, c.message, d.message]);
+		expect(expanded.recentMessages).toEqual([e.message]);
+	});
+});
+
 describe("findCutPoint", () => {
+	it("summarizes the older reasoning step when retaining it would exceed the recent-history budget", () => {
+		// #11365: one user turn contains a 22k-token reasoning step followed by
+		// an 18k-token step. Keeping both defeats the 20k retention budget.
+		const older = createAssistantMessage("");
+		older.content = [
+			{ type: "thinking", thinking: "r".repeat(87_382) },
+			{ type: "toolCall", id: "older-call", name: "read", arguments: {} },
+		];
+		const latest = createAssistantMessage("", createMockUsage(44_806, 18_840));
+		latest.content = [
+			{ type: "thinking", thinking: "r".repeat(67_448) },
+			{ type: "text", text: "t".repeat(1_412) },
+			{ type: "toolCall", id: "latest-call", name: "read", arguments: {} },
+		];
+		const result = (id: string): AgentMessage => ({
+			role: "toolResult",
+			toolCallId: id,
+			toolName: "read",
+			content: [{ type: "text", text: "small result" }],
+			isError: false,
+			timestamp: 0,
+		});
+		const entries = [
+			createMessageEntry(createUserMessage("Continue the review")),
+			createMessageEntry(older),
+			createMessageEntry(result("older-call")),
+			createMessageEntry(latest),
+			createMessageEntry(result("latest-call")),
+		];
+		const preparation = prepareCompaction(entries, { ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 20_000 });
+		expect(preparation?.firstKeptEntryId).toBe(entries[3].id);
+		expect(preparation?.turnPrefixMessages).toContain(older);
+		expect(preparation?.recentMessages).toEqual([latest, entries[4].message]);
+		expect(tokenizer.countMessages(preparation!.recentMessages)).toBeLessThanOrEqual(20_000);
+	});
+
+	it("retains the newest oversized tool group without dragging all earlier history into the tail", () => {
+		const latest = createAssistantMessage("");
+		latest.content = [{ type: "toolCall", id: "large-call", name: "read", arguments: {} }];
+		const entries = [
+			createMessageEntry(createUserMessage("Old request")),
+			createMessageEntry(createAssistantMessage("Old answer")),
+			createMessageEntry(latest),
+			createMessageEntry({
+				role: "toolResult",
+				toolCallId: "large-call",
+				toolName: "read",
+				content: [{ type: "text", text: "x".repeat(100_000) }],
+				isError: false,
+				timestamp: 0,
+			}),
+		];
+		const cut = findCutPoint(entries, tokenizer, 0, entries.length, 20_000);
+		expect(cut.firstKeptEntryIndex).toBe(2);
+	});
+
 	it("should find cut point based on actual token differences", () => {
 		// Create entries with cumulative token counts
 		const entries: SessionEntry[] = [];
@@ -1134,7 +1421,7 @@ describe("findCutPoint", () => {
 
 		// 20 entries, last assistant has 10000 tokens
 		// keepRecentTokens = 2500: keep entries where diff < 2500
-		const result = findCutPoint(entries, 0, entries.length, 2500);
+		const result = findCutPoint(entries, tokenizer, 0, entries.length, 2500);
 
 		// Should cut at a valid cut point (user or assistant message)
 		expect(entries[result.firstKeptEntryIndex].type).toBe("message");
@@ -1144,7 +1431,7 @@ describe("findCutPoint", () => {
 
 	it("should return startIndex if no valid cut points in range", () => {
 		const entries: SessionEntry[] = [createMessageEntry(createAssistantMessage("a"))];
-		const result = findCutPoint(entries, 0, entries.length, 1000);
+		const result = findCutPoint(entries, tokenizer, 0, entries.length, 1000);
 		expect(result.firstKeptEntryIndex).toBe(0);
 	});
 
@@ -1156,7 +1443,7 @@ describe("findCutPoint", () => {
 			createMessageEntry(createAssistantMessage("b", createMockUsage(0, 50, 1000, 0))),
 		];
 
-		const result = findCutPoint(entries, 0, entries.length, 50000);
+		const result = findCutPoint(entries, tokenizer, 0, entries.length, 50000);
 		expect(result.firstKeptEntryIndex).toBe(0);
 	});
 
@@ -1172,7 +1459,7 @@ describe("findCutPoint", () => {
 		];
 
 		// With keepRecentTokens = 3000, should cut somewhere in Turn 2
-		const result = findCutPoint(entries, 0, entries.length, 3000);
+		const result = findCutPoint(entries, tokenizer, 0, entries.length, 3000);
 
 		// If cut at assistant message (not user), should indicate split turn
 		const cutEntry = entries[result.firstKeptEntryIndex] as SessionMessageEntry;
@@ -1270,6 +1557,29 @@ describe("buildSessionContext", () => {
 		// LLM context is untouched by the option: latest compaction replaces history.
 		const llm = buildSessionContext(entries);
 		expect(llm.messages.map(m => m.role)).toEqual(["compactionSummary", "user", "user"]);
+	});
+
+	it("renders a snapcompact frame rescue as one replacement divider", () => {
+		const u1 = createMessageEntry(createUserMessage("1"));
+		const a1 = createMessageEntry(createAssistantMessage("a"));
+		const stale = createCompactionEntry("Oversized archive", u1.id);
+		stale.method = "snapcompact";
+		stale.tokensBefore = 188_789;
+		stale.tokensAfter = 168_131;
+		const rebuilt = createCompactionEntry("Rebuilt archive", u1.id);
+		rebuilt.method = "snapcompact";
+		rebuilt.tokensBefore = stale.tokensBefore;
+		rebuilt.tokensAfter = 163_107;
+
+		const transcript = buildSessionContext([u1, a1, stale, rebuilt], undefined, undefined, { transcript: true });
+		const dividers = transcript.messages.filter(message => message.role === "compactionSummary");
+
+		expect(dividers).toHaveLength(1);
+		expect(dividers[0]).toMatchObject({
+			summary: "Rebuilt archive",
+			tokensBefore: 188_789,
+			tokensAfter: 163_107,
+		});
 	});
 
 	it("transcript collapse option elides compacted display history", () => {
@@ -1385,7 +1695,7 @@ describe("buildSessionContext", () => {
 describe("Large session fixture", () => {
 	it("should find cut point in large session", async () => {
 		const entries = await loadLargeSessionEntries();
-		const result = findCutPoint(entries, 0, entries.length, DEFAULT_COMPACTION_SETTINGS.keepRecentTokens);
+		const result = findCutPoint(entries, tokenizer, 0, entries.length, DEFAULT_COMPACTION_SETTINGS.keepRecentTokens);
 
 		// Cut point should be at a message entry (user or assistant)
 		expect(entries[result.firstKeptEntryIndex].type).toBe("message");

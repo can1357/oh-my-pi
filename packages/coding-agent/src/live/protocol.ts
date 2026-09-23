@@ -1,5 +1,5 @@
 /** Frameless Bidi model used by Codex Desktop live calls. */
-export const LIVE_MODEL: "gpt-live-1-codex" = "gpt-live-1-codex";
+export const LIVE_MODEL = "gpt-live-1-codex" as const;
 
 /** Maximum UTF-8 payload size accepted by each context append. */
 export const CONTEXT_CHUNK_BYTES = 500;

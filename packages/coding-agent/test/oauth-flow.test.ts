@@ -84,6 +84,61 @@ describe("mcp oauth flow", () => {
 		expect(authUrl.searchParams.get("state")).toBe("test-state");
 	});
 
+	it("uses the issuer rather than the authorization endpoint to discover DCR metadata", async () => {
+		const calls: string[] = [];
+		const fetchImpl: FetchImpl = async input => {
+			const url = String(input);
+			calls.push(url);
+
+			if (url === "https://auth.example.com/auth/realms/myrealm/.well-known/oauth-authorization-server") {
+				return new Response(
+					JSON.stringify({
+						registration_endpoint:
+							"https://auth.example.com/auth/realms/myrealm/clients-registrations/openid-connect",
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			if (url === "https://auth.example.com/auth/realms/myrealm/clients-registrations/openid-connect") {
+				return new Response(JSON.stringify({ client_id: "registered-client-id" }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			return new Response("not found", { status: 404 });
+		};
+
+		const flow = new MCPOAuthFlow(
+			{
+				authorizationUrl: "https://auth.example.com/auth/realms/myrealm/protocol/openid-connect/auth",
+				tokenUrl: "https://auth.example.com/auth/realms/myrealm/protocol/openid-connect/token",
+				issuerUrl: "https://auth.example.com/auth/realms/myrealm",
+				fetch: fetchImpl,
+			},
+			{},
+		);
+
+		const { url } = await flow.generateAuthUrl("test-state", "http://127.0.0.1:53175/callback");
+
+		expect(new URL(url).searchParams.get("client_id")).toBe("registered-client-id");
+		expect(calls).toContain("https://auth.example.com/auth/realms/myrealm/.well-known/oauth-authorization-server");
+	});
+
+	it("removes a whitespace-only embedded client id before authorization", async () => {
+		const flow = new MCPOAuthFlow(
+			{
+				authorizationUrl: "https://provider.example/authorize?client_id=%20%09",
+				tokenUrl: "https://provider.example/token",
+				fetch: async () => new Response("not found", { status: 404 }),
+			},
+			{},
+		);
+
+		const { url } = await flow.generateAuthUrl("test-state", "http://127.0.0.1:53174/callback");
+
+		expect(new URL(url).searchParams.get("client_id")).toBeNull();
+	});
+
 	it("includes discovered scopes in dynamic client registration", async () => {
 		let registrationPayload: Record<string, unknown> | null = null;
 		const scopes = "openid profile email offline_access";
@@ -261,7 +316,7 @@ describe("mcp oauth flow", () => {
 		expect(authResource).toBe("https://mcp.example.com/mcp");
 		expect(tokenParams.get("resource")).toBe("https://mcp.example.com/mcp");
 	});
-	it("uses an authorization URL resource for the matching token request", async () => {
+	it("prefers the configured resource over one embedded in the authorization URL", async () => {
 		let authResource = "";
 		let tokenRequestBody = "";
 
@@ -294,8 +349,8 @@ describe("mcp oauth flow", () => {
 		await flow.login();
 		const tokenParams = new URLSearchParams(tokenRequestBody);
 
-		expect(authResource).toBe("https://auth-url-resource.example/mcp");
-		expect(tokenParams.get("resource")).toBe("https://auth-url-resource.example/mcp");
+		expect(authResource).toBe("https://config-resource.example/mcp");
+		expect(tokenParams.get("resource")).toBe("https://config-resource.example/mcp");
 	});
 
 	it("uses exact redirectUri and clientSecret for provider requests", async () => {
@@ -869,6 +924,17 @@ describe("mcp oauth flow", () => {
 		expect(tokenParams.get("grant_type")).toBe("refresh_token");
 		expect(tokenParams.get("resource")).toBeNull();
 	});
+	it("omits a whitespace-only client id from token refresh", async () => {
+		let tokenRequestBody = "";
+
+		await refreshMCPOAuthToken("https://provider.example/token", "refresh-token", " \t ", undefined, {
+			fetch: mockProviderTokenEndpoint(body => {
+				tokenRequestBody = body;
+			}),
+		});
+
+		expect(new URLSearchParams(tokenRequestBody).has("client_id")).toBe(false);
+	});
 	describe("RFC 8707 resource indicator", () => {
 		// Provider-advertised resource indicators are authoritative, including
 		// origin-only values. Plane's fallback-resource case opts into
@@ -1217,5 +1283,35 @@ describe("mcp oauth flow", () => {
 
 			expect(tokenParams.get("resource")).toBe("https://token.example.com");
 		});
+	});
+});
+
+describe("mcp oauth google offline access (issue #12438)", () => {
+	it("requests access_type=offline from Google issuers", async () => {
+		const flow = new MCPOAuthFlow(
+			{
+				authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth",
+				tokenUrl: "https://oauth2.googleapis.com/token",
+				clientId: "test-client-id",
+			},
+			{},
+		);
+
+		const { url } = await flow.generateAuthUrl("test-state", "http://127.0.0.1:53172/callback");
+		expect(new URL(url).searchParams.get("access_type")).toBe("offline");
+	});
+
+	it("leaves access_type untouched for other issuers", async () => {
+		const flow = new MCPOAuthFlow(
+			{
+				authorizationUrl: "https://auth.example.com/oauth/authorize",
+				tokenUrl: "https://auth.example.com/oauth/token",
+				clientId: "test-client-id",
+			},
+			{},
+		);
+
+		const { url } = await flow.generateAuthUrl("test-state", "http://127.0.0.1:53172/callback");
+		expect(new URL(url).searchParams.get("access_type")).toBeNull();
 	});
 });

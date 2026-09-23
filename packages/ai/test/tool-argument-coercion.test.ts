@@ -3,6 +3,71 @@ import { type } from "@oh-my-pi/omptype";
 import type { Tool, ToolCall } from "@oh-my-pi/pi-ai/types";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 
+function createHistoryTool(keyword: "anyOf" | "oneOf"): Tool {
+	return {
+		name: "preview_history",
+		description: "",
+		parameters: {
+			type: "object",
+			properties: {
+				source_row_id: { type: ["string", "null"] },
+				expected_source_revision: { type: ["string", "null"] },
+				values: {
+					[keyword]: [
+						{
+							type: "object",
+							additionalProperties: false,
+							properties: {
+								form: { const: "salary" },
+								amount: { type: "string" },
+								currency: { enum: ["COP", "USD"] },
+								effectiveFrom: { type: "string" },
+							},
+							required: ["form", "amount", "currency", "effectiveFrom"],
+						},
+						{
+							type: "object",
+							additionalProperties: false,
+							properties: {
+								form: { const: "work" },
+								clientId: { type: "string" },
+								startDate: { type: "string" },
+								endDate: { type: ["string", "null"] },
+								staffingDiscountUntil: { type: ["string", "null"] },
+								staffingDiscountPercent: { type: ["string", "null"] },
+							},
+							required: [
+								"form",
+								"clientId",
+								"startDate",
+								"endDate",
+								"staffingDiscountUntil",
+								"staffingDiscountPercent",
+							],
+						},
+					],
+				},
+			},
+			required: ["source_row_id", "expected_source_revision", "values"],
+		} as never,
+	};
+}
+
+function workHistoryArgs(): Record<string, unknown> {
+	return {
+		source_row_id: null,
+		expected_source_revision: null,
+		values: {
+			form: "work",
+			clientId: "synthetic-client",
+			startDate: "2026-09-14",
+			endDate: null,
+			staffingDiscountUntil: null,
+			staffingDiscountPercent: null,
+		},
+	};
+}
+
 describe("Tool argument coercion", () => {
 	it("coerces numeric strings when schema expects number", () => {
 		const tool: Tool = {
@@ -22,24 +87,6 @@ describe("Tool argument coercion", () => {
 		expect(result.timeout).toBe(300);
 	});
 
-	it("preserves string values when schema expects string", () => {
-		const tool: Tool = {
-			name: "t2",
-			description: "",
-			parameters: type({ label: type("string") }),
-		};
-
-		const toolCall: ToolCall = {
-			type: "toolCall",
-			id: "call-2",
-			name: "t2",
-			arguments: { label: "300" },
-		};
-
-		const result = validateToolArguments(tool, toolCall) as { label: string };
-		expect(result.label).toBe("300");
-	});
-
 	it("stringifies object values when schema expects string", () => {
 		const tool: Tool = {
 			name: "object-string",
@@ -55,6 +102,530 @@ describe("Tool argument coercion", () => {
 		}) as { payload: string };
 
 		expect(result.payload).toBe('{"a":1,"nested":["x"]}');
+	});
+	it("stringifies container values when a string union branch matches", () => {
+		const tool: Tool = {
+			name: "union-string",
+			description: "",
+			parameters: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					payload: { anyOf: [{ type: "string" }, { type: "number" }] },
+				},
+				required: ["payload"],
+			} as never,
+		};
+
+		const result = validateToolArguments(tool, {
+			type: "toolCall",
+			id: "call-union-object",
+			name: "union-string",
+			arguments: { payload: { a: 1 } },
+		}) as { payload: string };
+
+		expect(result.payload).toBe('{"a":1}');
+	});
+
+	it.each([1, "1"])("does not delete unrecognized keys diagnosed inside a failed union branch (value=%s)", value => {
+		const tool: Tool = {
+			name: "union-closed",
+			description: "",
+			parameters: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					op: {
+						anyOf: [
+							{
+								type: "object",
+								additionalProperties: false,
+								properties: { kind: { type: "string" }, value: { type: "number" } },
+								required: ["kind", "value"],
+							},
+							{ type: "string" },
+						],
+					},
+				},
+				required: ["op"],
+			} as never,
+		};
+
+		// `extra` fails the closed object variant; deleting it would silently
+		// drop payload data on a branch guess. Must surface as a validation error.
+		expect(() =>
+			validateToolArguments(tool, {
+				type: "toolCall",
+				id: "call-union-extra-key",
+				name: "union-closed",
+				arguments: { op: { kind: "set", value, extra: "keep me" } },
+			}),
+		).toThrow(/op/);
+	});
+
+	it.each(["anyOf", "oneOf"] as const)(
+		"preserves required nullable data while coercing an unresolved %s candidate",
+		keyword => {
+			const tool: Tool = {
+				name: "union-required-null",
+				description: "",
+				parameters: {
+					type: "object",
+					properties: {
+						payload: {
+							[keyword]: [
+								{
+									type: "object",
+									additionalProperties: false,
+									properties: { count: { type: "number" } },
+									required: ["count"],
+								},
+								{
+									type: "object",
+									additionalProperties: false,
+									properties: { count: { type: "number" }, keep: { type: "null" } },
+									required: ["count", "keep"],
+								},
+							],
+						},
+					},
+					required: ["payload"],
+				} as never,
+			};
+			const args = { payload: { count: "1", keep: null } };
+
+			expect(
+				validateToolArguments(tool, {
+					type: "toolCall",
+					id: "required-null",
+					name: tool.name,
+					arguments: args,
+				}),
+			).toEqual({ payload: { count: 1, keep: null } });
+			expect(args).toEqual({ payload: { count: "1", keep: null } });
+		},
+	);
+
+	it("tries another matching union branch when the first normalization invalidates its candidate", () => {
+		const tool: Tool = {
+			name: "overlapping-nullable-union",
+			description: "",
+			parameters: {
+				type: "object",
+				properties: {
+					payload: {
+						anyOf: [
+							{
+								type: "object",
+								additionalProperties: false,
+								properties: {
+									x: { type: ["string", "null"] },
+									y: { type: ["string", "null"] },
+								},
+								minProperties: 1,
+							},
+							{
+								type: "object",
+								additionalProperties: false,
+								properties: {
+									x: { type: ["string", "null"] },
+									y: { type: ["string", "null"] },
+								},
+								required: ["x"],
+							},
+						],
+					},
+				},
+				required: ["payload"],
+			} as never,
+		};
+		const args = { payload: { x: null, y: null } };
+
+		expect(
+			validateToolArguments(tool, {
+				type: "toolCall",
+				id: "overlapping-nullable-union",
+				name: tool.name,
+				arguments: args,
+			}),
+		).toEqual({ payload: { x: null } });
+		expect(args).toEqual({ payload: { x: null, y: null } });
+	});
+
+	it.each(["anyOf", "oneOf"] as const)("retains required nested nulls through %s normalization", keyword => {
+		const tool = createHistoryTool(keyword);
+		const args = workHistoryArgs();
+
+		expect(
+			validateToolArguments(tool, {
+				type: "toolCall",
+				id: "history-preview",
+				name: tool.name,
+				arguments: args,
+			}),
+		).toEqual(workHistoryArgs());
+	});
+
+	it("does not lose nested nulls while a later pass repairs the union discriminator", () => {
+		const tool = createHistoryTool("anyOf");
+		const args = workHistoryArgs();
+		args.values = { ...(args.values as Record<string, unknown>), form: " work " };
+
+		expect(
+			validateToolArguments(tool, {
+				type: "toolCall",
+				id: "history-preview",
+				name: tool.name,
+				arguments: args,
+			}),
+		).toEqual(workHistoryArgs());
+	});
+
+	it.each(["anyOf", "oneOf"] as const)(
+		"composes null cleanup and discriminator repair within a valid %s branch",
+		keyword => {
+			const tool: Tool = {
+				name: "repair_union",
+				description: "",
+				parameters: {
+					type: "object",
+					properties: {
+						values: {
+							[keyword]: ["a", "b"].map(op => ({
+								type: "object",
+								additionalProperties: false,
+								properties: {
+									op: { const: op },
+									note: { type: "string" },
+									label: { type: "string", default: "untitled" },
+								},
+								required: ["op", "label"],
+							})),
+						},
+					},
+					required: ["values"],
+				} as never,
+			};
+
+			expect(
+				validateToolArguments(tool, {
+					type: "toolCall",
+					id: "history-preview",
+					name: tool.name,
+					arguments: { values: { op: " a ", note: null, label: null } },
+				}),
+			).toEqual({ values: { op: "a", label: "untitled" } });
+			expect(() =>
+				validateToolArguments(tool, {
+					type: "toolCall",
+					id: "history-preview",
+					name: tool.name,
+					arguments: { values: { op: "unknown", note: null, label: null } },
+				}),
+			).toThrow("Validation failed");
+		},
+	);
+
+	it.each(["anyOf", "oneOf"] as const)(
+		"composes default discriminators and boolean coercion inside a %s candidate",
+		keyword => {
+			const tool: Tool = {
+				name: "repair_default_discriminator",
+				description: "",
+				parameters: {
+					type: "object",
+					properties: {
+						values: {
+							[keyword]: [
+								{
+									type: "object",
+									additionalProperties: false,
+									properties: { op: { const: "a" } },
+									required: ["op"],
+								},
+								{
+									type: "object",
+									additionalProperties: false,
+									properties: {
+										op: { const: "b", default: "b" },
+										enabled: { type: "boolean" },
+									},
+									required: ["op", "enabled"],
+								},
+							],
+						},
+					},
+					required: ["values"],
+				} as never,
+			};
+			// The default selects b, authorizing its existing unknown-key repair.
+			const args = { values: { op: null, enabled: "true", extra: "discard only after selection" } };
+
+			expect(
+				validateToolArguments(tool, {
+					type: "toolCall",
+					id: "history-preview",
+					name: tool.name,
+					arguments: args,
+				}),
+			).toEqual({ values: { op: "b", enabled: true } });
+			expect(args).toEqual({ values: { op: null, enabled: "true", extra: "discard only after selection" } });
+			expect(() =>
+				validateToolArguments(tool, {
+					type: "toolCall",
+					id: "history-preview",
+					name: tool.name,
+					arguments: { values: { op: null, enabled: "unknown" } },
+				}),
+			).toThrow("Validation failed");
+		},
+	);
+
+	it.each(["anyOf", "oneOf"] as const)(
+		"reconsiders null cleanup after identifier repair makes a %s branch viable",
+		keyword => {
+			const tool: Tool = {
+				name: "repair_identifier",
+				description: "",
+				parameters: {
+					type: "object",
+					properties: {
+						values: {
+							[keyword]: ["a", "b"].map(op => ({
+								type: "object",
+								properties: {
+									op: { const: op },
+									path: { type: "string", maxLength: 7 },
+									note: { type: "string" },
+								},
+								required: ["op", "path"],
+							})),
+						},
+					},
+					required: ["values"],
+				} as never,
+			};
+
+			expect(
+				validateToolArguments(tool, {
+					type: "toolCall",
+					id: "history-preview",
+					name: tool.name,
+					arguments: { values: { op: "a", path: "file.ts\n", note: null } },
+				}),
+			).toEqual({ values: { op: "a", path: "file.ts" } });
+		},
+	);
+
+	it("still rejects ambiguous oneOf matches", () => {
+		const tool: Tool = {
+			name: "ambiguous",
+			description: "",
+			parameters: {
+				type: "object",
+				properties: { values: { oneOf: [{ type: "object" }, { type: "object" }] } },
+				required: ["values"],
+			} as never,
+		};
+
+		expect(() =>
+			validateToolArguments(tool, {
+				type: "toolCall",
+				id: "history-preview",
+				name: tool.name,
+				arguments: { values: { endDate: null } },
+			}),
+		).toThrow("Validation failed");
+	});
+
+	it("keeps the salary branch payload intact through normalization", () => {
+		const tool = createHistoryTool("anyOf");
+		const args = {
+			source_row_id: null,
+			expected_source_revision: null,
+			values: { form: "salary", amount: "100", currency: "USD", effectiveFrom: "2026-09-14" },
+		};
+
+		expect(
+			validateToolArguments(tool, {
+				type: "toolCall",
+				id: "history-preview",
+				name: tool.name,
+				arguments: args,
+			}),
+		).toEqual(args);
+	});
+
+	it("rejects missing, non-nullable, and wrong-branch values", () => {
+		const tool = createHistoryTool("anyOf");
+		const work = workHistoryArgs().values as Record<string, unknown>;
+		const missing = { ...work };
+		delete missing.endDate;
+		const invalidValues = [
+			missing,
+			{ ...work, clientId: null },
+			{ ...work, form: "salary" },
+			{ form: "salary", amount: "100", currency: "EUR", effectiveFrom: "2026-09-14" },
+		];
+
+		for (const values of invalidValues) {
+			expect(() =>
+				validateToolArguments(tool, {
+					type: "toolCall",
+					id: "history-preview",
+					name: tool.name,
+					arguments: { ...workHistoryArgs(), values },
+				}),
+			).toThrow("Validation failed");
+		}
+	});
+
+	it("preserves content whitespace while composing nested null and boolean repairs", () => {
+		const tool: Tool = {
+			name: "content-union",
+			description: "",
+			parameters: {
+				type: "object",
+				properties: {
+					content: {
+						anyOf: [
+							{
+								type: "object",
+								properties: {
+									enabled: { type: "boolean" },
+									path: { type: "string" },
+									note: { type: "string" },
+								},
+								required: ["enabled", "path"],
+							},
+							{ type: "null" },
+						],
+					},
+				},
+				required: ["content"],
+			} as never,
+		};
+		const arguments_ = { content: { enabled: "true", path: "literal\n", note: null } };
+		expect(
+			validateToolArguments(tool, { type: "toolCall", id: "content", name: tool.name, arguments: arguments_ }),
+		).toEqual({
+			content: { enabled: true, path: "literal\n" },
+		});
+		expect(arguments_).toEqual({ content: { enabled: "true", path: "literal\n", note: null } });
+	});
+
+	it("does not authorize destructive nested repairs through an unselected ancestor union", () => {
+		const tool: Tool = {
+			name: "nested-union",
+			description: "",
+			parameters: {
+				type: "object",
+				properties: {
+					op: {
+						anyOf: [
+							{
+								type: "object",
+								properties: {
+									value: { type: "number" },
+									nested: {
+										anyOf: [
+											{
+												type: "object",
+												additionalProperties: false,
+												properties: {
+													op: { const: "a" },
+													enabled: { type: "boolean" },
+													note: { type: "string" },
+												},
+												required: ["op", "enabled"],
+											},
+											{ type: "null" },
+										],
+									},
+								},
+								required: ["value", "nested"],
+							},
+							{ type: "string" },
+						],
+					},
+				},
+				required: ["op"],
+			} as never,
+		};
+		expect(() =>
+			validateToolArguments(tool, {
+				type: "toolCall",
+				id: "nested",
+				name: tool.name,
+				arguments: { op: { value: "1", nested: { op: "a", enabled: "true", note: null, extra: "keep me" } } },
+			}),
+		).toThrow();
+	});
+
+	it.each(["wrapped", null])("allows nested default-selected repairs under a selected ancestor (kind=%s)", kind => {
+		const tool: Tool = {
+			name: "selected-nested-union",
+			description: "",
+			parameters: {
+				anyOf: [
+					{ type: "object", properties: { kind: { const: "none" } }, required: ["kind"] },
+					{
+						type: "object",
+						properties: {
+							kind: { const: "wrapped", default: "wrapped" },
+							nested: {
+								anyOf: [
+									{
+										type: "object",
+										additionalProperties: false,
+										properties: { op: { const: "a" } },
+										required: ["op"],
+									},
+									{
+										type: "object",
+										additionalProperties: false,
+										properties: { op: { const: "b", default: "b" }, enabled: { type: "boolean" } },
+										required: ["op", "enabled"],
+									},
+								],
+							},
+						},
+						required: ["kind", "nested"],
+					},
+				],
+			} as never,
+		};
+		expect(
+			validateToolArguments(tool, {
+				type: "toolCall",
+				id: "selected-nested",
+				name: tool.name,
+				arguments: { kind, nested: { op: null, enabled: "true", extra: "discard after selection" } },
+			}),
+		).toEqual({ kind: "wrapped", nested: { op: "b", enabled: true } });
+	});
+
+	it("still applies lossless repairs inside union branches", () => {
+		const tool: Tool = {
+			name: "union-lossless",
+			description: "",
+			parameters: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					payload: { anyOf: [{ type: "number" }, { type: "boolean" }] },
+				},
+				required: ["payload"],
+			} as never,
+		};
+
+		const result = validateToolArguments(tool, {
+			type: "toolCall",
+			id: "call-union-numeric-string",
+			name: "union-lossless",
+			arguments: { payload: "300" },
+		}) as { payload: number };
+		expect(result.payload).toBe(300);
 	});
 
 	it("stringifies array values when schema expects string", () => {
@@ -675,6 +1246,48 @@ describe("Tool argument coercion", () => {
 			}),
 		).toThrow("false schema");
 	});
+
+	it.each(["anyOf", "oneOf"] as const)(
+		"keeps root refs while composing null, enum, and type repairs in %s",
+		keyword => {
+			const tool: Tool = {
+				name: "root_refs",
+				description: "",
+				parameters: {
+					type: "object",
+					$defs: { Name: { type: "string" }, Op: { const: "a" }, Enabled: { type: "boolean" } },
+					properties: {
+						values: {
+							[keyword]: [
+								{
+									type: "object",
+									properties: {
+										name: { $ref: "#/$defs/Name" },
+										op: { $ref: "#/$defs/Op" },
+										enabled: { $ref: "#/$defs/Enabled" },
+										note: { type: "string" },
+									},
+									required: ["name", "op", "enabled"],
+								},
+								{ type: "null" },
+							],
+						},
+					},
+					required: ["values"],
+				},
+			};
+			const call: ToolCall = {
+				type: "toolCall",
+				id: "root-refs",
+				name: tool.name,
+				arguments: { values: { name: "Ada", op: " a ", enabled: "true", note: null } },
+			};
+			expect(validateToolArguments(tool, call)).toEqual({ values: { name: "Ada", op: "a", enabled: true } });
+			expect(() =>
+				validateToolArguments(tool, { ...call, arguments: { values: { name: null, op: "a", enabled: true } } }),
+			).toThrow("Validation failed");
+		},
+	);
 
 	it("parses nested JSON arrays in string values", () => {
 		const tool: Tool = {

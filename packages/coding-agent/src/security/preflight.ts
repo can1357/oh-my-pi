@@ -1,8 +1,9 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import * as git from "../utils/git";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type {
 	SecurityAccountRef,
+	SecurityAuthRef,
 	SecurityKnowledgeBaseRef,
 	SecurityModelRef,
 	SecurityOutputPlan,
@@ -24,7 +25,7 @@ export interface SecurityPlanRequest {
 	outputRoot: string;
 	archiveExisting?: boolean;
 	model: SecurityModelRef;
-	account: SecurityAccountRef;
+	account: SecurityAuthRef;
 	config: unknown;
 	workflowFingerprint: string;
 	signal?: AbortSignal;
@@ -48,13 +49,17 @@ export interface SecurityGitAdapter {
 }
 
 export const DEFAULT_SECURITY_GIT_ADAPTER: SecurityGitAdapter = {
-	root: (cwd, signal) => git.repo.root(cwd, signal),
-	headSha: (cwd, signal) => git.head.sha(cwd, signal),
-	resolveRef: (cwd, refName, signal) => git.ref.resolve(cwd, refName, signal),
-	diffTree: (cwd, base, head, signal) => git.diff.tree(cwd, base, head, { signal }),
-	status: (cwd, signal) => git.status(cwd, { porcelainV1: true, untrackedFiles: "all", signal }),
-	files: (cwd, signal) => git.ls.files(cwd, { signal }),
-	untracked: (cwd, signal) => git.ls.untracked(cwd, signal),
+	root: async (cwd, signal) => {
+		signal?.throwIfAborted();
+		return vcs.git(cwd)?.info().repoRoot ?? null;
+	},
+	headSha: async (cwd, signal) => (await vcs.git(cwd)?.headSha(signal)) ?? null,
+	resolveRef: async (cwd, refName, signal) => (await vcs.git(cwd)?.resolveRef(refName, signal)) ?? null,
+	diffTree: (cwd, base, head, signal) => vcs.requireGit(cwd).diffTree(base, head, false, signal),
+	status: (cwd, signal) =>
+		vcs.requireGit(cwd).statusPorcelain({ untracked: "all", pathspecs: undefined, nulTerminated: false }, signal),
+	files: (cwd, signal) => vcs.requireGit(cwd).lsFiles(false, false, signal),
+	untracked: (cwd, signal) => vcs.requireGit(cwd).lsFiles(true, true, signal),
 };
 
 export class StaleSecurityScanPlanError extends Error {
@@ -303,7 +308,7 @@ interface SecurityPlanMaterial {
 	knowledgeBases: SecurityKnowledgeBaseRef[];
 	output: SecurityOutputPlan;
 	model: SecurityModelRef;
-	account: SecurityAccountRef;
+	account: SecurityAuthRef;
 	configFingerprint: string;
 	workflowFingerprint: string;
 }
@@ -323,14 +328,21 @@ async function buildPlanMaterial(
 		modelId: request.model.modelId,
 	};
 	if (request.model.thinkingLevel !== undefined) model.thinkingLevel = request.model.thinkingLevel;
-	const account: SecurityAccountRef = {
-		provider: request.account.provider,
-		credentialId: request.account.credentialId,
-	};
-	if (request.account.accountId !== undefined) account.accountId = request.account.accountId;
-	if (request.account.email !== undefined) account.email = request.account.email;
-	if (request.account.organizationId !== undefined) account.organizationId = request.account.organizationId;
-	if (request.account.organizationName !== undefined) account.organizationName = request.account.organizationName;
+	let account: SecurityAuthRef;
+	if ("credentialId" in request.account) {
+		const oauthAccount: SecurityAccountRef = {
+			provider: request.account.provider,
+			credentialId: request.account.credentialId,
+		};
+		if (request.account.accountId !== undefined) oauthAccount.accountId = request.account.accountId;
+		if (request.account.email !== undefined) oauthAccount.email = request.account.email;
+		if (request.account.organizationId !== undefined) oauthAccount.organizationId = request.account.organizationId;
+		if (request.account.organizationName !== undefined)
+			oauthAccount.organizationName = request.account.organizationName;
+		account = oauthAccount;
+	} else {
+		account = { provider: request.account.provider, api: request.account.api };
+	}
 	return {
 		repositoryRoot: canonicalRoot,
 		target,

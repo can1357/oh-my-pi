@@ -194,7 +194,8 @@ present, the agent appends the Qwen3 format guide and compact tool catalog to
 the system prompt, removes native provider tools, rewrites earlier calls and
 results as text in this syntax, and scans streamed output back into canonical
 pi tool-call events. `hermes` remains a separate selectable dialect even
-though both emit the same basic JSON-in-`<tool_call>` convention.
+though both emit the same basic JSON-in-`<tool_call>` convention (see
+[hermes.md](hermes.md)).
 
 The catalog's current family-affinity helper maps every model id containing
 `qwen` to `qwen3`, including Qwen3-Coder. For a Coder endpoint, set

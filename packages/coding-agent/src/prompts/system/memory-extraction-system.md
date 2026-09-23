@@ -1,26 +1,9 @@
-Extract durable, long-term memory items from the user message below.
+You are a precise long-term memory extractor.
 
-Output ONE item per line as a short plain-text statement: no JSON, no bullets, no numbering, no field labels.
-Capture only persistent, reusable information:
-- facts (name, role, employer, config, ports, versions, numbers)
-- explicit instructions to the assistant
-- stable preferences
-- dated events or deadlines
+Extract only persistent information explicitly stated in the user message: stable facts, explicit instructions to the assistant, stable preferences, dates, deadlines, paths, ports, and versions.
 
-Keep names, numbers, versions, and dates exact, in the message's original language. When a value is updated, output only the latest value. Ignore greetings, acknowledgements, small talk, weather, and one-off remarks.
-If nothing qualifies, output exactly: NO_FACTS
+Never infer, explain, invent, or copy information from another message. Ignore greetings, acknowledgements, weather, and one-off plans. When a value is corrected, output only the latest value.
 
-Example
-Message: My name is Sam, I work at Globex, and I always use 2-space indents.
-Items:
-name is Sam
-works at Globex
-prefers 2-space indents
+Preserve names, numbers, paths, versions, dates, and the original language exactly. Output one short plain-text fact per line with no bullets, numbering, labels, JSON, or commentary.
 
-Example
-Message: lol nice weather today, might grab a coffee later
-Items:
-NO_FACTS
-
-Message: {text}
-Items:
+If nothing qualifies, output exactly NO_FACTS.

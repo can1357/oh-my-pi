@@ -87,6 +87,63 @@ describe("toolWireSchema — raw JSON Schema normalization", () => {
 		});
 	});
 
+	it("preserves exclusive-required anyOf for provider-specific handling", () => {
+		const wire = toolWireSchema(
+			jsonTool({
+				type: "object",
+				properties: {
+					project: { type: "string" },
+					paths: { type: "array", items: { type: "string" } },
+					scopes: { type: "array", items: { type: "string" } },
+				},
+				required: ["project"],
+				anyOf: [{ required: ["paths"] }, { required: ["scopes"] }],
+			}),
+		);
+		expect(wire.anyOf).toEqual([{ required: ["paths"] }, { required: ["scopes"] }]);
+		expect(wire.type).toBe("object");
+		expect(wire.required).toEqual(["project"]);
+	});
+
+	it("does not flatten nested exclusive-required anyOf (only the tool root 400s xAI)", () => {
+		const wire = toolWireSchema(
+			jsonTool({
+				type: "object",
+				properties: {
+					outputSchema: {
+						type: "object",
+						properties: {
+							paths: { type: "array", items: { type: "string" } },
+							scopes: { type: "array", items: { type: "string" } },
+						},
+						anyOf: [{ required: ["paths"] }, { required: ["scopes"] }],
+					},
+				},
+				required: ["outputSchema"],
+			}),
+		);
+		expect(wire.anyOf).toBeUndefined();
+		const outputSchema = (wire.properties as Record<string, unknown>).outputSchema as Record<string, unknown>;
+		expect(outputSchema.anyOf).toEqual([{ required: ["paths"] }, { required: ["scopes"] }]);
+	});
+
+	it("does not flatten a root union that constrains existing properties", () => {
+		const wire = toolWireSchema(
+			jsonTool({
+				type: "object",
+				properties: { kind: { type: "string" } },
+				anyOf: [{ properties: { kind: { const: "a" } } }, { properties: { kind: { const: "b" } } }],
+			}),
+		);
+		expect(wire.anyOf).toEqual([{ properties: { kind: { const: "a" } } }, { properties: { kind: { const: "b" } } }]);
+		const properties = wire.properties;
+		expect(
+			properties && typeof properties === "object" && "kind" in properties ? properties.kind : undefined,
+		).toEqual({
+			type: "string",
+		});
+	});
+
 	it("preserves raw JSON Schema required defaults and safe-integer bounds", () => {
 		const wire = toolWireSchema(
 			jsonTool({

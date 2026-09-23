@@ -18,10 +18,13 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import * as natives from "@oh-my-pi/pi-natives";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getWorktreesDir, isEnoent } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
-import { hasLiveIsolationOwner, ISOLATION_OWNER_FILE } from "../task/isolation-ownership";
-import * as git from "../utils/git";
+import { Settings } from "../config/settings";
+import { hasLiveIsolationOwner, ISOLATION_OWNER_FILE, readRetainedMountBackend } from "../task/isolation-ownership";
+import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
 
 type WorktreeKind = "pr-checkout" | "task-isolation" | "empty" | "stray";
 
@@ -40,6 +43,16 @@ export interface WorktreeEntry {
 	orphanReason?: string;
 }
 
+export interface AddWorktreeOptions {
+	cwd?: string;
+	path: string;
+	commit?: string;
+	branch?: string;
+	forceBranch?: string;
+	detach: boolean;
+	quiet: boolean;
+}
+
 export interface ListWorktreesOptions {
 	json: boolean;
 }
@@ -50,6 +63,102 @@ export interface ClearWorktreesOptions {
 	/** Print what would be removed without touching the filesystem. */
 	dryRun: boolean;
 	json: boolean;
+}
+/**
+ * Run native teardown on a retained workspace before recursive removal.
+ * Recursive `rm` through a live overlay mount destroys the preserved upper
+ * layer entry by entry and then fails on the mountpoint itself (likewise a
+ * Btrfs subvolume root, removable only via subvolume delete) — and mounts
+ * survive the owning session, so the reclaim path (unlike teardown) cannot
+ * rely on the creator to stop them. Side-effect-free without a retained-
+ * backend sidecar (returns false); throws when the sidecar cannot be read
+ * or teardown itself fails, so the caller skips removal instead of
+ * traversing a possibly live mount — the entry is then reported failed
+ * with the error, data intact.
+ */
+export async function stopRetainedMount(dir: string): Promise<boolean> {
+	const backend = await readRetainedMountBackend(dir);
+	if (backend === undefined) return false;
+	for (const name of TASK_ISOLATION_MOUNT_DIRS) {
+		const candidate = path.join(dir, name);
+		if (
+			await fs
+				.stat(candidate)
+				.then(stat => stat.isDirectory())
+				.catch(() => false)
+		) {
+			await natives.isoStop(backend, candidate);
+			return true;
+		}
+	}
+	return false;
+}
+
+export async function addWorktree(options: AddWorktreeOptions): Promise<void> {
+	if (options.branch && options.forceBranch) {
+		throw new Error("fatal: options '-b' and '-B' cannot be used together");
+	}
+	const cwd = path.resolve(options.cwd ?? process.cwd());
+	const repository = vcs.requireGit(cwd);
+	const worktreePath = path.resolve(cwd, options.path);
+	try {
+		const stat = await fs.stat(worktreePath);
+		const nonEmpty = !stat.isDirectory() || (await fs.readdir(worktreePath)).length > 0;
+		if (nonEmpty) throw new Error(`fatal: '${options.path}' already exists`);
+	} catch (error) {
+		if (!isEnoent(error)) throw error;
+	}
+
+	const settings = await Settings.init({ cwd });
+	let ref: string;
+	let detach = false;
+	let createdBranch: string | undefined;
+	if (options.branch || options.forceBranch) {
+		const branch = options.branch ?? options.forceBranch;
+		if (!branch) throw new Error("branch name is required");
+		await repository.createBranch(branch, options.commit ?? "HEAD", Boolean(options.forceBranch));
+		ref = branch;
+		createdBranch = branch;
+	} else if (options.detach) {
+		ref = options.commit ?? "HEAD";
+		detach = true;
+	} else if (options.commit) {
+		ref = options.commit;
+		detach = !(await repository.refExists(`refs/heads/${options.commit}`));
+	} else {
+		const branch = path.basename(worktreePath);
+		if (!(await repository.refExists(`refs/heads/${branch}`))) {
+			await repository.createBranch(branch, "HEAD", false);
+			createdBranch = branch;
+		}
+		ref = branch;
+	}
+
+	const commit = await repository.commitDetails(ref);
+	const shortSha = commit.sha.slice(0, 7);
+	const subject = commit.message.split("\n", 1)[0];
+	if (!options.quiet) {
+		const preparation = createdBranch
+			? `new branch '${createdBranch}'`
+			: detach
+				? `detached HEAD ${shortSha}`
+				: `checking out '${ref}'`;
+		console.log(`Preparing worktree (${preparation})`);
+	}
+	const result = await repository.worktreeAdd(worktreePath, ref, {
+		detach,
+		clone: settings.get("worktree.clone"),
+		backend: parseIsolationBackend(settings.get("isolation.backend")),
+	});
+	if (!options.quiet) {
+		console.log(`HEAD is now at ${shortSha} ${subject}`);
+		if (result.clonedWith != null) {
+			console.log(`Cloned from ${repository.info().repoRoot} via ${formatIsolationBackend(result.clonedWith)}`);
+		}
+	}
+	if (result.cloneError) {
+		console.error(chalk.dim(`warning: worktree clone fell back to plain checkout: ${result.cloneError}`));
+	}
 }
 
 export async function listWorktrees(options: ListWorktreesOptions): Promise<void> {
@@ -75,7 +184,7 @@ export async function listWorktrees(options: ListWorktreesOptions): Promise<void
 	console.log(chalk.dim(`\n${live} live · ${orphaned} orphaned · ${entries.length} total`));
 }
 
-export async function clearWorktrees(options: ClearWorktreesOptions): Promise<void> {
+export async function clearWorktrees(options: ClearWorktreesOptions): Promise<{ removed: number; failed: number }> {
 	const entries = await scanWorktrees();
 	const targets = options.all ? entries : entries.filter(entry => entry.orphanReason !== undefined);
 
@@ -85,7 +194,7 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<vo
 		} else {
 			console.log(chalk.dim(options.all ? "No worktrees to remove." : "No orphaned worktrees to remove."));
 		}
-		return;
+		return { removed: 0, failed: 0 };
 	}
 
 	if (options.dryRun) {
@@ -97,7 +206,7 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<vo
 			}
 			console.log(chalk.dim(`\n${targets.length} dir${targets.length === 1 ? "" : "s"} would be removed.`));
 		}
-		return;
+		return { removed: 0, failed: 0 };
 	}
 
 	const results: { path: string; ok: boolean; error?: string }[] = [];
@@ -108,12 +217,13 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<vo
 				// Live worktree: ask git to remove it cleanly. If git refuses (locked,
 				// dirty, etc.), fall back to fs.rm and rely on `worktree prune` to
 				// clean the bookkeeping on the parent side.
-				const removed = await git.worktree.tryRemove(target.parentRepo, target.path, { force: true });
+				const removed = await vcs.git(target.parentRepo)?.worktreeRemove(target.path, true);
 				if (!removed) {
 					await fs.rm(target.path, { recursive: true, force: true });
 					parentsToPrune.add(target.parentRepo);
 				}
 			} else {
+				if (target.kind === "task-isolation") await stopRetainedMount(target.path);
 				await fs.rm(target.path, { recursive: true, force: true });
 				if (target.parentRepo) parentsToPrune.add(target.parentRepo);
 			}
@@ -126,7 +236,7 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<vo
 	// Best-effort: drop stale entries from each affected parent's `.git/worktrees/`.
 	for (const parent of parentsToPrune) {
 		try {
-			await git.worktree.prune(parent);
+			await vcs.requireGit(parent).worktreePrune();
 		} catch {
 			/* parent repo may already be gone or pruned — ignore */
 		}
@@ -137,8 +247,7 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<vo
 
 	if (options.json) {
 		console.log(JSON.stringify({ removed: succeeded, failed, results }, null, 2));
-		if (failed > 0) process.exitCode = 1;
-		return;
+		return { removed: succeeded, failed };
 	}
 
 	for (const result of results) {
@@ -150,7 +259,7 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<vo
 		}
 	}
 	console.log(chalk.dim(`\n${succeeded} removed${failed > 0 ? ` · ${chalk.red(`${failed} failed`)}` : ""}`));
-	if (failed > 0) process.exitCode = 1;
+	return { removed: succeeded, failed };
 }
 
 // ───────────────────────────────────────────────────────────────────────────

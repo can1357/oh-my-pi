@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import type { VcsGitRepo } from "@oh-my-pi/pi-natives";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { CommitAgentState } from "../src/commit/agentic/state";
 import { createSplitCommitTool } from "../src/commit/agentic/tools/split-commit";
-import * as git from "../src/utils/git";
 
 const STAGED_DIFF = `diff --git a/src/a.ts b/src/a.ts
 index 1111111..2222222 100644
@@ -29,7 +30,9 @@ describe("split_commit hunk selector validation", () => {
 	});
 
 	it("rejects hunk index selectors that match no parsed hunk", async () => {
-		vi.spyOn(git, "diff").mockResolvedValue(STAGED_DIFF);
+		vi.spyOn(vcs, "requireGit").mockReturnValue({
+			diffText: async () => STAGED_DIFF,
+		} as unknown as VcsGitRepo);
 		const state: CommitAgentState = {
 			overview: { files: ["src/a.ts", "src/b.ts"], stat: "", numstat: [], scopeCandidates: "", isWideScope: false },
 		};
@@ -40,13 +43,13 @@ describe("split_commit hunk selector validation", () => {
 			{
 				commits: [
 					{
-						changes: [{ path: "src/a.ts", hunks: { type: "indices", indices: [2] } }],
+						changes: [{ path: "src/a.ts", kind: "indices", indices: [2] }],
 						type: "fix",
 						scope: null,
 						summary: "Fixed invalid selector handling",
 					},
 					{
-						changes: [{ path: "src/b.ts", hunks: { type: "all" } }],
+						changes: [{ path: "src/b.ts", kind: "all" }],
 						type: "fix",
 						scope: null,
 						summary: "Fixed split commit coverage",
@@ -63,7 +66,9 @@ describe("split_commit hunk selector validation", () => {
 	});
 
 	it("rejects line selectors that overlap no parsed hunk", async () => {
-		vi.spyOn(git, "diff").mockResolvedValue(STAGED_DIFF);
+		vi.spyOn(vcs, "requireGit").mockReturnValue({
+			diffText: async () => STAGED_DIFF,
+		} as unknown as VcsGitRepo);
 		const state: CommitAgentState = {
 			overview: { files: ["src/a.ts", "src/b.ts"], stat: "", numstat: [], scopeCandidates: "", isWideScope: false },
 		};
@@ -74,13 +79,13 @@ describe("split_commit hunk selector validation", () => {
 			{
 				commits: [
 					{
-						changes: [{ path: "src/a.ts", hunks: { type: "lines", start: 50, end: 60 } }],
+						changes: [{ path: "src/a.ts", kind: "lines", start: 50, end: 60 }],
 						type: "fix",
 						scope: null,
 						summary: "Fixed invalid line selectors",
 					},
 					{
-						changes: [{ path: "src/b.ts", hunks: { type: "all" } }],
+						changes: [{ path: "src/b.ts", kind: "all" }],
 						type: "fix",
 						scope: null,
 						summary: "Fixed split commit coverage",
@@ -97,7 +102,9 @@ describe("split_commit hunk selector validation", () => {
 	});
 
 	it("allows deferred changelog targets that are not in the staged diff yet", async () => {
-		vi.spyOn(git, "diff").mockResolvedValue(STAGED_DIFF);
+		vi.spyOn(vcs, "requireGit").mockReturnValue({
+			diffText: async () => STAGED_DIFF,
+		} as unknown as VcsGitRepo);
 		const state: CommitAgentState = {
 			overview: { files: ["src/a.ts", "src/b.ts"], stat: "", numstat: [], scopeCandidates: "", isWideScope: false },
 		};
@@ -109,9 +116,9 @@ describe("split_commit hunk selector validation", () => {
 				commits: [
 					{
 						changes: [
-							{ path: "src/a.ts", hunks: { type: "all" } },
-							{ path: "src/b.ts", hunks: { type: "all" } },
-							{ path: "packages/coding-agent/CHANGELOG.md", hunks: { type: "all" } },
+							{ path: "src/a.ts", kind: "all" },
+							{ path: "src/b.ts", kind: "all" },
+							{ path: "packages/coding-agent/CHANGELOG.md", kind: "all" },
 						],
 						type: "fix",
 						scope: null,

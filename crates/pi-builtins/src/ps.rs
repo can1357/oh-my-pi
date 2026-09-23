@@ -348,7 +348,7 @@ impl builtins::Command for PsCommand {
 			let output = render_ps_table(&rows, &columns, options.no_headers);
 			if let Err(err) = write!(context.stdout(), "{output}") {
 				if err.kind() == io::ErrorKind::BrokenPipe {
-					return Ok(ExecutionResult::success());
+					return Ok(ExecutionResult::new(crate::host::SIGPIPE_EXIT_CODE as u8));
 				}
 				return Err(err.into());
 			}

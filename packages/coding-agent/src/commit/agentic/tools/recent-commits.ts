@@ -1,6 +1,6 @@
 import { type } from "@oh-my-pi/omptype";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { CustomTool } from "../../../extensibility/custom-tools/types";
-import * as git from "../../../utils/git";
 
 const recentCommitsSchema = type({
 	"count?": type("1 <= number <= 50").describe("commit count"),
@@ -26,6 +26,7 @@ function extractScope(subject: string): string | null {
 }
 
 export function createRecentCommitsTool(cwd: string): CustomTool<typeof recentCommitsSchema> {
+	const repo = vcs.require(cwd);
 	return {
 		name: "recent_commits",
 		label: "Recent Commits",
@@ -33,7 +34,7 @@ export function createRecentCommitsTool(cwd: string): CustomTool<typeof recentCo
 		parameters: recentCommitsSchema,
 		async execute(_toolCallId, params) {
 			const count = params.count ?? 8;
-			const commits = await git.log.subjects(cwd, count);
+			const commits = await repo.logSubjects(count);
 			const verbs: Record<string, number> = {};
 			const scopes: Record<string, number> = {};
 			const lengths: number[] = [];

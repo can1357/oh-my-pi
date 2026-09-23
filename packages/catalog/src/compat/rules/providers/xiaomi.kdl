@@ -1,0 +1,26 @@
+// Provider-wire compat for "xiaomi"; regenerated from the frozen census using deployment contract selectors.
+
+provider "xiaomi" {
+	default-model "mimo-v2.5"
+	env "XIAOMI_API_KEY"
+	discovery label="Xiaomi"
+
+	class "mimo" {
+		family "v2" {
+			allows-synthetic-reasoning-content-for-tool-calls #false
+			reasoning-content-field "reasoning_content"
+			requires-reasoning-content-for-tool-calls #true
+			supports-store #false
+			thinking-format "zai"
+			thinking-mode "effort"
+		}
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "mimo-v2.5" {
+		allows-synthetic-reasoning-content-for-tool-calls #false
+		reasoning-content-field "reasoning_content"
+		requires-reasoning-content-for-tool-calls #true
+		supports-store #false
+		thinking-format "zai"
+	}
+}

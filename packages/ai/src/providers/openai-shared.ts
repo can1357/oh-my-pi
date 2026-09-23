@@ -1,6 +1,6 @@
+import { toClinePassWireModelId } from "@oh-my-pi/pi-catalog/cline-pass-model-id";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { toFirepassWireModelId, toFireworksWireModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
-import { isGlm52ReasoningEffortModelId, isKimiK3ModelId } from "@oh-my-pi/pi-catalog/identity";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import type {
@@ -25,13 +25,16 @@ import {
 	$env,
 	classifyJsonPrefix,
 	extractHttpStatusFromError,
+	isRecord,
 	logger,
 	parseImageMetadata,
 	parseStreamingJson,
 	parseStreamingJsonThrottled,
 	stringifyJson,
 	structuredCloneJSON,
+	USER_AGENT,
 } from "@oh-my-pi/pi-utils";
+import { NO_AUTH_SENTINEL } from "../auth-retry";
 import * as AIError from "../error";
 import {
 	type Api,
@@ -57,6 +60,7 @@ import {
 	type ToolResultMessage,
 	type Usage,
 } from "../types";
+import { resolveCopilotRequestIdentity } from "./github-copilot-headers";
 
 export type { OpenAIPromptCacheOptions } from "../types";
 
@@ -89,11 +93,14 @@ import { getOpenRouterHeaders } from "../utils/openrouter-headers";
 import { isForcedToolChoice } from "../utils/tool-choice";
 import {
 	buildCopilotDynamicHeaders,
+	getCachedCopilotIntegrationId,
+	getCopilotIntegrationCacheKey,
 	hasCopilotVisionInput,
 	resolveGitHubCopilotBaseUrl,
 } from "./github-copilot-headers";
+import { servedModelFromOpenRouterReasoning } from "./anthropic-signature";
 import type { ChatCompletionCreateParamsStreaming } from "./openai-chat-wire";
-import type { InputItem } from "./openai-codex/request-transformer";
+import { type InputItem, sanitizeCodexCallId } from "./openai-codex/request-transformer";
 import type {
 	Response as OpenAIResponse,
 	ResponseComputerToolCall,
@@ -112,22 +119,14 @@ import type {
 	ResponseStatus,
 	ResponseStreamEvent,
 } from "./openai-responses-wire";
+import { applyInferenceHeaders, setHeaderIfAbsent } from "./inference-headers";
 import { transformMessages } from "./transform-messages";
 import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER, partitionVisionContent } from "./vision-guard";
-
-/**
- * Keyless-provider sentinel. Custom providers configured with `auth: none`
- * (models.yml) have no credential, so the coding-agent resolves their API key
- * to this literal instead of a real secret. Providers must treat it as "no
- * credential" and suppress any credential-bearing header (e.g. `Authorization:
- * Bearer …`) rather than forwarding the sentinel on the wire. See #6188; the
- * google-vertex and amazon-bedrock transports apply the same guard inline.
- */
-export const NO_AUTH_SENTINEL = "N/A";
 
 export interface OpenAIModelIdentity {
 	provider: string;
 	id: string;
+	identity?: Model["identity"];
 	baseUrl?: string;
 }
 
@@ -168,7 +167,7 @@ export interface OpenAIRequestSetupOptions {
 		apiVersion: string;
 		deploymentName: string;
 	};
-	openAISessionId?: string;
+	sessionId?: string;
 	promptCacheSessionId?: string;
 }
 
@@ -178,6 +177,14 @@ export interface OpenAIRequestSetup {
 	headers: Record<string, string>;
 	query: Record<string, string> | undefined;
 	requestHeaders: Record<string, string>;
+	/** Working-identity cache key for this credential+host; undefined off the Copilot path. */
+	copilotCacheKey: string | undefined;
+	/**
+	 * Build-time cache provenance for the wrapper: the cached value the
+	 * outgoing headers were built from, or `null` when the cache was empty at
+	 * build. `undefined` off the Copilot path (wrapper rereads at dispatch).
+	 */
+	copilotCacheSnapshot: string | null | undefined;
 }
 
 function normalizeSakanaRequestBaseUrl(baseUrl: string | undefined): string | undefined {
@@ -202,14 +209,6 @@ function applyCoreWeaveProjectHeader(headers: Record<string, string>): void {
 	}
 }
 
-function setHeaderIfAbsent(headers: Record<string, string>, name: string, value: string): void {
-	const normalizedName = name.toLowerCase();
-	for (const existingName in headers) {
-		if (existingName.toLowerCase() === normalizedName) return;
-	}
-	headers[name] = value;
-}
-
 export function resolveOpenAIRequestSetup(
 	model: OpenAIRequestSetupModel,
 	options: OpenAIRequestSetupOptions,
@@ -225,7 +224,7 @@ export function resolveOpenAIRequestSetup(
 		apiKey = $env.OPENAI_API_KEY;
 	}
 	const rawApiKey = apiKey;
-	let headers = { ...(model.headers ?? {}) };
+	let headers = { ...model.headers };
 	if (model.provider === "openrouter") {
 		Object.assign(headers, getOpenRouterHeaders());
 	}
@@ -238,6 +237,8 @@ export function resolveOpenAIRequestSetup(
 	}
 
 	let copilotPremiumRequests: number | undefined;
+	let copilotCacheKey: string | undefined;
+	let copilotCacheSnapshot: string | null | undefined;
 	let baseUrl = model.baseUrl;
 	if (model.provider === "moonshot") {
 		// Bundled `moonshot` catalog models hardcode the international endpoint
@@ -256,17 +257,25 @@ export function resolveOpenAIRequestSetup(
 		}
 	}
 	if (model.provider === "github-copilot") {
-		apiKey = parseGitHubCopilotApiKey(rawApiKey).accessToken;
+		const copilotApiKey = parseGitHubCopilotApiKey(rawApiKey);
+		apiKey = copilotApiKey.accessToken;
+		const copilotBaseUrl = resolveGitHubCopilotBaseUrl(model.baseUrl, rawApiKey) ?? model.baseUrl;
+		copilotCacheKey = getCopilotIntegrationCacheKey(rawApiKey, copilotBaseUrl);
+		const copilotCached = getCachedCopilotIntegrationId(copilotCacheKey);
 		const copilot = buildCopilotDynamicHeaders({
 			messages: options.messages,
 			hasImages: hasCopilotVisionInput(options.messages),
 			premiumMultiplier: model.premiumMultiplier,
 			headers,
 			initiatorOverride: options.initiatorOverride,
+			enterpriseUrl: copilotApiKey.enterpriseUrl,
+			integrationId: resolveCopilotRequestIdentity(options.extraHeaders),
+			cachedIntegrationId: copilotCached,
 		});
 		Object.assign(headers, copilot.headers);
 		copilotPremiumRequests = copilot.premiumRequests;
-		baseUrl = resolveGitHubCopilotBaseUrl(model.baseUrl, rawApiKey) ?? model.baseUrl;
+		baseUrl = copilotBaseUrl;
+		copilotCacheSnapshot = copilotCached ?? null;
 	}
 
 	if (model.provider === "alibaba-token-plan") {
@@ -304,16 +313,22 @@ export function resolveOpenAIRequestSetup(
 		query = { "api-version": options.azureChatCompletions.apiVersion };
 	}
 
-	if (options.openAISessionId && model.provider === "openai") {
-		setHeaderIfAbsent(headers, "session_id", options.openAISessionId);
-		setHeaderIfAbsent(headers, "x-client-request-id", options.openAISessionId);
-	}
+	const sessionId = options.sessionId ?? options.promptCacheSessionId;
+	applyInferenceHeaders(headers, {
+		provider: model.provider,
+		protocol: "openai",
+		sessionId,
+	});
 	if (options.promptCacheSessionId && model.compat?.promptCacheSessionHeader) {
 		setHeaderIfAbsent(headers, model.compat.promptCacheSessionHeader, options.promptCacheSessionId);
 	}
 
 	if (options.defaultBaseUrl !== undefined) {
 		baseUrl = baseUrl ?? ($env.OPENAI_BASE_URL?.trim() || options.defaultBaseUrl);
+	}
+	// Attribute xAI traffic as omp unless a User-Agent is already set.
+	if (model.provider === "xai" || model.provider === "xai-oauth") {
+		setHeaderIfAbsent(headers, "User-Agent", USER_AGENT);
 	}
 	const requestHeaders = { ...headers };
 	// A keyless provider (`auth: none` in models.yml) resolves to the `N/A`
@@ -325,13 +340,13 @@ export function resolveOpenAIRequestSetup(
 	if (apiKey !== NO_AUTH_SENTINEL) {
 		headers.Authorization ??= `Bearer ${apiKey}`;
 	}
-	return { copilotPremiumRequests, baseUrl, headers, query, requestHeaders };
+	return { copilotPremiumRequests, baseUrl, headers, query, requestHeaders, copilotCacheKey, copilotCacheSnapshot };
 }
 
 export function applyOpenAIServiceTier(
 	params: { service_tier?: ServiceTier | null | undefined },
 	serviceTier: ServiceTier | null | undefined,
-	model: Pick<Model, "provider" | "api" | "id">,
+	model: Pick<Model, "provider" | "api" | "identity">,
 ): void {
 	if (!shouldSendServiceTier(serviceTier, model)) return;
 	params.service_tier = serviceTier;
@@ -343,7 +358,12 @@ export function applyOpenAIServiceTier(
  * half price; Priority is a 2x premium. Codex bills the same tiers with its own
  * table (Priority is 2.5x on gpt-5.5) and applies that separately.
  */
-function getOpenAIResponsesServiceTierCostMultiplier(tier: string | null | undefined): number {
+function getOpenAIResponsesServiceTierCostMultiplier(
+	model: Pick<Model, "serviceTierCost">,
+	tier: string | null | undefined,
+): number {
+	const resolvedMultiplier = tier === "flex" || tier === "priority" ? model.serviceTierCost?.[tier] : undefined;
+	if (resolvedMultiplier !== undefined) return resolvedMultiplier;
 	switch (tier) {
 		case "flex":
 			return 0.5;
@@ -363,7 +383,7 @@ function getOpenAIResponsesServiceTierCostMultiplier(tier: string | null | undef
  * proxy can never skew those costs.
  */
 export function applyOpenAIResponsesServiceTierCost(
-	model: Pick<Model, "provider">,
+	model: Pick<Model, "provider" | "serviceTierCost">,
 	usage: AssistantMessage["usage"],
 	responseServiceTier: unknown,
 	requestServiceTier: ServiceTier | null | undefined,
@@ -373,7 +393,7 @@ export function applyOpenAIResponsesServiceTierCost(
 	// requested priority/flex turn to default under load); only fall back to the
 	// requested tier when the response omits the echo entirely.
 	const served = typeof responseServiceTier === "string" ? responseServiceTier : (requestServiceTier ?? undefined);
-	const multiplier = getOpenAIResponsesServiceTierCostMultiplier(served);
+	const multiplier = getOpenAIResponsesServiceTierCostMultiplier(model, served);
 	if (multiplier === 1) return;
 	usage.cost.input *= multiplier;
 	usage.cost.output *= multiplier;
@@ -382,9 +402,14 @@ export function applyOpenAIResponsesServiceTierCost(
 	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
 }
 
-/** Reconcile token-price estimates with OpenRouter's authoritative account charge. */
-export function applyOpenRouterReportedCost(model: Pick<Model, "provider">, usage: Usage, rawUsage: unknown): void {
-	if (model.provider !== "openrouter" || typeof rawUsage !== "object" || rawUsage === null) return;
+/** Reconcile token-price estimates with a gateway's authoritative account charge. */
+export function applyProviderReportedCost(model: Pick<Model, "provider">, usage: Usage, rawUsage: unknown): void {
+	if (
+		(model.provider !== "openrouter" && model.provider !== "cline-pass") ||
+		typeof rawUsage !== "object" ||
+		rawUsage === null
+	)
+		return;
 	const reportedCost = Reflect.get(rawUsage, "cost");
 	if (typeof reportedCost !== "number" || !Number.isFinite(reportedCost) || reportedCost < 0) return;
 
@@ -528,10 +553,6 @@ export function disableStrictToolsForScope(
 	state?.strictTools.disabledModelScopes.add(`${scope.provider}:${scope.baseUrl ?? ""}:${scope.modelId}`);
 }
 
-export function isOpenRouterAnthropicModel(model: OpenAIModelIdentity): boolean {
-	return model.provider === "openrouter" && model.id.toLowerCase().startsWith("anthropic/");
-}
-
 /**
  * Append an OpenRouter routing-variant suffix (e.g. `:nitro`, `:floor`, `:online`, `:exacto`)
  * to a model id when no explicit variant is already present. A variant is considered
@@ -553,6 +574,8 @@ export function applyWireModelIdTransform(
 	openrouterVariant?: string,
 ): string {
 	switch (mode) {
+		case "cline-pass":
+			return toClinePassWireModelId(baseId);
 		case "firepass":
 			return toFirepassWireModelId(baseId);
 		case "fireworks":
@@ -709,17 +732,27 @@ export interface OpenAIExtraBodyOptions {
 }
 
 /**
- * Merge a compat/options `extraBody` blob into the request params. When
- * `dropThinkingWhenReasoningEffort` is set and `reasoning_effort` is present,
- * delete the conflicting `thinking` toggle (Fireworks rejects both together).
+ * Merge a compat/options `extraBody` blob into the request params. An encoded
+ * Venice disable signal takes precedence over static `venice_parameters`, so
+ * an explicit per-turn Thinking Off selection cannot be re-enabled by config.
+ * When `dropThinkingWhenReasoningEffort` is set and `reasoning_effort` is
+ * present, delete the conflicting `thinking` toggle (Fireworks rejects both).
  */
 export function applyOpenAIExtraBody<P extends object>(
-	params: P,
+	params: P & { venice_parameters?: Record<string, unknown> },
 	extraBody: Record<string, unknown> | undefined,
 	options?: OpenAIExtraBodyOptions,
 ): void {
 	if (!extraBody) return;
+	const encodedVeniceParameters = params.venice_parameters;
 	Object.assign(params, extraBody);
+	if (encodedVeniceParameters?.disable_thinking === true) {
+		const configuredVeniceParameters = extraBody.venice_parameters;
+		params.venice_parameters = {
+			...(isRecord(configuredVeniceParameters) ? configuredVeniceParameters : {}),
+			...encodedVeniceParameters,
+		};
+	}
 	if (options?.dropThinkingWhenReasoningEffort) {
 		const shaped = params as { reasoning_effort?: unknown; thinking?: unknown };
 		if (shaped.reasoning_effort !== undefined) {
@@ -729,11 +762,37 @@ export function applyOpenAIExtraBody<P extends object>(
 }
 
 /**
+ * Normalize `content: null` to `[]` in place across a list of inbound wire
+ * message items.
+ *
+ * Codex (and other OpenAI clients) emit `content: null` on empty message items
+ * during multi-turn/tool turns; OpenAI tolerates it. Normalizing before the
+ * auth-gateway's request schema validation lets the item take the same path as
+ * an explicit empty content array — for both validation and any native
+ * history-replay clone — instead of 400ing. Shared by the `/v1/responses`
+ * (`input[]`) and `/v1/chat/completions` (`messages[]`) routes.
+ *
+ * `isEligible` lets a route skip items whose content is not array-typed, e.g.
+ * the chat `function` role whose content is `string | null`. See issue #10956.
+ */
+export function coerceNullMessageContentInPlace(
+	items: unknown,
+	isEligible?: (item: Record<string, unknown>) => boolean,
+): void {
+	if (!Array.isArray(items)) return;
+	for (const item of items) {
+		if (typeof item !== "object" || item === null || Array.isArray(item)) continue;
+		const record = item as Record<string, unknown>;
+		if (record.content === null && (isEligible?.(record) ?? true)) record.content = [];
+	}
+}
+
+/**
  * Chat Completions streaming request body shaped by the OpenAI-family providers.
- * Extends the vendored SDK params with the compat dialect fields pi-ai emits
- * (binary `thinking`, Qwen `enable_thinking`/`chat_template_kwargs`, nested
- * `reasoning`, gateway `provider`/`providerOptions`, sampling extras). Lives in
- * the shared module beside the request-shaping helpers that mutate it.
+ * (binary `thinking`, Qwen `enable_thinking`/`chat_template_kwargs`, Venice
+ * `venice_parameters`, nested `reasoning`, gateway `provider`/`providerOptions`,
+ * sampling extras). Lives in the shared module beside the request-shaping
+ * helpers that mutate it.
  */
 export type OpenAICompletionsParams = Omit<ChatCompletionCreateParamsStreaming, "reasoning_effort" | "service_tier"> & {
 	top_k?: number;
@@ -742,8 +801,14 @@ export type OpenAICompletionsParams = Omit<ChatCompletionCreateParamsStreaming, 
 	thinking?: { type: "enabled" | "disabled"; effort?: string; keep?: "all" };
 	enable_thinking?: boolean;
 	preserve_thinking?: boolean;
-	chat_template_kwargs?: { enable_thinking?: boolean; preserve_thinking?: boolean };
-	reasoning?: { effort?: string } | { enabled: false };
+	chat_template_kwargs?: {
+		enable_thinking?: boolean;
+		thinking?: boolean;
+		preserve_thinking?: boolean;
+		reasoning_effort?: string;
+	};
+	reasoning?: { effort?: string; enabled?: boolean; max_tokens?: number };
+	venice_parameters?: { disable_thinking?: boolean; [key: string]: unknown };
 	reasoning_effort?: string | null;
 	service_tier?: ServiceTier;
 	tool_stream?: boolean;
@@ -755,11 +820,12 @@ export type OpenAICompletionsParams = Omit<ChatCompletionCreateParamsStreaming, 
 export interface ChatCompletionsReasoningOptions {
 	reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	disableReasoning?: boolean;
+	thinkingBudgets?: Partial<Record<Effort, number>>;
 }
 
 export type OpenAICompatEndpoint = "chat-completions" | "responses";
 
-export type OpenAIReasoningDisableReason = "caller" | "forced-tool-choice" | "tool-choice" | "not-requested";
+export type OpenAIReasoningDisableReason = "caller" | "forced-tool-choice" | "tool-choice" | "tools" | "not-requested";
 
 export type OpenAICompatPolicyCompat = ResolvedOpenAISharedCompat &
 	Partial<ResolvedOpenAICompat> &
@@ -771,6 +837,7 @@ export interface ResolveOpenAICompatPolicyOptions {
 	reasoning?: string;
 	disableReasoning?: boolean;
 	toolChoice?: unknown;
+	hasTools?: boolean;
 	strictResponsesPairing?: boolean;
 	includeEncryptedReasoning?: boolean;
 	filterReasoningHistory?: boolean;
@@ -835,7 +902,31 @@ function isImplicitDisableWhenNotRequested(disableMode: OpenAIReasoningDisableMo
 	return (
 		disableMode === "zai-thinking-disabled" ||
 		disableMode === "qwen-enable-thinking-false" ||
-		disableMode === "qwen-template-false"
+		disableMode === "qwen-template-false" ||
+		disableMode === "chat-template-thinking-false"
+	);
+}
+
+/**
+ * Whether a redundant `tool_choice: "auto"` should be dropped to keep
+ * reasoning alive. Hosts with `disableReasoningOnToolChoice` (DeepSeek family
+ * on e.g. Fireworks) silently turn reasoning off whenever any `tool_choice`
+ * is present. "auto" is already the provider default, so omitting it is
+ * wire-neutral for tool selection; forced and "none" choices are semantic and
+ * still win over reasoning (#1207).
+ */
+export function shouldDropAutoToolChoiceForReasoning(
+	model: Pick<Model, "reasoning">,
+	compat: { disableReasoningOnToolChoice: boolean },
+	toolChoice: unknown,
+	options: { reasoning?: string; disableReasoning?: boolean } | undefined,
+): boolean {
+	return (
+		toolChoice === "auto" &&
+		compat.disableReasoningOnToolChoice &&
+		Boolean(model.reasoning) &&
+		options?.reasoning !== undefined &&
+		!options.disableReasoning
 	);
 }
 
@@ -854,12 +945,19 @@ export function resolveOpenAICompatPolicy<TApi extends Api>(
 		!forcedToolChoiceSuppressesReasoning &&
 		baseCompat.disableReasoningOnToolChoice &&
 		options.toolChoice !== undefined;
+	const toolsSuppressReasoning =
+		!forcedToolChoiceSuppressesReasoning &&
+		!anyToolChoiceSuppressesReasoning &&
+		baseCompat.disableReasoningWithTools &&
+		options.hasTools === true;
 	const requestedAndAllowed = requestedEffort !== undefined && !options.disableReasoning && modelSupported;
 	const conflictDisableReason: OpenAIReasoningDisableReason | undefined = forcedToolChoiceSuppressesReasoning
 		? "forced-tool-choice"
 		: anyToolChoiceSuppressesReasoning
 			? "tool-choice"
-			: undefined;
+			: toolsSuppressReasoning
+				? "tools"
+				: undefined;
 	const disableReason: OpenAIReasoningDisableReason | undefined = options.disableReasoning
 		? "caller"
 		: conflictDisableReason;
@@ -966,10 +1064,15 @@ function encodeChatCompletionsDisabledReasoning(
 		case "qwen-template-false":
 			params.chat_template_kwargs = { ...params.chat_template_kwargs, enable_thinking: false };
 			break;
+		case "chat-template-thinking-false":
+			params.chat_template_kwargs = { ...params.chat_template_kwargs, thinking: false };
+			break;
 		case "openrouter-enabled-false":
-			(params as typeof params & { reasoning?: { effort?: string } | { enabled: false } }).reasoning = {
-				enabled: false,
-			};
+		case "cline-enabled-false":
+			params.reasoning = { enabled: false };
+			break;
+		case "venice-disable-thinking":
+			params.venice_parameters = { ...params.venice_parameters, disable_thinking: true };
 			break;
 		default:
 			delete params.reasoning;
@@ -1044,12 +1147,41 @@ export function applyChatCompletionsCompatPolicy(params: OpenAICompletionsParams
 				break;
 			case "qwen-enable-thinking-false":
 				params.enable_thinking = true;
+				// Qwen 3.8+ templates steer thinking depth via the
+				// `reasoning_effort` kwarg (low/medium/xhigh, template default
+				// xhigh) — without it every effort selection lands on xhigh.
+				// Twin emission mirrors `preserve_thinking` above: newer
+				// llama.cpp builds map the top-level OpenAI field into the
+				// template, older builds and Alibaba-style local servers read
+				// only the kwargs copy. The `qwen-chat-template` dialect (NIM,
+				// vLLM/SGLang) rides kwargs alone — NIM's request schema
+				// rejects unknown top-level fields (#2299).
+				if (policy.compat.qwenTemplateReasoningEffort && reasoning.wireEffort !== undefined) {
+					params.reasoning_effort = reasoning.wireEffort;
+					params.chat_template_kwargs = {
+						...params.chat_template_kwargs,
+						reasoning_effort: reasoning.wireEffort,
+					};
+				}
 				break;
 			case "qwen-template-false":
 				// Spread so the `preserve_thinking` kwarg hoisted above
 				// survives the merge — a bare `{ enable_thinking: true }`
 				// would clobber it.
-				params.chat_template_kwargs = { ...params.chat_template_kwargs, enable_thinking: true };
+				params.chat_template_kwargs = {
+					...params.chat_template_kwargs,
+					enable_thinking: true,
+					...(policy.compat.qwenTemplateReasoningEffort && reasoning.wireEffort !== undefined
+						? { reasoning_effort: reasoning.wireEffort }
+						: {}),
+				};
+				break;
+			case "chat-template-thinking-false":
+				params.chat_template_kwargs = {
+					...params.chat_template_kwargs,
+					thinking: true,
+					...(reasoning.wireEffort !== undefined ? { reasoning_effort: reasoning.wireEffort } : {}),
+				};
 				break;
 			case "openrouter-enabled-false":
 				if (reasoning.wireEffort !== undefined) {
@@ -1083,18 +1215,29 @@ export function applyChatCompletionsReasoningParams(
 	params: OpenAICompletionsParams,
 	model: Model<"openai-completions">,
 	compat: ResolvedOpenAICompat,
-	options: (ChatCompletionsReasoningOptions & { toolChoice?: unknown }) | undefined,
+	options: (ChatCompletionsReasoningOptions & { toolChoice?: unknown; hasTools?: boolean }) | undefined,
 ): void {
-	applyChatCompletionsCompatPolicy(
-		params,
-		resolveOpenAICompatPolicy(model, {
-			endpoint: "chat-completions",
-			compat,
-			reasoning: options?.reasoning,
-			disableReasoning: options?.disableReasoning,
-			toolChoice: options?.toolChoice,
-		}),
-	);
+	const policy = resolveOpenAICompatPolicy(model, {
+		endpoint: "chat-completions",
+		compat,
+		reasoning: options?.reasoning,
+		disableReasoning: options?.disableReasoning,
+		toolChoice: options?.toolChoice,
+		hasTools: options?.hasTools,
+	});
+	applyChatCompletionsCompatPolicy(params, policy);
+	if (
+		model.provider !== "cline-pass" ||
+		!policy.reasoning.enabled ||
+		model.thinking?.mode !== "budget" ||
+		options?.reasoning === undefined
+	) {
+		return;
+	}
+	const budget = options.thinkingBudgets?.[options.reasoning] ?? model.thinking.effortBudgets?.[options.reasoning];
+	if (budget === undefined) return;
+	delete params.reasoning_effort;
+	params.reasoning = { ...params.reasoning, max_tokens: budget };
 }
 
 export function disableChatCompletionsReasoningForDialect(
@@ -1112,26 +1255,29 @@ export function disableChatCompletionsReasoningForDialect(
  * true but are NOT GLM-5.2, so the model-id check is load-bearing — never swap it
  * for `compat.supportsReasoningEffort`.
  */
-function isZaiReasoningEffortDialect(model: Model<"openai-completions">, compat: ResolvedOpenAICompat): boolean {
-	return compat.thinkingFormat === "zai" && isGlm52ReasoningEffortModelId(model.id);
+function isZaiReasoningEffortDialect(_model: Model<"openai-completions">, compat: ResolvedOpenAICompat): boolean {
+	return compat.thinkingFormat === "zai" && compat.zaiReasoningEffortDialect;
 }
 
 /**
  * Provider-specific Chat Completions output clamp.
  *
  * Most OpenAI-compatible endpoints retain the conservative 64k ceiling from
- * {@link resolveOpenAIOutputTokenParam}. Z.AI/GLM-5.2 reasoning and native
- * Moonshot K3 explicitly accept their full advertised model caps, so those
- * routes clamp to `model.maxTokens` instead.
+ * {@link resolveOpenAIOutputTokenParam}. ClinePass, Z.AI/GLM-5.2 reasoning,
+ * and native Moonshot K3 explicitly accept their full advertised model caps,
+ * so those routes clamp to `model.maxTokens` instead.
  */
 export function resolveOpenAICompletionsOutputClamp(
 	model: Model<"openai-completions">,
 	compat: ResolvedOpenAICompat,
 ): number | undefined {
+	if (model.provider === "cline-pass") {
+		return model.maxTokens ?? OPENAI_MAX_OUTPUT_TOKENS;
+	}
 	if (isZaiReasoningEffortDialect(model, compat)) {
 		return model.maxTokens ?? OPENAI_MAX_OUTPUT_TOKENS;
 	}
-	if (model.provider === "moonshot" && isKimiK3ModelId(model.id)) {
+	if (compat.clampOutputToModelMax) {
 		return model.maxTokens ?? OPENAI_MAX_OUTPUT_TOKENS;
 	}
 	return undefined;
@@ -1140,12 +1286,13 @@ export function resolveOpenAICompletionsOutputClamp(
 /**
  * Provider-specific Responses API output clamp.
  *
- * Meta documents a 131,072-token output limit for Muse Spark 1.1, so native
- * Meta requests may use the model's full advertised cap instead of the
- * conservative 64k OpenAI-compatible default.
+ * Models whose compiled provider policy opts in may use their full advertised
+ * output cap instead of the conservative 64k OpenAI-compatible default.
  */
-export function resolveOpenAIResponsesOutputClamp(model: Pick<Model, "provider" | "maxTokens">): number | undefined {
-	if (model.provider === "meta") {
+export function resolveOpenAIResponsesOutputClamp(
+	model: Pick<Model, "maxTokens"> & { compat: Pick<ResolvedOpenAISharedCompat, "clampOutputToModelMax"> },
+): number | undefined {
+	if (model.compat.clampOutputToModelMax) {
 		return model.maxTokens ?? OPENAI_MAX_OUTPUT_TOKENS;
 	}
 	return undefined;
@@ -1299,18 +1446,14 @@ export function normalizeResponsesToolCallIdForTransform(
 	model?: Model<Api>,
 	source?: AssistantMessage,
 ): string {
-	if (!id.includes("|")) return id;
+	const sep = id.search(/[\n|]/);
+	if (sep < 0 && id.length <= 64 && /^[a-zA-Z0-9_-]+$/.test(id)) return id;
 	const isForeignToolCall =
 		source != null && model != null && (source.provider !== model.provider || source.api !== model.api);
-	if (isForeignToolCall) {
-		const [callId, itemId] = id.split("|");
-		const normalizeIdPart = (part: string): string => {
-			const sanitized = part.replace(/[^a-zA-Z0-9_-]/g, "_");
-			const truncated = sanitized.length > 64 ? sanitized.slice(0, 64) : sanitized;
-			return truncated.replace(/_+$/, "");
-		};
-		const normalizedCallId = normalizeIdPart(callId);
-		let normalizedItemId = `fc_${Bun.hash(itemId).toString(36)}`;
+	if (isForeignToolCall || sep >= 0 || id.length > 64) {
+		const [callId, itemId] = sep > 0 ? [id.slice(0, sep), id.slice(sep + 1)] : [id, undefined];
+		const normalizedCallId = sanitizeCodexCallId(callId);
+		let normalizedItemId = itemId ? `fc_${Bun.hash(itemId).toString(36)}` : `fc_${Bun.hash(id).toString(36)}`;
 		if (normalizedItemId.length > 64) normalizedItemId = normalizedItemId.slice(0, 64);
 		return `${normalizedCallId}|${normalizedItemId}`;
 	}
@@ -1495,6 +1638,77 @@ export function repairOrphanResponsesToolCalls(input: ResponseInput): ResponseIn
 	return repaired;
 }
 
+type ResponsesBatchItemKind = "call" | "output" | "assistant-message" | "other";
+
+/** Classify a Responses input item for tool-call/output batch normalization. */
+function classifyResponsesBatchItem(item: object): ResponsesBatchItemKind {
+	const type = "type" in item ? item.type : undefined;
+	if (responsesToolCallKind(type) !== undefined) return "call";
+	if (responsesToolOutputKind(type) !== undefined) return "output";
+	const role = "role" in item ? item.role : undefined;
+	if (type === "message" && role === "assistant") return "assistant-message";
+	return "other";
+}
+
+/**
+ * Relocate assistant `message` items wedged inside a tool-call → tool-output
+ * batch to before the batch, yielding canonical `message(s) → calls → outputs`
+ * order. Idempotent; returns the same array reference when nothing moves.
+ *
+ * OpenAI's Responses API pairs tool outputs by `call_id` and tolerates any item
+ * order, but stricter gateways (notably opencode-go's "Console Go") reject a
+ * shape where an assistant message interrupts a `function_call` →
+ * `function_call_output` run, 400ing with `No tool output found for tool call …`
+ * (naming a random call of the batch on each retry). This arises whenever a
+ * model streams a trailing text / demoted-thinking block *after* its tool calls:
+ * the block-encode path preserves stream order, emitting the message between the
+ * calls and the outputs appended afterward. Moving the already-model-owned
+ * message ahead of its call batch keeps content identical while satisfying the
+ * strict validator. See #8789.
+ */
+export function hoistInterleavedResponsesToolBatchMessages<T extends object>(items: readonly T[]): T[] {
+	const moved = new Set<number>();
+	const insertBefore = new Map<number, number[]>();
+	for (let index = 0; index < items.length; index++) {
+		if (classifyResponsesBatchItem(items[index]) !== "output") continue;
+		// Only anchor on the first output of a run.
+		if (index > 0 && classifyResponsesBatchItem(items[index - 1]) === "output") continue;
+		// Walk back over the batch body (calls interleaved with assistant messages).
+		let start = index;
+		let sawCall = false;
+		const messageIndexes: number[] = [];
+		while (start > 0) {
+			const kind = classifyResponsesBatchItem(items[start - 1]);
+			if (kind === "call") {
+				sawCall = true;
+			} else if (kind === "assistant-message") {
+				messageIndexes.push(start - 1);
+			} else {
+				break;
+			}
+			start -= 1;
+		}
+		// Nothing to hoist unless a message actually sits among the calls.
+		if (!sawCall || messageIndexes.length === 0) continue;
+		messageIndexes.reverse();
+		const target = insertBefore.get(start) ?? [];
+		for (const messageIndex of messageIndexes) {
+			moved.add(messageIndex);
+			target.push(messageIndex);
+		}
+		insertBefore.set(start, target);
+	}
+	if (moved.size === 0) return items.slice();
+	const result: T[] = [];
+	for (let index = 0; index < items.length; index++) {
+		const pending = insertBefore.get(index);
+		if (pending) for (const messageIndex of pending) result.push(items[messageIndex]);
+		if (moved.has(index)) continue;
+		result.push(items[index]);
+	}
+	return result;
+}
+
 /**
  * Some Responses backends (notably GitHub Copilot) reject the OpenAI image
  * `detail: "original"` value with a 400. When the model does not advertise
@@ -1507,6 +1721,18 @@ function clampResponsesImageDetail(
 ): ResponseInputImage["detail"] {
 	const resolved = detail ?? "auto";
 	return resolved === "original" && !supportsImageDetailOriginal ? "auto" : resolved;
+}
+
+function convertResponsesInputImage(image: ImageContent, supportsImageDetailOriginal: boolean): ResponseInputImage {
+	const detail = clampResponsesImageDetail(image.detail, supportsImageDetailOriginal);
+	if (image.providerFile?.provider === "openai" && image.providerFile.id) {
+		return { type: "input_image", detail, file_id: image.providerFile.id };
+	}
+	return {
+		type: "input_image",
+		detail,
+		image_url: image.url ?? `data:${image.mimeType};base64,${image.data}`,
+	};
 }
 
 export function convertResponsesInputContent(
@@ -1538,11 +1764,7 @@ export function convertResponsesInputContent(
 		} satisfies ResponseInputText);
 	}
 	for (const item of imageBlocks) {
-		normalizedContent.push({
-			type: "input_image",
-			detail: clampResponsesImageDetail(item.detail, supportsImageDetailOriginal),
-			image_url: `data:${item.mimeType};base64,${item.data}`,
-		} satisfies ResponseInputImage);
+		normalizedContent.push(convertResponsesInputImage(item, supportsImageDetailOriginal));
 	}
 	if (omittedImages) {
 		normalizedContent.push({
@@ -1671,8 +1893,25 @@ export interface BuildResponsesInputOptions<TApi extends Api> {
  */
 export function escapeReplayedControlTokens(items: ResponseInput): ResponseInput {
 	return items.map(item => {
-		if (item.type === "function_call_output" || item.type === "custom_tool_call_output") {
-			return typeof item.output === "string" ? { ...item, output: escapeHarmonyControlTokens(item.output) } : item;
+		if (item.type === "function_call_output") {
+			return typeof item.output === "string"
+				? { ...item, output: escapeHarmonyControlTokens(item.output) }
+				: {
+						...item,
+						output: item.output.map(part =>
+							part.type === "input_text" ? { ...part, text: escapeHarmonyControlTokens(part.text) } : part,
+						),
+					};
+		}
+		if (item.type === "custom_tool_call_output") {
+			return typeof item.output === "string"
+				? { ...item, output: escapeHarmonyControlTokens(item.output) }
+				: {
+						...item,
+						output: item.output.map(part =>
+							part.type === "input_text" ? { ...part, text: escapeHarmonyControlTokens(part.text) } : part,
+						),
+					};
 		}
 		if (item.type === "function_call") {
 			return typeof item.arguments === "string"
@@ -1896,9 +2135,16 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 		msgIndex++;
 	}
 
+	// Repair orphan outputs/calls first: both can inject an assistant `message`
+	// (an `[Orphan … result]` note, a `[Computer call interrupted …]` note) in
+	// place of, or beside, a tool item — wedging it between another call's
+	// `function_call` and `function_call_output`. Hoist runs last so it relocates
+	// any wedged message — model-streamed or repair-injected — out of the batch,
+	// preserving the Responses call→output pairing (#11473, extends #8789).
 	const withRepairedOutputs = options.repairOrphanOutputs ? repairOrphanResponsesToolOutputs(messages) : messages;
 	const withRepairedCalls = repairOrphanResponsesToolCalls(withRepairedOutputs);
-	return stripUnpairedOpenAIResponsesComputerReasoningIdsForReplay(withRepairedCalls);
+	const hoisted = hoistInterleavedResponsesToolBatchMessages(withRepairedCalls);
+	return stripUnpairedOpenAIResponsesComputerReasoningIdsForReplay(hoisted);
 }
 
 type ResponsesReplayAssistantMessage = Omit<ResponseOutputMessage, "id"> & { id?: string };
@@ -1915,6 +2161,19 @@ function parseResponseReasoningReplayItem(signature: string | undefined): Respon
 		return undefined;
 	}
 }
+
+/**
+ * Non-empty `reasoning_text` shipped for a synthesized reasoning item when no
+ * thinking text survived history reconstruction. DeepSeek-family Responses
+ * targets (e.g. opencode-go) reject BOTH a missing reasoning item and one whose
+ * `reasoning_text` is empty — "The reasoning_text in the thinking mode must be
+ * passed back to the API" (#8248 covered the missing case, #10690 the empty
+ * one). The item's presence plus a non-empty payload is what satisfies the
+ * contract; the exact text is immaterial once the source turn's reasoning is
+ * gone. Kept out of `reasoning_content="."`-territory since DeepSeek rejects the
+ * bare-dot synthetic placeholder on the chat-completions path.
+ */
+export const SYNTHETIC_REASONING_REPLAY_PLACEHOLDER = "reasoning unavailable";
 
 export function convertResponsesAssistantMessage<TApi extends Api>(
 	assistantMsg: AssistantMessage,
@@ -2073,41 +2332,91 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 	if (requiresReasoningItem && !reasoningItemEmitted && outputItems.length > 0) {
 		// Replay the demoted reasoning (already present in `content` as visible
 		// text) as a structured reasoning item so the thinking-mode continuation
-		// carries the `reasoning_text` the provider requires. The text may be empty
-		// when the source turn was minted by another model and its reasoning is
-		// already folded into the message text; the item's presence is what
-		// satisfies the provider contract, mirroring the empty `reasoning_content`
-		// placeholder used on the chat-completions path.
-		const reasoningText = carriedReasoningTexts.join("\n");
-		const reasoningId =
-			synthesizedReasoningItemId ?? `rs_${Bun.hash(`${model.id}:${msgIndex}:${reasoningText}`).toString(36)}`;
-		const reasoningItem: ResponseReasoningItem = {
+		// carries the `reasoning_text` the provider requires. When no thinking
+		// text survived reconstruction (source turn minted by another model, or
+		// reasoning dropped by compaction/archive budget) the carried text is
+		// empty — and DeepSeek-family targets reject an empty `reasoning_text`
+		// exactly like a missing item (#10690), so substitute a non-empty
+		// placeholder. The `id` is only set when an upstream item id survived:
+		// providers that validate reasoning ids against their own store (Meta via
+		// OpenRouter) reject a fabricated `rs_…` with "Referenced reasoning item
+		// … was not found or has expired", and the targets that need the item
+		// (DeepSeek, Kimi, Meta) all accept it without an id.
+		const carriedReasoningText = carriedReasoningTexts.join("\n");
+		const reasoningText =
+			carriedReasoningText.length > 0 ? carriedReasoningText : SYNTHETIC_REASONING_REPLAY_PLACEHOLDER;
+		const reasoningItem = {
 			type: "reasoning",
-			id: reasoningId,
+			...(synthesizedReasoningItemId ? { id: synthesizedReasoningItemId } : {}),
 			summary: [],
 			content: [{ type: "reasoning_text", text: reasoningText }],
-		};
-		outputItems.unshift(reasoningItem);
+		} satisfies Omit<ResponseReasoningItem, "id"> & Partial<Pick<ResponseReasoningItem, "id">>;
+		// The vendored SDK type marks `id` required; the wire accepts its absence.
+		outputItems.unshift(reasoningItem as ResponseReasoningItem);
 	}
 
 	return outputItems;
 }
 
-const syntheticToolImageMessages = new WeakSet<object>();
-
-function insertResponsesToolOutput(messages: ResponseInput, output: ResponseInput[number]): void {
-	let index = messages.length;
-	while (index > 0) {
-		const previous = messages[index - 1];
-		if (typeof previous !== "object" || previous === null || !syntheticToolImageMessages.has(previous)) {
-			break;
-		}
-		index -= 1;
-	}
-	messages.splice(index, 0, output);
+/**
+ * Responses wire output for a tool result plus its text-only fallback.
+ *
+ * `output` preserves native image blocks for paired function/custom outputs.
+ * `outputText` feeds orphan and unsupported-computer fallback messages, which
+ * cannot carry the native output array.
+ */
+export interface ResponsesToolResultOutputEncoding {
+	output: string | ResponseInputContent[];
+	outputText: string;
 }
 
-/** Appends one tool result while keeping consecutive outputs ahead of its synthetic image messages. */
+/**
+ * Encodes one canonical tool result for OpenAI Responses replay.
+ *
+ * Image-capable models receive an ordered native content array; text-only
+ * models and callers without images receive the compatible string form.
+ */
+export function encodeResponsesToolResultOutput<TApi extends Api>(
+	toolResult: ToolResultMessage,
+	model: Model<TApi>,
+	supportsImageDetailOriginal: boolean,
+): ResponsesToolResultOutputEncoding {
+	const supportsImages = model.input.includes("image");
+	const textResult = toolResult.content
+		.filter((block): block is TextContent => block.type === "text")
+		.map(block => block.text)
+		.join("\n");
+	const hasImages = toolResult.content.some((block): block is ImageContent => block.type === "image");
+	const omittedImages = hasImages && !supportsImages;
+	const rawOutput = (
+		omittedImages
+			? joinTextWithImagePlaceholder(textResult, true)
+			: textResult.length > 0
+				? textResult
+				: hasImages
+					? "(see attached image)"
+					: ""
+	).toWellFormed();
+	const escapeControlTokens = isHarmonyDialectModel(model);
+	// Harmony-server models reject reserved control-token spellings even as tool
+	// data; escape the transport copy so a grep/read result cannot poison the
+	// session (#6913). Covers every downstream branch that consumes `output`.
+	const outputText = escapeControlTokens ? escapeHarmonyControlTokens(rawOutput) : rawOutput;
+	const output: string | ResponseInputContent[] =
+		hasImages && supportsImages
+			? toolResult.content.map((block): ResponseInputContent => {
+					if (block.type === "image") return convertResponsesInputImage(block, supportsImageDetailOriginal);
+					const text = block.text.toWellFormed();
+					return {
+						type: "input_text",
+						text: escapeControlTokens ? escapeHarmonyControlTokens(text) : text,
+					};
+				})
+			: outputText;
+	return { output, outputText };
+}
+
+/** Appends one Responses tool result. */
 export function appendResponsesToolResultMessages<TApi extends Api>(
 	messages: ResponseInput,
 	toolResult: ToolResultMessage,
@@ -2119,32 +2428,8 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 	supportsCustomToolCalls = true,
 	computerCallIds?: ReadonlySet<string>,
 ): void {
-	const supportsImages = model.input.includes("image");
-	const textResult = toolResult.content
-		.filter((block): block is TextContent => block.type === "text")
-		.map(block => block.text)
-		.join("\n");
-	const hasImages = toolResult.content.some((block): block is ImageContent => block.type === "image");
-	const omittedImages = hasImages && !supportsImages;
+	const { output, outputText } = encodeResponsesToolResultOutput(toolResult, model, supportsImageDetailOriginal);
 	const normalized = normalizeResponsesToolCallId(toolResult.toolCallId);
-	// "(see attached image)" is only truthful when the result actually carries
-	// images (they ride as a separate user message on the Responses API). A
-	// genuinely empty text result (empty file read, silent tool) must stay
-	// empty — the placeholder sent models chasing an attachment that never
-	// existed.
-	const rawOutput = (
-		omittedImages
-			? joinTextWithImagePlaceholder(textResult, true)
-			: textResult.length > 0
-				? textResult
-				: hasImages
-					? "(see attached image)"
-					: ""
-	).toWellFormed();
-	// Harmony-server models reject reserved control-token spellings even as tool
-	// data; escape the transport copy so a grep/read result cannot poison the
-	// session (#6913). Covers every downstream branch that consumes `output`.
-	const output = isHarmonyDialectModel(model) ? escapeHarmonyControlTokens(rawOutput) : rawOutput;
 	if (toolResult.providerMetadata?.type === "computer" && model.supportsComputerUse !== true) {
 		messages.push({
 			type: "message",
@@ -2156,7 +2441,7 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 	if (computerCallIds?.has(normalized.callId)) {
 		if (toolResult.providerMetadata?.type !== "computer") {
 			const limit = 16_000;
-			const noteText = output.length > limit ? `${output.slice(0, limit)}\n...[truncated]` : output;
+			const noteText = outputText.length > limit ? `${outputText.slice(0, limit)}\n...[truncated]` : outputText;
 			messages.push({
 				type: "message",
 				role: "assistant",
@@ -2172,7 +2457,7 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 			} as ResponseInput[number]);
 			return;
 		}
-		insertResponsesToolOutput(messages, {
+		messages.push({
 			type: "computer_call_output",
 			call_id: normalized.callId,
 			output: structuredCloneJSON(toolResult.providerMetadata.screenshot),
@@ -2185,7 +2470,7 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 		// silently dropping the result loses information the model needs. Fold it
 		// into an assistant note instead (same shape as repairOrphanResponsesToolOutputs).
 		const limit = 16_000;
-		const noteText = output.length > limit ? `${output.slice(0, limit)}\n...[truncated]` : output;
+		const noteText = outputText.length > limit ? `${outputText.slice(0, limit)}\n...[truncated]` : outputText;
 		messages.push({
 			type: "message",
 			role: "assistant",
@@ -2194,38 +2479,18 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 		return;
 	}
 	if (supportsCustomToolCalls && customCallIds?.has(normalized.callId)) {
-		insertResponsesToolOutput(messages, {
+		messages.push({
 			type: "custom_tool_call_output",
 			call_id: normalized.callId,
 			output,
 		} as ResponseInput[number]);
 	} else {
-		insertResponsesToolOutput(messages, {
+		messages.push({
 			type: "function_call_output",
 			call_id: normalized.callId,
 			output,
 		});
 	}
-
-	if (!hasImages || !supportsImages) {
-		return;
-	}
-
-	const contentParts: ResponseInputContent[] = [
-		{ type: "input_text", text: "Attached image(s) from tool result:" } satisfies ResponseInputText,
-	];
-	for (const block of toolResult.content) {
-		if (block.type === "image") {
-			contentParts.push({
-				type: "input_image",
-				detail: clampResponsesImageDetail(block.detail, supportsImageDetailOriginal),
-				image_url: `data:${block.mimeType};base64,${block.data}`,
-			} satisfies ResponseInputImage);
-		}
-	}
-	const imageMessage = { role: "user", content: contentParts } satisfies ResponseInput[number];
-	syntheticToolImageMessages.add(imageMessage);
-	messages.push(imageMessage);
 }
 
 /**
@@ -2241,10 +2506,38 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
  */
 type ResponsesToolCallBlock = ToolCall & { [kStreamingPartialJson]: string; [kStreamingLastParseLen]?: number };
 
+// Proxies sometimes send payloadless progress frames. They carry no text; a
+// supplied non-string payload is malformed output, not an empty delta.
+function optionalResponsesText(value: unknown, field: string): string | undefined {
+	if (value === undefined) return undefined;
+	if (typeof value !== "string") throw new TypeError(`Invalid Responses ${field}: expected a string`);
+	return value;
+}
+
+function ensureReasoningSummaryPart(
+	item: ResponseReasoningItem,
+	summaryIndex: number | undefined,
+): ResponseReasoningItem["summary"][number] {
+	item.summary = item.summary || [];
+	if (summaryIndex === undefined) summaryIndex = Math.max(0, item.summary.length - 1);
+	if (!Number.isSafeInteger(summaryIndex) || summaryIndex < 0) {
+		throw new TypeError("Invalid Responses summary_index: expected a non-negative integer");
+	}
+	while (item.summary.length <= summaryIndex) {
+		item.summary.push({ type: "summary_text", text: "" });
+	}
+	const part = item.summary[summaryIndex]!;
+	part.text = optionalResponsesText(part.text, "summary text") ?? "";
+	return part;
+}
+
 export function appendReasoningSummaryPart(
 	item: ResponseReasoningItem,
-	part: ResponseReasoningItem["summary"][number],
+	part: ResponseReasoningItem["summary"][number] | undefined,
 ): void {
+	if (part === undefined) return;
+	if (part?.type !== "summary_text") throw new TypeError("Invalid Responses reasoning summary part");
+	part.text = optionalResponsesText(part.text, "summary text") ?? "";
 	item.summary = item.summary || [];
 	item.summary.push(part);
 }
@@ -2328,13 +2621,47 @@ export function appendReasoningSummaryTextDelta(
 	stream: AssistantMessageEventStream,
 	output: AssistantMessage,
 	contentIndex: number,
+	summaryIndex?: number,
 ): void {
-	item.summary = item.summary || [];
-	const lastPart = item.summary[item.summary.length - 1];
-	if (!lastPart) return;
+	delta = optionalResponsesText(delta, "reasoning summary delta") ?? "";
+	if (!delta) return;
+	const part = ensureReasoningSummaryPart(item, summaryIndex);
 	block.thinking += delta;
-	lastPart.text += delta;
+	part.text += delta;
 	stream.push({ type: "thinking_delta", contentIndex, delta, partial: output });
+}
+
+/**
+ * Applies a completed reasoning-summary snapshot, including providers that omit
+ * the preceding summary-part event.
+ */
+export function applyReasoningSummaryTextDone(
+	item: ResponseReasoningItem,
+	block: ThinkingContent,
+	text: string,
+	summaryIndex: number,
+	stream: AssistantMessageEventStream,
+	output: AssistantMessage,
+	contentIndex: number,
+): void {
+	const snapshot = optionalResponsesText(text, "reasoning summary text");
+	if (snapshot === undefined) return;
+	text = snapshot;
+	const part = ensureReasoningSummaryPart(item, summaryIndex);
+	const previous = part.text;
+	part.text = text;
+	if (!text || text === previous) return;
+	if (!block.thinking) {
+		block.thinking = text;
+		stream.push({ type: "thinking_delta", contentIndex, delta: text, partial: output });
+		return;
+	}
+	if (text.startsWith(previous) && block.thinking.endsWith(previous)) {
+		const delta = text.slice(previous.length);
+		if (!delta) return;
+		block.thinking += delta;
+		stream.push({ type: "thinking_delta", contentIndex, delta, partial: output });
+	}
 }
 
 export function appendReasoningSummaryPartDone(
@@ -2407,6 +2734,8 @@ export function appendMessageTextDelta(
 	contentIndex: number,
 	partType: "output_text" | "refusal",
 ): void {
+	delta = optionalResponsesText(delta, "message delta") ?? "";
+	if (!delta) return;
 	item.content = item.content || [];
 	let lastPart = item.content[item.content.length - 1];
 	if (lastPart?.type !== partType) {
@@ -2420,11 +2749,40 @@ export function appendMessageTextDelta(
 	}
 	block.text += delta;
 	if (lastPart.type === "output_text") {
-		lastPart.text += delta;
+		lastPart.text = (optionalResponsesText(lastPart.text, "output text") ?? "") + delta;
 	} else {
-		lastPart.refusal += delta;
+		lastPart.refusal = (optionalResponsesText(lastPart.refusal, "refusal") ?? "") + delta;
 	}
 	stream.push({ type: "text_delta", contentIndex, delta, partial: output });
+}
+
+/** Recover text omitted from delta frames without replaying an already streamed prefix. */
+function applyMessageTextDone(
+	item: ResponseOutputMessage,
+	block: TextContent,
+	text: string,
+	stream: AssistantMessageEventStream,
+	output: AssistantMessage,
+	contentIndex: number,
+	partType: "output_text" | "refusal",
+): void {
+	const snapshot = optionalResponsesText(text, "message text");
+	if (snapshot === undefined) return;
+	const lastPart = item.content?.[item.content.length - 1];
+	const previous =
+		lastPart?.type === partType
+			? (optionalResponsesText(lastPart.type === "output_text" ? lastPart.text : lastPart.refusal, "message text") ??
+				"")
+			: "";
+	if (snapshot.startsWith(previous)) {
+		appendMessageTextDelta(item, block, snapshot.slice(previous.length), stream, output, contentIndex, partType);
+	} else if (lastPart?.type === partType) {
+		// A correction cannot be represented as an append-only delta. Keep it for
+		// the completed block rather than appending contradictory text.
+		if (lastPart.type === "output_text") lastPart.text = snapshot;
+		else lastPart.refusal = snapshot;
+		block.text = finalizeMessageText(item, block.text);
+	}
 }
 /** Chooses final message text while treating non-empty terminal content as authoritative. */
 export function finalizeMessageText(item: ResponseOutputMessage, streamedText: string): string {
@@ -2453,6 +2811,8 @@ export function accumulateToolCallArgumentsDelta(
 	output: AssistantMessage,
 	contentIndex: number,
 ): void {
+	delta = optionalResponsesText(delta, "function call arguments delta") ?? "";
+	if (!delta) return;
 	block[kStreamingPartialJson] += delta;
 	const throttled = parseStreamingJsonThrottled(block[kStreamingPartialJson], block[kStreamingLastParseLen] ?? 0);
 	if (throttled) {
@@ -2481,6 +2841,8 @@ export function accumulateCustomToolCallInputDelta(
 	output: AssistantMessage,
 	contentIndex: number,
 ): void {
+	delta = optionalResponsesText(delta, "custom tool input delta") ?? "";
+	if (!delta) return;
 	block[kStreamingPartialJson] += delta;
 	block.arguments = { input: block[kStreamingPartialJson] };
 	stream.push({ type: "toolcall_delta", contentIndex, delta, partial: output });
@@ -2772,8 +3134,23 @@ export async function processResponsesStream<TApi extends Api>(
 		if (entry && identifierlessFunctionDeltaTarget === entry) identifierlessFunctionDeltaTarget = undefined;
 		if (entry && lastOpenItem === entry) lastOpenItem = null;
 	};
-	const contentIndexOf = (block: ThinkingContent | TextContent | StreamingToolCallBlock): number =>
-		output.content.indexOf(block);
+	// Content blocks are append-only for the lifetime of the stream, so each
+	// block's index is stable once pushed. Map block → index to keep the
+	// per-delta contentIndex lookup O(1); the legacy linear scan would turn a
+	// long turn (many blocks × many deltas) quadratic and is what pegs the
+	// shared JS main thread on streaming-heavy sessions (issue #10605).
+	const contentIndexByBlock = new Map<object, number>();
+	const pushContentBlock = (block: ThinkingContent | TextContent | StreamingToolCallBlock | ToolCall): void => {
+		contentIndexByBlock.set(block, output.content.length);
+		output.content.push(block);
+	};
+	const contentIndexOf = (block: ThinkingContent | TextContent | StreamingToolCallBlock): number => {
+		const index = contentIndexByBlock.get(block);
+		// Blocks appended outside this closure (e.g. images via
+		// appendResponsesImageResult) never route through contentIndexOf, but
+		// keep the fallback so an unexpected lookup stays correct.
+		return index ?? output.content.indexOf(block);
+	};
 
 	let sawFirstToken = false;
 	// Whether the current stream produced a completed native `web_search_call`
@@ -2793,7 +3170,7 @@ export async function processResponsesStream<TApi extends Api>(
 			const item = event.item;
 			if (item.type === "reasoning") {
 				const block: ThinkingContent = { type: "thinking", thinking: "", itemId: item.id };
-				output.content.push(block);
+				pushContentBlock(block);
 				registerOpenItem(event.output_index, item.id, { item, block });
 				stream.push({ type: "thinking_start", contentIndex: contentIndexOf(block), partial: output });
 			} else if (item.type === "message") {
@@ -2802,7 +3179,7 @@ export async function processResponsesStream<TApi extends Api>(
 					text: "",
 					textSignature: encodeTextSignatureV1(item.id, item.phase ?? undefined),
 				};
-				output.content.push(block);
+				pushContentBlock(block);
 				registerOpenItem(event.output_index, item.id, { item, block });
 				stream.push({ type: "text_start", contentIndex: contentIndexOf(block), partial: output });
 			} else if (item.type === "function_call") {
@@ -2813,7 +3190,7 @@ export async function processResponsesStream<TApi extends Api>(
 					arguments: {},
 					[kStreamingPartialJson]: item.arguments || "",
 				};
-				output.content.push(block);
+				pushContentBlock(block);
 				registerOpenItem(
 					event.output_index,
 					item.id,
@@ -2831,7 +3208,7 @@ export async function processResponsesStream<TApi extends Api>(
 					providerMetadata: computerCallMetadata(item),
 					[kStreamingPartialJson]: "",
 				};
-				output.content.push(block);
+				pushContentBlock(block);
 				registerOpenItem(event.output_index, item.id, { item, block }, item.call_id);
 				stream.push({ type: "toolcall_start", contentIndex: contentIndexOf(block), partial: output });
 			} else if (item.type === "custom_tool_call") {
@@ -2849,7 +3226,7 @@ export async function processResponsesStream<TApi extends Api>(
 					// accumulation buffer so later code that inspects the field still works.
 					[kStreamingPartialJson]: item.input ?? "",
 				};
-				output.content.push(block);
+				pushContentBlock(block);
 				registerOpenItem(
 					event.output_index,
 					item.id,
@@ -2872,6 +3249,20 @@ export async function processResponsesStream<TApi extends Api>(
 					stream,
 					output,
 					contentIndexOf(entry.block),
+					event.summary_index,
+				);
+			}
+		} else if (event.type === "response.reasoning_summary_text.done") {
+			const entry = lookupOpenItem(event);
+			if (entry?.item.type === "reasoning" && entry.block.type === "thinking") {
+				applyReasoningSummaryTextDone(
+					entry.item,
+					entry.block,
+					event.text,
+					event.summary_index,
+					stream,
+					output,
+					contentIndexOf(entry.block),
 				);
 			}
 		} else if (event.type === "response.reasoning_summary_part.done") {
@@ -2883,12 +3274,13 @@ export async function processResponsesStream<TApi extends Api>(
 			// Raw reasoning text delta from local providers that stream thinking
 			// directly rather than via the OpenAI summary tracking protocol.
 			const entry = lookupOpenItem(event);
-			if (entry?.item.type === "reasoning" && entry.block.type === "thinking") {
-				entry.block.thinking += event.delta;
+			const delta = optionalResponsesText(event.delta, "reasoning delta");
+			if (entry?.item.type === "reasoning" && entry.block.type === "thinking" && delta) {
+				entry.block.thinking += delta;
 				stream.push({
 					type: "thinking_delta",
 					contentIndex: contentIndexOf(entry.block),
-					delta: event.delta,
+					delta,
 					partial: output,
 				});
 			}
@@ -2921,6 +3313,19 @@ export async function processResponsesStream<TApi extends Api>(
 					"refusal",
 				);
 			}
+		} else if (event.type === "response.output_text.done" || event.type === "response.refusal.done") {
+			const entry = lookupOpenItem(event);
+			if (entry?.item.type === "message" && entry.block.type === "text") {
+				applyMessageTextDone(
+					entry.item,
+					entry.block,
+					event.type === "response.output_text.done" ? event.text : event.refusal,
+					stream,
+					output,
+					contentIndexOf(entry.block),
+					event.type === "response.output_text.done" ? "output_text" : "refusal",
+				);
+			}
 		} else if (event.type === "response.function_call_arguments.delta") {
 			const entry = lookupOpenFunctionCallItem(event);
 			if (entry?.item.type === "function_call" && entry.block.type === "toolCall") {
@@ -2928,8 +3333,9 @@ export async function processResponsesStream<TApi extends Api>(
 			}
 		} else if (event.type === "response.function_call_arguments.done") {
 			const entry = lookupOpenFunctionCallItem(event);
-			if (entry?.item.type === "function_call" && entry.block.type === "toolCall") {
-				finalizeToolCallArgumentsDone(entry.block, event.arguments);
+			const args = optionalResponsesText(event.arguments, "function call arguments");
+			if (entry?.item.type === "function_call" && entry.block.type === "toolCall" && args !== undefined) {
+				finalizeToolCallArgumentsDone(entry.block, args);
 				entry.block[kStreamingArgumentsDone] = true;
 			}
 		} else if (event.type === "response.custom_tool_call_input.delta") {
@@ -2939,8 +3345,9 @@ export async function processResponsesStream<TApi extends Api>(
 			}
 		} else if (event.type === "response.custom_tool_call_input.done") {
 			const entry = lookupOpenToolCallAlias(event, "custom_tool_call");
-			if (entry?.item.type === "custom_tool_call" && entry.block.type === "toolCall") {
-				finalizeCustomToolCallInputDone(entry.block, event.input);
+			const input = optionalResponsesText(event.input, "custom tool input");
+			if (entry?.item.type === "custom_tool_call" && entry.block.type === "toolCall" && input !== undefined) {
+				finalizeCustomToolCallInputDone(entry.block, input);
 				entry.block[kStreamingArgumentsDone] = true;
 			}
 		} else if (event.type === "response.output_item.done") {
@@ -2963,6 +3370,7 @@ export async function processResponsesStream<TApi extends Api>(
 				if (reasoningBlock) {
 					reasoningBlock.thinking = finalizeReasoningThinking(item, reasoningBlock.thinking);
 					reasoningBlock.thinkingSignature = JSON.stringify(item);
+					if (!output.upstreamModel) output.upstreamModel = servedModelFromOpenRouterReasoning(item);
 					stream.push({
 						type: "thinking_end",
 						contentIndex: contentIndexOf(reasoningBlock),
@@ -2984,7 +3392,7 @@ export async function processResponsesStream<TApi extends Api>(
 					// `output_item.added` never arrived (lossy proxy) — synthesize the
 					// block so the final message still carries the authoritative text.
 					const synthesized: TextContent = { type: "text", text, textSignature };
-					output.content.push(synthesized);
+					pushContentBlock(synthesized);
 					contentIndex = output.content.length - 1;
 				}
 				stream.push({ type: "text_end", contentIndex, content: text, partial: output });
@@ -3017,7 +3425,7 @@ export async function processResponsesStream<TApi extends Api>(
 					// `output_item.added` never arrived (lossy proxy) — synthesize the
 					// block so the final message carries the call the consumer was told
 					// completed (the agent loop executes tools from message.content).
-					output.content.push(toolCall);
+					pushContentBlock(toolCall);
 					contentIndex = output.content.length - 1;
 				}
 				closeOpenItem(event.output_index, item.id, entry, item.call_id, prefixedFunctionCallItemKey(item.call_id));
@@ -3038,14 +3446,19 @@ export async function processResponsesStream<TApi extends Api>(
 					clearStreamingPartialJson(block);
 					contentIndex = contentIndexOf(block);
 				} else {
-					output.content.push(toolCall);
+					pushContentBlock(toolCall);
 					contentIndex = output.content.length - 1;
 				}
 				closeOpenItem(event.output_index, item.id, entry, item.call_id);
 				stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
 			} else if (item.type === "custom_tool_call") {
 				const block = entry?.block.type === "toolCall" ? entry.block : undefined;
-				const rawInput = block?.[kStreamingPartialJson] ? block[kStreamingPartialJson] : (item.input ?? "");
+				const rawInput =
+					optionalResponsesText(item.input, "custom tool input") ??
+					(block?.[kStreamingArgumentsDone]
+						? optionalResponsesText(block.arguments.input, "custom tool input")
+						: block?.[kStreamingPartialJson]) ??
+					"";
 				const toolCall: ToolCall = {
 					type: "toolCall",
 					id: encodeResponsesToolCallId(item.call_id, item.id),
@@ -3061,7 +3474,7 @@ export async function processResponsesStream<TApi extends Api>(
 					clearStreamingPartialJson(block);
 					contentIndex = contentIndexOf(block);
 				} else {
-					output.content.push(toolCall);
+					pushContentBlock(toolCall);
 					contentIndex = output.content.length - 1;
 				}
 				closeOpenItem(event.output_index, item.id, entry, item.call_id, prefixedFunctionCallItemKey(item.call_id));
@@ -3084,8 +3497,8 @@ export async function processResponsesStream<TApi extends Api>(
 				output.responseId = response.id;
 			}
 			populateResponsesUsageFromResponse(output, response?.usage);
-			calculateCost(model, output.usage);
-			applyOpenRouterReportedCost(model, output.usage, response?.usage);
+			calculateCost(model, output.usage, output.timestamp);
+			applyProviderReportedCost(model, output.usage, response?.usage);
 			applyOpenAIResponsesServiceTierCost(
 				model,
 				output.usage,
@@ -3097,6 +3510,13 @@ export async function processResponsesStream<TApi extends Api>(
 				const error = response?.error ?? (response as any)?.status_details?.error;
 				const details = response?.incomplete_details;
 				const statusDetailsReason = (response as any)?.status_details?.reason;
+				// A rate-limit/overload body inside a terminal response envelope must
+				// advance the fallback chain exactly like an HTTP-status 429 would
+				// (body-error.ts). The whole envelope goes to the probe so a status or
+				// code carried beside `error` is visible, not only the inner object.
+				// Non-retryable failures keep their existing message.
+				const inBand = details ? undefined : AIError.createInBandProviderError({ ...response, error });
+				if (inBand) throw inBand;
 				const message = error
 					? `${error.code || "unknown"}: ${error.message || "no message"}`
 					: details?.reason
@@ -3139,6 +3559,12 @@ export async function processResponsesStream<TApi extends Api>(
 			break;
 		} else if (event.type === "error") {
 			const err = (event as any).error ?? event;
+			// An in-band rate-limit/overload `error` event advances the fallback chain
+			// like an HTTP-status 429 (body-error.ts); the whole event is passed so
+			// event-level status/code fields count too. Other codes keep the existing
+			// `Error Code <code>: <message>` message that error tests pin on.
+			const inBand = AIError.createInBandProviderError(event);
+			if (inBand) throw inBand;
 			const code = err.code ?? "unknown";
 			const message = err.message ?? "no message";
 			throw new AIError.ProviderResponseError(`Error Code ${code}: ${message}`, {
@@ -3149,6 +3575,8 @@ export async function processResponsesStream<TApi extends Api>(
 			populateResponsesUsageFromResponse(output, event.response?.usage);
 			const error = event.response?.error ?? (event.response as any)?.status_details?.error;
 			const details = event.response?.incomplete_details;
+			const inBand = details ? undefined : AIError.createInBandProviderError({ ...event.response, error });
+			if (inBand) throw inBand;
 			const message = error
 				? `${error.code || "unknown"}: ${error.message || "no message"}`
 				: details?.reason
@@ -3307,8 +3735,11 @@ type CommonSamplingOptions = Pick<
 export function applyCommonResponsesSamplingParams<P extends CommonResponsesParams>(
 	params: P,
 	options: CommonSamplingOptions | undefined,
-	model: Pick<Model, "provider" | "api" | "id" | "omitMaxOutputTokens" | "maxTokens"> & {
-		compat: Pick<ResolvedOpenAISharedCompat, "supportsSamplingParams">;
+	model: Pick<Model, "provider" | "api" | "id" | "omitMaxOutputTokens" | "maxTokens" | "identity"> & {
+		compat: Pick<
+			ResolvedOpenAISharedCompat,
+			"supportsSamplingParams" | "supportsPenaltyAndStopParams" | "clampOutputToModelMax"
+		>;
 	},
 ): void {
 	if (options?.maxTokens && !model.omitMaxOutputTokens) {
@@ -3325,8 +3756,10 @@ export function applyCommonResponsesSamplingParams<P extends CommonResponsesPara
 		if (options?.topP !== undefined) params.top_p = options.topP;
 		if (options?.topK !== undefined) params.top_k = options.topK;
 		if (options?.minP !== undefined) params.min_p = options.minP;
-		if (options?.presencePenalty !== undefined) params.presence_penalty = options.presencePenalty;
-		if (options?.repetitionPenalty !== undefined) params.repetition_penalty = options.repetitionPenalty;
+		if (model.compat.supportsPenaltyAndStopParams) {
+			if (options?.presencePenalty !== undefined) params.presence_penalty = options.presencePenalty;
+			if (options?.repetitionPenalty !== undefined) params.repetition_penalty = options.repetitionPenalty;
+		}
 	}
 	applyOpenAIServiceTier(params, options?.serviceTier, model);
 }
@@ -3337,6 +3770,19 @@ type ReasoningOptions = {
 	disableReasoning?: boolean;
 	toolChoice?: unknown;
 };
+
+/**
+ * Resolve the caller's reasoning-summary request against catalog compat.
+ * Hosts that reject `reasoning.summary` get an explicit `null` (wire omission)
+ * whenever reasoning is engaged, so the policy never fills the `"auto"` default.
+ */
+export function resolveReasoningSummaryOption(
+	model: Model<"openai-responses" | "azure-openai-responses" | "openai-codex-responses">,
+	options: { reasoning?: string; reasoningSummary?: "auto" | "detailed" | "concise" | null } | undefined,
+): "auto" | "detailed" | "concise" | null | undefined {
+	if (model.compat.supportsReasoningSummary) return options?.reasoningSummary;
+	return options?.reasoning === undefined ? undefined : null;
+}
 
 export interface ApplyResponsesCompatPolicyOptions {
 	reasoningSummary?: "auto" | "detailed" | "concise" | null;
@@ -3431,7 +3877,7 @@ export function applyResponsesReasoningParams<P extends ResponseCreateParamsStre
 			includeEncryptedReasoning,
 			omitReasoningEffort,
 		}),
-		{ reasoningSummary: options?.reasoningSummary, mapEffort },
+		{ reasoningSummary: resolveReasoningSummaryOption(model, options), mapEffort },
 	);
 }
 
@@ -3529,18 +3975,23 @@ export function populateResponsesUsageFromResponse(
  * A defined value differing across sides IS a difference; a key undefined or
  * absent on both stays equal. Nested values use full {@link Bun.deepEquals}.
  */
-function deepEqualsWithout(a: unknown, b: unknown, omitKeys?: Record<string, boolean>): boolean {
+function deepEqualsWithout(
+	a: unknown,
+	b: unknown,
+	omitKeys?: Readonly<Record<string, boolean>>,
+	additionalOmitKeys?: Readonly<Record<string, boolean>>,
+): boolean {
 	if (!a || !b || typeof a !== "object" || typeof b !== "object") return Bun.deepEquals(a, b);
 	const ao = a as Record<string, unknown>;
 	const bo = b as Record<string, unknown>;
 	for (const key in ao) {
-		if (omitKeys?.[key]) continue;
+		if (omitKeys?.[key] || additionalOmitKeys?.[key]) continue;
 		const av = ao[key];
 		const bv = bo[key];
 		if (av !== bv && !Bun.deepEquals(av, bv)) return false;
 	}
 	for (const key in bo) {
-		if (omitKeys?.[key]) continue;
+		if (omitKeys?.[key] || additionalOmitKeys?.[key]) continue;
 		if (bo[key] !== undefined && !(key in ao)) return false;
 	}
 	return true;
@@ -3562,6 +4013,17 @@ const ITEM_LIFECYCLE_EXCLUDE_MAP = {
 };
 
 /**
+ * Replay sanitization strips output item IDs from message/function/custom
+ * assistant items. A live transcript rebuilt from the corresponding agent
+ * message may still retain that ID; it is output-only identity, while call_id
+ * remains the semantic tool/result pairing key.
+ */
+const REPLAY_SANITIZED_ITEM_EXCLUDE_MAP = {
+	status: true,
+	id: true,
+};
+
+/**
  * Strict-prefix delta for stateful `previous_response_id` chaining (used by the
  * platform Responses provider and the Codex provider on both transports):
  * returns the input items the current request appends beyond the previous
@@ -3574,10 +4036,11 @@ export function buildResponsesDeltaInput<TItem extends ResponseInputItem | Input
 	previous: { input?: TItem[] } | undefined,
 	previousResponseItems: readonly TItem[] | undefined,
 	current: { input?: TItem[] },
+	additionalTopLevelExcludeMap?: Readonly<Record<string, boolean>>,
 ): TItem[] | null {
 	if (!previous) return null;
 	if (!Array.isArray(previous.input) || !Array.isArray(current.input)) return null;
-	if (!deepEqualsWithout(previous, current, TOP_LEVEL_EXCLUDE_MAP)) {
+	if (!deepEqualsWithout(previous, current, TOP_LEVEL_EXCLUDE_MAP, additionalTopLevelExcludeMap)) {
 		return null;
 	}
 
@@ -3588,7 +4051,12 @@ export function buildResponsesDeltaInput<TItem extends ResponseInputItem | Input
 	for (const series of [previous.input, previousResponseItems]) {
 		if (!series) continue;
 		for (const item of series) {
-			if (deepEqualsWithout(item, current.input[index], ITEM_LIFECYCLE_EXCLUDE_MAP)) {
+			const type = item.type;
+			const omitKeys =
+				type === "message" || type === "function_call" || type === "custom_tool_call"
+					? REPLAY_SANITIZED_ITEM_EXCLUDE_MAP
+					: ITEM_LIFECYCLE_EXCLUDE_MAP;
+			if (deepEqualsWithout(item, current.input[index], omitKeys)) {
 				index++;
 			} else {
 				return null;

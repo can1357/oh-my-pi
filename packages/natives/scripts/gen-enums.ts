@@ -34,6 +34,13 @@ const CLASS_RE = /^export declare class (\w+)/gm;
 // Match `export declare function name(...)`. Same shape rationale.
 const FUNCTION_RE = /^export declare function (\w+)/gm;
 
+/**
+ * The release sentinel answers "which build is this addon?", so it must stay a
+ * raw passthrough: a stub there would report presence for an addon that has it
+ * not, defeating the loader's own staleness diagnosis.
+ */
+const VERSION_SENTINEL_NAME_RE = /^__piNativesV/;
+
 interface EnumExport {
 	name: string;
 	entries: string[];
@@ -87,14 +94,21 @@ function buildGeneratedBlock(dts: string): string {
 	if (classes.length > 0) {
 		lines.push("// classes");
 		for (const name of classes) {
-			lines.push(`export const ${name} = nativeBindings.${name};`);
+			const binding =
+				name === "DesktopSession" ? `adaptDesktopSession(nativeBindings.${name})` : `nativeBindings.${name}`;
+			lines.push(`export const ${name} = ${binding};`);
 		}
 	}
 	if (functions.length > 0) {
 		if (lines.length > 0) lines.push("");
 		lines.push("// functions");
 		for (const name of functions) {
-			lines.push(`export const ${name} = nativeBindings.${name};`);
+			// `missingNativeExport` returns `undefined` on a current addon and a
+			// throwing stub on a stale one, so capability probes
+			// (`typeof native.x === "function"`) keep their meaning and only the
+			// stale case gains an actionable failure. See `loader-state.js`.
+			const fallback = VERSION_SENTINEL_NAME_RE.test(name) ? "" : ` ?? missingNativeExport("${name}")`;
+			lines.push(`export const ${name} = nativeBindings.${name}${fallback};`);
 		}
 	}
 	if (enums.length > 0) {

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -16,6 +16,7 @@ import { serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-ti
 
 const ISO = "2026-06-29T12:00:00.000Z";
 const HEADER = { type: "session", version: 3, id: "s1", timestamp: ISO, cwd: "/tmp" };
+
 const msg = (id: string, parentId: string, text: string) => ({
 	type: "message",
 	id,
@@ -92,7 +93,39 @@ describe("loadEntriesFromFileStream (Bun.JSONL parity)", () => {
 
 		expect(titleSlot?.title).toBe("Visitor");
 		expect(entryIds(visited)).toEqual(["s1", "m1", "m2"]);
+		expect(visited[0]).toMatchObject({ title: "Visitor", titleSource: "user" });
+		expect((await sessionLoader.loadEntriesFromFileStream(file)).malformedRecords).toBe(1);
 	});
+
+	it("visits a large journal before reading its tail", async () => {
+		const largeText = "x".repeat(1024 * 1024);
+		const slotLine = serializeTitleSlot({ title: "Visitor", source: "user", updatedAt: ISO });
+		const lines = [slotLine, JSON.stringify({ ...HEADER, title: "stale", titleSource: "generated" })];
+		for (let index = 1; index <= 9; index++) {
+			lines.push(JSON.stringify(msg(`m${index}`, index === 1 ? "s1" : `m${index - 1}`, largeText)));
+		}
+		const file = await writeTemp(`${lines.join("\n")}\n`);
+		expect(fs.statSync(file).size).toBeGreaterThan(8 * 1024 * 1024);
+
+		let visited = 0;
+		let headerTitle: string | undefined;
+		let headerTitleSource: string | undefined;
+		await sessionLoader.visitEntriesFromFile(file, entry => {
+			visited++;
+			if (entry.type === "session") {
+				headerTitle = entry.title;
+				headerTitleSource = entry.titleSource;
+			}
+			if (visited === 1) fs.truncateSync(file, 0);
+		});
+
+		// A collecting load reads the tail before the first callback and would
+		// still visit every in-memory entry after the file is truncated.
+		expect(visited).toBeLessThan(10);
+		expect(headerTitle).toBe("Visitor");
+		expect(headerTitleSource).toBe("user");
+	});
+
 	it("does not revisit entries before a malformed line spanning stream chunks", async () => {
 		const content = [
 			JSON.stringify(HEADER),
@@ -167,6 +200,7 @@ describe("loadEntriesFromFileStream (Bun.JSONL parity)", () => {
 		expect(entryTypes(stream.entries)).toEqual(["session", "message", "message"]);
 		const ids = messageIds(stream.entries);
 		expect(ids).toEqual(["m1", "m2"]); // valid entries kept in order, malformed skipped
+		expect(stream.malformedRecords).toBe(1);
 	});
 
 	it("matches parseSessionContent when there is no title slot (header is the first line)", async () => {
@@ -212,10 +246,114 @@ describe("loadEntriesFromFileStream (Bun.JSONL parity)", () => {
 		}
 	});
 
+	it("preserves a large multibyte record and its signature around malformed records", async () => {
+		const text = "✓🚀こんにちは".repeat(256 * 1024);
+		const signature = "signed-provider-payload";
+		const largeMessage: FileEntry = {
+			type: "message",
+			id: "large",
+			parentId: "s1",
+			timestamp: ISO,
+			message: {
+				role: "user",
+				content: [{ type: "text", text, textSignature: signature }],
+				timestamp: 0,
+			},
+		};
+		const content = [
+			JSON.stringify(HEADER),
+			JSON.stringify(largeMessage),
+			`{ malformed ${"x".repeat(256 * 1024)}`,
+			JSON.stringify(msg("tail", "large", "after large record")),
+		].join("\n");
+		const file = await writeTemp(content);
+		const loaded = await sessionLoader.loadEntriesFromFileStream(file);
+
+		expect(entryIds(loaded.entries)).toEqual(["s1", "large", "tail"]);
+		expect(messageTexts(loaded.entries)).toEqual([text, "after large record"]);
+		expect(loaded.entries[1]).toEqual(largeMessage);
+		expect(loaded.malformedRecords).toBe(1);
+	});
+
+	it("counts an incomplete large record at the byte limit without visiting the file tail", async () => {
+		const prefix = `${JSON.stringify(HEADER)}\n`;
+		const content = `${prefix}${JSON.stringify(msg("large", "s1", "🚀".repeat(256 * 1024)))}\n${JSON.stringify(msg("tail", "large", "outside byte limit"))}`;
+		const file = await writeTemp(content);
+		const visited: FileEntry[] = [];
+		let malformedRecords = 0;
+		await sessionLoader.visitEntriesFromFileStream(file, entry => void visited.push(entry), {
+			maxBytes: Buffer.byteLength(prefix) + 256 * 1024 + 1,
+			onMalformedRecord: () => {
+				malformedRecords++;
+			},
+		});
+
+		expect(entryIds(visited)).toEqual(["s1"]);
+		expect(malformedRecords).toBe(1);
+	});
+
+	it("stops after the first chunk of a delimiter-free file when the record cap is zero", async () => {
+		// No newline until EOF: the streaming loop's delimiter-free fast path skips
+		// the parser, so the record cap has to be enforced before buffering or the
+		// whole journal is read despite a zero budget.
+		const content = `{"type":"session","version":3,"id":"s1","timestamp":"${ISO}","cwd":"/tmp","pad":"${"z".repeat(4 * 1024 * 1024)}"}`;
+		expect(content).not.toInclude("\n");
+		const file = await writeTemp(content);
+
+		let bytesRead = 0;
+		let firstChunkBytes = 0;
+		const realBunFile = Bun.file.bind(Bun);
+		const bunFileSpy = spyOn(Bun, "file").mockImplementation((arg: unknown, opts?: BlobPropertyBag) => {
+			const handle = realBunFile(arg as string, opts);
+			const realStream = handle.stream.bind(handle);
+			// An async generator, not a piped stream: it is strictly pull-driven, so
+			// the count reflects what the loader asked for and not read-ahead.
+			handle.stream = () =>
+				(async function* () {
+					for await (const chunk of realStream() as AsyncIterable<Uint8Array>) {
+						if (firstChunkBytes === 0) firstChunkBytes = chunk.byteLength;
+						bytesRead += chunk.byteLength;
+						yield chunk;
+					}
+				})() as unknown as ReadableStream<Uint8Array<ArrayBuffer>>;
+			return handle;
+		});
+
+		try {
+			const visited: FileEntry[] = [];
+			await sessionLoader.visitEntriesFromFileStream(file, entry => void visited.push(entry), { maxRecords: 0 });
+
+			expect(visited).toEqual([]);
+			expect(firstChunkBytes).toBeLessThan(Buffer.byteLength(content));
+			expect(bytesRead).toBe(firstChunkBytes);
+		} finally {
+			bunFileSpy.mockRestore();
+		}
+	});
+
+	it("retains an unfinished value across embedded newlines before the trailing fragment", async () => {
+		const content = `${JSON.stringify(HEADER)}\n{\n"type":"message","id":"multiline","parentId":"s1","timestamp":"${ISO}","message":{"role":"user","content":"continued","timestamp":0}}`;
+		const file = await writeTemp(content);
+		const loaded = await sessionLoader.loadEntriesFromFileStream(file);
+
+		expect(entryIds(loaded.entries)).toEqual(["s1", "multiline"]);
+		expect(loaded.malformedRecords).toBe(0);
+	});
+
+	it("counts an unfinished malformed record across chunks before a valid trailing record", async () => {
+		const content = `${JSON.stringify(HEADER)}\n{${" ".repeat(128 * 1024)}\n${JSON.stringify(msg("tail", "s1", "x".repeat(128 * 1024)))}\n`;
+		const file = await writeTemp(content);
+		const loaded = await sessionLoader.loadEntriesFromFileStream(file);
+
+		expect(entryIds(loaded.entries)).toEqual(["s1", "tail"]);
+		expect(loaded.malformedRecords).toBe(1);
+	});
+
 	it("returns empty for a missing file (ENOENT)", async () => {
 		const missing = path.join(os.tmpdir(), `does-not-exist-${Date.now()}.jsonl`);
 		const stream = await sessionLoader.loadEntriesFromFileStream(missing);
 		expect(stream.entries).toEqual([]);
 		expect(stream.titleSlot).toBeUndefined();
+		expect(stream.malformedRecords).toBe(0);
 	});
 });

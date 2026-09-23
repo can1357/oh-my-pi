@@ -607,7 +607,7 @@ mod filter {
 		Report { message, labels: Vec::from([(found_range, found, Color::Red)]) }
 	}
 
-	type CodeBlock = codesnake::Block<codesnake::CodeWidth<String>, String>;
+	type CodeBlock = codesnake::Block<codesnake::CodeWidth<String>, String, Option<Color>>;
 
 	impl Report {
 		fn to_block(&self, idx: &codesnake::LineIndex) -> CodeBlock {
@@ -620,13 +620,19 @@ mod filter {
 				let text = text.into_iter().map(color_maybe).collect::<Vec<_>>();
 				Label::new(range)
 					.with_text(text.join(""))
-					.with_style(move |s| color.apply(s).to_string())
+					.with_style(Some(color))
 			});
-			Block::new(idx, labels).unwrap().map_code(|c| {
-				let c = c.replace('\t', "    ");
-				let w = unicode_width::UnicodeWidthStr::width(&*c);
-				CodeWidth::new(c, core::cmp::max(w, 1))
-			})
+			Block::new(idx, labels)
+				.unwrap()
+				.map_code(|c| {
+					let c = c.replace('\t', "    ");
+					let w = xutf::width_str(&c);
+					CodeWidth::new(c, core::cmp::max(w, 1))
+				})
+				.with_paint(|f, color, value| match color {
+					Some(color) => write!(f, "{}", color.apply(value)),
+					None => write!(f, "{value}"),
+				})
 		}
 	}
 
@@ -839,11 +845,10 @@ mod output {
 		}
 	}
 
-	/// Runs `f` with buffered standard output.
+	/// Runs `f` with standard output.
 	pub fn with_stdout<T>(stdout: &mut dyn Write, f: impl FnOnce(&mut dyn Write) -> T) -> T {
-		let mut out = io::BufWriter::new(stdout);
-		let res = f(&mut out);
-		let _ = out.flush();
+		let res = f(stdout);
+		let _ = stdout.flush();
 		res
 	}
 
@@ -928,7 +933,8 @@ impl Utility for Jq {
 		let _runtime = RuntimeGuard::install(host);
 		color::set(!cli.in_place && cli.color_if(|| stdout_is_terminal));
 
-		let result = real_main(&cli, host);
+		let mut stdout = host.stdout_writer();
+		let result = real_main(&cli, host, &mut stdout);
 		if let Some(code) = filter::take_halt() {
 			return code;
 		}
@@ -1036,7 +1042,7 @@ mod color {
 	}
 }
 
-fn real_main(cli: &Cli, host: &mut Host) -> Result<i32, Error> {
+fn real_main(cli: &Cli, host: &mut Host, stdout: &mut dyn Write) -> Result<i32, Error> {
 	if let Some(test_files) = &cli.run_tests {
 		return Ok(match test_files.last() {
 			Some(file) => {
@@ -1072,7 +1078,7 @@ fn real_main(cli: &Cli, host: &mut Host) -> Result<i32, Error> {
 
 	let last = if cli.files.is_empty() {
 		let inputs = read::buffered(cli, io::BufReader::new(&mut host.stdin));
-		output::with_stdout(&mut host.stdout, |out| {
+		output::with_stdout(stdout, |out| {
 			filter::run(cli, &filter, ctx, inputs, |v| output::print(out, cli, &v))
 		})?
 	} else {
@@ -1104,7 +1110,7 @@ fn real_main(cli: &Cli, host: &mut Host) -> Result<i32, Error> {
 				tmp.persist(path).map_err(Error::Persist)?;
 				std::fs::set_permissions(path, perms)?;
 			} else {
-				last = output::with_stdout(&mut host.stdout, |out| {
+				last = output::with_stdout(stdout, |out| {
 					filter::run(cli, &filter, ctx.clone(), inputs, |v| output::print(out, cli, &v))
 				})?;
 			}

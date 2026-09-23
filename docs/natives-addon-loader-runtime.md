@@ -33,6 +33,7 @@ Supported publish tags are:
 - `darwin-x64`
 - `darwin-arm64`
 - `win32-x64`
+- `win32-arm64`
 
 An unsupported tag is reported only after probing candidates.
 
@@ -111,6 +112,8 @@ For each candidate:
 
 The sentinel error distinguishes a previous addon still resident in the current process from a stale file on disk. If the loaded exports carry an older sentinel but the candidate bytes contain the expected current sentinel, the diagnostic says to restart. Otherwise it says to reinstall. The loader does not validate all public exports.
 
+Workspace development is the one case that skips the sentinel check, so a checkout that pulled a newer release boots before its rebuild. That tolerance is not silent: `native/index.js` exports `missingNativeExport(symbol)` in every function slot the addon omits, which is `undefined` on a current addon and a throwing stub on a stale one naming the symbol, the addon path, the loaded and expected releases, and `bun run build:native`. `nativeAddonStatus()` reports the same identity (`path`, `sentinel`, `expectedSentinel`, `packageVersion`, `stale`) for callers that surface it themselves.
+
 Rust module initialization installs crash diagnostics but does not spawn runtime threads under the dynamic-loader lock. The optional post-load hook installs bounded Windows Tokio and Rayon pools. It is best-effort; older addons or hook failures fall back to napi-rs behavior. Set `PI_DEBUG_STARTUP` to emit synchronous `[startup]` markers to stderr, including hook success/failure.
 
 Cache cleanup ignores read/delete failures and removes only directories whose parsed semantic version is older than the current package. It preserves current/future versions, prerelease/non-semver names, and ordinary files.
@@ -122,7 +125,7 @@ If no candidate succeeds:
 - an unsupported tag throws `Unsupported platform: <tag>`, the supported list, and issue guidance;
 - a supported tag throws `Failed to load pi_natives native addon for <tag>` (including the x64 variant), followed by every candidate/preparation error and mode-specific help.
 
-Compiled help lists expected cache paths, suggests deleting the versioned directory, and prints release-download `curl` commands. Installed-package help suggests reinstalling, the local Bazel host build (`bun --cwd=packages/natives run build`), and explicit `scripts/bazel-natives.ts <target> --dest packages/natives/native` builds.
+Compiled help lists expected cache paths, suggests deleting the versioned directory, and prints release-download `curl` commands. Installed-package help suggests reinstalling, the local host build (`bun --cwd=packages/natives run build`), and explicit `scripts/bazel-natives.ts <target> --dest packages/natives/native` builds.
 
 ## Lifecycle
 
@@ -133,7 +136,7 @@ entrypoint evaluates or lazy wrapper is invoked
   -> otherwise stage Windows node_modules addon, if applicable
   -> require candidates in deterministic order
        -> validate sentinel outside workspace development
-       -> install optional post-load runtime
+       -> install optional post-load runtime; record addon identity
        -> best-effort clean older version caches
        -> return bindings
   -> no success: throw unsupported-platform or aggregated load error

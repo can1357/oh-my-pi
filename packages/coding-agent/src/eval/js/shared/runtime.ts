@@ -8,12 +8,18 @@ import * as util from "node:util";
 
 import * as logger from "@oh-my-pi/pi-utils/logger";
 
+import type { EvalPreludeSource } from "../worker-protocol";
 import { createHelpers, type HelperBundle } from "./helpers";
 import { awaitMaybePromise, indirectEval } from "./indirect-eval";
 import { LocalModuleLoader } from "./local-module-loader";
 import { JAVASCRIPT_PRELUDE_SOURCE } from "./prelude";
 import { wrapCode } from "./rewrite-imports";
 import type { JsDisplayOutput, JsStatusEvent } from "./types";
+
+export interface RuntimeCallIdentity {
+	siteId: string;
+	occurrence: number;
+}
 
 /**
  * Per-run callbacks. Runtime globals resolve these from AsyncLocalStorage so
@@ -22,13 +28,38 @@ import type { JsDisplayOutput, JsStatusEvent } from "./types";
 export interface RuntimeHooks {
 	onText(chunk: string): void;
 	onDisplay(output: JsDisplayOutput): void;
-	callTool(name: string, args: unknown): Promise<unknown>;
+	callTool(name: string, args: unknown, identity?: RuntimeCallIdentity): Promise<unknown>;
+}
+
+/**
+ * Bridged tool results carry image blocks as a base64 `images` array that no
+ * cell code consumes. Emit each block as an image display output so the model
+ * receives real image content — matching the direct tool path — and replace
+ * the payload with a note so echoing the result cannot flood the transcript
+ * with base64.
+ */
+function surfaceBridgedToolImages(value: unknown, hooks: RuntimeHooks): unknown {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+	const { images, ...rest } = value as { images?: unknown } & Record<string, unknown>;
+	if (!Array.isArray(images) || images.length === 0) return value;
+	let displayed = 0;
+	for (const image of images) {
+		if (!image || typeof image !== "object") continue;
+		const { data, mimeType } = image as { data?: unknown; mimeType?: unknown };
+		if (typeof data !== "string" || typeof mimeType !== "string") continue;
+		hooks.onDisplay({ type: "image", data, mimeType });
+		displayed++;
+	}
+	if (displayed === 0) return value;
+	return { ...rest, images: `(${displayed} image${displayed === 1 ? "" : "s"} displayed)` };
 }
 
 export interface RunContext {
 	runId: string;
 	hooks: RuntimeHooks;
 	cwd: string;
+	filename?: string;
+	callOccurrences: Map<string, number>;
 	finalExpressionSet: boolean;
 	finalExpressionValue: unknown;
 }
@@ -47,6 +78,8 @@ export interface RuntimeOptions {
 	 * `{ local: "/…/artifacts/local" }`). Stable for the worker's lifetime.
 	 */
 	localRoots?: Record<string, string>;
+	/** Selected package directory consulted after the importing file's project. */
+	packageRoot?: string;
 }
 
 // Strict base64: characters from the standard alphabet plus optional `=` padding, and a
@@ -57,6 +90,7 @@ const DECIMAL_CSV_RE = /^\d{1,3}(?:,\d{1,3})*$/;
 
 const PRELUDE_GLOBAL_KEYS = [
 	"__omp_js_prelude_loaded__",
+	"__omp_tools__",
 	"console",
 	"print",
 	"display",
@@ -64,16 +98,118 @@ const PRELUDE_GLOBAL_KEYS = [
 	"completion",
 	"output",
 	"agent",
-	"parallel",
-	"pipeline",
+	"wait",
+	"AgentHandle",
+	"CompletionHandle",
+	"judge",
+	"judgeBatch",
+	"JudgmentBatch",
+	"JudgmentItem",
+	"workpool",
+	"WorkPool",
 	"log",
 	"phase",
+	"__omp_with_call_site__",
 	"budget",
-	"__pool",
 	"read",
 	"write",
 	"env",
 ];
+
+/**
+ * Which mutable global intrinsics still have their original identity.
+ *
+ * A retained cell can replace e.g. `String` with an arbitrary value; the shadow
+ * projector models `String(...)`/`JSON.stringify(...)`/`Array.prototype.join`
+ * calls as pure transforms only for names flagged intact here, so speculation
+ * never performs I/O from a branch the real cell cannot reach.
+ */
+export type ShadowInitialGlobals = Readonly<{
+	String: boolean;
+	JSON: boolean;
+	"JSON.stringify": boolean;
+	"Array.prototype.join": boolean;
+	/**
+	 * Whether `Object.prototype.toString` still has its original identity.
+	 * Implicit string coercion (templates, `+`) dispatches it for objects
+	 * (including arrays containing objects); a retained replacement changes
+	 * authoritative paths while leaving no snapshot trace. Absent only for
+	 * hand-built snapshots, where the intrinsic is assumed intact.
+	 */
+	"Object.prototype.toString"?: boolean;
+	/**
+	 * Whether the prelude tool bridge dispatcher still has its installed
+	 * identity. The proxy resolves `__omp_call_tool__` per call, so the flag
+	 * must track this binding; it also joins the snapshot digest, invalidating
+	 * plans if the installation ever changes under them. Absent only for
+	 * hand-built snapshots, where the bridge is assumed intact.
+	 */
+	__omp_call_tool__?: boolean;
+}>;
+
+export type ShadowSnapshot = Readonly<{
+	revision: number;
+	values: Readonly<Record<string, unknown>>;
+	initialGlobals: ShadowInitialGlobals;
+}>;
+
+export function shadowSnapshotDigest(snapshot: ShadowSnapshot): string {
+	// Intrinsic-identity flags participate: an async `globalThis.String = null` that
+	// lands after planning changes no value and bumps no revision, so a
+	// values-only digest would still match at verify time while projections made
+	// against the builtin no longer describe the cell. The template conversion
+	// avoids the mutable `String` global this function itself must survive.
+	return `${Bun.hash(JSON.stringify({ values: snapshot.values, initialGlobals: snapshot.initialGlobals }))}`;
+}
+
+const SHADOW_SNAPSHOT_MAX_DEPTH = 16;
+const SHADOW_SNAPSHOT_MAX_NODES = 2_000;
+const SHADOW_SNAPSHOT_MAX_STRING_BYTES = 8 * 1024 * 1024;
+
+function copyShadowValue(
+	value: unknown,
+	depth: number,
+	state: { nodes: number; bytes: number; seen: Set<object> },
+): unknown | undefined {
+	if (depth > SHADOW_SNAPSHOT_MAX_DEPTH || ++state.nodes > SHADOW_SNAPSHOT_MAX_NODES) return undefined;
+	if (value === null || typeof value === "boolean") return value;
+	if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+	if (typeof value === "string") {
+		state.bytes += Buffer.byteLength(value);
+		return state.bytes <= SHADOW_SNAPSHOT_MAX_STRING_BYTES ? value : undefined;
+	}
+	if (typeof value !== "object" || util.types.isProxy(value) || state.seen.has(value)) return undefined;
+	state.seen.add(value);
+	try {
+		if (Array.isArray(value)) {
+			const keys = Reflect.ownKeys(value);
+			if (keys.length !== value.length + 1 || !keys.includes("length")) return undefined;
+			const copied: unknown[] = [];
+			for (let index = 0; index < value.length; index++) {
+				const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+				if (!descriptor || !("value" in descriptor)) return undefined;
+				const next = copyShadowValue(descriptor.value, depth + 1, state);
+				if (next === undefined) return undefined;
+				copied.push(next);
+			}
+			return copied;
+		}
+		if (Object.getPrototypeOf(value) !== Object.prototype) return undefined;
+		const keys = Object.keys(value);
+		if (Reflect.ownKeys(value).length !== keys.length) return undefined;
+		const copied: Record<string, unknown> = {};
+		for (const key of keys) {
+			const descriptor = Object.getOwnPropertyDescriptor(value, key);
+			if (!descriptor || !("value" in descriptor)) return undefined;
+			const next = copyShadowValue(descriptor.value, depth + 1, state);
+			if (next === undefined) return undefined;
+			copied[key] = next;
+		}
+		return copied;
+	} finally {
+		state.seen.delete(value);
+	}
+}
 
 function isStrictBase64(s: string): boolean {
 	if (s.length === 0 || s.length % 4 !== 0) return false;
@@ -147,6 +283,8 @@ function describeDataType(data: unknown): string {
 export class JsRuntime {
 	#globalOwner = Symbol("JsRuntime globals");
 	#ownedGlobalKeys = new Set<string>();
+	#reservedGlobalKeys = new Set<string>();
+	#installedPreludes = new Map<string, EvalPreludeSource>();
 	#disposed = false;
 	#runHookResolver = () => this.#als.getStore()?.hooks;
 
@@ -156,9 +294,26 @@ export class JsRuntime {
 		this.#ownedGlobalKeys.add(key);
 	}
 
+	#releaseGlobal(key: string): void {
+		if (!this.#ownedGlobalKeys.delete(key)) return;
+		releaseGlobalKey(key, this.#globalOwner);
+	}
+
 	#activateGlobals(action: string): void {
 		if (this.#disposed) throw new Error(`Cannot ${action} on a disposed JS runtime`);
 		activateGlobalOwner(this.#globalOwner, this.#ownedGlobalKeys, action);
+	}
+
+	/**
+	 * Capture the current values of every owned global back into this owner's
+	 * global stack. A cell may rebind a reserved injected global (e.g.
+	 * `var fs = await import("node:fs/promises")`); without this, the next
+	 * `activateGlobalOwner` would restore the install-time value and silently
+	 * clobber the reassignment. Called after each run so bindings persist across
+	 * cells like the eval persistence contract promises.
+	 */
+	#recordGlobals(): void {
+		for (const key of this.#ownedGlobalKeys) recordGlobalValue(key, this.#globalOwner);
 	}
 
 	readonly helpers: HelperBundle;
@@ -167,15 +322,61 @@ export class JsRuntime {
 	readonly sessionId: string;
 	#env: Map<string, string>;
 	#als = new AsyncLocalStorage<RunContext>();
+	#callSiteAls = new AsyncLocalStorage<RuntimeCallIdentity>();
 	#moduleLoader: LocalModuleLoader;
 	#localRoots: Record<string, string>;
+	#namespaceRevision = 0;
+	#initialGlobalKeys = new Set<string>();
+	#initialIntrinsics = {
+		String: globalThis.String,
+		JSON: globalThis.JSON,
+		stringify: globalThis.JSON.stringify,
+		arrayJoin: Array.prototype.join,
+		objectToString: Object.prototype.toString,
+	};
+	#installedCallTool: unknown;
 
+	snapshotUserGlobals(): ShadowSnapshot {
+		this.#activateGlobals("snapshot user globals");
+		const values: Record<string, unknown> = {};
+		const snapshotState = { nodes: 0, bytes: 0, seen: new Set<object>() };
+		for (const key of Object.getOwnPropertyNames(globalThis)) {
+			if (this.#ownedGlobalKeys.has(key) || this.#initialGlobalKeys.has(key)) continue;
+			const descriptor = Object.getOwnPropertyDescriptor(globalThis, key);
+			if (!descriptor || !("value" in descriptor)) continue;
+			const copied = copyShadowValue(descriptor.value, 0, snapshotState);
+			if (copied !== undefined) values[key] = copied;
+		}
+		// A retained cell may replace these without leaving any snapshot trace
+		// (functions are never JSON-safe, and `delete` removes the key entirely),
+		// so record their identity explicitly. The `JSON` short-circuit guards the
+		// property access when a prior cell nulled the whole object.
+		const currentJSON = globalThis.JSON;
+		const initialGlobals: ShadowInitialGlobals = {
+			String: globalThis.String === this.#initialIntrinsics.String,
+			JSON: currentJSON === this.#initialIntrinsics.JSON,
+			"JSON.stringify":
+				typeof currentJSON === "object" &&
+				currentJSON !== null &&
+				currentJSON === this.#initialIntrinsics.JSON &&
+				currentJSON.stringify === this.#initialIntrinsics.stringify,
+			"Array.prototype.join": Array.prototype.join === this.#initialIntrinsics.arrayJoin,
+			"Object.prototype.toString": Object.prototype.toString === this.#initialIntrinsics.objectToString,
+			__omp_call_tool__: (globalThis as Record<string, unknown>).__omp_call_tool__ === this.#installedCallTool,
+		};
+		return Object.freeze({
+			revision: this.#namespaceRevision,
+			values: Object.freeze(values),
+			initialGlobals: Object.freeze(initialGlobals),
+		});
+	}
 	constructor(opts: RuntimeOptions) {
 		this.#cwd = opts.initialCwd;
 		this.#session = { cwd: opts.initialCwd, sessionId: opts.sessionId };
 		this.sessionId = opts.sessionId;
 		this.#env = new Map();
 		this.#moduleLoader = new LocalModuleLoader(this.sessionId);
+		this.#moduleLoader.setPackageRoot(opts.packageRoot);
 		this.#localRoots = opts.localRoots ?? {};
 		this.helpers = createHelpers({
 			cwd: () => this.#activeCwd(),
@@ -183,6 +384,7 @@ export class JsRuntime {
 			localRoots: () => this.#localRoots,
 			emitStatus: event => this.#activeHooks("emitStatus")?.onDisplay({ type: "status", event }),
 		});
+		this.#initialGlobalKeys = new Set(Object.getOwnPropertyNames(globalThis));
 		this.#install(opts.extraGlobals);
 	}
 
@@ -194,8 +396,8 @@ export class JsRuntime {
 		if (this.#disposed) throw new Error("Cannot set cwd on a disposed JS runtime");
 		// Always stamp the runtime and session state: WorkerCore/browser/cmux call
 		// setCwd from init and pre-run paths that may race another same-realm
-		// runtime, and a throw here used to escape the inline-worker microtask
-		// path as a fatal unhandledRejection that killed the whole session.
+		// runtime, and a throw here used to escape the harness microtask path as
+		// a fatal unhandledRejection that killed the whole session.
 		// #session is the same object saved in this owner's global stack entry,
 		// so the new cwd survives deferred activation and is visible to this
 		// runtime's next run; run()/setRunScope still assert exclusive ownership.
@@ -206,6 +408,11 @@ export class JsRuntime {
 		}
 	}
 
+	setPackageRoot(packageRoot: string | undefined): void {
+		if (this.#disposed) throw new Error("Cannot set package root on a disposed JS runtime");
+		this.#moduleLoader.setPackageRoot(packageRoot);
+	}
+
 	/**
 	 * Install per-run globals. Intended for run-scoped state (browser's `tab`, `display`
 	 * overrides, etc.). Overwrites previous assignments — caller is responsible for any
@@ -213,7 +420,92 @@ export class JsRuntime {
 	 */
 	setRunScope(scope: Record<string, unknown>): void {
 		this.#activateGlobals("set run scope");
-		Object.assign(globalThis, scope);
+		for (const key in scope) {
+			this.#ownGlobal(key);
+			(globalThis as Record<string, unknown>)[key] = scope[key];
+			recordGlobalValue(key, this.#globalOwner);
+		}
+	}
+
+	/**
+	 * Synchronize enabled capability snippets before an ordinary eval cell.
+	 * Unchanged sources retain their objects; removed or replaced definitions
+	 * release every declared global before replacement source runs.
+	 */
+	syncPreludes(preludes: readonly EvalPreludeSource[]): void {
+		if (preludes.length === 0 && this.#installedPreludes.size === 0) return;
+		this.#activateGlobals("sync eval preludes");
+		const desired = new Map<string, EvalPreludeSource>();
+		const exportOwners = new Map<string, string>();
+		for (const prelude of preludes) {
+			if (desired.has(prelude.name)) throw new Error(`Duplicate eval prelude name: ${prelude.name}`);
+			for (const name of prelude.exports) {
+				if (this.#reservedGlobalKeys.has(name)) {
+					throw new Error(`Eval prelude ${prelude.name} cannot replace reserved global ${name}`);
+				}
+				const owner = exportOwners.get(name);
+				if (owner) throw new Error(`Eval preludes ${owner} and ${prelude.name} both export ${name}`);
+				exportOwners.set(name, prelude.name);
+			}
+			desired.set(prelude.name, prelude);
+		}
+
+		for (const [name, installed] of this.#installedPreludes) {
+			const next = desired.get(name);
+			if (
+				next &&
+				next.source === installed.source &&
+				next.exports.length === installed.exports.length &&
+				next.exports.every((value, index) => value === installed.exports[index])
+			) {
+				continue;
+			}
+			for (const exported of installed.exports) this.#releaseGlobal(exported);
+			this.#installedPreludes.delete(name);
+		}
+
+		for (const [name, prelude] of desired) {
+			if (this.#installedPreludes.has(name)) continue;
+			for (const exported of prelude.exports) this.#ownGlobal(exported);
+			try {
+				indirectEval(prelude.source, `[eval-prelude:${name}]`);
+				for (const exported of prelude.exports) recordGlobalValue(exported, this.#globalOwner);
+				this.#installedPreludes.set(name, {
+					name,
+					exports: [...prelude.exports],
+					source: prelude.source,
+				});
+			} catch (error) {
+				for (const exported of prelude.exports) this.#releaseGlobal(exported);
+				throw error;
+			}
+		}
+	}
+
+	/** Read a prelude-owned global from this runtime's active global set. */
+	getGlobal(name: string): unknown {
+		this.#activateGlobals("read runtime global");
+		return Reflect.get(globalThis, name);
+	}
+
+	/** Invoke a callback inside this runtime's async run context. */
+	async runCallback<T>(runId: string, hooks: RuntimeHooks, callback: () => T | Promise<T>): Promise<T> {
+		this.#activateGlobals("run callback");
+		const leaveRun = enterGlobalRun(this.#globalOwner, "run callback");
+		const context: RunContext = {
+			runId,
+			hooks,
+			cwd: this.#cwd,
+			finalExpressionSet: false,
+			finalExpressionValue: undefined,
+			callOccurrences: new Map(),
+		};
+		try {
+			return await this.#als.run(context, callback);
+		} finally {
+			this.#recordGlobals();
+			leaveRun();
+		}
 	}
 
 	async run(
@@ -223,13 +515,16 @@ export class JsRuntime {
 		options: { runId?: string; cwd?: string } = {},
 	): Promise<unknown> {
 		this.#activateGlobals("run code");
+		this.#namespaceRevision++;
 		const leaveRun = enterGlobalRun(this.#globalOwner, "run code");
 		const context: RunContext = {
 			runId: options.runId ?? crypto.randomUUID(),
 			hooks,
 			cwd: options.cwd ?? this.#cwd,
+			filename,
 			finalExpressionSet: false,
 			finalExpressionValue: undefined,
+			callOccurrences: new Map(),
 		};
 		try {
 			return await this.#als.run(context, async () => {
@@ -248,6 +543,7 @@ export class JsRuntime {
 				return await awaitMaybePromise(value);
 			});
 		} finally {
+			this.#recordGlobals();
 			leaveRun();
 		}
 	}
@@ -292,6 +588,11 @@ export class JsRuntime {
 		return this.#als.getStore()?.cwd ?? this.#cwd;
 	}
 
+	#activeFilename(): string | undefined {
+		const filename = this.#als.getStore()?.filename;
+		return filename && path.isAbsolute(filename) ? filename : undefined;
+	}
+
 	#activeHooks(action: string): RuntimeHooks | undefined {
 		const hooks = this.#als.getStore()?.hooks;
 		if (!hooks) {
@@ -301,15 +602,18 @@ export class JsRuntime {
 	}
 
 	#activeRequire(moduleUrlOrPath?: string): NodeJS.Require {
-		return this.#moduleLoader.requireForFile(moduleUrlOrPath, this.#activeCwd());
+		return this.#moduleLoader.requireForFile(moduleUrlOrPath ?? this.#activeFilename(), this.#activeCwd());
 	}
 
 	#moduleFilename(moduleUrlOrPath?: string): string {
-		return this.#moduleLoader.filenameForUrl(moduleUrlOrPath) ?? path.join(this.#activeCwd(), "[eval]");
+		return (
+			this.#moduleLoader.filenameForUrl(moduleUrlOrPath ?? this.#activeFilename()) ??
+			path.join(this.#activeCwd(), "[eval]")
+		);
 	}
 
 	#moduleDirname(moduleUrlOrPath?: string): string {
-		return this.#moduleLoader.dirnameForUrl(moduleUrlOrPath, this.#activeCwd());
+		return this.#moduleLoader.dirnameForUrl(moduleUrlOrPath ?? this.#activeFilename(), this.#activeCwd());
 	}
 
 	#buildDynamicRequire(): NodeJS.Require {
@@ -337,13 +641,28 @@ export class JsRuntime {
 		const injected: Record<string, unknown> = {
 			__omp_session__: this.#session,
 			__omp_helpers__: this.helpers,
+			__omp_with_call_site__: <T>(siteId: string, action: () => T): T => {
+				const context = this.#als.getStore();
+				if (!context) return action();
+				const occurrence = context.callOccurrences.get(siteId) ?? 0;
+				context.callOccurrences.set(siteId, occurrence + 1);
+				return this.#callSiteAls.run({ siteId, occurrence }, action);
+			},
 			__omp_call_tool__: async (name: string, args: unknown) => {
 				const hooks = this.#activeHooks("tool");
 				if (!hooks) return undefined;
-				return await hooks.callTool(name, args);
+				return surfaceBridgedToolImages(await hooks.callTool(name, args, this.#callSiteAls.getStore()), hooks);
+			},
+			__omp_prelude__: async (name: string, parameters: unknown) => {
+				const hooks = this.#activeHooks("prelude");
+				if (!hooks) return undefined;
+				const payload = { name, parameters };
+				return surfaceBridgedToolImages(await hooks.callTool("__prelude__", payload), hooks);
 			},
 			__omp_import__: async (source: string, options?: ImportCallOptions) => {
-				const resolved = await this.#moduleLoader.resolveForRun(this.#activeCwd(), source);
+				const filename = this.#activeFilename();
+				const baseDir = filename ? path.dirname(filename) : this.#activeCwd();
+				const resolved = await this.#moduleLoader.resolveForRun(baseDir, source);
 				if (resolved.mode === "local") return resolved.value;
 				const target = resolved.target;
 				return options !== undefined ? await import(target, options) : await import(target);
@@ -377,7 +696,10 @@ export class JsRuntime {
 					},
 				});
 				const tableConsole = new Console({ stdout: stream, colorMode: false });
-				(tableConsole.table as (...a: unknown[]) => void)(...args);
+				// `table` is missing from some @types/node Console shapes, but the
+				// Node runtime always provides it.
+				const tableCapable = tableConsole as unknown as { table: (...args: unknown[]) => void };
+				tableCapable.table(...args);
 				hooks.onText(buffer.endsWith("\n") ? buffer : `${buffer}\n`);
 			},
 			__omp_display__: (value: unknown) => this.displayValue(value),
@@ -405,6 +727,7 @@ export class JsRuntime {
 			...PRELUDE_GLOBAL_KEYS,
 		]);
 
+		this.#reservedGlobalKeys = allGlobalKeys;
 		for (const key of allGlobalKeys) {
 			this.#ownGlobal(key);
 		}
@@ -414,6 +737,14 @@ export class JsRuntime {
 		// onto globalThis. Must run after helpers are in place.
 		indirectEval(JAVASCRIPT_PRELUDE_SOURCE);
 		for (const key of allGlobalKeys) recordGlobalValue(key, this.#globalOwner);
+		// Capture the installed bridge dispatcher for the snapshot identity
+		// flag below. The prelude tool proxy resolves `__omp_call_tool__` per
+		// call, so the flag must track this binding. (Steady-state retained
+		// replacements self-heal: owned-global activation restores the recorded
+		// value before any observation. The `tool` binding itself needs no
+		// flag: the prelude declares it as a lexical const, which shadows any
+		// `globalThis.tool` replacement for bare references.)
+		this.#installedCallTool = (globalThis as Record<string, unknown>).__omp_call_tool__;
 		RUN_HOOK_RESOLVERS.add(this.#runHookResolver);
 		patchStdioOnce();
 	}
@@ -424,6 +755,8 @@ export class JsRuntime {
 		RUN_HOOK_RESOLVERS.delete(this.#runHookResolver);
 		for (const key of this.#ownedGlobalKeys) releaseGlobalKey(key, this.#globalOwner);
 		this.#ownedGlobalKeys.clear();
+		this.#reservedGlobalKeys.clear();
+		this.#installedPreludes.clear();
 	}
 }
 
@@ -442,7 +775,7 @@ interface GlobalStack {
 	entries: GlobalOwnerEntry[];
 }
 
-// Inline fallback and cmux tabs can create multiple JsRuntime instances in one Bun realm.
+// Same-realm harnesses and cmux tabs can create multiple JsRuntime instances in one Bun realm.
 // Track reserved helper globals by owner so disposing one runtime restores the next active
 // owner (or the original process global after the last owner), not a stale snapshot.
 const GLOBAL_STACKS = new Map<string, GlobalStack>();

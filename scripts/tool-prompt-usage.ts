@@ -20,36 +20,13 @@ import { parseArgs } from "node:util";
 import { countTokens, Encoding } from "@oh-my-pi/pi-natives";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { loadBundledAgents } from "../packages/coding-agent/src/task/agents";
+import { isReadOnlyAgent } from "../packages/coding-agent/src/task/read-only-policy";
 
 const REPO_ROOT = path.resolve(import.meta.dir, "..");
 const TOOL_PROMPT_DIR = path.join(REPO_ROOT, "packages/coding-agent/src/prompts/tools");
 const DEFAULT_READ_LIMIT = "300";
 const DEFAULT_MAX_LINES = "3000";
 const DEFAULT_MAX_CONCURRENCY = 32;
-
-// Mirrors the task prompt's READ-ONLY badge semantics without importing the
-// whole task tool module just to render a static estimate.
-const READ_ONLY_TOOL_NAMES: Record<string, true> = {
-	ask: true,
-	ast_grep: true,
-	checkpoint: true,
-	find: true,
-	inspect_image: true,
-	irc: true,
-	job: true,
-	memory_edit: true,
-	read: true,
-	recall: true,
-	reflect: true,
-	resolve: true,
-	retain: true,
-	rewind: true,
-	search: true,
-	search_tool_bm25: true,
-	todo: true,
-	web_search: true,
-	yield: true,
-};
 
 interface AgentPromptRow {
 	name: string;
@@ -139,14 +116,11 @@ async function collectPromptPaths(positionals: readonly string[]): Promise<strin
 }
 
 function bundledAgents(): AgentPromptRow[] {
-	return loadBundledAgents().map(agent => {
-		const tools = agent.tools ?? [];
-		return {
-			name: agent.name,
-			description: agent.description,
-			readOnly: tools.length > 0 && tools.every(tool => READ_ONLY_TOOL_NAMES[tool] === true),
-		};
-	});
+	return loadBundledAgents().map(agent => ({
+		name: agent.name,
+		description: agent.description,
+		readOnly: isReadOnlyAgent(agent),
+	}));
 }
 
 function renderContext(): Record<string, unknown> {

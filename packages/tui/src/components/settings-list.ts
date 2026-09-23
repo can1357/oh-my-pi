@@ -5,12 +5,18 @@ import type { MouseRoutable, SgrMouseEvent } from "../mouse";
 import type { Component } from "../tui";
 import { Ellipsis, padding, replaceTabs, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils";
 import { ScrollView } from "./scroll-view";
+import { FormField, type FormFieldOptions, type FormFieldTheme } from "./form";
+import { MenuSelection } from "./menu-selection";
 
 function sanitizeSingleLine(text: string): string {
 	return replaceTabs(text)
 		.replace(/[\r\n]+/g, " ")
 		.replace(/\s+/g, " ")
 		.trim();
+}
+
+function hasMouseRouter(component: Component): component is Component & MouseRoutable {
+	return "routeMouse" in component && typeof component.routeMouse === "function";
 }
 
 export interface SettingItem {
@@ -20,6 +26,8 @@ export interface SettingItem {
 	label: string;
 	/** Optional description shown when selected */
 	description?: string;
+	/** Optional risk note shown in warning styling above the description, with a glyph on the row. */
+	warning?: string;
 	/** Current value to display (right side) */
 	currentValue: string;
 	/** If provided, Enter/Space cycles through these values */
@@ -36,6 +44,10 @@ export interface SettingsListTheme {
 	label: (text: string, selected: boolean, changed: boolean) => string;
 	value: (text: string, selected: boolean, changed: boolean) => string;
 	description: (text: string) => string;
+	/** Style for risk notes and the row warning glyph. Falls back to `description` when omitted. */
+	warning?: (text: string) => string;
+	/** Glyph marking rows that carry a `warning`. Omitted hides the row marker. */
+	warningMark?: string;
 	cursor: string;
 	hint: (text: string) => string;
 	/** Style for section heading rows (dimmed when outside the active section). Falls back to `hint` when omitted. */
@@ -78,11 +90,14 @@ export interface SettingsListOptions {
 	sidebarWidth?: number;
 }
 
-/** Searchable text for a setting item: label, id, value, description, and cycle values. */
+/** Searchable text for a setting item: label, id, value, description, warning, and cycle values. */
 export function getSettingItemFilterText(item: SettingItem): string {
 	let text = `${item.label} ${item.id} ${item.currentValue}`;
 	if (item.description) {
 		text += ` ${item.description}`;
+	}
+	if (item.warning) {
+		text += ` ${item.warning}`;
 	}
 	if (item.values) {
 		text += ` ${item.values.join(" ")}`;
@@ -91,8 +106,9 @@ export function getSettingItemFilterText(item: SettingItem): string {
 }
 
 export class SettingsList implements Component {
-	#items: SettingItem[];
-	#filteredItems: SettingItem[];
+	#items: readonly SettingItem[] = [];
+	#filteredItems: readonly SettingItem[] = [];
+	#selection: MenuSelection<SettingItem>;
 	#theme: SettingsListTheme;
 	#selectedIndex = 0;
 	#maxVisible: number;
@@ -123,15 +139,43 @@ export class SettingsList implements Component {
 		onCancel: () => void,
 		options: SettingsListOptions = {},
 	) {
-		this.#items = items;
-		this.#filteredItems = items;
+		this.#selection = new MenuSelection(items, {
+			getKey: item => item.id,
+			getSearchText: getSettingItemFilterText,
+			isDisabled: item => item.heading === true,
+			filter: (candidates, query) =>
+				fuzzyFilter(
+					candidates.filter(item => !item.heading),
+					query,
+					getSettingItemFilterText,
+				),
+		});
+		this.#syncSelectionState();
 		this.#maxVisible = maxVisible;
 		this.#theme = theme;
 		this.#onChange = onChange;
 		this.#onCancel = onCancel;
 		this.#options = options;
-		this.#selectedIndex = this.#firstSelectableIndex();
 		this.#lastNotifiedSelectionId = this.getSelectedItem()?.id;
+	}
+	/** Return item, selection, filter, and submenu state for debug inspection. */
+	debugState(): Record<string, unknown> {
+		const selected = this.getSelectedItem();
+		return {
+			itemCount: this.#items.length,
+			filteredItemCount: this.#filteredItems.length,
+			selectedIndex: this.#filteredItems.length > 0 ? this.#selectedIndex : -1,
+			selectedItemId: selected?.id ?? null,
+			selectedItemLabel: selected?.label ?? null,
+			filterText: this.#filterQuery,
+			sectionFocused: this.#sectionFocus,
+			submenuOpen: this.#submenuComponent !== null,
+		};
+	}
+
+	/** Expose the active submenu to the debug tree walker. */
+	get debugChildren(): readonly Component[] {
+		return this.#submenuComponent ? [this.#submenuComponent] : [];
 	}
 
 	/** The currently selected item, or undefined when empty or on a heading. */
@@ -142,10 +186,11 @@ export class SettingsList implements Component {
 
 	/** Move selection to the item with `id`. Returns false when it is not visible. */
 	selectItem(id: string): boolean {
-		const index = this.#filteredItems.findIndex(item => !item.heading && item.id === id);
-		if (index === -1) return false;
+		const item = this.#filteredItems.find(candidate => !candidate.heading && candidate.id === id);
+		if (!item) return false;
+		this.#selection.setSelectedKey(id);
 		this.#sectionFocus = false;
-		this.#selectedIndex = index;
+		this.#syncSelectionState();
 		this.#notifySelection();
 		return true;
 	}
@@ -244,7 +289,9 @@ export class SettingsList implements Component {
 	 */
 	routeSubmenuMouse(event: SgrMouseEvent, line: number, col: number): boolean {
 		if (!this.#submenuComponent) return false;
-		(this.#submenuComponent as Component & Partial<MouseRoutable>).routeMouse?.(event, line, col);
+		if (hasMouseRouter(this.#submenuComponent)) {
+			this.#submenuComponent.routeMouse(event, line, col);
+		}
 		return true;
 	}
 
@@ -268,8 +315,8 @@ export class SettingsList implements Component {
 
 		item.currentValue = newValue;
 		if (this.#filterQuery.trim()) {
-			this.#applyFilter();
-			this.#clampSelectedIndex();
+			this.#selection.setItems(this.#items, this.#selection.selectedKey);
+			this.#syncSelectionState();
 		}
 	}
 
@@ -281,65 +328,41 @@ export class SettingsList implements Component {
 	 * done callback, and `#closeSubmenu` re-resolves the restored item on exit.
 	 */
 	setItems(items: SettingItem[]): void {
-		const selectedId = this.#filteredItems[this.#selectedIndex]?.id;
-		this.#items = items;
-		this.#applyFilter();
-		if (this.#sectionFocus && !this.hasSectionFocusTargets()) this.#sectionFocus = false;
-
-		const nextIndex = selectedId ? this.#filteredItems.findIndex(item => item.id === selectedId) : -1;
-		if (nextIndex >= 0) {
-			this.#selectedIndex = nextIndex;
-		} else {
-			this.#clampSelectedIndex();
+		const selectedId = this.#selection.selectedKey;
+		const previousIndex = this.#selection.selectedIndex;
+		this.#selection.setItems(items, selectedId);
+		if (selectedId !== undefined && !this.#selection.visibleItems.some(item => item.id === selectedId)) {
+			this.#selection.setSelectedIndex(Math.min(previousIndex, this.#selection.visibleItems.length - 1));
 		}
+		this.#syncSelectionState();
+		if (this.#sectionFocus && !this.hasSectionFocusTargets()) this.#sectionFocus = false;
 		this.#notifySelection();
 	}
 
 	#setFilter(filter: string): void {
-		this.#filterQuery = filter;
 		if (filter.trim()) this.#sectionFocus = false;
-		this.#applyFilter();
-		this.#selectedIndex = this.#firstSelectableIndex();
+		this.#selection.setQuery(filter, false);
+		this.#syncSelectionState();
 		this.#notifySelection();
-	}
-
-	#applyFilter(): void {
-		this.#filteredItems = this.#filterQuery.trim()
-			? fuzzyFilter(
-					this.#items.filter(item => !item.heading),
-					this.#filterQuery,
-					getSettingItemFilterText,
-				)
-			: this.#items;
-	}
-
-	#firstSelectableIndex(): number {
-		const index = this.#filteredItems.findIndex(item => !item.heading);
-		return index >= 0 ? index : 0;
 	}
 
 	/** Move selection by one selectable item, wrapping or clamping, and skipping headings. */
 	#moveSelection(delta: -1 | 1, wrap = true): void {
-		const len = this.#filteredItems.length;
-		if (len === 0) return;
-		let index = this.#selectedIndex;
-		for (let step = 0; step < len * 2; step++) {
-			const next = index + delta;
-			if (next < 0 || next >= len) {
-				if (wrap) {
-					index = (next + len) % len;
-				} else {
-					return;
-				}
-			} else {
-				index = next;
-			}
-			if (!this.#filteredItems[index]?.heading) {
-				this.#selectedIndex = index;
-				this.#notifySelection();
-				return;
-			}
-		}
+		if (!this.#selection.move(delta, wrap)) return;
+		this.#syncSelectionState();
+		this.#notifySelection();
+	}
+
+	#syncSelectionState(): void {
+		this.#items = this.#selection.items;
+		this.#filteredItems = this.#selection.visibleItems;
+		this.#filterQuery = this.#selection.query;
+		this.#selectedIndex = Math.max(0, this.#selection.selectedIndex);
+	}
+
+	#setSelectedIndex(index: number): void {
+		this.#selection.setSelectedIndex(index);
+		this.#syncSelectionState();
 	}
 
 	/** Sections derived from heading rows in the filtered list. */
@@ -376,35 +399,17 @@ export class SettingsList implements Component {
 		if (sections.length < 2) {
 			const len = this.#filteredItems.length;
 			if (len === 0) return;
-			this.#selectedIndex = Math.max(0, Math.min(this.#selectedIndex + delta * this.#maxVisible, len - 1));
-			this.#clampSelectedIndex();
+			const index = Math.max(0, Math.min(this.#selectedIndex + delta * this.#maxVisible, len - 1));
+			this.#setSelectedIndex(index);
 		} else {
 			const next = (this.#activeSectionIndex(sections) + delta + sections.length) % sections.length;
-			this.#selectedIndex = sections[next].firstItemIndex;
+			this.#setSelectedIndex(sections[next].firstItemIndex);
 		}
 		this.#notifySelection();
 	}
 
 	#clampSelectedIndex(): void {
-		if (this.#filteredItems.length === 0) {
-			this.#selectedIndex = 0;
-			return;
-		}
-		this.#selectedIndex = Math.max(0, Math.min(this.#selectedIndex, this.#filteredItems.length - 1));
-		if (!this.#filteredItems[this.#selectedIndex]?.heading) return;
-		// Landed on a heading: prefer the next selectable item, else the previous one.
-		for (let i = this.#selectedIndex + 1; i < this.#filteredItems.length; i++) {
-			if (!this.#filteredItems[i].heading) {
-				this.#selectedIndex = i;
-				return;
-			}
-		}
-		for (let i = this.#selectedIndex - 1; i >= 0; i--) {
-			if (!this.#filteredItems[i].heading) {
-				this.#selectedIndex = i;
-				return;
-			}
-		}
+		this.#setSelectedIndex(this.#selectedIndex);
 	}
 
 	#renderSearchStatus(width: number): string {
@@ -477,6 +482,11 @@ export class SettingsList implements Component {
 		return this.#padLines(this.#renderMainList(width));
 	}
 
+	/** Warning glyph suffix for a row that carries a risk note, or "" when none applies. */
+	#warningMark(item: SettingItem): string {
+		return item.warning && this.#theme.warningMark ? ` ${this.#theme.warningMark}` : "";
+	}
+
 	#renderItemRow(
 		item: SettingItem,
 		index: number,
@@ -495,7 +505,9 @@ export class SettingsList implements Component {
 		const isSelected = index === this.#selectedIndex && !this.#sectionFocus;
 		const prefix = isSelected ? this.#theme.cursor : "  ";
 		const prefixWidth = visibleWidth(prefix);
-		const labelPadded = item.label + padding(Math.max(0, maxLabelWidth - visibleWidth(item.label)));
+		const mark = this.#warningMark(item);
+		const labelPlain = item.label + mark;
+		const labelPad = padding(Math.max(0, maxLabelWidth - visibleWidth(labelPlain)));
 		const separator = "  ";
 		const valueMaxWidth = rowWidth - prefixWidth - maxLabelWidth - visibleWidth(separator) - 2;
 		const valuePlain = truncateToWidth(String(item.currentValue ?? ""), valueMaxWidth, Ellipsis.Omit);
@@ -504,11 +516,13 @@ export class SettingsList implements Component {
 		// under one dim wash so inner label/value colors don't fight it.
 		if (dimmed && !isSelected) {
 			const text = this.#theme.hint(
-				truncateToWidth(`  ${labelPadded}${separator}${valuePlain}`, Math.max(0, rowWidth)),
+				truncateToWidth(`  ${labelPlain}${labelPad}${separator}${valuePlain}`, Math.max(0, rowWidth)),
 			);
 			return hovered && this.#theme.hovered ? this.#theme.hovered(text) : text;
 		}
-		const labelText = this.#theme.label(labelPadded, isSelected, item.changed === true);
+		const warningStyle = this.#theme.warning ?? this.#theme.description;
+		const labelText =
+			this.#theme.label(item.label, isSelected, item.changed === true) + (mark ? warningStyle(mark) : "") + labelPad;
 		const valueText = this.#theme.value(valuePlain, isSelected, item.changed === true);
 		const text = truncateToWidth(prefix + labelText + separator + valueText, Math.max(0, rowWidth));
 		// Pointer hover paints a band behind the whole row, distinct from the
@@ -550,7 +564,9 @@ export class SettingsList implements Component {
 				0,
 				Math.min(this.#selectedIndex - Math.floor(viewportHeight / 2), this.#filteredItems.length - viewportHeight),
 			);
-			const labelWidths = this.#filteredItems.filter(item => !item.heading).map(item => visibleWidth(item.label));
+			const labelWidths = this.#filteredItems
+				.filter(item => !item.heading)
+				.map(item => visibleWidth(item.label + this.#warningMark(item)));
 			const maxLabelWidth = Math.min(30, labelWidths.length > 0 ? Math.max(...labelWidths) : 0);
 			const itemRowsOverflow = this.#filteredItems.length > viewportHeight;
 			const itemRowWidth = Math.max(0, width - (itemRowsOverflow ? 1 : 0));
@@ -589,15 +605,25 @@ export class SettingsList implements Component {
 
 		// Description area: 1 blank + exactly 3 rows, clamped with an ellipsis,
 		// so moving between items with/without descriptions never shifts rows.
+		// The risk note leads so it survives the clamp when both are present.
 		lines.push("");
 		const selectedItem = this.#filteredItems[this.#selectedIndex];
 		const descLines: string[] = [];
-		if (selectedItem?.description && !selectedItem.heading) {
-			const wrappedDesc = wrapTextWithAnsi(selectedItem.description, width - 4);
-			for (const line of wrappedDesc.slice(0, 3)) {
-				descLines.push(this.#theme.description(`  ${line}`));
+		if (selectedItem && !selectedItem.heading) {
+			if (selectedItem.warning) {
+				const warningStyle = this.#theme.warning ?? this.#theme.description;
+				const mark = this.#theme.warningMark ? `${this.#theme.warningMark} ` : "";
+				for (const line of wrapTextWithAnsi(`${mark}${selectedItem.warning}`, width - 4)) {
+					descLines.push(warningStyle(`  ${line}`));
+				}
 			}
-			if (wrappedDesc.length > 3) {
+			if (selectedItem.description) {
+				for (const line of wrapTextWithAnsi(selectedItem.description, width - 4)) {
+					descLines.push(this.#theme.description(`  ${line}`));
+				}
+			}
+			if (descLines.length > 3) {
+				descLines.splice(3);
 				descLines[2] = truncateToWidth(`${descLines[2]}…`, width);
 			}
 		}
@@ -659,7 +685,9 @@ export class SettingsList implements Component {
 			Math.min(this.#selectedIndex - Math.floor(viewportHeight / 2), this.#filteredItems.length - viewportHeight),
 		);
 		// Label column width spans all items so the layout stays stable across sections.
-		const labelWidths = this.#filteredItems.filter(item => !item.heading).map(item => visibleWidth(item.label));
+		const labelWidths = this.#filteredItems
+			.filter(item => !item.heading)
+			.map(item => visibleWidth(item.label + this.#warningMark(item)));
 		const maxLabelWidth = Math.min(30, labelWidths.length > 0 ? Math.max(...labelWidths) : 0);
 		const overflow = this.#filteredItems.length > viewportHeight;
 		const rowWidth = Math.max(0, paneWidth - (overflow ? 1 : 0));
@@ -783,11 +811,57 @@ export class SettingsList implements Component {
 			const index = this.#filteredItems.findIndex(item => !item.heading && item.id === this.#submenuItemId);
 			this.#submenuItemId = null;
 			if (index >= 0) {
-				this.#selectedIndex = index;
+				this.#setSelectedIndex(index);
 			} else {
 				this.#clampSelectedIndex();
 			}
 			this.#notifySelection();
 		}
+	}
+}
+
+/** Construction options for a SettingsList composed as a form field. */
+export interface SettingsFormFieldOptions extends Omit<FormFieldOptions, "theme"> {
+	items: SettingItem[];
+	maxVisible: number;
+	settingsTheme: SettingsListTheme;
+	fieldTheme: FormFieldTheme;
+	onChange(id: string, newValue: string): void;
+	onCancel(): void;
+	listOptions?: SettingsListOptions;
+}
+
+/**
+ * SettingsList adapter for detail forms. It retains the canonical list
+ * implementation while sharing FormField label, description, hint, focus, and
+ * input dispatch with text and selection fields.
+ */
+export class SettingsFormField extends FormField {
+	readonly settingsList: SettingsList;
+
+	constructor(options: SettingsFormFieldOptions) {
+		const settingsList = new SettingsList(
+			options.items,
+			options.maxVisible,
+			options.settingsTheme,
+			options.onChange,
+			options.onCancel,
+			options.listOptions,
+		);
+		super(settingsList, {
+			theme: options.fieldTheme,
+			label: options.label,
+			description: options.description,
+			details: options.details,
+			previewLabel: options.previewLabel,
+			preview: options.preview,
+			hint: options.hint,
+			summary: options.summary,
+			footer: options.footer,
+			leadingSpace: options.leadingSpace,
+			spaceBeforeControl: options.spaceBeforeControl,
+			spaceAfterControl: options.spaceAfterControl,
+		});
+		this.settingsList = settingsList;
 	}
 }

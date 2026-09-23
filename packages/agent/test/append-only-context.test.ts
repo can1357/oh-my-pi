@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { AppendOnlyContextManager, AppendOnlyLog, StablePrefix } from "@oh-my-pi/pi-agent-core/append-only-context";
+import { invalidateMessageCache } from "@oh-my-pi/pi-agent-core/compaction/message-cache";
 import type { AgentContext, AgentTool } from "@oh-my-pi/pi-agent-core/types";
 import type { Message, Tool, ToolExample } from "@oh-my-pi/pi-ai";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
@@ -102,6 +103,81 @@ describe("StablePrefix", () => {
 
 		const changed = p.build(ctx, BUILD_OPTS);
 		expect(changed).toBe(true);
+	});
+
+	it("skips normalize+stringify when live references are unchanged", () => {
+		const p = new StablePrefix();
+		const ctx = makeContext({ systemPrompt: ["Stable"], tools: [makeTool("read")] });
+		expect(p.build(ctx, BUILD_OPTS)).toBe(true);
+		const first = p.toContext();
+
+		expect(p.build(ctx, BUILD_OPTS)).toBe(false);
+		// Same cached snapshot object: no rebuild happened at all.
+		expect(p.toContext().tools).toBe(first.tools);
+		expect(p.toContext().systemPrompt).toBe(first.systemPrompt);
+	});
+
+	it("detects swapped tool objects without invalidate", () => {
+		const p = new StablePrefix();
+		const tools = [makeTool("read", "Original desc")];
+		const ctx = makeContext({ systemPrompt: ["Stable"], tools });
+		p.build(ctx, BUILD_OPTS);
+
+		// Same array identity, different tool object: the per-tool
+		// name/description check sees it — no invalidate needed.
+		tools[0] = makeTool("read", "Mutated desc");
+		expect(p.build(ctx, BUILD_OPTS)).toBe(true);
+		expect(p.toContext().tools[0]!.description).toBe("Mutated desc");
+	});
+
+	it("detects dynamic schema swaps under stable tool references", () => {
+		// ReadTool-style getter: same tool object, different resolved schema
+		// (e.g. after a /skillful toggle). The wire-identity check catches it.
+		const p = new StablePrefix();
+		let variant = false;
+		const tool = makeTool("read");
+		Object.defineProperty(tool, "parameters", {
+			configurable: true,
+			get: () =>
+				variant
+					? { type: "object", properties: { extra: { type: "string" } } }
+					: { type: "object", properties: {} },
+		});
+		const ctx = makeContext({ systemPrompt: ["Stable"], tools: [tool] });
+		expect(p.build(ctx, BUILD_OPTS)).toBe(true);
+		expect(p.build(ctx, BUILD_OPTS)).toBe(false);
+
+		variant = true;
+		expect(p.build(ctx, BUILD_OPTS)).toBe(true);
+	});
+
+	it("detects wire-field swaps that keep name, description, and schema", () => {
+		// Registry replaces the tool object with same name/description and
+		// the SAME parameters object but a different strict/customWireName.
+		const p = new StablePrefix();
+		const params = { type: "object", properties: {} };
+		const first = { ...makeTool("read"), parameters: params } as never;
+		const ctx = makeContext({ systemPrompt: ["Stable"], tools: [first] });
+		expect(p.build(ctx, BUILD_OPTS)).toBe(true);
+		expect(p.build(ctx, BUILD_OPTS)).toBe(false);
+
+		const second = { ...makeTool("read"), parameters: params, strict: true, customWireName: "read_custom" } as never;
+		const ctx2 = makeContext({ systemPrompt: ["Stable"], tools: [second] });
+		expect(p.build(ctx2, BUILD_OPTS)).toBe(true);
+		expect(p.toContext().tools[0]!.customWireName).toBe("read_custom");
+	});
+
+	it("detects in-place system-prompt mutation without invalidate", () => {
+		// Same array object, pushed in place (Agent.setSystemPrompt stores
+		// the caller's array). Reference equality holds; joined bytes don't.
+		const p = new StablePrefix();
+		const prompt = ["Stable"];
+		const ctx = makeContext({ systemPrompt: prompt });
+		expect(p.build(ctx, BUILD_OPTS)).toBe(true);
+		expect(p.build(ctx, BUILD_OPTS)).toBe(false);
+		prompt.push(" appended in place");
+		expect(p.build(ctx, BUILD_OPTS)).toBe(true);
+		expect(p.toContext().systemPrompt).toEqual(["Stable", " appended in place"]);
 	});
 
 	it("toContext() throws when not built", () => {
@@ -739,6 +815,114 @@ describe("message sync", () => {
 		const r2 = mgr.build(ctx, BUILD_OPTS);
 		expect(r2.messages).toHaveLength(1);
 		expect(r2.messages[0]!.content).toBe("new turn");
+	});
+	it("keeps sync decisions byte-faithful across steady-state, growth, rewrite, and revert", () => {
+		const mgr = new AppendOnlyContextManager();
+		mgr.build(makeContext(), BUILD_OPTS);
+
+		// Partial message literals — syncMessages digests structural fields only.
+		const msgs: Message[] = [];
+		for (let i = 0; i < 4; i++) {
+			msgs.push({ role: "user", content: `q${i}` } as unknown as Message);
+			msgs.push({ role: "assistant", content: `a${i}` } as unknown as Message);
+		}
+		mgr.syncMessages(msgs);
+		expect([...mgr.log.entries()]).toEqual(msgs);
+
+		// Steady state: the pipeline hands back the same converted objects every
+		// call; the on-the-wire history must not move.
+		mgr.syncMessages(msgs);
+		expect([...mgr.log.entries()]).toEqual(msgs);
+
+		// Growth: prefix entries keep their identity, only the tail is added.
+		const before = [...mgr.log.entries()];
+		const tail = { role: "assistant", content: "new turn" } as unknown as Message;
+		msgs.push(tail);
+		mgr.syncMessages(msgs);
+		let entries = mgr.log.entries();
+		expect(entries.length).toBe(msgs.length);
+		expect(entries[entries.length - 1]).toBe(tail);
+		for (let i = 0; i < before.length; i++) expect(entries[i]).toBe(before[i]);
+
+		// Rewrite: one message's bytes change (fresh fragment objects); the log
+		// keeps the byte-stable prefix and replaces everything from the change.
+		const split = 5;
+		const rewritten = msgs.map((m, i) =>
+			i === split ? ({ role: m.role, content: "[pruned]" } as unknown as Message) : m,
+		);
+		mgr.syncMessages(rewritten);
+		entries = mgr.log.entries();
+		for (let i = 0; i < split; i++) expect(entries[i]).toBe(before[i]);
+		for (let i = split; i < rewritten.length; i++) expect(entries[i]).toBe(rewritten[i]);
+
+		// Revert: the original bytes return as fresh objects; the wire must show
+		// exactly those bytes again, in order.
+		const reverted = structuredClone(rewritten);
+		reverted[split] = { role: "assistant", content: "a2" } as unknown as Message;
+		mgr.syncMessages(reverted);
+		expect([...mgr.log.entries()]).toEqual(reverted);
+		const built = mgr.build(makeContext(), BUILD_OPTS);
+		expect(built.messages).toEqual(reverted);
+	});
+
+	it("re-syncs an in-place rewritten message once invalidation bumps its version", () => {
+		const mgr = new AppendOnlyContextManager();
+		mgr.build(makeContext(), BUILD_OPTS);
+
+		const raw = { role: "assistant", content: [{ type: "text", text: "original" }] };
+		const msg = raw as unknown as Message;
+		mgr.syncMessages([msg]);
+		expect(mgr.log.entries()[0]).toBe(msg);
+
+		// Owner-side in-place rewrite under stable identity (prune/shake/
+		// strip-images seam): the log aliases the very object being mutated, so
+		// the memo must not keep serving pre-mutation bytes.
+		raw.content = [{ type: "text", text: "[redacted]" }];
+		invalidateMessageCache(msg);
+		mgr.syncMessages([msg]);
+		expect(mgr.log.entries()[0]).toBe(msg);
+
+		// A later replay restores the ORIGINAL bytes as a fresh object. The
+		// manager must diverge here and put the replayed bytes on the wire —
+		// not the stale aliased object whose digest matched the old bytes.
+		const reverted = {
+			role: "assistant",
+			content: [{ type: "text", text: "original" }],
+		} as unknown as Message;
+		mgr.syncMessages([reverted]);
+		const built = mgr.build(makeContext(), BUILD_OPTS);
+		expect(built.messages[0]).toBe(reverted);
+		expect(built.messages[0]!.content).toEqual([{ type: "text", text: "original" }]);
+	});
+
+	it("treats fresh-object clones with identical bytes as stable and still detects real rewrites", () => {
+		const mgr = new AppendOnlyContextManager();
+		mgr.build(makeContext(), BUILD_OPTS);
+
+		const originals = [
+			{ role: "user", content: "q1" },
+			{ role: "assistant", content: "a1" },
+		] as unknown as Message[];
+		mgr.syncMessages(originals);
+
+		// Every call can re-normalize history into fresh objects (cerebras
+		// thinking-strip, transformContext re-render); identical bytes must keep
+		// the on-the-wire prefix objects stable.
+		const clones = structuredClone(originals);
+		mgr.syncMessages(clones);
+		let entries = mgr.log.entries();
+		expect(entries[0]).toBe(originals[0]);
+		expect(entries[1]).toBe(originals[1]);
+
+		// A real byte rewrite reaches sync as fresh fragment objects (owner
+		// invalidation recomputes the cached conversion) and must still diverge
+		// at exactly the changed message.
+		const rewritten = structuredClone(originals);
+		rewritten[1].content = "[pruned]";
+		mgr.syncMessages(rewritten);
+		entries = mgr.log.entries();
+		expect(entries[0]).toBe(originals[0]);
+		expect(entries[1]).toBe(rewritten[1]);
 	});
 });
 

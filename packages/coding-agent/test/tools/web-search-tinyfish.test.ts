@@ -1,27 +1,54 @@
-import { describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it, vi } from "bun:test";
 import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { searchTinyFish } from "@oh-my-pi/pi-coding-agent/web/search/providers/tinyfish";
 import { SearchProviderError } from "@oh-my-pi/pi-coding-agent/web/search/types";
+import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
 const TEST_KEY = "test-tinyfish-key";
 
-function makeAuthStorage(apiKey: string | undefined): AuthStorage {
-	return {
-		resolver(provider: string, options?: { sessionId?: string }) {
-			expect(provider).toBe("tinyfish");
-			expect(options?.sessionId).toBe("session-tinyfish-test");
-			return async () => apiKey;
-		},
-		hasAuth(provider: string) {
-			return provider === "tinyfish" && Boolean(apiKey);
-		},
-	} as unknown as AuthStorage;
+function createTinyFishFixture(authStorage: AuthStorage) {
+	const modelRegistry = new ModelRegistry(authStorage);
+	const model = modelRegistry.find("web", "tinyfish");
+	if (!model) throw new Error("Expected bundled web/tinyfish model");
+	return { model, modelRegistry };
 }
 
-function makeParams(query: string, authStorage: AuthStorage = makeAuthStorage(TEST_KEY)) {
+const providerAuthStorage = createInMemoryAuthStorage();
+providerAuthStorage.keys.setRuntime("tinyfish", TEST_KEY);
+const providerFixture = createTinyFishFixture(providerAuthStorage);
+const providerResolverSpy = vi.spyOn(providerAuthStorage.keys, "resolver").mockImplementation((provider, options) => {
+	expect(provider).toBe("tinyfish");
+	expect(options?.sessionId).toBe("session-tinyfish-test");
+	return async () => TEST_KEY;
+});
+
+const missingAuthStorage = createInMemoryAuthStorage();
+const missingFixture = createTinyFishFixture(missingAuthStorage);
+const missingResolverSpy = vi.spyOn(missingAuthStorage.keys, "resolver").mockImplementation((provider, options) => {
+	expect(provider).toBe("tinyfish");
+	expect(options?.sessionId).toBe("session-tinyfish-test");
+	return async () => undefined;
+});
+
+afterAll(() => {
+	providerResolverSpy.mockRestore();
+	missingResolverSpy.mockRestore();
+	providerAuthStorage.close();
+	missingAuthStorage.close();
+});
+
+function makeParams(query: string, authStorage: AuthStorage = providerAuthStorage) {
+	const fixture =
+		authStorage === providerAuthStorage
+			? providerFixture
+			: authStorage === missingAuthStorage
+				? missingFixture
+				: createTinyFishFixture(authStorage);
 	return {
 		query,
 		authStorage,
+		...fixture,
 		systemPrompt: "TinyFish test prompt",
 		sessionId: "session-tinyfish-test",
 	} as const;
@@ -105,6 +132,64 @@ describe("TinyFish web search provider", () => {
 
 		expect(captured).toHaveLength(1);
 		expect(captured[0].searchParams.get("query")).toBe("plain query with ordinary words");
+	});
+
+	it("maps a lang: locale directive onto location and language", async () => {
+		const captured: URL[] = [];
+		const fetchMock: FetchImpl = async input => {
+			const url = input instanceof URL ? input : new URL(typeof input === "string" ? input : input.url);
+			captured.push(url);
+			return new Response(JSON.stringify(tinyFishPage(tinyFishResults("tinyfish", 3))), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		};
+
+		await searchTinyFish({ ...makeParams("Best Cheap Android Tablet lang:it-it"), fetch: fetchMock });
+
+		expect(captured).toHaveLength(1);
+		expect(captured[0].searchParams.get("query")).toBe("Best Cheap Android Tablet");
+		expect(captured[0].searchParams.get("location")).toBe("IT");
+		expect(captured[0].searchParams.get("language")).toBe("it");
+		expectTinyFishParams(captured[0], ["query", "num_results", "page", "location", "language"]);
+	});
+
+	it("sends language only when the lang: directive omits a region", async () => {
+		const captured: URL[] = [];
+		const fetchMock: FetchImpl = async input => {
+			const url = input instanceof URL ? input : new URL(typeof input === "string" ? input : input.url);
+			captured.push(url);
+			return new Response(JSON.stringify(tinyFishPage(tinyFishResults("tinyfish", 3))), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		};
+
+		await searchTinyFish({ ...makeParams("cheap tablets lang:it"), fetch: fetchMock });
+
+		expect(captured).toHaveLength(1);
+		expect(captured[0].searchParams.get("language")).toBe("it");
+		expect(captured[0].searchParams.has("location")).toBe(false);
+		expectTinyFishParams(captured[0], ["query", "num_results", "page", "language"]);
+	});
+
+	it("never maps a script subtag onto location", async () => {
+		const captured: URL[] = [];
+		const fetchMock: FetchImpl = async input => {
+			const url = input instanceof URL ? input : new URL(typeof input === "string" ? input : input.url);
+			captured.push(url);
+			return new Response(JSON.stringify(tinyFishPage(tinyFishResults("tinyfish", 3))), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		};
+
+		await searchTinyFish({ ...makeParams("cheap tablets lang:zh-hans"), fetch: fetchMock });
+
+		expect(captured).toHaveLength(1);
+		expect(captured[0].searchParams.get("language")).toBe("zh");
+		expect(captured[0].searchParams.has("location")).toBe(false);
+		expectTinyFishParams(captured[0], ["query", "num_results", "page", "language"]);
 	});
 
 	it("passes TinyFish num_results and applies numSearchResults across pages", async () => {
@@ -377,7 +462,7 @@ describe("TinyFish web search provider", () => {
 		};
 
 		try {
-			await searchTinyFish({ ...makeParams("missing creds", makeAuthStorage(undefined)), fetch: fetchMock });
+			await searchTinyFish({ ...makeParams("missing creds", missingAuthStorage), fetch: fetchMock });
 			expect.unreachable("expected searchTinyFish to throw");
 		} catch (error) {
 			expect(error).toBeInstanceOf(Error);

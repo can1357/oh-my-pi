@@ -1,5 +1,16 @@
 import { describe, expect, test } from "bun:test";
-import { diffLineRuns, diffLines, diffWords, type PatchHunk, structuredPatchHunks } from "@oh-my-pi/pi-natives";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import {
+	DiffSide,
+	DiffStream,
+	diffLineRuns,
+	diffLines,
+	diffWords,
+	type PatchHunk,
+	structuredPatchHunks,
+} from "@oh-my-pi/pi-natives";
 
 function applyHunks(oldText: string, hunks: PatchHunk[]): string {
 	if (hunks.length === 0) return oldText;
@@ -127,6 +138,43 @@ function mutate(rng: () => number, text: string, density: number) {
 }
 
 describe("native diff correctness", () => {
+	test("streamed chunks produce the exact complete-file hunks", async () => {
+		const oldText = "same\nold 🚀\ntail\n";
+		const newText = "same\nnew 🚀\ntail\n";
+		const encoder = new TextEncoder();
+		const oldBytes = encoder.encode(oldText);
+		const newBytes = encoder.encode(newText);
+		const stream = new DiffStream();
+		stream.pushBytes(DiffSide.Old, oldBytes.subarray(0, 11));
+		stream.pushBytes(DiffSide.Old, oldBytes.subarray(11));
+		stream.pushBytes(DiffSide.New, newBytes.subarray(0, 11));
+		stream.pushBytes(DiffSide.New, newBytes.subarray(11));
+		expect(stream.progress().stableCommonLines).toBe(1);
+		stream.finishSide(DiffSide.Old);
+		stream.finishSide(DiffSide.New);
+
+		const result = await stream.finish(3);
+		expect(result.hunks).toEqual(structuredPatchHunks(oldText, newText, 3));
+		expect(stream.text(DiffSide.Old)).toBe(oldText);
+		expect(stream.text(DiffSide.New)).toBe(newText);
+		expect(stream.lines(DiffSide.New, 1, 1)).toEqual(["new 🚀"]);
+	});
+
+	test("native file open streams complete lines without a JS file read", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-diff-stream-"));
+		const file = path.join(dir, "source.txt");
+		try {
+			await Bun.write(file, "first\nsecond\n");
+			const stream = new DiffStream();
+			stream.finishSide(DiffSide.Old);
+			await stream.openFile(DiffSide.New, file, 1024);
+			expect(stream.progress()).toMatchObject({ newDone: true, newLines: 2, tooLarge: false });
+			expect(stream.lines(DiffSide.New, 0)).toEqual(["first", "second"]);
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
 	test("fixed edge cases", () => {
 		verifyDiffInvariants("", "");
 		verifyDiffInvariants("", "a\nb\n");

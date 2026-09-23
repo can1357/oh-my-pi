@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import { prompt, Snowflake } from "@oh-my-pi/pi-utils";
+import { prompt, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
 import backgroundTanDispatchPrompt from "../../prompts/system/background-tan-dispatch.md" with { type: "text" };
 import tanContextSwitchPrompt from "../../prompts/system/tan-context-switch.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
@@ -75,8 +75,19 @@ export class TanCommandController {
 		const parentPromptCacheKey = session.agent.promptCacheKey ?? parentSessionId;
 		const thinkingLevel = session.configuredThinkingLevel();
 		const systemPrompt = [...session.systemPrompt];
-		const toolNames = session.getActiveToolNames();
+		const toolNames = session.getEnabledToolNames();
 		const modelRegistry = session.modelRegistry;
+		// Snapshot the parent's rebindable extensions and root policy at dispatch.
+		// The child rebinds these (skipping discovery) so it re-registers the
+		// parent's runtime providers on the shared model registry before the SDK's
+		// syncExtensionSources prune runs — without this the child builds an empty
+		// extension set and unregisters the parent's provider auth (no-key error).
+		const parentPreparedExtensions = session.preparedExtensions;
+		// Path-list fallback for the (rare) parent build path that produced no
+		// prepared factories; the child rebinds from paths so it still re-registers
+		// providers rather than pruning the shared registry from an empty set.
+		const parentExtensionPaths = session.extensionPaths;
+		const parentExtensionRoots = session.effectiveExtensionRoots;
 		const ownerId = session.getAgentId() ?? MAIN_AGENT_ID;
 		const mcpManager = this.ctx.mcpManager;
 		const cwd = this.ctx.sessionManager.getCwd();
@@ -111,8 +122,18 @@ export class TanCommandController {
 		let jobId = "";
 		try {
 			const cloneManager = await SessionManager.forkFrom(parentFile, cwd, sessionDir, undefined, {
+				copyArtifacts: false,
 				suppressBreadcrumb: true,
 				sessionFile: cloneFile,
+				// A tan is a fresh agent forking the parent's transcript only for
+				// context; its cost must reflect its own work, not the parent's
+				// accumulated spend that session cost is otherwise derived from.
+				resetInheritedCost: true,
+				// The parent may be mid-turn: pair any tool call it left unresolved
+				// with a synthetic aborted result so the clone inherits a terminal
+				// transcript instead of rendering the parent's in-flight call as its
+				// own pending work (issue #11118).
+				repairInterruptedTail: true,
 			});
 
 			jobId = manager.register(
@@ -145,13 +166,20 @@ export class TanCommandController {
 							parentAgentId: ownerId,
 							agentRegistry,
 							disableExtensionDiscovery: true,
+							// `[]` is truthy and would make the child pick bindPreparedExtensions([])
+							// over a populated path fallback, so collapse an empty list to undefined.
+							preloadedPreparedExtensions: parentPreparedExtensions?.length
+								? parentPreparedExtensions
+								: undefined,
+							preloadedExtensionPaths: parentExtensionPaths?.length ? [...parentExtensionPaths] : undefined,
+							extensionRoots: () => parentExtensionRoots,
 							localProtocolOptions,
 						});
 						clone = created.session;
 						clone.sessionManager?.appendSessionInit?.({
 							systemPrompt: clone.systemPrompt ? clone.systemPrompt.join("\n\n") : systemPrompt.join("\n\n"),
 							task: trimmedWork,
-							tools: clone.getActiveToolNames ? clone.getActiveToolNames() : toolNames,
+							tools: clone.getEnabledToolNames(),
 						});
 						const abortClone = () => {
 							void clone?.abort();
@@ -170,14 +198,45 @@ export class TanCommandController {
 								timestamp: Date.now(),
 							});
 						};
-						// Compaction summarizes the fork notice away with the rest of the
-						// history, after which the clone re-adopts the parent's task as its
-						// own (the summary blends both). Re-inject after every successful
-						// compaction so the fork boundary survives summarization.
+						// The fork's request enters the transcript only once the initial
+						// prompt dispatches (its first `agent_start`). Compaction that
+						// fires before then is the pre-prompt pass on the inherited
+						// context: the pending request has not been appended yet and the
+						// dispatch adds it immediately after, so restoring it here would
+						// send the assignment twice — re-inject only the notice above it.
+						// Once the request is in history, restore the notice and request
+						// together only when summarization actually dropped the request:
+						// the notice must never claim a request that no longer follows it,
+						// and a request the summarizer kept (a recent turn within
+						// `compaction.keepRecentTokens`, or a prior re-injection still
+						// live) must not be duplicated onto the tail, which would present
+						// the same assignment again and risk restarting completed work.
+						let requestDispatched = false;
 						const unsubscribeCompaction = clone.subscribe(event => {
-							if (event.type === "auto_compaction_end" && event.result && !event.aborted) {
-								injectContextSwitch();
+							if (event.type === "agent_start") {
+								requestDispatched = true;
+								return;
 							}
+							if (event.type !== "auto_compaction_end" || !event.result || event.aborted) return;
+							if (!requestDispatched) {
+								injectContextSwitch();
+								return;
+							}
+							const requestRetained = (clone?.agent.state.messages ?? []).some(message => {
+								if (message.role !== "user") return false;
+								const content = message.content;
+								return typeof content === "string"
+									? content === trimmedWork
+									: content.some(part => part.type === "text" && part.text === trimmedWork);
+							});
+							if (requestRetained) return;
+							injectContextSwitch();
+							clone?.agent.appendMessage({
+								role: "user",
+								content: [{ type: "text", text: trimmedWork }],
+								attribution: "user",
+								timestamp: Date.now(),
+							});
 						});
 						try {
 							if (signal.aborted) {
@@ -190,6 +249,10 @@ export class TanCommandController {
 							injectContextSwitch();
 							await clone.prompt(trimmedWork, { attribution: "user" });
 							await clone.waitForIdle();
+							while (clone.hasPendingAsyncWork()) {
+								if (signal.aborted) throw new Error("Aborted while settling descendant work");
+								await untilAborted(signal, clone.settleAsyncWork());
+							}
 							return extractAssistantText(clone.getLastAssistantMessage()) || "(no output)";
 						} finally {
 							unsubscribeCompaction();

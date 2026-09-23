@@ -7,6 +7,7 @@
  */
 
 import type { Type } from "@oh-my-pi/omptype";
+import { structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import type { Tool, TSchema } from "../../types";
 import { upgradeJsonSchemaTo202012 } from "./draft";
 import { stamp } from "./stamps";
@@ -107,7 +108,7 @@ function arkJsonAstToWire(value: unknown): unknown {
 	return {};
 }
 
-/** Symbol-stamped caches keyed by schema object identity. */
+/** `stamp` cache keys; the entries themselves live in a weak side table keyed by schema identity. */
 const kJsonWireSchema = Symbol("pi.schema.json.wire");
 const kArkWireSchema = Symbol("pi.schema.ark.wire");
 const kStrippedSchema = Symbol("pi.schema.descriptions.stripped");
@@ -202,6 +203,37 @@ function rewriteNullableScalarAnyOf(schema: Record<string, unknown>): void {
 	delete schema.anyOf;
 	copyNullableScalarConstraints(schema, scalarVariant);
 	schema.type = [scalarType, "null"];
+}
+
+function isExclusiveRequiredBranch(branch: unknown): boolean {
+	if (!isSchemaRecord(branch)) return false;
+	if (Object.hasOwn(branch, "type")) return false;
+	if (!Array.isArray(branch.required) || branch.required.length === 0) return false;
+	if (!branch.required.every(name => typeof name === "string" && name.length > 0)) return false;
+	for (const key in branch) {
+		if (!Object.hasOwn(branch, key)) continue;
+		if (key === "required" || key === "description" || key === "title") continue;
+		return false;
+	}
+	return true;
+}
+
+/**
+ * Return an xAI-compatible copy of an object-root schema whose union consists
+ * only of typeless required-key fragments. Other providers must retain the
+ * union because it is a real model-facing constraint.
+ */
+export function flattenExclusiveRequiredRootUnion(schema: Record<string, unknown>): Record<string, unknown> {
+	const unionKey = Array.isArray(schema.anyOf) ? "anyOf" : Array.isArray(schema.oneOf) ? "oneOf" : undefined;
+	if (!unionKey) return schema;
+	const union = schema[unionKey];
+	if (!Array.isArray(union) || union.length === 0) return schema;
+	const typedObject = schema.type === "object" || (Array.isArray(schema.type) && schema.type.includes("object"));
+	if (!typedObject && !isSchemaRecord(schema.properties)) return schema;
+	if (!union.every(isExclusiveRequiredBranch)) return schema;
+	const flattened = { ...schema };
+	delete flattened[unionKey];
+	return flattened;
 }
 
 /** Keys whose values are a single JSON Schema (not an array or map). */
@@ -571,7 +603,9 @@ export function toolWireSchema(tool: Tool): Record<string, unknown> {
 	const params: TSchema = tool.parameters;
 	if (isArkSchema(params)) return arkToWireSchema(params);
 	return stamp(params as Record<string, unknown>, kJsonWireSchema, p => {
-		const raw = isArkJsonAst(p) ? arkJsonAstToWire(p) : p;
+		// Legacy schemas may carry non-cloneable metadata (helper functions); the JSON
+		// fallback drops it the same way the wire serializer always has.
+		const raw = isArkJsonAst(p) ? arkJsonAstToWire(p) : structuredCloneJSON(p);
 		const upgraded = upgradeJsonSchemaTo202012(raw) as Record<string, unknown>;
 		return postProcessJsonSchema(upgraded);
 	});
@@ -632,10 +666,9 @@ function stripSchemaDescriptionsInPlace(node: unknown): void {
 
 /**
  * Return a deep clone of `schema` with every `description` annotation removed.
- * The result is memoized on the input via a non-enumerable symbol (`stamp`) so
- * repeated provider requests reuse the same stripped object; the input is never
- * mutated, so the stamped `toolWireSchema` cache stays intact for
- * system-prompt/UI rendering.
+ * The result is memoized against the input (`stamp`) so repeated provider
+ * requests reuse the same stripped object; the input is never mutated, so the
+ * memoized `toolWireSchema` result stays intact for system-prompt/UI rendering.
  */
 export function stripSchemaDescriptions(schema: Record<string, unknown>): Record<string, unknown> {
 	return stamp(schema, kStrippedSchema, source => {
@@ -651,7 +684,7 @@ export function stripSchemaDescriptions(schema: Record<string, unknown>): Record
  * Used when the full tool catalog is rendered into the system prompt instead, so
  * the descriptions ride the wire once (in the prompt) rather than duplicated on
  * every tool definition. Parameters are resolved to wire JSON Schema and cloned,
- * leaving the original tool objects and the stamped schema cache untouched.
+ * leaving the original tool objects and the memoized schema cache untouched.
  */
 export function stripToolDescriptions(tools: readonly Tool[]): Tool[] {
 	return tools.map(tool => ({

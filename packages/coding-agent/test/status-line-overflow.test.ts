@@ -3,16 +3,19 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { StatusLineSegmentId } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
-import { StatusLineComponent } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
-import type { SegmentContext } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/segments";
-import { renderSegment } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/segments";
-import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { getSessionAccentAnsi, getSessionAccentHex } from "@oh-my-pi/pi-coding-agent/utils/session-color";
+import type { StatusLineSegmentId } from "@oh-my-pi/pi-tui/status-line/schema";
+import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
+import { statusLineHost } from "@oh-my-pi/pi-coding-agent/modes/status-line-host";
+import type { SegmentContext } from "@oh-my-pi/pi-tui/status-line/segments";
+import { renderSegment } from "@oh-my-pi/pi-tui/status-line/segments";
+import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
+import { getSessionAccentAnsi, getSessionAccentHex } from "@oh-my-pi/pi-tui/theme/session-color";
 import { visibleWidth } from "@oh-my-pi/pi-tui";
 import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
+import { StatusLineTestComponents } from "./helpers/status-line";
 
 const originalProjectDir = getProjectDir();
+const statusLines = new StatusLineTestComponents();
 
 beforeAll(async () => {
 	resetSettingsForTest();
@@ -21,6 +24,7 @@ beforeAll(async () => {
 });
 
 afterAll(() => {
+	statusLines.dispose();
 	resetSettingsForTest();
 	setProjectDir(originalProjectDir);
 });
@@ -31,6 +35,7 @@ function createCtx(overrides?: {
 	branch?: string | null;
 	sessionName?: string;
 	sessionAccent?: boolean;
+	previewTitle?: string;
 }): SegmentContext {
 	const hasName = overrides?.sessionName !== undefined;
 	return {
@@ -41,6 +46,7 @@ function createCtx(overrides?: {
 			sessionManager: hasName ? { getSessionName: () => overrides.sessionName } : undefined,
 		} as unknown as SegmentContext["session"],
 		sessionAccent: overrides?.sessionAccent,
+		previewTitle: overrides?.previewTitle,
 		width: 120,
 		compactThinkingLevel: false,
 		options: {
@@ -55,7 +61,10 @@ function createCtx(overrides?: {
 		prewalk: null,
 		goalMode: null,
 		vibeMode: null,
+		vim: null,
 		collab: null,
+		stream: null,
+		recording: false,
 		usageStats: {
 			input: 0,
 			output: 0,
@@ -73,8 +82,11 @@ function createCtx(overrides?: {
 		contextTokens: 0,
 		contextWindow: 0,
 		autoCompactEnabled: false,
+		compactionSpeculation: "idle",
+		speculationBlinkOn: true,
 		subagentCount: 0,
 		activeMs: 0,
+		turnElapsedMs: null,
 		activeRepo: null,
 		worktree: null,
 		git: {
@@ -132,7 +144,9 @@ function stripAnsi(value: string): string {
 
 describe("status line session accent", () => {
 	function buildComponent(sessionAccent: boolean) {
-		const component = new StatusLineComponent(createStatusLineSession("Named session"));
+		const component = statusLines.track(
+			new StatusLineComponent(createStatusLineSession("Named session"), statusLineHost),
+		);
 		component.updateSettings({
 			preset: "custom",
 			leftSegments: ["pi"],
@@ -145,9 +159,7 @@ describe("status line session accent", () => {
 
 	// Computed lazily: `theme` is assigned by initTheme() in beforeAll, after module evaluation.
 	const accentAnsi = (): string => {
-		const ansi = getSessionAccentAnsi(
-			getSessionAccentHex("Named session", theme.getMajorThemeColorHexes(), theme.accentSurfaceLuminance),
-		);
+		const ansi = getSessionAccentAnsi(getSessionAccentHex("Named session", theme.sessionAccentInputs));
 		if (!ansi) throw new Error("expected a session accent ANSI sequence for the test theme");
 		return ansi;
 	};
@@ -190,9 +202,41 @@ describe("status line session accent", () => {
 	});
 });
 
+describe("session_name preview-title fallback", () => {
+	it("renders the stand-in title when the session is unnamed", () => {
+		const seg = renderSegment("session_name", createCtx({ previewTitle: "omp" }));
+		expect(seg.visible).toBe(true);
+		expect(stripAnsi(seg.content)).toBe("omp");
+	});
+
+	it("prefers the real session name over the stand-in", () => {
+		const seg = renderSegment("session_name", createCtx({ sessionName: "Named session", previewTitle: "omp" }));
+		expect(stripAnsi(seg.content)).toBe("Named session");
+	});
+
+	it("right-aligns the stand-in title through the box border pipeline", () => {
+		const component = statusLines.track(new StatusLineComponent(createStatusLineSession(""), statusLineHost));
+		component.updateSettings({
+			preset: "custom",
+			leftSegments: ["pi"],
+			rightSegments: ["session_name"],
+			separator: "powerline-thin",
+			sessionAccent: false,
+		});
+		const withTitle = component.getTopBorder(80, "omp");
+		// The gauge fill pads the group gap, so the title chip lands flush right.
+		expect(withTitle.width).toBe(80);
+		expect(stripAnsi(withTitle.content).trimEnd().endsWith("omp")).toBe(true);
+		// Live render path passes no preview title: unnamed sessions show none.
+		expect(stripAnsi(component.getTopBorder(80).content)).not.toContain("omp");
+	});
+});
+
 describe("status line focused-agent dimming", () => {
 	it("keeps powerline end caps at full intensity while text stays dimmed", () => {
-		const component = new StatusLineComponent(createStatusLineSession("Focused session"));
+		const component = statusLines.track(
+			new StatusLineComponent(createStatusLineSession("Focused session"), statusLineHost),
+		);
 		component.updateSettings({
 			preset: "custom",
 			leftSegments: ["pi"],
@@ -428,7 +472,7 @@ describe("overflow: path survives before model", () => {
 
 		const modelName = `MODEL_SHOULD_DROP_${"x".repeat(24)}`;
 		const session = createStatusLineSession("overflow test", modelName);
-		const component = new StatusLineComponent(session);
+		const component = statusLines.track(new StatusLineComponent(session, statusLineHost));
 		const pathOptions = {
 			abbreviate: false,
 			maxLength: 32,

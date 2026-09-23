@@ -8,13 +8,14 @@ The root `Cargo.toml` lists every crate under `crates/` explicitly in `workspace
 
 | Crate           | Path                                              | Role and consumers                                                                                                                                              |
 | --------------- | ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pi-natives`    | [`crates/pi-natives`](../crates/pi-natives)       | Top-level N-API `cdylib`. It exposes the JS-visible API and depends on `pi-ast`, `pi-iso`, `pi-shell`, `pi-voice`, and `pi-walker`.                              |
+| `pi-natives`    | [`crates/pi-natives`](../crates/pi-natives)       | Top-level N-API `cdylib`. It exposes the JS-visible API and depends on `pi-ast`, `pi-iso`, `pi-shell`, `pi-vcs`, `pi-voice`, and `pi-walker`.                    |
 | `pi-builtins`   | [`crates/pi-builtins`](../crates/pi-builtins)     | Every builtin the embedded shell installs: a patched fork of brush's POSIX/bash builtins, plus one module per in-process command-line utility (`cat`, `grep`/`rg`, `sed`, `ls`, `find`, `jq`, `fd`, `diff`, `ps`, `top`, `kill`, the moreutils set, …). `src/host.rs` holds the `Utility` trait and the `Host` view of the shell (stdio, working directory, exported environment, cancellation) that the utilities run against. Ports of uutils coreutils/findutils/sed and jaq live here too; see the crate `LICENSE` for third-party notices. |
 | `pi-shell`      | [`crates/pi-shell`](../crates/pi-shell)           | Persistent embedded brush shell, command execution/minimization, process plumbing, filesystem walking, and in-process command integration used by `pi-natives`. |
 | `pi-voice`      | [`crates/pi-voice`](../crates/pi-voice)           | Cross-platform microphone/playback and Opus/WebRTC support used by the `AudioCapture`, `AudioPlayback`, and `LiveWebRtcPeer` bindings.                          |
 | `pi-ast`        | [`crates/pi-ast`](../crates/pi-ast)               | tree-sitter/ast-grep language registry, matching/editing, block analysis, and summarization support across the workspace grammar set.                           |
 | `pi-iso`        | [`crates/pi-iso`](../crates/pi-iso)               | Isolation backend implementations and diffing for APFS, Linux/Windows clone/reflink paths, overlayfs, ProjFS, and recursive copy fallback.                      |
 | `pi-walker`     | [`crates/pi-walker`](../crates/pi-walker)         | Parallel, cache-aware filesystem walker using ignore rules and globsets; shared by native grep/glob/workspace paths and shell commands.                         |
+| `pi-vcs`        | [`crates/pi-vcs`](../crates/pi-vcs)               | In-process version control: git on gitoxide (the git binary survives only for credential-bound network transfers and reftable repos) and Jujutsu on jj-lib; unified discovery and operations used by the `vcs*` native bindings. |
 
 ## Vendored workspace crates
 
@@ -29,7 +30,7 @@ The root `Cargo.toml` lists every crate under `crates/` explicitly in `workspace
 ```text
 @oh-my-pi/pi-natives JS entrypoints
   -> pi-natives (N-API conversion, platform bindings, task boundaries)
-       -> pi-ast / pi-iso / pi-voice / pi-walker
+       -> pi-ast / pi-iso / pi-vcs / pi-voice / pi-walker
        -> pi-shell
             -> brush-core (parser, expansion, interpreter)
             -> pi-builtins (bash builtins + utility builtins; host.rs: per-invocation I/O and cwd)

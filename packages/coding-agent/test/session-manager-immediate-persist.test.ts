@@ -198,6 +198,47 @@ describe("SessionManager JSONL software-crash durability", () => {
 		expect(toolResult).toBeDefined();
 	});
 
+	it("rewrites a malformed resumed tail before appending another entry", async () => {
+		const cwd = makeTempDir("@pi-malformed-tail-cwd-");
+		const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
+		manager.appendMessage(assistantMessage("seed"));
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		await manager.close();
+
+		fs.appendFileSync(sessionFile, '{"type":"message","id":"torn","message":{"role":"user","content":"lost');
+		const resumed = await SessionManager.open(sessionFile);
+		resumed.appendMessage({ role: "user", content: "after resume", timestamp: Date.now() });
+
+		const entries = readJsonl(sessionFile);
+		expect(entries.map(entryKind)).toEqual(["session", "assistant", "user"]);
+		expect(messageContent(entries[2] ?? {})).toBe("after resume");
+		await resumed.close();
+	});
+
+	it("rejects a corrupt session header without overwriting recoverable transcript bytes", async () => {
+		const cwd = makeTempDir("@pi-corrupt-header-cwd-");
+		const sessionFile = path.join(cwd, "corrupt-session.jsonl");
+		const original = [
+			"{broken header",
+			JSON.stringify({
+				type: "message",
+				id: "m1",
+				parentId: null,
+				timestamp: "2026-08-27T00:00:00.000Z",
+				message: { role: "user", content: "recover me", timestamp: 0 },
+			}),
+			"",
+		].join("\n");
+		fs.writeFileSync(sessionFile, original);
+		const originalBytes = fs.readFileSync(sessionFile);
+
+		await expect(SessionManager.open(sessionFile, undefined, undefined, { initialCwd: cwd })).rejects.toThrow(
+			"session header is missing or malformed",
+		);
+		expect(fs.readFileSync(sessionFile)).toEqual(originalBytes);
+	});
+
 	it("keeps pre-assistant sessions out of history during shutdown", async () => {
 		const cwd = makeTempDir("@pi-empty-session-cwd-");
 		const sessionDir = path.join(cwd, "sessions");
@@ -307,10 +348,7 @@ describe("SessionManager JSONL software-crash durability", () => {
 		expect(afterKinds).toEqual(crashKinds);
 	});
 
-	it("latches the first hot-path write failure before append returns", () => {
-		// H2: async append + discarded Promise meant ENOSPC/EIO only latched after a
-		// later flush/append. appendSync must latch `#diskFailure` on the first call
-		// without throwing through unguarded turn-loop callers.
+	it("alerts once and retries all in-memory entries after a transient write failure", () => {
 		const cwd = makeTempDir("@pi-write-fail-cwd-");
 		const sessionDir = path.join(cwd, "sessions");
 		const manager = SessionManager.create(cwd, sessionDir);
@@ -320,40 +358,91 @@ describe("SessionManager JSONL software-crash durability", () => {
 		manager.appendMessage(assistantMessage("seed"));
 		manager.appendMessage({ role: "user", content: "ok-user", timestamp: Date.now() });
 
-		let failWrites = true;
-		const origWrite = fs.writeSync.bind(fs) as typeof fs.writeSync;
-		const writeSpy = spyOn(fs, "writeSync").mockImplementation(((...args: Parameters<typeof fs.writeSync>) => {
-			if (failWrites) {
-				const err = new Error("ENOSPC: no space left on device") as NodeJS.ErrnoException;
-				err.code = "ENOSPC";
-				throw err;
-			}
-			return origWrite(...args);
-		}) as typeof fs.writeSync);
+		const writeSpy = spyOn(fs, "writeSync").mockImplementation(() => {
+			throw Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
+		});
+		const failures: Error[] = [];
+		manager.onPersistenceError(error => {
+			failures.push(error);
+		});
 
 		try {
-			let threw = false;
-			try {
-				manager.appendMessage({ role: "user", content: "should-fail-user", timestamp: Date.now() });
-			} catch {
-				threw = true;
-			}
-			// Unguarded turn-loop contract: appendMessage itself must not throw.
-			expect(threw).toBe(false);
-
-			// Failure is latched before return — flushSync / next append surface it.
+			expect(() =>
+				manager.appendMessage({ role: "user", content: "failed-user", timestamp: Date.now() }),
+			).not.toThrow();
 			expect(() => manager.flushSync()).toThrow("ENOSPC");
-			expect(() => manager.appendMessage({ role: "user", content: "next-user", timestamp: Date.now() })).toThrow(
-				"ENOSPC",
-			);
+			expect(failures).toHaveLength(1);
 
-			const users = parseJsonlLenient<Record<string, unknown>>(fs.readFileSync(sessionFile, "utf8"))
+			writeSpy.mockRestore();
+			expect(() =>
+				manager.appendMessage({ role: "user", content: "recovered-user", timestamp: Date.now() }),
+			).not.toThrow();
+			expect(() => manager.flushSync()).not.toThrow();
+
+			const users = readJsonl(sessionFile)
 				.filter(entry => entry.type === "message" && messageRole(entry) === "user")
 				.map(entry => messageContent(entry));
-			expect(users).toEqual(["ok-user"]);
+			expect(users).toEqual(["ok-user", "failed-user", "recovered-user"]);
+			expect(failures).toHaveLength(1);
 		} finally {
-			failWrites = false;
 			writeSpy.mockRestore();
 		}
+	});
+
+	it("reparents metadata children when durably discarding an entry", async () => {
+		const cwd = makeTempDir("@pi-discard-metadata-cwd-");
+		const sessionDir = path.join(cwd, "sessions");
+		const manager = SessionManager.create(cwd, sessionDir);
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file path");
+
+		const priorId = manager.appendMessage(assistantMessage("prior turn"));
+		const discardedId = manager.appendMessage(assistantMessage(""));
+		const serviceTierId = manager.appendServiceTierChange(null);
+		await manager.discardEntryDurably(discardedId);
+		await manager.close();
+
+		const reloaded = await SessionManager.open(sessionFile, sessionDir);
+		const branch = reloaded.getBranch();
+		expect(branch.some(entry => entry.id === discardedId)).toBe(false);
+		expect(branch).toContainEqual(expect.objectContaining({ id: serviceTierId, parentId: priorId }));
+		expect(branch.at(-1)).toMatchObject({
+			type: "branch_summary",
+			summary: "",
+			details: { kind: "discarded-entry-branch", discardedEntryId: discardedId },
+			parentId: serviceTierId,
+		});
+		await reloaded.close();
+	});
+
+	it("persists a branch marker when a discarded entry has content children", async () => {
+		const cwd = makeTempDir("@pi-discard-content-cwd-");
+		const sessionDir = path.join(cwd, "sessions");
+		const manager = SessionManager.create(cwd, sessionDir);
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file path");
+
+		const priorId = manager.appendMessage(assistantMessage("prior turn"));
+		const discardedId = manager.appendMessage(assistantMessage(""));
+		const contentChildId = manager.appendMessage({
+			role: "user",
+			content: "preserve off branch",
+			timestamp: Date.now(),
+		});
+		await manager.discardEntryDurably(discardedId);
+		await manager.close();
+
+		const reloaded = await SessionManager.open(sessionFile, sessionDir);
+		const branch = reloaded.getBranch();
+		expect(reloaded.getEntries()).toContainEqual(expect.objectContaining({ id: discardedId }));
+		expect(reloaded.getEntries()).toContainEqual(expect.objectContaining({ id: contentChildId }));
+		expect(branch.some(entry => entry.id === discardedId || entry.id === contentChildId)).toBe(false);
+		expect(branch.at(-1)).toMatchObject({
+			type: "branch_summary",
+			summary: "",
+			details: { kind: "discarded-entry-branch", discardedEntryId: discardedId },
+			parentId: priorId,
+		});
+		await reloaded.close();
 	});
 });

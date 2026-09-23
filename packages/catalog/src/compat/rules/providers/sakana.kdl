@@ -1,0 +1,54 @@
+// Provider-wire compat for "sakana"; regenerated from the frozen census using deployment contract selectors.
+
+provider "sakana" {
+	default-model "fugu"
+	env "SAKANA_API_KEY" "FUGU_API_KEY"
+	dynamic-models-authoritative #true
+	discovery label="Sakana AI"
+
+	// Sakana's documented Fugu models, bundled so the provider is usable when
+	// catalog generation has no live API key. If live `/v1/models` succeeds,
+	// Sakana is authoritative and stale seed ids must stay out. Fugu is the free
+	// router; Fugu Ultra carries the published tariff. Output limits are not
+	// documented (null); the Responses gateway returns no encrypted reasoning and
+	// streams long reasoning turns without keepalives.
+	seed api="openai-responses" base-url="https://api.sakana.ai/v1" bundle="fallback" {
+		model "fugu" name="Fugu" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1000000
+			thinking-mode "effort"
+			thinking-efforts "high" "max"
+			include-encrypted-reasoning #false
+			stream-idle-timeout-ms 0
+		}
+		model "fugu-ultra" name="Fugu Ultra" {
+			reasoning #true
+			input "text"
+			cost input=5 output=30 cache-read=0.5 cache-write=0
+			limits context=1000000
+			thinking-mode "effort"
+			thinking-efforts "high" "max"
+			include-encrypted-reasoning #false
+			stream-idle-timeout-ms 0
+		}
+		model "fugu-ultra-20260615" name="Fugu Ultra 20260615" {
+			reasoning #true
+			input "text"
+			cost input=5 output=30 cache-read=0.5 cache-write=0
+			limits context=1000000
+			thinking-mode "effort"
+			thinking-efforts "high" "max"
+			include-encrypted-reasoning #false
+			stream-idle-timeout-ms 0
+		}
+	}
+
+	include-encrypted-reasoning #false
+	stream-idle-timeout-ms 0
+	class "unknown" {
+		thinking-efforts "high" "max"
+		thinking-mode "effort"
+	}
+}

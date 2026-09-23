@@ -35,9 +35,11 @@ import {
 	normalizeMessagesForProvider,
 	normalizeTools,
 	resolveOwnedDialectFromEnv,
+	unpairedToolCallTail,
 } from "./agent-loop";
 import type { AppendOnlyContextManager } from "./append-only-context";
 import { isProviderRefusalMessage } from "./replay-policy";
+import { Tokenizer, tokenizerEncodingForModel } from "./tokenizer";
 import type {
 	AgentBeforeModelCall,
 	AgentContext,
@@ -49,6 +51,8 @@ import type {
 	AgentToolContext,
 	AgentTurnEndContext,
 	AsideMessage,
+	PrepareQueuedMessages,
+	SpeculativeToolExecutionConfig,
 	StreamFn,
 	ToolCallContext,
 	ToolChoiceDirective,
@@ -241,13 +245,22 @@ export interface AgentOptions {
 	 * Use for deobfuscating secrets or rewriting arguments.
 	 */
 	transformToolCallArguments?: (args: Record<string, unknown>, toolName: string) => Record<string, unknown>;
+	/** Host authorization and telemetry for opt-in speculative tool execution. */
+	speculativeToolExecution?: SpeculativeToolExecutionConfig;
 
 	/**
 	 * Resolve a tool call whose name matched no advertised tool. Lets hosts
 	 * route calls to tools exposed through side transports (e.g. `xd://`
 	 * device mounts) instead of failing with "Tool not found".
 	 */
-	resolveFallbackTool?: (name: string) => AgentTool<any> | undefined;
+	resolveFallbackTool?: (name: string, advertised: readonly AgentTool<any>[]) => AgentTool<any> | undefined;
+
+	/**
+	 * Names routable by {@link resolveFallbackTool} that the advertised set
+	 * omits (e.g. `xd://` device mounts), used only to suggest a target when a
+	 * call misses.
+	 */
+	suggestFallbackToolNames?: () => Iterable<string>;
 
 	/** Enable intent tracing schema injection/stripping in the harness. */
 	intentTracing?: boolean;
@@ -351,6 +364,13 @@ interface CursorToolResultEntry {
 	pending?: Promise<void>;
 }
 
+type QueuedMessageQueue = "steering" | "followUp";
+
+interface QueuedMessageClaim {
+	messages: AgentMessage[];
+	controller: AbortController;
+}
+
 export class Agent {
 	#state: AgentState = {
 		systemPrompt: [],
@@ -365,7 +385,7 @@ export class Agent {
 		pendingToolCalls: new Set<string>(),
 		error: undefined,
 	};
-
+	#tokenizer = new Tokenizer(this.#state.model);
 	#listeners = new Set<(e: AgentEvent) => void>();
 	#abortController?: AbortController;
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
@@ -373,6 +393,14 @@ export class Agent {
 	#transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
 	#steeringQueue: AgentMessage[] = [];
 	#followUpQueue: AgentMessage[] = [];
+	#queuedMessageClaims: Partial<Record<QueuedMessageQueue, QueuedMessageClaim>> = {};
+	/** Dequeued originals remain recoverable until their transcript events arrive. */
+	#queuedMessageDeliveries = new Set<{
+		queue: QueuedMessageQueue;
+		controller: AbortController | undefined;
+		messages: AgentMessage[];
+		next: number;
+	}>();
 	#steeringWaiters = new Set<() => void>();
 
 	#steeringMode: "all" | "one-at-a-time";
@@ -407,7 +435,9 @@ export class Agent {
 	#kimiApiFormat?: "openai" | "anthropic";
 	#preferWebsockets?: boolean;
 	#transformToolCallArguments?: (args: Record<string, unknown>, toolName: string) => Record<string, unknown>;
-	#resolveFallbackTool?: (name: string) => AgentTool<any> | undefined;
+	#speculativeToolExecution?: SpeculativeToolExecutionConfig;
+	#resolveFallbackTool?: (name: string, advertised: readonly AgentTool<any>[]) => AgentTool<any> | undefined;
+	#suggestFallbackToolNames?: () => Iterable<string>;
 	#intentTracing: boolean;
 	#pruneToolDescriptions: boolean;
 	#dialect?: Dialect;
@@ -433,9 +463,12 @@ export class Agent {
 
 	/** Buffered Cursor tool results with text length at time of call (for correct ordering) */
 	#cursorToolResultBuffer: CursorToolResultEntry[] = [];
+	#cursorToolResultDrain: CursorToolResultEntry[] | undefined;
 
 	streamFn: StreamFn;
 	getApiKey?: (model: Model) => Promise<ApiKey | undefined> | ApiKey | undefined;
+	/** Prepare actual queue deliveries after dequeue gates; commit runs only while ownership remains valid. */
+	prepareQueuedMessages?: PrepareQueuedMessages;
 	/**
 	 * Hook invoked after tool arguments are validated and before execution.
 	 * Reassign at any time to swap the implementation (e.g. on extension reload).
@@ -455,12 +488,18 @@ export class Agent {
 	 * Hook that peeks whether interrupting IRC asides are queued for the next boundary.
 	 */
 	hasIrcInterrupts?: AgentLoopConfig["hasIrcInterrupts"];
+	/**
+	 * Hook that peeks whether background completions (jobs, supervised processes)
+	 * are queued for the next boundary.
+	 */
+	hasBackgroundCompletions?: AgentLoopConfig["hasBackgroundCompletions"];
 
 	constructor(opts: AgentOptions = {}) {
 		this.#state = { ...this.#state, ...opts.initialState };
 		if (opts.initialState?.messages) this.#state.messages = opts.initialState.messages.slice();
 		if (opts.initialState?.pendingToolCalls)
 			this.#state.pendingToolCalls = new Set(opts.initialState.pendingToolCalls);
+		this.#syncTokenizer(this.#state.model);
 		this.#convertToLlm = opts.convertToLlm || defaultConvertToLlm;
 		this.#transformContext = opts.transformContext;
 		this.#steeringMode = opts.steeringMode || "one-at-a-time";
@@ -495,7 +534,9 @@ export class Agent {
 		this.#kimiApiFormat = opts.kimiApiFormat;
 		this.#preferWebsockets = opts.preferWebsockets;
 		this.#transformToolCallArguments = opts.transformToolCallArguments;
+		this.#speculativeToolExecution = opts.speculativeToolExecution;
 		this.#resolveFallbackTool = opts.resolveFallbackTool;
+		this.#suggestFallbackToolNames = opts.suggestFallbackToolNames;
 		this.#intentTracing = opts.intentTracing === true;
 		this.#pruneToolDescriptions = opts.pruneToolDescriptions === true;
 		this.#dialect = opts.dialect;
@@ -722,9 +763,27 @@ export class Agent {
 	set maxRetryDelayMs(value: number | undefined) {
 		this.#maxRetryDelayMs = value;
 	}
-
 	get state(): AgentState {
 		return this.#state;
+	}
+
+	/**
+	 * Tokenizer for the active model. The instance is replaced whenever the
+	 * active model's encoding changes (see {@link setModel}), so callers must
+	 * not cache it across model switches.
+	 */
+	get tokenizer(): Tokenizer {
+		return this.#tokenizer;
+	}
+
+	/**
+	 * Swap the tokenizer only when the encoding actually changes, so the warm
+	 * per-message memo survives same-encoding model switches.
+	 */
+	#syncTokenizer(model: Model | null | undefined): void {
+		if (tokenizerEncodingForModel(model) !== this.#tokenizer.encoding) {
+			this.#tokenizer = new Tokenizer(model);
+		}
 	}
 
 	get appendOnlyContext(): AppendOnlyContextManager | undefined {
@@ -810,16 +869,90 @@ export class Agent {
 		for (const hook of this.#beforeQueuedMessageDequeueHooks) await hook(signal);
 	}
 
-	async #dequeueSteeringMessagesAfterHooks(signal?: AbortSignal): Promise<AgentMessage[]> {
-		if (signal?.aborted || this.#steeringQueue.length === 0) return [];
+	async #dequeueSteeringMessagesAfterHooks(signal: AbortSignal): Promise<AgentMessage[]> {
+		if (signal.aborted || this.#steeringQueue.length === 0) return [];
 		await this.#runBeforeQueuedMessageDequeueHooks(signal);
-		return signal?.aborted ? [] : this.#dequeueSteeringMessages();
+		return signal.aborted ? [] : this.#prepareQueuedMessageBatch("steering", signal);
 	}
 
-	async #dequeueFollowUpMessagesAfterHooks(signal?: AbortSignal): Promise<AgentMessage[]> {
-		if (signal?.aborted || this.#followUpQueue.length === 0) return [];
+	async #dequeueFollowUpMessagesAfterHooks(signal: AbortSignal): Promise<AgentMessage[]> {
+		if (signal.aborted || this.#followUpQueue.length === 0) return [];
 		await this.#runBeforeQueuedMessageDequeueHooks(signal);
-		return signal?.aborted ? [] : this.#dequeueFollowUpMessages();
+		return signal.aborted ? [] : this.#prepareQueuedMessageBatch("followUp", signal);
+	}
+
+	async #prepareQueuedMessageBatch(queue: QueuedMessageQueue, signal: AbortSignal): Promise<AgentMessage[]> {
+		if (this.#queuedMessageClaims[queue]) return [];
+		const messages = queue === "steering" ? this.#dequeueSteeringMessages() : this.#dequeueFollowUpMessages();
+		const prepare = this.prepareQueuedMessages;
+		if (messages.length === 0) return messages;
+		const runController = this.#abortController;
+		if (!prepare) {
+			this.#queuedMessageDeliveries.add({ queue, controller: runController, messages, next: 0 });
+			return messages;
+		}
+
+		const claim: QueuedMessageClaim = { messages, controller: new AbortController() };
+		this.#queuedMessageClaims[queue] = claim;
+		const preparationSignal = AbortSignal.any([signal, claim.controller.signal]);
+		try {
+			const preparation = await prepare(messages, preparationSignal);
+			signal.throwIfAborted();
+			if (preparationSignal.aborted || this.#queuedMessageClaims[queue] !== claim) return [];
+			const additional = preparation?.commit();
+			if (preparationSignal.aborted || this.#queuedMessageClaims[queue] !== claim) return [];
+			if (preparation && additional === undefined) {
+				// Stop this attempt before the loop can immediately reclaim the restored batch.
+				runController?.abort();
+				throw new DOMException("Queued message preparation cancelled", "AbortError");
+			}
+			delete this.#queuedMessageClaims[queue];
+			this.#queuedMessageDeliveries.add({ queue, controller: runController, messages, next: 0 });
+			return additional?.length ? [...messages, ...additional] : messages;
+		} catch (error) {
+			if (signal.aborted) throw error;
+			if (preparationSignal.aborted || this.#queuedMessageClaims[queue] !== claim) return [];
+			throw error;
+		} finally {
+			if (this.#queuedMessageClaims[queue] === claim) this.#cancelQueuedMessagePreparation(queue, true);
+		}
+	}
+
+	#cancelQueuedMessagePreparation(queue: QueuedMessageQueue, restore = false): void {
+		if (!restore) {
+			for (const delivery of this.#queuedMessageDeliveries) {
+				if (delivery.queue === queue) this.#queuedMessageDeliveries.delete(delivery);
+			}
+		}
+		const claim = this.#queuedMessageClaims[queue];
+		if (!claim) return;
+		delete this.#queuedMessageClaims[queue];
+		if (restore) {
+			if (queue === "steering") {
+				this.#steeringQueue = [...claim.messages, ...this.#steeringQueue];
+				this.#notifySteeringWaiters();
+			} else {
+				this.#followUpQueue = [...claim.messages, ...this.#followUpQueue];
+			}
+		}
+		claim.controller.abort();
+	}
+
+	#restoreUndeliveredQueuedMessages(controller: AbortController): void {
+		if (this.#queuedMessageDeliveries.size === 0) return;
+		const restored: Record<QueuedMessageQueue, AgentMessage[]> = { steering: [], followUp: [] };
+		for (const delivery of this.#queuedMessageDeliveries) {
+			if (delivery.controller !== controller) continue;
+			this.#queuedMessageDeliveries.delete(delivery);
+			for (let i = delivery.next; i < delivery.messages.length; i++) {
+				restored[delivery.queue].push(delivery.messages[i]);
+			}
+		}
+		if (restored.steering.length > 0) {
+			this.#steeringQueue = [...restored.steering, ...this.#steeringQueue];
+			this.#notifySteeringWaiters();
+		}
+		if (restored.followUp.length > 0) this.#followUpQueue = [...restored.followUp, ...this.#followUpQueue];
 	}
 
 	setProviderResponseInterceptor(fn: SimpleStreamOptions["onResponse"] | undefined): void {
@@ -904,8 +1037,9 @@ export class Agent {
 		this.#state.systemPrompt = typeof v === "string" ? [v] : v;
 	}
 
-	setModel(m: Model) {
-		this.#state.model = m;
+	setModel(model: Model) {
+		this.#state.model = model;
+		this.#syncTokenizer(model);
 	}
 
 	setThinkingLevel(l: Effort | undefined) {
@@ -957,11 +1091,18 @@ export class Agent {
 	replaceQueues(steering: AgentMessage[], followUp: AgentMessage[]) {
 		this.#steeringQueue = steering.slice();
 		this.#followUpQueue = followUp.slice();
+		this.#cancelQueuedMessagePreparation("steering");
+		this.#cancelQueuedMessagePreparation("followUp");
 		this.#notifySteeringWaiters();
 	}
 
 	appendMessage(m: AgentMessage) {
 		this.#state.messages.push(m);
+		for (const delivery of this.#queuedMessageDeliveries) {
+			if (delivery.messages[delivery.next] !== m) continue;
+			if (++delivery.next === delivery.messages.length) this.#queuedMessageDeliveries.delete(delivery);
+			break;
+		}
 	}
 
 	popMessage(): AgentMessage | undefined {
@@ -991,11 +1132,13 @@ export class Agent {
 
 	clearSteeringQueue() {
 		this.#steeringQueue = [];
+		this.#cancelQueuedMessagePreparation("steering");
 		this.#notifySteeringWaiters();
 	}
 
 	clearFollowUpQueue() {
 		this.#followUpQueue = [];
+		this.#cancelQueuedMessagePreparation("followUp");
 	}
 
 	/**
@@ -1010,26 +1153,43 @@ export class Agent {
 	clearAllQueues() {
 		this.#steeringQueue = [];
 		this.#followUpQueue = [];
+		this.#cancelQueuedMessagePreparation("steering");
+		this.#cancelQueuedMessagePreparation("followUp");
 		this.#notifySteeringWaiters();
 		this.clearDeferredToolDirectives();
 	}
 
 	hasQueuedMessages(): boolean {
-		return this.#steeringQueue.length > 0 || this.#followUpQueue.length > 0;
+		return (
+			this.#steeringQueue.length > 0 ||
+			this.#followUpQueue.length > 0 ||
+			this.#queuedMessageClaims.steering !== undefined ||
+			this.#queuedMessageClaims.followUp !== undefined
+		);
 	}
 
 	/** Non-consuming view of the pending steering queue (insertion order, newest
 	 *  last). The session layer derives its queued-message display/count from
 	 *  this live view instead of a mirror, so the agent-core queue stays the
-	 *  single source of truth. */
+	 *  single source of truth. Includes exclusively claimed originals while
+	 *  preparation is pending, so editor restoration can cancel their delivery. */
 	peekSteeringQueue(): readonly AgentMessage[] {
-		return this.#steeringQueue;
+		const claim = this.#queuedMessageClaims.steering;
+		return claim ? [...claim.messages, ...this.#steeringQueue] : this.#steeringQueue;
 	}
 
 	/** Non-consuming view of the pending follow-up queue. See
 	 *  {@link peekSteeringQueue}. */
 	peekFollowUpQueue(): readonly AgentMessage[] {
-		return this.#followUpQueue;
+		const claim = this.#queuedMessageClaims.followUp;
+		return claim ? [...claim.messages, ...this.#followUpQueue] : this.#followUpQueue;
+	}
+
+	/** Nonblocking snapshot of the latest results, including provisional payloads while transforms are pending. */
+	getPendingToolResults(): readonly ToolResultMessage[] {
+		const results = this.#cursorToolResultDrain?.map(({ toolResult }) => toolResult) ?? [];
+		for (const { toolResult } of this.#cursorToolResultBuffer) results.push(toolResult);
+		return results;
 	}
 
 	get isAborting(): boolean {
@@ -1069,6 +1229,7 @@ export class Agent {
 	 * Used by dequeue keybinding.
 	 */
 	popLastSteer(): AgentMessage | undefined {
+		if (this.#steeringQueue.length === 0) this.#cancelQueuedMessagePreparation("steering", true);
 		return this.#steeringQueue.pop();
 	}
 
@@ -1077,6 +1238,7 @@ export class Agent {
 	 * Used by dequeue keybinding.
 	 */
 	popLastFollowUp(): AgentMessage | undefined {
+		if (this.#followUpQueue.length === 0) this.#cancelQueuedMessagePreparation("followUp", true);
 		return this.#followUpQueue.pop();
 	}
 
@@ -1116,15 +1278,19 @@ export class Agent {
 	}
 
 	reset() {
+		if (this.#queuedMessageClaims.steering || this.#queuedMessageClaims.followUp) {
+			this.#abortController?.abort();
+			this.#abortController = undefined;
+			this.#resolveRunningPrompt?.();
+			this.#runningPrompt = undefined;
+			this.#resolveRunningPrompt = undefined;
+		}
 		this.#state.messages.length = 0;
 		this.#state.isStreaming = false;
 		this.#state.streamMessage = null;
 		this.#state.pendingToolCalls.clear();
 		this.#state.error = undefined;
-		this.#steeringQueue = [];
-		this.#followUpQueue = [];
-		this.#notifySteeringWaiters();
-		this.clearDeferredToolDirectives();
+		this.clearAllQueues();
 	}
 
 	/** Send a prompt with an AgentMessage */
@@ -1212,7 +1378,7 @@ export class Agent {
 		this.#state.error = undefined;
 
 		try {
-			const dequeueSignal = this.#continuationDequeueSignal(signal);
+			const dequeueSignal = this.#continuationDequeueSignal(signal) ?? continuationAbortController.signal;
 			const messages = this.#state.messages;
 			if (messages.length === 0) {
 				// An empty transcript has nothing to resume, but a queued steer/follow-up
@@ -1222,11 +1388,13 @@ export class Agent {
 				// microtask because hasQueuedMessages() never clears, spinning an unbounded
 				// allocation loop until OOM (issue #6344).
 				const queuedSteering = await this.#dequeueSteeringMessagesAfterHooks(dequeueSignal);
+				if (this.#abortController !== continuationAbortController) return;
 				if (queuedSteering.length > 0) {
 					await this.#runLoop(queuedSteering, { skipInitialSteeringPoll: true }, signal, true);
 					return;
 				}
 				const queuedFollowUp = await this.#dequeueFollowUpMessagesAfterHooks(dequeueSignal);
+				if (this.#abortController !== continuationAbortController) return;
 				if (queuedFollowUp.length > 0) {
 					await this.#runLoop(queuedFollowUp, undefined, signal, true);
 					return;
@@ -1234,13 +1402,24 @@ export class Agent {
 				throw new Error("No messages to continue from");
 			}
 			if (messages[messages.length - 1].role === "assistant") {
+				// A tail with unpaired runnable tool calls resumes by re-executing
+				// them (see `unpairedToolCallTail` in agent-loop). This must win over
+				// queued-message delivery: injecting a message between the tool_use
+				// blocks and their results would break the provider's pairing
+				// invariant. Queued messages drain inside the resumed loop instead.
+				if (unpairedToolCallTail(messages)) {
+					await this.#runLoop(undefined, undefined, signal, true);
+					return;
+				}
 				const queuedSteering = await this.#dequeueSteeringMessagesAfterHooks(dequeueSignal);
+				if (this.#abortController !== continuationAbortController) return;
 				if (queuedSteering.length > 0) {
 					await this.#runLoop(queuedSteering, { skipInitialSteeringPoll: true }, signal, true);
 					return;
 				}
 
 				const queuedFollowUp = await this.#dequeueFollowUpMessagesAfterHooks(dequeueSignal);
+				if (this.#abortController !== continuationAbortController) return;
 				if (queuedFollowUp.length > 0) {
 					await this.#runLoop(queuedFollowUp, undefined, signal, true);
 					return;
@@ -1251,6 +1430,7 @@ export class Agent {
 
 			await this.#runLoop(undefined, undefined, signal, true);
 		} finally {
+			this.#restoreUndeliveredQueuedMessages(continuationAbortController);
 			resolve();
 			if (this.#abortController === continuationAbortController) {
 				this.#state.isStreaming = false;
@@ -1437,7 +1617,9 @@ export class Agent {
 			cwd: this.#cwd,
 			getCwd: this.#cwdResolver,
 			transformToolCallArguments: this.#transformToolCallArguments,
+			speculativeToolExecution: this.#speculativeToolExecution,
 			resolveFallbackTool: this.#resolveFallbackTool,
+			suggestFallbackToolNames: this.#suggestFallbackToolNames,
 			intentTracing: this.#intentTracing,
 			pruneToolDescriptions: this.#pruneToolDescriptions,
 			dialect: this.#dialect,
@@ -1466,7 +1648,7 @@ export class Agent {
 					skipInitialSteeringPoll = false;
 					return [];
 				}
-				return this.#dequeueSteeringMessagesAfterHooks(signal);
+				return this.#dequeueSteeringMessagesAfterHooks(signal ?? loopSignal);
 			},
 			hasSteeringMessages: () => {
 				if (this.#steeringQueue.length === 0) {
@@ -1491,7 +1673,8 @@ export class Agent {
 			},
 			waitForSteeringMessages: signal => this.#waitForSteeringMessages(signal),
 			hasIrcInterrupts: this.hasIrcInterrupts,
-			getFollowUpMessages: signal => this.#dequeueFollowUpMessagesAfterHooks(signal),
+			hasBackgroundCompletions: this.hasBackgroundCompletions,
+			getFollowUpMessages: signal => this.#dequeueFollowUpMessagesAfterHooks(signal ?? loopSignal),
 			getAsideMessages: async () => (await this.#asideMessageProvider?.()) ?? [],
 			onBeforeYield: () => this.#onBeforeYield?.(),
 			telemetry: this.#telemetry,
@@ -1507,6 +1690,7 @@ export class Agent {
 				: agentLoopContinue(context, config, loopSignal, this.streamFn);
 
 			for await (const event of stream) {
+				if (this.#abortController !== loopAbortController) return;
 				if (event.type === "turn_start") turnOpen = true;
 				if (event.type === "turn_end") turnOpen = false;
 				// Update internal state based on events
@@ -1577,6 +1761,7 @@ export class Agent {
 				}
 			}
 		} catch (err) {
+			if (this.#abortController !== loopAbortController) return;
 			const stoppedForAbort = loopSignal.aborted;
 			const errorMessage = stoppedForAbort
 				? abortReasonText(loopSignal)
@@ -1681,6 +1866,7 @@ export class Agent {
 				this.#emit({ type: "agent_end", messages: [errorMsg] });
 			}
 		} finally {
+			this.#restoreUndeliveredQueuedMessages(loopAbortController);
 			resolveRun?.();
 			if (this.#abortController === loopAbortController) {
 				this.#state.isStreaming = false;
@@ -1728,29 +1914,25 @@ export class Agent {
 	 * multi-text turns, producing duplicated text on replay.
 	 */
 	async #emitCursorSplitAssistantMessage(assistantMessage: AssistantMessage): Promise<void> {
-		// Snapshot and detach immediately so a still-pending `cursorOnToolResult`
-		// cannot push into a drained buffer. Entries already reserved stay paired
-		// with their toolCall.
 		const buffer = this.#cursorToolResultBuffer;
 		this.#cursorToolResultBuffer = [];
+		this.#cursorToolResultDrain = buffer;
+		try {
+			// Keep the detached batch observable while its transforms finish.
+			const pending = buffer.filter(entry => entry.pending !== undefined).map(entry => entry.pending);
+			if (pending.length > 0) await Promise.all(pending);
 
-		// Await any transformer still running for a reserved entry before reading
-		// its payload. The provider dispatches with `void handleServerMessage(…)`,
-		// so a `message_end` from the same chunk can reach this point while a
-		// transformer is mid-flight; without the await its rewrite would land on
-		// the detached entry after the original was already appended and emitted.
-		// Each `pending` swallows its own rejection, so this cannot throw.
-		const pending = buffer.filter(entry => entry.pending !== undefined).map(entry => entry.pending);
-		if (pending.length > 0) await Promise.all(pending);
+			this.#state.streamMessage = null;
+			this.appendMessage(assistantMessage);
+			this.#emit({ type: "message_end", message: assistantMessage });
 
-		this.#state.streamMessage = null;
-		this.appendMessage(assistantMessage);
-		this.#emit({ type: "message_end", message: assistantMessage });
-
-		for (const { toolResult } of buffer) {
-			this.#emit({ type: "message_start", message: toolResult });
-			this.appendMessage(toolResult);
-			this.#emit({ type: "message_end", message: toolResult });
+			for (const { toolResult } of buffer) {
+				this.#emit({ type: "message_start", message: toolResult });
+				this.appendMessage(toolResult);
+				this.#emit({ type: "message_end", message: toolResult });
+			}
+		} finally {
+			this.#cursorToolResultDrain = undefined;
 		}
 	}
 }

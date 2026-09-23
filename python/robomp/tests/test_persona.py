@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from robomp import persona
-from robomp.worker import DirectiveInfo, ThreadMessage
+from robomp.worker import DirectiveInfo, ReleaseTaskContext, ThreadMessage
 
 
 @dataclass(slots=True, frozen=True)
@@ -105,7 +105,7 @@ def test_directive_prompt_embeds_thread_and_directive_body() -> None:
         directive=DirectiveInfo(body="apply fix Y", author="can1357", thread=thread),
         pr_status="PR #1080 is open",
     )
-    assert "Directive on octo/widget#1080" in out
+    assert "octo/widget#1080" in out
     assert "@can1357" in out
     assert "apply fix Y" in out
     assert "follow up please" in out
@@ -141,7 +141,7 @@ def test_kickoff_directive_prompt_embeds_thread_and_classify_instruction() -> No
         workspace=_Workspace(),
         directive=DirectiveInfo(body="reproduce + fix", author="can1357", thread=thread),
     )
-    assert "Maintainer directive on octo/widget#1080" in out
+    assert "octo/widget#1080" in out
     assert "failing on macos" in out
     assert "reproduce + fix" in out
     # The kickoff variant must still tell the agent to classify first.
@@ -213,7 +213,8 @@ def test_system_append_routes_push_refusal_to_maintainer_comment_only() -> None:
         workspace=_Workspace(),
         bot_login="Svitter",
     )
-    assert "Push refused for reasons you cannot resolve? Ask the maintainer via `gh_post_comment`." in out
+    assert "Unresolvable push refusal" in out
+    assert "`gh_post_comment` maintainer" in out
     assert "or use `mark_unable_to_reproduce`" not in out
 
 
@@ -224,5 +225,52 @@ def test_system_append_pr_review_renders_configured_bot_login() -> None:
         workspace=_Workspace(),
         bot_login="Svitter",
     )
-    assert "You are **@Svitter**" in out
+    assert "@Svitter" in out
     assert "**robomp**" not in out
+
+
+def _release_context() -> ReleaseTaskContext:
+    return ReleaseTaskContext(
+        tag="v17.2.8",
+        version="17.2.8",
+        round=2,
+        max_rounds=5,
+        head_sha="a" * 40,
+        default_branch="main",
+        failures_text="## CI / check (failure)\n`bun check` failed",
+        run_urls=("https://example.invalid/runs/10",),
+    )
+
+
+def test_release_prompts_preserve_retag_contract() -> None:
+    release = _release_context()
+    system = persona.system_append_release(
+        repo=_Repo(),
+        release=release,
+        workspace=_Workspace(branch="main"),
+        release_commit_prefix="chore: bump version to ",
+    )
+    kickoff = persona.kickoff_release(
+        repo=_Repo(),
+        release=release,
+        workspace=_Workspace(branch="main"),
+    )
+    followup = persona.followup_release(
+        repo=_Repo(),
+        release=release,
+        workspace=_Workspace(branch="main"),
+    )
+
+    assert "`chore: bump version to 17.2.8`" in system
+    assert "NEVER bump versions or changelogs" in system
+    assert "After `release_retag` succeeds, END YOUR TURN" in system
+    assert "`bun check` failed" in kickoff
+    assert "2/5" in kickoff
+    assert "still failing" in followup
+    assert "crash-resumed round" in followup
+
+
+def test_release_todo_phases_end_in_retag() -> None:
+    phases = persona.seed_phases("handle_release_ci")
+    assert [phase["name"] for phase in phases] == ["Diagnose", "Fix", "Retag"]
+    assert phases[-1]["tasks"][-1] == "Call release_retag and end the turn"

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { UsageProvider, UsageReport } from "@oh-my-pi/pi-ai";
 import { unregisterOAuthProvider } from "@oh-my-pi/pi-ai/oauth";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
@@ -224,12 +225,79 @@ describe("extension provider registration rollback", () => {
 			if (!replaceProvider) throw new Error("Extension did not expose its provider replacement action");
 			replaceProvider();
 
-			expect(modelRegistry.authStorage.hasAuth("cliproxyapi")).toBe(false);
+			expect(modelRegistry.authStorage.keys.source("cliproxyapi") !== undefined).toBe(false);
 			expect(modelRegistry.find("cliproxyapi", "test-model")?.baseUrl).toBe(
 				"https://replacement.example.invalid/v1",
 			);
 		} finally {
 			unregisterOAuthProvider("cliproxyapi");
+			authStorage.close();
+			tempDir.removeSync();
+		}
+	});
+
+	test("uses extension usage providers and restores built-in resolution on unregister", async () => {
+		const tempDir = TempDir.createSync("@extension-usage-provider-");
+		const usageFetch: typeof fetch = Object.assign(
+			async (..._args: Parameters<typeof fetch>) => new Response(null, { status: 500 }),
+			{ preconnect: fetch.preconnect },
+		);
+		const authStorage = await AuthStorage.create(tempDir.join("auth.db"), { usageFetch });
+		const provider = "extension-usage-provider";
+		const report: UsageReport = {
+			provider,
+			fetchedAt: 123,
+			limits: [
+				{
+					id: "requests",
+					label: "Requests",
+					scope: { provider },
+					amount: { used: 25, limit: 100, unit: "requests" },
+					status: "ok",
+				},
+			],
+		};
+		const extensionUsage: UsageProvider = {
+			id: provider,
+			fetchUsage: async params => {
+				expect(params.provider).toBe(provider);
+				expect(params.credential).toEqual({ type: "api_key", apiKey: "extension-usage-key" });
+				return report;
+			},
+		};
+
+		try {
+			const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.json"));
+			const runtime = new ExtensionRuntime();
+			const events = new EventBus();
+			await loadExtensionFromFactory(
+				pi => {
+					pi.registerProvider(provider, { apiKey: "extension-usage-key", usage: extensionUsage });
+				},
+				process.cwd(),
+				events,
+				runtime,
+				"extension-usage-provider",
+			);
+			for (const registration of runtime.pendingProviderRegistrations) {
+				modelRegistry.registerProvider(registration.name, registration.config, registration.sourceId);
+				modelRegistry.registerProvider("synthetic", { apiKey: "must-not-be-probed" });
+			}
+
+			await expect(authStorage.usage.reports()).resolves.toEqual([report]);
+			expect(authStorage.usage.providerFor(provider)).toBe(extensionUsage);
+
+			modelRegistry.unregisterProvider(provider);
+			expect(authStorage.usage.providerFor(provider)).toBeUndefined();
+
+			const builtinUsage = authStorage.usage.providerFor("synthetic");
+			if (!builtinUsage) throw new Error("Expected the synthetic built-in usage provider");
+			const syntheticOverride: UsageProvider = { ...extensionUsage, id: "synthetic" };
+			modelRegistry.registerProvider("synthetic", { usage: syntheticOverride }, "extension-usage-provider");
+			expect(authStorage.usage.providerFor("synthetic")).toBe(syntheticOverride);
+			modelRegistry.unregisterProvider("synthetic");
+			expect(authStorage.usage.providerFor("synthetic")).toBe(builtinUsage);
+		} finally {
 			authStorage.close();
 			tempDir.removeSync();
 		}
