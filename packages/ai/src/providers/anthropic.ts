@@ -456,6 +456,13 @@ type AnthropicControlTransition = {
 	anchor: string;
 	content: ContentBlockParam[];
 	effort?: AnthropicOutputEffort;
+	/**
+	 * Whether this transition was already materialized into a request payload.
+	 * A sent transition is immutable: the wire message it produced is part of
+	 * the prefix the model and the prompt cache have seen, so a later control
+	 * becomes its own transition instead of being folded into this one.
+	 */
+	sent: boolean;
 };
 
 type AnthropicControlState = {
@@ -471,6 +478,8 @@ type AnthropicControlState = {
 	baseEffortWire: AnthropicOutputEffort | undefined;
 	/** Effort in force at the conversation tail; `undefined` = API default. */
 	currentEffort: AnthropicOutputEffort | undefined;
+	/** Whether a later request resolved this baseline again; one-shot side turns never do. */
+	continued: boolean;
 };
 
 type AnthropicProviderSessionState = ProviderSessionState & {
@@ -509,6 +518,7 @@ function createAnthropicControlState(): AnthropicControlState {
 		effortBaselined: false,
 		baseEffortWire: undefined,
 		currentEffort: undefined,
+		continued: false,
 	};
 }
 
@@ -4037,17 +4047,36 @@ function getAnthropicControlState(
 	);
 	const existing = state.controlStates.get(fingerprint);
 	if (existing) {
+		existing.continued = true;
 		state.controlStates.delete(fingerprint);
 		state.controlStates.set(fingerprint, existing);
 		return existing;
 	}
+	evictAnthropicControlState(state.controlStates);
 	const created = createAnthropicControlState();
 	state.controlStates.set(fingerprint, created);
-	if (state.controlStates.size > MAX_ANTHROPIC_CONTROL_STATES) {
-		const oldest = state.controlStates.keys().next().value;
-		if (oldest !== undefined) state.controlStates.delete(oldest);
-	}
 	return created;
+}
+
+/**
+ * Make room for one more baseline, evicting the oldest key no request has come
+ * back to yet before any conversation that was continued at least once. Side
+ * turns (`runEphemeralTurn`) and handoffs mint a fresh session id per call, so
+ * plain LRU lets a burst of one-shot requests push the live conversation's
+ * baseline out and force it to re-declare tools, system, and effort — a full
+ * prompt-cache miss on a conversation that never changed.
+ */
+function evictAnthropicControlState(states: Map<string, AnthropicControlState>): void {
+	if (states.size < MAX_ANTHROPIC_CONTROL_STATES) return;
+	let oldest: string | undefined;
+	for (const [key, state] of states) {
+		oldest ??= key;
+		if (!state.continued) {
+			states.delete(key);
+			return;
+		}
+	}
+	if (oldest !== undefined) states.delete(oldest);
 }
 
 /** Fingerprint of the wire message a control transition is attached after. */
@@ -4121,6 +4150,14 @@ function cloneAnthropicTools(tools: readonly AnthropicWireTool[]): AnthropicWire
 	return tools.map(tool => ({ ...tool }));
 }
 
+/**
+ * Attach a control to the slot after `messageCount` wire messages. Controls
+ * recorded for the same slot by the same request share one transition (one
+ * wire message carries both the tool changes and the new effort), but a slot
+ * whose transition already went out on an earlier request gets a new one:
+ * appending to a sent transition would rewrite a message the prompt cache and
+ * the model have already seen.
+ */
 function recordAnthropicControlTransition(
 	state: AnthropicControlState,
 	messages: readonly MessageParam[],
@@ -4128,7 +4165,9 @@ function recordAnthropicControlTransition(
 	content: ContentBlockParam[],
 	effort?: AnthropicOutputEffort,
 ): void {
-	const existing = state.controlTransitions.findLast(transition => transition.messageCount === messageCount);
+	const existing = state.controlTransitions.findLast(
+		transition => transition.messageCount === messageCount && !transition.sent,
+	);
 	if (existing) {
 		existing.content.push(...content);
 		if (effort !== undefined) existing.effort = effort;
@@ -4139,6 +4178,7 @@ function recordAnthropicControlTransition(
 		anchor: anthropicControlAnchor(messages, messageCount),
 		content,
 		effort,
+		sent: false,
 	});
 }
 
@@ -4243,10 +4283,16 @@ function materializeAnthropicControlTransitions(
 	// Insert in slot order so each splice offsets only the transitions after it.
 	const ordered = state.controlTransitions.toSorted((a, b) => a.messageCount - b.messageCount);
 	let offset = 0;
+	// Result index the previous transition rendered into. A transition folds
+	// into the system message before its slot only when that message came from
+	// the conversation itself: stacking onto the message an earlier transition
+	// produced would rewrite a control already on the wire.
+	let renderedIndex = -1;
 	for (const transition of ordered) {
+		transition.sent = true;
 		const index = Math.min(transition.messageCount + offset, result.length);
 		const previous = result[index - 1];
-		if (previous?.role === "system" && previous.clear_at === undefined) {
+		if (index - 1 !== renderedIndex && previous?.role === "system" && previous.clear_at === undefined) {
 			const content: ContentBlockParam[] =
 				typeof previous.content === "string"
 					? [{ type: "text", text: previous.content }, ...transition.content]
@@ -4256,6 +4302,7 @@ function materializeAnthropicControlTransitions(
 				content,
 				...(transition.effort === undefined ? {} : { output_config: { effort: transition.effort } }),
 			};
+			renderedIndex = index - 1;
 			continue;
 		}
 		result.splice(index, 0, {
@@ -4263,6 +4310,7 @@ function materializeAnthropicControlTransitions(
 			content: transition.content.map(block => ({ ...block })),
 			...(transition.effort === undefined ? {} : { output_config: { effort: transition.effort } }),
 		});
+		renderedIndex = index;
 		offset++;
 	}
 	return result;
