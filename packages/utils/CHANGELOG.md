@@ -7,6 +7,8 @@
 ### Fixed
 
 - Fixed log rotation near local-day boundaries so dated log files are consistently assigned to the correct local date.
+- Fixed rotating log files being assigned to the wrong date near local-day boundaries by ensuring dated log paths match the local day used to name the files.
+- Fixed multi-second temp directory removal stalls on Windows by forcing a major GC before the first deletion retry ([#13044](https://github.com/can1357/oh-my-pi/pull/13044) by [@jchanghong023](https://github.com/jchanghong023)).
 
 ## [18.2.7] - 2026-09-21
 
