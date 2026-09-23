@@ -1,147 +1,62 @@
-Anchored edit format: quote current text under `*** SM:FIND`, then replace it under `*** SM:PUT` or insert lines under `*** SM:AFTER`. Elide unchanged runs with `…`.
+Anchored edit patch: Find quotes existing text; Replace replaces it; Insert Before/Insert After add lines without replacing it.
 
 <ops>
-`*** SM:EDIT relative/path.ts` opens edits in that file; bare `*** SM:EDIT` continues the same file. Each edit is `*** SM:FIND` followed by `*** SM:PUT` or `*** SM:AFTER`. All edits apply atomically.
-
-- `*** SM:FIND` quotes current file lines. Each body MUST match once; append ` all` to the edit header to apply every match: `*** SM:EDIT src/x.ts all` or `*** SM:EDIT all`.
-- `*** SM:PUT` states the complete final text replacing the whole FIND match. An empty PUT body deletes the match; omitting the action does not.
-- `*** SM:AFTER` keeps the FIND match and inserts its body after the last matched line. Write only the new lines; blank lines and `…` are literal.
-- Every header MUST stand alone. Its body is raw text through the next recognized header or EOF; no closing delimiter exists.
-- Ambiguous path? Use a JSON-quoted path: `*** SM:EDIT "path ending in all" all`.
-- In FIND: `…` = gap/capture. Mid-line gaps stay line-bounded; a gap at line end spans lines.
-- In PUT: each `…` re-emits the next FIND capture. A whole `…` line with no capture is an error; type the lines out.
-
-Anchor unchanged? Use AFTER. Anchor also changes? Use PUT with the changed anchor and new lines. Move code with two edits: delete the block with empty PUT, then insert it with AFTER at the destination.
+- Start with `*** Edit File: path`; bare `*** Edit File:` continues that file. Repeat for another file; all edits apply atomically. To change every occurrence: `*** Edit File: path all` or `*** Edit File: all`. Quote ambiguous paths as JSON strings: `*** Edit File: "path ending in all" all`.
+- Each `*** Find` MUST match once unless `all`; follow it with `*** Replace` (complete replacement; empty body deletes), `*** Insert Before` (keeps match, inserts body before its first line), or `*** Insert After` (keeps match, inserts body after its last line). Omitting the action never deletes. Inserts need new lines; use Replace when the anchor also changes.
+- Headers MUST stand alone. Body = raw lines until next header or EOF; no closing delimiter, no `*** End …` line. In Find, `…` captures omitted text: mid-line gaps stay on that line; a gap at line end spans lines. Each Replace `…` re-emits the next Find capture. A whole `…` line without a capture is an error: type those lines out. In Insert bodies, `…` is literal.
 </ops>
 
 <rules>
-- Replacements MUST include a fragment of the changed line; insertions MUST quote the anchor ending just before the new lines.
-- Copy FIND lines byte-for-byte from the last file read, including indentation. Markdown, diffs, and agent summaries are not reliable sources.
-- PUT and AFTER indentation is written verbatim. The engine NEVER infers, converts, or repairs indentation.
-- AVOID retyping unchanged lines; use AFTER or `…` captures.
-- Keep edits minimal: the smallest unique anchor plus changed lines.
-- Ambiguous match? Add unique parent context; NEVER retry the bare line.
-- Edits address the original file; earlier edits never shift later anchors.
-- Fuzzy matching NEVER repairs authored whitespace, operators, or delimiters.
-- Failure applies nothing and returns a copy-ready corrected payload; resend it verbatim.
-- "No change" means the file already equals the PUT body; look elsewhere.
-- File contains a standalone `*** SM:EDIT`, `*** SM:FIND`, `*** SM:PUT`, or `*** SM:AFTER` line? Use `write` instead.
+- Find: copy byte-for-byte from latest verbatim file read, including indentation; never from Markdown, diffs, or agent summaries. Replacement MUST include part of changed line; insertion MUST quote the anchor adjacent to the new lines. Use smallest unique anchor; ambiguous match → add unique parent context, NEVER retry the bare line.
+- Not a diff: NEVER prefix lines with `+`/`-`/space or use `@@` hunks.
+- Replace/Insert: indentation verbatim; NEVER expect whitespace, operators, or delimiters to be repaired. AVOID retyping unchanged lines: use inserts or Replace captures. Edits address original file, not shifted lines from earlier edits.
+- Failure applies nothing: resend its complete copy-ready corrected payload verbatim. “No change” means Replace already equals file text; look elsewhere. File contains a standalone `*** Edit File:`, `*** Find`, `*** Replace`, `*** Insert Before`, or `*** Insert After` line? Use `write` instead.
 </rules>
 
 <example>
-Small change:
+Replace everywhere, insert in another file, then edit that file again:
 ```text
-*** SM:EDIT src/config.ts
-*** SM:FIND
-const timeout = 1000;
-*** SM:PUT
-const timeout = 5000;
+*** Edit File: src/a.ts all
+*** Find
+log.old(
+*** Replace
+log.new(
+*** Edit File: src/b.ts
+*** Find
+const n = 1;
+*** Insert After
+const m = 2;
+*** Edit File:
+*** Find
+run();
+*** Replace
+execute();
 ```
 
-Fix every match:
+Move existing code: delete at source with empty Replace, insert ahead of an unchanged anchor:
 ```text
-*** SM:EDIT src/catalog.ts all
-*** SM:FIND
-logger.debug(
-*** SM:PUT
-logger.trace(
-```
-
-Several edits in one file:
-```text
-*** SM:EDIT src/footer.ts
-*** SM:FIND
-	} else if (percent > 70) {
-		str = display;
-	} else {
-		str = warn(display);
-	}
-*** SM:PUT
-	} else if (percent > 70) {
-		str = warn(display);
-	} else {
-		str = display;
-	}
-*** SM:EDIT
-*** SM:FIND
-const label = "pct";
-*** SM:PUT
-const label = "percent";
-```
-
-Insert new lines — keep the anchor, write only the addition:
-```text
-*** SM:EDIT src/retry.ts
-*** SM:FIND
-	limit: number;
-*** SM:AFTER
-	/** Delay between attempts in ms */
-	delayMs: number;
-```
-
-Edit two files in one atomic payload:
-```text
-*** SM:EDIT src/client.ts
-*** SM:FIND
-const endpoint = "/v1";
-*** SM:PUT
-const endpoint = "/v2";
-*** SM:EDIT src/server.ts
-*** SM:FIND
-router.use("/v1", api);
-*** SM:PUT
-router.use("/v2", api);
-```
-
-Large restructure — a gap skips unchanged body text:
-```text
-*** SM:EDIT src/render.ts
-*** SM:FIND
-function legacyPipeline(input: Frame): Frame {
-…
-}
-*** SM:PUT
-const renderPipeline = (input: Frame): Frame => commit(stage(input));
-```
-
-Move a block; the final empty PUT deletes at EOF:
-```text
-*** SM:EDIT src/util.ts
-*** SM:FIND
+*** Edit File: src/util.ts
+*** Find
+const helper = () => 1;
+*** Replace
+*** Find
 run(target);
-*** SM:AFTER
-const helper = () => {
-	return 1;
-};
-*** SM:FIND
-const helper = () => {
-	return 1;
-};
-*** SM:PUT
+*** Insert Before
+const helper = () => 1;
 ```
 
-Sparse gaps carry captured lines through PUT:
+Preserve skipped lines and a skipped part of a line:
 ```text
-*** SM:EDIT src/users.ts
-*** SM:FIND
-loadUser(…
-	const user = legacyStore.read(…);
+*** Edit File: src/users.ts
+*** Find
+function load(…){
 …
+return old(…);
 }
-*** SM:PUT
-loadUser(…
-	const user = await database.users.read(…);
-	if (!user) throw new MissingUserError(id);
+*** Replace
+function load(…){
 …
+return fresh(…);
 }
 ```
 </example>
-
-<critical>
-1. First line MUST be `*** SM:EDIT relative/path.ts`; bare `*** SM:EDIT` continues that file.
-2. FIND MUST be followed by PUT or AFTER. Empty PUT deletes.
-3. Preserve exact indentation in every authored PUT or AFTER line.
-4. Prove one unique match or append ` all` to the edit header.
-5. After an error, resend the complete copy-ready payload verbatim.
-6. Edit only from verbatim file reads or edit-error payloads.
-</critical>
