@@ -178,13 +178,15 @@ Registers one background subagent job and returns an `AgentHandle` immediately:
 
 ### `workpool()`
 
-`workpool(agent=None, name=None, context=None, tools=None)` creates a pool of keep-alive subagents bounded by the live `task.maxConcurrency`:
+`workpool(agent=None, name=None, context=None, tools=None, units=False, attempts=2)` creates a pool of keep-alive subagents bounded by the live `task.maxConcurrency`:
 
 - `.push(*items)` returns item ids (`<pool>#<seq>`). An item goes to the idle worker with the lowest context usage, spawns a new worker while the pool has room, or is queued round-robin onto a busy worker and handed over as one batch when that worker's turn ends. `eval.workpool.freshAgents=true` instead queues for a fresh agent whenever capacity frees, so every item gets a new context and no follow-up batching occurs.
 - A worker submits each batch item separately through `yield({ key: <1-based number>, data: {...} })` or `yield({ key, error })`; each response names the remaining keys, and the final key ends the turn automatically.
 - The pool name is both its aggregate async-job id and label. Its first full drain settles and closes the pool; create a new named pool for another phase. The aggregate result auto-delivers once, while internal batch jobs are consumed.
 - Completely blocked? Leave eval and call `hub` with `{ op: "wait", ids: [pool.name] }`; re-issue until settled. There is no `pool.wait()`, so the kernel remains free to serve `@tool` calls.
 - `.status()` reports worker/item counts and context usage; `.peek()` returns a non-consuming `{ batches, pending }` snapshot; `.close()` drops still-queued items. Pools are process-local; after a restart their workers remain parked keep-alive agents reachable through `hub`.
+- `units=True` (opt-in) tracks every item as a unit. Each item's `data` is `{ status: "done" | "unresolved", value, evidence: string[], verification?: { status: "passed" | "failed" | "not_run", commands?, details? }, reason? }`. The pool accepts a unit only when it is `done` with a `value` and no failed verification — fixed rules, no model call. Missing, malformed, `unresolved`, errored, or failed-verification units are retried alone, with the previous failure reason in the prompt, up to `attempts` total (integer 1–5; only valid with `units=True`). A retried unit always runs in its own batch, so another unit's `{ key, error }` cannot consume its attempt. Verification is worker-reported; the pool does not re-run commands.
+- A `units` pool delivers a per-unit ledger instead of the batch outputs: each unit's state (`accepted`, `residual`, `pending`, `cancelled`), whether passed verification was reported, the accepted value and evidence, the residual reason, and every attempt's worker and batch. The same ledger is `.peek()["units"]`, in push order and independent of the order workers finished.
 
 ### Kernel-defined tools (`@tool` / `tool(fn)`)
 
