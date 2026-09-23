@@ -162,8 +162,12 @@ describe("google-gemini-cli effort-tier variant routing", () => {
 	it("routes claude pairs to the bare id when off without wire suppression", async () => {
 		const off = await captureRequest(collapsedClaudeModel(), undefined);
 		expect(off.body.model).toBe("claude-sonnet-4-6");
-		// Omitting thinkingConfig is correct on the non-thinking backing id.
-		expect(off.body.request?.generationConfig?.thinkingConfig).toBeUndefined();
+		// Even on a bare/non-thinking backing id, Gemini CLI needs explicit thinkingConfig
+		// suppression so "thinking off" does not fall back to a backend default.
+		expect(off.body.request?.generationConfig?.thinkingConfig).toEqual({
+			includeThoughts: false,
+			thinkingBudget: 0,
+		});
 	});
 
 	it("routes claude pairs to the -thinking id with a budget when reasoning", async () => {
@@ -176,7 +180,10 @@ describe("google-gemini-cli effort-tier variant routing", () => {
 	it("keeps the status quo for un-routed models", async () => {
 		const off = await captureRequest(unroutedModel(), undefined);
 		expect(off.body.model).toBe("gemini-2.5-flash");
-		expect(off.body.request?.generationConfig?.thinkingConfig).toBeUndefined();
+		expect(off.body.request?.generationConfig?.thinkingConfig).toEqual({
+			includeThoughts: false,
+			thinkingBudget: 0,
+		});
 
 		const high = await captureRequest(unroutedModel(), Effort.High);
 		expect(high.body.model).toBe("gemini-2.5-flash");

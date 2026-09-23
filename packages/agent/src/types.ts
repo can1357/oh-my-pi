@@ -13,6 +13,7 @@ import type {
 	Static,
 	streamSimple,
 	TextContent,
+	ThinkingMode,
 	Tool,
 	ToolCallProviderMetadata,
 	ToolChoice,
@@ -478,6 +479,12 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 */
 	getReasoning?: () => Effort | undefined;
 	/**
+	 * Dynamic thinking-mode resolver, authoritative per LLM call when installed.
+	 * Unlike {@link getReasoning}, returning `undefined` clears the static
+	 * `thinkingMode` snapshot for that request.
+	 */
+	getThinkingMode?: () => ThinkingMode | undefined;
+	/**
 	 * Dynamic model override, resolved once per LLM call. When set, each
 	 * provider call re-reads the model (like {@link getReasoning}) so mid-run
 	 * model switches — context promotion, retry fallback — apply on the next
@@ -901,6 +908,7 @@ export interface AgentState {
 	systemPrompt: string[];
 	model: Model;
 	thinkingLevel?: Effort;
+	thinkingMode?: ThinkingMode;
 	disableReasoning?: boolean;
 	tools: AgentTool<any>[];
 	messages: AgentMessage[]; // Can include attachments + custom message types

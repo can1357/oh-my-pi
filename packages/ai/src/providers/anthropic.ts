@@ -418,6 +418,7 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 }
 
 type AnthropicCacheControl = NonNullable<TextBlockParam["cache_control"]>;
+
 type AnthropicImageMediaType = "image/jpeg" | "image/png" | "image/gif" | "image/webp";
 
 function normalizeAnthropicImageMediaType(mimeType: string): AnthropicImageMediaType | undefined {
@@ -441,6 +442,7 @@ function cloneAnthropicCacheControl(cacheControl: AnthropicCacheControl): Anthro
 type AnthropicOutputConfig = NonNullable<MessageCreateParamsStreaming["output_config"]>;
 
 const ANTHROPIC_STOP_SEQUENCES_MAX = 4;
+
 let warnedStopSequencesTrim = false;
 
 /**
@@ -677,8 +679,11 @@ function createClaudeBillingHeader(firstUserMessageText: string): string {
 
 // cch attestation: XXHash64(body_with_placeholder, seed) low-20-bits, 5 hex chars.
 const CCH_SEED = 0x4d659218e32a3268n;
+
 const CCH_PLACEHOLDER_STR = "cch=00000";
+
 const cchEncoder = new TextEncoder();
+
 const CCH_PLACEHOLDER = cchEncoder.encode(CCH_PLACEHOLDER_STR);
 // Combined anchor for the billing-header placeholder inside system[0].
 // "system":[{"type":"text","text":"x-anthropic-billing-header:
@@ -688,6 +693,7 @@ const CCH_PLACEHOLDER = cchEncoder.encode(CCH_PLACEHOLDER_STR);
 // in the messages array can never match this sequence.  User system prompt text
 // lives in system[2] and therefore also cannot match.
 const BILLING_SYSTEM_MARKER = cchEncoder.encode(`"system":[{"type":"text","text":"${CLAUDE_BILLING_HEADER_PREFIX}`);
+
 const CCH_BILLING_SEARCH_WINDOW = 150;
 
 function patchCch(body: Uint8Array): "patched" | "no-billing-header" | "unanchored" {
@@ -786,6 +792,7 @@ function decodeAnthropicToolName(name: string, isOAuthToken: boolean, escapeBuil
 }
 
 const ANTHROPIC_MANY_IMAGE_THRESHOLD = 20;
+
 const ANTHROPIC_MANY_IMAGE_MAX_DIMENSION = 2000;
 
 function countAnthropicImageBlocks(messages: Message[]): number {
@@ -1016,8 +1023,27 @@ function convertContentBlocks(
 }
 
 export type AnthropicOutputEffort = "low" | "medium" | "high" | "xhigh" | "max";
+
+/** Wire effort tiers, least -> most intensive. Narrower than the catalog ladder (no `minimal`). */
+const ANTHROPIC_OUTPUT_EFFORTS: readonly AnthropicOutputEffort[] = ["low", "medium", "high", "xhigh", "max"];
+
 export type AnthropicEffort = AnthropicOutputEffort | "adaptive";
+
 export type AnthropicThinkingDisplay = "summarized" | "omitted";
+
+function clampDisabledThinkingEffort(
+	model: Model<"anthropic-messages">,
+	effort: AnthropicOutputEffort,
+): AnthropicOutputEffort {
+	// Opus 5+ rejects `thinking.type: "disabled"` above its documented effort
+	// ceiling with a 400. The comparison runs in the wire domain:
+	// `AnthropicOutputEffort` has no `minimal`, so the catalog ladder would not
+	// index it.
+	const ceiling = model.thinking?.disabledThinkingMaxEffort;
+	const ceilingIndex = ceiling ? ANTHROPIC_OUTPUT_EFFORTS.indexOf(ceiling as AnthropicOutputEffort) : -1;
+	const effortIndex = ANTHROPIC_OUTPUT_EFFORTS.indexOf(effort);
+	return ceilingIndex >= 0 && effortIndex > ceilingIndex ? ANTHROPIC_OUTPUT_EFFORTS[ceilingIndex] : effort;
+}
 
 export interface AnthropicOptions extends StreamOptions {
 	/**
@@ -1054,6 +1080,11 @@ export interface AnthropicOptions extends StreamOptions {
 	 * Converted to adaptive effort when effort is not explicitly provided.
 	 */
 	reasoning?: SimpleStreamOptions["reasoning"];
+	/**
+	 * Anthropic `thinking.type` when it is independent from `output_config.effort`.
+	 * Used to preserve adaptive Claude requests that omit an explicit effort.
+	 */
+	anthropicThinkingMode?: "adaptive";
 	/**
 	 * Controls how Anthropic returns thinking content when the selected thinking
 	 * transport supports a display option. Defaults to "summarized" where the
@@ -1315,6 +1346,7 @@ function buildClaudeCodeTlsFetchOptions(
 		},
 	};
 }
+
 function mergeHeaders(...headerSources: (Record<string, string> | undefined)[]): Record<string, string> {
 	// Case-insensitive merge: later sources win and keep their casing. A plain
 	// Object.assign would let `authorization` and `Authorization` coexist, and
@@ -1349,7 +1381,9 @@ const ANTHROPIC_MESSAGE_EVENTS: ReadonlySet<string> = new Set([
  * rather than aborting the stream.
  */
 type RawMessagePingEvent = { type: "ping" };
+
 type AnthropicStreamEvent = RawMessageStreamEvent | RawMessagePingEvent;
+
 const ANTHROPIC_PING_EVENT: RawMessagePingEvent = { type: "ping" };
 
 /**
@@ -1519,6 +1553,7 @@ function shouldIgnoreAnthropicPreambleEvent(eventType: unknown): boolean {
 }
 
 const THINKING_ENVELOPE_OPEN = "<thinking>";
+
 const THINKING_ENVELOPE_CLOSE = "</thinking>";
 
 function unwrapAnthropicThinkingEnvelope(text: string): string | undefined {
@@ -2116,10 +2151,23 @@ const streamAnthropicOnce = (
 					isAdaptiveOnlyThinking(model) &&
 					(options?.thinkingEnabled === false ||
 						(model.compat.supportsForcedToolChoice && isForcedToolChoice(options?.toolChoice)));
+				const thinkingMode = model.thinking?.mode;
+				const thinkingOn =
+					options?.thinkingEnabled === true ||
+					options?.anthropicThinkingMode === "adaptive" ||
+					model.compat.requiresThinkingEnabled;
+				const emitsOutputConfigEffort =
+					thinkingOn &&
+					((thinkingMode === "anthropic-adaptive" && !model.compat.disableAdaptiveThinking) ||
+						thinkingMode === "anthropic-budget-effort");
+				const requestedAdaptiveEffort = emitsOutputConfigEffort
+					? resolveAnthropicAdaptiveEffort(model, options ?? {})
+					: undefined;
 				if (
 					model.reasoning &&
 					model.compat.supportsOutputEffort &&
-					((options?.thinkingEnabled && options.effort !== "adaptive") || sendsAdaptiveEffortPin) &&
+					((requestedAdaptiveEffort !== undefined && requestedAdaptiveEffort !== "adaptive") ||
+						sendsAdaptiveEffortPin) &&
 					!extraBetas.includes(effortBeta)
 				) {
 					extraBetas.push(effortBeta);
@@ -2136,7 +2184,7 @@ const streamAnthropicOnce = (
 				// context management disable it through model compatibility policy.
 				if (
 					model.reasoning &&
-					options?.thinkingEnabled &&
+					(options?.thinkingEnabled || options?.anthropicThinkingMode === "adaptive") &&
 					model.compat.supportsContextManagement !== false &&
 					!extraBetas.includes(contextManagementBeta)
 				) {
@@ -3601,7 +3649,6 @@ function disableThinkingIfToolChoiceForced(
 	if (!toolChoice) return;
 	if (toolChoice.type !== "any" && toolChoice.type !== "tool") return;
 
-	delete params.thinking;
 	// Only the thinking edit is tied to thinking; a compaction strategy must
 	// stay because any replayed `compaction` block is rejected without it.
 	const compactionEdits = params.context_management?.edits.filter(edit => edit.type === "compact_20260112") ?? [];
@@ -3611,14 +3658,27 @@ function disableThinkingIfToolChoiceForced(
 		delete params.context_management;
 	}
 
-	// Adaptive-only models can't be switched off by omitting `thinking` — a bare
-	// omission defaults to adaptive thinking ON, so a forced-tool turn would still
-	// reason instead of calling the tool (#6589). Pin the lowest adaptive effort
-	// instead of dropping it, mirroring the disable branch in buildParams. Vertex
-	// rawPredict is the sole exception: it can only carry the effort beta in the
-	// body (dropped there too, see buildParams), so it keeps the delete behavior.
-	// The effort beta itself is attached at the request site — including per-request
-	// for injected SDK clients that bypass client-level beta construction.
+	if (isAdaptiveOnlyThinking(model) && model.thinking?.supportsDisabledThinking && model.compat.supportsOutputEffort) {
+		params.thinking = { type: "disabled" };
+		const outputConfig = params.output_config as AnthropicOutputConfig | undefined;
+		if (outputConfig?.effort) {
+			outputConfig.effort = clampDisabledThinkingEffort(model, outputConfig.effort);
+		}
+		return;
+	}
+
+	delete params.thinking;
+
+	// Adaptive-only models that do not support explicit disabled thinking can't
+	// be switched off by omitting `thinking` — a bare omission defaults to
+	// adaptive thinking ON, so a forced-tool turn would still reason instead of
+	// calling the tool (#6589). Pin the lowest adaptive effort instead of
+	// dropping it, mirroring the disable branch in buildParams. Vertex rawPredict
+	// is the sole exception: it can only carry the effort beta in the body
+	// (dropped there too, see buildParams), so it keeps the delete behavior.
+	// The effort beta itself is attached at the request site — including
+	// per-request for injected SDK clients that bypass client-level beta
+	// construction.
 	if (isAdaptiveOnlyThinking(model) && model.compat.supportsOutputEffort) {
 		const outputConfig = (params.output_config as AnthropicOutputConfig | undefined) ?? {};
 		outputConfig.effort = "low";
@@ -4365,7 +4425,11 @@ function buildParams(
 	let thinking: MessageCreateParamsStreaming["thinking"] | undefined;
 	let outputConfigEffort: AnthropicOutputEffort | undefined;
 	if (model.reasoning) {
-		if (options?.thinkingEnabled || model.compat.requiresThinkingEnabled) {
+		if (
+			options?.thinkingEnabled ||
+			options?.anthropicThinkingMode === "adaptive" ||
+			model.compat.requiresThinkingEnabled
+		) {
 			const thinkingOptions = options ?? {};
 			const mode = model.thinking?.mode;
 			const effort = resolveAnthropicAdaptiveEffort(model, thinkingOptions);
@@ -4392,17 +4456,20 @@ function buildParams(
 				if (mode === "anthropic-budget-effort" && effort && effort !== "adaptive") outputConfigEffort = effort;
 			}
 		} else if (options?.thinkingEnabled === false) {
-			if (isAdaptiveOnlyThinking(model)) {
-				// Adaptive-only Claude models (Opus 4.6+, Sonnet 4.6+, Fable/Mythos 5) reject
-				// `thinking.type: "disabled"` — adaptive thinking cannot be switched off.
-				// Omit the thinking field (the API defaults to adaptive) and pin the
-				// lowest effort so "thinking off" calls stay cheap instead of failing
-				// the request with a 400 (a hidden-thinking toggle must never break it).
-				// The effort field requires the `effort-2025-11-24` beta; it is attached
-				// at the request site, including per-request for injected SDK clients.
+			if (isAdaptiveOnlyThinking(model) && !model.thinking?.supportsDisabledThinking) {
+				// Preserve the legacy safe fallback for adaptive Claude models that
+				// still cannot accept `thinking.type: "disabled"`. Models flagged
+				// `supportsDisabledThinking` keep the caller's effort and send
+				// disabled thinking below.
 				outputConfigEffort = "low";
 			} else {
 				thinking = { type: "disabled" };
+				const disabledEffort = isAdaptiveOnlyThinking(model)
+					? resolveAnthropicAdaptiveEffort(model, options ?? {})
+					: undefined;
+				if (disabledEffort && disabledEffort !== "adaptive") {
+					outputConfigEffort = clampDisabledThinkingEffort(model, disabledEffort);
+				}
 			}
 		}
 	}
@@ -5123,12 +5190,16 @@ const ANTHROPIC_TOOL_SCHEMA_UNIVERSAL_KEEP = new Set([
 	"default",
 	"nullable",
 ]);
+
 /** Keys preserved on `type: "object"` nodes (in addition to the universal set). */
 const ANTHROPIC_TOOL_SCHEMA_OBJECT_KEEP = new Set(["properties", "required", "additionalProperties"]);
+
 /** Keys preserved on `type: "array"` nodes; `minItems` only when its value is 0 or 1. */
 const ANTHROPIC_TOOL_SCHEMA_ARRAY_KEEP = new Set(["items", "prefixItems", "minItems"]);
+
 /** Keys preserved on `type: "string"` nodes; `format` only when its value is in the supported list. */
 const ANTHROPIC_TOOL_SCHEMA_STRING_KEEP = new Set(["format"]);
+
 /**
  * String `format` values Anthropic accepts; everything else (including `pattern`-style
  * format hints) gets demoted into `description`. Matches `SupportedStringFormats` in the
@@ -5146,9 +5217,13 @@ const ANTHROPIC_TOOL_SCHEMA_STRING_FORMATS = new Set([
 	"ipv6",
 	"uuid",
 ]);
+
 const ANTHROPIC_STRICT_TOOL_ALLOWLIST = new Set(["bash", "python", "edit", "find"]);
+
 const MAX_ANTHROPIC_STRICT_TOOLS = 20;
+
 const MAX_ANTHROPIC_STRICT_OPTIONAL_PARAMETERS = 24;
+
 const MAX_ANTHROPIC_STRICT_UNION_PARAMETERS = 16;
 
 /** `minItems` / `maxItems` apply to arrays; Anthropic rejects them on `type: "object"` (including `minItems: 0`/`1`). */
@@ -5183,6 +5258,7 @@ function pickAnthropicScalarType(type: unknown): string | undefined {
 	}
 	return undefined;
 }
+
 function pickAnthropicEffectiveScalarType(schema: Record<string, unknown>): string | undefined {
 	const explicit = pickAnthropicScalarType(schema.type);
 	if (explicit) return explicit;
@@ -5347,6 +5423,7 @@ function hasNullVariant(schema: Record<string, unknown>): boolean {
 	if (Array.isArray(schema.type) && schema.type.includes("null")) return true;
 	return Array.isArray(schema.anyOf) && schema.anyOf.some(variant => isRecord(variant) && variant.type === "null");
 }
+
 function hasAnthropicSchemaDefiningKeyword(schema: Record<string, unknown>): boolean {
 	if (
 		schema.type !== undefined ||

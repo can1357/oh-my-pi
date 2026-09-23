@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an optional `thinkingMode` field to the collab `SessionState` so hosts can broadcast an additive provider thinking mode alongside `thinkingLevel`.
+- Added optional `configured` and `thinkingMode` fields to `ThinkingLevelChangeEntry` for persisted transcript consumers.
+
 ## [18.2.11] - 2026-09-23
 
 ### Added

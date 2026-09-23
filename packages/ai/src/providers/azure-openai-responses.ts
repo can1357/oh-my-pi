@@ -60,13 +60,13 @@ function resolveDeploymentName(model: Model<"azure-openai-responses">, options?:
 export interface AzureOpenAIResponsesOptions extends StreamOptions {
 	reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	reasoningSummary?: "auto" | "detailed" | "concise" | null;
+	disableReasoning?: boolean;
 	azureApiVersion?: string;
 	azureResourceName?: string;
 	azureBaseUrl?: string;
 	azureDeploymentName?: string;
 	toolChoice?: ToolChoice;
 	serviceTier?: ServiceTier;
-	disableReasoning?: boolean;
 }
 
 type AzureOpenAIResponsesSamplingParams = ResponseCreateParamsStreaming & {

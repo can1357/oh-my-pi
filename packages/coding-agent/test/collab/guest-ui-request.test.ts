@@ -203,6 +203,7 @@ async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarnes
 				state: { model: undefined },
 				setModel: () => {},
 				setThinkingLevel: () => {},
+				setThinkingMode: () => {},
 				setDisableReasoning: () => {},
 			},
 		},
@@ -276,6 +277,7 @@ async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarnes
 // ── Lifecycle ───────────────────────────────────────────────────────────────
 
 const harnessCleanups: (() => Promise<void>)[] = [];
+
 let writeSpy: { mockRestore(): void } | null = null;
 
 beforeEach(() => {

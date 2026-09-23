@@ -1136,6 +1136,11 @@ function resolveThinkingPolicy<TApi extends Api>(
 	if (rule.effortBudgets !== undefined) config.effortBudgets = rule.effortBudgets;
 	const supportsDisplay = rule.supportsDisplay ?? defaultSupportsDisplay(spec, facts);
 	if (supportsDisplay) config.supportsDisplay = true;
+	if (defaultSupportsDisabledThinking(spec, facts, compat, config.mode)) {
+		config.supportsDisabledThinking = true;
+		const disabledCeiling = defaultDisabledThinkingMaxEffort(facts);
+		if (disabledCeiling !== undefined) config.disabledThinkingMaxEffort = disabledCeiling;
+	}
 	if (rule.prefixBinding) config.prefixBinding = true;
 	const requiresEffort =
 		rule.requiresEffort ?? (impliesMandatoryReasoning(facts, spec.id) || isQwenTemplateReasoningEffortCompat(compat));
@@ -1154,6 +1159,31 @@ function defaultSupportsDisplay<TApi extends Api>(spec: ModelSpec<TApi>, facts: 
 		(spec.api === "anthropic-messages" || spec.api === "bedrock-converse-stream") &&
 		facts.anthropicAdaptiveGenAtLeast("4.7")
 	);
+}
+
+/**
+ * Explicit disabled-thinking default: Opus 5 and Sonnet 5 on the native
+ * Messages API accept `thinking.type: "disabled"`. Fable 5 / Mythos 5 reject
+ * it outright, and older adaptive Claude models need the legacy low-effort
+ * fallback. Like display support, this is an api-conditioned lineage fact.
+ */
+function defaultSupportsDisabledThinking<TApi extends Api>(
+	spec: ModelSpec<TApi>,
+	facts: IdentityFacts,
+	compat: CompatOf<TApi>,
+	mode: ThinkingConfig["mode"],
+): boolean {
+	if (mode !== "anthropic-adaptive" || spec.api !== "anthropic-messages") return false;
+	if (compat === undefined || !("officialEndpoint" in compat) || compat.officialEndpoint !== true) return false;
+	return facts.is("anthropic") && facts.family("opus", "sonnet") && facts.revGte("5");
+}
+
+/**
+ * Opus 5+ rejects `thinking.type: "disabled"` above `high` effort with a 400,
+ * enforced per request. Sonnet 5 documents no such ceiling.
+ */
+function defaultDisabledThinkingMaxEffort(facts: IdentityFacts): Effort | undefined {
+	return facts.family("opus") ? Effort.High : undefined;
 }
 
 function mergeEffortMap(
@@ -1195,7 +1225,28 @@ function fillExplicitThinking<TApi extends Api>(
 			(impliesMandatoryReasoning(facts, spec.id) || isQwenTemplateReasoningEffortCompat(compat)));
 	const needsDefaultLevel = thinking.defaultLevel === undefined && rule.defaultLevel !== undefined;
 	const needsPrefixBinding = thinking.prefixBinding === undefined && rule.prefixBinding === true;
-	if (effortMap === undefined && !needsDisplay && !needsRequiresEffort && !needsDefaultLevel && !needsPrefixBinding) {
+	// Explicit thinking metadata wins outright; the wire fact below is the only
+	// value backfilled from identity.
+	const needsSupportsDisabledThinking =
+		thinking.supportsDisabledThinking === undefined &&
+		defaultSupportsDisabledThinking(spec, facts, compat, thinking.mode);
+	const effectiveSupportsDisabledThinking = thinking.supportsDisabledThinking ?? needsSupportsDisabledThinking;
+	const disabledThinkingMaxEffort =
+		effectiveSupportsDisabledThinking && thinking.disabledThinkingMaxEffort === undefined
+			? defaultDisabledThinkingMaxEffort(facts)
+			: undefined;
+	const shouldRemoveDisabledThinkingMaxEffort =
+		!effectiveSupportsDisabledThinking && thinking.disabledThinkingMaxEffort !== undefined;
+	if (
+		effortMap === undefined &&
+		!needsDisplay &&
+		!needsRequiresEffort &&
+		!needsDefaultLevel &&
+		!needsPrefixBinding &&
+		!needsSupportsDisabledThinking &&
+		disabledThinkingMaxEffort === undefined &&
+		!shouldRemoveDisabledThinkingMaxEffort
+	) {
 		return thinking;
 	}
 	const filled: ThinkingConfig = { ...thinking };
@@ -1204,6 +1255,9 @@ function fillExplicitThinking<TApi extends Api>(
 	if (needsDefaultLevel && rule.defaultLevel !== undefined) filled.defaultLevel = rule.defaultLevel;
 	if (needsRequiresEffort) filled.requiresEffort = true;
 	if (needsPrefixBinding) filled.prefixBinding = true;
+	if (needsSupportsDisabledThinking) filled.supportsDisabledThinking = true;
+	if (disabledThinkingMaxEffort !== undefined) filled.disabledThinkingMaxEffort = disabledThinkingMaxEffort;
+	if (shouldRemoveDisabledThinkingMaxEffort) delete filled.disabledThinkingMaxEffort;
 	return filled;
 }
 

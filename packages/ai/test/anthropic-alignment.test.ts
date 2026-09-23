@@ -546,6 +546,62 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(capturedBeta).not.toContain("mid-conversation-system-2026-04-07");
 	});
 
+	it("adds the effort beta when reasoning maps to output_config.effort", async () => {
+		let capturedBeta: string | undefined;
+		let capturedBody: { output_config?: { effort?: string } } | undefined;
+		const fetchMock = (async (_input: string | URL | Request, init?: RequestInit) => {
+			capturedBeta = (init?.headers as Record<string, string> | undefined)?.["anthropic-beta"];
+			capturedBody = JSON.parse(String(init?.body ?? "{}"));
+			return new Response(
+				JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "captured" } }),
+				{ status: 400, headers: { "Content-Type": "application/json" } },
+			);
+		}) as typeof fetch;
+		const adaptiveModel: Model<"anthropic-messages"> = buildModel({
+			...ANTHROPIC_MODEL_SPEC,
+			id: "claude-opus-4-8-20260528",
+			name: "Claude Opus 4.8",
+			thinking: {
+				mode: "anthropic-adaptive",
+				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+			},
+		});
+
+		await streamAnthropic(
+			adaptiveModel,
+			{ systemPrompt: ["Stay concise."], messages: [{ role: "user", content: "Hi", timestamp: Date.now() }] },
+			{ apiKey: "sk-ant-api-test", anthropicThinkingMode: "adaptive", reasoning: Effort.High, fetch: fetchMock },
+		).result();
+
+		expect(capturedBody?.output_config).toEqual({ effort: "high" });
+		expect(capturedBeta).toContain("effort-2025-11-24");
+	});
+
+	it("does not add the effort beta for budget thinking requests", async () => {
+		let capturedBeta: string | undefined;
+		let capturedBody:
+			| { output_config?: { effort?: string }; thinking?: { budget_tokens?: number; type?: string } }
+			| undefined;
+		const fetchMock = (async (_input: string | URL | Request, init?: RequestInit) => {
+			capturedBeta = (init?.headers as Record<string, string> | undefined)?.["anthropic-beta"];
+			capturedBody = JSON.parse(String(init?.body ?? "{}"));
+			return new Response(
+				JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "captured" } }),
+				{ status: 400, headers: { "Content-Type": "application/json" } },
+			);
+		}) as typeof fetch;
+
+		await streamAnthropic(
+			ANTHROPIC_MODEL,
+			{ systemPrompt: ["Stay concise."], messages: [{ role: "user", content: "Hi", timestamp: Date.now() }] },
+			{ apiKey: "sk-ant-api-test", thinkingEnabled: true, reasoning: Effort.High, fetch: fetchMock },
+		).result();
+
+		expect(capturedBody?.thinking?.type).toBe("enabled");
+		expect(capturedBody?.output_config?.effort).toBeUndefined();
+		expect(capturedBeta ?? "").not.toContain("effort-2025-11-24");
+	});
+
 	it("adds the effort beta when a direct forced tool choice creates an adaptive effort pin", async () => {
 		let capturedBeta: string | undefined;
 		let capturedBody: { output_config?: { effort?: string }; tool_choice?: { type?: string } } | undefined;

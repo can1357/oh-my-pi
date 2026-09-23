@@ -98,6 +98,8 @@ export interface ThinkingLevelChangeEntry extends SessionEntryBase {
 	 * before auto-mode persistence existed; readers fall back to `thinkingLevel`.
 	 */
 	configured?: string | null;
+	/** Provider-neutral thinking mode selected independently from effort. */
+	thinkingMode?: string | null;
 }
 
 export interface ModelChangeEntry extends SessionEntryBase {

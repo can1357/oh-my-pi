@@ -5,9 +5,17 @@ import * as path from "node:path";
 import { $env, APP_NAME, logger } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import type { ServiceTierOpenAISettingValue } from "../config/service-tier";
-import { CLI_THINKING_LEVELS, type ConfiguredThinkingLevel, parseCliThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import {
+	CLI_EFFORT_LEVELS,
+	CLI_THINKING_MODES,
+	type ConfiguredThinkingLevel,
+	type ConfiguredThinkingMode,
+	parseCliEffort,
+	parseCliThinkingMode,
+} from "@oh-my-pi/pi-tui/thinking";
 import { normalizeToolNames } from "../tools/builtin-names";
 import {
+	createParseState,
 	OPTIONAL_FLAGS,
 	OPTIONAL_VALUE_FLAGS,
 	type ParseDeps,
@@ -45,8 +53,11 @@ export interface Args {
 	systemPrompt?: string;
 	systemPromptTemplate?: string;
 	appendSystemPrompt?: string;
-	thinking?: ConfiguredThinkingLevel;
+	thinkingMode?: ConfiguredThinkingMode;
+	effort?: ConfiguredThinkingLevel;
 	serviceTier?: ServiceTierOpenAISettingValue;
+	/** Non-fatal CLI notices (e.g. deprecated flag spellings), surfaced on stderr. */
+	warnings?: string[];
 	hideThinking?: boolean;
 	advisor?: boolean;
 	externalThinking?: boolean;
@@ -108,9 +119,11 @@ export interface Args {
  */
 const PARSE_DEPS: ParseDeps = {
 	logger,
-	parseThinking: parseCliThinkingLevel,
+	parseThinkingMode: parseCliThinkingMode,
+	parseEffort: parseCliEffort,
 	normalizeToolNames,
-	thinkingEfforts: CLI_THINKING_LEVELS,
+	thinkingModes: CLI_THINKING_MODES,
+	effortLevels: CLI_EFFORT_LEVELS,
 };
 
 const WINDOWS_PATH_VALUE_FLAGS = new Set(["--extension", "-e", "--hook", "--trusted-extension"]);
@@ -156,6 +169,7 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 		unrecognizedFlags: [],
 		sessionDir: $env.PI_CODING_AGENT_SESSION_DIR || undefined,
 	};
+	const state = createParseState();
 
 	// `--` ends option parsing (POSIX end-of-options). Everything after it is
 	// literal positional text, so flag-shaped messages are not parsed or rejected.
@@ -215,7 +229,7 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			if (i + 1 < args.length && args[i + 1] !== PROFILE_BOOTSTRAP_BOUNDARY_ARG) {
 				const consumed = consumeBuiltInStringValue(arg, args, i + 1);
 				i = consumed.index;
-				STRING_SETTERS[arg](result, consumed.value, parseDeps);
+				STRING_SETTERS[arg](result, consumed.value, parseDeps, state);
 			}
 		} else if (OPTIONAL_VALUE_FLAGS.has(arg)) {
 			const config = OPTIONAL_FLAGS[arg];
@@ -374,6 +388,16 @@ export function reportCliUsageError(
 	write(`${chalk.red(`Error: ${error.message}`)}\n`);
 	write(`Run \`${APP_NAME} --help\` for available flags.\n`);
 	return true;
+}
+
+/** Writes non-fatal CLI notices to stderr so they never pollute stdout payloads. */
+export function reportCliWarnings(
+	parsed: Args,
+	write: (text: string) => void = text => process.stderr.write(text),
+): void {
+	for (const warning of parsed.warnings ?? []) {
+		write(`${chalk.yellow(`Warning: ${warning}`)}\n`);
+	}
 }
 
 export function printHelp(): void {

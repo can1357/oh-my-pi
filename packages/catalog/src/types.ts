@@ -4,6 +4,7 @@ import type { Effort } from "./effort";
 // Re-exported from @oh-my-pi/pi-utils so the whole workspace shares one
 // `fetch`-compatible signature (tls-fetch's wrappers produce/accept it).
 export type { FetchImpl } from "@oh-my-pi/pi-utils";
+
 export type { KnownProvider } from "./provider-models/descriptors";
 
 export type KnownApi =
@@ -22,6 +23,7 @@ export type KnownApi =
 	| "gitlab-duo-agent"
 	| "devin-agent"
 	| "apple-foundation-models";
+
 export type Api = KnownApi | (string & {});
 
 /** Catalog kinds used to isolate role-specific runners from session chat models. */
@@ -73,6 +75,13 @@ export type ThinkingControlMode =
 	| "anthropic-adaptive"
 	| "anthropic-budget-effort";
 
+/**
+ * Request-level thinking mode, independent from effort intensity. Purely
+ * additive: disabling thinking is an effort (`ThinkingLevel.Off`), never a
+ * mode, so selecting a mode can never latch reasoning off.
+ */
+export type ThinkingMode = "adaptive";
+
 /** Per-model thinking capabilities used to clamp and map user-facing effort levels. */
 export interface ThinkingConfig {
 	/** Provider-specific transport used to encode the selected effort. */
@@ -83,6 +92,18 @@ export interface ThinkingConfig {
 	 * `thinking: undefined` instead of an empty list.
 	 */
 	efforts: readonly Effort[];
+	/**
+	 * Adaptive-thinking models that accept an explicit `thinking.type: "disabled"`
+	 * request. Older adaptive Claude models reject it and need the legacy
+	 * low-effort fallback instead.
+	 */
+	supportsDisabledThinking?: boolean;
+	/**
+	 * Highest effort that may accompany `thinking.type: "disabled"`. Opus 5+
+	 * rejects that combination above `high` with a 400, enforced per request;
+	 * absent means the model imposes no ceiling.
+	 */
+	disabledThinkingMaxEffort?: Effort;
 	/** Optional default effort applied when this model is selected. Falls back to global default if absent. */
 	defaultLevel?: Effort;
 	/**

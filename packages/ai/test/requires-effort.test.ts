@@ -64,9 +64,30 @@ function localQwenModel(): Model<"openai-completions"> {
 	} satisfies ModelSpec<"openai-completions">);
 }
 
+function openRouterResponsesModel(thinking: ThinkingConfig): Model<"openai-responses"> {
+	return buildModel({
+		id: "test/router-responses-model",
+		name: "Mandatory Responses Reasoner",
+		api: "openai-responses",
+		provider: "openrouter",
+		baseUrl: "https://openrouter.ai/api/v1",
+		reasoning: true,
+		thinking,
+		input: ["text"],
+		cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0 },
+		contextWindow: 1_048_576,
+		maxTokens: 65_535,
+	} satisfies ModelSpec<"openai-responses">);
+}
+
 async function captureBody(
-	model: Model<"openai-completions">,
-	options: { reasoning?: Effort; disableReasoning?: boolean; forceReasoningOff?: boolean },
+	model: Model<"openai-completions" | "openai-responses">,
+	options: {
+		reasoning?: Effort;
+		disableReasoning?: boolean;
+		thinkingMode?: "off";
+		forceReasoningOff?: boolean;
+	},
 ): Promise<CapturedBody> {
 	let requestBody: string | undefined;
 	const fetchMock: FetchImpl = (_input, init) => {
@@ -96,6 +117,15 @@ describe("thinking.requiresEffort clamping", () => {
 		// The pre-fix payload was `reasoning: { enabled: false }` — the exact
 		// shape OpenRouter rejects with "Reasoning is mandatory".
 		expect(body.reasoning).toEqual({ effort: "minimal" });
+	});
+
+	it("floors explicit off plus explicit effort for mandatory OpenAI-family models", async () => {
+		for (const model of [openRouterModel(MANDATORY_THINKING), openRouterResponsesModel(MANDATORY_THINKING)]) {
+			const disabled = await captureBody(model, { reasoning: Effort.High, disableReasoning: true });
+			expect(disabled.reasoning).toMatchObject({ effort: "minimal" });
+			const modeOff = await captureBody(model, { reasoning: Effort.High, thinkingMode: "off" });
+			expect(modeOff.reasoning).toMatchObject({ effort: "minimal" });
+		}
 	});
 
 	it("clamps forceReasoningOff when the endpoint cannot disable reasoning", async () => {

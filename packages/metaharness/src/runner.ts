@@ -155,6 +155,7 @@ Model / agent:
                                  apply per-trial with no rebuild. local = pack a tarball. published = npm.
       --version <v>              omp version for published install (default: latest)
       --thinking <level>         off|minimal|low|medium|high|xhigh|max
+      --effort <level>           Alias for --thinking on this runner
 
       --tarball <path>           Reuse a prebuilt omp tarball (implies --install local, --no-build)
       --no-build                 Skip packing; reuse newest tarball in bench dir (--install local)
@@ -242,6 +243,7 @@ export function parseArgs(argv: string[]): Config {
 				cfg.version = take(arg);
 				break;
 			case "--thinking":
+			case "--effort":
 				cfg.thinking = take(arg);
 				break;
 			case "--tarball":

@@ -144,6 +144,7 @@ function makeCancelledSwitchGuestContext(
 				state: { model: undefined },
 				setModel: () => events.push("host-model"),
 				setThinkingLevel: () => events.push("host-thinking"),
+				setThinkingMode: () => {},
 				setDisableReasoning: () => events.push("host-reasoning"),
 			},
 		},

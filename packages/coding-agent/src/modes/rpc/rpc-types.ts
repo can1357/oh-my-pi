@@ -6,7 +6,7 @@
  */
 import type { AgentMessage, AgentToolResult, ThinkingLevel, ToolLoadMode } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
-import type { Effort, ImageContent, Model, ToolExample } from "@oh-my-pi/pi-ai";
+import type { Effort, ImageContent, Model, ThinkingMode, ToolExample } from "@oh-my-pi/pi-ai";
 import type { BashResult } from "../../exec/bash-executor";
 import type { ContextUsage } from "../../extensibility/extensions/types";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
@@ -98,6 +98,8 @@ export type RpcCommand =
 export interface RpcSessionState {
 	model?: Model;
 	thinkingLevel: ThinkingLevel | undefined;
+	/** Additive provider thinking mode (e.g. Claude `adaptive`); off lives on `thinkingLevel`. */
+	thinkingMode?: ThinkingMode;
 	isStreaming: boolean;
 	isCompacting: boolean;
 	steeringMode: "all" | "one-at-a-time";

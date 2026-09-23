@@ -266,7 +266,7 @@ Startup `--fork` is resolved before normal session creation:
 2. Path-like values (`/`, `\`, or `.jsonl`) call `SessionManager.forkFrom(path, cwd, sessionDir)`.
 3. Other values resolve via `resolveResumableSession(...)`: local sessions first, then global search when `sessionDir` is not forced. Matching accepts lowercased session id prefixes, full JSONL filename prefixes, and timestamp-stripped filename id suffixes.
 4. The forked file is created in the current cwd/session-dir scope and becomes the active session manager for startup.
-5. Full-context forks automatically seed `providerPromptCacheKey` from the source header's inherited key, falling back to the source session id. Startup drops that automatic inheritance when `--model`, `--thinking`, `--system-prompt`, `--append-system-prompt`, `--tools`, or `--no-tools` changes the provider route or prompt/tool shape.
+5. Full-context forks automatically seed `providerPromptCacheKey` from the source header's inherited key, falling back to the source session id. Startup drops that automatic inheritance when `--model`, `--effort`, `--thinking`, `--system-prompt`, `--append-system-prompt`, `--tools`, or `--no-tools` changes the provider route or prompt/tool shape.
 
 Use `--prompt-cache-key <key>` to pin the provider prompt-cache identity explicitly and independently from both the OMP session id and `--provider-session-id`. `--provider-session-id` continues to control provider session/routing headers and sticky credential selection; `--prompt-cache-key` controls the OpenAI Responses `prompt_cache_key` payload where supported.
 

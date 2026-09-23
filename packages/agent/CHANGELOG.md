@@ -4,6 +4,11 @@
 
 ### Added
 
+- Added agent-loop forwarding for thinking mode independently from reasoning effort.
+
+### Fixed
+
+- Fixed the proxy transport dropping `thinkingMode` and `disableReasoning`, so proxied agents ignored a requested thinking-off.
 - Added `docTopics` method to `AgentTool` interface for on-demand documentation
 
 ## [18.2.11] - 2026-09-23

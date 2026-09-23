@@ -60,8 +60,12 @@ export function streamOpenAIAnthropicShim(
 				...options?.headers,
 			};
 
+			// Normalized once: both transports below need the same off signal.
+			const explicitThinkingOff = options?.thinkingMode === "off" || options?.disableReasoning === true;
+			const reasoningEffort = options?.reasoning;
+
 			if (format === "anthropic") {
-				const anthropicModel = buildModel({
+				const anthropicSpec = {
 					id: model.id,
 					name: model.name,
 					api: "anthropic-messages",
@@ -71,18 +75,40 @@ export function streamOpenAIAnthropicShim(
 					contextWindow: model.contextWindow,
 					maxTokens: model.maxTokens,
 					reasoning: model.reasoning,
-					...(config.anthropicThinkingMode && model.thinking
-						? { thinking: { ...model.thinking, mode: config.anthropicThinkingMode } }
-						: {}),
 					input: model.input,
 					cost: model.cost,
+				} as ModelSpec<"anthropic-messages">;
+				// Provider-wide catalog policy describes this provider's OpenAI-format
+				// rows, so a Claude id rebuilt for the Anthropic wire would inherit
+				// OpenAI effort metadata. Re-derive Claude thinking from the Anthropic
+				// lineage instead.
+				const claudeThinking =
+					config.anthropicThinkingMode === undefined && model.identity.class === "anthropic"
+						? buildModel({ ...anthropicSpec, provider: "anthropic" }).thinking
+						: undefined;
+				const anthropicModel = buildModel({
+					...anthropicSpec,
+					...(config.anthropicThinkingMode && model.thinking
+						? { thinking: { ...model.thinking, mode: config.anthropicThinkingMode } }
+						: claudeThinking
+							? { thinking: claudeThinking }
+							: {}),
 				} as ModelSpec<"anthropic-messages">);
+				const forwardsAnthropicReasoning =
+					config.anthropicThinkingMode !== undefined ||
+					anthropicModel.thinking?.mode === "anthropic-adaptive" ||
+					anthropicModel.thinking?.mode === "anthropic-budget-effort";
 
-				const reasoningEffort = options?.reasoning;
-				const thinkingEnabled = !!reasoningEffort && model.reasoning && !options?.disableReasoning;
-				const thinkingBudget = reasoningEffort
-					? (options?.thinkingBudgets?.[reasoningEffort] ?? ANTHROPIC_THINKING[reasoningEffort])
-					: undefined;
+				const adaptiveThinkingMode =
+					options?.anthropicThinkingMode ??
+					(options?.thinkingMode === "adaptive" && anthropicModel.thinking?.mode === "anthropic-adaptive"
+						? "adaptive"
+						: undefined);
+				const thinkingEnabled = !!reasoningEffort && model.reasoning && !explicitThinkingOff;
+				const thinkingBudget =
+					reasoningEffort && !explicitThinkingOff
+						? (options?.thinkingBudgets?.[reasoningEffort] ?? ANTHROPIC_THINKING[reasoningEffort])
+						: undefined;
 
 				const innerStream = streamAnthropic(anthropicModel, context, {
 					apiKey,
@@ -105,7 +131,8 @@ export function streamOpenAIAnthropicShim(
 					fetch: options?.fetch,
 					thinkingEnabled,
 					thinkingBudgetTokens: thinkingBudget,
-					reasoning: config.anthropicThinkingMode ? reasoningEffort : undefined,
+					reasoning: forwardsAnthropicReasoning ? reasoningEffort : undefined,
+					anthropicThinkingMode: explicitThinkingOff ? undefined : adaptiveThinkingMode,
 					toolChoice: mapAnthropicToolChoice(options?.toolChoice),
 					serviceTier: options?.serviceTier,
 				});
@@ -123,7 +150,6 @@ export function streamOpenAIAnthropicShim(
 						} as ModelSpec<"openai-completions">)
 					: model;
 
-				const reasoningEffort = options?.reasoning;
 				const innerStream = streamOpenAICompletions(openaiModel, context, {
 					apiKey,
 					temperature: options?.temperature,
@@ -143,10 +169,10 @@ export function streamOpenAIAnthropicShim(
 					onResponse: options?.onResponse,
 					onSseEvent: options?.onSseEvent,
 					fetch: options?.fetch,
-					reasoning: reasoningEffort,
+					reasoning: explicitThinkingOff ? undefined : reasoningEffort,
 					toolChoice: options?.toolChoice,
 					serviceTier: options?.serviceTier,
-					disableReasoning: options?.disableReasoning,
+					disableReasoning: explicitThinkingOff ? true : options?.disableReasoning,
 				});
 
 				for await (const event of innerStream) {

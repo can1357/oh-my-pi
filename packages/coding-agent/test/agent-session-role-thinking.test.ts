@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { Agent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { Effort } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import * as autoThinkingClassifier from "@oh-my-pi/pi-coding-agent/auto-thinking/classifier";
@@ -57,6 +57,7 @@ describe("AgentSession role model thinking behavior", () => {
 		initialModelId: string;
 		initialThinkingLevel: Effort;
 		modelRoles: Record<string, string>;
+		initialThinkingMode?: "adaptive";
 		runtimeApiKeys?: Record<string, string>;
 	}) {
 		const model = getAnthropicModelOrThrow(options.initialModelId);
@@ -67,6 +68,7 @@ describe("AgentSession role model thinking behavior", () => {
 				tools: [],
 				messages: [],
 				thinkingLevel: options.initialThinkingLevel,
+				thinkingMode: options.initialThinkingMode,
 			},
 		});
 		authStorage.keys.setRuntime("anthropic", "test-key");
@@ -83,6 +85,8 @@ describe("AgentSession role model thinking behavior", () => {
 			agent,
 			sessionManager: SessionManager.inMemory(),
 			settings: sessionSettings,
+			thinkingLevel: options.initialThinkingLevel,
+			thinkingMode: options.initialThinkingMode,
 			modelRegistry,
 		});
 	}
@@ -291,8 +295,12 @@ describe("AgentSession role model thinking behavior", () => {
 		});
 
 		expect(session.cycleThinkingLevel()).toBe("off");
-		expect(session.thinkingLevel).toBe("off");
+		// Off is intensity: it lives on the effort axis, never latches the mode axis.
+		expect(session.thinkingMode).toBeUndefined();
+		expect(agent.state.thinkingMode).toBeUndefined();
 		expect(agent.state.disableReasoning).toBe(true);
+		// Providers that separate mode from intensity still receive the last effort.
+		expect(agent.state.thinkingLevel).toBe(Effort.High);
 		expect(session.cycleThinkingLevel()).toBe(AUTO_THINKING);
 		expect(session.configuredThinkingLevel()).toBe(AUTO_THINKING);
 		expect(session.thinkingLevel).toBe(resolveProvisionalAutoLevel(model));
@@ -468,6 +476,82 @@ describe("AgentSession role model thinking behavior", () => {
 
 		expect(classifierSpy).not.toHaveBeenCalled();
 		expect(session.autoResolvedThinkingLevel()).toBeUndefined();
+	});
+
+	it("re-enables thinking when auto follows off and persists the classified effort", async () => {
+		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		await createSession({
+			initialModelId: model.id,
+			initialThinkingLevel: Effort.High,
+			modelRoles: { default: `${model.provider}/${model.id}` },
+		});
+		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+		vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.Medium);
+
+		session.setThinkingLevel(ThinkingLevel.Off);
+		session.setThinkingLevel(AUTO_THINKING);
+		await session.prompt("Implement a focused parser fix");
+
+		expect(session.sessionManager.buildSessionContext()).toMatchObject({
+			configuredThinkingLevel: AUTO_THINKING,
+			thinkingLevel: Effort.Medium,
+		});
+		expect(session.agent.state.thinkingLevel).toBe(Effort.Medium);
+		expect(session.agent.state.thinkingMode).toBeUndefined();
+		expect(session.agent.state.disableReasoning).toBe(false);
+	});
+
+	it("drops unsupported adaptive thinking mode at construction and selection", async () => {
+		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		await createSession({
+			initialModelId: model.id,
+			initialThinkingLevel: Effort.High,
+			initialThinkingMode: "adaptive",
+			modelRoles: { default: `${model.provider}/${model.id}` },
+		});
+
+		expect(session.thinkingMode).toBeUndefined();
+		expect(session.agent.state.thinkingMode).toBeUndefined();
+		expect(session.agent.state.disableReasoning).toBe(false);
+
+		// Off is intensity: it travels on the effort axis and leaves mode untouched.
+		session.setThinkingLevel(ThinkingLevel.Off);
+		expect(session.thinkingMode).toBeUndefined();
+		expect(session.agent.state.disableReasoning).toBe(true);
+
+		session.setThinkingMode("adaptive");
+		expect(session.thinkingMode).toBeUndefined();
+		expect(session.agent.state.thinkingMode).toBeUndefined();
+		expect(session.agent.state.thinkingLevel).toBe(Effort.High);
+	});
+
+	it("drops stale adaptive thinking mode when switching to a non-adaptive model", async () => {
+		const adaptiveModel = getAnthropicModelOrThrow("claude-opus-5");
+		const budgetModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		await createSession({
+			initialModelId: adaptiveModel.id,
+			initialThinkingLevel: Effort.High,
+			initialThinkingMode: "adaptive",
+			modelRoles: {
+				default: `${adaptiveModel.provider}/${adaptiveModel.id}`,
+				slow: `${budgetModel.provider}/${budgetModel.id}`,
+			},
+		});
+		expect(session.thinkingMode).toBe("adaptive");
+		// The session-local field alone proves nothing: the mode has to survive the
+		// hop into agent state or every request ships without it.
+		expect(session.agent.state.thinkingMode).toBe("adaptive");
+
+		const switchResult = await session.cycleRoleModels(["default", "slow"]);
+
+		expect(switchResult?.model.id).toBe(budgetModel.id);
+		expect(session.thinkingMode).toBeUndefined();
+		expect(session.agent.state.thinkingMode).toBeUndefined();
+		expect(session.agent.state.disableReasoning).toBe(false);
+		expect(session.sessionManager.buildSessionContext()).toMatchObject({
+			thinkingMode: undefined,
+			thinkingLevel: Effort.High,
+		});
 	});
 
 	it("keeps auto active on resume (pending until the next turn reclassifies)", async () => {

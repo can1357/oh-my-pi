@@ -8,7 +8,7 @@ import {
 	type AgentTool,
 	AppendOnlyContextManager,
 	filterProviderReplayMessages,
-	type ThinkingLevel,
+	ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
 import type {
 	Context,
@@ -203,12 +203,16 @@ import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
+	type ConfiguredThinkingMode,
 	concreteThinkingLevel,
+	parseCliThinkingMode,
 	parseConfiguredThinkingLevel,
 	parseThinkingLevel,
 	resolveProvisionalAutoLevel,
 	resolveThinkingLevelForModel,
+	resolveThinkingModeForModel,
 	shouldDisableReasoning,
+	toProviderThinkingMode,
 	toReasoningEffort,
 } from "@oh-my-pi/pi-tui/thinking";
 import {
@@ -425,7 +429,14 @@ export interface CreateAgentSessionOptions {
 	modelPatternFallbackRole?: string;
 	/** Validated default retry chain to install when a deferred singleton pattern resolves. */
 	modelPatternDefaultFallbackChain?: string[];
-	/** Thinking selector. Default: from settings, else unset */
+	/**
+	 * Thinking mode selector. Default: from session, else model/default behavior.
+	 *
+	 * `"off"` is accepted for compatibility and normalized onto the effort axis
+	 * (`thinkingLevel: "off"`); prefer `thinkingLevel` for intensity, including off.
+	 */
+	thinkingMode?: ConfiguredThinkingMode | typeof ThinkingLevel.Off;
+	/** Thinking effort selector. Default: from settings, else unset */
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Hard ceiling on the session's thinking effort (e.g. a task spawn's `task.maxEffort`-capped hint); retry-fallback recovery re-clamps to it. */
 	thinkingLevelCeiling?: Effort;
@@ -1277,6 +1288,9 @@ export function createAutoLearnCaptureRunner(
 				systemPrompt: [...options.sourceAgent.state.systemPrompt],
 				model: captureModel,
 				thinkingLevel: options.sourceAgent.state.thinkingLevel,
+				// Additive modes only: `off` belongs to the effort axis and is already
+				// carried by `disableReasoning` below.
+				thinkingMode: options.sourceAgent.state.thinkingMode === "adaptive" ? "adaptive" : undefined,
 				disableReasoning: options.sourceAgent.state.disableReasoning,
 				tools: options.captureTools,
 				messages: captureMessages,
@@ -1507,6 +1521,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		options.model !== undefined ||
 		options.modelPattern !== undefined ||
 		options.thinkingLevel !== undefined ||
+		options.thinkingMode !== undefined ||
 		options.systemPrompt !== undefined ||
 		options.systemPromptTemplate !== undefined ||
 		options.customSystemPrompt !== undefined ||
@@ -1677,7 +1692,25 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 		return level;
 	};
-	let thinkingLevel = pickInitialThinkingLevel(model);
+	// `off` is intensity, not mode. SDK callers and pre-split session files may
+	// still carry `thinkingMode: "off"`; fold those into the effort axis so the
+	// mode axis stays purely additive and cannot latch thinking off.
+	// A legacy `thinkingMode: "off"` only folds onto the effort axis when the
+	// caller did not state that axis directly -- matching `--effort` beating a
+	// deprecated `--thinking off` on the CLI, in either order.
+	const thinkingModeIsOff =
+		options.thinkingLevel === undefined &&
+		(options.thinkingMode === ThinkingLevel.Off ||
+			(options.thinkingMode === undefined && existingSession.thinkingMode === ThinkingLevel.Off));
+	// `off` never reaches the mode axis: it is either folded onto the effort axis
+	// above, or dropped when an explicit `thinkingLevel` already owns intensity.
+	const requestedThinkingMode =
+		options.thinkingMode !== undefined ? options.thinkingMode : parseCliThinkingMode(existingSession.thinkingMode);
+	const initialThinkingMode =
+		requestedThinkingMode === ThinkingLevel.Off ? undefined : toProviderThinkingMode(requestedThinkingMode);
+	let thinkingLevel = thinkingModeIsOff ? ThinkingLevel.Off : pickInitialThinkingLevel(model);
+	const parsedLastNonOffThinkingLevel =
+		hasExistingSession && hasThinkingEntry ? parseThinkingLevel(existingSession.lastNonOffThinkingLevel) : undefined;
 	let autoThinking = thinkingLevel === AUTO_THINKING;
 	// Concrete level the agent/session start with. With `auto` this is the
 	// provisional level shown until the first per-turn classification resolves;
@@ -3727,11 +3760,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// toggles; per-turn coordinator close never touches it.
 		const speculativeToolExecution = createSpeculativeToolExecutionConfig(settings, toolSession, extensionRunner);
 
+		const resolvedInitialThinkingMode = resolveThinkingModeForModel(model, initialThinkingMode);
 		agent = new Agent({
 			initialState: {
 				systemPrompt,
 				model,
 				thinkingLevel: toReasoningEffort(effectiveThinkingLevel),
+				thinkingMode: resolvedInitialThinkingMode,
 				disableReasoning: shouldDisableReasoning(effectiveThinkingLevel),
 				tools: initialTools,
 			},
@@ -3838,10 +3873,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (model) {
 				sessionManager.appendModelChange(`${model.provider}/${model.id}`);
 			}
-			if (!autoThinking) {
-				// Do not write the `auto` selector before the first turn resolves; auto
-				// classification persists its concrete effort once a real user turn runs.
-				sessionManager.appendThinkingLevelChange(effectiveThinkingLevel);
+			if (autoThinking && resolvedInitialThinkingMode !== undefined) {
+				sessionManager.appendThinkingLevelChange(undefined, AUTO_THINKING, resolvedInitialThinkingMode);
+			} else if (!autoThinking) {
+				// Do not write the `auto` selector before the first turn resolves unless
+				// an explicit mode must be preserved for resume/fork.
+				sessionManager.appendThinkingLevelChange(effectiveThinkingLevel, undefined, resolvedInitialThinkingMode);
 			}
 			if (persistInitialServiceTier || Object.keys(initialServiceTierByFamily).length > 0) {
 				sessionManager.appendServiceTierChange(
@@ -3929,6 +3966,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			agent,
 			pruneToolDescriptions: inlineToolDescriptors,
 			thinkingLevel: autoThinking ? AUTO_THINKING : effectiveThinkingLevel,
+			lastNonOffThinkingLevel: parsedLastNonOffThinkingLevel,
+			thinkingMode: resolvedInitialThinkingMode,
 			thinkingLevelCeiling: options.thinkingLevelCeiling,
 			initialRetryFallback,
 			prewalk: options.prewalk,

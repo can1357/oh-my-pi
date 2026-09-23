@@ -10,8 +10,9 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { getRestorableSessionModels } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { EPHEMERAL_MODEL_CHANGE_ROLE } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { MnemopiSessionState, setMnemopiSessionState } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
+import { AUTO_THINKING, resolveProvisionalAutoLevel } from "@oh-my-pi/pi-tui/thinking";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 describe("AgentSession model persistence", () => {
@@ -159,6 +160,34 @@ describe("AgentSession model persistence", () => {
 		session = result.session;
 		return result;
 	}
+	it("does not persist unsupported adaptive mode during SDK session creation", async () => {
+		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const sessionManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "unsupported-adaptive"));
+		const result = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			authStorage: sharedAuthStorage,
+			modelRegistry: sharedModelRegistry,
+			sessionManager,
+			settings: Settings.isolated(),
+			model,
+			thinkingMode: "adaptive",
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+		});
+		session = result.session;
+
+		expect(result.session.thinkingMode).toBeUndefined();
+		expect(result.session.agent.state.thinkingMode).toBeUndefined();
+		expect(result.session.sessionManager.buildSessionContext().thinkingMode).toBeUndefined();
+	});
+
 	it("switches the active model without persisting by default", async () => {
 		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
 		const nextModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
@@ -427,6 +456,214 @@ describe("AgentSession model persistence", () => {
 
 		expect(result.session.model?.id).toBe(defaultModel.id);
 		expect(result.session.configuredThinkingLevel()).toBe(AUTO_THINKING);
+	});
+
+	it("restores thinking off with the last concrete effort on startup resume", async () => {
+		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-5");
+		const targetSessionFile = path.join(tempDir.path(), `target-thinking-${Bun.nanoseconds()}.jsonl`);
+		const timestamp = "2026-06-01T00:00:00.000Z";
+		await Bun.write(
+			targetSessionFile,
+			`${[
+				{ type: "session", version: 3, id: "target-session", timestamp, cwd: tempDir.path() },
+				{
+					type: "model_change",
+					id: "default-model",
+					parentId: null,
+					timestamp,
+					model: modelValue(defaultModel),
+					role: "default",
+				},
+				{
+					type: "thinking_level_change",
+					id: "thinking-max",
+					parentId: "default-model",
+					timestamp,
+					thinkingLevel: "max",
+					configured: "max",
+				},
+				{
+					type: "thinking_level_change",
+					id: "thinking-off",
+					parentId: "thinking-max",
+					timestamp,
+					thinkingLevel: "off",
+					configured: "off",
+				},
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n")}\n`,
+		);
+
+		const settings = Settings.isolated();
+		settings.setModelRole("default", modelValue(defaultModel));
+
+		const result = await createStartupResumeSession(targetSessionFile, settings);
+		expect(result.session.model?.id).toBe("claude-sonnet-5");
+		expect(result.session.sessionManager.buildSessionContext().lastNonOffThinkingLevel).toBe("max");
+
+		expect(result.session.thinkingLevel).toBe("off");
+		expect(result.session.agent.state.thinkingLevel).toBe(Effort.Max);
+	});
+
+	it("resets an off session without retained effort to the model provisional effort on switch", async () => {
+		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-5");
+		const created = await createSession({
+			initialModel: defaultModel,
+			modelRoles: { default: modelValue(defaultModel) },
+			persist: true,
+		});
+		created.session.setThinkingLevel(Effort.Low);
+		expect(created.session.agent.state.thinkingLevel).toBe(Effort.Low);
+
+		const targetSessionFile = path.join(tempDir.path(), `target-off-only-${Bun.nanoseconds()}.jsonl`);
+		const timestamp = "2026-06-01T00:00:00.000Z";
+		await Bun.write(
+			targetSessionFile,
+			`${[
+				{ type: "session", version: 3, id: "target-off-only", timestamp, cwd: tempDir.path() },
+				{
+					type: "model_change",
+					id: "default-model",
+					parentId: null,
+					timestamp,
+					model: modelValue(defaultModel),
+					role: "default",
+				},
+				{
+					type: "thinking_level_change",
+					id: "thinking-off",
+					parentId: "default-model",
+					timestamp,
+					thinkingLevel: "off",
+					configured: "off",
+				},
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n")}\n`,
+		);
+
+		await expect(created.session.switchSession(targetSessionFile)).resolves.toBe(true);
+
+		expect(created.session.thinkingLevel).toBe("off");
+		expect(created.session.sessionManager.buildSessionContext().lastNonOffThinkingLevel).toBeUndefined();
+		expect(created.session.agent.state.thinkingLevel).toBe(resolveProvisionalAutoLevel(defaultModel));
+	});
+
+	it("restores thinking off with retained effort on switch session", async () => {
+		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-5");
+		const created = await createSession({
+			initialModel: defaultModel,
+			modelRoles: { default: modelValue(defaultModel) },
+			persist: true,
+		});
+		created.session.setThinkingLevel(Effort.Low);
+		expect(created.session.agent.state.thinkingLevel).toBe(Effort.Low);
+
+		const targetSessionFile = path.join(tempDir.path(), `target-off-retained-${Bun.nanoseconds()}.jsonl`);
+		const timestamp = "2026-06-01T00:00:00.000Z";
+		await Bun.write(
+			targetSessionFile,
+			`${[
+				{ type: "session", version: 3, id: "target-off-retained", timestamp, cwd: tempDir.path() },
+				{
+					type: "model_change",
+					id: "default-model",
+					parentId: null,
+					timestamp,
+					model: modelValue(defaultModel),
+					role: "default",
+				},
+				{
+					type: "thinking_level_change",
+					id: "thinking-max",
+					parentId: "default-model",
+					timestamp,
+					thinkingLevel: "max",
+					configured: "max",
+				},
+				{
+					type: "thinking_level_change",
+					id: "thinking-off",
+					parentId: "thinking-max",
+					timestamp,
+					thinkingLevel: "off",
+					configured: "off",
+				},
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n")}\n`,
+		);
+
+		await expect(created.session.switchSession(targetSessionFile)).resolves.toBe(true);
+
+		expect(created.session.thinkingLevel).toBe("off");
+		expect(created.session.sessionManager.buildSessionContext().lastNonOffThinkingLevel).toBe("max");
+		expect(created.session.agent.state.thinkingLevel).toBe(Effort.Max);
+	});
+
+	it("restores retained off effort when a session switch rolls back", async () => {
+		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-5");
+		const created = await createSession({
+			initialModel: defaultModel,
+			modelRoles: { default: modelValue(defaultModel) },
+			persist: true,
+		});
+		created.session.setThinkingLevel(Effort.Max);
+		created.session.setThinkingLevel("off");
+		expect(created.session.agent.state.thinkingLevel).toBe(Effort.Max);
+
+		const targetSessionFile = path.join(tempDir.path(), `target-off-rollback-${Bun.nanoseconds()}.jsonl`);
+		const timestamp = "2026-06-01T00:00:00.000Z";
+		await Bun.write(
+			targetSessionFile,
+			`${[
+				{ type: "session", version: 3, id: "target-off-rollback", timestamp, cwd: tempDir.path() },
+				{
+					type: "model_change",
+					id: "default-model",
+					parentId: null,
+					timestamp,
+					model: modelValue(defaultModel),
+					role: "default",
+				},
+				{
+					type: "thinking_level_change",
+					id: "thinking-low",
+					parentId: "default-model",
+					timestamp,
+					thinkingLevel: "low",
+					configured: "low",
+				},
+				{
+					type: "thinking_level_change",
+					id: "thinking-off",
+					parentId: "thinking-low",
+					timestamp,
+					thinkingLevel: "off",
+					configured: "off",
+				},
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n")}\n`,
+		);
+		const failure = new Error("switch failed after thinking restore");
+		created.settings.override("memory.backend", "mnemopi");
+		const mnemopi: MnemopiSessionState = Object.create(MnemopiSessionState.prototype);
+		Object.assign(mnemopi, {
+			aliasOf: undefined,
+			resetConversationTracking() {
+				throw failure;
+			},
+			setSessionId() {},
+			dispose() {},
+		});
+		setMnemopiSessionState(created.session, mnemopi);
+
+		await expect(created.session.switchSession(targetSessionFile)).rejects.toThrow(failure);
+
+		expect(created.session.thinkingLevel).toBe("off");
+		expect(created.session.agent.state.thinkingLevel).toBe(Effort.Max);
 	});
 
 	it("marks an incomplete process-exit transcript aborted during SDK resume without dropping history", async () => {

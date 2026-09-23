@@ -8,6 +8,7 @@ import {
 } from "@oh-my-pi/pi-ai";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { isRecord } from "@oh-my-pi/pi-utils";
+import { parseThinkingLevel, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
 import {
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
@@ -99,6 +100,10 @@ export interface SessionContext {
 	thinkingLevel?: string;
 	/** Configured thinking selector (`"auto"` or a concrete level) from the latest change. */
 	configuredThinkingLevel?: string;
+	/** Last concrete non-off effort before a thinking-off entry; used to restore split off+effort state. */
+	lastNonOffThinkingLevel?: string;
+	/** Provider-neutral thinking mode from the latest thinking/effort change. */
+	thinkingMode?: string;
 	serviceTier?: ServiceTierByFamily;
 	/** Model roles: { default: "provider/modelId", small: "provider/modelId", ... } */
 	models: Record<string, string>;
@@ -276,6 +281,8 @@ export function buildSessionContext(
 	// Extract settings and find compaction
 	let thinkingLevel: string | undefined = "off";
 	let configuredThinkingLevel: string | undefined;
+	let thinkingMode: string | undefined;
+	let lastNonOffThinkingLevel: string | undefined;
 	let serviceTier: ServiceTierByFamily | undefined;
 	const models: Record<string, string> = {};
 	let compaction: CompactionEntry | null = null;
@@ -293,8 +300,17 @@ export function buildSessionContext(
 
 	for (const entry of path) {
 		if (entry.type === "thinking_level_change") {
-			thinkingLevel = entry.thinkingLevel ?? "off";
+			thinkingLevel = entry.thinkingLevel ?? (Object.hasOwn(entry, "thinkingMode") ? undefined : "off");
 			configuredThinkingLevel = entry.configured ?? entry.thinkingLevel ?? undefined;
+			const configuredRetained = parseThinkingLevel(entry.configured);
+			const concreteRetained =
+				toReasoningEffort(configuredRetained) !== undefined
+					? configuredRetained
+					: parseThinkingLevel(entry.thinkingLevel);
+			if (toReasoningEffort(concreteRetained) !== undefined) {
+				lastNonOffThinkingLevel = concreteRetained;
+			}
+			thinkingMode = entry.thinkingMode ?? undefined;
 		} else if (entry.type === "model_change") {
 			// New format: { model: "provider/id", role?: string }
 			if (entry.model) {
@@ -717,6 +733,8 @@ export function buildSessionContext(
 		cacheMissExplainedAt: options?.transcript ? cacheMissExplainedAt : undefined,
 		thinkingLevel,
 		configuredThinkingLevel,
+		lastNonOffThinkingLevel,
+		thinkingMode,
 		serviceTier,
 		models,
 		injectedTtsrRules,

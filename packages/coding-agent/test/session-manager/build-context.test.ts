@@ -72,6 +72,23 @@ describe("buildSessionContext", () => {
 			expect(ctx.models).toEqual({});
 		});
 
+		it("preserves mode-only thinking entries without inventing off effort", () => {
+			const entries: SessionEntry[] = [
+				{
+					type: "thinking_level_change",
+					id: "1",
+					parentId: null,
+					timestamp: "2025-01-01T00:00:00Z",
+					thinkingLevel: null,
+					thinkingMode: "adaptive",
+				},
+			];
+			const ctx = buildSessionContext(entries);
+			expect(ctx.thinkingLevel).toBeUndefined();
+			expect(ctx.configuredThinkingLevel).toBeUndefined();
+			expect(ctx.thinkingMode).toBe("adaptive");
+		});
+
 		it("single user message", () => {
 			const entries: SessionEntry[] = [msg("1", null, "user", "hello")];
 			const ctx = buildSessionContext(entries);

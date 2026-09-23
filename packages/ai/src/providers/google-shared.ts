@@ -84,6 +84,11 @@ export interface GoogleSharedStreamOptions extends StreamOptions {
 		enabled: boolean;
 		budgetTokens?: number;
 		level?: GoogleThinkingLevel;
+		/**
+		 * Explicit wire suppression for models that re-apply a baked thinking
+		 * default whenever `thinkingConfig` is omitted.
+		 */
+		suppress?: { budget: number } | { level: GoogleThinkingLevel };
 	};
 	/** Request that Google omit human-readable thought summaries while still allowing internal reasoning. */
 	hideThinkingSummary?: boolean;

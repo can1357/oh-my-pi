@@ -27,6 +27,7 @@
 - Added `/export` and `/usage` to focused subagent views: `/export` writes the focused subagent's transcript (including its own subagents) and `/usage` shows account usage without returning to the main session ([#12986](https://github.com/can1357/oh-my-pi/pull/12986) by [@H4vC](https://github.com/H4vC)).
 - Added saving of clipboard-pasted images to the session artifact directory so the agent receives a file path it can read, copy, or upload (for example, attaching a pasted screenshot to an issue tracker) ([#12985](https://github.com/can1357/oh-my-pi/pull/12985) by [@H4vC](https://github.com/H4vC)).
 - Added `/annotate` to attach notes to a code-review diff, the latest reply, a session message, a file, or quoted text, then paste them into the prompt or send them with a review ([#12601](https://github.com/can1357/oh-my-pi/pull/12601) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
+- Added `--effort <off|minimal|low|medium|high|xhigh|max|auto>` as the universal reasoning-intensity flag, and `--thinking <adaptive|default>` as an additive provider thinking-mode selector for models that advertise it (Claude 4.6+/5). Both flags accept unambiguous abbreviations (`--effort xhi`, `--thinking ad`).
 
 ### Changed
 
@@ -37,6 +38,8 @@
 - Unified terminal OAuth flow logic across `omp login` and `omp auth-broker login`
 - Included identity account/organization info in terminal login success messages
 - Changed judgment fallback to consider only native candidates, preventing prompted models from replacing failed natives
+- `--thinking` now selects a thinking *mode*; reasoning intensity moved to `--effort`. Effort values passed to `--thinking` (e.g. `--thinking high`, `--thinking off`) still work and are routed to `--effort` with a deprecation warning on stderr. Invalid `--thinking`/`--effort` values now fail fast instead of silently falling back to the default.
+- Thinking-off session state now keeps the last supported reasoning effort available for providers that separate thinking mode from effort.
 
 ### Deprecated
 
@@ -51,6 +54,9 @@
 - Fixed comma-separated line selectors such as `:19,59` in `read`, `grep` paths, and `fetch` reading from the first number through EOF. A bare number in a list is now that single line; a lone `:50` still reads from line 50.
 - Fixed `write` success text reporting JavaScript string length as bytes. The count is now the UTF-8 byte length.
 - Fixed headless print mode (`-p`) silently dropping MCP servers slower than the startup window; print mode now waits for configured servers (bounded by `OMP_MCP_TIMEOUT_MS`) and warns on stderr when one is not ready ([#12188](https://github.com/can1357/oh-my-pi/issues/12188), reported by [@aaronjmars](https://github.com/aaronjmars)).
+- Fixed `--thinking off` being ignored by Google (Generative AI, Gemini CLI, Vertex), Ollama, Devin, and OpenAI/Anthropic shim OpenAI-format requests.
+- Fixed the thinking selector, RPC, ACP, and extension paths being unable to re-enable thinking after it had been turned off.
+- Fixed thinking state not reaching collab guests, RPC clients, and proxied agents, which showed stale or wrong thinking status.
 - Fixed reader-mode `fetch` output passing inline SVG icons and base64 `data:` images to the model as unreadable payloads; they are now dropped and their alt text is kept ([#13006](https://github.com/can1357/oh-my-pi/pull/13006) by [@H4vC](https://github.com/H4vC)).
 - Fixed judged TTSR rules failing with `max_tokens_exceeded` on long non-Latin outputs: judged content was capped at 60,000 characters, which is ~60k Jev tokens of Chinese against Jev's ~33k-token branch limit. It is now cut to 32,000 Jev tokens counted locally, so long English outputs are also no longer truncated early.
 

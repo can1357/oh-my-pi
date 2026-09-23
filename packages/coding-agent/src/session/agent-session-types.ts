@@ -16,6 +16,7 @@ import type {
 	OAuthAccountSummary,
 	ServiceTierByFamily,
 	SimpleStreamOptions,
+	ThinkingMode,
 	ToolChoice,
 } from "@oh-my-pi/pi-ai";
 import type { postmortem } from "@oh-my-pi/pi-utils";
@@ -160,8 +161,12 @@ export interface AgentSessionConfig {
 	autoApprove?: boolean;
 	/** Models to cycle through with Ctrl+P (from --models flag). */
 	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
-	/** Initial session thinking selector. */
+	/** Initial session thinking mode; effort intensity stays in `thinkingLevel`. */
+	thinkingMode?: ThinkingMode;
+	/** Initial session effort selector. */
 	thinkingLevel?: ConfiguredThinkingLevel;
+	/** Last concrete non-off effort retained when initial thinking is off. */
+	lastNonOffThinkingLevel?: ThinkingLevel;
 	/** Hard ceiling on the session's thinking effort (e.g. a task spawn's `task.maxEffort`-capped hint); every later change, including retry-fallback recovery, is re-clamped to it. */
 	thinkingLevelCeiling?: Effort;
 	/** Retry chain ownership when startup selected one of its fallback entries. */

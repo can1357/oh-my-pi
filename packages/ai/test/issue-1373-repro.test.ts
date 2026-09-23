@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { streamBedrock } from "@oh-my-pi/pi-ai/providers/amazon-bedrock";
-import type { Context, Model } from "@oh-my-pi/pi-ai/types";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
+import type { Context, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 
@@ -34,7 +35,7 @@ function adaptiveModel(id: string): Model<"bedrock-converse-stream"> {
 	});
 }
 
-function budgetModel(id: string): Model<"bedrock-converse-stream"> {
+function budgetModel(id: string, requiresEffort = false): Model<"bedrock-converse-stream"> {
 	return buildModel({
 		id,
 		name: id,
@@ -46,7 +47,11 @@ function budgetModel(id: string): Model<"bedrock-converse-stream"> {
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 200_000,
 		maxTokens: 64_000,
-		thinking: { mode: "budget", efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High] },
+		thinking: {
+			mode: "budget",
+			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+			requiresEffort,
+		},
 	});
 }
 
@@ -64,6 +69,7 @@ function abortedSignal(): AbortSignal {
 interface ThinkingPayload {
 	additionalModelRequestFields?: {
 		thinking?: { type?: string; display?: string; budget_tokens?: number };
+		output_config?: { effort?: string };
 	};
 }
 
@@ -83,6 +89,23 @@ function captureBedrockPayload(
 	return promise;
 }
 
+async function captureSimpleBedrockPayload(
+	model: Model<"bedrock-converse-stream">,
+	options: SimpleStreamOptions = {},
+): Promise<ThinkingPayload> {
+	const { promise, resolve } = Promise.withResolvers<ThinkingPayload>();
+	const stream = streamSimple(model, baseContext, {
+		signal: abortedSignal(),
+		...options,
+		onPayload: payload => {
+			resolve(payload as ThinkingPayload);
+			return undefined;
+		},
+	});
+	await stream.result();
+	return promise;
+}
+
 describe("issue #1373: Bedrock Claude thinkingDisplay", () => {
 	it("defaults adaptive thinking to display=summarized on Opus 4.7+", async () => {
 		const payload = await captureBedrockPayload(adaptiveModel("anthropic.claude-opus-4-7"), {
@@ -91,6 +114,69 @@ describe("issue #1373: Bedrock Claude thinkingDisplay", () => {
 		expect(payload.additionalModelRequestFields?.thinking).toMatchObject({
 			type: "adaptive",
 			display: "summarized",
+		});
+	});
+
+	it("preserves adaptive thinking mode without fabricating an effort", async () => {
+		const payload = await captureBedrockPayload(adaptiveModel("anthropic.claude-opus-4-7"), {
+			anthropicThinkingMode: "adaptive",
+		});
+		expect(payload.additionalModelRequestFields?.thinking).toMatchObject({
+			type: "adaptive",
+			display: "summarized",
+		});
+		expect(payload.additionalModelRequestFields?.output_config?.effort).toBeUndefined();
+	});
+
+	it("keeps default no-reasoning adaptive requests thinking-free", async () => {
+		const payload = await captureBedrockPayload(adaptiveModel("anthropic.claude-opus-4-7"));
+		expect(payload.additionalModelRequestFields).toBeUndefined();
+	});
+
+	it("lets disableReasoning suppress a supplied effort", async () => {
+		const { promise, resolve } = Promise.withResolvers<ThinkingPayload>();
+		const stream = streamSimple(adaptiveModel("anthropic.claude-opus-4-7"), baseContext, {
+			signal: abortedSignal(),
+			reasoning: Effort.High,
+			disableReasoning: true,
+			onPayload: payload => {
+				resolve(payload as ThinkingPayload);
+				return undefined;
+			},
+		});
+		await stream.result();
+		const payload = await promise;
+		expect(payload.additionalModelRequestFields).toBeUndefined();
+	});
+
+	it("maps neutral thinking modes before Bedrock option shaping", async () => {
+		const adaptivePayload = await captureSimpleBedrockPayload(adaptiveModel("anthropic.claude-opus-4-7"), {
+			thinkingMode: "adaptive",
+		});
+		expect(adaptivePayload.additionalModelRequestFields?.thinking).toMatchObject({
+			type: "adaptive",
+			display: "summarized",
+		});
+		expect(adaptivePayload.additionalModelRequestFields?.output_config?.effort).toBeUndefined();
+		const budgetAdaptivePayload = await captureSimpleBedrockPayload(
+			budgetModel("us.anthropic.claude-haiku-4-5-20251001-v1:0"),
+			{
+				thinkingMode: "adaptive",
+			},
+		);
+		expect(budgetAdaptivePayload.additionalModelRequestFields).toBeUndefined();
+		const offPayload = await captureSimpleBedrockPayload(adaptiveModel("anthropic.claude-opus-4-7"), {
+			reasoning: Effort.High,
+			thinkingMode: "off",
+		});
+		expect(offPayload.additionalModelRequestFields).toBeUndefined();
+		const mandatoryOffPayload = await captureSimpleBedrockPayload(budgetModel("minimax.m2.1", true), {
+			reasoning: Effort.High,
+			thinkingMode: "off",
+		});
+		expect(mandatoryOffPayload.additionalModelRequestFields?.thinking).toMatchObject({
+			type: "enabled",
+			budget_tokens: 1024,
 		});
 	});
 

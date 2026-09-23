@@ -160,7 +160,9 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 					: { type: "tool", name: options.toolChoice.name };
 	}
 	if (options.reasoning !== undefined) opts.reasoning = options.reasoning;
+	if (options.thinkingMode !== undefined) opts.thinkingMode = options.thinkingMode;
 	if (options.disableReasoning !== undefined) opts.disableReasoning = options.disableReasoning;
+	if (options.anthropicThinkingMode !== undefined) opts.anthropicThinkingMode = options.anthropicThinkingMode;
 	if (options.forceReasoningOff !== undefined) {
 		opts.disableReasoning = options.forceReasoningOff;
 		opts.forceReasoningOff = options.forceReasoningOff;

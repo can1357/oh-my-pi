@@ -40,6 +40,7 @@ function makeGuestContext(eventBus: EventBus): InteractiveModeContext {
 				state: { model: undefined },
 				setModel: () => {},
 				setThinkingLevel: () => {},
+				setThinkingMode: () => {},
 				setDisableReasoning: () => {},
 			},
 		},

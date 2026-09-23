@@ -41,7 +41,7 @@ import {
 	resolveTelemetry,
 	type StreamFn,
 	TERMINAL_TOOL_RESULT_ABORT_REASON,
-	type ThinkingLevel,
+	ThinkingLevel,
 	type ToolChoiceDirective,
 } from "@oh-my-pi/pi-agent-core";
 import {
@@ -71,6 +71,7 @@ import type {
 	ServiceTierFamily,
 	SimpleStreamOptions,
 	TextContent,
+	ThinkingMode,
 	ToolCall,
 	ToolChoice,
 	ToolResultMessage,
@@ -205,8 +206,7 @@ import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
 	parseConfiguredThinkingLevel,
-	shouldDisableReasoning,
-	toReasoningEffort,
+	parseThinkingLevel,
 } from "@oh-my-pi/pi-tui/thinking";
 import { isLowSignalTitleInput } from "../tiny/text";
 import { shutdownTinyTitleClient } from "../tiny/title-client";
@@ -1443,7 +1443,9 @@ export class AgentSession {
 		};
 		this.#models = new ModelControls(modelControlsHost, {
 			scopedModels: config.scopedModels,
+			thinkingMode: config.thinkingMode,
 			thinkingLevel: config.thinkingLevel,
+			lastNonOffThinkingLevel: config.lastNonOffThinkingLevel,
 			thinkingLevelCeiling: config.thinkingLevelCeiling,
 			serviceTierByFamily: config.serviceTierByFamily,
 		});
@@ -5335,7 +5337,12 @@ export class AgentSession {
 		return this.#models.thinkingLevel;
 	}
 
-	/** The selector the user configured: `auto` when auto mode is active, else the effective level. */
+	/** Configured thinking mode, separate from effort intensity. */
+	get thinkingMode(): ThinkingMode | undefined {
+		return this.#models.thinkingMode;
+	}
+
+	/** The effort selector the user configured: `auto` when auto mode is active, else the effective level. */
 	configuredThinkingLevel(): ConfiguredThinkingLevel | undefined {
 		return this.#models.configuredThinkingLevel();
 	}
@@ -8513,7 +8520,11 @@ export class AgentSession {
 			this.#queuedMessageDrainBlocked = false;
 			this.#usagePreflightReadyForNextModelCall = false;
 
-			this.sessionManager.appendThinkingLevelChange(this.thinkingLevel, this.configuredThinkingLevel());
+			this.sessionManager.appendThinkingLevelChange(
+				this.thinkingLevel,
+				this.configuredThinkingLevel(),
+				this.thinkingMode,
+			);
 			this.sessionManager.appendServiceTierChange(this.#models.serviceTierEntry());
 
 			this.#todo.resetCycle();
@@ -8708,7 +8719,12 @@ export class AgentSession {
 		return this.#models.getAvailableModels();
 	}
 
-	/** Selects the session thinking level and optionally persists it as the default. */
+	/** Selects provider-side thinking mode without changing effort intensity. */
+	setThinkingMode(mode: ThinkingMode | undefined): void {
+		this.#models.setThinkingMode(mode);
+	}
+
+	/** Selects the session effort level and optionally persists it as the default. */
 	setThinkingLevel(level: ConfiguredThinkingLevel | undefined, persist: boolean = false): void {
 		this.#models.setThinkingLevel(level, persist);
 	}
@@ -9466,8 +9482,9 @@ export class AgentSession {
 				promptCacheKey: this.agent.promptCacheKey ?? this.agent.sessionId,
 				preferWebsockets: this.#preferWebsockets,
 				providerSessionState: this.#providerSessionState,
-				reasoning: toReasoningEffort(this.thinkingLevel),
-				disableReasoning: shouldDisableReasoning(this.thinkingLevel),
+				reasoning: this.agent.state.thinkingLevel,
+				thinkingMode: this.agent.state.thinkingMode,
+				disableReasoning: this.agent.state.disableReasoning,
 				hideThinkingSummary: this.agent.hideThinkingSummary,
 				serviceTier: this.#models.effectiveServiceTier(model),
 				signal: args.signal,
@@ -9663,8 +9680,10 @@ export class AgentSession {
 		const previousUsagePreflightReadyModel = this.#usagePreflightReadyModel;
 		const previousModel = this.model;
 		const previousThinkingLevel = this.thinkingLevel;
+		const previousThinkingMode = this.thinkingMode;
 		const previousAutoThinking = this.isAutoThinking;
 		const previousAutoResolvedLevel = this.autoResolvedThinkingLevel();
+		const previousLastReasoningEffort = this.#models.lastReasoningEffort;
 		const previousServiceTierByFamily = this.serviceTierByFamily;
 		const previousTools = [...this.agent.state.tools];
 		const previousBaseSystemPrompt = this.#tools.baseSystemPrompt;
@@ -9826,13 +9845,22 @@ export class AgentSession {
 			// With no thinking entry, fall back to the global default so fresh sessions
 			// still classify their first turn.
 			const restoredConfigured = sessionContext.configuredThinkingLevel;
-			const restoredThinkingLevel: ConfiguredThinkingLevel | undefined =
-				hasThinkingEntry || (defaultThinkingLevel === AUTO_THINKING && sessionContext.thinkingLevel !== "off")
+			// Pre-split sessions persisted `thinkingMode: "off"`. Off is intensity, so
+			// fold it onto the effort axis and keep the mode axis purely additive.
+			const persistedModeIsOff = sessionContext.thinkingMode === "off";
+			const restoredThinkingLevel: ConfiguredThinkingLevel | undefined = persistedModeIsOff
+				? ThinkingLevel.Off
+				: hasThinkingEntry || (defaultThinkingLevel === AUTO_THINKING && sessionContext.thinkingLevel !== "off")
 					? restoredConfigured === AUTO_THINKING
 						? AUTO_THINKING
 						: (sessionContext.thinkingLevel as ThinkingLevel | undefined)
 					: defaultThinkingLevel;
-			this.#models.restoreThinkingLevel(restoredThinkingLevel);
+			const restoredThinkingMode = sessionContext.thinkingMode === "adaptive" ? "adaptive" : undefined;
+			this.#models.restoreThinkingLevel(
+				restoredThinkingLevel,
+				parseThinkingLevel(sessionContext.lastNonOffThinkingLevel),
+			);
+			this.#models.restoreThinkingMode(hasThinkingEntry ? restoredThinkingMode : undefined);
 			this.#models.restoreServiceTiers(
 				hasServiceTierEntry ? (sessionContext.serviceTier ?? {}) : configuredServiceTierByFamily,
 			);
@@ -9927,7 +9955,13 @@ export class AgentSession {
 				this.agent.setModel(previousModel);
 				modelRolledBack = !modelsAreEqual(rolledBackModel, previousModel);
 			}
-			this.#models.restoreThinkingSnapshot(previousThinkingLevel, previousAutoThinking, previousAutoResolvedLevel);
+			this.#models.restoreThinkingSnapshot(
+				previousThinkingLevel,
+				previousThinkingMode,
+				previousAutoThinking,
+				previousAutoResolvedLevel,
+				previousLastReasoningEffort,
+			);
 			this.#models.restoreServiceTiers(previousServiceTierByFamily);
 			if (modelRolledBack) {
 				this.#emit({ type: "model_changed" });

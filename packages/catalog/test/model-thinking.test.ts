@@ -244,6 +244,73 @@ describe("model thinking derivation", () => {
 		});
 	});
 
+	it("derives disabled-thinking support only for official Anthropic Messages Opus 5 models", () => {
+		const messagesOpus5 = createModel({
+			id: "claude-opus-5",
+			api: "anthropic-messages",
+			provider: "anthropic",
+			baseUrl: "https://api.anthropic.com",
+		});
+		const proxyOpus5 = createModel({
+			id: "github-copilot/claude-opus-5",
+			api: "anthropic-messages",
+			provider: "github-copilot",
+			baseUrl: "https://api.githubcopilot.com/chat/completions",
+		});
+		const bedrockOpus5 = createModel({
+			id: "global.anthropic.claude-opus-5",
+			api: "bedrock-converse-stream",
+			provider: "amazon-bedrock",
+		});
+		const cachedMessagesOpus5 = createModel({
+			id: "claude-opus-5",
+			api: "anthropic-messages",
+			provider: "anthropic",
+			baseUrl: "https://api.anthropic.com",
+			thinking: {
+				mode: "anthropic-adaptive",
+				efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+			},
+		});
+		const explicitUnsupportedOpus5 = createModel({
+			id: "claude-opus-5",
+			api: "anthropic-messages",
+			provider: "anthropic",
+			baseUrl: "https://api.anthropic.com",
+			thinking: {
+				mode: "anthropic-adaptive",
+				efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+				supportsDisabledThinking: false,
+				disabledThinkingMaxEffort: Effort.High,
+			},
+		});
+		const cachedBedrockOpus5 = createModel({
+			id: "global.anthropic.claude-opus-5",
+			api: "bedrock-converse-stream",
+			provider: "amazon-bedrock",
+			thinking: {
+				mode: "anthropic-adaptive",
+				efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.Max],
+			},
+		});
+
+		// Accepting `thinking.type: "disabled"` is documented for the native
+		// Anthropic Messages API. Anthropic-compatible proxy rows share the wire
+		// dialect but not necessarily that capability.
+		expect(messagesOpus5.thinking?.supportsDisabledThinking).toBe(true);
+		expect(messagesOpus5.thinking?.disabledThinkingMaxEffort).toBe(Effort.High);
+		expect(proxyOpus5.thinking?.supportsDisabledThinking).toBeUndefined();
+		expect(proxyOpus5.thinking?.disabledThinkingMaxEffort).toBeUndefined();
+		expect(bedrockOpus5.thinking?.supportsDisabledThinking).toBeUndefined();
+		// Backfilled onto explicit thinking when it is absent; explicit false wins
+		// and must not leave a contradictory ceiling behind.
+		expect(cachedMessagesOpus5.thinking?.supportsDisabledThinking).toBe(true);
+		expect(cachedMessagesOpus5.thinking?.disabledThinkingMaxEffort).toBe(Effort.High);
+		expect(explicitUnsupportedOpus5.thinking?.supportsDisabledThinking).toBe(false);
+		expect(explicitUnsupportedOpus5.thinking?.disabledThinkingMaxEffort).toBeUndefined();
+		expect(cachedBedrockOpus5.thinking?.supportsDisabledThinking).toBeUndefined();
+	});
+
 	it("maps GLM-5.2 reasoning effort per host dialect", () => {
 		const zai = createModel({
 			id: "glm-5.2",

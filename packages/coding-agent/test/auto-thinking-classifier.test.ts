@@ -10,12 +10,14 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	AUTO_THINKING,
 	clampAutoThinkingEffort,
-	parseCliThinkingLevel,
+	parseCliEffort,
+	parseCliThinkingMode,
 	parseConfiguredThinkingLevel,
 	parseEffort,
 	parseThinkingLevel,
 	resolveProvisionalAutoLevel,
 	resolveTaskEffortLevel,
+	resolveThinkingModeForModel,
 } from "@oh-my-pi/pi-tui/thinking";
 import type { TinyMemoryLocalModelKey } from "@oh-my-pi/pi-coding-agent/tiny/models";
 import { tinyModelClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
@@ -55,12 +57,22 @@ describe("auto thinking classifier helpers", () => {
 		expect(parseThinkingLevel(ThinkingLevel.Off)).toBe(ThinkingLevel.Off);
 	});
 
-	it("parses CLI --thinking selectors while rejecting inherit", () => {
-		expect(parseCliThinkingLevel(ThinkingLevel.Off)).toBe(ThinkingLevel.Off);
-		expect(parseCliThinkingLevel(AUTO_THINKING)).toBe(AUTO_THINKING);
-		expect(parseCliThinkingLevel("max")).toBe(ThinkingLevel.Max);
-		expect(parseCliThinkingLevel(ThinkingLevel.Inherit)).toBeUndefined();
-		expect(parseCliThinkingLevel("bogus")).toBeUndefined();
+	it("parses CLI --thinking mode selectors while rejecting efforts, auto, and inherit", () => {
+		// `off` is intensity, not a mode: it belongs to the effort axis.
+		expect(parseCliThinkingMode(ThinkingLevel.Off)).toBeUndefined();
+		expect(parseCliThinkingMode("adaptive")).toBe("adaptive");
+		expect(parseCliThinkingMode("default")).toBe("default");
+		expect(parseCliThinkingMode("auto")).toBeUndefined();
+		expect(parseCliThinkingMode("max")).toBeUndefined();
+		expect(parseCliThinkingMode(ThinkingLevel.Inherit)).toBeUndefined();
+		expect(parseCliThinkingMode("bogus")).toBeUndefined();
+	});
+
+	it("parses CLI --effort selectors while rejecting thinking-only selectors", () => {
+		expect(parseCliEffort(AUTO_THINKING)).toBe(AUTO_THINKING);
+		expect(parseCliEffort("max")).toBe(Effort.Max);
+		expect(parseCliEffort(ThinkingLevel.Off)).toBe(ThinkingLevel.Off);
+		expect(parseCliEffort("adaptive")).toBeUndefined();
 	});
 
 	it("expands the local reasoning classifier budget", async () => {
@@ -465,5 +477,21 @@ describe("auto thinking classifier helpers", () => {
 			expect(parseThinkingLevel(selector)).toBeUndefined();
 			expect(parseConfiguredThinkingLevel(selector)).toBeUndefined();
 		}
+	});
+
+	it("keeps adaptive selectable on real adaptive-transport models and rejects it elsewhere", () => {
+		// Regression: gating the mode axis on a separate catalog field silently
+		// dropped `--thinking adaptive` on every bundled Claude model.
+		for (const id of ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-6"]) {
+			const model = getBundledModel("anthropic", id);
+			expect(model?.thinking?.mode).toBe("anthropic-adaptive");
+			expect(resolveThinkingModeForModel(model, "adaptive")).toBe("adaptive");
+		}
+		// Budget/effort transports have no adaptive mode to select.
+		expect(
+			resolveThinkingModeForModel(getBundledModel("anthropic", "claude-sonnet-4-5"), "adaptive"),
+		).toBeUndefined();
+		expect(resolveThinkingModeForModel(getBundledModel("openai", "gpt-5.2"), "adaptive")).toBeUndefined();
+		expect(resolveThinkingModeForModel(undefined, "adaptive")).toBeUndefined();
 	});
 });

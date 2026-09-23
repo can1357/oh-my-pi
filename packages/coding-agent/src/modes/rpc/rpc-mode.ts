@@ -127,6 +127,7 @@ export type RpcSessionChangeResult =
 export type RpcSessionChangeSession = Pick<AgentSession, "newSession" | "switchSession" | "branch">;
 
 export type RpcSkillCommandSession = Pick<AgentSession, "promptCustomMessage" | "skills" | "skillsSettings">;
+
 export type RpcSkillCommandResult = { agentInvoked: true };
 
 export interface RpcSkillInvocation extends SkillPromptInput {
@@ -1287,6 +1288,7 @@ export async function runRpcMode(
 				const state: RpcSessionState = {
 					model: session.model,
 					thinkingLevel: session.thinkingLevel,
+					thinkingMode: session.thinkingMode,
 					isStreaming: session.isStreaming,
 					isCompacting: session.isCompacting,
 					steeringMode: session.steeringMode,

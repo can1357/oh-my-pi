@@ -94,6 +94,11 @@ describe("install modes", () => {
 });
 
 describe("parseArgs validation", () => {
+	it("accepts --effort as an alias for --thinking", () => {
+		const cfg = parseArgs(["--model", "anthropic/claude-opus-4-8", "--effort", "high"]);
+		expect(cfg.thinking).toBe("high");
+	});
+
 	it("rejects an unknown flag", () => {
 		expect(() => parseArgs(["--model", "anthropic/claude-opus-4-8", "--not-a-real-flag"])).toThrow(/unknown flag/);
 	});

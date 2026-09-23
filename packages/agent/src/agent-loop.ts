@@ -1825,6 +1825,7 @@ async function streamAssistantResponse(
 	// Owned tool calling sends no native tools, so any tool_choice would error.
 	const effectiveToolChoice = ownedDialect ? undefined : (hostToolChoice ?? forcedToolChoice ?? config.toolChoice);
 	const effectiveReasoning = dynamicReasoning ?? config.reasoning;
+	const effectiveThinkingMode = config.getThinkingMode ? config.getThinkingMode() : config.thinkingMode;
 	const effectiveDisableReasoning = dynamicDisableReasoning ?? config.disableReasoning;
 	// `getCwd` is read once per LLM call so a mid-run session move (`/move`) reaches
 	// workspace-scoped provider discovery; falls back to the static `cwd` when unset.
@@ -1877,6 +1878,7 @@ async function streamAssistantResponse(
 				metadata: resolvedMetadata,
 				toolChoice: effectiveToolChoice,
 				reasoning: effectiveReasoning,
+				thinkingMode: effectiveThinkingMode,
 				disableReasoning: effectiveDisableReasoning,
 				temperature: effectiveTemperature,
 				serviceTier: effectiveServiceTier,

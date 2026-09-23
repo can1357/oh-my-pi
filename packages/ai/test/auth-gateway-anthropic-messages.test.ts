@@ -308,6 +308,34 @@ describe("anthropic-messages parseRequest", () => {
 		expect(absent.options.reasoning).toBeUndefined();
 	});
 
+	it("preserves adaptive thinking mode separately from effort", () => {
+		const parsed = parseRequest({
+			model: "m",
+			max_tokens: 8,
+			thinking: { type: "adaptive" },
+			messages: [{ role: "user", content: "hi" }],
+		});
+
+		expect(parsed.options.anthropicThinkingMode).toBe("adaptive");
+		expect(parsed.options.reasoning).toBeUndefined();
+	});
+
+	it("maps disabled thinking onto the effort axis without erasing effort", () => {
+		const parsed = parseRequest({
+			model: "m",
+			max_tokens: 8,
+			thinking: { type: "disabled" },
+			output_config: { effort: "high" },
+			messages: [{ role: "user", content: "hi" }],
+		});
+
+		// `thinking.type: "disabled"` is intensity: it lands on `disableReasoning`,
+		// never on the additive mode axis.
+		expect(parsed.options.thinkingMode).toBeUndefined();
+		expect(parsed.options.disableReasoning).toBe(true);
+		expect(parsed.options.reasoning).toBe(Effort.High);
+	});
+
 	it("rejects missing required fields and unsupported request controls", () => {
 		expect(() => parseRequest({})).toThrow(/model/);
 		expect(() => parseRequest({ model: "m", messages: [] })).toThrow(/max_tokens/);

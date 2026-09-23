@@ -11,11 +11,20 @@
 - Added persistent rate-limit block tracking with auto-healing and account-specific routing policy support
 - Introduced `KeyCascade` for unified hierarchical authentication resolution
 - Added per-account OAuth routing policies with strict selectors, deterministic priority, and protected quota reserves ([#12243](https://github.com/can1357/oh-my-pi/pull/12243) by [@schickling-assistant](https://github.com/schickling-assistant)).
+- Added provider-neutral `thinkingMode` request options so Claude thinking mode can be selected independently from reasoning effort.
 
 ### Changed
 
 - Refactored `AuthStorage` into namespaced sub-modules (`credentials`, `keys`, `oauth`, `limits`, `health`, `blocks`, `resets`, `usage`)
 - Migrated all internal crypto-hashing to native `Bun` performance primitives
+
+### Fixed
+
+- Fixed Claude Opus 5 and Sonnet 5 thinking-off requests falling back to low effort instead of sending an explicit `thinking.type: "disabled"` with the caller's effort. Opus 5 rejects that combination above `high` with a 400, so its effort is clamped to `high` rather than dropped; Sonnet 5 has no such ceiling.
+- Fixed `thinkingMode: "off"` being ignored by the Google (Generative AI, Gemini CLI, Vertex), Ollama, and Devin request mappings, which kept sending reasoning-enabled requests whenever an effort was also set.
+- Fixed the OpenAI/Anthropic shim providers dropping the explicit thinking-off signal on their OpenAI-format transports.
+- Fixed Anthropic Messages gateway requests that set `thinking.type: "adaptive"` without `output_config.effort` being translated as thinking-off. The gateway, direct Anthropic provider, Bedrock Claude, GitLab Duo Anthropic proxy, OpenAI/Anthropic shim providers, and pi-native forwarding path now preserve Claude adaptive thinking mode separately from effort.
+- Fixed neutral `thinkingMode: "adaptive"` incorrectly enabling thinking on budget Claude models when no effort was set.
 
 ## [18.2.11] - 2026-09-23
 

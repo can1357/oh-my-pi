@@ -15,6 +15,7 @@ Effort: TypeAlias = Literal["minimal", "low", "medium", "high", "xhigh", "max"]
 ThinkingLevel: TypeAlias = Literal[
     "off", "minimal", "low", "medium", "high", "xhigh", "max"
 ]
+ThinkingMode: TypeAlias = Literal["adaptive"]
 StreamingBehavior: TypeAlias = Literal["steer", "followUp"]
 SteeringMode: TypeAlias = Literal["all", "one-at-a-time"]
 InterruptMode: TypeAlias = Literal["immediate", "wait"]
@@ -70,6 +71,7 @@ _EFFORT_VALUES: Final[frozenset[str]] = frozenset(
     {"minimal", "low", "medium", "high", "xhigh", "max"}
 )
 _THINKING_LEVEL_VALUES: Final[frozenset[str]] = _EFFORT_VALUES | frozenset({"off"})
+_THINKING_MODE_VALUES: Final[frozenset[str]] = frozenset({"adaptive"})
 _STEERING_MODE_VALUES: Final[frozenset[str]] = frozenset({"all", "one-at-a-time"})
 _INTERRUPT_MODE_VALUES: Final[frozenset[str]] = frozenset({"immediate", "wait"})
 _STOP_REASON_VALUES: Final[frozenset[str]] = frozenset(
@@ -850,6 +852,7 @@ class SessionState:
     fast_mode_active: bool = False
     tokens_per_second: float | None = None
     context_usage: ContextUsage | None = None
+    thinking_mode: ThinkingMode | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -1391,6 +1394,14 @@ def parse_session_state(payload: JsonObject) -> SessionState:
                 payload.get("thinkingLevel"),
                 _THINKING_LEVEL_VALUES,
                 field="thinkingLevel",
+            ),
+        ),
+        thinking_mode=cast(
+            ThinkingMode | None,
+            _optional_literal(
+                payload.get("thinkingMode"),
+                _THINKING_MODE_VALUES,
+                field="thinkingMode",
             ),
         ),
         is_streaming=bool(payload.get("isStreaming", False)),

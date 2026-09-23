@@ -1803,6 +1803,9 @@ class RpcClient:
         if self._session_dir is not None:
             command.extend(["--session-dir", str(self._session_dir)])
         if self._thinking is not None:
+            # `--thinking <effort>` parses on both pre- and post-split omp builds;
+            # the binary is resolved from PATH and is not version-pinned, so the
+            # new `--effort` spelling would exit 2 against an older omp.
             command.extend(["--thinking", self._thinking])
         if self._append_system_prompt is not None:
             command.extend(["--append-system-prompt", self._append_system_prompt])

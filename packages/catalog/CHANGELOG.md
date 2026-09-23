@@ -7,6 +7,8 @@
 - Added provider and auth rule definitions for on-device Apple Foundation Models
 - Added per-account discovery support for Codex cyber access entitlements
 - Added `org-scoped-identity` and `oauth-token-env` rule support for auth providers
+- Added `thinking.supportsDisabledThinking`, marking adaptive Claude models that accept an explicit `thinking.type: "disabled"` request instead of the legacy low-effort fallback. Claude Opus 5, Opus 5.5, and Sonnet 5 are marked; older adaptive Claude models keep the fallback.
+- Added `thinking.disabledThinkingMaxEffort`, the highest effort that may accompany `thinking.type: "disabled"`. Claude Opus 5+ rejects that combination above `high` with a 400, so requests are clamped instead of dropping the caller's effort.
 
 ## [18.2.11] - 2026-09-23
 

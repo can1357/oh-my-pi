@@ -994,6 +994,7 @@ export class CollabHost {
 			cwd: this.#ctx.sessionManager.getCwd(),
 			model: session.model,
 			thinkingLevel: session.thinkingLevel,
+			thinkingMode: session.thinkingMode,
 			contextUsage: {
 				tokens,
 				contextWindow: breakdown.contextWindow,

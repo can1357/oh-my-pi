@@ -2836,13 +2836,14 @@ export class SessionManager {
 		return entry.id;
 	}
 
-	/** Append a thinking level change as child of current leaf, then advance leaf. Returns entry id. */
-	appendThinkingLevelChange(thinkingLevel?: string, configured?: string): string {
+	/** Append a thinking/effort change as child of current leaf, then advance leaf. Returns entry id. */
+	appendThinkingLevelChange(thinkingLevel?: string, configured?: string, thinkingMode?: string): string {
 		const entry: ThinkingLevelChangeEntry = {
 			type: "thinking_level_change",
 			...this.#freshEntryFields(),
 			thinkingLevel: thinkingLevel ?? null,
 			configured: configured ?? null,
+			thinkingMode: thinkingMode ?? null,
 		};
 		this.#recordEntry(entry);
 		return entry.id;

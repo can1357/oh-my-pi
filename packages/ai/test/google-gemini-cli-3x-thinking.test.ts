@@ -31,6 +31,12 @@ function createModel(id: string): Model<"google-gemini-cli"> {
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 1_000_000,
 		maxTokens: 65_536,
+		thinking: id.includes("2.5-")
+			? {
+					mode: "budget",
+					efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+				}
+			: undefined,
 	});
 }
 
@@ -138,6 +144,28 @@ describe("google-gemini-cli Gemini 3.x thinking mapping", () => {
 		const thinking = extractThinking(requestBody);
 		expect(thinking?.thinkingLevel).toBeUndefined();
 		expect(thinking?.thinkingBudget).toBeDefined();
+	});
+
+	it.each([
+		["default off", {}],
+		["explicit off", { disableReasoning: true }],
+	] as const)("sends zero budget for Gemini CLI budget models when thinking is %s", async (_name, options) => {
+		let requestBody: string | undefined;
+		const fetchMock = createFetchMock(body => {
+			requestBody = body;
+		});
+
+		const stream = streamSimple(createModel("gemini-2.5-flash"), context, {
+			apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
+			fetch: fetchMock,
+			...options,
+		});
+		await stream.result();
+
+		expect(extractThinking(requestBody)).toEqual({
+			includeThoughts: false,
+			thinkingBudget: 0,
+		});
 	});
 
 	it("sends LOW not MINIMAL when gemini-3.7-flash minimal aliases the -low SKU", async () => {

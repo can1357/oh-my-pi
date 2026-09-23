@@ -125,58 +125,69 @@ export function streamGitLabDuo(
 
 			// This wrapper dispatches directly to the routed provider and bypasses
 			// mapOptionsForApi(), so preserve the shared reasoning contracts here as
-			// well. The anthropic-messages route derives thinking on/off from the
-			// effort itself, so fold the explicit off into a cleared effort — capped
-			// side turns rely on this to keep Anthropic from raising max_tokens for a
-			// thinking budget. The OpenAI routes take the flags themselves, mirroring
-			// mapOptionsForApi(), and keep the requested effort for their own
-			// off/fallback handling.
+			// well. The anthropic-messages route keeps thinking mode separate from
+			// effort: explicit thinking-off disables the thinking block and budget
+			// (capped side turns rely on this to keep Anthropic from raising
+			// max_tokens for a thinking budget) while the caller's effort still
+			// reaches models that accept disabled thinking with an effort; external
+			// scratchpad mode clears both. The OpenAI routes mirror
+			// mapOptionsForApi(): explicit thinking-off clears the effort so the
+			// shared policy can pin the lowest supported effort.
+			const explicitThinkingOff = options.thinkingMode === "off" || options.disableReasoning === true;
 			const reasoningEffort = options.reasoning;
-			const anthropicReasoningEffort =
-				options.disableReasoning || options.forceReasoningOff ? undefined : options.reasoning;
+			const anthropicReasoningEffort = options.forceReasoningOff ? undefined : reasoningEffort;
+			const anthropicThinkingOff = explicitThinkingOff || options.forceReasoningOff === true;
+
+			const anthropicModel =
+				route.api === "anthropic-messages"
+					? buildModel({
+							...model,
+							id: identity.upstreamModelId,
+							api: "anthropic-messages",
+							baseUrl: ANTHROPIC_PROXY_URL,
+							compat: model.compatConfig,
+						} as ModelSpec<"anthropic-messages">)
+					: undefined;
+			const adaptiveThinkingMode =
+				options.anthropicThinkingMode ??
+				(options.thinkingMode === "adaptive" && anthropicModel?.thinking?.mode === "anthropic-adaptive"
+					? "adaptive"
+					: undefined);
 
 			const inner =
-				route.api === "anthropic-messages"
-					? streamAnthropic(
-							buildModel({
-								...model,
-								id: identity.upstreamModelId,
-								api: "anthropic-messages",
-								baseUrl: ANTHROPIC_PROXY_URL,
-								compat: model.compatConfig,
-							} as ModelSpec<"anthropic-messages">),
-							context,
-							{
-								apiKey: directAccess.token,
-								isOAuth: true,
-								temperature: options.temperature,
-								topP: options.topP,
-								topK: options.topK,
-								minP: options.minP,
-								presencePenalty: options.presencePenalty,
-								repetitionPenalty: options.repetitionPenalty,
-								maxTokens: options.maxTokens ?? model.maxTokens ?? undefined,
-								signal: options.signal,
-								cacheRetention: options.cacheRetention,
-								headers,
-								maxRetryDelayMs: options.maxRetryDelayMs,
-								metadata: options.metadata,
-								sessionId: options.sessionId,
-								promptCacheKey: options.promptCacheKey,
-								providerSessionState: options.providerSessionState,
-								onPayload: options.onPayload,
-								onResponse: options.onResponse,
-								onSseEvent: options.onSseEvent,
-								fetch: options.fetch,
-								thinkingEnabled: Boolean(anthropicReasoningEffort) && model.reasoning,
-								thinkingBudgetTokens: anthropicReasoningEffort
+				route.api === "anthropic-messages" && anthropicModel
+					? streamAnthropic(anthropicModel, context, {
+							apiKey: directAccess.token,
+							isOAuth: true,
+							temperature: options.temperature,
+							topP: options.topP,
+							topK: options.topK,
+							minP: options.minP,
+							presencePenalty: options.presencePenalty,
+							repetitionPenalty: options.repetitionPenalty,
+							maxTokens: options.maxTokens ?? model.maxTokens ?? undefined,
+							signal: options.signal,
+							cacheRetention: options.cacheRetention,
+							headers,
+							maxRetryDelayMs: options.maxRetryDelayMs,
+							metadata: options.metadata,
+							sessionId: options.sessionId,
+							promptCacheKey: options.promptCacheKey,
+							providerSessionState: options.providerSessionState,
+							onPayload: options.onPayload,
+							onResponse: options.onResponse,
+							onSseEvent: options.onSseEvent,
+							fetch: options.fetch,
+							thinkingEnabled: Boolean(anthropicReasoningEffort) && model.reasoning && !anthropicThinkingOff,
+							thinkingBudgetTokens:
+								anthropicReasoningEffort && !anthropicThinkingOff
 									? (options.thinkingBudgets?.[anthropicReasoningEffort] ??
 										ANTHROPIC_THINKING[anthropicReasoningEffort])
 									: undefined,
-								reasoning: anthropicReasoningEffort,
-								toolChoice: mapAnthropicToolChoice(options.toolChoice),
-							},
-						)
+							reasoning: anthropicReasoningEffort,
+							anthropicThinkingMode: anthropicThinkingOff ? undefined : adaptiveThinkingMode,
+							toolChoice: mapAnthropicToolChoice(options.toolChoice),
+						})
 					: route.api === "openai-responses"
 						? streamOpenAIResponses(
 								buildModel({
@@ -209,8 +220,8 @@ export function streamGitLabDuo(
 									onResponse: options.onResponse,
 									onSseEvent: options.onSseEvent,
 									fetch: options.fetch,
-									reasoning: reasoningEffort,
-									disableReasoning: options.disableReasoning,
+									reasoning: explicitThinkingOff ? undefined : reasoningEffort,
+									disableReasoning: explicitThinkingOff ? true : options.disableReasoning,
 									forceReasoningOff: options.forceReasoningOff,
 									toolChoice: options.toolChoice,
 								} satisfies OpenAIResponsesOptions,
@@ -245,10 +256,10 @@ export function streamGitLabDuo(
 									onResponse: options.onResponse,
 									onSseEvent: options.onSseEvent,
 									fetch: options.fetch,
-									reasoning: reasoningEffort,
+									reasoning: explicitThinkingOff ? undefined : reasoningEffort,
 									// OpenAICompletionsOptions carries no forceReasoningOff; fold it
 									// like the azure-openai-responses mapping does.
-									disableReasoning: options.disableReasoning || options.forceReasoningOff,
+									disableReasoning: explicitThinkingOff || options.forceReasoningOff,
 									toolChoice: options.toolChoice,
 								} satisfies OpenAICompletionsOptions,
 							);

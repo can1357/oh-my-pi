@@ -13,6 +13,7 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { CURRENT_SESSION_VERSION, type SessionHeader } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 const OPENAI_TEST_MODEL = getBundledModel("openai", "gpt-4o-mini");
@@ -124,6 +125,48 @@ describe("provider prompt-cache key session affinity", () => {
 		}
 	});
 
+	it("keeps an explicit startup thinkingLevel authoritative over a legacy off mode", async () => {
+		using tempDir = TempDir.createSync("@omp-thinking-mode-auto-start-");
+		let session: AgentSession | undefined;
+		let authStorage: AuthStorage | undefined;
+		try {
+			const created = await createMinimalSession(tempDir, {
+				thinkingLevel: AUTO_THINKING,
+				thinkingMode: "off",
+			});
+			session = created.session;
+			authStorage = created.authStorage;
+			// `off` is intensity: the deprecated mode spelling never overrides an
+			// explicit effort, and never latches onto the additive mode axis.
+			// Auto writes no thinking entry before the first turn resolves, so the
+			// contract is asserted on live session state rather than persisted context.
+			expect(session.configuredThinkingLevel()).toBe(AUTO_THINKING);
+			expect(session.thinkingMode).toBeUndefined();
+			expect(session.agent.state.disableReasoning).toBe(false);
+		} finally {
+			await session?.dispose();
+			authStorage?.close();
+		}
+	});
+
+	it("folds a legacy startup off mode onto the effort axis when no level is given", async () => {
+		using tempDir = TempDir.createSync("@omp-thinking-mode-legacy-off-");
+		let session: AgentSession | undefined;
+		let authStorage: AuthStorage | undefined;
+		try {
+			const created = await createMinimalSession(tempDir, { thinkingMode: "off" });
+			session = created.session;
+			authStorage = created.authStorage;
+			expect(session.sessionManager.buildSessionContext()).toMatchObject({
+				thinkingLevel: ThinkingLevel.Off,
+				thinkingMode: undefined,
+			});
+		} finally {
+			await session?.dispose();
+			authStorage?.close();
+		}
+	});
+
 	it("initializes a full fork with child request lineage and parent prompt-cache affinity", async () => {
 		using tempDir = TempDir.createSync("@omp-prompt-cache-fork-");
 		const source = await createSourceSessionFixture(tempDir, "parent-cache-session");
@@ -160,6 +203,10 @@ describe("provider prompt-cache key session affinity", () => {
 			{
 				name: "thinking",
 				options: { thinkingLevel: ThinkingLevel.High },
+			},
+			{
+				name: "thinking-mode",
+				options: { thinkingMode: "off" },
 			},
 			{
 				name: "system",

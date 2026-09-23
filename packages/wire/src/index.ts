@@ -156,6 +156,8 @@ export interface ModelChangeEntry extends EntryBase {
 export interface ThinkingLevelChangeEntry extends EntryBase {
 	type: "thinking_level_change";
 	thinkingLevel?: string | null;
+	configured?: string | null;
+	thinkingMode?: string | null;
 }
 
 export type SessionEntry =
@@ -230,6 +232,8 @@ export interface SessionState {
 	cwd: string;
 	model?: WireModel;
 	thinkingLevel?: string;
+	/** Additive provider thinking mode (e.g. Claude `adaptive`); off travels on `thinkingLevel`. */
+	thinkingMode?: string;
 	contextUsage?: ContextUsage;
 	participants: Participant[];
 	isAborting?: boolean;

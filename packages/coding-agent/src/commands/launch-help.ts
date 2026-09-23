@@ -1,6 +1,6 @@
 import { Args, type CommandMetadata, Flags } from "@oh-my-pi/pi-utils/cli";
 import { APP_NAME } from "@oh-my-pi/pi-utils/dirs";
-import { CLI_THINKING_LEVELS } from "@oh-my-pi/pi-tui/thinking";
+import { CLI_EFFORT_LEVELS, CLI_THINKING_MODES } from "@oh-my-pi/pi-tui/thinking";
 import { SERVICE_TIER_OPENAI_VALUES } from "../config/service-tier";
 
 export const launchHelp = {
@@ -67,8 +67,15 @@ export const launchHelp = {
 		"no-pty": Flags.boolean({ description: "Disable PTY-based interactive bash execution" }),
 		tools: Flags.string({ description: "Comma-separated list of tools to enable (default: all)" }),
 		thinking: Flags.string({
-			description: `Set thinking level: ${CLI_THINKING_LEVELS.join(", ")}`,
-			options: [...CLI_THINKING_LEVELS],
+			description: `Set thinking mode: ${CLI_THINKING_MODES.join(", ")} (effort levels accepted for compatibility; prefer --effort)`,
+			// Parsing runs through parseArgs (strict = false); `options` only drives
+			// help text and shell completions, so it lists the deprecated effort
+			// domain too rather than degrading to file-path completion.
+			options: [...CLI_THINKING_MODES, ...CLI_EFFORT_LEVELS],
+		}),
+		effort: Flags.string({
+			description: `Set reasoning effort: ${CLI_EFFORT_LEVELS.join(", ")}`,
+			options: [...CLI_EFFORT_LEVELS],
 		}),
 		"service-tier": Flags.string({
 			description: "OpenAI service tier for this session (none omits service_tier)",

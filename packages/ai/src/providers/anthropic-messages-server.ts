@@ -429,9 +429,11 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 				options.explicitThinkingBudgetTokens = data.thinking.budget_tokens;
 				break;
 			case "disabled":
+				// Off is intensity, carried by `disableReasoning` alone.
 				options.disableReasoning = true;
 				break;
 			case "adaptive":
+				options.anthropicThinkingMode = "adaptive";
 				if (data.thinking.budget_tokens !== undefined) {
 					options.explicitThinkingBudgetTokens = data.thinking.budget_tokens;
 				}
