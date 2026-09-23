@@ -29,6 +29,7 @@ export interface SetupHost extends SetupUiHost {
 	refreshModels(): Promise<void>;
 	selectModel(model: Model, selector: string): Promise<void>;
 	refreshProvider(provider: string): Promise<void>;
+	addCustomProvider?(provider: { id: string; baseUrl: string; apiKey: string }): Promise<void>;
 	saveComposerShape(shape: ComposerShape): Promise<void>;
 	saveSymbolPreset(preset: SymbolPreset): void;
 	saveColorBlindMode(enabled: boolean): void;
@@ -93,6 +94,8 @@ export interface SetupTab {
 	/** See {@link SetupSceneController.render}: `maxLines` is the tab-local row budget. */
 	render(width: number, maxLines?: number): readonly string[];
 	handleInput(data: string): void;
+	/** Claim an input before the parent tab bar handles it. */
+	handlesInput?(data: string): boolean;
 	invalidate(): void;
 	/** Called when the tab becomes active (including initial mount). */
 	onActivate?(): void;

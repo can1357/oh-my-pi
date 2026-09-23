@@ -1,5 +1,27 @@
 import * as fs from "node:fs";
+import * as path from "node:path";
 import { hasFsCode, isEexist, isEnoent, logger, toError } from "@oh-my-pi/pi-utils";
+
+/** Write a private file through a synced sibling before publishing it. */
+export async function writeFileAtomically(filePath: string, content: string): Promise<void> {
+	await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+	const tempPath = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+	let removeTemp = false;
+	try {
+		const handle = await fs.promises.open(tempPath, "wx", 0o600);
+		removeTemp = true;
+		try {
+			await handle.writeFile(content, "utf8");
+			await handle.sync();
+		} finally {
+			await handle.close();
+		}
+		await replaceFileAtomically(tempPath, filePath);
+		removeTemp = false;
+	} finally {
+		if (removeTemp) await fs.promises.rm(tempPath, { force: true });
+	}
+}
 
 /**
  * Publish a staged sibling file atomically, preserving an existing destination

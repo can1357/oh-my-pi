@@ -30,6 +30,17 @@ export interface OAuthSelectorAuthSource {
  */
 const LIST_ROW_OFFSET = 1;
 
+interface OAuthSelectorItem extends Omit<OAuthProviderInfo, "id"> {
+	id: string;
+	action?: () => void;
+}
+
+interface OAuthSelectorAction {
+	id: string;
+	label: string;
+	onSelect: () => void;
+}
+
 /** Compact, human-readable tag for each credential-origin leg. */
 const ORIGIN_LABELS = {
 	runtime: "--api-key",
@@ -43,7 +54,7 @@ const ORIGIN_LABELS = {
  */
 export class OAuthSelectorComponent extends OverlayPanel {
 	#listContainer: Container;
-	#menu: MenuSelection<OAuthProviderInfo>;
+	#menu: MenuSelection<OAuthSelectorItem>;
 	#hoveredIndex: number | null = null;
 	/** First provider index of the visible ScrollView window (last #updateList). */
 	#scrollStart = 0;
@@ -57,6 +68,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 	#statusMessage: string | undefined;
 	#validateAuthCallback?: (providerId: string) => Promise<boolean>;
 	#requestRenderCallback?: () => void;
+	#extraAction?: OAuthSelectorAction;
 	#authState: Map<string, "checking" | "valid" | "invalid"> = new Map();
 	#spinnerFrame: number = 0;
 	#spinnerInterval?: NodeJS.Timeout;
@@ -70,6 +82,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 			disabledProviders?: readonly string[];
 			validateAuth?: (providerId: string) => Promise<boolean>;
 			requestRender?: () => void;
+			extraAction?: OAuthSelectorAction;
 		},
 	) {
 		super(mode === "login" ? "Select provider to login" : "Select provider to logout");
@@ -79,7 +92,8 @@ export class OAuthSelectorComponent extends OverlayPanel {
 		this.#onCancelCallback = onCancel;
 		this.#validateAuthCallback = options?.validateAuth;
 		this.#requestRenderCallback = options?.requestRender;
-		this.#menu = new MenuSelection<OAuthProviderInfo>([], {
+		this.#extraAction = options?.extraAction;
+		this.#menu = new MenuSelection<OAuthSelectorItem>([], {
 			getKey: provider => provider.id,
 			getSearchText: provider => this.#getProviderSearchText(provider),
 		});
@@ -133,13 +147,20 @@ export class OAuthSelectorComponent extends OverlayPanel {
 			// stores credentials under is disabled, so alias logins (e.g.
 			// `openai-codex-device` ⇒ `openai-codex`) disappear alongside the
 			// model provider they authenticate.
-			this.#menu.setItems(
-				providers.filter(
-					provider =>
-						!disabled.has(provider.id) &&
-						!(provider.storeCredentialsAs && disabled.has(provider.storeCredentialsAs)),
-				),
+			const items: OAuthSelectorItem[] = providers.filter(
+				provider =>
+					!disabled.has(provider.id) &&
+					!(provider.storeCredentialsAs && disabled.has(provider.storeCredentialsAs)),
 			);
+			if (this.#extraAction) {
+				items.push({
+					id: this.#extraAction.id,
+					name: this.#extraAction.label,
+					available: true,
+					action: this.#extraAction.onSelect,
+				});
+			}
+			this.#menu.setItems(items);
 		}
 	}
 
@@ -247,7 +268,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 		return theme.fg("muted", suffix);
 	}
 
-	#getProviderSearchText(provider: OAuthProviderInfo): string {
+	#getProviderSearchText(provider: OAuthSelectorItem): string {
 		let text = `${provider.name} ${provider.id}`;
 		const origin = this.#authStorage.keys.source(provider.id);
 		if (origin) {
@@ -393,6 +414,12 @@ export class OAuthSelectorComponent extends OverlayPanel {
 	/** Confirm the selected provider (Enter or mouse click). */
 	#confirmSelection(): void {
 		const selectedProvider = this.#menu.selectedItem;
+		if (selectedProvider?.action) {
+			this.#statusMessage = undefined;
+			this.stopValidation();
+			selectedProvider.action();
+			return;
+		}
 		if (selectedProvider?.available) {
 			this.#statusMessage = undefined;
 			this.stopValidation();

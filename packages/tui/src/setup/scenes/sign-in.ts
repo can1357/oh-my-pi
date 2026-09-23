@@ -12,6 +12,7 @@ import { wrapTextWithAnsi } from "../../utils";
 import { getAgentDbPath } from "@oh-my-pi/pi-utils";
 import { OAuthSelectorComponent } from "../../overlays/oauth-selector";
 import { theme } from "../../theme/theme";
+import { CustomProviderForm } from "./custom-provider";
 import type { SetupSceneHost, SetupTab } from "./types";
 
 function loginUrlLink(url: string): string {
@@ -77,6 +78,7 @@ export class SignInTab implements SetupTab {
 
 	#authStorage: AuthStorage;
 	#selector: OAuthSelectorComponent;
+	#customProvider: CustomProviderForm | undefined;
 	#statusLines: string[] = [];
 	#authUrl: string | undefined;
 	#authLaunchUrl: string | undefined;
@@ -99,11 +101,21 @@ export class SignInTab implements SetupTab {
 
 	/** Modal while an OAuth flow is running so the scene won't switch tabs or finish. */
 	get modal(): boolean {
-		return this.#loggingInProvider !== undefined;
+		return this.#loggingInProvider !== undefined || this.#customProvider?.modal === true;
+	}
+
+	handlesInput(data: string): boolean {
+		return this.#customProvider !== undefined && (matchesKey(data, "left") || matchesKey(data, "right"));
+	}
+
+	onActivate(): void {
+		this.#customProvider?.onActivate?.();
 	}
 
 	dispose(): void {
 		this.#disposed = true;
+		this.#customProvider?.dispose();
+		this.#customProvider = undefined;
 		this.#selector.stopValidation();
 		this.#loginAbort?.abort();
 		this.#resolvePrompt("");
@@ -112,10 +124,15 @@ export class SignInTab implements SetupTab {
 	invalidate(): void {
 		this.#step?.invalidate();
 		this.#selector.invalidate();
+		this.#customProvider?.invalidate();
 		this.#prompt?.input.invalidate();
 	}
 
 	handleInput(data: string): void {
+		if (this.#customProvider) {
+			this.#customProvider.handleInput(data);
+			return;
+		}
 		if (this.#loggingInProvider) {
 			if (this.#authUrl && (matchesKey(data, "alt+c") || (data === "c" && !this.#prompt))) {
 				void this.#copyAuthUrl();
@@ -131,11 +148,13 @@ export class SignInTab implements SetupTab {
 
 	/** Forward mouse to the provider selector; pointer is inert during an active login or code prompt. */
 	routeMouse(event: SgrMouseEvent, line: number, col: number): void {
+		if (this.#customProvider) return;
 		if (this.#loggingInProvider || this.#prompt) return;
 		this.#step?.routeMouse(event, line, col);
 	}
 
 	render(width: number, maxLines?: number): readonly string[] {
+		if (this.#customProvider) return this.#customProvider.render(width, maxLines);
 		// Hint + blank cost two rows; the wizard subtitle already explains
 		// this panel, so on short screens the rows go to the provider list
 		// instead (17 = full selector: 4 chrome above, 10 rows, 3 below).
@@ -210,12 +229,35 @@ export class SignInTab implements SetupTab {
 		return new OAuthSelectorComponent(
 			"login",
 			this.#authStorage,
-			providerId => {
-				void this.#login(providerId);
-			},
+			providerId => void this.#login(providerId),
 			() => this.#host.finish("skipped"),
-			{ requestRender: () => this.#host.requestRender(), disabledProviders: this.#host.ctx.disabledProviders },
+			{
+				requestRender: () => this.#host.requestRender(),
+				disabledProviders: this.#host.ctx.disabledProviders,
+				extraAction: this.#host.ctx.addCustomProvider
+					? {
+							id: "__omp_custom_provider__",
+							label: "Custom endpoint…",
+							onSelect: () => this.#openCustomProvider(),
+						}
+					: undefined,
+			},
 		);
+	}
+
+	#openCustomProvider(): void {
+		if (this.#customProvider || this.#disposed) return;
+		const addProvider = this.#host.ctx.addCustomProvider;
+		if (!addProvider) return;
+		this.#customProvider = new CustomProviderForm(this.#host, addProvider, () => this.#closeCustomProvider());
+		this.#customProvider.onActivate?.();
+		this.#host.requestRender();
+	}
+
+	#closeCustomProvider(): void {
+		this.#customProvider?.dispose();
+		this.#customProvider = undefined;
+		this.#host.requestRender();
 	}
 
 	async #login(providerId: string): Promise<void> {

@@ -6,14 +6,14 @@ import type { SetupScene, SetupSceneController, SetupSceneHost, SetupTab } from 
 import { WebSearchTab } from "./web-search";
 
 /**
- * Tabbed "Set up your providers" scene. Composes independent panels (model
- * sign-in, web search) behind a {@link TabBar}; the active panel owns
+ * Tabbed "Set up your providers" scene. Composes sign-in and web-search panels
+ * behind a {@link TabBar}; the active panel owns
  * rendering and input, while modal panels (e.g. an in-flight OAuth login)
  * temporarily suppress tab switching.
  */
 class ProvidersSceneController implements SetupSceneController {
 	title = "Set up your providers";
-	subtitle = "Sign in and pick a web search provider. Press Esc when you're done.";
+	subtitle = "Sign in, add a custom endpoint, and pick a web search provider. Press Esc when you're done.";
 
 	#tabs: SetupTab[];
 	#tabBar: TabBar;
@@ -48,6 +48,10 @@ class ProvidersSceneController implements SetupSceneController {
 	handleInput(data: string): void {
 		const tab = this.#activeTab();
 		if (tab.modal) {
+			tab.handleInput(data);
+			return;
+		}
+		if (tab.handlesInput?.(data)) {
 			tab.handleInput(data);
 			return;
 		}

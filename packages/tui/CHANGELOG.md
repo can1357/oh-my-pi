@@ -6,6 +6,7 @@
 
 - Added a fullscreen annotation overlay for diffs and text, with multi-line notes, editing, deletion, and undo ([#12601](https://github.com/can1357/oh-my-pi/pull/12601) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
 - Added Daybreak-enabled account listing to usage dashboard overlay
+- Added a custom OpenAI-compatible endpoint option to the setup provider list ([#12997](https://github.com/can1357/oh-my-pi/pull/12997) by [@DrB0rk](https://github.com/DrB0rk)).
 
 ### Changed
 
