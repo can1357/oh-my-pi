@@ -121,6 +121,9 @@
 - Added `/annotate` for attaching notes to diffs, replies, session messages, files, or quoted text and inserting or sending those notes in prompts and reviews.
 - Added configurable MCP startup behavior through `MCP_STARTUP_TIMEOUT_MS`/`mcp.startupTimeoutMs` and `OMP_MCP_REQUIRE_READY=1`, allowing headless runs to require MCP servers to become ready before the first turn.
 - Added native judgment usage reporting, including error stop reasons and messages, and added `openrouter/~typesafe/jev-latest` as a native judge candidate.
+### Added
+
+- Added a Serply web-search provider (`serply`), authenticated with `SERPLY_API_KEY` or `/login serply` and placed after the other keyed providers in the built-in auto chain, that forwards Google search operators (`site:`, `filetype:`, `intitle:`, quoted phrases, `OR`, `-exclusions`, `after:`/`before:`) verbatim instead of translating them onto vendor-specific filters ([#12021](https://github.com/can1357/oh-my-pi/pull/12021) by [@googio](https://github.com/googio)).
 
 ### Changed
 
@@ -355,10 +358,6 @@
 ### Changed
 
 - Unified thinking-level detection, unexpected-stop detection, and AI-assisted staging around a shared judgment system with automatic fallback across configured models when TypeSafe is unavailable or cannot complete a request. AI-assisted staging now evaluates files as a single batched judgment while preserving one yes/no decision per file.
-
-### Added
-
-- Added a Serply web-search provider (`serply`), authenticated with `SERPLY_API_KEY` or `/login serply` and placed after the other keyed providers in the built-in auto chain, that forwards Google search operators (`site:`, `filetype:`, `intitle:`, quoted phrases, `OR`, `-exclusions`, `after:`/`before:`) verbatim instead of translating them onto vendor-specific filters ([#12021](https://github.com/can1357/oh-my-pi/pull/12021) by [@googio](https://github.com/googio)).
 
 ## [18.2.3] - 2026-09-17
 
