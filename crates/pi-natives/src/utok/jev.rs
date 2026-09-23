@@ -1,7 +1,7 @@
 //! Offline reconstruction of `TypeSafe` Jev's input-token counts (`jev-1.13`).
 //!
 //! Jev reports only `usage.input_tokens`, so this model was recovered from
-//! counts alone: ~628k probes against the live System One API, split into a
+//! counts alone: ~639k probes against the live System One API, split into a
 //! vocabulary by difference measurements inside neutral padding, then fitted
 //! until every recorded count matched (see `data/README.md`). Like the
 //! Claude families it reconstructs counts, not token ids.
@@ -15,7 +15,7 @@
 //!    (almost exactly) the o200k tokens that are also Qwen3.5 tokens, plus
 //!    every base token.
 //! 3. Any other piece is cut into [`WINDOW`]-byte windows, and each window runs
-//!    tiktoken's byte-pair merge with o200k ranks, restricted to a ~53k-token
+//!    tiktoken's byte-pair merge with o200k ranks, restricted to a ~54k-token
 //!    base subset of o200k. Whole-piece hits in the base table are *not*
 //!    short-circuited ([`RankTable::count_merged`]): `token` is a whole word
 //!    but not a base token, so `tokenize` costs 3.
@@ -35,8 +35,9 @@ use crate::utok::{
 };
 
 /// Longest byte span one merge run covers: longer pieces are merged in
-/// independent windows (measured: an ASCII run gains a token exactly at
-/// byte 513, and a Lao word flips at the 512-byte mark mid-character).
+/// independent windows (measured: a random consonant run matches unwindowed
+/// merging through 513 bytes and diverges at 514, and a Lao word gains a token
+/// once it crosses byte 512 mid-character).
 const WINDOW: usize = 512;
 
 struct Jev {

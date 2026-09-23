@@ -15,7 +15,7 @@
 
 const root = new URL("..", import.meta.url).pathname;
 const O200K = 199_998;
-const EXPECTED = { W: 144_562, B: 53_462 };
+const EXPECTED = { W: 144_562, B: 53_622 };
 
 function varint(n: number): number[] {
 	const out: number[] = [];
