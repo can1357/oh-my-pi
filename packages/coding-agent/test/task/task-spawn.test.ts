@@ -25,7 +25,7 @@ import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runne
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { AgentProgress, SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { snapshotJobs } from "@oh-my-pi/pi-coding-agent/tools/hub/jobs";
+import { snapshotJobs } from "@oh-my-pi/pi-coding-agent/async/job-control";
 
 const taskAgent: AgentDefinition = {
 	name: "task",
@@ -151,8 +151,6 @@ describe("task spawn routing", () => {
 		await job!.promise;
 
 		expect(job!.status).toBe("completed");
-		expect(job!.resultText).toContain("Spawnling is now idle");
-		expect(job!.resultText).toContain("message it via `hub` to follow up");
 		expect(job!.resultText).toContain("history://Spawnling");
 		expect(runSpy).toHaveBeenCalledTimes(1);
 		expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual(["openai/gpt-4.1-mini"]);

@@ -337,7 +337,7 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 *
 	 * Same rules as {@link hasIrcInterrupts}: non-consuming, only cuts
 	 * *interruptible* waits short, ignored when interruptMode is "wait". Without
-	 * it a completion notice sits behind an hour-long `hub wait` that the agent
+	 * it a completion notice sits behind an hour-long `wait` that the agent
 	 * would have abandoned had it seen the notice. Unlike a peer IRC it never
 	 * raises {@link ToolCallContext.steeringSignal}: a queued completion must
 	 * not push ordinary foreground work (auto-background bash/eval) into the
@@ -1072,6 +1072,12 @@ export interface AgentTool<
 	loadMode?: ToolLoadMode;
 	/** Short one-line summary used for tool discovery indexes. */
 	summary?: string;
+	/**
+	 * On-demand documentation topics (`topic → markdown`), readable as
+	 * `xd://<tool>/<topic>`. Lets a tool keep large sub-surfaces out of its
+	 * description and advertise only a one-line pointer per topic.
+	 */
+	docTopics?(): Readonly<Record<string, string>>;
 	/**
 	 * Concurrency mode for tool scheduling when multiple calls are in one turn.
 	 * - "shared": can run alongside other shared tools (default)

@@ -228,7 +228,7 @@ const EMPTY_STRING_RECORD: Record<string, string> = {};
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
 const EMPTY_AGENT_SERVICE_TIER_OVERRIDES: Record<string, ServiceTierInheritSettingValue> = {};
 const DEFAULT_CYCLE_ORDER: string[] = ["smol", "default", "slow"];
-const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["hub"];
+const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["wait"];
 const EMPTY_MODEL_TAGS_RECORD: ModelTagsSettings = {};
 const HINDSIGHT_RECALL_TYPES_DEFAULT: string[] = ["world", "experience"];
 export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
@@ -276,22 +276,21 @@ export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 	},
 	{
 		pattern: "^\\s*nohup\\s+|(?<!&)\\&\\s*$",
-		tool: "hub",
+		tool: "bash",
 		message:
-			'Use the `hub` tool (`op:"start"`) instead of nohup or background shell syntax so the process stays observable and managed.',
+			"Use `bash` with `name` instead of nohup or background shell syntax so the service stays observable and managed.",
 	},
 	{
 		pattern:
 			"^\\s*(?:(?:bun|npm|pnpm|yarn)\\s+(?:run\\s+)?(?:dev|start)(?:\\s|$)|(?:vite|next\\s+dev|nuxt\\s+dev|nodemon|lldb|gdb|tail\\s+-f)(?:\\s|$)|docker\\s+compose\\s+up(?!.*(?:\\s-d(?:\\s|$)|--detach))(?:\\s|$))",
-		tool: "hub",
-		message:
-			'Use the `hub` tool (`op:"start"`) for services, watchers, and debuggers so other omp instances can observe and control them.',
+		tool: "bash",
+		message: "Use `bash` with `name` for services, watchers, and debuggers; inspect with `read proc://<name>`.",
 	},
 	{
 		pattern:
 			"^\\s*(?:(?:bun|npm|pnpm|yarn)\\s+(?:run\\s+)?\\S+|cargo\\s+watch|watchexec|pytest|vitest|jest|tsc)(?:.|\\n)*(?:--watch|-w)(?:\\s|$)",
-		tool: "hub",
-		message: 'Use the `hub` tool (`op:"start"`) for watch mode so its output, input, and lifecycle stay managed.',
+		tool: "bash",
+		message: "Use `bash` with `name` for watch mode so its output, input, and lifecycle stay managed.",
 	},
 ];
 
@@ -4347,8 +4346,8 @@ export const SETTINGS_SCHEMA = {
 		ui: {
 			tab: "tools",
 			group: "Available Tools",
-			label: "Launch",
-			description: "Enable the launch tool for supervising shared long-running project processes",
+			label: "Services",
+			description: "Enable named bash services and proc:// supervision for shared long-running project processes",
 		},
 	},
 
@@ -4749,24 +4748,6 @@ export const SETTINGS_SCHEMA = {
 		default: 100,
 	},
 
-	"irc.timeoutMs": {
-		type: "number",
-		default: 120_000,
-		ui: {
-			tab: "tools",
-			group: "Execution",
-			label: "IRC Timeout",
-			description: "Timeout for hub send await:true in milliseconds; 0 disables the timeout",
-			options: [
-				{ value: "0", label: "Disabled" },
-				{ value: "30000", label: "30 seconds" },
-				{ value: "60000", label: "1 minute" },
-				{ value: "120000", label: "2 minutes" },
-				{ value: "300000", label: "5 minutes" },
-			],
-		},
-	},
-
 	"bash.autoBackground.thresholdMs": {
 		type: "number",
 		default: 60_000,
@@ -4787,7 +4768,7 @@ export const SETTINGS_SCHEMA = {
 	"tools.xdevDocs": {
 		type: "enum",
 		values: ["inline", "builtins", "catalog"] as const,
-		default: "builtins",
+		default: "catalog",
 		ui: {
 			tab: "tools",
 			group: "Discovery & MCP",

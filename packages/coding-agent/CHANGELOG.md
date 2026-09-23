@@ -4,6 +4,17 @@
 
 ### Added
 
+- Added `wait` tool for monitoring background jobs, services, and peer messages
+- Added `proc://` protocol for inspecting and managing background jobs and services
+- Added `agent://` path support to `write` tool for direct agent messaging
+- Added supervised service mode to `bash` tool with `proc://` integration
+- Added Jev (TypeSafe Jev 1.13) to `toks` command supported encodings
+- Added `*** Insert Before` and `*** Insert After` to append new lines without replacing existing code
+- Added `toks` command to count tokens via offline tokenizers
+- Added automatic discovery of Apple Foundation Models on supported Apple silicon devices
+- Added recording of idle recaps to `session_recaps` table for durable storage
+- Added GC cleanup of session recap rows when deleting archived sessions
+- Implemented automatic title retry for ambiguous first messages
 - Added `/changelog last [N]` to show the latest release, or the last N releases. `/changelog` still shows the recent default and `/changelog full` still shows the complete history.
 - Added 'daybreak' badge to `omp usage` output for enabled accounts
 - Added `omp login` command for terminal-based OAuth authentication, including automated model discovery refresh and browser-opening support
@@ -19,9 +30,21 @@
 
 ### Changed
 
+- Changed default `bash.autoBackground.strategy` to `catalog`
+- Renamed `Launch` configuration group to `Services`
+- Improved terminal output for pipe-backed shells by normalizing line endings
+- Updated edit mode syntax to use `*** Edit File:`, `*** Find`, and `*** Replace` instead of `SM:` prefixed headers
 - Unified terminal OAuth flow logic across `omp login` and `omp auth-broker login`
 - Included identity account/organization info in terminal login success messages
 - Changed judgment fallback to consider only native candidates, preventing prompted models from replacing failed natives
+
+### Deprecated
+
+- Deprecated `hub` tool in favor of `wait`, `write`, and `proc://` protocols
+
+### Removed
+
+- Removed `irc.timeoutMs` configuration setting
 
 ### Fixed
 

@@ -631,21 +631,19 @@ export function splitImageQuestionTarget(readPath: string): { path: string; ques
 const MAX_IMAGE_SIZE = MAX_IMAGE_INPUT_BYTES;
 
 const readSchema = type({
-	path: type("string").describe("Local path, internal URI (e.g. memory://), or URL. Inline selectors are supported."),
+	path: type("string").describe("Local path, internal URI (e.g. memory://), or URL; selectors inline."),
 });
 
 const readSchemaWithSkills = type({
-	path: type("string").describe(
-		"Local path, internal URI (e.g. memory://, skill://), or URL. Inline selectors are supported.",
-	),
+	path: type("string").describe("Local path, internal URI (e.g. memory://, skill://), or URL; selectors inline."),
 });
 
 const readSchemaWithoutMemory = type({
-	path: type("string").describe("Local path, internal URI, or URL. Inline selectors are supported."),
+	path: type("string").describe("Local path, internal URI, or URL; selectors inline."),
 });
 
 const readSchemaWithoutMemoryWithSkills = type({
-	path: type("string").describe("Local path, internal URI (e.g. skill://), or URL. Inline selectors are supported."),
+	path: type("string").describe("Local path, internal URI (e.g. skill://), or URL; selectors inline."),
 });
 
 export type ReadToolInput = typeof readSchema.infer;
@@ -2780,6 +2778,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			localProtocolOptions: this.session.localProtocolOptions,
 			skills: this.session.skills,
 			rules: this.session.activeRules,
+			session: this.session,
 			xd: {
 				read: async name => {
 					if (name === REPORT_ISSUE_DEVICE_NAME) return reportIssueDeviceUsage();
@@ -2788,9 +2787,24 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					if (!xdev) throw new ToolError("xd:// is not mounted in this session.");
 					return name === null ? xdevListing(xdev) : xdevDocs(xdev, name);
 				},
+				topic: async (name, topic) => {
+					const topics = this.session.getToolByName?.(name)?.docTopics?.();
+					if (!topics) throw new ToolError(`Tool '${name}' has no doc topics.`);
+					const doc = topics[topic];
+					if (doc === undefined) {
+						throw new ToolError(
+							`Unknown topic '${topic}' for ${name}. Available: ${Object.keys(topics).join(", ")}.`,
+						);
+					}
+					return doc;
+				},
 			},
 		});
-		const details: ReadToolDetails = { resolvedPath: resource.sourcePath, contentType: resource.contentType };
+		const details: ReadToolDetails = {
+			resolvedPath: resource.sourcePath,
+			contentType: resource.contentType,
+			...(resource.details?.proc ? { proc: resource.details.proc } : {}),
+		};
 
 		// If extraction was used, return directly (no pagination)
 		if (hasExtraction) {

@@ -223,6 +223,11 @@ msvc_cc = use_repo_rule("//bazel/toolchains/msvc:cc.bzl", "msvc_cc_repository")
 
 msvc_cc(name = "msvc_cc")
 
+# Swift toolchain probe for the Apple Foundation Models bridge in pi-natives.
+applefm_swift = use_repo_rule("//bazel/toolchains/swift:applefm.bzl", "applefm_swift_repository")
+
+applefm_swift(name = "applefm_swift")
+
 # blake3 assembles MASM .asm for x64 msvc targets; cc-rs resolves `ml64.exe`
 # from the build-script PATH on non-windows hosts. Prepend @msvc_cc's wrapper
 # dir (bin/ml64.exe → llvm-ml -m64; the dir rides into the sandbox with the

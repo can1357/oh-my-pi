@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added support for Apple Foundation Models (on-device) integration, including tool calling and vision capabilities
 - Added multi-account discovery and authorization resolution for Codex cyber access programs
 - Added automated request replay logic to handle access program rejections
 - Implemented `SessionAffinity` for persistent, sticky session-to-credential mapping
