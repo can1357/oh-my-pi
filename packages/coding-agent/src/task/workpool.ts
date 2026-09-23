@@ -1,14 +1,15 @@
-import { logger, prompt } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import workpoolBatchTemplate from "../prompts/tools/workpool-batch.md" with { type: "text" };
 import workpoolTurnResultTemplate from "../prompts/tools/workpool-turn-result.md" with { type: "text" };
+import workpoolUnitLedgerTemplate from "../prompts/tools/workpool-unit-ledger.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import type { CustomMessage } from "../session/messages";
 import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../tools/hub";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { runSubagentFollowUpTurn } from "./executor";
+import { parseStringifiedJson, runSubagentFollowUpTurn } from "./executor";
 import {
 	type EffectiveSubagentPolicy,
 	reserveStructuredSubagentId,
@@ -16,6 +17,15 @@ import {
 } from "./structured-subagent";
 import { type AgentProgress, oneLineLabel, type SingleResult, type TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
 import { buildWorkPoolOutputSchema, type WorkPoolYieldItem } from "./workpool-yield";
+import {
+	buildUnitLedger,
+	classifyUnitReport,
+	type UnitAttempt,
+	type UnitLedgerEntry,
+	type UnitRetryContext,
+	unitLedgerView,
+	unitRetryContext,
+} from "./workpool-units";
 
 /** One user-supplied unit tracked through a workpool batch. */
 export interface WorkPoolItem {
@@ -25,6 +35,8 @@ export interface WorkPoolItem {
 	agentId?: string;
 	batchId?: string;
 	status: "queued" | "running" | "completed" | "failed" | "cancelled";
+	/** Units mode: residual context from the previous attempt, rendered into the retry batch. */
+	retry?: UnitRetryContext;
 }
 
 /** Keep-alive subagent and its queued work within a pool. */
@@ -80,6 +92,8 @@ export interface WorkPoolPeekResult {
 		output?: string;
 	}>;
 	pending: number;
+	/** Present only for `units` pools: per-unit ledger in push order. */
+	units?: UnitLedgerEntry[];
 }
 
 /** Resolved policy and optional shared context used to create a pool. */
@@ -88,6 +102,8 @@ export interface WorkPoolCreateOptions {
 	policy: EffectiveSubagentPolicy;
 	context?: string;
 	customTools?: CustomTool[];
+	/** Opt-in per-unit accounting: structured reports, residual retries up to `maxAttempts`, unit ledger. */
+	units?: { maxAttempts: number };
 }
 
 interface TurnOutcome {
@@ -96,6 +112,8 @@ interface TurnOutcome {
 	error?: string;
 	aborted?: boolean;
 	abortReason?: string;
+	/** Raw tool submissions keyed by tool name; `yield` entries carry per-item data or errors. */
+	extractedToolData?: Record<string, unknown[]>;
 }
 
 const DELIVERY_OUTPUT_LIMIT = 6_000;
@@ -109,6 +127,8 @@ export class WorkPool {
 	readonly context?: string;
 	readonly customTools: CustomTool[];
 	readonly freshAgents: boolean;
+	/** Units mode config; `undefined` keeps the default prose-only pool behavior. */
+	readonly units?: { maxAttempts: number };
 	readonly agents: WorkPoolAgent[] = [];
 	readonly items: WorkPoolItem[] = [];
 	readonly batches: WorkPoolBatch[] = [];
@@ -122,6 +142,8 @@ export class WorkPool {
 	#poolJobStarted = false;
 	readonly #drainWaiters: PromiseWithResolvers<void>[] = [];
 	readonly #freshQueue: WorkPoolItem[] = [];
+	/** Units mode: every classified attempt, in completion order. The ledger is order-free over this set. */
+	readonly #unitAttempts: UnitAttempt[] = [];
 
 	constructor(session: ToolSession, options: WorkPoolCreateOptions) {
 		this.name = options.name;
@@ -131,6 +153,7 @@ export class WorkPool {
 		this.context = options.context;
 		this.customTools = options.customTools ?? [];
 		this.freshAgents = session.settings.get("eval.workpool.freshAgents");
+		this.units = options.units;
 		if (!session.asyncJobManager) {
 			throw new ToolError("workpool() needs the session's async job manager; unavailable here");
 		}
@@ -316,7 +339,10 @@ export class WorkPool {
 			this.#notifyDrained();
 			return;
 		}
-		const items = agent.queue.splice(0);
+		// Units mode: a retried unit always runs alone, so another unit's `{ key, error }` abort cannot
+		// consume its attempt. First attempts still batch together up to the first queued retry.
+		const firstRetry = this.units ? agent.queue.findIndex(item => item.retry !== undefined) : -1;
+		const items = agent.queue.splice(0, firstRetry === 0 ? 1 : firstRetry > 0 ? firstRetry : agent.queue.length);
 		const id = `${agent.id}-b${agent.turns + 1}`;
 		const batch: WorkPoolBatch = {
 			id,
@@ -343,7 +369,13 @@ export class WorkPool {
 		return prompt.render(workpoolBatchTemplate, {
 			pool: this.name,
 			batch: batch.id,
-			items: batch.items.map((item, index) => ({ id: item.id, index: index + 1, text: item.text })),
+			units: this.units !== undefined,
+			items: batch.items.map((item, index) => ({
+				id: item.id,
+				index: index + 1,
+				text: item.text,
+				...(this.units && item.retry ? { retry: item.retry } : {}),
+			})),
 		});
 	}
 
@@ -412,9 +444,9 @@ export class WorkPool {
 					}
 				} catch (error) {
 					const output = error instanceof Error ? error.message : String(error);
-					return this.#settleTurn(agent, batch, { exitCode: 1, output, error: output });
+					return this.#settleTurn(agent, batch, { exitCode: 1, output, error: output }, signal.aborted);
 				}
-				return this.#settleTurn(agent, batch, result);
+				return this.#settleTurn(agent, batch, result, signal.aborted);
 			},
 			{ id: batch.id, agentId: agent.id, ownerId: this.ownerId },
 		);
@@ -423,17 +455,31 @@ export class WorkPool {
 		manager.watchJobs([jobId]);
 	}
 
-	async #settleTurn(agent: WorkPoolAgent, batch: WorkPoolBatch, result: TurnOutcome): Promise<string> {
-		await this.#finishTurn(agent, batch, result);
+	async #settleTurn(
+		agent: WorkPoolAgent,
+		batch: WorkPoolBatch,
+		result: TurnOutcome,
+		cancelled: boolean,
+	): Promise<string> {
+		await this.#finishTurn(agent, batch, result, cancelled);
 		const delivery = this.#renderTurnResult(agent, batch, result);
 		if (batch.status !== "completed") throw new Error(delivery);
 		return delivery;
 	}
 
-	async #finishTurn(agent: WorkPoolAgent, batch: WorkPoolBatch, result: TurnOutcome): Promise<void> {
+	async #finishTurn(
+		agent: WorkPoolAgent,
+		batch: WorkPoolBatch,
+		result: TurnOutcome,
+		cancelled: boolean,
+	): Promise<void> {
 		batch.status = result.aborted ? "cancelled" : result.exitCode !== 0 || result.error ? "failed" : "completed";
 		batch.output = result.output;
-		for (const item of batch.items) item.status = batch.status;
+		// `result.aborted` also covers a worker's own `{ key, error }` yield and runtime timeouts. Only a
+		// cancelled batch job (pool abort cancels every batch job) is a real cancellation; a turn that
+		// finishes after `close()` still records its units, and `close()` alone only blocks requeue.
+		if (this.units && !cancelled) this.#recordUnitAttempts(batch, result, this.units.maxAttempts);
+		else for (const item of batch.items) item.status = batch.status;
 		agent.turns++;
 		agent.jobId = undefined;
 		const ref = AgentRegistry.global().get(agent.id);
@@ -473,6 +519,8 @@ export class WorkPool {
 				}
 			}
 		}
+		// Residual units re-enter dispatch alone; the chain runs after this turn's worker state settles below.
+		for (const item of batch.items) if (item.status === "queued") this.#queueDispatch(item);
 		if (this.freshAgents) {
 			agent.state = "dead";
 			const index = this.agents.indexOf(agent);
@@ -498,7 +546,61 @@ export class WorkPool {
 		this.#notifyDrained();
 	}
 
+	/**
+	 * Classify each unit's report from this turn. Accepted units complete; residual
+	 * units requeue with their failure context until `maxAttempts`, then fail.
+	 * Runs before any await so drain checks never observe a transient state.
+	 */
+	#recordUnitAttempts(batch: WorkPoolBatch, result: TurnOutcome, maxAttempts: number): void {
+		// Raw per-item yields survive every exit path (worker `{ key, error }` aborts, timeouts, schema
+		// failures); the assembled structured output does not.
+		const reports = new Map<string, unknown>();
+		for (const entry of result.extractedToolData?.yield ?? []) {
+			if (!isRecord(entry) || !Array.isArray(entry.type) || typeof entry.type[0] !== "string") continue;
+			reports.set(
+				entry.type[0],
+				entry.status === "aborted"
+					? {
+							status: "unresolved",
+							reason: typeof entry.error === "string" ? entry.error : "worker yielded an error",
+						}
+					: // Workers often JSON-encode `data` (the per-item param is untyped); decode like terminal yields.
+						parseStringifiedJson(entry.data),
+			);
+		}
+		const missingDetail =
+			batch.status === "completed"
+				? "worker yielded no report for this unit"
+				: `turn ended before this unit was reported (${oneLineLabel(result.abortReason || result.error || "no reason given")})`;
+		for (const item of batch.items) {
+			const record: UnitAttempt = {
+				itemId: item.id,
+				attempt: this.#unitAttempts.filter(attempt => attempt.itemId === item.id).length + 1,
+				agentId: batch.agentId,
+				batchId: batch.id,
+				outcome: classifyUnitReport(reports.get(item.id), missingDetail),
+			};
+			this.#unitAttempts.push(record);
+			item.retry = unitRetryContext(record);
+			if (!item.retry) {
+				item.status = "completed";
+			} else if (record.attempt < maxAttempts && !this.closed) {
+				item.status = "queued";
+				item.agentId = undefined;
+				item.batchId = undefined;
+			} else {
+				item.status = "failed";
+			}
+		}
+	}
+
 	#renderAggregateResult(): string {
+		if (this.units) {
+			return prompt.render(
+				workpoolUnitLedgerTemplate,
+				unitLedgerView(this.name, buildUnitLedger(this.items, this.#unitAttempts)),
+			);
+		}
 		const lines = [
 			`Pool \`${this.name}\` completed (${this.items.length} item(s), ${this.batches.length} batch(es)).`,
 		];
@@ -570,6 +672,7 @@ export class WorkPool {
 				...(batch.output !== undefined ? { output: batch.output } : {}),
 			})),
 			pending: this.items.filter(item => item.status === "queued" || item.status === "running").length,
+			...(this.units ? { units: buildUnitLedger(this.items, this.#unitAttempts) } : {}),
 		};
 	}
 

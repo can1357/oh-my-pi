@@ -22,6 +22,7 @@ import * as taskExecutor from "../../src/task/executor";
 import * as isolationRunner from "../../src/task/isolation-runner";
 import { AgentOutputManager } from "../../src/task/output-manager";
 import type { AgentDefinition } from "../../src/task/types";
+import { WorkPoolRegistry } from "../../src/task/workpool";
 import type { AgentProgress, SingleResult, StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "../../src/tools";
 
@@ -705,6 +706,40 @@ describe("agent() through eval runtimes", () => {
 		const node = JSON.parse(lines[2] ?? "");
 		expect(node.data).toEqual({ ok: true });
 		expect(node.handle).toBe(`agent://${node.id}`);
+	});
+
+	it("forwards Python workpool units unchanged so the host rejects non-boolean values", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-workpool-units-py-");
+		const { session, sessionFile, sessionId } = makeEvalSession(tempDir, "py-workpool-units");
+		mockAgents();
+		try {
+			const result = await executePython(
+				[
+					"import json",
+					"errors = []",
+					'for bad in ("false", 1):',
+					"    try:",
+					'        workpool("task", units=bad)',
+					"    except Exception as exc:",
+					"        errors.append(str(exc))",
+					'tracked = workpool("task", name="py-tracked", units=True)',
+					'plain = workpool("task", name="py-plain")',
+					'print(json.dumps({"errors": errors, "tracked": "units" in tracked.peek(), "plain": "units" in plain.peek()}))',
+				].join("\n"),
+				{ cwd: tempDir.path(), sessionId, sessionFile, kernelMode: "per-call", toolSession: session },
+			);
+			if (result.exitCode === undefined && result.cancelled) {
+				expect(result.output).toBe("");
+				return; // kernel unavailable in this environment
+			}
+			expect(result.exitCode).toBe(0);
+			const printed = JSON.parse(result.output.trim().split("\n").at(-1) ?? "");
+			expect(printed.errors).toHaveLength(2);
+			for (const error of printed.errors) expect(error).toContain("workpool units must be a boolean");
+			expect(printed).toMatchObject({ tracked: true, plain: false });
+		} finally {
+			WorkPoolRegistry.resetForTests();
+		}
 	});
 
 	it("runs Python agent handles concurrently and returns results in input order", async () => {

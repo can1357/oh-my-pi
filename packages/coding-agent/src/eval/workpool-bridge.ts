@@ -55,6 +55,23 @@ function optionalTools(args: Record<string, unknown>): string[] | undefined {
 	return args.tools;
 }
 
+function optionalUnits(args: Record<string, unknown>): boolean {
+	const value = args.units;
+	if (value === undefined) return false;
+	if (typeof value !== "boolean") throw new ToolError("workpool units must be a boolean");
+	return value;
+}
+
+function optionalAttempts(args: Record<string, unknown>, units: boolean): number | undefined {
+	const value = args.attempts;
+	if (value === undefined) return undefined;
+	if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 5) {
+		throw new ToolError("workpool attempts must be an integer from 1 to 5");
+	}
+	if (!units) throw new ToolError("workpool attempts requires units=true");
+	return value;
+}
+
 function getPool(options: EvalWorkpoolBridgeOptions, name: string) {
 	const ownerId = options.session.getAgentId?.() ?? MAIN_AGENT_ID;
 	const pool = WorkPoolRegistry.global().get(ownerId, name);
@@ -73,6 +90,8 @@ export async function runEvalWorkpool(args: unknown, options: EvalWorkpoolBridge
 		const requestedName = optionalString(record, "name");
 		const context = optionalString(record, "context");
 		const tools = optionalTools(record);
+		const units = optionalUnits(record);
+		const attempts = optionalAttempts(record, units);
 		if (tools?.length && options.session.getPlanModeState?.()?.enabled === true) {
 			throw new ToolError("Eval-defined tools are unavailable in plan mode.");
 		}
@@ -99,6 +118,7 @@ export async function runEvalWorkpool(args: unknown, options: EvalWorkpoolBridge
 			name,
 			policy,
 			...(context ? { context } : {}),
+			...(units ? { units: { maxAttempts: attempts ?? 2 } } : {}),
 			customTools,
 		});
 		options.emitStatus?.({ op: "workpool", action: "create", pool: name, count: pool.limit() });

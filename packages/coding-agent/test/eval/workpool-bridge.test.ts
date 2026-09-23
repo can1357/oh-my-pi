@@ -88,4 +88,29 @@ describe("runEvalWorkpool", () => {
 			'unknown workpool operation "wait"',
 		);
 	});
+
+	it("validates units and attempts arguments", async () => {
+		const session = makeSession();
+		await expect(runEvalWorkpool({ op: "create", agent: "scout", units: "yes" }, { session })).rejects.toThrow(
+			"workpool units must be a boolean",
+		);
+		await expect(
+			runEvalWorkpool({ op: "create", agent: "scout", units: true, attempts: 9 }, { session }),
+		).rejects.toThrow("workpool attempts must be an integer from 1 to 5");
+		await expect(runEvalWorkpool({ op: "create", agent: "scout", attempts: 3 }, { session })).rejects.toThrow(
+			"workpool attempts requires units=true",
+		);
+	});
+
+	// Ledger contents are covered by the WorkPool units test; this pins that the bridge forwards `units`.
+	it("forwards units to the pool and leaves default pools without a ledger", async () => {
+		vi.spyOn(discovery, "discoverAgents").mockResolvedValue({ agents: [SCOUT], projectAgentsDir: null });
+		const session = makeSession();
+		await runEvalWorkpool({ op: "create", name: "plain", agent: "scout" }, { session });
+		await runEvalWorkpool({ op: "create", name: "tracked", agent: "scout", units: true }, { session });
+		const plain = await runEvalWorkpool({ op: "peek", name: "plain" }, { session });
+		const tracked = await runEvalWorkpool({ op: "peek", name: "tracked" }, { session });
+		expect(plain).not.toHaveProperty("units");
+		expect(tracked).toMatchObject({ units: [] });
+	});
 });

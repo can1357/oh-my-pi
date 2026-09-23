@@ -585,7 +585,8 @@ export interface ExecutorOptions {
 	cleanupGraceMs?: number;
 }
 
-function parseStringifiedJson(value: unknown): unknown {
+/** Decode a JSON-encoded object/array string losslessly; any other value is returned unchanged. */
+export function parseStringifiedJson(value: unknown): unknown {
 	if (typeof value !== "string") return value;
 	const trimmed = value.trim();
 	if (!trimmed) return value;
