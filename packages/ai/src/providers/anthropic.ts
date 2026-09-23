@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import { scheduler } from "node:timers/promises";
 import * as tls from "node:tls";
+import * as natives from "@oh-my-pi/pi-natives";
 import { isAnthropicSigningProxyUrl, isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
 import { hostMatchesUrl, isVertexRawPredictUrl } from "@oh-my-pi/pi-catalog/hosts";
 import { mapEffortToAnthropicAdaptiveEffort } from "@oh-my-pi/pi-catalog/model-thinking";
@@ -4268,6 +4269,65 @@ function materializeAnthropicControlTransitions(
 	return result;
 }
 
+/**
+ * The default o200k tokenizer under-counts the model-specific tokenizers
+ * (Claude, GLM, Kimi, …) that back most Anthropic-compatible endpoints, so the
+ * local prompt estimate is inflated by this factor to stay on the safe side of
+ * the provider's own count when clamping against the context window.
+ */
+const ANTHROPIC_PROMPT_TOKEN_SKEW = 1.15;
+/** Fixed per-image charge for inline image payloads dropped from the estimate. */
+const ANTHROPIC_IMAGE_TOKEN_ESTIMATE = 1600;
+/** Headroom kept below the context window for control/formatting tokens the estimate cannot see. */
+const ANTHROPIC_OUTPUT_WINDOW_MARGIN = 1024;
+/**
+ * Floor for the window-clamped output cap so a nearly-full context still yields
+ * a small positive budget instead of zero or a negative number.
+ */
+const MIN_USEFUL_ANTHROPIC_OUTPUT_TOKENS = 512;
+
+/**
+ * Estimate the input-token cost of a built request. Inline base64/URL image
+ * payloads are stripped (they dwarf the real prompt text and are billed as a
+ * small fixed per-image cost, not their transport length) and charged
+ * {@link ANTHROPIC_IMAGE_TOKEN_ESTIMATE} each. The text estimate is inflated by
+ * {@link ANTHROPIC_PROMPT_TOKEN_SKEW} to cover tokenizer-family skew, and falls
+ * back to a byte estimate when the native tokenizer is unavailable.
+ *
+ * Used only to clamp `max_tokens` against the context window (#12741): an
+ * over-estimate only lowers a value the request would not have used, so erring
+ * high is safe.
+ */
+function estimateAnthropicPromptTokens(
+	system: readonly AnthropicSystemBlock[] | undefined,
+	tools: readonly AnthropicWireTool[] | undefined,
+	messages: readonly MessageParam[],
+): number {
+	let images = 0;
+	const parts: string[] = [];
+	if (system) {
+		for (const block of system) parts.push(block.text);
+	}
+	if (tools?.length) parts.push(JSON.stringify(tools));
+	parts.push(
+		JSON.stringify(messages, (key, value) => {
+			if (typeof value === "string" && value.length > 512 && (key === "data" || key === "url")) {
+				images++;
+				return "";
+			}
+			return value;
+		}),
+	);
+	const text = parts.join("\n");
+	let textTokens: number;
+	try {
+		textTokens = natives.countTokens(text);
+	} catch {
+		textTokens = (Buffer.byteLength(text, "utf-8") + 3) >> 2;
+	}
+	return Math.ceil(textTokens * ANTHROPIC_PROMPT_TOKEN_SKEW) + images * ANTHROPIC_IMAGE_TOKEN_ESTIMATE;
+}
+
 type AnthropicParamBuildOptions = {
 	disableStrictTools: boolean;
 	useUmansGatewayWebSearch: boolean;
@@ -4483,6 +4543,22 @@ function buildParams(
 	const modelMaxTokens = model.maxTokens ?? CLAUDE_CODE_MAX_OUTPUT_TOKENS;
 	const maxOutputTokens = isOAuthToken ? Math.min(CLAUDE_CODE_MAX_OUTPUT_TOKENS, modelMaxTokens) : modelMaxTokens;
 
+	// Clamp the output ceiling against the remaining context window. Anthropic
+	// and compatible backends reject a request when input_tokens + max_tokens
+	// exceeds the model's context window — with a misleading "prompt is too
+	// long" error — so an unclamped ceiling silently caps usable input at
+	// contextWindow - maxTokens and makes long prompts fail (#12741). Estimate
+	// the prompt locally and keep the smaller of the output ceiling and the
+	// remaining window, floored so a near-full context still yields a usable
+	// budget.
+	let windowClampedCeiling = maxOutputTokens;
+	const contextWindow = model.contextWindow;
+	if (typeof contextWindow === "number" && contextWindow > 0) {
+		const estimatedPromptTokens = estimateAnthropicPromptTokens(systemBlocks, tools, wireMessages);
+		const remainingWindow = contextWindow - estimatedPromptTokens - ANTHROPIC_OUTPUT_WINDOW_MARGIN;
+		windowClampedCeiling = Math.max(MIN_USEFUL_ANTHROPIC_OUTPUT_TOKENS, Math.min(maxOutputTokens, remainingWindow));
+	}
+
 	// A caller-owned client targets its own endpoint: route body betas by the
 	// client's URL when it exposes one, not the model's routing. Otherwise the
 	// already-resolved effective URL wins over the spec URL so environment
@@ -4513,7 +4589,7 @@ function buildParams(
 		...(systemBlocks && { system: systemBlocks }),
 		...(tools !== undefined && { tools }),
 		...(metadata && { metadata }),
-		max_tokens: Math.min(maxOutputTokens, options?.maxTokens ?? modelMaxTokens),
+		max_tokens: Math.min(windowClampedCeiling, options?.maxTokens ?? modelMaxTokens),
 		...(thinking && { thinking }),
 		...(contextManagement && { context_management: contextManagement }),
 		...(outputConfig && { output_config: outputConfig }),
@@ -4577,7 +4653,7 @@ function buildParams(
 	}
 
 	disableThinkingIfToolChoiceForced(params, model);
-	ensureMaxTokensForThinking(params, maxOutputTokens);
+	ensureMaxTokensForThinking(params, windowClampedCeiling);
 	applyPromptCaching(params, cacheControl);
 
 	return params;

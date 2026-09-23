@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as tls from "node:tls";
+import * as natives from "@oh-my-pi/pi-natives";
 import { type as arkType } from "@oh-my-pi/omptype";
 import { Effort } from "@oh-my-pi/pi-ai";
 import {
@@ -424,6 +425,31 @@ describe("Anthropic request fingerprint alignment", () => {
 			{ isOAuth: false },
 		)) as { max_tokens?: number };
 		expect(payload.max_tokens).toBe(128_000);
+	});
+
+	it("clamps max_tokens to the remaining context window for long prompts (#12741)", async () => {
+		const flashModel = buildModel({
+			...ANTHROPIC_MODEL_SPEC,
+			id: "glm-4.7-flash",
+			name: "GLM 4.7 Flash",
+			contextWindow: 200_000,
+			maxTokens: 131_072,
+		});
+		// ~90k tokens of unique text — well past the 200_000 - 131_072 = 68,928
+		// input budget an unclamped output ceiling would leave.
+		const bigPrompt = Array.from({ length: 14_000 }, (_, i) => `token${i} lorem ipsum dolor`).join(" ");
+		const promptTokens = natives.countTokens(bigPrompt);
+		expect(promptTokens).toBeGreaterThan(68_928);
+		const payload = (await captureAnthropicPayload(
+			flashModel,
+			{ messages: [{ role: "user", content: bigPrompt, timestamp: Date.now() }] },
+			{ isOAuth: false },
+		)) as { max_tokens?: number };
+		// Pre-fix this stayed pinned at the 131,072 output ceiling.
+		expect(payload.max_tokens).toBeLessThan(131_072);
+		// The contract: input + output must fit the advertised window, so the
+		// backend's `input_tokens + max_tokens <= contextWindow` check passes.
+		expect((payload.max_tokens ?? 0) + promptTokens).toBeLessThanOrEqual(200_000);
 	});
 
 	it("does not place cache_control on thinking blocks in the trailing cache window", async () => {
