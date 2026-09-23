@@ -5,6 +5,7 @@
 ### Fixed
 
 - Bounded the shared Anthropic connection pool (128 sockets per host, `PI_ANTHROPIC_MAX_SOCKETS` to change it) and made cancelling a request that is waiting for a socket take effect immediately instead of after the wait ([#12868](https://github.com/can1357/oh-my-pi/pull/12868) by [@geoyws](https://github.com/geoyws)).
+
 ### Added
 
 - Implemented `SessionAffinity` for persistent, sticky session-to-credential mapping
