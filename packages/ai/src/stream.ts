@@ -209,7 +209,7 @@ function providerInFlightRoot(): string {
 }
 
 function providerInFlightSegment(provider: string): string {
-	return crypto.createHash("sha256").update(provider).digest("base64url");
+	return Bun.SHA256.hash(provider, "base64url");
 }
 
 function providerInFlightDir(provider: string): string {

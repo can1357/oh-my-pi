@@ -18,7 +18,7 @@ afterAll(() => authStorage.close());
 describe("Tavily web search provider", () => {
 	beforeEach(() => {
 		process.env.TAVILY_API_KEY = "test-tavily-key";
-		vi.spyOn(authStorage, "resolver").mockImplementation(provider => {
+		vi.spyOn(authStorage.keys, "resolver").mockImplementation(provider => {
 			expect(provider).toBe("tavily");
 			return async () => process.env.TAVILY_API_KEY;
 		});

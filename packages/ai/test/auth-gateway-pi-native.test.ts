@@ -285,7 +285,7 @@ describe("pi-native gateway cache controls", () => {
 		registerMockApi();
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-cache-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-		storage.setRuntimeApiKey("openrouter", "test-key");
+		storage.keys.setRuntime("openrouter", "test-key");
 		const mock = createMockModel({ provider: "openrouter", id: "pi-native-cache" });
 		const handle = startAuthGateway({
 			bind: "127.0.0.1:0",
@@ -329,7 +329,7 @@ describe("pi-native gateway reasoning flags", () => {
 		registerMockApi();
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-reasoning-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-		storage.setRuntimeApiKey("openrouter", "test-key");
+		storage.keys.setRuntime("openrouter", "test-key");
 		const mock = createMockModel({ provider: "openrouter", id: "pi-native-reasoning" });
 		const handle = startAuthGateway({
 			bind: "127.0.0.1:0",
@@ -372,7 +372,7 @@ describe("pi-native gateway usage attribution", () => {
 		registerMockApi();
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-usage-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-		storage.setRuntimeApiKey("openrouter", "test-key");
+		storage.keys.setRuntime("openrouter", "test-key");
 		const recorded: Array<{
 			provider: string;
 			model: string;
@@ -380,7 +380,7 @@ describe("pi-native gateway usage attribution", () => {
 			costUsd?: number;
 			client?: { installId: string; hostname?: string; app?: string };
 		}> = [];
-		const spy = vi.spyOn(storage, "recordObservedUsage").mockImplementation(entry => {
+		const spy = vi.spyOn(storage.usage, "observe").mockImplementation(entry => {
 			recorded.push(entry);
 		});
 		const mock = createMockModel({ provider: "openrouter", id: "pi-native-usage" });

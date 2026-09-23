@@ -3,7 +3,7 @@
  * Shared implementation for both google-gemini-cli and google-antigravity providers.
  * Uses the Cloud Code Assist API endpoint to access Gemini and Claude models.
  */
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
@@ -1145,7 +1145,7 @@ function formatSignedDecimalSessionId(value: bigint): string {
 }
 
 function deriveSignedDecimalFromHash(text: string): string {
-	const digest = createHash("sha256").update(text).digest();
+	const digest = Bun.SHA256.hash(text);
 	let value = 0n;
 	for (let index = 0; index < 8; index += 1) {
 		value = (value << 8n) | BigInt(digest[index] ?? 0);

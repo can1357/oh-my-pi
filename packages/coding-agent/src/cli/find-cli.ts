@@ -112,7 +112,7 @@ export async function runFindCommand(cmd: FindCommandArgs): Promise<void> {
 		const baseCwd = ompScope ? process.cwd() : root;
 		log("resolving judge");
 		const settings = await Settings.init({ cwd: baseCwd });
-		const authStorage = await discoverAuthStorage();
+		const authStorage = await discoverAuthStorage(undefined, { settings });
 		try {
 			const registry = new ModelRegistry(authStorage);
 			await registry.refresh();
