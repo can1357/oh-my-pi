@@ -127,6 +127,23 @@ describe("Anthropic control state across one session's requests", () => {
 		expectCacheStableContinuation(beforeSideRequests, afterSideRequests);
 	});
 
+	it("keeps a new conversation's baseline when abandoned continued baselines fill the cache", async () => {
+		const state = new Map<string, ProviderSessionState>();
+		// Each compaction rewrites the root, abandoning a baseline that was continued.
+		for (let epoch = 0; epoch < 16; epoch++) {
+			const root = [user(`summary ${epoch}`)];
+			await capture(state, root, Effort.High);
+			await capture(state, [...root, reply(`reply ${epoch}`), user(`next ${epoch}`)], Effort.High);
+		}
+		const turn0 = [user("live summary")];
+		const firstRequest = await capture(state, turn0, Effort.High);
+		// An idle recap lands before the conversation's second request.
+		await capture(state, [...turn0, user("recap")], Effort.High, { sessionId: "session:side:recap" });
+		const secondRequest = await capture(state, [...turn0, reply("ok"), user("continue")], Effort.Low);
+
+		expectCacheStableContinuation(firstRequest, secondRequest);
+	});
+
 	it("does not rewrite an already-sent tool control when a later effort change lands on its slot", async () => {
 		const state = new Map<string, ProviderSessionState>();
 		const turn0 = [user("start")];

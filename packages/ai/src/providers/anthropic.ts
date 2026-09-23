@@ -478,8 +478,6 @@ type AnthropicControlState = {
 	baseEffortWire: AnthropicOutputEffort | undefined;
 	/** Effort in force at the conversation tail; `undefined` = API default. */
 	currentEffort: AnthropicOutputEffort | undefined;
-	/** Whether a later request resolved this baseline again; one-shot side turns never do. */
-	continued: boolean;
 };
 
 type AnthropicProviderSessionState = ProviderSessionState & {
@@ -504,8 +502,14 @@ type AnthropicProviderSessionState = ProviderSessionState & {
 	thinkingReplayDisabled: boolean;
 	/** Thinking blocks the API permanently dropped after a prefix mismatch. */
 	prefixDroppedThinkingBlocks: Set<string>;
-	/** Conversation-scoped control baselines, isolated from side requests and advisors. */
+	/**
+	 * Conversation-scoped control baselines, isolated from side requests and
+	 * advisors: LRU of baselines a later request came back to. See
+	 * {@link getAnthropicControlState}.
+	 */
 	controlStates: Map<string, AnthropicControlState>;
+	/** LRU of baselines seen by exactly one request; promoted into `controlStates` on reuse. */
+	pendingControlStates: Map<string, AnthropicControlState>;
 };
 
 function createAnthropicControlState(): AnthropicControlState {
@@ -518,7 +522,6 @@ function createAnthropicControlState(): AnthropicControlState {
 		effortBaselined: false,
 		baseEffortWire: undefined,
 		currentEffort: undefined,
-		continued: false,
 	};
 }
 
@@ -530,6 +533,7 @@ function createAnthropicProviderSessionState(): AnthropicProviderSessionState {
 		thinkingReplayDisabled: false,
 		prefixDroppedThinkingBlocks: new Set(),
 		controlStates: new Map(),
+		pendingControlStates: new Map(),
 		close: () => {
 			state.strictToolsDisabled = false;
 			state.fastModeDisabled = false;
@@ -537,6 +541,7 @@ function createAnthropicProviderSessionState(): AnthropicProviderSessionState {
 			state.thinkingReplayDisabled = false;
 			state.prefixDroppedThinkingBlocks.clear();
 			state.controlStates.clear();
+			state.pendingControlStates.clear();
 		},
 	};
 	return state;
@@ -553,6 +558,7 @@ function getAnthropicProviderSessionState(
 	if (existing) {
 		existing.prefixDroppedThinkingBlocks ??= new Set();
 		existing.controlStates ??= new Map();
+		existing.pendingControlStates ??= new Map();
 		return existing;
 	}
 	const created = createAnthropicProviderSessionState();
@@ -4024,6 +4030,19 @@ function anthropicControlMessageProjection(message: MessageParam): MessageParam 
 	};
 }
 
+/**
+ * Resolve the control baseline for a conversation, keyed by session id, stable
+ * system prefix, and root message.
+ *
+ * Baselines live in two LRUs of `MAX_ANTHROPIC_CONTROL_STATES` each: a new key
+ * enters `pendingControlStates` and moves to `controlStates` the first time a
+ * later request resolves it. Side turns (`runEphemeralTurn`) and handoffs mint
+ * a fresh session id per call, so their one-shot keys only churn the pending
+ * tier and can never evict a live conversation's baseline — which would force
+ * it to re-declare tools, system, and effort, a full prompt-cache miss. Each
+ * tier still ages out plain-LRU, so conversations abandoned by compaction or a
+ * system-prompt change make room for the next one.
+ */
 function getAnthropicControlState(
 	state: AnthropicProviderSessionState | undefined,
 	sessionId: string | undefined,
@@ -4045,37 +4064,27 @@ function getAnthropicControlState(
 			]),
 		),
 	);
-	const existing = state.controlStates.get(fingerprint);
-	if (existing) {
-		existing.continued = true;
-		state.controlStates.delete(fingerprint);
-		state.controlStates.set(fingerprint, existing);
-		return existing;
+	const continued = state.controlStates.get(fingerprint) ?? state.pendingControlStates.get(fingerprint);
+	if (continued) {
+		state.pendingControlStates.delete(fingerprint);
+		touchAnthropicControlState(state.controlStates, fingerprint, continued);
+		return continued;
 	}
-	evictAnthropicControlState(state.controlStates);
 	const created = createAnthropicControlState();
-	state.controlStates.set(fingerprint, created);
+	touchAnthropicControlState(state.pendingControlStates, fingerprint, created);
 	return created;
 }
 
-/**
- * Make room for one more baseline, evicting the oldest key no request has come
- * back to yet before any conversation that was continued at least once. Side
- * turns (`runEphemeralTurn`) and handoffs mint a fresh session id per call, so
- * plain LRU lets a burst of one-shot requests push the live conversation's
- * baseline out and force it to re-declare tools, system, and effort — a full
- * prompt-cache miss on a conversation that never changed.
- */
-function evictAnthropicControlState(states: Map<string, AnthropicControlState>): void {
-	if (states.size < MAX_ANTHROPIC_CONTROL_STATES) return;
-	let oldest: string | undefined;
-	for (const [key, state] of states) {
-		oldest ??= key;
-		if (!state.continued) {
-			states.delete(key);
-			return;
-		}
-	}
+/** Mark `key` most recently used in `states`, evicting the least recently used entry past the cap. */
+function touchAnthropicControlState(
+	states: Map<string, AnthropicControlState>,
+	key: string,
+	value: AnthropicControlState,
+): void {
+	states.delete(key);
+	states.set(key, value);
+	if (states.size <= MAX_ANTHROPIC_CONTROL_STATES) return;
+	const oldest = states.keys().next().value;
 	if (oldest !== undefined) states.delete(oldest);
 }
 
