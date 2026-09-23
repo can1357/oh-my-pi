@@ -182,6 +182,30 @@ describe("AnthropicMessagesClient retries", () => {
 		expect(response.status).toBe(200);
 		expect(calls.length).toBe(2);
 	});
+
+	it("reports its own retry sleeps through providerRetryWait", async () => {
+		const { calls, fetch } = createFetchMock([
+			new Response(anthropicOverloadedErrorBody, { status: 529, headers: { "retry-after-ms": "1" } }),
+			new Response("{}", { status: 200 }),
+		]);
+		const waits: Array<{ delayMs: number; attempt?: number; maxAttempts?: number }> = [];
+		const client = new AnthropicMessagesClient({
+			apiKey: "sk-test",
+			maxRetries: 5,
+			fetch,
+			providerRetryWait: async (delayMs, _signal, info) => {
+				waits.push({ delayMs, attempt: info?.attempt, maxAttempts: info?.maxAttempts });
+			},
+		});
+
+		const response = await client.messages.create(params).asResponse();
+
+		// A 529 overload is the commonest silent backoff: the hook is the only
+		// thing that makes this sleep visible above the transport.
+		expect(response.status).toBe(200);
+		expect(calls.length).toBe(2);
+		expect(waits).toEqual([{ delayMs: 1, attempt: 1, maxAttempts: 5 }]);
+	});
 });
 
 describe("AnthropicMessagesClient timeout and abort", () => {

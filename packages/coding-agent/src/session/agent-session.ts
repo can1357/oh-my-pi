@@ -2556,6 +2556,18 @@ export class AgentSession {
 		this.#emit({ type: "notice", level, message, source });
 	}
 
+	/**
+	 * Surface a provider-internal retry backoff (pi-ai's own stream retry sleep)
+	 * to subscribers. UI-only, like {@link emitNotice}: nothing enters agent
+	 * state and the turn is NOT superseded, so this must never be conflated with
+	 * `auto_retry_start`.
+	 */
+	emitProviderRetryWait(
+		event: Extract<AgentSessionEvent, { type: "provider_retry_wait_start" | "provider_retry_wait_end" }>,
+	): void {
+		this.#emit(event);
+	}
+
 	#recordToolExecutionStart(event: Extract<AgentEvent, { type: "tool_execution_start" }>): void {
 		const data: ToolExecutionStartData = {
 			toolCallId: event.toolCallId,

@@ -1949,6 +1949,27 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				scheduleProgress(true);
 				return;
 			}
+			if (event.type === "provider_retry_wait_start") {
+				if (event.role !== "main") return;
+				progress.providerRetryState = {
+					waitId: event.waitId,
+					delayMs: event.delayMs,
+					model: event.model,
+					startedAtMs: Date.now(),
+					...(event.attempt !== undefined && event.maxAttempts !== undefined
+						? { attempt: event.attempt, maxAttempts: event.maxAttempts }
+						: {}),
+				};
+				scheduleProgress(true);
+				return;
+			}
+			if (event.type === "provider_retry_wait_end") {
+				// A superseded wait's stale end must not clear the newer wait's state.
+				if (progress.providerRetryState?.waitId !== event.waitId) return;
+				progress.providerRetryState = undefined;
+				scheduleProgress(true);
+				return;
+			}
 			if (isAgentEvent(event)) {
 				// Breadcrumb the synchronous subagent event handling so the loop
 				// watchdog can attribute any block to this in-process subagent.

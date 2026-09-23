@@ -985,7 +985,14 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 						if (emptyAttempt > 0) {
 							const backoffMs = EMPTY_STREAM_BASE_DELAY_MS * 2 ** (emptyAttempt - 1);
 							try {
-								await scheduler.wait(backoffMs, { signal: options?.signal });
+								// The hook only observes: same delay, same signal, and the
+								// catch below still converts an abort into AbortError.
+								if (options?.providerRetryWait)
+									await options.providerRetryWait(backoffMs, options.signal, {
+										attempt: emptyAttempt,
+										maxAttempts: MAX_EMPTY_STREAM_RETRIES,
+									});
+								else await scheduler.wait(backoffMs, { signal: options?.signal });
 							} catch {
 								throw new AIError.AbortError("Request was aborted");
 							}

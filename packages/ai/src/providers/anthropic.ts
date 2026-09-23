@@ -33,6 +33,7 @@ import type {
 	Model,
 	ProviderInputTransformation,
 	ProviderPayload,
+	ProviderRetryWaitFn,
 	ProviderSessionState,
 	RawSseEvent,
 	RedactedThinkingContent,
@@ -1106,6 +1107,8 @@ export type AnthropicClientOptionsArgs = {
 	thinkingDisplay?: AnthropicThinkingDisplay;
 	disableStrictTools?: boolean;
 	fetch?: FetchImpl;
+	/** Forwarded to the client so its own retry sleeps are observable too. */
+	providerRetryWait?: ProviderRetryWaitFn;
 	maxRetryDelayMs?: number;
 	sessionId?: string;
 	/** Working-identity cache key for this credential+host; undefined off the Copilot path. */
@@ -2206,6 +2209,7 @@ const streamAnthropicOnce = (
 					thinkingDisplay: options?.thinkingDisplay,
 					fetch: options?.fetch,
 					maxRetryDelayMs: options?.maxRetryDelayMs,
+					providerRetryWait: options?.providerRetryWait,
 					copilotCacheKey,
 					copilotCacheSnapshot: copilotCached ?? null,
 					sessionId:
@@ -3265,7 +3269,10 @@ const streamAnthropicOnce = (
 					}
 					const delayMs = headerDelayMs !== undefined ? Math.max(headerDelayMs, backoffDelayMs) : backoffDelayMs;
 					if (options?.providerRetryWait) {
-						await options.providerRetryWait(delayMs, options.signal);
+						await options.providerRetryWait(delayMs, options.signal, {
+							attempt: providerRetryAttempt,
+							maxAttempts: PROVIDER_MAX_RETRIES,
+						});
 					} else {
 						await scheduler.wait(delayMs, { signal: options?.signal });
 					}
@@ -3589,7 +3596,9 @@ function createClient(
 	args: AnthropicClientOptionsArgs,
 ): { client: AnthropicMessagesClient; isOAuthToken: boolean } {
 	const { isOAuthToken: oauthToken, ...clientOptions } = buildAnthropicClientOptions({ ...args, model });
-	const client = new AnthropicMessagesClient(clientOptions);
+	// The hook is pure observation, so it stays out of the request fingerprint
+	// `buildAnthropicClientOptions` builds (and out of its assertions).
+	const client = new AnthropicMessagesClient({ ...clientOptions, providerRetryWait: args.providerRetryWait });
 	return { client, isOAuthToken: oauthToken };
 }
 

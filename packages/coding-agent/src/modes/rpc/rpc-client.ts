@@ -147,6 +147,8 @@ const sessionEventTypes = new Set<AgentSessionEvent["type"]>([
 	"auto_compaction_end",
 	"auto_retry_start",
 	"auto_retry_end",
+	"provider_retry_wait_start",
+	"provider_retry_wait_end",
 	"retry_fallback_applied",
 	"retry_fallback_succeeded",
 	"ttsr_triggered",

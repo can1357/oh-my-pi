@@ -626,7 +626,7 @@ describe("anthropic provider retry delays", () => {
 
 		// Header says 30s; the 2s exponential backoff must not undercut it.
 		expect(attempt).toBe(2);
-		expect(providerRetryWait).toHaveBeenCalledWith(30_000, undefined);
+		expect(providerRetryWait).toHaveBeenCalledWith(30_000, undefined, { attempt: 1, maxAttempts: 10 });
 		expect(result.stopReason).toBe("stop");
 		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "after backoff" }]);
 	});
@@ -761,7 +761,7 @@ describe("anthropic retry-after cap (maxRetryDelayMs)", () => {
 		}).result();
 
 		expect(calls.count).toBe(2);
-		expect(providerRetryWait).toHaveBeenCalledWith(1_000, undefined);
+		expect(providerRetryWait).toHaveBeenCalledWith(1_000, undefined, { attempt: 1, maxAttempts: 10 });
 		expect(result.stopReason).toBe("stop");
 	});
 
@@ -782,7 +782,7 @@ describe("anthropic retry-after cap (maxRetryDelayMs)", () => {
 		}).result();
 
 		expect(calls.count).toBe(2);
-		expect(providerRetryWait).toHaveBeenCalledWith(120_000, undefined);
+		expect(providerRetryWait).toHaveBeenCalledWith(120_000, undefined, { attempt: 1, maxAttempts: 10 });
 		expect(result.stopReason).toBe("stop");
 	});
 
@@ -803,7 +803,7 @@ describe("anthropic retry-after cap (maxRetryDelayMs)", () => {
 		}).result();
 
 		expect(calls.count).toBe(2);
-		expect(providerRetryWait).toHaveBeenCalledWith(30_000, undefined);
+		expect(providerRetryWait).toHaveBeenCalledWith(30_000, undefined, { attempt: 1, maxAttempts: 10 });
 		expect(result.stopReason).toBe("stop");
 	});
 

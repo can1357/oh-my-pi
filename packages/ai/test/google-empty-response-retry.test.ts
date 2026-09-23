@@ -153,6 +153,32 @@ describe("Google empty-response retry (public + Vertex path)", () => {
 		expect(result.errorMessage).toContain("empty response");
 	});
 
+	it("reports its empty-response retry sleeps through providerRetryWait", async () => {
+		let calls = 0;
+		const fetchMock: FetchImpl = async () => {
+			calls += 1;
+			return sse(genaiChunk(""));
+		};
+
+		const waits: Array<{ delayMs: number; attempt?: number; maxAttempts?: number }> = [];
+		const stream = streamGoogle(genaiModel, context, {
+			apiKey: "k",
+			fetch: fetchMock,
+			providerRetryWait: async (delayMs, _signal, info) => {
+				waits.push({ delayMs, attempt: info?.attempt, maxAttempts: info?.maxAttempts });
+			},
+		});
+		const result = await stream.result();
+
+		expect(calls).toBe(3);
+		expect(result.stopReason).toBe("error");
+		// Both 2^n empty-stream backoffs must reach the caller, not be slept silently.
+		expect(waits).toEqual([
+			{ delayMs: 500, attempt: 1, maxAttempts: 2 },
+			{ delayMs: 1000, attempt: 2, maxAttempts: 2 },
+		]);
+	});
+
 	it("accepts an empty STOP when silence is a valid caller result", async () => {
 		let calls = 0;
 		const fetchMock: FetchImpl = async () => {
@@ -290,6 +316,31 @@ describe("Google empty-response retry (Cloud Code Assist path)", () => {
 		expect(result.stopReason).toBe("stop");
 		expect(textOf(result)).toBe("Done.");
 		void events;
+	});
+
+	it("reports its empty-response retry sleep through providerRetryWait", async () => {
+		let calls = 0;
+		const fetchMock: FetchImpl = async () => {
+			calls += 1;
+			const response = calls === 1 ? sse(ccaChunk("")) : sse(ccaChunk("Done."));
+			Object.defineProperty(response, "url", { value: "https://example.com/v1internal:streamGenerateContent" });
+			return response;
+		};
+
+		const waits: Array<{ delayMs: number; attempt?: number; maxAttempts?: number }> = [];
+		const stream = streamGoogleGeminiCli(cliModel, context, {
+			apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
+			fetch: fetchMock,
+			providerRetryWait: async (delayMs, _signal, info) => {
+				waits.push({ delayMs, attempt: info?.attempt, maxAttempts: info?.maxAttempts });
+			},
+		});
+		const result = await stream.result();
+
+		expect(calls).toBe(2);
+		expect(result.stopReason).toBe("stop");
+		// The retry backoff must reach the caller, not be slept silently.
+		expect(waits).toEqual([{ delayMs: 500, attempt: 1, maxAttempts: 2 }]);
 	});
 
 	it("surfaces thought-only STOP immediately for session-level final-output recovery", async () => {

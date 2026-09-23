@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed provider-internal retry backoffs looking like a frozen turn: pi-ai's own stream retry waits — including the Anthropic HTTP client's 429/529 overload sleeps — now surface as `provider_retry_wait_start`/`provider_retry_wait_end` session events, a "Provider retrying (2/10) in …" status countdown that shows the retry position when the waiting loop reports one, and a structured log line. Retry delays, attempt counts, and abort behaviour are unchanged. Each wait carries a session-scoped `waitId` echoed by its `_end` (plus the originating stream `role`: `main`, `advisor`, or `side`) so concurrent waits and RPC consumers can pair starts with ends ([#12785](https://github.com/can1357/oh-my-pi/pull/12785) by [@geoyws](https://github.com/geoyws)).
 ### Added
 
 - Added `omp login` command for terminal-based OAuth authentication, including automated model discovery refresh and browser-opening support

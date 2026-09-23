@@ -2426,6 +2426,75 @@ describe("openai-codex streaming", () => {
 		expect(result.content.find(block => block.type === "text")?.text).toBe("Hello after retry");
 	});
 
+	it("reports its provider-error retry sleep through providerRetryWait", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+
+		const payload = Buffer.from(
+			JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "acc_test" } }),
+			"utf8",
+		).toBase64();
+		const token = `aaa.${payload}.bbb`;
+		let requestCount = 0;
+
+		const successSse = `${[
+			`data: ${JSON.stringify({ type: "response.output_item.added", item: { type: "message", id: "msg_retry", role: "assistant", status: "in_progress", content: [] } })}`,
+			`data: ${JSON.stringify({ type: "response.content_part.added", part: { type: "output_text", text: "" } })}`,
+			`data: ${JSON.stringify({ type: "response.output_text.delta", delta: "Hello after retry" })}`,
+			`data: ${JSON.stringify({ type: "response.output_item.done", item: { type: "message", id: "msg_retry", role: "assistant", status: "completed", content: [{ type: "output_text", text: "Hello after retry" }] } })}`,
+			`data: ${JSON.stringify({ type: "response.completed", response: { status: "completed", usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8, input_tokens_details: { cached_tokens: 0 } } } })}`,
+		].join("\n\n")}\n\n`;
+		const errorSse = `data: ${JSON.stringify({ type: "error", code: "model_error", message: "An error occurred while processing your request. You can retry your request." })}\n\n`;
+
+		const fetchMock = vi.fn(async (input: string | URL) => {
+			const url = typeof input === "string" ? input : input.toString();
+			if (url === "https://chatgpt.com/backend-api/codex/responses") {
+				requestCount += 1;
+				return new Response(requestCount === 1 ? errorSse : successSse, {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				});
+			}
+			return new Response("not found", { status: 404 });
+		});
+
+		const model: Model<"openai-codex-responses"> = buildModel({
+			id: "gpt-5.1-codex",
+			name: "GPT-5.1 Codex",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			preferWebsockets: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+		});
+
+		const context: Context = {
+			systemPrompt: ["You are a helpful assistant."],
+			messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }],
+		};
+
+		const waits: Array<{ delayMs: number; attempt?: number; maxAttempts?: number }> = [];
+		const result = await completeSimple(model, context, {
+			apiKey: token,
+			fetch: fetchMock as FetchImpl,
+			providerRetryWait: async (delayMs, _signal, info) => {
+				waits.push({ delayMs, attempt: info?.attempt, maxAttempts: info?.maxAttempts });
+			},
+		});
+
+		expect(result.stopReason).toBe("stop");
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		// The 500ms provider-error backoff must reach the caller instead of being
+		// slept silently inside the stream loop.
+		expect(waits).toEqual([{ delayMs: 500, attempt: 1, maxAttempts: 5 }]);
+		expect(waitSpy).not.toHaveBeenCalledWith(500, expect.anything());
+	});
+
 	it.each([
 		[
 			"whitespace text",

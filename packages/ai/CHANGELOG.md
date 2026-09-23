@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `StreamOptions.providerRetryWait` being dropped when simple stream options were mapped to per-API provider options, so a caller-supplied retry-wait hook never reached the provider retry loops that honour it. The hook now also covers `AnthropicMessagesClient`'s own 429/529/5xx retry sleeps, the OpenAI Codex retry sleeps (websocket handshake, websocket reconnect/replay, whitespace tool-call loop, provider-error replay), the Google and Gemini CLI empty-response backoffs, and the thinking-loop guarded-retry backoff, and receives an optional third argument with the waiting loop's `attempt`/`maxAttempts`. GitLab Duo and the OpenAI/Anthropic shim now forward the hook to their inner route as well ([#12785](https://github.com/can1357/oh-my-pi/pull/12785) by [@geoyws](https://github.com/geoyws)).
 ### Added
 
 - Implemented `SessionAffinity` for persistent, sticky session-to-credential mapping
@@ -18,6 +21,7 @@
 
 ### Fixed
 
+- Fixed Claude Opus 5.5 ignoring a mid-session switch to high effort when the session started without an explicit effort; the change is now sent as a cache-preserving per-message effort control ([#12909](https://github.com/can1357/oh-my-pi/pull/12909) by [@h4vc](https://github.com/h4vc)).
 - Fixed Claude Opus 5.5 not applying a mid-session switch to high-effort reasoning when the session started without an explicit effort setting.
 - Fixed Alibaba Token Plan monthly quotas not appearing in usage reports or the status line.
 

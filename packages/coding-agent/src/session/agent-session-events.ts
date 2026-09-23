@@ -1,4 +1,5 @@
 import type { AgentEvent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { ProviderRetryWaitStreamRole } from "./settings-stream-fn";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Effort } from "@oh-my-pi/pi-ai";
 import type { Rule } from "../capability/rule";
@@ -46,6 +47,26 @@ export type AgentSessionEvent =
 			finalError?: string;
 			retryErrors?: RetryErrorUpdate[];
 	  }
+	/**
+	 * A provider-internal retry backoff (pi-ai's own stream retry) is sleeping.
+	 * Distinct from `auto_retry_start`: no turn has been superseded and no
+	 * assistant context is pruned — the same turn is still in flight.
+	 */
+	| {
+			type: "provider_retry_wait_start";
+			/** Correlation id pairing this start with its `_end`. Monotonic per session. */
+			waitId: number;
+			/** Which stream role observed the backoff; only `main` waits render a turn countdown. */
+			role: ProviderRetryWaitStreamRole;
+			delayMs: number;
+			model: string;
+			provider: string;
+			api: string;
+			/** Retry position, when the waiting retry loop tracks one. */
+			attempt?: number;
+			maxAttempts?: number;
+	  }
+	| { type: "provider_retry_wait_end"; aborted: boolean; waitId: number }
 	| { type: "retry_fallback_applied"; from: string; to: string; role: string; reason?: string }
 	| { type: "retry_fallback_succeeded"; model: string; role: string }
 	| { type: "model_changed" }
