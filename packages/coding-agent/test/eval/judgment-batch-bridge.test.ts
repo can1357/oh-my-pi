@@ -15,6 +15,12 @@ import {
 	runEvalJudgmentBatch,
 } from "../../src/eval/judgment-batch-bridge";
 import { JAVASCRIPT_PRELUDE_SOURCE } from "../../src/eval/js/shared/prelude";
+import {
+	isJudgmentBatchProgress,
+	JUDGMENT_BATCH_PROGRESS_EVENT_CHANNEL,
+	type JudgmentBatchProgress,
+} from "../../src/eval/judgment-batch-events";
+import { EventBus } from "../../src/utils/event-bus";
 import type { PythonResult } from "../../src/eval/py/executor";
 import type { ToolSession } from "../../src/tools";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
@@ -32,7 +38,9 @@ const SMOL: Model<Api> = {
 	maxTokens: 4096,
 } as Model<Api>;
 
-const QUESTIONS = { tests: { type: "bool", instructions: "Does the request mention tests?" } };
+const QUESTIONS = {
+	tests: { type: "bool", instructions: "Does the request mention tests?" },
+};
 
 const managers = new Set<AsyncJobManager>();
 
@@ -58,11 +66,17 @@ function makeSession(opts: { agentId?: string; jobs?: boolean } = {}): BatchSess
 		getAgentId: () => opts.agentId ?? "Main",
 	};
 	if (opts.jobs === false) return { session: session as unknown as ToolSession };
-	const manager = new AsyncJobManager({ retentionMs: 60_000, onJobComplete: () => {} });
+	const manager = new AsyncJobManager({
+		retentionMs: 60_000,
+		onJobComplete: () => {},
+	});
 	managers.add(manager);
 	session.asyncJobManager = manager;
 	return { session: session as unknown as ToolSession, manager };
 }
+
+/** Billed amount per mocked judgment attempt; batches sum it into `status().cost`. */
+const REPLY_COST = 0.001;
 
 function reply(text: string): AssistantMessage {
 	return {
@@ -77,7 +91,13 @@ function reply(text: string): AssistantMessage {
 			cacheRead: 0,
 			cacheWrite: 0,
 			totalTokens: 0,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			cost: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				total: REPLY_COST,
+			},
 		},
 		stopReason: "stop",
 		timestamp: Date.now(),
@@ -86,13 +106,18 @@ function reply(text: string): AssistantMessage {
 
 /** Route each completion by the state text embedded in the prompt; gated states block until released. */
 function mockJudge(answers: Record<string, string | Promise<string>>): void {
-	vi.spyOn(ai, "completeSimple").mockImplementation(async (_model, context) => {
+	vi.spyOn(ai, "completeSimple").mockImplementation(async (_model, context, options) => {
 		const user = context.messages.find(message => message.role === "user");
 		const prompt = typeof user?.content === "string" ? user.content : JSON.stringify(user?.content);
+		let message = reply("tests: no");
 		for (const state in answers) {
-			if (prompt.includes(state)) return reply(await answers[state]);
+			if (prompt.includes(state)) {
+				message = reply(await answers[state]);
+				break;
+			}
 		}
-		return reply("tests: no");
+		options?.onAttempt?.(message);
+		return message;
 	});
 }
 
@@ -124,6 +149,45 @@ afterEach(async () => {
 });
 
 describe("judge_batch bridge", () => {
+	it("publishes live progress between cells without a job manager or drain calls", async () => {
+		const gate = Promise.withResolvers<string>();
+		mockJudge({ "state-fast": "tests: yes", "state-gated": gate.promise });
+		const { session } = makeSession({ jobs: false });
+		session.eventBus = new EventBus();
+		const events: JudgmentBatchProgress[] = [];
+		const intermediate = Promise.withResolvers<void>();
+		const finished = Promise.withResolvers<void>();
+		session.eventBus.on(JUDGMENT_BATCH_PROGRESS_EVENT_CHANNEL, event => {
+			if (!isJudgmentBatchProgress(event)) return;
+			events.push(event);
+			if (event.running && event.done === 1) intermediate.resolve();
+			if (!event.running) finished.resolve();
+		});
+		try {
+			await create(session, ["state-fast", "state-gated"], {
+				intent: "Classifying: Test idiomacy",
+			});
+			await intermediate.promise;
+			expect(events[0]).toMatchObject({
+				intent: "Classifying: Test idiomacy",
+				done: 0,
+				total: 2,
+				cost: 0,
+				running: true,
+			});
+			expect(events.at(-1)).toMatchObject({ done: 1, total: 2, running: true });
+		} finally {
+			gate.resolve("tests: no");
+		}
+		await finished.promise;
+		expect(events.at(-1)).toMatchObject({
+			done: 2,
+			total: 2,
+			failed: 0,
+			running: false,
+		});
+		expect(events.at(-1)?.cost).toBeCloseTo(2 * REPLY_COST, 6);
+	});
 	it("validates items and options before starting", async () => {
 		const { session } = makeSession();
 		const spy = vi.spyOn(ai, "completeSimple");
@@ -144,11 +208,23 @@ describe("judge_batch bridge", () => {
 			),
 		).rejects.toThrow('duplicate item key "a"');
 		await expect(
-			runEvalJudgmentBatch({ op: "create", items: [{ key: "a", state: "" }], questions: QUESTIONS }, { session }),
+			runEvalJudgmentBatch(
+				{
+					op: "create",
+					items: [{ key: "a", state: "" }],
+					questions: QUESTIONS,
+				},
+				{ session },
+			),
 		).rejects.toThrow("state must not be empty");
 		await expect(
 			runEvalJudgmentBatch(
-				{ op: "create", items: [{ key: "a", state: "x" }], questions: QUESTIONS, concurrency: -1 },
+				{
+					op: "create",
+					items: [{ key: "a", state: "x" }],
+					questions: QUESTIONS,
+					concurrency: -1,
+				},
 				{ session },
 			),
 		).rejects.toThrow("concurrency must be a non-negative integer");
@@ -160,35 +236,54 @@ describe("judge_batch bridge", () => {
 
 	it("drains settled items through a cursor, records failures per item, and settles the job", async () => {
 		const gate = Promise.withResolvers<string>();
-		mockJudge({ "state-a": "tests: yes", "state-b": "I cannot decide.", "state-c": gate.promise });
+		mockJudge({
+			"state-a": "tests: yes",
+			"state-b": "I cannot decide.",
+			"state-c": gate.promise,
+		});
 		const { session, manager } = makeSession();
-		const created = await create(session, ["state-a", "state-b", "state-c"], { retries: 0 });
+		const created = await create(session, ["state-a", "state-b", "state-c"], {
+			retries: 0,
+		});
 		expect(created.total).toBe(3);
 		expect(created.running).toBe(true);
 
+		// Near-simultaneous settles coalesce into one drain instead of one round-trip each.
 		const first = await drain(session, created.id, 5_000);
-		const second = await drain(session, created.id, 5_000);
-		const firstKeys = [...first, ...second].map(item => item.key).sort();
-		expect(firstKeys).toEqual([0, 1]);
-		expect(first.concat(second).find(item => item.key === 0)).toEqual({
+		expect(first.map(item => item.key).sort()).toEqual([0, 1]);
+		expect(first.find(item => item.key === 0)).toEqual({
 			key: 0,
 			answers: { tests: { type: "bool", bool: 1 } },
 			model: "p/smol",
 		});
-		expect(first.concat(second).find(item => item.key === 1)?.error).toContain('judgment "tests"');
+		expect(first.find(item => item.key === 1)?.error).toContain('judgment "tests"');
 		// Nothing new and the run is still going: a zero timeout returns immediately with nothing.
 		expect(await drain(session, created.id, 0)).toEqual([]);
 
 		const pending = drain(session, created.id, 5_000);
 		gate.resolve("tests: no");
-		expect(await pending).toEqual([{ key: 2, answers: { tests: { type: "bool", bool: 0 } }, model: "p/smol" }]);
+		expect(await pending).toEqual([
+			{
+				key: 2,
+				answers: { tests: { type: "bool", bool: 0 } },
+				model: "p/smol",
+			},
+		]);
 		expect(await drain(session, created.id, 0)).toEqual([]);
 
 		const final = await status(session, created.id);
-		expect(final).toMatchObject({ done: 3, failed: 1, running: false, model: "p/smol" });
+		expect(final).toMatchObject({
+			done: 3,
+			failed: 1,
+			running: false,
+			model: "p/smol",
+		});
 		expect(final.error).toBeUndefined();
 		expect(await runEvalJudgmentBatch({ op: "results", id: created.id }, { session })).toEqual({
-			results: { "0": { tests: { type: "bool", bool: 1 } }, "2": { tests: { type: "bool", bool: 0 } } },
+			results: {
+				"0": { tests: { type: "bool", bool: 1 } },
+				"2": { tests: { type: "bool", bool: 0 } },
+			},
 		});
 		const failed = (await runEvalJudgmentBatch({ op: "failed", id: created.id }, { session })) as {
 			failed: Record<string, string>;
@@ -197,7 +292,8 @@ describe("judge_batch bridge", () => {
 
 		const job = manager?.getJob(created.id);
 		expect(job?.status).toBe("completed");
-		expect(job?.resultText).toMatch(/^judged 3\/3 · 1 failed · p\/smol · [\d.]+s$/);
+		// Five attempts: a, three parse retries on b, c — cost counts every attempt, not settled items.
+		expect(job?.resultText).toMatch(/^judged 3\/3 · 1 failed · \$0\.0050 · p\/smol · [\d.]+s$/);
 	});
 
 	it("retries an item once before recording its failure", async () => {
@@ -217,7 +313,10 @@ describe("judge_batch bridge", () => {
 	it("raises from drain only after the cursor is exhausted when min_ok is unmet", async () => {
 		mockJudge({ "state-a": "I cannot decide." });
 		const { session, manager } = makeSession();
-		const created = await create(session, ["state-a"], { retries: 0, minOk: 1 });
+		const created = await create(session, ["state-a"], {
+			retries: 0,
+			minOk: 1,
+		});
 		const items = await drain(session, created.id, 5_000);
 		expect(items).toHaveLength(1);
 		expect(items[0]?.error).toContain('judgment "tests"');
@@ -229,7 +328,9 @@ describe("judge_batch bridge", () => {
 		const gate = Promise.withResolvers<string>();
 		mockJudge({ "state-a": gate.promise, "state-b": gate.promise });
 		const { session, manager } = makeSession();
-		const created = await create(session, ["state-a", "state-b"], { concurrency: 1 });
+		const created = await create(session, ["state-a", "state-b"], {
+			concurrency: 1,
+		});
 		expect(await drain(session, created.id, 0)).toEqual([]);
 
 		expect(await runEvalJudgmentBatch({ op: "cancel", id: created.id }, { session })).toEqual({ cancelled: true });
@@ -266,7 +367,11 @@ describe("judge_batch bridge", () => {
 		const { session } = makeSession({ jobs: false });
 		const created = await create(session, ["state-a"]);
 		expect(await drain(session, created.id, 5_000)).toEqual([
-			{ key: 0, answers: { tests: { type: "bool", bool: 1 } }, model: "p/smol" },
+			{
+				key: 0,
+				answers: { tests: { type: "bool", bool: 1 } },
+				model: "p/smol",
+			},
 		]);
 		expect((await status(session, created.id)).running).toBe(false);
 	});
@@ -276,7 +381,15 @@ describe("judgeBatch() JS prelude", () => {
 	it("maps states to keyed items and drainIter stops on an empty drain", async () => {
 		const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
 		const drains = [
-			{ items: [{ key: "a", answers: { ok: { type: "bool", bool: 1 } }, model: "p/smol" }] },
+			{
+				items: [
+					{
+						key: "a",
+						answers: { ok: { type: "bool", bool: 1 } },
+						model: "p/smol",
+					},
+				],
+			},
 			{ items: [{ key: "b", error: "boom" }] },
 			{ items: [] },
 		];
@@ -340,7 +453,7 @@ async function runPythonJudgeBatchInSubprocess(tempDir: TempDir): Promise<Python
 	const cellOne = [
 		"import json",
 		'Q = {"tests": {"type": "bool", "instructions": "Does the request mention tests?"}}',
-		'b = judge_batch({"a": "add tests please", "b": "rename a local"}, Q)',
+		'b = judge_batch({"a": "add tests please", "b": "rename a local"}, Q, intent="Classifying: Test idiomacy")',
 		"first = await b.drain(timeout=30)",
 		"second = await b.drain(timeout=30)",
 		"items = sorted(first + second, key=lambda kv: kv[0])",
@@ -370,7 +483,7 @@ const authStorage = createInMemoryAuthStorage();
 authStorage.setRuntimeApiKey("p", "test-key");
 const modelRegistry = new ModelRegistry(authStorage, "/nonexistent/judgment-batch-py-models.yml");
 vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([SMOL]);
-const session = { settings, modelRegistry, getSessionId: () => "sess-py", getAgentId: () => "Main" };
+const session = { cwd: ${JSON.stringify(tempDir.path())}, settings, modelRegistry, getSessionId: () => "sess-py", getAgentId: () => "Main" };
 vi.spyOn(ai, "completeSimple").mockImplementation(async (_model, context) => {
 	const user = context.messages.find(message => message.role === "user");
 	const prompt = typeof user?.content === "string" ? user.content : JSON.stringify(user?.content);
