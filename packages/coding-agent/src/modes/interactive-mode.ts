@@ -586,19 +586,35 @@ class DeferredCommandPreview implements Component {
 		private readonly items: readonly Component[],
 		private readonly maxRows: number,
 		private readonly commandCount: number,
+		private readonly hasChangelog: boolean,
 	) {}
 
 	render(width: number): readonly string[] {
 		const rows: string[] = [];
 		for (const item of this.items) rows.push(...item.render(width));
 		const queued = this.commandCount === 1 ? "1 command output" : `${this.commandCount} command outputs`;
+		const closeHint = this.hasChangelog ? "/changelog close · " : "";
 		if (rows.length <= this.maxRows) {
-			rows.push(theme.fg("dim", `${queued} — repeated in the transcript when the agent pauses`));
+			rows.push(
+				theme.fg(
+					"dim",
+					truncateToWidth(`${closeHint}${queued} — repeated in the transcript when the agent pauses`, width, ""),
+				),
+			);
 			return rows;
 		}
 		const shown = rows.slice(0, Math.max(1, this.maxRows - 1));
 		const hidden = rows.length - shown.length;
-		shown.push(theme.fg("dim", `… ${hidden} more rows — ${queued} shown in full when the agent pauses`));
+		shown.push(
+			theme.fg(
+				"dim",
+				truncateToWidth(
+					`${closeHint}… ${hidden} more rows — ${queued} shown in full when the agent pauses`,
+					width,
+					"",
+				),
+			),
+		);
 		return shown;
 	}
 }
@@ -1025,10 +1041,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#recorder: SessionRecorder | undefined;
 	#recorderStarting = false;
 
-	#pendingCommandOutput: Component[] = [];
+	#pendingCommandOutput: { items: Component[]; source?: "changelog" }[] = [];
 	#pendingCommandOutputSessionId: string | undefined;
-	/** Commands (not components) queued while streaming, for the deferral hint. */
-	#pendingCommandOutputCommands = 0;
 	#pendingSlashCommands: SlashCommand[] = [];
 	/** Built-in editor autocomplete provider, before extension wrapping. */
 	#baseAutocompleteProvider: AutocompleteProvider | undefined;
@@ -1204,7 +1218,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.deferredCommandContainer.disposeChildren();
 		this.#pendingCommandOutput = [];
 		this.#pendingCommandOutputSessionId = undefined;
-		this.#pendingCommandOutputCommands = 0;
 		this.compactionQueuedMessages = [];
 		this.streamingComponent = undefined;
 		this.streamingMessage = undefined;
@@ -6065,7 +6078,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * anchored container is cleared and rebuilt in place without adding history
 	 * rows — the same reason the ctrl+p role-cycle track lives there.
 	 */
-	presentCommandOutput(content: Component | readonly Component[]): void {
+	presentCommandOutput(content: Component | readonly Component[], source?: "changelog"): void {
 		if (!this.session.isStreaming) {
 			this.present(content);
 			return;
@@ -6073,14 +6086,23 @@ export class InteractiveMode implements InteractiveModeContext {
 		const sessionId = this.sessionManager.getSessionId();
 		if (this.#pendingCommandOutput.length > 0 && this.#pendingCommandOutputSessionId !== sessionId) {
 			this.#pendingCommandOutput = [];
-			this.#pendingCommandOutputCommands = 0;
 		}
 		this.#pendingCommandOutputSessionId = sessionId;
 		const items = Array.isArray(content) ? content : [content as Component];
-		this.#pendingCommandOutput.push(...items);
-		this.#pendingCommandOutputCommands += 1;
+		this.#pendingCommandOutput.push({ items: [...items], source });
 		this.#renderDeferredCommandNotice();
 		this.ui.requestRender();
+	}
+
+	closePendingChangelog(): boolean {
+		if (this.#pendingCommandOutputSessionId !== this.sessionManager.getSessionId()) return false;
+		const pending = this.#pendingCommandOutput.filter(output => output.source !== "changelog");
+		if (pending.length === this.#pendingCommandOutput.length) return false;
+		this.#pendingCommandOutput = pending;
+		if (pending.length === 0) this.#pendingCommandOutputSessionId = undefined;
+		this.#renderDeferredCommandNotice();
+		this.ui.requestRender();
+		return true;
 	}
 	showSessionInfo(info: string): void {
 		this.#hideSessionInfo();
@@ -6124,7 +6146,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		);
 		this.deferredCommandContainer.addChild(new Spacer(1));
 		this.deferredCommandContainer.addChild(
-			new DeferredCommandPreview([...this.#pendingCommandOutput], maxRows, this.#pendingCommandOutputCommands),
+			new DeferredCommandPreview(
+				this.#pendingCommandOutput.flatMap(output => output.items),
+				maxRows,
+				this.#pendingCommandOutput.length,
+				this.#pendingCommandOutput.some(output => output.source === "changelog"),
+			),
 		);
 	}
 
@@ -6135,10 +6162,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		const pendingSessionId = this.#pendingCommandOutputSessionId;
 		this.#pendingCommandOutput = [];
 		this.#pendingCommandOutputSessionId = undefined;
-		this.#pendingCommandOutputCommands = 0;
 		this.#renderDeferredCommandNotice();
 		if (pendingSessionId !== this.sessionManager.getSessionId()) return;
-		this.present(pending);
+		this.present(pending.flatMap(output => output.items));
 	}
 
 	#mountChatChild(item: Component): void {

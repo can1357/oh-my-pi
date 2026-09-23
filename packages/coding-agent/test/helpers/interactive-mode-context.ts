@@ -269,6 +269,7 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 		init: vi.fn(async () => {}),
 		present: vi.fn(mount),
 		presentCommandOutput: vi.fn(mount),
+		closePendingChangelog: vi.fn(() => false),
 		flushPendingCommandOutput: vi.fn(),
 		showStatus: vi.fn(),
 		showError: vi.fn(),

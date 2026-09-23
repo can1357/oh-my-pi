@@ -4,8 +4,9 @@ import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mod
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { Text } from "@oh-my-pi/pi-tui";
+import { Text, visibleWidth } from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 
 type Harness = {
 	mode: InteractiveMode;
@@ -173,5 +174,77 @@ describe("InteractiveMode deferred command preview", () => {
 		expect(notice).not.toContain("stale panel");
 		expect(notice).toContain("1 command output");
 		expect(notice).not.toContain("2 command outputs");
+	});
+
+	it("closes every pending changelog without dropping other command output", async () => {
+		const { mode, setStreaming } = await createHarness();
+		setStreaming(true);
+		const tall = Array.from({ length: 200 }, (_, i) => `changelog row ${i}`).join("\n");
+		mode.presentCommandOutput(new Text(tall, 1, 0), "changelog");
+		mode.presentCommandOutput(new Text("usage panel", 1, 0));
+		mode.presentCommandOutput(new Text("second changelog", 1, 0), "changelog");
+		expect(noticeText(mode)).toContain("/changelog close");
+		expect(noticeText(mode)).toContain("3 command outputs");
+		const narrow = mode.deferredCommandContainer.render(60);
+		expect(narrow.join("\n")).toContain("/changelog close");
+		expect(narrow.every(row => visibleWidth(row) <= 60)).toBe(true);
+
+		expect(await executeBuiltinSlashCommand("/changelog close", { ctx: mode })).toBe(true);
+		expect(noticeText(mode)).toContain("usage panel");
+		expect(noticeText(mode)).toContain("1 command output");
+		expect(noticeText(mode)).not.toContain("changelog row");
+		expect(noticeText(mode)).not.toContain("second changelog");
+		expect(noticeText(mode)).not.toContain("/changelog close");
+
+		setStreaming(false);
+		mode.flushPendingCommandOutput();
+		expect(transcriptText(mode)).toContain("usage panel");
+		expect(transcriptText(mode)).not.toContain("changelog row");
+		expect(transcriptText(mode)).not.toContain("second changelog");
+	});
+
+	it("keeps changelog history when close runs after the queued output is flushed", async () => {
+		const { mode, setStreaming } = await createHarness();
+		setStreaming(true);
+		mode.presentCommandOutput(new Text("history changelog", 1, 0), "changelog");
+		setStreaming(false);
+		mode.flushPendingCommandOutput();
+
+		expect(await executeBuiltinSlashCommand("/changelog close", { ctx: mode })).toBe(true);
+		expect(transcriptText(mode)).toContain("history changelog");
+		expect(transcriptText(mode)).toContain("No pending changelog to close.");
+	});
+
+	it("drops pending changelog on session reset", async () => {
+		const { mode, setStreaming } = await createHarness();
+		setStreaming(true);
+		mode.presentCommandOutput(new Text("old changelog", 1, 0), "changelog");
+		mode.clearTransientSessionUi();
+		expect(mode.closePendingChangelog()).toBe(false);
+		mode.presentCommandOutput(new Text("new output", 1, 0));
+		setStreaming(false);
+		mode.flushPendingCommandOutput();
+		expect(transcriptText(mode)).toContain("new output");
+		expect(transcriptText(mode)).not.toContain("old changelog");
+	});
+
+	it("keeps the existing full command route", async () => {
+		const { mode } = await createHarness();
+		const show = vi.spyOn(mode, "handleChangelogCommand").mockResolvedValue();
+		expect(await executeBuiltinSlashCommand("/changelog full", { ctx: mode })).toBe(true);
+		expect(show).toHaveBeenCalledWith(true);
+	});
+
+	it("closes the changelog opened by the real slash command", async () => {
+		const { mode, setStreaming } = await createHarness();
+		setStreaming(true);
+		expect(await executeBuiltinSlashCommand("/changelog full", { ctx: mode })).toBe(true);
+		expect(noticeText(mode)).toContain("Full Changelog");
+		expect(noticeText(mode)).toContain("/changelog close");
+		expect(await executeBuiltinSlashCommand("/changelog close", { ctx: mode })).toBe(true);
+		expect(noticeText(mode)).toBe("");
+		setStreaming(false);
+		mode.flushPendingCommandOutput();
+		expect(transcriptText(mode)).not.toContain("Full Changelog");
 	});
 });

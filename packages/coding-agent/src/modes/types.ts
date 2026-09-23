@@ -299,7 +299,9 @@ export interface InteractiveModeContext {
 	 * agent turn ends so a growing live block cannot push duplicate rows into
 	 * native scrollback.
 	 */
-	presentCommandOutput(content: Component | readonly Component[]): void;
+	presentCommandOutput(content: Component | readonly Component[], source?: "changelog"): void;
+	/** Remove changelog panels queued during the current turn. */
+	closePendingChangelog(): boolean;
 	/** Show session information in a focused transient overlay. */
 	showSessionInfo(info: string): void;
 	/** Mount command output deferred by {@link presentCommandOutput}. */
