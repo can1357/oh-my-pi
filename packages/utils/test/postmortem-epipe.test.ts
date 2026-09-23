@@ -60,10 +60,16 @@ if (process.argv.includes(unrelatedUncaughtChildFlag)) {
 	setImmediate(() => {
 		throw Object.assign(new Error("EPIPE: broken pipe, write"), { code: "EPIPE", syscall: "write", errno: -32 });
 	});
-	setImmediate(async () => {
+	// The marker rides a later macrotask on purpose: if containment ever
+	// regressed, the async fatal path (`exitAfterFatal` awaits `runCleanup`)
+	// gets a window to exit 1 first, so the marker can never win a scheduling
+	// race and false-pass the survival contract. A real timer is required —
+	// the competing event is a real process exit, which fake timers cannot
+	// simulate (ts-no-test-timers exception).
+	setTimeout(async () => {
 		await Bun.write(marker, "survived non-stdout write EPIPE");
 		process.exit(0);
-	});
+	}, 250);
 	await Promise.withResolvers<void>().promise;
 } else if (process.argv.includes(deferNonEpipeChildFlag)) {
 	const marker = process.argv[process.argv.indexOf(deferNonEpipeChildFlag) + 1];
