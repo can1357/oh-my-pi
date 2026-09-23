@@ -37,6 +37,7 @@
 - Unified terminal OAuth flow logic across `omp login` and `omp auth-broker login`
 - Included identity account/organization info in terminal login success messages
 - Changed judgment fallback to consider only native candidates, preventing prompted models from replacing failed natives
+- Documented a map-reduce sub-call pattern for the eval tool (slice a long input inside the kernel, run one `completion` per slice, barrier with `wait`, aggregate in code, load large sources via in-kernel `read` rather than the outer `read` tool's `:raw` form) and routed bulk per-chunk semantic work there instead of subagent fan-out.
 
 ### Deprecated
 
