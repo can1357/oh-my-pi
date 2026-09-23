@@ -2,9 +2,6 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- A message typed while the agent is streaming now gets an explicit queued status instead of only a pending-bar repaint, so typed input is never silently swallowed: "Queued — interrupting the current step" when the model call it lands on has produced no output yet (the loop cancels that call and applies the steer immediately), "Queued — will apply after the current response" otherwise. The same notice now fires for collab guest prompts and skill commands queued mid-run; `interruptMode` (Settings → Interaction → Interrupt Mode) governs that cancellation as well as tool execution ([#12787](https://github.com/can1357/oh-my-pi/pull/12787) by [@geoyws](https://github.com/geoyws)).
 ### Added
 
 - Added `omp login` command for terminal-based OAuth authentication, including automated model discovery refresh and browser-opening support
@@ -24,6 +21,7 @@
 ### Fixed
 
 - Fixed headless print mode (`-p`) silently dropping MCP servers slower than the startup window; print mode now waits for configured servers (bounded by `OMP_MCP_TIMEOUT_MS`) and warns on stderr when one is not ready ([#12188](https://github.com/can1357/oh-my-pi/issues/12188), reported by [@aaronjmars](https://github.com/aaronjmars)).
+- A message typed while the agent is streaming now gets an explicit queued status instead of only a pending-bar repaint, so typed input is never silently swallowed: "Queued — interrupting the current step" when the model call it lands on has produced no output yet (the loop cancels that call and applies the steer immediately), "Queued — will apply after the current response" otherwise. The same notice now fires for collab guest prompts and skill commands queued mid-run; `interruptMode` (Settings → Interaction → Interrupt Mode) governs that cancellation as well as tool execution ([#12787](https://github.com/can1357/oh-my-pi/pull/12787) by [@geoyws](https://github.com/geoyws)).
 
 ## [18.2.11] - 2026-09-23
 
