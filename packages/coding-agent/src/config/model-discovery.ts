@@ -758,7 +758,9 @@ export async function discoverLmStudioModelRuntimeMetadata(
 	customTimeoutMs?: number,
 ): Promise<DiscoveredModelRuntimeMetadata | undefined> {
 	const baseUrl = normalizeOpenAIModelsListBaseUrl(model.baseUrl);
-	const timeoutMs = customTimeoutMs ?? 10_000;
+	// Same loopback budget as the list probe and the llama.cpp sibling: a dead
+	// desktop server must not stall model selection for the remote timeout.
+	const timeoutMs = discoveryProbeTimeoutMs(baseUrl, 250, customTimeoutMs);
 	const baseHeaders: Record<string, string> = { ...model.headers };
 	const attempt = async (headers: Record<string, string>) => {
 		const metadata = await withTimeoutSignal(timeoutMs, signal =>
@@ -831,7 +833,17 @@ export async function discoverOpenAIModelsList(
 
 	const baseHeaders: Record<string, string> = { ...providerConfig.headers };
 	let headers = baseHeaders;
-	const timeoutMs = providerConfig.discovery.timeoutMs ?? 10_000;
+	// LM Studio is a desktop server reached over loopback, so an unanswered
+	// probe means "not installed / not running", never "slow link": give it the
+	// same tight budget the other implicit local engines use instead of the
+	// remote one, which made every startup with no LM Studio running wait out
+	// the full connect timeout on platforms that do not refuse instantly
+	// (issue #12945). Non-loopback hosts and an explicit `timeoutMs` keep the
+	// generous budget via {@link discoveryProbeTimeoutMs}.
+	const timeoutMs =
+		providerConfig.discovery.type === "lm-studio"
+			? discoveryProbeTimeoutMs(baseUrl, 250, providerConfig.discovery.timeoutMs)
+			: (providerConfig.discovery.timeoutMs ?? REMOTE_DISCOVERY_TIMEOUT_MS);
 	const attempt = async (h: Record<string, string>) => {
 		const nativeMetadataPromise =
 			providerConfig.discovery.type === "lm-studio"
