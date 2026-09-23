@@ -72,7 +72,9 @@ export interface UnitRetryContext {
 	verification?: UnitVerification;
 }
 
-const VERIFICATION_STATUSES: Record<string, true> = { passed: true, failed: true, not_run: true };
+function isVerificationStatus(value: unknown): value is UnitVerification["status"] {
+	return value === "passed" || value === "failed" || value === "not_run";
+}
 
 function isStringArray(value: unknown): value is string[] {
 	return Array.isArray(value) && value.every(entry => typeof entry === "string");
@@ -85,9 +87,9 @@ function malformed(detail: string): UnitOutcome {
 // Strict-mode providers send omitted optional fields as `null`; every optional field treats `null` as absent.
 function parseVerification(value: unknown): UnitVerification | string | undefined {
 	if (value == null) return undefined;
-	if (!isRecord(value) || typeof value.status !== "string" || !Object.hasOwn(VERIFICATION_STATUSES, value.status)) {
-		return 'verification.status must be "passed", "failed", or "not_run"';
-	}
+	if (!isRecord(value)) return 'verification.status must be "passed", "failed", or "not_run"';
+	const status = value.status;
+	if (!isVerificationStatus(status)) return 'verification.status must be "passed", "failed", or "not_run"';
 	if (value.commands != null && !isStringArray(value.commands)) {
 		return "verification.commands must be an array of strings";
 	}
@@ -95,7 +97,7 @@ function parseVerification(value: unknown): UnitVerification | string | undefine
 		return "verification.details must be a string";
 	}
 	return {
-		status: value.status as UnitVerification["status"],
+		status,
 		...(value.commands != null ? { commands: [...value.commands] } : {}),
 		...(value.details != null ? { details: value.details } : {}),
 	};

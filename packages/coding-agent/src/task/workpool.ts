@@ -339,7 +339,10 @@ export class WorkPool {
 			this.#notifyDrained();
 			return;
 		}
-		const items = agent.queue.splice(0);
+		// Units mode: a retried unit always runs alone, so another unit's `{ key, error }` abort cannot
+		// consume its attempt. First attempts still batch together up to the first queued retry.
+		const firstRetry = this.units ? agent.queue.findIndex(item => item.retry !== undefined) : -1;
+		const items = agent.queue.splice(0, firstRetry === 0 ? 1 : firstRetry > 0 ? firstRetry : agent.queue.length);
 		const id = `${agent.id}-b${agent.turns + 1}`;
 		const batch: WorkPoolBatch = {
 			id,

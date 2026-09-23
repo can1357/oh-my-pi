@@ -426,22 +426,17 @@ describe("WorkPool dispatch", () => {
 });
 
 describe("WorkPool units mode", () => {
-	it("retries only residual units, keeps results from aborted batches, and delivers a per-unit ledger", async () => {
-		const deliveries: Array<{ id: string; text: string }> = [];
-		const session = makeSession([], 1, false, deliveries);
-		// Scripted worker, per unit per attempt: a report, `{ yieldError }` for a `{ key, error }` yield
-		// (ends the turn as aborted, like the executor), or `undefined` (never reported; turn fails).
-		const replies: Record<string, unknown[]> = {
-			// Real workers often yield `data` JSON-encoded (observed live); the pool must decode it.
-			"units#1": [
-				JSON.stringify({ status: "done", value: "ok", evidence: ["a.ts:1"], verification: { status: "passed" } }),
-			],
-			"units#2": [
-				{ status: "done", value: "v1", verification: { status: "failed", details: "1 fail" } },
-				{ status: "done", value: "v2", verification: { status: "passed", commands: ["bun test b"] } },
-			],
-			"units#3": [{ yieldError: "needs prod access" }, undefined],
-		};
+	/**
+	 * Scripted workers. Per unit per attempt: a report, `{ yieldError }` for a `{ key, error }` yield
+	 * (ends the turn as aborted, like the executor), or `undefined` (never reported; turn fails).
+	 * `turnGates[n]` holds the n-th worker turn open (as a real, slow worker would) until resolved.
+	 * Returns the unit ids and prompt of every turn, in dispatch order.
+	 */
+	function scriptWorkers(
+		replies: Record<string, unknown[]>,
+		turnGates: Array<Promise<void> | undefined> = [],
+	): { sent: string[][]; messages: string[] } {
+		const gates = turnGates[Symbol.iterator]();
 		const sent: string[][] = [];
 		const messages: string[] = [];
 		const respond = (id: string, items: WorkPoolYieldItem[] | undefined, message: string): SingleResult => {
@@ -467,12 +462,31 @@ describe("WorkPool units mode", () => {
 			return { ...singleResult(id), ...ending, extractedToolData: { yield: yields } };
 		};
 		vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
+			await gates.next().value;
 			const id = request.identity?.id ?? "missing";
 			return { ...execution(id), result: respond(id, request.workPoolYieldItems, request.assignment) };
 		});
-		vi.spyOn(executor, "runSubagentFollowUpTurn").mockImplementation(async options =>
-			respond(options.id, options.workPoolYieldItems, options.message),
-		);
+		vi.spyOn(executor, "runSubagentFollowUpTurn").mockImplementation(async options => {
+			await gates.next().value;
+			return respond(options.id, options.workPoolYieldItems, options.message);
+		});
+		return { sent, messages };
+	}
+
+	it("retries only residual units, keeps results from aborted batches, and delivers a per-unit ledger", async () => {
+		const deliveries: Array<{ id: string; text: string }> = [];
+		const session = makeSession([], 1, false, deliveries);
+		const { sent, messages } = scriptWorkers({
+			// Real workers often yield `data` JSON-encoded (observed live); the pool must decode it.
+			"units#1": [
+				JSON.stringify({ status: "done", value: "ok", evidence: ["a.ts:1"], verification: { status: "passed" } }),
+			],
+			"units#2": [
+				{ status: "done", value: "v1", verification: { status: "failed", details: "1 fail" } },
+				{ status: "done", value: "v2", verification: { status: "passed", commands: ["bun test b"] } },
+			],
+			"units#3": [{ yieldError: "needs prod access" }, undefined],
+		});
 		const workpool = new WorkPool(session, { name: "units", policy: POLICY, units: { maxAttempts: 2 } });
 		workpool.push(["Audit auth", "Audit billing", "Audit export"]);
 		await finishPool(session, workpool);
@@ -496,5 +510,40 @@ describe("WorkPool units mode", () => {
 		expect(ledger[1]).toMatchObject({ verified: true, value: "v2", verification: { commands: ["bun test b"] } });
 		expect(workpool.status().items).toMatchObject({ completed: 2, failed: 1, queued: 0, running: 0 });
 		expect(deliveries.find(delivery => delivery.id === "units")?.text).toContain("unit ledger: 2/3 accepted");
+	});
+
+	it("retries each residual unit in its own batch so one unit's abort cannot consume another's attempt", async () => {
+		// One worker: three residuals from the same batch requeue while that worker is busy with the first.
+		const session = makeSession([], 1);
+		const firstTurn = Promise.withResolvers<void>();
+		const firstRetry = Promise.withResolvers<void>();
+		const { sent } = scriptWorkers(
+			{
+				"iso#1": [{ status: "done", value: 1 }],
+				"iso#2": [{ yieldError: "blocked" }, { status: "done", value: 2 }],
+				"iso#3": [undefined, { yieldError: "still blocked" }],
+				"iso#4": [undefined, { status: "done", value: 4 }],
+			},
+			// Turn 0: iso#1; turn 1: iso#2-4 (all three become residual); turn 2: the first retry.
+			[firstTurn.promise, undefined, firstRetry.promise],
+		);
+		const workpool = new WorkPool(session, { name: "iso", policy: POLICY, units: { maxAttempts: 2 } });
+		workpool.push(["one", "two", "three", "four"]);
+		await until(() => workpool.agents[0]?.queue.length === 3);
+		firstTurn.resolve();
+		// While the first retry is still running, the other two residuals queue behind it on the only worker.
+		await until(() => workpool.agents[0]?.queue.length === 2);
+		firstRetry.resolve();
+		await finishPool(session, workpool);
+
+		expect(sent.slice(0, 2)).toEqual([["iso#1"], ["iso#2", "iso#3", "iso#4"]]);
+		expect(sent.slice(2).map(batch => batch.length)).toEqual([1, 1, 1]);
+		const ledger = workpool.peek().units ?? [];
+		expect(ledger.map(entry => [entry.id, entry.state, entry.attempts.map(a => a.result)])).toEqual([
+			["iso#1", "accepted", ["accepted"]],
+			["iso#2", "accepted", ["unresolved", "accepted"]],
+			["iso#3", "residual", ["missing", "unresolved"]],
+			["iso#4", "accepted", ["missing", "accepted"]],
+		]);
 	});
 });

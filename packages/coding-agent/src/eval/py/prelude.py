@@ -1073,8 +1073,9 @@ if "__omp_prelude_loaded__" not in globals():
             args["context"] = context
         if tools is not None:
             args["tools"] = list(tools)
-        if units:
-            args["units"] = True
+        if units is not False:
+            # Forward as given; the host validates it is a boolean.
+            args["units"] = units
         if attempts is not None:
             args["attempts"] = attempts
         result = _bridge_call("__workpool__", args)
