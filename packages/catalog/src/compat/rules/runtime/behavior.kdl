@@ -138,6 +138,9 @@ behavior {
 	exclude-models provider="xiaomi-token-plan-ams" substring="-tts" substring="-asr"
 	exclude-models provider="xiaomi-token-plan-cn" substring="-tts" substring="-asr"
 	exclude-models provider="xiaomi-token-plan-sgp" substring="-tts" substring="-asr"
+	// Text-chat transports cannot serve StepFun's audio-only and image-editing
+	// SKUs, which its /v1/models roster interleaves with the chat models.
+	exclude-models provider="stepfun" prefix="stepaudio-" prefix="step-image-" prefix="step-tts-" prefix="step-2x-large"
 	// SuperGrok's roster interleaves media models the chat picker cannot
 	// serve; the dedicated tool surfaces route them instead.
 	exclude-models provider="xai-oauth" exact="grok-imagine-image-quality" exact="grok-imagine-image-2.0" \
@@ -169,11 +172,16 @@ behavior {
 		prefix="qwen-audio-" prefix="qwen-image-" prefix="text-embedding-" prefix="wan2.7-"
 	// Copilot's /models listing carries no transport field; route Claude ids
 	// to Anthropic Messages, the reviewed Responses roster to Responses, and
-	// everything else to chat completions.
+	// everything else to chat completions. Every Grok Copilot has served since
+	// 4.5 is Responses-only (chat completions answers 400
+	// unsupported_api_for_model), so the line is matched by prefix — including
+	// the synthesized `-1m` long-context siblings — instead of one exact id per
+	// revision (#7096, #8807, #12901). grok-code-fast-1 carries no 4.x revision
+	// and stays on chat completions.
 	api-routes provider="github-copilot" default="openai-completions" {
 		route "anthropic-messages" glob="claude-haiku-*" glob="claude-sonnet-*" glob="claude-opus-*" \
 			glob="claude-fable-*" glob="claude-mythos-*"
-		route "openai-responses" exact="grok-4.5" exact="grok-4.6" prefix="gpt-5" prefix="gpt-6" prefix="oswe" prefix="mai-"
+		route "openai-responses" prefix="grok-4." prefix="gpt-5" prefix="gpt-6" prefix="oswe" prefix="mai-"
 	}
 	// Command Code serves Claude models through its Anthropic-compatible
 	// Messages endpoint and every other model through chat completions.

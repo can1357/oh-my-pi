@@ -56,6 +56,7 @@ import type {
 	AssistantMessage,
 	CodexCompactionContext,
 	ImageContent,
+	Judge,
 	Message,
 	MessageAttribution,
 	Model,
@@ -160,6 +161,7 @@ import { GoalRuntime } from "../goals/runtime";
 import type { GoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
+import { hasNativeJudge, journalJudgmentUsage, resolveJudge } from "../judgment";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/hub";
 import type { DaemonCompletionNotification } from "../launch/protocol";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
@@ -1724,8 +1726,12 @@ export class AgentSession {
 			schedulePostPromptTask: (task, options) => this.#schedulePostPromptTask(task, options),
 			scheduleAgentContinue: options => this.#scheduleAgentContinue(options),
 			promptGeneration: () => this.#promptGeneration,
+			ruleJudge: () => this.ruleJudge(),
+			deliverRuleWarning: (content, ruleNames) => this.#deliverRuleWarning(content, ruleNames),
+			sessionGeneration: () => this.#sessionGeneration,
 		};
 		this.#ttsr = new TtsrCoordinator(ttsrHost, config.ttsrManager);
+		this.agent.setOnBeforeYield(() => this.#ttsr.settleJudgments());
 		this.#obfuscator = config.obfuscator;
 		const providerBoundaryHost: SessionProviderBoundaryHost = {
 			agent: this.agent,
@@ -2440,6 +2446,38 @@ export class AgentSession {
 			durationMs,
 			epoch,
 		});
+	}
+
+	/**
+	 * Judge for TTSR `question` rules per `ttsr.judge`, used by live judging and
+	 * `/omfg` validation. `auto` requires the judge role to resolve to a native
+	 * System One model, since every completed output may cost a request. Rebuilt
+	 * per call so model, credential, and session switches apply.
+	 */
+	ruleJudge(): Judge | undefined {
+		const mode = this.settings.get("ttsr.judge");
+		if (mode === "off" || (mode === "auto" && !hasNativeJudge(this.settings, this.#modelRegistry))) return undefined;
+		return resolveJudge({
+			settings: this.settings,
+			registry: this.#modelRegistry,
+			sessionModel: this.model,
+			sessionId: this.sessionId,
+			metadataResolver: provider => this.agent.metadataForProvider(provider),
+			onUsage: journalJudgmentUsage(this.sessionManager, "ttsr"),
+		});
+	}
+
+	/**
+	 * Non-interrupting delivery: mid-run the warning joins the next step; an idle
+	 * session starts a turn so the agent can act on it. Persisting the message
+	 * records the rules as injected (see #persistMessageEnd).
+	 */
+	async #deliverRuleWarning(content: string, ruleNames: string[]): Promise<void> {
+		if (this.#isDisposed) return;
+		await this.sendCustomMessage(
+			{ customType: "ttsr-injection", content, display: false, details: { rules: ruleNames }, attribution: "agent" },
+			{ deliverAs: "aside" },
+		);
 	}
 
 	async #formatAsyncResultForFollowUp(result: string, meta?: OutputMeta): Promise<string> {
@@ -4414,6 +4452,7 @@ export class AgentSession {
 				from: event.from,
 				to: event.to,
 				role: event.role,
+				reason: event.reason,
 			});
 		} else if (event.type === "retry_fallback_succeeded") {
 			await this.#extensionRunner.emit({
