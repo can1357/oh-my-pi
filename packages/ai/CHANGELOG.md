@@ -5,6 +5,17 @@
 ### Fixed
 
 - Fixed `StreamOptions.providerRetryWait` being dropped when simple stream options were mapped to per-API provider options, so a caller-supplied retry-wait hook never reached the provider retry loops that honour it. The hook now also covers `AnthropicMessagesClient`'s own 429/529/5xx retry sleeps, the OpenAI Codex retry sleeps (websocket handshake, websocket reconnect/replay, whitespace tool-call loop, provider-error replay), the Google and Gemini CLI empty-response backoffs, and the thinking-loop guarded-retry backoff, and receives an optional third argument with the waiting loop's `attempt`/`maxAttempts`. GitLab Duo and the OpenAI/Anthropic shim now forward the hook to their inner route as well ([#12785](https://github.com/can1357/oh-my-pi/pull/12785) by [@geoyws](https://github.com/geoyws)).
+### Added
+
+- Implemented `SessionAffinity` for persistent, sticky session-to-credential mapping
+- Added persistent rate-limit block tracking with auto-healing and account-specific routing policy support
+- Introduced `KeyCascade` for unified hierarchical authentication resolution
+- Added per-account OAuth routing policies with strict selectors, deterministic priority, and protected quota reserves ([#12243](https://github.com/can1357/oh-my-pi/pull/12243) by [@schickling-assistant](https://github.com/schickling-assistant)).
+
+### Changed
+
+- Refactored `AuthStorage` into namespaced sub-modules (`credentials`, `keys`, `oauth`, `limits`, `health`, `blocks`, `resets`, `usage`)
+- Migrated all internal crypto-hashing to native `Bun` performance primitives
 
 ## [18.2.11] - 2026-09-23
 

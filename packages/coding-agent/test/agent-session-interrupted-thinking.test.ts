@@ -101,7 +101,7 @@ describe("AgentSession interrupted thinking persistence", () => {
 	beforeEach(() => {
 		tempDir = TempDir.createSync("@pi-interrupted-thinking-");
 		authStorage = createInMemoryAuthStorage();
-		authStorage.setRuntimeApiKey("anthropic", "anthropic-test-key");
+		authStorage.keys.setRuntime("anthropic", "anthropic-test-key");
 	});
 
 	afterEach(async () => {

@@ -2,7 +2,7 @@
  * Google Gemini Web Search Provider
  *
  * Uses Gemini's Google Search grounding via Cloud Code Assist API.
- * Cloud Code Assist auth is resolved through `AuthStorage.getOAuthAccess(...)`
+ * Cloud Code Assist auth is resolved through `AuthStorage.oauth.access(...)`
  * for the selected catalog provider; developer API auth uses the selected
  * model's registry resolver. The broker is the sole refresh authority, so this module never opens a
  * sibling SQLite store and never POSTs the broker sentinel to a Google token
@@ -121,7 +121,7 @@ export async function findGeminiAuth(
 	sessionId: string | undefined,
 	signal: AbortSignal | undefined,
 ): Promise<GeminiAuthSeed | null> {
-	const access = await authStorage.getOAuthAccess(provider, sessionId, { signal });
+	const access = await authStorage.oauth.access(provider, sessionId, { signal });
 	if (!access?.accessToken || !access.projectId) return null;
 	return { provider, access, projectId: access.projectId };
 }
@@ -668,14 +668,14 @@ export class GeminiProvider extends SearchProvider {
 
 	isAvailable(authStorage: AuthStorage, model?: Model<Api>): boolean {
 		if (model) {
-			if (model.api === "google-gemini-cli") return authStorage.hasOAuth(model.provider);
-			if (model.api === "google-generative-ai") return authStorage.hasAuth(model.provider);
+			if (model.api === "google-gemini-cli") return authStorage.credentials.hasOAuth(model.provider);
+			if (model.api === "google-generative-ai") return authStorage.keys.source(model.provider) !== undefined;
 			return false;
 		}
 		return (
-			authStorage.hasOAuth("google-antigravity") ||
-			authStorage.hasOAuth("google-gemini-cli") ||
-			authStorage.hasAuth("google")
+			authStorage.credentials.hasOAuth("google-antigravity") ||
+			authStorage.credentials.hasOAuth("google-gemini-cli") ||
+			authStorage.keys.source("google") !== undefined
 		);
 	}
 

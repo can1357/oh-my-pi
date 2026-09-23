@@ -11,17 +11,19 @@ function makeStore(credentials: StoredAuthCredential[] = []): AuthCredentialStor
 			return credentials;
 		},
 		updateAuthCredential() {},
-		deleteAuthCredential() {},
+		async deleteAuthCredential() {
+			return false;
+		},
 		tryDisableAuthCredentialIfMatches() {
 			return false;
 		},
-		replaceAuthCredentialsForProvider() {
+		async replaceAuthCredentials() {
 			return [];
 		},
-		upsertAuthCredentialForProvider() {
+		async upsertAuthCredential() {
 			return [];
 		},
-		deleteAuthCredentialsForProvider() {},
+		async deleteAuthCredentials() {},
 		getCache(key) {
 			const entry = cache.get(key);
 			if (!entry || entry.expiresAtSec * 1000 <= Date.now()) return null;
@@ -56,9 +58,9 @@ describe("xAI OAuth environment usage", () => {
 			const storage = new AuthStorage(makeStore(), {
 				usageProviderResolver: provider => (provider === "xai-oauth" ? captureUsageProvider(calls) : undefined),
 			});
-			await storage.reload();
+			await storage.credentials.reload();
 
-			await storage.fetchUsageReports();
+			await storage.usage.reports();
 		});
 
 		expect(calls).toHaveLength(1);
@@ -86,9 +88,9 @@ describe("xAI OAuth environment usage", () => {
 					usageProviderResolver: provider => (provider === "xai-oauth" ? captureUsageProvider(calls) : undefined),
 				},
 			);
-			await storage.reload();
+			await storage.credentials.reload();
 
-			await storage.fetchUsageReports();
+			await storage.usage.reports();
 		});
 
 		expect(calls).toHaveLength(1);
@@ -119,9 +121,9 @@ describe("xAI OAuth environment usage", () => {
 					usageProviderResolver: provider => (provider === "xai-oauth" ? captureUsageProvider(calls) : undefined),
 				},
 			);
-			await storage.reload();
+			await storage.credentials.reload();
 
-			await storage.fetchUsageReports();
+			await storage.usage.reports();
 		});
 
 		expect(calls).toHaveLength(1);
@@ -134,9 +136,9 @@ describe("xAI OAuth environment usage", () => {
 			const storage = new AuthStorage(makeStore(), {
 				usageProviderResolver: provider => (provider === "xai-oauth" ? captureUsageProvider(calls) : undefined),
 			});
-			await storage.reload();
+			await storage.credentials.reload();
 
-			await storage.fetchUsageReports();
+			await storage.usage.reports();
 		});
 
 		expect(calls).toEqual([]);

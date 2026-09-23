@@ -401,6 +401,8 @@ export interface UsageFetchContext {
 /** Provider implementation for fetching usage information. */
 export interface UsageProvider {
 	id: Provider;
+	/** Bump to retire cached reports of an older shape during last-good retention. */
+	cacheVersion?: number;
 	fetchUsage(params: UsageFetchParams, ctx: UsageFetchContext): Promise<UsageReport | null>;
 	/** Parse provider rate-limit response headers (lowercased keys) into a usage report, if supported. */
 	parseRateLimitHeaders?(
@@ -423,8 +425,19 @@ export interface CredentialRankingContext {
 	modelId?: string;
 }
 
+/** Classify an account report as eligible, ineligible, or unknown for a model's plan gate. */
+export type PlanGate = (report: UsageReport | null) => boolean | undefined;
+
 /** Strategy for usage-based credential ranking. Providers implement this to opt into smart credential selection. */
 export interface CredentialRankingStrategy {
+	/**
+	 * Account-plan gate for `context.modelId`: a classifier for the account behind a usage report —
+	 * eligible (`true`), ineligible (`false`), or unknown (`undefined`, plan not reported) — or
+	 * `undefined` when every plan may serve the model.
+	 */
+	planGate?(context: CredentialRankingContext): PlanGate | undefined;
+	/** Idle window after which a session pin stops suppressing usage re-ranking because the provider's prompt cache cannot still be warm; omit for indefinite stickiness. */
+	stickyWarmMs?: number;
 	/** Extract the primary (short) and secondary (long) window limits from a usage report. */
 	findWindowLimits(
 		report: UsageReport,
@@ -441,7 +454,7 @@ export interface CredentialRankingStrategy {
 	scopeLimits?(report: UsageReport, context?: CredentialRankingContext): UsageLimit[];
 	/**
 	 * Restrict limits for the opt-in, non-destructive usage-reserve health
-	 * check ({@link AuthStorage.getModelUsageHealth}). Distinct from
+	 * check ({@link AuthStorage.health.model}). Distinct from
 	 * {@link scopeLimits}, which gates credential-wide hard blocks: a provider
 	 * whose model/tier counters are trusted only at confirmed exhaustion for
 	 * hard-blocking can still expose them here so the reserve margin protects
@@ -470,10 +483,13 @@ export interface CredentialRankingStrategy {
 	 * gating it. {@link AuthStorage} clears a stale block under a returned scope
 	 * once every listed limit is below exhaustion, so a 429 whose retry-after
 	 * overstated the real reset does not sideline a recovered account until the
-	 * clock runs out. Scopes not returned expire by clock only. Codex heals
-	 * through its meter metadata instead and omits this.
+	 * clock runs out. Scopes not returned expire by clock only.
+	 *
+	 * `healthy` is the provider's own verdict for the scope (e.g. meter metadata):
+	 * false never heals; true heals even with empty limits; absent requires
+	 * non-empty limits with none exhausted.
 	 */
-	healableBlockScopes?(report: UsageReport): { blockScope: string; limits: UsageLimit[] }[];
+	healableBlockScopes?(report: UsageReport): { blockScope: string; limits: UsageLimit[]; healthy?: boolean }[];
 	/** Fallback window durations (ms) when limits don't specify durationMs. */
 	windowDefaults: {
 		primaryMs: number;

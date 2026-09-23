@@ -56,7 +56,7 @@ function makeSession(opts: { agentId?: string; jobs?: boolean } = {}): BatchSess
 		modelRoles: { judge: "p/smol" },
 	});
 	const authStorage = createInMemoryAuthStorage();
-	authStorage.setRuntimeApiKey("p", "test-key");
+	authStorage.keys.setRuntime("p", "test-key");
 	const modelRegistry = new ModelRegistry(authStorage, "/nonexistent/judgment-batch-models.yml");
 	vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([SMOL]);
 	const session: Record<string, unknown> = {
@@ -480,7 +480,7 @@ import { createInMemoryAuthStorage } from ${JSON.stringify(setupPath)};
 const SMOL = ${JSON.stringify(SMOL)};
 const settings = Settings.isolated({ "async.enabled": false, "task.isolation.enabled": false, modelRoles: { judge: "p/smol" } });
 const authStorage = createInMemoryAuthStorage();
-authStorage.setRuntimeApiKey("p", "test-key");
+authStorage.keys.setRuntime("p", "test-key");
 const modelRegistry = new ModelRegistry(authStorage, "/nonexistent/judgment-batch-py-models.yml");
 vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([SMOL]);
 const session = { cwd: ${JSON.stringify(tempDir.path())}, settings, modelRegistry, getSessionId: () => "sess-py", getAgentId: () => "Main" };

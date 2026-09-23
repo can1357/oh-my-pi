@@ -152,12 +152,12 @@ describe("codex saved-reset trigger integration", () => {
 	function buildSession(opts: HarnessOpts): Harness {
 		const model = getBundledModel("openai-codex", "gpt-5.5");
 		if (!model) throw new Error("Expected bundled openai-codex/gpt-5.5 to exist");
-		authStorage.setRuntimeApiKey("openai-codex", "test-key");
-		vi.spyOn(authStorage, "getOAuthAccountIdentity").mockReturnValue({ accountId: ACCOUNT_ID, email: EMAIL });
-		vi.spyOn(authStorage, "fetchUsageReports").mockImplementation(async () => (opts.report ? [opts.report] : null));
-		vi.spyOn(authStorage, "listResetCredits").mockImplementation(async () => opts.liveCredits);
+		authStorage.keys.setRuntime("openai-codex", "test-key");
+		vi.spyOn(authStorage.oauth, "identity").mockReturnValue({ accountId: ACCOUNT_ID, email: EMAIL });
+		vi.spyOn(authStorage.usage, "reports").mockImplementation(async () => (opts.report ? [opts.report] : null));
+		vi.spyOn(authStorage.resets, "list").mockImplementation(async () => opts.liveCredits);
 		const redeemTargets: ResetCreditTarget[] = [];
-		vi.spyOn(authStorage, "redeemResetCredit").mockImplementation(async options => {
+		vi.spyOn(authStorage.resets, "redeem").mockImplementation(async options => {
 			redeemTargets.push(options.target);
 			return { ok: true, code: "reset", accountId: ACCOUNT_ID, email: EMAIL, creditId: "credit-1" };
 		});
