@@ -1,3 +1,4 @@
+import { type AuthAccountPolicies, DEFAULT_USAGE_RESERVE_PCT } from "@oh-my-pi/pi-ai/auth-storage";
 import { ADVISOR_DEFAULT_BUDGET_PER_UPDATE } from "../advisor/emission-guard";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { DEFAULT_SHARE_URL, DEFAULT_STREAM_URL } from "@oh-my-pi/pi-wire";
@@ -295,6 +296,7 @@ export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 ];
 
 const DEFAULT_AGENT_MODEL_OVERRIDES: Record<string, string | string[]> = {};
+const EMPTY_AUTH_ACCOUNT_POLICIES: AuthAccountPolicies = [];
 
 export const SETTINGS_SCHEMA = {
 	// ────────────────────────────────────────────────────────────────────────
@@ -308,6 +310,7 @@ export const SETTINGS_SCHEMA = {
 	// per-machine overrides remain trivial.
 	"auth.broker.url": { type: "string", default: undefined },
 	"auth.broker.token": { type: "string", default: undefined, credential: true },
+	"auth.accountPolicies": { type: "array", default: EMPTY_AUTH_ACCOUNT_POLICIES },
 
 	autoResume: {
 		type: "boolean",
@@ -1776,7 +1779,7 @@ export const SETTINGS_SCHEMA = {
 	},
 	"retry.usageReservePct": {
 		type: "number",
-		default: 10,
+		default: DEFAULT_USAGE_RESERVE_PCT,
 		ui: {
 			tab: "model",
 			group: "Retry & Fallback",
@@ -4823,6 +4826,17 @@ export const SETTINGS_SCHEMA = {
 			group: "Discovery & MCP",
 			label: "MCP Project Config",
 			description: "Load .mcp.json/mcp.json from project root",
+		},
+	},
+
+	"mcp.startupTimeoutMs": {
+		type: "number",
+		default: 250,
+		ui: {
+			tab: "tools",
+			group: "Discovery & MCP",
+			label: "MCP Startup Window",
+			description: "Wait this many milliseconds for initial MCP tool discovery; 0 waits until connections settle",
 		},
 	},
 

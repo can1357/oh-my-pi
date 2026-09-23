@@ -9,7 +9,7 @@ const TEST_SOURCE = "manual-code-gate-test";
 // A custom (extension) OAuth provider is, by construction, NOT in
 // PASTE_CODE_LOGIN_PROVIDERS (that set is built from the static built-in
 // registry's `pasteCodeFlow` flags). It therefore exercises the loopback path:
-// AuthStorage.login must NOT synthesize a default manual-code prompt for it.
+// AuthStorage.oauth.login must NOT synthesize a default manual-code prompt for it.
 function registerCapturingLoopbackProvider(id: string): { received: () => OAuthLoginCallbacks | undefined } {
 	let captured: OAuthLoginCallbacks | undefined;
 	const provider: OAuthProviderInterface = {
@@ -27,14 +27,14 @@ function registerCapturingLoopbackProvider(id: string): { received: () => OAuthL
 	return { received: () => captured };
 }
 
-describe("AuthStorage.login default manual-code prompt gating", () => {
+describe("AuthStorage.oauth.login default manual-code prompt gating", () => {
 	let store: SqliteAuthCredentialStore;
 	let storage: AuthStorage;
 
 	beforeEach(async () => {
 		store = new SqliteAuthCredentialStore(new Database(":memory:"));
 		storage = new AuthStorage(store);
-		await storage.reload();
+		await storage.credentials.reload();
 	});
 
 	afterEach(() => {
@@ -46,7 +46,7 @@ describe("AuthStorage.login default manual-code prompt gating", () => {
 	it("does NOT synthesize a default manual-code prompt for a loopback provider", async () => {
 		const capture = registerCapturingLoopbackProvider("loopback-capture-provider");
 
-		await storage.login("loopback-capture-provider", {
+		await storage.oauth.login("loopback-capture-provider", {
 			onAuth: () => {},
 			onPrompt: async () => "should-not-be-called",
 		});
@@ -63,7 +63,7 @@ describe("AuthStorage.login default manual-code prompt gating", () => {
 		const capture = registerCapturingLoopbackProvider("loopback-explicit-provider");
 		const explicit = async () => "explicit-code";
 
-		await storage.login("loopback-explicit-provider", {
+		await storage.oauth.login("loopback-explicit-provider", {
 			onAuth: () => {},
 			onPrompt: async () => "unused",
 			onManualCodeInput: explicit,
@@ -89,7 +89,7 @@ describe("AuthStorage.login default manual-code prompt gating", () => {
 				),
 		);
 
-		await storage.login("gitlab-duo-agent", {
+		await storage.oauth.login("gitlab-duo-agent", {
 			onAuth: info => {
 				authUrl = info.url;
 			},

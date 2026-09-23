@@ -1,12 +1,13 @@
 /**
  * SQLite-backed credential persistence for AuthStorage.
  *
- * The public AuthCredentialStore interface remains in ../auth-storage so local
- * and remote stores share the same contract.
+ * The AuthCredentialStore contract lives in ./store so local and remote stores
+ * share the same interface.
  */
 import type { Database, Statement } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 import { parseAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
 import { parseCloudflareAiGatewayCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare-ai-gateway";
 import {
@@ -17,15 +18,14 @@ import {
 	logger,
 	openSqliteDatabase,
 } from "@oh-my-pi/pi-utils";
+import type { AuthCredentialStore, CredentialRefreshLeaseFence } from "./store";
 import type {
 	AuthCredential,
-	AuthCredentialStore,
-	CredentialRefreshLeaseFence,
 	DisabledCredentialSummary,
 	OAuthCredential,
 	StoredAuthCredential,
 	StoredCredentialBlock,
-} from "../auth-storage";
+} from "./types";
 import type { OAuthCredentials } from "../registry/oauth/types";
 import type { Provider } from "../types";
 import type {
@@ -168,7 +168,7 @@ function toStoredAuthCredential(row: AuthRow, credential: AuthCredential): Store
 
 function resolveProviderCredentialIdentityKey(provider: string, identifiers: string[]): string | null {
 	const emailIdentifier = identifiers.find(identifier => identifier.startsWith("email:"));
-	if (provider === "anthropic" || provider === "openai-codex") {
+	if (authPolicyFor(provider)?.orgScopedIdentity === true) {
 		// One account email can hold several organizations/workspaces (e.g. a
 		// Team seat plus a personal plan), each with its own org-scoped token
 		// and limit pools. Scope identity by org so both subscriptions can be
@@ -234,8 +234,8 @@ function matchesReplacementCredential(
 	if (incomingIdentityKey === existingIdentityKey) return true;
 	if (existingIdentityKey === null) return false;
 	// One-way upgrade, applied only when the INCOMING identity key carries the
-	// org qualifier (only anthropic and openai-codex keys do, so other
-	// providers never reach the checks below). An org-scoped login `org:<o>`
+	// org qualifier (only providers with org-scoped identity create such keys,
+	// so other providers never reach the checks below). An org-scoped login `org:<o>`
 	// claims (and re-keys) any existing row that denotes the same subscription:
 	//   - `org:<o>` — org-only row stored when identity recovery failed, claimed
 	//     once a later same-org login recovers a base identity;
@@ -426,7 +426,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				)`,
 		);
 		this.#deleteStmt = this.#db.prepare(
-			`UPDATE auth_credentials SET disabled_cause = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE id = ?`,
+			`UPDATE auth_credentials SET disabled_cause = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE id = ? AND disabled_cause IS NULL`,
 		);
 		this.#deleteIfMatchesStmt = this.#db.prepare(
 			`UPDATE auth_credentials SET disabled_cause = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE id = ? AND data = ? AND disabled_cause IS NULL`,
@@ -1256,7 +1256,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		return results;
 	}
 
-	replaceAuthCredentialsForProvider(provider: string, credentials: AuthCredential[]): StoredAuthCredential[] {
+	async replaceAuthCredentials(provider: string, credentials: AuthCredential[]): Promise<StoredAuthCredential[]> {
 		const replace = this.#db.transaction((providerName: string, items: AuthCredential[]) => {
 			const existingRows = this.#listActiveByProviderStmt.all(providerName) as AuthRow[];
 			const existing = existingRows.map(row => ({
@@ -1307,7 +1307,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		return result;
 	}
 
-	upsertAuthCredentialForProvider(provider: string, credential: AuthCredential): StoredAuthCredential[] {
+	async upsertAuthCredential(provider: string, credential: AuthCredential): Promise<StoredAuthCredential[]> {
 		const upsert = this.#db.transaction((providerName: string, item: AuthCredential) => {
 			const serialized = serializeCredential(providerName, item);
 			if (!serialized) return this.listAuthCredentials(providerName);
@@ -1476,11 +1476,13 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		return true;
 	}
 
-	deleteAuthCredential(id: number, disabledCause: string): void {
+	async deleteAuthCredential(id: number, disabledCause: string): Promise<boolean> {
 		try {
-			this.#deleteStmt.run(normalizeDisabledCause(disabledCause), id);
+			const result = this.#deleteStmt.run(normalizeDisabledCause(disabledCause), id);
+			return result.changes > 0;
 		} catch {
 			// Ignore delete failures
+			return false;
 		}
 	}
 
@@ -1510,7 +1512,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				});
 		return result.changes > 0;
 	}
-	deleteAuthCredentialsForProvider(provider: string, disabledCause: string): void {
+	async deleteAuthCredentials(provider: string, disabledCause: string): Promise<void> {
 		try {
 			this.#deleteByProviderStmt.run(normalizeDisabledCause(disabledCause), provider);
 		} catch {
@@ -1896,9 +1898,9 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	 * Save OAuth credentials for a provider.
 	 * Preserves unrelated identities and replaces only the matching credential.
 	 */
-	saveOAuth(provider: string, credentials: OAuthCredentials): void {
+	async saveOAuth(provider: string, credentials: OAuthCredentials): Promise<void> {
 		const credential: AuthCredential = { type: "oauth", ...credentials };
-		this.upsertAuthCredentialForProvider(provider, credential);
+		await this.upsertAuthCredential(provider, credential);
 	}
 
 	/**
@@ -1919,9 +1921,9 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	/**
 	 * Save API key for a provider (replaces existing).
 	 */
-	saveApiKey(provider: string, apiKey: string): void {
+	async saveApiKey(provider: string, apiKey: string): Promise<void> {
 		const credential: AuthCredential = { type: "api_key", key: apiKey };
-		this.replaceAuthCredentialsForProvider(provider, [credential]);
+		await this.replaceAuthCredentials(provider, [credential]);
 	}
 
 	/**
@@ -1953,8 +1955,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	/**
 	 * Delete all credentials for a provider.
 	 */
-	deleteProvider(provider: string): void {
-		this.deleteAuthCredentialsForProvider(provider, "deleted by user");
+	async deleteProvider(provider: string): Promise<void> {
+		await this.deleteAuthCredentials(provider, "deleted by user");
 	}
 
 	/**

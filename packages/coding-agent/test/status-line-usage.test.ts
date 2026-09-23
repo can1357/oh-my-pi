@@ -50,8 +50,10 @@ function makeComponent(
 				fetchUsageReports: async () => reports,
 				modelRegistry: {
 					authStorage: {
-						getOAuthAccountIdentity: (provider: string) =>
-							provider === options.provider ? options.activeIdentity : undefined,
+						oauth: {
+							identity: (provider: string) =>
+								provider === options.provider ? options.activeIdentity : undefined,
+						},
 					},
 				},
 				getAsyncJobSnapshot: () => ({ running: [] }),
@@ -297,10 +299,12 @@ describe("usage status-line segment", () => {
 			fetchUsageReports: async () => reports,
 			modelRegistry: {
 				authStorage: {
-					getOAuthAccountIdentity: (requestedProvider: string) =>
-						requestedProvider === provider && provider === "openai-codex"
-							? { accountId: "active-account" }
-							: undefined,
+					oauth: {
+						identity: (requestedProvider: string) =>
+							requestedProvider === provider && provider === "openai-codex"
+								? { accountId: "active-account" }
+								: undefined,
+					},
 				},
 			},
 			getAsyncJobSnapshot: () => ({ running: [] }),
@@ -367,8 +371,10 @@ describe("usage status-line segment", () => {
 			fetchUsageReports: async () => reports,
 			modelRegistry: {
 				authStorage: {
-					getOAuthAccountIdentity: (requestedProvider: string) =>
-						requestedProvider === "openai-codex" ? { accountId: "active-account" } : undefined,
+					oauth: {
+						identity: (requestedProvider: string) =>
+							requestedProvider === "openai-codex" ? { accountId: "active-account" } : undefined,
+					},
 				},
 			},
 			getAsyncJobSnapshot: () => ({ running: [] }),

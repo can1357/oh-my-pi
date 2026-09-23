@@ -9,8 +9,10 @@
  */
 import {
 	ANTHROPIC_OAUTH_GRANT_TTL_MS,
+	type AuthAccountPolicy,
 	type AuthStorage,
 	type DisabledCredentialSummary,
+	type OAuthAccountIdentity,
 	resolveUsedFraction,
 	type UsageHistoryEntry,
 	type UsageLimit,
@@ -23,6 +25,7 @@ import { formatProviderName } from "@oh-my-pi/pi-tui/chrome/format";
 import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
+import { Settings } from "../config/settings";
 import { discoverAuthStorage } from "../sdk";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
 import { collapseSharedUsageReports, summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
@@ -53,6 +56,13 @@ export interface UsageAccountIdentity {
 	orgName?: string;
 	/** Epoch ms of the interactive login that minted the OAuth grant (see `OAuthCredentials.authorizedAt`). */
 	authorizedAt?: number;
+}
+
+export interface UsagePolicyDiagnosticsOptions {
+	/** Existing global fallback used when an account has no reserve override. */
+	globalReservePct: number;
+	/** Delegates selector matching to AuthStorage's authoritative policy matcher. */
+	getAccountPolicy: (provider: string, identity: OAuthAccountIdentity) => AuthAccountPolicy | undefined;
 }
 
 /**
@@ -622,6 +632,82 @@ function disabledIdentityLabel(summary: DisabledCredentialSummary, redaction?: M
 	return `${masked} · ${redaction?.get(org) ?? org}`;
 }
 
+function metadataIdentity(report: UsageReport): OAuthAccountIdentity {
+	const metadata = report.metadata ?? {};
+	const read = (key: keyof OAuthAccountIdentity): string | undefined => {
+		const value = metadata[key];
+		return typeof value === "string" && value.length > 0 ? value : undefined;
+	};
+	const firstScoped = (key: "accountId" | "projectId" | "orgId"): string | undefined => {
+		for (const limit of report.limits) {
+			const value = limit.scope[key];
+			if (value) return value;
+		}
+		return undefined;
+	};
+	return {
+		email: read("email"),
+		accountId: read("accountId") ?? firstScoped("accountId"),
+		projectId: read("projectId") ?? firstScoped("projectId"),
+		orgId: read("orgId") ?? firstScoped("orgId"),
+		orgName: read("orgName"),
+	};
+}
+
+function accountOAuthIdentity(account: UsageAccountIdentity): OAuthAccountIdentity {
+	return {
+		email: account.email,
+		accountId: account.accountId,
+		projectId: account.projectId,
+		orgId: account.orgId,
+		orgName: account.orgName,
+	};
+}
+
+function policyEnabledProviders(
+	reports: UsageReport[],
+	accounts: UsageAccountIdentity[],
+	options: UsagePolicyDiagnosticsOptions | undefined,
+): Set<string> {
+	const providers = new Set<string>();
+	if (!options) return providers;
+	for (const account of accounts) {
+		if (account.type === "oauth" && options.getAccountPolicy(account.provider, accountOAuthIdentity(account))) {
+			providers.add(account.provider);
+		}
+	}
+	for (const report of reports) {
+		if (options.getAccountPolicy(report.provider, metadataIdentity(report))) providers.add(report.provider);
+	}
+	return providers;
+}
+
+function formatPolicyLine(
+	provider: string,
+	identity: OAuthAccountIdentity,
+	limits: UsageLimit[] | undefined,
+	options: UsagePolicyDiagnosticsOptions,
+): string {
+	const policy = options.getAccountPolicy(provider, identity);
+	const priority = policy?.priority ?? 0;
+	const configuredReservePct = policy?.reservePct;
+	const inherited = configuredReservePct === undefined;
+	const reservePct = Math.max(0, Math.min(100, configuredReservePct ?? options.globalReservePct));
+	const reserveLabel = `${reservePct}% ${inherited ? "(global)" : "(override)"}`;
+	// `omp usage` has no model/session context, so report the conservative
+	// account-wide state from the most-consumed visible window. Actual routing
+	// still scopes limits and selection in AuthStorage.
+	const usedFractions = (limits ?? [])
+		.map(resolveUsedFraction)
+		.filter((fraction): fraction is number => fraction !== undefined && Number.isFinite(fraction));
+	if (usedFractions.length === 0) {
+		return `policy: priority ${priority} · reserve ${reserveLabel} · reserve unknown`;
+	}
+	const remainingPct = Math.max(0, 1 - Math.max(...usedFractions)) * 100;
+	const state = remainingPct <= reservePct ? "inside reserve" : "eligible";
+	return `policy: priority ${priority} · reserve ${reserveLabel} · ${state} · ${remainingPct.toFixed(1)}% left`;
+}
+
 /**
  * Render the full text breakdown: per provider, per account, every limit
  * with a bar, amounts, and reset times; unattributed credentials trail
@@ -633,6 +719,7 @@ export function formatUsageBreakdown(
 	nowMs: number,
 	redaction?: Map<string, string>,
 	disabled: DisabledCredentialSummary[] = [],
+	policyOptions?: UsagePolicyDiagnosticsOptions,
 ): string {
 	const displayReports = collapseSharedUsageReports(reports);
 	const reportsByProvider = new Map<string, UsageReport[]>();
@@ -642,6 +729,7 @@ export function formatUsageBreakdown(
 		reportsByProvider.set(report.provider, list);
 	}
 	const unreported = collectUnreportedAccounts(displayReports, accounts);
+	const policyProviders = policyEnabledProviders(displayReports, accounts, policyOptions);
 	const unreportedByProvider = new Map<string, UsageAccountIdentity[]>();
 	for (const account of unreported) {
 		const list = unreportedByProvider.get(account.provider) ?? [];
@@ -683,6 +771,11 @@ export function formatUsageBreakdown(
 
 		providerReports.forEach((report, index) => {
 			lines.push(`  ${formatAccountHeader(report, index, nowMs, redaction)}`);
+			if (policyOptions && policyProviders.has(provider)) {
+				lines.push(
+					`      ${chalk.dim(formatPolicyLine(provider, metadataIdentity(report), report.limits, policyOptions))}`,
+				);
+			}
 			if (report.limits.length === 0) {
 				lines.push(`      ${chalk.dim("no limits reported")}`);
 				return;
@@ -702,6 +795,11 @@ export function formatUsageBreakdown(
 		for (const account of providerUnreported) {
 			const label = accountIdentityLabel(account, redaction);
 			lines.push(`  ${chalk.dim("○")} ${chalk.dim(`${label} — no usage data`)}`);
+			if (policyOptions && account.type === "oauth" && policyProviders.has(provider)) {
+				lines.push(
+					`      ${chalk.dim(formatPolicyLine(provider, accountOAuthIdentity(account), undefined, policyOptions))}`,
+				);
+			}
 		}
 
 		for (const summary of disabledByProvider.get(provider) ?? []) {
@@ -872,7 +970,7 @@ export function formatUsageHistory(
 
 function collectStoredAccounts(authStorage: AuthStorage): UsageAccountIdentity[] {
 	const accounts: UsageAccountIdentity[] = [];
-	const all = authStorage.getAll();
+	const all = authStorage.credentials.all();
 	for (const provider in all) {
 		const entry = all[provider];
 		const credentials = Array.isArray(entry) ? entry : [entry];
@@ -904,7 +1002,7 @@ function collectStoredAccounts(authStorage: AuthStorage): UsageAccountIdentity[]
  * keyless servers, inference providers without a usage API) would only ever
  * render as noise, so they are dropped.
  *
- * `hasUsageProvider` is injected (in practice {@link AuthStorage.usageProviderFor})
+ * `hasUsageProvider` is injected (in practice {@link AuthStorage.usage.providerFor})
  * so custom/broker resolvers stay authoritative — no provider list is duplicated
  * here. An explicit `--provider` request bypasses the cull, so
  * `omp usage --provider xai` can still confirm the stored credential has no
@@ -1023,11 +1121,12 @@ export function formatClientUsage(clients: ClientUsageClientSummary[], sinceMs: 
 }
 
 export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
-	const authStorage = await discoverAuthStorage();
+	const settings = await Settings.loadReadOnly();
+	const authStorage = await discoverAuthStorage(undefined, { settings });
 	try {
 		if (cmd.action === "invalidate") {
 			const provider = cmd.provider?.toLowerCase();
-			await authStorage.invalidateUsageCache(provider);
+			await authStorage.usage.invalidate(provider);
 			if (provider) {
 				process.stdout.write(`Invalidated cached usage reports for provider "${provider}".\n`);
 			} else {
@@ -1047,7 +1146,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 				const client = new AuthBrokerClient({ url: brokerConfig.url, token: brokerConfig.token });
 				clients = (await client.fetchClientUsageSummary({ sinceMs })).clients;
 			} else {
-				clients = authStorage.getClientUsageSummary(sinceMs).clients;
+				clients = authStorage.usage.clientSummary(sinceMs).clients;
 			}
 			if (cmd.json) {
 				process.stdout.write(`${JSON.stringify({ generatedAt: nowMs, sinceMs, clients }, null, 2)}\n`);
@@ -1069,7 +1168,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			const days = cmd.days !== undefined && Number.isFinite(cmd.days) && cmd.days > 0 ? cmd.days : 7;
 			const nowMs = Date.now();
 			const sinceMs = nowMs - days * 86_400_000;
-			const entries = authStorage.listUsageHistory({ sinceMs, provider: cmd.provider?.toLowerCase() });
+			const entries = authStorage.usage.history({ sinceMs, provider: cmd.provider?.toLowerCase() });
 			const redaction = cmd.redact ? buildRedactionMap(collectHistoryIdentityStrings(entries)) : undefined;
 			if (cmd.json) {
 				const masked = redaction
@@ -1096,9 +1195,13 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			process.stdout.write(`${formatUsageHistory(entries, sinceMs, nowMs, redaction)}\n`);
 			return;
 		}
+		const policyOptions: UsagePolicyDiagnosticsOptions = {
+			globalReservePct: settings.get("retry.usageReservePct"),
+			getAccountPolicy: (provider, identity) => authStorage.oauth.policy(provider, identity),
+		};
 		const modelRegistry = new ModelRegistry(authStorage);
 		const reports =
-			(await authStorage.fetchUsageReports({
+			(await authStorage.usage.reports({
 				baseUrlResolver: provider => modelRegistry.getProviderBaseUrl(provider),
 			})) ?? [];
 		// Reports are always fresh (broker-side fetch) but the account list can
@@ -1106,14 +1209,14 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 		// just-logged-in (or just-rotated-identity) credential isn't rendered
 		// as a stale duplicate. Best-effort: offline broker keeps the cache.
 		try {
-			await authStorage.revalidateCredentials();
+			await authStorage.credentials.revalidate();
 		} catch {
 			// Stale identities beat no output.
 		}
 		const storedAccounts = collectStoredAccounts(authStorage);
 		let accounts = selectReportableAccounts(
 			storedAccounts,
-			provider => authStorage.usageProviderFor(provider) !== undefined,
+			provider => authStorage.usage.providerFor(provider) !== undefined,
 			cmd.provider,
 		);
 		// Tombstones ride alongside the live pool so an auto-disabled account
@@ -1121,7 +1224,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 		// missing. Best-effort: a broker predating the endpoint yields [].
 		let disabled: DisabledCredentialSummary[] = [];
 		try {
-			disabled = await authStorage.listDisabledCredentials();
+			disabled = await authStorage.credentials.listDisabled();
 		} catch {
 			// Usage output must not fail because tombstone listing did.
 		}
@@ -1194,7 +1297,9 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			return;
 		}
 
-		process.stdout.write(`${formatUsageBreakdown(filteredReports, accounts, Date.now(), redaction, disabled)}\n`);
+		process.stdout.write(
+			`${formatUsageBreakdown(filteredReports, accounts, Date.now(), redaction, disabled, policyOptions)}\n`,
+		);
 	} finally {
 		authStorage.close();
 	}

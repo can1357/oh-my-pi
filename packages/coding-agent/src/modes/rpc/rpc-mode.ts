@@ -1630,7 +1630,7 @@ export async function runRpcMode(
 					id: provider.id,
 					name: provider.name,
 					available: provider.available,
-					authenticated: session.modelRegistry.authStorage.hasAuth(provider.id),
+					authenticated: session.modelRegistry.authStorage.keys.source(provider.id) !== undefined,
 				}));
 				return success(id, "get_login_providers", { providers });
 			}
@@ -1646,7 +1646,7 @@ export async function runRpcMode(
 				// onAuth, prompt input is the pasted OAuth code/redirect URL path.
 				let authEmitted = false;
 				try {
-					await session.modelRegistry.authStorage.login(command.providerId, {
+					await session.modelRegistry.authStorage.oauth.login(command.providerId, {
 						onAuth: info => {
 							authEmitted = true;
 							output({

@@ -14,20 +14,20 @@ const { modelRegistry, model: mojeekModel } = (() => {
 	return { modelRegistry, model };
 })();
 
-const getApiKeySpy = vi.spyOn(authStorage, "getApiKey").mockImplementation(() => {
+const getApiKeySpy = vi.spyOn(authStorage.keys, "get").mockImplementation(() => {
 	throw new Error("Mojeek search must not request API keys");
 });
-const resolverSpy = vi.spyOn(authStorage, "resolver").mockImplementation(() => {
+const resolverSpy = vi.spyOn(authStorage.keys, "resolver").mockImplementation(() => {
 	throw new Error("Mojeek search must not request credential resolvers");
 });
-const hasAuthSpy = vi.spyOn(authStorage, "hasAuth").mockImplementation(() => {
+const sourceSpy = vi.spyOn(authStorage.keys, "source").mockImplementation(() => {
 	throw new Error("Mojeek search must not check auth");
 });
 
 afterAll(() => {
 	getApiKeySpy.mockRestore();
 	resolverSpy.mockRestore();
-	hasAuthSpy.mockRestore();
+	sourceSpy.mockRestore();
 	authStorage.close();
 });
 

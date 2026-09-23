@@ -47,7 +47,7 @@ Example shapes:
   "description": "Use `for i := range n` instead of C-style counting loops",
   "astCondition": "for $I := 0; $I < $N; $I++ { $$$BODY }",
   "scope": ["tool:edit(*.go)", "tool:write(*.go)"],
-  "body": "Write `for i := range n { ... }` (Go 1.22+) instead of `for i := 0; i < n; i++`."
+  "body": "Write `for i := range n { … }` (Go 1.22+) instead of `for i := 0; i < n; i++`."
 }
 {
   "name": "no-unverified-test-claims",
