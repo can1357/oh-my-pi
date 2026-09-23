@@ -49,6 +49,7 @@ import { formatArtifactErrorNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { resolveInlineByteCapBudget } from "./output-meta";
 import { resolveToCwd } from "./path-utils";
+import { withPathHint } from "./path-hint";
 import { extractLeadingCdTarget, extractLiteralAndChainSegments, tokenizeShellSegments } from "./shell-tokenize";
 import { ToolAbortError } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
@@ -966,7 +967,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			cwdStat = await fs.promises.stat(commandCwd);
 		} catch (err) {
 			if (isEnoent(err)) {
-				throw new ToolError(`Working directory does not exist: ${commandCwd}`);
+				throw new ToolError(await withPathHint(`Working directory does not exist: ${commandCwd}`, commandCwd));
 			}
 			throw err;
 		}

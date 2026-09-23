@@ -19,6 +19,7 @@ import type { Skill } from "../extensibility/skills";
 import type { AgentRegistry } from "../registry/agent-registry";
 import { InternalUrlRouter, type LocalProtocolOptions } from "../internal-urls";
 import { ToolAbortError } from "./tool-errors";
+import { withPathHint } from "./path-hint";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
@@ -1458,7 +1459,9 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 	if (resolvedPathInputs.length > 1) {
 		const partition = await partitionExistingPaths(resolvedPathInputs, cwd, parseSearchPath);
 		if (partition.valid.length === 0) {
-			throw new ToolError(`Path not found: ${partition.missing.join(", ")}`);
+			throw new ToolError(
+				await withPathHint(`Path not found: ${partition.missing.join(", ")}`, partition.missing[0] ?? "", cwd),
+			);
 		}
 		effectivePaths = partition.valid;
 		missingPaths = partition.missing;
@@ -1501,7 +1504,7 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 		isDirectory = stat.isDirectory();
 	} catch {
 		const hint = opts.multipathStatHint && rawPaths.length > 1 ? opts.multipathStatHint : "";
-		throw new ToolError(`Path not found: ${scopePath}${hint}`);
+		throw new ToolError(await withPathHint(`Path not found: ${scopePath}${hint}`, searchPath));
 	}
 
 	return {
