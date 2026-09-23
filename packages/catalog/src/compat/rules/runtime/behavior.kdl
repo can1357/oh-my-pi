@@ -276,7 +276,6 @@ behavior {
 		alias "claude-opus-4-5" peer-id="claude-opus-4-5@20251101"
 		alias "claude-opus-4-6" peer-id="claude-opus-4-6@default"
 		alias "claude-sonnet-4-5" peer-id="claude-sonnet-4-5@20250929"
-		alias "claude-sonnet-4-6" peer-id="claude-sonnet-4-6@default"
 	}
 	// SuperGrok surfaces a few models under IDs that differ from their public
 	// xai equivalent, so the exact-id price mirror misses them.

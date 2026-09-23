@@ -636,6 +636,7 @@ collapse {
 	provider-alias "devin" "grok-4.6" "grok-4-6"
 	provider-alias "devin" "swe-1.7" "swe-1-7"
 	provider-alias "devin" "swe-1.7-lightning" "swe-1-7-lightning"
+	provider-alias "google-vertex" "claude-sonnet-4-6@default" "claude-sonnet-4-6"
 	variant-family "cursor" "cursor-grok-4.5" name="Grok 4.5" {
 		members "cursor-grok-4.5-low" "cursor-grok-4.5-medium" "cursor-grok-4.5-high"
 		route "low" "cursor-grok-4.5-low"

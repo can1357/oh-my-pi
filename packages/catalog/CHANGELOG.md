@@ -6,6 +6,10 @@
 
 - Added `org-scoped-identity` and `oauth-token-env` rule support for auth providers
 
+### Fixed
+
+- Fixed `google-vertex` Claude Sonnet 4.6 routing by mapping to bare publisher model ID `claude-sonnet-4-6` instead of `claude-sonnet-4-6@default` (which returns HTTP 404 on Vertex AI), while adding backward-compatible provider alias and stale cache migration for the legacy `@default` ID.
+
 ## [18.2.11] - 2026-09-23
 
 ### Added
