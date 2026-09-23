@@ -36,6 +36,7 @@ export const MacAppearanceObserver = nativeBindings.MacAppearanceObserver;
 export const NativeOAuthCallback = nativeBindings.NativeOAuthCallback;
 export const PowerAssertion = nativeBindings.PowerAssertion;
 export const Process = nativeBindings.Process;
+export const PsHost = nativeBindings.PsHost;
 export const PtySession = nativeBindings.PtySession;
 export const Shell = nativeBindings.Shell;
 export const TtyWriter = nativeBindings.TtyWriter;

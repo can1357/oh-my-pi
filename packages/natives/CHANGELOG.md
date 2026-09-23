@@ -6,6 +6,7 @@
 
 - Added `appleFmAvailability`, `appleFmGenerate`, and `appleFmCancel` native bindings
 - Added `Encoding.Jev` to `countTokens` for offline TypeSafe Jev 1.13 `state` input-token counts (request frame excluded), reconstructed from live API measurements
+- Added `PsHost`, a persistent PowerShell host sidecar with a shared runspace, streamed output, cancellation, and graceful process-tree shutdown.
 
 ### Fixed
 
