@@ -50,11 +50,6 @@ export const OPENAI_HEADER_VALUES = {
 	BETA_RESPONSES_WEBSOCKETS_V2: "responses_websockets=2026-02-06",
 	REMOTE_COMPACTION_V2: "remote_compaction_v2",
 	ORIGINATOR_CODEX: "omp",
-	/** Originator identity of the official Codex Desktop client, expected by the undocumented `/transcribe` endpoint. */
-	CODEX_DESKTOP: {
-		NAME: "Codex Desktop",
-		USER_AGENT: `Codex Desktop/${CODEX_CLIENT_VERSION}`,
-	},
 } as const;
 
 export const URL_PATHS = {
