@@ -227,6 +227,11 @@ export class ExtensionUiController {
 				await this.ctx.reloadTodos();
 				this.ctx.showStatus("Reloaded session");
 			},
+			refreshSkills: async () => {
+				await this.ctx.session.settings.reloadFromDisk();
+				await this.ctx.refreshSkillState();
+				this.ctx.ui.requestRender();
+			},
 			newSession: async options => {
 				await this.ctx.prepareSessionSwitch();
 				this.ctx.clearTransientSessionUi();
@@ -457,6 +462,11 @@ export class ExtensionUiController {
 				await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 				await this.ctx.reloadTodos();
 				this.ctx.showStatus("Reloaded session");
+			},
+			refreshSkills: async () => {
+				await this.ctx.session.settings.reloadFromDisk();
+				await this.ctx.refreshSkillState();
+				this.ctx.ui.requestRender();
 			},
 			newSession: async options => {
 				await this.ctx.prepareSessionSwitch();

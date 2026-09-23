@@ -4,6 +4,7 @@
 
 ### Added
 
+- Extension commands can refresh discovered skills and skill slash completions via `ctx.refreshSkills()` without rewriting the session file.
 - Added `omp login` command for terminal-based OAuth authentication, including automated model discovery refresh and browser-opening support
 - Enabled `org-scoped-identity` and `oauth-token-env` configuration parsing for authentication providers
 - Adopted namespaced `authStorage` API for CLI and session management

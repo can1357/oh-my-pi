@@ -5547,6 +5547,12 @@ export class AgentSession {
 		return this.#tools.refreshSkills();
 	}
 
+	/** Reloads settings from disk, then rediscovers skills. */
+	async refreshSkillsFromDisk(): Promise<void> {
+		await this.settings.reloadFromDisk();
+		await this.refreshSkills();
+	}
+
 	/**
 	 * Applies Code Mode at session startup: when the initial model activates
 	 * it (`codeMode` `on`, or `auto` matching a `code_mode_only` catalog flag),
@@ -7163,6 +7169,9 @@ export class AgentSession {
 			},
 			reload: async () => {
 				await this.reload();
+			},
+			refreshSkills: async () => {
+				await this.refreshSkillsFromDisk();
 			},
 			getSystemPrompt: () => this.systemPrompt,
 			setInterval: (callback, ms, ...args) => this.#fallbackTimers().setInterval(callback, ms, ...args),
