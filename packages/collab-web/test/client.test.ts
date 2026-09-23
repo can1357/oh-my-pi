@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import type {
 	AgentSnapshot,
 	AssistantMessage,
@@ -10,7 +10,7 @@ import type {
 	SubagentProgressPayload,
 	WireMessage,
 } from "@oh-my-pi/pi-wire";
-import { GuestClient } from "../src/lib/client";
+import { GuestClient, PAGE_BYTES, TAIL_BYTES } from "../src/lib/client";
 import { COLLAB_PROTO, encodeBase64Url } from "../src/lib/link";
 import { CollabSocket } from "../src/lib/socket";
 
@@ -428,5 +428,249 @@ describe("GuestClient frame apply", () => {
 		const after = client.getSnapshot();
 		expect(after.entries).not.toBe(before.entries);
 		expect(after.entries).toHaveLength(before.entries.length + 1);
+	});
+});
+
+describe("GuestClient tail-first sessions", () => {
+	const turn = (n: number): SessionEntry =>
+		messageEntry(`t${n}`, { role: "user", content: `Turn ${n}`, timestamp: n });
+
+	function tailWelcome(entryCount: number, startId: string | null, hasEarlier: boolean): HostFrame {
+		return {
+			t: "welcome",
+			proto: COLLAB_PROTO,
+			header: HEADER,
+			state: STATE,
+			agents: AGENTS,
+			entryCount,
+			history: { v: 1, startId, hasEarlier },
+		};
+	}
+
+	interface Harness {
+		client: GuestClient;
+		sent: GuestFrame[];
+		socket: () => CollabSocket;
+	}
+
+	/** A client whose socket never touches the network; tests drive its (re)connects and closes. */
+	function harness(): Harness {
+		const sent: GuestFrame[] = [];
+		let socket: CollabSocket | null = null;
+		vi.spyOn(CollabSocket.prototype, "send").mockImplementation((frame: GuestFrame) => {
+			sent.push(frame);
+		});
+		vi.spyOn(CollabSocket.prototype, "connect").mockImplementation(function (this: CollabSocket) {
+			socket = this;
+		});
+		vi.spyOn(CollabSocket.prototype, "close").mockImplementation(() => {});
+		const client = new GuestClient(LINK, "tester");
+		client.connect();
+		return {
+			client,
+			sent,
+			socket: () => {
+				if (socket === null) throw new Error("client never connected");
+				return socket;
+			},
+		};
+	}
+
+	/** A live tail guest holding `t{first}..t{last}`, with earlier history on the host when `first > 0`. */
+	function liveTail(first: number, last: number): Harness {
+		const h = harness();
+		h.socket().onOpen?.();
+		const tail: SessionEntry[] = [];
+		for (let n = first; n <= last; n++) tail.push(turn(n));
+		h.client.applyFrameForTest(tailWelcome(tail.length, tail[0]?.id ?? null, first > 0));
+		h.client.applyFrameForTest(snapshotChunk(tail));
+		return h;
+	}
+
+	function requests<T extends "fetch-history" | "fetch-value">(
+		sent: readonly GuestFrame[],
+		t: T,
+	): Extract<GuestFrame, { t: T }>[] {
+		return sent.filter((frame): frame is Extract<GuestFrame, { t: T }> => frame.t === t);
+	}
+
+	const ids = (client: GuestClient) => client.getSnapshot().entries.map(entry => entry.id);
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+		vi.useRealTimers();
+	});
+
+	it("joins with a tail and pages back from the welcome's cursor", () => {
+		const { client, sent, socket } = harness();
+		socket().onOpen?.();
+		expect(sent[0]).toMatchObject({ t: "hello", snapshot: { mode: "tail", maxBytes: TAIL_BYTES } });
+		client.applyFrameForTest(tailWelcome(2, "t7", true));
+		client.applyFrameForTest(snapshotChunk([turn(7), turn(8)]));
+
+		client.fetchHistory();
+		client.fetchHistory(); // one page in flight at a time
+		expect(requests(sent, "fetch-history")).toMatchObject([{ before: "t7", maxBytes: PAGE_BYTES }]);
+	});
+
+	it("never asks an old host (no welcome.history) for history", () => {
+		const { client, sent, socket } = harness();
+		socket().onOpen?.();
+		client.applyFrameForTest(welcomeFrame(1));
+		client.applyFrameForTest(snapshotChunk([turn(0)]));
+		expect(client.getSnapshot().history).toBeNull();
+
+		client.fetchHistory();
+		expect(requests(sent, "fetch-history")).toEqual([]);
+	});
+
+	it("prepends a multi-frame page in one commit, dropping rows it repeats", () => {
+		const { client, sent } = liveTail(5, 6);
+		client.fetchHistory();
+		const { reqId } = requests(sent, "fetch-history")[0];
+		const published = new Set<readonly SessionEntry[]>();
+		client.subscribe(() => published.add(client.getSnapshot().entries));
+
+		client.applyFrameForTest({ t: "history", reqId, entries: [turn(3), turn(4)], final: false });
+		client.applyFrameForTest({ t: "entry", entry: turn(7) });
+		client.applyFrameForTest({
+			t: "history",
+			reqId,
+			entries: [turn(5)],
+			final: true,
+			startId: "t3",
+			hasEarlier: true,
+		});
+
+		expect(ids(client)).toEqual(["t3", "t4", "t5", "t6", "t7"]);
+		expect(client.getSnapshot().history).toEqual({ startId: "t3", hasEarlier: true, loading: false, error: null });
+		expect(published.size).toBe(2); // the live entry, then the whole page
+	});
+
+	it("stops paging when a page adds nothing but claims more history", () => {
+		const { client, sent } = liveTail(5, 6);
+		client.fetchHistory();
+		const { reqId } = requests(sent, "fetch-history")[0];
+		client.applyFrameForTest({ t: "history", reqId, entries: [turn(5)], final: true, hasEarlier: true });
+		expect(client.getSnapshot().history).toMatchObject({
+			loading: false,
+			error: "the host sent no earlier messages",
+		});
+	});
+
+	it("times out a stalled page, re-arming on each frame, and ignores its late reply", () => {
+		vi.useFakeTimers();
+		const { client, sent } = liveTail(5, 6);
+		client.fetchHistory();
+		const { reqId } = requests(sent, "fetch-history")[0];
+
+		vi.advanceTimersByTime(29_999);
+		client.applyFrameForTest({ t: "history", reqId, entries: [turn(4)], final: false });
+		vi.advanceTimersByTime(29_999);
+		expect(client.getSnapshot().history?.loading).toBe(true);
+		vi.advanceTimersByTime(1);
+		expect(client.getSnapshot().history).toMatchObject({
+			loading: false,
+			error: "timed out loading earlier messages",
+		});
+
+		client.applyFrameForTest({
+			t: "history",
+			reqId,
+			entries: [turn(3)],
+			final: true,
+			startId: "t3",
+			hasEarlier: true,
+		});
+		expect(ids(client)).toEqual(["t5", "t6"]);
+	});
+
+	it("re-joins for a fresh tail when the cursor went stale", async () => {
+		const { client, sent } = liveTail(5, 6);
+		const transcript = client.fetchTranscript("Sub1", 0);
+		client.fetchHistory();
+		const { reqId } = requests(sent, "fetch-history")[0];
+		client.applyFrameForTest({ t: "history", reqId, entries: [], final: true, error: "stale" });
+		expect(sent.filter(frame => frame.t === "hello")).toHaveLength(2);
+		expect(ids(client)).toEqual(["t5", "t6"]);
+
+		const branch = messageEntry("b1", { role: "user", content: "other branch", timestamp: 9 });
+		client.applyFrameForTest(tailWelcome(1, "b1", false));
+		// The host's re-hello discarded this guest's queued transcript replies.
+		expect(await transcript).toBeNull();
+		client.applyFrameForTest(snapshotChunk([branch]));
+		expect(client.getSnapshot().entries).toEqual([branch]);
+		expect(client.getSnapshot().history).toEqual({ startId: "b1", hasEarlier: false, loading: false, error: null });
+	});
+
+	it("keeps the replica live when a stale-cursor rejoin is refused", () => {
+		vi.useFakeTimers();
+		const { client, sent } = liveTail(5, 6);
+		client.fetchHistory();
+		const { reqId } = requests(sent, "fetch-history")[0];
+		client.applyFrameForTest({ t: "history", reqId, entries: [], final: true, error: "stale" });
+		client.applyFrameForTest({ t: "error", message: "Session transition in progress; join again when it completes" });
+		vi.advanceTimersByTime(30_000);
+
+		const snap = client.getSnapshot();
+		expect(snap.phase).toBe("live");
+		expect(ids(client)).toEqual(["t5", "t6"]);
+		expect(snap.history).toMatchObject({ loading: false, error: "timed out reloading the latest messages" });
+	});
+
+	it("fails a pending page on close, and ignores it once a new welcome lands", () => {
+		const { client, sent, socket } = liveTail(3, 5);
+		client.fetchHistory();
+		const { reqId } = requests(sent, "fetch-history")[0];
+		socket().onClose?.("network lost", true);
+		expect(client.getSnapshot().history).toMatchObject({ loading: false, error: null });
+
+		socket().onOpen?.();
+		client.applyFrameForTest(tailWelcome(3, "t4", true));
+		client.applyFrameForTest({
+			t: "history",
+			reqId,
+			entries: [turn(2)],
+			final: true,
+			startId: "t2",
+			hasEarlier: true,
+		});
+		client.applyFrameForTest(snapshotChunk([turn(4), turn(5), turn(6)]));
+		expect(ids(client)).toEqual(["t4", "t5", "t6"]);
+		expect(client.getSnapshot().history?.startId).toBe("t4");
+	});
+
+	it("survives a host outage whose retry backoff outlasts the welcome timeout", () => {
+		// Each retry opens a socket the relay closes at once (no such room).
+		vi.useFakeTimers();
+		const { client, socket } = liveTail(3, 5);
+		socket().onClose?.("room closed", true);
+		for (const backoff of [1_000, 20_000, 35_000, 35_000]) {
+			vi.advanceTimersByTime(backoff);
+			socket().onOpen?.();
+			socket().onClose?.("no such room", true);
+		}
+		vi.advanceTimersByTime(60_000);
+		expect(client.getSnapshot().phase).toBe("reconnecting");
+
+		socket().onOpen?.();
+		client.applyFrameForTest(tailWelcome(1, "t5", true));
+		client.applyFrameForTest(snapshotChunk([turn(5)]));
+		expect(client.getSnapshot().phase).toBe("live");
+	});
+
+	it("ends a first join that no host welcomes within the timeout, however often the socket reopens", () => {
+		vi.useFakeTimers();
+		const { client, socket } = harness();
+		for (let i = 0; i < 3; i++) {
+			vi.advanceTimersByTime(9_000);
+			socket().onOpen?.();
+			socket().onClose?.("network lost", true);
+		}
+		vi.advanceTimersByTime(3_000);
+		expect(client.getSnapshot()).toMatchObject({
+			phase: "ended",
+			endedReason: "timed out waiting for the host's welcome",
+		});
 	});
 });

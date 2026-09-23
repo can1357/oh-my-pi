@@ -138,6 +138,7 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 		}),
 		[agentIds],
 	);
+	const loadEarlier = useCallback(() => client.fetchHistory(), [client]);
 
 	// Auto-open the rail the first time a subagent appears.
 	useEffect(() => {
@@ -174,6 +175,8 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 							working={snap.working}
 							host={toolHost}
 							phase={snap.phase}
+							history={snap.history}
+							onLoadEarlier={loadEarlier}
 						/>
 					</div>
 				</section>

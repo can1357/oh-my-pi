@@ -3,11 +3,13 @@ import type { AssistantMessage, SessionEntry } from "@oh-my-pi/pi-wire";
 import { renderToStaticMarkup } from "react-dom/server";
 import "./transcript-dom-shim";
 import {
+	captureScrollAnchor,
 	followTranscriptTail,
+	restoreScrollAnchor,
 	Transcript,
 	updateTranscriptTailLock,
 } from "../src/components/transcript/Transcript";
-import type { ActiveTool } from "../src/lib/client";
+import type { ActiveTool, HistoryState } from "../src/lib/client";
 
 const TOOL_CALL_ID = "call-running-tool";
 const TOOL_NAME = "probe_tool";
@@ -173,22 +175,83 @@ describe("Transcript tail-follow scroll operations", () => {
 	});
 });
 
+function userEntries(count: number): SessionEntry[] {
+	return Array.from({ length: count }, (_, i) => ({
+		type: "message",
+		id: `m${i}`,
+		parentId: i === 0 ? null : `m${i - 1}`,
+		timestamp: "2026-07-15T00:00:00Z",
+		message: { role: "user", content: `message-${i}-end`, timestamp: i },
+	}));
+}
+
 describe("Transcript windowing", () => {
 	it("mounts only the newest 100 entries and offers the rest", () => {
-		const entries: SessionEntry[] = Array.from({ length: 250 }, (_, i) => ({
-			type: "message",
-			id: `m${i}`,
-			parentId: i === 0 ? null : `m${i - 1}`,
-			timestamp: "2026-07-15T00:00:00Z",
-			message: { role: "user", content: `message-${i}-end`, timestamp: i },
-		}));
-
-		const html = renderTranscript({ entries, working: false });
+		const html = renderTranscript({ entries: userEntries(250), working: false });
 
 		expect(countElements(html, ".tr-row--user")).toBe(100);
 		expect(html).toContain("message-249-end");
 		expect(html).toContain("message-150-end");
 		expect(html).not.toContain("message-149-end");
 		expect(html).toContain("show 150 earlier");
+	});
+});
+
+describe("Transcript earlier history", () => {
+	const idle: HistoryState = { startId: "m0", hasEarlier: true, loading: false, error: null };
+	const render = (history: HistoryState | null, entries: SessionEntry[] = []) =>
+		renderToStaticMarkup(
+			<Transcript
+				entries={entries}
+				stream={null}
+				streamDone
+				activeTools={new Map()}
+				working={false}
+				history={history}
+				onLoadEarlier={() => {}}
+			/>,
+		);
+
+	it("offers the host's earlier history only once every held entry is mounted", () => {
+		expect(countElements(render(idle), ".tr-history button:not([disabled])")).toBe(1);
+		expect(countElements(render({ ...idle, loading: true }), ".tr-history button[disabled] .tv-spin")).toBe(1);
+		expect(countElements(render({ ...idle, hasEarlier: false }), ".tr-history")).toBe(0);
+		expect(countElements(render(null), ".tr-history")).toBe(0);
+
+		const held = render(idle, userEntries(250));
+		expect(held).toContain("show 150 earlier");
+		expect(countElements(held, ".tr-history")).toBe(0);
+	});
+
+	it("keeps the reader's row in place when a page is prepended", () => {
+		// Rows 100px tall, stacked from y = 0 under a viewport scrolled by `scrollTop`.
+		const view = {
+			ids: Array.from({ length: 10 }, (_, i) => `tail${i}`),
+			scrollTop: 150,
+			clientHeight: 300,
+			get scrollHeight() {
+				return view.ids.length * 100;
+			},
+			getBoundingClientRect: () => ({ top: 0 }),
+			querySelectorAll: () =>
+				view.ids.map((id, i) => ({
+					getAttribute: () => id,
+					getBoundingClientRect: () => ({ top: i * 100 - view.scrollTop, bottom: (i + 1) * 100 - view.scrollTop }),
+				})),
+		};
+		const lock = { current: true };
+		updateTranscriptTailLock(view, lock);
+
+		const anchor = captureScrollAnchor(view);
+		expect(anchor).toEqual({ id: "tail1", offset: -50 });
+		view.ids = ["page0", "page1", ...view.ids];
+		expect(anchor !== null && restoreScrollAnchor(view, anchor)).toBe(true);
+		expect(view.scrollTop).toBe(350);
+		followTranscriptTail(view, lock);
+		expect(view.scrollTop).toBe(350);
+
+		// A fresh tail that no longer holds the row reports it gone.
+		view.ids = view.ids.slice(5);
+		expect(anchor !== null && restoreScrollAnchor(view, anchor)).toBe(false);
 	});
 });

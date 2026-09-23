@@ -19,6 +19,30 @@
 	font-size: 12px;
 }
 
+/* ---- earlier history (tail joins) ---- */
+
+.tr-history {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+}
+
+.tr-history-sentinel {
+	align-self: stretch;
+	height: 1px;
+}
+
+.tr-history-err {
+	margin-bottom: 10px;
+	color: var(--err);
+	font-family: var(--font-mono);
+	font-size: 11px;
+}
+
+.tr-history-err--retrying {
+	visibility: hidden;
+}
+
 /* ---- rows ---- */
 
 .tr-row {
@@ -207,7 +231,10 @@
 }
 
 .tr-earlier {
-	display: block;
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	width: fit-content;
 	margin: 4px auto 10px;
 	padding: 4px 12px;
 	border: 1px solid var(--border);
@@ -221,9 +248,13 @@
 	cursor: pointer;
 }
 
-.tr-earlier:hover {
+.tr-earlier:hover:not(:disabled) {
 	color: var(--fg-muted);
 	border-color: var(--border-strong);
+}
+
+.tr-earlier:disabled {
+	cursor: default;
 }
 
 .tr-shimmer {
