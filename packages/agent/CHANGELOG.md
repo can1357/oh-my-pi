@@ -531,9 +531,6 @@
 ### Fixed
 
 - Fixed background job completions interrupting foreground Bash and eval calls, which could cause those calls to be repeatedly moved into the background.
-### Changed
-
-- Agent loop prompt-cache policy now follows declared OpenAI model capabilities ([#12880](https://github.com/can1357/oh-my-pi/pull/12880) by [@ZenAlexa](https://github.com/ZenAlexa)).
 
 ## [18.2.9] - 2026-09-22
 

@@ -147,16 +147,6 @@ export const STREAM_INTERRUPTED_AFTER_CONTENT_STOP_DETAIL = "stream_interrupted_
 /** Sentinel returned by the abort race in `streamAssistantResponse`. */
 const ABORTED: unique symbol = Symbol("agent-loop-aborted");
 
-function hasAutomaticOpenAIPromptCache(model: Model): boolean {
-	if (model.api !== "openai-completions" && model.api !== "openai-responses") return false;
-	const compat = model.compat;
-	return (
-		compat !== undefined &&
-		"supportsPromptCacheBreakpoints" in compat &&
-		compat.supportsPromptCacheBreakpoints === true
-	);
-}
-
 /**
  * Cap on consecutive re-samples triggered by a non-terminal stop
  * (`stopDetails.type === "pause_turn"`) without an intervening tool call. Each
@@ -2355,11 +2345,6 @@ async function streamAssistantResponse(
 			onProviderStart?.();
 			let response = await streamFunction(model, llmContext, {
 				...config,
-				promptCache:
-					config.promptCache ??
-					(hasAutomaticOpenAIPromptCache(model)
-						? { mode: "explicit", breakpoint: "latest-stable-message" }
-						: undefined),
 				apiKey,
 				metadata: resolvedMetadata,
 				toolChoice: effectiveToolChoice,

@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### Breaking Changes
+### Changed
+
+- Models configuration accepts `supportsPromptCacheBreakpoints` for custom OpenAI-compatible gateways ([#12880](https://github.com/can1357/oh-my-pi/pull/12880) by [@ZenAlexa](https://github.com/ZenAlexa)).
+
+## [18.2.11] - 2026-09-23
 
 - Removed the `cwd` parameter from the `bash` tool; a leading `cd <path> && …` still selects the working directory
 - Removed the `cwd` argument of the eval `sh` helper; every `sh` command starts in the session cwd (use `cd <path> && …` inside the command)
@@ -21,13 +26,6 @@
 - Fixed browser `tab.fill` timing out on pages whose animation frames stall.
 - Fixed the first LSP diagnostics request returning no results while a newly started language server is still analyzing.
 - `/shake thinking` now reports the number of tokens freed.
-### Changed
-
-- Models configuration accepts `supportsPromptCacheBreakpoints` for custom OpenAI-compatible gateways ([#12880](https://github.com/can1357/oh-my-pi/pull/12880) by [@ZenAlexa](https://github.com/ZenAlexa)).
-- Non-interrupting warnings are now delivered as aside messages when judgment verdicts indicate rule violations
-- Optimized TTSR registry to prefilter judged rules before triggering model calls, minimizing judgment costs
-- Extensions load faster on warm starts: their dependencies are no longer re-parsed on every launch ([#12908](https://github.com/can1357/oh-my-pi/pull/12908) by [@H4vC](https://github.com/H4vC)).
-- The first highlighted code block, bash preview, or diff no longer stalls the screen while syntax highlighting initializes ([#12908](https://github.com/can1357/oh-my-pi/pull/12908) by [@H4vC](https://github.com/H4vC)).
 
 ## [18.2.10] - 2026-09-22
 
