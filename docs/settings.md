@@ -479,6 +479,37 @@ A value of `-1` means "use the provider/model default" — `omp` does not send t
 | `tier.advisor`      | enum   | `none`    | `inherit`, `none`, `auto`, `default`, `flex`, `scale`, `priority`. Applied to the advisor model's family.                                                                                                                                                                      |
 | `personality`       | enum   | `default` | `default`, `friendly`, `pragmatic`, `none`. A user-level `<agent dir>/PERSONALITY.md` replaces the selected preset's text; `none` still omits the block. See [system-prompt-customization](./system-prompt-customization.md).                                                  |
 
+### Fast mode
+
+`/fast` opens four actions. Use Up/Down to choose, Space or Enter to apply and
+close, or Escape to cancel. Headless callers can use the explicit text forms:
+
+| Command | Scope |
+| --- | --- |
+| `/fast session` | This conversation and all its subagents, including nested and already-running agents. A resumed conversation keeps its selection until Off. |
+| `/fast provider` | Every request whose exact `model.provider` matches the current model's provider, across existing and future sessions. For example, `openai-codex` and `openai` are separate providers even though they share a tier family. |
+| `/fast global` | Existing and future sessions across providers, wherever the request model supports fast processing. |
+| `/fast off` | Clear every session, provider, and global selection and suppress base `priority` settings. Non-priority settings such as `flex` are preserved. |
+
+Enable actions are additive: selecting session scope never turns off another
+session or removes provider/global selections. `/fast status` reports all
+applicable scopes and whether fast processing is active.
+
+Selections are shared through `fast-mode-scopes.json` in the profile-independent
+OMP config root (normally `~/.omp`, or the root selected by `PI_CONFIG_DIR`).
+They apply to subsequent requests, not streams already in flight. Scoped fast
+mode overrides base service-tier settings, including `tier.subagent`,
+`task.agentServiceTierOverrides`, and `tier.advisor`; Off also prevents their
+`priority` values from re-enabling fast mode until another scoped enable action.
+The separate `providers.fireworksTier` control remains independent.
+
+The native model/status line shows the broadest applicable scope beside the
+existing lightning indicator: `session`, `provider`, or `global`. The lightning
+bolt still reflects actual fast processing; a selected scope can remain enabled
+but inactive on an unsupported model or after Anthropic rejects fast processing.
+Explicitly enabling an applicable scope re-arms the existing Anthropic retry
+behavior without re-arming unrelated sessions.
+
 ### Retry and fallback
 
 ```yaml

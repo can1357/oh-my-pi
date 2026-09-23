@@ -321,6 +321,13 @@ export interface ToolSession {
 	trackEvalExecution?<T>(execution: Promise<T>, abortController: AbortController): Promise<T>;
 	/** Get tool-state session ID (distinct from the owning session for advisors). */
 	getSessionId?: () => string | null;
+	/**
+	 * Owning top-level conversation ID for session-scoped fast mode. Subagent
+	 * sessions inherit the root conversation's ID so every descendant resolves
+	 * the same scoped state; distinct from {@link getSessionId} (tool-state
+	 * identity) and provider session/cache IDs.
+	 */
+	getFastModeSessionId?: () => string;
 	/** Get Hindsight runtime state for this agent session. */
 	getHindsightSessionState?: () => HindsightSessionState | undefined;
 	/** Get Mnemopi runtime state for this agent session. */

@@ -1301,6 +1301,7 @@ export async function runRpcMode(
 					fastModeEnabled: session.isFastModeEnabled(),
 					tokensPerSecond: calculateTokensPerSecond(session.messages, session.isStreaming),
 					fastModeActive: session.isFastModeActive(),
+					fastModeScopes: session.fastModeStatus().scopes,
 					messageCount: session.messages.length,
 					systemPrompt: session.systemPrompt,
 					dumpTools: session.agent.state.tools.map(tool => ({
@@ -1315,6 +1316,11 @@ export async function runRpcMode(
 			}
 
 			case "set_fast_mode": {
+				// Scoped action form takes precedence when both fields arrive.
+				if ("action" in command) {
+					session.setFastModeAction(command.action);
+					return success(id, "set_fast_mode", session.fastModeStatus());
+				}
 				const supported = session.setFastMode(command.enabled);
 				if (command.enabled && !supported) {
 					return error(id, "set_fast_mode", "Fast mode is unavailable for the current model.");

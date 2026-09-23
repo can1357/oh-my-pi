@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in Space confirmation for native hook selectors and inline fast-mode scope labels beside the model's lightning indicator ([#12975](https://github.com/can1357/oh-my-pi/pull/12975) by [@fredluz](https://github.com/fredluz)).
+
 ### Changed
 
 - Updated model hub and oauth selector components to use namespaced `authStorage` API

@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import type { FastModeAction } from "../config/fast-mode";
 import {
 	formatModelString,
 	getModelMatchPreferences,
@@ -68,9 +69,27 @@ async function runWithDetachedModeDraft(
 	}
 }
 
-/** `/fast status` label for the active model: "on" when its family is priority, else "off". */
+/** `/fast status` label: "on" when priority is realized, "enabled (inactive)"
+ *  when a selection is armed but not realized, "off" otherwise; enabled scopes
+ *  are listed so multiple stacked selections stay visible. */
 function formatFastModeStatus(session: AgentSession): string {
-	return session.isFastModeEnabled() ? "on" : "off";
+	const status = session.fastModeStatus();
+	const state = status.active ? "on" : status.enabled ? "enabled (inactive)" : "off";
+	return status.scopes.length > 0 ? `${state} (${status.scopes.join(", ")})` : state;
+}
+
+/** Operator feedback after applying a scoped `/fast` action. */
+function formatFastModeActionMessage(action: FastModeAction, session: AgentSession): string {
+	switch (action) {
+		case "session":
+			return "Fast mode enabled for this session.";
+		case "provider":
+			return `Fast mode enabled for provider ${session.model?.provider ?? "unknown"}.`;
+		case "global":
+			return "Fast mode enabled globally.";
+		case "off":
+			return "Fast mode off everywhere.";
+	}
 }
 
 /** `/extended-context status` label for the premium long-context window setting. */
@@ -417,61 +436,37 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "fast",
 		icon: "fast",
-		description: "Toggle priority service tier (OpenAI service_tier=priority, Anthropic speed=fast)",
-		acpDescription: "Toggle fast mode",
-		acpInputHint: "[on|off|status]",
+		description: "Priority service tier scoped to this session, this provider, or globally",
+		acpDescription: "Select fast mode scope",
+		acpInputHint: "[session|provider|global|off|status]",
 		subcommands: [
-			{ name: "on", description: "Enable fast mode" },
-			{ name: "off", description: "Disable fast mode" },
+			{ name: "session", description: "Enable for this session" },
+			{ name: "provider", description: "Enable for this provider" },
+			{ name: "global", description: "Enable globally" },
+			{ name: "off", description: "Off everywhere" },
 			{ name: "status", description: "Show fast mode status" },
 		],
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => `Fast: ${formatFastModeStatus(runtime.ctx.session)}`,
 		handle: async (command, runtime) => {
-			const arg = command.args.toLowerCase();
-			if (!arg || arg === "toggle") {
-				const enabled = runtime.session.toggleFastMode();
-				await runtime.output(`Fast mode ${enabled ? "enabled" : "disabled"}.`);
-				return commandConsumed();
-			}
-			if (arg === "on") {
-				const supported = runtime.session.setFastMode(true);
-				await runtime.output(supported ? "Fast mode enabled." : "Fast mode is unavailable for the current model.");
-				return commandConsumed();
-			}
-			if (arg === "off") {
-				runtime.session.setFastMode(false);
-				await runtime.output("Fast mode disabled.");
+			const arg = command.args.trim().toLowerCase();
+			if (arg === "session" || arg === "provider" || arg === "global" || arg === "off") {
+				runtime.session.setFastModeAction(arg);
+				await runtime.output(formatFastModeActionMessage(arg, runtime.session));
 				return commandConsumed();
 			}
 			if (arg === "status") {
 				await runtime.output(`Fast mode is ${formatFastModeStatus(runtime.session)}.`);
 				return commandConsumed();
 			}
-			return usage("Usage: /fast [on|off|status]", runtime);
+			return usage("Usage: /fast [session|provider|global|off|status]", runtime);
 		},
-		handleTui: (command, runtime) => {
+		handleTui: async (command, runtime) => {
 			const arg = command.args.trim().toLowerCase();
-			if (!arg || arg === "toggle") {
-				const enabled = runtime.ctx.session.toggleFastMode();
+			if (arg === "session" || arg === "provider" || arg === "global" || arg === "off") {
+				runtime.ctx.session.setFastModeAction(arg);
 				refreshStatusLine(runtime.ctx);
-				runtime.ctx.showStatus(`Fast mode ${enabled ? "enabled" : "disabled"}.`);
-				runtime.ctx.editor.setText("");
-				return;
-			}
-			if (arg === "on") {
-				const supported = runtime.ctx.session.setFastMode(true);
-				refreshStatusLine(runtime.ctx);
-				runtime.ctx.showStatus(
-					supported ? "Fast mode enabled." : "Fast mode is unavailable for the current model.",
-				);
-				runtime.ctx.editor.setText("");
-				return;
-			}
-			if (arg === "off") {
-				runtime.ctx.session.setFastMode(false);
-				refreshStatusLine(runtime.ctx);
-				runtime.ctx.showStatus("Fast mode disabled.");
+				runtime.ctx.showStatus(formatFastModeActionMessage(arg, runtime.ctx.session));
 				runtime.ctx.editor.setText("");
 				return;
 			}
@@ -480,8 +475,54 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				runtime.ctx.editor.setText("");
 				return;
 			}
-			runtime.ctx.showStatus("Usage: /fast [on|off|status]");
+			if (arg) {
+				runtime.ctx.showStatus("Usage: /fast [session|provider|global|off|status]");
+				runtime.ctx.editor.setText("");
+				return;
+			}
 			runtime.ctx.editor.setText("");
+			const provider = runtime.ctx.session.model?.provider;
+			const choices: ReadonlyArray<{ label: string; description: string; action: FastModeAction }> = [
+				{
+					label: "Enable for this session",
+					description: "This conversation and its subagents, until Off",
+					action: "session",
+				},
+				{
+					label: provider ? `Enable for this provider: ${provider}` : "Enable for this provider",
+					description: "Applies by each request's model.provider; persists",
+					action: "provider",
+				},
+				{
+					label: "Enable globally",
+					description: "Every session; persists",
+					action: "global",
+				},
+				{
+					label: "Off everywhere",
+					description: "Clears all scopes and suppresses prior priority settings",
+					action: "off",
+				},
+			];
+			const scope = runtime.ctx.session.fastModeScope();
+			const selected = await runtime.ctx.showHookSelector(
+				"Fast mode",
+				choices.map(choice => ({ label: choice.label, description: choice.description })),
+				{
+					spaceSelects: true,
+					initialIndex: Math.max(
+						0,
+						choices.findIndex(choice => choice.action === scope),
+					),
+					helpText: "up/down navigate  space/enter apply  esc cancel",
+				},
+			);
+			if (selected === undefined) return;
+			const choice = choices.find(entry => entry.label === selected);
+			if (!choice) return;
+			runtime.ctx.session.setFastModeAction(choice.action);
+			refreshStatusLine(runtime.ctx);
+			runtime.ctx.showStatus(formatFastModeActionMessage(choice.action, runtime.ctx.session));
 		},
 	},
 	{

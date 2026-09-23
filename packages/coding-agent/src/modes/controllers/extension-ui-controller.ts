@@ -979,6 +979,7 @@ export class ExtensionUiController {
 					selectionMarker: dialogOptions?.selectionMarker,
 					checkedIndices: dialogOptions?.checkedIndices,
 					markableCount: dialogOptions?.markableCount,
+					spaceSelects: dialogOptions?.spaceSelects,
 					maxVisible,
 					slider: extra?.slider,
 				},

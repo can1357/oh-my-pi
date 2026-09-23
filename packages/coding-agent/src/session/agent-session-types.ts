@@ -171,6 +171,13 @@ export interface AgentSessionConfig {
 	planYolo?: PlanYolo;
 	/** Initial per-family service tiers for the live session. */
 	serviceTierByFamily?: ServiceTierByFamily;
+	/**
+	 * Owning conversation id for `/fast` session-scope resolution. Subagents
+	 * inherit the root conversation's id so a session-scoped selection covers
+	 * every descendant; when unset the session resolves against its own
+	 * {@link AgentSession.sessionId}.
+	 */
+	fastModeSessionId?: string;
 	/** Prompt templates for expansion. */
 	promptTemplates?: PromptTemplate[];
 	/** File-based slash commands for expansion. */

@@ -164,6 +164,9 @@ export class TanCommandController {
 							agentDisplayName: "tan",
 							parentTaskPrefix: cloneId,
 							parentAgentId: ownerId,
+							// The clone is a descendant of this conversation: it resolves the
+							// owning conversation's session-scoped fast mode, not its own fork id.
+							fastModeSessionId: session.fastModeSessionId,
 							agentRegistry,
 							disableExtensionDiscovery: true,
 							// `[]` is truthy and would make the child pick bindPreparedExtensions([])

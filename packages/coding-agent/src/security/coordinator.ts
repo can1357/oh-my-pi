@@ -79,6 +79,8 @@ export interface SecurityCoordinatorHost {
 	modelRegistry: ModelRegistry;
 	activeModel?: Model;
 	sessionId?: string;
+	/** Owning top-level conversation ID for session-scoped fast mode, when the host runs inside one. */
+	fastModeSessionId?: string;
 	agentId?: string;
 	asyncJobManager?: AsyncJobManager;
 }
@@ -244,6 +246,7 @@ async function createDefaultSecuritySession(input: SecurityScanSessionFactoryInp
 		authStorage: input.host.authStorage,
 		modelRegistry: input.host.modelRegistry,
 		settings: scanSettings,
+		fastModeSessionId: input.host.fastModeSessionId,
 		model: input.model,
 		getApiKey: createSecurityAuthResolver({
 			authStorage: input.host.authStorage,

@@ -178,6 +178,10 @@ export function createPersistedSubagentReviverFactory(
 						: ref.displayName,
 				parentTaskPrefix: ref.id,
 				parentAgentId: ref.parentId,
+				// Cold-revived descendants keep the owning conversation's session-scope
+				// identity so a parked worker revived after a process restart still
+				// resolves the root conversation's fast-mode state.
+				fastModeSessionId: ctx.session.fastModeSessionId,
 				expectedAgentRef: expectedRef,
 				taskDepth,
 				toolNames: revivedToolNames,

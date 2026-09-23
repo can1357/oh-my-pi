@@ -41,7 +41,7 @@ advisor:
 
 Model selectors use normal role/model resolution, including provider-prefixed ids, canonical ids, fallback lists, and optional thinking suffixes.
 
-`tier.advisor` controls service tier for all advisors. It defaults to `none` (standard processing); `inherit` follows the primary's live per-family tier, including `/fast` changes. Concrete values (`auto`, `default`, `flex`, `scale`, `priority`) are applied only when the advisor model's provider family supports them.
+`tier.advisor` controls the base service tier for all advisors. It defaults to `none` (standard processing); `inherit` follows the primary's live per-family tier. Concrete values (`auto`, `default`, `flex`, `scale`, `priority`) are applied only when the advisor model's provider family supports them. Native `/fast` scopes override this base setting on each request, including when it is `none`: session scope includes every advisor in the owning conversation, provider scope matches each advisor's actual `model.provider`, and global scope applies everywhere supported. `/fast off` clears all scopes and suppresses base `priority` without suppressing `flex`.
 
 ### Headless runs
 

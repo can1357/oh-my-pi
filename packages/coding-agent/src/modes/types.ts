@@ -88,7 +88,8 @@ export interface InteractiveModeInitOptions {
 	recentSessions?: Promise<RecentSession[] | undefined>;
 }
 
-export type InteractiveSelectorDialogOptions = ExtensionUIDialogOptions & Pick<HookSelectorOptions, "disabledIndices">;
+export type InteractiveSelectorDialogOptions = ExtensionUIDialogOptions &
+	Pick<HookSelectorOptions, "disabledIndices" | "spaceSelects">;
 
 export interface RenderSessionContextOptions {
 	updateFooter?: boolean;

@@ -41,6 +41,7 @@ function coordinatorFor(runtime: SlashCommandRuntime) {
 		modelRegistry: runtime.session.modelRegistry,
 		activeModel: runtime.session.model,
 		sessionId: runtime.session.sessionId,
+		fastModeSessionId: runtime.session.fastModeSessionId,
 		agentId: runtime.session.getAgentId(),
 		asyncJobManager: runtime.session.asyncJobManager,
 	});

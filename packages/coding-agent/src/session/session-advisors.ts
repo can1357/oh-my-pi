@@ -375,6 +375,7 @@ export interface SessionAdvisorsHost {
 	hasPendingNextTurnMessages(): boolean;
 	convertToLlmForSideRequest(messages: AgentMessage[]): Message[];
 	effectiveServiceTier(model: Model): ServiceTier | undefined;
+	resolveFastModeServiceTier(model: Model, baseTier: ServiceTier | undefined): ServiceTier | undefined;
 	resolveContextPromotionTarget(
 		currentModel: Model,
 		contextWindow: number,
@@ -969,7 +970,9 @@ export class SessionAdvisors {
 		// on standard processing; "inherit" tracks the session's live per-family
 		// tiers per request (like the main agent, including /fast toggles); a
 		// concrete value is broadcast across families and applied to the advisor
-		// model's family. One value for all advisors.
+		// model's family. One value for all advisors. A scoped /fast selection
+		// applying to the advisor's request overlays the base setting regardless
+		// of `tier.advisor`, matching the owning conversation's resolution.
 		const advisorTierSetting = this.#host.settings.get("tier.advisor");
 		const advisorTierMap =
 			advisorTierSetting === "inherit"
@@ -978,7 +981,7 @@ export class SessionAdvisors {
 		const advisorServiceTierResolver = (model: Model): ServiceTier | undefined =>
 			advisorTierSetting === "inherit"
 				? this.#host.effectiveServiceTier(model)
-				: resolveModelServiceTier(advisorTierMap, model);
+				: this.#host.resolveFastModeServiceTier(model, resolveModelServiceTier(advisorTierMap, model));
 
 		for (const descriptor of descriptors) {
 			const {
