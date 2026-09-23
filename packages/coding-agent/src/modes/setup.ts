@@ -74,6 +74,7 @@ export function createSetupHost(ctx: InteractiveModeContext): SetupHost {
 			addCustomProvider(provider, {
 				authStorage: ctx.session.modelRegistry.authStorage,
 				refreshProvider: id => ctx.session.modelRegistry.refreshProvider(id, "online"),
+				discoverySucceeded: id => ctx.session.modelRegistry.getProviderDiscoveryState(id)?.status === "ok",
 				hasChatModels: id => ctx.session.modelRegistry.getAll("chat").some(model => model.provider === id),
 			}),
 		saveComposerShape: async shape => {

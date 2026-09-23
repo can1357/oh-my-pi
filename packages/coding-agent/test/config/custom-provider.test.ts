@@ -12,8 +12,9 @@ describe("addCustomProvider", () => {
 	let authStorage: AuthStorage;
 	let context: CustomProviderContext;
 	let configPath: string;
-	let refreshProvider: ReturnType<typeof vi.fn>;
+	let refreshProvider: (id: string) => Promise<void>;
 	let modelsFound: boolean;
+	let discoverySucceeded: boolean;
 
 	beforeEach(async () => {
 		directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-custom-provider-"));
@@ -21,10 +22,12 @@ describe("addCustomProvider", () => {
 		authStorage = await AuthStorage.create(":memory:");
 		refreshProvider = vi.fn(async () => {});
 		modelsFound = true;
+		discoverySucceeded = true;
 		context = {
 			authStorage,
 			config: ModelsConfigFile.relocate(configPath),
 			refreshProvider,
+			discoverySucceeded: () => discoverySucceeded,
 			hasChatModels: () => modelsFound,
 		};
 	});
@@ -60,6 +63,7 @@ describe("addCustomProvider", () => {
 		await addCustomProvider(input, {
 			...context,
 			refreshProvider: id => registry.refreshProvider(id, "online"),
+			discoverySucceeded: id => registry.getProviderDiscoveryState(id)?.status === "ok",
 			hasChatModels: id => registry.getAll("chat").some(model => model.provider === id),
 		});
 		expect(registry.find(input.id, "test-chat-model")).toBeDefined();
@@ -109,6 +113,7 @@ describe("addCustomProvider", () => {
 			{
 				...context,
 				refreshProvider: id => registry.refreshProvider(id, "online"),
+				discoverySucceeded: id => registry.getProviderDiscoveryState(id)?.status === "ok",
 				hasChatModels: id => registry.getAll("chat").some(model => model.provider === id),
 			},
 		);
@@ -122,6 +127,15 @@ describe("addCustomProvider", () => {
 	it("rolls back the file and key when discovery yields no chat models", async () => {
 		modelsFound = false;
 		await expect(addCustomProvider(input, context)).rejects.toThrow("No chat models were discovered");
+		await expect(fs.stat(configPath)).rejects.toThrow();
+		expect(authStorage.credentials.has(input.id)).toBe(false);
+	});
+
+	it("rejects cached chat models when the online discovery failed", async () => {
+		modelsFound = true;
+		discoverySucceeded = false;
+		await expect(addCustomProvider(input, context)).rejects.toThrow("No chat models were discovered");
+		expect(refreshProvider).toHaveBeenCalledWith(input.id);
 		await expect(fs.stat(configPath)).rejects.toThrow();
 		expect(authStorage.credentials.has(input.id)).toBe(false);
 	});
