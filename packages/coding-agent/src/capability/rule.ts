@@ -30,6 +30,8 @@ export interface RuleFrontmatter {
 	condition?: string | string[];
 	/** TTSR match condition(s) expressed as ast-grep patterns (edit/write streams only). */
 	astCondition?: string | string[];
+	/** Natural-language yes/no question a judge model answers on each completed in-scope output. */
+	question?: string;
 	/** New key for TTSR stream scope. */
 	scope?: string | string[];
 	/** Agent-name globs this rule applies to; absent = every agent. `main` targets the top-level session. */
@@ -59,6 +61,12 @@ export interface Rule {
 	condition?: string[];
 	/** ast-grep pattern condition(s) that can trigger TTSR interruption (edit/write streams only). */
 	astCondition?: string[];
+	/**
+	 * Judged-rule question: asked of the `judge` model role once an in-scope output completes,
+	 * never mid-stream. A yes delivers the rule as a non-interrupting warning; `condition` /
+	 * `astCondition`, when also set, only gate whether the question is asked.
+	 */
+	question?: string;
 	/** Optional stream scope tokens (for example: text, thinking, tool:edit(*.ts)). */
 	scope?: string[];
 	/** Lowercased agent-name globs this rule applies to (absent = every agent). */
@@ -239,7 +247,7 @@ function isLikelyFileGlob(value: string): boolean {
 }
 
 /**
- * Parse `condition` + `scope` from rule frontmatter.
+ * Parse the TTSR trigger fields (`condition`, `astCondition`, `question`) and `scope` from rule frontmatter.
  *
  * - `condition` accepts string or string[]
  * - `scope` accepts string or string[]
@@ -247,10 +255,11 @@ function isLikelyFileGlob(value: string): boolean {
  * - condition tokens that look like file globs become scope shorthands:
  *   `*.rs` => `tool:edit(*.rs)`, `tool:write(*.rs)` and a catch-all condition `.*`
  * - `astCondition` holds ast-grep patterns and is kept verbatim (no glob inference)
+ * - `question` accepts a single non-empty string
  */
 export function parseRuleConditionAndScope(
 	frontmatter: RuleFrontmatter,
-): Pick<Rule, "condition" | "astCondition" | "scope"> {
+): Pick<Rule, "condition" | "astCondition" | "question" | "scope"> {
 	const rawCondition = frontmatter.condition ?? frontmatter.ttsr_trigger ?? frontmatter.ttsrTrigger;
 	const parsedCondition = normalizeRuleField(rawCondition);
 	const astCondition = normalizeRuleField(frontmatter.astCondition);
@@ -276,6 +285,7 @@ export function parseRuleConditionAndScope(
 	return {
 		condition: condition.length > 0 ? Array.from(new Set(condition)) : undefined,
 		astCondition,
+		question: typeof frontmatter.question === "string" ? frontmatter.question.trim() || undefined : undefined,
 		scope: scope.length > 0 ? Array.from(new Set(scope)) : undefined,
 	};
 }

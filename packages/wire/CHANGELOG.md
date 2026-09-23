@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Skillshare registry API contract and authentication schemas
+
 ## [18.2.5] - 2026-09-17
 
 ### Added
