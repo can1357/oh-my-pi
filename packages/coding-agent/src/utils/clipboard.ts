@@ -60,6 +60,24 @@ async function spawnCapture(
 	}
 }
 
+async function readImageViaCommand(command: string): Promise<ClipboardImage | null> {
+	try {
+		const payload = await spawnCapture([command], { encoding: "bytes", timeoutMs: 5000 });
+		const separator = payload.indexOf(0);
+		if (separator <= 0 || separator === payload.byteLength - 1) {
+			throw new Error("missing MIME header or image bytes");
+		}
+		const mimeType = new TextDecoder().decode(payload.subarray(0, separator));
+		if (!SUPPORTED_IMAGE_MIME_TYPES.has(mimeType)) {
+			throw new Error(`unsupported MIME type: ${mimeType}`);
+		}
+		return { data: payload.subarray(separator + 1), mimeType };
+	} catch (error) {
+		logger.warn("clipboard: configured image command failed", { command, error: String(error) });
+		return null;
+	}
+}
+
 function hasDisplay(): boolean {
 	return process.platform !== "linux" || Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
 }
@@ -110,6 +128,17 @@ let macClipboardWrite = Promise.resolve();
  * @param text - UTF-8 text to place on the clipboard.
  */
 export async function copyToClipboard(text: string): Promise<void> {
+	const copyCommand = process.env.OMP_CLIPBOARD_COPY_COMMAND;
+	if (copyCommand) {
+		try {
+			await spawnCapture([copyCommand], { input: text, timeoutMs: 5000 });
+			return;
+		} catch (error) {
+			logger.warn("clipboard: configured copy command failed", { command: copyCommand, error: String(error) });
+			// Fall through to OSC 52 and native clipboard best-effort.
+		}
+	}
+
 	if (process.stdout.isTTY) {
 		const onError = (err: unknown) => {
 			process.stdout.off("error", onError);
@@ -330,6 +359,12 @@ async function readTextFromX11Clipboard(): Promise<string> {
  * @returns A supported image payload or null when no image is available.
  */
 export async function readImageFromClipboard(): Promise<ClipboardImage | null> {
+	const imageCommand = process.env.OMP_CLIPBOARD_IMAGE_COMMAND;
+	if (imageCommand) {
+		const image = await readImageViaCommand(imageCommand);
+		if (image) return image;
+	}
+
 	if (process.env.TERMUX_VERSION) {
 		return null;
 	}
@@ -386,6 +421,15 @@ export async function readImageFromClipboard(): Promise<ClipboardImage | null> {
  * Read plain text from the system clipboard.
  */
 export async function readTextFromClipboard(): Promise<string> {
+	const pasteCommand = process.env.OMP_CLIPBOARD_PASTE_COMMAND;
+	if (pasteCommand) {
+		try {
+			return await spawnCapture([pasteCommand]);
+		} catch (error) {
+			logger.warn("clipboard: configured paste command failed", { command: pasteCommand, error: String(error) });
+			// Fall through to native clipboard best-effort.
+		}
+	}
 	try {
 		const p = process.platform;
 		if (p === "darwin") {
