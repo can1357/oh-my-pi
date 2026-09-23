@@ -239,6 +239,7 @@ import {
 	xdevDocsAll,
 	xdevEntries,
 } from "./tools";
+import { disposeAllPsHosts } from "./tools/pshost-manager";
 import { createBrowserPrelude } from "./tools/browser";
 import { isMCPToolName, normalizeToolNames } from "./tools/builtin-names";
 import { createComputerPrelude } from "./tools/computer";
@@ -1059,6 +1060,14 @@ function registerEvalCleanup(): void {
 	postmortem.register("python-cleanup", disposeAllKernelSessions);
 }
 
+let powershellCleanupRegistered = false;
+
+function registerPowerShellCleanup(): void {
+	if (powershellCleanupRegistered) return;
+	powershellCleanupRegistered = true;
+	postmortem.register("powershell-cleanup", disposeAllPsHosts);
+}
+
 export function customToolToDefinition(tool: CustomTool, sourcePath?: string): ToolDefinition {
 	const definition: ToolDefinition & { [TOOL_DEFINITION_MARKER]: true } = {
 		name: tool.name,
@@ -1373,6 +1382,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 	registerSshCleanup();
 	registerEvalCleanup();
+	registerPowerShellCleanup();
 
 	const settings = await (options.settings ??
 		options.settingsManager ??
