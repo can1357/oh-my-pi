@@ -10,6 +10,7 @@ import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { isRecord, ptree, readJsonl } from "@oh-my-pi/pi-utils";
 import type { FileSink } from "bun";
+import type { FastModeAction, FastModeStatus } from "../../config/fast-mode";
 import type { BashResult } from "../../exec/bash-executor";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
 import type { SessionEntry, SessionTreeNode } from "../../session/session-entries";
@@ -643,6 +644,7 @@ export class RpcClient {
 			...state,
 			fastModeEnabled: state.fastModeEnabled === true,
 			fastModeActive: state.fastModeActive === true,
+			fastModeScopes: Array.isArray(state.fastModeScopes) ? state.fastModeScopes : [],
 			tokensPerSecond:
 				typeof state.tokensPerSecond === "number" && Number.isFinite(state.tokensPerSecond)
 					? state.tokensPerSecond
@@ -656,6 +658,15 @@ export class RpcClient {
 	async setFastMode(enabled: boolean): Promise<{ enabled: boolean; active: boolean }> {
 		const response = await this.#send({ type: "set_fast_mode", enabled });
 		return this.#getData(response);
+	}
+
+	/**
+	 * Apply a scoped fast-mode action (session/provider/global/off) and return
+	 * the resulting status, including every enabled scope.
+	 */
+	async setFastModeAction(action: FastModeAction): Promise<FastModeStatus> {
+		const response = await this.#send({ type: "set_fast_mode", action });
+		return this.#getData<FastModeStatus>(response);
 	}
 
 	/**

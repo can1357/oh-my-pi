@@ -7,6 +7,7 @@
 import type { AgentMessage, AgentToolResult, ThinkingLevel, ToolLoadMode } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Effort, ImageContent, Model, ToolExample } from "@oh-my-pi/pi-ai";
+import type { FastModeAction, FastModeScope } from "../../config/fast-mode";
 import type { BashResult } from "../../exec/bash-executor";
 import type { ContextUsage } from "../../extensibility/extensions/types";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
@@ -36,6 +37,7 @@ export type RpcCommand =
 	// State
 	| { id?: string; type: "get_state" }
 	| { id?: string; type: "set_fast_mode"; enabled: boolean }
+	| { id?: string; type: "set_fast_mode"; action: FastModeAction }
 	| { id?: string; type: "get_available_commands" }
 	| { id?: string; type: "get_entries"; since?: string }
 	| { id?: string; type: "get_tree" }
@@ -109,6 +111,8 @@ export interface RpcSessionState {
 	autoCompactionEnabled: boolean;
 	fastModeEnabled: boolean;
 	fastModeActive: boolean;
+	/** Enabled `/fast` scopes (session/provider/global); empty when no scoped selection applies. */
+	fastModeScopes: FastModeScope[];
 	tokensPerSecond: number | null;
 	messageCount: number;
 	queuedMessageCount: number;
@@ -217,7 +221,7 @@ export type RpcResponse =
 			type: "response";
 			command: "set_fast_mode";
 			success: true;
-			data: { enabled: boolean; active: boolean };
+			data: { enabled: boolean; active: boolean; scopes?: FastModeScope[] };
 	  }
 	| {
 			id?: string;
