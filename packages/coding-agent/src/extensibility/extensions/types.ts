@@ -43,9 +43,13 @@ import type {
 	AssistantMessageEventStream,
 	Context,
 	ImageContent,
+	JudgeOptions,
+	JudgmentRequest,
+	JudgmentResult,
 	Model,
 	ModelSpec,
 	ProviderResponseMetadata,
+	Questions,
 	ServiceTier,
 	ServiceTierByFamily,
 	ServiceTierFamily,
@@ -77,6 +81,7 @@ import type { BashResult } from "../../exec/bash-executor";
 import type { ExecOptions, ExecResult } from "../../exec/exec";
 import type * as PiCodingAgent from "../../index";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
+import type { JudgeBatchOptions, JudgmentBatchEntry, JudgmentBatchRequest } from "../../judgment/runtime";
 import type { MemoryRuntimeContext } from "../../memory-backend";
 import type { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
@@ -466,6 +471,21 @@ export interface ExtensionContext {
 	 * `SettingsManager` accepts a `projectTrusted` flag.
 	 */
 	isProjectTrusted(): boolean;
+	/**
+	 * Answer one typed judgment through the host-owned judge role chain. Absent
+	 * when the host installs no judgment runtime, so check before calling.
+	 */
+	judge?<Q extends Questions>(request: JudgmentRequest<Q>, options?: JudgeOptions): Promise<JudgmentResult<Q>>;
+	/**
+	 * Answer the same questions about many states through that same runtime: one
+	 * entry per item in request order, each carrying either a result or the
+	 * failure that item ended on. Installed and omitted together with
+	 * {@link ExtensionContext.judge}.
+	 */
+	judgeBatch?<Q extends Questions>(
+		request: JudgmentBatchRequest<Q>,
+		options?: JudgeBatchOptions,
+	): Promise<JudgmentBatchEntry<Q>[]>;
 	/** Get the current effective system prompt. */
 	getSystemPrompt(): string[];
 	/** Structured memory runtime for status/search/save across the configured backend. */

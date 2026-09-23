@@ -2922,6 +2922,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			settings,
 			localProtocolOptions,
 			() => (hasSession ? session.getAsyncJobSnapshot() : null),
+			{
+				metadataResolver: provider => agent.metadataForProvider(provider),
+			},
 		);
 
 		credentialDisabledTarget = extensionRunner;

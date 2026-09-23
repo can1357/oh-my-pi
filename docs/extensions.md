@@ -234,6 +234,7 @@ Handlers and tool `execute` receive `ctx` with:
 - `shutdown()`
 - `getSystemPrompt()`
 - `memory` (optional structured memory runtime — status/search/save across the configured backend)
+- `judge(...)` / `judgeBatch(...)` (optional typed judgments through the configured `judge` role — see below)
 - `setInterval(fn, ms, ...args)` / `setTimeout(fn, ms, ...args)` / `clearTimer(timer)` — managed timers (see below)
 
 ### Background work (`ctx.setInterval` / `ctx.setTimeout`)
@@ -274,6 +275,39 @@ const current = ctx.models.current();
 const contrasting = ctx.models
   .list()
   .find((m) => current && ctx.models.family(m) !== ctx.models.family(current));
+```
+
+### Typed judgments (`ctx.judge` / `ctx.judgeBatch`)
+
+Both methods answer typed questions about a state through the host's configured `judge` model role, and both are **optional**: they are installed together and omitted together when the host runs no judgment runtime, so check before calling.
+
+- `ctx.judge({ state, questions }, options?)` resolves to one result whose `answers` carry a typed answer per question id.
+- `ctx.judgeBatch({ items, questions }, options?)` answers the same questions about many states and resolves to one entry per item **in request order**. An entry carries either `result` or `error`, so one unanswerable item does not fail the rest — you decide what a partial batch means. `concurrency` (default 4) bounds judgments in flight and `retries` (default 0) re-walks the whole judge chain per item.
+
+Both share the one runtime the session owns: the same role and credential resolution, the same usage journaling into session totals, and the same cancellation. Passing `options.signal` adds your own cancellation on top of the scope that owns the call — a judgment started in a handler is cancelled when that handler's tool call is aborted, and every in-flight judgment stops when the session shuts down. Requests, options, results, per-item failures, and `JudgmentError` are importable from `@oh-my-pi/pi-coding-agent/judgment`.
+
+A judgment classifies evidence. It never approves a tool call, changes session state, or decides permissions by itself — that stays with the host and with your extension's own policy.
+
+```ts
+const questions = {
+  blocking: {
+    type: "choice",
+    instructions: "Does this evidence show a release-blocking defect?",
+    criteria: { yes: "blocking", no: "not blocking" },
+  },
+} as const;
+
+pi.on("tool_result", async (_event, ctx) => {
+  if (!ctx.judgeBatch) return; // host installed no judgment runtime
+  const entries = await ctx.judgeBatch(
+    { items: candidates.map((c) => ({ key: c.id, state: c.evidence })), questions },
+    { concurrency: 8 },
+  );
+  for (const entry of entries) {
+    if (entry.error) ctx.ui.notify(`judgment failed for ${entry.key}: ${entry.error.message}`, "warn");
+    else if (entry.result.answers.blocking.choice === "yes") report(entry.key);
+  }
+});
 ```
 
 ## 3) Command context (`ExtensionCommandContext`)
