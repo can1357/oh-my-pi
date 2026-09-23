@@ -223,7 +223,11 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 			args: options.shell_args.unwrap_or_default(),
 			version: options.shell_version,
 			product_display_str: options.shell_product_display_str,
-			working_dir: options.working_dir.map_or_else(std::env::current_dir, Ok)?,
+			// A deleted process working directory must not make shell creation
+			// fail outright (ENOENT from `current_dir`): fall back to $HOME and
+			// then `/` so an embedding host can recover by setting an explicit
+			// working directory afterwards.
+			working_dir: initial_working_dir(options.working_dir, std::env::current_dir()),
 			builtins: options.builtins,
 			parser_impl: options.parser,
 			key_bindings: options.key_bindings,
@@ -556,4 +560,42 @@ impl<SE: extensions::ShellExtensions> ShellState for Shell<SE> {
 #[cfg(feature = "serde")]
 fn default_error_formatter<EF: extensions::ErrorFormatter>() -> EF {
 	EF::default()
+}
+
+/// Resolve the shell's initial working directory. An embedder-provided path
+/// always wins; otherwise the process cwd is used, but a cwd that no longer
+/// exists (deleted underneath a long-running host — ENOENT from
+/// `current_dir`) falls back to `$HOME`, then `/`, instead of failing shell
+/// creation entirely.
+fn initial_working_dir(
+	explicit: Option<PathBuf>,
+	process_cwd: std::io::Result<PathBuf>,
+) -> PathBuf {
+	explicit
+		.or(process_cwd.ok())
+		.or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+		.unwrap_or_else(|| PathBuf::from("/"))
+}
+
+#[cfg(test)]
+mod initial_working_dir_tests {
+	use super::initial_working_dir;
+	use std::path::PathBuf;
+
+	#[test]
+	fn explicit_path_wins() {
+		let p = PathBuf::from("/explicit/cwd");
+		assert_eq!(initial_working_dir(Some(p.clone()), Ok(PathBuf::from("/process"))), p);
+	}
+
+	#[test]
+	fn deleted_process_cwd_falls_back_to_home() {
+		let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"));
+		let err = std::io::Error::from_raw_os_error(2); // ENOENT: cwd deleted
+		assert_eq!(
+			initial_working_dir(None, Err(err)),
+			home,
+			"shell creation must survive a deleted process cwd"
+		);
+	}
 }
