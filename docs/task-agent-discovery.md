@@ -218,10 +218,10 @@ For task dispatch, model precedence is:
 
 Role aliases in either of the first two sources are expanded through `modelRoles`. The shared eval bridge can also supply an invocation-local model override ahead of the settings override; the task wire schema does not expose that field.
 
-Service-tier precedence is independent of model selection: an exact, case-sensitive
+Base service-tier precedence is independent of model selection: an exact, case-sensitive
 `task.agentServiceTierOverrides[agentName]` entry overrides `tier.subagent`; an absent entry preserves
-the global behavior. `inherit` snapshots the parent session's live per-family tiers (including
-`/fast` changes) for the next spawn. The child session resolves a concrete value against the model
+the global behavior. `inherit` snapshots the parent session's per-family base tiers
+for the next spawn. The child session resolves a concrete value against the model
 it finally settles on — after auth fallback and after patterns only the session can resolve, such as
 extension-registered models — and populates only that model's provider family when the family
 supports the value, so same-family retry fallbacks retain the tier and cross-family fallbacks never
@@ -230,6 +230,14 @@ parked agent revived after a restart keeps its per-agent tier instead of re-deri
 `tier.subagent`. The entry is looked up by task/eval dispatch only; Vibe workers launched through
 the same executor keep `tier.subagent`. Service tiers are configuration-only; agent frontmatter and
 the task/eval wire formats do not expose a tier field or automatic Fast policy.
+
+Native `/fast` selections are a live overlay, not part of that spawn-time snapshot.
+Session scope follows the owning conversation through task/eval pools, nested agents,
+Vibe workers, and revived agents, including already-running children with explicit
+base tiers such as `none`. Provider scope matches each request's actual `model.provider`;
+global scope applies across sessions. Off clears all selections and suppresses base
+`priority` tiers while preserving non-priority values such as `flex`. Changes affect
+the next request, not a stream already in flight.
 
 Runtime output schema precedence is:
 

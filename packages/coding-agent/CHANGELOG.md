@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added native `/fast` actions for the owning conversation (including nested and already-running subagents), the exact provider, or all sessions, plus Off everywhere; selections persist across processes and apply to subsequent requests, with matching scoped RPC controls ([#12975](https://github.com/can1357/oh-my-pi/pull/12975) by [@fredluz](https://github.com/fredluz)).
 - Added `omp login` command for terminal-based OAuth authentication, including automated model discovery refresh and browser-opening support
 - Enabled `org-scoped-identity` and `oauth-token-env` configuration parsing for authentication providers
 - Adopted namespaced `authStorage` API for CLI and session management

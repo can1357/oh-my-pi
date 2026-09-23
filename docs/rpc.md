@@ -128,6 +128,7 @@ Important edge behavior from runtime:
 ### State
 
 - `{ id?, type: "get_state" }`
+- `{ id?, type: "set_fast_mode", action: "session" | "provider" | "global" | "off" }`
 - `{ id?, type: "set_fast_mode", enabled: boolean }`
 - `{ id?, type: "get_available_commands" }`
 - `{ id?, type: "get_entries", since?: string }`
@@ -245,11 +246,12 @@ Local-only slash commands may emit `command_output` frames before completing via
 ### `get_state` payload
 
 `tokensPerSecond` is a number when output throughput is available and `null`
-otherwise. `fastModeEnabled` reports the session setting, while
-`fastModeActive` reports the actual computed active state. For Fireworks,
-`providers.fireworksTier: priority` is a provider-level setting independent of
-the `/fast` family setting, so `fastModeActive` may remain `true` for an
-unsupported Fireworks model.
+otherwise. `fastModeEnabled` reports whether an applicable scope or unsuppressed
+base priority setting is enabled; `fastModeActive` reports the actual computed
+active state. `fastModeScopes` lists applicable selections in broadest-first
+order (`global`, `provider`, `session`), or `[]` when none applies.
+For Fireworks, `providers.fireworksTier: priority` remains independent of these
+scopes, so `fastModeActive` may be `true` even without a fast-mode selection.
 
 For direct Anthropic, a provider rejection of `speed: "fast"` uses a sticky
 fallback scoped by the resolved endpoint and exact model: `fastModeEnabled` may
@@ -272,6 +274,7 @@ is re-armed.
   "fastModeEnabled": false,
   "tokensPerSecond": null,
   "fastModeActive": false,
+  "fastModeScopes": [],
   "autoCompactionEnabled": true,
   "messageCount": 0,
   "queuedMessageCount": 0,
@@ -306,17 +309,52 @@ is re-armed.
 
 ### `set_fast_mode` payload
 
-`set_fast_mode` changes whether fast mode is enabled for the session. The
-request is:
+Send an `action` to apply the same scoped policy as the native `/fast` menu:
+
+```json
+{ "id": "req_fast_session", "type": "set_fast_mode", "action": "session" }
+```
+
+- `session`: this conversation and its nested/already-running subagents and
+  advisors; retained when the conversation is resumed.
+- `provider`: the exact current `model.provider`, evaluated against each actual
+  request model, across existing and future sessions.
+- `global`: all sessions, including future sessions.
+- `off`: clear all scoped selections and suppress base priority settings while
+  preserving non-priority tiers such as `flex`.
+
+Enable actions are additive and do not disable other selections. Changes apply
+to subsequent requests, not in-flight streams. Scope storage is shared across
+named profiles. Provider-specific transport support still determines whether an
+enabled selection is active.
+
+```json
+{
+  "id": "req_fast_session",
+  "type": "response",
+  "command": "set_fast_mode",
+  "success": true,
+  "data": { "enabled": true, "active": true, "scopes": ["session"] }
+}
+```
+
+Scoped responses include every applicable scope in broadest-first order. The
+SDK exposes this operation as `RpcClient.setFastModeAction(action)`. Use either
+`action` or `enabled` in a request, not both.
+
+#### Existing per-family API
+
+The existing boolean payload continues to set the current session's base
+preference for the active model family:
 
 ```json
 { "id": "req_fast_on", "type": "set_fast_mode", "enabled": true }
 ```
 
-On success, `data` always contains both `enabled` and `active`. These are the
-actual computed values: `enabled` reports the session setting, and `active`
-reports the resulting active state, including any provider-level Fireworks
-priority setting:
+Boolean responses contain `enabled` and `active`. These are the actual computed
+values after applying scoped policy and provider-level settings. A scoped enable
+can therefore keep fast mode active after `enabled: false`; conversely, a prior
+scoped Off suppresses base priority until another scoped enable action.
 
 For direct Anthropic, an explicit enable also re-arms a provider attempt after
 the sticky rejection fallback, even when fast mode was already enabled.
@@ -344,9 +382,9 @@ exact error below:
 }
 ```
 
-Disabling fast mode is idempotent, including on an unsupported model. It
-succeeds as an off/no-op result, but disabling `/fast` does not override
-provider-level settings, so a successful disable does not guarantee
+Disabling the base preference is idempotent, including on an unsupported model.
+It does not clear scoped selections or override independent provider-level
+settings, so a successful disable does not guarantee
 `active: false`. For example, with an unsupported
 `fireworks/deepseek-v4-flash` model and `providers.fireworksTier: priority`,
 the response reports the session setting as disabled while the provider
