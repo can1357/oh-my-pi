@@ -11,6 +11,7 @@
 import type {
 	AgentSnapshot,
 	AssistantMessage,
+	CollabElided,
 	CollabUiRequest,
 	CollabUiResponseValue,
 	HostFrame,
@@ -21,6 +22,7 @@ import type {
 	SubagentProgressPayload,
 } from "@oh-my-pi/pi-wire";
 import { importRoomKey } from "./codec";
+import { applyElidedValue, sameElided } from "./elided";
 import { COLLAB_PROTO, encodeBase64Url, parseCollabLink } from "./link";
 import { CollabSocket } from "./socket";
 
@@ -118,6 +120,24 @@ interface PendingHistory {
 	timer: Timer;
 }
 
+/** Outcome of {@link GuestClient.fetchValue}: the parsed original, or why it could not be fetched. */
+export type ValueResult = { kind: "value"; value: unknown } | { kind: "error"; message: string };
+
+/** Shown when the host's copy of a trimmed value changed after it was sent. */
+export const STALE_VALUE_MESSAGE = "content changed on the host; reload the session";
+
+/** One fetch-value transfer. Every slice is its own request, continuing at `offset`. */
+interface PendingValue {
+	entryId: string;
+	path: (string | number)[];
+	hash: string;
+	/** Slices so far; `offset` is their length in UTF-16 units. */
+	slices: string[];
+	offset: number;
+	timer: Timer | undefined;
+	resolve: (result: ValueResult) => void;
+}
+
 export class GuestClient {
 	readonly #socket: CollabSocket;
 	readonly #name: string;
@@ -125,6 +145,8 @@ export class GuestClient {
 	readonly #writeToken: string | undefined;
 	readonly #listeners = new Set<() => void>();
 	readonly #pendingTranscripts = new Map<number, PendingTranscript>();
+	/** Keyed by the reqId of the slice in flight. */
+	readonly #pendingValues = new Map<number, PendingValue>();
 	#reqSeq = 0;
 	#noticeSeq = 0;
 	#everConnected = false;
@@ -274,6 +296,49 @@ export class GuestClient {
 		this.#commit();
 	}
 
+	/**
+	 * The original of a value the host trimmed, reassembled from as many
+	 * `value` slices as it takes. Only for a host that advertised
+	 * `welcome.history`. Resolves an error for a host refusal
+	 * ("stale" resolves {@link STALE_VALUE_MESSAGE} and posts it as a notice),
+	 * a stalled slice, or a lost connection; nothing is retried.
+	 */
+	fetchValue(entryId: string, path: (string | number)[], hash: string): Promise<ValueResult> {
+		if (this.#history === null || this.#phase !== "live") {
+			return Promise.resolve({ kind: "error", message: "the host can't send trimmed values right now" });
+		}
+		const { promise, resolve } = Promise.withResolvers<ValueResult>();
+		this.#requestValueSlice({ entryId, path, hash, slices: [], offset: 0, timer: undefined, resolve });
+		return promise;
+	}
+
+	/**
+	 * Fetch the original behind `elided`, one of entry `entryId`'s
+	 * `collabElided` records, and swap the patched entry into the replica.
+	 * Resolves `null` once loaded, or when nothing is left to load (loaded
+	 * already, or the entry is gone); else the reason, ready to show.
+	 */
+	async loadFull(entryId: string, elided: CollabElided): Promise<string | null> {
+		const held = this.#entries.find(entry => entry.id === entryId);
+		if (!held?.collabElided?.some(record => sameElided(record, elided))) return null;
+		const result = await this.fetchValue(entryId, elided.path, elided.hash);
+		if (result.kind === "error") return result.message;
+		// The replica may have moved on while the value was in flight.
+		const index = this.#entries.findIndex(entry => entry.id === entryId);
+		const entry = this.#entries[index];
+		const record = entry?.collabElided?.find(other => sameElided(other, elided));
+		if (entry === undefined || record === undefined) return null;
+		let patched: SessionEntry;
+		try {
+			patched = applyElidedValue(entry, record, result.value);
+		} catch (err) {
+			return `couldn't show the loaded value: ${err instanceof Error ? err.message : String(err)}`;
+		}
+		this.#entries[index] = patched;
+		this.#publishedEntries = [...this.#entries];
+		this.#commit();
+		return null;
+	}
 
 	/** Test seam: apply a synthetic host frame through the real apply path. */
 	applyFrameForTest(frame: HostFrame): void {
@@ -305,6 +370,7 @@ export class GuestClient {
 		this.#clearSnapshotProgressTimer();
 		// The host discards this peer's queued replies with the connection.
 		this.#dropPendingHistory(null);
+		this.#failPendingValues("connection lost; try again");
 		if (this.#phase === "ended") return;
 		if (willReconnect) {
 			this.#phase = "reconnecting";
@@ -332,6 +398,7 @@ export class GuestClient {
 		this.#pendingSnapshot = null;
 		this.#failPendingTranscripts();
 		this.#dropPendingHistory(null);
+		this.#failPendingValues("the session ended");
 		this.#clearUiRequests();
 		this.#commit();
 		this.#socket.close();
@@ -384,6 +451,34 @@ export class GuestClient {
 		if (this.#history !== null) this.#history = { ...this.#history, loading: false, error };
 	}
 
+	/** Send the next slice request of `pending`, from its `offset`, under a fresh reqId and idle timer. */
+	#requestValueSlice(pending: PendingValue): void {
+		const reqId = ++this.#reqSeq;
+		pending.timer = setTimeout(() => {
+			if (this.#pendingValues.get(reqId) !== pending) return;
+			this.#pendingValues.delete(reqId);
+			pending.resolve({ kind: "error", message: "timed out loading the full value" });
+		}, SNAPSHOT_PROGRESS_TIMEOUT_MS);
+		this.#pendingValues.set(reqId, pending);
+		this.#socket.send({
+			t: "fetch-value",
+			reqId,
+			entryId: pending.entryId,
+			path: pending.path,
+			hash: pending.hash,
+			offset: pending.offset,
+		});
+	}
+
+	/** Resolve every value transfer in flight with `message`; late slices are then ignored. */
+	#failPendingValues(message: string): void {
+		for (const pending of this.#pendingValues.values()) {
+			clearTimeout(pending.timer);
+			pending.resolve({ kind: "error", message });
+		}
+		this.#pendingValues.clear();
+	}
+
 	/** Resolve every transcript read in flight as transient (`null`), so its poller retries. */
 	#failPendingTranscripts(): void {
 		for (const pending of this.#pendingTranscripts.values()) {
@@ -392,6 +487,7 @@ export class GuestClient {
 		}
 		this.#pendingTranscripts.clear();
 	}
+
 	#armSnapshotProgressTimer(): void {
 		this.#clearSnapshotProgressTimer();
 		this.#snapshotProgressTimer = setTimeout(() => {
@@ -438,8 +534,9 @@ export class GuestClient {
 				}
 				// Pages requested before this welcome describe the old replica.
 				this.#dropPendingHistory(null);
-				// So are transcript reads: the host dropped their queued replies
-				// with the old join.
+				// So are values and transcripts: the host dropped their queued
+				// replies with the old join.
+				this.#failPendingValues("the session reloaded; try again");
 				this.#failPendingTranscripts();
 				// Tail join: `history` pages in what the tail left out.
 				this.#history = frame.history
@@ -600,6 +697,38 @@ export class GuestClient {
 				if (this.#uiRequest?.reqId === frame.reqId) this.#showNextUiRequest();
 				else this.#uiRequestQueue = this.#uiRequestQueue.filter(request => request.reqId !== frame.reqId);
 				break;
+			case "value": {
+				const pending = this.#pendingValues.get(frame.reqId);
+				// A reply to a slice that already failed (timeout, close, re-welcome).
+				if (pending === undefined) return;
+				this.#pendingValues.delete(frame.reqId);
+				clearTimeout(pending.timer);
+				if (frame.error !== undefined) {
+					if (frame.error !== "stale") {
+						pending.resolve({ kind: "error", message: frame.error });
+						return;
+					}
+					this.#pushNotice("warning", STALE_VALUE_MESSAGE);
+					pending.resolve({ kind: "error", message: STALE_VALUE_MESSAGE });
+					break;
+				}
+				if (frame.offset !== pending.offset || (!frame.final && frame.data.length === 0)) {
+					pending.resolve({ kind: "error", message: "malformed value reply" });
+					return;
+				}
+				pending.slices.push(frame.data);
+				pending.offset += frame.data.length;
+				if (!frame.final) {
+					this.#requestValueSlice(pending);
+					return;
+				}
+				try {
+					pending.resolve({ kind: "value", value: JSON.parse(pending.slices.join("")) });
+				} catch {
+					pending.resolve({ kind: "error", message: "the loaded value is not valid JSON" });
+				}
+				return;
+			}
 			case "transcript": {
 				const pending = this.#pendingTranscripts.get(frame.reqId);
 				if (pending) {

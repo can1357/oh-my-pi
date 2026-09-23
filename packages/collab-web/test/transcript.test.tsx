@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { AssistantMessage, SessionEntry } from "@oh-my-pi/pi-wire";
+import type { AssistantMessage, CollabElided, SessionEntry } from "@oh-my-pi/pi-wire";
 import { renderToStaticMarkup } from "react-dom/server";
 import "./transcript-dom-shim";
 import {
@@ -9,6 +9,7 @@ import {
 	Transcript,
 	updateTranscriptTailLock,
 } from "../src/components/transcript/Transcript";
+import { applyElidedValue } from "../src/lib/elided";
 import type { ActiveTool, HistoryState } from "../src/lib/client";
 
 const TOOL_CALL_ID = "call-running-tool";
@@ -253,5 +254,48 @@ describe("Transcript earlier history", () => {
 		// A fresh tail that no longer holds the row reports it gone.
 		view.ids = view.ids.slice(5);
 		expect(anchor !== null && restoreScrollAnchor(view, anchor)).toBe(false);
+	});
+});
+
+describe("Transcript trimmed images", () => {
+	it("shows a tile for a trimmed image until its original is loaded", () => {
+		const record: CollabElided = {
+			path: ["message", "content", 1],
+			kind: "image",
+			bytes: 120,
+			hash: "i",
+			mimeType: "image/png",
+		};
+		const held: SessionEntry = {
+			type: "message",
+			id: "u1",
+			parentId: null,
+			timestamp: "2026-09-24T00:00:01Z",
+			message: {
+				role: "user",
+				content: [
+					{ type: "text", text: "the layout is broken" },
+					{ type: "text", text: "[image image/png, 120B not sent]" },
+				],
+				timestamp: 1,
+			},
+			collabElided: [record],
+		};
+		const render = (entry: SessionEntry) =>
+			renderToStaticMarkup(
+				<Transcript
+					entries={[entry]}
+					stream={null}
+					streamDone
+					activeTools={new Map()}
+					working={false}
+					host={{ loadFull: () => Promise.resolve(null) }}
+				/>,
+			);
+
+		expect(countElements(render(held), ".tv-img-tile")).toBe(1);
+		const loaded = render(applyElidedValue(held, record, { type: "image", mimeType: "image/png", data: "AAAA" }));
+		expect(loaded).toContain('src="data:image/png;base64,AAAA"');
+		expect(loaded).not.toContain("tv-img-tile");
 	});
 });

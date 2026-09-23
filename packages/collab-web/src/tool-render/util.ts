@@ -2,6 +2,8 @@
  * Pure helpers shared by tool renderers. Host-agnostic; no DOM beyond
  * `globalThis` feature probes, no host package imports.
  */
+import type { CollabElided } from "@oh-my-pi/pi-wire";
+import { pathEquals } from "../lib/elided";
 import type { ToolResultImage, ToolResultLike } from "./types";
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
@@ -164,6 +166,25 @@ export function resultImagesOf(result: ToolResultLike | undefined): ToolResultIm
 		if (block.type === "image" && typeof img.data === "string" && typeof img.mimeType === "string") {
 			images.push(img as ToolResultImage);
 		}
+	}
+	return images;
+}
+
+/**
+ * Images the collab host replaced with a text placeholder in a tool result
+ * (a `kind: "image"` record at `["message", "content", i]` over text block
+ * `i`), in content order.
+ */
+export function elidedImagesOf(result: ToolResultLike | undefined): CollabElided[] {
+	if (!result?.collabElided) return [];
+	const images: CollabElided[] = [];
+	for (let i = 0; i < result.content.length; i++) {
+		if (result.content[i].type !== "text") continue;
+		const path = ["message", "content", i];
+		const elided = result.collabElided.find(
+			record => record.kind === "image" && record.removed !== true && pathEquals(record.path, path),
+		);
+		if (elided) images.push(elided);
 	}
 	return images;
 }

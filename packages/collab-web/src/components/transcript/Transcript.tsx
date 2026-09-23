@@ -1,12 +1,20 @@
-import type { AssistantMessage, ImageContent, SessionEntry, TextContent, ToolResultMessage } from "@oh-my-pi/pi-wire";
+import {
+	COLLAB_ENTRY_OMITTED_CUSTOM_TYPE,
+	type AssistantMessage,
+	type CollabElided,
+	type ImageContent,
+	type SessionEntry,
+	type TextContent,
+} from "@oh-my-pi/pi-wire";
 import { ChevronRight } from "lucide-react";
 import type { ReactNode } from "react";
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ActiveTool, ConnectionPhase, HistoryState } from "../../lib/client";
+import { pathEquals } from "../../lib/elided";
 import { fmtTokens } from "../../lib/format";
-import type { ToolRenderHost } from "../../tool-render";
+import { ElidedImage, LoadFull, type ToolRenderHost } from "../../tool-render";
 import { Markdown } from "./Markdown";
-import { ToolCard } from "./ToolCard";
+import { ToolCard, type ToolResultEntry } from "./ToolCard";
 import "./transcript.css";
 
 export interface TranscriptProps {
@@ -136,15 +144,127 @@ function ThinkingBlock({ text, redacted }: { text: string; redacted?: boolean })
 	);
 }
 
-/** Markdown + image thumbnails for user / custom message content. */
-function MsgContent({ content }: { content: string | readonly (TextContent | ImageContent)[] }): ReactNode {
-	if (typeof content === "string") return <Markdown text={content} />;
+/** Values the collab host trimmed from one entry, when the host can load them. */
+interface EntryTrims {
+	host: ToolRenderHost;
+	entryId: string;
+	records: readonly CollabElided[];
+	/** Path of the entry's content: `["message", "content"]`, or `["content"]` for a custom message. */
+	prefix: readonly (string | number)[];
+}
+
+function entryTrims(
+	entry: SessionEntry,
+	host: ToolRenderHost | undefined,
+	prefix: readonly (string | number)[],
+): EntryTrims | undefined {
+	if (host?.loadFull === undefined || entry.collabElided === undefined || entry.collabElided.length === 0) {
+		return undefined;
+	}
+	return { host, entryId: entry.id, records: entry.collabElided, prefix };
+}
+
+/**
+ * The record of content block `i` shown inline: the text placeholder of a
+ * trimmed image (`"image"`), or a clipped text block (`"string"`).
+ */
+function blockTrim(trims: EntryTrims | undefined, i: number, kind: "image" | "string"): CollabElided | undefined {
+	if (trims === undefined) return undefined;
+	const path = kind === "image" ? [...trims.prefix, i] : [...trims.prefix, i, "text"];
+	return trims.records.find(
+		record => record.kind === kind && record.removed !== true && pathEquals(record.path, path),
+	);
+}
+
+/**
+ * Records with no inline control, offered by one control for the whole row:
+ * everything but clipped text blocks (or string content) and image
+ * placeholders among the text blocks of `content`.
+ */
+function rowTrims(trims: EntryTrims, content: string | readonly { type: string }[]): CollabElided[] {
+	const { prefix } = trims;
+	return trims.records.filter(record => {
+		if (typeof content === "string") return !(record.kind === "string" && pathEquals(record.path, prefix));
+		if (!pathEquals(record.path.slice(0, prefix.length), prefix)) return true;
+		const index = record.path[prefix.length];
+		if (typeof index !== "number" || content[index]?.type !== "text" || record.removed === true) return true;
+		if (record.path.length === prefix.length + 1) return record.kind !== "image";
+		return !(record.kind === "string" && record.path.length === prefix.length + 2 && record.path.at(-1) === "text");
+	});
+}
+
+/** The row-level control for `trims`' records that have no inline control of their own. */
+function RowTrims({
+	trims,
+	content,
+}: {
+	trims: EntryTrims | undefined;
+	content: string | readonly { type: string }[];
+}): ReactNode {
+	if (trims === undefined) return null;
+	const records = rowTrims(trims, content);
+	const whole = records.some(record => record.path.length === 0);
+	return (
+		<LoadFull
+			host={trims.host}
+			entryId={trims.entryId}
+			records={records}
+			label={whole ? "load full entry" : "load full message"}
+		/>
+	);
+}
+
+/** Markdown + image thumbnails for user / custom message content; trimmed values load in place. */
+function MsgContent({
+	content,
+	trims,
+}: {
+	content: string | readonly (TextContent | ImageContent)[];
+	trims?: EntryTrims;
+}): ReactNode {
+	if (typeof content === "string") {
+		const clipped = trims?.records.find(record => record.kind === "string" && pathEquals(record.path, trims.prefix));
+		return (
+			<>
+				<Markdown text={content} />
+				{trims && clipped && (
+					<LoadFull host={trims.host} entryId={trims.entryId} records={[clipped]} label="load full text" />
+				)}
+			</>
+		);
+	}
 	return (
 		<>
 			{content.map((block, i) => {
 				switch (block.type) {
-					case "text":
-						return <Markdown key={i} text={block.text} />;
+					case "text": {
+						const image = blockTrim(trims, i, "image");
+						if (trims && image) {
+							return (
+								<ElidedImage
+									key={i}
+									host={trims.host}
+									entryId={trims.entryId}
+									elided={image}
+									placeholder={block.text}
+								/>
+							);
+						}
+						const clipped = blockTrim(trims, i, "string");
+						return (
+							<Fragment key={i}>
+								<Markdown text={block.text} />
+								{trims && clipped && (
+									<LoadFull
+										host={trims.host}
+										entryId={trims.entryId}
+										records={[clipped]}
+										label="load full text"
+									/>
+								)}
+							</Fragment>
+						);
+					}
 					case "image":
 						return (
 							<img
@@ -168,13 +288,16 @@ function AssistantBody({
 	active,
 	pending,
 	host,
+	trims,
 }: {
 	message: AssistantMessage;
-	results: ReadonlyMap<string, ToolResultMessage>;
+	results: ReadonlyMap<string, ToolResultEntry>;
 	active: ReadonlyMap<string, ActiveTool>;
 	/** Still streaming — suppress stop-reason chips on the partial message. */
 	pending: boolean;
 	host?: ToolRenderHost;
+	/** Absent for the stream ghost, which the host never trims. */
+	trims?: EntryTrims;
 }): ReactNode {
 	const blocks = message.content.map((block, i) => {
 		switch (block.type) {
@@ -182,8 +305,17 @@ function AssistantBody({
 				return <ThinkingBlock key={i} text={block.thinking} />;
 			case "redactedThinking":
 				return <ThinkingBlock key={i} text="" redacted />;
-			case "text":
-				return <Markdown key={i} text={block.text} />;
+			case "text": {
+				const clipped = blockTrim(trims, i, "string");
+				return (
+					<Fragment key={i}>
+						<Markdown text={block.text} />
+						{trims && clipped && (
+							<LoadFull host={trims.host} entryId={trims.entryId} records={[clipped]} label="load full text" />
+						)}
+					</Fragment>
+				);
+			}
 			case "toolCall": {
 				const act = active.get(block.id);
 				const result = results.get(block.id);
@@ -219,13 +351,18 @@ function AssistantBody({
 					)}
 				</div>
 			)}
+			<RowTrims trims={trims} content={message.content} />
 		</>
 	);
 }
 
+/** Where message and custom-message content sit in their entries, as trim paths address them. */
+const MESSAGE_CONTENT = ["message", "content"];
+const CUSTOM_CONTENT = ["content"];
+
 interface EntryRowProps {
 	entry: SessionEntry;
-	results: ReadonlyMap<string, ToolResultMessage>;
+	results: ReadonlyMap<string, ToolResultEntry>;
 	active: ReadonlyMap<string, ActiveTool>;
 	host?: ToolRenderHost;
 }
@@ -248,16 +385,26 @@ const EntryRow = memo(function EntryRow({ entry, results, active, host }: EntryR
 		case "message": {
 			const msg = entry.message;
 			switch (msg.role) {
-				case "user":
+				case "user": {
+					const trims = entryTrims(entry, host, MESSAGE_CONTENT);
 					return (
 						<Row kind="user" gutter="host" title={entry.timestamp} entryId={entry.id}>
-							<MsgContent content={msg.content} />
+							<MsgContent content={msg.content} trims={trims} />
+							<RowTrims trims={trims} content={msg.content} />
 						</Row>
 					);
+				}
 				case "assistant":
 					return (
 						<Row kind="assistant" gutter="agent" title={entry.timestamp} entryId={entry.id}>
-							<AssistantBody message={msg} results={results} active={active} pending={false} host={host} />
+							<AssistantBody
+								message={msg}
+								results={results}
+								active={active}
+								pending={false}
+								host={host}
+								trims={entryTrims(entry, host, MESSAGE_CONTENT)}
+							/>
 						</Row>
 					);
 				default:
@@ -266,6 +413,7 @@ const EntryRow = memo(function EntryRow({ entry, results, active, host }: EntryR
 			}
 		}
 		case "custom_message": {
+			const trims = entryTrims(entry, host, CUSTOM_CONTENT);
 			if (entry.customType === "collab-prompt") {
 				const details = entry.details;
 				const from =
@@ -281,7 +429,20 @@ const EntryRow = memo(function EntryRow({ entry, results, active, host }: EntryR
 						title={entry.timestamp}
 						entryId={entry.id}
 					>
-						<MsgContent content={entry.content} />
+						<MsgContent content={entry.content} trims={trims} />
+						<RowTrims trims={trims} content={entry.content} />
+					</Row>
+				);
+			}
+			if (entry.customType === COLLAB_ENTRY_OMITTED_CUSTOM_TYPE) {
+				// Stands in for an entry too large to send; loading swaps the original in.
+				return (
+					<Row kind="custom" gutter="" title={entry.timestamp} entryId={entry.id}>
+						<div className="tr-custom">
+							<span className="tr-chip tr-chip--warn">not sent</span>
+							<MsgContent content={entry.content} />
+							<RowTrims trims={trims} content={entry.content} />
+						</div>
 					</Row>
 				);
 			}
@@ -290,7 +451,8 @@ const EntryRow = memo(function EntryRow({ entry, results, active, host }: EntryR
 				<Row kind="custom" gutter="" title={entry.timestamp} entryId={entry.id}>
 					<div className="tr-custom">
 						<span className="tr-chip">{entry.customType}</span>
-						<MsgContent content={entry.content} />
+						<MsgContent content={entry.content} trims={trims} />
+						<RowTrims trims={trims} content={entry.content} />
 					</div>
 				</Row>
 			);
@@ -351,12 +513,13 @@ export function Transcript(props: TranscriptProps): ReactNode {
 	const start = pinnedIndex < 0 ? tailStart : Math.min(pinnedIndex, tailStart);
 	const visible = useMemo(() => entries.slice(start), [entries, start]);
 
-	// A tool result always follows its call, so visible rows only pair with visible results.
+	// Tool results by call id, as entries: the id and trims ride along to the card.
+	// A result always follows its call, so visible rows only pair with visible results.
 	const results = useMemo(() => {
-		const map = new Map<string, ToolResultMessage>();
+		const map = new Map<string, ToolResultEntry>();
 		for (const entry of visible) {
 			if (entry.type === "message" && entry.message.role === "toolResult") {
-				map.set(entry.message.toolCallId, entry.message);
+				map.set(entry.message.toolCallId, entry as ToolResultEntry);
 			}
 		}
 		return map;

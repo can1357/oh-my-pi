@@ -2,15 +2,17 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import type {
 	AgentSnapshot,
 	AssistantMessage,
+	CollabElided,
 	GuestFrame,
 	HostFrame,
+	ImageContent,
 	SessionEntry,
 	SessionHeader,
 	SessionState,
 	SubagentProgressPayload,
 	WireMessage,
 } from "@oh-my-pi/pi-wire";
-import { GuestClient, PAGE_BYTES, TAIL_BYTES } from "../src/lib/client";
+import { GuestClient, PAGE_BYTES, STALE_VALUE_MESSAGE, TAIL_BYTES } from "../src/lib/client";
 import { COLLAB_PROTO, encodeBase64Url } from "../src/lib/link";
 import { CollabSocket } from "../src/lib/socket";
 
@@ -672,5 +674,83 @@ describe("GuestClient tail-first sessions", () => {
 			phase: "ended",
 			endedReason: "timed out waiting for the host's welcome",
 		});
+	});
+
+	const IMAGE: ImageContent = {
+		type: "image",
+		mimeType: "image/png",
+		data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ",
+	};
+	const IMAGE_RECORD: CollabElided = {
+		path: ["message", "content", 1],
+		kind: "image",
+		bytes: 120,
+		hash: "img0",
+		mimeType: "image/png",
+	};
+	const screenshot = (): SessionEntry => ({
+		...messageEntry("u1", {
+			role: "user",
+			content: [
+				{ type: "text", text: "the layout is broken" },
+				{ type: "text", text: "[image image/png, 120B not sent]" },
+			],
+			timestamp: 1,
+		}),
+		collabElided: [IMAGE_RECORD],
+	});
+
+	/** A live guest holding the trimmed screenshot. */
+	function screenshotGuest(): Harness {
+		const h = harness();
+		h.socket().onOpen?.();
+		h.client.applyFrameForTest(tailWelcome(1, "u1", false));
+		h.client.applyFrameForTest(snapshotChunk([screenshot()]));
+		return h;
+	}
+
+	it("loads a trimmed value across slices and swaps the restored entry in", async () => {
+		const { client, sent } = screenshotGuest();
+		const json = JSON.stringify(IMAGE);
+		const slice = Math.ceil(json.length / 3);
+		const loading = client.loadFull("u1", IMAGE_RECORD);
+		for (let i = 0; i < requests(sent, "fetch-value").length; i++) {
+			const { reqId, offset } = requests(sent, "fetch-value")[i];
+			const data = json.slice(offset, offset + slice);
+			client.applyFrameForTest({
+				t: "value",
+				reqId,
+				offset,
+				data,
+				total: json.length,
+				final: offset + slice >= json.length,
+			});
+		}
+
+		expect(requests(sent, "fetch-value").map(request => request.offset)).toEqual([0, slice, 2 * slice]);
+		expect(await loading).toBeNull();
+		const entry = client.getSnapshot().entries[0];
+		expect(entry.type === "message" && entry.message.content).toEqual([
+			{ type: "text", text: "the layout is broken" },
+			IMAGE,
+		]);
+		expect(entry.collabElided).toBeUndefined();
+	});
+
+	it("reports a stale value and leaves the entry alone", async () => {
+		const { client, sent } = screenshotGuest();
+		const loading = client.loadFull("u1", IMAGE_RECORD);
+		const { reqId } = requests(sent, "fetch-value")[0];
+		client.applyFrameForTest({ t: "value", reqId, offset: 0, data: "", total: 0, final: true, error: "stale" });
+
+		expect(await loading).toBe(STALE_VALUE_MESSAGE);
+		expect(client.getSnapshot().entries[0]).toEqual(screenshot());
+	});
+
+	it("fails a value transfer at once when the connection drops", async () => {
+		const { client, socket } = screenshotGuest();
+		const loading = client.loadFull("u1", IMAGE_RECORD);
+		socket().onClose?.("network lost", true);
+		expect(await loading).toBe("connection lost; try again");
 	});
 });
