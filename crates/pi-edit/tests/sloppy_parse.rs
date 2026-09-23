@@ -3,7 +3,7 @@ use pi_edit::modes::sloppy::{
 		extract_inline_sloppy_regions, ir_to_payload, normalize_input, parse_operations,
 		split_sloppy_sections,
 	},
-	types::OperationRewrite,
+	types::{OperationRewrite, Placement},
 };
 
 fn message(input: &str, content: &str) -> String {
@@ -15,20 +15,20 @@ fn message(input: &str, content: &str) -> String {
 #[test]
 fn parses_delimited_multi_file_bare_and_all_sections() {
 	let payload = [
-		"*** sm:edit src/config.ts",
-		"*** sm:find",
+		"*** edit file: src/config.ts",
+		"*** find",
 		"const timeout = 1000;",
-		"*** sm:put",
+		"*** replace",
 		"const timeout = 5000;",
-		"*** SM:EDIT",
-		"*** SM:FIND",
+		"*** Edit File:",
+		"*** Find",
 		"const retries = 3;",
-		"*** SM:PUT",
+		"*** Replace",
 		"const retries = 5;",
-		"*** SM:EDIT src/catalog.ts all",
-		"*** SM:FIND",
+		"*** Edit File: src/catalog.ts all",
+		"*** Find",
 		"logger.debug(",
-		"*** SM:PUT",
+		"*** Replace",
 		"logger.trace(",
 	]
 	.join("\n");
@@ -58,7 +58,7 @@ fn parses_delimited_multi_file_bare_and_all_sections() {
 #[test]
 fn accepts_begin_patch_and_trims_or_quotes_ambiguous_paths() {
 	let sections = split_sloppy_sections(
-		"*** Begin Patch\n*** SM:EDIT \" all \" all\n*** SM:FIND\nold\n*** SM:PUT\nnew\n*** End \
+		"*** Begin Patch\n*** Edit File: \" all \" all\n*** Find\nold\n*** Replace\nnew\n*** End \
 		 Patch",
 	);
 	assert_eq!(sections.len(), 1);
@@ -70,28 +70,28 @@ fn accepts_begin_patch_and_trims_or_quotes_ambiguous_paths() {
 #[test]
 fn headers_are_boundaries_only_when_the_whole_trimmed_line_is_recognized() {
 	let input = concat!(
-		"*** SM:EDIT src/a.ts\n*** SM:FIND\n",
-		"old\n*** SM:PUT trailing text\n<SM:PUT>\nliteral\n",
-		"*** SM:PUT\nnew\n",
+		"*** Edit File: src/a.ts\n*** Find\n",
+		"old\n*** Replace trailing text\n<Replace>\nliteral\n",
+		"*** Replace\nnew\n",
 	);
 	let sections = split_sloppy_sections(input);
 	let operations = parse_operations(
 		&sections[0].body,
-		"old\n*** SM:PUT trailing text\n<SM:PUT>\nliteral\n",
+		"old\n*** Replace trailing text\n<Replace>\nliteral\n",
 		"src/a.ts",
 	)
 	.unwrap();
-	assert_eq!(operations[0].pattern_text, "old\n*** SM:PUT trailing text\n<SM:PUT>\nliteral");
+	assert_eq!(operations[0].pattern_text, "old\n*** Replace trailing text\n<Replace>\nliteral");
 	assert_eq!(operations[0].rewrite, OperationRewrite::Explicit { text: "new".to_owned() });
 }
 
 #[test]
 fn empty_put_deletes_before_next_find_edit_and_eof() {
 	for payload in [
-		"*** SM:EDIT a.ts\n*** SM:FIND\nold\n*** SM:PUT\n*** SM:FIND\nkeep\n*** SM:PUT\nkept",
-		"*** SM:EDIT a.ts\n*** SM:FIND\nold\n*** SM:PUT\n*** SM:EDIT b.ts\n*** SM:FIND\nother\n*** \
-		 SM:PUT\nnext",
-		"*** SM:EDIT a.ts\n*** SM:FIND\nold\n*** SM:PUT",
+		"*** Edit File: a.ts\n*** Find\nold\n*** Replace\n*** Find\nkeep\n*** Replace\nkept",
+		"*** Edit File: a.ts\n*** Find\nold\n*** Replace\n*** Edit File: b.ts\n*** Find\nother\n*** \
+		 Replace\nnext",
+		"*** Edit File: a.ts\n*** Find\nold\n*** Replace",
 	] {
 		let section = &split_sloppy_sections(payload)[0];
 		let operation = &parse_operations(&section.body, "old\nkeep\n", "a.ts").unwrap()[0];
@@ -102,25 +102,31 @@ fn empty_put_deletes_before_next_find_edit_and_eof() {
 
 #[test]
 fn after_preserves_authored_blank_lines_without_a_terminal_phantom() {
-	let with_blank = "*** SM:EDIT a.ts\n*** SM:FIND\nanchor\n*** SM:AFTER\n\ninserted\n\n*** \
-	                  SM:FIND\nnext\n*** SM:PUT\nchanged";
+	let with_blank = "*** Edit File: a.ts\n*** Find\nanchor\n*** Insert After\n\ninserted\n\n*** \
+	                  Find\nnext\n*** Replace\nchanged";
 	let sections = split_sloppy_sections(with_blank);
 	let operations = parse_operations(&sections[0].body, "anchor\nnext\n", "a.ts").unwrap();
-	assert_eq!(operations[0].rewrite, OperationRewrite::After { text: "\ninserted\n\n".to_owned() });
+	assert_eq!(operations[0].rewrite, OperationRewrite::Insert {
+		text: "\ninserted\n\n".to_owned(),
+		at:   Placement::After,
+	});
 
 	for payload in [
-		"*** SM:EDIT a.ts\n*** SM:FIND\nanchor\n*** SM:AFTER\ninserted",
-		"*** SM:EDIT a.ts\n*** SM:FIND\nanchor\n*** SM:AFTER\ninserted\n",
+		"*** Edit File: a.ts\n*** Find\nanchor\n*** Insert After\ninserted",
+		"*** Edit File: a.ts\n*** Find\nanchor\n*** Insert After\ninserted\n",
 	] {
 		let section = &split_sloppy_sections(payload)[0];
 		let operations = parse_operations(&section.body, "anchor\n", "a.ts").unwrap();
-		assert_eq!(operations[0].rewrite, OperationRewrite::After { text: "inserted\n".to_owned() });
+		assert_eq!(operations[0].rewrite, OperationRewrite::Insert {
+			text: "inserted\n".to_owned(),
+			at:   Placement::After,
+		});
 	}
 }
 
 #[test]
 fn inline_regions_use_end_patch_as_an_explicit_prose_boundary() {
-	let payload = "*** SM:EDIT src/a.ts\n*** SM:FIND\nold();\n*** SM:PUT\nnew();";
+	let payload = "*** Edit File: src/a.ts\n*** Find\nold();\n*** Replace\nnew();";
 	let text = format!("Before.\n{payload}\n*** End Patch\nAfter.");
 	let regions = extract_inline_sloppy_regions(&text);
 	assert_eq!(regions.len(), 1);
@@ -133,7 +139,7 @@ fn inline_regions_use_end_patch_as_an_explicit_prose_boundary() {
 
 #[test]
 fn inline_region_without_an_explicit_boundary_runs_to_eof() {
-	let payload = "*** SM:EDIT src/a.ts\n*** SM:FIND\nold();\n*** SM:PUT\nnew();";
+	let payload = "*** Edit File: src/a.ts\n*** Find\nold();\n*** Replace\nnew();";
 	let text = format!("Before.\n{payload}");
 	let region = &extract_inline_sloppy_regions(&text)[0];
 	assert_eq!(region.payload, payload);
@@ -142,8 +148,8 @@ fn inline_region_without_an_explicit_boundary_runs_to_eof() {
 
 #[test]
 fn extracts_disjoint_regions_with_explicit_boundaries_and_utf16_offsets() {
-	let first = "*** SM:EDIT a.ts\n*** SM:FIND\none();\n*** SM:PUT\ntwo();";
-	let second = "*** SM:EDIT b.ts\n*** SM:FIND\nred();\n*** SM:PUT\nblue();";
+	let first = "*** Edit File: a.ts\n*** Find\none();\n*** Replace\ntwo();";
+	let second = "*** Edit File: b.ts\n*** Find\nred();\n*** Replace\nblue();";
 	let prefix = "Before 🦀.\n";
 	let text = format!("{prefix}{first}\n*** End Patch\nBetween.\n{second}");
 	let regions = extract_inline_sloppy_regions(&text);
@@ -155,17 +161,18 @@ fn extracts_disjoint_regions_with_explicit_boundaries_and_utf16_offsets() {
 
 #[test]
 fn ignores_payloads_quoted_in_markdown_fences() {
-	let text = ["```text", "*** SM:EDIT src/a.ts", "*** SM:FIND", "old", "*** SM:PUT", "new", "```"]
-		.join("\n");
+	let text =
+		["```text", "*** Edit File: src/a.ts", "*** Find", "old", "*** Replace", "new", "```"]
+			.join("\n");
 	assert!(extract_inline_sloppy_regions(&text).is_empty());
 }
 
 #[test]
 fn split_sections_coalesces_repeated_paths_in_order() {
 	let sections = split_sloppy_sections(concat!(
-		"*** SM:EDIT src/a.ts\n*** SM:FIND\none\n*** SM:PUT\n1\n",
-		"*** SM:EDIT src/b.ts\n*** SM:FIND\ntwo\n*** SM:PUT\n2\n",
-		"*** SM:EDIT src/a.ts\n*** SM:FIND\nthree\n*** SM:PUT\n3",
+		"*** Edit File: src/a.ts\n*** Find\none\n*** Replace\n1\n",
+		"*** Edit File: src/b.ts\n*** Find\ntwo\n*** Replace\n2\n",
+		"*** Edit File: src/a.ts\n*** Find\nthree\n*** Replace\n3",
 	));
 	assert_eq!(
 		sections
@@ -180,13 +187,13 @@ fn split_sections_coalesces_repeated_paths_in_order() {
 #[test]
 fn old_xml_looking_lines_are_literal_body_content() {
 	let input = concat!(
-		"*** SM:EDIT src/a.ts\n*** SM:FIND\n",
-		"const marker = \"<SM:PUT>\";\n</SM:FIND>\n",
-		"*** SM:PUT\nconst marker = \"literal\";",
+		"*** Edit File: src/a.ts\n*** Find\n",
+		"const marker = \"<Replace>\";\n</Find>\n",
+		"*** Replace\nconst marker = \"literal\";",
 	);
 	let sections = split_sloppy_sections(input);
 	let operations =
-		parse_operations(&sections[0].body, "const marker = \"<SM:PUT>\";\n</SM:FIND>\n", "src/a.ts")
+		parse_operations(&sections[0].body, "const marker = \"<Replace>\";\n</Find>\n", "src/a.ts")
 			.unwrap();
 	assert_eq!(operations[0].rewrite, OperationRewrite::Explicit {
 		text: "const marker = \"literal\";".to_owned(),
@@ -195,13 +202,13 @@ fn old_xml_looking_lines_are_literal_body_content() {
 
 #[test]
 fn returns_empty_without_a_pathful_leading_edit_header() {
-	assert!(split_sloppy_sections("*** SM:FIND\nold\n*** SM:PUT\nnew").is_empty());
-	assert!(split_sloppy_sections("*** SM:EDIT\n*** SM:FIND\nold").is_empty());
+	assert!(split_sloppy_sections("*** Find\nold\n*** Replace\nnew").is_empty());
+	assert!(split_sloppy_sections("*** Edit File:\n*** Find\nold").is_empty());
 }
 
 #[test]
 fn optional_patch_envelope_is_silent_during_normalization() {
-	let input = "\n```text\n*** Begin Patch\n*** SM:EDIT\n*** SM:FIND\nold\n*** SM:PUT\nnew\n*** \
+	let input = "\n```text\n*** Begin Patch\n*** Edit File:\n*** Find\nold\n*** Replace\nnew\n*** \
 	             End Patch\n```";
 	assert_eq!(normalize_input(input), "«\nold\n»\nnew");
 }
@@ -209,10 +216,10 @@ fn optional_patch_envelope_is_silent_during_normalization() {
 #[test]
 fn copy_ready_correction_preserves_the_complete_atomic_payload() {
 	let content = "const a = 1;\nkeep();\n";
-	let input = "*** SM:EDIT a.ts\n*** SM:FIND\nconst a = 1;\n*** SM:PUT\nconst a = 2;\n*** \
-	             SM:EDIT\n*** SM:FIND\nkeep();";
+	let input = "*** Edit File: a.ts\n*** Find\nconst a = 1;\n*** Replace\nconst a = 2;\n*** Edit \
+	             File:\n*** Find\nkeep();";
 	let error = message(input, content);
-	let start = error.find("*** SM:EDIT").expect("copy-ready payload");
+	let start = error.find("*** Edit File:").expect("copy-ready payload");
 	let completed = error[start..].replace("{new text}", "changed();");
 	let sections = split_sloppy_sections(&completed);
 	assert_eq!(sections.len(), 1);
@@ -225,7 +232,7 @@ fn copy_ready_correction_preserves_the_complete_atomic_payload() {
 #[test]
 fn truncated_register_rewrite_returns_a_parseable_all_match_skeleton() {
 	let error = message("«*\nenwlineIndex\n»1", "const first = enwlineIndex;\n");
-	let start = error.find("*** SM:EDIT").expect("copy-ready payload");
+	let start = error.find("*** Edit File:").expect("copy-ready payload");
 	let completed = error[start..].replace("{final text}", "newlineIndex");
 	let sections = split_sloppy_sections(&completed);
 	let operations =
@@ -336,9 +343,9 @@ fn ir_to_payload_preserves_operation_boundaries_all_and_terminal_newline() {
 	assert_eq!(
 		ir_to_payload(&["«*", "old", "»", "new", "«", "x"], "a.ts"),
 		concat!(
-			"*** SM:EDIT a.ts all\n*** SM:FIND\nold\n",
-			"*** SM:PUT\nnew\n*** SM:EDIT a.ts\n",
-			"*** SM:FIND\nx\n",
+			"*** Edit File: a.ts all\n*** Find\nold\n",
+			"*** Replace\nnew\n*** Edit File: a.ts\n",
+			"*** Find\nx\n",
 		)
 	);
 }
@@ -361,12 +368,12 @@ fn drops_a_copied_more_lines_notice_like_the_other_read_notices() {
 		"[\u{2026}6ln elided; re-read needed ranges with a.txt:3-8]",
 	] {
 		let payload = [
-			"*** SM:EDIT a.txt",
-			"*** SM:FIND",
+			"*** Edit File: a.txt",
+			"*** Find",
 			"keep a",
 			"keep b",
 			notice,
-			"*** SM:PUT",
+			"*** Replace",
 			"keep a",
 			"changed b",
 			notice,
@@ -394,7 +401,7 @@ fn drops_a_copied_more_lines_notice_like_the_other_read_notices() {
 fn keeps_content_that_only_resembles_a_more_lines_notice() {
 	for line in ["[3 more lines in the appendix]", "[More lines in artifact]"] {
 		let payload =
-			["*** SM:EDIT a.txt", "*** SM:FIND", "keep a", line, "*** SM:PUT", "keep b", line]
+			["*** Edit File: a.txt", "*** Find", "keep a", line, "*** Replace", "keep b", line]
 				.join("\n");
 		let operations = parse_operations(&payload, &format!("keep a\n{line}\n"), "a.ts")
 			.unwrap_or_else(|error| panic!("{line} broke matching: {error}"));

@@ -8,7 +8,6 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import type { ToolExample } from "@oh-my-pi/pi-ai";
 import type { FindToolDetails } from "@oh-my-pi/pi-tui/tools/find";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { formatBytes, formatDuration, formatNumber, isEnoent } from "@oh-my-pi/pi-utils";
@@ -23,13 +22,9 @@ import { materializeOmpScope, type OmpScope } from "./omp-scope";
 import { rankedHeat } from "./passages";
 
 const findSchema = type({
-	query: type("string").describe("what to find, in plain language (concept or behavior, not a regex)"),
-	grep_keywords: type("string[]").describe(
-		"identifiers or terms likely to appear verbatim in matching source; steer lexical pre-ranking. [] when unsure",
-	),
-	"path?": type("string").describe(
-		'directory to search, or an `omp://` docs scope (`omp://` for all harness docs, `omp://<file>.md` for one). Omitted -> the workspace root (".")',
-	),
+	query: "string",
+	grep_keywords: "string[]",
+	"path?": "string",
 });
 
 export type FindToolInput = typeof findSchema.infer;
@@ -59,21 +54,6 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 	readonly description = findDescription;
 	readonly parameters = findSchema;
 	readonly strict = true;
-
-	readonly examples: readonly ToolExample<typeof findSchema.inferIn>[] = [
-		{
-			caption: "Find a behavior by description",
-			call: { query: "where are request retries counted and reported?", grep_keywords: ["retry", "attempt"] },
-		},
-		{
-			caption: "Locate an implementation without known symbol names",
-			call: { query: "how is the database connection pooled?", grep_keywords: [] },
-		},
-		{
-			caption: "Scope the search to one directory",
-			call: { query: "where are tool renderers registered?", grep_keywords: ["renderer"], path: "packages/tui" },
-		},
-	];
 
 	constructor(private readonly session: ToolSession) {}
 

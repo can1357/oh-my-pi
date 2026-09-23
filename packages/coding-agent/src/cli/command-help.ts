@@ -144,6 +144,10 @@ export const tinyModelsHelp = {
 
 export const tokenHelp = { description: "Get the API key or OAuth token for a provider" } satisfies CommandMetadata;
 
+export const toksHelp = {
+	description: "Count a file or text with every embedded offline tokenizer (OpenAI, Claude, Qwen, …)",
+} satisfies CommandMetadata;
+
 export const ttsrHelp = {
 	description: "Inspect and test Time-Traveling Stream Rules (TTSR)",
 } satisfies CommandMetadata;

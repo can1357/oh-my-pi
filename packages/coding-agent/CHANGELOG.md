@@ -6,6 +6,17 @@
 
 - `providers.operationTimeoutSeconds` (default 900) caps the wall clock one provider request may spend across its internal retries on the Anthropic, OpenAI Responses, Codex Responses, Google and Gemini CLI paths plus the shared replay-safe stream retry. A retry whose backoff would cross the budget fails immediately with an error naming the budget and the elapsed time instead of sleeping, and the session saga replays an exhausted budget at most twice rather than running the full retry ladder — so a wedged provider surfaces in minutes instead of leaving a turn silent for hours. `0` disables the budget ([#12786](https://github.com/can1357/oh-my-pi/pull/12786) by [@geoyws](https://github.com/geoyws)).
 - `providers.operationTimeoutSeconds` now bounds time without progress (output extends it) rather than total duration. The session saga's exhausted-budget replay bound is saga-wide: a model switch no longer refunds it, and a spent bound no longer consults the fallback chain, so the "at most twice" bound holds for any chain length. Side-request oneshots replay a budget exhaustion at most once, and negative values are treated as `0` (off).
+- Added `wait` tool for monitoring background jobs, services, and peer messages
+- Added `proc://` protocol for inspecting and managing background jobs and services
+- Added `agent://` path support to `write` tool for direct agent messaging
+- Added supervised service mode to `bash` tool with `proc://` integration
+- Added Jev (TypeSafe Jev 1.13) to `toks` command supported encodings
+- Added `*** Insert Before` and `*** Insert After` to append new lines without replacing existing code
+- Added `toks` command to count tokens via offline tokenizers
+- Added automatic discovery of Apple Foundation Models on supported Apple silicon devices
+- Added recording of idle recaps to `session_recaps` table for durable storage
+- Added GC cleanup of session recap rows when deleting archived sessions
+- Implemented automatic title retry for ambiguous first messages
 - Added `/changelog last [N]` to show the latest release, or the last N releases. `/changelog` still shows the recent default and `/changelog full` still shows the complete history.
 - Added 'daybreak' badge to `omp usage` output for enabled accounts
 - Added `omp login` command for terminal-based OAuth authentication, including automated model discovery refresh and browser-opening support
@@ -21,15 +32,28 @@
 
 ### Changed
 
+- Changed default `bash.autoBackground.strategy` to `catalog`
+- Renamed `Launch` configuration group to `Services`
+- Improved terminal output for pipe-backed shells by normalizing line endings
+- Updated edit mode syntax to use `*** Edit File:`, `*** Find`, and `*** Replace` instead of `SM:` prefixed headers
 - Unified terminal OAuth flow logic across `omp login` and `omp auth-broker login`
 - Included identity account/organization info in terminal login success messages
 - Changed judgment fallback to consider only native candidates, preventing prompted models from replacing failed natives
+
+### Deprecated
+
+- Deprecated `hub` tool in favor of `wait`, `write`, and `proc://` protocols
+
+### Removed
+
+- Removed `irc.timeoutMs` configuration setting
 
 ### Fixed
 
 - Fixed comma-separated line selectors such as `:19,59` in `read`, `grep` paths, and `fetch` reading from the first number through EOF. A bare number in a list is now that single line; a lone `:50` still reads from line 50.
 - Fixed `write` success text reporting JavaScript string length as bytes. The count is now the UTF-8 byte length.
 - Fixed headless print mode (`-p`) silently dropping MCP servers slower than the startup window; print mode now waits for configured servers (bounded by `OMP_MCP_TIMEOUT_MS`) and warns on stderr when one is not ready ([#12188](https://github.com/can1357/oh-my-pi/issues/12188), reported by [@aaronjmars](https://github.com/aaronjmars)).
+- Fixed reader-mode `fetch` output passing inline SVG icons and base64 `data:` images to the model as unreadable payloads; they are now dropped and their alt text is kept ([#13006](https://github.com/can1357/oh-my-pi/pull/13006) by [@H4vC](https://github.com/H4vC)).
 
 ## [18.2.11] - 2026-09-23
 

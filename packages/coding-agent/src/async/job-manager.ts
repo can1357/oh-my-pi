@@ -9,7 +9,7 @@ const DELIVERY_RETRY_JITTER_MS = 200;
 const DEFAULT_RETENTION_MS = 5 * 60 * 1000;
 /**
  * A settled job row whose result was already consumed — auto-delivered to its
- * sink, or recovered by a foreground `hub jobs`/`hub wait` snapshot — has
+ * sink, or recovered by a foreground `wait` snapshot — has
  * served its inspectability purpose: the model holds the result, and later
  * job snapshots listing it for the full retention window is exactly the
  * "background jobs hang around after they complete" complaint. Evict shortly
@@ -41,26 +41,6 @@ const RETAINED_ARTIFACTS_CLEANUP_MAX_WAIT_MS = DEFAULT_RETENTION_MS;
 const DEFAULT_MAX_RUNNING_JOBS = 15;
 /** Abort reason used only when the owning session shuts down the entire manager. */
 export const ASYNC_JOB_MANAGER_SHUTDOWN_REASON = Symbol("AsyncJobManager shutdown");
-
-/**
- * Adaptive `hub` wait-window ladder (ms). A tight wait loop climbs these rungs
- * so each immediate re-wait backs off and stops spending turns on "still
- * running" frames; the floor (first rung) is the shortest window and the top
- * rung is the longest a wait will ever block.
- */
-export const POLL_WAIT_LADDER_MS = [5_000, 10_000, 30_000, 60_000, 300_000] as const;
-/**
- * Going at least this long between waits means the agent stepped out of the
- * wait loop to do real work — the next wait drops back to the ladder floor.
- */
-const POLL_ESCALATION_RESET_MS = 60_000;
-
-interface PollEscalationState {
-	/** Index into POLL_WAIT_LADDER_MS used for the most recent wait. */
-	level: number;
-	/** Timestamp (ms) when the most recent wait returned. */
-	lastPollEndAt: number;
-}
 
 /** Kind of work a managed job runs; drives job-row badges and delivery labels. */
 export type AsyncJobType = "bash" | "task" | "eval";
@@ -107,7 +87,7 @@ export interface AsyncJob {
 	 * Parsed structured completion for a job whose work selected an output
 	 * schema. Set from the body's {@link AsyncJobRunResult} or from an
 	 * {@link AsyncJobError}. The job row is the carrier — every delivery
-	 * attempt, redelivery, and `hub` snapshot reads it from here.
+	 * attempt, redelivery, and `proc://` snapshot reads it from here.
 	 */
 	structured?: StructuredSubagentOutput;
 	/** Latest tool-render details reported by the running job. */
@@ -258,7 +238,6 @@ export class AsyncJobManager {
 	readonly #watchedJobs = new Set<string>();
 	readonly #consumedJobResults = new Set<string>();
 	readonly #evictionTimers = new Map<string, NodeJS.Timeout>();
-	readonly #pollEscalation = new Map<string | undefined, PollEscalationState>();
 	readonly #deliverySinks = new Map<string, AsyncJobDeliverySink>();
 	readonly #onJobComplete: AsyncJobManagerOptions["onJobComplete"];
 	readonly #maxRunningJobs: number;
@@ -482,32 +461,6 @@ export class AsyncJobManager {
 		return removed;
 	}
 
-	/**
-	 * Compute the next adaptive wait window (ms) for a blocking `hub` wait by
-	 * the given owner. Consecutive waits — those starting within
-	 * POLL_ESCALATION_RESET_MS of the previous wait returning — climb
-	 * POLL_WAIT_LADDER_MS so a tight wait loop backs off; a longer gap means the
-	 * agent left to do real work, so the window resets to the floor. Pair each
-	 * call with `recordPollWaitEnd()` once the wait returns.
-	 */
-	nextPollWaitMs(ownerId: string | undefined, now: number = Date.now()): number {
-		const prev = this.#pollEscalation.get(ownerId);
-		const reset = !prev || now - prev.lastPollEndAt >= POLL_ESCALATION_RESET_MS;
-		const level = reset ? 0 : Math.min(prev.level + 1, POLL_WAIT_LADDER_MS.length - 1);
-		this.#pollEscalation.set(ownerId, { level, lastPollEndAt: prev?.lastPollEndAt ?? now });
-		return POLL_WAIT_LADDER_MS[level];
-	}
-
-	/**
-	 * Mark a blocking wait as finished so the idle-reset window is measured
-	 * from now. Waiting again before POLL_ESCALATION_RESET_MS elapses keeps
-	 * climbing the ladder; a longer gap resets it to the floor.
-	 */
-	recordPollWaitEnd(ownerId: string | undefined, now: number = Date.now()): void {
-		const prev = this.#pollEscalation.get(ownerId);
-		this.#pollEscalation.set(ownerId, { level: prev?.level ?? 0, lastPollEndAt: now });
-	}
-
 	acknowledgeDeliveries(jobIds: string[]): number {
 		const uniqueJobIds = Array.from(new Set(jobIds.map(id => id.trim()).filter(id => id.length > 0)));
 		if (uniqueJobIds.length === 0) return 0;
@@ -648,7 +601,7 @@ export class AsyncJobManager {
 	 * awaited too. Returns false when `timeoutMs` elapses first.
 	 *
 	 * `excludeSuppressed` skips jobs whose delivery is suppressed (acknowledged
-	 * or `hub`-watched): those can never re-wake a run, so quiescence barriers
+	 * or `wait`-watched): those can never re-wake a run, so quiescence barriers
 	 * pass it to share one contract with the pending-async-wake predicate.
 	 * Teardown reaps omit it — worktree safety concerns every owner process.
 	 */
@@ -780,7 +733,6 @@ export class AsyncJobManager {
 		this.#suppressedDeliveries.clear();
 		this.#watchedJobs.clear();
 		this.#consumedJobResults.clear();
-		this.#pollEscalation.clear();
 		this.#deliverySinks.clear();
 		return jobsSettled && drained;
 	}

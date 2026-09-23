@@ -6,7 +6,7 @@
 //! was computed against (the TypeScript source used UTF-16 indices; both are
 //! internal and never surface to the model).
 
-/// One `*** SM:EDIT path` target of a sloppy payload: a file plus its
+/// One `*** Edit File: path` target of a sloppy payload: a file plus its
 /// compiled op stream (`«`/`»` lines).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SloppySection {
@@ -53,13 +53,34 @@ pub enum OperationRewrite {
 	Explicit {
 		text: String,
 	},
-	/// Literal, LF-terminated lines inserted after the last matched source line.
-	After {
+	/// Literal, LF-terminated lines inserted before the first or after the last
+	/// matched source line; the match itself is kept.
+	Insert {
 		text: String,
+		at:   Placement,
 	},
 	Inline {
 		replacements: Vec<String>,
 	},
+}
+
+/// Side of the matched lines an [`OperationRewrite::Insert`] lands on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placement {
+	/// `*** Insert Before`: ahead of the first matched line.
+	Before,
+	/// `*** Insert After`: behind the last matched line.
+	After,
+}
+
+impl Placement {
+	/// Taught header naming this placement.
+	pub const fn header(self) -> &'static str {
+		match self {
+			Self::Before => "*** Insert Before",
+			Self::After => "*** Insert After",
+		}
+	}
 }
 
 /// One compiled `«` … `»` … operation.
@@ -107,11 +128,11 @@ pub struct SelectionPair {
 	pub gap_only:        bool,
 }
 
-/// Open-ended `…` edges of a `*** SM:FIND` body.
+/// Open-ended `…` edges of a `*** Find` body.
 ///
 /// An edge gap spans no text inside the match: it is dropped from the token
 /// stream (taking the newline that joined it to its neighbour with it), and a
-/// `…` on the same edge of `*** SM:PUT` re-emits it as nothing.
+/// `…` on the same edge of `*** Replace` re-emits it as nothing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EdgeGaps {
 	pub leading:  bool,
@@ -160,7 +181,7 @@ pub struct Candidate {
 	pub selection_spans: Vec<(usize, usize)>,
 	pub tuple:           Vec<usize>,
 	/// Located through the literal fallback: the pattern's `…` matched file
-	/// text verbatim, so `*** SM:PUT` ellipses are literal too.
+	/// text verbatim, so `*** Replace` ellipses are literal too.
 	pub literal_gaps:    bool,
 }
 

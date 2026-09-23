@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `docTopics` method to `AgentTool` interface for on-demand documentation
+
 ## [18.2.11] - 2026-09-23
 
 ### Fixed

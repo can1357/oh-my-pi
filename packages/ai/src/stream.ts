@@ -23,6 +23,7 @@ import { ProviderHttpError } from "./error";
 import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./error/rate-limit";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
+import type { AppleFoundationModelsOptions } from "./providers/apple-foundation-models";
 import type { MessageCreateParamsStreaming } from "./providers/anthropic-wire";
 import type { CursorOptions } from "./providers/cursor";
 import type { DevinOptions } from "./providers/devin";
@@ -39,6 +40,7 @@ import { streamPiNative } from "./providers/pi-native-client";
 import { streamSynthetic } from "./providers/synthetic";
 import {
 	streamAnthropic,
+	streamAppleFoundationModels,
 	streamAzureOpenAIResponses,
 	streamBedrock,
 	streamCursor,
@@ -1072,6 +1074,13 @@ function streamDispatch<TApi extends Api>(
 
 		case "devin-agent":
 			return streamDevin(providerModel as Model<"devin-agent">, context, providerOptions as DevinOptions);
+
+		case "apple-foundation-models":
+			return streamAppleFoundationModels(
+				providerModel as Model<"apple-foundation-models">,
+				context,
+				providerOptions as AppleFoundationModelsOptions,
+			);
 
 		default:
 			throw new AIError.ConfigurationError(`Unhandled API: ${api}`);
@@ -2499,6 +2508,12 @@ function mapOptionsForApi<TApi extends Api>(
 				...base,
 				cwd: options?.cwd,
 				toolChoice: options?.toolChoice,
+			});
+		case "apple-foundation-models":
+			return castApi<"apple-foundation-models">({
+				...base,
+				toolChoice: options?.toolChoice,
+				reasoning: options?.disableReasoning || options?.forceReasoningOff ? undefined : options?.reasoning,
 			});
 		case "devin-agent": {
 			const devinModel = model as Model<"devin-agent">;
