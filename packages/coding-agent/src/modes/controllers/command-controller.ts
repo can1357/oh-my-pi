@@ -353,7 +353,7 @@ export class CommandController {
 			const openaiWebsocketSetting = this.ctx.settings.get("providers.openaiWebsockets") ?? "auto";
 			const preferOpenAICodexWebsockets =
 				openaiWebsocketSetting === "on" ? true : openaiWebsocketSetting === "off" ? false : undefined;
-			const credentialSource = this.ctx.session.modelRegistry.authStorage.describeCredentialSource(
+			const credentialSource = this.ctx.session.modelRegistry.authStorage.keys.describe(
 				model.provider,
 				stats.sessionId,
 			);
@@ -487,10 +487,7 @@ export class CommandController {
 		// Resolve the active OAuth identity for each advisor's provider so quota
 		// filtering matches the credential actually in use (not sibling accounts).
 		const resolveActiveAdvisorAccount = (provider: string, sessionId?: string): OAuthAccountIdentity | undefined =>
-			this.ctx.session.modelRegistry.authStorage.getOAuthAccountIdentity(
-				provider,
-				sessionId ?? this.ctx.session.sessionId,
-			);
+			this.ctx.session.modelRegistry.authStorage.oauth.identity(provider, sessionId ?? this.ctx.session.sessionId);
 		const nowMs = Date.now();
 		// Roster view: show every configured advisor with its status, even when
 		// none are live (all paused/no-model). The old code returned a generic
@@ -1776,16 +1773,16 @@ function formatNumber(value: number, maxFractionDigits = 1): string {
 }
 
 function resolveProviderAuthMode(authStorage: AuthStorage, provider: string): string {
-	if (authStorage.hasOAuth(provider)) {
+	if (authStorage.credentials.hasOAuth(provider)) {
 		return "oauth";
 	}
-	if (authStorage.has(provider)) {
+	if (authStorage.credentials.has(provider)) {
 		return "api key";
 	}
 	if (getEnvApiKey(provider)) {
 		return "env api key";
 	}
-	if (authStorage.hasAuth(provider)) {
+	if (authStorage.keys.source(provider) !== undefined) {
 		return "runtime/fallback";
 	}
 	return "unknown";

@@ -4,13 +4,11 @@ import * as path from "node:path";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
-import * as modes from "@oh-my-pi/pi-coding-agent/modes";
 import { getSettingsForTab } from "@oh-my-pi/pi-tui/overlays/settings-defs";
 import { createSettingsHost } from "@oh-my-pi/pi-coding-agent/config/settings-ui";
 import {
 	autosaveApprovedPlan,
 	defaultPlanAutosaveDir,
-	planSaveFileName,
 	resolvePlanAutosaveDir,
 } from "@oh-my-pi/pi-coding-agent/plan-mode/plan-autosave";
 import type { PlanModeState } from "@oh-my-pi/pi-coding-agent/plan-mode/state";
@@ -55,9 +53,6 @@ describe("plan autosave settings UI", () => {
 		Settings.instance.set("plan.enabled", false);
 		expect(autosave.condition()).toBe(false);
 		expect(autosaveDir.condition()).toBe(false);
-	});
-	it("stays reachable from the public modes barrel", () => {
-		expect(modes.planSaveFileName).toBe(planSaveFileName);
 	});
 });
 

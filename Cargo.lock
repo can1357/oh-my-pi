@@ -4093,9 +4093,9 @@ dependencies = [
 
 [[package]]
 name = "icu_time_data"
-version = "2.3.0"
+version = "2.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "005ff86fa5851a77fc0a977b72d717f777bd9230415a247219d7898aefb1517a"
+checksum = "d9e21be527807cda7562cbfbdb04179f9cca46c12691d6a8073ffae6cfd7aeec"
 
 [[package]]
 name = "icy_sixel"
@@ -6052,7 +6052,7 @@ dependencies = [
 
 [[package]]
 name = "pi-ast"
-version = "18.2.9"
+version = "18.2.11"
 dependencies = [
  "anyhow",
  "ast-grep-core",
@@ -6122,7 +6122,7 @@ dependencies = [
 
 [[package]]
 name = "pi-builtins"
-version = "18.2.9"
+version = "18.2.11"
 dependencies = [
  "ansi-width",
  "anyhow",
@@ -6207,11 +6207,11 @@ dependencies = [
 
 [[package]]
 name = "pi-diff"
-version = "18.2.9"
+version = "18.2.11"
 
 [[package]]
 name = "pi-edit"
-version = "18.2.9"
+version = "18.2.11"
 dependencies = [
  "async-trait",
  "parking_lot",
@@ -6230,7 +6230,7 @@ dependencies = [
 
 [[package]]
 name = "pi-iso"
-version = "18.2.9"
+version = "18.2.11"
 dependencies = [
  "async-trait",
  "libc",
@@ -6242,7 +6242,7 @@ dependencies = [
 
 [[package]]
 name = "pi-natives"
-version = "18.2.9"
+version = "18.2.11"
 dependencies = [
  "anyhow",
  "arboard",
@@ -6327,7 +6327,7 @@ dependencies = [
 
 [[package]]
 name = "pi-shell"
-version = "18.2.9"
+version = "18.2.11"
 dependencies = [
  "anyhow",
  "brush-core",
@@ -6355,7 +6355,7 @@ dependencies = [
 
 [[package]]
 name = "pi-vcs"
-version = "18.2.9"
+version = "18.2.11"
 dependencies = [
  "gix",
  "gix-utils",
@@ -6370,7 +6370,7 @@ dependencies = [
 
 [[package]]
 name = "pi-voice"
-version = "18.2.9"
+version = "18.2.11"
 dependencies = [
  "bytes",
  "flume",
@@ -6384,7 +6384,7 @@ dependencies = [
 
 [[package]]
 name = "pi-walker"
-version = "18.2.9"
+version = "18.2.11"
 dependencies = [
  "globset",
  "ignore",

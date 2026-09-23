@@ -46,7 +46,7 @@ beforeAll(async () => {
 	registryRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-security-coordinator-auth-"));
 	credentialStore = await SqliteAuthCredentialStore.open(path.join(registryRoot, "agent.db"));
 	authStorage = new AuthStorage(credentialStore);
-	await authStorage.set("openai-codex", {
+	await authStorage.credentials.set("openai-codex", {
 		type: "oauth",
 		access: "fixture-access-token",
 		refresh: "fixture-refresh-token",
@@ -56,7 +56,7 @@ beforeAll(async () => {
 		orgId: "workspace-fixture",
 		orgName: "pro",
 	});
-	const account = authStorage.listOAuthAccounts("openai-codex")[0];
+	const account = authStorage.oauth.accounts("openai-codex")[0];
 	if (!account) throw new Error("expected fixture OAuth account");
 	credentialId = account.credentialId;
 	modelRegistry = new ModelRegistry(authStorage, path.join(registryRoot, "models.yml"));

@@ -62,8 +62,8 @@ function transcriptionModel(
 async function boot(): Promise<Harness> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-transcriptions-"));
 	const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-	storage.setRuntimeApiKey("openai", "openai-secret");
-	storage.setRuntimeApiKey("openrouter", "openrouter-secret");
+	storage.keys.setRuntime("openai", "openai-secret");
+	storage.keys.setRuntime("openrouter", "openrouter-secret");
 	const direct = transcriptionModel("openai", "whisper-1");
 	const routed = transcriptionModel("openrouter", "openai/whisper-large-v3");
 	const local = transcriptionModel("local", "whisper-small", "local-inference", "local://inference");
@@ -125,7 +125,7 @@ describe("auth-gateway POST /v1/audio/transcriptions", () => {
 	it("forwards multipart audio bytes and model through the broker credential", async () => {
 		harness = await boot();
 		const observed: Array<{ provider: string; model: string; costUsd?: number; client?: { app?: string } }> = [];
-		vi.spyOn(harness.storage, "recordObservedUsage").mockImplementation(entry => observed.push(entry));
+		vi.spyOn(harness.storage.usage, "observe").mockImplementation(entry => observed.push(entry));
 		const form = new FormData();
 		form.append("model", "openai/whisper-1");
 		form.append("file", new File([AUDIO], "sample.wav", { type: "audio/wav" }));

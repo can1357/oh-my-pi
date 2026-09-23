@@ -98,7 +98,7 @@ function createSessionWith(
 		const sessionManager = SessionManager.inMemory(tempDir);
 		const settings = Settings.isolated(settingsOverrides);
 		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
 		return {
 			agent,

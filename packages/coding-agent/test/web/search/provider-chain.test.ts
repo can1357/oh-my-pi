@@ -44,7 +44,7 @@ describe("web model role resolution", () => {
 	it("resolves authenticated OpenRouter chat models with web grounding", () => {
 		const authStorage = createInMemoryAuthStorage();
 		storages.add(authStorage);
-		authStorage.setRuntimeApiKey("openrouter", "test-openrouter-key");
+		authStorage.keys.setRuntime("openrouter", "test-openrouter-key");
 		const settings = Settings.isolated();
 		const modelRegistry = new ModelRegistry(authStorage, undefined, { settings });
 		const pool = roleCandidatePool("web", settings, modelRegistry);

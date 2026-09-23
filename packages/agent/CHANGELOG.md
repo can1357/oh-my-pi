@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.2.11] - 2026-09-23
+
+### Fixed
+
+- Fixed background job completions interrupting foreground Bash and eval calls, which could cause those calls to be repeatedly moved into the background.
+
 ## [18.2.9] - 2026-09-22
 
 ### Fixed

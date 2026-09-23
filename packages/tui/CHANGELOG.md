@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Updated model hub and oauth selector components to use namespaced `authStorage` API
+
+## [18.2.11] - 2026-09-23
+
+### Added
+
+- Added a Skills section to the settings.
+- Enabled OSC 8 hyperlinks in rio.
+
+### Fixed
+
+- Fixed scrolling startup release notes without requiring an initial Escape keypress.
+- Improved usage quota display so names remain distinguishable and readable in narrow and multi-column dashboards.
+
+## [18.2.10] - 2026-09-22
+
+### Changed
+
+- Added support for multiple concurrent TUI paint listeners to enable simultaneous session recording and streaming
+- Coalesced status event updates for progress-based operations to reduce TUI render overhead
+
 ## [18.2.9] - 2026-09-22
 
 ### Added

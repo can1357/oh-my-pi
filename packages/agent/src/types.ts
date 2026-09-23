@@ -300,7 +300,10 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Same rules as {@link hasIrcInterrupts}: non-consuming, only cuts
 	 * *interruptible* waits short, ignored when interruptMode is "wait". Without
 	 * it a completion notice sits behind an hour-long `hub wait` that the agent
-	 * would have abandoned had it seen the notice.
+	 * would have abandoned had it seen the notice. Unlike a peer IRC it never
+	 * raises {@link ToolCallContext.steeringSignal}: a queued completion must
+	 * not push ordinary foreground work (auto-background bash/eval) into the
+	 * background.
 	 */
 	hasBackgroundCompletions?: () => boolean | Promise<boolean>;
 

@@ -1,8 +1,9 @@
 /**
  * Resolves the {@link Judge} that answers typed judgments through the `judge`
- * model role. The chain is rebuilt for every call so live catalog discovery,
- * role edits, credential changes, and session fallback all take effect without
- * recreating feature consumers.
+ * model role. The chain is re-resolved at most every {@link CANDIDATE_TTL_MS}
+ * so live catalog discovery, role edits, credential changes, and session
+ * fallback all take effect without recreating feature consumers, while bulk
+ * callers (`judge_batch`) do not re-scan the whole catalog per item.
  */
 import {
 	type AssistantMessage,
@@ -20,11 +21,12 @@ import {
 	TextJudge,
 	TYPESAFE_PROVIDER,
 	TypeSafeJudge,
+	tokenUsage,
 	type Usage,
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelStringWithRouting, resolveRoleChain, type RoleChainCandidate } from "../config/model-resolver";
 import { roleCandidatePool } from "../config/model-roles";
@@ -95,6 +97,12 @@ const LOCAL_REASONING_MAX_TOKENS = 1024;
  * credential-rotation round trip before reaching the next candidate.
  */
 const CANDIDATE_REJECTION_COOLDOWN_MS = 5 * 60 * 1000;
+/**
+ * How long a resolved candidate list is reused. Resolution filters the full
+ * catalog (thousands of models) synchronously — milliseconds per call, which a
+ * concurrent fan-out turns into sustained event-loop stalls.
+ */
+const CANDIDATE_TTL_MS = 1_000;
 /** Skip-until timestamps keyed by routed model identity, carried by the registry that produced the rejection. */
 const kRejections = Symbol("judgment.rejections");
 interface RegistryWithRejections extends ModelRegistry {
@@ -114,7 +122,31 @@ export function kindOf(value: RoleChainCandidate | Model): JudgeKind {
 	return "online";
 }
 
-/** Resolve a live judge-role chain. Candidate resolution remains lazy per judgment call. */
+/**
+ * The `judge` role's candidates in attempt order, drawn from credentialed
+ * judge-capable models. From the first native candidate on, only native
+ * candidates remain: a prompted model never stands in for a failed native
+ * judgment, whose calibrated probabilities it cannot reproduce.
+ */
+function judgeRoleChain(settings: Settings, registry: ModelRegistry): RoleChainCandidate[] {
+	const chain = resolveRoleChain("judge", settings, roleCandidatePool("judge", settings, registry));
+	const firstNative = chain.findIndex(candidate => kindOf(candidate) === "native");
+	if (firstNative < 0) return chain;
+	return chain.filter((candidate, index) => index < firstNative || kindOf(candidate) === "native");
+}
+
+/**
+ * Whether the `judge` role resolves first to a native System One backend
+ * (TypeSafe jev, directly or through OpenRouter) rather than a prompted
+ * on-device or chat model. Judge-heavy features gate on it, e.g. the `find`
+ * tool under `find.enabled: auto`.
+ */
+export function hasNativeJudge(settings: Settings, registry: ModelRegistry): boolean {
+	const [primary] = judgeRoleChain(settings, registry);
+	return primary !== undefined && kindOf(primary) === "native";
+}
+
+/** Resolve a live judge-role chain. Candidates resolve lazily and are reused for {@link CANDIDATE_TTL_MS}. */
 export function resolveJudge(deps: JudgeDeps): ChainJudge {
 	return new ChainJudge(deps);
 }
@@ -127,6 +159,7 @@ export function resolveJudge(deps: JudgeDeps): ChainJudge {
 export class ChainJudge implements Judge {
 	readonly label = "judge role chain";
 	readonly #deps: JudgeDeps;
+	#candidates: { list: RoleChainCandidate[]; expiresAt: number } | undefined;
 
 	constructor(deps: JudgeDeps) {
 		this.#deps = deps;
@@ -170,8 +203,15 @@ export class ChainJudge implements Judge {
 					throw signal.reason instanceof Error ? signal.reason : new AIError.AbortError("judgment aborted");
 				}
 				if (isAbortOrTimeout(error)) throw error;
-				if (isAccountRejection(error)) rejections.set(identity, Date.now() + CANDIDATE_REJECTION_COOLDOWN_MS);
+				const rejected = isAccountRejection(error);
+				if (rejected) rejections.set(identity, Date.now() + CANDIDATE_REJECTION_COOLDOWN_MS);
 				lastFailure = error instanceof Error ? error.message : String(error);
+				logger.warn("judgment candidate failed", {
+					candidate: identity,
+					status: AIError.status(error),
+					error: lastFailure,
+					skippedForMs: rejected ? CANDIDATE_REJECTION_COOLDOWN_MS : undefined,
+				});
 			}
 		}
 		if (candidates.length === 0) throw new Error("judgment: no judge model available");
@@ -184,9 +224,17 @@ export class ChainJudge implements Judge {
 	}
 
 	#resolveCandidates(): RoleChainCandidate[] {
+		const now = Date.now();
+		if (this.#candidates && now < this.#candidates.expiresAt) return this.#candidates.list;
+		const list = this.#buildCandidates();
+		this.#candidates = { list, expiresAt: now + CANDIDATE_TTL_MS };
+		return list;
+	}
+
+	#buildCandidates(): RoleChainCandidate[] {
 		const { settings, registry, sessionModel } = this.#deps;
-		const candidates = resolveRoleChain("judge", settings, roleCandidatePool("judge", settings, registry));
-		if (!sessionModel) return candidates;
+		const candidates = judgeRoleChain(settings, registry);
+		if (!sessionModel || candidates.some(candidate => kindOf(candidate) === "native")) return candidates;
 		const sessionIdentity = formatModelStringWithRouting(sessionModel);
 		if (candidates.some(candidate => formatModelStringWithRouting(candidate.model) === sessionIdentity)) {
 			return candidates;
@@ -262,9 +310,10 @@ class LocalTextBackend implements TextBackend {
 }
 
 /**
- * Report each native judgment's usage. TypeSafe itself reports tokens only, so
- * a response without a billed amount is priced from the catalog model; a
- * route that bills (OpenRouter) keeps its reported cost.
+ * Report each native judgment attempt's usage, failed ones included so the
+ * session ledger shows why a judgment errored. TypeSafe itself reports tokens
+ * only, so a response without a billed amount is priced from the catalog
+ * model; a route that bills (OpenRouter) keeps its reported cost.
  */
 function usageReportingTypeSafeJudge(judge: TypeSafeJudge, model: Model, onUsage: JudgeDeps["onUsage"]): Judge {
 	return {
@@ -273,7 +322,21 @@ function usageReportingTypeSafeJudge(judge: TypeSafeJudge, model: Model, onUsage
 			request: JudgmentRequest<Q>,
 			options?: JudgeOptions,
 		): Promise<JudgmentResult<Q>> {
-			const result = await judge.judge(request, options);
+			let result: JudgmentResult<Q>;
+			try {
+				result = await judge.judge(request, options);
+			} catch (error) {
+				onUsage?.({
+					role: TYPESAFE_PROVIDER,
+					api: judge.api,
+					provider: judge.provider,
+					model: judge.model,
+					usage: tokenUsage(0, 0),
+					stopReason: isAbortOrTimeout(error) ? "aborted" : "error",
+					errorMessage: error instanceof Error ? error.message : String(error),
+				});
+				throw error;
+			}
 			if (result.usage.cost.total === 0) calculateCost(model, result.usage);
 			onUsage?.({
 				role: TYPESAFE_PROVIDER,

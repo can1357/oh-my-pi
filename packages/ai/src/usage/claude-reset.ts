@@ -1,4 +1,6 @@
-import type { UsageResetCredit, UsageResetCredits } from "../usage";
+import type { UsageReport, UsageResetCredit, UsageResetCredits } from "../usage";
+import { isUsageLimitReached } from "../auth/usage-report";
+import { claudeRankingStrategy } from "./claude";
 import type { FetchImpl } from "../types";
 import { isRecord } from "../utils";
 import {
@@ -23,6 +25,23 @@ const CLAUDE_RESET_WINDOW_IDS: Readonly<Record<string, string>> = {
 	seven_day_opus: "anthropic:7d:opus",
 	seven_day_sonnet: "anthropic:7d:sonnet",
 };
+
+/** Return the block scopes healed by a partial Claude reset, without mutating stored blocks. */
+export function claudeResetClearedBlockScopes(cleared: readonly string[], report: UsageReport): (string | undefined)[] {
+	const shared = report.limits.filter(limit => limit.scope.shared);
+	if (!["anthropic:5h", "anthropic:7d"].every(id => shared.some(limit => limit.id === id))) return [];
+	const unscoped = report.limits.filter(
+		limit => limit.scope.shared || limit.scope.tier === "opus" || limit.scope.tier === "sonnet",
+	);
+	const scopes = [
+		{ blockScope: undefined, limits: unscoped },
+		...(claudeRankingStrategy.healableBlockScopes?.(report) ?? []),
+	];
+	return scopes
+		.filter(scope => scope.limits.some(limit => cleared.includes(limit.id)))
+		.filter(scope => !isUsageLimitReached(scope.limits.filter(limit => !cleared.includes(limit.id))))
+		.map(scope => scope.blockScope);
+}
 
 /** OAuth credential and transport used for an account's Claude reset operations. */
 export interface ClaudeResetAuth {
@@ -448,9 +467,14 @@ async function withResolvedOrganization(
 }
 
 /**
- * Reuse program blocks when a normal usage response actually includes them.
- * A lone non-redeemable Cedar block is inconclusive because Juniper requires
- * the separate at-wall read, so callers must still perform discovery.
+ * Reuse program blocks when a normal usage response actually evaluated them.
+ * Anthropic lists every promo program as a key on the plain `/usage` body and
+ * leaves the value `null` until the matching probe query (`?cedar_ember=1`,
+ * `?at_wall=1`) asks for an evaluation, so a `null` block is "unknown", never
+ * "no resets". Only an object block is an answer; anything else returns `null`
+ * so the caller falls through to {@link listClaudeResetCredits}. A lone
+ * non-redeemable Cedar block is likewise inconclusive because Juniper requires
+ * the separate at-wall read.
  *
  * @internal
  */
@@ -459,26 +483,24 @@ export function parseClaudeResetCreditsFromUsagePayload(
 	orgId?: string,
 	baseUrl?: string,
 ): ClaudeResetCreditList | null {
-	if (!isRecord(payload) || !Object.hasOwn(payload, CEDAR_PROGRAM)) return null;
-	const parsedCedar = parseCedarStatus(payload[CEDAR_PROGRAM]);
-	if (!parsedCedar.ok) return null;
+	if (!isRecord(payload)) return null;
+	const cedarBlock = payload[CEDAR_PROGRAM];
+	const juniperBlock = payload[JUNIPER_PROGRAM];
 	const normalizedOrgId = orgId?.trim();
 	const safeOrgId = normalizedOrgId && ORGANIZATION_ID.test(normalizedOrgId) ? normalizedOrgId : undefined;
-	const cedarList = parsedCedar.status ? normalizeCedarList(parsedCedar.status, safeOrgId, baseUrl) : undefined;
-	if (cedarList && (cedarList.availableCount > 0 || cedarList.nextCreditId)) return cedarList;
-	if (!Object.hasOwn(payload, JUNIPER_PROGRAM)) return null;
-	const parsedJuniper = parseJuniperStatus(payload[JUNIPER_PROGRAM]);
-	if (!parsedJuniper.ok) return null;
-	if (parsedJuniper.status) return normalizeJuniperList(parsedJuniper.status, safeOrgId, baseUrl);
-	if (cedarList) return cedarList;
-	return {
-		availableCount: 0,
-		redeemableCount: 0,
-		eligible: false,
-		credits: [],
-		...(safeOrgId ? { orgId: safeOrgId } : {}),
-		...(baseUrl ? { baseUrl } : {}),
-	};
+	let cedarList: ClaudeResetCreditList | undefined;
+	if (isRecord(cedarBlock)) {
+		const parsedCedar = parseCedarStatus(cedarBlock);
+		if (!parsedCedar.ok || !parsedCedar.status) return null;
+		cedarList = normalizeCedarList(parsedCedar.status, safeOrgId, baseUrl);
+		if (cedarList.availableCount > 0 || cedarList.nextCreditId) return cedarList;
+	}
+	if (isRecord(juniperBlock)) {
+		const parsedJuniper = parseJuniperStatus(juniperBlock);
+		if (!parsedJuniper.ok || !parsedJuniper.status) return null;
+		return normalizeJuniperList(parsedJuniper.status, safeOrgId, baseUrl);
+	}
+	return cedarList ?? null;
 }
 
 /**
