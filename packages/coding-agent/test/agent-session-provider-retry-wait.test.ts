@@ -28,6 +28,7 @@ import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { asGlobalFetch } from "./helpers/fetch-mock";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
 /** Minimal well-formed Anthropic SSE turn; shape copied from packages/ai/test/anthropic-stream-timeout.test.ts. */
@@ -213,25 +214,38 @@ describe("createAgentSession provider retry wait visibility", () => {
 	});
 
 	it("keeps an auto-learn capture retry wait out of an active main turn", async () => {
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		const bundledModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!bundledModel) throw new Error("Expected bundled Anthropic test model to exist");
+		// The capture agent builds its own provider request, so this case cannot
+		// hand the stream a `fetch` the way `runTurn` does. On the bundled https
+		// endpoint that request takes Anthropic's default transport, `coworkFetch`
+		// over `node:https`, which a `globalThis.fetch` spy never sees: the capture
+		// dials api.anthropic.com for real, 401s on the test key, and the 529 below
+		// never happens. A plain-http loopback endpoint takes coworkFetch's
+		// non-https bypass onto the global fetch (pinned by
+		// packages/ai/test/cowork-fetch-proxy.test.ts), so the spy answers every
+		// capture request and nothing leaves the machine.
+		const captureBaseUrl = "http://127.0.0.1:9";
+		const model: Model<Api> = { ...bundledModel, baseUrl: captureBaseUrl };
 		let signalCaptureFetch!: () => void;
 		const captureFetchStarted = new Promise<void>(resolve => (signalCaptureFetch = resolve));
 		let releaseCaptureFetch!: () => void;
 		const captureFetchReleased = new Promise<void>(resolve => (releaseCaptureFetch = resolve));
-		let captureFetchCalls = 0;
-		vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
-			captureFetchCalls++;
-			if (captureFetchCalls === 1) {
-				signalCaptureFetch();
-				await captureFetchReleased;
-				return new Response('{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}', {
-					status: 529,
-					headers: { "content-type": "application/json", "request-id": "req_capture_overloaded" },
-				});
-			}
-			return anthropicSseResponse("capture complete");
-		});
+		const captureRequestUrls: string[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async input => {
+				captureRequestUrls.push(input instanceof Request ? input.url : String(input));
+				if (captureRequestUrls.length === 1) {
+					signalCaptureFetch();
+					await captureFetchReleased;
+					return new Response('{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}', {
+						status: 529,
+						headers: { "content-type": "application/json", "request-id": "req_capture_overloaded" },
+					});
+				}
+				return anthropicSseResponse("capture complete");
+			}),
+		);
 		mockSchedulerWaitWithClock();
 
 		authStorage.keys.setRuntime("anthropic", "sk-ant-test");
@@ -265,8 +279,11 @@ describe("createAgentSession provider retry wait visibility", () => {
 			let mainCalls = 0;
 			let releaseMain!: () => void;
 			const mainReleased = new Promise<void>(resolve => (releaseMain = resolve));
+			let signalSecondMainStream!: () => void;
+			const secondMainStreamStarted = new Promise<void>(resolve => (signalSecondMainStream = resolve));
 			session.agent.streamFn = () => {
 				const call = ++mainCalls;
+				if (call === 2) signalSecondMainStream();
 				const stream = new AssistantMessageEventStream();
 				const message: AssistantMessage = {
 					role: "assistant",
@@ -309,12 +326,18 @@ describe("createAgentSession provider retry wait visibility", () => {
 			await firstAgentEnded;
 			await captureFetchStarted;
 			const activeMain = session.prompt("keep the next real turn active");
-			while (!session.agent.state.isStreaming) await Promise.resolve();
+			// Gate on the held second main stream, not a microtask poll of
+			// `isStreaming`: the prompt reaches streaming only after a macrotask, so
+			// a `Promise.resolve()` loop starves the event loop and hangs the whole
+			// run past the per-test timeout.
+			await secondMainStreamStarted;
 			releaseCaptureFetch();
 			try {
 				await waitObserved;
 
 				expect(session.agent.state.isStreaming).toBe(true);
+				// The 529 came from the capture agent's own provider request.
+				expect(captureRequestUrls[0]).toBe(`${captureBaseUrl}/v1/messages`);
 				expect(starts).toHaveLength(1);
 				expect(starts[0]).toMatchObject({ type: "provider_retry_wait_start", role: "side", waitId: 1 });
 			} finally {
