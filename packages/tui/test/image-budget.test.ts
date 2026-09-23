@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
+import * as natives from "@oh-my-pi/pi-natives";
 import { TUI } from "@oh-my-pi/pi-tui";
 import { Image, ImageBudget } from "@oh-my-pi/pi-tui/components/image";
 import { Text } from "@oh-my-pi/pi-tui/components/text";
@@ -406,6 +407,35 @@ describe("Image budget integration", () => {
 		image.render(20);
 		budget.endPass();
 		expect([...budget.takeTransmits()]).toEqual([]);
+	});
+
+	it("encodes a budgeted SIXEL image once across render passes", () => {
+		terminal.imageProtocol = ImageProtocol.Sixel;
+		const encodeSixel = spyOn(natives, "encodeSixel");
+		try {
+			const budget = new ImageBudget(3, () => {});
+			const image = new Image(
+				BASE64_ONE_PIXEL_PNG,
+				"image/png",
+				{ fallbackColor: t => t },
+				{ maxWidthCells: 4, maxHeightCells: 4, budget, imageKey: "k" },
+			);
+
+			const frames: (readonly string[])[] = [];
+			for (let pass = 0; pass < 3; pass++) {
+				budget.beginPass();
+				frames.push(image.render(20));
+				budget.endPass();
+			}
+
+			// SIXEL carries the image inside the line and never registers a
+			// transmit; each extra encode is a full synchronous re-encode per frame.
+			expect(encodeSixel).toHaveBeenCalledTimes(1);
+			expect(frames[0]?.at(-1)).toContain("\x1bP");
+			expect(frames[2]).toEqual(frames[0]!);
+		} finally {
+			encodeSixel.mockRestore();
+		}
 	});
 
 	it("moves back up before multi-row direct Kitty placements and restores the cursor below them", () => {
