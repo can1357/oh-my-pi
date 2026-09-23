@@ -258,6 +258,11 @@ export class TerminalInfo {
 		// users get. So follow the (Zellij-swallowed) OSC with a plain BEL.
 		if (this.notifyProtocol !== NotifyProtocol.Bell && isInsideZellij()) {
 			process.stdout.write(`${formatted}\x07`);
+			// The swallowed OSC cannot produce a desktop toast. Use the same
+			// Linux fallback as BEL-only terminals while retaining the pane flag.
+			if (shouldDeliverDesktopNotification(this.id, true)) {
+				sendDesktopNotification(message);
+			}
 			return;
 		}
 		process.stdout.write(formatted);
