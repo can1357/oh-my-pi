@@ -135,13 +135,13 @@
       }
     },
     "stdioServer": {
+      "unevaluatedProperties": false,
       "allOf": [
         {
           "$ref": "#/$defs/serverBase"
         },
         {
           "type": "object",
-          "additionalProperties": false,
           "required": ["command"],
           "properties": {
             "type": {
@@ -177,13 +177,13 @@
       ]
     },
     "httpServer": {
+      "unevaluatedProperties": false,
       "allOf": [
         {
           "$ref": "#/$defs/serverBase"
         },
         {
           "type": "object",
-          "additionalProperties": false,
           "required": ["type", "url"],
           "properties": {
             "type": {
@@ -208,13 +208,13 @@
       ]
     },
     "sseServer": {
+      "unevaluatedProperties": false,
       "allOf": [
         {
           "$ref": "#/$defs/serverBase"
         },
         {
           "type": "object",
-          "additionalProperties": false,
           "required": ["type", "url"],
           "properties": {
             "type": {
