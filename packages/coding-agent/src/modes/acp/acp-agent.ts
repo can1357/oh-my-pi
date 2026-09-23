@@ -2634,6 +2634,10 @@ export class AcpAgent implements Agent {
 				reload: async () => {
 					await record.session.reload();
 				},
+				refreshSkills: async () => {
+					await record.session.refreshSkillsFromDisk();
+					await this.#emitAvailableCommandsUpdate(record);
+				},
 				compact: instructionsOrOptions => runExtensionCompact(record.session, instructionsOrOptions),
 			},
 			uiContext,

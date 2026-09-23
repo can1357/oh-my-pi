@@ -460,6 +460,7 @@ export class ExtensionRunner {
 	#navigateTreeHandler: NavigateTreeHandler = async () => ({ cancelled: false });
 	#switchSessionHandler: SwitchSessionHandler = async () => ({ cancelled: false });
 	#reloadHandler: () => Promise<void> = async () => {};
+	#refreshSkillsHandler: () => Promise<void> = async () => {};
 	#shutdownHandler: ShutdownHandler = () => {};
 	#getMemoryFn?: () => MemoryRuntimeContext | undefined;
 	#commandDiagnostics: Array<{ type: string; message: string; path: string }> = [];
@@ -711,6 +712,7 @@ export class ExtensionRunner {
 			this.#navigateTreeHandler = commandContextActions.navigateTree;
 			this.#switchSessionHandler = commandContextActions.switchSession;
 			this.#reloadHandler = commandContextActions.reload;
+			this.#refreshSkillsHandler = commandContextActions.refreshSkills;
 			this.#getContextUsageFn = commandContextActions.getContextUsage;
 			this.#compactFn = commandContextActions.compact;
 		}
@@ -1261,6 +1263,7 @@ export class ExtensionRunner {
 			navigateTree: (targetId, options) => this.#navigateTreeHandler(targetId, options),
 			switchSession: sessionPath => this.#switchSessionHandler(sessionPath),
 			reload: () => this.#reloadHandler(),
+			refreshSkills: () => this.#refreshSkillsHandler(),
 			compact: instructionsOrOptions => this.#compactFn(instructionsOrOptions),
 		};
 	}

@@ -553,6 +553,12 @@ export interface ExtensionCommandContext extends ExtensionContext {
 	/** Reload the current session/runtime state. */
 	reload(): Promise<void>;
 
+	/**
+	 * Reload settings from disk, rediscover skills, and refresh skill slash
+	 * completions. Does not rewrite or re-read the session JSONL.
+	 */
+	refreshSkills(): Promise<void>;
+
 	/** Compact the session context (interactive mode shows UI). */
 	compact(instructionsOrOptions?: string | CompactOptions): Promise<void>;
 }
@@ -1740,6 +1746,7 @@ export interface ExtensionCommandContextActions {
 	compact: (instructionsOrOptions?: string | CompactOptions) => Promise<void>;
 	switchSession: (sessionPath: string) => Promise<{ cancelled: boolean }>;
 	reload: () => Promise<void>;
+	refreshSkills: () => Promise<void>;
 }
 
 /** Full runtime = state + actions, including host-compatible service-tier fallbacks. */

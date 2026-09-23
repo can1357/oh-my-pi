@@ -286,6 +286,9 @@ Command handlers additionally get:
 - `branch(entryId)`
 - `navigateTree(targetId, { summarize })`
 - `reload()`
+- `refreshSkills()`
+
+`reload()` re-reads the current session JSONL. `refreshSkills()` reloads settings from disk and rediscovers skills so TUI/RPC/ACP skill completions update without rewriting the session file.
 
 Use command context for session-control flows; these methods are intentionally separated from general event handlers.
 

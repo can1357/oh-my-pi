@@ -153,6 +153,9 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 			reload: async () => {
 				await session.reload();
 			},
+			refreshSkills: async () => {
+				await session.refreshSkillsFromDisk();
+			},
 			compact: instructionsOrOptions => runExtensionCompact(session, instructionsOrOptions),
 		},
 		uiContext,
