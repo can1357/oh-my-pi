@@ -4033,12 +4033,75 @@ describe("agentLoop steering during the provider wait", () => {
 		);
 	}
 
+	it("rebuilds the first dispatch when steering arrives during credential resolution", async () => {
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+		const queue = createSteeringQueue();
+		const mock = createMockModel();
+		const resolverStarted = Promise.withResolvers<void>();
+		const releaseCredential = Promise.withResolvers<string>();
+		const contexts: Context[] = [];
+		let getApiKeyCalls = 0;
+		let resolverCalls = 0;
+
+		const streamFn: StreamFn = (_model, llmContext) => {
+			contexts.push(llmContext);
+			const response = new AssistantMessageEventStream();
+			queueMicrotask(() => pushAnswer(response, "answer with steer"));
+			return response;
+		};
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "immediate",
+			getApiKey: () => {
+				getApiKeyCalls++;
+				return async () => {
+					resolverCalls++;
+					resolverStarted.resolve();
+					return releaseCredential.promise;
+				};
+			},
+			...queue.config,
+		};
+
+		const run = (async (): Promise<AgentEvent[]> => {
+			const events: AgentEvent[] = [];
+			for await (const event of agentLoop([createUserMessage("start")], context, config, undefined, streamFn)) {
+				events.push(event);
+			}
+			return events;
+		})();
+
+		await resolverStarted.promise;
+		queue.push("actually, do X instead");
+		await drainWatcherTurn();
+		// Credential selection is still blocked, so no stale request reached the transport.
+		expect(contexts).toEqual([]);
+		releaseCredential.resolve("resolved-key");
+		const events = await run;
+
+		expect(getApiKeyCalls).toBe(1);
+		expect(resolverCalls).toBe(1);
+		expect(contexts).toHaveLength(1);
+		expect(contexts[0]?.messages.some(m => m.role === "user" && m.content === "actually, do X instead")).toBe(
+			true,
+		);
+		expect(queue.size).toBe(0);
+		expect(assistantTexts(events)).toEqual(["answer with steer"]);
+		expect(
+			events.some(
+				e => e.type === "message_end" && e.message.role === "assistant" && e.message.stopReason === "aborted",
+			),
+		).toBe(false);
+	});
+
 	it("cancels a request that streamed nothing and re-issues it with the steer", async () => {
 		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
 		const queue = createSteeringQueue();
 		const mock = createMockModel();
 		const contexts: Context[] = [];
 		let firstRequestAborted = false;
+		let resolverCalls = 0;
 
 		const streamFn: StreamFn = (_model, llmContext, options) => {
 			contexts.push(llmContext);
@@ -4064,6 +4127,10 @@ describe("agentLoop steering during the provider wait", () => {
 			model: mock.model,
 			convertToLlm: identityConverter,
 			interruptMode: "immediate",
+			getApiKey: () => async () => {
+				resolverCalls++;
+				return "key-" + resolverCalls;
+			},
 			...queue.config,
 		};
 
@@ -4074,6 +4141,7 @@ describe("agentLoop steering during the provider wait", () => {
 
 		expect(firstRequestAborted).toBe(true);
 		expect(contexts.length).toBe(2);
+		expect(resolverCalls).toBe(2);
 		// The steer is in context for the re-issued call, and the queue is empty
 		// before that call starts, so it cannot interrupt its own replacement.
 		expect(contexts[1]?.messages.some(m => m.role === "user" && m.content === "actually, do X instead")).toBe(true);

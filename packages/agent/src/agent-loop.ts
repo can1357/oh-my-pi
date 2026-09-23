@@ -4,6 +4,7 @@
  */
 import { scheduler } from "node:timers/promises";
 import {
+	type ApiKey,
 	type AssistantMessage,
 	type AssistantMessageEvent,
 	type AssistantMessageEventStream,
@@ -198,8 +199,15 @@ const STEER_INTERRUPT_ABORT_REASON = "__omp.steer_interrupt__";
  * partial (and no thinking signature) that has to survive the replay. The
  * provider may still charge for the prompt it had already accepted.
  */
+interface ResolvedRequestCredential {
+	readonly model: Model;
+	readonly sessionId: string | undefined;
+	readonly requestApiKey: ApiKey | undefined;
+	readonly resolvedApiKey: string | undefined;
+}
+
 class SteerInterruption extends Error {
-	constructor() {
+	constructor(readonly credential?: ResolvedRequestCredential) {
 		super("Provider request cancelled by queued steering before any output");
 		this.name = "SteerInterruption";
 	}
@@ -1437,6 +1445,10 @@ async function runLoopBody(
 		// Consecutive steer re-issues within this turn (see MAX_STEER_REISSUES):
 		// reset whenever a call produces output, alongside the Harmony counters.
 		let steerReissueCount = 0;
+		// A credential whose request was discarded before output may be consumed by
+		// its immediate steer replacement. The callee rejects it when the dynamic
+		// model or session changed while the queue was drained.
+		let steerCredential: ResolvedRequestCredential | undefined;
 
 		// Soft tool requirement lifecycle (reminder then escalation; see SoftToolRequirement).
 		// The host-owned state survives only a gate stop between Agent.prompt calls.
@@ -1672,11 +1684,13 @@ async function runLoopBody(
 						// disagreement) or once the re-issue cap is hit, so a
 						// further steer waits for the turn boundary.
 						!steerInterruptDrainedNothing && steerReissueCount < MAX_STEER_REISSUES,
+						steerCredential,
 					);
 					harmonyRetryAttempt = 0;
 					harmonyTruncateResumeCount = 0;
 					steerInterruptDrainedNothing = false;
 					steerReissueCount = 0;
+					steerCredential = undefined;
 				} catch (err) {
 					if (err instanceof SteerInterruption) {
 						if (signal?.aborted) {
@@ -1696,6 +1710,7 @@ async function runLoopBody(
 							);
 							steerInterruptDrainedNothing = false;
 						} else {
+							steerCredential = err.credential;
 							// Queued steering cancelled a model call that had produced no
 							// output: nothing streamed and no assistant boundary was emitted or
 							// persisted — so there is nothing to pair, replay, or explain to
@@ -2142,6 +2157,8 @@ async function streamAssistantResponse(
 	canDispatchFinalToolCalls?: (message: AssistantMessage) => boolean,
 	/** False after a steer interrupt whose dequeue came back empty (see runLoopBody). */
 	allowSteerInterrupt = true,
+	/** Credential resolved by the immediately interrupted attempt, reusable only for the same model and session. */
+	credential?: ResolvedRequestCredential,
 ): Promise<AssistantMessage> {
 	const providerCall = prepared ?? (await prepareProviderCall(context, config, signal));
 	const { model, context: llmContext, promptToolWireTools, ownedDialect } = providerCall;
@@ -2190,13 +2207,65 @@ async function streamAssistantResponse(
 			: providerAbortSignals.length === 1
 				? providerAbortSignals[0]!
 				: AbortSignal.any(providerAbortSignals);
-	const requestApiKey = (config.getApiKey ? await config.getApiKey(model) : undefined) ?? config.apiKey;
-	const resolvedApiKey = await resolveApiKeyOnce(requestApiKey, finalRequestSignal);
+	// Open the pre-output window before credential selection: OAuth refresh can
+	// be the longest part of a request, and a steer queued there must rebuild the
+	// context before anything reaches the provider. The refresh itself settles
+	// and is carried into the immediate replacement so account selection and
+	// other mutating resolver work do not run twice.
+	let steerWindowOpen = true;
+	let steerDetected = false;
+	const steerWatch = steerInterruptController
+		? watchSteeringQueue(config, requestSignal, () => {
+				if (!steerWindowOpen || requestSignal?.aborted) return false;
+				steerDetected = true;
+				return true;
+			})
+		: undefined;
+	const steerRace = steerWatch?.fired.then((): typeof STEER_INTERRUPTED => STEER_INTERRUPTED);
+	// The baseline must precede both credential work and provider dispatch.
+	await steerWatch?.ready;
+	const abortForSteer = (): void => {
+		steerWindowOpen = false;
+		steerWatch?.stop();
+		steerInterruptController?.abort(STEER_INTERRUPT_ABORT_REASON);
+	};
+
+	const reusableCredential =
+		credential?.model === model && credential.sessionId === config.sessionId ? credential : undefined;
+	let requestApiKey: ApiKey | undefined;
+	let resolvedApiKey: string | undefined;
+	try {
+		requestApiKey = reusableCredential
+			? reusableCredential.requestApiKey
+			: ((config.getApiKey ? await config.getApiKey(model) : undefined) ?? config.apiKey);
+		resolvedApiKey = reusableCredential
+			? reusableCredential.resolvedApiKey
+			: await resolveApiKeyOnce(requestApiKey, finalRequestSignal);
+	} catch (error) {
+		steerWatch?.stop();
+		throw error;
+	}
+	const resolvedCredential: ResolvedRequestCredential = {
+		model,
+		sessionId: config.sessionId,
+		requestApiKey,
+		resolvedApiKey,
+	};
+	if (steerDetected && !requestSignal?.aborted) {
+		abortForSteer();
+		throw new SteerInterruption(resolvedCredential);
+	}
 	const apiKey = isApiKeyResolver(requestApiKey) ? seedApiKeyResolver(resolvedApiKey, requestApiKey) : requestApiKey;
 
 	// Re-resolve metadata after credential selection so the per-request value
 	// reflects the credential actually used, not the snapshot from AgentLoopConfig construction.
-	const resolvedMetadata = config.metadataResolver ? config.metadataResolver(model.provider) : config.metadata;
+	let resolvedMetadata: AgentLoopConfig["metadata"];
+	try {
+		resolvedMetadata = config.metadataResolver ? config.metadataResolver(model.provider) : config.metadata;
+	} catch (error) {
+		steerWatch?.stop();
+		throw error;
+	}
 	const effectiveTemperature =
 		harmonyRetryAttempt > 0 && config.temperature !== undefined ? config.temperature + 0.05 : config.temperature;
 	// Owned tool calling sends no native tools, so any tool_choice would error.
@@ -2205,7 +2274,13 @@ async function streamAssistantResponse(
 	const effectiveDisableReasoning = dynamicDisableReasoning ?? config.disableReasoning;
 	// `getCwd` is read once per LLM call so a mid-run session move (`/move`) reaches
 	// workspace-scoped provider discovery; falls back to the static `cwd` when unset.
-	const effectiveCwd = config.getCwd?.() ?? config.cwd;
+	let effectiveCwd: AgentLoopConfig["cwd"];
+	try {
+		effectiveCwd = config.getCwd?.() ?? config.cwd;
+	} catch (error) {
+		steerWatch?.stop();
+		throw error;
+	}
 
 	const chatStepNumber = stepCounter.count;
 	stepCounter.count += 1;
@@ -2248,37 +2323,6 @@ async function streamAssistantResponse(
 
 	try {
 		return await runInActiveSpan(chatSpan, async () => {
-			// Open until the request produces its first stream event. The watcher only
-			// *reports* queued steering — it never aborts. The provider is cancelled
-			// below, and only once a race has actually been decided in the steer's
-			// favour: aborting from the callback would kill a request whose first
-			// event had already settled that race, truncating output the user is
-			// about to read.
-			let steerWindowOpen = true;
-			const steerWatch = steerInterruptController
-				? watchSteeringQueue(config, requestSignal, () => steerWindowOpen && !requestSignal?.aborted)
-				: undefined;
-			const steerRace = steerWatch?.fired.then((): typeof STEER_INTERRUPTED => STEER_INTERRUPTED);
-			// The baseline peek is async even for a synchronous host, so issuing
-			// the provider call first would let a steer that arrives in between
-			// count as baseline and never fire. `ready` also resolves on
-			// abort/stop/peek failure, so this cannot hang the call.
-			await steerWatch?.ready;
-			/**
-			 * Cancel the provider request the steer just won the race against.
-			 *
-			 * Called ONLY from a branch that has already decided in the steer's
-			 * favour and throws {@link SteerInterruption} straight after, so the
-			 * rejection this abort provokes (pi-ai `fail()`s the stream and rejects
-			 * the in-flight waiter with the reason) is always abandoned, never
-			 * awaited — `STEER_INTERRUPT_ABORT_REASON` can therefore not surface as a
-			 * run error.
-			 */
-			const abortForSteer = (): void => {
-				steerWindowOpen = false;
-				steerWatch?.stop();
-				steerInterruptController?.abort(STEER_INTERRUPT_ABORT_REASON);
-			};
 			let response: AssistantMessageEventStream;
 			try {
 				const pendingResponse = Promise.resolve(
