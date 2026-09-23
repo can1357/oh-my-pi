@@ -174,8 +174,8 @@ export interface AgentSessionConfig {
 	/**
 	 * Owning conversation id for `/fast` session-scope resolution. Subagents
 	 * inherit the root conversation's id so a session-scoped selection covers
-	 * every descendant; when unset the session resolves against its own
-	 * {@link AgentSession.sessionId}.
+	 * every descendant; when unset the session uses its persisted conversation
+	 * id, never a provider-side routing/cache id.
 	 */
 	fastModeSessionId?: string;
 	/** Prompt templates for expansion. */

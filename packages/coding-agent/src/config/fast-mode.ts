@@ -158,3 +158,23 @@ export function applyFastModeAction(
 		return next;
 	});
 }
+
+/** Carry a session selection across `/new` without issuing a new enable action. */
+export function inheritSessionFastMode(
+	sourceSessionId: string,
+	targetSessionId: string,
+	filePath: string = fastModeScopesPath(),
+): void {
+	if (sourceSessionId === targetSessionId || !Object.hasOwn(readFastModeScopes(filePath).sessions, sourceSessionId)) {
+		return;
+	}
+	withFileLockSync(filePath, () => {
+		// Off may have cleared the selection while this transition waited for the lock.
+		const state = readFastModeScopes(filePath);
+		if (!Object.hasOwn(state.sessions, sourceSessionId)) return;
+		writeFastModeScopes(filePath, {
+			...state,
+			sessions: { ...state.sessions, [targetSessionId]: state.sessions[sourceSessionId] },
+		});
+	});
+}

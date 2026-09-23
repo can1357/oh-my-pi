@@ -486,7 +486,7 @@ close, or Escape to cancel. Headless callers can use the explicit text forms:
 
 | Command | Scope |
 | --- | --- |
-| `/fast session` | This conversation and all its subagents, including nested and already-running agents. A resumed conversation keeps its selection until Off. |
+| `/fast session` | This conversation and all its subagents, including nested and already-running agents. `/new` carries the selection forward, and resumed conversations keep their selection until Off. Reusing a provider-side session ID does not extend this scope to unrelated conversations. |
 | `/fast provider` | Every request whose exact `model.provider` matches the current model's provider, across existing and future sessions. For example, `openai-codex` and `openai` are separate providers even though they share a tier family. |
 | `/fast global` | Existing and future sessions across providers, wherever the request model supports fast processing. |
 | `/fast off` | Clear every session, provider, and global selection and suppress base `priority` settings. Non-priority settings such as `flex` are preserved. |

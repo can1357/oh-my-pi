@@ -45,7 +45,7 @@ describe("/fast targets the current model's service-tier family", () => {
 		return createSessionForModel(model);
 	}
 
-	async function createSessionForModel(model: Model<Api>): Promise<AgentSession> {
+	async function createSessionForModel(model: Model<Api>, providerSessionId?: string): Promise<AgentSession> {
 		const agent = new Agent({
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
 		});
@@ -55,6 +55,7 @@ describe("/fast targets the current model's service-tier family", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated(),
 			modelRegistry,
+			providerSessionId,
 		});
 		session.subscribe(() => {});
 		return session;
@@ -152,6 +153,24 @@ describe("/fast targets the current model's service-tier family", () => {
 		expect(session.serviceTierByFamily.anthropic).toBe("priority");
 		expect(session.toggleFastMode()).toBe(false);
 		expect(session.serviceTierByFamily.anthropic).toBeUndefined();
+	});
+
+	it("does not share session fast mode through a provider session ID", async () => {
+		const model = getBundledModel("openai", "gpt-5.2");
+		if (!model) throw new Error("Expected bundled test model openai/gpt-5.2 to exist");
+		const issuer = await createSessionForModel(model, "shared-provider-routing-id");
+		const peer = await createSessionForModel(model, "shared-provider-routing-id");
+		const previousConfigDir = process.env.PI_CONFIG_DIR;
+		try {
+			process.env.PI_CONFIG_DIR = path.relative(os.homedir(), tempDir.path());
+			issuer.setFastModeAction("session");
+			expect(issuer.agent.serviceTierResolver?.(model)).toBe("priority");
+			expect(peer.agent.serviceTierResolver?.(model)).toBeUndefined();
+		} finally {
+			if (previousConfigDir === undefined) delete process.env.PI_CONFIG_DIR;
+			else process.env.PI_CONFIG_DIR = previousConfigDir;
+			await issuer.dispose();
+		}
 	});
 
 	it("Off everywhere suppresses a peer's existing priority without suppressing flex", async () => {

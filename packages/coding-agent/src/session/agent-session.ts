@@ -106,7 +106,12 @@ import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager } fro
 import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
-import type { FastModeAction, FastModeScope, FastModeStatus } from "../config/fast-mode";
+import {
+	type FastModeAction,
+	type FastModeScope,
+	type FastModeStatus,
+	inheritSessionFastMode,
+} from "../config/fast-mode";
 import type { ModelRegistry } from "../config/model-registry";
 import type { ResolvedModelRoleValue } from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
@@ -5836,12 +5841,11 @@ export class AgentSession {
 
 	/**
 	 * Owning conversation id for `/fast` session-scope resolution: the
-	 * inherited owner id when this session is a descendant, otherwise the
-	 * current conversation's {@link sessionId} (so `/new` and session switches
-	 * re-key the scope automatically).
+	 * inherited owner id for descendants, otherwise the persisted conversation id.
+	 * Provider-side session ids are routing/cache identities and may be shared.
 	 */
 	get fastModeSessionId(): string {
-		return this.#fastModeSessionId ?? this.sessionId;
+		return this.#fastModeSessionId ?? this.sessionManager.getSessionId();
 	}
 
 	getEvalSessionId(): string | null {
@@ -8405,6 +8409,7 @@ export class AgentSession {
 		using _transition = this.#beginSessionTransition();
 		this.#assertVibeSessionTransitionAllowed("start a new session");
 		const previousSessionFile = this.sessionFile;
+		const previousFastModeSessionId = this.fastModeSessionId;
 
 		// Emit session_before_switch event with reason "new" (can be cancelled)
 		if (this.#extensionRunner?.hasHandlers("session_before_switch")) {
@@ -8455,6 +8460,7 @@ export class AgentSession {
 			} finally {
 				this.#bash.finishSessionTransition(bashTransition, sessionTransitioned);
 			}
+			inheritSessionFastMode(previousFastModeSessionId, this.fastModeSessionId);
 
 			this.#clearSessionScopedToolState();
 			this.#clearCheckpointRuntimeState();
