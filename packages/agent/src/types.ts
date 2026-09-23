@@ -297,6 +297,12 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * watch can tell a new arrival from a message that was already queued when
 	 * the request was issued.
 	 *
+	 * An asynchronous implementation must report the queue as it stood when it
+	 * was called (read it before the first `await`). The provider-wait watch
+	 * holds the request until this first answer arrives and uses it as the
+	 * baseline, so an answer read later would count a steer that arrived in the
+	 * meantime as already queued, and that steer would wait for the boundary.
+	 *
 	 * When omitted, steering never interrupts a running tool batch; queued
 	 * messages are still delivered at the next injection boundary.
 	 */

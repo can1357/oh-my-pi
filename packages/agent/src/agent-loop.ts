@@ -2326,11 +2326,14 @@ async function streamAssistantResponse(
 
 	try {
 		return await runInActiveSpan(chatSpan, async () => {
-			// A poll-only host may have queued steering after the baseline while
-			// credential resolution was in flight but before its 250ms timer tick.
-			// Refresh synchronously at the last await before dispatch so that arrival
-			// cannot become the replacement request's baseline.
-			await steerWatch?.refresh();
+			// A poll-only host re-peeks only on its 250ms tick, so a steer queued
+			// after the baseline — typically while credential resolution was in
+			// flight — may not have been seen yet. Peek once more at the last await
+			// before dispatch: sending a request built without the steer could let
+			// it start streaming (closing the interrupt window) before that tick.
+			// An event-driven watch is woken by the arrival itself and gets no
+			// extra peek, so its dispatch timing is unchanged.
+			if (!config.waitForSteeringMessages) await steerWatch?.refresh();
 			if (steerDetected && !requestSignal?.aborted) {
 				abortForSteer();
 				throw new SteerInterruption(resolvedCredential);

@@ -4086,9 +4086,7 @@ describe("agentLoop steering during the provider wait", () => {
 		expect(getApiKeyCalls).toBe(1);
 		expect(resolverCalls).toBe(1);
 		expect(contexts).toHaveLength(1);
-		expect(contexts[0]?.messages.some(m => m.role === "user" && m.content === "actually, do X instead")).toBe(
-			true,
-		);
+		expect(contexts[0]?.messages.some(m => m.role === "user" && m.content === "actually, do X instead")).toBe(true);
 		expect(queue.size).toBe(0);
 		expect(assistantTexts(events)).toEqual(["answer with steer"]);
 		expect(
@@ -4868,7 +4866,7 @@ describe("agentLoop steering during the provider wait", () => {
 			deadline: Date.now() + 60_000,
 			hasSteeringMessages: queue.config.hasSteeringMessages,
 			waitForSteeringMessages: queue.config.waitForSteeringMessages,
-			getSteeringMessages: async signal => {
+			getSteeringMessages: async () => {
 				const batch = await queue.config.getSteeringMessages();
 				if (batch.length > 0) config.deadline = Date.now() - 1;
 				return batch;
@@ -4955,9 +4953,13 @@ describe("agentLoop steering during the provider wait", () => {
 					},
 					{ once: true },
 				);
-				// Still thinking: without the baseline wait this call would be
-				// issued while the peek is in flight and the steer below would
-				// count as baseline, hanging the run here.
+				// A fast provider: answers one macrotask after dispatch, sooner
+				// than the slow baseline peek resolves. Issued without waiting for
+				// that baseline, this request streams before the steer below can
+				// be detected, closing the interrupt window.
+				setImmediate(() => {
+					if (!firstRequestAborted) pushAnswer(stream, "stale answer");
+				});
 			} else {
 				queueMicrotask(() => pushAnswer(stream, "answer with steer"));
 			}
@@ -4986,13 +4988,17 @@ describe("agentLoop steering during the provider wait", () => {
 		await peekEntered.promise;
 		expect(peeks).toBe(1);
 		expect(contexts.length).toBe(0);
-		// Pushed after the request would have been issued (unfixed code has
-		// already called streamFn by now) but before the peek resolves.
+		// Pushed while the baseline peek is still in flight.
 		queue.push("steer during baseline");
+		// The peek keeps answering late: two macrotasks give a request issued
+		// without waiting for the baseline time to be sent and to stream its
+		// answer. With the wait, nothing has been dispatched yet.
+		await drainWatcherTurn();
+		await drainWatcherTurn();
 		releaseBaseline.resolve();
 
-		// Hang guard only: a baseline race that swallows the steer leaves the
-		// thinking request parked forever. That must fail this test with a
+		// Hang guard only: a regression that never issues the steered request
+		// leaves the run parked. That must fail this test with a
 		// diagnostic, not hang it — a real timer is the only guard a hung
 		// promise allows (fake timers cannot settle an await that never
 		// resolves). Kept under bun's 5s default test timeout so the guard,
@@ -5078,6 +5084,51 @@ describe("agentLoop steering during the provider wait", () => {
 					: [],
 			),
 		).toEqual(["answer with steer"]);
+	});
+
+	it("does not record a steer caught at the pre-dispatch peek as a failed chat", async () => {
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+		const queue = createSteeringQueue();
+		const mock = createMockModel();
+		const resolverStarted = Promise.withResolvers<void>();
+		const releaseCredential = Promise.withResolvers<string>();
+		const contexts: Context[] = [];
+
+		const streamFn: StreamFn = (_model, llmContext) => {
+			contexts.push(llmContext);
+			const response = new AssistantMessageEventStream();
+			queueMicrotask(() => pushAnswer(response, "answer with steer"));
+			return response;
+		};
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "immediate",
+			getApiKey: () => async () => {
+				resolverStarted.resolve();
+				return releaseCredential.promise;
+			},
+			...queue.config,
+			// Poll-only host: its first timer tick is 250ms out, so the steer below
+			// is caught by the final pre-dispatch peek, after the chat span opened.
+			waitForSteeringMessages: undefined,
+		};
+
+		const { detailed } = agentLoopDetailed([createUserMessage("start")], context, config, undefined, streamFn);
+		const run = detailed();
+		await resolverStarted.promise;
+		queue.push("steer before dispatch");
+		releaseCredential.resolve("resolved-key");
+		const result = await run;
+
+		expect(contexts).toHaveLength(1);
+		expect(contexts[0]?.messages.some(m => m.role === "user" && m.content === "steer before dispatch")).toBe(true);
+		// The discarded attempt opened a chat span but never dispatched: only the
+		// re-issued call owns a chat, and nothing is recorded as an error.
+		expect(result.telemetry?.chats.total).toBe(1);
+		expect(result.telemetry?.chats.byStopReason).toEqual({ stop: 1 });
+		expect(result.telemetry?.errors.total).toBe(0);
+		expect(result.telemetry?.errors.byType).toEqual({});
 	});
 
 	it("preserves completed results and later tools when a steering callback throws", async () => {
