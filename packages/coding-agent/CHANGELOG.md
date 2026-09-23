@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added a toggleable live `/jobs` HUD above the prompt for tracking active background jobs (by [@shivamklr](https://github.com/shivamklr)).
 - Added `omp login` command for terminal-based OAuth authentication, including automated model discovery refresh and browser-opening support
 - Enabled `org-scoped-identity` and `oauth-token-env` configuration parsing for authentication providers
 - Adopted namespaced `authStorage` API for CLI and session management

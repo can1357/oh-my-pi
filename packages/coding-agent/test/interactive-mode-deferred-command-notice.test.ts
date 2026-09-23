@@ -3,6 +3,7 @@ import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-ag
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { AsyncJobSnapshot, AsyncJobSnapshotItem } from "@oh-my-pi/pi-coding-agent/session/agent-session-types";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { Text } from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -11,6 +12,8 @@ type Harness = {
 	mode: InteractiveMode;
 	tempDir: TempDir;
 	setStreaming: (value: boolean) => void;
+	setJobs: (running?: AsyncJobSnapshotItem[], recent?: AsyncJobSnapshotItem[]) => void;
+	getSnapshotCalls: () => number;
 };
 
 let harness: Harness | undefined;
@@ -19,6 +22,7 @@ async function createHarness(): Promise<Harness> {
 	if (harness) {
 		harness.setStreaming(false);
 		harness.mode.clearTransientSessionUi();
+		harness.setJobs();
 		harness.mode.chatContainer.disposeChildren();
 		return harness;
 	}
@@ -29,6 +33,12 @@ async function createHarness(): Promise<Harness> {
 	const sessionManager = SessionManager.inMemory(tempDir.path());
 	await sessionManager.setSessionName("Deferred notice", "user");
 	let streaming = false;
+	let snapshot: AsyncJobSnapshot = {
+		running: [],
+		recent: [],
+		delivery: { queued: 0, delivering: false, pendingJobIds: [] },
+	};
+	let snapshotCalls = 0;
 	const session = {
 		sessionManager,
 		settings,
@@ -41,6 +51,10 @@ async function createHarness(): Promise<Harness> {
 		state: { model: undefined },
 		model: undefined,
 		thinkingLevel: undefined,
+		getAsyncJobSnapshot: (options?: { recentLimit?: number }) => {
+			snapshotCalls++;
+			return options?.recentLimit === 0 ? { ...snapshot, recent: [] } : snapshot;
+		},
 		get isStreaming() {
 			return streaming;
 		},
@@ -52,6 +66,10 @@ async function createHarness(): Promise<Harness> {
 		setStreaming: (value: boolean) => {
 			streaming = value;
 		},
+		setJobs: (running = [], recent = []) => {
+			snapshot = { running, recent, delivery: { queued: 0, delivering: false, pendingJobIds: [] } };
+		},
+		getSnapshotCalls: () => snapshotCalls,
 	};
 	return harness;
 }
@@ -60,6 +78,9 @@ function noticeText(mode: InteractiveMode): string {
 	return mode.deferredCommandContainer.render(120).join("\n");
 }
 
+function jobsText(mode: InteractiveMode): string {
+	return mode.jobsContainer.render(120).join("\n");
+}
 function transcriptRowCount(mode: InteractiveMode): number {
 	return mode.chatContainer.render(120).length;
 }
@@ -70,6 +91,7 @@ function transcriptText(mode: InteractiveMode): string {
 
 afterEach(() => {
 	vi.restoreAllMocks();
+	vi.useRealTimers();
 });
 
 afterAll(() => {
@@ -173,5 +195,102 @@ describe("InteractiveMode deferred command preview", () => {
 		expect(notice).not.toContain("stale panel");
 		expect(notice).toContain("1 command output");
 		expect(notice).not.toContain("2 command outputs");
+	});
+});
+
+describe("InteractiveMode live jobs HUD", () => {
+	const first: AsyncJobSnapshotItem = {
+		id: "bash_first",
+		type: "bash",
+		status: "running",
+		label: "compile first",
+		startTime: 0,
+		agentId: undefined,
+	};
+	const second: AsyncJobSnapshotItem = { ...first, id: "bash_second", label: "compile second" };
+
+	it("opens mid-turn before jobs start, refreshes in place, and persists past turn completion without transcript rows", async () => {
+		const { mode, setStreaming, setJobs } = await createHarness();
+		vi.useFakeTimers();
+		setStreaming(true);
+		const transcriptBefore = transcriptRowCount(mode);
+		await mode.handleJobsCommand();
+		expect(jobsText(mode)).toContain("No active jobs.");
+		expect(noticeText(mode)).toBe("");
+
+		setJobs([first]);
+		vi.advanceTimersByTime(1000);
+		expect(jobsText(mode)).toContain("compile first");
+		const rowCount = mode.jobsContainer.render(120).length;
+
+		setStreaming(false);
+		mode.flushPendingCommandOutput();
+		setJobs([second], [{ ...first, status: "completed" }]);
+		vi.advanceTimersByTime(1000);
+		expect(mode.jobsContainer.render(120)).toHaveLength(rowCount);
+		expect(jobsText(mode)).toContain("compile second");
+		expect(jobsText(mode)).not.toContain("compile first");
+		expect(jobsText(mode)).not.toContain("Recent Jobs");
+
+		setJobs([], [{ ...second, status: "completed" }]);
+		vi.advanceTimersByTime(1000);
+		expect(jobsText(mode)).toContain("No active jobs.");
+		expect(jobsText(mode)).not.toContain("compile second");
+		expect(transcriptRowCount(mode)).toBe(transcriptBefore);
+	});
+
+	it("dismisses on the second call and stops refreshing until reopened", async () => {
+		const { mode, setJobs, getSnapshotCalls } = await createHarness();
+		vi.useFakeTimers();
+		setJobs([first]);
+		await mode.handleJobsCommand();
+		expect(jobsText(mode)).toContain("compile first");
+		await mode.handleJobsCommand();
+		expect(jobsText(mode)).toBe("");
+		const callsAfterDismissal = getSnapshotCalls();
+		vi.advanceTimersByTime(3000);
+		expect(getSnapshotCalls()).toBe(callsAfterDismissal);
+
+		setJobs([second]);
+		await mode.handleJobsCommand();
+		expect(jobsText(mode)).toContain("compile second");
+		expect(jobsText(mode)).not.toContain("compile first");
+	});
+
+	it("drops the HUD and its poller when transient session UI is cleared", async () => {
+		const { mode, setJobs, getSnapshotCalls } = await createHarness();
+		vi.useFakeTimers();
+		setJobs([first]);
+		await mode.handleJobsCommand();
+		mode.clearTransientSessionUi();
+		expect(jobsText(mode)).toBe("");
+		const callsAfterReset = getSnapshotCalls();
+		vi.advanceTimersByTime(3000);
+		expect(getSnapshotCalls()).toBe(callsAfterReset);
+	});
+
+	it("keeps the idle one-time report with recent jobs in the transcript", async () => {
+		const { mode, setJobs, getSnapshotCalls } = await createHarness();
+		vi.useFakeTimers();
+		setJobs([], [{ ...first, status: "completed" }]);
+		await mode.handleJobsCommand();
+		expect(jobsText(mode)).toBe("");
+		expect(transcriptText(mode)).toContain("Recent Jobs");
+		expect(transcriptText(mode)).toContain("compile first");
+		const callsAfterReport = getSnapshotCalls();
+		vi.advanceTimersByTime(3000);
+		expect(getSnapshotCalls()).toBe(callsAfterReport);
+	});
+
+	it("clears the HUD and stops polling when the mode stops", async () => {
+		const { mode, setJobs, getSnapshotCalls } = await createHarness();
+		vi.useFakeTimers();
+		setJobs([first]);
+		await mode.handleJobsCommand();
+		mode.stop();
+		expect(jobsText(mode)).toBe("");
+		const callsAfterStop = getSnapshotCalls();
+		vi.advanceTimersByTime(3000);
+		expect(getSnapshotCalls()).toBe(callsAfterStop);
 	});
 });
