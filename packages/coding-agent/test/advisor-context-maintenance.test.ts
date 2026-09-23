@@ -43,7 +43,7 @@ describe("AgentSession advisor context maintenance", () => {
 	beforeAll(() => {
 		tempDir = TempDir.createSync("@pi-advisor-context-maintenance-");
 		authStorage = createInMemoryAuthStorage();
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 	});
 
 	afterEach(async () => {
@@ -177,7 +177,7 @@ describe("AgentSession advisor context maintenance", () => {
 			throw new Error("Expected bundled compaction models");
 		}
 
-		authStorage.setRuntimeApiKey(nativeModel.provider, "openai-key");
+		authStorage.keys.setRuntime(nativeModel.provider, "openai-key");
 		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
 		const settings = Settings.isolated({
 			"advisor.syncBacklog": "1",

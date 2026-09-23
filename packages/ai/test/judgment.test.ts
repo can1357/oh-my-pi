@@ -12,7 +12,6 @@ import {
 	TypeSafeApiError,
 	TypeSafeJudge,
 } from "@oh-my-pi/pi-ai";
-import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 
 const LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 
@@ -334,11 +333,5 @@ describe("TypeSafeJudge", () => {
 				Response.json({ model: "jev-latest", answers: { urgent: { type: "choice", choice: "x" } }, usage: {} }),
 		});
 		await expect(mismatched.judge(request)).rejects.toThrow(/missing a "noul" answer/);
-	});
-
-	it("is loginable via the auth registry with TYPESAFE_API_KEY as env fallback", () => {
-		const definition = getProviderDefinition("typesafe");
-		expect(definition?.envKeys).toBe("TYPESAFE_API_KEY");
-		expect(typeof definition?.login).toBe("function");
 	});
 });

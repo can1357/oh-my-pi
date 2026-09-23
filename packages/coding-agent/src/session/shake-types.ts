@@ -37,7 +37,7 @@ export function formatShakeSummary(result: ShakeResult): string {
 		const n = result.thinkingBlocksDropped ?? 0;
 		return n === 0
 			? "No thinking blocks found in this session."
-			: `Dropped ${n} thinking block${n === 1 ? "" : "s"} from this session.`;
+			: `Dropped ${n} thinking block${n === 1 ? "" : "s"} from this session${result.tokensFreed > 0 ? ` (~${result.tokensFreed} tokens freed)` : ""}.`;
 	}
 	const parts: string[] = [];
 	if (result.toolResultsDropped > 0) {

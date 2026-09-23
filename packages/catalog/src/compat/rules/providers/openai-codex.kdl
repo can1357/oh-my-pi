@@ -92,6 +92,22 @@ provider "openai-codex" {
 		}
 		max-context-window 922000
 	}
+	models "gpt-6-sol" "gpt-6-sol-wm" {
+		cost-patch {
+			input 2.0
+			output 10.0
+			cache-read 0.2
+			cache-write 0
+		}
+	}
+	models "gpt-6-luna" "gpt-6-luna-wm" {
+		cost-patch {
+			input 0.1
+			output 0.5
+			cache-read 0.01
+			cache-write 0
+		}
+	}
 	class "openai" {
 		revision ">=5.3 <5.7" {
 			thinking-mode "effort"

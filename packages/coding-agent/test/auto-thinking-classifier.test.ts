@@ -28,7 +28,7 @@ describe("auto thinking classifier helpers", () => {
 
 	function createRegistry(models: Model[], keys: Record<string, string> = {}): ModelRegistry {
 		const authStorage = createInMemoryAuthStorage();
-		for (const provider in keys) authStorage.setRuntimeApiKey(provider, keys[provider]!);
+		for (const provider in keys) authStorage.keys.setRuntime(provider, keys[provider]!);
 		const registry = new ModelRegistry(authStorage, "/nonexistent/auto-thinking-models.yml");
 		vi.spyOn(registry, "getAvailable").mockReturnValue(models);
 		return registry;

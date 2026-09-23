@@ -359,6 +359,28 @@ describe("Anthropic preserved-thinking request shaping", () => {
 		expect(payload.messages?.at(-2)?.output_config?.effort).toBe("low");
 		expect(payload.messages?.at(-1)?.role).toBe("user");
 	});
+
+	it("sends an explicit effort as a control when the session started on the API default", async () => {
+		// Omitted effort is the API default (`medium` on Opus 5.5), not `high`:
+		// a later explicit `high` must still reach the wire.
+		const model = makeAnthropicModel("claude-opus-5-5");
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const first = await capturePayload(model, { thinkingEnabled: true, providerSessionState });
+		const payload = await capturePayload(
+			model,
+			{ thinkingEnabled: true, reasoning: Effort.High, providerSessionState },
+			{
+				...CONTEXT,
+				messages: [...CONTEXT.messages, { role: "user", content: "continue", timestamp: Date.now() }],
+			},
+		);
+
+		expect(first.output_config?.effort).toBeUndefined();
+		expect(payload.output_config?.effort).toBeUndefined();
+		expect(payload.messages?.at(-2)?.role).toBe("system");
+		expect(payload.messages?.at(-2)?.output_config?.effort).toBe("high");
+		expect(payload.messages?.at(-1)?.role).toBe("user");
+	});
 });
 
 describe("Anthropic Fable/Mythos forced tool_choice", () => {

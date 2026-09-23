@@ -1,10 +1,11 @@
 import { Buffer } from "node:buffer";
-import { quotaTierFor } from "@oh-my-pi/pi-catalog/compat/behavior";
+import { planRequirementFor, quotaTierFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { toNumber } from "@oh-my-pi/pi-catalog/utils";
 import { USER_AGENT } from "@oh-my-pi/pi-utils";
 import type {
 	CredentialRankingContext,
 	CredentialRankingStrategy,
+	PlanGate,
 	UsageAmount,
 	UsageFetchContext,
 	UsageFetchParams,
@@ -644,13 +645,83 @@ export const openaiCodexUsageProvider: UsageProvider = {
 	},
 };
 
+/** Codex account tier required for the selected model. */
+type OpenAICodexPlanRequirement = "none" | "paid" | "pro";
+type OpenAICodexPlanClass = "free" | "paid" | "pro" | "unknown";
+
+const OPENAI_CODEX_PRO_PLAN_TOKENS: Record<string, true> = {
+	pro: true,
+};
+const OPENAI_CODEX_PAID_PLAN_TOKENS: Record<string, true> = {
+	plus: true,
+	business: true,
+	team: true,
+	enterprise: true,
+	edu: true,
+	education: true,
+	teacher: true,
+	teachers: true,
+	health: true,
+	gov: true,
+	government: true,
+};
+const OPENAI_CODEX_FREE_PLAN_TOKENS: Record<string, true> = {
+	free: true,
+	go: true,
+};
+
+/**
+ * Account tier needed for model-aware Codex OAuth routing.
+ *
+ * GPT-5.6 Terra (including its local pro-mode alias) remains available on every
+ * plan. Sol and Luna pro-mode aliases inherit their base models' paid tier;
+ * only Spark currently has a documented Pro-plan preference in Codex.
+ */
+function resolveOpenAICodexPlanRequirement(modelId: string | undefined): OpenAICodexPlanRequirement {
+	if (typeof modelId !== "string") return "none";
+	const requirement = planRequirementFor("openai-codex", modelId);
+	return requirement === "paid" || requirement === "pro" ? requirement : "none";
+}
+
+function getUsagePlanType(report: UsageReport | null): string | undefined {
+	const metadata = report?.metadata;
+	if (!metadata) return undefined;
+	const planType = metadata.planType;
+	if (typeof planType !== "string") return undefined;
+	const normalized = planType
+		.trim()
+		.toLowerCase()
+		.replace(/[\s-]+/g, "_");
+	return normalized.startsWith("chatgpt_") ? normalized.slice("chatgpt_".length) : normalized;
+}
+
+function classifyOpenAICodexPlan(report: UsageReport | null): OpenAICodexPlanClass {
+	const planType = getUsagePlanType(report);
+	if (!planType) return "unknown";
+	// Pro Lite is a paid Codex tier, but does not imply full Pro-only model access.
+	if (planType === "prolite" || planType === "pro_lite") return "paid";
+	const tokens = planType.split("_");
+	if (tokens.some(token => OPENAI_CODEX_PRO_PLAN_TOKENS[token] === true)) return "pro";
+	if (tokens.some(token => OPENAI_CODEX_PAID_PLAN_TOKENS[token] === true)) return "paid";
+	if (tokens.some(token => OPENAI_CODEX_FREE_PLAN_TOKENS[token] === true)) return "free";
+	return "unknown";
+}
+
+/** Check whether a Codex account report meets the model tier. */
+function codexPlanGate(requirement: Exclude<OpenAICodexPlanRequirement, "none">): PlanGate {
+	return report => {
+		const planClass = classifyOpenAICodexPlan(report);
+		if (planClass === "unknown") return undefined;
+		return requirement === "paid" ? planClass !== "free" : planClass === "pro";
+	};
+}
+
 // A Codex request gates only on the chat windows it actually consumes. A
 // "-spark" model spends the separate Spark meter; every other Codex model spends
 // the 5h/weekly chat windows. Scoping the gating set this way keeps an exhausted
 // Spark meter from blocking a normal chat request (and vice versa), instead of
 // OR-ing every window and meter in the report into one provider-wide block.
-function scopeCodexLimitsForRequest(report: UsageReport, context?: CredentialRankingContext): UsageLimit[] {
-	const isSparkRequest = isCodexSparkRequest(context);
+function scopeCodexLimitsForRequest(report: UsageReport, isSparkRequest: boolean): UsageLimit[] {
 	return report.limits.filter(limit => {
 		if (limit.id === "openai-codex:primary" || limit.id === "openai-codex:secondary") {
 			return !isSparkRequest;
@@ -667,7 +738,13 @@ function isCodexSparkRequest(context?: CredentialRankingContext): boolean {
 }
 
 export const codexRankingStrategy: CredentialRankingStrategy = {
-	scopeLimits: scopeCodexLimitsForRequest,
+	planGate(context) {
+		const requirement = resolveOpenAICodexPlanRequirement(context.modelId);
+		return requirement === "none" ? undefined : codexPlanGate(requirement);
+	},
+	scopeLimits(report, context) {
+		return scopeCodexLimitsForRequest(report, isCodexSparkRequest(context));
+	},
 	// A `usage_limit_reached` from a Spark request means the Spark meter is
 	// spent, not the chat windows, so the two back off under separate scopes;
 	// one shared block would let an exhausted Spark meter stop ordinary chat
@@ -682,8 +759,32 @@ export const codexRankingStrategy: CredentialRankingStrategy = {
 		if (!context) return ["chat", "spark", "shared"];
 		return [isCodexSparkRequest(context) ? "spark" : "chat", "shared"];
 	},
+	// Heal each scope against its own meter, including the legacy shared block.
+	// Missing Spark metadata cannot establish recovery even if its limits are empty.
+	healableBlockScopes(report) {
+		const metadata = report.metadata;
+		const meterStates = metadata?.meterStates;
+		const spark = isRecord(meterStates) && isRecord(meterStates.spark) ? meterStates.spark : undefined;
+		return [
+			{
+				blockScope: "chat",
+				limits: scopeCodexLimitsForRequest(report, false),
+				healthy: metadata?.allowed === true && metadata.limitReached === false,
+			},
+			{
+				blockScope: "spark",
+				limits: scopeCodexLimitsForRequest(report, true),
+				healthy: spark?.allowed === true && spark.limitReached === false,
+			},
+			{
+				blockScope: "shared",
+				limits: report.limits,
+				healthy: metadata?.allowed === true && metadata.limitReached === false,
+			},
+		];
+	},
 	findWindowLimits(report, context) {
-		const limits = scopeCodexLimitsForRequest(report, context);
+		const limits = scopeCodexLimitsForRequest(report, isCodexSparkRequest(context));
 		const findLimit = (key: "primary" | "secondary"): UsageLimit | undefined => {
 			const direct = limits.find(l => l.id === `openai-codex:${key}`);
 			if (direct) return direct;

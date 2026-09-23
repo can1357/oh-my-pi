@@ -17,7 +17,7 @@ async function createRegistry(settings: Settings, models: Model[]): Promise<Mode
 	const authStorage = await AuthStorage.create(":memory:");
 	authStorages.push(authStorage);
 	for (const model of models) {
-		authStorage.setRuntimeApiKey(model.provider, model.provider === "local" ? "local-inference" : "test-key");
+		authStorage.keys.setRuntime(model.provider, model.provider === "local" ? "local-inference" : "test-key");
 	}
 	const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-speech-enhancer-"));
 	modelConfigDirs.push(configDir);

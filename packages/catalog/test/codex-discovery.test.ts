@@ -262,6 +262,45 @@ describe("Codex model discovery", () => {
 		}
 	});
 
+	it("applies GPT-6 Sol and Luna pricing to discovered plain and worker routes", async () => {
+		const fetchFn: typeof fetch = Object.assign(
+			async () =>
+				Response.json({
+					models: ["sol", "luna"].map(name => ({
+						slug: `gpt-6-${name}-wm`,
+						display_name: `GPT-6 ${name}`,
+						default_reasoning_level: "medium",
+						supported_reasoning_levels: ["low", "medium", "high"],
+						input_modalities: ["text", "image"],
+						supported_in_api: true,
+					})),
+				}),
+			{ preconnect() {} },
+		);
+		const result = await fetchCodexModels({
+			accessToken: "test-token",
+			baseUrl: "https://codex.example/backend-api",
+			fetchFn,
+		});
+
+		expect(result?.models.map(model => model.id).sort()).toEqual([
+			"gpt-6-luna",
+			"gpt-6-luna-wm",
+			"gpt-6-sol",
+			"gpt-6-sol-wm",
+		]);
+		for (const model of result!.models) {
+			// Discovery has no rates; the generated KDL policy supplies them
+			// when the discovered spec becomes a usable model.
+			expect(model.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+			expect(buildModel(model).cost).toEqual(
+				model.id.startsWith("gpt-6-sol")
+					? { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 0 }
+					: { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0 },
+			);
+		}
+	});
+
 	it("floors stale reported windows for GPT-5.6 luna/sol/terra and honors reports above the floor", async () => {
 		const fetchFn: typeof fetch = Object.assign(
 			async () =>

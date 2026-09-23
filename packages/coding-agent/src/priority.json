@@ -52,6 +52,9 @@
 		"k3",
 		"zai/glm-5.3",
 		"glm-5.3",
+		"anthropic/claude-opus-5-5",
+		"claude-opus-5-5",
+		"opus-5-5",
 		"anthropic/claude-opus-5",
 		"claude-opus-5",
 		"opus-5",
@@ -112,6 +115,7 @@
 	],
 	"judge": [
 		"typesafe/jev-latest",
+		"openrouter/~typesafe/jev-latest",
 		"@tiny",
 		"@smol",
 		"@default"
