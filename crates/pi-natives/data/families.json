@@ -110,7 +110,7 @@
     "blobs": ["jev_base", "jev_whole"],
     "rank": "o200k rank; slots outside each set are empty",
     "whole": 144562,
-    "base": 53462,
+    "base": 53622,
     "normalizer": "NFC",
     "pre": "qwen3.pre (Qwen3.5 split pattern)",
     "window": 512,

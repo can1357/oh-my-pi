@@ -2,7 +2,9 @@
 //! (`usage.input_tokens` minus the 269-token request frame), covering
 //! multilingual UDHR text, code, emoji, whitespace, combining marks, NFC and
 //! the 512-byte merge window (random-consonant runs of 514/515 bytes and a
-//! 179-character Lao word, whose counts flip at the window edge).
+//! 179-character Lao word, whose counts flip at the window edge), plus base
+//! pieces padding cannot isolate: space runs before CRLF, newline-final
+//! punctuation, and byte fragments of kana after a space or plane-4 code points.
 
 use serde::Deserialize;
 

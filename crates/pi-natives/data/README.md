@@ -36,14 +36,15 @@ split specs: `families.json` in this directory).
 `jev_base.bin.zst` and `jev_whole.bin.zst` are **measured**, not downloaded:
 TypeSafe publishes no tokenizer for Jev, so both sets were recovered from
 the live System One API's `usage.input_tokens` (jev-1.13.0, 2026-09-23,
-~628k probes). `jev_whole` holds the whole-word entries (a piece that
+~639k probes). `jev_whole` holds the whole-word entries (a piece that
 equals one costs 1); `jev_base` holds the base tokens the merge loop may
 form. Both are o200k subsets stored at their o200k ranks, with every other
 slot empty. Membership came from difference probes inside non-merging
 padding (e.g. `cost("世" + x + "世") - 2`), byte fragments were fitted
-against per-character probes, and the result reproduces every recorded
-count except three probes of the unassigned code point U+4E50A and one
-whitespace run (`fixtures/jev.json` pins 386 live counts). Regenerate the
+against per-character probes, and pieces padding cannot isolate (space
+runs, newline-final punctuation, rare fragments) were settled with probes
+built to flip on each one. The result reproduces all 638,573 recorded
+counts (`fixtures/jev.json` pins 400 live counts). Regenerate the
 blobs from the measured sets with:
 
 ```sh
