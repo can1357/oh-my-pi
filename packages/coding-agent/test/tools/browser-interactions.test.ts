@@ -123,10 +123,13 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser interaction parity", () => {
 			const highlight = await invoke({
 				action: "run",
 				name: TAB_NAME,
-				code: `const pending = tab.highlight("#highlight", { duration: 100 });
-// This integration test must observe the real page timer while the helper remains pending.
-await Bun.sleep(20);
-const during = await tab.evaluate(() => document.querySelectorAll("[data-omp-highlight-overlay]").length);
+				code: `const pending = tab.highlight("#highlight", { duration: 500 });
+// Wait for the asynchronous selector action to install the overlay before inspecting it.
+let during = 0;
+for (let attempt = 0; attempt < 20 && during === 0; attempt++) {
+	await Bun.sleep(10);
+	during = await tab.evaluate(() => document.querySelectorAll("[data-omp-highlight-overlay]").length);
+}
 await pending;
 const after = await tab.evaluate(() => document.querySelectorAll("[data-omp-highlight-overlay]").length);
 return { during, after };`,

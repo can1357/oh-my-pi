@@ -34,6 +34,7 @@ import type {
 } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+import ompSystemInstruction from "../src/providers/omp-system-instruction.md" with { type: "text" };
 import { withEnv, withOfficialAnthropicEndpoint } from "./helpers";
 
 const ANTHROPIC_MODEL_SPEC: ModelSpec<"anthropic-messages"> = {
@@ -292,6 +293,7 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(claudeCodeSystemInstruction).toBe("You are Claude Code, Anthropic's official CLI for Claude.");
 		expect(payload.system?.[1]?.text).toBe(claudeCodeSystemInstruction);
 		expect(payload.system?.[1]?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+		expect(payload.system?.[2]?.text).toBe(ompSystemInstruction.trim());
 		expect(payload.system?.[2]?.cache_control).toBeUndefined();
 		const content = payload.messages?.[0]?.content;
 		expect(Array.isArray(content)).toBe(true);
@@ -329,11 +331,13 @@ describe("Anthropic request fingerprint alignment", () => {
 			messages?: Array<{ content?: Array<{ cache_control?: unknown }> | string }>;
 		};
 
-		expect(payload.system).toHaveLength(2);
+		expect(payload.system).toHaveLength(3);
 		expect(payload.system?.[0]?.text).toStartWith("x-anthropic-billing-header:");
 		expect(payload.system?.[0]?.cache_control).toBeUndefined();
 		expect(payload.system?.[1]?.text).toBe(claudeCodeSystemInstruction);
 		expect(payload.system?.[1]?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+		expect(payload.system?.[2]?.text).toBe(ompSystemInstruction.trim());
+		expect(payload.system?.[2]?.cache_control).toBeUndefined();
 		const content = payload.messages?.[0]?.content;
 		expect(Array.isArray(content) ? content[0]?.cache_control : undefined).toEqual({
 			type: "ephemeral",

@@ -1063,6 +1063,7 @@ describe("commitToBranch preserves agent commits", () => {
 	beforeAll(async () => {
 		fixtureRepo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-commit-fixture-"));
 		await runGit(fixtureRepo, ["init", "-q", "-b", "main"]);
+		await runGit(fixtureRepo, ["config", "maintenance.auto", "false"]);
 		await runGit(fixtureRepo, ["config", "user.email", "test@example.com"]);
 		await runGit(fixtureRepo, ["config", "user.name", "Test User"]);
 		await fs.writeFile(
