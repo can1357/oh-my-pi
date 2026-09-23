@@ -265,9 +265,13 @@ impl PathPolicy {
 		if !matches!(self.address(unwrap_hashline_header_path(authored)), Address::Path) {
 			return false;
 		}
-		let recovered = lexical_absolute(recovered, &self.cwd);
-		is_within(&recovered, &lexical_absolute(&self.cwd, &self.cwd))
-			|| self.in_plan_writable_root(&recovered)
+		// Compare both sides in the same cleaned form as `canonical_key`:
+		// `Path::starts_with` matches per-component, and a verbatim `\\?\C:\…`
+		// cwd (std canonicalize on Windows) never component-matches the cleaned
+		// store-key form `C:\…`, silently rejecting every recovery.
+		let recovered = strip_windows_verbatim_path(lexical_absolute(recovered, &self.cwd));
+		let root = strip_windows_verbatim_path(lexical_absolute(&self.cwd, &self.cwd));
+		is_within(&recovered, &root) || self.in_plan_writable_root(&recovered)
 	}
 
 	/// Return the model-facing generated-file rejection, when applicable.
@@ -710,6 +714,9 @@ mod tests {
 		assert_eq!(p.resolve("/", &urls).unwrap().absolute, tmp.path());
 		assert_eq!(p.resolve("@~/x", &urls).unwrap().absolute, tmp.path().join("home/x"));
 		assert_eq!(p.resolve(":./x", &urls).unwrap().absolute, tmp.path().join("./x"));
+		// The file URL's `/tmp/...` path maps to a POSIX root; on Windows it
+		// resolves onto the current drive instead (`C:\tmp\...`).
+		#[cfg(unix)]
 		assert_eq!(
 			p.resolve("file:///tmp/a%20b", &urls).unwrap().absolute,
 			PathBuf::from("/tmp/a b")
@@ -982,14 +989,46 @@ mod tests {
 	}
 
 	#[test]
+	fn strips_verbatim_prefix_from_windows_paths() {
+		assert_eq!(
+			strip_windows_verbatim_path(PathBuf::from(r"\\?\C:\proj\a.ts")),
+			PathBuf::from(r"C:\proj\a.ts")
+		);
+		assert_eq!(
+			strip_windows_verbatim_path(PathBuf::from(r"C:\proj\a.ts")),
+			PathBuf::from(r"C:\proj\a.ts")
+		);
+	}
+
+	#[test]
+	fn allows_recovery_when_cwd_is_verbatim_and_store_key_is_cleaned() {
+		// On Windows `std::fs::canonicalize` yields the verbatim `\\?\C:\…` cwd
+		// while the hashline store key keeps the cleaned `C:\…` form; recovery
+		// between the two must not be silently rejected. On POSIX the two forms
+		// coincide, so the same assertions hold.
+		let tmp = tempfile::tempdir().unwrap();
+		let verbatim_cwd = std::fs::canonicalize(tmp.path()).unwrap();
+		let cleaned_cwd = strip_windows_verbatim_path(verbatim_cwd.clone());
+		let p = policy(&verbatim_cwd);
+		assert!(p.allow_tag_path_recovery("a.ts", &cleaned_cwd.join("a.ts")));
+		assert!(p.allow_tag_path_recovery("a.ts", &verbatim_cwd.join("a.ts")));
+		// Recovery outside the cwd stays rejected.
+		assert!(!p.allow_tag_path_recovery("a.ts", &cleaned_cwd.parent().unwrap().join("a.ts")));
+	}
+
+	#[test]
 	fn canonicalizes_existing_parent() {
 		let tmp = tempfile::tempdir().unwrap();
 		let missing = tmp.path().join("missing.txt");
+		// canonical_key strips the `\\?\` verbatim prefix std canonicalize
+		// yields on Windows; apply the same cleaning to the expectation.
 		assert_eq!(
 			canonical_key(&missing),
-			std::fs::canonicalize(tmp.path())
-				.unwrap()
-				.join("missing.txt")
+			strip_windows_verbatim_path(
+				std::fs::canonicalize(tmp.path())
+					.unwrap()
+					.join("missing.txt")
+			)
 		);
 	}
 }
