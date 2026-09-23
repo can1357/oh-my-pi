@@ -627,6 +627,13 @@ export interface CreateAgentSessionOptions {
 	parentAgentId?: string;
 	/** Inherited eval executor session id for subagents sharing parent eval state. */
 	parentEvalSessionId?: string;
+	/**
+	 * Owning top-level conversation ID for session-scoped fast mode. Subagent
+	 * sessions inherit the root conversation's ID so every descendant resolves
+	 * the same scoped state; omitted for top-level sessions, which default to
+	 * their own session ID. Distinct from `providerSessionId`/prompt-cache IDs.
+	 */
+	fastModeSessionId?: string;
 
 	/** Session manager. Default: session stored under the configured agentDir sessions root */
 	sessionManager?: SessionManager;
@@ -1908,6 +1915,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			trackEvalExecution: (execution, abortController) =>
 				session ? session.trackEvalExecution(execution, abortController) : execution,
 			getSessionId: () => sessionManager.getSessionId?.() ?? null,
+			// Owning conversation for session-scoped fast mode: the live session's
+			// getter (inherited owner ID or its own session ID), then the explicit
+			// spawn option, then this session's own ID before `session` exists.
+			getFastModeSessionId: () =>
+				session?.fastModeSessionId ?? options.fastModeSessionId ?? sessionManager.getSessionId(),
 			isDisposed: () => session?.isDisposed ?? false,
 			getHindsightSessionState: () => session?.getHindsightSessionState(),
 			getMnemopiSessionState: () => session?.getMnemopiSessionState(),
@@ -4021,6 +4033,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			disconnectOwnedMcpManager: ownedMcpManager ? () => ownedMcpManager.disconnectAll() : undefined,
 			ttsrManager,
 			obfuscator,
+			fastModeSessionId: options.fastModeSessionId,
 			agentId: resolvedAgentId,
 			agentKind,
 			providerSessionId: options.providerSessionId,

@@ -555,6 +555,12 @@ export interface ExecutorOptions {
 	/** Parent agent's eval executor session id. Subagents reuse it so eval state is shared. */
 	parentEvalSessionId?: string;
 	/**
+	 * Owning top-level conversation ID for session-scoped fast mode. Forwarded
+	 * verbatim from the parent's `ToolSession.getFastModeSessionId()` so every
+	 * generation of descendants resolves the root conversation's scoped state.
+	 */
+	fastModeSessionId?: string;
+	/**
 	 * Parent agent's OpenTelemetry configuration. When defined, the subagent's
 	 * loop is started with the same tracer/hooks but its own agent identity
 	 * stamped, so its `invoke_agent` / `chat` / `execute_tool` spans appear as
@@ -3813,6 +3819,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				localProtocolOptions: options.localProtocolOptions,
 				telemetry: subagentTelemetry,
 				parentEvalSessionId: options.parentEvalSessionId,
+				fastModeSessionId: options.fastModeSessionId,
 				onFirstChatDispatch: () => {
 					firstChatDispatchAt ??= performance.now();
 				},
