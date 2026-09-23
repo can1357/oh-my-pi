@@ -665,7 +665,7 @@ export class CommandController {
 		block.addChild(new Spacer(1));
 		block.addChild(new Markdown(changelogMarkdown + hint, 1, 1, getMarkdownTheme()));
 		block.addChild(new DynamicBorder());
-		this.ctx.presentCommandOutput(block);
+		this.ctx.presentCommandOutput(block, "changelog");
 	}
 
 	handleHotkeysCommand(): void {

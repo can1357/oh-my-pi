@@ -406,10 +406,17 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		icon: "news",
 		description: "Show changelog entries",
 		acpDescription: "Show changelog",
-		acpInputHint: "[full]",
-		subcommands: [{ name: "full", description: "Show complete changelog" }],
+		acpInputHint: "[full|close]",
+		subcommands: [
+			{ name: "full", description: "Show complete changelog" },
+			{ name: "close", description: "Dismiss pending changelog preview" },
+		],
 		allowArgs: true,
 		handle: async (command, runtime) => {
+			if (command.args.trim().toLowerCase() === "close") {
+				await runtime.output("No pending changelog to close.");
+				return commandConsumed();
+			}
 			const changelogPath = getChangelogPath();
 			const allEntries = await parseChangelog(changelogPath);
 			const showFull = command.args.trim().toLowerCase() === "full";
@@ -422,6 +429,11 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			return commandConsumed();
 		},
 		handleTui: async (command, runtime) => {
+			if (command.args.trim().toLowerCase() === "close") {
+				if (!runtime.ctx.closePendingChangelog()) runtime.ctx.showStatus("No pending changelog to close.");
+				runtime.ctx.editor.setText("");
+				return;
+			}
 			const showFull = command.args.split(/\s+/).filter(Boolean).includes("full");
 			await runtime.ctx.handleChangelogCommand(showFull);
 			runtime.ctx.editor.setText("");
