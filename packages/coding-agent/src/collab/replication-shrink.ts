@@ -42,7 +42,7 @@
  *   state and never reaches the model.
  */
 
-import type { SessionEntry as WireSessionEntry } from "@oh-my-pi/pi-wire";
+import { COLLAB_ENTRY_OMITTED_CUSTOM_TYPE, type SessionEntry as WireSessionEntry } from "@oh-my-pi/pi-wire";
 import type { AgentSessionEvent } from "../session/agent-session";
 import type { SessionEntry } from "../session/session-entries";
 
@@ -54,8 +54,7 @@ import type { SessionEntry } from "../session/session-entries";
  */
 export const MAX_REPLICATED_PAYLOAD_BYTES = 1 * 1024 * 1024;
 
-/** `customType` of the entry a guest receives in place of one that cannot be shrunk. */
-export const COLLAB_ENTRY_OMITTED_CUSTOM_TYPE = "collab-entry-too-large";
+export { COLLAB_ENTRY_OMITTED_CUSTOM_TYPE };
 
 /**
  * A session entry the guest's wire grammar can represent — what the host has

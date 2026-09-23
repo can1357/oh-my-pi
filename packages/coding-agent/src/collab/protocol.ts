@@ -12,6 +12,7 @@ import type {
 	BusChannel,
 	CollabUiRequest,
 	GuestFrame,
+	HistoryWindow,
 	ParsedCollabLink,
 	Participant,
 	AgentSnapshot as WireAgentSnapshot,
@@ -28,11 +29,13 @@ import type { AgentSessionEvent } from "../session/agent-session";
 import type { SessionEntry, SessionHeader } from "../session/session-entries";
 
 export type {
+	CollabElided,
 	CollabPromptDetails,
 	CollabUiRequest,
 	CollabUiRequestDraft,
 	CollabUiResponseValue,
 	CollabUiSelectItem,
+	HistoryWindow,
 	ParsedCollabLink,
 	RelayControlMessage,
 	RelayControlToGuest,
@@ -52,7 +55,7 @@ export type { CollabSessionState };
  * that serialize into those shapes.
  */
 export type CollabFrame =
-	// guest -> host (hello/abort/agent-cmd/fetch-transcript/ui-response are taken verbatim from the wire grammar)
+	// guest -> host (hello/abort/agent-cmd/fetch-*/ui-response are taken verbatim from the wire grammar)
 	| Exclude<GuestFrame, { t: "prompt" }>
 	| { t: "prompt"; text: string; images?: ImageContent[] }
 	// host -> guest
@@ -71,6 +74,8 @@ export type CollabFrame =
 			entryCount: number;
 			/** True when this peer joined through a read-only (view) link. */
 			readOnly?: boolean;
+			/** Present only when the host honoured `hello.snapshot` (tail mode). */
+			history?: HistoryWindow;
 	  }
 	/**
 	 * Targeted snapshot fragment delivered after `welcome`. Splits a large
@@ -92,6 +97,18 @@ export type CollabFrame =
 	| { t: "ui-request-end"; reqId: number }
 	/** Targeted reply to fetch-transcript; `error` marks a terminal read failure that guests must surface without hot retrying. */
 	| { t: "transcript"; reqId: number; text: string; newSize: number; error?: string }
+	/** Reply to fetch-history; last frame has `final` plus `startId`/`hasEarlier`; `error` is terminal. */
+	| {
+			t: "history";
+			reqId: number;
+			entries: SessionEntry[];
+			final: boolean;
+			startId?: string | null;
+			hasEarlier?: boolean;
+			error?: string;
+	  }
+	/** Reply to fetch-value: a slice of the original value's JSON from `offset`; `error` is terminal. */
+	| { t: "value"; reqId: number; offset: number; data: string; total: number; final: boolean; error?: string }
 	| { t: "bye"; reason: string }
 	| { t: "error"; message: string };
 
