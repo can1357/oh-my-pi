@@ -31,7 +31,7 @@ function createForm(addCustomProvider: SetupSceneHost["ctx"]["addCustomProvider"
 		},
 	} as unknown as SetupSceneHost;
 	return {
-		form: new CustomProviderForm(host),
+		form: new CustomProviderForm(host, addCustomProvider!),
 		finished,
 		get focusTarget() {
 			return focusTarget;
@@ -98,6 +98,9 @@ describe("CustomProviderForm", () => {
 			for (let i = 0; i < getOAuthProviders().length; i++) send("\x1b[B");
 			send("\n");
 			expect(Bun.stripANSI(scene.render(120).join("\n"))).toContain("Provider ID");
+			send("\x1b[D");
+			send("\x1b[C");
+			expect(Bun.stripANSI(scene.render(120).join("\n"))).toContain("Provider ID");
 
 			send("\t");
 			expect(Bun.stripANSI(scene.render(120).join("\n"))).toContain(
@@ -107,6 +110,26 @@ describe("CustomProviderForm", () => {
 			expect(Bun.stripANSI(scene.render(120).join("\n"))).toContain("Provider ID");
 			send("\x1b");
 			expect(Bun.stripANSI(scene.render(120).join("\n"))).toContain("Select provider to login");
+		} finally {
+			scene.dispose?.();
+		}
+	});
+
+	it("hides the custom endpoint action when the host does not support it", () => {
+		const host = {
+			ctx: {
+				authStorage: { credentials: { has: () => false }, keys: { source: () => undefined } },
+				disabledProviders: [],
+				webSearchOrder: ["auto"],
+			},
+			requestRender() {},
+			finish() {},
+			setFocus() {},
+			restoreFocus() {},
+		} as unknown as SetupSceneHost;
+		const scene = providersSetupScene.mount(host);
+		try {
+			expect(Bun.stripANSI(scene.render(120).join("\n"))).not.toContain("Custom endpoint…");
 		} finally {
 			scene.dispose?.();
 		}

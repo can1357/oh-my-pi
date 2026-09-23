@@ -83,11 +83,13 @@ export class SignInScene implements SetupSceneController {
 				requestRender: () => this.#host.requestRender(),
 				disabledProviders: this.#host.ctx.disabledProviders,
 				sheet: this.#sheet(),
-				extraAction: {
-					id: "__omp_custom_provider__",
-					label: "Custom endpoint…",
-					onSelect: () => this.#openCustomProvider(),
-				},
+				extraAction: this.#host.ctx.addCustomProvider
+					? {
+							id: "__omp_custom_provider__",
+							label: "Custom endpoint…",
+							onSelect: () => this.#openCustomProvider(),
+						}
+					: undefined,
 			},
 		);
 	}
@@ -248,7 +250,9 @@ export class SignInScene implements SetupSceneController {
 
 	#openCustomProvider(): void {
 		if (this.#customProvider || this.#lifetime.signal.aborted) return;
-		this.#customProvider = new CustomProviderForm(this.#host, () => this.#closeCustomProvider());
+		const addProvider = this.#host.ctx.addCustomProvider;
+		if (!addProvider) return;
+		this.#customProvider = new CustomProviderForm(this.#host, addProvider, () => this.#closeCustomProvider());
 		this.#customProvider.onActivate?.();
 		this.#host.requestRender();
 	}
@@ -256,7 +260,6 @@ export class SignInScene implements SetupSceneController {
 	#closeCustomProvider(): void {
 		this.#customProvider?.dispose();
 		this.#customProvider = undefined;
-		this.#selector.resumeValidation();
 		this.#host.requestRender();
 	}
 

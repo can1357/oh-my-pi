@@ -1,5 +1,4 @@
 import { getOAuthCredentialProvider } from "@oh-my-pi/pi-ai/oauth";
-import { stringifyYamlConfig } from "@oh-my-pi/pi-utils/yaml-config";
 import { runProviderSetupWizard as runProviderWizard } from "@oh-my-pi/pi-tui/setup/lazy";
 import type { SetupHost, SetupScene } from "@oh-my-pi/pi-tui/setup/scenes/types";
 import {
@@ -10,7 +9,7 @@ import {
 	selectSetupScenes as selectScenes,
 	type SetupSceneSelectionOptions,
 } from "@oh-my-pi/pi-tui/setup/wizard";
-import { ModelsConfigFile } from "../config/models-config";
+import { addCustomProvider } from "../config/custom-provider";
 import type { Settings } from "../config/settings";
 import { captureBrowserSession } from "../utils/browser-session";
 import { createModelBrowserSource } from "./model-browser-source";
@@ -71,39 +70,12 @@ export function createSetupHost(ctx: InteractiveModeContext): SetupHost {
 			await ctx.session.modelRegistry.refreshProvider(getOAuthCredentialProvider(provider), "online");
 			await ctx.refreshScopedModelsAfterLogin?.();
 		},
-		addCustomProvider: async ({ id, baseUrl, apiKey }) => {
-			if (!/^[a-z0-9][a-z0-9_-]*$/.test(id)) {
-				throw new Error(
-					"Provider ID must start with a letter or number and contain only lowercase letters, numbers, - or _.",
-				);
-			}
-			let endpoint: URL;
-			try {
-				endpoint = new URL(baseUrl);
-			} catch {
-				throw new Error("Enter a valid provider endpoint URL.");
-			}
-			if (endpoint.protocol !== "http:" && endpoint.protocol !== "https:") {
-				throw new Error("Provider endpoint must use HTTP or HTTPS.");
-			}
-			const config = ModelsConfigFile.loadOrDefault();
-			if (config.providers?.[id]) throw new Error(`Provider "${id}" is already configured.`);
-			const next = {
-				...config,
-				providers: {
-					...config.providers,
-					[id]: {
-						baseUrl: endpoint.toString().replace(/\/$/, ""),
-						api: "openai-completions" as const,
-						...(apiKey ? { apiKey } : {}),
-						discovery: { type: "openai-models-list" as const },
-					},
-				},
-			};
-			await Bun.write(ModelsConfigFile.path(), stringifyYamlConfig(next));
-			ModelsConfigFile.invalidate();
-			await ctx.session.modelRegistry.refreshProvider(id, "online");
-		},
+		addCustomProvider: provider =>
+			addCustomProvider(provider, {
+				authStorage: ctx.session.modelRegistry.authStorage,
+				refreshProvider: id => ctx.session.modelRegistry.refreshProvider(id, "online"),
+				hasChatModels: id => ctx.session.modelRegistry.getAll("chat").some(model => model.provider === id),
+			}),
 		saveComposerShape: async shape => {
 			cfgComposerShape.set(ctx.settings, shape);
 			await ctx.settings.flush();

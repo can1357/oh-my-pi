@@ -163,10 +163,6 @@ export class OAuthSelectorComponent extends OverlayPanel {
 		this.#updateList();
 	}
 
-	resumeValidation(): void {
-		this.#startValidation();
-	}
-
 	/**
 	 * Fit the selector into `lines` rendered rows by shrinking the visible list
 	 * window (the window is centered on the selection, so the selected row is
