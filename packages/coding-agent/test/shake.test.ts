@@ -10,6 +10,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { formatShakeSummary } from "@oh-my-pi/pi-coding-agent/session/shake-types";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 const usage = {
@@ -402,14 +403,23 @@ describe("AgentSession shake", () => {
 			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
 
 			const tokenizer = new Tokenizer();
-			const tokensBefore = tokenizer.countMessage(mixed);
+			const tokensBefore = tokenizer.countMessage(mixed, { excludeEncryptedReasoning: true });
+			const thinkingOnlyBefore = tokenizer.countMessage(thinkingOnly, { excludeEncryptedReasoning: true });
 
 			const result = await session.shake("thinking");
 
 			expect(result.thinkingBlocksDropped).toBe(3);
 			expect(mixed.content).toEqual([{ type: "text", text: "visible answer" }]);
 			expect(thinkingOnly.content).toEqual([]);
-			expect(tokenizer.countMessage(mixed)).toBeLessThan(tokensBefore);
+			expect(tokenizer.countMessage(mixed, { excludeEncryptedReasoning: true })).toBeLessThan(tokensBefore);
+			const measuredSaving =
+				tokensBefore +
+				thinkingOnlyBefore -
+				tokenizer.countMessage(mixed, { excludeEncryptedReasoning: true }) -
+				tokenizer.countMessage(thinkingOnly, { excludeEncryptedReasoning: true });
+			expect(measuredSaving).toBeGreaterThan(0);
+			expect(result.tokensFreed).toBe(measuredSaving);
+			expect(formatShakeSummary(result)).toContain(`~${result.tokensFreed} tokens freed`);
 
 			const runtimeAssistants = session.agent.state.messages.filter(
 				(message): message is AssistantMessage => message.role === "assistant",
@@ -431,6 +441,61 @@ describe("AgentSession shake", () => {
 			} finally {
 				await persisted.close();
 			}
+		});
+
+		it("does not inflate reported savings with opaque signature bytes", async () => {
+			const signed: AssistantMessage = {
+				role: "assistant",
+				content: [
+					{ type: "thinking", thinking: "short", thinkingSignature: "S".repeat(20_000) },
+					{ type: "text", text: "answer" },
+				],
+				...apiInfo,
+				stopReason: "stop",
+				usage,
+				timestamp: Date.now(),
+			};
+			sessionManager.appendMessage(signed);
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+			const tokenizer = new Tokenizer();
+			const before = tokenizer.countMessage(signed, { excludeEncryptedReasoning: true });
+			const rawBefore = tokenizer.countMessage(signed);
+			const result = await session.shake("thinking");
+
+			expect(result.thinkingBlocksDropped).toBe(1);
+			expect(result.tokensFreed).toBe(before - tokenizer.countMessage(signed, { excludeEncryptedReasoning: true }));
+			expect(result.tokensFreed).toBeLessThan(rawBefore - tokenizer.countMessage(signed));
+		});
+
+		it("updates the provider-anchored context meter for earlier thinking", async () => {
+			const prior: AssistantMessage = {
+				role: "assistant",
+				content: [
+					{ type: "thinking", thinking: "old reasoning ".repeat(1_000) },
+					{ type: "text", text: "old answer" },
+				],
+				...apiInfo,
+				stopReason: "stop",
+				usage,
+				timestamp: Date.now() - 1,
+			};
+			sessionManager.appendMessage(prior);
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "latest answer" }],
+				...apiInfo,
+				stopReason: "stop",
+				usage: { ...usage, input: 20_000, totalTokens: 20_008 },
+				timestamp: Date.now(),
+			});
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+			expect(session.getContextUsage()?.tokens).toBe(20_000);
+
+			const result = await session.shake("thinking");
+
+			expect(result.tokensFreed).toBeGreaterThan(0);
+			expect(session.getContextUsage()?.tokens).toBe(20_000 - result.tokensFreed);
 		});
 	});
 

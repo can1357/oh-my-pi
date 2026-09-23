@@ -37,6 +37,8 @@ import type {
 	BeforeAgentStartEventResult,
 	BeforeProviderRequestEvent,
 	BeforeProviderRequestEventResult,
+	BeforeSubagentSpawnEvent,
+	BeforeSubagentSpawnEventResult,
 	CompactOptions,
 	ContextEvent,
 	ContextEventResult,
@@ -1805,5 +1807,41 @@ export class ExtensionRunner {
 		}
 
 		return undefined;
+	}
+
+	/**
+	 * Runs `before_subagent_spawn` handlers; a `block` short-circuits, the last defined `model` wins.
+	 * `signal` (the spawn's abort signal) cancels an awaiting handler instead of parking until the timeout.
+	 */
+	async emitBeforeSubagentSpawn(
+		event: BeforeSubagentSpawnEvent,
+		signal?: AbortSignal,
+	): Promise<BeforeSubagentSpawnEventResult | undefined> {
+		if (!this.hasHandlers("before_subagent_spawn")) return undefined;
+		const ctx = this.createContext();
+		let chosen: Pick<BeforeSubagentSpawnEventResult, "model" | "note"> | undefined;
+
+		for (const ext of this.extensions) {
+			const handlers = ext.handlers.get("before_subagent_spawn");
+			if (!handlers || handlers.length === 0) continue;
+
+			for (const handler of handlers) {
+				const handlerResult = await this.#runHandlerWithTimeout(
+					handler,
+					event,
+					ctx,
+					ext,
+					extensionHandlerTimeoutMs,
+					undefined,
+					signal,
+				);
+				if (!handlerResult) continue;
+				const result = handlerResult as BeforeSubagentSpawnEventResult;
+				if (result.block) return result;
+				if (result.model !== undefined) chosen = { model: result.model, note: result.note };
+			}
+		}
+
+		return chosen;
 	}
 }
