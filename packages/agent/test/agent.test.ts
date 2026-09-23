@@ -2143,19 +2143,22 @@ describe("Agent", () => {
 		expect(mock.calls[0]?.options?.promptCacheKey).toBe("parent-cache");
 	});
 
-	it("enables explicit prompt caching from structured OpenAI compatibility metadata", async () => {
-		const model = getBundledModel("openai", "gpt-5.6");
-		if (!model) throw new Error("Expected bundled GPT-5.6 model");
-		const mock = createMockModel({ responses: [{ content: ["ok"] }] });
-		const agent = new Agent({ initialState: { model, messages: [] }, streamFn: mock.stream });
+	it.each(["gpt-5.6", "gpt-6-sol", "gpt-6-luna"])(
+		"enables explicit prompt caching from structured OpenAI compatibility metadata for %s",
+		async modelId => {
+			const model = getBundledModel("openai", modelId);
+			if (!model) throw new Error(`Expected bundled ${modelId} model`);
+			const mock = createMockModel({ responses: [{ content: ["ok"] }] });
+			const agent = new Agent({ initialState: { model, messages: [] }, streamFn: mock.stream });
 
-		await agent.prompt("run");
+			await agent.prompt("run");
 
-		expect(mock.calls[0]?.options?.promptCache).toEqual({
-			mode: "explicit",
-			breakpoint: "latest-stable-message",
-		});
-	});
+			expect(mock.calls[0]?.options?.promptCache).toEqual({
+				mode: "explicit",
+				breakpoint: "latest-stable-message",
+			});
+		},
+	);
 
 	it("preserves a caller-supplied prompt-cache policy", async () => {
 		const model = getBundledModel("openai", "gpt-5.6");
