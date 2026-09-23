@@ -1,5 +1,6 @@
 import { applyBackgroundToLine, padding, visibleWidth } from "../utils";
 import { type Component, Container } from "../tui";
+import { Box } from "../components/box";
 import { Disclosure } from "../components/disclosure";
 import { Markdown } from "../components/markdown";
 import { formatBytes } from "@oh-my-pi/pi-utils";
@@ -50,6 +51,20 @@ export interface UserBubbleOptions {
 	synthetic?: boolean;
 	/** SKILL.md path for a skill chip by name; `undefined` leaves the chip unlinked. */
 	skillPath?: (name: string) => string | undefined;
+	/** Visual layout of the message: block (colored background), box (border frame), or plain. */
+	shape?: UserMessageShape;
+}
+
+export type UserMessageShape = "block" | "box" | "plain";
+
+let defaultUserMessageShape: UserMessageShape = "block";
+
+export function setUserMessageShape(shape: UserMessageShape): void {
+	defaultUserMessageShape = shape;
+}
+
+export function getUserMessageShape(): UserMessageShape {
+	return defaultUserMessageShape;
 }
 
 /**
@@ -111,7 +126,8 @@ export class UserMessageComponent extends Container implements ReactionTarget {
 	// never mutates the container's cached array.
 	#zoneSource: readonly string[] | undefined;
 	#zoneLines: string[] | undefined;
-	readonly #bgColor: (value: string) => string;
+	readonly #bgColor: ((value: string) => string) | undefined;
+	readonly #shape: UserMessageShape;
 	#reaction: string | undefined;
 
 	constructor(text: string, options: UserBubbleOptions = {}) {
@@ -128,14 +144,43 @@ export class UserMessageComponent extends Container implements ReactionTarget {
 			mentionLabels.push(label);
 			return label;
 		});
-		const bgColor = (value: string) => theme.bg("userMessageBg", value);
-		this.#bgColor = bgColor;
-		const md = new Markdown(text, 1, 1, getMarkdownTheme(), {
-			bgColor,
-			color: userBubbleColor(options, composerTokenRegex(mentionLabels)),
-		});
-		md.setIgnoreTight(true);
-		this.addChild(md);
+
+		const shape = options.shape ?? defaultUserMessageShape;
+		this.#shape = shape;
+
+		if (shape === "box") {
+			const bgColor = (value: string) => theme.bg("userMessageBg", value);
+			this.#bgColor = bgColor;
+			const md = new Markdown(text, 0, 0, getMarkdownTheme(), {
+				bgColor: undefined,
+				color: userBubbleColor(options, composerTokenRegex(mentionLabels)),
+			});
+			md.setIgnoreTight(true);
+			const box = new Box(1, 0, bgColor, {
+				chars: theme.boxRound,
+				color: (s: string) => theme.fg("border", s),
+			});
+			box.setIgnoreTight(true);
+			box.addChild(md);
+			this.addChild(box);
+		} else if (shape === "plain") {
+			this.#bgColor = undefined;
+			const md = new Markdown(text, 1, 1, getMarkdownTheme(), {
+				bgColor: undefined,
+				color: userBubbleColor(options, composerTokenRegex(mentionLabels)),
+			});
+			md.setIgnoreTight(true);
+			this.addChild(md);
+		} else {
+			const bgColor = (value: string) => theme.bg("userMessageBg", value);
+			this.#bgColor = bgColor;
+			const md = new Markdown(text, 1, 1, getMarkdownTheme(), {
+				bgColor,
+				color: userBubbleColor(options, composerTokenRegex(mentionLabels)),
+			});
+			md.setIgnoreTight(true);
+			this.addChild(md);
+		}
 	}
 
 	setReaction(emoji: string): void {
@@ -147,7 +192,25 @@ export class UserMessageComponent extends Container implements ReactionTarget {
 	/** The top padding row with the reaction badge right-aligned inside the horizontal padding. */
 	#reactionRow(width: number): string {
 		const emoji = this.#reaction!;
-		return applyBackgroundToLine(padding(width - 1 - visibleWidth(emoji)) + emoji, width, this.#bgColor);
+		return applyBackgroundToLine(padding(width - 1 - visibleWidth(emoji)) + emoji, width, this.#bgColor ?? (s => s));
+	}
+
+	/** The top border row with the reaction badge docked into the border. */
+	#reactionBorderRow(topBorderRow: string, width: number): string {
+		const emoji = this.#reaction!;
+		const emojiLen = visibleWidth(emoji);
+		const badge = ` ${emoji} `;
+		const badgeWidth = emojiLen + 2;
+		const rightMargin = 2;
+		const leftLen = width - 2 - badgeWidth - rightMargin;
+		if (leftLen < 1) return topBorderRow;
+		const chars = theme.boxRound;
+		const color = (s: string) => theme.fg("border", s);
+		return (
+			color(chars.topLeft + chars.horizontal.repeat(leftLen)) +
+			badge +
+			color(chars.horizontal.repeat(rightMargin) + chars.topRight)
+		);
 	}
 
 	override render(width: number): readonly string[] {
@@ -159,7 +222,13 @@ export class UserMessageComponent extends Container implements ReactionTarget {
 			return this.#zoneLines;
 		}
 		const wrapped = lines.slice();
-		if (this.#reaction !== undefined) wrapped[0] = this.#reactionRow(width);
+		if (this.#reaction !== undefined) {
+			if (this.#shape === "box") {
+				wrapped[0] = this.#reactionBorderRow(wrapped[0]!, width);
+			} else {
+				wrapped[0] = this.#reactionRow(width);
+			}
+		}
 		wrapped[0] = OSC133_ZONE_START + wrapped[0];
 		wrapped[wrapped.length - 1] = wrapped[wrapped.length - 1] + OSC133_ZONE_CLOSE;
 		this.#zoneSource = lines;
@@ -167,7 +236,6 @@ export class UserMessageComponent extends Container implements ReactionTarget {
 		return wrapped;
 	}
 }
-
 /**
  * Always-visible dim summary row for a collapsed synthetic input. Kept as a
  * small domain renderer so the width-truncated label never pays Markdown

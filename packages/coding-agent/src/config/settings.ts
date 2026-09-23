@@ -35,6 +35,7 @@ import { setShimmerMode } from "@oh-my-pi/pi-tui/theme/shimmer";
 import { setChatTranscriptDisplayPreferences } from "@oh-my-pi/pi-tui/chat/display-preferences";
 import { setEditorGapComposerShape } from "@oh-my-pi/pi-tui/prompt/editor-top-gap";
 import { setEmojiAutocompleteEnabled } from "@oh-my-pi/pi-tui/prompt/prompt-action-autocomplete";
+import { setUserMessageShape } from "@oh-my-pi/pi-tui/chat/user-message";
 import { setMcpRenderMarkdownResults } from "@oh-my-pi/pi-tui/tools/mcp";
 import { isLightTheme, setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "@oh-my-pi/pi-tui/theme/theme";
 import { JSONC, YAML } from "bun";
@@ -3468,6 +3469,9 @@ const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
 	},
 	"display.shimmer": value => {
 		if (value === "classic" || value === "kitt" || value === "disabled") setShimmerMode(value);
+	},
+	"display.userMessageShape": value => {
+		if (value === "block" || value === "box" || value === "plain") setUserMessageShape(value);
 	},
 	"composer.shape": value => {
 		if (typeof value === "string") setEditorGapComposerShape(value);

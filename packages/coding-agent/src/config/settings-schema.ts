@@ -1256,6 +1256,18 @@ export const SETTINGS_SCHEMA = {
 				"Collapse pre-compaction history behind the summary divider on the live transcript; disable to keep the full transcript inline with dividers at each compaction point",
 		},
 	},
+	"display.userMessageShape": {
+		type: "enum",
+		values: ["block", "box", "plain"] as const,
+		default: "block",
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "User Message Style",
+			description:
+				"Visual framing for user prompts in the chat transcript: block (colored background fill), box (outlined with border), or plain (transparent text)",
+		},
+	},
 
 	showHardwareCursor: {
 		type: "boolean",

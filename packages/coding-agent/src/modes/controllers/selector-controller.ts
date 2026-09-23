@@ -613,6 +613,10 @@ export class SelectorController {
 			case "composer.shape":
 				this.ctx.syncComposerShape();
 				break;
+			case "display.userMessageShape":
+				this.ctx.chatContainer.invalidate();
+				this.ctx.ui.requestRender();
+				break;
 			case "advisor.enabled":
 				this.ctx.session.setAdvisorEnabled(value as boolean);
 				this.ctx.statusLine.invalidate();
