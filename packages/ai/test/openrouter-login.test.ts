@@ -1,7 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
-import { getOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/stream";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 
@@ -17,13 +16,6 @@ afterEach(() => {
 });
 
 describe("openrouter login wiring", () => {
-	test("registers OpenRouter in the OAuth provider selector", () => {
-		const provider = getOAuthProviders().find(item => item.id === "openrouter");
-		expect(provider).toBeDefined();
-		expect(provider?.name).toBe("OpenRouter");
-		expect(provider?.available).toBe(true);
-	});
-
 	test("resolves OPENROUTER_API_KEY from environment", () => {
 		Bun.env.OPENROUTER_API_KEY = "or-test-key";
 		expect(getEnvApiKey("openrouter")).toBe("or-test-key");

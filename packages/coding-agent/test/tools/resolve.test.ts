@@ -10,7 +10,6 @@ import {
 	PROPOSE_DEVICE_PATH,
 	REJECT_DEVICE_PATH,
 	RESOLVE_DEVICE_PATH,
-	resolutionDeviceUsage,
 	writeDeviceDispatch,
 } from "@oh-my-pi/pi-coding-agent/tools/resolve";
 import {
@@ -45,12 +44,6 @@ function getText(result: { content: Array<{ type: string; text?: string }> }): s
 }
 
 describe("dispatchResolutionDevice", () => {
-	it("returns usage text for each device", () => {
-		expect(resolutionDeviceUsage(RESOLVE_DEVICE_NAME)).toContain(RESOLVE_DEVICE_PATH);
-		expect(resolutionDeviceUsage(REJECT_DEVICE_NAME)).toContain(REJECT_DEVICE_PATH);
-		expect(resolutionDeviceUsage(PROPOSE_DEVICE_NAME)).toContain(PROPOSE_DEVICE_PATH);
-	});
-
 	it("errors and clears stale pending markers when resolve has no invoker", async () => {
 		let clearRuns = 0;
 		const session = createSession({

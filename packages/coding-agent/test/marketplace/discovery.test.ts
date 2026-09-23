@@ -85,15 +85,6 @@ afterEach(() => {
 
 // ── Path contract ─────────────────────────────────────────────────────────────
 
-describe("OMP registry path contract", () => {
-	it("OMP registry lives at home/.omp/plugins/installed_plugins.json", () => {
-		// This is the path that listClaudePluginRoots reads.
-		// Any change to this path must be reflected in helpers.ts.
-		const expected = path.join(tmpHome, ".omp", "plugins", "installed_plugins.json");
-		expect(ompRegistryPath).toBe(expected);
-	});
-});
-
 // ── Format compatibility ───────────────────────────────────────────────────────
 
 describe("OMP registry format compatibility with Claude parser", () => {

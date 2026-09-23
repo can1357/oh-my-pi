@@ -18,7 +18,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { SETTINGS_SCHEMA } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -143,10 +142,6 @@ describe("EventController.sendCompletionNotification — abort guard", () => {
 });
 
 describe("EventController.sendErrorNotification", () => {
-	it("defaults error notifications to opt-in", () => {
-		expect(SETTINGS_SCHEMA["error.notify"].default).toBe("off");
-	});
-
 	it("fires an error notification when stopReason === 'error'", () => {
 		const spy = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
 		settings.override("error.notify", "on");

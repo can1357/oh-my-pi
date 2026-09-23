@@ -1,8 +1,9 @@
 /**
  * Resolves the {@link Judge} that answers typed judgments through the `judge`
- * model role. The chain is rebuilt for every call so live catalog discovery,
- * role edits, credential changes, and session fallback all take effect without
- * recreating feature consumers.
+ * model role. The chain is re-resolved at most every {@link CANDIDATE_TTL_MS}
+ * so live catalog discovery, role edits, credential changes, and session
+ * fallback all take effect without recreating feature consumers, while bulk
+ * callers (`judge_batch`) do not re-scan the whole catalog per item.
  */
 import {
 	type AssistantMessage,
@@ -95,6 +96,12 @@ const LOCAL_REASONING_MAX_TOKENS = 1024;
  * credential-rotation round trip before reaching the next candidate.
  */
 const CANDIDATE_REJECTION_COOLDOWN_MS = 5 * 60 * 1000;
+/**
+ * How long a resolved candidate list is reused. Resolution filters the full
+ * catalog (thousands of models) synchronously — milliseconds per call, which a
+ * concurrent fan-out turns into sustained event-loop stalls.
+ */
+const CANDIDATE_TTL_MS = 1_000;
 /** Skip-until timestamps keyed by routed model identity, carried by the registry that produced the rejection. */
 const kRejections = Symbol("judgment.rejections");
 interface RegistryWithRejections extends ModelRegistry {
@@ -114,7 +121,23 @@ export function kindOf(value: RoleChainCandidate | Model): JudgeKind {
 	return "online";
 }
 
-/** Resolve a live judge-role chain. Candidate resolution remains lazy per judgment call. */
+/** The `judge` role's candidates in attempt order, drawn from credentialed judge-capable models. */
+function judgeRoleChain(settings: Settings, registry: ModelRegistry): RoleChainCandidate[] {
+	return resolveRoleChain("judge", settings, roleCandidatePool("judge", settings, registry));
+}
+
+/**
+ * Whether the `judge` role resolves first to a native System One backend
+ * (TypeSafe jev, directly or through OpenRouter) rather than a prompted
+ * on-device or chat model. Judge-heavy features gate on it, e.g. the `find`
+ * tool under `find.enabled: auto`.
+ */
+export function hasNativeJudge(settings: Settings, registry: ModelRegistry): boolean {
+	const [primary] = judgeRoleChain(settings, registry);
+	return primary !== undefined && kindOf(primary) === "native";
+}
+
+/** Resolve a live judge-role chain. Candidates resolve lazily and are reused for {@link CANDIDATE_TTL_MS}. */
 export function resolveJudge(deps: JudgeDeps): ChainJudge {
 	return new ChainJudge(deps);
 }
@@ -127,6 +150,7 @@ export function resolveJudge(deps: JudgeDeps): ChainJudge {
 export class ChainJudge implements Judge {
 	readonly label = "judge role chain";
 	readonly #deps: JudgeDeps;
+	#candidates: { list: RoleChainCandidate[]; expiresAt: number } | undefined;
 
 	constructor(deps: JudgeDeps) {
 		this.#deps = deps;
@@ -184,8 +208,16 @@ export class ChainJudge implements Judge {
 	}
 
 	#resolveCandidates(): RoleChainCandidate[] {
+		const now = Date.now();
+		if (this.#candidates && now < this.#candidates.expiresAt) return this.#candidates.list;
+		const list = this.#buildCandidates();
+		this.#candidates = { list, expiresAt: now + CANDIDATE_TTL_MS };
+		return list;
+	}
+
+	#buildCandidates(): RoleChainCandidate[] {
 		const { settings, registry, sessionModel } = this.#deps;
-		const candidates = resolveRoleChain("judge", settings, roleCandidatePool("judge", settings, registry));
+		const candidates = judgeRoleChain(settings, registry);
 		if (!sessionModel) return candidates;
 		const sessionIdentity = formatModelStringWithRouting(sessionModel);
 		if (candidates.some(candidate => formatModelStringWithRouting(candidate.model) === sessionIdentity)) {

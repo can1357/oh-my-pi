@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Extensions load faster on warm starts: their dependencies are no longer re-parsed on every launch ([#12908](https://github.com/can1357/oh-my-pi/pull/12908) by [@H4vC](https://github.com/H4vC)).
+- The first highlighted code block, bash preview, or diff no longer stalls the screen while syntax highlighting initializes ([#12908](https://github.com/can1357/oh-my-pi/pull/12908) by [@H4vC](https://github.com/H4vC)).
+
+## [18.2.10] - 2026-09-22
+
+### Added
+
+- Added live benchmark results table with real-time model ranking and per-kind performance metrics
+- Added dedicated prefill throughput reporting for prefill-focused benchmarks
+- Added `/record` slash command to capture terminal sessions as replayable `.ompcast` files
+- Added `omp play` CLI for terminal-based playback of session recordings
+- Added intent descriptions to judgment batching
+- Added live progress tracking for judgment batches in the TUI
+
+### Changed
+
+- Refined AI-assisted git staging verification to reduce false positives
+- Updated `omp bench` default profile to `chat` and improved CLI flag documentation
+- Coalesced judgment batch drain operations for better performance under high load
+
 ## [18.2.9] - 2026-09-22
 
 ### Added
@@ -10,7 +32,6 @@
 - `providers.operationTimeoutSeconds` (default 900) caps the wall clock one provider request may spend across its internal retries on the Anthropic, OpenAI Responses, Codex Responses, Google and Gemini CLI paths plus the shared replay-safe stream retry. A retry whose backoff would cross the budget fails immediately with an error naming the budget and the elapsed time instead of sleeping, and the session saga replays an exhausted budget at most twice rather than running the full retry ladder — so a wedged provider surfaces in minutes instead of leaving a turn silent for hours. `0` disables the budget ([#12786](https://github.com/can1357/oh-my-pi/pull/12786) by [@geoyws](https://github.com/geoyws)).
 - `providers.operationTimeoutSeconds` now bounds time without progress (output extends it) rather than total duration. The session saga's exhausted-budget replay bound is saga-wide: a model switch no longer refunds it, and a spent bound no longer consults the fallback chain, so the "at most twice" bound holds for any chain length. Side-request oneshots replay a budget exhaustion at most once, and negative values are treated as `0` (off).
 - Added Claude saved resets to usage views and `/usage reset`, with automatic blocked-limit recovery and expiring-reset redemption controlled by `claudeResets`.
-
 - Added support for searching embedded harness documentation with `find` and `omp find` using `omp://` scopes, including file-specific searches and `:start-end` selectors; results open directly through canonical `omp://` URLs.
 
 ### Changed
