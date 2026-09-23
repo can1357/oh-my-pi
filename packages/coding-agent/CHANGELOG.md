@@ -6,6 +6,7 @@
 
 - `providers.operationTimeoutSeconds` (default 900) caps the wall clock one provider request may spend across its internal retries on the Anthropic, OpenAI Responses, Codex Responses, Google and Gemini CLI paths plus the shared replay-safe stream retry. A retry whose backoff would cross the budget fails immediately with an error naming the budget and the elapsed time instead of sleeping, and the session saga replays an exhausted budget at most twice rather than running the full retry ladder — so a wedged provider surfaces in minutes instead of leaving a turn silent for hours. `0` disables the budget ([#12786](https://github.com/can1357/oh-my-pi/pull/12786) by [@geoyws](https://github.com/geoyws)).
 - `providers.operationTimeoutSeconds` now bounds time without progress (output extends it) rather than total duration. The session saga's exhausted-budget replay bound is saga-wide: a model switch no longer refunds it, and a spent bound no longer consults the fallback chain, so the "at most twice" bound holds for any chain length. Side-request oneshots replay a budget exhaustion at most once, and negative values are treated as `0` (off).
+- Added `/changelog last [N]` to show the latest release, or the last N releases. `/changelog` still shows the recent default and `/changelog full` still shows the complete history.
 - Added `omp login` command for terminal-based OAuth authentication, including automated model discovery refresh and browser-opening support
 - Enabled `org-scoped-identity` and `oauth-token-env` configuration parsing for authentication providers
 - Adopted namespaced `authStorage` API for CLI and session management
@@ -13,6 +14,9 @@
 - Added openrouter/~typesafe/jev-latest as a native judge candidate in priority configuration
 - Added `OMP_MCP_STARTUP_TIMEOUT_MS` and `mcp.startupTimeoutMs` to configure the initial MCP discovery window, plus `OMP_MCP_REQUIRE_READY=1` to fail headless print runs before the first turn when a server is unavailable.
 - Added `auth.accountPolicies` for per-account OAuth priority and reserve controls, with matching policy state in `omp usage` ([#12243](https://github.com/can1357/oh-my-pi/pull/12243) by [@schickling-assistant](https://github.com/schickling-assistant)).
+- Added `/export` and `/usage` to focused subagent views: `/export` writes the focused subagent's transcript (including its own subagents) and `/usage` shows account usage without returning to the main session ([#12986](https://github.com/can1357/oh-my-pi/pull/12986) by [@H4vC](https://github.com/H4vC)).
+- Added saving of clipboard-pasted images to the session artifact directory so the agent receives a file path it can read, copy, or upload (for example, attaching a pasted screenshot to an issue tracker) ([#12985](https://github.com/can1357/oh-my-pi/pull/12985) by [@H4vC](https://github.com/H4vC)).
+- Added `/annotate` to attach notes to a code-review diff, the latest reply, a session message, a file, or quoted text, then paste them into the prompt or send them with a review ([#12601](https://github.com/can1357/oh-my-pi/pull/12601) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
 
 ### Changed
 
@@ -22,6 +26,8 @@
 
 ### Fixed
 
+- Fixed comma-separated line selectors such as `:19,59` in `read`, `grep` paths, and `fetch` reading from the first number through EOF. A bare number in a list is now that single line; a lone `:50` still reads from line 50.
+- Fixed `write` success text reporting JavaScript string length as bytes. The count is now the UTF-8 byte length.
 - Fixed headless print mode (`-p`) silently dropping MCP servers slower than the startup window; print mode now waits for configured servers (bounded by `OMP_MCP_TIMEOUT_MS`) and warns on stderr when one is not ready ([#12188](https://github.com/can1357/oh-my-pi/issues/12188), reported by [@aaronjmars](https://github.com/aaronjmars)).
 
 ## [18.2.11] - 2026-09-23
