@@ -256,9 +256,17 @@ const modelSegment: StatusLineSegment = {
 		// between the name and that tail, so it reads as a distinct marker.
 		// theme.fg resets only the fg, so the spans are concatenated (not
 		// nested) to keep each color intact.
+		// The bolt marks priority service realized on the wire; the scope word
+		// rides beside it whenever a `/fast` session/provider/global selection
+		// is enabled, so an enabled-but-inactive scope still shows its word
+		// without the bolt. Off clears the scope and nothing renders.
 		let tail = "";
 		if (ctx.session.isFastModeActive() && theme.icon.fast) {
 			tail += ` ${theme.icon.fast}`;
+		}
+		const fastScope = ctx.session.fastModeScope?.();
+		if (fastScope) {
+			tail += ` ${fastScope}`;
 		}
 		if (!compact && thinkingDisplay) {
 			tail += `${theme.sep.dot}${thinkingDisplay}`;

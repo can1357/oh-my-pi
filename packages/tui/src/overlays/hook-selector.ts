@@ -84,6 +84,9 @@ export interface HookSelectorOptions {
 	/** Number of leading options (original order) that receive a selection
 	 *  marker. Defaults to every option when {@link selectionMarker} is set. */
 	markableCount?: number;
+	/** When true, Space confirms the highlighted option exactly like Enter.
+	 *  Off by default so Space keeps its type-to-search role in long lists. */
+	spaceSelects?: boolean;
 }
 
 export interface HookSelectorOption {
@@ -177,6 +180,7 @@ export class HookSelectorComponent extends OverlayPanel {
 	#onRightCallback: (() => void) | undefined;
 	#onExternalEditorCallback: (() => void) | undefined;
 	#onTimeoutResetCallback: (() => void) | undefined;
+	#spaceSelects: boolean;
 	#slider: HookSelectorSlider | undefined;
 	#sliderIndex: number = 0;
 	#sliderComponent: Text | undefined;
@@ -220,6 +224,7 @@ export class HookSelectorComponent extends OverlayPanel {
 		this.#onRightCallback = opts?.onRight;
 		this.#onExternalEditorCallback = opts?.onExternalEditor;
 		this.#onTimeoutResetCallback = opts?.onTimeoutReset;
+		this.#spaceSelects = opts?.spaceSelects === true;
 		if (opts?.slider && opts.slider.segments.length > 0) {
 			this.#slider = opts.slider;
 			this.#sliderIndex = Math.max(0, Math.min(opts.slider.index, opts.slider.segments.length - 1));
@@ -589,6 +594,12 @@ export class HookSelectorComponent extends OverlayPanel {
 		}
 
 		if (this.#handleQuickSelect(keyData)) {
+			return;
+		}
+
+		if (this.#spaceSelects && (matchesKey(keyData, "space") || keyData === " ")) {
+			const selected = this.#menu.selectedItem;
+			if (selected && !this.#menu.isDisabled(selected)) this.#onSelectCallback(selected.option.label);
 			return;
 		}
 

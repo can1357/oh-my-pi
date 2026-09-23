@@ -18,6 +18,8 @@ export interface ActiveRepoContext {
 	relativeRepoRoot: string;
 	source: "single-direct-child-repo";
 }
+/** Scope of a `/fast` selection, mirroring the coding-agent `FastModeScope` union. */
+export type StatusLineFastModeScope = "session" | "provider" | "global";
 
 export interface StatusLineSession {
 	state: { model?: Model; thinkingLevel?: ThinkingLevel; messages: readonly AgentMessage[] };
@@ -53,6 +55,8 @@ export interface StatusLineSession {
 	getContextUsage(): { tokens: number; contextWindow: number; percent: number | null } | undefined;
 	autoResolvedThinkingLevel(): string | undefined;
 	isFastModeActive(): boolean;
+	/** Broadest enabled `/fast` scope (global > provider > session), or undefined when no scoped selection applies. */
+	fastModeScope?(): StatusLineFastModeScope | undefined;
 	getPrewalkState?(): unknown;
 	getAsyncJobSnapshot(): { running: readonly { type: string; agentId?: string }[] } | null | undefined;
 	getGoalModeState(): { goal?: { status: string; tokensUsed: number; tokenBudget?: number } } | undefined;

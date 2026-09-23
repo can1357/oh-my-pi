@@ -22,6 +22,7 @@ import { adjustHsv, formatNumber, getProjectDir, hexToRgb, rgbToHex } from "@oh-
 import type {
 	ActiveRepoContext,
 	StatusAccountIdentity as OAuthAccountIdentity,
+	StatusLineFastModeScope,
 	StatusLineHost,
 	StatusLineSession,
 } from "./host";
@@ -301,6 +302,7 @@ interface StatusLineExternalInputs {
 	isStreaming: boolean | undefined;
 	isAutoThinking: boolean | undefined;
 	isFastModeActive: boolean;
+	fastModeScope: StatusLineFastModeScope | undefined;
 	compactionSpeculation: unknown;
 }
 
@@ -2369,6 +2371,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			isAutoThinking: this.session.isAutoThinking,
 			isFastModeActive:
 				typeof this.session.isFastModeActive === "function" ? this.session.isFastModeActive() : false,
+			fastModeScope: typeof this.session.fastModeScope === "function" ? this.session.fastModeScope() : undefined,
 			compactionSpeculation: this.session.compactionSpeculation,
 		};
 	}
@@ -2423,6 +2426,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			left.isStreaming === right.isStreaming &&
 			left.isAutoThinking === right.isAutoThinking &&
 			left.isFastModeActive === right.isFastModeActive &&
+			left.fastModeScope === right.fastModeScope &&
 			left.compactionSpeculation === right.compactionSpeculation
 		);
 	}
