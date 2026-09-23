@@ -21,6 +21,7 @@ import { listCodexResetCredits } from "./openai-codex-reset";
 import { HOUR_MS } from "./shared";
 
 const CODEX_USAGE_PATH = "wham/usage";
+const CODEX_VERIFIED_ACCESS_PATH = "accounts/verified_access";
 const JWT_AUTH_CLAIM = "https://api.openai.com/auth";
 const JWT_PROFILE_CLAIM = "https://api.openai.com/profile";
 
@@ -144,6 +145,34 @@ function extractEmail(token: string | undefined): string | undefined {
 	if (!token) return undefined;
 	const payload = parseJwt(token);
 	return normalizeEmail(payload?.[JWT_PROFILE_CLAIM]?.email);
+}
+
+/** Whether `accounts/verified_access` grants the account cyber (Daybreak) access; `false` on any failure. */
+async function fetchCodexDaybreakAccess(
+	baseUrl: string,
+	headers: Record<string, string>,
+	signal: AbortSignal | undefined,
+	ctx: UsageFetchContext,
+): Promise<boolean> {
+	try {
+		const response = await ctx.fetch(`${baseUrl}/${CODEX_VERIFIED_ACCESS_PATH}`, { headers, signal });
+		if (!response.ok) {
+			ctx.logger?.debug("Codex verified access request failed", { status: response.status });
+			return false;
+		}
+		return hasDaybreakAccess(await response.json());
+	} catch (error) {
+		ctx.logger?.debug("Codex verified access request error", { error: String(error) });
+		return false;
+	}
+}
+
+function hasDaybreakAccess(payload: unknown): boolean {
+	if (!isRecord(payload) || !Array.isArray(payload.programs)) return false;
+	return payload.programs.some(program => {
+		if (!isRecord(program) || program.program !== "cyber") return false;
+		return program.state !== "inactive" || (Array.isArray(program.grants) && program.grants.length > 0);
+	});
 }
 
 function parseUsageWindow(payload: unknown): ParsedUsageWindow | undefined {
@@ -507,6 +536,9 @@ export const openaiCodexUsageProvider: UsageProvider = {
 			headers["ChatGPT-Account-Id"] = accountId;
 		}
 
+		// Runs in parallel with the usage request; never rejects, so a failing
+		// entitlement lookup only omits the badge.
+		const daybreakAccess = fetchCodexDaybreakAccess(baseUrl, headers, params.signal, ctx);
 		const url = buildCodexUsageUrl(baseUrl);
 		let payload: unknown;
 		try {
@@ -626,6 +658,7 @@ export const openaiCodexUsageProvider: UsageProvider = {
 				ctx.logger?.warn("Codex reset credits detail fetch failed", { error: String(error) });
 			}
 		}
+		const daybreak = await daybreakAccess;
 		const report: UsageReport = {
 			provider: "openai-codex",
 			fetchedAt: nowMs,
@@ -637,6 +670,7 @@ export const openaiCodexUsageProvider: UsageProvider = {
 				email,
 				accountId,
 				meterStates,
+				...(daybreak ? { daybreak: true } : {}),
 			},
 			raw: parsed?.raw ?? payload,
 		};
