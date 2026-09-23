@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Skills configuration section to settings
+
 ## [18.2.10] - 2026-09-22
 
 ### Changed

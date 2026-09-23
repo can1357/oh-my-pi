@@ -2,8 +2,20 @@
 
 ## [Unreleased]
 
+### Added
+
+- Introduced `question` field for TTSR rules, enabling semantic judgment of assistant output
+- Implemented judge-model integration using `noul` (yes/no) questions for completed assistant replies, thinking, and tool calls
+- Added support for `astCondition` triggers for structural code-matching during tool-write operations
+- Added `/omfg` rule generation and validation support for judged questions and structural AST patterns
+- Introduced Skillshare registry support for searching, installing, and managing skill extensions
+- Added CLI `skill` and TUI `/skills` commands for registry interactions
+- Implemented project-scoped and global skill installation with integrity validation
+
 ### Changed
 
+- Non-interrupting warnings are now delivered as aside messages when judgment verdicts indicate rule violations
+- Optimized TTSR registry to prefilter judged rules before triggering model calls, minimizing judgment costs
 - Extensions load faster on warm starts: their dependencies are no longer re-parsed on every launch ([#12908](https://github.com/can1357/oh-my-pi/pull/12908) by [@H4vC](https://github.com/H4vC)).
 - The first highlighted code block, bash preview, or diff no longer stalls the screen while syntax highlighting initializes ([#12908](https://github.com/can1357/oh-my-pi/pull/12908) by [@H4vC](https://github.com/H4vC)).
 
