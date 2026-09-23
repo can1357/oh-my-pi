@@ -240,6 +240,7 @@ export interface ModelPatch {
 	tokenizer?: Model<Api>["tokenizer"];
 	supportsTools?: boolean;
 	cost?: Partial<Model<Api>["cost"]>;
+	promptCache?: Model<Api>["promptCache"];
 	contextWindow?: number;
 	/** Registry-only window preference; never patches the provider-advertised maximum. */
 	maxContextWindow?: number;
@@ -273,6 +274,7 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 	if (patch.tokenizer !== undefined) result.tokenizer = patch.tokenizer;
 	if (patch.imageInputDecoder !== undefined) result.imageInputDecoder = patch.imageInputDecoder;
 	if (patch.supportsTools !== undefined) result.supportsTools = patch.supportsTools;
+	if (patch.promptCache !== undefined) result.promptCache = patch.promptCache;
 	if (patch.contextWindow !== undefined) result.contextWindow = patch.contextWindow;
 	if (patch.maxTokens !== undefined) result.maxTokens = patch.maxTokens;
 	if (patch.omitMaxOutputTokens !== undefined) result.omitMaxOutputTokens = patch.omitMaxOutputTokens;

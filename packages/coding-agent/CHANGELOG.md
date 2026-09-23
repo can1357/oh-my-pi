@@ -18,6 +18,13 @@
 
 ### Added
 
+- Added comprehensive browser tools for accessibility audits, React internals inspection, console/network monitoring, and performance tracing
+- Introduced tab management, disk-backed screen recording with cursor overlays, and WebMCP protocol support for cross-frame tool discovery
+- Implemented advanced browser control options including custom init scripts, download management, and persistent storage state persistence
+- Added semantic DOM querying support for roles, test-ids, labels, and placeholders to improve element interaction reliability
+- Added `typesafe` and `openrouter-decisions` to the `models.yml` provider/model `api` values, so a native judge can be declared as a custom provider with `baseUrl`, `apiKey`, and `headers`.
+- Added prompt-cache warming, ported from [earendil-works/pi](https://github.com/earendil-works/pi)'s cache-warming implementation: the main agent loop re-sends its last request with a one-token output budget shortly before the prompt-cache entry expires, so idle gaps do not force a full-prefix cache re-write. Scheduled at 90% of the model's declared cache lifetime with a cost-aware decision — a refresh fires only when the expected avoided-miss cost clears the refresh cost by $0.05 (idle gaps use a 15% continuation probability; extension decide calls time out inside the expiry margin). Governed by the new global `providers.cacheWarming` setting (`off` / `streaming` / `idle`, default `idle`); models without a declared `promptCache` lifetime are never warmed (provider lifetimes are declared in catalog rules, e.g. `rules/providers/anthropic.kdl`, and custom models opt in via the models.yml `promptCache` key), extensions can override each decision via the new `cache_warming_decision` event, warmed usage persists as `cache-warm` model-usage entries so session totals include its cost, and task subagents plus one-shot sessions (standalone compaction, agentic commit) never arm it. Replaces the previous Anthropic-only fixed keep-alive refresh loop ([#12691](https://github.com/can1357/oh-my-pi/issues/12691)).
+- `find` (and `omp find`) accepts an `omp://` docs scope: `omp://` searches every embedded harness doc and `omp://<file>.md` searches one, reporting hits as canonical `omp://` URLs that `read` opens directly, including with `:start-end` selectors ([#12758](https://github.com/can1357/oh-my-pi/pull/12758) by [@H4vC](https://github.com/H4vC)).
 - Added live benchmark results table with real-time model ranking and per-kind performance metrics
 - Added dedicated prefill throughput reporting for prefill-focused benchmarks
 - Added `/record` slash command to capture terminal sessions as replayable `.ompcast` files

@@ -225,11 +225,34 @@ Provider defaults vs per-model overrides:
 - Provider `headers`, `compat`, and `remoteCompaction` are baselines.
 - Model `headers` override provider header keys.
 - `modelOverrides` can override model metadata (`name`, `reasoning`, `thinking`, `input`, `imageInputDecoder`,
-  `tokenizer`, `supportsTools`, `cost`, `premiumMultiplier`, `contextWindow`, `maxContextWindow`, `maxTokens`,
+  `tokenizer`, `supportsTools`, `cost`, `promptCache`, `premiumMultiplier`, `contextWindow`, `maxContextWindow`, `maxTokens`,
+    `omitMaxOutputTokens`, `headers`, `compat`, `contextPromotionTarget`, `compactionModel`, and
+    `remoteCompaction`).
   `omitMaxOutputTokens`, `headers`, `compat`, `contextPromotionTarget`, `compactionModel`, and
   `remoteCompaction`).
 - `compat` is deep-merged for nested routing blocks (`openRouterRouting`, `vercelGatewayRouting`,
   `extraBody`, and `whenThinking`).
+
+## Prompt cache lifetimes
+
+`promptCache` states how long the provider keeps a prompt cache entry alive for each retention tier
+OMP can request (`short` is the default tier; `long` is used where a 1h entry is supported, e.g.
+`PI_CACHE_RETENTION=long` or `providers.cacheRetention: "long"`). Values are seconds and are
+estimates: providers publish ranges, so pick the conservative end.
+
+```yaml
+providers:
+  my-gateway:
+    models:
+      - id: claude-sonnet-5
+        promptCache: { short: 300, long: 3600 }
+```
+
+The bundled catalog fills this in for direct Anthropic (5 min / 1 h). Other providers, including
+Anthropic-compatible gateways and direct OpenAI, have no built-in lifetime until their cache-expiry
+and replay behavior has been validated for warming. A model without a value for the tier a request
+used is never warmed; custom models and `modelOverrides` can opt in with `promptCache` once the
+backing cache behavior is known. See `providers.cacheWarming` in [Settings](./settings.md).
 
 ## Usage costs and time-based pricing
 

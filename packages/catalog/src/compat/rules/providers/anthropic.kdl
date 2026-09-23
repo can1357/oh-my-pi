@@ -6,6 +6,14 @@ provider "anthropic" {
 	discovery label="Anthropic"
 	web-search "anthropic"
 
+	// Prompt-cache entry lifetimes per retention tier, in seconds; feeds the
+	// coding agent's cache warmer. 5m writes for pay-per-token keys, 1h for
+	// retention-tier "long" requests.
+	prompt-cache {
+		short 300
+		long 3600
+	}
+
 	// Curated Anthropic models that are live or limited-availability on the
 	// first-party `/v1/models` endpoint but that stencil.so has not catalogued
 	// yet. Seeded so the bundled catalog is never gated on stencil.so's update

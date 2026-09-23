@@ -59,6 +59,9 @@ import type {
 	ExtensionUIDialogOptions,
 	InputEvent,
 	InputEventResult,
+	CacheWarmingAction,
+	CacheWarmingDecisionEvent,
+	CacheWarmingDecisionEventResult,
 	McpNotificationEvent,
 	MessageRenderer,
 	RegisteredCommand,
@@ -344,6 +347,7 @@ type RunnerEmitEvent = Exclude<
 	| ToolResultEvent
 	| UserBashEvent
 	| ContextEvent
+	| CacheWarmingDecisionEvent
 	| BeforeProviderRequestEvent
 	| AfterProviderResponseEvent
 	| BeforeAgentStartEvent
@@ -877,6 +881,31 @@ export class ExtensionRunner {
 	async emitSessionStop(event: Omit<SessionStopEvent, "type">): Promise<SessionStopEventResult | undefined> {
 		if (event.signal.aborted) return undefined;
 		return await this.emit({ type: "session_stop", ...event });
+	}
+
+	/**
+	 * Asks extensions to override a prompt-cache warming decision. The last
+	 * handler returning an action wins; handler failures are reported through
+	 * the extension error listeners and leave the warmer's decision standing.
+	 */
+	async emitCacheWarmingDecision(event: CacheWarmingDecisionEvent): Promise<CacheWarmingAction> {
+		let action = event.action;
+		for (const ext of this.extensions) {
+			const handlers = ext.handlers.get(event.type);
+			if (!handlers || handlers.length === 0) continue;
+			const ctx = this.createContext();
+			for (const handler of handlers) {
+				const result = (await this.#runHandlerWithTimeout(
+					handler,
+					event,
+					ctx,
+					ext,
+					handlerTimeoutForEvent(event.type),
+				)) as CacheWarmingDecisionEventResult | undefined;
+				if (result?.action !== undefined) action = result.action;
+			}
+		}
+		return action;
 	}
 	/** Registers the interactive transcript gate that must settle before a tool approval is presented. */
 	setToolApprovalPreviewWaiter(waiter: (toolCallId: string) => Promise<void>): () => void {

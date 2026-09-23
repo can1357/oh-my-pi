@@ -3739,6 +3739,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					model || modelOverride === undefined ? undefined : inheritedRetryFallbackChain,
 				thinkingLevel: effectiveThinkingLevel,
 				thinkingLevelCeiling: spawnEffortCeiling,
+				// Subagents are short-lived; never schedule background warm requests.
+				cacheWarming: false,
 				// A revived session restores the tier history it persisted (including
 				// tiers a provider rejected or an extension changed since spawn); only
 				// the fresh spawn resolves the per-agent override.

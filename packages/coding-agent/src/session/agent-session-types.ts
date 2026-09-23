@@ -32,6 +32,7 @@ import type { TtsrManager } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { ExtensionRunner, PreparedExtension } from "../extensibility/extensions";
+import type { CacheWarmer } from "./cache-warmer";
 import type { ContextUsage } from "../extensibility/extensions/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
@@ -177,6 +178,12 @@ export interface AgentSessionConfig {
 	slashCommands?: FileSlashCommand[];
 	/** Extension runner created with wrapped tools. */
 	extensionRunner?: ExtensionRunner;
+	/**
+	 * Prompt-cache warmer owned by the main agent loop. The session arms it per
+	 * main-loop request, settles it when the agent run finishes, and invalidates
+	 * it when the context changes; side-channel requests never arm it.
+	 */
+	cacheWarmer?: CacheWarmer;
 	/** Returns the current enabled eval prelude definitions. */
 	getEvalPreludes?: () => readonly EvalPreludeDefinition[];
 	/** Tool bridge context used by user-initiated Python cells to project enabled eval preludes. */

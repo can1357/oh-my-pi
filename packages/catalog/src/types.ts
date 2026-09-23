@@ -1139,6 +1139,13 @@ export interface TimeBasedCost {
 	effectiveRates?: readonly EffectiveTokenCost[];
 }
 
+/**
+ * Best-effort prompt-cache entry lifetime in seconds for each retention tier a
+ * request can ask for. A missing tier means the lifetime is unknown; consumers
+ * must not schedule cache warming against unknown lifetimes.
+ */
+export type ModelPromptCache = Partial<Record<"short" | "long", number>>;
+
 /** Base token rates plus optional long-context and time-based pricing. */
 export interface ModelCost extends TokenCost {
 	longContext?: LongContextTokenCost;
@@ -1258,6 +1265,14 @@ export interface Model<TApi extends Api = Api> {
 	 */
 	cursorMaxModeRoutes?: Readonly<Record<string, boolean>>;
 	cost: ModelCost;
+	/**
+	 * Prompt-cache entry lifetime per retention tier, in seconds. Populated only
+	 * for providers whose cache-expiry and replay behavior has been validated
+	 * for cache warming (direct Anthropic: 5m / 1h). A missing entry means the
+	 * provider's cache behavior is unknown — such models are never warmed.
+	 * Custom models and provider overrides opt in via models.yml `promptCache`.
+	 */
+	promptCache?: ModelPromptCache;
 	/** Premium Copilot requests charged per user-initiated request (defaults to 1). */
 	premiumMultiplier?: number;
 	contextWindow: number | null;

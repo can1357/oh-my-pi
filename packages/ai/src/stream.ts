@@ -23,7 +23,6 @@ import { ProviderHttpError } from "./error";
 import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./error/rate-limit";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
-import type { MessageCreateParamsStreaming } from "./providers/anthropic-wire";
 import type { CursorOptions } from "./providers/cursor";
 import type { DevinOptions } from "./providers/devin";
 import { streamGitLabDuo } from "./providers/gitlab-duo";
@@ -60,7 +59,6 @@ import type {
 	FetchImpl,
 	Model,
 	OptionsForApi,
-	ProviderSessionState,
 	SimpleStreamOptions,
 	StreamOptions,
 	ThinkingBudgets,
@@ -1196,285 +1194,6 @@ function emitBufferedEvents(stream: AssistantMessageEventStream, events: Assista
 		stream.push(event);
 	}
 }
-
-const ANTHROPIC_CACHE_TTL_MS = 5 * 60_000;
-const ANTHROPIC_CACHE_REFRESH_LEAD_MS = 15_000;
-const ANTHROPIC_CACHE_REFRESH_LIMIT = 3;
-const ANTHROPIC_CACHE_REFRESH_STATE_KEY = "anthropic-cache-refresh";
-
-interface AnthropicCacheRefreshPlan {
-	refresh(controller: AbortController): Promise<number | undefined>;
-}
-
-class AnthropicCacheRefreshState implements ProviderSessionState {
-	#controller: AbortController | undefined;
-	#generation = 0;
-	#plan: AnthropicCacheRefreshPlan | undefined;
-	#refreshesRemaining = 0;
-	#timer: NodeJS.Timeout | undefined;
-
-	cancel(): void {
-		this.#generation++;
-		if (this.#timer !== undefined) {
-			clearTimeout(this.#timer);
-			this.#timer = undefined;
-		}
-		this.#controller?.abort();
-		this.#controller = undefined;
-		this.#plan = undefined;
-		this.#refreshesRemaining = 0;
-	}
-
-	arm(plan: AnthropicCacheRefreshPlan, cacheTouchedAtMs: number): void {
-		this.cancel();
-		this.#plan = plan;
-		this.#refreshesRemaining = ANTHROPIC_CACHE_REFRESH_LIMIT;
-		this.#schedule(cacheTouchedAtMs, this.#generation);
-	}
-
-	close(): void {
-		this.cancel();
-	}
-
-	#schedule(cacheTouchedAtMs: number, generation: number): void {
-		const refreshAtMs = cacheTouchedAtMs + ANTHROPIC_CACHE_TTL_MS - ANTHROPIC_CACHE_REFRESH_LEAD_MS;
-		this.#timer = setTimeout(
-			() => {
-				this.#timer = undefined;
-				void this.#refresh(generation);
-			},
-			Math.max(0, refreshAtMs - Date.now()),
-		);
-		this.#timer.unref?.();
-	}
-
-	async #refresh(generation: number): Promise<void> {
-		const plan = this.#plan;
-		if (generation !== this.#generation || !plan || this.#refreshesRemaining <= 0) return;
-
-		const controller = new AbortController();
-		this.#controller = controller;
-		let cacheTouchedAtMs: number | undefined;
-		try {
-			cacheTouchedAtMs = await plan.refresh(controller);
-		} catch (error) {
-			if (generation === this.#generation && !controller.signal.aborted) {
-				logger.debug("Anthropic prompt-cache refresh failed", { error: String(error) });
-			}
-		}
-		if (generation !== this.#generation) return;
-
-		this.#controller = undefined;
-		if (cacheTouchedAtMs === undefined) {
-			this.#plan = undefined;
-			this.#refreshesRemaining = 0;
-			return;
-		}
-
-		this.#refreshesRemaining--;
-		if (this.#refreshesRemaining <= 0) {
-			this.#plan = undefined;
-			return;
-		}
-		this.#schedule(cacheTouchedAtMs, generation);
-	}
-}
-
-function supportsAnthropicCacheRefresh<TApi extends Api>(model: Model<TApi>): boolean {
-	return (
-		model.api === "anthropic-messages" &&
-		model.provider === "anthropic" &&
-		model.transport !== "pi-native" &&
-		isLeakedThinkingHealExempt(model)
-	);
-}
-
-function isAnthropicRefreshPayload(payload: unknown): payload is MessageCreateParamsStreaming {
-	return (
-		typeof payload === "object" &&
-		payload !== null &&
-		"messages" in payload &&
-		Array.isArray(payload.messages) &&
-		"max_tokens" in payload &&
-		typeof payload.max_tokens === "number"
-	);
-}
-
-function isShortAnthropicCacheControl(cacheControl: unknown): boolean {
-	return (
-		typeof cacheControl === "object" &&
-		cacheControl !== null &&
-		"type" in cacheControl &&
-		cacheControl.type === "ephemeral" &&
-		(!("ttl" in cacheControl) || cacheControl.ttl !== "1h")
-	);
-}
-
-function hasShortAnthropicMessageBreakpoint(payload: MessageCreateParamsStreaming): boolean {
-	for (const message of payload.messages) {
-		if (!Array.isArray(message.content)) continue;
-		for (const block of message.content) {
-			if ("cache_control" in block && isShortAnthropicCacheControl(block.cache_control)) return true;
-		}
-	}
-	return false;
-}
-
-function isAnthropicGenerationEvent(event: AssistantMessageEvent): boolean {
-	switch (event.type) {
-		case "text_start":
-		case "thinking_start":
-		case "toolcall_start":
-		case "image_end":
-			return true;
-		case "text_delta":
-		case "thinking_delta":
-		case "toolcall_delta":
-			return event.delta.length > 0;
-		default:
-			return false;
-	}
-}
-
-function isAnthropicThinkingActive(model: Model<Api>, payload: MessageCreateParamsStreaming): boolean {
-	if (payload.thinking) return payload.thinking.type !== "disabled";
-	return model.thinking?.mode === "anthropic-adaptive" && payload.output_config?.effort != null;
-}
-
-function createAnthropicCacheRefreshPlan<TApi extends Api>(
-	model: Model<TApi>,
-	context: Context,
-	options: SimpleStreamOptions | undefined,
-	payload: MessageCreateParamsStreaming,
-): AnthropicCacheRefreshPlan {
-	const thinkingEnabled = isAnthropicThinkingActive(model, payload);
-	return {
-		async refresh(controller) {
-			let cacheRead = 0;
-			let cacheWrite = 0;
-			let cacheTouchedAtMs: number | undefined;
-			let canceledAfterGenerationStarted = false;
-			const response = streamSimpleRequest(model, context, {
-				...options,
-				acceptEmptyResponse: true,
-				anthropicCacheRefreshRequest: !thinkingEnabled,
-				cacheRetention: "short",
-				maxTokens: thinkingEnabled ? options?.maxTokens : 0,
-				onPayload: () => ({
-					...payload,
-					max_tokens: thinkingEnabled ? payload.max_tokens : 0,
-				}),
-				onResponse: () => {
-					cacheTouchedAtMs = Date.now();
-				},
-				onSseEvent: undefined,
-				signal: controller.signal,
-			});
-
-			for await (const event of response) {
-				if ("partial" in event) {
-					cacheRead = event.partial.usage.cacheRead;
-					cacheWrite = event.partial.usage.cacheWrite;
-				}
-				if (event.type === "error") return undefined;
-				if (event.type === "done") {
-					cacheRead = event.message.usage.cacheRead;
-					cacheWrite = event.message.usage.cacheWrite;
-					return cacheTouchedAtMs !== undefined && cacheRead > 0 && cacheWrite === 0
-						? cacheTouchedAtMs
-						: undefined;
-				}
-				if (thinkingEnabled && isAnthropicGenerationEvent(event)) {
-					canceledAfterGenerationStarted = true;
-					controller.abort();
-					break;
-				}
-			}
-
-			if (canceledAfterGenerationStarted) {
-				try {
-					await response.result();
-				} catch (error) {
-					if (!controller.signal.aborted) throw error;
-				}
-			}
-			return cacheTouchedAtMs !== undefined && cacheRead > 0 && cacheWrite === 0 ? cacheTouchedAtMs : undefined;
-		},
-	};
-}
-
-function streamSimpleWithAnthropicCacheRefresh<TApi extends Api>(
-	model: Model<TApi>,
-	context: Context,
-	options: SimpleStreamOptions | undefined,
-): AssistantMessageEventStream {
-	const providerSessionState = options?.providerSessionState;
-	if (!options?.anthropicCacheRefresh || !providerSessionState) {
-		return streamSimpleRequest(model, context, options);
-	}
-
-	const existingState = providerSessionState.get(ANTHROPIC_CACHE_REFRESH_STATE_KEY);
-	if (existingState instanceof AnthropicCacheRefreshState) {
-		existingState.cancel();
-	} else if (existingState) {
-		return streamSimpleRequest(model, context, options);
-	}
-	if (!supportsAnthropicCacheRefresh(model) || resolveCacheRetention(options.cacheRetention) !== "short") {
-		return streamSimpleRequest(model, context, options);
-	}
-
-	const refreshState = existingState ?? new AnthropicCacheRefreshState();
-	if (!existingState) providerSessionState.set(ANTHROPIC_CACHE_REFRESH_STATE_KEY, refreshState);
-
-	let cacheTouchedAtMs: number | undefined;
-	let capturedPayload: MessageCreateParamsStreaming | undefined;
-	const inner = streamSimpleRequest(model, context, {
-		...options,
-		onPayload: async (payload, payloadModel) => {
-			const replacement = await options?.onPayload?.(payload, payloadModel);
-			const finalPayload = replacement ?? payload;
-			if (isAnthropicRefreshPayload(finalPayload)) capturedPayload = finalPayload;
-			return replacement;
-		},
-		onResponse: async (response, responseModel) => {
-			cacheTouchedAtMs = Date.now();
-			await options?.onResponse?.(response, responseModel);
-		},
-	});
-	const outer = new AssistantMessageEventStream();
-	const armRefresh = (message: AssistantMessage): void => {
-		if (
-			message.stopReason === "error" ||
-			message.stopReason === "aborted" ||
-			message.usage.cacheRead + message.usage.cacheWrite <= 0 ||
-			cacheTouchedAtMs === undefined ||
-			capturedPayload === undefined ||
-			!hasShortAnthropicMessageBreakpoint(capturedPayload)
-		) {
-			return;
-		}
-		refreshState.arm(createAnthropicCacheRefreshPlan(model, context, options, capturedPayload), cacheTouchedAtMs);
-	};
-
-	void (async () => {
-		try {
-			for await (const event of inner) {
-				if (event.type === "done") armRefresh(event.message);
-				outer.push(event);
-				if (outer.done) return;
-			}
-			if (!outer.done) {
-				const result = await inner.result();
-				armRefresh(result);
-				outer.end(result);
-			}
-		} catch (error) {
-			outer.fail(error);
-		}
-	})();
-	return outer;
-}
-
 function withInferenceSessionId(options?: SimpleStreamOptions): SimpleStreamOptions {
 	if (options?.sessionId) return options;
 	return { ...options, sessionId: crypto.randomUUID() };
@@ -1487,7 +1206,7 @@ export function streamSimple<TApi extends Api>(
 ): AssistantMessageEventStream {
 	const sessionOptions = withInferenceSessionId(options);
 	if (!model.requiresGlyphTokenization) {
-		return streamSimpleWithAnthropicCacheRefresh(model, context, sessionOptions);
+		return streamSimpleRequest(model, context, sessionOptions);
 	}
 	const codec = applyGlyphCodec(context);
 	const execHandlers = sessionOptions.cursorExecHandlers ?? sessionOptions.execHandlers;
@@ -1500,7 +1219,7 @@ export function streamSimple<TApi extends Api>(
 					execHandlers: wrappedExecHandlers,
 					cursorExecHandlers: wrappedExecHandlers,
 				};
-	return codec.wrap(streamSimpleWithAnthropicCacheRefresh(model, codec.context, wireOptions));
+	return codec.wrap(streamSimpleRequest(model, codec.context, wireOptions));
 }
 
 /**
@@ -2061,7 +1780,6 @@ function mapOptionsForApi<TApi extends Api>(
 		fetch: options?.fetch,
 		fallbacks: options?.fallbacks,
 		acceptEmptyResponse: options?.acceptEmptyResponse,
-		anthropicCacheRefreshRequest: options?.anthropicCacheRefreshRequest,
 		anthropicPrefixMismatchBehavior: options?.anthropicPrefixMismatchBehavior,
 		anthropicCompaction: options?.anthropicCompaction,
 		...simpleProviderOptions,

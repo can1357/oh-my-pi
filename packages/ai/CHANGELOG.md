@@ -53,6 +53,10 @@
 - Updated API response cost reporting to use aggregate usage totals.
 - Model list responses now optionally include a model kind.
 
+### Removed
+
+- Removed the stream-level Anthropic prompt-cache keep-alive (`StreamOptions.anthropicCacheRefresh` / `anthropicCacheRefreshRequest` and the `AnthropicCacheRefreshState` timer). Prompt-cache warming moved to the coding agent's session-level cache warmer (`session/cache-warmer.ts`), which replays the last request with a one-token output cap on a cost-aware schedule for any provider that declares `promptCache` lifetimes ([#12691](https://github.com/can1357/oh-my-pi/issues/12691)).
+
 ### Fixed
 
 - Fixed detection of Claude usage-limit errors.

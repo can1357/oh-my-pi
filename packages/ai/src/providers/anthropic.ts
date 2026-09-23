@@ -1583,31 +1583,6 @@ export function applyAnthropicUsageExtras(usage: Usage, source: AnthropicUsageLi
 	}
 }
 
-function parseAnthropicWireUsage(value: unknown): AnthropicWireUsage | undefined {
-	if (!isRecord(value)) return undefined;
-	const cacheCreation = isRecord(value.cache_creation)
-		? {
-				...(typeof value.cache_creation.ephemeral_5m_input_tokens === "number"
-					? { ephemeral_5m_input_tokens: value.cache_creation.ephemeral_5m_input_tokens }
-					: {}),
-				...(typeof value.cache_creation.ephemeral_1h_input_tokens === "number"
-					? { ephemeral_1h_input_tokens: value.cache_creation.ephemeral_1h_input_tokens }
-					: {}),
-			}
-		: undefined;
-	return {
-		...(typeof value.input_tokens === "number" ? { input_tokens: value.input_tokens } : {}),
-		...(typeof value.output_tokens === "number" ? { output_tokens: value.output_tokens } : {}),
-		...(typeof value.cache_read_input_tokens === "number"
-			? { cache_read_input_tokens: value.cache_read_input_tokens }
-			: {}),
-		...(typeof value.cache_creation_input_tokens === "number"
-			? { cache_creation_input_tokens: value.cache_creation_input_tokens }
-			: {}),
-		...(cacheCreation === undefined ? {} : { cache_creation: cacheCreation }),
-	};
-}
-
 function parseAnthropicFallbackWireBlock(value: unknown): AnthropicFallbackContent | undefined {
 	if (!isRecord(value) || value.type !== "fallback") return undefined;
 	const from = isRecord(value.from) && typeof value.from.model === "string" ? value.from.model : undefined;
@@ -2083,7 +2058,6 @@ const streamAnthropicOnce = (
 				});
 			}
 
-			const zeroOutputCacheRefresh = options?.anthropicCacheRefreshRequest === true;
 			let client: AnthropicMessagesClientLike;
 			let isOAuthToken: boolean;
 			// Retained so a Claude Code version bump can rebuild the client's fingerprint headers.
@@ -2197,7 +2171,7 @@ const streamAnthropicOnce = (
 					model,
 					apiKey,
 					extraBetas,
-					stream: !zeroOutputCacheRefresh,
+					stream: true,
 					interleavedThinking: options?.interleavedThinking ?? true,
 					headers: options?.headers,
 					dynamicHeaders: copilotDynamicHeaders?.headers,
@@ -2262,82 +2236,6 @@ const streamAnthropicOnce = (
 			const requestTimeoutMs =
 				firstEventTimeoutMs !== undefined && firstEventTimeoutMs > 0 ? firstEventTimeoutMs : undefined;
 
-			if (zeroOutputCacheRefresh) {
-				const refreshParams: MessageCreateParams = { ...params, max_tokens: 0, stream: false };
-				// Anthropic rejects `tool_choice: {type:"tool"|"any"}` with `max_tokens: 0`
-				// ("tool_choice ... cannot be used when max_tokens is 0", #12597). A refresh
-				// replays the captured turn's payload, which can carry a forced selector
-				// (e.g. a forced yield). A zero-output keep-alive produces no tokens, so the
-				// forced choice is meaningless here — drop it so the request is accepted.
-				const refreshChoiceType = refreshParams.tool_choice?.type;
-				if (refreshChoiceType === "tool" || refreshChoiceType === "any") {
-					delete refreshParams.tool_choice;
-				}
-				rawRequestDump = {
-					provider: model.provider,
-					api: output.api,
-					model: model.id,
-					method: "POST",
-					url: `${baseUrl}/v1/messages${isOAuthToken ? "?beta=true" : ""}`,
-					body: refreshParams,
-				};
-				const { requestSignal } = activeAbortTracker;
-				// A replayed compaction block needs the beta on injected clients too.
-				// Route by the client's own endpoint when it exposes one.
-				const refreshBetaRouteUrl =
-					options?.client !== undefined ? (injectedClientBaseUrl(options.client) ?? baseUrl) : baseUrl;
-				const refreshHeaders =
-					options?.client !== undefined &&
-					!isVertexRawPredictUrl(refreshBetaRouteUrl) &&
-					carriesCompactionEdit(refreshParams)
-						? mergeAnthropicBetaHeader(mergedCallerHeaders, COMPACTION_BETA)
-						: undefined;
-				const requestOptions = {
-					...createSdkStreamRequestOptions(requestSignal, requestTimeoutMs),
-					maxRetries: 0,
-					...(refreshHeaders ? { headers: refreshHeaders } : {}),
-				};
-				const request: unknown =
-					isOAuthToken && client.beta
-						? client.beta.messages.create(refreshParams, requestOptions)
-						: client.messages.create(refreshParams, requestOptions);
-				if (!hasAnthropicRawResponseRequest(request)) {
-					throw new AIError.AnthropicStreamEnvelopeError(
-						"Anthropic cache refresh request did not expose a raw response",
-					);
-				}
-				const response = await request.asResponse();
-				await notifyProviderResponse(options, response, model, response.headers.get("request-id"));
-				const body: unknown = await response.json();
-				if (!isRecord(body)) {
-					throw new AIError.AnthropicStreamEnvelopeError("Anthropic cache refresh returned a malformed response");
-				}
-				const wireUsage = parseAnthropicWireUsage(body.usage);
-				if (!wireUsage) {
-					throw new AIError.AnthropicStreamEnvelopeError("Anthropic cache refresh response omitted usage");
-				}
-				if (typeof body.id === "string") output.responseId = body.id;
-				applyReportedInputTransformations(
-					output,
-					params,
-					providerSessionState,
-					body.input_transformations,
-					seenInputTransformations,
-				);
-				output.usage.input = wireUsage.input_tokens ?? 0;
-				output.usage.output = wireUsage.output_tokens ?? 0;
-				output.usage.cacheRead = wireUsage.cache_read_input_tokens ?? 0;
-				output.usage.cacheWrite = wireUsage.cache_creation_input_tokens ?? 0;
-				applyAnthropicUsageExtras(output.usage, wireUsage);
-				output.usage.totalTokens =
-					output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
-				calculateCost(model, output.usage, output.timestamp);
-				output.duration = performance.now() - startTime;
-				stream.push({ type: "start", partial: output });
-				stream.push({ type: "done", reason: "stop", message: output });
-				stream.end();
-				return;
-			}
 
 			// Opt-in flag: the response parser only honors `fallback` content
 			// blocks and `usage.iterations` when the current request opted into

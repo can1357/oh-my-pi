@@ -3488,6 +3488,7 @@ const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
 	"hindsight.bankIdPrefix": () => hindsightScopeSignal.fire(),
 	"hindsight.scoping": () => hindsightScopeSignal.fire(),
 	extendedContext: () => extendedContextSignal.fire(),
+	"providers.cacheWarming": () => cacheWarmingSignal.fire(),
 	"worktree.base": value => {
 		const dir = typeof value === "string" && value.trim() ? value : undefined;
 		// Always call so an unset/empty value clears a previously-applied override.
@@ -3548,6 +3549,14 @@ export const onExtendedContextChanged = (cb: () => void) => extendedContextSigna
 
 /** Fires when `statusLine.sessionAccent` changes at runtime. */
 const statusLineSessionAccentSignal = new SettingSignal("statusLine.sessionAccent");
+
+/**
+ * Subscribe to cache-warming mode changes. Sessions reconcile an armed warming
+ * run immediately instead of waiting for its next timer tick.
+ * Returns an unsubscribe function.
+ */
+const cacheWarmingSignal = new SettingSignal("providers.cacheWarming");
+export const onCacheWarmingChanged = (cb: () => void) => cacheWarmingSignal.on(cb);
 
 /**
  * Subscribe to session-accent setting changes.

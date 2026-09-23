@@ -97,6 +97,15 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 	}
 	const priority = catalog.priority;
 	if (typeof priority === "number") model.priority = priority;
+	const promptCache = objectPayload(catalog.promptCache);
+	if (promptCache !== undefined) {
+		const short = numberField(promptCache, "short");
+		const long = numberField(promptCache, "long");
+		model.promptCache = {
+			...(short !== undefined && { short }),
+			...(long !== undefined && { long }),
+		};
+	}
 	const applyPatchToolType = catalog.applyPatchToolType;
 	if (applyPatchToolType === "freeform" || applyPatchToolType === "function") {
 		model.applyPatchToolType = applyPatchToolType;

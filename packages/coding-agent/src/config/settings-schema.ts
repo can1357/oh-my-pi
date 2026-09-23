@@ -5683,20 +5683,45 @@ export const SETTINGS_SCHEMA = {
 					value: "auto",
 					label: "Auto",
 					description:
-						"Provider default — Anthropic OAuth subscriber sessions default to 1h, API keys use 5m kept warm by idle keep-alive refreshes; PI_CACHE_RETENTION still applies",
+						"Provider default — Anthropic OAuth subscriber sessions default to 1h, API keys use 5m; PI_CACHE_RETENTION still applies",
 				},
 				{
 					value: "short",
 					label: "Short (5m)",
-					description:
-						"Cheapest cache writes; Anthropic keeps the entry warm with bounded keep-alive refreshes while idle",
+					description: "Cheapest cache writes; pair with cache warming to keep short entries alive while idle",
 				},
 				{
 					value: "long",
 					label: "Long (1h)",
-					description: "1h TTL where the provider supports it; pricier writes, no keep-alive refresh requests",
+					description: "1h TTL where the provider supports it; pricier writes, warming schedules stretch to match",
 				},
 				{ value: "none", label: "Off", description: "Disable prompt caching and cache-affinity routing" },
+			],
+		},
+	},
+
+	"providers.cacheWarming": {
+		type: "enum",
+		values: ["off", "streaming", "idle"] as const,
+		default: "idle",
+		ui: {
+			tab: "providers",
+			group: "Protocol",
+			label: "Cache Warming",
+			description:
+				"Re-send the last request with a one-token output budget shortly before its prompt-cache entry expires",
+			options: [
+				{ value: "off", label: "Off", description: "Disable cache warming" },
+				{
+					value: "streaming",
+					label: "Streaming",
+					description: "Protect expensive prefixes during long tool executions; stops when the agent settles",
+				},
+				{
+					value: "idle",
+					label: "Idle",
+					description: "Also refresh between runs while the expected savings stay above the cost floor",
+				},
 			],
 		},
 	},

@@ -99,6 +99,8 @@ import type {
 	AutoCompactionStartEvent,
 	AutoRetryEndEvent,
 	AutoRetryStartEvent,
+	CacheWarmingDecisionEvent,
+	CacheWarmingDecisionEventResult,
 	ContextEvent,
 	GoalUpdatedEvent,
 	RetryFallbackAppliedEvent,
@@ -727,6 +729,18 @@ export type {
 
 export type { ContextEvent } from "../shared-events";
 
+// ============================================================================
+// Cache Warming Events
+// ============================================================================
+
+export type { CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult } from "../shared-events";
+export type {
+	CacheWarmingAction,
+	CacheWarmingDecision,
+	CacheWarmingMode,
+	CacheWarmingStatus,
+} from "../../session/cache-warmer";
+
 /** Fired before a provider request is sent. Can replace the payload. */
 export interface BeforeProviderRequestEvent {
 	type: "before_provider_request";
@@ -1072,6 +1086,7 @@ export type ExtensionEvent =
 	| ResourcesDiscoverEvent
 	| SessionEvent
 	| ContextEvent
+	| CacheWarmingDecisionEvent
 	| BeforeProviderRequestEvent
 	| AfterProviderResponseEvent
 	| BeforeAgentStartEvent
@@ -1245,6 +1260,10 @@ export interface ExtensionAPI {
 		handler: ExtensionHandler<SessionBeforeCompactEvent, SessionBeforeCompactResult>,
 	): void;
 	on(event: "session.compacting", handler: ExtensionHandler<SessionCompactingEvent, SessionCompactingResult>): void;
+	on(
+		event: "cache_warming_decision",
+		handler: ExtensionHandler<CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult>,
+	): void;
 	on(event: "session_compact", handler: ExtensionHandler<SessionCompactEvent>): void;
 	on(event: "session_shutdown", handler: ExtensionHandler<SessionShutdownEvent>): void;
 	on(event: "session_before_tree", handler: ExtensionHandler<SessionBeforeTreeEvent, SessionBeforeTreeResult>): void;
