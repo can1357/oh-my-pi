@@ -107,6 +107,8 @@ async function createHarness(options: HarnessOptions): Promise<Harness> {
 		model: options.hasModel === false ? undefined : { provider: "anthropic", id: "claude-sonnet-4-5" },
 		runEphemeralTurn: options.runEphemeralTurn,
 		messages: options.messages ?? [],
+		agent: { state: { tools: [] } },
+		ruleJudge: () => undefined,
 		ttsrManager: { addRule: ttsrAddRule },
 	} as unknown as InteractiveModeContext["session"];
 	const container = new Container();

@@ -169,7 +169,7 @@ describe("collab host registry lifecycle (#6099)", () => {
 		"notifies the submitting guest when %s discards an admitted prompt",
 		async transition => {
 			const auth = await AuthStorage.create(":memory:");
-			auth.setRuntimeApiKey("anthropic", "test-key");
+			auth.keys.setRuntime("anthropic", "test-key");
 			const models = new ModelRegistry(auth);
 			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 			if (!model) throw new Error("Test model missing");

@@ -168,7 +168,7 @@ describe("issue #12281 — lm-studio empty-fallback placeholder vs. wire auth", 
 		// the server rejects them, and the model list silently empties even
 		// though the UI shows the provider as signed in.
 		const storage = await bootStorage("realkey");
-		await storage.login("lm-studio", { onAuth: () => {}, onPrompt: async () => LM_KEY });
+		await storage.oauth.login("lm-studio", { onAuth: () => {}, onPrompt: async () => LM_KEY });
 
 		const registry = bootRegistry(storage);
 		await registry.refresh("online");
@@ -190,21 +190,21 @@ describe("issue #12281 — lm-studio empty-fallback placeholder vs. wire auth", 
 		// and the 401 was swallowed as generic "unavailable" — models
 		// silently gone with no auth-specific error.
 		const storage = await bootStorage("placeholder");
-		await storage.login("lm-studio", { onAuth: () => {}, onPrompt: async () => "" });
+		await storage.oauth.login("lm-studio", { onAuth: () => {}, onPrompt: async () => "" });
 
 		// The placeholder itself stays stored (so /logout can remove it) —
 		// what must change is the auth *status* derived from it. Violations
 		// are aggregated so one failing run reports every broken leg.
-		expect(await storage.peekApiKey("lm-studio")).toBe("lm-studio-local");
+		expect(await storage.keys.peek("lm-studio")).toBe("lm-studio-local");
 		const violations: string[] = [];
-		if (storage.hasAuth("lm-studio")) {
+		if (storage.keys.source("lm-studio") !== undefined) {
 			violations.push("hasAuth=true — UI claims authenticated while every wire request goes bare");
 		}
-		const origin = storage.getCredentialOrigin("lm-studio");
+		const origin = storage.keys.source("lm-studio");
 		if (origin !== undefined) {
 			violations.push(`getCredentialOrigin=${JSON.stringify(origin)} — /login would show "logged in"`);
 		}
-		const source = storage.describeCredentialSource("lm-studio");
+		const source = storage.keys.describe("lm-studio");
 		if (source !== undefined) {
 			violations.push(`describeCredentialSource=${JSON.stringify(source)} — /session would show an auth source`);
 		}
@@ -255,7 +255,7 @@ describe("issue #12281 — lm-studio empty-fallback placeholder vs. wire auth", 
 		// Placeholder-only setup: empty paste against a keyless server.
 		wire.length = 0;
 		const placeholder = await bootStorage("keyless-placeholder");
-		await placeholder.login("lm-studio", { onAuth: () => {}, onPrompt: async () => "" });
+		await placeholder.oauth.login("lm-studio", { onAuth: () => {}, onPrompt: async () => "" });
 		const placeholderRegistry = bootRegistry(placeholder);
 		await placeholderRegistry.refresh("online");
 
@@ -278,8 +278,8 @@ describe("issue #12281 — lm-studio empty-fallback placeholder vs. wire auth", 
 		// placeholder-only providers as keyless would lock a working
 		// keyless vllm server out of the model picker.
 		const storage = await bootStorage("vllm-placeholder");
-		await storage.login("vllm", { onAuth: () => {}, onPrompt: async () => "" });
-		expect(await storage.peekApiKey("vllm")).toBe("vllm-local");
+		await storage.oauth.login("vllm", { onAuth: () => {}, onPrompt: async () => "" });
+		expect(await storage.keys.peek("vllm")).toBe("vllm-local");
 
 		const registry = bootRegistry(storage);
 		await registry.refresh("online");

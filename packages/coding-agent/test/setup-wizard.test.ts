@@ -377,9 +377,8 @@ describe("setup wizard short terminals", () => {
 			session: {
 				modelRegistry: {
 					authStorage: {
-						has: () => false,
-						hasAuth: () => false,
-						getCredentialOrigin: () => undefined,
+						credentials: { has: () => false },
+						keys: { source: () => undefined },
 					},
 				},
 			},
@@ -514,7 +513,7 @@ describe("setup wizard web search tab", () => {
 		const host = bindSceneHost({
 			ctx: {
 				settings,
-				session: { modelRegistry: { authStorage: { hasAuth: () => false }, getAll: () => webModels } },
+				session: { modelRegistry: { authStorage: { keys: { source: () => undefined } }, getAll: () => webModels } },
 			},
 			requestRender: () => {},
 			finish: () => {},
@@ -537,7 +536,7 @@ describe("setup wizard web search tab", () => {
 		const host = bindSceneHost({
 			ctx: {
 				settings,
-				session: { modelRegistry: { authStorage: { hasAuth: () => false }, getAll: () => webModels } },
+				session: { modelRegistry: { authStorage: { keys: { source: () => undefined } }, getAll: () => webModels } },
 			},
 			requestRender: () => {},
 			finish: () => {},

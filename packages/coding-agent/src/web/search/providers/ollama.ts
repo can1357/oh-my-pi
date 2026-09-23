@@ -89,7 +89,7 @@ function toSearchSources(response: OllamaSearchResponse, numResults: number): Se
 
 /** Execute Ollama web search. */
 export async function searchOllama(params: SearchParamsWithFetch): Promise<SearchResponse> {
-	const keyOrResolver: ApiKey = params.authStorage.resolver("ollama-cloud", {
+	const keyOrResolver: ApiKey = params.authStorage.keys.resolver("ollama-cloud", {
 		sessionId: params.sessionId,
 	});
 
@@ -126,7 +126,7 @@ export class OllamaProvider extends SearchProvider {
 	readonly label = "Ollama";
 
 	isAvailable(authStorage: AuthStorage): boolean {
-		return authStorage.hasAuth("ollama-cloud");
+		return authStorage.keys.source("ollama-cloud") !== undefined;
 	}
 
 	search(params: SearchParamsWithFetch): Promise<SearchResponse> {

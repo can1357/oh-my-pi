@@ -63,7 +63,7 @@ describe("session exit diagnostics", () => {
 	it("records a durable tool start marker and shutdown diagnostic before a pending result exists", async () => {
 		tempDir = TempDir.createSync("@pi-session-exit-");
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage);
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected built-in anthropic model to exist");
@@ -142,7 +142,7 @@ describe("session exit diagnostics", () => {
 	it("signal teardown persists the postmortem reason, not the generic dispose", async () => {
 		tempDir = TempDir.createSync("@pi-session-exit-signal-");
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage);
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected built-in anthropic model to exist");

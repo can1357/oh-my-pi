@@ -36,6 +36,7 @@ import { materializeReadUrlToFile, parseReadUrlTarget } from "./fetch";
 import { createFileRecorder, formatResultPath } from "./file-recorder";
 import { formatGroupedFiles } from "@oh-my-pi/pi-tui/tools/grouped-file-output";
 import { formatMatchLine } from "@oh-my-pi/pi-tui/tools/match-line-format";
+import { isFindEnabled } from "./jfind";
 import {
 	expandDelimitedPathEntries,
 	hasGlobPathChars,
@@ -864,7 +865,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 		return prompt.render(grepDescription, {
 			IS_HL_MODE: displayMode.hashLines,
 			IS_LINE_NUMBER_MODE: !displayMode.hashLines && displayMode.lineNumbers,
-			hasFind: this.session.isToolActive?.("find") ?? this.session.settings.get("find.enabled"),
+			hasFind: this.session.isToolActive?.("find") ?? isFindEnabled(this.session),
 			eagerDelegation: sessionDelegationBias(this.session) === "eager",
 			scoutAvailable: isScoutSpawnable(
 				this.session.settings.get("task.disabledAgents") as string[] | undefined,

@@ -5,7 +5,7 @@ import { createLspWritethrough } from "@oh-my-pi/pi-coding-agent/lsp";
 import { type FileDiagnosticsResult, FileFormatResult } from "@oh-my-pi/pi-tui/tools/lsp";
 import * as lspClient from "@oh-my-pi/pi-coding-agent/lsp/client";
 import * as lspConfig from "@oh-my-pi/pi-coding-agent/lsp/config";
-import { formatContent } from "@oh-my-pi/pi-coding-agent/lsp/diagnostics";
+import { formatContent, INLINE_DIAGNOSTICS_WAIT_TIMEOUT_MS } from "@oh-my-pi/pi-coding-agent/lsp/diagnostics";
 import type { Diagnostic, LinterClient, LspClient, ServerConfig } from "@oh-my-pi/pi-coding-agent/lsp/types";
 import { EquivalentUriMap, fileToUri } from "@oh-my-pi/pi-coding-agent/lsp/utils";
 import type { DeferredDiagnosticsEntry, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -57,6 +57,7 @@ function createClient(cwd: string, config: ServerConfig): LspClient {
 		isReading: false,
 		status: "ready",
 		lastActivity: Date.now(),
+		startedAt: Date.now(),
 		writeQueue: Promise.resolve(),
 		activeProgressTokens: new Set(),
 		projectLoaded: Promise.resolve(),
@@ -521,6 +522,61 @@ describe("LSP diagnostics freshness", () => {
 		expect(result?.diagnostics?.errored).toBe(true);
 		expect(result?.diagnostics?.messages?.some(m => m.includes("real error"))).toBe(true);
 		expect(result?.diagnostics?.messages?.some(m => m.includes("stale error"))).toBe(false);
+	});
+
+	it("defers an empty unversioned cold-server publish until analysis finishes", async () => {
+		const filePath = path.join(tempDir.path(), "cold.ts");
+		const uri = fileToUri(filePath);
+		const clock = new VirtualClock(Date.now());
+		installVirtualTime(clock);
+		// Let diagnostic polls advance the clock; a racing 500ms timeout must not
+		// skip past the 250ms settle window before the poll loop observes it.
+		vi.spyOn(Bun, "sleep").mockImplementation(((ms: number) => {
+			if (ms === INLINE_DIAGNOSTICS_WAIT_TIMEOUT_MS) {
+				const timeout = Promise.withResolvers<void>();
+				clock.in(ms, timeout.resolve);
+				return timeout.promise;
+			}
+			clock.advance(ms);
+			return Promise.resolve();
+		}) as typeof Bun.sleep);
+		const client = createClient(tempDir.path(), TEST_SERVER);
+
+		vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
+		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["test-lsp", TEST_SERVER]]);
+		vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
+		vi.spyOn(lspClient, "syncContent").mockImplementation(async mockClient => {
+			mockClient.openFiles.set(uri, { version: 1, languageId: "typescript" });
+		});
+		vi.spyOn(lspClient, "notifySaved").mockImplementation(async mockClient => {
+			clock.in(10, () => {
+				publishDiagnostics(mockClient, uri, [], null);
+			});
+			clock.in(700, () => {
+				publishDiagnostics(mockClient, uri, [createDiagnostic("completed analysis error")], null);
+			});
+		});
+
+		const late = Promise.withResolvers<FileDiagnosticsResult>();
+		const handle = {
+			onDeferredDiagnostics: (diagnostics: FileDiagnosticsResult) => late.resolve(diagnostics),
+			signal: new AbortController().signal,
+			finalize: () => {},
+		};
+		const writethrough = createLspWritethrough(tempDir.path(), { enableFormat: false, enableDiagnostics: true });
+		const inline = await writethrough(
+			filePath,
+			"export const value: number = 'x';\n",
+			undefined,
+			undefined,
+			undefined,
+			() => handle,
+		);
+
+		expect(inline.diagnostics).toBeUndefined();
+		const lateResult = await late.promise;
+		expect(lateResult.errored).toBe(true);
+		expect(lateResult.messages.some(message => message.includes("completed analysis error"))).toBe(true);
 	});
 
 	it("matches published diagnostics when the server renormalizes the document URI", async () => {

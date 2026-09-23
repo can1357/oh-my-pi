@@ -27,7 +27,7 @@ export interface ApiKeyResolverRegistry {
 		sessionId?: string,
 		options?: { baseUrl?: string; modelId?: string; forceRefresh?: boolean; signal?: AbortSignal },
 	): Promise<string | undefined>;
-	authStorage: Pick<AuthStorage, "rotateSessionCredential">;
+	authStorage: Pick<AuthStorage, "limits">;
 	/**
 	 * Build an {@link ApiKeyResolver} implementing the central a/b/c auth-retry
 	 * policy: initial → resolve; step (b) → force-refresh same account; step (c)
@@ -63,7 +63,7 @@ export function createApiKeyResolver(
 			// sibling exists we switch immediately; the precise no-sibling backoff
 			// is owned by `markUsageLimitReached` (default + server usage-report
 			// reset) and the outer whole-turn retry layer.
-			const switched = await registry.authStorage.rotateSessionCredential(provider, sessionId, {
+			const switched = await registry.authStorage.limits.rotate(provider, sessionId, {
 				error,
 				modelId,
 				signal,

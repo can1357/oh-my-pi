@@ -1,6 +1,8 @@
+import { type AuthAccountPolicies, DEFAULT_USAGE_RESERVE_PCT } from "@oh-my-pi/pi-ai/auth-storage";
 import { ADVISOR_DEFAULT_BUDGET_PER_UPDATE } from "../advisor/emission-guard";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { DEFAULT_SHARE_URL, DEFAULT_STREAM_URL } from "@oh-my-pi/pi-wire";
+import { DEFAULT_SKILLS_URL } from "@oh-my-pi/pi-wire/skillshare";
 import { TREE_FILTER_MODES } from "@oh-my-pi/pi-tui/overlays/tree-selector";
 import { SHAPE_VARIANT_NAMES } from "@oh-my-pi/snapcompact";
 import {
@@ -301,6 +303,7 @@ const HISTORY_SCOPE_OPTIONS: ReadonlyArray<SubmenuOption<HistoryScopeKind>> = HI
 	value: kind,
 	label: HISTORY_SCOPE_LABELS[kind],
 }));
+const EMPTY_AUTH_ACCOUNT_POLICIES: AuthAccountPolicies = [];
 
 export const SETTINGS_SCHEMA = {
 	// ────────────────────────────────────────────────────────────────────────
@@ -314,6 +317,7 @@ export const SETTINGS_SCHEMA = {
 	// per-machine overrides remain trivial.
 	"auth.broker.url": { type: "string", default: undefined },
 	"auth.broker.token": { type: "string", default: undefined, credential: true },
+	"auth.accountPolicies": { type: "array", default: EMPTY_AUTH_ACCOUNT_POLICIES },
 
 	autoResume: {
 		type: "boolean",
@@ -1782,7 +1786,7 @@ export const SETTINGS_SCHEMA = {
 	},
 	"retry.usageReservePct": {
 		type: "number",
-		default: 10,
+		default: DEFAULT_USAGE_RESERVE_PCT,
 		ui: {
 			tab: "model",
 			group: "Retry & Fallback",
@@ -2468,6 +2472,19 @@ export const SETTINGS_SCHEMA = {
 			label: "Extra Redaction Patterns",
 			description:
 				"Additional regular expressions redacted from every streamed row, on top of env/secrets.yml values and built-in credential shapes",
+		},
+	},
+
+	// Skill registry (omp skill)
+	"skills.registryUrl": {
+		type: "string",
+		default: DEFAULT_SKILLS_URL,
+		ui: {
+			tab: "interaction",
+			group: "Skills",
+			label: "Skill Registry",
+			description:
+				"Skillshare registry used by `omp skill` to install, search, and publish skills (https://host[:port])",
 		},
 	},
 
@@ -3487,6 +3504,28 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"ttsr.judge": {
+		type: "enum",
+		values: ["auto", "on", "off"] as const,
+		default: "auto",
+		ui: {
+			tab: "context",
+			group: "Rules (TTSR)",
+			label: "Judged Rules",
+			description:
+				"Ask the judge model role each `question` rule about completed replies, reasoning, and tool calls; a yes injects the rule as a warning",
+			options: [
+				{
+					value: "auto",
+					label: "Auto",
+					description: "Judge only when the judge role resolves to a native TypeSafe jev model",
+				},
+				{ value: "on", label: "On", description: "Always judge, whichever model the judge role resolves to" },
+				{ value: "off", label: "Off", description: "Never judge; question rules stay inactive" },
+			],
+		},
+	},
+
 	"ttsr.contextMode": {
 		type: "enum",
 		values: ["discard", "keep"] as const,
@@ -4030,6 +4069,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"eval.autoProvision": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "shell",
+			group: "Eval & Runtimes",
+			label: "Eval Environment Provisioning",
+			description: "Automatically create the managed JavaScript eval package environment on first install",
+		},
+	},
+
 	"eval.tools.enabled": {
 		type: "boolean",
 		default: true,
@@ -4291,14 +4341,24 @@ export const SETTINGS_SCHEMA = {
 	},
 
 	"find.enabled": {
-		type: "boolean",
-		default: false,
+		type: "enum",
+		values: ["auto", "on", "off"] as const,
+		default: "auto",
 		ui: {
 			tab: "tools",
 			group: "Available Tools",
 			label: "Find (semantic grep)",
 			description:
-				"Enable the find tool: natural-language search for files and line ranges, judged by the judge model role",
+				"Enable the find tool: natural-language search for files and line ranges, judged by the judge model role. Auto enables it only when the judge role resolves to a native TypeSafe jev model",
+			options: [
+				{
+					value: "auto",
+					label: "Auto",
+					description: "Enable when the judge role resolves to a native TypeSafe jev model",
+				},
+				{ value: "on", label: "On", description: "Always enable, whichever model the judge role resolves to" },
+				{ value: "off", label: "Off", description: "Disable the find tool" },
+			],
 		},
 	},
 
@@ -4801,6 +4861,17 @@ export const SETTINGS_SCHEMA = {
 			group: "Discovery & MCP",
 			label: "MCP Project Config",
 			description: "Load .mcp.json/mcp.json from project root",
+		},
+	},
+
+	"mcp.startupTimeoutMs": {
+		type: "number",
+		default: 250,
+		ui: {
+			tab: "tools",
+			group: "Discovery & MCP",
+			label: "MCP Startup Window",
+			description: "Wait this many milliseconds for initial MCP tool discovery; 0 waits until connections settle",
 		},
 	},
 
@@ -6245,6 +6316,8 @@ export interface SkillsSettings {
 	ignoredSkills?: string[];
 	includeSkills?: string[];
 	disabledExtensions?: string[];
+	/** Skillshare registry base URL (`omp skill`). */
+	registryUrl?: string;
 }
 
 /** Conventional commit generation and changelog limits. */
@@ -6265,6 +6338,8 @@ export interface CommitSettings {
 
 export interface TtsrSettings {
 	enabled: boolean;
+	/** When judged (`question`) rules run: read by the session, not the TtsrManager. */
+	judge?: "auto" | "on" | "off";
 	contextMode: "discard" | "keep";
 	interruptMode: "never" | "prose-only" | "tool-only" | "always";
 	repeatMode: "once" | "after-gap";

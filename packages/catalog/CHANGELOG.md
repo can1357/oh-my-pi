@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `org-scoped-identity` and `oauth-token-env` rule support for auth providers
+
+## [18.2.11] - 2026-09-23
+
+### Added
+
+- Added built-in StepFun provider support for the step-5-preview model, including live model discovery.
+
+### Fixed
+
+- Fixed cost estimation for OpenAI Codex GPT-6 Sol and Luna models across standard and worker routes.
+- Fixed GitHub Copilot Grok 4.x models failing to make requests.
+
+## [18.2.10] - 2026-09-22
+
 ### Changed
 
 - Updated default models for anthropic, amazon-bedrock, cloudflare-ai-gateway, kilo, litellm, opencode-zen, vercel-ai-gateway, and zenmux to claude-opus-5-5

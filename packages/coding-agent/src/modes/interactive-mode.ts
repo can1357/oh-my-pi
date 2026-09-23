@@ -36,6 +36,7 @@ import {
 	TERMINAL,
 	Text,
 	type TUI,
+	renderProgressBar,
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
@@ -44,6 +45,7 @@ import { isInsideTerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-capabilit
 import {
 	$env,
 	adjustHsv,
+	formatDuration,
 	formatNumber,
 	getProjectDir,
 	hsvToRgb,
@@ -99,6 +101,11 @@ import {
 	type McpConnectionStatusEvent,
 } from "../mcp/startup-events";
 import { humanizePlanTitle, type PlanApprovalDetails, resolvePlanTitle } from "../plan-mode/approved-plan";
+import {
+	isJudgmentBatchProgress,
+	JUDGMENT_BATCH_PROGRESS_EVENT_CHANNEL,
+	type JudgmentBatchProgress,
+} from "../eval/judgment-batch-events";
 import { autosaveApprovedPlan, planSaveFileName } from "../plan-mode/plan-autosave";
 import { resolvePlanModelTransition } from "../plan-mode/model-transition";
 import guidedGoalInterviewPrompt from "../prompts/goals/guided-goal-interview.md" with { type: "text" };
@@ -106,6 +113,7 @@ import planFilenamePrompt from "../prompts/system/plan-filename.md" with { type:
 import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" with { type: "text" };
 import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with { type: "text" };
 import type { AgentHubRegistry } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
+import { formatCost } from "@oh-my-pi/pi-tui/overlays/agent-hub-renderer";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import {
 	type AgentSession,
@@ -138,6 +146,7 @@ import { isMCPToolName } from "../tools/builtin-names";
 import type { LspStartupServerInfo } from "../tools";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
 import { StreamPublisher } from "../stream/publisher";
+import { newRecordingPath, SessionRecorder } from "../stream/recording";
 import { StreamRedactor } from "../stream/redactor";
 import {
 	FEED_MODEL_BADGE_WIDTH,
@@ -271,6 +280,7 @@ import {
 	setSymbolPreset,
 	startMacOSAppearanceReprobeFallback,
 	theme,
+	warmHighlighter,
 } from "@oh-my-pi/pi-tui/theme";
 import { getSlashCommandTypeIcon } from "@oh-my-pi/pi-tui/theme/tui-adapters";
 import type {
@@ -286,6 +296,9 @@ import type { TodoItem, TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { UiHelpers } from "./utils/ui-helpers";
 
 const STILL_CLOSING_DELAY_MS = 3_000;
+const JUDGMENT_BATCH_PROGRESS_RETAIN_MS = 1_000;
+const JUDGMENT_BATCH_PROGRESS_BAR_WIDTH = 18;
+const JUDGMENT_BATCH_PROGRESS_MIN_BAR_WIDTH = 4;
 const DEFAULT_WORKING_MESSAGE = "Working…";
 
 interface WorkingMessageAccent {
@@ -309,7 +322,12 @@ interface WorkingMessageAccentCacheKey {
 
 function renderWorkingMessage(message: string, accent?: WorkingMessageAccent): string {
 	if (!accent) return shimmerText(message, theme);
-	accent.palette ??= { low: "dim", mid: { ansi: accent.main }, high: { ansi: accent.main }, bold: true };
+	accent.palette ??= {
+		low: "dim",
+		mid: { ansi: accent.main },
+		high: { ansi: accent.main },
+		bold: true,
+	};
 	return shimmerText(message, theme, accent.palette);
 }
 
@@ -378,7 +396,10 @@ function planSaveTitleExcerpt(planContent: string): string {
 		.join("\n");
 }
 
-function parseGoalSubcommand(args: string): { sub: GoalSubcommand | undefined; rest: string } {
+function parseGoalSubcommand(args: string): {
+	sub: GoalSubcommand | undefined;
+	rest: string;
+} {
 	const trimmed = args.trim();
 	if (!trimmed) return { sub: undefined, rest: "" };
 	const match = /^(\S+)(?:\s+([\s\S]*))?$/.exec(trimmed);
@@ -472,6 +493,83 @@ class StatusHudContainer extends AnchoredLiveContainer {
 			return childLines;
 		}
 		return this.mode.renderCompactStatusLine(width, childLines);
+	}
+}
+
+/** Editor-anchored, right-aligned progress rows for concurrent judge batches. */
+class JudgmentBatchProgressHud implements Component {
+	readonly #batches = new Map<string, JudgmentBatchProgress>();
+
+	update(progress: JudgmentBatchProgress): void {
+		this.#batches.set(progress.id, progress);
+	}
+
+	delete(id: string): void {
+		this.#batches.delete(id);
+	}
+
+	clear(): void {
+		this.#batches.clear();
+	}
+
+	render(width: number): readonly string[] {
+		const rowWidth = Number.isFinite(width) ? Math.max(0, Math.trunc(width)) : 0;
+		if (rowWidth === 0) return [];
+		const rows: string[] = [];
+		for (const progress of this.#batches.values()) rows.push(this.#renderRow(progress, rowWidth));
+		return rows;
+	}
+
+	#renderRow(progress: JudgmentBatchProgress, width: number): string {
+		const countText = `${progress.done}/${progress.total}`;
+		// Zero cost means unpriced (local/native without catalog pricing), not free — omit rather than show $0.
+		const costText = progress.cost > 0 ? ` · ${formatCost(progress.cost)}` : "";
+		const failedText = progress.failed > 0 ? ` · ${progress.failed} failed` : "";
+		const compactFailedText = progress.failed > 0 ? ` +${progress.failed}!` : "";
+		let failure = failedText;
+		if (
+			failure &&
+			visibleWidth(countText) +
+				visibleWidth(costText) +
+				visibleWidth(failure) +
+				JUDGMENT_BATCH_PROGRESS_MIN_BAR_WIDTH +
+				1 >
+				width &&
+			visibleWidth(countText) + visibleWidth(costText) + visibleWidth(compactFailedText) <= width
+		) {
+			failure = compactFailedText;
+		}
+
+		const styledCount = theme.bold(theme.fg("text", countText));
+		const styledCost = costText ? theme.fg("dim", costText) : "";
+		const styledFailure = failure ? theme.fg("warning", failure) : "";
+		let tail = `${styledCount}${styledCost}${styledFailure}`;
+		let remaining = width - visibleWidth(tail);
+		if (remaining > 1) {
+			const barWidth = Math.min(JUDGMENT_BATCH_PROGRESS_BAR_WIDTH, remaining - 1);
+			const bar = renderProgressBar(progress.done, barWidth, {
+				min: 0,
+				max: Math.max(1, progress.total),
+				minWidth: barWidth,
+				maxWidth: barWidth,
+				style: {
+					filled: "━",
+					empty: "─",
+					styleFilled: text => theme.fg("accent", text),
+					styleEmpty: text => theme.fg("dim", text),
+				},
+			});
+			tail = `${bar} ${tail}`;
+			remaining = width - visibleWidth(tail);
+		}
+
+		const intent = sanitizeStatusText(progress.intent);
+		if (remaining > 1) {
+			const label = truncateToWidth(intent, remaining - 1, "");
+			if (label) tail = `${theme.fg("dim", label)} ${tail}`;
+		}
+		if (visibleWidth(tail) > width) tail = theme.bold(theme.fg("text", truncateToWidth(countText, width, "")));
+		return `${" ".repeat(Math.max(0, width - visibleWidth(tail)))}${tail}`;
 	}
 }
 
@@ -607,9 +705,17 @@ export function layoutPinnedHud(runningTotal: number, expanded: boolean): Pinned
 		return { itemRows: runningTotal, toggle: undefined, toggleRow: undefined };
 	}
 	if (!expanded) {
-		return { itemRows: SUBAGENT_HUD_COLLAPSED_LIMIT, toggle: "expand", toggleRow: 2 + SUBAGENT_HUD_COLLAPSED_LIMIT };
+		return {
+			itemRows: SUBAGENT_HUD_COLLAPSED_LIMIT,
+			toggle: "expand",
+			toggleRow: 2 + SUBAGENT_HUD_COLLAPSED_LIMIT,
+		};
 	}
-	return { itemRows: runningTotal, toggle: "collapse", toggleRow: 2 + runningTotal };
+	return {
+		itemRows: runningTotal,
+		toggle: "collapse",
+		toggleRow: 2 + runningTotal,
+	};
 }
 
 /**
@@ -718,6 +824,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	ui: TUI;
 	chatContainer: TranscriptContainer;
 	pendingMessagesContainer: Container;
+	judgmentBatchProgressContainer: Container;
 	statusContainer: Container;
 	/** Whether {@link statusContainer} rendered lines in the latest frame; the band composer's editor top gap collapses only then. */
 	statusRowOccupied = false;
@@ -765,6 +872,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#todoAutoClearTimer: NodeJS.Timeout | undefined;
 	#todoAutoClearGeneration = 0;
 	#modelCycleClearTimer: NodeJS.Timeout | undefined;
+	readonly #judgmentBatchProgressHud = new JudgmentBatchProgressHud();
+	readonly #judgmentBatchProgressClearTimers = new Map<string, NodeJS.Timeout>();
 	#nextAppearanceRequestToken = 1;
 	#appearanceRefreshRequest: { token: TerminalAppearanceRequestToken; deadline: number } | undefined;
 	todoPhases: TodoPhase[] = [];
@@ -914,6 +1023,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	collabHost?: CollabHost;
 	collabGuest?: CollabGuestLink;
 	#streamPublisher: StreamPublisher | undefined;
+	#recorder: SessionRecorder | undefined;
+	#recorderStarting = false;
 
 	#pendingCommandOutput: Component[] = [];
 	#pendingCommandOutputSessionId: string | undefined;
@@ -1088,6 +1199,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.statusContainer.disposeChildren();
 		this.pendingMessagesContainer.disposeChildren();
+		this.#clearJudgmentBatchProgress();
 		this.#cancelModelCycleClearTimer();
 		this.modelCycleContainer.disposeChildren();
 		this.deferredCommandContainer.disposeChildren();
@@ -1122,7 +1234,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	#mcpPendingServers = new Set<string>();
 	#mcpConnectedServers = new Set<string>();
 	#mcpFailedServers = new Map<string, { error: string; sourcePath?: string }>();
-	readonly #chatHost: ChatBlockHost = { requestRender: () => this.ui.requestRender() };
+	readonly #chatHost: ChatBlockHost = {
+		requestRender: () => this.ui.requestRender(),
+	};
 
 	/** Root-scoped bus carrying this session tree's `task:subagent:*` frames. */
 	get subagentEventBus(): EventBus | undefined {
@@ -1207,7 +1321,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#eventBusUnsubscribers.push(
 				eventBus.on(MCP_CONNECTION_STATUS_EVENT_CHANNEL, data => {
 					if (!isMcpConnectionStatusEvent(data)) {
-						logger.warn("Ignoring malformed mcp:connection-status event", { data });
+						logger.warn("Ignoring malformed mcp:connection-status event", {
+							data,
+						});
 						return;
 					}
 					this.#handleMcpConnectionStatusEvent(data);
@@ -1243,6 +1359,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		});
 		this.chatContainer = new TranscriptContainer();
 		this.pendingMessagesContainer = new AnchoredLiveContainer();
+		this.judgmentBatchProgressContainer = new AnchoredLiveContainer();
+		this.judgmentBatchProgressContainer.addChild(this.#judgmentBatchProgressHud);
 		this.statusContainer = new StatusHudContainer(this);
 		this.todoContainer = new TodoHudContainer(this);
 		this.subagentContainer = new AnchoredLiveContainer();
@@ -1253,6 +1371,17 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.modelCycleContainer = new AnchoredLiveContainer();
 		this.deferredCommandContainer = new AnchoredLiveContainer();
 		this.editor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
+		if (eventBus) {
+			this.#eventBusUnsubscribers.push(
+				eventBus.on(JUDGMENT_BATCH_PROGRESS_EVENT_CHANNEL, data => {
+					if (!isJudgmentBatchProgress(data)) {
+						logger.warn("Ignoring malformed eval:judgment-batch-progress event", { data });
+						return;
+					}
+					this.#handleJudgmentBatchProgress(data);
+				}),
+			);
+		}
 		this.editor.setImeSafeCursorLayout(settings.get("tui.imeSafeCursor"));
 		this.#applyVimMode(this.editor);
 		this.editor.setAutocompleteMaxVisible(settings.get("autocompleteMaxVisible"));
@@ -1329,7 +1458,9 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		const skillCommandList = this.#rebuildSkillCommandsFromSession();
 
-		const builtinCommands: SlashCommand[] = buildTuiBuiltinSlashCommands({ ctx: this }).map(cmd => ({
+		const builtinCommands: SlashCommand[] = buildTuiBuiltinSlashCommands({
+			ctx: this,
+		}).map(cmd => ({
 			...cmd,
 			icon: getSlashCommandTypeIcon(cmd.icon ?? "action"),
 		}));
@@ -1353,6 +1484,33 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.session.setTitleGenerationStart?.(() => this.#inputController.notifyTitleGenerationStart());
 		this.session.setPromptDropped?.(prompt => this.#restoreDroppedPrompt(prompt));
 		this.#observerRegistry = new SessionObserverRegistry();
+	}
+
+	#handleJudgmentBatchProgress(progress: JudgmentBatchProgress): void {
+		const pendingClear = this.#judgmentBatchProgressClearTimers.get(progress.id);
+		if (pendingClear) {
+			clearTimeout(pendingClear);
+			this.#judgmentBatchProgressClearTimers.delete(progress.id);
+		}
+
+		this.#judgmentBatchProgressHud.update(progress);
+		if (!progress.running) {
+			const timer = setTimeout(() => {
+				this.#judgmentBatchProgressClearTimers.delete(progress.id);
+				this.#judgmentBatchProgressHud.delete(progress.id);
+				this.ui.requestRender();
+			}, JUDGMENT_BATCH_PROGRESS_RETAIN_MS);
+			timer.unref?.();
+			this.#judgmentBatchProgressClearTimers.set(progress.id, timer);
+		}
+		this.ui.requestRender();
+	}
+
+	#clearJudgmentBatchProgress(requestRender = false): void {
+		for (const timer of this.#judgmentBatchProgressClearTimers.values()) clearTimeout(timer);
+		this.#judgmentBatchProgressClearTimers.clear();
+		this.#judgmentBatchProgressHud.clear();
+		if (requestRender) this.ui.requestRender();
 	}
 
 	#handleMcpConnectionStatusEvent(event: McpConnectionStatusEvent): void {
@@ -1436,7 +1594,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			saveDraft: text => this.sessionManager.saveDraft(text),
 			disposeSession: async reason => {
 				await this.#btwController.dispose();
-				await this.session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS, reason });
+				await this.session.dispose({
+					mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS,
+					reason,
+				});
 			},
 		});
 		// Forward the postmortem reason (SIGTERM/SIGHUP/uncaughtException/…) so the
@@ -1522,6 +1683,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.errorBannerContainer,
 			this.modelCycleContainer,
 			this.deferredCommandContainer,
+			// Judge batches stay editor-anchored and update independently of eval
+			// transcript output, directly above the working/throughput/title row.
+			this.judgmentBatchProgressContainer,
 			// Working loader / transient status sits below the sticky todo + subagent
 			// HUDs, just above the editor's hook-widget top margin — so it reads next to
 			// the prompt while keeping the one-line gap above the editor (the band
@@ -1634,7 +1798,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		// not be titled. Deferred via setImmediate so it runs AFTER the render
 		// callback requestRender(true) queued above (immediates are FIFO) — the
 		// spawn syscall never lands in the same loop turn ahead of the first paint.
+		// The native syntax set (syntect defaults plus the vendored TypeScript/TSX/
+		// Julia grammars, parsed from YAML) costs ~1s to build on first use, and each
+		// language's regexes compile on its first highlight (~250ms for TS/TSX).
+		// Warm both on the native worker pool now so the first highlighted code
+		// block, bash command preview, or file diff does not stall the render thread.
 		setImmediate(() => {
+			void warmHighlighter();
 			if (!$env.PI_NO_TITLE && !this.sessionManager.getSessionName()) {
 				this.#inputController.prewarmTinyTitleModel();
 			}
@@ -1829,7 +1999,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			for (const skill of this.session.skills) {
 				const commandName = `skill:${skill.name}`;
 				this.skillCommands.set(commandName, skill);
-				commands.push({ name: commandName, description: skill.description, icon });
+				commands.push({
+					name: commandName,
+					description: skill.description,
+					icon,
+				});
 			}
 		}
 		return commands;
@@ -2697,7 +2871,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			borderColor:
 				markerIndex < 0
 					? undefined
-					: { prefix: colored.slice(0, markerIndex), suffix: colored.slice(markerIndex + marker.length) },
+					: {
+							prefix: colored.slice(0, markerIndex),
+							suffix: colored.slice(markerIndex + marker.length),
+						},
 			topBorder: topContent ? { content: topContent, width: visibleWidth(topContent) } : undefined,
 			bottomLines,
 		};
@@ -2981,7 +3158,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		// bound (rather than routing through `setTodos`, which rebinds it to
 		// `viewSession`) keeps a follow-up reconcile in the same window correct.
 		const owner = this.#todoPhasesOwner ?? this.session;
-		owner.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: next });
+		owner.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, {
+			phases: next,
+		});
 		owner.setTodoPhases(next);
 		this.todoPhases = next;
 		this.#syncTodoHudState(owner);
@@ -3497,7 +3676,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		// active model on the plan role, so overwriting here would restore the old
 		// plan model instead of the user's real pre-plan model.
 		this.#planModePreviousModelState = currentModel
-			? { model: currentModel, thinkingLevel: this.session.configuredThinkingLevel() }
+			? {
+					model: currentModel,
+					thinkingLevel: this.session.configuredThinkingLevel(),
+				}
 			: undefined;
 
 		await this.#applyPlanModelTransition(currentModel, resolved);
@@ -3546,7 +3728,10 @@ export class InteractiveMode implements InteractiveModeContext {
 				return;
 			case "apply":
 				if (transition.deferred) {
-					this.#pendingModelSwitch = { model: transition.model, thinkingLevel: transition.thinkingLevel };
+					this.#pendingModelSwitch = {
+						model: transition.model,
+						thinkingLevel: transition.thinkingLevel,
+					};
 					this.#pendingPlanModelSwitch = true;
 					return;
 				}
@@ -3659,7 +3844,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		// flags and settings, and that set — not a historical one — is what exiting
 		// vibe must restore.
 		const vibeToolsetLostToTeardown = this.vibeModeEnabled && !preserveVibe;
-		await this.#clearTransientModeState({ preserveVibe, vibeScopeAlreadySuspended });
+		await this.#clearTransientModeState({
+			preserveVibe,
+			vibeScopeAlreadySuspended,
+		});
 		await VibeSessionRegistry.global().rehydrate(vibeSession);
 		const goalEnabled = this.session.settings.get("goal.enabled");
 		if (!goalEnabled && (sessionContext.mode === "goal" || sessionContext.mode === "goal_paused")) {
@@ -3810,7 +3998,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			// which would reset provider-side sessions and break continuity.
 			this.session.setThinkingLevel(prev.thinkingLevel);
 		} else if (this.session.isStreaming) {
-			this.#pendingModelSwitch = { model: prev.model, thinkingLevel: prev.thinkingLevel };
+			this.#pendingModelSwitch = {
+				model: prev.model,
+				thinkingLevel: prev.thinkingLevel,
+			};
 			this.#pendingPlanModelSwitch = false;
 		} else {
 			await this.session.setModelTemporary(prev.model, prev.thinkingLevel);
@@ -3870,7 +4061,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		const planModeTools = this.session.getEnabledToolNames();
 		const planModeMountedTools = this.session.getMountedXdevToolNames();
 		const planModeModelState = this.session.model
-			? { model: this.session.model, thinkingLevel: this.session.configuredThinkingLevel() }
+			? {
+					model: this.session.model,
+					thinkingLevel: this.session.configuredThinkingLevel(),
+				}
 			: undefined;
 		this.session.setPlanModeState(undefined);
 		try {
@@ -3902,7 +4096,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				try {
 					await this.#restorePlanPreviousModel(planModeModelState);
 				} catch (rollbackError) {
-					logger.warn("Failed to restore plan model after plan exit failure", { error: String(rollbackError) });
+					logger.warn("Failed to restore plan model after plan exit failure", {
+						error: String(rollbackError),
+					});
 				}
 			}
 			const enabledTools = this.session.getEnabledToolNames();
@@ -3916,7 +4112,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				try {
 					await this.session.setActiveToolPresentation(planModeTools, planModeMountedTools);
 				} catch (rollbackError) {
-					logger.warn("Failed to restore plan tools after plan exit failure", { error: String(rollbackError) });
+					logger.warn("Failed to restore plan tools after plan exit failure", {
+						error: String(rollbackError),
+					});
 				}
 			}
 			throw error;
@@ -3969,7 +4167,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.goalModePaused = false;
 		const state = options.resume
 			? await this.session.goalRuntime.resumeGoal()
-			: await this.session.goalRuntime.createGoal({ objective: options.objective ?? "" });
+			: await this.session.goalRuntime.createGoal({
+					objective: options.objective ?? "",
+				});
 		await this.session.setActiveToolsByName(goalTools);
 		this.session.setGoalModeState(state);
 		this.goalModeEnabled = true;
@@ -4569,13 +4769,17 @@ export class InteractiveMode implements InteractiveModeContext {
 		// flips true between the check and dispatch (the same fire-and-forget race
 		// noted below), catch `AgentBusyError` and fall back to the same queue.
 		if (this.session.isStreaming) {
-			await this.session.followUp(planModePrompt, undefined, { synthetic: true });
+			await this.session.followUp(planModePrompt, undefined, {
+				synthetic: true,
+			});
 		} else {
 			try {
 				await this.session.prompt(planModePrompt, { synthetic: true });
 			} catch (error) {
 				if (!(error instanceof AgentBusyError)) throw error;
-				await this.session.followUp(planModePrompt, undefined, { synthetic: true });
+				await this.session.followUp(planModePrompt, undefined, {
+					synthetic: true,
+				});
 			}
 		}
 		return true;
@@ -4643,7 +4847,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			const images = input?.images?.length ? input.images : undefined;
 			await this.withLocalSubmission(
 				initialPrompt,
-				() => this.session.prompt(initialPrompt, { streamingBehavior: "steer", images }),
+				() =>
+					this.session.prompt(initialPrompt, {
+						streamingBehavior: "steer",
+						images,
+					}),
 				{ imageCount: images?.length ?? 0 },
 			);
 			return true;
@@ -4711,7 +4919,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			const images = input?.images?.length ? input.images : undefined;
 			await this.withLocalSubmission(
 				initialPrompt,
-				() => this.session.prompt(initialPrompt, { streamingBehavior: "steer", images }),
+				() =>
+					this.session.prompt(initialPrompt, {
+						streamingBehavior: "steer",
+						images,
+					}),
 				{ imageCount: images?.length ?? 0 },
 			);
 			return true;
@@ -4738,7 +4950,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		const images = input?.images?.length ? input.images : undefined;
 		await this.withLocalSubmission(
 			initialPrompt,
-			() => this.session.prompt(initialPrompt, { streamingBehavior: "steer", images }),
+			() =>
+				this.session.prompt(initialPrompt, {
+					streamingBehavior: "steer",
+					images,
+				}),
 			{ imageCount: images?.length ?? 0 },
 		);
 		return true;
@@ -4926,7 +5142,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		if (subRest) return await this.#startGoalFromObjective(subRest, input);
 		const objective = (
-			await this.showHookEditor("Goal objective", undefined, undefined, { promptStyle: true })
+			await this.showHookEditor("Goal objective", undefined, undefined, {
+				promptStyle: true,
+			})
 		)?.trim();
 		if (!objective) return false;
 		return await this.#startGoalFromObjective(objective, input);
@@ -4971,7 +5189,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			// hidden developer message, the agent asks its questions as regular
 			// assistant turns, and the user answers in the ordinary editor. Queue
 			// behind an in-flight run instead of aborting it.
-			const kickoff = prompt.render(guidedGoalInterviewPrompt, { initial: rest?.trim() || undefined });
+			const kickoff = prompt.render(guidedGoalInterviewPrompt, {
+				initial: rest?.trim() || undefined,
+			});
 			const images = input?.images?.length ? input.images : undefined;
 			if (this.session.isStreaming) {
 				await this.session.followUp(kickoff, images, { synthetic: true });
@@ -5132,7 +5352,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			const images = input?.images?.length ? input.images : undefined;
 			await this.withLocalSubmission(
 				objective,
-				() => this.session.prompt(objective, { streamingBehavior: "steer", images }),
+				() =>
+					this.session.prompt(objective, {
+						streamingBehavior: "steer",
+						images,
+					}),
 				{ imageCount: images?.length ?? 0 },
 			);
 			return true;
@@ -5159,7 +5383,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			const images = input?.images?.length ? input.images : undefined;
 			await this.withLocalSubmission(
 				objective,
-				() => this.session.prompt(objective, { streamingBehavior: "steer", images }),
+				() =>
+					this.session.prompt(objective, {
+						streamingBehavior: "steer",
+						images,
+					}),
 				{ imageCount: images?.length ?? 0 },
 			);
 			return true;
@@ -5181,7 +5409,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		const objective = rest.trim()
 			? rest.trim()
-			: (await this.showHookEditor("Goal objective", undefined, undefined, { promptStyle: true }))?.trim();
+			: (
+					await this.showHookEditor("Goal objective", undefined, undefined, {
+						promptStyle: true,
+					})
+				)?.trim();
 		if (!objective) return false;
 		if (this.goalModeEnabled) return await this.#replaceGoalFromObjective(objective, input);
 		return await this.#startGoalFromObjective(objective, input);
@@ -5476,6 +5708,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#appearanceRefreshRequest = undefined;
 		this.#streamPublisher?.dispose();
 		this.#streamPublisher = undefined;
+		void this.#recorder?.stop();
+		this.#recorder = undefined;
 		// Last chance to refresh the startup status placeholder for the next launch.
 		this.#persistComposerStatus();
 		if (this.loadingAnimation) {
@@ -5486,6 +5720,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// stopAnimation would otherwise keep an 80ms interval pinning the process.
 		stopSharedSpinnerTicker();
 		this.#liveCommandController.dispose();
+		this.#clearJudgmentBatchProgress();
 		this.#cancelTodoAutoClearTimer();
 		this.#cancelObserverUiSyncTimer();
 		this.#cancelGoalContinuation();
@@ -5612,7 +5847,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			}
 		}
 		try {
-			const child = Bun.spawn(cmd, { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
+			const child = Bun.spawn(cmd, {
+				stdin: "inherit",
+				stdout: "inherit",
+				stderr: "inherit",
+			});
 			await postmortem.quit(await child.exited);
 		} catch (err) {
 			process.stderr.write(`${chalk.red(`Restart spawn failed: ${err instanceof Error ? err.message : err}`)}\n`);
@@ -5652,6 +5891,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		try {
 			this.#streamPublisher?.dispose();
 			this.#streamPublisher = undefined;
+			await this.#recorder?.stop();
+			this.#recorder = undefined;
 			// Guests get goodbye and the registry entry disappears before the
 			// session is disposed, under the same still-closing progress notice.
 			await this.collabController.shutdown("host exited");
@@ -5670,7 +5911,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			if (this.#signalTeardown) {
 				await this.#signalTeardown();
 			} else {
-				await this.session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
+				await this.session.dispose({
+					mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS,
+				});
 			}
 		} finally {
 			clearTimeout(stillClosingTimer);
@@ -5811,7 +6054,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#inputController.setupEditorSubmitHandler();
 
 		void this.refreshSlashCommandState().catch(error => {
-			logger.warn("Failed to refresh slash command state for custom editor", { error: String(error) });
+			logger.warn("Failed to refresh slash command state for custom editor", {
+				error: String(error),
+			});
 		});
 
 		this.#syncVimStatus(nextEditor);
@@ -6018,7 +6263,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	#persistComposerWelcome(modelName: string, providerName: string): void {
 		if (!this.sessionManager.getSessionFile()) return;
-		void writeComposerWelcomeCache(this.sessionManager.getCwd(), { modelName, providerName }).catch(error => {
+		void writeComposerWelcomeCache(this.sessionManager.getCwd(), {
+			modelName,
+			providerName,
+		}).catch(error => {
 			logger.debug("composer welcome cache write failed", { error });
 		});
 	}
@@ -6324,6 +6572,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async prepareSessionSwitch(): Promise<void> {
+		this.#clearJudgmentBatchProgress(true);
 		await this.#btwController.dispose();
 		this.#omfgController.dispose();
 		this.#cleanseController.dispose();
@@ -6420,6 +6669,39 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.ui.requestRender();
 			},
 		});
+	}
+
+	/** Start a `/record` screen capture, or stop the running one and report where it was saved. */
+	async toggleRecording(): Promise<void> {
+		const active = this.#recorder;
+		if (active) {
+			this.#recorder = undefined;
+			const elapsed = active.elapsedMs;
+			await active.stop();
+			this.statusLine.setRecording(false);
+			this.showStatus(
+				`Saved ${formatDuration(elapsed)} recording to ${active.path} · replay: omp play · share: omp clip`,
+			);
+			return;
+		}
+		if (this.#recorderStarting) return;
+		this.#recorderStarting = true;
+		const cwd = this.sessionManager.getCwd();
+		try {
+			this.#recorder = await SessionRecorder.start({
+				tui: this.ui,
+				redactor: await StreamRedactor.load(cwd, this.settings.get("stream.redactPatterns")),
+				title: this.sessionManager.getSessionName() || path.basename(cwd),
+				path: newRecordingPath(this.sessionManager.getSessionId()),
+			});
+		} catch (error) {
+			this.showError(`Could not start recording: ${error instanceof Error ? error.message : String(error)}`);
+			return;
+		} finally {
+			this.#recorderStarting = false;
+		}
+		this.statusLine.setRecording(true);
+		this.showStatus(`Recording to ${this.#recorder.path} · /record again to stop`);
 	}
 
 	/** Start or stop the Codex-backed realtime voice surface. */
