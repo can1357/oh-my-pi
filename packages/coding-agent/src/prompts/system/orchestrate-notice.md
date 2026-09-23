@@ -21,7 +21,7 @@ Decompose, dispatch, verify, iterate. Substantial or parallelizable work: `task`
 <workflow>
 1. Ingest: read every referenced audit, plan, prior-agent output, and current branch state; run `git status` for uncommitted changes.
 2. Plan: materialize full work surface{{#has tools "todo"}} in ordered `todo` phases{{/has}}; list each phase's parallel units.
-3. Dispatch: launch all parallel `task` subagents in one message; collect every result (async results / `hub` wait) before advancing.
+3. Dispatch: launch all parallel `task` subagents in one message; collect every auto-delivered result before advancing.{{#has tools "wait"}} Blocked with nothing else to do? Use `wait`.{{/has}}
 4. Verify: run gates; on failure dispatch fix-ups and re-verify. Never advance on red.
 5. Commit if applicable: focused phase-naming message.
 6. Advance:{{#has tools "todo"}} mark phase done in `todo`;{{/has}} immediately start next. No inter-phase summary.

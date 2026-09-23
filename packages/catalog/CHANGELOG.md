@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added provider and auth rule definitions for on-device Apple Foundation Models
 - Added per-account discovery support for Codex cyber access entitlements
 - Added `org-scoped-identity` and `oauth-token-env` rule support for auth providers
 - Added `thinking.supportsDisabledThinking`, marking adaptive Claude models that accept an explicit `thinking.type: "disabled"` request instead of the legacy low-effort fallback. Claude Opus 5, Opus 5.5, and Sonnet 5 are marked; older adaptive Claude models keep the fallback.

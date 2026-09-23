@@ -295,8 +295,8 @@ function resolveBulkDirectives(raw: string, stripped: string): Map<number, strin
 }
 
 const writeSchema = type({
-	path: type("string").describe("file path"),
-	content: type("string").describe("file content"),
+	path: "string",
+	content: "string",
 });
 
 export type WriteToolInput = typeof writeSchema.infer;
@@ -340,6 +340,11 @@ function stripWriteContent(session: ToolSession, content: string): { text: strin
 	}
 	return stripWriteContentWithPotentialLooseHeader(content.split("\n"));
 }
+/** `write agent://<id>`: a peer message (read tier, allowed in plan mode and device-only sessions). */
+const AGENT_URL_RE = /^agent:\/\//i;
+/** `write proc://<id>[/mode]`: service stdin, job cancel/service stop, or service mode (exec tier). */
+const PROC_URL_RE = /^proc:\/\//i;
+
 function endsWithReadTruncationNotice(content: string): boolean {
 	const lines = splitAddressableFileLines(normalizeToLF(content));
 	const noticeIndex = lines.findLastIndex(line => line.trim().length > 0);
@@ -616,6 +621,10 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				return "exec";
 			}
 		}
+		// Peer messages are coordination, not mutation; proc:// writes drive
+		// processes (stdin, stop, mode).
+		if (AGENT_URL_RE.test(path)) return "read";
+		if (PROC_URL_RE.test(path)) return "exec";
 		// Remote SSH writes open an outbound connection and run a remote shell —
 		// gate them like the exec-tier `ssh` tool, ahead of the handler-write
 		// logic. Substring match also covers selector-suffixed targets.
@@ -1200,6 +1209,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		if (
 			this.session.deviceOnlyWrite === true &&
 			!parseXdUrl(path) &&
+			!AGENT_URL_RE.test(path) &&
 			!(this.session.getPlanModeState?.()?.enabled === true && targetsLocalSandbox(this.session, path))
 		) {
 			throw new ToolError(
@@ -1207,8 +1217,12 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			);
 		}
 		return untilAborted(signal, async () => {
-			// Strip hashline display prefixes ([PATH#HASH] + LINE:) if the model copied them from read output
-			const { text: cleanContent, stripped } = stripWriteContent(this.session, content);
+			// Strip hashline display prefixes ([PATH#HASH] + LINE:) if the model copied them from read output.
+			// Messages and process stdin are verbatim payloads, never file text.
+			const { text: cleanContent, stripped } =
+				AGENT_URL_RE.test(path) || PROC_URL_RE.test(path)
+					? { text: content, stripped: false }
+					: stripWriteContent(this.session, content);
 			const internalRouter = InternalUrlRouter.instance();
 			assertWriteTargetAddressable(path, internalRouter);
 			if (internalRouter.canHandle(path)) {
@@ -1216,7 +1230,12 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				const scheme = parsed.protocol.replace(/:$/, "").toLowerCase();
 				const handler = internalRouter.getHandler(scheme);
 				if (handler?.write) {
-					if (scheme !== "xd" && endsWithReadTruncationNotice(content)) {
+					if (
+						scheme !== "xd" &&
+						scheme !== "agent" &&
+						scheme !== "proc" &&
+						endsWithReadTruncationNotice(content)
+					) {
 						const currentResource = await internalRouter.resolve(path, {
 							cwd: this.session.cwd,
 							settings: this.session.settings,
@@ -1225,15 +1244,17 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 						assertNotShorterReadProjection(path, content, currentResource.content, cleanContent);
 					}
 					// Handler-owned writes mutate user data outside the local
-					// sandbox. xd:// dispatches retain each wrapped tool's tier.
+					// sandbox. xd:// dispatches retain each wrapped tool's tier;
+					// agent:// messages are coordination and stay allowed.
 					if (scheme !== "xd") {
-						enforcePlanModeWrite(this.session, path, { op: "update" });
+						if (scheme !== "agent") enforcePlanModeWrite(this.session, path, { op: "update" });
 						emitWriteProgress(onUpdate, cleanContent, path);
 					}
 					let xdResult: AgentToolResult<WriteToolDetails> | undefined;
-					await internalRouter.write(path, cleanContent, {
+					const handlerResult = await internalRouter.write(path, cleanContent, {
 						cwd: this.session.cwd,
 						signal,
+						session: this.session,
 						xd: {
 							write: async (name, deviceContent) => {
 								if (name === REPORT_ISSUE_DEVICE_NAME) {
@@ -1285,6 +1306,12 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 						},
 					});
 					if (xdResult) return xdResult;
+					if (handlerResult)
+						return {
+							content: [{ type: "text", text: handlerResult.text }],
+							details: handlerResult.details ?? {},
+							isError: handlerResult.isError,
+						};
 					let resultText = `Successfully wrote ${Buffer.byteLength(cleanContent, "utf8")} bytes to ${path}`;
 					if (stripped) {
 						resultText += `\nNote: auto-stripped hashline display prefixes from content before writing.`;

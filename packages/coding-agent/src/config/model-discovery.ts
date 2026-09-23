@@ -6,6 +6,7 @@
  * discovery lives in pi-catalog's provider-models.
  */
 import { type ApiKey, withAuth } from "@oh-my-pi/pi-ai/auth-retry";
+import { getAppleFoundationModelsAvailability } from "@oh-my-pi/pi-ai/providers/apple-foundation-models";
 import type { Api, FetchImpl, Model, RemoteCompactionConfig } from "@oh-my-pi/pi-ai/types";
 import { buildDiscoveredModel, buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
@@ -439,7 +440,35 @@ export function discoverModelsByProviderType(
 			return discoverProxyModels(providerConfig, ctx);
 		case "litellm":
 			return discoverLiteLLMModels(providerConfig, ctx);
+		case "apple-foundation-models":
+			return discoverAppleFoundationModels(providerConfig);
 	}
+}
+
+/**
+ * Offers Apple's on-device model when the in-process bridge reports it usable;
+ * an ineligible device, disabled Apple Intelligence, or an omp build without
+ * the bridge yields no models.
+ */
+async function discoverAppleFoundationModels(providerConfig: DiscoveryProviderConfig): Promise<Model<Api>[]> {
+	const availability = await getAppleFoundationModelsAvailability();
+	if (!availability.available) return [];
+	const contextWindow = availability.contextSize ?? DISCOVERY_DEFAULT_CONTEXT_WINDOW;
+	return [
+		buildModel({
+			id: "on-device",
+			name: availability.variant ? `Apple ${availability.variant}` : "Apple Foundation Model",
+			api: providerConfig.api,
+			provider: providerConfig.provider,
+			baseUrl: providerConfig.baseUrl ?? "local://apple-foundation-models",
+			reasoning: availability.reasoningCapable ?? false,
+			input: availability.vision ? ["text", "image"] : ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow,
+			maxTokens: Math.min(contextWindow, DISCOVERY_DEFAULT_MAX_TOKENS),
+			supportsTools: availability.toolCalling ?? true,
+		} as ModelSpec<Api>),
+	];
 }
 
 async function discoverOllamaModelMetadata(

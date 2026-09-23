@@ -15,7 +15,7 @@ import { jsBackend, pythonBackend } from "../eval";
 import type { ExecutorBackend, ExecutorBackendResult } from "../eval/backend";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../eval/bridge-timeout";
 import { IdleTimeout } from "../eval/idle-timeout";
-import { getEnabledEvalPreludes } from "../eval/preludes";
+import { type EvalPreludeDefinition, getEnabledEvalPreludes } from "../eval/preludes";
 import { prepareEvalSource } from "../eval/input";
 import type { BackendProbeOptions } from "../eval/probe";
 import { defaultEvalSessionId } from "../eval/session-id";
@@ -23,6 +23,9 @@ import { EvalShadowCellSession } from "../eval/speculation/cell-session";
 import { runWithEvalShadowCell } from "../eval/speculation/runtime-context";
 import type { EvalCellResult, EvalLanguage, EvalStatusEvent, EvalToolDetails } from "@oh-my-pi/pi-tui/tools/eval";
 import evalDescription from "../prompts/tools/eval.md" with { type: "text" };
+import evalAgentsTopic from "../prompts/tools/eval-agents.md" with { type: "text" };
+import evalJudgeTopic from "../prompts/tools/eval-judge.md" with { type: "text" };
+import evalHelpersTopic from "../prompts/tools/eval-helpers.md" with { type: "text" };
 import evalCodeModeDescription from "../prompts/tools/eval-code-mode.md" with { type: "text" };
 import {
 	DEFAULT_MAX_BYTES,
@@ -52,8 +55,8 @@ import { clampTimeout } from "./tool-timeouts";
 export type EvalLanguageToken = "py" | "js";
 const EVAL_LANGUAGE_ORDER: readonly EvalLanguageToken[] = ["py", "js"];
 const EVAL_LANGUAGE_RUNTIME: Record<EvalLanguageToken, string> = {
-	py: '"py" for the IPython kernel',
-	js: '"js" for the persistent JS VM',
+	py: '"py": IPython',
+	js: '"js": Bun',
 };
 const EVAL_LANGUAGE_NAME: Record<EvalLanguageToken, string> = {
 	py: "Python",
@@ -68,7 +71,7 @@ function joinWithOr(items: readonly string[]): string {
 }
 
 function describeLanguageField(langs: readonly EvalLanguageToken[]): string {
-	return `runtime: ${langs.map(lang => EVAL_LANGUAGE_RUNTIME[lang]).join(", ")}`;
+	return langs.map(lang => EVAL_LANGUAGE_RUNTIME[lang]).join("; ");
 }
 
 /** One-line discovery summary listing the runtimes available this session. */
@@ -88,10 +91,10 @@ function enabledEvalLanguages(backends: EvalBackendsAllowance): EvalLanguageToke
 }
 
 const evalCellCommonFields = {
-	code: type("string").describe("code or a standalone % command to run in this eval call. Top-level await works."),
-	"title?": type("string").describe('short label shown in transcript (e.g. "imports", "load config")'),
-	"timeout?": type("number").describe("timeout for this eval call in seconds; 0 disables the cell timeout"),
-	"reset?": type("boolean").describe("wipe this language's kernel before running. Other languages are untouched."),
+	code: type("string").describe("Code or standalone % command; top-level await works."),
+	"title?": type("string").describe("Short transcript label."),
+	"timeout?": type("number").describe("Cell deadline in seconds; 0 disables it."),
+	"reset?": type("boolean").describe("Wipe only this kernel."),
 };
 
 /**
@@ -198,27 +201,62 @@ export interface EvalToolDescriptionOptions {
 	evalTools?: boolean;
 	/** Push `workpool()` as the default for independent items (model delegation bias `eager`). Default: true. */
 	eagerDelegation?: boolean;
-	/** Enabled capability documentation appended to the eval-only prompt. */
-	preludeDocumentation?: string;
+	/** Enabled preludes; each becomes an `xd://eval/<name>` doc topic. */
+	preludes?: readonly Pick<EvalPreludeDefinition, "name" | "documentation">[];
+	/**
+	 * Inline every doc topic instead of linking `xd://eval/<topic>`. Required
+	 * when the session cannot `read` (the only transport for topic docs).
+	 */
+	inlineTopics?: boolean;
 	/** Whether missing runtimes and environments may be provisioned automatically. */
 	autoProvision?: boolean;
 }
 
-export function getEvalToolDescription(options: EvalToolDescriptionOptions = {}): string {
-	const py = options.py ?? true;
-	const js = options.js ?? true;
+function evalTemplateContext(options: EvalToolDescriptionOptions) {
 	const spawnPolicy = resolveSpawnPolicy(options.spawns ?? true);
-	return prompt.render(evalDescription, {
-		py,
-		js,
+	return {
+		py: options.py ?? true,
+		js: options.js ?? true,
 		evalTools: options.evalTools ?? true,
 		eagerDelegation: options.eagerDelegation ?? true,
 		autoBackgroundEnabled: options.autoBackgroundEnabled ?? false,
 		spawns: spawnPolicy.enabled,
 		spawnDefaultAgent: spawnPolicy.defaultAgent,
 		spawnAllowedAgentsText: spawnPolicy.allowedPromptText,
-		preludeDocumentation: options.preludeDocumentation,
 		autoProvision: options.autoProvision ?? true,
+	};
+}
+
+/**
+ * On-demand eval docs (`topic → markdown`) served at `xd://eval/<topic>`:
+ * `judge` (including completion), `helpers`, `agents` (when spawning is allowed),
+ * and one per enabled prelude.
+ */
+export function getEvalDocTopics(options: EvalToolDescriptionOptions = {}): Record<string, string> {
+	const context = evalTemplateContext(options);
+	const topics: Record<string, string> = {
+		judge: prompt.render(evalJudgeTopic, context),
+		helpers: prompt.render(evalHelpersTopic, context),
+	};
+	if (context.spawns) topics.agents = prompt.render(evalAgentsTopic, context);
+	for (const prelude of options.preludes ?? []) {
+		const doc = prelude.documentation.trim();
+		if (doc) topics[prelude.name] = doc;
+	}
+	return topics;
+}
+
+/** Model-facing eval description: core kernel surface plus one pointer per doc topic. */
+export function getEvalToolDescription(options: EvalToolDescriptionOptions = {}): string {
+	const preludes: { name: string; summary: string }[] = [];
+	for (const prelude of options.preludes ?? []) {
+		const doc = prelude.documentation.trim();
+		if (doc) preludes.push({ name: prelude.name, summary: doc.split("\n", 1)[0]! });
+	}
+	return prompt.render(evalDescription, {
+		...evalTemplateContext(options),
+		preludes,
+		inlineTopics: options.inlineTopics ? Object.values(getEvalDocTopics(options)).join("\n\n") : undefined,
 	});
 }
 
@@ -312,32 +350,34 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 	readonly loadMode = "essential";
 	readonly label = "Eval";
 	get description(): string {
-		let base: string;
-		if (!this.session) {
-			base = getEvalToolDescription();
-		} else {
-			const backends = resolveEvalBackends(this.session);
-			const sessionSpawns = this.session.getSessionSpawns?.() ?? "*";
-			const depthAllowsSpawning = canSpawnAtDepth(
-				this.session.settings.get("task.maxRecursionDepth") ?? 2,
-				this.session.taskDepth ?? 0,
-			);
-			const preludeDocumentation = getEnabledEvalPreludes(this.session.getEvalPreludes?.() ?? [])
-				.map(definition => definition.documentation.trim())
-				.filter(Boolean)
-				.join("\n\n");
-			base = getEvalToolDescription({
-				py: backends.python,
-				js: backends.js,
-				spawns: depthAllowsSpawning ? sessionSpawns : false,
-				autoBackgroundEnabled: this.session.settings.get("eval.autoBackground.enabled"),
-				evalTools: this.session.settings.get("eval.tools.enabled"),
-				eagerDelegation: sessionDelegationBias(this.session) === "eager",
-				preludeDocumentation,
-				autoProvision: this.session.settings.get("eval.autoProvision"),
-			});
-		}
+		const base = getEvalToolDescription(this.#descriptionOptions());
 		return this.#codeModeDescription(base) ?? base;
+	}
+
+	docTopics(): Record<string, string> {
+		return getEvalDocTopics(this.#descriptionOptions());
+	}
+
+	/** Live session state feeding both the description and its `xd://eval/<topic>` docs. */
+	#descriptionOptions(): EvalToolDescriptionOptions {
+		const session = this.session;
+		if (!session) return {};
+		const backends = resolveEvalBackends(session);
+		const depthAllowsSpawning = canSpawnAtDepth(
+			session.settings.get("task.maxRecursionDepth") ?? 2,
+			session.taskDepth ?? 0,
+		);
+		return {
+			py: backends.python,
+			js: backends.js,
+			spawns: depthAllowsSpawning ? (session.getSessionSpawns?.() ?? "*") : false,
+			autoBackgroundEnabled: session.settings.get("eval.autoBackground.enabled"),
+			evalTools: session.settings.get("eval.tools.enabled"),
+			eagerDelegation: sessionDelegationBias(session) === "eager",
+			preludes: getEnabledEvalPreludes(session.getEvalPreludes?.() ?? []),
+			inlineTopics: session.isToolActive?.("read") === false,
+			autoProvision: session.settings.get("eval.autoProvision"),
+		};
 	}
 
 	/**
@@ -364,47 +404,11 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			.join("\n\n");
 		return prompt.render(evalCodeModeDescription, { baseDescription, declarations, preludeDeclarations });
 	}
-	/** All reuse-chain examples; the `examples` getter filters by enabled languages. */
+	/** Only syntax not obvious from the field schema; filtered by enabled language. */
 	static readonly #examples: readonly ToolExample<typeof evalSchema.infer>[] = [
 		{
-			caption: "Install distributions without replaying a failed cell",
-			call: { language: "py", code: "%pip install pillow", title: "install image support" },
-		},
-		{
-			caption: "Load an existing script; reuse its definitions in later cells",
-			call: { language: "py", code: "%load ./analysis.py", title: "load analysis" },
-		},
-		{
-			caption: "Install a JavaScript dependency outside the project",
-			call: { language: "js", code: "%bun add csv-parse", title: "install CSV parser" },
-		},
-		{
-			caption: "Execute an existing TypeScript script in the retained kernel",
-			call: { language: "js", code: "%load ./analysis.ts", title: "load analysis" },
-		},
-		{
-			caption: "First call — set up once",
-			call: {
-				language: "py",
-				title: "imports",
-				code: "import json\nfrom pathlib import Path",
-			},
-		},
-		{
-			caption: "Second call — reuse, do NOT re-import",
-			call: {
-				language: "py",
-				title: "load config",
-				code: "data = json.loads(read('package.json'))\ndisplay(data)",
-			},
-		},
-		{
-			caption: "Third call — reuse the loaded config",
-			call: {
-				language: "py",
-				title: "scan deps",
-				code: "display(sorted(data['dependencies']))",
-			},
+			caption: "Load a script with spaces without echoing its source",
+			call: { language: "py", code: '%load "scripts/my setup.py"' },
 		},
 	];
 	get examples(): readonly ToolExample<typeof evalSchema.infer>[] {
