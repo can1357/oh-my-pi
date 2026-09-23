@@ -23,7 +23,7 @@ import {
 	OPENAI_COMPAT_DISCOVERY_DEFAULT_MAX_TOKENS,
 	resolveLiteLLMApi,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
-import type { ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/types";
+import type { KindApiKind, ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { ProviderDiscovery } from "./models-config-schema";
 
@@ -788,6 +788,18 @@ export async function discoverLmStudioModelRuntimeMetadata(
 	}
 }
 
+/** Lowercased modality names collected from every shape an OpenAI-compatible row may use. */
+function collectModalities(values: readonly unknown[]): Set<string> {
+	const modalities = new Set<string>();
+	for (const value of values) {
+		if (!Array.isArray(value)) continue;
+		for (const entry of value) {
+			if (typeof entry === "string") modalities.add(entry.toLowerCase());
+		}
+	}
+	return modalities;
+}
+
 /**
  * Read image-input support from an OpenAI-compatible `/v1/models` row. Handles
  * direct `input` arrays, Synthetic-style top-level `input_modalities`, and
@@ -799,18 +811,42 @@ function extractOpenAIModelsListInputCapabilities(item: {
 	input_modalities?: unknown;
 	architecture?: unknown;
 }): ("text" | "image")[] | undefined {
-	const modalities = new Set<string>();
-	const collect = (value: unknown): void => {
-		if (!Array.isArray(value)) return;
-		for (const entry of value) {
-			if (typeof entry === "string") modalities.add(entry.toLowerCase());
-		}
-	};
-	collect(item.input);
-	collect(item.input_modalities);
-	if (isRecord(item.architecture)) collect(item.architecture.input_modalities);
+	const architecture = isRecord(item.architecture) ? item.architecture : undefined;
+	const modalities = collectModalities([item.input, item.input_modalities, architecture?.input_modalities]);
 	if (modalities.size === 0) return undefined;
 	return modalities.has("image") ? ["text", "image"] : ["text"];
+}
+
+/**
+ * Map an explicit non-chat output modality onto the runner kind and API that
+ * serves it. Only endpoint-unambiguous tasks are routed: a row whose sole
+ * output is `embeddings` or an image answers through the `/embeddings` and
+ * `/images/generations` surfaces of the same OpenAI-compatible root the
+ * provider already serves its model list from.
+ *
+ * Anything else stays chat. Rows that also emit `text` are ordinary (multimodal)
+ * chat models, and an `audio` or `video` output alone cannot distinguish a TTS
+ * SKU from a music generator, or a chat response from a video-job API — those
+ * need explicit task metadata this list shape does not carry.
+ */
+function extractOpenAIModelsListOutputTask(item: {
+	output?: unknown;
+	output_modalities?: unknown;
+	architecture?: unknown;
+}): { kind: KindApiKind; api: Api } | undefined {
+	const architecture = isRecord(item.architecture) ? item.architecture : undefined;
+	const modalities = collectModalities([item.output, item.output_modalities, architecture?.output_modalities]);
+	if (modalities.size !== 1) return undefined;
+	const [modality] = modalities;
+	switch (modality) {
+		case "embedding":
+		case "embeddings":
+			return { kind: "embedding", api: "openai-embeddings" };
+		case "image":
+			return { kind: "image", api: "openai-images" };
+		default:
+			return undefined;
+	}
 }
 
 export async function discoverOpenAIModelsList(
@@ -856,6 +892,8 @@ export async function discoverOpenAIModelsList(
 						context_length?: unknown;
 						input?: unknown;
 						input_modalities?: unknown;
+						output?: unknown;
+						output_modalities?: unknown;
 						architecture?: unknown;
 						mode?: unknown;
 					}>;
@@ -888,16 +926,47 @@ export async function discoverOpenAIModelsList(
 		// headers/baseUrl/cost stay local.
 		const reference = resolveModelReference(id, references) as ModelSpec<Api> | undefined;
 		const referenceCompat = reference?.compat as OpenAICompat | undefined;
-		const api =
-			providerConfig.discovery.type === "litellm"
-				? resolveLiteLLMApi(undefined, id, providerConfig.api)
-				: providerConfig.api;
-		const contextWindow =
+		const input = nativeMetadataForModel?.input ??
+			extractOpenAIModelsListInputCapabilities(item) ??
+			reference?.input ?? ["text"];
+		const reportedContextWindow =
 			toPositiveNumberOrUndefined(item.max_model_len) ??
 			toPositiveNumberOrUndefined(item.context_length) ??
 			nativeMetadataForModel?.contextWindow ??
 			reference?.contextWindow ??
-			DISCOVERY_DEFAULT_CONTEXT_WINDOW;
+			null;
+		// A row that advertises a dedicated task answers through that task's
+		// runner, not the provider's chat API: leaving it on chat both hides it
+		// from its own role and offers the picker a model the chat endpoint
+		// cannot serve (issue #13021).
+		const task = extractOpenAIModelsListOutputTask(item);
+		if (task) {
+			discovered.push(
+				buildModel({
+					id,
+					name: reference?.name ?? id,
+					api: task.api,
+					kind: task.kind,
+					provider: providerConfig.provider,
+					baseUrl,
+					reasoning: false,
+					input,
+					supportsTools: false,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					// Embeddings cap their input by context; image jobs carry no
+					// token window. Neither produces output tokens.
+					contextWindow: task.kind === "embedding" ? reportedContextWindow : null,
+					maxTokens: null,
+					headers,
+				} as ModelSpec<Api>),
+			);
+			continue;
+		}
+		const api =
+			providerConfig.discovery.type === "litellm"
+				? resolveLiteLLMApi(undefined, id, providerConfig.api)
+				: providerConfig.api;
+		const contextWindow = reportedContextWindow ?? DISCOVERY_DEFAULT_CONTEXT_WINDOW;
 		discovered.push(
 			buildModel({
 				id,
@@ -907,9 +976,7 @@ export async function discoverOpenAIModelsList(
 				baseUrl,
 				reasoning: reference?.reasoning ?? false,
 				thinking: inheritReferenceThinking(undefined, reference, providerConfig.provider),
-				input: nativeMetadataForModel?.input ??
-					extractOpenAIModelsListInputCapabilities(item) ??
-					reference?.input ?? ["text"],
+				input,
 				...(providerConfig.discovery.type === "lm-studio" ? { imageInputDecoder: "stb" as const } : {}),
 				// Proxy/gateway pricing is provider-specific and rarely matches
 				// upstream bundled catalogs, so keep costs local-unknown even
