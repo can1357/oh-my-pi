@@ -71,7 +71,7 @@ import { AssistantMessageEventStream } from "./utils/event-stream";
 import { isFoundryEnabled } from "./utils/foundry";
 import { applyGlyphCodec } from "./utils/glyph-codec";
 import { wrapLeakedThinkingStream } from "./utils/leaked-thinking-stream";
-import { withOperationDeadline } from "./utils/operation-deadline";
+import { operationDeadlineExceeded, withOperationDeadline } from "./utils/operation-deadline";
 import { withThinkingLoopGuard } from "./utils/thinking-loop";
 import { withTransportFetch } from "./utils/transport-fetch";
 
@@ -1650,6 +1650,15 @@ function streamSimpleRequest<TApi extends Api>(
 				if (signal?.aborted) break;
 				const nextKey = await resolveNextAuthRetryKey(retryState, apiKeyResolver, failure.error, signal);
 				if (nextKey === undefined) break;
+				// The resolver may have yielded while refreshing or rotating credentials.
+				// Preserve caller-abort precedence, then refuse a replay whose shared
+				// operation budget expired while the resolver was working.
+				if (signal?.aborted) break;
+				const deadlineError = operationDeadlineExceeded(requestOptions, 0);
+				if (deadlineError) {
+					outer.fail(deadlineError);
+					return;
+				}
 				const next = await runAttempt(nextKey);
 				if (!next) return;
 				failure = next;

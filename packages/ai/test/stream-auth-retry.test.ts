@@ -1,7 +1,7 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { ApiKeyResolveContext } from "@oh-my-pi/pi-ai";
 import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai";
-import { OAuthError, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
+import { OAuthError, ProviderHttpError, ProviderOperationDeadlineError } from "@oh-my-pi/pi-ai/error";
 import { classify } from "@oh-my-pi/pi-ai/error/flags";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@oh-my-pi/pi-ai/types";
@@ -101,6 +101,7 @@ function ok(stream: AssistantMessageEventStream): void {
 describe("streamSimple resolver auth retry", () => {
 	afterEach(() => {
 		unregisterCustomApis(SOURCE_ID);
+		vi.restoreAllMocks();
 	});
 
 	it("retries with a refreshed key when a 401 is thrown before the first event", async () => {
@@ -118,6 +119,7 @@ describe("streamSimple resolver auth retry", () => {
 		);
 
 		const stream = streamSimple(model(), context, {
+			operationTimeoutMs: 60_000,
 			apiKey: async ctx => {
 				contexts.push(ctx);
 				return ctx.error === undefined ? "old-key" : ctx.lastChance ? "switch-key" : "refresh-key";
@@ -137,6 +139,89 @@ describe("streamSimple resolver auth retry", () => {
 		]);
 		expect(contexts[1]).toBeDefined();
 		expect((contexts[1]!.error as { status?: number }).status).toBe(401);
+	});
+
+	it("refuses auth replay after a fast 401 when key resolution spends the operation budget", async () => {
+		let now = 10_000;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const keys: unknown[] = [];
+		const original = authError();
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				pushKey(keys, options);
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => stream.fail(original));
+				return stream;
+			},
+			SOURCE_ID,
+		);
+
+		const stream = streamSimple(model(), context, {
+			operationTimeoutMs: 100,
+			apiKey: async ctx => {
+				if (ctx.error === undefined) return "key-1";
+				await Promise.resolve();
+				now += 101;
+				return "key-2";
+			},
+		});
+		let caught: unknown;
+		try {
+			for await (const _event of stream) {
+				// drain
+			}
+		} catch (error) {
+			caught = error;
+		}
+
+		expect(keys).toEqual(["key-1"]);
+		expect(caught).toBeInstanceOf(ProviderOperationDeadlineError);
+		expect(caught).not.toBe(original);
+		expect((caught as ProviderOperationDeadlineError).declinedDelayMs).toBe(0);
+	});
+
+	it("lets an abort after key resolution beat an expired auth-replay budget", async () => {
+		let now = 20_000;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const controller = new AbortController();
+		const keys: unknown[] = [];
+		const original = authError();
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				pushKey(keys, options);
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => stream.fail(original));
+				return stream;
+			},
+			SOURCE_ID,
+		);
+
+		const stream = streamSimple(model(), context, {
+			signal: controller.signal,
+			operationTimeoutMs: 100,
+			apiKey: ctx => {
+				if (ctx.error === undefined) return "key-1";
+				now += 101;
+				// Land the external abort after resolveNextAuthRetryKey's final signal
+				// check but before its caller resumes with the returned key.
+				queueMicrotask(() => queueMicrotask(() => queueMicrotask(() => controller.abort())));
+				return "key-2";
+			},
+		});
+		let caught: unknown;
+		try {
+			for await (const _event of stream) {
+				// drain
+			}
+		} catch (error) {
+			caught = error;
+		}
+
+		expect(keys).toEqual(["key-1"]);
+		expect(caught).toBe(original);
+		expect(caught).not.toBeInstanceOf(ProviderOperationDeadlineError);
 	});
 
 	it("replays exactly once after a provider requests token refresh, then succeeds", async () => {

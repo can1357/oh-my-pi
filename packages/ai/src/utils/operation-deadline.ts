@@ -20,12 +20,12 @@
  * transient failure therefore keeps its in-place retry, while a ladder of
  * silent attempts is still cut at the budget.
  *
- * Enforced in: the replay-safe stream retry (`empty-completion-retry`), the
- * Anthropic provider loop and its HTTP client backoff, the OpenAI Responses
- * transient stream retry, the five Codex Responses websocket/provider/
- * whitespace retries, and the Google + Gemini CLI empty-stream retries. A
- * caller abort always wins: every site keeps its existing abort check ahead of
- * the budget check.
+ * Enforced in: the replay-safe stream retry (`empty-completion-retry`),
+ * resolver-driven stream auth replays, the Anthropic provider loop and its
+ * HTTP client backoff, the OpenAI Responses transient stream retry, the five
+ * Codex Responses websocket/provider/whitespace retries, and the Google +
+ * Gemini CLI empty-stream retries. A caller abort always wins: every site
+ * keeps its existing abort check ahead of the budget check.
  *
  * Deliberately NOT the stream-idle watchdog: that one bounds the gap between
  * events of a live stream and knows nothing about retries, while this one
