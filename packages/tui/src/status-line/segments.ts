@@ -758,9 +758,11 @@ const collabSegment: StatusLineSegment = {
 const streamSegment: StatusLineSegment = {
 	id: "stream",
 	render(ctx) {
-		if (!ctx.stream) return { content: "", visible: false };
-		const viewers = statusValue(ctx, `${ctx.stream.viewers}`);
-		return { content: theme.fg("thinkingHigh", `● LIVE ${viewers}`), visible: true };
+		const badges: string[] = [];
+		if (ctx.stream) badges.push(`● LIVE ${statusValue(ctx, `${ctx.stream.viewers}`)}`);
+		if (ctx.recording) badges.push("● REC");
+		if (badges.length === 0) return { content: "", visible: false };
+		return { content: theme.fg("thinkingHigh", badges.join(" ")), visible: true };
 	},
 };
 

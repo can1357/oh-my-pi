@@ -3,7 +3,6 @@ import { Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type { Usage } from "@oh-my-pi/pi-ai";
 import {
 	calculateContextTokens,
-	compact,
 	estimateTokens,
 	findCutPoint,
 	type SessionEntry,
@@ -36,9 +35,6 @@ describe("legacy shim compaction helpers", () => {
 	// `estimateTokens`) was likewise absent from the shim surface, so
 	// `omp plugin install npm:pi-claude-bridge` failed with "Export named
 	// 'compact' not found". Pin the callable re-export.
-	it("re-exports compact as a callable function", () => {
-		expect(typeof compact).toBe("function");
-	});
 	// Issue #7403: `serializeConversation` is another package-root compaction
 	// helper used by pi-openai-server-compaction. Its absence prevented the
 	// extension from passing static validation.

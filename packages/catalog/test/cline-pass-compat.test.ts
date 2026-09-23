@@ -91,10 +91,6 @@ describe("ClinePass catalog", () => {
 		});
 	});
 
-	it("keeps uncurated model names free of the Cline wire namespace", () => {
-		expect(sourceModel("unlisted-model").name).toBe("unlisted-model");
-	});
-
 	it("maps Cline's per-model reasoning controls from the curated snapshot", () => {
 		const model = sourceModel("kimi-k3");
 

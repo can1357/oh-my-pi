@@ -43,6 +43,7 @@ import { canUseInteractiveBashPty } from "./bash-pty-selection";
 import { expandInternalUrls, type InternalUrlExpansionOptions } from "./bash-skill-urls";
 import { resolveEvalBackends } from "./eval-backends";
 import { invalidateGithubCacheForBashCommand } from "./gh-cache-invalidation";
+import { isFindEnabled } from "./jfind";
 import { formatArtifactErrorNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { resolveInlineByteCapBudget } from "./output-meta";
@@ -514,7 +515,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			hasAstEdit: isToolActive("ast_edit", this.session.settings.get("astEdit.enabled")),
 			hasGrep: isToolActive("grep", this.session.settings.get("grep.enabled")),
 			hasGlob: isToolActive("glob", this.session.settings.get("glob.enabled")),
-			hasFind: isToolActive("find", this.session.settings.get("find.enabled")),
+			hasFind: this.session.isToolActive?.("find") ?? isFindEnabled(this.session),
 			hasRead: isToolActive("read", true),
 			// Frozen at the last prompt rebuild (managed sessions). SDK consumers
 			// building a bare ToolSession lack the rebuild lifecycle, so fall back

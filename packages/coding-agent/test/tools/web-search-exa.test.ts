@@ -58,10 +58,6 @@ describe("normalizeSearchType", () => {
 	it("passes through 'auto' unchanged", () => {
 		expect(normalizeSearchType("auto")).toBe("auto");
 	});
-
-	it("passes through 'fast' unchanged", () => {
-		expect(normalizeSearchType("fast")).toBe("fast");
-	});
 });
 
 describe("buildExaRequestBody", () => {

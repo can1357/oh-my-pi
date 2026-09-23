@@ -24,7 +24,7 @@ Current tool input:
 ```ts
 {
   language: "py";
-  code: string;
+  code: string;    // inline source or a standalone %load / %pip install
   title?: string;
   timeout?: number; // seconds; default 30, 0 disables, otherwise clamped to 1..3600
   reset?: boolean;  // wipe the Python kernel before this call
@@ -81,7 +81,7 @@ The runner's source transformer rewrites IPython-style magics to plain Python ca
 
 | Magic                             | Effect                                                                                                                                                      |
 | --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `%pip <args>`                     | `python -m pip <args>` with live streaming output. Newly installed packages are evicted from `sys.modules` so the next `import` picks up the fresh install. |
+| `%pip <args>`                     | `python -m pip <args>` with live streaming output; pauses the cell watchdog. Newly installed packages are evicted from `sys.modules` so the next `import` picks up the fresh install. |
 | `%cd <path>`                      | `os.chdir(path)` (with `~` expansion); emits status event.                                                                                                  |
 | `%pwd`                            | Returns `os.getcwd()`.                                                                                                                                      |
 | `%ls [path]`                      | Returns `sorted(os.listdir(path))`.                                                                                                                         |
@@ -90,7 +90,7 @@ The runner's source transformer rewrites IPython-style magics to plain Python ca
 | `%time <expr>` / `%timeit <expr>` | Time the expression; emits status event with elapsed ms.                                                                                                    |
 | `%who` / `%whos`                  | List user-namespace names.                                                                                                                                  |
 | `%reset`                          | Clear user globals and re-inject prelude.                                                                                                                   |
-| `%load <path>`                    | Read a file into a fresh cell and execute.                                                                                                                  |
+| `%load <path>`                    | Execute a quoted file path in the retained namespace with top-level await and filename-aware tracebacks; does not echo source. A standalone `%load` cell is read by the host instead (supports `local://`). |
 | `%run <path>`                     | `runpy.run_path` and merge globals back.                                                                                                                    |
 | `%%bash`                          | Run the cell body via `bash`. The only registered shell cell magic — `%%sh` does not exist, and unregistered names raise `Cell magic function '%%<name>' not found`. |
 | `%%capture [name]`                | Run body with stdout/stderr captured into `name`.                                                                                                           |

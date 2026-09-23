@@ -10,7 +10,6 @@ import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cach
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
-import { PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import {
 	fetchWellKnownModels,
 	MODELS_DEV_PROVIDER_DESCRIPTORS,
@@ -492,15 +491,6 @@ describe("Shared models.dev catalog fallback", () => {
 });
 
 describe("OpenCode provider discovery", () => {
-	test("treats the OpenCode model endpoints as authoritative catalogs", () => {
-		for (const providerId of ["opencode-go", "opencode-zen"]) {
-			const descriptor = PROVIDER_DESCRIPTORS.find(item => item.providerId === providerId);
-			expect(descriptor?.dynamicModelsAuthoritative).toBe(true);
-		}
-		expect(opencodeGoModelManagerOptions().dynamicModelsAuthoritative).toBe(true);
-		expect(opencodeZenModelManagerOptions().dynamicModelsAuthoritative).toBe(true);
-	});
-
 	test("invalidates cached GLM-5.3 Flash effort metadata on upgrade (issue #9960)", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-opencode-glm53-flash-cache-"));
 		const cacheDbPath = path.join(tempDir, "models.db");

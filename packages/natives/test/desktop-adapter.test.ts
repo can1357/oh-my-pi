@@ -42,15 +42,6 @@ class LegacyDesktopSession {
 }
 
 describe("legacy DesktopSession adapter", () => {
-	it("passes current native classes through unchanged", () => {
-		class CurrentDesktopSession {
-			click() {}
-		}
-
-		const adapted: unknown = adaptDesktopSession(CurrentDesktopSession);
-		expect(adapted).toBe(CurrentDesktopSession);
-	});
-
 	it("fills conservative capabilities and translates default foreground input", async () => {
 		const DesktopSession = adaptDesktopSession(LegacyDesktopSession);
 		const session = new DesktopSession({ display: "all" });

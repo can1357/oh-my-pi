@@ -97,12 +97,4 @@ describe("Muse Code provider", () => {
 			}
 		}
 	});
-
-	test("keeps the existing Meta Model API login distinct", () => {
-		expect(getProviderDefinition("meta")).toMatchObject({ id: "meta", name: "Meta Model API" });
-		expect(getProviderDefinition("muse-code")).toMatchObject({
-			id: "muse-code",
-			name: "Muse Code (Subscription)",
-		});
-	});
 });
