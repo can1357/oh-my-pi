@@ -1536,7 +1536,7 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
-	it("does not replay internal Hub messages to ACP clients", async () => {
+	it("does not replay internal peer messages to ACP clients", async () => {
 		const harness = await createHarness();
 		const stored = new FakeAgentSession(harness.cwdA);
 		harness.sessions.push(stored);
@@ -1547,8 +1547,8 @@ describe("ACP agent", () => {
 				{
 					type: "toolCall",
 					id: "toolu_hub_replay",
-					name: "hub",
-					arguments: { op: "send", to: "Scout", message: "Private coordination" },
+					name: "write",
+					arguments: { path: "agent://Scout", content: "Private coordination" },
 				},
 			],
 			stopReason: "toolUse",
@@ -1556,8 +1556,8 @@ describe("ACP agent", () => {
 		stored.sessionManager.appendMessage({
 			role: "toolResult",
 			toolCallId: "toolu_hub_replay",
-			toolName: "hub",
-			content: [{ type: "text", text: "Private reply" }],
+			toolName: "write",
+			content: [{ type: "text", text: "Delivered to Scout." }],
 			isError: false,
 			timestamp: Date.now(),
 		});

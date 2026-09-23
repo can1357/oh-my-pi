@@ -4,6 +4,10 @@
 
 ### Added
 
+- Added proc:// and agent:// URI support for process and agent interaction
+- Added support for xd:// documentation topic URLs
+- Added `wait` tool renderer to display background job state and peer-to-peer messages
+- Added supervised bash service rendering for status, readiness, and output
 - Added a fullscreen annotation overlay for diffs and text, with multi-line notes, editing, deletion, and undo ([#12601](https://github.com/can1357/oh-my-pi/pull/12601) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
 - Added Daybreak-enabled account listing to usage dashboard overlay
 
@@ -13,6 +17,10 @@
 - Mermaid flowcharts and state diagrams now re-pick layout on terminal resize: the shortest orientation that fits the width wins, and the narrowest is used only when none fit.
 - Updated model hub and oauth selector components to use namespaced `authStorage` API
 - Plan Review annotations can now be edited or deleted, span multiple lines, and be undone ([#12601](https://github.com/can1357/oh-my-pi/pull/12601) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
+
+### Removed
+
+- Removed `hub` tool renderer and associated messaging components
 
 ### Fixed
 

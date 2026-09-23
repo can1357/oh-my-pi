@@ -1,19 +1,19 @@
 /**
- * Hub jobs half — lifecycle control for async background jobs (bash scripts,
+ * Lifecycle control for async background jobs (bash scripts,
  * subagents) owned by the calling agent: wait/cancel/snapshot plus the
  * running-agents roster for activity with no job entry.
  */
 
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 
-import type { AsyncJob, AsyncJobDetails, AsyncJobManager, AsyncJobType } from "../../async";
+import type { AsyncJob, AsyncJobDetails, AsyncJobManager, AsyncJobType } from "./job-manager";
 
-import { renderStructuredJson, structuredStatusLabel } from "../../session/async-job-delivery";
-import { USER_INTERRUPT_LABEL } from "../../session/messages";
+import { renderStructuredJson, structuredStatusLabel } from "../session/async-job-delivery";
+import { USER_INTERRUPT_LABEL } from "../session/messages";
 import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
 import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 
-import type { ToolSession } from "..";
+import type { ToolSession } from "../tools";
 
 import { formatDuration } from "@oh-my-pi/pi-tui/render/render-utils";
 import type {
@@ -21,15 +21,14 @@ import type {
 	CancelOutcome,
 	CoordinationDetails,
 	JobSnapshot,
-} from "@oh-my-pi/pi-tui/tools/hub";
+} from "@oh-my-pi/pi-tui/tools/wait";
 
-import { isWaitingPollDetails } from "@oh-my-pi/pi-tui/tools/hub";
+import { isWaitingPollDetails } from "@oh-my-pi/pi-tui/tools/wait";
 import { formatArtifactErrorNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 
 /**
  * Resolve a list of job ids to job records visible to the calling agent.
- * Drops missing ids and ids owned by other agents, so cross-agent inspection
- * via the hub is impossible.
+ * Drops missing ids and ids owned by other agents, preventing cross-agent inspection.
  */
 export function visibleJobs(manager: AsyncJobManager, ids: string[], ownerId: string | undefined): AsyncJob[] {
 	const out: AsyncJob[] = [];
@@ -44,7 +43,7 @@ export function visibleJobs(manager: AsyncJobManager, ids: string[], ownerId: st
 
 /**
  * Running subagents from the registry that are not covered by one of the
- * caller's running jobs. Agents woken via hub messaging (idle wake / park
+ * caller's running jobs. Agents woken via peer messaging (idle wake / park
  * revival) and spawns owned by another agent run with no AsyncJobManager
  * entry, yet the UI's agent badge counts them — a snapshot must account for
  * that activity instead of implying the system is quiet. Existence is
@@ -63,7 +62,7 @@ export function runningAgentsOutsideJobs(session: ToolSession): AgentActivitySna
 	const selfId = session.getAgentId?.() ?? undefined;
 	// Cover = the caller's RUNNING jobs only. A settled job still sitting in
 	// delivery retention must not hide its agent if that agent was re-woken
-	// (e.g. via a hub message) and is running again without a job.
+	// (e.g. via a peer message) and is running again without a job.
 	const covered = new Set<string>();
 	const manager = session.asyncJobManager;
 	if (manager) {
@@ -105,14 +104,17 @@ function describeAgents(agents: AgentActivitySnapshot[]): string[] {
 		const stale = agent.live
 			? ""
 			: agent.acceptedAt !== undefined
-				? ` — final result accepted ${formatDuration(Math.max(0, Date.now() - agent.acceptedAt))} ago but still running; clear it with \`hub\` cancel`
+				? ` — final result accepted ${formatDuration(Math.max(0, Date.now() - agent.acceptedAt))} ago but still running; clear it with empty \`write proc://${agent.id}\``
 				: " — no turn in flight (stale registration?)";
 		lines.push(`- \`${agent.id}\`${parent} — up ${formatDuration(agent.ageMs)}${activity}${stale}`);
 	}
-	lines.push("", "These agents have no job entry; message them via `hub` send, transcripts at `history://<id>`.");
+	lines.push(
+		"",
+		"These agents have no job entry; message them via `write agent://<id>`, transcripts at `history://<id>`.",
+	);
 	if (agents.some(agent => !agent.live)) {
 		lines.push(
-			"An agent with no turn in flight cannot answer a message and never satisfies a bare `wait`; clear it with `hub` cancel.",
+			"An agent with no turn in flight cannot answer a message and never satisfies `wait`; clear it with empty `write proc://<id>`.",
 		);
 	}
 	return lines;
@@ -327,37 +329,6 @@ export function buildJobResult(
 	};
 }
 
-/** `wait` with explicit ids that matched nothing visible: correct the caller, surface live agents. */
-export function noMatchingJobsResult(session: ToolSession, ids: string[]): AgentToolResult<CoordinationDetails> {
-	// Zero pollable jobs is not necessarily "nothing running": agents woken
-	// via hub messages or owned by another agent run with no job entry.
-	// Report them so the snapshot matches the UI's running-agent count
-	// (task job ids are agent ids, so a stale id often names one).
-	const agents = runningAgentsOutsideJobs(session);
-	const lines: string[] = [`No matching jobs found for IDs: ${ids.join(", ")}`];
-	const registry = session.agentRegistry;
-	for (const id of ids) {
-		const ref = registry?.get(id);
-		if (!ref) continue;
-		lines.push(
-			ref.status === "running"
-				? `- \`${id}\` is a running agent with no job entry — message it via \`hub\` send; transcript at history://${id}`
-				: `- \`${id}\` is a ${ref.status} agent (its job is gone) — transcript at history://${id}`,
-		);
-	}
-	if (agents.length > 0) {
-		lines.push("", ...describeAgents(agents));
-	}
-	return {
-		content: [{ type: "text", text: lines.join("\n") }],
-		details: { op: "wait", jobs: [], ...(agents.length ? { agents } : {}) },
-		// Nothing found is noise once consumed — the follow-up call has already
-		// corrected course. Running agents are real state the model may act on,
-		// so keep those results.
-		...(agents.length === 0 ? { useless: true } : {}),
-	};
-}
-
 /** Bare `wait` with no running jobs and nobody who could message: nothing to block on. */
 export function nothingToWaitForResult(session: ToolSession): AgentToolResult<CoordinationDetails> {
 	const agents = runningAgentsOutsideJobs(session);
@@ -426,7 +397,7 @@ export async function executeCancel(
  * cross-agent kills stay impossible; a bare test/SDK caller (no owner id) may
  * target any sub. Never touches Main, the caller, or advisor transcripts.
  */
-async function cancelAgentRegistration(
+export async function cancelAgentRegistration(
 	session: ToolSession,
 	ownerId: string | undefined,
 	id: string,

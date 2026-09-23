@@ -98,8 +98,9 @@ Agent Hub is the human-facing live session view. Adjacent commands and internal 
 - `/jobs` prints a snapshot of running and recently settled asynchronous tool jobs. It does not replace the per-agent transcript or control view.
 - `history://<id>` gives the coding agent a concise transcript for a live or parked subagent.
 - `agent://<id>` resolves a subagent's saved final output artifact; it is not the live transcript.
-- `hub` `list` exposes the peer roster to the coding agent, and `hub` `send` steers or follows up with a normal subagent programmatically. Messaging a parked subagent revives it.
+- `write agent://<id>` steers or follows up with a normal subagent; `agent://all` broadcasts to visible live peers. Messaging a parked subagent revives it. `read history://` discovers registered agent transcripts.
+- `read proc://` lists background jobs and project services; `read proc://<id>` inspects status/output without consuming delivery.
 
-Advisor rows are intentionally excluded from the agent-facing `hub`, `history://`, and `agent://` peer workflows.
+Advisor rows are intentionally excluded from the agent-facing peer roster, `history://` index, and `agent://` messaging workflows.
 
 See also [Task Agent Discovery and Selection](./task-agent-discovery.md), [Collaboration](./collab.md), and [Advisor, WATCHDOG.md, and WATCHDOG.yml](./advisor-watchdog.md).

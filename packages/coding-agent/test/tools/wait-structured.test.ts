@@ -1,6 +1,6 @@
 /**
- * `buildJobResult` structured-output rendering (`hub wait`/`jobs`/`cancel`
- * text). Regression coverage: valid results must not inline a truncated JSON
+ * `buildJobResult` structured-output rendering for a settled wait.
+ * Regression coverage: valid results must not inline a truncated JSON
  * block (breaks async-result.md's contract of pointing to `agent://<id>`
  * instead, and can emit invalid JSON once truncated at 4k), and any result
  * carrying data must advertise the `agent://<id>` handle (PR #10625 review).
@@ -12,7 +12,7 @@ import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { HubTool } from "@oh-my-pi/pi-coding-agent/tools/hub";
+import { buildJobResult } from "@oh-my-pi/pi-coding-agent/async/job-control";
 
 const SELF_ID = "Main";
 
@@ -21,7 +21,7 @@ function makeSession(manager: AsyncJobManager): ToolSession {
 		cwd: process.cwd(),
 		settings: {
 			get(key: string): unknown {
-				if (key === "irc.timeoutMs") return 120_000;
+				if (key === "launch.enabled") return false;
 				return undefined;
 			},
 		},
@@ -29,7 +29,7 @@ function makeSession(manager: AsyncJobManager): ToolSession {
 		asyncJobManager: manager,
 		getAgentId: () => SELF_ID,
 	};
-	// Structurally-partial test session: HubTool only touches the fields above.
+	// Structurally-partial test session: snapshot rendering only touches these fields.
 	return stub as unknown as ToolSession;
 }
 
@@ -44,7 +44,7 @@ function registerSettledJob(
 	return manager.register("task", label, async () => ({ text, structured }), { ownerId: SELF_ID, agentId });
 }
 
-describe("hub jobs structured output rendering", () => {
+describe("wait structured output rendering", () => {
 	beforeEach(() => {
 		AgentRegistry.resetGlobalForTests();
 		IrcBus.resetGlobalForTests();
@@ -63,9 +63,9 @@ describe("hub jobs structured output rendering", () => {
 			{ source: "agent", mode: "permissive", status: "valid", data: { ok: true, count: 7 } },
 			"ValidJob",
 		);
-		const tool = new HubTool(makeSession(manager));
+		await manager.getJob(jobId)!.promise;
 
-		const result = await tool.execute("call_1", { op: "wait", ids: [jobId] });
+		const result = buildJobResult(makeSession(manager), manager, "wait", [manager.getJob(jobId)!], []);
 		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 
 		expect(text).toContain("Structured output: schema valid");
@@ -84,9 +84,9 @@ describe("hub jobs structured output rendering", () => {
 			{ source: "agent", mode: "permissive", status: "invalid", data: { wrong: "shape" }, error: "missing field" },
 			"InvalidJob",
 		);
-		const tool = new HubTool(makeSession(manager));
+		await manager.getJob(jobId)!.promise;
 
-		const result = await tool.execute("call_2", { op: "wait", ids: [jobId] });
+		const result = buildJobResult(makeSession(manager), manager, "wait", [manager.getJob(jobId)!], []);
 		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 
 		expect(text).toContain("Structured output: schema invalid: missing field");
@@ -108,9 +108,9 @@ describe("hub jobs structured output rendering", () => {
 			{ source: "agent", mode: "permissive", status: "unavailable", error },
 			"DeadStream",
 		);
-		const tool = new HubTool(makeSession(manager));
+		await manager.getJob(jobId)!.promise;
 
-		const result = await tool.execute("call_4", { op: "wait", ids: [jobId] });
+		const result = buildJobResult(makeSession(manager), manager, "wait", [manager.getJob(jobId)!], []);
 		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 
 		expect(text).toContain(`Structured output: unavailable: ${error}`);
@@ -136,15 +136,7 @@ describe("hub jobs structured output rendering", () => {
 		);
 		expect(jobId).not.toBe("Foo");
 		await manager.getJob(jobId)!.promise;
-		const tool = new HubTool(makeSession(manager));
-		const summary = await tool.execute("summary", { op: "jobs" });
-		const summaryText = summary.content[0]?.type === "text" ? summary.content[0].text : "";
-		expect(summaryText).toContain(`- \`${jobId}\` [task] — completed — Foo — delivery pending — agent://Foo`);
-		expect(summaryText).not.toContain("<task-result>done</task-result>");
-		if (!summary.details || !("jobs" in summary.details)) throw new Error("Expected job summary details");
-		expect(summary.details.jobs?.find(job => job.id === jobId)?.structured).toBeUndefined();
-
-		const result = await tool.execute("call_3", { op: "wait", ids: [jobId] });
+		const result = buildJobResult(makeSession(manager), manager, "wait", [manager.getJob(jobId)!], []);
 		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 
 		expect(text).toContain(`full payload at agent://Foo,`);

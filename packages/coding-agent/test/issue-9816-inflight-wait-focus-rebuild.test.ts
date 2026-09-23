@@ -4,7 +4,7 @@
  * with no display listener while its following tool-result `message_end` is
  * still being persisted. Returning immediately used to rebuild from the stale
  * dangling toolCall, classify the now-idle session as historical, and seal a
- * permanent `all running jobs` card.
+ * permanent pending `wait` card.
  *
  * Contract: focus attach subscribes to the target, drains its in-flight event
  * handlers/persistence, then rebuilds. A completion already emitted during the
@@ -35,9 +35,9 @@ const usage = {
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
-const danglingHubWait = {
+const danglingWait = {
 	role: "assistant",
-	content: [{ type: "toolCall", id: "hub-1", name: "hub", arguments: { op: "wait" } }],
+	content: [{ type: "toolCall", id: "wait-1", name: "wait", arguments: {} }],
 	api: "anthropic-messages",
 	provider: "anthropic",
 	model: "claude-sonnet-4-5",
@@ -46,10 +46,10 @@ const danglingHubWait = {
 	timestamp: Date.now(),
 } as unknown as AgentMessage;
 
-const completedHubWait = {
+const completedWait = {
 	role: "toolResult",
-	toolCallId: "hub-1",
-	toolName: "hub",
+	toolCallId: "wait-1",
+	toolName: "wait",
 	content: [{ type: "text", text: "Completed (1)" }],
 	details: {
 		op: "wait",
@@ -269,14 +269,14 @@ function makeSession(
 			const pending = Promise.withResolvers<void>();
 			persistence = pending.promise;
 			return () => {
-				messages = [danglingHubWait, completedHubWait];
+				messages = [danglingWait, completedWait];
 				pending.resolve();
 			};
 		},
 	};
 }
 
-function createFixture(main = makeSession([danglingHubWait], true)) {
+function createFixture(main = makeSession([danglingWait], true)) {
 	const worker = makeSession([], false);
 	const registry = new AgentRegistry();
 	registry.register({
@@ -325,11 +325,13 @@ afterAll(() => {
 	resetSettingsForTest();
 });
 
-describe("#9816 focus blackout across an in-flight hub wait", () => {
+describe("#9816 focus blackout across an in-flight wait", () => {
 	it("drains a lost completion into the transcript before rebuilding the main session", async () => {
 		const { ctx, focus, main } = createFixture();
 		await ctx.renderInitialMessages();
-		expect(Bun.stripANSI(ctx.chatContainer.render(120).join("\n"))).toContain("all running jobs");
+		const pending = Bun.stripANSI(ctx.chatContainer.render(120).join("\n"));
+		expect(pending).toContain("Wait");
+		expect(pending).not.toContain("Sleeper1");
 
 		await focus.focusAgent("Worker");
 		expect(main.hasListener()).toBe(false);
@@ -345,8 +347,7 @@ describe("#9816 focus blackout across an in-flight hub wait", () => {
 		const rendered = Bun.stripANSI(ctx.chatContainer.render(120).join("\n"));
 		expect(rendered).toContain("1 job settled");
 		expect(rendered).toContain("Sleeper1");
-		expect(rendered).not.toContain("all running jobs");
-		expect(ctx.pendingTools.has("hub-1")).toBe(false);
+		expect(ctx.pendingTools.has("wait-1")).toBe(false);
 	});
 });
 
