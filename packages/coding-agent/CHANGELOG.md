@@ -20,6 +20,7 @@
 
 ### Fixed
 
+- Fixed a reasoning-only stop being accepted as a delivered answer whenever its thinking block carried a `thinkingSignature`, so signed and unsigned reasoning-only stops now both get empty-stop recovery; each discarded attempt now logs what it contained, and the terminal error describes only what was observed.
 - Fixed headless print mode (`-p`) silently dropping MCP servers slower than the startup window; print mode now waits for configured servers (bounded by `OMP_MCP_TIMEOUT_MS`) and warns on stderr when one is not ready ([#12188](https://github.com/can1357/oh-my-pi/issues/12188), reported by [@aaronjmars](https://github.com/aaronjmars)).
 
 ## [18.2.11] - 2026-09-23

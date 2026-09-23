@@ -88,12 +88,17 @@ describe("isUnexpectedStopCandidate", () => {
 		expect(isUnexpectedStopCandidate(message)).toBe(false);
 	});
 
-	it("returns true for a signed thinking-only stop", () => {
+	// The signature is replay metadata, not delivery: reasoning-only stops belong
+	// to the empty-stop path with or without one. This detector must not claim a
+	// turn that handler already owns — on a capped empty stop the handler FALLS
+	// THROUGH to here, so claiming it would schedule a recovery after the budget
+	// is spent and break "one terminal failure and stops".
+	it("returns false for a signed thinking-only stop (empty-stop path owns reasoning-only)", () => {
 		const message = makeAssistantMessage({
 			stopReason: "stop",
 			content: [{ type: "thinking", thinking: " 响应", thinkingSignature: "reasoning_content" }],
 		});
-		expect(isUnexpectedStopCandidate(message)).toBe(true);
+		expect(isUnexpectedStopCandidate(message)).toBe(false);
 	});
 
 	it("returns false for an unsigned thinking-only stop (empty-stop path owns it)", () => {

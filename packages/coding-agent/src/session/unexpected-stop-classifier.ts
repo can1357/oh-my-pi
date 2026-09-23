@@ -44,16 +44,14 @@ export function isUnexpectedStopCandidate(message: AssistantMessage): boolean {
 	let hasContent = false;
 	for (const content of message.content) {
 		if (content.type === "toolCall") return false;
+		// Delivered text only. A reasoning-only stop is the empty-stop path's
+		// subject whether or not its blocks are signed (`isDeliveredContent`), and
+		// that handler runs first and answers "continue"/"terminal" — while on
+		// "terminal" it FALLS THROUGH to this one. Claiming the same turn here
+		// would schedule a second recovery behind an already exhausted retry cap,
+		// so the two detectors must partition on one predicate instead of each
+		// approximating the other's.
 		if (content.type === "text" && /\S/.test(content.text)) {
-			hasContent = true;
-		}
-		// A signed thinking-only stop is still a candidate: reasoning models can
-		// trap the intended response (or a truncated fragment) in a thinking block
-		// with no text. #isEmptyAssistantStop treats a non-whitespace signature as
-		// terminal (not empty), so such stops bypass the empty-stop path entirely.
-		// Match that predicate here — unsigned thinking-only stops stay with the
-		// empty-stop retry path (and its cap) rather than being re-handled here.
-		if (content.type === "thinking" && /\S/.test(content.thinking) && /\S/.test(content.thinkingSignature ?? "")) {
 			hasContent = true;
 		}
 	}

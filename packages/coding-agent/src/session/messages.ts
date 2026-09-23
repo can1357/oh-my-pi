@@ -485,13 +485,51 @@ function isActionableContent(content: AssistantMessage["content"][number] | unde
 	}
 }
 
+/**
+ * A block whose content reached the user: the deliverable output of a turn.
+ *
+ * Distinct from {@link isActionableContent}, which asks whether the model
+ * produced real output and is the right question for attribution. Delivery is
+ * the question the empty-stop recovery asks, and reasoning never answers it —
+ * `ThinkingContent.thinkingSignature` is replay metadata minted by the transport
+ * ("the reasoning item ID"), not evidence that an answer was delivered. A
+ * reasoning-only stop therefore needs another generation step whether or not its
+ * blocks are signed, and `redactedThinking` (opaque provider reasoning) and
+ * Anthropic's `fallback` routing marker are not deliverable either.
+ *
+ * Unknown block kinds count as delivered on purpose. This predicate authorises
+ * DELETION of a turn when it returns `false`, so a block kind this switch has
+ * simply not been taught yet must never reach the destructive branch.
+ */
+export function isDeliveredContent(content: AssistantMessage["content"][number] | undefined): boolean {
+	switch (content?.type) {
+		case "text":
+			return hasText(content);
+		case "toolCall":
+		case "image":
+		case "anthropicServerTool":
+			return true;
+		case "thinking":
+		case "redactedThinking":
+		case "fallback":
+			return false;
+		default:
+			return true;
+	}
+}
+
 /** A `stop`/`toolUse` turn that produced nothing actionable. Any other stop
  *  reason is not an "empty stop": an `error`/`aborted` turn is a failure rather
- *  than an empty completion, and a `length` stop was cut off mid-output. */
+ *  than an empty completion, and a `length` stop was cut off mid-output.
+ *
+ *  `stop` is judged on delivery ({@link isDeliveredContent}); `toolUse` keeps its
+ *  own stricter rule on purpose — it asks whether anything can ANCHOR a later
+ *  `tool_result`, and an image cannot, so only a real tool call or non-whitespace
+ *  text rescues an orphaned `toolUse` stop. */
 export function isEmptyAssistantStop(message: Pick<AssistantMessage, "stopReason" | "content">): boolean {
 	switch (message.stopReason) {
 		case "stop":
-			return !message.content.some(isActionableContent);
+			return !message.content.some(isDeliveredContent);
 		case "toolUse":
 			// An orphaned toolUse stop (no tool_use block) corrupts Anthropic history:
 			// a later tool_result has nothing to anchor to. Thinking alone cannot anchor

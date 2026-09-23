@@ -14,7 +14,6 @@ import type {
 	Model,
 	ModelUsageHealth,
 	TextContent,
-	ThinkingContent,
 	ToolChoice,
 } from "@oh-my-pi/pi-ai";
 import { calculateRateLimitBackoffMs, parseRateLimitReason } from "@oh-my-pi/pi-ai";
@@ -46,7 +45,7 @@ import type {
 	UsageFallbackConfirmation,
 	UsageFallbackConfirmer,
 } from "./agent-session-types";
-import { assistantTurnProducedOutput, isEmptyAssistantStop, isEmptyErrorTurn } from "./messages";
+import { assistantTurnProducedOutput, isDeliveredContent, isEmptyAssistantStop, isEmptyErrorTurn } from "./messages";
 import {
 	type ActiveRetryFallbackState,
 	calculateRetryBackoffDelayMs,
@@ -843,36 +842,22 @@ export class TurnRecovery {
 		}
 
 		this.#emptyStopRetryCount++;
-		if (this.#emptyStopRetryCount > EMPTY_STOP_MAX_RETRIES) {
+		const { finalError, evidence } = emptyStopDiagnostic(assistantMessage, providerEmptyOutput);
+		const capped = this.#emptyStopRetryCount > EMPTY_STOP_MAX_RETRIES;
+		// One correlated record per discarded attempt, written immediately before
+		// the removal that erases it. Recording only the capped attempt loses the
+		// sequence, and the sequence is what explains why recovery could not
+		// converge — the drop order is 3 retries then the capped turn (seq 1..4).
+		this.#recordEmptyStopAttempt(assistantMessage, evidence, {
+			dropSeq: this.#emptyStopRetryCount,
+			maxRetries: EMPTY_STOP_MAX_RETRIES,
+			decision: capped ? "cap-reached" : "retry-scheduled",
+			finalError: capped ? finalError : undefined,
+		});
+		if (capped) {
 			const attempts = this.#emptyStopRetryCount - 1;
-			const outputTokens = assistantMessage.usage.output;
-			const outputTokensExcludingKnownReasoning = Math.max(
-				0,
-				outputTokens - (assistantMessage.usage.reasoningTokens ?? 0),
-			);
-			let finalError: string;
-			if (providerEmptyOutput) {
-				finalError = "Assistant returned no final output after retry cap; try switching models";
-			} else if (outputTokensExcludingKnownReasoning > 0 && assistantMessage.content.length === 0) {
-				// Billed non-reasoning output on a truly zero-block stop means content was
-				// generated and then dropped downstream (a filter/refusal flattened to
-				// `finish_reason: "stop"` by a proxy, or a lossy API translation) — the
-				// context/`/shake images` hint is wrong here, so name the billed output
-				// instead. Known reasoning-only usage is not evidence that deliverable
-				// content was dropped, and thinking-only stops retain a thinking block.
-				finalError = `Assistant returned an empty stop after retry cap, but the provider billed ${outputTokens} output token${outputTokens === 1 ? "" : "s"} for it; content was generated and then dropped before delivery, which usually points to a provider-side content filter or a lossy API translation rather than a context problem`;
-			} else {
-				finalError =
-					"Assistant returned empty stop after retry cap; try switching models or `/shake images` to remove archived frames";
-			}
 			assistantMessage.errorMessage = finalError;
 			if (providerEmptyOutput) assistantMessage.errorId = AIError.create();
-			logger.warn(finalError, {
-				attempts,
-				model: assistantMessage.model,
-				provider: assistantMessage.provider,
-				outputTokens,
-			});
 			await this.#host.emitSessionEvent({
 				type: "auto_retry_end",
 				success: false,
@@ -923,25 +908,18 @@ export class TurnRecovery {
 			return false;
 		}
 
-		let text = assistantMessage.content
+		// `isUnexpectedStopCandidate` requires delivered text, so this turn always
+		// has one. A reasoning-only turn is the empty-stop path's subject and never
+		// reaches here — and on a capped empty stop that handler FALLS THROUGH to
+		// this one, so re-classifying reasoning here would schedule a second
+		// recovery behind an exhausted budget. Tool-call turns are excluded
+		// upstream too, forced tools included.
+		const text = assistantMessage.content
 			.filter((content): content is TextContent => content.type === "text")
 			.map(content => content.text)
 			.join("\n");
-		const hasTextContent = hasNonWhitespace(text);
 
-		// A thinking-only terminal turn has no visible assistant message, so both
-		// mechanical and smart modes retry it directly. Tool-call turns never reach
-		// this path: isUnexpectedStopCandidate excludes them, including forced tools.
-		if (!hasTextContent) {
-			text = assistantMessage.content
-				.filter((content): content is ThinkingContent => content.type === "thinking")
-				.map(content => content.thinking)
-				.join("\n");
-			if (!hasNonWhitespace(text)) {
-				this.#unexpectedStopRetryCount = 0;
-				return false;
-			}
-		} else if (mode === "mechanical") {
+		if (mode === "mechanical") {
 			this.#unexpectedStopRetryCount = 0;
 			return false;
 		} else {
@@ -1033,6 +1011,44 @@ export class TurnRecovery {
 	async #dropPersistedAssistantTurn(assistantMessage: AssistantMessage): Promise<string | undefined> {
 		await this.#host.waitForSessionMessagePersistence(assistantMessage);
 		return this.discardAssistantTurn(assistantMessage);
+	}
+
+	/** Correlates each discarded empty stop with the attempt that dropped it.
+	 *
+	 *  Called immediately before `#dropAssistantTurnDurably`, so this is what
+	 *  survives the removal. Counts and lengths only — never text, signature
+	 *  values, or credentials — because it lands in ordinary logs. Swallows its
+	 *  own failures: diagnostic recording must never become a recovery failure. */
+	#recordEmptyStopAttempt(
+		assistantMessage: AssistantMessage,
+		evidence: Record<string, unknown>,
+		fields: {
+			dropSeq: number;
+			maxRetries: number;
+			decision: "retry-scheduled" | "cap-reached";
+			finalError?: string;
+		},
+	): void {
+		try {
+			const base = {
+				...fields,
+				sessionId: this.#host.sessionId(),
+				promptGeneration: this.#host.promptGeneration(),
+				model: assistantMessage.model,
+				provider: assistantMessage.provider,
+				api: assistantMessage.api,
+				...evidence,
+			};
+			if (fields.decision === "cap-reached") {
+				// Final error text belongs on the log so it survives alongside
+				// the per-attempt sequence, not only on the assistant message.
+				logger.warn(fields.finalError ?? "empty-stop attempt discarded", base);
+			} else {
+				logger.debug("empty-stop attempt discarded", base);
+			}
+		} catch {
+			// Diagnostic only.
+		}
 	}
 
 	/**
@@ -2841,4 +2857,133 @@ export class TurnRecovery {
 		}
 		this.#host.agent.replaceMessages(messages.slice(0, replayStart));
 	}
+}
+
+/**
+ * What a capped empty stop actually observed, and the error that reports it.
+ *
+ * The message describes recorded block shape and usage, never a guessed cause:
+ * a "provider content filter" needs provider evidence we do not hold, and an
+ * absent `usage.reasoningTokens` is an unknown split rather than a zero one.
+ */
+export function emptyStopDiagnostic(
+	assistantMessage: AssistantMessage,
+	providerEmptyOutput: boolean,
+): { finalError: string; recoveryBranch: string; evidence: Record<string, unknown> } {
+	const outputTokens = assistantMessage.usage.output;
+	// Absent is UNKNOWN, not zero: without a provider reasoning split the billed
+	// output cannot be attributed to visible versus hidden tokens.
+	const reasoningTokens = assistantMessage.usage.reasoningTokens ?? null;
+	const blockKinds: string[] = [];
+	const blockLengths: number[] = [];
+	let thinkingBlocks = 0;
+	let signedThinkingBlocks = 0;
+	let redactedThinkingBlocks = 0;
+	let reasoningChars = 0;
+	let redactedChars = 0;
+	let deliveredBlocks = 0;
+	let hasDeliverable = false;
+	for (const block of assistantMessage.content) {
+		blockKinds.push(block.type);
+		switch (block.type) {
+			case "text":
+				// Real length even for empty/whitespace-only text: the record must
+				// show what arrived, not only what counted.
+				blockLengths.push(block.text.length);
+				break;
+			case "toolCall":
+				blockLengths.push(JSON.stringify(block.arguments ?? null).length);
+				break;
+			case "image":
+				blockLengths.push(0);
+				break;
+			case "thinking":
+				blockLengths.push(block.thinking.length);
+				thinkingBlocks++;
+				if ((block.thinkingSignature ?? "").trim().length > 0) signedThinkingBlocks++;
+				reasoningChars += block.thinking.trim().length;
+				break;
+			case "redactedThinking":
+				// Opaque provider reasoning. Counted separately from `thinking`
+				// because it is a different shape (ciphertext, no signature) and is
+				// no more deliverable than visible reasoning is.
+				blockLengths.push(block.data.length);
+				redactedThinkingBlocks++;
+				redactedChars += block.data.trim().length;
+				break;
+			default:
+				// A recorder must survive an unknown block type rather than throw.
+				blockLengths.push(0);
+				break;
+		}
+		// Delivery is judged per block and only here, so an empty or
+		// whitespace-only text block cannot claim to have delivered an answer.
+		if (isDeliveredContent(block)) {
+			hasDeliverable = true;
+			deliveredBlocks++;
+		}
+	}
+	const billed = `${outputTokens} output token${outputTokens === 1 ? "" : "s"} billed`;
+	const split =
+		reasoningTokens === null ? "the reasoning/output split is unknown" : `${reasoningTokens} of them reasoning`;
+	const reasoningBlocks = thinkingBlocks + redactedThinkingBlocks;
+	const unsignedThinkingBlocks = thinkingBlocks - signedThinkingBlocks;
+	let finalError: string;
+	let recoveryBranch: string;
+	if (providerEmptyOutput) {
+		recoveryBranch = "provider-empty-output";
+		finalError = "Assistant returned no final output after retry cap; try switching models";
+	} else if (!hasDeliverable && reasoningBlocks > 0) {
+		recoveryBranch = "reasoning-only-stop";
+		finalError =
+			`Assistant returned a reasoning-only stop after retry cap: ${thinkingBlocks} thinking block${thinkingBlocks === 1 ? "" : "s"} ` +
+			`(${reasoningChars} chars, ${signedThinkingBlocks} signed / ${unsignedThinkingBlocks} unsigned)` +
+			(redactedThinkingBlocks > 0
+				? ` and ${redactedThinkingBlocks} redacted thinking block${redactedThinkingBlocks === 1 ? "" : "s"} (${redactedChars} chars)`
+				: "") +
+			`, and no text, tool call, or image. ${billed}, ${split}; try switching models`;
+	} else if (blockKinds.length === 0) {
+		recoveryBranch = "zero-block-stop";
+		// The drop hypothesis needs billed non-reasoning output: nothing billed,
+		// or output attributed entirely to reasoning, cannot have been generated
+		// and dropped. Otherwise, describe the stop without asserting a cause.
+		const billedNonReasoning = (outputTokens ?? 0) - (reasoningTokens ?? 0);
+		const dropHypothesis =
+			billedNonReasoning > 0
+				? "content may have been generated and dropped before delivery"
+				: "no cause can be inferred from the recorded usage";
+		finalError = `Assistant returned an empty stop after retry cap with no content blocks at all and ${billed}, ${split}; ${dropHypothesis}; try switching models`;
+	} else if (assistantMessage.stopReason === "toolUse" && deliveredBlocks > 0) {
+		// An image (or other non-anchoring block) survives finalization but the
+		// model emitted no tool_call or text — an orphaned toolUse that would
+		// corrupt Anthropic history. Name the real cause and let the user act.
+		recoveryBranch = "orphaned-tooluse-stop";
+		finalError =
+			`Assistant returned a toolUse stop with no tool call and ${deliveredBlocks} non-anchoring block${deliveredBlocks === 1 ? "" : "s"} ` +
+			`[${blockKinds.join(", ")}] (${billed}, ${split}); try switching models`;
+	} else {
+		recoveryBranch = "non-actionable-mixed";
+		finalError =
+			`Assistant returned empty stop after retry cap with ${deliveredBlocks} delivered block${deliveredBlocks === 1 ? "" : "s"} ` +
+			`and non-actionable blocks [${blockKinds.join(", ")}] (${billed}, ${split}); no deliverable output survived; try switching models`;
+	}
+	return {
+		finalError,
+		recoveryBranch,
+		evidence: {
+			stopReason: assistantMessage.stopReason ?? null,
+			blockKinds,
+			blockLengths,
+			deliveredBlocks,
+			signedThinkingBlocks,
+			unsignedThinkingBlocks,
+			redactedThinkingBlocks,
+			reasoningChars,
+			redactedChars,
+			outputTokens,
+			reasoningTokens,
+			usage: assistantMessage.usage,
+			recoveryBranch,
+		},
+	};
 }
