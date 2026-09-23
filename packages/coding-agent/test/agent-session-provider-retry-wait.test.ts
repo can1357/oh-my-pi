@@ -215,8 +215,6 @@ describe("createAgentSession provider retry wait visibility", () => {
 	it("keeps an auto-learn capture retry wait out of an active main turn", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
-		const previousKey = process.env.ANTHROPIC_API_KEY;
-		process.env.ANTHROPIC_API_KEY = "sk-ant-test";
 		let signalCaptureFetch!: () => void;
 		const captureFetchStarted = new Promise<void>(resolve => (signalCaptureFetch = resolve));
 		let releaseCaptureFetch!: () => void;
@@ -236,8 +234,9 @@ describe("createAgentSession provider retry wait visibility", () => {
 		});
 		mockSchedulerWaitWithClock();
 
+		let regressionSession: AgentSession | undefined;
 		try {
-			const { session } = await createAgentSession({
+			const result = await createAgentSession({
 				cwd: registryDir,
 				agentDir: registryDir,
 				modelRegistry,
@@ -258,6 +257,9 @@ describe("createAgentSession provider retry wait visibility", () => {
 				enableLsp: false,
 				skipPythonPreflight: true,
 			});
+			const session = result.session;
+			regressionSession = session;
+			session.agent.getApiKey = () => "sk-ant-test";
 			sessions.push(session);
 
 			let mainCalls = 0;
@@ -317,8 +319,7 @@ describe("createAgentSession provider retry wait visibility", () => {
 			}
 		} finally {
 			releaseCaptureFetch();
-			if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY;
-			else process.env.ANTHROPIC_API_KEY = previousKey;
+			await regressionSession?.dispose();
 		}
 	});
 });
