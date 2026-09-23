@@ -233,11 +233,6 @@ jobs:
       runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
       steps:
          - uses: actions/checkout@v4
-         - uses: ./.github/actions/bun-install
-         - name: Install bazelisk on PR runners
-           if: github.event_name == 'pull_request'
-           run: npm install --global @bazel/bazelisk@1.28.1
-
          - id: cache
            uses: ./.github/actions/bazel-cache
            with:
