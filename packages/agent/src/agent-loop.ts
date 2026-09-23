@@ -272,6 +272,8 @@ interface SteeringWatch {
 	 * the baseline it will be compared against.
 	 */
 	readonly ready: Promise<void>;
+	/** Runs an authoritative queue peek at the caller's final pre-dispatch boundary. */
+	refresh: () => Promise<void>;
 	/** Stops watching. Idempotent; MUST be called or the timer/wait leaks. */
 	stop: () => void;
 }
@@ -401,6 +403,7 @@ function watchSteeringQueue(
 	return {
 		fired,
 		ready,
+		refresh: check,
 		stop: () => {
 			settleReady();
 			clearInterval(timer);
@@ -2323,6 +2326,15 @@ async function streamAssistantResponse(
 
 	try {
 		return await runInActiveSpan(chatSpan, async () => {
+			// A poll-only host may have queued steering after the baseline while
+			// credential resolution was in flight but before its 250ms timer tick.
+			// Refresh synchronously at the last await before dispatch so that arrival
+			// cannot become the replacement request's baseline.
+			await steerWatch?.refresh();
+			if (steerDetected && !requestSignal?.aborted) {
+				abortForSteer();
+				throw new SteerInterruption(resolvedCredential);
+			}
 			let response: AssistantMessageEventStream;
 			try {
 				const pendingResponse = Promise.resolve(

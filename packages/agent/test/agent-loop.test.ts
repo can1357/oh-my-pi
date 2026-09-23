@@ -4062,6 +4062,9 @@ describe("agentLoop steering during the provider wait", () => {
 				};
 			},
 			...queue.config,
+			// Exercise the timer fallback: the credential resolves well before its
+			// first 250ms tick, so only the final authoritative peek sees the steer.
+			waitForSteeringMessages: undefined,
 		};
 
 		const run = (async (): Promise<AgentEvent[]> => {
