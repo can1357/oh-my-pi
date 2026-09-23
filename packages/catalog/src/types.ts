@@ -1163,6 +1163,16 @@ export type ModelTokenizer =
 	| "kimi-k2"
 	| "glm5";
 
+/** One account's discovered entitlements on a model; see {@link Model.accountAccess}. */
+export interface ModelAccountAccess {
+	/**
+	 * Codex `available_access_programs.cyber`: cyber access programs this account
+	 * may request on the model (`standard`, `daybreak_blue`, `daybreak_red`).
+	 * Absent when the backend reported no program metadata.
+	 */
+	cyberPrograms?: readonly string[];
+}
+
 // Model interface for the unified model system
 export interface Model<TApi extends Api = Api> {
 	id: string;
@@ -1257,6 +1267,15 @@ export interface Model<TApi extends Api = Api> {
 	 * their single wire id) and on bundled snapshots that predate discovery.
 	 */
 	cursorMaxModeRoutes?: Readonly<Record<string, boolean>>;
+	/**
+	 * Per-account availability recorded by multi-account discovery: provider
+	 * account id (Codex: ChatGPT `chatgpt_account_id`) → that account's
+	 * entitlements on this model. An account appears only when its own catalog
+	 * lists the model, so credential selection can route account-gated models
+	 * (e.g. `gpt-daybreak-blue-latest`) straight to eligible accounts. Absent on
+	 * bundled/config rows and on single-account discovery.
+	 */
+	accountAccess?: Readonly<Record<string, ModelAccountAccess>>;
 	cost: ModelCost;
 	/** Premium Copilot requests charged per user-initiated request (defaults to 1). */
 	premiumMultiplier?: number;

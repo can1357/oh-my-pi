@@ -2775,6 +2775,7 @@ export class ModelRegistry {
 		return this.authStorage.keys.get(model.provider, sessionId, {
 			baseUrl: model.baseUrl,
 			modelId: model.id,
+			accountIds: model.accountAccess && Object.keys(model.accountAccess),
 			signal: options?.signal,
 		});
 	}
@@ -2809,9 +2810,11 @@ export class ModelRegistry {
 		if (this.#keylessProviders.has(provider) && this.authStorage.keys.source(provider) === undefined) {
 			return kNoAuth;
 		}
+		const accountAccess = options?.modelId ? this.find(provider, options.modelId)?.accountAccess : undefined;
 		return this.authStorage.keys.get(provider, sessionId, {
 			baseUrl: options?.baseUrl,
 			modelId: options?.modelId,
+			accountIds: accountAccess && Object.keys(accountAccess),
 			forceRefresh: options?.forceRefresh,
 			signal: options?.signal,
 		});

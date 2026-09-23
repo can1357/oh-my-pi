@@ -63,8 +63,9 @@ import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-uti
 import {
 	getChangelogPath,
 	parseChangelog,
-	RECENT_CHANGELOG_ENTRY_LIMIT,
+	parseChangelogView,
 	renderChangelogEntries,
+	selectChangelogEntries,
 } from "../../utils/changelog";
 import { copyToClipboard } from "../../utils/clipboard";
 import { openPath } from "../../utils/open";
@@ -155,7 +156,9 @@ export class CommandController {
 				return;
 			}
 
-			const filePath = await this.ctx.session.exportToHtml(outputPath, useUserThemes);
+			// The viewed session: the focused subagent's transcript (plus its own
+			// subagents) from a focused view, otherwise the main session.
+			const filePath = await this.ctx.viewSession.exportToHtml(outputPath, useUserThemes);
 			this.ctx.showStatus(`Session exported to: ${filePath}`);
 			this.openInBrowser(filePath);
 		} catch (error: unknown) {
@@ -613,16 +616,31 @@ export class CommandController {
 		this.ctx.showUsageDashboard(usageReports);
 	}
 
-	async handleChangelogCommand(showFull = false): Promise<void> {
+	async handleChangelogCommand(args = ""): Promise<void> {
+		const view = parseChangelogView(args);
+		if ("error" in view) {
+			this.ctx.showWarning(view.error);
+			return;
+		}
 		const changelogPath = getChangelogPath();
 		const allEntries = await parseChangelog(changelogPath);
-		const entriesToShow = showFull ? allEntries : allEntries.slice(0, RECENT_CHANGELOG_ENTRY_LIMIT);
+		const entriesToShow = selectChangelogEntries(allEntries, view);
 		const changelogMarkdown =
 			entriesToShow.length > 0 ? renderChangelogEntries(entriesToShow).markdown : "No changelog entries found.";
-		const title = showFull ? "Full Changelog" : "Recent Changes";
-		const hint = showFull
-			? ""
-			: `\n\n${theme.fg("dim", "Use")} ${theme.bold("/changelog full")} ${theme.fg("dim", "to view the complete changelog.")}`;
+		const shown = entriesToShow.length;
+		const titleCount = shown > 0 ? shown : view.kind === "last" ? view.count : shown;
+		const title =
+			view.kind === "full"
+				? "Full Changelog"
+				: view.kind === "last"
+					? titleCount === 1
+						? "Last Release"
+						: `Last ${titleCount} Releases`
+					: "Recent Changes";
+		const hint =
+			view.kind === "full"
+				? ""
+				: `\n\n${theme.fg("dim", "Use")} ${theme.bold("/changelog full")} ${theme.fg("dim", "to view the complete changelog.")}`;
 
 		const block = new TranscriptBlock();
 		block.addChild(new DynamicBorder());
@@ -1870,6 +1888,7 @@ function formatAccountHeaderRow(
 			label: active ? `● ${label}` : label,
 			suffix: reset ? `(${reset})` : "",
 			active,
+			daybreak: report?.metadata?.daybreak === true,
 		};
 	});
 	const maxSuffixWidth = parts.reduce((max, p) => Math.max(max, visibleWidth(p.suffix)), 0);
@@ -1879,19 +1898,21 @@ function formatAccountHeaderRow(
 	// If suffix can't share the cell with at least `x…`, fall back to whole-label truncation.
 	if (prefixBudget < 2) {
 		return parts.map(p => {
-			const full = p.suffix ? `${p.label} ${p.suffix}` : p.label;
+			const full = `${p.label}${p.daybreak ? " daybreak" : ""}${p.suffix ? ` ${p.suffix}` : ""}`;
 			const cell = padColumn(truncateJobLabel(full, columnWidth), columnWidth);
 			return p.active ? uiTheme.fg("accent", cell) : cell;
 		});
 	}
 
 	return parts.map(p => {
-		const prefix = truncateJobLabel(p.label, prefixBudget);
+		// Keep the full badge visible by taking its columns from the account label.
+		const badge = p.daybreak && prefixBudget >= 10 ? " daybreak" : "";
+		const label = truncateJobLabel(p.label, prefixBudget - visibleWidth(badge));
+		const prefix = `${p.active ? uiTheme.fg("accent", label) : label}${badge ? uiTheme.fg("success", badge) : ""}`;
 		const prefixCell = prefix + " ".repeat(prefixBudget - visibleWidth(prefix));
-		const styledPrefix = p.active ? uiTheme.fg("accent", prefixCell) : prefixCell;
-		if (!p.suffix) return styledPrefix + " ".repeat(maxSuffixWidth + gap);
+		if (!p.suffix) return prefixCell + " ".repeat(maxSuffixWidth + gap);
 		const suffixPad = " ".repeat(maxSuffixWidth - visibleWidth(p.suffix));
-		return `${styledPrefix} ${suffixPad}${uiTheme.fg("dim", p.suffix)}`;
+		return `${prefixCell} ${suffixPad}${uiTheme.fg("dim", p.suffix)}`;
 	});
 }
 
@@ -2239,8 +2260,9 @@ export function renderUsageReports(
 			const label = formatUnlimitedReportLabel(report, 0);
 			const tier = report.metadata?.planType;
 			const tierSuffix = typeof tier === "string" && tier ? ` ${uiTheme.fg("dim", `(${tier})`)}` : "";
+			const daybreakSuffix = report.metadata?.daybreak === true ? uiTheme.fg("success", " daybreak") : "";
 			lines.push(
-				`${uiTheme.fg("success", uiTheme.status.success)} ${label}${tierSuffix} ${uiTheme.fg("dim", "-- no limits")}`,
+				`${uiTheme.fg("success", uiTheme.status.success)} ${label}${daybreakSuffix}${tierSuffix} ${uiTheme.fg("dim", "-- no limits")}`,
 			);
 		}
 		// No per-provider footer; global header shows last check.

@@ -1454,11 +1454,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		}));
 
 		// Convert custom commands (TypeScript) to SlashCommand format
-		const customCommands: SlashCommand[] = this.session.customCommands.map(loaded => ({
-			name: loaded.command.name,
-			description: `${loaded.command.description} (${loaded.source})`,
-			icon: getSlashCommandTypeIcon(loaded.path.startsWith("mcp:") ? "mcp" : "prompt"),
-		}));
+		const customCommands: SlashCommand[] = this.session.customCommands.map(loaded => {
+			const complete = loaded.command.getArgumentCompletions?.bind(loaded.command);
+			return {
+				name: loaded.command.name,
+				description: `${loaded.command.description} (${loaded.source})`,
+				icon: getSlashCommandTypeIcon(loaded.path.startsWith("mcp:") ? "mcp" : "prompt"),
+				getArgumentCompletions: complete && (prefix => complete(prefix, this.sessionManager.getCwd())),
+			};
+		});
 
 		const skillCommandList = this.#rebuildSkillCommandsFromSession();
 
@@ -6567,8 +6571,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#commandController.handleUsageCommand(reports);
 	}
 
-	async handleChangelogCommand(showFull = false): Promise<void> {
-		await this.#commandController.handleChangelogCommand(showFull);
+	async handleChangelogCommand(args = ""): Promise<void> {
+		await this.#commandController.handleChangelogCommand(args);
 	}
 
 	handleHotkeysCommand(): void {
