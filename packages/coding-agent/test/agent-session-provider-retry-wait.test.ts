@@ -19,7 +19,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AuthStorage } from "@oh-my-pi/pi-ai";
-import type { Api, Context, FetchImpl, Model } from "@oh-my-pi/pi-ai";
+import type { Api, AssistantMessage, Context, FetchImpl, Model } from "@oh-my-pi/pi-ai";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -209,5 +210,115 @@ describe("createAgentSession provider retry wait visibility", () => {
 		expect(stopReason).toBe("stop");
 		expect(fetchCalls).toBe(2);
 		expectSingleReportedWait(seen, model);
+	});
+
+	it("keeps an auto-learn capture retry wait out of an active main turn", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		const previousKey = process.env.ANTHROPIC_API_KEY;
+		process.env.ANTHROPIC_API_KEY = "sk-ant-test";
+		let signalCaptureFetch!: () => void;
+		const captureFetchStarted = new Promise<void>(resolve => (signalCaptureFetch = resolve));
+		let releaseCaptureFetch!: () => void;
+		const captureFetchReleased = new Promise<void>(resolve => (releaseCaptureFetch = resolve));
+		let captureFetchCalls = 0;
+		vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+			captureFetchCalls++;
+			if (captureFetchCalls === 1) {
+				signalCaptureFetch();
+				await captureFetchReleased;
+				return new Response('{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}', {
+					status: 529,
+					headers: { "content-type": "application/json", "request-id": "req_capture_overloaded" },
+				});
+			}
+			return anthropicSseResponse("capture complete");
+		});
+		mockSchedulerWaitWithClock();
+
+		try {
+			const { session } = await createAgentSession({
+				cwd: registryDir,
+				agentDir: registryDir,
+				modelRegistry,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({
+					"autolearn.enabled": true,
+					"autolearn.autoContinue": true,
+					"autolearn.minToolCalls": 0,
+					"compaction.enabled": false,
+				}),
+				model,
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				skipPythonPreflight: true,
+			});
+			sessions.push(session);
+
+			let mainCalls = 0;
+			let releaseMain!: () => void;
+			const mainReleased = new Promise<void>(resolve => (releaseMain = resolve));
+			session.agent.streamFn = () => {
+				const call = ++mainCalls;
+				const stream = new AssistantMessageEventStream();
+				const message: AssistantMessage = {
+					role: "assistant",
+					content: [{ type: "text", text: `main ${call}` }],
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "stop",
+					timestamp: Date.now(),
+				};
+				queueMicrotask(async () => {
+					stream.push({ type: "start", partial: message });
+					if (call === 2) await mainReleased;
+					stream.push({ type: "done", reason: "stop", message });
+				});
+				return stream;
+			};
+
+			const starts: Extract<AgentSessionEvent, { type: "provider_retry_wait_start" }>[] = [];
+			let signalWait!: () => void;
+			const waitObserved = new Promise<void>(resolve => (signalWait = resolve));
+			session.subscribe(event => {
+				if (event.type !== "provider_retry_wait_start") return;
+				starts.push(event);
+				signalWait();
+			});
+
+			await session.prompt("finish the first turn");
+			await captureFetchStarted;
+			const activeMain = session.prompt("keep the next real turn active");
+			while (!session.agent.state.isStreaming) await Promise.resolve();
+			releaseCaptureFetch();
+			try {
+				await waitObserved;
+
+				expect(session.agent.state.isStreaming).toBe(true);
+				expect(starts).toHaveLength(1);
+				expect(starts[0]).toMatchObject({ type: "provider_retry_wait_start", role: "side", waitId: 1 });
+			} finally {
+				releaseMain();
+				await activeMain;
+			}
+		} finally {
+			releaseCaptureFetch();
+			if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+			else process.env.ANTHROPIC_API_KEY = previousKey;
+		}
 	});
 });

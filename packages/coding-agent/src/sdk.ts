@@ -4399,7 +4399,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					kimiApiFormat,
 					preferWebsockets: preferOpenAICodexWebsockets,
 					getToolContext: toolCall => toolContextStore.getContext(toolCall),
-					streamFn: mainStreamFn,
+					streamFn: sideStreamFn,
 					transformToolCallArguments,
 					// No fallback resolver. The capture agent advertises only
 					// `learn`/`manage_skill`, both of which stay top-level and never
