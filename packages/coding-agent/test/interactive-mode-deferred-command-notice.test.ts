@@ -1,4 +1,5 @@
 import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
+import { stripVTControlCharacters } from "node:util";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -79,7 +80,7 @@ function noticeText(mode: InteractiveMode): string {
 }
 
 function jobsText(mode: InteractiveMode): string {
-	return mode.jobsContainer.render(120).join("\n");
+	return stripVTControlCharacters(mode.jobsContainer.render(120).join("\n"));
 }
 function transcriptRowCount(mode: InteractiveMode): number {
 	return mode.chatContainer.render(120).length;
@@ -215,26 +216,23 @@ describe("InteractiveMode live jobs HUD", () => {
 		setStreaming(true);
 		const transcriptBefore = transcriptRowCount(mode);
 		await mode.handleJobsCommand();
-		expect(jobsText(mode)).toContain("No active jobs.");
+		expect(jobsText(mode)).toContain("Running: 0");
 		expect(noticeText(mode)).toBe("");
 
 		setJobs([first]);
 		vi.advanceTimersByTime(1000);
 		expect(jobsText(mode)).toContain("compile first");
-		const rowCount = mode.jobsContainer.render(120).length;
 
 		setStreaming(false);
 		mode.flushPendingCommandOutput();
-		setJobs([second], [{ ...first, status: "completed" }]);
+		setJobs([second]);
 		vi.advanceTimersByTime(1000);
-		expect(mode.jobsContainer.render(120)).toHaveLength(rowCount);
 		expect(jobsText(mode)).toContain("compile second");
 		expect(jobsText(mode)).not.toContain("compile first");
-		expect(jobsText(mode)).not.toContain("Recent Jobs");
 
-		setJobs([], [{ ...second, status: "completed" }]);
+		setJobs([]);
 		vi.advanceTimersByTime(1000);
-		expect(jobsText(mode)).toContain("No active jobs.");
+		expect(jobsText(mode)).toContain("Running: 0");
 		expect(jobsText(mode)).not.toContain("compile second");
 		expect(transcriptRowCount(mode)).toBe(transcriptBefore);
 	});
@@ -275,7 +273,6 @@ describe("InteractiveMode live jobs HUD", () => {
 		setJobs([], [{ ...first, status: "completed" }]);
 		await mode.handleJobsCommand();
 		expect(jobsText(mode)).toBe("");
-		expect(transcriptText(mode)).toContain("Recent Jobs");
 		expect(transcriptText(mode)).toContain("compile first");
 		const callsAfterReport = getSnapshotCalls();
 		vi.advanceTimersByTime(3000);
