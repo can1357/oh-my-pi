@@ -1950,6 +1950,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				return;
 			}
 			if (event.type === "provider_retry_wait_start") {
+				if (event.role !== "main") return;
 				progress.providerRetryState = {
 					waitId: event.waitId,
 					delayMs: event.delayMs,

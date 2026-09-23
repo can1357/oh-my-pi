@@ -21,11 +21,11 @@ import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { createSessionDefaults } from "../helpers/session-defaults";
 
-function waitStart(waitId: number): AgentSessionEvent {
+function waitStart(waitId: number, role: "main" | "advisor" | "side" = "main"): AgentSessionEvent {
 	return {
 		type: "provider_retry_wait_start",
 		waitId,
-		role: "main",
+		role,
 		delayMs: 8000,
 		model: "claude-sonnet-4-5",
 		provider: "anthropic",
@@ -204,5 +204,43 @@ describe("executor provider retry wait progress", () => {
 		expect(definedWaitIds(states)).toEqual([1, 2]);
 		expect(midState).toMatchObject({ waitId: 2, model: "claude-sonnet-4-5" });
 		expect(states.at(-1)).toBeUndefined();
+	});
+
+	it("keeps the main wait visible while advisor and side waits come and go", async () => {
+		let afterBackgroundWaits: AgentProgress["providerRetryState"];
+		const { states, exitCode } = await runScripted((emit, seen) => {
+			emit(waitStart(1));
+			emit(waitStart(2, "advisor"));
+			emit(waitEnd(2));
+			emit(waitStart(3, "side"));
+			emit(waitEnd(3));
+			emit({ type: "tool_execution_start", toolCallId: "probe", toolName: "read", args: {} } as AgentSessionEvent);
+			emit({
+				type: "tool_execution_end",
+				toolCallId: "probe",
+				toolName: "read",
+				result: { content: [{ type: "text", text: "ok" }] },
+				isError: false,
+			} as AgentSessionEvent);
+			afterBackgroundWaits = seen.at(-1);
+			emit(waitEnd(1));
+		});
+
+		expect(exitCode).toBe(0);
+		expect(definedWaitIds(states)).toEqual([1]);
+		expect(afterBackgroundWaits).toMatchObject({ waitId: 1, model: "claude-sonnet-4-5" });
+		expect(states.at(-1)).toBeUndefined();
+	});
+
+	it("does not surface background-only provider waits as main retry progress", async () => {
+		const { states, exitCode } = await runScripted(emit => {
+			emit(waitStart(2, "advisor"));
+			emit(waitEnd(2));
+			emit(waitStart(3, "side"));
+			emit(waitEnd(3));
+		});
+
+		expect(exitCode).toBe(0);
+		expect(definedWaitIds(states)).toEqual([]);
 	});
 });
