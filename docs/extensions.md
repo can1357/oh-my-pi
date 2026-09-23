@@ -382,6 +382,46 @@ The runtime handles the JSON-RPC transport and its own list/update refresh first
 - `user_bash` (override with `{ result }`)
 - `user_python` (override with `{ result }`)
 
+### Plan review
+
+- `plan_review` — fired when plan mode is about to ask for approval of a finished plan, **before** the built-in approval surface opens. Lets an external reviewer (web UI, a second human, an internal tool) own the decision.
+
+```ts
+pi.on("plan_review", async (event) => {
+  // event: { planFilePath, resolvedPlanPath, title, planContent, signal }
+  const { signal, resolvedPlanPath } = event;
+  const verdict = await myReviewer.review(resolvedPlanPath, { signal });
+  // context?: "fresh" | "compact" | "keep"
+  if (verdict.kind === "approved") return { action: "approve" };
+  if (verdict.kind === "annotated") {
+    return { action: "refine", feedback: verdict.notes };
+  }
+  return { action: "dismiss" };
+});
+```
+
+Contract:
+
+- `planFilePath` is the path as plan-mode state holds it (`local://…` or cwd-relative); `resolvedPlanPath` is the absolute on-disk path — the only reference another process can open. `planContent` is the revision the host is handing over.
+- Returning `undefined` (or `null`) means "no decision": the host opens its own approval surface with unchanged behavior, and the next subscribed extension is consulted.
+- `approve` executes the plan. `context` applies in interactive mode only and defaults to `"fresh"` (equivalent to the picker's "Approve and execute"); `"compact"` distills the plan-mode transcript first, `"keep"` preserves context and is refused — with a warning and a fall back to the picker — when the context is too full, exactly as the picker disables that option.
+- `refine` requires a non-empty `feedback`, which is delivered as a user turn; plan mode stays active.
+- `dismiss` leaves plan mode active and stops the current turn.
+- An invalid result (unknown `action`, `refine` without feedback, bad `context`) is reported once through the extension-error channel and treated as no decision.
+
+**First-wins, not a policy gate.** The first handler returning anything other than `undefined` decides; later handlers do not run. Do not use `plan_review` for a mandatory veto — another extension can answer first. A veto that must always apply belongs on `tool_call` for `xd://propose`, which fires earlier, is seen by every subscriber, and composes with this event.
+
+**No timeout.** `plan_review` handlers are exempt from the 30s extension-handler budget (`extensionHandlers.toolCallTimeoutMs` and friends) because a human review has no deadline. Cancellation is signal-based: `event.signal` aborts when the operator cancels the wait (Esc/Ctrl+C on the waiting overlay), a newer proposal supersedes this one, the session switches, plan mode exits, or the host shuts down. Tear down your own review surface — dialogs, spawned processes — from that signal; a handler that ignores it simply has its (late) answer discarded.
+
+Mode coverage:
+
+- **Interactive** — full support. While a review is pending, a modal overlay holds focus so no turn can race the answer; Esc/Ctrl+C there returns the decision to the built-in picker, re-reading the plan file so the picker shows whatever revision the reviewer left behind. An extension approval writes a visible `plan-review-approved` record into the executing session, so the transcript shows that no human in the TUI approved.
+- **ACP** — supported. `ctx.mode` is `"rpc"` for ACP handlers, and no other RPC surface emits this event, so `"rpc"` here means ACP. The extension decision replaces the client elicitation entirely. Differences from interactive: `context` is ignored; `refine` feedback can only be returned as tool-result text (the decision is made inside the `xd://propose` tool call, so there is no user-turn channel); `dismiss` returns a stop-and-wait result and aborts the turn.
+- **Not emitted** in print mode, RPC mode, or plan-yolo (an intentional auto-approve), and SDK hosts that install their own `setPlanProposalHandler` never see it.
+- `/plan-review` does not emit the event: the operator asked for the built-in surface by name.
+
+Migration from a `tool_call` gate: an extension that intercepted `write` to `xd://propose` to hold approval should move the human wait to `plan_review` and delete the interception. Keeping both blocks the propose before the event can fire, and the old path delivers refinement to the model as a tool error instead of a user turn. Keep `tool_call` only for checks that must run on every proposal regardless of who reviews it.
+
 ### `resources_discover`
 
 `resources_discover` exists in extension types and `ExtensionRunner`.

@@ -7,6 +7,14 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import type {
+	ExtensionAPI,
+	PlanReviewEvent,
+	PlanReviewEventResult,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import {
 	ACP_BOOTSTRAP_RACE_GUARD_MS,
@@ -112,6 +120,9 @@ function makeAssistantMessage(text: string, thinking?: string) {
 	};
 }
 
+/** Mirrors `PlanProposalHandler`: title, the dispatching tool's signal, its call id. */
+type FakePlanProposalHandler = (title: string, signal?: AbortSignal, toolCallId?: string) => Promise<unknown> | unknown;
+
 class FakeAgentSession {
 	sessionManager: SessionManager;
 	sessionId: string;
@@ -119,7 +130,7 @@ class FakeAgentSession {
 	model: Model | undefined;
 	thinkingLevel: string | undefined;
 	customCommands: [] = [];
-	extensionRunner = undefined;
+	extensionRunner: ExtensionRunner | undefined = undefined;
 	isStreaming = false;
 	queuedMessageCount = 0;
 	systemPrompt = "system";
@@ -260,7 +271,10 @@ class FakeAgentSession {
 		return (await this.asyncJobDrain?.(options)) ?? false;
 	}
 
+	abortCalls = 0;
+
 	async abort(): Promise<void> {
+		this.abortCalls++;
 		this.isStreaming = false;
 	}
 
@@ -344,13 +358,13 @@ class FakeAgentSession {
 		this.planModeState = state;
 	}
 
-	planProposalHandler: ((title: string) => Promise<unknown> | unknown) | undefined;
+	planProposalHandler: FakePlanProposalHandler | undefined;
 
-	setPlanProposalHandler(handler: ((title: string) => Promise<unknown> | unknown) | null): void {
+	setPlanProposalHandler(handler: FakePlanProposalHandler | null): void {
 		this.planProposalHandler = handler ?? undefined;
 	}
 
-	peekPlanProposalHandler(): ((title: string) => Promise<unknown> | unknown) | undefined {
+	peekPlanProposalHandler(): FakePlanProposalHandler | undefined {
 		return this.planProposalHandler;
 	}
 
@@ -872,6 +886,173 @@ describe("ACP agent", () => {
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
+	});
+
+	/** Attaches a real ExtensionRunner carrying one `plan_review` handler. */
+	async function attachPlanReviewer(
+		session: FakeAgentSession,
+		handler: (
+			event: PlanReviewEvent,
+		) => Promise<PlanReviewEventResult | undefined> | PlanReviewEventResult | undefined,
+	): Promise<void> {
+		const runtime = new ExtensionRuntime();
+		const register: (pi: ExtensionAPI) => void = pi => pi.on("plan_review", handler);
+		const extension = await loadExtensionFromFactory(
+			register,
+			session.sessionManager.getCwd(),
+			new EventBus(),
+			runtime,
+			"acp-reviewer.ts",
+		);
+		session.extensionRunner = new ExtensionRunner(
+			[extension],
+			runtime,
+			session.sessionManager.getCwd(),
+			session.sessionManager,
+			// The runner only dereferences the registry when an extension asks for
+			// models; a `plan_review` handler never does.
+			undefined as never,
+		);
+	}
+
+	/** Enters ACP plan mode with a plan file on disk; returns the plan path. */
+	async function enterAcpPlanMode(harness: AgentHarness, sessionId: string): Promise<string> {
+		const session = harness.findSession(sessionId)!;
+		await harness.agent.setSessionMode({ sessionId, modeId: "plan" });
+		const localOptions = {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		};
+		cleanupRoots.push(resolveLocalUrlToPath("local://", localOptions));
+		const planPath = resolveLocalUrlToPath("local://words-counter-plan.md", localOptions);
+		await Bun.write(planPath, "# Words Counter\n\nFile contents.");
+		return planPath;
+	}
+
+	it("applies an extension plan approval without asking the ACP client", async () => {
+		let elicitations = 0;
+		const harness = await createHarness({
+			clientCapabilities: { elicitation: { form: {} } } as ClientCapabilities,
+			elicitationHandler: async () => {
+				elicitations++;
+				return { action: "cancel" };
+			},
+		});
+		Settings.instance.set("plan.enabled", true);
+		Settings.instance.set("plan.autosave", true);
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		await attachPlanReviewer(session, () => ({ action: "approve" }));
+		const planPath = await enterAcpPlanMode(harness, created.sessionId);
+		// The reviewer rewrote the plan while holding the decision; approval must
+		// carry that revision, not the one it was handed.
+		await Bun.write(planPath, "# Words Counter\n\nReviewed contents.");
+
+		const result = (await session.planProposalHandler!("words-counter")) as {
+			content: Array<{ text: string }>;
+		};
+
+		expect(elicitations).toBe(0);
+		expect(result.content[0]?.text).toMatch(/Plan approved/);
+		expect(session.planModeState).toBeUndefined();
+		expect(session.planReferencePath).toBe("local://words-counter-plan.md");
+		expect(await Bun.file(path.join(harness.cwdA, ".omp", "plans", "WORDS_COUNTER_PLAN.md")).text()).toContain(
+			"Reviewed contents.",
+		);
+
+		harness.abortController.abort();
+	});
+
+	it("returns extension refinement feedback to the agent and keeps plan mode", async () => {
+		const harness = await createHarness();
+		Settings.instance.set("plan.enabled", true);
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		await attachPlanReviewer(session, () => ({ action: "refine", feedback: "Name the rollback step." }));
+		await enterAcpPlanMode(harness, created.sessionId);
+
+		const result = (await session.planProposalHandler!("words-counter")) as { content: Array<{ text: string }> };
+
+		// ACP has no user-turn channel inside a tool call, so the feedback has to
+		// ride the tool result text.
+		expect(result.content[0]?.text).toContain("Name the rollback step.");
+		expect(session.planModeState?.enabled).toBe(true);
+		expect(session.planReferencePath).toBeUndefined();
+
+		harness.abortController.abort();
+	});
+
+	it("stops the turn when an extension dismisses the plan", async () => {
+		const harness = await createHarness();
+		Settings.instance.set("plan.enabled", true);
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		await attachPlanReviewer(session, () => ({ action: "dismiss" }));
+		await enterAcpPlanMode(harness, created.sessionId);
+
+		session.isStreaming = true;
+		const result = (await session.planProposalHandler!("words-counter", undefined, "call-1")) as {
+			content: Array<{ text: string }>;
+		};
+
+		// The dismissal text must reach the caller before anything stops the turn,
+		// or the model never learns why it was interrupted.
+		expect(result.content[0]?.text).toMatch(/dismissed/i);
+		expect(session.abortCalls).toBe(0);
+
+		// An unrelated dispatch finishing must not trigger the stop.
+		for (const listener of session.listeners()) {
+			listener({ type: "tool_execution_end", toolCallId: "other", toolName: "write" } as AgentSessionEvent);
+		}
+		expect(session.abortCalls).toBe(0);
+
+		for (const listener of session.listeners()) {
+			listener({ type: "tool_execution_end", toolCallId: "call-1", toolName: "write" } as AgentSessionEvent);
+		}
+
+		expect(session.abortCalls).toBe(1);
+		expect(session.planModeState?.enabled).toBe(true);
+
+		harness.abortController.abort();
+	});
+
+	it("refuses to approve on a cancelled turn instead of falling through to auto-approve", async () => {
+		// A client without `elicitation.form` auto-approves, so an aborted turn that
+		// reached the elicitation would silently grant write access.
+		const harness = await createHarness();
+		Settings.instance.set("plan.enabled", true);
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const turn = new AbortController();
+		await attachPlanReviewer(session, () => {
+			turn.abort();
+			return undefined;
+		});
+		await enterAcpPlanMode(harness, created.sessionId);
+
+		await expect(session.planProposalHandler!("words-counter", turn.signal)).rejects.toThrow(/cancelled/i);
+		expect(session.planModeState?.enabled).toBe(true);
+		expect(session.planReferencePath).toBeUndefined();
+
+		harness.abortController.abort();
+	});
+
+	it("ignores a decision made for a mode the client already switched away from", async () => {
+		const harness = await createHarness();
+		Settings.instance.set("plan.enabled", true);
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		await attachPlanReviewer(session, () => {
+			// The client flipped back to default while the review was pending.
+			session.setPlanModeState({ enabled: true, planFilePath: "local://PLAN.md", workflow: "parallel" });
+			return { action: "approve" };
+		});
+		await enterAcpPlanMode(harness, created.sessionId);
+
+		await expect(session.planProposalHandler!("words-counter")).rejects.toThrow(/Plan mode changed/);
+		expect(session.planReferencePath).toBeUndefined();
+
+		harness.abortController.abort();
 	});
 
 	it("pushes config_option_update when thinking level changes internally", async () => {
