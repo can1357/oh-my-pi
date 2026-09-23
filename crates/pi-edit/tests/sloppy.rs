@@ -64,7 +64,7 @@ async fn after_preserves_line_endings_and_eof_conventions() {
 async fn after_inserts_literal_blank_lines_and_control_like_text() {
 	let workspace = Workspace::new(EditMode::Sloppy);
 	workspace.write("a.txt", "anchor\n\nnext\n");
-	let insertion = "\n\t+literal <a> & \"b\"\n…\n»1\n＋kept\n*** End Patch\n\n";
+	let insertion = "\n\t+literal <a> & \"b\"\n…\n»1\n*** End Patch\n＋kept\n\n";
 	workspace
 		.apply_json(&json!({ "input": after_payload("anchor", insertion) }), &DiskWriter::default())
 		.await
@@ -77,6 +77,27 @@ async fn after_inserts_literal_blank_lines_and_control_like_text() {
 		.await
 		.expect("one blank line is an insertion");
 	assert_eq!(workspace.read("a.txt").unwrap(), "anchor\n\nnext\n");
+}
+
+#[tokio::test]
+async fn trailing_end_patch_closes_a_wrapped_insert_instead_of_being_inserted() {
+	for closer in ["*** End Patch", "*** End Patch\n```\n", "*** End Patch\n\n"] {
+		let workspace = Workspace::new(EditMode::Sloppy);
+		workspace.write("a.txt", "  case 'a':\n  case 'b':\n");
+		let input = format!(
+			"*** Begin Patch\n*** Edit File: a.txt\n*** Find\n  case 'b':\n*** Insert Before\n    \
+			 break;\n{closer}"
+		);
+		workspace
+			.apply_json(&json!({ "input": input }), &DiskWriter::default())
+			.await
+			.expect("wrapped insertion");
+		assert_eq!(
+			workspace.read("a.txt").unwrap(),
+			"  case 'a':\n    break;\n  case 'b':\n",
+			"{closer:?}"
+		);
+	}
 }
 
 #[tokio::test]
