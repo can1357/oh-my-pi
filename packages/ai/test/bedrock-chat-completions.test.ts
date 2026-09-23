@@ -1,7 +1,8 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { clearAwsCredentialCache } from "@oh-my-pi/pi-ai/providers/aws-credentials";
 import { stream, streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { AssistantMessage, Context, FetchImpl, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai/types";
@@ -17,6 +18,8 @@ const cleanAwsEnv = {
 	AWS_SECRET_ACCESS_KEY: undefined,
 	AWS_SESSION_TOKEN: undefined,
 	AWS_PROFILE: undefined,
+	AWS_DEFAULT_PROFILE: undefined,
+	AWS_SDK_LOAD_CONFIG: undefined,
 	AWS_REGION: undefined,
 	AWS_DEFAULT_REGION: undefined,
 	AWS_CONFIG_FILE: "/missing/bedrock-chat-config",
@@ -26,6 +29,8 @@ const cleanAwsEnv = {
 	AWS_CONTAINER_CREDENTIALS_RELATIVE_URI: undefined,
 	AWS_CONTAINER_CREDENTIALS_FULL_URI: undefined,
 	AWS_EC2_METADATA_DISABLED: "true",
+	AWS_CONTAINER_AUTHORIZATION_TOKEN: undefined,
+	AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE: undefined,
 	AWS_BEDROCK_SKIP_AUTH: undefined,
 };
 const iamEnv = {
@@ -219,7 +224,7 @@ describe("Bedrock Chat Completions authentication", () => {
 				fetch: capturingFetch(requests),
 			}).result();
 			expect(result.stopReason).toBe("error");
-			expect(result.errorMessage).toContain("credential");
+			expect(AIError.is(result.errorId ?? 0, AIError.Flag.AuthFailed)).toBe(true);
 		});
 		expect(requests).toHaveLength(0);
 	});
@@ -261,6 +266,187 @@ describe("Bedrock Chat Completions authentication", () => {
 		});
 		expect(requests[0]!.url).toBe("http://gateway.internal/v1/pi/stream");
 		expect(requests[0]!.headers.get("authorization")).toBe("Bearer gateway-token");
+	});
+});
+
+describe("Bedrock credential-service retries", () => {
+	async function withSsoProfile(
+		token: Record<string, unknown>,
+		run: (cacheFile: string) => Promise<void>,
+	): Promise<void> {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "bedrock-chat-sso-"));
+		const homedir = spyOn(os, "homedir").mockReturnValue(dir);
+		try {
+			const config = path.join(dir, "config");
+			const cacheDir = path.join(dir, ".aws", "sso", "cache");
+			await fs.mkdir(cacheDir, { recursive: true });
+			const cacheFile = path.join(cacheDir, `${new Bun.CryptoHasher("sha1").update("chat-sso").digest("hex")}.json`);
+			await Bun.write(config, "[profile chat-sso]\nsso_session = chat-sso\nsso_account_id = 111122223333\nsso_role_name = TestRole\nregion = us-east-1\n[sso-session chat-sso]\nsso_start_url = https://example.awsapps.com/start\nsso_region = us-east-1\n");
+			await Bun.write(cacheFile, JSON.stringify({
+				startUrl: "https://example.awsapps.com/start",
+				region: "us-east-1",
+				accessToken: "cached-access-token",
+				expiresAt: "2099-01-01T00:00:00Z",
+				...token,
+			}));
+			await withEnv({ ...cleanAwsEnv, AWS_CONFIG_FILE: config, AWS_PROFILE: "chat-sso" }, async () => {
+				clearAwsCredentialCache();
+				await run(cacheFile);
+			});
+		} finally {
+			clearAwsCredentialCache();
+			homedir.mockRestore();
+			await removeWithRetries(dir);
+		}
+	}
+
+	function ssoRoleResponse(): Response {
+		return Response.json({ roleCredentials: {
+			accessKeyId: "ASIASSO", secretAccessKey: "sso-secret", sessionToken: "sso-session",
+			expiration: Date.parse("2099-01-01T00:00:00Z"),
+		} });
+	}
+
+	test("recovers an STS 503 before sending the signed inference request", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "bedrock-chat-sts-"));
+		try {
+			const config = path.join(dir, "config");
+			await Bun.write(config, "[profile chat-role]\nrole_arn = arn:aws:iam::111122223333:role/TestRole\nsource_profile = base\nregion = us-east-1\n[profile base]\naws_access_key_id = AKIABASE\naws_secret_access_key = base-secret\n");
+			await withEnv({ ...cleanAwsEnv, AWS_CONFIG_FILE: config, AWS_PROFILE: "chat-role" }, async () => {
+				clearAwsCredentialCache();
+				let exchanges = 0;
+				const requests: CapturedRequest[] = [];
+				const inference = capturingFetch(requests);
+				const result = await streamSimple(chatModel(), context, { maxTokens: 64, fetch: async (input, init) => {
+					if (new URL(String(input)).hostname.startsWith("sts.")) {
+						if (++exchanges === 1) return new Response("<Error><Message>Service Unavailable</Message></Error>", { status: 503 });
+						return new Response("<Credentials><AccessKeyId>ASIAASSUMED</AccessKeyId><SecretAccessKey>assumed-secret</SecretAccessKey><SessionToken>assumed-session</SessionToken><Expiration>2099-01-01T00:00:00Z</Expiration></Credentials>");
+					}
+					return inference(input, init);
+				} }).result();
+				expect(result.stopReason).toBe("stop");
+				expect(result.content.find(block => block.type === "text")).toMatchObject({ text: "OK" });
+				expect(exchanges).toBe(2);
+				expect(requests).toHaveLength(1);
+				expect(requests[0]!.headers.get("authorization")).toContain("Credential=ASIAASSUMED/");
+			});
+		} finally {
+			clearAwsCredentialCache();
+			await removeWithRetries(dir);
+		}
+	});
+
+	test.each([429, 503])("recovers an SSO role-service %i before inference", async status => {
+		await withSsoProfile({}, async () => {
+			let exchanges = 0;
+			const requests: CapturedRequest[] = [];
+			const inference = capturingFetch(requests);
+			const result = await streamSimple(chatModel(), context, { maxTokens: 64, fetch: async (input, init) => {
+				if (new URL(String(input)).hostname.startsWith("portal.sso.")) {
+					if (++exchanges === 1) return Response.json({ message: "temporary failure" }, { status });
+					return ssoRoleResponse();
+				}
+				return inference(input, init);
+			} }).result();
+			expect(result.stopReason).toBe("stop");
+			expect(result.content.find(block => block.type === "text")).toMatchObject({ text: "OK" });
+			expect(exchanges).toBe(2);
+			expect(requests).toHaveLength(1);
+			expect(requests[0]!.headers.get("authorization")).toContain("Credential=ASIASSO/");
+		});
+	});
+
+	test("stops after one rejected SSO role exchange without inference", async () => {
+		await withSsoProfile({}, async () => {
+			const requests: string[] = [];
+			const result = await streamSimple(chatModel(), context, { maxTokens: 64, fetch: async input => {
+				requests.push(String(input));
+				return Response.json({ message: "Access denied" }, { status: 403 });
+			} }).result();
+			expect(result.stopReason).toBe("error");
+			expect(AIError.is(result.errorId ?? 0, AIError.Flag.AuthFailed)).toBe(true);
+			expect(requests).toHaveLength(1);
+			expect(new URL(requests[0]!).hostname).toBe("portal.sso.us-east-1.amazonaws.com");
+		});
+	});
+
+	test("retries a mandatory SSO refresh after 503 and persists the new token", async () => {
+		await withSsoProfile({
+			expiresAt: "2000-01-01T00:00:00Z", refreshToken: "refresh-token",
+			clientId: "client-id", clientSecret: "client-secret", registrationExpiresAt: "2099-01-01T00:00:00Z",
+		}, async cacheFile => {
+			let refreshes = 0;
+			const portalTokens: (string | null)[] = [];
+			const requests: CapturedRequest[] = [];
+			const inference = capturingFetch(requests);
+			const result = await streamSimple(chatModel(), context, { maxTokens: 64, fetch: async (input, init) => {
+				const host = new URL(String(input)).hostname;
+				if (host.startsWith("oidc.")) {
+					if (++refreshes === 1) return Response.json({ error: "temporarily_unavailable" }, { status: 503 });
+					return Response.json({ accessToken: "fresh-access-token", refreshToken: "rotated-refresh-token", expiresIn: 3600 });
+				}
+				if (host.startsWith("portal.sso.")) {
+					portalTokens.push(new Headers(init?.headers).get("x-amz-sso_bearer_token"));
+					return ssoRoleResponse();
+				}
+				return inference(input, init);
+			} }).result();
+			expect(result.stopReason).toBe("stop");
+			expect(refreshes).toBe(2);
+			expect(portalTokens).toEqual(["fresh-access-token"]);
+			expect(requests).toHaveLength(1);
+			clearAwsCredentialCache();
+			const replay = await streamSimple(chatModel(), context, { maxTokens: 64, fetch: async (input, init) => {
+				if (new URL(String(input)).hostname.startsWith("portal.sso.")) {
+					portalTokens.push(new Headers(init?.headers).get("x-amz-sso_bearer_token"));
+					return ssoRoleResponse();
+				}
+				return inference(input, init);
+			} }).result();
+			expect(replay.stopReason).toBe("stop");
+			expect(portalTokens).toEqual(["fresh-access-token", "fresh-access-token"]);
+			expect((await Bun.file(cacheFile).json()).refreshToken).toBe("rotated-refresh-token");
+		});
+	});
+
+	test("keeps a still-valid SSO token when optional refresh returns 503", async () => {
+		await withSsoProfile({
+			expiresAt: new Date(Date.now() + 30_000).toISOString(), refreshToken: "refresh-token",
+			clientId: "client-id", clientSecret: "client-secret", registrationExpiresAt: "2099-01-01T00:00:00Z",
+		}, async () => {
+			const portalTokens: (string | null)[] = [];
+			const requests: CapturedRequest[] = [];
+			const inference = capturingFetch(requests);
+			const result = await streamSimple(chatModel(), context, { maxTokens: 64, fetch: async (input, init) => {
+				const host = new URL(String(input)).hostname;
+				if (host.startsWith("oidc.")) return Response.json({ error: "temporarily_unavailable" }, { status: 503 });
+				if (host.startsWith("portal.sso.")) {
+					portalTokens.push(new Headers(init?.headers).get("x-amz-sso_bearer_token"));
+					return ssoRoleResponse();
+				}
+				return inference(input, init);
+			} }).result();
+			expect(result.stopReason).toBe("stop");
+			expect(portalTokens).toEqual(["cached-access-token"]);
+			expect(requests).toHaveLength(1);
+		});
+	});
+
+	test("does not retry a revoked SSO refresh grant", async () => {
+		await withSsoProfile({
+			expiresAt: "2000-01-01T00:00:00Z", refreshToken: "revoked-refresh-token",
+			clientId: "client-id", clientSecret: "client-secret", registrationExpiresAt: "2099-01-01T00:00:00Z",
+		}, async () => {
+			const requests: string[] = [];
+			const result = await streamSimple(chatModel(), context, { maxTokens: 64, fetch: async input => {
+				requests.push(String(input));
+				return Response.json({ error: "invalid_grant" }, { status: 400 });
+			} }).result();
+			expect(result.stopReason).toBe("error");
+			expect(AIError.is(result.errorId ?? 0, AIError.Flag.AuthFailed)).toBe(true);
+			expect(requests).toHaveLength(1);
+			expect(new URL(requests[0]!).hostname).toBe("oidc.us-east-1.amazonaws.com");
+		});
 	});
 });
 

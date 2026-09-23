@@ -15,24 +15,20 @@ describe("isUnexpectedSocketCloseMessage", () => {
 });
 
 describe("fetchWithRetry", () => {
-	it("routes requests through the `fetch` override when provided", async () => {
-		const calls: Array<{ input: string | URL | Request; init: RequestInit | undefined }> = [];
-		const customFetch = async (input: string | URL | Request, init?: RequestInit) => {
-			calls.push({ input, init });
-			return new Response("ok", { status: 200 });
-		};
-
-		const response = await fetchWithRetry("https://example.invalid/x", {
-			method: "POST",
-			body: "hi",
-			fetch: customFetch,
+	it("preserves a terminal error without retrying or wrapping it", async () => {
+		const failure = new Error("fetch failed", { cause: new Error("invalid local credentials") });
+		let attempts = 0;
+		const request = fetchWithRetry("https://example.invalid/terminal", {
+			fetch: async () => {
+				attempts++;
+				throw failure;
+			},
+			shouldRetryError: async () => false,
+			defaultDelayMs: 1,
+			maxAttempts: 3,
 		});
-
-		expect(response.status).toBe(200);
-		expect(await response.text()).toBe("ok");
-		expect(calls).toHaveLength(1);
-		expect(calls[0]?.input).toBe("https://example.invalid/x");
-		expect(calls[0]?.init).toMatchObject({ method: "POST", body: "hi" });
+		await expect(request).rejects.toBe(failure);
+		expect(attempts).toBe(1);
 	});
 
 	it("retries through the override on transient failures", async () => {
@@ -52,6 +48,20 @@ describe("fetchWithRetry", () => {
 		expect(response.status).toBe(200);
 		expect(await response.text()).toBe("done");
 		expect(attempt).toBe(2);
+	});
+
+	it("recovers from a network error without a caller retry policy", async () => {
+		let attempts = 0;
+		const response = await fetchWithRetry("https://example.invalid/network", {
+			fetch: async () => {
+				if (++attempts === 1) throw new TypeError("fetch failed");
+				return new Response("recovered");
+			},
+			defaultDelayMs: 1,
+			maxAttempts: 2,
+		});
+		expect(await response.text()).toBe("recovered");
+		expect(attempts).toBe(2);
 	});
 
 	it("lets callers stop retries for deterministic response bodies", async () => {

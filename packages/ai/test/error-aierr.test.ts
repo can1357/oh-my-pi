@@ -56,6 +56,20 @@ describe("AIError.classify — structural provider errors", () => {
 		expect(AIError.is(id, AIError.Flag.AuthFailed)).toBe(true);
 	});
 
+	it.each([408, 429, 503])("classifies AWS credential service %i as transient, not invalid credentials", status => {
+		const error = new AIError.AwsCredentialsError("opaque credential service failure", "assume-role", { status });
+		const id = AIError.classify(error);
+		expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
+		expect(AIError.is(id, AIError.Flag.AuthFailed)).toBe(false);
+		expect(AIError.retriable(id)).toBe(true);
+	});
+
+	it("keeps a rejected AWS credential exchange terminal", () => {
+		const id = AIError.classify(new AIError.AwsCredentialsError("access denied", "sso-role", { status: 403 }));
+		expect(AIError.is(id, AIError.Flag.AuthFailed)).toBe(true);
+		expect(AIError.retriable(id)).toBe(false);
+	});
+
 	it("maps the usage_limit_reached code to usageLimit on a 429", () => {
 		const id = AIError.classify(
 			new AIError.ProviderHttpError("Payment Required", 429, { code: "usage_limit_reached" }),
