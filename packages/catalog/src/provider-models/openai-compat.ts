@@ -6793,14 +6793,26 @@ const GOOGLE_VERTEX_OPENAI_BASE_URL =
 const GOOGLE_VERTEX_ANTHROPIC_BASE_URL =
 	"https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/anthropic/models/{model}:streamRawPredict";
 
+function normalizeGoogleVertexModelId(modelId: string): string {
+	// Google Cloud Vertex AI Model Garden publishes Claude Sonnet 4.6 exclusively
+	// under its bare publisher ID 'claude-sonnet-4-6'. Unlike Opus 5 and Sonnet 5,
+	// Google did not publish a 'claude-sonnet-4-6@default' endpoint alias in the EU
+	// multi-region (returning HTTP 404 NOT_FOUND).
+	if (modelId === "claude-sonnet-4-6@default") {
+		return "claude-sonnet-4-6";
+	}
+	return modelId;
+}
+
 function resolveGoogleVertexApi(modelId: string, raw: ModelsDevModel): { api: Api; baseUrl: string } {
+	const effectiveId = normalizeGoogleVertexModelId(modelId);
 	if (raw.provider?.npm === "@ai-sdk/google-vertex/anthropic") {
 		return {
 			api: "anthropic-messages",
-			baseUrl: GOOGLE_VERTEX_ANTHROPIC_BASE_URL.replace("{model}", modelId),
+			baseUrl: GOOGLE_VERTEX_ANTHROPIC_BASE_URL.replace("{model}", effectiveId),
 		};
 	}
-	if (modelId.includes("/") || raw.provider?.npm === "@ai-sdk/openai-compatible") {
+	if (effectiveId.includes("/") || raw.provider?.npm === "@ai-sdk/openai-compatible") {
 		return { api: "openai-completions", baseUrl: GOOGLE_VERTEX_OPENAI_BASE_URL };
 	}
 	return { api: "google-vertex", baseUrl: GOOGLE_VERTEX_BASE_URL };
@@ -7079,6 +7091,13 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_GOOGLE_VERTEX: readonly ModelsDevProviderD
 	simpleModelsDevDescriptor("google-vertex", "google-vertex", "google-vertex", GOOGLE_VERTEX_BASE_URL, {
 		filterModel: filterActiveToolCallModels,
 		resolveApi: resolveGoogleVertexApi,
+		transformModel: (model, rawId) => {
+			const id = normalizeGoogleVertexModelId(rawId);
+			if (id !== model.id) {
+				return { ...model, id };
+			}
+			return model;
+		},
 	}),
 ];
 

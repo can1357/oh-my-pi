@@ -45,6 +45,14 @@ const googleVertexModelsDevPayload = {
 				limit: { context: 200_000, output: 64_000 },
 				provider: { npm: "@ai-sdk/google-vertex/anthropic" },
 			},
+			"claude-sonnet-4-6@default": {
+				name: "Claude Sonnet 4.6",
+				tool_call: true,
+				reasoning: true,
+				modalities: { input: ["text", "image", "pdf"] },
+				limit: { context: 1_000_000, output: 128_000 },
+				provider: { npm: "@ai-sdk/google-vertex/anthropic" },
+			},
 			"gemini-embedding-001": {
 				name: "Gemini Embedding 001",
 				tool_call: false,
@@ -82,6 +90,7 @@ describe("google-vertex model catalog", () => {
 			"gemini-3.5-flash",
 			"deepseek-ai/deepseek-v3.2-maas",
 			"claude-sonnet-4@20250514",
+			"claude-sonnet-4-6",
 		]);
 
 		const gemini = models.find(model => model.id === "gemini-3.5-flash");
@@ -102,6 +111,13 @@ describe("google-vertex model catalog", () => {
 			"https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/anthropic/models/claude-sonnet-4@20250514:streamRawPredict",
 		);
 		expect(claude?.reasoning).toBe(true);
+
+		const sonnet46 = models.find(model => model.id === "claude-sonnet-4-6");
+		expect(sonnet46?.api).toBe("anthropic-messages");
+		expect(sonnet46?.baseUrl).toBe(
+			"https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/anthropic/models/claude-sonnet-4-6:streamRawPredict",
+		);
+		expect(sonnet46?.reasoning).toBe(true);
 	});
 
 	it("uses the bundled Vertex catalog without ADC project discovery", async () => {
@@ -119,6 +135,8 @@ describe("google-vertex model catalog", () => {
 		expect(result.models.some(model => model.id.endsWith("-maas") && model.api === "openai-completions")).toBe(true);
 		expect(result.models.some(model => model.id === "gemini-3.5-flash")).toBe(true);
 		expect(result.models.some(model => model.id === "gemini-1.5-pro")).toBe(false);
+		expect(result.models.some(model => model.id === "claude-sonnet-4-6")).toBe(true);
+		expect(result.models.some(model => model.id === "claude-sonnet-4-6@default")).toBe(false);
 	});
 
 	it("invalidates cached Gemini 3.7/3.8 Flash effort metadata on upgrade (#10543)", async () => {
@@ -190,6 +208,31 @@ describe("google-vertex model catalog", () => {
 				"offline",
 			);
 			expect(result.models.find(model => model.id === "gemini-2.5-flash-lite")?.maxTokens).toBe(65_535);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("invalidates stale cached claude-sonnet-4-6@default on upgrade", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-vertex-sonnet-cache-"));
+		try {
+			const options = googleVertexModelManagerOptions();
+			const bundledModels = getBundledModels("google-vertex");
+			const current = bundledModels.find(model => model.id === "claude-sonnet-4-6");
+			if (!current) throw new Error("google-vertex claude-sonnet-4-6 missing from bundled catalog");
+			const stale = {
+				...current,
+				id: "claude-sonnet-4-6@default",
+			};
+			const cacheDbPath = path.join(tempDir, "google-vertex.db");
+			writeModelCache("google-vertex", Date.now(), [stale], true, "pre-sonnet46-fix", cacheDbPath);
+
+			const result = await resolveProviderModels(
+				{ ...options, staticModels: bundledModels, cacheDbPath },
+				"offline",
+			);
+			expect(result.models.some(model => model.id === "claude-sonnet-4-6")).toBe(true);
+			expect(result.models.some(model => model.id === "claude-sonnet-4-6@default")).toBe(false);
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
