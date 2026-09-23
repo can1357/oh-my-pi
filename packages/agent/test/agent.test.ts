@@ -19,6 +19,8 @@ import {
 	type ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { agentLoop } from "@oh-my-pi/pi-agent-core/agent-loop";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core/types";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
@@ -2153,6 +2155,57 @@ describe("Agent", () => {
 			mode: "explicit",
 			breakpoint: "latest-stable-message",
 		});
+	});
+
+	it("preserves a caller-supplied prompt-cache policy", async () => {
+		const model = getBundledModel("openai", "gpt-5.6");
+		if (!model) throw new Error("Expected bundled GPT-5.6 model");
+		const mock = createMockModel({ responses: [{ content: ["ok"] }] });
+		const config = {
+			model,
+			convertToLlm: (messages: AgentMessage[]) =>
+				messages.filter(
+					message => message.role === "user" || message.role === "assistant" || message.role === "toolResult",
+				) as Message[],
+			promptCache: { mode: "explicit" as const, breakpoint: "none" as const },
+		};
+
+		await agentLoop(
+			[createUserMessage("run")],
+			{ systemPrompt: [], messages: [] },
+			config,
+			undefined,
+			mock.stream,
+		).result();
+
+		expect(mock.calls[0]?.options?.promptCache).toEqual({ mode: "explicit", breakpoint: "none" });
+	});
+
+	it("keeps models without the declared cache capability markerless", async () => {
+		const capableModel = getBundledModel("openai", "gpt-5.6");
+		if (!capableModel) throw new Error("Expected bundled GPT-5.6 model");
+		const model = structuredClone(capableModel);
+		if (!model.compat || !("supportsPromptCacheBreakpoints" in model.compat)) {
+			throw new Error("Expected OpenAI prompt-cache capability metadata");
+		}
+		model.compat.supportsPromptCacheBreakpoints = false;
+		const mock = createMockModel({ responses: [{ content: ["ok"] }] });
+
+		await agentLoop(
+			[createUserMessage("run")],
+			{ systemPrompt: [], messages: [] },
+			{
+				model,
+				convertToLlm: (messages: AgentMessage[]) =>
+					messages.filter(
+						message => message.role === "user" || message.role === "assistant" || message.role === "toolResult",
+					) as Message[],
+			},
+			undefined,
+			mock.stream,
+		).result();
+
+		expect(mock.calls[0]?.options?.promptCache).toBeUndefined();
 	});
 
 	it("forwards the live cwd from cwdResolver to the stream, overriding the static cwd", async () => {

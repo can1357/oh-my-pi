@@ -1239,6 +1239,9 @@
 - Added deprecated `getApiKey` and `reload` methods for backward compatibility.
 
 ## [18.2.11] - 2026-09-23
+### Changed
+
+- OpenAI prompt-cache breakpoints now cover stable assistant, tool, and function-output boundaries, with nested gateway markers rejected ([#12880](https://github.com/can1357/oh-my-pi/pull/12880) by [@ZenAlexa](https://github.com/ZenAlexa)).
 
 ### Fixed
 
