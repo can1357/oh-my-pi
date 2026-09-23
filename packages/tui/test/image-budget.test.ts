@@ -777,6 +777,7 @@ describe("TUI inline-image budget", () => {
 		resident: Set<number>;
 		placed: Set<number>;
 		virtual: Set<number>;
+		placements: Map<number, Set<number>>;
 	}
 
 	/**
@@ -800,8 +801,13 @@ describe("TUI inline-image budget", () => {
 		deleted: number[];
 		writes: string[];
 	} {
-		const screen: GraphicsStore = { resident: new Set(), placed: new Set(), virtual: new Set() };
-		const alt: GraphicsStore = { resident: new Set(), placed: new Set(), virtual: new Set() };
+		const screen: GraphicsStore = {
+			resident: new Set(),
+			placed: new Set(),
+			virtual: new Set(),
+			placements: new Map(),
+		};
+		const alt: GraphicsStore = { resident: new Set(), placed: new Set(), virtual: new Set(), placements: new Map() };
 		let active = screen;
 		const deleted: number[] = [];
 		const writes: string[] = [];
@@ -813,6 +819,7 @@ describe("TUI inline-image budget", () => {
 					alt.resident.clear();
 					alt.placed.clear();
 					alt.virtual.clear();
+					alt.placements.clear();
 					active = alt;
 					continue;
 				}
@@ -826,6 +833,7 @@ describe("TUI inline-image budget", () => {
 					for (const held of active.resident) {
 						if (active.virtual.has(held)) continue;
 						active.placed.delete(held);
+						active.placements.delete(held);
 						active.resident.delete(held);
 					}
 					continue;
@@ -836,11 +844,22 @@ describe("TUI inline-image budget", () => {
 				if (action === "t") active.resident.add(id);
 				if (action === "p") {
 					if (fields.get("U") === "1") active.virtual.add(id);
-					if (active.resident.has(id)) active.placed.add(id);
+					if (active.resident.has(id)) {
+						active.placed.add(id);
+						let ids = active.placements.get(id);
+						if (!ids) active.placements.set(id, (ids = new Set()));
+						ids.add(Number(fields.get("p") ?? 0));
+					}
+				}
+				if (action === "d" && fields.get("d") === "i") {
+					if (fields.has("p")) active.placements.get(id)?.delete(Number(fields.get("p")));
+					else active.placements.delete(id);
+					if (!active.placements.get(id)?.size) active.placed.delete(id);
 				}
 				if (action === "d" && fields.get("d") === "I") {
 					active.resident.delete(id);
 					active.placed.delete(id);
+					active.placements.delete(id);
 					active.virtual.delete(id);
 					deleted.push(id);
 				}
@@ -855,6 +874,7 @@ describe("TUI inline-image budget", () => {
 						deleted.push(held);
 						active.resident.delete(held);
 						active.placed.delete(held);
+						active.placements.delete(held);
 					}
 				}
 			}
@@ -862,6 +882,93 @@ describe("TUI inline-image budget", () => {
 		});
 		return { ...screen, alt, deleted, writes };
 	}
+
+	it("removes a clipped image after it leaves the live viewport without losing its data", async () => {
+		const originalGraphics = { ...getKittyGraphics() };
+		const term = new VirtualTerminal(40, 12);
+		const { resident, placed } = trackKittyGraphics(term);
+		setKittyGraphics({ unicodePlaceholders: false });
+		const tui = new TUI(term);
+		const image = makeImage(tui.imageBudget, "scrolling");
+		const id = tui.imageBudget.acquireId("scrolling");
+		let stage = 0;
+		tui.setFrameProvider({
+			renderFrame: size => {
+				const rows = [...image.render(size.columns)];
+				return { viewport: stage === 2 ? ["replacement text"] : stage === 1 ? rows.slice(-1) : rows };
+			},
+			acknowledgeHistory: () => {},
+		});
+		try {
+			tui.start();
+			await settle(term);
+			expect(placed.has(id)).toBe(true);
+			stage = 1;
+			tui.requestRender();
+			await settle(term);
+			expect(placed.has(id)).toBe(true);
+			stage = 2;
+			tui.requestRender();
+			await settle(term);
+			expect(placed.has(id)).toBe(false);
+			expect(resident.has(id)).toBe(true);
+			stage = 3;
+			tui.requestRender();
+			await settle(term);
+			expect(placed.has(id)).toBe(true);
+		} finally {
+			tui.stop();
+			setKittyGraphics(originalGraphics);
+		}
+	});
+
+	it.each(["append", "replay"] as const)("preserves committed images across later live reuse (%s)", async kind => {
+		const originalGraphics = { ...getKittyGraphics() };
+		const term = new VirtualTerminal(40, 12);
+		const { placed } = trackKittyGraphics(term);
+		setKittyGraphics({ unicodePlaceholders: false });
+		const tui = new TUI(term);
+		const image = makeImage(tui.imageBudget, "committed");
+		const id = tui.imageBudget.acquireId("committed");
+		let commit = false;
+		let acknowledged = false;
+		let text = "following text";
+		tui.setFrameProvider({
+			renderFrame: size => {
+				const rows = [...image.render(size.columns)];
+				return {
+					history: commit && !acknowledged ? { id: 1, rows, ...(kind === "replay" ? { kind } : {}) } : undefined,
+					viewport: commit ? [text] : rows,
+				};
+			},
+			acknowledgeHistory: () => {
+				acknowledged = true;
+			},
+		});
+		try {
+			tui.start();
+			await settle(term);
+			commit = true;
+			tui.requestRender();
+			await settle(term);
+			expect(acknowledged).toBe(true);
+			expect(placed.has(id)).toBe(true);
+			text = "later text";
+			tui.requestRender();
+			await settle(term);
+			expect(placed.has(id)).toBe(true);
+			commit = false;
+			tui.requestRender();
+			await settle(term);
+			commit = true;
+			tui.requestRender();
+			await settle(term);
+			expect(placed.has(id)).toBe(true);
+		} finally {
+			tui.stop();
+			setKittyGraphics(originalGraphics);
+		}
+	});
 
 	it("keeps normal-buffer placements visible across a fullscreen overlay pass", async () => {
 		const originalGraphics = { ...getKittyGraphics() };

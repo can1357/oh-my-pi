@@ -27,6 +27,7 @@ import { STDOUT_BACKLOG_CLEAR_BYTES, setAltScreenActive, type Terminal } from ".
 import {
 	encodeKittyDeleteAllImages,
 	encodeKittyDeleteImage,
+	encodeKittyDeletePlacement,
 	encodeKittyPlacementLine,
 	ImageProtocol,
 	isImageProtocolForced,
@@ -776,6 +777,8 @@ export class TUI extends Container {
 	// the established differential comparison and resize accounting.
 	#providerWindow: string[] = [];
 	#providerPreparedRows: PreparedLine[] = [];
+	// Only mutable normal-screen placements: committed history owns its own lifetime.
+	#viewportImagePlacements = new Map<number, number>();
 	#previousFrameLength = 0;
 	#previousWidth = 0;
 	#previousHeight = 0;
@@ -2617,7 +2620,13 @@ export class TUI extends Container {
 	 * unknown) and non-placement image lines (placeholder grids, sixel, iTerm2,
 	 * tmux-wrapped) pass through verbatim.
 	 */
-	#imageLineSequence(line: string, screenRow: number, frameRow: number, committedTo: number): string {
+	#imageLineSequence(
+		line: string,
+		screenRow: number,
+		frameRow: number,
+		committedTo: number,
+		viewportPlacements?: Map<number, number>,
+	): string {
 		if (screenRow < 0) return line;
 		const parsed = parseKittyDirectPlacementLine(line);
 		if (!parsed) return line;
@@ -2629,6 +2638,10 @@ export class TUI extends Container {
 			frameRow >= 0 ? frameRow - Math.min(parsed.rows - 1, screenRow) : -1,
 			committedTo,
 		);
+		// A committed placement must survive a later emission of the same image.
+		this.#imageBudget.observeCommitWatermark(committedTo);
+		const placementId = placement?.placementId ?? parsed.placementId;
+		if (placementId !== undefined) viewportPlacements?.set(parsed.imageId, placementId);
 		if (!placement) return line;
 		return encodeKittyPlacementLine({
 			imageId: parsed.imageId,
@@ -2638,6 +2651,27 @@ export class TUI extends Container {
 			screenRow,
 			imageHeightPx: placement.heightPx,
 		});
+	}
+
+	/** Text erases do not remove classic Kitty placements that leave the viewport. */
+	#retireViewportImagePlacements(rows: readonly PreparedLine[], start: number): string {
+		let deletes = "";
+		for (const [imageId, placementId] of this.#viewportImagePlacements) {
+			let visible = false;
+			for (let index = start; index < rows.length; index++) {
+				const row = rows[index]!;
+				if (row.isImage && parseKittyDirectPlacementLine(row.line)?.imageId === imageId) {
+					visible = true;
+					break;
+				}
+			}
+			if (visible) continue;
+			// Delete before history is appended, so retirement can re-place the
+			// same image in scrollback. Keep its data and all other placements.
+			deletes += encodeKittyDeletePlacement(imageId, placementId);
+			this.#viewportImagePlacements.delete(imageId);
+		}
+		return deletes;
 	}
 
 	#terminalLine(line: PreparedLine): string {
@@ -2835,9 +2869,11 @@ export class TUI extends Container {
 			// nothing downstream could find them again.
 			for (const id of this.#imageBudget.takeResetPurgeIds()) buffer += encodeKittyDeleteImage(id);
 			this.#imageBudget.resetPlacementEpochs();
+			this.#viewportImagePlacements.clear();
 		}
 		if (TERMINAL.imageProtocol === ImageProtocol.Kitty) {
 			for (const id of this.#imageBudget.takePurgeIds()) buffer += encodeKittyDeleteImage(id);
+			buffer += this.#retireViewportImagePlacements(prepared.rows, replayViewportRows);
 		} else {
 			this.#imageBudget.takePurgeIds();
 		}
@@ -2861,6 +2897,7 @@ export class TUI extends Container {
 		const diffable =
 			geometryStable &&
 			historyRows.length === 0 &&
+			replayViewportRows === 0 &&
 			startTop === newTop &&
 			!this.#forceViewportRepaintOnNextRender &&
 			!destructiveReset &&
@@ -2884,6 +2921,7 @@ export class TUI extends Container {
 					-1,
 					-1,
 					this.#osc66SpacerGlyphWidth(prepared.lines, index),
+					this.#viewportImagePlacements,
 				)}`;
 			}
 			if (this.#providerWindow.length > rows && newTop + rows < height) {
@@ -2907,8 +2945,8 @@ export class TUI extends Container {
 					preparedHistory.rows[index]!,
 					width,
 					Math.min(screenRow, height - 1),
-					-1,
-					-1,
+					screenRow,
+					screenRow + 1,
 					this.#osc66SpacerGlyphWidth(preparedHistory.lines, index),
 				);
 				screenRow++;
@@ -2919,9 +2957,10 @@ export class TUI extends Container {
 					prepared.rows[index]!,
 					width,
 					Math.min(screenRow, height - 1),
-					-1,
-					-1,
+					index < replayViewportRows ? screenRow : -1,
+					index < replayViewportRows ? screenRow + 1 : -1,
 					this.#osc66SpacerGlyphWidth(prepared.lines, index),
+					index < replayViewportRows ? undefined : this.#viewportImagePlacements,
 				);
 				screenRow++;
 			}
@@ -3447,6 +3486,7 @@ export class TUI extends Container {
 		frameRow = -1,
 		committedTo = -1,
 		spacerGlyphWidth = -1,
+		viewportPlacements?: Map<number, number>,
 	): string {
 		// End every rewrite at column zero. ConPTY can materialize a pending
 		// wrap before a following cursor-addressing sequence even while DECAWM is
@@ -3463,7 +3503,8 @@ export class TUI extends Container {
 		if (spacerGlyphWidth >= 0) {
 			rewrite = spacerGlyphWidth >= width ? "" : `${SEGMENT_RESET}\x1b[${spacerGlyphWidth}C${ERASE_TO_END_OF_LINE}`;
 		} else if (line.isImage) {
-			rewrite = ERASE_LINE + this.#imageLineSequence(line.line, screenRow, frameRow, committedTo);
+			rewrite =
+				ERASE_LINE + this.#imageLineSequence(line.line, screenRow, frameRow, committedTo, viewportPlacements);
 		} else {
 			const terminalLine = this.#terminalLine(line);
 			if (line.asciiWidth !== undefined) {
