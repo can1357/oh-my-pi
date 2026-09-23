@@ -33,7 +33,7 @@ const HEADER_RESTORE_VERSION = 1;
  * computed lazily on first cache access and memoized, so processes that never
  * touch the model cache skip the stringify entirely.
  */
-const MODEL_MATERIALIZATION_VERSION = 1;
+const MODEL_MATERIALIZATION_VERSION = 2;
 let cachedMaterializationPolicy: string | undefined;
 function materializationPolicy(): string {
 	if (cachedMaterializationPolicy === undefined) {

@@ -2477,7 +2477,9 @@ export class ModelRegistry {
 			if (model.provider === "ollama-cloud" && model.omitMaxOutputTokens !== true) {
 				model = applyModelOverride(model, { omitMaxOutputTokens: true });
 			}
-			if (model.id !== "gpt-5.4" || model.provider === "github-copilot") {
+			// A route advertising unknown context keeps it: the gpt-5.4 output
+			// override must not fabricate a window from the model id.
+			if (model.contextWindow === null || model.id !== "gpt-5.4" || model.provider === "github-copilot") {
 				return model;
 			}
 			const overrides = this.#modelOverrides.get(model.provider)?.get(model.id);

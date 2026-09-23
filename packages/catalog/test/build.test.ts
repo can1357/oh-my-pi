@@ -64,6 +64,16 @@ function openrouterSpec(overrides: Partial<ModelSpec<"openrouter">> = {}): Model
 		...overrides,
 	};
 }
+describe("buildModel explicit unknown context (issue #12616)", () => {
+	it("keeps null when catalog rules patch or floor known limits", () => {
+		const patched = completionsSpec({ provider: "zai", id: "glm-5.3", contextWindow: 128_000 });
+		const floored = completionsSpec({ provider: "cursor", id: "default", contextWindow: 128_000 });
+		expect(buildModel(patched).contextWindow).toBe(1_000_000);
+		expect(buildModel(floored).contextWindow).toBe(256_000);
+		expect(buildModel({ ...patched, contextWindow: null }).contextWindow).toBeNull();
+		expect(buildModel({ ...floored, contextWindow: null }).contextWindow).toBeNull();
+	});
+});
 
 describe("buildModel", () => {
 	describe("discovery backend policy", () => {

@@ -892,12 +892,18 @@ export async function discoverOpenAIModelsList(
 			providerConfig.discovery.type === "litellm"
 				? resolveLiteLLMApi(undefined, id, providerConfig.api)
 				: providerConfig.api;
+		// Explicit null means the provider truthfully advertises unknown
+		// context (e.g. a dynamic route): preserve it instead of fabricating
+		// a number from the bundled reference catalog (issue #12616). Only
+		// omitted/invalid metadata falls through the heuristic chain.
 		const contextWindow =
-			toPositiveNumberOrUndefined(item.max_model_len) ??
-			toPositiveNumberOrUndefined(item.context_length) ??
-			nativeMetadataForModel?.contextWindow ??
-			reference?.contextWindow ??
-			DISCOVERY_DEFAULT_CONTEXT_WINDOW;
+			item.max_model_len === null || item.context_length === null
+				? null
+				: (toPositiveNumberOrUndefined(item.max_model_len) ??
+					toPositiveNumberOrUndefined(item.context_length) ??
+					nativeMetadataForModel?.contextWindow ??
+					reference?.contextWindow ??
+					DISCOVERY_DEFAULT_CONTEXT_WINDOW);
 		discovered.push(
 			buildModel({
 				id,
@@ -919,7 +925,12 @@ export async function discoverOpenAIModelsList(
 				// Cap the reference's output limit at the discovered context
 				// window so an ID collision with a larger bundled model can
 				// never request more tokens than the local runtime advertises.
-				maxTokens: Math.min(reference?.maxTokens ?? discoveryDefaultMaxTokens(api), contextWindow),
+				// Unknown (null) context leaves the reference/default output
+				// limit uncapped rather than collapsing to zero.
+				maxTokens: Math.min(
+					reference?.maxTokens ?? discoveryDefaultMaxTokens(api),
+					contextWindow ?? Number.POSITIVE_INFINITY,
+				),
 				headers,
 				compat: {
 					supportsStore: false,
