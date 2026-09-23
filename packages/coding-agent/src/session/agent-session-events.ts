@@ -67,7 +67,7 @@ export type AgentSessionEvent =
 			maxAttempts?: number;
 	  }
 	| { type: "provider_retry_wait_end"; aborted: boolean; waitId: number }
-	| { type: "retry_fallback_applied"; from: string; to: string; role: string }
+	| { type: "retry_fallback_applied"; from: string; to: string; role: string; reason?: string }
 	| { type: "retry_fallback_succeeded"; model: string; role: string }
 	| { type: "model_changed" }
 	| { type: "config_warnings_changed" }

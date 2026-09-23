@@ -631,7 +631,13 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 		};
 	}
 	// Re-build from spec stage: sparse compat comes from `compatConfig` (the
-	// verbatim override vocabulary), never the resolved `compat` record.
+	// verbatim override vocabulary), never the resolved `compat` record. The
+	// override is transport-scoped, so a bundled row authored for one API must
+	// not follow an id whose discovered route moved: Copilot's chat-completions
+	// rows carry `supportsReasoningEffort: false`, which would silently strip
+	// the effort dial once the id is pinned to Responses (#12901).
+	const compat =
+		dynamicModel.compatConfig ?? (dynamicModel.api === existingModel.api ? existingModel.compatConfig : undefined);
 	return buildModel({
 		...existingModel,
 		...dynamicModel,
@@ -654,7 +660,7 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 				? { ...existingModel.headers, ...dynamicModel.headers }
 				: existingModel.headers,
 		resolveHeaders,
-		compat: dynamicModel.compatConfig ?? existingModel.compatConfig,
+		compat,
 		contextPromotionTarget: dynamicModel.contextPromotionTarget ?? existingModel.contextPromotionTarget,
 	} as ModelSpec<TApi>);
 }

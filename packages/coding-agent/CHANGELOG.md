@@ -2,10 +2,21 @@
 
 ## [Unreleased]
 
-### Changed
+### Fixed
 
-- Extensions load faster on warm starts: their dependencies are no longer re-parsed on every launch ([#12908](https://github.com/can1357/oh-my-pi/pull/12908) by [@H4vC](https://github.com/H4vC)).
-- The first highlighted code block, bash preview, or diff no longer stalls the screen while syntax highlighting initializes ([#12908](https://github.com/can1357/oh-my-pi/pull/12908) by [@H4vC](https://github.com/H4vC)).
+- Fixed provider-internal retry backoffs looking like a frozen turn: pi-ai's own stream retry waits — including the Anthropic HTTP client's 429/529 overload sleeps — now surface as `provider_retry_wait_start`/`provider_retry_wait_end` session events, a "Provider retrying (2/10) in …" status countdown that shows the retry position when the waiting loop reports one, and a structured log line. Retry delays, attempt counts, and abort behaviour are unchanged. Each wait carries a session-scoped `waitId` echoed by its `_end` (plus the originating stream `role`: `main`, `advisor`, or `side`) so concurrent waits and RPC consumers can pair starts with ends ([#12785](https://github.com/can1357/oh-my-pi/pull/12785) by [@geoyws](https://github.com/geoyws)).
+
+## [18.2.11] - 2026-09-23
+
+### Fixed
+
+- Fixed nested `eval` Todo updates not being reflected by the Todo tracker, including cases where a cell fails after committing an update.
+- Fixed strict-mode structured-output validation for JSON Schemas without a root `type`, preserving their `items` and `required` keywords.
+- Improved streamed TTSR whole-buffer matching to avoid repeated scans from the beginning of the buffer.
+- Fixed plural browser queries when compiled binaries provide shallow stack traces.
+- Fixed browser `tab.fill` timing out on pages whose animation frames stall.
+- Fixed the first LSP diagnostics request returning no results while a newly started language server is still analyzing.
+- `/shake thinking` now reports the number of tokens freed.
 
 ## [18.2.10] - 2026-09-22
 
@@ -95,10 +106,6 @@
 - Edits targeting auto-generated files now return a tool-scoped rejection instead of aborting the whole turn ([#12499](https://github.com/can1357/oh-my-pi/pull/12499) by [@Dante-dan](https://github.com/Dante-dan)).
 - Subagents with an ordered model fallback keep it reachable on startup when the parent default role shares the same primary model ([#12377](https://github.com/can1357/oh-my-pi/pull/12377) by [@Dante-dan](https://github.com/Dante-dan)).
 - omp-plugins MCP servers now substitute `${CLAUDE_PLUGIN_ROOT}`/`${OMP_PLUGIN_ROOT}` in `command`, `args`, and `cwd` ([#12801](https://github.com/can1357/oh-my-pi/pull/12801) by [@holny](https://github.com/holny)).
-
-### Fixed
-
-- Fixed provider-internal retry backoffs looking like a frozen turn: pi-ai's own stream retry waits — including the Anthropic HTTP client's 429/529 overload sleeps — now surface as `provider_retry_wait_start`/`provider_retry_wait_end` session events, a "Provider retrying (2/10) in …" status countdown that shows the retry position when the waiting loop reports one, and a structured log line. Retry delays, attempt counts, and abort behaviour are unchanged. Each wait carries a session-scoped `waitId` echoed by its `_end` (plus the originating stream `role`: `main`, `advisor`, or `side`) so concurrent waits and RPC consumers can pair starts with ends ([#12785](https://github.com/can1357/oh-my-pi/pull/12785) by [@geoyws](https://github.com/geoyws)).
 
 ## [18.2.8] - 2026-09-21
 

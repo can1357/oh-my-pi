@@ -1,6 +1,7 @@
 import { ADVISOR_DEFAULT_BUDGET_PER_UPDATE } from "../advisor/emission-guard";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { DEFAULT_SHARE_URL, DEFAULT_STREAM_URL } from "@oh-my-pi/pi-wire";
+import { DEFAULT_SKILLS_URL } from "@oh-my-pi/pi-wire/skillshare";
 import { TREE_FILTER_MODES } from "@oh-my-pi/pi-tui/overlays/tree-selector";
 import { SHAPE_VARIANT_NAMES } from "@oh-my-pi/snapcompact";
 import {
@@ -2436,6 +2437,19 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	// Skill registry (omp skill)
+	"skills.registryUrl": {
+		type: "string",
+		default: DEFAULT_SKILLS_URL,
+		ui: {
+			tab: "interaction",
+			group: "Skills",
+			label: "Skill Registry",
+			description:
+				"Skillshare registry used by `omp skill` to install, search, and publish skills (https://host[:port])",
+		},
+	},
+
 	// Speech-to-text
 	"stt.enabled": {
 		type: "boolean",
@@ -3449,6 +3463,28 @@ export const SETTINGS_SCHEMA = {
 			group: "Rules (TTSR)",
 			label: "TTSR",
 			description: "Interrupt the agent mid-stream when output matches rule patterns (Time-Traveling Stream Rules)",
+		},
+	},
+
+	"ttsr.judge": {
+		type: "enum",
+		values: ["auto", "on", "off"] as const,
+		default: "auto",
+		ui: {
+			tab: "context",
+			group: "Rules (TTSR)",
+			label: "Judged Rules",
+			description:
+				"Ask the judge model role each `question` rule about completed replies, reasoning, and tool calls; a yes injects the rule as a warning",
+			options: [
+				{
+					value: "auto",
+					label: "Auto",
+					description: "Judge only when the judge role resolves to a native TypeSafe jev model",
+				},
+				{ value: "on", label: "On", description: "Always judge, whichever model the judge role resolves to" },
+				{ value: "off", label: "Off", description: "Never judge; question rules stay inactive" },
+			],
 		},
 	},
 
@@ -6231,6 +6267,8 @@ export interface SkillsSettings {
 	ignoredSkills?: string[];
 	includeSkills?: string[];
 	disabledExtensions?: string[];
+	/** Skillshare registry base URL (`omp skill`). */
+	registryUrl?: string;
 }
 
 /** Conventional commit generation and changelog limits. */
@@ -6251,6 +6289,8 @@ export interface CommitSettings {
 
 export interface TtsrSettings {
 	enabled: boolean;
+	/** When judged (`question`) rules run: read by the session, not the TtsrManager. */
+	judge?: "auto" | "on" | "off";
 	contextMode: "discard" | "keep";
 	interruptMode: "never" | "prose-only" | "tool-only" | "always";
 	repeatMode: "once" | "after-gap";
