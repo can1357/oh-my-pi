@@ -67,9 +67,9 @@ import {
 } from "@oh-my-pi/pi-tui/thinking";
 import type { ContextFileEntry, ToolSession } from "../tools";
 import { resolveEvalBackends } from "../tools/eval-backends";
-import { isIrcEnabled } from "../tools/hub";
-import { LIST_STATUS_ORDER } from "@oh-my-pi/pi-tui/tools/hub";
-import { DEFAULT_HUB_LIST_LIMIT } from "@oh-my-pi/pi-tui/tools/hub";
+import { isIrcEnabled } from "../irc/messaging";
+import { LIST_STATUS_ORDER } from "@oh-my-pi/pi-tui/tools/irc";
+import { DEFAULT_PEER_ROSTER_LIMIT } from "@oh-my-pi/pi-tui/tools/irc";
 import { normalizeSchema } from "../tools/jtd-to-json-schema";
 import { buildOutputValidator, summarizeValidationFailure } from "../tools/output-schema-validator";
 import { ToolAbortError } from "../tools/tool-errors";
@@ -310,7 +310,7 @@ export interface IrcPeerRosterRow {
 }
 
 export interface IrcPeerRosterData {
-	/** Live (running+idle) peer rows, bounded at DEFAULT_HUB_LIST_LIMIT. */
+	/** Live (running+idle) peer rows, bounded at DEFAULT_PEER_ROSTER_LIMIT. */
 	peers: IrcPeerRosterRow[];
 	/** Current-root parked refs, counted but never named. */
 	parkedCount: number;
@@ -323,7 +323,7 @@ export function collectIrcPeerRoster(
 	selfId: string,
 	rootSessionFile?: string,
 ): IrcPeerRosterData {
-	// Same ordering as `hub list`: running before idle, then newest activity
+	// Running before idle, then newest activity
 	// first — so the cap keeps the newest relevant siblings, not an
 	// insertion-order prefix.
 	const live = registry
@@ -332,7 +332,7 @@ export function collectIrcPeerRoster(
 			(a, b) =>
 				(LIST_STATUS_ORDER[a.status] ?? 9) - (LIST_STATUS_ORDER[b.status] ?? 9) || b.lastActivity - a.lastActivity,
 		);
-	const limit = DEFAULT_HUB_LIST_LIMIT;
+	const limit = DEFAULT_PEER_ROSTER_LIMIT;
 	const omittedCount = Math.max(0, live.length - limit);
 	const peers = (omittedCount > 0 ? live.slice(0, limit) : live).map(peer => ({
 		id: peer.id,
@@ -2240,11 +2240,11 @@ async function driveSessionToYield(
 		// pending owner work left is terminal — the isolation runner captures
 		// and destroys the worktree right after this run resolves, so no
 		// owner job that could still re-wake the session may outlive it.
-		// Suppressed (acknowledged / hub-watched) jobs never re-wake the run
+		// Suppressed (acknowledged / wait-watched) jobs never re-wake the run
 		// and are reaped at teardown.
 		//
 		// Before blocking on running jobs, tell the model ONCE what it is
-		// waiting on so it can `hub` wait/cancel instead of sitting silent
+		// waiting on so it can use `wait` or cancel via `write proc://<id>` instead of sitting silent
 		// until the jobs (or the runtime limit) expire. Runs that never yield
 		// (ladder exhausted / terminal model error) skip the barrier — more
 		// injected turns just multiply the failure noise; the teardown reap
@@ -2384,7 +2384,7 @@ interface FinalizeRunArgs {
 	/**
 	 * This finalize is a revival/wake or explicit follow-up turn, not the initial
 	 * run. Such turns only (re)write `<id>.md` when they produce a real `yield`
-	 * result, so a conversational hub wake (which never yields) cannot clobber the
+	 * result, so a conversational peer-message wake (which never yields) cannot clobber the
 	 * completed run's artifact with a missing-yield warning body (issue #9518).
 	 */
 	followUpTurn?: boolean;
@@ -2453,7 +2453,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	// Compute output metadata for agent:// URL integration.
 	//
 	// A revival/follow-up turn only (re)writes <id>.md when it produced a real
-	// yield result. A subagent revived to answer a hub message never yields, so
+	// yield result. A subagent revived to answer a peer message never yields, so
 	// writing here would overwrite the completed run's authoritative artifact with
 	// a missing-yield warning body (issue #9518). The initial run is unaffected
 	// (followUpTurn is unset), preserving the documented missing-yield artifact.
@@ -2648,8 +2648,8 @@ function wakeSources(records: AgentMessage[], selfId: string): WakeSource[] {
  * did not answer them itself. A re-`yield` delivers the `<task-result>`
  * envelope (the artifact was just rewritten, so it carries the `agent://`
  * pointer); a plain turn delivers its final assistant text. Without this, a
- * recipient that lacks the `hub` tool — every read-only scout — can never get
- * an answer back to a `send await:true` sender, and its re-yield silently
+ * recipients without a dedicated messaging tool can still answer a sender;
+ * otherwise their re-yield silently
  * updates the artifact nobody is told to re-read.
  */
 async function relayWakeTurnOutput(args: {
@@ -3088,7 +3088,7 @@ export interface FollowUpTurnOptions {
 	parentToolCallId?: string;
 	/**
 	 * When set, a turn that produces a `yield` result (re)writes `<artifactsDir>/<id>.md`
-	 * so `agent://<id>` tracks the latest completion. A yield-less turn (e.g. a hub
+	 * so `agent://<id>` tracks the latest completion. A yield-less turn (e.g. a peer-message
 	 * wake answering a message) leaves the existing artifact intact (issue #9518).
 	 */
 	artifactsDir?: string;
@@ -3373,15 +3373,18 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	if (atMaxDepth && toolNames?.includes("task")) {
 		toolNames = toolNames.filter(name => name !== "task");
 	}
-	// Ordinary agents retain the host's always-on collaboration capability.
-	// Restricted sessions must not widen their explicit host tool list with hub.
+	// Ordinary agents retain the host's collaboration wait capability.
+	// Restricted sessions must not widen their explicit host tool list.
 	if (
 		toolNames &&
 		!options.restrictToolNames &&
-		!toolNames.includes("hub") &&
-		(!isReadOnlyAgent(agent) || toolNames.includes("task"))
+		!toolNames.includes("wait") &&
+		(!isReadOnlyAgent(agent) || toolNames.includes("task")) &&
+		(subagentSettings.get("async.enabled") ||
+			(options.enableIrc !== false && isIrcEnabled(subagentSettings, childDepth)) ||
+			subagentSettings.get("launch.enabled"))
 	) {
-		toolNames = [...toolNames, "hub"];
+		toolNames = [...toolNames, "wait"];
 	}
 	if (toolNames?.includes("exec")) {
 		const backends = resolveEvalBackends({ settings } as ToolSession);
@@ -3390,12 +3393,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		expanded.push("bash");
 		toolNames = Array.from(new Set(expanded));
 	}
-	// Inbound steering works without hub, but outbound IRC roster and peer coordination instructions
-	// require the hub tool to be available to this subagent.
+	// Inbound steering works without messaging; outbound peer coordination requires write.
 	const ircEnabled =
 		options.enableIrc !== false &&
 		isIrcEnabled(subagentSettings, childDepth) &&
-		(toolNames === undefined || toolNames.includes("hub"));
+		(toolNames === undefined || toolNames.includes("write"));
 
 	const modelPatterns = normalizeModelPatterns(modelOverride ?? agent.model);
 	const sessionFile = subtaskSessionFile ?? null;

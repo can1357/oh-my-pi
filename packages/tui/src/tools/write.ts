@@ -21,6 +21,8 @@ import {
 	TRUNCATE_LENGTHS,
 	truncateToWidth,
 } from "../render/render-utils";
+import type { CoordinationDetails } from "./wait";
+import { renderAgentWrite, renderProcWrite, type ProcWriteDetails } from "./proc-render";
 import type { FileDiagnosticsResult } from "./lsp";
 import type { OutputMeta } from "./output-meta";
 import type { RenderResultOptions, ToolActivityContext, ToolActivitySummary, ToolRenderer } from "./renderer";
@@ -46,6 +48,8 @@ export interface WriteToolDetails {
 	resolvedPath?: string;
 	/** Set when the write dispatched an `xd://` tool device; drives renderer delegation. */
 	xdev?: XdevRenderDispatch;
+	message?: CoordinationDetails;
+	proc?: ProcWriteDetails;
 }
 
 interface WriteRenderArgs {
@@ -326,6 +330,21 @@ export const writeToolRenderer = {
 					? writeArgs.path
 					: "";
 		if (!rawPath) return { label: "Write" };
+		if (/^agent:\/\//i.test(rawPath)) {
+			return {
+				label: "Message",
+				detail: rawPath.slice("agent://".length) === "all" ? "broadcast" : rawPath.slice("agent://".length),
+			};
+		}
+		if (/^proc:\/\//i.test(rawPath)) {
+			const target = rawPath.slice("proc://".length);
+			const action = target.endsWith("/mode")
+				? "mode"
+				: typeof writeArgs.content === "string" && writeArgs.content.length > 0
+					? "stdin"
+					: "cancel / stop";
+			return { label: "Process", detail: `${action} ${shortenPath(target.replace(/\/mode$/, ""))}` };
+		}
 		const xdev = parseXdUrl(rawPath);
 		if (xdev?.name) {
 			const resolveMounted = (context.renderContext as WriteRenderContext | undefined)?.resolveXdevMounted;
@@ -347,6 +366,39 @@ export const writeToolRenderer = {
 		// A present-but-malformed path (array/object from a bad provider parse)
 		// is definitively not xd:// — fall through to the legacy frame.
 		if (args.path === undefined && args.file_path === undefined) return undefined;
+		const pathSettled = args.content !== undefined || options.argsComplete === true;
+		const hasStringPath = typeof args.file_path === "string" || typeof args.path === "string";
+		if (
+			hasStringPath &&
+			!pathSettled &&
+			("agent://".startsWith(rawPath.toLowerCase()) ||
+				"proc://".startsWith(rawPath.toLowerCase()) ||
+				/^(?:agent|proc):\/\//i.test(rawPath))
+		)
+			return undefined;
+		if (/^agent:\/\//i.test(rawPath)) {
+			return renderAgentWrite(
+				rawPath.slice("agent://".length),
+				typeof args.content === "string" ? args.content : "",
+				undefined,
+				undefined,
+				options,
+				uiTheme,
+			);
+		}
+		if (/^proc:\/\//i.test(rawPath)) {
+			const target = rawPath.slice("proc://".length);
+			return renderProcWrite(
+				target.replace(/\/mode$/, ""),
+				target.endsWith("/mode"),
+				typeof args.content === "string" ? args.content : undefined,
+				options.argsComplete === true,
+				undefined,
+				undefined,
+				options,
+				uiTheme,
+			);
+		}
 		if (rawPath && couldBecomeXdUrl(rawPath)) {
 			const xdev = parseXdUrl(rawPath);
 			// The path string is settled once the content field started streaming.
@@ -412,6 +464,30 @@ export const writeToolRenderer = {
 		uiTheme: Theme,
 		args?: WriteRenderArgs,
 	): Component {
+		const messagePath = typeof args?.path === "string" ? args.path : args?.file_path;
+		if (typeof messagePath === "string" && /^agent:\/\//i.test(messagePath)) {
+			return renderAgentWrite(
+				messagePath.slice("agent://".length),
+				typeof args?.content === "string" ? args.content : "",
+				result,
+				result.details?.message,
+				options,
+				uiTheme,
+			);
+		}
+		if (typeof messagePath === "string" && /^proc:\/\//i.test(messagePath)) {
+			const target = messagePath.slice("proc://".length);
+			return renderProcWrite(
+				target.replace(/\/mode$/, ""),
+				target.endsWith("/mode"),
+				typeof args?.content === "string" ? args.content : undefined,
+				true,
+				result,
+				result.details?.proc,
+				options,
+				uiTheme,
+			);
+		}
 		// xd:// dispatch results render as the mounted tool's own result.
 		const xdev = result.details?.xdev;
 		if (xdev) {

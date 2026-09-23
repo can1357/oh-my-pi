@@ -23,6 +23,7 @@
 #![feature(alloc_error_hook)]
 
 pub mod appearance;
+pub mod applefm;
 pub mod ast;
 pub mod audio;
 pub mod block;
