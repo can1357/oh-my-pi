@@ -44,7 +44,7 @@ describe("AgentSession steering during the provider wait", () => {
 		fixtureDir = path.join(os.tmpdir(), `pi-steer-wait-fixture-${Snowflake.next()}`);
 		fs.mkdirSync(fixtureDir, { recursive: true });
 		authStorage = await AuthStorage.create(path.join(fixtureDir, "auth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage, path.join(fixtureDir, "models.yml"));
 	});
 
