@@ -109,9 +109,8 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 		// Only real credential-service statuses (408/429/5xx via
 		// `AwsCredentialsError.status`) and generic non-AWS network failures
 		// stay retryable.
-		shouldRetryError: (error) =>
-			!(error instanceof AwsCredentialsError) ||
-			(error.status !== undefined && isRetryableStatus(error.status)),
+		shouldRetryError: error =>
+			!(error instanceof AwsCredentialsError) || (error.status !== undefined && isRetryableStatus(error.status)),
 		// Bun's native fetch enforces a hard ~300s pre-response timeout (issue #2422).
 		// Cold large-context streams legitimately exceed it; the caller's
 		// `firstEventTimeoutMs`/`AbortSignal` already govern stuck requests.

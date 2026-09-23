@@ -634,10 +634,7 @@ export function classify(error: unknown, api?: Api): number {
 		}
 
 		if (link instanceof AwsCredentialsError) {
-			kinds |= Flag.AuthFailed;
-			// Real credential-service HTTP statuses ride on the error; transient
-			// 408/429/5xx rejections stay retryable instead of reporting a dead credential.
-			if (link.status !== undefined && isRetryableStatus(link.status)) kinds |= Flag.Transient;
+			kinds |= link.status !== undefined && isRetryableStatus(link.status) ? Flag.Transient : Flag.AuthFailed;
 		} else if (link instanceof AnthropicConnectionTimeoutError) {
 			kinds |= Flag.Timeout | Flag.Transient;
 		} else if (link instanceof AnthropicConnectionError) {
