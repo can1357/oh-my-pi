@@ -206,6 +206,25 @@ describe("config CLI schema coverage", () => {
 		expect(parsed.type).toBe("enum");
 		expect(parsed.value).toBe("max");
 	});
+	it("reports the persisted value when an overlay overrides config set", async () => {
+		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
+		const overlayPath = path.join(testAgentDir.path(), "overlay.yml");
+		await Bun.write(overlayPath, "defaultThinkingLevel: max\n");
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const flags = { json: true, config: [overlayPath] };
+
+		await runConfigCommand({ action: "set", key: "defaultThinkingLevel", value: "medium", flags });
+		expect(JSON.parse(String(logSpy.mock.calls.at(-1)?.[0]))).toEqual({
+			key: "defaultThinkingLevel",
+			value: "medium",
+		});
+		await runConfigCommand({ action: "get", key: "defaultThinkingLevel", flags });
+		expect(JSON.parse(String(logSpy.mock.calls.at(-1)?.[0])).value).toBe("max");
+
+		resetSettingsForTest();
+		await runConfigCommand({ action: "get", key: "defaultThinkingLevel", flags: { json: true } });
+		expect(JSON.parse(String(logSpy.mock.calls.at(-1)?.[0])).value).toBe("medium");
+	});
 	it("fully flushes JSON larger than a pipe buffer", async () => {
 		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
 		const { exitCode, output, error } = await runCliProcess(["config", "list", "--json"], {
@@ -230,6 +249,29 @@ describe("config CLI schema coverage", () => {
 			PI_CODING_AGENT_DIR: testAgentDir.path(),
 			PI_CONFIG_FILES: [baseOverlayPath, finalOverlayPath].join(path.delimiter),
 		});
+
+		expect(exitCode).toBe(0);
+		expect(error).toBe("");
+		expect(JSON.parse(output)).toMatchObject({
+			key: "defaultThinkingLevel",
+			value: "max",
+			type: "enum",
+		});
+	});
+	it.each(["before", "after"])("loads --config overlays in flag order %s the command", async position => {
+		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
+		const baseOverlayPath = path.join(testAgentDir.path(), "flag-base-overlay.yml");
+		const finalOverlayPath = path.join(testAgentDir.path(), "flag-final-overlay.yml");
+		await Promise.all([
+			Bun.write(baseOverlayPath, "defaultThinkingLevel: high\n"),
+			Bun.write(finalOverlayPath, "defaultThinkingLevel: max\n"),
+		]);
+		const overlays = ["--config", baseOverlayPath, `--config=${finalOverlayPath}`];
+		const command = ["config", "get", "defaultThinkingLevel", "--json"];
+		const { exitCode, output, error } = await runCliProcess(
+			position === "before" ? [...overlays, ...command] : [...command, ...overlays],
+			{ PI_CODING_AGENT_DIR: testAgentDir.path() },
+		);
 
 		expect(exitCode).toBe(0);
 		expect(error).toBe("");

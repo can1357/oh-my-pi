@@ -1,4 +1,4 @@
-import type { CommandMetadata } from "@oh-my-pi/pi-utils/cli";
+import { type CommandMetadata, Flags } from "@oh-my-pi/pi-utils/cli";
 
 export const acpHelp = {
 	description: "Run Oh My Pi as an ACP (Agent Client Protocol) server over stdio",
@@ -48,7 +48,16 @@ export const compressHelp = {
 	description: "Rewrite a text file into the dense prompt register, reporting what it drops",
 } satisfies CommandMetadata;
 
-export const configHelp = { description: "Manage configuration settings" } satisfies CommandMetadata;
+export const configHelp = {
+	description: "Manage configuration settings",
+	flags: {
+		json: Flags.boolean({ description: "Output JSON" }),
+		config: Flags.string({
+			description: "Load an extra config.yml-style overlay for this run (repeatable)",
+			multiple: true,
+		}),
+	},
+} satisfies CommandMetadata;
 
 export const dryBalanceHelp = {
 	description: "Dry-run OAuth account balancing across random session ids",

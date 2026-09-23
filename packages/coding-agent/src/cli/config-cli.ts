@@ -35,6 +35,8 @@ export interface ConfigCommandArgs {
 	value?: string;
 	flags: {
 		json?: boolean;
+		/** `--config` overlays, applied like `PI_CONFIG_FILES` entries. */
+		config?: string[];
 	};
 }
 // =============================================================================
@@ -175,7 +177,7 @@ function getTypeDisplay(def: CliSettingDef): string {
 // Schema-Driven Value Parsing
 // =============================================================================
 
-function parseAndSetValue(path: SettingPath, rawValue: string): void {
+function parseAndSetValue(path: SettingPath, rawValue: string): unknown {
 	const schemaType = getType(path);
 	let parsedValue: unknown;
 
@@ -234,6 +236,7 @@ function parseAndSetValue(path: SettingPath, rawValue: string): void {
 	}
 
 	settings.set(path, parsedValue as SettingValue<typeof path>);
+	return parsedValue;
 }
 
 // =============================================================================
@@ -241,7 +244,7 @@ function parseAndSetValue(path: SettingPath, rawValue: string): void {
 // =============================================================================
 
 export async function runConfigCommand(cmd: ConfigCommandArgs): Promise<void> {
-	await Settings.init();
+	await Settings.init({ configFiles: cmd.flags.config });
 
 	switch (cmd.action) {
 		case "list":
@@ -373,15 +376,14 @@ async function handleSet(key: string | undefined, value: string | undefined, fla
 		process.exit(1);
 	}
 
+	let newValue: unknown;
 	try {
-		parseAndSetValue(def.path, value);
+		newValue = parseAndSetValue(def.path, value);
 		await settings.flush();
 	} catch (err) {
 		console.error(chalk.red(String(err)));
 		process.exit(1);
 	}
-
-	const newValue = settings.get(def.path);
 
 	if (flags.json) {
 		console.log(JSON.stringify({ key: def.path, value: newValue }));
@@ -442,6 +444,7 @@ ${chalk.bold("Commands:")}
 
 ${chalk.bold("Options:")}
   --json             Output as JSON
+  --config <file>    Load an extra config.yml-style overlay for this run (repeatable)
 
 ${chalk.bold("Examples:")}
   ${APP_NAME} config list

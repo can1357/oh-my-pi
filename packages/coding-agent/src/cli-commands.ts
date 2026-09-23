@@ -8,7 +8,7 @@
  * `launch` — see #1496 for the original "args silently leak to the LLM"
  * regression that motivated the split.
  */
-import type { CommandEntry } from "@oh-my-pi/pi-utils/cli";
+import type { CommandEntry, FlagDescriptor } from "@oh-my-pi/pi-utils/cli";
 import * as commandHelp from "./cli/command-help";
 import {
 	EXTENSION_SHADOWABLE_STRING_FLAGS,
@@ -386,13 +386,19 @@ function isLaunchGlobalFlag(arg: string): boolean {
  * belong to the launch surface and mean nothing to a subcommand like `update`,
  * whose strict parser would otherwise reject them with a cryptic
  * `node:util.parseArgs` error (#8891). Tokens the launch tables don't recognize
- * are kept, so a subcommand's own leading flags still reach it.
+ * are kept, as are flags declared in the subcommand's metadata.
  */
-function stripLaunchGlobalFlags(leading: readonly string[]): string[] {
+function stripLaunchGlobalFlags(
+	leading: readonly string[],
+	commandFlags: Record<string, FlagDescriptor> = {},
+): string[] {
 	const kept: string[] = [];
 	for (let index = 0; index < leading.length; index += 1) {
 		const arg = leading[index];
-		if (isLaunchGlobalFlag(arg)) {
+		const declared = arg.startsWith("--")
+			? Object.hasOwn(commandFlags, arg.slice(2).split("=", 1)[0])
+			: Object.values(commandFlags).some(flag => arg === `-${flag.char}`);
+		if (isLaunchGlobalFlag(arg) && !declared) {
 			if (flagConsumesValue(arg, leading[index + 1])) index += 1;
 			continue;
 		}
@@ -429,7 +435,9 @@ export function resolveCliArgv(argv: string[]): ResolvedCliArgv {
 		const sub = argv[subIndex];
 		const leading = argv.slice(0, subIndex);
 		const trailing = argv.slice(subIndex + 1);
-		const forwardedLeading = LAUNCH_FLAG_COMMANDS[sub] === true ? leading : stripLaunchGlobalFlags(leading);
+		const command = commands.find(command => command.name === sub || command.aliases?.includes(sub));
+		const forwardedLeading =
+			LAUNCH_FLAG_COMMANDS[sub] === true ? leading : stripLaunchGlobalFlags(leading, command?.help?.flags);
 		return { argv: [sub, ...forwardedLeading, ...trailing] };
 	}
 	return { argv: ["launch", ...argv] };

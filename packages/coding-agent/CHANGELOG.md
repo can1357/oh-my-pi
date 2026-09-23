@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `omp config get` and `list` ignoring `--config` overlays placed before or after the command ([#12588](https://github.com/can1357/oh-my-pi/pull/12588) by [@anthonyrisinger](https://github.com/anthonyrisinger)).
+
 ## [18.2.11] - 2026-09-23
 
 ### Fixed

@@ -2,7 +2,7 @@
  * Manage configuration settings.
  */
 
-import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
+import { Args, Command } from "@oh-my-pi/pi-utils/cli";
 import { configHelp as commandHelp } from "../cli/command-help";
 import { type ConfigAction, type ConfigCommandArgs, runConfigCommand } from "../cli/config-cli";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -28,9 +28,7 @@ export default class Config extends Command {
 		}),
 	};
 
-	static flags = {
-		json: Flags.boolean({ description: "Output JSON" }),
-	};
+	static flags = commandHelp.flags;
 
 	async run(): Promise<void> {
 		const { args, flags } = await this.parse(Config);
@@ -43,6 +41,7 @@ export default class Config extends Command {
 			value,
 			flags: {
 				json: flags.json,
+				config: flags.config,
 			},
 		};
 
