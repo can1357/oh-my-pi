@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `appleFmAvailability`, `appleFmGenerate`, and `appleFmCancel` native bindings
+- Added `Encoding.Jev` to `countTokens` for offline TypeSafe Jev 1.13 `state` input-token counts (request frame excluded), reconstructed from live API measurements
+
 ## [18.2.11] - 2026-09-23
 
 ### Changed

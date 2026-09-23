@@ -9,6 +9,7 @@
 
 ### Changed
 
+- Updated status line context usage to include tool examples in token estimation
 - Mermaid flowcharts and state diagrams now re-pick layout on terminal resize: the shortest orientation that fits the width wins, and the narrowest is used only when none fit.
 - Updated model hub and oauth selector components to use namespaced `authStorage` API
 - Plan Review annotations can now be edited or deleted, span multiple lines, and be undone ([#12601](https://github.com/can1357/oh-my-pi/pull/12601) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))

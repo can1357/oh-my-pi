@@ -104,5 +104,16 @@
       ]
     },
     "ignore_merges": true
+  },
+  "jev": {
+    "source": "cache/jev-1.13.vocab.json (measured from live usage.input_tokens; see data/README.md) + cache/o200k_base.tiktoken",
+    "blobs": ["jev_base", "jev_whole"],
+    "rank": "o200k rank; slots outside each set are empty",
+    "whole": 144562,
+    "base": 53462,
+    "normalizer": "NFC",
+    "pre": "qwen3.pre (Qwen3.5 split pattern)",
+    "window": 512,
+    "frame": "269 tokens for a minimal one-noul request; excluded from counts"
   }
 }
