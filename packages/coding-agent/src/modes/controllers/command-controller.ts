@@ -1890,6 +1890,7 @@ function formatAccountHeaderRow(
 			label: active ? `● ${label}` : label,
 			suffix: reset ? `(${reset})` : "",
 			active,
+			daybreak: report?.metadata?.daybreak === true,
 		};
 	});
 	const maxSuffixWidth = parts.reduce((max, p) => Math.max(max, visibleWidth(p.suffix)), 0);
@@ -1899,19 +1900,21 @@ function formatAccountHeaderRow(
 	// If suffix can't share the cell with at least `x…`, fall back to whole-label truncation.
 	if (prefixBudget < 2) {
 		return parts.map(p => {
-			const full = p.suffix ? `${p.label} ${p.suffix}` : p.label;
+			const full = `${p.label}${p.daybreak ? " daybreak" : ""}${p.suffix ? ` ${p.suffix}` : ""}`;
 			const cell = padColumn(truncateJobLabel(full, columnWidth), columnWidth);
 			return p.active ? uiTheme.fg("accent", cell) : cell;
 		});
 	}
 
 	return parts.map(p => {
-		const prefix = truncateJobLabel(p.label, prefixBudget);
+		// Keep the full badge visible by taking its columns from the account label.
+		const badge = p.daybreak && prefixBudget >= 10 ? " daybreak" : "";
+		const label = truncateJobLabel(p.label, prefixBudget - visibleWidth(badge));
+		const prefix = `${p.active ? uiTheme.fg("accent", label) : label}${badge ? uiTheme.fg("success", badge) : ""}`;
 		const prefixCell = prefix + " ".repeat(prefixBudget - visibleWidth(prefix));
-		const styledPrefix = p.active ? uiTheme.fg("accent", prefixCell) : prefixCell;
-		if (!p.suffix) return styledPrefix + " ".repeat(maxSuffixWidth + gap);
+		if (!p.suffix) return prefixCell + " ".repeat(maxSuffixWidth + gap);
 		const suffixPad = " ".repeat(maxSuffixWidth - visibleWidth(p.suffix));
-		return `${styledPrefix} ${suffixPad}${uiTheme.fg("dim", p.suffix)}`;
+		return `${prefixCell} ${suffixPad}${uiTheme.fg("dim", p.suffix)}`;
 	});
 }
 
@@ -2259,8 +2262,9 @@ export function renderUsageReports(
 			const label = formatUnlimitedReportLabel(report, 0);
 			const tier = report.metadata?.planType;
 			const tierSuffix = typeof tier === "string" && tier ? ` ${uiTheme.fg("dim", `(${tier})`)}` : "";
+			const daybreakSuffix = report.metadata?.daybreak === true ? uiTheme.fg("success", " daybreak") : "";
 			lines.push(
-				`${uiTheme.fg("success", uiTheme.status.success)} ${label}${tierSuffix} ${uiTheme.fg("dim", "-- no limits")}`,
+				`${uiTheme.fg("success", uiTheme.status.success)} ${label}${daybreakSuffix}${tierSuffix} ${uiTheme.fg("dim", "-- no limits")}`,
 			);
 		}
 		// No per-provider footer; global header shows last check.

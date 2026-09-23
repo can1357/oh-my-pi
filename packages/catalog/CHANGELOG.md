@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added per-account discovery support for Codex cyber access entitlements
 - Added `org-scoped-identity` and `oauth-token-env` rule support for auth providers
 
 ## [18.2.11] - 2026-09-23
