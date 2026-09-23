@@ -211,7 +211,11 @@ export class TodoTracker {
 			});
 			return false;
 		}
-		if (!this.#host.settings.get("todo.reminders") || !this.#host.settings.get("todo.enabled")) {
+		if (
+			!this.#host.settings.get("todo.reminders") ||
+			!this.#host.settings.get("todo.enabled") ||
+			!this.#host.getActiveToolNames().includes("todo")
+		) {
 			this.#reminderCount = 0;
 			this.#reminderAwaitingProgress = false;
 			return false;
