@@ -1,6 +1,6 @@
 /**
- * Tool renderer registry. Keys are current wire tool names; aliases keep old
- * transcript names renderable. Unknown tools fall back to the generic JSON renderer.
+ * Tool renderer registry. Keys are current wire tool names.
+ * Unknown tools fall back to the generic JSON renderer.
  */
 import { genericRenderer } from "./generic";
 import { askRenderer } from "./tools/ask";
@@ -17,9 +17,7 @@ import { githubRenderer } from "./tools/github";
 import { globRenderer } from "./tools/glob";
 import { goalRenderer } from "./tools/goal";
 import { grepRenderer } from "./tools/grep";
-import { hubRenderer } from "./tools/hub";
-import { ircRenderer } from "./tools/irc";
-import { jobRenderer } from "./tools/job";
+import { waitRenderer } from "./tools/wait";
 import { lspRenderer } from "./tools/lsp";
 import { recallRenderer } from "./tools/memory-recall";
 import { reflectRenderer } from "./tools/memory-reflect";
@@ -54,12 +52,7 @@ const RENDERERS: Record<string, ToolRenderer> = {
 	generate_image: generateImageRenderer,
 	github: githubRenderer,
 	goal: goalRenderer,
-	hub: hubRenderer,
-	irc: ircRenderer,
-	job: jobRenderer,
-	await: jobRenderer,
-	poll: jobRenderer,
-	cancel_job: jobRenderer,
+	wait: waitRenderer,
 	lsp: lspRenderer,
 	recall: recallRenderer,
 	reflect: reflectRenderer,

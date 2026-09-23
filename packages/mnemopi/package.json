@@ -4,7 +4,7 @@
   "version": "18.2.11",
   "description": "Local SQLite memory engine for Oh My Pi agents",
   "homepage": "https://omp.sh",
-  "author": "Stencil Labs, Inc.",
+  "author": { "name": "Stencil Labs, Inc.", "url": "https://stencil.so" },
   "contributors": [
     "Abdias J"
   ],

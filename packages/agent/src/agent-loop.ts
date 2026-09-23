@@ -2875,7 +2875,7 @@ async function executeToolCalls(
 	// backgrounds itself so the message injects promptly — but it never kills
 	// anything; ignoring it is always safe.
 	const steeringSoftController = new AbortController();
-	// Interruptible tools (pure waits: hub wait, vibe) observe steering +
+	// Interruptible tools (pure waits: wait, vibe) observe steering +
 	// external + IRC aborts. Every other tool sees ONLY the external signal:
 	// neither queued steering nor a peer IRC ever hard-kills a partially
 	// side-effecting foreground tool (e.g. `bash`) — those get the cooperative
@@ -3050,7 +3050,7 @@ async function executeToolCalls(
 
 	const runTool = async (record: (typeof records)[number], index: number): Promise<void> => {
 		// A pending interrupt preempts not-yet-started *interruptible* waits so
-		// the message injects promptly instead of sitting out a `hub wait`.
+		// the message injects promptly instead of sitting out a `wait`.
 		// Non-interruptible work is never skipped, whatever the source: the
 		// expensive part — generating the call — is already paid, the tool
 		// itself is cheap, and a skip only makes the model re-emit the same

@@ -43,7 +43,7 @@ Single-shot result.
 
 - Success always returns at least one text block, except that an `xd://` dispatch preserves the mounted tool's own content/error result.
   - Plain file write: `Successfully wrote <chars> bytes to <relative-path>` (the count is `cleanContent.length`, not encoded byte length).
-  - Internal URL write: `Successfully wrote <chars> bytes to <url>`.
+  - Internal URL write: handler-provided receipt/status text when present; otherwise `Successfully wrote <chars> bytes to <url>`.
   - Archive write: `Successfully wrote <chars> bytes to <relative-archive-path>:<entry-path>`.
   - SQLite write: one of `Inserted row into <table>`, `Updated row '<key>' in <table>`, `No row updated ...`, `Deleted row ...`, `No row deleted ...`.
   - Conflict resolution: conflict-specific success text, with fresh hashline snapshot headers when applicable. Bulk resolution can return `isError: true` after some files succeeded and others failed.
@@ -141,6 +141,8 @@ content: ""
 ```
 
 ### Writable internal resources and tool devices
+- `agent://<id>` with non-empty `content` sends a message to that peer (delivery receipt text); `agent://all` broadcasts to visible live peers. This write is read-approved and allowed in plan mode and `deviceOnlyWrite` when messaging is available. `agent://` reads remain output artifacts.
+- `proc://<id>` with non-empty content sends stdin to a service (Enter appended unless already newline-terminated); an empty content cancels a job or stops a service. `proc://<id>/mode` accepts `persist` or `session` to toggle persistence, or `detached` to restart without a PTY and persist beyond the broker. Proc writes require exec approval and are unavailable in `deviceOnlyWrite` sessions; proc reads do not consume job delivery.
 - A registered internal handler with a `write` hook owns its resource semantics (for example, `vault://`). `local://` is instead resolved into the session-local artifact sandbox and follows the plain-file path.
 - `xd://` lists/dispatches tool devices mounted behind `write`. Read `xd://<name>` first for its generated input documentation, then pass one JSON object as `content`. The device's own schema, updates, result blocks, error flag, renderer metadata, and approval tier are preserved.
 - Unknown URI-like schemes are refused to prevent silent local-file creation. Use `./scheme://...` only when that filename is intentional.

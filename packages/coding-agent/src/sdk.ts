@@ -112,6 +112,7 @@ import {
 	type ToolDefinition,
 	wrapRegisteredTools,
 } from "./extensibility/extensions";
+import { createSkillDescriptionCompressor, SkillDescriptionCatalog } from "./extensibility/skill-descriptions";
 import {
 	loadSkills as loadSkillsInternal,
 	type Skill,
@@ -242,7 +243,7 @@ import { createBrowserPrelude } from "./tools/browser";
 import { isMCPToolName, normalizeToolNames } from "./tools/builtin-names";
 import { createComputerPrelude } from "./tools/computer";
 import { ToolContextStore } from "./tools/context";
-import { isIrcEnabled } from "./tools/hub";
+import { isIrcEnabled } from "./irc/messaging";
 import { getImageGenTools } from "./tools/image-gen";
 import { wrapToolWithMetaNotice } from "./tools/output-meta";
 import { isFilesystemSourcePath } from "./tools/path-utils";
@@ -1919,7 +1920,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			agentRegistry,
 			// The global lifecycle releases through AgentRegistry.global(); wiring it
 			// onto a caller-supplied registry would report a cancel while releasing an
-			// unrelated global ref. With no lifecycle, hub cancel falls back to
+			// unrelated global ref. With no lifecycle, explicit cancellation falls back to
 			// dispose + unregister on the session's own registry.
 			agentLifecycle: options.agentRegistry ? undefined : () => AgentLifecycleManager.global(),
 			getSessionSpawns: () => options.spawns ?? "*",
@@ -3224,6 +3225,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// constructed) and refreshed on every later rebuild via
 		// `setAdvisorMemoryPrompt`.
 		let advisorMemoryPrompt: string | undefined;
+		const skillDescriptions = new SkillDescriptionCatalog({
+			dbPath: path.join(agentDir, "skill-descriptions.db"),
+			compress: createSkillDescriptionCompressor(modelRegistry, settings),
+		});
 		const rebuildSystemPrompt = async (
 			toolNames: string[],
 			tools: Map<string, AgentTool>,
@@ -3363,6 +3368,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				resolvedCustomPrompt: options.customSystemPrompt,
 				systemPromptTemplate: options.systemPromptTemplate,
 				skills: settings.get("skillful") ? (session?.skills ?? skills) : [],
+				skillDescriptions,
 				contextFiles,
 				tools: promptTools,
 				toolNames,
@@ -3952,6 +3958,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			evalToolSession: toolSession,
 			customCommands: customCommandsResult.commands,
 			skills,
+			skillDescriptions,
 			skillWarnings,
 			skillsReloadable: options.skills === undefined,
 			skillsSettings: settings.getGroup("skills"),

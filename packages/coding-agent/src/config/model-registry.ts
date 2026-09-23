@@ -1445,6 +1445,21 @@ export class ModelRegistry {
 				this.#keylessProviders.add("llama.cpp");
 			}
 		}
+		if (
+			process.platform === "darwin" &&
+			process.arch === "arm64" &&
+			!configuredProviders.has("apple") &&
+			!disabledProviders.has("apple")
+		) {
+			this.#discoverableProviders.push({
+				provider: "apple",
+				api: "apple-foundation-models",
+				baseUrl: "local://apple-foundation-models",
+				discovery: { type: "apple-foundation-models" },
+				optional: true,
+			});
+			this.#keylessProviders.add("apple");
+		}
 		if (!configuredProviders.has("lm-studio") && !disabledProviders.has("lm-studio")) {
 			this.#discoverableProviders.push({
 				provider: "lm-studio",

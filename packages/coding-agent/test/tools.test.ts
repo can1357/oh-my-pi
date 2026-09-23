@@ -20,7 +20,6 @@ import { $which, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { openArchive, readArchiveEntries } from "@oh-my-pi/pi-utils/ar";
 import { GlobTool } from "../src/tools/glob";
 import { DEFAULT_FILE_LIMIT, GrepTool, MULTI_FILE_PER_FILE_MATCHES } from "../src/tools/grep";
-import { HubTool } from "../src/tools/hub";
 
 // Helper to extract text from content blocks
 function getTextOutput(result: any): string {
@@ -2642,73 +2641,6 @@ function b() {
 			expect(output).toContain("first-line");
 			expect(output).toContain("second");
 			expect(output).toContain("third");
-		});
-	});
-
-	describe("HubTool", () => {
-		it("should wait for jobs and acknowledge deliveries to prevent race conditions", async () => {
-			const manager = new AsyncJobManager({
-				onJobComplete: async () => {},
-			});
-			const session = createTestToolSession(testDir, Settings.isolated({ "bash.autoBackground.enabled": true }), {
-				asyncJobManager: manager,
-			});
-			const jobTool = new HubTool(session);
-
-			const jobId = manager.register("bash", "test job", async () => "success");
-
-			// Job is running, call poll
-			const resultPromise = jobTool.execute("test-call-poll-1", { op: "wait", ids: [jobId] });
-
-			// Ensure poll finished
-			const result = await resultPromise;
-			expect(getTextOutput(result)).toContain("Completed");
-
-			// Wait for deliveries to be processed
-			await manager.drainDeliveries({ timeoutMs: 100 });
-
-			// If it correctly acknowledged, the delivery is suppressed.
-			expect(manager.hasPendingDeliveries()).toBe(false);
-		});
-
-		it("flags still-waiting polls and all-running snapshots as contextually useless", async () => {
-			const manager = new AsyncJobManager({
-				onJobComplete: async () => {},
-			});
-			const session = createTestToolSession(testDir, Settings.isolated({ "bash.autoBackground.enabled": true }), {
-				asyncJobManager: manager,
-			});
-			const jobTool = new HubTool(session);
-			const gate = Promise.withResolvers<string>();
-			const jobId = manager.register("bash", "long job", () => gate.promise);
-
-			// Poll cut short while the job is still running: a pure "still
-			// waiting" snapshot carries no information once consumed.
-			const controller = new AbortController();
-			const pollPromise = jobTool.execute("test-call-useless-poll", { op: "wait", ids: [jobId] }, controller.signal);
-			controller.abort();
-			const polled = await pollPromise;
-			expect(polled.useless).toBe(true);
-
-			// A list snapshot showing only running jobs is equally uneventful.
-			const listed = await jobTool.execute("test-call-useless-list", { op: "jobs" });
-			expect(listed.useless).toBe(true);
-
-			// Once the job settles, the result is informative — flag absent.
-			gate.resolve("done");
-			const settled = await jobTool.execute("test-call-useless-settled", { op: "wait", ids: [jobId] });
-			expect(getTextOutput(settled)).toContain("Completed");
-			expect(settled.useless).toBeUndefined();
-
-			// Nothing left to wait for: noise once consumed.
-			const idle = await jobTool.execute("test-call-useless-idle", { op: "wait" });
-			expect(getTextOutput(idle)).toContain("No running background jobs");
-			expect(idle.useless).toBe(true);
-
-			// A poll naming unknown ids found nothing — equally uneventful.
-			const missing = await jobTool.execute("test-call-useless-missing", { op: "wait", ids: ["no-such-job"] });
-			expect(getTextOutput(missing)).toContain("No matching jobs found");
-			expect(missing.useless).toBe(true);
 		});
 	});
 

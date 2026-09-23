@@ -752,12 +752,11 @@ if "__omp_prelude_loaded__" not in globals():
 
         def send(self, message):
             return _bridge_call(
-                "hub",
+                "write",
                 {
-                    "op": "send",
-                    "to": self.id,
-                    "message": str(message),
-                    "i": "agent handle",
+                    "path": self.handle,
+                    "content": str(message),
+                    "i": "Messaging agent",
                 },
             )
 

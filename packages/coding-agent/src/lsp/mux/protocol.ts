@@ -2,7 +2,7 @@
  * Cross-process contract for the broker-owned LSP mux daemon.
  *
  * One mux daemon runs per project scope (launched through the same daemon
- * broker that owns the shared Chromium and `hub start` processes). It assigns
+ * broker that owns the shared Chromium and `bash` services). It assigns
  * each concurrent OMP link its own language-server process, then retains idle
  * processes briefly for reuse by later links. The link speaks plain
  * Content-Length-framed LSP JSON-RPC after a one-request handshake
