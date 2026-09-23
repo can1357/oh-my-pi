@@ -4,8 +4,6 @@
 
 ### Added
 
-- `providers.operationTimeoutSeconds` (default 900) caps the wall clock one provider request may spend across its internal retries on the Anthropic, OpenAI Responses, Codex Responses, Google and Gemini CLI paths plus the shared replay-safe stream retry. A retry whose backoff would cross the budget fails immediately with an error naming the budget and the elapsed time instead of sleeping, and the session saga replays an exhausted budget at most twice rather than running the full retry ladder — so a wedged provider surfaces in minutes instead of leaving a turn silent for hours. `0` disables the budget ([#12786](https://github.com/can1357/oh-my-pi/pull/12786) by [@geoyws](https://github.com/geoyws)).
-- `providers.operationTimeoutSeconds` now bounds time without progress (output extends it) rather than total duration. The session saga's exhausted-budget replay bound is saga-wide: a model switch no longer refunds it, and a spent bound no longer consults the fallback chain, so the "at most twice" bound holds for any chain length. Side-request oneshots replay a budget exhaustion at most once, and negative values are treated as `0` (off).
 - Added `wait` tool for monitoring background jobs, services, and peer messages
 - Added `proc://` protocol for inspecting and managing background jobs and services
 - Added `agent://` path support to `write` tool for direct agent messaging
@@ -29,6 +27,8 @@
 - Added `/export` and `/usage` to focused subagent views: `/export` writes the focused subagent's transcript (including its own subagents) and `/usage` shows account usage without returning to the main session ([#12986](https://github.com/can1357/oh-my-pi/pull/12986) by [@H4vC](https://github.com/H4vC)).
 - Added saving of clipboard-pasted images to the session artifact directory so the agent receives a file path it can read, copy, or upload (for example, attaching a pasted screenshot to an issue tracker) ([#12985](https://github.com/can1357/oh-my-pi/pull/12985) by [@H4vC](https://github.com/H4vC)).
 - Added `/annotate` to attach notes to a code-review diff, the latest reply, a session message, a file, or quoted text, then paste them into the prompt or send them with a review ([#12601](https://github.com/can1357/oh-my-pi/pull/12601) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
+- `providers.operationTimeoutSeconds` (default 900) caps the wall clock one provider request may spend across its internal retries on the Anthropic, OpenAI Responses, Codex Responses, Google and Gemini CLI paths plus the shared replay-safe stream retry. A retry whose backoff would cross the budget fails immediately with an error naming the budget and the elapsed time instead of sleeping, and the session saga replays an exhausted budget at most twice rather than running the full retry ladder — so a wedged provider surfaces in minutes instead of leaving a turn silent for hours. `0` disables the budget ([#12786](https://github.com/can1357/oh-my-pi/pull/12786) by [@geoyws](https://github.com/geoyws)).
+- `providers.operationTimeoutSeconds` now bounds time without progress (output extends it) rather than total duration. The session saga's exhausted-budget replay bound is saga-wide: a model switch no longer refunds it, and a spent bound no longer consults the fallback chain, so the "at most twice" bound holds for any chain length. Side-request oneshots replay a budget exhaustion at most once, and negative values are treated as `0` (off).
 
 ### Changed
 
@@ -88,7 +88,6 @@
 
 ### Added
 
-- `find` (and `omp find`) accepts an `omp://` docs scope: `omp://` searches every embedded harness doc and `omp://<file>.md` searches one, reporting hits as canonical `omp://` URLs that `read` opens directly, including with `:start-end` selectors ([#12758](https://github.com/can1357/oh-my-pi/pull/12758) by [@H4vC](https://github.com/H4vC)).
 - Added Claude saved resets to usage views and `/usage reset`, with automatic blocked-limit recovery and expiring-reset redemption controlled by `claudeResets`.
 - Added support for searching embedded harness documentation with `find` and `omp find` using `omp://` scopes, including file-specific searches and `:start-end` selectors; results open directly through canonical `omp://` URLs.
 
