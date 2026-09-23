@@ -61,6 +61,8 @@ import type {
 	InputEventResult,
 	McpNotificationEvent,
 	MessageRenderer,
+	PlanReviewEvent,
+	PlanReviewEventResult,
 	RegisteredCommand,
 	RegisteredTool,
 	ResourcesDiscoverEvent,
@@ -246,10 +248,18 @@ function createHandlerContext(
  * after any subscribed `tool_call`/`tool_result` handler runs (issue #3948
  * review, `chatgpt-codex-connector[bot]`). `setTimeout` returns a handle we
  * can `clearTimeout` on the winning branch.
+ *
+ * `timeoutMs: null` selects the **unbounded** mode used by `plan_review`: no
+ * timer is ever armed and `pause`/`resume`/`expire` degrade to no-ops, so a
+ * handler parked on a human reviewer is never killed by a deadline. The
+ * cancellation path is unchanged — `signal` is the only way out. A number is
+ * never `Infinity` here on purpose: `setTimeout(fn, Infinity)` fires almost
+ * immediately in Bun, which is why the unbounded mode is a separate branch
+ * instead of a large budget.
  */
 async function raceHandlerWithTimeout<T>(
 	work: (handlerSignal: AbortSignal, timeoutBudget: HandlerTimeoutBudget) => Promise<T> | T,
-	timeoutMs: number,
+	timeoutMs: number | null,
 	signal?: AbortSignal,
 ): Promise<T | typeof EXTENSION_HANDLER_TIMEOUT | typeof EXTENSION_HANDLER_ABORTED> {
 	if (signal?.aborted) return EXTENSION_HANDLER_ABORTED;
@@ -261,8 +271,9 @@ async function raceHandlerWithTimeout<T>(
 	>();
 	const onAbort = () => resolveInterrupt(EXTENSION_HANDLER_ABORTED);
 	signal?.addEventListener("abort", onAbort, { once: true });
+	const unbounded = timeoutMs === null;
 	let timer: Timer | undefined;
-	let remainingMs = timeoutMs;
+	let remainingMs = timeoutMs ?? 0;
 	let activeSince = performance.now();
 	let pauseDepth = 0;
 	let settled = false;
@@ -272,14 +283,14 @@ async function raceHandlerWithTimeout<T>(
 		timer = undefined;
 	};
 	const expire = () => {
-		if (settled) return;
+		if (unbounded || settled) return;
 		settled = true;
 		clearTimer();
 		timeoutController.abort(new DOMException(`Handler timed out after ${timeoutMs}ms`, "TimeoutError"));
 		resolveInterrupt(EXTENSION_HANDLER_TIMEOUT);
 	};
 	const armTimer = () => {
-		if (settled || pauseDepth > 0) return;
+		if (unbounded || settled || pauseDepth > 0) return;
 		activeSince = performance.now();
 		timer = setTimeout(expire, Math.max(0, remainingMs));
 	};
@@ -290,7 +301,7 @@ async function raceHandlerWithTimeout<T>(
 	};
 	const timeoutBudget: HandlerTimeoutBudget = {
 		pause: () => {
-			if (settled) return;
+			if (unbounded || settled) return;
 			pauseDepth++;
 			if (pauseDepth !== 1) return;
 			remainingMs = Math.max(0, remainingMs - (performance.now() - activeSince));
@@ -298,7 +309,7 @@ async function raceHandlerWithTimeout<T>(
 			if (remainingMs <= 0) expire();
 		},
 		resume: () => {
-			if (settled || pauseDepth === 0) return;
+			if (unbounded || settled || pauseDepth === 0) return;
 			pauseDepth--;
 			if (pauseDepth === 0) armTimer();
 		},
@@ -335,6 +346,38 @@ const MAX_PENDING_CREDENTIAL_DISABLED = 32;
 const MAX_PENDING_MCP_NOTIFICATIONS = 100;
 
 /**
+ * Runtime validation for `plan_review` results. The contract is a plain object
+ * crossing an extension boundary, so the shape is checked here rather than
+ * trusted from the type declaration (same posture as `session_stop`).
+ * `undefined` means "not a valid decision" and the caller degrades to its own
+ * approval surface.
+ */
+function parsePlanReviewResult(value: unknown): PlanReviewEventResult | undefined {
+	if (typeof value !== "object" || value === null) return undefined;
+	const candidate = value as Partial<PlanReviewEventResult>;
+	const { action, context, feedback } = candidate;
+	if (action !== "approve" && action !== "refine" && action !== "dismiss") return undefined;
+	if (feedback !== undefined && typeof feedback !== "string") return undefined;
+	if (action === "refine") {
+		// Refine is delivered as a user turn; an empty prompt is not a decision.
+		if (typeof feedback !== "string" || feedback.trim().length === 0) return undefined;
+		return { action, feedback };
+	}
+	if (action === "dismiss") return { action };
+	if (context !== undefined && context !== "fresh" && context !== "compact" && context !== "keep") return undefined;
+	return { action, context: context ?? "fresh" };
+}
+
+/** One-line rendering of a rejected `plan_review` result for the error channel. */
+function describePlanReviewResult(value: unknown): string {
+	if (typeof value !== "object" || value === null) return typeof value;
+	const candidate = value as Partial<PlanReviewEventResult>;
+	return `action=${JSON.stringify(candidate.action)} context=${JSON.stringify(candidate.context)} feedback=${
+		typeof candidate.feedback === "string" ? `${candidate.feedback.trim().length} chars` : typeof candidate.feedback
+	}`;
+}
+
+/**
  * Events handled by the generic emit() method.
  * Events with dedicated emitXxx() methods are excluded for stronger type safety.
  */
@@ -349,6 +392,7 @@ type RunnerEmitEvent = Exclude<
 	| BeforeAgentStartEvent
 	| ResourcesDiscoverEvent
 	| InputEvent
+	| PlanReviewEvent
 >;
 
 type SessionBeforeEvent = Extract<
@@ -1281,7 +1325,7 @@ export class ExtensionRunner {
 		event: TEvent,
 		ctx: ExtensionContext,
 		ext: Extension,
-		timeoutMs: number,
+		timeoutMs: number | null,
 		onFailure?: (kind: "timeout" | "error", message: string) => R,
 		outerSignal?: AbortSignal,
 	): Promise<R | undefined> {
@@ -1560,6 +1604,62 @@ export class ExtensionRunner {
 			}
 		}
 
+		return undefined;
+	}
+
+	/**
+	 * Emit `plan_review` and return the first decision an extension makes.
+	 *
+	 * First-wins, like `emitUserBash`/`emitInput`: the first handler returning
+	 * anything other than `undefined` decides and no later handler runs. This is
+	 * deliberately **not** a policy gate — mandatory vetoes belong on `tool_call`
+	 * for `xd://propose`, which fires earlier and every extension sees.
+	 *
+	 * Handlers run **unbounded** (`timeoutMs: null`): a human reviewer has no
+	 * deadline. The caller's `signal` is the only cancellation, and it is passed
+	 * as the outer signal so a handler parked in `ctx.ui` settles on abort.
+	 *
+	 * `onHandlerStart` fires immediately before each handler runs so a waiting
+	 * UI can name the extension currently holding the decision rather than the
+	 * first subscriber.
+	 *
+	 * A defined-but-invalid result is reported once through the extension-error
+	 * channel and downgraded to `undefined` (host falls back to its own
+	 * approval surface) — no second warning path.
+	 */
+	async emitPlanReview(
+		event: PlanReviewEvent,
+		options?: { signal?: AbortSignal; onHandlerStart?: (extensionPath: string) => void },
+	): Promise<PlanReviewEventResult | undefined> {
+		const ctx = this.createContext();
+		for (const ext of this.extensions) {
+			const handlers = ext.handlers.get("plan_review");
+			if (!handlers || handlers.length === 0) continue;
+			for (const handler of handlers) {
+				if (options?.signal?.aborted) return undefined;
+				options?.onHandlerStart?.(ext.path);
+				const handlerResult = await this.#runHandlerWithTimeout(
+					handler,
+					event,
+					ctx,
+					ext,
+					null,
+					undefined,
+					options?.signal,
+				);
+				if (handlerResult === undefined || handlerResult === null) continue;
+				const decision = parsePlanReviewResult(handlerResult);
+				if (!decision) {
+					this.emitError({
+						extensionPath: ext.path,
+						event: "plan_review",
+						error: `invalid plan_review result: ${describePlanReviewResult(handlerResult)}`,
+					});
+					return undefined;
+				}
+				return decision;
+			}
+		}
 		return undefined;
 	}
 

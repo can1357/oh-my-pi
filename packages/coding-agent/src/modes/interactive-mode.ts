@@ -83,7 +83,7 @@ import type {
 	ExtensionWidgetContent,
 	ExtensionWidgetOptions,
 } from "../extensibility/extensions";
-import type { CompactOptions } from "../extensibility/extensions/types";
+import type { CompactOptions, PlanReviewEventResult } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import { loadSlashCommands } from "../extensibility/slash-commands";
@@ -215,6 +215,7 @@ import type { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor"
 import type { HookInputComponent } from "@oh-my-pi/pi-tui/overlays/hook-input";
 import type { HookSelectorComponent, HookSelectorSlider } from "@oh-my-pi/pi-tui/overlays/hook-selector";
 import { type PlanReviewAnnotationState, PlanReviewOverlay } from "@oh-my-pi/pi-tui/overlays/plan-review-overlay";
+import { PlanReviewWaitingOverlay } from "@oh-my-pi/pi-tui/overlays/plan-review-waiting-overlay";
 import { PlanSaveOverlay, type PlanSaveOverlayResult } from "@oh-my-pi/pi-tui/overlays/plan-save-overlay";
 import { ServedModelTracker } from "@oh-my-pi/pi-tui/chat/served-model-marker";
 import { SessionInfoOverlay } from "@oh-my-pi/pi-tui/overlays/session-info-overlay";
@@ -1072,6 +1073,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	#planReviewOverlayHandle: OverlayHandle | undefined;
 	#sessionInfoOverlayHandle: OverlayHandle | undefined;
 	#planReviewCancel: (() => void) | undefined;
+	#planReviewWaitingOverlayHandle: OverlayHandle | undefined;
+	/** Single-flight controller for an in-progress external `plan_review`. */
+	#pendingPlanReview: AbortController | undefined;
 	/** Serializable review annotations keyed by the resolved plan file path. */
 	#planReviewAnnotationState = new Map<string, PlanReviewAnnotationState>();
 	/** Annotation state held until the associated queued refinement actually starts. */
@@ -4056,6 +4060,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		paused?: boolean;
 		deferModelRestore?: boolean;
 	}): Promise<void> {
+		// Plan mode is going away: an external reviewer still holding this plan is
+		// deciding about a mode that no longer exists.
+		this.#abortPendingPlanReview("plan-exit");
 		const planModeState = this.session.getPlanModeState();
 		const planModeTools = this.session.getEnabledToolNames();
 		const planModeMountedTools = this.session.getMountedXdevToolNames();
@@ -4326,17 +4333,40 @@ export class InteractiveMode implements InteractiveModeContext {
 		return promise;
 	}
 
+	/** Hides both plan-review surfaces: the picker and the external-review wait.
+	 *  They are alternatives for the same decision, so they share one teardown —
+	 *  which also means an approved plan keeps the waiting overlay on screen
+	 *  until `#approvePlan` dispatches, blocking stray keystrokes exactly as the
+	 *  picker does (PR #5689 review). */
 	#hidePlanReview(): void {
 		this.#planReviewCancel = undefined;
 		this.#planReviewOverlayHandle?.hide();
 		this.#planReviewOverlayHandle = undefined;
 		this.#planReviewOverlay = undefined;
+		this.#planReviewWaitingOverlayHandle?.hide();
+		this.#planReviewWaitingOverlayHandle = undefined;
+	}
+
+	/** Cancel an in-flight external plan review. Only `"esc"` re-opens the
+	 *  built-in picker; every other reason is a host-side teardown where a second
+	 *  picker would either strand the operator or leave `showPlanReview`'s promise
+	 *  unresolved forever. */
+	#abortPendingPlanReview(
+		reason: "esc" | "superseded" | "session-switch" | "plan-exit" | "shutdown" | "dismissed",
+	): void {
+		const controller = this.#pendingPlanReview;
+		if (!controller) return;
+		this.#pendingPlanReview = undefined;
+		controller.abort(reason);
 	}
 
 	#dismissPlanReview(): void {
 		const cancel = this.#planReviewCancel;
 		this.#planReviewCancel = undefined;
 		cancel?.();
+		// A dismissed review surface must also cancel the external reviewer:
+		// otherwise a late approve lands after the operator regained the editor.
+		this.#abortPendingPlanReview("dismissed");
 		this.#hidePlanReview();
 	}
 
@@ -4599,6 +4629,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			preserveContext?: boolean;
 			compactBeforeExecute?: boolean;
 			executionModel?: ResolvedRoleModel;
+			/** Extension that approved on the operator's behalf, when not the picker. */
+			approvedBy?: string;
 		},
 	): Promise<boolean> {
 		const previousPresentation = this.#planModePreviousToolPresentation ?? {
@@ -4737,6 +4769,31 @@ export class InteractiveMode implements InteractiveModeContext {
 		const seededName = humanizePlanTitle(options.title);
 		if (seededName && !this.sessionManager.getSessionName()) {
 			await this.sessionManager.setSessionName(seededName, "auto");
+		}
+
+		// Provenance for an approval nobody made in this TUI. Written here — after
+		// the clear/compact that would otherwise drop it, and before the
+		// isStreaming fork below — so the record lands in the session that actually
+		// executes the plan and survives a restart.
+		if (options.approvedBy) {
+			// A turn queued during compaction may already be streaming; the default
+			// delivery would inject this note as a steer into that turn. `followUp`
+			// keeps it a plain transcript entry either way.
+			const wasStreaming = this.session.isStreaming;
+			await this.session.sendCustomMessage(
+				{
+					customType: "plan-review-approved",
+					content: `Plan approved by extension ${options.approvedBy}`,
+					display: true,
+				},
+				{ deliverAs: "followUp" },
+			);
+			// An idle `sendCustomMessage` appends to state and session without
+			// emitting `message_start`, so nothing paints it: rebuild the transcript,
+			// the same way the extension `sendMessage` bridge does for a displayed
+			// message sent off-turn. A streaming delivery paints on its own
+			// `message_start` when the queued follow-up is consumed.
+			if (!wasStreaming && this.initialChatRendered) this.rebuildChatFromMessages();
 		}
 
 		// markPlanReferenceSent fires only on the dispatch path so the synthetic
@@ -5442,10 +5499,18 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		const { title } = resolvePlanTitle({ planContent, planFilePath });
-		await this.handlePlanApproval({ planFilePath, title, planExists: true });
+		// The operator asked for the built-in review surface by name, so this path
+		// never hands the decision to a `plan_review` extension.
+		await this.handlePlanApproval({ planFilePath, title, planExists: true }, { external: false });
 	}
 
-	async handlePlanApproval(details: PlanApprovalDetails): Promise<void> {
+	/**
+	 * Run the plan-approval decision for `details`.
+	 *
+	 * `external` (default `true`) controls whether subscribed extensions get a
+	 * `plan_review` event before the built-in picker opens.
+	 */
+	async handlePlanApproval(details: PlanApprovalDetails, options?: { external?: boolean }): Promise<void> {
 		if (!this.planModeEnabled) {
 			this.showWarning("Plan mode is not active.");
 			return;
@@ -5460,7 +5525,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		const planFilePath = details.planFilePath || this.planModePlanFilePath || (await this.#getPlanFilePath());
 		this.planModePlanFilePath = planFilePath;
-		const planContent = await this.#readPlanFile(planFilePath);
+		let planContent = await this.#readPlanFile(planFilePath);
 		if (!planContent) {
 			this.showError(`Plan file not found at ${planFilePath}`);
 			return;
@@ -5514,6 +5579,62 @@ export class InteractiveMode implements InteractiveModeContext {
 		let editedContent: string | undefined;
 		let feedback = "";
 		const annotationStateKey = this.#resolvePlanFilePath(planFilePath);
+		// Capture the tier choice and hand it to #approvePlan, which applies it
+		// AFTER #exitPlanMode. #exitPlanMode normally restores
+		// #planModePreviousModelState (the model from before plan mode), so
+		// applying the slider choice any earlier would be silently reverted.
+		// Pass executionModel only when the slider was actually shown — a
+		// singleton cycle (e.g. only modelRoles.plan is configured, so
+		// getRoleModelCycle synthesizes a lone `default` entry from the
+		// currently active plan model) hides the slider, nobody made a
+		// selection, and the pre-plan model is not in the cycle. Pinning
+		// that singleton would silently switch the session back to the plan
+		// model after #exitPlanMode restored the pre-plan model.
+		// Treat the choice as implicit only when applying the selected role
+		// would land on the same end state as the restore — same model AND
+		// the same effective thinking level. A role with an explicit thinking
+		// suffix that differs from the restored thinking level must still go
+		// through applyRoleModel, otherwise approving on the same model with a
+		// different configured thinking level silently keeps the pre-plan level.
+		const resolveExecutionModel = (tierIndex: number): ResolvedRoleModel | undefined => {
+			const restoredState = this.#planModePreviousModelState;
+			const restoredIndex =
+				cycle && restoredState
+					? cycle.models.findIndex(entry => {
+							if (!modelsAreEqual(entry.model, restoredState.model)) return false;
+							if (!entry.explicitThinkingLevel) return true;
+							return entry.thinkingLevel === restoredState.thinkingLevel;
+						})
+					: -1;
+			return slider && cycle && tierIndex !== restoredIndex ? cycle.models[tierIndex] : undefined;
+		};
+
+		// Hand the decision to a `plan_review` extension first. Everything above is
+		// a pure read of state the picker would have shown, so the external
+		// reviewer sees exactly the revision and options the operator would.
+		if (options?.external !== false) {
+			const outcome = await this.#reviewPlanExternally(planFilePath, planContent, details.title);
+			if (outcome.kind === "cancelled") return;
+			if (outcome.kind === "decided") {
+				const applied = await this.#applyExternalPlanReview(
+					outcome.result,
+					outcome.reviewer,
+					outcome.hideWaitingOverlay,
+					{
+						planFilePath,
+						title: details.title,
+						annotationStateKey,
+						keepContextDisabled,
+						executionModel: resolveExecutionModel(startTierIndex),
+					},
+				);
+				if (applied) return;
+			} else {
+				// Esc re-reads the file: the reviewer may have rewritten it, and the
+				// preview must show the same revision approval would execute.
+				planContent = outcome.planContent;
+			}
+		}
 
 		const choice = await this.showPlanReview(
 			planContent,
@@ -5578,42 +5699,14 @@ export class InteractiveMode implements InteractiveModeContext {
 					closePlanReview();
 					return;
 				}
-				// Capture the operator's tier choice and hand it to #approvePlan, which
-				// applies it AFTER #exitPlanMode. #exitPlanMode normally restores
-				// #planModePreviousModelState (the model from before plan mode), so
-				// applying the slider choice any earlier would be silently reverted.
-				// Pass executionModel only when the slider was actually shown — a
-				// singleton cycle (e.g. only modelRoles.plan is configured, so
-				// getRoleModelCycle synthesizes a lone `default` entry from the
-				// currently active plan model) hides the slider, the operator made
-				// no selection, and the pre-plan model is not in the cycle. Pinning
-				// that singleton would silently switch the session back to the plan
-				// model after #exitPlanMode restored the pre-plan model.
-				// Treat the choice as implicit only when applying the selected role
-				// would land on the same end state as the restore — same model AND
-				// the same effective thinking level. A role with an explicit thinking
-				// suffix that differs from the restored thinking level must still go
-				// through applyRoleModel, otherwise approving on the same model with a
-				// different configured thinking level silently keeps the pre-plan level.
-				const restoredState = this.#planModePreviousModelState;
-				const restoredIndex =
-					cycle && restoredState
-						? cycle.models.findIndex(entry => {
-								if (!modelsAreEqual(entry.model, restoredState.model)) return false;
-								if (!entry.explicitThinkingLevel) return true;
-								return entry.thinkingLevel === restoredState.thinkingLevel;
-							})
-						: -1;
-				const executionModel =
-					slider && cycle && selectedTierIndex !== restoredIndex ? cycle.models[selectedTierIndex] : undefined;
-				const executionDispatched = await this.#approvePlan(latestPlanContent, {
+				await this.#applyPlanApproval(latestPlanContent, {
 					planFilePath,
 					title: details.title,
+					annotationStateKey,
 					preserveContext: choice !== "Approve and execute",
 					compactBeforeExecute: choice === "Approve and compact context",
-					executionModel,
+					executionModel: resolveExecutionModel(selectedTierIndex),
 				});
-				if (executionDispatched) this.#planReviewAnnotationState.delete(annotationStateKey);
 			} catch (error) {
 				this.showError(
 					`Failed to finalize approved plan: ${error instanceof Error ? error.message : String(error)}`,
@@ -5624,27 +5717,227 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 
 		if (choice === "Refine plan") {
-			const refinement = feedback.trim();
-			try {
-				if (refinement) {
-					if (this.onInputCallback) {
-						const input = this.startPendingSubmission({ text: feedback });
-						this.#planReviewAnnotationStateBySubmission.set(input, annotationStateKey);
-						this.onInputCallback(input);
-					} else {
-						await this.session.prompt(feedback);
-						this.#planReviewAnnotationState.delete(annotationStateKey);
-					}
-				} else {
-					this.showStatus("Refine plan: enter a follow-up prompt.");
-				}
-			} catch (error) {
-				this.showError(`Failed to refine plan: ${error instanceof Error ? error.message : String(error)}`);
-			}
+			if (feedback.trim()) await this.#applyPlanRefinement(feedback, annotationStateKey);
+			else this.showStatus("Refine plan: enter a follow-up prompt.");
 			closePlanReview();
 			return;
 		}
 		closePlanReview();
+	}
+
+	/** Display name for the extension currently holding the plan-review decision. */
+	#planReviewerName(extensionPath: string): string {
+		const base = path.basename(extensionPath).replace(/\.(?:[cm]?[jt]sx?)$/i, "");
+		return base || extensionPath;
+	}
+
+	/**
+	 * Offer the plan to `plan_review` extensions and wait, under a modal overlay,
+	 * for the first decision.
+	 *
+	 * The overlay holds focus for the whole wait: the operator cannot start a
+	 * turn that would race the reviewer's answer (and a stray `/clear` cannot
+	 * abort the approval the reviewer is about to grant), and Esc/Ctrl+C there
+	 * is the operator's way back to the built-in picker.
+	 */
+	async #reviewPlanExternally(
+		planFilePath: string,
+		planContent: string,
+		title: string,
+	): Promise<
+		| { kind: "decided"; result: PlanReviewEventResult; reviewer: string; hideWaitingOverlay: () => void }
+		| { kind: "picker"; planContent: string }
+		| { kind: "cancelled" }
+	> {
+		const runner = this.session.extensionRunner;
+		if (!runner?.hasHandlers("plan_review")) return { kind: "picker", planContent };
+
+		// Single-flight: a newer proposal supersedes the review still on screen,
+		// exactly as `showPlanReview` replaces a live picker. Tear the old surface
+		// down here, before the new one exists, so the superseded continuation
+		// never has to touch the UI.
+		this.#abortPendingPlanReview("superseded");
+		this.#hidePlanReview();
+		const controller = new AbortController();
+		this.#pendingPlanReview = controller;
+		let reviewer = "extension";
+		const overlay = new PlanReviewWaitingOverlay(reviewer, () => this.#abortPendingPlanReview("esc"));
+		const handle = this.ui.showOverlay(overlay, {
+			anchor: "bottom-center",
+			width: "100%",
+			margin: 0,
+		});
+		this.#planReviewWaitingOverlayHandle = handle;
+		this.ui.setFocus(overlay);
+		this.ui.requestRender();
+		// Only the review that still owns the on-screen overlay may close it. A
+		// superseded continuation resuming later would otherwise hide its
+		// successor's overlay — or its already-open picker, stranding
+		// `showPlanReview`'s promise forever.
+		const hideIfStillOurs = (): void => {
+			if (this.#planReviewWaitingOverlayHandle !== handle) return;
+			this.#hidePlanReview();
+			this.ui.requestRender();
+		};
+
+		let result: PlanReviewEventResult | undefined;
+		try {
+			result = await runner.emitPlanReview(
+				{
+					type: "plan_review",
+					planFilePath,
+					resolvedPlanPath: this.#resolvePlanFilePath(planFilePath),
+					title,
+					planContent,
+					signal: controller.signal,
+				},
+				{
+					signal: controller.signal,
+					onHandlerStart: extensionPath => {
+						reviewer = this.#planReviewerName(extensionPath);
+						overlay.setReviewer(reviewer);
+						this.ui.requestRender();
+					},
+				},
+			);
+		} catch (error) {
+			// The overlay is modal and its Esc only aborts the review that is no
+			// longer running: leaving it up would freeze the session.
+			hideIfStillOurs();
+			this.showError(`Plan review failed: ${error instanceof Error ? error.message : String(error)}`);
+			return { kind: "cancelled" };
+		} finally {
+			// Detach BEFORE any decision is applied: #approvePlan reaches
+			// handleClearCommand → prepareSessionSwitch, which would otherwise abort
+			// our own signal mid-approval and kill the reviewer's process.
+			if (this.#pendingPlanReview === controller) this.#pendingPlanReview = undefined;
+		}
+
+		if (controller.signal.aborted) {
+			// Only the operator's own cancel falls back to the picker. The other
+			// reasons (superseded, session switch, plan exit, shutdown) tore the
+			// surface down deliberately, and whoever raised them owns the UI now: a
+			// picker here would either stack a second review or park on a promise
+			// nothing will ever resolve.
+			if (controller.signal.reason !== "esc") return { kind: "cancelled" };
+			hideIfStillOurs();
+			const latestPlanContent = await this.#readPlanFile(planFilePath);
+			if (latestPlanContent === null) {
+				this.showError(`Plan file not found at ${planFilePath}`);
+				return { kind: "cancelled" };
+			}
+			return { kind: "picker", planContent: latestPlanContent };
+		}
+		if (!result) {
+			hideIfStillOurs();
+			return { kind: "picker", planContent };
+		}
+		return { kind: "decided", result, reviewer, hideWaitingOverlay: hideIfStillOurs };
+	}
+
+	/**
+	 * Apply a `plan_review` decision. Returns `false` when the decision could not
+	 * be honored and the built-in picker must open instead.
+	 */
+	async #applyExternalPlanReview(
+		result: PlanReviewEventResult,
+		reviewer: string,
+		hideWaitingOverlay: () => void,
+		options: {
+			planFilePath: string;
+			title: string;
+			annotationStateKey: string;
+			keepContextDisabled: boolean;
+			executionModel: ResolvedRoleModel | undefined;
+		},
+	): Promise<boolean> {
+		if (result.action === "dismiss") {
+			hideWaitingOverlay();
+			this.showStatus("Plan review dismissed — plan mode still active");
+			return true;
+		}
+		if (result.action === "refine") {
+			hideWaitingOverlay();
+			await this.#applyPlanRefinement(result.feedback ?? "", options.annotationStateKey);
+			return true;
+		}
+		if (result.context === "keep" && options.keepContextDisabled) {
+			// Same guard the picker enforces by disabling the option. Degrading
+			// silently to another context mode would execute the plan under a
+			// context budget nobody chose.
+			hideWaitingOverlay();
+			this.showWarning("Plan review asked to keep context, but the context is too full — choose how to proceed.");
+			return false;
+		}
+		try {
+			// Execute the revision on disk: while the review ran the agent was parked
+			// behind the overlay, so the reviewer is the only writer the plan can have.
+			const latestPlanContent = await this.#readPlanFile(options.planFilePath);
+			if (!latestPlanContent) {
+				hideWaitingOverlay();
+				this.showError(`Plan file not found at ${options.planFilePath}`);
+				return true;
+			}
+			await this.#applyPlanApproval(latestPlanContent, {
+				planFilePath: options.planFilePath,
+				title: options.title,
+				annotationStateKey: options.annotationStateKey,
+				preserveContext: result.context !== "fresh",
+				compactBeforeExecute: result.context === "compact",
+				executionModel: options.executionModel,
+				approvedBy: reviewer,
+			});
+		} catch (error) {
+			// A modal overlay left up here would be unclosable: its Esc only aborts
+			// a review that already finished.
+			this.showError(`Failed to finalize approved plan: ${error instanceof Error ? error.message : String(error)}`);
+		}
+		hideWaitingOverlay();
+		return true;
+	}
+
+	/** Shared approval path for the built-in picker and for `plan_review`. */
+	async #applyPlanApproval(
+		planContent: string,
+		options: {
+			planFilePath: string;
+			title: string;
+			annotationStateKey: string;
+			preserveContext: boolean;
+			compactBeforeExecute: boolean;
+			executionModel: ResolvedRoleModel | undefined;
+			approvedBy?: string;
+		},
+	): Promise<void> {
+		try {
+			const executionDispatched = await this.#approvePlan(planContent, {
+				planFilePath: options.planFilePath,
+				title: options.title,
+				preserveContext: options.preserveContext,
+				compactBeforeExecute: options.compactBeforeExecute,
+				executionModel: options.executionModel,
+				approvedBy: options.approvedBy,
+			});
+			if (executionDispatched) this.#planReviewAnnotationState.delete(options.annotationStateKey);
+		} catch (error) {
+			this.showError(`Failed to finalize approved plan: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
+	/** Shared refine path: the feedback is delivered as an ordinary user turn. */
+	async #applyPlanRefinement(feedback: string, annotationStateKey: string): Promise<void> {
+		try {
+			if (this.onInputCallback) {
+				const input = this.startPendingSubmission({ text: feedback });
+				this.#planReviewAnnotationStateBySubmission.set(input, annotationStateKey);
+				this.onInputCallback(input);
+			} else {
+				await this.session.prompt(feedback);
+				this.#planReviewAnnotationState.delete(annotationStateKey);
+			}
+		} catch (error) {
+			this.showError(`Failed to refine plan: ${error instanceof Error ? error.message : String(error)}`);
+		}
 	}
 
 	/**
@@ -5702,8 +5995,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		const choice = await this.showHookSelector(`${headline}\n${body}`, ["Yes", "No"]);
 		return choice === "Yes";
 	}
-
 	stop(): void {
+		this.#abortPendingPlanReview("shutdown");
 		this.#appearanceRefreshRequest = undefined;
 		this.#streamPublisher?.dispose();
 		this.#streamPublisher = undefined;
@@ -6555,6 +6848,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#cleanseController.dispose();
 		this.#extensionUiController.clearExtensionTerminalInputListeners();
 		this.clearPinnedError();
+		this.#abortPendingPlanReview("session-switch");
 		this.#hidePlanReview();
 	}
 

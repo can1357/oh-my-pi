@@ -909,6 +909,38 @@ export interface InputEvent {
 }
 
 // ============================================================================
+// Plan Review Events
+// ============================================================================
+
+/**
+ * Fired when plan mode is about to ask for approval of a finished plan, before
+ * the built-in approval picker opens. Lets an external reviewer (a web UI, a
+ * second human, an internal tool) own the decision instead of the TUI picker.
+ *
+ * Aggregation is **first-wins**: the first handler returning a defined result
+ * decides and no later handler runs. This is a decision hook, not a policy
+ * gate — an extension that must veto every plan unconditionally belongs on
+ * `tool_call` for `xd://propose`, which fires earlier and cannot be outraced.
+ *
+ * Handlers are **not** bounded by the generic 30s handler budget: human review
+ * takes as long as it takes. `signal` is the host's cancellation — it aborts
+ * when the operator cancels the wait, a newer proposal supersedes this one,
+ * the session switches, plan mode exits, or the host shuts down.
+ */
+export interface PlanReviewEvent {
+	type: "plan_review";
+	/** Plan path as plan-mode state holds it (`local://…` or cwd-relative). */
+	planFilePath: string;
+	/** Absolute on-disk path — the only reference an external process can open. */
+	resolvedPlanPath: string;
+	title: string;
+	/** The revision the host is handing over for review. */
+	planContent: string;
+	/** Host cancellation; tear down your own review surface when it fires. */
+	signal: AbortSignal;
+}
+
+// ============================================================================
 // Tool Events
 // ============================================================================
 
@@ -1101,6 +1133,7 @@ export type ExtensionEvent =
 	| UserBashEvent
 	| UserPythonEvent
 	| InputEvent
+	| PlanReviewEvent
 	| ToolCallEvent
 	| ToolResultEvent
 	| ToolApprovalRequestedEvent
@@ -1126,6 +1159,25 @@ export interface InputEventResult {
 	text?: string;
 	/** Replace any pending images */
 	images?: ImageContent[];
+}
+
+/**
+ * Result from a `plan_review` handler. Flat interface plus runtime validation,
+ * like `SessionStopEventResult` / `ToolCallEventResult`: an invalid shape is
+ * reported through the extension-error channel and treated as "no decision".
+ *
+ * Returning `undefined` means "no decision" — the host falls back to its
+ * built-in approval surface with unchanged behavior.
+ */
+export interface PlanReviewEventResult {
+	action: "approve" | "refine" | "dismiss";
+	/**
+	 * Context handling for `approve` only; defaults to `"fresh"` (the picker's
+	 * "Approve and execute"). Ignored outside interactive mode.
+	 */
+	context?: "fresh" | "compact" | "keep";
+	/** Required, and non-empty, for `refine`: delivered as a user turn. */
+	feedback?: string;
 }
 
 /** Result from user_bash event handler */
@@ -1282,6 +1334,7 @@ export interface ExtensionAPI {
 	on(event: "goal_updated", handler: ExtensionHandler<GoalUpdatedEvent>): void;
 	on(event: "credential_disabled", handler: ExtensionHandler<CredentialDisabledEvent>): void;
 	on(event: "input", handler: ExtensionHandler<InputEvent, InputEventResult>): void;
+	on(event: "plan_review", handler: ExtensionHandler<PlanReviewEvent, PlanReviewEventResult>): void;
 	on(event: "tool_approval_requested", handler: ExtensionHandler<ToolApprovalRequestedEvent>): void;
 	on(event: "tool_approval_resolved", handler: ExtensionHandler<ToolApprovalResolvedEvent>): void;
 	on(event: "tool_call", handler: ExtensionHandler<ToolCallEvent, ToolCallEventResult>): void;

@@ -1239,7 +1239,13 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 									return;
 								}
 								if (name && isResolutionDeviceName(name)) {
-									const { result, xdev } = await dispatchResolutionDevice(this.session, name, deviceContent);
+									const { result, xdev } = await dispatchResolutionDevice(
+										this.session,
+										name,
+										deviceContent,
+										signal,
+										_toolCallId,
+									);
 									xdResult = {
 										content: result.content,
 										details: { xdev },

@@ -2048,11 +2048,17 @@ describe("InteractiveMode plan review rendering", () => {
 			await mode.openPlanReview();
 
 			expect(approval).toHaveBeenCalledTimes(1);
-			expect(approval).toHaveBeenCalledWith({
-				planFilePath: "local://auth-refactor-plan.md",
-				title: "Auth-refactor",
-				planExists: true,
-			});
+			// `external: false` keeps `/plan-review` on the built-in picker: the
+			// operator asked for that surface by name, so no `plan_review` extension
+			// gets to answer for them.
+			expect(approval).toHaveBeenCalledWith(
+				{
+					planFilePath: "local://auth-refactor-plan.md",
+					title: "Auth-refactor",
+					planExists: true,
+				},
+				{ external: false },
+			);
 		});
 
 		it("warns and does not start approval when plan mode is inactive", async () => {
