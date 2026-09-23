@@ -1550,6 +1550,7 @@ describe("AgentSession retry delay cap", () => {
 			from: `${exhaustedModel.provider}/${exhaustedModel.id}`,
 			to: `${fallbackModel.provider}/${fallbackModel.id}`,
 			role: "default",
+			reason: expect.stringContaining("429 Weekly usage limit reached"),
 		});
 		for (const call of waitSpy.mock.calls) {
 			expect(call[0]).toBeLessThan(300_000);
