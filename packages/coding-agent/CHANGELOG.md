@@ -350,6 +350,7 @@
 
 ### Added
 
+- Added configurable and auto-detected token pricing extraction for `openai-models-list` discovery via `discovery.pricing` and standard `/models` pricing fields ([#12149](https://github.com/can1357/oh-my-pi/pull/12149) by [@github-vincent-saluzzo](https://github.com/github-vincent-saluzzo)).
 - Added keyless Parallel web search when the provider is explicitly selected ([#9770](https://github.com/can1357/oh-my-pi/pull/9770) by [@georgeatparallel](https://github.com/georgeatparallel)).
 - Sloppy edits support `<SM:AFTER>` to insert new lines after an anchor without repeating or replacing it.
 - Fixed eligible full OpenAI Responses request-body timeouts by retrying once after conservative local tool-result elision, while preserving assistant/user history, unsafe partial output, and existing stateful retries ([#11878](https://github.com/can1357/oh-my-pi/pull/11878) by [@hellofrommorgan](https://github.com/hellofrommorgan)).
