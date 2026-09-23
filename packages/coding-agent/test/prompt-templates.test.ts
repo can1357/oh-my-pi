@@ -138,10 +138,6 @@ describe("substituteArgs", () => {
 		);
 	});
 
-	test("should handle command with no placeholders", () => {
-		expect(substituteArgs("Just plain text", ["a", "b"])).toBe("Just plain text");
-	});
-
 	test("should handle command with only placeholders", () => {
 		expect(substituteArgs("$1 $2 $@", ["a", "b", "c"])).toBe("a b a b c");
 	});

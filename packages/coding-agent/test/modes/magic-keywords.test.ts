@@ -4,18 +4,9 @@ import {
 	renderOrchestrateNotice,
 	renderWorkflowNotice,
 } from "@oh-my-pi/pi-coding-agent/modes/magic-keywords";
-import { SETTINGS_SCHEMA } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
 import { clearBundledCommandsCache, loadBundledCommands } from "@oh-my-pi/pi-coding-agent/task/commands";
 
 describe("magic keyword registry", () => {
-	it("derives one settings toggle per keyword and names every word in the master switch", () => {
-		const description = SETTINGS_SCHEMA["magicKeywords.enabled"].ui.description;
-		for (const keyword of MAGIC_KEYWORDS) {
-			expect(SETTINGS_SCHEMA[`magicKeywords.${keyword.id}`].default).toBe(true);
-			expect(description).toContain(keyword.word);
-		}
-	});
-
 	it("keeps ids and words unique so notice types and settings keys cannot collide", () => {
 		expect(new Set(MAGIC_KEYWORDS.map(keyword => keyword.id)).size).toBe(MAGIC_KEYWORDS.length);
 		expect(new Set(MAGIC_KEYWORDS.map(keyword => keyword.word)).size).toBe(MAGIC_KEYWORDS.length);

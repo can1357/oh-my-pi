@@ -30,7 +30,7 @@ It is a TypeScript port of the default (`cascade`) strategy of [jegrep](https://
 
 `omp://` hits are canonical doc URLs (`omp://tools/read.md`), not cwd-relative paths — open them directly with `read`, including with `:start-end` selectors (`read omp://tools/read.md:50-100`). Hidden files are excluded. Hit paths are otherwise reported relative to the session cwd, not the searched directory, so `read` and hyperlinks resolve without knowing the scope.
 
-`find` is disabled by default (`find.enabled = false`); once enabled it is an essential (top-level) tool, never mounted under `xd://`. It needs a judge: configure the `judge` model role (a TypeSafe System One model such as `typesafe/jev-latest`).
+`find.enabled` is `auto` by default: `find` is enabled only when the `judge` model role resolves first to a native System One model (TypeSafe `typesafe/jev-latest`, directly or through OpenRouter), not a prompted on-device or chat model. `on` enables it whichever model judges; `off` disables it. Once enabled it is an essential (top-level) tool, never mounted under `xd://`.
 
 ## Outputs
 - Single text block, strongest hit first:

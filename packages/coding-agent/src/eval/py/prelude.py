@@ -879,17 +879,18 @@ if "__omp_prelude_loaded__" not in globals():
     class JudgmentBatch:
         """Host-owned bulk judgment run. Pull settled items with ``await drain()`` across as many cells as needed."""
 
-        __slots__ = ("id", "total")
+        __slots__ = ("id", "total", "intent")
 
-        def __init__(self, id, total):
+        def __init__(self, id, total, intent):
             self.id = id
             self.total = total
+            self.intent = intent
 
         def _call(self, op, **args):
             return _bridge_call("__judge_batch__", {"op": op, "id": self.id, **args})
 
         def status(self):
-            """Snapshot: ``done``, ``total``, ``failed``, ``running``, ``model``, ``elapsedS``."""
+            """Snapshot: ``intent``, ``done``, ``total``, ``failed``, ``running``, ``model``, ``elapsedS``."""
             return self._call("status")
 
         async def drain(self, timeout=None):
@@ -937,15 +938,32 @@ if "__omp_prelude_loaded__" not in globals():
     def _judge_batch_from(result):
         if not isinstance(result, dict) or not isinstance(result.get("id"), str):
             raise RuntimeError("judge_batch() did not return a batch")
-        return JudgmentBatch(result["id"], int(result.get("total") or 0))
+        return JudgmentBatch(
+            result["id"],
+            int(result.get("total") or 0),
+            result.get("intent") or "Judging",
+        )
 
-    def judge_batch(states, questions, *, concurrency=None, retries=None, min_ok=None):
+    def judge_batch(
+        states,
+        questions,
+        *,
+        concurrency=None,
+        retries=None,
+        min_ok=None,
+        intent=None,
+    ):
         """Judge every state with the same ``questions`` on the host; returns a ``JudgmentBatch`` to drain across cells.
 
-        ``states`` is ``{key: state}`` or a list (keys are indices). Item failures land in
-        ``JudgmentItem.error``; only a run that dies wholesale raises from ``drain()``.
+        ``states`` is ``{key: state}`` or a list (keys are indices). ``intent`` is an
+        optional nonempty progress/job label. Item failures land in ``JudgmentItem.error``;
+        only a run that dies wholesale raises from ``drain()``.
         """
         _check_questions(questions)
+        if intent is not None and (
+            not isinstance(intent, str) or not intent.strip()
+        ):
+            raise TypeError("judge_batch() intent must be a non-empty string")
         if isinstance(states, dict):
             items = [{"key": key, "state": state} for key, state in states.items()]
         elif isinstance(states, (list, tuple)):
@@ -959,6 +977,8 @@ if "__omp_prelude_loaded__" not in globals():
             args["retries"] = int(retries)
         if min_ok is not None:
             args["minOk"] = int(min_ok)
+        if intent is not None:
+            args["intent"] = intent
         return _judge_batch_from(_bridge_call("__judge_batch__", args))
 
     def _attach_judge_batch(id):

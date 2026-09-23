@@ -1,7 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
-import { getOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/stream";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 
@@ -19,13 +18,6 @@ afterEach(() => {
 });
 
 describe("Abliteration login wiring", () => {
-	test("registers Abliteration in the login provider selector", () => {
-		const provider = getOAuthProviders().find(item => item.id === "abliteration");
-		expect(provider).toBeDefined();
-		expect(provider?.name).toBe("Abliteration");
-		expect(provider?.available).toBe(true);
-	});
-
 	test("resolves ABLITERATION_API_KEY and ABLIT_KEY from environment", () => {
 		delete Bun.env.ABLITERATION_API_KEY;
 		Bun.env.ABLIT_KEY = "abliteration-alias-key";

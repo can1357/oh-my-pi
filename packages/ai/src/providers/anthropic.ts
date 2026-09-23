@@ -467,8 +467,11 @@ type AnthropicControlState = {
 	stableSystemBlocks: AnthropicSystemBlock[] | undefined;
 	systemFingerprint: string | undefined;
 	controlTransitions: AnthropicControlTransition[];
-	baseEffort: AnthropicOutputEffort | undefined;
+	/** Whether the effort baseline was captured; `undefined` efforts are a valid baseline. */
+	effortBaselined: boolean;
+	/** Top-level `output_config.effort` of the baseline request; `undefined` = API default. */
 	baseEffortWire: AnthropicOutputEffort | undefined;
+	/** Effort in force at the conversation tail; `undefined` = API default. */
 	currentEffort: AnthropicOutputEffort | undefined;
 };
 
@@ -505,7 +508,7 @@ function createAnthropicControlState(): AnthropicControlState {
 		stableSystemBlocks: undefined,
 		systemFingerprint: undefined,
 		controlTransitions: [],
-		baseEffort: undefined,
+		effortBaselined: false,
 		baseEffortWire: undefined,
 		currentEffort: undefined,
 	};
@@ -4008,7 +4011,7 @@ function resetAnthropicControlState(state: AnthropicControlState): void {
 	state.stableSystemBlocks = undefined;
 	state.systemFingerprint = undefined;
 	state.controlTransitions = [];
-	state.baseEffort = undefined;
+	state.effortBaselined = false;
 	state.baseEffortWire = undefined;
 	state.currentEffort = undefined;
 }
@@ -4211,6 +4214,13 @@ function planStableAnthropicTools(
  * later changes as per-message effort. Anthropic applies a system message's
  * `output_config.effort` from the next `user` turn on, so the control is
  * anchored before the latest user message to take effect on this response.
+ *
+ * An omitted effort means the API's per-model default (`medium` on Opus 5.5,
+ * `high` elsewhere), so it is tracked as its own state rather than assumed to
+ * be any concrete level: every later explicit level is sent as a control. A
+ * per-message control cannot express "back to the API default", so a request
+ * that drops its effort mid-session keeps the level already in force instead
+ * of rewriting the top-level value and invalidating the cache.
  */
 function planStableAnthropicEffort(
 	current: AnthropicOutputEffort | undefined,
@@ -4219,18 +4229,17 @@ function planStableAnthropicEffort(
 	enabled: boolean,
 ): AnthropicOutputEffort | undefined {
 	if (!state || !enabled) return current;
-	const effective = current ?? "high";
-	if (state.baseEffort === undefined) {
-		state.baseEffort = effective;
+	if (!state.effortBaselined) {
+		state.effortBaselined = true;
 		state.baseEffortWire = current;
-		state.currentEffort = effective;
+		state.currentEffort = current;
 		return current;
 	}
-	if (state.currentEffort !== effective) {
+	if (current !== undefined && state.currentEffort !== current) {
 		const lastUserIndex = messages.findLastIndex(message => message.role === "user");
 		const messageCount = lastUserIndex >= 0 ? lastUserIndex : messages.length;
-		recordAnthropicControlTransition(state, messages, messageCount, [], effective);
-		state.currentEffort = effective;
+		recordAnthropicControlTransition(state, messages, messageCount, [], current);
+		state.currentEffort = current;
 	}
 	return state.baseEffortWire;
 }
