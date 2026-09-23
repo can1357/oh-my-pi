@@ -5,6 +5,8 @@
 ### Added
 
 - Added keyless OpenZoo authentication, with optional credentials for protected proxy endpoints.
+- Added multi-account discovery and authorization resolution for Codex cyber access programs
+- Added automated request replay logic to handle access program rejections
 - Implemented `SessionAffinity` for persistent, sticky session-to-credential mapping
 - Added persistent rate-limit block tracking with auto-healing and account-specific routing policy support
 - Introduced `KeyCascade` for unified hierarchical authentication resolution

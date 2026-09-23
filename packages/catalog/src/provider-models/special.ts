@@ -77,7 +77,8 @@ export function openaiCodexModelManagerOptions(
 
 /**
  * Merge complete per-account Codex catalogs into one authoritative list,
- * deduped by model id (first account to expose an id wins).
+ * deduped by model id. The first account to expose an id supplies its spec;
+ * account access is merged from every account whose catalog lists that id.
  *
  * Returns `null` when any account's fetch failed transiently, so a partial list
  * cannot replace the previous or bundled authoritative catalog. An account
@@ -102,7 +103,15 @@ function unionCodexModels(
 		}
 		catalogs++;
 		for (const model of result.models) {
-			if (!byId.has(model.id)) byId.set(model.id, model);
+			const existing = byId.get(model.id);
+			if (!existing) {
+				byId.set(model.id, model);
+			} else if (model.accountAccess) {
+				byId.set(model.id, {
+					...existing,
+					accountAccess: { ...existing.accountAccess, ...model.accountAccess },
+				});
+			}
 		}
 	}
 	return catalogs > 0 ? [...byId.values()] : null;

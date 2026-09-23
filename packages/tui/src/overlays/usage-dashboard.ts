@@ -83,6 +83,8 @@ export interface ProviderCard {
 		soonestExpiryMs?: number;
 		unavailableReasons: string[];
 	};
+	/** Labels of accounts with verified Daybreak access. */
+	daybreakAccounts?: string[];
 }
 
 /**
@@ -202,6 +204,17 @@ export function buildProviderCards(reports: UsageReport[], nowMs: number): Provi
 						unavailableReasons,
 					}
 				: undefined;
+		const daybreakAccounts = providerReports.flatMap((report, index) =>
+			report.metadata?.daybreak === true
+				? [
+						typeof report.metadata.email === "string" && report.metadata.email
+							? report.metadata.email
+							: typeof report.metadata.accountId === "string" && report.metadata.accountId
+								? report.metadata.accountId
+								: `account ${index + 1}`,
+					]
+				: [],
+		);
 		cards.push({
 			provider,
 			name: formatProviderName(provider),
@@ -209,8 +222,11 @@ export function buildProviderCards(reports: UsageReport[], nowMs: number): Provi
 			windows,
 			unlimited: windows.length === 0,
 			idle:
-				!resetCredits && windows.every(window => window.fraction !== undefined && window.fraction < IDLE_FRACTION),
+				!resetCredits &&
+				daybreakAccounts.length === 0 &&
+				windows.every(window => window.fraction !== undefined && window.fraction < IDLE_FRACTION),
 			resetCredits,
+			...(daybreakAccounts.length > 0 ? { daybreakAccounts } : {}),
 		});
 	}
 
@@ -452,6 +468,11 @@ export class UsageDashboardComponent implements Component {
 		const title = theme.bold(truncateToWidth(card.name, Math.max(4, titleBudget)));
 		const titlePad = Math.max(0, width - 2 - visibleWidth(title) - visibleWidth(accountsText));
 		lines.push(`${this.#statusIcon(cardStatus)} ${title}${" ".repeat(titlePad)}${accountsText}`);
+
+		for (const account of card.daybreakAccounts ?? []) {
+			const label = sanitizeText(account.replace(/[\r\n\t]+/g, " "));
+			lines.push(`  ${theme.fg("success", truncateToWidth(`daybreak · ${label}`, width - 2))}`);
+		}
 
 		if (card.resetCredits) {
 			const resets = card.resetCredits;
