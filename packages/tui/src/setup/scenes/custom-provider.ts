@@ -3,7 +3,7 @@ import { Input } from "../../components/input";
 import { Text } from "../../components/text";
 import { WizardStep } from "../../components/wizard-step";
 import { theme } from "../../theme/theme";
-import type { SetupSceneHost } from "./types";
+import type { SetupHost, SetupSceneHost } from "./types";
 
 const FIELDS = [
 	{ id: "id", label: "Provider ID", prompt: "Provider ID: " },
@@ -14,6 +14,7 @@ const FIELDS = [
 /** Register an OpenAI-compatible endpoint and discover its models. */
 export class CustomProviderForm implements Component {
 	#host: SetupSceneHost;
+	#addProvider: NonNullable<SetupHost["addCustomProvider"]>;
 	#inputs = FIELDS.map(field => {
 		const input = new Input();
 		input.prompt = field.prompt;
@@ -24,8 +25,13 @@ export class CustomProviderForm implements Component {
 	#saving = false;
 	#status: string | undefined;
 
-	constructor(host: SetupSceneHost, onCancel: () => void = () => host.finish("skipped")) {
+	constructor(
+		host: SetupSceneHost,
+		addProvider: NonNullable<SetupHost["addCustomProvider"]>,
+		onCancel: () => void = () => host.finish("skipped"),
+	) {
 		this.#host = host;
+		this.#addProvider = addProvider;
 		this.#inputs.forEach((input, index) => {
 			input.onSubmit = value => void this.#submit(index, value);
 			input.onEscape = onCancel;
@@ -45,7 +51,7 @@ export class CustomProviderForm implements Component {
 		const content = new Container();
 		content.addChild(this.#inputs[this.#index]);
 		const intro = new Text(
-			"Add an OpenAI-compatible API endpoint. Models are discovered from its /v1/models endpoint.",
+			"Add an OpenAI-compatible endpoint; models are discovered from /v1/models. Saving rewrites models.yml and may remove its comments. API keys are stored separately.",
 			0,
 		);
 		const status = this.#status ? new Text(this.#status, 0, 0) : undefined;
@@ -77,8 +83,8 @@ export class CustomProviderForm implements Component {
 
 	async #submit(index: number, rawValue: string): Promise<void> {
 		const value = rawValue.trim();
-		if (index === 0 && !/^[a-z0-9][a-z0-9_-]*$/.test(value)) {
-			this.#status = theme.fg("error", "Use lowercase letters, numbers, - or _; start with a letter or number.");
+		if (index === 0 && !value) {
+			this.#status = theme.fg("error", "Provider ID is required.");
 			this.#host.requestRender();
 			return;
 		}
@@ -99,7 +105,7 @@ export class CustomProviderForm implements Component {
 		this.#status = theme.fg("muted", "Saving provider and discovering models…");
 		this.#host.requestRender();
 		try {
-			await this.#host.ctx.addCustomProvider({
+			await this.#addProvider({
 				id: this.#inputs[0].getValue().trim(),
 				baseUrl: this.#inputs[1].getValue().trim(),
 				apiKey: this.#inputs[2].getValue().trim(),
