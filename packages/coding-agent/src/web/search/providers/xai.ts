@@ -413,7 +413,7 @@ export async function searchXAI(params: SearchParams): Promise<SearchResponse> {
 		headers: await params.modelRegistry.resolveModelHeaders(params.model, params.signal),
 	};
 	const customEndpoint = transport.baseURL.replace(/\/+$/, "") !== XAI_DEFAULT_BASE_URL;
-	const credentialOrigin = params.authStorage.getCredentialOrigin(params.model.provider);
+	const credentialOrigin = params.authStorage.keys.source(params.model.provider);
 	const hasCommandBackedKey = params.modelRegistry.hasCommandBackedApiKey(params.model.provider);
 	if (
 		customEndpoint &&
@@ -459,7 +459,7 @@ export class XAIProvider extends SearchProvider {
 	readonly label = "xAI";
 
 	isAvailable(authStorage: AuthStorage, model?: Model<Api>): boolean {
-		return authStorage.hasAuth(model?.provider ?? "xai");
+		return authStorage.keys.source(model?.provider ?? "xai") !== undefined;
 	}
 
 	search(params: SearchParams): Promise<SearchResponse> {

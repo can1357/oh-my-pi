@@ -65,7 +65,7 @@ describe("xAI web search provider", () => {
 
 	beforeEach(() => {
 		authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
-		authStorage.setRuntimeApiKey("xai", "test-xai-key");
+		authStorage.keys.setRuntime("xai", "test-xai-key");
 		modelRegistry = new ModelRegistry(authStorage);
 	});
 
@@ -167,7 +167,7 @@ describe("xAI web search provider", () => {
 	it("uses credentials for the selected xAI OAuth model provider", async () => {
 		const capture = captureFetch({ id: "resp_xai_oauth", model: "grok-4.3", output_text: "xAI OAuth answer" });
 		const oauthAuthStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
-		oauthAuthStorage.setRuntimeApiKey("xai-oauth", "test-xai-oauth-token");
+		oauthAuthStorage.keys.setRuntime("xai-oauth", "test-xai-oauth-token");
 		const oauthRegistry = new ModelRegistry(oauthAuthStorage);
 		const oauthModel = xaiModel("grok-oauth-selected", "xai-oauth");
 
@@ -184,7 +184,7 @@ describe("xAI web search provider", () => {
 	it("uses the selected model endpoint, API key, and headers together", async () => {
 		const capture = captureFetch({ id: "resp_proxy", model: "grok-4.3", output_text: "proxy answer" });
 		const proxyAuthStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
-		proxyAuthStorage.setRuntimeApiKey("xai-oauth", "proxy-key");
+		proxyAuthStorage.keys.setRuntime("xai-oauth", "proxy-key");
 		const proxyRegistry = new ModelRegistry(proxyAuthStorage);
 		const proxyModel = {
 			...xaiModel("grok-proxy", "xai-oauth", "https://proxy.example/v1/"),
@@ -206,8 +206,8 @@ describe("xAI web search provider", () => {
 	it("never sends official xAI OAuth credentials to a selected custom endpoint", async () => {
 		const capture = captureFetch({ id: "must_not_send", output_text: "unexpected" });
 		const oauthAuthStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
-		oauthAuthStorage.setRuntimeApiKey("xai-oauth", "official-oauth-token");
-		vi.spyOn(oauthAuthStorage, "getCredentialOrigin").mockReturnValue({ kind: "oauth" });
+		oauthAuthStorage.keys.setRuntime("xai-oauth", "official-oauth-token");
+		vi.spyOn(oauthAuthStorage.keys, "source").mockReturnValue({ kind: "oauth", concrete: true });
 		const oauthRegistry = new ModelRegistry(oauthAuthStorage);
 		const proxyModel = xaiModel("grok-oauth-proxy", "xai-oauth", "https://proxy.example/v1/");
 
@@ -229,7 +229,7 @@ describe("xAI web search provider", () => {
 	it("reports availability for the selected model provider", () => {
 		const provider = new XAIProvider();
 		const oauthAuthStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
-		oauthAuthStorage.setRuntimeApiKey("xai-oauth", "test-xai-oauth-token");
+		oauthAuthStorage.keys.setRuntime("xai-oauth", "test-xai-oauth-token");
 
 		expect(provider.isAvailable(oauthAuthStorage, xaiModel("grok-oauth", "xai-oauth"))).toBe(true);
 		expect(provider.isAvailable(oauthAuthStorage, selectedXaiModel)).toBe(false);
@@ -652,7 +652,7 @@ describe("xAI web search provider", () => {
 			.mockResolvedValueOnce("initial-xai-key")
 			.mockResolvedValueOnce("refreshed-xai-key")
 			.mockResolvedValueOnce("rotated-xai-key");
-		const rotateSpy = vi.spyOn(authStorage, "rotateSessionCredential").mockResolvedValue(true);
+		const rotateSpy = vi.spyOn(authStorage.limits, "rotate").mockResolvedValue(true);
 		const fetchMock: FetchImpl = (_input, init) => {
 			requestCount += 1;
 			authorizationHeaders.push(new Headers(init?.headers).get("authorization") ?? "");

@@ -116,8 +116,8 @@ async function fixture(): Promise<ResetFixture> {
 		email: "same@example.com",
 		orgId,
 	}));
-	await storage.set("anthropic", credentials);
-	const account = storage.listOAuthAccounts("anthropic").find(row => row.orgId === "org-b");
+	await storage.credentials.set("anthropic", credentials);
+	const account = storage.oauth.accounts("anthropic").find(row => row.orgId === "org-b");
 	if (!account) throw new Error("Expected independently stored organization credential");
 	return {
 		storage,
@@ -131,14 +131,14 @@ async function fixture(): Promise<ResetFixture> {
 describe("Claude saved reset account safety", () => {
 	it("spends only the selected durable credential when both organizations share an email", async () => {
 		const f = await fixture();
-		const statuses = await f.storage.listResetCredits({ provider: "anthropic", baseUrlResolver: f.baseUrlResolver });
+		const statuses = await f.storage.resets.list({ provider: "anthropic", baseUrlResolver: f.baseUrlResolver });
 		expect(new Set(statuses.map(status => status.credentialId)).size).toBe(2);
-		const outcome = await f.storage.redeemResetCredit({ target: f.target, baseUrlResolver: f.baseUrlResolver });
+		const outcome = await f.storage.resets.redeem({ target: f.target, baseUrlResolver: f.baseUrlResolver });
 		expect(outcome.ok).toBe(true);
 		expect(f.posts.map(post => [post.path, post.bearer])).toEqual([
 			["/api/organizations/org-b/reset_rate_limits", "Bearer token-org-b"],
 		]);
-		const removed = await f.storage.redeemResetCredit({
+		const removed = await f.storage.resets.redeem({
 			target: { ...f.target, credentialId: -1, email: "same@example.com" },
 			baseUrlResolver: f.baseUrlResolver,
 		});
@@ -149,7 +149,7 @@ describe("Claude saved reset account safety", () => {
 	it("does not spend a new offer under an old confirmation", async () => {
 		const f = await fixture();
 		f.state.nextGrant = "new-offer";
-		const outcome = await f.storage.redeemResetCredit({ target: f.target, baseUrlResolver: f.baseUrlResolver });
+		const outcome = await f.storage.resets.redeem({ target: f.target, baseUrlResolver: f.baseUrlResolver });
 		expect(outcome.code).toBe("offer_changed");
 		expect(f.posts).toEqual([]);
 	});
@@ -158,14 +158,14 @@ describe("Claude saved reset account safety", () => {
 		const f = await fixture();
 		f.state.responseStatus = 502;
 		f.state.response = { error: "upstream response lost" };
-		const first = await f.storage.redeemResetCredit({ target: f.target, baseUrlResolver: f.baseUrlResolver });
+		const first = await f.storage.resets.redeem({ target: f.target, baseUrlResolver: f.baseUrlResolver });
 		expect(first.ok).toBe(false);
 		f.state.responseStatus = 200;
 		f.state.response = { result: "cooldown" };
-		const waiting = await f.storage.redeemResetCredit({ target: f.target, baseUrlResolver: f.baseUrlResolver });
+		const waiting = await f.storage.resets.redeem({ target: f.target, baseUrlResolver: f.baseUrlResolver });
 		expect(waiting.code).toBe("cooldown");
 		f.state.response = { result: "reset", resets_left: 1, cleared: ["five_hour"] };
-		const retry = await f.storage.redeemResetCredit({ target: f.target, baseUrlResolver: f.baseUrlResolver });
+		const retry = await f.storage.resets.redeem({ target: f.target, baseUrlResolver: f.baseUrlResolver });
 		expect(retry.ok).toBe(true);
 		expect(f.posts).toHaveLength(3);
 		const requestId = f.posts[0]?.body.request_id;
@@ -177,9 +177,9 @@ describe("Claude saved reset account safety", () => {
 		const f = await fixture();
 		f.state.responseStatus = 502;
 		f.state.response = { error: "upstream response lost" };
-		await f.storage.redeemResetCredit({ target: f.target, baseUrlResolver: f.baseUrlResolver });
+		await f.storage.resets.redeem({ target: f.target, baseUrlResolver: f.baseUrlResolver });
 		f.state.remaining = 1;
-		const retry = await f.storage.redeemResetCredit({ target: f.target, baseUrlResolver: f.baseUrlResolver });
+		const retry = await f.storage.resets.redeem({ target: f.target, baseUrlResolver: f.baseUrlResolver });
 		expect(retry.code).toBe("already_redeemed");
 		expect(f.posts).toHaveLength(1);
 	});
@@ -190,9 +190,9 @@ describe("Claude saved reset account safety", () => {
 		f.target.creditId = "juniper_tide";
 		f.state.responseStatus = 502;
 		f.state.response = { error: "upstream response lost" };
-		const first = await f.storage.redeemResetCredit({ target: f.target, baseUrlResolver: f.baseUrlResolver });
+		const first = await f.storage.resets.redeem({ target: f.target, baseUrlResolver: f.baseUrlResolver });
 		expect(first.ok).toBe(false);
-		const retry = await f.storage.redeemResetCredit({ target: f.target, baseUrlResolver: f.baseUrlResolver });
+		const retry = await f.storage.resets.redeem({ target: f.target, baseUrlResolver: f.baseUrlResolver });
 		expect(retry.code).toBe("reset_unconfirmed");
 		expect(f.posts).toHaveLength(1);
 		expect(f.posts[0]?.body).toEqual({ program: "juniper_tide" });
@@ -205,9 +205,9 @@ describe("Claude saved reset account safety", () => {
 		f.state.postArrived = arrived.resolve;
 		f.state.postGate = release.promise;
 		const options = { target: f.target, baseUrlResolver: f.baseUrlResolver };
-		const first = f.storage.redeemResetCredit(options);
+		const first = f.storage.resets.redeem(options);
 		await arrived.promise;
-		const second = f.storage.redeemResetCredit(options);
+		const second = f.storage.resets.redeem(options);
 		release.resolve();
 		const outcomes = await Promise.all([first, second]);
 		expect(outcomes.map(outcome => outcome.code)).toEqual(["reset", "reset"]);
@@ -217,31 +217,29 @@ describe("Claude saved reset account safety", () => {
 	it("clears the restored shared block but retains an exhausted uncovered model tier", async () => {
 		const f = await fixture();
 		for (const blockScope of ["", "tier:fable"]) {
-			f.storage.upsertCredentialBlock({
+			f.storage.blocks.upsert({
 				credentialId: f.target.credentialId,
 				providerKey: "anthropic:oauth",
 				blockScope,
 				blockedUntilMs: Date.now() + 3_600_000,
 			});
 		}
-		const outcome = await f.storage.redeemResetCredit({ target: f.target, baseUrlResolver: f.baseUrlResolver });
+		const outcome = await f.storage.resets.redeem({ target: f.target, baseUrlResolver: f.baseUrlResolver });
 		expect(outcome.ok).toBe(true);
-		expect(f.storage.listCredentialBlocks([f.target.credentialId]).map(block => block.blockScope)).toEqual([
-			"tier:fable",
-		]);
+		expect(f.storage.blocks.list([f.target.credentialId]).map(block => block.blockScope)).toEqual(["tier:fable"]);
 	});
 
 	it("retains a shared block when a session reset leaves the weekly quota exhausted", async () => {
 		const f = await fixture();
 		f.state.weeklyUsed = 100;
-		f.storage.upsertCredentialBlock({
+		f.storage.blocks.upsert({
 			credentialId: f.target.credentialId,
 			providerKey: "anthropic:oauth",
 			blockScope: "",
 			blockedUntilMs: Date.now() + 3_600_000,
 		});
-		const outcome = await f.storage.redeemResetCredit({ target: f.target, baseUrlResolver: f.baseUrlResolver });
+		const outcome = await f.storage.resets.redeem({ target: f.target, baseUrlResolver: f.baseUrlResolver });
 		expect(outcome.ok).toBe(true);
-		expect(f.storage.listCredentialBlocks([f.target.credentialId]).map(block => block.blockScope)).toEqual([""]);
+		expect(f.storage.blocks.list([f.target.credentialId]).map(block => block.blockScope)).toEqual([""]);
 	});
 });

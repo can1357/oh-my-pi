@@ -111,7 +111,7 @@ export async function aiStage(options: AiStageOptions): Promise<AiStageOutcome> 
 
 	onProgress?.("Resolving model…");
 	const settings = await Settings.init({ cwd });
-	const authStorage = await discoverAuthStorage();
+	const authStorage = await discoverAuthStorage(undefined, { settings });
 	try {
 		const registry = new ModelRegistry(authStorage);
 		await registry.refresh();

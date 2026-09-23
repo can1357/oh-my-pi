@@ -77,6 +77,10 @@ export const grievancesHelp = {
 	description: "View, clean, or push reported tool issues (auto-QA grievances)",
 } satisfies CommandMetadata;
 
+export const loginHelp = {
+	description: "Log in to a model provider (terminal counterpart of /login)",
+} satisfies CommandMetadata;
+
 export const imagesHelp = {
 	description: "Inspect, diagnose, probe, and purge image publication backends",
 } satisfies CommandMetadata;

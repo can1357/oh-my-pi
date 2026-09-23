@@ -21,11 +21,12 @@ import {
 	TextJudge,
 	TYPESAFE_PROVIDER,
 	TypeSafeJudge,
+	tokenUsage,
 	type Usage,
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelStringWithRouting, resolveRoleChain, type RoleChainCandidate } from "../config/model-resolver";
 import { roleCandidatePool } from "../config/model-roles";
@@ -121,9 +122,17 @@ export function kindOf(value: RoleChainCandidate | Model): JudgeKind {
 	return "online";
 }
 
-/** The `judge` role's candidates in attempt order, drawn from credentialed judge-capable models. */
+/**
+ * The `judge` role's candidates in attempt order, drawn from credentialed
+ * judge-capable models. From the first native candidate on, only native
+ * candidates remain: a prompted model never stands in for a failed native
+ * judgment, whose calibrated probabilities it cannot reproduce.
+ */
 function judgeRoleChain(settings: Settings, registry: ModelRegistry): RoleChainCandidate[] {
-	return resolveRoleChain("judge", settings, roleCandidatePool("judge", settings, registry));
+	const chain = resolveRoleChain("judge", settings, roleCandidatePool("judge", settings, registry));
+	const firstNative = chain.findIndex(candidate => kindOf(candidate) === "native");
+	if (firstNative < 0) return chain;
+	return chain.filter((candidate, index) => index < firstNative || kindOf(candidate) === "native");
 }
 
 /**
@@ -194,8 +203,15 @@ export class ChainJudge implements Judge {
 					throw signal.reason instanceof Error ? signal.reason : new AIError.AbortError("judgment aborted");
 				}
 				if (isAbortOrTimeout(error)) throw error;
-				if (isAccountRejection(error)) rejections.set(identity, Date.now() + CANDIDATE_REJECTION_COOLDOWN_MS);
+				const rejected = isAccountRejection(error);
+				if (rejected) rejections.set(identity, Date.now() + CANDIDATE_REJECTION_COOLDOWN_MS);
 				lastFailure = error instanceof Error ? error.message : String(error);
+				logger.warn("judgment candidate failed", {
+					candidate: identity,
+					status: AIError.status(error),
+					error: lastFailure,
+					skippedForMs: rejected ? CANDIDATE_REJECTION_COOLDOWN_MS : undefined,
+				});
 			}
 		}
 		if (candidates.length === 0) throw new Error("judgment: no judge model available");
@@ -218,7 +234,7 @@ export class ChainJudge implements Judge {
 	#buildCandidates(): RoleChainCandidate[] {
 		const { settings, registry, sessionModel } = this.#deps;
 		const candidates = judgeRoleChain(settings, registry);
-		if (!sessionModel) return candidates;
+		if (!sessionModel || candidates.some(candidate => kindOf(candidate) === "native")) return candidates;
 		const sessionIdentity = formatModelStringWithRouting(sessionModel);
 		if (candidates.some(candidate => formatModelStringWithRouting(candidate.model) === sessionIdentity)) {
 			return candidates;
@@ -294,9 +310,10 @@ class LocalTextBackend implements TextBackend {
 }
 
 /**
- * Report each native judgment's usage. TypeSafe itself reports tokens only, so
- * a response without a billed amount is priced from the catalog model; a
- * route that bills (OpenRouter) keeps its reported cost.
+ * Report each native judgment attempt's usage, failed ones included so the
+ * session ledger shows why a judgment errored. TypeSafe itself reports tokens
+ * only, so a response without a billed amount is priced from the catalog
+ * model; a route that bills (OpenRouter) keeps its reported cost.
  */
 function usageReportingTypeSafeJudge(judge: TypeSafeJudge, model: Model, onUsage: JudgeDeps["onUsage"]): Judge {
 	return {
@@ -305,7 +322,21 @@ function usageReportingTypeSafeJudge(judge: TypeSafeJudge, model: Model, onUsage
 			request: JudgmentRequest<Q>,
 			options?: JudgeOptions,
 		): Promise<JudgmentResult<Q>> {
-			const result = await judge.judge(request, options);
+			let result: JudgmentResult<Q>;
+			try {
+				result = await judge.judge(request, options);
+			} catch (error) {
+				onUsage?.({
+					role: TYPESAFE_PROVIDER,
+					api: judge.api,
+					provider: judge.provider,
+					model: judge.model,
+					usage: tokenUsage(0, 0),
+					stopReason: isAbortOrTimeout(error) ? "aborted" : "error",
+					errorMessage: error instanceof Error ? error.message : String(error),
+				});
+				throw error;
+			}
 			if (result.usage.cost.total === 0) calculateCost(model, result.usage);
 			onUsage?.({
 				role: TYPESAFE_PROVIDER,

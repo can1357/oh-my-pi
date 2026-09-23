@@ -85,7 +85,7 @@ describe("path-pasted image source path (#12244)", () => {
 		// Keep blob materialization for clipboard payloads inside the temp dir.
 		setAgentDir(tmpDir);
 		authStorage = await AuthStorage.create(":memory:");
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
 		const agent = new Agent({
