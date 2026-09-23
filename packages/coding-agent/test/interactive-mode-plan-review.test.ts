@@ -84,7 +84,7 @@ describe("InteractiveMode plan review rendering", () => {
 		sharedTempDir = TempDir.createSync("@pi-plan-review-shared-");
 		await Settings.init({ inMemory: true, cwd: sharedTempDir.path() });
 		authStorage = await AuthStorage.create(path.join(sharedTempDir.path(), "testauth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 	});
 
@@ -1159,7 +1159,7 @@ describe("InteractiveMode plan review rendering", () => {
 		// was active before plan mode (#planModePreviousModelState), which silently
 		// reverted the operator's pick — sliding to "slow" still executed on the
 		// default model. The fix defers application until after the plan-mode exit.
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const slow = session.modelRegistry.find("anthropic", "claude-opus-4-5");
 		const def = session.modelRegistry.find("anthropic", "claude-sonnet-4-5");
 		if (!slow || !def) throw new Error("Expected sonnet + opus to exist in registry");

@@ -384,9 +384,9 @@ export async function runModelsCommand(command: ModelsCommandArgs): Promise<void
 	}
 
 	const cwd = getProjectDir();
-	const authStorage = await discoverAuthStorage();
+	const settings = await Settings.init({ cwd, configFiles: command.flags.config });
+	const authStorage = await discoverAuthStorage(undefined, { settings });
 	try {
-		const settings = await Settings.init({ cwd, configFiles: command.flags.config });
 		const modelRegistry = new ModelRegistry(authStorage);
 
 		if (action === "refresh" && !json && process.stderr.isTTY) {

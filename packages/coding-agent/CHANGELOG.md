@@ -5,6 +5,25 @@
 ### Fixed
 
 - A message typed while the agent is streaming now gets an explicit queued status instead of only a pending-bar repaint, so typed input is never silently swallowed: "Queued — interrupting the current step" when the model call it lands on has produced no output yet (the loop cancels that call and applies the steer immediately), "Queued — will apply after the current response" otherwise. The same notice now fires for collab guest prompts and skill commands queued mid-run; `interruptMode` (Settings → Interaction → Interrupt Mode) governs that cancellation as well as tool execution ([#12787](https://github.com/can1357/oh-my-pi/pull/12787) by [@geoyws](https://github.com/geoyws)).
+### Added
+
+- Added `omp login` command for terminal-based OAuth authentication, including automated model discovery refresh and browser-opening support
+- Enabled `org-scoped-identity` and `oauth-token-env` configuration parsing for authentication providers
+- Adopted namespaced `authStorage` API for CLI and session management
+- Added usage reporting for failed native judgments, including error stop reason and message
+- Added openrouter/~typesafe/jev-latest as a native judge candidate in priority configuration
+- Added `OMP_MCP_STARTUP_TIMEOUT_MS` and `mcp.startupTimeoutMs` to configure the initial MCP discovery window, plus `OMP_MCP_REQUIRE_READY=1` to fail headless print runs before the first turn when a server is unavailable.
+- Added `auth.accountPolicies` for per-account OAuth priority and reserve controls, with matching policy state in `omp usage` ([#12243](https://github.com/can1357/oh-my-pi/pull/12243) by [@schickling-assistant](https://github.com/schickling-assistant)).
+
+### Changed
+
+- Unified terminal OAuth flow logic across `omp login` and `omp auth-broker login`
+- Included identity account/organization info in terminal login success messages
+- Changed judgment fallback to consider only native candidates, preventing prompted models from replacing failed natives
+
+### Fixed
+
+- Fixed headless print mode (`-p`) silently dropping MCP servers slower than the startup window; print mode now waits for configured servers (bounded by `OMP_MCP_TIMEOUT_MS`) and warns on stderr when one is not ready ([#12188](https://github.com/can1357/oh-my-pi/issues/12188), reported by [@aaronjmars](https://github.com/aaronjmars)).
 
 ## [18.2.11] - 2026-09-23
 

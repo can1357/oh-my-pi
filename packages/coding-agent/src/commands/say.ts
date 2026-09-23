@@ -140,7 +140,7 @@ export default class Say extends Command {
 	}
 
 	async #resolveDefaultModel(settings: Settings): Promise<string> {
-		const authStorage = await discoverAuthStorage();
+		const authStorage = await discoverAuthStorage(undefined, { settings });
 		try {
 			const registry = new ModelRegistry(authStorage, undefined, { settings });
 			return resolveLocalSpeechModelId({ settings, registry });

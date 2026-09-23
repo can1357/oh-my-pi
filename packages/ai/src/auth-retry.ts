@@ -1,5 +1,5 @@
 import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
-import type { OAuthAccess } from "./auth-storage";
+import type { LimitsApi, OAuthAccess, OAuthApi } from "./auth/types";
 import * as AIError from "./error";
 import { isAuthRetryableError, isInvalidatedOAuthTokenError } from "./error/auth-classify";
 import { isAccountPolicyError, isUsageLimit } from "./error/flags";
@@ -274,20 +274,12 @@ export async function withAuth<T>(
 
 /**
  * Minimal structural slice of `AuthStorage` consumed by {@link withOAuthAccess}.
- * Typed structurally (and importing only the `OAuthAccess` type) so this module
- * never takes a runtime dependency on `./auth-storage`.
+ * Typed structurally (type-only imports) so this module never takes a runtime
+ * dependency on `./auth-storage`.
  */
 export interface OAuthAccessSource {
-	getOAuthAccess(
-		provider: string,
-		sessionId?: string,
-		options?: { forceRefresh?: boolean; signal?: AbortSignal },
-	): Promise<OAuthAccess | undefined>;
-	rotateSessionCredential(
-		provider: string,
-		sessionId: string | undefined,
-		options?: { error?: unknown; signal?: AbortSignal; apiKey?: string; credentialId?: number },
-	): Promise<boolean>;
+	readonly oauth: Pick<OAuthApi, "access">;
+	readonly limits: Pick<LimitsApi, "rotate">;
 }
 
 export interface WithOAuthAccessOptions {
@@ -335,7 +327,7 @@ export async function withOAuthAccess<T>(
 	const isAuthError = opts?.isAuthError ?? isAuthRetryableError;
 	const { sessionId, signal } = opts ?? {};
 
-	let lastAccess = opts?.seed ?? (await storage.getOAuthAccess(provider, sessionId, { signal }));
+	let lastAccess = opts?.seed ?? (await storage.oauth.access(provider, sessionId, { signal }));
 	if (!lastAccess) {
 		throw new AIError.MissingApiKeyError(
 			provider,
@@ -362,7 +354,7 @@ export async function withOAuthAccess<T>(
 			tokenRefreshReplayUsed = true;
 			refreshedCurrent = true;
 			try {
-				next = await storage.getOAuthAccess(provider, sessionId, { forceRefresh: true, signal });
+				next = await storage.oauth.access(provider, sessionId, { forceRefresh: true, signal });
 			} catch {
 				next = undefined;
 			}
@@ -385,7 +377,7 @@ export async function withOAuthAccess<T>(
 			if (!refreshedCurrent) {
 				refreshedCurrent = true;
 				try {
-					next = await storage.getOAuthAccess(provider, sessionId, { forceRefresh: true, signal });
+					next = await storage.oauth.access(provider, sessionId, { forceRefresh: true, signal });
 				} catch {
 					next = undefined;
 				}
@@ -408,14 +400,14 @@ export async function withOAuthAccess<T>(
 
 		if (signal?.aborted || attemptCount >= AUTH_RETRY_MAX_ATTEMPTS) break;
 		try {
-			const rotated = await storage.rotateSessionCredential(provider, sessionId, {
+			const rotated = await storage.limits.rotate(provider, sessionId, {
 				error: lastError,
 				signal,
 				apiKey: lastAccess.accessToken,
 				credentialId: lastAccess.credentialId,
 			});
 			if (!rotated) break;
-			next = await storage.getOAuthAccess(provider, sessionId, { signal });
+			next = await storage.oauth.access(provider, sessionId, { signal });
 		} catch {
 			next = undefined;
 		}

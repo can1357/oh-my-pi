@@ -47,8 +47,8 @@ function embeddingModel(
 async function boot(): Promise<Harness> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-embeddings-"));
 	const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-	storage.setRuntimeApiKey("openai", "openai-secret");
-	storage.setRuntimeApiKey("openrouter", "openrouter-secret");
+	storage.keys.setRuntime("openai", "openai-secret");
+	storage.keys.setRuntime("openrouter", "openrouter-secret");
 	const direct = embeddingModel("openai", "text-embedding-3-small");
 	const routed = embeddingModel("openrouter", "qwen/qwen3-embedding-8b");
 	const wrongApi = embeddingModel("openai", "gpt-5.5", "openai-responses");
@@ -110,7 +110,7 @@ describe("auth-gateway POST /v1/embeddings", () => {
 	it("forwards OpenAI float requests and records calculated usage", async () => {
 		harness = await boot();
 		const observed: Array<{ provider: string; model: string; costUsd?: number; client?: { app?: string } }> = [];
-		vi.spyOn(harness.storage, "recordObservedUsage").mockImplementation(entry => observed.push(entry));
+		vi.spyOn(harness.storage.usage, "observe").mockImplementation(entry => observed.push(entry));
 		const response = await fetch(`${harness.url}/v1/embeddings`, {
 			method: "POST",
 			headers: { ...HEADERS, "x-omp-app": "vector-client" },

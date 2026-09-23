@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `org-scoped-identity` and `oauth-token-env` rule support for auth providers
+
 ## [18.2.11] - 2026-09-23
 
 ### Added
