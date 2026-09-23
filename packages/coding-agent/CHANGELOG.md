@@ -2,10 +2,21 @@
 
 ## [Unreleased]
 
-### Changed
+### Fixed
 
-- Extensions load faster on warm starts: their dependencies are no longer re-parsed on every launch ([#12908](https://github.com/can1357/oh-my-pi/pull/12908) by [@H4vC](https://github.com/H4vC)).
-- The first highlighted code block, bash preview, or diff no longer stalls the screen while syntax highlighting initializes ([#12908](https://github.com/can1357/oh-my-pi/pull/12908) by [@H4vC](https://github.com/H4vC)).
+- A message typed while the agent is streaming now gets an explicit queued status instead of only a pending-bar repaint, so typed input is never silently swallowed: "Queued — interrupting the current step" when the model call it lands on has produced no output yet (the loop cancels that call and applies the steer immediately), "Queued — will apply after the current response" otherwise. The same notice now fires for collab guest prompts and skill commands queued mid-run; `interruptMode` (Settings → Interaction → Interrupt Mode) governs that cancellation as well as tool execution ([#12787](https://github.com/can1357/oh-my-pi/pull/12787) by [@geoyws](https://github.com/geoyws)).
+
+## [18.2.11] - 2026-09-23
+
+### Fixed
+
+- Fixed nested `eval` Todo updates not being reflected by the Todo tracker, including cases where a cell fails after committing an update.
+- Fixed strict-mode structured-output validation for JSON Schemas without a root `type`, preserving their `items` and `required` keywords.
+- Improved streamed TTSR whole-buffer matching to avoid repeated scans from the beginning of the buffer.
+- Fixed plural browser queries when compiled binaries provide shallow stack traces.
+- Fixed browser `tab.fill` timing out on pages whose animation frames stall.
+- Fixed the first LSP diagnostics request returning no results while a newly started language server is still analyzing.
+- `/shake thinking` now reports the number of tokens freed.
 
 ## [18.2.10] - 2026-09-22
 
@@ -95,10 +106,6 @@
 - Edits targeting auto-generated files now return a tool-scoped rejection instead of aborting the whole turn ([#12499](https://github.com/can1357/oh-my-pi/pull/12499) by [@Dante-dan](https://github.com/Dante-dan)).
 - Subagents with an ordered model fallback keep it reachable on startup when the parent default role shares the same primary model ([#12377](https://github.com/can1357/oh-my-pi/pull/12377) by [@Dante-dan](https://github.com/Dante-dan)).
 - omp-plugins MCP servers now substitute `${CLAUDE_PLUGIN_ROOT}`/`${OMP_PLUGIN_ROOT}` in `command`, `args`, and `cwd` ([#12801](https://github.com/can1357/oh-my-pi/pull/12801) by [@holny](https://github.com/holny)).
-
-### Fixed
-
-- A message typed while the agent is streaming now gets an explicit queued status instead of only a pending-bar repaint, so typed input is never silently swallowed: "Queued — interrupting the current step" when the model call it lands on has produced no output yet (the loop cancels that call and applies the steer immediately), "Queued — will apply after the current response" otherwise. The same notice now fires for collab guest prompts and skill commands queued mid-run; `interruptMode` (Settings → Interaction → Interrupt Mode) governs that cancellation as well as tool execution ([#12787](https://github.com/can1357/oh-my-pi/pull/12787) by [@geoyws](https://github.com/geoyws)).
 
 ## [18.2.8] - 2026-09-21
 

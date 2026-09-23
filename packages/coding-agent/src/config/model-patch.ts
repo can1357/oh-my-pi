@@ -241,6 +241,8 @@ export interface ModelPatch {
 	supportsTools?: boolean;
 	cost?: Partial<Model<Api>["cost"]>;
 	contextWindow?: number;
+	/** Registry-only window preference; never patches the provider-advertised maximum. */
+	maxContextWindow?: number;
 	maxTokens?: number;
 	omitMaxOutputTokens?: boolean;
 	/** Whether Codex requests should prefer WebSocket transport. */

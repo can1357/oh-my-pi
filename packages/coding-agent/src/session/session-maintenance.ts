@@ -772,8 +772,21 @@ export class SessionMaintenance {
 
 		if (mode === "thinking") {
 			const branchEntries = this.#host.sessionManager.getBranch();
+			const latestCompaction = getLatestCompactionEntry(branchEntries);
+			const compactionIndex = latestCompaction ? branchEntries.lastIndexOf(latestCompaction) : -1;
+			const hasRemoteReplacementHistory = getOpenAiRemoteCompactionPayload(latestCompaction) !== undefined;
+			let anchorIndex = -1;
+			for (let index = branchEntries.length - 1; index > compactionIndex; index--) {
+				const entry = branchEntries[index];
+				if (entry.type !== "message" || !isTranscriptUsageAnchor(entry.message)) continue;
+				anchorIndex = index;
+				break;
+			}
 			let removed = 0;
-			for (const entry of branchEntries) {
+			let tokensFreed = 0;
+			let anchoredTokensRemoved = 0;
+			const countOptions = { excludeEncryptedReasoning: true } as const;
+			for (const [index, entry] of branchEntries.entries()) {
 				if (entry.type !== "message" || entry.message.role !== "assistant") continue;
 				const message = entry.message;
 				const kept = message.content.filter(
@@ -781,20 +794,29 @@ export class SessionMaintenance {
 				);
 				const dropped = message.content.length - kept.length;
 				if (dropped === 0) continue;
+				// Match the stored-context floor: opaque signatures and encrypted
+				// reasoning bytes do not have a reliable provider-token equivalent.
+				const before = this.#tokenizer.countMessage(message, countOptions);
 				// Provider serializers omit empty assistant turns, so don't invent model-authored text.
 				message.content = kept;
 				invalidateMessageCache(message);
+				const saved = Math.max(0, before - this.#tokenizer.countMessage(message, countOptions));
+				tokensFreed += saved;
+				if (index < anchorIndex && (!hasRemoteReplacementHistory || index > compactionIndex)) {
+					anchoredTokensRemoved += saved;
+				}
 				removed += dropped;
 			}
 			if (removed === 0) {
 				return { mode, toolResultsDropped: 0, blocksDropped: 0, thinkingBlocksDropped: 0, tokensFreed: 0 };
 			}
+			this.#host.recordAnchoredHistoryRewrite(anchoredTokensRemoved);
 			await this.#host.sessionManager.rewriteEntries();
 			const sessionContext = this.#host.buildDisplaySessionContext();
 			this.#host.agent.replaceMessages(sessionContext.messages);
 			this.#host.resetAdvisorRuntimes("shake");
 			this.#host.closeCodexProviderSessionsForHistoryRewrite();
-			return { mode, toolResultsDropped: 0, blocksDropped: 0, thinkingBlocksDropped: removed, tokensFreed: 0 };
+			return { mode, toolResultsDropped: 0, blocksDropped: 0, thinkingBlocksDropped: removed, tokensFreed };
 		}
 
 		const assertCurrent = () => {

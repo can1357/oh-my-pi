@@ -5,6 +5,13 @@
 ### Fixed
 
 - A steering message sent while a model request has not produced any output is applied immediately instead of waiting for the response, subject to `interruptMode`; the session shows whether a queued steer will interrupt or wait. ([#12787](https://github.com/can1357/oh-my-pi/pull/12787) by [@geoyws](https://github.com/geoyws))
+
+## [18.2.11] - 2026-09-23
+
+### Fixed
+
+- Fixed background job completions interrupting foreground Bash and eval calls, which could cause those calls to be repeatedly moved into the background.
+
 ## [18.2.9] - 2026-09-22
 
 ### Fixed

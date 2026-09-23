@@ -3436,19 +3436,32 @@ async function executeToolCalls(
 	const checkAsideInterrupts = async (): Promise<void> => {
 		// Asides only fire once: an interrupt already recorded on interruptState
 		// must not re-abort, and (unlike steering) never re-consumes a queue.
-		if (!shouldInterruptImmediately || signal?.aborted || interruptState.triggered) return;
+		// A completion-triggered record is the exception — it leaves the
+		// cooperative signal down, so keep polling until a peer IRC escalates.
+		if (!shouldInterruptImmediately || signal?.aborted) return;
+		if (interruptState.triggered && steeringSoftController.signal.aborted) return;
 		// Peer IRC and background completions (finished jobs, exited supervised
 		// processes) hard-abort interruptible waits only; foreground tools keep
-		// running (no partial side effects) but get the cooperative soft signal
-		// so backgroundable work can step aside for the queued notice.
+		// running (no partial side effects).
 		let source: AsideInterruptSource | undefined;
 		if (hasIrcInterrupts && (await hasIrcInterrupts())) source = "irc";
-		else if (hasBackgroundCompletions && (await hasBackgroundCompletions())) source = "background";
-		if (!source || interruptState.triggered) return;
-		interruptState.triggered = true;
-		interruptState.source = source;
-		ircAbortController.abort();
-		steeringSoftController.abort();
+		else if (!interruptState.triggered && hasBackgroundCompletions && (await hasBackgroundCompletions()))
+			source = "background";
+		if (!source) return;
+		if (!interruptState.triggered) {
+			interruptState.triggered = true;
+			interruptState.source = source;
+			ircAbortController.abort();
+		}
+		// Only an urgent aside raises the cooperative signal that makes
+		// backgroundable foreground work (auto-background bash/eval) detach
+		// itself. A peer waiting on an IRC is blocked on this batch; a finished
+		// background job is not — its notice is an aside that injects at the
+		// batch boundary either way. Detaching ordinary foreground work for it
+		// also cascades: the freshly detached job's own completion re-triggers
+		// this check for the next command, so millisecond-long commands chain
+		// into separate background deliveries (#12869).
+		if (source !== "background") steeringSoftController.abort();
 	};
 
 	const checkSteering = async (): Promise<void> => {
@@ -3784,10 +3797,11 @@ async function executeToolCalls(
 
 	// While tool calls are in flight, queued steering or interrupting IRC would
 	// otherwise wait out the tools' own window. Poll only non-consuming queues:
-	// detection hard-aborts interruptible waits (running or not yet started)
-	// and soft-signals cooperative tools (auto-background bash), so the boundary
-	// dequeue below injects the message promptly. Gated on immediate-interrupt
-	// mode; checkSteering is idempotent (no-op once triggered).
+	// detection hard-aborts interruptible waits (running or not yet started),
+	// and steering/IRC additionally soft-signal cooperative tools
+	// (auto-background bash), so the boundary dequeue below injects the message
+	// promptly. Gated on immediate-interrupt mode; checkSteering is idempotent
+	// (no-op once triggered).
 	const hasAsidePeek = hasIrcInterrupts !== undefined || hasBackgroundCompletions !== undefined;
 	const watchSteeringWhileRunning = shouldInterruptImmediately && (hasSteeringMessages !== undefined || hasAsidePeek);
 	const eventDrivenSteeringWatch =
@@ -3823,7 +3837,11 @@ async function executeToolCalls(
 						() => false,
 					);
 					if (!(await Promise.race([steeringChecked, watchAbortedFalse]))) return;
-					if (steeringWatchSignal.aborted || interruptState.triggered) return;
+					// Stop once the cooperative signal is up — steering and IRC
+					// have nothing left to escalate. A completion-only trigger
+					// leaves it down, so keep watching: a genuine steer arriving
+					// afterwards must still reach foreground tools.
+					if (steeringWatchSignal.aborted || steeringSoftController.signal.aborted) return;
 					if (!(await Promise.race([steeringQueued, watchAbortedFalse]))) return;
 				}
 			})()

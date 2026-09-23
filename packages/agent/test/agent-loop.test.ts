@@ -2400,6 +2400,157 @@ describe("agentLoop with AgentMessage", () => {
 		).toBe(true);
 	});
 
+	it("leaves the cooperative steering signal down for a queued background completion", async () => {
+		const toolSchema = type({});
+		let drained = false;
+		let steeringSignal: AbortSignal | undefined;
+		let softAbortedDuringRun: boolean | undefined;
+		const peeked = Promise.withResolvers<void>();
+		const notice = createUserMessage("job bg_9 completed");
+
+		// Stands in for auto-background bash: non-interruptible, and it detaches
+		// itself whenever the cooperative steering signal goes up.
+		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
+			name: "run",
+			label: "Run",
+			description: "Foreground command that backgrounds itself on a steer",
+			parameters: toolSchema,
+			async execute() {
+				// The batch watch peeked the completion queue; one macrotask later
+				// any abort it decided to raise has landed.
+				await peeked.promise;
+				await new Promise<void>(resolve => setImmediate(resolve));
+				softAbortedDuringRun = steeringSignal?.aborted === true;
+				return { content: [{ type: "text", text: "ran inline" }], details: {} };
+			},
+		};
+
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "run", arguments: {} }] },
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "immediate",
+			getToolContext: toolCall => {
+				steeringSignal = toolCall?.steeringSignal;
+				return { toolCall } as AgentToolContext;
+			},
+			hasBackgroundCompletions: () => {
+				peeked.resolve();
+				return !drained;
+			},
+			getAsideMessages: async () => {
+				if (drained) return [];
+				drained = true;
+				return [() => notice];
+			},
+		};
+
+		const events: AgentEvent[] = [];
+		for await (const event of agentLoop([createUserMessage("start")], context, config, undefined, mock.stream)) {
+			events.push(event);
+		}
+
+		// A completion notice must not push ordinary foreground work into the
+		// background: the detached job's own completion would then detach the
+		// next command, and so on (#12869).
+		expect(softAbortedDuringRun).toBe(false);
+		const toolEnd = events.find(
+			(e): e is Extract<AgentEvent, { type: "tool_execution_end" }> => e.type === "tool_execution_end",
+		);
+		const content = toolEnd?.result.content[0];
+		if (content?.type !== "text") throw new Error("tool result must be text");
+		expect(content.text).toBe("ran inline");
+		// Still delivered, at the batch boundary.
+		expect(
+			events.some(
+				e => e.type === "message_start" && e.message.role === "user" && e.message.content === "job bg_9 completed",
+			),
+		).toBe(true);
+	});
+
+	it("still raises the cooperative steering signal when a user steers after a background completion", async () => {
+		const toolSchema = type({});
+		let completionDrained = false;
+		let steerQueued = false;
+		let steeringDrained = false;
+		let steeringSignal: AbortSignal | undefined;
+		let softAbortedBeforeSteer: boolean | undefined;
+		let softAbortedAfterSteer = false;
+		let releaseSteeringWatch: (() => void) | undefined;
+		const peeked = Promise.withResolvers<void>();
+		const steeringMessage = createUserMessage("user steering");
+
+		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
+			name: "run",
+			label: "Run",
+			description: "Foreground command that backgrounds itself on a steer",
+			parameters: toolSchema,
+			async execute() {
+				await peeked.promise;
+				await new Promise<void>(resolve => setImmediate(resolve));
+				softAbortedBeforeSteer = steeringSignal?.aborted === true;
+				steerQueued = true;
+				releaseSteeringWatch?.();
+				await new Promise<void>(resolve => {
+					if (steeringSignal?.aborted) resolve();
+					else steeringSignal?.addEventListener("abort", () => resolve(), { once: true });
+				});
+				softAbortedAfterSteer = true;
+				return { content: [{ type: "text", text: "backgrounded" }], details: {} };
+			},
+		};
+
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "run", arguments: {} }] },
+				{ content: ["done"] },
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "immediate",
+			getToolContext: toolCall => {
+				steeringSignal = toolCall?.steeringSignal;
+				return { toolCall } as AgentToolContext;
+			},
+			hasBackgroundCompletions: () => {
+				peeked.resolve();
+				return !completionDrained;
+			},
+			hasSteeringMessages: () => steerQueued && !steeringDrained,
+			waitForSteeringMessages: () =>
+				new Promise<void>(resolve => {
+					releaseSteeringWatch = resolve;
+				}),
+			getSteeringMessages: async () => {
+				if (!steerQueued || steeringDrained) return [];
+				steeringDrained = true;
+				return [steeringMessage];
+			},
+			getAsideMessages: async () => {
+				if (completionDrained) return [];
+				completionDrained = true;
+				return [() => createUserMessage("job bg_9 completed")];
+			},
+		};
+
+		for await (const _ of agentLoop([createUserMessage("start")], context, config, undefined, mock.stream)) {
+			// drain
+		}
+
+		expect(softAbortedBeforeSteer).toBe(false);
+		expect(softAbortedAfterSteer).toBe(true);
+	});
+
 	it("keeps legacy steering queued until the injection boundary when no non-consuming peek exists", async () => {
 		const toolSchema = type({ value: "string" });
 		const executed: string[] = [];
