@@ -1,5 +1,4 @@
 import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
-import { stripVTControlCharacters } from "node:util";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -80,7 +79,7 @@ function noticeText(mode: InteractiveMode): string {
 }
 
 function jobsText(mode: InteractiveMode): string {
-	return stripVTControlCharacters(mode.jobsContainer.render(120).join("\n"));
+	return Bun.stripANSI(mode.jobsContainer.render(120).join("\n"));
 }
 function transcriptRowCount(mode: InteractiveMode): number {
 	return mode.chatContainer.render(120).length;

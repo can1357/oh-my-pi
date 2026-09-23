@@ -6556,7 +6556,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const lineWidth = Math.max(24, (this.ui.terminal.columns ?? 100) - 24);
 		this.jobsContainer.clear();
 		this.jobsContainer.addChild(new Spacer(1));
-		this.jobsContainer.addChild(new Text(formatJobsSnapshot(snapshot, lineWidth, true), 1, 0));
+		this.jobsContainer.addChild(new Text(formatJobsSnapshot(snapshot, { lineWidth, runningOnly: true }), 1, 0));
 		this.ui.requestRender();
 	}
 

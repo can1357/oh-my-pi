@@ -589,7 +589,7 @@ export class CommandController {
 
 	async handleJobsCommand(snapshot: AsyncJobSnapshot): Promise<void> {
 		const lineWidth = Math.max(24, (this.ctx.ui.terminal.columns ?? 100) - 24);
-		this.ctx.presentCommandOutput([new Spacer(1), new Text(formatJobsSnapshot(snapshot, lineWidth), 1, 0)]);
+		this.ctx.presentCommandOutput([new Spacer(1), new Text(formatJobsSnapshot(snapshot, { lineWidth }), 1, 0)]);
 	}
 
 	async handleUsageCommand(reports?: UsageReport[] | null): Promise<void> {
@@ -1730,9 +1730,9 @@ const COLUMN_WIDTH_MIN = 4;
 /** Shared rows for the one-time report and the prompt-anchored live view. */
 export function formatJobsSnapshot(
 	snapshot: Pick<AsyncJobSnapshot, "running" | "recent">,
-	lineWidth: number,
-	runningOnly = false,
+	options: { lineWidth: number; runningOnly?: boolean },
 ): string {
+	const { lineWidth, runningOnly = false } = options;
 	const now = Date.now();
 	let info = `${theme.bold("Background Jobs")}\n\n`;
 	info += `${theme.fg("dim", "Running:")} ${snapshot.running.length}\n`;
