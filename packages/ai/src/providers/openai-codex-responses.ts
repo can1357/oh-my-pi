@@ -81,6 +81,7 @@ import {
 	sanitizeCodexCallId,
 	transformRequestBody,
 } from "./openai-codex/request-transformer";
+import { applyCodexAccessPrograms, dropRejectedCodexAccessPrograms } from "./openai-codex/access-programs";
 import { CodexApiError } from "./openai-codex/response-handler";
 import { getCodexAttestationHeader } from "./openai-codex-attestation";
 export { createOpenAICodexCompactionRequestContext } from "./openai-codex-compaction";
@@ -1407,6 +1408,7 @@ function createCodexRequestContext(
 	}
 
 	const accountId = getCodexAccountId(apiKey);
+	applyCodexAccessPrograms(transformedBody, model, accountId);
 	const baseUrl = model.baseUrl || CODEX_BASE_URL;
 	const url = resolveCodexResponsesUrl(baseUrl);
 
@@ -1635,7 +1637,12 @@ async function openInitialCodexEventStream(
 			}
 		}
 	}
-	return openCodexSseTransport(model, requestContext, requestSetup, options, websocketState, transformedBody);
+	try {
+		return await openCodexSseTransport(model, requestContext, requestSetup, options, websocketState, transformedBody);
+	} catch (error) {
+		if (!dropRejectedCodexAccessPrograms(transformedBody, model, requestContext.accountId, error)) throw error;
+		return openCodexSseTransport(model, requestContext, requestSetup, options, websocketState, transformedBody);
+	}
 }
 
 function toCodexRequestBody(body: OpenAICodexCompactionBody): RequestBody {
@@ -1712,6 +1719,22 @@ async function* streamCodexCompactionEvents(
 				const fallback = await openCodexSseTransport(model, requestContext, requestSetup, options, state);
 				if (state) state.lastTransport = fallback.transport;
 				yield* drainCodexCompactionEvents(fallback.eventStream, requestContext);
+				completed = true;
+				return;
+			}
+			const failure = bufferedEvents.findLast(event => event.type === "error" || event.type === "response.failed");
+			if (
+				failure !== undefined &&
+				dropRejectedCodexAccessPrograms(
+					requestContext.transformedBody,
+					model,
+					requestContext.accountId,
+					createCodexProviderStreamError(failure),
+				)
+			) {
+				const replay = await openCodexSseTransport(model, requestContext, requestSetup, options, websocketState);
+				if (websocketState) websocketState.lastTransport = replay.transport;
+				yield* drainCodexCompactionEvents(replay.eventStream, requestContext);
 				completed = true;
 				return;
 			}
@@ -2558,6 +2581,9 @@ class CodexStreamProcessor {
 	}
 
 	async #recoverStreamError(error: unknown): Promise<boolean> {
+		if (await this.#tryDropRejectedAccessPrograms(error)) {
+			return true;
+		}
 		if (await this.#tryRecoverWhitespaceToolCallLoop(error)) {
 			return true;
 		}
@@ -2712,6 +2738,39 @@ class CodexStreamProcessor {
 			signal: this.requestSetup.requestSignal,
 		});
 		await this.#reopenWebSocketStream(websocketState);
+		return true;
+	}
+
+	/**
+	 * Replay the request without `access_programs` after the backend rejected the
+	 * requested cyber program (see `openai-codex/access-programs.ts`). A
+	 * rejection arrives before any output, so the replay is always safe.
+	 */
+	async #tryDropRejectedAccessPrograms(error: unknown): Promise<boolean> {
+		if (
+			hasVisibleAssistantContent(this.output) ||
+			this.options?.signal?.aborted ||
+			!dropRejectedCodexAccessPrograms(
+				this.requestContext.transformedBody,
+				this.model,
+				this.requestContext.accountId,
+				error,
+			)
+		) {
+			return false;
+		}
+		this.#closeOpenBlocksForReplay();
+		const websocketState = this.requestContext.websocketState;
+		if (websocketState) resetCodexWebSocketAppendState(websocketState);
+		this.runtime.resetAccumulators();
+		this.runtime.sawTerminalEvent = false;
+		resetOutputState(this.output);
+		this.firstTokenTime = undefined;
+		if (this.runtime.transport === "websocket" && websocketState) {
+			await this.#reopenWebSocketStream(websocketState);
+		} else {
+			await this.#reopenSseStream(websocketState);
+		}
 		return true;
 	}
 

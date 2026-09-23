@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added `/changelog last [N]` to show the latest release, or the last N releases. `/changelog` still shows the recent default and `/changelog full` still shows the complete history.
+- Added 'daybreak' badge to `omp usage` output for enabled accounts
 - Added `omp login` command for terminal-based OAuth authentication, including automated model discovery refresh and browser-opening support
 - Enabled `org-scoped-identity` and `oauth-token-env` configuration parsing for authentication providers
 - Adopted namespaced `authStorage` API for CLI and session management
@@ -11,6 +13,9 @@
 - Added openrouter/~typesafe/jev-latest as a native judge candidate in priority configuration
 - Added `OMP_MCP_STARTUP_TIMEOUT_MS` and `mcp.startupTimeoutMs` to configure the initial MCP discovery window, plus `OMP_MCP_REQUIRE_READY=1` to fail headless print runs before the first turn when a server is unavailable.
 - Added `auth.accountPolicies` for per-account OAuth priority and reserve controls, with matching policy state in `omp usage` ([#12243](https://github.com/can1357/oh-my-pi/pull/12243) by [@schickling-assistant](https://github.com/schickling-assistant)).
+- Added `/export` and `/usage` to focused subagent views: `/export` writes the focused subagent's transcript (including its own subagents) and `/usage` shows account usage without returning to the main session ([#12986](https://github.com/can1357/oh-my-pi/pull/12986) by [@H4vC](https://github.com/H4vC)).
+- Added saving of clipboard-pasted images to the session artifact directory so the agent receives a file path it can read, copy, or upload (for example, attaching a pasted screenshot to an issue tracker) ([#12985](https://github.com/can1357/oh-my-pi/pull/12985) by [@H4vC](https://github.com/H4vC)).
+- Added `/annotate` to attach notes to a code-review diff, the latest reply, a session message, a file, or quoted text, then paste them into the prompt or send them with a review ([#12601](https://github.com/can1357/oh-my-pi/pull/12601) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
 
 ### Changed
 
@@ -20,8 +25,11 @@
 
 ### Fixed
 
+- Fixed comma-separated line selectors such as `:19,59` in `read`, `grep` paths, and `fetch` reading from the first number through EOF. A bare number in a list is now that single line; a lone `:50` still reads from line 50.
+- Fixed `write` success text reporting JavaScript string length as bytes. The count is now the UTF-8 byte length.
 - Fixed headless print mode (`-p`) silently dropping MCP servers slower than the startup window; print mode now waits for configured servers (bounded by `OMP_MCP_TIMEOUT_MS`) and warns on stderr when one is not ready ([#12188](https://github.com/can1357/oh-my-pi/issues/12188), reported by [@aaronjmars](https://github.com/aaronjmars)).
 - A message typed while the agent is streaming now gets an explicit queued status instead of only a pending-bar repaint, so typed input is never silently swallowed: "Queued — interrupting the current step" when the model call it lands on has produced no output yet (the loop cancels that call and applies the steer immediately), "Queued — will apply after the current response" otherwise. The same notice now fires for collab guest prompts and skill commands queued mid-run; `interruptMode` (Settings → Interaction → Interrupt Mode) governs that cancellation as well as tool execution ([#12787](https://github.com/can1357/oh-my-pi/pull/12787) by [@geoyws](https://github.com/geoyws)).
+- Fixed reader-mode `fetch` output passing inline SVG icons and base64 `data:` images to the model as unreadable payloads; they are now dropped and their alt text is kept ([#13006](https://github.com/can1357/oh-my-pi/pull/13006) by [@H4vC](https://github.com/H4vC)).
 
 ## [18.2.11] - 2026-09-23
 
