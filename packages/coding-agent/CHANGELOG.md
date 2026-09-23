@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed RPC `set_todos` losing todo lists when the session branch is compacted, reloaded, or resumed ([#12590](https://github.com/can1357/oh-my-pi/pull/12590) by [@anthonyrisinger](https://github.com/anthonyrisinger)).
+
 ## [18.2.11] - 2026-09-23
 
 ### Fixed

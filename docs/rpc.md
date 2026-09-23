@@ -373,7 +373,7 @@ The corresponding `get_state` result reports the same computed state:
 
 ### `set_todos` payload
 
-Replaces the in-memory todo state for the current session and returns the normalized phase list:
+Replaces the todo state for the current session and returns the normalized phase list. The list is recorded on the current session branch and restored when that branch is reloaded, compacted, or resumed, like an interactive `/todo` edit:
 
 ```json
 {
