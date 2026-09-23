@@ -1901,6 +1901,7 @@ describe("ACP agent", () => {
 					{ name: "model:foo", description: "Colon-shadowed by /model", handler: async () => {} },
 				].filter(cmd => !reserved?.has(cmd.name));
 			},
+			reloadExtensions: async () => {},
 		};
 
 		// Drive a deterministic re-advertisement instead of sleeping through
