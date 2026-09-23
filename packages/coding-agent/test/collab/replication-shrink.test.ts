@@ -28,19 +28,21 @@
  * {@link MAX_REPLICATED_PAYLOAD_BYTES}, and preserves the entry's
  * `id`/`parentId` so the guest's branch chain stays connected.
  */
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
 import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
 import {
 	COLLAB_PROTO,
+	type CollabElided,
 	type CollabFrame,
 	parseCollabLink,
 	rewriteEnvelopePeer,
 	unpackEnvelope,
 } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
+import { placeholdImagesForReplication } from "@oh-my-pi/pi-coding-agent/collab/replication-images";
 import {
-	COLLAB_ENTRY_OMITTED_CUSTOM_TYPE,
 	copyForReplication,
 	MAX_REPLICATED_PAYLOAD_BYTES,
 	oversizedEntryNotice,
@@ -54,6 +56,9 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { COLLAB_ENTRY_OMITTED_CUSTOM_TYPE } from "@oh-my-pi/pi-wire";
+import { expectFetchable, valueAtPath } from "./helpers/collab-elided";
+import { buildTailFixture, type TailFixture } from "./helpers/tail-fixture";
 
 interface RelayData {
 	role: "host" | "guest";
@@ -732,5 +737,242 @@ describe("live oversized-entry substitution is guest-visible (PR #11999 review)"
 		expect(notice.source).toBe("collab");
 		expect(notice.message).toContain("too large to replicate");
 		expect(notice.message).toContain("(message)");
+	});
+});
+
+/** A tool-result entry over `content` (and optional `details`), as the host holds it. */
+function toolResultEntry(id: string, content: unknown[], details?: unknown): ReplicatedEntry {
+	return {
+		type: "message",
+		id,
+		parentId: null,
+		timestamp: "2026-09-24T00:00:00Z",
+		message: {
+			role: "toolResult",
+			toolCallId: "call-1",
+			toolName: "read",
+			content,
+			details,
+			isError: false,
+			timestamp: 0,
+		},
+	} as unknown as ReplicatedEntry;
+}
+
+/** An image block whose base64 payload is `bytes` long; `seed` keeps blocks distinct. */
+function imageBlock(bytes: number, seed = 0): ImageContent {
+	return { type: "image", data: String.fromCharCode(65 + (seed % 26)).repeat(bytes), mimeType: "image/png" };
+}
+
+describe("collabElided: every trimmed value stays fetchable (#9469)", () => {
+	let fixture: TailFixture;
+	beforeAll(() => {
+		fixture = buildTailFixture();
+	});
+
+	it("lists every clipped fixture string at its path in the original entry", () => {
+		const entry = fixture.sessionManager.getEntry(fixture.ids.clippedString) as ReplicatedEntry;
+		const before = JSON.stringify(entry);
+		const shrunk = shrinkReplicatedEntry(entry);
+		expectBounded(shrunk);
+		const records = shrunk.collabElided ?? [];
+		expect(records.map(r => [r.kind, r.path])).toEqual(
+			[0, 1, 2].map(i => ["string", ["message", "content", i, "text"]]),
+		);
+		for (const record of records) {
+			expect(expectFetchable(entry, record)).toHaveLength(450 * 1024);
+			expect(valueAtPath(shrunk, record.path)).toContain("chars elided for collab session");
+		}
+		// The live path hands over the session's own entry: it must come back untouched.
+		expect(JSON.stringify(entry)).toBe(before);
+	});
+
+	it("sizes a clipped string by the UTF-8 bytes of its JSON", () => {
+		const text = 'é"'.repeat(400_000);
+		const entry = toolResultEntry("utf8", [
+			{ type: "text", text: "ok" },
+			{ type: "text", text },
+		]);
+		const shrunk = shrinkReplicatedEntry(entry);
+		expectBounded(shrunk);
+		const [record, ...rest] = shrunk.collabElided ?? [];
+		if (!record) throw new Error("expected a string record");
+		expect(rest).toEqual([]);
+		expect(record.path).toEqual(["message", "content", 1, "text"]);
+		// `é` is two bytes and `"` escapes to two: four per pair, plus the JSON quotes.
+		expect(record.bytes).toBe(400_000 * 4 + 2);
+		expect(expectFetchable(entry, record)).toBe(text);
+	});
+
+	it("lists a clipped array by its path, keeping the original's indices", () => {
+		const items = Array.from({ length: 200_000 }, (_, i) => i);
+		const entry = toolResultEntry("array", [
+			{ type: "text", text: "a" },
+			{ type: "text", text: "b" },
+			{ type: "text", text: "c", items },
+		]);
+		const shrunk = shrinkReplicatedEntry(entry);
+		expectBounded(shrunk);
+		const records = shrunk.collabElided ?? [];
+		expect(records.map(r => [r.kind, r.path])).toEqual([["array", ["message", "content", 2, "items"]]]);
+		const [record] = records;
+		if (!record) throw new Error("expected an array record");
+		expect(expectFetchable(entry, record)).toBe(items);
+		expect(valueAtPath(shrunk, [...record.path, 256])).toContain("items elided for collab session");
+	});
+
+	it("gives the whole-entry placeholder one entry-level record of the original", () => {
+		const entry = fixture.sessionManager.getEntry(fixture.ids.keyHeavy) as ReplicatedEntry;
+		const shrunk = shrinkReplicatedEntry(entry);
+		expectBounded(shrunk);
+		if (shrunk.type !== "custom_message") throw new Error("expected the typed placeholder");
+		expect(shrunk.customType).toBe(COLLAB_ENTRY_OMITTED_CUSTOM_TYPE);
+		const records = shrunk.collabElided ?? [];
+		expect(records.map(r => [r.kind, r.path])).toEqual([["entry", []]]);
+		const [record] = records;
+		if (!record) throw new Error("expected an entry record");
+		expect(expectFetchable(entry, record)).toBe(entry);
+		expect(shrunk.details).toEqual({ omittedType: "message", bytes: record.bytes });
+	});
+
+	it("returns an entry that already fits by reference, without metadata", () => {
+		const entry = userMessage("fits", null, "2026-09-24T00:00:00Z", "hi");
+		const shrunk = shrinkReplicatedEntry(entry);
+		expect(shrunk).toBe(entry);
+		expect(shrunk.collabElided).toBeUndefined();
+	});
+
+	it("ships an oversized screenshot as an image record, not as clipped base64", () => {
+		const entry = fixture.sessionManager.getEntry(fixture.ids.toolImage) as ReplicatedEntry;
+		const shrunk = shrinkReplicatedEntry(entry);
+		expectBounded(shrunk);
+		expect(valueAtPath(shrunk, ["message", "content", 1])).toEqual({
+			type: "text",
+			text: expect.stringMatching(/^\[image image\/png, .+ not sent\]$/),
+		});
+		const records = shrunk.collabElided ?? [];
+		expect(records.map(r => [r.kind, r.path, r.mimeType])).toEqual([
+			["image", ["message", "content", 1], "image/png"],
+		]);
+		const [record] = records;
+		if (!record) throw new Error("expected an image record");
+		expect(expectFetchable(entry, record)).toMatchObject({ type: "image", mimeType: "image/png" });
+	});
+
+	it("keeps records the entry already carries ahead of its own, once each", () => {
+		// The host placeholders a whole oversized snapshot's images itself, then
+		// shrinks each entry: those records must survive verbatim and not repeat.
+		const original = toolResultEntry("prior", [imageBlock(2_000), { type: "text", text: "x".repeat(1_500_000) }]);
+		const copy = structuredClone(original);
+		expect(placeholdImagesForReplication(copy)).toBe(1);
+		const imageRecords = structuredClone(copy.collabElided);
+		const shrunk = shrinkReplicatedEntry(copy);
+		expectBounded(shrunk);
+		const records = shrunk.collabElided ?? [];
+		expect(records.map(r => [r.kind, r.path])).toEqual([
+			["image", ["message", "content", 0]],
+			["string", ["message", "content", 1, "text"]],
+		]);
+		expect(records[0]).toEqual(imageRecords?.[0] as CollabElided);
+		for (const record of records) expectFetchable(original, record);
+	});
+
+	it("hashes a clipped array holding an image placeholder as the original array", () => {
+		// The array record is fetched from the host's original, which still has
+		// the image — hashing the placeholder copy would make it forever stale.
+		const original = toolResultEntry(
+			"mixed",
+			Array.from({ length: 300 }, (_, i) =>
+				i === 3 ? imageBlock(2_000) : { type: "text", text: "t".repeat(5_000) },
+			),
+		);
+		const hostPlaceholdered = structuredClone(original);
+		placeholdImagesForReplication(hostPlaceholdered);
+		for (const input of [original, hostPlaceholdered]) {
+			const shrunk = shrinkReplicatedEntry(input);
+			expectBounded(shrunk);
+			const records = shrunk.collabElided ?? [];
+			expect(records.map(r => [r.kind, r.path])).toEqual([
+				["image", ["message", "content", 3]],
+				["array", ["message", "content"]],
+			]);
+			for (const record of records) expectFetchable(original, record);
+		}
+	});
+
+	it("addresses the original across an image-only array that lost its image", () => {
+		// `details.images` loses its image outright, shifting later elements down.
+		// Records inside, of, or around that array must still resolve on the
+		// host's original, whoever removed the image.
+		const figures = [{ type: "text", text: "figures" }];
+		const chart = (text: string) => ({ type: "chart", text });
+		const files: Record<string, number> = {};
+		for (let i = 0; i < 20_000; i++) files[`src/generated/module-${i}/index.generated.ts`] = i;
+		const cases: { entry: ReplicatedEntry; expected: [CollabElided["kind"], (string | number)[]][] }[] = [
+			{
+				entry: toolResultEntry("inside", figures, { images: [imageBlock(2_000), chart("c".repeat(1_500_000))] }),
+				expected: [
+					["image", ["message", "details", "images", 0]],
+					["string", ["message", "details", "images", 1, "text"]],
+				],
+			},
+			{
+				entry: toolResultEntry("of", figures, {
+					images: [imageBlock(2_000), ...Array.from({ length: 400 }, (_, i) => chart(`${i}`.padEnd(5_000, "c")))],
+				}),
+				expected: [
+					["image", ["message", "details", "images", 0]],
+					["array", ["message", "details", "images"]],
+				],
+			},
+			{
+				entry: toolResultEntry("around", figures, { images: [imageBlock(2_000)], files }),
+				expected: [["entry", []]],
+			},
+		];
+		for (const { entry: original, expected } of cases) {
+			const hostPlaceholdered = structuredClone(original);
+			expect(placeholdImagesForReplication(hostPlaceholdered)).toBe(1);
+			for (const input of [original, hostPlaceholdered]) {
+				const shrunk = shrinkReplicatedEntry(input);
+				expectBounded(shrunk);
+				const records = shrunk.collabElided ?? [];
+				expect(records.map(r => [r.kind, r.path])).toEqual(expected);
+				for (const record of records) expectFetchable(original, record);
+			}
+		}
+	});
+
+	it("collapses more than 64 records into one entry-level record", () => {
+		const entry = toolResultEntry(
+			"many",
+			Array.from({ length: 70 }, (_, i) => ({ type: "text", text: `${i}`.padEnd(20_000, "s") })),
+		);
+		const shrunk = shrinkReplicatedEntry(entry);
+		expectBounded(shrunk);
+		expect(shrunk.type).toBe("message");
+		const records = shrunk.collabElided ?? [];
+		expect(records.map(r => [r.kind, r.path])).toEqual([["entry", []]]);
+		const [record] = records;
+		if (!record) throw new Error("expected an entry record");
+		expect(expectFetchable(entry, record)).toBe(entry);
+	});
+
+	it("collapses image records with the rest, hashing the entry with its images", () => {
+		const original = toolResultEntry("many-images", [
+			...Array.from({ length: 70 }, (_, i) => imageBlock(1_000, i)),
+			{ type: "text", text: "x".repeat(2_000_000) },
+		]);
+		const hostPlaceholdered = structuredClone(original);
+		expect(placeholdImagesForReplication(hostPlaceholdered)).toBe(70);
+		for (const input of [original, hostPlaceholdered]) {
+			const shrunk = shrinkReplicatedEntry(input);
+			expectBounded(shrunk);
+			const records = shrunk.collabElided ?? [];
+			expect(records.map(r => [r.kind, r.path])).toEqual([["entry", []]]);
+			const [record] = records;
+			if (!record) throw new Error("expected an entry record");
+			expectFetchable(original, record);
+		}
 	});
 });

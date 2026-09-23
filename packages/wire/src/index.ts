@@ -129,6 +129,13 @@ export interface CollabElided {
 	hash: string;
 	/** Images only. */
 	mimeType?: string;
+	/**
+	 * The value was removed rather than replaced in place: image-only arrays
+	 * (`bashExecution.images`, tool `details.images`) can't hold a text
+	 * placeholder, because renderers draw every element as an image. Restore
+	 * it by inserting at `path`'s index, in ascending index order.
+	 */
+	removed?: true;
 }
 
 export interface EntryBase {

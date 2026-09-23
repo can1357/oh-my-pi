@@ -8,17 +8,28 @@
  * Drives the production `CollabHost` over the in-memory relay with real
  * sealing and a real `SessionManager` holding the large fixture session.
  */
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, expectTypeOf, it } from "bun:test";
 import { isTurnStartEntry } from "@oh-my-pi/pi-agent-core/compaction";
 import { importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
 import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
-import { COLLAB_PROTO, type CollabFrame, parseCollabLink } from "@oh-my-pi/pi-coding-agent/collab/protocol";
+import {
+	COLLAB_PROTO,
+	type CollabElided,
+	type CollabFrame,
+	parseCollabLink,
+} from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
-import { replicationByteLength } from "@oh-my-pi/pi-coding-agent/collab/replication-shrink";
+import { collabValueHash } from "@oh-my-pi/pi-coding-agent/collab/replication-images";
+import {
+	MAX_REPLICATED_PAYLOAD_BYTES,
+	replicationByteLength,
+} from "@oh-my-pi/pi-coding-agent/collab/replication-shrink";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import type { GuestFrame, HostFrame, TailSnapshotRequest } from "@oh-my-pi/pi-wire";
+import { expectFetchable, valueAtPath } from "./helpers/collab-elided";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
 import { buildTailFixture, type TailFixture } from "./helpers/tail-fixture";
 import { instrumentRelay, type RelayProbe } from "./helpers/throttled-host";
@@ -35,6 +46,7 @@ const WIRE_TYPES: Record<string, true> = {
 
 type HistoryFrame = Extract<CollabFrame, { t: "history" }>;
 type WelcomeFrame = Extract<CollabFrame, { t: "welcome" }>;
+type ValueFrame = Extract<CollabFrame, { t: "value" }>;
 
 function hostContext(sessionManager: SessionManager): InteractiveModeContext {
 	return {
@@ -163,10 +175,40 @@ class RawGuest {
 	async fetchHistory(before: string, maxBytes?: number) {
 		return this.page(this.sendFetchHistory(before, maxBytes));
 	}
+
+	/**
+	 * Follow `value` frames from offset 0 to `final`, re-requesting like a guest
+	 * would; `afterSlice` runs between a non-final slice and the next request.
+	 */
+	async fetchValue(
+		entryId: unknown,
+		path: unknown,
+		hash: unknown,
+		afterSlice?: () => void,
+	): Promise<{ json: string; frames: number; error?: string }> {
+		let json = "";
+		for (let frames = 1; ; frames++) {
+			const reqId = ++this.#reqId;
+			this.socket.send({ t: "fetch-value", reqId, entryId, path, hash, offset: json.length } as CollabFrame);
+			const frame = (await this.until(f => f.t === "value" && f.reqId === reqId)) as ValueFrame;
+			if (frame.error) return { json, frames, error: frame.error };
+			expect(frame.offset).toBe(json.length);
+			json += frame.data;
+			if (frame.final) {
+				expect(json.length).toBe(frame.total);
+				return { json, frames };
+			}
+			afterSlice?.();
+		}
+	}
 }
 
 function wirePath(sessionManager: SessionManager): SessionEntry[] {
 	return sessionManager.getBranch().filter(entry => entry.type in WIRE_TYPES);
+}
+
+function elisions(entry: SessionEntry | undefined): CollabElided[] {
+	return (entry as { collabElided?: CollabElided[] } | undefined)?.collabElided ?? [];
 }
 
 function ids(entries: readonly SessionEntry[]): string[] {
@@ -337,6 +379,119 @@ describe("collab tail-first snapshot (#9469)", () => {
 	}
 });
 
+describe("collab fetch-value: nothing trimmed is lost (#9469)", () => {
+	/** The whole turn holding `id`, as a one-turn history page. */
+	async function turnHolding(guest: RawGuest, id: string): Promise<SessionEntry> {
+		const at = path.findIndex(entry => entry.id === id);
+		const next = path.findIndex((entry, i) => i > at && isTurnStartEntry(entry));
+		const page = await guest.fetchHistory(path[next]?.id ?? "", 1);
+		const entry = page.entries.find(candidate => candidate.id === id);
+		if (!entry) throw new Error(`entry ${id} not in its turn's page`);
+		return entry;
+	}
+
+	/** Fetch every elided value of `sent` and compare it with the host's original. */
+	async function expectLossless(guest: RawGuest, sent: SessionEntry, kinds: CollabElided["kind"][]) {
+		const original = fixture.sessionManager.getEntry(sent.id);
+		const records = elisions(sent);
+		expect(records.map(record => record.kind).sort()).toEqual([...kinds].sort());
+		let frames = 0;
+		for (const record of records) {
+			const expected = JSON.stringify(expectFetchable(original, record));
+			const fetched = await guest.fetchValue(sent.id, record.path, record.hash);
+			expect(fetched.error).toBeUndefined();
+			expect(fetched.json).toBe(expected);
+			frames += fetched.frames;
+		}
+		return frames;
+	}
+
+	let guest: RawGuest;
+	beforeAll(async () => {
+		guest = await RawGuest.connect(running.host.viewLink, { mode: "tail", maxBytes: MIB });
+		await guest.joined();
+	});
+	afterAll(() => guest.socket.close());
+
+	it("restores every clipped string of an oversized tool result", async () => {
+		const sent = await turnHolding(guest, fixture.ids.clippedString);
+		expect(bytes([sent])).toBeLessThanOrEqual(MIB);
+		// Three 450 KiB blocks, each within one 1 MiB `value` frame: one request apiece.
+		expect(await expectLossless(guest, sent, ["string", "string", "string"])).toBe(3);
+	});
+
+	it("sends an oversized image as a placeholder at its own index and serves the original block", async () => {
+		const sent = await turnHolding(guest, fixture.ids.toolImage);
+		const original = fixture.sessionManager.getEntry(sent.id);
+		const [record] = elisions(sent);
+		if (!record) throw new Error("expected an image placeholder");
+		expect(record).toMatchObject({ kind: "image", mimeType: "image/png" });
+		const block = valueAtPath(sent, record.path) as { type: string };
+		expect(block.type).toBe("text");
+		expect((valueAtPath(sent, record.path.slice(0, -1)) as unknown[]).length).toBe(
+			(valueAtPath(original, record.path.slice(0, -1)) as unknown[]).length,
+		);
+		expect(await expectLossless(guest, sent, ["image"])).toBeGreaterThan(1);
+	});
+
+	it("serves the whole original behind an entry that could not be shrunk", async () => {
+		const sent = await turnHolding(guest, fixture.ids.keyHeavy);
+		expect(sent.type).toBe("custom_message");
+		await expectLossless(guest, sent, ["entry"]);
+	});
+
+	it("replaces every image of an over-threshold full snapshot with a loadable placeholder", async () => {
+		const full = await RawGuest.connect(running.host.link);
+		try {
+			const { entries } = await full.joined();
+			for (const id of [fixture.ids.userImage, fixture.ids.detailsImage, fixture.ids.bashImage]) {
+				const sent = entries.find(entry => entry.id === id);
+				if (!sent) throw new Error(`entry ${id} missing from the full snapshot`);
+				expect(JSON.stringify(sent)).not.toContain("iVBORw0KGgo");
+				await expectLossless(full, sent, ["image"]);
+			}
+		} finally {
+			full.socket.close();
+		}
+	});
+
+	it("answers stale once the original changed in place", async () => {
+		const sent = await turnHolding(guest, fixture.ids.clippedString);
+		const [record] = elisions(sent);
+		if (!record) throw new Error("expected a clipped string");
+		const original = fixture.sessionManager.getEntry(sent.id) as { message: { content: { text: string }[] } };
+		const block = original.message.content[0];
+		if (!block) throw new Error("expected a text block");
+		const text = block.text;
+		// What session maintenance does when it prunes old tool output.
+		block.text = "[pruned]";
+		try {
+			expect((await guest.fetchValue(sent.id, record.path, record.hash)).error).toBe("stale");
+		} finally {
+			block.text = text;
+		}
+		expect((await guest.fetchValue(sent.id, record.path, record.hash)).error).toBeUndefined();
+	});
+
+	it("rejects malformed requests and unknown values", async () => {
+		const sent = await turnHolding(guest, fixture.ids.clippedString);
+		const [record] = elisions(sent);
+		if (!record) throw new Error("expected a clipped string");
+		for (const [entryId, valuePath] of [
+			[42, record.path],
+			[sent.id, "message"],
+			[sent.id, [{ key: 1 }]],
+			[sent.id, [-1]],
+		] as const) {
+			expect((await guest.fetchValue(entryId, valuePath, record.hash)).error).toBe("malformed fetch-value");
+		}
+		expect((await guest.fetchValue(sent.id, ["message", "nope"], record.hash)).error).toBe("stale");
+		expect((await guest.fetchValue(sent.id, ["__proto__"], record.hash)).error).toBe("stale");
+		expect((await guest.fetchValue("no-such-entry", [], record.hash)).error).toBe("stale");
+		expect((await guest.fetchValue(sent.id, record.path, "0")).error).toBe("stale");
+	});
+});
+
 describe("collab tail-first snapshot under backpressure", () => {
 	it("bounds queued history pages per guest and keeps the room alive", async () => {
 		await running.stop();
@@ -440,5 +595,108 @@ describe("collab tail-first snapshot after the branch moves", () => {
 		} finally {
 			guest.socket.close();
 		}
+	});
+
+	it("never serves entry types the snapshot itself withholds", async () => {
+		const sessionManager = SessionManager.inMemory("/work/tail-small");
+		const initId = sessionManager.appendSessionInit({ systemPrompt: "host-only secret", task: "t", tools: [] });
+		sessionManager.appendMessage({ role: "user", content: "hello", timestamp: 0 });
+		await running.stop();
+		running = await startHost(sessionManager);
+		const guest = await RawGuest.connect(running.host.viewLink, { mode: "tail", maxBytes: MIB });
+		try {
+			const { entries } = await guest.joined();
+			expect(ids(entries)).not.toContain(initId);
+			// Even a guest that knows the exact value and its hash is refused.
+			const init = sessionManager.getEntry(initId);
+			const hash = collabValueHash(JSON.stringify(init));
+			const fetched = await guest.fetchValue(initId, [], hash);
+			expect(fetched.error).toBe("stale");
+			expect(fetched.json).not.toContain("secret");
+		} finally {
+			guest.socket.close();
+		}
+	});
+});
+
+describe("collab fetch-value slices", () => {
+	// Each repetition is 21 UTF-8 bytes of text but 30 inside a `value` frame,
+	// whose JSON escapes the value's own escaped quotes and backslash again.
+	const text = '漢字"引用"\\パス'.repeat(100_000);
+	let sessionManager: SessionManager;
+	let guest: RawGuest;
+	let sent: SessionEntry;
+	let record: CollabElided;
+
+	beforeAll(async () => {
+		sessionManager = SessionManager.inMemory("/work/tail-slices");
+		sessionManager.appendMessage({ role: "user", content: "Dump the corpus.", timestamp: 0 });
+		sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: "call_1",
+			toolName: "read",
+			content: [{ type: "text", text }],
+			isError: false,
+			timestamp: 1,
+		});
+		await running.stop();
+		running = await startHost(sessionManager);
+		guest = await RawGuest.connect(running.host.viewLink, { mode: "tail", maxBytes: MIB });
+		const { entries } = await guest.joined();
+		const clipped = entries.find(entry => elisions(entry).length > 0);
+		const [first] = elisions(clipped);
+		if (!clipped || !first) throw new Error("expected the tool result to be clipped");
+		expect(first).toMatchObject({ kind: "string", path: ["message", "content", 0, "text"] });
+		sent = clipped;
+		record = first;
+	});
+	afterAll(() => guest.socket.close());
+
+	it("keeps every frame of a CJK and escape-heavy value under the payload ceiling", async () => {
+		const seen = guest.frames.length;
+		const fetched = await guest.fetchValue(sent.id, record.path, record.hash);
+		expect(fetched.error).toBeUndefined();
+		expect(fetched.json).toBe(JSON.stringify(text));
+		expect(fetched.frames).toBeGreaterThan(1);
+		const frames = guest.frames.slice(seen).filter(frame => frame.t === "value");
+		expect(frames).toHaveLength(fetched.frames);
+		for (const frame of frames) {
+			expect(replicationByteLength(frame)).toBeLessThanOrEqual(MAX_REPLICATED_PAYLOAD_BYTES);
+		}
+	});
+
+	it("cuts every slice of a transfer from the value its first slice checked", async () => {
+		const original = sessionManager.getEntry(sent.id) as { message: { content: { text: string }[] } };
+		const block = original.message.content[0];
+		if (!block) throw new Error("expected a text block");
+		try {
+			const fetched = await guest.fetchValue(sent.id, record.path, record.hash, () => {
+				block.text = "[pruned]";
+			});
+			expect(fetched.error).toBeUndefined();
+			expect(fetched.json).toBe(JSON.stringify(text));
+			// A new transfer checks the live value again.
+			expect((await guest.fetchValue(sent.id, record.path, record.hash)).error).toBe("stale");
+		} finally {
+			block.text = text;
+		}
+	});
+});
+
+type HostFrameOf<T extends CollabFrame["t"]> = Extract<CollabFrame, { t: T }>;
+type WireHostFrame<T extends HostFrame["t"]> = Extract<HostFrame, { t: T }>;
+type WireGuestFrame<T extends GuestFrame["t"]> = Extract<GuestFrame, { t: T }>;
+
+describe("collab tail frames on the wire", () => {
+	it("types the tail frames the same on the host and in the web guest's grammar", () => {
+		// Host history pages carry rich session entries that only serialize into the wire shape.
+		expectTypeOf<Omit<HostFrameOf<"history">, "entries">>().toEqualTypeOf<
+			Omit<WireHostFrame<"history">, "entries">
+		>();
+		expectTypeOf<HostFrameOf<"value">>().toEqualTypeOf<WireHostFrame<"value">>();
+		expectTypeOf<HostFrameOf<"welcome">["history"]>().toEqualTypeOf<WireHostFrame<"welcome">["history"]>();
+		expectTypeOf<HostFrameOf<"fetch-history">>().toEqualTypeOf<WireGuestFrame<"fetch-history">>();
+		expectTypeOf<HostFrameOf<"fetch-value">>().toEqualTypeOf<WireGuestFrame<"fetch-value">>();
+		expectTypeOf<HostFrameOf<"hello">["snapshot"]>().toEqualTypeOf<TailSnapshotRequest | undefined>();
 	});
 });
