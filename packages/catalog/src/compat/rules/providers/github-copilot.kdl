@@ -62,4 +62,18 @@ provider "github-copilot" {
 	models "grok-4.6" "grok-4.6-1m" {
 		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
 	}
+	// Copilot bills these OpenAI flagships in two tiers: the default tier ends
+	// at 272K prompt tokens and the long tier is served as the opt-in `-1m`
+	// sibling synthesized from `billing.token_prices.long_context`. Bundled and
+	// cached rows carry the long tier's 1.05M ceiling as the base window, and
+	// the Copilot rows carry no `cost.longContext`, so the standard-pricing cap
+	// had nothing to key on and every session started on the premium tier.
+	// Keep the default tier explicit; `/extended-context on` restores the full
+	// window. Exact ids only — the `-1m` siblings are the long tier itself.
+	models "gpt-5.6-sol" "gpt-5.6-luna" "gpt-5.6-terra" "gpt-6-astra" {
+		limits-patch {
+			context-window 272000
+		}
+		max-context-window 1050000
+	}
 }
