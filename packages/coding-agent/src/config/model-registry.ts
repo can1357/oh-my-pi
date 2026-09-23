@@ -2380,14 +2380,25 @@ export class ModelRegistry {
 
 	#applyModelOverrides(models: Model<Api>[], overrides: Map<string, Map<string, ModelOverride>>): Model<Api>[] {
 		const customWindows = new Map<string, number>();
+		const pinnedWindows = new Set<string>();
+		let hasTieredOverlays = false;
 		for (const overlays of [this.#customModelOverlays, this.#runtimeModelOverlays]) {
 			for (const overlay of overlays) {
+				const key = `${overlay.provider}\u0000${overlay.id}`;
 				if (overlay.maxContextWindow !== undefined) {
-					customWindows.set(`${overlay.provider}\u0000${overlay.id}`, overlay.maxContextWindow);
+					customWindows.set(key, overlay.maxContextWindow);
+				}
+				if (overlay.contextWindow !== undefined) {
+					pinnedWindows.add(key);
+				}
+				if (overlay.cost?.longContext !== undefined) {
+					hasTieredOverlays = true;
 				}
 			}
 		}
-		if (overrides.size === 0 && customWindows.size === 0) return models;
+		if (overrides.size === 0 && customWindows.size === 0 && pinnedWindows.size === 0 && !hasTieredOverlays) {
+			return models;
+		}
 		let liveKeys: Set<string> | null = null;
 		const hasLiveModel = (provider: string, id: string) => {
 			liveKeys ??= new Set(models.map(m => `${m.provider}\u0000${m.id}`));
@@ -2406,8 +2417,30 @@ export class ModelRegistry {
 				(override?.contextWindow === undefined
 					? customWindows.get(`${model.provider}\u0000${model.id}`)
 					: undefined);
-			return this.#applyConfiguredExtendedWindow(overridden, maximum, model);
+			const withWindow = this.#applyConfiguredExtendedWindow(overridden, maximum, model);
+			return this.#applyConfiguredLongContextCap(
+				withWindow,
+				override?.contextWindow !== undefined || pinnedWindows.has(`${model.provider}\u0000${model.id}`),
+			);
 		});
+	}
+
+	/**
+	 * Config-declared long-context tiers (`cost.longContext` in models.yml) reach
+	 * the model only after the custom-model and override merge, so the catalog
+	 * tier cap in `#applyHardcodedModelPolicies` cannot see them. Mirror it here:
+	 * with extended context off, cap the working window at the tier threshold so
+	 * compaction fires before a request crosses into premium pricing. Explicitly
+	 * pinned windows (an override or custom definition that sets `contextWindow`)
+	 * win over this cap, matching the catalog pass's documented precedence.
+	 */
+	#applyConfiguredLongContextCap(model: Model<Api>, windowPinned: boolean): Model<Api> {
+		if (windowPinned || isExtendedContextEnabledFromSettings(this.#settings)) return model;
+		const threshold = model.cost.longContext?.inputThreshold;
+		if (threshold === undefined || model.contextWindow === null || model.contextWindow <= threshold) {
+			return model;
+		}
+		return applyModelOverride(model, { contextWindow: threshold });
 	}
 
 	#applyConfiguredExtendedWindow(model: Model<Api>, maximum: number | undefined, baseline: Model<Api>): Model<Api> {

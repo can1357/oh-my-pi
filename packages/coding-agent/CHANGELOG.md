@@ -27,6 +27,7 @@
 - Added `/export` and `/usage` to focused subagent views: `/export` writes the focused subagent's transcript (including its own subagents) and `/usage` shows account usage without returning to the main session ([#12986](https://github.com/can1357/oh-my-pi/pull/12986) by [@H4vC](https://github.com/H4vC)).
 - Added saving of clipboard-pasted images to the session artifact directory so the agent receives a file path it can read, copy, or upload (for example, attaching a pasted screenshot to an issue tracker) ([#12985](https://github.com/can1357/oh-my-pi/pull/12985) by [@H4vC](https://github.com/H4vC)).
 - Added `/annotate` to attach notes to a code-review diff, the latest reply, a session message, a file, or quoted text, then paste them into the prompt or send them with a review ([#12601](https://github.com/can1357/oh-my-pi/pull/12601) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
+- Added `cost.longContext` to `models.yml` model definitions and `modelOverrides` so gateway/proxy models can declare a premium long-context pricing tier; with extended context off the working window caps at the tier threshold, matching bundled long-context models.
 
 ### Changed
 

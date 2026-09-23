@@ -187,6 +187,31 @@ export const getModelsConfigSchemaBundle = once(() => {
 		return true;
 	});
 
+	/**
+	 * Long-context pricing tier: absolute rates applied once prompt input
+	 * crosses `inputThreshold` (or reaches it when `inputThresholdInclusive`
+	 * is true). Mirrors the catalog's `long-context-cost` absolute form; the
+	 * multiplier form stays KDL-only because it derives from the row's live
+	 * list price.
+	 */
+	const LongContextCostSchema = type({
+		inputThreshold: "number",
+		input: "number",
+		output: "number",
+		cacheRead: "number",
+		cacheWrite: "number",
+		"inputThresholdInclusive?": "boolean",
+	}).narrow((value, ctx) => {
+		if (
+			typeof value.inputThreshold !== "number" ||
+			!Number.isFinite(value.inputThreshold) ||
+			value.inputThreshold <= 0
+		) {
+			return ctx.mustBe("longContext.inputThreshold a positive finite number");
+		}
+		return true;
+	});
+
 	const ModelDefinitionSchema = type({
 		id: "string",
 		"name?": "string",
@@ -203,6 +228,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 			output: "number",
 			cacheRead: "number",
 			cacheWrite: "number",
+			"longContext?": LongContextCostSchema,
 		},
 		"premiumMultiplier?": "number",
 		"contextWindow?": "number",
@@ -256,6 +282,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 			"output?": "number",
 			"cacheRead?": "number",
 			"cacheWrite?": "number",
+			"longContext?": LongContextCostSchema,
 		},
 		"premiumMultiplier?": "number",
 		"contextWindow?": "number",

@@ -2397,6 +2397,145 @@ describe("ModelRegistry", () => {
 			expect(registry.find("openrouter", "anthropic/claude-sonnet-4")?.contextWindow).toBe(128_000);
 		});
 
+		test("custom gateway long-context tier caps the window at its threshold with extended context off", async () => {
+			// A gateway fronting GPT-6 Sol: 272K standard-pricing boundary, 1.05M
+			// extended window, premium rates above the threshold — the pair a
+			// user declares when the proxy's /models list reports no limits.
+			writeRawModelsJson({
+				"portkey-gateway": {
+					baseUrl: "https://example.com/v1",
+					auth: "none",
+					api: "openai-responses",
+					models: [
+						{
+							id: "gpt-6-sol",
+							contextWindow: 272_000,
+							maxContextWindow: 1_050_000,
+							cost: {
+								input: 1.25,
+								output: 10,
+								cacheRead: 0.125,
+								cacheWrite: 0,
+								longContext: {
+									inputThreshold: 272_000,
+									input: 10,
+									output: 45,
+									cacheRead: 1.25,
+									cacheWrite: 0,
+								},
+							},
+						},
+					],
+				},
+			});
+			const testSettings = Settings.isolated();
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
+			expect(registry.find("portkey-gateway", "gpt-6-sol")?.contextWindow).toBe(272_000);
+			expect(registry.find("portkey-gateway", "gpt-6-sol")?.cost.longContext?.inputThreshold).toBe(272_000);
+
+			testSettings.set("extendedContext", true);
+			await registry.reapplyModelPolicies();
+			expect(registry.find("portkey-gateway", "gpt-6-sol")?.contextWindow).toBe(1_050_000);
+
+			testSettings.set("extendedContext", false);
+			await registry.reapplyModelPolicies();
+			expect(registry.find("portkey-gateway", "gpt-6-sol")?.contextWindow).toBe(272_000);
+		});
+
+		test("an explicit contextWindow override wins over the tier threshold cap", async () => {
+			writeRawModelsJson({
+				"portkey-gateway": {
+					baseUrl: "https://example.com/v1",
+					auth: "none",
+					api: "openai-responses",
+					models: [
+						{
+							id: "gpt-6-sol",
+							contextWindow: 400_000,
+							cost: {
+								input: 1.25,
+								output: 10,
+								cacheRead: 0.125,
+								cacheWrite: 0,
+								longContext: {
+									inputThreshold: 272_000,
+									input: 10,
+									output: 45,
+									cacheRead: 1.25,
+									cacheWrite: 0,
+								},
+							},
+						},
+					],
+				},
+			});
+			const testSettings = Settings.isolated();
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
+			// The pinned window stays exactly as configured: the tier only prices
+			// requests that cross it, it must not shrink an explicit window.
+			expect(registry.find("portkey-gateway", "gpt-6-sol")?.contextWindow).toBe(400_000);
+		});
+
+		test("modelOverrides tier caps a discovered-size window without window overrides", async () => {
+			// The gateway's /models list reports the full 1.05M window (cached
+			// discovery); the user's override supplies only the pricing tier. With
+			// extended context off the working window must cap at the threshold.
+			writeRawModelsJson({
+				"portkey-gateway": {
+					baseUrl: "https://example.com/v1",
+					auth: "none",
+					api: "openai-responses",
+					discovery: { type: "openai-models-list" },
+					models: [],
+					modelOverrides: {
+						"gpt-6-sol": {
+							cost: {
+								input: 1.25,
+								output: 10,
+								cacheRead: 0.125,
+								cacheWrite: 0,
+								longContext: {
+									inputThreshold: 272_000,
+									input: 10,
+									output: 45,
+									cacheRead: 1.25,
+									cacheWrite: 0,
+								},
+							},
+						},
+					},
+				},
+			});
+			writeModelCache(
+				"portkey-gateway:openai-models-list-context-v3",
+				Date.now(),
+				[
+					buildModel({
+						id: "gpt-6-sol",
+						name: "GPT-6 Sol",
+						api: "openai-responses",
+						provider: "portkey-gateway",
+						baseUrl: "https://example.com/v1",
+						reasoning: true,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 1_050_000,
+						maxTokens: 128_000,
+					}),
+				],
+				true,
+				"",
+				path.join(path.dirname(modelsJsonPath), "models.db"),
+			);
+			const testSettings = Settings.isolated();
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
+			expect(registry.find("portkey-gateway", "gpt-6-sol")?.contextWindow).toBe(272_000);
+
+			testSettings.set("extendedContext", true);
+			await registry.reapplyModelPolicies();
+			expect(registry.find("portkey-gateway", "gpt-6-sol")?.contextWindow).toBe(1_050_000);
+		});
+
 		test("toggles bundled Astra between its standard and documented extended windows", async () => {
 			const testSettings = Settings.isolated();
 			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });

@@ -67,6 +67,13 @@ providers:
           output: 0
           cacheRead: 0
           cacheWrite: 0
+          # optional premium long-context tier (see "Usage costs")
+          longContext:
+            inputThreshold: 272000 # standard-pricing boundary
+            input: 10
+            output: 45
+            cacheRead: 1.25
+            cacheWrite: 0
         contextWindow: 128000
         maxContextWindow: 256000 # optional extended-context window
         maxTokens: 16384
@@ -246,6 +253,18 @@ Local estimates use the assistant message's **request-start timestamp** to choos
 The status line's `cost` segment appends **↑** for peak or **↓** for off-peak pricing on the **currently active provider/model**, using the current wall clock. It refreshes at tariff boundaries even while idle; the arrow is not a label for the accumulated session total. Models without scheduled pricing, including explicit flat-price overrides, show no arrow.
 
 An explicit model `cost` in `models.yml`, including `modelOverrides`, is a flat-price override and disables inherited time-based pricing for that model. Omitting `cost` preserves catalog pricing. `models.yml` does **not** accept a `timeBased` schedule; that metadata belongs to the catalog's [KDL pricing rules](../packages/catalog/src/compat/rules/README.md#time-based-pricing).
+
+`cost.longContext` (on `models` entries and `modelOverrides`) declares a premium
+long-context pricing tier in absolute rates: `inputThreshold` plus the
+`input`/`output`/`cacheRead`/`cacheWrite` rates billed once prompt input crosses
+the threshold (inclusive with `inputThresholdInclusive: true`). Requests above
+the threshold are estimated at the tier rates, and with extended context off the
+working window caps at `inputThreshold` so compaction fires before a request
+crosses into the premium tier — the same behavior bundled long-context models
+(GPT-5.6/6 Sol, Luna, Astra) get from catalog rules. An explicit `contextWindow`
+in the same definition or override remains fixed and wins over the tier cap.
+Pair it with `contextWindow` + `maxContextWindow` to declare "272K standard,
+1.05M extended" for a gateway that reports no limits.
 
 A custom model in `models.yml` that omits `cost` inherits its reference row's card, schedule included. That lookup is keyed by model id and prefers the row with the widest limits, so `deepseek-v4-flash` resolves to a reseller's flat card while `deepseek-flash` resolves to the scheduled first-party one. Discovered proxy and gateway models are the opposite case: their pricing is provider-specific and rarely matches the bundled catalog, so discovery keeps them at a local-unknown zero cost and no tariff applies to them.
 
