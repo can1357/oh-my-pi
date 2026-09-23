@@ -224,7 +224,7 @@ const LOCAL_OPENAI_COMPAT_STREAM_IDLE_TIMEOUT_MS = 300_000;
 
 // Mechanism only: provider ids identify local/proxy endpoint shape, while
 // loopback URL detection handles custom endpoints; neither is model policy.
-const LOCAL_OPENAI_COMPAT_PROVIDERS: Record<string, true> = {
+export const LOCAL_OPENAI_COMPAT_PROVIDERS: Record<string, true> = {
 	"llama.cpp": true,
 	"lm-studio": true,
 	vllm: true,

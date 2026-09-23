@@ -190,3 +190,78 @@ describe("bench challenge mix", () => {
 		await expect(runProfiled({ profile: "mix", prompt: "hello" })).rejects.toThrow("--prompt");
 	});
 });
+describe("bench local provider behavior", () => {
+	it("defaults to par=1 for local providers and shares session across runs", async () => {
+		const localModel = buildModel({
+			provider: "llama.cpp",
+			id: "local-model",
+			name: "local-model",
+			api: "openai-completions",
+			baseUrl: "http://127.0.0.1:8080/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			maxTokens: 4096,
+			contextWindow: 128_000,
+		});
+		const localRegistry: BenchModelRegistry = {
+			getAll: () => [localModel],
+			getAvailable: () => [localModel],
+			getApiKey: async () => "sk-test",
+			resolver: () => () => Promise.resolve("sk-test"),
+		};
+		const captured: { context: Context; options: SimpleStreamOptions }[] = [];
+		const capturedSessions: string[] = [];
+		let call = 0;
+		const _summary = await runBenchCommand(
+			{ models: ["llama.cpp/local-model"], flags: { json: true, profile: "chat", runs: 3 } },
+			{
+				createRuntime: async () => ({ modelRegistry: localRegistry, close: () => {} }),
+				randomSessionId: () => `sess-${call++}`,
+				writeStdout: () => {},
+				writeStderr: () => {},
+				setExitCode: () => {},
+				streamSimple: (_model, context, options) => {
+					captured.push({ context, options: options ?? ({} as SimpleStreamOptions) });
+					capturedSessions.push(options!.sessionId!);
+					return streamOf(message({}));
+				},
+				now: () => 0,
+				random: () => 0,
+				stdoutIsTTY: false,
+			},
+		);
+		expect(captured.length).toBe(3);
+		// With par=1 and shared session, all runs use the same session ID
+		const uniqueSessions = new Set(capturedSessions);
+		expect(uniqueSessions.size).toBe(1);
+	}, 10000);
+
+	it("uses par=4 default for non-local providers", async () => {
+		const captured: { context: Context; options: SimpleStreamOptions }[] = [];
+		const capturedSessions: string[] = [];
+		let call = 0;
+		const _summary = await runBenchCommand(
+			{ models: ["acme/bench-model"], flags: { json: true, profile: "chat", runs: 4 } },
+			{
+				createRuntime: async () => ({ modelRegistry: registry, close: () => {} }),
+				randomSessionId: () => `sess-${call++}`,
+				writeStdout: () => {},
+				writeStderr: () => {},
+				setExitCode: () => {},
+				streamSimple: (_model, context, options) => {
+					captured.push({ context, options: options ?? ({} as SimpleStreamOptions) });
+					capturedSessions.push(options!.sessionId!);
+					return streamOf(message({}));
+				},
+				now: () => 0,
+				random: () => 0,
+				stdoutIsTTY: false,
+			},
+		);
+		expect(captured.length).toBe(4);
+		// Non-local providers get par=4, so different sessions
+		const uniqueSessions = new Set(capturedSessions);
+		expect(uniqueSessions.size).toBeGreaterThan(1);
+	}, 10000);
+});

@@ -41,8 +41,9 @@ import {
 } from "./bench-runtime";
 import { createLiveBoard, type LiveBoardOutput } from "@oh-my-pi/pi-tui/chrome/live-board";
 import { formatCost } from "@oh-my-pi/pi-tui/overlays/agent-hub-renderer";
-
+import { LOCAL_OPENAI_COMPAT_PROVIDERS as LOCAL_PROVIDERS } from "@oh-my-pi/pi-catalog/compat/resolve";
 const DEFAULT_PAR = 4;
+const DEFAULT_PAR_LOCAL = 1;
 const DEFAULT_CACHE_MAX_TOKENS = 64;
 const DEFAULT_CACHE_PREFIX_BYTES = 8_192;
 const DEFAULT_CACHE_PAIRS = 1;
@@ -991,6 +992,19 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 	try {
 		const targets = await resolveBenchTargets(command.models, runtime.modelRegistry, runtime.settings, writeStderr);
 		if (cacheMode) assertCacheModeSupported(targets);
+		const hasExplicitPar = command.flags.par !== undefined;
+		const par = hasExplicitPar
+			? normalizePositiveInteger("par", command.flags.par, DEFAULT_PAR)
+			: targets.some(t => LOCAL_PROVIDERS[t.model.provider])
+				? DEFAULT_PAR_LOCAL
+				: DEFAULT_PAR;
+		if (!hasExplicitPar && par < DEFAULT_PAR) {
+			print(
+				chalk.dim(
+					`local provider detected — using --par ${DEFAULT_PAR_LOCAL} (KV cache thrash would dominate with ${DEFAULT_PAR} parallel slots)`,
+				),
+			);
+		}
 		// Explicit `--service-tier` (a single value broadcast across families) wins;
 		// otherwise fall back to the configured per-family `tier.*` settings. Each
 		// model resolves its own family's tier below before reaching the wire.
@@ -1135,7 +1149,11 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 			// To keep output clean, non-JSON output emits entries in correct index order.
 			let nextToPrint = 0;
 			const runWorker = async (index: number) => {
-				const sessionId = index === 0 ? testSessionId : randomSessionId();
+				const sessionId = LOCAL_PROVIDERS[model.provider]
+					? testSessionId
+					: index === 0
+						? testSessionId
+						: randomSessionId();
 				const challenge = buildBenchChallenge(kinds[index % kinds.length]!, {
 					promptOverride,
 					prefillBytes,
