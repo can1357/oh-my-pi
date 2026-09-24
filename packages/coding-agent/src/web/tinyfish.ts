@@ -2,7 +2,7 @@
  * TinyFish Fetch API Client
  *
  * Shared TinyFish REST helpers: endpoint resolution (honouring the
- * `TINYFISH_FETCH_URL` / `TINYFISH_FETCH_BASE_URL` self-hosting overrides) and
+ * `TINYFISH_FETCH_BASE_URL` / `TINYFISH_FETCH_URL` self-hosting overrides) and
  * the `/fetch` reader backend used by the fetch/read URL tool.
  *
  * See https://docs.tinyfish.ai.
@@ -17,11 +17,11 @@ const TINYFISH_DEFAULT_FETCH_URL = "https://api.fetch.tinyfish.ai";
 const RETRY_MAX_DELAY_MS = 2_000;
 
 /**
- * Resolve a TinyFish fetch endpoint URL, applying the `TINYFISH_FETCH_URL` (or
- * its `TINYFISH_FETCH_BASE_URL` alias) override when set.
+ * Resolve a TinyFish fetch endpoint URL, applying the `TINYFISH_FETCH_BASE_URL` (or
+ * its `TINYFISH_FETCH_URL` alias) override when set.
  */
 export function resolveTinyFishFetchUrl(): string {
-	const configured = process.env.TINYFISH_FETCH_URL ?? process.env.TINYFISH_FETCH_BASE_URL;
+	const configured = process.env.TINYFISH_FETCH_BASE_URL ?? process.env.TINYFISH_FETCH_URL;
 	if (!configured?.trim()) return TINYFISH_DEFAULT_FETCH_URL;
 	let url: URL;
 	try {
@@ -40,6 +40,9 @@ export function resolveTinyFishFetchUrl(): string {
 	return url.toString().replace(/\/+$/, "");
 }
 
+/**
+ * Error thrown when a TinyFish fetch request or API response fails.
+ */
 export class TinyFishFetchError extends Error {
 	readonly statusCode?: number;
 
@@ -50,37 +53,35 @@ export class TinyFishFetchError extends Error {
 	}
 }
 
-/** TinyFish fetch result item. */
-export interface TinyFishFetchResultItem {
-	url?: string | null;
-	final_url?: string | null;
-	title?: string | null;
-	description?: string | null;
-	text?: string | null;
-	format?: string | null;
-}
-
-/** TinyFish fetch error item. */
-export interface TinyFishFetchErrorItem {
-	url?: string | null;
-	error?: string | null;
-	code?: string | null;
-}
-
-/** TinyFish fetch response shape. */
-export interface TinyFishFetchResponse {
-	results?: TinyFishFetchResultItem[] | null;
-	errors?: TinyFishFetchErrorItem[] | null;
-}
-
+/**
+ * Execution options for {@link scrapeWithTinyFish}.
+ */
 export interface TinyFishFetchOptions {
 	signal?: AbortSignal;
 	timeoutMs?: number;
 	fetch?: FetchImpl;
 }
 
+/**
+ * Resolve TinyFish API credentials from environment variables or agent storage.
+ */
 export function findTinyFishApiKey(storage: AgentStorage | null | undefined): string | null {
 	return findCredential(storage, getEnvApiKey("tinyfish"), "tinyfish");
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
+}
+
+function getString(value: Record<string, unknown>, key: string): string | undefined {
+	const candidate = value[key];
+	return typeof candidate === "string" ? candidate : undefined;
+}
+
+function getObjectArray(value: Record<string, unknown>, key: string): Record<string, unknown>[] {
+	const candidate = value[key];
+	if (!Array.isArray(candidate)) return [];
+	return candidate.filter(isObject);
 }
 
 function parseTinyFishErrorResponse(statusCode: number, responseText: string): TinyFishFetchError {
@@ -89,14 +90,14 @@ function parseTinyFishErrorResponse(statusCode: number, responseText: string): T
 		return new TinyFishFetchError(`TinyFish API error (${statusCode})`, statusCode);
 	}
 	try {
-		const payload = JSON.parse(trimmed) as { error?: unknown; message?: unknown };
-		const detail =
-			typeof payload.error === "string"
-				? payload.error.trim()
-				: typeof payload.message === "string"
-					? payload.message.trim()
-					: "";
-		return new TinyFishFetchError(`TinyFish API error (${statusCode}): ${detail || trimmed}`, statusCode);
+		const payload: unknown = JSON.parse(trimmed);
+		if (isObject(payload)) {
+			const detail = getString(payload, "error") ?? getString(payload, "message");
+			if (detail && detail.trim().length > 0) {
+				return new TinyFishFetchError(`TinyFish API error (${statusCode}): ${detail.trim()}`, statusCode);
+			}
+		}
+		return new TinyFishFetchError(`TinyFish API error (${statusCode}): ${trimmed}`, statusCode);
 	} catch {
 		return new TinyFishFetchError(`TinyFish API error (${statusCode}): ${trimmed}`, statusCode);
 	}
@@ -104,7 +105,7 @@ function parseTinyFishErrorResponse(statusCode: number, responseText: string): T
 
 /**
  * Scrape a single URL through TinyFish and return its markdown rendering, or
- * `null` when the response carries no markdown. Unlike the local renderers,
+ * `null` when the response carries no markdown. Unlike local renderers,
  * TinyFish renders dynamic pages in a full browser environment.
  */
 export async function scrapeWithTinyFish(
@@ -122,6 +123,7 @@ export async function scrapeWithTinyFish(
 		format: "markdown",
 		links: false,
 		image_links: false,
+		ttl: 0,
 	};
 
 	const response = await fetchWithRetry(resolveTinyFishFetchUrl(), {
@@ -142,14 +144,30 @@ export async function scrapeWithTinyFish(
 		throw parseTinyFishErrorResponse(response.status, await response.text());
 	}
 
-	const payload = (await response.json()) as TinyFishFetchResponse;
-	if (Array.isArray(payload.errors) && payload.errors.length > 0) {
-		const firstError = payload.errors[0]?.error;
-		if (firstError && (!Array.isArray(payload.results) || payload.results.length === 0)) {
+	let payload: unknown;
+	try {
+		payload = await response.json();
+	} catch (err) {
+		const detail = err instanceof Error ? err.message : String(err);
+		throw new TinyFishFetchError(`TinyFish fetch returned invalid JSON: ${detail}`);
+	}
+
+	if (!isObject(payload)) {
+		throw new TinyFishFetchError("TinyFish fetch returned an unexpected response shape");
+	}
+
+	const errors = getObjectArray(payload, "errors");
+	const results = getObjectArray(payload, "results");
+
+	if (errors.length > 0) {
+		const firstError = getString(errors[0]!, "error");
+		if (firstError && results.length === 0) {
 			throw new TinyFishFetchError(firstError);
 		}
 	}
 
-	const firstResult = payload.results?.[0];
-	return firstResult?.text ?? null;
+	const firstResult = results[0];
+	if (!firstResult) return null;
+
+	return getString(firstResult, "text") ?? null;
 }

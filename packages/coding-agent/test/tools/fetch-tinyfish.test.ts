@@ -17,16 +17,28 @@ import * as natives from "@oh-my-pi/pi-natives";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { asGlobalFetch, mockFetch } from "../helpers/fetch-mock";
 
+interface TinyFishRequestBody {
+	urls: string[];
+	format: string;
+	links: boolean;
+	image_links: boolean;
+	ttl: number;
+}
+
 describe("TinyFish fetch client", () => {
-	const originalEnv = { ...process.env };
+	const originalApiKey = process.env.TINYFISH_API_KEY;
+	const originalFetchUrl = process.env.TINYFISH_FETCH_URL;
+	const originalFetchBaseUrl = process.env.TINYFISH_FETCH_BASE_URL;
 
 	afterEach(() => {
-		for (const key of Object.keys(process.env)) {
-			if (!(key in originalEnv)) {
-				delete process.env[key];
-			}
-		}
-		Object.assign(process.env, originalEnv);
+		if (originalApiKey === undefined) delete process.env.TINYFISH_API_KEY;
+		else process.env.TINYFISH_API_KEY = originalApiKey;
+
+		if (originalFetchUrl === undefined) delete process.env.TINYFISH_FETCH_URL;
+		else process.env.TINYFISH_FETCH_URL = originalFetchUrl;
+
+		if (originalFetchBaseUrl === undefined) delete process.env.TINYFISH_FETCH_BASE_URL;
+		else process.env.TINYFISH_FETCH_BASE_URL = originalFetchBaseUrl;
 	});
 
 	it("resolves default endpoint URL", () => {
@@ -35,20 +47,24 @@ describe("TinyFish fetch client", () => {
 		expect(resolveTinyFishFetchUrl()).toBe("https://api.fetch.tinyfish.ai");
 	});
 
-	it("honors TINYFISH_FETCH_URL and TINYFISH_FETCH_BASE_URL", () => {
-		process.env.TINYFISH_FETCH_URL = "https://custom.fetch.tinyfish.ai/endpoint";
-		expect(resolveTinyFishFetchUrl()).toBe("https://custom.fetch.tinyfish.ai/endpoint");
-
-		delete process.env.TINYFISH_FETCH_URL;
+	it("honors TINYFISH_FETCH_BASE_URL and TINYFISH_FETCH_URL alias with correct precedence", () => {
 		process.env.TINYFISH_FETCH_BASE_URL = "https://custom.fetch.tinyfish.ai/";
 		expect(resolveTinyFishFetchUrl()).toBe("https://custom.fetch.tinyfish.ai");
+
+		// When both are set, TINYFISH_FETCH_BASE_URL is canonical and takes precedence
+		process.env.TINYFISH_FETCH_URL = "https://alias.fetch.tinyfish.ai";
+		expect(resolveTinyFishFetchUrl()).toBe("https://custom.fetch.tinyfish.ai");
+
+		// When only TINYFISH_FETCH_URL alias is set
+		delete process.env.TINYFISH_FETCH_BASE_URL;
+		expect(resolveTinyFishFetchUrl()).toBe("https://alias.fetch.tinyfish.ai");
 	});
 
 	it("rejects invalid URLs or credentials in base URL", () => {
-		process.env.TINYFISH_FETCH_URL = "ftp://invalid.com";
+		process.env.TINYFISH_FETCH_BASE_URL = "ftp://invalid.com";
 		expect(() => resolveTinyFishFetchUrl()).toThrow(/HTTP or HTTPS/);
 
-		process.env.TINYFISH_FETCH_URL = "https://user:pass@invalid.com";
+		process.env.TINYFISH_FETCH_BASE_URL = "https://user:pass@invalid.com";
 		expect(() => resolveTinyFishFetchUrl()).toThrow(/credentials/);
 	});
 
@@ -66,12 +82,13 @@ describe("TinyFish fetch client", () => {
 		process.env.TINYFISH_API_KEY = "test-tinyfish-key";
 		let capturedUrl: string | undefined;
 		let capturedHeaders: Headers | undefined;
-		let capturedBody: any;
+		let capturedBody: TinyFishRequestBody | undefined;
 
 		const fetchMock = mockFetch(async (input, init) => {
 			capturedUrl = String(input);
 			capturedHeaders = new Headers(init?.headers);
-			capturedBody = JSON.parse(String(init?.body));
+			const parsed: unknown = JSON.parse(String(init?.body));
+			capturedBody = parsed as TinyFishRequestBody;
 			return new Response(
 				JSON.stringify({
 					results: [
@@ -97,6 +114,7 @@ describe("TinyFish fetch client", () => {
 			format: "markdown",
 			links: false,
 			image_links: false,
+			ttl: 0,
 		});
 		expect(result).toBe("# Hello from TinyFish\n\nThis is content.");
 	});
@@ -129,6 +147,34 @@ describe("TinyFish fetch client", () => {
 
 		await expect(scrapeWithTinyFish("https://example.com/fail", { fetch: fetchMock }, null)).rejects.toThrow(
 			"Failed to render target page",
+		);
+	});
+
+	it("throws on invalid JSON response", async () => {
+		process.env.TINYFISH_API_KEY = "test-tinyfish-key";
+		const fetchMock = mockFetch(async () => {
+			return new Response("not-valid-json", {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		});
+
+		await expect(scrapeWithTinyFish("https://example.com/invalid-json", { fetch: fetchMock }, null)).rejects.toThrow(
+			/invalid JSON/,
+		);
+	});
+
+	it("throws on non-object JSON response shape", async () => {
+		process.env.TINYFISH_API_KEY = "test-tinyfish-key";
+		const fetchMock = mockFetch(async () => {
+			return new Response(JSON.stringify("a string instead of object"), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		});
+
+		await expect(scrapeWithTinyFish("https://example.com/non-object", { fetch: fetchMock }, null)).rejects.toThrow(
+			/unexpected response shape/,
 		);
 	});
 });
@@ -244,6 +290,7 @@ describe("Read tool TinyFish fetch provider integration", () => {
 			format: "markdown",
 			links: false,
 			image_links: false,
+			ttl: 0,
 		});
 		expect(ensureToolSpy).not.toHaveBeenCalled();
 		expect(htmlToMarkdownSpy).not.toHaveBeenCalled();
