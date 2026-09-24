@@ -184,6 +184,11 @@ async function runRpc(msg) {
       const tab = await chrome.tabs.create({ url: msg.url });
       if (msg.group && tab.id !== undefined) {
         await enqueueGroupOp(() => groupTabs([tab.id], msg.group.title, msg.group.color)).catch(() => {});
+        const fresh = await chrome.tabs.get(tab.id).catch(() => null);
+        const snap = snapshot(fresh ?? tab);
+        if (!snap)
+          throw new Error("created tab has no id");
+        return { tab: snap };
       }
       const snap = snapshot(tab);
       if (!snap)
