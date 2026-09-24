@@ -471,7 +471,8 @@ export interface ExtensionAgentIdentity {
 	 * `createAgentSession`; undefined for the top-level session. Reported
 	 * verbatim — linkage, not a spawn guarantee (a `parentAgentId`-only caller
 	 * is `kind: "main"`; a `parentTaskPrefix`-only caller is `"sub"` with this
-	 * field absent). A `/tan` fork reports the job-owning main session.
+	 * field absent). A `/tan` fork reports the job-owning session (`"Main"`
+	 * for the default top-level session).
 	 */
 	readonly parentId?: string;
 	/**

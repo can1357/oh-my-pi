@@ -98,7 +98,7 @@ describe("AgentRegistry.resolveParentChain", () => {
 		expect(registry.resolveParentChain("SelfLoop", "SelfLoop")).toEqual([]);
 	});
 
-	it("stops when a parent link is missing from the registry", () => {
+	it("includes an unregistered parent link and stops walking there", () => {
 		const registry = new AgentRegistry();
 		registry.register({ id: "P1", displayName: "p1", kind: "sub", parentId: "MissingParent", session: null });
 
