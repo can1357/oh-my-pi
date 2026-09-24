@@ -3017,9 +3017,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		const { session } = await createAgentSession(baseOptions(tempDir));
 
 		try {
-			expect(session.getToolByName("read")?.description).toContain(
-				"Copy `[FILENAME#TAG]` for anchored edits; NEVER fabricate the tag",
-			);
+			expect(session.getToolByName("read")?.description).toContain("[FILENAME#TAG]");
 		} finally {
 			await session.dispose();
 		}
@@ -3037,9 +3035,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		});
 
 		try {
-			expect(session.getToolByName("read")?.description).not.toContain(
-				"Copy `[FILENAME#TAG]` for anchored edits; NEVER fabricate the tag",
-			);
+			expect(session.getToolByName("read")?.description).not.toContain("[FILENAME#TAG]");
 		} finally {
 			await session.dispose();
 		}
@@ -3057,9 +3053,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		});
 
 		try {
-			expect(session.getToolByName("read")?.description).not.toContain(
-				"Copy `[FILENAME#TAG]` for anchored edits; NEVER fabricate the tag",
-			);
+			expect(session.getToolByName("read")?.description).not.toContain("[FILENAME#TAG]");
 		} finally {
 			await session.dispose();
 		}

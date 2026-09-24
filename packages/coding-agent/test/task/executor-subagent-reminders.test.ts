@@ -1373,8 +1373,8 @@ describe("runSubprocess yield reminders", () => {
 		};
 		expect(initArgs.enforceToolAllowlist).toBe(true);
 		// `todo` is parent-owned and stripped from both the active set and the
-		// persisted declaration. `hub` stays out too: a read-only scope without
-		// `task` gets no collaboration tool (upstream hub gate), matching the
+		// persisted declaration. `wait` stays out too: a read-only scope without
+		// `task` gets no coordination tool (executor wait gate), matching the
 		// live session's grant.
 		expect(initArgs.declaredTools).toEqual(["read"]);
 	});

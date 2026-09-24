@@ -9,16 +9,18 @@
 ### Added
 
 - Added the `disallowedTools:` frontmatter field for agent definitions: it removes tools by exact name, `mcp__*` / `mcp__<server>_*` wildcard, or bare `*` deny-all ([#8599](https://github.com/can1357/oh-my-pi/issues/8599)).
-- Removed support for the env parameter in the bash tool
 
 ## [18.3.0] - 2026-09-24
 
-### Added
+### Breaking Changes
 
 - The `hub` tool is deprecated; use `wait`, `write`, and the `proc://` protocols instead.
 - The `irc.timeoutMs` configuration setting has been removed.
 - The edit mode syntax now uses `*** Edit File:`, `*** Find`, and `*** Replace` headers instead of `SM:` headers.
 - Cancelling a process through `write` now requires an explicit `proc://<id>/kill` target; other write targets validate content normally.
+
+### Added
+
 - Added `omp://` documentation scopes for `find` and `omp find`. Search all embedded harness documentation with `omp://` or a specific document with `omp://<file>.md`; results are returned as canonical URLs that `read` can open, including range selectors.
 - Added extension support for ephemeral, `/btw`-style side turns through `ctx.runEphemeralTurn()`, with optional tool suppression and output/context limits without adding the turn to session history.
 - Added background job and service management through the `wait` tool and `proc://` URLs, including supervised services in `bash` and direct agent messaging through `agent://` write targets.

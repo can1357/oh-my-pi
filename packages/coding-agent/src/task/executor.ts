@@ -3438,17 +3438,17 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	if (atMaxDepth && toolNames?.includes("task")) {
 		toolNames = toolNames.filter(name => name !== "task");
 	}
-	// Ordinary agents retain the host's always-on collaboration capability.
-	// Restricted sessions must not widen their explicit host tool list with hub.
+	// Ordinary agents retain the host's always-on coordination capability.
+	// Restricted sessions must not widen their explicit host tool list with wait.
+	const evalBackends = resolveEvalBackends({ settings } as ToolSession);
 	if (
 		toolNames &&
 		!options.restrictToolNames &&
-		!toolNames.includes("hub") &&
-		(!isReadOnlyAgent(agent) || toolNames.includes("task"))
+		!toolNames.includes("wait") &&
+		(!isReadOnlyAgent(agent, evalBackends) || toolNames.includes("task"))
 	) {
-		toolNames = [...toolNames, "hub"];
+		toolNames = [...toolNames, "wait"];
 	}
-	const evalBackends = resolveEvalBackends({ settings } as ToolSession);
 	if (toolNames) {
 		toolNames = expandExecToolAlias(toolNames, expandedDisallowed, evalBackends);
 	}

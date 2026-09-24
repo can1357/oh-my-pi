@@ -222,6 +222,7 @@ export function mcpDisallowTargetsServer(patterns: readonly string[], serverName
  *
  * Hidden protocol tools (`yield`, `goal`, `think`) are never disallowable:
  * stripping the subagent terminator would leave a `requireYieldTool` session
+ * unable to yield. The `<server>` in an `mcp__<server>_*` pattern is the
  * sanitized tool-name prefix (`createMCPToolName` lowercases, keeps digits,
  * and collapses other non-`[a-z0-9_]` characters), not the raw config server
  * name — a server named `db-2` mints `mcp__db_2_query`, so the pattern is
