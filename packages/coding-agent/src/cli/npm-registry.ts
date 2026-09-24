@@ -4,10 +4,10 @@
  * Verdaccio, …) is honored for both the release lookup and the install.
  *
  * Sources, first match wins, per package:
- * 1. Scoped registry for the package's scope: `@scope:registry` in the user
- *    `.npmrc`, then `[install.scopes]` in the global `bunfig.toml`.
- * 2. `npm_config_registry` / `BUN_CONFIG_REGISTRY` environment variables.
- * 3. `registry` in the user `.npmrc` (`npm_config_userconfig` or `~/.npmrc`).
+ * 1. `@scope:registry`, then `registry` in the user `.npmrc`
+ *    (`npm_config_userconfig` or `~/.npmrc`).
+ * 2. `[install.scopes]` in the global `bunfig.toml` for the package's scope.
+ * 3. `npm_config_registry` / `BUN_CONFIG_REGISTRY` environment variables.
  * 4. `install.registry` in the global `bunfig.toml`
  *    (`$XDG_CONFIG_HOME/.bunfig.toml`, then `~/.bunfig.toml`).
  * 5. {@link DEFAULT_NPM_REGISTRY}.
@@ -72,11 +72,11 @@ export async function loadNpmRegistryResolver(options: LoadNpmRegistryOptions = 
 	const bunfig = await readGlobalBunfig(env, homeDir);
 
 	let fallback: RegistryEntry = { url: DEFAULT_NPM_REGISTRY, source: "default" };
-	const npmrcRegistry = npmrc.get("registry");
 	if (bunfig?.registry) fallback = bunfig.registry;
-	if (npmrcRegistry) fallback = { url: npmrcRegistry, source: npmrcPath };
 	const envRegistry = envLookup(env, "npm_config_registry") ?? envLookup(env, "BUN_CONFIG_REGISTRY");
 	if (envRegistry) fallback = { url: envRegistry, source: "environment" };
+	const npmrcRegistry = npmrc.get("registry");
+	const npmrcDefault = npmrcRegistry ? { url: npmrcRegistry, source: npmrcPath } : undefined;
 
 	const cache = new Map<string, NpmRegistry>();
 	return pkg => {
@@ -84,15 +84,10 @@ export async function loadNpmRegistryResolver(options: LoadNpmRegistryOptions = 
 		const key = scope ?? "";
 		const cached = cache.get(key);
 		if (cached) return cached;
-		let entry = fallback;
-		if (scope) {
-			const scoped = npmrc.get(`${scope}:registry`);
-			if (scoped) entry = { url: scoped, source: npmrcPath };
-			else {
-				const bunScoped = bunfig?.scopes.get(scope);
-				if (bunScoped) entry = bunScoped;
-			}
-		}
+		const scoped = scope ? npmrc.get(`${scope}:registry`) : undefined;
+		const entry = scoped
+			? { url: scoped, source: npmrcPath }
+			: (npmrcDefault ?? (scope ? bunfig?.scopes.get(scope) : undefined) ?? fallback);
 		const registry = toRegistry(entry, npmrc);
 		cache.set(key, registry);
 		return registry;

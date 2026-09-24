@@ -51,10 +51,46 @@ describe("loadNpmRegistryResolver", () => {
 		expect(resolve("@other/pkg").url).toBe("https://a.example/");
 	});
 
-	it("lets npm_config_registry override the .npmrc registry, case-insensitively", async () => {
-		const homeDir = await home({ ".npmrc": "registry=https://a.example/\n" });
+	it("prefers the user .npmrc registry over npm and Bun registry environment overrides", async () => {
+		const homeDir = await home({ ".npmrc": "registry=https://npmrc.example/\n" });
+		for (const env of [
+			{ NPM_CONFIG_REGISTRY: "https://npm-env.example/" },
+			{ BUN_CONFIG_REGISTRY: "https://bun-env.example/" },
+		]) {
+			const resolve = await loadNpmRegistryResolver({ env, homeDir });
+			expect(resolve(PKG)).toMatchObject({ url: "https://npmrc.example/", source: path.join(homeDir, ".npmrc") });
+		}
+	});
+
+	it("uses npm_config_registry case-insensitively when .npmrc has no registry", async () => {
+		const homeDir = await home({ ".npmrc": "//env.example/:_authToken=token\n" });
 		const resolve = await loadNpmRegistryResolver({ env: { NPM_CONFIG_REGISTRY: "https://env.example/" }, homeDir });
-		expect(resolve(PKG)).toMatchObject({ url: "https://env.example/", source: "environment" });
+		expect(resolve(PKG)).toMatchObject({
+			url: "https://env.example/",
+			source: "environment",
+			authorization: "Bearer token",
+		});
+	});
+
+	it("prefers the user .npmrc registry over a scoped bunfig registry", async () => {
+		const homeDir = await home({
+			".npmrc": "registry=https://npmrc.example/\n",
+			".bunfig.toml": '[install.scopes]\n"@oh-my-pi" = "https://scoped-bun.example/"\n',
+		});
+		const resolve = await loadNpmRegistryResolver({ env: {}, homeDir });
+		expect(resolve(PKG)).toMatchObject({ url: "https://npmrc.example/", source: path.join(homeDir, ".npmrc") });
+	});
+
+	it("falls back to a scoped bunfig registry before environment defaults without an .npmrc registry", async () => {
+		const homeDir = await home({
+			".bunfig.toml": '[install.scopes]\n"@oh-my-pi" = "https://scoped-bun.example/"\n',
+		});
+		const resolve = await loadNpmRegistryResolver({ env: { NPM_CONFIG_REGISTRY: "https://env.example/" }, homeDir });
+		expect(resolve(PKG)).toMatchObject({
+			url: "https://scoped-bun.example/",
+			source: path.join(homeDir, ".bunfig.toml"),
+		});
+		expect(resolve("@other/pkg")).toMatchObject({ url: "https://env.example/", source: "environment" });
 	});
 
 	it("honors npm_config_userconfig instead of ~/.npmrc", async () => {
