@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Added usage-based ranking for SuperGrok (`xai-oauth`) so multi-account setups balance traffic by weekly quota headroom ([#13136](https://github.com/can1357/oh-my-pi/pull/13136) by [@zhaob1n](https://github.com/zhaob1n)).
+
 ## [18.3.0] - 2026-09-24
 
 ### Added
