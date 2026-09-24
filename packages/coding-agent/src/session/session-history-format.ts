@@ -57,13 +57,12 @@ export interface HistoryFormatOptions {
 	transformExpandedToolIO?: (text: string) => string;
 	/**
 	 * Chunked rendering support: a caller formatting one logical transcript in
-	 * several calls (the advisor's chunked delta render) passes a result index
-	 * built over the WHOLE delta plus one shared consumed-id set, so a toolCall
-	 * finds its toolResult across chunk boundaries and the result is never
-	 * re-rendered as an orphan in a later chunk.
+	 * several calls (the advisor's chunked delta render) passes one pairing built
+	 * over the WHOLE delta, so a toolCall finds its toolResult across chunk
+	 * boundaries, repeated provider ids pair by occurrence, and a paired result
+	 * is never re-rendered as an orphan in a later chunk.
 	 */
-	toolResultIndex?: ReadonlyMap<string, ToolResultMessage>;
-	consumedToolCallIds?: Set<string>;
+	toolResultPairing?: ToolResultPairing;
 	/**
 	 * Chunked rendering state: a mutable holder for the watched-role label
 	 * (`**user**:` / `**agent**:`) that ended the previous chunk. Lets a caller
@@ -232,7 +231,13 @@ function boundedAskJson(value: unknown, transform?: (text: string) => string): s
 	);
 }
 
-function boundedFencedToolContext(text: string, language: string): string {
+/**
+ * Bound and fence a tool I/O excerpt for the advisor transcript. Returns the
+ * rendered block plus whether the advisor's own byte/line cap shortened it, so
+ * a caller can label advisor-view-only elision distinctly from tool-delivered
+ * truncation (see #12777).
+ */
+function boundedFencedToolContext(text: string, language: string): { content: string; truncated: boolean } {
 	const longestFence = text.match(/`+/g)?.reduce((max, run) => Math.max(max, run.length), 0) ?? 0;
 	// A pathological run can make Markdown fences larger than the whole budget.
 	// Use indented code in that case: constant wrapper cost and no delimiter collision.
@@ -243,16 +248,14 @@ function boundedFencedToolContext(text: string, language: string): string {
 			maxLines: EXPANDED_TOOL_IO_MAX_LINES,
 		});
 		const bounded = truncated.truncated ? `${marker}\n${truncated.content}` : truncated.content;
-		return bounded.replace(/^/gm, "    ");
+		return { content: bounded.replace(/^/gm, "    "), truncated: truncated.truncated === true };
 	}
 	const fenceBytes = Math.max(3, longestFence + 1) * 2 + language.length + 2;
-	return fencedText(
-		truncateMiddle(text, {
-			maxBytes: Math.max(1, EXPANDED_TOOL_IO_MAX_BYTES - fenceBytes),
-			maxLines: EXPANDED_TOOL_IO_MAX_LINES,
-		}).content,
-		language,
-	);
+	const result = truncateMiddle(text, {
+		maxBytes: Math.max(1, EXPANDED_TOOL_IO_MAX_BYTES - fenceBytes),
+		maxLines: EXPANDED_TOOL_IO_MAX_LINES,
+	});
+	return { content: fencedText(result.content, language), truncated: result.truncated === true };
 }
 
 function expandedAskArguments(
@@ -338,12 +341,20 @@ function toolCallLine(
 		if (name === "ask") {
 			const askArguments =
 				expandedAskArguments(args, transformExpandedToolIO) ?? expandedAskDetails(result, transformExpandedToolIO);
-			if (askArguments) sections.push(`Ask input:\n${boundedFencedToolContext(askArguments, "json")}`);
+			if (askArguments) sections.push(`Ask input:\n${boundedFencedToolContext(askArguments, "json").content}`);
 		}
 		if (result) {
 			const resultText = expandedToolResultText(visibleResultText);
 			if (resultText) {
-				sections.push(`Tool result:\n${boundedFencedToolContext(resultText, "text")}`);
+				const bounded = boundedFencedToolContext(resultText, "text");
+				// The advisor's own byte/line cap can shorten a result the main
+				// thread received in full. Label that as advisor-view-only so the
+				// reviewer never reads its `[…Nln elided…]` marker as a truncated
+				// or incomplete main-thread read (see #12777).
+				const label = bounded.truncated
+					? "Tool result (main thread received the complete result; shortened here for advisor view only):"
+					: "Tool result:";
+				sections.push(`${label}\n${bounded.content}`);
 			}
 		}
 		if (sections.length > 0) base = `${base}\n${sections.join("\n")}`;
@@ -420,6 +431,53 @@ function customOneLiner(msg: CustomMessage | HookMessage): string {
 }
 
 /**
+ * Occurrence-aware pairing of tool results to tool calls for one transcript.
+ *
+ * A single id→result map loses data when a provider reuses tool-call ids
+ * across responses (Ollama mints `ollama:<index>:<name>` from a response-local
+ * index, so `ollama:0:read` recurs every turn). Keeping results per id in
+ * delta order and consuming them with a per-id cursor pairs the k-th call with
+ * the k-th result; `consumed` tracks paired result messages by identity so a
+ * chunked render never re-emits one as an orphan. See #12777.
+ */
+export interface ToolResultPairing {
+	/** Results per call id, in delta order. */
+	readonly byCallId: ReadonlyMap<string, ToolResultMessage[]>;
+	/** Next unconsumed index per call id. */
+	readonly cursors: Map<string, number>;
+	/** Result messages already paired with a call. */
+	readonly consumed: Set<ToolResultMessage>;
+}
+
+/** Build a {@link ToolResultPairing} over a whole message delta. */
+export function buildToolResultPairing(messages: readonly AgentMessage[]): ToolResultPairing {
+	const byCallId = new Map<string, ToolResultMessage[]>();
+	for (const msg of messages) {
+		if (msg.role !== "toolResult") continue;
+		const list = byCallId.get(msg.toolCallId);
+		if (list) list.push(msg);
+		else byCallId.set(msg.toolCallId, [msg]);
+	}
+	return { byCallId, cursors: new Map(), consumed: new Set() };
+}
+
+/**
+ * Pop the next unconsumed result for `callId` in delta order and mark it
+ * consumed, so repeated ids pair the k-th call with the k-th result instead of
+ * collapsing to a single last-wins entry.
+ */
+function nextPairedResult(pairing: ToolResultPairing, callId: string): ToolResultMessage | undefined {
+	const results = pairing.byCallId.get(callId);
+	if (!results) return undefined;
+	const cursor = pairing.cursors.get(callId) ?? 0;
+	if (cursor >= results.length) return undefined;
+	const result = results[cursor];
+	pairing.cursors.set(callId, cursor + 1);
+	pairing.consumed.add(result);
+	return result;
+}
+
+/**
  * Format a session's message array as a concise markdown transcript.
  *
  * `messages` is the session's in-memory message array (or the read-only
@@ -433,20 +491,12 @@ export function formatSessionHistoryMarkdown(messages: unknown[], opts?: History
 		lines.push(`# ${opts.title}`, "");
 	}
 
-	// Index tool results by call id so each toolCall collapses to one line.
-	// Chunked callers supply a whole-delta index + shared consumed set so
-	// call/result pairs resolve across chunk boundaries.
-	let resultsByCallId = opts?.toolResultIndex;
-	if (!resultsByCallId) {
-		const local = new Map<string, ToolResultMessage>();
-		for (const msg of typed) {
-			if (msg.role === "toolResult") {
-				local.set(msg.toolCallId, msg);
-			}
-		}
-		resultsByCallId = local;
-	}
-	const consumed = opts?.consumedToolCallIds ?? new Set<string>();
+	// Pair each tool result with the correct call occurrence. Some providers
+	// (e.g. Ollama) reuse tool-call ids across responses, so a plain id→result
+	// map keeps last-wins and mis-attaches results in a batched delta. Chunked
+	// callers share one pairing over the WHOLE delta so pairs and the
+	// k-th-occurrence cursor resolve across chunk boundaries (see #12777).
+	const pairing = opts?.toolResultPairing ?? buildToolResultPairing(typed);
 	// In watched mode, consecutive same-role messages collapse under one label
 	// (the watched agent emits one assistant message per tool call, so otherwise
 	// every call repeats `**agent**:`). Cleared whenever a
@@ -493,8 +543,7 @@ export function formatSessionHistoryMarkdown(messages: unknown[], opts?: History
 					if (block.type === "text") {
 						if (block.text.trim()) body.push(block.text);
 					} else if (block.type === "toolCall") {
-						const result = resultsByCallId.get(block.id);
-						if (result) consumed.add(block.id);
+						const result = nextPairedResult(pairing, block.id);
 						body.push(
 							toolCallLine(
 								block.name,
@@ -527,7 +576,7 @@ export function formatSessionHistoryMarkdown(messages: unknown[], opts?: History
 			}
 			case "toolResult": {
 				// Normally consumed by its toolCall; orphans (e.g. truncated history) get their own line.
-				if (consumed.has(msg.toolCallId)) break;
+				if (pairing.consumed.has(msg)) break;
 				lines.push(
 					toolCallLine(
 						msg.toolName,

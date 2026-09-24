@@ -387,4 +387,98 @@ describe("formatSessionHistoryMarkdown", () => {
 		expect(output).not.toContain("**user**:");
 		expect(output).toContain("## assistant");
 	});
+
+	it("pairs repeated tool-call ids with their own results by occurrence (#12777)", () => {
+		// Ollama reuses response-local ids (`ollama:0:read`) across turns; a plain
+		// id->result map keeps last-wins and mis-attaches results in a batch.
+		const output = formatSessionHistoryMarkdown(
+			[
+				{
+					role: "assistant",
+					content: [{ type: "toolCall", id: "ollama:0:read", name: "read", arguments: { path: "a:raw:300-450" } }],
+					timestamp: 1,
+				},
+				{
+					role: "toolResult",
+					toolCallId: "ollama:0:read",
+					toolName: "read",
+					content: [{ type: "text", text: "RESULT-A" }],
+					isError: false,
+					timestamp: 2,
+				},
+				{
+					role: "assistant",
+					content: [{ type: "toolCall", id: "ollama:0:read", name: "read", arguments: { path: "a:raw:450-582" } }],
+					timestamp: 3,
+				},
+				{
+					role: "toolResult",
+					toolCallId: "ollama:0:read",
+					toolName: "read",
+					content: [{ type: "text", text: "RESULT-B" }],
+					isError: false,
+					timestamp: 4,
+				},
+			],
+			{ expandToolIO: true },
+		);
+		const idxCallA = output.indexOf("a:raw:300-450");
+		const idxCallB = output.indexOf("a:raw:450-582");
+		const idxResultA = output.indexOf("RESULT-A");
+		const idxResultB = output.indexOf("RESULT-B");
+		// Each result lands under its own call, not last-wins under both.
+		expect(idxResultA).toBeGreaterThan(idxCallA);
+		expect(idxResultA).toBeLessThan(idxCallB);
+		expect(idxResultB).toBeGreaterThan(idxCallB);
+		// No orphan re-render of the first result after the second call's section.
+		expect(output.indexOf("RESULT-A", idxCallB)).toBe(-1);
+	});
+
+	it("labels advisor-view-only shortening distinctly from tool-delivered elision (#12777)", () => {
+		const complete = Array.from({ length: 150 }, (_, i) => `line ${i + 1}`).join("\n");
+		const shortened = formatSessionHistoryMarkdown(
+			[
+				{
+					role: "assistant",
+					content: [{ type: "toolCall", id: "c1", name: "read", arguments: { path: "report:raw:1-150" } }],
+					timestamp: 1,
+				},
+				{
+					role: "toolResult",
+					toolCallId: "c1",
+					toolName: "read",
+					content: [{ type: "text", text: complete }],
+					isError: false,
+					timestamp: 2,
+				},
+			],
+			{ expandToolIO: true },
+		);
+		// The advisor's own cap shortened it, so the label states main got it whole.
+		expect(shortened).toContain("shortened here for advisor view only");
+		expect(shortened).toMatch(/\[…\d+ln elided…\]/);
+
+		const whole = formatSessionHistoryMarkdown(
+			[
+				{
+					role: "assistant",
+					content: [{ type: "toolCall", id: "c2", name: "read", arguments: { path: "small.ts" } }],
+					timestamp: 1,
+				},
+				{
+					role: "toolResult",
+					toolCallId: "c2",
+					toolName: "read",
+					content: [{ type: "text", text: "const a = 1;" }],
+					isError: false,
+					timestamp: 2,
+				},
+			],
+			{ expandToolIO: true },
+		);
+		// A result that fits keeps the bare label and gains no elision marker.
+		expect(whole).toContain("Tool result:");
+		expect(whole).not.toContain("advisor view only");
+		expect(whole).not.toMatch(/\[…\d+ln elided…\]/);
+	});
 });

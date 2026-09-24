@@ -680,8 +680,8 @@ export class AdvisorRuntime {
 	}
 
 	// Each source message is rendered INDEPENDENTLY via
-	// formatSessionHistoryMarkdown in chunked mode (shared toolResultIndex +
-	// consumedToolCallIds over the WHOLE delta), so a toolCall finds its
+	// formatSessionHistoryMarkdown in chunked mode (shared tool-result pairing
+	// over the WHOLE delta), so a toolCall finds its
 	// toolResult across chunk boundaries and consecutive same-role collapsing
 	// is preserved. Concatenating the chunk texts with the same separator the
 	// old single-block render used yields byte-identical advisor context.

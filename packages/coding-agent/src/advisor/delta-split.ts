@@ -9,7 +9,7 @@
 // experimentally: 11066 → 11091 → 11112).
 //
 // Each source message is rendered INDEPENDENTLY via formatSessionHistoryMarkdown
-// in chunked mode (shared toolResultIndex + consumedToolCallIds + watchedRoleState
+// in chunked mode (shared tool-result pairing + watchedRoleState
 // over the WHOLE delta), so toolCall/toolResult pairings resolve across chunk
 // boundaries and consecutive same-role collapsing is byte-identical to the old
 // single-block render. Concatenating the chunk texts reproduces the old advisor
@@ -18,8 +18,8 @@
 // The heading stays on the FIRST chunk; the WIP marker stays on the LAST chunk
 // (candidate 3) so a wip/final flip never changes the stable prefix.
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
-import { formatSessionHistoryMarkdown } from "../session/session-history-format";
+import type { TextContent } from "@oh-my-pi/pi-ai";
+import { buildToolResultPairing, formatSessionHistoryMarkdown } from "../session/session-history-format";
 
 /**
  * Obfuscation surface the split renderer needs: a single text redaction pass.
@@ -53,19 +53,14 @@ export function renderAdvisorDeltaChunks(
 ): AgentMessage[] | null {
 	if (delta.length === 0) return null;
 
-	const resultsByCallId = new Map<string, ToolResultMessage>();
-	for (const msg of delta) {
-		if (msg.role === "toolResult") resultsByCallId.set(msg.toolCallId, msg);
-	}
-	const consumed = new Set<string>();
+	const pairing = buildToolResultPairing(delta);
 	const watchedRoleState = { lastLabel: undefined as string | undefined };
 
 	const renderChunk = (chunk: AgentMessage[]): string =>
 		formatSessionHistoryMarkdown(chunk, {
 			...ADVISOR_RENDER_OPTIONS,
 			includeThinking: opts.includeThinking,
-			toolResultIndex: resultsByCallId,
-			consumedToolCallIds: consumed,
+			toolResultPairing: pairing,
 			watchedRoleState,
 			transformExpandedToolIO: opts.obfuscator
 				? text => opts.obfuscator!.obfuscate(text, opts.advisorRegexSecretValues)
