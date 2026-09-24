@@ -1,4 +1,8 @@
-import { type AuthAccountPolicies, DEFAULT_USAGE_RESERVE_PCT } from "@oh-my-pi/pi-ai/auth-storage";
+import {
+	type AuthAccountPolicies,
+	DEFAULT_HOT_WINDOW_FRACTION,
+	DEFAULT_USAGE_RESERVE_PCT,
+} from "@oh-my-pi/pi-ai/auth-storage";
 import { ADVISOR_DEFAULT_BUDGET_PER_UPDATE } from "../advisor/emission-guard";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { DEFAULT_SHARE_URL, DEFAULT_STREAM_URL } from "@oh-my-pi/pi-wire";
@@ -310,6 +314,17 @@ export const SETTINGS_SCHEMA = {
 	"auth.broker.url": { type: "string", default: undefined },
 	"auth.broker.token": { type: "string", default: undefined, credential: true },
 	"auth.accountPolicies": { type: "array", default: EMPTY_AUTH_ACCOUNT_POLICIES },
+	"auth.hotWindowFraction": {
+		type: "number",
+		default: DEFAULT_HOT_WINDOW_FRACTION,
+		ui: {
+			tab: "model",
+			group: "Auth",
+			label: "Hot Window Threshold",
+			description:
+				"Usage threshold (0..1) above which accounts are demoted during ranking. Set to 1.0 to disable early switching and fully exhaust quota before rotating.",
+		},
+	},
 
 	autoResume: {
 		type: "boolean",

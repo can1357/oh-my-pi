@@ -3,7 +3,11 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { discoverAuthStorage, loadAuthAccountPolicyConfig, resolveAuthBrokerConfig } from "@oh-my-pi/pi-ai/auth-broker";
-import { type AuthAccountPolicies, DEFAULT_USAGE_RESERVE_PCT } from "@oh-my-pi/pi-ai/auth-storage";
+import {
+	type AuthAccountPolicies,
+	DEFAULT_HOT_WINDOW_FRACTION,
+	DEFAULT_USAGE_RESERVE_PCT,
+} from "@oh-my-pi/pi-ai/auth-storage";
 import { writeAuthBrokerSnapshotCache } from "@oh-my-pi/pi-ai/auth-broker/snapshot-cache";
 import type { SnapshotResponse } from "@oh-my-pi/pi-ai/auth-broker/types";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
@@ -81,12 +85,32 @@ describe("resolveAuthBrokerConfig config discovery", () => {
 		await expect(loadAuthAccountPolicyConfig({ agentDir })).resolves.toEqual({
 			accountPolicies,
 			defaultReservePct: 17,
+			hotWindowFraction: DEFAULT_HOT_WINDOW_FRACTION,
 		});
 
 		await Bun.write(path.join(agentDir, "config.yml"), "auth: {}\n");
 		await expect(loadAuthAccountPolicyConfig({ agentDir })).resolves.toEqual({
 			accountPolicies: [],
 			defaultReservePct: DEFAULT_USAGE_RESERVE_PCT,
+			hotWindowFraction: DEFAULT_HOT_WINDOW_FRACTION,
+		});
+	});
+	test("parses per-account hotWindowFraction override", async () => {
+		const accountPolicies: AuthAccountPolicies = [
+			{
+				provider: "anthropic",
+				account: { email: "worker@example.com" },
+				hotWindowFraction: 1.0,
+			},
+		];
+		await Bun.write(
+			path.join(agentDir, "config.yml"),
+			`auth:\n  accountPolicies: ${JSON.stringify(accountPolicies)}\n`,
+		);
+		await expect(loadAuthAccountPolicyConfig({ agentDir })).resolves.toEqual({
+			accountPolicies,
+			defaultReservePct: DEFAULT_USAGE_RESERVE_PCT,
+			hotWindowFraction: DEFAULT_HOT_WINDOW_FRACTION,
 		});
 	});
 
@@ -98,6 +122,7 @@ describe("resolveAuthBrokerConfig config discovery", () => {
 				await expect(loadAuthAccountPolicyConfig({ agentDir })).resolves.toEqual({
 					accountPolicies: [],
 					defaultReservePct: DEFAULT_USAGE_RESERVE_PCT,
+					hotWindowFraction: DEFAULT_HOT_WINDOW_FRACTION,
 				});
 			});
 		}

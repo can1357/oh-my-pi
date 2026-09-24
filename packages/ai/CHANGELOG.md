@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `hotWindowFraction` to `AuthAccountPolicy` and `AuthStorageOptions` to configure the short-window usage ranking threshold ([#13054](https://github.com/can1357/oh-my-pi/pull/13054) by [@zhaob1n](https://github.com/zhaob1n)).
+
 ## [18.3.0] - 2026-09-24
 
 ### Added

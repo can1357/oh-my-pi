@@ -38,6 +38,7 @@ export type UsageRankedCandidate<T extends AuthCredential> = UsageCandidate<T> &
 	inReserve: boolean;
 	reserveMeasured?: boolean;
 	accountPriority: number;
+	hotWindowFraction: number;
 	hasPriorityBoost: boolean;
 	usageMeasured: boolean;
 	planPriority: number;
@@ -53,12 +54,7 @@ export type RankedOAuthCandidate = UsageRankedCandidate<OAuthCredential>;
 export type RankedApiKeyCandidate = UsageRankedCandidate<ApiKeyCredential>;
 
 const USAGE_RANKING_METRIC_EPSILON = 1e-9;
-/**
- * Primary (short, e.g. 5h) window used-fraction at or above which a candidate
- * is demoted behind cooler siblings during ranking: a nearly exhausted short
- * window means an imminent mid-session block, so drain urgency defers to it.
- */
-const PRIMARY_WINDOW_HOT_FRACTION = 0.85;
+export { DEFAULT_HOT_WINDOW_FRACTION } from "./types";
 
 /** Rank accounts by model-plan eligibility when a plan gate applies. */
 export function planPriority(gate: PlanGate | undefined, report: UsageReport | null): number {
@@ -95,8 +91,8 @@ function compareUsageRankedCandidatePriority(
 	// Short-window guard: candidates whose primary (e.g. 5h) window is
 	// nearly exhausted rank behind cool ones regardless of drain urgency —
 	// overflow lands on the next-most-urgent cool account instead.
-	const leftHot = left.primaryUsed >= PRIMARY_WINDOW_HOT_FRACTION;
-	const rightHot = right.primaryUsed >= PRIMARY_WINDOW_HOT_FRACTION;
+	const leftHot = left.primaryUsed >= left.hotWindowFraction;
+	const rightHot = right.primaryUsed >= right.hotWindowFraction;
 	if (leftHot !== rightHot) return leftHot ? 1 : -1;
 	// Usage-backed candidates outrank unmeasured ones: required-drain
 	// scores are only comparable between measured windows, and the

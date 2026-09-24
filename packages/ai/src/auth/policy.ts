@@ -7,7 +7,7 @@ import type {
 	OAuthAccountIdentity,
 	OAuthCredential,
 } from "./types";
-import { DEFAULT_USAGE_RESERVE_PCT } from "./types";
+import { DEFAULT_HOT_WINDOW_FRACTION, DEFAULT_USAGE_RESERVE_PCT } from "./types";
 
 /** Whether every identity field set on `selector` matches `identity`. */
 export function matchesAuthAccountSelector(selector: AuthAccountSelector, identity: OAuthAccountIdentity): boolean {
@@ -23,13 +23,22 @@ export function matchesAuthAccountSelector(selector: AuthAccountSelector, identi
 export class AccountPolicies {
 	#accountPolicies: AuthAccountPolicies;
 	readonly defaultReservePct: number;
+	readonly defaultHotWindowFraction: number;
 
-	constructor(policies: AuthAccountPolicies, defaultReservePct: number | undefined) {
+	constructor(
+		policies: AuthAccountPolicies,
+		defaultReservePct: number | undefined,
+		defaultHotWindowFraction: number | undefined = undefined,
+	) {
 		this.#accountPolicies = policies;
 		this.defaultReservePct =
 			typeof defaultReservePct === "number" && Number.isFinite(defaultReservePct)
 				? Math.max(0, Math.min(100, defaultReservePct))
 				: DEFAULT_USAGE_RESERVE_PCT;
+		this.defaultHotWindowFraction =
+			typeof defaultHotWindowFraction === "number" && Number.isFinite(defaultHotWindowFraction)
+				? Math.max(0, Math.min(1, defaultHotWindowFraction))
+				: DEFAULT_HOT_WINDOW_FRACTION;
 		this.#validateAccountPolicyConfiguration();
 	}
 
@@ -70,16 +79,25 @@ export class AccountPolicies {
 			) {
 				throw new AIError.ConfigurationError(`${path}.reservePct must be a finite number between 0 and 100`);
 			}
+			if (
+				policy.hotWindowFraction !== undefined &&
+				(!Number.isFinite(policy.hotWindowFraction) || policy.hotWindowFraction < 0 || policy.hotWindowFraction > 1)
+			) {
+				throw new AIError.ConfigurationError(`${path}.hotWindowFraction must be a finite number between 0 and 1`);
+			}
 		}
 	}
 
 	validateUsageCapability(provider: string, canFetchUsage: boolean): void {
 		const policyIndex = this.#accountPolicies.findIndex(
-			policy => policy.provider === provider && policy.reservePct !== undefined,
+			policy =>
+				policy.provider === provider && (policy.reservePct !== undefined || policy.hotWindowFraction !== undefined),
 		);
 		if (policyIndex !== -1 && !canFetchUsage) {
+			const offending = this.#accountPolicies[policyIndex]!;
+			const field = offending.reservePct !== undefined ? "reservePct" : "hotWindowFraction";
 			throw new AIError.ConfigurationError(
-				`auth.accountPolicies[${policyIndex}].reservePct requires a usage provider for ${provider}`,
+				`auth.accountPolicies[${policyIndex}].${field} requires a usage provider for ${provider}`,
 			);
 		}
 	}

@@ -66,7 +66,7 @@ async function resolveEffectiveSettings({ settings, cwd, agentDir = getAgentDir(
 	return Settings.loadReadOnly({ cwd, agentDir });
 }
 
-/** Resolve `auth.accountPolicies` + `retry.usageReservePct` from effective settings (SDK discovery, auth-gateway). */
+/** Resolve `auth.accountPolicies` + `retry.usageReservePct` + `auth.hotWindowFraction` from effective settings (SDK discovery, auth-gateway). */
 export async function loadEffectiveAuthAccountPolicyConfig(
 	scope: EffectiveSettingsScope = {},
 ): Promise<AuthAccountPolicyConfig> {
@@ -74,6 +74,7 @@ export async function loadEffectiveAuthAccountPolicyConfig(
 	return loadAuthAccountPolicyConfig({
 		accountPolicies: settings.get("auth.accountPolicies"),
 		usageReservePct: settings.get("retry.usageReservePct"),
+		hotWindowFraction: settings.get("auth.hotWindowFraction"),
 	});
 }
 

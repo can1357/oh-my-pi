@@ -23,6 +23,8 @@ import type {
 
 /** Default remaining quota protected for accounts without an explicit policy override. */
 export const DEFAULT_USAGE_RESERVE_PCT = 10;
+/** Default short-window usage threshold above which an account is demoted as hot during ranking. */
+export const DEFAULT_HOT_WINDOW_FRACTION = 0.85;
 
 /** Stored API key used by credential selection. */
 export type ApiKeyCredential = {
@@ -62,6 +64,8 @@ export interface AuthAccountPolicy {
 	readonly priority?: number;
 	/** Protected remaining quota percentage for this account. */
 	readonly reservePct?: number;
+	/** Short-window usage fraction threshold (0..1) above which this account is demoted as hot during ranking. */
+	readonly hotWindowFraction?: number;
 }
 
 /** Read-only set of per-account routing policies. */
@@ -319,6 +323,8 @@ export type AuthStorageOptions = {
 	accountPolicies?: AuthAccountPolicies;
 	/** Global reserve fallback for accounts without a matching reservePct policy. */
 	defaultReservePct?: number;
+	/** Global short-window hot fraction threshold (0..1) above which accounts are demoted during ranking. Default: 0.85. */
+	hotWindowFraction?: number;
 	usageFetch?: typeof fetch;
 	usageRequestTimeoutMs?: number;
 	usageLogger?: UsageLogger;
