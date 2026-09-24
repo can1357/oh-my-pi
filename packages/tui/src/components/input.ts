@@ -1,7 +1,8 @@
 import { BracketedPasteHandler, decodeReencodedPasteControls } from "../bracketed-paste";
 import { getKeybindings } from "../keybindings";
-import { extractPrintableText } from "../keys";
+import { extractPrintableText, matchesKey } from "../keys";
 import { KillRing } from "../kill-ring";
+import { SpaceHoldGesture } from "../space-hold";
 import { type Component, CURSOR_MARKER, type Focusable } from "../tui";
 import { cursorColumnWindow } from "./scroll-viewport";
 import {
@@ -16,6 +17,30 @@ import {
 } from "../utils";
 
 const segmenter = getSegmenter();
+
+/**
+ * Clean text entering the single-line value from outside the keyboard (pastes, dictation) —
+ * decode tmux's re-encoded control bytes (both extended-keys formats, e.g. Ctrl+J → "\n") back to
+ * literal bytes so the escape tail does not leak in, remove newlines/carriage returns, expand tabs,
+ * NFC-normalize, then strip any remaining control bytes. The decoder can synthesize Ctrl+A..Ctrl+Z
+ * (0x01..0x1A) from a paste, and a single-line value must hold none of them — newlines are already
+ * gone and tabs are already spaces by the time the C0/DEL strip runs.
+ *
+ * NFC normalization rationale: macOS Finder drag-drops file paths in NFD
+ * (Conjoining Jamo, U+1100..U+11FF). `Bun.stringWidth` counts each
+ * conjoining jamo as a separate cell — a Korean syllable like `화` is
+ * 1 char and 2 cells in NFC, but 2 chars and 3 cells in NFD (ᄒ=2 cells
+ * + ᅪ=1 cell). The terminal renders the NFD sequence as a single
+ * combined syllable (2 cells visible), so the width mismatch shows up
+ * as cursor drift past the visible filename — N×~1.5 cells for a path
+ * with N Korean syllables. NFC normalization at insert time stores the
+ * value in the same form everything else in the codebase assumes.
+ */
+function toSingleLine(text: string): string {
+	return replaceTabs(decodeReencodedPasteControls(text).replace(/\r\n/g, "").replace(/\r/g, "").replace(/\n/g, ""))
+		.normalize("NFC")
+		.replace(/[\x00-\x1F\x7F]/g, "");
+}
 
 interface InputState {
 	value: string;
@@ -35,6 +60,10 @@ export class Input implements Component, Focusable {
 	mask = false;
 	onSubmit?: (value: string) => void;
 	onEscape?: () => void;
+	/** Space-bar push-to-talk; set its `handler` to enable it. */
+	readonly spaceHold = new SpaceHoldGesture(count => this.deleteBeforeCursor(count));
+	/** When set, replaces the cursor glyph at end-of-text with this ANSI-styled string. */
+	cursorOverride: string | undefined;
 
 	/** Focusable interface - set by TUI when focus changes */
 	focused: boolean = false;
@@ -48,6 +77,9 @@ export class Input implements Component, Focusable {
 
 	// Undo support
 	#undoStack: InputState[] = [];
+
+	/** Code units of the current volatile speech-to-text preview (see {@link setVolatileText}). */
+	#volatileTextLen = 0;
 
 	getValue(): string {
 		return this.#value;
@@ -91,6 +123,15 @@ export class Input implements Component, Focusable {
 				}
 			}
 			return;
+		}
+
+		// Space-hold push-to-talk: a sustained space bar starts/stops STT instead of typing spaces.
+		switch (this.spaceHold.process(matchesKey(data, "space"))) {
+			case "type":
+				this.#insertCharacter(" ");
+				return;
+			case "swallow":
+				return;
 		}
 
 		const kb = getKeybindings();
@@ -210,6 +251,52 @@ export class Input implements Component, Focusable {
 	 *  (e.g. kitty's OSC 5522 enhanced clipboard read). Mirrors `Editor.pasteText`. */
 	pasteText(text: string): void {
 		this.#handlePaste(text);
+	}
+
+	/** Programmatically trigger submission (e.g. for voice submit). */
+	submit(): void {
+		this.onSubmit?.(this.#value);
+	}
+
+	/** Delete up to `count` characters immediately before the cursor. */
+	deleteBeforeCursor(count: number): void {
+		const removable = Math.min(count, this.#cursor);
+		if (removable <= 0) return;
+		this.#lastAction = null;
+		this.#pushUndo();
+		this.#replaceBeforeCursor(removable, "");
+	}
+
+	/** Show or replace a volatile speech-to-text preview at the cursor, outside undo history.
+	 *  Finalize it with {@link commitVolatileText} or drop it with {@link clearVolatileText}. */
+	setVolatileText(text: string): void {
+		const clean = toSingleLine(text);
+		this.#replaceBeforeCursor(this.#volatileTextLen, clean);
+		this.#volatileTextLen = clean.length;
+	}
+
+	/** Remove the current volatile preview without committing it. */
+	clearVolatileText(): void {
+		this.setVolatileText("");
+	}
+
+	/** Drop any volatile preview, then insert `text` as a single undoable edit. */
+	commitVolatileText(text: string): void {
+		this.clearVolatileText();
+		const clean = toSingleLine(text);
+		if (!clean) return;
+		this.#lastAction = null;
+		this.#pushUndo();
+		this.#replaceBeforeCursor(0, clean);
+	}
+
+	/** Replace up to `count` code units before the cursor with `text`, leaving the cursor after it. The
+	 *  range stops at the start of the value: a volatile preview's length can outrun the cursor once
+	 *  the caret moves while dictation is still streaming. */
+	#replaceBeforeCursor(count: number, text: string): void {
+		const start = Math.max(0, this.#cursor - count);
+		this.#value = this.#value.slice(0, start) + text + this.#value.slice(this.#cursor);
+		this.#cursor = start + text.length;
 	}
 
 	#insertCharacter(text: string): void {
@@ -390,32 +477,7 @@ export class Input implements Component, Focusable {
 	#handlePaste(pastedText: string): void {
 		this.#lastAction = null;
 		this.#pushUndo();
-
-		// Clean the pasted text — decode tmux's re-encoded control bytes (both
-		// extended-keys formats, e.g. Ctrl+J → "\n") back to literal bytes so the escape
-		// tail does not leak in, remove newlines/carriage returns, expand tabs, NFC-normalize,
-		// then strip any remaining control bytes. The decoder can synthesize Ctrl+A..Ctrl+Z
-		// (0x01..0x1A) from a paste, and a single-line value must hold none of them — newlines
-		// are already gone and tabs are already spaces by the time the C0/DEL strip runs.
-		//
-		// NFC normalization rationale: macOS Finder drag-drops file paths in NFD
-		// (Conjoining Jamo, U+1100..U+11FF). `Bun.stringWidth` counts each
-		// conjoining jamo as a separate cell — a Korean syllable like `화` is
-		// 1 char and 2 cells in NFC, but 2 chars and 3 cells in NFD (ᄒ=2 cells
-		// + ᅪ=1 cell). The terminal renders the NFD sequence as a single
-		// combined syllable (2 cells visible), so the width mismatch shows up
-		// as cursor drift past the visible filename — N×~1.5 cells for a path
-		// with N Korean syllables. NFC normalization at paste time stores the
-		// value in the same form everything else in the codebase assumes.
-		const cleanText = replaceTabs(
-			decodeReencodedPasteControls(pastedText).replace(/\r\n/g, "").replace(/\r/g, "").replace(/\n/g, ""),
-		)
-			.normalize("NFC")
-			.replace(/[\x00-\x1F\x7F]/g, "");
-
-		// Insert at cursor position
-		this.#value = this.#value.slice(0, this.#cursor) + cleanText + this.#value.slice(this.#cursor);
-		this.#cursor += cleanText.length;
+		this.#replaceBeforeCursor(0, toSingleLine(pastedText));
 	}
 
 	invalidate(): void {
@@ -440,7 +502,13 @@ export class Input implements Component, Focusable {
 			visibleValue = "•".repeat(graphemes.length);
 			cursorIndex = graphemes.filter(grapheme => grapheme.index < this.#cursor).length;
 		}
-		const displayValue = this.#cursor >= this.#value.length ? `${visibleValue} ` : visibleValue;
+		// At end of text the cursor sits on trailing padding, sized to fit a (possibly wide) cursor override.
+		const atEnd = this.#cursor >= this.#value.length;
+		const override =
+			atEnd && this.cursorOverride !== undefined
+				? { text: this.cursorOverride, width: visibleWidth(this.cursorOverride) }
+				: undefined;
+		const displayValue = atEnd ? visibleValue + " ".repeat(override?.width ?? 1) : visibleValue;
 
 		const window = cursorColumnWindow(displayValue, cursorIndex, availableWidth);
 		const visibleText = window.text;
@@ -456,11 +524,10 @@ export class Input implements Component, Focusable {
 
 		// Hardware cursor marker (zero-width, emitted before the cursor cell for IME positioning)
 		const marker = this.focused ? CURSOR_MARKER : "";
-		const cursorChar = this.#useTerminalCursor ? atCursor : `\x1b[7m${atCursor || " "}\x1b[27m`;
+		const { text: cursorChar, width: cursorWidth } = override ?? this.#cursorCell(atCursor);
 
 		// Clamp only the trailing text (measured in terminal cells), keeping the cursor marker intact.
 		const beforeWidth = visibleWidth(beforeCursor);
-		const cursorWidth = this.#useTerminalCursor ? visibleWidth(atCursor) : visibleWidth(atCursor || " ");
 		const remainingAfterWidth = Math.max(0, availableWidth - beforeWidth - cursorWidth);
 		const clampedAfterCursor = sliceWithWidth(afterCursor, 0, remainingAfterWidth, true).text;
 		const renderedNoMarker = beforeCursor + cursorChar + clampedAfterCursor;
@@ -470,5 +537,11 @@ export class Input implements Component, Focusable {
 		const pad = padding(Math.max(0, availableWidth - visualLength));
 		const line = prompt + textWithCursor + pad;
 		return [line];
+	}
+
+	/** The rendered cursor cell: the grapheme under the cursor, inverted unless the terminal draws its own cursor. */
+	#cursorCell(atCursor: string): { text: string; width: number } {
+		if (this.#useTerminalCursor) return { text: atCursor, width: visibleWidth(atCursor) };
+		return { text: `\x1b[7m${atCursor || " "}\x1b[27m`, width: visibleWidth(atCursor || " ") };
 	}
 }

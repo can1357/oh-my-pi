@@ -2012,6 +2012,63 @@ describe("resolveCliModel", () => {
 		expect(result.model?.provider).toBe("zai");
 		expect(result.model?.id).toBe("glm-5");
 	});
+
+	describe("issue #13079: disabledProviders gates an explicit pin", () => {
+		const registry = { getAll: () => openaiGpt55Models, getAvailable: () => openaiGpt55Models };
+		const settings = Settings.isolated({ disabledProviders: ["openai-codex"] });
+
+		test("refuses a provider-qualified pin and names the disabled provider", () => {
+			const result = resolveCliModel({
+				cliModel: "openai-codex/gpt-5.5",
+				modelRegistry: registry,
+				settings,
+			});
+
+			expect(result.model).toBeUndefined();
+			expect(result.disabledProvider).toBe("openai-codex");
+			expect(result.error).toContain("openai-codex");
+		});
+
+		test("refuses a --provider/--model pair naming the disabled provider", () => {
+			const result = resolveCliModel({
+				cliProvider: "openai-codex",
+				cliModel: "gpt-5.5",
+				modelRegistry: registry,
+				settings,
+			});
+
+			expect(result.model).toBeUndefined();
+			expect(result.disabledProvider).toBe("openai-codex");
+		});
+
+		test("falls through to an enabled provider carrying the same id", () => {
+			const result = resolveCliModel({
+				cliModel: "gpt-5.5",
+				modelRegistry: registry,
+				availableModels: openaiGpt55Models.filter(model => model.provider === "openai-codex"),
+				settings,
+			});
+
+			expect(result.error).toBeUndefined();
+			expect(result.disabledProvider).toBeUndefined();
+			expect(result.model?.provider).toBe("openai");
+		});
+
+		test("refuses a configured role whose only candidate is disabled", () => {
+			const result = resolveCliModel({
+				cliModel: "task",
+				modelRegistry: registry,
+				settings: Settings.isolated({
+					disabledProviders: ["openai-codex"],
+					modelRoles: { task: "openai-codex/gpt-5.5" },
+				}),
+			});
+
+			expect(result.model).toBeUndefined();
+			expect(result.disabledProvider).toBe("openai-codex");
+			expect(result.configuredPatterns).toBeUndefined();
+		});
+	});
 });
 
 describe("resolveModelScope", () => {

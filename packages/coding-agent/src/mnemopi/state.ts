@@ -454,10 +454,10 @@ export class MnemopiSessionState {
 		return this.formatScopedRecallContext(results, format) ?? "";
 	}
 
+	/** Background write: a failed write is logged and returns `undefined` instead of throwing. */
 	rememberInScope(memory: MnemopiRememberInput, options: MnemopiRememberOptions = {}): string | undefined {
 		try {
-			const [scrubbed, scrubbedOptions] = redactRememberWrite(memory, options);
-			return this.scoped.retain.memory.remember(scrubbed, scrubbedOptions);
+			return this.rememberScoped(memory, options);
 		} catch (error) {
 			logger.warn("Mnemopi: retain failed", {
 				bank: this.scoped.retain.bank,
@@ -467,8 +467,10 @@ export class MnemopiSessionState {
 		}
 	}
 
-	rememberScoped(memory: MnemopiRememberInput, options: MnemopiRememberOptions = {}): string | undefined {
-		return this.rememberInScope(memory, options);
+	/** Explicit write: throws the storage error, so the caller can report why nothing was stored. */
+	rememberScoped(memory: MnemopiRememberInput, options: MnemopiRememberOptions = {}): string {
+		const [scrubbed, scrubbedOptions] = redactRememberWrite(memory, options);
+		return this.scoped.retain.memory.remember(scrubbed, scrubbedOptions);
 	}
 
 	async recallForContext(query: string, signal?: AbortSignal): Promise<string | undefined> {
