@@ -121,6 +121,11 @@ async function groupTabs(tabIds: number[], title: string, color: string): Promis
 	return { grouped };
 }
 
+/** Every title form the omp group can carry: plain, busy ("⏳…"), done ("✅…"), plus the historical suffix form. */
+function ompGroupTitles(title: string): Record<string, true> {
+	return { [title]: true, [`⏳${title}`]: true, [`✅${title}`]: true, [`${title} ⏳`]: true };
+}
+
 /** Dissolve every omp-titled group (relay disconnected or asked us to release tabs). */
 async function restoreGroups(): Promise<void> {
 	if (!ompGroupTitle) {
@@ -128,12 +133,13 @@ async function restoreGroups(): Promise<void> {
 		const stored = await chrome.storage.session.get({ ompGroupTitle: "" }).catch(() => ({ ompGroupTitle: "" }));
 		ompGroupTitle = typeof stored.ompGroupTitle === "string" && stored.ompGroupTitle ? stored.ompGroupTitle : null;
 	}
-	busyTabsByGroup.clear();
+
 	if (!ompGroupTitle) return;
-	// Query every group and match by title: a currently-busy group carries the
-	// "<title> ⏳" suffix, which an exact-title query would miss.
+	// Query every group and match by any title form (busy/done marks included).
 	const allGroups = await chrome.tabGroups.query({}).catch(() => []);
-	const groups = allGroups.filter(group => group.title === ompGroupTitle || group.title === `${ompGroupTitle} ⏳`);
+	const title = ompGroupTitle;
+	const wanted = ompGroupTitles(title);
+	const groups = allGroups.filter(group => group.title !== undefined && wanted[group.title]);
 	for (const group of groups) {
 		const tabs = await chrome.tabs.query({ groupId: group.id }).catch(() => []);
 		const ids = tabs.map(tab => tab.id).filter(id => id !== undefined);
@@ -164,10 +170,15 @@ async function setGroupBusy(tabId: number, busy: boolean): Promise<void> {
 	}
 }
 
+/**
+ * Flip the group title between its busy and done forms: "⏳omp" while any tab in
+ * the group is being driven, "✅omp" once the burst ends, so a human can tell at
+ * a glance whether omp is working or finished (until the next burst or release).
+ */
 async function updateGroupBusyTitle(groupId: number, busy: boolean): Promise<void> {
 	if (!ompGroupTitle) return;
 	try {
-		await chrome.tabGroups.update(groupId, { title: busy ? `${ompGroupTitle} ⏳` : ompGroupTitle });
+		await chrome.tabGroups.update(groupId, { title: busy ? `⏳${ompGroupTitle}` : `✅${ompGroupTitle}` });
 	} catch {
 		// Group may have been dissolved concurrently; ignore.
 	}

@@ -32,7 +32,7 @@ export type RelayRpcRequest =
 	| { op: "group"; tabIds: number[]; title: string; color: string }
 	/** Return tabs to their pre-omp group (or ungroup); no-op for tabs the relay never grouped. */
 	| { op: "ungroup"; tabIds: number[] }
-	/** Toggle the "⏳" busy suffix on the tab's omp group title while it drives the tab. */
+	/** Flip the tab's omp group title between "⏳omp" (driving) and "✅omp" (burst finished). */
 	| { op: "setBusy"; tabId: number; busy: boolean };
 
 /** Messages sent relay → extension. */
