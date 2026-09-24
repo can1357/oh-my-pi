@@ -132,7 +132,17 @@ export function expandTilde(filePath: string, home?: string): string {
 	return filePath;
 }
 
-export function expandPath(filePath: string): string {
+/** Options for {@link expandPath} / {@link resolveToCwd}. */
+export interface ExpandPathOptions {
+	/**
+	 * Collapse unicode spaces (U+00A0, U+2000–U+200A, U+202F, U+205F, U+3000) to
+	 * ASCII space. Defaults to `true`. Filesystem-probing callers pass `false`
+	 * to preserve the literal on-disk name (issue #12805).
+	 */
+	collapseUnicodeSpaces?: boolean;
+}
+
+export function expandPath(filePath: string, opts?: ExpandPathOptions): string {
 	// Some models intermittently prefix an otherwise-valid path with a stray
 	// `:` (e.g. `:/abs/path`, `:../rel`, or the Windows forms `:C:\repo\file`
 	// and `:.\src`). No real path starts with `:` and it never begins a
@@ -142,9 +152,14 @@ export function expandPath(filePath: string): string {
 	// lookahead admits POSIX (`/`, `~`, `./`, `../`) and Windows (`\`, `.\`,
 	// `..\`, drive-letter `C:`) path shapes.
 	const deColoned = /^:(?=[/\\~]|\.\.?[/\\]|[A-Za-z]:)/.test(filePath) ? filePath.slice(1) : filePath;
-	const normalized = stripWindowsExtendedLengthPathPrefix(
-		stripFileUrl(normalizeUnicodeSpaces(normalizeAtPrefix(deColoned))),
-	);
+	const atNormalized = normalizeAtPrefix(deColoned);
+	// Unicode-space collapse is a paste-from-web heuristic (HTML/PDF/chat often
+	// carry U+00A0 where the file has a plain space). It is lossy, so callers
+	// that probe the filesystem pass `collapseUnicodeSpaces: false` to keep the
+	// literal on-disk name and try the collapsed form only as a fallback
+	// (issue #12805).
+	const spaced = (opts?.collapseUnicodeSpaces ?? true) ? normalizeUnicodeSpaces(atNormalized) : atNormalized;
+	const normalized = stripWindowsExtendedLengthPathPrefix(stripFileUrl(spaced));
 	return expandTilde(normalized);
 }
 
@@ -378,9 +393,9 @@ export function isSshUrl(path: string): boolean {
  * often pass `/` to mean “search from here”, and letting tools escape to the
  * filesystem root is almost never what they intended.
  */
-export function resolveToCwd(filePath: string, cwd: string): string {
+export function resolveToCwd(filePath: string, cwd: string, opts?: ExpandPathOptions): string {
 	const normalized = normalizeLocalScheme(filePath);
-	const expanded = normalizeWindowsDriveAliasPath(expandPath(normalized));
+	const expanded = normalizeWindowsDriveAliasPath(expandPath(normalized, opts));
 	const expandedAndNormalized = normalizeLocalScheme(expanded);
 
 	assertNotInternalUrl(expandedAndNormalized, normalized);
@@ -1137,6 +1152,27 @@ export async function partitionExistingPaths(
 }
 
 /**
+ * Build the ordered filesystem probe candidates shared by the read resolvers.
+ *
+ * `resolved` is the display/fallback path with unicode spaces collapsed (the
+ * paste-from-web heuristic). The literal, un-collapsed path is probed FIRST so
+ * a file whose real name contains U+00A0 (or U+2000–U+200A / U+202F / U+205F /
+ * U+3000) resolves to itself instead of being unreachable — or, worse, silently
+ * substituted by an ASCII-space sibling. The collapsed `resolved` and the
+ * shell-escaped variant follow as fallbacks (issue #12805).
+ */
+function readPathCandidates(filePath: string, cwd: string): { resolved: string; baseCandidates: string[] } {
+	const resolved = resolveToCwd(filePath, cwd);
+	const literal = resolveToCwd(filePath, cwd, { collapseUnicodeSpaces: false });
+	const shellEscapedVariant = tryShellEscapedPath(resolved);
+	const baseCandidates: string[] = [];
+	if (literal !== resolved) baseCandidates.push(literal);
+	baseCandidates.push(resolved);
+	if (shellEscapedVariant !== resolved) baseCandidates.push(shellEscapedVariant);
+	return { resolved, baseCandidates };
+}
+
+/**
  * Async variant of {@link resolveReadPath} for async tool paths: identical
  * variant order and winner semantics, but non-blocking probes. The sync
  * variant stays for genuinely synchronous contexts (renderers, ACP mapper).
@@ -1148,9 +1184,7 @@ export async function partitionExistingPaths(
  * probes, not fewer probes.
  */
 export async function resolveReadPathAsync(filePath: string, cwd: string): Promise<string> {
-	const resolved = resolveToCwd(filePath, cwd);
-	const shellEscapedVariant = tryShellEscapedPath(resolved);
-	const baseCandidates = shellEscapedVariant !== resolved ? [resolved, shellEscapedVariant] : [resolved];
+	const { resolved, baseCandidates } = readPathCandidates(filePath, cwd);
 
 	for (const baseCandidate of baseCandidates) {
 		if (await fileExistsAsync(baseCandidate)) {
@@ -1188,9 +1222,7 @@ export async function resolveReadPathAsync(filePath: string, cwd: string): Promi
 }
 
 export function resolveReadPath(filePath: string, cwd: string): string {
-	const resolved = resolveToCwd(filePath, cwd);
-	const shellEscapedVariant = tryShellEscapedPath(resolved);
-	const baseCandidates = shellEscapedVariant !== resolved ? [resolved, shellEscapedVariant] : [resolved];
+	const { resolved, baseCandidates } = readPathCandidates(filePath, cwd);
 
 	for (const baseCandidate of baseCandidates) {
 		if (fileExists(baseCandidate)) {
