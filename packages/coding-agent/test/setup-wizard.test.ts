@@ -507,13 +507,32 @@ describe("setup wizard glyph scene", () => {
 
 describe("setup wizard web search tab", () => {
 	const webModels = (webModelManagerOptions().staticModels ?? []).map(model => buildModel(model));
+	const googleGemini = buildModel({
+		id: "gemini-2.5-flash",
+		name: "Gemini 2.5 Flash",
+		api: "google-generative-ai",
+		provider: "google",
+		baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1_000_000,
+		maxTokens: 65_536,
+		webSearch: "gemini",
+	});
 
 	it("persists the highlighted provider as the web model role", async () => {
 		const settings = Settings.isolated();
 		const host = bindSceneHost({
 			ctx: {
 				settings,
-				session: { modelRegistry: { authStorage: { keys: { source: () => undefined } }, getAll: () => webModels } },
+				session: {
+					modelRegistry: {
+						authStorage: { keys: { source: () => undefined } },
+						getAll: () => webModels,
+						getAvailable: () => webModels,
+					},
+				},
 			},
 			requestRender: () => {},
 			finish: () => {},
@@ -536,7 +555,13 @@ describe("setup wizard web search tab", () => {
 		const host = bindSceneHost({
 			ctx: {
 				settings,
-				session: { modelRegistry: { authStorage: { keys: { source: () => undefined } }, getAll: () => webModels } },
+				session: {
+					modelRegistry: {
+						authStorage: { keys: { source: () => undefined } },
+						getAll: () => webModels,
+						getAvailable: () => webModels,
+					},
+				},
 			},
 			requestRender: () => {},
 			finish: () => {},
@@ -555,6 +580,76 @@ describe("setup wizard web search tab", () => {
 		const lastValue = lastOption.value;
 		if (lastValue === "auto") throw new Error("last option must be a concrete provider");
 		expect(settings.getModelRole("web")).toBe(`web/${lastValue}`);
+	});
+
+	it("reports Gemini ready when only Antigravity OAuth is signed in", async () => {
+		// #13023: the readiness probe must resolve against the credential-filtered
+		// pool (getAvailable) rather than the full catalog — google/gemini-2.5-flash
+		// leads the web priority order but has no credential in this scenario, so a
+		// getAll-based probe would pick it and report "Not configured yet".
+		const antigravityGemini = buildModel({
+			id: "gemini-2.5-flash",
+			name: "Gemini 2.5 Flash",
+			api: "google-gemini-cli",
+			provider: "google-antigravity",
+			baseUrl: "https://cloudcode-pa.googleapis.com",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1_000_000,
+			maxTokens: 65_536,
+			webSearch: "gemini",
+		});
+		const settings = Settings.isolated();
+		const host = bindSceneHost({
+			ctx: {
+				settings,
+				session: {
+					modelRegistry: {
+						authStorage: {
+							credentials: { hasOAuth: (provider: string) => provider === "google-antigravity" },
+							keys: { source: () => undefined },
+						},
+						getAll: () => [googleGemini, antigravityGemini],
+						getAvailable: () => [antigravityGemini],
+					},
+				},
+			},
+			requestRender: () => {},
+			finish: () => {},
+			setFocus: () => {},
+			restoreFocus: () => {},
+		} as unknown as SetupApplicationSceneHost);
+
+		expect(await host.ctx.isSearchProviderAvailable("gemini")).toBe(true);
+	});
+
+	it("still saves and highlights a grounded provider that has no credentials yet", async () => {
+		// The tab confirms "Web search set to …" and tells the user to add a key
+		// afterwards, so the preference must persist even though the credentialed
+		// pool has no Gemini model.
+		const settings = Settings.isolated();
+		const host = bindSceneHost({
+			ctx: {
+				settings,
+				session: {
+					modelRegistry: {
+						authStorage: { credentials: { hasOAuth: () => false }, keys: { source: () => undefined } },
+						getAll: () => [googleGemini],
+						getAvailable: () => [],
+					},
+				},
+			},
+			requestRender: () => {},
+			finish: () => {},
+			setFocus: () => {},
+			restoreFocus: () => {},
+		} as unknown as SetupApplicationSceneHost);
+
+		host.ctx.saveSearchProvider("gemini");
+		expect(settings.getModelRole("web")).toBe("google/gemini-2.5-flash");
+		expect(host.ctx.webSearchOrder).toEqual(["gemini"]);
+		expect(await host.ctx.isSearchProviderAvailable("gemini")).toBe(false);
 	});
 });
 

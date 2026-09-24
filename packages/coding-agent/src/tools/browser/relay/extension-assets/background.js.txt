@@ -734,6 +734,17 @@ async function trackAttachments(tabIds, isFresh = () => true, attachmentState = 
   for (const tabId of freshTabIds())
     attachmentGuard.track(tabId, preserveRetry);
 }
+var instanceId = null;
+async function ensureInstanceId() {
+  if (instanceId)
+    return instanceId;
+  const key = "relayInstanceId";
+  const stored = await chrome.storage.local.get({ [key]: "" });
+  const existing = stored[key];
+  instanceId = typeof existing === "string" && existing.length > 0 ? existing : crypto.randomUUID();
+  await chrome.storage.local.set({ [key]: instanceId });
+  return instanceId;
+}
 async function loadSettings() {
   const stored = await chrome.storage.local.get({
     port: DEFAULT_PORT,
@@ -925,6 +936,7 @@ async function buildHello() {
   const hardwareConcurrency = Number.isInteger(navigator.hardwareConcurrency) && navigator.hardwareConcurrency > 0 ? navigator.hardwareConcurrency : undefined;
   return {
     t: "hello",
+    instanceId: await ensureInstanceId(),
     userAgent: navigator.userAgent,
     browserVersion: versionMatch?.[0] ?? "Chrome/unknown",
     hardwareConcurrency,

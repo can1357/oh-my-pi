@@ -22,6 +22,7 @@
  *   shared root session and passed through verbatim
  */
 import { parse } from "@babel/parser";
+import { createHash } from "node:crypto";
 import type { ExtToRelayMessage, RelayRpcRequest, RelayToExtMessage, TabSnapshot } from "./protocol";
 
 /** Transport-agnostic websocket surface the bridge writes to. */
@@ -50,6 +51,8 @@ type RuntimeState = "default" | "enabled" | "disabled";
 
 interface SessionRef {
 	kind: "tab" | "page";
+	/** Registry key of the owning tab (`<instance code>:<chrome tabId>`). */
+	tabKey: string;
 	tabId: number;
 	runtimeState: RuntimeState;
 	/** Context ids already announced to this pseudo-session. */
@@ -340,17 +343,17 @@ class CdpConnection {
 	/** Minted pseudo-sessions owned by this connection. */
 	readonly sessions = new Map<string, SessionRef>();
 	/** Tabs this connection claimed as drive targets (`OMP.claimTarget` / `Target.createTarget`). */
-	readonly claims = new Set<number>();
+	readonly claims = new Set<string>();
 
 	constructor(
 		readonly id: number,
 		readonly socket: RelaySocket,
 	) {}
 
-	sessionsForTab(tabId: number, kind?: "tab" | "page"): string[] {
+	sessionsForTab(tabKey: string, kind?: "tab" | "page"): string[] {
 		const out: string[] = [];
 		for (const [sessionId, ref] of this.sessions) {
-			if (ref.tabId === tabId && (!kind || ref.kind === kind)) out.push(sessionId);
+			if (ref.tabKey === tabKey && (!kind || ref.kind === kind)) out.push(sessionId);
 		}
 		return out;
 	}
@@ -370,7 +373,42 @@ function isExtensionTransportInterrupted(error: unknown): boolean {
 	);
 }
 
+/** A connected extension browser instance; one per browser/profile. */
+interface ExtInstance {
+	instanceId: string;
+	/** Stable short code derived from the instance id; names target ids (`TAB<code>.<tabId>`). */
+	code: string;
+	socket: RelaySocket | null;
+	info: { userAgent: string; browserVersion: string; hardwareConcurrency?: number } | null;
+}
+
+/** Deterministic per-instance code for target ids: stable across relay restarts. */
+function instanceCode(instanceId: string): string {
+	return createHash("sha256").update(instanceId).digest("base64url").slice(0, 8);
+}
+
+function tabKeyOf(extCode: string, tabId: number): string {
+	return `${extCode}:${tabId}`;
+}
+
+function tabTargetIdFromKey(key: string): string {
+	return `TAB${key.replace(":", ".")}`;
+}
+
+function pageTargetIdFromKey(key: string): string {
+	return `PAGE${key.replace(":", ".")}`;
+}
+
+function parseTargetId(targetId: string): { key: string; kind: "tab" | "page" } | null {
+	const match = /^(TAB|PAGE)([^.]+)\.(\d+)$/.exec(targetId);
+	if (!match) return null;
+	const kind: "tab" | "page" = match[1] === "TAB" ? "tab" : "page";
+	return { key: `${match[2]}:${match[3]}`, kind };
+}
+
 class TabState {
+	/** Assigned in the constructor body from the owning instance. */
+	readonly tabKey: string;
 	url: string;
 	title: string;
 	active: boolean;
@@ -474,9 +512,12 @@ class TabState {
 	pendingPreloadScriptCleanup: PreservedPreloadScript[] = [];
 
 	constructor(
+		readonly instanceId: string,
+		readonly extCode: string,
 		readonly tabId: number,
 		snap: TabSnapshot,
 	) {
+		this.tabKey = tabKeyOf(extCode, tabId);
 		this.url = snap.url;
 		this.title = snap.title;
 		this.active = snap.active;
@@ -515,55 +556,35 @@ function _platformFromUserAgent(userAgent: string): string | undefined {
 function hasObjectKeys(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value) && Object.keys(value).length > 0;
 }
-
-function tabTargetId(tabId: number): string {
-	return `TAB${tabId}`;
-}
-
-function pageTargetId(tabId: number): string {
-	return `PAGE${tabId}`;
-}
-
-/** Reverse of {@link tabTargetId}/{@link pageTargetId}; null for foreign ids. */
-function parseTargetId(targetId: string): { kind: "tab" | "page"; tabId: number } | null {
-	const match = /^(TAB|PAGE)(\d+)$/.exec(targetId);
-	if (!match) return null;
-	return { kind: match[1] === "TAB" ? "tab" : "page", tabId: Number(match[2]) };
-}
-
 /**
  * Multiplexing CDP bridge between downstream puppeteer connections and the
  * relay extension. One instance per relay server; all state lives here so an
  * extension service-worker restart only has to re-handshake.
  */
 export class RelayBridge {
-	#tabs = new Map<number, TabState>();
+	/** Tab registries keyed by `<instance code>:<chrome tabId>`; one namespace per browser instance. */
+	#tabs = new Map<string, TabState>();
 	#conns = new Map<number, CdpConnection>();
 	#connSeq = 0;
 	#sessionSeq = 0;
 	#subscriptionSeq = 0;
 	#rpcSeq = 0;
-	#ext: RelaySocket | null = null;
-	#extInfo: {
-		userAgent: string;
-		browserVersion: string;
-		hardwareConcurrency?: number;
-	} | null = null;
-	/** Bounds the interval where a connected extension has not completed hello. */
-	#helloTimer: NodeJS.Timeout | null = null;
+	/** Connected extension browser instances, keyed by stable instance id. */
+	#instances = new Map<string, ExtInstance>();
+	#socketInstance = new Map<RelaySocket, string>();
+	/** Sockets awaiting their hello, bounded so commands cannot hang forever. */
+	#helloTimers = new Map<RelaySocket, NodeJS.Timeout>();
+	/** Waiters released whenever a pending socket completes hello or drops. */
+	#helloWaiters: Array<() => void> = [];
+	/** Instance whose hello ran last: answers browser-wide requests and owns created tabs. */
+	#lastHelloInstance: string | null = null;
 	#extensionSeen = false;
 	#pendingRpc = new Map<
-		number,
-		{
-			resolve: (value: unknown) => void;
-			reject: (err: Error) => void;
-			timer: NodeJS.Timeout;
-		}
+		string,
+		{ resolve: (value: unknown) => void; reject: (err: Error) => void; timer: NodeJS.Timeout; req: RelayRpcRequest }
 	>();
-	/** Real child session id → owning tab, learned from `Target.attachedToTarget` events. */
-	#realSessionTabs = new Map<string, number>();
-	/** Waiters released when the next extension hello completes (or the socket drops). */
-	#helloWaiters: Array<() => void> = [];
+	/** Real child session id → owning tab key, learned from `Target.attachedToTarget` events. */
+	#realSessionTabs = new Map<string, string>();
 	#log: (message: string, data?: Record<string, unknown>) => void;
 	/** Tab-group appearance for driven tabs; null disables grouping. */
 	#group: { title: string; color: string } | null;
@@ -585,7 +606,22 @@ export class RelayBridge {
 
 	/** True once the extension has completed its hello handshake. */
 	get ready(): boolean {
-		return this.#ext !== null && this.#extInfo !== null;
+		for (const inst of this.#instances.values()) {
+			if (inst.socket && inst.info) return true;
+		}
+		return false;
+	}
+
+	/** The instance whose hello ran last (browser-wide requests route there). */
+	#lastHello(): ExtInstance | undefined {
+		if (this.#lastHelloInstance) {
+			const inst = this.#instances.get(this.#lastHelloInstance);
+			if (inst?.socket) return inst;
+		}
+		for (const inst of this.#instances.values()) {
+			if (inst.socket) return inst;
+		}
+		return undefined;
 	}
 
 	/** True after the first hello, and stays true: separates a reaped service worker from an absent extension. */
@@ -595,9 +631,10 @@ export class RelayBridge {
 
 	/** Payload for `GET /json/version`. */
 	versionInfo(wsUrl: string): Record<string, string> {
-		const ua = this.#extInfo?.userAgent ?? "";
+		const info = this.#lastHello()?.info;
+		const ua = info?.userAgent ?? "";
 		return {
-			Browser: this.#extInfo?.browserVersion ?? "Chrome/unknown",
+			Browser: info?.browserVersion ?? "Chrome/unknown",
 			"Protocol-Version": "1.3",
 			"User-Agent": ua,
 			"V8-Version": "",
@@ -611,64 +648,57 @@ export class RelayBridge {
 		const out: Array<Record<string, string>> = [];
 		for (const tab of this.#tabs.values()) {
 			if (!this.#eligible(tab)) continue;
-			out.push({
-				id: pageTargetId(tab.tabId),
-				type: "page",
-				title: tab.title,
-				url: tab.url,
-			});
+			out.push({ id: pageTargetIdFromKey(tab.tabKey), type: "page", title: tab.title, url: tab.url });
 		}
 		return out;
 	}
 
 	// ---- extension lifecycle -------------------------------------------------
 
-	#rejectPendingExtensionRpcs(error: Error): void {
-		for (const pending of this.#pendingRpc.values()) {
+	#rejectPendingExtensionRpcs(instanceId: string, error: Error): void {
+		const prefix = `${instanceId}:`;
+		for (const [key, pending] of this.#pendingRpc) {
+			if (!key.startsWith(prefix)) continue;
 			clearTimeout(pending.timer);
 			pending.reject(error);
+			this.#pendingRpc.delete(key);
 		}
-		this.#pendingRpc.clear();
 	}
 
-	/** A new extension socket connected; replaces any previous one. */
+	#wakeHelloWaiters(): void {
+		const waiters = this.#helloWaiters;
+		this.#helloWaiters = [];
+		for (const wake of waiters) wake();
+	}
+
+	/** A new extension socket connected; its hello assigns (or reuses) a browser instance. */
 	extConnected(socket: RelaySocket): void {
-		if (this.#helloTimer) clearTimeout(this.#helloTimer);
-		if (this.#ext && this.#ext !== socket) {
-			this.#log("replacing extension socket");
-			for (const tab of this.#tabs.values()) {
-				tab.recoveryStartUrl = tab.url;
-				if (tab.rootRuntimeEnabled) tab.restoreRootRuntime = true;
-				this.#resetRuntime(tab);
-			}
-			this.#rejectPendingExtensionRpcs(new ExtensionReplacedError());
-			this.#ext.close();
-			// The replacement's hello has not landed yet, so its handshake state is
-			// unknown until then. Drop the previous socket's `#extInfo` now: a later
-			// `extClosed(oldSocket)` is ignored (`this.#ext !== socket`), so this is
-			// the only point that clears the stale handshake. Without it,
-			// `#forwardToTab`'s hello gate (`this.#ext && !this.#extInfo`) still sees
-			// the old info and forwards a surviving-session command onto the
-			// not-yet-recovered target, which Chrome rejects after an orphan sweep.
-			this.#extInfo = null;
-		}
-		this.#ext = socket;
-		this.#helloTimer = setTimeout(() => {
-			if (this.#ext !== socket || this.#extInfo) return;
+		const timer = setTimeout(() => {
+			if (!this.#helloTimers.has(socket)) return;
 			this.#log("extension hello timed out");
 			socket.close();
 			this.extClosed(socket);
 		}, HELLO_TIMEOUT_MS);
+		this.#helloTimers.set(socket, timer);
+		this.#log("extension socket connected");
 	}
 
 	extClosed(socket: RelaySocket): void {
-		if (this.#ext !== socket) return;
-		if (this.#helloTimer) clearTimeout(this.#helloTimer);
-		this.#helloTimer = null;
-		this.#ext = null;
-		this.#extInfo = null;
-		this.#rejectPendingExtensionRpcs(new Error("relay extension disconnected"));
+		const helloTimer = this.#helloTimers.get(socket);
+		if (helloTimer) clearTimeout(helloTimer);
+		this.#helloTimers.delete(socket);
+		this.#wakeHelloWaiters();
+		const instanceId = this.#socketInstance.get(socket);
+		if (instanceId === undefined) return;
+		this.#socketInstance.delete(socket);
+		const inst = this.#instances.get(instanceId);
+		if (!inst || inst.socket !== socket) return;
+		inst.socket = null;
+		this.#rejectPendingExtensionRpcs(instanceId, new Error("relay extension disconnected"));
+		// Keep the instance's tabs listed (the browser may reconnect), but drop
+		// debugger state: the attachment died with the service worker.
 		for (const tab of this.#tabs.values()) {
+			if (tab.instanceId !== instanceId) continue;
 			tab.recoveryStartUrl = tab.url;
 			if (tab.rootRuntimeEnabled) tab.restoreRootRuntime = true;
 			tab.attached = false;
@@ -680,24 +710,14 @@ export class RelayBridge {
 			this.#resetRuntime(tab);
 			// The extension dissolves omp groups on disconnect (or died along
 			// with them); grouping state is unknowable until the next hello.
-			// Without this reset, the next hello's groupId=-1 snapshots would
-			// read as the user dragging every tab out (permanent opt-out).
 			tab.grouped = false;
 			tab.grouping = false;
 			tab.ompGroupId = undefined;
 		}
-		this.#groupQueue.length = 0;
-		// A fresh socket may reconnect and deliver its hello; a command that raced
-		// in during the gap should re-evaluate against the reconnect state rather
-		// than block forever. Wake current waiters — #forwardToTab re-checks
-		// readiness and either proceeds or re-waits on the next socket.
-		const waiters = this.#helloWaiters;
-		this.#helloWaiters = [];
-		for (const wake of waiters) wake();
+		this.#groupQueue = this.#groupQueue.filter(tab => tab.instanceId !== instanceId);
 	}
 
 	extMessage(socket: RelaySocket, raw: string): void {
-		if (socket !== this.#ext) return;
 		let msg: ExtToRelayMessage;
 		try {
 			msg = JSON.parse(raw) as ExtToRelayMessage;
@@ -705,33 +725,39 @@ export class RelayBridge {
 			this.#log("dropping malformed extension message");
 			return;
 		}
+		if (msg.t === "hello") {
+			this.#onHello(socket, msg);
+			return;
+		}
+		const instanceId = this.#socketInstance.get(socket);
+		if (instanceId === undefined) return;
+		const inst = this.#instances.get(instanceId);
+		if (!inst || inst.socket !== socket) return;
 		switch (msg.t) {
-			case "hello":
-				this.#onHello(msg);
-				return;
 			case "rpcResult": {
-				const pending = this.#pendingRpc.get(msg.id);
+				const key = `${instanceId}:${msg.id}`;
+				const pending = this.#pendingRpc.get(key);
 				if (!pending) return;
-				this.#pendingRpc.delete(msg.id);
+				this.#pendingRpc.delete(key);
 				clearTimeout(pending.timer);
 				if (msg.ok) pending.resolve(msg.result);
 				else pending.reject(new Error(msg.error ?? "extension rpc failed"));
 				return;
 			}
 			case "cdpEvent":
-				this.#onCdpEvent(msg.tabId, msg.sessionId, msg.method, msg.params);
+				this.#onCdpEvent(tabKeyOf(inst.code, msg.tabId), msg.sessionId, msg.method, msg.params);
 				return;
 			case "detached":
-				this.#onTabDetached(msg.tabId, msg.reason, msg.relayInitiated === true);
+				this.#onTabDetached(tabKeyOf(inst.code, msg.tabId), msg.reason, msg.relayInitiated === true);
 				return;
 			case "tabCreated":
-				this.#onTabUpsert(msg.tab);
+				this.#onTabUpsert(msg.tab, instanceId);
 				return;
 			case "tabUpdated":
-				this.#onTabUpsert(msg.tab);
+				this.#onTabUpsert(msg.tab, instanceId);
 				return;
 			case "tabRemoved":
-				this.#onTabRemoved(msg.tabId);
+				this.#onTabRemoved(tabKeyOf(inst.code, msg.tabId));
 				return;
 			case "ping":
 				socket.send(JSON.stringify({ t: "pong" } satisfies RelayToExtMessage));
@@ -739,15 +765,65 @@ export class RelayBridge {
 		}
 	}
 
-	#onHello(msg: Extract<ExtToRelayMessage, { t: "hello" }>): void {
-		if (this.#helloTimer) clearTimeout(this.#helloTimer);
-		this.#helloTimer = null;
-		this.#extInfo = {
+	#onHello(socket: RelaySocket, msg: Extract<ExtToRelayMessage, { t: "hello" }>): void {
+		const helloTimer = this.#helloTimers.get(socket);
+		if (helloTimer) clearTimeout(helloTimer);
+		this.#helloTimers.delete(socket);
+		// Hellos without an instance id (legacy extension builds) share one anon
+		// instance and keep the historical latest-wins replacement semantics.
+		const instanceId = typeof msg.instanceId === "string" && msg.instanceId.length > 0 ? msg.instanceId : "anon";
+		let inst = this.#instances.get(instanceId);
+		if (!inst) {
+			inst = { instanceId, code: instanceCode(instanceId), socket: null, info: null };
+			this.#instances.set(instanceId, inst);
+		} else if (inst.socket && inst.socket !== socket) {
+			// Same browser reconnected (service-worker restart): retire the old
+			// socket. Debugger-derived state dies with the old attachment, so
+			// reset runtime state exactly like the old single-slot replace did;
+			// the hello's attachedTabIds reconciliation runs right after.
+			const replacedSocket = inst.socket;
+			for (const tab of this.#tabs.values()) {
+				if (tab.instanceId !== instanceId) continue;
+				tab.recoveryStartUrl = tab.url;
+				if (tab.rootRuntimeEnabled) tab.restoreRootRuntime = true;
+				// The rejected replay may have already committed an additive or
+				// otherwise root-local mutation in Chrome. Its promise rejection runs
+				// on a later microtask, after this hello is reconciled, so arm the fresh
+				// root synchronously while the old restoring socket is still known.
+				const interruptedPreloadRecovery = [...this.#pendingRpc.entries()].some(
+					([key, pending]) =>
+						key.startsWith(`${instanceId}:`) &&
+						pending.req.op === "send" &&
+						pending.req.tabId === tab.tabId &&
+						[
+							"Page.addScriptToEvaluateOnNewDocument",
+							"Page.removeScriptToEvaluateOnNewDocument",
+							"Page.getFrameTree",
+							"Page.createIsolatedWorld",
+							"Runtime.evaluate",
+						].includes(pending.req.method),
+				);
+				if (tab.restoring !== null && tab.restoringExt === replacedSocket && interruptedPreloadRecovery) {
+					tab.forceFreshRootBeforeReplay = true;
+					tab.restorePending = true;
+				}
+				this.#resetRuntime(tab);
+			}
+			this.#rejectPendingExtensionRpcs(instanceId, new ExtensionReplacedError());
+			this.#socketInstance.delete(replacedSocket);
+			replacedSocket.close();
+		}
+		inst.socket = socket;
+		this.#socketInstance.set(socket, instanceId);
+		inst.info = {
 			userAgent: msg.userAgent,
 			browserVersion: msg.browserVersion,
 			hardwareConcurrency: msg.hardwareConcurrency,
 		};
+		this.#lastHelloInstance = instanceId;
 		this.#extensionSeen = true;
+		// The hello GC is scoped to this instance: another browser's tabs are
+		// untouched, which is what lets Chrome and Edge share one relay.
 		const seen = new Set<number>();
 		const attachedNow = new Set(msg.attachedTabIds);
 		// An older extension predates the orphan guard and omits `recoverableTabIds`
@@ -763,12 +839,14 @@ export class RelayBridge {
 		const freshRootRequiredNow = new Set(msg.freshRootRequiredTabIds ?? []);
 		for (const snap of msg.tabs) {
 			seen.add(snap.tabId);
-			this.#onTabUpsert(snap, { silent: true });
+			this.#onTabUpsert(snap, instanceId, { silent: true });
 		}
-		for (const tabId of Array.from(this.#tabs.keys())) {
-			if (!seen.has(tabId)) this.#onTabRemoved(tabId);
+		for (const [key, tab] of this.#tabs) {
+			if (tab.instanceId !== instanceId || seen.has(tab.tabId)) continue;
+			this.#onTabRemoved(key);
 		}
 		for (const tab of this.#tabs.values()) {
+			if (tab.instanceId !== instanceId) continue;
 			tab.attached = attachedNow.has(tab.tabId);
 			// A refresh hello can snapshot Chrome before an attach RPC that was
 			// already dispatched on this same socket commits. Keep that in-flight
@@ -776,7 +854,7 @@ export class RelayBridge {
 			// a duplicate attach whose "already attached" failure bans the tab. A
 			// real socket replacement rejects the old RPC in extConnected(), so only
 			// an attach owned by the current socket can survive reconciliation.
-			const sameSocketAttach = tab.attaching !== null && tab.attachingExt === this.#ext;
+			const sameSocketAttach = tab.attaching !== null && tab.attachingExt === socket;
 			if (!sameSocketAttach) {
 				tab.attaching = null;
 				tab.attachingExt = null;
@@ -789,12 +867,12 @@ export class RelayBridge {
 			// replay is bound to: keep an active same-socket replay (do not relaunch a
 			// second, concurrent one below); reset only when the socket actually
 			// changed, so the replacement hello restarts the interrupted replay.
-			const sameSocketReplay = tab.restoring !== null && tab.restoringExt === this.#ext;
+			const sameSocketReplay = tab.restoring !== null && tab.restoringExt === socket;
 			if (!sameSocketReplay) tab.recoveryStartLoaderId = msg.recoveryLoaderIds?.[String(tab.tabId)];
 			if (!sameSocketReplay) tab.recoveryStartFrameLoaderIds = msg.recoveryFrameLoaderIds?.[String(tab.tabId)];
 			if (!sameSocketReplay) tab.restoring = null;
-			const holders = this.#sessionHolders(tab.tabId);
-			const preserve = holders.filter(conn => !conn.autoAttach && conn.sessionsForTab(tab.tabId).length > 0);
+			const holders = this.#sessionHolders(tab.tabKey);
+			const preserve = holders.filter(conn => !conn.autoAttach && conn.sessionsForTab(tab.tabKey).length > 0);
 			if (freshRootRequiredNow.has(tab.tabId) && holders.length > 0) {
 				tab.forceFreshRootBeforeReplay = true;
 				tab.restorePending = true;
@@ -819,7 +897,7 @@ export class RelayBridge {
 					// debugger attachments, including ones owned by DevTools or another
 					// extension. Keep its cleanup best-effort: if Chrome rejects detach,
 					// do not recycle the transport into the same failing hello loop.
-					this.#detachIfUnheld(tab.tabId, hasRecoveryMetadata);
+					this.#detachIfUnheld(tab.tabKey, hasRecoveryMetadata);
 					continue;
 				}
 				if (needsRecoveryReplay) {
@@ -847,7 +925,7 @@ export class RelayBridge {
 				tab.recoveryStartLoaderId = undefined;
 				tab.recoveryStartFrameLoaderIds = undefined;
 				if (hasRecoveryMetadata && recoverableNow.has(tab.tabId)) {
-					void this.#rpc({ op: "forgetRecovery", tabId: tab.tabId }).catch(err => {
+					void this.#rpc({ op: "forgetRecovery", tabId: tab.tabId }, inst).catch(err => {
 						this.#log("failed to release unheld recovery marker", {
 							tabId: tab.tabId,
 							error: err instanceof Error ? err.message : String(err),
@@ -889,7 +967,7 @@ export class RelayBridge {
 					// The user detached while the extension socket was down. Invalidate
 					// the relay's stale sessions without fighting the explicit opt-out.
 					tab.forceFreshRootBeforeReplay = false;
-					this.#onTabDetached(tab.tabId, "detached_while_disconnected", false);
+					this.#onTabDetached(tab.tabKey, "detached_while_disconnected", false);
 					continue;
 				}
 			}
@@ -911,15 +989,14 @@ export class RelayBridge {
 		}
 		this.#syncGrouping();
 		this.#log("extension connected", {
-			tabs: this.#tabs.size,
+			instanceId,
+			tabs: msg.tabs.length,
 			version: msg.browserVersion,
 		});
 		// Release any commands that arrived on surviving sessions after the socket
 		// reopened but before this hello was processed — recovery bookkeeping
 		// (retract/reattach, tab.attaching) is now in place, so they route correctly.
-		const waiters = this.#helloWaiters;
-		this.#helloWaiters = [];
-		for (const wake of waiters) wake();
+		this.#wakeHelloWaiters();
 	}
 
 	// ---- downstream (puppeteer) lifecycle -------------------------------------
@@ -936,12 +1013,12 @@ export class RelayBridge {
 		const conn = this.#conns.get(connId);
 		if (!conn) return;
 		this.#conns.delete(connId);
-		const touched = new Set<number>();
+		const touched = new Set<string>();
 		for (const [sessionId, ref] of conn.sessions) {
-			touched.add(ref.tabId);
+			touched.add(ref.tabKey);
 			if (ref.kind === "page") {
-				this.#forgetSessionSubscriptions(ref.tabId, [sessionId]);
-				this.#forgetSessionPreloadScripts(ref.tabId, [sessionId]);
+				this.#forgetSessionSubscriptions(ref.tabKey, [sessionId]);
+				this.#forgetSessionPreloadScripts(ref.tabKey, [sessionId]);
 			}
 		}
 		conn.sessions.clear();
@@ -954,7 +1031,7 @@ export class RelayBridge {
 		}
 		conn.claims.clear();
 		// Drop the debugger (and its infobar) from tabs nobody drives anymore.
-		for (const tabId of touched) this.#detachIfUnheld(tabId);
+		for (const tabKey of touched) this.#detachIfUnheld(tabKey);
 		this.#log("cdp client closed", { conn: connId });
 	}
 
@@ -990,9 +1067,9 @@ export class RelayBridge {
 			await this.#handlePageSessionCommand(conn, msg, sessionId, ref);
 			return;
 		}
-		const realTab = this.#realSessionTabs.get(sessionId);
-		if (realTab !== undefined) {
-			await this.#forwardToTab(conn, msg, realTab, sessionId);
+		const realTabKey = this.#realSessionTabs.get(sessionId);
+		if (realTabKey !== undefined) {
+			await this.#forwardToTab(conn, msg, realTabKey, sessionId);
 			return;
 		}
 		this.#replyError(conn, msg, `Unknown session id ${sessionId}`);
@@ -1023,7 +1100,7 @@ export class RelayBridge {
 			return;
 		}
 		if (msg.method !== "Runtime.enable") {
-			await this.#forwardToTab(conn, msg, ref.tabId, undefined, ref);
+			await this.#forwardToTab(conn, msg, ref.tabKey, undefined, ref);
 			return;
 		}
 		// A preserved page session can repeat `Runtime.enable` in the reconnect
@@ -1035,7 +1112,7 @@ export class RelayBridge {
 		// Gate on the complete recovery (hello, attach, and subscription replay) so
 		// the state read below is current and an enabled fast-path cannot outrun the
 		// fresh root's Runtime.enable.
-		await this.#awaitTabReady(ref.tabId);
+		await this.#awaitTabReady(ref.tabKey);
 		if (conn.sessions.get(sessionId) !== ref) {
 			this.#replyError(conn, msg, `Unknown session id ${sessionId}`);
 			return;
@@ -1065,14 +1142,14 @@ export class RelayBridge {
 		sessionId: string,
 		ref: SessionRef,
 	): Promise<void> {
-		await this.#awaitTabReady(ref.tabId);
+		await this.#awaitTabReady(ref.tabKey);
 		if (conn.sessions.get(sessionId) !== ref) {
 			this.#replyError(conn, msg, `Unknown session id ${sessionId}`);
 			return;
 		}
-		const tab = this.#tabs.get(ref.tabId);
+		const tab = this.#tabs.get(ref.tabKey);
 		if (!tab) {
-			this.#replyError(conn, msg, `No tab with id ${ref.tabId}`);
+			this.#replyError(conn, msg, `No tab with key ${ref.tabKey}`);
 			return;
 		}
 		let rootGeneration = tab.runtimeGeneration;
@@ -1080,14 +1157,14 @@ export class RelayBridge {
 		// unnoticed before the add. The snapshot itself is not retained: only the
 		// post-registration state proves which document received the script.
 		if (msg.params?.runImmediately === true) {
-			await this.#frameDocumentState(ref.tabId).catch(err => {
+			await this.#frameDocumentState(ref.tabKey).catch(err => {
 				if (isExtensionTransportInterrupted(err)) throw err;
 			});
 		}
 		// The probe can outlive the root it was sent to. A surviving holder may
 		// trigger fresh-root recovery while it is pending, so wait for that
 		// recovery to finish and revalidate ownership before forwarding the add.
-		await this.#awaitTabReady(ref.tabId);
+		await this.#awaitTabReady(ref.tabKey);
 		if (conn.sessions.get(sessionId) !== ref) {
 			this.#replyError(conn, msg, `Unknown session id ${sessionId}`);
 			return;
@@ -1100,12 +1177,15 @@ export class RelayBridge {
 		rootGeneration = tab.runtimeGeneration;
 		let result: Record<string, unknown> | undefined;
 		try {
-			result = (await this.#rpc({
-				op: "send",
-				tabId: ref.tabId,
-				method: msg.method,
-				params: msg.params,
-			})) as Record<string, unknown> | undefined;
+			result = (await this.#rpc(
+				{
+					op: "send",
+					tabId: tab.tabId,
+					method: msg.method,
+					params: msg.params,
+				},
+				this.#instanceFor(tab),
+			)) as Record<string, unknown> | undefined;
 		} catch (err) {
 			// Chrome may have accepted this initial additive registration before the
 			// socket dropped and the result never reached us. We never learned its
@@ -1131,7 +1211,7 @@ export class RelayBridge {
 		}
 		const documentState =
 			msg.params?.runImmediately === true
-				? await this.#frameDocumentState(ref.tabId).catch(err => {
+				? await this.#frameDocumentState(ref.tabKey).catch(err => {
 						if (isExtensionTransportInterrupted(err)) {
 							tab.forceFreshRootBeforeReplay = true;
 							throw err;
@@ -1165,7 +1245,7 @@ export class RelayBridge {
 			this.#replyError(conn, msg, `Unknown session id ${sessionId}`);
 			return;
 		}
-		const clientIdentifier = `preload:${ref.tabId}:${++this.#sessionSeq}`;
+		const clientIdentifier = `preload:${ref.tabKey}:${++this.#sessionSeq}`;
 		this.#rememberPreloadScript(
 			tab,
 			sessionId,
@@ -1185,14 +1265,14 @@ export class RelayBridge {
 		sessionId: string,
 		ref: SessionRef,
 	): Promise<void> {
-		await this.#awaitTabReady(ref.tabId);
+		await this.#awaitTabReady(ref.tabKey);
 		if (conn.sessions.get(sessionId) !== ref) {
 			this.#replyError(conn, msg, `Unknown session id ${sessionId}`);
 			return;
 		}
-		const tab = this.#tabs.get(ref.tabId);
+		const tab = this.#tabs.get(ref.tabKey);
 		if (!tab) {
-			this.#replyError(conn, msg, `No tab with id ${ref.tabId}`);
+			this.#replyError(conn, msg, `No tab with key ${ref.tabKey}`);
 			return;
 		}
 		const clientIdentifier = typeof msg.params?.identifier === "string" ? msg.params.identifier : undefined;
@@ -1200,12 +1280,15 @@ export class RelayBridge {
 		const params = script && clientIdentifier ? { ...msg.params, identifier: script.rootIdentifier } : msg.params;
 		const rootGeneration = tab.runtimeGeneration;
 		try {
-			await this.#rpc({
-				op: "send",
-				tabId: ref.tabId,
-				method: msg.method,
-				params,
-			});
+			await this.#rpc(
+				{
+					op: "send",
+					tabId: tab.tabId,
+					method: msg.method,
+					params,
+				},
+				this.#instanceFor(tab),
+			);
 			if (script && clientIdentifier && tab.runtimeGeneration !== rootGeneration) {
 				const replayed = this.#preloadScript(tab, sessionId, clientIdentifier);
 				if (replayed && replayed.rootGeneration === tab.runtimeGeneration) {
@@ -1218,16 +1301,19 @@ export class RelayBridge {
 			// against a replacement root where Chrome may reuse the identifier.
 			if (script?.cleanupRootIdentifier && tab.runtimeGeneration === rootGeneration) {
 				try {
-					await this.#rpc({
-						op: "send",
-						tabId: ref.tabId,
-						method: msg.method,
-						params: { ...msg.params, identifier: script.cleanupRootIdentifier },
-					});
+					await this.#rpc(
+						{
+							op: "send",
+							tabId: tab.tabId,
+							method: msg.method,
+							params: { ...msg.params, identifier: script.cleanupRootIdentifier },
+						},
+						this.#instanceFor(tab),
+					);
 				} catch (err) {
 					if (isExtensionTransportInterrupted(err)) throw err;
 					this.#log("preload marker cleanup removal failed", {
-						tabId: ref.tabId,
+						tabId: tab.tabId,
 						identifier: script.cleanupRootIdentifier,
 						error: err instanceof Error ? err.message : String(err),
 					});
@@ -1279,10 +1365,10 @@ export class RelayBridge {
 		const prev = ref.runtimeState;
 		const epoch = ++ref.runtimeEpoch;
 		ref.runtimeState = "enabled";
-		const tab = this.#tabs.get(ref.tabId);
+		const tab = this.#tabs.get(ref.tabKey);
 		if (!tab) {
 			ref.runtimeState = prev;
-			throw new Error(`No tab with id ${ref.tabId}`);
+			throw new Error(`No tab ${ref.tabKey}`);
 		}
 		try {
 			await this.#ensureRuntimeEnabled(tab);
@@ -1322,13 +1408,17 @@ export class RelayBridge {
 		// Chrome receives Runtime.disable/enable on a still-detached target and
 		// rejects the initialization. Wait for the tab to settle (hello + attach,
 		// looping across any socket swap) before cycling.
-		await this.#awaitTabReady(tab.tabId);
-		await this.#rpc({
-			op: "send",
-			tabId: tab.tabId,
-			method: "Runtime.disable",
-		});
-		await this.#rpc({ op: "send", tabId: tab.tabId, method: "Runtime.enable" });
+		await this.#awaitTabReady(tab.tabKey);
+		const inst = this.#instanceFor(tab);
+		await this.#rpc(
+			{
+				op: "send",
+				tabId: tab.tabId,
+				method: "Runtime.disable",
+			},
+			inst,
+		);
+		await this.#rpc({ op: "send", tabId: tab.tabId, method: "Runtime.enable" }, inst);
 	}
 
 	#replayRuntimeContexts(conn: CdpConnection, sessionId: string, ref: SessionRef, tab: TabState): void {
@@ -1348,7 +1438,7 @@ export class RelayBridge {
 	async #forwardToTab(
 		conn: CdpConnection,
 		msg: CdpCommand,
-		tabId: number,
+		tabKey: string,
 		realSessionId: string | undefined,
 		pageRef?: SessionRef,
 	): Promise<void> {
@@ -1370,8 +1460,8 @@ export class RelayBridge {
 		// replace the connection and arm a new hello + attach B. Awaiting only A and
 		// then sending would still race B's chrome.debugger.attach(). Loop until the
 		// tab settles against the current socket (hello delivered, attach quiesced).
-		await this.#awaitTabReady(tabId);
-		if (!this.#forwardingSessionIsCurrent(conn, msg, tabId, realSessionId, pageRef)) {
+		await this.#awaitTabReady(tabKey);
+		if (!this.#forwardingSessionIsCurrent(conn, msg, tabKey, realSessionId, pageRef)) {
 			this.#replyError(conn, msg, `Unknown session id ${String(msg.sessionId)}`);
 			return;
 		}
@@ -1380,38 +1470,51 @@ export class RelayBridge {
 		// still waits for recovery and revalidates above so a retracted auto-attach
 		// session cannot claim the tab after a replacement hello.
 		if (msg.method === "OMP.claimTarget") {
-			this.#claimTab(conn, tabId);
+			this.#claimTab(conn, tabKey);
 			this.#reply(conn, msg, {});
 			return;
 		}
-		const pendingSubscription = pageRef && msg.sessionId ? this.#trackPendingSubscription(tabId, msg) : null;
-		const initialTab = this.#tabs.get(tabId);
+		const tab = this.#tabs.get(tabKey);
+		if (!tab) {
+			this.#replyError(conn, msg, `No tab with key ${tabKey}`);
+			return;
+		}
+		const inst = this.#instances.get(tab.instanceId);
+		if (!inst || !inst.socket) {
+			this.#replyError(conn, msg, "relay extension is not connected");
+			return;
+		}
+		const pendingSubscription = pageRef && msg.sessionId ? this.#trackPendingSubscription(tabKey, msg) : null;
+		const initialTab = tab;
 		const rootGeneration = initialTab?.runtimeGeneration;
 		const subscriptionKey = pendingSubscription ? this.#subscriptionTrackingKey(msg) : undefined;
 		const previousSubscription =
 			initialTab && subscriptionKey ? this.#latestSubscriptionForKey(initialTab, subscriptionKey) : undefined;
 		try {
-			const result = await this.#rpc({
-				op: "send",
-				tabId,
-				sessionId: realSessionId,
-				method: msg.method,
-				params: msg.params,
-			});
+			const result = await this.#rpc(
+				{
+					op: "send",
+					tabId: tab.tabId,
+					sessionId: realSessionId,
+					method: msg.method,
+					params: msg.params,
+				},
+				inst,
+			);
 			if (realSessionId && initialTab) {
 				if (msg.method === "Runtime.enable") initialTab.childRuntimeEnabled.add(realSessionId);
 				if (msg.method === "Runtime.disable") initialTab.childRuntimeEnabled.delete(realSessionId);
 			}
-			const forwardingSessionIsCurrent = this.#forwardingSessionIsCurrent(conn, msg, tabId, realSessionId, pageRef);
+			const forwardingSessionIsCurrent = this.#forwardingSessionIsCurrent(conn, msg, tabKey, realSessionId, pageRef);
 			if (pageRef && msg.sessionId && pendingSubscription) {
 				this.#recordSubscription(
-					tabId,
+					tabKey,
 					msg,
 					msg.sessionId,
 					forwardingSessionIsCurrent,
 					pendingSubscription.sequence,
 				);
-				const tab = this.#tabs.get(tabId);
+				const tab = this.#tabs.get(tabKey);
 				if (
 					forwardingSessionIsCurrent &&
 					tab &&
@@ -1426,7 +1529,7 @@ export class RelayBridge {
 						]);
 					} else if (subscriptionKey && previousSubscription) {
 						const clearedFields = subscriptionClearedFields(subscriptionKey, msg.params);
-						const clearsSubscription = this.#interruptedClearKey(msg) !== undefined;
+						const clearsSubscription = this.#interruptedClearKey(msg, tab) !== undefined;
 						if (clearsSubscription || clearedFields) {
 							// Recovery may have replayed the old journal entry before this clear
 							// completed on the detached root. Apply the successful clear to the
@@ -1442,7 +1545,7 @@ export class RelayBridge {
 			}
 			pendingSubscription?.resolve();
 			if (pageRef && msg.sessionId && !forwardingSessionIsCurrent) {
-				await this.#cleanupOrphanedCompletedSubscription(tabId, msg);
+				await this.#cleanupOrphanedCompletedSubscription(tabKey, msg);
 			}
 			if (!forwardingSessionIsCurrent) {
 				this.#replyError(conn, msg, `Unknown session id ${String(msg.sessionId)}`);
@@ -1460,7 +1563,7 @@ export class RelayBridge {
 			// tracked setter as ambiguous and force a fresh-root reconciliation, as
 			// the preload handlers already do for interrupted registrations.
 			if (pendingSubscription && isExtensionTransportInterrupted(err)) {
-				const tab = this.#tabs.get(tabId);
+				const tab = this.#tabs.get(tabKey);
 				if (tab) {
 					// A tab-wide clear (a `<domain>.disable`, an explicit clear/reset, a
 					// removed binding, or a neutral-value setter) is doubly ambiguous when
@@ -1471,7 +1574,7 @@ export class RelayBridge {
 					// caller explicitly cleared. Forget journal state no newer than this
 					// dispatch so recovery cannot revive it, while retaining setters that
 					// Chrome received later and already acknowledged.
-					const clearedKey = this.#interruptedClearKey(msg);
+					const clearedKey = this.#interruptedClearKey(msg, tab);
 					if (clearedKey) {
 						this.#forgetTabSubscriptionThroughSequence(tab, clearedKey, pendingSubscription.sequence);
 					} else {
@@ -1494,8 +1597,8 @@ export class RelayBridge {
 		}
 	}
 
-	#trackPendingSubscription(tabId: number, msg: CdpCommand): { resolve: () => void; sequence: number } | null {
-		const tab = this.#tabs.get(tabId);
+	#trackPendingSubscription(tabKey: string, msg: CdpCommand): { resolve: () => void; sequence: number } | null {
+		const tab = this.#tabs.get(tabKey);
 		const key = this.#subscriptionTrackingKey(msg);
 		if (!tab || !key) return null;
 		const sequence = ++this.#subscriptionSeq;
@@ -1516,8 +1619,8 @@ export class RelayBridge {
 		};
 	}
 
-	async #cleanupOrphanedCompletedSubscription(tabId: number, msg: CdpCommand): Promise<void> {
-		const tab = this.#tabs.get(tabId);
+	async #cleanupOrphanedCompletedSubscription(tabKey: string, msg: CdpCommand): Promise<void> {
+		const tab = this.#tabs.get(tabKey);
 		const key = this.#subscriptionTrackingKey(msg);
 		if (!tab || !key) return;
 		if (!tab.attached || tab.restoring) return;
@@ -1527,10 +1630,10 @@ export class RelayBridge {
 			ownerSessionId: typeof msg.sessionId === "string" ? msg.sessionId : "",
 			sequence: 0,
 		} satisfies SessionRootSubscription;
-		const disable = this.#subscriptionDisableCommand(orphaned);
+		const disable = this.#subscriptionDisableCommand(orphaned, tab);
 		const requiresFreshRoot =
 			orphaned.method === "Emulation.setHardwareConcurrencyOverride" &&
-			!isValidHardwareConcurrency(this.#extInfo?.hardwareConcurrency);
+			!isValidHardwareConcurrency(this.#instanceFor(tab).info?.hardwareConcurrency);
 		if (!disable && !requiresFreshRoot) return;
 		await this.#awaitPendingSubscriptions(tab, key);
 		if (!tab.attached || tab.restoring) return;
@@ -1558,12 +1661,12 @@ export class RelayBridge {
 	#forwardingSessionIsCurrent(
 		conn: CdpConnection,
 		msg: CdpCommand,
-		tabId: number,
+		tabKey: string,
 		realSessionId: string | undefined,
 		pageRef: SessionRef | undefined,
 	): boolean {
 		if (pageRef) return typeof msg.sessionId === "string" && conn.sessions.get(msg.sessionId) === pageRef;
-		if (realSessionId) return this.#realSessionTabs.get(realSessionId) === tabId;
+		if (realSessionId) return this.#realSessionTabs.get(realSessionId) === tabKey;
 		return true;
 	}
 
@@ -1577,13 +1680,13 @@ export class RelayBridge {
 	 * originating pseudo-session is still live.
 	 */
 	#recordSubscription(
-		tabId: number,
+		tabKey: string,
 		msg: CdpCommand,
 		ownerSessionId: string,
 		ownerIsCurrent: boolean,
 		sequence: number,
 	): void {
-		const tab = this.#tabs.get(tabId);
+		const tab = this.#tabs.get(tabKey);
 		if (!tab) return;
 		const trackingKey = this.#subscriptionTrackingKey(msg);
 		if (!trackingKey) return;
@@ -1597,7 +1700,7 @@ export class RelayBridge {
 		// clear when replies settle out of dispatch order.
 		const clearSequence = tab.subscriptionClearSequences.get(trackingKey);
 		if (clearSequence !== undefined && clearSequence > sequence) return;
-		if (this.#interruptedClearKey(msg)) {
+		if (this.#interruptedClearKey(msg, tab)) {
 			const current = this.#latestSubscriptionForKey(tab, trackingKey);
 			if (current && current.sequence > sequence) {
 				this.#forgetTabSubscriptionThroughSequence(tab, trackingKey, sequence);
@@ -1833,7 +1936,7 @@ export class RelayBridge {
 				}
 				if (
 					msg.method === "Emulation.setHardwareConcurrencyOverride" &&
-					isDefaultHardwareConcurrency(msg.params, this.#extInfo?.hardwareConcurrency)
+					isDefaultHardwareConcurrency(msg.params, this.#instanceFor(tab).info?.hardwareConcurrency)
 				) {
 					this.#forgetTabSubscription(tab, subscriptionKey(msg.method));
 					return;
@@ -2063,8 +2166,8 @@ export class RelayBridge {
 
 	#scheduleLivePreloadScriptCleanup(tab: TabState): void {
 		if (tab.pendingPreloadScriptCleanup.length === 0) return;
-		if (!tab.attached || tab.detaching || tab.restoring || this.#sessionHolders(tab.tabId).length === 0) return;
-		const expectedExt = this.#ext;
+		if (!tab.attached || tab.detaching || tab.restoring || this.#sessionHolders(tab.tabKey).length === 0) return;
+		const expectedExt = this.#instances.get(tab.instanceId)?.socket ?? null;
 		if (!expectedExt) return;
 		const prior = tab.preloadScriptCleaning ?? Promise.resolve();
 		const task = prior
@@ -2072,17 +2175,20 @@ export class RelayBridge {
 			.then(async () => {
 				while (true) {
 					if (tab.pendingPreloadScriptCleanup.length === 0) return;
-					if (!tab.attached || tab.detaching || tab.restoring || this.#sessionHolders(tab.tabId).length === 0)
+					if (!tab.attached || tab.detaching || tab.restoring || this.#sessionHolders(tab.tabKey).length === 0)
 						return;
 					const script = tab.pendingPreloadScriptCleanup[0];
 					this.#assertExtensionCurrent(expectedExt);
 					try {
-						await this.#rpc({
-							op: "send",
-							tabId: tab.tabId,
-							method: "Page.removeScriptToEvaluateOnNewDocument",
-							params: { identifier: script.rootIdentifier },
-						});
+						await this.#rpc(
+							{
+								op: "send",
+								tabId: tab.tabId,
+								method: "Page.removeScriptToEvaluateOnNewDocument",
+								params: { identifier: script.rootIdentifier },
+							},
+							this.#instanceFor(tab),
+						);
 					} catch (err) {
 						// A transport swap must abort the whole loop so the pending
 						// queue survives for the replacement hello to retry.
@@ -2121,8 +2227,8 @@ export class RelayBridge {
 		});
 	}
 
-	#forgetSessionPreloadScripts(tabId: number, sessionIds: Iterable<string>): void {
-		const tab = this.#tabs.get(tabId);
+	#forgetSessionPreloadScripts(tabKey: string, sessionIds: Iterable<string>): void {
+		const tab = this.#tabs.get(tabKey);
 		if (!tab) return;
 		const removed: PreservedPreloadScript[] = [];
 		for (const sessionId of sessionIds) {
@@ -2134,8 +2240,8 @@ export class RelayBridge {
 		this.#enqueuePreloadScriptCleanup(tab, removed);
 	}
 
-	#forgetSessionSubscriptions(tabId: number, sessionIds: Iterable<string>): void {
-		const tab = this.#tabs.get(tabId);
+	#forgetSessionSubscriptions(tabKey: string, sessionIds: Iterable<string>): void {
+		const tab = this.#tabs.get(tabKey);
 		if (!tab) return;
 		const previousByKey = new Map<string, SessionRootSubscription | undefined>();
 		for (const key of tab.subscriptions.keys()) {
@@ -2167,15 +2273,15 @@ export class RelayBridge {
 	): void {
 		if (changes.length === 0) return;
 		tab.pendingSubscriptionReconcile = mergeSubscriptionChanges(tab.pendingSubscriptionReconcile, changes);
-		if (!tab.attached || tab.detaching || tab.restoring || this.#sessionHolders(tab.tabId).length === 0) return;
-		const expectedExt = this.#ext;
+		if (!tab.attached || tab.detaching || tab.restoring || this.#sessionHolders(tab.tabKey).length === 0) return;
+		const expectedExt = this.#instances.get(tab.instanceId)?.socket ?? null;
 		if (!expectedExt) return;
 		const prior = tab.subscriptionReconciling ?? Promise.resolve();
 		const task = prior
 			.catch(() => {})
 			.then(async () => {
 				while (true) {
-					if (!tab.attached || tab.detaching || tab.restoring || this.#sessionHolders(tab.tabId).length === 0)
+					if (!tab.attached || tab.detaching || tab.restoring || this.#sessionHolders(tab.tabKey).length === 0)
 						return;
 					this.#assertExtensionCurrent(expectedExt);
 					const change = [...tab.pendingSubscriptionReconcile].sort((left, right) => {
@@ -2195,7 +2301,7 @@ export class RelayBridge {
 						// including a retained fallback from a different live owner.
 						queued.next = current;
 					}
-					const command = this.#subscriptionReconcileCommand(queued.previous, current);
+					const command = this.#subscriptionReconcileCommand(queued.previous, current, tab);
 					if (!command) {
 						if (subscriptionChangeEquals(queued, change)) {
 							tab.pendingSubscriptionReconcile = tab.pendingSubscriptionReconcile.filter(
@@ -2205,14 +2311,14 @@ export class RelayBridge {
 						if (
 							queued.previous?.method === "Emulation.setHardwareConcurrencyOverride" &&
 							current === undefined &&
-							!isValidHardwareConcurrency(this.#extInfo?.hardwareConcurrency)
+							!isValidHardwareConcurrency(this.#instanceFor(tab).info?.hardwareConcurrency)
 						) {
 							// Older extensions do not report the browser's real hardware
 							// concurrency. Chrome has no clear RPC for this override, so a
 							// guessed value would leak synthetic state to surviving holders.
 							// Replace the debugger root instead, preserving explicit page
 							// sessions and replaying only their still-owned journal entries.
-							const preserve = this.#sessionHolders(tab.tabId).filter(conn => !conn.autoAttach);
+							const preserve = this.#sessionHolders(tab.tabKey).filter(conn => !conn.autoAttach);
 							tab.forceFreshRootBeforeReplay = true;
 							tab.restorePending = preserve.length > 0;
 							tab.resumeSubscriptionReconcileAfterRestore = tab.pendingSubscriptionReconcile.length > 0;
@@ -2223,12 +2329,15 @@ export class RelayBridge {
 					}
 					this.#assertExtensionCurrent(expectedExt);
 					try {
-						await this.#rpc({
-							op: "send",
-							tabId: tab.tabId,
-							method: command.method,
-							params: command.params,
-						});
+						await this.#rpc(
+							{
+								op: "send",
+								tabId: tab.tabId,
+								method: command.method,
+								params: command.params,
+							},
+							this.#instanceFor(tab),
+						);
 					} catch (err) {
 						// A transport swap must abort the loop so every queued change
 						// survives for the replacement hello. A normal CDP failure only
@@ -2273,7 +2382,7 @@ export class RelayBridge {
 	#pruneSubscriptions(tab: TabState, keepPageSessions: CdpConnection[]): void {
 		const liveSessions = new Set<string>();
 		for (const conn of keepPageSessions) {
-			for (const pageSession of conn.sessionsForTab(tab.tabId, "page")) liveSessions.add(pageSession);
+			for (const pageSession of conn.sessionsForTab(tab.tabKey, "page")) liveSessions.add(pageSession);
 		}
 		if (liveSessions.size === 0) {
 			tab.subscriptions.clear();
@@ -2290,7 +2399,7 @@ export class RelayBridge {
 	#prunePreloadScripts(tab: TabState, keepPageSessions: CdpConnection[]): void {
 		const liveSessions = new Set<string>();
 		for (const conn of keepPageSessions) {
-			for (const pageSession of conn.sessionsForTab(tab.tabId, "page")) liveSessions.add(pageSession);
+			for (const pageSession of conn.sessionsForTab(tab.tabKey, "page")) liveSessions.add(pageSession);
 		}
 		if (liveSessions.size === 0) {
 			tab.preloadScripts.clear();
@@ -2307,9 +2416,9 @@ export class RelayBridge {
 		this.#enqueuePreloadScriptCleanup(tab, removed);
 	}
 
-	#sessionOwnsTab(conn: CdpConnection, tabId: number, sessionId: string): boolean {
+	#sessionOwnsTab(conn: CdpConnection, tabKey: string, sessionId: string): boolean {
 		const ref = conn.sessions.get(sessionId);
-		return ref?.kind === "page" && ref.tabId === tabId;
+		return ref?.kind === "page" && ref.tabKey === tabKey;
 	}
 
 	#latestSubscriptionForKey(tab: TabState, key: string): SessionRootSubscription | undefined {
@@ -2428,7 +2537,7 @@ export class RelayBridge {
 	// establishing it. Used by the interruption handler so an interrupted clear
 	// forgets the prior enable/override it was meant to undo, since
 	// #recordSubscription never ran to record the clear itself.
-	#interruptedClearKey(msg: CdpCommand): string | undefined {
+	#interruptedClearKey(msg: CdpCommand, tab?: TabState): string | undefined {
 		const separator = msg.method.indexOf(".");
 		const domain = separator > 0 ? msg.method.slice(0, separator) : "";
 		const command = separator > 0 ? msg.method.slice(separator + 1) : "";
@@ -2511,7 +2620,10 @@ export class RelayBridge {
 				cleared = isEmptyUserAgentOverride(msg.params);
 				break;
 			case "Emulation.setHardwareConcurrencyOverride":
-				cleared = isDefaultHardwareConcurrency(msg.params, this.#extInfo?.hardwareConcurrency);
+				cleared = isDefaultHardwareConcurrency(
+					msg.params,
+					tab ? this.#instanceFor(tab).info?.hardwareConcurrency : undefined,
+				);
 				break;
 			case "Emulation.setDefaultBackgroundColorOverride":
 				cleared = !hasObjectKeys(msg.params);
@@ -2533,7 +2645,7 @@ export class RelayBridge {
 		conns: CdpConnection[],
 	): boolean {
 		if (!subscriptionEquals(this.#latestSubscriptionForKey(tab, key), subscription)) return false;
-		return conns.some(conn => this.#sessionOwnsTab(conn, tab.tabId, subscription.ownerSessionId));
+		return conns.some(conn => this.#sessionOwnsTab(conn, tab.tabKey, subscription.ownerSessionId));
 	}
 
 	#nextPreservedSubscription(
@@ -2549,7 +2661,7 @@ export class RelayBridge {
 			const subscription = this.#latestSubscriptionForKey(tab, key);
 			if (!subscription) continue;
 			if (subscriptionEquals(replayed.get(key), subscription)) continue;
-			if (!conns.some(conn => this.#sessionOwnsTab(conn, tab.tabId, subscription.ownerSessionId))) continue;
+			if (!conns.some(conn => this.#sessionOwnsTab(conn, tab.tabKey, subscription.ownerSessionId))) continue;
 			subscriptions.push({ key, subscription });
 		}
 		subscriptions.sort((a, b) => a.subscription.sequence - b.subscription.sequence);
@@ -2568,15 +2680,18 @@ export class RelayBridge {
 		for (const [key, subscription] of stale) {
 			replayed.delete(key);
 			const current = this.#latestSubscriptionForKey(tab, key);
-			const command = this.#subscriptionReconcileCommand(subscription, current);
+			const command = this.#subscriptionReconcileCommand(subscription, current, tab);
 			if (!command) continue;
 			this.#assertExtensionCurrent(expectedExt);
-			await this.#rpc({
-				op: "send",
-				tabId: tab.tabId,
-				method: command.method,
-				params: command.params,
-			});
+			await this.#rpc(
+				{
+					op: "send",
+					tabId: tab.tabId,
+					method: command.method,
+					params: command.params,
+				},
+				this.#instanceFor(tab),
+			);
 			this.#assertExtensionCurrent(expectedExt);
 		}
 	}
@@ -2584,6 +2699,7 @@ export class RelayBridge {
 	#subscriptionReconcileCommand(
 		previous: SessionRootSubscription | undefined,
 		next: SessionRootSubscription | undefined,
+		tab: TabState,
 	): { method: string; params?: Record<string, unknown> } | null {
 		if (next) {
 			if (previous && subscriptionEquals(next, previous)) return null;
@@ -2592,11 +2708,12 @@ export class RelayBridge {
 				params: reconcileSubscriptionParams(subscriptionKey(next.method), previous?.params, next.params),
 			};
 		}
-		return previous ? this.#subscriptionDisableCommand(previous) : null;
+		return previous ? this.#subscriptionDisableCommand(previous, tab) : null;
 	}
 
 	#subscriptionDisableCommand(
 		subscription: SessionRootSubscription,
+		tab: TabState,
 	): { method: string; params?: Record<string, unknown> } | null {
 		if (subscription.method.endsWith(".enable")) {
 			return {
@@ -2699,14 +2816,16 @@ export class RelayBridge {
 				return { method: subscription.method };
 			case "Emulation.setPageScaleFactor":
 				return { method: "Emulation.resetPageScaleFactor" };
-			case "Emulation.setHardwareConcurrencyOverride":
-				if (isValidHardwareConcurrency(this.#extInfo?.hardwareConcurrency)) {
+			case "Emulation.setHardwareConcurrencyOverride": {
+				const hardwareConcurrency = this.#instanceFor(tab).info?.hardwareConcurrency;
+				if (isValidHardwareConcurrency(hardwareConcurrency)) {
 					return {
 						method: subscription.method,
-						params: { hardwareConcurrency: this.#extInfo.hardwareConcurrency },
+						params: { hardwareConcurrency },
 					};
 				}
 				return null;
+			}
 			case "Emulation.setEmulatedVisionDeficiency":
 				return { method: subscription.method, params: { type: "none" } };
 			case "Emulation.setIdleOverride":
@@ -2737,20 +2856,20 @@ export class RelayBridge {
 	 * command traffic: target discovery scans every page with the same
 	 * commands a driver sends, so inference would sweep all tabs.
 	 */
-	#claimTab(conn: CdpConnection, tabId: number): void {
-		const tab = this.#tabs.get(tabId);
+	#claimTab(conn: CdpConnection, tabKey: string): void {
+		const tab = this.#tabs.get(tabKey);
 		if (!tab) return;
-		if (!conn.claims.has(tabId)) {
-			conn.claims.add(tabId);
-			this.#log("tab claimed", { conn: conn.id, tabId });
+		if (!conn.claims.has(tabKey)) {
+			conn.claims.add(tabKey);
+			this.#log("tab claimed", { conn: conn.id, tabKey });
 		}
 		this.#syncTabGrouping(tab);
 	}
 
 	/** True while any downstream connection claims the tab as its drive target. */
-	#claimed(tabId: number): boolean {
+	#claimed(tabKey: string): boolean {
 		for (const conn of this.#conns.values()) {
-			if (conn.claims.has(tabId)) return true;
+			if (conn.claims.has(tabKey)) return true;
 		}
 		return false;
 	}
@@ -2759,14 +2878,14 @@ export class RelayBridge {
 	#handleTabSessionCommand(conn: CdpConnection, msg: CdpCommand, ref: SessionRef): void {
 		switch (msg.method) {
 			case "Target.setAutoAttach": {
-				const tab = this.#tabs.get(ref.tabId);
+				const tab = this.#tabs.get(ref.tabKey);
 				if (!tab) {
-					this.#replyError(conn, msg, `Tab ${ref.tabId} is gone`);
+					this.#replyError(conn, msg, `Tab ${ref.tabKey} is gone`);
 					return;
 				}
 				// Emit before replying: puppeteer's TargetManager counts page
 				// children attached before the setAutoAttach response resolves.
-				const pageSession = this.#mintSession(conn, "page", tab.tabId);
+				const pageSession = this.#mintSession(conn, "page", tab);
 				this.#emit(
 					conn,
 					"Target.attachedToTarget",
@@ -2799,9 +2918,9 @@ export class RelayBridge {
 			case "Browser.getVersion": {
 				this.#reply(conn, msg, {
 					protocolVersion: "1.3",
-					product: this.#extInfo?.browserVersion ?? "Chrome/unknown",
+					product: this.#lastHello()?.info?.browserVersion ?? "Chrome/unknown",
 					revision: "",
-					userAgent: this.#extInfo?.userAgent ?? "",
+					userAgent: this.#lastHello()?.info?.userAgent ?? "",
 					jsVersion: "",
 				});
 				return;
@@ -2836,7 +2955,7 @@ export class RelayBridge {
 				// A replacement extension socket can open before its hello arrives.
 				// Reconcile every previously known tab before an attachment command can
 				// create a fresh debugger root and make the hello skip recovery.
-				await Promise.all([...this.#tabs.values()].map(tab => this.#awaitTabReady(tab.tabId)));
+				await Promise.all([...this.#tabs.values()].map(tab => this.#awaitTabReady(tab.tabKey)));
 				conn.autoAttach = true;
 				const tabs = [...this.#tabs.values()].filter(tab => this.#eligible(tab));
 				await Promise.all(tabs.map(tab => this.#ensureAttached(tab)));
@@ -2854,13 +2973,13 @@ export class RelayBridge {
 			}
 			case "Target.attachToTarget": {
 				const parsed = typeof msg.params?.targetId === "string" ? parseTargetId(msg.params.targetId) : null;
-				const tab = parsed ? this.#tabs.get(parsed.tabId) : undefined;
+				const tab = parsed ? this.#tabs.get(parsed.key) : undefined;
 				if (!parsed || !tab) {
 					this.#replyError(conn, msg, `No target with id ${String(msg.params?.targetId)}`);
 					return;
 				}
-				await this.#awaitTabReady(tab.tabId);
-				const currentTab = this.#tabs.get(parsed.tabId);
+				await this.#awaitTabReady(tab.tabKey);
+				const currentTab = this.#tabs.get(parsed.key);
 				if (!currentTab) {
 					this.#replyError(conn, msg, `No target with id ${String(msg.params?.targetId)}`);
 					return;
@@ -2869,7 +2988,7 @@ export class RelayBridge {
 					this.#replyError(conn, msg, `Cannot attach to tab ${currentTab.tabId} (${currentTab.url})`);
 					return;
 				}
-				const sessionId = this.#mintSession(conn, parsed.kind, currentTab.tabId);
+				const sessionId = this.#mintSession(conn, parsed.kind, currentTab);
 				const info = parsed.kind === "tab" ? this.#tabInfo(currentTab, true) : this.#pageInfo(currentTab, true);
 				this.#emit(conn, "Target.attachedToTarget", {
 					sessionId,
@@ -2888,13 +3007,17 @@ export class RelayBridge {
 			case "Target.createTarget": {
 				const url =
 					typeof msg.params?.url === "string" && msg.params.url.length > 0 ? msg.params.url : "about:blank";
-				const result = (await this.#rpc({ op: "createTab", url })) as {
-					tab: TabSnapshot;
-				};
-				this.#onTabUpsert(result.tab);
+				const inst = this.#lastHello();
+				if (!inst || !inst.socket) {
+					this.#replyError(conn, msg, "relay extension is not connected");
+					return;
+				}
+				const result = (await this.#rpc({ op: "createTab", url }, inst)) as { tab: TabSnapshot };
+				this.#onTabUpsert(result.tab, inst.instanceId);
 				// Creating a tab is an explicit act of driving it.
-				this.#claimTab(conn, result.tab.tabId);
-				this.#reply(conn, msg, { targetId: pageTargetId(result.tab.tabId) });
+				const createdKey = tabKeyOf(inst.code, result.tab.tabId);
+				this.#claimTab(conn, createdKey);
+				this.#reply(conn, msg, { targetId: pageTargetIdFromKey(createdKey) });
 				return;
 			}
 			case "Target.closeTarget": {
@@ -2903,20 +3026,28 @@ export class RelayBridge {
 					this.#replyError(conn, msg, `No target with id ${String(msg.params?.targetId)}`);
 					return;
 				}
-				await this.#rpc({ op: "removeTab", tabId: parsed.tabId });
+				const removedTab = this.#tabs.get(parsed.key);
+				if (!removedTab) {
+					this.#replyError(conn, msg, `No target with id ${String(msg.params?.targetId)}`);
+					return;
+				}
+				await this.#rpc({ op: "removeTab", tabId: removedTab.tabId }, this.#instanceFor(removedTab));
 				this.#reply(conn, msg, { success: true });
 				return;
 			}
 			case "Target.activateTarget": {
 				const parsed = typeof msg.params?.targetId === "string" ? parseTargetId(msg.params.targetId) : null;
-				if (parsed) await this.#rpc({ op: "activateTab", tabId: parsed.tabId });
+				const activatedTab = parsed ? this.#tabs.get(parsed.key) : undefined;
+				if (parsed && activatedTab) {
+					await this.#rpc({ op: "activateTab", tabId: activatedTab.tabId }, this.#instanceFor(activatedTab));
+				}
 				this.#reply(conn, msg, {});
 				return;
 			}
 			case "Target.getTargetInfo": {
 				const raw = typeof msg.params?.targetId === "string" ? msg.params.targetId : undefined;
 				const parsed = raw ? parseTargetId(raw) : null;
-				const tab = parsed ? this.#tabs.get(parsed.tabId) : undefined;
+				const tab = parsed ? this.#tabs.get(parsed.key) : undefined;
 				if (parsed && tab) {
 					const info =
 						parsed.kind === "tab" ? this.#tabInfo(tab, tab.attached) : this.#pageInfo(tab, tab.attached);
@@ -2956,12 +3087,12 @@ export class RelayBridge {
 	// ---- extension events -------------------------------------------------------
 
 	#onCdpEvent(
-		tabId: number,
+		tabKey: string,
 		sourceSessionId: string | undefined,
 		method: string,
 		params?: Record<string, unknown>,
 	): void {
-		const tab = this.#tabs.get(tabId);
+		const tab = this.#tabs.get(tabKey);
 		if (!tab) return;
 		if (method === "Runtime.exceptionThrown") {
 			const details = params?.exceptionDetails;
@@ -2978,7 +3109,7 @@ export class RelayBridge {
 			const child = params?.sessionId;
 			if (typeof child === "string") {
 				tab.realSessions.add(child);
-				this.#realSessionTabs.set(child, tabId);
+				this.#realSessionTabs.set(child, tabKey);
 				const targetInfo = params?.targetInfo;
 				const targetId =
 					targetInfo &&
@@ -3051,7 +3182,7 @@ export class RelayBridge {
 				params,
 			});
 			for (const conn of this.#conns.values()) {
-				if (conn.sessionsForTab(tabId, "page").length > 0) conn.socket.send(payload);
+				if (conn.sessionsForTab(tabKey, "page").length > 0) conn.socket.send(payload);
 			}
 			return;
 		}
@@ -3083,7 +3214,7 @@ export class RelayBridge {
 
 			for (const conn of this.#conns.values()) {
 				for (const [pageSession, ref] of conn.sessions) {
-					if (ref.kind !== "page" || ref.tabId !== tabId) continue;
+					if (ref.kind !== "page" || ref.tabKey !== tabKey) continue;
 					if (destroyedContextId !== undefined) ref.runtimeContexts.delete(destroyedContextId);
 					if (method === "Runtime.executionContextsCleared") ref.runtimeContexts.clear();
 					// `default` sessions never enabled Runtime but still get the
@@ -3100,14 +3231,14 @@ export class RelayBridge {
 		}
 		// Other root-session events fan out once per minted page session.
 		for (const conn of this.#conns.values()) {
-			for (const pageSession of conn.sessionsForTab(tabId, "page")) {
+			for (const pageSession of conn.sessionsForTab(tabKey, "page")) {
 				conn.socket.send(JSON.stringify({ sessionId: pageSession, method, params }));
 			}
 		}
 	}
 
-	#onTabDetached(tabId: number, reason: string, relayInitiated: boolean): void {
-		const tab = this.#tabs.get(tabId);
+	#onTabDetached(tabKey: string, reason: string, relayInitiated: boolean): void {
+		const tab = this.#tabs.get(tabKey);
 		if (!tab) return;
 		// Explicit source attribution comes from the extension that executed
 		// chrome.debugger.detach, so socket replacement cannot confuse this
@@ -3131,7 +3262,7 @@ export class RelayBridge {
 			}
 			return;
 		}
-		this.#log("tab detached", { tabId, reason });
+		this.#log("tab detached", { tabKey, reason });
 		tab.attached = false;
 		tab.attaching = null;
 		tab.attachingExt = null;
@@ -3147,19 +3278,22 @@ export class RelayBridge {
 		this.#retractTab(tab);
 	}
 
-	#onTabRemoved(tabId: number): void {
-		const tab = this.#tabs.get(tabId);
+	#onTabRemoved(tabKey: string): void {
+		const tab = this.#tabs.get(tabKey);
 		if (!tab) return;
 		this.#retractTab(tab);
-		this.#tabs.delete(tabId);
-		for (const conn of this.#conns.values()) conn.claims.delete(tabId);
+		this.#tabs.delete(tabKey);
+		for (const conn of this.#conns.values()) conn.claims.delete(tabKey);
 	}
 
-	#onTabUpsert(snap: TabSnapshot, opts: { silent?: boolean } = {}): void {
-		let tab = this.#tabs.get(snap.tabId);
+	#onTabUpsert(snap: TabSnapshot, instanceId: string, opts: { silent?: boolean } = {}): void {
+		const inst = this.#instances.get(instanceId);
+		if (!inst) return;
+		const key = tabKeyOf(inst.code, snap.tabId);
+		let tab = this.#tabs.get(key);
 		if (!tab) {
-			tab = new TabState(snap.tabId, snap);
-			this.#tabs.set(snap.tabId, tab);
+			tab = new TabState(instanceId, inst.code, snap.tabId, snap);
+			this.#tabs.set(key, tab);
 		} else {
 			if (tab.url !== snap.url) tab.banned = false;
 			// The user dragging a tab out of the omp group is an opt-out; the
@@ -3229,7 +3363,7 @@ export class RelayBridge {
 		// while the attach is in flight, the replacement's hello re-runs
 		// reconciliation, so a `false` here is a retryable transport swap — not a
 		// terminal attach failure — and must not retract preserved sessions.
-		const ext = this.#ext;
+		const ext = this.#instances.get(tab.instanceId)?.socket ?? null;
 		const recoveryGeneration = ++tab.recoveryGeneration;
 		let refreshedRoot = false;
 		let forceFreshRoot = false;
@@ -3268,12 +3402,12 @@ export class RelayBridge {
 				tab.refreshDetachInFlight = false;
 				tab.banned = true;
 				this.#retractTab(tab);
-				this.#detachIfUnheld(tab.tabId, true);
+				this.#detachIfUnheld(tab.tabKey, true);
 				return;
 			}
 			if (tab.recoveryGeneration !== recoveryGeneration) return;
 			if (!ok) {
-				if (this.#ext !== ext) {
+				if (this.#instances.get(tab.instanceId)?.socket !== ext) {
 					// The extension socket was replaced (or closed) mid-attach: the
 					// RPC rejected with ExtensionReplacedError or "relay extension
 					// disconnected", not a real attach failure. Retracting now would
@@ -3324,7 +3458,7 @@ export class RelayBridge {
 					// A replacement keeps the journal pending. Its hello restarts the
 					// complete replay even when Chrome still reports the root attached,
 					// repairing interruptions such as Runtime.disable without enable.
-					if (this.#ext !== ext || err instanceof ExtensionReplacedError) return;
+					if (this.#instances.get(tab.instanceId)?.socket !== ext || err instanceof ExtensionReplacedError) return;
 					if (tab.recoveryGeneration !== recoveryGeneration) return;
 					this.#log("subscription recovery failed", {
 						tabId: tab.tabId,
@@ -3337,7 +3471,7 @@ export class RelayBridge {
 					tab.forceFreshRootBeforeReplay = false;
 					tab.restorePending = false;
 					this.#retractTab(tab);
-					this.#detachIfUnheld(tab.tabId, true);
+					this.#detachIfUnheld(tab.tabKey, true);
 					return;
 				}
 				if (tab.recoveryGeneration !== recoveryGeneration) return;
@@ -3353,8 +3487,13 @@ export class RelayBridge {
 			// fresh auto-attach sessions for a now-detached tab. Those sessions look
 			// usable but every forwarded command fails, and they keep the tab
 			// recorded as held. Revalidate against the live state before emitting.
-			if (this.#tabs.get(tab.tabId) !== tab || tab.banned || !tab.attached || this.#ext !== ext) {
-				this.#detachIfUnheld(tab.tabId);
+			if (
+				this.#tabs.get(tab.tabKey) !== tab ||
+				tab.banned ||
+				!tab.attached ||
+				this.#instances.get(tab.instanceId)?.socket !== ext
+			) {
+				this.#detachIfUnheld(tab.tabKey);
 				return;
 			}
 			for (const conn of autoAttachConns) {
@@ -3366,7 +3505,7 @@ export class RelayBridge {
 			// attachment is live (auto-attach sessions, if any, were just minted
 			// above) so a tab nobody holds anymore doesn't keep an orphaned debugger
 			// attachment and its infobar.
-			this.#detachIfUnheld(tab.tabId);
+			this.#detachIfUnheld(tab.tabKey);
 		})();
 		const task = restoring.finally(() => {
 			if (tab.restoring === task) {
@@ -3411,7 +3550,7 @@ export class RelayBridge {
 		tab.childPreloadContextProbes.clear();
 		tab.childRuntimeEnabled.clear();
 		for (const conn of this.#conns.values()) {
-			for (const pageSession of conn.sessionsForTab(tab.tabId, "page")) {
+			for (const pageSession of conn.sessionsForTab(tab.tabKey, "page")) {
 				const ref = conn.sessions.get(pageSession);
 				if (!ref) continue;
 				for (const realSession of staleRealSessions) {
@@ -3431,7 +3570,7 @@ export class RelayBridge {
 		tab.refreshDetachInFlight = true;
 		const done = (async () => {
 			this.#assertExtensionCurrent(expectedExt);
-			await this.#rpc({ op: "detach", tabId: tab.tabId });
+			await this.#rpc({ op: "detach", tabId: tab.tabId }, this.#instanceFor(tab));
 			this.#assertExtensionCurrent(expectedExt);
 			tab.attached = false;
 			// Every queued preload identifier belongs to the debugger root that was
@@ -3469,7 +3608,7 @@ export class RelayBridge {
 	): Promise<void> {
 		const refs: SessionRef[] = [];
 		for (const conn of conns) {
-			for (const pageSession of conn.sessionsForTab(tab.tabId, "page")) {
+			for (const pageSession of conn.sessionsForTab(tab.tabKey, "page")) {
 				const ref = conn.sessions.get(pageSession);
 				if (ref) refs.push(ref);
 			}
@@ -3479,17 +3618,23 @@ export class RelayBridge {
 			(tab.restoreRootRuntime && refs.some(ref => ref.runtimeState === "default"));
 		if (needsRuntimeRestore) {
 			this.#assertExtensionCurrent(expectedExt);
-			await this.#rpc({
-				op: "send",
-				tabId: tab.tabId,
-				method: "Runtime.disable",
-			});
+			await this.#rpc(
+				{
+					op: "send",
+					tabId: tab.tabId,
+					method: "Runtime.disable",
+				},
+				this.#instanceFor(tab),
+			);
 			this.#assertExtensionCurrent(expectedExt);
-			await this.#rpc({
-				op: "send",
-				tabId: tab.tabId,
-				method: "Runtime.enable",
-			});
+			await this.#rpc(
+				{
+					op: "send",
+					tabId: tab.tabId,
+					method: "Runtime.enable",
+				},
+				this.#instanceFor(tab),
+			);
 			this.#assertExtensionCurrent(expectedExt);
 			tab.rootRuntimeEnabled = true;
 		}
@@ -3501,33 +3646,39 @@ export class RelayBridge {
 			if (!next) break;
 			const { key, subscription } = next;
 			this.#assertExtensionCurrent(expectedExt);
-			await this.#rpc({
-				op: "send",
-				tabId: tab.tabId,
-				method: subscription.method,
-				params: subscription.params,
-			});
+			await this.#rpc(
+				{
+					op: "send",
+					tabId: tab.tabId,
+					method: subscription.method,
+					params: subscription.params,
+				},
+				this.#instanceFor(tab),
+			);
 			this.#assertExtensionCurrent(expectedExt);
 			if (this.#isCurrentPreservedSubscription(tab, key, subscription, conns)) {
 				replayed.set(key, subscription);
 				continue;
 			}
 			const current = this.#latestSubscriptionForKey(tab, key);
-			const command = this.#subscriptionReconcileCommand(subscription, current);
+			const command = this.#subscriptionReconcileCommand(subscription, current, tab);
 			if (!command) continue;
 			this.#assertExtensionCurrent(expectedExt);
-			await this.#rpc({
-				op: "send",
-				tabId: tab.tabId,
-				method: command.method,
-				params: command.params,
-			});
+			await this.#rpc(
+				{
+					op: "send",
+					tabId: tab.tabId,
+					method: command.method,
+					params: command.params,
+				},
+				this.#instanceFor(tab),
+			);
 			this.#assertExtensionCurrent(expectedExt);
 		}
 		await this.#cleanupReplayedPreservedSubscriptions(tab, conns, expectedExt, replayed);
 		const preloadScripts = [...tab.preloadScripts.values()]
 			.flatMap(scripts => [...scripts.values()])
-			.filter(script => conns.some(conn => this.#sessionOwnsTab(conn, tab.tabId, script.ownerSessionId)))
+			.filter(script => conns.some(conn => this.#sessionOwnsTab(conn, tab.tabKey, script.ownerSessionId)))
 			.sort((left, right) => left.sequence - right.sequence);
 		const hasImmediatePreload = preloadScripts.some(script => script.params?.runImmediately === true);
 		// Loader snapshots alone cannot tell whether a navigation happened before
@@ -3538,10 +3689,10 @@ export class RelayBridge {
 		const temporarilyObserveNavigations =
 			hasImmediatePreload && this.#latestSubscriptionForKey(tab, "Page.enable") === undefined;
 		const enablePageEvents = temporarilyObserveNavigations
-			? this.#rpc({ op: "send", tabId: tab.tabId, method: "Page.enable" })
+			? this.#rpc({ op: "send", tabId: tab.tabId, method: "Page.enable" }, this.#instanceFor(tab))
 			: Promise.resolve();
 		const currentLoaderPromise = hasImmediatePreload
-			? this.#frameDocumentState(tab.tabId).catch(() => undefined)
+			? this.#frameDocumentState(tab.tabKey).catch(() => undefined)
 			: Promise.resolve(undefined);
 		const [, currentDocumentState] = await Promise.all([enablePageEvents, currentLoaderPromise]);
 		const currentLoaderId = currentDocumentState?.mainLoaderId;
@@ -3594,12 +3745,15 @@ export class RelayBridge {
 					: script.params;
 			let result: Record<string, unknown> | undefined;
 			try {
-				result = (await this.#rpc({
-					op: "send",
-					tabId: tab.tabId,
-					method: "Page.addScriptToEvaluateOnNewDocument",
-					params: replayParams,
-				})) as Record<string, unknown> | undefined;
+				result = (await this.#rpc(
+					{
+						op: "send",
+						tabId: tab.tabId,
+						method: "Page.addScriptToEvaluateOnNewDocument",
+						params: replayParams,
+					},
+					this.#instanceFor(tab),
+				)) as Record<string, unknown> | undefined;
 			} catch (err) {
 				// The marker is suppression state for this one replay attempt. If the
 				// registration never becomes journaled, retaining it would hide an
@@ -3636,7 +3790,7 @@ export class RelayBridge {
 			let finalizedLoaderId = currentLoaderId;
 			let finalizedFrameLoaderIds = currentDocumentState?.frameLoaderIds;
 			if (script.params?.runImmediately === true && !runImmediately) {
-				const documentStateAfterRegistration = await this.#frameDocumentState(tab.tabId).catch(err => {
+				const documentStateAfterRegistration = await this.#frameDocumentState(tab.tabKey).catch(err => {
 					if (isExtensionTransportInterrupted(err)) {
 						tab.forceFreshRootBeforeReplay = true;
 						throw err;
@@ -3688,7 +3842,7 @@ export class RelayBridge {
 					if (applicationMarker !== undefined && mainFrameChanged) {
 						try {
 							appliedToCurrentDocument = await this.#preloadApplicationMarker(
-								tab.tabId,
+								tab,
 								applicationMarker,
 								script.params.worldName,
 							);
@@ -3724,22 +3878,28 @@ export class RelayBridge {
 							// atomically makes an immediate registration cover both existing
 							// contexts and later documents, so a navigation cannot fall into
 							// an uncovered remove -> probe -> add interval.
-							const retry = (await this.#rpc({
-								op: "send",
-								tabId: tab.tabId,
-								method: "Page.addScriptToEvaluateOnNewDocument",
-								params: { ...replayParams, runImmediately: true },
-							})) as Record<string, unknown> | undefined;
+							const retry = (await this.#rpc(
+								{
+									op: "send",
+									tabId: tab.tabId,
+									method: "Page.addScriptToEvaluateOnNewDocument",
+									params: { ...replayParams, runImmediately: true },
+								},
+								this.#instanceFor(tab),
+							)) as Record<string, unknown> | undefined;
 							if (typeof retry?.identifier !== "string") {
 								throw new Error("Page.addScriptToEvaluateOnNewDocument replay did not return an identifier");
 							}
 							rootIdentifier = retry.identifier;
-							await this.#rpc({
-								op: "send",
-								tabId: tab.tabId,
-								method: "Page.removeScriptToEvaluateOnNewDocument",
-								params: { identifier: producerIdentifier },
-							});
+							await this.#rpc(
+								{
+									op: "send",
+									tabId: tab.tabId,
+									method: "Page.removeScriptToEvaluateOnNewDocument",
+									params: { identifier: producerIdentifier },
+								},
+								this.#instanceFor(tab),
+							);
 						} catch (err) {
 							if (isExtensionTransportInterrupted(err)) tab.forceFreshRootBeforeReplay = true;
 							throw err;
@@ -3756,16 +3916,19 @@ export class RelayBridge {
 					// document and removes the private marker without duplicating any top-level
 					// lexical declaration. This avoids both an uncovered handoff gap and the
 					// SyntaxError Chrome raises when two scripts declare the same let/const/class.
-					const cleanup = (await this.#rpc({
-						op: "send",
-						tabId: tab.tabId,
-						method: "Page.addScriptToEvaluateOnNewDocument",
-						params: {
-							...originalParams,
-							source: clearPreloadApplicationMarker(applicationMarker),
-							runImmediately: true,
+					const cleanup = (await this.#rpc(
+						{
+							op: "send",
+							tabId: tab.tabId,
+							method: "Page.addScriptToEvaluateOnNewDocument",
+							params: {
+								...originalParams,
+								source: clearPreloadApplicationMarker(applicationMarker),
+								runImmediately: true,
+							},
 						},
-					})) as Record<string, unknown> | undefined;
+						this.#instanceFor(tab),
+					)) as Record<string, unknown> | undefined;
 					// The preserved owner can disappear while the companion is being
 					// registered. A confirmed final-owner detach destroys both producer
 					// and cleanup registrations; their late identifiers must not be
@@ -3808,7 +3971,7 @@ export class RelayBridge {
 				tab.preloadApplicationMarkers.delete(previousApplicationMarker);
 			}
 			if (navigationDuringRegistration && rootIdentifier !== identifier) {
-				const loaderAfterReplay = await this.#frameDocumentState(tab.tabId).catch(err => {
+				const loaderAfterReplay = await this.#frameDocumentState(tab.tabKey).catch(err => {
 					if (isExtensionTransportInterrupted(err)) {
 						tab.forceFreshRootBeforeReplay = true;
 						throw err;
@@ -3826,11 +3989,14 @@ export class RelayBridge {
 		if (temporarilyObserveNavigations) {
 			try {
 				this.#assertExtensionCurrent(expectedExt);
-				await this.#rpc({
-					op: "send",
-					tabId: tab.tabId,
-					method: "Page.disable",
-				});
+				await this.#rpc(
+					{
+						op: "send",
+						tabId: tab.tabId,
+						method: "Page.disable",
+					},
+					this.#instanceFor(tab),
+				);
 			} catch (err) {
 				// The preload replay already mutated this root. If the cleanup result
 				// is lost, retry only after replacing the root so the additive
@@ -3842,33 +4008,40 @@ export class RelayBridge {
 		this.#scheduleLivePreloadScriptCleanup(tab);
 	}
 
-	async #preloadApplicationMarker(tabId: number, marker: string, worldName: unknown): Promise<boolean> {
+	async #preloadApplicationMarker(tab: TabState, marker: string, worldName: unknown): Promise<boolean> {
 		let contextId: number | undefined;
 		if (typeof worldName === "string") {
-			const frame = (await this.#rpc({ op: "send", tabId, method: "Page.getFrameTree" })) as
-				| { frameTree?: { frame?: { id?: unknown } } }
-				| undefined;
+			const frame = (await this.#rpc(
+				{ op: "send", tabId: tab.tabId, method: "Page.getFrameTree" },
+				this.#instanceFor(tab),
+			)) as { frameTree?: { frame?: { id?: unknown } } } | undefined;
 			const frameId = frame?.frameTree?.frame?.id;
 			if (typeof frameId !== "string") return false;
-			const isolatedWorld = (await this.#rpc({
-				op: "send",
-				tabId,
-				method: "Page.createIsolatedWorld",
-				params: { frameId, worldName },
-			})) as { executionContextId?: unknown } | undefined;
+			const isolatedWorld = (await this.#rpc(
+				{
+					op: "send",
+					tabId: tab.tabId,
+					method: "Page.createIsolatedWorld",
+					params: { frameId, worldName },
+				},
+				this.#instanceFor(tab),
+			)) as { executionContextId?: unknown } | undefined;
 			if (typeof isolatedWorld?.executionContextId !== "number") return false;
 			contextId = isolatedWorld.executionContextId;
 		}
-		const evaluated = (await this.#rpc({
-			op: "send",
-			tabId,
-			method: "Runtime.evaluate",
-			params: {
-				expression: `(() => { const present = this[${JSON.stringify(marker)}] === true; delete this[${JSON.stringify(marker)}]; return present; })()`,
-				returnByValue: true,
-				...(contextId !== undefined ? { contextId } : {}),
+		const evaluated = (await this.#rpc(
+			{
+				op: "send",
+				tabId: tab.tabId,
+				method: "Runtime.evaluate",
+				params: {
+					expression: `(() => { const present = this[${JSON.stringify(marker)}] === true; delete this[${JSON.stringify(marker)}]; return present; })()`,
+					returnByValue: true,
+					...(contextId !== undefined ? { contextId } : {}),
+				},
 			},
-		})) as { result?: { value?: unknown } } | undefined;
+			this.#instanceFor(tab),
+		)) as { result?: { value?: unknown } } | undefined;
 		return evaluated?.result?.value === true;
 	}
 
@@ -3889,7 +4062,7 @@ export class RelayBridge {
 			if (enabledForProbe) {
 				tab.preloadContextProbe = contexts;
 				this.#assertExtensionCurrent(expectedExt);
-				await this.#rpc({ op: "send", tabId: tab.tabId, method: "Runtime.enable" });
+				await this.#rpc({ op: "send", tabId: tab.tabId, method: "Runtime.enable" }, this.#instanceFor(tab));
 				this.#assertExtensionCurrent(expectedExt);
 				probeEnabled = true;
 			}
@@ -3897,24 +4070,30 @@ export class RelayBridge {
 				const sessionId = tab.frameSessions.get(frameId);
 				try {
 					if (typeof worldName === "string") {
-						const isolatedWorld = (await this.#rpc({
-							op: "send",
-							tabId: tab.tabId,
-							...(sessionId ? { sessionId } : {}),
-							method: "Page.createIsolatedWorld",
-							params: { frameId, worldName },
-						})) as { executionContextId?: unknown } | undefined;
+						const isolatedWorld = (await this.#rpc(
+							{
+								op: "send",
+								tabId: tab.tabId,
+								...(sessionId ? { sessionId } : {}),
+								method: "Page.createIsolatedWorld",
+								params: { frameId, worldName },
+							},
+							this.#instanceFor(tab),
+						)) as { executionContextId?: unknown } | undefined;
 						if (typeof isolatedWorld?.executionContextId !== "number") {
 							throw new Error(`No isolated execution context for changed frame ${frameId}`);
 						}
 						this.#assertExtensionCurrent(expectedExt);
-						await this.#rpc({
-							op: "send",
-							tabId: tab.tabId,
-							...(sessionId ? { sessionId } : {}),
-							method: "Runtime.evaluate",
-							params: { expression: source, contextId: isolatedWorld.executionContextId, ...commandLineAPI },
-						});
+						await this.#rpc(
+							{
+								op: "send",
+								tabId: tab.tabId,
+								...(sessionId ? { sessionId } : {}),
+								method: "Runtime.evaluate",
+								params: { expression: source, contextId: isolatedWorld.executionContextId, ...commandLineAPI },
+							},
+							this.#instanceFor(tab),
+						);
 						continue;
 					}
 					if (sessionId) {
@@ -3924,12 +4103,15 @@ export class RelayBridge {
 							tab.childPreloadContextProbes.set(sessionId, childContexts);
 							const runtimeWasEnabled = tab.childRuntimeEnabled.has(sessionId);
 							this.#assertExtensionCurrent(expectedExt);
-							await this.#rpc({
-								op: "send",
-								tabId: tab.tabId,
-								sessionId,
-								method: "Runtime.enable",
-							});
+							await this.#rpc(
+								{
+									op: "send",
+									tabId: tab.tabId,
+									sessionId,
+									method: "Runtime.enable",
+								},
+								this.#instanceFor(tab),
+							);
 							if (!runtimeWasEnabled) temporarilyEnabledChildSessions.add(sessionId);
 						}
 						const match = [...childContexts].find(([, context]) => {
@@ -3940,13 +4122,16 @@ export class RelayBridge {
 						});
 						if (!match) throw new Error(`No matching execution context for changed frame ${frameId}`);
 						this.#assertExtensionCurrent(expectedExt);
-						await this.#rpc({
-							op: "send",
-							tabId: tab.tabId,
-							sessionId,
-							method: "Runtime.evaluate",
-							params: { expression: source, contextId: match[0], ...commandLineAPI },
-						});
+						await this.#rpc(
+							{
+								op: "send",
+								tabId: tab.tabId,
+								sessionId,
+								method: "Runtime.evaluate",
+								params: { expression: source, contextId: match[0], ...commandLineAPI },
+							},
+							this.#instanceFor(tab),
+						);
 						continue;
 					}
 					const match = [...contexts].find(([, context]) => {
@@ -3960,18 +4145,21 @@ export class RelayBridge {
 					});
 					if (!match) throw new Error(`No matching execution context for changed frame ${frameId}`);
 					this.#assertExtensionCurrent(expectedExt);
-					await this.#rpc({
-						op: "send",
-						tabId: tab.tabId,
-						method: "Runtime.evaluate",
-						params: { expression: source, contextId: match[0], ...commandLineAPI },
-					});
+					await this.#rpc(
+						{
+							op: "send",
+							tabId: tab.tabId,
+							method: "Runtime.evaluate",
+							params: { expression: source, contextId: match[0], ...commandLineAPI },
+						},
+						this.#instanceFor(tab),
+					);
 				} catch (err) {
 					if (isExtensionTransportInterrupted(err)) throw err;
 					// Frame discovery and targeted replay are separate CDP operations. A
 					// vanished/replaced child is already covered by the durable registration.
 					if (tab.frameSessions.get(frameId) !== sessionId) continue;
-					const currentFrames = await this.#frameDocumentState(tab.tabId);
+					const currentFrames = await this.#frameDocumentState(tab.tabKey);
 					this.#assertExtensionCurrent(expectedExt);
 					if (!(frameId in currentFrames.frameLoaderIds)) continue;
 					throw err;
@@ -3981,7 +4169,10 @@ export class RelayBridge {
 			for (const sessionId of temporarilyEnabledChildSessions) {
 				if (!tab.realSessions.has(sessionId)) continue;
 				this.#assertExtensionCurrent(expectedExt);
-				await this.#rpc({ op: "send", tabId: tab.tabId, sessionId, method: "Runtime.disable" });
+				await this.#rpc(
+					{ op: "send", tabId: tab.tabId, sessionId, method: "Runtime.disable" },
+					this.#instanceFor(tab),
+				);
 			}
 			for (const sessionId of new Set([...temporarilyEnabledChildSessions, ...tab.childRuntimeEnabled])) {
 				tab.childPreloadContextProbes.delete(sessionId);
@@ -3990,22 +4181,27 @@ export class RelayBridge {
 				tab.preloadContextProbe = null;
 				if (probeEnabled) {
 					this.#assertExtensionCurrent(expectedExt);
-					await this.#rpc({ op: "send", tabId: tab.tabId, method: "Runtime.disable" });
+					await this.#rpc({ op: "send", tabId: tab.tabId, method: "Runtime.disable" }, this.#instanceFor(tab));
 				}
 			}
 		}
 	}
 
-	async #frameDocumentState(tabId: number): Promise<{
+	async #frameDocumentState(tabKey: string): Promise<{
 		mainFrameId?: string;
 		mainLoaderId?: string;
 		frameLoaderIds: Record<string, string>;
 	}> {
-		const result = (await this.#rpc({
-			op: "send",
-			tabId,
-			method: "Page.getFrameTree",
-		})) as { frameTree?: { frame?: { id?: unknown; loaderId?: unknown }; childFrames?: unknown[] } } | undefined;
+		const tab = this.#tabs.get(tabKey);
+		if (!tab) throw new Error(`No tab with key ${tabKey}`);
+		const result = (await this.#rpc(
+			{
+				op: "send",
+				tabId: tab.tabId,
+				method: "Page.getFrameTree",
+			},
+			this.#instanceFor(tab),
+		)) as { frameTree?: { frame?: { id?: unknown; loaderId?: unknown }; childFrames?: unknown[] } } | undefined;
 		const frameLoaderIds: Record<string, string> = {};
 		const visit = (tree: unknown): void => {
 			if (!tree || typeof tree !== "object") return;
@@ -4023,14 +4219,16 @@ export class RelayBridge {
 	}
 
 	#assertExtensionCurrent(expected: RelaySocket | null): void {
-		if (this.#ext !== expected) throw new ExtensionReplacedError();
+		if (!expected || ![...this.#instances.values()].some(inst => inst.socket === expected)) {
+			throw new ExtensionReplacedError();
+		}
 	}
 
 	// ---- tab grouping -----------------------------------------------------------
 
 	/** A tab belongs in the omp group when claimed by a client, controllable, unpinned, not user-opted-out, and not already in a user group. */
 	#groupWorthy(tab: TabState): boolean {
-		if (!this.#claimed(tab.tabId) || !this.#eligible(tab) || tab.pinned || tab.groupOptOut) return false;
+		if (!this.#claimed(tab.tabKey) || !this.#eligible(tab) || tab.pinned || tab.groupOptOut) return false;
 		return tab.grouped || tab.groupId === -1;
 	}
 
@@ -4051,7 +4249,7 @@ export class RelayBridge {
 		if (tab.grouped) {
 			tab.grouped = false;
 			tab.ompGroupId = undefined;
-			void this.#rpc({ op: "ungroup", tabIds: [tab.tabId] }).catch(() => {});
+			void this.#rpc({ op: "ungroup", tabIds: [tab.tabId] }, this.#instanceFor(tab)).catch(() => {});
 		}
 	}
 
@@ -4076,36 +4274,44 @@ export class RelayBridge {
 		try {
 			while (this.#groupQueue.length > 0) {
 				const batch = this.#groupQueue.splice(0);
-				const tabIds = batch.map(tab => tab.tabId);
-				try {
-					const result = await this.#rpc({
-						op: "group",
-						tabIds,
-						title: group.title,
-						color: group.color,
-					});
-					// Extension replies { grouped: { [tabId]: groupId } }; validate per entry.
-					const grouped: Record<string, unknown> =
-						result &&
-						typeof result === "object" &&
-						"grouped" in result &&
-						result.grouped &&
-						typeof result.grouped === "object"
-							? (result.grouped as Record<string, unknown>)
-							: {};
-					for (const tab of batch) {
-						const groupId = grouped[String(tab.tabId)];
-						if (typeof groupId !== "number") continue;
-						tab.grouped = true;
-						tab.ompGroupId = groupId;
+				// Group RPCs address tabs by chrome tabId within one browser
+				// instance, so a mixed batch is split per instance.
+				const byInstance = new Map<string, TabState[]>();
+				for (const tab of batch) {
+					const tabs = byInstance.get(tab.instanceId);
+					if (tabs) tabs.push(tab);
+					else byInstance.set(tab.instanceId, [tab]);
+				}
+				for (const [instanceId, tabs] of byInstance) {
+					const inst = this.#instances.get(instanceId);
+					if (!inst?.socket) {
+						for (const tab of tabs) tab.grouping = false;
+						continue;
 					}
-					this.#log("grouped tabs", { tabIds, grouped });
-				} catch (err) {
-					this.#log("tab grouping failed", {
-						error: err instanceof Error ? err.message : String(err),
-					});
-				} finally {
-					for (const tab of batch) tab.grouping = false;
+					const tabIds = tabs.map(tab => tab.tabId);
+					try {
+						const result = await this.#rpc({ op: "group", tabIds, title: group.title, color: group.color }, inst);
+						// Extension replies { grouped: { [tabId]: groupId } }; validate per entry.
+						const grouped: Record<string, unknown> =
+							result &&
+							typeof result === "object" &&
+							"grouped" in result &&
+							result.grouped &&
+							typeof result.grouped === "object"
+								? (result.grouped as Record<string, unknown>)
+								: {};
+						for (const tab of tabs) {
+							const groupId = grouped[String(tab.tabId)];
+							if (typeof groupId !== "number") continue;
+							tab.grouped = true;
+							tab.ompGroupId = groupId;
+						}
+						this.#log("grouped tabs", { instanceId, tabIds, grouped });
+					} catch (err) {
+						this.#log("tab grouping failed", { error: err instanceof Error ? err.message : String(err) });
+					} finally {
+						for (const tab of tabs) tab.grouping = false;
+					}
 				}
 			}
 		} finally {
@@ -4131,16 +4337,16 @@ export class RelayBridge {
 		tab.childRuntimeEnabled.clear();
 		for (const conn of this.#conns.values()) {
 			const preservePages = keepPageSessions.includes(conn);
-			const tabSessions = conn.sessionsForTab(tab.tabId, "tab");
+			const tabSessions = conn.sessionsForTab(tab.tabKey, "tab");
 			if (!preservePages) {
-				const pageSessions = conn.sessionsForTab(tab.tabId, "page");
-				this.#forgetSessionSubscriptions(tab.tabId, pageSessions);
+				const pageSessions = conn.sessionsForTab(tab.tabKey, "page");
+				this.#forgetSessionSubscriptions(tab.tabKey, pageSessions);
 				for (const pageSession of pageSessions) {
 					conn.sessions.delete(pageSession);
 					this.#emit(
 						conn,
 						"Target.detachedFromTarget",
-						{ sessionId: pageSession, targetId: pageTargetId(tab.tabId) },
+						{ sessionId: pageSession, targetId: pageTargetIdFromKey(tab.tabKey) },
 						tabSessions[0],
 					);
 				}
@@ -4152,7 +4358,7 @@ export class RelayBridge {
 				// recovery continuation replays enabled domains on the fresh root before
 				// forwarding another command, while an explicit Runtime.disable remains
 				// a per-session opt-out.
-				for (const pageSession of conn.sessionsForTab(tab.tabId, "page")) {
+				for (const pageSession of conn.sessionsForTab(tab.tabKey, "page")) {
 					const ref = conn.sessions.get(pageSession);
 					if (!ref) continue;
 					for (const realSession of staleRealSessions) {
@@ -4175,16 +4381,16 @@ export class RelayBridge {
 					conn.sessions.delete(tabSession);
 					this.#emit(conn, "Target.detachedFromTarget", {
 						sessionId: tabSession,
-						targetId: tabTargetId(tab.tabId),
+						targetId: tabTargetIdFromKey(tab.tabKey),
 					});
 				}
 			}
 			if (conn.discover && tab.announced && !preservePages) {
 				this.#emit(conn, "Target.targetDestroyed", {
-					targetId: pageTargetId(tab.tabId),
+					targetId: pageTargetIdFromKey(tab.tabKey),
 				});
 				this.#emit(conn, "Target.targetDestroyed", {
-					targetId: tabTargetId(tab.tabId),
+					targetId: tabTargetIdFromKey(tab.tabKey),
 				});
 			}
 		}
@@ -4193,11 +4399,12 @@ export class RelayBridge {
 
 	// ---- session + attach bookkeeping --------------------------------------------
 
-	#mintSession(conn: CdpConnection, kind: "tab" | "page", tabId: number): string {
-		const sessionId = `S${kind === "tab" ? "T" : "P"}${tabId}.${conn.id}.${++this.#sessionSeq}`;
+	#mintSession(conn: CdpConnection, kind: "tab" | "page", tab: TabState): string {
+		const sessionId = `S${kind === "tab" ? "T" : "P"}${tab.tabId}.${conn.id}.${++this.#sessionSeq}`;
 		conn.sessions.set(sessionId, {
 			kind,
-			tabId,
+			tabKey: tab.tabKey,
+			tabId: tab.tabId,
 			runtimeState: "default",
 			runtimeContexts: new Set(),
 			runtimeEnabling: null,
@@ -4207,7 +4414,6 @@ export class RelayBridge {
 		// deferred: without a holder, issuing root mutations would race the detach.
 		// If another client later adopts the still-attached tab, resume both queues
 		// now that their mutations once again have a live downstream consumer.
-		const tab = this.#tabs.get(tabId);
 		if (tab?.pendingSubscriptionReconcile.length) {
 			this.#scheduleLiveSubscriptionReconcile(tab, [...tab.pendingSubscriptionReconcile]);
 		}
@@ -4220,29 +4426,31 @@ export class RelayBridge {
 		if (!ref) return;
 		conn.sessions.delete(sessionId);
 		if (ref.kind === "page") {
-			this.#forgetSessionSubscriptions(ref.tabId, [sessionId]);
-			this.#forgetSessionPreloadScripts(ref.tabId, [sessionId]);
+			this.#forgetSessionSubscriptions(ref.tabKey, [sessionId]);
+			this.#forgetSessionPreloadScripts(ref.tabKey, [sessionId]);
 		}
-		const targetId = ref.kind === "tab" ? tabTargetId(ref.tabId) : pageTargetId(ref.tabId);
+		const targetId = ref.kind === "tab" ? tabTargetIdFromKey(ref.tabKey) : pageTargetIdFromKey(ref.tabKey);
 		this.#emit(conn, "Target.detachedFromTarget", { sessionId, targetId }, parentSessionId);
 		// An explicit release of the last session must drop the attachment too,
 		// or it outlives every downstream session: the infobar stays up, and
 		// dismissing it bans the tab for the rest of the epoch.
-		this.#detachIfUnheld(ref.tabId);
+		this.#detachIfUnheld(ref.tabKey);
 	}
 
 	/**
 	 * Release the tab's chrome.debugger attachment once no downstream session
 	 * holds it. Inert while the long-lived registry connection still holds one.
 	 */
-	#detachIfUnheld(tabId: number, reconnectOnFailure = false): void {
-		if (this.#sessionHolders(tabId).length > 0) return;
-		const tab = this.#tabs.get(tabId);
+	#detachIfUnheld(tabKey: string, reconnectOnFailure = false): void {
+		if (this.#sessionHolders(tabKey).length > 0) return;
+		const tab = this.#tabs.get(tabKey);
 		if (!tab?.attached) return;
 		if (tab.detaching) return;
 		tab.reattachedAfterDetach = false;
-		const ext = this.#ext;
-		const done = this.#rpc({ op: "detach", tabId })
+		const inst = this.#instances.get(tab.instanceId);
+		const ext = inst?.socket;
+		if (!inst || !ext) return;
+		const done = this.#rpc({ op: "detach", tabId: tab.tabId }, inst)
 			.then(() => {
 				tab.attached = false;
 				tab.forceFreshRootBeforeReplay = false;
@@ -4255,13 +4463,13 @@ export class RelayBridge {
 			})
 			.catch(err => {
 				this.#log("detach failed", {
-					tabId,
+					tabKey,
 					error: err instanceof Error ? err.message : String(err),
 				});
 				// Recovery already failed and this best-effort cleanup could not
 				// confirm detachment either. Force the extension into its disconnected
 				// orphan-sweep path so a surviving debugger attachment is retried.
-				if (reconnectOnFailure && this.#ext === ext && ext) {
+				if (reconnectOnFailure && inst.socket === ext) {
 					ext.close();
 					this.extClosed(ext);
 				}
@@ -4281,17 +4489,17 @@ export class RelayBridge {
 	}
 
 	/** Connections currently holding any session on a tab. */
-	#sessionHolders(tabId: number): CdpConnection[] {
+	#sessionHolders(tabKey: string): CdpConnection[] {
 		const out: CdpConnection[] = [];
 		for (const conn of this.#conns.values()) {
-			if (conn.sessionsForTab(tabId).length > 0) out.push(conn);
+			if (conn.sessionsForTab(tabKey).length > 0) out.push(conn);
 		}
 		return out;
 	}
 
 	#emitTabAttached(conn: CdpConnection, tab: TabState): void {
-		if (conn.sessionsForTab(tab.tabId, "tab").length > 0) return;
-		const sessionId = this.#mintSession(conn, "tab", tab.tabId);
+		if (conn.sessionsForTab(tab.tabKey, "tab").length > 0) return;
+		const sessionId = this.#mintSession(conn, "tab", tab);
 		this.#emit(conn, "Target.attachedToTarget", {
 			sessionId,
 			targetInfo: this.#tabInfo(tab, true),
@@ -4304,10 +4512,11 @@ export class RelayBridge {
 		// prevents a replacement attach racing either operation.
 		while (tab.detaching) await tab.detaching;
 		if (tab.attached) return true;
-		if (tab.banned || !this.#ext) return false;
+		const inst = this.#instances.get(tab.instanceId);
+		if (tab.banned || !inst?.socket) return false;
 		if (tab.attaching) return await tab.attaching;
-		const attachExt = this.#ext;
-		const attempt = this.#rpc({ op: "attach", tabId: tab.tabId })
+		const attachExt = inst.socket;
+		const attempt = this.#rpc({ op: "attach", tabId: tab.tabId }, inst)
 			.then(() => {
 				tab.attached = true;
 				tab.reattachedAfterDetach = true;
@@ -4315,7 +4524,7 @@ export class RelayBridge {
 			})
 			.catch(err => {
 				this.#log("attach failed", {
-					tabId: tab.tabId,
+					tabKey: tab.tabKey,
 					url: tab.url,
 					error: err instanceof Error ? err.message : String(err),
 				});
@@ -4339,13 +4548,16 @@ export class RelayBridge {
 
 	#eligible(tab: TabState): boolean {
 		if (tab.banned) return false;
+		// A browser whose extension socket is gone cannot be driven; hide its
+		// tabs from discovery until the instance reconnects.
+		if (!this.#instances.get(tab.instanceId)?.socket) return false;
 		if (!tab.url) return true;
 		return !INELIGIBLE_URL.test(tab.url);
 	}
 
 	#tabInfo(tab: TabState, attached: boolean): TargetInfo {
 		return {
-			targetId: tabTargetId(tab.tabId),
+			targetId: tabTargetIdFromKey(tab.tabKey),
 			type: "tab",
 			title: tab.title,
 			url: tab.url || "about:blank",
@@ -4356,7 +4568,7 @@ export class RelayBridge {
 
 	#pageInfo(tab: TabState, attached: boolean): TargetInfo {
 		return {
-			targetId: pageTargetId(tab.tabId),
+			targetId: pageTargetIdFromKey(tab.tabKey),
 			type: "page",
 			title: tab.title,
 			url: tab.url || "about:blank",
@@ -4386,38 +4598,38 @@ export class RelayBridge {
 	}
 
 	/**
-	 * Resolve once the current extension socket completes its hello handshake, or
-	 * immediately if the socket dropped (the caller re-checks and either proceeds
-	 * or errors). Used to hold a surviving session's command through the window
-	 * between a reconnect opening and its hello landing.
+	 * Resolve once a pending extension socket completes its hello handshake, or
+	 * immediately if every pending socket dropped. The caller re-checks its tab's
+	 * instance after waking.
 	 */
 	#awaitHello(): Promise<void> {
-		if (this.#extInfo || !this.#ext) return Promise.resolve();
+		if (this.#helloTimers.size === 0) return Promise.resolve();
 		const { promise, resolve } = Promise.withResolvers<void>();
 		this.#helloWaiters.push(resolve);
 		return promise;
 	}
 
 	/**
-	 * Hold until a tab is safe to forward to: the current extension socket has
+	 * Hold until a tab is safe to forward to: its extension socket has
 	 * completed its hello (recovery bookkeeping has run) and any armed debugger
 	 * reattach has settled. Loops because a socket can be replaced mid-wait —
 	 * awaiting a single hello/attach pair would still race the *next* socket's
-	 * chrome.debugger.attach(). Each iteration re-reads `#extInfo`/`tab.attaching`
+	 * chrome.debugger.attach(). Each iteration re-reads the instance/tab state
 	 * against the latest socket; it settles once neither a pending hello nor a
 	 * pending attach remains (or the extension is gone, in which case the caller's
 	 * RPC fails fast rather than hanging).
 	 */
-	async #awaitTabReady(tabId: number): Promise<void> {
+	async #awaitTabReady(tabKey: string): Promise<void> {
 		// Bounded so a pathological reconnect storm can't spin forever; each real
 		// swap resolves one hello + one attach, so this comfortably exceeds any
 		// realistic burst before falling through to let the RPC surface the error.
 		for (let i = 0; i < 100; i++) {
-			if (this.#ext && !this.#extInfo) {
+			const tab = this.#tabs.get(tabKey);
+			const inst = tab ? this.#instances.get(tab.instanceId) : undefined;
+			if ((!inst?.socket || !inst.info) && this.#helloTimers.size > 0) {
 				await this.#awaitHello();
 				continue;
 			}
-			const tab = this.#tabs.get(tabId);
 			if (tab?.attaching) {
 				await tab.attaching;
 				continue;
@@ -4430,26 +4642,33 @@ export class RelayBridge {
 		}
 	}
 
-	#rpc(req: RelayRpcRequest, timeoutMs = RPC_TIMEOUT_MS): Promise<unknown> {
-		const ext = this.#ext;
+	/** The extension instance a tab belongs to; throws if the browser vanished. */
+	#instanceFor(tab: TabState): ExtInstance {
+		const inst = this.#instances.get(tab.instanceId);
+		if (!inst) throw new Error("relay extension is not connected");
+		return inst;
+	}
+
+	#rpc(req: RelayRpcRequest, inst: ExtInstance, timeoutMs = RPC_TIMEOUT_MS): Promise<unknown> {
+		const ext = inst.socket;
 		if (!ext) return Promise.reject(new Error("relay extension is not connected"));
 		const id = ++this.#rpcSeq;
 		const { promise, resolve, reject } = Promise.withResolvers<unknown>();
 		const timer = setTimeout(() => {
-			this.#pendingRpc.delete(id);
+			this.#pendingRpc.delete(`${inst.instanceId}:${id}`);
 			const error = new ExtensionRpcTimeoutError(`extension rpc '${req.op}' timed out after ${timeoutMs}ms`);
 			reject(error);
 			// Only bridge-managed root mutations need a transport reset after an
 			// ambiguous timeout. Ordinary forwarded commands (notably a long-running
 			// Runtime.evaluate with awaitPromise) may legitimately exceed this local
-			// deadline; recycling the shared extension socket for those commands would
-			// interrupt unrelated tabs without making the timed-out operation safer.
-			if (this.#rpcTimeoutNeedsRecovery(req) && this.#ext === ext) {
+			// deadline; recycling one browser instance for those commands would
+			// interrupt unrelated tabs in that browser without making the operation safer.
+			if (this.#rpcTimeoutNeedsRecovery(req) && inst.socket === ext) {
 				ext.close();
 				this.extClosed(ext);
 			}
 		}, timeoutMs);
-		this.#pendingRpc.set(id, { resolve, reject, timer });
+		this.#pendingRpc.set(`${inst.instanceId}:${id}`, { resolve, reject, timer, req });
 		ext.send(JSON.stringify({ t: "rpc", id, ...req } satisfies RelayToExtMessage));
 		return promise;
 	}

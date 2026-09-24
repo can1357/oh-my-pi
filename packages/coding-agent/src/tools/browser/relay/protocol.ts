@@ -63,6 +63,15 @@ export type ExtToRelayMessage =
 			recoveryFrameLoaderIds?: Record<string, Record<string, string>>;
 			/** Attached roots dirtied by guard-only CDP state and requiring detach + replay before reuse. */
 			freshRootRequiredTabIds?: number[];
+			/**
+			 * Stable per-install browser identity (persisted in `chrome.storage.local`).
+			 * Lets the relay serve several browsers at once: tabs are namespaced per
+			 * instance, and a service-worker restart with the same id reuses the
+			 * existing tab registry instead of replacing another browser's connection.
+			 * Absent on older extensions, which share one legacy instance with
+			 * latest-wins socket replacement.
+			 */
+			instanceId?: string;
 	  }
 	| {
 			t: "cdpEvent";

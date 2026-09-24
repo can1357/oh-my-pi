@@ -1949,6 +1949,37 @@ mod tests {
 		(result, output)
 	}
 
+	/// Shell initialization must recover when a long-running host's inherited
+	/// working directory is deleted. This runs in a child process because cwd is
+	/// process-global.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn shell_initializes_after_process_cwd_is_deleted() {
+		const MARKER: &str = "PI_SHELL_TEST_DELETED_CWD";
+		if std::env::var_os(MARKER).is_none() {
+			run_isolated_kill_test(
+				"shell::tests::shell_initializes_after_process_cwd_is_deleted",
+				MARKER,
+				false,
+			)
+			.await;
+			return;
+		}
+
+		let dir = tempfile::tempdir().expect("temporary cwd");
+		std::env::set_current_dir(dir.path()).expect("enter temporary cwd");
+		std::fs::remove_dir(dir.path()).expect("delete process cwd");
+
+		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let session = create_session(&config)
+			.await
+			.expect("initialize shell after deleted cwd");
+		let fallback = std::env::var_os("HOME")
+			.map(std::path::PathBuf::from)
+			.unwrap_or_else(|| "/".into());
+		assert_eq!(session.shell.working_dir(), fallback);
+	}
+
 	/// Native Windows tools write the ANSI code page to pipes. On a Chinese
 	/// system that is GBK; treating it as UTF-8 used to turn `echo 中文` into
 	/// replacement characters.
