@@ -82,7 +82,11 @@ export class AuthStorage {
 
 	constructor(store: AuthCredentialStore, options: AuthStorageOptions = {}) {
 		const overrides = new KeyOverrides(options.configValueResolver);
-		const policies = new AccountPolicies(options.accountPolicies ?? [], options.defaultReservePct);
+		const policies = new AccountPolicies(
+			options.accountPolicies ?? [],
+			options.defaultReservePct,
+			options.hotWindowFraction,
+		);
 		const blockHealth = new BlockStoreHealth(options.sourceLabel);
 		const strategies = options.rankingStrategyResolver ?? defaultRankingStrategy;
 		const pool = new CredentialPool(store, {

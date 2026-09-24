@@ -4037,6 +4037,37 @@ describe("AuthStorage claude oauth ranking", () => {
 		const counts = await countApiKeySelections(authStorage, "anthropic", "claude-hot-guard", 100);
 		expectExclusivePreference(counts, "api-acct-cool", "api-acct-urgent-hot");
 	});
+	test("does not demote an account whose 5h window is 90% used when hotWindowFraction is 1.0", async () => {
+		if (!store) throw new Error("test setup failed");
+		authStorage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "anthropic" ? usageProvider : undefined),
+			hotWindowFraction: 1.0,
+		});
+		await authStorage.credentials.set("anthropic", [
+			{ type: "oauth", ...createCredential("acct-urgent-hot", "urgent@example.com") },
+			{ type: "oauth", ...createCredential("acct-cool", "cool@example.com") },
+		]);
+
+		usageByAccount.set(
+			"acct-urgent-hot",
+			createClaudeUsageReport({
+				accountId: "acct-urgent-hot",
+				primary: { usedFraction: 0.9, resetInMs: 3 * HOUR_MS },
+				secondary: { usedFraction: 0.9, resetInMs: 30 * 60 * 1000 },
+			}),
+		);
+		usageByAccount.set(
+			"acct-cool",
+			createClaudeUsageReport({
+				accountId: "acct-cool",
+				primary: { usedFraction: 0.2, resetInMs: 4 * HOUR_MS },
+				secondary: { usedFraction: 0.5, resetInMs: 6 * 24 * HOUR_MS },
+			}),
+		);
+
+		const counts = await countApiKeySelections(authStorage, "anthropic", "claude-hot-guard-disabled", 100);
+		expectExclusivePreference(counts, "api-acct-urgent-hot", "api-acct-cool");
+	});
 
 	test("skips exhausted account and picks healthy", async () => {
 		if (!authStorage) throw new Error("test setup failed");

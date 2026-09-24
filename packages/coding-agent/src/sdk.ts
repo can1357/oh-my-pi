@@ -789,6 +789,7 @@ export async function discoverAuthStorage(
 		authStorageOptions: {
 			...discoveryOptions.authStorageOptions,
 			defaultReservePct: discoveryOptions.authStorageOptions?.defaultReservePct ?? policy.defaultReservePct,
+			hotWindowFraction: discoveryOptions.authStorageOptions?.hotWindowFraction ?? policy.hotWindowFraction,
 		},
 	});
 }

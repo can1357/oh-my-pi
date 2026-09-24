@@ -21,6 +21,7 @@ import {
 	type AuthAccountPolicies,
 	AuthStorage,
 	type AuthStorageOptions,
+	DEFAULT_HOT_WINDOW_FRACTION,
 	DEFAULT_USAGE_RESERVE_PCT,
 } from "../auth-storage";
 import * as AIError from "../error";
@@ -83,6 +84,7 @@ interface ConfigSnapshot {
 	token?: string;
 	accountPolicies?: unknown;
 	usageReservePct?: unknown;
+	hotWindowFraction?: unknown;
 }
 
 /**
@@ -180,6 +182,7 @@ function parseAuthAccountPolicies(value: unknown): AuthAccountPolicies {
 			},
 			...(typeof policy.priority === "number" ? { priority: policy.priority } : {}),
 			...(typeof policy.reservePct === "number" ? { reservePct: policy.reservePct } : {}),
+			...(typeof policy.hotWindowFraction === "number" ? { hotWindowFraction: policy.hotWindowFraction } : {}),
 		};
 	});
 }
@@ -190,6 +193,13 @@ function parseUsageReservePct(value: unknown): number {
 		throw new AIError.ConfigurationError("retry.usageReservePct must be a finite number");
 	}
 	return reservePct;
+}
+function parseHotWindowFraction(value: unknown): number {
+	const fraction = value === undefined ? DEFAULT_HOT_WINDOW_FRACTION : value;
+	if (typeof fraction !== "number" || !Number.isFinite(fraction) || fraction < 0 || fraction > 1) {
+		throw new AIError.ConfigurationError("auth.hotWindowFraction must be a finite number between 0 and 1");
+	}
+	return fraction;
 }
 
 async function readConfigYaml(agentDir: string): Promise<ConfigSnapshot> {
@@ -220,6 +230,7 @@ async function readConfigYaml(agentDir: string): Promise<ConfigSnapshot> {
 			token: readDottedString(record, "auth.broker.token"),
 			accountPolicies: readDottedValue(record, "auth.accountPolicies"),
 			usageReservePct: readDottedValue(record, "retry.usageReservePct"),
+			hotWindowFraction: readDottedValue(record, "auth.hotWindowFraction"),
 		};
 	}
 	return {};
@@ -228,12 +239,14 @@ async function readConfigYaml(agentDir: string): Promise<ConfigSnapshot> {
 export interface AuthAccountPolicyConfig {
 	accountPolicies: AuthAccountPolicies;
 	defaultReservePct: number;
+	hotWindowFraction: number;
 }
 
 export interface LoadAuthAccountPolicyConfigOptions {
 	agentDir?: string;
 	accountPolicies?: unknown;
 	usageReservePct?: unknown;
+	hotWindowFraction?: unknown;
 }
 
 /** Load and strictly validate account-selection policy configuration, with main-config fallback. */
@@ -241,7 +254,10 @@ export async function loadAuthAccountPolicyConfig(
 	options: LoadAuthAccountPolicyConfigOptions = {},
 ): Promise<AuthAccountPolicyConfig> {
 	const agentDir = options.agentDir ?? getAgentDir();
-	const needsMainConfigFallback = options.accountPolicies === undefined || options.usageReservePct === undefined;
+	const needsMainConfigFallback =
+		options.accountPolicies === undefined ||
+		options.usageReservePct === undefined ||
+		options.hotWindowFraction === undefined;
 	const snapshot = needsMainConfigFallback ? await readConfigYaml(agentDir) : undefined;
 	return {
 		accountPolicies: parseAuthAccountPolicies(
@@ -249,6 +265,9 @@ export async function loadAuthAccountPolicyConfig(
 		),
 		defaultReservePct: parseUsageReservePct(
 			options.usageReservePct === undefined ? snapshot?.usageReservePct : options.usageReservePct,
+		),
+		hotWindowFraction: parseHotWindowFraction(
+			options.hotWindowFraction === undefined ? snapshot?.hotWindowFraction : options.hotWindowFraction,
 		),
 	};
 }
@@ -374,10 +393,11 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 		agentDir,
 		configValueResolver: options.configValueResolver,
 	});
-	const { accountPolicies, defaultReservePct } = await loadAuthAccountPolicyConfig({
+	const { accountPolicies, defaultReservePct, hotWindowFraction } = await loadAuthAccountPolicyConfig({
 		agentDir,
 		accountPolicies: options.accountPolicies,
 		usageReservePct: options.authStorageOptions?.defaultReservePct,
+		hotWindowFraction: options.authStorageOptions?.hotWindowFraction,
 	});
 
 	if (brokerConfig) {
@@ -443,6 +463,7 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 			sourceLabel: options.sourceLabel ?? `broker ${brokerConfig.url}`,
 			accountPolicies,
 			defaultReservePct,
+			hotWindowFraction,
 		});
 		await storage.credentials.reload();
 		return storage;
@@ -455,6 +476,7 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 		sourceLabel: options.sourceLabel ?? `local ${dbPath}`,
 		accountPolicies,
 		defaultReservePct,
+		hotWindowFraction,
 	});
 	await storage.credentials.reload();
 	return storage;
