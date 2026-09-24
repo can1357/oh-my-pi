@@ -17,6 +17,7 @@ import {
 	getXAICliBillingHeaders,
 } from "../registry/oauth/xai-oauth";
 import type {
+	CredentialRankingStrategy,
 	UsageAmount,
 	UsageFetchContext,
 	UsageFetchParams,
@@ -438,5 +439,24 @@ export const xaiOauthUsageProvider: UsageProvider = {
 			},
 			raw,
 		};
+	},
+};
+
+export const xaiOauthRankingStrategy: CredentialRankingStrategy = {
+	scopeLimits(report) {
+		return report.limits.filter(
+			limit => limit.id === `${PROVIDER_ID}:credits:1w` || limit.id === `${PROVIDER_ID}:included:1mo`,
+		);
+	},
+	findWindowLimits(report) {
+		const credits = report.limits.find(limit => limit.id === `${PROVIDER_ID}:credits:1w`);
+		const included = report.limits.find(limit => limit.id === `${PROVIDER_ID}:included:1mo`);
+		return {
+			secondary: credits ?? included,
+		};
+	},
+	windowDefaults: {
+		primaryMs: 5 * 60 * 60 * 1000,
+		secondaryMs: 7 * 24 * 60 * 60 * 1000,
 	},
 };
