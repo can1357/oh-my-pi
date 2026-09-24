@@ -188,6 +188,7 @@
 
 ### Added
 
+- Added per-advisor `subagents` eligibility to `WATCHDOG.yml` and `/advisor configure`: `false` keeps an advisor main-session-only; unset or `true` permits it in subagent sessions already opted in through frontmatter or `task.agentAdvisor`. Session-level and per-advisor enable switches remain authoritative ([#7168](https://github.com/can1357/oh-my-pi/pull/7168) by [@metaphorics](https://github.com/metaphorics)).
 - Added `find` tool for semantic workspace searching, allowing agents to locate behaviors and symbols using natural language
 - Added `find` CLI command for performing semantic workspace searches
 - Added batch evaluation with judge_batch(states, questions) / judgeBatch(...), including bounded background execution, incremental result and status access, per-item failure reporting, and the ability to wait for or reattach to jobs across turns or after a reset.

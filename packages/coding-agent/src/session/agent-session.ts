@@ -415,7 +415,9 @@ import { TodoTracker, type TodoTrackerHost } from "./todo-tracker";
 import { TtsrCoordinator, type TtsrCoordinatorHost } from "./ttsr-coordinator";
 
 const PLAN_MODE_REMINDER_MAX = 3;
+
 const POST_PROMPT_DRAIN_TIMEOUT_MS = 5_000;
+
 const AGENT_START_POLICY_MAX_ATTEMPTS = 3;
 
 /** A failed preparation, not a provider failure: the ordinary input can still be restored. */
@@ -515,7 +517,9 @@ type ActiveAgentContinue = {
 };
 
 type SessionTitleSource = "auto" | "user";
+
 type SessionNameTrigger = "replan";
+
 type SetSessionNameWithTrigger = (
 	name: string,
 	source?: SessionTitleSource,
@@ -523,6 +527,7 @@ type SetSessionNameWithTrigger = (
 ) => Promise<boolean>;
 
 const kPersistedSessionEntryId = Symbol("persistedSessionEntryId");
+
 type PersistedAssistantMessage = AssistantMessage & { [kPersistedSessionEntryId]?: string };
 
 /**
@@ -555,6 +560,7 @@ function cloneMessageEndNotification(message: AgentMessage): AgentMessage {
 }
 
 const INTERRUPTED_THINKING_MIN_CHARS = 60;
+
 const SESSION_CWD_CHANGE_REJECTED = Symbol("sessionCwdChangeRejected");
 
 /**
@@ -1910,6 +1916,7 @@ export class AgentSession {
 		};
 		this.#advisors = new SessionAdvisors(advisorsHost, {
 			enabled: this.settings.get("advisor.enabled"),
+			agentKind: config.agentKind,
 			tools: config.advisorTools,
 			createGrepTool: config.advisorCreateGrepTool,
 			createEditTool: config.advisorCreateEditTool,

@@ -43,8 +43,18 @@ const advisorEntrySchema = type({
 	"tools?": "string[]",
 	"instructions?": "string",
 	"enabled?": "boolean",
+	"subagents?": "boolean",
 	"maxNotesPerUpdate?": "number",
 });
+
+/**
+ * Filter an already-enabled session's roster without overriding its opt-in.
+ * Main sessions retain the full roster; subagent sessions exclude only advisors
+ * explicitly marked main-session-only. The per-advisor `enabled` gate is separate.
+ */
+export function advisorRunsForAgentKind(config: AdvisorConfig, agentKind: "main" | "sub"): boolean {
+	return agentKind === "main" || config.subagents !== false;
+}
 
 type AdvisorYamlEntry = typeof advisorEntrySchema.infer;
 
@@ -219,6 +229,7 @@ export async function discoverAdvisorConfigs(cwd: string, agentDir?: string): Pr
 						? Math.trunc(entry.maxNotesPerUpdate)
 						: undefined,
 				enabled: entry.enabled,
+				subagents: entry.subagents,
 				instructions: entryInstructions,
 			});
 		}
@@ -301,6 +312,7 @@ export async function loadWatchdogConfigFile(filePath: string): Promise<Watchdog
 		if (a.tools !== undefined) advisor.tools = [...a.tools];
 		if (a.instructions?.trim()) advisor.instructions = a.instructions;
 		if (a.enabled !== undefined) advisor.enabled = a.enabled;
+		if (a.subagents !== undefined) advisor.subagents = a.subagents;
 		if (typeof a.maxNotesPerUpdate === "number" && Number.isFinite(a.maxNotesPerUpdate) && a.maxNotesPerUpdate >= 1) {
 			advisor.maxNotesPerUpdate = Math.trunc(a.maxNotesPerUpdate);
 		}
@@ -371,6 +383,7 @@ export function serializeWatchdogConfig(doc: WatchdogConfigDoc): string {
 				appendYamlString(lines, "    ", "instructions", advisor.instructions);
 			}
 			if (advisor.enabled !== undefined) lines.push(`    enabled: ${advisor.enabled}`);
+			if (advisor.subagents !== undefined) lines.push(`    subagents: ${advisor.subagents}`);
 			if (
 				typeof advisor.maxNotesPerUpdate === "number" &&
 				Number.isFinite(advisor.maxNotesPerUpdate) &&

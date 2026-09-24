@@ -57,6 +57,7 @@ import {
 	type AdvisorRuntimeStatus,
 	type AdvisorSeverity,
 	AdvisorTranscriptRecorder,
+	advisorRunsForAgentKind,
 	advisorTranscriptFilename,
 	buildAdvisorQuarantineSourceText,
 	formatAdvisorBatchContent,
@@ -207,6 +208,7 @@ export function planAdvisorUsageLimitWait(args: {
 	if (retry.maxDelayMs > 0 && waitMs > retry.maxDelayMs) return undefined;
 	return waitMs;
 }
+
 /** Advisor statistics for the advisor status command. */
 export interface AdvisorStats {
 	configured: boolean;
@@ -270,6 +272,7 @@ interface ActiveAdvisor {
 	usageLimitRetries: number;
 	signature: string;
 }
+
 interface AdvisorCompactionSummaryMessage extends CompactionSummaryMessage {
 	firstKeptEntryId?: string;
 	advisorUsageAnchorStartIndex?: number;
@@ -295,6 +298,8 @@ interface AdvisorRuntimeDescriptor {
 /** Inputs that configure the advisor roster owned by a session. */
 export interface SessionAdvisorsOptions {
 	enabled: boolean;
+	/** Session kind is resolved before construction-time roster filtering. */
+	agentKind?: "main" | "sub";
 	tools?: AgentTool[];
 	/**
 	 * Build a `grep` honoring a Cursor `pi_grep` frame's own context width and
@@ -420,6 +425,7 @@ export interface AdvisorStatusOverviewEntry {
 /** Owns advisor runtimes, delivery policy, context maintenance, and status reporting. */
 export class SessionAdvisors {
 	readonly #host: SessionAdvisorsHost;
+	readonly #agentKind: "main" | "sub";
 	#advisorEnabled: boolean;
 	#advisorTools: AgentTool[] | undefined;
 	#advisorCreateGrepTool: SessionAdvisorsOptions["createGrepTool"];
@@ -461,6 +467,7 @@ export class SessionAdvisors {
 
 	constructor(host: SessionAdvisorsHost, options: SessionAdvisorsOptions) {
 		this.#host = host;
+		this.#agentKind = options.agentKind ?? "main";
 		this.#advisorEnabled = options.enabled;
 		this.#advisorTools = options.tools;
 		this.#advisorCreateGrepTool = options.createGrepTool;
@@ -865,9 +872,9 @@ export class SessionAdvisors {
 				slug = candidate;
 				usedSlugs.add(slug);
 			}
-			// Per-advisor toggle: skip disabled advisors but keep them in the
-			// status map so they show `○` rather than disappearing.
-			if (config.enabled === false) {
+			// Keep disabled and main-session-only advisors visible as paused.
+			// Session-level opt-in remains enforced by #buildAdvisorRuntime.
+			if (config.enabled === false || !advisorRunsForAgentKind(config, this.#agentKind)) {
 				this.#advisorStatuses.set(slug, { name: config.name, status: "paused" });
 				continue;
 			}

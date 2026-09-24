@@ -48,6 +48,8 @@ export interface AdvisorConfig {
 	instructions?: string;
 	/** Defaults to true; false retains the advisor in the roster and status displays without building its runtime. */
 	enabled?: boolean;
+	/** Controls eligibility inside an already-advised subagent session; unset inherits session eligibility. */
+	subagents?: boolean;
 	/** Maximum non-blocker notes per advisor prompt update (default 4); blockers are exempt. */
 	maxNotesPerUpdate?: number;
 }
@@ -184,6 +186,10 @@ function commitTools(
 function formatAdvisorTools(tools: readonly string[] | undefined, emptyLabel: string): string {
 	if (tools === undefined) return "read, grep, glob (default)";
 	return tools.length > 0 ? tools.join(", ") : emptyLabel;
+}
+
+function formatAdvisorSubagents(subagents: boolean | undefined): string {
+	return subagents === undefined ? "inherit (per-agent)" : subagents ? "● on" : "○ off";
 }
 
 /** Soft-wrap plain text to `width`, returning at least one (possibly empty) line. */
@@ -407,6 +413,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 			theme.bold(advisor.name || "(unnamed)"),
 			"",
 			`${theme.fg("dim", "Enabled:")} ${advisor.enabled === false ? "○ off" : "● on"}`,
+			`${theme.fg("dim", "Subagents:")} ${formatAdvisorSubagents(advisor.subagents)}`,
 			`${theme.fg("dim", "Model:")} ${model}`,
 			`${theme.fg("dim", "Tools:")} ${tools}`,
 			"",
@@ -476,6 +483,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 			advisor.tools === undefined &&
 			!advisor.instructions?.trim() &&
 			advisor.enabled !== false &&
+			advisor.subagents === undefined &&
 			advisor.maxNotesPerUpdate === undefined
 		);
 	}
@@ -483,7 +491,8 @@ export class AdvisorConfigOverlayComponent implements Component {
 	#advisorSummary(advisor: AdvisorConfig): string {
 		const model = advisor.model?.trim() || this.#defaultModelLabel || "advisor role default";
 		const tools = formatAdvisorTools(advisor.tools, "no tools");
-		return `${model} · ${tools}`;
+		const summary = `${model} · ${tools}`;
+		return advisor.subagents === undefined ? summary : `${summary} · subagents: ${advisor.subagents ? "on" : "off"}`;
 	}
 
 	#showList(): void {
@@ -582,6 +591,11 @@ export class AdvisorConfigOverlayComponent implements Component {
 				label: "Enabled",
 				description: advisor.enabled === false ? "○ off" : "● on",
 			},
+			{
+				value: "toggleSubagents",
+				label: "Subagents",
+				description: formatAdvisorSubagents(advisor.subagents),
+			},
 			{ value: "model", label: "Model", description: modelDescription },
 		];
 		if (advisor.model?.trim()) {
@@ -604,6 +618,14 @@ export class AdvisorConfigOverlayComponent implements Component {
 			case "toggleEnabled": {
 				const a = this.#doc.advisors[index];
 				a.enabled = a.enabled === false ? undefined : false;
+				this.#dirty = true;
+				this.#showDetail(index);
+				return;
+			}
+			case "toggleSubagents": {
+				const advisor = this.#doc.advisors[index];
+				// Inherit → on → off → inherit; none of these enables the session.
+				advisor.subagents = advisor.subagents === undefined ? true : advisor.subagents ? false : undefined;
 				this.#dirty = true;
 				this.#showDetail(index);
 				return;
