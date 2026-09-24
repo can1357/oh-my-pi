@@ -167,6 +167,19 @@ describe("YieldTool", () => {
 		expect(result.details).toEqual({ data: undefined, status: "aborted", error: "blocked" });
 	});
 
+	it("unwraps exact legacy result envelopes without accepting extra wrapper fields", async () => {
+		const tool = new YieldTool(createSession());
+		expect((await tool.execute("legacy-data", { result: { data: { answer: 42 } } })).details?.data).toEqual({
+			answer: 42,
+		});
+		expect((await tool.execute("legacy-error", { result: { error: "blocked" } })).details).toMatchObject({
+			status: "aborted",
+			error: "blocked",
+		});
+		await expect(tool.execute("legacy-extra", { result: { data: 1, extra: 2 } })).rejects.toThrow();
+		await expect(tool.execute("outer-extra", { result: { data: 1 }, extra: 2 })).rejects.toThrow();
+	});
+
 	it("accepts typed success without data as a last-turn result", async () => {
 		const tool = new YieldTool(createSession());
 		const result = await tool.execute("call-last-turn", { type: "summary" } as never);
@@ -204,6 +217,11 @@ describe("YieldTool", () => {
 		await expect(tool.execute("call-empty-last-turn", { type: "result" } as never)).rejects.toThrow(
 			/no text \(thinking only\)/,
 		);
+	});
+
+	it("tells a thinking-only last turn exactly how to submit data", async () => {
+		const tool = new YieldTool(createSession({ getLastAssistantText: () => undefined }));
+		await expect(tool.execute("thinking-only", { type: "result" })).rejects.toThrow(/Pass `data` explicitly/);
 	});
 
 	it("rejects an empty incremental last-turn yield before it can mask an empty finalize", async () => {
@@ -277,6 +295,16 @@ describe("YieldTool", () => {
 		);
 		const result = await tool.execute("call-string-data", { data: '{"n":4}' } as never);
 		expect(result.details).toEqual({ data: { n: 4 }, status: "success", error: undefined });
+	});
+
+	it("distinguishes malformed JSON strings from parsed values that fail the schema", async () => {
+		const outputSchema = { type: "object", properties: { n: { type: "number" } }, required: ["n"] };
+		await expect(
+			new YieldTool(createSession({ outputSchema })).execute("invalid-json", { data: '{"n":' }),
+		).rejects.toThrow(/invalid JSON/);
+		await expect(
+			new YieldTool(createSession({ outputSchema })).execute("invalid-shape", { data: '{"n":"no"}' }),
+		).rejects.toThrow(/decoded JSON.*n.*number/);
 	});
 
 	it("arg validation serializes object payloads for string-typed output fields", () => {
@@ -444,6 +472,70 @@ describe("YieldTool", () => {
 				data: { title: "only-title" },
 			} as never),
 		).rejects.toThrow(/Section "findings" does not match schema.*body/);
+	});
+
+	it("accepts an array of individually valid findings and assembles them flat", async () => {
+		const outputSchema = {
+			type: "object",
+			properties: {
+				findings: {
+					type: "array",
+					items: {
+						type: "object",
+						properties: { title: { type: "string" } },
+						required: ["title"],
+						additionalProperties: false,
+					},
+				},
+			},
+			required: ["findings"],
+		};
+		const tool = new YieldTool(createSession({ outputSchema }));
+		const first = await tool.execute("findings-batch", {
+			type: ["findings"],
+			data: [{ title: "one" }, { title: "two" }],
+		});
+		const second = await tool.execute("findings-single", { type: ["findings"], data: { title: "three" } });
+		const assembled = assembleYieldResult(
+			[first.details!, second.details!],
+			undefined,
+			arrayValuedLabels(outputSchema),
+		);
+		expect(assembled?.data).toEqual({ findings: [{ title: "one" }, { title: "two" }, { title: "three" }] });
+		expect(buildOutputValidator(outputSchema).validator?.validate(assembled?.data).success).toBe(true);
+		const encoded = await new YieldTool(createSession({ outputSchema })).execute("findings-encoded", {
+			type: ["findings"],
+			data: '[{"title":"encoded"}]',
+		});
+		expect(encoded.details?.data).toEqual([{ title: "encoded" }]);
+		await expect(
+			new YieldTool(createSession({ outputSchema })).execute("findings-empty", {
+				type: ["findings"],
+				data: [],
+			}),
+		).rejects.toThrow(/at least one item/);
+		await expect(
+			tool.execute("findings-invalid", {
+				type: ["findings"],
+				data: [{ title: "valid" }, { title: 3 }],
+			}),
+		).rejects.toThrow(/findings.*1.*title/);
+		const scalar = new YieldTool(
+			createSession({
+				outputSchema: { type: "object", properties: { verdict: { type: "string" } } },
+			}),
+		);
+		await expect(scalar.execute("scalar-array", { type: ["verdict"], data: ["yes"] })).rejects.toThrow(
+			/Section "verdict" does not match schema/,
+		);
+		const primitiveItems = new YieldTool(
+			createSession({
+				outputSchema: { type: "object", properties: { notes: { type: "array", items: { type: "string" } } } },
+			}),
+		);
+		await expect(primitiveItems.execute("primitive-batch", { type: ["notes"], data: ["one"] })).rejects.toThrow(
+			/Section "notes" does not match schema/,
+		);
 	});
 
 	it("leaves user-defined section labels unconstrained", async () => {
@@ -1353,6 +1445,30 @@ describe("YieldTool", () => {
 		await expect(tool.execute("call-invalid-after-valid", { data: { token: "ab" } } as never)).rejects.toThrow(
 			"Output does not match schema",
 		);
+	});
+
+	it("names missing and extra section fields with a minimal valid shape", async () => {
+		const tool = new YieldTool(
+			createSession({
+				outputSchema: {
+					type: "object",
+					properties: {
+						findings: {
+							type: "array",
+							items: {
+								type: "object",
+								properties: { title: { type: "string" }, body: { type: "string" } },
+								required: ["title", "body"],
+								additionalProperties: false,
+							},
+						},
+					},
+				},
+			}),
+		);
+		await expect(
+			tool.execute("bad-fields", { type: ["findings"], data: { title: "x", bogus: true } }),
+		).rejects.toThrow(/body.*bogus.*valid shape.*"title".*"body"/);
 	});
 
 	it("rejects nested-array shape mismatches with a retry hint (scout-style JTD)", async () => {

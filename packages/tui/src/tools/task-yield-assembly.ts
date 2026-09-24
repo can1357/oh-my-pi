@@ -112,7 +112,9 @@ export function assembleYieldResult(
 		const resolved = resolveYieldPayload(item, lastAssistantText, labels);
 		missingData ||= resolved.missingData;
 		for (const label of labels) {
-			appendYieldSection(sections, sectionCounts, label, resolved.value, arrayLabels?.has(label) ?? false);
+			const forceArray = arrayLabels?.has(label) ?? false;
+			const values = forceArray && Array.isArray(resolved.value) ? resolved.value : [resolved.value];
+			for (const value of values) appendYieldSection(sections, sectionCounts, label, value, forceArray);
 			hasSections = true;
 		}
 	}
