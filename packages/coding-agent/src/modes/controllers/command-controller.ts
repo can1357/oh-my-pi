@@ -42,7 +42,7 @@ import { renderContextUsage } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import { computeSessionContextBreakdown } from "../../session/context-usage-runtime";
 import { buildHotkeysMarkdown } from "@oh-my-pi/pi-tui/hotkeys-markdown";
 import { buildToolsMarkdown } from "@oh-my-pi/pi-tui/prompt/tools-markdown";
-import type { AsyncJobSnapshotItem } from "../../session/agent-session";
+import type { AsyncJobSnapshot, AsyncJobSnapshotItem } from "../../session/agent-session";
 import type { AuthStorage, OAuthAccountIdentity } from "../../session/auth-storage";
 import type { CompactMode } from "../../session/compact-modes";
 import type { NewSessionOptions } from "../../session/session-entries";
@@ -592,41 +592,9 @@ export class CommandController {
 		this.ctx.presentCommandOutput([new Spacer(1), new Text(info, 1, 0)]);
 	}
 
-	async handleJobsCommand(): Promise<void> {
-		const snapshot = this.ctx.session.getAsyncJobSnapshot({ recentLimit: 5 });
-		if (!snapshot) {
-			this.ctx.showWarning("Async background jobs are unavailable in this session.");
-			return;
-		}
-
-		const now = Date.now();
+	async handleJobsCommand(snapshot: AsyncJobSnapshot): Promise<void> {
 		const lineWidth = Math.max(24, (this.ctx.ui.terminal.columns ?? 100) - 24);
-		let info = `${theme.bold("Background Jobs")}\n\n`;
-		info += `${theme.fg("dim", "Running:")} ${snapshot.running.length}\n`;
-
-		if (snapshot.running.length === 0 && snapshot.recent.length === 0) {
-			info += `\n${theme.fg("dim", "No async jobs yet.")}\n`;
-			this.ctx.presentCommandOutput([new Spacer(1), new Text(info, 1, 0)]);
-			return;
-		}
-
-		if (snapshot.running.length > 0) {
-			info += `\n${theme.bold("Running Jobs")}\n`;
-			for (const job of snapshot.running) {
-				info += `${renderJobLine(job, now)}\n`;
-				info += `  ${theme.fg("dim", truncateJobLabel(job.label, lineWidth))}\n`;
-			}
-		}
-
-		if (snapshot.recent.length > 0) {
-			info += `\n${theme.bold("Recent Jobs")}\n`;
-			for (const job of snapshot.recent) {
-				info += `${renderJobLine(job, now)}\n`;
-				info += `  ${theme.fg("dim", truncateJobLabel(job.label, lineWidth))}\n`;
-			}
-		}
-
-		this.ctx.presentCommandOutput([new Spacer(1), new Text(info.trimEnd(), 1, 0)]);
+		this.ctx.presentCommandOutput([new Spacer(1), new Text(formatJobsSnapshot(snapshot, { lineWidth }), 1, 0)]);
 	}
 
 	async handleUsageCommand(reports?: UsageReport[] | null): Promise<void> {
@@ -1763,6 +1731,36 @@ export class CommandController {
 
 const BAR_WIDTH_MAX = 24;
 const COLUMN_WIDTH_MIN = 4;
+
+/** Shared rows for the one-time report and the prompt-anchored live view. */
+export function formatJobsSnapshot(
+	snapshot: Pick<AsyncJobSnapshot, "running" | "recent">,
+	options: { lineWidth: number; runningOnly?: boolean },
+): string {
+	const { lineWidth, runningOnly = false } = options;
+	const now = Date.now();
+	let info = `${theme.bold("Background Jobs")}\n\n`;
+	info += `${theme.fg("dim", "Running:")} ${snapshot.running.length}\n`;
+
+	if (snapshot.running.length === 0 && (runningOnly || snapshot.recent.length === 0)) {
+		return `${info}\n${theme.fg("dim", runningOnly ? "No active jobs." : "No async jobs yet.")}`;
+	}
+	if (snapshot.running.length > 0) {
+		info += `\n${theme.bold("Running Jobs")}\n`;
+		for (const job of snapshot.running) {
+			info += `${renderJobLine(job, now)}\n`;
+			info += `  ${theme.fg("dim", truncateJobLabel(job.label, lineWidth))}\n`;
+		}
+	}
+	if (!runningOnly && snapshot.recent.length > 0) {
+		info += `\n${theme.bold("Recent Jobs")}\n`;
+		for (const job of snapshot.recent) {
+			info += `${renderJobLine(job, now)}\n`;
+			info += `  ${theme.fg("dim", truncateJobLabel(job.label, lineWidth))}\n`;
+		}
+	}
+	return info.trimEnd();
+}
 
 function renderJobLine(job: AsyncJobSnapshotItem, now: number): string {
 	const duration = formatDuration(Math.max(0, (job.endTime ?? now) - job.startTime));

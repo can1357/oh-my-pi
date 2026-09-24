@@ -121,6 +121,7 @@ import {
 	type ResolvedRoleModel,
 	SHUTDOWN_CONSOLIDATE_BUDGET_MS,
 } from "../session/agent-session";
+import type { AsyncJobSnapshot } from "../session/agent-session-types";
 import type { CompactMode } from "../session/compact-modes";
 import type { ForeignSessionSource } from "../session/foreign-session-store";
 import { HistoryStorage } from "../session/history-storage";
@@ -230,7 +231,7 @@ import { MAGIC_KEYWORDS } from "./magic-keywords";
 import { writeComposerStatusCache, writeComposerWelcomeCache } from "@oh-my-pi/pi-tui/prompt/composer-cache";
 import { BtwController } from "./controllers/btw-controller";
 import { CleanseCommandController } from "./controllers/cleanse-command-controller";
-import { CommandController } from "./controllers/command-controller";
+import { CommandController, formatJobsSnapshot } from "./controllers/command-controller";
 import { EventController } from "./controllers/event-controller";
 import { ExtensionUiController } from "./controllers/extension-ui-controller";
 import { InputController } from "./controllers/input-controller";
@@ -835,6 +836,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	errorBannerContainer: Container;
 	modelCycleContainer: Container;
 	deferredCommandContainer: Container;
+	jobsContainer: Container;
 	editor: CustomEditor;
 	editorContainer: Container;
 	/** Composer attachment band (chip cards) rendered directly above the prompt box. */
@@ -872,6 +874,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#todoAutoClearGeneration = 0;
 	#modelCycleClearTimer: NodeJS.Timeout | undefined;
 	readonly #judgmentBatchProgressHud = new JudgmentBatchProgressHud();
+	#jobsHudTimer: NodeJS.Timeout | undefined;
 	readonly #judgmentBatchProgressClearTimers = new Map<string, NodeJS.Timeout>();
 	#nextAppearanceRequestToken = 1;
 	#appearanceRefreshRequest: { token: TerminalAppearanceRequestToken; deadline: number } | undefined;
@@ -1202,6 +1205,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#cancelModelCycleClearTimer();
 		this.modelCycleContainer.disposeChildren();
 		this.deferredCommandContainer.disposeChildren();
+		this.#closeJobsHud();
 		this.#pendingCommandOutput = [];
 		this.#pendingCommandOutputSessionId = undefined;
 		this.#pendingCommandOutputCommands = 0;
@@ -1366,6 +1370,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.errorBannerContainer = new AnchoredLiveContainer();
 		this.modelCycleContainer = new AnchoredLiveContainer();
 		this.deferredCommandContainer = new AnchoredLiveContainer();
+		this.jobsContainer = new AnchoredLiveContainer();
 		this.editor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		if (eventBus) {
 			this.#eventBusUnsubscribers.push(
@@ -1683,6 +1688,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.errorBannerContainer,
 			this.modelCycleContainer,
 			this.deferredCommandContainer,
+			this.jobsContainer,
 			// Judge batches stay editor-anchored and update independently of eval
 			// transcript output, directly above the working/throughput/title row.
 			this.judgmentBatchProgressContainer,
@@ -5723,6 +5729,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#liveCommandController.dispose();
 		this.#clearJudgmentBatchProgress();
 		this.#cancelTodoAutoClearTimer();
+		this.#closeJobsHud();
 		this.#cancelObserverUiSyncTimer();
 		this.#cancelGoalContinuation();
 		if (this.#sttController) {
@@ -6520,8 +6527,42 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#commandController.handleAdvisorStatusCommand();
 	}
 
-	handleJobsCommand(): Promise<void> {
-		return this.#commandController.handleJobsCommand();
+	async handleJobsCommand(): Promise<void> {
+		if (this.#jobsHudTimer) {
+			this.#closeJobsHud();
+			return;
+		}
+		const snapshot = this.session.getAsyncJobSnapshot({ recentLimit: 5 });
+		if (!snapshot) {
+			this.showWarning("Async background jobs are unavailable in this session.");
+			return;
+		}
+		if (!this.session.isStreaming && snapshot.running.length === 0) {
+			await this.#commandController.handleJobsCommand(snapshot);
+			return;
+		}
+		this.#renderJobsHud(snapshot);
+		this.#jobsHudTimer = setInterval(() => {
+			const current = this.session.getAsyncJobSnapshot({ recentLimit: 0 });
+			if (current) this.#renderJobsHud(current);
+			else this.#closeJobsHud();
+		}, 1000);
+		this.#jobsHudTimer.unref();
+	}
+
+	#renderJobsHud(snapshot: AsyncJobSnapshot): void {
+		const lineWidth = Math.max(24, (this.ui.terminal.columns ?? 100) - 24);
+		this.jobsContainer.clear();
+		this.jobsContainer.addChild(new Spacer(1));
+		this.jobsContainer.addChild(new Text(formatJobsSnapshot(snapshot, { lineWidth, runningOnly: true }), 1, 0));
+		this.ui.requestRender();
+	}
+
+	#closeJobsHud(): void {
+		clearInterval(this.#jobsHudTimer);
+		this.#jobsHudTimer = undefined;
+		this.jobsContainer.clear();
+		this.ui.requestRender();
 	}
 
 	handleUsageCommand(reports?: UsageReport[] | null): Promise<void> {
