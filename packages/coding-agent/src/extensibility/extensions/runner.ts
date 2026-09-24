@@ -641,11 +641,10 @@ export class ExtensionRunner {
 		getAsyncJobSnapshot?: () => AsyncJobSnapshot | null,
 		/** Identity of the agent this runner's session runs; defaults to the top-level agent. */
 		private readonly agent: ExtensionAgentIdentity = TOP_LEVEL_AGENT,
-		private readonly waitForInitialMCPConnections: () => Promise<McpConnectionStatusSnapshot> = async () => ({
-			pendingServers: [],
-			connectedServers: [],
-			failedServers: [],
-		}),
+		private readonly waitForInitialMCPConnections: (options?: {
+			signal?: AbortSignal;
+		}) => Promise<McpConnectionStatusSnapshot> = () =>
+			Promise.reject(new Error("Initial MCP readiness is unsupported without an MCP manager")),
 	) {
 		this.#uiContext = noOpUIContext;
 		this.#getMemoryFn = getMemory;
@@ -1291,7 +1290,7 @@ export class ExtensionRunner {
 			mode: this.#mode,
 			getContextUsage: () => this.#getContextUsageFn(),
 			compact: instructionsOrOptions => this.#compactFn(instructionsOrOptions),
-			waitForInitialMCPConnections: () => this.waitForInitialMCPConnections(),
+			waitForInitialMCPConnections: options => this.waitForInitialMCPConnections(options),
 			getAsyncJobSnapshot: () => this.#getAsyncJobSnapshotFn(),
 			hasUI: this.hasUI(),
 			cwd: this.cwd,
