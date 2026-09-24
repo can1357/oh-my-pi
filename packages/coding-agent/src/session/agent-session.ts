@@ -2926,7 +2926,12 @@ export class AgentSession {
 			if (this.#recovery.isClassifierRefusal(assistantMsg)) return;
 			if (isEmptyErrorTurn(assistantMsg)) return;
 			if (assistantMsg.stopReason !== "aborted" && assistantMsg.stopReason !== "error" && assistantMsg.usage) {
-				const nonMessageBreakdown = computeNonMessageBreakdown(this, this.agent.tokenizer, this.settings.revision);
+				const nonMessageBreakdown = computeNonMessageBreakdown(
+					this,
+					this.agent.tokenizer,
+					this.settings.revision,
+					this.settings.get("skillful"),
+				);
 				assistantMsg.contextSnapshot = {
 					promptTokens: calculatePromptTokens(assistantMsg.usage),
 					nonMessageTokens:
