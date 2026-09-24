@@ -261,6 +261,89 @@ interface Motion {
 	linewise: boolean;
 }
 
+/** Whitespace-delimited WORD motions, walking graphemes without flattening the buffer. */
+function bigWordMotion(
+	buf: VimBuffer,
+	key: "W" | "B" | "E",
+	count: number,
+	change: boolean,
+	operator: boolean,
+): VimPosition {
+	let line = buf.cursorLine;
+	let col = buf.cursorCol;
+	const text = (): string => buf.lines[line] ?? "";
+	let segments = segmenter.segment(text());
+	const nextCol = (at: number): number => {
+		const segment = segments.containing(at);
+		return segment === undefined ? text().length : segment.index + segment.segment.length;
+	};
+	const previousCol = (at: number): number => segments.containing(at - 1)?.index ?? 0;
+	const space = (): boolean => col >= text().length || /\s/u.test(text().charAt(col));
+	const next = (): boolean => {
+		if (col < text().length) {
+			col = nextCol(col);
+			return true;
+		}
+		if (line === buf.lines.length - 1) return false;
+		line++;
+		col = 0;
+		segments = segmenter.segment(text());
+		return true;
+	};
+	const previous = (): boolean => {
+		if (col > 0) {
+			col = previousCol(col);
+			return true;
+		}
+		if (line === 0) return false;
+		line--;
+		segments = segmenter.segment(text());
+		col = previousCol(text().length);
+		return true;
+	};
+
+	for (let i = 0; i < count; i++) {
+		const beforeLine = line;
+		const beforeCol = col;
+		if (change && i === 0 && text().length === 0) continue;
+		if (key === "B") {
+			if (!previous()) break;
+			while (space() && text().length > 0) {
+				if (!previous()) break;
+			}
+			while (col > 0) {
+				const prev = previousCol(col);
+				if (/\s/u.test(text().charAt(prev))) break;
+				col = prev;
+			}
+		} else if (key === "W" && !change) {
+			while (!space()) next();
+			while (space()) {
+				// On an operator's final step, a WORD at the line end does not take the newline.
+				if (i === count - 1 && text().length > 0 && col >= text().length && operator) return { line, col };
+				if (!next()) break;
+				// An empty line is a WORD boundary, unlike a whitespace-only line.
+				if (text().length === 0 && line !== beforeLine) break;
+			}
+		} else {
+			// `cW` includes the current WORD, even when only its final grapheme remains.
+			if (!(change && i === 0) && !next()) break;
+			while (space()) {
+				if (!next()) break;
+			}
+			if (!space()) {
+				let end = nextCol(col);
+				while (end < text().length && !/\s/u.test(text().charAt(end))) {
+					col = end;
+					end = nextCol(col);
+				}
+			}
+		}
+		if (line === beforeLine && col === beforeCol && !(change && i === 0)) break;
+	}
+	return { line, col };
+}
+
 export class VimState {
 	mode: VimMode = "normal";
 	/** Fixed end of a Visual selection; the cursor is the moving end. */
@@ -405,7 +488,9 @@ export class VimState {
 		const line = buf.lines[buf.cursorLine] ?? "";
 		const at = (col: number): VimPosition => ({ line: buf.cursorLine, col });
 
-		switch (key === " " ? "l" : key) {
+		if (key === " ") key = "l";
+
+		switch (key) {
 			case "h": {
 				let col = buf.cursorCol;
 				for (let i = 0; i < count; i++) col = prevGraphemeStart(line, col);
@@ -433,6 +518,37 @@ export class VimState {
 				// Sticky end-of-line, so `$j` lands on the end of each line rather than a fixed column.
 				this.#desiredCol = Number.POSITIVE_INFINITY;
 				return { to: at(line.length), inclusive: false, linewise: false };
+			case "W":
+			case "B":
+			case "E": {
+				const change =
+					key === "W" &&
+					this.#operator === "c" &&
+					(line.length === 0 || (buf.cursorCol < line.length && !/\s/u.test(line.charAt(buf.cursorCol))));
+				const to = bigWordMotion(buf, key, count, change, this.#operator !== null);
+				const firstTextCol = line.search(/\S/u);
+				const leading = buf.cursorCol <= (firstTextCol < 0 ? line.length : firstTextCol);
+				if (key === "W" && !change && this.#operator !== null && to.line > buf.cursorLine && to.col === 0) {
+					// An exclusive column-zero endpoint stops at the previous line's end.
+					// Starting in leading whitespace promotes that span to whole lines.
+					const endLine = to.line - 1;
+					return {
+						to: { line: endLine, col: (buf.lines[endLine] ?? "").length },
+						inclusive: false,
+						linewise: leading,
+					};
+				}
+				return {
+					to,
+					inclusive: key === "E" || change,
+					linewise:
+						key === "W" &&
+						this.#operator === "d" &&
+						leading &&
+						to.line > buf.cursorLine &&
+						to.col === (buf.lines[to.line] ?? "").length,
+				};
+			}
 			case "w": {
 				let col = buf.cursorCol;
 				// Vim's `cw` quirk: standing on a non-blank, it changes to the end of the word like

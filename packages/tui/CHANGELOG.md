@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Vim `W`, `B`, and `E` motions for navigating whitespace-delimited WORDs ([#13099](https://github.com/can1357/oh-my-pi/pull/13099) by [@Scott-Simmons](https://github.com/Scott-Simmons)).
+
 ## [18.3.0] - 2026-09-24
 
 ### Added

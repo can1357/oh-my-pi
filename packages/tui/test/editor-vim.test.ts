@@ -674,4 +674,59 @@ describe("Editor vim mode", () => {
 			expect(cursor(editor)).toEqual({ line: 2, col: 17 });
 		});
 	});
+
+	describe("WORD motions", () => {
+		it("treats punctuation as part of a WORD", () => {
+			const editor = vimEditor("foo-bar baz.qux");
+			editor.handleInput("W");
+			expect(cursor(editor)).toEqual({ line: 0, col: 8 });
+
+			editor.handleInput("0E");
+			expect(cursor(editor)).toEqual({ line: 0, col: 6 });
+
+			editor.handleInput("$B");
+			expect(cursor(editor)).toEqual({ line: 0, col: 8 });
+		});
+
+		it("counts WORDs across newlines and blank lines", () => {
+			const editor = vimEditor("foo-bar baz.qux\n\nlast:item end");
+			editor.handleInput("2W");
+			expect(cursor(editor)).toEqual({ line: 1, col: 0 });
+			editor.handleInput("W");
+			expect(cursor(editor)).toEqual({ line: 2, col: 0 });
+			editor.handleInput("B");
+			expect(cursor(editor)).toEqual({ line: 1, col: 0 });
+			editor.handleInput("2B");
+			expect(cursor(editor)).toEqual({ line: 0, col: 0 });
+			editor.handleInput("3E");
+			expect(cursor(editor)).toEqual({ line: 2, col: 8 });
+		});
+
+		it("cW preserves the separator while replacing a punctuation-containing WORD", () => {
+			const editor = vimEditor("foo-bar baz.qux tail");
+			editor.handleInput("cW");
+			expect(editor.vimMode).toBe("insert");
+			editor.handleInput("fresh");
+			expect(editor.getText()).toBe("fresh baz.qux tail");
+		});
+
+		it("applies WORD motion counts to operators", () => {
+			const editor = vimEditor("a-b c.d e:f g/h keep");
+			editor.handleInput("d4W");
+			expect(editor.getText()).toBe("keep");
+		});
+
+		it("dB excludes the current WORD when deleting backward across a newline", () => {
+			const editor = vimEditor("foo-bar\nbaz.qux");
+			editor.handleInput("WdB");
+			expect(editor.getText()).toBe("baz.qux");
+		});
+
+		it("includes the final grapheme of a Visual E selection", () => {
+			const editor = vimEditor("foo-bar baz");
+			editor.handleInput("vEd");
+			expect(editor.getText()).toBe(" baz");
+			expect(editor.vimMode).toBe("normal");
+		});
+	});
 });

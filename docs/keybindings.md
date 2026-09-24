@@ -88,7 +88,7 @@ The prompt then starts in Insert mode and behaves exactly as it always has. `Esc
 | ----------------------------- | -------------------------------------------------------------- |
 | `h` `j` `k` `l`               | Move by character and line (arrow keys work too)               |
 | `0` `^` `$`                   | Line start / first non-blank / line end                        |
-| `w` `b` `e`                   | Next word, previous word, end of word                          |
+| `w` `b` `e` / `W` `B` `E`     | Move by word / whitespace-delimited WORD                       |
 | `gg` `G`                      | First line, last line (`5gg` and `5G` jump to line 5)          |
 | `1`–`9` prefix                | Repeat a motion or operator, e.g. `3w`, `5j`, `2dd`            |
 | `i` `a` `I` `A`               | Insert before / after cursor, at line start / line end         |
