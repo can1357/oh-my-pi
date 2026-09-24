@@ -1798,7 +1798,35 @@ async function openCodexWebSocketTransport(
 	transport: CodexTransport;
 }> {
 	const canAppendBeforeRequest = websocketState.canAppend === true;
-	const chainedBody = buildCodexChainedRequestBody(requestContext.transformedBody, websocketState);
+	let chainedBody = buildCodexChainedRequestBody(requestContext.transformedBody, websocketState);
+	const websocketHeaders = createCodexHeaders(
+		requestContext.requestHeaders,
+		requestContext.accountId,
+		requestContext.apiKey,
+		requestContext.codexClientVersion,
+		requestContext.transportSessionId,
+		"websocket",
+		websocketState,
+		requestContext.turnState,
+		requestContext.responsesLite,
+		requestContext.requestMetadata,
+		await getCodexAttestationHeader(requestContext.accountId),
+		requestContext.transformedBody,
+	);
+	const websocketConnection = await getOrCreateCodexWebSocketConnection(
+		websocketState,
+		requestContext.turnState,
+		toWebSocketUrl(requestContext.url),
+		websocketHeaders,
+		model.provider,
+		requestSetup.requestSignal,
+	);
+	// Acquiring a connection can reset append history (idle, closed, or refreshed
+	// credentials). Finalize the frame only after that reset, before onPayload
+	// observes it, while retaining the pre-handshake prefix/options check above.
+	if (!websocketState.canAppend) {
+		chainedBody = requestContext.transformedBody;
+	}
 	// WebSocket frames cannot carry per-request HTTP headers. Canonical Codex
 	// request identity is already in `client_metadata`; connection-scoped
 	// compatibility values that can change after the upgrade ride alongside it
@@ -1820,20 +1848,6 @@ async function openCodexWebSocketTransport(
 		websocketRequest = replacementWebsocketRequest as typeof websocketRequest;
 	}
 	recordCodexTurnRequestDiagnostics(websocketState, websocketRequest, "websocket", canAppendBeforeRequest);
-	const websocketHeaders = createCodexHeaders(
-		requestContext.requestHeaders,
-		requestContext.accountId,
-		requestContext.apiKey,
-		requestContext.codexClientVersion,
-		requestContext.transportSessionId,
-		"websocket",
-		websocketState,
-		requestContext.turnState,
-		requestContext.responsesLite,
-		requestContext.requestMetadata,
-		await getCodexAttestationHeader(requestContext.accountId),
-		requestContext.transformedBody,
-	);
 	const requestBodyForState = structuredCloneJSON(requestContext.transformedBody);
 	// `onPayload` may rewrite the outgoing frame (e.g. drop `stream_options`);
 	// recorded state must reflect what was actually sent — the sequential-cutoff
@@ -1856,14 +1870,6 @@ async function openCodexWebSocketTransport(
 			retry,
 			retryBudget: CODEX_WEBSOCKET_RETRY_BUDGET,
 		});
-	const websocketConnection = await getOrCreateCodexWebSocketConnection(
-		websocketState,
-		requestContext.turnState,
-		toWebSocketUrl(requestContext.url),
-		websocketHeaders,
-		model.provider,
-		requestSetup.requestSignal,
-	);
 	const eventStream = websocketConnection.streamRequest(
 		websocketRequest,
 		{
