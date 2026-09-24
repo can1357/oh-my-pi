@@ -659,6 +659,49 @@ describe("AgentSession retry fallback", () => {
 		expect(session.model?.id).toBe(fallbackModel.id);
 	});
 
+	it("never falls back to a model of a provider that settings disable", async () => {
+		// A fallback candidate that availability-filtered resolution misses was
+		// looked up by name in the full catalog, so a chain naming a disabled
+		// provider's model sent the retry there anyway.
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const disabledModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !disabledModel) {
+			throw new Error("Expected bundled disabled-provider fallback models");
+		}
+
+		const requestedModels: string[] = [];
+		const agent = createFallbackAgent(primaryModel, requestedModels, {
+			firstError: new AIError.ProviderResponseError("Devin API error: empty response body", {
+				provider: "devin",
+				kind: "empty-body",
+			}),
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			disabledProviders: [disabledModel.provider],
+			"retry.fallbackChains": {
+				default: [`${disabledModel.provider}/${disabledModel.id}`],
+			},
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models-disabled.yml"), { settings });
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		await session.prompt("Recover without the disabled provider");
+		await session.waitForIdle();
+
+		// The only candidate is unavailable, so the failure surfaces on the primary.
+		expect(requestedModels).toEqual([`${primaryModel.provider}/${primaryModel.id}`]);
+		expect(getLastAssistantMessage(session).stopReason).toBe("error");
+		expect(session.model?.provider).toBe(primaryModel.provider);
+	});
+
 	it("forwards retry fallback events to extension handlers", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
