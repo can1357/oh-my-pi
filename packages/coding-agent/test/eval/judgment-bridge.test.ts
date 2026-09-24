@@ -41,8 +41,8 @@ function makeSession(opts: { typesafe?: boolean } = {}): ToolSession {
 		"retry.fallbackChains": { judge: ["p/smol"] },
 	});
 	const authStorage = createInMemoryAuthStorage();
-	authStorage.setRuntimeApiKey("p", "test-key");
-	if (opts.typesafe) authStorage.setRuntimeApiKey("typesafe", "ts-key");
+	authStorage.keys.setRuntime("p", "test-key");
+	if (opts.typesafe) authStorage.keys.setRuntime("typesafe", "ts-key");
 	const modelRegistry = new ModelRegistry(authStorage, "/nonexistent/judgment-bridge-models.yml");
 	vi.spyOn(modelRegistry, "getAvailable").mockReturnValue(opts.typesafe ? [JEV_PREVIEW, SMOL] : [SMOL]);
 	return { settings, modelRegistry, getSessionId: () => "sess-1" } as unknown as ToolSession;

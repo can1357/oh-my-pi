@@ -30,8 +30,8 @@ import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 const authStorage = createInMemoryAuthStorage();
-authStorage.setRuntimeApiKey("anthropic", "test-key");
-authStorage.setRuntimeApiKey("openai-codex", "test-key");
+authStorage.keys.setRuntime("anthropic", "test-key");
+authStorage.keys.setRuntime("openai-codex", "test-key");
 const modelRegistry = new ModelRegistry(authStorage);
 
 afterAll(() => {

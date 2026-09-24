@@ -71,7 +71,7 @@ export function findApiKey(
 	sessionId?: string,
 	signal?: AbortSignal,
 ): Promise<string | undefined> {
-	return authStorage.getApiKey("firecrawl", sessionId, { signal });
+	return authStorage.keys.get("firecrawl", sessionId, { signal });
 }
 
 function buildRequestBody(params: FirecrawlSearchParams): Record<string, unknown> {
@@ -167,7 +167,7 @@ export async function searchFirecrawl(params: SearchParams): Promise<SearchRespo
 		timeoutMs: params.timeoutMs,
 		fetch: params.fetch,
 	};
-	const keyResolver = params.authStorage.resolver("firecrawl", {
+	const keyResolver = params.authStorage.keys.resolver("firecrawl", {
 		sessionId: params.sessionId,
 	});
 	const numResults = clampNumResults(firecrawlParams.num_results, DEFAULT_NUM_RESULTS, MAX_NUM_RESULTS);
@@ -216,7 +216,11 @@ export class FirecrawlProvider extends SearchProvider {
 	 */
 	isAvailable(authStorage: AuthStorage): boolean {
 		const configuredBaseUrl = process.env.FIRECRAWL_BASE_URL ?? process.env.FIRECRAWL_API_URL;
-		return !!configuredBaseUrl?.trim() || authStorage.hasAuth("firecrawl") || !!getEnvApiKey("firecrawl");
+		return (
+			!!configuredBaseUrl?.trim() ||
+			authStorage.keys.source("firecrawl") !== undefined ||
+			!!getEnvApiKey("firecrawl")
+		);
 	}
 
 	/**

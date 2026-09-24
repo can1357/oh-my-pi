@@ -23,7 +23,7 @@ import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import type { TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
 import { type BashToolDetails, formatBackgroundNotice } from "@oh-my-pi/pi-tui/tools/bash";
-import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/hub";
+import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
 function taskResult(asyncState: "running" | "completed" | "failed" | undefined, text: string) {
@@ -234,7 +234,7 @@ describe("EventController async update finalization", () => {
 		expect(component.isTranscriptBlockFinalized()).toBe(true);
 	});
 
-	it("settles an early Hub wait result while another reported job remains running", async () => {
+	it("settles an early wait result while another reported job remains running", async () => {
 		const { controller, pendingTools, chatContainer } = createFixture();
 		const details: CoordinationDetails = {
 			op: "wait",
@@ -245,16 +245,16 @@ describe("EventController async update finalization", () => {
 		};
 		await controller.handleEvent({
 			type: "tool_execution_end",
-			toolCallId: "tc-hub",
-			toolName: "hub",
+			toolCallId: "tc-wait",
+			toolName: "wait",
 			result: { content: [{ type: "text", text: "Job1 finished; Job2 is still running." }], details },
 			isError: false,
 		});
 		await controller.handleEvent({
 			type: "tool_execution_start",
-			toolCallId: "tc-hub",
-			toolName: "hub",
-			args: { op: "wait", ids: ["Job1", "Job2"] },
+			toolCallId: "tc-wait",
+			toolName: "wait",
+			args: {},
 		});
 		const component = chatContainer.children.find(
 			(child): child is ToolExecutionComponent => child instanceof ToolExecutionComponent,
@@ -262,7 +262,7 @@ describe("EventController async update finalization", () => {
 		sealed.push(component);
 		component.setExpanded(true);
 		expect(Bun.stripANSI(chatContainer.render(120).join("\n"))).toContain("Job1 Finished work");
-		expect(pendingTools.has("tc-hub")).toBe(false);
+		expect(pendingTools.has("tc-wait")).toBe(false);
 		expect(component.isTranscriptBlockFinalized()).toBe(true);
 	});
 
@@ -271,13 +271,13 @@ describe("EventController async update finalization", () => {
 		await controller.handleEvent({
 			type: "tool_execution_start",
 			toolCallId: "tc-stale",
-			toolName: "hub",
-			args: { op: "wait", ids: ["job-stale"] },
+			toolName: "wait",
+			args: {},
 		});
 		const component = chatContainer.children.find(
 			(child): child is ToolExecutionComponent => child instanceof ToolExecutionComponent,
 		);
-		if (!component) throw new Error("expected stale Hub card");
+		if (!component) throw new Error("expected stale wait card");
 		sealed.push(component);
 		// Model a dropped live completion: the timeline still owns the card but
 		// its pending-map entry is gone, so agent_end cannot find it.

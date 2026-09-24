@@ -636,6 +636,18 @@ function renderDescriptionLines(description: string, prefix: string, width: numb
 	return wrapTextWithAnsi(description, contentWidth).map(line => `${boundedPrefix}${theme.fg("dim", line)}`);
 }
 
+/** `routed:` note from a `before_subagent_spawn` model replacement; empty when unrouted. */
+function renderRouteLine(route: string | undefined, continuePrefix: string, maxWidth: number, theme: Theme): string[] {
+	if (!route) return [];
+	return [
+		truncateTaskRow(
+			`${continuePrefix}${theme.fg("dim", `routed: ${replaceTabs(sanitizeText(route))}`)}`,
+			maxWidth,
+			"",
+		),
+	];
+}
+
 /**
  * Render streaming progress for a single agent.
  */
@@ -688,6 +700,7 @@ function renderAgentProgress(
 	if (fullDescription && !row.descriptionShown) {
 		lines.push(...renderDescriptionLines(fullDescription, continuePrefix, maxWidth, theme));
 	}
+	lines.push(...renderRouteLine(progress.resolvedModelRoute, continuePrefix, maxWidth, theme));
 
 	lines.push(...renderTaskSection(progress.assignment ?? progress.task, continuePrefix, expanded, theme));
 
@@ -1029,6 +1042,7 @@ function renderAgentResult(
 	if (fullDescription && !description) {
 		lines.push(...renderDescriptionLines(fullDescription, continuePrefix, maxWidth, theme));
 	}
+	lines.push(...renderRouteLine(result.resolvedModelRoute, continuePrefix, maxWidth, theme));
 
 	lines.push(...renderTaskSection(result.assignment ?? result.task, continuePrefix, expanded, theme));
 
@@ -1858,6 +1872,8 @@ export interface AgentProgress {
 	resolvedThinkingLevel?: ConfiguredThinkingLevel;
 	/** True when {@link resolvedModel} is the target of an active retry fallback (not the originally configured model). Lets observer-only UIs (collab guests, Agent Hub rows with no live session) flag the fallback and keep the provider. */
 	resolvedModelIsFallback?: boolean;
+	/** Extension routing note (e.g. model-pools) explaining why {@link resolvedModel} was chosen. */
+	resolvedModelRoute?: string;
 	/** True when a live advisor was attached to this run's session, not merely enabled in settings. */
 	advisor?: boolean;
 	/** Data extracted by registered subprocess tool handlers (keyed by tool name) */
@@ -1935,6 +1951,8 @@ export interface SingleResult {
 	resolvedThinkingLevel?: ConfiguredThinkingLevel;
 	/** True when {@link resolvedModel} is the target of an active retry fallback. Mirrors {@link AgentProgress.resolvedModelIsFallback} onto the settled result. */
 	resolvedModelIsFallback?: boolean;
+	/** Mirrors {@link AgentProgress.resolvedModelRoute} onto the settled result. */
+	resolvedModelRoute?: string;
 	/** Retains {@link AgentProgress.advisor} after the advised session is disposed. */
 	advisor?: boolean;
 	error?: string;

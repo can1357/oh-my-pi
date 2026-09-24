@@ -33,7 +33,7 @@ describe("AgentSession dispose releases retained memory", () => {
 	beforeEach(() => {
 		tempDir = TempDir.createSync("@omp-dispose-release-");
 		authStorage = createInMemoryAuthStorage();
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 	});
 
 	afterEach(async () => {

@@ -34,6 +34,7 @@ import { ModelRegistry } from "./config/model-registry";
 import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import {
 	DEFAULT_PREWALK_TARGET,
+	disabledProviderIds,
 	expandRoleAlias,
 	getModelMatchPreferences,
 	resolveCliModel,
@@ -546,7 +547,7 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 			preloadedExtensions: trustedExtensions,
 		});
 		if (args.parsedArgs.apiKey && !args.baseOptions.model && nextSession.model) {
-			args.authStorage.setRuntimeApiKey(nextSession.model.provider, args.parsedArgs.apiKey);
+			args.authStorage.keys.setRuntime(nextSession.model.provider, args.parsedArgs.apiKey);
 		}
 		const runner = nextSession.extensionRunner;
 		const reparsedArgs = applyExtensionFlags(
@@ -1305,6 +1306,7 @@ export async function buildSessionOptions(
 	// - supports --provider <name> --model <pattern>
 	// - supports --model <provider>/<pattern>
 	const modelMatchPreferences = getModelMatchPreferences(activeSettings);
+	const disabledProviders = disabledProviderIds(activeSettings);
 	// `--model` rewrites the session's `default` role below. Preserve the
 	// configured assignment so explicit prewalk role targets still resolve
 	// against the value that existed when the CLI was invoked.
@@ -1324,6 +1326,14 @@ export async function buildSessionOptions(
 		});
 		if (resolved.warning) {
 			process.stderr.write(`${chalk.yellow(`Warning: ${resolved.warning}`)}\n`);
+		}
+		if (resolved.disabledProvider !== undefined) {
+			// Deferring a disabled pin to post-extension resolution would let it
+			// through, so refuse here (issue #13079).
+			process.stderr.write(
+				`${chalk.red(resolved.error ?? `Provider "${resolved.disabledProvider}" is disabled.`)}\n`,
+			);
+			process.exit(1);
 		}
 		const matchedAfterMissingRolePattern = (resolved.configuredPatternIndex ?? 0) > 0;
 		if (matchedAfterMissingRolePattern) {
@@ -1462,6 +1472,8 @@ export async function buildSessionOptions(
 			let candidate = resolveCandidate(pattern);
 			lastResolution = candidate;
 
+			// A disabled provider is unreachable; try the next fallback pattern.
+			if (candidate.model && disabledProviders.has(candidate.model.provider)) continue;
 			if (candidate.model && modelRegistry.hasConfiguredAuth(candidate.model)) {
 				authenticatedResolution = candidate;
 				break;
@@ -1481,6 +1493,7 @@ export async function buildSessionOptions(
 
 			candidate = resolveCandidate(pattern);
 			lastResolution = candidate;
+			if (candidate.model && disabledProviders.has(candidate.model.provider)) continue;
 			if (candidate.model && modelRegistry.hasConfiguredAuth(candidate.model)) {
 				authenticatedResolution = candidate;
 				break;
@@ -1507,6 +1520,10 @@ export async function buildSessionOptions(
 			process.stderr.write(
 				`${chalk.yellow(`Warning: prewalk disabled — ${resolved.error ?? `model "${target}" not found`}`)}\n`,
 			);
+		} else if (disabledProviders.has(resolved.model.provider)) {
+			process.stderr.write(
+				`${chalk.yellow(`Warning: prewalk disabled — provider "${resolved.model.provider}" is disabled`)}\n`,
+			);
 		} else if (!modelRegistry.hasConfiguredAuth(resolved.model)) {
 			process.stderr.write(
 				`${chalk.yellow(`Warning: prewalk disabled — no API key for ${resolved.model.provider}/${resolved.model.id}`)}\n`,
@@ -1527,6 +1544,11 @@ export async function buildSessionOptions(
 		}
 		if (resolved.error || !resolved.model) {
 			throw new Error(resolved.error ?? `Model "${parsed.planYoloInto ?? "@smol"}" not found`);
+		}
+		if (disabledProviders.has(resolved.model.provider)) {
+			throw new Error(
+				`Provider "${resolved.model.provider}" is disabled. Remove it from disabledProviders to hand off to "${rolePattern}".`,
+			);
 		}
 		if (!modelRegistry.hasConfiguredAuth(resolved.model)) {
 			throw new Error(`No API key for ${resolved.model.provider}/${resolved.model.id}`);
@@ -1741,15 +1763,17 @@ export async function runRootCommand(
 		if (!isInteractive) {
 			stopPendingStartupComposer();
 		}
-		// Auth and settings are independent; start both before awaiting either.
-		// A configured-but-unreachable auth broker still receives the actionable
-		// startup error below, while its cache/config I/O overlaps settings I/O.
-		const authStoragePromise = logger.time("discoverAuthStorage", deps.discoverAuthStorage ?? discoverAuthStorage);
-		authStoragePromise.catch(() => {});
+		// Account routing must use the effective settings, including `--config` and
+		// `PI_CONFIG_FILES` overlays, rather than independently re-reading only the
+		// main config file during auth discovery.
 		const settingsPromise = deps.settings
 			? Promise.resolve(deps.settings)
 			: logger.time("settings:init", Settings.init, { cwd, configFiles: parsedArgs.config });
 		settingsPromise.catch(() => {});
+		const authStoragePromise = logger.time("discoverAuthStorage", async () =>
+			(deps.discoverAuthStorage ?? discoverAuthStorage)(undefined, { settings: await settingsPromise }),
+		);
+		authStoragePromise.catch(() => {});
 		let authStorage: AuthStorage;
 		try {
 			authStorage = await authStoragePromise;
@@ -2103,7 +2127,7 @@ export async function runRootCommand(
 				process.exit(1);
 			}
 			if (sessionOptions.model) {
-				authStorage.setRuntimeApiKey(sessionOptions.model.provider, parsedArgs.apiKey);
+				authStorage.keys.setRuntime(sessionOptions.model.provider, parsedArgs.apiKey);
 			}
 		}
 
@@ -2264,7 +2288,7 @@ export async function runRootCommand(
 				Math.trunc(Number(settingsInstance.get("task.agentIdleTtlMs") ?? 420_000) || 0),
 			);
 			if (parsedArgs.apiKey && !sessionOptions.model && session.model) {
-				authStorage.setRuntimeApiKey(session.model.provider, parsedArgs.apiKey);
+				authStorage.keys.setRuntime(session.model.provider, parsedArgs.apiKey);
 			}
 
 			// Runtime provider discovery (opencode-go, models.yml `discovery:`, proxies)
@@ -2369,6 +2393,7 @@ export async function runRootCommand(
 					initialImages,
 					printThoughts: initialArgs.printThoughts,
 					planYolo: parsedArgs.planYolo,
+					mcpManager,
 				});
 				if ($env.PI_TIMING) {
 					logger.printTimings();

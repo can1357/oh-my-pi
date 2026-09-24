@@ -123,6 +123,10 @@ async function buildPrFixtureTemplate(): Promise<PrFixture> {
 
 	await fs.mkdir(repoRoot, { recursive: true });
 	runGit(baseDir, ["init", "-b", "main", repoRoot]);
+	// createPrFixture copies this tree with fs.cp; a background
+	// `git maintenance run --auto` lock would race the copy.
+	runGit(repoRoot, ["config", "maintenance.auto", "false"]);
+	runGit(repoRoot, ["config", "gc.auto", "0"]);
 	await fs.writeFile(path.join(repoRoot, "README.md"), "base\n");
 	runGit(repoRoot, ["add", "README.md"]);
 	runGit(repoRoot, ["commit", "-m", "base commit"]);

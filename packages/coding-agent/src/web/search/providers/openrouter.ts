@@ -235,7 +235,7 @@ export class OpenRouterGroundedProvider extends SearchProvider {
 	readonly label = "OpenRouter";
 
 	isAvailable(authStorage: AuthStorage, model?: Model<Api>): boolean {
-		return authStorage.hasAuth(model?.provider ?? "openrouter");
+		return authStorage.keys.source(model?.provider ?? "openrouter") !== undefined;
 	}
 
 	search(params: SearchParams): Promise<SearchResponse> {

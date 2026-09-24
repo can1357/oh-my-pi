@@ -148,6 +148,19 @@ function hasConfiguredCompactionMethod(settings: ConfiguredCompactionSettings): 
 	return resolveCompactionMethodOrder(settings.methodOrder).length > 0;
 }
 
+/** Kept Anthropic thinking requires compaction by the same live model. */
+function canUseLiveProviderNativeCompaction(
+	candidate: Model,
+	liveModel: Model,
+	settings: EngineCompactionSettings,
+): boolean {
+	return (
+		candidate.provider === liveModel.provider &&
+		(candidate.api !== "anthropic-messages" || (candidate.api === liveModel.api && candidate.id === liveModel.id)) &&
+		shouldUseProviderNativeCompaction(candidate, settings)
+	);
+}
+
 /**
  * Whether `candidate` is actually selectable for `reason` on `model` — mirrors the
  * per-candidate availability check in {@link SessionMaintenance.runAutoCompaction}'s
@@ -772,8 +785,21 @@ export class SessionMaintenance {
 
 		if (mode === "thinking") {
 			const branchEntries = this.#host.sessionManager.getBranch();
+			const latestCompaction = getLatestCompactionEntry(branchEntries);
+			const compactionIndex = latestCompaction ? branchEntries.lastIndexOf(latestCompaction) : -1;
+			const hasRemoteReplacementHistory = getOpenAiRemoteCompactionPayload(latestCompaction) !== undefined;
+			let anchorIndex = -1;
+			for (let index = branchEntries.length - 1; index > compactionIndex; index--) {
+				const entry = branchEntries[index];
+				if (entry.type !== "message" || !isTranscriptUsageAnchor(entry.message)) continue;
+				anchorIndex = index;
+				break;
+			}
 			let removed = 0;
-			for (const entry of branchEntries) {
+			let tokensFreed = 0;
+			let anchoredTokensRemoved = 0;
+			const countOptions = { excludeEncryptedReasoning: true } as const;
+			for (const [index, entry] of branchEntries.entries()) {
 				if (entry.type !== "message" || entry.message.role !== "assistant") continue;
 				const message = entry.message;
 				const kept = message.content.filter(
@@ -781,20 +807,29 @@ export class SessionMaintenance {
 				);
 				const dropped = message.content.length - kept.length;
 				if (dropped === 0) continue;
+				// Match the stored-context floor: opaque signatures and encrypted
+				// reasoning bytes do not have a reliable provider-token equivalent.
+				const before = this.#tokenizer.countMessage(message, countOptions);
 				// Provider serializers omit empty assistant turns, so don't invent model-authored text.
 				message.content = kept;
 				invalidateMessageCache(message);
+				const saved = Math.max(0, before - this.#tokenizer.countMessage(message, countOptions));
+				tokensFreed += saved;
+				if (index < anchorIndex && (!hasRemoteReplacementHistory || index > compactionIndex)) {
+					anchoredTokensRemoved += saved;
+				}
 				removed += dropped;
 			}
 			if (removed === 0) {
 				return { mode, toolResultsDropped: 0, blocksDropped: 0, thinkingBlocksDropped: 0, tokensFreed: 0 };
 			}
+			this.#host.recordAnchoredHistoryRewrite(anchoredTokensRemoved);
 			await this.#host.sessionManager.rewriteEntries();
 			const sessionContext = this.#host.buildDisplaySessionContext();
 			this.#host.agent.replaceMessages(sessionContext.messages);
 			this.#host.resetAdvisorRuntimes("shake");
 			this.#host.closeCodexProviderSessionsForHistoryRewrite();
-			return { mode, toolResultsDropped: 0, blocksDropped: 0, thinkingBlocksDropped: removed, tokensFreed: 0 };
+			return { mode, toolResultsDropped: 0, blocksDropped: 0, thinkingBlocksDropped: removed, tokensFreed };
 		}
 
 		const assertCurrent = () => {
@@ -1124,9 +1159,7 @@ export class SessionMaintenance {
 			const compactionCandidates = this.#getCompactionModelCandidates(
 				availableModels,
 				requireProviderRemote
-					? candidate =>
-							candidate.provider === activeModel.provider &&
-							shouldUseProviderNativeCompaction(candidate, effectiveSettings)
+					? candidate => canUseLiveProviderNativeCompaction(candidate, activeModel, effectiveSettings)
 					: undefined,
 			);
 			if (requireProviderRemote && compactionCandidates.length === 0) {
@@ -1991,7 +2024,11 @@ export class SessionMaintenance {
 			// reclaims materially more context at apply time.
 			const growth = contextTokens - current.armed.contextTokensAtStart;
 			const refreshBudget = Math.max(settings.keepRecentTokens, SPECULATION_LEAD_MIN_TOKENS);
-			if (growth <= refreshBudget && this.#armedSpeculationValid(current.armed, contextTokens)) return;
+			if (
+				(growth <= refreshBudget || isRecord(current.armed.result.preserveData?.anthropicCompaction)) &&
+				this.#armedSpeculationValid(current.armed, contextTokens)
+			)
+				return;
 			this.cancelSpeculation();
 		}
 		const model = this.#model;
@@ -2113,9 +2150,7 @@ export class SessionMaintenance {
 			const candidates = this.#getCompactionModelCandidates(
 				this.#host.modelRegistry.getAvailable(),
 				method === "remote" && !effectiveSettings.remoteEndpoint
-					? candidate =>
-							candidate.provider === model.provider &&
-							shouldUseProviderNativeCompaction(candidate, effectiveSettings)
+					? candidate => canUseLiveProviderNativeCompaction(candidate, model, effectiveSettings)
 					: undefined,
 			);
 			if (candidates.length === 0) return clear();
@@ -2195,7 +2230,11 @@ export class SessionMaintenance {
 		}
 		if (leafIdx < branch.length - 1) {
 			const keptIdx = branch.findIndex(entry => entry.id === armed.result.firstKeptEntryId);
-			if (keptIdx < 0) return false;
+			const nativeAnthropic = isRecord(armed.result.preserveData?.anthropicCompaction);
+			if (keptIdx < 0 && !(nativeAnthropic && armed.result.firstKeptEntryId === "")) return false;
+			// The signed Anthropic block replaces exactly its snapshot prefix.
+			// Extra turns are outside the block, so growth alone cannot stale it.
+			if (nativeAnthropic) return true;
 
 			const projected = this.#projectCompactedContextTokens({
 				...armed.result,
@@ -4175,9 +4214,12 @@ export class SessionMaintenance {
 					fromExtension: false,
 					codexCompaction: armedSpec.codexCompaction,
 					method: armedSpec.method,
-					providerReplayThroughEntryId: armedSpec.result.preserveData?.openaiRemoteCompaction
-						? armedSpec.snapshotLeafId
-						: undefined,
+					providerReplayThroughEntryId:
+						armedSpec.result.preserveData?.openaiRemoteCompaction ||
+						(armedSpec.result.preserveData?.anthropicCompaction &&
+							this.#host.sessionManager.getBranch().at(-1)?.id !== armedSpec.snapshotLeafId)
+							? armedSpec.snapshotLeafId
+							: undefined,
 					action,
 					reason,
 					willRetry,
@@ -4607,12 +4649,11 @@ export class SessionMaintenance {
 				details = snapcompactResult.details;
 				preserveData = { ...compactionPrep.preserveData, ...snapcompactResult.preserveData };
 			} else {
+				const liveModel = this.#model;
 				const candidates = this.#getCompactionModelCandidates(
 					availableModels,
-					method === "remote" && !effectiveSettings.remoteEndpoint
-						? candidate =>
-								candidate.provider === this.#model?.provider &&
-								shouldUseProviderNativeCompaction(candidate, effectiveSettings)
+					method === "remote" && !effectiveSettings.remoteEndpoint && liveModel
+						? candidate => canUseLiveProviderNativeCompaction(candidate, liveModel, effectiveSettings)
 						: undefined,
 				);
 				const retrySettings = this.#host.settings.getGroup("retry");

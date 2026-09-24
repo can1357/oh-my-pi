@@ -118,7 +118,7 @@ describe("AuthStorage usage history recording", () => {
 
 	beforeEach(async () => {
 		store = new SqliteAuthCredentialStore(new Database(":memory:"));
-		store.upsertAuthCredentialForProvider("anthropic", {
+		await store.upsertAuthCredential("anthropic", {
 			type: "oauth",
 			access: "oat-1",
 			refresh: "refresh-1",
@@ -131,7 +131,7 @@ describe("AuthStorage usage history recording", () => {
 		storage = new AuthStorage(store, {
 			usageProviderResolver: provider => (provider === "anthropic" ? claudeUsage.claudeUsageProvider : undefined),
 		});
-		await storage.reload();
+		await storage.credentials.reload();
 	});
 
 	afterEach(() => {
@@ -166,9 +166,9 @@ describe("AuthStorage usage history recording", () => {
 		};
 		vi.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage").mockImplementation(async () => report);
 
-		await storage.fetchUsageReports();
+		await storage.usage.reports();
 
-		const rows = storage.listUsageHistory();
+		const rows = storage.usage.history();
 		expect(rows).toHaveLength(2);
 
 		const fiveHour = rows.find(row => row.limitId === "anthropic:5h");
@@ -216,8 +216,8 @@ describe("OpenCode Go usage via the upstream endpoint", () => {
 				);
 			}) as unknown as typeof fetch,
 		});
-		await storage.reload();
-		await storage.set("opencode-go", { type: "api_key", key: "opencode-go-key" });
+		await storage.credentials.reload();
+		await storage.credentials.set("opencode-go", { type: "api_key", key: "opencode-go-key" });
 	});
 
 	afterEach(() => {
@@ -227,7 +227,7 @@ describe("OpenCode Go usage via the upstream endpoint", () => {
 	});
 
 	it("fetches percent-based limits for a stored API key and records history rows", async () => {
-		const reports = await storage.fetchUsageReports();
+		const reports = await storage.usage.reports();
 
 		expect(fetchCalls).toHaveLength(1);
 		expect(fetchCalls[0]?.url).toBe("https://opencode.ai/zen/go/v1/usage");
@@ -278,10 +278,10 @@ describe("OpenCode Go usage via the upstream endpoint", () => {
 			}) as unknown as typeof fetch,
 		});
 		try {
-			await referenceStorage.reload();
-			await referenceStorage.set("opencode-go", { type: "api_key", key: "ref:opencode" });
+			await referenceStorage.credentials.reload();
+			await referenceStorage.credentials.set("opencode-go", { type: "api_key", key: "ref:opencode" });
 
-			const reports = await referenceStorage.fetchUsageReports();
+			const reports = await referenceStorage.usage.reports();
 
 			expect(fetchCalls).toHaveLength(1);
 			expect(fetchCalls[0]?.headers.authorization).toBe("Bearer sk-resolved-secret");
@@ -320,18 +320,18 @@ describe("OpenCode Go usage via the upstream endpoint", () => {
 						)) as unknown as typeof fetch,
 		});
 		try {
-			await transitionStorage.reload();
-			await transitionStorage.set("opencode-go", { type: "api_key", key: "opencode-go-key" });
+			await transitionStorage.credentials.reload();
+			await transitionStorage.credentials.set("opencode-go", { type: "api_key", key: "opencode-go-key" });
 
 			const nowMs = Date.now();
 			setSystemTime(new Date(nowMs));
-			const fresh = await transitionStorage.fetchUsageReports();
+			const fresh = await transitionStorage.usage.reports();
 			expect(fresh?.some(candidate => candidate.provider === "opencode-go")).toBe(true);
 
 			// Past the report TTL the next poll re-hits the endpoint and gets 401.
 			respondWith = "unauthorized";
 			setSystemTime(new Date(nowMs + 10 * 60_000));
-			const afterRevocation = await transitionStorage.fetchUsageReports();
+			const afterRevocation = await transitionStorage.usage.reports();
 			expect(afterRevocation?.some(candidate => candidate.provider === "opencode-go")).toBe(false);
 		} finally {
 			transitionStorage.close();
@@ -361,17 +361,17 @@ describe("OpenCode Go usage via the upstream endpoint", () => {
 				)) as unknown as typeof fetch,
 		});
 		try {
-			await partialStorage.reload();
-			await partialStorage.set("opencode-go", { type: "api_key", key: "opencode-go-key" });
+			await partialStorage.credentials.reload();
+			await partialStorage.credentials.set("opencode-go", { type: "api_key", key: "opencode-go-key" });
 
 			const nowMs = Date.now();
 			setSystemTime(new Date(nowMs));
-			const fresh = await partialStorage.fetchUsageReports();
+			const fresh = await partialStorage.usage.reports();
 			expect(fresh?.find(candidate => candidate.provider === "opencode-go")?.limits).toHaveLength(3);
 
 			respondWith = "partial";
 			setSystemTime(new Date(nowMs + 10 * 60_000));
-			const afterPartial = await partialStorage.fetchUsageReports();
+			const afterPartial = await partialStorage.usage.reports();
 			const retained = afterPartial?.find(candidate => candidate.provider === "opencode-go");
 			expect(retained?.limits.map(limit => limit.id)).toEqual(["rolling-5h", "weekly", "monthly"]);
 		} finally {

@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent, AgentBusyError } from "@oh-my-pi/pi-agent-core";
-import type { ApiKeyResolveContext, AssistantMessage, AssistantRetryRecovery, Usage } from "@oh-my-pi/pi-ai";
+import type { ApiKey, AssistantMessage, AssistantRetryRecovery, Usage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import * as aiStream from "@oh-my-pi/pi-ai/stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -71,14 +71,14 @@ function retryRecovery(recovery: AssistantRetryRecovery["recovery"], note: strin
 	};
 }
 
-function resolveInitialApiKey(
-	apiKey: string | ((ctx: ApiKeyResolveContext) => string | Promise<string | undefined> | undefined) | undefined,
-): string {
+function resolveInitialApiKey(apiKey: ApiKey | undefined): string {
 	const resolved = typeof apiKey === "function" ? apiKey({ lastChance: false, error: undefined }) : apiKey;
-	if (typeof resolved !== "string") {
+	const bearer =
+		typeof resolved === "string" ? resolved : resolved && "apiKey" in resolved ? resolved.apiKey : undefined;
+	if (typeof bearer !== "string") {
 		throw new Error("Expected API key to be resolved before streaming");
 	}
-	return resolved;
+	return bearer;
 }
 
 interface AssistantEntry {
@@ -134,8 +134,8 @@ describe("AgentSession retry recovery", () => {
 	beforeEach(async () => {
 		tempDir = TempDir.createSync("@pi-retry-recovery-");
 		vi.spyOn(aiStream, "getEnvApiKey").mockReturnValue(undefined);
-		await authStorage.remove("anthropic");
-		authStorage.removeRuntimeApiKey("anthropic");
+		await authStorage.credentials.remove("anthropic");
+		authStorage.keys.removeRuntime("anthropic");
 		modelRegistry.clearSuppressedSelectors();
 		sessions = [];
 		managers = [];
@@ -163,8 +163,8 @@ describe("AgentSession retry recovery", () => {
 			throw new Error("Expected bundled Anthropic test model to exist");
 		}
 
-		authStorage.removeRuntimeApiKey("anthropic");
-		await authStorage.set("anthropic", [
+		authStorage.keys.removeRuntime("anthropic");
+		await authStorage.credentials.set("anthropic", [
 			{ type: "api_key", key: "anthropic-key-1" },
 			{ type: "api_key", key: "anthropic-key-2" },
 		]);
@@ -224,7 +224,7 @@ describe("AgentSession retry recovery", () => {
 	it("waitForIdle waits for retry recovery event delivery", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const mock = createMockModel({
 			responses: [{ throw: RETRIABLE_SERVER_ERROR }, { content: ["Recovered after retry."], stopReason: "stop" }],
 		});
@@ -353,7 +353,7 @@ describe("AgentSession retry recovery", () => {
 		if (!model) {
 			throw new Error("Expected bundled Anthropic test model to exist");
 		}
-		authStorage.setRuntimeApiKey("anthropic", "anthropic-test-key");
+		authStorage.keys.setRuntime("anthropic", "anthropic-test-key");
 
 		const mock = createMockModel({
 			responses: [
@@ -421,7 +421,7 @@ describe("AgentSession retry recovery", () => {
 		if (!model) {
 			throw new Error("Expected bundled Anthropic test model to exist");
 		}
-		authStorage.setRuntimeApiKey("anthropic", "anthropic-test-key");
+		authStorage.keys.setRuntime("anthropic", "anthropic-test-key");
 
 		const mock = createMockModel({
 			responses: [{ throw: RETRIABLE_SERVER_ERROR }, { throw: RETRIABLE_SERVER_ERROR }],

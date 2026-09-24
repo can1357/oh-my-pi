@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import type { DaemonRpcResult } from "../../src/launch/protocol";
-import { renderLaunchLogTerminalRows } from "../../src/tools/hub/launch";
+import { renderServiceLogTerminalRows } from "../../src/launch/services";
 
 const result: Extract<DaemonRpcResult, { op: "logs" }> = {
 	op: "logs",
@@ -11,7 +11,7 @@ const result: Extract<DaemonRpcResult, { op: "logs" }> = {
 	timedOut: false,
 	state: "running",
 };
-const terminalRows = await renderLaunchLogTerminalRows(result, { head: false, lines: 10 });
+const terminalRows = await renderServiceLogTerminalRows(result, 10);
 const paths = Object.keys(require.cache)
 	.filter(modulePath => modulePath.replaceAll("\\", "/").includes("/packages/utils/src/vterm"))
 	.sort();
