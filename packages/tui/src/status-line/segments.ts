@@ -562,7 +562,7 @@ const costSegment: StatusLineSegment = {
 	id: "cost",
 	render(ctx) {
 		const { premiumRequests, costStatistics } = ctx.usageStats;
-		const subagents = ctx.options.cost?.subagents;
+		const subagents = ctx.options?.cost?.subagents;
 		const cost =
 			subagents === "split"
 				? (costStatistics?.selfCost ?? ctx.usageStats.cost)
