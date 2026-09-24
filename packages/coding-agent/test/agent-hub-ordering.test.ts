@@ -1,10 +1,7 @@
 import { createAgentHubRuntime } from "@oh-my-pi/pi-coding-agent/modes/agent-hub-runtime";
 /**
- * Regression: the agent hub row order must be stable while the hub is open.
- *
- * The hub is sorted by lastActivity on first open, but after that keyboard
- * selection must not jump around as agents heartbeat or update activity. New
- * agents that appear while the hub is open are appended at the end.
+ * Regression: the agent hub keeps its initial status/recency order while open,
+ * regardless of heartbeats; newly spawned agents appear above existing rows.
  */
 import { afterEach, beforeAll, describe, expect, it, setSystemTime, vi } from "bun:test";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
@@ -184,7 +181,7 @@ describe("Agent hub row ordering", () => {
 		}
 	});
 
-	it("keeps row order stable as agents heartbeat and appends new agents", () => {
+	it("pins existing rows across activity changes and puts new agents at the top", () => {
 		vi.useFakeTimers();
 		let hub: AgentHubOverlayComponent | undefined;
 		try {
@@ -205,28 +202,39 @@ describe("Agent hub row ordering", () => {
 			hub = makeHub(agents);
 			// Captured once on open: status then recency (most-recent first).
 			expect(renderedAgentIds(hub)).toEqual(["C", "B", "A"]);
+			hub.handleInput("j");
+			expect(selectedAgentId(hub)).toBe("B");
 
-			// A heartbeats far ahead of the others; a stable roster must NOT bubble
-			// it to the top while the hub is open (issue #10524).
+			// A heartbeat and B's status change must not move existing rows.
 			setSystemTime(4000);
 			agents.setActivity("A", "still running");
+			agents.setStatus("B", "idle");
 
-			// A new agent appears and forces a refresh: existing rows keep their
-			// captured order, and the newcomer appends at the end.
 			setSystemTime(5000);
 			const sessionD = {} as AgentSession;
 			agents.register({ id: "D", displayName: "Delta", kind: "sub", session: sessionD, status: "parked" });
-			// Renders coalesce: the immediate frame still shows the captured order.
+			setSystemTime(6000);
+			agents.register({ id: "E", displayName: "Epsilon", kind: "sub", session: {} as AgentSession });
+			// One coalesced refresh: new agents use the existing status/recency
+			// ranking, but both precede the frozen roster.
 			expect(renderedAgentIds(hub)).toEqual(["C", "B", "A"]);
 			vi.advanceTimersByTime(100);
-			expect(renderedAgentIds(hub)).toEqual(["C", "B", "A", "D"]);
+			expect(renderedAgentIds(hub)).toEqual(["E", "D", "C", "B", "A"]);
+			expect(selectedAgentId(hub)).toBe("B");
 
-			// Reusing an unregistered id creates a new agent generation. It must
-			// append rather than reclaiming the removed generation's old rank.
+			// Further tool activity cannot displace either newcomer.
+			setSystemTime(7000);
+			agents.setActivity("A", "active again");
+			vi.advanceTimersByTime(100);
+			expect(renderedAgentIds(hub)).toEqual(["E", "D", "C", "B", "A"]);
+			expect(selectedAgentId(hub)).toBe("B");
+
+			// Reusing an unregistered id creates a new generation at the top,
+			// rather than reclaiming the previous generation's old rank.
 			agents.unregister("B", sessionB);
 			agents.register({ id: "B", displayName: "Beta 2", kind: "sub", session: {} as AgentSession });
 			vi.advanceTimersByTime(100);
-			expect(renderedAgentIds(hub)).toEqual(["C", "A", "D", "B"]);
+			expect(renderedAgentIds(hub)).toEqual(["B", "E", "D", "C", "A"]);
 		} finally {
 			hub?.dispose();
 			vi.useRealTimers();
