@@ -11,6 +11,7 @@
 - Fixed MCP configs carrying a shared field (`timeout`, `requestIdFormat`, `auth`, `oauth`, …) being rejected by the bundled JSON schema on every transport; such entries now validate.
 - Fixed scalar shared fields (`timeout`, `enabled`, `requestIdFormat`) losing `${VAR}` expansion in `.omp/mcp.json` and OMP extension configs once filters went literal; per-field expansion now covers them, and the expanded strings coerce exactly as literal values do.
 - Fixed Exa tool selection consulting the new filters (URL-semantic endpoint parsing, case-sensitive native classification, prototype-safe native set): a server whose enabled tools are non-native is kept instead of dropped.
+- Added `additionalContext` to extension and hook `tool_call` results, plus `ctx.addAdditionalContext()` for registered tools, to pass trusted instructions to the model after a tool call without changing its result ([#11998](https://github.com/can1357/oh-my-pi/pull/11998) by [@H4vC](https://github.com/H4vC))
 
 ## [18.3.0] - 2026-09-24
 
