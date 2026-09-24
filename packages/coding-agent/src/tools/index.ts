@@ -692,7 +692,10 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "eval") return allowEval;
 		if (name === "debug") return session.settings.get("debug.enabled");
 		if (name === "todo")
-			return (!includeYield || session.prewalkArmed === true) && session.settings.get("todo.enabled");
+			return (
+				(!includeYield || session.prewalkArmed === true || requestedTools?.includes("todo") === true) &&
+				session.settings.get("todo.enabled")
+			);
 		if (name === "glob") return session.settings.get("glob.enabled");
 		if (name === "grep") return session.settings.get("grep.enabled");
 		if (name === "find") return isFindEnabled(session);

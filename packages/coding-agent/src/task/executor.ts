@@ -3981,8 +3981,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 
 			// Todos are parent-owned bookkeeping and stripped from subagents —
 			// except under prewalk, whose plan nudge + todo gate require the
-			// subagent to commit its own todo list before the hand-off.
-			const isParentOwnedTool = (name: string): boolean => !prewalk && name === "todo";
+			// subagent to commit its own todo list before the hand-off, or when
+			// the agent definition opts in via `todo: true` frontmatter and its
+			// tools grant includes `todo` (issue #12575).
+			const keepsTodo = agent.todo === true && toolNames?.includes("todo") === true;
+			const isParentOwnedTool = (name: string): boolean => !prewalk && !keepsTodo && name === "todo";
 			const subagentToolNames = session.getEnabledToolNames();
 			const filteredSubagentTools = subagentToolNames.filter(name => !isParentOwnedTool(name));
 			if (filteredSubagentTools.length !== subagentToolNames.length) {

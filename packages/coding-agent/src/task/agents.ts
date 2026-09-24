@@ -27,6 +27,7 @@ interface AgentFrontmatter {
 	blocking?: boolean;
 	prewalk?: boolean | string;
 	advisor?: boolean | string;
+	todo?: boolean;
 }
 
 interface EmbeddedAgentDef {

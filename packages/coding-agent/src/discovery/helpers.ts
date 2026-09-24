@@ -300,6 +300,8 @@ export interface ParsedAgentFields {
 	prewalk?: boolean | string;
 	/** `true` = advise with the default advisor-role model; string = advise with that model pattern. */
 	advisor?: boolean | string;
+	/** `true` = keep the parent-owned `todo` tool in spawned sessions when the tools grant includes it. */
+	todo?: boolean;
 }
 
 /**
@@ -393,6 +395,7 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		readSummarize,
 		prewalk,
 		advisor,
+		todo: parseBoolean(frontmatter.todo) ?? undefined,
 	};
 }
 
