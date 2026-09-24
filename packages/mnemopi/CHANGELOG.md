@@ -2,10 +2,6 @@
 
 ## [Unreleased]
 
-### Changed
-
-- Migrated all hashing operations from `node:crypto` to `Bun.SHA256`
-
 ## [18.2.5] - 2026-09-17
 
 ### Fixed

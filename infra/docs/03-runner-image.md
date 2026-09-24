@@ -40,23 +40,14 @@ on `PATH`, and
 the pinned Rust toolchain is already the default so target/component installs in
 CI become no-ops.
 
-### Stay in sync with `setup-system-deps`
+### The apt set is not a CI requirement
 
-The apt set baked into the image **must** match the repo's
-`.github/actions/setup-system-deps` composite action. That action is the
-self-healing counterpart: it probes for the baked tools and skips the apt
-round-trip when they are present (preloaded image), but installs the exact same
-set on a stock runner so CI still works anywhere. Its detection probes are:
-
-```bash
-command -v fd && command -v rg && command -v magick \
-  && pkg-config --exists cairo pango
-```
-
-If you add a dependency that the action probes for, add it in **both** the
-Dockerfile apt line and `setup-system-deps`. If they drift, either the action
-re-installs deps the image already has (slow) or CI breaks on a tool the image
-forgot to bake.
+CI used to run a `setup-system-deps` composite action that mirrored this apt
+set on stock runners. It was removed after every CI test bucket, the CLI
+smoke, and the install-method smoke were verified to pass without those
+packages (the only `magick` user is an API-key-gated e2e test CI never runs).
+The packages stay baked into the image for agent/interactive use; there is no
+longer a workflow-side copy to keep in sync.
 
 ---
 
@@ -88,7 +79,8 @@ reproduced verbatim (it contains no secrets or redactable host identifiers; the
 #     targets (linux-x64, windows-msvc x64/arm64) and linux-arm64 for zigbuild
 #
 # Rebuild + reimport (see /root/omp-kata-runner.md) after bumping the ARGs below
-# or the apt set. Keep the apt set in sync with .github/actions/setup-system-deps.
+# or the apt set. No CI job requires the apt tools any more; they stay baked
+# for interactive/agent use on the runner.
 FROM ghcr.io/actions/actions-runner:latest
 
 ARG RUST_NIGHTLY=nightly-2026-09-14
@@ -171,8 +163,7 @@ toolchain install in CI is a no-op (see step 4 below). Bump both together.
 apt and bun system installs; `noninteractive` suppresses debconf/tzdata prompts
 during `apt-get install`.
 
-**The apt `RUN` block.** This is the set that must mirror `setup-system-deps`.
-In order:
+**The apt `RUN` block.** In order:
 - The first three lines add the **GitHub CLI apt repository** (keyring + signed
   source list) *before* `apt-get update`, so `gh` resolves and installs in the
   same apt transaction as everything else. `gh` is present on GitHub-hosted
@@ -193,8 +184,7 @@ In order:
   Debian ships `fd` as `fdfind`, so `ln -sf "$(command -v fdfind)"
   /usr/local/bin/fd` exposes it as `fd`; ImageMagick installs `convert`, so
   `ln -sf /usr/bin/convert /usr/local/bin/magick` exposes the v7-style `magick`
-  name. These two shims are exactly what `setup-system-deps` recreates on a stock
-  runner.
+  name.
 - `rm -rf /var/lib/apt/lists/*` drops the apt index to keep the layer smaller.
 
 **bun (`ENV BUN_INSTALL=/usr/local` + install `RUN`).** Setting
@@ -395,10 +385,8 @@ next job's microVM starts cold but with warm dependencies from the local store.
 2. **Rust:** edit `ARG RUST_NIGHTLY=` to the `channel` in `rust-toolchain.toml`,
    and keep the `rustup target add` list a superset of the toml's `targets`, so
    rustup's per-job install stays a no-op.
-3. **apt set:** edit the `apt-get install` line. You **must** mirror the change in
-   `.github/actions/setup-system-deps` (and, if you add a tool the action probes
-   for, in its detection block - currently `fd`, `rg`, `magick`,
-   `pkg-config --exists cairo pango`).
+3. **apt set:** edit the `apt-get install` line. No workflow mirrors it any
+   more, so nothing else needs changing.
 4. Re-roll:
 
    ```bash

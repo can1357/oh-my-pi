@@ -4052,6 +4052,7 @@ mod tests {
 		let _ = std::fs::remove_dir_all(&tmp);
 		std::fs::create_dir_all(&tmp).expect("temp dir");
 		std::fs::write(tmp.join("data.txt"), "from-cwd\nfrom-pattern\n").expect("data");
+		std::fs::write(tmp.join("z-output.txt"), "from-cwd\n").expect("output seed");
 		let tmp_str = tmp.to_str().expect("utf8");
 
 		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
@@ -4066,10 +4067,10 @@ mod tests {
 
 		session
 			.shell
-			.run_string("rg from-cwd > cwd.txt", &si, &params)
+			.run_string("rg --sort path --max-count 1 from-cwd >> z-output.txt", &si, &params)
 			.await
 			.expect("rg cwd");
-		assert_eq!(read("cwd.txt"), "data.txt:from-cwd\n");
+		assert_eq!(read("z-output.txt"), "from-cwd\ndata.txt:from-cwd\n");
 
 		session
 			.shell

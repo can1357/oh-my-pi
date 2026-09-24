@@ -415,6 +415,7 @@ function formatAccountHeader(
 	}
 	const planType = report.metadata?.planType;
 	if (typeof planType === "string" && planType) header += chalk.dim(` · plan: ${planType}`);
+	if (report.metadata?.daybreak === true) header += chalk.cyan(" · daybreak");
 	const resets = summarizeUsageResetCredits(report.resetCredits, nowMs);
 	if (resets && resets.bankedCount > 0) {
 		header += chalk.cyan(` · ✦ ${resets.bankedCount} saved reset${resets.bankedCount === 1 ? "" : "s"}`);

@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [18.3.0] - 2026-09-24
+
+### Added
+
+- Added native bindings for Apple Foundation Models availability checks, text generation, and cancellation.
+- Added offline token counting support for TypeSafe Jev 1.13 `state` inputs via `Encoding.Jev` (excluding the request frame).
+
 ## [18.2.11] - 2026-09-23
 
 ### Changed

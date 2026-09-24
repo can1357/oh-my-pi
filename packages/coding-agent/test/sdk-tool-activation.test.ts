@@ -2071,7 +2071,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			settings: configuredSettings(),
 			extensions: [toolActivationExtension, restrictedLateExtension],
 			customTools: [sdkCustomTool],
-			toolNames: ["read", "lsp", "hub"],
+			toolNames: ["read", "lsp"],
 			requireYieldTool: true,
 			restrictToolNames: true,
 			enableMCP: true,
@@ -2099,7 +2099,6 @@ describe("createAgentSession defaultInactive tool activation", () => {
 				"default_inactive_tool",
 				"sdk_custom_tool",
 				"restricted_late_extension_tool",
-				"hub",
 			]) {
 				expect(restricted.getToolByName(name)).toBeUndefined();
 			}

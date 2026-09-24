@@ -5,7 +5,7 @@
  * viewer ({@link AgentTranscriptViewer}) to render a parked subagent / advisor /
  * collab-guest transcript that has no live session.
  *
- * Unlike the old incremental hub sync, {@link ChatTranscriptBuilder.rebuild}
+ * Unlike incremental transcript sync, {@link ChatTranscriptBuilder.rebuild}
  * always discards prior components and rebuilds the whole transcript from the
  * supplied entries. Re-rendering a growing transcript is therefore O(n) in the
  * entry count, but it cannot duplicate or misorder rows the way incremental
@@ -184,12 +184,12 @@ export class ChatTranscriptBuilder {
 		this.#expandables.push(component);
 	}
 
-	/** A `hub` wait showing all-running is displaced by the next `hub` call. */
+	/** A `wait` showing all-running is displaced by the next `wait` call. */
 	#resolveWaitingPoll(nextToolName?: string): void {
 		const previous = this.#waitingPoll;
 		if (!previous) return;
 		this.#waitingPoll = null;
-		if (nextToolName === "hub" && previous.isDisplaceableBlock() && this.container.canRemoveBlock(previous)) {
+		if (nextToolName === "wait" && previous.isDisplaceableBlock() && this.container.canRemoveBlock(previous)) {
 			this.container.removeChild(previous);
 		}
 		previous.seal();
@@ -517,7 +517,7 @@ export class ChatTranscriptBuilder {
 		if (!pending) return;
 		pending.updateResult(message, false, message.toolCallId);
 		this.#pendingTools.delete(message.toolCallId);
-		if (message.toolName === "hub" && pending instanceof ToolExecutionComponent && pending.isDisplaceableBlock()) {
+		if (message.toolName === "wait" && pending instanceof ToolExecutionComponent && pending.isDisplaceableBlock()) {
 			this.#waitingPoll = pending;
 		} else if (
 			message.toolName === "todo" &&

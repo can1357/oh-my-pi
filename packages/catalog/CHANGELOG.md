@@ -4,7 +4,16 @@
 
 ### Added
 
-- Added `org-scoped-identity` and `oauth-token-env` rule support for auth providers
+- Added Mistral to `/login` with an API-key flow that validates against `https://api.mistral.ai/v1/models`, so `MISTRAL_API_KEY` no longer has to come from the environment
+
+## [18.3.0] - 2026-09-24
+
+### Added
+
+- Added compaction support for the `claude-mythos-preview` model.
+- Added provider and authentication rule definitions for on-device Apple Foundation Models.
+- Added per-account discovery of Codex cyber access entitlements.
+- Added `org-scoped-identity` and `oauth-token-env` authentication rules for providers.
 
 ## [18.2.11] - 2026-09-23
 
@@ -39,10 +48,6 @@
 
 ### Added
 
-- Added support for embedding, rerank, and video generation capabilities in OpenRouter provider
-- Added support for speech-to-text (STT) capabilities in OpenAI provider
-- Added five STT models to OpenRouter provider
-- Added Mistral to `/login` with an API-key flow that validates against `https://api.mistral.ai/v1/models`, so `MISTRAL_API_KEY` no longer has to come from the environment
 - Expanded OpenRouter provider support with embedding, reranking, video generation, text-to-speech, and speech-to-text capabilities, including five new speech-to-text models.
 - Added speech-to-text support to the OpenAI provider.
 

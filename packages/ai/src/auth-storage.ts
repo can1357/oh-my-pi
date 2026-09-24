@@ -33,6 +33,7 @@ import { CredentialSelector } from "./auth/select";
 import { SqliteAuthCredentialStore } from "./auth/sqlite-credential-store";
 import type { AuthCredentialStore } from "./auth/store";
 import type {
+	AuthApiKeyOptions,
 	AuthStorageOptions,
 	BlocksApi,
 	CredentialsApi,
@@ -170,5 +171,21 @@ export class AuthStorage {
 	/** Close the underlying credential store; the instance must not be reused. */
 	close(): void {
 		this.#pool.close();
+	}
+
+	/**
+	 * Legacy redirect for callers of the pre-namespace flat API (e.g. repo scripts).
+	 * @deprecated Use {@link AuthStorage.keys}`.get`.
+	 */
+	getApiKey(provider: string, sessionId?: string, options?: AuthApiKeyOptions): Promise<string | undefined> {
+		return this.keys.get(provider, sessionId, options);
+	}
+
+	/**
+	 * Legacy redirect for callers of the pre-namespace flat API (e.g. repo scripts).
+	 * @deprecated Use {@link AuthStorage.credentials}`.reload`.
+	 */
+	reload(): Promise<void> {
+		return this.credentials.reload();
 	}
 }

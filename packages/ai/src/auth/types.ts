@@ -1,4 +1,4 @@
-import type { ApiKeyResolver } from "../auth-retry";
+import type { ApiKeyResolver, ResolvedApiKey } from "../auth-retry";
 import type {
 	OAuthAuthInfo,
 	OAuthController,
@@ -450,6 +450,8 @@ export interface ModelUsageHealthOptions {
 export type AuthApiKeyOptions = {
 	baseUrl?: string;
 	modelId?: string;
+	/** Provider account ids known to serve `modelId` from multi-account discovery; OAuth selection prefers them and tries other accounts only as a last resort. */
+	accountIds?: readonly string[];
 	/**
 	 * Caller's cancel signal. Threaded into any broker-bound OAuth refresh so
 	 * `ESC` / request abort actually kills a hung broker fetch instead of
@@ -838,6 +840,12 @@ export interface KeysApi {
 	 * 6. Stored API key (e.g. a broker-migrated copy) — last resort, so an explicit env var wins
 	 */
 	get(provider: string, sessionId?: string, options?: AuthApiKeyOptions): Promise<string | undefined>;
+	/** Resolve a bearer together with its durable stored credential row id, when known. */
+	getWithCredential(
+		provider: string,
+		sessionId?: string,
+		options?: AuthApiKeyOptions,
+	): Promise<ResolvedApiKey | undefined>;
 	/**
 	 * Peek at API key for a provider without refreshing OAuth tokens.
 	 * Used for model discovery where we only need to know if credentials exist

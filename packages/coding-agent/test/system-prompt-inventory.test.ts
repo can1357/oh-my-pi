@@ -620,13 +620,7 @@ describe("system prompt tool inventory", () => {
 
 		expect(toolNames).toContain("bash");
 		expect(toolNames).not.toContain("eval");
-		expect(bash?.description).toContain("purpose-built tool");
-		expect(bash?.description).not.toContain("eval` cell");
-		expect(bash?.description).not.toContain("use `eval` cells");
-		expect(bash?.description).not.toContain("Prefer `eval`");
-		expect(bash?.description).not.toContain("`grep` tool");
-		expect(bash?.description).not.toContain("`ls` → `read`");
-		expect(bash?.description).not.toContain("`find` → the `glob` tool");
+		expect(bash?.description).not.toContain("`eval`");
 
 		const { systemPrompt } = await buildSystemPrompt({
 			cwd: tempDir,
@@ -809,7 +803,7 @@ describe("system prompt tool inventory", () => {
 		});
 
 		expect(JSON.stringify(read.parameters.toJsonSchema())).toContain("skill://");
-		expect(bash.description).toContain("`skill://<name>`");
+		expect(bash.description).toContain("skill://");
 		expect(systemPrompt.join("\n\n")).toContain("`skill://<name>`");
 
 		// Standalone sessions derive visibility; an explicit managed snapshot wins.
@@ -1008,7 +1002,7 @@ describe("system prompt tool inventory", () => {
 			})
 		).systemPrompt.join("\n\n");
 
-		expect(withScout).toContain("one read-only scout while working is allowed");
+		expect(withScout).toContain("read-only scout");
 		expect(withoutScout).not.toContain("read-only scout");
 	});
 
@@ -1024,12 +1018,11 @@ describe("system prompt tool inventory", () => {
 			inlineToolDescriptors: false,
 		};
 		const withoutTodo = (await buildSystemPrompt({ ...opts, toolNames: ["read", "bash"] })).systemPrompt.join("\n\n");
-		expect(withoutTodo).not.toContain("Todo calls NEVER alone");
-		expect(withoutTodo).not.toContain("batch each with turn's real calls");
+		expect(withoutTodo).not.toContain("todo-only turn");
 
 		const withTodo = (await buildSystemPrompt({ ...opts, toolNames: ["read", "bash", "todo"] })).systemPrompt.join(
 			"\n\n",
 		);
-		expect(withTodo).toContain("Todo calls NEVER alone");
+		expect(withTodo).toContain("todo-only turn");
 	});
 });

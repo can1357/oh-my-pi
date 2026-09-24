@@ -69,7 +69,7 @@ interface SessionHarness {
  * `subscribeRunState` never fires — the run-state mirror omits `idle`, which is
  * exactly the leak the acceptance boundary must cover.
  */
-function createHarness(options?: { hangPrompt?: boolean }): SessionHarness {
+function createHarness(options?: { hangPrompt?: boolean; asyncJobManager?: AsyncJobManager }): SessionHarness {
 	const listeners: Array<(event: AgentSessionEvent) => void> = [];
 	const messages: AssistantMessage[] = [];
 	const promptEntered = Promise.withResolvers<void>();
@@ -138,6 +138,7 @@ function createHarness(options?: { hangPrompt?: boolean }): SessionHarness {
 		},
 		trackIrcReply: () => {},
 		subscribeRunState: () => () => {},
+		asyncJobManager: options?.asyncJobManager,
 	};
 	return {
 		session: session as unknown as AgentSession,
@@ -294,5 +295,53 @@ describe("runSubprocess result acceptance", () => {
 		expect(settled?.lifecycle?.responseAt).toBeNumber();
 		expect(settled?.lifecycle?.acceptedAt).toBeNumber();
 		expect(settled?.lifecycle?.terminalAt).toBeNumber();
+	});
+
+	it("delivers every yield of a woken agent to its parent as a job completion", async () => {
+		const manager = new AsyncJobManager({});
+		const delivered: string[] = [];
+		manager.registerDeliverySink("Parent", (_jobId, text) => {
+			delivered.push(text);
+		});
+		const harness = createHarness({ asyncJobManager: manager });
+		AgentRegistry.global().register({
+			id: AGENT_ID,
+			displayName: AGENT_ID,
+			kind: "sub",
+			parentId: "Parent",
+			session: harness.session,
+			status: "idle",
+		});
+		attachIrcWakeTurnMonitor(harness.session, { id: AGENT_ID, agent: baseAgent });
+		const observer = harness.wakeObserver();
+		if (!observer) throw new Error("wake-turn observer was not registered");
+
+		try {
+			for (const report of ["followup-done", "broadcast-ok"]) {
+				const finish = observer([
+					{
+						role: "custom",
+						customType: "irc:incoming",
+						content: "follow up",
+						display: false,
+						details: { id: `msg-${report}`, from: "Parent", message: "follow up" },
+						attribution: "agent",
+						timestamp: Date.now(),
+					} as unknown as AgentMessage,
+				]);
+				harness.emitTerminalYield({ report });
+				// Pending from acceptance until finalization: the parent's `wait` can block on it.
+				expect(manager.getRunningJobs({ ownerId: "Parent" }).map(job => job.agentId)).toEqual([AGENT_ID]);
+				await finish?.(undefined);
+				await manager.waitForAll();
+				await manager.drainDeliveries({ timeoutMs: 1000 });
+			}
+
+			expect(delivered).toHaveLength(2);
+			expect(delivered[0]).toContain("followup-done");
+			expect(delivered[1]).toContain("broadcast-ok");
+		} finally {
+			await manager.dispose({ timeoutMs: 1000 });
+		}
 	});
 });

@@ -461,6 +461,31 @@ describe("ExtensionRunner", () => {
 	});
 
 	describe("error handling", () => {
+		it("rejects instead of returning untransformed context when its caller aborts a pending handler", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("context", async () => {
+						await new Promise(() => {});
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "pending-context.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const controller = new AbortController();
+			const pending = runner.emitContext([{ role: "user", content: "unredacted", timestamp: 1 }], controller.signal);
+
+			controller.abort(new Error("caller aborted"));
+			await expect(pending).rejects.toThrow("caller aborted");
+		});
+
 		it("calls error listeners when handler throws", async () => {
 			const extCode = `
 				export default function(pi) {
