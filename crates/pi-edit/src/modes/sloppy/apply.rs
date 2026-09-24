@@ -17,7 +17,7 @@ use super::{
 	types::{
 		ATOMICITY_NOTICE, Candidate, CandidateResult, EdgeGaps, LiteralFallback, MAX_CANDIDATES,
 		MAX_COMBINATIONS, NormalizedText, Occurrence, Operation, OperationRewrite, ParsedPattern,
-		PatternToken, PlannedEdit, SelectionPair,
+		PatternToken, Placement, PlannedEdit, SelectionPair,
 		markers::{GAP, SELECT_CLOSE, SELECT_DIVIDER, SELECT_OPEN},
 	},
 };
@@ -481,6 +481,36 @@ fn source_end(normalized: &NormalizedText, offset: usize, fallback: usize) -> us
 		normalized.ends.get(offset - 1).copied().unwrap_or(fallback)
 	}
 }
+
+/// Whether a candidate's selection spans can be applied without corrupting the
+/// rewrite.
+///
+/// Consumers ([`rewrite_selection_spans`], the ambiguity-outcome projector, and
+/// [`rewrite_proves_whole_span`]) assume the spans are ordered,
+/// non-overlapping, distinct-start sub-ranges of `[start, end]`. Garbled `⟪…⟫`
+/// marker glyphs can resolve pairs that overlap or fall outside that range;
+/// splicing such a pair would index `content` (or the mutated
+/// `content[start..end]` buffer) on an out-of-range or mid-char edge and panic
+/// the worker instead of reporting a miss. Rejecting the candidate lets the
+/// miss surface as an [`EditError`].
+fn selection_spans_usable(spans: &[(usize, usize)], start: usize, end: usize) -> bool {
+	let mut ordered: Vec<(usize, usize)> = spans.to_vec();
+	ordered.sort_unstable();
+	let mut cursor = start;
+	let mut previous_start: Option<usize> = None;
+	for (span_start, span_end) in ordered {
+		if span_start < cursor
+			|| span_start > span_end
+			|| span_end > end
+			|| previous_start == Some(span_start)
+		{
+			return false;
+		}
+		previous_start = Some(span_start);
+		cursor = span_end;
+	}
+	true
+}
 fn preceding_literal(tokens: &[PatternToken], boundary: usize) -> Option<usize> {
 	(0..boundary)
 		.rev()
@@ -717,7 +747,14 @@ fn collect_candidates(
 						)
 					})
 					.collect::<Vec<_>>();
-				if selection_spans.iter().any(|(start, end)| start > end) {
+				// Every selection span must be an ordered, non-overlapping,
+				// char-boundary sub-range of the candidate's own [start, end].
+				// Garbled marker glyphs can otherwise resolve overlapping or
+				// out-of-range pairs that later slice `content` (or the
+				// `content[start..end]` rewrite buffer) on a mid-char or
+				// out-of-range edge and panic the worker instead of reporting a
+				// miss.
+				if !selection_spans_usable(&selection_spans, start, end) {
 					return;
 				}
 				let candidate = Candidate {
@@ -883,7 +920,7 @@ fn no_match_error(
 		)
 	};
 	let first = if operation.all {
-		format!("Operation {operation_number} *** SM:EDIT all found 0 matches in {path}. {reason}")
+		format!("Operation {operation_number} (all) found 0 matches in {path}. {reason}")
 	} else {
 		format!("Operation {operation_number} did not match {path}. {reason}")
 	};
@@ -917,7 +954,7 @@ fn no_match_error(
 			)
 		} else if standalone {
 			"No copy-ready correction — the closest current text is only a fuzzy match. Re-read the \
-			 region above and rebuild *** SM:FIND from the exact current text."
+			 region above and rebuild *** Find from the exact current text."
 				.to_owned()
 		} else {
 			"No copy-ready correction — retrying this operation alone would drop sibling operations. \
@@ -989,7 +1026,7 @@ fn same_rewrite_for_all(
 	candidates: &[Candidate],
 ) -> bool {
 	match &operation.rewrite {
-		OperationRewrite::After { .. } => true,
+		OperationRewrite::Insert { .. } => true,
 		OperationRewrite::Explicit { text } => {
 			let gaps = text.matches(GAP).count();
 			pattern
@@ -1143,13 +1180,13 @@ pub(crate) fn locate(
 	}
 	if candidates.len() <= 4
 		&& !operation.desired_state
-		&& !matches!(operation.rewrite, OperationRewrite::After { .. })
+		&& !matches!(operation.rewrite, OperationRewrite::Insert { .. })
 	{
 		let outcomes = candidates
 			.iter()
 			.filter_map(|candidate| {
 				Some(match &operation.rewrite {
-					OperationRewrite::After { .. } => return None,
+					OperationRewrite::Insert { .. } => return None,
 					OperationRewrite::Explicit { text } => {
 						format!("{}{}{}", &content[..candidate.start], text, &content[candidate.end..])
 					},
@@ -1363,7 +1400,7 @@ fn decode_literal_markers(text: String) -> String {
 		.replace("\0V8LITDIV\0", SELECT_DIVIDER)
 }
 
-/// Drop the `*** SM:PUT` ellipses that re-emit `*** SM:FIND`'s open edges. An
+/// Drop the `*** Replace` ellipses that re-emit `*** Find`'s open edges. An
 /// edge gap captured nothing, so re-emitting it writes nothing; a whole-line
 /// edge `…` takes the newline joining it to the rest of the rewrite with it.
 /// The leading edge is positional; the trailing one is only claimed by an
@@ -1415,7 +1452,7 @@ fn strip_edge_gaps(rewrite: &str, edges: EdgeGaps, inner: usize) -> Cow<'_, str>
 	text
 }
 
-/// Edges of `*** SM:FIND` that an inline selection borders; its replacement may
+/// Edges of `*** Find` that an inline selection borders; its replacement may
 /// re-emit them.
 fn selection_edges(
 	pattern: &ParsedPattern,
@@ -1440,8 +1477,8 @@ fn render_rewrite(
 ) -> Result<String, EditError> {
 	if rewrite.contains(SELECT_OPEN) || rewrite.contains(SELECT_CLOSE) {
 		return Err(EditError::matched(format!(
-			"Operation {operation_number} has selection markers in *** SM:PUT; *** SM:FIND is \
-			 current text, *** SM:PUT is final text."
+			"Operation {operation_number} has selection markers in *** Replace; *** Find is current \
+			 text, *** Replace is final text."
 		)));
 	}
 	let stripped = strip_edge_gaps(rewrite, edges, indices.len());
@@ -1459,10 +1496,10 @@ fn render_rewrite(
 			if marker >= indices.len() {
 				if line.trim() == GAP {
 					return Err(EditError::matched(format!(
-						"Operation {operation_number} *** SM:PUT has a whole-line {GAP} with no *** \
-						 SM:FIND gap to re-emit. *** SM:PUT is final text written verbatim: type the \
-						 elided lines out, or add a matching {GAP} gap to *** SM:FIND. To write a \
-						 literal {GAP} line, use the write tool."
+						"Operation {operation_number} *** Replace has a whole-line {GAP} with no *** \
+						 Find gap to re-emit. *** Replace is final text written verbatim: type the \
+						 elided lines out, or add a matching {GAP} gap to *** Find. To write a literal \
+						 {GAP} line, use the write tool."
 					)));
 				}
 				rendered.push_str(GAP);
@@ -2186,8 +2223,8 @@ fn no_op_error(
 	} else if let Some(operation) = operation {
 		if let Some(matches) = match_count {
 			format!(
-				"Operation {operation} *** SM:EDIT all matched {matches} occurrences but all make no \
-				 change to {}.",
+				"Operation {operation} (all) matched {matches} occurrences but all make no change to \
+				 {}.",
 				context.path
 			)
 		} else {
@@ -2199,7 +2236,7 @@ fn no_op_error(
 	let grounding = preview.map_or(String::new(), |(content, offset)| {
 		format!(
 			"\nYour rewrite normalized to text identical to these lines. Indentation-only changes \
-			 are applied verbatim; adjust the authored *** SM:PUT if another whitespace change was \
+			 are applied verbatim; adjust the authored *** Replace if another whitespace change was \
 			 intended.\nCurrent file content near the closest match (no re-read needed):\n{}",
 			numbered_preview(content, offset)
 		)
@@ -2299,7 +2336,7 @@ fn apply_operations(
 		};
 		if operation.whitespace_matched {
 			recovery_notes.push(format!(
-				"Note: operation {number}'s *** SM:FIND differed from the file in whitespace only and \
+				"Note: operation {number}'s *** Find differed from the file in whitespace only and \
 				 was matched leniently. Inserted lines are written exactly as authored — verify their \
 				 indentation."
 			));
@@ -2308,20 +2345,30 @@ fn apply_operations(
 			candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.start));
 		}
 		match &operation.rewrite {
-			OperationRewrite::After { text } => {
+			OperationRewrite::Insert { text, at } => {
+				let body = text.strip_suffix('\n').unwrap_or(text);
 				for candidate in &candidates {
-					// Insert before the final anchor line's newline, retaining its EOF convention.
-					let end = candidate.match_end;
-					let offset = if end > 0 && content.as_bytes()[end - 1] == b'\n' {
-						end - 1
-					} else {
-						content[end..]
-							.find('\n')
-							.map_or(content.len(), |at| end + at)
+					let (offset, replacement) = match at {
+						// Insert at the first anchor line's start, ahead of its indentation.
+						Placement::Before => {
+							let start = candidate.match_start;
+							let offset = content[..start].rfind('\n').map_or(0, |at| at + 1);
+							(offset, format!("{body}\n"))
+						},
+						// Insert before the final anchor line's newline, retaining its EOF
+						// convention.
+						Placement::After => {
+							let end = candidate.match_end;
+							let offset = if end > 0 && content.as_bytes()[end - 1] == b'\n' {
+								end - 1
+							} else {
+								content[end..]
+									.find('\n')
+									.map_or(content.len(), |at| end + at)
+							};
+							(offset, format!("\n{body}"))
+						},
 					};
-					let mut replacement = String::with_capacity(text.len());
-					replacement.push('\n');
-					replacement.push_str(text.strip_suffix('\n').unwrap_or(text));
 					planned.push(PlannedEdit {
 						start: offset,
 						end: offset,
@@ -2461,19 +2508,19 @@ fn apply_operations(
 					return Err(EditError::matched(
 						[
 							format!(
-								"Operation {number} has {} selections, but *** SM:PUT proves neither \
+								"Operation {number} has {} selections, but *** Replace proves neither \
 								 positional substitution nor whole-span replacement.",
 								pattern.selection_ranges.len()
 							),
 							"Copy-ready per-selection interpretation:".to_owned(),
 							format!(
-								"{header}\n*** SM:FIND\n{}\n*** SM:PUT\n{}",
+								"{header}\n*** Find\n{}\n*** Replace\n{}",
 								operation.pattern_text,
 								repeated.join("\n")
 							),
 							"Copy-ready whole-span interpretation:".to_owned(),
 							format!(
-								"{header}\n*** SM:FIND\n{}\n*** SM:PUT\n{}",
+								"{header}\n*** Find\n{}\n*** Replace\n{}",
 								operation.pattern_text,
 								rewrite_selection_spans(content, candidate, &repeated)
 							),
@@ -2534,13 +2581,14 @@ fn apply_operations(
 							number,
 							if operation.assumed_deletion {
 								format!(
-									"Note: operation {number} had no *** SM:PUT and was applied as a move \
+									"Note: operation {number} had no *** Replace and was applied as a move \
 									 deletion (a later operation re-emits its block)."
 								)
 							} else {
 								format!(
-									"Note: operation {number} deleted {lines} line(s); an empty *** SM:PUT \
-									 means deletion — resend with the final text if you meant to replace."
+									"Note: operation {number} deleted {lines} line(s); an empty *** \
+									 Replace means deletion — resend with the final text if you meant to \
+									 replace."
 								)
 							},
 						);

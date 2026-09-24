@@ -4,7 +4,7 @@ import { LINE_RANGE_CHUNK_SOURCE, parseLineRanges } from "./line-ranges";
 import * as path from "node:path";
 import type { Component } from "../tui";
 import { Text } from "../components/text";
-import type { RenderResultOptions, ToolRenderer } from "./renderer";
+import type { RenderResultOptions, ToolActivityContext, ToolActivitySummary, ToolRenderer } from "./renderer";
 import { getLanguageFromPath } from "../lang-from-path";
 import type { Theme } from "../theme/theme";
 import { fileHyperlink, renderCodeCell, renderMarkdownCell, renderStatusLine } from "../render";
@@ -16,6 +16,7 @@ import { formatBytes, sanitizeDisplayLines, shortenPath, wrapBrackets } from "..
 
 import type { OutputMeta } from "./output-meta";
 import type { TruncationResult } from "./streaming-output";
+import { renderProcRead, type ProcReadDetails } from "./proc-render";
 
 /** Read result metadata retains truncation statistics, not a second copy of the body. */
 export type ReadTruncationStats = Omit<TruncationResult, "content">;
@@ -23,6 +24,7 @@ export type ReadTruncationStats = Omit<TruncationResult, "content">;
 /** Display metadata for file and URL reads. */
 export interface ReadToolDetails {
 	kind?: "file" | "url";
+	proc?: ProcReadDetails;
 	/** Filesystem hyperlink target resolved by the executing tool. */
 	displayTarget?: string;
 	truncation?: ReadTruncationStats;
@@ -91,6 +93,7 @@ const INTERNAL_SCHEMES_WITH_SELECTORS: Record<string, true> = {
 	memory: true,
 	omp: true,
 	pr: true,
+	proc: true,
 	rule: true,
 	security: true,
 	skill: true,
@@ -266,9 +269,19 @@ function formatReadPathLink(
 
 /** Render file, image, and URL reads in the transcript. */
 export const readToolRenderer = {
+	activitySummary(args: unknown, _context: ToolActivityContext): ToolActivitySummary {
+		const input = args as ReadRenderArgs | undefined;
+		const rawPath =
+			typeof input?.file_path === "string" ? input.file_path : typeof input?.path === "string" ? input.path : "";
+		if (/^proc:\/\//i.test(rawPath))
+			return { label: "Process", detail: rawPath.slice("proc://".length) || "jobs & services" };
+		return { label: "Read", detail: shortenPath(rawPath) };
+	},
 	renderCall(args: ReadRenderArgs, _options: RenderResultOptions, uiTheme: Theme): Component {
 		const rawPath =
 			typeof args.file_path === "string" ? args.file_path : typeof args.path === "string" ? args.path : "";
+		if (/^proc:\/\//i.test(rawPath))
+			return renderProcRead(rawPath.slice("proc://".length), undefined, undefined, _options, uiTheme);
 		if (isReadableUrlPath(rawPath)) {
 			return renderReadUrlCall({ path: rawPath, raw: args.raw }, _options, uiTheme);
 		}
@@ -296,6 +309,14 @@ export const readToolRenderer = {
 		const urlDetails = result.details as ReadUrlToolDetails | undefined;
 		const baseRawPathForKind =
 			typeof args?.file_path === "string" ? args.file_path : typeof args?.path === "string" ? args.path : "";
+		if (/^proc:\/\//i.test(baseRawPathForKind))
+			return renderProcRead(
+				baseRawPathForKind.slice("proc://".length),
+				result,
+				result.details?.proc,
+				options,
+				uiTheme,
+			);
 		if (urlDetails?.kind === "url" || isReadableUrlPath(baseRawPathForKind)) {
 			return renderReadUrlResult(
 				result as {

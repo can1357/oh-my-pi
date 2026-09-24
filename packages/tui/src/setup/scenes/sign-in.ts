@@ -230,7 +230,7 @@ export class SignInTab implements SetupTab {
 		this.#host.restoreFocus();
 		this.#host.requestRender();
 		try {
-			await this.#authStorage.login(providerId as OAuthProvider, {
+			await this.#authStorage.oauth.login(providerId as OAuthProvider, {
 				signal: this.#loginAbort.signal,
 				onBrowserSession: (request, signal) => this.#host.ctx.captureBrowserSession(request, signal),
 				onAuth: info => {

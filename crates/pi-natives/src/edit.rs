@@ -702,7 +702,7 @@ pub struct InlineSloppyRegion {
 	pub payload: String,
 }
 
-/// Locate `*** SM:EDIT path` payloads the model emitted as plain text.
+/// Locate `*** Edit File: path` payloads the model emitted as plain text.
 #[napi]
 pub fn extract_inline_sloppy_regions(text: String) -> Vec<InlineSloppyRegion> {
 	sloppy::parse::extract_inline_sloppy_regions(&text)

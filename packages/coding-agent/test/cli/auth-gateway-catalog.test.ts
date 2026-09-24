@@ -1,8 +1,13 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { AuthStorage } from "@oh-my-pi/pi-ai";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { createSerializedRebuilder, indexModelsByRequestId } from "../../src/cli/auth-gateway-cli";
+import {
+	createSerializedRebuilder,
+	gatewayRoutableModels,
+	indexModelsByRequestId,
+} from "../../src/cli/auth-gateway-cli";
 import { ModelRegistry } from "../../src/config/model-registry";
 
 const authStores: AuthStorage[] = [];
@@ -76,7 +81,7 @@ describe("indexModelsByRequestId (auth-gateway catalog)", () => {
 		const clientRegistry = new ModelRegistry(clientAuthStorage, modelsPath);
 		expect(clientRegistry.find("anthropic", "claude-sonnet-4-5")?.baseUrl).toBe("http://127.0.0.1:18899");
 		expect(clientRegistry.getAll().find(model => model.provider === "openai")?.transport).toBe("pi-native");
-		expect(await clientAuthStorage.getApiKey("anthropic")).toBe("gateway-token");
+		expect(await clientAuthStorage.keys.get("anthropic")).toBe("gateway-token");
 
 		// The gateway registry ignores models.yml entirely: bundled routing wins,
 		// no config key reaches AuthStorage, and no pi-native self-route survives.
@@ -90,7 +95,7 @@ describe("indexModelsByRequestId (auth-gateway catalog)", () => {
 
 		expect(gatewayModel.baseUrl).toBe(bundledModel.baseUrl);
 		expect(gatewayModel.transport).toBeUndefined();
-		expect(await gatewayAuthStorage.getApiKey("anthropic")).not.toBe("gateway-token");
+		expect(await gatewayAuthStorage.keys.get("anthropic")).not.toBe("gateway-token");
 		expect(gatewayRegistry.getAll().find(model => model.provider === "openai")?.transport).toBeUndefined();
 		expect(indexModelsByRequestId(gatewayRegistry.getAll(), new Set(["anthropic"])).get(gatewayModel.id)).toBe(
 			gatewayModel,
@@ -109,6 +114,22 @@ describe("indexModelsByRequestId (auth-gateway catalog)", () => {
 
 		expect(index.get(`anthropic/${anthropicModel.id}`)).toBeDefined();
 		expect(index.get(`${foreignModel.provider}/${foreignModel.id}`)).toBeUndefined();
+	});
+
+	test("serves judge-kind models alongside chat and keeps unrouted kinds out", async () => {
+		using tempDir = TempDir.createSync("@omp-auth-gateway-catalog-");
+		const registry = new ModelRegistry(await createAuthStorage(), tempDir.join("models.yml"));
+		const routable = gatewayRoutableModels(registry);
+		// `getAll()` alone is chat-only, which is what left `/v1/systemone` with
+		// "Unknown model: jev-latest" for a credentialed TypeSafe account.
+		expect(registry.getAll().some(model => model.provider === "typesafe")).toBe(false);
+
+		const index = indexModelsByRequestId(routable, new Set(["typesafe", "local"]));
+
+		expect(index.get("typesafe/jev-latest")?.api).toBe("typesafe");
+		expect(index.get("jev-latest")?.provider).toBe("typesafe");
+		// Tiny on-device models have no gateway route and are not advertised.
+		expect([...index.values()].some(model => modelKind(model) === "tiny")).toBe(false);
 	});
 });
 

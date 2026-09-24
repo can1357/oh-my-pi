@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { generateTaskLabel, labelEchoesHandle } from "@oh-my-pi/pi-coding-agent/task/label";
 
 function getModelOrThrow(id: string): Model<Api> {
@@ -11,20 +12,14 @@ function getModelOrThrow(id: string): Model<Api> {
 }
 
 function createSettings(model: Model<Api>) {
-	return {
-		get(path: string) {
-			if (path === "providers.tinyModel") return "online";
-			return undefined;
-		},
-		getModelRole(role: string) {
-			return role === "smol" ? `${model.provider}/${model.id}` : undefined;
-		},
-	} as never;
+	return Settings.isolated({
+		modelRoles: { tiny: `${model.provider}/${model.id}` },
+	});
 }
 
 function createRegistry(model: Model<Api>) {
 	return {
-		getAvailable: () => [model],
+		getAvailable: (kind = "chat") => (kind === "all" ? [model] : []),
 		getApiKey: async () => "test-key",
 		resolver: vi.fn(() => async () => "test-key"),
 	} as never;

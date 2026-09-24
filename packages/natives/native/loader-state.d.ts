@@ -127,4 +127,33 @@ export function validateLoadedBindings(
 	candidate: string,
 ): void;
 
+/** Identity of the addon `loadNative()` returned, for missing-export diagnostics. */
+export interface NativeAddonStatus {
+	/** Absolute path of the loaded `.node`. */
+	path: string;
+	/** Sentinel the loaded addon carries, or `null` before sentinels existed. */
+	sentinel: string | null;
+	/** Sentinel this loader's package version expects. */
+	expectedSentinel: string;
+	/** `package.json#version` of the loader that loaded it. */
+	packageVersion: string;
+	/** True when the addon carries a different release than this package. */
+	stale: boolean;
+}
+
+/** The addon behind this process's exports; `null` before a successful load. */
+export function nativeAddonStatus(): NativeAddonStatus | null;
+
+/**
+ * Stub for an export the addon does not provide: `undefined` on a current
+ * addon, a throwing function on a stale one.
+ */
+export function missingNativeExport(
+	symbolName: string,
+	addon?: NativeAddonStatus | null,
+): (() => never) | undefined;
+
+/** Actionable text for {@link missingNativeExport}. */
+export function missingNativeExportMessage(symbolName: string, addon?: NativeAddonStatus | null): string;
+
 export function loadNative(): Record<string, unknown>;

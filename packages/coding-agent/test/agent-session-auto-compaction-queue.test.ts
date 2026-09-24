@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { scheduler } from "node:timers/promises";
 import { Agent, AgentBusyError } from "@oh-my-pi/pi-agent-core";
 import { CompactionCancelledError } from "@oh-my-pi/pi-agent-core/compaction";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -48,7 +49,8 @@ describe("AgentSession auto-compaction queue resume", () => {
 	beforeAll(async () => {
 		tempDir = TempDir.createSync("@pi-auto-compaction-queue-");
 		authStorage = await AuthStorage.create(":memory:");
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		authStorage.keys.setRuntime("mock", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 	});
 
@@ -1570,7 +1572,13 @@ describe("AgentSession auto-compaction queue resume", () => {
 		session.settings.set("compaction.autoContinue", true);
 		session.settings.set("contextPromotion.enabled", false);
 		session.settings.set("features.unexpectedStopDetection", "smart");
-		session.settings.set("providers.unexpectedStopModel", "online");
+		const judgeModel = createMockModel();
+		const getAvailable = modelRegistry.getAvailable.bind(modelRegistry);
+		vi.spyOn(modelRegistry, "getAvailable").mockImplementation(kind =>
+			kind === "all" ? [judgeModel] : getAvailable(kind),
+		);
+		session.settings.setModelRole("judge", `${judgeModel.provider}/${judgeModel.id}`);
+		session.settings.set("retry.fallbackChains", { judge: [] });
 
 		vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockResolvedValue(true);
 		vi.spyOn(session.agent, "continue").mockImplementation(async () => {

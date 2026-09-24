@@ -53,9 +53,9 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 		}
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "auth-broker-remote-store-"));
 		store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
-		store.saveOAuth("anthropic", mintOAuthCredential("a", Date.now() + 60_000));
+		await store.saveOAuth("anthropic", mintOAuthCredential("a", Date.now() + 60_000));
 		storage = new AuthStorage(store);
-		await storage.reload();
+		await storage.credentials.reload();
 		handle = startAuthBroker({
 			storage,
 			bind: "127.0.0.1:0",
@@ -93,7 +93,7 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 		const initialGeneration = remote!.snapshot.generation;
 
 		// 2. Server-side upsert is delivered as an `entry` frame.
-		storage!.upsertCredential("anthropic", mintOAuthCredential("b", Date.now() + 120_000));
+		await storage!.credentials.upsert("anthropic", mintOAuthCredential("b", Date.now() + 120_000));
 		await waitUntil(() => remote!.snapshot.credentials.length === 2);
 		expect(remote!.snapshot.generation).toBeGreaterThan(initialGeneration);
 		const accessTokens = remote!.snapshot.credentials
@@ -107,7 +107,7 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 			entry => entry.credential.type === "oauth" && entry.credential.access === "access-b",
 		)?.id;
 		expect(bId).toBeDefined();
-		const disabled = storage!.disableCredentialById(bId!, "revoked by test");
+		const disabled = await storage!.credentials.disable(bId!, "revoked by test");
 		expect(disabled).toBe(true);
 		await waitUntil(() => remote!.snapshot.credentials.length === 1);
 		expect(remote!.snapshot.credentials[0].id).not.toBe(bId);
@@ -124,36 +124,36 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 		remote = new RemoteAuthCredentialStore({ client, initialSnapshot: initial.snapshot });
 		const gatewayStorage = new AuthStorage(remote, { sourceLabel: `broker ${handle!.url}` });
 		try {
-			await gatewayStorage.reload();
+			await gatewayStorage.credentials.reload();
 			await waitUntil(() => remote!.snapshot.credentials.length === 1);
 			// Boot generation is acknowledged: no spurious reload before any change.
-			expect(await gatewayStorage.pollExternalChanges()).toBe(false);
-			expect(gatewayStorage.exportSnapshot().credentials.map(c => c.provider)).toEqual(["anthropic"]);
+			expect(await gatewayStorage.credentials.poll()).toBe(false);
+			expect(gatewayStorage.credentials.snapshot().credentials.map(c => c.provider)).toEqual(["anthropic"]);
 
 			// Another process logs in a new provider; the change reaches the remote
 			// store over SSE.
-			storage!.upsertCredential("deepseek", { type: "api_key", key: "sk-repro" });
+			await storage!.credentials.upsert("deepseek", { type: "api_key", key: "sk-repro" });
 			await waitUntil(() => remote!.snapshot.credentials.some(c => c.provider === "deepseek"));
 
 			// The poll now reports the change and the reload widens the gateway view.
-			expect(await gatewayStorage.pollExternalChanges()).toBe(true);
+			expect(await gatewayStorage.credentials.poll()).toBe(true);
 			expect(
-				gatewayStorage
-					.exportSnapshot()
+				gatewayStorage.credentials
+					.snapshot()
 					.credentials.map(c => c.provider)
 					.sort(),
 			).toEqual(["anthropic", "deepseek"]);
 			// One true per observed change: an unchanged generation reports false.
-			expect(await gatewayStorage.pollExternalChanges()).toBe(false);
+			expect(await gatewayStorage.credentials.poll()).toBe(false);
 
 			// A logout in another process removes the credential over SSE, and the
 			// next poll drops it from the gateway view.
 			const deepseekId = remote!.snapshot.credentials.find(c => c.provider === "deepseek")?.id;
 			expect(deepseekId).toBeDefined();
-			expect(storage!.disableCredentialById(deepseekId!, "logged out by test")).toBe(true);
+			expect(await storage!.credentials.disable(deepseekId!, "logged out by test")).toBe(true);
 			await waitUntil(() => !remote!.snapshot.credentials.some(c => c.provider === "deepseek"));
-			expect(await gatewayStorage.pollExternalChanges()).toBe(true);
-			expect(gatewayStorage.exportSnapshot().credentials.map(c => c.provider)).toEqual(["anthropic"]);
+			expect(await gatewayStorage.credentials.poll()).toBe(true);
+			expect(gatewayStorage.credentials.snapshot().credentials.map(c => c.provider)).toEqual(["anthropic"]);
 		} finally {
 			gatewayStorage.close();
 		}
@@ -166,17 +166,17 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 		remote = new RemoteAuthCredentialStore({ client, initialSnapshot: initial.snapshot });
 		const gatewayStorage = new AuthStorage(remote, { sourceLabel: `broker ${handle!.url}` });
 		try {
-			await gatewayStorage.reload();
+			await gatewayStorage.credentials.reload();
 
 			// Drive the original broker above the generation its replacement will
 			// start at, then acknowledge that complete credential view.
-			storage!.upsertCredential("deepseek", { type: "api_key", key: "sk-deepseek" });
-			storage!.upsertCredential("openai", { type: "api_key", key: "sk-openai" });
-			storage!.upsertCredential("xai", { type: "api_key", key: "sk-xai" });
+			await storage!.credentials.upsert("deepseek", { type: "api_key", key: "sk-deepseek" });
+			await storage!.credentials.upsert("openai", { type: "api_key", key: "sk-openai" });
+			await storage!.credentials.upsert("xai", { type: "api_key", key: "sk-xai" });
 			await waitUntil(() => remote!.snapshot.credentials.length === 4);
 			const previousGeneration = remote.snapshot.generation;
-			expect(await gatewayStorage.pollExternalChanges()).toBe(true);
-			expect(await gatewayStorage.pollExternalChanges()).toBe(false);
+			expect(await gatewayStorage.credentials.poll()).toBe(true);
+			expect(await gatewayStorage.credentials.poll()).toBe(false);
 
 			// Stop the broker, replace its persisted credential set, and boot a
 			// fresh AuthStorage whose in-memory generation starts below the
@@ -188,12 +188,12 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 
 			store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
 			for (const provider of ["anthropic", "deepseek", "openai", "xai"]) {
-				store.deleteProvider(provider);
+				await store.deleteProvider(provider);
 			}
-			store.saveApiKey("google", "sk-restarted");
+			await store.saveApiKey("google", "sk-restarted");
 			storage = new AuthStorage(store);
-			await storage.reload();
-			expect(storage.getGeneration()).toBeLessThan(previousGeneration);
+			await storage.credentials.reload();
+			expect(storage.credentials.generation).toBeLessThan(previousGeneration);
 			handle = startAuthBroker({
 				storage,
 				bind,
@@ -210,18 +210,18 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 					remote!.snapshot.credentials[0]?.provider === "google",
 				4_000,
 			);
-			expect(await gatewayStorage.pollExternalChanges()).toBe(true);
-			expect(gatewayStorage.exportSnapshot().credentials.map(c => c.provider)).toEqual(["google"]);
+			expect(await gatewayStorage.credentials.poll()).toBe(true);
+			expect(gatewayStorage.credentials.snapshot().credentials.map(c => c.provider)).toEqual(["google"]);
 
 			// Incremental events are now ordered against the replacement
 			// baseline, not the previous broker process's higher generation.
-			storage!.upsertCredential("deepseek", { type: "api_key", key: "sk-after-restart" });
+			await storage!.credentials.upsert("deepseek", { type: "api_key", key: "sk-after-restart" });
 			await waitUntil(() => remote!.snapshot.credentials.some(c => c.provider === "deepseek"));
 			expect(remote.snapshot.generation).toBeLessThan(previousGeneration);
-			expect(await gatewayStorage.pollExternalChanges()).toBe(true);
+			expect(await gatewayStorage.credentials.poll()).toBe(true);
 			expect(
-				gatewayStorage
-					.exportSnapshot()
+				gatewayStorage.credentials
+					.snapshot()
 					.credentials.map(c => c.provider)
 					.sort(),
 			).toEqual(["deepseek", "google"]);
@@ -275,8 +275,8 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 			},
 		]);
 
-		await waitUntil(() => storage!.getClientUsageSummary(0).clients.length === 1);
-		const summary = storage!.getClientUsageSummary(0);
+		await waitUntil(() => storage!.usage.clientSummary(0).clients.length === 1);
+		const summary = storage!.usage.clientSummary(0);
 		const reported = summary.clients[0];
 		expect(reported.installId.length).toBeGreaterThan(0);
 		expect(reported.hostname).toBe(os.hostname());
@@ -302,14 +302,14 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 		// like the coding-agent does per assistant message — merges into the same
 		// 5-minute bucket row instead of accreting a new row per flush.
 		const clientStorage = new AuthStorage(remote);
-		clientStorage.recordObservedUsage({
+		clientStorage.usage.observe({
 			provider: "anthropic",
 			model: "claude-x",
 			at: at + 3,
 			usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
 		});
 		await waitUntil(() => {
-			const current = storage!.getClientUsageSummary(0).clients[0];
+			const current = storage!.usage.clientSummary(0).clients[0];
 			return current?.providers.find(p => p.provider === "anthropic")?.requests === 3;
 		});
 		// An explicit identity (the auth-gateway attributing a caller) must
@@ -330,8 +330,8 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 			],
 			{ installId: "robomp-install", hostname: "robomp-box", app: "robomp" },
 		);
-		await waitUntil(() => storage!.getClientUsageSummary(0).clients.length === 2);
-		const attributed = storage!.getClientUsageSummary(0).clients.find(c => c.installId === "robomp-install");
+		await waitUntil(() => storage!.usage.clientSummary(0).clients.length === 2);
+		const attributed = storage!.usage.clientSummary(0).clients.find(c => c.installId === "robomp-install");
 		expect(attributed?.hostname).toBe("robomp-box");
 		expect(attributed?.providers).toEqual([
 			{
@@ -396,8 +396,8 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 	});
 
 	test("filters configured OAuth identities while preserving API keys and raw snapshot callbacks", async () => {
-		storage!.upsertCredential("anthropic", mintOAuthCredential("b", Date.now() + 120_000));
-		storage!.upsertCredential("anthropic", { type: "api_key", key: "visible-api-key" });
+		await storage!.credentials.upsert("anthropic", mintOAuthCredential("b", Date.now() + 120_000));
+		await storage!.credentials.upsert("anthropic", { type: "api_key", key: "visible-api-key" });
 		const client = new AuthBrokerClient({ url: handle!.url, token });
 		const initialResult = await client.fetchSnapshot();
 		if (initialResult.status !== 200) throw new Error("expected initial snapshot");
@@ -441,7 +441,7 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 		});
 		const initialGeneration = remote.snapshot.generation;
 
-		storage!.upsertCredential("anthropic", mintOAuthCredential("b", Date.now() + 120_000));
+		await storage!.credentials.upsert("anthropic", mintOAuthCredential("b", Date.now() + 120_000));
 		await waitUntil(() => remote!.snapshot.generation > initialGeneration);
 
 		expect(remote.snapshot.credentials).toHaveLength(1);
@@ -449,7 +449,7 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 	});
 
 	test("treats a missing provider as unrestricted and an empty provider pool as OAuth-disabled", async () => {
-		storage!.upsertCredential("openai-codex", mintOAuthCredential("codex", Date.now() + 120_000));
+		await storage!.credentials.upsert("openai-codex", mintOAuthCredential("codex", Date.now() + 120_000));
 		const client = new AuthBrokerClient({ url: handle!.url, token });
 		const initialResult = await client.fetchSnapshot();
 		if (initialResult.status !== 200) throw new Error("expected initial snapshot");
@@ -465,7 +465,7 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 	});
 
 	test("loads the account pool once for broker-backed discovery", async () => {
-		storage!.upsertCredential("anthropic", mintOAuthCredential("b", Date.now() + 120_000));
+		await storage!.credentials.upsert("anthropic", mintOAuthCredential("b", Date.now() + 120_000));
 		const client = new AuthBrokerClient({ url: handle!.url, token });
 		const initialResult = await client.fetchSnapshot();
 		if (initialResult.status !== 200) throw new Error("expected initial snapshot");
@@ -487,15 +487,11 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 					cachePath: path.join(tempDir, "snapshot-cache.enc"),
 				});
 				try {
-					expect(discovered.listOAuthAccounts("anthropic").map(account => account.email)).toEqual([
-						"a@example.com",
-					]);
+					expect(discovered.oauth.accounts("anthropic").map(account => account.email)).toEqual(["a@example.com"]);
 
 					await Bun.write(poolPath, JSON.stringify({ anthropic: [allowed.identityKey, excluded.identityKey] }));
-					await discovered.reload();
-					expect(discovered.listOAuthAccounts("anthropic").map(account => account.email)).toEqual([
-						"a@example.com",
-					]);
+					await discovered.credentials.reload();
+					expect(discovered.oauth.accounts("anthropic").map(account => account.email)).toEqual(["a@example.com"]);
 				} finally {
 					discovered.close();
 				}
@@ -517,7 +513,7 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 					accountPool: new Map([["anthropic", new Set()]]),
 				});
 				try {
-					expect(discovered.listOAuthAccounts("anthropic")).toEqual([]);
+					expect(discovered.oauth.accounts("anthropic")).toEqual([]);
 				} finally {
 					discovered.close();
 				}

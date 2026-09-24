@@ -4,6 +4,7 @@ import {
 	type SpellingBackend,
 	type SpellingDecorationContext,
 } from "@oh-my-pi/pi-tui/prompt/macos-spelling";
+import { setMagicKeywords } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 
 function backend(overrides: Partial<SpellingBackend>): SpellingBackend {
 	return {
@@ -189,6 +190,39 @@ describe("macOS spelling feature gates", () => {
 		expect(checkSpelling).not.toHaveBeenCalled();
 		expect(completeWord).not.toHaveBeenCalled();
 		expect(spellingGuesses).not.toHaveBeenCalled();
+	});
+
+	it("never autocorrects or underlines a registered magic keyword", async () => {
+		setMagicKeywords([{ word: "workflowz", hue: [30, 150] }]);
+		try {
+			const autocorrectWord = mock(async () => "workflows");
+			const provider = new MacOSSpellingProvider(
+				backend({
+					// macOS flags both words; only the non-keyword survives.
+					checkSpelling: async text => [
+						{ start: text.indexOf("workflowz"), length: 9 },
+						{ start: text.indexOf("recieved"), length: 8 },
+					],
+					autocorrectWord,
+				}),
+				true,
+			);
+			provider.setFeatures({ typoDetection: true, autocomplete: false, autocorrect: true });
+
+			expect(await provider.tryAutocorrect(["please workflowz "], 0, 17)).toBeNull();
+			expect(autocorrectWord).not.toHaveBeenCalled();
+
+			const updated = Promise.withResolvers<void>();
+			provider.onUpdate = updated.resolve;
+			const text = "workflowz recieved";
+			provider.decorateTypos(text, decorationContext(text));
+			await updated.promise;
+			expect(provider.decorateTypos(text, decorationContext(text))).toBe(
+				"workflowz \x1b[4:3m\x1b[58:2::255:95:95mrecieved\x1b[4:0m\x1b[59m",
+			);
+		} finally {
+			setMagicKeywords([]);
+		}
 	});
 
 	it("skips paths, slash commands, and inline code", async () => {

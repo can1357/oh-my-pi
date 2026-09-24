@@ -30,6 +30,7 @@ import {
 } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
+import { Semaphore } from "../task/parallel";
 import type { ToolSession } from "../tools";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import {
@@ -68,7 +69,7 @@ export interface EvalCompletionBridgeOptions {
 	emitStatus?: (event: JsStatusEvent) => void;
 }
 
-/** Terminal payload of a retained handle; `judge()` handles share the registry and report no tier. */
+/** Terminal payload of a retained handle. */
 export interface EvalCompletionResult {
 	text: string;
 	/** Structured payload; when present the cell receives it in place of `text`. */
@@ -94,6 +95,17 @@ export interface CompletionHandleEntry {
 
 const COMPLETION_HANDLE_RETENTION_MS = 30 * 60 * 1000;
 const completionHandles = new Map<string, CompletionHandleEntry>();
+
+/**
+ * Process-wide ceiling on eval model requests executing at once, shared by
+ * `completion()` handles, `judge()`, and `judge_batch()` items. A cell that
+ * fans out hundreds of calls otherwise opens every request simultaneously and,
+ * once the primary candidate rejects, floods each fallback in the role chain
+ * (including self-hosted models that serve requests serially). Queued handles
+ * report `running` until admitted.
+ */
+export const EVAL_HANDLE_CONCURRENCY = 32;
+export const evalRequestSlots = new Semaphore(EVAL_HANDLE_CONCURRENCY);
 
 /** Resolve a retained completion handle by id. */
 export function getCompletionHandle(id: string): CompletionHandleEntry | undefined {
@@ -430,7 +442,15 @@ export function retainCompletionHandle(
 		settled: false,
 	};
 	completionHandles.set(id, entry);
-	entry.promise = execute(signal)
+	const run = async (): Promise<EvalCompletionResult> => {
+		await evalRequestSlots.acquire(signal);
+		try {
+			return await execute(signal);
+		} finally {
+			evalRequestSlots.release();
+		}
+	};
+	entry.promise = run()
 		.then(
 			result => {
 				entry.result = result;

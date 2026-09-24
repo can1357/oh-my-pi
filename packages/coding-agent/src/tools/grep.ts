@@ -21,6 +21,7 @@ import {
 import { getEditStore } from "../edit/store";
 import { formatHashlineHeader } from "@oh-my-pi/pi-tui/tools/hashline-format";
 import type { LocalProtocolOptions } from "../internal-urls/local-protocol";
+import { isOmpDocsRoot, ompDocsScopeEntries } from "../internal-urls/omp-scope";
 import { InternalUrlRouter } from "../internal-urls/router";
 import { tryResolveInternalUrlSync } from "../internal-urls/hyperlink-targets";
 import type { InternalResource, ResolveContext } from "../internal-urls/types";
@@ -35,6 +36,7 @@ import { materializeReadUrlToFile, parseReadUrlTarget } from "./fetch";
 import { createFileRecorder, formatResultPath } from "./file-recorder";
 import { formatGroupedFiles } from "@oh-my-pi/pi-tui/tools/grouped-file-output";
 import { formatMatchLine } from "@oh-my-pi/pi-tui/tools/match-line-format";
+import { isFindEnabled } from "./jfind";
 import {
 	expandDelimitedPathEntries,
 	hasGlobPathChars,
@@ -54,19 +56,12 @@ import { formatCodeFrameLine } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 
-const searchPathEntry = type("string").describe(
-	'file, directory, glob, internal URL, or "<file>:<lines>" selector to search (e.g. "src/foo.ts:50-100", "src/foo.ts:50+10", "src/foo.ts:50-100,200-300")',
-);
 const searchSchema = type({
-	pattern: type("string").describe("regex pattern"),
-	"path?": searchPathEntry.describe(
-		'file, directory, glob, internal URL, or "<file>:<lines>" selector to search; pass several as a semicolon-delimited list ("src; tests"). Omitted -> searches the workspace root (".")',
-	),
-	"case?": type("boolean").describe("case-sensitive search"),
-	"gitignore?": type("boolean").describe("respect gitignore"),
-	"skip?": type("number")
-		.or("null")
-		.describe("files to skip before collecting results — use to paginate when the prior call hit the file limit"),
+	pattern: type("string"),
+	"path?": "string",
+	"case?": "boolean",
+	"gitignore?": "boolean",
+	"skip?": type("number").or("null"),
 });
 
 export type GrepToolInput = typeof searchSchema.infer;
@@ -324,8 +319,6 @@ interface IndexedContentLines {
 	lines: string[];
 	starts: number[];
 }
-
-const OMP_ROOT_URL_RE = /^omp:\/\/(?:\/?|docs\/?)$/i;
 
 function normalizeSearchLine(line: string): string {
 	return line.endsWith("\r") ? line.slice(0, -1) : line;
@@ -721,25 +714,13 @@ function mergeGrepResults(left: GrepResult, right: GrepResult, maxCount: number)
 async function expandVirtualInternalResource(
 	rawPath: string,
 	resource: InternalResource,
-	internalRouter: InternalUrlRouter,
 	context: ResolveContext,
 	ranges: readonly LineRange[] | undefined,
 ): Promise<VirtualSearchResource[]> {
-	if (OMP_ROOT_URL_RE.test(rawPath)) {
-		const completions = await internalRouter.complete("omp", "");
-		if (completions && completions.length > 0) {
-			const resources: VirtualSearchResource[] = [];
-			const seen = new Set<string>();
-			for (const completion of completions) {
-				if (seen.has(completion.value)) continue;
-				seen.add(completion.value);
-				const docUrl = `omp://${completion.value}`;
-				const doc = await internalRouter.resolve(docUrl, context);
-				if (!doc.sourcePath) {
-					resources.push({ path: docUrl, content: doc.content, ranges });
-				}
-			}
-			if (resources.length > 0) return resources;
+	if (isOmpDocsRoot(rawPath)) {
+		const entries = await ompDocsScopeEntries(context);
+		if (entries.length > 0) {
+			return entries.map(entry => ({ path: entry.url, content: entry.content, ranges }));
 		}
 	}
 
@@ -761,6 +742,7 @@ async function resolveInternalSearchInputs(opts: {
 	getSessionBranch: ResolveContext["getSessionBranch"];
 	sessionId?: string;
 	agentRegistry?: ResolveContext["agentRegistry"];
+	session?: ResolveContext["session"];
 }): Promise<InternalSearchInputResolution> {
 	const internalRouter = InternalUrlRouter.instance();
 	const paths = opts.resolvedPaths.slice();
@@ -776,6 +758,7 @@ async function resolveInternalSearchInputs(opts: {
 		sessionFile: opts.sessionFile,
 		sessionId: opts.sessionId,
 		agentRegistry: opts.agentRegistry,
+		session: opts.session,
 		localProtocolOptions: opts.localProtocolOptions,
 		skills: opts.skills,
 		rules: opts.rules,
@@ -825,13 +808,7 @@ async function resolveInternalSearchInputs(opts: {
 		}
 
 		const ranges = opts.pathSpecs[idx]?.ranges;
-		const expanded = await expandVirtualInternalResource(
-			rawPath,
-			resource,
-			internalRouter,
-			{ ...context, pathOnly: false },
-			ranges,
-		);
+		const expanded = await expandVirtualInternalResource(rawPath, resource, { ...context, pathOnly: false }, ranges);
 		virtualInputIndexes.add(idx);
 		for (const virtual of expanded) {
 			virtualResources.push(virtual);
@@ -877,12 +854,13 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 	};
 	readonly label = "Grep";
 	readonly loadMode = "discoverable";
-	readonly summary = "Grep file contents using ripgrep (fast regex search)";
+	readonly summary = "Search file contents by regex";
 	get description(): string {
 		const displayMode = resolveFileDisplayMode(this.session);
 		return prompt.render(grepDescription, {
 			IS_HL_MODE: displayMode.hashLines,
 			IS_LINE_NUMBER_MODE: !displayMode.hashLines && displayMode.lineNumbers,
+			hasFind: this.session.isToolActive?.("find") ?? isFindEnabled(this.session),
 			eagerDelegation: sessionDelegationBias(this.session) === "eager",
 			scoutAvailable: isScoutSpawnable(
 				this.session.settings.get("task.disabledAgents") as string[] | undefined,
@@ -968,6 +946,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					getSessionBranch: () => getExperimentalContextSession(this.session).getBranch(),
 					sessionId: this.session.sessionManager?.getSessionId?.() ?? this.session.getSessionId?.() ?? undefined,
 					agentRegistry: this.session.agentRegistry,
+					session: this.session,
 				});
 				const searchablePaths = internalResolution.paths;
 				const { virtualResources, virtualPathSet, virtualInputIndexes } = internalResolution;

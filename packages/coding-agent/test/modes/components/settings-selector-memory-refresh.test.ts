@@ -171,14 +171,14 @@ describe("SettingsSelectorComponent memory tab", () => {
 
 	it("puts the exact global settings search hit before incidental matches", () => {
 		const comp = createSelector();
-		for (const ch of "image provider") comp.handleInput(ch);
+		for (const ch of "fetch provider") comp.handleInput(ch);
 
 		const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, "");
 		const rendered = comp.render(120).map(strip).join("\n");
 		const providersIndex = rendered.indexOf("Providers");
 		const appearanceIndex = rendered.indexOf("Appearance");
 
-		expect(rendered).toContain("Image Provider");
+		expect(rendered).toContain("Fetch Provider");
 		expect(rendered).not.toContain("Include Model in Prompt");
 		expect(rendered).not.toContain("Service Tier");
 		expect(providersIndex).toBeGreaterThanOrEqual(0);

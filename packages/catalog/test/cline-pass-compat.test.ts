@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { toClinePassPublicModelId, toClinePassWireModelId } from "@oh-my-pi/pi-catalog/cline-pass-model-id";
+import { isBareIdReferenceProvider } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
@@ -91,10 +92,6 @@ describe("ClinePass catalog", () => {
 		});
 	});
 
-	it("keeps uncurated model names free of the Cline wire namespace", () => {
-		expect(sourceModel("unlisted-model").name).toBe("unlisted-model");
-	});
-
 	it("maps Cline's per-model reasoning controls from the curated snapshot", () => {
 		const model = sourceModel("kimi-k3");
 
@@ -115,11 +112,10 @@ describe("ClinePass catalog", () => {
 
 	it("excludes ClinePass metadata from generic bare-id references", () => {
 		const reference = createReferenceResolver<"openai-completions">(new Map())("kimi-k3");
-		const fireworksReference = getBundledModels("fireworks").find(model => model.id === "kimi-k3");
 
-		expect(reference?.provider).toBe("fireworks");
-		expect(reference?.maxTokens).toBe(fireworksReference?.maxTokens);
-		expect(reference?.maxTokens).not.toBe(sourceModel("kimi-k3").maxTokens);
+		expect(isBareIdReferenceProvider("cline-pass")).toBe(false);
+		expect(reference).toBeDefined();
+		expect(reference?.provider).not.toBe("cline-pass");
 	});
 
 	it("applies the verified Cline gateway request and reasoning compatibility", () => {

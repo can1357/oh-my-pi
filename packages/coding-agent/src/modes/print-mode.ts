@@ -7,7 +7,9 @@
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
+import { $flag, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
+import type { MCPManager } from "../mcp/manager";
+import { resolveMCPTimeoutMs } from "../mcp/timeout";
 import { type AgentSession, type AgentSessionEvent, SHUTDOWN_CONSOLIDATE_BUDGET_MS } from "../session/agent-session";
 import { isSilentAbort } from "../session/messages";
 import { flushTelemetryExport } from "../telemetry-export";
@@ -30,12 +32,19 @@ export interface PrintModeOptions {
 	printThoughts?: boolean;
 	/** Whether the caller explicitly started the headless plan flow. */
 	planYolo?: boolean;
+	/** Manager returned by session creation; only print mode waits for its servers. */
+	mcpManager?: MCPManager;
 }
 
 /** Matches the longest built-in provider request deadline while bounding tool-loop stalls. */
 export const PRINT_MODE_ADVISOR_DRAIN_TIMEOUT_MS = 10 * 60_000;
 /** Error exits cannot hold automation for the full normal drain budget. */
 export const PRINT_MODE_ERROR_ADVISOR_DRAIN_TIMEOUT_MS = 30_000;
+
+/** Sanitize untrusted text (server names, errors) into one stderr-safe line. */
+function singleLine(text: string): string {
+	return sanitizeText(text).replace(/[\r\n\t]+/g, " ");
+}
 
 /** Drop the provider-opaque replay payload (e.g. encrypted reasoning items) before printing. */
 function stripProviderPayload<T extends AgentMessage>(message: T): T {
@@ -217,6 +226,34 @@ async function runPrintModeCore(
 		writeStderrLine(formatPersistenceFailure(error.message));
 	});
 
+	const timeoutMs = resolveMCPTimeoutMs();
+	let strictMCPFailure = false;
+	if (options.mcpManager) {
+		const readiness = await options.mcpManager.waitForStartup(timeoutMs);
+		// The manager's initial callback may have fired before SDK wiring, or a
+		// reconnect may have fired it without awaiting the session mutation.
+		// Refresh is serialized by AgentSession, so turn one sees the final snapshot.
+		await session.refreshMCPTools(options.mcpManager.getTools());
+		const unavailable: string[] = [];
+		for (const name of readiness.pending) {
+			const server = singleLine(name);
+			unavailable.push(server);
+			const after = timeoutMs > 0 ? ` after ${timeoutMs}ms` : "";
+			writeStderrLine(`Warning: MCP server "${server}" not ready${after}; its tools are unavailable for this run.`);
+		}
+		for (const { name, error } of readiness.failed) {
+			const server = singleLine(name);
+			unavailable.push(server);
+			writeStderrLine(
+				`Warning: MCP server "${server}" failed to connect: ${singleLine(error)}; its tools are unavailable for this run.`,
+			);
+		}
+		if ($flag("OMP_MCP_REQUIRE_READY") && unavailable.length > 0) {
+			writeStderrLine(`Error: MCP servers not ready: ${unavailable.join(", ")}`);
+			strictMCPFailure = true;
+		}
+	}
+
 	let wroteTextWorkingIndicator = false;
 	const writeTextWorkingIndicator = (): void => {
 		if (mode !== "text" || wroteTextWorkingIndicator) return;
@@ -225,17 +262,19 @@ async function runPrintModeCore(
 	};
 
 	// Send initial message with attachments
-	if (initialMessage !== undefined) {
+	if (!strictMCPFailure && initialMessage !== undefined) {
 		writeTextWorkingIndicator();
 		if (mode === "text") session.setTextOutputCommitted(false);
 		await logger.time("print:prompt:initial", () => session.prompt(initialMessage, { images: initialImages }));
 	}
 
 	// Send remaining messages
-	for (const message of messages) {
-		writeTextWorkingIndicator();
-		if (mode === "text") session.setTextOutputCommitted(false);
-		await logger.time("print:prompt:next", () => session.prompt(message));
+	if (!strictMCPFailure) {
+		for (const message of messages) {
+			writeTextWorkingIndicator();
+			if (mode === "text") session.setTextOutputCommitted(false);
+			await logger.time("print:prompt:next", () => session.prompt(message));
+		}
 	}
 
 	// From this point onward a late blocker must be recorded without starting a
@@ -253,6 +292,7 @@ async function runPrintModeCore(
 	// transitions) and aborts initiated by signal teardown stay non-fatal here;
 	// postmortem owns the signal-specific exit code (130/143/129).
 	const terminalFailure =
+		!strictMCPFailure &&
 		assistantMsg !== undefined &&
 		(assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") &&
 		!isSilentAbort(assistantMsg) &&
@@ -261,7 +301,7 @@ async function runPrintModeCore(
 	// In text mode, output the final response. A terminal failure prints only
 	// the error line below; JSON mode already emitted the assistant message and
 	// stop reason through the event subscription.
-	if (mode === "text" && !terminalFailure) {
+	if (mode === "text" && !terminalFailure && !strictMCPFailure) {
 		if (assistantMsg) {
 			if (
 				assistantMsg.errorMessage &&
@@ -284,9 +324,11 @@ async function runPrintModeCore(
 	}
 
 	// A turn-fatal exit cannot hold automation for the full normal drain budget.
-	await session.waitForAdvisorCatchup(
-		terminalFailure ? PRINT_MODE_ERROR_ADVISOR_DRAIN_TIMEOUT_MS : PRINT_MODE_ADVISOR_DRAIN_TIMEOUT_MS,
-	);
+	if (!strictMCPFailure) {
+		await session.waitForAdvisorCatchup(
+			terminalFailure ? PRINT_MODE_ERROR_ADVISOR_DRAIN_TIMEOUT_MS : PRINT_MODE_ADVISOR_DRAIN_TIMEOUT_MS,
+		);
+	}
 	// Error spans must reach the exporter; the postmortem `exit` handler can't await.
 	if (terminalFailure) await flushTelemetryExport();
 
@@ -324,5 +366,5 @@ async function runPrintModeCore(
 	}
 
 	await stderrTail;
-	return terminalFailure || durabilityFailure ? 1 : 0;
+	return terminalFailure || durabilityFailure || strictMCPFailure ? 1 : 0;
 }

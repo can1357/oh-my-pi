@@ -55,11 +55,13 @@ function objectValue(children: KdlNodeView[], verbatim: boolean): Record<string,
 }
 
 function axisValue(node: KdlNodeView, axis: AxisDef): unknown {
+	const allowed = (value: unknown): value is string | boolean =>
+		(typeof value === "string" || typeof value === "boolean") && (axis.values?.includes(value) ?? false);
 	switch (axis.shape) {
 		case "scalar": {
 			if (node.args.length !== 1 || node.children) malformed(node);
 			const value = scalarValue(node, node.args[0]);
-			if (typeof value === "string" && axis.values && !axis.values.includes(value)) {
+			if (axis.values && !allowed(value)) {
 				throw new CompatCompileError(node.file, node.line, `axis \`${node.name}\` rejects value \`${value}\``);
 			}
 			if (axis.key === "editRevision" && (typeof value !== "string" || !value.trim())) malformed(node);
@@ -69,7 +71,7 @@ function axisValue(node: KdlNodeView, axis: AxisDef): unknown {
 			if (node.args.length === 0 || node.children) malformed(node);
 			return node.args.map(raw => {
 				const value = scalarValue(node, raw);
-				if (typeof value === "string" && axis.values && !axis.values.includes(value)) {
+				if (axis.values && !allowed(value)) {
 					throw new CompatCompileError(node.file, node.line, `axis \`${node.name}\` rejects value \`${value}\``);
 				}
 				return value;
