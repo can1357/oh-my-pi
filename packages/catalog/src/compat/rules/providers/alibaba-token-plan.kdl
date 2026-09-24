@@ -130,17 +130,21 @@ provider "alibaba-token-plan" {
 	// Max Preview rides only Alibaba's binary enable_thinking toggle: it stays on
 	// the Qwen dialect and must not emit an unsupported reasoning_effort field.
 	// (Upstream 1681ac702d narrowed the revision wire contract to exact max/flash
-	// ids for this reason; this PR re-widens it to cover discovered siblings.
-	// The opt-out below keeps preview's baked models.json row byte-identical —
-	// no replay flag — which the compat-parity gate enforces. Verified: with the
-	// class when-thinking inherited, the resolved preview policy still emits
-	// only the binary toggle (reasoning_effort stays undefined) because the
-	// variant lacks supportsReasoningEffort-gated effort emission; the baked row
-	// simply records no whenThinking object.)
+	// ids for this reason; this PR re-widens it to cover discovered siblings, so
+	// preview inherits the class replay + when-thinking unless re-pinned. The
+	// pin below keeps preview wire-identical to its baked models.json row —
+	// replay off, Qwen dialect, no reasoning_effort — which the policy test and
+	// the payload path both assert. The baked row records no whenThinking
+	// object, so one compat-parity diff (present-vs-undefined whenThinking)
+	// remains; it is structural — any class when-thinking rule materializes the
+	// variant — and covered by the sibling regression tests, not the parity row.)
 	models "qwen3.8-max-preview" {
 		thinking-efforts "low" "high" "xhigh"
 		thinking-requires-effort #true
 		replay-reasoning-content #false
+		when-thinking {
+			thinking-format "qwen"
+		}
 	}
 	// Max exposes a distinct low/medium/xhigh ladder; Flash retains its
 	// provider-authored minimal/low/medium/high ladder.
