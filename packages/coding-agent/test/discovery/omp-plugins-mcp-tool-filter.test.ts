@@ -4,16 +4,20 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { clearCache as clearFsCache } from "@oh-my-pi/pi-coding-agent/capability/fs";
 import { loadAllMCPConfigs } from "@oh-my-pi/pi-coding-agent/mcp/config";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { getConfigRootDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
 // Concatenation avoids the noTemplateCurlyInString lint on literal placeholder names.
 const OMP_ROOT_VAR = "$" + "{OMP_PLUGIN_ROOT}";
 const CLAUDE_ROOT_VAR = "$" + "{CLAUDE_PLUGIN_ROOT}";
 
+const originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
+const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
+
 let root = "";
 let home = "";
 let projectDir = "";
 let ext = "";
+let tempAgentDir = "";
 let originalHome: string | undefined;
 
 beforeEach(async () => {
@@ -23,8 +27,10 @@ beforeEach(async () => {
 	home = path.join(root, "home");
 	projectDir = path.join(root, "project");
 	ext = path.join(root, "ext");
+	tempAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-plugins-mcp-filter-agent-"));
 	process.env.HOME = home;
 	vi.spyOn(os, "homedir").mockReturnValue(home);
+	setAgentDir(tempAgentDir);
 	await fs.mkdir(path.join(projectDir, ".git"), { recursive: true });
 	await fs.mkdir(ext, { recursive: true });
 });
@@ -32,9 +38,16 @@ beforeEach(async () => {
 afterEach(async () => {
 	clearFsCache();
 	vi.restoreAllMocks();
+	if (originalAgentDirEnv) {
+		setAgentDir(originalAgentDirEnv);
+	} else {
+		setAgentDir(fallbackAgentDir);
+		delete process.env.PI_CODING_AGENT_DIR;
+	}
 	if (originalHome === undefined) delete process.env.HOME;
 	else process.env.HOME = originalHome;
 	await removeWithRetries(root);
+	await removeWithRetries(tempAgentDir);
 });
 
 test("omp-plugins resolves plugin-root scalars but keeps filter entries literal", async () => {
@@ -63,6 +76,8 @@ test("omp-plugins resolves plugin-root scalars but keeps filter entries literal"
 		filterExa: false,
 		extensionRoots: { explicit: [ext], mode: "merge", configured: [], configuredLevel: "user" },
 	});
+	expect(result.sources.stdio?.provider).toBe("omp-plugins");
+	expect(result.sources.http?.provider).toBe("omp-plugins");
 	const stdio = result.configs.stdio as
 		| {
 				command?: string;
