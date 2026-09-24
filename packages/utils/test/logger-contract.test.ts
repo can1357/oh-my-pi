@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -301,7 +300,7 @@ describe("DailyRotateFile option and retention contract", () => {
 		expect(audit.hashType).toBe("sha256");
 		expect(audit.files.map(file => file.name)).toEqual(expectedNames.map(name => path.join(result.primaryDir, name)));
 		for (const file of audit.files) {
-			const hash = crypto.createHash("sha256").update(`${file.name}LOG_FILE${file.date}`).digest("hex");
+			const hash = Bun.SHA256.hash(`${file.name}LOG_FILE${file.date}`, "hex");
 			expect(file.hash).toBe(hash);
 			expect(file.hash).toMatch(/^[0-9a-f]{64}$/);
 		}

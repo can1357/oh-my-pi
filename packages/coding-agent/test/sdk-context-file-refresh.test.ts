@@ -23,7 +23,7 @@ async function createContextSession(
 	const authStorage = await AuthStorage.create(`${cwd}/auth.db`);
 	const model = getBundledModel("openai", "gpt-4o-mini");
 	if (options.advisor) {
-		authStorage.setRuntimeApiKey("openai", "test-key");
+		authStorage.keys.setRuntime("openai", "test-key");
 		settings.set("advisor.enabled", true);
 		settings.setModelRole("advisor", `${model.provider}/${model.id}`);
 	}

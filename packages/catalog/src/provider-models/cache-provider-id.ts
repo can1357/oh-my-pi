@@ -1,4 +1,5 @@
 import { CHARM_HYPER_API_BASE_URL, normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
+import { CODEX_CLIENT_VERSION } from "../wire/codex";
 import { PERSONAL_GITHUB_COPILOT_BASE_URL } from "../wire/github-copilot";
 import {
 	SINGULARITYAPI_DEV_API_BASE_URL,
@@ -68,6 +69,9 @@ export function resolveOllamaModelCacheProviderId(providerId: string, baseUrl?: 
 /** Resolve the cache namespace used by a provider's model-manager options without constructing those options. */
 export function resolveModelCacheProviderId(providerId: string, options: ModelCacheProviderIdOptions = {}): string {
 	switch (providerId) {
+		case "openai-codex":
+			// The backend filters the roster by client version.
+			return `${providerId}:${CODEX_CLIENT_VERSION}`;
 		case "ollama":
 			return resolveOllamaModelCacheProviderId(providerId, options.baseUrl);
 		case "cursor":
@@ -171,6 +175,11 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
 			return `vllm:models-v2:${Bun.hash(baseUrl).toString(36)}`;
 		}
+		case "devin":
+			// v2: rows cached before Fusion pairings carried their lead uid as
+			// `requestModelId` send the composite uid and fail with
+			// `permission_denied: no API providers are available`.
+			return "devin:models-v2";
 		default:
 			return providerId;
 	}

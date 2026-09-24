@@ -12,7 +12,14 @@ import type {
 	ServiceTierByFamily,
 } from "@oh-my-pi/pi-ai";
 import { resolveModelServiceTier, streamSimple } from "@oh-my-pi/pi-ai";
-import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
+import {
+	renderTableRow,
+	replaceTabs,
+	type TableCell,
+	type TableColumn,
+	truncateToWidth,
+	visibleWidth,
+} from "@oh-my-pi/pi-tui";
 import { formatDuration, formatNumber, prompt } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
@@ -59,9 +66,10 @@ const RESPONSE_CACHE_STATUS_HEADERS = ["cf-aig-cache-status"] as const;
  */
 export type BenchChallengeKind = "chat" | "prefill" | "generation";
 
-/** `mix` (the default) rotates through every challenge kind; a kind name isolates one. */
+/** One challenge kind (`chat` by default), or `mix` to rotate through every kind. */
 export type BenchProfile = "mix" | BenchChallengeKind;
 
+/** `mix` rotation order; the lead kind (chat) supplies a mixed table's latency and ranking. */
 const CHALLENGE_KINDS = ["chat", "prefill", "generation"] as const;
 
 /** Default max output tokens per challenge kind (`--max-tokens` overrides all). */
@@ -106,7 +114,7 @@ export interface BenchCommandArgs {
 		serviceTier?: string;
 		json?: boolean;
 		par?: number;
-		/** Benchmark workload: `mix` (default) rotates challenge kinds; a kind name isolates one. */
+		/** Benchmark workload: a challenge kind (default `chat`), or `mix` to rotate through every kind. */
 		profile?: string;
 		/** Synthetic input size for prefill challenges (default: 32768 bytes). */
 		prefillBytes?: number;
@@ -720,122 +728,152 @@ function formatMs(ms: number): string {
 	return formatDuration(Math.max(0, Math.round(ms)));
 }
 
-function formatRunLine(result: BenchRunResult, index: number, total: number): string {
+/** One run's result line; `tagKind` labels the challenge (only informative when kinds are mixed). */
+function formatRunLine(result: BenchRunResult, index: number, total: number, opts: { tagKind: boolean }): string {
 	const prefix = chalk.dim(`run ${index + 1}/${total}`);
-	const kind = result.challenge ? `${chalk.cyan(result.challenge.padEnd(10))} ` : "";
+	const kind = opts.tagKind && result.challenge ? `${chalk.cyan(result.challenge.padEnd(10))} ` : "";
 	if (result.ok) {
+		// A prefill run emits a handful of tokens: its output rates are noise, the input rate is the result.
 		const gen = result.generationTps > 0 ? `${result.generationTps.toFixed(1)}/s` : "-";
-		return `  ${chalk.green("✓")} ${prefix} ${kind}${chalk.dim("TTFT")} ${formatMs(result.ttftMs)} ${chalk.dim("tok/s")} ${result.tokensPerSecond.toFixed(1)} ${chalk.dim("gen")} ${gen} ${chalk.dim("in")} ${formatNumber(result.inputTokens)} ${chalk.dim("out")} ${formatNumber(result.outputTokens)} ${chalk.dim("total")} ${formatMs(result.durationMs)}`;
+		const rates =
+			result.challenge === "prefill"
+				? `${chalk.dim("prefill")} ${result.prefillTps.toFixed(0)}/s`
+				: `${chalk.dim("tok/s")} ${result.tokensPerSecond.toFixed(1)} ${chalk.dim("gen")} ${gen}`;
+		return `  ${chalk.green("✓")} ${prefix} ${kind}${chalk.dim("TTFT")} ${formatMs(result.ttftMs)} ${rates} ${chalk.dim("in")} ${formatNumber(result.inputTokens)} ${chalk.dim("out")} ${formatNumber(result.outputTokens)} ${chalk.dim("total")} ${formatMs(result.durationMs)}`;
 	}
 	return `  ${chalk.red("✗")} ${prefix} ${kind}${chalk.red(truncateToWidth(replaceTabs(result.error).replace(/\r?\n/g, " "), ERROR_WIDTH))}`;
 }
-/** Mutable per-model progress backing the live status line. */
-interface BenchLiveProgress {
-	label: string;
-	unit: "runs" | "pairs";
+
+/** Placeholder cell for a value the live footer has not measured yet. */
+const PENDING_CELL = "…";
+
+/** Run (cache mode: pair) counters for one model. */
+interface BenchProgress {
 	total: number;
 	completed: number;
 	failed: number;
 	inFlight: number;
-	okCount: number;
-	ttftSumMs: number;
-	tpsSum: number;
 }
 
-function renderBenchProgress(progress: BenchLiveProgress | undefined, spinner: string): string[] {
-	if (!progress || progress.completed >= progress.total) return [];
-	const parts = [`${progress.completed}/${progress.total} ${progress.unit}`];
+/** One model's comparison-table row; the live footer repaints it as runs finish. */
+interface BenchTableRow {
+	/** Aggregates over the runs finished so far. */
+	report: BenchModelReport;
+	state: "queued" | "running" | "done";
+	progress: BenchProgress;
+}
+
+function formatProgress(progress: BenchProgress, unit: "runs" | "pairs"): string {
+	const parts = [`${progress.completed}/${progress.total} ${unit}`];
 	if (progress.inFlight > 0) parts.push(`${progress.inFlight} in flight`);
 	if (progress.failed > 0) parts.push(chalk.red(`${progress.failed} failed`));
-	if (progress.okCount > 0) {
-		parts.push(`TTFT ~${formatMs(progress.ttftSumMs / progress.okCount)}`);
-		parts.push(`~${(progress.tpsSum / progress.okCount).toFixed(1)} tok/s`);
+	return parts.join(chalk.dim(" · "));
+}
+
+function formatRowStatus(row: BenchTableRow, spinner: string): string {
+	switch (row.state) {
+		case "queued":
+			return chalk.dim("queued");
+		case "running":
+			return `${chalk.yellow(spinner)} ${formatProgress(row.progress, "runs")}`;
+		case "done": {
+			const failed = row.report.results.filter(result => !result.ok).length;
+			return failed > 0 ? chalk.red(`(${failed} failed)`) : "";
+		}
 	}
-	return [
-		`  ${chalk.yellow(spinner)} ${chalk.bold(progress.label)}${chalk.dim(" · ")}${parts.join(chalk.dim(" · "))}`,
-	];
 }
 
 interface BenchTableColumn {
 	header: string;
-	value(report: BenchModelReport): string;
+	/** Undefined when the model has no data for this column (yet). */
+	value(report: BenchModelReport): string | undefined;
 }
 
-function benchTableColumns(models: BenchModelReport[]): BenchTableColumn[] {
-	const has = (kind: BenchChallengeKind): boolean => models.some(report => report.byChallenge[kind] !== undefined);
-	// Chat runs carry the representative latency; fall back to overall stats
-	// for single-kind profiles and cache mode.
-	const ttft = (report: BenchModelReport): MetricStats | undefined =>
-		(report.byChallenge.chat ?? report.stats ?? undefined)?.ttftMs;
+/** Headline column per challenge kind: output tok/s, or input tok/s for prefill (p50 of `metric`). */
+const KIND_HEADLINES: Record<
+	BenchChallengeKind,
+	{ header: string; metric: "tokensPerSecond" | "prefillTps"; digits: number }
+> = {
+	chat: { header: "tok/s", metric: "tokensPerSecond", digits: 1 },
+	prefill: { header: "prefill", metric: "prefillTps", digits: 0 },
+	generation: { header: "decode", metric: "tokensPerSecond", digits: 1 },
+};
+
+function benchTableColumns(kinds: readonly BenchChallengeKind[]): BenchTableColumn[] {
+	// The lead kind (chat when mixed) carries the representative latency.
+	const lead = kinds[0]!;
 	const columns: BenchTableColumn[] = [
 		{ header: "model", value: formatBenchModelLabel },
-		{ header: "TTFT p50", value: r => (ttft(r) ? formatMs(ttft(r)!.p50) : "-") },
-		{ header: "p95", value: r => (ttft(r) ? formatMs(ttft(r)!.p95) : "-") },
+		{
+			header: "TTFT p50",
+			value: r => {
+				const ttft = r.byChallenge[lead]?.ttftMs;
+				return ttft ? formatMs(ttft.p50) : undefined;
+			},
+		},
+		{
+			header: "p95",
+			value: r => {
+				const ttft = r.byChallenge[lead]?.ttftMs;
+				return ttft ? formatMs(ttft.p95) : undefined;
+			},
+		},
 	];
-	if (has("chat")) {
-		columns.push({
-			header: "tok/s",
-			value: r => (r.byChallenge.chat ? r.byChallenge.chat.tokensPerSecond.p50.toFixed(1) : "-"),
-		});
+	for (const kind of kinds) {
+		const { header, metric, digits } = KIND_HEADLINES[kind];
+		columns.push({ header, value: r => r.byChallenge[kind]?.[metric].p50.toFixed(digits) });
 	}
-	if (has("generation")) {
-		columns.push({
-			header: "decode",
-			value: r => (r.byChallenge.generation ? r.byChallenge.generation.tokensPerSecond.p50.toFixed(1) : "-"),
-		});
-	}
-	if (has("prefill")) {
-		columns.push({
-			header: "prefill",
-			value: r => (r.byChallenge.prefill ? r.byChallenge.prefill.prefillTps.p50.toFixed(0) : "-"),
-		});
-	}
-	columns.push({ header: "cost/run", value: r => (r.stats && r.stats.cost > 0 ? formatCost(r.stats.cost) : "-") });
+	columns.push({
+		header: "cost/run",
+		value: r => {
+			if (!r.stats) return undefined;
+			// Zero cost means the model is unpriced, not free.
+			return r.stats.cost > 0 ? formatCost(r.stats.cost) : "-";
+		},
+	});
 	return columns;
 }
 
 /**
- * Ranked comparison table over model reports: one headline column per
- * challenge kind present (`tok/s` chat, `decode` generation, `prefill`
- * ingest rate); the winner's model cell is highlighted. Medians (not means)
- * so one queue hiccup cannot reorder rows.
+ * Comparison table ranked by the lead kind's headline rate (chat tok/s when
+ * mixed); medians, not means, so one queue hiccup cannot reorder rows. It is
+ * also the live footer: unfinished rows show {@link PENDING_CELL} for
+ * unmeasured cells and a trailing status animated by `spinner`.
  */
-export function formatBenchTable(summary: BenchSummary): string {
-	const rank = (report: BenchModelReport): number =>
-		report.byChallenge.chat?.tokensPerSecond.p50 ??
-		report.byChallenge.generation?.tokensPerSecond.p50 ??
-		report.byChallenge.prefill?.prefillTps.p50 ??
-		report.stats?.tokensPerSecond.p50 ??
-		Number.NEGATIVE_INFINITY;
-	const ranked = [...summary.models].sort((a, b) => rank(b) - rank(a));
-	const columns = benchTableColumns(summary.models);
-	const rows = ranked.map(report => ({
-		cells: columns.map(column => column.value(report)),
-		failed: report.results.filter(result => !result.ok).length,
-		hasStats: report.stats !== null,
-	}));
-	const widths = columns.map((column, index) =>
-		Math.max(column.header.length, ...rows.map(row => row.cells[index]!.length)),
+function formatBenchTable(
+	rows: readonly BenchTableRow[],
+	kinds: readonly BenchChallengeKind[],
+	spinner = "",
+): string[] {
+	const lead = kinds[0]!;
+	const { metric } = KIND_HEADLINES[lead];
+	const ranked = rows
+		.map(row => ({ row, rate: row.report.byChallenge[lead]?.[metric].p50 ?? Number.NEGATIVE_INFINITY }))
+		.sort((a, b) => b.rate - a.rate);
+	const columns = benchTableColumns(kinds);
+	const texts = ranked.map(({ row }) =>
+		columns.map(column => column.value(row.report) ?? (row.state === "done" ? "-" : PENDING_CELL)),
 	);
-	const lines = [
-		chalk.dim(
-			columns
-				.map((column, i) => column.header.padEnd(widths[i]!))
-				.join("  ")
-				.trimEnd(),
-		),
-	];
-	let winnerMarked = false;
-	for (const row of rows) {
-		const cells = row.cells.map((cell, i) => cell.padEnd(widths[i]!));
-		if (!winnerMarked && row.hasStats) {
-			cells[0] = chalk.green(cells[0]!);
-			winnerMarked = true;
-		}
-		const failedSuffix = row.failed > 0 ? `  ${chalk.red(`(${row.failed} failed)`)}` : "";
-		lines.push(cells.join("  ").trimEnd() + failedSuffix);
+	const layout = columns.map((column, index): TableColumn => ({
+		width: Math.max(visibleWidth(column.header), ...texts.map(cells => visibleWidth(cells[index]!))),
+		align: "left",
+		overflow: "allow",
+	}));
+	// Unpadded trailing status: progress, queue position, or failures.
+	layout.push({ width: 0, align: "left", overflow: "allow" });
+	const table: TableCell[][] = [columns.map(column => ({ text: column.header, style: chalk.dim }))];
+	for (const [index, { row, rate }] of ranked.entries()) {
+		const cells = texts[index]!.map((text): TableCell => ({
+			text,
+			style: text === PENDING_CELL ? chalk.dim : undefined,
+		}));
+		// Green marks the leader: the top row once it has a headline rate.
+		if (index === 0 && rate > Number.NEGATIVE_INFINITY) cells[0] = { text: cells[0]!.text, style: chalk.green };
+		const status = formatRowStatus(row, spinner);
+		if (status) cells.push({ text: status });
+		table.push(cells);
 	}
-	return `${lines.join("\n")}\n`;
+	return table.map(cells => renderTableRow(cells, layout, undefined, { gap: "  " }).trimEnd());
 }
 
 function assertCacheModeSupported(targets: BenchTarget[]): void {
@@ -869,9 +907,9 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 		profileFlag !== "prefill" &&
 		profileFlag !== "generation"
 	) {
-		throw new Error(`Unknown --profile "${profileFlag}" (expected mix, chat, prefill, or generation)`);
+		throw new Error(`Unknown --profile "${profileFlag}" (expected chat, prefill, generation, or mix)`);
 	}
-	const profile: BenchProfile = profileFlag ?? "mix";
+	const profile: BenchProfile = profileFlag ?? "chat";
 	if (!cacheMode && command.flags.prompt !== undefined && profile !== "chat" && profile !== "generation") {
 		throw new Error("--prompt requires --profile chat or generation");
 	}
@@ -898,6 +936,7 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 	const promptOverride = command.flags.prompt?.trim() || undefined;
 	const prefillBytes = normalizePositiveInteger("prefill-bytes", command.flags.prefillBytes, DEFAULT_PREFILL_BYTES);
 	const kinds: readonly BenchChallengeKind[] = profile === "mix" ? CHALLENGE_KINDS : [profile];
+	const tagKind = kinds.length > 1;
 	const random = deps.random ?? Math.random;
 	const json = command.flags.json === true;
 	const randomSessionId = deps.randomSessionId ?? (() => Bun.randomUUIDv7());
@@ -916,10 +955,21 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 	if (command.models.length === 0) {
 		throw new Error("Pass at least one model selector, e.g. `omp bench opus gpt-5.2`");
 	}
-	let progress: BenchLiveProgress | undefined;
+	// One row per model, filled as runs finish. Outside cache mode the comparison
+	// table doubles as the live footer; cache mode shows a one-line status.
+	let rows: BenchTableRow[] = [];
+	const renderLive = (spinner: string): string[] => {
+		if (!cacheMode) {
+			return rows.some(row => row.state !== "done") ? ["", ...formatBenchTable(rows, kinds, spinner)] : [];
+		}
+		const running = rows.find(row => row.state === "running");
+		if (!running) return [];
+		const label = chalk.bold(formatBenchModelLabel(running.report));
+		return [`  ${chalk.yellow(spinner)} ${label}${chalk.dim(" · ")}${formatProgress(running.progress, "pairs")}`];
+	};
 	const board = json
 		? undefined
-		: createLiveBoard(spinner => renderBenchProgress(progress, spinner), {
+		: createLiveBoard(renderLive, {
 				isTTY: interactive,
 				get columns() {
 					return process.stdout.columns;
@@ -953,25 +1003,21 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 					runtime.settings?.get("tier.google") ?? "none",
 				);
 		if (!json && flagTier) print(chalk.dim(`service tier: ${flagTier}`));
-		const reports: BenchModelReport[] = [];
-		for (const { selector, model, thinking } of targets) {
+		const total = cacheMode ? cachePairs! : runs;
+		rows = targets.map(({ selector, model, thinking }): BenchTableRow => ({
+			report: buildModelReport(selector, model, thinking, []),
+			state: "queued",
+			progress: { total, completed: 0, failed: 0, inFlight: 0 },
+		}));
+		for (const [targetIndex, { selector, model, thinking }] of targets.entries()) {
+			const row = rows[targetIndex]!;
+			const { progress } = row;
 			if (!json) {
-				const resolvedModel = formatModelSelectorValue(formatModelStringWithRouting(model), thinking);
-				const resolvedNote = selector === resolvedModel ? "" : chalk.dim(` (${selector})`);
-				print(`${chalk.bold(resolvedModel)}${resolvedNote}`);
-				progress = {
-					label: resolvedModel,
-					unit: cacheMode ? "pairs" : "runs",
-					total: cacheMode ? cachePairs! : runs,
-					completed: 0,
-					failed: 0,
-					inFlight: 0,
-					okCount: 0,
-					ttftSumMs: 0,
-					tpsSum: 0,
-				};
-				board?.repaint();
+				const label = formatBenchModelLabel(row.report);
+				print(`${chalk.bold(label)}${selector === label ? "" : chalk.dim(` (${selector})`)}`);
 			}
+			row.state = "running";
+			board?.repaint();
 			const results: BenchRunResult[] = [];
 
 			// Preflight check: let's verify credentials before starting any runs.
@@ -985,12 +1031,10 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 					error: `No credentials for provider "${model.provider}". Run \`omp\` and use /login, or set the provider API key.`,
 				};
 				results.push(failure);
-				if (!json) print(formatRunLine(failure, 0, runs));
-				progress = undefined;
-				board?.repaint();
-				const report = buildModelReport(selector, model, thinking, results);
-				if (cacheMode) report.cachePairs = [];
-				reports.push(report);
+				if (!json) print(formatRunLine(failure, 0, runs, { tagKind }));
+				row.report = buildModelReport(selector, model, thinking, results);
+				if (cacheMode) row.report.cachePairs = [];
+				row.state = "done";
 				continue;
 			}
 
@@ -1001,10 +1045,8 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 					cacheConcurrency!,
 					async (pairIndex): Promise<BenchCachePairReport> => {
 						const cacheNamespace = randomSessionId();
-						if (progress) {
-							progress.inFlight++;
-							board?.repaint();
-						}
+						progress.inFlight++;
+						board?.repaint();
 						const promptCacheKey = `bench-cache:${cacheNamespace}`;
 						const stablePrefix = renderCacheBenchmarkPrefix(cachePrefix!, cacheNamespace);
 						const coldSuffix = prompt.render(cacheSuffixTemplate, { variant: "A" }).trim();
@@ -1056,20 +1098,11 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 							streamFn,
 							now,
 						);
-						if (progress) {
-							progress.inFlight--;
-							progress.completed++;
-							for (const result of [coldResult, warmResult]) {
-								if (result.ok) {
-									progress.okCount++;
-									progress.ttftSumMs += result.ttftMs;
-									progress.tpsSum += result.tokensPerSecond;
-								} else {
-									progress.failed++;
-								}
-							}
-							board?.repaint();
-						}
+						progress.inFlight--;
+						progress.completed++;
+						if (!coldResult.ok) progress.failed++;
+						if (!warmResult.ok) progress.failed++;
+						board?.repaint();
 						return {
 							cold: cacheRunReport("cold", coldResult, coldCapture),
 							warm: cacheRunReport("warm", warmResult, warmCapture),
@@ -1087,9 +1120,9 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 					},
 				);
 				for (const pair of pairs) results.push(pair.cold.result, pair.warm.result);
-				const report = buildModelReport(selector, model, thinking, results);
-				report.cachePairs = pairs;
-				reports.push(report);
+				row.report = buildModelReport(selector, model, thinking, results);
+				row.report.cachePairs = pairs;
+				row.state = "done";
 				if (!json) {
 					for (const [index, pair] of pairs.entries()) {
 						print(formatCachePairLine(pair, index, pairs.length));
@@ -1131,27 +1164,17 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 			const processNext = async (): Promise<void> => {
 				if (queue.length === 0) return;
 				const index = queue.shift()!;
-				if (progress) {
-					progress.inFlight++;
-					board?.repaint();
-				}
+				progress.inFlight++;
+				board?.repaint();
 				await runWorker(index);
-				if (progress) {
-					progress.inFlight--;
-					progress.completed++;
-					const result = results[index]!;
-					if (result.ok) {
-						progress.okCount++;
-						progress.ttftSumMs += result.ttftMs;
-						progress.tpsSum += result.tokensPerSecond;
-					} else {
-						progress.failed++;
-					}
-					board?.repaint();
-				}
+				progress.inFlight--;
+				progress.completed++;
+				if (!results[index]!.ok) progress.failed++;
+				row.report = buildModelReport(selector, model, thinking, results);
+				board?.repaint();
 				if (!json) {
 					while (nextToPrint < runs && results[nextToPrint] !== undefined) {
-						print(formatRunLine(results[nextToPrint], nextToPrint, runs));
+						print(formatRunLine(results[nextToPrint], nextToPrint, runs, { tagKind }));
 						nextToPrint++;
 					}
 				}
@@ -1159,8 +1182,9 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 			};
 			for (let worker = 0; worker < Math.min(par, runs); worker++) activeWorkers.push(processNext());
 			await Promise.all(activeWorkers);
-			reports.push(buildModelReport(selector, model, thinking, results));
+			row.state = "done";
 		}
+		const reports = rows.map(row => row.report);
 		const failures = reports.reduce((sum, report) => sum + report.results.filter(result => !result.ok).length, 0);
 		const summary: BenchSummary = {
 			runs,
@@ -1174,11 +1198,10 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 			serviceTierByFamily,
 			...(cacheMode ? { cache: { pairs: cachePairs!, concurrency: cacheConcurrency! } } : { profile }),
 		};
-		progress = undefined;
 		if (json) {
 			writeStdout(`${JSON.stringify(summary, null, 2)}\n`);
 		} else if (!cacheMode && (reports.length > 1 || runs > 1)) {
-			print(`\n${formatBenchTable(summary)}`.trimEnd());
+			print(["", ...formatBenchTable(rows, kinds)].join("\n"));
 		}
 		if (failures > 0) setExitCode(1);
 		return summary;

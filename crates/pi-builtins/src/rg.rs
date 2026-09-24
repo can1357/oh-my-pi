@@ -1323,6 +1323,9 @@ fn process_file<M: Matcher, W: Write>(
 	stats: &mut Stats,
 	out: &mut W,
 ) -> io::Result<SearchOutcome> {
+	if host.path_is_stdout(path) {
+		return Ok(SearchOutcome { any_match: false, had_error: false });
+	}
 	let result = if cli.search_zip && !cli.no_search_zip {
 		let builder = DecompressionReaderBuilder::new();
 		if builder.get_matcher().has_command(path) {
@@ -1600,6 +1603,9 @@ fn list_files<W: Write>(
 					files.sort_unstable_by(|a, b| b.cmp(a));
 				}
 				for path in files {
+					if host.path_is_stdout(&path) {
+						continue;
+					}
 					let display = display_path(operand.as_os_str(), &resolved, &path);
 					let _ =
 						write_display_bytes(out, display.as_os_str().as_encoded_bytes(), path_separator);
@@ -1607,7 +1613,7 @@ fn list_files<W: Write>(
 					any = true;
 				}
 			},
-			Ok(meta) if meta.is_file() => {
+			Ok(meta) if meta.is_file() && !host.path_is_stdout(&resolved) => {
 				let _ = write_display_bytes(out, operand.as_encoded_bytes(), path_separator);
 				let _ = out.write_all(if cli.null { b"\0" } else { b"\n" });
 				any = true;
