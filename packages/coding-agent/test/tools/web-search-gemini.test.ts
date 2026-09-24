@@ -65,13 +65,13 @@ describe("searchGemini tools serialization", () => {
 
 	beforeEach(() => {
 		oauthAuthStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
-		vi.spyOn(oauthAuthStorage, "getOAuthAccess").mockResolvedValue({
+		vi.spyOn(oauthAuthStorage.oauth, "access").mockResolvedValue({
 			accessToken: "test-access-token",
 			projectId: "test-project",
 		});
-		vi.spyOn(oauthAuthStorage, "hasOAuth").mockReturnValue(true);
+		vi.spyOn(oauthAuthStorage.credentials, "hasOAuth").mockReturnValue(true);
 		apiKeyAuthStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
-		apiKeyAuthStorage.setRuntimeApiKey("google", "test-gemini-api-key");
+		apiKeyAuthStorage.keys.setRuntime("google", "test-gemini-api-key");
 		oauthRegistry = new ModelRegistry(oauthAuthStorage);
 		apiKeyRegistry = new ModelRegistry(apiKeyAuthStorage);
 	});
@@ -143,11 +143,11 @@ describe("searchGemini tools serialization", () => {
 		const authorizationHeaders: string[] = [];
 		const requestUrls: string[] = [];
 		let requestCount = 0;
-		vi.spyOn(apiKeyRegistry, "getApiKeyForProvider")
-			.mockResolvedValueOnce("initial-gemini-key")
-			.mockResolvedValueOnce("refreshed-gemini-key")
-			.mockResolvedValueOnce("rotated-gemini-key");
-		const rotateSpy = vi.spyOn(apiKeyAuthStorage, "rotateSessionCredential").mockResolvedValue(true);
+		vi.spyOn(apiKeyRegistry, "getApiKeyWithCredentialForProvider")
+			.mockResolvedValueOnce({ apiKey: "initial-gemini-key" })
+			.mockResolvedValueOnce({ apiKey: "refreshed-gemini-key" })
+			.mockResolvedValueOnce({ apiKey: "rotated-gemini-key" });
+		const rotateSpy = vi.spyOn(apiKeyAuthStorage.limits, "rotate").mockResolvedValue(true);
 		const fetchMock: FetchImpl = (url, init) => {
 			requestCount += 1;
 			requestUrls.push(String(url));
@@ -179,7 +179,7 @@ describe("searchGemini tools serialization", () => {
 
 	it("routes Cloudflare AI Gateway auth through AuthStorage without leaking a Google API key", async () => {
 		const gatewayAuthStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
-		gatewayAuthStorage.setRuntimeApiKey(
+		gatewayAuthStorage.keys.setRuntime(
 			"cloudflare-ai-gateway",
 			serializeCloudflareAiGatewayCredential("test-cloudflare-key", "account", "gateway"),
 		);

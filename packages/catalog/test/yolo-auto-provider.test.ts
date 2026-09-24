@@ -235,4 +235,39 @@ describe("Yolo-Auto provider discovery", () => {
 			expect(model.tokenizer).toBe("qwen3");
 		}
 	});
+
+	test("takes each model's effort ladder from the live `thinking` field", async () => {
+		// Live /v1/models advertises minimal..xhigh for the Qwen3.8 rows; the
+		// seed ladder previously stopped at high, hiding xhigh from the picker.
+		const ladder = ["minimal", "low", "medium", "high", "xhigh"];
+		const fetch: FetchImpl = async () =>
+			new Response(
+				JSON.stringify({
+					object: "list",
+					data: [
+						{ id: "qwen3.8-flash", context_length: 262144, thinking: ladder },
+						{ id: "yolo", context_length: 262144, thinking: ladder },
+						{ id: "qwen3.8-27b", context_length: 262144, thinking: [...ladder, "turbo"] },
+						{ id: "deepseek-flash-v4" },
+					],
+				}),
+				{ status: 200 },
+			);
+		const models = await yoloAutoModelManagerOptions({ apiKey: "yolo-test-key", fetch }).fetchDynamicModels?.();
+		const built = (id: string) => {
+			const spec = models?.find(candidate => candidate.id === id);
+			if (!spec) throw new Error(`yolo-auto/${id} missing from discovery`);
+			return buildModel(spec);
+		};
+
+		const expected = [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh];
+		for (const id of ["qwen3.8-flash", "yolo", "qwen3.8-27b"]) {
+			const model = built(id);
+			expect(model.reasoning).toBe(true);
+			// Unknown wire values ("turbo") are dropped, not surfaced as levels.
+			expect(model.thinking?.efforts).toEqual(expected);
+		}
+		// A row without `thinking` keeps its reference ladder and wire remap.
+		expect(built("deepseek-flash-v4").thinking?.effortMap).toMatchObject({ xhigh: "max" });
+	});
 });

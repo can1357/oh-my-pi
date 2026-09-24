@@ -5,6 +5,7 @@
 ### Fixed
 
 - Long-running commands no longer accumulate promise handlers for every output chunk while retaining bounded stderr previews. ([#12291](https://github.com/can1357/oh-my-pi/pull/12291) by [@iliaal](https://github.com/iliaal))
+- Fixed rotating log files being assigned to the wrong date near local-day boundaries by ensuring dated log paths match the local day used to name the files.
 
 ## [18.2.7] - 2026-09-21
 

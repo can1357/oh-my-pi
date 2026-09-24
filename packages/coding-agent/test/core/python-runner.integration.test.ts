@@ -5,6 +5,7 @@
  * (or sandboxes where subprocess spawning is restricted) does not fail.
  */
 import { afterEach, describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
@@ -143,6 +144,100 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 			const result = await executePythonWithKernel(kernel, "x + 1");
 			expect(result.exitCode).toBe(0);
 			expect(result.output).toContain("42");
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
+	it("executes file-backed cells in the retained namespace with script import semantics", async () => {
+		using tempDir = TempDir.createSync("@python-runner-file-");
+		const scriptDir = path.join(tempDir.path(), "scripts");
+		await fs.mkdir(scriptDir, { recursive: true });
+		await Bun.write(path.join(scriptDir, "sibling.py"), "VALUE = 2\n");
+		const filename = path.join(scriptDir, "loaded.py");
+		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
+		try {
+			await executePythonWithKernel(kernel, "seed = 40");
+			const loaded = await executePythonWithKernel(
+				kernel,
+				[
+					"import asyncio",
+					"import sibling",
+					"await asyncio.sleep(0)",
+					"loaded_value = seed + sibling.VALUE",
+					"print(__file__)",
+				].join("\n"),
+				{ filename },
+			);
+			expect(loaded.exitCode).toBe(0);
+			expect(loaded.output).toContain(filename);
+
+			const retained = await executePythonWithKernel(kernel, "loaded_value");
+			expect(retained.exitCode).toBe(0);
+			expect(retained.output).toContain("42");
+
+			const failed = await executePythonWithKernel(kernel, "raise RuntimeError('from loaded file')", {
+				filename,
+			});
+			expect(failed.exitCode).toBe(1);
+			expect(failed.output).toContain(filename);
+			expect(failed.output).toContain("raise RuntimeError('from loaded file')");
+
+			const missing = await executePythonWithKernel(kernel, "import omp_definitely_missing_module");
+			expect(missing.exitCode).toBe(1);
+			expect(missing.output).toContain("Distribution names can differ");
+			expect(missing.output).toContain("%pip install <distribution-name>");
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
+	it("loads quoted scripts without source echo, retaining namespace, filename and async execution", async () => {
+		using tempDir = TempDir.createSync("@python-runner-load-");
+		const scriptDir = path.join(tempDir.path(), "script folder");
+		await fs.mkdir(scriptDir, { recursive: true });
+		await Bun.write(path.join(scriptDir, "sibling.py"), "VALUE = 2\n");
+		const filename = path.join(scriptDir, "loaded file.py");
+		await Bun.write(
+			filename,
+			[
+				"import asyncio",
+				"import sibling",
+				"await asyncio.sleep(0)",
+				"loaded_value = seed + sibling.VALUE",
+				"load_count = globals().get('load_count', 0) + 1",
+				"print('script output', load_count)",
+			].join("\n"),
+		);
+		const canonicalFilename = await fs.realpath(filename);
+		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
+		try {
+			await executePythonWithKernel(kernel, "seed = 40");
+			const first = await executePythonWithKernel(kernel, `%load "${filename}"`);
+			expect(first.exitCode).toBe(0);
+			expect(first.output.trim()).toBe("script output 1");
+			expect(first.output).not.toContain("loaded_value =");
+			const retained = await executePythonWithKernel(kernel, "print(loaded_value, load_count, __file__)");
+			expect(retained.exitCode).toBe(0);
+			expect(retained.output.trim()).toBe(`42 1 ${canonicalFilename}`);
+
+			const second = await executePythonWithKernel(kernel, `%load "${filename}"`);
+			expect(second.exitCode).toBe(0);
+			expect(second.output.trim()).toBe("script output 2");
+
+			await Bun.write(filename, "raise RuntimeError('loaded traceback')\n");
+			const failed = await executePythonWithKernel(kernel, `%load "${filename}"`);
+			expect(failed.exitCode).toBe(1);
+			expect(failed.output).toContain(canonicalFilename);
+			expect(failed.output).toContain("raise RuntimeError('loaded traceback')");
+			expect(failed.output).not.toContain("_exec_source_async");
+
+			const missing = await executePythonWithKernel(kernel, '%load "missing file.py"');
+			expect(missing.exitCode).toBe(1);
+			expect(missing.output).toContain("missing file.py");
+			const usage = await executePythonWithKernel(kernel, "%load");
+			expect(usage.exitCode).toBe(1);
+			expect(usage.output).toContain("Usage: %load <path>");
 		} finally {
 			await kernel.shutdown();
 		}
@@ -297,13 +392,13 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 		using tempDir = TempDir.createSync("@python-runner-shadow-plan-");
 		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
 		try {
-			await expect(kernel.shadowPlan('tool.read({"path": "src/a.py"})')).resolves.toMatchObject({
+			await expect(kernel.shadowPlan('await tool.read({"path": "src/a.py"})')).resolves.toMatchObject({
 				operations: [
 					{
 						kind: "tool",
 						call: {
-							id: "py:0::0",
-							siteId: "py:0",
+							id: "py:6::0",
+							siteId: "py:6",
 							name: "read",
 							args: {
 								kind: "object",
@@ -314,7 +409,7 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 					},
 				],
 			});
-			await expect(kernel.shadowPlan("tool.read({'path': str(True)})")).resolves.toMatchObject({
+			await expect(kernel.shadowPlan("await tool.read({'path': str(True)})")).resolves.toMatchObject({
 				operations: [
 					{
 						call: {
@@ -336,23 +431,23 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 				],
 			});
 			const mappingAttribute = await kernel.shadowPlan(
-				['cfg = {"path": "secret.txt"}', 'tool.read({"path": cfg.path})'].join("\n"),
+				['cfg = {"path": "secret.txt"}', 'await tool.read({"path": cfg.path})'].join("\n"),
 			);
 			expect(mappingAttribute?.operations).toEqual([]);
 			expect(mappingAttribute?.barrier?.reason).toBe("unsupported Python statement");
-			const jsonDumps = await kernel.shadowPlan('tool.read({"path": json.dumps({"a": 1})})');
+			const jsonDumps = await kernel.shadowPlan('await tool.read({"path": json.dumps({"a": 1})})');
 			expect(jsonDumps?.operations).toEqual([]);
 			expect(jsonDumps?.barrier?.reason).toBe("unsupported Python statement");
-			const ambiguousAddition = await kernel.shadowPlan("if [] + []:\n    tool.read({'path': 'wrong'})");
+			const ambiguousAddition = await kernel.shadowPlan("if [] + []:\n    await tool.read({'path': 'wrong'})");
 			expect(ambiguousAddition?.operations).toEqual([]);
 			expect(ambiguousAddition?.barrier?.reason).toBe("unsupported Python condition");
-			const stringAddition = await kernel.shadowPlan("tool.read({'path': 'src/' + 'a.py'})");
+			const stringAddition = await kernel.shadowPlan("await tool.read({'path': 'src/' + 'a.py'})");
 			expect(stringAddition?.barrier).toBeUndefined();
 			expect(stringAddition?.operations).toHaveLength(1);
-			const invalidJoin = await kernel.shadowPlan("tool.read({'path': ''.join(['secret', 1, '.txt'])})");
+			const invalidJoin = await kernel.shadowPlan("await tool.read({'path': ''.join(['secret', 1, '.txt'])})");
 			expect(invalidJoin?.operations).toEqual([]);
 			expect(invalidJoin?.barrier?.reason).toBe("unsupported Python statement");
-			const formattedValue = await kernel.shadowPlan('tool.read({"path": f"{\'secret\'!r}"})');
+			const formattedValue = await kernel.shadowPlan('await tool.read({"path": f"{\'secret\'!r}"})');
 			expect(formattedValue?.operations).toEqual([]);
 			expect(formattedValue?.barrier?.reason).toBe("unsupported Python statement");
 			const completion = await kernel.shadowPlan("completion('constant')");

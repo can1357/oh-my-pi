@@ -24,7 +24,7 @@ describe("AgentSession eval preludes", () => {
 		registryDir = path.join(os.tmpdir(), `pi-computer-toggle-${Snowflake.next()}`);
 		fs.mkdirSync(registryDir, { recursive: true });
 		authStorage = await AuthStorage.create(path.join(registryDir, "auth.db"));
-		authStorage.setRuntimeApiKey("google", "test-key");
+		authStorage.keys.setRuntime("google", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 	});
 

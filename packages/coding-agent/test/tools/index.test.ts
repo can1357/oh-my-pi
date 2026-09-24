@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { type SettingPath, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { createTools, HIDDEN_TOOLS, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { createTools, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 Bun.env.PI_PYTHON_SKIP_CHECK = "1";
 
@@ -348,6 +348,14 @@ describe("createTools", () => {
 		expect(names).toContain("rewind");
 	});
 
+	it("withholds wait from subagents even when explicitly requested", async () => {
+		const settings = createSettingsWithOverrides({ "async.enabled": true });
+		const main = (await createTools(createTestSession({ settings }), ["read", "wait"])).map(t => t.name);
+		const sub = (await createTools(createTestSession({ taskDepth: 1, settings }), ["read", "wait"])).map(t => t.name);
+		expect(main).toContain("wait");
+		expect(sub).not.toContain("wait");
+	});
+
 	it("excludes checkpoint/rewind from subagent when not explicitly requested", async () => {
 		const names = (
 			await createTools(
@@ -443,9 +451,5 @@ describe("createTools", () => {
 		).map(t => t.name);
 		expect(names).toContain("checkpoint");
 		expect(names).toContain("rewind");
-	});
-
-	it("HIDDEN_TOOLS contains yield, goal, and think", () => {
-		expect(Object.keys(HIDDEN_TOOLS).sort()).toEqual(["goal", "think", "yield"]);
 	});
 });

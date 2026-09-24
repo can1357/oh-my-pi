@@ -7,25 +7,22 @@ const API_URL = "https://api.perplexity.ai/chat/completions";
 const OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions";
 const RESPONSES_URL = "https://api.perplexity.ai/v1/responses";
 
-// API-key path only: getOAuthAccess returns undefined so findPerplexityAuth
+// API-key path only: OAuth access returns undefined so findPerplexityAuth
 // falls through to PERPLEXITY_API_KEY (set per-test, restored in afterEach).
 const apiKeyAuthStorage = {
-	async getOAuthAccess() {
-		return undefined;
-	},
-	async getApiKey(provider: string) {
-		if (provider === "perplexity") return process.env.PERPLEXITY_API_KEY;
-		if (provider === "openrouter") return process.env.OPENROUTER_API_KEY;
-		return undefined;
-	},
-	getCredentialOrigin(provider: string) {
-		// Env-backed key (not OAuth) — the direct api-key config must still be emitted.
-		if (provider === "perplexity" && process.env.PERPLEXITY_API_KEY) return { kind: "env" };
-		if (provider === "openrouter" && process.env.OPENROUTER_API_KEY) return { kind: "env" };
-		return undefined;
-	},
-	hasAuth() {
-		return false;
+	oauth: { access: async () => undefined },
+	keys: {
+		get: async (provider: string) => {
+			if (provider === "perplexity") return process.env.PERPLEXITY_API_KEY;
+			if (provider === "openrouter") return process.env.OPENROUTER_API_KEY;
+			return undefined;
+		},
+		source: (provider: string) => {
+			// Env-backed key (not OAuth) — the direct api-key config must still be emitted.
+			if (provider === "perplexity" && process.env.PERPLEXITY_API_KEY) return { kind: "env", concrete: true };
+			if (provider === "openrouter" && process.env.OPENROUTER_API_KEY) return { kind: "env", concrete: true };
+			return undefined;
+		},
 	},
 } as unknown as AuthStorage;
 
@@ -290,35 +287,21 @@ describe("Perplexity API-key request shape", () => {
 
 const OAUTH_ASK_URL = "https://www.perplexity.ai/rest/sse/perplexity_ask";
 
-// OAuth path: getOAuthAccess returns a bearer (no `.`-delimited exp claim, so it
+// OAuth path: OAuth access returns a bearer (no `.`-delimited exp claim, so it
 // is treated as non-expiring), making findPerplexityAuth pick the oauth branch.
 const oauthAuthStorage = {
-	async getOAuthAccess() {
-		return { accessToken: "test-oauth-token" };
-	},
-	async getApiKey() {
-		return undefined;
-	},
-	getCredentialOrigin(provider: string) {
-		return provider === "perplexity" ? { kind: "oauth" } : undefined;
-	},
-	hasAuth() {
-		return true;
+	oauth: { access: async () => ({ accessToken: "test-oauth-token" }) },
+	keys: {
+		get: async () => undefined,
+		source: (provider: string) => (provider === "perplexity" ? { kind: "oauth", concrete: true } : undefined),
 	},
 } as unknown as AuthStorage;
 
 const anonymousAuthStorage = {
-	async getOAuthAccess() {
-		return undefined;
-	},
-	async getApiKey() {
-		return undefined;
-	},
-	getCredentialOrigin() {
-		return undefined;
-	},
-	hasAuth() {
-		return false;
+	oauth: { access: async () => undefined },
+	keys: {
+		get: async () => undefined,
+		source: () => undefined,
 	},
 } as unknown as AuthStorage;
 
@@ -504,25 +487,15 @@ describe("Perplexity OAuth transport failure (issue #5315)", () => {
 		else process.env.PERPLEXITY_COOKIES = savedCookies;
 	});
 
-	// Mirrors production: an active OAuth session makes getApiKey("perplexity")
-	// return the OAuth JWT itself, and getCredentialOrigin reports origin "oauth".
+	// Mirrors production: an active OAuth session makes keys.get("perplexity")
+	// return the OAuth JWT itself, and keys.source reports origin "oauth".
 	const oauthOriginStorage = {
-		async getOAuthAccess() {
-			return { accessToken: "oauth-session-jwt" };
+		oauth: { access: async () => ({ accessToken: "oauth-session-jwt" }) },
+		keys: {
+			get: async (provider: string) => (provider === "perplexity" ? "oauth-session-jwt" : undefined),
+			source: (provider: string) => (provider === "perplexity" ? { kind: "oauth", concrete: true } : undefined),
 		},
-		async getApiKey(provider: string) {
-			if (provider === "perplexity") return "oauth-session-jwt";
-			return undefined;
-		},
-		getCredentialOrigin(provider: string) {
-			return provider === "perplexity" ? { kind: "oauth" } : undefined;
-		},
-		async rotateSessionCredential() {
-			return false;
-		},
-		hasAuth() {
-			return true;
-		},
+		limits: { rotate: async () => false },
 	} as unknown as AuthStorage;
 
 	it("does not emit a direct api-key config from the OAuth session token", async () => {
@@ -683,14 +656,10 @@ describe("Perplexity OpenRouter auto-chain admission (issue #3251)", () => {
 
 	it("keeps Perplexity out of the auto chain when only OpenRouter auth is configured", () => {
 		const openrouterOnly = {
-			async getOAuthAccess() {
-				return undefined;
-			},
-			async getApiKey() {
-				return undefined;
-			},
-			hasAuth(provider: string) {
-				return provider === "openrouter";
+			oauth: { access: async () => undefined },
+			keys: {
+				get: async () => undefined,
+				source: (provider: string) => (provider === "openrouter" ? { kind: "env", concrete: true } : undefined),
 			},
 		} as unknown as AuthStorage;
 
@@ -707,14 +676,10 @@ describe("Perplexity OpenRouter auto-chain admission (issue #3251)", () => {
 
 	it("admits Perplexity to the auto chain when a direct Perplexity credential exists", () => {
 		const perplexityOnly = {
-			async getOAuthAccess() {
-				return undefined;
-			},
-			async getApiKey() {
-				return undefined;
-			},
-			hasAuth(provider: string) {
-				return provider === "perplexity";
+			oauth: { access: async () => undefined },
+			keys: {
+				get: async () => undefined,
+				source: (provider: string) => (provider === "perplexity" ? { kind: "env", concrete: true } : undefined),
 			},
 		} as unknown as AuthStorage;
 
@@ -750,17 +715,10 @@ describe("Perplexity Authentication order", () => {
 		});
 
 		const mixedAuthStorage = {
-			async getOAuthAccess() {
-				return { accessToken: "test-oauth-token" };
-			},
-			async getApiKey() {
-				return undefined;
-			},
-			getCredentialOrigin(provider: string) {
-				return provider === "perplexity" ? { kind: "oauth" } : undefined;
-			},
-			hasAuth() {
-				return true;
+			oauth: { access: async () => ({ accessToken: "test-oauth-token" }) },
+			keys: {
+				get: async () => undefined,
+				source: (provider: string) => (provider === "perplexity" ? { kind: "oauth", concrete: true } : undefined),
 			},
 		} as unknown as AuthStorage;
 
@@ -779,18 +737,10 @@ describe("Perplexity Authentication order", () => {
 		delete Bun.env.PERPLEXITY_COOKIES;
 
 		const oauthAndApiKeyAuthStorage = {
-			async getOAuthAccess() {
-				return { accessToken: "oauth-token" };
-			},
-			async getApiKey(provider: string) {
-				if (provider === "perplexity") return "api-key";
-				return undefined;
-			},
-			getCredentialOrigin(provider: string) {
-				return provider === "perplexity" ? { kind: "oauth" } : undefined;
-			},
-			hasAuth() {
-				return true;
+			oauth: { access: async () => ({ accessToken: "oauth-token" }) },
+			keys: {
+				get: async (provider: string) => (provider === "perplexity" ? "api-key" : undefined),
+				source: (provider: string) => (provider === "perplexity" ? { kind: "oauth", concrete: true } : undefined),
 			},
 		} as unknown as AuthStorage;
 

@@ -17,6 +17,7 @@ function makeRule(partial: Partial<Rule>): Rule {
 		description: partial.description,
 		condition: partial.condition,
 		astCondition: partial.astCondition,
+		question: partial.question,
 		scope: partial.scope,
 		agents: partial.agents,
 		interruptMode: partial.interruptMode,
@@ -91,6 +92,24 @@ describe("bucketRules", () => {
 		expect(alwaysApplyRules).toHaveLength(0);
 		expect(mgr.hasRules()).toBe(true);
 		expect(mgr.hasAstRules()).toBe(true);
+	});
+
+	it("registers a question-only rule as judged TTSR that never matches the stream", () => {
+		const mgr = new TtsrManager();
+		const judged = makeRule({
+			name: "honest-tests",
+			question: "Does the reply claim tests pass?",
+			condition: ["tests pass"],
+			description: "no unverified claims",
+		});
+
+		const { rulebookRules, alwaysApplyRules } = bucketRules([judged], mgr);
+
+		expect(rulebookRules).toHaveLength(0);
+		expect(alwaysApplyRules).toHaveLength(0);
+		expect(mgr.hasJudgedRules()).toBe(true);
+		// Its condition only gates the question; streamed text never interrupts.
+		expect(mgr.checkDelta("all tests pass", { source: "text" })).toEqual([]);
 	});
 
 	it("splits non-TTSR rules into always-apply and rulebook by metadata", () => {

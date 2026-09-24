@@ -60,7 +60,7 @@ function selectOAuthAccount(
 	requestedCredentialId?: number,
 	sessionId?: string,
 ): SecurityAccountRef | undefined {
-	const accounts = authStorage.listOAuthAccounts(provider, sessionId);
+	const accounts = authStorage.oauth.accounts(provider, sessionId);
 	const selected =
 		requestedCredentialId !== undefined
 			? accounts.find(account => account.credentialId === requestedCredentialId)
@@ -119,7 +119,7 @@ export async function resolveExactSecurityOAuthAccess(
 	account: SecurityAccountRef,
 	options: { forceRefresh: boolean; signal?: AbortSignal },
 ): Promise<Extract<OAuthAccessResolution, { ok: true }>> {
-	const resolution = await authStorage.getOAuthAccessByCredentialId(account.provider, account.credentialId, options);
+	const resolution = await authStorage.oauth.accessById(account.provider, account.credentialId, options);
 	if (!resolution) throw new Error("The pinned security OAuth credential is unavailable");
 	assertSecurityIdentityMatches(account, resolution);
 	if (!resolution.ok) throw new Error("The pinned security OAuth credential could not be resolved");

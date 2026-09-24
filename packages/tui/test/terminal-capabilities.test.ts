@@ -75,14 +75,18 @@ describe("detectTerminalId", () => {
 		expect(detectTerminalId({ TERM_PROGRAM: "rio", COLORTERM: "truecolor" })).toBe("rio");
 	});
 
-	it("maps rio to kitty graphics with conservative unverified capabilities", () => {
-		// Reporter-verified (#12205): kitty graphics + true color. Everything
-		// else stays on the base defaults until proven inside rio itself.
+	it("maps rio to kitty graphics with verified hyperlink capability", () => {
+		// Reporter-verified (#12205): kitty graphics + true color. Hyperlinks
+		// verified against rio 0.5.28's published escape sequence support plus a
+		// live OSC 8 Alt+click and OSC 52 round-trip. Notifications stay on BEL:
+		// rio's Windows toast needs an AUMID registration it does not create
+		// (observed silent drop), so Osc9 would only remove the D-Bus fallback
+		// for Linux rio users.
 		const info = getTerminalInfo("rio");
 		expect(info.id).toBe("rio");
 		expect(info.imageProtocol).toBe(ImageProtocol.Kitty);
 		expect(info.trueColor).toBe(true);
-		expect(info.hyperlinks).toBe(false);
+		expect(info.hyperlinks).toBe(true);
 		expect(info.notifyProtocol).toBe(NotifyProtocol.Bell);
 	});
 

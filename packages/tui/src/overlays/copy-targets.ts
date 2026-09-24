@@ -199,12 +199,12 @@ export function extractLastCommand(messages: readonly AgentMessage[]): LastComma
 	return undefined;
 }
 
-/** Concatenated visible text of an assistant message, or undefined when empty. */
-function assistantText(msg: AgentMessage): string | undefined {
+/** Concatenated visible text of an assistant message, verbatim; undefined when blank. */
+export function assistantText(msg: AgentMessage): string | undefined {
 	if (msg.role !== "assistant") return undefined;
 	let text = "";
 	for (const content of msg.content) {
 		if (content.type === "text") text += content.text;
 	}
-	return text.trim() || undefined;
+	return text.trim() ? text : undefined;
 }
