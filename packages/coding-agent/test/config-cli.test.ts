@@ -240,3 +240,102 @@ describe("config CLI schema coverage", () => {
 		});
 	});
 });
+
+describe("config doctor", () => {
+	interface DoctorReport {
+		issues: Array<{ severity: string; check: string; message: string }>;
+		summary: { errors: number; warnings: number; info: number };
+	}
+
+	async function runDoctorJson(): Promise<DoctorReport> {
+		const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation(((chunk: unknown, encodingOrCallback?: unknown, callback?: unknown) => {
+			const done = typeof encodingOrCallback === "function" ? encodingOrCallback : callback;
+			if (typeof done === "function") (done as (error?: Error | null) => void)(null);
+			return true;
+		}) as typeof process.stdout.write);
+		try {
+			await runConfigCommand({ action: "doctor", flags: { json: true } });
+			const text = writeSpy.mock.calls.map(call => String(call[0])).join("");
+			return JSON.parse(text) as DoctorReport;
+		} finally {
+			writeSpy.mockRestore();
+		}
+	}
+
+	async function writeModelsYml(content: string): Promise<void> {
+		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
+		await Bun.write(path.join(testAgentDir.path(), "models.yml"), content);
+	}
+
+	it("treats an auth:none provider as keyless, not as a guaranteed failure", async () => {
+		await writeModelsYml(
+			"providers:\n  ollama:\n    baseUrl: http://localhost:11434\n    api: openai-completions\n    auth: none\n    models:\n      - id: local-model\n",
+		);
+
+		const report = await runDoctorJson();
+
+		expect(report.issues.filter(issue => issue.check === "provider-auth")).toEqual([]);
+		expect(report.summary.errors).toBe(0);
+	});
+
+	it("parses provider ids outside \\w through the schema-backed loader", async () => {
+		await writeModelsYml(
+			"providers:\n  llama.cpp:\n    baseUrl: http://localhost:8080\n    api: openai-completions\n    auth: none\n    models:\n      - id: local-model\n",
+		);
+		await runConfigCommand({ action: "set", key: "disabledProviders", value: '["llama.cpp"]', flags: { json: true } });
+
+		const report = await runDoctorJson();
+
+		expect(report.issues.some(issue => issue.check === "disabled-has-config")).toBe(true);
+		expect(report.summary.errors).toBe(0);
+	});
+
+	it("reports a models.yml the schema-backed loader rejects instead of a clean bill", async () => {
+		await writeModelsYml("providers:\n  broken:\n    auth: bogus-value\n");
+
+		const report = await runDoctorJson();
+
+		const issue = report.issues.find(entry => entry.check === "models-config-invalid");
+		expect(issue?.severity).toBe("error");
+	});
+
+	it("warns when a configured bare selector is served by multiple enabled providers", async () => {
+		await writeModelsYml(
+			"providers:\n" +
+				"  local-a:\n    baseUrl: http://localhost:8081\n    api: openai-completions\n    auth: none\n    models:\n      - id: shared-model\n" +
+				"  local-b:\n    baseUrl: http://localhost:8082\n    api: openai-completions\n    auth: none\n    models:\n      - id: shared-model\n",
+		);
+		await runConfigCommand({
+			action: "set",
+			key: "modelRoles",
+			value: '{"default":"shared-model"}',
+			flags: { json: true },
+		});
+
+		const report = await runDoctorJson();
+
+		const conflicts = report.issues.filter(issue => issue.check === "catalog-conflict");
+		expect(conflicts).toHaveLength(1);
+		expect(conflicts[0]?.severity).toBe("warning");
+		expect(conflicts[0]?.message).toContain("local-a");
+		expect(conflicts[0]?.message).toContain("local-b");
+	});
+
+	it("does not warn for a provider-qualified selector served by multiple providers", async () => {
+		await writeModelsYml(
+			"providers:\n" +
+				"  local-a:\n    baseUrl: http://localhost:8081\n    api: openai-completions\n    auth: none\n    models:\n      - id: shared-model\n" +
+				"  local-b:\n    baseUrl: http://localhost:8082\n    api: openai-completions\n    auth: none\n    models:\n      - id: shared-model\n",
+		);
+		await runConfigCommand({
+			action: "set",
+			key: "modelRoles",
+			value: '{"default":"local-a/shared-model"}',
+			flags: { json: true },
+		});
+
+		const report = await runDoctorJson();
+
+		expect(report.issues.filter(issue => issue.check === "catalog-conflict")).toEqual([]);
+	});
+});
