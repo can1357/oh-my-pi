@@ -6,7 +6,7 @@ export interface BillingSummaryOptions {
 	readonly cost: number;
 	readonly usingSubscription: boolean;
 	readonly premiumRequests: number;
-	readonly aiu: number;
+	readonly aiu?: number;
 	readonly fractionDigits: number;
 	readonly startupPlaceholder?: boolean;
 	readonly pricingPeriod?: "peak" | "off-peak";
@@ -39,9 +39,9 @@ function formatSpendPlaceholder(usingSubscription: boolean, uiTheme: Theme): str
 	return "S…";
 }
 
-function formatAiu(amount: number, fractionDigits: number): string {
-	const rounded = amount.toFixed(fractionDigits);
-	return Number(rounded) === 0 ? Number(amount.toPrecision(3)).toString() : rounded;
+function formatAiu(amount: number): string {
+	const rounded = amount.toFixed(2);
+	return rounded === "0.00" ? amount.toFixed(9).replace(/0+$/, "").replace(/\.$/, "") : rounded;
 }
 
 function formatAdvisorSpend(
@@ -65,7 +65,8 @@ function formatAdvisorSpend(
 export function formatBillingSummary(options: BillingSummaryOptions, uiTheme: Theme): string | undefined {
 	const premiumRequests = normalizePremiumRequests(options.premiumRequests);
 	const advisorCost = options.advisor?.cost ?? 0;
-	const hasAiu = options.aiu > 0;
+	const aiu = options.aiu ?? 0;
+	const hasAiu = aiu > 0;
 	if (
 		!options.cost &&
 		!advisorCost &&
@@ -80,7 +81,7 @@ export function formatBillingSummary(options: BillingSummaryOptions, uiTheme: Th
 	const placeholder = options.startupPlaceholder === true;
 	const parts: string[] = [];
 	if (hasAiu) {
-		parts.push(`${placeholder ? "…" : formatAiu(options.aiu, options.fractionDigits)} AIU`);
+		parts.push(`${placeholder ? "…" : formatAiu(aiu)} AIU`);
 	} else {
 		if (options.cost || options.pricingPeriod) {
 			parts.push(

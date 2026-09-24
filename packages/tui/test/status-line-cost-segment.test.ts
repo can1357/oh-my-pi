@@ -2,9 +2,10 @@ import { beforeAll, describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
+import { formatBillingSummary } from "../src/status-line/metrics";
 import { renderSegment } from "../src/status-line/segments";
 import type { SegmentContext } from "../src/status-line/types";
-import { initTheme } from "../src/theme";
+import { initTheme, theme } from "../src/theme";
 
 beforeAll(async () => {
 	await initTheme();
@@ -130,9 +131,17 @@ describe("cost status-line segment", () => {
 		expect(stripVTControlCharacters(renderSegment("cost", ctx).content)).toBe("1.71 AIU");
 	});
 
-	it("shows a small nonzero AIU charge before it rounds to a hundredth", () => {
+	it("formats small AIU consistently without exponential notation", () => {
 		const ctx = costCtx({ aiu: 0.00075, onAdvisorSubscriptionProbe: () => {} });
 		expect(stripVTControlCharacters(renderSegment("cost", ctx).content)).toBe("0.00075 AIU");
+		expect(
+			formatBillingSummary(
+				{ cost: 0, usingSubscription: false, premiumRequests: 0, aiu: 0.00075, fractionDigits: 3 },
+				theme,
+			),
+		).toBe("0.00075 AIU");
+		ctx.usageStats.aiu = 5e-9;
+		expect(stripVTControlCharacters(renderSegment("cost", ctx).content)).toBe("0.000000005 AIU");
 	});
 
 	it("uses premium requests when the AIU total is zero", () => {
