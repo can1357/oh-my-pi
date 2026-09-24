@@ -11,6 +11,7 @@ import { formatModelString } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import { validateProviderMaxInFlightRequests } from "../config/settings";
 import type { LocalProtocolOptions } from "../internal-urls";
+import { resolveLocalUrlToPath } from "../internal-urls/local-protocol";
 import { deobfuscateSessionContext, obfuscateMessages } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import { stripPendingSecretPlaceholderSuffix } from "../secrets/placeholder";
@@ -62,12 +63,18 @@ export class SessionProviderBoundary {
 			return images.flatMap((image, index) => {
 				const label = `Image #${index + 1}`;
 				const uri = `attachment://${index + 1}`;
-				// File-backed attachments resolve to their original path so tools and
-				// clickable links open the user's real file; clipboard payloads have no
-				// source file and materialize a blob copy instead.
-				const originalPath = imageAttachmentSource(image)?.path;
-				if (originalPath) return [{ label, uri, image, sourcePath: originalPath }];
+				// File-backed attachments resolve to their file so tools and clickable links
+				// open it. Clipboard images committed to the session carry a `local://` URL,
+				// resolved against the session's current root so `/move` keeps them readable.
+				// Payloads without a file materialize a blob copy instead.
+				const source = imageAttachmentSource(image)?.path;
 				try {
+					if (source) {
+						const sourcePath = source.startsWith("local://")
+							? resolveLocalUrlToPath(source, this.#host.localProtocolOptions())
+							: source;
+						return [{ label, uri, image, sourcePath }];
+					}
 					const sourcePath = this.#host.sessionManager.putBlobSync(Buffer.from(image.data, "base64"), {
 						extension: blobExtensionForImageMimeType(image.mimeType),
 					}).displayPath;
@@ -182,29 +189,32 @@ export class SessionProviderBoundary {
 		}
 
 		if (sessionOnPayload) {
-			if (!options.onPayload) {
-				preparedOptions.onPayload = sessionOnPayload;
-			} else {
-				const requestOnPayload = options.onPayload;
-				preparedOptions.onPayload = async (payload, model) => {
-					const sessionPayload = await sessionOnPayload(payload, model);
-					const sessionResolvedPayload = sessionPayload ?? payload;
-					const requestPayload = await requestOnPayload(sessionResolvedPayload, model);
-					return requestPayload ?? sessionResolvedPayload;
-				};
-			}
+			const requestOnPayload = options.onPayload;
+			preparedOptions.onPayload = async (payload, model) => {
+				const sessionPayload = options.signal
+					? await sessionOnPayload(payload, model, options.signal)
+					: await sessionOnPayload(payload, model);
+				options.signal?.throwIfAborted();
+				const sessionResolvedPayload = sessionPayload ?? payload;
+				if (!requestOnPayload) return sessionResolvedPayload;
+				const requestPayload = options.signal
+					? await requestOnPayload(sessionResolvedPayload, model, options.signal)
+					: await requestOnPayload(sessionResolvedPayload, model);
+				options.signal?.throwIfAborted();
+				return requestPayload ?? sessionResolvedPayload;
+			};
 		}
 
 		if (sessionOnResponse) {
-			if (!options.onResponse) {
-				preparedOptions.onResponse = sessionOnResponse;
-			} else {
-				const requestOnResponse = options.onResponse;
-				preparedOptions.onResponse = async (response, model) => {
-					await sessionOnResponse(response, model);
-					await requestOnResponse(response, model);
-				};
-			}
+			const requestOnResponse = options.onResponse;
+			preparedOptions.onResponse = async (response, model) => {
+				if (options.signal) await sessionOnResponse(response, model, options.signal);
+				else await sessionOnResponse(response, model);
+				if (requestOnResponse) {
+					if (options.signal) await requestOnResponse(response, model, options.signal);
+					else await requestOnResponse(response, model);
+				}
+			};
 		}
 
 		if (sessionOnSseEvent) {

@@ -39,7 +39,7 @@ describe("AgentSession concurrent prompt dispatch", () => {
 
 	beforeEach(async () => {
 		authStorage = await AuthStorage.create(":memory:");
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 	});
 

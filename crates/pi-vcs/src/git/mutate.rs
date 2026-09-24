@@ -68,11 +68,7 @@ pub(crate) fn update_reference(
 				.duration_since(std::time::UNIX_EPOCH)
 				.map_or(0, |elapsed| elapsed.as_secs())
 		);
-		gix::actor::SignatureRef {
-			name:  "oh-my-pi".into(),
-			email: "omp@localhost".into(),
-			time:  &now,
-		}
+		gix::actor::SignatureRef { name: "omp".into(), email: "omp@localhost".into(), time: &now }
 	};
 	repo
 		.edit_references_as(Some(edit), Some(committer))

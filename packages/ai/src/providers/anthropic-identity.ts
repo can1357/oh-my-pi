@@ -53,7 +53,7 @@ const CLAUDE_DEVICE_ID_ACCOUNT_HASH_DOMAIN = "omp-claude-device-id-v2";
 
 /** Derive the stable Claude device id for an installation and optional account. */
 export function deriveClaudeDeviceId(installId: string, accountId?: string): string {
-	const hash = nodeCrypto.createHash("sha256");
+	const hash = new Bun.SHA256();
 	if (accountId && accountId.length > 0) {
 		return hash
 			.update(CLAUDE_DEVICE_ID_ACCOUNT_HASH_DOMAIN)

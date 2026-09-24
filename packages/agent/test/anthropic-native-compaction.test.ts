@@ -1,18 +1,7 @@
-/**
- * Anthropic server-side compaction backend (`compact-2026-01-12`).
- *
- * Covers the agent side of the lane: which models take it, the request
- * `compact()` issues (live-turn shape plus the compact edit with the harness
- * instructions), what it persists (the API's summary as both entry text and
- * native replay payload), the eligibility floor that routes small contexts to
- * the local summarizer, native-failure semantics, and how a later compaction
- * reads a native entry back.
- */
+/** Anthropic on-demand compaction: prefix-only requests, signed replay and failure fallback. */
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import {
-	ANTHROPIC_COMPACTION_MIN_CONTEXT_TOKENS,
-	buildAnthropicCompactionInstructions,
-	describeRetainedTail,
+	findAnthropicCompactionCut,
 	type CompactionPreparation,
 	compact,
 	createFileOps,
@@ -80,7 +69,9 @@ function makePreparation(overrides: Partial<CompactionPreparation> = {}): Compac
 		firstKeptEntryId: "kept-1",
 		messagesToSummarize: [{ role: "user", content: "long history", timestamp: 1 }],
 		turnPrefixMessages: [],
-		recentMessages: [{ role: "user", content: "recent", timestamp: 2 }],
+		recentMessages: [
+			assistantMessage(makeAnthropicModel(), { content: [{ type: "text", text: "recent" }], timestamp: 2 }),
+		],
 		isSplitTurn: false,
 		tokensBefore: 100_000,
 		fileOps: createFileOps(),
@@ -122,16 +113,15 @@ afterEach(() => {
 });
 
 describe("shouldUseAnthropicNativeCompaction", () => {
-	test("covers beta-supported first-party models on the official endpoint and explicit opt-ins only", () => {
+	test("covers beta-supported first-party models on supported endpoints", () => {
 		expect(shouldUseAnthropicNativeCompaction(makeAnthropicModel())).toBe(true);
 		expect(shouldUseAnthropicNativeCompaction(makeAnthropicModel({ remoteCompaction: { enabled: false } }))).toBe(
 			false,
 		);
 		expect(
-			shouldUseAnthropicNativeCompaction(makeAnthropicModel({ compat: { supportsContextManagement: false } })),
+			shouldUseAnthropicNativeCompaction(makeAnthropicModel({ compat: { supportsServerCompaction: false } })),
 		).toBe(false);
-		// The beta rejects the budget-thinking generations (Haiku 4.5, Sonnet
-		// 4.5, Opus 4.5): only adaptive-thinking models qualify.
+		// These generations lack the on-demand compaction capability in catalog policy.
 		expect(
 			shouldUseAnthropicNativeCompaction(
 				makeAnthropicModel({ id: "claude-haiku-4-5", name: "Claude Haiku 4.5", contextWindow: 200_000 }),
@@ -154,7 +144,7 @@ describe("shouldUseAnthropicNativeCompaction", () => {
 					remoteCompaction: { enabled: true },
 				}),
 			),
-		).toBe(true);
+		).toBe(false);
 		expect(shouldUseAnthropicNativeCompaction(makeOpenAiModel())).toBe(false);
 	});
 
@@ -164,7 +154,7 @@ describe("shouldUseAnthropicNativeCompaction", () => {
 		try {
 			expect(shouldUseAnthropicNativeCompaction(makeAnthropicModel())).toBe(false);
 			expect(shouldUseAnthropicNativeCompaction(makeAnthropicModel({ remoteCompaction: { enabled: true } }))).toBe(
-				true,
+				false,
 			);
 		} finally {
 			if (previous === undefined) delete Bun.env.ANTHROPIC_BASE_URL;
@@ -179,7 +169,7 @@ describe("shouldUseAnthropicNativeCompaction", () => {
 });
 
 describe("compact() Anthropic native lane", () => {
-	test("compacts through the live-turn request shape and persists the summary as text and replay payload", async () => {
+	test("sends only the summarized prefix with live controls and persists the signed summary", async () => {
 		const completeSimple = vi.spyOn(ai, "completeSimple");
 		const model = makeAnthropicModel();
 		const { calls, completeImpl } = recordingCompleteImpl(() =>
@@ -188,7 +178,7 @@ describe("compact() Anthropic native lane", () => {
 					type: "anthropicCompaction",
 					provider: "anthropic",
 					content: NATIVE_SUMMARY,
-					encryptedContent: "enc_state_1",
+					signature: "sig_state_1",
 				},
 				stopDetails: { type: "compaction" },
 				usage: { ...ZERO_USAGE, input: 64, output: 2002, cacheRead: 79_000, totalTokens: 81_066 },
@@ -215,23 +205,16 @@ describe("compact() Anthropic native lane", () => {
 		expect(completeSimple).not.toHaveBeenCalled();
 		expect(calls).toHaveLength(1);
 		const [{ ctx, options }] = calls;
-		// The request is the live turn: same system prompt, tools, and every
-		// message that would be summarized plus the retained tail.
+		// The tail is omitted, but live controls remain unchanged.
 		expect(ctx.systemPrompt).toEqual(["You are the live agent."]);
 		expect(ctx.tools).toBe(tools);
-		expect(ctx.messages.map(message => message.content)).toEqual(["long history", "recent"]);
-		expect(options.anthropicCompaction?.triggerInputTokens).toBe(50_000);
-		expect(options.anthropicCompaction?.pauseAfterCompaction).toBe(true);
+		expect(ctx.messages.map(message => message.content)).toEqual(["long history"]);
+		expect(options.anthropicCompaction).toEqual({ instructions: expect.any(String) });
 		const instructions = options.anthropicCompaction?.instructions ?? "";
 		expect(instructions).toContain("<additional-context>\n- Branch: main\n</additional-context>");
 		expect(instructions).toContain("## Goal");
-		// The retained tail travels for the prompt cache but is scoped out of the
-		// summary, by count rather than by quoting its contents.
-		expect(instructions.startsWith("SCOPE: The conversation's final user message stays in context verbatim")).toBe(
-			true,
-		);
-		expect(instructions).not.toContain('"recent"');
-		expect(instructions).toContain("Summarize ONLY the history before those messages");
+		expect(instructions).toContain("The conversation above is the complete history to summarize.");
+		expect(instructions).not.toContain("retained");
 		expect(instructions.endsWith("respond with the summary text only.")).toBe(true);
 		expect(instructions).toContain("MUST NOT call any tools");
 
@@ -242,13 +225,13 @@ describe("compact() Anthropic native lane", () => {
 		expect(result.summary).toContain("<files>\n# /repo/src/\nhandlers.ts (Read)\n</files>");
 		expect(result.shortSummary).toBe("Remote compaction");
 		expect(result.firstKeptEntryId).toBe("kept-1");
-		// The API's opaque state travels with the verbatim summary into the
+		// The API's signature travels with the verbatim summary into the
 		// entry and back out as the replay payload.
 		expect(result.preserveData).toEqual({
 			anthropicCompaction: {
 				provider: "anthropic",
 				content: NATIVE_SUMMARY,
-				encryptedContent: "enc_state_1",
+				signature: "sig_state_1",
 				filesText: "<files>\n# /repo/src/\nhandlers.ts (Read)\n</files>",
 				model: "claude-fable-5",
 				usedTokens: 79_064,
@@ -258,84 +241,88 @@ describe("compact() Anthropic native lane", () => {
 			type: "anthropicCompaction",
 			provider: "anthropic",
 			content: NATIVE_SUMMARY,
-			encryptedContent: "enc_state_1",
+			signature: "sig_state_1",
 			filesText: "<files>\n# /repo/src/\nhandlers.ts (Read)\n</files>",
 		});
 	});
 
-	test("renders the retained-tail scope singular and plural from structured scope", () => {
-		const singular = buildAnthropicCompactionInstructions("BASE", undefined, undefined, {
-			count: 1,
-			role: "user",
-		});
-		expect(singular.startsWith("SCOPE: The conversation's final user message stays in context verbatim")).toBe(true);
-
-		const plural = buildAnthropicCompactionInstructions("BASE", undefined, undefined, {
-			count: 3,
-			role: "assistant",
-		});
-		expect(
-			plural.startsWith(
-				"SCOPE: The conversation's final 3 messages, starting with a assistant message, stay in context verbatim",
-			),
-		).toBe(true);
-	});
-
-	test("describeRetainedTail counts the trailing pad for assistant-final tails", () => {
+	test("moves the cut past tool pairs, same-role boundaries, and system/developer-first tails", () => {
 		const user = (content: string): Message => ({ role: "user", content, timestamp: 1 });
-		const assistant = (text: string | undefined): Message => ({
-			role: "assistant",
-			content: text === undefined ? [] : [{ type: "text", text }],
-			provider: "anthropic",
-			model: "claude-fable-5",
-			api: "anthropic-messages",
-			usage: ZERO_USAGE,
-			stopReason: "stop",
-			timestamp: 2,
-		});
-
-		// The wire appends a synthetic trailing user message after an
-		// assistant turn, which stays verbatim like the rest of the tail.
-		expect(describeRetainedTail([user("old"), assistant("new")])).toEqual({ count: 3, role: "user" });
-		expect(describeRetainedTail([assistant("only")])).toEqual({ count: 2, role: "assistant" });
-		// No pad without a live final turn — and collapsing still applies.
-		expect(describeRetainedTail([assistant(undefined)])).toEqual({ count: 1, role: "assistant" });
-		// Server-tool blocks serialize unconditionally, so a server-tool-only
-		// turn draws the pad too.
-		const serverToolAssistant: Message = {
-			role: "assistant",
-			content: [
-				{ type: "anthropicServerTool", block: { type: "server_tool_use", id: "srv_1", name: "web_search" } },
-			],
-			provider: "anthropic",
-			model: "claude-fable-5",
-			api: "anthropic-messages",
-			usage: ZERO_USAGE,
-			stopReason: "stop",
-			timestamp: 2,
-		};
-		expect(describeRetainedTail([user("old"), serverToolAssistant])).toEqual({ count: 3, role: "user" });
-		expect(describeRetainedTail([])).toBeUndefined();
-		// Consecutive tool results still collapse into one wire message.
-		const toolResult = (id: string): Message => ({
+		const assistant = (content: AssistantMessage["content"]): Message =>
+			assistantMessage(makeAnthropicModel(), { content });
+		const call = assistant([{ type: "toolCall", id: "call-1", name: "read", arguments: {} }]);
+		const result: Message = {
 			role: "toolResult",
-			toolCallId: id,
+			toolCallId: "call-1",
 			toolName: "read",
 			content: [{ type: "text", text: "bytes" }],
 			isError: false,
-			timestamp: 1,
-		});
-		expect(describeRetainedTail([toolResult("a"), toolResult("b"), user("next")])).toEqual({
-			count: 2,
-			role: "user",
-		});
+			timestamp: 2,
+		};
+		const done = assistant([{ type: "text", text: "done" }]);
+		expect(findAnthropicCompactionCut([user("start"), call, result, done, user("next")], 2)).toBe(3);
+		expect(findAnthropicCompactionCut([user("old"), user("same"), done], 1)).toBe(2);
+		expect(
+			findAnthropicCompactionCut([user("old"), { role: "developer", content: "control", timestamp: 2 }, done], 1),
+		).toBe(2);
+		expect(
+			findAnthropicCompactionCut([user("old"), { role: "system", content: "control", timestamp: 2 }, done], 1),
+		).toBe(2);
+		expect(findAnthropicCompactionCut([user("old"), user("same")], 1)).toBe(2);
+		expect(findAnthropicCompactionCut([user("old"), call, result], 2)).toBe(3);
 	});
 
-	test("leads a follow-up compaction with the previous native summary as its replay payload", async () => {
+	test("persists the advanced cut and summarizes everything when no safe tail exists", async () => {
 		const model = makeAnthropicModel();
 		const { calls, completeImpl } = recordingCompleteImpl(() =>
 			assistantMessage(model, {
-				providerPayload: { type: "anthropicCompaction", provider: "anthropic", content: "second summary" },
+				providerPayload: {
+					type: "anthropicCompaction",
+					provider: "anthropic",
+					content: "summary",
+					signature: "sig",
+				},
+				stopDetails: { type: "compaction" },
+			}),
+		);
+		const preparation = makePreparation({
+			recentMessages: [
+				{ role: "user", content: "same-role tail", timestamp: 2 },
+				assistantMessage(model, { content: [{ type: "text", text: "safe tail" }], timestamp: 3 }),
+			],
+			recentEntryIds: ["kept-1", "kept-2"],
+		});
+		const advanced = await compact(preparation, model, "sk-ant-test", undefined, undefined, { completeImpl });
+		expect(advanced.firstKeptEntryId).toBe("kept-2");
+		expect(calls[0]?.ctx.messages.map(message => message.content)).toEqual(["long history", "same-role tail"]);
+
+		calls.length = 0;
+		const none = await compact(
+			makePreparation({
+				recentMessages: [{ role: "user", content: "no safe boundary", timestamp: 2 }],
+				recentEntryIds: ["kept-1"],
+			}),
+			model,
+			"sk-ant-test",
+			undefined,
+			undefined,
+			{ completeImpl },
+		);
+		expect(none.firstKeptEntryId).toBe("");
+		expect(calls[0]?.ctx.messages.map(message => message.content)).toEqual(["long history", "no safe boundary"]);
+	});
+
+	test("leads a follow-up compaction with a legacy replay block and replaces it with a signature", async () => {
+		const model = makeAnthropicModel();
+		const { calls, completeImpl } = recordingCompleteImpl(() =>
+			assistantMessage(model, {
+				providerPayload: {
+					type: "anthropicCompaction",
+					provider: "anthropic",
+					content: "second summary",
+					signature: "sig_2",
+				},
+				stopDetails: { type: "compaction" },
 			}),
 		);
 		const preparation = makePreparation({
@@ -365,13 +352,14 @@ describe("compact() Anthropic native lane", () => {
 				filesText: "<files>\n# /repo/src/\nold.ts (Read)\n</files>",
 			},
 		});
-		expect(ctx.messages.slice(1).map(message => message.content)).toEqual(["long history", "recent"]);
+		expect(ctx.messages.slice(1).map(message => message.content)).toEqual(["long history"]);
 		// The stale slot is replaced, unrelated preserve data survives.
 		expect(result.preserveData).toEqual({
 			appKey: "kept",
 			anthropicCompaction: {
 				provider: "anthropic",
 				content: result.summary,
+				signature: "sig_2",
 				model: "claude-fable-5",
 				usedTokens: 0,
 			},
@@ -382,12 +370,16 @@ describe("compact() Anthropic native lane", () => {
 		const model = makeAnthropicModel();
 		const { calls, completeImpl } = recordingCompleteImpl(() =>
 			assistantMessage(model, {
-				providerPayload: { type: "anthropicCompaction", provider: "anthropic", content: "second summary" },
+				providerPayload: {
+					type: "anthropicCompaction",
+					provider: "anthropic",
+					content: "second summary",
+					signature: "sig_2",
+				},
+				stopDetails: { type: "compaction" },
 			}),
 		);
-		// Re-retained and re-summarized turns can both predate the previous
-		// compaction's commit: the marker must precede every message this
-		// request replays, exactly like the live rebuild.
+		// Re-summarized turns can predate the previous compaction's commit.
 		const preparation = makePreparation({
 			messagesToSummarize: [{ role: "user", content: "long history", timestamp: 2000 }],
 			recentMessages: [{ role: "user", content: "recent", timestamp: 3000 }],
@@ -403,39 +395,71 @@ describe("compact() Anthropic native lane", () => {
 		const [{ ctx }] = calls;
 		const first = ctx.messages[0] as { historyRewriteAt?: number };
 		expect(first.historyRewriteAt).toBe(2_000 - 1);
-		// The rewrite marker precedes the retained tail, so prefix-bound thinking
-		// in the tail is not treated as pre-rewrite and stripped.
-		const retained = ctx.messages[ctx.messages.length - 1] as { timestamp: number };
-		expect(first.historyRewriteAt).toBeLessThan(retained.timestamp);
+		// The rewrite marker precedes the remaining summarized messages.
+		expect(first.historyRewriteAt).toBeLessThan(ctx.messages[1]?.timestamp ?? 0);
 	});
 
-	test("summarizes locally below the trigger floor instead of issuing a request that cannot compact", async () => {
+	test("compacts below the old threshold without changing the live request controls", async () => {
 		const model = makeAnthropicModel();
 		const { calls, completeImpl } = recordingCompleteImpl(() =>
-			assistantMessage(model, { content: [{ type: "text", text: "local summary" }] }),
+			assistantMessage(model, {
+				providerPayload: {
+					type: "anthropicCompaction",
+					provider: "anthropic",
+					content: "small summary",
+					signature: "sig",
+				},
+				stopDetails: { type: "compaction" },
+			}),
 		);
-		const preparation = makePreparation({ tokensBefore: ANTHROPIC_COMPACTION_MIN_CONTEXT_TOKENS - 1 });
-
-		const result = await compact(preparation, model, "sk-ant-test", undefined, undefined, { completeImpl });
-
-		expect(calls.every(call => call.options.anthropicCompaction === undefined)).toBe(true);
-		expect(calls[0]?.ctx.messages[0]?.content).toMatchObject([{ type: "text" }]);
-		expect(result.summary).toContain("local summary");
-		expect(result.preserveData).toBeUndefined();
+		const result = await compact(
+			makePreparation({ tokensBefore: 1_000 }),
+			model,
+			"sk-ant-test",
+			undefined,
+			undefined,
+			{
+				completeImpl,
+			},
+		);
+		expect(calls[0]?.ctx.systemPrompt).toEqual([]);
+		expect(calls[0]?.options.anthropicCompaction).toEqual({ instructions: expect.any(String) });
+		expect(result.preserveData?.anthropicCompaction).toMatchObject({ signature: "sig", content: "small summary" });
 	});
 
-	test("a response without a compaction block is a native failure, never a silent local summary", async () => {
+	test("every no-summary stop reason falls through as NativeCompactionError", async () => {
 		const completeSimple = vi.spyOn(ai, "completeSimple");
 		const model = makeAnthropicModel();
-		const { calls, completeImpl } = recordingCompleteImpl(() =>
-			assistantMessage(model, { content: [{ type: "text", text: "the model answered instead" }] }),
-		);
+		const stops: Array<Pick<AssistantMessage, "stopReason" | "stopDetails">> = [
+			{ stopReason: "length", stopDetails: { type: "max_tokens" } },
+			{ stopReason: "toolUse", stopDetails: { type: "tool_use" } },
+			{ stopReason: "stop", stopDetails: { type: "refusal" } },
+			{ stopReason: "stop", stopDetails: { type: "end_turn" } },
+			{ stopReason: "length", stopDetails: { type: "context_window" } },
+		];
+		for (const stop of stops) {
+			const { calls, completeImpl } = recordingCompleteImpl(() =>
+				assistantMessage(model, { ...stop, content: [{ type: "text", text: "not a summary" }] }),
+			);
+			await expect(
+				compact(makePreparation(), model, "sk-ant-test", undefined, undefined, { completeImpl }),
+			).rejects.toBeInstanceOf(NativeCompactionError);
+			expect(calls).toHaveLength(1);
+		}
+		expect(completeSimple).not.toHaveBeenCalled();
+	});
 
+	test("rejects an unsigned compaction block rather than storing an unusable summary", async () => {
+		const model = makeAnthropicModel();
+		const { completeImpl } = recordingCompleteImpl(() =>
+			assistantMessage(model, {
+				providerPayload: { type: "anthropicCompaction", provider: "anthropic", content: "unsigned" },
+				stopDetails: { type: "compaction" },
+			}),
+		);
 		await expect(
 			compact(makePreparation(), model, "sk-ant-test", undefined, undefined, { completeImpl }),
 		).rejects.toBeInstanceOf(NativeCompactionError);
-		expect(calls).toHaveLength(1);
-		expect(completeSimple).not.toHaveBeenCalled();
 	});
 
 	test("an abort during the native request propagates as the abort, not as a native failure", async () => {
@@ -505,7 +529,13 @@ describe("compact() Anthropic native lane", () => {
 		const model = makeAnthropicModel();
 		const { calls, completeImpl } = recordingCompleteImpl(() =>
 			assistantMessage(model, {
-				providerPayload: { type: "anthropicCompaction", provider: "anthropic", content: "after archive" },
+				providerPayload: {
+					type: "anthropicCompaction",
+					provider: "anthropic",
+					content: "after archive",
+					signature: "sig_archive",
+				},
+				stopDetails: { type: "compaction" },
 			}),
 		);
 		const archiveText = "ARCHIVE-SENTINEL-7f3a";
@@ -525,11 +555,12 @@ describe("compact() Anthropic native lane", () => {
 
 		const wire = JSON.stringify(calls[0]?.ctx.messages);
 		expect(wire.split(archiveText).length - 1).toBe(1);
-		expect(calls[0]?.ctx.messages.map(message => message.role)).toEqual(["user", "user", "user"]);
+		expect(calls[0]?.ctx.messages.map(message => message.role)).toEqual(["user", "user"]);
 		expect(result.preserveData).toEqual({
 			anthropicCompaction: {
 				provider: "anthropic",
 				content: result.summary,
+				signature: "sig_archive",
 				model: "claude-fable-5",
 				usedTokens: 0,
 			},
@@ -592,6 +623,24 @@ describe("native compaction entries read back", () => {
 			"retained tail",
 		]);
 		expect(next?.recentMessages.map(message => ("content" in message ? message.content : undefined))).toEqual([
+			"after compaction",
+		]);
+
+		// An empty snapshot tail must still expose turns appended while the
+		// signed summary was being computed to the next compaction.
+		const compactionEntry = entries[2];
+		if (compactionEntry?.type !== "compaction") throw new Error("Expected compaction entry");
+		const emptyTail: SessionEntry[] = [
+			entries[0],
+			entries[1],
+			{ ...compactionEntry, firstKeptEntryId: "", providerReplayThroughEntryId: "m1" },
+			entries[3],
+		];
+		const afterGrowth = prepareCompaction(emptyTail, settings, makeAnthropicModel());
+		expect(
+			afterGrowth?.messagesToSummarize.map(message => ("content" in message ? message.content : undefined)),
+		).toEqual(["retained tail"]);
+		expect(afterGrowth?.recentMessages.map(message => ("content" in message ? message.content : undefined))).toEqual([
 			"after compaction",
 		]);
 	});

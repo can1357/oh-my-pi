@@ -42,8 +42,8 @@ function createRegistry(models: Model<Api>[], credentials: Record<string, string
 	const authStorage = createInMemoryAuthStorage();
 	for (const model of models) {
 		const credential = credentials[model.provider];
-		if (credential !== undefined) authStorage.setRuntimeApiKey(model.provider, credential);
-		else if (!(model.provider in credentials)) authStorage.setRuntimeApiKey(model.provider, `key-${model.provider}`);
+		if (credential !== undefined) authStorage.keys.setRuntime(model.provider, credential);
+		else if (!(model.provider in credentials)) authStorage.keys.setRuntime(model.provider, `key-${model.provider}`);
 	}
 	const registry = new ModelRegistry(authStorage);
 	registry.getAvailable = (kind = "chat") =>

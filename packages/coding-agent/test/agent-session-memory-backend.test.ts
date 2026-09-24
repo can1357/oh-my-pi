@@ -41,7 +41,7 @@ describe("AgentSession memory backend lifecycle", () => {
 	beforeEach(() => {
 		tempDir = TempDir.createSync("@memory-backend-lifecycle-");
 		authStorage = createInMemoryAuthStorage();
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		settings = Settings.isolated({
 			"compaction.enabled": false,
 			"memory.backend": "off",

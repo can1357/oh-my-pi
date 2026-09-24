@@ -99,4 +99,15 @@ describe("write tool hashline header", () => {
 		expect(text.startsWith("[")).toBe(false);
 		expect(text).toBe(`Successfully wrote ${content.length} bytes to ${path.relative(tmpDir, filePath)}`);
 	});
+
+	it("reports UTF-8 bytes, not JavaScript string length", async () => {
+		const filePath = path.join(tmpDir, "notes.txt");
+		const session = createSession(tmpDir);
+		session.settings.set("edit.mode", "replace");
+		const tool = new WriteTool(session);
+		const content = "café\n";
+
+		const result = await tool.execute("call-1", { path: filePath, content });
+		expect(resultText(result)).toBe(`Successfully wrote 6 bytes to ${path.relative(tmpDir, filePath)}`);
+	});
 });

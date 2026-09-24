@@ -160,6 +160,7 @@ import {
 	clickAt,
 	clickElement,
 	clickQueryHandlerText,
+	fillViaHandle,
 	highlightElement,
 	type HighlightOptions,
 	type InteractionHandle,
@@ -867,23 +868,6 @@ async function typeViaHandle(
 		throwIfAborted(signal);
 		await untilAborted(signal, () => handle.frame.page().keyboard.type(character, options));
 	}
-}
-
-/** Focus, clear any existing value, then retype — shared by `tab.fill(aria-ref)` and enriched handles. */
-async function fillViaHandle(
-	handle: ElementHandle,
-	value: string,
-	signal?: AbortSignal,
-	type: (text: string) => Promise<unknown> = text => handle.type(text, { delay: 0 }),
-): Promise<void> {
-	await untilAborted(signal, () =>
-		handle.evaluate(el => {
-			const node = el as unknown as { value?: string; focus?: () => void };
-			node.focus?.();
-			if ("value" in node) node.value = "";
-		}),
-	);
-	await untilAborted(signal, () => type(value));
 }
 
 /**
@@ -2004,18 +1988,12 @@ export class WorkerCore {
 					`tab.fill(${JSON.stringify(selector)})`,
 					actionOpMs,
 					async sig => {
-						if (parseAriaRefSelector(selector) !== null) {
-							const handle = await this.#resolveAriaRef(selector);
-							try {
-								await fillViaHandle(handle, value, sig);
-							} finally {
-								await handle.dispose().catch(() => undefined);
-							}
-							return;
+						const handle = await this.#resolveActionHandle(selector, actionOpMs, sig);
+						try {
+							await fillViaHandle(handle, value, sig);
+						} finally {
+							await handle.dispose().catch(() => undefined);
 						}
-						await untilAborted(sig, () =>
-							page.locator(normalizeSelector(selector)).setTimeout(actionOpMs).fill(value, { signal: sig }),
-						);
 					},
 					{ selector, zeroMatchAfterMs: ZERO_MATCH_FAIL_FAST_MS },
 				),

@@ -72,7 +72,7 @@ async function getConfigDirs(ctx: LoadContext): Promise<Array<{ dir: string; lev
 	return result;
 }
 
-function getAncestorDirs(cwd: string, stopAt?: string | null): Array<{ dir: string; depth: number }> {
+export function getAncestorDirs(cwd: string, stopAt?: string | null): Array<{ dir: string; depth: number }> {
 	const ancestors: Array<{ dir: string; depth: number }> = [];
 	let current = cwd;
 	let depth = 0;

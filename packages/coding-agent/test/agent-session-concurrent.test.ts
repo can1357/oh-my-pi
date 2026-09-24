@@ -55,8 +55,8 @@ beforeAll(async () => {
 	sharedDir = path.join(os.tmpdir(), `pi-concurrent-shared-${Snowflake.next()}`);
 	fs.mkdirSync(sharedDir, { recursive: true });
 	sharedAuthStorage = await AuthStorage.create(path.join(sharedDir, "auth.db"));
-	sharedAuthStorage.setRuntimeApiKey("anthropic", "test-key");
-	sharedAuthStorage.setRuntimeApiKey("openai-codex", "test-key");
+	sharedAuthStorage.keys.setRuntime("anthropic", "test-key");
+	sharedAuthStorage.keys.setRuntime("openai-codex", "test-key");
 	sharedModelRegistry = new ModelRegistry(sharedAuthStorage, path.join(sharedDir, "models.yml"));
 });
 

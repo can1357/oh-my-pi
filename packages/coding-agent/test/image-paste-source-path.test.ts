@@ -3,12 +3,13 @@
  * paste, drag-and-drop, macOS file-url pasteboard) must deliver the original
  * absolute path to the model — mirroring how video contact sheets carry their
  * source path via a hidden companion message — so the agent can use the file
- * with read/other tools. Clipboard-bitmap pastes have no source file and must
- * not invent one.
+ * with read/other tools. Clipboard-bitmap pastes have no source file, so they
+ * are committed to the session's `local://` root and that relocation-safe URL
+ * is delivered the same way.
  *
  * Failure mode if this regresses: the model receives the image bytes but no
- * path, so it cannot open or act on the user's file; the user must retype the
- * directory and filename as separate text.
+ * usable reference — or one that `/move` invalidates — so it cannot open, copy,
+ * or upload the user's image (e.g. attach a pasted screenshot to an issue tracker).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
@@ -20,6 +21,7 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -85,7 +87,7 @@ describe("path-pasted image source path (#12244)", () => {
 		// Keep blob materialization for clipboard payloads inside the temp dir.
 		setAgentDir(tmpDir);
 		authStorage = await AuthStorage.create(":memory:");
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
 		const agent = new Agent({
@@ -154,24 +156,98 @@ describe("path-pasted image source path (#12244)", () => {
 		expect(editor.pendingImageLinks[0]).toBe(imagePath);
 	});
 
-	it("does not invent a source path for clipboard-bitmap pastes", async () => {
-		if (!session) throw new Error("Session was not initialized");
-		const { ctx, editor } = createPasteContext(SessionManager.inMemory(tmpDir));
+	async function pasteClipboardBitmap(sessionManager: SessionManager): Promise<StubEditor> {
+		const { ctx, editor } = createPasteContext(sessionManager);
 		const controller = new InputController(ctx, {
 			readImage: async () => ({ data: Buffer.from(TINY_PNG, "base64"), mimeType: "image/png" }),
 			readText: async () => "",
 		});
-
-		const handled = await controller.handleImagePaste();
-		expect(handled).toBe(true);
+		expect(await controller.handleImagePaste()).toBe(true);
 		expect(editor.pendingImages.length).toBe(1);
+		return editor;
+	}
+
+	function localOptions(sessionManager: SessionManager) {
+		return {
+			getArtifactsDir: () => sessionManager.getArtifactsDir(),
+			getSessionId: () => sessionManager.getSessionId(),
+		};
+	}
+
+	function createSession(sessionManager: SessionManager): AgentSession {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model || !authStorage) throw new Error("Expected test model and auth storage");
+		return new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: createMockModel({ responses: [{ content: ["Done"] }] }).stream,
+			}),
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: new ModelRegistry(authStorage),
+		});
+	}
+
+	it("commits clipboard-bitmap pastes to the session artifact directory and delivers a local:// reference", async () => {
+		if (!session) throw new Error("Session was not initialized");
+		const sessionManager = SessionManager.create(tmpDir, path.join(tmpDir, "sessions"));
+		const artifactsDir = sessionManager.getArtifactsDir();
+		if (!artifactsDir) throw new Error("Expected a file-backed session artifact directory");
+		const editor = await pasteClipboardBitmap(sessionManager);
+
+		const url = editor.pendingImageLinks[0];
+		if (!url) throw new Error("Expected the pasted image to link to its saved file");
+		expect(url).toMatch(/^local:\/\/pasted-image-[0-9a-f]+\.png$/);
+		const savedPath = resolveLocalUrlToPath(url, localOptions(sessionManager));
+		expect(savedPath.startsWith(artifactsDir)).toBe(true);
+		expect(Buffer.from(await Bun.file(savedPath).arrayBuffer()).toBase64()).toBe(TINY_PNG);
 
 		await session.prompt("What is in [Image #1]?", { images: [...editor.pendingImages] });
+		expect(modelVisibleText(session)).toContain(url);
+	});
 
-		const hidden = session.messages.find(
-			message => message.role === "custom" && message.customType === "image-attachment",
-		);
-		expect(hidden).toBeUndefined();
-		expect(modelVisibleText(session)).not.toContain(tmpDir);
+	it("keeps a pasted image readable after /move relocates the session", async () => {
+		const cwdA = path.join(tmpDir, "a");
+		const cwdB = path.join(tmpDir, "b");
+		await fs.mkdir(cwdA, { recursive: true });
+		await fs.mkdir(cwdB, { recursive: true });
+		const sessionManager = SessionManager.create(cwdA, path.join(tmpDir, "sessions"));
+		const moving = createSession(sessionManager);
+		try {
+			const editor = await pasteClipboardBitmap(sessionManager);
+			const url = editor.pendingImageLinks[0];
+			if (!url) throw new Error("Expected the pasted image to link to its saved file");
+			await moving.prompt("What is in [Image #1]?", { images: [...editor.pendingImages] });
+			await sessionManager.ensureOnDisk();
+			const pathBeforeMove = resolveLocalUrlToPath(url, localOptions(sessionManager));
+
+			await sessionManager.moveTo(cwdB);
+
+			// The persisted notice names the relocation-safe URL, not the old absolute path.
+			expect(modelVisibleText(moving)).toContain(url);
+			expect(modelVisibleText(moving)).not.toContain(pathBeforeMove);
+			const pathAfterMove = resolveLocalUrlToPath(url, localOptions(sessionManager));
+			expect(pathAfterMove).not.toBe(pathBeforeMove);
+			expect(Buffer.from(await Bun.file(pathAfterMove).arrayBuffer()).toBase64()).toBe(TINY_PNG);
+			// Tools addressing `attachment://1` get the post-move filesystem path.
+			expect(moving.getImageAttachments()[0]?.sourcePath).toBe(pathAfterMove);
+		} finally {
+			await moving.dispose();
+		}
+	});
+
+	it("commits clipboard pastes in sessions without an artifact directory to the temp local:// root", async () => {
+		if (!session) throw new Error("Session was not initialized");
+		const sessionManager = SessionManager.inMemory(tmpDir);
+		const editor = await pasteClipboardBitmap(sessionManager);
+
+		const url = editor.pendingImageLinks[0];
+		if (!url) throw new Error("Expected the pasted image to link to its saved file");
+		const savedPath = resolveLocalUrlToPath(url, localOptions(sessionManager));
+		expect(Buffer.from(await Bun.file(savedPath).arrayBuffer()).toBase64()).toBe(TINY_PNG);
+
+		await session.prompt("What is in [Image #1]?", { images: [...editor.pendingImages] });
+		expect(modelVisibleText(session)).toContain(url);
 	});
 });
