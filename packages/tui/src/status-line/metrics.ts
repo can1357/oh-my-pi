@@ -9,6 +9,8 @@ export interface BillingSummaryOptions {
 	readonly fractionDigits: number;
 	readonly startupPlaceholder?: boolean;
 	readonly pricingPeriod?: "peak" | "off-peak";
+	/** Opt-in descendant spend; the main `cost` is own or combined according to `split`. */
+	readonly descendants?: { readonly totalCost: number; readonly pending: boolean; readonly split: boolean };
 	readonly advisor?: {
 		readonly cost: number;
 		readonly usingSubscription: boolean;
@@ -59,21 +61,32 @@ function formatAdvisorSpend(
 export function formatBillingSummary(options: BillingSummaryOptions, uiTheme: Theme): string | undefined {
 	const premiumRequests = normalizePremiumRequests(options.premiumRequests);
 	const advisorCost = options.advisor?.cost ?? 0;
-	if (!options.cost && !advisorCost && !options.usingSubscription && !premiumRequests && !options.pricingPeriod) {
+	if (
+		!options.cost &&
+		!advisorCost &&
+		!options.usingSubscription &&
+		!premiumRequests &&
+		!options.pricingPeriod &&
+		!options.descendants?.split
+	) {
 		return undefined;
 	}
 
 	const placeholder = options.startupPlaceholder === true;
 	const parts: string[] = [];
-	if (options.cost || options.pricingPeriod) {
-		parts.push(
-			placeholder
-				? formatSpendPlaceholder(options.usingSubscription, uiTheme)
-				: formatSpend(options.cost, options.usingSubscription, options.fractionDigits, uiTheme),
-		);
+	if (options.cost || options.pricingPeriod || options.descendants?.split) {
+		const spend = placeholder
+			? formatSpendPlaceholder(options.usingSubscription, uiTheme)
+			: formatSpend(options.cost, options.usingSubscription, options.fractionDigits, uiTheme);
+		parts.push(`${spend}${!options.descendants?.split && options.descendants?.pending ? "+" : ""}`);
 	} else if (options.usingSubscription) {
 		parts.push(
 			uiTheme.getSymbolPreset() === "nerd" && uiTheme.icon.subscription ? uiTheme.icon.subscription : "(sub)",
+		);
+	}
+	if (options.descendants?.split) {
+		parts.push(
+			`Σ${placeholder ? "…" : options.descendants.totalCost.toFixed(options.fractionDigits)}${options.descendants.pending ? "+" : ""}`,
 		);
 	}
 	if (options.pricingPeriod) parts.push(options.pricingPeriod === "peak" ? "↑" : "↓");

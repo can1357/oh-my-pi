@@ -34,8 +34,16 @@ export interface CollabStatus {
 	stateOverride?: CollabSessionState | null;
 }
 
+/** Direct session spend and the live, deduplicated descendant total. */
+export interface CostStatistics {
+	selfCost: number;
+	totalCost: number;
+	pending: boolean;
+}
+
 export interface StatusLineSegmentOptions {
 	model?: { showThinkingLevel?: boolean };
+	cost?: { subagents?: "total" | "split" };
 	path?: { abbreviate?: boolean; maxLength?: number; stripWorkPrefix?: boolean };
 	git?: { showBranch?: boolean; showStaged?: boolean; showUnstaged?: boolean; showUntracked?: boolean };
 	time?: { format?: "12h" | "24h"; showSeconds?: boolean };
@@ -139,6 +147,7 @@ export interface SegmentContext {
 		orchestrationCacheRead: number;
 		premiumRequests: number;
 		cost: number;
+		costStatistics?: CostStatistics;
 		tokensPerSecond: number | null;
 	};
 	/** Context usage percent, or null when unknown (e.g. right after compaction). */

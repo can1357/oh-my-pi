@@ -2134,6 +2134,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const usageStats = {
 			...aggregateUsageStats,
 			tokensPerSecond: this.#getTokensPerSecond(),
+			costStatistics: segmentOptions?.cost?.subagents
+				? this.host.getCostStatistics?.(this.session)
+				: undefined,
 		};
 
 		let contextWindow = state.model?.contextWindow ?? this.session.model?.contextWindow ?? 0;

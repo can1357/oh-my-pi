@@ -29,6 +29,7 @@ import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
 import { moveFileAcrossDevices } from "../utils/atomic-file";
 import { ArtifactManager } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore, lazyImageDataSync } from "./blob-store";
+import { aggregateCost, entryOwnCost, ownCost, type CostStatistics, type DescendantCost } from "./cost-statistics";
 import type { CompactionMethod } from "./compaction-methods";
 import {
 	type BashExecutionMessage,
@@ -441,6 +442,7 @@ class SessionEntryIndex {
 	// (reordering callers already .slice() first).
 	#generation = 0;
 	#branchCache: { leaf: string | null | undefined; generation: number; branch: SessionEntry[] } | undefined;
+	#selfCost = 0;
 
 	clear(): void {
 		this.#entriesById.clear();
@@ -450,6 +452,7 @@ class SessionEntryIndex {
 		this.#usage = emptyUsageStatistics();
 		this.#generation++;
 		this.#branchCache = undefined;
+		this.#selfCost = 0;
 	}
 
 	rebuild(entries: readonly SessionEntry[]): void {
@@ -473,6 +476,7 @@ class SessionEntryIndex {
 		}
 
 		addUsage(this.#usage, entryUsage(entry));
+		this.#selfCost += entryOwnCost(entry);
 	}
 
 	has(id: string): boolean {
@@ -520,6 +524,10 @@ class SessionEntryIndex {
 
 	usageSnapshot(): UsageStatistics {
 		return { ...this.#usage };
+	}
+
+	ownCost(): number {
+		return this.#selfCost;
 	}
 
 	pathTo(id: string | null | undefined = this.#leaf): SessionEntry[] {
@@ -718,6 +726,8 @@ export class SessionManager {
 	#sessionName: string | undefined;
 	#titleSource: SessionTitleSource | undefined;
 	#titleRevision = 0;
+	#costDiskCache: { expiresAt: number; sessionFile: string; descendants: DescendantCost[] } | undefined;
+	#costFileCache = new Map<string, { mtimeMs: number; size: number; cost: number }>();
 	#sessionFile: string | undefined;
 	#header!: SessionHeader;
 	#titleUpdatedAt = "";
@@ -2508,6 +2518,67 @@ export class SessionManager {
 
 	getUsageStatistics(): UsageStatistics {
 		return this.#index.usageSnapshot();
+	}
+
+	getOwnCost(): number {
+		return this.#index.ownCost();
+	}
+
+	/**
+	 * Spend attribution for this session and every nested task transcript.
+	 * The legacy usage aggregate retains task result totals for existing callers;
+	 * only this view excludes them, avoiding double counting.
+	 */
+	getCostStatistics(liveDescendants: readonly DescendantCost[] = []): CostStatistics {
+		const sessionFile = this.#sessionFile;
+		let descendants: readonly DescendantCost[] = [];
+		if (sessionFile) {
+			const cache = this.#costDiskCache;
+			if (cache?.sessionFile === sessionFile && cache.expiresAt > Date.now()) {
+				descendants = cache.descendants;
+			} else {
+				if (cache?.sessionFile !== sessionFile) this.#costFileCache.clear();
+				const found: DescendantCost[] = [];
+				const visit = (file: string): void => {
+					const artifactsDir = artifactsDirectoryFor(file);
+					if (!artifactsDir) return;
+					let children: fs.Dirent[];
+					try {
+						children = fs.readdirSync(artifactsDir, { withFileTypes: true });
+					} catch (error) {
+						if (!isEnoent(error))
+							logger.warn("Could not read subagent artifacts for cost", { artifactsDir, error });
+						return;
+					}
+					for (const child of children) {
+						if (!child.isFile() || !child.name.endsWith(".jsonl") || child.name.startsWith("__advisor."))
+							continue;
+						const childFile = path.join(artifactsDir, child.name);
+						try {
+							const { mtimeMs, size } = fs.statSync(childFile);
+							const cachedFile = this.#costFileCache.get(childFile);
+							let cost: number;
+							if (cachedFile?.mtimeMs === mtimeMs && cachedFile.size === size) {
+								cost = cachedFile.cost;
+							} else {
+								const loaded = parseSessionContent(fs.readFileSync(childFile, "utf8"));
+								if (loaded.invalidHeader) continue;
+								cost = ownCost(loaded.entries);
+								this.#costFileCache.set(childFile, { mtimeMs, size, cost });
+							}
+							found.push({ id: child.name.slice(0, -JSONL_SUFFIX_LENGTH), cost });
+							visit(childFile);
+						} catch (error) {
+							if (!isEnoent(error)) logger.warn("Could not read subagent cost", { childFile, error });
+						}
+					}
+				};
+				visit(sessionFile);
+				descendants = found;
+				this.#costDiskCache = { sessionFile, descendants: found, expiresAt: Date.now() + 500 };
+			}
+		}
+		return aggregateCost(this.#index.ownCost(), [...descendants, ...liveDescendants]);
 	}
 
 	/**
