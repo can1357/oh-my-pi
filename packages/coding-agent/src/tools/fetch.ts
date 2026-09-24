@@ -19,6 +19,7 @@ import { CONVERTIBLE_EXTENSIONS } from "../utils/markit";
 import { ensureTool } from "../utils/tools-manager";
 import { findFirecrawlApiKey, scrapeWithFirecrawl } from "../web/firecrawl";
 import { extractWithParallel, findParallelApiKey, getParallelExtractContent } from "../web/parallel";
+import { findTinyFishApiKey, scrapeWithTinyFish } from "../web/tinyfish";
 import type { RenderResult, SpecialHandler } from "../web/scrapers/types";
 import { finalizeOutput, loadPage, looksLikeHtml, MAX_BYTES, MAX_OUTPUT_CHARS } from "../web/scrapers/types";
 import { convertWithMarkit, fetchBinary } from "../web/scrapers/utils";
@@ -563,7 +564,7 @@ function stripDataUriImages(markdown: string): string {
 }
 
 /** Reader backends for {@link renderHtmlToText}, in default priority order. */
-export type FetchProvider = "native" | "trafilatura" | "lynx" | "parallel" | "firecrawl" | "jina";
+export type FetchProvider = "native" | "trafilatura" | "lynx" | "parallel" | "firecrawl" | "jina" | "tinyfish";
 
 const FETCH_PROVIDER_ORDER: readonly FetchProvider[] = [
 	"native",
@@ -572,11 +573,12 @@ const FETCH_PROVIDER_ORDER: readonly FetchProvider[] = [
 	"parallel",
 	"firecrawl",
 	"jina",
+	"tinyfish",
 ];
 
 /**
  * Render HTML to markdown by trying reader backends in priority order: native
- * (in-process), trafilatura, lynx, Parallel, Firecrawl, then Jina. The
+ * (in-process), trafilatura, lynx, Parallel, Firecrawl, Jina, then TinyFish. The
  * `providers.fetch` setting picks the order — `auto` uses the default above; any
  * specific backend is tried first, then the remaining backends as fallbacks.
  * Every backend's output must clear the same quality gate (>100 non-whitespace
@@ -584,7 +586,7 @@ const FETCH_PROVIDER_ORDER: readonly FetchProvider[] = [
  * next backend is tried.
  *
  * The overall `timeout` budget bounds the whole call; remote backends (Parallel,
- * Firecrawl, Jina) are additionally capped at `REMOTE_READER_MAX_MS` so a hung
+ * Firecrawl, Jina, TinyFish) are additionally capped at `REMOTE_READER_MAX_MS` so a hung
  * endpoint cannot starve later renderers — especially the purely-local native
  * converter, which always works on already-loaded HTML. Only a real `userSignal`
  * cancellation aborts the chain (#1449).
@@ -662,6 +664,10 @@ export async function renderHtmlToText(
 			const contentLength = Number(response.headers.get("content-length"));
 			if (Number.isFinite(contentLength) && contentLength > JINA_READER_MAX_BYTES) return null;
 			return parseJinaReaderContent(await response.text());
+		},
+		tinyfish: async () => {
+			if (!findTinyFishApiKey(storage)) return null;
+			return scrapeWithTinyFish(url, { signal: remoteSignal(), fetch: fetchImpl }, storage);
 		},
 	};
 
@@ -1422,7 +1428,7 @@ async function renderUrl(
 		}
 
 		// 5E: Render HTML via the reader-backend chain
-		// (native/trafilatura/lynx/parallel/firecrawl/jina)
+		// (native/trafilatura/lynx/parallel/firecrawl/jina/tinyfish)
 		const htmlResult = await renderHtmlToText(
 			finalUrl,
 			rawContent,

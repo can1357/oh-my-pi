@@ -352,7 +352,8 @@ therefore completes through the paste-code path.
 | Variable                                            | Used by                                                                   |
 | --------------------------------------------------- | ------------------------------------------------------------------------- |
 | `EXA_API_KEY`                                       | Exa search/MCP; alternatively use `/login exa`                            |
-| `TINYFISH_API_KEY`                                  | TinyFish search provider (required)                                       |
+| `TINYFISH_API_KEY`                                  | TinyFish search provider and fetch reader backend (required)               |
+| `TINYFISH_FETCH_BASE_URL`                          | TinyFish Fetch API endpoint override (`TINYFISH_FETCH_URL` is an alias)   |
 | `BRAVE_API_KEY`                                     | Brave search provider                                                     |
 | `PERPLEXITY_API_KEY`                                | Perplexity search provider API-key mode                                   |
 | `PERPLEXITY_COOKIES`                                | Perplexity cookie-auth search mode                                        |
