@@ -2326,9 +2326,9 @@
     url = "https://registry.npmjs.org/yargs/-/yargs-16.2.2.tgz";
     hash = "sha512-Nt9ZJjXTv5R8MHbqby/wXQ6Gi0Bb3TcYZkR1bzuL4yB2OxWPkXknz513gEF0GoA6tn00UpbPvERW8rzCuWCA6w==";
   };
-  "yargs@18.1.0" = fetchurl {
-    url = "https://registry.npmjs.org/yargs/-/yargs-18.1.0.tgz";
-    hash = "sha512-2rAgRKu54VsHkqI0/tYkmluGXHD4KW7yZoycuqDQ15QOTnc2VVfy0nN/1eMhnQLO00A+dwtK20xuCnc1YGeUyg==";
+  "yargs@18.2.0" = fetchurl {
+    url = "https://registry.npmjs.org/yargs/-/yargs-18.2.0.tgz";
+    hash = "sha512-9OpKOLeaoNFecEp7P6iYbzze/5CqWoH7N3SMs/6y1XF4nMvFMspEGZzJ6uFi9MmQwXhyzqYoSEKO3tvA3Z/o2w==";
   };
   "yocto-queue@0.1.0" = fetchurl {
     url = "https://registry.npmjs.org/yocto-queue/-/yocto-queue-0.1.0.tgz";

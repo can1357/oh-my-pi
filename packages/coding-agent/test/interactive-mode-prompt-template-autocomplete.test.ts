@@ -58,7 +58,7 @@ describe("InteractiveMode prompt-template autocomplete (#2462)", () => {
 		await Settings.init({ inMemory: true, cwd: tempDir.path() });
 		Settings.instance.set("startup.quiet", true);
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		// ModelRegistry (bundled-model load) and the resolved model are immutable across
 		// these tests, so build them once rather than per test.
 		registry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));

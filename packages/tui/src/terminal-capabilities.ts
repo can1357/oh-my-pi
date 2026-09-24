@@ -42,7 +42,7 @@ export type TerminalId =
 	| "base"
 	| "trueColor";
 
-const CMUX_NOTIFICATION_TITLE = "Oh My Pi";
+const CMUX_NOTIFICATION_TITLE = "omp";
 const CMUX_SURFACE_ID_PATTERN = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/iu;
 
 /** Title and body for an out-of-band multiplexer notification (cmux, Herdr). */
@@ -678,11 +678,20 @@ const KNOWN_TERMINALS = Object.freeze({
 	// OSC 66 text sizing are unverified, so those stay on conservative defaults;
 	// synchronized output is left to the runtime DECRQM probe.
 	otty: new TerminalInfo("otty", ImageProtocol.Kitty, true, true, NotifyProtocol.Osc99),
-	// rio ships the Kitty graphics protocol — direct placement plus U=1 Unicode
-	// placeholders verified by the reporter (#12205). Everything unproven stays
-	// conservative: hyperlinks, DECCARA, screen-to-scrollback, and notifications
-	// keep the base defaults until verified in that terminal.
-	rio: new TerminalInfo("rio", ImageProtocol.Kitty, true, false),
+	// rio publishes its supported escape sequences at
+	// rioterm.com/docs/escape-sequence-support: OSC 8 hyperlinks are opened via
+	// the hints system (Alt+click on Windows/Linux) — live-verified on
+	// rio 0.5.28/Win11 26100 where an OSC 8 span Alt+click opened the target
+	// URL in the browser, and an OSC 52 clipboard query round-tripped. Kitty
+	// graphics direct placement plus U=1 Unicode placeholders verified by the
+	// reporter (#12205). Notifications stay on BEL: rio parses OSC 9/777 into
+	// its own notifier, but its Windows path raises an unpackaged WinRT toast
+	// with AppId "Rio" that Windows silently drops without a registered AUMID
+	// shortcut — observed as a no-op live — so flipping it would only remove
+	// the D-Bus fallback for Linux rio users. DECCARA, screen-to-scrollback,
+	// OSC 99, and OSC 66 text sizing are outside rio's supported set and keep
+	// the conservative defaults.
+	rio: new TerminalInfo("rio", ImageProtocol.Kitty, true, true),
 });
 
 /** Resolve terminal identity from environment markers used by common emulators. */
@@ -1424,7 +1433,7 @@ function notificationToLine(n: TerminalNotification): string {
 // C0/C1 control characters that are unsafe inside an OSC payload (must base64).
 const OSC99_UNSAFE = /[\x00-\x1f\x7f\x80-\x9f]/u;
 const OSC99_MAX_PAYLOAD_BYTES = 2048;
-const OSC99_APP_NAME = "Oh My Pi";
+const OSC99_APP_NAME = "omp";
 let nextOsc99NotificationId = 1;
 
 function base64Utf8(value: string): string {

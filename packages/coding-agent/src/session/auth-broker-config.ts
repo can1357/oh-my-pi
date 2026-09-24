@@ -15,13 +15,16 @@
  * Returns null when no broker URL is configured — caller falls back to the
  * local SQLite store.
  *
- * Reads config.yml directly (instead of going through `Settings.init`) because
- * `discoverAuthStorage` runs before the settings singleton is initialized in
- * `runRootCommand`, and we want hand-edited config entries to be honoured at
- * boot without forcing a startup reorder.
+ * Broker connection values are read directly from config.yml; account routing
+ * policy is loaded from effective Settings by the SDK discovery wrapper.
  */
 
-import { AuthBrokerError } from "@oh-my-pi/pi-ai/auth-broker";
+import * as path from "node:path";
+import {
+	type AuthAccountPolicyConfig,
+	AuthBrokerError,
+	loadAuthAccountPolicyConfig,
+} from "@oh-my-pi/pi-ai/auth-broker";
 import {
 	type AuthBrokerClientConfig,
 	type DiscoverAuthStorageOptions,
@@ -32,9 +35,47 @@ import {
 import { MissingApiKeyError } from "@oh-my-pi/pi-ai/error";
 import { getAgentDir } from "@oh-my-pi/pi-utils";
 import { resolveConfigValue } from "../config/resolve-config-value";
+import { Settings } from "../config/settings";
 import type { AuthStorage } from "./auth-storage";
 
 export { type AuthBrokerClientConfig, getAuthBrokerTokenFilePath };
+
+/** Where auth discovery reads effective settings from; see {@link loadEffectiveAuthAccountPolicyConfig}. */
+export interface EffectiveSettingsScope {
+	/** Already-resolved settings; wins over every other source. */
+	settings?: Settings;
+	cwd?: string;
+	agentDir?: string;
+}
+
+/**
+ * Resolve the settings auth discovery must honor: the explicit instance, else the
+ * global instance when it targets the same agent dir (and cwd, when given), else a
+ * read-only load so `--config`/`PI_CONFIG_FILES`/project overlays still apply.
+ */
+async function resolveEffectiveSettings({ settings, cwd, agentDir = getAgentDir() }: EffectiveSettingsScope) {
+	if (settings) return settings;
+	const current = await Settings.current;
+	if (
+		current &&
+		current.getAgentDir() === path.normalize(agentDir) &&
+		(cwd === undefined || current.getCwd() === path.normalize(cwd))
+	) {
+		return current;
+	}
+	return Settings.loadReadOnly({ cwd, agentDir });
+}
+
+/** Resolve `auth.accountPolicies` + `retry.usageReservePct` from effective settings (SDK discovery, auth-gateway). */
+export async function loadEffectiveAuthAccountPolicyConfig(
+	scope: EffectiveSettingsScope = {},
+): Promise<AuthAccountPolicyConfig> {
+	const settings = await resolveEffectiveSettings(scope);
+	return loadAuthAccountPolicyConfig({
+		accountPolicies: settings.get("auth.accountPolicies"),
+		usageReservePct: settings.get("retry.usageReservePct"),
+	});
+}
 
 /**
  * Process-lifetime memo for {@link resolveAuthBrokerConfig}. Keyed on the env

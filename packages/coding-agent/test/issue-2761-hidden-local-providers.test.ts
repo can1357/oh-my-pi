@@ -60,7 +60,12 @@ function makeRegistry(spec: RegistrySpec): ModelRegistry {
 		getAll: spec.models,
 		getDiscoverableProviders: () => spec.discoverable ?? [],
 		getProviderDiscoveryState: spec.discovery ?? (() => undefined),
-		authStorage: { hasAuth: spec.hasAuth ?? (() => false) },
+		authStorage: {
+			keys: {
+				source: (providerId: string) =>
+					spec.hasAuth?.(providerId) ? { kind: "api_key", concrete: true } : undefined,
+			},
+		},
 	} as unknown as ModelRegistry;
 }
 

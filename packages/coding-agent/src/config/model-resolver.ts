@@ -1579,6 +1579,18 @@ export function resolveModelOverride(
 }
 
 /**
+ * Provider ids turned off through the `disabledProviders` setting, already
+ * resolved for the current working directory's path scopes.
+ *
+ * A disabled provider is unreachable however a model is named — catalog
+ * listing, configured role, or an explicit `provider/id` pin — so every
+ * resolution path filters through this set.
+ */
+export function disabledProviderIds(settings?: Settings): ReadonlySet<string> {
+	return new Set(settings?.get("disabledProviders"));
+}
+
+/**
  * Resolve a list of override patterns to the first matching model, with an
  * auth-aware fallback to the parent session's active model.
  *
@@ -1620,7 +1632,7 @@ export async function resolveModelOverrideWithAuthFallback(
 	authFallbackUsed: boolean;
 	warning?: string;
 }> {
-	const disabledProviders = new Set(settings?.get("disabledProviders"));
+	const disabledProviders = disabledProviderIds(settings);
 	let lookupRegistry: ModelLookupRegistry = modelRegistry;
 	if (disabledProviders.size > 0) {
 		const enabledModels = modelRegistry.getAvailable().filter(model => !disabledProviders.has(model.provider));
@@ -1920,6 +1932,32 @@ export interface ResolveCliModelResult {
 	thinkingLevel?: ConfiguredThinkingLevel;
 	warning: string | undefined;
 	error: string | undefined;
+	/**
+	 * Provider the selector wanted but that `disabledProviders` turns off. Set
+	 * only alongside `error`, so callers can refuse the selector outright
+	 * instead of deferring it to a later resolution pass.
+	 */
+	disabledProvider?: string;
+}
+
+/** Inputs accepted by {@link resolveCliModel}. */
+interface CliModelOptions {
+	cliProvider?: string;
+	cliModel?: string;
+	modelRegistry: CliModelRegistry;
+	/** Authenticated models to prefer for unqualified selectors; defaults to the registry's authenticated set. */
+	availableModels?: Model<Api>[];
+	settings?: Settings;
+	preferences?: ModelMatchPreferences;
+}
+
+/**
+ * Catalog a CLI selector may bind to: the full set plus the preferred
+ * (authenticated, or `--models`-scoped) subset.
+ */
+interface CliModelScope {
+	all: Model<Api>[];
+	available: Model<Api>[];
 }
 
 /**
@@ -1929,23 +1967,57 @@ export interface ResolveCliModelResult {
  * over configured role names, which in turn take precedence over an
  * unauthenticated catalog-only id (so a bundled `cursor/default` never shadows a
  * configured `modelRoles.default`).
+ *
+ * Disabled providers are dropped from both halves of the scope before matching,
+ * so a selector naming one is refused rather than silently spending on it
+ * (issue #13079); an unqualified selector falls through to an enabled provider
+ * carrying the same id. The unfiltered catalog is consulted only after that
+ * failed, to report which disabled provider the selector wanted.
  */
-export function resolveCliModel(options: {
-	cliProvider?: string;
-	cliModel?: string;
-	modelRegistry: CliModelRegistry;
-	/** Authenticated models to prefer for unqualified selectors; defaults to the registry's authenticated set. */
-	availableModels?: Model<Api>[];
-	settings?: Settings;
-	preferences?: ModelMatchPreferences;
-}): ResolveCliModelResult {
-	const { cliProvider, cliModel, modelRegistry, settings, preferences, availableModels: preferredModels } = options;
+export function resolveCliModel(options: CliModelOptions): ResolveCliModelResult {
+	const { cliProvider, cliModel, modelRegistry, settings, availableModels: preferredModels } = options;
 
 	if (!cliModel) {
 		return { model: undefined, selector: undefined, warning: undefined, error: undefined };
 	}
 
-	const allModels = modelRegistry.getAll();
+	const scoped = { ...options, cliModel };
+	const scope: CliModelScope = {
+		all: modelRegistry.getAll(),
+		available: preferredModels ?? modelRegistry.getAvailable(),
+	};
+	const disabled = disabledProviderIds(settings);
+	if (disabled.size === 0) return resolveCliModelInScope(scoped, scope);
+
+	const enabled = resolveCliModelInScope(scoped, {
+		all: scope.all.filter(model => !disabled.has(model.provider)),
+		available: scope.available.filter(model => !disabled.has(model.provider)),
+	});
+	if (enabled.model) return enabled;
+
+	// Nothing enabled matched. An explicit `--provider` names its target
+	// directly; otherwise re-resolve unfiltered to see what the selector was
+	// aiming at, so the refusal names the provider instead of reading as a typo.
+	const blocked = cliProvider
+		? scope.all.find(model => model.provider.toLowerCase() === cliProvider.toLowerCase())?.provider
+		: resolveCliModelInScope(scoped, scope).model?.provider;
+	if (blocked === undefined || !disabled.has(blocked)) return enabled;
+	return {
+		model: undefined,
+		selector: undefined,
+		thinkingLevel: undefined,
+		warning: enabled.warning,
+		error: `Provider "${blocked}" is disabled. Remove "${blocked}" from disabledProviders to use "${cliModel.trim()}".`,
+		disabledProvider: blocked,
+	};
+}
+
+function resolveCliModelInScope(
+	options: CliModelOptions & { cliModel: string },
+	scope: CliModelScope,
+): ResolveCliModelResult {
+	const { cliProvider, cliModel, settings, preferences } = options;
+	const { all: allModels, available: availableModels } = scope;
 	if (allModels.length === 0) {
 		return {
 			model: undefined,
@@ -1955,7 +2027,6 @@ export function resolveCliModel(options: {
 		};
 	}
 
-	const availableModels = preferredModels ?? modelRegistry.getAvailable();
 	const providerMap = new Map<string, string>();
 	for (const model of allModels) {
 		providerMap.set(model.provider.toLowerCase(), model.provider);

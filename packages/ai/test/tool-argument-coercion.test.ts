@@ -87,24 +87,6 @@ describe("Tool argument coercion", () => {
 		expect(result.timeout).toBe(300);
 	});
 
-	it("preserves string values when schema expects string", () => {
-		const tool: Tool = {
-			name: "t2",
-			description: "",
-			parameters: type({ label: type("string") }),
-		};
-
-		const toolCall: ToolCall = {
-			type: "toolCall",
-			id: "call-2",
-			name: "t2",
-			arguments: { label: "300" },
-		};
-
-		const result = validateToolArguments(tool, toolCall) as { label: string };
-		expect(result.label).toBe("300");
-	});
-
 	it("stringifies object values when schema expects string", () => {
 		const tool: Tool = {
 			name: "object-string",

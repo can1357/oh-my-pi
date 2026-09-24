@@ -27,7 +27,7 @@ describe("goal tool registration when goal mode is enabled at runtime", () => {
 
 	async function makeSession(goalEnabledAtStartup: boolean): Promise<AgentSession> {
 		const authStorage = createInMemoryAuthStorage();
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
 		const sessionManager = SessionManager.inMemory(tempDir.path());
 		const settings = Settings.instance;

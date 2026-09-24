@@ -501,16 +501,20 @@ describe("withOAuthAccess", () => {
 	function fakeStorage(tokens: { initial?: OAuthAccess; forced?: OAuthAccess; rotated?: OAuthAccess }): FakeStorage {
 		const storage: FakeStorage = {
 			calls: [],
-			async getOAuthAccess(_provider, _sessionId, options) {
-				storage.calls.push({ forceRefresh: options?.forceRefresh });
-				if (options?.forceRefresh) return tokens.forced;
-				// After a rotate, the next plain resolve yields the sibling.
-				if (storage.calls.includes("rotate")) return tokens.rotated;
-				return tokens.initial;
+			oauth: {
+				async access(_provider, _sessionId, options) {
+					storage.calls.push({ forceRefresh: options?.forceRefresh });
+					if (options?.forceRefresh) return tokens.forced;
+					// After a rotate, the next plain resolve yields the sibling.
+					if (storage.calls.includes("rotate")) return tokens.rotated;
+					return tokens.initial;
+				},
 			},
-			async rotateSessionCredential() {
-				storage.calls.push("rotate");
-				return tokens.rotated !== undefined;
+			limits: {
+				async rotate() {
+					storage.calls.push("rotate");
+					return tokens.rotated !== undefined;
+				},
 			},
 		};
 		return storage;
@@ -584,14 +588,18 @@ describe("withOAuthAccess", () => {
 		const calls: Array<{ forceRefresh: boolean | undefined } | "rotate"> = [];
 		const forced = [access("fresh-but-expired", { credentialId: 7 }), access("renewed", { credentialId: 7 })];
 		const storage: OAuthAccessSource = {
-			async getOAuthAccess(_provider, _sessionId, options) {
-				calls.push({ forceRefresh: options?.forceRefresh });
-				if (options?.forceRefresh) return forced.shift();
-				return access("stale", { credentialId: 7 });
+			oauth: {
+				async access(_provider, _sessionId, options) {
+					calls.push({ forceRefresh: options?.forceRefresh });
+					if (options?.forceRefresh) return forced.shift();
+					return access("stale", { credentialId: 7 });
+				},
 			},
-			async rotateSessionCredential() {
-				calls.push("rotate");
-				return true;
+			limits: {
+				async rotate() {
+					calls.push("rotate");
+					return true;
+				},
 			},
 		};
 		const refreshRequest = new OAuthError("Refreshed token expired before request", {
@@ -636,16 +644,20 @@ describe("withOAuthAccess", () => {
 		let lastError: unknown;
 		let caught: unknown;
 		const storage: OAuthAccessSource = {
-			async getOAuthAccess(_provider, _sessionId, options) {
-				calls.push({ forceRefresh: options?.forceRefresh });
-				if (options?.forceRefresh) return access("fresh", { credentialId: 1 });
-				if (rotateIndex > 0) return rotated[rotateIndex - 1];
-				return access("stale", { credentialId: 1 });
+			oauth: {
+				async access(_provider, _sessionId, options) {
+					calls.push({ forceRefresh: options?.forceRefresh });
+					if (options?.forceRefresh) return access("fresh", { credentialId: 1 });
+					if (rotateIndex > 0) return rotated[rotateIndex - 1];
+					return access("stale", { credentialId: 1 });
+				},
 			},
-			async rotateSessionCredential() {
-				calls.push("rotate");
-				rotateIndex += 1;
-				return true;
+			limits: {
+				async rotate() {
+					calls.push("rotate");
+					rotateIndex += 1;
+					return true;
+				},
 			},
 		};
 
@@ -709,14 +721,18 @@ describe("withOAuthAccess", () => {
 	it("passes the failed OAuth bearer to rotation", async () => {
 		const rotationTargets: Array<{ apiKey: string | undefined; credentialId: number | undefined }> = [];
 		const storage: OAuthAccessSource = {
-			async getOAuthAccess() {
-				return rotationTargets.length === 0
-					? access("dead", { credentialId: 17 })
-					: access("sibling", { credentialId: 18 });
+			oauth: {
+				async access() {
+					return rotationTargets.length === 0
+						? access("dead", { credentialId: 17 })
+						: access("sibling", { credentialId: 18 });
+				},
 			},
-			async rotateSessionCredential(_provider, _sessionId, options) {
-				rotationTargets.push({ apiKey: options?.apiKey, credentialId: options?.credentialId });
-				return true;
+			limits: {
+				async rotate(_provider, _sessionId, options) {
+					rotationTargets.push({ apiKey: options?.apiKey, credentialId: options?.credentialId });
+					return true;
+				},
 			},
 		};
 		const attempts: string[] = [];
@@ -738,13 +754,17 @@ describe("withOAuthAccess", () => {
 		let lastError: unknown;
 		let caught: unknown;
 		const storage: OAuthAccessSource = {
-			async getOAuthAccess() {
-				const credentialId = nextCredential++;
-				return access(`token-${credentialId}`, { credentialId });
+			oauth: {
+				async access() {
+					const credentialId = nextCredential++;
+					return access(`token-${credentialId}`, { credentialId });
+				},
 			},
-			async rotateSessionCredential() {
-				rotateCalls += 1;
-				return true;
+			limits: {
+				async rotate() {
+					rotateCalls += 1;
+					return true;
+				},
 			},
 		};
 

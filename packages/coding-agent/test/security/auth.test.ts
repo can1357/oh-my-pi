@@ -16,13 +16,18 @@ describe("exact security OAuth resolver", () => {
 			{ credentialId: 11, position: 0, active: true, accountId: "workspace-a" },
 			{ credentialId: 42, position: 1, active: false, accountId: "workspace-b" },
 		]);
-		const selected = selectSecurityAuth({ listOAuthAccounts } as unknown as AuthStorage, model(), 42, "session-a");
+		const selected = selectSecurityAuth(
+			{ oauth: { accounts: listOAuthAccounts } } as unknown as AuthStorage,
+			model(),
+			42,
+			"session-a",
+		);
 		expect(selected).toEqual({ provider: "openai-codex", credentialId: 42, accountId: "workspace-b" });
 		expect(listOAuthAccounts).toHaveBeenCalledWith("openai-codex", "session-a");
 	});
 
 	test("plans provider-owned authentication for recognized Bedrock routes without OAuth", () => {
-		const authStorage = { listOAuthAccounts: vi.fn(() => []) } as unknown as AuthStorage;
+		const authStorage = { oauth: { accounts: vi.fn(() => []) } } as unknown as AuthStorage;
 		for (const [provider, modelId, api] of [
 			["amazon-bedrock", "us.anthropic.claude-opus-4-8", "bedrock-converse-stream"],
 			["bedrock-mantle", "openai.gpt-5.6-terra", "openai-responses"],
@@ -34,7 +39,7 @@ describe("exact security OAuth resolver", () => {
 	});
 
 	test("rejects unsupported provider-owned authentication routes", () => {
-		const authStorage = { listOAuthAccounts: vi.fn(() => []) } as unknown as AuthStorage;
+		const authStorage = { oauth: { accounts: vi.fn(() => []) } } as unknown as AuthStorage;
 		expect(() => selectSecurityAuth(authStorage, { provider: "openai", api: "openai-responses" })).toThrow(
 			"require a stored OAuth account",
 		);
@@ -66,7 +71,7 @@ describe("exact security OAuth resolver", () => {
 			credentialId,
 			accountId: "workspace-a",
 		}));
-		const authStorage = { getOAuthAccessByCredentialId } as unknown as AuthStorage;
+		const authStorage = { oauth: { accessById: getOAuthAccessByCredentialId } } as unknown as AuthStorage;
 		const resolver = createExactSecurityOAuthResolver({
 			authStorage,
 			account: { provider: "openai-codex", credentialId: 42, accountId: "workspace-a" },
@@ -87,7 +92,7 @@ describe("exact security OAuth resolver", () => {
 			credentialId: 42,
 			accountId: "workspace-a",
 		}));
-		const authStorage = { getOAuthAccessByCredentialId } as unknown as AuthStorage;
+		const authStorage = { oauth: { accessById: getOAuthAccessByCredentialId } } as unknown as AuthStorage;
 		const resolver = createExactSecurityOAuthResolver({
 			authStorage,
 			account: { provider: "openai-codex", credentialId: 42, accountId: "workspace-a" },
@@ -121,12 +126,14 @@ describe("exact security OAuth resolver", () => {
 			{ orgName: "Workspace B" },
 		]) {
 			const authStorage = {
-				getOAuthAccessByCredentialId: async () => ({
-					ok: true as const,
-					accessToken: "token",
-					...resolved,
-					...mismatch,
-				}),
+				oauth: {
+					accessById: async () => ({
+						ok: true as const,
+						accessToken: "token",
+						...resolved,
+						...mismatch,
+					}),
+				},
 			} as unknown as AuthStorage;
 			const resolver = createExactSecurityOAuthResolver({ authStorage, account });
 			const exact = resolver(model()) as ApiKeyResolver;
@@ -136,12 +143,14 @@ describe("exact security OAuth resolver", () => {
 
 	test("fails closed when the refreshed row loses its workspace identity", async () => {
 		const authStorage = {
-			getOAuthAccessByCredentialId: async () => ({
-				ok: true as const,
-				accessToken: "token",
-				credentialId: 42,
-				accountId: undefined,
-			}),
+			oauth: {
+				accessById: async () => ({
+					ok: true as const,
+					accessToken: "token",
+					credentialId: 42,
+					accountId: undefined,
+				}),
+			},
 		} as unknown as AuthStorage;
 		const resolver = createExactSecurityOAuthResolver({
 			authStorage,

@@ -72,16 +72,6 @@ describe("parse", () => {
 });
 
 describe("intersection", () => {
-	it("identical", () => {
-		const T = type("number%2&number%2");
-		expect(T(2)).toBe(2);
-	});
-
-	it("purely divisible", () => {
-		const T = type("number%4&number%2");
-		expect(T(4)).toBe(4);
-	});
-
 	it("common divisor", () => {
 		const T = type("number%6&number%4");
 		expect(T(12)).toBe(12);

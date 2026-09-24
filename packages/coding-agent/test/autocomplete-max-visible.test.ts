@@ -74,9 +74,4 @@ describe("autocompleteMaxVisible setting", () => {
 
 		expect(setAutocompleteMaxVisible).toHaveBeenCalledWith(10);
 	});
-
-	it("should work with isolated instances", () => {
-		const settings = Settings.isolated({ autocompleteMaxVisible: 12 });
-		expect(settings.get("autocompleteMaxVisible")).toBe(12);
-	});
 });

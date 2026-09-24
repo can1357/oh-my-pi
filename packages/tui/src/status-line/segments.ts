@@ -758,9 +758,11 @@ const collabSegment: StatusLineSegment = {
 const streamSegment: StatusLineSegment = {
 	id: "stream",
 	render(ctx) {
-		if (!ctx.stream) return { content: "", visible: false };
-		const viewers = statusValue(ctx, `${ctx.stream.viewers}`);
-		return { content: theme.fg("thinkingHigh", `● LIVE ${viewers}`), visible: true };
+		const badges: string[] = [];
+		if (ctx.stream) badges.push(`● LIVE ${statusValue(ctx, `${ctx.stream.viewers}`)}`);
+		if (ctx.recording) badges.push("● REC");
+		if (badges.length === 0) return { content: "", visible: false };
+		return { content: theme.fg("thinkingHigh", badges.join(" ")), visible: true };
 	},
 };
 
@@ -879,9 +881,9 @@ const usageSegment: StatusLineSegment = {
 			parts.push(formatQuotaWindow(ctx, "7d", u.sevenDay.percent, u.sevenDay.resetHours, "h", "round"));
 		}
 		if (u.monthly) {
-			// Cursor and OpenCode Go (normalize gates monthly to those providers).
-			// Both floor used percents upstream (Cursor's dashboard shows 1.88 →
-			// "1% used"; OpenCode's endpoint already emits floored integers).
+			// Monthly-subscription providers only (the normalizer gates the class).
+			// Cursor and QwenCloud floor used percents upstream (Cursor's dashboard
+			// shows 1.88 → "1% used"; OpenCode's endpoint emits floored integers).
 			parts.push(formatQuotaWindow(ctx, "mo", u.monthly.percent, u.monthly.resetHours, "h", "floor"));
 		}
 		if (u.resetCredits) {

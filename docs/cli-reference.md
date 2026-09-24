@@ -208,7 +208,7 @@ Run `omp <command> --help` for each command's own flags and examples.
 | Command | Purpose | See also |
 | --- | --- | --- |
 | `launch` | Start a coding session (the default command). | [Launch flags](#launch-flags) |
-| `acp` | Run Oh My Pi as an ACP (Agent Client Protocol) server over stdio. | [approval mode](./approval-mode.md#acp-sessions) |
+| `acp` | Run omp as an ACP (Agent Client Protocol) server over stdio. | [approval mode](./approval-mode.md#acp-sessions) |
 | `auth-broker` | Manage the omp auth-broker (credential vault). | [auth broker / gateway](./auth-broker-gateway.md) |
 | `auth-gateway` | Run an auth-gateway forward proxy backed by the configured broker. | [auth broker / gateway](./auth-broker-gateway.md) |
 | `agents` | Manage bundled task agents. | [task agent discovery](./task-agent-discovery.md) |

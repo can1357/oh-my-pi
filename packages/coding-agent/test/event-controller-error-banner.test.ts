@@ -17,6 +17,7 @@ import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/eve
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { Loader } from "@oh-my-pi/pi-tui";
+import { PREVIEW_LIMITS, TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 
 function makeAssistantMessage(overrides: Partial<AssistantMessage> = {}): AssistantMessage {
@@ -116,6 +117,26 @@ function createFixture(streamingMessage?: AssistantMessage) {
 }
 
 describe("EventController error banner", () => {
+	it("bounds and sanitizes multiline provider errors in fallback warnings", async () => {
+		const { controller, ctx } = createFixture();
+		const showWarning = vi.spyOn(ctx, "showWarning");
+		const reason = `Request failed: \u001b[31m503 unavailable\u001b[0m\n${"<html>error</html>\n".repeat(1000)}`;
+		await controller.handleEvent({
+			type: "retry_fallback_applied",
+			from: "source/model",
+			to: "target/model",
+			role: "default",
+			reason,
+		});
+		const warning = showWarning.mock.calls[0][0];
+		expect(warning).toContain("source/model -> target/model");
+		const lines = warning.split("\n");
+		expect(lines).toHaveLength(2);
+		expect(lines[1]).toContain("503 unavailable");
+		expect(lines[1]).not.toContain("\u001b");
+		expect(Bun.stringWidth(lines[1])).toBeLessThanOrEqual(TRUNCATE_LENGTHS.LINE * PREVIEW_LIMITS.COLLAPSED_LINES);
+	});
+
 	it("pins the provider error above the editor when an assistant turn ends on stopReason error", async () => {
 		const errorMessage = "Output blocked by content filtering policy";
 		const message = makeAssistantMessage({ stopReason: "error", errorMessage });

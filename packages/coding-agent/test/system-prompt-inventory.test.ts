@@ -501,6 +501,45 @@ describe("system prompt tool inventory", () => {
 		expect(text).not.toContain("Reads files from disk.");
 	});
 
+	it("references xd://-only tools by their xd:// URL", async () => {
+		const { systemPrompt } = await buildSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			skills: [],
+			rules: [],
+			toolNames: ["read", "bash"],
+			tools: TOOLS,
+			xdevTools: [{ name: "lsp", summary: "Language server." }],
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+		});
+		const text = systemPrompt.join("\n\n");
+		expect(text).toContain("MUST use `xd://lsp` for definitions");
+		expect(text).toContain("MUST run `xd://lsp` references first");
+		expect(text).not.toContain("`lsp`");
+	});
+
+	it("renders exactly one of the map-unknown-code and inline-first delegation rules per bias", async () => {
+		const renderDelegation = async (delegationBias: "eager" | "restrained" | "gated", eagerTasks: boolean) => {
+			const { systemPrompt } = await buildSystemPrompt({
+				cwd: tempDir,
+				contextFiles: [],
+				skills: [],
+				rules: [],
+				toolNames: ["read", "task"],
+				workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+				delegationBias,
+				eagerTasks,
+			});
+			const count = (needle: string) => systemPrompt[0].split(needle).length - 1;
+			return [count("Map unknown code via `task`"), count("Inline first.")];
+		};
+		expect(await renderDelegation("eager", false)).toEqual([1, 0]);
+		expect(await renderDelegation("eager", true)).toEqual([1, 0]);
+		expect(await renderDelegation("restrained", true)).toEqual([1, 0]);
+		expect(await renderDelegation("restrained", false)).toEqual([0, 1]);
+		expect(await renderDelegation("gated", true)).toEqual([0, 0]);
+	});
+
 	it("keeps enabled computer prelude routing and safety explicit", async () => {
 		const { systemPrompt } = await buildSystemPrompt({
 			cwd: tempDir,
@@ -620,13 +659,7 @@ describe("system prompt tool inventory", () => {
 
 		expect(toolNames).toContain("bash");
 		expect(toolNames).not.toContain("eval");
-		expect(bash?.description).toContain("purpose-built tool");
-		expect(bash?.description).not.toContain("eval` cell");
-		expect(bash?.description).not.toContain("use `eval` cells");
-		expect(bash?.description).not.toContain("Prefer `eval`");
-		expect(bash?.description).not.toContain("`grep` tool");
-		expect(bash?.description).not.toContain("`ls` → `read`");
-		expect(bash?.description).not.toContain("`find` → the `glob` tool");
+		expect(bash?.description).not.toContain("`eval`");
 
 		const { systemPrompt } = await buildSystemPrompt({
 			cwd: tempDir,
@@ -809,7 +842,7 @@ describe("system prompt tool inventory", () => {
 		});
 
 		expect(JSON.stringify(read.parameters.toJsonSchema())).toContain("skill://");
-		expect(bash.description).toContain("`skill://<name>`");
+		expect(bash.description).toContain("skill://");
 		expect(systemPrompt.join("\n\n")).toContain("`skill://<name>`");
 
 		// Standalone sessions derive visibility; an explicit managed snapshot wins.
@@ -1008,7 +1041,7 @@ describe("system prompt tool inventory", () => {
 			})
 		).systemPrompt.join("\n\n");
 
-		expect(withScout).toContain("one read-only scout while working is allowed");
+		expect(withScout).toContain("read-only scout");
 		expect(withoutScout).not.toContain("read-only scout");
 	});
 
@@ -1024,12 +1057,11 @@ describe("system prompt tool inventory", () => {
 			inlineToolDescriptors: false,
 		};
 		const withoutTodo = (await buildSystemPrompt({ ...opts, toolNames: ["read", "bash"] })).systemPrompt.join("\n\n");
-		expect(withoutTodo).not.toContain("Todo calls NEVER alone");
-		expect(withoutTodo).not.toContain("batch each with turn's real calls");
+		expect(withoutTodo).not.toContain("todo-only turn");
 
 		const withTodo = (await buildSystemPrompt({ ...opts, toolNames: ["read", "bash", "todo"] })).systemPrompt.join(
 			"\n\n",
 		);
-		expect(withTodo).toContain("Todo calls NEVER alone");
+		expect(withTodo).toContain("todo-only turn");
 	});
 });

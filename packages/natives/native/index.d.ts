@@ -648,7 +648,27 @@ export declare function __ompInstallTokioRuntime(): void
  * `packages/natives/native/index.js` (which derives the name from
  * `package.json#version`).
  */
-export declare function __piNativesV18_2_9(): void
+export declare function __piNativesV18_3_0(): void
+
+/**
+ * Reports whether the on-device model can generate, as an `availability`
+ * event JSON: `{available, reason?, contextSize?, variant?, vision?,
+ * toolCalling?}`.
+ */
+export declare function appleFmAvailability(): Promise<string>
+
+/**
+ * Cancels a generation; its stream then ends with a `cancelled` error event.
+ * Unknown or finished handles are ignored.
+ */
+export declare function appleFmCancel(handle: number): void
+
+/**
+ * Starts one model turn for a JSON request and streams JSON events to
+ * `on_event` until a terminal `done` or `error` event. Returns a handle for
+ * [`apple_fm_cancel`].
+ */
+export declare function appleFmGenerate(request: string, onEvent: (err: null | Error, event: string) => void): number
 
 /**
  * Apply ast-grep rewrite rules to matching files; honors `dryRun` and returns
@@ -1007,7 +1027,7 @@ export declare function cosineSimilarityPairs(vectors: Float64Array, count: numb
  * use ordinary encoding (no special-token handling) and the Claude
  * encodings count message content without the fixed per-message frame.
  * Defaults to `o200k_base`; pass a `Claude*` encoding for exact Claude
- * counts, or the matching family encoding for Qwen/DeepSeek/Kimi/GLM.
+ * counts, or the matching family encoding for Qwen/DeepSeek/Kimi/GLM/Jev.
  */
 export declare function countTokens(input: string | string[], encoding?: Encoding | undefined | null): number
 
@@ -1451,7 +1471,9 @@ export declare enum Encoding {
   /** Kimi K2 … K3. */
   KimiK2 = 'KimiK2',
   /** GLM-5.x exact; GLM-4.x near-exact. */
-  Glm5 = 'Glm5'
+  Glm5 = 'Glm5',
+  /** `TypeSafe` Jev 1.13 judgment `state` (request frame excluded). */
+  Jev = 'Jev'
 }
 
 /**
@@ -1479,7 +1501,7 @@ export declare function execReplace(argv: Array<string>): void
  */
 export declare function executeShell(options: ShellExecuteOptions, onChunk?: ((error: Error | null, chunk: string) => void) | undefined | null): Promise<ShellRunResult>
 
-/** Locate `*** SM:EDIT path` payloads the model emitted as plain text. */
+/** Locate `*** Edit File: path` payloads the model emitted as plain text. */
 export declare function extractInlineSloppyRegions(text: string): Array<InlineSloppyRegion>
 
 /**
@@ -2994,7 +3016,10 @@ export interface VectorTopK {
  */
 export declare function visibleWidth(text: string, tabWidth: number): number
 
-/** Warm syntax grammars and scope matchers on the native worker pool. */
+/**
+ * Warm syntax grammars, scope matchers, and the regexes of commonly
+ * highlighted languages on the native worker pool.
+ */
 export declare function warmHighlighter(): Promise<undefined>
 
 /** Profiling results returned to JavaScript. */

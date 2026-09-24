@@ -9,7 +9,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { CopySelectorComponent } from "@oh-my-pi/pi-tui/overlays/copy-selector";
+import { CopySelectorComponent, type CopyPickSource } from "@oh-my-pi/pi-tui/overlays/copy-selector";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { setKeybindings, type TUI } from "@oh-my-pi/pi-tui";
@@ -128,12 +128,16 @@ function makeSelector(
 	onCancel = () => {},
 	opens?: Array<{ href: string; label: string }>,
 	entries: SessionMessageEntry[] = makeEntries(),
+	sources?: CopyPickSource[],
 ): CopySelectorComponent {
 	return new CopySelectorComponent(entries, {
 		ui: { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI,
 		cwd: "/tmp",
 		requestRender: () => {},
-		onPick: (content, label) => picks.push({ content, label }),
+		onPick: (content, label, source) => {
+			picks.push({ content, label });
+			sources?.push(source);
+		},
 		onOpen: opens ? (href, label) => opens.push({ href, label }) : undefined,
 		onCancel,
 	});
@@ -163,6 +167,66 @@ describe("CopySelectorComponent", () => {
 		// The newest item is the assistant turn (bash result folded into it);
 		// its item-level copy is the assistant prose, not tool noise.
 		expect(picks).toEqual([{ content: ASSISTANT_TEXT, label: "assistant message" }]);
+	});
+
+	it("keeps whole-turn picks exact and ties them to the native transcript entries", () => {
+		const entries = makeEntries();
+		const picks: Array<{ content: string; label: string }> = [];
+		const sources: CopyPickSource[] = [];
+		const selector = makeSelector(picks, () => {}, undefined, entries, sources);
+		selector.render(100);
+
+		selector.handleInput(ENTER);
+		selector.handleInput(UP);
+		selector.handleInput(ENTER);
+		selector.dispose();
+
+		expect(picks).toEqual([
+			{ content: ASSISTANT_TEXT, label: "assistant message" },
+			{ content: "fix the logging", label: "user message" },
+		]);
+		expect(sources).toEqual([{ entry: entries[1] }, { entry: entries[0] }]);
+	});
+
+	it("keeps block content and metadata exact while retaining each block's source entry", () => {
+		const quote = "quoted first line\nquoted second line";
+		const assistantText = `${ASSISTANT_TEXT}\n> ${quote.replace("\n", "\n> ")}`;
+		const entries = makeEntries(assistantText);
+		const assistantEntry = entries[1]!;
+		const toolResultEntry = entries[2]!;
+		const picks: Array<{ content: string; label: string }> = [];
+		const sources: CopyPickSource[] = [];
+		const selector = makeSelector(picks, () => {}, undefined, entries, sources);
+		selector.render(100);
+		selector.handleInput(RIGHT);
+
+		for (let index = 0; index < 5; index++) {
+			selector.handleInput(ENTER);
+			if (index < 4) selector.handleInput("\x1b[B");
+		}
+		selector.dispose();
+
+		expect(picks).toEqual([
+			{ content: CODE, label: "ts code" },
+			{ content: quote, label: "quote" },
+			{ content: LINK, label: `link${theme.sep.dot}the PR` },
+			{ content: "bun test", label: "bash command" },
+			{ content: "12 pass", label: "bash result" },
+		]);
+		expect(sources.map(source => source.entry)).toEqual([
+			assistantEntry,
+			assistantEntry,
+			assistantEntry,
+			assistantEntry,
+			toolResultEntry,
+		]);
+		expect(sources.map(source => source.block)).toEqual([
+			{ content: CODE, label: "ts code", entry: assistantEntry, language: "ts", kind: "code" },
+			{ content: quote, label: "quote", entry: assistantEntry, kind: "quote" },
+			{ content: LINK, label: `link${theme.sep.dot}the PR`, entry: assistantEntry, href: LINK },
+			{ content: "bun test", label: "bash command", entry: assistantEntry, language: "bash", kind: "command" },
+			{ content: "12 pass", label: "bash result", entry: toolResultEntry },
+		]);
 	});
 
 	it("folds lazily created grouped reads into the assistant turn so Enter copies the yield", () => {
