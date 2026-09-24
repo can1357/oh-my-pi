@@ -88,6 +88,32 @@ describe("LocalProtocolHandler", () => {
 		});
 	});
 
+	it("keeps percent-encoded filenames distinct from decoded names", async () => {
+		await withTempDir(async tempDir => {
+			const options = { getArtifactsDir: () => tempDir };
+			const context = { localProtocolOptions: options };
+			await Bun.write(path.join(tempDir, "local", "a b.txt"), "space file");
+			await Bun.write(path.join(tempDir, "local", "a%20b.txt"), "percent file");
+			const router = InternalUrlRouter.instance();
+			const resource = await router.resolve("local://a%2520b.txt", context);
+			expect(resource.content).toBe("percent file");
+			expect(resolveLocalUrlToPath("local://a%2520b.txt", options)).toBe(path.join(tempDir, "local", "a%20b.txt"));
+			expect((await router.resolve("local://a%20b.txt", context)).content).toBe("space file");
+			expect(resolveLocalUrlToPath("local://a%252Fb.txt", options)).toBe(path.join(tempDir, "local", "a%2Fb.txt"));
+		});
+	});
+
+	it("reads literal percent signs in both authority and pathname components", async () => {
+		await withTempDir(async tempDir => {
+			const context = { localProtocolOptions: { getArtifactsDir: () => tempDir } };
+			await Bun.write(path.join(tempDir, "local", "100%.txt"), "top level");
+			await Bun.write(path.join(tempDir, "local", "dir", "100%.txt"), "nested");
+			const router = InternalUrlRouter.instance();
+			expect((await router.resolve("local://100%25.txt", context)).content).toBe("top level");
+			expect((await router.resolve("local://dir/100%25.txt", context)).content).toBe("nested");
+		});
+	});
+
 	it("blocks path traversal attempts", async () => {
 		await withTempDir(async tempDir => {
 			LocalProtocolHandler.setOverride({
