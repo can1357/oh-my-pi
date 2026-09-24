@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import type { ConnectionPhase } from "../../lib/client";
+import { useCollabI18n } from "../../lib/i18n";
 
 export interface BannersProps {
 	phase: ConnectionPhase;
@@ -9,11 +10,12 @@ export interface BannersProps {
 }
 
 export function Banners({ phase, endedReason, onRejoin, onNewLink }: BannersProps): ReactNode {
+	const { i18n } = useCollabI18n();
 	if (phase === "connecting" || phase === "waiting") {
 		return (
 			<div className="sh-banner" role="status">
 				<span className="sh-banner-dot" />
-				{phase === "connecting" ? "connecting to relay…" : "joining session…"}
+				{phase === "connecting" ? i18n.t("collab.shell.connecting") : i18n.t("collab.shell.join")}
 			</div>
 		);
 	}
@@ -21,22 +23,22 @@ export function Banners({ phase, endedReason, onRejoin, onNewLink }: BannersProp
 		return (
 			<div className="sh-banner" role="status">
 				<span className="sh-banner-dot" />
-				reconnecting…
+				{i18n.t("collab.shell.reconnecting")}
 			</div>
 		);
 	}
 	if (phase === "ended") {
 		return (
-			<div className="sh-ended" role="alertdialog" aria-label="session ended">
+			<div className="sh-ended" role="alertdialog" aria-label={i18n.t("collab.shell.sessionEnded")}>
 				<div className="sh-ended-card">
-					<div className="sh-ended-title">session ended</div>
+					<div className="sh-ended-title">{i18n.t("collab.shell.sessionEnded")}</div>
 					{endedReason && <div className="sh-ended-reason">{endedReason}</div>}
 					<div className="sh-ended-actions">
 						<button type="button" className="sh-btn sh-btn-primary" onClick={onRejoin}>
-							Rejoin
+							{i18n.t("collab.shell.rejoin")}
 						</button>
 						<button type="button" className="sh-btn" onClick={onNewLink}>
-							New link
+							{i18n.t("collab.shell.newLink")}
 						</button>
 					</div>
 				</div>

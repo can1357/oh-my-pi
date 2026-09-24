@@ -20,6 +20,7 @@ import {
 	formatTokensPerSecond,
 } from "../data/formatters";
 import { useResource } from "../data/useResource";
+import { useStatsI18n } from "../i18n";
 import type {
 	ProviderAggregate,
 	ProviderDashboardStats,
@@ -69,6 +70,7 @@ export function ProvidersRoute({ active, range, refreshTrigger }: ProvidersRoute
 // ---------------------------------------------------------------------------
 
 function ProviderTotalsPanel({ providers }: { providers: ProviderAggregate[] }) {
+	const { i18n } = useStatsI18n();
 	const grandTotal = useMemo(() => providers.reduce((sum, p) => sum + p.totalTokens, 0), [providers]);
 	const unpricedRequests = useMemo(
 		() => providers.reduce((sum, provider) => sum + provider.unpricedRequests, 0),
@@ -76,18 +78,27 @@ function ProviderTotalsPanel({ providers }: { providers: ProviderAggregate[] }) 
 	);
 
 	const columns: DataTableColumn<ProviderAggregate>[] = [
-		{ key: "provider", header: "Provider", render: p => <span className="font-medium">{p.provider}</span> },
-		{ key: "requests", header: "Requests", numeric: true, render: p => formatInteger(p.totalRequests) },
+		{
+			key: "provider",
+			header: i18n.t("stats.providers.provider"),
+			render: p => <span className="font-medium">{p.provider}</span>,
+		},
+		{
+			key: "requests",
+			header: i18n.t("stats.providers.requests"),
+			numeric: true,
+			render: p => formatInteger(p.totalRequests),
+		},
 		{
 			key: "errors",
-			header: "Error Rate",
+			header: i18n.t("stats.metrics.errorRate"),
 			numeric: true,
 			render: p => formatPercent(p.totalRequests > 0 ? p.failedRequests / p.totalRequests : 0),
 		},
-		{ key: "models", header: "Models", numeric: true, render: p => formatInteger(p.models) },
+		{ key: "models", header: i18n.t("stats.nav.models"), numeric: true, render: p => formatInteger(p.models) },
 		{
 			key: "tokens",
-			header: "Tokens",
+			header: i18n.t("stats.providers.tokens"),
 			numeric: true,
 			render: p => (
 				<span
@@ -99,33 +110,38 @@ function ProviderTotalsPanel({ providers }: { providers: ProviderAggregate[] }) 
 		},
 		{
 			key: "share",
-			header: "Share",
+			header: i18n.t("stats.providers.share"),
 			numeric: true,
 			render: p => formatPercent(grandTotal > 0 ? p.totalTokens / grandTotal : 0),
 		},
 		{
 			key: "cost",
-			header: "API-equivalent estimate",
+			header: i18n.t("stats.providers.apiEstimate"),
 			numeric: true,
 			render: provider => formatEstimatedCost(provider.totalCost, provider.unpricedRequests),
 		},
-		{ key: "tps", header: "Tok/s", numeric: true, render: p => formatTokensPerSecond(p.avgTokensPerSecond) },
+		{
+			key: "tps",
+			header: i18n.t("stats.metrics.tokensPerSecond"),
+			numeric: true,
+			render: p => formatTokensPerSecond(p.avgTokensPerSecond),
+		},
 	];
 
 	return (
 		<Panel
-			title="Provider Totals"
+			title={i18n.t("stats.providers.provider")}
 			subtitle={
 				unpricedRequests > 0
 					? `Token, request, and API-equivalent estimates; excludes ${unpricedRequests.toLocaleString()} unpriced subscription request${unpricedRequests === 1 ? "" : "s"}`
-					: "Token, request, and API-equivalent estimates over the active range"
+					: `${i18n.t("stats.providers.tokens")}, ${i18n.t("stats.providers.requests")} ${i18n.t("stats.providers.apiEstimate")} over the active range`
 			}
 		>
 			<DataTable
 				columns={columns}
 				data={providers}
 				keyExtractor={p => p.provider}
-				emptyText="No requests recorded in this range"
+				emptyText={i18n.t("stats.providers.noActivity")}
 			/>
 		</Panel>
 	);
@@ -136,6 +152,7 @@ function ProviderTotalsPanel({ providers }: { providers: ProviderAggregate[] }) 
 // ---------------------------------------------------------------------------
 
 function ProviderTrendPanel({ stats }: { stats: ProviderDashboardStats }) {
+	const { i18n } = useStatsI18n();
 	const [metric, setMetric] = useState<"tokens" | "cost">("tokens");
 	const theme = useSystemTheme();
 	const chartTheme = CHART_THEMES[theme];
@@ -169,7 +186,8 @@ function ProviderTrendPanel({ stats }: { stats: ProviderDashboardStats }) {
 			plugins: buildSharedPlugins({
 				chartTheme,
 				showLegend: true,
-				defaultLabel: metric === "tokens" ? "Tokens" : "API-equivalent estimate",
+				defaultLabel:
+					metric === "tokens" ? i18n.t("stats.providers.tokens") : i18n.t("stats.providers.apiEstimate"),
 				formatValue,
 				footer: items => {
 					if (items.length < 2) return undefined;
@@ -182,7 +200,7 @@ function ProviderTrendPanel({ stats }: { stats: ProviderDashboardStats }) {
 				y: { ...yScale, stacked: true },
 			},
 		};
-	}, [chartTheme, metric, formatValue]);
+	}, [chartTheme, metric, formatValue, i18n]);
 
 	const data = useMemo(
 		() => ({
@@ -194,17 +212,17 @@ function ProviderTrendPanel({ stats }: { stats: ProviderDashboardStats }) {
 
 	return (
 		<Panel
-			title="Burn by Provider"
+			title={i18n.t("stats.providers.burnByProvider")}
 			subtitle={
 				metric === "cost" && unpricedRequests > 0
 					? `API-equivalent estimates over time; excludes ${unpricedRequests.toLocaleString()} unpriced subscription request${unpricedRequests === 1 ? "" : "s"}`
-					: "Stacked token or API-equivalent estimate burn over time"
+					: `${i18n.t("stats.providers.tokens")} / ${i18n.t("stats.providers.apiEstimate")} burn over time`
 			}
 			actions={
 				<SegmentedControl
 					options={[
-						{ value: "tokens" as const, label: "Tokens" },
-						{ value: "cost" as const, label: "API-equivalent estimate" },
+						{ value: "tokens" as const, label: i18n.t("stats.providers.tokens") },
+						{ value: "cost" as const, label: i18n.t("stats.providers.apiEstimate") },
 					]}
 					value={metric}
 					onChange={setMetric}
@@ -213,7 +231,7 @@ function ProviderTrendPanel({ stats }: { stats: ProviderDashboardStats }) {
 		>
 			<div className="h-[300px]">
 				{chartData.labels.length === 0 ? (
-					<EmptyState message="No provider activity in this range" />
+					<EmptyState message={i18n.t("stats.providers.noActivity")} />
 				) : (
 					<Bar data={data} options={options} />
 				)}
@@ -229,6 +247,7 @@ function ProviderTrendPanel({ stats }: { stats: ProviderDashboardStats }) {
 const ALL_PROVIDERS = "__all__";
 
 function PeakHoursPanel({ hourly, providers }: { hourly: ProviderHourlyPoint[]; providers: ProviderAggregate[] }) {
+	const { i18n } = useStatsI18n();
 	const [provider, setProvider] = useState(ALL_PROVIDERS);
 	const theme = useSystemTheme();
 	const chartTheme = CHART_THEMES[theme];
@@ -254,7 +273,7 @@ function PeakHoursPanel({ hourly, providers }: { hourly: ProviderHourlyPoint[]; 
 			labels: Array.from({ length: 24 }, (_, hour) => `${String(hour).padStart(2, "0")}:00`),
 			datasets: [
 				{
-					label: "Tokens",
+					label: i18n.t("stats.providers.tokens"),
 					data: tokensByHour,
 					...barDatasetStyle(MODEL_COLORS[2]),
 					// Highlight the peak hour in the brand accent color.
@@ -273,29 +292,29 @@ function PeakHoursPanel({ hourly, providers }: { hourly: ProviderHourlyPoint[]; 
 			plugins: buildSharedPlugins({
 				chartTheme,
 				showLegend: false,
-				defaultLabel: "Tokens",
+				defaultLabel: i18n.t("stats.providers.tokens"),
 				formatValue: formatCompact,
 			}),
 			scales: { x: sharedScaleBase, y: yScale },
 		};
-	}, [chartTheme]);
+	}, [chartTheme, i18n]);
 
 	return (
 		<Panel
-			title="Peak Burn Hours"
+			title={i18n.t("stats.providers.peakHours")}
 			subtitle={
 				hasData
 					? `Token burn by local hour of day — peak at ${String(peakHour).padStart(2, "0")}:00`
-					: "Token burn by local hour of day"
+					: i18n.t("stats.providers.tokens")
 			}
 			actions={
 				<select
 					className="stats-select"
 					value={provider}
 					onChange={e => setProvider(e.target.value)}
-					aria-label="Provider"
+					aria-label={i18n.t("stats.providers.provider")}
 				>
-					<option value={ALL_PROVIDERS}>All providers</option>
+					<option value={ALL_PROVIDERS}>{i18n.t("stats.providers.allProviders")}</option>
 					{providers.map(p => (
 						<option key={p.provider} value={p.provider}>
 							{p.provider}
@@ -305,7 +324,11 @@ function PeakHoursPanel({ hourly, providers }: { hourly: ProviderHourlyPoint[]; 
 			}
 		>
 			<div className="h-[260px]">
-				{hasData ? <Bar data={data} options={options} /> : <EmptyState message="No activity in this range" />}
+				{hasData ? (
+					<Bar data={data} options={options} />
+				) : (
+					<EmptyState message={i18n.t("stats.providers.noActivity")} />
+				)}
 			</div>
 		</Panel>
 	);
@@ -316,47 +339,53 @@ function PeakHoursPanel({ hourly, providers }: { hourly: ProviderHourlyPoint[]; 
 // ---------------------------------------------------------------------------
 
 function WindowInsightsPanel({ insights }: { insights: ProviderWindowInsight[] }) {
+	const { i18n } = useStatsI18n();
 	const columns: DataTableColumn<ProviderWindowInsight>[] = [
-		{ key: "provider", header: "Provider", render: i => <span className="font-medium">{i.provider}</span> },
-		{ key: "window", header: "Window", render: i => i.windowLabel },
-		{ key: "accounts", header: "Accounts", numeric: true, render: i => formatInteger(i.accounts) },
+		{
+			key: "provider",
+			header: i18n.t("stats.providers.provider"),
+			render: i => <span className="font-medium">{i.provider}</span>,
+		},
+		{ key: "window", header: i18n.t("stats.providers.window"), render: i => i.windowLabel },
+		{
+			key: "accounts",
+			header: i18n.t("stats.providers.accounts"),
+			numeric: true,
+			render: i => formatInteger(i.accounts),
+		},
 		{
 			key: "consumed",
-			header: "Windows Burned",
+			header: i18n.t("stats.providers.windowsBurned"),
 			numeric: true,
 			render: i => (
-				<span title="Subscription-window equivalents consumed in range (sum of used-fraction increases across accounts)">
-					{i.fractionConsumed.toFixed(2)}
-				</span>
+				<span title={i18n.t("stats.providers.tokensBurnedWindowTitle")}>{i.fractionConsumed.toFixed(2)}</span>
 			),
 		},
 		{
 			key: "capacity",
-			header: "Est. Tokens / Window",
+			header: i18n.t("stats.providers.tokensPerWindow"),
 			numeric: true,
 			render: i => (
-				<span title="Provider tokens burned in range ÷ windows burned — what one full window is worth">
+				<span title={i18n.t("stats.providers.providerTokensWindowTitle")}>
 					{i.estTokensPerWindow !== null ? formatCompact(i.estTokensPerWindow) : "—"}
 				</span>
 			),
 		},
 		{
 			key: "peak",
-			header: "Peak Utilization",
+			header: i18n.t("stats.providers.peakUtilization"),
 			numeric: true,
 			render: i => (
-				<span title="Peak of summed used fraction across accounts at any sampled instant">
-					{formatPercent(i.peakConcurrentFraction)}
-				</span>
+				<span title={i18n.t("stats.providers.peakUtilization")}>{formatPercent(i.peakConcurrentFraction)}</span>
 			),
 		},
 		{
 			key: "ideal",
-			header: "Ideal Accounts",
+			header: i18n.t("stats.providers.idealAccounts"),
 			numeric: true,
 			render: i => (
 				<span
-					title="Accounts needed to keep peak demand under 90% of fleet capacity"
+					title={i18n.t("stats.providers.idealAccounts")}
 					className={i.idealAccounts > i.accounts ? "stats-text-warning font-semibold" : undefined}
 				>
 					{formatInteger(i.idealAccounts)}
@@ -366,7 +395,7 @@ function WindowInsightsPanel({ insights }: { insights: ProviderWindowInsight[] }
 		},
 		{
 			key: "exhausted",
-			header: "Exhaustions",
+			header: i18n.t("stats.providers.exhaustions"),
 			numeric: true,
 			render: i => (
 				<span className={i.exhaustedEvents > 0 ? "stats-text-warning" : undefined}>
@@ -378,14 +407,14 @@ function WindowInsightsPanel({ insights }: { insights: ProviderWindowInsight[] }
 
 	return (
 		<Panel
-			title="Subscription Windows"
-			subtitle="What each usage window buys you, and how many accounts peak demand needs"
+			title={i18n.t("stats.providers.subscriptionWindows")}
+			subtitle={i18n.t("stats.providers.subscriptionWindowsSubtitle")}
 		>
 			<DataTable
 				columns={columns}
 				data={insights}
 				keyExtractor={i => `${i.provider}::${i.windowKey}`}
-				emptyText="No usage snapshots recorded yet — they accumulate whenever usage is fetched (TUI footer, /usage, omp usage)"
+				emptyText={i18n.t("stats.providers.noSnapshotDetails")}
 			/>
 		</Panel>
 	);
@@ -402,6 +431,7 @@ const UTILIZATION_COLORS = {
 } as const;
 
 function WindowUtilizationPanel({ usageSeries }: { usageSeries: UsageWindowSeries[] }) {
+	const { i18n } = useStatsI18n();
 	const providers = useMemo(() => [...new Set(usageSeries.map(s => s.provider))], [usageSeries]);
 	const [selected, setSelected] = useState<string | null>(null);
 	const provider = selected !== null && providers.includes(selected) ? selected : (providers[0] ?? null);
@@ -434,7 +464,7 @@ function WindowUtilizationPanel({ usageSeries }: { usageSeries: UsageWindowSerie
 			labels: rows.map(r => r.label),
 			datasets: [
 				{
-					label: "Used",
+					label: i18n.t("stats.providers.used"),
 					data: rows.map(r => r.fraction * 100),
 					backgroundColor: rows.map(r =>
 						r.exhausted
@@ -458,7 +488,7 @@ function WindowUtilizationPanel({ usageSeries }: { usageSeries: UsageWindowSerie
 		const shared = buildSharedPlugins({
 			chartTheme,
 			showLegend: false,
-			defaultLabel: "Used",
+			defaultLabel: i18n.t("stats.providers.used"),
 			formatValue: v => `${v.toFixed(1)}%`,
 		});
 		return {
@@ -472,8 +502,10 @@ function WindowUtilizationPanel({ usageSeries }: { usageSeries: UsageWindowSerie
 					callbacks: {
 						label: (ctx: { dataIndex: number; parsed: { x: number | null } }) => {
 							const row = rows[ctx.dataIndex];
-							const used = `${(ctx.parsed.x ?? 0).toFixed(1)}% used`;
-							return row ? `${used} · recorded ${formatRelativeTime(row.recordedAt)}` : used;
+							const used = `${(ctx.parsed.x ?? 0).toFixed(1)}% ${i18n.t("stats.providers.used")}`;
+							return row
+								? `${used} · ${i18n.t("stats.providers.recorded", { time: formatRelativeTime(row.recordedAt, i18n.locale) })}`
+								: used;
 						},
 					},
 				},
@@ -483,19 +515,19 @@ function WindowUtilizationPanel({ usageSeries }: { usageSeries: UsageWindowSerie
 				y: { ...sharedScaleBase, grid: { display: false } },
 			},
 		};
-	}, [chartTheme, rows]);
+	}, [chartTheme, rows, i18n]);
 
 	return (
 		<Panel
-			title="Window Utilization"
-			subtitle="Latest recorded limit utilization per account and window — red bars are exhausted, amber above 80%"
+			title={i18n.t("stats.providers.windowUtilization")}
+			subtitle={i18n.t("stats.providers.windowUtilizationSubtitle")}
 			actions={
 				providers.length > 1 ? (
 					<select
 						className="stats-select"
 						value={provider ?? ""}
 						onChange={e => setSelected(e.target.value)}
-						aria-label="Provider"
+						aria-label={i18n.t("stats.providers.provider")}
 					>
 						{providers.map(p => (
 							<option key={p} value={p}>
@@ -508,7 +540,7 @@ function WindowUtilizationPanel({ usageSeries }: { usageSeries: UsageWindowSerie
 		>
 			<div style={{ height: Math.max(160, rows.length * 34 + 60) }}>
 				{rows.length === 0 ? (
-					<EmptyState message="No usage snapshots recorded yet — they accumulate whenever usage is fetched" />
+					<EmptyState message={i18n.t("stats.providers.noSnapshots")} />
 				) : (
 					<Bar data={data} options={options} />
 				)}

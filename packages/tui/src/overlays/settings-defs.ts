@@ -1,5 +1,7 @@
 /** Schema-independent display definitions for the settings overlay. */
 import type { SymbolKey } from "../theme/symbols";
+import type { MessageKey } from "@oh-my-pi/pi-i18n";
+import { getDefaultI18n } from "../i18n";
 
 export type SettingTab =
 	| "appearance"
@@ -44,13 +46,97 @@ export const TAB_METADATA: Record<SettingTab, TabMetadata> = {
 	providers: { label: "Providers", icon: "tab.providers" },
 };
 
+const SETTING_TAB_KEYS: Readonly<Record<SettingTab, MessageKey>> = {
+	appearance: "tui.settings.tabs.appearance",
+	model: "tui.settings.tabs.model",
+	interaction: "tui.settings.tabs.interaction",
+	context: "tui.settings.tabs.context",
+	memory: "tui.settings.tabs.memory",
+	files: "tui.settings.tabs.files",
+	shell: "tui.settings.tabs.shell",
+	tools: "tui.settings.tabs.tools",
+	tasks: "tui.settings.tabs.tasks",
+	providers: "tui.settings.tabs.providers",
+};
+
+const SETTING_GROUP_KEYS: Readonly<Record<string, MessageKey>> = {
+	Language: "tui.settings.groups.language",
+	Theme: "tui.settings.groups.theme",
+	Composer: "tui.settings.groups.composer",
+	"Status Line": "tui.settings.groups.statusLine",
+	Display: "tui.settings.groups.display",
+	Images: "tui.settings.groups.images",
+	Thinking: "tui.settings.groups.thinking",
+	Sampling: "tui.settings.groups.sampling",
+	Prompt: "tui.settings.groups.prompt",
+	"Retry & Fallback": "tui.settings.groups.retryFallback",
+	Advisor: "tui.settings.groups.advisor",
+	Prewalk: "tui.settings.groups.prewalk",
+	Vision: "tui.settings.groups.vision",
+	Input: "tui.settings.groups.input",
+	Approvals: "tui.settings.groups.approvals",
+	Notifications: "tui.settings.groups.notifications",
+	Speech: "tui.settings.groups.speech",
+	Collab: "tui.settings.groups.collab",
+	Stream: "tui.settings.groups.stream",
+	"Magic Keywords": "tui.settings.groups.magicKeywords",
+	"Startup & Updates": "tui.settings.groups.startupUpdates",
+	Power: "tui.settings.groups.power",
+	Agent: "tui.settings.groups.agent",
+	Git: "tui.settings.groups.git",
+	Skills: "tui.settings.groups.skills",
+	General: "tui.settings.groups.general",
+	Compaction: "tui.settings.groups.compaction",
+	"Rules (TTSR)": "tui.settings.groups.rulesTtsr",
+	Experimental: "tui.settings.groups.experimental",
+	"Auto-Learn": "tui.settings.groups.autoLearn",
+	Mnemopi: "tui.settings.groups.mnemopi",
+	Hindsight: "tui.settings.groups.hindsight",
+	Sharpshooter: "tui.settings.groups.sharpshooter",
+	Editing: "tui.settings.groups.editing",
+	Reading: "tui.settings.groups.reading",
+	"Read Summaries": "tui.settings.groups.readSummaries",
+	LSP: "tui.settings.groups.lsp",
+	Bash: "tui.settings.groups.bash",
+	"Eval & Runtimes": "tui.settings.groups.evalRuntimes",
+	"Available Tools": "tui.settings.groups.availableTools",
+	Todos: "tui.settings.groups.todos",
+	"Grep & Browser": "tui.settings.groups.grepBrowser",
+	Computer: "tui.settings.groups.computer",
+	GitHub: "tui.settings.groups.github",
+	"Output Limits": "tui.settings.groups.outputLimits",
+	Execution: "tui.settings.groups.execution",
+	"Discovery & MCP": "tui.settings.groups.discoveryMcp",
+	Extensions: "tui.settings.groups.extensions",
+	Developer: "tui.settings.groups.developer",
+	Modes: "tui.settings.groups.modes",
+	Subagents: "tui.settings.groups.subagents",
+	Isolation: "tui.settings.groups.isolation",
+	"Commands & Skills": "tui.settings.groups.commandsSkills",
+	Services: "tui.settings.groups.services",
+	Fireworks: "tui.settings.groups.fireworks",
+	"Tiny Model": "tui.settings.groups.tinyModel",
+	Protocol: "tui.settings.groups.protocol",
+	Timeouts: "tui.settings.groups.timeouts",
+	Privacy: "tui.settings.groups.privacy",
+};
+
+export function settingTabLabel(tab: SettingTab): string {
+	return getDefaultI18n().t(SETTING_TAB_KEYS[tab]);
+}
+
+export function settingGroupLabel(group: string): string {
+	const key = SETTING_GROUP_KEYS[group];
+	return key ? getDefaultI18n().t(key) : group;
+}
+
 /**
  * Ordered section groups per tab. Settings declare their section via `ui.group`;
  * the settings UI renders groups in this order with a heading row between them.
  * Ungrouped settings render first, before any section heading.
  */
 export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
-	appearance: ["Theme", "Composer", "Status Line", "Display", "Images"],
+	appearance: ["Language", "Theme", "Composer", "Status Line", "Display", "Images"],
 	model: ["Thinking", "Sampling", "Prompt", "Retry & Fallback", "Advisor", "Prewalk", "Vision"],
 	interaction: [
 		"Input",
@@ -91,6 +177,8 @@ export type SubmenuOption<V extends string = string> = {
 	value: V;
 	label: string;
 	description?: string;
+	labelKey?: string;
+	descriptionKey?: string;
 };
 
 export interface UiBase {
@@ -99,6 +187,8 @@ export interface UiBase {
 	group?: string;
 	label: string;
 	description: string;
+	labelKey?: string;
+	descriptionKey?: string;
 	/**
 	 * Risk note. Marks the settings row with a warning glyph and renders above
 	 * the description in warning styling. For settings that can get the user

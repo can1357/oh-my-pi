@@ -11,6 +11,7 @@ export interface TinyTitleDownloadProgress {
 	files?: Record<string, { loaded: number; total: number }>;
 }
 import { theme } from "../theme/theme";
+import { getDefaultI18n } from "../i18n";
 
 const DEFAULT_BAR_WIDTH = 24;
 
@@ -37,13 +38,14 @@ function currentFile(event: TinyTitleDownloadProgress | undefined): string | und
 }
 
 function statusLabel(event: TinyTitleDownloadProgress | undefined): string {
-	if (!event) return "Preparing";
-	if (event.status === "error") return "Failed";
-	if (event.status === "ready") return "Ready";
-	if (event.status === "done") return "Downloaded";
-	if (event.status === "download") return "Downloading";
-	if (event.status === "progress" || event.status === "progress_total") return "Downloading";
-	return "Preparing";
+	const i18n = getDefaultI18n();
+	if (!event) return i18n.t("tui.download.preparing");
+	if (event.status === "error") return i18n.t("tui.download.failed");
+	if (event.status === "ready") return i18n.t("tui.download.ready");
+	if (event.status === "done") return i18n.t("tui.download.downloaded");
+	if (event.status === "download") return i18n.t("tui.download.downloading");
+	if (event.status === "progress" || event.status === "progress_total") return i18n.t("tui.download.downloading");
+	return i18n.t("tui.download.preparing");
 }
 
 function byteLabel(event: TinyTitleDownloadProgress | undefined): string | undefined {
@@ -93,7 +95,7 @@ export class TinyTitleDownloadProgressComponent implements Component {
 		const pct =
 			this.#event?.progress === undefined ? "" : `${Math.floor(this.#event.progress).toString().padStart(3, " ")}%`;
 		const bytes = byteLabel(this.#event);
-		const title = `${theme.fg("accent", "Tiny model")} ${theme.fg("muted", status)} ${this.#modelLabel}`;
+		const title = `${theme.fg("accent", getDefaultI18n().t("tui.download.title"))} ${theme.fg("muted", status)} ${this.#modelLabel}`;
 		const bar = this.#bar.render(Math.max(8, width - 36))[0] ?? "";
 		const details = [bar, pct, bytes, file].filter((part): part is string => Boolean(part)).join(" ");
 

@@ -6,9 +6,11 @@
  */
 
 import { format } from "@oh-my-pi/pi-utils/dates";
+import type { Locale } from "@oh-my-pi/pi-i18n";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import { Line } from "react-chartjs-2";
 import type { ChartTheme } from "./chart-shared";
+import { useStatsI18n } from "../i18n";
 
 // Detail-table charts share the exact OMP chart chrome as the timeline charts;
 // re-export rather than duplicate so the palette has a single source of truth.
@@ -35,13 +37,19 @@ export function MiniSparkline({
 	timestamps,
 	values,
 	color,
+	locale = "en",
 }: {
 	timestamps: number[];
 	values: number[];
 	color: string;
+	locale?: Locale;
 }) {
 	const chartData = {
-		labels: timestamps.map(ts => format(new Date(ts), "MMM d")),
+		labels: timestamps.map(ts =>
+			locale === "en"
+				? format(new Date(ts), "MMM d")
+				: new Intl.DateTimeFormat(locale, { month: "short", day: "numeric" }).format(new Date(ts)),
+		),
 		datasets: [{ data: values, ...lineSeriesStyle(color) }],
 	};
 
@@ -250,6 +258,11 @@ export function TrendEmpty() {
 }
 
 /** Placeholder shown in the expanded detail-chart slot when data is missing. */
-export function DetailChartEmpty({ message = "No data available" }: { message?: string }) {
-	return <div className="h-full flex items-center justify-center text-[var(--text-muted)] text-sm">{message}</div>;
+export function DetailChartEmpty({ message }: { message?: string }) {
+	const { i18n } = useStatsI18n();
+	return (
+		<div className="h-full flex items-center justify-center text-[var(--text-muted)] text-sm">
+			{message ?? i18n.t("stats.models.noData")}
+		</div>
+	);
 }

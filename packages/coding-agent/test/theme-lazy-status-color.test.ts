@@ -4,6 +4,7 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
+import { configureCodingAgentI18n } from "@oh-my-pi/pi-coding-agent/i18n";
 
 /**
  * Regression for issue #6337: a status message presented while the auto-theme
@@ -123,5 +124,26 @@ describe("lazy status color re-resolves on theme switch", () => {
 			.map(line => line.trim())
 			.filter(line => line === "Update Available" || line.startsWith("New version "));
 		expect(semanticLines).toEqual(["Update Available", "New version 1.2.3 is available. Run: omp update"]);
+	});
+
+	it("localizes update notification chrome while preserving version and command", () => {
+		configureCodingAgentI18n({ language: "zh-CN" });
+		try {
+			let presented: Component | undefined;
+			const context: Pick<InteractiveModeContext, "present"> = {
+				present(component) {
+					if (!isSingleComponent(component)) throw new Error("Expected one update notification block");
+					presented = component;
+				},
+			};
+			new UiHelpers(context as InteractiveModeContext).showNewVersionNotification("1.2.3");
+			const output = Bun.stripANSI(presented?.render(100).join("\n") ?? "");
+			expect(output).toContain("有可用更新");
+			expect(output).toContain("1.2.3");
+			expect(output).toContain("omp update");
+			expect(output).not.toContain("Update Available");
+		} finally {
+			configureCodingAgentI18n({ language: "en" });
+		}
 	});
 });

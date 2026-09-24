@@ -528,6 +528,20 @@ export const SETTINGS_SCHEMA = {
 	// Appearance
 	// ────────────────────────────────────────────────────────────────────────
 
+	"ui.language": {
+		type: "enum",
+		values: ["auto", "en", "zh-CN"] as const,
+		default: "auto",
+		ui: {
+			tab: "appearance",
+			group: "Language",
+			label: "Language",
+			description: "Choose the language used by the interface",
+			labelKey: "common.language",
+			descriptionKey: "common.languageDescription",
+		},
+	},
+
 	// Theme
 	"theme.dark": {
 		type: "string",

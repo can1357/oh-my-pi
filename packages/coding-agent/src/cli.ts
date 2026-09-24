@@ -29,6 +29,13 @@ import {
 } from "@oh-my-pi/pi-utils/dirs";
 
 import { declareWorkerHostEntry, installWorkerInbox, isWorkerHostSelector } from "@oh-my-pi/pi-utils/worker-host";
+import type { MessageKey } from "@oh-my-pi/pi-i18n";
+import {
+	configureCodingAgentI18n,
+	getCodingAgentI18n,
+	getEnvironmentLocalePreferences,
+	readCliLanguagePreference,
+} from "./i18n";
 import { extractProfileFlags } from "./cli/profile-bootstrap";
 import {
 	BLOB_BROKER_WORKER_ARG,
@@ -505,6 +512,10 @@ export async function runCli(argv: string[]): Promise<void> {
 		process.exitCode = 1;
 		return;
 	}
+	configureCodingAgentI18n({
+		language: readCliLanguagePreference(resolvedArgv),
+		environment: getEnvironmentLocalePreferences(),
+	});
 
 	// Declare this module as the worker-host entry now that the active profile
 	// is resolved. The worker-host module is side-effect-free; importing
@@ -584,7 +595,14 @@ export async function runCli(argv: string[]): Promise<void> {
 			process.exitCode = 1;
 			return;
 		}
-		await run({ bin: APP_NAME, version: VERSION, argv: resolved.argv, commands, metadataHelp: showHelp });
+		await run({
+			bin: APP_NAME,
+			version: VERSION,
+			argv: resolved.argv,
+			commands,
+			metadataHelp: showHelp,
+			translate: (key, values) => getCodingAgentI18n().t(key as MessageKey, values),
+		});
 	} finally {
 		stopStartupComposer?.();
 	}

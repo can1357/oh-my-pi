@@ -1,5 +1,7 @@
 import { TERMINAL } from "@oh-my-pi/pi-tui";
+import { getCodingAgentI18n } from "../i18n";
 import { SETTING_TABS, type SettingsDisplayEntry, type SettingsHost } from "@oh-my-pi/pi-tui/overlays/settings-defs";
+import type { MessageKey } from "@oh-my-pi/pi-i18n";
 import {
 	normalizeProviderMaxInFlightRequests,
 	Settings,
@@ -89,7 +91,15 @@ export function createSettingsHost(): SettingsHost {
 	const entries: SettingsDisplayEntry[] = [];
 	for (const tab of SETTING_TABS) {
 		for (const path of getPathsForTab(tab)) {
-			const ui = getUi(path);
+			const rawUi = getUi(path);
+			const i18n = getCodingAgentI18n();
+			const ui = rawUi
+				? {
+						...rawUi,
+						label: rawUi.labelKey ? i18n.t(rawUi.labelKey as MessageKey) : rawUi.label,
+						description: rawUi.descriptionKey ? i18n.t(rawUi.descriptionKey as MessageKey) : rawUi.description,
+					}
+				: rawUi;
 			entries.push({
 				path,
 				type: getType(path),

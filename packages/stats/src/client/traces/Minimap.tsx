@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { TraceSpanKind, TraceTrack } from "../types";
 import { useSystemTheme } from "../useSystemTheme";
+import { useStatsI18n } from "../i18n";
 import type { TimelineViewport } from "./TimelineCanvas";
 import type { TraceScale } from "./time-scale";
 import { TRACE_THEMES } from "./trace-colors";
@@ -25,6 +26,7 @@ const MIN_WINDOW_U = 10;
 type DragMode = "move" | "left" | "right" | "create";
 
 export function Minimap({ tracks, scale, viewport, onViewportChange }: MinimapProps) {
+	const { i18n } = useStatsI18n();
 	const theme = useSystemTheme();
 	const colors = TRACE_THEMES[theme];
 	const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -155,7 +157,7 @@ export function Minimap({ tracks, scale, viewport, onViewportChange }: MinimapPr
 				touchAction: "none",
 			}}
 			role="slider"
-			aria-label="Timeline overview brush"
+			aria-label={i18n.t("stats.traceView.minimap")}
 			aria-valuemin={0}
 			aria-valuemax={100}
 			aria-valuenow={Math.round(((viewport.u0 - d0) / dSpan) * 100)}

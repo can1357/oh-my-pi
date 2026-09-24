@@ -18,6 +18,7 @@ That's it: the relay server auto-starts under omp's profile-independent global d
 ## Development
 
 - `bun run build` — bundles the extension into `dist/extension/`, zips it for GH releases, and regenerates the embedded CLI install assets under `packages/coding-agent/src/tools/browser/relay/extension-assets/` (**commit those**).
+- Options 页面文案来自 `@oh-my-pi/pi-i18n`，修改后运行 `bun run build`，并用 `bun scripts/check-extension-assets.ts` 验证生成资产。
 - `bun scripts/smoke.ts [relay-url] [target-substring]` — end-to-end smoke replicating omp's supervisor + tab-worker double-connection pattern against a live relay.
 
 ## Limitations

@@ -1,5 +1,6 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Effort } from "@oh-my-pi/pi-ai";
+import type { MessageKey } from "@oh-my-pi/pi-i18n";
 import {
 	type Component,
 	Container,
@@ -32,6 +33,8 @@ import type {
 import {
 	SETTING_TABS,
 	TAB_METADATA,
+	settingGroupLabel,
+	settingTabLabel,
 	type SettingTab,
 	type SettingsHost,
 	type SettingsDisplayEntry,
@@ -48,6 +51,17 @@ import { SnapcompactShapePreview } from "./snapcompact-shape-preview";
 import { getPreset } from "../status-line/presets";
 import { FormField, SelectFormField, TextFormField } from "../components/form";
 import { formTheme } from "../chrome/form-theme";
+import { getDefaultI18n } from "../i18n";
+
+function localizeOption(option: SelectItem): SelectItem {
+	const i18n = getDefaultI18n();
+	const candidate = option as SelectItem & { labelKey?: string; descriptionKey?: string };
+	return {
+		...option,
+		label: candidate.labelKey ? i18n.t(candidate.labelKey as MessageKey) : option.label,
+		description: candidate.descriptionKey ? i18n.t(candidate.descriptionKey as MessageKey) : option.description,
+	};
+}
 
 /**
  * Free-text string setting field backed by the shared text form field.
@@ -419,7 +433,7 @@ function settingsSidebarWidth(entries: readonly SettingsDisplayEntry[]): number 
 	let nameWidth = 0;
 	for (const tab of SETTING_TABS) {
 		for (const def of getSettingsForTab(entries, tab)) {
-			if (def.group) nameWidth = Math.max(nameWidth, visibleWidth(def.group));
+			if (def.group) nameWidth = Math.max(nameWidth, visibleWidth(settingGroupLabel(def.group)));
 		}
 	}
 	return Math.min(22, nameWidth) + 4;
@@ -430,7 +444,7 @@ function getSettingsTabs(): Tab[] {
 		...SETTING_TABS.map(id => {
 			const meta = TAB_METADATA[id];
 			const icon = theme.symbol(meta.icon);
-			return { id, label: `${icon} ${meta.label}`, short: icon };
+			return { id, label: `${icon} ${settingTabLabel(id)}`, short: icon };
 		}),
 		{ id: "plugins", label: `${theme.icon.package} Plugins`, short: theme.icon.package },
 	];
@@ -785,7 +799,7 @@ export class SettingsSelectorComponent implements Component {
 			const meta = TAB_METADATA[result.tab];
 			items.push({
 				id: `__tab:${result.tab}`,
-				label: `${theme.symbol(meta.icon)} ${meta.label}`,
+				label: `${theme.symbol(meta.icon)} ${settingTabLabel(result.tab)}`,
 				currentValue: "",
 				heading: true,
 			});
@@ -835,14 +849,14 @@ export class SettingsSelectorComponent implements Component {
 			const icon = theme.symbol(meta.icon);
 			const count = counts.get(id) ?? 0;
 			if (count > 0) {
-				matched.push({ id, label: `${icon} ${meta.label} (${count})`, short: `${icon} ${count}` });
+				matched.push({ id, label: `${icon} ${settingTabLabel(id)} (${count})`, short: `${icon} ${count}` });
 			}
 		}
 		for (const id of SETTING_TABS) {
 			if (matchedIds.has(id)) continue;
 			const meta = TAB_METADATA[id];
 			const icon = theme.symbol(meta.icon);
-			empty.push({ id, label: `${icon} ${meta.label}`, short: icon, muted: true });
+			empty.push({ id, label: `${icon} ${settingTabLabel(id)}`, short: icon, muted: true });
 		}
 		// Plugins hosts its own UI; it is not part of the schema-backed search.
 		empty.push({
@@ -988,6 +1002,7 @@ export class SettingsSelectorComponent implements Component {
 		} else if (def.path === "composer.shape") {
 			options = getComposerShapeOptions();
 		}
+		options = options.map(localizeOption);
 		// Preview handlers
 		let onPreview: ((value: string) => void | Promise<void>) | undefined;
 		let onPreviewCancel: (() => void) | undefined;
@@ -1140,6 +1155,7 @@ export class SettingsSelectorComponent implements Component {
 
 	#createMultiSelect(def: SettingDef & { type: "multiselect" }, done: (value?: string) => void): Container {
 		const options = this.#getMultiSelectOptions(def);
+		const localizedOptions = options.map(localizeOption);
 		const current: unknown = this.#context.settings.get(def.path);
 		const initial = Array.isArray(current)
 			? current.filter((entry): entry is string => typeof entry === "string")
@@ -1147,7 +1163,7 @@ export class SettingsSelectorComponent implements Component {
 		return new MultiSelectSubmenu(
 			def.label,
 			def.description,
-			options,
+			localizedOptions,
 			initial,
 			def.ordered,
 			value => {
@@ -1160,10 +1176,11 @@ export class SettingsSelectorComponent implements Component {
 
 	#formatMultiSelectValue(def: SettingDef & { type: "multiselect" }, value: unknown): string {
 		const options = this.#getMultiSelectOptions(def);
+		const localizedOptions = options.map(localizeOption);
 		const labels = Array.isArray(value)
 			? value.flatMap(entry => {
 					if (typeof entry !== "string") return [];
-					const option = options.find(candidate => candidate.value === entry);
+					const option = localizedOptions.find(candidate => candidate.value === entry);
 					return option ? [option.label] : [];
 				})
 			: [];
@@ -1276,7 +1293,12 @@ export class SettingsSelectorComponent implements Component {
 			const item = this.#defToItem(def);
 			if (!item) continue;
 			if (def.group && def.group !== lastGroup) {
-				items.push({ id: `__heading:${def.group}`, label: def.group, currentValue: "", heading: true });
+				items.push({
+					id: `__heading:${def.group}`,
+					label: settingGroupLabel(def.group),
+					currentValue: "",
+					heading: true,
+				});
 				lastGroup = def.group;
 			}
 			items.push(item);

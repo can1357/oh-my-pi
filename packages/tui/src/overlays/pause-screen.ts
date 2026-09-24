@@ -17,6 +17,7 @@ import { formatCoarseDuration } from "../chrome/format";
 import { centerLine } from "../utils";
 import { theme } from "../theme/theme";
 import { matchesAppInterrupt } from "../keybinding-matchers";
+import { getDefaultI18n } from "../i18n";
 
 /**
  * Slice of `InteractiveModeContext` the pause screen drives. Narrow so tests
@@ -45,13 +46,6 @@ const BAR_GAP = 4;
 const MIN_FULL_WIDTH = 64;
 const MIN_FULL_HEIGHT = 18;
 
-const TITLE = "P A U S E D";
-const BODY_LINES = [
-	"Main agent, subagents, and advisor hold at their next step.",
-	"In-flight calls finish; nothing new starts until you resume.",
-] as const;
-const RESUME_HINT = "esc · enter · space — resume";
-
 /** Live hold clock, seconds-precise: `0:07`, `12:34`, `1:02:03`. */
 function formatClock(ms: number): string {
 	const totalSeconds = Math.max(0, Math.floor(ms / 1000));
@@ -67,6 +61,9 @@ function formatClock(ms: number): string {
  * Exported for tests.
  */
 export function renderPauseScreen(width: number, height: number, elapsedMs: number, sessionName?: string): string[] {
+	const i18n = getDefaultI18n();
+	const title = i18n.t("tui.pause.title");
+	const bodyLines = [i18n.t("tui.pause.body1"), i18n.t("tui.pause.body2")];
 	const compact = width < MIN_FULL_WIDTH || height < MIN_FULL_HEIGHT;
 	const content: string[] = [];
 
@@ -75,10 +72,12 @@ export function renderPauseScreen(width: number, height: number, elapsedMs: numb
 			content.push(centerLine(theme.bold(sessionName), width).trimEnd());
 			content.push("");
 		}
-		content.push(centerLine(theme.bold(theme.fg("accent", `▌▌ ${TITLE}`)), width).trimEnd());
+		content.push(centerLine(theme.bold(theme.fg("accent", `▌▌ ${title}`)), width).trimEnd());
 		content.push("");
-		content.push(centerLine(theme.fg("dim", `paused for ${formatClock(elapsedMs)}`), width).trimEnd());
-		content.push(centerLine(theme.fg("dim", "esc to resume"), width).trimEnd());
+		content.push(
+			centerLine(theme.fg("dim", i18n.t("tui.pause.pausedFor", { time: formatClock(elapsedMs) })), width).trimEnd(),
+		);
+		content.push(centerLine(theme.fg("dim", i18n.t("tui.pause.escResume")), width).trimEnd());
 	} else {
 		if (sessionName) {
 			content.push(centerLine(theme.bold(sessionName), width).trimEnd());
@@ -91,15 +90,17 @@ export function renderPauseScreen(width: number, height: number, elapsedMs: numb
 			content.push(centerLine(theme.fg("accent", glyphRow), width).trimEnd());
 		}
 		content.push("");
-		content.push(centerLine(theme.bold(theme.fg("accent", TITLE)), width).trimEnd());
+		content.push(centerLine(theme.bold(theme.fg("accent", title)), width).trimEnd());
 		content.push("");
-		for (const line of BODY_LINES) {
+		for (const line of bodyLines) {
 			content.push(centerLine(theme.fg("muted", line), width).trimEnd());
 		}
 		content.push("");
-		content.push(centerLine(theme.fg("dim", `paused for ${formatClock(elapsedMs)}`), width).trimEnd());
+		content.push(
+			centerLine(theme.fg("dim", i18n.t("tui.pause.pausedFor", { time: formatClock(elapsedMs) })), width).trimEnd(),
+		);
 		content.push("");
-		content.push(centerLine(theme.fg("dim", RESUME_HINT), width).trimEnd());
+		content.push(centerLine(theme.fg("dim", i18n.t("tui.pause.resumeHint")), width).trimEnd());
 	}
 
 	const topPad = Math.max(0, Math.floor((height - content.length) / 2));
@@ -192,7 +193,7 @@ export async function runPauseScreen(host: PauseScreenHost): Promise<void> {
 		overlay.hide();
 		const heldMs = agentPauseGate.resume();
 		if (heldMs !== undefined) {
-			host.showStatus(`Resumed after ${formatCoarseDuration(heldMs)} — agents are running again.`);
+			host.showStatus(getDefaultI18n().t("tui.pause.resumedAfter", { time: formatCoarseDuration(heldMs) }));
 		}
 	}
 }

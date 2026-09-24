@@ -536,6 +536,7 @@
 		"@oh-my-pi/pi-agent-core": "catalog:",
 		"@oh-my-pi/pi-ai": "catalog:",
 		"@oh-my-pi/pi-catalog": "catalog:",
+		"@oh-my-pi/pi-i18n": "catalog:",
 		"@oh-my-pi/pi-mnemopi": "catalog:",
 		"@oh-my-pi/pi-natives": "catalog:",
 		"@oh-my-pi/pi-tui": "catalog:",

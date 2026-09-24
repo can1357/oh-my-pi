@@ -1,6 +1,8 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 
 import { HookInputComponent } from "@oh-my-pi/pi-tui/overlays/hook-input";
+import { TinyTitleDownloadProgressComponent } from "@oh-my-pi/pi-tui/overlays/tiny-title-download-progress";
+import { configureDefaultI18n } from "@oh-my-pi/pi-tui/i18n";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import type { TUI } from "@oh-my-pi/pi-tui";
 
@@ -103,5 +105,38 @@ describe("HookInputComponent timeout", () => {
 		expect(onSubmit).toHaveBeenCalledWith("sk-line1sk-line2");
 
 		component.dispose();
+	});
+
+	it("renders fixed input chrome through the active locale", () => {
+		configureDefaultI18n("zh-CN");
+		try {
+			const component = new HookInputComponent(
+				"Prompt",
+				undefined,
+				() => {},
+				() => {},
+			);
+			const output = component.render(80).join("\n");
+			expect(output).toContain("提交");
+			expect(output).toContain("取消");
+			expect(output).not.toContain("enter submit");
+			component.dispose();
+		} finally {
+			configureDefaultI18n("en");
+		}
+	});
+
+	it("localizes tiny-model download status labels", () => {
+		configureDefaultI18n("zh-CN");
+		try {
+			const component = new TinyTitleDownloadProgressComponent("test-model");
+			component.update({ status: "error", progress: 50 });
+			const output = component.render(80).join("\n");
+			expect(output).toContain("小模型");
+			expect(output).toContain("失败");
+			expect(output).not.toContain("Tiny model");
+		} finally {
+			configureDefaultI18n("en");
+		}
 	});
 });

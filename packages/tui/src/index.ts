@@ -1,5 +1,7 @@
 // Core TUI interfaces and classes
 
+export * from "./i18n";
+
 // Autocomplete support
 export * from "./autocomplete";
 // Components

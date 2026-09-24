@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
 import type { GuestClient } from "../../lib/client";
 import { fmtCost, fmtDuration, fmtTokens } from "../../lib/format";
+import { useCollabI18n } from "../../lib/i18n";
 import { decideTranscriptPoll } from "../../lib/transcript-poll";
 import type { TranscriptProps } from "../transcript/Transcript";
 import { Transcript } from "../transcript/Transcript";
@@ -21,6 +22,7 @@ export function AgentDrawer(props: {
 	host?: TranscriptProps["host"];
 	onClose(): void;
 }): ReactNode {
+	const { i18n } = useCollabI18n();
 	const { agent, progress, client, readOnly, host, onClose } = props;
 	const [entries, setEntries] = useState<readonly SessionEntry[]>([]);
 	const [fetchError, setFetchError] = useState<string | null>(null);
@@ -122,16 +124,21 @@ export function AgentDrawer(props: {
 							onClick={() => client.sendAgentCmd("kill", agent.id)}
 						>
 							<OctagonX size={13} aria-hidden />
-							kill
+							{i18n.t("collab.agents.kill")}
 						</button>
 					) : null}
 					{(agent.status === "parked" || agent.status === "aborted") && !readOnly ? (
 						<button type="button" className="ag-btn" onClick={() => client.sendAgentCmd("revive", agent.id)}>
 							<RotateCcw size={13} aria-hidden />
-							revive
+							{i18n.t("collab.agents.revive")}
 						</button>
 					) : null}
-					<button type="button" className="ag-iconbtn" aria-label="close" onClick={onClose}>
+					<button
+						type="button"
+						className="ag-iconbtn"
+						aria-label={i18n.t("collab.agents.close")}
+						onClick={onClose}
+					>
 						<X size={15} aria-hidden />
 					</button>
 				</div>
@@ -139,12 +146,15 @@ export function AgentDrawer(props: {
 			{p ? (
 				<div className="ag-stats">
 					<span className="ag-stat">
-						<span className="ag-stat-label">tok</span>
+						<span className="ag-stat-label">{i18n.t("collab.agents.tok")}</span>
 						<span className="ag-stat-value">{fmtTokens(p.tokens)}</span>
 					</span>
 					{ctxPct !== null ? (
-						<span className="ag-stat" title={`context ${fmtTokens(p.contextTokens ?? 0)}`}>
-							<span className="ag-stat-label">ctx</span>
+						<span
+							className="ag-stat"
+							title={i18n.t("collab.agents.context", { tokens: fmtTokens(p.contextTokens ?? 0) })}
+						>
+							<span className="ag-stat-label">{i18n.t("collab.agents.ctx")}</span>
 							<span className="ag-gauge">
 								<span
 									className={ctxPct > 80 ? "ag-gauge-fill ag-gauge-fill--warn" : "ag-gauge-fill"}
@@ -154,11 +164,11 @@ export function AgentDrawer(props: {
 						</span>
 					) : null}
 					<span className="ag-stat">
-						<span className="ag-stat-label">cost</span>
+						<span className="ag-stat-label">{i18n.t("collab.agents.cost")}</span>
 						<span className="ag-stat-value">{fmtCost(p.cost)}</span>
 					</span>
 					<span className="ag-stat">
-						<span className="ag-stat-label">tools</span>
+						<span className="ag-stat-label">{i18n.t("collab.agents.tools")}</span>
 						<span className="ag-stat-value">{p.toolCount}</span>
 					</span>
 					<span className="ag-stat">
@@ -180,12 +190,12 @@ export function AgentDrawer(props: {
 						/>
 						{fetchError !== null ? (
 							<div className="ag-fetch-error" role="alert">
-								transcript unavailable: {fetchError}
+								{i18n.t("collab.agents.transcriptUnavailable", { error: fetchError })}
 							</div>
 						) : null}
 					</>
 				) : (
-					<div className="ag-empty">no transcript available</div>
+					<div className="ag-empty">{i18n.t("collab.agents.noTranscript")}</div>
 				)}
 			</div>
 			{!readOnly && (
@@ -199,10 +209,15 @@ export function AgentDrawer(props: {
 					<input
 						className="ag-chat-input"
 						value={draft}
-						placeholder={`message ${agent.displayName}…`}
+						placeholder={i18n.t("collab.agents.message", { name: agent.displayName })}
 						onChange={e => setDraft(e.target.value)}
 					/>
-					<button type="submit" className="ag-iconbtn" aria-label="send" disabled={draft.trim().length === 0}>
+					<button
+						type="submit"
+						className="ag-iconbtn"
+						aria-label={i18n.t("collab.agents.send")}
+						disabled={draft.trim().length === 0}
+					>
 						<SendHorizontal size={15} aria-hidden />
 					</button>
 				</form>

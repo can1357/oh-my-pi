@@ -1,14 +1,21 @@
 import { Args, type CommandMetadata, Flags } from "@oh-my-pi/pi-utils/cli";
+import { createI18n, type MessageKey } from "@oh-my-pi/pi-i18n";
 import { APP_NAME } from "@oh-my-pi/pi-utils/dirs";
 import { CLI_THINKING_LEVELS } from "@oh-my-pi/pi-tui/thinking";
 import { SERVICE_TIER_OPENAI_VALUES } from "../config/service-tier";
 
+const english = createI18n("en");
+
+function helpText(key: MessageKey): { description: string; descriptionKey: MessageKey } {
+	return { description: english.t(key), descriptionKey: key };
+}
+
 export const launchHelp = {
-	description: "AI coding assistant",
+	...helpText("codingAgent.ui.appDescription"),
 	hidden: true,
 	args: {
 		messages: Args.string({
-			description: "Messages to send (prefix files with @)",
+			...helpText("codingAgent.help.messages"),
 			required: false,
 			multiple: true,
 		}),
@@ -16,6 +23,10 @@ export const launchHelp = {
 	flags: {
 		model: Flags.string({
 			description: 'Model to use (fuzzy match: "opus", "gpt-5.2", or "openai/gpt-5.2")',
+		}),
+		language: Flags.string({
+			...helpText("codingAgent.help.language"),
+			options: ["auto", "en", "zh-CN"],
 		}),
 		smol: Flags.string({ description: "Smol/fast model for lightweight tasks (or PI_SMOL_MODEL env)" }),
 		slow: Flags.string({ description: "Slow/reasoning model for thorough analysis (or PI_SLOW_MODEL env)" }),

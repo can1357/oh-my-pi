@@ -13,6 +13,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { $ } from "bun";
+import { EN_MESSAGES, ZH_CN_MESSAGES } from "../../i18n/src/messages";
 
 const root = path.resolve(import.meta.dir, "..");
 const repoRoot = path.resolve(root, "../..");
@@ -34,9 +35,14 @@ if (!bundle.success) {
 	process.exit(1);
 }
 
-for (const file of ["manifest.json", "options.html", "options.js"]) {
+for (const file of ["manifest.json", "options.html"]) {
 	await Bun.write(path.join(distExtension, file), Bun.file(path.join(root, "extension", file)));
 }
+const optionsSource = await Bun.file(path.join(root, "extension", "options.js")).text();
+const optionsMessages = JSON.stringify({ en: EN_MESSAGES.browserRelay, "zh-CN": ZH_CN_MESSAGES.browserRelay });
+const optionsRuntime = optionsSource.replace("/*__OMP_MESSAGES__*/{}", optionsMessages);
+if (optionsRuntime === optionsSource) throw new Error("options.js i18n marker is missing");
+await Bun.write(path.join(distExtension, "options.js"), optionsRuntime);
 for (const file of ["LICENSE", "THIRD-PARTY-NOTICES.txt"]) {
 	await Bun.write(path.join(distExtension, file), Bun.file(path.join(repoRoot, file)));
 }

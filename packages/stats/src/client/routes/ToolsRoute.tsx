@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { Line } from "react-chartjs-2";
 import { getToolDashboardStats } from "../api";
 import { CHART_THEMES, MODEL_COLORS } from "../components/chart-shared";
-import { formatRangeTick, rangeMeta } from "../components/range-meta";
+import { formatRangeTick, rangeWindowLabel } from "../components/range-meta";
 import {
 	formatCompact,
 	formatEstimatedCost,
@@ -11,6 +11,7 @@ import {
 	formatRelativeTime,
 } from "../data/formatters";
 import { useResource } from "../data/useResource";
+import { useStatsI18n } from "../i18n";
 import { buildToolRows, type ToolRowView } from "../data/view-models";
 import type { TimeRange, ToolModelStats, ToolTimeSeriesPoint, ToolUsageStats } from "../types";
 import { AsyncBoundary, DataTable, Panel, StatusPill } from "../ui";
@@ -23,6 +24,7 @@ export interface ToolsRouteProps {
 }
 
 export function ToolsRoute({ active, range, refreshTrigger }: ToolsRouteProps) {
+	const { i18n } = useStatsI18n();
 	const {
 		data: stats,
 		error,
@@ -34,7 +36,7 @@ export function ToolsRoute({ active, range, refreshTrigger }: ToolsRouteProps) {
 
 	return (
 		<div className="stats-route-container space-y-6">
-			<AsyncBoundary loading={loading} error={error} data={stats} emptyText="No tool calls recorded for this range.">
+			<AsyncBoundary loading={loading} error={error} data={stats} emptyText={i18n.t("stats.tools.noData")}>
 				{stats && (
 					<>
 						<ToolsSummaryPanel byTool={stats.byTool} />
@@ -53,6 +55,7 @@ export function ToolsRoute({ active, range, refreshTrigger }: ToolsRouteProps) {
 // ---------------------------------------------------------------------------
 
 function ToolsSummaryPanel({ byTool }: { byTool: ToolUsageStats[] }) {
+	const { i18n } = useStatsI18n();
 	const totals = useMemo(() => {
 		let calls = 0;
 		let errors = 0;
@@ -76,47 +79,44 @@ function ToolsSummaryPanel({ byTool }: { byTool: ToolUsageStats[] }) {
 	}, [byTool]);
 
 	return (
-		<Panel
-			title="Tool Usage"
-			subtitle="Tokens and API-equivalent estimates are split from invoking turns across each turn's tool calls"
-		>
+		<Panel title={i18n.t("stats.tools.toolUsage")} subtitle={i18n.t("stats.tools.toolUsageSubtitle")}>
 			<div className="stats-metric-cluster">
 				<div className="stats-metric-primary-grid">
 					<div className="stats-metric-card primary">
-						<div className="stats-metric-label">Tool Calls</div>
+						<div className="stats-metric-label">{i18n.t("stats.trace.toolCalls")}</div>
 						<div className="stats-metric-value">{formatInteger(totals.calls)}</div>
 					</div>
 					<div className="stats-metric-card primary">
-						<div className="stats-metric-label">Tools Used</div>
+						<div className="stats-metric-label">{i18n.t("stats.tools.toolsUsed")}</div>
 						<div className="stats-metric-value">{formatInteger(totals.tools)}</div>
 					</div>
 					<div className="stats-metric-card primary">
-						<div className="stats-metric-label">Error Rate</div>
+						<div className="stats-metric-label">{i18n.t("stats.metrics.errorRate")}</div>
 						<div className="stats-metric-value">
 							{formatPercent(totals.calls > 0 ? totals.errors / totals.calls : 0)}
 						</div>
 					</div>
 					<div className="stats-metric-card primary">
-						<div className="stats-metric-label">Attributed API-equivalent estimate</div>
+						<div className="stats-metric-label">{i18n.t("stats.tools.attributedCost")}</div>
 						<div className="stats-metric-value">{formatEstimatedCost(totals.cost, totals.unpricedRequests)}</div>
 					</div>
 				</div>
 
 				<div className="stats-metric-secondary-grid">
 					<div className="stats-metric-card secondary">
-						<div className="stats-metric-label">Attributed Tokens</div>
+						<div className="stats-metric-label">{i18n.t("stats.tools.attributedTokens")}</div>
 						<div className="stats-metric-value">{formatCompact(Math.round(totals.tokens))}</div>
 					</div>
 					<div className="stats-metric-card secondary">
-						<div className="stats-metric-label">Attributed Output</div>
+						<div className="stats-metric-label">{i18n.t("stats.tools.attributedOutput")}</div>
 						<div className="stats-metric-value">{formatCompact(Math.round(totals.output))}</div>
 					</div>
 					<div className="stats-metric-card secondary">
-						<div className="stats-metric-label">Result Text</div>
+						<div className="stats-metric-label">{i18n.t("stats.tools.resultText")}</div>
 						<div className="stats-metric-value">{formatCompact(totals.resultChars)} chars</div>
 					</div>
 					<div className="stats-metric-card secondary">
-						<div className="stats-metric-label">Call Arguments</div>
+						<div className="stats-metric-label">{i18n.t("stats.tools.callArguments")}</div>
 						<div className="stats-metric-value">{formatCompact(totals.argsChars)} chars</div>
 					</div>
 				</div>
@@ -156,15 +156,15 @@ function buildToolCallSeries(points: ToolTimeSeriesPoint[]): {
 }
 
 function ToolCallsChart({ series, timeRange }: { series: ToolTimeSeriesPoint[]; timeRange: TimeRange }) {
+	const { i18n } = useStatsI18n();
 	const theme = useSystemTheme();
 	const chartTheme = CHART_THEMES[theme];
-	const meta = rangeMeta(timeRange);
 
 	const chartSeries = useMemo(() => buildToolCallSeries(series), [series]);
 
 	const data = useMemo(
 		() => ({
-			labels: chartSeries.buckets.map(ts => formatRangeTick(ts, timeRange)),
+			labels: chartSeries.buckets.map(ts => formatRangeTick(ts, timeRange, i18n.locale)),
 			datasets: chartSeries.tools.map((tool, index) => ({
 				label: tool,
 				data: chartSeries.buckets.map(bucket => chartSeries.data.get(bucket)?.[tool] ?? 0),
@@ -177,7 +177,7 @@ function ToolCallsChart({ series, timeRange }: { series: ToolTimeSeriesPoint[]; 
 				borderWidth: 2,
 			})),
 		}),
-		[chartSeries, timeRange],
+		[chartSeries, timeRange, i18n.locale],
 	);
 
 	const options = useMemo(
@@ -229,10 +229,15 @@ function ToolCallsChart({ series, timeRange }: { series: ToolTimeSeriesPoint[]; 
 	);
 
 	return (
-		<Panel title="Calls Over Time" subtitle={`Tool calls over ${meta.windowLabel}, stacked by tool`}>
+		<Panel
+			title={i18n.t("stats.tools.callsOverTime")}
+			subtitle={i18n.t("stats.tools.callsOverTimeSubtitle", { window: rangeWindowLabel(timeRange, i18n) })}
+		>
 			<div className="h-[280px]">
 				{chartSeries.buckets.length === 0 ? (
-					<div className="h-full flex items-center justify-center text-stats-muted text-sm">No data available</div>
+					<div className="h-full flex items-center justify-center text-stats-muted text-sm">
+						{i18n.t("stats.tools.noData")}
+					</div>
 				) : (
 					<Line data={data} options={options} />
 				)}
@@ -250,13 +255,14 @@ function errorPillVariant(errorRate: number): "danger" | "warning" | "success" {
 }
 
 function ToolsTable({ byTool }: { byTool: ToolUsageStats[] }) {
+	const { i18n } = useStatsI18n();
 	const rows = useMemo(() => buildToolRows(byTool), [byTool]);
 
 	const columns = useMemo(
 		() => [
 			{
 				key: "tool",
-				header: "Tool",
+				header: i18n.t("stats.trace.tool"),
 				render: (item: ToolRowView) => (
 					<div className="stats-font-medium stats-text-primary font-mono truncate max-w-[280px]" title={item.tool}>
 						{item.tool}
@@ -265,7 +271,7 @@ function ToolsTable({ byTool }: { byTool: ToolUsageStats[] }) {
 			},
 			{
 				key: "calls",
-				header: "Calls",
+				header: i18n.t("stats.trace.calls"),
 				numeric: true,
 				render: (item: ToolRowView) => (
 					<div className="stats-text-right">
@@ -282,7 +288,7 @@ function ToolsTable({ byTool }: { byTool: ToolUsageStats[] }) {
 			},
 			{
 				key: "errorRate",
-				header: "Error Rate",
+				header: i18n.t("stats.metrics.errorRate"),
 				numeric: true,
 				render: (item: ToolRowView) => (
 					<StatusPill variant={errorPillVariant(item.errorRate)}>{formatPercent(item.errorRate)}</StatusPill>
@@ -290,7 +296,7 @@ function ToolsTable({ byTool }: { byTool: ToolUsageStats[] }) {
 			},
 			{
 				key: "tokens",
-				header: "Attr. Tokens",
+				header: i18n.t("stats.tools.attributedTokens"),
 				numeric: true,
 				render: (item: ToolRowView) => (
 					<span className="font-mono" title="Invoking turns' total tokens, split across each turn's calls">
@@ -300,7 +306,7 @@ function ToolsTable({ byTool }: { byTool: ToolUsageStats[] }) {
 			},
 			{
 				key: "cost",
-				header: "Attr. API-equivalent estimate",
+				header: i18n.t("stats.tools.attributedCost"),
 				numeric: true,
 				render: (item: ToolRowView) => (
 					<span className="font-mono">{formatEstimatedCost(item.costShare, item.unpricedRequestsShare)}</span>
@@ -308,24 +314,24 @@ function ToolsTable({ byTool }: { byTool: ToolUsageStats[] }) {
 			},
 			{
 				key: "resultChars",
-				header: "Result Text",
+				header: i18n.t("stats.tools.resultText"),
 				numeric: true,
 				render: (item: ToolRowView) => (
-					<span className="font-mono" title="Characters of tool-result text fed back into context">
+					<span className="font-mono" title={i18n.t("stats.tools.resultTextTitle")}>
 						{formatCompact(item.resultChars)}
 					</span>
 				),
 			},
 			{
 				key: "lastUsed",
-				header: "Last Used",
+				header: i18n.t("stats.tools.lastUsed"),
 				numeric: true,
 				render: (item: ToolRowView) => (
-					<span className="stats-text-secondary">{formatRelativeTime(item.lastUsed)}</span>
+					<span className="stats-text-secondary">{formatRelativeTime(item.lastUsed, i18n.locale)}</span>
 				),
 			},
 		],
-		[],
+		[i18n],
 	);
 
 	const renderMobileCard = (item: ToolRowView) => (
@@ -336,23 +342,23 @@ function ToolsTable({ byTool }: { byTool: ToolUsageStats[] }) {
 			</div>
 			<div className="stats-mobile-card-grid">
 				<div>
-					<div className="stats-mobile-card-label">Calls</div>
+					<div className="stats-mobile-card-label">{i18n.t("stats.trace.calls")}</div>
 					<div className="stats-mobile-card-value font-mono">{formatInteger(item.calls)}</div>
 				</div>
 				<div>
-					<div className="stats-mobile-card-label">Attr. Tokens</div>
+					<div className="stats-mobile-card-label">{i18n.t("stats.tools.attributedTokens")}</div>
 					<div className="stats-mobile-card-value font-mono">
 						{formatCompact(Math.round(item.totalTokensShare))}
 					</div>
 				</div>
 				<div>
-					<div className="stats-mobile-card-label">Attr. API-equivalent estimate</div>
+					<div className="stats-mobile-card-label">{i18n.t("stats.tools.attributedCost")}</div>
 					<div className="stats-mobile-card-value font-mono">
 						{formatEstimatedCost(item.costShare, item.unpricedRequestsShare)}
 					</div>
 				</div>
 				<div>
-					<div className="stats-mobile-card-label">Result Text</div>
+					<div className="stats-mobile-card-label">{i18n.t("stats.tools.resultText")}</div>
 					<div className="stats-mobile-card-value font-mono">{formatCompact(item.resultChars)}</div>
 				</div>
 			</div>
@@ -360,13 +366,13 @@ function ToolsTable({ byTool }: { byTool: ToolUsageStats[] }) {
 	);
 
 	return (
-		<Panel title="By Tool" subtitle="Usage per tool, most called first">
+		<Panel title={i18n.t("stats.tools.byTool")} subtitle={i18n.t("stats.tools.byToolSubtitle")}>
 			<DataTable
 				columns={columns}
 				data={rows}
 				keyExtractor={item => item.tool}
 				renderMobileCard={renderMobileCard}
-				emptyText="No tool calls recorded for this range."
+				emptyText={i18n.t("stats.tools.noData")}
 			/>
 		</Panel>
 	);
@@ -377,6 +383,7 @@ function ToolsTable({ byTool }: { byTool: ToolUsageStats[] }) {
 // ---------------------------------------------------------------------------
 
 function ToolModelPanel({ byToolModel }: { byToolModel: ToolModelStats[] }) {
+	const { i18n } = useStatsI18n();
 	const [tool, setTool] = useState<string | null>(null);
 
 	const tools = useMemo(() => [...new Set(byToolModel.map(row => row.tool))].sort(), [byToolModel]);
@@ -393,14 +400,14 @@ function ToolModelPanel({ byToolModel }: { byToolModel: ToolModelStats[] }) {
 		() => [
 			{
 				key: "tool",
-				header: "Tool",
+				header: i18n.t("stats.trace.tool"),
 				render: (item: ToolModelStats & { errorRate: number }) => (
 					<span className="stats-font-medium stats-text-primary font-mono">{item.tool}</span>
 				),
 			},
 			{
 				key: "model",
-				header: "Model",
+				header: i18n.t("stats.table.model"),
 				render: (item: ToolModelStats & { errorRate: number }) => (
 					<div>
 						<div className="stats-text-primary">{item.model || "(unknown)"}</div>
@@ -410,7 +417,7 @@ function ToolModelPanel({ byToolModel }: { byToolModel: ToolModelStats[] }) {
 			},
 			{
 				key: "calls",
-				header: "Calls",
+				header: i18n.t("stats.trace.calls"),
 				numeric: true,
 				render: (item: ToolModelStats & { errorRate: number }) => (
 					<span className="font-mono">{formatInteger(item.calls)}</span>
@@ -418,7 +425,7 @@ function ToolModelPanel({ byToolModel }: { byToolModel: ToolModelStats[] }) {
 			},
 			{
 				key: "errorRate",
-				header: "Error Rate",
+				header: i18n.t("stats.metrics.errorRate"),
 				numeric: true,
 				render: (item: ToolModelStats & { errorRate: number }) => (
 					<StatusPill variant={errorPillVariant(item.errorRate)}>{formatPercent(item.errorRate)}</StatusPill>
@@ -426,7 +433,7 @@ function ToolModelPanel({ byToolModel }: { byToolModel: ToolModelStats[] }) {
 			},
 			{
 				key: "tokens",
-				header: "Attr. Tokens",
+				header: i18n.t("stats.tools.attributedTokens"),
 				numeric: true,
 				render: (item: ToolModelStats & { errorRate: number }) => (
 					<span className="font-mono">{formatCompact(Math.round(item.totalTokensShare))}</span>
@@ -434,21 +441,21 @@ function ToolModelPanel({ byToolModel }: { byToolModel: ToolModelStats[] }) {
 			},
 			{
 				key: "cost",
-				header: "Attr. API-equivalent estimate",
+				header: i18n.t("stats.tools.attributedCost"),
 				numeric: true,
 				render: (item: ToolModelStats & { errorRate: number }) => (
 					<span className="font-mono">{formatEstimatedCost(item.costShare, item.unpricedRequestsShare)}</span>
 				),
 			},
 		],
-		[],
+		[i18n],
 	);
 
 	return (
-		<Panel title="By Model" subtitle="Which models call which tools">
+		<Panel title={i18n.t("stats.tools.byModel")} subtitle={i18n.t("stats.tools.byModelSubtitle")}>
 			<div className="mb-4" style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
 				<span className="stats-text-secondary" style={{ fontSize: "0.875rem", whiteSpace: "nowrap" }}>
-					Tool
+					{i18n.t("stats.trace.tool")}
 				</span>
 				<select
 					className="stats-select"
@@ -456,7 +463,7 @@ function ToolModelPanel({ byToolModel }: { byToolModel: ToolModelStats[] }) {
 					onChange={e => setTool(e.target.value || null)}
 					style={{ maxWidth: "320px", flex: 1 }}
 				>
-					<option value="">All tools</option>
+					<option value="">{i18n.t("stats.tools.allTools")}</option>
 					{tools.map(name => (
 						<option key={name} value={name}>
 							{name}
@@ -468,7 +475,7 @@ function ToolModelPanel({ byToolModel }: { byToolModel: ToolModelStats[] }) {
 				columns={columns}
 				data={rows}
 				keyExtractor={item => `${item.tool}::${item.model}::${item.provider}`}
-				emptyText="No tool calls recorded for this range."
+				emptyText={i18n.t("stats.tools.noData")}
 			/>
 		</Panel>
 	);

@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { getRecentRequests } from "../api";
 import { formatDurationMs, formatInteger, formatMessageCost, formatRelativeTime } from "../data/formatters";
 import { useResource } from "../data/useResource";
+import { useStatsI18n } from "../i18n";
 import type { MessageStats, TimeRange } from "../types";
 import { AsyncBoundary, DataTable, Panel, StatusPill } from "../ui";
 
@@ -13,6 +14,7 @@ export interface RequestsRouteProps {
 }
 
 export function RequestsRoute({ active, refreshTrigger, onRequestClick }: RequestsRouteProps) {
+	const { i18n } = useStatsI18n();
 	const {
 		data: recentRequests,
 		error,
@@ -26,7 +28,7 @@ export function RequestsRoute({ active, refreshTrigger, onRequestClick }: Reques
 		() => [
 			{
 				key: "model",
-				header: "Model",
+				header: i18n.t("stats.table.model"),
 				render: (item: MessageStats) => (
 					<div>
 						<div className="stats-font-medium stats-text-primary">{item.model}</div>
@@ -36,39 +38,39 @@ export function RequestsRoute({ active, refreshTrigger, onRequestClick }: Reques
 			},
 			{
 				key: "timestamp",
-				header: "Time",
-				render: (item: MessageStats) => formatRelativeTime(item.timestamp),
+				header: i18n.t("stats.table.time"),
+				render: (item: MessageStats) => formatRelativeTime(item.timestamp, i18n.locale),
 			},
 			{
 				key: "tokens",
-				header: "Tokens",
+				header: i18n.t("stats.table.tokens"),
 				numeric: true,
 				render: (item: MessageStats) => formatInteger(item.usage.totalTokens),
 			},
 			{
 				key: "cost",
-				header: "API-equivalent estimate",
+				header: i18n.t("stats.metrics.apiEstimate"),
 				numeric: true,
 				render: (item: MessageStats) => formatMessageCost(item, 4),
 			},
 			{
 				key: "duration",
-				header: "Duration",
+				header: i18n.t("stats.drawer.duration"),
 				numeric: true,
 				render: (item: MessageStats) => formatDurationMs(item.duration),
 			},
 			{
 				key: "status",
-				header: "Status",
+				header: i18n.t("stats.table.status"),
 				className: "stats-text-center",
 				render: (item: MessageStats) => (
 					<StatusPill variant={item.errorMessage ? "danger" : "success"}>
-						{item.errorMessage ? "Failed" : "Success"}
+						{item.errorMessage ? i18n.t("stats.table.failed") : i18n.t("stats.table.success")}
 					</StatusPill>
 				),
 			},
 		],
-		[],
+		[i18n],
 	);
 
 	const renderMobileCard = (item: MessageStats, onClick?: () => void) => (
@@ -79,24 +81,24 @@ export function RequestsRoute({ active, refreshTrigger, onRequestClick }: Reques
 					<div className="stats-text-xs stats-text-muted">{item.provider}</div>
 				</div>
 				<StatusPill variant={item.errorMessage ? "danger" : "success"}>
-					{item.errorMessage ? "Failed" : "Success"}
+					{item.errorMessage ? i18n.t("stats.table.failed") : i18n.t("stats.table.success")}
 				</StatusPill>
 			</div>
 			<div className="stats-mobile-card-grid">
 				<div>
-					<div className="stats-mobile-card-label">Time</div>
-					<div className="stats-mobile-card-value">{formatRelativeTime(item.timestamp)}</div>
+					<div className="stats-mobile-card-label">{i18n.t("stats.table.time")}</div>
+					<div className="stats-mobile-card-value">{formatRelativeTime(item.timestamp, i18n.locale)}</div>
 				</div>
 				<div>
-					<div className="stats-mobile-card-label">API-equivalent estimate</div>
+					<div className="stats-mobile-card-label">{i18n.t("stats.metrics.apiEstimate")}</div>
 					<div className="stats-mobile-card-value">{formatMessageCost(item, 4)}</div>
 				</div>
 				<div>
-					<div className="stats-mobile-card-label">Tokens</div>
+					<div className="stats-mobile-card-label">{i18n.t("stats.table.tokens")}</div>
 					<div className="stats-mobile-card-value">{formatInteger(item.usage.totalTokens)}</div>
 				</div>
 				<div>
-					<div className="stats-mobile-card-label">Duration</div>
+					<div className="stats-mobile-card-label">{i18n.t("stats.drawer.duration")}</div>
 					<div className="stats-mobile-card-value">{formatDurationMs(item.duration)}</div>
 				</div>
 			</div>
@@ -106,7 +108,7 @@ export function RequestsRoute({ active, refreshTrigger, onRequestClick }: Reques
 
 	return (
 		<div className="stats-route-container">
-			<Panel title="All Recent Requests" subtitle="Up to 50 most recent requests processed by OMP">
+			<Panel title={i18n.t("stats.requests.title")} subtitle={i18n.t("stats.requests.subtitle")}>
 				<AsyncBoundary loading={loading} error={error} data={recentRequests}>
 					<DataTable
 						columns={columns}
@@ -114,7 +116,7 @@ export function RequestsRoute({ active, refreshTrigger, onRequestClick }: Reques
 						keyExtractor={item => item.id || `${item.sessionFile}-${item.entryId}`}
 						onRowClick={item => item.id && onRequestClick(item.id)}
 						renderMobileCard={renderMobileCard}
-						emptyText="No recent requests found"
+						emptyText={i18n.t("stats.requests.noResults")}
 					/>
 				</AsyncBoundary>
 			</Panel>

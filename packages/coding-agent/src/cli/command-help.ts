@@ -1,159 +1,56 @@
+import { createI18n, type MessageKey } from "@oh-my-pi/pi-i18n";
 import type { CommandMetadata } from "@oh-my-pi/pi-utils/cli";
 
-export const acpHelp = {
-	description: "Run Oh My Pi as an ACP (Agent Client Protocol) server over stdio",
-} satisfies CommandMetadata;
+const english = createI18n("en");
 
-export const agentsHelp = { description: "Manage bundled task agents" } satisfies CommandMetadata;
+function help(key: MessageKey): CommandMetadata {
+	return { description: english.t(key), descriptionKey: key };
+}
 
-export const authBrokerHelp = {
-	description: "Manage the omp auth-broker (credential vault)",
-} satisfies CommandMetadata;
-
-export const authGatewayHelp = {
-	description: "Run an auth-gateway forward proxy backed by the configured broker",
-} satisfies CommandMetadata;
-
-export const benchHelp = {
-	description:
-		"Benchmark models: TTFT/prefill vs decode throughput with p50/p95, across chat, prefill, generation, and prompt-cache workloads",
-} satisfies CommandMetadata;
-
-export const browserRelayHelp = {
-	description: "Run the local CDP relay that lets the browser prelude drive your own Chrome tabs",
-} satisfies CommandMetadata;
-
-export const cleanseHelp = {
-	description: "Detect and fix project diagnostics with weighted parallel subagents",
-} satisfies CommandMetadata;
-
-export const collabHelp = {
-	description:
-		"List active local Collab host metadata without URLs; use collab link <instanceId|pid> to retrieve a control link (--view for view-only)",
-} satisfies CommandMetadata;
-
-export const clipHelp = {
-	description: "Upload a /record recording to live.omp.sh as a public clip and print its URL",
-} satisfies CommandMetadata;
-
-export const commitHelp = { description: "Generate a commit message and update changelogs" } satisfies CommandMetadata;
-
-export const completionsHelp = {
-	description: "Print a shell completion script (bash, zsh, or fish)",
-} satisfies CommandMetadata;
-
+export const acpHelp = help("codingAgent.command.acp");
+export const agentsHelp = help("codingAgent.command.agents");
+export const authBrokerHelp = help("codingAgent.command.authBroker");
+export const authGatewayHelp = help("codingAgent.command.authGateway");
+export const benchHelp = help("codingAgent.command.bench");
+export const browserRelayHelp = help("codingAgent.command.browserRelay");
+export const cleanseHelp = help("codingAgent.command.cleanse");
+export const collabHelp = help("codingAgent.command.collab");
+export const clipHelp = help("codingAgent.command.clip");
+export const commitHelp = help("codingAgent.command.commit");
+export const completionsHelp = help("codingAgent.command.completions");
 export const completeHelp = { hidden: true } satisfies CommandMetadata;
-
-export const compressHelp = {
-	description: "Rewrite a text file into the dense prompt register, reporting what it drops",
-} satisfies CommandMetadata;
-
-export const configHelp = { description: "Manage configuration settings" } satisfies CommandMetadata;
-
-export const dryBalanceHelp = {
-	description: "Dry-run OAuth account balancing across random session ids",
-} satisfies CommandMetadata;
-
-export const galleryHelp = {
-	description: "Preview tool, composer, and status-line renderers in a deterministic visual gallery",
-} satisfies CommandMetadata;
-
-export const gcHelp = { description: "Run storage garbage collection" } satisfies CommandMetadata;
-export const ifBenchHelp = {
-	description:
-		"Benchmark instruction following and working memory: one cached thread of glyph array actions with a moving cat-sound directive",
-} satisfies CommandMetadata;
-export const gitHelp = {
-	description: "Interactive fullscreen git UI: split diff viewer, staging sidebar, and commit composer",
-} satisfies CommandMetadata;
-
-export const findHelp = {
-	description: "Semantic search: describe a behavior, get the files and line ranges that implement it",
-} satisfies CommandMetadata;
-
-export const grepHelp = { description: "Test grep tool" } satisfies CommandMetadata;
-
-export const grievancesHelp = {
-	description: "View, clean, or push reported tool issues (auto-QA grievances)",
-} satisfies CommandMetadata;
-
-export const loginHelp = {
-	description: "Log in to a model provider (terminal counterpart of /login)",
-} satisfies CommandMetadata;
-
-export const imagesHelp = {
-	description: "Inspect, diagnose, probe, and purge image publication backends",
-} satisfies CommandMetadata;
-
-export const installHelp = {
-	description: "Install or link an extension package (alias of `plugin install`/`plugin link`)",
-} satisfies CommandMetadata;
-
-export const joinHelp = { description: "Join a shared collab session (same as /join)" } satisfies CommandMetadata;
-
-export const modelsHelp = { description: "List, search, and refresh available models" } satisfies CommandMetadata;
-
-export const pluginHelp = { description: "Manage plugins (install, uninstall, list, etc.)" } satisfies CommandMetadata;
-
-export const playHelp = {
-	description: "Replay a /record session recording in the terminal (space pauses, q quits)",
-} satisfies CommandMetadata;
-
-export const psHelp = {
-	description: "List and control daemon-supervised background processes (logs, stop, kill, restart)",
-} satisfies CommandMetadata;
-
-export const readHelp = {
-	description: "Show what the read tool will return for a path, URL, or internal URI",
-} satisfies CommandMetadata;
-export const renderHelp = {
-	description: "Draw a session's entire thread through the production transcript pipeline (with repaint timing)",
-} satisfies CommandMetadata;
-
-export const sayHelp = {
-	description: "Synthesize text with the local TTS engine and play it through the speakers",
-} satisfies CommandMetadata;
-
-export const searchHelp = { description: "Test web search providers" } satisfies CommandMetadata;
-
-export const shareHelp = {
-	description: "Share a saved session via an encrypted link (same as /share)",
-} satisfies CommandMetadata;
-
-export const setupHelp = {
-	description: "Run onboarding setup or install dependencies for optional features",
-} satisfies CommandMetadata;
-
-export const shellHelp = { description: "Interactive shell console" } satisfies CommandMetadata;
-
-export const skillHelp = {
-	description: "Install, search, publish, and manage skills on the Skillshare registry (skills.omp.sh)",
-} satisfies CommandMetadata;
-
-export const sshHelp = { description: "Manage SSH host configurations" } satisfies CommandMetadata;
-
-export const statsHelp = { description: "View usage statistics" } satisfies CommandMetadata;
-
-export const streamHelp = {
-	description: "Broadcast local omp session screens and chat to your public live channel",
-} satisfies CommandMetadata;
-
-export const tinyModelsHelp = {
-	description: "Download tiny local models (session titles + memory)",
-} satisfies CommandMetadata;
-
-export const tokenHelp = { description: "Get the API key or OAuth token for a provider" } satisfies CommandMetadata;
-
-export const ttsrHelp = {
-	description: "Inspect and test Time-Traveling Stream Rules (TTSR)",
-} satisfies CommandMetadata;
-
-export const updateHelp = { description: "Check for and install updates" } satisfies CommandMetadata;
-
-export const usageHelp = {
-	description: "Show provider usage limits for every authenticated account",
-} satisfies CommandMetadata;
-
-export const worktreeHelp = {
-	description: "Add, list, or clear git worktrees (clone-first when enabled)",
-} satisfies CommandMetadata;
+export const compressHelp = help("codingAgent.command.compress");
+export const configHelp = help("codingAgent.command.config");
+export const dryBalanceHelp = help("codingAgent.command.dryBalance");
+export const galleryHelp = help("codingAgent.command.gallery");
+export const gcHelp = help("codingAgent.command.gc");
+export const ifBenchHelp = help("codingAgent.command.ifBench");
+export const gitHelp = help("codingAgent.command.git");
+export const findHelp = help("codingAgent.command.find");
+export const grepHelp = help("codingAgent.command.grep");
+export const grievancesHelp = help("codingAgent.command.grievances");
+export const loginHelp = help("codingAgent.command.login");
+export const imagesHelp = help("codingAgent.command.images");
+export const installHelp = help("codingAgent.command.install");
+export const joinHelp = help("codingAgent.command.join");
+export const modelsHelp = help("codingAgent.command.models");
+export const pluginHelp = help("codingAgent.command.plugin");
+export const playHelp = help("codingAgent.command.play");
+export const psHelp = help("codingAgent.command.ps");
+export const readHelp = help("codingAgent.command.read");
+export const renderHelp = help("codingAgent.command.render");
+export const sayHelp = help("codingAgent.command.say");
+export const searchHelp = help("codingAgent.command.search");
+export const shareHelp = help("codingAgent.command.share");
+export const setupHelp = help("codingAgent.command.setup");
+export const shellHelp = help("codingAgent.command.shell");
+export const skillHelp = help("codingAgent.command.skill");
+export const sshHelp = help("codingAgent.command.ssh");
+export const statsHelp = help("codingAgent.command.stats");
+export const streamHelp = help("codingAgent.command.stream");
+export const tinyModelsHelp = help("codingAgent.command.tinyModels");
+export const tokenHelp = help("codingAgent.command.token");
+export const ttsrHelp = help("codingAgent.command.ttsr");
+export const updateHelp = help("codingAgent.command.update");
+export const usageHelp = help("codingAgent.command.usage");
+export const worktreeHelp = help("codingAgent.command.worktree");

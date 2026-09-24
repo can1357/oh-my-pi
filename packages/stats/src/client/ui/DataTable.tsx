@@ -1,4 +1,5 @@
 import type React from "react";
+import { useStatsI18n } from "../i18n";
 
 export interface DataTableColumn<T> {
 	key: string;
@@ -23,8 +24,9 @@ export function DataTable<T>({
 	keyExtractor,
 	onRowClick,
 	renderMobileCard,
-	emptyText = "No data available",
+	emptyText,
 }: DataTableProps<T>) {
+	const { i18n } = useStatsI18n();
 	const handleKeyDown = (e: React.KeyboardEvent<HTMLTableRowElement>, item: T) => {
 		if (onRowClick && (e.key === "Enter" || e.key === " ")) {
 			e.preventDefault();
@@ -33,7 +35,7 @@ export function DataTable<T>({
 	};
 
 	if (data.length === 0) {
-		return <div className="stats-table-empty">{emptyText}</div>;
+		return <div className="stats-table-empty">{emptyText ?? i18n.t("stats.ui.empty")}</div>;
 	}
 
 	return (

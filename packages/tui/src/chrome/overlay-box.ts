@@ -7,9 +7,32 @@
  * colors so all outlined overlays read identically.
  */
 import { type Component, visibleWidth } from "../tui";
+import type { MessageKey } from "@oh-my-pi/pi-i18n";
 import { Ellipsis, truncateToWidth } from "../utils";
 import { padToWidth } from "../render/utils";
 import { type ThemeColor, theme } from "../theme/index";
+import { getDefaultI18n } from "../i18n";
+
+const OVERLAY_TITLE_KEYS: Readonly<Record<string, MessageKey>> = {
+	"Add MCP Server": "tui.overlay.addMcpServer",
+	Ask: "tui.overlay.ask",
+	History: "tui.overlay.history",
+	"Plan Review": "tui.overlay.planReview",
+	Plugins: "tui.overlay.plugins",
+	"Queue Mode": "tui.overlay.queueMode",
+	"Spend a saved rate-limit reset": "tui.overlay.resetUsage",
+	"Save and quit": "tui.overlay.saveQuit",
+	"Session Tree": "tui.overlay.sessionTree",
+	"Show Images": "tui.overlay.showImages",
+	Theme: "tui.overlay.theme",
+	"Thinking Level": "tui.overlay.thinkingLevel",
+	Usage: "tui.overlay.usage",
+};
+
+function localizeOverlayTitle(title: string): string {
+	const key = OVERLAY_TITLE_KEYS[title];
+	return key ? getDefaultI18n().t(key) : title;
+}
 
 function paint(s: string, color: ThemeColor = "border"): string {
 	return theme.fg(color, s);
@@ -202,7 +225,7 @@ export class OverlayPanel implements Component {
 	#memo: OverlayPanelMemo | undefined;
 
 	constructor(title = "") {
-		this.#title = collapseTitle(title);
+		this.#title = collapseTitle(localizeOverlayTitle(title));
 	}
 
 	get title(): string {
@@ -210,7 +233,7 @@ export class OverlayPanel implements Component {
 	}
 
 	set title(value: string) {
-		const next = collapseTitle(value);
+		const next = collapseTitle(localizeOverlayTitle(value));
 		if (next === this.#title) return;
 		this.#title = next;
 		this.#memo = undefined;

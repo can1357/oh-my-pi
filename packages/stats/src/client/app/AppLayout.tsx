@@ -5,6 +5,7 @@ import type { TimeRange } from "../types";
 import { NavRail } from "./NavRail";
 import type { DashboardSection } from "./routes";
 import { TopBar } from "./TopBar";
+import { useStatsI18n } from "../i18n";
 
 export interface AppLayoutProps {
 	activeSection: DashboardSection;
@@ -27,6 +28,7 @@ export function AppLayout({
 	onSyncComplete,
 	children,
 }: AppLayoutProps) {
+	const { i18n } = useStatsI18n();
 	const [menuOpen, setMenuOpen] = useState(false);
 
 	const handleSectionChange = (section: DashboardSection) => {
@@ -47,7 +49,7 @@ export function AppLayout({
 						onClick={e => e.stopPropagation()}
 						role="dialog"
 						aria-modal="true"
-						aria-label="Navigation menu"
+						aria-label={i18n.t("stats.aria.navigationMenu")}
 					>
 						<div className="stats-mobile-drawer-header">
 							<div className="stats-logo-container">
@@ -58,7 +60,7 @@ export function AppLayout({
 								type="button"
 								onClick={() => setMenuOpen(false)}
 								className="stats-drawer-close-btn"
-								aria-label="Close navigation menu"
+								aria-label={i18n.t("stats.aria.closeNavigation")}
 							>
 								<X size={18} />
 							</button>

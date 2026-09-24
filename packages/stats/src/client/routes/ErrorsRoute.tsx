@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { getRecentErrors } from "../api";
 import { formatInteger, formatMessageCost, formatRelativeTime } from "../data/formatters";
 import { useResource } from "../data/useResource";
+import { useStatsI18n } from "../i18n";
 import type { MessageStats, TimeRange } from "../types";
 import { AsyncBoundary, DataTable, Panel, StatusPill } from "../ui";
 
@@ -13,6 +14,7 @@ export interface ErrorsRouteProps {
 }
 
 export function ErrorsRoute({ active, range, refreshTrigger, onRequestClick }: ErrorsRouteProps) {
+	const { i18n } = useStatsI18n();
 	const {
 		data: recentErrors,
 		error,
@@ -26,7 +28,7 @@ export function ErrorsRoute({ active, range, refreshTrigger, onRequestClick }: E
 		() => [
 			{
 				key: "model",
-				header: "Model",
+				header: i18n.t("stats.table.model"),
 				render: (item: MessageStats) => (
 					<div>
 						<div className="stats-font-medium stats-text-primary">{item.model}</div>
@@ -36,35 +38,35 @@ export function ErrorsRoute({ active, range, refreshTrigger, onRequestClick }: E
 			},
 			{
 				key: "timestamp",
-				header: "Time",
-				render: (item: MessageStats) => formatRelativeTime(item.timestamp),
+				header: i18n.t("stats.table.time"),
+				render: (item: MessageStats) => formatRelativeTime(item.timestamp, i18n.locale),
 			},
 			{
 				key: "errorMessage",
-				header: "Error Message",
+				header: i18n.t("stats.table.errorMessage"),
 				render: (item: MessageStats) => (
 					<div
 						className="stats-text-xs stats-text-danger stats-truncate stats-max-w-md stats-font-mono"
 						title={item.errorMessage || ""}
 					>
-						{item.errorMessage || "Unknown error"}
+						{item.errorMessage || i18n.t("stats.errors.unknown")}
 					</div>
 				),
 			},
 			{
 				key: "tokens",
-				header: "Tokens",
+				header: i18n.t("stats.table.tokens"),
 				numeric: true,
 				render: (item: MessageStats) => formatInteger(item.usage.totalTokens),
 			},
 			{
 				key: "cost",
-				header: "API-equivalent estimate",
+				header: i18n.t("stats.metrics.apiEstimate"),
 				numeric: true,
 				render: (item: MessageStats) => formatMessageCost(item, 4),
 			},
 		],
-		[],
+		[i18n],
 	);
 
 	const renderMobileCard = (item: MessageStats, onClick?: () => void) => (
@@ -74,19 +76,19 @@ export function ErrorsRoute({ active, range, refreshTrigger, onRequestClick }: E
 					<div className="stats-font-semibold stats-text-primary">{item.model}</div>
 					<div className="stats-text-xs stats-text-muted">{item.provider}</div>
 				</div>
-				<StatusPill variant="danger">Failed</StatusPill>
+				<StatusPill variant="danger">{i18n.t("stats.table.failed")}</StatusPill>
 			</div>
 			<div className="stats-mobile-card-grid">
 				<div>
-					<div className="stats-mobile-card-label">Time</div>
-					<div className="stats-mobile-card-value">{formatRelativeTime(item.timestamp)}</div>
+					<div className="stats-mobile-card-label">{i18n.t("stats.table.time")}</div>
+					<div className="stats-mobile-card-value">{formatRelativeTime(item.timestamp, i18n.locale)}</div>
 				</div>
 				<div>
-					<div className="stats-mobile-card-label">API-equivalent estimate</div>
+					<div className="stats-mobile-card-label">{i18n.t("stats.metrics.apiEstimate")}</div>
 					<div className="stats-mobile-card-value">{formatMessageCost(item, 4)}</div>
 				</div>
 				<div>
-					<div className="stats-mobile-card-label">Tokens</div>
+					<div className="stats-mobile-card-label">{i18n.t("stats.table.tokens")}</div>
 					<div className="stats-mobile-card-value">{formatInteger(item.usage.totalTokens)}</div>
 				</div>
 			</div>
@@ -96,12 +98,12 @@ export function ErrorsRoute({ active, range, refreshTrigger, onRequestClick }: E
 
 	return (
 		<div className="stats-route-container">
-			<Panel title="Recent Errors" subtitle="Up to 50 most recent failed requests in the stats database">
+			<Panel title={i18n.t("stats.errors.title")} subtitle={i18n.t("stats.errors.subtitle")}>
 				<AsyncBoundary
 					loading={loading}
 					error={error}
 					data={recentErrors}
-					emptyText="No recent failures in the local stats database"
+					emptyText={i18n.t("stats.errors.noResults")}
 				>
 					<DataTable
 						columns={columns}
@@ -109,7 +111,7 @@ export function ErrorsRoute({ active, range, refreshTrigger, onRequestClick }: E
 						keyExtractor={item => item.id || `${item.sessionFile}-${item.entryId}`}
 						onRowClick={item => item.id && onRequestClick(item.id)}
 						renderMobileCard={renderMobileCard}
-						emptyText="No recent failures in the local stats database"
+						emptyText={i18n.t("stats.errors.noResults")}
 					/>
 				</AsyncBoundary>
 			</Panel>

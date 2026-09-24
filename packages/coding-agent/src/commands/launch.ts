@@ -16,6 +16,7 @@ async function loadRunRootCommand() {
 
 export default class Index extends Command {
 	static description = launchHelp.description;
+	static descriptionKey = launchHelp.descriptionKey;
 	static hidden = launchHelp.hidden;
 	static args = launchHelp.args;
 	static flags = launchHelp.flags;

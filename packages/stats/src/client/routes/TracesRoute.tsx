@@ -7,6 +7,7 @@ import { useMemo, useState } from "react";
 import { getSessions } from "../api";
 import { formatCompact, formatDurationMs, formatEstimatedCost, formatRelativeTime } from "../data/formatters";
 import { useResource } from "../data/useResource";
+import { useStatsI18n } from "../i18n";
 import { TraceView } from "../traces/TraceView";
 import type { SessionSummary } from "../types";
 import { AsyncBoundary, DataTable, Panel } from "../ui";
@@ -47,6 +48,7 @@ function ModelChips({ models }: { models: string[] }) {
 }
 
 export function TracesRoute({ active, session, onOpenSession, refreshTrigger }: TracesRouteProps) {
+	const { i18n } = useStatsI18n();
 	const [filter, setFilter] = useState("");
 
 	const {
@@ -74,7 +76,7 @@ export function TracesRoute({ active, session, onOpenSession, refreshTrigger }: 
 		() => [
 			{
 				key: "title",
-				header: "Title",
+				header: i18n.t("stats.traces.title"),
 				render: (item: SessionSummary) => (
 					<div className="stats-font-medium stats-text-primary truncate" style={{ maxWidth: 280 }}>
 						{item.title ?? item.file.split("/").pop()}
@@ -83,7 +85,7 @@ export function TracesRoute({ active, session, onOpenSession, refreshTrigger }: 
 			},
 			{
 				key: "folder",
-				header: "Project",
+				header: i18n.t("stats.traces.project"),
 				render: (item: SessionSummary) => (
 					<span className="stats-text-muted truncate" style={{ maxWidth: 160, display: "inline-block" }}>
 						{item.folder.split("/").slice(-2).join("/")}
@@ -92,33 +94,52 @@ export function TracesRoute({ active, session, onOpenSession, refreshTrigger }: 
 			},
 			{
 				key: "started",
-				header: "Started",
-				render: (item: SessionSummary) => formatRelativeTime(item.startedAt),
+				header: i18n.t("stats.traces.started"),
+				render: (item: SessionSummary) => formatRelativeTime(item.startedAt, i18n.locale),
 			},
 			{
 				key: "duration",
-				header: "Duration",
+				header: i18n.t("stats.drawer.duration"),
 				numeric: true,
 				render: (item: SessionSummary) => formatDurationMs(item.endedAt - item.startedAt),
 			},
-			{ key: "requests", header: "Requests", numeric: true, render: (item: SessionSummary) => item.requests },
-			{ key: "toolCalls", header: "Tools", numeric: true, render: (item: SessionSummary) => item.toolCalls },
-			{ key: "subagents", header: "Agents", numeric: true, render: (item: SessionSummary) => item.subagents },
+			{
+				key: "requests",
+				header: i18n.t("stats.trace.requests"),
+				numeric: true,
+				render: (item: SessionSummary) => item.requests,
+			},
+			{
+				key: "toolCalls",
+				header: i18n.t("stats.trace.tools"),
+				numeric: true,
+				render: (item: SessionSummary) => item.toolCalls,
+			},
+			{
+				key: "subagents",
+				header: i18n.t("stats.trace.agents"),
+				numeric: true,
+				render: (item: SessionSummary) => item.subagents,
+			},
 			{
 				key: "tokens",
-				header: "Tokens",
+				header: i18n.t("stats.trace.tokens"),
 				numeric: true,
 				render: (item: SessionSummary) => formatCompact(item.totalTokens),
 			},
 			{
 				key: "cost",
-				header: "Cost",
+				header: i18n.t("stats.trace.cost"),
 				numeric: true,
 				render: (item: SessionSummary) => formatEstimatedCost(item.costTotal, item.unpricedRequests),
 			},
-			{ key: "models", header: "Models", render: (item: SessionSummary) => <ModelChips models={item.models} /> },
+			{
+				key: "models",
+				header: i18n.t("stats.nav.models"),
+				render: (item: SessionSummary) => <ModelChips models={item.models} />,
+			},
 		],
-		[],
+		[i18n],
 	);
 
 	const renderMobileCard = (item: SessionSummary, onClick?: () => void) => (
@@ -130,19 +151,19 @@ export function TracesRoute({ active, session, onOpenSession, refreshTrigger }: 
 			</div>
 			<div className="stats-mobile-card-grid">
 				<div>
-					<div className="stats-mobile-card-label">Started</div>
-					<div className="stats-mobile-card-value">{formatRelativeTime(item.startedAt)}</div>
+					<div className="stats-mobile-card-label">{i18n.t("stats.traces.started")}</div>
+					<div className="stats-mobile-card-value">{formatRelativeTime(item.startedAt, i18n.locale)}</div>
 				</div>
 				<div>
-					<div className="stats-mobile-card-label">Duration</div>
+					<div className="stats-mobile-card-label">{i18n.t("stats.drawer.duration")}</div>
 					<div className="stats-mobile-card-value">{formatDurationMs(item.endedAt - item.startedAt)}</div>
 				</div>
 				<div>
-					<div className="stats-mobile-card-label">Requests</div>
+					<div className="stats-mobile-card-label">{i18n.t("stats.trace.requests")}</div>
 					<div className="stats-mobile-card-value">{item.requests}</div>
 				</div>
 				<div>
-					<div className="stats-mobile-card-label">Cost</div>
+					<div className="stats-mobile-card-label">{i18n.t("stats.trace.cost")}</div>
 					<div className="stats-mobile-card-value">
 						{formatEstimatedCost(item.costTotal, item.unpricedRequests)}
 					</div>
@@ -158,15 +179,15 @@ export function TracesRoute({ active, session, onOpenSession, refreshTrigger }: 
 	return (
 		<div className="stats-route-container">
 			<Panel
-				title="Sessions"
-				subtitle="Recent sessions with subagent activity folded in — click one to open its trace"
+				title={i18n.t("stats.traces.sessions")}
+				subtitle={i18n.t("stats.traces.sessionsSubtitle")}
 				actions={
 					<input
 						type="search"
 						value={filter}
 						onChange={event => setFilter(event.target.value)}
-						placeholder="Filter by title, project, model…"
-						aria-label="Filter sessions"
+						placeholder={i18n.t("stats.traces.filterPlaceholder")}
+						aria-label={i18n.t("stats.traces.filterSessions")}
 						spellCheck={false}
 						className="stats-trace-input"
 						style={{ width: 220 }}
@@ -180,7 +201,7 @@ export function TracesRoute({ active, session, onOpenSession, refreshTrigger }: 
 						keyExtractor={item => item.file}
 						onRowClick={item => onOpenSession(item.file)}
 						renderMobileCard={renderMobileCard}
-						emptyText="No sessions found — run a Sync to index recent activity"
+						emptyText={i18n.t("stats.traces.noSessions")}
 					/>
 				</AsyncBoundary>
 			</Panel>

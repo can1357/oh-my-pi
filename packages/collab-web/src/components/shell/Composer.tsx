@@ -2,6 +2,7 @@ import { SendHorizontal, Square } from "lucide-react";
 import type { KeyboardEvent, ReactNode, RefObject } from "react";
 import { useCallback, useLayoutEffect, useRef, useState } from "react";
 import type { GuestClient, GuestSnapshot } from "../../lib/client";
+import { useCollabI18n } from "../../lib/i18n";
 
 export interface ComposerProps {
 	client: GuestClient;
@@ -65,6 +66,7 @@ interface AskEditorProps {
  * draft. Submits verbatim — whitespace-only responses are intentional.
  */
 function AskEditor({ prefill, onSubmit }: AskEditorProps): ReactNode {
+	const { i18n } = useCollabI18n();
 	const [draft, setDraft] = useState(prefill ?? "");
 	const taRef = useRef<HTMLTextAreaElement | null>(null);
 	const { composingRef, onCompositionStart, onCompositionEnd } = useCompositionGuard();
@@ -90,7 +92,7 @@ function AskEditor({ prefill, onSubmit }: AskEditorProps): ReactNode {
 				onKeyDown={onKeyDown}
 				onCompositionStart={onCompositionStart}
 				onCompositionEnd={onCompositionEnd}
-				placeholder="type your response…"
+				placeholder={i18n.t("collab.shell.responsePlaceholder")}
 				rows={1}
 				spellCheck={false}
 			/>
@@ -99,9 +101,9 @@ function AskEditor({ prefill, onSubmit }: AskEditorProps): ReactNode {
 					type="button"
 					className="sh-btn sh-btn-primary"
 					onClick={() => onSubmit(draft)}
-					title="submit response"
+					title={i18n.t("collab.shell.submitResponse")}
 				>
-					<SendHorizontal size={12} /> <span className="sh-btn-label">Submit</span>
+					<SendHorizontal size={12} /> <span className="sh-btn-label">{i18n.t("collab.shell.submit")}</span>
 				</button>
 			</div>
 		</div>
@@ -109,6 +111,7 @@ function AskEditor({ prefill, onSubmit }: AskEditorProps): ReactNode {
 }
 
 export function Composer({ client, snapshot }: ComposerProps): ReactNode {
+	const { i18n } = useCollabI18n();
 	const [text, setText] = useState("");
 	const taRef = useRef<HTMLTextAreaElement | null>(null);
 	const { composingRef, onCompositionStart, onCompositionEnd } = useCompositionGuard();
@@ -177,7 +180,7 @@ export function Composer({ client, snapshot }: ComposerProps): ReactNode {
 				)}
 				<div className="sh-composer-actions sh-ask-actions">
 					<button type="button" className="sh-btn" onClick={() => client.sendUiResponse(uiRequest.reqId)}>
-						Cancel
+						{i18n.t("collab.shell.cancel")}
 					</button>
 					{busy && (
 						<button
@@ -185,9 +188,9 @@ export function Composer({ client, snapshot }: ComposerProps): ReactNode {
 							className="sh-btn sh-btn-stop"
 							onClick={() => client.sendAbort()}
 							disabled={!live}
-							title="stop the current turn"
+							title={i18n.t("collab.shell.stopTurn")}
 						>
-							<Square size={11} /> <span className="sh-btn-label">Stop</span>
+							<Square size={11} /> <span className="sh-btn-label">{i18n.t("collab.shell.stop")}</span>
 						</button>
 					)}
 				</div>
@@ -208,10 +211,10 @@ export function Composer({ client, snapshot }: ComposerProps): ReactNode {
 					onCompositionEnd={onCompositionEnd}
 					placeholder={
 						readOnly
-							? "read-only session — watching only"
+							? i18n.t("collab.shell.readOnlyPlaceholder")
 							: live
-								? "prompt the host agent…"
-								: "waiting for session…"
+								? i18n.t("collab.shell.promptPlaceholder")
+								: i18n.t("collab.shell.waitingPlaceholder")
 					}
 					disabled={!canPrompt}
 					rows={1}
@@ -220,7 +223,7 @@ export function Composer({ client, snapshot }: ComposerProps): ReactNode {
 				<div className="sh-composer-actions">
 					{busy && queued > 0 && (
 						<span className="sh-queued">
-							<span className="sh-queued-label">queued </span>×{queued}
+							<span className="sh-queued-label">{i18n.t("collab.shell.queued")} </span>×{queued}
 						</span>
 					)}
 					{busy && !readOnly && (
@@ -229,9 +232,9 @@ export function Composer({ client, snapshot }: ComposerProps): ReactNode {
 							className="sh-btn sh-btn-stop"
 							onClick={() => client.sendAbort()}
 							disabled={!live}
-							title="stop the current turn"
+							title={i18n.t("collab.shell.stopTurn")}
 						>
-							<Square size={11} /> <span className="sh-btn-label">Stop</span>
+							<Square size={11} /> <span className="sh-btn-label">{i18n.t("collab.shell.stop")}</span>
 						</button>
 					)}
 					<button
@@ -239,9 +242,9 @@ export function Composer({ client, snapshot }: ComposerProps): ReactNode {
 						className="sh-btn sh-btn-primary"
 						onClick={send}
 						disabled={!canSend}
-						title="send (Enter)"
+						title={`${i18n.t("collab.shell.send")} (Enter)`}
 					>
-						<SendHorizontal size={12} /> <span className="sh-btn-label">Send</span>
+						<SendHorizontal size={12} /> <span className="sh-btn-label">{i18n.t("collab.shell.send")}</span>
 					</button>
 				</div>
 			</div>

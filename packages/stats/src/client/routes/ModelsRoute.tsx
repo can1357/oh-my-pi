@@ -17,9 +17,10 @@ import {
 	type TableChartTheme,
 	TrendEmpty,
 } from "../components/models-table-shared";
-import { formatRangeTick, rangeMeta } from "../components/range-meta";
+import { formatRangeTick, rangeTrendLabel, rangeWindowLabel } from "../components/range-meta";
 import { formatEstimatedCost } from "../data/formatters";
 import { useResource } from "../data/useResource";
+import { useStatsI18n } from "../i18n";
 import { buildModelPerformanceLookup } from "../data/view-models";
 import type { ModelPerformancePoint, ModelStats, ModelTimeSeriesPoint, TimeRange } from "../types";
 import { AsyncBoundary, Panel } from "../ui";
@@ -74,15 +75,18 @@ function ModelShareChart({
 	timeRange: TimeRange;
 	colorLookup: ReadonlyMap<string, string>;
 }) {
+	const { i18n } = useStatsI18n();
 	const theme = useSystemTheme();
 	const chartTheme = CHART_THEMES[theme];
-	const meta = rangeMeta(timeRange);
 
-	const chartData = useMemo(() => buildModelPreferenceSeries(modelSeries), [modelSeries]);
+	const chartData = useMemo(
+		() => buildModelPreferenceSeries(modelSeries, 5, i18n.t("stats.models.otherModel")),
+		[modelSeries, i18n],
+	);
 
 	const data = useMemo(() => {
 		return {
-			labels: chartData.data.map(d => formatRangeTick(d.timestamp, timeRange)),
+			labels: chartData.data.map(d => formatRangeTick(d.timestamp, timeRange, i18n.locale)),
 			datasets: chartData.series.map((series, index) => {
 				const fallbackColor = MODEL_COLORS[index % MODEL_COLORS.length];
 				const color = series.key ? (colorLookup.get(series.key) ?? fallbackColor) : fallbackColor;
@@ -101,7 +105,7 @@ function ModelShareChart({
 				};
 			}),
 		};
-	}, [chartData, colorLookup, timeRange]);
+	}, [chartData, colorLookup, timeRange, i18n.locale]);
 
 	const options = useMemo(() => {
 		return {
@@ -169,10 +173,15 @@ function ModelShareChart({
 	}, [chartTheme]);
 
 	return (
-		<Panel title="Model Preference" subtitle={`Share of requests over ${meta.windowLabel}`}>
+		<Panel
+			title={i18n.t("stats.models.modelPreference")}
+			subtitle={i18n.t("stats.models.shareOfRequests", { window: rangeWindowLabel(timeRange, i18n) })}
+		>
 			<div className="h-[280px]">
 				{chartData.data.length === 0 ? (
-					<div className="h-full flex items-center justify-center text-stats-muted text-sm">No data available</div>
+					<div className="h-full flex items-center justify-center text-stats-muted text-sm">
+						{i18n.t("stats.models.noData")}
+					</div>
 				) : (
 					<Line data={data} options={options} />
 				)}
@@ -184,6 +193,7 @@ function ModelShareChart({
 function buildModelPreferenceSeries(
 	points: ModelTimeSeriesPoint[],
 	topN = 5,
+	otherLabel = "Other",
 ): {
 	data: Array<Record<string, number>>;
 	series: Array<{ key?: string; label: string }>;
@@ -229,7 +239,7 @@ function buildModelPreferenceSeries(
 			total: 0,
 		};
 		bucket.total += point.requests;
-		const seriesKey = topKeys.has(key) ? key : "Other";
+		const seriesKey = topKeys.has(key) ? key : "__other";
 		bucket[seriesKey] = (bucket[seriesKey] ?? 0) + point.requests;
 		dataMap.set(point.timestamp, bucket);
 	}
@@ -238,8 +248,8 @@ function buildModelPreferenceSeries(
 		key: entry.key,
 		label: labelByKey.get(entry.key) ?? entry.model,
 	}));
-	if ([...dataMap.values()].some(row => (row.Other ?? 0) > 0)) {
-		series.push({ label: "Other" });
+	if ([...dataMap.values()].some(row => (row.__other ?? 0) > 0)) {
+		series.push({ key: "__other", label: otherLabel });
 	}
 
 	const data = [...dataMap.values()]
@@ -269,8 +279,8 @@ function ModelsTable({
 	timeRange: TimeRange;
 	colorLookup: ReadonlyMap<string, string>;
 }) {
+	const { i18n } = useStatsI18n();
 	const [expandedKey, setExpandedKey] = useState<string | null>(null);
-	const meta = rangeMeta(timeRange);
 
 	const performanceSeriesByKey = useMemo(
 		() => buildModelPerformanceLookup(performanceSeries, timeRange),
@@ -287,17 +297,17 @@ function ModelsTable({
 	}, [models]);
 
 	return (
-		<ModelTableShell title="Model Statistics">
+		<ModelTableShell title={i18n.t("stats.models.statistics")}>
 			<ModelTableHeader
 				gridTemplate={GRID_TEMPLATE}
 				columns={[
-					{ label: "Model" },
-					{ label: "Requests", align: "right" },
-					{ label: "API-equivalent estimate", align: "right" },
-					{ label: "Tokens", align: "right" },
-					{ label: "Tokens/s", align: "right" },
-					{ label: "TTFT", align: "right" },
-					{ label: meta.trendLabel, align: "center" },
+					{ label: i18n.t("stats.table.model") },
+					{ label: i18n.t("stats.metrics.requests"), align: "right" },
+					{ label: i18n.t("stats.metrics.apiEstimate"), align: "right" },
+					{ label: i18n.t("stats.table.tokens"), align: "right" },
+					{ label: i18n.t("stats.models.trendTokens"), align: "right" },
+					{ label: i18n.t("stats.models.trendTtft"), align: "right" },
+					{ label: rangeTrendLabel(timeRange, i18n), align: "center" },
 				]}
 			/>
 
@@ -342,6 +352,7 @@ function ModelsTable({
 										timestamps={trendData.map(d => d.timestamp)}
 										values={trendData.map(d => d.avgTokensPerSecond ?? 0)}
 										color={trendColor}
+										locale={i18n.locale}
 									/>
 								)
 							}
@@ -349,10 +360,12 @@ function ModelsTable({
 								<div className="grid gap-4" style={{ gridTemplateColumns: "200px 1fr" }}>
 									<div className="space-y-4 text-sm">
 										<div>
-											<div className="text-[var(--text-primary)] font-medium mb-2">Efficiency</div>
+											<div className="text-[var(--text-primary)] font-medium mb-2">
+												{i18n.t("stats.models.efficiency")}
+											</div>
 											<div className="space-y-1 text-[var(--text-secondary)]">
 												<div className="flex items-center justify-between">
-													<span>Error rate</span>
+													<span>{i18n.t("stats.models.errorRate")}</span>
 													<span
 														className={
 															errorRate > 5 ? "text-[var(--accent-red)]" : "text-[var(--accent-green)]"
@@ -362,11 +375,11 @@ function ModelsTable({
 													</span>
 												</div>
 												<div className="flex items-center justify-between">
-													<span>Cache rate</span>
+													<span>{i18n.t("stats.models.cacheRate")}</span>
 													<span className="font-mono">{(model.cacheRate * 100).toFixed(1)}%</span>
 												</div>
 												<div className="flex items-center justify-between">
-													<span>Cache savings</span>
+													<span>{i18n.t("stats.models.cacheSavings")}</span>
 													<span
 														className={
 															model.cacheSavings < 0
@@ -380,16 +393,18 @@ function ModelsTable({
 											</div>
 										</div>
 										<div>
-											<div className="text-[var(--text-primary)] font-medium mb-2">Latency</div>
+											<div className="text-[var(--text-primary)] font-medium mb-2">
+												{i18n.t("stats.models.latency")}
+											</div>
 											<div className="space-y-1 text-[var(--text-secondary)]">
 												<div className="flex items-center justify-between">
-													<span>Avg duration</span>
+													<span>{i18n.t("stats.metrics.avgDuration")}</span>
 													<span className="font-mono">
 														{model.avgDuration ? `${(model.avgDuration / 1000).toFixed(2)}s` : "-"}
 													</span>
 												</div>
 												<div className="flex items-center justify-between">
-													<span>Avg TTFT</span>
+													<span>{i18n.t("stats.metrics.avgTtft")}</span>
 													<span className="font-mono">
 														{model.avgTtft ? `${(model.avgTtft / 1000).toFixed(2)}s` : "-"}
 													</span>
@@ -406,6 +421,7 @@ function ModelsTable({
 												color={trendColor}
 												chartTheme={chartTheme}
 												timeRange={timeRange}
+												locale={i18n.locale}
 											/>
 										)}
 									</div>
@@ -424,6 +440,7 @@ function PerformanceChart({
 	color,
 	chartTheme,
 	timeRange,
+	locale,
 }: {
 	data: Array<{
 		timestamp: number;
@@ -433,10 +450,11 @@ function PerformanceChart({
 	color: string;
 	chartTheme: TableChartTheme;
 	timeRange: TimeRange;
+	locale: "en" | "zh-CN";
 }) {
 	const chartData = useMemo(() => {
 		return {
-			labels: data.map(d => formatRangeTick(d.timestamp, timeRange)),
+			labels: data.map(d => formatRangeTick(d.timestamp, timeRange, locale)),
 			datasets: [
 				{
 					label: "TTFT",
@@ -452,7 +470,7 @@ function PerformanceChart({
 				},
 			],
 		};
-	}, [data, color, timeRange]);
+	}, [data, color, timeRange, locale]);
 
 	const options = useMemo(() => {
 		return {

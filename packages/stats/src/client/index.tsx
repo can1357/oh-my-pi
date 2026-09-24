@@ -5,6 +5,11 @@ import "./styles.css";
 import "./data/charts";
 import { createRoot } from "react-dom/client";
 import App from "./App";
+import { StatsI18nProvider } from "./i18n";
 
 const root = createRoot(document.getElementById("root")!);
-root.render(<App />);
+root.render(
+	<StatsI18nProvider>
+		<App />
+	</StatsI18nProvider>,
+);

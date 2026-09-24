@@ -8,6 +8,7 @@
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { formatDurationMs } from "../data/formatters";
+import { useStatsI18n } from "../i18n";
 import type { TraceMarker, TraceSpan, TraceSpanKind, TraceTrack } from "../types";
 import { useSystemTheme } from "../useSystemTheme";
 import { buildTicks, formatOffset, type TraceScale } from "./time-scale";
@@ -43,13 +44,7 @@ const HIT_SLOP_PX = 4;
 const LABEL_MIN_PX = 56;
 const SPAN_RADIUS = 3;
 
-const LANE_ORDER: Array<{ kind: TraceSpanKind; label: string }> = [
-	{ kind: "turn", label: "Input" },
-	{ kind: "model", label: "Model" },
-	{ kind: "tool", label: "Tools" },
-	{ kind: "subagent", label: "Agents" },
-	{ kind: "background", label: "Bg" },
-];
+const LANE_ORDER: TraceSpanKind[] = ["turn", "model", "tool", "subagent", "background"];
 
 interface LaneRow {
 	track: TraceTrack;
@@ -77,7 +72,11 @@ interface TimelineLayout {
 }
 
 /** Compute vertical layout for the visible (non-collapsed) track tree. */
-function buildLayout(tracks: TraceTrack[], collapsed: ReadonlySet<string>): TimelineLayout {
+function buildLayout(
+	tracks: TraceTrack[],
+	collapsed: ReadonlySet<string>,
+	labelForKind: (kind: TraceSpanKind) => string,
+): TimelineLayout {
 	const byId = new Map(tracks.map(track => [track.id, track]));
 	const hasChildren = new Set<string>();
 	for (const track of tracks) {
@@ -109,12 +108,12 @@ function buildLayout(tracks: TraceTrack[], collapsed: ReadonlySet<string>): Time
 			y1: y,
 		};
 		y += HEADER_H;
-		for (const { kind, label } of LANE_ORDER) {
+		for (const kind of LANE_ORDER) {
 			const spans = track.spans.filter(span => span.kind === kind);
 			// Main always shows the core lanes; optional lanes appear when populated.
 			const isCore = kind === "turn" || kind === "model" || kind === "tool";
 			if (spans.length === 0 && !(track.id === "main" && isCore)) continue;
-			const lane: LaneRow = { track, kind, label, y, spans };
+			const lane: LaneRow = { track, kind, label: labelForKind(kind), y, spans };
 			block.lanes.push(lane);
 			lanes.push(lane);
 			y += LANE_H + LANE_GAP;
@@ -166,6 +165,7 @@ export function TimelineCanvas({
 	onToggleCollapse,
 	traceStart,
 }: TimelineCanvasProps) {
+	const { i18n } = useStatsI18n();
 	const theme = useSystemTheme();
 	const colors = TRACE_THEMES[theme];
 	const containerRef = useRef<HTMLDivElement>(null);
@@ -181,7 +181,22 @@ export function TimelineCanvas({
 	const viewportRef = useRef(viewport);
 	viewportRef.current = viewport;
 
-	const layout = useMemo(() => buildLayout(tracks, collapsed), [tracks, collapsed]);
+	const labelForKind = (kind: TraceSpanKind): string => {
+		switch (kind) {
+			case "turn":
+				return i18n.t("stats.trace.input");
+			case "model":
+				return i18n.t("stats.trace.model");
+			case "tool":
+				return i18n.t("stats.trace.tools");
+			case "subagent":
+				return i18n.t("stats.trace.agents");
+			case "background":
+				return i18n.t("stats.trace.background");
+		}
+	};
+
+	const layout = useMemo(() => buildLayout(tracks, collapsed, labelForKind), [tracks, collapsed, i18n]);
 
 	// Observe container width (gutter excluded).
 	useEffect(() => {
@@ -440,8 +455,8 @@ export function TimelineCanvas({
 									onClick={() => onToggleCollapse(block.track.id)}
 									aria-label={
 										collapsed.has(block.track.id)
-											? `Expand ${block.track.label}`
-											: `Collapse ${block.track.label}`
+											? `${i18n.t("stats.traceView.expandAll")} ${block.track.label}`
+											: `${i18n.t("stats.traceView.collapseAll")} ${block.track.label}`
 									}
 									className="stats-trace-chevron"
 								>
@@ -480,7 +495,7 @@ export function TimelineCanvas({
 				style={{ width: canvasWidth, height: layout.totalHeight }}
 				tabIndex={0}
 				role="application"
-				aria-label="Trace timeline. W and S zoom, A and D pan, 0 fits all, F focuses the selection."
+				aria-label={i18n.t("stats.traceView.timeline")}
 				onPointerDown={handlePointerDown}
 				onPointerMove={handlePointerMove}
 				onPointerUp={handlePointerUp}

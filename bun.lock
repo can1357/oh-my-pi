@@ -87,6 +87,7 @@
         "@oh-my-pi/pi-agent-core": "catalog:",
         "@oh-my-pi/pi-ai": "catalog:",
         "@oh-my-pi/pi-catalog": "catalog:",
+        "@oh-my-pi/pi-i18n": "catalog:",
         "@oh-my-pi/pi-mnemopi": "catalog:",
         "@oh-my-pi/pi-natives": "catalog:",
         "@oh-my-pi/pi-tui": "catalog:",
@@ -119,6 +120,7 @@
       "name": "@oh-my-pi/collab-web",
       "version": "16.3.6",
       "dependencies": {
+        "@oh-my-pi/pi-i18n": "catalog:",
         "@oh-my-pi/pi-utils": "catalog:",
         "@oh-my-pi/pi-wire": "catalog:",
         "katex": "catalog:",
@@ -132,6 +134,13 @@
         "@types/react-dom": "catalog:",
       },
     },
+    "packages/i18n": {
+      "name": "@oh-my-pi/pi-i18n",
+      "version": "18.2.11",
+      "devDependencies": {
+        "@types/bun": "catalog:",
+      },
+    },
     "packages/metaharness": {
       "name": "@oh-my-pi/pi-metaharness",
       "version": "0.0.1",
@@ -143,6 +152,7 @@
         "@oh-my-pi/pi-ai": "catalog:",
         "@oh-my-pi/pi-catalog": "catalog:",
         "@oh-my-pi/pi-coding-agent": "catalog:",
+        "@oh-my-pi/pi-i18n": "catalog:",
         "@oh-my-pi/pi-natives": "catalog:",
         "@oh-my-pi/pi-utils": "catalog:",
         "@oh-my-pi/typescript-edit-benchmark": "workspace:*",
@@ -242,6 +252,7 @@
       "dependencies": {
         "@oh-my-pi/pi-ai": "catalog:",
         "@oh-my-pi/pi-catalog": "catalog:",
+        "@oh-my-pi/pi-i18n": "catalog:",
         "@oh-my-pi/pi-utils": "catalog:",
         "@tailwindcss/node": "catalog:",
         "chart.js": "catalog:",
@@ -266,6 +277,7 @@
         "@oh-my-pi/pi-agent-core": "catalog:",
         "@oh-my-pi/pi-ai": "catalog:",
         "@oh-my-pi/pi-catalog": "catalog:",
+        "@oh-my-pi/pi-i18n": "catalog:",
         "@oh-my-pi/pi-natives": "catalog:",
         "@oh-my-pi/pi-utils": "catalog:",
         "@oh-my-pi/pi-wire": "catalog:",
@@ -352,6 +364,7 @@
     "@oh-my-pi/pi-ai": "18.2.11",
     "@oh-my-pi/pi-catalog": "18.2.11",
     "@oh-my-pi/pi-coding-agent": "18.2.11",
+    "@oh-my-pi/pi-i18n": "18.2.11",
     "@oh-my-pi/pi-mnemopi": "18.2.11",
     "@oh-my-pi/pi-natives": "18.2.11",
     "@oh-my-pi/pi-tui": "18.2.11",
@@ -723,6 +736,8 @@
     "@oh-my-pi/pi-catalog": ["@oh-my-pi/pi-catalog@workspace:packages/catalog"],
 
     "@oh-my-pi/pi-coding-agent": ["@oh-my-pi/pi-coding-agent@workspace:packages/coding-agent"],
+
+    "@oh-my-pi/pi-i18n": ["@oh-my-pi/pi-i18n@workspace:packages/i18n"],
 
     "@oh-my-pi/pi-metaharness": ["@oh-my-pi/pi-metaharness@workspace:packages/metaharness"],
 

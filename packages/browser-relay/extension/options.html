@@ -2,7 +2,7 @@
 <html lang="en">
 	<head>
 		<meta charset="utf-8" />
-		<title>OMP Browser Relay settings</title>
+		<title data-i18n="browserRelay.optionsTitle">OMP Browser Relay settings</title>
 		<style>
 			body {
 				font-family: system-ui, sans-serif;
@@ -38,16 +38,22 @@
 		</style>
 	</head>
 	<body>
-		<h1>OMP Browser Relay</h1>
-		<p class="hint">
+		<h1 data-i18n="browserRelay.title">OMP Browser Relay</h1>
+		<p class="hint" data-i18n="browserRelay.hint">
 			The extension connects to a local <code>omp-browser-relay</code> process. Values here must match the flags the
 			relay was started with.
 		</p>
-		<label for="port">Relay port</label>
+		<label for="language" data-i18n="browserRelay.labels.language">Language</label>
+		<select id="language">
+			<option value="auto" data-i18n="browserRelay.language.auto">Automatic</option>
+			<option value="en" data-i18n="browserRelay.language.english">English</option>
+			<option value="zh-CN" data-i18n="browserRelay.language.chinese">简体中文</option>
+		</select>
+		<label for="port" data-i18n="browserRelay.labels.port">Relay port</label>
 		<input id="port" type="number" min="1" max="65535" />
-		<label for="token">Token (optional)</label>
+		<label for="token"><span data-i18n="browserRelay.labels.token">Token</span> (<span data-i18n="browserRelay.labels.tokenOptional">optional</span>)</label>
 		<input id="token" type="text" autocomplete="off" />
-		<button id="save">Save</button><span id="status"></span>
+		<button id="save" data-i18n="browserRelay.save">Save</button><span id="status"></span>
 		<script src="options.js"></script>
 	</body>
 </html>

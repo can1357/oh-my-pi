@@ -1,4 +1,3 @@
-import { format } from "@oh-my-pi/pi-utils/dates";
 import { useMemo } from "react";
 import { Line } from "react-chartjs-2";
 import { getOverviewStats, getRecentRequests } from "../api";
@@ -6,6 +5,7 @@ import { AgentTokenShare } from "../components/AgentTokenShare";
 import { CHART_THEMES } from "../components/chart-shared";
 import { formatDurationMs, formatInteger, formatMessageCost, formatRelativeTime } from "../data/formatters";
 import { useResource } from "../data/useResource";
+import { useStatsI18n } from "../i18n";
 import type { MessageStats, TimeRange } from "../types";
 import { AsyncBoundary, DataTable, MetricCluster, Panel, Skeleton, StatusPill } from "../ui";
 import { useSystemTheme } from "../useSystemTheme";
@@ -18,6 +18,7 @@ export interface OverviewRouteProps {
 }
 
 export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }: OverviewRouteProps) {
+	const { i18n } = useStatsI18n();
 	const {
 		data: overview,
 		error: overviewError,
@@ -42,7 +43,9 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 	const chartData = useMemo(() => {
 		if (!overview?.timeSeries) return { labels: [], datasets: [] };
 		const labels = overview.timeSeries.map(pt =>
-			format(new Date(pt.timestamp), range === "1h" || range === "24h" ? "HH:mm" : "MMM d"),
+			range === "1h" || range === "24h"
+				? i18n.date(pt.timestamp, { hour: "2-digit", minute: "2-digit" })
+				: i18n.date(pt.timestamp, { month: "short", day: "numeric" }),
 		);
 		// Show point markers when the series is sparse (e.g. a quiet 1h window)
 		// so a 1-2 point line is still visible instead of an empty plot.
@@ -51,7 +54,7 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 			labels,
 			datasets: [
 				{
-					label: "Requests",
+					label: i18n.t("stats.trace.requests"),
 					data: overview.timeSeries.map(pt => pt.requests),
 					borderColor: "#5ad8e6",
 					backgroundColor: "rgba(90, 216, 230, 0.12)",
@@ -62,7 +65,7 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 					fill: true,
 				},
 				{
-					label: "Errors",
+					label: i18n.t("stats.trace.errors"),
 					data: overview.timeSeries.map(pt => pt.errors),
 					borderColor: "#ff6b7d",
 					backgroundColor: "rgba(255, 107, 125, 0.12)",
@@ -74,7 +77,7 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 				},
 			],
 		};
-	}, [overview?.timeSeries, range]);
+	}, [overview?.timeSeries, range, i18n]);
 
 	const chartOptions = useMemo(() => {
 		return {
@@ -136,7 +139,7 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 		() => [
 			{
 				key: "model",
-				header: "Model",
+				header: i18n.t("stats.table.model"),
 				render: (item: MessageStats) => (
 					<div>
 						<div className="stats-font-medium stats-text-primary">{item.model}</div>
@@ -146,39 +149,39 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 			},
 			{
 				key: "timestamp",
-				header: "Time",
-				render: (item: MessageStats) => formatRelativeTime(item.timestamp),
+				header: i18n.t("stats.table.time"),
+				render: (item: MessageStats) => formatRelativeTime(item.timestamp, i18n.locale),
 			},
 			{
 				key: "tokens",
-				header: "Tokens",
+				header: i18n.t("stats.table.tokens"),
 				numeric: true,
 				render: (item: MessageStats) => formatInteger(item.usage.totalTokens),
 			},
 			{
 				key: "cost",
-				header: "API-equivalent estimate",
+				header: i18n.t("stats.metrics.apiEstimate"),
 				numeric: true,
 				render: (item: MessageStats) => formatMessageCost(item, 4),
 			},
 			{
 				key: "duration",
-				header: "Duration",
+				header: i18n.t("stats.drawer.duration"),
 				numeric: true,
 				render: (item: MessageStats) => formatDurationMs(item.duration),
 			},
 			{
 				key: "status",
-				header: "Status",
+				header: i18n.t("stats.table.status"),
 				className: "stats-text-center",
 				render: (item: MessageStats) => (
 					<StatusPill variant={item.errorMessage ? "danger" : "success"}>
-						{item.errorMessage ? "Failed" : "Success"}
+						{item.errorMessage ? i18n.t("stats.table.failed") : i18n.t("stats.table.success")}
 					</StatusPill>
 				),
 			},
 		],
-		[],
+		[i18n],
 	);
 
 	const renderMobileCard = (item: MessageStats, onClick?: () => void) => (
@@ -189,24 +192,24 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 					<div className="stats-text-xs stats-text-muted">{item.provider}</div>
 				</div>
 				<StatusPill variant={item.errorMessage ? "danger" : "success"}>
-					{item.errorMessage ? "Failed" : "Success"}
+					{item.errorMessage ? i18n.t("stats.table.failed") : i18n.t("stats.table.success")}
 				</StatusPill>
 			</div>
 			<div className="stats-mobile-card-grid">
 				<div>
-					<div className="stats-mobile-card-label">Time</div>
-					<div className="stats-mobile-card-value">{formatRelativeTime(item.timestamp)}</div>
+					<div className="stats-mobile-card-label">{i18n.t("stats.table.time")}</div>
+					<div className="stats-mobile-card-value">{formatRelativeTime(item.timestamp, i18n.locale)}</div>
 				</div>
 				<div>
-					<div className="stats-mobile-card-label">API-equivalent estimate</div>
+					<div className="stats-mobile-card-label">{i18n.t("stats.metrics.apiEstimate")}</div>
 					<div className="stats-mobile-card-value">{formatMessageCost(item, 4)}</div>
 				</div>
 				<div>
-					<div className="stats-mobile-card-label">Tokens</div>
+					<div className="stats-mobile-card-label">{i18n.t("stats.table.tokens")}</div>
 					<div className="stats-mobile-card-value">{formatInteger(item.usage.totalTokens)}</div>
 				</div>
 				<div>
-					<div className="stats-mobile-card-label">Duration</div>
+					<div className="stats-mobile-card-label">{i18n.t("stats.drawer.duration")}</div>
 					<div className="stats-mobile-card-value">{formatDurationMs(item.duration)}</div>
 				</div>
 			</div>
@@ -226,8 +229,8 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 			</AsyncBoundary>
 
 			<Panel
-				title="Conversation Tokens by Agent"
-				subtitle="Uncached input + cache reads + cache writes + output, grouped by agent type"
+				title={i18n.t("stats.overview.conversationTokensByAgent")}
+				subtitle={i18n.t("stats.overview.conversationTokensSubtitle")}
 			>
 				<AsyncBoundary loading={overviewLoading} error={overviewError} data={overview}>
 					{overview && <AgentTokenShare stats={overview.byAgentType} />}
@@ -236,14 +239,17 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 
 			<div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
 				<div className="lg:col-span-2">
-					<Panel title="System Throughput" subtitle="Request volume and errors over time">
+					<Panel
+						title={i18n.t("stats.overview.systemThroughput")}
+						subtitle={i18n.t("stats.overview.throughputSubtitle")}
+					>
 						<AsyncBoundary loading={overviewLoading} error={overviewError} data={overview}>
 							<div className="h-[280px]">
 								{overview?.timeSeries && overview.timeSeries.length > 0 ? (
 									<Line data={chartData} options={chartOptions} />
 								) : (
 									<div className="h-full flex items-center justify-center text-stats-muted text-sm">
-										No time-series data available
+										{i18n.t("stats.overview.noTimeSeries")}
 									</div>
 								)}
 							</div>
@@ -252,7 +258,7 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 				</div>
 
 				<div>
-					<Panel title="Operational Feed" subtitle="Real-time request log">
+					<Panel title={i18n.t("stats.overview.operationalFeed")} subtitle={i18n.t("stats.overview.realTimeLog")}>
 						<AsyncBoundary
 							loading={requestsLoading}
 							error={requestsError}
@@ -291,7 +297,7 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 														{req.model}
 													</div>
 													<div className="stats-text-xs stats-text-muted whitespace-nowrap">
-														{formatRelativeTime(req.timestamp)}
+														{formatRelativeTime(req.timestamp, i18n.locale)}
 													</div>
 												</div>
 												<div className="flex justify-between items-center text-xs stats-text-muted mt-0.5">
@@ -309,7 +315,9 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 									);
 								})}
 								{previewRequests.length === 0 && (
-									<div className="py-8 text-center stats-text-muted text-sm">No recent requests found</div>
+									<div className="py-8 text-center stats-text-muted text-sm">
+										{i18n.t("stats.table.noRecentRequests")}
+									</div>
 								)}
 							</div>
 						</AsyncBoundary>
@@ -318,11 +326,11 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 			</div>
 
 			<Panel
-				title="Recent Requests Preview"
-				subtitle="Latest transactions processed by the proxy"
+				title={i18n.t("stats.overview.recentRequestsPreview")}
+				subtitle={i18n.t("stats.overview.latestTransactions")}
 				actions={
 					<a href={`#/requests?range=${range}`} className="stats-button stats-button-secondary text-xs">
-						View All Requests
+						{i18n.t("stats.overview.viewAllRequests")}
 					</a>
 				}
 			>
@@ -333,7 +341,7 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 						keyExtractor={item => item.id || `${item.sessionFile}-${item.entryId}`}
 						onRowClick={item => item.id && onRequestClick(item.id)}
 						renderMobileCard={renderMobileCard}
-						emptyText="No recent requests found"
+						emptyText={i18n.t("stats.table.noRecentRequests")}
 					/>
 				</AsyncBoundary>
 			</Panel>

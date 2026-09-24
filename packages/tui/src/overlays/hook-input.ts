@@ -7,6 +7,7 @@ import { CountdownTimer } from "../chrome/countdown-timer";
 import { formTheme } from "../chrome/form-theme";
 import { OverlayPanel } from "../chrome/overlay-box";
 import { Form, TextFormField } from "../components/form";
+import { getDefaultI18n } from "../i18n";
 
 export interface HookInputOptions {
 	tui?: TUI;
@@ -30,6 +31,7 @@ export class HookInputComponent extends OverlayPanel {
 		opts?: HookInputOptions,
 	) {
 		super(title);
+		const i18n = getDefaultI18n();
 
 		this.#onSubmitCallback = onSubmit;
 		this.#onCancelCallback = onCancel;
@@ -49,7 +51,7 @@ export class HookInputComponent extends OverlayPanel {
 
 		this.#field = new TextFormField({
 			theme: formTheme,
-			hint: "enter submit  esc cancel",
+			hint: i18n.t("tui.input.hint"),
 			empty: "submit",
 			onSubmit: value => this.#onSubmitCallback(value),
 			onCancel: () => this.#onCancelCallback(),

@@ -5,6 +5,8 @@ import type { DashboardSection } from "./routes";
 import { routes } from "./routes";
 import { SyncButton } from "./SyncButton";
 import { ThemeToggle } from "./ThemeToggle";
+import { LanguageSelector } from "./LanguageSelector";
+import { useStatsI18n } from "../i18n";
 
 export interface TopBarProps {
 	activeSection: DashboardSection;
@@ -27,13 +29,16 @@ export function TopBar({
 	onMenuToggle,
 	className = "",
 }: TopBarProps) {
+	const { i18n } = useStatsI18n();
 	const currentRoute = routes.find(r => r.id === activeSection);
-	const title = currentRoute?.label || "Observability";
+	const title = currentRoute ? i18n.t(currentRoute.labelKey) : i18n.t("stats.brand.observability");
 
 	const formatLastUpdated = (time: number | null) => {
-		if (!time) return "Not updated";
+		if (!time) return i18n.t("stats.updated.notUpdated");
 		const date = new Date(time);
-		return `Updated ${date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`;
+		return i18n.t("stats.updated.at", {
+			time: date.toLocaleTimeString(i18n.locale, { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+		});
 	};
 
 	return (
@@ -44,7 +49,7 @@ export function TopBar({
 						type="button"
 						onClick={onMenuToggle}
 						className="stats-mobile-menu-btn"
-						aria-label="Open navigation menu"
+						aria-label={i18n.t("stats.aria.openNavigation")}
 					>
 						<Menu size={20} />
 					</button>
@@ -65,6 +70,8 @@ export function TopBar({
 				<RangeControl value={range} onChange={onRangeChange} />
 
 				<ThemeToggle />
+
+				<LanguageSelector />
 
 				<SyncButton onSyncStart={onSyncStart} onSyncComplete={onSyncComplete} />
 			</div>

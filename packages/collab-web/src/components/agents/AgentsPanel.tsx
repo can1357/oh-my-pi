@@ -7,6 +7,7 @@ import type {
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
 import { fmtCost, fmtDuration, fmtTokens, relTime } from "../../lib/format";
+import { useCollabI18n } from "../../lib/i18n";
 import "./agents.css";
 
 /** Re-render tick so running-tool durations and relative times stay live. */
@@ -55,6 +56,7 @@ function AgentRow(props: {
 	now: number;
 	onSelect(id: string | null): void;
 }): ReactNode {
+	const { i18n } = useCollabI18n();
 	const { agent, payload, lifecycle, selected, now, onSelect } = props;
 	const p = payload?.progress;
 	return (
@@ -70,7 +72,11 @@ function AgentRow(props: {
 			</span>
 			<span className="ag-row-activity">{activityLine(agent, p, lifecycle, now)}</span>
 			<span className="ag-row-meta">
-				{p ? <span>{fmtTokens(p.tokens)} tok</span> : null}
+				{p ? (
+					<span>
+						{fmtTokens(p.tokens)} {i18n.t("collab.agents.tok")}
+					</span>
+				) : null}
 				{p ? <span>{fmtCost(p.cost)}</span> : null}
 				<span className="ag-row-meta-when">{relTime(agent.lastActivity)}</span>
 			</span>
@@ -85,6 +91,7 @@ export function AgentsPanel(props: {
 	selectedId: string | null;
 	onSelect(id: string | null): void;
 }): ReactNode {
+	const { i18n } = useCollabI18n();
 	const { agents, progress, lifecycle, selectedId, onSelect } = props;
 	const now = useNow(1000);
 
@@ -125,7 +132,7 @@ export function AgentsPanel(props: {
 					onSelect={onSelect}
 				/>
 			))}
-			{sorted.subs.length === 0 ? <div className="ag-empty">no subagents</div> : null}
+			{sorted.subs.length === 0 ? <div className="ag-empty">{i18n.t("collab.agents.noSubagents")}</div> : null}
 		</div>
 	);
 }

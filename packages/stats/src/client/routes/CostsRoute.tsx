@@ -15,6 +15,7 @@ import {
 } from "../components/chart-shared";
 import { formatCost, formatEstimatedCost } from "../data/formatters";
 import { useResource } from "../data/useResource";
+import { useStatsI18n } from "../i18n";
 import { buildCostSummary } from "../data/view-models";
 import type { CostTimeSeriesPoint, TimeRange } from "../types";
 import { AsyncBoundary, Panel, SegmentedControl } from "../ui";
@@ -51,25 +52,28 @@ export function CostsRoute({ active, range, refreshTrigger }: CostsRouteProps) {
 }
 
 function CostOverviewPanel({ costSeries }: { costSeries: CostTimeSeriesPoint[] }) {
+	const { i18n } = useStatsI18n();
 	const summary = useMemo(() => buildCostSummary(costSeries), [costSeries]);
 
 	const cards = [
 		{
-			label: "API-equivalent estimate",
+			label: i18n.t("stats.metrics.apiEstimate"),
 			value: formatEstimatedCost(summary.totalCost, summary.unpricedRequests),
 			sub:
 				summary.unpricedRequests > 0
-					? `Excludes ${summary.unpricedRequests.toLocaleString()} unpriced subscription request${summary.unpricedRequests === 1 ? "" : "s"}`
+					? i18n.t("stats.costs.excludesUnpriced", { count: summary.unpricedRequests })
 					: undefined,
 		},
 		{
-			label: "Average estimate / Day",
+			label: i18n.t("stats.costs.averageEstimateDay"),
 			value: formatEstimatedCost(summary.avgDailyCost, summary.unpricedRequests),
 		},
 		{
-			label: "Top Model",
+			label: i18n.t("stats.drawer.model"),
 			value: summary.topModelName || "—",
-			sub: summary.topModelName ? `API-equivalent estimate: ${formatCost(summary.topModelCost)}` : undefined,
+			sub: summary.topModelName
+				? `${i18n.t("stats.metrics.apiEstimate")}: ${formatCost(summary.topModelCost)}`
+				: undefined,
 		},
 	];
 
@@ -125,6 +129,7 @@ function makeBarLabelPlugin(color: string): Plugin<"bar"> {
 }
 
 function CostTrendPanel({ costSeries }: { costSeries: CostTimeSeriesPoint[] }) {
+	const { i18n } = useStatsI18n();
 	const [byModel, setByModel] = useState(false);
 	const theme = useSystemTheme();
 	const chartTheme = CHART_THEMES[theme];
@@ -144,28 +149,32 @@ function CostTrendPanel({ costSeries }: { costSeries: CostTimeSeriesPoint[] }) {
 				bucketToValue: bucket => bucket.total,
 			});
 		}
-		return buildAggregateTimeSeries<CostTimeSeriesPoint, { total: number }>(costSeries, "API-equivalent estimate", {
-			initBucket: () => ({ total: 0 }),
-			accumulate: (bucket, point) => {
-				bucket.total += point.cost;
+		return buildAggregateTimeSeries<CostTimeSeriesPoint, { total: number }>(
+			costSeries,
+			i18n.t("stats.metrics.apiEstimate"),
+			{
+				initBucket: () => ({ total: 0 }),
+				accumulate: (bucket, point) => {
+					bucket.total += point.cost;
+				},
+				bucketToValue: bucket => bucket.total,
 			},
-			bucketToValue: bucket => bucket.total,
-		});
-	}, [costSeries, byModel]);
+		);
+	}, [costSeries, byModel, i18n]);
 
 	const sharedPlugins = useMemo(() => {
 		return buildSharedPlugins({
 			chartTheme,
 			showLegend: byModel,
-			defaultLabel: "API-equivalent estimate",
+			defaultLabel: i18n.t("stats.metrics.apiEstimate"),
 			formatValue: v => `$${v.toFixed(2)}`,
 			footer: items => {
 				if (!byModel || items.length < 2) return undefined;
 				const total = items.reduce((sum, item) => sum + (item.parsed.y ?? 0), 0);
-				return `Total: $${total.toFixed(2)}`;
+				return i18n.t("stats.costs.total", { value: `$${total.toFixed(2)}` });
 			},
 		});
-	}, [chartTheme, byModel]);
+	}, [chartTheme, byModel, i18n]);
 
 	const { sharedScaleBase, yScale } = useMemo(() => {
 		return buildSharedScales({
@@ -222,24 +231,24 @@ function CostTrendPanel({ costSeries }: { costSeries: CostTimeSeriesPoint[] }) {
 	}, [sharedPlugins, sharedScaleBase, yScale]);
 
 	const toggleOptions = [
-		{ value: false, label: "All Models" },
-		{ value: true, label: "By Model" },
+		{ value: false, label: i18n.t("stats.costs.allModels") },
+		{ value: true, label: i18n.t("stats.costs.byModel") },
 	];
 
 	return (
 		<Panel
-			title="Daily API-equivalent estimate"
+			title={i18n.t("stats.costs.dailyEstimate")}
 			subtitle={
 				unpricedRequests > 0
-					? `Public API rate-card value over time; excludes ${unpricedRequests.toLocaleString()} unpriced subscription request${unpricedRequests === 1 ? "" : "s"}`
-					: "Public API rate-card value over time"
+					? i18n.t("stats.costs.publicRateCardExcludes", { count: unpricedRequests })
+					: i18n.t("stats.costs.publicRateCard")
 			}
 			actions={<SegmentedControl options={toggleOptions} value={byModel} onChange={setByModel} />}
 		>
 			<div className="h-[300px]">
 				{chartData.labels.length === 0 ? (
 					<div className="h-full flex items-center justify-center text-stats-muted text-sm">
-						No API-equivalent estimate data available
+						{i18n.t("stats.costs.noData")}
 					</div>
 				) : byModel && lineData ? (
 					<Line data={lineData} options={lineOptions} />

@@ -97,6 +97,31 @@ describe("run() root help", () => {
 		expect(output).toContain("good  prints good things");
 	});
 
+	it("localizes standard help section labels through the optional translator", async () => {
+		const commands: CommandEntry[] = [
+			{ name: "good", load: async () => GoodCommand, help: { description: "prints good things" } },
+		];
+		const writes: string[] = [];
+		const stdoutSpy = spyOn(process.stdout, "write").mockImplementation(chunk => {
+			writes.push(String(chunk));
+			return true;
+		});
+		try {
+			await run({
+				bin: "omp",
+				version: "0.0.0",
+				argv: ["--help"],
+				commands,
+				translate: key => `translated:${key}`,
+			});
+		} finally {
+			stdoutSpy.mockRestore();
+		}
+		const output = writes.join("");
+		expect(output).toContain("translated:common.cli.usage");
+		expect(output).toContain("translated:common.cli.commands");
+	});
+
 	it("preserves constructable commands for existing custom help callbacks", async () => {
 		const commands: CommandEntry[] = [
 			{ name: "good", load: async () => GoodCommand, help: { description: "static summary" } },

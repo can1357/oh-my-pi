@@ -1,4 +1,5 @@
 import { type DashboardSection, routes } from "./routes";
+import { useStatsI18n } from "../i18n";
 
 export interface NavRailProps {
 	activeSection: DashboardSection;
@@ -7,6 +8,7 @@ export interface NavRailProps {
 }
 
 export function NavRail({ activeSection, onSectionChange, className = "" }: NavRailProps) {
+	const { i18n } = useStatsI18n();
 	return (
 		<aside className={`stats-nav-rail ${className}`}>
 			<div className="stats-nav-rail-header">
@@ -30,7 +32,7 @@ export function NavRail({ activeSection, onSectionChange, className = "" }: NavR
 							aria-current={isActive ? "page" : undefined}
 						>
 							<Icon size={16} className="stats-nav-rail-item-icon" />
-							<span className="stats-nav-rail-item-label">{route.label}</span>
+							<span className="stats-nav-rail-item-label">{i18n.t(route.labelKey)}</span>
 						</button>
 					);
 				})}

@@ -38,6 +38,7 @@
   },
   "dependencies": {
     "@oh-my-pi/pi-utils": "catalog:",
+    "@oh-my-pi/pi-i18n": "catalog:",
     "@oh-my-pi/pi-wire": "catalog:",
     "lucide-react": "catalog:",
     "katex": "catalog:",

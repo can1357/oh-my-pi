@@ -1,4 +1,5 @@
 import { describe, expect, it, spyOn } from "bun:test";
+import { createI18n, type MessageKey } from "@oh-my-pi/pi-i18n";
 import {
 	type CliConfig,
 	type CommandCtor,
@@ -24,6 +25,8 @@ function captureStdout(render: () => void): string {
 
 describe("CLI command help metadata", () => {
 	it("renders the same root help as the loaded command classes", async () => {
+		const translator = createI18n("en");
+		const translate = (key: string): string => translator.t(key as MessageKey);
 		const metadata = new Map<string, CommandMetadata>();
 		const constructors = new Map<string, CommandCtor>();
 		for (const entry of commands) {
@@ -34,8 +37,8 @@ describe("CLI command help metadata", () => {
 		}
 
 		const base = { bin: "omp", version: "test" };
-		const metadataConfig: CliConfig<CommandMetadata> = { ...base, commands: metadata };
-		const constructorConfig: CliConfig = { ...base, commands: constructors };
+		const metadataConfig: CliConfig<CommandMetadata> = { ...base, commands: metadata, translate };
+		const constructorConfig: CliConfig = { ...base, commands: constructors, translate };
 		const metadataRoot = captureStdout(() => renderRootHelp(metadataConfig));
 		const constructorRoot = captureStdout(() => renderRootHelp(constructorConfig));
 		expect(metadataRoot).toBe(constructorRoot);
@@ -45,7 +48,7 @@ describe("CLI command help metadata", () => {
 		for (const name of visibleNames) {
 			const Command = constructors.get(name);
 			if (!Command) throw new Error(`Missing loaded command: ${name}`);
-			const commandOutput = captureStdout(() => renderCommandHelp("omp", name, Command));
+			const commandOutput = captureStdout(() => renderCommandHelp("omp", name, Command, translate));
 			const description = commandOutput.split("\n", 1)[0];
 			expect(metadataRoot).toContain(`  ${name.padEnd(maxNameLength + 2)}${description}`);
 		}

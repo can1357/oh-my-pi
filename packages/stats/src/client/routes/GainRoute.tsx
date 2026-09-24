@@ -4,6 +4,7 @@ import { getGainDashboardStats } from "../api";
 import { buildSharedPlugins, buildSharedScales, CHART_THEMES, lineDatasetStyle } from "../components/chart-shared";
 import { formatBytes, formatCompact, formatInteger, formatPercent } from "../data/formatters";
 import { useResource } from "../data/useResource";
+import { useStatsI18n } from "../i18n";
 import type { GainDashboardStats, GainSourceTotals, GainTimeSeriesPoint, TimeRange } from "../types";
 import { AsyncBoundary, Panel } from "../ui";
 import { useSystemTheme } from "../useSystemTheme";
@@ -55,11 +56,12 @@ function GainProjectSelector({
 	selected: string | null;
 	onChange: (p: string | null) => void;
 }) {
+	const { i18n } = useStatsI18n();
 	if (projects.length === 0) return null;
 	return (
 		<div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
 			<span className="stats-text-secondary" style={{ fontSize: "0.875rem", whiteSpace: "nowrap" }}>
-				Project
+				{i18n.t("stats.gain.project")}
 			</span>
 			<select
 				className="stats-select"
@@ -67,7 +69,7 @@ function GainProjectSelector({
 				onChange={e => onChange(e.target.value || null)}
 				style={{ maxWidth: "480px", flex: 1 }}
 			>
-				<option value="">All projects</option>
+				<option value="">{i18n.t("stats.gain.allProjects")}</option>
 				{projects.map(p => (
 					<option key={p} value={p}>
 						{p}
@@ -83,25 +85,26 @@ function GainProjectSelector({
 // ---------------------------------------------------------------------------
 
 function GainOverallPanel({ overall }: { overall: GainSourceTotals }) {
+	const { i18n } = useStatsI18n();
 	return (
-		<Panel title="Overall Gain" subtitle="Aggregate snapcompact savings">
+		<Panel title={i18n.t("stats.gain.overall")} subtitle={i18n.t("stats.gain.overallSubtitle")}>
 			<div className="stats-metric-primary-grid">
 				<div className="stats-metric-card primary">
-					<div className="stats-metric-label">Saved Tokens</div>
+					<div className="stats-metric-label">{i18n.t("stats.gain.savedTokens")}</div>
 					<div className="stats-metric-value">{formatCompact(overall.savedTokens)}</div>
 				</div>
 				<div className="stats-metric-card primary">
-					<div className="stats-metric-label">Saved Bytes</div>
+					<div className="stats-metric-label">{i18n.t("stats.gain.savedBytes")}</div>
 					<div className="stats-metric-value">{formatBytes(overall.savedBytes)}</div>
 				</div>
 				<div className="stats-metric-card primary">
-					<div className="stats-metric-label">Reduction</div>
+					<div className="stats-metric-label">{i18n.t("stats.gain.reduction")}</div>
 					<div className="stats-metric-value">
 						{overall.reductionPercent !== null ? formatPercent(overall.reductionPercent) : "—"}
 					</div>
 				</div>
 				<div className="stats-metric-card primary">
-					<div className="stats-metric-label">Total Hits</div>
+					<div className="stats-metric-label">{i18n.t("stats.gain.totalHits")}</div>
 					<div className="stats-metric-value">{formatInteger(overall.hits)}</div>
 				</div>
 			</div>
@@ -114,6 +117,7 @@ function GainOverallPanel({ overall }: { overall: GainSourceTotals }) {
 // ---------------------------------------------------------------------------
 
 function SourceCard({ title, totals }: { title: string; totals: GainSourceTotals }) {
+	const { i18n } = useStatsI18n();
 	return (
 		<div className="stats-metric-card secondary" style={{ flex: 1 }}>
 			<div className="stats-metric-label" style={{ fontWeight: 600, marginBottom: 8 }}>
@@ -121,25 +125,25 @@ function SourceCard({ title, totals }: { title: string; totals: GainSourceTotals
 			</div>
 			<div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
 				<div>
-					<div className="stats-metric-label">Saved Tokens</div>
+					<div className="stats-metric-label">{i18n.t("stats.gain.savedTokens")}</div>
 					<div className="stats-metric-value" style={{ fontSize: "1rem" }}>
 						{formatCompact(totals.savedTokens)}
 					</div>
 				</div>
 				<div>
-					<div className="stats-metric-label">Saved Bytes</div>
+					<div className="stats-metric-label">{i18n.t("stats.gain.savedBytes")}</div>
 					<div className="stats-metric-value" style={{ fontSize: "1rem" }}>
 						{formatBytes(totals.savedBytes)}
 					</div>
 				</div>
 				<div>
-					<div className="stats-metric-label">Hits</div>
+					<div className="stats-metric-label">{i18n.t("stats.gain.hits")}</div>
 					<div className="stats-metric-value" style={{ fontSize: "1rem" }}>
 						{formatInteger(totals.hits)}
 					</div>
 				</div>
 				<div>
-					<div className="stats-metric-label">Reduction</div>
+					<div className="stats-metric-label">{i18n.t("stats.gain.reduction")}</div>
 					<div className="stats-metric-value" style={{ fontSize: "1rem" }}>
 						{totals.reductionPercent !== null ? formatPercent(totals.reductionPercent) : "—"}
 					</div>
@@ -150,8 +154,9 @@ function SourceCard({ title, totals }: { title: string; totals: GainSourceTotals
 }
 
 function GainBySourcePanel({ bySource }: { bySource: GainDashboardStats["bySource"] }) {
+	const { i18n } = useStatsI18n();
 	return (
-		<Panel title="By Source" subtitle="Savings breakdown per subsystem">
+		<Panel title={i18n.t("stats.gain.bySource")} subtitle={i18n.t("stats.gain.savingsBreakdown")}>
 			<div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
 				<SourceCard title="Snapcompact" totals={bySource.snapcompact} />
 			</div>
@@ -168,16 +173,14 @@ const GAIN_COLORS = {
 } as const;
 
 function GainTimeSeriesPanel({ timeSeries }: { timeSeries: GainTimeSeriesPoint[] }) {
+	const { i18n } = useStatsI18n();
 	const theme = useSystemTheme();
 	const chartTheme = CHART_THEMES[theme];
 
 	const { data, options } = useMemo(() => {
-		const labelFormatter = new Intl.DateTimeFormat(undefined, {
-			month: "short",
-			day: "numeric",
-			timeZone: "UTC",
-		});
-		const labels = timeSeries.map(p => labelFormatter.format(new Date(`${p.date}T00:00:00.000Z`)));
+		const labels = timeSeries.map(p =>
+			i18n.date(new Date(`${p.date}T00:00:00.000Z`), { month: "short", day: "numeric", timeZone: "UTC" }),
+		);
 		const chartData = {
 			labels,
 			datasets: [
@@ -200,7 +203,7 @@ function GainTimeSeriesPanel({ timeSeries }: { timeSeries: GainTimeSeriesPoint[]
 			plugins: buildSharedPlugins({
 				chartTheme,
 				showLegend: true,
-				defaultLabel: "Tokens Saved",
+				defaultLabel: i18n.t("stats.gain.chartLabel"),
 				formatValue: formatCompact,
 			}),
 			scales: {
@@ -210,13 +213,13 @@ function GainTimeSeriesPanel({ timeSeries }: { timeSeries: GainTimeSeriesPoint[]
 		};
 
 		return { data: chartData, options: chartOptions };
-	}, [timeSeries, chartTheme]);
+	}, [timeSeries, chartTheme, i18n]);
 
 	return (
-		<Panel title="Savings Over Time" subtitle="Daily token savings">
+		<Panel title={i18n.t("stats.gain.savingsOverTime")} subtitle={i18n.t("stats.gain.dailySavings")}>
 			<div style={{ height: 240 }}>
 				{timeSeries.length === 0 ? (
-					<div className="stats-table-empty">No time series data yet</div>
+					<div className="stats-table-empty">{i18n.t("stats.gain.noData")}</div>
 				) : (
 					<Line data={data} options={options as Parameters<typeof Line>[0]["options"]} />
 				)}

@@ -1,5 +1,6 @@
 /** Fallback renderer for tools without a dedicated view. */
 import type { ReactNode } from "react";
+import { useCollabI18n } from "../lib/i18n";
 import { Output, ResultImages, ResultText } from "./parts";
 import type { ToolRenderer, ToolRenderProps } from "./types";
 import { argsDigest } from "./util";
@@ -9,6 +10,7 @@ function Summary({ args }: ToolRenderProps): ReactNode {
 }
 
 function Body({ args, result }: ToolRenderProps): ReactNode {
+	const { i18n } = useCollabI18n();
 	let argText = "";
 	try {
 		argText = JSON.stringify(args, null, 2) ?? "";
@@ -18,7 +20,7 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 	return (
 		<>
 			{argText && argText !== "{}" && (
-				<Output text={argText} lang="json" variant="code" maxLines={12} title="args" />
+				<Output text={argText} lang="json" variant="code" maxLines={12} title={i18n.t("collab.tool.args")} />
 			)}
 			<ResultImages result={result} />
 			<ResultText result={result} maxLines={10} />

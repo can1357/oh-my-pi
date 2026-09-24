@@ -4,6 +4,7 @@
  * defined in `aggregator.ts`.
  */
 
+import type { I18n, Locale } from "@oh-my-pi/pi-i18n";
 import { format } from "@oh-my-pi/pi-utils/dates";
 import type { TimeRange } from "../types";
 
@@ -67,7 +68,44 @@ export function rangeMeta(range: TimeRange): RangeMeta {
 	return RANGE_META[range];
 }
 
+export function rangeWindowLabel(range: TimeRange, i18n: I18n): string {
+	switch (range) {
+		case "1h":
+			return i18n.t("stats.range.lastHour");
+		case "24h":
+			return i18n.t("stats.range.last24Hours");
+		case "7d":
+			return i18n.t("stats.range.last7Days");
+		case "30d":
+			return i18n.t("stats.range.last30Days");
+		case "90d":
+			return i18n.t("stats.range.last90Days");
+		case "all":
+			return i18n.t("stats.range.allTime");
+	}
+}
+
+export function rangeTrendLabel(range: TimeRange, i18n: I18n): string {
+	switch (range) {
+		case "1h":
+			return i18n.t("stats.range.trend1h");
+		case "24h":
+			return i18n.t("stats.range.trend24h");
+		case "7d":
+			return i18n.t("stats.range.trend7d");
+		case "30d":
+			return i18n.t("stats.range.trend30d");
+		case "90d":
+			return i18n.t("stats.range.trend90d");
+		case "all":
+			return i18n.t("stats.range.trend");
+	}
+}
+
 /** Format a bucket timestamp using the active range's tick format. */
-export function formatRangeTick(timestamp: number, range: TimeRange): string {
-	return format(new Date(timestamp), RANGE_META[range].tickFormat);
+export function formatRangeTick(timestamp: number, range: TimeRange, locale: Locale = "en"): string {
+	if (locale === "en") return format(new Date(timestamp), RANGE_META[range].tickFormat);
+	const options: Intl.DateTimeFormatOptions =
+		range === "1h" || range === "24h" ? { hour: "2-digit", minute: "2-digit" } : { month: "short", day: "numeric" };
+	return new Intl.DateTimeFormat(locale, options).format(new Date(timestamp));
 }

@@ -19,7 +19,7 @@ export function AsyncBoundary({
 	error,
 	data,
 	empty = false,
-	emptyText = "No data available",
+	emptyText,
 	fallback,
 	onRetry,
 	children,

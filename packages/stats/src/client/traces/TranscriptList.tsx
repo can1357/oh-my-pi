@@ -6,6 +6,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { formatDurationMs } from "../data/formatters";
+import { useStatsI18n } from "../i18n";
 import type { TraceMarker, TraceSpan, TraceTrack } from "../types";
 import { useSystemTheme } from "../useSystemTheme";
 import { formatOffset } from "./time-scale";
@@ -50,6 +51,7 @@ export function buildTranscriptRows(tracks: TraceTrack[]): TranscriptRow[] {
 }
 
 export function TranscriptList({ tracks, selection, onSelect, search, traceStart }: TranscriptListProps) {
+	const { i18n } = useStatsI18n();
 	const theme = useSystemTheme();
 	const colors = TRACE_THEMES[theme];
 	const containerRef = useRef<HTMLDivElement>(null);
@@ -130,7 +132,9 @@ export function TranscriptList({ tracks, selection, onSelect, search, traceStart
 									</span>
 								)}
 								<span className="stats-trace-row-meta">
-									{row.span?.isError && <span style={{ color: colors.error }}>error</span>}
+									{row.span?.isError && (
+										<span style={{ color: colors.error }}>{i18n.t("stats.drawer.error")}</span>
+									)}
 									<span>{duration}</span>
 									<span>{formatOffset(row.time - traceStart)}</span>
 								</span>
@@ -158,7 +162,7 @@ export function TranscriptList({ tracks, selection, onSelect, search, traceStart
 			</div>
 			{rows.length === 0 && (
 				<div className="stats-text-muted" style={{ padding: 16, fontSize: 12 }}>
-					No matching events
+					{i18n.t("stats.trace.noMatchingEvents")}
 				</div>
 			)}
 		</div>

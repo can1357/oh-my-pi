@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { ActiveTool, ConnectionPhase } from "../../lib/client";
 import { fmtTokens } from "../../lib/format";
+import { useCollabI18n } from "../../lib/i18n";
 import type { ToolRenderHost } from "../../tool-render";
 import { Markdown } from "./Markdown";
 import { ToolCard } from "./ToolCard";
@@ -65,20 +66,25 @@ function Row({
 }
 
 function ThinkingBlock({ text, redacted }: { text: string; redacted?: boolean }): ReactNode {
+	const { i18n } = useCollabI18n();
 	const [open, setOpen] = useState(false);
 	return (
 		<div className="tr-think">
 			<button type="button" className="tr-think-head" onClick={() => setOpen(v => !v)}>
 				<ChevronRight size={11} className={`tr-chev${open ? " tr-chev--open" : ""}`} />
-				thinking{redacted ? " · redacted" : ""}
+				{i18n.t("collab.transcript.thinking")}
+				{redacted ? ` · ${i18n.t("collab.transcript.redacted")}` : ""}
 			</button>
-			{open && <div className="tr-think-body">{redacted ? "(redacted by provider)" : text}</div>}
+			{open && (
+				<div className="tr-think-body">{redacted ? i18n.t("collab.transcript.redactedByProvider") : text}</div>
+			)}
 		</div>
 	);
 }
 
 /** Markdown + image thumbnails for user / custom message content. */
 function MsgContent({ content }: { content: string | readonly (TextContent | ImageContent)[] }): ReactNode {
+	const { i18n } = useCollabI18n();
 	if (typeof content === "string") return <Markdown text={content} />;
 	return (
 		<>
@@ -92,7 +98,7 @@ function MsgContent({ content }: { content: string | readonly (TextContent | Ima
 								key={i}
 								className="tr-msg-img"
 								src={`data:${block.mimeType};base64,${block.data}`}
-								alt="attachment"
+								alt={i18n.t("collab.transcript.attachment")}
 							/>
 						);
 					default:
@@ -185,6 +191,7 @@ function entryRowEqual(prev: EntryRowProps, next: EntryRowProps): boolean {
 }
 
 const EntryRow = memo(function EntryRow({ entry, results, active, host }: EntryRowProps): ReactNode {
+	const { i18n } = useCollabI18n();
 	switch (entry.type) {
 		case "message": {
 			const msg = entry.message;
@@ -234,25 +241,29 @@ const EntryRow = memo(function EntryRow({ entry, results, active, host }: EntryR
 		case "compaction":
 			return (
 				<div className="tr-divider" title={entry.shortSummary ?? entry.summary}>
-					<span>context compacted · {fmtTokens(entry.tokensBefore)} tokens</span>
+					<span>{i18n.t("collab.transcript.contextCompacted", { tokens: fmtTokens(entry.tokensBefore) })}</span>
 				</div>
 			);
 		case "branch_summary":
 			return (
 				<div className="tr-divider" title={entry.summary}>
-					<span>branch summary</span>
+					<span>{i18n.t("collab.transcript.branchSummary")}</span>
 				</div>
 			);
 		case "model_change":
 			return (
 				<Row kind="marker" gutter="" title={entry.timestamp}>
-					<span className="tr-marker">model → {entry.model}</span>
+					<span className="tr-marker">{i18n.t("collab.transcript.modelChange", { model: entry.model })}</span>
 				</Row>
 			);
 		case "thinking_level_change":
 			return (
 				<Row kind="marker" gutter="" title={entry.timestamp}>
-					<span className="tr-marker">thinking → {entry.thinkingLevel ?? "off"}</span>
+					<span className="tr-marker">
+						{i18n.t("collab.transcript.thinkingChange", {
+							level: entry.thinkingLevel ?? i18n.t("collab.transcript.off"),
+						})}
+					</span>
 				</Row>
 			);
 		default:
@@ -262,6 +273,7 @@ const EntryRow = memo(function EntryRow({ entry, results, active, host }: EntryR
 }, entryRowEqual);
 
 export function Transcript(props: TranscriptProps): ReactNode {
+	const { i18n } = useCollabI18n();
 	const { entries, stream, streamDone, activeTools, working, compact, host, phase } = props;
 
 	const results = useMemo(() => {
@@ -322,7 +334,9 @@ export function Transcript(props: TranscriptProps): ReactNode {
 				if (el !== null) updateTranscriptTailLock(el, lockRef);
 			}}
 		>
-			{entries.length === 0 && stream === null && !working && <div className="tr-empty">no activity yet</div>}
+			{entries.length === 0 && stream === null && !working && (
+				<div className="tr-empty">{i18n.t("collab.transcript.noActivity")}</div>
+			)}
 			{entries.map(entry => (
 				<EntryRow key={entry.id} entry={entry} results={results} active={activeTools} host={host} />
 			))}
@@ -355,7 +369,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 			)}
 			{working && stream === null && activeTools.size === 0 && (
 				<Row kind="assistant" gutter="agent">
-					<div className="tr-shimmer">thinking…</div>
+					<div className="tr-shimmer">{i18n.t("collab.transcript.thinkingNow")}</div>
 				</Row>
 			)}
 		</div>

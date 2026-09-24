@@ -3,6 +3,7 @@ import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { type Component, Spacer, Text, TruncatedText } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
+import { getCodingAgentI18n, localizeCodingAgentUiMessage } from "../../i18n";
 import type { AdvisorMessageDetails } from "../../advisor";
 import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "../../collab/protocol";
 import { settings } from "../../config/settings";
@@ -139,13 +140,13 @@ export class UiHelpers {
 
 		if (last && secondLast && last === this.ctx.lastStatusText && secondLast === this.ctx.lastStatusSpacer) {
 			this.ctx.lastStatusText.setStyleFn(styleFn);
-			this.ctx.lastStatusText.setText(message);
+			this.ctx.lastStatusText.setText(localizeCodingAgentUiMessage(message));
 			this.ctx.ui.requestRender();
 			return;
 		}
 
 		const spacer = new Spacer(1);
-		const text = new Text(message, 1, 0).setStyleFn(styleFn);
+		const text = new Text(localizeCodingAgentUiMessage(message), 1, 0).setStyleFn(styleFn);
 		this.ctx.present([spacer, text]);
 		this.ctx.lastStatusSpacer = spacer;
 		this.ctx.lastStatusText = text;
@@ -1016,7 +1017,7 @@ export class UiHelpers {
 			}
 			if (compactionCount > 0) {
 				const times = compactionCount === 1 ? "1 time" : `${compactionCount} times`;
-				this.ctx.showStatus(`Session compacted ${times}`);
+				this.ctx.showStatus(getCodingAgentI18n().t("codingAgent.ui.sessionCompacted", { times }));
 			}
 			if (options.clearTerminalHistory) {
 				this.ctx.ui.requestRender(true, { clearScrollback: true });
@@ -1045,12 +1046,22 @@ export class UiHelpers {
 	}
 
 	showError(errorMessage: string): void {
-		const text = new Text(`Error: ${errorMessage}`, 1, 0).setStyleFn(t => theme.fg("error", t));
+		const localizedMessage = localizeCodingAgentUiMessage(errorMessage);
+		const text = new Text(
+			getCodingAgentI18n().t("codingAgent.ui.errorPrefix", { message: localizedMessage }),
+			1,
+			0,
+		).setStyleFn(t => theme.fg("error", t));
 		this.ctx.present([new Spacer(1), text]);
 	}
 
 	showWarning(warningMessage: string, options?: { hideWithToolActivity?: boolean }): void {
-		const text = new Text(`Warning: ${warningMessage}`, 1, 0).setStyleFn(t => theme.fg("warning", t));
+		const localizedMessage = localizeCodingAgentUiMessage(warningMessage);
+		const text = new Text(
+			getCodingAgentI18n().t("codingAgent.ui.warningPrefix", { message: localizedMessage }),
+			1,
+			0,
+		).setStyleFn(t => theme.fg("warning", t));
 		const content = [new Spacer(1), text];
 		this.ctx.present(options?.hideWithToolActivity ? new ToolActivityContainer(content) : content);
 	}
@@ -1058,8 +1069,9 @@ export class UiHelpers {
 	showNewVersionNotification(newVersion: string): void {
 		const block = new TranscriptBlock();
 		block.addChild(new DynamicBorder(text => theme.fg("warning", text)));
-		const title = "Update Available";
-		const prefix = `New version ${newVersion} is available. Run: `;
+		const i18n = getCodingAgentI18n();
+		const title = i18n.t("codingAgent.ui.updateAvailable");
+		const prefix = i18n.t("codingAgent.ui.newVersionAvailable", { version: newVersion });
 		const command = "omp update";
 		block.addChild(
 			new Text(`${title}\n${prefix}${command}`, 1, 0).setStyleFn(
@@ -1085,9 +1097,10 @@ export class UiHelpers {
 			if (entry.mode === "followUp") followUpMessages.push(entry.text);
 		}
 
+		const i18n = getCodingAgentI18n();
 		const groups = [
-			{ label: "Steering", messages: steeringMessages },
-			{ label: "After yield", messages: followUpMessages },
+			{ label: i18n.t("codingAgent.ui.steering"), messages: steeringMessages },
+			{ label: i18n.t("codingAgent.ui.afterYield"), messages: followUpMessages },
 		].filter(group => group.messages.length > 0);
 		if (groups.length > 0) {
 			this.ctx.pendingMessagesContainer.addChild(new Spacer(1));
@@ -1113,7 +1126,9 @@ export class UiHelpers {
 		this.ctx.editor.clearDraft(text);
 		this.ctx.updatePendingMessagesDisplay();
 		this.ctx.showStatus(
-			queuedImages ? "Queued message with image for after compaction" : "Queued message for after compaction",
+			getCodingAgentI18n().t(
+				queuedImages ? "codingAgent.ui.queuedImageAfterCompaction" : "codingAgent.ui.queuedAfterCompaction",
+			),
 		);
 	}
 

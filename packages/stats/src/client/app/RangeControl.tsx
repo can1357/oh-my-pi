@@ -1,4 +1,5 @@
 import type { TimeRange } from "../types";
+import { useStatsI18n } from "../i18n";
 
 export interface RangeControlProps {
 	value: TimeRange;
@@ -16,8 +17,13 @@ const RANGE_OPTIONS: { value: TimeRange; label: string }[] = [
 ];
 
 export function RangeControl({ value, onChange, className = "" }: RangeControlProps) {
+	const { i18n } = useStatsI18n();
 	return (
-		<div className={`stats-range-control ${className}`} role="radiogroup" aria-label="Select time range">
+		<div
+			className={`stats-range-control ${className}`}
+			role="radiogroup"
+			aria-label={i18n.t("stats.ui.selectTimeRange")}
+		>
 			{RANGE_OPTIONS.map(opt => {
 				const isActive = opt.value === value;
 				return (
@@ -30,7 +36,7 @@ export function RangeControl({ value, onChange, className = "" }: RangeControlPr
 						className="stats-range-control-btn"
 						onClick={() => onChange(opt.value)}
 					>
-						{opt.label}
+						{opt.value === "all" ? i18n.t("stats.ui.all") : opt.label}
 					</button>
 				);
 			})}

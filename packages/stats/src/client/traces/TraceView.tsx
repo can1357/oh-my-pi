@@ -8,6 +8,7 @@ import { ArrowLeft, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getSessionTrace } from "../api";
 import { useResource } from "../data/useResource";
+import { useStatsI18n } from "../i18n";
 import type { TraceSpan, TraceTrack } from "../types";
 import { AsyncBoundary } from "../ui/AsyncBoundary";
 import { SegmentedControl } from "../ui/SegmentedControl";
@@ -25,13 +26,8 @@ export interface TraceViewProps {
 	onBack: () => void;
 }
 
-const MODE_OPTIONS: Array<{ value: AxisMode; label: string; title?: string }> = [
-	{ value: "time", label: "Duration", title: "Real wall-clock time" },
-	{ value: "turns", label: "Turns", title: "Equal width per user turn" },
-	{ value: "calls", label: "Calls", title: "Equal width per model/tool call boundary" },
-];
-
 export function TraceView({ file, active, onBack }: TraceViewProps) {
+	const { i18n } = useStatsI18n();
 	const {
 		data: trace,
 		error,
@@ -51,6 +47,26 @@ export function TraceView({ file, active, onBack }: TraceViewProps) {
 	const [matchIndex, setMatchIndex] = useState(0);
 	const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
 	const [viewport, setViewport] = useState<TimelineViewport | null>(null);
+	const modeOptions = useMemo(
+		() => [
+			{
+				value: "time" as const,
+				label: i18n.t("stats.traceView.axisDuration"),
+				title: i18n.t("stats.traceView.axisDurationTitle"),
+			},
+			{
+				value: "turns" as const,
+				label: i18n.t("stats.traceView.axisTurns"),
+				title: i18n.t("stats.traceView.axisTurnsTitle"),
+			},
+			{
+				value: "calls" as const,
+				label: i18n.t("stats.traceView.axisCalls"),
+				title: i18n.t("stats.traceView.axisCallsTitle"),
+			},
+		],
+		[i18n],
+	);
 
 	const tracks = useMemo(() => trace?.tracks ?? [], [trace]);
 	const scale = useMemo(() => buildScale(tracks, mode, compressIdle), [tracks, mode, compressIdle]);
@@ -204,7 +220,7 @@ export function TraceView({ file, active, onBack }: TraceViewProps) {
 			<div className="stats-trace-header">
 				<button type="button" onClick={onBack} className="stats-trace-back">
 					<ArrowLeft size={13} aria-hidden="true" />
-					Sessions
+					{i18n.t("stats.nav.traces")}
 				</button>
 				<h2 className="stats-trace-title" style={{ maxWidth: 480, margin: 0 }}>
 					{trace?.title ?? file.split("/").pop()}
@@ -214,8 +230,8 @@ export function TraceView({ file, active, onBack }: TraceViewProps) {
 					type="button"
 					onClick={() => void refetch()}
 					className="stats-trace-icon-btn"
-					aria-label="Refresh trace"
-					title="Refresh trace"
+					aria-label={i18n.t("stats.traceView.refresh")}
+					title={i18n.t("stats.traceView.refresh")}
 					style={{ marginLeft: "auto" }}
 				>
 					<RefreshCw size={14} className={refreshing ? "stats-spin" : undefined} />
@@ -228,7 +244,7 @@ export function TraceView({ file, active, onBack }: TraceViewProps) {
 						<SummaryStrip summary={trace.summary} />
 
 						<div className="stats-trace-toolbar">
-							<SegmentedControl options={MODE_OPTIONS} value={mode} onChange={setMode} />
+							<SegmentedControl options={modeOptions} value={mode} onChange={setMode} />
 							{mode === "time" && (
 								<label className="stats-trace-check">
 									<input
@@ -236,7 +252,7 @@ export function TraceView({ file, active, onBack }: TraceViewProps) {
 										checked={compressIdle}
 										onChange={event => setCompressIdle(event.target.checked)}
 									/>
-									Compress idle
+									{i18n.t("stats.traceView.compressIdle")}
 								</label>
 							)}
 							<div style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
@@ -247,8 +263,8 @@ export function TraceView({ file, active, onBack }: TraceViewProps) {
 										setSearch(event.target.value);
 										setMatchIndex(0);
 									}}
-									placeholder="Search spans…"
-									aria-label="Search spans"
+									placeholder={i18n.t("stats.traceView.searchSpansPlaceholder")}
+									aria-label={i18n.t("stats.traceView.searchSpans")}
 									spellCheck={false}
 									className="stats-trace-input"
 									style={{ width: 190 }}
@@ -267,7 +283,7 @@ export function TraceView({ file, active, onBack }: TraceViewProps) {
 											type="button"
 											onClick={() => cycleMatch(-1)}
 											className="stats-trace-icon-btn"
-											aria-label="Previous match"
+											aria-label={i18n.t("stats.traceView.previousMatch")}
 											disabled={matches.length === 0}
 										>
 											‹
@@ -276,7 +292,7 @@ export function TraceView({ file, active, onBack }: TraceViewProps) {
 											type="button"
 											onClick={() => cycleMatch(1)}
 											className="stats-trace-icon-btn"
-											aria-label="Next match"
+											aria-label={i18n.t("stats.traceView.nextMatch")}
 											disabled={matches.length === 0}
 										>
 											›
@@ -286,10 +302,10 @@ export function TraceView({ file, active, onBack }: TraceViewProps) {
 							</div>
 							<div style={{ marginLeft: "auto", display: "inline-flex", gap: 6 }}>
 								<button type="button" onClick={() => collapseAll(false)} className="stats-trace-back">
-									Expand all
+									{i18n.t("stats.traceView.expandAll")}
 								</button>
 								<button type="button" onClick={() => collapseAll(true)} className="stats-trace-back">
-									Collapse all
+									{i18n.t("stats.traceView.collapseAll")}
 								</button>
 							</div>
 						</div>
@@ -314,8 +330,7 @@ export function TraceView({ file, active, onBack }: TraceViewProps) {
 								traceStart={traceStart}
 							/>
 							<div className="stats-trace-toolbar-hint" style={{ marginLeft: 0 }}>
-								W/S zoom · A/D pan · drag pan · wheel zoom · 0 fit · F focus selection · dbl-click focus · Esc
-								deselect
+								{i18n.t("stats.traceView.focusHint")}
 							</div>
 						</div>
 						<TranscriptList

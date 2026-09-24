@@ -10,6 +10,8 @@
  */
 import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { LanguageSelector } from "./LanguageSelector";
+import { MetaI18nProvider, useMetaI18n } from "./i18n";
 
 // ── api types (mirrors server modules) ──────────────────────────────────────
 
@@ -199,8 +201,9 @@ function Progress({
 // ── experiments index ────────────────────────────────────────────────────────
 
 function ExperimentsIndex() {
+	const { i18n } = useMetaI18n();
 	const [experiments] = usePolled<ExperimentSummary[]>("/api/experiments", 3000);
-	if (!experiments) return <div className="p-10 text-zinc-500">loading…</div>;
+	if (!experiments) return <div className="p-10 text-zinc-500">{i18n.t("metaharness.ui.loading")}</div>;
 	return (
 		<div className="mx-auto grid max-w-5xl gap-3 p-6">
 			{experiments.map(exp => (
@@ -212,8 +215,13 @@ function ExperimentsIndex() {
 					<div className="w-40 shrink-0">
 						<div className="font-semibold">{exp.id}</div>
 						<div className="text-xs text-zinc-500">
-							{exp.arms} arm{exp.arms === 1 ? "" : "s"}
-							{exp.runningArms > 0 && <span className="text-sky-400"> · {exp.runningArms} live</span>}
+							{exp.arms} {exp.arms === 1 ? i18n.t("metaharness.ui.arm") : i18n.t("metaharness.ui.arms")}
+							{exp.runningArms > 0 && (
+								<span className="text-sky-400">
+									{" "}
+									· {exp.runningArms} {i18n.t("metaharness.ui.live")}
+								</span>
+							)}
 						</div>
 					</div>
 					<div className="min-w-0 flex-1">
@@ -489,6 +497,7 @@ function BarChart({
 	focus: string | null;
 	onFocus: (key: string) => void;
 }) {
+	const { i18n } = useMetaI18n();
 	const sorted = [...bars].sort((a, b) => (best === "high" ? b.value - a.value : a.value - b.value));
 	const max = Math.max(...bars.map(b => b.value), anchor ?? 0);
 	const anchorLeft = anchor !== null && max > 0 ? Math.min((100 * anchor) / max, 100) : null;
@@ -497,11 +506,12 @@ function BarChart({
 			<div className="mb-2 flex items-baseline justify-between">
 				<h3 className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400">{title}</h3>
 				<span className="text-[9px] text-zinc-600">
-					{best === "high" ? "higher is better" : "lower is better"} · best first
+					{best === "high" ? i18n.t("metaharness.ui.higherBetter") : i18n.t("metaharness.ui.lowerBetter")} ·{" "}
+					{i18n.t("metaharness.ui.bestFirst")}
 				</span>
 			</div>
 			{sorted.length === 0 ? (
-				<div className="py-6 text-center text-xs text-zinc-600">no decided trials yet</div>
+				<div className="py-6 text-center text-xs text-zinc-600">{i18n.t("metaharness.ui.noDecidedTrials")}</div>
 			) : (
 				<div className="flex flex-col gap-px">
 					{sorted.map(b => {
@@ -626,6 +636,7 @@ function ScatterChart({
 	focus: string | null;
 	onFocus: (key: string) => void;
 }) {
+	const { i18n } = useMetaI18n();
 	const [ref, width] = useMeasuredWidth();
 	const H = 268;
 	const m = { l: 46, r: 14, t: 12, b: 30 };
@@ -642,15 +653,17 @@ function ScatterChart({
 	return (
 		<div ref={ref} className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-3">
 			<div className="mb-1 flex items-baseline justify-between">
-				<h3 className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400">cost vs success</h3>
-				<span className="text-[9px] text-zinc-600">↖ cheaper &amp; better</span>
+				<h3 className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400">
+					{i18n.t("metaharness.ui.costVsSuccess")}
+				</h3>
+				<span className="text-[9px] text-zinc-600">↖ {i18n.t("metaharness.ui.cheaperBetter")}</span>
 			</div>
 			{pts.length === 0 || width === 0 ? (
 				<div className="flex h-[268px] items-center justify-center text-xs text-zinc-600">
-					no decided trials yet
+					{i18n.t("metaharness.ui.noDecidedTrials")}
 				</div>
 			) : (
-				<svg width={width} height={H} role="img" aria-label="pass rate versus cost per task; one point per arm">
+				<svg width={width} height={H} role="img" aria-label={i18n.t("metaharness.ui.passRateVsCost")}>
 					{[0, 1 / 3, 2 / 3, 1].map(f => {
 						const v = passLo + f * (passHi - passLo);
 						return (
@@ -802,6 +815,7 @@ function Delta({
  * arm-specific knobs (name, model, role, note, optional prewalk) are collected here.
  */
 function AddArmForm({ experimentId, onDone }: { experimentId: string; onDone: () => void }) {
+	const { i18n } = useMetaI18n();
 	const [msg, setMsg] = useState("");
 	const submit = useCallback(
 		async (ev: React.FormEvent<HTMLFormElement>) => {
@@ -813,14 +827,18 @@ function AddArmForm({ experimentId, onDone }: { experimentId: string; onDone: ()
 			if (f.get("prewalkInto") || f.get("prewalk")) {
 				body.prewalk = f.get("prewalkInto") ? { into: f.get("prewalkInto") } : {};
 			}
-			setMsg("launching…");
+			setMsg(i18n.t("metaharness.ui.launching"));
 			const res = await fetch(`/api/experiments/${encodeURIComponent(experimentId)}/arms`, {
 				method: "POST",
 				headers: { "content-type": "application/json" },
 				body: JSON.stringify(body),
 			});
 			const out = (await res.json()) as { jobName?: string; error?: string };
-			setMsg(res.ok ? `launched ${out.jobName}` : `error: ${out.error}`);
+			setMsg(
+				res.ok
+					? i18n.t("metaharness.ui.launched", { name: out.jobName ?? "" })
+					: i18n.t("metaharness.ui.error", { message: out.error ?? "" }),
+			);
 			if (res.ok) setTimeout(onDone, 900);
 		},
 		[experimentId, onDone],
@@ -830,21 +848,21 @@ function AddArmForm({ experimentId, onDone }: { experimentId: string; onDone: ()
 			onSubmit={submit}
 			className="mb-4 grid grid-cols-4 gap-2 rounded-lg border border-zinc-800 bg-zinc-900/60 p-3 text-sm"
 		>
-			<input name="arm" placeholder="arm name (e.g. opus48)" required className={INPUT_CLASS} />
+			<input name="arm" placeholder={i18n.t("metaharness.ui.arm")} required className={INPUT_CLASS} />
 			<input name="model" placeholder="model (provider/model)" required className={INPUT_CLASS} />
 			<select name="role" className={INPUT_CLASS} defaultValue="">
-				<option value="">role: unset</option>
+				<option value="">{i18n.t("metaharness.ui.roleUnset")}</option>
 				<option value="baseline">baseline</option>
 				<option value="variant">variant</option>
 			</select>
 			<input name="note" placeholder="note (what this arm tests)" className={INPUT_CLASS} />
-			<input name="prewalkInto" placeholder="prewalk into (model, optional)" className={INPUT_CLASS} />
+			<input name="prewalkInto" placeholder={i18n.t("metaharness.ui.prewalkInto")} className={INPUT_CLASS} />
 			<label className="flex items-center gap-1 text-xs text-zinc-400">
-				<input type="checkbox" name="prewalk" /> prewalk (default smol)
+				<input type="checkbox" name="prewalk" /> {i18n.t("metaharness.ui.prewalk")}
 			</label>
 			<div className="col-span-4 flex items-center gap-3">
 				<button type="submit" className="rounded border border-zinc-600 px-3 py-1 hover:border-sky-400">
-					launch arm
+					{i18n.t("metaharness.ui.newArm")}
 				</button>
 				<span className="text-xs text-zinc-500">inherits dataset + task sample from existing arms · {msg}</span>
 			</div>
@@ -854,18 +872,21 @@ function AddArmForm({ experimentId, onDone }: { experimentId: string; onDone: ()
 
 /** Inline editor for the experiment's goal/description. */
 function GoalEditor({ id, goal, onSaved }: { id: string; goal: string; onSaved: () => void }) {
+	const { i18n } = useMetaI18n();
 	const [editing, setEditing] = useState(false);
 	const [busy, setBusy] = useState(false);
 	const [err, setErr] = useState("");
 	if (!editing) {
 		return (
 			<div className="group mb-4 flex max-w-4xl items-start gap-2">
-				<p className={`text-sm ${goal ? "text-zinc-400" : "text-zinc-600"}`}>{goal || "no description"}</p>
+				<p className={`text-sm ${goal ? "text-zinc-400" : "text-zinc-600"}`}>
+					{goal || i18n.t("metaharness.ui.noDescription")}
+				</p>
 				<button
 					type="button"
 					onClick={() => setEditing(true)}
-					aria-label="edit experiment description"
-					title="edit description"
+					aria-label={i18n.t("metaharness.ui.edit")}
+					title={i18n.t("metaharness.ui.edit")}
 					className="rounded px-1 text-xs text-zinc-600 opacity-0 transition-opacity hover:text-zinc-200 focus-visible:opacity-100 group-hover:opacity-100"
 				>
 					✎
@@ -907,7 +928,7 @@ function GoalEditor({ id, goal, onSaved }: { id: string; goal: string; onSaved: 
 				defaultValue={goal}
 				rows={3}
 				autoFocus
-				placeholder="what question does this experiment answer?…"
+				placeholder={i18n.t("metaharness.ui.experimentGoal")}
 				className={`${INPUT_CLASS} w-full`}
 			/>
 			<div className="mt-1 flex items-center gap-2 text-xs">
@@ -916,14 +937,14 @@ function GoalEditor({ id, goal, onSaved }: { id: string; goal: string; onSaved: 
 					disabled={busy}
 					className="rounded border border-zinc-600 px-2 py-0.5 hover:border-sky-400"
 				>
-					{busy ? "saving…" : "save"}
+					{busy ? i18n.t("metaharness.ui.saving") : i18n.t("metaharness.ui.save")}
 				</button>
 				<button
 					type="button"
 					onClick={() => setEditing(false)}
 					className="rounded border border-zinc-700 px-2 py-0.5 text-zinc-400 hover:border-zinc-500"
 				>
-					cancel
+					{i18n.t("metaharness.ui.cancel")}
 				</button>
 				<span className="text-zinc-600">⌘↵ save · esc cancel</span>
 				{err && <span className="text-red-400">{err}</span>}
@@ -944,6 +965,7 @@ function ArmEditorRow({
 	onSaved: () => void;
 	onCancel: () => void;
 }) {
+	const { i18n } = useMetaI18n();
 	const [busy, setBusy] = useState(false);
 	const [err, setErr] = useState("");
 	const save = async (form: HTMLFormElement) => {
@@ -980,7 +1002,7 @@ function ArmEditorRow({
 					}}
 				>
 					<label className="flex items-center gap-1.5 text-xs text-zinc-500">
-						name
+						{i18n.t("metaharness.ui.name")}
 						<input
 							name="label"
 							defaultValue={arm.run.label}
@@ -991,19 +1013,19 @@ function ArmEditorRow({
 						/>
 					</label>
 					<label className="flex items-center gap-1.5 text-xs text-zinc-500">
-						role
+						{i18n.t("metaharness.ui.role")}
 						<select name="role" defaultValue={arm.run.role} className={INPUT_CLASS}>
-							<option value="">unset</option>
+							<option value="">{i18n.t("metaharness.ui.unset")}</option>
 							<option value="baseline">baseline</option>
 							<option value="variant">variant</option>
 						</select>
 					</label>
 					<label className="flex min-w-64 flex-1 items-center gap-1.5 text-xs text-zinc-500">
-						description
+						{i18n.t("metaharness.ui.description")}
 						<input
 							name="note"
 							defaultValue={arm.run.note}
-							placeholder="what does this arm test?…"
+							placeholder={i18n.t("metaharness.ui.description")}
 							className={`${INPUT_CLASS} w-full`}
 						/>
 					</label>
@@ -1012,14 +1034,14 @@ function ArmEditorRow({
 						disabled={busy}
 						className="rounded border border-zinc-600 px-2 py-1 text-xs hover:border-sky-400"
 					>
-						{busy ? "saving…" : "save"}
+						{busy ? i18n.t("metaharness.ui.saving") : i18n.t("metaharness.ui.save")}
 					</button>
 					<button
 						type="button"
 						onClick={onCancel}
 						className="rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-400 hover:border-zinc-500"
 					>
-						cancel
+						{i18n.t("metaharness.ui.cancel")}
 					</button>
 					<span className="w-full text-[10px] text-zinc-600">
 						display name only — job dir stays <span className="text-zinc-500">{arm.run.jobName}</span>
@@ -1472,13 +1494,14 @@ function TaskMatrix({
 }
 
 function ExperimentPage({ id }: { id: string }) {
+	const { i18n } = useMetaI18n();
 	const [adding, setAdding] = useState(false);
 	const [sort, setSort] = useState<SortSpec | null>(null);
 	const [focusKey, setFocusKey] = useState<string | null>(null);
 	const [editing, setEditing] = useState<string | null>(null);
 	const [detail, refresh] = usePolled<ExperimentDetail>(`/api/experiments/${encodeURIComponent(id)}`, 3000);
 	const toggleFocus = useCallback((key: string) => setFocusKey(f => (f === key ? null : key)), []);
-	if (!detail) return <div className="p-10 text-zinc-500">loading…</div>;
+	if (!detail) return <div className="p-10 text-zinc-500">{i18n.t("metaharness.ui.loading")}</div>;
 	const { arms, tasks, matrix, goal } = detail;
 
 	const focusArm = focusKey ? (arms.find(a => a.arm === focusKey) ?? null) : null;
@@ -1542,7 +1565,7 @@ function ExperimentPage({ id }: { id: string }) {
 					onClick={() => setAdding(v => !v)}
 					className="ml-auto rounded border border-zinc-700 px-2 py-0.5 text-xs hover:border-sky-400"
 				>
-					{adding ? "cancel" : "+ add arm"}
+					{adding ? i18n.t("metaharness.ui.cancel") : i18n.t("metaharness.ui.addArm")}
 				</button>
 			</div>
 			<GoalEditor id={id} goal={goal} onSaved={refresh} />
@@ -1677,6 +1700,7 @@ function useRunsSse(): RunRow[] | null {
 }
 
 function RunsPage({ selected }: { selected: string | null }) {
+	const { i18n } = useMetaI18n();
 	const runs = useRunsSse();
 	const [detail] = usePolled<{ run: RunRow; traces: TraceRow[] }>(
 		selected ? `/api/runs/${encodeURIComponent(selected)}` : null,
@@ -1704,17 +1728,17 @@ function RunsPage({ selected }: { selected: string | null }) {
 		if (!res.ok) alert((await res.json().catch(() => null))?.error ?? `resume failed (${res.status})`);
 	}, []);
 
-	if (!runs) return <div className="p-10 text-zinc-500">loading…</div>;
+	if (!runs) return <div className="p-10 text-zinc-500">{i18n.t("metaharness.ui.loading")}</div>;
 	return (
 		<div className="grid h-[calc(100vh-49px)] grid-cols-[minmax(420px,44%)_1fr]">
 			<section className="overflow-auto border-r border-zinc-800">
 				<table className="w-full text-sm">
 					<thead className="sticky top-0 bg-zinc-900 text-xs text-zinc-500">
 						<tr>
-							<th className="px-3 py-1.5 text-left">run</th>
-							<th className="text-left">status</th>
-							<th className="text-left">progress</th>
-							<th className="text-left">spend</th>
+							<th className="px-3 py-1.5 text-left">{i18n.t("metaharness.ui.run")}</th>
+							<th className="text-left">{i18n.t("metaharness.ui.status")}</th>
+							<th className="text-left">{i18n.t("metaharness.ui.progress")}</th>
+							<th className="text-left">{i18n.t("metaharness.ui.spend")}</th>
 							<th />
 						</tr>
 					</thead>
@@ -1757,7 +1781,7 @@ function RunsPage({ selected }: { selected: string | null }) {
 											}}
 											className="rounded border border-zinc-700 px-2 text-xs hover:border-red-500 hover:text-red-400"
 										>
-											stop
+											{i18n.t("metaharness.ui.stop")}
 										</button>
 									) : (
 										r.benchmark === "harbor" &&
@@ -1770,7 +1794,7 @@ function RunsPage({ selected }: { selected: string | null }) {
 												}}
 												className="rounded border border-zinc-700 px-2 text-xs hover:border-emerald-500 hover:text-emerald-400"
 											>
-												resume
+												{i18n.t("metaharness.ui.resume")}
 											</button>
 										)
 									)}
@@ -1844,7 +1868,7 @@ function RunsPage({ selected }: { selected: string | null }) {
 						)}
 					</>
 				) : (
-					<div className="p-10 text-zinc-500">select a run</div>
+					<div className="p-10 text-zinc-500">{i18n.t("metaharness.ui.selectRun")}</div>
 				)}
 			</section>
 		</div>
@@ -1854,6 +1878,7 @@ function RunsPage({ selected }: { selected: string | null }) {
 // ── launch form ──────────────────────────────────────────────────────────────
 
 function LaunchForm({ onDone }: { onDone: () => void }) {
+	const { i18n } = useMetaI18n();
 	const [msg, setMsg] = useState("");
 	const submit = useCallback(
 		async (ev: React.FormEvent<HTMLFormElement>) => {
@@ -1883,14 +1908,18 @@ function LaunchForm({ onDone }: { onDone: () => void }) {
 			if (f.get("prewalkInto") || f.get("prewalk")) {
 				body.prewalk = f.get("prewalkInto") ? { into: f.get("prewalkInto") } : {};
 			}
-			setMsg("launching…");
+			setMsg(i18n.t("metaharness.ui.launching"));
 			const res = await fetch("/api/runs", {
 				method: "POST",
 				headers: { "content-type": "application/json" },
 				body: JSON.stringify(body),
 			});
 			const out = (await res.json()) as { jobName?: string; error?: string };
-			setMsg(res.ok ? `launched ${out.jobName}` : `error: ${out.error}`);
+			setMsg(
+				res.ok
+					? i18n.t("metaharness.ui.launched", { name: out.jobName ?? "" })
+					: i18n.t("metaharness.ui.error", { message: out.error ?? "" }),
+			);
 			if (res.ok) setTimeout(onDone, 800);
 		},
 		[onDone],
@@ -1903,32 +1932,34 @@ function LaunchForm({ onDone }: { onDone: () => void }) {
 				<option value="edit">TypeScript edit</option>
 				<option value="snapcompact">SnapCompact</option>
 			</select>
-			<input name="model" placeholder="model (required)" required className={input} />
-			<input name="dataset" placeholder="dataset (terminal-bench@2.0)" className={input} />
-			<input name="jobName" placeholder="job name (exp-arm)" className={input} />
-			<input name="tasks" type="number" placeholder="task/passages limit" className={input} />
-			<input name="concurrency" type="number" placeholder="concurrency" className={input} />
-			<input name="timeoutMultiplier" type="number" step="0.5" placeholder="timeout ×" className={input} />
-			<input name="prewalkInto" placeholder="prewalk into (model)" className={input} />
-			<label className="flex items-center gap-2 text-xs text-zinc-400">
-				<input type="checkbox" name="prewalk" /> prewalk (default smol)
-			</label>
-			<input name="include" placeholder="include tasks, comma-sep" className={`${input} col-span-2`} />
-			<input name="conditions" placeholder="SnapCompact conditions, comma-sep" className={`${input} col-span-2`} />
+			<input name="model" placeholder={i18n.t("metaharness.ui.modelRequired")} required className={input} />
+			<input name="dataset" placeholder={i18n.t("metaharness.ui.dataset")} className={input} />
+			<input name="jobName" placeholder={i18n.t("metaharness.ui.jobName")} className={input} />
+			<input name="tasks" type="number" placeholder={i18n.t("metaharness.ui.taskLimit")} className={input} />
+			<input name="concurrency" type="number" placeholder={i18n.t("metaharness.ui.concurrency")} className={input} />
 			<input
-				name="goal"
-				placeholder="experiment goal (what question does this answer?)"
-				className={`${input} col-span-2`}
+				name="timeoutMultiplier"
+				type="number"
+				step="0.5"
+				placeholder={i18n.t("metaharness.ui.timeout")}
+				className={input}
 			/>
+			<input name="prewalkInto" placeholder={i18n.t("metaharness.ui.prewalkInto")} className={input} />
+			<label className="flex items-center gap-2 text-xs text-zinc-400">
+				<input type="checkbox" name="prewalk" /> {i18n.t("metaharness.ui.prewalk")}
+			</label>
+			<input name="include" placeholder={i18n.t("metaharness.ui.includeTasks")} className={`${input} col-span-2`} />
+			<input name="conditions" placeholder={i18n.t("metaharness.ui.conditions")} className={`${input} col-span-2`} />
+			<input name="goal" placeholder={i18n.t("metaharness.ui.experimentGoal")} className={`${input} col-span-2`} />
 			<select name="role" className={input}>
-				<option value="">role: unset</option>
+				<option value="">{i18n.t("metaharness.ui.roleUnset")}</option>
 				<option value="baseline">baseline</option>
 				<option value="variant">variant</option>
 			</select>
-			<input name="note" placeholder="arm note (e.g. prewalk flash)" className={input} />
+			<input name="note" placeholder={i18n.t("metaharness.ui.armNote")} className={input} />
 			<div className="col-span-4 flex items-center gap-3">
 				<button type="submit" className="rounded border border-zinc-600 px-3 py-1 hover:border-sky-400">
-					launch
+					{i18n.t("metaharness.ui.launch")}
 				</button>
 				<span className="text-xs text-zinc-500">{msg}</span>
 			</div>
@@ -1939,6 +1970,7 @@ function LaunchForm({ onDone }: { onDone: () => void }) {
 // ── shell ────────────────────────────────────────────────────────────────────
 
 function App() {
+	const { i18n } = useMetaI18n();
 	const hash = useHashRoute();
 	const [showLaunch, setShowLaunch] = useState(false);
 	useEffect(() => {
@@ -1968,16 +2000,17 @@ function App() {
 			<header className="sticky top-0 z-10 flex items-center gap-4 border-b border-zinc-800 bg-zinc-950/90 px-4 py-2 backdrop-blur">
 				<h1 className="text-sm font-semibold tracking-wide">metaharness</h1>
 				<nav className="flex gap-1 text-sm">
-					{tab("#/", "experiments", !expMatch && !runMatch)}
-					{tab("#/runs", "runs", !!runMatch)}
+					{tab("#/", i18n.t("metaharness.nav.experiments"), !expMatch && !runMatch)}
+					{tab("#/runs", i18n.t("metaharness.nav.runs"), !!runMatch)}
 				</nav>
 				<div className="ml-auto">
+					<LanguageSelector />
 					<button
 						type="button"
 						onClick={() => setShowLaunch(s => !s)}
 						className="rounded border border-zinc-700 px-3 py-1 text-sm hover:border-sky-400"
 					>
-						new run
+						{i18n.t("metaharness.nav.newRun")}
 					</button>
 				</div>
 			</header>
@@ -1988,4 +2021,10 @@ function App() {
 }
 
 const rootEl = document.getElementById("root");
-if (rootEl) createRoot(rootEl).render(<App />);
+if (rootEl) {
+	createRoot(rootEl).render(
+		<MetaI18nProvider>
+			<App />
+		</MetaI18nProvider>,
+	);
+}

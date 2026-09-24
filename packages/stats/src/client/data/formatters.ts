@@ -1,4 +1,5 @@
 import { formatDistanceToNow } from "@oh-my-pi/pi-utils/dates";
+import type { Locale } from "@oh-my-pi/pi-i18n";
 import type { MessageStats } from "../types";
 
 export function formatInteger(value: number): string {
@@ -58,8 +59,33 @@ export function formatTokensPerSecond(value: number | null): string {
 	return value.toFixed(1);
 }
 
-export function formatRelativeTime(timestamp: number): string {
-	return formatDistanceToNow(new Date(timestamp), { addSuffix: true });
+export function formatRelativeTime(timestamp: number, locale: Locale = "en"): string {
+	if (locale === "en") return formatDistanceToNow(new Date(timestamp), { addSuffix: true });
+
+	const deltaSeconds = (timestamp - Date.now()) / 1000;
+	const absoluteSeconds = Math.abs(deltaSeconds);
+	if (absoluteSeconds < 60) {
+		return new Intl.RelativeTimeFormat(locale, { numeric: "always" }).format(Math.round(deltaSeconds), "second");
+	}
+	if (absoluteSeconds < 3_600) {
+		return new Intl.RelativeTimeFormat(locale, { numeric: "always" }).format(Math.round(deltaSeconds / 60), "minute");
+	}
+	if (absoluteSeconds < 86_400) {
+		return new Intl.RelativeTimeFormat(locale, { numeric: "always" }).format(
+			Math.round(deltaSeconds / 3_600),
+			"hour",
+		);
+	}
+	if (absoluteSeconds < 2_592_000) {
+		return new Intl.RelativeTimeFormat(locale, { numeric: "always" }).format(
+			Math.round(deltaSeconds / 86_400),
+			"day",
+		);
+	}
+	return new Intl.RelativeTimeFormat(locale, { numeric: "always" }).format(
+		Math.round(deltaSeconds / 2_592_000),
+		"month",
+	);
 }
 
 export function formatBytes(value: number): string {

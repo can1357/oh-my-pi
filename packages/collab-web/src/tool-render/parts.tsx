@@ -4,15 +4,48 @@
  */
 import type { ReactNode } from "react";
 import { useMemo, useState } from "react";
+import type { I18n, MessageKey } from "@oh-my-pi/pi-i18n";
+import { useCollabI18n } from "../lib/i18n";
 import type { ToolRenderHost, ToolResultImage, ToolResultLike } from "./types";
 import { getHljs, replaceTabs, resultImagesOf, resultTextOf, shortenPath, stripAnsi } from "./util";
 
 export type Tone = "accent" | "ok" | "err" | "warn";
 
+const TOOL_TEXT_KEYS: Readonly<Record<string, MessageKey>> = {
+	args: "collab.tool.args",
+	calls: "collab.tool.calls",
+	command: "collab.tool.command",
+	content: "collab.tool.content",
+	context: "collab.tool.context",
+	error: "collab.tool.error",
+	model: "collab.tool.model",
+	notes: "collab.tool.notes",
+	output: "collab.tool.output",
+	path: "collab.tool.path",
+	paths: "collab.tool.paths",
+	query: "collab.tool.query",
+	raw: "collab.tool.raw",
+	result: "collab.tool.result",
+	status: "collab.tool.status",
+	success: "collab.tool.success",
+	truncated: "collab.tool.truncated",
+	url: "collab.tool.url",
+};
+
+function localizeToolText(value: string, i18n: I18n): string {
+	const key = TOOL_TEXT_KEYS[value];
+	return key ? i18n.t(key) : value;
+}
+
 /** Inline chip. Renders nothing for empty content. */
 export function Badge({ children, tone }: { children: ReactNode; tone?: Tone }): ReactNode {
+	const { i18n } = useCollabI18n();
 	if (children == null || children === "" || children === false) return null;
-	return <span className={`tv-badge${tone ? ` tv-badge--${tone}` : ""}`}>{children}</span>;
+	return (
+		<span className={`tv-badge${tone ? ` tv-badge--${tone}` : ""}`}>
+			{typeof children === "string" ? localizeToolText(children, i18n) : children}
+		</span>
+	);
 }
 
 /** Chip row; falsy items are skipped. Usable inline (summaries) and in bodies. */
@@ -60,10 +93,11 @@ export function KvGrid({ children }: { children: ReactNode }): ReactNode {
 }
 
 export function Kv({ k, children }: { k: ReactNode; children: ReactNode }): ReactNode {
+	const { i18n } = useCollabI18n();
 	if (children == null || children === "" || children === false) return null;
 	return (
 		<>
-			<span className="tv-kv-key">{k}</span>
+			<span className="tv-kv-key">{typeof k === "string" ? localizeToolText(k, i18n) : k}</span>
 			<span className="tv-kv-val">{children}</span>
 		</>
 	);
@@ -104,6 +138,7 @@ export interface OutputProps {
  * search results. Tabs are widened, ANSI escapes stripped.
  */
 export function Output({ text, maxLines = 10, lang, error, variant = "plain", title, bare }: OutputProps): ReactNode {
+	const { i18n } = useCollabI18n();
 	const [expanded, setExpanded] = useState(false);
 	const clean = useMemo(() => replaceTabs(stripAnsi(text)).replace(/\n+$/, ""), [text]);
 	const lines = useMemo(() => clean.split("\n"), [clean]);
@@ -116,7 +151,7 @@ export function Output({ text, maxLines = 10, lang, error, variant = "plain", ti
 	if (bare) classes.push("tv-pre--bare");
 	return (
 		<div className="tv-out">
-			{title && <div className="tv-out-title">{title}</div>}
+			{title && <div className="tv-out-title">{localizeToolText(title, i18n)}</div>}
 			{html !== null ? (
 				<pre className={classes.join(" ")} dangerouslySetInnerHTML={{ __html: html }} />
 			) : (
@@ -124,7 +159,9 @@ export function Output({ text, maxLines = 10, lang, error, variant = "plain", ti
 			)}
 			{collapsible && (
 				<button type="button" className="tv-expand" onClick={() => setExpanded(v => !v)}>
-					{expanded ? "collapse" : `⋯ ${lines.length - maxLines} more lines`}
+					{expanded
+						? i18n.t("collab.tool.collapse")
+						: i18n.t("collab.tool.moreLines", { count: lines.length - maxLines })}
 				</button>
 			)}
 		</div>
@@ -193,6 +230,7 @@ function openImage(img: ToolResultImage): void {
 
 /** Thumbnails for every image block in a result; click opens full size. */
 export function ResultImages({ result }: { result: ToolResultLike | undefined }): ReactNode {
+	const { i18n } = useCollabI18n();
 	const images = resultImagesOf(result);
 	if (images.length === 0) return null;
 	return (
@@ -203,9 +241,13 @@ export function ResultImages({ result }: { result: ToolResultLike | undefined })
 					type="button"
 					style={{ all: "unset", display: "inline-flex" }}
 					onClick={() => openImage(img)}
-					aria-label={`Open tool result image ${i + 1}`}
+					aria-label={i18n.t("collab.tool.openResultImage", { index: i + 1 })}
 				>
-					<img className="tv-img" src={`data:${img.mimeType};base64,${img.data}`} alt={`tool result ${i + 1}`} />
+					<img
+						className="tv-img"
+						src={`data:${img.mimeType};base64,${img.data}`}
+						alt={i18n.t("collab.tool.resultImage", { index: i + 1 })}
+					/>
 				</button>
 			))}
 		</div>
@@ -214,15 +256,23 @@ export function ResultImages({ result }: { result: ToolResultLike | undefined })
 
 /** Callout block. */
 export function Note({ tone, children }: { tone?: "err" | "warn" | "ok"; children: ReactNode }): ReactNode {
+	const { i18n } = useCollabI18n();
 	if (children == null || children === "" || children === false) return null;
-	return <div className={`tv-note${tone ? ` tv-note--${tone}` : ""}`}>{children}</div>;
+	return (
+		<div className={`tv-note${tone ? ` tv-note--${tone}` : ""}`}>
+			{typeof children === "string" ? localizeToolText(children, i18n) : children}
+		</div>
+	);
 }
 
 /** Labeled row inside a `.tv-list`. */
 export function Row({ k, children }: { k?: ReactNode; children: ReactNode }): ReactNode {
+	const { i18n } = useCollabI18n();
 	return (
 		<div className="tv-row">
-			{k != null && k !== "" && <span className="tv-row-key">{k}</span>}
+			{k != null && k !== "" && (
+				<span className="tv-row-key">{typeof k === "string" ? localizeToolText(k, i18n) : k}</span>
+			)}
 			<span className="tv-row-val">{children}</span>
 		</div>
 	);
@@ -230,7 +280,8 @@ export function Row({ k, children }: { k?: ReactNode; children: ReactNode }): Re
 
 /** Marker for arguments that arrived with the wrong JSON type. */
 export function InvalidArg({ what }: { what?: string }): ReactNode {
-	return <span className="tv-err-text">[invalid {what ?? "arg"}]</span>;
+	const { i18n } = useCollabI18n();
+	return <span className="tv-err-text">{i18n.t("collab.tool.invalidArg", { what: what ?? "arg" })}</span>;
 }
 
 /**
@@ -238,6 +289,7 @@ export function InvalidArg({ what }: { what?: string }): ReactNode {
  * faint, blank rows render as `…` gaps (non-contiguous regions).
  */
 export function DiffBlock({ diff, maxLines = 80 }: { diff: string; maxLines?: number }): ReactNode {
+	const { i18n } = useCollabI18n();
 	const [expanded, setExpanded] = useState(false);
 	const lines = useMemo(() => replaceTabs(stripAnsi(diff)).replace(/\n+$/, "").split("\n"), [diff]);
 	const collapsible = lines.length > maxLines + 1;
@@ -260,7 +312,9 @@ export function DiffBlock({ diff, maxLines = 80 }: { diff: string; maxLines?: nu
 			</div>
 			{collapsible && (
 				<button type="button" className="tv-expand" onClick={() => setExpanded(v => !v)}>
-					{expanded ? "collapse" : `⋯ ${lines.length - maxLines} more lines`}
+					{expanded
+						? i18n.t("collab.tool.collapse")
+						: i18n.t("collab.tool.moreLines", { count: lines.length - maxLines })}
 				</button>
 			)}
 		</div>

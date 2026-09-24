@@ -134,6 +134,12 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--model": (result, value) => {
 		result.model = value;
 	},
+	"--language": (result, value) => {
+		if (value !== "auto" && value !== "en" && value !== "zh-CN") {
+			throw new CliUsageError(`Invalid --language value: ${JSON.stringify(value)}. Expected auto, en, or zh-CN.`);
+		}
+		result.language = value;
+	},
 	"--smol": (result, value) => {
 		result.smol = value;
 	},

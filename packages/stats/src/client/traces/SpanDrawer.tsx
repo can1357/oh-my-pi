@@ -8,6 +8,7 @@ import { Check, Copy, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { getSessionEntryDetail } from "../api";
 import { formatDurationMs, formatInteger } from "../data/formatters";
+import { useStatsI18n } from "../i18n";
 import type { TraceSpan, TraceTrack } from "../types";
 import { JsonBlock } from "../ui/JsonBlock";
 import { Skeleton } from "../ui/Skeleton";
@@ -63,6 +64,7 @@ function textBlocks(content: unknown): Array<{ kind: string; text: string }> {
 }
 
 export function SpanDrawer({ span, track, onClose, onOpenChildTrack }: SpanDrawerProps) {
+	const { i18n } = useStatsI18n();
 	const [entry, setEntry] = useState<unknown>(null);
 	const [loading, setLoading] = useState(false);
 	const [error, setError] = useState<Error | null>(null);
@@ -129,7 +131,7 @@ export function SpanDrawer({ span, track, onClose, onOpenChildTrack }: SpanDrawe
 
 	return (
 		<div className="stats-drawer-overlay" onClick={handleOverlayClick} role="presentation">
-			<div className="stats-drawer" role="dialog" aria-modal="true" aria-label="Span details">
+			<div className="stats-drawer" role="dialog" aria-modal="true" aria-label={i18n.t("stats.drawer.spanDetails")}>
 				<div className="stats-drawer-header">
 					<div className="stats-drawer-header-left">
 						<h2 className="stats-drawer-title truncate" style={{ maxWidth: 320 }}>
@@ -142,8 +144,8 @@ export function SpanDrawer({ span, track, onClose, onOpenChildTrack }: SpanDrawe
 							type="button"
 							onClick={handleCopy}
 							className="stats-drawer-close-btn"
-							aria-label="Copy raw JSON"
-							title="Copy raw JSON"
+							aria-label={i18n.t("stats.drawer.copyRawJson")}
+							title={i18n.t("stats.drawer.copyRawJson")}
 						>
 							{copied ? <Check size={16} /> : <Copy size={16} />}
 						</button>
@@ -152,7 +154,7 @@ export function SpanDrawer({ span, track, onClose, onOpenChildTrack }: SpanDrawe
 							type="button"
 							onClick={onClose}
 							className="stats-drawer-close-btn"
-							aria-label="Close span details"
+							aria-label={i18n.t("stats.drawer.closeSpanDetails")}
 						>
 							<X size={18} />
 						</button>
@@ -163,20 +165,22 @@ export function SpanDrawer({ span, track, onClose, onOpenChildTrack }: SpanDrawe
 					<div className="stats-drawer-content">
 						<div className="stats-drawer-metrics-grid">
 							<div className="stats-drawer-metric-card">
-								<div className="stats-drawer-metric-label">Duration</div>
+								<div className="stats-drawer-metric-label">{i18n.t("stats.drawer.duration")}</div>
 								<div className="stats-drawer-metric-value">{formatDurationMs(span.end - span.start)}</div>
-								{span.unterminated && <div className="stats-drawer-metric-sub">unterminated</div>}
+								{span.unterminated && (
+									<div className="stats-drawer-metric-sub">{i18n.t("stats.drawer.unterminated")}</div>
+								)}
 							</div>
 							<div className="stats-drawer-metric-card">
-								<div className="stats-drawer-metric-label">Start</div>
+								<div className="stats-drawer-metric-label">{i18n.t("stats.drawer.start")}</div>
 								<div className="stats-drawer-metric-value" style={{ fontSize: 13 }}>
-									{new Date(span.start).toLocaleTimeString()}
+									{i18n.date(span.start, { timeStyle: "medium" })}
 								</div>
 							</div>
 							{span.kind === "model" && (
 								<>
 									<div className="stats-drawer-metric-card">
-										<div className="stats-drawer-metric-label">Tokens</div>
+										<div className="stats-drawer-metric-label">{i18n.t("stats.drawer.tokens")}</div>
 										<div className="stats-drawer-metric-value">{formatInteger(span.tokens ?? 0)}</div>
 										{usage && (
 											<div className="stats-drawer-metric-sub">
@@ -186,20 +190,24 @@ export function SpanDrawer({ span, track, onClose, onOpenChildTrack }: SpanDrawe
 										)}
 									</div>
 									<div className="stats-drawer-metric-card">
-										<div className="stats-drawer-metric-label">Cost</div>
+										<div className="stats-drawer-metric-label">{i18n.t("stats.drawer.cost")}</div>
 										<div className="stats-drawer-metric-value">${(span.cost ?? 0).toFixed(4)}</div>
 									</div>
 									<div className="stats-drawer-metric-card">
-										<div className="stats-drawer-metric-label">TTFT</div>
+										<div className="stats-drawer-metric-label">{i18n.t("stats.drawer.ttft")}</div>
 										<div className="stats-drawer-metric-value">{formatDurationMs(span.ttft ?? null)}</div>
 									</div>
 									<div className="stats-drawer-metric-card">
-										<div className="stats-drawer-metric-label">Model</div>
+										<div className="stats-drawer-metric-label">{i18n.t("stats.drawer.model")}</div>
 										<div className="stats-drawer-metric-value" style={{ fontSize: 12 }}>
 											{msg?.model ?? span.model ?? "-"}
 										</div>
 										{msg?.provider && <div className="stats-drawer-metric-sub">{msg.provider}</div>}
-										{msg?.stopReason && <div className="stats-drawer-metric-sub">stop: {msg.stopReason}</div>}
+										{msg?.stopReason && (
+											<div className="stats-drawer-metric-sub">
+												{i18n.t("stats.drawer.stop", { reason: msg.stopReason })}
+											</div>
+										)}
 									</div>
 								</>
 							)}
@@ -207,7 +215,7 @@ export function SpanDrawer({ span, track, onClose, onOpenChildTrack }: SpanDrawe
 
 						{msg?.errorMessage && (
 							<div className="stats-drawer-error-block">
-								<div className="stats-drawer-error-label">Error Message</div>
+								<div className="stats-drawer-error-label">{i18n.t("stats.drawer.errorMessage")}</div>
 								<div className="stats-drawer-error-text">{msg.errorMessage}</div>
 							</div>
 						)}
@@ -235,7 +243,7 @@ export function SpanDrawer({ span, track, onClose, onOpenChildTrack }: SpanDrawe
 										style={{ marginTop: 8, border: "1px solid var(--border)", borderRadius: 6 }}
 										onClick={() => onOpenChildTrack(span.childTrackId ?? "")}
 									>
-										Open child track {span.childTrackId}
+										{i18n.t("stats.drawer.openChildTrack", { id: span.childTrackId })}
 									</button>
 								)}
 							</div>
@@ -243,7 +251,7 @@ export function SpanDrawer({ span, track, onClose, onOpenChildTrack }: SpanDrawe
 
 						{span.kind === "tool" && span.detail && (
 							<div>
-								<div className="stats-drawer-metric-label">Args</div>
+								<div className="stats-drawer-metric-label">{i18n.t("stats.drawer.args")}</div>
 								<pre
 									style={{
 										whiteSpace: "pre-wrap",
@@ -267,7 +275,7 @@ export function SpanDrawer({ span, track, onClose, onOpenChildTrack }: SpanDrawe
 						)}
 						{error && (
 							<div className="stats-drawer-error">
-								<p className="stats-drawer-error-title">Failed to load entry</p>
+								<p className="stats-drawer-error-title">{i18n.t("stats.drawer.failedToLoadEntry")}</p>
 								<p className="stats-drawer-error-message">{error.message}</p>
 							</div>
 						)}
@@ -298,7 +306,7 @@ export function SpanDrawer({ span, track, onClose, onOpenChildTrack }: SpanDrawe
 
 						{!loading && entry !== null && (
 							<div className="stats-drawer-json-blocks">
-								<JsonBlock data={entry} title="Raw Entry" initialCollapsed={true} />
+								<JsonBlock data={entry} title={i18n.t("stats.drawer.rawEntry")} initialCollapsed={true} />
 							</div>
 						)}
 					</div>

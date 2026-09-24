@@ -6,6 +6,7 @@
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { useMemo, useState } from "react";
 import { formatDurationMs, formatInteger } from "../data/formatters";
+import { useStatsI18n } from "../i18n";
 import type { TraceToolStat } from "../types";
 import { DataTable } from "../ui/DataTable";
 
@@ -14,33 +15,44 @@ export interface AggregatesPanelProps {
 }
 
 export function AggregatesPanel({ toolStats }: AggregatesPanelProps) {
+	const { i18n } = useStatsI18n();
 	const [open, setOpen] = useState(false);
 
 	const columns = useMemo(
 		() => [
-			{ key: "tool", header: "Tool", render: (item: TraceToolStat) => item.tool },
-			{ key: "calls", header: "Calls", numeric: true, render: (item: TraceToolStat) => formatInteger(item.calls) },
+			{ key: "tool", header: i18n.t("stats.trace.tool"), render: (item: TraceToolStat) => item.tool },
+			{
+				key: "calls",
+				header: i18n.t("stats.trace.calls"),
+				numeric: true,
+				render: (item: TraceToolStat) => formatInteger(item.calls),
+			},
 			{
 				key: "errors",
-				header: "Errors",
+				header: i18n.t("stats.trace.errors"),
 				numeric: true,
 				render: (item: TraceToolStat) => formatInteger(item.errors),
 			},
 			{
 				key: "total",
-				header: "Total",
+				header: i18n.t("stats.trace.total"),
 				numeric: true,
 				render: (item: TraceToolStat) => formatDurationMs(item.totalMs),
 			},
 			{
 				key: "avg",
-				header: "Avg",
+				header: i18n.t("stats.trace.avg"),
 				numeric: true,
 				render: (item: TraceToolStat) => formatDurationMs(item.calls > 0 ? item.totalMs / item.calls : 0),
 			},
-			{ key: "max", header: "Max", numeric: true, render: (item: TraceToolStat) => formatDurationMs(item.maxMs) },
+			{
+				key: "max",
+				header: i18n.t("stats.trace.max"),
+				numeric: true,
+				render: (item: TraceToolStat) => formatDurationMs(item.maxMs),
+			},
 		],
-		[],
+		[i18n],
 	);
 
 	if (toolStats.length === 0) return null;
@@ -68,9 +80,9 @@ export function AggregatesPanel({ toolStats }: AggregatesPanelProps) {
 				) : (
 					<ChevronRight size={14} className="stats-text-muted" aria-hidden="true" />
 				)}
-				<span className="stats-panel-title">Tool Aggregates</span>
+				<span className="stats-panel-title">{i18n.t("stats.trace.toolAggregates")}</span>
 				<span className="stats-text-muted" style={{ fontSize: 11 }}>
-					{toolStats.length} tools
+					{toolStats.length} {i18n.t("stats.trace.tools")}
 				</span>
 			</button>
 			{open && (
@@ -79,7 +91,7 @@ export function AggregatesPanel({ toolStats }: AggregatesPanelProps) {
 						columns={columns}
 						data={toolStats}
 						keyExtractor={item => item.tool}
-						emptyText="No tool calls"
+						emptyText={i18n.t("stats.trace.noToolCalls")}
 					/>
 				</div>
 			)}

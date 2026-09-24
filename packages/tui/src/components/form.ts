@@ -7,6 +7,7 @@ import { Input } from "./input";
 import { type SelectItem, SelectList, type SelectListTheme } from "./select-list";
 import { Spacer } from "./spacer";
 import { Text } from "./text";
+import { localizeTuiText } from "../i18n";
 
 /** Styling hooks used by the reusable form-field layout. */
 export interface FormFieldTheme {
@@ -121,17 +122,19 @@ export class FormField implements Component, Focusable, MouseRoutable {
 
 		if (options.leadingSpace) this.#beforeControl.addChild(new Spacer(1));
 		if (options.label) {
-			this.#beforeControl.addChild(new StyledText(options.label, options.theme.label));
+			this.#beforeControl.addChild(new StyledText(localizeTuiText(options.label), options.theme.label));
 		}
 		if (options.description) {
 			if (options.label) this.#beforeControl.addChild(new Spacer(1));
-			this.#beforeControl.addChild(new StyledText(options.description, options.theme.description));
+			this.#beforeControl.addChild(new StyledText(localizeTuiText(options.description), options.theme.description));
 		}
 		for (const detail of options.details ?? []) this.#beforeControl.addChild(detail);
 		if (options.preview) {
 			this.#beforeControl.addChild(new Spacer(1));
 			if (options.previewLabel) {
-				this.#beforeControl.addChild(new StyledText(options.previewLabel, options.theme.description));
+				this.#beforeControl.addChild(
+					new StyledText(localizeTuiText(options.previewLabel), options.theme.description),
+				);
 			}
 			this.#beforeControl.addChild(options.preview);
 		}
@@ -140,7 +143,7 @@ export class FormField implements Component, Focusable, MouseRoutable {
 		if (options.spaceAfterControl !== false) this.#afterControl.addChild(new Spacer(1));
 		this.#afterControl.addChild(this.#error);
 		for (const summary of options.summary ?? []) this.#afterControl.addChild(summary);
-		if (options.hint) this.#afterControl.addChild(new StyledText(options.hint, options.theme.hint));
+		if (options.hint) this.#afterControl.addChild(new StyledText(localizeTuiText(options.hint), options.theme.hint));
 		if (options.footer) {
 			this.#afterControl.addChild(new Spacer(1));
 			this.#afterControl.addChild(options.footer);

@@ -10,6 +10,7 @@ import { Toasts } from "./components/shell/Toasts";
 import { Transcript } from "./components/transcript/Transcript";
 import { GuestClient } from "./lib/client";
 import { useGuestSnapshot } from "./lib/use-guest";
+import { useCollabI18n } from "./lib/i18n";
 import type { ToolRenderHost } from "./tool-render";
 import "./components/shell/shell.css";
 
@@ -37,6 +38,7 @@ function hashLink(): string | null {
 }
 
 export function App(): ReactNode {
+	const { i18n } = useCollabI18n();
 	const [client, setClient] = useState<GuestClient | null>(null);
 	const [connectError, setConnectError] = useState<string | null>(null);
 	const credsRef = useRef<Creds | null>(null);
@@ -104,8 +106,8 @@ export function App(): ReactNode {
 	}, [connect]);
 
 	useEffect(() => {
-		if (!client) document.title = "omp collab";
-	}, [client]);
+		if (!client) document.title = i18n.t("collab.shell.pageTitle");
+	}, [client, i18n]);
 
 	if (!client) {
 		return <ConnectScreen defaultName={storedName()} error={connectError} onConnect={connect} />;
@@ -120,6 +122,7 @@ interface SessionProps {
 }
 
 function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
+	const { i18n } = useCollabI18n();
 	const snap = useGuestSnapshot(client);
 	const [railOpen, setRailOpen] = useState(false);
 	const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -147,10 +150,10 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 		}
 	}, [subCount]);
 
-	const title = snap.header?.title ?? snap.state?.sessionName ?? "session";
+	const title = snap.header?.title ?? snap.state?.sessionName ?? i18n.t("collab.shell.session");
 	useEffect(() => {
-		document.title = `${title} · omp collab`;
-	}, [title]);
+		document.title = i18n.t("collab.shell.pageTitleWithSession", { title });
+	}, [title, i18n]);
 
 	const drawerAgent = selectedId != null ? snap.agents.find(a => a.id === selectedId) : undefined;
 
