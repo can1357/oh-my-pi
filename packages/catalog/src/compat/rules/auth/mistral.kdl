@@ -1,3 +1,10 @@
 auth "mistral" {
 	name "Mistral"
+	login "api-key" {
+		auth-url "https://console.mistral.ai/api-keys"
+		instructions "Create or copy your API key from the Mistral console"
+		prompt "Paste your Mistral API key" placeholder="API key"
+		normalize "strip-bearer"
+		validate "models-endpoint" label="mistral" url="https://api.mistral.ai/v1/models"
+	}
 }

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Mistral to `/login` with an API-key flow that validates against `https://api.mistral.ai/v1/models`, so `MISTRAL_API_KEY` no longer has to come from the environment
+
 ## [18.3.0] - 2026-09-24
 
 ### Added
