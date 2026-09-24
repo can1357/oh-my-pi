@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `/dev/stdin`, `/dev/stdout`, `/dev/stderr`, `/dev/fd/N`, and `/dev/tty` in the bash tool reaching omp's own descriptors instead of the command's; `cat /dev/stdin <<'EOF'` no longer hangs the TUI ([#13121](https://github.com/can1357/oh-my-pi/pull/13121) by [@radkawar](https://github.com/radkawar))
+
 ## [18.3.0] - 2026-09-24
 
 ### Added
