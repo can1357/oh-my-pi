@@ -181,6 +181,9 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--session-dir": (result, value) => {
 		result.sessionDir = value;
 	},
+	"--session-id": (result, value) => {
+		result.sessionId = value;
+	},
 	"--models": (result, value) => {
 		result.models = value.split(",").map(s => s.trim());
 	},

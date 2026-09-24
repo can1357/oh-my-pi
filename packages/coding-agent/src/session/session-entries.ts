@@ -55,6 +55,8 @@ export interface SessionHeader {
 
 export interface NewSessionOptions {
 	parentSession?: string;
+	/** Prescribed session id (`--session-id` create path); must be filename-safe. */
+	sessionId?: string;
 	/** Provider prompt-cache identity to seed on the new session header. */
 	providerPromptCacheKey?: string;
 	/** Skip flushing the current session and delete it instead of saving. */

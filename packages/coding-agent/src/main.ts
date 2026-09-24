@@ -1115,6 +1115,35 @@ export async function createSessionManager(
 		}
 	}
 
+	if (parsed.sessionId !== undefined) {
+		const sessionId = parsed.sessionId;
+		if (
+			sessionId === "" ||
+			sessionId.includes("/") ||
+			sessionId.includes("\\") ||
+			sessionId.endsWith(".jsonl")
+		) {
+			throw new SessionResolutionError(
+				`Invalid --session-id ${JSON.stringify(sessionId)}: expected a bare session id for exact match (no paths).`,
+			);
+		}
+		if (parsed.resume !== undefined || parsed.continue || parsed.fork || parsed.noSession) {
+			throw new SessionResolutionError(
+				"--session-id cannot be used with --resume, --session, --continue, --fork, or --no-session.",
+			);
+		}
+		// Exact match only: resolveResumableSession does prefix matching, so
+		// verify the candidate's id before adopting it; otherwise create fresh
+		// with the prescribed id. Adopting the matched path reuses the resume
+		// handling (and its resuming flags) below.
+		const match = await resolveResumableSession(sessionId, cwd, parsed.sessionDir);
+		if (match && match.session.id === sessionId) {
+			parsed.resume = match.session.path;
+		} else {
+			return SessionManager.create(cwd, parsed.sessionDir, undefined, sessionId);
+		}
+	}
+
 	if (parsed.noSession) {
 		normalizeContinueSessionArgs(parsed);
 		if (options.nativeFlagOwnership !== "preliminary") {
