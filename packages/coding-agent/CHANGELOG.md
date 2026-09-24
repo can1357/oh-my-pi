@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `auth.hotWindowFraction` setting to configure the short-window demotion threshold ([#13054](https://github.com/can1357/oh-my-pi/pull/13054) by [@zhaob1n](https://github.com/zhaob1n)).
+
 ## [18.3.0] - 2026-09-24
 
 ### Breaking Changes
@@ -27,6 +31,29 @@
 - Added `/annotate` for attaching notes to diffs, replies, session messages, files, or quoted text and inserting or sending those notes in prompts and reviews.
 - Added configurable MCP startup behavior through `MCP_STARTUP_TIMEOUT_MS`/`mcp.startupTimeoutMs` and `OMP_MCP_REQUIRE_READY=1`, allowing headless runs to require MCP servers to become ready before the first turn.
 - Added native judgment usage reporting, including error stop reasons and messages, and added `openrouter/~typesafe/jev-latest` as a native judge candidate.
+- Added `wait` tool for monitoring background jobs, services, and peer messages
+- Added `proc://` protocol for inspecting and managing background jobs and services
+- Added `agent://` path support to `write` tool for direct agent messaging
+- Added supervised service mode to `bash` tool with `proc://` integration
+- Added Jev (TypeSafe Jev 1.13) to `toks` command supported encodings
+- Added `*** Insert Before` and `*** Insert After` to append new lines without replacing existing code
+- Added `toks` command to count tokens via offline tokenizers
+- Added automatic discovery of Apple Foundation Models on supported Apple silicon devices
+- Added recording of idle recaps to `session_recaps` table for durable storage
+- Added GC cleanup of session recap rows when deleting archived sessions
+- Implemented automatic title retry for ambiguous first messages
+- Added `/changelog last [N]` to show the latest release, or the last N releases. `/changelog` still shows the recent default and `/changelog full` still shows the complete history.
+- Added 'daybreak' badge to `omp usage` output for enabled accounts
+- Added `omp login` command for terminal-based OAuth authentication, including automated model discovery refresh and browser-opening support
+- Enabled `org-scoped-identity` and `oauth-token-env` configuration parsing for authentication providers
+- Adopted namespaced `authStorage` API for CLI and session management
+- Added usage reporting for failed native judgments, including error stop reason and message
+- Added openrouter/~typesafe/jev-latest as a native judge candidate in priority configuration
+- Added `OMP_MCP_STARTUP_TIMEOUT_MS` and `mcp.startupTimeoutMs` to configure the initial MCP discovery window, plus `OMP_MCP_REQUIRE_READY=1` to fail headless print runs before the first turn when a server is unavailable.
+- Added `auth.accountPolicies` for per-account OAuth priority and reserve controls, with matching policy state in `omp usage` ([#12243](https://github.com/can1357/oh-my-pi/pull/12243) by [@schickling-assistant](https://github.com/schickling-assistant)).
+- Added `/export` and `/usage` to focused subagent views: `/export` writes the focused subagent's transcript (including its own subagents) and `/usage` shows account usage without returning to the main session ([#12986](https://github.com/can1357/oh-my-pi/pull/12986) by [@H4vC](https://github.com/H4vC)).
+- Added saving of clipboard-pasted images to the session artifact directory so the agent receives a file path it can read, copy, or upload (for example, attaching a pasted screenshot to an issue tracker) ([#12985](https://github.com/can1357/oh-my-pi/pull/12985) by [@H4vC](https://github.com/H4vC)).
+- Added `/annotate` to attach notes to a code-review diff, the latest reply, a session message, a file, or quoted text, then paste them into the prompt or send them with a review ([#12601](https://github.com/can1357/oh-my-pi/pull/12601) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
 
 ### Changed
 
