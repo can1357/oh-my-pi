@@ -86,6 +86,78 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 		mock.restore();
 	});
 
+	it("omits an opted-out server's instructions and the empty heading, and keeps its tools", async () => {
+		await Bun.write(
+			path.join(tempDir, ".mcp.json"),
+			JSON.stringify({
+				mcpServers: {
+					instr: { type: "stdio", command: process.execPath, args: [FIXTURE_PATH], instructions: false },
+				},
+			}),
+		);
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "mcp.startupTimeoutMs": 0 }),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableLsp: false,
+			skipPythonPreflight: true,
+			enableMCP: true,
+		});
+		try {
+			const prompt = session.systemPrompt.join("\n");
+			expect(prompt).not.toContain(SERVER_INSTRUCTIONS);
+			expect(prompt).not.toContain("## MCP Server Instructions");
+			const result = await session.getToolByName(MCP_TOOL_NAME)?.execute("opted-out-instructions-call", {});
+			expect(result?.content.find(part => part.type === "text")?.text).toBe(TOOL_RESULT);
+		} finally {
+			await session.dispose();
+		}
+	}, 20_000);
+
+	it("keeps other servers' instructions when one server opts out", async () => {
+		await Bun.write(
+			path.join(tempDir, ".mcp.json"),
+			JSON.stringify({
+				mcpServers: {
+					instr: { type: "stdio", command: process.execPath, args: [FIXTURE_PATH], instructions: false },
+					other: { type: "stdio", command: process.execPath, args: [FIXTURE_PATH, "--other"] },
+				},
+			}),
+		);
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "mcp.startupTimeoutMs": 0 }),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableLsp: false,
+			skipPythonPreflight: true,
+			enableMCP: true,
+		});
+		try {
+			const prompt = session.systemPrompt.join("\n");
+			expect(prompt).toContain(`### other\n${SERVER_INSTRUCTIONS}`);
+			expect(prompt).not.toContain("### instr");
+			expect(prompt.split(SERVER_INSTRUCTIONS)).toHaveLength(2);
+		} finally {
+			await session.dispose();
+		}
+	}, 20_000);
+
 	it("folds server instructions into the prompt once deferred discovery connects", async () => {
 		const { session } = await createAgentSession({
 			cwd: tempDir,

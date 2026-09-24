@@ -1807,12 +1807,12 @@ export class MCPManager {
 	}
 
 	/**
-	 * Get all server instructions (for system prompt injection).
+	 * Get server instructions allowed by config (for prompt injection and rebuild signatures).
 	 */
 	getServerInstructions(): Map<string, string> {
 		const instructions = new Map<string, string>();
 		for (const [name, connection] of this.#connections) {
-			if (connection.instructions) {
+			if (connection.config.instructions !== false && connection.instructions) {
 				instructions.set(name, connection.instructions);
 			}
 		}
