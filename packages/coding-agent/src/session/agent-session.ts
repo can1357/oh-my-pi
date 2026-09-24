@@ -53,6 +53,7 @@ import {
 	type ShakeConfig,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import type {
+	AnthropicFallbackCreditHandle,
 	AssistantMessage,
 	CodexCompactionContext,
 	ImageContent,
@@ -11671,5 +11672,12 @@ export class AgentSession {
 	 */
 	get extensionRunner(): ExtensionRunner | undefined {
 		return this.#extensionRunner;
+	}
+
+	/**
+	 * Consume any pending Anthropic fallback credit handle for the next retry turn.
+	 */
+	consumeActiveFallbackCreditRedemption(targetModel?: Model): AnthropicFallbackCreditHandle | undefined {
+		return this.#recovery.consumeActiveFallbackCreditRedemption(targetModel);
 	}
 }
