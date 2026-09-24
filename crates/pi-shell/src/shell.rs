@@ -71,7 +71,17 @@ fn shell_working_dir_matches(shell: &BrushShell, cwd: &str) -> bool {
 		return false;
 	}
 	let current = shell.working_dir();
-	current == requested
+	// On Windows the stored dir is already long-form (brush-core expands 8.3
+	// short names on every store), so only the requested spelling needs
+	// expansion for a short-spelled host cwd to match its long spelling.
+	#[cfg(windows)]
+	{
+		current == brush_core::sys::fs::expand_to_long_path(requested)
+	}
+	#[cfg(not(windows))]
+	{
+		current == requested
+	}
 }
 
 fn set_shell_working_dir_if_changed(shell: &mut BrushShell, cwd: &str) -> Result<()> {
@@ -1906,6 +1916,114 @@ mod tests {
 
 	use super::*;
 
+	/// 8.3 short spelling of `path` (`GetShortPathNameW`).
+	#[cfg(windows)]
+	fn short_name_of(path: &std::path::Path) -> std::path::PathBuf {
+		use std::os::windows::ffi::{OsStrExt, OsStringExt};
+		let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+		// SAFETY: `wide` is NUL-terminated; a null buffer with length 0 asks
+		// only for the required size.
+		let needed = unsafe {
+			windows_sys::Win32::Storage::FileSystem::GetShortPathNameW(
+				wide.as_ptr(),
+				std::ptr::null_mut(),
+				0,
+			)
+		};
+		assert!(needed > 0, "GetShortPathNameW failed for {}", path.display());
+		let mut buf = vec![0u16; needed as usize];
+		// SAFETY: `wide` is NUL-terminated and `buf` is writable for
+		// `buf.len()` u16s.
+		let written = unsafe {
+			windows_sys::Win32::Storage::FileSystem::GetShortPathNameW(
+				wide.as_ptr(),
+				buf.as_mut_ptr(),
+				buf.len() as u32,
+			)
+		};
+		assert!(written > 0, "GetShortPathNameW fill failed for {}", path.display());
+		buf.truncate(written as usize);
+		std::path::PathBuf::from(std::ffi::OsString::from_wide(&buf))
+	}
+
+	#[cfg(windows)]
+	const LONG_DIR_NAME: &str = "pi-shell-long-name-probe";
+
+	/// A fresh directory whose long name has a distinct 8.3 alias, as
+	/// `(guard, long, short)`. `None` when the volume does not generate short
+	/// names, since no spelling split can exist there.
+	#[cfg(windows)]
+	fn short_alias_fixture() -> Option<(tempfile::TempDir, std::path::PathBuf, std::path::PathBuf)> {
+		let root = tempfile::tempdir().expect("tempdir");
+		let long = root.path().join(LONG_DIR_NAME);
+		std::fs::create_dir(&long).expect("create long-named dir");
+		let short = short_name_of(&long);
+		(short.file_name() != long.file_name()).then_some((root, long, short))
+	}
+
+	/// The shell stores `working_dir` in long form both at construction and on
+	/// `cd`, even when handed the 8.3 short spelling of the directory.
+	#[cfg(windows)]
+	#[tokio::test]
+	async fn working_dir_stores_long_form() {
+		let Some((_root, _long, short)) = short_alias_fixture() else {
+			return;
+		};
+
+		let mut shell = BrushShell::builder()
+			.do_not_inherit_env(true)
+			.profile(ProfileLoadBehavior::Skip)
+			.rc(RcLoadBehavior::Skip)
+			.working_dir(short.clone())
+			.build()
+			.await
+			.expect("build shell");
+
+		assert_eq!(
+			shell.working_dir().file_name(),
+			Some(std::ffi::OsStr::new(LONG_DIR_NAME)),
+			"built from {}",
+			short.display()
+		);
+
+		shell
+			.set_working_dir(short.parent().expect("parent"))
+			.expect("cd parent");
+		shell.set_working_dir(&short).expect("cd short spelling");
+		assert_eq!(
+			shell.working_dir().file_name(),
+			Some(std::ffi::OsStr::new(LONG_DIR_NAME)),
+			"cd {}",
+			short.display()
+		);
+	}
+
+	/// A host cwd spelled with 8.3 short names matches the stored long form of
+	/// the same directory, so no redundant `set_working_dir` runs.
+	#[cfg(windows)]
+	#[tokio::test]
+	async fn short_spelled_cwd_matches_stored_long_form() {
+		let Some((_root, long, short)) = short_alias_fixture() else {
+			return;
+		};
+
+		let shell = BrushShell::builder()
+			.do_not_inherit_env(true)
+			.profile(ProfileLoadBehavior::Skip)
+			.rc(RcLoadBehavior::Skip)
+			.working_dir(long)
+			.build()
+			.await
+			.expect("build shell");
+
+		assert!(
+			shell_working_dir_matches(&shell, &short.to_string_lossy()),
+			"short spelling {} should match stored {}",
+			short.display(),
+			shell.working_dir().display()
+		);
+	}
+
 	#[cfg(unix)]
 	async fn kill_test_context() -> (ShellSessionCore, ExecutionParameters) {
 		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
@@ -1947,6 +2065,37 @@ mod tests {
 		.expect("shell execution");
 		let output = rx.try_iter().collect();
 		(result, output)
+	}
+
+	/// Shell initialization must recover when a long-running host's inherited
+	/// working directory is deleted. This runs in a child process because cwd is
+	/// process-global.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn shell_initializes_after_process_cwd_is_deleted() {
+		const MARKER: &str = "PI_SHELL_TEST_DELETED_CWD";
+		if std::env::var_os(MARKER).is_none() {
+			run_isolated_kill_test(
+				"shell::tests::shell_initializes_after_process_cwd_is_deleted",
+				MARKER,
+				false,
+			)
+			.await;
+			return;
+		}
+
+		let dir = tempfile::tempdir().expect("temporary cwd");
+		std::env::set_current_dir(dir.path()).expect("enter temporary cwd");
+		std::fs::remove_dir(dir.path()).expect("delete process cwd");
+
+		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let session = create_session(&config)
+			.await
+			.expect("initialize shell after deleted cwd");
+		let fallback = std::env::var_os("HOME")
+			.map(std::path::PathBuf::from)
+			.unwrap_or_else(|| "/".into());
+		assert_eq!(session.shell.working_dir(), fallback);
 	}
 
 	/// Native Windows tools write the ANSI code page to pipes. On a Chinese
@@ -2533,6 +2682,36 @@ mod tests {
 				.next()
 				.is_some_and(|value| value == pid.to_string())
 		}));
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn ps_builtin_lists_one_line_per_thread_with_m() {
+		// Field report: `ps -M -p <pid>` failed with "unsupported option '-M'".
+		let pid = std::process::id().to_string();
+		let (result, output) = execute_captured(format!("ps -M -p {pid}")).await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		let mut lines = output.lines();
+		let header: Vec<&str> = lines
+			.next()
+			.unwrap_or_default()
+			.split_whitespace()
+			.collect();
+		assert_eq!(header, ["USER", "PID", "TT", "%CPU", "STAT", "PRI", "STIME", "UTIME", "COMMAND"]);
+		let threads: Vec<Vec<&str>> = lines
+			.map(|line| line.split_whitespace().collect())
+			.collect();
+		// The multi-threaded tokio runtime guarantees several threads.
+		assert!(threads.len() > 1, "{output:?}");
+		// USER, TT and COMMAND print only on the first thread line.
+		assert_eq!(threads[0].get(1), Some(&pid.as_str()), "{output:?}");
+		assert!(threads[0].len() >= 9, "{output:?}");
+		for fields in &threads[1..] {
+			assert_eq!(fields.len(), 6, "{output:?}");
+			assert_eq!(fields[0], pid);
+			assert!(fields[1].parse::<f64>().is_ok(), "%CPU: {:?}", fields[1]);
+			#[cfg(target_os = "macos")]
+			assert!(fields[5].contains(':'), "UTIME: {:?}", fields[5]);
+		}
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
@@ -3426,6 +3605,7 @@ mod tests {
 			"date",
 			"diff",
 			"dirname",
+			#[cfg(unix)]
 			"errno",
 			"fd",
 			"find",
@@ -4052,6 +4232,7 @@ mod tests {
 		let _ = std::fs::remove_dir_all(&tmp);
 		std::fs::create_dir_all(&tmp).expect("temp dir");
 		std::fs::write(tmp.join("data.txt"), "from-cwd\nfrom-pattern\n").expect("data");
+		std::fs::write(tmp.join("z-output.txt"), "from-cwd\n").expect("output seed");
 		let tmp_str = tmp.to_str().expect("utf8");
 
 		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
@@ -4066,10 +4247,10 @@ mod tests {
 
 		session
 			.shell
-			.run_string("rg from-cwd > cwd.txt", &si, &params)
+			.run_string("rg --sort path --max-count 1 from-cwd >> z-output.txt", &si, &params)
 			.await
 			.expect("rg cwd");
-		assert_eq!(read("cwd.txt"), "data.txt:from-cwd\n");
+		assert_eq!(read("z-output.txt"), "from-cwd\ndata.txt:from-cwd\n");
 
 		session
 			.shell
@@ -4664,6 +4845,119 @@ mod tests {
 
 		assert_eq!(result.exit_code, Some(1));
 		assert!(output.contains("< a\n---\n> b\n"), "diff output missing changed lines: {output:?}");
+	}
+
+	/// Builtins share the host process, so a descriptor path must reach the
+	/// command's descriptors rather than the host's: the host's fd 0 is its
+	/// terminal (`cat /dev/stdin` once blocked on the TUI's keystrokes for
+	/// good) and its fd 2 is not the capture pipe. Covers a utility operand,
+	/// a redirect, a utility output file, and `source`.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn descriptor_paths_reach_the_commands_descriptors() {
+		// The first command is the shape that hung the TUI.
+		let command = "for f in $(cat /dev/stdin <<'EOF'\na\nb\nEOF\n); do echo \"$f\"; done\necho \
+		               to-stderr > /dev/stderr\necho via-tee | tee /dev/stderr > /dev/null\nsource \
+		               /dev/stdin <<< 'echo sourced'";
+		let (result, output) = time::timeout(
+			Duration::from_secs(5),
+			run_command_capture(command, None, None, CancelToken::default()),
+		)
+		.await
+		.expect("descriptor paths must not read the host terminal");
+
+		assert_eq!(result.exit_code, Some(0), "output: {output:?}");
+		assert_eq!(output, "a\nb\nto-stderr\nvia-tee\nsourced\n");
+	}
+
+	/// A descriptor the shell does not have fails like a closed one, instead
+	/// of reaching whatever the host process holds at that number.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn descriptor_paths_never_reach_host_only_descriptors() {
+		use std::os::fd::AsRawFd as _;
+
+		let dir = unique_temp_dir("host-fd");
+		let host_path = dir.join("host-only.txt");
+		std::fs::write(&host_path, "host-only\n").expect("write host file");
+		let host_file = std::fs::File::open(&host_path).expect("open host file");
+		let fd = host_file.as_raw_fd();
+		let command =
+			format!("cat /dev/fd/{fd}; echo \"rc=$?\"; cat < /proc/self/fd/{fd}; echo \"rc=$?\"");
+
+		let (_, output) = time::timeout(
+			Duration::from_secs(5),
+			run_command_capture(&command, None, None, CancelToken::default()),
+		)
+		.await
+		.expect("closed descriptor paths should fail fast");
+		drop(host_file);
+		let _ = std::fs::remove_dir_all(&dir);
+
+		assert!(!output.contains("host-only"), "read a host-only descriptor: {output:?}");
+		assert_eq!(output.matches("rc=1").count(), 2, "both opens should fail: {output:?}");
+	}
+
+	/// `<(…)` operands resolve through the shell's descriptor table, so
+	/// utilities report the name the shell passed and script-file options read
+	/// them too.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn process_substitution_operands_keep_the_shell_fd_name() {
+		let command = "wc -l <(printf 'a\\nb\\n'); ls <(true); sed -n -f <(echo p) <<< from-sed";
+		let (result, output) = time::timeout(
+			Duration::from_secs(5),
+			run_command_capture(command, None, None, CancelToken::default()),
+		)
+		.await
+		.expect("process substitution should not hang");
+
+		assert_eq!(result.exit_code, Some(0), "output: {output:?}");
+		assert_eq!(output, "2 /dev/fd/63\n/dev/fd/63\nfrom-sed\n");
+	}
+
+	/// `sed`'s `w /dev/stdout` writes through sed's own output, as GNU sed
+	/// does: a second open of a redirected stdout truncates it and races the
+	/// primary output at its own offset.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn sed_w_dev_stdout_shares_sed_output() {
+		let dir = unique_temp_dir("sed-w-stdout");
+		let command = format!(
+			"cd '{}'; printf 'a\\nb\\n' | sed 'w /dev/stdout' > f; cat f; printf 'c\\n' | sed -n \
+			 's/c/d/w /dev/stdout'",
+			dir.display()
+		);
+		let (result, output) = time::timeout(
+			Duration::from_secs(5),
+			run_command_capture(&command, None, None, CancelToken::default()),
+		)
+		.await
+		.expect("sed should not hang");
+		let _ = std::fs::remove_dir_all(&dir);
+
+		assert_eq!(result.exit_code, Some(0), "output: {output:?}");
+		assert_eq!(output, "a\na\nb\nb\nd\n");
+	}
+
+	/// A descriptor the shell lacks is reported under the name the user
+	/// typed, and `readlink` reads `/dev/stdin` as the symlink it is instead
+	/// of the descriptor behind it.
+	#[cfg(target_os = "linux")]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn descriptor_paths_keep_their_spelling() {
+		let command = "pgrep -F /dev/fd/9; sed 'w /dev/fd/9' <<< x; readlink /dev/stdin <<< x";
+		let (_, output) = time::timeout(
+			Duration::from_secs(5),
+			run_command_capture(command, None, None, CancelToken::default()),
+		)
+		.await
+		.expect("closed descriptor paths should fail fast");
+
+		assert!(!output.contains("/dev/fd/-1"), "leaked the placeholder path: {output:?}");
+		assert!(output.contains("cannot read pidfile '/dev/fd/9'"), "output: {output:?}");
+		assert!(output.contains("creating file '/dev/fd/9'"), "output: {output:?}");
+		assert!(output.ends_with("/proc/self/fd/0\n"), "output: {output:?}");
 	}
 
 	#[cfg(unix)]

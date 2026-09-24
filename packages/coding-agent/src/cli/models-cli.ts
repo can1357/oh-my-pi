@@ -25,6 +25,8 @@ import { discoverAuthStorage } from "../sdk";
 import { SessionManager } from "../session/session-manager";
 import { EventBus } from "../utils/event-bus";
 
+import { cfgDisabledExtensions, cfgExtensions } from "../extensibility/settings";
+
 export type ModelsAction = "ls" | "find" | "refresh";
 
 export interface ModelsCommandArgs {
@@ -406,8 +408,8 @@ export async function runModelsCommand(command: ModelsCommandArgs): Promise<void
 			json,
 			kind,
 			additionalExtensionPaths: cliExtensionPaths,
-			settingsExtensions: settings.get("extensions") ?? [],
-			disabledExtensionIds: settings.get("disabledExtensions") ?? [],
+			settingsExtensions: cfgExtensions.get(settings) ?? [],
+			disabledExtensionIds: cfgDisabledExtensions.get(settings) ?? [],
 			disableExtensionDiscovery: Boolean(command.flags.noExtensions),
 		});
 	} finally {

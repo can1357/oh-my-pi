@@ -4,12 +4,12 @@
 mod common;
 
 use common::{DiskWriter, Workspace};
-use pi_edit::{ApplyRequest, EditMode, FileOp, session::PreviewBatch};
+use pi_edit::{ApplyRequest, EditError, EditMode, FileOp, UrlResolution, session::PreviewBatch};
 
 const SOURCE: &str = "fn main() {\n    let x = 1;\n    println!(\"{x}\");\n}\n";
 
 fn sloppy_payload(path: &str) -> String {
-	format!("*** SM:EDIT {path}\n*** SM:FIND\n    let x = 1;\n*** SM:PUT\n    let x = 2;\n")
+	format!("*** Edit File: {path}\n*** Find\n    let x = 1;\n*** Replace\n    let x = 2;\n")
 }
 
 #[tokio::test]
@@ -60,7 +60,7 @@ async fn multi_file_failure_stages_nothing() {
 	ws.write("a.rs", SOURCE);
 	ws.write("b.rs", "fn other() {}\n");
 	let input = format!(
-		"{}*** SM:EDIT b.rs\n*** SM:FIND\nfn missing() {{}}\n*** SM:PUT\nfn present() {{}}\n",
+		"{}*** Edit File: b.rs\n*** Find\nfn missing() {{}}\n*** Replace\nfn present() {{}}\n",
 		sloppy_payload("a.rs")
 	);
 	let writer = DiskWriter::default();
@@ -419,8 +419,8 @@ async fn hashline_rem_streaming_preview_does_not_error_on_invalid_utf8() {
 		policy:             PathPolicy {
 			cwd:                  cwd.clone(),
 			home_dir:             cwd,
-			local_sandbox_root:   None,
-			vault_roots:          None,
+			url_schemes:          Vec::new(),
+			plan_writable_roots:  Vec::new(),
 			plan_active:          false,
 			block_auto_generated: true,
 		},
@@ -514,6 +514,71 @@ async fn plan_mode_rejects_working_tree_writes_before_writing() {
 		 instead."
 	);
 	assert_eq!(writer.requests.lock().len(), 0);
+}
+
+#[tokio::test]
+async fn internal_url_targets_wait_for_host_answers() {
+	let mut ws = Workspace::new(EditMode::Replace);
+	ws.config.policy.url_schemes = vec!["local".into()];
+	ws.config.policy.plan_active = true;
+	let sandbox = tempfile::tempdir().expect("sandbox");
+	let backing = sandbox.path().join("plan.md");
+	std::fs::write(&backing, "one\n").unwrap();
+	let args = r#"{"old_string":"one","new_string":"two","path":"local://plan.md"}"#;
+	let writer = DiskWriter::default();
+
+	let mut unprovided = ws.session();
+	unprovided.set_args_json(args);
+	unprovided.finish();
+	let err = unprovided
+		.apply(ApplyRequest::default(), &writer)
+		.await
+		.expect_err("unprovided URL");
+	assert!(matches!(&err, EditError::UnresolvedUrl(url) if url == "local://plan.md"), "{err}");
+	assert_eq!(writer.requests.lock().len(), 0, "no write before the URL resolves");
+	assert_eq!(unprovided.take_unresolved(), ["local://plan.md"]);
+
+	let mut session = ws.session();
+	let split = args.len() - r#"an.md"}"#.len();
+	session.push(&args[..split]);
+	session.preview();
+	assert_eq!(
+		session.take_unresolved(),
+		["local://pl"],
+		"streaming passes report their current URL"
+	);
+	session.push(&args[split..]);
+	let batch = session.preview();
+	assert_eq!(
+		batch.files[0].error.as_deref(),
+		Some("Internal URL not resolved yet: local://plan.md")
+	);
+	assert_eq!(session.take_unresolved(), ["local://plan.md"]);
+	assert!(!session.preview_pending());
+
+	session.provide("local://plan.md".into(), UrlResolution {
+		absolute:      Some(backing.clone()),
+		error:         None,
+		plan_writable: true,
+	});
+	assert!(session.preview_pending());
+	let batch = session.preview();
+	assert_eq!(batch.files[0].display, "local://plan.md");
+	assert!(
+		batch.files[0]
+			.diff
+			.as_deref()
+			.is_some_and(|diff| diff.contains("+1|two")),
+		"{batch:?}"
+	);
+
+	session.finish();
+	session
+		.apply(ApplyRequest::default(), &writer)
+		.await
+		.expect("plan-writable URL applies in plan mode");
+	assert_eq!(writer.requests.lock()[0].absolute, backing);
+	assert_eq!(std::fs::read_to_string(&backing).unwrap(), "two\n");
 }
 
 #[tokio::test]

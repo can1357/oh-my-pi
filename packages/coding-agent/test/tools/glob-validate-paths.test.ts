@@ -145,6 +145,7 @@ describe("delimited path expansion", () => {
 			rawPaths: ["apps\\**\\*.txt"],
 			cwd: tempDir,
 			internalUrlAction: "search",
+			context: {},
 		});
 
 		expect(scope.searchPath).toBe(path.join(tempDir, "apps"));

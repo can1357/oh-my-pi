@@ -35,6 +35,9 @@ import {
 } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolAbortError } from "./tool-errors";
 
+import { cfgAskNotify, cfgAskTimeout } from "../modes/settings";
+import { cfgSpeechEnabled } from "../tts/settings";
+
 // =============================================================================
 // Types
 // =============================================================================
@@ -49,18 +52,18 @@ const RESERVED_OPTION_LABELS: Record<string, true> = {
 };
 
 const OptionItem = arkType({
-	label: arkType("string").describe("display label"),
-	"description?": arkType("string").describe("optional explanatory text displayed below the label"),
-	"preview?": arkType("string").describe("optional rich preview content for interactive ask dialogs"),
+	label: arkType("string"),
+	"description?": arkType("string"),
+	"preview?": arkType("string").describe("rich preview"),
 });
 
 const QuestionItem = arkType({
-	id: arkType("string").describe("question id"),
-	question: arkType("string").describe("question text"),
-	"header?": arkType("string").describe("optional short display chip for rich ask dialogs"),
-	options: OptionItem.array().describe("available options"),
-	"multi?": arkType("boolean").describe("allow multiple selections"),
-	"recommended?": arkType("number").describe("recommended option index"),
+	id: arkType("string"),
+	question: arkType("string"),
+	"header?": arkType("string").describe("display chip"),
+	options: OptionItem.array(),
+	"multi?": arkType("boolean"),
+	"recommended?": arkType("number").describe("0-based default index"),
 }).narrow((question, ctx) => {
 	const reserved = question.options.find(option => RESERVED_OPTION_LABELS[option.label] === true);
 	return (
@@ -70,7 +73,7 @@ const QuestionItem = arkType({
 });
 
 const askSchema = arkType({
-	questions: QuestionItem.array().atLeastLength(1).describe("questions to ask"),
+	questions: QuestionItem.array().atLeastLength(1),
 });
 
 export type AskToolInput = typeof askSchema.infer;
@@ -754,38 +757,14 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 
 	readonly examples: readonly ToolExample<typeof askSchema.infer>[] = [
 		{
-			caption: "Single question",
+			caption: "Choice",
 			call: {
 				questions: [
 					{
-						id: "auth_method",
-						question: "Which authentication method should this API use?",
-						options: [
-							{ label: "JWT", description: "Bearer tokens for stateless API clients." },
-							{ label: "OAuth2", description: "Delegated authorization with external identity providers." },
-							{
-								label: "Session cookies",
-								description: "Browser-first authentication backed by server-side sessions.",
-							},
-						],
+						id: "storage",
+						question: "Database?",
+						options: [{ label: "SQLite" }, { label: "Postgres" }],
 						recommended: 0,
-					},
-				],
-			},
-		},
-		{
-			caption: "Multiple questions",
-			call: {
-				questions: [
-					{
-						id: "storage_type",
-						question: "Which storage backend?",
-						options: [{ label: "SQLite" }, { label: "PostgreSQL" }],
-					},
-					{
-						id: "auth_method",
-						question: "Which auth method?",
-						options: [{ label: "JWT" }, { label: "Session cookies" }],
 					},
 				],
 			},
@@ -810,10 +789,10 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 	/** Send terminal notification when ask tool is waiting for input */
 	#sendAskNotification(): void {
 		if (!this.session.hasUI) return;
-		const method = this.session.settings.get("ask.notify");
+		const method = cfgAskNotify.get(this.session.settings);
 		if (method === "off") return;
 		TERMINAL.sendNotification({
-			title: "Oh My Pi",
+			title: "omp",
 			body: "Waiting for input",
 			type: "ask",
 			urgency: "normal",
@@ -922,8 +901,8 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 
 		// Determine timeout based on settings and plan mode
 		const planModeEnabled = this.session.getPlanModeState?.()?.enabled ?? false;
-		// Settings.get("ask.timeout") returns seconds (0 = disabled), convert to ms
-		const timeoutSeconds = this.session.settings.get("ask.timeout");
+		// `ask.timeout` is in seconds (0 = disabled); convert to ms
+		const timeoutSeconds = cfgAskTimeout.get(this.session.settings);
 		const settingsTimeout = timeoutSeconds === 0 ? null : timeoutSeconds * 1000;
 		const timeout = planModeEnabled ? null : settingsTimeout;
 
@@ -940,7 +919,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		// Speak the question(s) aloud before surfacing them. Ask vocalizes in every
 		// mode — it's the assistant addressing the user — gated only by speech.enabled
 		// (the vocalizer re-checks the setting and no-ops when disabled).
-		if (this.session.settings.get("speech.enabled")) {
+		if (cfgSpeechEnabled.get(this.session.settings)) {
 			vocalizer.speak(params.questions.map(q => q.question).join("\n"));
 		}
 

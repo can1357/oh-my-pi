@@ -1,6 +1,6 @@
 # bash
 
-> Execute a shell command in the session workspace, with optional PTY or background-job handling.
+> Execute a shell command in the session workspace, with optional PTY, background-job handling, or supervised service mode.
 
 ## Source
 - Entry: `packages/coding-agent/src/tools/bash.ts`
@@ -14,7 +14,7 @@
   - `packages/coding-agent/src/exec/bash-executor.ts` — non-PTY shell execution.
   - `packages/coding-agent/src/session/streaming-output.ts` — tail buffer, truncation, artifact spill.
   - `packages/coding-agent/src/tools/tool-timeouts.ts` — timeout clamp bounds.
-  - `packages/coding-agent/src/config/settings-schema.ts` — default interceptor rules.
+  - `packages/coding-agent/src/exec/settings.ts` — default interceptor rules.
   - `docs/bash-tool-runtime.md` — deeper executor/runtime notes; use as the companion doc for shell-session internals.
 
 ## Inputs
@@ -24,8 +24,16 @@
 | `command` | `string` | Yes | Shell command text to execute. A leading `cd <path> && ...` is rewritten into `cwd` only when `cwd` was omitted. |
 | `timeout` | `number` | No | Timeout in seconds. Default `300`. `0` disables the deadline. Positive values are capped by `tools.maxTimeout` when that setting is positive, then clamped to the Bash range `1..3600`. |
 | `cwd` | `string` | No | Working directory, resolved against `session.cwd` via `resolveToCwd`. Must exist and be a directory. |
-| `pty` | `boolean` | No | Request PTY mode. Default `false`. PTY is used only when `pty: true`, `PI_NO_PTY !== "1"`, and the tool context has a UI. |
+| `pty` | `boolean` | No | Request PTY mode. Default `false`. Foreground PTY requires a UI and `PI_NO_PTY !== "1"`; named services forward this setting to the broker. |
 | `async` | `boolean` | No | Background execution request. Present only when `async.enabled` is true for the session. Returns immediately with a job id instead of waiting; it does not change the effective deadline, including a disabled deadline from `timeout: 0`. |
+| `name` | `string` | No | Supervised service name (≤48 characters; project-unique). Present only when `launch.enabled` and the session can launch. A live name restarts using the new spec. Incompatible with `async` and `timeout`. |
+| `ready` | `{ log?: string; port?: number; host?: string; timeout?: number }` | No | Service readiness: output regex and/or TCP port must pass; host defaults to `127.0.0.1`, timeout to 30 seconds. Only with `name`. |
+| `env` | `Record<string, string>` | No | Environment overrides for the service. Only with `name`. |
+
+Named service example:
+```json
+{"command":"python3 -m http.server 8765","name":"web","ready":{"port":8765}}
+```
 
 ## Outputs
 The tool returns a single `text` content block plus optional `details`.
@@ -43,6 +51,8 @@ The tool returns a single `text` content block plus optional `details`.
 - Success, background start (`async: true` or auto-background):
   - `content[0].text`: optional preview tail and notices, followed by `Backgrounded as job <id>; result will be delivered automatically.`
   - `details.async`: `{ state: "running", jobId, type: "bash" }`.
+  - `read proc://` lists owned jobs and project services; `read proc://<id>` inspects status/output without consuming result delivery; `write proc://<id>/kill` cancels the job without requiring `content`.
+- Success, named service (`name`): executes `command` through the user's shell under the launch broker, returning readiness, exit, or readiness timeout with state and log tail. A live name is stopped and restarted with the new spec; exit notifications still auto-deliver. `read proc://<name>` inspects status/logs; `write proc://<name>` sends stdin (appends Enter unless content already ends with newline, including empty content); `write proc://<name>/kill` stops it. `write proc://<name>/mode` accepts `persist`, `session`, or `detached`.
 - Background progress / completion:
   - delivered through `onUpdate` / async job manager, not the initial return.
   - running updates contain tail text and `details.async.state: "running"` only after the job is considered backgrounded.
@@ -101,7 +111,7 @@ bashInterceptor:
 
 An interceptor rule only applies when its `tool` is available in the current session. If `read` is disabled, a `cat` rule targeting `read` does not block the Bash call. This makes the interceptor a best-effort capability preference rather than an execution-security boundary.
 
-The built-in default rules route common operations such as `cat` to `read`, `rg` to `grep`, in-place `sed` to `edit`, shell redirection to `write`, and unmanaged services/background processes to `hub`. See `DEFAULT_BASH_INTERCEPTOR_RULES` in `packages/coding-agent/src/config/settings-schema.ts` for the complete list.
+The built-in default rules route common operations such as `cat` to `read`, `rg` to `grep`, in-place `sed` to `edit`, shell redirection to `write`, and unmanaged services/watchers to named `bash` service mode. See `DEFAULT_BASH_INTERCEPTOR_RULES` in `packages/coding-agent/src/exec/settings.ts` for the complete list.
 
 For compatibility with existing custom regexes, the interceptor always checks the complete original command first. It then checks raw, flat command fragments separated by unquoted and unescaped `&&`, `||`, `;`, `|`, `&`, or newlines. It also checks fragments after leading environment assignments are removed:
 
@@ -123,11 +133,11 @@ Choose the setting by the desired outcome:
 - Use `bash.patterns` when the question is **whether the command may execute**.
 - Use `bashInterceptor.patterns` when the question is **which tool should perform the operation**.
 
-1. `BashTool.execute()` in `packages/coding-agent/src/tools/bash.ts` reads `command` and defaults `timeout` to `300`.
+1. `BashTool.execute()` in `packages/coding-agent/src/tools/bash.ts` reads `command`. A `name` selects supervised service mode (through the user's shell and launch broker); normal Bash execution defaults `timeout` to `300`.
 2. If `cwd` is absent, it rewrites a leading `cd <path> && ...` into the structured `cwd` field and strips that prefix from `command`.
 3. If `async: true` is requested while `async.enabled` is off, it throws `ToolError` before any execution.
 4. If `bashInterceptor.enabled` is on, `checkBashInterception()` runs against both the original command and the `cd`-stripped command. For each form, configured regexes still check the complete input first, then each flat command separated by unquoted/unescaped `&&`, `||`, `;`, `|`, `|&`, `&`, or newlines (excluding stages that consume piped stdin from `|` or `|&`, including across blank/comment continuations), followed by versions of those fragments without leading `NAME=value` assignments. A matching enabled rule throws before URL expansion or execution.
-5. `expandInternalUrls()` rewrites supported internal URLs inside `command` and protocol-looking `cwd` values. Command replacements are shell-escaped; `cwd` replacements use raw filesystem paths because they are not interpolated into shell text.
+5. `expandInternalUrls()` rewrites every internal URL the router can `locate` to a local path inside `command` and protocol-looking `cwd` values; unlocatable URLs are left unchanged. Command replacements are shell-escaped; `cwd` replacements use raw filesystem paths because they are not interpolated into shell text.
 6. `resolveToCwd()` resolves `cwd` against `session.cwd`; `fs.stat()` verifies that the target exists and is a directory.
 7. `timeout: 0` disables the deadline. Otherwise `clampTimeout("bash", requestedTimeoutSec, tools.maxTimeout)` applies a positive global ceiling (when configured), then `TOOL_TIMEOUTS.bash` (`min: 1`, `max: 3600`). When clamped, `#buildCompletedResult()` / `#buildBackgroundStartResult()` append a notice line.
 8. Execution path splits:
@@ -163,19 +173,24 @@ Choose the setting by the desired outcome:
 5. Auto-backgrounded non-PTY job
    - Requires `bash.autoBackground.enabled`, no PTY/client-terminal bridge, and an async job manager below its running-job cap.
    - Starts like a foreground managed job, then backgrounds it when it outlives the wait window; at capacity, Bash falls back to direct foreground execution.
-6. Intercepted command
+6. Named supervised service
+   - Requires `launch.enabled` and a launch-capable session; `async` and `timeout` are incompatible.
+   - Runs through the launch broker with project-unique `name`, optional `env`, and optional readiness conditions. Reusing a live name restarts it with the new spec.
+   - Readiness waits for all supplied log/port conditions, service exit, or timeout. Inspect with `read proc://<name>`.
+7. Intercepted command
    - No subprocess created.
-   - Returns a `ToolError` pointing the model at `read`, `grep`, `glob`, `edit`, or `write`.
+   - Returns a `ToolError` pointing the model at the dedicated tool or named service mode.
 
 ## Side Effects
 - Filesystem
   - Validates `cwd` with `fs.stat()`.
   - May allocate and write artifact files for full local output (`bash`) and minimizer-preserved raw output (`bash-original`).
-  - `expandInternalUrls(..., { ensureLocalParentDirs: true })` creates parent directories for `local://` paths before execution.
+  - `expandInternalUrls(..., { create: true })` locates missing targets of mutable schemes (e.g. `local://`) and creates their parent directories before execution.
 - Subprocesses / native bindings / client terminal
   - Non-PTY local execution uses native shell execution via `@oh-my-pi/pi-natives` (`Shell.run()` or `executeShell()`).
   - PTY uses native `PtySession.start()`.
   - Client-terminal mode delegates process execution to the connected client terminal capability.
+  - Named services run in the project-scoped launch broker and retain logs/status for `proc://`.
 - Session state
   - Reads session settings for async, auto-background, interceptor, direnv, global timeout cap, tool availability, and shell configuration.
   - Registers jobs with `session.asyncJobManager` for explicit/auto background runs.
@@ -184,7 +199,7 @@ Choose the setting by the desired outcome:
   - Invalidates `github-cache` rows before execution when the command contains a mutating `gh issue`/`gh pr` subcommand, so later `issue://`/`pr://` reads see post-mutation state (`invalidateGithubCacheForBashCommand`).
 - User-visible prompts / interactive UI
   - PTY mode opens a TUI overlay titled `Console` and forwards input to the PTY.
-  - Background start messages note that the result is delivered automatically when complete and that the `hub` tool can wait on it until then.
+  - Background start messages note that the result is delivered automatically; use `wait` only when there is no other work.
 - Background work / cancellation
   - Async and auto-background jobs continue after the initial tool return, until completion, cancellation, or their deadline (unless `timeout: 0` disabled it).
   - Cancellation aborts the native run; PTY overlay dismissal also kills the PTY.
@@ -208,7 +223,7 @@ Choose the setting by the desired outcome:
   - matched command -> `ToolError` with `Blocked: <rule.message>` and the original command.
   - invalid interceptor regexes are silently skipped by `compileRules()`.
 - Internal URL expansion:
-  - unsupported scheme, unknown skill, path traversal, missing router support, or router resolution failures all throw `ToolError` from `packages/coding-agent/src/tools/bash-skill-urls.ts`.
+  - root-containment violations (path traversal/symlink escapes) throw `ToolError` from `packages/coding-agent/src/tools/bash-skill-urls.ts`; URLs that do not locate (unknown skill, remote/virtual schemes, lookup failures) stay literal in the command.
 - Execution:
   - non-zero exit -> returned tool result marked `isError`, with `details.exitCode` and text ending in `Command exited with code <n>`.
   - missing exit code -> thrown `ToolError` with `Command failed: missing exit status`.
@@ -222,7 +237,7 @@ Choose the setting by the desired outcome:
 - `checkBashInterception()` blocks only when the matching rule's `tool` name is present in `ctx.toolNames`; missing tools disable their corresponding rule.
 - Interceptor configuration syntax is unchanged. It handles common flat command lists, not full shell parsing: heredocs, parameter expansion, command substitution, backticks, grouping, and malformed quoting only receive the existing whole-input check. This is best-effort routing toward dedicated tools, not a security boundary.
 - `bash.direnv` defaults to `"auto"` and honors direnv's allow list; an unallowed `.envrc` is not executed. Set it to `"off"` to bypass preflight. `bash.direnvLoadTimeoutMs` controls the cold-load budget.
-- Default interceptor rules come from `DEFAULT_BASH_INTERCEPTOR_RULES` in `packages/coding-agent/src/config/settings-schema.ts`:
+- Default interceptor rules come from `DEFAULT_BASH_INTERCEPTOR_RULES` in `packages/coding-agent/src/exec/settings.ts`:
   - `cat|head|tail|less|more` -> `read`
   - `grep|rg|ripgrep|ag|ack` -> `grep`
   - `find|fd|locate` with name/type/glob flags -> `glob`

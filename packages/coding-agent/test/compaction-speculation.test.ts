@@ -12,6 +12,8 @@ import { SessionMaintenance, type SessionMaintenanceHost } from "@oh-my-pi/pi-co
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as snapcompactModule from "@oh-my-pi/snapcompact";
 
+import { cfgCompactionMethodOrder } from "@oh-my-pi/pi-coding-agent/session/context-settings";
+
 const CONTEXT_WINDOW = 100_000;
 const THRESHOLD = 50_000;
 const SPECULATION_BAND_START = THRESHOLD - 8_192;
@@ -98,7 +100,7 @@ describe("async speculative compaction", () => {
 				throw new Error("The compact seam should be used instead of the side stream");
 			},
 			providerSessionState: new Map(),
-			preferWebsockets: undefined,
+			preferWebsockets: () => undefined,
 			model: () => model,
 			thinkingLevel: () => undefined,
 			isDisposed: () => false,
@@ -262,6 +264,97 @@ describe("async speculative compaction", () => {
 		expect(entry?.type === "compaction" ? entry.summary : undefined).toBe("armed summary");
 		expect(compactSpy).toHaveBeenCalledTimes(1);
 		expect(events).toEqual(expect.arrayContaining(["auto_compaction_start", "auto_compaction_end"]));
+	});
+
+	it("applies an Anthropic snapshot after append-only growth without dropping its tail or new turns", async () => {
+		const bundled = getBundledModel("anthropic", "claude-sonnet-4-6");
+		if (!bundled) throw new Error("Expected compaction-capable Anthropic model");
+		model = { ...bundled, contextWindow: CONTEXT_WINDOW };
+		maintenance = createMaintenance({ methodOrder: ["remote"] });
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
+			started.resolve();
+			await release.promise;
+			return {
+				summary: "signed snapshot summary",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+				preserveData: {
+					anthropicCompaction: {
+						provider: "anthropic",
+						content: "signed snapshot summary",
+						signature: "snapshot-signature",
+					},
+				},
+			};
+		});
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await started.promise;
+		const snapshotLeafId = sessionManager.getBranch().at(-1)?.id;
+		// Growth beyond the recovery band does not change the signed snapshot.
+		const addedUser = userMessage("post-snapshot request " + "growth ".repeat(45_000));
+		const addedAssistant = assistantMessage("post-snapshot reply", model);
+		sessionManager.appendMessage(addedUser);
+		sessionManager.appendMessage(addedAssistant);
+		release.resolve();
+		await waitForState("armed");
+
+		await maintenance.runAutoCompaction("threshold", false, false, false, { triggerContextTokens: THRESHOLD });
+		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
+		if (entry?.type !== "compaction") throw new Error("Expected native compaction entry");
+		expect(entry.providerReplayThroughEntryId).toBe(snapshotLeafId);
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		expect(agent.state.messages.map(message => message.role)).toEqual([
+			"compactionSummary",
+			"assistant",
+			"user",
+			"assistant",
+		]);
+		expect(
+			agent.state.messages[0]?.role === "compactionSummary" ? agent.state.messages[0].providerPayload : undefined,
+		).toMatchObject({ signature: "snapshot-signature" });
+		expect(agent.state.messages.slice(-2)).toEqual([addedUser, addedAssistant]);
+		const rebuilt = sessionManager.buildSessionContext().messages;
+		expect(rebuilt.map(message => message.role)).toEqual(agent.state.messages.map(message => message.role));
+		expect(rebuilt.slice(-2)).toEqual([addedUser, addedAssistant]);
+		expect(rebuilt[0]?.role === "compactionSummary" ? rebuilt[0].providerPayload : undefined).toMatchObject({
+			signature: "snapshot-signature",
+		});
+	});
+
+	it("invalidates an Anthropic snapshot when its prefix is rewound", async () => {
+		const bundled = getBundledModel("anthropic", "claude-sonnet-4-6");
+		if (!bundled) throw new Error("Expected compaction-capable Anthropic model");
+		model = { ...bundled, contextWindow: CONTEXT_WINDOW };
+		maintenance = createMaintenance({ methodOrder: ["remote"] });
+		let invocation = 0;
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: `native summary ${++invocation}`,
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+			preserveData: {
+				anthropicCompaction: {
+					provider: "anthropic",
+					content: `native summary ${invocation}`,
+					signature: `signature ${invocation}`,
+				},
+			},
+		}));
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("armed");
+		const branch = sessionManager.getBranch();
+		sessionManager.branch(branch[branch.length - 2].id);
+		sessionManager.appendMessage(assistantMessage("rewritten prefix", model));
+		sessionManager.appendMessage(userMessage("new suffix"));
+
+		await maintenance.runAutoCompaction("threshold", false, false, false, { triggerContextTokens: THRESHOLD });
+		expect(compactSpy).toHaveBeenCalledTimes(2);
+		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
+		expect(entry?.type === "compaction" ? entry.summary : undefined).toBe("native summary 2");
 	});
 
 	it("preserves an in-flight native interval through the next compaction", async () => {
@@ -508,7 +601,7 @@ describe("async speculative compaction", () => {
 		await waitForState("armed");
 		// Method order changed after arming: the real pass now runs the instant
 		// local method, and the stale LLM summary must not override it.
-		maintenanceSettings.override("compaction.methodOrder", ["snapcompact"]);
+		cfgCompactionMethodOrder.override(maintenanceSettings, ["snapcompact"]);
 
 		await maintenance.runAutoCompaction("threshold", false, false, false, { triggerContextTokens: THRESHOLD });
 

@@ -285,16 +285,16 @@ describe("ToolExecutionComponent live preview spinners", () => {
 			component.stopAnimation();
 		}
 	});
-	// Regression: a live hub call whose streamed args have not parsed yet
-	// (op still unknown) folded to a contentless `╭─ Hub` / `╰` frame under
-	// viewport pressure. A squeezed block keeps its real render whenever it
-	// fits the allocation; only genuinely overflowing blocks fold.
-	it("keeps the real render on squeezed hub blocks when it fits", () => {
+	// Regression: a live coordination call whose streamed args have not parsed
+	// yet folded to a contentless `╭─ …` / `╰` frame under viewport pressure. A
+	// squeezed block keeps its real render whenever it fits the allocation;
+	// only genuinely overflowing blocks fold.
+	it("keeps the real render on squeezed wait blocks when it fits", () => {
 		const component = new ToolExecutionComponent(
-			"hub",
+			"wait",
 			{},
 			{},
-			{ name: "hub", label: "Hub" } as never,
+			{ name: "wait", label: "Wait" } as never,
 			{ requestRender: vi.fn(), requestComponentRender: vi.fn() } as unknown as TUI,
 			process.cwd(),
 		);
@@ -302,7 +302,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 			component.setTranscriptAllocation(2, { tick: 0, now: 0 });
 			const pending = component.render(80).map(row => stripVTControlCharacters(row));
 			expect(pending).toHaveLength(1);
-			expect(pending[0]).toContain("Hub");
+			expect(pending[0]).toContain("Wait");
 			expect(pending[0]).not.toContain("╭");
 
 			component.updateResult({ content: [{ type: "text", text: "done" }] }, false);
@@ -314,12 +314,12 @@ describe("ToolExecutionComponent live preview spinners", () => {
 		}
 	});
 
-	it("folds an overflowing squeezed hub block to a frame naming its op target", () => {
+	it("folds an overflowing squeezed wait block to a single labeled frame", () => {
 		const component = new ToolExecutionComponent(
-			"hub",
-			{ op: "send", to: "Main", message: "hi" },
+			"wait",
 			{},
-			{ name: "hub", label: "Hub" } as never,
+			{},
+			{ name: "wait", label: "Wait" } as never,
 			{ requestRender: vi.fn(), requestComponentRender: vi.fn() } as unknown as TUI,
 			process.cwd(),
 		);
@@ -328,7 +328,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 			component.setTranscriptAllocation(1, { tick: 0, now: 0 });
 			const folded = component.render(80).map(row => stripVTControlCharacters(row));
 			expect(folded).toHaveLength(1);
-			expect(folded[0]).toContain("Hub · send → Main");
+			expect(folded[0]).toContain("Wait");
 		} finally {
 			component.stopAnimation();
 		}
@@ -362,7 +362,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 
 			await Settings.init({ inMemory: true });
 			const ctx = {
-				settings: { get: () => "" },
+				settings: Settings.isolated(),
 				sessionManager: { getSessionFile: () => null, getSessionName: () => "local", getCwd: () => "/local" },
 				session: {
 					messages: [],
@@ -518,7 +518,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 
 			await Settings.init({ inMemory: true });
 			const ctx = {
-				settings: { get: () => "" },
+				settings: Settings.isolated(),
 				sessionManager: { getSessionFile: () => null, getSessionName: () => "local", getCwd: () => "/local" },
 				session: {
 					messages: [],
@@ -655,7 +655,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 	});
 
 	// Regression (PR #9377 follow-up, codex review): `#handleToolExecutionEnd`
-	// settles a displaceable `hub`/`todo` result out of `pendingTools` into
+	// settles a displaceable `wait`/`todo` result out of `pendingTools` into
 	// EventController's own trackers (`#displaceablePollComponent` /
 	// `#displaceableTodoComponent`) instead of leaving it there, so enumerating
 	// only `pendingTools` before a resync misses that still-animated "waiting"
@@ -667,7 +667,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 	// `takeDisplaceableComponents()` to hand back a manually built block only
 	// proves `#finalizeSnapshot` calls whatever function sits at that name --
 	// not that the real tracker holds and clears the right component -- so
-	// this drives an actual `hub` wait (still running, so it stays
+	// this drives an actual `wait` (still running, so it stays
 	// displaceable) through a real `EventController`, the same tracker
 	// `job-poll-displacement.test.ts` exercises in isolation.
 	it("folds a displaceable poll/todo block into orphan cleanup when guest resync staging fails", async () => {
@@ -688,14 +688,14 @@ describe("ToolExecutionComponent live preview spinners", () => {
 			const takeDisplaceableComponents = vi.spyOn(controller, "takeDisplaceableComponents");
 			await controller.handleEvent({
 				type: "tool_execution_start",
-				toolCallId: "hub-wait-1",
-				toolName: "hub",
-				args: { op: "wait", ids: ["j0"] },
+				toolCallId: "wait-1",
+				toolName: "wait",
+				args: {},
 			} as Extract<AgentSessionEvent, { type: "tool_execution_start" }>);
 			await controller.handleEvent({
 				type: "tool_execution_end",
-				toolCallId: "hub-wait-1",
-				toolName: "hub",
+				toolCallId: "wait-1",
+				toolName: "wait",
 				isError: false,
 				result: {
 					content: [{ type: "text", text: "" }],
@@ -712,11 +712,11 @@ describe("ToolExecutionComponent live preview spinners", () => {
 			const displaceableBlock = chatContainer.children.find(
 				(child): child is ToolExecutionComponent => child instanceof ToolExecutionComponent,
 			);
-			if (!displaceableBlock) throw new Error("expected the hub wait to render a live block");
+			if (!displaceableBlock) throw new Error("expected the wait to render a live block");
 			expect(vi.getTimerCount()).toBeGreaterThan(0);
 
 			const ctx = {
-				settings: { get: () => "" },
+				settings: Settings.isolated(),
 				sessionManager: { getSessionFile: () => null, getSessionName: () => "local", getCwd: () => "/local" },
 				session: {
 					messages: [],
@@ -901,7 +901,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 
 			await Settings.init({ inMemory: true });
 			const ctx = {
-				settings: { get: () => "" },
+				settings: Settings.isolated(),
 				sessionManager: { getSessionFile: () => null, getSessionName: () => "local", getCwd: () => "/local" },
 				session: {
 					messages: [],

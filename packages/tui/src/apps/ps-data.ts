@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import { formatDuration } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
-import type { DaemonSnapshot, DaemonSpec, DaemonState } from "../tools/hub";
+import type { DaemonSnapshot, DaemonSpec, DaemonState } from "../tools/daemon";
 
 /** One broker scope: a project runtime dir or a machine-global service dir. */
 export interface PsScope {

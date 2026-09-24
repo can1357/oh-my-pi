@@ -1018,9 +1018,7 @@ describe("role priorities and chains", () => {
 
 describe("resolveModelRoleValue", () => {
 	test("resolves @role:<thinking> by expanding role alias before parsing thinking", () => {
-		const settings = {
-			getModelRole: (role: string) => (role === "smol" ? "openrouter/qwen/qwen3-coder:exacto" : undefined),
-		} as NonNullable<Parameters<typeof resolveModelRoleValue>[2]>["settings"];
+		const settings = Settings.isolated({ modelRoles: { smol: "openrouter/qwen/qwen3-coder:exacto" } });
 
 		const result = resolveModelRoleValue("@smol:high", allModels, { settings });
 
@@ -1031,9 +1029,7 @@ describe("resolveModelRoleValue", () => {
 	});
 
 	test("resolves @role:max by expanding role alias before parsing thinking", () => {
-		const settings = {
-			getModelRole: (role: string) => (role === "smol" ? "openai-codex/gpt-5.3-codex" : undefined),
-		} as NonNullable<Parameters<typeof resolveModelRoleValue>[2]>["settings"];
+		const settings = Settings.isolated({ modelRoles: { smol: "openai-codex/gpt-5.3-codex" } });
 
 		const result = resolveModelRoleValue("@smol:max", allModels, { settings });
 
@@ -1045,9 +1041,7 @@ describe("resolveModelRoleValue", () => {
 	});
 
 	test("resolves @default through configured default role alias", () => {
-		const settings = {
-			getModelRole: (role: string) => (role === "default" ? "openrouter/qwen/qwen3-coder:exacto" : undefined),
-		} as NonNullable<Parameters<typeof resolveModelRoleValue>[2]>["settings"];
+		const settings = Settings.isolated({ modelRoles: { default: "openrouter/qwen/qwen3-coder:exacto" } });
 
 		const result = resolveModelRoleValue("@default", allModels, { settings });
 
@@ -1063,13 +1057,12 @@ describe("resolveModelRoleValue", () => {
 		// role to its concrete model at the pure resolution layer, without
 		// relying on the retry model-fallback path (which retry.modelFallback:
 		// false disables).
-		const roles: Record<string, string> = {
-			task: "openrouter/qwen/qwen3-coder:exacto",
-			fast_worker: "@task",
-		};
-		const settings = {
-			getModelRole: (role: string) => roles[role],
-		} as NonNullable<Parameters<typeof resolveModelRoleValue>[2]>["settings"];
+		const settings = Settings.isolated({
+			modelRoles: {
+				task: "openrouter/qwen/qwen3-coder:exacto",
+				fast_worker: "@task",
+			},
+		});
 
 		const result = resolveModelRoleValue("@fast_worker", allModels, { settings });
 
@@ -2011,6 +2004,63 @@ describe("resolveCliModel", () => {
 		expect(result.error).toBeUndefined();
 		expect(result.model?.provider).toBe("zai");
 		expect(result.model?.id).toBe("glm-5");
+	});
+
+	describe("issue #13079: disabledProviders gates an explicit pin", () => {
+		const registry = { getAll: () => openaiGpt55Models, getAvailable: () => openaiGpt55Models };
+		const settings = Settings.isolated({ disabledProviders: ["openai-codex"] });
+
+		test("refuses a provider-qualified pin and names the disabled provider", () => {
+			const result = resolveCliModel({
+				cliModel: "openai-codex/gpt-5.5",
+				modelRegistry: registry,
+				settings,
+			});
+
+			expect(result.model).toBeUndefined();
+			expect(result.disabledProvider).toBe("openai-codex");
+			expect(result.error).toContain("openai-codex");
+		});
+
+		test("refuses a --provider/--model pair naming the disabled provider", () => {
+			const result = resolveCliModel({
+				cliProvider: "openai-codex",
+				cliModel: "gpt-5.5",
+				modelRegistry: registry,
+				settings,
+			});
+
+			expect(result.model).toBeUndefined();
+			expect(result.disabledProvider).toBe("openai-codex");
+		});
+
+		test("falls through to an enabled provider carrying the same id", () => {
+			const result = resolveCliModel({
+				cliModel: "gpt-5.5",
+				modelRegistry: registry,
+				availableModels: openaiGpt55Models.filter(model => model.provider === "openai-codex"),
+				settings,
+			});
+
+			expect(result.error).toBeUndefined();
+			expect(result.disabledProvider).toBeUndefined();
+			expect(result.model?.provider).toBe("openai");
+		});
+
+		test("refuses a configured role whose only candidate is disabled", () => {
+			const result = resolveCliModel({
+				cliModel: "task",
+				modelRegistry: registry,
+				settings: Settings.isolated({
+					disabledProviders: ["openai-codex"],
+					modelRoles: { task: "openai-codex/gpt-5.5" },
+				}),
+			});
+
+			expect(result.model).toBeUndefined();
+			expect(result.disabledProvider).toBe("openai-codex");
+			expect(result.configuredPatterns).toBeUndefined();
+		});
 	});
 });
 

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed browser relay support for multiple browser instances, such as Chrome and Edge, connected simultaneously. Tabs and relay requests now remain associated with the correct browser, while extensions without an instance identifier continue to use the existing single-browser behavior.
+
 ## [18.0.7] - 2026-08-26
 
 ### Changed

@@ -54,6 +54,22 @@ import { isWarpCliAgentProtocolActive } from "../warp-events";
 import { StreamingRevealController } from "./streaming-reveal";
 import { streamingStringKeysForTool, ToolArgsRevealController } from "./tool-args-reveal";
 
+import {
+	cfgCompletionNotify,
+	cfgDisplayCacheMissMarker,
+	cfgDisplayCollapseCompacted,
+	cfgDisplayShowTokenUsage,
+	cfgDisplayShowTurnTime,
+	cfgDisplaySmoothStreaming,
+	cfgErrorNotify,
+	cfgRecap,
+	cfgTerminalShowImages,
+	cfgTerminalShowProgress,
+} from "../settings";
+import { cfgCompaction } from "../../session/context-settings";
+import { cfgReadToolResultPreview, cfgToolsApproval, cfgToolsApprovalMode } from "../../tools/settings";
+import { cfgSpeechEnabled, cfgSpeechMode } from "../../tts/settings";
+
 type AgentSessionEventKind = AgentSessionEvent["type"];
 
 const IRC_MESSAGE_VISIBLE_TTL_MS = 10_000;
@@ -183,6 +199,9 @@ export class EventController {
 	#retryPending = false;
 	#idleCompactionTimer?: NodeJS.Timeout;
 	#idleRecapTimer?: NodeJS.Timeout;
+	// True from `agent_end` until this idle window's recap timer fires, so a live
+	// `recap.*` change can rearm without re-delivering a recap already shown.
+	#idleRecapPending = false;
 	// In-flight ephemeral recap turn; aborted by #cancelIdleRecap when any
 	// activity (new turn, compaction, editor draft) supersedes the idle recap.
 	#idleRecapAbort?: AbortController;
@@ -190,8 +209,8 @@ export class EventController {
 	// Insertion-ordered IRC cards not yet retired; values are the transcript
 	// components each card contributed (see #retireIrcCard for the guard).
 	#liveIrcCards = new Map<string, Component[]>();
-	// Most recent `hub` tool block whose result still had every watched job
-	// running. Kept un-finalized (live) so the next `hub` call displaces it —
+	// Most recent `wait` tool block whose result still had every watched job
+	// running. Kept un-finalized (live) so the next `wait` call displaces it —
 	// one persistent poll instead of a stack of "waiting on N jobs" frames —
 	// and sealed in place the moment anything else lands below it.
 	#displaceablePollComponent: ToolExecutionComponent | undefined = undefined;
@@ -248,13 +267,13 @@ export class EventController {
 				: null,
 		);
 		this.#streamingReveal = new StreamingRevealController({
-			getSmoothStreaming: () => this.ctx.settings.get("display.smoothStreaming"),
+			getSmoothStreaming: () => cfgDisplaySmoothStreaming.get(this.ctx.settings),
 			getHideThinkingBlock: () => this.ctx.effectiveHideThinkingBlock,
 			getProseOnlyThinking: () => this.ctx.proseOnlyThinking,
 			requestRender: component => this.ctx.ui.requestComponentRender(component),
 		});
 		this.#toolArgsReveal = new ToolArgsRevealController({
-			getSmoothStreaming: () => this.ctx.settings.get("display.smoothStreaming"),
+			getSmoothStreaming: () => cfgDisplaySmoothStreaming.get(this.ctx.settings),
 			requestRender: component => this.ctx.ui.requestComponentRender(component),
 		});
 		this.#handlers = {
@@ -340,6 +359,12 @@ export class EventController {
 			return;
 		}
 		this.#scheduleIdleCompaction();
+	}
+
+	/** Rearm (or cancel) the idle recap after a live `recap.*` setting change. */
+	refreshIdleRecapTimer(): void {
+		if (!this.#idleRecapPending || this.ctx.viewSession.isStreaming) return;
+		this.#scheduleIdleRecap();
 	}
 
 	dispose(): void {
@@ -439,7 +464,7 @@ export class EventController {
 	#getReadGroup(): ReadToolGroupComponent {
 		if (!this.#lastReadGroup) {
 			const group = new ReadToolGroupComponent({
-				showContentPreview: this.ctx.settings.get("read.toolResultPreview"),
+				showContentPreview: cfgReadToolResultPreview.get(this.ctx.settings),
 			});
 			group.setExpanded(this.ctx.toolOutputExpanded);
 			this.ctx.chatContainer.addChild(group);
@@ -543,7 +568,7 @@ export class EventController {
 			.map(content => ({ type: "image", data: content.data, mimeType: content.mimeType }));
 		if (images.length === 0) return false;
 		assistantComponent.setToolResultImages(toolCallId, images);
-		return settings.get("terminal.showImages");
+		return cfgTerminalShowImages.get(settings);
 	}
 
 	#insertAfterTranscriptComponent(anchor: Component | undefined, component: Component): boolean {
@@ -824,7 +849,11 @@ export class EventController {
 
 	#setTerminalProgress(active: boolean): void {
 		if (active) {
-			if (this.#terminalProgressActive || this.ctx.settings?.get("terminal.showProgress") !== true) return;
+			if (
+				this.#terminalProgressActive ||
+				(this.ctx.settings ? cfgTerminalShowProgress.get(this.ctx.settings) : undefined) !== true
+			)
+				return;
 			this.ctx.ui.terminal.setProgress(true);
 			this.#terminalProgressActive = true;
 			return;
@@ -1109,7 +1138,7 @@ export class EventController {
 
 	/**
 	 * Resolve the pending displaceable poll block before the next block lands.
-	 * A follow-up `hub` call displaces it — the stale "waiting on N jobs" frame
+	 * A follow-up `wait` call displaces it — the stale "waiting on N jobs" frame
 	 * is removed so repeated polls read as one persistent poll — while anything
 	 * else seals it in place as final history. Removal is gated on none of the
 	 * block's rows having entered native scrollback: rows already on the tape
@@ -1120,7 +1149,11 @@ export class EventController {
 		const previous = this.#displaceablePollComponent;
 		if (!previous) return;
 		this.#displaceablePollComponent = undefined;
-		if (nextToolName === "hub" && previous.isDisplaceableBlock() && this.ctx.chatContainer.canRemoveBlock(previous)) {
+		if (
+			nextToolName === "wait" &&
+			previous.isDisplaceableBlock() &&
+			this.ctx.chatContainer.canRemoveBlock(previous)
+		) {
 			this.ctx.chatContainer.removeChild(previous);
 		}
 		// Sealing stops the waiting-poll spinner and freezes the block (for a
@@ -1154,7 +1187,7 @@ export class EventController {
 	/**
 	 * Detach both displacement trackers and return whichever components were
 	 * live, without touching their animation state. `#handleToolExecutionEnd`
-	 * settles a displaceable `hub`/`todo` result out of `pendingTools` into
+	 * settles a displaceable `wait`/`todo` result out of `pendingTools` into
 	 * these trackers instead (see the `isDisplaceableBlock()` branch there), so
 	 * a caller that enumerates only `pendingTools` before replacing the whole
 	 * transcript — the collab guest resync (`guest.ts#finalizeSnapshot`) —
@@ -1226,8 +1259,8 @@ export class EventController {
 	 * live (the final message is spoken at turn end).
 	 */
 	#vocalizeDelta(event: Extract<AgentSessionEvent, { type: "message_update" }>): void {
-		if (!settings.get("speech.enabled")) return;
-		const mode = settings.get("speech.mode");
+		if (!cfgSpeechEnabled.get(settings)) return;
+		const mode = cfgSpeechMode.get(settings);
 		const delta = event.assistantMessageEvent;
 		if (delta.type === "text_delta" && (mode === "assistant" || mode === "all")) {
 			vocalizer.pushDelta(delta.delta);
@@ -1242,8 +1275,8 @@ export class EventController {
 	 * sure the live buffer's trailing partial gets flushed.
 	 */
 	#handleTurnEnd(event: Extract<AgentSessionEvent, { type: "turn_end" }>): void {
-		if (!settings.get("speech.enabled")) return;
-		if (settings.get("speech.mode") !== "yield") {
+		if (!cfgSpeechEnabled.get(settings)) return;
+		if (cfgSpeechMode.get(settings) !== "yield") {
 			vocalizer.flush();
 			return;
 		}
@@ -1369,7 +1402,7 @@ export class EventController {
 						renderArgs,
 						{
 							useBuiltInRenderer: this.ctx.viewSession.hasBuiltInTool(renderToolName),
-							showImages: settings.get("terminal.showImages"),
+							showImages: cfgTerminalShowImages.get(settings),
 						},
 						tool,
 						this.ctx.ui,
@@ -1461,12 +1494,12 @@ export class EventController {
 			this.ctx.streamingComponent.setHideThinkingBlock(this.ctx.effectiveHideThinkingBlock);
 			this.#streamingReveal.resyncVisibility();
 		}
-		if (event.message.role === "assistant" && settings.get("speech.enabled")) {
+		if (event.message.role === "assistant" && cfgSpeechEnabled.get(settings)) {
 			if (event.message.stopReason === "aborted") {
 				// Esc / Ctrl+C / interrupt: stop speaking now and drop the trailing partial.
 				vocalizer.clear();
 			} else {
-				const mode = settings.get("speech.mode");
+				const mode = cfgSpeechMode.get(settings);
 				// Speak the last partial sentence of a completed message; yield mode
 				// instead speaks the whole final message at turn end.
 				if (mode === "assistant" || mode === "all") vocalizer.flush();
@@ -1554,7 +1587,7 @@ export class EventController {
 			// meaningful prefix and this request read none of it back, flag the turn.
 			const usage = event.message.usage;
 			if (usage.cacheRead + usage.cacheWrite + usage.input > 0) {
-				if (settings.get("display.cacheMissMarker")) {
+				if (cfgDisplayCacheMissMarker.get(settings)) {
 					const invalidation = detectCacheInvalidation(this.ctx.lastAssistantUsage, usage);
 					if (invalidation) this.ctx.streamingComponent.setCacheInvalidation(invalidation);
 				}
@@ -1573,9 +1606,9 @@ export class EventController {
 				if (component) lastPostToolAssistantComponent = component;
 			}
 			this.#lastAssistantComponent = lastPostToolAssistantComponent ?? this.ctx.streamingComponent;
-			if (settings.get("display.showTokenUsage") && assistantUsageIsBilled(event.message.usage)) {
+			if (cfgDisplayShowTokenUsage.get(settings) && assistantUsageIsBilled(event.message.usage)) {
 				const readCallIds = groupedReadUsageCallIds(event.message);
-				const turnElapsed = settings.get("display.showTurnTime")
+				const turnElapsed = cfgDisplayShowTurnTime.get(settings)
 					? turnElapsedMs(this.#turnStartedAt, event.message)
 					: undefined;
 				const usageAttached =
@@ -1668,7 +1701,7 @@ export class EventController {
 				event.args,
 				{
 					useBuiltInRenderer: this.ctx.viewSession.hasBuiltInTool(renderToolName),
-					showImages: settings.get("terminal.showImages"),
+					showImages: cfgTerminalShowImages.get(settings),
 				},
 				tool,
 				this.ctx.ui,
@@ -1729,8 +1762,8 @@ export class EventController {
 	#toolWillPromptForApproval(toolName: string, args: unknown): boolean {
 		const tool = this.ctx.viewSession.getToolByName(toolName);
 		if (!tool) return false;
-		const mode = (settings.get("tools.approvalMode") ?? "yolo") as ApprovalMode;
-		const userPolicies = (settings.get("tools.approval") ?? {}) as Record<string, unknown>;
+		const mode = (cfgToolsApprovalMode.get(settings) ?? "yolo") as ApprovalMode;
+		const userPolicies = (cfgToolsApproval.get(settings) ?? {}) as Record<string, unknown>;
 		return resolveApproval(tool, args, mode, userPolicies).policy === "prompt";
 	}
 
@@ -1896,8 +1929,8 @@ export class EventController {
 			if (component) {
 				this.#applyToolCompletion(component, event);
 				if (component instanceof ToolExecutionComponent && component.isDisplaceableBlock()) {
-					if (event.toolName === "hub" && component.canBeDisplacedBy("hub")) {
-						// Remember the waiting poll so the next `hub` call can displace it.
+					if (event.toolName === "wait" && component.canBeDisplacedBy("wait")) {
+						// Remember the waiting poll so the next `wait` call can displace it.
 						this.#displaceablePollComponent = component;
 					} else if (event.toolName === "todo" && component.canBeDisplacedBy("todo")) {
 						// Successful todo update supersedes the prior live snapshot. A failed
@@ -2073,6 +2106,7 @@ export class EventController {
 		this.ctx.syncRetryHintRow();
 		this.ctx.ui.requestRender();
 		this.#scheduleIdleCompaction();
+		this.#idleRecapPending = true;
 		this.#scheduleIdleRecap();
 		this.sendErrorNotification(event);
 		this.sendCompletionNotification(event);
@@ -2209,7 +2243,7 @@ export class EventController {
 			// transcript replacement then — same as auto-handoff below. With
 			// collapse disabled the rebuilt transcript keeps the full history,
 			// so the resync handles it and scrollback stays.
-			if (settings.get("display.collapseCompacted")) {
+			if (cfgDisplayCollapseCompacted.get(settings)) {
 				this.ctx.ui.requestRender(true, { clearScrollback: true });
 			} else {
 				this.ctx.ui.requestRender();
@@ -2406,7 +2440,7 @@ export class EventController {
 		// maintenance flow may reset the session before this timer fires.
 		if (this.ctx.viewSession.isCompacting) return;
 
-		const idleSettings = settings.getGroup("compaction");
+		const idleSettings = cfgCompaction.get(this.ctx.settings);
 		if (!idleSettings.idleEnabled) return;
 
 		// Only if input is empty
@@ -2434,7 +2468,7 @@ export class EventController {
 		this.#cancelIdleRecap();
 		if (this.ctx.viewSession.isCompacting) return;
 
-		const recapSettings = settings.getGroup("recap");
+		const recapSettings = cfgRecap.get(this.ctx.settings);
 		if (!recapSettings.enabled) return;
 		if (this.ctx.editor.getText().trim()) return;
 
@@ -2442,6 +2476,7 @@ export class EventController {
 			Math.max(IDLE_RECAP_MIN_SECONDS, Math.min(IDLE_RECAP_MAX_SECONDS, recapSettings.idleSeconds)) * 1000;
 		this.#idleRecapTimer = setTimeout(() => {
 			this.#idleRecapTimer = undefined;
+			this.#idleRecapPending = false;
 			void this.#runIdleRecap();
 		}, timeoutMs);
 		this.#idleRecapTimer.unref?.();
@@ -2449,8 +2484,9 @@ export class EventController {
 
 	/**
 	 * Generate the idle recap with an ephemeral side-channel turn over the
-	 * current conversation (same pipeline as `/btw`) and surface it as a status
-	 * line. Live goal/title and the active todo task are passed as anchoring
+	 * current conversation (same pipeline as `/btw`), surface it as a status
+	 * line, and journal it to history.db (`session_recaps`) for the session that
+	 * produced it. Live goal/title and the active todo task are passed as anchoring
 	 * hints because the snapshot only carries conversation history, not the
 	 * controller's todo/goal state. The request is abortable: any activity
 	 * cancels it via #cancelIdleRecap, and idle conditions are re-checked after
@@ -2469,10 +2505,12 @@ export class EventController {
 		const abort = new AbortController();
 		this.#idleRecapAbort = abort;
 		try {
-			const { replyText } = await this.ctx.viewSession.runEphemeralTurn({ promptText, signal: abort.signal });
+			const session = this.ctx.viewSession;
+			const { replyText } = await session.runEphemeralTurn({ promptText, signal: abort.signal });
 			if (this.#idleRecapAbort !== abort || abort.signal.aborted || !this.#idleConditionsHold()) return;
 			const recap = previewLine(replyText, TRUNCATE_LENGTHS.RECAP);
 			if (!recap) return;
+			session.sessionManager.recordRecap(replyText);
 			this.ctx.showStatus(theme.fg("dim", theme.italic(`※ recap: ${recap}`)), { dim: false });
 		} catch (error) {
 			if (!abort.signal.aborted) logger.debug("Idle recap turn failed", { error: String(error) });
@@ -2523,7 +2561,7 @@ export class EventController {
 		// protocol is negotiated — avoid a second legacy desktop/OSC-9 toast.
 		if (isWarpCliAgentProtocolActive()) return;
 
-		const notify = settings.get("error.notify");
+		const notify = cfgErrorNotify.get(settings);
 		if (notify === "off") return;
 
 		// Read the turn's own outcome from `agent_end.messages`, not the mutable
@@ -2537,7 +2575,7 @@ export class EventController {
 
 		const sessionName = this.ctx.sessionManager.getSessionName();
 		TERMINAL.sendNotification({
-			title: sessionName || "Oh My Pi",
+			title: sessionName || "omp",
 			body: "Stopped with error",
 			type: "error",
 			actions: "focus",
@@ -2545,7 +2583,7 @@ export class EventController {
 	}
 
 	sendCompletionNotification(event: Extract<AgentSessionEvent, { type: "agent_end" }>): void {
-		const notify = settings.get("completion.notify");
+		const notify = cfgCompletionNotify.get(settings);
 		if (notify === "off") return;
 
 		// Warp structured OSC 777 already drives native completion UX when the
@@ -2562,7 +2600,7 @@ export class EventController {
 
 		const sessionName = this.ctx.sessionManager.getSessionName();
 		TERMINAL.sendNotification({
-			title: sessionName || "Oh My Pi",
+			title: sessionName || "omp",
 			body: "Complete",
 			type: "completion",
 			actions: "focus",

@@ -14,6 +14,8 @@ import { AUTO_THINKING, clampAutoThinkingEffort, resolveProvisionalAutoLevel } f
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
+import { cfgDefaultThinkingLevel } from "@oh-my-pi/pi-coding-agent/session/settings";
+
 describe("AgentSession role model thinking behavior", () => {
 	let tempDir: TempDir;
 	let fixtureDir: TempDir;
@@ -484,7 +486,7 @@ describe("AgentSession role model thinking behavior", () => {
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 		sessionSettings = Settings.isolated();
-		sessionSettings.set("defaultThinkingLevel", AUTO_THINKING);
+		cfgDefaultThinkingLevel.set(sessionSettings, AUTO_THINKING);
 		session = new AgentSession({
 			agent,
 			sessionManager,
@@ -527,7 +529,7 @@ describe("AgentSession role model thinking behavior", () => {
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 		sessionSettings = Settings.isolated();
-		sessionSettings.set("defaultThinkingLevel", AUTO_THINKING);
+		cfgDefaultThinkingLevel.set(sessionSettings, AUTO_THINKING);
 		session = new AgentSession({
 			agent,
 			sessionManager,
@@ -570,7 +572,7 @@ describe("AgentSession role model thinking behavior", () => {
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 		sessionSettings = Settings.isolated();
-		sessionSettings.set("defaultThinkingLevel", AUTO_THINKING);
+		cfgDefaultThinkingLevel.set(sessionSettings, AUTO_THINKING);
 		session = new AgentSession({
 			agent,
 			sessionManager,
@@ -590,7 +592,7 @@ describe("AgentSession role model thinking behavior", () => {
 		// defaultThinkingLevel), not silently stay `configured: "auto"`.
 		session.setThinkingLevel(Effort.Medium, true);
 		expect(session.isAutoThinking).toBe(false);
-		expect(sessionSettings.get("defaultThinkingLevel")).toBe(Effort.Medium);
+		expect(cfgDefaultThinkingLevel.get(sessionSettings)).toBe(Effort.Medium);
 		session.sessionManager.appendMessage(createAssistantMessage("done"));
 
 		const sessionFile = session.sessionFile;
@@ -726,7 +728,7 @@ describe("AgentSession role model thinking behavior", () => {
 		});
 		authStorage.keys.setRuntime("openai", "test-key");
 		sessionSettings = Settings.isolated();
-		sessionSettings.set("defaultThinkingLevel", AUTO_THINKING);
+		cfgDefaultThinkingLevel.set(sessionSettings, AUTO_THINKING);
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),

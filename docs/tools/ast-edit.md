@@ -20,7 +20,7 @@
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `ops` | `{ pat: string; out: string }[]` | Yes | One or more rewrite rules. `pat` must be non-empty. Duplicate `pat` values fail before native execution. Empty `out` deletes the matched node. |
-| `paths` | `string[]` | Yes | One or more files, directories, globs, or path-backed internal URLs. At least one non-empty entry is required. Internal-URL globs are rejected; fetched external URLs are read-only and cannot be rewritten. |
+| `paths` | `string[]` | Yes | One or more files, directories, globs, locatable internal URLs, or internal-URL globs over a locatable base. At least one non-empty entry is required. Fetched external URLs are read-only and cannot be rewritten. |
 
 Shared AST pattern grammar and language catalog: see [`ast_grep`](./ast-grep.md#inputs).
 
@@ -71,7 +71,7 @@ Shared AST pattern grammar and language catalog: see [`ast_grep`](./ast-grep.md#
 - Single file: preview or apply against one file.
 - Directory + optional glob: native scan walks the directory, then filters by compiled glob.
 - Multiple explicit paths/globs: wrapper unions them into one synthetic scope or runs per-target native calls when paths only meet at root.
-- Internal URL inputs: only supported when the router resolves them to a backing file path.
+- Internal URL inputs: only supported when the router locates them (or a glob's base) to a local path; sources from immutable schemes are refused. Approval is the highest write tier among the targeted schemes.
 - Preview mode: always the direct `ast_edit` tool result.
 - Apply mode: only reachable through the queued resolve callback (a `write` to `xd://resolve` or `xd://reject`) after a preview.
 - Hashline output mode vs plain line/column mode: controlled by `resolveFileDisplayMode()`.
@@ -100,7 +100,7 @@ Shared AST pattern grammar and language catalog: see [`ast_grep`](./ast-grep.md#
 - Preview text truncates each rendered `before` and `after` first line to 120 characters in `packages/coding-agent/src/tools/ast-edit.ts`.
 
 ## Errors
-- TS wrapper throws `ToolError` for empty patterns, duplicate rewrite patterns, empty path entries, unsupported internal-URL globs, internal URLs without `sourcePath`, and missing paths.
+- TS wrapper throws `ToolError` for empty patterns, duplicate rewrite patterns, empty path entries, internal-URL globs over a non-locatable base, internal URLs with no local file (`Cannot rewrite <scheme>:// URL: no local file backs …`), matches in immutable internal resources (`Cannot rewrite immutable resource: …`), and missing paths.
 - Native code returns hard errors for:
   - inability to infer a supported language for a candidate (reported as a parse issue in the wrapper's best-effort mode),
   - unsupported explicit `lang` in internal/native calls,

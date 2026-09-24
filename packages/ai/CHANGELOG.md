@@ -4,15 +4,23 @@
 
 ### Added
 
-- Implemented `SessionAffinity` for persistent, sticky session-to-credential mapping
-- Added persistent rate-limit block tracking with auto-healing and account-specific routing policy support
-- Introduced `KeyCascade` for unified hierarchical authentication resolution
-- Added per-account OAuth routing policies with strict selectors, deterministic priority, and protected quota reserves ([#12243](https://github.com/can1357/oh-my-pi/pull/12243) by [@schickling-assistant](https://github.com/schickling-assistant)).
+- Added support for Anthropic fallback credit token capture and redemption, including the 3-step rejection ladder for prompt-cache repricing on classifier refusals.
+- Added Vercel AI Gateway app attribution: requests now send `http-referer: https://omp.sh/` and `x-title: omp` unless you set those headers yourself.
 
-### Changed
+### Fixed
 
-- Refactored `AuthStorage` into namespaced sub-modules (`credentials`, `keys`, `oauth`, `limits`, `health`, `blocks`, `resets`, `usage`)
-- Migrated all internal crypto-hashing to native `Bun` performance primitives
+- Fixed multi-account provider selection for OpenCode Go and SuperGrok (xai-oauth), so accounts with insufficient funds or exhausted included quota are skipped in favor of eligible accounts with available billing headroom.
+- Automatic credential disables (definitive OAuth refresh failure, upstream token invalidation, auth-broker disable) are now logged as an `Auth credential disabled` warning, and `credential_disabled` events carry the disabled row's id and the account's email, account id, and organization ([#13190](https://github.com/can1357/oh-my-pi/pull/13190) by [@alphastorm](https://github.com/alphastorm)).
+
+## [18.3.0] - 2026-09-24
+
+### Added
+
+- Added support for Anthropic User Profiles, including schema-validated API responses.
+- Added support for Apple Foundation Models running on-device, including tool calling and vision capabilities.
+- Added multi-account authentication and authorization for Codex cyber access programs, including automatic request replay after access-program rejections.
+- Added credential-aware authentication routing with per-account OAuth policies, deterministic account selection, protected quota reserves, persistent rate-limit tracking, automatic recovery, and sticky session-to-credential affinity.
+- Added deprecated `getApiKey` and `reload` methods for backward compatibility.
 
 ## [18.2.11] - 2026-09-23
 

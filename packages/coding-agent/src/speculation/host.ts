@@ -22,6 +22,13 @@ import { isCpuProfilePath } from "../utils/cpuprofile";
 import { isSampleProfilePath } from "../utils/sample-profile";
 import { isVideoPath } from "@oh-my-pi/pi-tui/prompt/video";
 
+import {
+	cfgToolsApproval,
+	cfgToolsApprovalMode,
+	cfgToolsSpeculativeExecutionEnabled,
+	cfgToolsSpeculativeExecutionMaxInFlight,
+} from "../tools/settings";
+
 type LocalReadEvidence = {
 	path: string;
 	device: number;
@@ -112,7 +119,7 @@ export class CodingAgentSpeculativeExecutionHost implements SpeculativeExecution
 	) {}
 
 	async authorize(context: SpeculativeOperationContext): Promise<SpeculativeAuthorization> {
-		if (!this.settings.get("tools.speculativeExecution.enabled")) {
+		if (!cfgToolsSpeculativeExecutionEnabled.get(this.settings)) {
 			return { allowed: false, reason: "speculative execution is disabled" };
 		}
 		const operation = operationGrant(context);
@@ -125,8 +132,8 @@ export class CodingAgentSpeculativeExecutionHost implements SpeculativeExecution
 		if (hasLifecycleHandlers(this.extensionRunner)) {
 			return { allowed: false, reason: "active extension lifecycle handler" };
 		}
-		const approvalMode = this.settings.get("tools.approvalMode") as ApprovalMode;
-		const policies = this.settings.get("tools.approval") as Record<string, unknown>;
+		const approvalMode = cfgToolsApprovalMode.get(this.settings) as ApprovalMode;
+		const policies = cfgToolsApproval.get(this.settings) as Record<string, unknown>;
 		const approval = resolveApproval(context.tool, context.args, approvalMode, policies);
 		if (approval.policy !== "allow") return { allowed: false, reason: "tool approval is not auto-allow" };
 		const resource = context.effect.resources[0];
@@ -293,10 +300,10 @@ export function createSpeculativeToolExecutionConfig(
 	const host = new CodingAgentSpeculativeExecutionHost(settings, toolSession, extensionRunner);
 	return {
 		get enabled() {
-			return settings.get("tools.speculativeExecution.enabled");
+			return cfgToolsSpeculativeExecutionEnabled.get(settings);
 		},
 		get maxInFlight() {
-			return settings.get("tools.speculativeExecution.maxInFlight");
+			return cfgToolsSpeculativeExecutionMaxInFlight.get(settings);
 		},
 		host,
 	};

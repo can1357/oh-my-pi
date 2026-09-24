@@ -1,5 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgHistoryScope } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { bindHistorySource, resolveHistoryScope } from "@oh-my-pi/pi-coding-agent/modes/history-scope";
 import type { HistorySearchComponent } from "@oh-my-pi/pi-tui/overlays/history-search";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
@@ -57,7 +58,7 @@ describe("history scope wiring", () => {
 	it("recalls through the scope named by the history.scope setting, and follows the setting", async () => {
 		const settings = Settings.isolated();
 		// Same mutation the settings UI performs: the merged value is what the scope resolver reads.
-		settings.override("history.scope", "cwd");
+		cfgHistoryScope.override(settings, "cwd");
 		const storage = HistoryStorage.open(tempDir!.join("history.db"));
 		const elsewhere = tempDir!.join("other");
 		await storage.add("HERE_PROMPT", tempDir!.path(), "session-1");
@@ -65,7 +66,7 @@ describe("history scope wiring", () => {
 		await storage.add("SESSION_PROMPT", elsewhere, "session-1");
 
 		const scope = () =>
-			resolveHistoryScope(settings.get("history.scope"), {
+			resolveHistoryScope(cfgHistoryScope.get(settings), {
 				sessionId: "session-1",
 				cwd: getProjectDir(),
 			});
@@ -80,7 +81,7 @@ describe("history scope wiring", () => {
 
 		// Switching the setting must move the editor to the newly named data set rather than
 		// keep serving the previous one.
-		settings.override("history.scope", "session");
+		cfgHistoryScope.override(settings, "session");
 		editor.setText("");
 		editor.handleInput("\x1b[A");
 		expect(editor.getText()).toBe("SESSION_PROMPT");

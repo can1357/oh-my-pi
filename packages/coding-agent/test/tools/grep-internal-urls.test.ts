@@ -23,6 +23,9 @@ import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { GlobTool } from "../../src/tools/glob";
 import { GrepTool } from "../../src/tools/grep";
 
+import { cfgCompactionExperimentalContextManagement } from "@oh-my-pi/pi-coding-agent/session/context-settings";
+import { cfgReadSummarizeEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
+
 function getResultText(result: { content: Array<{ type: string; text?: string }> }): string {
 	return result.content
 		.filter(c => c.type === "text")
@@ -39,7 +42,7 @@ function virtualDocName(url: InternalUrl): string {
 function registerVirtualDocs(docs: ReadonlyMap<string, string>): void {
 	const handler: ProtocolHandler = {
 		scheme: "virtual",
-		immutable: true,
+		spec: { backing: "virtual", selectors: "lines", immutable: true },
 		async resolve(url: InternalUrl): Promise<InternalResource> {
 			const name = virtualDocName(url);
 			if (!name) {
@@ -204,7 +207,7 @@ describe("GrepTool internal URL resolution", () => {
 
 	it("greps the caller-bound full current branch without materializing a session file", async () => {
 		const settings = Settings.isolated({ "grep.contextBefore": 0, "grep.contextAfter": 0 });
-		settings.set("compaction.experimentalContextManagement", true);
+		cfgCompactionExperimentalContextManagement.set(settings, true);
 		const branch = [
 			{
 				type: "message",
@@ -538,7 +541,7 @@ describe("GrepTool internal URL resolution", () => {
 		LocalProtocolHandler.setOverride({ getArtifactsDir: () => artifactsDir, getSessionId: () => "session" });
 
 		const session = createSession({ hasEditTool: true });
-		session.settings.set("read.summarize.enabled", false);
+		cfgReadSummarizeEnabled.set(session.settings, false);
 		const result = await new ReadTool(session).execute("test-read-local-url-selector", {
 			path: "local://notes.md:1-2",
 		});
@@ -652,7 +655,7 @@ describe("GrepTool internal URL resolution", () => {
 		// not be virtual-grepped — its listing text is not the directory's contents.
 		InternalUrlRouter.instance().register({
 			scheme: "dirstub",
-			immutable: true,
+			spec: { backing: "virtual", selectors: "none", immutable: true },
 			async resolve(url: InternalUrl): Promise<InternalResource> {
 				return { url: url.href, content: "sub/\nfile.txt", contentType: "text/plain", isDirectory: true };
 			},

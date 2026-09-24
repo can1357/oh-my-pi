@@ -8,28 +8,27 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import type { ToolExample } from "@oh-my-pi/pi-ai";
 import type { FindToolDetails } from "@oh-my-pi/pi-tui/tools/find";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { formatBytes, formatDuration, formatNumber, isEnoent } from "@oh-my-pi/pi-utils";
+import { sessionResolveContext } from "../../internal-urls/context";
+import { InternalUrlRouter } from "../../internal-urls/router";
+import type { ResolveContext } from "../../internal-urls/types";
 import { hasNativeJudge, journalJudgmentUsage, resolveJudge } from "../../judgment";
 import findDescription from "../../prompts/tools/find.md" with { type: "text" };
 import type { ToolSession } from "..";
 import { formatPathRelativeToCwd, normalizePathLikeInput, resolveToCwd } from "../path-utils";
 import { toolResult } from "../tool-result";
-import { isOmpDocsScope } from "../../internal-urls/omp-scope";
 import { runCascade } from "./cascade";
-import { materializeOmpScope, type OmpScope } from "./omp-scope";
 import { rankedHeat } from "./passages";
+import { isEnumerableScope, materializeUrlScope, type UrlScope } from "./url-scope";
+
+import { cfgFindEnabled } from "../settings";
 
 const findSchema = type({
-	query: type("string").describe("what to find, in plain language (concept or behavior, not a regex)"),
-	grep_keywords: type("string[]").describe(
-		"identifiers or terms likely to appear verbatim in matching source; steer lexical pre-ranking. [] when unsure",
-	),
-	"path?": type("string").describe(
-		'directory to search, or an `omp://` docs scope (`omp://` for all harness docs, `omp://<file>.md` for one). Omitted -> the workspace root (".")',
-	),
+	query: "string",
+	grep_keywords: "string[]",
+	"path?": "string",
 });
 
 export type FindToolInput = typeof findSchema.infer;
@@ -44,7 +43,7 @@ const RANGES_SHOWN = 3;
  * in sibling tool prompts.
  */
 export function isFindEnabled(session: ToolSession): boolean {
-	const mode = session.settings.get("find.enabled");
+	const mode = cfgFindEnabled.get(session.settings);
 	if (mode !== "auto") return mode === "on";
 	return session.modelRegistry !== undefined && hasNativeJudge(session.settings, session.modelRegistry);
 }
@@ -60,21 +59,6 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 	readonly parameters = findSchema;
 	readonly strict = true;
 
-	readonly examples: readonly ToolExample<typeof findSchema.inferIn>[] = [
-		{
-			caption: "Find a behavior by description",
-			call: { query: "where are request retries counted and reported?", grep_keywords: ["retry", "attempt"] },
-		},
-		{
-			caption: "Locate an implementation without known symbol names",
-			call: { query: "how is the database connection pooled?", grep_keywords: [] },
-		},
-		{
-			caption: "Scope the search to one directory",
-			call: { query: "where are tool renderers registered?", grep_keywords: ["renderer"], path: "packages/tui" },
-		},
-	];
-
 	constructor(private readonly session: ToolSession) {}
 
 	async execute(
@@ -87,18 +71,20 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 		if (query.length === 0) throw new ToolError("`query` must be a non-empty description");
 		const cwd = this.session.cwd;
 		const rawScopeInput = params.path === undefined ? "" : normalizePathLikeInput(params.path);
-		// Harness docs are virtual (no `sourcePath`), so the directory-walking
-		// cascade cannot read them in place: search a temp materialization and
-		// remap hits back to `omp://` URLs, the same shape `grep` uses for archives.
-		let ompScope: OmpScope | undefined;
-		if (isOmpDocsScope(rawScopeInput)) {
-			onUpdate?.({ content: [{ type: "text", text: "materializing omp:// docs" }] });
-			ompScope = await materializeOmpScope(rawScopeInput, { cwd, signal });
+		const resolveContext = sessionResolveContext(this.session, { signal });
+		// Enumerable URLs (virtual document containers) have no local files, so
+		// the directory-walking cascade cannot read them in place: search a temp
+		// materialization and remap hits back to their URLs, the same shape
+		// `grep` uses for archives.
+		let urlScope: UrlScope | undefined;
+		if (isEnumerableScope(rawScopeInput)) {
+			onUpdate?.({ content: [{ type: "text", text: `materializing ${rawScopeInput}` }] });
+			urlScope = await materializeUrlScope(rawScopeInput, resolveContext);
 		}
 		try {
-			const root = ompScope?.dir ?? (await this.#resolveRoot(params.path, cwd));
+			const root = urlScope?.dir ?? (await this.#resolveRoot(rawScopeInput, cwd, resolveContext));
 			const scopePath =
-				ompScope?.scopePath ??
+				urlScope?.scopePath ??
 				(root === path.resolve(cwd) ? undefined : formatPathRelativeToCwd(root, cwd, { trailingSlash: true }));
 			const registry = this.session.modelRegistry;
 			if (!registry) throw new ToolError("find has no model registry to resolve a judge from");
@@ -121,13 +107,13 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 			const elapsedMs = performance.now() - started;
 			const { stats, threshold, keywords } = result;
 			// Cascade paths are root-relative; the model and renderer want
-			// resolvable paths (`read`-relative for files, URLs for docs) without
-			// knowing the scope.
-			const toRel = ompScope?.toOmpRel ?? ((rel: string) => formatPathRelativeToCwd(path.join(root, rel), cwd));
+			// resolvable paths (`read`-relative for files, URLs for virtual
+			// documents) without knowing the scope.
+			const toRel = urlScope?.toUrl ?? ((rel: string) => formatPathRelativeToCwd(path.join(root, rel), cwd));
 			const hits = result.hits.map(hit => ({ ...hit, rel: toRel(hit.rel) }));
 			const details: FindToolDetails = { query, keywords, threshold, hits, stats, elapsedMs, cwd, scopePath };
-			// `omp://` hits are URLs, not cwd-relative paths — they resolve through
-			// the `read` tool, including with `:start-end` selectors.
+			// Virtual-document hits are URLs, not cwd-relative paths — they resolve
+			// through the `read` tool, including with `:start-end` selectors.
 			const where = scopePath === undefined ? "" : ` in ${scopePath}`;
 			const out: string[] = [];
 			if (hits.length === 0) {
@@ -160,15 +146,20 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 			else if (hits.length === 0) builder.useless();
 			return builder.done();
 		} finally {
-			await ompScope?.cleanup();
+			await urlScope?.cleanup();
 		}
 	}
 
-	/** Absolute search root: `path` under cwd, which must be an existing directory. */
-	async #resolveRoot(rawPath: string | undefined, cwd: string): Promise<string> {
-		const input = rawPath === undefined ? "" : normalizePathLikeInput(rawPath);
+	/**
+	 * Absolute search root: `path` under cwd, or the local directory an internal
+	 * URL locates to; either must be an existing directory.
+	 */
+	async #resolveRoot(input: string, cwd: string, context: ResolveContext): Promise<string> {
 		if (input.length === 0) return path.resolve(cwd);
-		const root = resolveToCwd(input, cwd);
+		const router = InternalUrlRouter.instance();
+		const root = router.canHandle(input)
+			? await router.requireLocal(input, "find", context, { directory: true })
+			: resolveToCwd(input, cwd);
 		try {
 			if (!(await fs.stat(root)).isDirectory()) throw new ToolError(`Path is not a directory: ${input}`);
 		} catch (error) {

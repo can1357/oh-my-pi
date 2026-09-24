@@ -8,6 +8,7 @@ import {
 	type CompactionSummaryMessage,
 	resolveTelemetry,
 	type StreamFn,
+	TERMINAL_TOOL_RESULT_ABORT_REASON,
 	ThinkingLevel,
 	type Tokenizer,
 } from "@oh-my-pi/pi-agent-core";
@@ -84,6 +85,7 @@ import type { PlanModeState } from "../plan-mode/state";
 import advisorSystemPrompt from "../prompts/advisor/system.md" with { type: "text" };
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import {
+	AUTO_THINKING,
 	concreteThinkingLevel,
 	resolveThinkingLevelForModel,
 	shouldDisableReasoning,
@@ -108,6 +110,10 @@ import { formatSessionHistoryMarkdown } from "./session-history-format";
 import type { SessionManager } from "./session-manager";
 import { buildSessionMetadata } from "./session-metadata";
 import type { YieldQueue } from "./yield-queue";
+
+import { cfgAdvisorImmuneTurns, cfgAdvisorMaxNotesPerUpdate, cfgAdvisorSyncBacklog } from "../advisor/settings";
+import { cfgCompaction, cfgContextPromotionEnabled } from "./context-settings";
+import { cfgRetry, cfgTierAdvisor } from "./settings";
 
 const ADVISOR_CODEX_SSE_MAX_ATTEMPTS = 1;
 
@@ -263,6 +269,12 @@ interface ActiveAdvisor {
 	agentUnsubscribe?: () => void;
 	model: Model;
 	thinkingLevel: ThinkingLevel;
+	/**
+	 * The user selected `auto` for this advisor's effort. The classifier only
+	 * runs for the primary turn, so the advisor tracks the level `auto` resolved
+	 * to there, retuned at each review boundary.
+	 */
+	autoThinking: boolean;
 	providerSessionId: string | undefined;
 	retryFallback?: AdvisorRetryFallbackState;
 	retryFallbackPendingSuccess: boolean;
@@ -289,6 +301,7 @@ interface AdvisorRuntimeDescriptor {
 	slug: string;
 	model: Model;
 	thinkingLevel: ThinkingLevel;
+	autoThinking: boolean;
 	signature: string;
 }
 
@@ -355,9 +368,10 @@ export interface SessionAdvisorsHost {
 	settings: Settings;
 	modelRegistry: ModelRegistry;
 	yieldQueue: YieldQueue;
-	obfuscator: SecretObfuscator | undefined;
+	obfuscator(): SecretObfuscator | undefined;
 	providerSessionState: Map<string, ProviderSessionState>;
-	preferWebsockets: boolean | undefined;
+	/** Live `providers.openaiWebsockets` hint for provider calls. */
+	preferWebsockets(): boolean | undefined;
 	onPayload: SimpleStreamOptions["onPayload"] | undefined;
 	onResponse: SimpleStreamOptions["onResponse"] | undefined;
 	onSseEvent: SimpleStreamOptions["onSseEvent"] | undefined;
@@ -488,6 +502,7 @@ export class SessionAdvisors {
 		const terminalBoundary = willContinue !== true;
 		if (terminalBoundary) this.#terminalUnwindActive = true;
 		try {
+			this.#retuneAutoThinkingAdvisors();
 			this.#advisorPrimaryTurnsCompleted++;
 			for (const advisor of this.#advisors) {
 				if (advisor.runtime.disposed) continue;
@@ -501,7 +516,7 @@ export class SessionAdvisors {
 					logger.warn("advisor onTurnEnd threw; delta dropped", { advisor: advisor.name, err: String(error) });
 				}
 			}
-			const syncBacklog = this.#host.settings.get("advisor.syncBacklog");
+			const syncBacklog = cfgAdvisorSyncBacklog.get(this.#host.settings);
 			if (this.#advisors.length === 0 || syncBacklog === "off") return;
 			const threshold = Number.parseInt(syncBacklog, 10);
 			await Promise.all(this.#advisors.map(advisor => advisor.runtime.waitForCatchup(30_000, threshold, signal)));
@@ -514,7 +529,7 @@ export class SessionAdvisors {
 	}
 
 	/** Rebuilds live advisors when role assignments alter their resolved runtime inputs. */
-	onModelRolesChanged(): void {
+	reconcileModelRoles(): void {
 		if (!this.#advisorEnabled || this.#host.isDisposed()) return;
 		if (this.#advisors.length > 0 && !this.#advisorRuntimeMatchesCurrentConfig()) this.#stopAdvisorRuntime();
 		this.#buildAdvisorRuntime(true);
@@ -706,6 +721,11 @@ export class SessionAdvisors {
 		this.#resetAllAdvisorRuntimes(reason);
 	}
 
+	/** Re-aligns advisor delivered prefixes after an in-place rewrite their contexts already cover. */
+	rebaseDeliveredPrefixes(reason: string): void {
+		for (const advisor of this.#advisors) advisor.runtime.rebaseDeliveredPrefix(reason);
+	}
+
 	/** Whether live runtimes still match the resolved advisor configuration. */
 	runtimeMatchesCurrentConfig(): boolean {
 		return this.#advisorRuntimeMatchesCurrentConfig();
@@ -744,7 +764,7 @@ export class SessionAdvisors {
 	// Advisor runtime lifecycle
 	// -------------------------------------------------------------------------
 	#advisorImmuneTurnLimit(): number {
-		const immuneTurns = this.#host.settings.get("advisor.immuneTurns") as number;
+		const immuneTurns = cfgAdvisorImmuneTurns.get(this.#host.settings) as number;
 		if (!Number.isFinite(immuneTurns) || immuneTurns <= 0) return 0;
 		return Math.trunc(immuneTurns);
 	}
@@ -757,7 +777,7 @@ export class SessionAdvisors {
 		return (
 			clamp(config?.maxNotesPerUpdate) ??
 			clamp(this.#advisorSharedMaxNotesPerUpdate) ??
-			clamp(this.#host.settings.get("advisor.maxNotesPerUpdate")) ??
+			clamp(cfgAdvisorMaxNotesPerUpdate.get(this.#host.settings)) ??
 			ADVISOR_DEFAULT_BUDGET_PER_UPDATE
 		);
 	}
@@ -876,9 +896,14 @@ export class SessionAdvisors {
 			// `advisor` role chain. A model that fails to resolve skips just this advisor.
 			let model: Model | undefined;
 			let thinkingLevel: ThinkingLevel | undefined;
+			// `auto` is a session-level selector with no per-advisor classifier, so
+			// `concreteThinkingLevel` erases it. Remember the choice: the advisor
+			// then tracks whatever the primary turn's classifier resolved to.
+			let autoThinking = false;
 			if (config.model) {
 				const resolved = resolveModelOverride([config.model], this.#host.modelRegistry, this.#host.settings);
 				model = resolved.model;
+				autoThinking = resolved.thinkingLevel === AUTO_THINKING;
 				thinkingLevel = concreteThinkingLevel(resolved.thinkingLevel);
 				if (!model) {
 					this.#advisorStatuses.set(slug, { name: config.name, status: "no_model" });
@@ -903,6 +928,7 @@ export class SessionAdvisors {
 					continue;
 				}
 				model = sel.model;
+				autoThinking = sel.thinkingLevel === AUTO_THINKING;
 				thinkingLevel = concreteThinkingLevel(sel.thinkingLevel);
 			}
 			// Clamp the effort against the resolved model. Historically we defaulted
@@ -915,7 +941,9 @@ export class SessionAdvisors {
 			// controllable efforts — for that case we forward `Inherit` so no effort
 			// is sent and reasoning stays enabled (matching the `auto`-path fix for
 			// Devin models via `clampAutoThinkingEffort`). See #4579.
-			const requestedLevel = thinkingLevel ?? ThinkingLevel.Medium;
+			const requestedLevel = autoThinking
+				? this.#autoAdvisorThinkingLevel()
+				: (thinkingLevel ?? ThinkingLevel.Medium);
 			const resolvedLevel = resolveThinkingLevelForModel(model, requestedLevel);
 			const advisorThinkingLevel: ThinkingLevel = resolvedLevel ?? ThinkingLevel.Inherit;
 			// Record the status entry now (in roster order) so the Map's insertion
@@ -929,19 +957,42 @@ export class SessionAdvisors {
 				slug,
 				model,
 				thinkingLevel: advisorThinkingLevel,
-				signature: this.#advisorRuntimeSignature(config, slug, model, advisorThinkingLevel),
+				autoThinking,
+				// An `auto` advisor's concrete level changes every turn; signing the
+				// resolved level would make each change look like a config edit and
+				// rebuild the advisor, losing its context. Sign the selector instead.
+				signature: this.#advisorRuntimeSignature(
+					config,
+					slug,
+					model,
+					autoThinking ? AUTO_THINKING : advisorThinkingLevel,
+				),
 			});
 		}
 		return descriptors;
 	}
 
-	#advisorRuntimeSignature(config: AdvisorConfig, slug: string, model: Model, thinkingLevel: ThinkingLevel): string {
+	#advisorRuntimeSignature(
+		config: AdvisorConfig,
+		slug: string,
+		model: Model,
+		thinkingLevel: ThinkingLevel | typeof AUTO_THINKING,
+	): string {
 		const tools = config.tools?.length ? config.tools.join("\u001e") : "";
 		const instructions = config.instructions?.trim() ?? "";
 		const budget = this.#advisorMaxNotesPerUpdate(config);
-		return [config.name, slug, formatModelStringWithRouting(model), thinkingLevel, tools, instructions, budget].join(
-			"\u001f",
-		);
+		// The service tier is bound at build time, so a `tier.advisor` edit must rebuild.
+		const tier = cfgTierAdvisor.get(this.#host.settings);
+		return [
+			config.name,
+			slug,
+			formatModelStringWithRouting(model),
+			thinkingLevel,
+			tools,
+			instructions,
+			budget,
+			tier,
+		].join("\u001f");
 	}
 
 	#advisorRuntimeMatchesCurrentConfig(): boolean {
@@ -970,7 +1021,7 @@ export class SessionAdvisors {
 		// tiers per request (like the main agent, including /fast toggles); a
 		// concrete value is broadcast across families and applied to the advisor
 		// model's family. One value for all advisors.
-		const advisorTierSetting = this.#host.settings.get("tier.advisor");
+		const advisorTierSetting = cfgTierAdvisor.get(this.#host.settings);
 		const advisorTierMap =
 			advisorTierSetting === "inherit"
 				? undefined
@@ -987,6 +1038,7 @@ export class SessionAdvisors {
 				model: advisorModel,
 				name: advisorName,
 				thinkingLevel: advisorThinkingLevel,
+				autoThinking: advisorAutoThinking,
 				signature,
 			} = descriptor;
 
@@ -1097,7 +1149,12 @@ export class SessionAdvisors {
 				mcpResources: this.#advisorMcpResources,
 			});
 			const baseAdvisorStreamFn = this.#advisorStreamFn ?? streamSimple;
-			const advisorStreamFn: StreamFn = (requestModel, context, options) => {
+			const advisorStreamFn: StreamFn = (requestModel, context, streamOptions) => {
+				// Read per request so a mid-session `providers.openaiWebsockets` change reaches advisors.
+				const options = {
+					...streamOptions,
+					preferWebsockets: streamOptions?.preferWebsockets ?? this.#host.preferWebsockets(),
+				};
 				if (requestModel.api === "openai-codex-responses") {
 					return baseAdvisorStreamFn(requestModel, context, {
 						...options,
@@ -1126,7 +1183,6 @@ export class SessionAdvisors {
 				providerSessionState: this.#host.providerSessionState,
 				cursorExecHandlers: advisorCursorExecHandlers,
 				cwdResolver: () => this.#host.sessionManager.getCwd(),
-				preferWebsockets: this.#host.preferWebsockets,
 				getApiKey: requestModel => this.#host.modelRegistry.resolver(requestModel, advisorProviderSessionId),
 				streamFn: advisorStreamFn,
 				// Maintenance installs compactionSummary messages; the core Agent's
@@ -1142,6 +1198,27 @@ export class SessionAdvisors {
 						message,
 						buildAdvisorQuarantineSourceText(currentAdvisorInput, advisorAgent.state.messages),
 					);
+				},
+				// A turn whose only tool calls are `advise` has nothing left to do:
+				// without this the model is re-invoked over the whole prefix just to
+				// say "done" (measured at ~6% of advisor spend, zero notes). Stop the
+				// review through the same graceful terminal path the primary's
+				// `yield` tool uses — the tool batch persists and `onTurnEnd` still
+				// runs. A turn that advises and keeps investigating is untouched.
+				// Fire on the LAST advise block, not the first: the batch starts
+				// records in index order and a not-yet-started sibling would see the
+				// aborted signal and become a skipped placeholder — a lost note.
+				afterToolCall: ctx => {
+					if (ctx.toolCall.name !== adviseTool.name) return undefined;
+					if (ctx.isError) return undefined;
+					let lastAdviseId: string | undefined;
+					for (const block of ctx.assistantMessage.content) {
+						if (block.type !== "toolCall") continue;
+						if (block.name !== adviseTool.name) return undefined;
+						lastAdviseId = block.id;
+					}
+					if (ctx.toolCall.id === lastAdviseId) advisorAgent.abort(TERMINAL_TOOL_RESULT_ABORT_REASON);
+					return undefined;
 				},
 				telemetry: advisorTelemetry,
 				serviceTier: undefined,
@@ -1234,7 +1311,7 @@ export class SessionAdvisors {
 			const runtime = new AdvisorRuntime(advisorAgentFacade, {
 				snapshotMessages: () => this.#host.agent.state.messages,
 				maintainContext: (incoming, signal) => this.#maintainAdvisorContext(advisorRef, incoming, signal),
-				obfuscator: this.#host.obfuscator,
+				obfuscator: this.#host.obfuscator(),
 				getModelIdentity: () => formatModelString(advisorRef.agent.state.model),
 				beginAdvisorUpdate: inProgress => {
 					advisorRef.recorder.beginTurn();
@@ -1303,6 +1380,7 @@ export class SessionAdvisors {
 				recorderClosed: Promise.resolve(),
 				model: advisorModel,
 				thinkingLevel: advisorThinkingLevel,
+				autoThinking: advisorAutoThinking,
 				providerSessionId: advisorProviderSessionId,
 				retryFallbackPendingSuccess: false,
 				usageLimitRetries: 0,
@@ -1503,6 +1581,41 @@ export class SessionAdvisors {
 		return nextThinkingLevel;
 	}
 
+	/**
+	 * The level an `auto` advisor runs at: the effort the primary agent is
+	 * running at — the classifier's pick under `auto`, the pinned level
+	 * otherwise — so the advisor follows a mid-session switch in either
+	 * direction. When the primary has no effort (`off`, `inherit`, unset) it is
+	 * the `medium` default an advisor without a configured level gets. One
+	 * source for build, review-boundary retune and fallback restore, so a live
+	 * advisor always matches what a fresh build would give it.
+	 */
+	#autoAdvisorThinkingLevel(): ThinkingLevel {
+		return this.#host.agent.state.thinkingLevel ?? ThinkingLevel.Medium;
+	}
+
+	/**
+	 * Re-point every `auto` advisor at {@link #autoAdvisorThinkingLevel} — the
+	 * primary turn's level, or the build-time default while the primary is off.
+	 *
+	 * Deliberately not {@link #setAdvisorModel}: the model is unchanged, and that
+	 * path invalidates the append-only context, which would throw away the
+	 * advisor's cached prefix on every turn. Only the effort moves here.
+	 */
+	#retuneAutoThinkingAdvisors(): void {
+		const requested = this.#autoAdvisorThinkingLevel();
+		for (const advisor of this.#advisors) {
+			// A retry-fallback selector pinned its own effort for the fallback
+			// model; the retune resumes once the configured model is restored.
+			if (!advisor.autoThinking || advisor.runtime.disposed || advisor.retryFallback) continue;
+			const next = resolveThinkingLevelForModel(advisor.model, requested) ?? ThinkingLevel.Inherit;
+			if (next === advisor.thinkingLevel) continue;
+			advisor.agent.setThinkingLevel(toReasoningEffort(next));
+			advisor.agent.setDisableReasoning(shouldDisableReasoning(next));
+			advisor.thinkingLevel = next;
+		}
+	}
+
 	#canReplayAdvisorHistory(advisor: ActiveAdvisor, model: Model): boolean {
 		return advisor.agent.state.messages.every(
 			message =>
@@ -1544,8 +1657,11 @@ export class SessionAdvisors {
 		if (!apiKey) return;
 		signal.throwIfAborted();
 
-		const thinkingToApply =
-			advisor.thinkingLevel === fallback.lastAppliedThinkingLevel
+		// An `auto` advisor skipped the retune while on the fallback: rejoin the
+		// primary's live level now, not the level it had when it fell back.
+		const thinkingToApply = advisor.autoThinking
+			? this.#autoAdvisorThinkingLevel()
+			: advisor.thinkingLevel === fallback.lastAppliedThinkingLevel
 				? fallback.originalThinkingLevel
 				: advisor.thinkingLevel;
 		this.#setAdvisorModel(advisor, primaryModel, thinkingToApply);
@@ -1637,7 +1753,7 @@ export class SessionAdvisors {
 
 		const currentSelector = formatRetryFallbackSelector(currentModel, advisor.thinkingLevel);
 
-		const retrySettings = this.#host.settings.getGroup("retry");
+		const retrySettings = cfgRetry.get(this.#host.settings);
 		// A usage-limit error with no sibling credential and no usable model
 		// fallback is not automatically fatal: wait out a transient credential
 		// block and retry, mirroring the primary turn-recovery. Only a wait past
@@ -1771,8 +1887,7 @@ export class SessionAdvisors {
 		currentModel: Model,
 		signal: AbortSignal,
 	): Promise<boolean> {
-		const promotionSettings = this.#host.settings.getGroup("contextPromotion");
-		if (!promotionSettings.enabled) return false;
+		if (!cfgContextPromotionEnabled.get(this.#host.settings)) return false;
 		const contextWindow = currentModel.contextWindow ?? 0;
 		if (contextWindow <= 0) return false;
 		const targetModel = await this.#host.resolveContextPromotionTarget(currentModel, contextWindow, signal);
@@ -1810,7 +1925,7 @@ export class SessionAdvisors {
 		const agent = advisor.agent;
 		const incomingTokens = agent.tokenizer.countMessage(incoming);
 
-		const configuredCompaction = this.#host.settings.getGroup("compaction");
+		const configuredCompaction = cfgCompaction.get(this.#host.settings);
 		const methods = resolveCompactionMethodOrder(configuredCompaction.methodOrder);
 		if (!configuredCompaction.enabled || methods.length === 0) {
 			return false;
@@ -1999,7 +2114,7 @@ export class SessionAdvisors {
 						promptCacheKey: advisorProviderSessionId,
 						metadata: advisorMetadata,
 						providerSessionState: this.#host.providerSessionState,
-						preferWebsockets: this.#host.preferWebsockets,
+						preferWebsockets: this.#host.preferWebsockets(),
 						codexCompaction,
 					},
 				);
@@ -2121,11 +2236,16 @@ export class SessionAdvisors {
 	/**
 	 * Wait for active advisor reviews and their emitted card events before a
 	 * headless caller disposes the session. Returns `false` and logs work disposal
-	 * will abandon when the shared deadline expires or an advisor fails.
+	 * will abandon when the shared deadline expires or an advisor stops for good
+	 * (halt, quota pause). A failing advisor releases the drain at once unless
+	 * `waitThroughRecovery` is set: then its retry and fallback-chain recovery is
+	 * waited through instead of being abandoned mid-switch.
 	 */
-	async waitForAdvisorCatchup(timeoutMs: number): Promise<boolean> {
+	async waitForAdvisorCatchup(timeoutMs: number, options?: { waitThroughRecovery?: boolean }): Promise<boolean> {
 		const deadline = Date.now() + timeoutMs;
-		const results = await Promise.all(this.#advisors.map(advisor => advisor.runtime.waitForCatchup(timeoutMs, 1)));
+		const results = await Promise.all(
+			this.#advisors.map(advisor => advisor.runtime.waitForCatchup(timeoutMs, 1, undefined, options)),
+		);
 		const cardEventsCaughtUp = await this.#waitForPendingAdvisorCardEvents(Math.max(0, deadline - Date.now()));
 		const abandoned = this.#advisors.filter(
 			(advisor, index) => results[index] === false && advisor.runtime.backlog > 0,

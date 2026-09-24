@@ -9,8 +9,8 @@ import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelString } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
-import { validateProviderMaxInFlightRequests } from "../config/settings";
-import type { LocalProtocolOptions } from "../internal-urls";
+import { InternalUrlRouter, type LocalProtocolOptions } from "../internal-urls";
+import { normalizeLocalScheme } from "../internal-urls/parse";
 import { deobfuscateSessionContext, obfuscateMessages } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import { stripPendingSecretPlaceholderSuffix } from "../secrets/placeholder";
@@ -22,6 +22,17 @@ import { type CustomMessage, convertToLlm } from "./messages";
 import { IMAGE_ATTACHMENT_DESCRIPTION_TYPE } from "./queued-messages";
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
 import type { SessionManager } from "./session-manager";
+
+import { cfgImagesBlockImages } from "../modes/settings";
+import {
+	cfgImagesDescribeForTextModels,
+	cfgModelLoopGuardCheckAssistantContent,
+	cfgModelLoopGuardEnabled,
+	cfgProvidersAntigravityEndpoint,
+	cfgProvidersMaxInFlightRequests,
+	cfgProvidersOpenrouterVariant,
+	validateProviderMaxInFlightRequests,
+} from "./settings";
 
 type NormalizableContentBlock = AssistantMessage["content"][number] | TextContent | ImageContent;
 
@@ -39,7 +50,8 @@ export interface SessionProviderBoundaryHost {
 	onPayload: SimpleStreamOptions["onPayload"] | undefined;
 	onResponse: SimpleStreamOptions["onResponse"] | undefined;
 	onSseEvent: SimpleStreamOptions["onSseEvent"] | undefined;
-	obfuscator: SecretObfuscator | undefined;
+	/** Current secret obfuscator; swapped when `secrets.enabled` turns on mid-session. */
+	obfuscator(): SecretObfuscator | undefined;
 }
 
 /** Owns the transformations at the session/provider boundary. */
@@ -62,12 +74,22 @@ export class SessionProviderBoundary {
 			return images.flatMap((image, index) => {
 				const label = `Image #${index + 1}`;
 				const uri = `attachment://${index + 1}`;
-				// File-backed attachments resolve to their original path so tools and
-				// clickable links open the user's real file; clipboard payloads have no
-				// source file and materialize a blob copy instead.
-				const originalPath = imageAttachmentSource(image)?.path;
-				if (originalPath) return [{ label, uri, image, sourcePath: originalPath }];
+				// File-backed attachments resolve to their file so tools and clickable links
+				// open it. Clipboard images committed to the session carry an internal URL,
+				// located against the session's current root so `/move` keeps them readable.
+				// Payloads without a file materialize a blob copy instead.
+				const source = imageAttachmentSource(image)?.path;
 				try {
+					if (source) {
+						const router = InternalUrlRouter.instance();
+						const url = normalizeLocalScheme(source);
+						if (!router.canHandle(url)) return [{ label, uri, image, sourcePath: source }];
+						const sourcePath = router.locateSync(url, {
+							localProtocolOptions: this.#host.localProtocolOptions(),
+						});
+						if (sourcePath === undefined) throw new Error(`No local file backs ${source}`);
+						return [{ label, uri, image, sourcePath }];
+					}
 					const sourcePath = this.#host.sessionManager.putBlobSync(Buffer.from(image.data, "base64"), {
 						extension: blobExtensionForImageMimeType(image.mimeType),
 					}).displayPath;
@@ -86,7 +108,7 @@ export class SessionProviderBoundary {
 
 	/** Builds the current deobfuscated context for agent display and replay. */
 	buildDisplaySessionContext(): SessionContext {
-		return deobfuscateSessionContext(this.#host.sessionManager.buildSessionContext(), this.#host.obfuscator);
+		return deobfuscateSessionContext(this.#host.sessionManager.buildSessionContext(), this.#host.obfuscator());
 	}
 
 	/** Builds the full display-only transcript context. */
@@ -99,19 +121,20 @@ export class SessionProviderBoundary {
 				collapseCompactedHistory: options?.collapseCompactedHistory,
 				keepDanglingToolCalls: options?.keepDanglingToolCalls,
 			}),
-			this.#host.obfuscator,
+			this.#host.obfuscator(),
 		);
 	}
 
 	/** Obfuscates optional plaintext before a provider request. */
 	obfuscateText(text: string | undefined): string | undefined {
-		if (!text || !this.#host.obfuscator?.hasSecrets()) return text;
-		return this.#host.obfuscator.obfuscate(text);
+		const obfuscator = this.#host.obfuscator();
+		if (!text || !obfuscator?.obfuscates()) return text;
+		return obfuscator.obfuscate(text);
 	}
 
 	/** Obfuscates summaries and snapcompact plaintext carried into compaction. */
 	obfuscateCompactionPreparation(preparation: CompactionPreparation): CompactionPreparation {
-		if (!this.#host.obfuscator?.hasSecrets()) return preparation;
+		if (!this.#host.obfuscator()?.obfuscates()) return preparation;
 		const previousSummary = this.obfuscateText(preparation.previousSummary);
 		const previousPreserveData = this.#obfuscatePreservedArchiveText(preparation.previousPreserveData);
 		if (
@@ -125,21 +148,23 @@ export class SessionProviderBoundary {
 
 	/** Deobfuscates provider text before exposing it to the session. */
 	deobfuscateText(text: string): string {
-		if (!this.#host.obfuscator?.hasSecrets()) return text;
-		return this.#host.obfuscator.deobfuscate(text);
+		const obfuscator = this.#host.obfuscator();
+		if (!obfuscator?.hasSecrets()) return text;
+		return obfuscator.deobfuscate(text);
 	}
 
 	/** Deobfuscates a streamed delta and removes an incomplete secret placeholder suffix. */
 	deobfuscateDelta(text: string): string {
 		const deobfuscated = this.deobfuscateText(text);
-		if (!this.#host.obfuscator?.hasSecrets()) return deobfuscated;
+		if (!this.#host.obfuscator()?.hasSecrets()) return deobfuscated;
 		return stripPendingSecretPlaceholderSuffix(deobfuscated);
 	}
 
 	/** Converts side-request messages through the session's secret boundary. */
 	convertToLlmForSideRequest(messages: AgentMessage[]): Message[] {
 		const converted = convertToLlm(messages);
-		return this.#host.obfuscator?.hasSecrets() ? obfuscateMessages(this.#host.obfuscator, converted) : converted;
+		const obfuscator = this.#host.obfuscator();
+		return obfuscator ? obfuscateMessages(obfuscator, converted) : converted;
 	}
 
 	/** Converts session messages using the configured pre-LLM pipeline. */
@@ -155,24 +180,24 @@ export class SessionProviderBoundary {
 		const sessionMetadata = this.#host.agent.metadataForProvider(provider);
 		const sessionOnSseEvent = this.#host.onSseEvent;
 		const openrouterRoutingPreset =
-			provider === "openrouter" ? this.#host.settings.get("providers.openrouterVariant") : "default";
+			provider === "openrouter" ? cfgProvidersOpenrouterVariant.get(this.#host.settings) : "default";
 		const openrouterVariant =
 			openrouterRoutingPreset !== "default" && options.openrouterVariant === undefined
 				? openrouterRoutingPreset
 				: undefined;
 		const antigravityEndpointMode =
-			provider === "google-antigravity" ? this.#host.settings.get("providers.antigravityEndpoint") : undefined;
+			provider === "google-antigravity" ? cfgProvidersAntigravityEndpoint.get(this.#host.settings) : undefined;
 
 		const preparedOptions: SimpleStreamOptions = {
 			...options,
 			...(openrouterVariant !== undefined && { openrouterVariant }),
 			...(antigravityEndpointMode !== undefined && { antigravityEndpointMode }),
 			maxInFlightRequests: validateProviderMaxInFlightRequests(
-				options.maxInFlightRequests ?? this.#host.settings.get("providers.maxInFlightRequests"),
+				options.maxInFlightRequests ?? cfgProvidersMaxInFlightRequests.get(this.#host.settings),
 			),
 			loopGuard: {
-				enabled: this.#host.settings.get("model.loopGuard.enabled"),
-				checkAssistantContent: this.#host.settings.get("model.loopGuard.checkAssistantContent"),
+				enabled: cfgModelLoopGuardEnabled.get(this.#host.settings),
+				checkAssistantContent: cfgModelLoopGuardCheckAssistantContent.get(this.#host.settings),
 				...options.loopGuard,
 			},
 		};
@@ -182,29 +207,32 @@ export class SessionProviderBoundary {
 		}
 
 		if (sessionOnPayload) {
-			if (!options.onPayload) {
-				preparedOptions.onPayload = sessionOnPayload;
-			} else {
-				const requestOnPayload = options.onPayload;
-				preparedOptions.onPayload = async (payload, model) => {
-					const sessionPayload = await sessionOnPayload(payload, model);
-					const sessionResolvedPayload = sessionPayload ?? payload;
-					const requestPayload = await requestOnPayload(sessionResolvedPayload, model);
-					return requestPayload ?? sessionResolvedPayload;
-				};
-			}
+			const requestOnPayload = options.onPayload;
+			preparedOptions.onPayload = async (payload, model) => {
+				const sessionPayload = options.signal
+					? await sessionOnPayload(payload, model, options.signal)
+					: await sessionOnPayload(payload, model);
+				options.signal?.throwIfAborted();
+				const sessionResolvedPayload = sessionPayload ?? payload;
+				if (!requestOnPayload) return sessionResolvedPayload;
+				const requestPayload = options.signal
+					? await requestOnPayload(sessionResolvedPayload, model, options.signal)
+					: await requestOnPayload(sessionResolvedPayload, model);
+				options.signal?.throwIfAborted();
+				return requestPayload ?? sessionResolvedPayload;
+			};
 		}
 
 		if (sessionOnResponse) {
-			if (!options.onResponse) {
-				preparedOptions.onResponse = sessionOnResponse;
-			} else {
-				const requestOnResponse = options.onResponse;
-				preparedOptions.onResponse = async (response, model) => {
-					await sessionOnResponse(response, model);
-					await requestOnResponse(response, model);
-				};
-			}
+			const requestOnResponse = options.onResponse;
+			preparedOptions.onResponse = async (response, model) => {
+				if (options.signal) await sessionOnResponse(response, model, options.signal);
+				else await sessionOnResponse(response, model);
+				if (requestOnResponse) {
+					if (options.signal) await requestOnResponse(response, model, options.signal);
+					else await requestOnResponse(response, model);
+				}
+			};
 		}
 
 		if (sessionOnSseEvent) {
@@ -236,8 +264,8 @@ export class SessionProviderBoundary {
 		const shouldDescribe =
 			!!model &&
 			!sendsImageInputOnWire(model) &&
-			!this.#host.settings.get("images.blockImages") &&
-			this.#host.settings.get("images.describeForTextModels");
+			!cfgImagesBlockImages.get(this.#host.settings) &&
+			cfgImagesDescribeForTextModels.get(this.#host.settings);
 		if (!shouldDescribe || !model) return undefined;
 
 		let blocks: TextContent[];
@@ -297,10 +325,10 @@ export class SessionProviderBoundary {
 	#obfuscatePreservedArchiveText(
 		preserveData: Record<string, unknown> | undefined,
 	): Record<string, unknown> | undefined {
-		const obfuscator = this.#host.obfuscator;
+		const obfuscator = this.#host.obfuscator();
 		const slot = preserveData?.[snapcompact.PRESERVE_KEY];
 		if (
-			!obfuscator?.hasSecrets() ||
+			!obfuscator?.obfuscates() ||
 			!preserveData ||
 			!isRecord(slot) ||
 			!snapcompact.getPreservedArchive(preserveData)

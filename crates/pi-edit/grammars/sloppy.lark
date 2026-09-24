@@ -1,41 +1,43 @@
 // Canonical grammar for the sloppy edit payload (constrained decoding).
 //
 // Shape:
-//   *** SM:EDIT relative/path.ts   open edits in that file
-//   *** SM:EDIT relative/path.ts all
-//                                  apply every match
-//   *** SM:EDIT                    continue with the same file
-//   *** SM:FIND                    current-text body; … elides gaps
-//   *** SM:PUT                     final replacement body; empty deletes
-//   *** SM:AFTER                   lines inserted after the match
+//   *** Edit File: relative/path.ts   open edits in that file
+//   *** Edit File: relative/path.ts all
+//                                     apply every match
+//   *** Edit File:                    continue with the same file
+//   *** Find                          current-text body; … elides gaps
+//   *** Replace                       final replacement body; empty deletes
+//   *** Insert Before                 lines inserted before the match
+//   *** Insert After                  lines inserted after the match
 // Headers are standalone and case-insensitive. A body continues until the
-// next recognized header or EOF; no closing delimiter is used. AFTER treats
-// foreign Begin/End Patch rows as literal insertion text.
+// next recognized header or EOF; no closing delimiter is used. Insert bodies
+// treat foreign Begin/End Patch rows as literal insertion text, except a
+// trailing End Patch, which the parser drops as a wrapper closer.
 start: begin_patch? edit+
 
 begin_patch: BEGIN_PATCH LF
 
 edit: edit_open pair+
 edit_open: EDIT_HEADER LF
-pair: find (put | after)
+pair: find (replace | insert)
 find: FIND_HEADER LF body_line*
-put: PUT_HEADER action_body?
-after: AFTER_HEADER after_body?
+replace: REPLACE_HEADER action_body?
+insert: INSERT_HEADER insert_body?
 action_body: LF body_line* BODY_TEXT?
-after_body: LF after_body_line* AFTER_TEXT?
+insert_body: LF insert_body_line* INSERT_TEXT?
 
 body_line: BODY_TEXT LF | LF
-after_body_line: AFTER_TEXT LF | LF
+insert_body_line: INSERT_TEXT LF | LF
 
 BEGIN_PATCH: /[ \t]*\*{3}[ \t]+(?i:Begin[ \t]+Patch)[ \t]*/
 END_PATCH: /[ \t]*\*{3}[ \t]+(?i:End[ \t]+Patch)[ \t]*/
-EDIT_HEADER: /[ \t]*\*{3}[ \t]+(?i:SM:EDIT)(?:[ \t]+[^\r\n]*)?/
-FIND_HEADER: /[ \t]*\*{3}[ \t]+(?i:SM:FIND)[ \t]*/
-PUT_HEADER: /[ \t]*\*{3}[ \t]+(?i:SM:PUT)[ \t]*/
-AFTER_HEADER: /[ \t]*\*{3}[ \t]+(?i:SM:AFTER)[ \t]*/
+EDIT_HEADER: /[ \t]*\*{3}[ \t]+(?i:Edit[ \t]+File:)(?:[ \t]+[^\r\n]*)?/
+FIND_HEADER: /[ \t]*\*{3}[ \t]+(?i:Find)[ \t]*/
+REPLACE_HEADER: /[ \t]*\*{3}[ \t]+(?i:Replace)[ \t]*/
+INSERT_HEADER: /[ \t]*\*{3}[ \t]+(?i:Insert[ \t]+(?:Before|After))[ \t]*/
 
 // LLGuidance supports terminal intersection/complement, not priorities or lookarounds.
-BODY_TEXT: /[^\r\n]+/ & ~(EDIT_HEADER | FIND_HEADER | PUT_HEADER | AFTER_HEADER | BEGIN_PATCH | END_PATCH)
-AFTER_TEXT: /[^\r\n]+/ & ~(EDIT_HEADER | FIND_HEADER | PUT_HEADER | AFTER_HEADER)
+BODY_TEXT: /[^\r\n]+/ & ~(EDIT_HEADER | FIND_HEADER | REPLACE_HEADER | INSERT_HEADER | BEGIN_PATCH | END_PATCH)
+INSERT_TEXT: /[^\r\n]+/ & ~(EDIT_HEADER | FIND_HEADER | REPLACE_HEADER | INSERT_HEADER)
 
 %import common.LF

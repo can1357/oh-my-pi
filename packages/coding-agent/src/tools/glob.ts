@@ -3,11 +3,9 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import type { ToolExample } from "@oh-my-pi/pi-ai";
 import * as natives from "@oh-my-pi/pi-natives";
 import { formatGroupedPaths, hasFsCode, isEnoent, prompt, untilAborted } from "@oh-my-pi/pi-utils";
-import { InternalUrlRouter } from "../internal-urls";
-import { splitMemoryGlobPattern } from "../internal-urls/memory-protocol";
+import { InternalUrlRouter, sessionResolveContext } from "../internal-urls";
 import globDescription from "../prompts/tools/glob.md" with { type: "text" };
 import { truncateHead } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { sessionDelegationBias } from "../task/prompt-policy";
@@ -18,8 +16,7 @@ import { applyListLimit } from "@oh-my-pi/pi-tui/tools/list-limit";
 import {
 	expandDelimitedPathEntries,
 	formatPathRelativeToCwd,
-	hasGlobPathChars,
-	isSshUrl,
+	hasUrlPathGlobChars,
 	normalizePathLikeInput,
 	parseFindPattern,
 	partitionExistingPaths,
@@ -31,13 +28,13 @@ import { ToolAbortError, throwIfAborted } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 
+import { cfgTaskDisabledAgents } from "../task/settings";
+
 const findSchema = type({
-	"path?": type("string").describe(
-		'glob, file, or directory to search — a single path or a semicolon-delimited list ("src/**/*.ts; test/**/*.ts"). Omitted -> searches the workspace root (".")',
-	),
-	"hidden?": type("boolean").describe("include hidden files"),
-	"gitignore?": type("boolean").describe("respect gitignore"),
-	"limit?": type("number").describe("max results"),
+	"path?": "string",
+	"hidden?": "boolean",
+	"gitignore?": "boolean",
+	"limit?": "number",
 });
 
 export type GlobToolInput = typeof findSchema.infer;
@@ -95,31 +92,13 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			hasFind: this.session.isToolActive?.("find") ?? isFindEnabled(this.session),
 			eagerDelegation: sessionDelegationBias(this.session) === "eager",
 			scoutAvailable: isScoutSpawnable(
-				this.session.settings.get("task.disabledAgents") as string[] | undefined,
+				cfgTaskDisabledAgents.get(this.session.settings) as string[] | undefined,
 				this.session.getSessionSpawns?.() ?? "*",
 			),
 		});
 	}
 	readonly parameters = findSchema;
 
-	readonly examples: readonly ToolExample<typeof findSchema.infer>[] = [
-		{
-			caption: "Glob files",
-			call: { path: "src/**/*.ts" },
-		},
-		{
-			caption: "Multiple targets — semicolon-delimited list",
-			call: { path: "src/**/*.ts; test/**/*.ts" },
-		},
-		{
-			caption: "Glob gitignored files like .env",
-			call: { path: ".env*", gitignore: false },
-		},
-		{
-			caption: "Glob directories matching a name (returns both files and dirs; directories are suffixed with `/`)",
-			call: { path: "**/tests" },
-		},
-	];
 	readonly strict = true;
 
 	readonly #customOps?: GlobOperations;
@@ -178,59 +157,25 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 				throw new ToolError("Searching from root directory '/' is not allowed");
 			}
 			const internalRouter = InternalUrlRouter.instance();
+			const resolveContext = sessionResolveContext(this.session, { signal });
 			const normalizedPatterns: string[] = [];
 			for (const rawPattern of aliasResolvedPatterns) {
 				if (!internalRouter.canHandle(rawPattern)) {
 					normalizedPatterns.push(rawPattern);
 					continue;
 				}
-				if (isSshUrl(rawPattern)) {
-					throw new ToolError(
-						`find cannot operate on a remote ssh:// path: ${rawPattern}. ssh:// has no local file to glob; use \`read ${rawPattern}\` to list or inspect the remote path.`,
-					);
-				}
-				if (hasGlobPathChars(rawPattern)) {
-					if (!/^memory:\/\//i.test(rawPattern)) {
+				// Locating never contacts a remote host; schemes without local files fail uniformly.
+				if (hasUrlPathGlobChars(rawPattern)) {
+					const located = await internalRouter.locateGlob(rawPattern, resolveContext);
+					if (located === null) {
 						throw new ToolError(`Glob patterns are not supported for internal URLs: ${rawPattern}`);
 					}
-					const memoryGlob = splitMemoryGlobPattern(rawPattern);
-					const resource = await internalRouter.resolve(memoryGlob.baseUrl, {
-						cwd: this.session.cwd,
-						settings: this.session.settings,
-						signal,
-						sessionFile: this.session.getSessionFile() ?? undefined,
-						sessionId:
-							this.session.sessionManager?.getSessionId?.() ?? this.session.getSessionId?.() ?? undefined,
-						agentRegistry: this.session.agentRegistry,
-						localProtocolOptions: this.session.localProtocolOptions,
-						skills: this.session.skills,
-						rules: this.session.activeRules,
-						pathOnly: true,
-					});
-					if (!resource.sourcePath) {
-						throw new ToolError(`Cannot find internal URL without a backing file: ${memoryGlob.baseUrl}`);
-					}
-					normalizedPatterns.push(
-						path.join(resource.sourcePath.replace(/[*?[{]/g, "[$&]"), memoryGlob.globPattern),
-					);
+					normalizedPatterns.push(located);
 					continue;
 				}
-				const resource = await internalRouter.resolve(rawPattern, {
-					cwd: this.session.cwd,
-					settings: this.session.settings,
-					signal,
-					sessionFile: this.session.getSessionFile() ?? undefined,
-					sessionId: this.session.sessionManager?.getSessionId?.() ?? this.session.getSessionId?.() ?? undefined,
-					agentRegistry: this.session.agentRegistry,
-					localProtocolOptions: this.session.localProtocolOptions,
-					skills: this.session.skills,
-					rules: this.session.activeRules,
-					pathOnly: true,
-				});
-				if (!resource.sourcePath) {
-					throw new ToolError(`Cannot find internal URL without a backing file: ${rawPattern}`);
-				}
-				normalizedPatterns.push(resource.sourcePath);
+				normalizedPatterns.push(
+					await internalRouter.requireLocal(rawPattern, "glob", resolveContext, { directory: true }),
+				);
 			}
 			if (normalizedPatterns.some(pattern => pattern.length === 0)) {
 				throw new ToolError("`path` must contain non-empty globs or paths");

@@ -2,32 +2,31 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
+import localDoc from "../prompts/internal-urls/local.md" with { type: "text" };
 import { AgentRegistry } from "../registry/agent-registry";
-import { isMarkdownPath } from "@oh-my-pi/pi-tui/lang-from-path";
-import { buildDirectoryResource } from "./filesystem-resource";
+import {
+	buildDirectoryResource,
+	containedRealPath,
+	contentTypeForPath,
+	ensureWithinRoot,
+	validateRelativePath,
+} from "./filesystem-resource";
 import { parseInternalUrl } from "./parse";
-import { validateRelativePath } from "./skill-protocol";
-import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, UrlCompletion } from "./types";
+import type {
+	InternalResource,
+	InternalUrl,
+	LocateOptions,
+	ProtocolHandler,
+	ResolveContext,
+	SchemeSpec,
+	UrlCompletion,
+} from "./types";
 
 export interface LocalProtocolOptions {
 	getArtifactsDir?: () => string | null;
 	getSessionId?: () => string | null;
 }
 
-function parseLocalUrl(input: string): InternalUrl {
-	return parseInternalUrl(input);
-}
-
-function ensureWithinRoot(targetPath: string, rootPath: string): void {
-	if (targetPath !== rootPath && !targetPath.startsWith(`${rootPath}${path.sep}`)) {
-		throw new Error("local:// URL escapes local root");
-	}
-}
-
-function toLocalValidationError(error: unknown): Error {
-	const message = error instanceof Error ? error.message : String(error);
-	return new Error(message.replace("skill://", "local://"));
-}
 const WINDOWS_LOCAL_ROOT_MAX_CHARS = 180;
 
 function safeSessionId(options: LocalProtocolOptions): string {
@@ -41,13 +40,6 @@ function shortLocalRoot(options: LocalProtocolOptions): string {
 	// so `SessionManager.moveTo()` and the resume-after-move flow keep finding
 	// the same `local://` directory the session wrote pre-move.
 	return path.join(os.tmpdir(), "omp-local", safeSessionId(options));
-}
-
-function getContentType(filePath: string): InternalResource["contentType"] {
-	if (isMarkdownPath(filePath)) return "text/markdown";
-	const ext = path.extname(filePath).toLowerCase();
-	if (ext === ".json") return "application/json";
-	return "text/plain";
 }
 
 const LOCAL_TEXT_SNIFF_BYTES = 8 * 1024;
@@ -158,7 +150,7 @@ async function buildFileResource(
 	return {
 		url: url.href,
 		content,
-		contentType: getContentType(resolved.path),
+		contentType: contentTypeForPath(resolved.path),
 		size: Buffer.byteLength(content, "utf-8"),
 		sourcePath: resolved.path,
 		notes: [LOCAL_WRITE_NOTE],
@@ -231,11 +223,7 @@ function extractRelativePath(url: InternalUrl): string {
 	} catch {
 		throw new Error(`Invalid URL encoding in local:// path: ${url.href}`);
 	}
-	try {
-		validateRelativePath(decoded);
-	} catch (error) {
-		throw toLocalValidationError(error);
-	}
+	validateRelativePath(decoded, "local");
 	return decoded;
 }
 
@@ -301,7 +289,7 @@ export function resolveLocalUrlToPath(
 	options: LocalProtocolOptions,
 	platform: NodeJS.Platform = process.platform,
 ): string {
-	const url = typeof input === "string" ? parseLocalUrl(input) : input;
+	const url = typeof input === "string" ? parseInternalUrl(input) : input;
 	const localRoot = path.resolve(resolveLocalRoot(options, platform));
 	const relativePath = extractRelativePath(url);
 
@@ -310,7 +298,7 @@ export function resolveLocalUrlToPath(
 	}
 
 	const resolved = path.resolve(localRoot, relativePath);
-	ensureWithinRoot(resolved, localRoot);
+	ensureWithinRoot(resolved, localRoot, "local");
 	return resolved;
 }
 
@@ -338,8 +326,7 @@ type ResolvedLocalTarget =
  * Resolve a local:// URL to its on-disk target with realpath + containment
  * checks on the root, parent, and target so symlinks cannot escape the session
  * local root. Does NOT read or decode file contents — callers decide how to
- * consume the resolved path. Shared by {@link LocalProtocolHandler.resolve} and
- * {@link resolveLocalUrlToFile}.
+ * consume the resolved path.
  */
 async function resolveLocalTarget(url: InternalUrl, opts: LocalProtocolOptions): Promise<ResolvedLocalTarget> {
 	const localRoot = path.resolve(resolveLocalRoot(opts));
@@ -357,31 +344,16 @@ async function resolveLocalTarget(url: InternalUrl, opts: LocalProtocolOptions):
 
 	const relativePath = extractRelativePath(url);
 	const targetPath = relativePath ? path.resolve(resolvedRoot, relativePath) : resolvedRoot;
-	ensureWithinRoot(targetPath, resolvedRoot);
+	ensureWithinRoot(targetPath, resolvedRoot, "local");
 
 	if (targetPath === resolvedRoot) {
 		return { kind: "listing", root: resolvedRoot };
 	}
 
-	const parentDir = path.dirname(targetPath);
-	try {
-		const realParent = await fs.realpath(parentDir);
-		ensureWithinRoot(realParent, resolvedRoot);
-	} catch (error) {
-		if (!isEnoent(error)) throw error;
+	const realTargetPath = await containedRealPath(targetPath, resolvedRoot, "local");
+	if (realTargetPath === undefined) {
+		throw new Error(`Local file not found: ${url.href}`);
 	}
-
-	let realTargetPath: string;
-	try {
-		realTargetPath = await fs.realpath(targetPath);
-	} catch (error) {
-		if (isEnoent(error)) {
-			throw new Error(`Local file not found: ${url.href}`);
-		}
-		throw error;
-	}
-
-	ensureWithinRoot(realTargetPath, resolvedRoot);
 
 	const stat = await fs.stat(realTargetPath);
 	if (stat.isDirectory()) {
@@ -394,27 +366,35 @@ async function resolveLocalTarget(url: InternalUrl, opts: LocalProtocolOptions):
 }
 
 /**
- * Resolve a local:// URL to a regular on-disk file, applying the same
- * realpath + containment guarantees as {@link LocalProtocolHandler.resolve}
- * but WITHOUT reading or UTF-8-decoding its contents. Returns null when there
- * is no active session or when the URL targets the root listing or a directory;
- * throws the handler's not-found and "escapes local root" errors for missing
- * files and symlink escapes.
- *
- * Options are resolved via {@link LocalProtocolHandler.resolveOptions} so the
- * caller-options → override → registry order matches router resolution exactly.
- * The read tool uses this to detect and emit image files from their real path
- * before the text-only resource contract would decode the binary into mojibake.
+ * Locate a local:// URL without creating anything. Returns the realpath of an
+ * existing target, the lexical path under the session root when `create` is set
+ * and the target is missing (writes land where `resolveLocalUrlToPath` points),
+ * else null. Containment is enforced on every existing ancestor.
  */
-export async function resolveLocalUrlToFile(
-	input: string | InternalUrl,
-	context?: ResolveContext,
-): Promise<{ path: string; size: number } | null> {
-	const opts = LocalProtocolHandler.resolveOptions(context);
-	if (!opts) return null;
-	const url = typeof input === "string" ? parseLocalUrl(input) : input;
-	const resolved = await resolveLocalTarget(url, opts);
-	return resolved.kind === "file" ? { path: resolved.path, size: resolved.size } : null;
+async function locateLocalTarget(
+	url: InternalUrl,
+	opts: LocalProtocolOptions,
+	create: boolean,
+): Promise<string | null> {
+	const localRoot = path.resolve(resolveLocalRoot(opts));
+	const relativePath = extractRelativePath(url);
+	const targetPath = relativePath ? path.resolve(localRoot, relativePath) : localRoot;
+	ensureWithinRoot(targetPath, localRoot, "local");
+
+	let realRoot: string;
+	try {
+		realRoot = await fs.realpath(localRoot);
+	} catch (error) {
+		if (isEnoent(error)) return create ? targetPath : null;
+		throw error;
+	}
+	const realTarget = await containedRealPath(
+		relativePath ? path.resolve(realRoot, relativePath) : realRoot,
+		realRoot,
+		"local",
+	);
+	if (create) return targetPath;
+	return realTarget ?? null;
 }
 
 /**
@@ -426,7 +406,14 @@ export async function resolveLocalUrlToFile(
  */
 export class LocalProtocolHandler implements ProtocolHandler {
 	readonly scheme = "local";
-	readonly immutable = false;
+	/** Session scratch space: `write` persists through its file pipeline via `locate({ create })`, approved at read tier. */
+	readonly spec: SchemeSpec = {
+		backing: "file",
+		selectors: "lines",
+		immutable: false,
+		linkable: true,
+		write: { payload: "text", scope: "sandbox", tier: () => "read" },
+	};
 
 	static #override: LocalProtocolOptions | undefined;
 
@@ -488,17 +475,6 @@ export class LocalProtocolHandler implements ProtocolHandler {
 		}
 
 		const resolved = await resolveLocalTarget(url, opts);
-		if (context?.pathOnly) {
-			const sourcePath = resolved.kind === "listing" ? resolved.root : resolved.path;
-			return {
-				url: url.href,
-				content: "",
-				contentType: getContentType(sourcePath),
-				sourcePath,
-				size: resolved.kind === "file" ? resolved.size : undefined,
-				isDirectory: resolved.kind !== "file",
-			};
-		}
 		if (resolved.kind === "listing") {
 			return buildListing(url, resolved.root);
 		}
@@ -507,6 +483,28 @@ export class LocalProtocolHandler implements ProtocolHandler {
 		}
 
 		return buildFileResource(url, resolved);
+	}
+
+	async locate(url: InternalUrl, context?: ResolveContext, options?: LocateOptions): Promise<string | null> {
+		const opts = LocalProtocolHandler.resolveOptions(context);
+		if (!opts) {
+			throw new Error("No session - local:// unavailable");
+		}
+		return locateLocalTarget(url, opts, options?.create === true);
+	}
+
+	locateSync(url: InternalUrl, context?: ResolveContext): string | undefined {
+		const opts = LocalProtocolHandler.resolveOptions(context);
+		if (!opts) return undefined;
+		try {
+			return resolveLocalUrlToPath(url, opts);
+		} catch {
+			return undefined;
+		}
+	}
+
+	promptDoc(): string {
+		return localDoc.trim();
 	}
 
 	async complete(_query?: string, context?: ResolveContext): Promise<UrlCompletion[]> {

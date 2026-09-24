@@ -10,6 +10,7 @@ import { getEditStore } from "../edit/store";
 
 import { formatHashlineHeader } from "@oh-my-pi/pi-tui/tools/hashline-format";
 
+import { sessionResolveContext } from "../internal-urls/context";
 import astGrepDescription from "../prompts/tools/ast-grep.md" with { type: "text" };
 import { sessionDelegationBias } from "../task/prompt-policy";
 import { isScoutSpawnable } from "../task/spawn-policy";
@@ -27,6 +28,8 @@ import { isRawSelector } from "./read-selector";
 import { capParseErrors, formatCodeFrameLine, formatParseErrors } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
+
+import { cfgTaskDisabledAgents } from "../task/settings";
 
 const astGrepSchema = type({
 	pat: type("string").describe("ast pattern"),
@@ -133,7 +136,7 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 		return prompt.render(astGrepDescription, {
 			eagerDelegation: sessionDelegationBias(this.session) === "eager",
 			scoutAvailable: isScoutSpawnable(
-				this.session.settings.get("task.disabledAgents") as string[] | undefined,
+				cfgTaskDisabledAgents.get(this.session.settings) as string[] | undefined,
 				this.session.getSessionSpawns?.() ?? "*",
 			),
 		});
@@ -190,14 +193,7 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 				rawPaths,
 				cwd: this.session.cwd,
 				internalUrlAction: "search",
-				settings: this.session.settings,
-				signal,
-				sessionFile: this.session.getSessionFile() ?? undefined,
-				sessionId: this.session.sessionManager?.getSessionId?.() ?? this.session.getSessionId?.() ?? undefined,
-				agentRegistry: this.session.agentRegistry,
-				localProtocolOptions: this.session.localProtocolOptions,
-				skills: this.session.skills,
-				rules: this.session.activeRules,
+				context: sessionResolveContext(this.session, { signal }),
 				resolveExternalUrl: async rawPath => {
 					const target = parseReadUrlTarget(rawPath);
 					if (!target) return undefined;

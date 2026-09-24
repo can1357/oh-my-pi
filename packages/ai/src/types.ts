@@ -41,6 +41,7 @@ import type { AnthropicOptions } from "./providers/anthropic";
 import type { FallbackParam, StopDetails } from "./providers/anthropic-wire";
 import type { AzureOpenAIResponsesOptions } from "./providers/azure-openai-responses";
 import type { CursorOptions } from "./providers/cursor";
+import type { AppleFoundationModelsOptions } from "./providers/apple-foundation-models";
 import type { DevinOptions } from "./providers/devin";
 import type { GitLabDuoWorkflowOptions } from "./providers/gitlab-duo-workflow";
 import type { GoogleOptions } from "./providers/google";
@@ -84,6 +85,7 @@ export interface ApiOptionsMap {
 	"cursor-agent": CursorOptions;
 	"gitlab-duo-agent": GitLabDuoWorkflowOptions;
 	"devin-agent": DevinOptions;
+	"apple-foundation-models": AppleFoundationModelsOptions;
 }
 // Compile-time exhaustiveness check - this will fail if ApiOptionsMap doesn't have all KnownApi keys
 type _CheckExhaustive =
@@ -376,15 +378,8 @@ export interface CodexCompactionRequestContext extends CodexCompactionMetadata {
 	operationId: string;
 }
 
-/** Anthropic `compact_20260112` context-management edit (`compact-2026-01-12` beta). */
+/** On-demand compaction request (`compact-2026-09-04` beta). */
 export interface AnthropicCompactionRequest {
-	/**
-	 * Prompt input-token count at which the API compacts. The API enforces a
-	 * 50,000-token floor and defaults to 150,000 when omitted.
-	 */
-	triggerInputTokens?: number;
-	/** Stop after the compaction block instead of continuing the response. */
-	pauseAfterCompaction?: boolean;
 	/** Custom summarization prompt; replaces the API default entirely when set. */
 	instructions?: string;
 }
@@ -430,6 +425,8 @@ export interface StreamOptions {
 	maxTokens?: number;
 	signal?: AbortSignal;
 	apiKey?: string;
+	/** @internal Stored credential row serving this request, when known. */
+	credentialId?: number;
 	cacheRetention?: CacheRetention;
 	/**
 	 * Keep Anthropic's 5-minute prompt cache warm across bounded idle gaps.
@@ -447,14 +444,14 @@ export interface StreamOptions {
 	/** @internal Marks a replay-only Anthropic request that must use non-streaming `max_tokens: 0`. */
 	anthropicCacheRefreshRequest?: boolean;
 	/**
-	 * Anthropic server-side compaction (`compact-2026-01-12` beta). Sends the
-	 * `compact_20260112` context-management edit so the API summarizes the
-	 * prompt in-band once its input reaches the trigger; the resulting summary
-	 * arrives as an {@link AnthropicCompactionPayload} on the assistant message.
-	 * Ignored by every other provider and by Anthropic-compatible endpoints
-	 * without context-management support.
+	 * Anthropic on-demand compaction (`compact-2026-09-04` beta). Sends a
+	 * top-level `compaction: { type: "summarize", instructions? }` request; the
+	 * signed summary arrives as an {@link AnthropicCompactionPayload}.
+	 * Ignored by providers and endpoints without on-demand compaction support.
 	 */
 	anthropicCompaction?: AnthropicCompactionRequest;
+	/** Attribute Anthropic Messages requests to this user profile (`anthropic-user-profile-id`). */
+	userProfileId?: string;
 	/**
 	 * Additional headers to include in provider requests.
 	 * These are merged on top of model-defined headers.
@@ -548,11 +545,15 @@ export interface StreamOptions {
 	 * Optional callback for inspecting or replacing provider payloads before sending.
 	 * Return undefined to keep the payload unchanged.
 	 */
-	onPayload?: (payload: unknown, model?: Model<Api>) => unknown | undefined | Promise<unknown | undefined>;
+	onPayload?: (
+		payload: unknown,
+		model?: Model<Api>,
+		signal?: AbortSignal,
+	) => unknown | undefined | Promise<unknown | undefined>;
 	/**
 	 * Optional callback for provider response metadata after headers are received.
 	 */
-	onResponse?: (response: ProviderResponseMetadata, model?: Model<Api>) => void | Promise<void>;
+	onResponse?: (response: ProviderResponseMetadata, model?: Model<Api>, signal?: AbortSignal) => void | Promise<void>;
 	/**
 	 * Optional callback for raw Server-Sent Events as they arrive from HTTP streaming providers,
 	 * plus synthesized SSE-shaped frames for the Codex WebSocket transport (one synthetic frame
@@ -623,6 +624,12 @@ export interface StreamOptions {
 
 	/** Cursor exec/MCP tool handlers (cursor-agent only). */
 	execHandlers?: CursorExecHandlers;
+	/**
+	 * Anthropic fallback credit redemption handle from a prior classifier refusal.
+	 * When present, the Anthropic provider replays the frozen request body and betas with
+	 * the new model and `fallback_credit_token` to redeem prompt cache credit.
+	 */
+	fallbackCreditRedemption?: AnthropicFallbackCreditHandle;
 }
 
 // Unified options with reasoning passed to streamSimple() and completeSimple()
@@ -900,16 +907,50 @@ export interface OpenAIResponsesHistoryPayload {
 	items: Array<Record<string, unknown>>;
 }
 
+/** Anthropic `output_config.effort` level. */
+export type AnthropicOutputEffort = "low" | "medium" | "high" | "xhigh" | "max";
+
+/** One `tool_addition`/`tool_removal` block of an Anthropic mid-conversation system message. */
+export interface AnthropicToolChange {
+	type: "tool_addition" | "tool_removal";
+	name: string;
+}
+
 /** Anthropic-only controls attached to a mid-conversation system message. */
 export interface AnthropicMessagePayload {
 	type: "anthropicMessage";
 	clearAt?: "never" | "next_user_message";
-	effort?: "low" | "medium" | "high" | "xhigh" | "max";
-	toolChanges?: Array<{ type: "tool_addition" | "tool_removal"; name: string }>;
+	effort?: AnthropicOutputEffort;
+	toolChanges?: AnthropicToolChange[];
 }
 
 /**
- * Anthropic server-side compaction summary (`compact-2026-01-12` beta).
+ * Controls an Anthropic request declared, recorded on its response so later
+ * requests over the same transcript replay a byte-identical prefix.
+ * Written by the Anthropic provider; read by it and by the Agent's inactive-tool lookup.
+ */
+export interface AnthropicRequestControls {
+	/**
+	 * `context.messages.length` of the request that produced this response, i.e. the
+	 * response's own index. A record found at another index belongs to a history that was
+	 * rewritten before it (compaction, dropped messages) and is not replayed as controls.
+	 */
+	messageIndex: number;
+	/** Present when the request kept a stable tool declaration (`supportsMidConversationToolChanges`). Source tool names, not wire names. */
+	tools?: {
+		/** Top-level `tools` in wire order. */
+		declared: string[];
+		/** Subset of `declared` sent with `defer_loading: true`. */
+		deferred: string[];
+		/** Tools active at the end of the request, in `context.tools` order. */
+		active: string[];
+	};
+	/** Present when the request kept a stable effort (`supportsPerMessageEffort`); `null` = API default. */
+	effort?: { topLevel: AnthropicOutputEffort | null; tail: AnthropicOutputEffort | null };
+}
+
+/**
+ * Anthropic on-demand compaction summary (`compact-2026-09-04` beta).
  *
  * Produced by the Anthropic provider on the assistant message of a request
  * that streamed a `compaction` content block, and attached to the user-role
@@ -923,7 +964,9 @@ export interface AnthropicCompactionPayload {
 	/** Provider that produced the summary; only that provider replays it natively. */
 	provider: string;
 	content: string;
-	/** Opaque provider state the API attached to the block; replayed verbatim when present. */
+	/** Signature of an on-demand block; replayed verbatim. */
+	signature?: string;
+	/** Legacy threshold block state (`compact-2026-01-12`); replay-only. */
 	encryptedContent?: string;
 	/**
 	 * Harness-appended file metadata (`<files>` section) kept out of the
@@ -1030,6 +1073,8 @@ export interface AssistantMessage {
 	api: Api;
 	provider: Provider;
 	model: string;
+	/** Stored credential row that produced this turn; absent for external or unknown keys. */
+	credentialId?: number;
 	contextSnapshot?: ContextSnapshot;
 	retryRecovery?: AssistantRetryRecovery;
 	responseId?: string; // Provider-specific response/message identifier when the upstream API exposes one
@@ -1073,8 +1118,15 @@ export interface AssistantMessage {
 	disabledFeatures?: string[];
 	/** Provider-reported input rewrites such as dropped bound-thinking blocks. */
 	inputTransformations?: ProviderInputTransformation[];
+	/**
+	 * Controls an Anthropic request declared, recorded on its response so later
+	 * requests over the same transcript replay a byte-identical prefix.
+	 */
+	requestControls?: AnthropicRequestControls;
 	/** Provider-specific opaque payload used to reconstruct transport-native history. */
 	providerPayload?: ProviderPayload;
+	/** In-memory fallback credit handle attached when a refusal response carries a fallback credit token. */
+	fallbackCreditHandle?: AnthropicFallbackCreditHandle;
 	timestamp: number; // Unix timestamp in milliseconds
 	duration?: number; // Request duration in milliseconds
 	ttft?: number; // Time to first token in milliseconds
@@ -1385,6 +1437,8 @@ export interface Context {
 	systemPrompt?: string[];
 	messages: Message[];
 	tools?: Tool[];
+	/** Definitions of tools the transcript's latest Anthropic request declared but that are no longer in `tools`; only the Anthropic provider reads it. */
+	inactiveTools?: Tool[];
 }
 
 export type AssistantMessageEvent =
@@ -1411,3 +1465,14 @@ export type AssistantMessageEvent =
 			reason: Extract<StopReason, "aborted" | "error">;
 			error: AssistantMessage;
 	  };
+
+export interface AnthropicFallbackCreditHandle {
+	token: string;
+	prefillClaim?: boolean | null;
+	params: unknown;
+	betas?: readonly string[];
+	betaHeader?: string;
+	expiresAt: number;
+	/** The refused response's content, in `AssistantMessage` block form. */
+	refusedContent?: AssistantMessage["content"];
+}
