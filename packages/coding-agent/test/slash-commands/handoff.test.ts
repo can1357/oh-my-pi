@@ -75,9 +75,7 @@ describe("/handoff dispatch (ACP)", () => {
 	});
 
 	it("reports success as a single line and never reports a saved path", async () => {
-		// `SessionHandoff` only writes the document to disk under
-		// `options.autoTriggered`, which the user-invoked path never passes, so
-		// `savedPath` is unreachable here even when the type allows it.
+		// Saving an artifact does not change the ACP command response.
 		const h = acpRuntime({ handoffResult: { document: "doc", savedPath: "/tmp/handoff.md" } });
 		await executeAcpBuiltinSlashCommand("/handoff", h.runtime);
 		expect(h.output).toHaveBeenCalledTimes(1);

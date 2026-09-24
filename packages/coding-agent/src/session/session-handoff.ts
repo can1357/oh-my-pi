@@ -207,7 +207,7 @@ export class SessionHandoff {
 			}
 
 			let savedPath: string | undefined;
-			if (options?.autoTriggered && this.#host.settings.get("compaction.handoffSaveToDisk")) {
+			if (this.#host.settings.get("compaction.handoffSaveToDisk")) {
 				const artifactsDir = this.#host.sessionManager.getArtifactsDir();
 				if (artifactsDir) {
 					const handoffFilePath = path.join(artifactsDir, createHandoffFileName());

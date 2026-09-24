@@ -2615,7 +2615,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "context",
 			group: "Compaction",
 			label: "Save Handoff Docs",
-			description: "Save generated handoff documents to markdown files for the auto-handoff flow",
+			description: "Save generated handoff documents to markdown files",
 		},
 	},
 
