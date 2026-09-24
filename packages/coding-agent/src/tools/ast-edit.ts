@@ -1,13 +1,20 @@
 import type { AstEditToolDetails } from "@oh-my-pi/pi-tui/tools/ast-edit";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import type {
+	AgentTool,
+	AgentToolContext,
+	AgentToolResult,
+	AgentToolUpdateCallback,
+	ToolTier,
+} from "@oh-my-pi/pi-agent-core";
 import type { ToolExample } from "@oh-my-pi/pi-ai";
 import { type AstReplaceChange, type AstReplaceFileChange, astEdit } from "@oh-my-pi/pi-natives";
 
 import { $envpos, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { getEditStore } from "../edit/store";
 import { normalizeToLF } from "../edit/normalize";
+import { InternalUrlRouter, sessionResolveContext } from "../internal-urls";
 import { formatHashlineHeader } from "@oh-my-pi/pi-tui/tools/hashline-format";
 
 import astEditDescription from "../prompts/tools/ast-edit.md" with { type: "text" };
@@ -19,7 +26,7 @@ import { parseReadUrlTarget } from "./fetch";
 import { createFileRecorder, formatResultPath } from "./file-recorder";
 import { formatGroupedFiles } from "@oh-my-pi/pi-tui/tools/grouped-file-output";
 
-import { isInternalUrlPath, resolveToolSearchScope } from "./path-utils";
+import { resolveToolSearchScope } from "./path-utils";
 import {
 	capParseErrors,
 	formatCodeFrameLine,
@@ -141,11 +148,21 @@ type AstEditSchemaInfer = typeof astEditSchema.infer;
 
 export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolDetails> {
 	readonly name = "ast_edit";
-	readonly approval = (args: unknown) => {
+	/** Highest write tier over every path; read only when every path is a read-tier write target. */
+	readonly approval = (args: unknown): ToolTier => {
 		const paths = Array.isArray((args as Partial<AstEditSchemaInfer>).paths)
 			? ((args as Partial<AstEditSchemaInfer>).paths as string[])
 			: [];
-		return paths.length > 0 && paths.every(path => isInternalUrlPath(path)) ? "read" : "write";
+		if (paths.length === 0) return "write";
+		const router = InternalUrlRouter.instance();
+		let tier: ToolTier = "read";
+		for (const target of paths) {
+			const decision = router.writeTier(target, undefined, undefined);
+			const targetTier = typeof decision === "string" ? decision : decision.tier;
+			if (targetTier === "exec") return "exec";
+			if (targetTier === "write") tier = "write";
+		}
+		return tier;
 	};
 	readonly formatApprovalDetails = (args: unknown): string[] => {
 		const params = args as Partial<AstEditSchemaInfer>;
@@ -247,18 +264,13 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 			const normalizedRewrites = Object.fromEntries(ops);
 			const maxFiles = $envpos("PI_MAX_AST_FILES", 1000);
 
+			const resolveContext = sessionResolveContext(this.session, { signal });
 			const scope = await resolveToolSearchScope({
 				rawPaths: params.paths,
 				cwd: this.session.cwd,
 				internalUrlAction: "rewrite",
-				settings: this.session.settings,
-				signal,
-				sessionFile: this.session.getSessionFile() ?? undefined,
-				sessionId: this.session.sessionManager?.getSessionId?.() ?? this.session.getSessionId?.() ?? undefined,
-				agentRegistry: this.session.agentRegistry,
-				localProtocolOptions: this.session.localProtocolOptions,
-				skills: this.session.skills,
-				rules: this.session.activeRules,
+				context: resolveContext,
+				trackImmutableSources: true,
 				resolveExternalUrl: async rawPath => {
 					if (!parseReadUrlTarget(rawPath)) return undefined;
 					throw new ToolError(
@@ -266,7 +278,27 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 					);
 				},
 			});
-			const { searchPath: resolvedSearchPath, scopePath, isDirectory, multiTargets, globFilter } = scope;
+			const {
+				searchPath: resolvedSearchPath,
+				scopePath,
+				isDirectory,
+				multiTargets,
+				globFilter,
+				immutableSourcePaths,
+			} = scope;
+			if (immutableSourcePaths.size > 0) {
+				// Name the URLs the model wrote; fall back to the backing paths when no
+				// input URL locates onto one (delimited or glob entries).
+				const router = InternalUrlRouter.instance();
+				const immutableUrls: string[] = [];
+				for (const rawPath of params.paths) {
+					if (!router.canHandle(rawPath)) continue;
+					const located = await router.locate(rawPath, resolveContext).catch(() => null);
+					if (located !== null && immutableSourcePaths.has(path.resolve(located))) immutableUrls.push(rawPath);
+				}
+				const named = immutableUrls.length > 0 ? immutableUrls : [...immutableSourcePaths];
+				throw new ToolError(`Cannot rewrite immutable resource: ${named.join(", ")}`);
+			}
 
 			const result = await runAstEditOnce(multiTargets, resolvedSearchPath, globFilter, {
 				rewrites: normalizedRewrites,

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	PRINT_MODE_ADVISOR_DRAIN_TIMEOUT_MS,
 	PRINT_MODE_ERROR_ADVISOR_DRAIN_TIMEOUT_MS,
@@ -75,10 +76,10 @@ function createDelayedSession(
 				return "mode-change";
 			},
 		},
-		settings: {
-			get: (key: string) =>
-				key === "plan.enabled" || (key === "plan.defaultOnStartup" && options.defaultPlanMode === true),
-		},
+		settings: Settings.isolated({
+			"plan.enabled": true,
+			"plan.defaultOnStartup": options.defaultPlanMode === true,
+		}),
 		model: undefined,
 		isStreaming: false,
 		getPlanReferencePath: () => "",
@@ -304,7 +305,7 @@ describe("print mode working indicator", () => {
 				getEntries: () => [],
 				onPersistenceError: () => () => {},
 			},
-			settings: { get: () => false },
+			settings: Settings.isolated(),
 			extensionRunner: undefined,
 			subscribe: (listener: (event: AgentSessionEvent) => void) => {
 				subscriber = listener;
@@ -366,7 +367,7 @@ describe("print mode working indicator", () => {
 				getEntries: () => [],
 				onPersistenceError: () => () => {},
 			},
-			settings: { get: () => false },
+			settings: Settings.isolated(),
 			extensionRunner: undefined,
 			subscribe: () => () => {},
 			prompt: async () => {
@@ -411,7 +412,7 @@ describe("print mode working indicator", () => {
 				getEntries: () => [],
 				onPersistenceError: () => () => {},
 			},
-			settings: { get: () => false },
+			settings: Settings.isolated(),
 			extensionRunner: undefined,
 			subscribe: () => () => {},
 			prompt: async () => {

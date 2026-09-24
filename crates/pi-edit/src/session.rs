@@ -14,7 +14,7 @@ use crate::{
 	error::{EditError, EditResult},
 	files::{FileCache, FileSource},
 	notebook,
-	path_policy::{PathPolicy, canonical_key},
+	path_policy::{PathPolicy, UrlResolution, canonical_key},
 	store::{EditStore, Snapshot, file_hash, seen_lines_from_body},
 	stream_json::ArgStream,
 	text::{normalize_to_lf, strip_bom, utf16_len},
@@ -192,6 +192,21 @@ impl Session {
 		self.generation != self.previewed || (self.args.is_finished() && !self.final_pass_done)
 	}
 
+	/// Drain internal URLs that missed the resolution table since the last
+	/// call (deduped, first-seen order). Streaming passes record misses too:
+	/// the host answers half-streamed URLs like any other (locating has no
+	/// side effects), so previews never wait for the arguments to finish.
+	pub fn take_unresolved(&mut self) -> Vec<String> {
+		self.files.take_unresolved()
+	}
+
+	/// Record the host answer for `url`; clears cached reads/resolutions for
+	/// it and makes [`Self::preview_pending`] true.
+	pub fn provide(&mut self, url: String, resolution: UrlResolution) {
+		self.files.provide(url, resolution);
+		self.generation += 1;
+	}
+
 	/// Compute the preview for the current buffer. While streaming, trailing
 	/// removal-only tails are trimmed so additions never visibly "catch up".
 	pub fn preview(&mut self) -> PreviewBatch {
@@ -221,6 +236,11 @@ impl Session {
 	/// for every file, then write in payload order. A writer failure aborts
 	/// the loop; files already written stay written and the error is
 	/// returned verbatim.
+	///
+	/// # Errors
+	/// Staging and plan-mode failures, all raised before the first write —
+	/// including [`EditError::UnresolvedUrl`], after which the host may
+	/// [`Self::provide`] the URL and retry — or the writer's error.
 	pub async fn apply(
 		&mut self,
 		request: ApplyRequest,
@@ -233,7 +253,7 @@ impl Session {
 		}
 		let staged = self.engine.stage(&snapshot, &mut self.files, &self.store)?;
 		for file in &staged {
-			self.config.policy.enforce_write(
+			self.files.enforce_write(
 				&file.display,
 				file.op,
 				file.move_to.as_ref().map(|m| m.display.as_str()),
@@ -397,6 +417,8 @@ fn carried_seen_lines(before: &str, after: &str, prior: Option<&Snapshot>) -> Ve
 		.count();
 	let unchanged = u32::try_from(unchanged).unwrap_or(u32::MAX);
 	match prior.and_then(|snapshot| snapshot.seen_lines.as_ref()) {
+		// `range(1..=0)` panics; a first-line change carries nothing.
+		_ if unchanged == 0 => Vec::new(),
 		Some(seen) if !seen.is_empty() => seen.range(1..=unchanged).copied().collect(),
 		_ => (1..=unchanged).collect(),
 	}

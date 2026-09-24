@@ -157,7 +157,7 @@ describe("config CLI schema coverage", () => {
 		).rejects.toThrow("process.exit");
 		expect(exitSpy).toHaveBeenCalledWith(1);
 		expect(console.error).toHaveBeenCalledWith(
-			expect.stringContaining('Unknown status line segment: "modle". Valid segments: pi, status, model'),
+			expect.stringContaining('Unknown status line segment: "modle". Valid status line segments: pi, status, model'),
 		);
 	});
 	it("sets numeric idle compaction settings from CLI values", async () => {

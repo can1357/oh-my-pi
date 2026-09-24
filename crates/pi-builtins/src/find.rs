@@ -5430,4 +5430,19 @@ mod tests {
 		let matches: Vec<PathBuf> = capture.out().lines().map(PathBuf::from).collect();
 		assert_eq!(matches, vec![root.join("a.txt"), root.join("b.md"), root.join("c.rs")]);
 	}
+
+	/// `-exec {}` receives the display path, so on Unix it must keep non-UTF-8
+	/// name bytes instead of replacing them with U+FFFD.
+	#[cfg(unix)]
+	#[test]
+	fn display_root_keeps_non_utf8_name_bytes() {
+		use std::{ffi::OsStr, os::unix::ffi::OsStrExt, path::Path};
+
+		use super::matchers::{Follow, WalkEntry};
+
+		let file = Path::new(OsStr::from_bytes(b"/r/bad\xffname"));
+		let mut entry = WalkEntry::new(file, 1, Follow::Never);
+		entry.set_display_root(Path::new("."), Path::new("/r"));
+		assert_eq!(entry.display_path().as_os_str().as_bytes(), b"./bad\xffname");
+	}
 }

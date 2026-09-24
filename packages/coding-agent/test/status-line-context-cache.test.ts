@@ -24,6 +24,13 @@ import { getSessionAccentAnsi } from "@oh-my-pi/pi-tui/theme/session-color";
 import { adjustHsv } from "@oh-my-pi/pi-utils";
 import { StatusLineTestComponents } from "./helpers/status-line";
 
+import {
+	cfgStatusLineContextLine,
+	cfgStatusLineLeftSegments,
+	cfgStatusLinePreset,
+	cfgStatusLineRightSegments,
+} from "@oh-my-pi/pi-coding-agent/modes/settings";
+
 const statusLines = new StatusLineTestComponents();
 beforeAll(async () => {
 	resetSettingsForTest();
@@ -363,10 +370,10 @@ describe("StatusLineComponent context breakdown", () => {
 			messages: [userMessage("hi"), assistantMessage("done")],
 			usage: { tokens: 80_000, contextWindow: 1_000_000, percent: 8 },
 		});
-		settings.override("statusLine.preset", "custom");
-		settings.override("statusLine.leftSegments", ["pi", "context_pct"]);
-		settings.override("statusLine.rightSegments", ["context_total", "session_name"]);
-		settings.override("statusLine.contextLine", "embedded");
+		cfgStatusLinePreset.override(settings, "custom");
+		cfgStatusLineLeftSegments.override(settings, ["pi", "context_pct"]);
+		cfgStatusLineRightSegments.override(settings, ["context_total", "session_name"]);
+		cfgStatusLineContextLine.override(settings, "embedded");
 
 		try {
 			const comp = statusLines.track(new StatusLineComponent(session, statusLineHost));
@@ -384,10 +391,10 @@ describe("StatusLineComponent context breakdown", () => {
 			expect(windowIndex).toBeGreaterThan(compactionIndex);
 			expect(plain.indexOf("1M", windowIndex + 1)).toBe(-1);
 		} finally {
-			settings.clearOverride("statusLine.contextLine");
-			settings.clearOverride("statusLine.rightSegments");
-			settings.clearOverride("statusLine.leftSegments");
-			settings.clearOverride("statusLine.preset");
+			cfgStatusLineContextLine.clearOverride(settings);
+			cfgStatusLineRightSegments.clearOverride(settings);
+			cfgStatusLineLeftSegments.clearOverride(settings);
+			cfgStatusLinePreset.clearOverride(settings);
 		}
 	});
 
@@ -401,10 +408,10 @@ describe("StatusLineComponent context breakdown", () => {
 			usage: { tokens: 80_000, contextWindow: 1_000_000, percent: 8 },
 			sessionName: null,
 		});
-		settings.override("statusLine.preset", "custom");
-		settings.override("statusLine.leftSegments", ["pi", "context_pct"]);
-		settings.override("statusLine.rightSegments", ["session_name"]);
-		settings.override("statusLine.contextLine", "embedded");
+		cfgStatusLinePreset.override(settings, "custom");
+		cfgStatusLineLeftSegments.override(settings, ["pi", "context_pct"]);
+		cfgStatusLineRightSegments.override(settings, ["session_name"]);
+		cfgStatusLineContextLine.override(settings, "embedded");
 
 		try {
 			const comp = statusLines.track(new StatusLineComponent(session, statusLineHost));
@@ -415,10 +422,10 @@ describe("StatusLineComponent context breakdown", () => {
 			expect(plain).toContain("8%");
 			expect(plain).toContain("1M");
 		} finally {
-			settings.clearOverride("statusLine.contextLine");
-			settings.clearOverride("statusLine.rightSegments");
-			settings.clearOverride("statusLine.leftSegments");
-			settings.clearOverride("statusLine.preset");
+			cfgStatusLineContextLine.clearOverride(settings);
+			cfgStatusLineRightSegments.clearOverride(settings);
+			cfgStatusLineLeftSegments.clearOverride(settings);
+			cfgStatusLinePreset.clearOverride(settings);
 		}
 	});
 
@@ -470,10 +477,10 @@ describe("StatusLineComponent context breakdown", () => {
 			contextWindow: 200_000,
 			usage: { tokens: 240_000, contextWindow: 200_000, percent: 120 },
 		});
-		settings.override("statusLine.preset", "custom");
-		settings.override("statusLine.leftSegments", ["pi", "context_pct"]);
-		settings.override("statusLine.rightSegments", ["context_total", "session_name"]);
-		settings.override("statusLine.contextLine", "embedded");
+		cfgStatusLinePreset.override(settings, "custom");
+		cfgStatusLineLeftSegments.override(settings, ["pi", "context_pct"]);
+		cfgStatusLineRightSegments.override(settings, ["context_total", "session_name"]);
+		cfgStatusLineContextLine.override(settings, "embedded");
 
 		try {
 			const comp = statusLines.track(new StatusLineComponent(session, statusLineHost));
@@ -488,10 +495,10 @@ describe("StatusLineComponent context breakdown", () => {
 			expect(plain).not.toContain("100%");
 			expect(border.content).toContain(`${theme.getFgAnsi("error")}120%`);
 		} finally {
-			settings.clearOverride("statusLine.contextLine");
-			settings.clearOverride("statusLine.rightSegments");
-			settings.clearOverride("statusLine.leftSegments");
-			settings.clearOverride("statusLine.preset");
+			cfgStatusLineContextLine.clearOverride(settings);
+			cfgStatusLineRightSegments.clearOverride(settings);
+			cfgStatusLineLeftSegments.clearOverride(settings);
+			cfgStatusLinePreset.clearOverride(settings);
 		}
 	});
 	it("uses semantic Nerd Font markers for async speculation and compaction boundaries", async () => {

@@ -9,6 +9,7 @@
 
 ### Added
 
+- Added transcript rendering for `cfg://` configuration read and write tool calls
 - Added push-to-talk dictation to `Input`, including live transcription text and `cursorOverride` support.
 
 ### Fixed

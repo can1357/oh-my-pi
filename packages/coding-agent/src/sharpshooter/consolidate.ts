@@ -27,6 +27,8 @@ import {
 	type SharpshooterState,
 } from "./types";
 
+import { cfgSharpshooterIntervalMinutes } from "./settings";
+
 const DEFAULT_INTERVAL_MINUTES = 5;
 const PROJECT_DOC_TOKEN_LIMIT = 6000;
 
@@ -123,7 +125,7 @@ async function consolidateLocked(
 ): Promise<SharpshooterConsolidationResult> {
 	const state = await readSharpshooterState(options.agentDir, options.cwd);
 	try {
-		const intervalMinutes = options.settings.get("sharpshooter.intervalMinutes") ?? DEFAULT_INTERVAL_MINUTES;
+		const intervalMinutes = cfgSharpshooterIntervalMinutes.get(options.settings) ?? DEFAULT_INTERVAL_MINUTES;
 		if (!options.force && Date.now() - state.lastConsolidatedAt < intervalMinutes * 60_000) {
 			return { ran: false, reason: "not_due" };
 		}

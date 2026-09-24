@@ -73,6 +73,17 @@ import type { SessionManager } from "./session-manager";
 import { sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
 import { classifyUnexpectedStop, isUnexpectedStopCandidate } from "./unexpected-stop-classifier";
 
+import {
+	cfgFeaturesUnexpectedStopDetection,
+	cfgModelLoopGuardEnabled,
+	cfgRetry,
+	cfgRetryEnabled,
+	cfgRetryModelFallback,
+	cfgRetryUsageAwareFallback,
+	cfgRetryUsageReservePct,
+	cfgRetryUsageReservePolicy,
+} from "./settings";
+
 const THINKING_LOOP_REDIRECT_TYPE = "thinking-loop-redirect";
 const UNEXPECTED_STOP_MAX_RETRIES = 3;
 const UNEXPECTED_STOP_TIMEOUT_MS = 4000;
@@ -936,7 +947,7 @@ export class TurnRecovery {
 		});
 	}
 	async #handleUnexpectedAssistantStop(assistantMessage: AssistantMessage): Promise<boolean> {
-		const mode = this.#host.settings.get("features.unexpectedStopDetection");
+		const mode = cfgFeaturesUnexpectedStopDetection.get(this.#host.settings);
 		if (mode === "none") {
 			return false;
 		}
@@ -1278,7 +1289,7 @@ export class TurnRecovery {
 			if (!replayUnsafe) this.removeAssistantMessageFromActiveContext(message, "request-body-timeout-terminal");
 			return "handled-terminal";
 		};
-		const retrySettings = this.#host.settings.getGroup("retry");
+		const retrySettings = cfgRetry.get(this.#host.settings);
 		if (
 			this.#requestBodyReadTimeoutRecoveryPromptSequence === promptSequence ||
 			!retrySettings.enabled ||
@@ -1692,7 +1703,7 @@ export class TurnRecovery {
 	}
 
 	async #maybeApplyUsageAwareFallback(signal: AbortSignal, confirmer?: UsageFallbackConfirmer): Promise<boolean> {
-		if (!this.#host.settings.get("retry.usageAwareFallback")) return false;
+		if (!cfgRetryUsageAwareFallback.get(this.#host.settings)) return false;
 		const currentModel = this.#host.model();
 		if (!currentModel) return false;
 		const currentSelector = formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel());
@@ -1702,7 +1713,7 @@ export class TurnRecovery {
 				modelId: currentModel.id,
 				sessionId: this.#host.sessionId(),
 				baseUrl: currentModel.baseUrl,
-				reserveFraction: this.#host.settings.get("retry.usageReservePct") / 100,
+				reserveFraction: cfgRetryUsageReservePct.get(this.#host.settings) / 100,
 				signal,
 			});
 		} catch (error) {
@@ -1733,7 +1744,7 @@ export class TurnRecovery {
 		}
 		if (health.state !== "reserve") this.#usageReserveApprovedSelector = undefined;
 
-		const reservePolicy = this.#host.settings.get("retry.usageReservePolicy");
+		const reservePolicy = cfgRetryUsageReservePolicy.get(this.#host.settings);
 		if (reservePolicy === "fail-closed") {
 			const condition = health.state === "reserve" ? "reserve reached" : "usage depleted";
 			throw new Error(
@@ -1747,7 +1758,7 @@ export class TurnRecovery {
 		) {
 			return false;
 		}
-		if (!this.#host.settings.get("retry.modelFallback")) return false;
+		if (!cfgRetryModelFallback.get(this.#host.settings)) return false;
 
 		let fallback: { role: string; selector: RetryFallbackSelector; apiKey: string } | undefined;
 		const ceiling = this.#host.thinkingLevelCeiling();
@@ -1770,7 +1781,7 @@ export class TurnRecovery {
 							modelId: candidateModel.id,
 							sessionId: this.#host.sessionId(),
 							baseUrl: candidateModel.baseUrl,
-							reserveFraction: this.#host.settings.get("retry.usageReservePct") / 100,
+							reserveFraction: cfgRetryUsageReservePct.get(this.#host.settings) / 100,
 							signal,
 						},
 					);
@@ -1838,7 +1849,7 @@ export class TurnRecovery {
 			pinFallback: true,
 			apiKey: fallback.apiKey,
 			signal,
-			reason: describeUsageFallback(health, this.#host.settings.get("retry.usageReservePct")),
+			reason: describeUsageFallback(health, cfgRetryUsageReservePct.get(this.#host.settings)),
 		});
 	}
 
@@ -2119,7 +2130,7 @@ export class TurnRecovery {
 				message.errorMessage?.startsWith("400 ") === true) &&
 			IMMUTABLE_ANTHROPIC_THINKING_ERROR_PATTERN.test(message.errorMessage ?? "");
 		if (immutableAnthropicThinkingError) return false;
-		const retrySettings = this.#host.settings.getGroup("retry");
+		const retrySettings = cfgRetry.get(this.#host.settings);
 		if (!retrySettings.enabled || !retrySettings.modelFallback) return false;
 		if (this.isClassifierRefusal(message)) return false;
 		const id = this.#classifyRetryMessage(message);
@@ -2255,7 +2266,7 @@ export class TurnRecovery {
 			preserveFailedTurn?: boolean;
 		},
 	): Promise<boolean> {
-		const retrySettings = this.#host.settings.getGroup("retry");
+		const retrySettings = cfgRetry.get(this.#host.settings);
 		// The Fireworks Fast→base degrade is an intrinsic model-selection safety net,
 		// not a retry loop, so it runs even when the user disabled retries: it switches
 		// the model once and lets the base turn proceed.
@@ -2725,7 +2736,7 @@ export class TurnRecovery {
 	 */
 	#maybeInjectThinkingLoopRedirect(id: number): void {
 		if (!AIError.is(id, AIError.Flag.ThinkingLoop)) return;
-		if (this.#host.settings.get("model.loopGuard.enabled") !== true) return;
+		if (cfgModelLoopGuardEnabled.get(this.#host.settings) !== true) return;
 		this.#host.agent.appendMessage({
 			role: "custom",
 			customType: THINKING_LOOP_REDIRECT_TYPE,
@@ -2777,7 +2788,7 @@ export class TurnRecovery {
 
 	/** Whether auto-retry is enabled */
 	get autoRetryEnabled(): boolean {
-		return this.#host.settings.get("retry.enabled") ?? true;
+		return cfgRetryEnabled.get(this.#host.settings) ?? true;
 	}
 
 	/**
@@ -2788,10 +2799,10 @@ export class TurnRecovery {
 	 */
 	setAutoRetryEnabled(enabled: boolean, persist = false): void {
 		if (persist) {
-			this.#host.settings.set("retry.enabled", enabled);
-			this.#host.settings.clearOverride("retry.enabled");
+			cfgRetryEnabled.set(this.#host.settings, enabled);
+			cfgRetryEnabled.clearOverride(this.#host.settings);
 		} else {
-			this.#host.settings.override("retry.enabled", enabled);
+			cfgRetryEnabled.override(this.#host.settings, enabled);
 		}
 	}
 	/**

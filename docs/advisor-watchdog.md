@@ -17,7 +17,7 @@ An advisor does not approve actions or mutate primary session state directly. It
 - [`src/session/session-advisors.ts`](../packages/coding-agent/src/session/session-advisors.ts)
 - [`src/session/agent-session.ts`](../packages/coding-agent/src/session/agent-session.ts)
 - [`src/slash-commands/builtin-registry.ts`](../packages/coding-agent/src/slash-commands/builtin-registry.ts)
-- [`src/config/settings-schema.ts`](../packages/coding-agent/src/config/settings-schema.ts)
+- [`src/advisor/settings.ts`](../packages/coding-agent/src/advisor/settings.ts) — `advisor.*` setting definitions
 
 ---
 

@@ -6,11 +6,9 @@ import type { Judge, JudgmentRequest, JudgmentResult, NoulAnswer, Questions } fr
 import { tokenUsage } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
-import { isOmpDocsScope } from "@oh-my-pi/pi-coding-agent/internal-urls/omp-scope";
 import { FindTool } from "@oh-my-pi/pi-coding-agent/tools/jfind";
 import { runCascade } from "@oh-my-pi/pi-coding-agent/tools/jfind/cascade";
 import { keywordsFromQuery } from "@oh-my-pi/pi-coding-agent/tools/jfind/keywords";
-import { materializeOmpScope } from "@oh-my-pi/pi-coding-agent/tools/jfind/omp-scope";
 import {
 	mergeHeat,
 	type Passage,
@@ -20,6 +18,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/jfind/passages";
 import { readText, ReadTextError } from "@oh-my-pi/pi-coding-agent/tools/jfind/text";
 import { eligibleFile, renderTree } from "@oh-my-pi/pi-coding-agent/tools/jfind/tree";
+import { isEnumerableScope, materializeUrlScope } from "@oh-my-pi/pi-coding-agent/tools/jfind/url-scope";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 describe("jfind keywords", () => {
@@ -275,18 +274,19 @@ describe("jfind cascade", () => {
 			await removeWithRetries(dir);
 		}
 	});
-	it("detects omp scopes and rejects unknown docs and range selectors before judging", async () => {
-		expect(isOmpDocsScope("omp://")).toBe(true);
-		expect(isOmpDocsScope("OMP://tools/read.md")).toBe(true);
-		expect(isOmpDocsScope("packages/tui")).toBe(false);
-		await expect(materializeOmpScope("omp://nope.md")).rejects.toThrow("Documentation file not found");
-		await expect(materializeOmpScope("omp://tools/read.md:1-10")).rejects.toThrow(
+	it("detects enumerable URL scopes and rejects unknown docs and range selectors before judging", async () => {
+		expect(isEnumerableScope("omp://")).toBe(true);
+		expect(isEnumerableScope("OMP://tools/read.md")).toBe(true);
+		expect(isEnumerableScope("artifact://1")).toBe(false);
+		expect(isEnumerableScope("packages/tui")).toBe(false);
+		await expect(materializeUrlScope("omp://nope.md")).rejects.toThrow("Documentation file not found");
+		await expect(materializeUrlScope("omp://tools/read.md:1-10")).rejects.toThrow(
 			"line-range selectors are not supported",
 		);
 	});
 
 	it("materializes one omp doc and remaps its cascade hits to the canonical URL", async () => {
-		const scope = await materializeOmpScope("omp://docs/tools/read.md");
+		const scope = await materializeUrlScope("omp://docs/tools/read.md");
 		try {
 			expect(scope.scopePath).toBe("omp://tools/read.md");
 			expect(await materializedRels(scope.dir)).toEqual(["tools/read.md"]);
@@ -298,7 +298,7 @@ describe("jfind cascade", () => {
 				judge: new FakeJudge(() => 0.9),
 				includeHidden: false,
 			});
-			expect(result.hits.map(hit => scope.toOmpRel(hit.rel))).toEqual(["omp://tools/read.md"]);
+			expect(result.hits.map(hit => scope.toUrl(hit.rel))).toEqual(["omp://tools/read.md"]);
 		} finally {
 			await scope.cleanup();
 		}
@@ -308,7 +308,7 @@ describe("jfind cascade", () => {
 		const completions = (await InternalUrlRouter.instance().complete("omp", "")) ?? [];
 		const rels = new Set(completions.map(completion => completion.value));
 
-		const scope = await materializeOmpScope("omp://");
+		const scope = await materializeUrlScope("omp://");
 		try {
 			const materialized = await materializedRels(scope.dir);
 			expect(materialized).toHaveLength(rels.size);

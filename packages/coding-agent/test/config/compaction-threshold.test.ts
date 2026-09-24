@@ -4,6 +4,7 @@ import * as os from "node:os";
 import path from "node:path";
 import { validateAgentCompactionThresholdOverrides } from "@oh-my-pi/pi-coding-agent/config/compaction-threshold";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgTaskAgentCompactionThresholdOverrides } from "@oh-my-pi/pi-coding-agent/task/settings";
 
 async function withConfigDirs(run: (dirs: { root: string; agentDir: string; cwd: string }) => Promise<void>) {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-compaction-threshold-"));
@@ -74,21 +75,21 @@ describe("task.agentCompactionThresholdOverrides", () => {
 
 			const settings = await Settings.loadReadOnly({ agentDir, cwd, configFiles: [overlay] });
 			expect(
-				validateAgentCompactionThresholdOverrides(settings.get("task.agentCompactionThresholdOverrides")),
+				validateAgentCompactionThresholdOverrides(cfgTaskAgentCompactionThresholdOverrides.get(settings)),
 			).toEqual({ scout: { thresholdPercent: 80, thresholdTokens: -1 } });
 		});
 	});
 
 	it("rejects invalid set and override calls without changing the effective value", () => {
 		const settings = Settings.isolated();
-		settings.override("task.agentCompactionThresholdOverrides", { scout: 90000 });
+		cfgTaskAgentCompactionThresholdOverrides.override(settings, { scout: 90000 });
 
-		expect(() => settings.set("task.agentCompactionThresholdOverrides", { scout: "eighty" })).toThrow(
+		expect(() => cfgTaskAgentCompactionThresholdOverrides.set(settings, { scout: "eighty" })).toThrow(
 			"task.agentCompactionThresholdOverrides.scout",
 		);
-		expect(() => settings.override("task.agentCompactionThresholdOverrides", { scout: Number.NaN })).toThrow(
+		expect(() => cfgTaskAgentCompactionThresholdOverrides.override(settings, { scout: Number.NaN })).toThrow(
 			"task.agentCompactionThresholdOverrides.scout",
 		);
-		expect(settings.get("task.agentCompactionThresholdOverrides")).toEqual({ scout: 90000 });
+		expect(cfgTaskAgentCompactionThresholdOverrides.get(settings)).toEqual({ scout: 90000 });
 	});
 });

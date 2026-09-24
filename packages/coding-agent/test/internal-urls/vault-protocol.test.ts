@@ -424,7 +424,7 @@ describe("VaultProtocolHandler", () => {
 	});
 
 	it("reports hasObsidian() as false when the gate is off, even if the binary is on disk", () => {
-		// hasObsidian feeds Handlebars `{{#if hasObsidian}}` in the system prompt.
+		// hasObsidian gates the vault:// promptDoc in the system prompt's Internal URLs list.
 		// Disabling the gate MUST hide vault:// from the prompt regardless of binary presence.
 		vi.spyOn(vaultProtocol, "isVaultEnabled").mockReturnValue(false);
 		vi.spyOn(vaultProtocol, "resolveObsidianBinary").mockReturnValue("/test/obsidian");

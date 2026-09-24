@@ -16,10 +16,9 @@ import type {
 	CustomToolResult,
 	RenderResultOptions,
 } from "../extensibility/custom-tools/types";
-import { resolveLocalUrlToFile } from "../internal-urls/local-protocol";
+import { extractUriScheme, normalizeLocalScheme } from "../internal-urls/parse";
+import { InternalUrlRouter } from "../internal-urls/router";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
-
-import { normalizeLocalScheme } from "../tools/path-utils";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { schemaDeclaresIntentField } from "../utils/tool-schema";
 import { callTool } from "./client";
@@ -126,20 +125,24 @@ function stripHarnessIntent(args: MCPToolArgs, inputSchema: MCPToolDefinition["i
 	return rest;
 }
 
-async function resolveOutboundLocalUrlArgs(
+/** Replace string args that are file-backed internal URLs with the local path backing them. */
+async function resolveOutboundUrlArgs(
 	value: unknown,
 	context: CustomToolContext,
 	seen: WeakSet<object> = new WeakSet(),
 ): Promise<unknown> {
 	if (typeof value === "string") {
-		const normalized = normalizeLocalScheme(value);
-		if (!normalized.startsWith("local://")) return value;
-		const localFile = await resolveLocalUrlToFile(normalized, {
+		const router = InternalUrlRouter.instance();
+		const url = normalizeLocalScheme(value);
+		if (!router.canHandle(url)) return value;
+		const scheme = extractUriScheme(url);
+		if (!scheme || router.spec(scheme)?.backing !== "file") return value;
+		const located = await router.locate(url, {
 			cwd: context.sessionManager?.getCwd?.(),
 			settings: context.settings,
 			localProtocolOptions: context.localProtocolOptions,
 		});
-		return localFile?.path ?? value;
+		return located ?? value;
 	}
 	if (typeof value !== "object" || value === null) return value;
 	if (seen.has(value)) return value;
@@ -149,7 +152,7 @@ async function resolveOutboundLocalUrlArgs(
 		let resolved: unknown[] | undefined;
 		for (let index = 0; index < value.length; index++) {
 			const item = value[index];
-			const next = await resolveOutboundLocalUrlArgs(item, context, seen);
+			const next = await resolveOutboundUrlArgs(item, context, seen);
 			if (next === item && !resolved) continue;
 			resolved ??= value.slice();
 			resolved[index] = next;
@@ -161,7 +164,7 @@ async function resolveOutboundLocalUrlArgs(
 	let resolved: Record<string, unknown> | undefined;
 	for (const key in input) {
 		const item = input[key];
-		const next = await resolveOutboundLocalUrlArgs(item, context, seen);
+		const next = await resolveOutboundUrlArgs(item, context, seen);
 		if (next === item && !resolved) continue;
 		resolved ??= { ...input };
 		resolved[key] = next;
@@ -172,7 +175,7 @@ async function resolveOutboundLocalUrlArgs(
 /**
  * Normalize raw tool params into the outbound `tools/call` arguments: strip
  * the harness intent field, drop optional empty placeholders the server
- * declares but doesn't require, then translate session-local files to paths
+ * declares but doesn't require, then translate file-backed internal URLs to paths
  * external MCP servers can read.
  */
 async function prepareOutboundArgs(
@@ -181,7 +184,7 @@ async function prepareOutboundArgs(
 	context: CustomToolContext,
 ): Promise<MCPToolArgs> {
 	const args = omitUnusedOptionalArgs(stripHarnessIntent(normalizeToolArgs(params), inputSchema), inputSchema);
-	return (await resolveOutboundLocalUrlArgs(args, context)) as MCPToolArgs;
+	return (await resolveOutboundUrlArgs(args, context)) as MCPToolArgs;
 }
 
 /**

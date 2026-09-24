@@ -26,9 +26,9 @@ It is a TypeScript port of the default (`cascade`) strategy of [jegrep](https://
 | --- | --- | --- | --- |
 | `query` | `string` | Yes | Plain-language description of the behavior or concept to locate. Quoted phrases are matched whole in the lexical pass. Whitespace-only queries are rejected. |
 | `grep_keywords` | `string[]` | Yes | Extra identifiers or terms for the lexical pre-ranking, in addition to those derived from `query`. `[]` when nothing specific comes to mind. |
-| `path` | `string` | No | Directory to search, or an `omp://` docs scope (`omp://` for all harness docs, `omp://<file>.md` for one doc). Resolved against the session cwd (`~` expanded, a bare `/` means the workspace root). Omitted or empty defaults to the cwd. A missing path or a file is rejected. A trailing `:start-end` selector on an `omp://` scope is rejected too — `find` judges whole files. |
+| `path` | `string` | No | Directory to search, or an internal URL. URLs whose handler can `enumerate` searchable documents (e.g. the `omp://` docs scope: `omp://` for all harness docs, `omp://<file>.md` for one doc) are materialized into a temp corpus; any other internal URL must locate to a local directory (`skill://<name>`, `local://notes`) and is searched in place. Paths resolve against the session cwd (`~` expanded, a bare `/` means the workspace root). Omitted or empty defaults to the cwd. A missing path, a file, or a URL with no local directory is rejected. A trailing `:start-end` selector on an enumerated URL scope is rejected too — `find` judges whole files. |
 
-`omp://` hits are canonical doc URLs (`omp://tools/read.md`), not cwd-relative paths — open them directly with `read`, including with `:start-end` selectors (`read omp://tools/read.md:50-100`). Hidden files are excluded. Hit paths are otherwise reported relative to the session cwd, not the searched directory, so `read` and hyperlinks resolve without knowing the scope.
+Hits from an enumerated URL scope are the documents' URLs (`omp://tools/read.md`), not cwd-relative paths — open them directly with `read`, including with `:start-end` selectors (`read omp://tools/read.md:50-100`). Hidden files are excluded. Hit paths are otherwise reported relative to the session cwd, not the searched directory, so `read` and hyperlinks resolve without knowing the scope.
 
 `find.enabled` is `auto` by default: `find` is enabled only when the `judge` model role resolves first to a native System One model (TypeSafe `typesafe/jev-latest`, directly or through OpenRouter), not a prompted on-device or chat model. `on` enables it whichever model judges; `off` disables it. Once enabled it is an essential (top-level) tool, never mounted under `xd://`.
 
@@ -63,7 +63,7 @@ Each judged phase drains through a dispatcher with 16 requests in flight before 
 - Files over 4 MB are scanned by the lexical pass only up to the native grep cap and read only up to 4 MB (trimmed to the last full line).
 
 ## Errors
-- `ToolError` for an empty `query`, a `path` that does not exist (`Path not found: …`) or is not a directory (`Path is not a directory: …`), or a session without a model registry.
+- `ToolError` for an empty `query`, a `path` that does not exist (`Path not found: …`) or is not a directory (`Path is not a directory: …`), an internal URL with no local file (`Cannot find <scheme>:// URL: no local file backs …`), or a session without a model registry.
 - Judge failures are not thrown: a failed request leaves its entries unjudged (filename and verification) or routes them onward as unknown (sketch scoring, so an outage never prunes). Failures are listed in the footer; the result becomes an error only when every request failed.
 
 ## Notes

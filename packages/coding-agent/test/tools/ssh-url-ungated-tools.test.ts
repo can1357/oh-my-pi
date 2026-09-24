@@ -42,8 +42,8 @@ describe("ssh:// is rejected before any connection in read/write-tier tools", ()
 			.mockRejectedValue(new Error("resolve must not run for ssh://"));
 		for (const internalUrlAction of ["search", "rewrite"]) {
 			await expect(
-				resolveToolSearchScope({ rawPaths: ["ssh://h/x"], cwd: os.tmpdir(), internalUrlAction }),
-			).rejects.toThrow(/use `grep` on a specific remote file/);
+				resolveToolSearchScope({ rawPaths: ["ssh://h/x"], cwd: os.tmpdir(), internalUrlAction, context: {} }),
+			).rejects.toThrow(`Cannot ${internalUrlAction} ssh:// URL: no local file backs ssh://h/x`);
 		}
 		expect(spy).not.toHaveBeenCalled();
 	});
