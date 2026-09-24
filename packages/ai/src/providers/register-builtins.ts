@@ -18,6 +18,7 @@ import * as AnthropicProvider from "./anthropic";
 import * as AzureOpenAIResponsesProvider from "./azure-openai-responses";
 import * as BedrockProvider from "./amazon-bedrock";
 import * as CursorProvider from "./cursor";
+import * as AppleFoundationModelsProvider from "./apple-foundation-models";
 import * as DevinProvider from "./devin";
 import * as GoogleProvider from "./google";
 import * as GoogleGeminiCliProvider from "./google-gemini-cli";
@@ -286,6 +287,11 @@ export const streamCursor = createProviderStream<"cursor-agent">((model, context
 /** Stream Devin through the shared watchdog. */
 export const streamDevin = createProviderStream<"devin-agent">((model, context, options) =>
 	DevinProvider.streamDevin(model, context, options),
+);
+
+/** Stream Apple's on-device Foundation Model through the shared watchdog. */
+export const streamAppleFoundationModels = createProviderStream<"apple-foundation-models">((model, context, options) =>
+	AppleFoundationModelsProvider.streamAppleFoundationModels(model, context, options),
 );
 
 /** Stream Ollama with OpenAI-compatible idle timeout precedence. */

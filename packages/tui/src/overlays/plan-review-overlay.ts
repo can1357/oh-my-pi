@@ -19,7 +19,7 @@
 import {
 	type Component,
 	Ellipsis,
-	Input,
+	Editor,
 	Markdown,
 	type MarkdownTheme,
 	matchesKey,
@@ -31,7 +31,7 @@ import {
 } from "../index";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { sanitizeStatusText } from "../chrome/shared";
-import { getMarkdownTheme, theme } from "../theme/theme";
+import { getEditorTheme, getMarkdownTheme, theme } from "../theme/theme";
 import {
 	matchesAppExternalEditor,
 	matchesSelectCancel,
@@ -57,6 +57,8 @@ import { renderSegmentTrack } from "../chrome/segment-track";
 const OVERLAY_TITLE = "Plan Review";
 /** Minimum plan-body rows kept visible even on short terminals. */
 const MIN_BODY_ROWS = 3;
+/** Visible rows for the in-overlay annotation editor before it scrolls. */
+const MAX_ANNOTATION_EDITOR_ROWS = 6;
 /** Sidebar gates: enough headings, a wide terminal, and a usable body column. */
 const SIDEBAR_MIN_HEADINGS = 2;
 const SIDEBAR_MIN_TOTAL_WIDTH = 64;
@@ -91,6 +93,16 @@ interface BodyRowAnchor {
 	row: number;
 	context: string;
 	contextTruncated: boolean;
+}
+
+interface AnnotationSelection {
+	sectionIndex: number;
+	annotationIndex: number;
+}
+
+interface AnnotationChooser {
+	entries: AnnotationSelection[];
+	selected: number;
 }
 
 /** Serializable annotations retained by the plan-review owner between overlays. */
@@ -207,8 +219,10 @@ export class PlanReviewOverlay implements Component {
 	/** Label of the committed choice, shown while the async approval settles. */
 	#committedLabel: string | undefined;
 	#annotating = false;
-	#input: Input;
+	#editor: Editor;
 	#annotationTarget: BodyRowAnchor | { sectionIndex: number; row: null; context: null } | undefined;
+	#editingAnnotation: AnnotationSelection | undefined;
+	#annotationChooser: AnnotationChooser | undefined;
 
 	constructor(
 		planContent: string,
@@ -236,10 +250,11 @@ export class PlanReviewOverlay implements Component {
 		} else {
 			this.#sliderIndex = 0;
 		}
-		this.#input = new Input();
-		this.#input.setUseTerminalCursor(false);
-		this.#input.onSubmit = value => this.#submitAnnotation(value);
-		this.#input.onEscape = () => this.#exitAnnotate();
+		this.#editor = new Editor(getEditorTheme());
+		this.#editor.setBorderVisible(false);
+		this.#editor.setPromptGutter("> ");
+		this.#editor.setUseTerminalCursor(false);
+		this.#editor.onSubmit = value => this.#submitAnnotation(value);
 		this.#setSections(planContent);
 		this.#restoreAnnotationState(options.annotationState);
 		if (Array.isArray(options.annotationState?.annotations) && options.annotationState.annotations.length > 0) {
@@ -490,19 +505,35 @@ export class PlanReviewOverlay implements Component {
 	handleInput(keyData: string): void {
 		if (this.#committed) return;
 		if (keyData.startsWith("\x1b[<") && this.#handleMouse(keyData)) return;
+		if (this.#annotationChooser) {
+			this.#handleAnnotationChooser(keyData);
+			return;
+		}
 		if (this.#annotating) {
 			if (this.callbacks.onAnnotationExternalEditor && matchesAppExternalEditor(keyData)) {
-				this.callbacks.onAnnotationExternalEditor(this.#input.getValue(), text => {
-					if (text !== null) this.#submitAnnotation(text);
+				this.callbacks.onAnnotationExternalEditor(this.#editor.getExpandedText(), text => {
+					if (text !== null && this.#annotating) this.#editor.setText(text);
 				});
 				return;
 			}
-			this.#input.handleInput(keyData);
+			if (matchesSelectCancel(keyData)) {
+				this.#exitAnnotate();
+				return;
+			}
+			this.#editor.handleInput(keyData);
 			return;
 		}
 		if (matchesSelectCancel(keyData)) {
 			this.#committed = true;
 			this.callbacks.onCancel();
+			return;
+		}
+		if (this.#focus !== "actions" && keyData === "u") {
+			this.#undoLast();
+			return;
+		}
+		if (this.#focus !== "actions" && keyData === "e") {
+			this.#editCurrentAnnotation();
 			return;
 		}
 		if (this.callbacks.onExternalEditor && matchesAppExternalEditor(keyData)) {
@@ -726,10 +757,6 @@ export class PlanReviewOverlay implements Component {
 			this.#startSectionAnnotate();
 			return;
 		}
-		if (data === "u") {
-			this.#undoLast();
-			return;
-		}
 	}
 
 	#moveTocCursor(delta: number): void {
@@ -828,39 +855,145 @@ export class PlanReviewOverlay implements Component {
 
 	#startAnnotate(target: BodyRowAnchor | { sectionIndex: number; row: null; context: null }): void {
 		this.#annotationTarget = target;
+		this.#editingAnnotation = undefined;
 		this.#annotating = true;
-		this.#input.setValue("");
+		this.#editor.setText("");
+	}
+
+	#startExistingAnnotation(selection: AnnotationSelection): void {
+		const section = this.#sections[selection.sectionIndex];
+		const annotation = section?.annotations[selection.annotationIndex];
+		if (!section || !annotation) return;
+		this.#annotationChooser = undefined;
+		this.#editingAnnotation = selection;
+		this.#annotationTarget =
+			annotation.target.kind === "section"
+				? { sectionIndex: selection.sectionIndex, row: null, context: null }
+				: {
+						sectionIndex: selection.sectionIndex,
+						row: annotation.target.row,
+						context: annotation.target.context,
+						contextTruncated: annotation.target.contextTruncated,
+					};
+		this.#annotating = true;
+		this.#editor.setText(annotation.note);
+	}
+
+	#annotationMatchesBodyAnchor(annotation: OverlayAnnotation, anchor: BodyRowAnchor): boolean {
+		if (annotation.target.kind === "section") return true;
+		if (annotation.target.row === anchor.row && annotation.target.context === anchor.context) return true;
+		const seenRows = new Set<number>();
+		const sectionAnchors: LineAnchorContext[] = [];
+		for (const candidate of this.#bodyRowAnchors) {
+			if (candidate.sectionIndex !== anchor.sectionIndex || seenRows.has(candidate.row)) continue;
+			seenRows.add(candidate.row);
+			sectionAnchors.push({ text: candidate.context, truncated: candidate.contextTruncated });
+		}
+		const resolvedRow = this.#resolveLineRow(
+			annotation.target.row,
+			{ text: annotation.target.context, truncated: annotation.target.contextTruncated },
+			sectionAnchors,
+		);
+		return resolvedRow === anchor.row;
+	}
+
+	#annotationCandidates(): AnnotationSelection[] {
+		if (this.#focus === "toc") {
+			const sectionIndex = this.#toc[this.#tocCursor];
+			const section = sectionIndex === undefined ? undefined : this.#sections[sectionIndex];
+			if (!section || section.annotations.length === 0) return [];
+			return section.annotations.map((_, annotationIndex) => ({ sectionIndex, annotationIndex }));
+		}
+		if (this.#focus !== "body") return [];
+		const maxRow = this.#bodyRowAnchors.length - 1;
+		if (maxRow < 0) return [];
+		const topRow = Math.max(0, Math.min(maxRow, Math.floor(this.#scrollView.getScrollOffset())));
+		const anchor = this.#bodyRowAnchors[topRow];
+		const section = anchor ? this.#sections[anchor.sectionIndex] : undefined;
+		if (!anchor || !section) return [];
+		const entries: AnnotationSelection[] = [];
+		for (const [annotationIndex, annotation] of section.annotations.entries()) {
+			if (this.#annotationMatchesBodyAnchor(annotation, anchor)) {
+				entries.push({ sectionIndex: anchor.sectionIndex, annotationIndex });
+			}
+		}
+		return entries;
+	}
+
+	#editCurrentAnnotation(): void {
+		const entries = this.#annotationCandidates();
+		if (entries.length === 0) return;
+		if (entries.length === 1) {
+			this.#startExistingAnnotation(entries[0]!);
+			return;
+		}
+		this.#annotationChooser = { entries, selected: 0 };
+	}
+
+	#handleAnnotationChooser(data: string): void {
+		const chooser = this.#annotationChooser;
+		if (!chooser) return;
+		if (matchesSelectCancel(data)) {
+			this.#annotationChooser = undefined;
+			return;
+		}
+		if (matchesSelectUp(data) || matchesKey(data, "k")) {
+			chooser.selected = (chooser.selected - 1 + chooser.entries.length) % chooser.entries.length;
+			return;
+		}
+		if (matchesSelectDown(data) || matchesKey(data, "j")) {
+			chooser.selected = (chooser.selected + 1) % chooser.entries.length;
+			return;
+		}
+		if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
+			const selection = chooser.entries[chooser.selected];
+			this.#annotationChooser = undefined;
+			if (selection) this.#startExistingAnnotation(selection);
+		}
 	}
 
 	#submitAnnotation(value: string): void {
-		this.#annotating = false;
 		const note = value.trim();
 		const target = this.#annotationTarget;
+		const editing = this.#editingAnnotation;
+		this.#annotating = false;
 		this.#annotationTarget = undefined;
-		const section = target ? this.#sections[target.sectionIndex] : undefined;
-		if (note && section && target) {
+		this.#editingAnnotation = undefined;
+		this.#editor.setText("");
+		if (editing) {
+			const section = this.#sections[editing.sectionIndex];
+			const annotation = section?.annotations[editing.annotationIndex];
+			if (!section || !annotation) return;
 			this.#pushUndo();
-			section.annotations.push({
-				note,
-				target:
-					target.row === null
-						? { kind: "section" }
-						: {
-								kind: "line",
-								row: target.row,
-								context: target.context,
-								contextTruncated: target.contextTruncated,
-							},
-			});
+			if (note) annotation.note = note;
+			else section.annotations.splice(editing.annotationIndex, 1);
 			this.#recomputeFeedback();
+			return;
 		}
-		this.#input.setValue("");
+		if (!note || !target) return;
+		const section = this.#sections[target.sectionIndex];
+		if (!section) return;
+		this.#pushUndo();
+		section.annotations.push({
+			note,
+			target:
+				target.row === null
+					? { kind: "section" }
+					: {
+							kind: "line",
+							row: target.row,
+							context: target.context,
+							contextTruncated: target.contextTruncated,
+						},
+		});
+		this.#recomputeFeedback();
 	}
 
 	#exitAnnotate(): void {
 		this.#annotating = false;
 		this.#annotationTarget = undefined;
-		this.#input.setValue("");
+		this.#editingAnnotation = undefined;
+		this.#editor.setText("");
 	}
 
 	#recomputeFeedback(): void {
@@ -942,10 +1075,10 @@ export class PlanReviewOverlay implements Component {
 				if (this.#slider) parts.push("◂▸ model");
 				break;
 			case "toc":
-				parts.push("↑↓ section", "⏎ open", "a annotate", "d delete", "u undo");
+				parts.push("↑↓ section", "⏎ open", "a annotate", "e edit", "d delete", "u undo");
 				break;
 			case "body":
-				parts.push("↑↓ scroll", "⇧ faster", "pgup/pgdn", "g/G ends", "a annotate");
+				parts.push("↑↓ scroll", "⇧ faster", "pgup/pgdn", "g/G ends", "a annotate", "e edit", "u undo");
 				break;
 		}
 		if (this.callbacks.onCopyPlan) parts.push("c copy");
@@ -1136,8 +1269,39 @@ export class PlanReviewOverlay implements Component {
 		if (glow) return theme.fg("accent", line);
 		return theme.fg("muted", line);
 	}
+	#renderAnnotationChooserLines(innerWidth: number, maxRows = Number.POSITIVE_INFINITY): string[] {
+		const chooser = this.#annotationChooser;
+		if (!chooser || maxRows <= 0) return [];
+		const optionLimit = Number.isFinite(maxRows) ? Math.max(0, Math.floor(maxRows) - 2) : chooser.entries.length;
+		const start =
+			optionLimit >= chooser.entries.length
+				? 0
+				: Math.max(
+						0,
+						Math.min(chooser.selected - Math.floor(optionLimit / 2), chooser.entries.length - optionLimit),
+					);
+		const lines = [theme.bold(theme.fg("accent", "Edit annotation"))];
+		for (let windowIndex = 0; windowIndex < optionLimit; windowIndex++) {
+			const optionIndex = start + windowIndex;
+			const selection = chooser.entries[optionIndex];
+			if (!selection) continue;
+			const section = this.#sections[selection.sectionIndex];
+			const annotation = section?.annotations[selection.annotationIndex];
+			if (!section || !annotation) continue;
+			const target = annotation.target.kind === "section" ? "section" : `line ${annotation.target.context}`;
+			const note = sanitizeStatusText(annotation.note);
+			const marker = optionIndex === chooser.selected ? theme.fg("accent", "› ") : "  ";
+			const label = `${marker}${sanitizeStatusText(section.title || "Plan preamble")} · ${target} · ${note}`;
+			lines.push(truncateToWidth(label, innerWidth, Ellipsis.Unicode));
+		}
+		if (!Number.isFinite(maxRows) || maxRows >= 2) {
+			lines.push(theme.fg("dim", "↑↓ choose · enter edit · esc cancel"));
+		}
+		return lines.slice(0, Math.max(0, Math.floor(maxRows)));
+	}
 
-	#renderFooterLines(innerWidth: number): string[] {
+	#renderFooterLines(innerWidth: number, maxChooserRows = Number.POSITIVE_INFINITY): string[] {
+		if (this.#annotationChooser) return this.#renderAnnotationChooserLines(innerWidth, maxChooserRows);
 		if (this.#annotating) {
 			const target = this.#annotationTarget;
 			const section = target ? this.#sections[target.sectionIndex] : undefined;
@@ -1151,9 +1315,12 @@ export class PlanReviewOverlay implements Component {
 				innerWidth,
 				Ellipsis.Unicode,
 			);
-			const hintParts = ["enter save", "esc cancel"];
+			const hintParts = ["enter save", "shift+enter newline", "esc cancel"];
+			if (this.#editingAnnotation) hintParts.push("empty deletes");
 			if (this.#externalEditorLabel) hintParts.push(`${this.#externalEditorLabel} editor`);
-			return [caption, this.#input.render(innerWidth)[0] ?? "", theme.fg("dim", hintParts.join(" · "))];
+			this.#editor.setMaxHeight(Math.max(1, Math.min(MAX_ANNOTATION_EDITOR_ROWS, (process.stdout.rows || 40) - 12)));
+			this.#editor.focused = true;
+			return [caption, ...this.#editor.render(innerWidth), theme.fg("dim", hintParts.join(" · "))];
 		}
 		return [theme.fg("dim", this.#buildHelp())];
 	}
@@ -1171,14 +1338,20 @@ export class PlanReviewOverlay implements Component {
 		const submittingLabel = this.#committedLabel ? `${this.#committedLabel} — submitting…` : "Submitting…";
 		const optionLines = committed ? [theme.bold(theme.fg("accent", submittingLabel))] : this.#renderOptionLines();
 		const promptLines = this.#promptTitle ? [theme.bold(theme.fg("accent", this.#promptTitle))] : [];
+		const baseChrome = 4 + promptLines.length + sliderLines.length + optionLines.length;
+		const chooserFooterRows = this.#annotationChooser
+			? Math.max(0, termHeight - baseChrome - MIN_BODY_ROWS)
+			: Number.POSITIVE_INFINITY;
 		const footerLines = committed
 			? [theme.fg("dim", "Applying your selection — this can take a moment while context is prepared.")]
-			: this.#renderFooterLines(innerWidth);
+			: this.#renderFooterLines(innerWidth, chooserFooterRows);
 
 		// Chrome rows: top border, two dividers, bottom border, plus the
 		// prompt/slider/option/footer rows between them.
-		const chrome = 4 + promptLines.length + sliderLines.length + optionLines.length + footerLines.length;
-		const regionRows = Math.max(MIN_BODY_ROWS, termHeight - chrome);
+		const chrome = baseChrome + footerLines.length;
+		const regionRows = this.#annotationChooser
+			? Math.max(0, termHeight - chrome)
+			: Math.max(MIN_BODY_ROWS, termHeight - chrome);
 
 		const bodyLines = this.#buildBody(bodyContentWidth);
 		this.#layoutBody(bodyLines, regionRows);

@@ -162,11 +162,10 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		}
 
 		async send(message) {
-			return await globalThis.__omp_call_tool__("hub", {
-				op: "send",
-				to: this.id,
-				message: String(message),
-				i: "agent handle",
+			return await globalThis.__omp_call_tool__("write", {
+				path: this.handle,
+				content: String(message),
+				i: "Messaging agent",
 			});
 		}
 

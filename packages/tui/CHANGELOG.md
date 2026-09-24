@@ -2,9 +2,25 @@
 
 ## [Unreleased]
 
+## [18.3.0] - 2026-09-24
+
+### Added
+
+- Added proc:// and agent:// URI support for interacting with processes and agents.
+- Added support for xd:// documentation topic URLs.
+- Added rendering for background job state and peer-to-peer messages from the wait tool.
+- Added supervised bash service rendering with status, readiness, and output information.
+- Added a fullscreen annotation overlay for diffs and text, including multi-line notes, editing, deletion, and undo ([#12601](https://github.com/can1357/oh-my-pi/pull/12601) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+- Added Daybreak-enabled account listings to the usage dashboard.
+
 ### Changed
 
-- Updated model hub and oauth selector components to use namespaced `authStorage` API
+- Mermaid flowcharts and state diagrams now automatically choose a layout that best fits the available terminal width and reflow when the terminal is resized.
+- Plan Review annotations now support multi-line editing, deletion, and undo ([#12601](https://github.com/can1357/oh-my-pi/pull/12601) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+
+### Fixed
+
+- Fixed AltGr characters, including `[`, `]`, `{`, and `}`, being dropped in Windows Terminal when using the kitty keyboard protocol on Hungarian and other international keyboard layouts ([#12984](https://github.com/can1357/oh-my-pi/pull/12984) by [@H4vC](https://github.com/H4vC)).
 
 ## [18.2.11] - 2026-09-23
 

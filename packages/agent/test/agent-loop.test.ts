@@ -6,6 +6,7 @@ import {
 	agentLoopContinue,
 	agentLoopDetailed,
 	TERMINAL_TOOL_RESULT_ABORT_REASON,
+	TOOL_INTERRUPT_ABORT_REASON,
 } from "@oh-my-pi/pi-agent-core/agent-loop";
 import { SpeculativeOperationCoordinator } from "@oh-my-pi/pi-agent-core/speculative-execution";
 import type {
@@ -2058,6 +2059,7 @@ describe("agentLoop with AgentMessage", () => {
 		let steerReady = false;
 		let drained = false;
 		let observedAbort = false;
+		let observedReason: unknown;
 		let resolvedByTimeout = false;
 
 		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
@@ -2087,6 +2089,7 @@ describe("agentLoop with AgentMessage", () => {
 				}
 				await promise;
 				observedAbort = signal?.aborted === true;
+				observedReason = signal?.reason;
 				return { content: [{ type: "text", text: "waited" }], details: {} };
 			},
 		};
@@ -2118,11 +2121,91 @@ describe("agentLoop with AgentMessage", () => {
 		}
 
 		expect(observedAbort).toBe(true);
+		expect(observedReason).toBe(TOOL_INTERRUPT_ABORT_REASON);
 		expect(resolvedByTimeout).toBe(false);
 		expect(drained).toBe(true);
 		expect(
 			events.some(e => e.type === "message_start" && e.message.role === "user" && e.message.content === "interrupt"),
 		).toBe(true);
+	});
+
+	it("aborts an interruptible wait on queued steering in wait mode without soft-signalling other tools", async () => {
+		const toolSchema = type({});
+		let steerReady = false;
+		let drained = false;
+		let workSoftAborted: boolean | undefined;
+		let steeringSignal: AbortSignal | undefined;
+		const waitAborted = Promise.withResolvers<void>();
+
+		const waitTool: AgentTool<typeof toolSchema, Record<string, never>> = {
+			name: "wait",
+			label: "Wait",
+			description: "Blocks until aborted",
+			parameters: toolSchema,
+			interruptible: true,
+			async execute(_toolCallId, _params, signal) {
+				steerReady = true;
+				const { promise, resolve } = Promise.withResolvers<void>();
+				signal?.addEventListener("abort", () => resolve(), { once: true });
+				await promise;
+				waitAborted.resolve();
+				signal?.throwIfAborted();
+				return { content: [{ type: "text", text: "waited" }], details: {} };
+			},
+		};
+		const workTool: AgentTool<typeof toolSchema, Record<string, never>> = {
+			name: "work",
+			label: "Work",
+			description: "Foreground work that outlives the interrupt",
+			parameters: toolSchema,
+			async execute() {
+				await waitAborted.promise;
+				await new Promise<void>(resolve => setImmediate(resolve));
+				workSoftAborted = steeringSignal?.aborted === true;
+				return { content: [{ type: "text", text: "worked" }], details: {} };
+			},
+		};
+
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [waitTool, workTool] };
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{ type: "toolCall", id: "tool-1", name: "wait", arguments: {} },
+						{ type: "toolCall", id: "tool-2", name: "work", arguments: {} },
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "wait",
+			hasSteeringMessages: () => steerReady && !drained,
+			getSteeringMessages: async () => {
+				if (!steerReady || drained) return [];
+				drained = true;
+				return [createUserMessage("interrupt")];
+			},
+			getToolContext: toolCall => {
+				steeringSignal = toolCall?.steeringSignal;
+				return { toolCall } as AgentToolContext;
+			},
+		};
+
+		const events: AgentEvent[] = [];
+		for await (const event of agentLoop([createUserMessage("start")], context, config, undefined, mock.stream)) {
+			events.push(event);
+		}
+
+		expect(workSoftAborted).toBe(false);
+		const results = events.filter(
+			(event): event is Extract<AgentEvent, { type: "tool_execution_end" }> => event.type === "tool_execution_end",
+		);
+		expect(results.find(event => event.toolName === "wait")?.result.details).toMatchObject({ __interrupted: true });
+		expect(results.find(event => event.toolName === "work")?.isError).toBe(false);
+		expect(drained).toBe(true);
 	});
 
 	it("distinguishes an in-flight abort from a never-executed steering skip", async () => {
@@ -2266,6 +2349,7 @@ describe("agentLoop with AgentMessage", () => {
 		let ircReady = false;
 		let ircDrained = false;
 		let observedAbort = false;
+		let observedReason: unknown;
 		let resolvedByTimeout = false;
 		const ircMessage = createUserMessage("irc interrupt");
 
@@ -2296,6 +2380,7 @@ describe("agentLoop with AgentMessage", () => {
 				}
 				await promise;
 				observedAbort = signal?.aborted === true;
+				observedReason = signal?.reason;
 				return { content: [{ type: "text", text: "waited" }], details: {} };
 			},
 		};
@@ -2327,6 +2412,7 @@ describe("agentLoop with AgentMessage", () => {
 		}
 
 		expect(observedAbort).toBe(true);
+		expect(observedReason).toBe(TOOL_INTERRUPT_ABORT_REASON);
 		expect(resolvedByTimeout).toBe(false);
 		expect(ircDrained).toBe(true);
 		expect(

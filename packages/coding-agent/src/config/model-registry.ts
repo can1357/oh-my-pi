@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import type { ApiKeyResolver, FetchImpl, UsageProvider } from "@oh-my-pi/pi-ai";
+import type { ApiKeyResolver, FetchImpl, ResolvedApiKey, UsageProvider } from "@oh-my-pi/pi-ai";
 import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { registerOAuthProvider, unregisterOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
@@ -1445,6 +1445,21 @@ export class ModelRegistry {
 				this.#keylessProviders.add("llama.cpp");
 			}
 		}
+		if (
+			process.platform === "darwin" &&
+			process.arch === "arm64" &&
+			!configuredProviders.has("apple") &&
+			!disabledProviders.has("apple")
+		) {
+			this.#discoverableProviders.push({
+				provider: "apple",
+				api: "apple-foundation-models",
+				baseUrl: "local://apple-foundation-models",
+				discovery: { type: "apple-foundation-models" },
+				optional: true,
+			});
+			this.#keylessProviders.add("apple");
+		}
 		if (!configuredProviders.has("lm-studio") && !disabledProviders.has("lm-studio")) {
 			this.#discoverableProviders.push({
 				provider: "lm-studio",
@@ -2775,6 +2790,7 @@ export class ModelRegistry {
 		return this.authStorage.keys.get(model.provider, sessionId, {
 			baseUrl: model.baseUrl,
 			modelId: model.id,
+			accountIds: model.accountAccess && Object.keys(model.accountAccess),
 			signal: options?.signal,
 		});
 	}
@@ -2805,13 +2821,23 @@ export class ModelRegistry {
 		sessionId?: string,
 		options?: { baseUrl?: string; modelId?: string; forceRefresh?: boolean; signal?: AbortSignal },
 	): Promise<string | undefined> {
+		return (await this.getApiKeyWithCredentialForProvider(provider, sessionId, options))?.apiKey;
+	}
+
+	async getApiKeyWithCredentialForProvider(
+		provider: string,
+		sessionId?: string,
+		options?: { baseUrl?: string; modelId?: string; forceRefresh?: boolean; signal?: AbortSignal },
+	): Promise<ResolvedApiKey | undefined> {
 		if (options?.forceRefresh) this.#invalidateProviderCommandConfigs(provider);
 		if (this.#keylessProviders.has(provider) && this.authStorage.keys.source(provider) === undefined) {
-			return kNoAuth;
+			return { apiKey: kNoAuth };
 		}
-		return this.authStorage.keys.get(provider, sessionId, {
+		const accountAccess = options?.modelId ? this.find(provider, options.modelId)?.accountAccess : undefined;
+		return this.authStorage.keys.getWithCredential(provider, sessionId, {
 			baseUrl: options?.baseUrl,
 			modelId: options?.modelId,
+			accountIds: accountAccess && Object.keys(accountAccess),
 			forceRefresh: options?.forceRefresh,
 			signal: options?.signal,
 		});
