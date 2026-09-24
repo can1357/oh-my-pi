@@ -32,7 +32,7 @@ import { createExtensionModelQuery } from "./model-api";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import type {
 	AfterProviderResponseEvent,
-	AgentIdentity,
+	ExtensionAgentIdentity,
 	AssistantThinkingRenderer,
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
@@ -451,7 +451,7 @@ export class ExtensionRunner {
 	#isIdleFn: () => boolean = () => true;
 	#waitForIdleFn: () => Promise<void> = async () => {};
 	#abortFn: () => void = () => {};
-	#identity: AgentIdentity | undefined;
+	#identity: ExtensionAgentIdentity | undefined;
 	#hasPendingMessagesFn: () => boolean = () => false;
 	#getContextUsageFn: () => ContextUsage | undefined = () => undefined;
 	#compactFn: (instructionsOrOptions?: string | CompactOptions) => Promise<void> = async () => {};
@@ -619,7 +619,7 @@ export class ExtensionRunner {
 		private readonly settings?: Settings,
 		private readonly localProtocolOptions?: LocalProtocolOptions,
 		getAsyncJobSnapshot?: () => AsyncJobSnapshot | null,
-		agentIdentity?: AgentIdentity,
+		agentIdentity?: ExtensionAgentIdentity,
 	) {
 		this.#uiContext = noOpUIContext;
 		this.#getMemoryFn = getMemory;

@@ -438,7 +438,7 @@ export type ExtensionMode = "tui" | "rpc" | "json" | "print";
  * `kind: "sub"` with `depth: 0`. Ask "am I a spawned worker?" via
  * `kind === "sub"`; ask "was I spawned by the task tool?" via `depth > 0`.
  */
-export interface AgentIdentity {
+export interface ExtensionAgentIdentity {
 	/**
 	 * Whether this session runs as the top-level session or as a spawned
 	 * worker. Mirrors the session's pre-existing `agentKind` classification
@@ -522,7 +522,7 @@ export interface ExtensionContext {
 	 * when the host does not report identity (e.g. provider-only runner
 	 * hosts) — handlers must fail open rather than assume `"main"`.
 	 */
-	readonly agentIdentity?: AgentIdentity;
+	readonly agentIdentity?: ExtensionAgentIdentity;
 	/** Whether the agent is idle (not streaming) */
 	isIdle(): boolean;
 	/** Abort the current agent operation */

@@ -5,13 +5,13 @@ import * as path from "node:path";
 import { ModelRegistry } from "../src/config/model-registry";
 import { Settings } from "../src/config/settings";
 import { ExtensionRunner } from "../src/extensibility/extensions/runner";
-import type { AgentIdentity } from "../src/extensibility/extensions/types";
+import type { ExtensionAgentIdentity } from "../src/extensibility/extensions/types";
 import { AgentRegistry, MAIN_AGENT_ID } from "../src/registry/agent-registry";
 import type { AgentSession } from "../src/session/agent-session";
 import { createAgentSession, type CreateAgentSessionOptions } from "../src/sdk";
 import { AuthStorage } from "../src/session/auth-storage";
 
-function makeRunner(identity?: AgentIdentity): ExtensionRunner {
+function makeRunner(identity?: ExtensionAgentIdentity): ExtensionRunner {
 	return new ExtensionRunner(
 		[],
 		{} as never,
