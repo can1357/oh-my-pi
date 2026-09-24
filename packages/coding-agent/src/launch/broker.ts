@@ -3,7 +3,7 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { FileLock, Process, type PtyRunResult, PtySession } from "@oh-my-pi/pi-natives";
-import { isEnoent, logger, postmortem, procmgr, sanitizeText, setProcessName } from "@oh-my-pi/pi-utils";
+import { isEnoent, isRecord, logger, postmortem, procmgr, sanitizeText, setProcessName } from "@oh-my-pi/pi-utils";
 import { TerminalQueryResponder } from "@oh-my-pi/pi-utils/vterm";
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
 import {
@@ -533,8 +533,11 @@ class DaemonBroker {
 		let id = "unknown";
 		try {
 			const decoded: unknown = JSON.parse(line);
+			// Correlate before validating: an operation this broker cannot parse (a newer omp
+			// reaching a broker that predates it) must fail the caller's request, not strand it
+			// until the client-side timeout.
+			if (isRecord(decoded) && typeof decoded.id === "string") id = decoded.id;
 			const request = parseDaemonWireRequest(decoded);
-			id = request.id;
 			if (request.token !== this.#token) throw new Error("Daemon broker authentication failed");
 			onAuthenticated();
 			for (const owner of request.completionUnsubscribes ?? []) {
