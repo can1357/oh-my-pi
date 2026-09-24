@@ -244,7 +244,7 @@ const LANG_ALIASES: &[(&[&str], &str)] = &[
 	(&["el", "elisp", "emacs-lisp", "emacslisp"], "Lisp"),
 	(&["ex", "exs", "elixir"], "Ruby"),
 	(&["erl", "erlang"], "Erlang"),
-	(&["hs", "haskell"], "Haskell"),
+	(&["hs", "haskell", "purs", "purescript"], "Haskell"),
 	(&["ml", "ocaml"], "OCaml"),
 	(&["vim"], "VimL"),
 	(&["graphql", "gql"], "GraphQL"),

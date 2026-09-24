@@ -9,6 +9,7 @@
 ### Fixed
 
 - `omp update` and the startup update check now use your configured npm registry (`.npmrc`, `npm_config_registry`, or bunfig, including scoped registries and auth tokens) instead of always querying registry.npmjs.org ([#13115](https://github.com/can1357/oh-my-pi/pull/13115) by [@H4vC](https://github.com/H4vC))
+- HTML exports and share pages now highlight `purescript` code blocks through the Haskell grammar (highlight.js ships no PureScript grammar) instead of falling back to auto-detection ([#13122](https://github.com/can1357/oh-my-pi/pull/13122) by [@i-am-the-slime](https://github.com/i-am-the-slime))
 
 ## [18.3.0] - 2026-09-24
 

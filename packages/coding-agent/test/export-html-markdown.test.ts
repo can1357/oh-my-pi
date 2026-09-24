@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import * as vm from "node:vm";
-import { type Element, parseHTML } from "@oh-my-pi/pi-utils/dom";
+import { type Document, type Element, parseHTML } from "@oh-my-pi/pi-utils/dom";
 
 const [templateHtml, templateJs, markedJs] = await Promise.all([
 	Bun.file(new URL("../src/export/html/template.html", import.meta.url)).text(),
@@ -32,7 +32,8 @@ interface MinimalSession {
 	leafId: string;
 }
 
-function renderSession(session: MinimalSession) {
+function renderSession(session: MinimalSession): { document: Document; highlightedLanguages: string[] } {
+	const highlightedLanguages: string[] = [];
 	const { document, window } = parseHTML(templateHtml);
 	const sessionData = document.getElementById("session-data");
 	if (!sessionData) throw new Error("Export template is missing session data");
@@ -59,12 +60,21 @@ function renderSession(session: MinimalSession) {
 		});
 	}
 
+	// The alias map template.html registers at load time, mirrored here so the
+	// shim answers like a real browser with the haskell grammar loaded.
+	const aliasesMap: Record<string, string> = { purescript: "haskell", purs: "haskell" };
 	const context = vm.createContext({
 		window,
 		document,
 		hljs: {
-			getLanguage: () => false,
-			highlight: () => ({ value: "" }),
+			getLanguage: (lang: string) => lang === "haskell" || aliasesMap[lang] !== undefined,
+			registerAliases: (aliases: string[], opts: { languageName: string }) => {
+				for (const alias of aliases) aliasesMap[alias] = opts.languageName;
+			},
+			highlight: (code: string, opts: { language: string }) => {
+				highlightedLanguages.push(aliasesMap[opts.language] ?? opts.language);
+				return { value: code };
+			},
 			highlightAuto: () => ({ value: "" }),
 		},
 		URL,
@@ -80,7 +90,7 @@ function renderSession(session: MinimalSession) {
 	vm.runInContext(markedJs, context);
 	vm.runInContext("marked = new marked.Marked()", context);
 	vm.runInContext(templateJs, context);
-	return document;
+	return { document, highlightedLanguages };
 }
 
 function createSession(entries: MinimalMessageEntry[], leafId: string, id: string): MinimalSession {
@@ -127,8 +137,8 @@ function createDeepChainSession(depth: number): MinimalSession {
 	return createSession(entries, "message-0", "deep-chain-test");
 }
 
-function renderMarkdown(source: string): Element {
-	const document = renderSession(
+function renderMarkdown(source: string): { rendered: Element; highlightedLanguages: string[] } {
+	const { document, highlightedLanguages } = renderSession(
 		createSession(
 			[
 				{
@@ -150,12 +160,12 @@ function renderMarkdown(source: string): Element {
 
 	const rendered = document.querySelector(".markdown-content");
 	if (!rendered) throw new Error("Export viewer did not render Markdown content");
-	return rendered;
+	return { rendered, highlightedLanguages };
 }
 
 describe("HTML export Markdown", () => {
 	test("renders inline Markdown in ordered, unordered, and nested list items", () => {
-		const rendered = renderMarkdown("**outside**\n\n- **bold** and *italic* and `code`\n  1. **nested**");
+		const { rendered } = renderMarkdown("**outside**\n\n- **bold** and *italic* and `code`\n  1. **nested**");
 
 		expect(rendered.querySelector("p strong")?.textContent).toBe("outside");
 		expect(rendered.querySelector("ul > li > strong")?.textContent).toBe("bold");
@@ -165,7 +175,7 @@ describe("HTML export Markdown", () => {
 	});
 
 	test("renders bold inline code before indented code blocks in ordered lists", () => {
-		const rendered = renderMarkdown(`1. **\`Crew Ship\`** — description
+		const { rendered } = renderMarkdown(`1. **\`Crew Ship\`** — description
    \`\`\`json
    { "crew": "..." }
    \`\`\`
@@ -180,10 +190,23 @@ describe("HTML export Markdown", () => {
 	});
 
 	test("renders a deep valid conversation tree without overflowing the call stack", () => {
-		const document = renderSession(createDeepChainSession(30_000));
+		const { document } = renderSession(createDeepChainSession(30_000));
 
 		expect(document.querySelectorAll(".tree-node").length).toBe(1);
 		expect(document.querySelector(".tree-node.active")?.getAttribute("data-id")).toBe("message-0");
 		expect(document.querySelector("#messages")?.textContent).toContain("root");
+	});
+
+	test("highlights purescript fences through the haskell grammar", () => {
+		const source = '```purescript\nmain :: Effect Unit\nmain = log "hi"\n```';
+		const { highlightedLanguages } = renderMarkdown(source);
+
+		expect(highlightedLanguages).toEqual(["haskell"]);
+	});
+
+	test("does not alias unknown fence languages to haskell", () => {
+		const { highlightedLanguages } = renderMarkdown("```notalang\nplain\n```");
+
+		expect(highlightedLanguages).toEqual([]);
 	});
 });

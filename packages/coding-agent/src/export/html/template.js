@@ -1566,7 +1566,8 @@
         breaks: true,
         gfm: true,
         renderer: {
-          // Code blocks: syntax highlight, no HTML escaping
+          // Code blocks: syntax highlight, no HTML escaping. PureScript fences
+          // resolve through the haskell alias registered in template.html.
           code(token) {
             const code = token.text;
             const lang = token.lang;

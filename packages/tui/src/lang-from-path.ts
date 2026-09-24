@@ -126,6 +126,7 @@ const EXTENSION_LANG: Record<string, readonly [string, string]> = {
 	erl: ["erlang", "erlang"],
 	hrl: ["erlang", "erlang"],
 	hs: ["haskell", "haskell"],
+	purs: ["haskell", "purescript"],
 	ml: ["ocaml", "ocaml"],
 	mli: ["ocaml", "ocaml"],
 	swift: ["swift", "swift"],
