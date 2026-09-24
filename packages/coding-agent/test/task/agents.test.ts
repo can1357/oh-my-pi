@@ -90,7 +90,10 @@ describe("resolveAgentSkills", () => {
 		expect(skills).toEqual(before);
 	});
 
-	test("malformed glob does not throw and does not match", () => {
+	test("unparseable glob pattern is tolerated and matches nothing", () => {
+		// `Bun.Glob` parses leniently, so this asserts the tolerated outcome
+		// for this shape — not a guaranteed fail-safe for every malformed
+		// pattern (an extglob-shaped typo may match more than intended).
 		const skills = [skill("alpha")];
 		const resolved = resolveAgentSkills(skills, agent({ hideSkills: ["[invalid"] }));
 		expect(listed(resolved)).toEqual(["alpha"]);
