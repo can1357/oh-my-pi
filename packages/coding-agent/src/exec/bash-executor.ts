@@ -8,13 +8,21 @@ import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { type MinimizerOptions, PtySession, Shell, type ShellRunResult } from "@oh-my-pi/pi-natives";
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
-import { Settings, type ShellMinimizerSettings } from "../config/settings";
+import { Settings } from "../config/settings";
 import { type OutputArtifactError, OutputSink, type OutputSummary } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "../tools/output-meta";
 import { getOrCreateSnapshot } from "../utils/shell-snapshot";
 import { TerminalGraphicsDecoder } from "../utils/terminal-graphics";
 import { loadDirenvEnv } from "./direnv";
 import { buildNonInteractiveEnv } from "./non-interactive-env";
+
+import {
+	cfgBashDirenv,
+	cfgBashDirenvLoadTimeoutMs,
+	cfgShellMinimizer,
+	cfgShellPath,
+	type ShellMinimizerSettings,
+} from "./settings";
 
 export interface BashExecutorOptions {
 	cwd?: string;
@@ -359,7 +367,7 @@ function buildUserShellCommand(shell: string, args: string[], command: string): 
 }
 
 function resolveUserShellConfig(settings: Settings, baseConfig: ShellConfig): ShellConfig {
-	const customShellPath = settings.get("shellPath");
+	const customShellPath = cfgShellPath.get(settings);
 	const envShell = Bun.env.SHELL;
 	if (customShellPath || process.platform === "win32" || !envShell || envShell === baseConfig.shell) {
 		return baseConfig;
@@ -481,7 +489,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		!isPersistentShellCdCommand(command);
 	const snapshotPath = bashShell ? await getOrCreateSnapshot(shell, shellEnv) : null;
 
-	const minimizer = buildMinimizerOptions(settings.getGroup("shellMinimizer"));
+	const minimizer = buildMinimizerOptions(cfgShellMinimizer.get(settings));
 
 	const commandCwd = resolveShellCwd(options?.cwd);
 	// Fold the repo's direnv/devenv env into the command + env so devenv tools
@@ -492,9 +500,9 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	const preflight = await applyDirenvPreflight(command, commandCwd ?? process.cwd(), {
 		callerEnv: options?.env,
 		signal: options?.signal,
-		timeoutMs: settings.get("bash.direnvLoadTimeoutMs"),
+		timeoutMs: cfgBashDirenvLoadTimeoutMs.get(settings),
 		callerTimeoutMs: options?.timeout,
-		direnvSetting: settings.get("bash.direnv"),
+		direnvSetting: cfgBashDirenv.get(settings),
 		commandPrefix: prefix,
 	});
 	const commandEnv = buildNonInteractiveEnv(preflight.env);

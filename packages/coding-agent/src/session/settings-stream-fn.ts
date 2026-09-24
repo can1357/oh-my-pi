@@ -19,7 +19,30 @@ import {
 import { type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
 import { serverSideFallbackModels } from "@oh-my-pi/pi-catalog/compat/server-side-fallback";
 import type { Encoding } from "@oh-my-pi/pi-natives";
-import { type Settings, validateProviderMaxInFlightRequests } from "../config/settings";
+import type { Settings } from "../config/settings";
+
+import {
+	cfgModelLoopGuardCheckAssistantContent,
+	cfgModelLoopGuardEnabled,
+	cfgOmitThinking,
+	cfgProvidersAnthropicServerSideFallback,
+	cfgProvidersAntigravityEndpoint,
+	cfgProvidersCacheRetention,
+	cfgProvidersMaxInFlightRequests,
+	cfgProvidersOpenaiWebsockets,
+	cfgProvidersOpenrouterVariant,
+	cfgProvidersStreamFirstEventTimeoutSeconds,
+	cfgProvidersStreamIdleTimeoutSeconds,
+	cfgRetryMaxDelayMs,
+	cfgTextVerbosity,
+	validateProviderMaxInFlightRequests,
+} from "./settings";
+
+/** Map `providers.openaiWebsockets` to the provider `preferWebsockets` hint (`auto` → model default). */
+export function resolveOpenAIWebsocketPreference(settings: Settings): boolean | undefined {
+	const setting = cfgProvidersOpenaiWebsockets.get(settings);
+	return setting === "on" ? true : setting === "off" ? false : undefined;
+}
 
 function timeoutSecondsToMs(value: number): number | undefined {
 	if (!Number.isFinite(value) || value < 0) return undefined;
@@ -41,33 +64,33 @@ export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn =
 	// One tokenizer per encoding, so per-message counts are reused across requests.
 	const tokenizers = new Map<Encoding | null, Tokenizer>();
 	return (model, context, streamOptions) => {
-		const openrouterRoutingPreset = settings.get("providers.openrouterVariant");
+		const openrouterRoutingPreset = cfgProvidersOpenrouterVariant.get(settings);
 		const openrouterVariant =
 			openrouterRoutingPreset && openrouterRoutingPreset !== "default" ? openrouterRoutingPreset : undefined;
-		const antigravityEndpointMode = settings.get("providers.antigravityEndpoint");
+		const antigravityEndpointMode = cfgProvidersAntigravityEndpoint.get(settings);
 		const textVerbosity =
 			model.api === "openai-codex-responses"
-				? settings.isConfigured("textVerbosity")
-					? settings.get("textVerbosity")
+				? cfgTextVerbosity.isConfigured(settings)
+					? cfgTextVerbosity.get(settings)
 					: undefined
 				: model.api === "openai-responses"
-					? settings.get("textVerbosity")
+					? cfgTextVerbosity.get(settings)
 					: undefined;
 		// "auto" leaves the option unset so provider defaults and the
 		// PI_CACHE_RETENTION env override keep working; anything else is an
 		// explicit per-request retention (long restores 1h Anthropic TTLs and
 		// implicitly disables the short-entry keep-alive refresh loop).
-		const cacheRetentionSetting = settings.get("providers.cacheRetention");
+		const cacheRetentionSetting = cfgProvidersCacheRetention.get(settings);
 		const cacheRetention = cacheRetentionSetting === "auto" ? undefined : cacheRetentionSetting;
-		const streamFirstEventTimeoutMs = timeoutSecondsToMs(settings.get("providers.streamFirstEventTimeoutSeconds"));
-		const streamIdleTimeoutMs = timeoutSecondsToMs(settings.get("providers.streamIdleTimeoutSeconds"));
+		const streamFirstEventTimeoutMs = timeoutSecondsToMs(cfgProvidersStreamFirstEventTimeoutSeconds.get(settings));
+		const streamIdleTimeoutMs = timeoutSecondsToMs(cfgProvidersStreamIdleTimeoutSeconds.get(settings));
 		// Server-side fallback (opt-in): when the user enables it, inject the
 		// catalog-owned `fallbacks` chain (`server-side-fallback-models` axis,
 		// authored for Fable/Mythos on first-party Anthropic). The provider
 		// layer picks it up, sends the beta header, and honors the response
 		// signals. Models without a rule-assigned chain are untouched.
 		const serverSideFallbackChain =
-			streamOptions?.fallbacks === undefined && settings.get("providers.anthropic.serverSideFallback")
+			streamOptions?.fallbacks === undefined && cfgProvidersAnthropicServerSideFallback.get(settings)
 				? serverSideFallbackModels(model)
 				: [];
 		const fallbacks =
@@ -89,16 +112,16 @@ export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn =
 			cacheRetention: streamOptions?.cacheRetention ?? cacheRetention,
 			streamFirstEventTimeoutMs: streamOptions?.streamFirstEventTimeoutMs ?? streamFirstEventTimeoutMs,
 			streamIdleTimeoutMs: streamOptions?.streamIdleTimeoutMs ?? streamIdleTimeoutMs,
-			maxRetryDelayMs: streamOptions?.maxRetryDelayMs ?? settings.get("retry.maxDelayMs"),
+			maxRetryDelayMs: streamOptions?.maxRetryDelayMs ?? cfgRetryMaxDelayMs.get(settings),
 			maxInFlightRequests: validateProviderMaxInFlightRequests(
-				streamOptions?.maxInFlightRequests ?? settings.get("providers.maxInFlightRequests"),
+				streamOptions?.maxInFlightRequests ?? cfgProvidersMaxInFlightRequests.get(settings),
 			),
 			loopGuard: {
-				enabled: settings.get("model.loopGuard.enabled"),
-				checkAssistantContent: settings.get("model.loopGuard.checkAssistantContent"),
+				enabled: cfgModelLoopGuardEnabled.get(settings),
+				checkAssistantContent: cfgModelLoopGuardCheckAssistantContent.get(settings),
 				...streamOptions?.loopGuard,
 			},
-			hideThinkingSummary: streamOptions?.hideThinkingSummary ?? settings.get("omitThinking"),
+			hideThinkingSummary: streamOptions?.hideThinkingSummary ?? cfgOmitThinking.get(settings),
 			...(fallbacks !== undefined ? { fallbacks } : {}),
 		};
 		return base(model, context, merged);

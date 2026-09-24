@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
@@ -17,22 +18,16 @@ function makeSession(): ToolSession {
 		hasUI: false,
 		skills: [],
 		getSessionFile: () => null,
-		settings: {
-			get(key: string) {
-				if (key === "async.enabled") return false;
-				if (key === "bash.autoBackground.enabled") return false;
-				if (key === "bash.autoBackground.thresholdMs") return 60_000;
-				if (key === "bashInterceptor.enabled") return false;
-				if (key === "astGrep.enabled") return false;
-				if (key === "astEdit.enabled") return false;
-				if (key === "grep.enabled") return false;
-				if (key === "glob.enabled") return false;
-				return undefined;
-			},
-			getBashInterceptorRules() {
-				return [];
-			},
-		},
+		settings: Settings.isolated({
+			"async.enabled": false,
+			"bash.autoBackground.enabled": false,
+			"bash.autoBackground.thresholdMs": 60_000,
+			"bashInterceptor.enabled": false,
+			"astGrep.enabled": false,
+			"astEdit.enabled": false,
+			"grep.enabled": false,
+			"glob.enabled": false,
+		}),
 		getClientBridge: () => undefined,
 	} as unknown as ToolSession;
 }

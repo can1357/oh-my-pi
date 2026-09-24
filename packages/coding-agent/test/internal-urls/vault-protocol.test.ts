@@ -424,7 +424,7 @@ describe("VaultProtocolHandler", () => {
 	});
 
 	it("reports hasObsidian() as false when the gate is off, even if the binary is on disk", () => {
-		// hasObsidian feeds Handlebars `{{#if hasObsidian}}` in the system prompt.
+		// hasObsidian gates the vault:// promptDoc in the system prompt's Internal URLs list.
 		// Disabling the gate MUST hide vault:// from the prompt regardless of binary presence.
 		vi.spyOn(vaultProtocol, "isVaultEnabled").mockReturnValue(false);
 		vi.spyOn(vaultProtocol, "resolveObsidianBinary").mockReturnValue("/test/obsidian");
@@ -439,5 +439,27 @@ describe("VaultProtocolHandler", () => {
 
 		vi.spyOn(vaultProtocol, "resolveObsidianBinary").mockReturnValue(null);
 		expect(vaultProtocol.hasObsidian()).toBe(false);
+	});
+
+	it("resolves the same vault root file to a consistent spelling across the sync and async paths", async () => {
+		// On Windows hosts whose TEMP/profile is an 8.3 short-name alias, the
+		// sync path (fs.realpathSync) and the async read path
+		// (fs.promises.realpath) used to resolve a single vault root to two
+		// different absolute-path spellings of the same physical file. The
+		// sync path now uses the long-form native realpath, so both must agree.
+		await withTempDir(async tempDir => {
+			const root = path.join(tempDir, "vault");
+			const note = path.join(root, "Folder", "note.md");
+			await fs.mkdir(path.dirname(note), { recursive: true });
+			await fs.writeFile(note, "# Note\nbody");
+			VaultProtocolHandler.setVaultDirectoryForTests({ Work: root });
+
+			const handler = new VaultProtocolHandler({ resolveObsidianBinary: () => null });
+			const resource = await handler.resolve(resourceUrl("vault://Work/Folder/note.md"));
+
+			// os.tmpdir() is short-name on some Windows setups; whatever the
+			// spelling of `root`, both paths must agree on the same file.
+			expect(resource.sourcePath).toBe(resolveVaultUrlToPath("vault://Work/Folder/note.md"));
+		});
 	});
 });

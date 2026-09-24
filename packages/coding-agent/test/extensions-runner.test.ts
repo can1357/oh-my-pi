@@ -2404,7 +2404,7 @@ describe("ExtensionRunner", () => {
 				isIdle: () => true,
 				hasQueuedMessages: () => false,
 				abort: () => {},
-				settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) } as never,
+				settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
 			});
 
 			expect(events).toEqual([
@@ -2460,9 +2460,7 @@ describe("ExtensionRunner", () => {
 					isIdle: () => true,
 					hasQueuedMessages: () => false,
 					abort: () => {},
-					settings: {
-						get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}),
-					} as never,
+					settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
 					toolCall: {
 						batchId: `batch-${toolCallId}`,
 						index: 0,
@@ -2518,7 +2516,7 @@ describe("ExtensionRunner", () => {
 					isIdle: () => true,
 					hasQueuedMessages: () => false,
 					abort: () => {},
-					settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) } as never,
+					settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
 				}),
 			).rejects.toThrow("Tool call denied by user: dangerous_tool");
 
@@ -2569,7 +2567,7 @@ describe("ExtensionRunner", () => {
 					isIdle: () => true,
 					hasQueuedMessages: () => false,
 					abort: () => {},
-					settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) } as never,
+					settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
 				}),
 			).rejects.toThrow("dialog aborted");
 
@@ -2616,7 +2614,7 @@ describe("ExtensionRunner", () => {
 			const wrapper = new ExtensionToolWrapper(approvalTool, runner);
 			await expect(
 				(wrapper as ExtensionToolWrapper<any>).execute("call-partial-context", {}, undefined, undefined, {
-					settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) },
+					settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
 				} as never),
 			).rejects.toThrow('Tool "dangerous_tool" requires approval but no interactive UI available.');
 
@@ -2635,7 +2633,7 @@ describe("ExtensionRunner", () => {
 
 	describe("tool_call input", () => {
 		const yoloContext = {
-			settings: { get: (key: string) => (key === "tools.approvalMode" ? "yolo" : {}) },
+			settings: Settings.isolated({ "tools.approvalMode": "yolo" }),
 		} as never;
 
 		function createHashlineEditTool(): AgentTool {
@@ -2984,7 +2982,7 @@ describe("ExtensionRunner", () => {
 			isIdle: () => true,
 			hasQueuedMessages: () => false,
 			abort: () => {},
-			settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) },
+			settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
 		} as never;
 
 		it("blocks a revised input that resolves to a deny policy (approval gates the revised args)", async () => {
@@ -3386,7 +3384,7 @@ describe("ExtensionRunner", () => {
 			);
 			const wrapped = new ExtensionToolWrapper(createRecordingTool(recordPath), runner);
 			const xdevContext = {
-				settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) },
+				settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
 				xdevApproved: true,
 			} as never;
 
@@ -3422,7 +3420,7 @@ describe("ExtensionRunner", () => {
 			);
 			const wrapped = new ExtensionToolWrapper(createRecordingTool(recordPath), runner);
 			const acpContext = {
-				settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) },
+				settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
 				acpApprovedArgs: { command: "echo original" },
 			} as never;
 
@@ -3464,7 +3462,7 @@ describe("ExtensionRunner", () => {
 			const wrapped = new ExtensionToolWrapper(tool, runner);
 			let effectiveTier: string | undefined;
 			const xdevContext = {
-				settings: { get: (key: string) => (key === "tools.approvalMode" ? "yolo" : {}) },
+				settings: Settings.isolated({ "tools.approvalMode": "yolo" }),
 				xdevApproved: true,
 				xdevTierResolved: (tier: string) => {
 					effectiveTier = tier;

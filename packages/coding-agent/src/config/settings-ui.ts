@@ -1,83 +1,83 @@
 import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { SETTING_TABS, type SettingsDisplayEntry, type SettingsHost } from "@oh-my-pi/pi-tui/overlays/settings-defs";
+import { Settings, settings } from "./settings";
+import { orderedSettings } from "./all-settings";
+import { lookup } from "./registry";
+
+import { cfgPlanAutosave, cfgPlanEnabled } from "../plan-mode/settings";
 import {
+	cfgRetryUsageAwareFallback,
+	cfgDefaultThinkingLevel,
 	normalizeProviderMaxInFlightRequests,
-	Settings,
-	settings,
 	validateProviderMaxInFlightRequests,
-} from "./settings";
-import {
-	getDefault,
-	getEnumValues,
-	getPathsForTab,
-	getType,
-	getUi,
-	isCredential,
-	type SettingPath,
-} from "./settings-schema";
+} from "../session/settings";
+import { cfgAutolearnEnabled } from "../autolearn/settings";
+import { cfgMemoryBackend } from "../memory-backend/settings";
+import { cfgTuiVimMode } from "../modes/settings";
+import { cfgAdvisorEnabled } from "../advisor/settings";
 
 const CONDITIONS: Record<string, () => boolean> = {
 	macOS: () => process.platform === "darwin",
 	hasImageProtocol: () => !!TERMINAL.imageProtocol,
 	advisorEnabled: () => {
 		try {
-			return Settings.instance.get("advisor.enabled") === true;
+			return cfgAdvisorEnabled.get(Settings.instance) === true;
 		} catch {
 			return false;
 		}
 	},
 	vimModeEnabled: () => {
 		try {
-			return Settings.instance.get("tui.vimMode") === true;
+			return cfgTuiVimMode.get(Settings.instance) === true;
 		} catch {
 			return false;
 		}
 	},
 	hindsightActive: () => {
 		try {
-			return Settings.instance.get("memory.backend") === "hindsight";
+			return cfgMemoryBackend.get(Settings.instance) === "hindsight";
 		} catch {
 			return false;
 		}
 	},
 	mnemopiActive: () => {
 		try {
-			return Settings.instance.get("memory.backend") === "mnemopi";
+			return cfgMemoryBackend.get(Settings.instance) === "mnemopi";
 		} catch {
 			return false;
 		}
 	},
 	autolearnActive: () => {
 		try {
-			return Settings.instance.get("autolearn.enabled") === true;
+			return cfgAutolearnEnabled.get(Settings.instance) === true;
 		} catch {
 			return false;
 		}
 	},
 	autoThinkingActive: () => {
 		try {
-			return Settings.instance.get("defaultThinkingLevel") === "auto";
+			return cfgDefaultThinkingLevel.get(Settings.instance) === "auto";
 		} catch {
 			return false;
 		}
 	},
 	usageAwareFallbackEnabled: () => {
 		try {
-			return Settings.instance.get("retry.usageAwareFallback") === true;
+			return cfgRetryUsageAwareFallback.get(Settings.instance) === true;
 		} catch {
 			return false;
 		}
 	},
 	planModeEnabled: () => {
 		try {
-			return Settings.instance.get("plan.enabled");
+			return cfgPlanEnabled.get(Settings.instance);
 		} catch {
 			return false;
 		}
 	},
 	planAutosaveEnabled: () => {
 		try {
-			return Settings.instance.get("plan.enabled") && Settings.instance.get("plan.autosave");
+			return cfgPlanEnabled.get(Settings.instance) && cfgPlanAutosave.get(Settings.instance);
 		} catch {
 			return false;
 		}
@@ -88,23 +88,28 @@ const CONDITIONS: Record<string, () => boolean> = {
 export function createSettingsHost(): SettingsHost {
 	const entries: SettingsDisplayEntry[] = [];
 	for (const tab of SETTING_TABS) {
-		for (const path of getPathsForTab(tab)) {
-			const ui = getUi(path);
+		for (const setting of orderedSettings()) {
+			const ui = setting.ui;
+			if (ui?.tab !== tab) continue;
 			entries.push({
-				path,
-				type: getType(path),
-				defaultValue: getDefault(path),
+				path: setting.id,
+				type: setting.type,
+				defaultValue: setting.default,
 				ui,
-				enumValues: getEnumValues(path),
-				credential: isCredential(path),
-				condition: ui?.condition ? CONDITIONS[ui.condition] : undefined,
+				enumValues: setting.enumValues,
+				credential: setting.isCredential,
+				condition: ui.condition ? CONDITIONS[ui.condition] : undefined,
 			});
 		}
 	}
 	return {
 		entries,
-		get: path => settings.get(path as SettingPath),
-		set: (path, value) => settings.set(path as SettingPath, value as never),
+		get: path => lookup(path)?.get(settings),
+		set: (path, value) => {
+			const setting = lookup(path);
+			if (!setting) throw new Error(`Unknown setting: ${path}`);
+			setting.set(settings, value);
+		},
 		normalizeProviderLimits: normalizeProviderMaxInFlightRequests,
 		validateProviderLimits: validateProviderMaxInFlightRequests,
 	};

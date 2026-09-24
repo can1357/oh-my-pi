@@ -624,6 +624,12 @@ export interface StreamOptions {
 
 	/** Cursor exec/MCP tool handlers (cursor-agent only). */
 	execHandlers?: CursorExecHandlers;
+	/**
+	 * Anthropic fallback credit redemption handle from a prior classifier refusal.
+	 * When present, the Anthropic provider replays the frozen request body and betas with
+	 * the new model and `fallback_credit_token` to redeem prompt cache credit.
+	 */
+	fallbackCreditRedemption?: AnthropicFallbackCreditHandle;
 }
 
 // Unified options with reasoning passed to streamSimple() and completeSimple()
@@ -1119,6 +1125,8 @@ export interface AssistantMessage {
 	requestControls?: AnthropicRequestControls;
 	/** Provider-specific opaque payload used to reconstruct transport-native history. */
 	providerPayload?: ProviderPayload;
+	/** In-memory fallback credit handle attached when a refusal response carries a fallback credit token. */
+	fallbackCreditHandle?: AnthropicFallbackCreditHandle;
 	timestamp: number; // Unix timestamp in milliseconds
 	duration?: number; // Request duration in milliseconds
 	ttft?: number; // Time to first token in milliseconds
@@ -1457,3 +1465,14 @@ export type AssistantMessageEvent =
 			reason: Extract<StopReason, "aborted" | "error">;
 			error: AssistantMessage;
 	  };
+
+export interface AnthropicFallbackCreditHandle {
+	token: string;
+	prefillClaim?: boolean | null;
+	params: unknown;
+	betas?: readonly string[];
+	betaHeader?: string;
+	expiresAt: number;
+	/** The refused response's content, in `AssistantMessage` block form. */
+	refusedContent?: AssistantMessage["content"];
+}

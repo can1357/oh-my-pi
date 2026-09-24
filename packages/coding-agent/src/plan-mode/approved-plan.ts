@@ -1,4 +1,4 @@
-import { normalizeLocalScheme } from "../tools/path-utils";
+import { normalizeLocalScheme } from "../internal-urls/parse";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 /** Shape forwarded from the plan-proposal handler to InteractiveMode's
@@ -91,10 +91,10 @@ function firstLevelOneHeading(planContent: string): string {
 	return match?.[1]?.trim() ?? "";
 }
 
-/** Stem of a `local://name.md` (or bare `name.md`) URL — the filename without
+/** Stem of a `scheme://…/name.md` URL (or bare `name.md` path) — the filename without
  *  scheme or extension. Returns the empty string for inputs that have no stem. */
 function planFilenameStem(planFilePath: string): string {
-	const withoutScheme = planFilePath.replace(/^local:\/+/, "");
+	const withoutScheme = planFilePath.replace(/^[a-z][a-z0-9+.-]*:\/+/i, "");
 	const lastSegment = withoutScheme.split(/[\\/]/).pop() ?? "";
 	return lastSegment.replace(/\.md$/i, "");
 }

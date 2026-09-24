@@ -8,7 +8,8 @@ Primary implementation files:
 
 - `packages/coding-agent/src/config/model-registry.ts` — loads built-in + custom models, provider overrides, runtime discovery, auth integration
 - `packages/coding-agent/src/config/model-resolver.ts` — parses model patterns and selects initial/smol/slow models
-- `packages/coding-agent/src/config/settings-schema.ts` — model-related settings (`modelRoles`, provider transport preferences)
+- `packages/coding-agent/src/config/model-settings.ts` — model selection settings (`modelRoles`, `enabledModels`, `enabledProviders`/`disabledProviders`, `modelProviderOrder`, `cycleOrder`)
+- `packages/coding-agent/src/session/settings.ts` — provider transport preferences (`providers.*`)
 - `packages/coding-agent/src/session/auth-storage.ts` — re-exports `AuthStorage` from `@oh-my-pi/pi-ai`; API key + OAuth resolution order
 - `packages/catalog/src/models.ts` and `packages/catalog/src/types.ts` — built-in providers/models and public model types
 

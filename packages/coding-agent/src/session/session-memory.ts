@@ -3,6 +3,7 @@
 import type { Agent, AgentTool } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
+import { all as allSettings, combine, type Derived } from "../config/registry";
 import type { Settings } from "../config/settings";
 import type { HindsightSessionState } from "../hindsight/state";
 import { resolveMemoryBackend } from "../memory-backend/resolve";
@@ -10,12 +11,40 @@ import type { MemoryBackendStartOptions } from "../memory-backend/types";
 import type { MnemopiSessionState } from "../mnemopi/state";
 import { releaseSharpshooterSession } from "../sharpshooter/backend";
 
+import { cfgMemoryBackend } from "../memory-backend/settings";
+
+/** Id prefixes of the memory backends' own settings; their live edits reconfigure the active backend. */
+const MEMORY_BACKEND_SETTING_PREFIXES: readonly string[] = ["hindsight.", "mnemopi.", "sharpshooter."];
+
+let memorySettings: Derived<Record<string, unknown>> | undefined;
+
+/** `memory.backend` plus every backend's own settings, keyed by setting id (built once registration is complete). */
+function memorySettingsValue(): Derived<Record<string, unknown>> {
+	memorySettings ??= combine(
+		Object.fromEntries(
+			allSettings()
+				.filter(
+					handle =>
+						handle.id === cfgMemoryBackend.id ||
+						MEMORY_BACKEND_SETTING_PREFIXES.some(prefix => handle.id.startsWith(prefix)),
+				)
+				.map(handle => [handle.id, handle]),
+		),
+	);
+	return memorySettings;
+}
+
 /** Capabilities borrowed from the owning AgentSession. */
 export interface SessionMemoryHost {
 	agent: Agent;
 	settings: Settings;
 	modelRegistry: ModelRegistry;
 	isDisposed(): boolean;
+	/** Session working directory; memory bank scopes derive from it. */
+	cwd(): string;
+	/** Registers teardown to run when the session is disposed (settings listeners bound to this host). */
+	addDisposer(dispose: () => void): void;
+	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
 	memoryBackendSession(): MemoryBackendStartOptions["session"];
 	getHindsightSessionState(): HindsightSessionState | undefined;
 	setHindsightSessionState(state: HindsightSessionState | undefined): void;
@@ -35,10 +64,16 @@ export class SessionMemory {
 	#memoryBackendTransition: Promise<void> = Promise.resolve();
 	#localMemoryStartupAbort: AbortController | undefined;
 	#baseSystemPromptBeforeMemoryPromotion: string[] | undefined;
+	/** Cwd the running backend state was built for; a transcript is never retained after it moved. */
+	#runtimeCwd: string | undefined;
+	/** Apply waiting behind the current transition; later requests join it. */
+	#queuedApply: { retainMnemopi: boolean; done: Promise<void> } | undefined;
 
 	constructor(
 		host: SessionMemoryHost,
 		options: {
+			/** Session-start memory policy; false disables live backend changes. */
+			memoryEnabled?: boolean;
 			memoryAgentDir?: string;
 			memoryTaskDepth?: number;
 			createMemoryTools?: () => Promise<AgentTool[]>;
@@ -48,6 +83,45 @@ export class SessionMemory {
 		this.#memoryAgentDir = options.memoryAgentDir;
 		this.#memoryTaskDepth = options.memoryTaskDepth ?? 0;
 		this.#createMemoryTools = options.createMemoryTools;
+		if (this.#memoryAgentDir) this.#runtimeCwd = host.cwd();
+		// Subagents alias the parent's backend state and never replace it live.
+		if (options.memoryEnabled !== false && this.#memoryAgentDir && this.#memoryTaskDepth === 0) {
+			memorySettingsValue().listen(host, (next, previous) => {
+				const changed: string[] = [];
+				for (const id in next) if (!Bun.deepEquals(next[id], previous[id])) changed.push(id);
+				return this.#applySettingsChange(changed);
+			});
+		}
+	}
+
+	/**
+	 * Live memory-setting edits: switching `memory.backend` re-applies everything;
+	 * edits to the active backend's own `<id>.*` settings go to its
+	 * `applySettings` hook, or re-apply the backend when it has none.
+	 */
+	async #applySettingsChange(changed: string[]): Promise<void> {
+		try {
+			if (changed.includes("memory.backend")) {
+				await this.applyMemoryBackend();
+				return;
+			}
+			// Queue synchronously, like a backend switch, so the next prompt's
+			// transition drain and a later cwd rebind both order after this edit.
+			const hook = await this.#enqueueTransition(async () => {
+				if (this.#host.isDisposed()) return undefined;
+				const backend = await resolveMemoryBackend(this.#host.settings);
+				const own = changed.filter(path => path.startsWith(`${backend.id}.`));
+				if (own.length === 0) return undefined;
+				if (backend.applySettings) return { backend, own };
+				await this.#applyMemoryBackend(true);
+				return undefined;
+			});
+			// Backend hooks may re-enter `applyMemoryBackend`, so they run outside the transition.
+			await hook?.backend.applySettings?.(this.#host.memoryBackendSession(), hook.own);
+		} catch (error) {
+			logger.warn("Memory lifecycle: applying setting change failed", { changed, error: String(error) });
+			this.#host.emitNotice("error", `Failed to apply memory settings: ${String(error)}`, "Memory");
+		}
 	}
 
 	/** Current serialized backend transition, used by prompt and disposal drains. */
@@ -81,14 +155,14 @@ export class SessionMemory {
 	}
 
 	#rekeyHindsightMemoryForCurrentSessionId(): void {
-		if (this.#host.settings.get("memory.backend") !== "hindsight") return;
+		if (cfgMemoryBackend.get(this.#host.settings) !== "hindsight") return;
 		const sid = this.#host.agent.sessionId;
 		if (!sid) return;
 		this.#host.getHindsightSessionState()?.setSessionId(sid);
 	}
 
 	#rekeyMnemopiMemoryForCurrentSessionId(): void {
-		if (this.#host.settings.get("memory.backend") !== "mnemopi") return;
+		if (cfgMemoryBackend.get(this.#host.settings) !== "mnemopi") return;
 		const sid = this.#host.agent.sessionId;
 		if (!sid) return;
 		this.#host.getMnemopiSessionState()?.setSessionId(sid);
@@ -96,7 +170,7 @@ export class SessionMemory {
 
 	/** New transcript: reset Hindsight counters and reload its frozen mental-model snapshot. */
 	#resetHindsightConversationTrackingIfHindsight(): boolean {
-		if (this.#host.settings.get("memory.backend") !== "hindsight") return false;
+		if (cfgMemoryBackend.get(this.#host.settings) !== "hindsight") return false;
 		const state = this.#host.getHindsightSessionState();
 		if (!state || state.aliasOf) return false;
 		state.resetConversationTracking();
@@ -108,7 +182,7 @@ export class SessionMemory {
 	}
 
 	#resetMnemopiConversationTrackingIfMnemopi(): boolean {
-		if (this.#host.settings.get("memory.backend") !== "mnemopi") return false;
+		if (cfgMemoryBackend.get(this.#host.settings) !== "mnemopi") return false;
 		const state = this.#host.getMnemopiSessionState();
 		if (!state || state.aliasOf) return false;
 		state.resetConversationTracking();
@@ -178,23 +252,47 @@ export class SessionMemory {
 
 	/**
 	 * Apply the selected memory backend to runtime state, tools, and prompt.
-	 * Concurrent settings changes run in order and settle before the next turn.
-	 * Cwd rebinding can disable Mnemopi auto-retention without skipping its drain.
+	 * Concurrent settings changes run in order and settle before the next turn;
+	 * requests arriving while an apply is still queued join it, since it reads
+	 * settings only once it starts. Cwd rebinding can disable Mnemopi
+	 * auto-retention without skipping its drain.
 	 */
 	async applyMemoryBackend(options: { retainMnemopi?: boolean } = {}): Promise<void> {
 		if (this.#host.isDisposed()) return;
-		const transition = this.#memoryBackendTransition.then(() => this.#applyMemoryBackend(options.retainMnemopi));
+		const retainMnemopi = options.retainMnemopi !== false;
+		const queued = this.#queuedApply;
+		if (queued) {
+			queued.retainMnemopi &&= retainMnemopi;
+			return queued.done;
+		}
+		const request = { retainMnemopi, done: Promise.resolve() };
+		this.#queuedApply = request;
+		request.done = this.#enqueueTransition(() => {
+			this.#queuedApply = undefined;
+			return this.#applyMemoryBackend(request.retainMnemopi);
+		});
+		await request.done;
+	}
+
+	/** Runs `work` after every earlier transition; its failure does not block later ones. */
+	#enqueueTransition<T>(work: () => Promise<T>): Promise<T> {
+		const transition = this.#memoryBackendTransition.then(work);
 		this.#memoryBackendTransition = transition.then(
 			() => undefined,
 			() => undefined,
 		);
-		await transition;
+		return transition;
 	}
 
-	async #applyMemoryBackend(retainMnemopi = true): Promise<void> {
+	async #applyMemoryBackend(retainMnemopi: boolean): Promise<void> {
 		if (this.#host.isDisposed()) return;
+		const cwd = this.#host.cwd();
+		// A cwd move (or its rollback) may reach here before the rebind does:
+		// drain the outgoing state without capturing the transcript under a stale scope.
+		const retain = retainMnemopi && (this.#runtimeCwd ?? cwd) === cwd;
 		try {
-			await this.#disposeMemoryBackendState(true, retainMnemopi);
+			await this.#disposeMemoryBackendState(true, retain);
+			this.#runtimeCwd = cwd;
 			if (this.#memoryAgentDir && this.#memoryTaskDepth === 0 && !this.#host.isDisposed()) {
 				const backend = await resolveMemoryBackend(this.#host.settings);
 				await backend.start({

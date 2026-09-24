@@ -49,6 +49,7 @@ import {
 	shrinkReplicatedEntry,
 	shrinkReplicatedEvent,
 } from "@oh-my-pi/pi-coding-agent/collab/replication-shrink";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -210,7 +211,7 @@ function makeHostContext(snapshot: HostSnapshot): HostHarness {
 function makeHostHarness(sessionManager: HostReplicationSource): HostHarness {
 	const statusMessages: string[] = [];
 	const ctx = {
-		settings: { get: () => "" },
+		settings: Settings.isolated(),
 		sessionManager,
 		session: {
 			isStreaming: false,

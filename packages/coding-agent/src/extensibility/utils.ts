@@ -1,7 +1,9 @@
 import * as path from "node:path";
 import { postmortem } from "@oh-my-pi/pi-utils";
 import { theme } from "@oh-my-pi/pi-tui/theme";
-import { expandPath, normalizeLocalScheme } from "../tools/path-utils";
+import { extractUriScheme, normalizeLocalScheme } from "../internal-urls/parse";
+import { InternalUrlRouter } from "../internal-urls/router";
+import { expandPath } from "../tools/path-utils";
 import type { HookUIContext } from "./hooks/types";
 
 /**
@@ -13,9 +15,9 @@ import type { HookUIContext } from "./hooks/types";
 export function resolvePath(filePath: string, cwd: string): string {
 	const expanded = expandPath(filePath);
 	const expandedAndNormalized = normalizeLocalScheme(expanded);
-	if (expandedAndNormalized.startsWith("local://")) {
+	if (InternalUrlRouter.instance().canHandle(expandedAndNormalized)) {
 		throw new Error(
-			`Path "${filePath}" uses internal scheme "local://" and must be resolved through the proper protocol handler, not as a filesystem path.`,
+			`Path "${filePath}" uses internal scheme "${extractUriScheme(expandedAndNormalized)}://" and must be resolved through the proper protocol handler, not as a filesystem path.`,
 		);
 	}
 	if (path.isAbsolute(expanded)) {

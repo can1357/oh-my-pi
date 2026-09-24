@@ -13,6 +13,8 @@ import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { readArchiveEntries, writeArchive } from "@oh-my-pi/pi-utils/ar";
 
+import { cfgReadDefaultLimit } from "@oh-my-pi/pi-coding-agent/tools/settings";
+
 function createSession(cwd: string, bridge?: ClientBridge, editMode: "replace" | "hashline" = "replace"): ToolSession {
 	return {
 		cwd,
@@ -102,7 +104,7 @@ describe("write tool read projection guard", () => {
 		const original = `${Array.from({ length: 60 }, (_, index) => `line ${index + 1}`).join("\n")}\n`;
 		await Bun.write(filePath, original);
 		const session = createSession(tmpDir);
-		session.settings.set("read.defaultLimit", 20);
+		cfgReadDefaultLimit.set(session.settings, 20);
 		const projection = resultText(
 			await wrapToolWithMetaNotice(new ReadTool(session)).execute("read-1", { path: filePath }),
 		);
@@ -119,7 +121,7 @@ describe("write tool read projection guard", () => {
 		const original = "\n".repeat(60);
 		await Bun.write(filePath, original);
 		const session = createSession(tmpDir, undefined, "hashline");
-		session.settings.set("read.defaultLimit", 20);
+		cfgReadDefaultLimit.set(session.settings, 20);
 		const projection = resultText(
 			await wrapToolWithMetaNotice(new ReadTool(session)).execute("read-hashline", { path: filePath }),
 		);
@@ -180,7 +182,12 @@ describe("write tool read projection guard", () => {
 		let writeCalled = false;
 		const handler: ProtocolHandler = {
 			scheme: "vault",
-			immutable: false,
+			spec: {
+				backing: "virtual",
+				selectors: "lines",
+				immutable: false,
+				write: { payload: "text", scope: "workspace", tier: () => "write" },
+			},
 			resolve: async resolvedUrl => ({
 				url: resolvedUrl.href,
 				content: resourceContent,

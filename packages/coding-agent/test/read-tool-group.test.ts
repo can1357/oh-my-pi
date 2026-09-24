@@ -2,9 +2,13 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:te
 import * as path from "node:path";
 import * as url from "node:url";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { getDefault } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
+// Installs the pi-tui scheme host that decides which reads collapse into the group.
+import "@oh-my-pi/pi-coding-agent/internal-urls/router";
+
 import { ReadToolGroupComponent, readArgsCollapseIntoGroup } from "@oh-my-pi/pi-tui/chat/read-tool-group";
 import * as themeModule from "@oh-my-pi/pi-tui/theme";
+import { cfgReadToolResultPreview } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import { cfgTuiHyperlinks } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 function extractLinkUris(text: string): string[] {
 	return [...text.matchAll(/\x1b\]8;[^;]*;([^\x1b]+)\x1b\\/g)].map(match => match[1]!);
@@ -24,7 +28,7 @@ describe("ReadToolGroupComponent", () => {
 	});
 
 	afterEach(() => {
-		settings.clearOverride("tui.hyperlinks");
+		cfgTuiHyperlinks.clearOverride(settings);
 		vi.restoreAllMocks();
 	});
 
@@ -33,7 +37,7 @@ describe("ReadToolGroupComponent", () => {
 	});
 
 	it("keeps inline read previews disabled by default", () => {
-		expect(getDefault("read.toolResultPreview")).toBe(false);
+		expect(cfgReadToolResultPreview.default).toBe(false);
 
 		const component = new ReadToolGroupComponent();
 		const examplePath = path.resolve("/tmp/example.ts");
@@ -213,7 +217,7 @@ describe("ReadToolGroupComponent", () => {
 	});
 
 	it("links every grouped delimited row from result-provided link paths", () => {
-		settings.override("tui.hyperlinks", "always");
+		cfgTuiHyperlinks.override(settings, "always");
 		const component = new ReadToolGroupComponent();
 		const oneLink = path.resolve("/workspace/src/one.ts");
 		const twoLink = path.resolve("/workspace/src/two.ts");
@@ -335,7 +339,7 @@ describe("ReadToolGroupComponent", () => {
 	});
 
 	it("links grouped summary paths to resolved filesystem paths and selector lines", () => {
-		settings.override("tui.hyperlinks", "always");
+		cfgTuiHyperlinks.override(settings, "always");
 		const component = new ReadToolGroupComponent();
 		const examplePath = path.resolve("/workspace/src/example.ts");
 		component.updateArgs({ path: "src/example.ts:7-9" }, "read-link");
@@ -358,7 +362,7 @@ describe("ReadToolGroupComponent", () => {
 	});
 
 	it("links inline preview titles when the summary row is suppressed", () => {
-		settings.override("tui.hyperlinks", "always");
+		cfgTuiHyperlinks.override(settings, "always");
 		const component = new ReadToolGroupComponent({ showContentPreview: true });
 		const previewPath = path.resolve("/workspace/src/preview.ts");
 		component.updateArgs({ path: "src/preview.ts:20-22" }, "read-preview-link");

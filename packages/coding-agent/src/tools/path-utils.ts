@@ -1,4 +1,4 @@
-import { extractUriScheme } from "../internal-urls/parse";
+import { extractUriScheme, normalizeLocalScheme } from "../internal-urls/parse";
 import { type LineRange } from "@oh-my-pi/pi-tui/tools/line-ranges";
 import { splitPathAndSel, splitInternalUrlSel, isReadableUrlPath } from "@oh-my-pi/pi-tui/tools/read";
 import * as fs from "node:fs";
@@ -14,10 +14,7 @@ import {
 	stripWindowsExtendedLengthPathPrefix,
 	windowsPathToWslMount,
 } from "@oh-my-pi/pi-utils";
-import type { Rule } from "../capability/rule";
-import type { Skill } from "../extensibility/skills";
-import type { AgentRegistry } from "../registry/agent-registry";
-import { InternalUrlRouter, type LocalProtocolOptions } from "../internal-urls";
+import { InternalUrlRouter, type ResolveContext } from "../internal-urls";
 import { ToolAbortError } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
@@ -28,17 +25,6 @@ export function isFilesystemSourcePath(value: string): boolean {
 	return path.posix.isAbsolute(value) || path.win32.isAbsolute(value);
 }
 const NARROW_NO_BREAK_SPACE = "\u202F";
-const TOP_LEVEL_INTERNAL_URL_PREFIXES = [
-	"agent://",
-	"artifact://",
-	"skill://",
-	"rule://",
-	"security://",
-	"local://",
-	"mcp://",
-	"ssh://",
-	"vault://",
-] as const;
 
 function normalizeUnicodeSpaces(str: string): string {
 	return str.replace(UNICODE_SPACES, " ");
@@ -96,13 +82,7 @@ function normalizeAtPrefix(filePath: string): string {
 		// Windows absolute paths (drive letters / UNC / root-relative)
 		path.win32.isAbsolute(withoutAt) ||
 		// Internal URL shorthands
-		withoutAt.startsWith("agent://") ||
-		withoutAt.startsWith("artifact://") ||
-		withoutAt.startsWith("skill://") ||
-		withoutAt.startsWith("rule://") ||
-		withoutAt.startsWith("security://") ||
-		withoutAt.startsWith("local:") ||
-		withoutAt.startsWith("mcp://")
+		InternalUrlRouter.instance().canHandle(normalizeLocalScheme(withoutAt))
 	) {
 		return withoutAt;
 	}
@@ -325,63 +305,15 @@ export function peelWriteUrlSelector(rawPath: string): string {
 }
 
 function assertNotInternalUrl(expanded: string, original: string): void {
-	for (const prefix of TOP_LEVEL_INTERNAL_URL_PREFIXES) {
-		if (expanded.startsWith(prefix)) {
-			throw new Error(
-				`Path "${original}" uses internal scheme "${prefix}" and must be resolved through the proper protocol handler, not as a filesystem path.`,
-			);
-		}
-	}
+	if (!InternalUrlRouter.instance().canHandle(expanded)) return;
+	throw new Error(
+		`Path "${original}" uses internal scheme "${extractUriScheme(expanded)}://" and must be resolved through the proper protocol handler, not as a filesystem path.`,
+	);
 }
 
-export function normalizeLocalScheme(filePath: string): string {
-	return filePath.replace(/^(local:)\/(?!\/)/, "$1//");
-}
-
-export function isInternalUrlPath(filePath: string): boolean {
-	const normalized = normalizeLocalScheme(filePath);
-	const expandedAndNormalized = normalizeLocalScheme(expandPath(normalized));
-	for (const prefix of TOP_LEVEL_INTERNAL_URL_PREFIXES) {
-		if (expandedAndNormalized.startsWith(prefix)) return true;
-	}
-	return false;
-}
-
-/**
- * Approval tier for a path that will be written through the file/internal-URL
- * routing layer. Internal resources are read-tier only when their handler is
- * read-only; writable handlers such as vault:// must retain write approval.
- */
-export function resolveFileWriteApprovalTier(filePath: string): "read" | "write" {
-	const normalized = normalizeLocalScheme(expandPath(normalizeLocalScheme(filePath)));
-	if (!TOP_LEVEL_INTERNAL_URL_PREFIXES.some(prefix => normalized.startsWith(prefix))) return "write";
-	const scheme = extractUriScheme(normalized);
-	const handler = scheme ? InternalUrlRouter.instance().getHandler(scheme) : undefined;
-	return handler?.write ? "write" : "read";
-}
-
-/**
- * True when a tool path argument references the `ssh://` scheme anywhere.
- *
- * Substring (not anchored) on purpose: it feeds the read/search/write approval
- * tier, which runs synchronously on the raw args. `search` only flattens a
- * delimited `paths: "a,ssh://h/x"` into separate entries *after* approval, so an
- * anchored check would let an embedded `ssh://` slip through at the read tier.
- * Matching the literal `ssh://` substring also tracks exactly what routes to the
- * SSH handler; over-matching only over-prompts (fail-closed).
- */
-export function pathTargetsSsh(path: string): boolean {
-	return /ssh:\/\//i.test(path);
-}
-
-/**
- * True when a path is specifically an `ssh://` URL (anchored scheme match).
- * Unlike {@link pathTargetsSsh} (substring, for the pre-expansion approval
- * scan), this is the exact per-entry check used to reject `ssh://` *before* a
- * side-effecting `InternalUrlRouter.resolve` in tools that need a local file.
- */
-export function isSshUrl(path: string): boolean {
-	return /^ssh:\/\//i.test(path.trim());
+/** Whether `filePath` (after `@`/`local:/` normalization) is a URL of a registered internal scheme. */
+function isInternalUrlPath(filePath: string): boolean {
+	return InternalUrlRouter.instance().canHandle(normalizeLocalScheme(expandPath(filePath)));
 }
 
 /**
@@ -620,6 +552,16 @@ const GLOB_PATH_CHARS = ["*", "?", "[", "{"] as const;
 
 export function hasGlobPathChars(filePath: string): boolean {
 	return GLOB_PATH_CHARS.some(char => filePath.includes(char));
+}
+
+const URL_AUTHORITY_PREFIX_RE = /^[a-z][a-z0-9+.-]*:\/\/[^/]*/i;
+
+/**
+ * Glob metacharacters in a `scheme://` URL's path, after the authority: an
+ * authority is a name or host, never a glob (`[::1]` is an IPv6 literal).
+ */
+export function hasUrlPathGlobChars(url: string): boolean {
+	return hasGlobPathChars(url.replace(URL_AUTHORITY_PREFIX_RE, ""));
 }
 
 type PathEntrySplitter = (item: string) => { basePath: string };
@@ -1319,9 +1261,11 @@ export interface ResolvedExternalSearchUrl {
 export interface ToolScopeOptions {
 	rawPaths: string[];
 	cwd: string;
-	/** Verb used in the "Cannot {action} internal URL without a backing file: …" message. */
+	/** Verb used in the "Cannot {action} …" errors for internal URLs without local files and external URLs. */
 	internalUrlAction: string;
-	/** Collect absolute paths flagged immutable by their internal-URL handler. */
+	/** Caller context for locating internal URLs; build it with `sessionResolveContext`. */
+	context: ResolveContext;
+	/** Collect absolute paths located from internal URLs whose scheme is immutable, plus immutable external materializations. */
 	trackImmutableSources?: boolean;
 	/** Honor `exactFilePaths` from {@link resolveExplicitSearchPaths} (search-only). */
 	surfaceExactFilePaths?: boolean;
@@ -1331,21 +1275,6 @@ export interface ToolScopeOptions {
 	fanOutFileTargets?: boolean;
 	/** Extra hint appended to "Path not found" when stat fails and the user supplied multiple paths. */
 	multipathStatHint?: string;
-	/** Calling session's settings — forwarded to the internal-URL router so caller-aware handlers (issue://, pr://) honor it. */
-	settings?: unknown;
-	/** Caller's abort signal — forwarded to the internal-URL router. */
-	signal?: AbortSignal;
-	/** Calling session's `local://` root mapping — pins resolutions to the calling session. */
-	localProtocolOptions?: LocalProtocolOptions;
-	/** Calling session's loaded skills — lets skill:// resolve without process-global state. */
-	skills?: readonly Skill[];
-	/** Calling session's agent-scoped applicable rules — lets rule:// resolve without process-global state. */
-	rules?: readonly Rule[];
-	/** Calling session's session file — lets history:///agent:// resolve against the caller's root. */
-	sessionFile?: string;
-	/** Calling session's stable session-manager id — binds memory:// to the caller that has no session file. */
-	sessionId?: string;
-	agentRegistry?: AgentRegistry;
 	/** Materialize readable external URLs to local text files before scope derivation. */
 	resolveExternalUrl?: (rawPath: string) => Promise<ResolvedExternalSearchUrl | undefined>;
 }
@@ -1364,7 +1293,7 @@ export interface ToolScopeResolution {
 /**
  * Shared path-input pipeline for `search`, `ast_grep`, and `ast_edit`:
  *  1. normalize + reject empty paths,
- *  2. resolve internal URLs through {@link InternalUrlRouter} to backing files,
+ *  2. locate internal URLs (and URL globs) through {@link InternalUrlRouter} to local files,
  *  3. partition existing vs missing when multiple paths are supplied,
  *  4. derive a single search base path / glob, or a multi-target list,
  *  5. stat the resolved base path so callers can branch on directory vs file scope.
@@ -1417,40 +1346,30 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 				`Cannot ${internalUrlAction} external URL: ${rawPath}. Use \`read\` to fetch web content, then search the returned text.`,
 			);
 		}
-		if (!internalRouter.canHandle(rawPath)) {
+		const internalUrl = normalizeLocalScheme(rawPath);
+		if (!internalRouter.canHandle(internalUrl)) {
 			resolvedPathInputs.push(rawPath);
 			continue;
 		}
-		if (isSshUrl(rawPath)) {
-			throw new ToolError(
-				`Cannot ${internalUrlAction} a remote ssh:// path (no local file): ${rawPath}. Use \`read ${rawPath}\` to view it, or use \`grep\` on a specific remote file.`,
-			);
+		// Locating never materializes content or contacts a remote host: schemes
+		// without a local backing fail with the router's uniform error.
+		const scheme = extractUriScheme(internalUrl);
+		const immutable =
+			opts.trackImmutableSources === true && scheme !== undefined && internalRouter.spec(scheme)?.immutable === true;
+		if (hasUrlPathGlobChars(internalUrl)) {
+			const pattern = await internalRouter.locateGlob(internalUrl, opts.context);
+			if (pattern === null) {
+				throw new ToolError(`Glob patterns are not supported for internal URLs: ${rawPath}`);
+			}
+			if (immutable) immutableSourcePaths.add(path.resolve(parseSearchPath(pattern).basePath));
+			resolvedPathInputs.push(pattern);
+			continue;
 		}
-		if (hasGlobPathChars(rawPath)) {
-			throw new ToolError(`Glob patterns are not supported for internal URLs: ${rawPath}`);
-		}
-		const resource = await internalRouter.resolve(rawPath, {
-			cwd,
-			settings: opts.settings,
-			signal: opts.signal,
-			sessionFile: opts.sessionFile,
-			sessionId: opts.sessionId,
-			agentRegistry: opts.agentRegistry,
-			localProtocolOptions: opts.localProtocolOptions,
-			skills: opts.skills,
-			rules: opts.rules,
-			// Tool-scope resolution only needs `sourcePath`; skip content
-			// materialization so large artifacts (or any handler that separates
-			// path from content) stay searchable without OOM risk.
-			pathOnly: true,
+		const located = await internalRouter.requireLocal(internalUrl, internalUrlAction, opts.context, {
+			directory: true,
 		});
-		if (!resource.sourcePath) {
-			throw new ToolError(`Cannot ${internalUrlAction} internal URL without a backing file: ${rawPath}`);
-		}
-		if (opts.trackImmutableSources && resource.immutable) {
-			immutableSourcePaths.add(path.resolve(resource.sourcePath));
-		}
-		resolvedPathInputs.push(resource.sourcePath);
+		if (immutable) immutableSourcePaths.add(path.resolve(located));
+		resolvedPathInputs.push(located);
 	}
 
 	let missingPaths: string[] = [];

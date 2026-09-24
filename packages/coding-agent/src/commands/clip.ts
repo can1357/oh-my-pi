@@ -8,6 +8,8 @@ import { StencilCredential } from "../stencil/credential";
 import { uploadClip } from "../stream/clip-upload";
 import { latestRecording, recordingsDir } from "../stream/recording";
 
+import { cfgStreamServerUrl } from "../stream/settings";
+
 export default class Clip extends Command {
 	static description = commandHelp.description;
 
@@ -55,7 +57,7 @@ export default class Clip extends Command {
 				return;
 			}
 			const clip = await uploadClip({
-				serverUrl: flags.server ?? settings.get("stream.serverUrl") ?? DEFAULT_STREAM_URL,
+				serverUrl: flags.server ?? cfgStreamServerUrl.get(settings) ?? DEFAULT_STREAM_URL,
 				token,
 				recording,
 				title: flags.title,

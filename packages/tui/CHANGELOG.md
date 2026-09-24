@@ -10,6 +10,7 @@
 ### Added
 
 - Added opt-in Japanese welcome and settings text with `PI_UI_LANG=ja` ([#13179](https://github.com/can1357/oh-my-pi/pull/13179) by [@sota411](https://github.com/sota411)).
+- Added transcript rendering for `cfg://` configuration read and write tool calls
 - Added push-to-talk dictation to `Input`, including live transcription text and `cursorOverride` support.
 
 ### Fixed

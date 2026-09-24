@@ -116,7 +116,7 @@ describe("provider-file stream fallback", () => {
 			return scriptedStream(channel === "inline" ? "success" : "error");
 		};
 		const service = new FakeFallbackService();
-		const wrapped = wrapStreamFnWithBlobUrlFallback(base, service);
+		const wrapped = wrapStreamFnWithBlobUrlFallback(base, () => service);
 
 		const events = await eventTypes(await wrapped(model, imageContext("native")));
 
@@ -132,7 +132,7 @@ describe("provider-file stream fallback", () => {
 			return scriptedStream(seen.length === 1 ? "error" : "success");
 		};
 		const service = new FakeFallbackService();
-		const wrapped = wrapStreamFnWithBlobUrlFallback(base, service);
+		const wrapped = wrapStreamFnWithBlobUrlFallback(base, () => service);
 
 		expect(await eventTypes(await wrapped(model, imageContext("native")))).toEqual(["start", "done"]);
 		expect(seen.map(channelOf)).toEqual(["native", "url"]);
@@ -146,7 +146,7 @@ describe("provider-file stream fallback", () => {
 			return scriptedStream("content-error");
 		};
 		const service = new FakeFallbackService();
-		const wrapped = wrapStreamFnWithBlobUrlFallback(base, service);
+		const wrapped = wrapStreamFnWithBlobUrlFallback(base, () => service);
 
 		const events = await eventTypes(await wrapped(model, imageContext("native")));
 

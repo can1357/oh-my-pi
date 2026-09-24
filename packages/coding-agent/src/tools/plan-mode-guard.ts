@@ -6,41 +6,21 @@ import {
 	HL_FILE_PREFIX,
 	HL_FILE_SUFFIX,
 } from "@oh-my-pi/pi-tui/tools/hashline-format";
-import {
-	type LocalProtocolOptions,
-	resolveLocalRoot,
-	resolveLocalUrlToPath,
-	resolveVaultUrlToPath,
-} from "../internal-urls";
+import { InternalUrlRouter, type ResolveContext, resolveLocalRoot } from "../internal-urls";
+import { sessionLocalProtocolOptions } from "../internal-urls/context";
+import { normalizeLocalScheme } from "../internal-urls/parse";
 import type { ToolSession } from ".";
-import { normalizeLocalScheme, resolveToCwd } from "./path-utils";
+import { resolveToCwd } from "./path-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
-const VAULT_SCHEME_PREFIX = "vault:";
-const LOCAL_SCHEME_PREFIX = "local:";
 const HL_TRAILING_TAG_RE = new RegExp(`${HL_FILE_HASH_SEP}[0-9A-Fa-f]{${HL_FILE_HASH_LENGTH}}$`);
 
-/** Resolve the `local://` options the session uses, preferring its own
- *  {@link LocalProtocolOptions} (the mapping `read`/`write`/`eval` resolve
- *  through) over the bare `getArtifactsDir`/`getSessionId` pair. Subagents and
- *  multi-session hosts (cmux/ACP, embedded SDK) pin `local://` to a parent/foreign
- *  root via `localProtocolOptions`; the sandbox root the plan-mode guard derives
- *  must match where the artifact actually lives, or it rejects a legitimate plan
- *  edit (and tag-based path recovery onto the sandbox would miss it). */
-export function planLocalProtocolOptions(session: ToolSession): LocalProtocolOptions {
-	return (
-		session.localProtocolOptions ?? {
-			getArtifactsDir: () => session.getArtifactsDir?.() ?? null,
-			getSessionId: () => session.getSessionId?.() ?? null,
-		}
-	);
-}
-
-/** Resolve the absolute path of the session's `local://` artifact sandbox.
- *  Returns `null` when the session has no artifact wiring (e.g. tests). */
-function localSandboxRoot(session: ToolSession): string | null {
+/** Absolute path of the session's `local://` artifact sandbox (the root plan mode keeps writable).
+ *  It must match where `read`/`write`/`eval` put the artifact, or the guard rejects a
+ *  legitimate plan edit. Returns `null` when the session has no artifact wiring (e.g. tests). */
+function sessionSandboxRoot(session: ToolSession): string | null {
 	try {
-		return path.resolve(resolveLocalRoot(planLocalProtocolOptions(session)));
+		return path.resolve(resolveLocalRoot(sessionLocalProtocolOptions(session)));
 	} catch {
 		return null;
 	}
@@ -81,15 +61,15 @@ export function unwrapHashlineHeaderPath(targetPath: string): string {
 /** True when `targetPath` resolves into the session-local artifact sandbox.
  *  Routes through {@link resolvePlanPath} so the guard and the eventual write
  *  always agree on the absolute target (including bracketed hashline headers,
- *  `local://` URLs, and bare absolute paths). Files inside the sandbox are not
+ *  internal URLs, and bare absolute paths). Files inside the sandbox are not
  *  part of the working tree, so plan mode treats them as freely writable
  *  scratch/plan space — and tag-based path recovery may rebind onto them. */
-export function targetsLocalSandbox(session: ToolSession, targetPath: string): boolean {
-	const root = localSandboxRoot(session);
+export async function targetsLocalSandbox(session: ToolSession, targetPath: string): Promise<boolean> {
+	const root = sessionSandboxRoot(session);
 	if (!root) return false;
 	let resolved: string;
 	try {
-		resolved = resolvePlanPath(session, targetPath);
+		resolved = await resolvePlanPath(session, targetPath);
 	} catch {
 		return false;
 	}
@@ -110,23 +90,26 @@ export function targetsLocalSandbox(session: ToolSession, targetPath: string): b
 }
 
 /**
- * Resolve a write/edit target to its absolute filesystem path, honoring the
- * `local://` and `vault://` schemes. Plain paths resolve against the session cwd.
- * Bracketed hashline headers (`[path#TAG]`) are unwrapped first so the inner
- * filesystem path drives resolution — keeping the plan-mode guard and the
- * eventual write in lockstep.
+ * Resolve a write/edit target to its absolute filesystem path. Internal URLs
+ * locate through their scheme handler (the entry need not exist yet); URLs no
+ * local file backs throw the router's uniform error. Plain paths resolve
+ * against the session cwd. Bracketed hashline headers (`[path#TAG]`) are
+ * unwrapped first so the inner filesystem path drives resolution — keeping the
+ * plan-mode guard and the eventual write in lockstep.
  */
-export function resolvePlanPath(session: ToolSession, targetPath: string): string {
-	const unwrapped = unwrapHashlineHeaderPath(targetPath);
-	const normalized = normalizeLocalScheme(unwrapped);
-	if (normalized.startsWith(LOCAL_SCHEME_PREFIX)) {
-		return resolveLocalUrlToPath(normalized, planLocalProtocolOptions(session));
+export async function resolvePlanPath(session: ToolSession, targetPath: string): Promise<string> {
+	const normalized = normalizeLocalScheme(unwrapHashlineHeaderPath(targetPath));
+	const router = InternalUrlRouter.instance();
+	if (router.canHandle(normalized)) {
+		// Only cwd and the sandbox mapping matter to locate; the mapping's fallback keeps
+		// URL targets where this session's own reads resolve them.
+		const context: ResolveContext = {
+			cwd: session.cwd,
+			session,
+			localProtocolOptions: sessionLocalProtocolOptions(session),
+		};
+		return router.requireLocal(normalized, "write", context, { create: true });
 	}
-
-	if (normalized.startsWith(VAULT_SCHEME_PREFIX)) {
-		return resolveVaultUrlToPath(normalized);
-	}
-
 	return resolveToCwd(normalized, session.cwd);
 }
 
@@ -136,11 +119,11 @@ export function resolvePlanPath(session: ToolSession, targetPath: string): strin
  * where the plan and any scratch notes live); anything that would touch the
  * working tree — or rename/delete a file — is rejected.
  */
-export function enforcePlanModeWrite(
+export async function enforcePlanModeWrite(
 	session: ToolSession,
 	targetPath: string,
 	options?: { move?: string; op?: "create" | "update" | "delete" },
-): void {
+): Promise<void> {
 	const state = session.getPlanModeState?.();
 	if (!state?.enabled) return;
 
@@ -152,7 +135,7 @@ export function enforcePlanModeWrite(
 		throw new ToolError("Plan mode: deleting files is not allowed.");
 	}
 
-	if (targetsLocalSandbox(session, targetPath)) return;
+	if (await targetsLocalSandbox(session, targetPath)) return;
 
 	throw new ToolError(
 		"Plan mode: the working tree is read-only. Write your plan to a local://<slug>-plan.md file instead.",
