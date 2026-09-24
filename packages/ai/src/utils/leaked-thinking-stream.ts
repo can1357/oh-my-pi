@@ -33,6 +33,7 @@
 
 import { ThinkingInbandScanner } from "../dialect/thinking";
 import type { InbandScanEvent } from "../dialect/types";
+import * as AIError from "../error";
 import { isAnthropicServerToolHistoryBlock } from "../providers/anthropic-wire";
 import type {
 	AnthropicServerToolContent,
@@ -340,6 +341,12 @@ class LeakedThinkingProjector {
 	 * flush held-back fragments, close open blocks, and return the healed content.
 	 */
 	finish(message: AssistantMessage): AssistantMessage["content"] {
+		// A classified thinking loop discards terminal content on purpose so the
+		// failed attempt is not committed or replayed. Do not rebuild that
+		// content from deltas already projected for live consumers.
+		if (message.content.length === 0 && AIError.is(message.errorId, AIError.Flag.ThinkingLoop)) {
+			return [];
+		}
 		for (const [srcIndex] of this.#thinkingBlocks) {
 			const block = message.content[srcIndex];
 			this.thinkingEnd(srcIndex, block?.type === "thinking" ? block.thinkingSignature : undefined);

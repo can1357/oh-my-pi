@@ -41,6 +41,7 @@ import {
 	iterateWithTerminalGrace,
 } from "../utils/idle-iterator";
 import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
+import { THINKING_LOOP_ERROR_MARKER } from "../utils/thinking-loop";
 import { notifyProviderResponse } from "../utils/provider-response";
 import {
 	adaptSchemaForStrict,
@@ -1290,6 +1291,14 @@ const streamOpenAICompletionsOnce = (
 					streamFinishedAt ??= Date.now();
 				}
 
+				const repetitionStop = readProviderRepetitionStop(choice);
+				if (repetitionStop) {
+					output.stopReason = "error";
+					output.errorMessage = formatProviderRepetitionStop(repetitionStop);
+					output.errorId = AIError.create(AIError.Flag.ThinkingLoop);
+					streamFinishedAt ??= Date.now();
+				}
+
 				if (choice.delta) {
 					// Some endpoints return reasoning in reasoning_content (llama.cpp),
 					// or reasoning (other openai compatible endpoints). Use the first
@@ -1581,10 +1590,19 @@ const streamOpenAICompletionsOnce = (
 				throw new AIError.AbortError();
 			}
 			if (output.stopReason === "error") {
-				throw new AIError.ProviderResponseError(output.errorMessage || "Provider returned an error stop reason", {
-					provider: model.provider,
-					kind: "runtime",
-				});
+				const error = new AIError.ProviderResponseError(
+					output.errorMessage || "Provider returned an error stop reason",
+					{
+						provider: model.provider,
+						kind: "runtime",
+					},
+				);
+				const thinkingLoopId = output.errorId;
+				if (typeof thinkingLoopId === "number" && AIError.is(thinkingLoopId, AIError.Flag.ThinkingLoop)) {
+					AIError.attach(error, thinkingLoopId);
+					output.content = [];
+				}
+				throw error;
 			}
 
 			output.errorMessage = undefined;
@@ -1611,6 +1629,9 @@ const streamOpenAICompletionsOnce = (
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = result.message;
+			if (AIError.is(result.id, AIError.Flag.ThinkingLoop)) {
+				output.content = [];
+			}
 			// Some providers via OpenRouter include extra details here.
 			const rawMetadata = (error as { error?: { metadata?: { raw?: string } } })?.error?.metadata?.raw;
 			if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;
@@ -2668,6 +2689,29 @@ function convertTools(
 
 const EMPTY_OLLAMA_LENGTH_COMPLETION_MESSAGE =
 	"Model returned no content: prompt filled the context window; raise Ollama num_ctx or shorten the prompt.";
+
+type ChoiceStopSignals = {
+	finish_reason?: unknown;
+	stop_reason?: unknown;
+};
+
+/** vLLM / llama.cpp-style repetition stops on OpenAI-compatible choices. */
+function readProviderRepetitionStop(choice: ChoiceStopSignals): { finishReason?: string; stopReason?: string } | null {
+	const finishReason = typeof choice.finish_reason === "string" ? choice.finish_reason : undefined;
+	const stopReason = typeof choice.stop_reason === "string" ? choice.stop_reason : undefined;
+	const finish = finishReason?.toLowerCase();
+	const stop = stopReason?.toLowerCase();
+	if (finish !== "repetition" && stop !== "repetition_detected" && stop !== "repetition") return null;
+	return { finishReason, stopReason };
+}
+
+function formatProviderRepetitionStop(signals: { finishReason?: string; stopReason?: string }): string {
+	const parts: string[] = [];
+	if (signals.finishReason) parts.push(`finish_reason: ${signals.finishReason}`);
+	if (signals.stopReason) parts.push(`stop_reason: ${signals.stopReason}`);
+	const detail = parts.length > 0 ? ` (${parts.join(", ")})` : "";
+	return `${THINKING_LOOP_ERROR_MARKER}: provider repetition stop${detail}. Treating as a stream stall and retrying.`;
+}
 
 function mapStopReason(reason: ChatCompletionChunk.Choice["finish_reason"] | string): {
 	stopReason: StopReason;

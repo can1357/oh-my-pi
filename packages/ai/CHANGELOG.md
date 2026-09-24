@@ -78,6 +78,9 @@
 
 - Anthropic organization-level OAuth permission errors now reliably rotate to sibling credentials and persist blocks across usage reports.
 - Fixed error handling for provider responses that do not include token usage information.
+### Fixed
+
+- Fixed punctuation-only thinking loops (for example repeated `?!`) going undetected, and mapped OpenAI-compatible provider repetition stops to a thinking-loop error that discards the runaway reasoning ([#12525](https://github.com/can1357/oh-my-pi/issues/12525)).
 
 ## [18.2.6] - 2026-09-18
 
