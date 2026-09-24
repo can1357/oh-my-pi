@@ -143,10 +143,10 @@ describe("searchGemini tools serialization", () => {
 		const authorizationHeaders: string[] = [];
 		const requestUrls: string[] = [];
 		let requestCount = 0;
-		vi.spyOn(apiKeyRegistry, "getApiKeyForProvider")
-			.mockResolvedValueOnce("initial-gemini-key")
-			.mockResolvedValueOnce("refreshed-gemini-key")
-			.mockResolvedValueOnce("rotated-gemini-key");
+		vi.spyOn(apiKeyRegistry, "getApiKeyWithCredentialForProvider")
+			.mockResolvedValueOnce({ apiKey: "initial-gemini-key" })
+			.mockResolvedValueOnce({ apiKey: "refreshed-gemini-key" })
+			.mockResolvedValueOnce({ apiKey: "rotated-gemini-key" });
 		const rotateSpy = vi.spyOn(apiKeyAuthStorage.limits, "rotate").mockResolvedValue(true);
 		const fetchMock: FetchImpl = (url, init) => {
 			requestCount += 1;
