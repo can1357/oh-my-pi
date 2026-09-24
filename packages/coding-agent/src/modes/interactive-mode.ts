@@ -1893,6 +1893,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	 */
 	#refreshProseGithubRepo(): void {
 		const cwd = this.sessionManager.getCwd();
+		// Drop the previous cwd's repo so nothing links against it while this lookup is pending.
+		if (setProseGithubRepo(undefined)) {
+			this.ui.invalidate();
+			this.ui.requestRender();
+		}
 		void tryResolveCurrentRepo(cwd, undefined).then(repo => {
 			if (this.sessionManager.getCwd() !== cwd) return;
 			const ref = repo === undefined ? undefined : parseRepoRef(repo);
