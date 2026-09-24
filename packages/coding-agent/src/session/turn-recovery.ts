@@ -2369,6 +2369,23 @@ export class TurnRecovery {
 			/\bGoUsageLimitError\b/.test(errorMessage) &&
 			(!this.#hasReplayUnsafeOutput(message) || this.#unexecutedToolCallsReplaySafe(message));
 
+		// A transient capacity failure (`overloaded`, 5xx, transport reset) usually
+		// clears inside the retry backoff, so walking the chain on the first one
+		// trades the user's chosen model for a few seconds of provider load — and
+		// because a successful switch sets `delayMs = 0` below, the backoff that
+		// would have fixed it never runs. Spend `retry.transientSameModelAttempts`
+		// on the same model first. Quota, auth, and account-policy errors are
+		// excluded: those do not clear on retry, so they still switch immediately.
+		// `Flag.Transient` also covers rate limits, hence the explicit UsageLimit
+		// exclusion rather than a bare Transient test.
+		const transientCapacity =
+			AIError.is(id, AIError.Flag.Transient) &&
+			!AIError.is(id, AIError.Flag.UsageLimit) &&
+			!AIError.is(id, AIError.Flag.AuthFailed) &&
+			!AIError.is(id, AIError.Flag.AccountPolicy);
+		const deferModelFallback =
+			transientCapacity && !retryBudgetExhausted && this.#retryAttempt <= retrySettings.transientSameModelAttempts;
+
 		if (!staleOpenAIResponsesReplayError && !switchedCredential && currentSelector) {
 			// A refusal chain stops at the retry budget: the exhausted-attempt
 			// last resort is for provider failures, not classifier decisions.
@@ -2377,6 +2394,7 @@ export class TurnRecovery {
 				retrySettings.modelFallback &&
 				!thinkingLoop &&
 				!waitForSiblingCredential &&
+				!deferModelFallback &&
 				!(retryBudgetExhausted && classifierRefusal)
 			) {
 				if (!classifierRefusal) {
