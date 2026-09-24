@@ -976,6 +976,8 @@ export interface BuildSystemPromptOptions {
 	browserEnabled?: boolean;
 	/** Include computer eval-prelude guidance and safety policy. Default: false. */
 	computerEnabled?: boolean;
+	/** Collapse duplicated guidance blocks in the system prompt (settings `systemPrompt.trim`). Default: false. */
+	trimMode?: boolean;
 }
 
 /**
@@ -1005,6 +1007,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		securityEnabled: options.securityEnabled,
 		browserEnabled: options.browserEnabled,
 		computerEnabled: options.computerEnabled,
+		trimMode: options.trimMode,
 		toolNames,
 		tools: promptTools,
 	});
@@ -3379,6 +3382,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				systemPromptTemplate: options.systemPromptTemplate,
 				skills: settings.get("skillful") ? (session?.skills ?? skills) : [],
 				skillDescriptions,
+				skillMaxEntries: settings.get("skills.maxPromptEntries"),
 				contextFiles,
 				tools: promptTools,
 				toolNames,
@@ -3415,6 +3419,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				personality: agentKind === "sub" ? "none" : settings.get("personality"),
 				renderMermaid: settings.get("tui.renderMermaid"),
 				reactions: agentKind === "main" && options.hasUI === true && settings.get("tui.reactions"),
+				trimMode: settings.get("systemPrompt.trim"),
 				activeRepoContext,
 			});
 

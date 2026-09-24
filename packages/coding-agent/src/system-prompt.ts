@@ -472,6 +472,8 @@ export interface BuildSystemPromptOptions {
 	skills?: readonly Skill[];
 	/** Session-scoped description snapshot; background cache writes apply only to the next session. */
 	skillDescriptions?: SkillDescriptionCatalog;
+	/** Cap on skill entries rendered into the prompt; 0 or undefined = unlimited. When capped, overflow renders one count line pointing at `skill://`. */
+	skillMaxEntries?: number;
 	/** Pre-loaded rulebook rules (descriptions, excluding TTSR and always-apply). */
 	rules?: Array<{ name: string; description?: string; path: string; globs?: string[] }>;
 	/** Intent field name injected into every tool schema. If set, explains the field in the prompt. */
@@ -517,6 +519,8 @@ export interface BuildSystemPromptOptions {
 	renderMermaid?: boolean;
 	/** Whether the TUI lifts an opening emoji into a reaction badge on the user's message. Default: false */
 	reactions?: boolean;
+	/** Whether to collapse duplicated guidance blocks in the default system prompt (settings `systemPrompt.trim`). Default: false */
+	trimMode?: boolean;
 	/** Pre-resolved nested active repo context. Undefined resolves from cwd. */
 	activeRepoContext?: ActiveRepoContext | null;
 	/** Tools mounted under `xd://`; renders the protocol section when non-empty. `dynamic` marks external devices whose summary is third-party metadata. */
@@ -614,6 +618,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		includeWorkspaceTree = false,
 		renderMermaid = true,
 		reactions = false,
+		trimMode = false,
 		xdevTools = [],
 		xdevDocs = "",
 		autoQaEnabled = false,
@@ -878,6 +883,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	const hasSkillUriAccess = hasSkillReader && skills.length > 0;
 	const filteredSkills = (options.skillDescriptions ?? new SkillDescriptionCatalog()).render(
 		hasSkillReader ? skills.filter(skill => skill.hide !== true) : [],
+		options.skillMaxEntries ?? 0,
 	);
 
 	const effectiveSystemPromptCustomization = dedupePromptSource(systemPromptCustomization, [
@@ -936,6 +942,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		includeWorkspaceTree,
 		renderMermaid,
 		reactions,
+		trimMode,
 		xdevTools,
 		hasDynamicXdevTools: xdevTools.some(mounted => mounted.dynamic === true),
 		xdevDocs,

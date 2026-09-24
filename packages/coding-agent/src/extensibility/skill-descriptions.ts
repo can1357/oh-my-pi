@@ -137,11 +137,13 @@ export class SkillDescriptionCatalog {
 		}));
 	}
 
-	render(skills: readonly Skill[]): Array<Skill & { description: string }> {
+	render(skills: readonly Skill[], maxEntries = 0): Array<Skill & { description: string }> {
 		if (skills.length === 0) return [];
+		const overflowCount = maxEntries > 0 && skills.length > maxEntries ? skills.length - maxEntries : 0;
+		const listed = overflowCount > 0 ? skills.slice(0, maxEntries) : skills;
 		const db = openDb(this.#dbPath);
 		try {
-			return skills.map(skill => {
+			const rendered = listed.map(skill => {
 				const key = keyFor(skill);
 				let description = this.#snapshot.get(key);
 				if (description === undefined) {
@@ -162,6 +164,14 @@ export class SkillDescriptionCatalog {
 				}
 				return { ...skill, description };
 			});
+			if (overflowCount > 0) {
+				rendered.push({
+					...rendered[rendered.length - 1],
+					name: "more-skills",
+					description: `+${overflowCount} more not listed — run \`read skill://<name>\` or /skill:<name> when relevant`,
+				});
+			}
+			return rendered;
 		} finally {
 			db?.close();
 		}

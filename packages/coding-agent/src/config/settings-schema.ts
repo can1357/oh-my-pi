@@ -1458,6 +1458,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"systemPrompt.trim": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Prompt",
+			label: "Trim System Prompt",
+			description:
+				"Collapse default system-prompt guidance duplicated from per-tool descriptions (tool etiquette tails, repeated delivery rules, tool-list labels). Off by default; when off the system prompt renders unchanged.",
+		},
+	},
+
 	skillful: {
 		type: "boolean",
 		default: true,
@@ -5348,6 +5360,18 @@ export const SETTINGS_SCHEMA = {
 
 	"skills.includeSkills": { type: "array", default: [] as string[] },
 
+	"skills.maxPromptEntries": {
+		type: "number",
+		default: 0,
+		ui: {
+			tab: "tasks",
+			group: "Commands & Skills",
+			label: "Max Skills In Prompt",
+			description:
+				"Cap how many skill descriptions render into the system prompt. 0 = unlimited; when set, the first N skills are listed and overflow renders a single count line pointing at skill://",
+		},
+	},
+
 	// Commands
 	"commands.enableClaudeUser": {
 		type: "boolean",
@@ -6261,6 +6285,8 @@ export interface SkillsSettings {
 	customDirectories?: string[];
 	ignoredSkills?: string[];
 	includeSkills?: string[];
+	/** Cap on skill entries rendered into the system prompt; 0 = unlimited. */
+	maxPromptEntries?: number;
 	disabledExtensions?: string[];
 	/** Skillshare registry base URL (`omp skill`). */
 	registryUrl?: string;
