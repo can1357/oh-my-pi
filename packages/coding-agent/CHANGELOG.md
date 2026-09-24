@@ -4,6 +4,7 @@
 
 ### Added
 
+- `omp usage --json` now includes an optional `policy` object on `reports[]` and `accountsWithoutUsage[]` entries for policy-enabled providers: `{ priority, reservePct, reserveSource, state, remainingPct? }`. `reserveSource` is `global` or `override`; `state` is `eligible`, `inside-reserve`, or `unknown`, with `remainingPct` omitted when unknown. Unreported API-key accounts and providers without account policies have no `policy` field ([#13177](https://github.com/can1357/oh-my-pi/pull/13177) by [@schickling-assistant](https://github.com/schickling-assistant)).
 - Added trusted additional context support for extension and hook tool results, including `ctx.addAdditionalContext()` for registered tools, allowing instructions to be passed to the model without altering the tool result.
 - Added dictation support to `/btw` follow-up input, including microphone controls on the follow-up line.
 - Added opt-in CUDA support to the Nix package for tiny-model inference with the ONNX Runtime CUDA execution provider.
