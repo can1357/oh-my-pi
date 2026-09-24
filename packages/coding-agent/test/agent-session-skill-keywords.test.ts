@@ -91,8 +91,9 @@ describe("AgentSession skill prompt keyword steering", () => {
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(tempDir.path()),
-			// Isolation mode "auto" keeps the notice's isolation controls enabled
-			// so the injected notice matches the exported WORKFLOW_NOTICE default.
+			// Non-isolated session with isolation enabled keeps the notice's
+			// isolation controls advertised, so the injected notice matches the
+			// renderWorkflowNotice default (isolationEnabled: true).
 			settings: Settings.isolated({ "compaction.enabled": false, "task.isolation.enabled": true }),
 			modelRegistry,
 		});
