@@ -175,18 +175,33 @@ describe("PluginManager.install load validation", () => {
 			dependencies: { [name]: "^1.0.3" },
 		});
 		await Bun.write(pluginsPkgJson, packageJson);
-		const install = Bun.spawn(["bun", "-e", ""], {
-			stdin: "ignore",
-			stdout: "pipe",
-			stderr: "pipe",
-		});
-		const spawnSpy = vi.spyOn(Bun, "spawn").mockReturnValue(install);
+		let recordedCmd: string[] | undefined;
+		let recordedCwd: string | undefined;
+		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[], options?: { cwd?: string }) => {
+			recordedCmd = cmd;
+			recordedCwd = options?.cwd;
+			// Faithful `bun install <pkg>` semantics: the manager prunes the stale
+			// edge first, and bun writes the resolved edge back on success.
+			const prepare = (async () => {
+				const current = (await Bun.file(pluginsPkgJson).json()) as {
+					dependencies?: Record<string, string>;
+				};
+				await Bun.write(
+					pluginsPkgJson,
+					JSON.stringify({ ...current, dependencies: { ...current.dependencies, [name]: "^1.0.3" } }, null, 2),
+				);
+			})();
+			return {
+				pid: 1,
+				stdout: emptyStream(),
+				stderr: emptyStream(),
+				exited: prepare.then(() => 0),
+			} as Subprocess;
+		}) as typeof Bun.spawn);
 
 		const result = await new PluginManager(tmpRoot).install(name, { force: true });
-		expect(spawnSpy).toHaveBeenCalledWith(
-			["bun", "install", "--no-cache", "--force", name],
-			expect.objectContaining({ cwd: pluginsDir }),
-		);
+		expect(recordedCmd).toEqual(["bun", "install", "--no-cache", "--force", name]);
+		expect(recordedCwd).toBe(pluginsDir);
 
 		expect(result.version).toBe("1.0.3");
 		expect((await Bun.file(pluginsPkgJson).json()).dependencies).toEqual({ [name]: "^1.0.3" });

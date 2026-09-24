@@ -101,9 +101,15 @@ import type { ForeignSessionInfo, ForeignSessionSource, ForeignSessionStore } fr
 import { resolveResumableSession, type SessionInfo } from "./session/session-listing";
 import { ForkSourceNotFoundError, SessionManager } from "./session/session-manager";
 import { shouldShowStartupSplash } from "./startup-splash";
-import { discoverTitleSystemPromptFile, resolvePromptInput } from "./system-prompt";
+import {
+	discoverSystemPromptOverride,
+	discoverTitleSystemPromptFile,
+	loadSystemPromptTemplateFile,
+	resolvePromptInput,
+} from "./system-prompt";
 import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
+import { registerLocalInferenceApi } from "./tiny/local-inference-api";
 import { concreteThinkingLevel, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { LspStartupServerInfo } from "./tools";
 import { sanitizeDisplayWarnings } from "@oh-my-pi/pi-tui/render/render-utils";
@@ -149,7 +155,7 @@ async function loadSessionPicker(): Promise<SessionPicker> {
 				await storage.deleteSessionWithArtifacts(session.path);
 				return true;
 			},
-			loadAllSessions: () => SessionManager.listAll(storage),
+			loadAllSessions: () => SessionManager.listAllForPicker(storage),
 		});
 	};
 }
@@ -540,7 +546,7 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 			preloadedExtensions: trustedExtensions,
 		});
 		if (args.parsedArgs.apiKey && !args.baseOptions.model && nextSession.model) {
-			args.authStorage.setRuntimeApiKey(nextSession.model.provider, args.parsedArgs.apiKey);
+			args.authStorage.keys.setRuntime(nextSession.model.provider, args.parsedArgs.apiKey);
 		}
 		const runner = nextSession.extensionRunner;
 		const reparsedArgs = applyExtensionFlags(
@@ -1185,21 +1191,6 @@ export async function createSessionManager(
 	return undefined;
 }
 
-/** Discover SYSTEM.md file if no CLI system prompt was provided */
-function discoverSystemPromptFile(): string | undefined {
-	// Check project-local first (.omp/SYSTEM.md, .pi/SYSTEM.md legacy)
-	const projectPath = findConfigFile("SYSTEM.md", { user: false });
-	if (projectPath) {
-		return projectPath;
-	}
-	// If not found, check SYSTEM.md file in the global directory.
-	const globalPath = findConfigFile("SYSTEM.md", { user: true });
-	if (globalPath) {
-		return globalPath;
-	}
-	return undefined;
-}
-
 /** Discover APPEND_SYSTEM.md file if no CLI append system prompt was provided */
 function discoverAppendSystemPromptFile(): string | undefined {
 	const projectPath = findConfigFile("APPEND_SYSTEM.md", { user: false });
@@ -1219,7 +1210,7 @@ export function applyResolvedSystemPromptInputs(
 	resolvedSystemPrompt: string | undefined,
 	resolvedAppendPrompt: string | undefined,
 ): void {
-	if (resolvedSystemPrompt) {
+	if (resolvedSystemPrompt !== undefined) {
 		options.customSystemPrompt = resolvedSystemPrompt;
 	}
 	if (resolvedAppendPrompt) {
@@ -1252,15 +1243,36 @@ export async function buildSessionOptions(
 		options.deadline = Date.now() + parsed.maxTime * 1000;
 	}
 
-	// Auto-discover SYSTEM.md if no CLI system prompt provided
-	const systemPromptSource = parsed.systemPrompt ?? discoverSystemPromptFile();
+	// Explicit prompt inputs win over discovered SYSTEM_TEMPLATE.md/SYSTEM.md.
+	if (parsed.systemPrompt !== undefined && parsed.systemPromptTemplate !== undefined) {
+		throw new Error("--system-prompt and --system-prompt-template cannot be combined");
+	}
+	const cwd = options.cwd;
+	const discoveredOverride =
+		parsed.systemPrompt === undefined && parsed.systemPromptTemplate === undefined
+			? await discoverSystemPromptOverride(cwd)
+			: undefined;
+	const systemPromptSource =
+		parsed.systemPrompt ?? (discoveredOverride?.kind === "text" ? discoveredOverride.path : undefined);
+	const templatePath =
+		parsed.systemPromptTemplate ?? (discoveredOverride?.kind === "template" ? discoveredOverride.path : undefined);
 	const appendPromptSource = parsed.appendSystemPrompt ?? discoverAppendSystemPromptFile();
-	const titleSystemPromptSource = discoverTitleSystemPromptFile();
-	const [resolvedSystemPrompt, resolvedAppendPrompt, titleSystemPrompt] = await Promise.all([
-		resolvePromptInput(systemPromptSource, "system prompt"),
-		resolvePromptInput(appendPromptSource, "append system prompt"),
-		resolvePromptInput(titleSystemPromptSource, "title system prompt"),
-	]);
+	const titleSystemPromptSource = discoverTitleSystemPromptFile(cwd);
+	const [resolvedSystemPrompt, resolvedAppendPrompt, titleSystemPrompt, resolvedSystemPromptTemplate] =
+		await Promise.all([
+			discoveredOverride?.kind === "text"
+				? Promise.resolve(discoveredOverride.content)
+				: resolvePromptInput(systemPromptSource, "system prompt"),
+			resolvePromptInput(appendPromptSource, "append system prompt"),
+			resolvePromptInput(titleSystemPromptSource, "title system prompt"),
+			// Discovered templates arrive pre-loaded from the capability; only
+			// explicit CLI paths hit the strict file loader here.
+			discoveredOverride?.kind === "template" && parsed.systemPromptTemplate === undefined
+				? Promise.resolve(discoveredOverride.content)
+				: templatePath === undefined
+					? Promise.resolve(undefined)
+					: loadSystemPromptTemplateFile(templatePath),
+		]);
 
 	if (sessionManager) {
 		options.sessionManager = sessionManager;
@@ -1279,6 +1291,7 @@ export async function buildSessionOptions(
 			parsed.model !== undefined ||
 			parsed.thinking !== undefined ||
 			parsed.systemPrompt !== undefined ||
+			parsed.systemPromptTemplate !== undefined ||
 			parsed.appendSystemPrompt !== undefined ||
 			parsed.tools !== undefined ||
 			parsed.noTools === true;
@@ -1546,6 +1559,9 @@ export async function buildSessionOptions(
 
 	// System prompt
 	applyResolvedSystemPromptInputs(options, resolvedSystemPrompt, resolvedAppendPrompt);
+	if (resolvedSystemPromptTemplate !== undefined) {
+		options.systemPromptTemplate = resolvedSystemPromptTemplate;
+	}
 	// Replan-driven title refresh resolves the override from this same field on
 	// `AgentSession`, so threading it through `CreateAgentSessionOptions` keeps
 	// both first-input titling (`input-controller.ts`) and replan refresh
@@ -1725,15 +1741,17 @@ export async function runRootCommand(
 		if (!isInteractive) {
 			stopPendingStartupComposer();
 		}
-		// Auth and settings are independent; start both before awaiting either.
-		// A configured-but-unreachable auth broker still receives the actionable
-		// startup error below, while its cache/config I/O overlaps settings I/O.
-		const authStoragePromise = logger.time("discoverAuthStorage", deps.discoverAuthStorage ?? discoverAuthStorage);
-		authStoragePromise.catch(() => {});
+		// Account routing must use the effective settings, including `--config` and
+		// `PI_CONFIG_FILES` overlays, rather than independently re-reading only the
+		// main config file during auth discovery.
 		const settingsPromise = deps.settings
 			? Promise.resolve(deps.settings)
 			: logger.time("settings:init", Settings.init, { cwd, configFiles: parsedArgs.config });
 		settingsPromise.catch(() => {});
+		const authStoragePromise = logger.time("discoverAuthStorage", async () =>
+			(deps.discoverAuthStorage ?? discoverAuthStorage)(undefined, { settings: await settingsPromise }),
+		);
+		authStoragePromise.catch(() => {});
 		let authStorage: AuthStorage;
 		try {
 			authStorage = await authStoragePromise;
@@ -1973,8 +1991,8 @@ export async function runRootCommand(
 		// resolved) rejects a native --resume, so the picker must not run first.
 		if (parsedArgs.resume === true && !parsedArgs.fork && !parsedArgs.noSession) {
 			const folderSessions = await logger.time(
-				"SessionManager.list",
-				SessionManager.list,
+				"SessionManager.listForPicker",
+				SessionManager.listForPicker,
 				cwd,
 				parsedArgs.sessionDir,
 			);
@@ -1985,7 +2003,10 @@ export async function runRootCommand(
 				// silently surfaced other projects' history when the cwd was empty
 				// (issue #3099). The preloaded list also makes the user's Tab switch
 				// instant on the way in.
-				preloadedAllSessions = await logger.time("SessionManager.listAll", SessionManager.listAll);
+				preloadedAllSessions = await logger.time(
+					"SessionManager.listAllForPicker",
+					SessionManager.listAllForPicker,
+				);
 				if (preloadedAllSessions.length === 0) {
 					writeStartupNotice(parsedArgs, `${chalk.dim("No sessions found")}\n`);
 					stopStartupWatchdog();
@@ -2084,7 +2105,7 @@ export async function runRootCommand(
 				process.exit(1);
 			}
 			if (sessionOptions.model) {
-				authStorage.setRuntimeApiKey(sessionOptions.model.provider, parsedArgs.apiKey);
+				authStorage.keys.setRuntime(sessionOptions.model.provider, parsedArgs.apiKey);
 			}
 		}
 
@@ -2245,7 +2266,7 @@ export async function runRootCommand(
 				Math.trunc(Number(settingsInstance.get("task.agentIdleTtlMs") ?? 420_000) || 0),
 			);
 			if (parsedArgs.apiKey && !sessionOptions.model && session.model) {
-				authStorage.setRuntimeApiKey(session.model.provider, parsedArgs.apiKey);
+				authStorage.keys.setRuntime(session.model.provider, parsedArgs.apiKey);
 			}
 
 			// Runtime provider discovery (opencode-go, models.yml `discovery:`, proxies)
@@ -2350,6 +2371,7 @@ export async function runRootCommand(
 					initialImages,
 					printThoughts: initialArgs.printThoughts,
 					planYolo: parsedArgs.planYolo,
+					mcpManager,
 				});
 				if ($env.PI_TIMING) {
 					logger.printTimings();
@@ -2367,6 +2389,7 @@ export async function runRootCommand(
 }
 
 export async function main(args: string[]): Promise<void> {
+	registerLocalInferenceApi();
 	const { runCli } = await import("./cli");
 	await runCli(args.length === 0 ? ["launch"] : args);
 }

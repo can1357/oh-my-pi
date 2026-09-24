@@ -168,18 +168,19 @@ export type FallbackBlockParam = {
 	to: { model: string };
 };
 
-/** Beta enabling server-side compaction (`compact_20260112` edit, `compaction` blocks). */
-export const COMPACTION_BETA = "compact-2026-01-12";
+/** Beta enabling on-demand compaction requests and signed block replay. */
+export const COMPACTION_BETA = "compact-2026-09-04";
+/** Legacy threshold compaction beta, required only to replay persisted encrypted blocks. */
+export const LEGACY_COMPACTION_BETA = "compact-2026-01-12";
 
 /**
- * Server-side compaction summary (compact-2026-01-12). Returned at the start
- * of the assistant response that crossed the trigger; on replay the API drops
- * every block that precedes it, so it may open the messages array. The
- * `encrypted_content` is opaque provider state, round-tripped verbatim.
+ * On-demand signed compaction summary or a persisted legacy threshold block.
+ * Replayed at the start of the assistant history with its original opaque state.
  */
 export type CompactionBlockParam = {
 	type: "compaction";
 	content: string;
+	signature?: string;
 	encrypted_content?: string | null;
 	cache_control?: CacheControlEphemeral | null;
 };
@@ -276,6 +277,8 @@ export type ThinkingConfigParam = ThinkingConfigEnabled | ThinkingConfigDisabled
 export type OutputConfig = {
 	/** Adaptive-thinking effort level (effort beta). */
 	effort?: "low" | "medium" | "high" | "xhigh" | "max" | null;
+	/** Structured format, excluded on compaction requests. */
+	format?: unknown;
 	/** Task-budgets beta. */
 	task_budget?: TokenTaskBudget | null;
 };
@@ -293,7 +296,7 @@ export type FallbackParam = {
 	speed?: "fast";
 };
 
-/** Server-side compaction edit (compact-2026-01-12). */
+/** Legacy threshold compaction edit, used only when replaying persisted encrypted blocks. */
 export type CompactionEdit = {
 	type: "compact_20260112";
 	/** `input_tokens` is the only trigger; `value` must be at least 50,000. */
@@ -307,6 +310,8 @@ export type CompactionEdit = {
 export type ContextManagement = {
 	edits: Array<{ type: "clear_thinking_20251015"; keep: "all" } | CompactionEdit>;
 };
+
+export type OnDemandCompaction = { type: "summarize"; instructions?: string };
 
 export type MessageCreateParams = {
 	model: string;
@@ -327,6 +332,8 @@ export type MessageCreateParams = {
 	speed?: "fast";
 	/** Claude Code context-management beta. */
 	context_management?: ContextManagement;
+	/** On-demand compaction request, mutually exclusive with context_management. */
+	compaction?: OnDemandCompaction;
 	/** Google Cloud rawPredict carries Anthropic beta names in the body. */
 	anthropic_beta?: string[];
 	/**
@@ -364,9 +371,9 @@ export type ServerToolUsage = {
 
 /**
  * Per-attempt token accounting inside a multi-run turn
- * (server-side-fallback-2026-06-01, compact-2026-01-12). Populated whenever
+ * (server-side-fallback-2026-06-01, compact-2026-09-04). Populated whenever
  * a fallback chain ran, including sticky-served turns with no `fallback`
- * content block, and whenever the compaction beta is active. A
+ * content block, and whenever on-demand compaction ran. A
  * `fallback_message` entry is the definitive "served by fallback" signal; a
  * `compaction` entry is the summarization sampling the top-level usage
  * excludes.
@@ -433,14 +440,13 @@ export type ResponseContentBlock =
 	| WebSearchToolResultBlockParam
 	| ToolSearchToolResultBlockParam
 	| { type: "fallback"; from: { model: string }; to: { model: string } }
-	| { type: "compaction"; content?: string | null; encrypted_content?: string | null };
+	| { type: "compaction"; content: string; signature?: string; encrypted_content?: string | null };
 
 export type ContentBlockDelta =
 	| { type: "text_delta"; text: string }
 	| { type: "input_json_delta"; partial_json: string }
 	| { type: "thinking_delta"; thinking: string }
-	| { type: "signature_delta"; signature: string }
-	| { type: "compaction_delta"; content?: string | null; encrypted_content?: string | null };
+	| { type: "signature_delta"; signature: string };
 
 export type StopDetails = {
 	type: string;

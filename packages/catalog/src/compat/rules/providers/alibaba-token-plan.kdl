@@ -106,18 +106,14 @@ provider "alibaba-token-plan" {
 		revision ">=3.6 <3.8" {
 			thinking-efforts "minimal" "low" "medium" "high"
 		}
+		// Every remote DashScope Qwen 3.8 SKU steers thinking depth through the
+		// OpenAI `reasoning_effort` control and replays reasoning_content across
+		// turns (preserve_thinking defaults on). The exact `qwen3.8-max` /
+		// `qwen3.8-flash` rows keep their reviewed ladders; discovered siblings
+		// (e.g. `qwen3.8-plus`) inherit this wire contract instead of silently
+		// dropping effort selections on the Qwen dialect.
 		revision ">=3.8 <3.9" {
 			supports-reasoning-effort #true
-		}
-	}
-	// Every remote DashScope Qwen 3.8 SKU steers thinking depth through the
-	// OpenAI `reasoning_effort` control and replays reasoning_content across
-	// turns (preserve_thinking defaults on). The exact `qwen3.8-max` /
-	// `qwen3.8-flash` rows keep their reviewed ladders; discovered siblings
-	// (e.g. `qwen3.8-plus`) inherit this wire contract instead of silently
-	// dropping effort selections on the Qwen dialect.
-	class "qwen" {
-		revision ">=3.8 <3.9" {
 			replay-reasoning-content #true
 			when-thinking {
 				extra-body {

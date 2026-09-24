@@ -1,9 +1,10 @@
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Judge } from "@oh-my-pi/pi-ai";
 import { compileRuleCondition, type Rule } from "../../capability/rule";
 import { buildRuleFromMarkdown, createSourceMeta } from "../../discovery/helpers";
-import { TtsrManager, type TtsrMatchContext } from "../../export/ttsr";
+import { judgeRules, TtsrManager, type TtsrOutput } from "../../export/ttsr";
+import type { TtsrToolInspector } from "../../session/ttsr-outputs";
 
 export interface ParsedGeneratedRule {
 	rule: Rule;
@@ -15,6 +16,8 @@ export type GeneratedRuleParseResult = ParsedGeneratedRule | { error: string };
 export interface RuleHistoryValidation {
 	matched: boolean;
 	feedback?: string;
+	/** No judge could answer the rule's `question`; regenerating the rule cannot fix that. */
+	judgeUnavailable?: boolean;
 }
 
 export interface ParsedRuleHistoryValidation {
@@ -25,6 +28,8 @@ export interface ParsedRuleHistoryValidation {
 export type OmfgRuleSourceLevel = "project" | "user";
 
 const JSON_FENCE_PATTERN = /```(?:json)?\s*([\s\S]*?)```/i;
+/** Most recent in-scope outputs a `question` rule is judged against during validation. */
+const MAX_JUDGED_VALIDATION_OUTPUTS = 8;
 
 export function extractGeneratedRuleJson(text: string): string | null {
 	const trimmed = text.trim();
@@ -55,6 +60,11 @@ export function buildOmfgRuleForPath(
 	return buildRuleFromMarkdown(ruleName, fileContent, filePath, createSourceMeta("omfg", filePath, level), {
 		ruleName,
 	});
+}
+
+/** Completed assistant outputs in `messages`, as TTSR rules see them. */
+export function historyOutputs(messages: readonly AgentMessage[], inspector: TtsrToolInspector): TtsrOutput[] {
+	return messages.filter(isAssistantMessage).flatMap(message => inspector.outputs(message));
 }
 
 function normalizeConditionRegexes(conditions: readonly string[]): { condition: string[] } | { error: string } {
@@ -108,18 +118,16 @@ export function parseGeneratedRule(text: string): GeneratedRuleParseResult {
 		return { error: "Rule name must contain at least one letter or digit" };
 	}
 
-	const conditionResult = normalizeConditionRegexes(payloadResult.condition);
-	if ("error" in conditionResult) {
-		return conditionResult;
+	let condition: string[] | undefined;
+	if (payloadResult.condition) {
+		const conditionResult = normalizeConditionRegexes(payloadResult.condition);
+		if ("error" in conditionResult) {
+			return conditionResult;
+		}
+		condition = conditionResult.condition;
 	}
 
-	const fileContent = assembleRuleMarkdown({
-		name: ruleName,
-		description: payloadResult.description,
-		condition: conditionResult.condition,
-		scope: payloadResult.scope,
-		body: payloadResult.body,
-	});
+	const fileContent = assembleRuleMarkdown({ ...payloadResult, name: ruleName, condition });
 
 	const virtualPath = path.join(process.cwd(), `${ruleName}.md`);
 	let rule: Rule;
@@ -129,25 +137,9 @@ export function parseGeneratedRule(text: string): GeneratedRuleParseResult {
 		return { error: error instanceof Error ? error.message : String(error) };
 	}
 
-	if (!rule.condition || rule.condition.length === 0) {
-		return { error: "Generated rule JSON must include at least one condition" };
-	}
-
-	for (const condition of rule.condition) {
-		if (isValidRegexCondition(condition) || isRepairableEscapedRegexCondition(condition)) {
-			continue;
-		}
-		try {
-			new RegExp(condition);
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			return { error: `Invalid condition regex ${JSON.stringify(condition)}: ${message}` };
-		}
-	}
-
 	const manager = new TtsrManager();
 	if (!manager.addRule(rule)) {
-		return { error: "Rule has no valid condition or reachable scope" };
+		return { error: "Rule has no valid trigger or reachable scope" };
 	}
 
 	return { rule, fileContent };
@@ -156,7 +148,9 @@ export function parseGeneratedRule(text: string): GeneratedRuleParseResult {
 interface GeneratedRulePayload {
 	name: string;
 	description: string;
-	condition: string[];
+	condition?: string[];
+	astCondition?: string[];
+	question?: string;
 	scope: string[];
 	body: string;
 }
@@ -228,8 +222,10 @@ function parseGeneratedRulePayload(jsonText: string): GeneratedRulePayload | { e
 	}
 
 	const condition = stringArrayField(object, "condition") ?? stringArrayField(object, "cond");
-	if (!condition || condition.length === 0) {
-		return { error: "Generated rule JSON must include at least one condition" };
+	const astCondition = stringArrayField(object, "astCondition");
+	const question = stringField(object, "question");
+	if (!condition && !astCondition && !question) {
+		return { error: "Generated rule JSON must include a `condition`, `astCondition`, or `question`" };
 	}
 
 	const scope = stringArrayField(object, "scope");
@@ -242,13 +238,7 @@ function parseGeneratedRulePayload(jsonText: string): GeneratedRulePayload | { e
 		return { error: "Generated rule JSON must include a non-empty body" };
 	}
 
-	return {
-		name: rawName,
-		description,
-		condition,
-		scope,
-		body,
-	};
+	return { name: rawName, description, condition, astCondition, question, scope, body };
 }
 
 function stringField(object: Record<string, unknown>, key: string): string | undefined {
@@ -278,16 +268,17 @@ function stringArrayField(object: Record<string, unknown>, key: string): string[
 }
 
 function assembleRuleMarkdown(payload: GeneratedRulePayload): string {
-	return [
-		"---",
-		`name: ${payload.name}`,
-		`description: ${JSON.stringify(payload.description)}`,
-		`condition: ${formatFrontmatterStringArray(payload.condition)}`,
+	const lines = ["---", `name: ${payload.name}`, `description: ${JSON.stringify(payload.description)}`];
+	if (payload.condition) lines.push(`condition: ${formatFrontmatterStringArray(payload.condition)}`);
+	if (payload.astCondition) lines.push(`astCondition: ${formatFrontmatterStringArray(payload.astCondition)}`);
+	if (payload.question) lines.push(`question: ${JSON.stringify(payload.question)}`);
+	lines.push(
 		`scope: ${formatFrontmatterStringArray(payload.scope)}`,
 		"---",
 		"",
 		payload.body.trim().replace(/\r\n?/g, "\n"),
-	].join("\n");
+	);
+	return lines.join("\n");
 }
 
 function formatFrontmatterStringArray(values: readonly string[]): string {
@@ -297,75 +288,42 @@ function formatFrontmatterStringArray(values: readonly string[]): string {
 	return `[${values.map(value => JSON.stringify(value)).join(", ")}]`;
 }
 
-interface HistorySurface {
-	text: string;
-	label: string;
-	context: TtsrMatchContext;
-}
-
-function collectAssistantSurfaces(messages: readonly AgentMessage[]): HistorySurface[] {
-	const surfaces: HistorySurface[] = [];
-	for (const message of messages) {
-		if (!isAssistantMessage(message)) continue;
-		for (let index = 0; index < message.content.length; index++) {
-			const block = message.content[index];
-			if (block.type === "text") {
-				surfaces.push({
-					text: block.text,
-					label: "assistant text",
-					context: { source: "text" },
-				});
-				continue;
-			}
-			if (block.type === "thinking") {
-				surfaces.push({
-					text: block.thinking,
-					label: "assistant thinking",
-					context: { source: "thinking" },
-				});
-				continue;
-			}
-			if (block.type === "toolCall") {
-				const filePaths = extractArgPaths(block.arguments);
-				surfaces.push({
-					text: stringifyToolArguments(block.arguments),
-					label: formatToolSurfaceLabel(block.name, filePaths),
-					context: {
-						source: "tool",
-						toolName: block.name,
-						filePaths,
-						streamKey: block.id ? `toolcall:${block.id}` : `tool:${block.name}:${index}`,
-					},
-				});
-			}
-		}
-	}
-	return surfaces;
-}
-
-export function validateRuleAgainstAssistantHistory(
+/**
+ * Check a rule against earlier assistant outputs the way TTSR would evaluate
+ * them live: `condition`/`astCondition` must match an in-scope output; a
+ * `question` rule must pass its scope/prefilter and get a yes from `judge` on
+ * one of the most recent in-scope outputs.
+ */
+export async function validateRuleAgainstAssistantHistory(
 	rule: Rule,
-	messages: readonly AgentMessage[],
-): RuleHistoryValidation {
+	outputs: readonly TtsrOutput[],
+	judge: Judge | undefined,
+): Promise<RuleHistoryValidation> {
 	const manager = new TtsrManager();
 	if (!manager.addRule(rule)) {
 		return {
 			matched: false,
-			feedback: "TTSR rejected the rule: it has no valid condition or its scope cannot reach any stream.",
+			feedback: "TTSR rejected the rule: it has no valid trigger or its scope cannot reach any stream.",
 		};
 	}
+	if (rule.question !== undefined) {
+		return validateQuestionRule(rule, rule.question, manager, outputs, judge);
+	}
 
-	const surfaces = collectAssistantSurfaces(messages);
-	const matches: HistorySurface[] = [];
-	for (const surface of surfaces) {
+	const matches: TtsrOutput[] = [];
+	for (const output of outputs) {
+		if (output.content.length === 0) continue;
 		manager.resetBuffer();
-		if (surface.text.length > 0 && manager.checkDelta(surface.text, surface.context).length > 0) {
-			matches.push(surface);
+		if (
+			manager.checkSnapshot(output.content, output.context).length > 0 ||
+			(await manager.checkAstSnapshot(output.content, output.context)).length > 0
+		) {
+			matches.push(output);
 		}
 	}
 
 	if (matches.length === 0) {
-		return { matched: false, feedback: buildNoMatchFeedback(rule, surfaces) };
+		return { matched: false, feedback: buildNoMatchFeedback(rule, outputs) };
 	}
 
 	const scopeFeedback = buildScopeFeedback(rule, matches);
@@ -376,11 +334,58 @@ export function validateRuleAgainstAssistantHistory(
 	return { matched: true };
 }
 
-export function validateParsedRuleAgainstAssistantHistory(
+async function validateQuestionRule(
+	rule: Rule,
+	question: string,
+	manager: TtsrManager,
+	outputs: readonly TtsrOutput[],
+	judge: Judge | undefined,
+): Promise<RuleHistoryValidation> {
+	const reachable: TtsrOutput[] = [];
+	for (const output of outputs) {
+		if ((await manager.judgedCandidates(output.content, output.context)).length > 0) reachable.push(output);
+	}
+	if (reachable.length === 0) {
+		return { matched: false, feedback: buildNoMatchFeedback(rule, outputs) };
+	}
+	if (!judge) {
+		return {
+			matched: false,
+			judgeUnavailable: true,
+			feedback: "No judge model is available (see `ttsr.judge`), so the question could not be confirmed.",
+		};
+	}
+
+	const recent = reachable.slice(-MAX_JUDGED_VALIDATION_OUTPUTS);
+	let verdicts: Rule[][];
+	try {
+		verdicts = await Promise.all(recent.map(output => judgeRules(judge, output, [{ rule, question }])));
+	} catch (error) {
+		return {
+			matched: false,
+			judgeUnavailable: true,
+			feedback: `The judge failed: ${error instanceof Error ? error.message : String(error)}`,
+		};
+	}
+	if (verdicts.some(flagged => flagged.length > 0)) {
+		return { matched: true };
+	}
+	return {
+		matched: false,
+		feedback: `The judge answered no to question ${JSON.stringify(question)} for every in-scope output checked (${recent
+			.map(output => output.subject)
+			.join(
+				", ",
+			)}). Rephrase the question so the offending output clearly answers yes, or prefer a \`condition\`/\`astCondition\` if the offending output has a literal or structural signature.`,
+	};
+}
+
+export async function validateParsedRuleAgainstAssistantHistory(
 	candidate: ParsedGeneratedRule,
-	messages: readonly AgentMessage[],
-): ParsedRuleHistoryValidation {
-	const validation = validateRuleAgainstAssistantHistory(candidate.rule, messages);
+	outputs: readonly TtsrOutput[],
+	judge: Judge | undefined,
+): Promise<ParsedRuleHistoryValidation> {
+	const validation = await validateRuleAgainstAssistantHistory(candidate.rule, outputs, judge);
 	if (validation.matched) {
 		return { candidate, validation, repairedCondition: false };
 	}
@@ -390,7 +395,7 @@ export function validateParsedRuleAgainstAssistantHistory(
 		return { candidate, validation, repairedCondition: false };
 	}
 
-	const repairedValidation = validateRuleAgainstAssistantHistory(repaired.rule, messages);
+	const repairedValidation = await validateRuleAgainstAssistantHistory(repaired.rule, outputs, judge);
 	if (repairedValidation.matched) {
 		return { candidate: repaired, validation: repairedValidation, repairedCondition: true };
 	}
@@ -398,32 +403,15 @@ export function validateParsedRuleAgainstAssistantHistory(
 	return { candidate, validation, repairedCondition: false };
 }
 
-export function ruleMatchesAssistantHistory(rule: Rule, messages: readonly AgentMessage[]): boolean {
-	return validateRuleAgainstAssistantHistory(rule, messages).matched;
-}
-
-function isValidRegexCondition(condition: string): boolean {
-	try {
-		compileRuleCondition(condition);
-		return true;
-	} catch {
-		return false;
-	}
-}
-
-function isRepairableEscapedRegexCondition(condition: string): boolean {
-	const repaired = condition.replace(/\\\\/g, "\\");
-	return repaired !== condition && isValidRegexCondition(repaired);
-}
-
 function repairEscapedConditions(candidate: ParsedGeneratedRule): ParsedGeneratedRule | undefined {
-	const currentConditions = candidate.rule.condition;
+	const { rule } = candidate;
+	const currentConditions = rule.condition;
 	if (!currentConditions || currentConditions.length === 0) return undefined;
 
 	const repairedConditions: string[] = [];
 	let changed = false;
 	for (const condition of currentConditions) {
-		const repaired = condition.replace(/\\\\/g, "\\");
+		const repaired = unescapeRegexConditionOnce(condition);
 		repairedConditions.push(repaired);
 		if (repaired !== condition) {
 			changed = true;
@@ -431,50 +419,62 @@ function repairEscapedConditions(candidate: ParsedGeneratedRule): ParsedGenerate
 	}
 	if (!changed) return undefined;
 
-	const scope = candidate.rule.scope;
+	const scope = rule.scope;
 	if (!scope || scope.length === 0) return undefined;
 
 	const fileContent = assembleRuleMarkdown({
-		name: candidate.rule.name,
-		description: candidate.rule.description ?? candidate.rule.name,
+		name: rule.name,
+		description: rule.description ?? rule.name,
 		condition: repairedConditions,
+		astCondition: rule.astCondition,
+		question: rule.question,
 		scope,
-		body: candidate.rule.content,
+		body: rule.content,
 	});
-	const level = candidate.rule._source.level === "user" ? "user" : "project";
+	const level = rule._source.level === "user" ? "user" : "project";
 	return {
-		rule: buildOmfgRuleForPath(candidate.rule.name, fileContent, candidate.rule.path, level),
+		rule: buildOmfgRuleForPath(rule.name, fileContent, rule.path, level),
 		fileContent,
 	};
 }
 
-function buildNoMatchFeedback(rule: Rule, surfaces: readonly HistorySurface[]): string {
-	const hints = extractConditionHints(rule.condition);
+function describeTriggers(rule: Rule): string {
+	const parts: string[] = [];
+	if (rule.condition) parts.push(`condition ${formatRuleList(rule.condition)}`);
+	if (rule.astCondition) parts.push(`astCondition ${formatRuleList(rule.astCondition)}`);
+	if (rule.question) parts.push(`question ${JSON.stringify(rule.question)}`);
+	return parts.join(" / ");
+}
+
+function buildNoMatchFeedback(rule: Rule, outputs: readonly TtsrOutput[]): string {
+	const hints = extractConditionHints([...(rule.condition ?? []), ...(rule.astCondition ?? [])]);
 	const lines = [
-		`No assistant history surface matched condition ${formatRuleList(rule.condition)} within scope ${formatRuleList(rule.scope)}.`,
+		rule.question
+			? `No assistant output within scope ${formatRuleList(rule.scope)} passed ${describeTriggers(rule)}; the question was never asked.`
+			: `No assistant output matched ${describeTriggers(rule)} within scope ${formatRuleList(rule.scope)}.`,
 	];
-	if (surfaces.length === 0) {
-		lines.push("No assistant text, thinking, or tool-call argument surfaces were available to check.");
+	if (outputs.length === 0) {
+		lines.push("No assistant replies, reasoning, or tool calls were available to check.");
 		return lines.join("\n");
 	}
 
-	lines.push("Checked surfaces:");
-	const max = Math.min(surfaces.length, 5);
+	lines.push("Checked outputs:");
+	const max = Math.min(outputs.length, 5);
 	for (let i = 0; i < max; i++) {
-		const surface = surfaces[i];
-		lines.push(`- ${surface.label}: ${JSON.stringify(excerptForSurface(surface.text, hints))}`);
+		const output = outputs[i];
+		lines.push(`- ${output.subject}: ${JSON.stringify(excerptForOutput(output.content, hints))}`);
 	}
-	if (surfaces.length > max) {
-		lines.push(`- ... ${surfaces.length - max} more surface(s)`);
+	if (outputs.length > max) {
+		lines.push(`- ... ${outputs.length - max} more output(s)`);
 	}
 	lines.push(
-		'If the visible bad code contains quotes, remember tool arguments are checked as serialized JSON, so quotes may appear as escaped sequences such as \\".',
+		'edit/write calls are checked as the written source text; other tool calls as serialized JSON arguments, where quotes appear escaped (\\").',
 	);
-	lines.push("If the condition looks right, fix the scope so it reaches the offending tool and file glob.");
+	lines.push("If the trigger looks right, fix the scope so it reaches the offending tool and file glob.");
 	return lines.join("\n");
 }
 
-function buildScopeFeedback(rule: Rule, matches: readonly HistorySurface[]): string | undefined {
+function buildScopeFeedback(rule: Rule, matches: readonly TtsrOutput[]): string | undefined {
 	const toolMatch = findFileToolMatch(matches);
 	if (!toolMatch) return undefined;
 
@@ -507,12 +507,12 @@ function buildScopeFeedback(rule: Rule, matches: readonly HistorySurface[]): str
 		problems.push("scope includes `text`, but the offending content was confirmed in tool arguments");
 	}
 
-	return `The condition matched ${toolMatch.label}, but ${problems.join("; ")}. Use a narrow scope such as ${JSON.stringify(
+	return `The trigger matched the ${toolMatch.subject}, but ${problems.join("; ")}. Use a narrow scope such as ${JSON.stringify(
 		recommendedScope,
 	)} and do not repeat the failed scope ${formatRuleList(rule.scope)}.`;
 }
 
-function findFileToolMatch(matches: readonly HistorySurface[]): HistorySurface | undefined {
+function findFileToolMatch(matches: readonly TtsrOutput[]): TtsrOutput | undefined {
 	for (const match of matches) {
 		if (match.context.source !== "tool") continue;
 		if (!match.context.toolName) continue;
@@ -522,9 +522,9 @@ function findFileToolMatch(matches: readonly HistorySurface[]): HistorySurface |
 	return undefined;
 }
 
-function recommendedToolScope(surface: HistorySurface): string | undefined {
-	const toolName = surface.context.toolName;
-	const glob = extensionGlob(surface.context.filePaths);
+function recommendedToolScope(output: TtsrOutput): string | undefined {
+	const toolName = output.context.toolName;
+	const glob = extensionGlob(output.context.filePaths);
 	if (!toolName || !glob) return undefined;
 	return `tool:${toolName}(${glob})`;
 }
@@ -539,13 +539,6 @@ function extensionGlob(filePaths: readonly string[] | undefined): string | undef
 	return undefined;
 }
 
-function formatToolSurfaceLabel(toolName: string, filePaths: readonly string[] | undefined): string {
-	if (!filePaths || filePaths.length === 0) {
-		return `tool:${toolName} serialized arguments`;
-	}
-	return `tool:${toolName}(${filePaths.join(", ")}) serialized arguments`;
-}
-
 function formatRuleList(values: readonly string[] | undefined): string {
 	if (!values || values.length === 0) {
 		return "<default>";
@@ -553,9 +546,9 @@ function formatRuleList(values: readonly string[] | undefined): string {
 	return values.map(value => JSON.stringify(value)).join(", ");
 }
 
-function extractConditionHints(conditions: readonly string[] | undefined): string[] {
+function extractConditionHints(conditions: readonly string[]): string[] {
 	const hints: string[] = [];
-	for (const condition of conditions ?? []) {
+	for (const condition of conditions) {
 		const matches = condition.match(/[A-Za-z_][A-Za-z0-9_]{2,}/g) ?? [];
 		for (const match of matches) {
 			const normalized = match.toLowerCase();
@@ -576,7 +569,7 @@ function extractConditionHints(conditions: readonly string[] | undefined): strin
 	return hints;
 }
 
-function excerptForSurface(text: string, hints: readonly string[]): string {
+function excerptForOutput(text: string, hints: readonly string[]): string {
 	const normalized = text.replace(/\s+/g, " ");
 	if (normalized.length <= 260) {
 		return normalized;
@@ -604,44 +597,4 @@ function excerptForSurface(text: string, hints: readonly string[]): string {
 function isAssistantMessage(message: AgentMessage): message is AssistantMessage {
 	const candidate = message as { role?: unknown; content?: unknown };
 	return candidate.role === "assistant" && Array.isArray(candidate.content);
-}
-
-function stringifyToolArguments(args: unknown): string {
-	try {
-		const text = JSON.stringify(args);
-		return typeof text === "string" ? text : "";
-	} catch {
-		return "";
-	}
-}
-
-function extractArgPaths(args: unknown): string[] | undefined {
-	if (!args || typeof args !== "object" || Array.isArray(args)) {
-		return undefined;
-	}
-
-	const paths: string[] = [];
-	for (const key in args as Record<string, unknown>) {
-		const value = (args as Record<string, unknown>)[key];
-		const normalizedKey = key.toLowerCase();
-		if (typeof value === "string" && (normalizedKey === "path" || normalizedKey.endsWith("path"))) {
-			paths.push(value);
-			continue;
-		}
-		if (Array.isArray(value) && (normalizedKey === "paths" || normalizedKey.endsWith("paths"))) {
-			for (const candidate of value) {
-				if (typeof candidate === "string") {
-					paths.push(candidate);
-				}
-			}
-		}
-	}
-
-	const uniquePaths: string[] = [];
-	for (const candidate of paths) {
-		if (!uniquePaths.includes(candidate)) {
-			uniquePaths.push(candidate);
-		}
-	}
-	return uniquePaths.length > 0 ? uniquePaths : undefined;
 }

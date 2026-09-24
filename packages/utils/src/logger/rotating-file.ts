@@ -1,5 +1,4 @@
 /** Behavior-compatible reimplementation of winston-daily-rotate-file's used surface. */
-import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -151,7 +150,7 @@ export class RotatingFileSink {
 
 	#registerFile(filePath: string, date: number): void {
 		if (this.#files.some(file => file.name === filePath)) return;
-		const hash = crypto.createHash("sha256").update(`${filePath}LOG_FILE${date}`).digest("hex");
+		const hash = Bun.SHA256.hash(`${filePath}LOG_FILE${date}`, "hex");
 		this.#files.push({ date, name: filePath, hash });
 		while (this.#files.length > this.#maxFiles) {
 			const removed = this.#files.shift();

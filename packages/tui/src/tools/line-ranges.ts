@@ -15,6 +15,11 @@ const LINE_RANGE_CHUNK_RE = new RegExp(`^${LINE_RANGE_CHUNK_SOURCE}$`, "i");
 
 /** Parse a single `N`, `N-M`, `N-`, `N+K`, or `..`-aliased (`N..M`, `N..`) chunk. Throws via {@link ToolError} on invalid bounds. */
 export function parseLineRangeChunk(sel: string): LineRange | null {
+	return parseChunk(sel, false);
+}
+
+/** `pinBare` makes a separator-less `N` the single line `N` instead of "from `N` onward". */
+function parseChunk(sel: string, pinBare: boolean): LineRange | null {
 	const lineMatch = LINE_RANGE_CHUNK_RE.exec(sel);
 	if (!lineMatch) return null;
 	const rawStart = Number.parseInt(lineMatch[1]!, 10);
@@ -31,27 +36,32 @@ export function parseLineRangeChunk(sel: string): LineRange | null {
 		}
 		rawEnd = rawStart + rhs - 1;
 	} else if (sep === "-") {
-		// `301-` is shorthand for "from 301 onward" — equivalent to bare `301`.
+		// `301-` is shorthand for "from 301 onward" — equivalent to a lone bare `301`.
 		if (rhs !== undefined) {
 			if (rhs < rawStart) {
 				throw new ToolError(`Invalid range ${rawStart}-${rhs}: end must be >= start.`);
 			}
 			rawEnd = rhs;
 		}
+	} else if (pinBare) {
+		rawEnd = rawStart;
 	}
 	return { startLine: rawStart, endLine: rawEnd };
 }
 
 /**
- * Parse a comma-separated list of line ranges (e.g. `5-16,960-973`). Returns
+ * Parse a comma-separated list of line ranges (e.g. `5-16,960-973` or `19,59`). Returns
  * the ranges in ascending order with overlapping/adjacent ranges merged so
  * downstream consumers can stream the file in a single forward pass per range.
  */
 export function parseLineRanges(sel: string): [LineRange, ...LineRange[]] | null {
 	const chunks = sel.split(",");
+	// A lone `:50` means "from line 50". Inside a comma list, a bare number is
+	// that one line; otherwise `:19,59` collapses to "from 19 through EOF".
+	const pinBare = chunks.length > 1;
 	const parsed: LineRange[] = [];
 	for (const chunk of chunks) {
-		const range = parseLineRangeChunk(chunk);
+		const range = parseChunk(chunk, pinBare);
 		if (!range) return null;
 		parsed.push(range);
 	}

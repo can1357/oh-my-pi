@@ -49,18 +49,18 @@ const RESERVED_OPTION_LABELS: Record<string, true> = {
 };
 
 const OptionItem = arkType({
-	label: arkType("string").describe("display label"),
-	"description?": arkType("string").describe("optional explanatory text displayed below the label"),
-	"preview?": arkType("string").describe("optional rich preview content for interactive ask dialogs"),
+	label: arkType("string"),
+	"description?": arkType("string"),
+	"preview?": arkType("string").describe("rich preview"),
 });
 
 const QuestionItem = arkType({
-	id: arkType("string").describe("question id"),
-	question: arkType("string").describe("question text"),
-	"header?": arkType("string").describe("optional short display chip for rich ask dialogs"),
-	options: OptionItem.array().describe("available options"),
-	"multi?": arkType("boolean").describe("allow multiple selections"),
-	"recommended?": arkType("number").describe("recommended option index"),
+	id: arkType("string"),
+	question: arkType("string"),
+	"header?": arkType("string").describe("display chip"),
+	options: OptionItem.array(),
+	"multi?": arkType("boolean"),
+	"recommended?": arkType("number").describe("0-based default index"),
 }).narrow((question, ctx) => {
 	const reserved = question.options.find(option => RESERVED_OPTION_LABELS[option.label] === true);
 	return (
@@ -70,7 +70,7 @@ const QuestionItem = arkType({
 });
 
 const askSchema = arkType({
-	questions: QuestionItem.array().atLeastLength(1).describe("questions to ask"),
+	questions: QuestionItem.array().atLeastLength(1),
 });
 
 export type AskToolInput = typeof askSchema.infer;
@@ -754,38 +754,14 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 
 	readonly examples: readonly ToolExample<typeof askSchema.infer>[] = [
 		{
-			caption: "Single question",
+			caption: "Choice",
 			call: {
 				questions: [
 					{
-						id: "auth_method",
-						question: "Which authentication method should this API use?",
-						options: [
-							{ label: "JWT", description: "Bearer tokens for stateless API clients." },
-							{ label: "OAuth2", description: "Delegated authorization with external identity providers." },
-							{
-								label: "Session cookies",
-								description: "Browser-first authentication backed by server-side sessions.",
-							},
-						],
+						id: "storage",
+						question: "Database?",
+						options: [{ label: "SQLite" }, { label: "Postgres" }],
 						recommended: 0,
-					},
-				],
-			},
-		},
-		{
-			caption: "Multiple questions",
-			call: {
-				questions: [
-					{
-						id: "storage_type",
-						question: "Which storage backend?",
-						options: [{ label: "SQLite" }, { label: "PostgreSQL" }],
-					},
-					{
-						id: "auth_method",
-						question: "Which auth method?",
-						options: [{ label: "JWT" }, { label: "Session cookies" }],
 					},
 				],
 			},
@@ -813,7 +789,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		const method = this.session.settings.get("ask.notify");
 		if (method === "off") return;
 		TERMINAL.sendNotification({
-			title: "Oh My Pi",
+			title: "omp",
 			body: "Waiting for input",
 			type: "ask",
 			urgency: "normal",

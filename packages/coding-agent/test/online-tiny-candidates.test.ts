@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { getRoleInfo } from "@oh-my-pi/pi-coding-agent/config/model-roles";
 import { formatModelStringWithRouting } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
@@ -7,11 +8,13 @@ import {
 	expandOnlineTinyModelFallbacks,
 } from "@oh-my-pi/pi-coding-agent/tiny/online-candidates";
 
+const localTiny = getBundledModel("local", "lfm2.5-230m")!;
 const primary = getBundledModel("google", "gemini-2.5-flash")!;
 const secondary = getBundledModel("openai", "gpt-4o-mini")!;
 const fallback = getBundledModel("google-vertex", "gemini-2.5-flash")!;
 const models = [primary, secondary, fallback];
 const primarySelector = `${primary.provider}/${primary.id}`;
+const localTinySelector = `${localTiny.provider}/${localTiny.id}`;
 const secondarySelector = `${secondary.provider}/${secondary.id}`;
 const fallbackSelector = `${fallback.provider}/${fallback.id}`;
 
@@ -26,6 +29,29 @@ function candidates(chains: Record<string, string[]>, modelFallback = true) {
 }
 
 describe("online tiny fallback candidates", () => {
+	it("selects a configured local-inference tiny model before explicit fallbacks", () => {
+		const settings = Settings.isolated({
+			"retry.fallbackChains": { tiny: [fallbackSelector, secondarySelector] },
+		});
+		settings.setModelRole("tiny", localTinySelector);
+		const callerPool = [localTiny, primary, secondary, fallback].filter(getRoleInfo("tiny", settings).accepts);
+
+		expect(localTiny).toMatchObject({ api: "local-inference", kind: "tiny" });
+		expect(collectOnlineTinyCandidates(["tiny"], settings, callerPool).map(candidate => candidate.model)).toEqual([
+			localTiny,
+			fallback,
+			secondary,
+		]);
+	});
+
+	it("does not let normal chat roles select a nonchat pool after caller filtering", () => {
+		const settings = Settings.isolated({});
+		settings.setModelRole("smol", localTinySelector);
+		const callerPool = [localTiny].filter(getRoleInfo("smol", settings).accepts);
+
+		expect(collectOnlineTinyCandidates(["smol"], settings, callerPool)).toEqual([]);
+	});
+
 	it("does not hop to another role primary when model fallback is disabled", () => {
 		expect(candidates({ tiny: [fallbackSelector] }, false)).toEqual([primary]);
 	});

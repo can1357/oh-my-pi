@@ -89,7 +89,7 @@ describe("extension autocomplete provider API (#4919)", () => {
 		await Settings.init({ inMemory: true, cwd: tempDir.path() });
 		Settings.instance.set("startup.quiet", true);
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		registry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 		const resolved = registry.find("anthropic", "claude-sonnet-4-5");
 		if (!resolved) throw new Error("Expected anthropic model claude-sonnet-4-5 to exist");

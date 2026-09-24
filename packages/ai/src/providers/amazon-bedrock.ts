@@ -71,6 +71,43 @@ const SIGNER_OWNED_HEADERS = new Set(["host", "x-amz-date", "x-amz-content-sha25
 // mismatch.
 const BEDROCK_RESERVED_HEADERS = new Set(["content-type", "accept", "authorization", "content-length"]);
 
+/**
+ * HTTP status for a ConverseStream in-stream failure, keyed by lowercased
+ * exception shape name. Exception and error frames ride inside an HTTP 200
+ * event stream, so the shape name in `:exception-type` / `:error-code` is the
+ * only evidence of what actually failed upstream. Values come from the
+ * bedrock-runtime service model (the same source the AWS SDKs deserialize
+ * against): without them every in-stream failure would be stamped 400, which
+ * the retry classifier reads as a deterministic client rejection and refuses
+ * to replay — making a transient `internalServerException` (500) terminal.
+ * Shapes absent from the map keep 400 so an unrecognized rejection is never
+ * retried by accident.
+ */
+const BEDROCK_STREAM_EXCEPTION_STATUS: Record<string, number> = {
+	accessdeniedexception: 403,
+	conflictexception: 400,
+	internalserverexception: 500,
+	modelerrorexception: 424,
+	modelnotreadyexception: 429,
+	modelstreamerrorexception: 424,
+	modeltimeoutexception: 408,
+	resourcenotfoundexception: 404,
+	servicequotaexceededexception: 400,
+	serviceunavailableexception: 503,
+	throttlingexception: 429,
+	validationexception: 400,
+};
+
+/**
+ * Resolve the service-model status for an in-stream exception/error code.
+ * Frame headers carry the bare shape name in either camelCase
+ * (`internalServerException`) or PascalCase (`InternalServerException`); both
+ * normalize to the same map key. Unknown shapes default to 400.
+ */
+export function bedrockStreamExceptionStatus(code: string): number {
+	return BEDROCK_STREAM_EXCEPTION_STATUS[code.trim().toLowerCase()] ?? 400;
+}
+
 export type BedrockThinkingDisplay = "summarized" | "omitted";
 
 /** Bedrock guardrail trace verbosity, mirrors the Converse `guardrailConfig.trace` values. */
@@ -260,7 +297,7 @@ interface WireMessage {
 }
 
 interface WireToolSpec {
-	toolSpec: { name: string; description: string; inputSchema: { json: unknown } };
+	toolSpec: { name: string; description?: string; inputSchema: { json: unknown } };
 }
 interface WireToolChoice {
 	auto?: Record<string, never>;
@@ -605,12 +642,16 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 					const payload = safeParsePayload(message.payload) as { message?: string } | undefined;
 					const errorMessage = payload?.message || new TextDecoder().decode(message.payload);
 					const text = `${exceptionType}: ${errorMessage}`;
-					throw new AIError.BedrockApiError(text, 400, { code: exceptionType });
+					throw new AIError.BedrockApiError(text, bedrockStreamExceptionStatus(exceptionType), {
+						code: exceptionType,
+					});
 				}
 				if (messageType === "error") {
 					const code = message.headers[":error-code"] || "UnknownError";
 					const errorMessage = message.headers[":error-message"] || new TextDecoder().decode(message.payload);
-					throw new AIError.BedrockApiError(`${code}: ${errorMessage}`, 400, { code });
+					throw new AIError.BedrockApiError(`${code}: ${errorMessage}`, bedrockStreamExceptionStatus(code), {
+						code,
+					});
 				}
 				if (messageType !== "event") continue;
 
@@ -947,10 +988,17 @@ function buildToolResultBlock(
 	hoistedImages: ImageBlockWire[],
 ): ToolResultBlockWire {
 	const content: Array<TextBlockWire | ImageBlockWire> = [];
+	// Bedrock's Anthropic Claude models reject an error toolResult that carries a
+	// non-text block ("all content must be type `text` if `is_error` is true"),
+	// so images inside an error result must always be hoisted out regardless of
+	// the model's requiresToolResultImageHoisting flag (no `class "anthropic"`
+	// rule sets it). Mirrors anthropic.ts buildToolResultBlock. Re-serializing a
+	// previously-persisted poisoned result on a later turn repairs it in place.
+	const hoistImages = message.isError || model.requiresToolResultImageHoisting;
 	for (const block of message.content) {
 		if (block.type === "image") {
 			const image: ImageBlockWire = { image: createImageBlock(block.mimeType, block.data) };
-			if (model.requiresToolResultImageHoisting) {
+			if (hoistImages) {
 				content.push({ text: "(see attached image)" });
 				hoistedImages.push(image);
 			} else {
@@ -1114,7 +1162,9 @@ function convertToolSpec(tool: Tool): WireToolSpec {
 	return {
 		toolSpec: {
 			name: tool.name,
-			description: tool.description || "",
+			// Descriptions may be pruned into the system prompt. Bedrock permits
+			// omission, but rejects an explicitly empty description (minLength: 1).
+			description: tool.description || undefined,
 			inputSchema: { json: toolWireSchema(tool) },
 		},
 	};

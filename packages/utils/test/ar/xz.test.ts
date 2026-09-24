@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import * as crypto from "node:crypto";
 import { crc32 } from "../../src/ar/checksums";
 import { lzmaAloneDecompress } from "../../src/ar/codecs/lzma";
 import { isXz, xzDecompress } from "../../src/ar/codecs/xz";
@@ -9,7 +8,7 @@ import { arFixture as fixture } from "./fixtures";
 const TEXT_HASH = "ee8e31cbfe3ffd471a71273fc17c68c50db0aa63d48d6b6b294f5560bfc08c2a";
 
 function sha256(bytes: Uint8Array): string {
-	return crypto.createHash("sha256").update(bytes).digest("hex");
+	return Bun.SHA256.hash(bytes, "hex");
 }
 
 function read32LE(bytes: Uint8Array, offset: number): number {

@@ -11,10 +11,11 @@ import { parseModelString, splitUpstreamRouting, formatModelSelectorValue } from
  * in the compact alt+p picker ({@link ./model-picker}).
  */
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Model } from "@oh-my-pi/pi-ai";
+import type { KeysApi, Model } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
+import { MODEL_KINDS, modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
 import type { Component, TUI } from "../tui";
 import { extractPrintableText, matchesKey } from "../keys";
 import { fuzzyFilter } from "../fuzzy";
@@ -88,7 +89,7 @@ export interface ModelHubSource extends ModelBrowserSource {
 
 /** Catalog capabilities required by the model hub. */
 export interface ModelHubRegistry extends ModelBrowserRegistry {
-	readonly authStorage: { hasAuth(provider: string): boolean };
+	readonly authStorage: { readonly keys: Pick<KeysApi, "source"> };
 	getDiscoverableProviders(): string[];
 	getProviderDiscoveryState(provider: string):
 		| {
@@ -187,6 +188,9 @@ type StripState =
 
 const PROVIDER_REFRESH_DEBOUNCE_MS = 120;
 const RECENT_LIMIT = 15;
+const MODEL_KIND_TABS: ReadonlyArray<"all" | ModelKind> = ["all", ...MODEL_KINDS];
+const ROLE_TABS = ["all", "chat", "kind"] as const;
+type RoleTab = (typeof ROLE_TABS)[number];
 
 /**
  * Providers already auto-refreshed this process. Selecting a provider fetches
@@ -215,6 +219,9 @@ export class ModelHubComponent implements Component {
 	#roles: RoleAssignments = {};
 	#availableItems: ModelBrowserItem[] = [];
 	#recentItems: ModelBrowserItem[] = [];
+	#candidateItems: ModelBrowserItem[] = [];
+	#modelKindTab: "all" | ModelKind = "all";
+	#roleTab: RoleTab = "all";
 	#configError: string | undefined;
 
 	#entries: SidebarEntry[] = [];
@@ -268,7 +275,8 @@ export class ModelHubComponent implements Component {
 		} else if (entry.kind === "provider" && entry.locked && this.#assigning === null) {
 			lines.push(...this.#renderLockedView(entry, width, rows - 1));
 		} else {
-			this.#browser.setMaxVisible(rows - 1 - 5);
+			lines.push(this.#renderModelKindTabs(width));
+			this.#browser.setMaxVisible(rows - 2 - 5);
 			this.#browser.setFocused(this.#focus === "list");
 			lines.push(...this.#browser.render(width));
 		}
@@ -360,7 +368,7 @@ export class ModelHubComponent implements Component {
 
 	/** Resolve every known role: configured values first, auto-selection for the rest. */
 	#reloadRoles(autoCandidates: ReadonlyArray<Model>): void {
-		const allModels = this.#scopedModels.length > 0 ? autoCandidates : this.#registry.getAll();
+		const allModels = this.#scopedModels.length > 0 ? autoCandidates : this.#registry.getAll("all");
 		this.#roles = resolveRoleAssignments(this.#settings, allModels, autoCandidates);
 	}
 
@@ -379,9 +387,9 @@ export class ModelHubComponent implements Component {
 		} else {
 			const loadError = this.#registry.getError();
 			this.#configError = loadError ? String(loadError) : undefined;
-			allModels = this.#registry.getAll();
+			allModels = this.#registry.getAll("all");
 			try {
-				availableModels = this.#registry.getAvailable();
+				availableModels = this.#registry.getAvailable("all");
 			} catch (error) {
 				this.#configError = error instanceof Error ? error.message : String(error);
 				availableModels = [];
@@ -443,7 +451,8 @@ export class ModelHubComponent implements Component {
 				// Discoverable without stored auth: catalog-backed providers stay
 				// locked; keyless/custom endpoints (ollama, vllm, …) surface as
 				// selectable so discovery can populate them.
-				if (authStorage.hasAuth(provider) || !locked.has(provider)) {
+				const authenticated = authStorage.keys.source(provider) !== undefined;
+				if (authenticated || !locked.has(provider)) {
 					// #2761: implicit local endpoints (optional: true) stay hidden
 					// until discovery actually reaches a server. "idle" means never
 					// probed; "unavailable" means the endpoint is unreachable; both
@@ -451,7 +460,7 @@ export class ModelHubComponent implements Component {
 					// configured. models.yml discovery providers (optional: false)
 					// and providers with stored auth keep their entry so
 					// misconfigurations stay visible and diagnosable.
-					if (!authStorage.hasAuth(provider)) {
+					if (!authenticated) {
 						const discovery = this.#registry.getProviderDiscoveryState(provider);
 						if (discovery?.optional && (discovery.status === "idle" || discovery.status === "unavailable")) {
 							continue;
@@ -602,18 +611,18 @@ export class ModelHubComponent implements Component {
 		switch (entry.kind) {
 			case "recent":
 				this.#browser.setShowProvider(true);
-				this.#browser.setItems([...this.#recentItems]);
+				this.#setCandidateItems(this.#recentItems);
 				break;
 			case "provider": {
 				if (entry.locked) {
 					// Assign-mode renders the browser regardless of scope; a locked
 					// provider contributes nothing selectable.
-					this.#browser.setItems([]);
+					this.#setCandidateItems([]);
 					break;
 				}
 				const providerId = entry.providerId;
 				this.#browser.setShowProvider(false);
-				this.#browser.setItems(this.#availableItems.filter(item => item.provider === providerId));
+				this.#setCandidateItems(this.#availableItems.filter(item => item.provider === providerId));
 				break;
 			}
 			case "roles":
@@ -621,9 +630,23 @@ export class ModelHubComponent implements Component {
 				break;
 			default:
 				this.#browser.setShowProvider(true);
-				this.#browser.setItems([...this.#availableItems]);
+				this.#setCandidateItems(this.#availableItems);
 				break;
 		}
+	}
+
+	#setCandidateItems(items: ReadonlyArray<ModelBrowserItem>): void {
+		this.#candidateItems = [...items];
+		this.#applyModelKind();
+	}
+
+	#applyModelKind(): void {
+		const kind = this.#modelKindTab;
+		this.#browser.setItems(
+			kind === "all"
+				? [...this.#candidateItems]
+				: this.#candidateItems.filter(item => modelKind(item.model) === kind),
+		);
 	}
 
 	/**
@@ -655,12 +678,24 @@ export class ModelHubComponent implements Component {
 	#buildRolesRows(): void {
 		const rows: RolesRow[] = [];
 		const chains = this.#fallbackChains();
-		for (const role of this.#visibleRoleIds()) {
-			rows.push({ kind: "role", role });
-			const chain = chains[role] ?? [];
-			for (let i = 0; i < chain.length; i++) {
-				rows.push({ kind: "fallback", role, chainIndex: i, selector: chain[i] });
+		const appendRoles = (roles: ReadonlyArray<string>): void => {
+			for (const role of roles) {
+				rows.push({ kind: "role", role });
+				const chain = chains[role] ?? [];
+				for (let i = 0; i < chain.length; i++) {
+					rows.push({ kind: "fallback", role, chainIndex: i, selector: chain[i] });
+				}
 			}
+		};
+		const visibleRoles = this.#visibleRoleIds();
+		if (this.#roleTab === "all") {
+			const chatRoles = visibleRoles.filter(role => this.#settings.getRoleInfo(role).section === "chat");
+			const kindRoles = visibleRoles.filter(role => this.#settings.getRoleInfo(role).section === "kind");
+			appendRoles(chatRoles);
+			if (chatRoles.length > 0 && kindRoles.length > 0) rows.push({ kind: "separator" });
+			appendRoles(kindRoles);
+		} else {
+			appendRoles(visibleRoles.filter(role => this.#settings.getRoleInfo(role).section === this.#roleTab));
 		}
 		rows.push({ kind: "newRole" });
 		rows.push({ kind: "separator" });
@@ -912,7 +947,7 @@ export class ModelHubComponent implements Component {
 		const roleValue =
 			scope === "project" ? this.#settings.getProjectModelRole(role) : this.#settings.getGlobalModelRole(role);
 		const allModels =
-			this.#scopedModels.length > 0 ? this.#scopedModels.map(scoped => scoped.model) : this.#registry.getAll();
+			this.#scopedModels.length > 0 ? this.#scopedModels.map(scoped => scoped.model) : this.#registry.getAll("all");
 		const roleLookup: ModelRoleLookup = {
 			getModelRole: scopedRole =>
 				scope === "project"
@@ -987,12 +1022,14 @@ export class ModelHubComponent implements Component {
 		return [ThinkingLevel.Inherit, ThinkingLevel.Off, AUTO_THINKING, ...getSupportedEfforts(model)];
 	}
 
+	/** Offer only the roles this model can actually fill (chat roles for chat models, `web` for search runners, …). */
 	#openRoleStrip(item: ModelBrowserItem): void {
 		const chips: StripChip[] = [];
 		const scopedStorage = this.#settings.modelRoleStorage === "project";
 		const scopes: readonly ModelRoleSelectionScope[] = scopedStorage ? ["project", "global"] : ["global"];
 		for (const role of this.#visibleRoleIds()) {
 			const info = this.#settings.getRoleInfo(role);
+			if (!info.accepts(item.model)) continue;
 			const assignment = this.#roles[role];
 			for (const scope of scopes) {
 				const scopedModel = scopedStorage
@@ -1029,7 +1066,10 @@ export class ModelHubComponent implements Component {
 			styled: theme.fg("muted", `fallbacks:${item.model.provider}/*`),
 			action: "fallbackProvider",
 		});
-		chips.push({ label: "fallback", styled: theme.fg("muted", "retry-fallback"), action: "fallback" });
+		// `retry-fallback` appends to the default chain, so only chat-capable models qualify.
+		if (this.#settings.getRoleInfo("default").accepts(item.model)) {
+			chips.push({ label: "fallback", styled: theme.fg("muted", "retry-fallback"), action: "fallback" });
+		}
 		this.#strip = { kind: "role", item, chips, index: 0, returnToRoles: false };
 	}
 
@@ -1290,7 +1330,9 @@ export class ModelHubComponent implements Component {
 		this.#assigning = { kind: "role", role };
 		this.#focus = "scope";
 		this.#browser.setShowProvider(true);
-		this.#browser.setItems([...this.#availableItems]);
+		this.#setCandidateItems(
+			this.#availableItems.filter(item => this.#settings.getRoleInfo(role).accepts(item.model)),
+		);
 		this.#browser.setQuery("");
 		const current = this.#roles[role];
 		if (current) {
@@ -1303,7 +1345,7 @@ export class ModelHubComponent implements Component {
 		this.#assigning = { kind: "fallback", role, index };
 		this.#focus = "scope";
 		this.#browser.setShowProvider(true);
-		this.#browser.setItems([...this.#availableItems]);
+		this.#setCandidateItems(this.#availableItems);
 		this.#browser.setQuery("");
 		if (index !== null) {
 			const selector = this.#fallbackChains()[role]?.[index];
@@ -1321,7 +1363,7 @@ export class ModelHubComponent implements Component {
 		this.#assigning = { kind: "fallbackKey" };
 		this.#focus = "scope";
 		this.#browser.setShowProvider(true);
-		this.#browser.setItems([...this.#availableItems]);
+		this.#setCandidateItems(this.#availableItems);
 		this.#browser.setQuery("");
 	}
 
@@ -1462,6 +1504,22 @@ export class ModelHubComponent implements Component {
 	// Input
 	// ═══════════════════════════════════════════════════════════════════════
 
+	#moveModelKind(delta: -1 | 1): void {
+		const current = MODEL_KIND_TABS.indexOf(this.#modelKindTab);
+		const next = (Math.max(0, current) + delta + MODEL_KIND_TABS.length) % MODEL_KIND_TABS.length;
+		this.#modelKindTab = MODEL_KIND_TABS[next] ?? "all";
+		this.#applyModelKind();
+	}
+
+	#moveRoleTab(delta: -1 | 1): void {
+		const current = ROLE_TABS.indexOf(this.#roleTab);
+		const next = (Math.max(0, current) + delta + ROLE_TABS.length) % ROLE_TABS.length;
+		this.#roleTab = ROLE_TABS[next] ?? "all";
+		this.#roleIndex = 0;
+		this.#roleScrollStart = 0;
+		this.#buildRolesRows();
+	}
+
 	handleInput(data: string): void {
 		if (this.#assignmentPending) {
 			if (matchesSelectCancel(data)) this.#callbacks.onCancel();
@@ -1503,6 +1561,21 @@ export class ModelHubComponent implements Component {
 			if (entry.kind === "provider" && !entry.locked) {
 				this.#scheduleProviderRefresh(entry.providerId ?? "", { force: true });
 			}
+			return;
+		}
+		// Alt+←/→ cycles whichever tab strip is on screen: role tabs in the
+		// Roles view, kind tabs in every browser view. Ctrl+←/→ is unusable on
+		// macOS (Spaces shortcut). macOS terminals (ghostty, Terminal.app,
+		// iTerm) send ESC b / ESC f for Option+←/→, which parse as alt+b /
+		// alt+f — the same aliases the editor's word-motion bindings accept.
+		if (matchesKey(data, "alt+left") || matchesKey(data, "alt+b")) {
+			if (rolesView) this.#moveRoleTab(-1);
+			else this.#moveModelKind(-1);
+			return;
+		}
+		if (matchesKey(data, "alt+right") || matchesKey(data, "alt+f")) {
+			if (rolesView) this.#moveRoleTab(1);
+			else this.#moveModelKind(1);
 			return;
 		}
 
@@ -1797,8 +1870,8 @@ export class ModelHubComponent implements Component {
 			} else if (overBody) {
 				if (entry.kind === "roles" && this.#assigning === null) {
 					this.#roleIndex = this.#stepRoleIndex(this.#roleIndex, event.wheel > 0 ? 1 : -1, { wrap: false });
-				} else if (this.#isBrowserView(entry)) {
-					this.#browser.routeMouse(event, bodyLine);
+				} else if (this.#isBrowserView(entry) && bodyLine > 0) {
+					this.#browser.routeMouse(event, bodyLine - 1);
 				}
 			}
 			return true;
@@ -1812,8 +1885,8 @@ export class ModelHubComponent implements Component {
 					roleLine >= 0 && roleLine < this.#rolesVisibleCount ? roleLine + this.#roleScrollStart : null;
 			} else {
 				this.#roleHover = null;
-				if (overBody && this.#isBrowserView(entry)) {
-					this.#browser.routeMouse(event, bodyLine);
+				if (overBody && this.#isBrowserView(entry) && bodyLine > 0) {
+					this.#browser.routeMouse(event, bodyLine - 1);
 				} else {
 					// Pointer left the browser pane: without this, the last
 					// hovered row keeps its band while the sidebar hovers too.
@@ -1860,8 +1933,8 @@ export class ModelHubComponent implements Component {
 				if (this.#lockedLoginLine !== null && bodyLine === this.#lockedLoginLine) {
 					this.#requestLogin(entry);
 				}
-			} else if (this.#isBrowserView(entry)) {
-				this.#browser.routeMouse(event, bodyLine);
+			} else if (this.#isBrowserView(entry) && bodyLine > 0) {
+				this.#browser.routeMouse(event, bodyLine - 1);
 			}
 		}
 		return true;
@@ -1926,6 +1999,24 @@ export class ModelHubComponent implements Component {
 			padTruncated: true,
 		};
 	};
+
+	#renderModelKindTabs(width: number): string {
+		const active = MODEL_KIND_TABS.indexOf(this.#modelKindTab);
+		const track = renderSegmentTrack(
+			MODEL_KIND_TABS.map(kind => ({ label: kind })),
+			Math.max(0, active),
+		);
+		return truncateToWidth(` ${theme.fg("dim", "Kind:")} ${track}  ${theme.fg("dim", "Alt+←/→")}`, width);
+	}
+
+	#renderRoleTabs(width: number): string {
+		const active = ROLE_TABS.indexOf(this.#roleTab);
+		const track = renderSegmentTrack(
+			ROLE_TABS.map(tab => ({ label: tab === "kind" ? "kinds" : tab })),
+			Math.max(0, active),
+		);
+		return truncateToWidth(` ${theme.fg("dim", "Roles:")} ${track}  ${theme.fg("dim", "Alt+←/→")}`, width);
+	}
 
 	#statusRow(width: number): string {
 		if (this.#assignmentPending) {
@@ -1995,10 +2086,9 @@ export class ModelHubComponent implements Component {
 
 	#renderRolesView(width: number, rows: number): string[] {
 		const lines: string[] = [];
-		lines.push("");
+		lines.push(this.#renderRoleTabs(width));
 		// First row's offset in bodyLine coordinates: the mouse router's
-		// `bodyLine` has already dropped the status row, so this is just the
-		// leading blank line — no extra status-row offset here.
+		// `bodyLine` has already dropped the status row, leaving the tabs row.
 		this.#rolesRowStart = lines.length;
 
 		let tagWidth = 0;
@@ -2162,7 +2252,7 @@ export class ModelHubComponent implements Component {
 		const catalogCount = entry.catalogCount ?? 0;
 		if (catalogCount > 0) {
 			lines.push(truncateToWidth(theme.fg("dim", `  ${catalogCount} models in catalog:`), width));
-			const preview = this.#scopedModels.length > 0 ? [] : this.#registry.getAll();
+			const preview = this.#scopedModels.length > 0 ? [] : this.#registry.getAll("all");
 			for (const model of preview) {
 				if (model.provider !== entry.providerId) continue;
 				if (lines.length >= rows) break;
@@ -2186,17 +2276,17 @@ export class ModelHubComponent implements Component {
 		if (this.#assigning !== null) {
 			switch (this.#assigning.kind) {
 				case "fallback":
-					return "Enter pick fallback · ↑/↓ providers · type to search · Esc cancel";
+					return "Enter pick fallback · ↑/↓ providers · type to search · Alt+←/→ kind · Esc cancel";
 				case "fallbackKey":
-					return "Enter pick the protected model · ↑/↓ providers · type to search · Esc cancel";
+					return "Enter pick the protected model · ↑/↓ providers · type to search · Alt+←/→ kind · Esc cancel";
 				default:
-					return "Enter assign · ↑/↓ providers · type to search · Esc cancel";
+					return "Enter assign · ↑/↓ providers · type to search · Alt+←/→ kind · Esc cancel";
 			}
 		}
 		const entry = this.#activeEntry();
 		if (entry.kind === "roles") {
 			if (this.#focus !== "list") {
-				return "↑/↓ providers · → roles · Esc close";
+				return "↑/↓ providers · → roles · Alt+←/→ tabs · Esc close";
 			}
 			const row = this.#rolesRows[this.#roleIndex];
 			if (row?.kind === "fallback") {
@@ -2220,7 +2310,7 @@ export class ModelHubComponent implements Component {
 		}
 		const arrows = this.#focus === "scope" ? "↑/↓ providers · → models" : "↑/↓ models · ← providers";
 		const refresh = entry.kind === "provider" ? " · F5 refresh" : "";
-		return `Enter assign roles · ${arrows} · type to search${refresh} · Esc close`;
+		return `Enter assign roles · ${arrows} · type to search · Alt+←/→ kind${refresh} · Esc close`;
 	}
 
 	#renderFooter(width: number): string {

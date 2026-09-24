@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, mock, vi } from "bun:test";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { webModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/special";
 import { runOnboardingSetup } from "@oh-my-pi/pi-coding-agent/commands/setup";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
@@ -17,10 +18,10 @@ import { providersSetupScene } from "@oh-my-pi/pi-tui/setup/scenes/providers";
 import { themeSetupScene } from "@oh-my-pi/pi-tui/setup/scenes/theme";
 import { WebSearchTab } from "@oh-my-pi/pi-tui/setup/scenes/web-search";
 import { SetupWizardComponent } from "@oh-my-pi/pi-tui/setup/wizard-overlay";
+import { setTerminalGlyphProtocol } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { SEARCH_PROVIDER_OPTIONS } from "@oh-my-pi/pi-tui/tools/web-search";
-import { SEARCH_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/web/search/types";
 
 type SetupApplicationSceneHost = Omit<SetupSceneHost, "ctx"> & { ctx: InteractiveModeContext };
 
@@ -108,6 +109,18 @@ describe("setup wizard scene selection", () => {
 		});
 		expect(selected.map(scene => scene.id)).toEqual(ALL_SCENES.map(scene => scene.id));
 		expect(await selectSetupScenes(0, ALL_SCENES, ctx, { isTTY: false, force: true })).toEqual([]);
+	});
+
+	it("drops the glyph scene once the terminal renders omp's bundled icons in-band", async () => {
+		setTerminalGlyphProtocol(true);
+		try {
+			const scenes = await selectSetupScenes(0, ALL_SCENES, fakeContextWithConfiguredModel(), { isTTY: true });
+			expect(scenes.map(scene => scene.id)).toEqual(
+				ALL_SCENES.map(scene => scene.id).filter(id => id !== "glyph-mode"),
+			);
+		} finally {
+			setTerminalGlyphProtocol(false);
+		}
 	});
 
 	it("applies scene shouldRun only as a hard environment gate", async () => {
@@ -364,9 +377,8 @@ describe("setup wizard short terminals", () => {
 			session: {
 				modelRegistry: {
 					authStorage: {
-						has: () => false,
-						hasAuth: () => false,
-						getCredentialOrigin: () => undefined,
+						credentials: { has: () => false },
+						keys: { source: () => undefined },
 					},
 				},
 			},
@@ -494,12 +506,14 @@ describe("setup wizard glyph scene", () => {
 });
 
 describe("setup wizard web search tab", () => {
-	it("persists the highlighted provider as the head of the web search order", async () => {
+	const webModels = (webModelManagerOptions().staticModels ?? []).map(model => buildModel(model));
+
+	it("persists the highlighted provider as the web model role", async () => {
 		const settings = Settings.isolated();
 		const host = bindSceneHost({
 			ctx: {
 				settings,
-				session: { modelRegistry: { authStorage: { hasAuth: () => false } } },
+				session: { modelRegistry: { authStorage: { keys: { source: () => undefined } }, getAll: () => webModels } },
 			},
 			requestRender: () => {},
 			finish: () => {},
@@ -514,10 +528,7 @@ describe("setup wizard web search tab", () => {
 
 		const expected = SEARCH_PROVIDER_OPTIONS[1]!.value;
 		expect(expected).not.toBe("auto");
-		expect(settings.get("providers.webSearchOrder")).toEqual([
-			expected,
-			...SEARCH_PROVIDER_ORDER.filter(id => id !== expected),
-		]);
+		expect(settings.getModelRole("web")).toBe(`web/${expected}`);
 	});
 
 	it("can select the last provider in the setup TUI list", async () => {
@@ -525,7 +536,7 @@ describe("setup wizard web search tab", () => {
 		const host = bindSceneHost({
 			ctx: {
 				settings,
-				session: { modelRegistry: { authStorage: { hasAuth: () => false } } },
+				session: { modelRegistry: { authStorage: { keys: { source: () => undefined } }, getAll: () => webModels } },
 			},
 			requestRender: () => {},
 			finish: () => {},
@@ -543,10 +554,7 @@ describe("setup wizard web search tab", () => {
 		const lastOption = SEARCH_PROVIDER_OPTIONS[SEARCH_PROVIDER_OPTIONS.length - 1]!;
 		const lastValue = lastOption.value;
 		if (lastValue === "auto") throw new Error("last option must be a concrete provider");
-		expect(settings.get("providers.webSearchOrder")).toEqual([
-			lastValue,
-			...SEARCH_PROVIDER_ORDER.filter(id => id !== lastValue),
-		]);
+		expect(settings.getModelRole("web")).toBe(`web/${lastValue}`);
 	});
 });
 

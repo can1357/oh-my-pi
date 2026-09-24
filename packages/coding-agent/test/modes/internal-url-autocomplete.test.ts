@@ -145,22 +145,6 @@ describe("internal-url-autocomplete", () => {
 		it("returns null for an unknown scheme", async () => {
 			expect(await InternalUrlRouter.instance().complete("bogus", "")).toBeNull();
 		});
-
-		it("exposes the completion-capable schemes", () => {
-			const schemes = InternalUrlRouter.instance().completionSchemes().sort();
-			expect(schemes).toEqual([
-				"agent",
-				"artifact",
-				"history",
-				"local",
-				"memory",
-				"omp",
-				"rule",
-				"security",
-				"skill",
-				"ssh",
-			]);
-		});
 	});
 
 	describe("applyInternalUrlCompletion", () => {

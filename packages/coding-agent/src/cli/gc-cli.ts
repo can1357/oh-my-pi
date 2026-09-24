@@ -705,13 +705,18 @@ function deleteHistoryRowsForSessions(dbPath: string, sessionIds: string[]): { d
 	const db = new Database(dbPath);
 	try {
 		db.run("PRAGMA busy_timeout = 5000");
-		if (!tableExists(db, "history")) return { deleted: 0, ftsRebuilt: false };
-		if (!historyHasSessionId(db)) return { deleted: 0, ftsRebuilt: false };
-		const hasFts = tableExists(db, "history_fts");
-		const deleteStmt = db.prepare("DELETE FROM history WHERE session_id = ?");
+		const hasHistory = tableExists(db, "history") && historyHasSessionId(db);
+		const hasRecaps = tableExists(db, "session_recaps");
+		if (!hasHistory && !hasRecaps) return { deleted: 0, ftsRebuilt: false };
+		const hasFts = hasHistory && tableExists(db, "history_fts");
+		const deleteStmt = hasHistory ? db.prepare("DELETE FROM history WHERE session_id = ?") : undefined;
+		// Recaps are session-scoped side output with no life beyond their session.
+		const deleteRecapsStmt = hasRecaps ? db.prepare("DELETE FROM session_recaps WHERE session_id = ?") : undefined;
 		let deleted = 0;
 		const tx = db.transaction((ids: string[]) => {
 			for (const id of ids) {
+				deleteRecapsStmt?.run(id);
+				if (!deleteStmt) continue;
 				const result = deleteStmt.run(id) as SqliteRunResult;
 				deleted += sqliteNumber(result.changes);
 			}
