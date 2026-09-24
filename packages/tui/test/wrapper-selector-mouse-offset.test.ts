@@ -102,4 +102,47 @@ describe("inline-picker wrapper routeMouse offset", () => {
 		component.routeMouse(leftClick(1), 1, 0);
 		expect(selectedName).toBe("alpha");
 	});
+
+	it("PluginSelectorComponent routes wrapped confirmation rows to Confirm and Cancel", () => {
+		let selectedName: string | undefined;
+		const component = new PluginSelectorComponent(
+			1,
+			[
+				{
+					plugin: { name: "alpha", description: "first" },
+					marketplace: "shop",
+					scope: "project",
+					confirmation:
+						"Install alpha@shop to project scope? Writes to C:\\very\\long\\path\\that\\must\\wrap\\installed_plugins.json",
+				},
+			],
+			new Set<string>(),
+			{
+				onSelect: name => {
+					selectedName = name;
+				},
+				onCancel: () => {},
+			},
+		);
+
+		component.render(40);
+		component.routeMouse(leftClick(1), 1, 0); // Open confirmation.
+		const cancelLines = component.render(40).map(line => Bun.stripANSI(line));
+		const promptLine = cancelLines.findIndex(line => line.includes("Install alpha@shop"));
+		const cancelLine = cancelLines.findIndex(line => line.includes("Cancel"));
+		if (promptLine < 0 || cancelLine < 0) throw new Error("expected wrapped confirmation and Cancel rows");
+		// An unwrapped message would leave four rows between its first line and Cancel.
+		expect(cancelLine - promptLine).toBeGreaterThan(4);
+		component.routeMouse(leftClick(cancelLine), cancelLine, 0);
+		expect(selectedName).toBeUndefined();
+		expect(component.title).toBe("Plugins");
+
+		component.render(40);
+		component.routeMouse(leftClick(1), 1, 0); // Reopen confirmation.
+		const confirmLines = component.render(40);
+		const confirmLine = confirmLines.findIndex(line => Bun.stripANSI(line).includes("❯ Confirm"));
+		if (confirmLine < 0) throw new Error("expected rendered Confirm row");
+		component.routeMouse(leftClick(confirmLine), confirmLine, 0);
+		expect(selectedName).toBe("alpha");
+	});
 });

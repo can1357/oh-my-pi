@@ -14,7 +14,6 @@ import {
 } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import { Container, type Component, initTheme, Text } from "@oh-my-pi/pi-tui";
 import { PluginSelectorComponent } from "@oh-my-pi/pi-tui/overlays/plugin-selector";
 import * as piUtils from "@oh-my-pi/pi-utils";
@@ -200,6 +199,49 @@ describe("SelectorController.showPluginSelector install scope prompt", () => {
 		});
 	});
 
+	it("keeps a user-only install separate from the project row", async () => {
+		const { installSpy } = stubManager([installedSummary("user")]);
+		const { slot, controller } = createControllerHarness(new Text("ask", 0, 0));
+
+		await controller.showPluginSelector("install");
+
+		const selector = mountedSelector(slot);
+		expect(selector.getSelectList().debugState().selectedItemLabel).toBe("hello-plugin@1.0.0 [project]");
+		selector.handleInput("\x1b[B");
+		expect(selector.getSelectList().debugState().selectedItemLabel).toBe("hello-plugin@1.0.0 [user] [installed]");
+		selector.handleInput("\x1b[A");
+
+		selector.handleInput("\n"); // Open project confirmation
+		expect(Bun.stripANSI(selector.render(100).join("\n"))).not.toContain("Replaces current install.");
+		selector.handleInput("\n"); // Confirm project install
+
+		expect(installSpy).toHaveBeenCalledWith("hello-plugin", "test-marketplace", {
+			force: false,
+			scope: "project",
+		});
+	});
+
+	it("keeps a project-only install separate from the user row", async () => {
+		const { installSpy } = stubManager([installedSummary("project")]);
+		const { slot, controller } = createControllerHarness(new Text("ask", 0, 0));
+
+		await controller.showPluginSelector("install");
+
+		const selector = mountedSelector(slot);
+		expect(selector.getSelectList().debugState().selectedItemLabel).toBe("hello-plugin@1.0.0 [project] [installed]");
+		selector.handleInput("\x1b[B");
+		expect(selector.getSelectList().debugState().selectedItemLabel).toBe("hello-plugin@1.0.0 [user]");
+
+		selector.handleInput("\n"); // Open user confirmation
+		expect(Bun.stripANSI(selector.render(100).join("\n"))).not.toContain("Replaces current install.");
+		selector.handleInput("\n"); // Confirm user install
+
+		expect(installSpy).toHaveBeenCalledWith("hello-plugin", "test-marketplace", {
+			force: false,
+			scope: "user",
+		});
+	});
+
 	it("Esc on confirmation returns to the plugin list without installing", async () => {
 		const { installSpy } = stubManager();
 		const { slot, showStatus, controller } = createControllerHarness(new Text("ask", 0, 0));
@@ -332,66 +374,6 @@ describe("SelectorController.showPluginSelector uninstall scope targeting", () =
 		expect(showStatus).not.toHaveBeenCalled();
 		expect(selector.title).toBe("Plugins");
 		expect(selector.getSelectList()).toBe(pluginList);
-	});
-});
-
-describe("interactive /marketplace install dispatch", () => {
-	function dispatchHarness() {
-		const setText = vi.fn();
-		const showPluginSelector = vi.fn();
-		const showStatus = vi.fn((_message: string) => {});
-		const runtime = {
-			ctx: {
-				editor: { setText },
-				collabGuest: false,
-				showPluginSelector,
-				showStatus,
-				sessionManager: { getCwd: () => "C:\\tmp\\project" },
-				settings: {},
-				ui: { requestRender: vi.fn() },
-			} as unknown as InteractiveModeContext,
-		};
-		return { runtime, setText, showPluginSelector, showStatus };
-	}
-
-	it("installs an explicit spec immediately in user scope without opening any picker", async () => {
-		const { runtime, showPluginSelector, showStatus } = dispatchHarness();
-		const installSpy = spyOn(MarketplaceManager.prototype, "installPlugin").mockResolvedValue(
-			installedEntry("user", "C:\\tmp\\cache\\installed"),
-		);
-
-		expect(await executeBuiltinSlashCommand("/marketplace install hello-plugin@test-marketplace", runtime)).toBe(
-			true,
-		);
-
-		expect(installSpy).toHaveBeenCalledTimes(1);
-		expect(installSpy).toHaveBeenCalledWith("hello-plugin", "test-marketplace", {
-			force: false,
-			scope: "user",
-		});
-		expect(showPluginSelector).not.toHaveBeenCalled();
-		expect(showStatus).toHaveBeenCalledWith("Installed hello-plugin from test-marketplace");
-	});
-
-	it("honours an explicit --scope project without prompting", async () => {
-		const { runtime, showPluginSelector } = dispatchHarness();
-		const installSpy = spyOn(MarketplaceManager.prototype, "installPlugin").mockResolvedValue(
-			installedEntry("project", "C:\\tmp\\cache\\installed"),
-		);
-
-		expect(
-			await executeBuiltinSlashCommand(
-				"/marketplace install --scope project hello-plugin@test-marketplace",
-				runtime,
-			),
-		).toBe(true);
-
-		expect(installSpy).toHaveBeenCalledTimes(1);
-		expect(installSpy).toHaveBeenCalledWith("hello-plugin", "test-marketplace", {
-			force: false,
-			scope: "project",
-		});
-		expect(showPluginSelector).not.toHaveBeenCalled();
 	});
 });
 

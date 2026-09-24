@@ -38,7 +38,7 @@ export class PluginSelectorComponent extends OverlayPanel {
 	constructor(
 		marketplaceCount: number,
 		plugins: PluginItem[],
-		installedIds: Set<string>,
+		installedRows: Set<string>,
 		callbacks: PluginSelectorCallbacks,
 	) {
 		super("Plugins", "omp.overlay.plugins");
@@ -49,7 +49,7 @@ export class PluginSelectorComponent extends OverlayPanel {
 			// Encode scope into the value so onSelect can recover it without a parallel Map.
 			// Format: "name@marketplace" or "name@marketplace#scope"
 			const id = scope ? `${plugin.name}@${marketplace}#${scope}` : `${plugin.name}@${marketplace}`;
-			const installed = installedIds.has(`${plugin.name}@${marketplace}`);
+			const installed = installedRows.has(id);
 			const version = plugin.version ? `@${plugin.version}` : "";
 			const status = installed ? " [installed]" : "";
 			const scopeTag = scope ? ` [${scope}]` : "";
@@ -57,7 +57,7 @@ export class PluginSelectorComponent extends OverlayPanel {
 			if (confirmation) confirmations.set(id, confirmation);
 			return {
 				value: id,
-				label: `${plugin.name}${version}${status}${scopeTag}`,
+				label: `${plugin.name}${version}${scopeTag}${status}`,
 				description: plugin.description,
 				hint: marketplace,
 			};

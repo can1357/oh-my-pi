@@ -1024,7 +1024,7 @@ export class SelectorController {
 		});
 
 		const [marketplaces, installed] = await Promise.all([mgr.listMarketplaces(), mgr.listInstalledPlugins()]);
-		const installedIds = new Set(installed.map(p => p.id));
+		const installedRows = new Set(installed.map(p => `${p.id}#${p.scope}`));
 
 		if (mode === "uninstall") {
 			// Show only installed plugins, one row per scope. Selecting a row opens
@@ -1091,7 +1091,8 @@ export class SelectorController {
 
 		const installRows = allPlugins.flatMap(({ plugin, marketplace }) => {
 			const id = `${plugin.name}@${marketplace}`;
-			const force = installedIds.has(id);
+			const projectInstalled = installedRows.has(`${id}#project`);
+			const userInstalled = installedRows.has(`${id}#user`);
 			const rows: Array<{
 				plugin: { name: string; version?: string; description?: string };
 				marketplace: string;
@@ -1103,26 +1104,26 @@ export class SelectorController {
 					plugin,
 					marketplace,
 					scope: "project",
-					confirmation: `Install ${id} to project scope?${force ? " Replaces current install. " : " "}Writes to ${shortenPath(projectInstalledRegistryPath)}`,
+					confirmation: `Install ${id} to project scope?${projectInstalled ? " Replaces current install. " : " "}Writes to ${shortenPath(projectInstalledRegistryPath)}`,
 				});
 			}
 			rows.push({
 				plugin,
 				marketplace,
 				scope: "user",
-				confirmation: `Install ${id} to user scope?${force ? " Replaces current install. " : " "}Writes to ${shortenPath(installedRegistryPath)}`,
+				confirmation: `Install ${id} to user scope?${userInstalled ? " Replaces current install. " : " "}Writes to ${shortenPath(installedRegistryPath)}`,
 			});
 			return rows;
 		});
 
 		this.showSelector(done => {
-			const selector = new PluginSelectorComponent(marketplaces.length, installRows, installedIds, {
+			const selector = new PluginSelectorComponent(marketplaces.length, installRows, installedRows, {
 				onSelect: async (name, marketplace, scope) => {
 					done();
 					this.ctx.showStatus(`Installing ${name} from ${marketplace}...`);
 					this.ctx.ui.requestRender();
 					try {
-						const force = installedIds.has(`${name}@${marketplace}`);
+						const force = scope !== undefined && installedRows.has(`${name}@${marketplace}#${scope}`);
 						await mgr.installPlugin(name, marketplace, { force, scope });
 						this.ctx.showStatus(`Installed ${name} from ${marketplace}`);
 					} catch (err) {
