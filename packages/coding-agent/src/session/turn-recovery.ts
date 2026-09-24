@@ -47,6 +47,7 @@ import type {
 	UsageFallbackConfirmer,
 } from "./agent-session-types";
 import { assistantTurnProducedOutput, isEmptyAssistantStop, isEmptyErrorTurn } from "./messages";
+import { capDurationToSessionDeadline, remainingSessionDeadlineMs } from "./session-deadline";
 import {
 	type ActiveRetryFallbackState,
 	calculateRetryBackoffDelayMs,
@@ -54,6 +55,7 @@ import {
 	formatRetryFallbackSelector,
 	getRetryFallbackChains,
 	getRetryFallbackRevertPolicy,
+	hasEligibleRetryFallbackHop,
 	parseRetryFallbackSelector,
 	type RetryFallbackChains,
 	type RetryFallbackResolutionContext,
@@ -2512,6 +2514,21 @@ export class TurnRecovery {
 			this.#clearPendingRetryErrors();
 			this.resolveRetry();
 			return false;
+		}
+
+		// Bound the wait that actually reaches scheduler.wait(), after every
+		// later override (reason backoff, sibling/usage-limit wait, Retry-After).
+		// Fail-fast above uses the uncapped provider request so a 3-hour window
+		// still surfaces instead of being silently shortened to the deadline.
+		// delayMs === 0 is an immediate credential/model retry and must stay 0:
+		// capDurationToSessionDeadline treats <= 0 as "unset" and would replace it.
+		if (!staleOpenAIResponsesReplayError && delayMs > 0) {
+			delayMs =
+				capDurationToSessionDeadline(
+					delayMs,
+					remainingSessionDeadlineMs(this.#host.agent.deadline),
+					hasEligibleRetryFallbackHop(this.#host.settings, currentModel, currentSelector),
+				) ?? delayMs;
 		}
 
 		await this.#recordPendingRetryError(message, id, { switchedCredential, switchedModel, delayMs });

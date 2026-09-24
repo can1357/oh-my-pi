@@ -15,6 +15,9 @@
 - Updated Anthropic compaction compatibility with signature verification.
 
 ## [18.2.11] - 2026-09-23
+### Added
+
+- Exposed `Agent.deadline` so session recovery can bound retries and stream watchdogs to `--max-time`.
 
 ### Fixed
 
