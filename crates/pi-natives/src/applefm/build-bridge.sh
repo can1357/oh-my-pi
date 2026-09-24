@@ -5,8 +5,10 @@
 #   build-bridge.sh detect
 #       Prints "<swiftc>\t<sdk>\t<fingerprint>" for the first toolchain able to
 #       build bridge.swift (Swift 6.4+ with the macOS 27+ SDK), or nothing.
-#       Candidates: $OMP_APPLEFM_SWIFTC with $SDKROOT (or the selected SDK), the
-#       xcode-select'ed toolchain, then the Command Line Tools. Probes versions
+#       Candidates: $OMP_APPLEFM_SWIFTC and the xcode-select'ed toolchain with
+#       the selected SDK, then the Command Line Tools with their own SDK. A set
+#       $SDKROOT is the SDK for every candidate, so the bridge never links
+#       against a different SDK than the rest of the addon. Probes versions
 #       only; never compiles.
 #
 #   build-bridge.sh build <out.a> <arch> [<swiftc> <sdk>]
@@ -43,7 +45,7 @@ detect() {
 	for candidate in \
 		"${OMP_APPLEFM_SWIFTC:-}|$selected_sdk" \
 		"$(/usr/bin/xcrun --find swiftc 2>/dev/null || true)|$selected_sdk" \
-		"$clt/usr/bin/swiftc|$clt/SDKs/MacOSX.sdk"; do
+		"$clt/usr/bin/swiftc|${SDKROOT:-$clt/SDKs/MacOSX.sdk}"; do
 		swiftc=${candidate%%|*}
 		sdk=${candidate#*|}
 		if usable "$swiftc" "$sdk"; then
