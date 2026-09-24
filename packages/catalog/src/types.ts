@@ -164,6 +164,8 @@ export interface Usage {
 	};
 	/** Copilot premium-request counter, when applicable. */
 	premiumRequests?: number;
+	/** Server-reported Copilot AI units for this response (1 AIU = 1e9 nano-AIU). */
+	aiu?: number;
 	/**
 	 * Reasoning/thinking tokens included in `output`, when the provider reports them
 	 * (OpenAI `output_tokens_details.reasoning_tokens`, Google `thoughtsTokenCount`).

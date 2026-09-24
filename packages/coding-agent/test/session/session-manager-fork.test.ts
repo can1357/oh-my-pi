@@ -215,6 +215,7 @@ describe("SessionManager.forkFrom", () => {
 					cacheWrite: 5,
 					totalTokens: 165,
 					premiumRequests: 2,
+					aiu: 1.25,
 					credits: { cost: 3, committedCost: 3, acuCost: 1 },
 					cost: { input: 1, output: 4, cacheRead: 0.5, cacheWrite: 0.5, total: 6 },
 				},
@@ -237,6 +238,7 @@ describe("SessionManager.forkFrom", () => {
 		const preservedMessage = await findAssistant(preservedFile);
 		expect(preservedMessage.usage.cost.total).toBe(6);
 		expect(preservedMessage.usage.premiumRequests).toBe(2);
+		expect(preservedMessage.usage.aiu).toBe(1.25);
 
 		const reset = await SessionManager.forkFrom(sourceFile, cwd, path.join(tempDir.path(), "reset"), undefined, {
 			suppressBreadcrumb: true,
@@ -248,6 +250,7 @@ describe("SessionManager.forkFrom", () => {
 		expect(resetMessage.usage.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 });
 		expect(resetMessage.usage.credits).toBeUndefined();
 		expect(resetMessage.usage.premiumRequests).toBeUndefined();
+		expect(resetMessage.usage.aiu).toBeUndefined();
 		// Token counts are context, not spend — compaction anchors depend on them.
 		expect(resetMessage.usage.input).toBe(100);
 		expect(resetMessage.usage.output).toBe(50);

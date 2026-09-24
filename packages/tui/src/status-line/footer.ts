@@ -169,6 +169,7 @@ export class FooterComponent implements Component {
 		let totalCacheWrite = 0;
 		let totalCost = 0;
 		let totalPremiumRequests = 0;
+		let totalAiu = 0;
 
 		for (const entry of this.session.sessionManager.getEntries()) {
 			if (entry.type === "message" && entry.message?.role === "assistant") {
@@ -178,6 +179,7 @@ export class FooterComponent implements Component {
 				totalCacheWrite += entry.message.usage.cacheWrite;
 				totalCost += entry.message.usage.cost.total;
 				totalPremiumRequests += entry.message.usage.premiumRequests ?? 0;
+				totalAiu += entry.message.usage.aiu ?? 0;
 			}
 		}
 
@@ -229,7 +231,13 @@ export class FooterComponent implements Component {
 		const usingSubscription = state.model ? this.session.modelRegistry.isUsingOAuth(state.model) : false;
 		const { auto: autoIcon } = theme.icon;
 		const billing = formatBillingSummary(
-			{ cost: totalCost, usingSubscription, premiumRequests: totalPremiumRequests, fractionDigits: 3 },
+			{
+				cost: totalCost,
+				usingSubscription,
+				premiumRequests: totalPremiumRequests,
+				aiu: totalAiu,
+				fractionDigits: 3,
+			},
 			theme,
 		);
 		if (billing) statsParts.push(billing);

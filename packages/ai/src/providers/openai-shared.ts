@@ -61,6 +61,7 @@ import {
 	type Usage,
 } from "../types";
 import { resolveCopilotRequestIdentity } from "./github-copilot-headers";
+import { applyCopilotUsage, type CopilotUsageCarrier } from "./github-copilot-usage";
 
 export type { OpenAIPromptCacheOptions } from "../types";
 
@@ -3499,6 +3500,7 @@ export async function processResponsesStream<TApi extends Api>(
 			populateResponsesUsageFromResponse(output, response?.usage);
 			calculateCost(model, output.usage, output.timestamp);
 			applyProviderReportedCost(model, output.usage, response?.usage);
+			applyCopilotUsage(model, output.usage, (terminalEvent as CopilotUsageCarrier).copilot_usage);
 			applyOpenAIResponsesServiceTierCost(
 				model,
 				output.usage,

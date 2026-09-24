@@ -469,6 +469,7 @@ export interface SessionStats {
 		committedCost: number;
 		acuCost: number;
 	};
+	aiu: number;
 	/** Concrete provider-routed model ids with finalized turn counts. */
 	routedModels?: Record<string, number>;
 	contextUsage?: ContextUsage;

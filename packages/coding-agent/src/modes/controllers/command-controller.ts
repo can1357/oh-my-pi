@@ -425,6 +425,10 @@ export class CommandController {
 				info += `${theme.fg("dim", "Committed ACU:")} ${formatCreditValue(stats.credits.acuCost)}\n`;
 			}
 		}
+		if (stats.aiu > 0) {
+			info += `\n${theme.bold("AIU")}\n`;
+			info += `${theme.fg("dim", "Total:")} ${stats.aiu.toLocaleString(undefined, { maximumFractionDigits: 9 })}\n`;
+		}
 
 		if (this.ctx.lspServers && this.ctx.lspServers.length > 0) {
 			info += `\n${theme.bold("LSP Servers")}\n`;

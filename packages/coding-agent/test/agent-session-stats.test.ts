@@ -479,5 +479,47 @@ describe("AgentSession session stats", () => {
 			"claude-opus-4-6": 2,
 			"swe-1-7-medium": 1,
 		});
+		expect(stats.aiu).toBe(0);
+	});
+
+	it("sums Copilot AIU separately from credit meters", () => {
+		const usage = {
+			input: 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 2,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const target = model();
+		const assistant = (text: string, messageUsage: Usage, timestamp: number): AssistantMessage => ({
+			role: "assistant",
+			content: [{ type: "text", text }],
+			api: target.api,
+			provider: target.provider,
+			model: target.id,
+			usage: messageUsage,
+			stopReason: "stop",
+			timestamp,
+		});
+		const messages: Message[] = [
+			assistant("first", { ...usage, premiumRequests: 1, aiu: 1.7114 }, 1),
+			assistant("second", { ...usage, premiumRequests: 1, aiu: 0.25 }, 2),
+			assistant("third", usage, 3),
+		];
+		const sessionManager = SessionManager.inMemory();
+		for (const message of messages) sessionManager.appendMessage(message);
+		session = new AgentSession({
+			agent: new Agent({ initialState: { model: target, systemPrompt: ["Test"], tools: [], messages } }),
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+		});
+
+		const stats = session.getSessionStats();
+		expect(stats.aiu).toBeCloseTo(1.9614, 10);
+		expect(stats.premiumRequests).toBe(2);
+		expect(stats.credits).toBeUndefined();
+		expect(sessionManager.getUsageStatistics().aiu).toBeCloseTo(1.9614, 10);
 	});
 });

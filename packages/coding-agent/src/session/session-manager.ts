@@ -349,6 +349,7 @@ function emptyUsageStatistics(): UsageStatistics {
 		orchestrationCacheRead: 0,
 		premiumRequests: 0,
 		cost: 0,
+		aiu: 0,
 	};
 }
 
@@ -379,11 +380,12 @@ function addUsage(target: UsageStatistics, usage: Usage | undefined): void {
 	target.orchestrationCacheRead += usage.orchestration?.cacheRead ?? 0;
 	target.premiumRequests += usage.premiumRequests ?? 0;
 	target.cost += usage.cost.total;
+	target.aiu += usage.aiu ?? 0;
 }
 
 /**
- * Zero the monetary attribution on one usage record in place, leaving token
- * counts untouched. Cost, credit meters, and premium-request counts describe
+ * Zero the billing attribution on one usage record in place, leaving token
+ * counts untouched. Cost, credit meters, premium requests, and AIU describe
  * billing; forks that must not inherit spend (see {@link SessionManager.forkFrom}
  * `resetInheritedCost`) drop them while keeping the tokens compaction relies on.
  */
@@ -391,6 +393,7 @@ function resetUsageCost(usage: Usage | undefined): void {
 	if (!usage) return;
 	usage.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
 	usage.credits = undefined;
+	usage.aiu = undefined;
 	usage.premiumRequests = undefined;
 }
 
@@ -3408,7 +3411,7 @@ export class SessionManager {
 	}
 
 	/**
-	 * Zero the monetary attribution (cost, credits, premium requests) on the
+	 * Zero the billing attribution (cost, credits, premium requests, AIU) on the
 	 * forked history's assistant turns and completed `task` results, in place.
 	 *
 	 * A tan fork is a fresh agent that inherits the parent's transcript purely

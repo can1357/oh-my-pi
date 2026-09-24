@@ -45,6 +45,7 @@ export interface StatusLineSession {
 			orchestrationCacheRead: number;
 			premiumRequests: number;
 			cost: number;
+			aiu: number;
 		};
 	};
 	modelRegistry: {

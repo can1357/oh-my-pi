@@ -129,6 +129,7 @@ export class SessionStatsTracker {
 		let committedCreditCost = 0;
 		let committedAcuCost = 0;
 		let hasCredits = false;
+		let aiu = 0;
 		const routedModels: Record<string, number> = {};
 		const addUsage = (usage: Usage): void => {
 			totalInput += usage.input;
@@ -139,6 +140,7 @@ export class SessionStatsTracker {
 			totalTokens += usage.totalTokens;
 			totalPremiumRequests += usage.premiumRequests ?? 0;
 			totalCost += usage.cost.total;
+			aiu += usage.aiu ?? 0;
 			const credits = usage.credits;
 			if (credits !== undefined) {
 				hasCredits = true;
@@ -198,6 +200,7 @@ export class SessionStatsTracker {
 						},
 					}
 				: undefined),
+			aiu,
 			...(Object.keys(routedModels).length > 0 ? { routedModels } : undefined),
 			contextUsage: this.getContextUsage(),
 		};

@@ -6,6 +6,7 @@ export interface BillingSummaryOptions {
 	readonly cost: number;
 	readonly usingSubscription: boolean;
 	readonly premiumRequests: number;
+	readonly aiu: number;
 	readonly fractionDigits: number;
 	readonly startupPlaceholder?: boolean;
 	readonly pricingPeriod?: "peak" | "off-peak";
@@ -38,6 +39,11 @@ function formatSpendPlaceholder(usingSubscription: boolean, uiTheme: Theme): str
 	return "S…";
 }
 
+function formatAiu(amount: number, fractionDigits: number): string {
+	const rounded = amount.toFixed(fractionDigits);
+	return Number(rounded) === 0 ? Number(amount.toPrecision(3)).toString() : rounded;
+}
+
 function formatAdvisorSpend(
 	amount: number,
 	usingSubscription: boolean,
@@ -59,25 +65,37 @@ function formatAdvisorSpend(
 export function formatBillingSummary(options: BillingSummaryOptions, uiTheme: Theme): string | undefined {
 	const premiumRequests = normalizePremiumRequests(options.premiumRequests);
 	const advisorCost = options.advisor?.cost ?? 0;
-	if (!options.cost && !advisorCost && !options.usingSubscription && !premiumRequests && !options.pricingPeriod) {
+	const hasAiu = options.aiu > 0;
+	if (
+		!options.cost &&
+		!advisorCost &&
+		!options.usingSubscription &&
+		!premiumRequests &&
+		!options.pricingPeriod &&
+		!hasAiu
+	) {
 		return undefined;
 	}
 
 	const placeholder = options.startupPlaceholder === true;
 	const parts: string[] = [];
-	if (options.cost || options.pricingPeriod) {
-		parts.push(
-			placeholder
-				? formatSpendPlaceholder(options.usingSubscription, uiTheme)
-				: formatSpend(options.cost, options.usingSubscription, options.fractionDigits, uiTheme),
-		);
-	} else if (options.usingSubscription) {
-		parts.push(
-			uiTheme.getSymbolPreset() === "nerd" && uiTheme.icon.subscription ? uiTheme.icon.subscription : "(sub)",
-		);
+	if (hasAiu) {
+		parts.push(`${placeholder ? "…" : formatAiu(options.aiu, options.fractionDigits)} AIU`);
+	} else {
+		if (options.cost || options.pricingPeriod) {
+			parts.push(
+				placeholder
+					? formatSpendPlaceholder(options.usingSubscription, uiTheme)
+					: formatSpend(options.cost, options.usingSubscription, options.fractionDigits, uiTheme),
+			);
+		} else if (options.usingSubscription) {
+			parts.push(
+				uiTheme.getSymbolPreset() === "nerd" && uiTheme.icon.subscription ? uiTheme.icon.subscription : "(sub)",
+			);
+		}
+		if (options.pricingPeriod) parts.push(options.pricingPeriod === "peak" ? "↑" : "↓");
+		if (premiumRequests) parts.push(`★ ${placeholder ? "…" : formatNumber(premiumRequests)}`);
 	}
-	if (options.pricingPeriod) parts.push(options.pricingPeriod === "peak" ? "↑" : "↓");
-	if (premiumRequests) parts.push(`★ ${placeholder ? "…" : formatNumber(premiumRequests)}`);
 	if (advisorCost && options.advisor) {
 		const prefix = parts.length > 0 ? "+ " : "";
 		parts.push(

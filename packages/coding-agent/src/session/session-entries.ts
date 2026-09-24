@@ -340,6 +340,7 @@ export interface UsageStatistics {
 	orchestrationCacheRead: number;
 	premiumRequests: number;
 	cost: number;
+	aiu: number;
 }
 /**
  * True when a raw JSONL line is a complete `message` record carrying an

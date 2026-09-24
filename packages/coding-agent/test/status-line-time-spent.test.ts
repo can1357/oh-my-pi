@@ -63,6 +63,7 @@ function createCtx(activeMs: number): SegmentContext {
 			orchestrationCacheRead: 0,
 			premiumRequests: 0,
 			cost: 0,
+			aiu: 0,
 			tokensPerSecond: null,
 		},
 		contextPercent: 0,

@@ -17,6 +17,7 @@ interface CostCtxOptions {
 	now?: Date;
 	usingSubscription?: boolean;
 	premiumRequests?: number;
+	aiu?: number;
 	onAdvisorSubscriptionProbe: () => void;
 }
 
@@ -30,6 +31,7 @@ function costCtx(options: CostCtxOptions): SegmentContext {
 			cacheWrite: 0,
 			premiumRequests: options.premiumRequests ?? 0,
 			cost: options.cost ?? 0,
+			aiu: options.aiu ?? 0,
 			tokensPerSecond: null,
 		},
 		session: {
@@ -116,5 +118,25 @@ describe("cost status-line segment", () => {
 		const rendered = stripVTControlCharacters(renderSegment("cost", ctx).content);
 		expect(rendered).toMatch(/1\.25.*↑ ★ 2 \+ .*0\.50/);
 		expect(rendered).not.toContain("↓");
+	});
+
+	it("shows only server-reported Copilot AIU in the compact billing summary", () => {
+		const ctx = costCtx({
+			cost: 0.01,
+			premiumRequests: 2,
+			aiu: 1.7114,
+			onAdvisorSubscriptionProbe: () => {},
+		});
+		expect(stripVTControlCharacters(renderSegment("cost", ctx).content)).toBe("1.71 AIU");
+	});
+
+	it("shows a small nonzero AIU charge before it rounds to a hundredth", () => {
+		const ctx = costCtx({ aiu: 0.00075, onAdvisorSubscriptionProbe: () => {} });
+		expect(stripVTControlCharacters(renderSegment("cost", ctx).content)).toBe("0.00075 AIU");
+	});
+
+	it("uses premium requests when the AIU total is zero", () => {
+		const ctx = costCtx({ cost: 0.01, premiumRequests: 2, aiu: 0, onAdvisorSubscriptionProbe: () => {} });
+		expect(stripVTControlCharacters(renderSegment("cost", ctx).content)).toBe("$0.01 ★ 2");
 	});
 });
