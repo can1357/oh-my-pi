@@ -154,6 +154,7 @@ import { isResolutionDeviceName } from "@oh-my-pi/pi-tui/tools/resolve";
 import { resolutionDeviceUsage } from "./resolve";
 import { ToolAbortError, throwIfAborted } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { withPathHint } from "./path-hint";
 import { toolResult } from "./tool-result";
 import { xdevDocs, xdevListing } from "./xdev";
 
@@ -1750,7 +1751,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				if (!recoveredApprovedPlan && !suffixResolution) {
 					const delimitedResult = await this.#tryReadDelimitedPaths(readPath, signal);
 					if (delimitedResult) return delimitedResult;
-					throw new ToolError(`Path '${localReadPath}' not found`);
+					throw new ToolError(
+						await withPathHint(`Path '${localReadPath}' not found`, absolutePath, this.session.cwd, signal),
+					);
 				}
 			} else {
 				throw error;

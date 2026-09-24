@@ -48,6 +48,7 @@ import {
 	resolveToolSearchScope,
 	splitPathAndSelPreferringLiteral,
 } from "./path-utils";
+import { withPathHint } from "./path-hint";
 import { type LineRange, parseLineRanges, selectorLineRanges } from "@oh-my-pi/pi-tui/tools/line-ranges";
 import { splitInternalUrlSel, splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
 import { toPathList } from "@oh-my-pi/pi-tui/render/render-utils";
@@ -986,6 +987,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 						cwd: this.session.cwd,
 						internalUrlAction: "search",
 						settings: this.session.settings,
+						signal,
 						localProtocolOptions: this.session.localProtocolOptions,
 						skills: this.session.skills,
 						rules: this.session.activeRules,
@@ -1027,7 +1029,14 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 							const absKey = path.resolve(resolveReadPath(resolved, this.session.cwd));
 							const stats = await stat(absKey).catch(() => null);
 							if (!stats) {
-								throw new ToolError(`Path not found for line-range selector: ${spec.original}`);
+								throw new ToolError(
+									await withPathHint(
+										`Path not found for line-range selector: ${spec.original}`,
+										absKey,
+										this.session.cwd,
+										signal,
+									),
+								);
 							}
 							if (!stats.isFile()) {
 								throw new ToolError(
@@ -1067,7 +1076,12 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 							? ` (archive members were not searchable: ${archiveUnreadable.join(", ")})`
 							: "";
 					throw new ToolError(
-						`Path not found: ${missingPaths.join(", ")}; list each target in the semicolon-delimited \`path\`${archiveHint}`,
+						await withPathHint(
+							`Path not found: ${missingPaths.join(", ")}; list each target in the semicolon-delimited \`path\`${archiveHint}`,
+							missingPaths[0] ?? "",
+							this.session.cwd,
+							signal,
+						),
 					);
 				}
 				const baseDisplayMode = resolveFileDisplayMode(this.session);

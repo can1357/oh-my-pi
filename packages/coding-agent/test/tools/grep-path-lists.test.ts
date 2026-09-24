@@ -599,13 +599,14 @@ describe("tool path arrays", () => {
 		});
 		const text = getText(result);
 		const details = result.details as { notes?: string[]; displayReadTargetLinks?: Array<string | null> } | undefined;
+		const hint = "Nearest existing directory: . contains: apps/, folder with spaces/, other/, packages/, phases/";
 
 		expect(text).toContain("Note: interpreted as 2 paths: missing.txt, packages/grep.txt");
 		expect(text).toContain("shared-needle packages");
-		expect(text).toContain("[Could not read missing.txt: Path 'missing.txt' not found]");
+		expect(text).toContain(`[Could not read missing.txt: Path 'missing.txt' not found\n${hint}]`);
 		expect(details?.notes).toEqual([
 			"Note: interpreted as 2 paths: missing.txt, packages/grep.txt",
-			"Could not read missing.txt: Path 'missing.txt' not found",
+			`Could not read missing.txt: Path 'missing.txt' not found\n${hint}`,
 		]);
 		// Alignment contract: an unreadable part gets a null link, the readable peer keeps its resolved fs path (#11732).
 		expect(details?.displayReadTargetLinks).toEqual([null, path.join(tempDir, "packages", "grep.txt")]);

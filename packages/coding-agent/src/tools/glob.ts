@@ -25,6 +25,7 @@ import {
 	resolveExplicitFindPatterns,
 	resolveToCwd,
 } from "./path-utils";
+import { withPathHint } from "./path-hint";
 import { toPathList } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolAbortError, throwIfAborted } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
@@ -224,7 +225,14 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			if (normalizedPatterns.length > 1 && !this.#customOps) {
 				const partition = await partitionExistingPaths(normalizedPatterns, this.session.cwd, parseFindPattern);
 				if (partition.valid.length === 0) {
-					throw new ToolError(`Path not found: ${partition.missing.join(", ")}`);
+					throw new ToolError(
+						await withPathHint(
+							`Path not found: ${partition.missing.join(", ")}`,
+							partition.missing[0] ?? "",
+							this.session.cwd,
+							signal,
+						),
+					);
 				}
 				effectivePatterns = partition.valid;
 				missingPaths = partition.missing;
@@ -379,7 +387,15 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 						// ENAMETOOLONG can never name a real target; surface a clean
 						// "Path not found" instead of leaking the raw errno (issue #7597).
 						if (isEnoent(err) || hasFsCode(err, "ENAMETOOLONG")) {
-							if (isSingle) throw new ToolError(`Path not found: ${scopePath}`);
+							if (isSingle)
+								throw new ToolError(
+									await withPathHint(
+										`Path not found: ${scopePath}`,
+										target.searchPath,
+										this.session.cwd,
+										signal,
+									),
+								);
 							return { target, result: [] };
 						}
 						throw err;
