@@ -3,13 +3,52 @@ import type { Component } from "../tui";
 import { padding, replaceTabs, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils";
 import { APP_NAME } from "@oh-my-pi/pi-utils/dirs";
 import { theme } from "../theme/theme";
+import { uiLanguage } from "../ui-locale";
 import tipsText from "./tips.txt" with { type: "text" };
+import japaneseTipsText from "./tips.ja.txt" with { type: "text" };
 
 /** Tips embedded at build time, one per line; blanks dropped. */
 const TIPS: readonly string[] = tipsText
 	.split("\n")
 	.map(line => line.trim())
 	.filter(line => line.length > 0);
+const JAPANESE_TIPS = japaneseTipsText
+	.split("\n")
+	.map(line => line.trim())
+	.filter(Boolean);
+
+type WelcomeLanguage = "en" | "ja";
+
+const WELCOME_COPY = {
+	en: {
+		greeting: "Welcome back!",
+		tip: "Tip: ",
+		noSessions: "No recent sessions",
+		noLsp: "No LSP servers",
+		tips: "Tips",
+		promptActions: " for prompt actions",
+		commands: " for commands",
+		bash: " to run bash",
+		python: " to run python",
+		lsp: "LSP Servers",
+		sessions: "Recent sessions",
+		nerdFont: "Please use nerdfont 😭.",
+	},
+	ja: {
+		greeting: "おかえりなさい",
+		tip: "ヒント: ",
+		noSessions: "最近のセッションはありません",
+		noLsp: "LSPサーバーはありません",
+		tips: "ヒント",
+		promptActions: " プロンプトの操作",
+		commands: " コマンドの入力",
+		bash: " Bashの実行",
+		python: " Pythonの実行",
+		lsp: "LSPサーバー",
+		sessions: "最近のセッション",
+		nerdFont: "Nerd Fontを使ってください 😭",
+	},
+} as const;
 
 /**
  * Fixed number of session rows in the welcome box so its height stays stable
@@ -76,8 +115,8 @@ function renderNewTag(phase: number, encoding: ColorEncoding): string {
 	}
 	return out + reset;
 }
-export function renderWelcomeTip(tip: string, boxWidth: number, phase = 0): string[] {
-	const label = "Tip: ";
+export function renderWelcomeTip(tip: string, boxWidth: number, phase = 0, language: WelcomeLanguage = "en"): string[] {
+	const label = WELCOME_COPY[language].tip;
 	const labelWidth = visibleWidth(label);
 	const bodyBudget = boxWidth - 1 - labelWidth; // 1 = leading indent
 	if (bodyBudget < 8) return [];
@@ -154,14 +193,15 @@ export class WelcomeComponent implements Component {
 		private providerName: string,
 		private recentSessions: RecentSession[] = [],
 		private lspServers: LspServerInfo[] = [],
+		private readonly language: WelcomeLanguage = uiLanguage(),
 	) {}
 	get tip(): string | undefined {
 		this.#nagRoll ??= Math.random();
 		this.#tipRoll ??= Math.random();
 		if (theme.getSymbolPreset() === "unicode" && this.#nagRoll < 0.1) {
-			return "Please use nerdfont 😭.";
+			return WELCOME_COPY[this.language].nerdFont;
 		}
-		return pickWeightedTip(TIPS, this.#tipRoll) || undefined;
+		return pickWeightedTip(this.language === "ja" ? JAPANESE_TIPS : TIPS, this.#tipRoll) || undefined;
 	}
 
 	invalidate(): void {
@@ -261,6 +301,7 @@ export class WelcomeComponent implements Component {
 	}
 
 	#renderLines(termWidth: number): string[] {
+		const copy = WELCOME_COPY[this.language];
 		// Box dimensions - responsive with max width and small-terminal support
 		const maxWidth = 100;
 		const boxWidth = Math.min(maxWidth, Math.max(0, termWidth - 2));
@@ -274,7 +315,7 @@ export class WelcomeComponent implements Component {
 		// Dynamic model/provider labels are truncated inside the fixed column.
 		// Letting them influence the responsive breakpoint changes the box height
 		// when authoritative session data replaces the empty prepaint labels.
-		const leftMinContentWidth = Math.max(minLeftCol, visibleWidth("Welcome back!"));
+		const leftMinContentWidth = Math.max(minLeftCol, visibleWidth(copy.greeting));
 		const desiredLeftCol = Math.max(
 			Math.min(preferredLeftCol, Math.max(minLeftCol, Math.floor(dualContentWidth * 0.35))),
 			leftMinContentWidth,
@@ -294,7 +335,7 @@ export class WelcomeComponent implements Component {
 		// Left column - centered content
 		const leftLines = [
 			"",
-			this.#centerText(theme.bold("Welcome back!"), leftCol),
+			this.#centerText(theme.bold(copy.greeting), leftCol),
 			"",
 			...logoColored.map(l => this.#centerText(l, leftCol)),
 			"",
@@ -309,7 +350,7 @@ export class WelcomeComponent implements Component {
 		// Recent sessions content
 		const sessionLines: string[] = [];
 		if (this.recentSessions.length === 0) {
-			sessionLines.push(` ${theme.fg("dim", "No recent sessions")}`);
+			sessionLines.push(` ${theme.fg("dim", copy.noSessions)}`);
 		} else {
 			// Reserve width for the bullet prefix (" • ") and the trailing " (timeAgo)"
 			// so the relative time is never the part that gets truncated. The name
@@ -335,7 +376,7 @@ export class WelcomeComponent implements Component {
 		// LSP servers content
 		const lspLines: string[] = [];
 		if (this.lspServers.length === 0) {
-			lspLines.push(` ${theme.fg("dim", "No LSP servers")}`);
+			lspLines.push(` ${theme.fg("dim", copy.noLsp)}`);
 		} else {
 			for (const server of this.lspServers.slice(0, WELCOME_LSP_SLOTS)) {
 				const icon =
@@ -357,16 +398,16 @@ export class WelcomeComponent implements Component {
 
 		// Right column
 		const rightLines = [
-			` ${theme.bold(theme.fg("accent", "Tips"))}`,
-			` ${theme.fg("dim", "#")}${theme.fg("muted", " for prompt actions")}`,
-			` ${theme.fg("dim", "/")}${theme.fg("muted", " for commands")}`,
-			` ${theme.fg("dim", "!")}${theme.fg("muted", " to run bash")}`,
-			` ${theme.fg("dim", "$")}${theme.fg("muted", " to run python")}`,
+			` ${theme.bold(theme.fg("accent", copy.tips))}`,
+			` ${theme.fg("dim", "#")}${theme.fg("muted", copy.promptActions)}`,
+			` ${theme.fg("dim", "/")}${theme.fg("muted", copy.commands)}`,
+			` ${theme.fg("dim", "!")}${theme.fg("muted", copy.bash)}`,
+			` ${theme.fg("dim", "$")}${theme.fg("muted", copy.python)}`,
 			separator,
-			` ${theme.bold(theme.fg("accent", "LSP Servers"))}`,
+			` ${theme.bold(theme.fg("accent", copy.lsp))}`,
 			...lspLines,
 			separator,
-			` ${theme.bold(theme.fg("accent", "Recent sessions"))}`,
+			` ${theme.bold(theme.fg("accent", copy.sessions))}`,
 			...sessionLines,
 			"",
 		];
@@ -432,7 +473,7 @@ export class WelcomeComponent implements Component {
 		// intro's re-render frames, then settles into a still rainbow once the box
 		// caches its resting frame. Non-"[NEW]" tips ignore the phase entirely.
 		const phase = NEW_TIP_MARKER.test(tip) ? performance.now() / NEW_GLOW_PERIOD_MS : 0;
-		return renderWelcomeTip(tip, boxWidth, phase);
+		return renderWelcomeTip(tip, boxWidth, phase, this.language);
 	}
 
 	/** Center text within a given width */
@@ -448,27 +489,7 @@ export class WelcomeComponent implements Component {
 
 	/** Fit string to exact width with ANSI-aware truncation/padding */
 	#fitToWidth(str: string, width: number): string {
-		const visLen = visibleWidth(str);
-		if (visLen > width) {
-			const ellipsis = "…";
-			const ellipsisWidth = visibleWidth(ellipsis);
-			const maxWidth = Math.max(0, width - ellipsisWidth);
-			let truncated = "";
-			let currentWidth = 0;
-			let inEscape = false;
-			for (const char of str) {
-				if (char === "\x1b") inEscape = true;
-				if (inEscape) {
-					truncated += char;
-					if (char === "m") inEscape = false;
-				} else if (currentWidth < maxWidth) {
-					truncated += char;
-					currentWidth++;
-				}
-			}
-			return `${truncated}${ellipsis}`;
-		}
-		return str + padding(width - visLen);
+		return truncateToWidth(str, width, undefined, true);
 	}
 
 	/** Pick the logo frame for the current intro phase, or the resting frame. */

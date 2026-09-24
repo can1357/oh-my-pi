@@ -1,5 +1,6 @@
 /** Schema-independent display definitions for the settings overlay. */
 import type { SymbolKey } from "../theme/symbols";
+import { translateUi } from "../ui-locale";
 
 export type SettingTab =
 	| "appearance"
@@ -202,7 +203,11 @@ export type SettingDef =
 function resolveOptions(ui: AnyUiMetadata): OptionList | "runtime" | undefined {
 	if (!ui.options) return undefined;
 	if (ui.options === "runtime") return "runtime";
-	return ui.options;
+	return ui.options.map(option => ({
+		...option,
+		label: translateUi(option.label),
+		description: option.description ? translateUi(option.description) : undefined,
+	}));
 }
 
 function entryToSettingDef(entry: SettingsDisplayEntry): SettingDef | null {
@@ -215,9 +220,9 @@ function entryToSettingDef(entry: SettingsDisplayEntry): SettingDef | null {
 		path,
 		defaultValue: entry.defaultValue,
 		schemaType,
-		label: ui.label,
-		description: ui.description,
-		warning: ui.warning,
+		label: translateUi(ui.label),
+		description: translateUi(ui.description),
+		warning: ui.warning ? translateUi(ui.warning) : undefined,
 		tab: ui.tab,
 		group: ui.group,
 		condition,
