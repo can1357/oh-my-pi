@@ -12,7 +12,7 @@ import { fileHyperlink, renderCodeCell } from "../render";
 import { canonicalizeMessage } from "./thinking-display";
 import { internalReadTargetPredicate } from "./read-target";
 import type { ToolExecutionHandle } from "./tool-execution";
-import { formatUsageRow } from "../overlays/usage-row";
+import { formatUsageRow, type TurnTimeWindow } from "../overlays/usage-row";
 
 /**
  * Extract the read call's target path. `path` is the canonical arg; `file_path`
@@ -111,6 +111,7 @@ type ReadUsageRow = {
 	ttftMs?: number;
 	timestamp?: number;
 	turnElapsedMs?: number;
+	turnTime?: TurnTimeWindow;
 };
 
 /** Number of code lines to show in collapsed preview mode */
@@ -469,6 +470,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		ttftMs?: number,
 		timestamp?: number,
 		turnElapsedMs?: number,
+		turnTime?: TurnTimeWindow,
 	): boolean {
 		const attachedToolCallIds: string[] = [];
 		let anchorId: string | undefined;
@@ -488,6 +490,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			ttftMs,
 			timestamp,
 			turnElapsedMs,
+			turnTime,
 		});
 		this.#updateDisplay();
 		return true;
@@ -692,7 +695,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			lines.push(
 				theme.fg(
 					"dim",
-					`${prefix}${formatUsageRow(usageRow.usage, usageRow.durationMs, usageRow.ttftMs, usageRow.timestamp, usageRow.turnElapsedMs)}`,
+					`${prefix}${formatUsageRow(usageRow.usage, usageRow.durationMs, usageRow.ttftMs, usageRow.timestamp, usageRow.turnElapsedMs, usageRow.turnTime)}`,
 				),
 			);
 		}
@@ -846,6 +849,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 						usageRow.ttftMs,
 						usageRow.timestamp,
 						usageRow.turnElapsedMs,
+						usageRow.turnTime,
 					),
 				),
 				3,

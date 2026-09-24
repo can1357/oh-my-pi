@@ -1224,6 +1224,26 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"display.turnTimeStyle": {
+		type: "enum",
+		values: ["elapsed", "range"] as const,
+		default: "elapsed",
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Turn Time Style",
+			description: "Show the turn time as elapsed duration only, or as start → end clock times plus elapsed",
+			options: [
+				{ value: "elapsed", label: "Elapsed", description: "Show only the prompt-to-yield duration (e.g. Δ 1m)" },
+				{
+					value: "range",
+					label: "Range",
+					description: "Show start → end clock times plus the elapsed duration",
+				},
+			],
+		},
+	},
+
 	"display.showTurnTime": {
 		type: "boolean",
 		default: false,

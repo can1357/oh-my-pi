@@ -59,7 +59,7 @@ import { groupedReadUsageCallIds, ReadToolGroupComponent, readArgsCollapseIntoGr
 import { SkillMessageComponent } from "./skill-message";
 import { ToolExecutionComponent } from "./tool-execution";
 import { TranscriptContainer } from "../chrome/transcript-container";
-import { createUsageRowBlock, turnElapsedMs } from "../overlays/usage-row";
+import { createUsageRowBlock, turnElapsedMs, type TurnTimeWindow } from "../overlays/usage-row";
 import { CollapsedSyntheticMessageComponent, UserMessageComponent } from "./user-message";
 
 export interface ChatTranscriptBuilderDeps {
@@ -87,6 +87,8 @@ export class ChatTranscriptBuilder {
 	#pendingUsageTimestamp: number | undefined;
 	#pendingReadUsageCallIds: string[] | undefined;
 	#pendingUsageElapsedMs: number | undefined;
+	#pendingUsageTurnStartedAt: number | undefined;
+	#pendingUsageTurnEndedAt: number | undefined;
 	#turnStartedAt: number | undefined;
 	#lastAssistantUsage: Usage | undefined;
 	#servedModelTracker = new ServedModelTracker();
@@ -147,14 +149,14 @@ export class ChatTranscriptBuilder {
 	reset(): void {
 		for (const pending of this.#pendingTools.values()) pending.seal();
 		this.#pendingTools.clear();
-		this.#readArgs.clear();
-		this.#readGroup = null;
 		this.#pendingUsage = undefined;
 		this.#pendingUsageDuration = undefined;
 		this.#pendingUsageTtft = undefined;
 		this.#pendingUsageTimestamp = undefined;
 		this.#pendingReadUsageCallIds = undefined;
 		this.#pendingUsageElapsedMs = undefined;
+		this.#pendingUsageTurnStartedAt = undefined;
+		this.#pendingUsageTurnEndedAt = undefined;
 		this.#turnStartedAt = undefined;
 		this.#lastAssistantUsage = undefined;
 		this.#servedModelTracker = new ServedModelTracker();
@@ -231,6 +233,7 @@ export class ChatTranscriptBuilder {
 	// group; every other turn keeps the standalone row below its tool blocks.
 	#flushPendingUsage(): void {
 		if (!this.#pendingUsage) return;
+		const turnTime = this.#pendingTurnTime();
 		const usageAttached =
 			this.#pendingReadUsageCallIds !== undefined &&
 			(this.#readGroup?.attachUsage(
@@ -240,6 +243,7 @@ export class ChatTranscriptBuilder {
 				this.#pendingUsageTtft,
 				this.#pendingUsageTimestamp,
 				this.#pendingUsageElapsedMs,
+				turnTime,
 			) ??
 				false);
 		if (!usageAttached) {
@@ -252,6 +256,7 @@ export class ChatTranscriptBuilder {
 					this.#pendingUsageTtft,
 					this.#pendingUsageTimestamp,
 					this.#pendingUsageElapsedMs,
+					turnTime,
 				),
 			);
 		}
@@ -261,6 +266,8 @@ export class ChatTranscriptBuilder {
 		this.#pendingUsageTimestamp = undefined;
 		this.#pendingReadUsageCallIds = undefined;
 		this.#pendingUsageElapsedMs = undefined;
+		this.#pendingUsageTurnStartedAt = undefined;
+		this.#pendingUsageTurnEndedAt = undefined;
 	}
 
 	#appendChatMessage(message: AgentMessage): void {
@@ -371,9 +378,14 @@ export class ChatTranscriptBuilder {
 		}
 	}
 
-	/** Prompt→yield wall time for the current turn, or undefined when unknown. */
-	#turnElapsedMs(message: Extract<AgentMessage, { role: "assistant" }>): number | undefined {
-		return turnElapsedMs(this.#turnStartedAt, message);
+	/** Turn-time window for the pending usage row; style always set, ends only when known. */
+	#pendingTurnTime(): TurnTimeWindow | undefined {
+		if (this.#pendingUsageElapsedMs === undefined) return undefined;
+		return {
+			style: displayPreferences.turnTimeStyle,
+			turnStartedAt: this.#pendingUsageTurnStartedAt,
+			turnEndedAt: this.#pendingUsageTurnEndedAt,
+		};
 	}
 
 	#appendAssistantMessage(message: Extract<AgentMessage, { role: "assistant" }>): void {
@@ -495,7 +507,11 @@ export class ChatTranscriptBuilder {
 		this.#pendingUsageTimestamp = message.timestamp;
 		this.#pendingReadUsageCallIds = this.#pendingUsage ? groupedReadUsageCallIds(message) : undefined;
 		this.#pendingUsageElapsedMs =
-			this.#pendingUsage && displayPreferences.showTurnTime ? this.#turnElapsedMs(message) : undefined;
+			this.#pendingUsage && displayPreferences.showTurnTime
+				? turnElapsedMs(this.#turnStartedAt, message)
+				: undefined;
+		this.#pendingUsageTurnStartedAt = this.#pendingUsageElapsedMs !== undefined ? this.#turnStartedAt : undefined;
+		this.#pendingUsageTurnEndedAt = this.#pendingUsageElapsedMs !== undefined ? message.completedAt : undefined;
 	}
 
 	#appendToolResult(message: Extract<AgentMessage, { role: "toolResult" }>): void {

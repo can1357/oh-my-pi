@@ -1,4 +1,5 @@
 import type { Usage } from "@oh-my-pi/pi-ai";
+import type { TurnTimeStyle } from "../chat/display-preferences";
 import { Container, Spacer } from "../index";
 import { formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
 import { theme } from "../theme/theme";
@@ -16,13 +17,13 @@ function formatUsageTimestamp(ms: number): string {
 	return `${date} ${time}`;
 }
 
-/**
- * Prompt→yield wall time for a turn, from pure local timestamps: the user
- * prompt's timestamp to the response's completion time (`completedAt`, stamped
- * by the session at `message_end`). No provider-reported duration is involved —
- * messages persisted before the stamp existed simply have no span.
- * Undefined when either end is unknown (mid-attach or unstamped message).
- */
+/** Local `HH:mm:ss` clock for the range-style turn-time window. */
+function formatUsageClock(ms: number): string {
+	const d = new Date(ms);
+	const pad = (n: number): string => String(n).padStart(2, "0");
+	return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
 export function turnElapsedMs(
 	turnStartedAt: number | undefined,
 	message: { completedAt?: number },
@@ -32,12 +33,19 @@ export function turnElapsedMs(
 	return elapsed > 0 ? Math.round(elapsed) : undefined;
 }
 
+/** Turn-time window threaded to the usage-row renderer for `range` style. */
+export interface TurnTimeWindow {
+	style?: TurnTimeStyle;
+	turnStartedAt?: number;
+	turnEndedAt?: number;
+}
 function usageRowSpecs(
 	usage: Usage,
 	durationMs?: number,
 	ttftMs?: number,
 	timestamp?: number,
 	turnElapsedMs?: number,
+	turnTime?: TurnTimeWindow,
 ): MetricSpec[] {
 	const totalInput = usage.input + usage.cacheWrite;
 	const specs: MetricSpec[] = [];
@@ -51,7 +59,16 @@ function usageRowSpecs(
 	// fractional; round before formatDuration so the label never prints a raw
 	// float (e.g. `347.28381699998863ms`).
 	if (turnElapsedMs !== undefined && turnElapsedMs > 0) {
-		specs.push({ value: `Δ ${formatDuration(Math.round(turnElapsedMs))}` });
+		const elapsed = `Δ ${formatDuration(Math.round(turnElapsedMs))}`;
+		// Range style renders the start → end clock window plus the elapsed
+		// figure; a missing start falls back to the elapsed-only label.
+		if (turnTime?.style === "range" && turnTime.turnStartedAt !== undefined && turnTime.turnEndedAt !== undefined) {
+			specs.push({
+				value: `${formatUsageClock(turnTime.turnStartedAt)} → ${formatUsageClock(turnTime.turnEndedAt)} · ${elapsed}`,
+			});
+		} else {
+			specs.push({ value: elapsed });
+		}
 	}
 	specs.push({ leading: theme.icon.input, value: formatNumber(totalInput) });
 	specs.push({ leading: theme.icon.output, value: formatNumber(usage.output) });
@@ -78,8 +95,9 @@ export function formatUsageRow(
 	ttftMs?: number,
 	timestamp?: number,
 	turnElapsedMs?: number,
+	turnTime?: TurnTimeWindow,
 ): string {
-	return formatMetricRow(usageRowSpecs(usage, durationMs, ttftMs, timestamp, turnElapsedMs), {
+	return formatMetricRow(usageRowSpecs(usage, durationMs, ttftMs, timestamp, turnElapsedMs, turnTime), {
 		separator: "  ",
 	});
 }
@@ -101,11 +119,12 @@ export function createUsageRowBlock(
 	ttftMs?: number,
 	timestamp?: number,
 	turnElapsedMs?: number,
+	turnTime?: TurnTimeWindow,
 ): Container {
 	const block = new Container();
 	block.addChild(new Spacer(1));
 	block.addChild(
-		new MetricRow(usageRowSpecs(usage, durationMs, ttftMs, timestamp, turnElapsedMs), {
+		new MetricRow(usageRowSpecs(usage, durationMs, ttftMs, timestamp, turnElapsedMs, turnTime), {
 			separator: "  ",
 			overflow: "wrap",
 			paddingX: 1,

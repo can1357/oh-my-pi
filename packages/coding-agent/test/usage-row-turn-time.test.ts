@@ -114,8 +114,25 @@ describe("formatUsageRow turn elapsed", () => {
 		expect(row).toContain("Δ 347ms");
 		expect(row).not.toContain("347.28381699998863");
 	});
-});
 
+	it("renders the start → end clock window in range style", () => {
+		const row = formatUsageRow(assistantMessage().usage as Usage, REQUEST_DURATION_MS, 6_700, PROMPT_AT, 60_000, {
+			style: "range",
+			turnStartedAt: PROMPT_AT,
+			turnEndedAt: PROMPT_AT + 60_000,
+		});
+		expect(row).toContain("03:04:05 → 03:05:05");
+		expect(row).toContain(TURN_ELAPSED_LABEL);
+	});
+
+	it("falls back to elapsed-only in range style when the start is unknown", () => {
+		const row = formatUsageRow(assistantMessage().usage as Usage, REQUEST_DURATION_MS, 6_700, PROMPT_AT, 60_000, {
+			style: "range",
+		});
+		expect(row).toContain(TURN_ELAPSED_LABEL);
+		expect(row).not.toContain("→");
+	});
+});
 describe("ChatTranscriptBuilder turn elapsed", () => {
 	beforeEach(async () => {
 		await Settings.init({ inMemory: true, cwd: process.cwd() });
