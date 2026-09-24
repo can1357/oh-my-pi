@@ -14,6 +14,8 @@ import {
 import { createTools, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { cleanupTempHome } from "./helpers/temp-home-cleanup";
 
+import { cfgSkillful } from "@oh-my-pi/pi-coding-agent/session/settings";
+
 const EMPTY_TREE = {
 	rootPath: "",
 	rendered: "",
@@ -810,10 +812,8 @@ describe("system prompt tool inventory", () => {
 	it("keeps real provider tool definitions free of skill URL guidance", async () => {
 		const session = { ...makeToolSession(Settings.isolated()), skills: [] };
 		const tools = await createTools(session, ["read", "bash"]);
-		const read = tools.find(tool => tool.name === "read")!;
 		const bash = tools.find(tool => tool.name === "bash")!;
 
-		expect(JSON.stringify(read.parameters.toJsonSchema())).not.toContain("skill://");
 		expect(bash.description).not.toContain("skill://");
 	});
 
@@ -832,7 +832,6 @@ describe("system prompt tool inventory", () => {
 			],
 		};
 		const tools = await createTools(session, ["read", "bash"]);
-		const read = tools.find(tool => tool.name === "read")!;
 		const bash = tools.find(tool => tool.name === "bash")!;
 		const { systemPrompt } = await buildSdkSystemPrompt({
 			cwd: tempDir,
@@ -841,17 +840,14 @@ describe("system prompt tool inventory", () => {
 			tools,
 		});
 
-		expect(JSON.stringify(read.parameters.toJsonSchema())).toContain("skill://");
 		expect(bash.description).toContain("skill://");
 		expect(systemPrompt.join("\n\n")).toContain("`skill://<name>`");
 
 		// Standalone sessions derive visibility; an explicit managed snapshot wins.
 		session.skillHintVisible = false;
-		expect(JSON.stringify(read.parameters.toJsonSchema())).not.toContain("skill://");
 		expect(bash.description).not.toContain("skill://");
-		session.settings.set("skillful", false);
+		cfgSkillful.set(session.settings, false);
 		session.skillHintVisible = true;
-		expect(JSON.stringify(read.parameters.toJsonSchema())).toContain("skill://");
 		expect(bash.description).toContain("skill://");
 	});
 

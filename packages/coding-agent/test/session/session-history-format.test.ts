@@ -387,4 +387,46 @@ describe("formatSessionHistoryMarkdown", () => {
 		expect(output).not.toContain("**user**:");
 		expect(output).toContain("## assistant");
 	});
+
+	it("middle-truncates an oversized expanded diff but leaves small and mid-size ones byte-identical", () => {
+		const renderDiff = (diff: string): string =>
+			formatSessionHistoryMarkdown(
+				[
+					{
+						role: "assistant",
+						content: [{ type: "toolCall", id: "c1", name: "edit", arguments: { path: "big.ts" } }],
+						timestamp: 1,
+					},
+					{
+						role: "toolResult",
+						toolCallId: "c1",
+						toolName: "edit",
+						content: "ok",
+						details: { diff },
+						timestamp: 2,
+					},
+				],
+				{ expandEditDiffs: true, watchedRoles: true },
+			);
+
+		const rows = Array.from({ length: 400 }, (_, index) => `+row-${String(index + 1).padStart(4, "0")}`);
+		const big = renderDiff(["--- a/big.ts", "+++ b/big.ts", "@@ -1,400 +1,400 @@", ...rows].join("\n"));
+		expect(big).toContain("```diff");
+		expect(big).toContain("+row-0001");
+		expect(big).toContain("+row-0400");
+		expect(big).not.toContain("+row-0200");
+		expect(big).toMatch(/\[…\d+ln elided…\]/);
+
+		const smallDiff = "--- a/big.ts\n+++ b/big.ts\n@@ -1,2 +1,2 @@\n-const x = 1;\n+const x = 2;";
+		const small = renderDiff(smallDiff);
+		expect(small).toContain(`\`\`\`diff\n${smallDiff}\n\`\`\``);
+		expect(small).not.toContain("elided");
+
+		// Past the 80-line tool-output cap, inside the diff's own 300-line cap.
+		const midRows = Array.from({ length: 200 }, (_, index) => `+row-${String(index + 1).padStart(4, "0")}`);
+		const midDiff = ["--- a/big.ts", "+++ b/big.ts", "@@ -1,200 +1,200 @@", ...midRows].join("\n");
+		const mid = renderDiff(midDiff);
+		expect(mid).toContain(`\`\`\`diff\n${midDiff}\n\`\`\``);
+		expect(mid).not.toContain("elided");
+	});
 });

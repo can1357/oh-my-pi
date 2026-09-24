@@ -349,10 +349,25 @@ pub mod matchers {
 			display: Option<PathBuf>,
 		}
 
+		/// Forward-slash spelling of a Windows display path, or `None` when the path
+		/// already displays as-is (non-Windows, no backslashes, verbatim prefix, or
+		/// non-Unicode names that must stay native).
+		fn forward_slash_display(path: &Path) -> Option<PathBuf> {
+			if !cfg!(windows) || path.to_str().is_none() {
+				return None;
+			}
+			match pi_walker::normalize_path(path) {
+				std::borrow::Cow::Owned(text) => Some(PathBuf::from(text)),
+				std::borrow::Cow::Borrowed(_) => None,
+			}
+		}
+
 		impl WalkEntry {
 			/// Create a new WalkEntry for a specific file.
 			pub fn new(path: impl Into<PathBuf>, depth: usize, follow: Follow) -> Self {
-				Self { path: path.into(), depth, follow, meta: OnceCell::new(), display: None }
+				let path = path.into();
+				let display = forward_slash_display(&path);
+				Self { path, depth, follow, meta: OnceCell::new(), display }
 			}
 
 			/// Get the path to this entry.
@@ -379,7 +394,7 @@ pub mod matchers {
 					Ok(rel) => operand.join(rel),
 					Err(_) => return,
 				};
-				self.display = Some(display);
+				self.display = Some(forward_slash_display(&display).unwrap_or(display));
 			}
 
 			/// Get the name of this entry.
@@ -5414,5 +5429,20 @@ mod tests {
 		// -s guarantees lexicographically sorted output.
 		let matches: Vec<PathBuf> = capture.out().lines().map(PathBuf::from).collect();
 		assert_eq!(matches, vec![root.join("a.txt"), root.join("b.md"), root.join("c.rs")]);
+	}
+
+	/// `-exec {}` receives the display path, so on Unix it must keep non-UTF-8
+	/// name bytes instead of replacing them with U+FFFD.
+	#[cfg(unix)]
+	#[test]
+	fn display_root_keeps_non_utf8_name_bytes() {
+		use std::{ffi::OsStr, os::unix::ffi::OsStrExt, path::Path};
+
+		use super::matchers::{Follow, WalkEntry};
+
+		let file = Path::new(OsStr::from_bytes(b"/r/bad\xffname"));
+		let mut entry = WalkEntry::new(file, 1, Follow::Never);
+		entry.set_display_root(Path::new("."), Path::new("/r"));
+		assert_eq!(entry.display_path().as_os_str().as_bytes(), b"./bad\xffname");
 	}
 }

@@ -67,24 +67,15 @@ describe("LocalProtocolHandler", () => {
 		});
 	});
 
-	it("resolves path-only files and directories without returning their contents", async () => {
+	it("locates files and the root directory, and nothing for missing entries", async () => {
 		await withTempDir(async tempDir => {
 			const localFile = path.join(tempDir, "local", "report.json");
 			await Bun.write(localFile, '{"report":true}');
-			const context = {
-				localProtocolOptions: { getArtifactsDir: () => tempDir },
-				pathOnly: true,
-			};
+			const context = { localProtocolOptions: { getArtifactsDir: () => tempDir } };
 			const router = InternalUrlRouter.instance();
-			const file = await router.resolve("local://report.json", context);
-			expect(file.sourcePath).toBe(await fs.realpath(localFile));
-			expect(file.content).toBe("");
-			expect(file.isDirectory).toBe(false);
-			const directory = await router.resolve("local://", context);
-			expect(directory.sourcePath).toBe(await fs.realpath(path.dirname(localFile)));
-			expect(directory.content).toBe("");
-			expect(directory.isDirectory).toBe(true);
-			await expect(router.resolve("local://missing.json", context)).rejects.toThrow("Local file not found");
+			expect(await router.locate("local://report.json", context)).toBe(await fs.realpath(localFile));
+			expect(await router.locate("local://", context)).toBe(await fs.realpath(path.dirname(localFile)));
+			expect(await router.locate("local://missing.json", context)).toBeNull();
 		});
 	});
 
@@ -153,6 +144,31 @@ describe("LocalProtocolHandler", () => {
 			});
 			const router = InternalUrlRouter.instance();
 			await expect(router.resolve("local://linked/secret.txt")).rejects.toThrow("local:// URL escapes local root");
+		});
+	});
+
+	it("refuses write targets reaching outside the local root through missing dirs or dangling symlinks", async () => {
+		if (process.platform === "win32") return;
+
+		await withTempDir(async tempDir => {
+			const localRoot = path.join(tempDir, "local");
+			const outsideDir = path.join(tempDir, "outside");
+			await fs.mkdir(localRoot, { recursive: true });
+			await fs.mkdir(outsideDir, { recursive: true });
+			await fs.symlink(outsideDir, path.join(localRoot, "link"));
+			await fs.symlink(path.join(outsideDir, "victim.txt"), path.join(localRoot, "dangling"));
+			const context = { localProtocolOptions: { getArtifactsDir: () => tempDir } };
+			const router = InternalUrlRouter.instance();
+
+			await expect(router.locate("local://link/newdir/f", context, { create: true })).rejects.toThrow(
+				"local:// URL escapes local root",
+			);
+			await expect(router.locate("local://dangling", context, { create: true })).rejects.toThrow(
+				"local:// URL goes through a dangling symlink",
+			);
+			expect(await router.locate("local://fresh/dir/f", context, { create: true })).toBe(
+				path.join(localRoot, "fresh", "dir", "f"),
+			);
 		});
 	});
 

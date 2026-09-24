@@ -13,6 +13,15 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { formatShakeSummary } from "@oh-my-pi/pi-coding-agent/session/shake-types";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
+import {
+	cfgCompactionDropUseless,
+	cfgCompactionKeepRecentTokens,
+	cfgCompactionMethodOrder,
+	cfgCompactionThresholdPercent,
+	cfgCompactionThresholdTokens,
+	cfgContextPromotionEnabled,
+} from "@oh-my-pi/pi-coding-agent/session/context-settings";
+
 const usage = {
 	input: 16,
 	output: 8,
@@ -565,9 +574,9 @@ describe("AgentSession shake", () => {
 
 	describe("auto-shake strategy", () => {
 		it("dispatches the elide path and emits a shake action for threshold maintenance", async () => {
-			session.settings.set("compaction.methodOrder", ["shake", "soft"]);
-			session.settings.set("compaction.thresholdPercent", 1);
-			session.settings.set("contextPromotion.enabled", false);
+			cfgCompactionMethodOrder.set(session.settings, ["shake", "soft"]);
+			cfgCompactionThresholdPercent.set(session.settings, 1);
+			cfgContextPromotionEnabled.set(session.settings, false);
 
 			// Reclaim enough that the corrected (provider − tokensFreed) figure lands
 			// inside the 80% recovery band — otherwise the #2275 post-shake check would
@@ -605,8 +614,8 @@ describe("AgentSession shake", () => {
 		});
 
 		it("keeps a successful overflow shake recovery committed before retrying", async () => {
-			session.settings.set("compaction.methodOrder", ["shake", "soft"]);
-			session.settings.set("contextPromotion.enabled", false);
+			cfgCompactionMethodOrder.set(session.settings, ["shake", "soft"]);
+			cfgContextPromotionEnabled.set(session.settings, false);
 			seedHeavyToolResult("X ".repeat(20000));
 			branchToolResults()[0].useless = true;
 			vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
@@ -661,8 +670,8 @@ describe("AgentSession shake", () => {
 		});
 
 		it("keeps a no-op incomplete shake retry committed before rollback can restore the length tail", async () => {
-			session.settings.set("compaction.methodOrder", ["shake", "soft"]);
-			session.settings.set("contextPromotion.enabled", false);
+			cfgCompactionMethodOrder.set(session.settings, ["shake", "soft"]);
+			cfgContextPromotionEnabled.set(session.settings, false);
 			vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
 			vi.spyOn(session.agent, "continue").mockResolvedValue();
 			vi.spyOn(session, "getContextUsage").mockReturnValue({ tokens: 1000, contextWindow: 200000, percent: 0.5 });
@@ -721,9 +730,9 @@ describe("AgentSession shake", () => {
 			// Defect 1 parity for the shake strategy: the controller backing isCompacting
 			// must be installed before auto_compaction_start is emitted, so a message
 			// typed as the loader appears is queued safely rather than mis-routed.
-			session.settings.set("compaction.methodOrder", ["shake", "soft"]);
-			session.settings.set("compaction.thresholdPercent", 1);
-			session.settings.set("contextPromotion.enabled", false);
+			cfgCompactionMethodOrder.set(session.settings, ["shake", "soft"]);
+			cfgCompactionThresholdPercent.set(session.settings, 1);
+			cfgContextPromotionEnabled.set(session.settings, false);
 
 			let capturedIsCompacting: boolean | undefined;
 			const { promise: shakeStarted, resolve: onShakeStarted } = Promise.withResolvers<void>();
@@ -764,9 +773,9 @@ describe("AgentSession shake", () => {
 		});
 
 		it("advances to soft compaction when shake cannot drop context below the threshold (regression #2119)", async () => {
-			session.settings.set("compaction.methodOrder", ["shake", "soft"]);
-			session.settings.set("compaction.thresholdPercent", 1);
-			session.settings.set("contextPromotion.enabled", false);
+			cfgCompactionMethodOrder.set(session.settings, ["shake", "soft"]);
+			cfgCompactionThresholdPercent.set(session.settings, 1);
+			cfgContextPromotionEnabled.set(session.settings, false);
 
 			// Seed agent state so the post-shake estimate is well above the 1% threshold
 			// (~2K tokens for a 200K window). The mocked shake returns reclaimed=true but
@@ -821,9 +830,9 @@ describe("AgentSession shake", () => {
 		});
 
 		it("falls back when provider-reported usage stays above the threshold even though the local estimate is below it (regression #2275)", async () => {
-			session.settings.set("compaction.methodOrder", ["shake", "soft"]);
-			session.settings.set("compaction.thresholdTokens", 5_000);
-			session.settings.set("contextPromotion.enabled", false);
+			cfgCompactionMethodOrder.set(session.settings, ["shake", "soft"]);
+			cfgCompactionThresholdTokens.set(session.settings, 5_000);
+			cfgContextPromotionEnabled.set(session.settings, false);
 
 			// Agent state holds almost no content, so #estimatePendingPromptTokens reads
 			// well below the 5K threshold. The pre-fix post-shake check trusted that
@@ -872,11 +881,11 @@ describe("AgentSession shake", () => {
 		});
 
 		it("counts pre-shake prune savings when deciding whether to fall back to context-full", async () => {
-			session.settings.set("compaction.methodOrder", ["shake", "soft"]);
-			session.settings.set("compaction.thresholdTokens", 76384);
-			session.settings.set("compaction.thresholdPercent", -1);
-			session.settings.set("compaction.dropUseless", true);
-			session.settings.set("contextPromotion.enabled", false);
+			cfgCompactionMethodOrder.set(session.settings, ["shake", "soft"]);
+			cfgCompactionThresholdTokens.set(session.settings, 76384);
+			cfgCompactionThresholdPercent.set(session.settings, -1);
+			cfgCompactionDropUseless.set(session.settings, true);
+			cfgContextPromotionEnabled.set(session.settings, false);
 
 			const now = Date.now();
 			sessionManager.appendMessage({
@@ -936,10 +945,10 @@ describe("AgentSession shake", () => {
 		});
 
 		it("falls back after pre-prompt shake when the floored stored conversation remains over threshold", async () => {
-			session.settings.set("compaction.methodOrder", ["shake", "soft"]);
-			session.settings.set("compaction.thresholdTokens", 8_000);
-			session.settings.set("compaction.keepRecentTokens", 1);
-			session.settings.set("contextPromotion.enabled", false);
+			cfgCompactionMethodOrder.set(session.settings, ["shake", "soft"]);
+			cfgCompactionThresholdTokens.set(session.settings, 8_000);
+			cfgCompactionKeepRecentTokens.set(session.settings, 1);
+			cfgContextPromotionEnabled.set(session.settings, false);
 
 			const seedUser: AgentMessage = {
 				role: "user",

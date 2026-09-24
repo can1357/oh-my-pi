@@ -35,6 +35,9 @@ import {
 } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolAbortError } from "./tool-errors";
 
+import { cfgAskNotify, cfgAskTimeout } from "../modes/settings";
+import { cfgSpeechEnabled } from "../tts/settings";
+
 // =============================================================================
 // Types
 // =============================================================================
@@ -786,7 +789,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 	/** Send terminal notification when ask tool is waiting for input */
 	#sendAskNotification(): void {
 		if (!this.session.hasUI) return;
-		const method = this.session.settings.get("ask.notify");
+		const method = cfgAskNotify.get(this.session.settings);
 		if (method === "off") return;
 		TERMINAL.sendNotification({
 			title: "omp",
@@ -898,8 +901,8 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 
 		// Determine timeout based on settings and plan mode
 		const planModeEnabled = this.session.getPlanModeState?.()?.enabled ?? false;
-		// Settings.get("ask.timeout") returns seconds (0 = disabled), convert to ms
-		const timeoutSeconds = this.session.settings.get("ask.timeout");
+		// `ask.timeout` is in seconds (0 = disabled); convert to ms
+		const timeoutSeconds = cfgAskTimeout.get(this.session.settings);
 		const settingsTimeout = timeoutSeconds === 0 ? null : timeoutSeconds * 1000;
 		const timeout = planModeEnabled ? null : settingsTimeout;
 
@@ -916,7 +919,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		// Speak the question(s) aloud before surfacing them. Ask vocalizes in every
 		// mode — it's the assistant addressing the user — gated only by speech.enabled
 		// (the vocalizer re-checks the setting and no-ops when disabled).
-		if (this.session.settings.get("speech.enabled")) {
+		if (cfgSpeechEnabled.get(this.session.settings)) {
 			vocalizer.speak(params.questions.map(q => q.question).join("\n"));
 		}
 

@@ -29,7 +29,7 @@ Set `bash.enabled: false` in settings to remove the model-facing `bash` tool fro
 - rejects `async: true` when `async.enabled` is false,
 - defaults `timeout` to 300 seconds; `0` explicitly disables the command deadline.
 
-There are no structured `head` or `tail` parameters. Before execution, internal URLs in the command and environment values are expanded to backing filesystem paths; an internal URL used as `cwd` is also resolved. Expansion can create parent directories for writable `local://` paths. The configured direnv/devenv preflight can then merge project environment changes, with explicit `env` values taking precedence.
+There are no structured `head` or `tail` parameters. Before execution, internal URLs in the command are expanded to backing filesystem paths; an internal URL used as `cwd` is also resolved. Any internal URL the router can locate to a local path is expanded (others stay literal); expansion can create parent directories for missing targets of mutable schemes such as `local://`. The configured direnv/devenv preflight can then merge project environment changes, with explicit `env` values taking precedence.
 
 ### Approval policy
 
@@ -294,7 +294,7 @@ This component is wired by `CommandController.handleBashCommand()` and fed from 
 - [`src/tools/bash.ts`](../packages/coding-agent/src/tools/bash.ts) — tool entrypoint, input handling/interception, async and PTY/non-PTY selection, result/error mapping, bash tool renderer.
 - [`src/tools/bash-pty-selection.ts`](../packages/coding-agent/src/tools/bash-pty-selection.ts) — `canUseInteractiveBashPty` predicate for choosing the local PTY overlay.
 - [`src/tools/bash-interceptor.ts`](../packages/coding-agent/src/tools/bash-interceptor.ts) — interceptor rule matching and blocked-command messages.
-- [`src/tools/bash-skill-urls.ts`](../packages/coding-agent/src/tools/bash-skill-urls.ts) — internal-URL expansion for commands, env values, and cwd.
+- [`src/tools/bash-skill-urls.ts`](../packages/coding-agent/src/tools/bash-skill-urls.ts) — internal-URL expansion for commands and cwd.
 - [`src/exec/bash-executor.ts`](../packages/coding-agent/src/exec/bash-executor.ts) — non-PTY executor, shell session reuse, cancellation wiring, output sink integration.
 - [`src/exec/non-interactive-env.ts`](../packages/coding-agent/src/exec/non-interactive-env.ts) — non-interactive child-process env defaults (`buildNonInteractiveEnv`) used by the non-PTY executor.
 - [`src/exec/direnv.ts`](../packages/coding-agent/src/exec/direnv.ts) — direnv/devenv environment loading used by executor preflight.

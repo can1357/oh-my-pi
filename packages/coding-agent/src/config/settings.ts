@@ -1,11 +1,10 @@
 /**
- * Settings singleton with sync get/set and background persistence.
+ * Layered settings store (global config, project, `--config` overlay, runtime overrides) with
+ * background persistence. Values are typed and read through registry handles
+ * (see `./registry`), declared next to their domain and collected by `./all-settings`:
  *
- * Usage:
- *   import { settings } from "./settings";
- *
- *   const enabled = settings.get("compaction.enabled");  // sync read
- *   settings.set("theme.dark", "titanium");               // sync write, saves in background
+ *   cfgCompactionEnabled.get(settings);         // sync read
+ *   cfgThemeDark.set(settings, "titanium");     // sync write, saves in background
  *
  * For tests:
  *   const isolated = Settings.isolated({ "compaction.enabled": false });
@@ -16,8 +15,6 @@ import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { configureCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
-import { configureProviderMaxInFlightRequests } from "@oh-my-pi/pi-ai/stream";
 import {
 	getAgentDbPath,
 	getAgentDir,
@@ -28,15 +25,9 @@ import {
 	logger,
 	MAIN_CONFIG_FILENAMES,
 	procmgr,
-	setWorktreesDir,
 } from "@oh-my-pi/pi-utils";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
-import { setShimmerMode } from "@oh-my-pi/pi-tui/theme/shimmer";
-import { setChatTranscriptDisplayPreferences } from "@oh-my-pi/pi-tui/chat/display-preferences";
-import { setEditorGapComposerShape } from "@oh-my-pi/pi-tui/prompt/editor-top-gap";
-import { setEmojiAutocompleteEnabled } from "@oh-my-pi/pi-tui/prompt/prompt-action-autocomplete";
-import { setMcpRenderMarkdownResults } from "@oh-my-pi/pi-tui/tools/mcp";
-import { isLightTheme, setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "@oh-my-pi/pi-tui/theme/theme";
+import { isLightTheme } from "@oh-my-pi/pi-tui/theme/theme";
 import { JSONC, YAML } from "bun";
 import { invalidate as invalidateCapabilityFsCache } from "../capability/fs";
 import { type Settings as SettingsCapabilityItem, settingsCapability } from "../capability/settings";
@@ -45,59 +36,27 @@ import { loadCapability } from "../discovery";
 import { AgentStorage } from "../session/agent-storage";
 import { type CompactionMethod, DEFAULT_COMPACTION_METHOD_ORDER } from "../session/compaction-methods";
 import MODEL_PRIO from "../priority.json" with { type: "json" };
-import { applyHyperlinkSetting } from "@oh-my-pi/pi-tui/render/hyperlink";
-import {
-	setFeedModelBadgeEnabled,
-	setInlineImageMaxColumns,
-	setInlineImageMaxRows,
-} from "@oh-my-pi/pi-tui/render/render-utils";
 import { replaceFileAtomically } from "../utils/atomic-file";
-import { type EditMode } from "@oh-my-pi/pi-tui/tools/edit";
-import { normalizeEditMode } from "../utils/edit-mode";
 import { stringifyYamlConfig } from "@oh-my-pi/pi-utils/yaml-config";
-import { validateAgentServiceTierOverrides } from "./service-tier";
-import { STATUS_LINE_SEGMENT_IDS } from "@oh-my-pi/pi-tui/status-line/schema";
 import {
-	type BashInterceptorRule,
-	type GroupPrefix,
-	type GroupTypeMap,
-	getDefault,
-	SETTINGS_SCHEMA,
-	type SettingPath,
-	type SettingValue,
-} from "./settings-schema";
-
-// Re-export types that callers need
-export type * from "./settings-schema";
-export * from "./settings-schema";
-
-const STATUS_LINE_SEGMENT_PATHS = ["statusLine.leftSegments", "statusLine.rightSegments"] as const;
-const warnedUnknownStatusLineSegments = new Set<string>();
-
-function getUnknownStatusLineSegments(value: unknown): string[] {
-	if (!Array.isArray(value)) return [];
-	const unknown = new Set<string>();
-	for (const segment of value) {
-		if (!STATUS_LINE_SEGMENT_IDS.some(id => id === segment)) {
-			unknown.add(typeof segment === "string" ? JSON.stringify(segment) : String(segment));
-		}
-	}
-	return [...unknown];
-}
-
-function assertKnownStatusLineSegments(path: SettingPath, value: unknown): void {
-	if (path !== "statusLine.leftSegments" && path !== "statusLine.rightSegments") return;
-	const unknown = getUnknownStatusLineSegments(value);
-	if (unknown.length === 0) return;
-	const noun = unknown.length === 1 ? "segment" : "segments";
-	throw new Error(
-		`Unknown status line ${noun}: ${unknown.join(", ")}. Valid segments: ${STATUS_LINE_SEGMENT_IDS.join(", ")}`,
-	);
-}
+	type AnySetting,
+	all as allSettings,
+	bindEffects,
+	lookup as lookupSetting,
+	resetRegistryForTest,
+	type ValueCacheEntry,
+} from "./registry";
+// Registers every setting before any instance is read (definitions live next to their domains).
+import "./all-settings";
+import { cfgModelRoles, cfgModelRoleStorage } from "./model-settings";
+import { cfgShellPath } from "../exec/settings";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Types
 // ═══════════════════════════════════════════════════════════════════════════
+
+/** Settings layer that supplies an effective value; see {@link Settings.getProvenance}. */
+export type SettingProvenance = "env" | "runtime" | "overlay" | "project" | "global" | "default";
 
 /** Raw settings object as stored in YAML */
 export interface RawSettings {
@@ -170,7 +129,18 @@ type ProjectSettingsReadResult = {
 	settings: RawSettings;
 	fileSettings: RawSettings;
 	shellPathSource: string | undefined;
+	/** Files that supplied merged project-level settings items. */
+	sourcePaths: string[];
 };
+
+/** `strict` rejects on any unreadable layer; `keep-last-good` keeps each failed layer's previous value. */
+type PersistedReloadMode = "strict" | "keep-last-good";
+
+/** Layer refreshes serialized by `Settings.#exclusive`: disk reloads and cwd re-scopes. */
+type LayerRefreshKind = PersistedReloadMode | "rescope";
+
+/** Quiet period after the last config-file event before the watcher reloads from disk. */
+const CONFIG_WATCH_DEBOUNCE_MS = 200;
 
 type ConfigOverlayReadResult = {
 	settings: RawSettings;
@@ -186,8 +156,8 @@ export interface SettingsOptions {
 	inMemory?: boolean;
 	/** Read config sources without opening storage or writing migrations */
 	readOnly?: boolean;
-	/** Initial overrides */
-	overrides?: Partial<Record<SettingPath, unknown>>;
+	/** Initial runtime overrides, keyed by setting id (legacy ids migrate; values are checked like `override`). */
+	overrides?: Readonly<Record<string, unknown>>;
 	/** Extra config.yml-style overlays loaded after global/project settings */
 	configFiles?: string[];
 }
@@ -210,33 +180,11 @@ function getByPath(obj: RawSettings, segments: readonly string[]): unknown {
 	return current;
 }
 
-const SETTING_PATH_SEGMENTS: Record<SettingPath, readonly string[]> = Object.fromEntries(
-	(Object.keys(SETTINGS_SCHEMA) as SettingPath[]).map(settingPath => [settingPath, settingPath.split(".")]),
-) as unknown as Record<SettingPath, readonly string[]>;
-
-/**
- * Schema members for each typed group, computed once. `getGroup` is hot during
- * startup and status rendering; it must not walk the full schema on every
- * settings instance or effective-layer revision.
- */
-const SETTING_GROUP_MEMBERS: Record<GroupPrefix, readonly [suffix: string, path: SettingPath][]> = (() => {
-	const members: Partial<Record<GroupPrefix, [suffix: string, path: SettingPath][]>> = {};
-	for (const rawPath in SETTINGS_SCHEMA) {
-		const path = rawPath as SettingPath;
-		const dot = path.indexOf(".");
-		if (dot === -1) continue;
-		const prefix = path.slice(0, dot) as GroupPrefix;
-		const group = members[prefix] ?? (members[prefix] = []);
-		group.push([path.slice(dot + 1), path]);
-	}
-	return members as Record<GroupPrefix, readonly [suffix: string, path: SettingPath][]>;
-})();
-
 /**
  * Set a nested value in an object by path segments.
  * Creates intermediate objects as needed.
  */
-function setByPath(obj: RawSettings, segments: string[], value: unknown): void {
+function setByPath(obj: RawSettings, segments: readonly string[], value: unknown): void {
 	let current = obj;
 	for (let i = 0; i < segments.length - 1; i++) {
 		const segment = segments[i];
@@ -248,21 +196,78 @@ function setByPath(obj: RawSettings, segments: string[], value: unknown): void {
 	current[segments[segments.length - 1]] = value;
 }
 
+/** Removes the value at `segments`, pruning the parent objects the removal leaves empty. */
+function deleteByPath(obj: RawSettings, segments: readonly string[]): void {
+	const parents: RawSettings[] = [];
+	let current = obj;
+	for (let i = 0; i < segments.length - 1; i++) {
+		const next = current[segments[i]];
+		if (!isRecord(next)) return;
+		parents.push(current);
+		current = next;
+	}
+	delete current[segments[segments.length - 1]];
+	for (let i = parents.length - 1; i >= 0 && Object.keys(current).length === 0; i--) {
+		delete parents[i][segments[i]];
+		current = parents[i];
+	}
+}
+
+/**
+ * @throws Error when a leaf of `layer` sits at a path that names no registered setting (typo guard
+ * for constructor overrides).
+ */
+function assertKnownSettingPaths(layer: RawSettings, prefix = ""): void {
+	for (const key in layer) {
+		const id = prefix ? `${prefix}.${key}` : key;
+		if (lookupSetting(id)) continue;
+		const value = layer[key];
+		if (!isRecord(value)) throw new Error(`Unknown setting "${id}"`);
+		assertKnownSettingPaths(value, id);
+	}
+}
+
+/** `project` as it merges over the global layer: `null` (cleared) model roles fall back to global. */
+function projectLayerForMerge(project: RawSettings): RawSettings {
+	const projectRoles = getByPath(project, ["modelRoles"]);
+	if (!isRecord(projectRoles)) return project;
+
+	let filteredRoles: Record<string, unknown> | undefined;
+	for (const role in projectRoles) {
+		if (!Object.hasOwn(projectRoles, role) || modelRoleValueFromUnknown(projectRoles[role]) !== undefined) continue;
+		filteredRoles ??= { ...projectRoles };
+		delete filteredRoles[role];
+	}
+	return filteredRoles ? { ...project, modelRoles: filteredRoles } : project;
+}
+
+/** One instance's own layers, lowest precedence first. */
+interface OwnLayers {
+	global: RawSettings;
+	project: RawSettings;
+	configOverlay: RawSettings;
+	overrides: RawSettings;
+}
+
 /**
  * Dotted-path prefixes that name settings groups (e.g. "tui" for "tui.*").
  * A prefix may simultaneously be a schema leaf; those accept their declared
  * value shape and are excluded from shadow detection.
  */
-const SETTINGS_GROUP_ONLY_PREFIXES: Readonly<Record<string, true>> = (() => {
+let groupOnlyPrefixes: Readonly<Record<string, true>> | undefined;
+
+function settingsGroupOnlyPrefixes(): Readonly<Record<string, true>> {
+	if (groupOnlyPrefixes) return groupOnlyPrefixes;
 	const prefixes: Record<string, true> = {};
-	for (const key of Object.keys(SETTINGS_SCHEMA)) {
-		for (let dot = key.indexOf("."); dot !== -1; dot = key.indexOf(".", dot + 1)) {
-			prefixes[key.slice(0, dot)] = true;
+	for (const { id } of allSettings()) {
+		for (let dot = id.indexOf("."); dot !== -1; dot = id.indexOf(".", dot + 1)) {
+			prefixes[id.slice(0, dot)] = true;
 		}
 	}
-	for (const key of Object.keys(SETTINGS_SCHEMA)) delete prefixes[key];
+	for (const { id } of allSettings()) delete prefixes[id];
+	groupOnlyPrefixes = prefixes;
 	return prefixes;
-})();
+}
 
 /**
  * Drop entries from capability-provided project settings whose non-object
@@ -277,7 +282,7 @@ export function dropSettingsGroupShadows(data: RawSettings, sourcePath: string, 
 	for (const key of Object.keys(data)) {
 		const value = data[key];
 		const path = basePrefix === "" ? key : `${basePrefix}.${key}`;
-		if (!Object.hasOwn(SETTINGS_GROUP_ONLY_PREFIXES, path)) {
+		if (!Object.hasOwn(settingsGroupOnlyPrefixes(), path)) {
 			result[key] = value;
 			continue;
 		}
@@ -292,45 +297,6 @@ export function dropSettingsGroupShadows(data: RawSettings, sourcePath: string, 
 	}
 	return result;
 }
-
-export function normalizeProviderMaxInFlightRequests(value: unknown): Record<string, number> {
-	if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-	const normalized: Record<string, number> = {};
-	for (const [provider, rawLimit] of Object.entries(value)) {
-		if (typeof rawLimit !== "number" || !Number.isFinite(rawLimit) || rawLimit <= 0) continue;
-		normalized[provider] = Math.max(1, Math.floor(rawLimit));
-	}
-	return normalized;
-}
-
-export function validateProviderMaxInFlightRequests(value: unknown): Record<string, number> {
-	if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-	const invalidProviders: string[] = [];
-	const normalized: Record<string, number> = {};
-	for (const [provider, rawLimit] of Object.entries(value)) {
-		if (typeof rawLimit !== "number" || !Number.isFinite(rawLimit) || rawLimit <= 0) {
-			invalidProviders.push(provider);
-			continue;
-		}
-		normalized[provider] = Math.max(1, Math.floor(rawLimit));
-	}
-	if (invalidProviders.length > 0) {
-		throw new Error(`Provider request limits must be positive numbers: ${invalidProviders.join(", ")}`);
-	}
-	return normalized;
-}
-
-const PATH_SCOPED_ARRAY_SETTINGS = new Set<SettingPath>(["enabledModels", "disabledProviders", "enabledProviders"]);
-type PathScopedStringArrayEntry = {
-	path?: unknown;
-	paths?: unknown;
-	pathPrefix?: unknown;
-	pathPrefixes?: unknown;
-	values?: unknown;
-	items?: unknown;
-	models?: unknown;
-	providers?: unknown;
-};
 
 function expandTilde(p: string): string {
 	return p === "~" ? os.homedir() : p.startsWith("~/") ? path.join(os.homedir(), p.slice(2)) : p;
@@ -440,13 +406,31 @@ function modelRoleValueFromUnknown(value: unknown): string | undefined {
 	return entries.length === value.length ? entries.join(",") : undefined;
 }
 
-type EditVariantEntry = {
-	patternLower: string;
-	mode: EditMode;
-};
+/** Receives the setting whose effective value changed (see {@link Settings.onEffectiveChange}). */
+type SettingChangeListener = (setting: AnySetting) => void;
 
-function resolvePathScopedStringArray(settingPath: SettingPath, value: unknown, cwd: string): string[] | undefined {
-	if (!PATH_SCOPED_ARRAY_SETTINGS.has(settingPath) || !Array.isArray(value)) return undefined;
+/** Calls each listener with `setting`; a throwing listener is logged and never blocks the rest. */
+function runChangeListeners(listeners: ReadonlySet<SettingChangeListener>, setting: AnySetting): void {
+	// Snapshot: a listener may unsubscribe itself or others mid-dispatch.
+	for (const listener of Array.from(listeners)) {
+		try {
+			listener(setting);
+		} catch (error) {
+			logger.warn("Settings: effective-change listener failed", { path: setting.id, error: String(error) });
+		}
+	}
+}
+
+/** Value `setting` has in the `merged` layers, path-scoped entries resolved for `cwd`; `null` counts as unset. */
+function configuredValue(merged: RawSettings, setting: AnySetting, cwd: string): unknown {
+	const value = getByPath(merged, setting.segments);
+	if (value === undefined || value === null) return undefined;
+	return resolvePathScopedStringArray(setting, value, cwd) ?? value;
+}
+
+function resolvePathScopedStringArray(setting: AnySetting, value: unknown, cwd: string): string[] | undefined {
+	const scope = setting.definition.pathScoped;
+	if (!scope || !Array.isArray(value)) return undefined;
 
 	const resolved: string[] = [];
 	for (const entry of value) {
@@ -456,7 +440,7 @@ function resolvePathScopedStringArray(settingPath: SettingPath, value: unknown, 
 		}
 		if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
 
-		const scoped = entry as PathScopedStringArrayEntry;
+		const scoped: Record<string, unknown> = entry;
 		const prefixes = [
 			...stringArrayFromUnknown(scoped.path),
 			...stringArrayFromUnknown(scoped.paths),
@@ -465,19 +449,11 @@ function resolvePathScopedStringArray(settingPath: SettingPath, value: unknown, 
 		];
 		if (prefixes.length === 0 || !prefixes.some(prefix => pathMatchesPrefix(cwd, prefix))) continue;
 
-		const values =
-			settingPath === "enabledModels"
-				? [
-						...stringArrayFromUnknown(scoped.values),
-						...stringArrayFromUnknown(scoped.items),
-						...stringArrayFromUnknown(scoped.models),
-					]
-				: [
-						...stringArrayFromUnknown(scoped.values),
-						...stringArrayFromUnknown(scoped.items),
-						...stringArrayFromUnknown(scoped.providers),
-					];
-		resolved.push(...values);
+		resolved.push(
+			...stringArrayFromUnknown(scoped.values),
+			...stringArrayFromUnknown(scoped.items),
+			...stringArrayFromUnknown(scoped[scope.valuesKey]),
+		);
 	}
 
 	return resolved;
@@ -544,22 +520,33 @@ export class Settings {
 	#configOverlay: RawSettings = {};
 	/** Project settings file that most recently supplied shellPath. */
 	#projectShellPathSource: string | undefined;
+	/** Discovered files that supplied the current project layer (watch targets). */
+	#projectSourcePaths: string[] = [];
 	/** Capability warnings already surfaced for the current project scope; reloads stay quiet. */
 	#projectSettingsWarningsSeen = new Set<string>();
 	/** Explicit config overlay that most recently supplied shellPath. */
 	#overlayShellPathSource: string | undefined;
 	/** Runtime overrides (not persisted) */
 	#overrides: RawSettings = {};
+	/** Settings whose runtime override is a soft-pinned default ({@link pinDefaultValue}). */
+	#softPins = new Set<AnySetting>();
 	/** Merged view (global + project + overrides) */
 	#merged: RawSettings = {};
 	/** Monotonic revision of merged layers and cwd-scoped resolution. */
 	#revision = 0;
-	/** Cached resolved values from the merged view, including defaults/path scoping */
-	#resolvedCache = new Map<SettingPath, unknown>();
-	/** Typed group snapshots for the current merged layers and cwd scope. */
-	#groupCache = new Map<GroupPrefix, unknown>();
-	#effectiveChangeListeners = new Set<(path: SettingPath, value: unknown, previous: unknown) => void>();
-	#editVariantCache: readonly EditVariantEntry[] | undefined;
+	/**
+	 * Registry-owned memo of handle and derivation values for this instance, indexed by
+	 * `Derived.slot` and validated against {@link revision}; see `config/registry.ts`.
+	 */
+	readonly valueCache: (ValueCacheEntry | undefined)[] = [];
+	/** Change listeners bucketed by the `slot` of the setting they observe ({@link onEffectiveChange}). */
+	#changeListeners: (Set<SettingChangeListener> | undefined)[] = [];
+	/** Forwarders of every change into live {@link overlay} children. */
+	#childForwarders = new Set<SettingChangeListener>();
+	/** Instance this overlay reads through to ({@link overlay}); overlays never persist or write back. */
+	#parent: Settings | undefined;
+	/** Parent {@link revision} `#merged` was last built from; any other parent revision re-merges. */
+	#syncedParentRevision = -1;
 
 	/** Paths modified during this session (for partial save) */
 	#modified = new Set<string>();
@@ -589,8 +576,14 @@ export class Settings {
 	#savePromise?: Promise<void>;
 	#projectSaveTimer?: NodeJS.Timeout;
 	#projectSavePromise?: Promise<void>;
-	/** Coalesces concurrent persisted-layer refreshes into one atomic reload. */
-	#reloadFromDiskPromise?: Promise<void>;
+	/** In-flight layer refresh; concurrent strict reloads share it, others queue behind it. */
+	#activeReload?: { kind: LayerRefreshKind; promise: Promise<void> };
+	/** Whether {@link startWatching} is active. */
+	#watchingFiles = false;
+	/** Directory watchers for config sources, keyed by directory, with the basenames that trigger a reload. */
+	#fileWatchers = new Map<string, { watcher: fs.FSWatcher; names: Set<string> }>();
+	/** Debounce timer for watcher-triggered reloads. */
+	#watchReloadTimer?: NodeJS.Timeout;
 
 	/** Whether to persist changes */
 	#persist: boolean;
@@ -604,14 +597,32 @@ export class Settings {
 		this.#configFiles = configFiles.map(file => path.resolve(this.#cwd, expandTilde(file)));
 		this.#persist = !options.inMemory && options.readOnly !== true;
 		liveSettingsInstances.add(new WeakRef(this));
+		if (options.overrides) this.#overrides = this.#overrideLayer(options.overrides);
+	}
 
-		if (options.overrides) {
-			for (const [key, value] of Object.entries(options.overrides)) {
-				setByPath(this.#overrides, key.split("."), value);
-			}
-
-			this.#overrides = this.#migrateRawSettings(this.#overrides);
+	/**
+	 * Runtime-override layer for dotted constructor `overrides`: legacy ids migrate first, then every
+	 * path must belong to a registered setting and every value is normalized and checked like a
+	 * handle `override`. `undefined` values are skipped; `null` stays as an unset tombstone.
+	 *
+	 * @throws Error on an unknown setting or a value its definition rejects.
+	 */
+	#overrideLayer(overrides: Readonly<Record<string, unknown>>): RawSettings {
+		const raw: RawSettings = {};
+		for (const key in overrides) {
+			const value = overrides[key];
+			if (value !== undefined) setByPath(raw, key.split("."), value);
 		}
+		const layer = this.#migrateRawSettings(raw);
+		assertKnownSettingPaths(layer);
+		for (const setting of allSettings()) {
+			const value = getByPath(layer, setting.segments);
+			if (value === undefined || value === null) continue;
+			const normalized = setting.definition.normalize ? setting.definition.normalize(value) : value;
+			setting.assertWritable(normalized);
+			setByPath(layer, setting.segments, normalized);
+		}
+		return layer;
 	}
 
 	// ─────────────────────────────────────────────────────────────────────────
@@ -620,13 +631,13 @@ export class Settings {
 
 	/**
 	 * Initialize the global singleton.
-	 * Call once at startup before accessing `settings`.
+	 * Call once at startup before accessing `settings`. Rejects (never throws) on an invalid
+	 * override or configuration.
 	 */
 	static init(options: SettingsOptions = {}): Promise<Settings> {
 		if (globalInstancePromise) return globalInstancePromise;
 
-		const instance = new Settings(options);
-		const promise = instance.#load();
+		const promise = Promise.try(() => new Settings(options).#load());
 		globalInstancePromise = promise;
 
 		return promise.then(
@@ -634,6 +645,7 @@ export class Settings {
 				globalInstance = instance;
 				clearBoundSettingsMethods();
 				globalInstancePromise = Promise.resolve(instance);
+				bindEffects(instance);
 				return instance;
 			},
 			error => {
@@ -650,16 +662,14 @@ export class Settings {
 	 * opening agent.db, migrating legacy settings, or writing marker files.
 	 */
 	static loadReadOnly(options: SettingsOptions = {}): Promise<Settings> {
-		const instance = new Settings({ ...options, readOnly: true });
-		return instance.#loadReadOnly();
+		return Promise.try(() => new Settings({ ...options, readOnly: true }).#loadReadOnly());
 	}
 
 	/**
 	 * Load a persisted settings instance without touching the global singleton.
 	 */
 	static loadIsolated(options: SettingsOptions = {}): Promise<Settings> {
-		const instance = new Settings(options);
-		return instance.#load();
+		return Promise.try(() => new Settings(options).#load());
 	}
 
 	/**
@@ -667,13 +677,59 @@ export class Settings {
 	 * A supplied storage handle remains shared for runtime data while setting overrides stay non-persistent.
 	 */
 	static isolated(
-		overrides: Partial<Record<SettingPath, unknown>> = {},
+		overrides: Readonly<Record<string, unknown>> = {},
 		options: { storage?: AgentStorage | null } = {},
 	): Settings {
 		const instance = new Settings({ inMemory: true, overrides });
 		instance.#storage = options.storage ?? null;
 		instance.#rebuildMerged();
 		return instance;
+	}
+
+	/**
+	 * Child view for a subagent or other derived session: reads fall through to this instance
+	 * live (a later edit here reaches the child and its listeners), while `overrides` and every
+	 * later write on the child stay in the child — never persisted, never written back here.
+	 *
+	 * @throws Error when `overrides` names an unknown setting or a value its definition rejects.
+	 */
+	overlay(overrides: Readonly<Record<string, unknown>> = {}): Settings {
+		const child = new Settings({ inMemory: true, cwd: this.#cwd, agentDir: this.#agentDir, overrides });
+		child.#storage = this.#storage;
+		child.#parent = this;
+		child.#rebuildMerged();
+		// The parent holds only a weak reference, so a discarded child is collected without an
+		// explicit dispose; its listener unsubscribes on the next parent change.
+		const ref = new WeakRef(child);
+		const forward: SettingChangeListener = setting => {
+			const target = ref.deref();
+			if (!target) {
+				this.#childForwarders.delete(forward);
+				return;
+			}
+			target.#applyParentChange(setting);
+		};
+		this.#childForwarders.add(forward);
+		return child;
+	}
+
+	/** Re-merges after a parent change and forwards it unless the child's own layers pin the value. */
+	#applyParentChange(setting: AnySetting): void {
+		this.#syncParent();
+		const own = getByPath(this.#mergeOwnLayers(this.#ownLayers()), setting.segments);
+		if (own !== undefined && (typeof own !== "object" || own === null || Array.isArray(own))) return;
+		this.#notifyChange(setting);
+	}
+
+	/** Re-merges an overlay whose parent changed since the last merge (every parent write bumps its revision). */
+	#syncParent(): void {
+		if (this.#parent && this.#parent.revision !== this.#syncedParentRevision) this.#rebuildMerged();
+	}
+
+	/** Merged layers, re-merged first when the parent moved on. */
+	#mergedView(): RawSettings {
+		this.#syncParent();
+		return this.#merged;
 	}
 
 	/**
@@ -697,128 +753,170 @@ export class Settings {
 	// ─────────────────────────────────────────────────────────────────────────
 
 	/**
-	 * Get a setting value (sync).
-	 * Returns the merged value from global + project + overrides, or the default.
+	 * Registry plumbing behind `Setting.get`: the configured value of `id` across all layers
+	 * (path-scoped entries resolved for this cwd), or `undefined` when unset — the handle
+	 * supplies the default. Read settings through their handles, not this.
+	 *
+	 * A configured `null` is treated as unset: YAML writes `null` for a key left
+	 * without a value (`fallbackChains:`), and no schema entry has a null
+	 * default, so returning it verbatim would hand callers a value the schema
+	 * says is impossible (#13183).
 	 */
-	get<P extends SettingPath>(path: P): SettingValue<P> {
-		if (this.#resolvedCache.has(path)) {
-			return this.#resolvedCache.get(path) as SettingValue<P>;
-		}
-
-		const value = getByPath(this.#merged, SETTING_PATH_SEGMENTS[path]);
-		const resolved =
-			value !== undefined ? (resolvePathScopedStringArray(path, value, this.#cwd) ?? value) : getDefault(path);
-		this.#resolvedCache.set(path, resolved);
-		return resolved as SettingValue<P>;
+	rawValue(setting: AnySetting): unknown {
+		return configuredValue(this.#mergedView(), setting, this.#cwd);
 	}
 
 	/**
-	 * Whether `path` has an explicitly configured value (global config, project
+	 * Whether `setting` has an explicitly configured value (global config, project
 	 * config, or runtime override) rather than falling back to the schema default.
+	 * A configured `null` counts as unset, like in {@link rawValue}.
 	 */
-	isConfigured(path: SettingPath): boolean {
-		return getByPath(this.#merged, SETTING_PATH_SEGMENTS[path]) !== undefined;
+	isConfigured(setting: AnySetting): boolean {
+		const value = getByPath(this.#mergedView(), setting.segments);
+		return value !== undefined && value !== null;
 	}
 
 	/**
-	 * Set a setting value (sync).
-	 * Updates global settings and queues a background save.
-	 * Triggers hooks for settings that have side effects.
+	 * Layer supplying the effective value of `setting`, in merge precedence order:
+	 * runtime override → config overlay → project → global → (overlay parent) → schema default.
+	 * A value that merges to `null` is unset and reports `"default"`.
 	 */
-	set<P extends SettingPath>(path: P, value: SettingValue<P>): void {
-		assertKnownStatusLineSegments(path, value);
-		const prev = this.get(path);
-		const segments = path.split(".");
-		this.#captureGlobalMutation(path, this.#modifiedPathMutations, getByPath(this.#global, segments));
-		setByPath(this.#global, segments, value);
+	getProvenance(setting: AnySetting): SettingProvenance {
+		if (!this.isConfigured(setting)) return "default";
+		const segments = setting.segments;
+		if (getByPath(this.#overrides, segments) !== undefined) return "runtime";
+		if (getByPath(this.#configOverlay, segments) !== undefined) return "overlay";
+		if (getByPath(projectLayerForMerge(this.#project), segments) !== undefined) return "project";
+		if (getByPath(this.#global, segments) !== undefined) return "global";
+		return this.#parent?.getProvenance(setting) ?? "default";
+	}
+
+	/**
+	 * Registry plumbing behind `Setting.set` / `Setting.override`: writes `value` for `setting` to the
+	 * global layer (persisted in the background) or the runtime-override layer, then notifies change
+	 * listeners (process-wide effects apply synchronously). On an {@link overlay} both layers are
+	 * local to the overlay.
+	 *
+	 * @throws Error when the value does not fit the definition's type or fails its `items`/`validate` check.
+	 */
+	writeValue(setting: AnySetting, value: unknown, layer: "global" | "override"): void {
+		setting.assertWritable(value);
+		if (layer === "override" && setting === cfgModelRoles) {
+			this.#savedRuntimeModelRoleOverrides.clear();
+		}
+		if (layer === "override") this.#softPins.delete(setting);
+		const prev = setting.get(this);
+		const segments = setting.segments;
+		if (layer === "global") {
+			this.#captureGlobalMutation(setting.id, this.#modifiedPathMutations, getByPath(this.#global, segments));
+			setByPath(this.#global, segments, value);
+			this.#persistedMutationGeneration++;
+			this.#modified.add(setting.id);
+		} else {
+			setByPath(this.#overrides, segments, value);
+		}
+		this.#rebuildMerged();
+		if (layer === "global") this.#queueSave();
+		this.#fireIfChanged(setting, prev);
+	}
+
+	/**
+	 * Registry plumbing behind `Setting.unset`: removes `setting` from the global layer (the removal
+	 * is persisted in the background), so lower layers and the default apply again.
+	 */
+	unsetGlobalValue(setting: AnySetting): void {
+		const segments = setting.segments;
+		const current = getByPath(this.#global, segments);
+		if (current === undefined) return;
+		const prev = setting.get(this);
+		this.#captureGlobalMutation(setting.id, this.#modifiedPathMutations, current);
+		deleteByPath(this.#global, segments);
 		this.#persistedMutationGeneration++;
-		this.#modified.add(path);
+		this.#modified.add(setting.id);
 		this.#rebuildMerged();
-		const next = this.get(path);
 		this.#queueSave();
-
-		// Trigger hook if exists
-		const hook = SETTING_HOOKS[path];
-		if (hook) {
-			hook(next, prev);
-		}
-		this.#fireEffectiveSettingChanged(path, next, prev);
+		this.#fireIfChanged(setting, prev);
 	}
 
 	/**
-	 * Apply runtime overrides (not persisted).
+	 * Registry plumbing behind `Setting.pinDefault`: overrides `setting` with its default unless a
+	 * layer configures it, keeping the override soft — a disk reload or re-scope that makes a
+	 * persisted layer configure the setting drops it, and an explicit override/clear ends it.
 	 */
-	override<P extends SettingPath>(path: P, value: SettingValue<P>): void {
-		if (path === "modelRoles") {
-			this.#savedRuntimeModelRoleOverrides.clear();
-		}
-		const prev = this.get(path);
-		const segments = path.split(".");
-		setByPath(this.#overrides, segments, value);
-		this.#rebuildMerged();
-		const next = this.get(path);
-		SETTING_HOOKS[path]?.(next, prev);
-		this.#fireEffectiveSettingChanged(path, next, prev);
+	pinDefaultValue(setting: AnySetting): void {
+		const value = setting.default;
+		if (value === undefined || this.isConfigured(setting)) return;
+		this.writeValue(setting, value, "override");
+		this.#softPins.add(setting);
 	}
 
 	/**
-	 * Clear a runtime override.
+	 * Removes from `layers.overrides` (replaced by a copy) every soft pin the persisted `layers`
+	 * (global, project, `--config` overlay, parent) now configure; returns the settled settings.
 	 */
-	clearOverride(path: SettingPath): void {
-		if (path === "modelRoles") {
+	#settlePins(layers: OwnLayers): AnySetting[] {
+		if (this.#softPins.size === 0) return [];
+		const persisted = this.#mergeOverParent(this.#mergeOwnLayers({ ...layers, overrides: {} }));
+		const settled = [...this.#softPins].filter(setting => {
+			const value = getByPath(persisted, setting.segments);
+			return value !== undefined && value !== null;
+		});
+		if (settled.length === 0) return settled;
+		layers.overrides = structuredClone(layers.overrides);
+		for (const setting of settled) deleteByPath(layers.overrides, setting.segments);
+		return settled;
+	}
+
+	/** Registry plumbing behind `Setting.clearOverride`: drops the runtime override of `setting`. */
+	clearOverrideValue(setting: AnySetting): void {
+		if (setting === cfgModelRoles) {
 			this.#savedRuntimeModelRoleOverrides.clear();
 		}
-		const prev = this.get(path);
-		const segments = path.split(".");
-		let current = this.#overrides;
-		for (let i = 0; i < segments.length - 1; i++) {
-			const segment = segments[i];
-			if (!(segment in current)) return;
-			current = current[segment] as RawSettings;
-		}
-		delete current[segments[segments.length - 1]];
+		this.#softPins.delete(setting);
+		if (getByPath(this.#overrides, setting.segments) === undefined) return;
+		const prev = setting.get(this);
+		deleteByPath(this.#overrides, setting.segments);
 		this.#rebuildMerged();
-		const next = this.get(path);
-		SETTING_HOOKS[path]?.(next, prev);
-		this.#fireEffectiveSettingChanged(path, next, prev);
+		this.#fireIfChanged(setting, prev);
 	}
 
-	/** Effective values of every setting that repartitions the Code Mode surface. */
-	#codeModeSignalSnapshot(): unknown[] {
-		return CODE_MODE_SIGNAL_PATHS.map(path => this.get(path));
+	/** Effective value of every setting (in registration order), captured before a bulk layer refresh. */
+	#snapshot(): unknown[] {
+		return allSettings().map(setting => setting.get(this));
 	}
 
-	/** Fires the Code Mode signal when a persisted-layer refresh changed the partition inputs. */
-	#fireCodeModeChangeIfNeeded(previous: unknown[]): void {
-		if (Bun.deepEquals(this.#codeModeSignalSnapshot(), previous)) return;
-		codeModeSignal.fire();
-	}
-
-	#fireEffectiveSettingChanged(path: SettingPath, value: unknown, prev: unknown): void {
-		if (Object.is(value, prev)) return;
-		for (const listener of Array.from(this.#effectiveChangeListeners)) {
-			try {
-				listener(path, value, prev);
-			} catch (error) {
-				logger.warn("Settings: effective-change listener failed", { path, error: String(error) });
-			}
-		}
-		if (path === "statusLine.sessionAccent") {
-			statusLineSessionAccentSignal.fire();
-		}
-		if (path === "modelRoles") {
-			modelRolesSignal.fire();
-		}
-		if (CODE_MODE_SIGNAL_PATHS.includes(path)) {
-			codeModeSignal.fire();
+	/**
+	 * Notifies change listeners for every setting whose effective value differs from
+	 * `previous` (disk reload, save-time merge, project re-scope).
+	 */
+	#fireChangesSince(previous: readonly unknown[]): void {
+		const settings = allSettings();
+		for (let i = 0; i < previous.length; i++) {
+			const setting = settings[i];
+			if (!Bun.deepEquals(setting.get(this), previous[i])) this.#notifyChange(setting);
 		}
 	}
 
-	/** Observe effective changes on this settings instance. */
-	onEffectiveChange(listener: (path: SettingPath, value: unknown, previous: unknown) => void): () => void {
-		this.#effectiveChangeListeners.add(listener);
+	#fireIfChanged(setting: AnySetting, prev: unknown): void {
+		if (!Object.is(setting.get(this), prev)) this.#notifyChange(setting);
+	}
+
+	/** Runs the listeners observing `setting`, then forwards the change to overlay children. */
+	#notifyChange(setting: AnySetting): void {
+		const listeners = this.#changeListeners[setting.slot];
+		if (listeners) runChangeListeners(listeners, setting);
+		if (this.#childForwarders.size > 0) runChangeListeners(this.#childForwarders, setting);
+	}
+
+	/**
+	 * Registry plumbing behind `Derived.listen` and `effect`: calls `listener` synchronously
+	 * whenever the effective value of one of `sources` changes in this instance. Returns the
+	 * unsubscribe. Consumers observe settings through handles instead.
+	 */
+	onEffectiveChange(sources: readonly AnySetting[], listener: SettingChangeListener): () => void {
+		for (const source of sources) (this.#changeListeners[source.slot] ??= new Set()).add(listener);
 		return () => {
-			this.#effectiveChangeListeners.delete(listener);
+			for (const source of sources) this.#changeListeners[source.slot]?.delete(listener);
 		};
 	}
 
@@ -829,14 +927,133 @@ export class Settings {
 	 * Drop pending debounced saves and refuse any further background writes.
 	 * Used when an instance is being discarded (test teardown): an armed timer
 	 * or a chained in-flight save on a dropped instance would otherwise fire
-	 * later and race the successor's file locks.
+	 * later and race the successor's file locks. Also stops config-file watching.
 	 */
 	cancelPendingSaves(): void {
 		this.#savesCancelled = true;
+		this.stopWatching();
 		clearTimeout(this.#saveTimer);
 		this.#saveTimer = undefined;
 		clearTimeout(this.#projectSaveTimer);
 		this.#projectSaveTimer = undefined;
+	}
+
+	/**
+	 * Apply on-disk edits live: watch the directories holding config.yml, the
+	 * project settings files, and `--config` overlays, and run a debounced
+	 * keep-last-good reload (a file that fails to parse keeps its layer's last
+	 * good values). Only the persisting process-global instance watches; other
+	 * instances ignore the call. Stopped by {@link stopWatching} /
+	 * {@link cancelPendingSaves}.
+	 */
+	startWatching(): void {
+		if (this.#watchingFiles || !this.#persist || this.#savesCancelled || globalInstance !== this) return;
+		this.#watchingFiles = true;
+		this.#syncFileWatchers();
+	}
+
+	/** Stop config-file watching started by {@link startWatching}; idempotent. */
+	stopWatching(): void {
+		this.#watchingFiles = false;
+		clearTimeout(this.#watchReloadTimer);
+		this.#watchReloadTimer = undefined;
+		for (const { watcher } of this.#fileWatchers.values()) watcher.close();
+		this.#fileWatchers.clear();
+	}
+
+	/** Directory → basenames whose events should trigger a reload, for every current config source. */
+	#configWatchTargets(): Map<string, Set<string>> {
+		const targets = new Map<string, Set<string>>();
+		const addTarget = (dir: string, name: string) => {
+			const names = targets.get(dir);
+			if (names) names.add(name);
+			else targets.set(dir, new Set([name]));
+		};
+		const addFile = (file: string) => {
+			const dir = path.dirname(file);
+			// A missing directory cannot be watched; watch its parent for the
+			// directory's creation instead (the next sync re-arms the real watch).
+			if (fs.existsSync(dir)) addTarget(dir, path.basename(file));
+			else addTarget(path.dirname(dir), path.basename(dir));
+			// Symlinked configs (dotfile managers) change at the link target.
+			let real: string;
+			try {
+				real = fs.realpathSync(file);
+			} catch {
+				return;
+			}
+			if (real !== file) addTarget(path.dirname(real), path.basename(real));
+		};
+		for (const filename of MAIN_CONFIG_FILENAMES) addFile(path.join(this.#agentDir, filename));
+		const projectCwd = path.resolve(this.#cwd);
+		const projectConfigDir = getProjectAgentDir(projectCwd);
+		addFile(path.join(projectConfigDir, "config.yml"));
+		addFile(path.join(projectConfigDir, "settings.json"));
+		addFile(path.join(projectCwd, ".claude", "settings.json"));
+		for (const file of this.#projectSourcePaths) addFile(file);
+		for (const file of this.#configFiles) addFile(file);
+		return targets;
+	}
+
+	/**
+	 * Reconcile directory watchers with the current config sources. Watching
+	 * directories (not files) keeps atomic rename-over writes observable.
+	 */
+	#syncFileWatchers(): void {
+		if (!this.#watchingFiles) return;
+		const targets = this.#configWatchTargets();
+		for (const [dir, entry] of this.#fileWatchers) {
+			if (targets.has(dir)) continue;
+			entry.watcher.close();
+			this.#fileWatchers.delete(dir);
+		}
+		for (const [dir, names] of targets) {
+			const existing = this.#fileWatchers.get(dir);
+			if (existing) {
+				existing.names = names;
+				continue;
+			}
+			let watcher: fs.FSWatcher;
+			try {
+				watcher = fs.watch(dir, { persistent: false }, (_event, filename) => {
+					const entry = this.#fileWatchers.get(dir);
+					if (!entry || entry.watcher !== watcher) return;
+					if (filename && !entry.names.has(path.basename(filename.toString()))) return;
+					this.#scheduleWatchReload();
+				});
+			} catch (error) {
+				if (!isEnoent(error))
+					logger.debug("Settings: cannot watch config directory", { dir, error: String(error) });
+				continue;
+			}
+			watcher.on("error", error => {
+				logger.debug("Settings: config directory watcher failed", { dir, error: String(error) });
+				watcher.close();
+				if (this.#fileWatchers.get(dir)?.watcher === watcher) this.#fileWatchers.delete(dir);
+			});
+			this.#fileWatchers.set(dir, { watcher, names });
+		}
+	}
+
+	#scheduleWatchReload(): void {
+		if (!this.#watchingFiles) return;
+		clearTimeout(this.#watchReloadTimer);
+		this.#watchReloadTimer = setTimeout(() => {
+			this.#watchReloadTimer = undefined;
+			void this.#reloadFromWatch();
+		}, CONFIG_WATCH_DEBOUNCE_MS);
+		this.#watchReloadTimer.unref();
+	}
+
+	async #reloadFromWatch(): Promise<void> {
+		if (!this.#watchingFiles) return;
+		try {
+			await this.#exclusive("keep-last-good", () => this.#reloadPersistedLayers("keep-last-good"));
+		} catch (error) {
+			logger.warn("Settings: failed to apply on-disk config change", { error: String(error) });
+		}
+		// Sources may have appeared, moved, or vanished; re-target the watchers.
+		this.#syncFileWatchers();
 	}
 
 	/**
@@ -866,23 +1083,40 @@ export class Settings {
 		}
 	}
 
+	/**
+	 * Independent instance scoped to `cwd`: same global, `--config` overlay, and runtime layers, the
+	 * project layer re-read for `cwd` (persisted instances). An {@link overlay} clones its parent for
+	 * `cwd` and re-applies its own layers on top, so inherited values carry over.
+	 *
+	 * @throws Error when a configured value fails its definition's `validate` check.
+	 */
 	async cloneForCwd(cwd: string): Promise<Settings> {
-		const cloned = new Settings({
-			cwd,
-			agentDir: this.#agentDir,
-			inMemory: !this.#persist,
-		});
-		cloned.#storage = this.#storage;
-		cloned.#configPath = this.#configPath;
+		let cloned: Settings;
+		if (this.#parent) {
+			cloned = (await this.#parent.cloneForCwd(cwd)).overlay();
+			cloned.#project = structuredClone(this.#project);
+		} else {
+			cloned = new Settings({
+				cwd,
+				agentDir: this.#agentDir,
+				inMemory: !this.#persist,
+			});
+			cloned.#storage = this.#storage;
+			cloned.#configPath = this.#configPath;
+			cloned.#project = this.#persist ? await cloned.#loadProjectSettings() : structuredClone(this.#project);
+			if (!this.#persist) cloned.#projectShellPathSource = this.#projectShellPathSource;
+			cloned.#configFiles = [...this.#configFiles];
+			cloned.#overlayShellPathSource = this.#overlayShellPathSource;
+		}
 		cloned.#global = structuredClone(this.#global);
-		cloned.#project = this.#persist ? await cloned.#loadProjectSettings() : structuredClone(this.#project);
-		if (!this.#persist) cloned.#projectShellPathSource = this.#projectShellPathSource;
-		cloned.#configFiles = [...this.#configFiles];
 		cloned.#configOverlay = structuredClone(this.#configOverlay);
-		cloned.#overlayShellPathSource = this.#overlayShellPathSource;
-		cloned.#overrides = this.#buildOriginalOverrides();
+		// A soft-pinned default yields to a value the clone's own scope configures.
+		cloned.#softPins = new Set(this.#softPins);
+		const layers = { ...cloned.#ownLayers(), overrides: this.#buildOriginalOverrides() };
+		for (const setting of cloned.#settlePins(layers)) cloned.#softPins.delete(setting);
+		cloned.#overrides = layers.overrides;
 		cloned.#rebuildMerged();
-		cloned.#fireAllHooks();
+		cloned.#validateAll();
 		return cloned;
 	}
 
@@ -890,77 +1124,92 @@ export class Settings {
 	 * Re-read the current global, project, and explicit overlay layers from disk
 	 * without replacing this instance or discarding runtime overrides.
 	 *
-	 * All sources are loaded before any live layer is replaced, so readers never
-	 * observe a partially refreshed configuration. Concurrent callers share the
-	 * same reload.
+	 * All sources are loaded and validated before any live layer is replaced, so
+	 * readers never observe a partially refreshed or invalid configuration.
+	 * Concurrent callers share the same reload.
+	 *
+	 * @throws Error when a source fails to load or a value fails its definition's
+	 * `validate` check; the previous layers stay in effect.
 	 */
 	async reloadFromDisk(): Promise<void> {
 		if (!this.#persist) return;
-		if (this.#reloadFromDiskPromise) return this.#reloadFromDiskPromise;
+		await this.#exclusive("strict", () => this.#reloadPersistedLayers("strict"));
+	}
 
-		const reload = this.#reloadPersistedLayers();
-		this.#reloadFromDiskPromise = reload;
+	/**
+	 * Run one disk reload at a time, also serialized with {@link reloadForCwd}
+	 * (which holds the same slot). Concurrent strict reloads share the in-flight
+	 * one; anything else queues behind the active refresh so it never misses a
+	 * write or scope change that landed after that refresh read the files.
+	 */
+	async #exclusive(kind: LayerRefreshKind, refresh: () => Promise<void>): Promise<void> {
+		for (;;) {
+			const active = this.#activeReload;
+			if (!active) break;
+			if (kind === "strict" && active.kind === "strict") return active.promise;
+			await active.promise.catch(() => {});
+		}
+		const entry = { kind, promise: refresh() };
+		this.#activeReload = entry;
 		try {
-			await reload;
+			await entry.promise;
 		} finally {
-			if (this.#reloadFromDiskPromise === reload) {
-				this.#reloadFromDiskPromise = undefined;
-			}
+			if (this.#activeReload === entry) this.#activeReload = undefined;
 		}
 	}
 
-	async #reloadPersistedLayers(): Promise<void> {
+	async #reloadPersistedLayers(mode: PersistedReloadMode): Promise<void> {
+		const keepLastGood = mode === "keep-last-good";
 		for (;;) {
 			await this.flush();
 			const mutationGeneration = this.#persistedMutationGeneration;
-			const previousSignaledValues = {
-				modelRoles: this.get("modelRoles"),
-				sessionAccent: this.get("statusLine.sessionAccent"),
-			};
-			const previousCodeModeValues = this.#codeModeSignalSnapshot();
-			const previousHookValues = new Map<SettingPath, unknown>();
-			for (const key of Object.keys(SETTING_HOOKS) as SettingPath[]) {
-				previousHookValues.set(key, this.get(key));
-			}
 
 			const [globalResult, projectResult, overlayResult] = await Promise.allSettled([
 				this.#readExistingMainYaml(false),
-				this.#readProjectSettings(false),
+				this.#readProjectSettings(false, { rejectNewWarnings: keepLastGood }),
 				this.#readConfigOverlays(false),
 			]);
 			if (mutationGeneration !== this.#persistedMutationGeneration) continue;
-			if (globalResult.status === "rejected") throw globalResult.reason;
-			if (projectResult.status === "rejected") throw projectResult.reason;
-			if (overlayResult.status === "rejected") throw overlayResult.reason;
+			for (const result of [globalResult, projectResult, overlayResult]) {
+				if (result.status === "fulfilled") continue;
+				if (!keepLastGood) throw result.reason;
+				logger.warn("Settings: keeping last good config; on-disk change failed to load", {
+					error: String(result.reason),
+				});
+			}
 
-			this.#configPath = globalResult.value.configPath;
-			this.#global = globalResult.value.settings ?? {};
-			this.#project = projectResult.value.settings;
-			this.#projectFileSettings = projectResult.value.fileSettings;
-			this.#projectShellPathSource = projectResult.value.shellPathSource;
-			this.#configOverlay = overlayResult.value.settings;
-			this.#overlayShellPathSource = overlayResult.value.shellPathSource;
+			const candidate: OwnLayers = {
+				global: globalResult.status === "fulfilled" ? (globalResult.value.settings ?? {}) : this.#global,
+				project: projectResult.status === "fulfilled" ? projectResult.value.settings : this.#project,
+				configOverlay: overlayResult.status === "fulfilled" ? overlayResult.value.settings : this.#configOverlay,
+				overrides: this.#overrides,
+			};
+			const settled = this.#settlePins(candidate);
+			try {
+				this.#validateAll(this.#mergeOverParent(this.#mergeOwnLayers(candidate)), this.#cwd);
+			} catch (error) {
+				if (!keepLastGood) throw error;
+				logger.warn("Settings: keeping last good config; on-disk change is invalid", { error: String(error) });
+				return;
+			}
+
+			const previous = this.#snapshot();
+			if (globalResult.status === "fulfilled") this.#configPath = globalResult.value.configPath;
+			if (projectResult.status === "fulfilled") {
+				this.#projectFileSettings = projectResult.value.fileSettings;
+				this.#projectShellPathSource = projectResult.value.shellPathSource;
+				this.#projectSourcePaths = projectResult.value.sourcePaths;
+			}
+			if (overlayResult.status === "fulfilled") {
+				this.#overlayShellPathSource = overlayResult.value.shellPathSource;
+			}
+			this.#global = candidate.global;
+			this.#project = candidate.project;
+			this.#configOverlay = candidate.configOverlay;
+			this.#overrides = candidate.overrides;
+			for (const setting of settled) this.#softPins.delete(setting);
 			this.#rebuildMerged();
-
-			const nextModelRoles = this.get("modelRoles");
-			if (!Bun.deepEquals(nextModelRoles, previousSignaledValues.modelRoles)) {
-				this.#fireEffectiveSettingChanged("modelRoles", nextModelRoles, previousSignaledValues.modelRoles);
-			}
-			const nextSessionAccent = this.get("statusLine.sessionAccent");
-			if (!Bun.deepEquals(nextSessionAccent, previousSignaledValues.sessionAccent)) {
-				this.#fireEffectiveSettingChanged(
-					"statusLine.sessionAccent",
-					nextSessionAccent,
-					previousSignaledValues.sessionAccent,
-				);
-			}
-			this.#fireCodeModeChangeIfNeeded(previousCodeModeValues);
-			for (const [key, previous] of previousHookValues) {
-				const next = this.get(key);
-				if (!Bun.deepEquals(next, previous)) {
-					SETTING_HOOKS[key]?.(next, previous);
-				}
-			}
+			this.#fireChangesSince(previous);
 			return;
 		}
 	}
@@ -968,30 +1217,65 @@ export class Settings {
 	/**
 	 * Re-scope this instance to a new working directory *in place*: reload the
 	 * project layer (`.claude/settings.yml` etc.) from `cwd`, re-resolve
-	 * path-scoped settings against it, and re-fire side-effect hooks (theme,
-	 * symbols, tab width, …). Global settings and runtime overrides are preserved.
+	 * path-scoped settings against it, and notify listeners (and process-wide
+	 * effects: theme, symbols, …) of every value the new scope changes. Global
+	 * settings and runtime overrides are preserved.
 	 *
 	 * Unlike {@link cloneForCwd}, this mutates the live instance, so every holder
 	 * (the `settings` proxy, the active session, controllers) observes the new
 	 * project scope without swapping references — used when the process changes
 	 * directory mid-run (`/move`, cross-project resume). No-op when `cwd` is
-	 * already the current scope.
+	 * already the current scope. Serialized with disk reloads.
+	 *
+	 * @throws Error when a value configured for the new scope fails its definition's
+	 * `validate` check; the instance then stays on its previous scope.
 	 */
 	async reloadForCwd(cwd: string): Promise<void> {
 		const normalized = path.normalize(cwd);
-		if (normalized === this.#cwd) return;
-		await this.flush();
-		this.#restoreRuntimeModelRoleOverrides();
-		const prevModelRoles = this.get("modelRoles");
-		const prevCodeModeValues = this.#codeModeSignalSnapshot();
-		this.#cwd = normalized;
-		if (this.#persist) {
-			this.#project = await this.#loadProjectSettings();
+		for (let active = this.#activeReload; active; active = this.#activeReload) {
+			await active.promise.catch(() => {});
 		}
-		this.#rebuildMerged();
-		this.#fireEffectiveSettingChanged("modelRoles", this.get("modelRoles"), prevModelRoles);
-		this.#fireCodeModeChangeIfNeeded(prevCodeModeValues);
-		this.#fireAllHooks();
+		// Holds the refresh slot while running inline (not through `#exclusive`): callers resume
+		// right after listeners are notified, as consumers sequencing a move (memory rebind) expect.
+		const settled = Promise.withResolvers<void>();
+		settled.promise.catch(() => {});
+		const entry = { kind: "rescope" as const, promise: settled.promise };
+		this.#activeReload = entry;
+		try {
+			if (normalized === this.#cwd) return;
+			await this.flush();
+			const project = this.#persist ? await this.#readProjectSettings(true, { cwd: normalized }) : undefined;
+			const candidate: OwnLayers = {
+				global: this.#global,
+				project: project?.settings ?? this.#project,
+				configOverlay: this.#configOverlay,
+				overrides:
+					this.#savedRuntimeModelRoleOverrides.size === 0 ? this.#overrides : this.#buildOriginalOverrides(),
+			};
+			const settledPins = this.#settlePins(candidate);
+			this.#validateAll(this.#mergeOverParent(this.#mergeOwnLayers(candidate)), normalized);
+
+			const previous = this.#snapshot();
+			this.#cwd = normalized;
+			this.#overrides = candidate.overrides;
+			for (const setting of settledPins) this.#softPins.delete(setting);
+			this.#savedRuntimeModelRoleOverrides.clear();
+			if (project) {
+				this.#project = project.settings;
+				this.#projectFileSettings = project.fileSettings;
+				this.#projectShellPathSource = project.shellPathSource;
+				this.#projectSourcePaths = project.sourcePaths;
+			}
+			this.#rebuildMerged();
+			this.#fireChangesSince(previous);
+			this.#syncFileWatchers();
+		} catch (error) {
+			settled.reject(error);
+			throw error;
+		} finally {
+			if (this.#activeReload === entry) this.#activeReload = undefined;
+			settled.resolve();
+		}
 	}
 
 	// ─────────────────────────────────────────────────────────────────────────
@@ -1016,6 +1300,7 @@ export class Settings {
 	 * and path-scoped array re-resolution.
 	 */
 	get revision(): number {
+		this.#syncParent();
 		return this.#revision;
 	}
 
@@ -1025,19 +1310,23 @@ export class Settings {
 	 * Exposes arbitrary namespaced keys (e.g. an extension's own `piVim` block)
 	 * that the typed, schema-bound {@link get} cannot reach. Used by the legacy
 	 * pi `SettingsManager` shim to match upstream Pi's `getGlobalSettings()`.
-	 * The clone means callers cannot mutate internal state.
+	 * The clone means callers cannot mutate internal state. An {@link overlay}
+	 * reports its parent's layer with the overlay's own writes merged on top.
 	 */
 	getGlobalSettings(): RawSettings {
-		return structuredClone(this.#global);
+		const own = structuredClone(this.#global);
+		return this.#parent ? this.#deepMerge(this.#parent.getGlobalSettings(), own) : own;
 	}
 
 	/**
 	 * Raw project settings layer (`.claude/settings.yml`, `.omp/config.yml`,
 	 * etc.), deep-cloned. Companion to {@link getGlobalSettings} for the legacy
-	 * pi `SettingsManager` shim's `getProjectSettings()`.
+	 * pi `SettingsManager` shim's `getProjectSettings()`; an {@link overlay}
+	 * likewise reports its parent's layer under its own.
 	 */
 	getProjectSettings(): RawSettings {
-		return structuredClone(this.#project);
+		const own = structuredClone(this.#project);
+		return this.#parent ? this.#deepMerge(this.#parent.getProjectSettings(), own) : own;
 	}
 
 	getPlansDirectory(): string {
@@ -1048,18 +1337,20 @@ export class Settings {
 	 * Get shell configuration based on settings.
 	 */
 	getShellConfig() {
-		const shell = this.get("shellPath");
-		let configSource = this.#configPath ?? path.join(this.#agentDir, MAIN_CONFIG_FILENAMES[0]);
-		if (Object.hasOwn(this.#project, "shellPath")) {
-			configSource = this.#projectShellPathSource ?? "the active project configuration";
-		}
+		return procmgr.getShellConfig(cfgShellPath.get(this), { configSource: this.#shellPathSource() });
+	}
+
+	/** Where the effective `shellPath` comes from, for error messages; an overlay defers to its parent. */
+	#shellPathSource(): string {
+		if (Object.hasOwn(this.#overrides, "shellPath")) return "the runtime settings override";
 		if (Object.hasOwn(this.#configOverlay, "shellPath")) {
-			configSource = this.#overlayShellPathSource ?? "the active config overlay";
+			return this.#overlayShellPathSource ?? "the active config overlay";
 		}
-		if (Object.hasOwn(this.#overrides, "shellPath")) {
-			configSource = "the runtime settings override";
+		if (Object.hasOwn(this.#project, "shellPath")) {
+			return this.#projectShellPathSource ?? "the active project configuration";
 		}
-		return procmgr.getShellConfig(shell, { configSource });
+		if (this.#parent && !Object.hasOwn(this.#global, "shellPath")) return this.#parent.#shellPathSource();
+		return this.#configPath ?? path.join(this.#agentDir, MAIN_CONFIG_FILENAMES[0]);
 	}
 
 	/**
@@ -1070,83 +1361,15 @@ export class Settings {
 	 * `--config` overlay or a runtime override) replaces it; otherwise `"user"`.
 	 * Callers pass this into {@link EffectiveExtensionRoots.configuredLevel} so
 	 * discovery labels roots by the authority that produced them rather than
-	 * re-deriving provenance from a partial disk scan.
+	 * re-deriving provenance from a partial disk scan. An {@link overlay} whose
+	 * own layers leave `extensions` alone reports its parent's level.
 	 */
 	extensionsSourceLevel(): "user" | "project" {
 		if (Object.hasOwn(this.#overrides, "extensions")) return "user";
 		if (Object.hasOwn(this.#configOverlay, "extensions")) return "user";
-		return Object.hasOwn(this.#project, "extensions") ? "project" : "user";
-	}
-
-	/**
-	 * Get all settings in a group with full type safety.
-	 *
-	 * The returned snapshot is stable until any effective settings layer or cwd
-	 * scope is rebuilt. Defaults remain instance-local because each member still
-	 * resolves through {@link get}, which clones array/record defaults.
-	 */
-	getGroup<G extends GroupPrefix>(prefix: G): GroupTypeMap[G] {
-		const cached = this.#groupCache.get(prefix);
-		if (cached !== undefined) return cached as GroupTypeMap[G];
-
-		const result: Record<string, unknown> = {};
-		for (const [suffix, path] of SETTING_GROUP_MEMBERS[prefix] ?? []) {
-			result[suffix] = this.get(path);
-		}
-		const snapshot = Object.freeze(result);
-		this.#groupCache.set(prefix, snapshot);
-		return snapshot as unknown as GroupTypeMap[G];
-	}
-
-	/**
-	 * Get the edit variant for a specific model.
-	 * Returns "patch", "replace", "hashline", "apply_patch", or null (use global default).
-	 */
-	getEditVariantForModel(model: string | undefined): EditMode | null {
-		if (!model) return null;
-		const variants = this.#getEditVariantEntries();
-		if (variants.length === 0) return null;
-
-		const modelLower = model.toLowerCase();
-
-		for (let i = 0; i < variants.length; i++) {
-			const variant = variants[i];
-			if (modelLower.includes(variant.patternLower)) {
-				return variant.mode;
-			}
-		}
-		return null;
-	}
-
-	#getEditVariantEntries(): readonly EditVariantEntry[] {
-		if (this.#editVariantCache !== undefined) return this.#editVariantCache;
-
-		const value = getByPath(this.#merged, ["edit", "modelVariants"]);
-		if (!isRecord(value)) {
-			this.#editVariantCache = [];
-			return this.#editVariantCache;
-		}
-
-		const variants: EditVariantEntry[] = [];
-		for (const pattern in value) {
-			if (!Object.hasOwn(value, pattern)) continue;
-			const rawMode = value[pattern];
-			if (typeof rawMode !== "string") continue;
-			const mode = normalizeEditMode(rawMode);
-			if (mode) {
-				variants.push({ patternLower: pattern.toLowerCase(), mode });
-			}
-		}
-
-		this.#editVariantCache = variants;
-		return variants;
-	}
-
-	/**
-	 * Get bash interceptor rules (typed accessor for complex array config).
-	 */
-	getBashInterceptorRules(): BashInterceptorRule[] {
-		return this.get("bashInterceptor.patterns");
+		if (Object.hasOwn(this.#project, "extensions")) return "project";
+		if (this.#parent && !Object.hasOwn(this.#global, "extensions")) return this.#parent.extensionsSourceLevel();
+		return "user";
 	}
 
 	#modelRolesFromLayer(layer: RawSettings): Record<string, string> {
@@ -1178,10 +1401,10 @@ export class Settings {
 	 * semantics that `override("modelRoles", …)` carries.
 	 */
 	#setRuntimeModelRoleOverrides(next: Record<string, string>): void {
-		const prev = this.get("modelRoles");
+		const prev = cfgModelRoles.get(this);
 		setByPath(this.#overrides, ["modelRoles"], next);
 		this.#rebuildMerged();
-		this.#fireEffectiveSettingChanged("modelRoles", this.get("modelRoles"), prev);
+		this.#fireIfChanged(cfgModelRoles, prev);
 	}
 
 	#updateRuntimeModelRoleOverride(role: ModelRole | string, modelId: string | undefined): void {
@@ -1211,34 +1434,12 @@ export class Settings {
 	}
 
 	/**
-	 * Restore original process-wide model-role overrides that were temporarily
-	 * replaced by project edits, mutating `#overrides` in place without
-	 * rebuilding. All remaining captures are valid because superseding
-	 * operations (late `overrideModelRoles`, global-mode `setModelRole`,
-	 * whole-map `override`/`clearOverride`) invalidate the affected captures
-	 * at the point of supersession. Caller is responsible for `#rebuildMerged()`.
-	 */
-	#restoreRuntimeModelRoleOverrides(): void {
-		if (this.#savedRuntimeModelRoleOverrides.size === 0) return;
-		const runtimeRoles = getByPath(this.#overrides, ["modelRoles"]);
-		if (!isRecord(runtimeRoles)) {
-			this.#savedRuntimeModelRoleOverrides.clear();
-			return;
-		}
-		for (const [role, originalValue] of this.#savedRuntimeModelRoleOverrides) {
-			if (originalValue === undefined) {
-				delete runtimeRoles[role];
-			} else {
-				runtimeRoles[role] = originalValue;
-			}
-		}
-		this.#savedRuntimeModelRoleOverrides.clear();
-	}
-
-	/**
 	 * Produce a deep copy of `#overrides` with original process-wide model-role
-	 * overrides restored, for use by {@link cloneForCwd}. All remaining
-	 * captures are valid (see {@link #restoreRuntimeModelRoleOverrides}).
+	 * overrides restored (temporarily replaced by project edits), for
+	 * {@link cloneForCwd} and {@link reloadForCwd}. All remaining captures are
+	 * valid because superseding operations (late `overrideModelRoles`,
+	 * global-mode `setModelRole`, whole-map `override`/`clearOverride`)
+	 * invalidate the affected captures at the point of supersession.
 	 * Does not mutate the current instance's `#overrides`.
 	 */
 	#buildOriginalOverrides(): RawSettings {
@@ -1259,7 +1460,7 @@ export class Settings {
 	}
 
 	#setProjectModelRoleValue(role: ModelRole | string, modelId: string | null): void {
-		const prev = this.get("modelRoles");
+		const prev = cfgModelRoles.get(this);
 		const projectRoles = getByPath(this.#project, ["modelRoles"]);
 		const current: Record<string, unknown> = isRecord(projectRoles) ? { ...projectRoles } : {};
 		current[role] = modelId;
@@ -1267,7 +1468,7 @@ export class Settings {
 		this.#modifiedProjectModelRoles.add(role);
 		this.#persistedMutationGeneration++;
 		this.#rebuildMerged();
-		this.#fireEffectiveSettingChanged("modelRoles", this.get("modelRoles"), prev);
+		this.#fireIfChanged(cfgModelRoles, prev);
 		this.#queueProjectSave();
 	}
 
@@ -1286,7 +1487,7 @@ export class Settings {
 	 * stale skip in place.
 	 */
 	setModelRole(role: ModelRole | string, modelId: string | undefined): void {
-		const prev = this.get("modelRoles");
+		const prev = cfgModelRoles.get(this);
 		const current = this.#modelRolesFromLayer(this.#global);
 		this.#captureGlobalMutation(role, this.#modifiedGlobalModelRoleMutations, current[role]);
 		if (modelId === undefined) {
@@ -1303,7 +1504,7 @@ export class Settings {
 		this.#persistedMutationGeneration++;
 		this.#rebuildMerged();
 		this.#queueSave();
-		this.#fireEffectiveSettingChanged("modelRoles", this.get("modelRoles"), prev);
+		this.#fireIfChanged(cfgModelRoles, prev);
 		if (this.isProjectModelRoleRuntimeOverrideActive(role)) {
 			return;
 		}
@@ -1319,7 +1520,7 @@ export class Settings {
 	 * surviving capture implies no external supersession occurred.
 	 */
 	isProjectModelRoleRuntimeOverrideActive(role: ModelRole | string): boolean {
-		if (this.get("modelRoleStorage") !== "project") return false;
+		if (cfgModelRoleStorage.get(this) !== "project") return false;
 		if (!this.#savedRuntimeModelRoleOverrides.has(role)) return false;
 		return !!this.getProjectModelRole(role);
 	}
@@ -1344,24 +1545,24 @@ export class Settings {
 	 * Get a model role (helper for modelRoles record).
 	 */
 	getModelRole(role: ModelRole | string): string | undefined {
-		const roles: unknown = this.get("modelRoles");
+		const roles: unknown = cfgModelRoles.get(this);
 		if (!isRecord(roles)) return undefined;
 		return modelRoleValueFromUnknown(roles[role]);
 	}
 	/**
-	 * Get a model role from only the global settings layer.
+	 * Get a model role from only the global settings layer (an {@link overlay}'s own, else its parent's).
 	 */
 	getGlobalModelRole(role: ModelRole | string): string | undefined {
 		const modelId = this.#modelRolesFromLayer(this.#global)[role];
-		return modelId || undefined;
+		return modelId || this.#parent?.getGlobalModelRole(role);
 	}
 
 	/**
-	 * Get a model role from only the current project settings layer.
+	 * Get a model role from only the current project settings layer (an {@link overlay}'s own, else its parent's).
 	 */
 	getProjectModelRole(role: ModelRole | string): string | undefined {
 		const modelId = this.#modelRolesFromLayer(this.#project)[role];
-		return modelId || undefined;
+		return modelId || this.#parent?.getProjectModelRole(role);
 	}
 
 	/**
@@ -1371,16 +1572,16 @@ export class Settings {
 	 * for runtime and config-overlay layers and detects ownership by key
 	 * presence rather than normalized value, so a `null` tombstone in the
 	 * overlay or runtime layer correctly blocks lower layers. The project
-	 * layer is checked through {@link #projectSettingsForMerge} because a
+	 * layer is checked through {@link projectLayerForMerge} because a
 	 * project null is a cleared value (falls back to global), not a
 	 * tombstone.
 	 */
-	getModelRoleProvenance(role: ModelRole | string): "runtime" | "overlay" | "project" | "global" | "default" {
+	getModelRoleProvenance(role: ModelRole | string): SettingProvenance {
 		if (this.#modelRoleLayerOwns(this.#overrides, role)) return "runtime";
 		if (this.#modelRoleLayerOwns(this.#configOverlay, role)) return "overlay";
-		if (this.#modelRoleLayerOwns(this.#projectSettingsForMerge(), role)) return "project";
+		if (this.#modelRoleLayerOwns(projectLayerForMerge(this.#project), role)) return "project";
 		if (this.#modelRoleLayerOwns(this.#global, role)) return "global";
-		return "default";
+		return this.#parent?.getModelRoleProvenance(role) ?? "default";
 	}
 
 	/**
@@ -1396,7 +1597,7 @@ export class Settings {
 	 * Get all model roles (helper for modelRoles record).
 	 */
 	getModelRoles(): ReadOnlyDict<string> {
-		const roles: unknown = this.get("modelRoles");
+		const roles: unknown = cfgModelRoles.get(this);
 		if (!isRecord(roles)) return {};
 
 		const normalized: Record<string, string> = {};
@@ -1424,27 +1625,6 @@ export class Settings {
 		this.#setRuntimeModelRoleOverrides(next);
 	}
 
-	/**
-	 * Get enabled providers (for compatibility with discovery system).
-	 */
-	getEnabledProviders(): string[] {
-		return this.get("enabledProviders");
-	}
-
-	/**
-	 * Set enabled providers (for compatibility with discovery system).
-	 */
-	setEnabledProviders(ids: string[]): void {
-		this.set("enabledProviders", ids);
-	}
-
-	/**
-	 * Set disabled providers (for compatibility with discovery system).
-	 */
-	setDisabledProviders(ids: string[]): void {
-		this.set("disabledProviders", ids);
-	}
-
 	// ─────────────────────────────────────────────────────────────────────────
 	// Loading
 	// ─────────────────────────────────────────────────────────────────────────
@@ -1466,7 +1646,7 @@ export class Settings {
 
 		// Build merged view (global → project → overrides; project wins over global)
 		this.#rebuildMerged();
-		this.#fireAllHooks();
+		this.#validateAll();
 		return this;
 	}
 	async #loadGlobalSettings(): Promise<void> {
@@ -1495,6 +1675,7 @@ export class Settings {
 		this.#project = projectResult.value;
 		this.#configOverlay = await this.#loadConfigOverlays();
 		this.#rebuildMerged();
+		this.#validateAll();
 		return this;
 	}
 
@@ -1894,18 +2075,31 @@ export class Settings {
 		return result.settings;
 	}
 
-	async #readProjectSettings(quarantineInvalid: boolean): Promise<ProjectSettingsReadResult> {
+	/**
+	 * `rejectNewWarnings` fails the read (without logging or recording the
+	 * warnings) when a project settings file newly fails to parse, so a
+	 * keep-last-good reload can retain the previous project layer. `cwd`
+	 * (default: the current scope) selects the project to read.
+	 */
+	async #readProjectSettings(
+		quarantineInvalid: boolean,
+		options: { rejectNewWarnings?: boolean; cwd?: string } = {},
+	): Promise<ProjectSettingsReadResult> {
+		const cwd = options.cwd ?? this.#cwd;
 		// Resolve once: capability discovery, fs-cache invalidation, and the
 		// warning prefix below must all derive from the same absolute scope so
 		// relative cwds (e.g. ".") produce absolute provider paths that match.
-		const discoveryCwd = path.resolve(this.#cwd);
-		const projectConfigDir = getProjectAgentDir(this.#cwd);
+		const discoveryCwd = path.resolve(cwd);
+		const projectConfigDir = getProjectAgentDir(cwd);
 		const projectConfigPath = path.join(projectConfigDir, "config.yml");
 		invalidateCapabilityFsCache(projectConfigPath);
 		invalidateCapabilityFsCache(path.join(projectConfigDir, "settings.json"));
 		invalidateCapabilityFsCache(path.join(discoveryCwd, ".claude", "settings.json"));
+		for (const sourcePath of this.#projectSourcePaths) invalidateCapabilityFsCache(sourcePath);
 		let shellPathSource: string | undefined;
 		let merged: RawSettings = {};
+		const sourcePaths: string[] = [];
+		let rejectedWarnings: string[] | undefined;
 		try {
 			const result = await loadCapability(settingsCapability.id, { cwd: discoveryCwd });
 			// `loadCapability` aggregates warnings across every level, but this
@@ -1920,21 +2114,27 @@ export class Settings {
 			// providers, which `LoadResult.warnings` does not carry.
 			const cwdRoot = discoveryCwd.endsWith(path.sep) ? discoveryCwd : discoveryCwd + path.sep;
 			const projectWarnings = (result.warnings ?? []).filter(warning => warning.includes(cwdRoot));
-			for (const warning of projectWarnings) {
-				if (this.#projectSettingsWarningsSeen.has(warning)) continue;
-				logger.warn(`Settings: ${warning}`);
-			}
-			this.#projectSettingsWarningsSeen = new Set(projectWarnings);
-			for (const item of result.items as SettingsCapabilityItem[]) {
-				if (item.level === "project") {
-					merged = this.#deepMerge(merged, dropSettingsGroupShadows(item.data as RawSettings, item.path));
-					if (Object.hasOwn(item.data, "shellPath")) shellPathSource = item.path;
+			const newWarnings = projectWarnings.filter(warning => !this.#projectSettingsWarningsSeen.has(warning));
+			if (options.rejectNewWarnings && newWarnings.length > 0) {
+				rejectedWarnings = newWarnings;
+			} else {
+				for (const warning of newWarnings) logger.warn(`Settings: ${warning}`);
+				this.#projectSettingsWarningsSeen = new Set(projectWarnings);
+				for (const item of result.items as SettingsCapabilityItem[]) {
+					if (item.level === "project") {
+						merged = this.#deepMerge(merged, dropSettingsGroupShadows(item.data as RawSettings, item.path));
+						sourcePaths.push(item.path);
+						if (Object.hasOwn(item.data, "shellPath")) shellPathSource = item.path;
+					}
 				}
 			}
 		} catch {
 			shellPathSource = undefined;
 			// Capability discovery is best-effort; the native project config below
 			// remains authoritative for its model-role layer and must not be hidden.
+		}
+		if (rejectedWarnings) {
+			throw new Error(`Project settings failed to parse: ${rejectedWarnings.join("; ")}`);
 		}
 		const nativeProject = quarantineInvalid
 			? await this.#loadYaml(projectConfigPath)
@@ -1948,6 +2148,7 @@ export class Settings {
 			settings: this.#migrateRawSettings(merged, quarantineInvalid),
 			fileSettings: structuredClone(nativeProject),
 			shellPathSource,
+			sourcePaths,
 		};
 	}
 
@@ -1955,6 +2156,7 @@ export class Settings {
 		const result = await this.#readProjectSettings(true);
 		this.#projectFileSettings = result.fileSettings;
 		this.#projectShellPathSource = result.shellPathSource;
+		this.#projectSourcePaths = result.sourcePaths;
 		return result.settings;
 	}
 
@@ -2734,43 +2936,46 @@ export class Settings {
 			const legacyWebOrder = legacy(providerSettings, "webSearchOrder", "providers.webSearchOrder");
 			const legacyWebExclude = legacy(providerSettings, "webSearchExclude", "providers.webSearchExclude");
 			const legacyGeminiModel = legacy(providerSettings, "webSearchGeminiModel", "providers.webSearchGeminiModel");
-			const webSelector = (provider: string, geminiModel: string): string | undefined => {
+			const geminiSelectors = (model: string): string[] => [
+				`google-gemini-cli/${model}`,
+				`google-antigravity/${model}`,
+				`google/${model}`,
+			];
+			const webSelectors = (provider: string, geminiModel: string): string[] => {
 				switch (provider) {
 					case "gemini":
-						return `google/${geminiModel}`;
+						return geminiSelectors(geminiModel);
 					case "anthropic":
-						return "anthropic/claude-haiku-4-5";
+						return ["anthropic/claude-haiku-4-5"];
 					case "codex":
-						return "openai-codex/gpt-5.6-luna";
+						return ["openai-codex/gpt-5.6-luna"];
 					case "xai":
-						return "xai/grok-4.5";
+						return ["xai/grok-4.5"];
 					case "auto":
-						return undefined;
+						return [];
 					default:
-						return MODEL_PRIO.web.includes(`web/${provider}`) ? `web/${provider}` : undefined;
+						return MODEL_PRIO.web.includes(`web/${provider}`) ? [`web/${provider}`] : [];
 				}
 			};
 			const geminiModel =
 				typeof legacyGeminiModel === "string" && legacyGeminiModel.trim()
 					? legacyGeminiModel.trim()
 					: "gemini-2.5-flash";
-			const webDefaults = MODEL_PRIO.web.map(selector => {
-				if (selector === "google/gemini-2.5-flash") return `google/${geminiModel}`;
-				if (selector === "google-antigravity/gemini-2.5-flash") {
-					return `google-antigravity/${geminiModel}`;
-				}
-				return selector;
+			const webDefaults = MODEL_PRIO.web.flatMap(selector => {
+				if (selector === "google/gemini-2.5-flash") return geminiSelectors(geminiModel);
+				if (selector === "google-antigravity/gemini-2.5-flash") return [];
+				return [selector];
 			});
 			const excludedWebProviders = new Set(
 				Array.isArray(legacyWebExclude)
 					? legacyWebExclude.filter(
 							(value): value is string =>
-								typeof value === "string" && webSelector(value, geminiModel) !== undefined,
+								typeof value === "string" && webSelectors(value, geminiModel).length > 0,
 						)
 					: [],
 			);
 			const isWebSelectorExcluded = (selector: string): boolean => {
-				if (excludedWebProviders.has("gemini") && /^(?:google|google-antigravity)\//.test(selector)) return true;
+				if (excludedWebProviders.has("gemini") && geminiSelectors(geminiModel).includes(selector)) return true;
 				if (excludedWebProviders.has("anthropic") && selector.startsWith("anthropic/")) return true;
 				if (excludedWebProviders.has("codex") && selector.startsWith("openai-codex/")) return true;
 				if (excludedWebProviders.has("xai") && (selector.startsWith("xai/") || selector.startsWith("xai-oauth/"))) {
@@ -2787,7 +2992,7 @@ export class Settings {
 					? [legacyWebSearch]
 					: [];
 			const orderedWebSelectors = orderedWebProviders.flatMap(value =>
-				typeof value === "string" ? (webSelector(value, geminiModel) ?? []) : [],
+				typeof value === "string" ? webSelectors(value, geminiModel) : [],
 			);
 			const shouldMigrateWeb =
 				orderedWebSelectors.length > 0 ||
@@ -3058,15 +3263,7 @@ export class Settings {
 		const modifiedPathMutations = new Map(this.#modifiedPathMutations);
 		const modifiedModelRoleMutations = new Map(this.#modifiedGlobalModelRoleMutations);
 		const globalRolesAtStart = this.#modelRolesFromLayer(this.#global);
-		const previousSignaledValues = {
-			modelRoles: this.get("modelRoles"),
-			sessionAccent: this.get("statusLine.sessionAccent"),
-		};
-		const previousCodeModeValues = this.#codeModeSignalSnapshot();
-		const previousHookValues = new Map<SettingPath, unknown>();
-		for (const key of Object.keys(SETTING_HOOKS) as SettingPath[]) {
-			previousHookValues.set(key, this.get(key));
-		}
+		const previous = this.#snapshot();
 		this.#modified.clear();
 		this.#modifiedGlobalModelRoles.clear();
 		this.#modifiedPathMutations.clear();
@@ -3100,7 +3297,8 @@ export class Settings {
 						continue;
 					}
 					const value = getByPath(this.#global, segments);
-					setByPath(current, segments, value);
+					if (value === undefined) deleteByPath(current, segments);
+					else setByPath(current, segments, value);
 					shouldWrite = true;
 				}
 
@@ -3210,25 +3408,7 @@ export class Settings {
 		}
 
 		this.#rebuildMerged();
-		const nextModelRoles = this.get("modelRoles");
-		if (!Bun.deepEquals(nextModelRoles, previousSignaledValues.modelRoles)) {
-			this.#fireEffectiveSettingChanged("modelRoles", nextModelRoles, previousSignaledValues.modelRoles);
-		}
-		const nextSessionAccent = this.get("statusLine.sessionAccent");
-		if (!Bun.deepEquals(nextSessionAccent, previousSignaledValues.sessionAccent)) {
-			this.#fireEffectiveSettingChanged(
-				"statusLine.sessionAccent",
-				nextSessionAccent,
-				previousSignaledValues.sessionAccent,
-			);
-		}
-		this.#fireCodeModeChangeIfNeeded(previousCodeModeValues);
-		for (const [key, previous] of previousHookValues) {
-			const next = this.get(key);
-			if (!Bun.deepEquals(next, previous)) {
-				SETTING_HOOKS[key]?.(next, previous);
-			}
-		}
+		this.#fireChangesSince(previous);
 	}
 	#queueProjectSave(): void {
 		if (!this.#persist) return;
@@ -3290,54 +3470,47 @@ export class Settings {
 	// Utilities
 	// ─────────────────────────────────────────────────────────────────────────
 
-	#projectSettingsForMerge(): RawSettings {
-		const projectRoles = getByPath(this.#project, ["modelRoles"]);
-		if (!isRecord(projectRoles)) return this.#project;
-
-		let filteredRoles: Record<string, unknown> | undefined;
-		for (const role in projectRoles) {
-			if (!Object.hasOwn(projectRoles, role) || modelRoleValueFromUnknown(projectRoles[role]) !== undefined)
-				continue;
-			filteredRoles ??= { ...projectRoles };
-			delete filteredRoles[role];
-		}
-		return filteredRoles ? { ...this.#project, modelRoles: filteredRoles } : this.#project;
-	}
-
-	#warnUnknownStatusLineSegments(): void {
-		for (const path of STATUS_LINE_SEGMENT_PATHS) {
-			const value = getByPath(this.#merged, SETTING_PATH_SEGMENTS[path]);
-			for (const segment of getUnknownStatusLineSegments(value)) {
-				if (warnedUnknownStatusLineSegments.has(segment)) continue;
-				warnedUnknownStatusLineSegments.add(segment);
-				logger.warn(`Settings: unknown status line segment ${segment}`, { setting: path });
-			}
-		}
-	}
-
 	#rebuildMerged(): void {
 		this.#revision++;
-		this.#merged = this.#deepMerge(this.#deepMerge({}, this.#global), this.#projectSettingsForMerge());
-		this.#merged = this.#deepMerge(this.#merged, this.#configOverlay);
-		this.#merged = this.#deepMerge(this.#merged, this.#overrides);
-		this.#resolvedCache.clear();
-		this.#groupCache.clear();
-		this.#editVariantCache = undefined;
-		this.#warnUnknownStatusLineSegments();
+		if (this.#parent) this.#syncedParentRevision = this.#parent.revision;
+		this.#merged = this.#mergeOverParent(this.#mergeOwnLayers(this.#ownLayers()));
 	}
 
-	#fireAllHooks(): void {
-		for (const key of Object.keys(SETTING_HOOKS) as SettingPath[]) {
-			const hook = SETTING_HOOKS[key];
-			if (hook) {
-				const value = this.get(key);
-				hook(value, value);
-			}
-		}
+	#ownLayers(): OwnLayers {
+		return {
+			global: this.#global,
+			project: this.#project,
+			configOverlay: this.#configOverlay,
+			overrides: this.#overrides,
+		};
 	}
 
+	/** `layers` (global, project, `--config` overlay, runtime) merged in precedence order. */
+	#mergeOwnLayers(layers: OwnLayers): RawSettings {
+		let merged = this.#deepMerge(this.#deepMerge({}, layers.global), projectLayerForMerge(layers.project));
+		merged = this.#deepMerge(merged, layers.configOverlay);
+		return this.#deepMerge(merged, layers.overrides);
+	}
+
+	/** `own` merged over an overlay parent's current view (itself for a root instance). */
+	#mergeOverParent(own: RawSettings): RawSettings {
+		return this.#parent ? this.#deepMerge(this.#parent.#mergedView(), own) : own;
+	}
+
+	/**
+	 * Checks every value configured in `merged` (path-scoped entries resolved for `cwd`) against its
+	 * definition: `validate` throws, unknown `items` warn. Defaults to the live layers.
+	 */
+	#validateAll(merged: RawSettings = this.#mergedView(), cwd: string = this.#cwd): void {
+		for (const setting of allSettings()) setting.checkConfigured(configuredValue(merged, setting, cwd));
+	}
+
+	/**
+	 * `overrides` deep-merged over `base`. Keys follow the higher layer's order, then base-only keys:
+	 * record order is meaningful to some consumers (`retry.fallbackChains` is searched in order).
+	 */
 	#deepMerge(base: RawSettings, overrides: RawSettings): RawSettings {
-		const result = { ...base };
+		const result: RawSettings = {};
 		for (const key of Object.keys(overrides)) {
 			const override = overrides[key];
 			const baseVal = base[key];
@@ -3357,223 +3530,10 @@ export class Settings {
 				result[key] = override;
 			}
 		}
+		for (const key of Object.keys(base)) if (!Object.hasOwn(result, key)) result[key] = base[key];
 		return result;
 	}
 }
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Setting Hooks
-// ═══════════════════════════════════════════════════════════════════════════
-
-type SettingHook<P extends SettingPath> = (value: SettingValue<P>, prev: SettingValue<P>) => void;
-
-/**
- * Minimal change-notification primitive backing the exported `on*Changed`
- * subscriptions. Holds a listener set, hands out unsubscribe closures, and
- * isolates errors so a single throwing listener can't abort the rest or bubble
- * out of `Settings.set()`.
- *
- * @typeParam A - argument tuple forwarded to each listener on `fire`.
- */
-class SettingSignal<A extends unknown[] = []> {
-	#listeners = new Set<(...args: A) => void>();
-
-	constructor(private readonly label: string) {}
-
-	/** Subscribe `cb`; returns an unsubscribe function. */
-	on(cb: (...args: A) => void): () => void {
-		this.#listeners.add(cb);
-		return () => {
-			this.#listeners.delete(cb);
-		};
-	}
-
-	/**
-	 * Invoke every listener with `args`. Iterates a snapshot so a listener may
-	 * (un)subscribe mid-fire without re-entrancy — the Hindsight backend
-	 * re-registers the fresh state's listener on every rebuild — and wraps each
-	 * call so a throwing listener is logged and skipped instead of aborting the
-	 * rest.
-	 */
-	fire(...args: A): void {
-		for (const cb of Array.from(this.#listeners)) {
-			try {
-				cb(...args);
-			} catch (err) {
-				logger.warn(`Settings: ${this.label} hook failed`, { error: String(err) });
-			}
-		}
-	}
-}
-
-const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
-	"theme.dark": value => {
-		if (typeof value === "string") {
-			setAutoThemeMapping("dark", value);
-		}
-	},
-	"theme.light": value => {
-		if (typeof value === "string") {
-			setAutoThemeMapping("light", value);
-		}
-	},
-	symbolPreset: value => {
-		if (typeof value === "string" && (value === "unicode" || value === "nerd" || value === "ascii")) {
-			setSymbolPreset(value).catch(err => {
-				logger.warn("Settings: symbolPreset hook failed", { preset: value, error: String(err) });
-			});
-		}
-	},
-	colorBlindMode: value => {
-		if (typeof value === "boolean") {
-			setColorBlindMode(value).catch(err => {
-				logger.warn("Settings: colorBlindMode hook failed", { enabled: value, error: String(err) });
-			});
-		}
-	},
-	// A project-scoped reload (`/move`, cross-project resume, rollback) can change
-	// the effective value; reapply so pi-tui renderers gating on the shared flag
-	// track it the same instant path/resource links do. Runtime `/settings` edits
-	// also go through the selector controller to invalidate and repaint live views.
-	"tui.hyperlinks": value => applyHyperlinkSetting(value),
-	"display.hideToolActivity": value => {
-		if (typeof value === "boolean") setChatTranscriptDisplayPreferences({ hideToolActivity: value });
-	},
-	"read.toolResultPreview": value => {
-		if (typeof value === "boolean") setChatTranscriptDisplayPreferences({ readToolResultPreview: value });
-	},
-	"terminal.showImages": value => {
-		if (typeof value === "boolean") setChatTranscriptDisplayPreferences({ showImages: value });
-	},
-	"display.cacheMissMarker": value => {
-		if (typeof value === "boolean") setChatTranscriptDisplayPreferences({ cacheMissMarker: value });
-	},
-	"display.showTokenUsage": value => {
-		if (typeof value === "boolean") setChatTranscriptDisplayPreferences({ showTokenUsage: value });
-	},
-	"display.showTurnTime": value => {
-		if (typeof value === "boolean") setChatTranscriptDisplayPreferences({ showTurnTime: value });
-	},
-	"tui.maxInlineImageColumns": value => {
-		if (typeof value === "number") setInlineImageMaxColumns(value);
-	},
-	"tui.maxInlineImageRows": value => {
-		if (typeof value === "number") setInlineImageMaxRows(value);
-	},
-	"task.showResolvedModelBadge": value => {
-		if (typeof value === "boolean") setFeedModelBadgeEnabled(value);
-	},
-	"mcp.renderMarkdownResults": value => {
-		if (typeof value === "boolean") setMcpRenderMarkdownResults(value);
-	},
-	"display.shimmer": value => {
-		if (value === "classic" || value === "kitt" || value === "disabled") setShimmerMode(value);
-	},
-	"composer.shape": value => {
-		if (typeof value === "string") setEditorGapComposerShape(value);
-	},
-	emojiAutocomplete: value => {
-		if (typeof value === "boolean") setEmojiAutocompleteEnabled(value);
-	},
-	"provider.appendOnlyContext": value => {
-		if (typeof value === "string") {
-			appendOnlyModeSignal.fire(value);
-		}
-	},
-	"providers.maxInFlightRequests": value => {
-		configureProviderMaxInFlightRequests(validateProviderMaxInFlightRequests(value));
-	},
-	"task.agentServiceTierOverrides": value => {
-		validateAgentServiceTierOverrides(value);
-	},
-	"secrets.enabled": value => {
-		configureCredentialRedaction(value === true);
-	},
-	"hindsight.bankId": () => hindsightScopeSignal.fire(),
-	"hindsight.bankIdPrefix": () => hindsightScopeSignal.fire(),
-	"hindsight.scoping": () => hindsightScopeSignal.fire(),
-	extendedContext: () => extendedContextSignal.fire(),
-	"worktree.base": value => {
-		const dir = typeof value === "string" && value.trim() ? value : undefined;
-		// Always call so an unset/empty value clears a previously-applied override.
-		// setWorktreesDir expands `~`, rejects relative paths, and returns the
-		// applied absolute path (or undefined when cleared/rejected).
-		if (dir && !setWorktreesDir(dir)) {
-			logger.warn("Settings: worktree.base must be an absolute or ~-relative path; ignoring", { value: dir });
-		} else if (!dir) {
-			setWorktreesDir(undefined);
-		}
-	},
-};
-/** Fires when `provider.appendOnlyContext` changes at runtime. */
-const appendOnlyModeSignal = new SettingSignal<[value: string]>("provider.appendOnlyContext");
-
-/**
- * Subscribe to append-only mode setting changes.
- * Returns an unsubscribe function. Multiple sessions (main + subagents)
- * can register independently without overwriting each other.
- */
-export const onAppendOnlyModeChanged = (cb: (value: string) => void) => appendOnlyModeSignal.on(cb);
-
-/** Fires when any model role changes at runtime. */
-const modelRolesSignal = new SettingSignal("modelRoles");
-
-/** Subscribe to model role changes. Returns an unsubscribe function. */
-export const onModelRolesChanged: (cb: () => void) => () => void = modelRolesSignal.on.bind(modelRolesSignal);
-
-/** Fires when Code Mode activation or its direct keep-set changes at runtime. */
-const codeModeSignal = new SettingSignal("providers.openai-codex.codeMode");
-
-/**
- * Settings whose effective value changes the Code Mode tool partition. `edit.mode`
- * belongs here because it renames `EditTool` on the wire (`apply_patch` vs `edit`),
- * which the namespace metadata is keyed by.
- */
-const CODE_MODE_SIGNAL_PATHS: readonly SettingPath[] = [
-	"providers.openai-codex.codeMode",
-	"providers.openai-codex.codeModeDirectTools",
-	"eval.js",
-	"edit.mode",
-];
-
-/** Subscribe to Code Mode setting changes. Returns an unsubscribe function. */
-export const onCodeModeChanged = (cb: () => void) => codeModeSignal.on(cb);
-
-/** Fires when `extendedContext` changes at runtime. */
-const extendedContextSignal = new SettingSignal("extendedContext");
-
-/**
- * Subscribe to extended-context setting changes. Sessions re-derive their
- * model's effective context window (the registry restores default windows
- * and caps premium long-context models at the standard-pricing threshold
- * while the setting is off).
- * Returns an unsubscribe function.
- */
-export const onExtendedContextChanged = (cb: () => void) => extendedContextSignal.on(cb);
-
-/** Fires when `statusLine.sessionAccent` changes at runtime. */
-const statusLineSessionAccentSignal = new SettingSignal("statusLine.sessionAccent");
-
-/**
- * Subscribe to session-accent setting changes.
- * Returns an unsubscribe function. Callers should re-read settings in the callback.
- */
-export const onStatusLineSessionAccentChanged = (cb: () => void) => statusLineSessionAccentSignal.on(cb);
-
-/** Fires when any `hindsight.bankId` / `bankIdPrefix` / `scoping` value changes. */
-const hindsightScopeSignal = new SettingSignal("hindsight scope");
-
-/**
- * Subscribe to changes in the Hindsight bank-scoping settings. Lets the
- * Hindsight backend rebuild the active `HindsightSessionState` when the
- * operator switches `hindsight.bankId`, `hindsight.bankIdPrefix`, or
- * `hindsight.scoping` mid-session so subsequent retain/recall calls land in
- * the new bank instead of the one selected at session start.
- *
- * Returns an unsubscribe function. The callback receives no arguments — the
- * caller is expected to re-read the relevant settings via `Settings.get`.
- */
-export const onHindsightScopeChanged = (cb: () => void) => hindsightScopeSignal.on(cb);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Global Singleton
@@ -3657,12 +3617,11 @@ export function resetSettingsForTest(): void {
 		ref.deref()?.cancelPendingSaves();
 	}
 	liveSettingsInstances.clear();
-	warnedUnknownStatusLineSegments.clear();
 	globalInstance = null;
 	globalInstancePromise = null;
 	clearBoundSettingsMethods();
-	configureProviderMaxInFlightRequests(undefined);
-	configureCredentialRedaction(false);
+	// Effect-owned process state (theme, redaction, request limits, …) returns to its defaults.
+	resetRegistryForTest(Settings.isolated());
 }
 
 /**

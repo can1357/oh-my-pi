@@ -66,6 +66,23 @@ function promptText(input: string | AgentMessage[]): string {
 		.join("\n");
 }
 
+/** High-entropy secret with no repeated 8-char window, so any surviving window is a leak. */
+function distinctSecret(length: number): string {
+	let secret = "";
+	for (let i = 0; secret.length < length; i++) secret += Bun.hash(`secret-${i}`).toString(36);
+	return secret.slice(0, length);
+}
+
+/** 8-char windows of `secret` present in `text`: a truncation cut leaks a secret as fragments, not whole. */
+function leakedSecretPieces(text: string, secret: string): string[] {
+	const pieces: string[] = [];
+	for (let i = 0; i + 8 <= secret.length; i++) {
+		const piece = secret.slice(i, i + 8);
+		if (text.includes(piece)) pieces.push(piece);
+	}
+	return pieces;
+}
+
 describe("advisor", () => {
 	describe("advisor system prompt", () => {
 		it("forbids concrete claims about tool arguments hidden from the advisor transcript", () => {
@@ -2274,6 +2291,40 @@ describe("advisor", () => {
 			expect(rendered).toContain(placeholder);
 			expect(rendered).not.toContain("BEGIN_SECRET_");
 			expect(rendered).not.toContain("_END_SECRET");
+		});
+
+		it("redacts an expanded edit diff before middle truncation", async () => {
+			// One giant diff line; the secret straddles the tail window's cut, so
+			// truncating first would leave its suffix, which no redaction pass can match.
+			const secret = distinctSecret(2_000);
+			const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+			const diff = `--- a/big.ts\n+++ b/big.ts\n@@ -1 +1 @@\n+${".".repeat(10_000)}${secret}${".".repeat(3_000)}`;
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const agent = makeAgent(promptInputs);
+			const messages: AgentMessage[] = [
+				{
+					role: "assistant",
+					content: [{ type: "toolCall", id: "c1", name: "edit", arguments: { path: "big.ts" } }],
+					timestamp: 1,
+				} as unknown as AgentMessage,
+				{
+					role: "toolResult",
+					toolCallId: "c1",
+					toolName: "edit",
+					content: "ok",
+					details: { diff },
+					isError: false,
+					timestamp: 2,
+				} as unknown as AgentMessage,
+			];
+			const runtime = new AdvisorRuntime(agent, { snapshotMessages: () => messages, obfuscator });
+
+			runtime.onTurnEnd();
+			await runtime.waitForCatchup(1_000, 1);
+
+			const rendered = promptText(promptInputs[0]);
+			expect(rendered).toContain("elided");
+			expect(leakedSecretPieces(rendered, secret)).toEqual([]);
 		});
 		it("does not scan tool-call arguments hidden by the primary-argument preview", async () => {
 			const obfuscator = new SecretObfuscator([

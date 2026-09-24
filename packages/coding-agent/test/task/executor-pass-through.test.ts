@@ -5,12 +5,14 @@
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { resolveThresholdTokens, shouldCompact } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Model, ServiceTierByFamily } from "@oh-my-pi/pi-ai";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgCompaction } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { parseAgentFields } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import type { ToolPathWithSource } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools";
 import type { LoadExtensionsResult, PreparedExtension } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
@@ -22,6 +24,8 @@ import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { createSessionDefaults } from "../helpers/session-defaults";
+
+import { cfgTierAnthropic, cfgTierGoogle, cfgTierOpenai } from "@oh-my-pi/pi-coding-agent/session/settings";
 
 function createMockSession(onPrompt: (params: { emit: (event: AgentSessionEvent) => void }) => void): AgentSession {
 	const listeners: Array<(event: AgentSessionEvent) => void> = [];
@@ -524,6 +528,47 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 	});
 });
 
+describe("runSubprocess per-agent compaction threshold overrides", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("applies the override to the named child only, not to agents that child spawns", async () => {
+		const createSession = vi
+			.spyOn(sdkModule, "createAgentSession")
+			.mockResolvedValueOnce(createSessionResult(yieldEmittingSession()))
+			.mockResolvedValueOnce(createSessionResult(yieldEmittingSession()));
+		const rootSettings = Settings.isolated({ "compaction.thresholdTokens": 40_000 });
+
+		const child = await runSubprocess({
+			...baseOptions,
+			id: "compaction-override-child",
+			settings: rootSettings,
+			compactionThresholdOverride: { thresholdPercent: 80, thresholdTokens: -1 },
+		});
+		expect(child.exitCode).toBe(0);
+		const childSettings = createSession.mock.calls[0]?.[0]?.settings;
+		if (!childSettings) throw new Error("Expected child settings");
+		const childCompaction = cfgCompaction.get(childSettings);
+		expect(resolveThresholdTokens(200_000, childCompaction)).toBe(160_000);
+		expect(shouldCompact(50_000, 200_000, childCompaction)).toBe(false);
+		expect(shouldCompact(160_001, 200_000, childCompaction)).toBe(true);
+
+		// A grandchild without its own entry is spawned from the child's settings.
+		const grandchild = await runSubprocess({
+			...baseOptions,
+			id: "compaction-override-grandchild",
+			settings: childSettings,
+		});
+		expect(grandchild.exitCode).toBe(0);
+		const grandchildSettings = createSession.mock.calls[1]?.[0]?.settings;
+		if (!grandchildSettings) throw new Error("Expected grandchild settings");
+		const grandchildCompaction = cfgCompaction.get(grandchildSettings);
+		expect(resolveThresholdTokens(200_000, grandchildCompaction)).toBe(40_000);
+		expect(shouldCompact(50_000, 200_000, grandchildCompaction)).toBe(true);
+	});
+});
+
 describe("runSubprocess per-agent service-tier overrides", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
@@ -579,9 +624,9 @@ describe("runSubprocess per-agent service-tier overrides", () => {
 		const sessionOptions = spy.mock.calls[0]?.[0];
 		expect(sessionOptions?.resolveServiceTierByFamily).toBeUndefined();
 		expect([
-			sessionOptions?.settings?.get("tier.openai"),
-			sessionOptions?.settings?.get("tier.anthropic"),
-			sessionOptions?.settings?.get("tier.google"),
+			sessionOptions?.settings ? cfgTierOpenai.get(sessionOptions?.settings) : undefined,
+			sessionOptions?.settings ? cfgTierAnthropic.get(sessionOptions?.settings) : undefined,
+			sessionOptions?.settings ? cfgTierGoogle.get(sessionOptions?.settings) : undefined,
 		]).toEqual(["flex", "none", "flex"]);
 	});
 

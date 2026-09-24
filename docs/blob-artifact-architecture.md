@@ -157,7 +157,7 @@ Handled by `ArtifactProtocolHandler` over registered active session artifact dir
 - when missing, reports available numeric artifact IDs
 - refuses to materialize a full artifact larger than 8 MiB; use bounded `read` selectors or the reported backing path for search/copy workflows
 
-Path-only consumers can resolve the backing file at any size without loading its bytes.
+`locate` returns the backing file path at any size without loading its bytes; `read`, search, and bash URL expansion go through it.
 
 Failure behavior:
 
@@ -228,7 +228,7 @@ When the destination artifact directory already exists — a session returning t
 | No registered artifact dirs (`agent://`)                  | Throws `No session - agent outputs unavailable`                                        |
 | Registered artifact dirs missing on disk                  | Throws explicit `No artifacts directory found`                                         |
 | Artifact ID not found                                     | Throws with available IDs listing                                                      |
-| Full `artifact://` resolution exceeds 8 MiB               | Rejects inline materialization; bounded selectors/path-only workflows remain available |
+| Full `artifact://` resolution exceeds 8 MiB               | Rejects inline materialization; `locate`-based reads and search remain available       |
 | OutputSink artifact writer init fails                     | Continues with bounded in-memory output only                                           |
 | Non-persistent `saveArtifact`                             | Stores text in `SessionManager` memory map; not file-backed URL data                   |
 | Artifact directory already exists at the move destination | Directories merged; an entry whose name or artifact id is taken stays at the source and is logged (warn) |

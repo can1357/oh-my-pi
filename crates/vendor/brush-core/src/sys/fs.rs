@@ -9,6 +9,11 @@ use std::env;
 #[cfg(any(windows, test))]
 use std::{ffi::OsStr, path::Component};
 
+#[cfg(windows)]
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::GetLongPathNameW;
+
 /// Normalizes shell-facing path aliases before `std::fs` sees them.
 #[allow(clippy::missing_const_for_fn, reason = "Windows implementation allocates")]
 pub fn normalize_shell_path(path: &Path) -> Cow<'_, Path> {
@@ -22,6 +27,62 @@ pub fn normalize_shell_path(path: &Path) -> Cow<'_, Path> {
 	{
 		Cow::Borrowed(path)
 	}
+}
+
+/// Expand 8.3 short-name components (e.g. `ADMINI~1`) in `path` to their long
+/// form, leaving the path otherwise unchanged.
+#[cfg(windows)]
+pub fn expand_to_long_path(path: &Path) -> PathBuf {
+	expand_to_long_path_impl(path)
+}
+
+/// Non-Windows: no 8.3 short names, return unchanged.
+#[cfg(not(windows))]
+pub fn expand_to_long_path(path: &Path) -> PathBuf {
+	path.to_path_buf()
+}
+
+/// Windows implementation using `GetLongPathNameW`, which resolves short-name
+/// aliases but — unlike `std::fs::canonicalize` — does **not** resolve symlinks
+/// or junctions, so `cd` into a symlink keeps the symlink spelling (the
+/// shell's existing behavior). A path with no short names is returned
+/// unchanged; on failure the input is returned as-is.
+#[cfg(windows)]
+fn expand_to_long_path_impl(path: &Path) -> PathBuf {
+	// Encode straight from the wide form: Windows `OsStr` is UTF-16 and may
+	// not round-trip through UTF-8, so a `to_str()` detour would silently skip
+	// expansion for those paths — exactly the identity split this function
+	// exists to avoid.
+	let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+
+	// First call with a null buffer returns the required size (including the
+	// terminating NUL); the fill call returns the length excluding the NUL.
+	// GetLongPathNameW returns 0 on failure (e.g. nonexistent path), in which
+	// case the input is returned unchanged.
+	let needed = unsafe { GetLongPathNameW(wide.as_ptr(), std::ptr::null_mut(), 0) };
+	if needed == 0 {
+		return path.to_path_buf();
+	}
+	let mut buf = vec![0u16; needed as usize];
+	loop {
+		let written =
+			unsafe { GetLongPathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) };
+		if written == 0 {
+			return path.to_path_buf();
+		}
+		let written = written as usize;
+		if written <= buf.len() {
+			// `written` excludes the NUL; drop any trailing padding so
+			// `from_wide` (which does not stop at a NUL) sees only the path.
+			buf.truncate(written);
+			break;
+		}
+		// The long form grew between the sizing call and the fill call:
+		// `written` is the new required size (including the NUL). Grow and
+		// retry rather than returning partial/zero-padded garbage.
+		buf = vec![0u16; written];
+	}
+	PathBuf::from(std::ffi::OsString::from_wide(&buf))
 }
 
 /// Returns a Windows drive root for a shell pattern that starts with an MSYS/WSL drive alias.
@@ -217,6 +278,38 @@ pub trait PathExt {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	#[cfg(windows)]
+	use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+
+	/// A short-spelled path expands back to the long spelling of the same
+	/// directory. Uses a fresh long-named directory so the input really has a
+	/// distinct 8.3 alias; skips on volumes that do not generate short names.
+	#[cfg(windows)]
+	#[test]
+	fn expand_to_long_path_resolves_short_names() {
+		const LONG_NAME: &str = "brush-core-long-name-probe";
+		let root = tempfile::tempdir().expect("tempdir");
+		let long = root.path().join(LONG_NAME);
+		std::fs::create_dir(&long).expect("create long-named dir");
+
+		let wide: Vec<u16> = long.as_os_str().encode_wide().chain(Some(0)).collect();
+		let needed = unsafe { GetShortPathNameW(wide.as_ptr(), std::ptr::null_mut(), 0) };
+		assert!(needed > 0, "GetShortPathNameW failed for {}", long.display());
+		let mut buf = vec![0u16; needed as usize];
+		let written = unsafe { GetShortPathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) };
+		assert!(written > 0, "GetShortPathNameW fill failed for {}", long.display());
+		buf.truncate(written as usize);
+		let short = PathBuf::from(std::ffi::OsString::from_wide(&buf));
+		if short.file_name() == long.file_name() {
+			return;
+		}
+
+		let expanded = expand_to_long_path(&short);
+		assert_eq!(expanded.file_name(), Some(OsStr::new(LONG_NAME)), "from {}", short.display());
+		// Same result as expanding the long spelling: one identity, no `\\?\`
+		// prefix, no symlink resolution.
+		assert_eq!(expanded, expand_to_long_path(&long));
+	}
 
 	#[test]
 	fn unix_drive_aliases_translate_to_windows_roots() {

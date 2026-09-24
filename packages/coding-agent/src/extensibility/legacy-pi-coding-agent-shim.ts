@@ -42,7 +42,7 @@ import {
 import { getPackageDir as getOmpPackageDir } from "../config";
 import { formatKeyHints } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { PromptTemplate } from "../config/prompt-templates";
-import { findScopedSettings, type SettingPath, Settings } from "../config/settings";
+import { findScopedSettings, Settings } from "../config/settings";
 import { EditTool } from "../edit";
 import type { CreateAgentSessionOptions, CreateAgentSessionResult, LoadExtensionsResult } from "../sdk";
 import {
@@ -87,6 +87,8 @@ import { getEnabledPlugins, resolvePluginExtensionPaths, type ScopedInstalledPlu
 import type { Skill } from "./skills";
 import { loadSkillsFromDir } from "./skills";
 
+import { cfgDisabledExtensions, cfgExtensions, cfgSkills } from "./settings";
+
 const TOOL_DEFINITION_MARKER = "__isToolDefinition";
 const LEGACY_BUILTIN_TOOL_MARKER = "__ompLegacyBuiltinTool";
 const LEGACY_CODING_TOOL_NAMES = ["read", "bash", "edit", "write"] as const;
@@ -96,7 +98,7 @@ type LegacyCodingToolName = (typeof LEGACY_CODING_TOOL_NAMES)[number];
 type LegacyRegistryToolName = LegacyCodingToolName | "grep" | "glob";
 type LegacyBuiltinToolDefinition = ToolDefinition & { [LEGACY_BUILTIN_TOOL_MARKER]: true };
 
-type LegacySettingOverrides = Partial<Record<SettingPath, unknown>>;
+type LegacySettingOverrides = Record<string, unknown>;
 
 interface LegacyThemeLike {
 	fg(color: string, text: string): string;
@@ -842,8 +844,8 @@ export class DefaultPackageManager {
 	/** Resolve enabled extension paths with their OMP plugin provenance. */
 	async resolve(_onMissing?: (source: string) => Promise<MissingSourceAction>): Promise<ResolvedPaths> {
 		const settings = await this.#settingsManager;
-		const configuredPaths = settings.get("extensions") ?? [];
-		const disabledExtensionIds = settings.get("disabledExtensions") ?? [];
+		const configuredPaths = cfgExtensions.get(settings);
+		const disabledExtensionIds = cfgDisabledExtensions.get(settings);
 		const [extensionPaths, plugins] = await Promise.all([
 			discoverExtensionPaths(configuredPaths, this.#cwd, disabledExtensionIds),
 			getEnabledPlugins(this.#cwd),
@@ -1100,8 +1102,8 @@ export class DefaultResourceLoader implements ResourceLoader {
 				options.noSkills
 					? Promise.resolve({ skills: [], warnings: [] })
 					: discoverSkills(cwd, agentDir, {
-							...settings.getGroup("skills"),
-							disabledExtensions: settings.get("disabledExtensions") ?? [],
+							...cfgSkills.get(settings),
+							disabledExtensions: cfgDisabledExtensions.get(settings),
 						}),
 				this.#loadAdditionalSkills(),
 				options.noPromptTemplates ? Promise.resolve([]) : discoverPromptTemplates(cwd, agentDir),

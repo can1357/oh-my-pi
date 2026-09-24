@@ -213,22 +213,13 @@ describe("internal URL tools resolve against the caller root (A/B same ids)", ()
 		const registry = AgentRegistry.global();
 		await installGlobalMainB(registry, rootB);
 
-		const expanded = await expandInternalUrls("cat agent://Worker", {
-			skills: [],
-			internalRouter: InternalUrlRouter.instance(),
-			cwd: dir,
-			sessionFile: rootA,
-		});
+		const expanded = await expandInternalUrls("cat agent://Worker", { context: { cwd: dir, sessionFile: rootA } });
 		expect(expanded).toContain(artifactA);
 		expect(expanded).not.toContain(artifactB);
 
 		// No caller session file: keep the pre-existing global behavior (B's
 		// Main-owned dir wins) instead of guessing a caller root.
-		const noSession = await expandInternalUrls("cat agent://Worker", {
-			skills: [],
-			internalRouter: InternalUrlRouter.instance(),
-			cwd: dir,
-		});
+		const noSession = await expandInternalUrls("cat agent://Worker", { context: { cwd: dir } });
 		expect(noSession).toContain(artifactB);
 		expect(noSession).not.toContain(artifactA);
 	});

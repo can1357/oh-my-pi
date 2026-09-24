@@ -316,44 +316,68 @@ export function xdevDocs(state: XdevState, name: string): string {
 	return renderDocs(resolveRequiredXdevTool(state, name));
 }
 
+/** Mounted-device placement in the system prompt: inlined docs sections, then one-line catalog entries. */
+export interface XdevPromptDocs {
+	readonly sections: readonly string[];
+	/** Catalog summary for each device listed as a one-line entry, in presentation order. */
+	readonly catalog: ReadonlyMap<string, string>;
+}
+
+/**
+ * Place mounted devices under the configured prompt-doc policy and budgets.
+ * A device the policy does not inline, or whose docs exceed a cap, becomes a
+ * catalog entry.
+ */
+export function planXdevPromptDocs(
+	state: XdevState,
+	mode: XdevDocsMode = "inline",
+	inlinePatterns: readonly string[] = [],
+): XdevPromptDocs {
+	const sections: string[] = [];
+	const catalog = new Map<string, string>();
+	const inlineGlobs = compileInlineGlobs(inlinePatterns);
+	let used = 0;
+	for (const tool of listXdevTools(state)) {
+		const descriptionCap = state.builtInNames.has(tool.name) ? undefined : XDEV_EXTERNAL_DESCRIPTION_CAP;
+		if (shouldInlineXdevTool(state, tool, mode, inlineGlobs)) {
+			const docs = renderDocs(tool, "##", descriptionCap);
+			if (docs.length <= XDEV_DOCS_PER_DEVICE_CAP && used + docs.length <= XDEV_DOCS_TOTAL_BUDGET) {
+				used += docs.length;
+				sections.push(docs);
+				continue;
+			}
+		}
+		catalog.set(tool.name, promptCatalogSummary(tool, descriptionCap));
+	}
+	return { sections, catalog };
+}
+
+/**
+ * Render planned `xd://` prompt docs. Devices in `listedElsewhere` get no
+ * catalog line: the caller lists them itself, with their catalog summary.
+ */
+export function renderXdevPromptDocs(docs: XdevPromptDocs, listedElsewhere?: ReadonlySet<string>): string {
+	const lines: string[] = [];
+	for (const [name, summary] of docs.catalog) {
+		if (!listedElsewhere?.has(name)) lines.push(`- ${XD_URL_PREFIX}${name} — ${summary}`);
+	}
+	if (lines.length === 0) return docs.sections.join("\n\n");
+	const catalogSection = [
+		"## Additional devices (docs on demand)",
+		...lines,
+		"",
+		`Read ${XD_URL_PREFIX}<tool> for full docs + JSON schema before first use.`,
+	].join("\n");
+	return [...docs.sections, catalogSection].join("\n\n");
+}
+
 /** Docs + schema for mounted devices under the configured prompt-doc policy. */
 export function xdevDocsAll(
 	state: XdevState,
 	mode: XdevDocsMode = "inline",
 	inlinePatterns: readonly string[] = [],
 ): string {
-	const sections: string[] = [];
-	const overflow: Tool[] = [];
-	const inlineGlobs = compileInlineGlobs(inlinePatterns);
-	let used = 0;
-	for (const tool of listXdevTools(state)) {
-		if (!shouldInlineXdevTool(state, tool, mode, inlineGlobs)) {
-			overflow.push(tool);
-			continue;
-		}
-		const descriptionCap = state.builtInNames.has(tool.name) ? undefined : XDEV_EXTERNAL_DESCRIPTION_CAP;
-		const docs = renderDocs(tool, "##", descriptionCap);
-		if (docs.length > XDEV_DOCS_PER_DEVICE_CAP || used + docs.length > XDEV_DOCS_TOTAL_BUDGET) {
-			overflow.push(tool);
-			continue;
-		}
-		used += docs.length;
-		sections.push(docs);
-	}
-	if (overflow.length > 0) {
-		sections.push(
-			[
-				"## Additional devices (docs on demand)",
-				...overflow.map(tool => {
-					const maxBytes = state.builtInNames.has(tool.name) ? undefined : XDEV_EXTERNAL_DESCRIPTION_CAP;
-					return `- ${XD_URL_PREFIX}${tool.name} — ${promptCatalogSummary(tool, maxBytes)}`;
-				}),
-				"",
-				`Read ${XD_URL_PREFIX}<tool> for full docs + JSON schema before first use.`,
-			].join("\n"),
-		);
-	}
-	return sections.join("\n\n");
+	return renderXdevPromptDocs(planXdevPromptDocs(state, mode, inlinePatterns));
 }
 
 /** Docs for selected mounted devices under the configured prompt-doc policy. */

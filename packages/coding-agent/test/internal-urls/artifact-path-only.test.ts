@@ -12,12 +12,12 @@ import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/route
 import { resolveToolSearchScope } from "@oh-my-pi/pi-coding-agent/tools/path-utils";
 
 /**
- * Path-only callers (search/grep, bash URL expansion) only need the artifact's
+ * Path consumers (search/grep, bash URL expansion) only need the artifact's
  * filesystem path. Blocking them for large artifacts would break `search`
  * against MCP results and `bash` commands that reference the file — the very
  * workflows the read-tool guidance points users toward.
  */
-describe("artifact:// path-only resolution", () => {
+describe("artifact:// locate vs content resolution", () => {
 	let testDir: string;
 	let artifactDir: string;
 	let unregister: (() => void) | undefined;
@@ -27,8 +27,8 @@ describe("artifact:// path-only resolution", () => {
 		testDir = await fs.mkdtemp(path.join(os.tmpdir(), "artifact-path-only-"));
 		artifactDir = path.join(testDir, "session");
 		await fs.mkdir(artifactDir, { recursive: true });
-		// 9 MiB — larger than the 8 MiB inline cap so `pathOnly: false` refuses to
-		// materialize while `pathOnly: true` returns the shape unchanged.
+		// 9 MiB — larger than the 8 MiB inline cap so `resolve` refuses to
+		// materialize while `locate` still returns the backing file.
 		const bytes = Buffer.alloc(9 * 1024 * 1024, 65);
 		await Bun.write(path.join(artifactDir, "0.mcp.log"), bytes);
 		resetRegisteredArtifactDirsForTests();
@@ -39,16 +39,6 @@ describe("artifact:// path-only resolution", () => {
 		unregister?.();
 		resetRegisteredArtifactDirsForTests();
 		await fs.rm(testDir, { recursive: true, force: true });
-	});
-
-	it("returns the artifact source path for large artifacts under pathOnly without reading its bytes", async () => {
-		const url = parseInternalUrl("artifact://0");
-		const resource = await handler.resolve(url, { pathOnly: true });
-
-		expect(resource.sourcePath).toBe(path.join(artifactDir, "0.mcp.log"));
-		expect(resource.size).toBe(9 * 1024 * 1024);
-		// Content must NOT be materialized — that is the whole point of pathOnly.
-		expect(resource.content).toBe("");
 	});
 
 	it("still rejects full content resolution for large artifacts (existing OOM guard)", async () => {
@@ -72,7 +62,7 @@ describe("artifact:// path-only resolution", () => {
 	});
 });
 
-describe("resolveToolSearchScope handles large artifacts via pathOnly", () => {
+describe("resolveToolSearchScope locates large artifacts", () => {
 	let testDir: string;
 	let artifactDir: string;
 	let unregister: (() => void) | undefined;
@@ -100,6 +90,7 @@ describe("resolveToolSearchScope handles large artifacts via pathOnly", () => {
 			rawPaths: ["artifact://0"],
 			cwd: testDir,
 			internalUrlAction: "search",
+			context: {},
 		});
 		// Scope resolution must reach the artifact's real path without going through
 		// InternalUrlRouter's inline-content cap.

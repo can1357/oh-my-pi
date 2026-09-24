@@ -11,7 +11,6 @@ import { type RepeatedToolCallDetection, ToolCallLoopGuard } from "@oh-my-pi/pi-
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import geminiToolReminderTemplate from "../prompts/system/gemini-tool-call-reminder.md" with { type: "text" };
-import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { CustomMessage } from "./messages";
 import type { SessionManager } from "./session-manager";
 import {
@@ -19,6 +18,15 @@ import {
 	TOOL_CALL_LOOP_REDIRECT_TYPE,
 	toolCallLoopRedirectDetails,
 } from "./tool-call-loop-redirect";
+
+import { cfgEditStreamingAbort } from "../edit/settings";
+import {
+	cfgModelLoopGuardEnabled,
+	cfgModelLoopGuardToolCallReminder,
+	cfgModelToolCallLoopGuardEnabled,
+	cfgModelToolCallLoopGuardExemptTools,
+	cfgModelToolCallLoopGuardThreshold,
+} from "./settings";
 
 const GEMINI_HEADER_INTERRUPT_REASON = "Interrupted: emit a tool call instead of more planning";
 const GEMINI_TOOL_REMINDER_TYPE = "gemini-tool-call-reminder";
@@ -34,7 +42,6 @@ export interface StreamGuardsHost {
 	agent: Agent;
 	settings: Settings;
 	sessionManager: SessionManager;
-	obfuscator: SecretObfuscator | undefined;
 	model(): Model | undefined;
 	isDisposed(): boolean;
 	promptGeneration(): number;
@@ -65,7 +72,7 @@ export class StreamingEditGuard {
 	/** Aborts an edit when the native engine's final preview reports an error. */
 	maybeAbort(event: AgentEvent): void {
 		if (
-			!this.#host.settings.get("edit.streamingAbort") ||
+			!cfgEditStreamingAbort.get(this.#host.settings) ||
 			this.#abortTriggered ||
 			event.type !== "tool_stream_update" ||
 			event.toolName !== "edit"
@@ -149,14 +156,14 @@ export class LoopGuards {
 	}
 
 	#activeToolCallLoopGuard(): ToolCallLoopGuard | undefined {
-		if (this.#host.settings.get("model.toolCallLoopGuard.enabled") !== true) {
+		if (cfgModelToolCallLoopGuardEnabled.get(this.#host.settings) !== true) {
 			this.#toolCallLoopGuard = undefined;
 			this.#toolCallLoopGuardSettingsKey = undefined;
 			return undefined;
 		}
-		const threshold = this.#host.settings.get("model.toolCallLoopGuard.threshold");
-		const exemptTools = this.#host.settings
-			.get("model.toolCallLoopGuard.exemptTools")
+		const threshold = cfgModelToolCallLoopGuardThreshold.get(this.#host.settings);
+		const exemptTools = cfgModelToolCallLoopGuardExemptTools
+			.get(this.#host.settings)
 			.filter((tool): tool is string => typeof tool === "string" && tool.length > 0);
 		const settingsKey = `${threshold}:${JSON.stringify(exemptTools)}`;
 		if (!this.#toolCallLoopGuard || this.#toolCallLoopGuardSettingsKey !== settingsKey) {
@@ -193,9 +200,8 @@ export class LoopGuards {
 	#geminiHeaderGuardActive(): boolean {
 		const model = this.#host.model();
 		return (
-			process.env.PI_NO_THINKING_LOOP_GUARD !== "1" &&
-			this.#host.settings.get("model.loopGuard.enabled") === true &&
-			this.#host.settings.get("model.loopGuard.toolCallReminder") === true &&
+			cfgModelLoopGuardEnabled.get(this.#host.settings) === true &&
+			cfgModelLoopGuardToolCallReminder.get(this.#host.settings) === true &&
 			model !== undefined &&
 			model.identity.class === "gemini"
 		);

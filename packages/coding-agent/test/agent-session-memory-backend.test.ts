@@ -12,6 +12,7 @@ import { MEMORY_BACKEND_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/memory-back
 import { computeMnemopiBankScope } from "@oh-my-pi/pi-coding-agent/mnemopi/config";
 import { getMnemopiSessionState } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
@@ -19,6 +20,11 @@ import { BUILTIN_TOOLS, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools
 import { resetMemoryForTests } from "@oh-my-pi/pi-mnemopi";
 import { getProjectAgentDir, getProjectDir, setProjectDir, TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+
+import { cfgAutolearnEnabled } from "@oh-my-pi/pi-coding-agent/autolearn/settings";
+import { cfgHindsightApiUrl, cfgHindsightMentalModelsEnabled } from "@oh-my-pi/pi-coding-agent/hindsight/settings";
+import { cfgMemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/settings";
+import { cfgMnemopiBank, cfgMnemopiRecallLimit, cfgMnemopiScoping } from "@oh-my-pi/pi-coding-agent/mnemopi/settings";
 
 function createTool(name: string): AgentTool {
 	return {
@@ -55,6 +61,8 @@ describe("AgentSession memory backend lifecycle", () => {
 		session = undefined;
 		resetMemoryForTests();
 		authStorage.close();
+		// `Settings.loadIsolated` opens agent.db under tempDir; close it before the directory goes away.
+		AgentStorage.close();
 		tempDir.removeSync();
 	});
 
@@ -75,7 +83,7 @@ describe("AgentSession memory backend lifecycle", () => {
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: ["initial"], tools: [read] },
-			streamFn: createMockModel({ responses: [{ content: ["ok"] }] }).stream,
+			streamFn: createMockModel({ responses: [{ content: ["ok"] }, { content: ["ok"] }] }).stream,
 		});
 		const toolRegistry = new Map<string, AgentTool>([[read.name, read]]);
 		session = new AgentSession({
@@ -89,7 +97,7 @@ describe("AgentSession memory backend lifecycle", () => {
 			toolRegistry,
 			builtInToolNames: [read.name],
 			rebuildSystemPrompt: async toolNames => ({
-				systemPrompt: [`backend:${settings.get("memory.backend")};tools:${toolNames.sort().join(",")}`],
+				systemPrompt: [`backend:${cfgMemoryBackend.get(settings)};tools:${toolNames.sort().join(",")}`],
 			}),
 		});
 		return session;
@@ -97,10 +105,10 @@ describe("AgentSession memory backend lifecycle", () => {
 
 	it("removes unusable Hindsight tools after a cwd reload clears the URL and restores them when configured", async () => {
 		const apiUrl = "http://127.0.0.1:1";
-		settings.override("memory.backend", "hindsight");
-		settings.override("hindsight.apiUrl", apiUrl);
-		settings.override("hindsight.mentalModelsEnabled", false);
-		settings.override("autolearn.enabled", true);
+		cfgMemoryBackend.override(settings, "hindsight");
+		cfgHindsightApiUrl.override(settings, apiUrl);
+		cfgHindsightMentalModelsEnabled.override(settings, false);
+		cfgAutolearnEnabled.override(settings, true);
 		const toolSession = {
 			cwd: tempDir.path(),
 			hasUI: false,
@@ -114,7 +122,7 @@ describe("AgentSession memory backend lifecycle", () => {
 		await current.applyMemoryBackend();
 		expect(current.getActiveToolNames()).toEqual(expect.arrayContaining(["recall", "retain", "reflect", "learn"]));
 
-		settings.override("hindsight.apiUrl", "");
+		cfgHindsightApiUrl.override(settings, "");
 		await settings.reloadForCwd(path.join(tempDir.path(), "destination"));
 		await rebindMemoryBackendForCwd(current);
 
@@ -122,26 +130,44 @@ describe("AgentSession memory backend lifecycle", () => {
 		expect(current.getAllToolNames()).toEqual(["read"]);
 		expect(current.getActiveToolNames()).toEqual(["read"]);
 
-		settings.override("hindsight.apiUrl", apiUrl);
+		cfgHindsightApiUrl.override(settings, apiUrl);
 		await settings.reloadForCwd(path.join(tempDir.path(), "source"));
 		await rebindMemoryBackendForCwd(current);
 		expect(current.getHindsightSessionState()).toBeDefined();
 		expect(current.getActiveToolNames()).toEqual(expect.arrayContaining(["recall", "retain", "reflect", "learn"]));
 	});
 
-	it("switches runtime state, memory tools, and prompt in one apply", async () => {
+	it("applies memory settings edited mid-session before the next prompt", async () => {
 		const current = createSession(async () =>
-			settings.get("memory.backend") === "mnemopi" ? [createTool("retain"), createTool("memory_edit")] : [],
+			cfgMemoryBackend.get(settings) === "mnemopi" ? [createTool("retain")] : [],
 		);
 
-		settings.override("memory.backend", "mnemopi");
+		cfgMemoryBackend.override(settings, "mnemopi");
+		await current.prompt("first");
+		const started = getMnemopiSessionState(current);
+		expect(started?.config.recallLimit).toBe(8);
+		expect(current.getActiveToolNames()).toEqual(["read", "retain"]);
+
+		cfgMnemopiRecallLimit.override(settings, 2);
+		await current.prompt("second");
+		const rebuilt = getMnemopiSessionState(current);
+		expect(rebuilt).not.toBe(started);
+		expect(rebuilt?.config.recallLimit).toBe(2);
+	});
+
+	it("switches runtime state, memory tools, and prompt in one apply", async () => {
+		const current = createSession(async () =>
+			cfgMemoryBackend.get(settings) === "mnemopi" ? [createTool("retain"), createTool("memory_edit")] : [],
+		);
+
+		cfgMemoryBackend.override(settings, "mnemopi");
 		await current.applyMemoryBackend();
 
 		expect(getMnemopiSessionState(current)).toBeDefined();
 		expect(current.getActiveToolNames()).toEqual(expect.arrayContaining(["read", "retain", "memory_edit"]));
 		expect(current.systemPrompt).toEqual(["backend:mnemopi;tools:memory_edit,read,retain"]);
 
-		settings.override("memory.backend", "off");
+		cfgMemoryBackend.override(settings, "off");
 		await current.applyMemoryBackend();
 
 		expect(getMnemopiSessionState(current)).toBeUndefined();
@@ -154,25 +180,25 @@ describe("AgentSession memory backend lifecycle", () => {
 		["mnemopi", "off"],
 		["off", "mnemopi"],
 	] as const)("rebinds %s to %s on a cwd move without Hindsight", async (source, destination) => {
-		settings.override("memory.backend", source);
+		cfgMemoryBackend.override(settings, source);
 		await settings.reloadForCwd(path.join(tempDir.path(), "source"));
 		const current = createSession(async () =>
-			settings.get("memory.backend") === "mnemopi" ? [createTool("retain")] : [],
+			cfgMemoryBackend.get(settings) === "mnemopi" ? [createTool("retain")] : [],
 		);
 		await current.applyMemoryBackend();
 
 		const destinationCwd = path.join(tempDir.path(), "destination");
 		current.sessionManager.setCwdWithoutRelocation(destinationCwd);
-		settings.override("memory.backend", destination);
+		cfgMemoryBackend.override(settings, destination);
 		await settings.reloadForCwd(destinationCwd);
 		await rebindMemoryBackendForCwd(current);
 
 		const state = getMnemopiSessionState(current);
 		if (destination === "mnemopi") {
 			const scope = computeMnemopiBankScope(
-				settings.get("mnemopi.bank"),
+				cfgMnemopiBank.get(settings),
 				destinationCwd,
-				settings.get("mnemopi.scoping"),
+				cfgMnemopiScoping.get(settings),
 			);
 			expect(state?.config.retainBank).toBe(scope.retainBank);
 			expect(state?.config.recallBanks).toEqual(scope.recallBanks);
@@ -259,7 +285,7 @@ describe("AgentSession memory backend lifecycle", () => {
 		expect(transcriptRows(destinationDbPath!)).toEqual([]);
 
 		// Ordinary backend changes still retain once, in the committed project.
-		settings.override("memory.backend", "off");
+		cfgMemoryBackend.override(settings, "off");
 		await current.applyMemoryBackend();
 		expect(transcriptRows(sourceDbPath)).toEqual(rollback ? [{ cwd: sourceCwd }] : []);
 		expect(transcriptRows(destinationDbPath!)).toEqual(rollback ? [] : [{ cwd: destinationCwd }]);
@@ -319,7 +345,7 @@ describe("AgentSession memory backend lifecycle", () => {
 				await executeAcpBuiltinSlashCommand("/move " + destinationCwd, runtime);
 				expect(output).toContainEqual(expect.stringMatching(/Move failed:.*Mnemopi/));
 				expect(current.sessionManager.getCwd()).toBe(sourceCwd);
-				expect(settings.get("memory.backend")).toBe(source);
+				expect(cfgMemoryBackend.get(settings)).toBe(source);
 				expect(current.getActiveToolNames()).toEqual(sourceTools);
 				expect(current.systemPrompt).toEqual(sourcePrompt);
 				if (source === "mnemopi") {
@@ -396,17 +422,17 @@ describe("AgentSession memory backend lifecycle", () => {
 	});
 
 	it("applies the destination project's memory backend on a cwd move", async () => {
-		settings.override("memory.backend", "hindsight");
-		settings.override("hindsight.mentalModelsEnabled", false);
+		cfgMemoryBackend.override(settings, "hindsight");
+		cfgHindsightMentalModelsEnabled.override(settings, false);
 		const current = createSession(async () =>
-			settings.get("memory.backend") === "hindsight" ? [createTool("recall"), createTool("retain")] : [],
+			cfgMemoryBackend.get(settings) === "hindsight" ? [createTool("recall"), createTool("retain")] : [],
 		);
 
 		await current.applyMemoryBackend();
 		expect(current.getHindsightSessionState()).toBeDefined();
 		expect(current.getActiveToolNames()).toEqual(expect.arrayContaining(["read", "recall", "retain"]));
 
-		settings.override("memory.backend", "off");
+		cfgMemoryBackend.override(settings, "off");
 		await rebindMemoryBackendForCwd(current);
 
 		expect(current.getHindsightSessionState()).toBeUndefined();
@@ -415,17 +441,17 @@ describe("AgentSession memory backend lifecycle", () => {
 
 	// A hook-triggered retry may find teardown already done; that no-op must preserve the failure.
 	it.each([false, true])("reports destination rebind failures (coalesced no-op: %s)", async coalesced => {
-		settings.override("memory.backend", "hindsight");
-		settings.override("hindsight.mentalModelsEnabled", false);
+		cfgMemoryBackend.override(settings, "hindsight");
+		cfgHindsightMentalModelsEnabled.override(settings, false);
 		let failToolBuild = false;
 		const current = createSession(async () => {
 			if (failToolBuild) throw new Error("destination memory tools unavailable");
-			return settings.get("memory.backend") === "hindsight" ? [createTool("recall")] : [];
+			return cfgMemoryBackend.get(settings) === "hindsight" ? [createTool("recall")] : [];
 		});
 
 		await current.applyMemoryBackend();
 		expect(current.getHindsightSessionState()).toBeDefined();
-		settings.override("memory.backend", "off");
+		cfgMemoryBackend.override(settings, "off");
 		failToolBuild = true;
 		if (coalesced) await settings.reloadForCwd(path.join(tempDir.path(), "destination"));
 
