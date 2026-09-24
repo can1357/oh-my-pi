@@ -174,7 +174,7 @@ import { MAGIC_KEYWORDS, type MagicKeywordContext, type MagicKeywordId } from ".
 import { containsMagicKeyword } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import { parseTurnBudget } from "../modes/turn-budget";
-import { computeNonMessageTokens } from "@oh-my-pi/pi-tui/status-line/context-usage";
+import { computeNonMessageBreakdown, computeNonMessageTokens } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import { type PlanApprovalDetails, resolveApprovedPlan } from "../plan-mode/approved-plan";
 import { listPlanFiles, readPlanFile } from "../plan-mode/plan-files";
 import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
@@ -2926,11 +2926,16 @@ export class AgentSession {
 			if (this.#recovery.isClassifierRefusal(assistantMsg)) return;
 			if (isEmptyErrorTurn(assistantMsg)) return;
 			if (assistantMsg.stopReason !== "aborted" && assistantMsg.stopReason !== "error" && assistantMsg.usage) {
+				const nonMessageBreakdown = computeNonMessageBreakdown(this, this.agent.tokenizer, this.settings.revision);
 				assistantMsg.contextSnapshot = {
 					promptTokens: calculatePromptTokens(assistantMsg.usage),
 					nonMessageTokens:
 						this.#stats.pendingNonMessageTokens ??
 						computeNonMessageTokens(this, this.agent.tokenizer, this.settings.revision),
+					skillsTokens: nonMessageBreakdown.skillsTokens,
+					toolsTokens: nonMessageBreakdown.toolsTokens,
+					systemContextTokens: nonMessageBreakdown.systemContextTokens,
+					systemPromptTokens: nonMessageBreakdown.systemPromptTokens,
 					compactionEpoch: this.#stats.compactionEpoch,
 				};
 			}

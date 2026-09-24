@@ -201,6 +201,8 @@ export async function initDb(): Promise<Database> {
 			output_tokens INTEGER NOT NULL,
 			cache_read_tokens INTEGER NOT NULL,
 			cache_write_tokens INTEGER NOT NULL,
+			cache_write_5m_tokens INTEGER NOT NULL DEFAULT 0,
+			cache_write_1h_tokens INTEGER NOT NULL DEFAULT 0,
 			total_tokens INTEGER NOT NULL,
 			premium_requests REAL NOT NULL,
 			cost_input REAL NOT NULL,
@@ -296,6 +298,12 @@ export async function initDb(): Promise<Database> {
 	// their epoch-sentinel zeros read as free until a re-parse rewrites them.
 	if (!messageColumns.some(column => column.name === "cost_unpriced")) {
 		db.run("ALTER TABLE messages ADD COLUMN cost_unpriced INTEGER NOT NULL DEFAULT 0");
+	}
+	if (!messageColumns.some(column => column.name === "cache_write_5m_tokens")) {
+		db.run("ALTER TABLE messages ADD COLUMN cache_write_5m_tokens INTEGER NOT NULL DEFAULT 0");
+	}
+	if (!messageColumns.some(column => column.name === "cache_write_1h_tokens")) {
+		db.run("ALTER TABLE messages ADD COLUMN cache_write_1h_tokens INTEGER NOT NULL DEFAULT 0");
 	}
 	db.run("UPDATE messages SET premium_requests = 0 WHERE premium_requests IS NULL");
 	// Token-usage-by-agent: each message is classified main / subagent / advisor
@@ -724,11 +732,12 @@ export function insertMessageStats(stats: MessageStatsInput[]): number {
 		INSERT INTO messages (
 			session_file, entry_id, folder, model, provider, api, timestamp,
 			duration, ttft, stop_reason, error_message,
-			input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens, premium_requests,
+			input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+			cache_write_5m_tokens, cache_write_1h_tokens, total_tokens, premium_requests,
 			cost_input, cost_output, cost_cache_read, cost_cache_write, cost_total, cost_no_cache_input,
 			cost_unpriced, agent_type
 		)
-		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 		WHERE NOT EXISTS (
 			SELECT 1 FROM messages
 			WHERE entry_id = ? AND timestamp = ? AND session_file <> ?
@@ -741,7 +750,9 @@ export function insertMessageStats(stats: MessageStatsInput[]): number {
 			cost_cache_write = excluded.cost_cache_write,
 			cost_total = excluded.cost_total,
 			cost_no_cache_input = excluded.cost_no_cache_input,
-			cost_unpriced = excluded.cost_unpriced
+			cost_unpriced = excluded.cost_unpriced,
+			cache_write_5m_tokens = excluded.cache_write_5m_tokens,
+			cache_write_1h_tokens = excluded.cache_write_1h_tokens
 	`);
 
 	let inserted = 0;
@@ -765,6 +776,8 @@ export function insertMessageStats(stats: MessageStatsInput[]): number {
 				s.usage.output,
 				s.usage.cacheRead,
 				s.usage.cacheWrite,
+				s.usage.cttl?.ephemeral5m ?? 0,
+				s.usage.cttl?.ephemeral1h ?? 0,
 				s.usage.totalTokens,
 				s.usage.premiumRequests ?? 0,
 				cost.input,

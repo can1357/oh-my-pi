@@ -1057,6 +1057,10 @@ export interface ContextSnapshot {
 	 */
 	compactionEpoch?: number;
 	lastMessageTimestamp?: number;
+	skillsTokens?: number;
+	toolsTokens?: number;
+	systemContextTokens?: number;
+	systemPromptTokens?: number;
 }
 
 export interface AssistantMessage {
