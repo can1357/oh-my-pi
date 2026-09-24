@@ -186,11 +186,6 @@ export class SessionToolPolicy {
 	lspReadOnly(): boolean {
 		return this.cliLspReadOnly || (!this.effective("write") && !this.effective("edit"));
 	}
-
-	waitEnabled(): boolean {
-		return this.effective("wait");
-	}
-
 	/**
 	 * The full effective grant: intersection of every layer across the
 	 * currently-registered tools. Consumers (subagent spawn inheritance) use it

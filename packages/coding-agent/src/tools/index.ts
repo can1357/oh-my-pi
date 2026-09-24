@@ -575,10 +575,6 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	const restrictToolNames = session.restrictToolNames === true;
 	const includeYield = session.requireYieldTool === true;
 	const enableLsp = session.enableLsp ?? true;
-	// LIVE flag derivation: the session tool policy (persona/cli layers) owns
-	// wait availability — consulted LAZILY in the gate below. (LSP read-only is
-	// enforced by the tool itself.)
-	const toolPolicy = session.getToolPolicy?.();
 	const requestedTools = restrictToolNames
 		? normalizeToolNames(toolNames ?? [])
 		: toolNames
@@ -734,15 +730,6 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		// through the executor's quiescence barrier, and parent messages steer them.
 		if (name === "wait") {
 			if ((session.taskDepth ?? 0) > 0) return false;
-			// The policy is the live answer ONLY once the session registry holds
-			// `wait`: `effective()` intersects the registry, which is still EMPTY
-			// during this first createTools pass (it populates it below) — asking
-			// now would always deny and drop wait/IRC from ordinary unrestricted
-			// sessions. So the initial build falls back to the classic
-			// unrestricted-session gate; later rebuilds (persona enter/exit,
-			// toggles) see the populated registry and the policy layers decide
-			// (persona grant, CLI grant, toggles already intersected).
-			if (toolPolicy && session.toolRegistry?.has("wait")) return toolPolicy.waitEnabled();
 			return (
 				session.settings.get("async.enabled") ||
 				(session.enableIrc !== false && isIrcEnabled(session.settings, session.taskDepth ?? 0)) ||

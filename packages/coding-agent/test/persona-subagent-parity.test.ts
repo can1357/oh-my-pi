@@ -165,9 +165,9 @@ describe("subagent spawn inheritance parity", () => {
 
 		// And the child capability set the executor derives is identical:
 		// persona [read, task] does not cage — child keeps its frontmatter
-		// [read, write, bash] plus the ordinary wait auto-append.
+		// [read, write, bash] with no wait auto-append (subagents never block on wait upstream).
 		expect(childCapabilities(launchPolicy)).toEqual(childCapabilities(livePolicy));
-		expect(childCapabilities(launchPolicy)).toEqual(["read", "write", "bash", "wait"]);
+		expect(childCapabilities(launchPolicy)).toEqual(["read", "write", "bash"]);
 	});
 
 	it("persona-active parent with unrestricted baseline leaves child [read, bash] intact", async () => {
@@ -184,7 +184,7 @@ describe("subagent spawn inheritance parity", () => {
 
 		expect(resolved.restrictToolNames).toBe(false);
 		expect(resolved.parentEffectiveGrant).toBeNull();
-		expect(childCapabilities(policy, child)).toEqual(["read", "bash", "wait"]);
+		expect(childCapabilities(policy, child)).toEqual(["read", "bash"]);
 	});
 
 	it("CLI-restricted parent still cages the child even with a widening persona", async () => {
@@ -323,23 +323,19 @@ describe("subagent spawn inheritance parity", () => {
 		expect(resolved.parentEffectiveGrant).toBeNull();
 
 		// Unrestricted: child keeps its full frontmatter list, and an ordinary
-		// agent still gets the wait auto-append.
-		expect(childCapabilities(policy)).toEqual(["read", "write", "bash", "wait"]);
+		// agent keeps its frontmatter list unchanged (no wait auto-append).
+		expect(childCapabilities(policy)).toEqual(["read", "write", "bash"]);
 	});
 
-	it("wait auto-append is skipped for a baseline-restricted parent (wait not in baseline grant)", () => {
-		// CLI grant excludes wait; the widening persona cannot restore it for the
-		// child.
-		const policy = new SessionToolPolicy({
-			toolNames: ["read", "task"],
-			restrictToolNames: true,
-			registry: () => ALL_TOOLS,
-			isDefaultActive: () => true,
-		});
-		policy.enterPersona(makePersona(), {});
+	it("no wait auto-append for children: subagents never block on wait upstream", () => {
+		// Upstream contract (executor-pass-through pin): createTools drops wait
+		// at depth > 0, so deriving it onto a child would hand it a tool it
+		// can never run. deriveChildToolNames leaves the frontmatter list alone.
+		const policy = makePolicy();
+		expect(childCapabilities(policy)).toEqual(["read", "write", "bash"]);
 		const child = deriveChildToolNames(CHILD_AGENT, {
-			parentEffectiveGrant: policy.baselineEffectiveSet(),
-			restrictToolNames: policy.isBaselineRestricted(),
+			parentEffectiveGrant: null,
+			restrictToolNames: false,
 			atMaxDepth: false,
 		});
 		expect(child).not.toContain("wait");

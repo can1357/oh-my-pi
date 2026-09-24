@@ -3370,22 +3370,6 @@ export function deriveChildToolNames(agent: AgentDefinition, options: ChildToolN
 	if (options.atMaxDepth && toolNames?.includes("task")) {
 		toolNames = toolNames.filter(name => name !== "task");
 	}
-	// Subagents never block on `wait` upstream: owned job results re-wake their
-	// run through the executor's quiescence barrier, and parent messages steer
-	// them — so the auto-append below only applies to main-depth derivations.
-	// Restricted sessions must not widen their explicit host tool list: for a
-	// restricted parent, wait is either already in the grant or out by policy.
-	// Read-only agents (scout, `tools: []`) never gain wait: subagents cannot
-	// use it (the createTools gate drops it at depth > 0).
-	if (
-		toolNames &&
-		!options.restrictToolNames &&
-		!parentGrant &&
-		!toolNames.includes("wait") &&
-		(!isReadOnlyAgent(agent) || toolNames.includes("task"))
-	) {
-		toolNames = [...toolNames, "wait"];
-	}
 	return toolNames;
 }
 

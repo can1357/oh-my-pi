@@ -108,19 +108,9 @@ describe("SessionToolPolicy", () => {
 		expect(policy.effective("write")).toBe(true);
 	});
 
-	it("waitEnabled follows effective('wait') with no extra persona check", () => {
-		const policy = makePolicy();
-		expect(policy.waitEnabled()).toBe(true);
-		policy.enterPersona(makeAgent({ tools: ["read"] }), NO_EXPLICIT);
-		expect(policy.waitEnabled()).toBe(false);
-		policy.exitPersona();
-		expect(policy.waitEnabled()).toBe(true);
-	});
-
-	it("persona grant from registry (no tools frontmatter) keeps wait and strips task only for spawns:[]", () => {
+	it("persona grant from registry (no tools frontmatter) keeps task for spawns:undefined", () => {
 		const policy = makePolicy();
 		policy.enterPersona(makeAgent(), NO_EXPLICIT);
-		expect(policy.waitEnabled()).toBe(true);
 		expect(policy.effective("task")).toBe(true); // spawns undefined → no strip
 	});
 

@@ -3465,13 +3465,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				taskMaxConcurrency: settings.get("task.maxConcurrency"),
 				scoutAvailable: session ? session.isScoutSpawnable() : isScoutSpawnable(undefined, options.spawns ?? "*"),
 				delegationBias: sessionDelegationBias(toolSession),
-				// Wait/IRC affordance guidance follows the LIVE policy: a persona
-				// without `wait` (or a disabled toggle) suppresses it; persona exit
-				// restores it on the next rebuild. Policy-less sessions keep the
-				// creation-time derivation.
-				taskIrcEnabled:
-					(toolPolicy ? toolPolicy.waitEnabled() : !restrictToolNames) &&
-					isIrcEnabled(settings, options.taskDepth ?? 0),
+				taskIrcEnabled: !restrictToolNames && isIrcEnabled(settings, options.taskDepth ?? 0),
 				autoQaEnabled: !restrictToolNames && isAutoQaEnabled(settings),
 				writeTransportOnly:
 					toolSession.deviceOnlyWrite === true && toolSession.pendingFullWriteDescription !== true,

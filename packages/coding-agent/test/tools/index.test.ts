@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { type SettingPath, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { SessionToolPolicy } from "@oh-my-pi/pi-coding-agent/session/tool-policy";
-import { createTools, HIDDEN_TOOLS, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { createTools, HIDDEN_TOOLS, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 Bun.env.PI_PYTHON_SKIP_CHECK = "1";
 
@@ -452,38 +451,6 @@ describe("createTools", () => {
 		).map(t => t.name);
 		expect(names).toContain("checkpoint");
 		expect(names).toContain("rewind");
-	});
-
-	it("keeps wait in an ordinary unrestricted session with a live tool policy (fr-vQ)", async () => {
-		// The policy's registry view is EMPTY during this first createTools pass;
-		// consulting policy.waitEnabled() eagerly denied wait everywhere. The gate
-		// must fall back to the classic unrestricted derivation until the session
-		// registry holds `wait`.
-		const registry = new Map<string, Tool>();
-		const policy = new SessionToolPolicy({
-			registry: () => new Set(registry.keys()),
-			isDefaultActive: () => true,
-		});
-		const names = (await createTools(createTestSession({ toolRegistry: registry, getToolPolicy: () => policy }))).map(
-			t => t.name,
-		);
-		expect(names).toContain("wait");
-	});
-
-	it("drops wait when the persona grant omits it once the registry is primed (fr-vQ)", async () => {
-		const registry = new Map<string, Tool>();
-		// Primed registry simulates a later createTools rebuild (persona
-		// enter/exit): the policy layers now decide wait availability.
-		registry.set("wait", {} as Tool);
-		const policy = new SessionToolPolicy({
-			registry: () => new Set(registry.keys()),
-			isDefaultActive: () => true,
-		});
-		policy.enterPersona({ name: "x", description: "x", systemPrompt: "x", source: "bundled", tools: ["read"] }, {});
-		const tools = await createTools(createTestSession({ toolRegistry: registry, getToolPolicy: () => policy }));
-		const names = tools.map(t => t.name);
-		expect(names).not.toContain("wait");
-		expect(names).toContain("read");
 	});
 
 	it("HIDDEN_TOOLS contains yield, goal, and think", () => {
