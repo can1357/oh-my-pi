@@ -2685,6 +2685,36 @@ mod tests {
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
+	async fn ps_builtin_lists_one_line_per_thread_with_m() {
+		// Field report: `ps -M -p <pid>` failed with "unsupported option '-M'".
+		let pid = std::process::id().to_string();
+		let (result, output) = execute_captured(format!("ps -M -p {pid}")).await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		let mut lines = output.lines();
+		let header: Vec<&str> = lines
+			.next()
+			.unwrap_or_default()
+			.split_whitespace()
+			.collect();
+		assert_eq!(header, ["USER", "PID", "TT", "%CPU", "STAT", "PRI", "STIME", "UTIME", "COMMAND"]);
+		let threads: Vec<Vec<&str>> = lines
+			.map(|line| line.split_whitespace().collect())
+			.collect();
+		// The multi-threaded tokio runtime guarantees several threads.
+		assert!(threads.len() > 1, "{output:?}");
+		// USER, TT and COMMAND print only on the first thread line.
+		assert_eq!(threads[0].get(1), Some(&pid.as_str()), "{output:?}");
+		assert!(threads[0].len() >= 9, "{output:?}");
+		for fields in &threads[1..] {
+			assert_eq!(fields.len(), 6, "{output:?}");
+			assert_eq!(fields[0], pid);
+			assert!(fields[1].parse::<f64>().is_ok(), "%CPU: {:?}", fields[1]);
+			#[cfg(target_os = "macos")]
+			assert!(fields[5].contains(':'), "UTIME: {:?}", fields[5]);
+		}
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
 	async fn top_builtin_emits_one_finite_snapshot() {
 		#[cfg(target_os = "macos")]
 		let command = "top -l 1 -n 3";

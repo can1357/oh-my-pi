@@ -41,6 +41,7 @@ import MODEL_PRIO from "../priority.json" with { type: "json" };
 import { replaceFileAtomically } from "../utils/atomic-file";
 import { stringifyYamlConfig } from "@oh-my-pi/pi-utils/yaml-config";
 import {
+	type AnySetting,
 	all as allSettings,
 	bindEffects,
 	lookup as lookupSetting,
@@ -178,18 +179,6 @@ function getByPath(obj: RawSettings, segments: readonly string[]): unknown {
 	return current;
 }
 
-const pathSegmentsCache = new Map<string, readonly string[]>();
-
-/** Dotted id → path segments, memoized (ids are a small closed set). */
-function segmentsOf(id: string): readonly string[] {
-	let segments = pathSegmentsCache.get(id);
-	if (!segments) {
-		segments = id.split(".");
-		pathSegmentsCache.set(id, segments);
-	}
-	return segments;
-}
-
 /** @throws Error when `values` names an id no setting is registered under (typo guard for overrides). */
 function assertKnownSettingIds(values: Readonly<Record<string, unknown>>): void {
 	for (const id in values) {
@@ -197,18 +186,11 @@ function assertKnownSettingIds(values: Readonly<Record<string, unknown>>): void 
 	}
 }
 
-/** Effective value of `id` in `settings` through its registered handle. */
-function effectiveValue(settings: Settings, id: string): unknown {
-	const handle = lookupSetting(id);
-	if (!handle) throw new Error(`Unknown setting "${id}"`);
-	return handle.get(settings);
-}
-
 /**
  * Set a nested value in an object by path segments.
  * Creates intermediate objects as needed.
  */
-function setByPath(obj: RawSettings, segments: string[], value: unknown): void {
+function setByPath(obj: RawSettings, segments: readonly string[], value: unknown): void {
 	let current = obj;
 	for (let i = 0; i < segments.length - 1; i++) {
 		const segment = segments[i];
@@ -377,8 +359,23 @@ function modelRoleValueFromUnknown(value: unknown): string | undefined {
 	return entries.length === value.length ? entries.join(",") : undefined;
 }
 
-function resolvePathScopedStringArray(settingPath: string, value: unknown, cwd: string): string[] | undefined {
-	const scope = lookupSetting(settingPath)?.definition.pathScoped;
+/** Receives the setting whose effective value changed (see {@link Settings.onEffectiveChange}). */
+type SettingChangeListener = (setting: AnySetting) => void;
+
+/** Calls each listener with `setting`; a throwing listener is logged and never blocks the rest. */
+function runChangeListeners(listeners: ReadonlySet<SettingChangeListener>, setting: AnySetting): void {
+	// Snapshot: a listener may unsubscribe itself or others mid-dispatch.
+	for (const listener of Array.from(listeners)) {
+		try {
+			listener(setting);
+		} catch (error) {
+			logger.warn("Settings: effective-change listener failed", { path: setting.id, error: String(error) });
+		}
+	}
+}
+
+function resolvePathScopedStringArray(setting: AnySetting, value: unknown, cwd: string): string[] | undefined {
+	const scope = setting.definition.pathScoped;
 	if (!scope || !Array.isArray(value)) return undefined;
 
 	const resolved: string[] = [];
@@ -482,11 +479,14 @@ export class Settings {
 	/** Monotonic revision of merged layers and cwd-scoped resolution. */
 	#revision = 0;
 	/**
-	 * Registry-owned memo of handle and derivation values for this instance, validated against
-	 * {@link revision}; see `config/registry.ts`.
+	 * Registry-owned memo of handle and derivation values for this instance, indexed by
+	 * `Derived.slot` and validated against {@link revision}; see `config/registry.ts`.
 	 */
-	readonly valueCache = new Map<object, ValueCacheEntry>();
-	#effectiveChangeListeners = new Set<(path: string, value: unknown, previous: unknown) => void>();
+	readonly valueCache: (ValueCacheEntry | undefined)[] = [];
+	/** Change listeners bucketed by the `slot` of the setting they observe ({@link onEffectiveChange}). */
+	#changeListeners: (Set<SettingChangeListener> | undefined)[] = [];
+	/** Forwarders of every change into live {@link overlay} children. */
+	#childForwarders = new Set<SettingChangeListener>();
 	/** Instance this overlay reads through to ({@link overlay}); overlays never persist or write back. */
 	#parent: Settings | undefined;
 	/** Set while a batch of parent change notifications is being applied (one rebuild per batch). */
@@ -631,19 +631,20 @@ export class Settings {
 		// The parent holds only a weak reference, so a discarded child is collected without an
 		// explicit dispose; its listener unsubscribes on the next parent change.
 		const ref = new WeakRef(child);
-		const unsubscribe = this.onEffectiveChange((path, value, previous) => {
+		const forward: SettingChangeListener = setting => {
 			const target = ref.deref();
 			if (!target) {
-				unsubscribe();
+				this.#childForwarders.delete(forward);
 				return;
 			}
-			target.#applyParentChange(path, value, previous);
-		});
+			target.#applyParentChange(setting);
+		};
+		this.#childForwarders.add(forward);
 		return child;
 	}
 
 	/** Re-merges after a parent change and forwards it unless the child's own layers pin the value. */
-	#applyParentChange(path: string, value: unknown, previous: unknown): void {
+	#applyParentChange(setting: AnySetting): void {
 		if (!this.#parentSyncPending) {
 			// The parent rebuilt before notifying, so one re-merge covers the whole batch.
 			this.#parentSyncPending = true;
@@ -652,9 +653,9 @@ export class Settings {
 			});
 			this.#rebuildMerged();
 		}
-		const own = getByPath(this.#ownLayersMerged(), segmentsOf(path));
+		const own = getByPath(this.#ownLayersMerged(), setting.segments);
 		if (own !== undefined && (typeof own !== "object" || own === null || Array.isArray(own))) return;
-		this.#notifyEffectiveChange(path, own === undefined ? value : effectiveValue(this, path), previous);
+		this.#notifyChange(setting);
 	}
 
 	/**
@@ -687,70 +688,69 @@ export class Settings {
 	 * default, so returning it verbatim would hand callers a value the schema
 	 * says is impossible (#13183).
 	 */
-	rawValue(id: string): unknown {
-		const value = getByPath(this.#merged, segmentsOf(id));
+	rawValue(setting: AnySetting): unknown {
+		const value = getByPath(this.#merged, setting.segments);
 		if (value === undefined || value === null) return undefined;
-		return resolvePathScopedStringArray(id, value, this.#cwd) ?? value;
+		return resolvePathScopedStringArray(setting, value, this.#cwd) ?? value;
 	}
 
 	/**
-	 * Whether `path` has an explicitly configured value (global config, project
+	 * Whether `setting` has an explicitly configured value (global config, project
 	 * config, or runtime override) rather than falling back to the schema default.
 	 */
-	isConfigured(path: string): boolean {
-		return getByPath(this.#merged, segmentsOf(path)) !== undefined;
+	isConfigured(setting: AnySetting): boolean {
+		return getByPath(this.#merged, setting.segments) !== undefined;
 	}
 
 	/**
-	 * Layer supplying the effective value of `path`, in merge precedence order:
+	 * Layer supplying the effective value of `setting`, in merge precedence order:
 	 * runtime override → config overlay → project → global → schema default.
 	 */
-	getProvenance(path: string): SettingProvenance {
-		const segments = segmentsOf(path);
+	getProvenance(setting: AnySetting): SettingProvenance {
+		const segments = setting.segments;
 		if (getByPath(this.#overrides, segments) !== undefined) return "runtime";
 		if (getByPath(this.#configOverlay, segments) !== undefined) return "overlay";
 		if (getByPath(this.#projectSettingsForMerge(), segments) !== undefined) return "project";
 		if (getByPath(this.#global, segments) !== undefined) return "global";
-		if (this.#parent && this.#parent.isConfigured(path)) return this.#parent.getProvenance(path);
+		if (this.#parent && this.#parent.isConfigured(setting)) return this.#parent.getProvenance(setting);
 		return "default";
 	}
 
 	/**
-	 * Registry plumbing behind `Setting.set` / `Setting.override`: writes `value` for `id` to the
+	 * Registry plumbing behind `Setting.set` / `Setting.override`: writes `value` for `setting` to the
 	 * global layer (persisted in the background) or the runtime-override layer, then notifies change
 	 * listeners (process-wide effects apply synchronously). On an {@link overlay} both layers are
 	 * local to the overlay.
 	 *
 	 * @throws Error when the value fails its definition's `items` or `validate` check.
 	 */
-	writeValue(id: string, value: unknown, layer: "global" | "override"): void {
-		lookupSetting(id)?.assertWritable(value);
-		if (layer === "override" && id === "modelRoles") {
+	writeValue(setting: AnySetting, value: unknown, layer: "global" | "override"): void {
+		setting.assertWritable(value);
+		if (layer === "override" && setting === cfgModelRoles) {
 			this.#savedRuntimeModelRoleOverrides.clear();
 		}
-		const prev = effectiveValue(this, id);
-		const segments = segmentsOf(id);
+		const prev = setting.get(this);
+		const segments = setting.segments;
 		if (layer === "global") {
-			this.#captureGlobalMutation(id, this.#modifiedPathMutations, getByPath(this.#global, segments));
-			setByPath(this.#global, [...segments], value);
+			this.#captureGlobalMutation(setting.id, this.#modifiedPathMutations, getByPath(this.#global, segments));
+			setByPath(this.#global, segments, value);
 			this.#persistedMutationGeneration++;
-			this.#modified.add(id);
+			this.#modified.add(setting.id);
 		} else {
-			setByPath(this.#overrides, [...segments], value);
+			setByPath(this.#overrides, segments, value);
 		}
 		this.#rebuildMerged();
-		const next = effectiveValue(this, id);
 		if (layer === "global") this.#queueSave();
-		this.#fireEffectiveSettingChanged(id, next, prev);
+		this.#fireIfChanged(setting, prev);
 	}
 
-	/** Registry plumbing behind `Setting.clearOverride`: drops the runtime override of `id`. */
-	clearOverrideValue(path: string): void {
-		if (path === "modelRoles") {
+	/** Registry plumbing behind `Setting.clearOverride`: drops the runtime override of `setting`. */
+	clearOverrideValue(setting: AnySetting): void {
+		if (setting === cfgModelRoles) {
 			this.#savedRuntimeModelRoleOverrides.clear();
 		}
-		const prev = effectiveValue(this, path);
-		const segments = segmentsOf(path);
+		const prev = setting.get(this);
+		const segments = setting.segments;
 		let current = this.#overrides;
 		for (let i = 0; i < segments.length - 1; i++) {
 			const segment = segments[i];
@@ -759,51 +759,46 @@ export class Settings {
 		}
 		delete current[segments[segments.length - 1]];
 		this.#rebuildMerged();
-		const next = effectiveValue(this, path);
-		this.#fireEffectiveSettingChanged(path, next, prev);
+		this.#fireIfChanged(setting, prev);
 	}
 
-	/** Effective value of every setting, captured before a bulk layer refresh. */
-	#snapshot(): Map<string, unknown> {
-		return new Map(allSettings().map(handle => [handle.id, handle.get(this)]));
+	/** Effective value of every setting (in registration order), captured before a bulk layer refresh. */
+	#snapshot(): unknown[] {
+		return allSettings().map(setting => setting.get(this));
 	}
 
 	/**
 	 * Notifies change listeners for every setting whose effective value differs from
 	 * `previous` (disk reload, save-time merge, project re-scope).
 	 */
-	#fireChangesSince(previous: Map<string, unknown>): void {
-		for (const [path, prev] of previous) {
-			const next = effectiveValue(this, path);
-			if (Bun.deepEquals(next, prev)) continue;
-			this.#notifyEffectiveChange(path, next, prev);
+	#fireChangesSince(previous: readonly unknown[]): void {
+		const settings = allSettings();
+		for (let i = 0; i < previous.length; i++) {
+			const setting = settings[i];
+			if (!Bun.deepEquals(setting.get(this), previous[i])) this.#notifyChange(setting);
 		}
 	}
 
-	#fireEffectiveSettingChanged(path: string, value: unknown, prev: unknown): void {
-		if (Object.is(value, prev)) return;
-		this.#notifyEffectiveChange(path, value, prev);
+	#fireIfChanged(setting: AnySetting, prev: unknown): void {
+		if (!Object.is(setting.get(this), prev)) this.#notifyChange(setting);
 	}
 
-	/** Runs change listeners. */
-	#notifyEffectiveChange(path: string, value: unknown, prev: unknown): void {
-		for (const listener of Array.from(this.#effectiveChangeListeners)) {
-			try {
-				listener(path, value, prev);
-			} catch (error) {
-				logger.warn("Settings: effective-change listener failed", { path, error: String(error) });
-			}
-		}
+	/** Runs the listeners observing `setting`, then forwards the change to overlay children. */
+	#notifyChange(setting: AnySetting): void {
+		const listeners = this.#changeListeners[setting.slot];
+		if (listeners) runChangeListeners(listeners, setting);
+		if (this.#childForwarders.size > 0) runChangeListeners(this.#childForwarders, setting);
 	}
 
 	/**
-	 * Registry plumbing behind `Derived.listen` and `effect`: synchronous per-setting change
-	 * notifications for this instance. Consumers observe settings through handles instead.
+	 * Registry plumbing behind `Derived.listen` and `effect`: calls `listener` synchronously
+	 * whenever the effective value of one of `sources` changes in this instance. Returns the
+	 * unsubscribe. Consumers observe settings through handles instead.
 	 */
-	onEffectiveChange(listener: (path: string, value: unknown, previous: unknown) => void): () => void {
-		this.#effectiveChangeListeners.add(listener);
+	onEffectiveChange(sources: readonly AnySetting[], listener: SettingChangeListener): () => void {
+		for (const source of sources) (this.#changeListeners[source.slot] ??= new Set()).add(listener);
 		return () => {
-			this.#effectiveChangeListeners.delete(listener);
+			for (const source of sources) this.#changeListeners[source.slot]?.delete(listener);
 		};
 	}
 
@@ -1210,7 +1205,7 @@ export class Settings {
 		const prev = cfgModelRoles.get(this);
 		setByPath(this.#overrides, ["modelRoles"], next);
 		this.#rebuildMerged();
-		this.#fireEffectiveSettingChanged("modelRoles", cfgModelRoles.get(this), prev);
+		this.#fireIfChanged(cfgModelRoles, prev);
 	}
 
 	#updateRuntimeModelRoleOverride(role: ModelRole | string, modelId: string | undefined): void {
@@ -1296,7 +1291,7 @@ export class Settings {
 		this.#modifiedProjectModelRoles.add(role);
 		this.#persistedMutationGeneration++;
 		this.#rebuildMerged();
-		this.#fireEffectiveSettingChanged("modelRoles", cfgModelRoles.get(this), prev);
+		this.#fireIfChanged(cfgModelRoles, prev);
 		this.#queueProjectSave();
 	}
 
@@ -1332,7 +1327,7 @@ export class Settings {
 		this.#persistedMutationGeneration++;
 		this.#rebuildMerged();
 		this.#queueSave();
-		this.#fireEffectiveSettingChanged("modelRoles", cfgModelRoles.get(this), prev);
+		this.#fireIfChanged(cfgModelRoles, prev);
 		if (this.isProjectModelRoleRuntimeOverrideActive(role)) {
 			return;
 		}
@@ -3342,7 +3337,7 @@ export class Settings {
 
 	/** Checks every configured value against its definition (`validate` throws; unknown `items` warn). */
 	#validateAll(): void {
-		for (const handle of allSettings()) handle.checkConfigured(this.rawValue(handle.id));
+		for (const setting of allSettings()) setting.checkConfigured(this.rawValue(setting));
 	}
 
 	#deepMerge(base: RawSettings, overrides: RawSettings): RawSettings {
