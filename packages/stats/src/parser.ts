@@ -172,6 +172,22 @@ function finiteTokenCount(value: unknown): number {
 }
 
 /**
+ * Coerce the Anthropic cache-write TTL split (`Usage.cttl`) from a session
+ * payload. Older versions and foreign producers may omit it entirely or carry
+ * malformed components; keep only finite counts and drop the split when
+ * neither component is finite so the stats insert stores zeros, matching the
+ * `premiumRequests` handling.
+ */
+function coerceUsageCttl(cttl: unknown): Usage["cttl"] {
+	if (!cttl || typeof cttl !== "object") return undefined;
+	const raw = cttl as Partial<NonNullable<Usage["cttl"]>>;
+	const ephemeral5m = isFiniteCount(raw.ephemeral5m) ? raw.ephemeral5m : undefined;
+	const ephemeral1h = isFiniteCount(raw.ephemeral1h) ? raw.ephemeral1h : undefined;
+	if (ephemeral5m === undefined && ephemeral1h === undefined) return undefined;
+	return { ephemeral5m, ephemeral1h };
+}
+
+/**
  * Token-bucket view for total derivation. Persisted session payloads are
  * outside-controlled (old versions, foreign producers), so every counter is
  * `unknown` and validated at read time.
@@ -271,6 +287,10 @@ function extractStats(
 					cost: rawUsage.cost,
 					premiumRequests: derived,
 				};
+	// Normalize the cache-write TTL split onto the usage carried into the
+	// insert: the well-formed passthrough and the reconstructed fallback both
+	// flow through `MessageStatsInput.usage`, so one assignment covers both.
+	usage.cttl = coerceUsageCttl(rawUsage.cttl);
 
 	return {
 		sessionFile,

@@ -174,7 +174,7 @@ import { MAGIC_KEYWORDS, type MagicKeywordContext, type MagicKeywordId } from ".
 import { containsMagicKeyword } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import { parseTurnBudget } from "../modes/turn-budget";
-import { computeNonMessageTokens } from "@oh-my-pi/pi-tui/status-line/context-usage";
+import { computeNonMessageBreakdown, computeNonMessageTokens } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import { type PlanApprovalDetails, resolveApprovedPlan } from "../plan-mode/approved-plan";
 import { listPlanFiles, readPlanFile } from "../plan-mode/plan-files";
 import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
@@ -2926,11 +2926,27 @@ export class AgentSession {
 			if (this.#recovery.isClassifierRefusal(assistantMsg)) return;
 			if (isEmptyErrorTurn(assistantMsg)) return;
 			if (assistantMsg.stopReason !== "aborted" && assistantMsg.stopReason !== "error" && assistantMsg.usage) {
+				// When a pending snapshot is live, nonMessageTokens is the send-time
+				// collapsed estimate while the breakdown below reflects persist-time
+				// state; after a mid-flight prompt rebuild the two can skew for one
+				// snapshot. The next successful response re-anchors both.
+				// The skillful argument must match the prompt render (sdk.ts) so the
+				// breakdown sums to the collapsed total.
+				const nonMessageBreakdown = computeNonMessageBreakdown(
+					this,
+					this.agent.tokenizer,
+					this.settings.revision,
+					this.settings.get("skillful"),
+				);
 				assistantMsg.contextSnapshot = {
 					promptTokens: calculatePromptTokens(assistantMsg.usage),
 					nonMessageTokens:
 						this.#stats.pendingNonMessageTokens ??
 						computeNonMessageTokens(this, this.agent.tokenizer, this.settings.revision),
+					skillsTokens: nonMessageBreakdown.skillsTokens,
+					toolsTokens: nonMessageBreakdown.toolsTokens,
+					systemContextTokens: nonMessageBreakdown.systemContextTokens,
+					systemPromptTokens: nonMessageBreakdown.systemPromptTokens,
 					compactionEpoch: this.#stats.compactionEpoch,
 				};
 			}
@@ -8003,12 +8019,20 @@ export class AgentSession {
 		return this.#tools.skills;
 	}
 
-	/** Descriptions frozen when this session's system prompt was built. */
+	/**
+	 * Skills as they appear in the system prompt: same cap the render path
+	 * applies (skills.maxPromptEntries, overflow collapsed to the count line),
+	 * so token estimates (skillsTokens breakdown, /context panel) match what
+	 * the model actually sees instead of counting catalog entries the prompt
+	 * omitted.
+	 */
 	get renderedSkills(): readonly Skill[] {
 		const skills = this.skills;
 		if (skills !== this.#promptSkillsSource) {
 			this.#promptSkillsSource = skills;
-			this.#promptSkills = this.#skillDescriptions.snapshot(skills);
+			this.#promptSkills = this.#skillDescriptions.snapshot(
+				this.#skillDescriptions.applyPromptCap(skills, this.settings.get("skills.maxPromptEntries")),
+			);
 		}
 		return this.#promptSkills;
 	}

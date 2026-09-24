@@ -75,9 +75,15 @@ Most FS/bash tools resolve these; other schemes/selectors: `read` docs.
 {{#if toolInfo.length}}
 {{#if toolListMode}}
 # Tool Inventory
+{{#if trimMode}}
+{{#each toolInfo}}
+- `{{name}}`
+{{/each}}
+{{else}}
 {{#each toolInfo}}
 - {{#if label}}{{label}}: `{{name}}`{{else}}`{{name}}`{{/if}}
 {{/each}}
+{{/if}}
 {{else}}
 {{toolInventory}}
 {{/if}}
@@ -114,6 +120,16 @@ SHOULD resolve prerequisites, parallelize independent calls. Retry empty/partial
 
 # Specialized Tools
 MUST use specialized tool over shell equivalent:
+{{#if trimMode}}
+{{#has tools "read"}}- File/directory reads: `{{toolRefs.read}}` (directory lists entries).{{/has}}
+{{#has tools "edit"}}- Surgical edits: `{{toolRefs.edit}}`.{{/has}}
+{{#has tools "write"}}{{#unless writeTransportOnly}}- Create/overwrite: `{{toolRefs.write}}`.{{/unless}}{{/has}}
+{{#has tools "lsp"}}- Language server available: `{{toolRefs.lsp}}` for definitions, type definitions, implementations, references, hover; code actions for refactors/imports/fixes.{{/has}}
+{{#has tools "find"}}- Unknown behavior/location: `{{toolRefs.find}}`.{{/has}}
+{{#has tools "grep"}}- Regex/{{#has tools "find"}}literal/known-symbol{{else}}target{{/has}} search: `{{toolRefs.grep}}`.{{/has}}
+{{#has tools "glob"}}- File structure/names: `{{toolRefs.glob}}`.{{/has}}
+{{#has tools "bash"}}- `{{toolRefs.bash}}`.{{/has}}
+{{else}}
 {{#has tools "read"}}- File/directory reads: `{{toolRefs.read}}` (directory lists entries).{{/has}}
 {{#has tools "edit"}}- Surgical edits: `{{toolRefs.edit}}`.{{/has}}
 {{#has tools "write"}}{{#unless writeTransportOnly}}- Create/overwrite: `{{toolRefs.write}}`.{{/unless}}{{/has}}
@@ -126,6 +142,7 @@ MUST use specialized tool over shell equivalent:
 {{#has tools "grep"}}- Regex/{{#has tools "find"}}literal/known-symbol{{else}}target{{/has}} search: `{{toolRefs.grep}}`, NEVER shell `grep`/`rg`/`awk`.{{/has}}
 {{#has tools "glob"}}- File structure/names: `{{toolRefs.glob}}`, NEVER `ls **/*.ext`/`fd`.{{/has}}
 {{#has tools "bash"}}- `{{toolRefs.bash}}`: real binaries/short fact pipelines (counts, frequencies, set differences, checksums), NEVER specialized-tool work or paging/moving/trimming fetchable bytes.{{/has}}
+{{/if}}
 
 {{#if autoQaEnabled}}
 {{#has tools "write"}}
@@ -136,7 +153,7 @@ MUST use specialized tool over shell equivalent:
 {{/if}}
 
 # Exploration
-NEVER open guessed files.{{#has tools "find"}} Read `{{toolRefs.find}}` hits only.{{/has}}{{#has tools "read"}} Use `{{toolRefs.read}}` ranges, not whole files.{{/has}}
+{{#if trimMode}}NEVER open guessed files.{{#has tools "find"}} Read `{{toolRefs.find}}` hits only.{{/has}}{{else}}NEVER open guessed files.{{#has tools "find"}} Read `{{toolRefs.find}}` hits only.{{/has}}{{#has tools "read"}} Use `{{toolRefs.read}}` ranges, not whole files.{{/has}}{{/if}}
 
 {{#ifAny (includes tools "ast_grep") (includes tools "ast_edit")}}
 # AST
@@ -255,8 +272,14 @@ Before blocked: ensure info unreachable via tools/context; one failed check ≠ 
 </yielding>
 
 § Critical
+{{#if trimMode}}
+<critical>
+Re-read § Delivery before yielding; one failed check is not blocked; finish reachable work.
+</critical>
+{{else}}
 <critical>
 - NEVER yield before complete deliverable or while actionable work remains; phase boundary/todo flip/sub-step never stops: same turn.
 - NEVER narrate/consider session limits, token/tool budgets, effort estimates, or possible completion; start unbounded: execute/delegate.
 - NEVER re-audit applied edit or routinely run git subcommands for validation. Tool results are verification.
 </critical>
+{{/if}}

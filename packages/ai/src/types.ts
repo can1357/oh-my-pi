@@ -1057,6 +1057,17 @@ export interface ContextSnapshot {
 	 */
 	compactionEpoch?: number;
 	lastMessageTimestamp?: number;
+	/**
+	 * Non-message token breakdown matching the /context panel categories.
+	 * skillsTokens is split OUT of systemPromptTokens by design, so the four
+	 * fields sum to nonMessageTokens only when both sides are computed with the
+	 * same `skillful` value (see computeNonMessageBreakdown vs
+	 * computeNonMessageTokens in @oh-my-pi/pi-tui/status-line/context-usage).
+	 */
+	skillsTokens?: number;
+	toolsTokens?: number;
+	systemContextTokens?: number;
+	systemPromptTokens?: number;
 }
 
 export interface AssistantMessage {
