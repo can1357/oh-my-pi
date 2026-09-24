@@ -243,6 +243,7 @@ declare global {
 		remove(): void;
 	}
 	function getComputedStyle(element: Element): Record<string, unknown>;
+	function matchMedia(mediaQuery: string): { readonly matches: boolean };
 	var innerWidth: number;
 	var innerHeight: number;
 	var document: {
@@ -1190,6 +1191,11 @@ function flashActionHighlight(handle: ElementHandle): void {
 			if (rect.width < 1 || rect.height < 1) return;
 			const cx = rect.left + rect.width / 2;
 			const cy = rect.top + rect.height / 2;
+			// Match the omp tab-group chip color (Chrome's own "cyan") so the
+			// in-page affordances read as part of the group; per color-scheme,
+			// exactly like the chip Chrome draws.
+			const accent = globalThis.matchMedia("(prefers-color-scheme: dark)").matches ? "#78d9ec" : "#007b83";
+			const accentRgb = accent === "#78d9ec" ? "120,217,236" : "0,123,131";
 
 			const box = globalThis.document.createElement("div");
 			box.style.cssText = [
@@ -1198,9 +1204,9 @@ function flashActionHighlight(handle: ElementHandle): void {
 				`top:${rect.top}px`,
 				`width:${rect.width}px`,
 				`height:${rect.height}px`,
-				"border:2px solid #ff5722",
+				`border:2px solid ${accent}`,
 				"border-radius:3px",
-				"background:rgba(255,87,34,0.15)",
+				`background:rgba(${accentRgb},0.15)`,
 				"pointer-events:none",
 				"z-index:2147483647",
 				"transition:opacity 250ms ease-out",
@@ -1223,7 +1229,7 @@ function flashActionHighlight(handle: ElementHandle): void {
 					"width:20px",
 					"height:20px",
 					"margin:-2px 0 0 -2px",
-					"background:#ff5722",
+					`background:${accent}`,
 					"clip-path:polygon(0% 0%, 0% 70%, 27% 55%, 42% 92%, 58% 85%, 43% 50%, 75% 48%)",
 					"filter:drop-shadow(0 1px 2px rgba(0,0,0,0.6))",
 					"pointer-events:none",
@@ -1255,7 +1261,7 @@ function flashActionHighlight(handle: ElementHandle): void {
 				"height:10px",
 				"margin:-5px 0 0 -5px",
 				"border-radius:50%",
-				"border:2px solid #ff5722",
+				`border:2px solid ${accent}`,
 				"pointer-events:none",
 				"z-index:2147483646",
 				"transform:scale(1)",
@@ -1312,12 +1318,15 @@ async function setBusyFrame(page: Page, busy: boolean): Promise<void> {
 			root.querySelector("#omp-cursor")?.remove();
 			return;
 		}
+		// Same per-scheme "cyan" as the omp tab-group chip (see flashActionHighlight).
+		const accent = globalThis.matchMedia("(prefers-color-scheme: dark)").matches ? "#78d9ec" : "#007b83";
+		const accentRgb = accent === "#78d9ec" ? "120,217,236" : "0,123,131";
 		if (!root.querySelector("style#omp-busy-style")) {
 			const style = globalThis.document.createElement("style");
 			style.id = "omp-busy-style";
 			style.textContent = [
 				"@keyframes omp-busy-pulse{0%,100%{opacity:.2}50%{opacity:.95}}",
-				"[data-omp-busy-edge]{background:#ff5722;box-shadow:0 0 6px rgba(255,87,34,.5);animation:omp-busy-pulse 1.6s ease-in-out infinite}",
+				`[data-omp-busy-edge]{background:${accent};box-shadow:0 0 6px rgba(${accentRgb},.5);animation:omp-busy-pulse 1.6s ease-in-out infinite}`,
 				"@media (prefers-reduced-motion:reduce){[data-omp-busy-edge]{animation:none;opacity:.7}}",
 			].join("");
 			root.appendChild(style);

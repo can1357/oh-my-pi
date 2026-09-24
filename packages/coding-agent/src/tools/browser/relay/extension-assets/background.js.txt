@@ -83,16 +83,20 @@ async function groupTabs(tabIds, title, color) {
   }
   return { grouped };
 }
+function ompGroupTitles(title) {
+  return { [title]: true, [`⏳${title}`]: true, [`✅${title}`]: true, [`${title} ⏳`]: true };
+}
 async function restoreGroups() {
   if (!ompGroupTitle) {
     const stored = await chrome.storage.session.get({ ompGroupTitle: "" }).catch(() => ({ ompGroupTitle: "" }));
     ompGroupTitle = typeof stored.ompGroupTitle === "string" && stored.ompGroupTitle ? stored.ompGroupTitle : null;
   }
-  busyTabsByGroup.clear();
   if (!ompGroupTitle)
     return;
   const allGroups = await chrome.tabGroups.query({}).catch(() => []);
-  const groups = allGroups.filter((group) => group.title === ompGroupTitle || group.title === `${ompGroupTitle} ⏳`);
+  const title = ompGroupTitle;
+  const wanted = ompGroupTitles(title);
+  const groups = allGroups.filter((group) => group.title !== undefined && wanted[group.title]);
   for (const group of groups) {
     const tabs = await chrome.tabs.query({ groupId: group.id }).catch(() => []);
     const ids = tabs.map((tab) => tab.id).filter((id) => id !== undefined);
@@ -128,7 +132,7 @@ async function updateGroupBusyTitle(groupId, busy) {
   if (!ompGroupTitle)
     return;
   try {
-    await chrome.tabGroups.update(groupId, { title: busy ? `${ompGroupTitle} ⏳` : ompGroupTitle });
+    await chrome.tabGroups.update(groupId, { title: busy ? `⏳${ompGroupTitle}` : `✅${ompGroupTitle}` });
   } catch {}
 }
 function post(msg) {
