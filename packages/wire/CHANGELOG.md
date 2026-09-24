@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the tail-first snapshot grammar: `hello.snapshot`, `welcome.history`, the `fetch-history`/`history` and `fetch-value`/`value` frames, and `collabElided` placeholder records on entries ([#9469](https://github.com/can1357/oh-my-pi/issues/9469), [#9328](https://github.com/can1357/oh-my-pi/issues/9328), [#11859](https://github.com/can1357/oh-my-pi/issues/11859)).
+
 ## [18.2.11] - 2026-09-23
 
 ### Added

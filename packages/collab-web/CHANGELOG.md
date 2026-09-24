@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added tail-first joining: the web guest loads the latest turns first, earlier messages as you scroll up, and trimmed images, tool output and entries in full when you tap them ([#9469](https://github.com/can1357/oh-my-pi/issues/9469), [#9328](https://github.com/can1357/oh-my-pi/issues/9328), [#11859](https://github.com/can1357/oh-my-pi/issues/11859)).
+
 ### Fixed
 
 - Improved the web client’s performance by ensuring production builds use the optimized React runtime.
