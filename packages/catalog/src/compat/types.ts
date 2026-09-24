@@ -556,6 +556,8 @@ export interface CompiledAuthProvider {
 	orgScopedIdentity?: boolean;
 	/** Environment variables carrying this provider's own OAuth bearer, excluding borrowed API-key aliases. */
 	oauthTokenEnv?: string[];
+	/** Default web search tries one other available candidate before this provider's anonymous transport. */
+	deferAnonymousSearch?: boolean;
 	/** APIs whose provider transport resolves credentials without a stored account. */
 	nativeAuthApis?: string[];
 	available?: boolean;

@@ -13,6 +13,7 @@ import type { AuthCredentialStore } from "../auth/store";
 import {
 	type AuthCredential,
 	type AuthCredentialSnapshotEntry,
+	type ConditionalAuthCredentialInsertResult,
 	type DisabledCredentialSummary,
 	type OAuthCredential,
 	REMOTE_REFRESH_SENTINEL,
@@ -841,6 +842,23 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		this.#applyProviderEntries(provider, entries);
 		this.#maybeRefreshSnapshot("upload");
 		return this.listAuthCredentials(provider);
+	}
+
+	async insertAuthCredentialIfProviderAbsent(
+		provider: string,
+		credential: AuthCredential,
+		signal?: AbortSignal,
+	): Promise<ConditionalAuthCredentialInsertResult> {
+		this.#noteActivity();
+		const { entries, inserted } = await this.#client.uploadCredential(provider, credential, signal, {
+			ifProviderAbsent: true,
+		});
+		if (inserted === undefined) {
+			throw new AIError.AuthBrokerError("Auth broker did not return a conditional credential-write result");
+		}
+		this.#applyProviderEntries(provider, entries);
+		this.#maybeRefreshSnapshot("conditional upload");
+		return { inserted, credentials: this.listAuthCredentials(provider) };
 	}
 
 	/**

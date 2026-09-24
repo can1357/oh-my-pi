@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added AnySearch search result rendering and credential setup guidance ([#9726](https://github.com/can1357/oh-my-pi/pull/9726) by [@anysearch-ai](https://github.com/anysearch-ai)).
+
 ## [18.3.0] - 2026-09-24
 
 ### Added

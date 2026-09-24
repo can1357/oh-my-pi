@@ -12,7 +12,13 @@ import { formatQuery, GOOGLE_QUERY_SYNTAX, parseSearchQuery } from "../query";
 import { clampNumResults, dateToAgeSeconds } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
-import { classifyProviderHttpError, readLimitedText, withHardTimeout } from "./utils";
+import {
+	classifyProviderHttpError,
+	normalizeSearchText,
+	normalizeSearchUrl,
+	readLimitedText,
+	withHardTimeout,
+} from "./utils";
 
 const BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search";
 const DEFAULT_NUM_RESULTS = 10;
@@ -71,24 +77,7 @@ interface BraveSearchResponse {
 }
 
 function normalizeText(value: unknown, maxLength: number): string | undefined {
-	if (typeof value !== "string") return undefined;
-	const text = value
-		.replace(/<[^>]*>/g, " ")
-		.replace(/\s+/g, " ")
-		.trim();
-	if (!text) return undefined;
-	return text.length <= maxLength ? text : `${text.slice(0, maxLength - 1)}…`;
-}
-
-function normalizeUrl(value: unknown): string | undefined {
-	if (typeof value !== "string" || value.length > 2048) return undefined;
-	try {
-		const url = new URL(value);
-		if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
-		return url.toString();
-	} catch {
-		return undefined;
-	}
+	return normalizeSearchText(typeof value === "string" ? value.replace(/<[^>]*>/g, " ") : value, maxLength);
 }
 
 function webResults(response: BraveSearchResponse): readonly unknown[] {
@@ -179,7 +168,7 @@ export async function searchBrave(params: BraveSearchParams): Promise<SearchResp
 
 	for (const result of webResults(response)) {
 		if (typeof result !== "object" || result === null) continue;
-		const url = normalizeUrl("url" in result ? result.url : undefined);
+		const url = normalizeSearchUrl("url" in result ? result.url : undefined);
 		if (!url) continue;
 		const publishedDate = normalizeText("age" in result ? result.age : undefined, 100);
 		sources.push({

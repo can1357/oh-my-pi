@@ -1,4 +1,5 @@
 import { logger } from "@oh-my-pi/pi-utils";
+import * as AIError from "../error";
 import { resolveCredentialIdentityKey, serializeCredential } from "./sqlite-credential-store";
 import type { BlockStoreHealth } from "./blocks";
 import type { AccountPolicies } from "./policy";
@@ -542,6 +543,25 @@ export class CredentialPool implements CredentialsApi {
 			})),
 		);
 		this.reset(provider);
+	}
+
+	/**
+	 * Generated keys omit `source: "login"` so later explicit environment keys
+	 * retain priority. The store owns the atomic check, including broker writes.
+	 */
+	async addGeneratedApiKeyIfAbsent(provider: string, apiKey: string, signal?: AbortSignal): Promise<boolean> {
+		signal?.throwIfAborted();
+		if (!this.#store.insertAuthCredentialIfProviderAbsent) {
+			throw new AIError.ConfigurationError("Credential store does not support conditional generated-key writes");
+		}
+		const credential: ApiKeyCredential = { type: "api_key", key: apiKey };
+		const result = await this.#store.insertAuthCredentialIfProviderAbsent(provider, credential, signal);
+		this.replace(
+			provider,
+			result.credentials.map(record => ({ id: record.id, credential: record.credential })),
+		);
+		this.reset(provider);
+		return result.inserted;
 	}
 
 	/**

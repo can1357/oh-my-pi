@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
+import * as aiStream from "@oh-my-pi/pi-ai/stream";
+import * as modelCache from "@oh-my-pi/pi-catalog/model-cache";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { __resetDirsFromEnvForTests, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { runSearchCommand } from "../../../src/cli/web-search-cli";
@@ -45,6 +47,8 @@ function makeFetchMock(): typeof fetch {
 }
 
 beforeEach(async () => {
+	// Keep CLI tests independent of persistent model discovery and its shared DB handle.
+	vi.spyOn(modelCache, "readModelCache").mockReturnValue(null);
 	originalExitCode = process.exitCode;
 	process.exitCode = undefined;
 	resetSettingsForTest();
@@ -70,6 +74,28 @@ afterEach(async () => {
 });
 
 describe("runSearchCommand model role settings", () => {
+	it("selects and renders AnySearch through --model web/anysearch", async () => {
+		vi.spyOn(aiStream, "getEnvApiKey").mockReturnValue(undefined);
+		vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			Response.json({
+				code: 0,
+				data: {
+					results: [{ title: "Search result", url: "https://anysearch.example/result", snippet: "Result text" }],
+				},
+			}),
+		);
+		let stdout = "";
+		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+			stdout += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
+			return true;
+		});
+		await runSearchCommand({ query: "role search", model: "web/anysearch", limit: 1, expanded: false });
+		const plain = stripVTControlCharacters(stdout);
+		expect(plain).toContain("AnySearch");
+		expect(plain).toContain("anysearch.example/result");
+		expect(plain).not.toContain("startpage.example");
+	});
+
 	it("honors modelRoles.web for the implicit request", async () => {
 		vi.spyOn(globalThis, "fetch").mockImplementation(makeFetchMock());
 		let stdout = "";

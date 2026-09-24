@@ -21,6 +21,7 @@ import {
 import type { AuthCredentialStore, CredentialRefreshLeaseFence } from "./store";
 import type {
 	AuthCredential,
+	ConditionalAuthCredentialInsertResult,
 	DisabledCredentialSummary,
 	OAuthCredential,
 	StoredAuthCredential,
@@ -1359,6 +1360,42 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 
 		const result = upsert(provider, credential);
 		this.#purgeSupersededDisabledRows(provider, result);
+		return result;
+	}
+
+	async insertAuthCredentialIfProviderAbsent(
+		provider: string,
+		credential: AuthCredential,
+	): Promise<ConditionalAuthCredentialInsertResult> {
+		const insert = this.#db.transaction(
+			(providerName: string, item: AuthCredential): ConditionalAuthCredentialInsertResult => {
+				const existingRows = this.#listActiveByProviderStmt.all(providerName) as AuthRow[];
+				if (existingRows.length > 0) {
+					const credentials = existingRows.flatMap(row => {
+						const activeCredential = deserializeCredential(row);
+						return activeCredential ? [toStoredAuthCredential(row, activeCredential)] : [];
+					});
+					return { inserted: false, credentials };
+				}
+
+				const serialized = serializeCredential(providerName, item);
+				if (!serialized) return { inserted: false, credentials: [] };
+				const row = this.#insertStmt.get(
+					providerName,
+					serialized.credentialType,
+					serialized.data,
+					serialized.identityKey,
+				) as { id?: number } | undefined;
+				if (!row?.id) return { inserted: false, credentials: [] };
+				return {
+					inserted: true,
+					credentials: [{ id: row.id, provider: providerName, credential: item, disabledCause: null }],
+				};
+			},
+		);
+
+		const result = insert.immediate(provider, credential);
+		this.#purgeSupersededDisabledRows(provider, result.credentials);
 		return result;
 	}
 

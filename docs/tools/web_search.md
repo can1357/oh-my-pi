@@ -2,6 +2,24 @@
 
 > Run one web query through the first available search provider and return LLM-formatted answer, source URLs, and optional citations.
 
+## AnySearch through the web role
+
+Select AnySearch with `modelRoles.web: web/anysearch`. Configure alternatives under `retry.fallbackChains.web`, or override the role for one CLI request with `omp web-search --model web/anysearch "query"`.
+
+```yaml
+modelRoles:
+  web: web/anysearch
+retry:
+  fallbackChains:
+    web:
+      - web/parallel
+      - web/public
+```
+
+Credentials come from `/login anysearch` or `ANYSEARCH_API_KEY`. When explicitly selected as the primary model without a key, AnySearch can use anonymous quota and provision a generated API key after that quota is exhausted. Registration polling, persistence, and activation retries share the provider timeout. Generated credentials are saved without overwriting credentials added concurrently, and registration secrets are never returned in tool output.
+
+With no custom web role or fallback chain, AnySearch runs first with a key. Without a key, OMP first attempts the first available alternative in its original order, then anonymous AnySearch if that attempt fails, and finally the remaining alternatives. Unavailable engines do not count as attempts. If no alternative is available, anonymous AnySearch runs directly. Explicit primary and fallback configuration is not reordered. Each successful search ends the chain; the order is evaluated again for the next request. When anonymous quota is exhausted, the search falls back to the next available candidate. An AnySearch entry in a configured fallback chain may use anonymous quota, but never polls registration, saves generated credentials, or retries with a generated key. Legacy AnySearch order and exclusion settings migrate to the web role configuration.
+
 ## Source
 - Entry: `packages/coding-agent/src/web/search/index.ts`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/web-search.md`
@@ -84,17 +102,10 @@ Each provider search transport receives a hard timeout from `providers.webSearch
 
 ## Flow
 1. `WebSearchTool.execute()` in `packages/coding-agent/src/web/search/index.ts` delegates directly to `executeSearch()`.
-2. `executeSearch()` parses `query` once with `parseSearchQuery()`, then computes ordered provider candidates without eagerly loading their modules:
-   - if internal `params.provider` is set and not `"auto"`, that provider is the only candidate and is treated as explicit;
-   - otherwise it uses the configured candidate order. Entries explicitly listed in `providers.webSearchOrder` use `isExplicitlyAvailable()`; ordinary fallback entries use `isAvailable()`.
-3. `resolveProviderCandidates()` prioritizes valid first-occurrence IDs from `providers.webSearchOrder`, then appends unlisted providers in `SEARCH_PROVIDER_ORDER`. An empty list preserves built-in order. `providers.webSearchExclude` removes providers from the automatic/configured chain and from Public Web fan-out. Internal per-request forced providers bypass that configured chain.
-4. If no candidate is available (for example, settings exclude every credential-free engine and no keyed/OAuth provider is configured), `executeSearch()` returns `Error: No web search provider configured.` with `details.response.provider = "none"`.
-5. For each provider in order, `executeSearch()` calls `provider.search()` with:
-   - `query`,
-   - `limit`, `recency`, `temperature`, `maxOutputTokens`, `numSearchResults`,
-   - `timeoutMs`, derived from `providers.webSearchTimeoutSeconds`,
-   - `systemPrompt` from `packages/coding-agent/src/prompts/system/web-search.md`,
-   - the parsed structured query, including recognized directives and date/domain/title/URL/filetype constraints.
+2. `executeSearch()` parses `query` with `parseSearchQuery()` and builds a web-role candidate pool from the model registry. Pure search engines have kind `search`; eligible chat models declare a grounding backend.
+3. `params.model` is a one-shot model selector. Otherwise `resolveRoleChain("web", ...)` resolves `modelRoles.web` and `retry.fallbackChains.web`, with defaults from `src/priority.json`. Explicitly configured candidates use `isExplicitlyAvailable()`; automatic candidates use `isAvailable()`.
+4. If no candidate is available, the tool returns `Error: No web search model configured.` with provider `none`. An unmatched one-shot selector instead reports that no web search model matches the selector.
+5. Each attempt resolves its engine or grounding backend and passes the query, parsed constraints, selected `model`, `modelRegistry`, shared `authStorage`, search options, prompt, signal, and timeout to the adapter. AnySearch's credential-provisioning path is used only for an explicit primary selection; configured fallbacks use ordinary search.
 6. After a provider responds, `applyQueryConstraints()` leniently post-filters its sources for constraints not guaranteed upstream. It applies each filterable dimension in turn; any dimension that would eliminate every remaining result is relaxed and a leading `Note: no results matched ...` is emitted. Answer/citation text is not rewritten.
 7. A `SearchResponse` with no renderable content (`hasRenderableSearchContent()` returns false) is rejected as a `SearchProviderError` (status `204`) so the loop advances to the next provider. On the first renderable response, `formatForLLM()` renders notes, answer, sources, citations, related questions, and search queries into one text block.
 8. If a provider throws, `executeSearch()` records the error and tries the next provider. There is no provider-level parallel fan-out; fallback is sequential.
@@ -105,11 +116,11 @@ Each provider search transport receives a hard timeout from `providers.webSearch
 10. If more than one provider failed, the final message is `All web search providers failed: <provider/error>; ...`; otherwise it is just the normalized last error.
 
 ## Modes / Variants
-- **Provider selection**
-  - **Forced provider**: internal callers may pass `provider`; a non-`auto` value is the only attempted provider and uses `isExplicitlyAvailable()`, while `auto` (or omitting it) walks the configured chain. This field is not in the model-facing schema.
-  - **Configured order**: `setSearchProviderOrder()` prioritizes valid, first-occurrence provider IDs in `providers.webSearchOrder`; omitted providers follow in built-in relative order. Listed providers are explicit selections and resolve through `isExplicitlyAvailable()`, so Perplexity, Exa, and Firecrawl can use their unauthenticated/keyless paths.
-  - **Excluded providers**: `setExcludedSearchProviders()` removes providers from the automatic/configured chain and Public Web fan-out. Wired from `providers.webSearchExclude` through `packages/coding-agent/src/config/provider-globals.ts`.
-  - **Default auto chain order** (24 providers): `parallel`, `perplexity`, `gemini`, `anthropic`, `codex`, `xai`, `zai`, `exa`, `tinyfish`, `jina`, `kagi`, `tavily`, `firecrawl`, `brave`, `kimi`, `synthetic`, `ollama`, `searxng`, `startpage`, `duckduckgo`, `ecosia`, `google`, `mojeek`, `public` (`SEARCH_PROVIDER_ORDER` in `packages/coding-agent/src/web/search/types.ts`). Parallel uses authenticated search when configured and its credential-free MCP otherwise. `public` is explicit-only: its `isAvailable()` returns `false`, so the auto chain never fans out implicitly.
+- **Model selection**
+  - **One-shot override**: CLI `--model web/anysearch` or internal `params.model` selects a single model. The model-facing tool schema has no per-call model selector.
+  - **Configured chain**: `modelRoles.web` selects the primary; `retry.fallbackChains.web` lists alternatives. An explicit empty fallback array disables fallback. Omitted chains use the role defaults.
+  - **Default chain**: priorities come from `packages/coding-agent/src/priority.json`. AnySearch runs first with credentials; otherwise it is deferred until after one other available engine has been attempted, or runs directly if no other engine is available. Failures continue through the remaining candidates without repeating an attempt. Automatic candidates never poll registration or persist generated credentials. This is a client-side policy; it does not control whether the server starts registration when anonymous quota is exhausted.
+  - **Legacy settings**: order and exclusion settings are migrated into the web role and fallback chain on load. Use model selectors for new configuration.
 - **Provider timeout**: `providers.webSearchTimeoutSeconds` supplies the hard ceiling for each provider's search transport before the automatic chain advances. It defaults to `60`; invalid non-positive values fall back to that default and values above `300` are capped, while provider-specific upstream or aggregate limits may still be shorter.
 - **Provider adapters**
   - **Perplexity** — `packages/coding-agent/src/web/search/providers/perplexity.ts`
@@ -160,7 +171,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
     - `limit` and `num_search_results` are collapsed together before dispatch.
     - Output may include parsed free-text `answer`, `sources`, `requestId`.
   - **Exa** — `packages/coding-agent/src/web/search/providers/exa.ts`
-    - Availability: `EXA_API_KEY` or a stored credential for `exa` (including one added through `/login exa`) admits Exa to the auto chain; settings must not explicitly disable `exa.enabled` or `exa.enableSearch`. Explicit selection (listing `exa` in `providers.webSearchOrder`, or a forced `provider: exa`) reaches Exa even without a credential and falls back to public MCP.
+    - Availability: `EXA_API_KEY` or a stored credential for `exa` (including one added through `/login exa`) admits Exa to the auto chain; settings must not explicitly disable `exa.enabled` or `exa.enableSearch`. Explicit selection (selecting `web/exa` in the web role chain or with `--model`) reaches Exa even without a credential and falls back to public MCP.
     - Querying: POST `https://api.exa.ai/search` with the resolved Exa API key, otherwise JSON-RPC `tools/call` against `https://mcp.exa.ai/mcp` for remote MCP tool `web_search_exa`.
     - `limit` and `num_search_results` are collapsed together before dispatch.
     - Output: synthesized `answer` from up to 3 result summaries, `sources`, `requestId`.
