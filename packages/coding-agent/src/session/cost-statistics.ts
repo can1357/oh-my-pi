@@ -20,7 +20,7 @@ export interface CostStatistics {
 /** Charge only direct model calls, never a task result's recursive usage summary. */
 export function entryOwnCost(entry: FileEntry): number {
 	if (entry.type === "model_usage") return entry.usage.cost.total;
-	return entry.type === "message" && entry.message.role === "assistant" ? entry.message.usage.cost.total : 0;
+	return entry.type === "message" && entry.message.role === "assistant" ? (entry.message.usage?.cost.total ?? 0) : 0;
 }
 
 export function ownCost(entries: readonly FileEntry[]): number {
