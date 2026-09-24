@@ -18,6 +18,7 @@ import type { BashToolDetails } from "@oh-my-pi/pi-tui/tools/bash";
 import type { GlobToolDetails } from "@oh-my-pi/pi-tui/tools/glob";
 import type { GrepToolDetails } from "@oh-my-pi/pi-tui/tools/grep";
 import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
+import type { ExtensionStatusOptions } from "../extensions/types";
 import type {
 	AgentEndEvent,
 	AgentStartEvent,
@@ -95,10 +96,14 @@ export interface HookUIContext {
 	 * ANSI/VT escape sequences and most control characters are stripped; tabs and newlines become spaces.
 	 * Repeated spaces are collapsed and surrounding whitespace is trimmed.
 	 * The combined status line is truncated to terminal width.
+	 *
+	 * Because escapes are stripped, colour is requested through `options.color`
+	 * as a theme token rather than embedded ANSI.
 	 * @param key - Unique key to identify this status (e.g., hook name)
 	 * @param text - Status text to display, or undefined to clear
+	 * @param options - Optional presentation options, e.g. `{ color: "warning" }`
 	 */
-	setStatus(key: string, text: string | undefined): void;
+	setStatus(key: string, text: string | undefined, options?: ExtensionStatusOptions): void;
 
 	/**
 	 * Show a custom component with keyboard focus.

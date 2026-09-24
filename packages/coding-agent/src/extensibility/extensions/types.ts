@@ -79,7 +79,7 @@ import type * as PiCodingAgent from "../../index";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
 import type { MemoryRuntimeContext } from "../../memory-backend";
 import type { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
-import type { Theme } from "@oh-my-pi/pi-tui/theme";
+import type { Theme, ThemeColor } from "@oh-my-pi/pi-tui/theme";
 import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/agent-session";
 import type { EphemeralTurnOptions, EphemeralTurnResult } from "../../session/agent-session-types";
 import type { CompactMode } from "../../session/compact-modes";
@@ -208,6 +208,16 @@ export interface ExtensionWidgetOptions {
 	placement?: WidgetPlacement;
 }
 
+/** Options for `ExtensionUIContext.setStatus()`. */
+export interface ExtensionStatusOptions {
+	/**
+	 * Theme token used to colour this status entry, e.g. `"warning"` or
+	 * `"error"`. A token the theme does not define is dropped, leaving each
+	 * surface with its pre-existing styling — see {@link ExtensionUIContext.setStatus}.
+	 */
+	color?: ThemeColor;
+}
+
 /** Options for `ExtensionUIContext.custom()` (overlay rendering of a custom component). */
 export interface ExtensionCustomOptions {
 	/** Render the component as an overlay over the transcript instead of replacing the editor area. */
@@ -260,8 +270,19 @@ export interface ExtensionUIContext {
 	/** Listen to raw terminal input (interactive mode only). Returns an unsubscribe function. */
 	onTerminalInput(handler: TerminalInputHandler): () => void;
 
-	/** Set status text in the footer/status bar. Pass undefined to clear. */
-	setStatus(key: string, text: string | undefined): void;
+	/**
+	 * Set status text in the footer/status bar. Pass undefined to clear.
+	 *
+	 * Status text is sanitized, so embedded ANSI never reaches the terminal.
+	 * Request colour with `options.color` instead: it names a theme token, so the
+	 * status stays legible when the user switches themes.
+	 *
+	 * A token the active theme does not define is dropped, and each surface then
+	 * renders as it did before this option existed: the `status` segment of the
+	 * status line accents the entry, while the standalone hook-status row below
+	 * the editor leaves it unstyled.
+	 */
+	setStatus(key: string, text: string | undefined, options?: ExtensionStatusOptions): void;
 
 	/** Set the working/loading message shown during streaming. Call with no argument to restore default. */
 	setWorkingMessage(message?: string): void;
