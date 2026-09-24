@@ -3085,13 +3085,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			settings,
 			localProtocolOptions,
 			() => (hasSession ? session.getAsyncJobSnapshot() : null),
-			() =>
-				mcpManager?.waitForInitialConnections() ??
-				Promise.resolve<McpConnectionStatusSnapshot>({
-					pendingServers: [],
-					connectedServers: [],
-					failedServers: [],
-				}),
+			waitOptions =>
+				mcpManager?.waitForInitialConnections(waitOptions) ??
+				Promise.reject(new Error("Initial MCP readiness is unsupported without an MCP manager")),
 		);
 
 		credentialDisabledTarget = extensionRunner;

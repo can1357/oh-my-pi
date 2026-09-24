@@ -436,8 +436,13 @@ export interface ExtensionContext {
 	getContextUsage(): ContextUsage | undefined;
 	/** Get a read-only snapshot of async jobs owned by this session. */
 	getAsyncJobSnapshot(): AsyncJobSnapshot | null;
-	/** Await the first configured MCP servers' initial `tools/list` attempts only. */
-	waitForInitialMCPConnections(): Promise<McpConnectionStatusSnapshot>;
+	/**
+	 * Await only the first discovery's configured MCP `tools/list` attempts. The
+	 * snapshot is initial-only; later retries do not change it, and a hung
+	 * discovery may wait indefinitely. Abort cancels only this caller's wait;
+	 * manager disposal rejects all pending waiters.
+	 */
+	waitForInitialMCPConnections(options?: { signal?: AbortSignal }): Promise<McpConnectionStatusSnapshot>;
 	/** Compact the session context (interactive mode shows UI). */
 	compact(instructionsOrOptions?: string | CompactOptions): Promise<void>;
 	/** Whether UI is available (false in print/RPC mode) */

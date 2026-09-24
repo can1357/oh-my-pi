@@ -121,6 +121,7 @@ describe("ExtensionRunner", () => {
 			connectedServers: readonly string[];
 			failedServers: readonly { serverName: string; error: string }[];
 		}>();
+		let forwarded: { signal?: AbortSignal } | undefined;
 		const runner = new ExtensionRunner(
 			result.extensions,
 			result.runtime,
@@ -131,7 +132,10 @@ describe("ExtensionRunner", () => {
 			undefined,
 			undefined,
 			undefined,
-			() => readiness.promise,
+			options => {
+				forwarded = options;
+				return readiness.promise;
+			},
 		);
 
 		const ctx = runner.createContext();
@@ -142,8 +146,22 @@ describe("ExtensionRunner", () => {
 			connectedServers: ["mcp"],
 			failedServers: [],
 		});
+		const controller = new AbortController();
+		expect(ctx.waitForInitialMCPConnections({ signal: controller.signal })).toBe(readiness.promise);
+		expect(forwarded?.signal).toBe(controller.signal);
 	});
 
+	it("rejects initial MCP readiness when no manager is available", async () => {
+		const result = await loadTestExtensions();
+		const runner = new ExtensionRunner(
+			result.extensions,
+			result.runtime,
+			tempDir.path(),
+			sessionManager,
+			modelRegistry,
+		);
+		await expect(runner.createContext().waitForInitialMCPConnections()).rejects.toThrow("unsupported");
+	});
 
 	it("exposes the initialized host mode to extension contexts", async () => {
 		const result = await loadTestExtensions();

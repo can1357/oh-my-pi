@@ -624,11 +624,10 @@ export class ExtensionRunner {
 		private readonly settings?: Settings,
 		private readonly localProtocolOptions?: LocalProtocolOptions,
 		getAsyncJobSnapshot?: () => AsyncJobSnapshot | null,
-		private readonly waitForInitialMCPConnections: () => Promise<McpConnectionStatusSnapshot> = async () => ({
-			pendingServers: [],
-			connectedServers: [],
-			failedServers: [],
-		}),
+		private readonly waitForInitialMCPConnections: (options?: {
+			signal?: AbortSignal;
+		}) => Promise<McpConnectionStatusSnapshot> = () =>
+			Promise.reject(new Error("Initial MCP readiness is unsupported without an MCP manager")),
 	) {
 		this.#uiContext = noOpUIContext;
 		this.#getMemoryFn = getMemory;
@@ -1249,7 +1248,7 @@ export class ExtensionRunner {
 			mode: this.#mode,
 			getContextUsage: () => this.#getContextUsageFn(),
 			compact: instructionsOrOptions => this.#compactFn(instructionsOrOptions),
-			waitForInitialMCPConnections: () => this.waitForInitialMCPConnections(),
+			waitForInitialMCPConnections: options => this.waitForInitialMCPConnections(options),
 			getAsyncJobSnapshot: () => this.#getAsyncJobSnapshotFn(),
 			hasUI: this.hasUI(),
 			cwd: this.cwd,
