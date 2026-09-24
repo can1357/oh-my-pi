@@ -149,6 +149,7 @@ export function createAgentsHubDeps(
 			});
 			try {
 				await session.prompt(prompt.render(agentCreationUserPrompt, { request: description }), {
+					attribution: "agent",
 					expandPromptTemplates: false,
 				});
 				const raw = extractAssistantText(session.state.messages);
