@@ -7,6 +7,8 @@ import { type AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
 import { canSpawnAtDepth } from "../task/types";
 
+import { cfgTaskMaxRecursionDepth } from "../task/settings";
+
 function coordinationErrorResult(text: string, details: CoordinationDetails): AgentToolResult<CoordinationDetails> {
 	return { content: [{ type: "text", text }], details, isError: true };
 }
@@ -14,7 +16,7 @@ function coordinationErrorResult(text: string, details: CoordinationDetails): Ag
 /** Messaging is available to subagents and to top-level sessions able to spawn peers. */
 export function isIrcEnabled(settings: Settings, taskDepth: number): boolean {
 	if (taskDepth > 0) return true;
-	const maxDepth = settings.get("task.maxRecursionDepth") ?? 2;
+	const maxDepth = cfgTaskMaxRecursionDepth.get(settings) ?? 2;
 	return canSpawnAtDepth(maxDepth, taskDepth);
 }
 

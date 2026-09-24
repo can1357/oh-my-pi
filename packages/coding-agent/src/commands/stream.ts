@@ -6,6 +6,8 @@ import { Settings } from "../config/settings";
 import { StencilCredential } from "../stencil/credential";
 import { resolveStreamUrls, runStreamConsole, type StreamUrls } from "../stream/streamer";
 
+import { cfgStreamServerUrl } from "../stream/settings";
+
 export default class Stream extends Command {
 	static description = commandHelp.description;
 
@@ -31,7 +33,7 @@ export default class Stream extends Command {
 		const settings = await Settings.loadReadOnly({ cwd });
 		let urls: StreamUrls;
 		try {
-			urls = resolveStreamUrls(flags.server ?? settings.get("stream.serverUrl") ?? DEFAULT_STREAM_URL);
+			urls = resolveStreamUrls(flags.server ?? cfgStreamServerUrl.get(settings) ?? DEFAULT_STREAM_URL);
 		} catch (error) {
 			throw new CliUsageError(error instanceof Error ? error.message : String(error));
 		}

@@ -20,6 +20,7 @@ use pi_edit::{
 			types::FileOp,
 		},
 	},
+	path_policy::canonical_key,
 	store::{Clipboard, EditStore, file_hash},
 	stream_json::snapshot_from_text,
 	text::{LineEnding, detect_line_ending},
@@ -788,6 +789,42 @@ async fn coding_agent_hashline_executor_cases_run_through_session() {
 			"L10\n",
 		))
 	);
+
+	// The session sandbox is a plan-writable root outside the working tree.
+	let sandbox = tempfile::tempdir().expect("sandbox");
+	let sandbox_root = sandbox.path().canonicalize().expect("canonical sandbox");
+	let mut plan = Workspace::new(EditMode::Hashline);
+	plan.config.policy.plan_active = true;
+	plan.config.policy.plan_writable_roots = vec![sandbox_root.clone()];
+	let artifact = sandbox_root.join("cfg-module-hygiene-plan.md");
+	let source = "# Plan\n\n## Context\n- old\n";
+	std::fs::write(&artifact, source).expect("write sandbox artifact");
+	let tag = plan.store.record(&canonical_key(&artifact), source, None);
+	let args =
+		json!({ "input": format!("[cfg-module-hygiene-plan.md#{tag}]\nPUT 4.=4:\n+- new\n") });
+	let outcome = plan
+		.apply_json(&args, &common::DiskWriter::default())
+		.await
+		.expect("recovers a bare plan-file name onto the plan-writable sandbox in plan mode");
+	assert_eq!(
+		std::fs::read_to_string(&artifact).expect("artifact"),
+		"# Plan\n\n## Context\n- new\n"
+	);
+	assert!(plan.read("cfg-module-hygiene-plan.md").is_none());
+	assert!(outcome.text.contains("does not exist"), "{}", outcome.text);
+
+	let mut working_tree = Workspace::new(EditMode::Hashline);
+	working_tree.config.policy.plan_active = true;
+	working_tree.config.policy.plan_writable_roots = vec![sandbox_root];
+	working_tree.write("real.ts", "a\nb\nc\n");
+	let tag = working_tree.snapshot("real.ts", "a\nb\nc\n", None);
+	let args = json!({ "input": format!("[real.ts#{tag}]\nPUT 2.=2:\n+B\n") });
+	let error = working_tree
+		.apply_json(&args, &common::DiskWriter::default())
+		.await
+		.expect_err("plan mode still rejects an existing working-tree edit");
+	assert!(error.to_string().contains("working tree is read-only"), "{error}");
+	assert_eq!(working_tree.read("real.ts").as_deref(), Some("a\nb\nc\n"));
 }
 
 #[tokio::test]
@@ -1031,6 +1068,27 @@ async fn edit_results_carry_unshifted_prior_provenance_only() {
 			.replacen("line2\n", "LINE2\n", 1)
 			.replacen("line30\n", "line30\nnew-a\nnew-b\n", 1);
 	assert_eq!(workspace.read("a.txt").as_deref(), Some(expected.as_str()));
+}
+
+#[tokio::test]
+async fn edit_of_first_line_with_prior_read_carries_no_provenance() {
+	let source: String = (1..=5).map(|n| format!("line{n}\n")).collect();
+	let all_lines = (1..=5).collect::<Vec<u32>>();
+
+	let mut workspace = Workspace::new(EditMode::Hashline);
+	workspace.config.enforce_seen_lines = true;
+	workspace.write("a.txt", &source);
+	let read_tag = workspace.snapshot("a.txt", &source, Some(&all_lines));
+	let writer = common::DiskWriter::default();
+
+	workspace
+		.apply_json(&json!({ "input": format!("[a.txt#{read_tag}]\nPUT 1.=1:\n+LINE1") }), &writer)
+		.await
+		.expect("first-line edit with a prior read applies");
+	assert_eq!(
+		workspace.read("a.txt").as_deref(),
+		Some(source.replacen("line1\n", "LINE1\n", 1).as_str())
+	);
 }
 
 fn preview_for(

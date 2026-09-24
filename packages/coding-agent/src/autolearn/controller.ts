@@ -6,9 +6,11 @@
  * prompt-cache neutral: the standing system guidance remains available, but no
  * hidden mid-session reminder is inserted into the conversation.
  *
- * Installed once per top-level session (taskDepth 0). The subscription lives
- * for the session's lifetime — `newSession` resets the session in place
- * without re-running startup — so the controller needs no disposal.
+ * Installed once per top-level session (taskDepth 0) regardless of
+ * `autolearn.enabled`: every stop re-reads the live setting, so toggling it
+ * mid-session takes effect at the next stop. The subscription lives for the
+ * session's lifetime — `newSession` resets the session in place without
+ * re-running startup — so the controller needs no disposal.
  */
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
@@ -17,6 +19,8 @@ import autolearnGuidanceLearn from "../prompts/system/autolearn-guidance-learn.m
 import autolearnNudgeAutoContinue from "../prompts/system/autolearn-nudge-autocontinue.md" with { type: "text" };
 import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
 
+import { cfgAutolearnAutoContinue, cfgAutolearnEnabled, cfgAutolearnMinToolCalls } from "./settings";
+
 const AUTOLEARN_NUDGE_AUTOCONTINUE = autolearnNudgeAutoContinue.trim();
 const DEFAULT_MIN_TOOL_CALLS = 5;
 
@@ -24,12 +28,11 @@ const DEFAULT_MIN_TOOL_CALLS = 5;
  * Build the standing auto-learn guidance for the system prompt from the tools
  * actually present in the active set, or null when `manage_skill` is absent.
  *
- * Driven by tool presence rather than live settings: the `learn`/`manage_skill`
- * registry is built ONCE at session start (and only for top-level sessions), so
- * keying the guidance on `autolearn.enabled` would let a mid-session enable — or
- * a subagent that filtered the tools out — inject guidance pointing at tools the
- * session never built. The `learn` addendum is included only when the `learn`
- * tool is present (it requires a memory backend).
+ * Driven by tool presence rather than settings: keying the guidance on
+ * `autolearn.enabled` would let a subagent that filtered the tools out — or a
+ * session whose registry has not yet reconciled — inject guidance pointing at
+ * tools the session does not have. The `learn` addendum is included only when
+ * the `learn` tool is present (it requires a memory backend).
  */
 export function buildAutoLearnInstructions(available: { manageSkill: boolean; learn: boolean }): string | null {
 	if (!available.manageSkill) return null;
@@ -108,10 +111,9 @@ export class AutoLearnController {
 				break;
 			}
 		}
-		// Honor a live opt-out: the subscription outlives the setting, so re-check
-		// the current flag rather than trusting install-time state.
-		if (!this.#settings.get("autolearn.enabled")) return;
-		const minToolCalls = this.#settings.get("autolearn.minToolCalls") ?? DEFAULT_MIN_TOOL_CALLS;
+		// The controller is installed regardless of the flag; honor its live value.
+		if (!cfgAutolearnEnabled.get(this.#settings)) return;
+		const minToolCalls = cfgAutolearnMinToolCalls.get(this.#settings) ?? DEFAULT_MIN_TOOL_CALLS;
 		if (toolCalls < minToolCalls) return;
 		// Never interrupt plan-mode review.
 		if (this.#session.getPlanModeState()?.enabled) return;
@@ -126,7 +128,7 @@ export class AutoLearnController {
 		// persisted conversation prefix after providers have cached it. The standing
 		// auto-learn system guidance is stable; keep passive mode to that guidance
 		// so Anthropic prompt-cache prefixes survive long sessions.
-		const autoContinue = this.#settings.get("autolearn.autoContinue") === true;
+		const autoContinue = cfgAutolearnAutoContinue.get(this.#settings) === true;
 		if (!autoContinue) return;
 
 		if (this.#captureInFlight) {

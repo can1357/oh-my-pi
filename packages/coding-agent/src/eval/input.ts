@@ -1,10 +1,11 @@
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { InternalUrlRouter } from "../internal-urls";
+import { sessionResolveContext } from "../internal-urls/context";
+import { normalizeLocalScheme } from "../internal-urls/parse";
 import type { ToolSession } from "../tools";
-import { isInternalUrlPath, isSshUrl, normalizeLocalScheme, resolveReadPathAsync } from "../tools/path-utils";
+import { resolveReadPathAsync } from "../tools/path-utils";
 import { throwIfAborted } from "../tools/tool-errors";
 import { parseCommandArgs } from "../utils/command-args";
-import { resolveEvalLocalProtocolOptions } from "./backend";
 import { normalizePackageRequirements } from "./package-requirements";
 
 /** Code-only eval input; standalone percent commands prepare files or dependencies. */
@@ -24,7 +25,7 @@ export interface PreparedEvalSource {
 
 /**
  * Resolve standalone percent commands without downloads, execution, or source
- * echo. Python only intercepts `%load` (for `local://` paths); its `%pip`
+ * echo. Python only intercepts `%load` (for internal URL paths); its `%pip`
  * runs through the runner's own magic in the kernel's interpreter.
  */
 export async function prepareEvalSource(
@@ -67,19 +68,9 @@ export async function prepareEvalSource(
 	if (args.length !== 1 || !file) throw new ToolError("Usage: %load <script path>. Quote paths containing spaces.");
 	let filename: string;
 	const target = normalizeLocalScheme(file);
-	if (isSshUrl(target)) throw new ToolError("Eval scripts must be local; fetch and inspect the remote file first.");
-	if (isInternalUrlPath(target)) {
-		const resource = await InternalUrlRouter.instance().resolve(target, {
-			cwd: session.cwd,
-			settings: session.settings,
-			signal,
-			sessionFile: session.getSessionFile?.() ?? undefined,
-			sessionId: session.getSessionId?.() ?? undefined,
-			localProtocolOptions: resolveEvalLocalProtocolOptions(session),
-			pathOnly: true,
-		});
-		if (!resource.sourcePath) throw new ToolError(`Eval script has no local backing file: ${file}`);
-		filename = resource.sourcePath;
+	const router = InternalUrlRouter.instance();
+	if (router.canHandle(target)) {
+		filename = await router.requireLocal(target, "load", sessionResolveContext(session, { signal }));
 	} else {
 		if (/^[a-z][a-z0-9+.-]*:\/\//i.test(target) && !target.startsWith("file://")) {
 			throw new ToolError("Eval scripts must be local. Download and inspect remote scripts before executing them.");

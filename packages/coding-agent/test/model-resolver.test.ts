@@ -1018,9 +1018,7 @@ describe("role priorities and chains", () => {
 
 describe("resolveModelRoleValue", () => {
 	test("resolves @role:<thinking> by expanding role alias before parsing thinking", () => {
-		const settings = {
-			getModelRole: (role: string) => (role === "smol" ? "openrouter/qwen/qwen3-coder:exacto" : undefined),
-		} as NonNullable<Parameters<typeof resolveModelRoleValue>[2]>["settings"];
+		const settings = Settings.isolated({ modelRoles: { smol: "openrouter/qwen/qwen3-coder:exacto" } });
 
 		const result = resolveModelRoleValue("@smol:high", allModels, { settings });
 
@@ -1031,9 +1029,7 @@ describe("resolveModelRoleValue", () => {
 	});
 
 	test("resolves @role:max by expanding role alias before parsing thinking", () => {
-		const settings = {
-			getModelRole: (role: string) => (role === "smol" ? "openai-codex/gpt-5.3-codex" : undefined),
-		} as NonNullable<Parameters<typeof resolveModelRoleValue>[2]>["settings"];
+		const settings = Settings.isolated({ modelRoles: { smol: "openai-codex/gpt-5.3-codex" } });
 
 		const result = resolveModelRoleValue("@smol:max", allModels, { settings });
 
@@ -1045,9 +1041,7 @@ describe("resolveModelRoleValue", () => {
 	});
 
 	test("resolves @default through configured default role alias", () => {
-		const settings = {
-			getModelRole: (role: string) => (role === "default" ? "openrouter/qwen/qwen3-coder:exacto" : undefined),
-		} as NonNullable<Parameters<typeof resolveModelRoleValue>[2]>["settings"];
+		const settings = Settings.isolated({ modelRoles: { default: "openrouter/qwen/qwen3-coder:exacto" } });
 
 		const result = resolveModelRoleValue("@default", allModels, { settings });
 
@@ -1063,13 +1057,12 @@ describe("resolveModelRoleValue", () => {
 		// role to its concrete model at the pure resolution layer, without
 		// relying on the retry model-fallback path (which retry.modelFallback:
 		// false disables).
-		const roles: Record<string, string> = {
-			task: "openrouter/qwen/qwen3-coder:exacto",
-			fast_worker: "@task",
-		};
-		const settings = {
-			getModelRole: (role: string) => roles[role],
-		} as NonNullable<Parameters<typeof resolveModelRoleValue>[2]>["settings"];
+		const settings = Settings.isolated({
+			modelRoles: {
+				task: "openrouter/qwen/qwen3-coder:exacto",
+				fast_worker: "@task",
+			},
+		});
 
 		const result = resolveModelRoleValue("@fast_worker", allModels, { settings });
 

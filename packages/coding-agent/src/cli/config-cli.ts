@@ -7,19 +7,9 @@
 
 import { APP_NAME, getAgentDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
-import {
-	getDefault,
-	getEnumValues,
-	getType,
-	getUi,
-	isCredential,
-	type SettingPath,
-	Settings,
-	type SettingValue,
-	settings,
-	validateProviderMaxInFlightRequests,
-} from "../config/settings";
-import { SETTINGS_SCHEMA } from "../config/settings-schema";
+import { orderedSettings } from "../config/all-settings";
+import { type AnySetting, lookup } from "../config/registry";
+import { Settings, settings } from "../config/settings";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import { initXdg } from "./commands/init-xdg";
 
@@ -42,36 +32,31 @@ export interface ConfigCommandArgs {
 // =============================================================================
 
 type CliSettingDef = {
-	path: SettingPath;
+	setting: AnySetting;
+	path: string;
 	type: string;
 	description: string;
 	tab: string;
 };
 
-const ALL_SETTING_PATHS = Object.keys(SETTINGS_SCHEMA) as SettingPath[];
-
 /** Printed instead of a credential value in human output only. */
 const REDACTED = "********";
 
-/** Find setting definition by path */
-function findSettingDef(path: string): CliSettingDef | undefined {
-	if (!(path in SETTINGS_SCHEMA)) return undefined;
-	const key = path as SettingPath;
-	const ui = getUi(key);
+function toSettingDef(setting: AnySetting): CliSettingDef {
+	const ui = setting.ui;
 	return {
-		path: key,
-		type: getType(key),
+		setting,
+		path: setting.id,
+		type: setting.type,
 		description: ui?.description ?? "",
 		tab: ui?.tab ?? "internal",
 	};
 }
 
-/** Get available values for a setting */
-function getSettingValues(def: CliSettingDef): readonly string[] | undefined {
-	if (def.type === "enum") {
-		return getEnumValues(def.path);
-	}
-	return undefined;
+/** Find setting definition by path */
+function findSettingDef(path: string): CliSettingDef | undefined {
+	const setting = lookup(path);
+	return setting ? toSettingDef(setting) : undefined;
 }
 
 // =============================================================================
@@ -153,7 +138,7 @@ function formatValue(value: unknown): string {
 }
 
 function getTypeDisplay(def: CliSettingDef): string {
-	const values = getSettingValues(def);
+	const values = def.setting.enumValues;
 	if (values && values.length > 0) {
 		return `(${values.join("|")})`;
 	}
@@ -169,71 +154,6 @@ function getTypeDisplay(def: CliSettingDef): string {
 		default:
 			return "(string)";
 	}
-}
-
-// =============================================================================
-// Schema-Driven Value Parsing
-// =============================================================================
-
-function parseAndSetValue(path: SettingPath, rawValue: string): void {
-	const schemaType = getType(path);
-	let parsedValue: unknown;
-
-	const trimmed = rawValue.trim();
-	switch (schemaType) {
-		case "boolean": {
-			const lower = trimmed.toLowerCase();
-			if (["true", "1", "yes", "on"].includes(lower)) parsedValue = true;
-			else if (["false", "0", "no", "off"].includes(lower)) parsedValue = false;
-			else throw new Error(`Invalid boolean value: ${rawValue}. Use true/false, yes/no, on/off, or 1/0`);
-			break;
-		}
-		case "number":
-			parsedValue = Number(trimmed);
-			if (!Number.isFinite(parsedValue)) throw new Error(`Invalid number: ${rawValue}`);
-			break;
-		case "enum": {
-			const valid = getEnumValues(path);
-			if (valid && !valid.includes(trimmed)) {
-				throw new Error(`Invalid value: ${rawValue}. Valid values: ${valid.join(", ")}`);
-			}
-			parsedValue = trimmed;
-			break;
-		}
-		case "array": {
-			let parsed: unknown;
-			try {
-				parsed = JSON.parse(trimmed);
-			} catch {
-				throw new Error(`Invalid array JSON: ${rawValue}`);
-			}
-			if (!Array.isArray(parsed)) {
-				throw new Error(`Invalid array JSON: ${rawValue}`);
-			}
-			parsedValue = parsed;
-			break;
-		}
-		case "record": {
-			let parsed: unknown;
-			try {
-				parsed = JSON.parse(trimmed);
-			} catch {
-				throw new Error(`Invalid record JSON: ${rawValue}`);
-			}
-			if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-				throw new Error(`Invalid record JSON: ${rawValue}`);
-			}
-			if (path === "providers.maxInFlightRequests") {
-				parsed = validateProviderMaxInFlightRequests(parsed);
-			}
-			parsedValue = parsed;
-			break;
-		}
-		default:
-			parsedValue = trimmed;
-	}
-
-	settings.set(path, parsedValue as SettingValue<typeof path>);
 }
 
 // =============================================================================
@@ -278,7 +198,7 @@ async function writeStdout(text: string): Promise<void> {
 }
 
 async function handleList(flags: { json?: boolean }): Promise<void> {
-	const defs = ALL_SETTING_PATHS.map(path => findSettingDef(path)).filter((def): def is CliSettingDef => !!def);
+	const defs = orderedSettings().map(toSettingDef);
 
 	if (flags.json) {
 		// A redacted entry omits `value` and says so, rather than substituting a
@@ -292,9 +212,9 @@ async function handleList(flags: { json?: boolean }): Promise<void> {
 		// as unset; the same semantics apply here (credentials are all strings).
 		const result: Record<string, { value?: unknown; redacted?: true; type: string; description: string }> = {};
 		for (const def of defs) {
-			const value = settings.get(def.path);
+			const value = def.setting.get(settings);
 			result[def.path] =
-				isCredential(def.path) && value
+				def.setting.isCredential && value
 					? { redacted: true, type: def.type, description: def.description }
 					: { value, type: def.type, description: def.description };
 		}
@@ -326,8 +246,8 @@ async function handleList(flags: { json?: boolean }): Promise<void> {
 			// single-value request and is left alone. An unset or cleared ("")
 			// credential keeps its ordinary rendering: masking it would imply one
 			// is configured.
-			const value = settings.get(def.path);
-			const valueStr = isCredential(def.path) && value ? REDACTED : formatValue(value);
+			const value = def.setting.get(settings);
+			const valueStr = def.setting.isCredential && value ? REDACTED : formatValue(value);
 			const typeStr = getTypeDisplay(def);
 			console.log(`  ${chalk.white(def.path)} = ${valueStr} ${chalk.dim(typeStr)}`);
 		}
@@ -349,7 +269,7 @@ function handleGet(key: string | undefined, flags: { json?: boolean }): void {
 		process.exit(1);
 	}
 
-	const value = settings.get(def.path);
+	const value = def.setting.get(settings);
 
 	if (flags.json) {
 		console.log(JSON.stringify({ key: def.path, value, type: def.type, description: def.description }, null, 2));
@@ -374,14 +294,14 @@ async function handleSet(key: string | undefined, value: string | undefined, fla
 	}
 
 	try {
-		parseAndSetValue(def.path, value);
+		def.setting.set(settings, def.setting.parse(value));
 		await settings.flush();
 	} catch (err) {
 		console.error(chalk.red(String(err)));
 		process.exit(1);
 	}
 
-	const newValue = settings.get(def.path);
+	const newValue = def.setting.get(settings);
 
 	if (flags.json) {
 		console.log(JSON.stringify({ key: def.path, value: newValue }));
@@ -404,10 +324,9 @@ async function handleReset(key: string | undefined, flags: { json?: boolean }): 
 		process.exit(1);
 	}
 
-	const path = def.path as SettingPath;
-	const defaultValue = getDefault(path);
+	const defaultValue = def.setting.default;
 	try {
-		settings.set(path, defaultValue as SettingValue<typeof path>);
+		def.setting.set(settings, defaultValue);
 		await settings.flush();
 	} catch (err) {
 		console.error(chalk.red(String(err)));

@@ -48,6 +48,25 @@ import {
 	upsertThreads,
 } from "./storage";
 
+import {
+	cfgMemoriesFallbackTokenLimit,
+	cfgMemoriesMaxRawMemoriesForGlobal,
+	cfgMemoriesMaxRolloutAgeDays,
+	cfgMemoriesMaxRolloutsPerStartup,
+	cfgMemoriesMinRolloutIdleHours,
+	cfgMemoriesPhase1InputTokenLimit,
+	cfgMemoriesPhase2HeartbeatSeconds,
+	cfgMemoriesPhase2LeaseSeconds,
+	cfgMemoriesPhase2RetryDelaySeconds,
+	cfgMemoriesRolloutPayloadPercent,
+	cfgMemoriesStage1Concurrency,
+	cfgMemoriesStage1LeaseSeconds,
+	cfgMemoriesStage1RetryDelaySeconds,
+	cfgMemoriesSummaryInjectionTokenLimit,
+	cfgMemoriesThreadScanLimit,
+} from "./settings";
+import { cfgMemoryBackend } from "../memory-backend/settings";
+
 interface MemoryRuntimeConfig {
 	enabled: boolean;
 	maxRolloutsPerStartup: number;
@@ -338,7 +357,7 @@ interface MemoryStartupOptions {
 }
 
 function isMemoryStartupActive(options: MemoryStartupOptions): boolean {
-	return !options.signal.aborted && !options.session.isDisposed && options.settings.get("memory.backend") === "local";
+	return !options.signal.aborted && !options.session.isDisposed && cfgMemoryBackend.get(options.settings) === "local";
 }
 
 async function runMemoryStartup(options: MemoryStartupOptions): Promise<void> {
@@ -1269,23 +1288,23 @@ async function resolveMemoryModel(options: {
 
 function loadMemoryConfig(settings: Settings): MemoryRuntimeConfig {
 	return {
-		enabled: settings.get("memory.backend") === "local",
-		maxRolloutsPerStartup: settings.get("memories.maxRolloutsPerStartup") ?? DEFAULTS.maxRolloutsPerStartup,
-		maxRolloutAgeDays: settings.get("memories.maxRolloutAgeDays") ?? DEFAULTS.maxRolloutAgeDays,
-		minRolloutIdleHours: settings.get("memories.minRolloutIdleHours") ?? DEFAULTS.minRolloutIdleHours,
-		threadScanLimit: settings.get("memories.threadScanLimit") ?? DEFAULTS.threadScanLimit,
-		maxRawMemoriesForGlobal: settings.get("memories.maxRawMemoriesForGlobal") ?? DEFAULTS.maxRawMemoriesForGlobal,
-		stage1Concurrency: settings.get("memories.stage1Concurrency") ?? DEFAULTS.stage1Concurrency,
-		stage1LeaseSeconds: settings.get("memories.stage1LeaseSeconds") ?? DEFAULTS.stage1LeaseSeconds,
-		stage1RetryDelaySeconds: settings.get("memories.stage1RetryDelaySeconds") ?? DEFAULTS.stage1RetryDelaySeconds,
-		phase2LeaseSeconds: settings.get("memories.phase2LeaseSeconds") ?? DEFAULTS.phase2LeaseSeconds,
-		phase2RetryDelaySeconds: settings.get("memories.phase2RetryDelaySeconds") ?? DEFAULTS.phase2RetryDelaySeconds,
-		phase2HeartbeatSeconds: settings.get("memories.phase2HeartbeatSeconds") ?? DEFAULTS.phase2HeartbeatSeconds,
-		rolloutPayloadPercent: settings.get("memories.rolloutPayloadPercent") ?? DEFAULTS.rolloutPayloadPercent,
-		phase1InputTokenLimit: settings.get("memories.phase1InputTokenLimit") ?? DEFAULTS.phase1InputTokenLimit,
-		fallbackTokenLimit: settings.get("memories.fallbackTokenLimit") ?? DEFAULTS.fallbackTokenLimit,
+		enabled: cfgMemoryBackend.get(settings) === "local",
+		maxRolloutsPerStartup: cfgMemoriesMaxRolloutsPerStartup.get(settings) ?? DEFAULTS.maxRolloutsPerStartup,
+		maxRolloutAgeDays: cfgMemoriesMaxRolloutAgeDays.get(settings) ?? DEFAULTS.maxRolloutAgeDays,
+		minRolloutIdleHours: cfgMemoriesMinRolloutIdleHours.get(settings) ?? DEFAULTS.minRolloutIdleHours,
+		threadScanLimit: cfgMemoriesThreadScanLimit.get(settings) ?? DEFAULTS.threadScanLimit,
+		maxRawMemoriesForGlobal: cfgMemoriesMaxRawMemoriesForGlobal.get(settings) ?? DEFAULTS.maxRawMemoriesForGlobal,
+		stage1Concurrency: cfgMemoriesStage1Concurrency.get(settings) ?? DEFAULTS.stage1Concurrency,
+		stage1LeaseSeconds: cfgMemoriesStage1LeaseSeconds.get(settings) ?? DEFAULTS.stage1LeaseSeconds,
+		stage1RetryDelaySeconds: cfgMemoriesStage1RetryDelaySeconds.get(settings) ?? DEFAULTS.stage1RetryDelaySeconds,
+		phase2LeaseSeconds: cfgMemoriesPhase2LeaseSeconds.get(settings) ?? DEFAULTS.phase2LeaseSeconds,
+		phase2RetryDelaySeconds: cfgMemoriesPhase2RetryDelaySeconds.get(settings) ?? DEFAULTS.phase2RetryDelaySeconds,
+		phase2HeartbeatSeconds: cfgMemoriesPhase2HeartbeatSeconds.get(settings) ?? DEFAULTS.phase2HeartbeatSeconds,
+		rolloutPayloadPercent: cfgMemoriesRolloutPayloadPercent.get(settings) ?? DEFAULTS.rolloutPayloadPercent,
+		phase1InputTokenLimit: cfgMemoriesPhase1InputTokenLimit.get(settings) ?? DEFAULTS.phase1InputTokenLimit,
+		fallbackTokenLimit: cfgMemoriesFallbackTokenLimit.get(settings) ?? DEFAULTS.fallbackTokenLimit,
 		summaryInjectionTokenLimit:
-			settings.get("memories.summaryInjectionTokenLimit") ?? DEFAULTS.summaryInjectionTokenLimit,
+			cfgMemoriesSummaryInjectionTokenLimit.get(settings) ?? DEFAULTS.summaryInjectionTokenLimit,
 	};
 }
 

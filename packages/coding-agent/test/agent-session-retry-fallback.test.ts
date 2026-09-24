@@ -25,7 +25,8 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
-import { type SettingPath, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { editVariantForModel } from "@oh-my-pi/pi-coding-agent/utils/edit-mode";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -40,6 +41,8 @@ import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
+
+import { cfgRetryUsageReservePolicy } from "@oh-my-pi/pi-coding-agent/session/settings";
 
 type AutoRetryStartEvent = Extract<AgentSessionEvent, { type: "auto_retry_start" }>;
 type AutoRetryEndEvent = Extract<AgentSessionEvent, { type: "auto_retry_end" }>;
@@ -432,13 +435,13 @@ describe("AgentSession retry fallback", () => {
 				default: [`${fallbackModel.provider}/${fallbackModel.id}`],
 			},
 			"edit.modelVariants": { [fallbackModel.id]: "replace" },
-		} as Partial<Record<SettingPath, unknown>>);
+		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
 		const renderEditMode = (): string => {
 			const active = session?.model;
 			const selector = active ? `${active.provider}/${active.id}` : "";
-			return settings.getEditVariantForModel(selector) ?? "hashline";
+			return editVariantForModel(settings, selector) ?? "hashline";
 		};
 
 		session = new AgentSession({
@@ -839,8 +842,8 @@ describe("AgentSession retry fallback", () => {
 
 		await session.prompt("Stay on the primary");
 		await session.waitForIdle();
-		settings.override("retry.usageReservePolicy", "fail-closed");
-		expect(settings.get("retry.usageReservePolicy")).toBe("fail-closed");
+		cfgRetryUsageReservePolicy.override(settings, "fail-closed");
+		expect(cfgRetryUsageReservePolicy.get(settings)).toBe("fail-closed");
 
 		await expect(session.prompt("Do not spend reserve")).rejects.toThrow("reserve policy is fail-closed");
 		expect(confirmFallback).toHaveBeenCalledTimes(1);

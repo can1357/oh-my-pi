@@ -10,11 +10,10 @@ import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
 import { resolveJudge } from "../judgment";
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
-import { isOmpDocsScope } from "../internal-urls/omp-scope";
 import { expandPath } from "../tools/path-utils";
 import { type CascadeResult, runCascade } from "../tools/jfind/cascade";
-import { materializeOmpScope, type OmpScope } from "../tools/jfind/omp-scope";
 import { rankedHeat } from "../tools/jfind/passages";
+import { isEnumerableScope, materializeUrlScope, type UrlScope } from "../tools/jfind/url-scope";
 
 export interface FindCommandArgs {
 	query: string;
@@ -87,13 +86,13 @@ export async function runFindCommand(cmd: FindCommandArgs): Promise<void> {
 		process.exit(1);
 	}
 	const log = cmd.quiet ? () => {} : (message: string) => console.error(chalk.dim(message));
-	let ompScope: OmpScope | undefined;
-	if (isOmpDocsScope(cmd.path)) {
-		log("materializing omp:// docs");
-		ompScope = await materializeOmpScope(cmd.path, { cwd: process.cwd() });
+	let urlScope: UrlScope | undefined;
+	if (isEnumerableScope(cmd.path)) {
+		log(`materializing ${cmd.path}`);
+		urlScope = await materializeUrlScope(cmd.path, { cwd: process.cwd() });
 	}
 	try {
-		const root = ompScope?.dir ?? path.resolve(expandPath(cmd.path));
+		const root = urlScope?.dir ?? path.resolve(expandPath(cmd.path));
 		try {
 			if (!(await fs.stat(root)).isDirectory()) {
 				console.error(chalk.red(`Error: not a directory: ${cmd.path}`));
@@ -105,11 +104,11 @@ export async function runFindCommand(cmd: FindCommandArgs): Promise<void> {
 			process.exit(1);
 		}
 
-		const displayRoot = ompScope?.scopePath ?? root;
-		// An `omp://` scope searches a temp corpus, but settings and extensions
-		// still belong to the caller's project: one base for both, or a docs
-		// scope would silently drop project extensions (and their providers).
-		const baseCwd = ompScope ? process.cwd() : root;
+		const displayRoot = urlScope?.scopePath ?? root;
+		// A URL scope searches a temp corpus, but settings and extensions still
+		// belong to the caller's project: one base for both, or a URL scope
+		// would silently drop project extensions (and their providers).
+		const baseCwd = urlScope ? process.cwd() : root;
 		log("resolving judge");
 		const settings = await Settings.init({ cwd: baseCwd });
 		const authStorage = await discoverAuthStorage(undefined, { settings });
@@ -127,22 +126,22 @@ export async function runFindCommand(cmd: FindCommandArgs): Promise<void> {
 				includeHidden: cmd.hidden,
 				onProgress: log,
 			});
-			const result: CascadeResult = ompScope
-				? { ...raw, hits: raw.hits.map(hit => ({ ...hit, rel: ompScope.toOmpRel(hit.rel) })) }
+			const result: CascadeResult = urlScope
+				? { ...raw, hits: raw.hits.map(hit => ({ ...hit, rel: urlScope.toUrl(hit.rel) })) }
 				: raw;
 			const elapsedMs = performance.now() - started;
 			if (cmd.json) {
 				console.log(JSON.stringify({ query: cmd.query, root: displayRoot, elapsedMs, ...result }, null, 2));
 			} else {
-				printReport(cmd, root, result, elapsedMs, ompScope?.scopePath);
+				printReport(cmd, root, result, elapsedMs, urlScope?.scopePath);
 			}
 			// `exitCode`, not `exit`: process.exit skips the finally blocks below,
-			// orphaning the materialized omp corpus and skipping authStorage.close().
+			// orphaning the materialized URL corpus and skipping authStorage.close().
 			if (result.stats.requests > 0 && result.stats.errors === result.stats.requests) process.exitCode = 1;
 		} finally {
 			authStorage.close();
 		}
 	} finally {
-		await ompScope?.cleanup();
+		await urlScope?.cleanup();
 	}
 }

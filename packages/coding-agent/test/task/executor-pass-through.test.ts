@@ -12,6 +12,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgCompaction } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { parseAgentFields } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import type { ToolPathWithSource } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools";
 import type { LoadExtensionsResult, PreparedExtension } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
@@ -23,6 +24,8 @@ import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { createSessionDefaults } from "../helpers/session-defaults";
+
+import { cfgTierAnthropic, cfgTierGoogle, cfgTierOpenai } from "@oh-my-pi/pi-coding-agent/session/settings";
 
 function createMockSession(onPrompt: (params: { emit: (event: AgentSessionEvent) => void }) => void): AgentSession {
 	const listeners: Array<(event: AgentSessionEvent) => void> = [];
@@ -546,7 +549,7 @@ describe("runSubprocess per-agent compaction threshold overrides", () => {
 		expect(child.exitCode).toBe(0);
 		const childSettings = createSession.mock.calls[0]?.[0]?.settings;
 		if (!childSettings) throw new Error("Expected child settings");
-		const childCompaction = childSettings.getGroup("compaction");
+		const childCompaction = cfgCompaction.get(childSettings);
 		expect(resolveThresholdTokens(200_000, childCompaction)).toBe(160_000);
 		expect(shouldCompact(50_000, 200_000, childCompaction)).toBe(false);
 		expect(shouldCompact(160_001, 200_000, childCompaction)).toBe(true);
@@ -560,7 +563,7 @@ describe("runSubprocess per-agent compaction threshold overrides", () => {
 		expect(grandchild.exitCode).toBe(0);
 		const grandchildSettings = createSession.mock.calls[1]?.[0]?.settings;
 		if (!grandchildSettings) throw new Error("Expected grandchild settings");
-		const grandchildCompaction = grandchildSettings.getGroup("compaction");
+		const grandchildCompaction = cfgCompaction.get(grandchildSettings);
 		expect(resolveThresholdTokens(200_000, grandchildCompaction)).toBe(40_000);
 		expect(shouldCompact(50_000, 200_000, grandchildCompaction)).toBe(true);
 	});
@@ -621,9 +624,9 @@ describe("runSubprocess per-agent service-tier overrides", () => {
 		const sessionOptions = spy.mock.calls[0]?.[0];
 		expect(sessionOptions?.resolveServiceTierByFamily).toBeUndefined();
 		expect([
-			sessionOptions?.settings?.get("tier.openai"),
-			sessionOptions?.settings?.get("tier.anthropic"),
-			sessionOptions?.settings?.get("tier.google"),
+			sessionOptions?.settings ? cfgTierOpenai.get(sessionOptions?.settings) : undefined,
+			sessionOptions?.settings ? cfgTierAnthropic.get(sessionOptions?.settings) : undefined,
+			sessionOptions?.settings ? cfgTierGoogle.get(sessionOptions?.settings) : undefined,
 		]).toEqual(["flex", "none", "flex"]);
 	});
 

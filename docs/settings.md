@@ -2,7 +2,7 @@
 
 `omp` resolves settings from built-in defaults, a persistent global config file, optional project-local config, one-shot CLI overlays, and in-memory runtime overrides. Reach for project settings when one repository needs a different provider set, model role, tool policy, memory backend, or UI behavior than your global defaults — without touching your machine-wide configuration.
 
-Settings are stored as plain YAML mappings. Every key, its type, default, and enum values come from the settings schema. `omp config` exposes the complete schema; the interactive `/settings` panel exposes the schema entries that have UI metadata.
+Settings are stored as plain YAML mappings. Every key, its type, default, and enum values come from its setting definition (declared with `register(...)` next to the owning feature, e.g. `packages/coding-agent/src/tools/settings.ts`). `omp config` exposes the complete schema; the interactive `/settings` panel exposes the schema entries that have UI metadata.
 
 - For model/provider credentials, `.env` files, and the env-var table that resolves API keys, see [Providers](./providers.md).
 - For custom model definitions in `models.yml`, see [Models](./models.md).
@@ -93,22 +93,23 @@ Keys must match a real schema path exactly. There is no shorthand — set `theme
 From lowest to highest priority, the effective value of a setting is built as:
 
 ```text
-built-in defaults  <-  global config  <-  project config  <-  CLI overlays  <-  runtime overrides
+built-in defaults  <-  global config  <-  project config  <-  CLI overlays  <-  runtime overrides  <-  setting env var
 ```
 
 From highest to lowest:
 
-1. **Runtime overrides** — dedicated CLI flags and feature env vars applied in memory for the current process: `--model`, `--smol`, `--slow`, `--plan`, `--approval-mode`, `--auto-approve`/`--yolo`, `--hide-thinking`, `--advisor`, `--no-pty`, `--api-key`, and protocol-mode defaults. Never persisted.
-2. **CLI config overlays** — each `--config <file>`; later overlay files override earlier ones.
-3. **Project settings** — `<cwd>/.omp/settings.json` then `<cwd>/.omp/config.yml` (and contributions from other discovery providers at project level).
-4. **Global settings** — `~/.omp/agent/config.yml`.
-5. **Built-in defaults** — from the settings schema.
+1. **Setting env var** — an environment variable declared on the setting's definition (for example `PI_PY` for `eval.py`, `OMP_AUTH_BROKER_URL` for `auth.broker.url`). Parsed by the setting's type; unparseable text (such as `PI_EDIT_VARIANT=auto`) counts as unset. A few are declared as fallbacks instead (`SEARXNG_*`, `MNEMOPI_EMBEDDING_MODEL`): they only replace the built-in default, so any configured layer wins over them.
+2. **Runtime overrides** — dedicated CLI flags and feature env vars applied in memory for the current process: `--model`, `--smol`, `--slow`, `--plan`, `--approval-mode`, `--auto-approve`/`--yolo`, `--hide-thinking`, `--advisor`, `--no-pty`, `--api-key`, and protocol-mode defaults. Never persisted.
+3. **CLI config overlays** — each `--config <file>`; later overlay files override earlier ones.
+4. **Project settings** — `<cwd>/.omp/settings.json` then `<cwd>/.omp/config.yml` (and contributions from other discovery providers at project level).
+5. **Global settings** — `~/.omp/agent/config.yml`.
+6. **Built-in defaults** — from the setting definition.
 
-A key that is unset at every layer resolves to its schema default at read time.
+A key that is unset at every layer resolves to its default at read time.
 
 ### Environment overrides
 
-Environment variables are **not** a single settings layer. Each is read by the feature that owns the value, usually as a per-machine override or fallback, and is never written back to `config.yml`. The ones that map directly onto a setting:
+Environment variables are never written back to `config.yml`. Variables declared on a setting definition form the top layer described above; others are read directly by the feature that owns the value (`PI_NO_PTY`) or applied as runtime overrides (`PI_SMOL_MODEL` sets the `smol` model role for the process). The ones that map directly onto a setting:
 
 | Env var                 | Overrides setting           | Notes                                                                                             |
 | ----------------------- | --------------------------- | ------------------------------------------------------------------------------------------------- |
@@ -150,7 +151,7 @@ tools:
 
 ### Bash command approval patterns
 
-`tools.approval` is a record keyed by tool name; dotted forms such as `tools.approval.eval` and `tools.approval.computer` identify entries in that record, not separate settings-schema paths. Each entry sets that tool's default policy. For bash, you can add ordered command rules with `bash.patterns`; the first matching rule wins. Patterns support literal text plus `*` as a wildcard.
+`tools.approval` is a record keyed by tool name; dotted forms such as `tools.approval.eval` and `tools.approval.computer` identify entries in that record, not separate setting ids. Each entry sets that tool's default policy. For bash, you can add ordered command rules with `bash.patterns`; the first matching rule wins. Patterns support literal text plus `*` as a wildcard.
 
 By default, an `allow` rule must match the entire command and cannot approve a compound line. Set `bash.allowCompoundCommands: true` to also evaluate conservative chains of two or more literal commands joined only by `&&`:
 

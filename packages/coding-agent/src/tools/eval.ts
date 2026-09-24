@@ -52,6 +52,15 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
 
+import {
+	cfgEvalAutoBackgroundEnabled,
+	cfgEvalAutoBackgroundThresholdMs,
+	cfgEvalAutoProvision,
+	cfgEvalToolsEnabled,
+} from "../eval/settings";
+import { cfgTaskMaxRecursionDepth } from "../task/settings";
+import { cfgToolsMaxTimeout } from "./settings";
+
 /** Language tokens the eval tool accepts, in stable display order. */
 export type EvalLanguageToken = "py" | "js";
 const EVAL_LANGUAGE_ORDER: readonly EvalLanguageToken[] = ["py", "js"];
@@ -368,20 +377,20 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		if (!session) return {};
 		const backends = resolveEvalBackends(session);
 		const depthAllowsSpawning = canSpawnAtDepth(
-			session.settings.get("task.maxRecursionDepth") ?? 2,
+			cfgTaskMaxRecursionDepth.get(session.settings) ?? 2,
 			session.taskDepth ?? 0,
 		);
 		return {
 			py: backends.python,
 			js: backends.js,
 			spawns: depthAllowsSpawning ? (session.getSessionSpawns?.() ?? "*") : false,
-			autoBackgroundEnabled: session.settings.get("eval.autoBackground.enabled"),
-			evalTools: session.settings.get("eval.tools.enabled"),
+			autoBackgroundEnabled: cfgEvalAutoBackgroundEnabled.get(session.settings),
+			evalTools: cfgEvalToolsEnabled.get(session.settings),
 			eagerDelegation: sessionDelegationBias(session) === "eager",
 			waitTool: hasWaitTool(session),
 			preludes: getEnabledEvalPreludes(session.getEvalPreludes?.() ?? []),
 			inlineTopics: session.isToolActive?.("read") === false,
-			autoProvision: session.settings.get("eval.autoProvision"),
+			autoProvision: cfgEvalAutoProvision.get(session.settings),
 		};
 	}
 
@@ -442,7 +451,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		stream: {
 			open: async context => {
 				if (!this.session) return undefined;
-				if (this.session.settings.get("eval.autoBackground.enabled")) return undefined;
+				if (cfgEvalAutoBackgroundEnabled.get(this.session.settings)) return undefined;
 				const parentToolCallId = context.parentToolCallId;
 				const cell = new EvalShadowCellSession({
 					coordinator: context.coordinator,
@@ -508,7 +517,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		const cellTimeoutMs =
 			params.timeout === 0
 				? 0
-				: clampTimeout("eval", params.timeout, session.settings.get("tools.maxTimeout")) * 1000;
+				: clampTimeout("eval", params.timeout, cfgToolsMaxTimeout.get(session.settings)) * 1000;
 		const resolved = await resolveBackend(session, cellLanguage, { signal, timeoutMs: cellTimeoutMs });
 		const source = await prepareEvalSource(params, session, signal);
 		if (shadowCell && (source.filename || source.packages?.length || source.environment)) {
@@ -576,13 +585,13 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		const autoBgManager = session.asyncJobManager;
 		// At the running-job cap, fall through to direct foreground execution
 		// instead of failing every eval call until a slot frees up.
-		if (!session.settings.get("eval.autoBackground.enabled") || !autoBgManager || autoBgManager.atCapacity) {
+		if (!cfgEvalAutoBackgroundEnabled.get(session.settings) || !autoBgManager || autoBgManager.atCapacity) {
 			return await run(signal, emitToolUpdate);
 		}
 
 		const thresholdMs = Math.max(
 			0,
-			Math.floor(session.settings.get("eval.autoBackground.thresholdMs") ?? DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS),
+			Math.floor(cfgEvalAutoBackgroundThresholdMs.get(session.settings) ?? DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS),
 		);
 		// The wait budget mirrors #runCells' clamped cell timeout. The cell budget
 		// is runtime work (it pauses across agent()/tool bridge calls), so a cell
@@ -591,7 +600,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		const clampedCellTimeoutMs =
 			cells[0].timeoutMs === 0
 				? undefined
-				: clampTimeout("eval", cells[0].timeoutMs / 1000, session.settings.get("tools.maxTimeout")) * 1000;
+				: clampTimeout("eval", cells[0].timeoutMs / 1000, cfgToolsMaxTimeout.get(session.settings)) * 1000;
 		const autoBackgroundWaitMs = resolveAutoBackgroundWaitMs(thresholdMs, clampedCellTimeoutMs);
 		const startBackgrounded = autoBackgroundWaitMs === 0;
 
@@ -874,7 +883,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				const idleTimeoutMs =
 					cell.timeoutMs === 0
 						? undefined
-						: clampTimeout("eval", cell.timeoutMs / 1000, session.settings.get("tools.maxTimeout")) * 1000;
+						: clampTimeout("eval", cell.timeoutMs / 1000, cfgToolsMaxTimeout.get(session.settings)) * 1000;
 				const idle = idleTimeoutMs === undefined ? undefined : new IdleTimeout(idleTimeoutMs);
 				const combinedSignal =
 					signal && idle

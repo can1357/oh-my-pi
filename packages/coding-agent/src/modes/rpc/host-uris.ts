@@ -5,6 +5,7 @@ import type {
 	InternalUrl,
 	ProtocolHandler,
 	ResolveContext,
+	SchemeSpec,
 	WriteContext,
 } from "../../internal-urls/types";
 import type {
@@ -40,15 +41,21 @@ export function isRpcHostUriResult(value: unknown): value is RpcHostUriResult {
  */
 class RpcHostUriProtocolHandler implements ProtocolHandler {
 	readonly scheme: string;
-	readonly immutable: boolean;
+	readonly spec: SchemeSpec;
 	readonly write?: (url: InternalUrl, content: string, context?: WriteContext) => Promise<void>;
 	readonly #bridge: RpcHostUriBridge;
 
 	constructor(definition: RpcHostUriSchemeDefinition, bridge: RpcHostUriBridge) {
 		this.scheme = definition.scheme;
-		this.immutable = definition.immutable === true;
 		this.#bridge = bridge;
-		if (definition.writable === true) {
+		const writable = definition.writable === true;
+		this.spec = {
+			backing: "remote",
+			selectors: "none",
+			immutable: definition.immutable === true,
+			write: writable ? { payload: "text", scope: "workspace", tier: () => "write" } : undefined,
+		};
+		if (writable) {
 			this.write = (url, content, context) => this.#bridge.requestWrite(this.scheme, url, content, context);
 		}
 	}

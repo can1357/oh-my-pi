@@ -206,6 +206,19 @@ export class CredentialPool implements CredentialsApi {
 		}
 	}
 
+	/**
+	 * Take over the subscribers, buffered disable events, and generation counter of
+	 * the pool this one replaces (store swap). Listener sets are shared, so
+	 * unsubscribe functions handed out by `previous` keep working.
+	 */
+	adoptSubscribers(previous: CredentialPool): void {
+		this.#credentialDisabledListeners = previous.#credentialDisabledListeners;
+		this.#generationListeners = previous.#generationListeners;
+		this.#pendingDisabledEvents = previous.#pendingDisabledEvents;
+		previous.#pendingDisabledEvents = [];
+		this.#generation = previous.#generation;
+	}
+
 	onGeneration(listener: (generation: number) => void): () => void {
 		this.#generationListeners.add(listener);
 		return () => {

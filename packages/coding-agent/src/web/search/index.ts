@@ -36,6 +36,8 @@ import {
 	type SearchResultDetails,
 } from "./types";
 
+import { cfgProvidersAntigravityEndpoint, cfgProvidersWebSearchTimeoutSeconds } from "../../session/settings";
+
 /** Web search tool parameters schema */
 export const webSearchSchema = type({
 	query: "string",
@@ -153,14 +155,14 @@ async function executeSearch(
 	// Invariant across candidates; resolve once before walking the role chain.
 	let antigravityEndpointMode: "auto" | "production" | "sandbox" | undefined;
 	try {
-		antigravityEndpointMode = settings.get("providers.antigravityEndpoint");
+		antigravityEndpointMode = cfgProvidersAntigravityEndpoint.get(settings);
 	} catch {
 		antigravityEndpointMode = undefined;
 	}
 
 	let timeoutMs = DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS * 1_000;
 	try {
-		const configuredSeconds = settings.get("providers.webSearchTimeoutSeconds");
+		const configuredSeconds = cfgProvidersWebSearchTimeoutSeconds.get(settings);
 		if (Number.isFinite(configuredSeconds) && configuredSeconds > 0) {
 			timeoutMs = Math.ceil(Math.min(configuredSeconds, MAX_WEB_SEARCH_TIMEOUT_SECONDS) * 1_000);
 		}

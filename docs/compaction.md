@@ -22,7 +22,7 @@ Both are persisted as session entries and converted back into user-context messa
 - `packages/coding-agent/src/session/session-maintenance.ts` (automatic maintenance orchestration)
 - `packages/coding-agent/src/session/messages.ts`
 - `packages/coding-agent/src/extensibility/hooks/types.ts`
-- `packages/coding-agent/src/config/settings-schema.ts`
+- `packages/coding-agent/src/session/context-settings.ts` (`compaction.*`, `snapcompact.*`, `branchSummary.*` definitions)
 
 ## Session entry model
 
@@ -484,10 +484,10 @@ Post-navigation event exposing new/old leaf and optional summary entry.
 
 ## Settings and defaults
 
-From `settings-schema.ts`:
+Defined in `packages/coding-agent/src/session/context-settings.ts`:
 
 - `compaction.enabled` = `true`
-- `compaction.experimentalContextManagement` = `false`. Opt-in persistent notes, branch-bound raw-history retrieval, and local context-window rollover; restart after enabling to refresh available tools.
+- `compaction.experimentalContextManagement` = `false`. Opt-in persistent notes, branch-bound raw-history retrieval, and local context-window rollover; toggling it adds or removes `context_notes`/`new_context` in the running session.
 - `compaction.methodOrder` = `["remote", "snapcompact", "handoff", "shake", "soft"]`. `remote` uses provider-native server compaction (OpenAI Responses compact, Anthropic compaction beta) when available; unavailable or failed methods advance to the next preference.
 - `compaction.asyncEnabled` = `true`. Async (speculative) compaction: when context enters the pre-threshold band `[threshold − lead, threshold)` (lead = `clamp(threshold × 0.125, 8192, 32000)`), maintenance starts a background summarization for the first configured LLM-backed method (`remote`, `handoff`, or `soft`) off a branch snapshot, isolated from the live turn by a side session id. The armed result is committed instantly when the threshold is actually crossed, hiding summarization latency; post-snapshot turns are appended after the summary unchanged. Armed results are discarded when the branch prefix changes (new compaction, reset boundary, `/tree` navigation), when a provider-native replay payload is no longer readable by the active model, or when context grows past `keepRecentTokens` since compute (a fresh speculation replaces it). Speculation is skipped while an extension registers `session_before_compact`. The status line pulses the auto-compact icon while a speculation runs and holds it in accent when a result is armed.
 - `compaction.reserveTokens` is unset by default. The compaction layer normally applies a `16384`-token floor and at least 15% of the context window; on small windows where that default would be impractical, budget checks use the 15% proportional reserve. An explicit configured reserve is honored.

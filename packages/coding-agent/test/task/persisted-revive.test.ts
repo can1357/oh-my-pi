@@ -6,6 +6,7 @@ import * as path from "node:path";
 import type { EffectiveExtensionRoots } from "@oh-my-pi/pi-coding-agent/capability/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgCompaction } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import type { PreparedExtension } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { RpcSubagentRegistry } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-subagents";
@@ -29,6 +30,8 @@ import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createSessionDefaults } from "../helpers/session-defaults";
+
+import { cfgAdvisorEnabled } from "@oh-my-pi/pi-coding-agent/advisor/settings";
 
 const tempDirs: TempDir[] = [];
 
@@ -624,11 +627,11 @@ describe("persisted subagent revival", () => {
 		}
 
 		const [advised, roleAdvised, unadvised] = captured;
-		expect(advised.get("advisor.enabled")).toBe(true);
+		expect(cfgAdvisorEnabled.get(advised)).toBe(true);
 		expect(advised.getModelRole("advisor")).toBe("moonshot/k3");
-		expect(roleAdvised.get("advisor.enabled")).toBe(true);
+		expect(cfgAdvisorEnabled.get(roleAdvised)).toBe(true);
 		expect(roleAdvised.getModelRole("advisor")).toBeUndefined();
-		expect(unadvised.get("advisor.enabled")).toBe(false);
+		expect(cfgAdvisorEnabled.get(unadvised)).toBe(false);
 	});
 
 	it("restores the persisted custom model role before reopening the session", async () => {
@@ -671,8 +674,8 @@ describe("persisted subagent revival", () => {
 
 		const revivedSettings = capturedOptions?.settings;
 		if (!revivedSettings) throw new Error("Expected revived child settings");
-		const parentCompaction = parentSettings.getGroup("compaction");
-		const revivedCompaction = revivedSettings.getGroup("compaction");
+		const parentCompaction = cfgCompaction.get(parentSettings);
+		const revivedCompaction = cfgCompaction.get(revivedSettings);
 		expect(shouldCompact(130_000, 200_000, parentCompaction)).toBe(true);
 		expect(resolveThresholdTokens(200_000, revivedCompaction)).toBe(144_000);
 		expect(shouldCompact(130_000, 200_000, revivedCompaction)).toBe(false);

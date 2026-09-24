@@ -93,7 +93,7 @@ Which automatic inputs reach each kind of session. An input applies only when it
 
 `SYSTEM_TEMPLATE.md` and `--system-prompt-template <path>` select raw Handlebars source from a file. Programmatic callers can instead pass raw Handlebars source through `CreateAgentSessionOptions.systemPromptTemplate` or `buildSystemPrompt({ systemPromptTemplate })`; those programmatic options are the template itself, not a path. Each route is rendered instead of the bundled `system-prompt.md` with the same live data and registered helpers as that bundled template.
 
-Generated blocks that are outside block 0 remain normal: the project/environment footer (including generated context and append material), computer safety, active nested-repository context, and provider tool schemas are retained. Data-driven sections that normally live inside the bundled template are not appended by magic. `skills`, `rules`, `alwaysApplyRules`, `toolInventory`, `xdevTools`, and `xdevDocs` are available to the template, but each is emitted only if the template references it. In particular, omitting `{{toolInventory}}` or `{{xdevDocs}}` omits that in-block catalog. Mount-notice dedupe follows the rendered output: a template whose block 0 contains an `xd://` reference claims the catalog, one that omits it does not.
+Generated blocks that are outside block 0 remain normal: the project/environment footer (including generated context and append material), computer safety, active nested-repository context, and provider tool schemas are retained. Data-driven sections that normally live inside the bundled template are not appended by magic. `skills`, `rules`, `alwaysApplyRules`, `toolInventory`, `internalUrls` (one rendered line per internal URL scheme available in the session), `xdevTools`, and `xdevDocs` are available to the template, but each is emitted only if the template references it. In particular, omitting `{{toolInventory}}` or `{{xdevDocs}}` omits that in-block catalog. Mount-notice dedupe follows the rendered output: a template whose block 0 contains an `xd://` reference claims the catalog, one that omits it does not.
 
 The generated project/footer route already renders `contextFiles` and `appendPrompt` once. A template SHOULD NOT render those fields in block 0 unless it intentionally wants duplicate copies.
 
@@ -114,7 +114,7 @@ Working in
 {{cwd}}
 on
 {{date}}.
-{{#if hasMemoryRoot}}Memory enabled.{{/if}}
+{{#if internalUrls.length}}Internal URLs available.{{/if}}
 ```
 
 those characters reach the model literally. Internal values such as `cwd`, `skills`, `rules`, and `toolRefs` remain private implementation details for the plain route. The calendar date is deliberately not exposed as a template value anymore — it rides the per-request first-turn reminder instead (see above).
