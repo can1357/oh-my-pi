@@ -240,6 +240,21 @@ function requestDocumentDiagnostics(
 		});
 }
 
+function isProvisionalColdPublish(
+	client: LspClient,
+	published: PublishedDiagnostics,
+	expectedDocumentVersion: number | undefined,
+	now: number,
+): boolean {
+	return (
+		expectedDocumentVersion !== undefined &&
+		published.version === null &&
+		published.diagnostics.length === 0 &&
+		client.startedAt !== undefined &&
+		now - client.startedAt < DEFERRED_DIAGNOSTICS_WAIT_TIMEOUT_MS
+	);
+}
+
 export async function waitForDiagnostics(
 	client: LspClient,
 	uri: string,
@@ -267,12 +282,17 @@ export async function waitForDiagnostics(
 			if (expectedDocumentVersion !== undefined && published.version === expectedDocumentVersion) {
 				return published.diagnostics;
 			}
-			// Unversioned/mismatched publish: wait for the stream to go quiet so an
-			// in-flight publish for the pre-edit content is superseded by the fresh one.
+			// An empty unversioned publish from a newly started server is often its
+			// pre-analysis placeholder. Keep waiting so the writethrough crosses its
+			// inline deadline and preserves this fetch for deferred delivery.
+			const now = Date.now();
 			if (published !== settledRef) {
 				settledRef = published;
-				settledAt = Date.now();
-			} else if (Date.now() - settledAt >= settleMs) {
+				settledAt = now;
+			} else if (
+				now - settledAt >= settleMs &&
+				!isProvisionalColdPublish(client, published, expectedDocumentVersion, now)
+			) {
 				return published.diagnostics;
 			}
 		}
@@ -303,7 +323,12 @@ export async function waitForDiagnostics(
 		if (expectedDocumentVersion !== undefined && published.version === expectedDocumentVersion) {
 			return published.diagnostics;
 		}
-		if (published === settledRef && Date.now() - settledAt >= settleMs) {
+		const now = Date.now();
+		if (
+			published === settledRef &&
+			now - settledAt >= settleMs &&
+			!isProvisionalColdPublish(client, published, expectedDocumentVersion, now)
+		) {
 			return published.diagnostics;
 		}
 	}
@@ -541,7 +566,18 @@ export async function formatContent(
 	const uri = fileToUri(absolutePath);
 	let hadFailure = false;
 
-	for (const [serverName, serverConfig] of servers) {
+	// Prefer dedicated formatter/linter servers (`isLinter`) over type-checkers
+	// when choosing who formats. A type-checker such as tsserver also advertises
+	// `documentFormattingProvider` but only reindents; without this preference a
+	// configured external formatter (prettier via efm-langserver, ruff, dprint,
+	// gofumpt) could never win for a file type the type-checker also claims,
+	// since the loop returns at the first formatting-capable server. The sort is
+	// stable, so same-class ordering (and the type-checker-first order used for
+	// type-intelligence in `getServerForFile`) is otherwise preserved.
+	const ordered =
+		servers.length > 1 ? [...servers].sort((a, b) => (a[1].isLinter ? 0 : 1) - (b[1].isLinter ? 0 : 1)) : servers;
+
+	for (const [serverName, serverConfig] of ordered) {
 		try {
 			throwIfAborted(signal);
 			// Use custom linter client if configured

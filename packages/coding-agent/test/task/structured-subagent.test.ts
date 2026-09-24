@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { BeforeSubagentSpawnEvent } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import {
 	artifactsDirsFromRegistry,
 	resetRegisteredArtifactDirsForTests,
@@ -418,6 +419,54 @@ describe("structured subagent primitive", () => {
 		expect(policy.modelOverride).toEqual(["openai/gpt-4o"]);
 	});
 
+	it("lets before_subagent_spawn replace model patterns at dispatch without dropping role identity", async () => {
+		mockDiscovery({ ...AGENT, model: ["@definition"] });
+		const childSession = session({ modelRoles: { definition: "anthropic/claude-opus-4-5" } });
+		const events: BeforeSubagentSpawnEvent[] = [];
+		childSession.emitBeforeSubagentSpawn = async event => {
+			events.push(event);
+			return { model: "openai/gpt-4o", note: "pool test" };
+		};
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+
+		// Frontend preflight is side-effect free: stateful routers must not advance.
+		await resolveEffectiveSubagentPolicy(request({ session: childSession }));
+		expect(events).toEqual([]);
+
+		const settled = await runStructuredSubagent(request({ session: childSession, retainArtifacts: true }));
+		expect(dispatched[0]).toMatchObject({
+			modelOverride: ["openai/gpt-4o"],
+			modelRole: "definition",
+			modelRoute: "pool test",
+		});
+		expect(events).toEqual([
+			{
+				type: "before_subagent_spawn",
+				agent: "worker",
+				invocationKind: "task",
+				modelRole: "definition",
+				patterns: ["anthropic/claude-opus-4-5"],
+			},
+		]);
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("rejects dispatch before leasing artifacts when an extension blocks the spawn", async () => {
+		mockDiscovery();
+		const blockedSession = session();
+		blockedSession.emitBeforeSubagentSpawn = async () => ({ block: true, reason: "pool exhausted" });
+		const run = vi.spyOn(executorModule, "runSubprocess");
+		const error = await runStructuredSubagent(request({ session: blockedSession })).catch((cause: unknown) => cause);
+		expect(error).toBeInstanceOf(StructuredSubagentError);
+		expect(error as StructuredSubagentError).toMatchObject({ kind: "preflight", message: "pool exhausted" });
+		expect(run).not.toHaveBeenCalled();
+		expect(artifactsDirsFromRegistry()).toEqual([]);
+	});
+
 	it("does not assign a role when a child uses an explicit model selector", async () => {
 		mockDiscovery();
 		const childSession = session({ modelRoles: { reviewer: "openai/gpt-4o" } });
@@ -742,12 +791,40 @@ describe("structured subagent primitive", () => {
 		await expect(fs.stat(artifactsDir ?? "")).rejects.toThrow();
 	});
 
+	it("reports a run that failed before yielding as unavailable, not schema-invalid", async () => {
+		// Production 2026-09-21: a scout whose model stream died mid-prose
+		// ("Anthropic stream envelope error: stream ended before message_stop")
+		// was delivered as `Structured output: schema invalid: <provider error>`
+		// with its half-streamed text as the offending payload. No payload was
+		// ever validated, so the status is "unavailable", the error is the
+		// provider's, and the partial prose is not presented as data.
+		mockDiscovery();
+		const error = "Anthropic stream envelope error: stream ended before message_stop";
+		vi.spyOn(executorModule, "runSubprocess").mockResolvedValue({
+			...result(),
+			exitCode: 1,
+			output: "I'll systematically investigate the codebase",
+			stderr: error,
+			error,
+		});
+
+		const settled = await runStructuredSubagent(request());
+
+		expect(settled.result.structuredOutput).toEqual({
+			source: "agent",
+			mode: "permissive",
+			status: "unavailable",
+			error,
+		});
+		expect(settled.result.structuredOutput).not.toHaveProperty("data");
+	});
+
 	it("retains a detached task's artifacts on failure even without valid structured output", async () => {
-		// Regression: a detached (async) task job that fails with schema
-		// status "invalid" (not "valid") previously had its temp dir wiped
-		// immediately, breaking the "failed agent stays interrogable"
-		// invariant (task/index.ts) — the model could no longer read the
-		// failure via agent://<id> or history://<id> (PR #10625 review).
+		// Regression: a detached (async) task job that fails without a valid
+		// structured payload previously had its temp dir wiped immediately,
+		// breaking the "failed agent stays interrogable" invariant
+		// (task/index.ts) — the model could no longer read the failure via
+		// agent://<id> or history://<id> (PR #10625 review).
 		mockDiscovery();
 		let artifactsDir: string | undefined;
 		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
@@ -758,7 +835,7 @@ describe("structured subagent primitive", () => {
 		const settled = await runStructuredSubagent(request({ retainArtifacts: true, detached: true }));
 
 		expect(settled.result.exitCode).toBe(1);
-		expect(settled.result.structuredOutput?.status).toBe("invalid");
+		expect(settled.result.structuredOutput?.status).toBe("unavailable");
 		expect(artifactsDirsFromRegistry()).toContain(settled.artifactsDir);
 		await expect(fs.stat(artifactsDir ?? "")).resolves.toBeDefined();
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });

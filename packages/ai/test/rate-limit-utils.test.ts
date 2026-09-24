@@ -400,6 +400,16 @@ describe("isUsageLimit", () => {
 		expect(parseRateLimitReason(message)).toBe("QUOTA_EXHAUSTED");
 	});
 
+	it("detects Claude subscription extra-usage exhaustion as a credential-rotatable usage limit", () => {
+		// Anthropic OAuth (claude.ai) accounts answer HTTP 400 invalid_request_error with
+		// this wording once the plan window and the extra-usage balance are both spent.
+		// Without the match a multi-account pool stays sticky on the exhausted account.
+		const message =
+			'400 {"type":"error","error":{"type":"invalid_request_error","message":"You\'re out of extra usage. Add more at claude.ai/settings/usage and keep going."}}';
+		expect(isUsageLimit(message)).toBe(true);
+		expect(isUsageLimit(Object.assign(new Error(message), { status: 400 }))).toBe(true);
+	});
+
 	it("detects OpenAI quota payload codes as credential-rotatable usage limits", () => {
 		for (const message of ["insufficient_quota", "usage_limit_exceeded", "usage_limit_reached"]) {
 			expect(isUsageLimit(message)).toBe(true);

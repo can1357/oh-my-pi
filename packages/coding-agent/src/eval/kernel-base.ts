@@ -21,6 +21,8 @@ export type KernelRuntimeEnv = Record<string, string | null>;
 
 export interface KernelExecuteOptions {
 	id?: string;
+	/** Source filename for file-backed execution and tracebacks. */
+	filename?: string;
 	/** Runtime working directory applied immediately before this request executes. */
 	cwd?: string;
 	/** Managed runtime environment variables applied immediately before this request executes. */

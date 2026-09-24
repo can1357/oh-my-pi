@@ -40,7 +40,7 @@ describe("KimiProvider availability", () => {
 		const available = await withLocalAuthStorage(async authStorage => {
 			// A Moonshot Open Platform key is a different credential system than the
 			// Kimi Code search endpoint (issue #5762) — it must not mark Kimi available.
-			await authStorage.set("moonshot", { type: "api_key", key: "moonshot-open-platform-key" });
+			await authStorage.credentials.set("moonshot", { type: "api_key", key: "moonshot-open-platform-key" });
 			return new KimiProvider().isAvailable(authStorage);
 		});
 		expect(available).toBe(false);
@@ -50,7 +50,7 @@ describe("KimiProvider availability", () => {
 		delete process.env.MOONSHOT_SEARCH_API_KEY;
 		delete process.env.KIMI_SEARCH_API_KEY;
 		const available = await withLocalAuthStorage(async authStorage => {
-			await authStorage.set("kimi-code", { type: "api_key", key: "kimi-code-console-key" });
+			await authStorage.credentials.set("kimi-code", { type: "api_key", key: "kimi-code-console-key" });
 			return new KimiProvider().isAvailable(authStorage);
 		});
 		expect(available).toBe(true);
@@ -88,7 +88,7 @@ describe("searchKimi credential resolution", () => {
 		};
 
 		await withLocalAuthStorage(async authStorage => {
-			await authStorage.set("kimi-code", { type: "api_key", key: "kimi-code-console-key" });
+			await authStorage.credentials.set("kimi-code", { type: "api_key", key: "kimi-code-console-key" });
 			const result = await searchKimi({ query: "kimi docs", authStorage, fetch: fetchMock });
 			expect(result.provider).toBe("kimi");
 		});
@@ -105,7 +105,7 @@ describe("searchKimi credential resolution", () => {
 		};
 
 		await withLocalAuthStorage(async authStorage => {
-			await authStorage.set("moonshot", { type: "api_key", key: "moonshot-open-platform-key" });
+			await authStorage.credentials.set("moonshot", { type: "api_key", key: "moonshot-open-platform-key" });
 			await expect(searchKimi({ query: "kimi docs", authStorage, fetch: fetchMock })).rejects.toThrow(/Kimi Code/);
 		});
 	});

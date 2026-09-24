@@ -4,6 +4,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { buildDocsIndexPayload } from "./generate-docs-index";
+import { createJsonParsePlugin } from "./json-parse-plugin";
 import { createLegacyPiVirtualModulePlugin } from "./legacy-pi-virtual-module";
 
 const packageDir = path.join(import.meta.dir, "..");
@@ -92,7 +93,7 @@ export async function bundleDist(outDir: string = defaultOutDir): Promise<void> 
 			entrypoints: [path.join(packageDir, "src/cli.ts")],
 			outdir: outDir,
 			target: "bun",
-			plugins: [await createLegacyPiVirtualModulePlugin()],
+			plugins: [createJsonParsePlugin(), await createLegacyPiVirtualModulePlugin()],
 			external: [...ALWAYS_EXTERNAL, ...RUNTIME_EXTERNAL],
 			define: {
 				"process.env.PI_BUNDLED": JSON.stringify("true"),

@@ -43,11 +43,13 @@ function makeExternallyMutableStore(rows: StoredAuthCredential[]): ExternalStore
 		close() {},
 		listAuthCredentials: provider => rows.filter(row => provider === undefined || row.provider === provider),
 		updateAuthCredential() {},
-		deleteAuthCredential() {},
+		async deleteAuthCredential() {
+			return false;
+		},
 		tryDisableAuthCredentialIfMatches: () => false,
-		replaceAuthCredentialsForProvider: () => rows,
-		upsertAuthCredentialForProvider: () => rows,
-		deleteAuthCredentialsForProvider() {},
+		replaceAuthCredentials: async () => rows,
+		upsertAuthCredential: async () => rows,
+		async deleteAuthCredentials() {},
 		getCredentialBlock: (credentialId: number, _providerKey: string, blockScope: string) =>
 			blocks.get(`${credentialId}:${blockScope}`),
 		upsertCredentialBlock: block => {
@@ -96,23 +98,23 @@ describe("credential pool visibility across processes", () => {
 		const { store, commitExternally } = makeExternallyMutableStore(rows);
 		const storage = new AuthStorage(store, { configValueResolver: async value => value });
 		storages.push(storage);
-		await storage.reload();
+		await storage.credentials.reload();
 
 		// Rotation attributes the failure to the session's pinned credential, so
 		// establish the pin the way a real turn does.
-		expect(await storage.getApiKey("anthropic", "session-1")).toBe("access-1");
+		expect(await storage.keys.get("anthropic", "session-1")).toBe("access-1");
 
 		const usageLimitError = Object.assign(new Error("429 usage limit reached"), { status: 429 });
 
 		// Sole account is spent: nothing to rotate onto.
-		expect(await storage.rotateSessionCredential("anthropic", "session-1", { error: usageLimitError })).toBe(false);
+		expect(await storage.limits.rotate("anthropic", "session-1", { error: usageLimitError })).toBe(false);
 
 		commitExternally(oauthRow(2));
 
 		// The new account is usable, so the same session must switch to it rather
 		// than report the provider exhausted.
-		expect(await storage.rotateSessionCredential("anthropic", "session-1", { error: usageLimitError })).toBe(true);
-		expect(await storage.getApiKey("anthropic", "session-1")).toBe("access-2");
+		expect(await storage.limits.rotate("anthropic", "session-1", { error: usageLimitError })).toBe(true);
+		expect(await storage.keys.get("anthropic", "session-1")).toBe("access-2");
 	});
 
 	it("selects an account another process added, with no rotation in between", async () => {
@@ -120,15 +122,15 @@ describe("credential pool visibility across processes", () => {
 		const { store, commitExternally } = makeExternallyMutableStore(rows);
 		const storage = new AuthStorage(store, { configValueResolver: async value => value });
 		storages.push(storage);
-		await storage.reload();
+		await storage.credentials.reload();
 
 		// A session that started before any account existed.
-		expect(await storage.getOAuthAccess("anthropic", "session-1")).toBeUndefined();
+		expect(await storage.oauth.access("anthropic", "session-1")).toBeUndefined();
 
 		commitExternally(oauthRow(1));
 
 		// Selection alone must see the new row: no usage-limit error, no rotation.
-		expect(await storage.getApiKey("anthropic", "session-1")).toBe("access-1");
+		expect(await storage.keys.get("anthropic", "session-1")).toBe("access-1");
 	});
 
 	it("makes an externally added account visible to non-refreshing discovery", async () => {
@@ -136,11 +138,11 @@ describe("credential pool visibility across processes", () => {
 		const { store, commitExternally } = makeExternallyMutableStore(rows);
 		const storage = new AuthStorage(store, { configValueResolver: async value => value });
 		storages.push(storage);
-		await storage.reload();
+		await storage.credentials.reload();
 
 		commitExternally(oauthRow(1));
 
-		expect(await storage.peekApiKey("anthropic")).toBe("access-1");
+		expect(await storage.keys.peek("anthropic")).toBe("access-1");
 	});
 
 	it("resolves OAuth access for an account another process added", async () => {
@@ -148,14 +150,14 @@ describe("credential pool visibility across processes", () => {
 		const { store, commitExternally } = makeExternallyMutableStore(rows);
 		const storage = new AuthStorage(store, { configValueResolver: async value => value });
 		storages.push(storage);
-		await storage.reload();
+		await storage.credentials.reload();
 
 		// `withOAuthAccess` consumers start here rather than at `getApiKey`.
-		expect(await storage.getOAuthAccess("anthropic", "session-1")).toBeUndefined();
+		expect(await storage.oauth.access("anthropic", "session-1")).toBeUndefined();
 
 		commitExternally(oauthRow(1));
 
-		const resolved = await storage.getOAuthAccess("anthropic", "session-1");
+		const resolved = await storage.oauth.access("anthropic", "session-1");
 		expect(resolved?.accessToken).toBe("access-1");
 	});
 
@@ -170,11 +172,11 @@ describe("credential pool visibility across processes", () => {
 		};
 		const storage = new AuthStorage(store, { configValueResolver: async value => value });
 		storages.push(storage);
-		await storage.reload();
+		await storage.credentials.reload();
 		const afterInitialLoad = listCalls;
 
 		const usageLimitError = Object.assign(new Error("429 usage limit reached"), { status: 429 });
-		await storage.rotateSessionCredential("anthropic", "session-1", { error: usageLimitError });
+		await storage.limits.rotate("anthropic", "session-1", { error: usageLimitError });
 
 		// An unchanged store is a `PRAGMA data_version` read, never a re-list.
 		expect(listCalls).toBe(afterInitialLoad);
@@ -185,21 +187,43 @@ describe("credential pool visibility across processes", () => {
 		const { store, removeExternally, blocks } = makeExternallyMutableStore(rows);
 		const storage = new AuthStorage(store, { configValueResolver: async value => value });
 		storages.push(storage);
-		await storage.reload();
+		await storage.credentials.reload();
 
 		// Pin the session to the first row, the way a real turn does.
-		expect(await storage.getApiKey("anthropic", "session-1")).toBe("access-1");
+		expect(await storage.keys.get("anthropic", "session-1")).toBe("access-1");
 
 		// The pool is an index-ordered snapshot, so deleting the pinned row moves
 		// the sibling into its slot.
 		removeExternally(1);
 
 		const usageLimitError = Object.assign(new Error("429 usage limit reached"), { status: 429 });
-		const switched = await storage.rotateSessionCredential("anthropic", "session-1", { error: usageLimitError });
+		const switched = await storage.limits.rotate("anthropic", "session-1", { error: usageLimitError });
 
 		// The failure belongs to an account that is gone; the sibling that took
 		// index 0 must not be blocked for it.
 		expect(switched).toBe(false);
 		expect([...blocks.keys()].filter(key => key.startsWith("2:"))).toEqual([]);
+	});
+
+	it("keeps a block on its own account after another process removes an earlier row", async () => {
+		const rows = [oauthRow(1), oauthRow(2), oauthRow(3)];
+		const { store, removeExternally } = makeExternallyMutableStore(rows);
+		const storage = new AuthStorage(store, {
+			configValueResolver: async value => value,
+			usageProviderResolver: () => undefined,
+			rankingStrategyResolver: () => undefined,
+		});
+		storages.push(storage);
+		await storage.credentials.reload();
+
+		const limited = { retryAfterMs: 60 * 60_000, credentialId: 2 };
+		expect((await storage.limits.markReached("anthropic", undefined, limited)).switched).toBe(true);
+
+		// Removing row 1 shifts rows 2 and 3 down one slot in the snapshot.
+		removeExternally(1);
+
+		// Row 3 was never limited: row 2's block must not follow its old slot onto it.
+		expect((await storage.limits.markReached("anthropic", undefined, limited)).switched).toBe(true);
+		expect(await storage.keys.get("anthropic")).toBe("access-3");
 	});
 });

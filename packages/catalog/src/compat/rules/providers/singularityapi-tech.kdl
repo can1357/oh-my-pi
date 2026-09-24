@@ -1,0 +1,72 @@
+// SingularityAPI reserved DeepSeek lanes (api.singularityapi.tech, a LiteLLM
+// front end for slot-reserved lanes). This is the vendor's other product —
+// see `singularityapi-dev` for the pay-as-you-go universal gateway — split
+// out because the two gateways publish conflicting effort ladders: `max` is
+// valid here and400s there, `medium` is rejected here and accepted there
+// (both measured live 2026-09-22). Usage bills against a booked reservation
+// slot, so a valid key with no active slot answers 403 `permission_error`
+// ("No active lane reservation for this key", verified 2026-09-22): login
+// succeeds while a slot is idle, inference waits for one.
+//
+// The live `/v1/models` roster owns membership: keys are lane-scoped `sk-...`
+// bearer tokens issued from the dashboard, and a bogus key is rejected with
+// 401 `token_not_found_in_db` (verified 2026-09-21), so no rows are frozen
+// here. Deliberately no `discovery` node: that node enrolls a provider in
+// generate-models.ts, which would freeze one account's lane snapshot into
+// models.json on every credential-less regen. The roster is per-key
+// credential-scoped, so `singularityApiTechModelManagerOptions` keys its
+// authoritative cache on both the resolved credential and the endpoint;
+// `dynamic-models-authoritative` prunes stale rows.
+provider "singularityapi-tech" {
+	default-model "deepseek-ai/DeepSeek-V4.1-Flash"
+	env "SINGULARITYAPI_TECH_API_KEY"
+	dynamic-models-authoritative #true
+
+	// Gateway-wide request shape. The deployment fronts DeepSeek lanes only and
+	// its front end takes `max_tokens`, returning reasoning as top-level
+	// `reasoning_content` on the final message and on streamed deltas (verified
+	// live 2026-09-22). A lane row that no `models` rule below matches inherits
+	// exactly this shape instead of the openai-completions default
+	// (`max_completion_tokens`), because the roster is per-key and unreviewed
+	// lanes are expected.
+	max-tokens-field "max_tokens"
+	reasoning-content-field "reasoning_content"
+
+	// Model guide (dashboard): the lane runs DeepSeek V4.1 Flash. Send
+	// `deepseek-ai/DeepSeek-V4.1-Flash`; the short alias
+	// `deepseek-v4.1-flash` is accepted too, and the account also serves the
+	// dated V4 Flash row. Context is 262,144 tokens prompt+completion (not the
+	// documented 1M); an overflowing max_tokens is reduced automatically, and a
+	// prompt within ~1K of the limit 400s. Both ids classify deepseek/flash by
+	// taxonomy, but bare `/v1/models` rows carry no reasoning metadata, so
+	// neutral discovery would leave the effort dial dark.
+	// Glob, not `exact`: one lane ships as a `deepseek-ai/…` id, a dated `-0731`
+	// row and a short alias, and cascade globs match the lowercased id, so one
+	// pattern covers each spelling where `exact` compares the raw id verbatim.
+	models "*deepseek-v4-flash-0731" "*deepseek-v4.1-flash" {
+		thinking-upgrade-neutral #true
+		// Effort vocabulary measured against the live gateway 2026-09-22:
+		// `none`, `minimal`, `low`, `high`, `xhigh`, `max` pass admission;
+		// `medium` and integer efforts 400 even though the gateway's own
+		// rejected-variant text lists `medium` as valid, so the guide's
+		// integer 1-100 scale does not survive the forward path. The ladder
+		// below is the accepted named set, `none` owns the off position.
+		thinking-efforts "low" "high" "xhigh" "max"
+		reasoning-disable-mode "none-effort"
+		// Guide: an overflowing max_tokens is reduced automatically, so clamp the
+		// request to the lane's ceiling rather than let the gateway answer 400.
+		// Lane-scoped, not provider-wide: for a row whose ceiling discovery leaves
+		// unknown the clamp falls back to the OpenAI default ceiling, which is not
+		// something an unreviewed lane should inherit.
+		clamp-output-to-model-max #true
+		// Guide: up to 8 image_url parts per request (PNG/JPEG, data URL or
+		// public https). Declared here as well as clearing the class strip:
+		// live discovery seeds input ["text"], and the wire guard requires the
+		// declared modality.
+		input-modalities "text" "image"
+		strip-image-input #false
+		limits-patch {
+			context-window 262144
+		}
+	}
+}

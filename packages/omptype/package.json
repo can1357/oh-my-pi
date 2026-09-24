@@ -1,10 +1,10 @@
 {
   "type": "module",
   "name": "@oh-my-pi/omptype",
-  "version": "18.2.6",
+  "version": "18.3.0",
   "description": "ArkType-compatible runtime schema validation with lazy JIT compilation",
   "homepage": "https://omp.sh",
-  "author": "Stencil Labs, Inc.",
+  "author": { "name": "Stencil Labs, Inc.", "url": "https://stencil.so" },
   "license": "MIT",
   "repository": {
     "type": "git",

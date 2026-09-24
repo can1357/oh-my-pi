@@ -8,6 +8,7 @@
  * anything timestamp-shaped is a seek position.
  */
 import * as path from "node:path";
+import { rasterizeSvg } from "@oh-my-pi/pi-natives";
 import { isVideoPath } from "@oh-my-pi/pi-tui/prompt/video";
 import { untilAborted } from "@oh-my-pi/pi-utils/abortable";
 import { TempDir } from "@oh-my-pi/pi-utils/temp";
@@ -127,12 +128,12 @@ async function framePassthroughFlag(): Promise<string[]> {
 	return cachedFpsModeFlag;
 }
 
-/** Resolve a system binary or throw a user-facing install hint. */
-function requireMediaBinary(name: "ffmpeg" | "ffprobe"): string {
+/** Resolve a system media binary or throw a user-facing install hint. */
+export function requireMediaBinary(name: "ffmpeg" | "ffprobe"): string {
 	const found = $which(name);
 	if (!found) {
 		throw new VideoError(
-			`Reading video requires ${name}, which was not found on PATH. Install it (e.g. \`brew install ffmpeg\`) and retry.`,
+			`Video operations require ${name}, which was not found on PATH. Install it (e.g. \`brew install ffmpeg\`) and retry.`,
 		);
 	}
 	return found;
@@ -301,7 +302,8 @@ export interface VideoPng {
 	readonly mimeType: "image/png";
 }
 
-async function runFfmpeg(args: string[], signal?: AbortSignal): Promise<void> {
+/** Run ffmpeg with bounded, abort-aware process cleanup and a user-facing failure. */
+export async function runFfmpeg(args: string[], signal?: AbortSignal): Promise<void> {
 	const ffmpeg = requireMediaBinary("ffmpeg");
 	if (signal?.aborted) throw new VideoError("Video operation aborted.");
 	const child = Bun.spawn([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", ...args], {
@@ -453,6 +455,210 @@ export async function buildVideoContactSheetPng(
 			thumbs: available.length,
 			cols,
 			rows,
+		};
+	} finally {
+		await tmp.remove().catch(() => {});
+	}
+}
+
+/** Options for selecting changed frames and composing a labeled recording contact sheet. */
+export interface ChangedFrameContactSheetOptions {
+	/** Destination PNG path. */
+	readonly outputPath: string;
+	/** Constant frame rate of the encoded source. */
+	readonly fps: number;
+	/** Minimum changed-pixel ratio needed to retain an intermediate frame. */
+	readonly threshold: number;
+	/** Maximum number of tiles, including the first and last frames. */
+	readonly maxTiles?: number;
+}
+
+/** A labeled contact sheet built from visually changed frames. */
+export interface ChangedFrameContactSheet {
+	/** Absolute destination path. */
+	readonly path: string;
+	/** PNG bytes ready for a vision image block. */
+	readonly png: VideoPng;
+	/** Number of rendered thumbnails. */
+	readonly thumbs: number;
+	/** Tile-grid columns. */
+	readonly cols: number;
+	/** Tile-grid rows. */
+	readonly rows: number;
+	/** Output PNG width. */
+	readonly width: number;
+	/** Output PNG height. */
+	readonly height: number;
+}
+
+interface ScoredFrame {
+	index: number;
+	score: number;
+}
+
+const CHANGE_SAMPLE_WIDTH = 64;
+const CHANGE_SAMPLE_HEIGHT = 64;
+const CHANGE_PIXEL_DELTA = 16;
+const RECORDING_CONTACT_THUMB_WIDTH = 320;
+
+function formatContactSheetTimestamp(seconds: number): string {
+	const tenths = Math.max(0, Math.round(seconds * 10));
+	const minutes = Math.floor(tenths / 600);
+	const secondsWithinMinute = Math.floor((tenths % 600) / 10);
+	return `${String(minutes).padStart(2, "0")}:${String(secondsWithinMinute).padStart(2, "0")}.${tenths % 10}`;
+}
+
+async function selectChangedFrames(
+	rawPath: string,
+	threshold: number,
+	maxTiles: number,
+	signal?: AbortSignal,
+): Promise<number[]> {
+	const frameBytes = CHANGE_SAMPLE_WIDTH * CHANGE_SAMPLE_HEIGHT;
+	const reader = Bun.file(rawPath).stream().getReader();
+	let pending = Buffer.alloc(0);
+	let previous: Buffer | undefined;
+	let frameIndex = 0;
+	let lastIndex = -1;
+	const changed: ScoredFrame[] = [];
+	try {
+		for (;;) {
+			if (signal?.aborted) throw new VideoError("Video operation aborted.");
+			const { done, value } = await reader.read();
+			if (done) break;
+			pending =
+				pending.length === 0
+					? Buffer.from(value)
+					: Buffer.concat([pending, Buffer.from(value)], pending.length + value.length);
+			while (pending.length >= frameBytes) {
+				const frame = pending.subarray(0, frameBytes);
+				pending = pending.subarray(frameBytes);
+				if (previous) {
+					let changedPixels = 0;
+					for (let i = 0; i < frameBytes; i++) {
+						if (Math.abs(frame[i]! - previous[i]!) > CHANGE_PIXEL_DELTA) changedPixels++;
+					}
+					const score = changedPixels / frameBytes;
+					if (score >= threshold) {
+						changed.push({ index: frameIndex, score });
+						changed.sort((a, b) => b.score - a.score || a.index - b.index);
+						if (changed.length > Math.max(0, maxTiles - 2)) changed.pop();
+					}
+				}
+				previous = Buffer.from(frame);
+				lastIndex = frameIndex;
+				frameIndex++;
+			}
+		}
+	} finally {
+		reader.releaseLock();
+	}
+	if (lastIndex < 0) throw new VideoError("Could not decode frames for the recording contact sheet.");
+	const selected = new Set<number>([0, lastIndex]);
+	for (const frame of changed) selected.add(frame.index);
+	return [...selected].sort((a, b) => a - b);
+}
+
+/**
+ * Select visually changed frames from a constant-frame-rate video and write a
+ * timestamp-labeled PNG contact sheet. Analysis is disk-backed and streamed.
+ */
+export async function buildChangedFrameContactSheetPng(
+	absolutePath: string,
+	options: ChangedFrameContactSheetOptions,
+	signal?: AbortSignal,
+): Promise<ChangedFrameContactSheet> {
+	const maxTiles = Math.max(2, Math.min(12, Math.floor(options.maxTiles ?? 12)));
+	const tmp = await TempDir.create("omp-video-change-sheet-");
+	try {
+		const raw = tmp.join("frames.gray");
+		await runFfmpeg(
+			[
+				"-i",
+				absolutePath,
+				"-vf",
+				`scale=${CHANGE_SAMPLE_WIDTH}:${CHANGE_SAMPLE_HEIGHT},format=gray`,
+				"-f",
+				"rawvideo",
+				raw,
+			],
+			signal,
+		);
+		const indexes = await selectChangedFrames(raw, options.threshold, maxTiles, signal);
+		const rawThumbPaths = indexes.map((_, i) => tmp.join(`thumb-raw-${i}.png`));
+		const labelPaths = indexes.map((_, i) => tmp.join(`label-${i}.png`));
+		const thumbPaths = indexes.map((_, i) => tmp.join(`thumb-${i}.png`));
+		await Promise.all(
+			indexes.map(async (index, i) => {
+				const seconds = index / options.fps;
+				const label = formatContactSheetTimestamp(seconds);
+				try {
+					await runFfmpeg(
+						[
+							"-ss",
+							String(Math.max(0, seconds - 0.001)),
+							"-i",
+							absolutePath,
+							"-frames:v",
+							"1",
+							"-vf",
+							`scale=${RECORDING_CONTACT_THUMB_WIDTH}:-2`,
+							rawThumbPaths[i]!,
+						],
+						signal,
+					);
+					const labelSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="${RECORDING_CONTACT_THUMB_WIDTH}" height="30"><rect width="100%" height="100%" fill="#000" fill-opacity=".7"/><text x="8" y="22" fill="#fff" font-size="18" font-family="monospace">${label}</text></svg>`;
+					const labelPng = await rasterizeSvg(Buffer.from(labelSvg), RECORDING_CONTACT_THUMB_WIDTH, 30);
+					await Bun.write(labelPaths[i]!, labelPng);
+					await runFfmpeg(
+						[
+							"-i",
+							rawThumbPaths[i]!,
+							"-i",
+							labelPaths[i]!,
+							"-filter_complex",
+							"[0:v][1:v]overlay=0:H-h",
+							"-frames:v",
+							"1",
+							thumbPaths[i]!,
+						],
+						signal,
+					);
+				} catch (error) {
+					if (signal?.aborted) throw error;
+				}
+			}),
+		);
+		const available = thumbPaths.filter(thumb => Bun.file(thumb).size > 0);
+		if (available.length === 0) throw new VideoError("Could not extract contact-sheet frames from the recording.");
+		const cols = Math.min(CONTACT_SHEET_COLS, available.length);
+		const rows = Math.ceil(available.length / cols);
+		const inputs = available.flatMap(thumb => ["-i", thumb]);
+		const concat = available.map((_, i) => `[${i}:v]`).join("");
+		await runFfmpeg(
+			[
+				...inputs,
+				"-filter_complex",
+				`${concat}concat=n=${available.length}:v=1:a=0,tile=${cols}x${rows}:padding=0:margin=0:color=black`,
+				"-frames:v",
+				"1",
+				options.outputPath,
+			],
+			signal,
+		);
+		const bytes = await Bun.file(options.outputPath)
+			.bytes()
+			.catch(() => null);
+		if (!bytes || bytes.length === 0) throw new VideoError("Could not build the recording contact sheet.");
+		const metadata = await new Bun.Image(bytes).metadata();
+		return {
+			path: options.outputPath,
+			png: { data: Buffer.from(bytes).toBase64(), mimeType: "image/png" },
+			thumbs: available.length,
+			cols,
+			rows,
+			width: metadata.width,
+			height: metadata.height,
 		};
 	} finally {
 		await tmp.remove().catch(() => {});

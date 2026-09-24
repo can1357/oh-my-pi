@@ -40,7 +40,7 @@ import { createUsageRowBlock, turnElapsedMs } from "@oh-my-pi/pi-tui/overlays/us
 import { UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
 import { decodeStreamedToolArgs, streamingStringKeysForTool } from "../../modes/controllers/tool-args-reveal";
 import { materializeImageReferenceLinksSync } from "@oh-my-pi/pi-tui/prompt/image-references";
-import { videoPreviewSource } from "@oh-my-pi/pi-tui/prompt/video";
+import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import type { CompactionQueuedMessage, InteractiveModeContext, RenderSessionContextOptions } from "../../modes/types";
 import { LAUNCH_COMPLETION_MESSAGE_TYPE } from "../../session/launch-completion";
@@ -116,7 +116,7 @@ function imageLinksForMessage(
 			content.type === "image" && typeof content.data === "string" && typeof content.mimeType === "string",
 	);
 	const materialized = materializeImageReferenceLinksSync(images, putBlobSync);
-	return images.map((image, index) => videoPreviewSource(image) ?? materialized?.[index]);
+	return images.map((image, index) => imageAttachmentSource(image)?.path ?? materialized?.[index]);
 }
 
 export class UiHelpers {
@@ -425,8 +425,8 @@ export class UiHelpers {
 			pendingUsageTurnElapsed = undefined;
 		};
 		// Rebuild-time mirror of the event controller's displaceable-poll
-		// bookkeeping: a `hub` wait that found every watched job still running is
-		// superseded by the next `hub` call, so a rebuilt transcript collapses a
+		// bookkeeping: a `wait` that found every watched job still running is
+		// superseded by the next `wait` call, so a rebuilt transcript collapses a
 		// repeated-poll run to its final snapshot instead of replaying the spam.
 		let waitingPoll: ToolExecutionComponent | null = null;
 		const resolveWaitingPoll = (nextToolName?: string) => {
@@ -434,7 +434,7 @@ export class UiHelpers {
 			if (!previous) return;
 			waitingPoll = null;
 			if (
-				nextToolName === "hub" &&
+				nextToolName === "wait" &&
 				previous.isDisplaceableBlock() &&
 				this.ctx.chatContainer.canRemoveBlock(previous)
 			) {
@@ -711,7 +711,7 @@ export class UiHelpers {
 					} else {
 						this.ctx.pendingTools.delete(message.toolCallId);
 						if (
-							message.toolName === "hub" &&
+							message.toolName === "wait" &&
 							component instanceof ToolExecutionComponent &&
 							component.isDisplaceableBlock()
 						) {

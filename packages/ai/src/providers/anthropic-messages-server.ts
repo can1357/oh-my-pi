@@ -464,6 +464,8 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	if (headers) {
 		const captured = captureRequestHeaders(headers);
 		if (Object.keys(captured).length > 0) options.headers = captured;
+		const userProfileId = headers.get("anthropic-user-profile-id");
+		if (userProfileId) options.userProfileId = userProfileId;
 	}
 
 	return {

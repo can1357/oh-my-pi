@@ -26,10 +26,14 @@ import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
 import taskDescriptionTemplate from "../prompts/tools/task.md" with { type: "text" };
 import taskAsyncContractTemplate from "../prompts/tools/task-async-contract.md" with { type: "text" };
+import taskCoordinationAdvisoryTemplate from "../prompts/tools/task-coordination-advisory.md" with { type: "text" };
+import taskSpawnFeedbackTemplate from "../prompts/tools/task-spawn-feedback.md" with { type: "text" };
+import taskSpecializationAdvisoryTemplate from "../prompts/tools/task-specialization-advisory.md" with { type: "text" };
 import taskFollowUpTemplate from "../prompts/tools/task-follow-up.md" with { type: "text" };
 import { TASK_EFFORTS, type TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import { truncateForPrompt } from "../tools/approval";
-import { isIrcEnabled } from "../tools/hub";
+import { hasWaitTool } from "../tools/wait";
+import { isIrcEnabled } from "../irc/messaging";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
 import { isIsolationAvailable, isScoutSpawnable, resolveSpawnPolicy } from "./spawn-policy";
@@ -381,16 +385,18 @@ export function buildSpecializationAdvisory(
 	if (!depthCapacity) return undefined;
 	const generics = agentNames.filter(name => GENERIC_SPAWN_AGENTS.has(name));
 	if (generics.length < 2) return undefined;
-	const specialist = scoutAvailable
-		? `Check the agent list for a closer specialist type — e.g. read-only research belongs on ` +
-			`\`agent: "scout"\`, which runs on a faster model.`
-		: `Check the agent list for a closer specialist type.`;
-	return `Tip: this call spawned ${generics.length} generic \`${generics[0]}\` workers. ${specialist}`;
+	return prompt
+		.render(taskSpecializationAdvisoryTemplate, {
+			count: generics.length,
+			agent: generics[0],
+			scoutAvailable,
+		})
+		.trim();
 }
 
 /**
  * Suggestion — never a rejection — nudging the spawner to coordinate via the
- * hub when one call creates ≥2 live siblings and it still holds spawn
+ * peer messages when one call creates ≥2 live siblings and it still holds spawn
  * capacity. Returns undefined when there is nothing to coordinate or peer
  * messaging is unavailable.
  */
@@ -400,11 +406,7 @@ export function buildCoordinationAdvisory(
 	ircEnabled: boolean,
 ): string | undefined {
 	if (!depthCapacity || !ircEnabled || items.length < 2) return undefined;
-	return (
-		`Coordinate: ${items.length} siblings are running together. If their work overlaps, have them ` +
-		`message each other via \`hub\` (by id, or "all" to broadcast) before editing shared files — ` +
-		`live coordination beats a serial handoff. Check \`hub\` op:"list" to see who is doing what.`
-	);
+	return prompt.render(taskCoordinationAdvisoryTemplate, { count: items.length }).trim();
 }
 
 /**
@@ -962,20 +964,29 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			failedSchedules.length > 0
 				? ` Failed to schedule ${failedSchedules.length} spawn${failedSchedules.length === 1 ? "" : "s"}: ${failedSchedules.join("; ")}.`
 				: "";
-		const coordinationHint = [
-			started.length === 1
-				? ircEnabled
-					? `DM \`${started[0].agentId}\` via \`hub\` send to coordinate while it runs; use \`hub\` only to inspect (\`jobs\`), wait, or cancel a stuck task.`
-					: `Use \`hub\` to inspect (\`jobs\`), wait, or cancel a stuck task.`
-				: ircEnabled
-					? `DM these ids via \`hub\` send to coordinate while they run; use \`hub\` only to inspect (\`jobs\`), wait, or cancel a stuck task.`
-					: `Use \`hub\` to inspect (\`jobs\`), wait, or cancel a stuck task by id.`,
-			taskAsyncContractTemplate.trim(),
-		].join("\n");
+		const guidance = prompt
+			.render(taskAsyncContractTemplate, { ircEnabled, waitTool: hasWaitTool(this.session) })
+			.trim();
+		const renderSpawnFeedback = (mixed: boolean): string =>
+			prompt
+				.render(taskSpawnFeedbackTemplate, {
+					mixed,
+					singular: started.length === 1,
+					singleCall: spawns.length === 1,
+					showListing: mixed || spawns.length > 1,
+					count: started.length,
+					agentId: started[0]?.agentId,
+					jobId: started[0]?.jobId,
+					agentLabel,
+					started,
+					scheduleFailureSummary,
+					guidance,
+				})
+				.trim();
 
 		if (syncSpawns.length === 0) {
 			if (spawns.length === 1) {
-				const { agentId, jobId } = started[0];
+				const { agentId } = started[0];
 				onUpdate?.({
 					content: [{ type: "text", text: `Spawned agent \`${agentId}\`...` }],
 					details: buildAsyncDetails(),
@@ -984,13 +995,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					content: [
 						{
 							type: "text",
-							text: `Spawned agent \`${agentId}\` (job \`${jobId}\`). Its result auto-delivers on yield unless a settled \`hub jobs\`/\`wait\` snapshot consumes it first. ${coordinationHint}`,
+							text: renderSpawnFeedback(false),
 						},
 					],
 					details: buildAsyncDetails(),
 				});
 			}
-			const startedListing = started.map(({ agentId, jobId }) => `- \`${agentId}\` (job \`${jobId}\`)`).join("\n");
 			onUpdate?.({
 				content: [{ type: "text", text: `Spawned ${started.length} agents...` }],
 				details: buildAsyncDetails(),
@@ -999,7 +1009,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				content: [
 					{
 						type: "text",
-						text: `Spawned ${started.length} background agents using ${agentLabel}.${scheduleFailureSummary} Each result auto-delivers on yield unless a settled \`hub jobs\`/\`wait\` snapshot consumes it first.\n${startedListing}\n${coordinationHint}`,
+						text: renderSpawnFeedback(false),
 					},
 				],
 				details: buildAsyncDetails(),
@@ -1061,10 +1071,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			}
 		}
 
-		const spawnedSummary =
-			started.length > 0
-				? `Spawned ${started.length} background agent${started.length === 1 ? "" : "s"}.${scheduleFailureSummary} Each result auto-delivers on yield unless a settled \`hub jobs\`/\`wait\` snapshot consumes it first.\n${started.map(({ agentId, jobId }) => `- \`${agentId}\` (job \`${jobId}\`)`).join("\n")}\n${coordinationHint}`
-				: scheduleFailureSummary.trim();
+		const spawnedSummary = started.length > 0 ? renderSpawnFeedback(true) : scheduleFailureSummary.trim();
 		const text = [merged.contentParts.join("\n\n"), spawnedSummary]
 			.filter(section => section.trim().length > 0)
 			.join("\n\n");
@@ -1167,6 +1174,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 								? nextProgress.resolvedModelIsFallback
 								: undefined;
 							progress.advisor = nextProgress.advisor ?? progress.advisor;
+							progress.resolvedModelRoute = nextProgress.resolvedModelRoute ?? progress.resolvedModelRoute;
 							progress.tokens = nextProgress.tokens;
 							progress.requests = nextProgress.requests;
 							progress.contextTokens = nextProgress.contextTokens;
@@ -1231,6 +1239,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					progress.retryState = undefined;
 					progress.modelRole = singleResult?.modelRole ?? progress.modelRole;
 					progress.advisor = singleResult?.advisor ?? progress.advisor;
+					progress.resolvedModelRoute = singleResult?.resolvedModelRoute ?? progress.resolvedModelRoute;
 					if (singleResult?.resolvedModel) {
 						progress.resolvedModel = singleResult.resolvedModel;
 						progress.resolvedModelIdentity = singleResult.resolvedModelIdentity;
