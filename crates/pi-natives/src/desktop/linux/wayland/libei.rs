@@ -31,6 +31,9 @@ const DRAG_STEP_DELAY: Duration = Duration::from_millis(8);
 /// caller, so the dialog's own error still beats the run's timeout.
 const CONSENT_MARGIN: Duration =
 	crate::desktop::CLOSE_TIMEOUT.saturating_add(Duration::from_millis(500));
+const DEVICE_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
+const DEVICE_DISCOVERY_WAKE_INTERVAL: Duration = Duration::from_millis(100);
+const DEVICE_DISCOVERY_MAX_EVENTS: usize = 128;
 
 #[derive(Clone, Copy)]
 struct DiscoveryTargets {
@@ -285,23 +288,53 @@ impl Libei {
 		if targets.is_complete(false, false) {
 			return Ok(());
 		}
+		self.discover_devices_with_timeout(runtime, events, targets, DEVICE_DISCOVERY_TIMEOUT)
+	}
+
+	/// `timeout` is the overall discovery budget; split out so tests can bound
+	/// it tightly instead of waiting on the production timeout.
+	fn discover_devices_with_timeout(
+		&mut self,
+		runtime: &tokio::runtime::Runtime,
+		events: &mut EiConvertEventStream,
+		targets: DiscoveryTargets,
+		timeout: Duration,
+	) -> CoreResult<()> {
 		runtime.block_on(async {
-			let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+			let discovery_deadline = tokio::time::Instant::now() + timeout;
 			let mut drain_deadline = None;
+			let mut processed_events = 0usize;
 			loop {
 				control::check()?;
-				let until = drain_deadline.unwrap_or(deadline).min(deadline);
-				let tick = (tokio::time::Instant::now() + Duration::from_millis(10)).min(until);
-				let event = match tokio::time::timeout_at(tick, events.next()).await {
-					Ok(Some(event)) => event.map_err(|err| {
-						DesktopError::input_failed(format!("libei device discovery: {err}"))
-					})?,
-					Ok(None) => {
-						return Err(DesktopError::input_failed("libei disconnected during discovery"));
-					},
-					Err(_) if tokio::time::Instant::now() < until => continue,
-					Err(_) => break,
+				let now = tokio::time::Instant::now();
+				let deadline = drain_deadline.unwrap_or(discovery_deadline).min(discovery_deadline);
+				if now >= deadline {
+					if targets.is_complete(
+						self.has_capability(DeviceCapability::PointerAbsolute),
+						self.has_capability(DeviceCapability::Keyboard),
+					) {
+						break;
+					}
+					return Err(DesktopError::input_failed(if drain_deadline.is_some() {
+						"libei device discovery ended before every granted device resumed"
+					} else {
+						"libei device discovery timed out"
+					}));
+				}
+				let wake_deadline = (now + DEVICE_DISCOVERY_WAKE_INTERVAL).min(deadline);
+				let Ok(event) = tokio::time::timeout_at(wake_deadline, events.next()).await else {
+					// Messages can remain queued after handshake's separate block_on;
+					// drain them rather than waiting indefinitely for another readiness edge.
+					self
+						.context
+						.read()
+						.map_err(|err| DesktopError::input_failed(format!("libei socket read: {err}")))?;
+					continue;
 				};
+				let event = event
+					.ok_or_else(|| DesktopError::input_failed("libei disconnected during device discovery"))?
+					.map_err(|err| DesktopError::input_failed(format!("libei device discovery: {err}")))?;
+				processed_events += 1;
 				self.handle_event(event)?;
 				// Drain the initial burst even after the first matching devices:
 				// other monitors and initial modifier state can follow.
@@ -311,6 +344,11 @@ impl Libei {
 						self.has_capability(DeviceCapability::Keyboard),
 					) {
 					drain_deadline = Some(tokio::time::Instant::now() + DEVICE_DISCOVERY_DRAIN_TIMEOUT);
+				}
+				if processed_events >= DEVICE_DISCOVERY_MAX_EVENTS {
+					return Err(DesktopError::input_failed(
+						"libei device discovery exceeded the event limit",
+					));
 				}
 			}
 			self.flush()
