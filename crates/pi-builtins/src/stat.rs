@@ -1156,7 +1156,7 @@ for details about the options it supports.";
 		#[cfg(unix)]
 		fn exec(&self, host: &mut Host) -> i32 {
 			let mut stdin_is_fifo = false;
-			if let Ok(md) = fs::metadata("/dev/stdin") {
+			if let Ok(md) = fs::metadata(host.resolve("/dev/stdin")) {
 				stdin_is_fifo = md.file_type().is_fifo();
 			}
 
@@ -1312,7 +1312,7 @@ for details about the options it supports.";
 						writeln!(&mut host.stderr, "stat: {}", StatError::StdinFilesystemMode);
 					return 1;
 				}
-				if let Ok(p) = Path::new("/dev/stdin").canonicalize() {
+				if let Ok(p) = host.resolve("/dev/stdin").canonicalize() {
 					p.into_os_string()
 				} else {
 					OsString::from("/dev/stdin")

@@ -1,12 +1,13 @@
 /**
  * Tool wrappers for extensions.
  */
-import type {
-	AgentTool,
-	AgentToolContext,
-	AgentToolResult,
-	AgentToolUpdateCallback,
-	ToolLoadMode,
+import {
+	type AgentTool,
+	type AgentToolContext,
+	type AgentToolResult,
+	type AgentToolUpdateCallback,
+	isNonBlankContext,
+	type ToolLoadMode,
 } from "@oh-my-pi/pi-agent-core";
 import type { ComputerSafetyCheck, ImageContent, Static, TextContent, TSchema } from "@oh-my-pi/pi-ai";
 import { sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
@@ -204,6 +205,11 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// runs with. Doing this BEFORE the approval gate means approval (below) resolves against the
 		// input that actually executes, closing the "approve one thing, run another" gap: the prompt
 		// text, policy resolution, and provider safety checks all see `effectiveParams`.
+		// Passive context collected here is forwarded only once the call has run
+		// and produced a non-error result: a block, deny, user reject, fail-closed
+		// safety refusal, or failed execution never injects instructions. This
+		// matches the loop's rule for context prepared at arg-prep time.
+		let pendingAdditionalContext: string | undefined;
 		let effectiveParams = params;
 		if (!loopEmittedToolCall && this.runner.hasHandlers("tool_call")) {
 			try {
@@ -223,6 +229,9 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				if (callResult?.block) {
 					const reason = callResult.reason || "Tool execution was blocked by an extension";
 					throw new Error(reason);
+				}
+				if (isNonBlankContext(callResult?.additionalContext)) {
+					pendingAdditionalContext = callResult.additionalContext;
 				}
 				// A non-blocking handler may replace the execution input. The returned object is the raw
 				// input passed to `execute` (handler-owned; not re-normalized). Skipped for `computer`
@@ -392,6 +401,9 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				// call's model-visible content/details while keeping it an error, flip a
 				// failure to success, or flag a success as an error.
 				const effectiveError = resultResult.isError ?? !!executionError;
+				if (!effectiveError && pendingAdditionalContext !== undefined) {
+					context?.addAdditionalContext?.(pendingAdditionalContext);
+				}
 
 				// Return the (possibly modified) result carrying the error flag rather than
 				// rethrowing the original exception. The agent loop honors
@@ -411,6 +423,9 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// No extension modification
 		if (executionError) {
 			throw executionError;
+		}
+		if (result.isError !== true && pendingAdditionalContext !== undefined) {
+			context?.addAdditionalContext?.(pendingAdditionalContext);
 		}
 		return result;
 	}
