@@ -337,7 +337,7 @@ describe("jfind cascade", () => {
 				hasUI: false,
 				getSessionFile: () => null,
 				getSessionSpawns: () => "*",
-				settings: Settings.isolated({ "find.enabled": true }),
+				settings: Settings.isolated({ "find.enabled": "on" }),
 			});
 			await expect(tool.execute("x", { query: "anything", grep_keywords: [], path: "nope" })).rejects.toThrow(
 				"Path not found: nope",

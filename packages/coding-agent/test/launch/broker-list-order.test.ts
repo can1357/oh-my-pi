@@ -5,7 +5,7 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import { startDaemonBrokerFromEnvironment } from "../../src/launch/broker";
 import { createDaemonBrokerClient, type DaemonBrokerClient } from "../../src/launch/client";
 import { DAEMON_IDLE_GRACE_ENV, DAEMON_PROJECT_DIR_ENV, DAEMON_RUNTIME_DIR_ENV } from "../../src/launch/protocol";
-import { type DaemonSnapshot, type DaemonSpec } from "@oh-my-pi/pi-tui/tools/hub";
+import { type DaemonSnapshot, type DaemonSpec } from "@oh-my-pi/pi-tui/tools/daemon";
 
 const TERMINAL_HISTORY_LIMIT = 10;
 

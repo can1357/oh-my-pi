@@ -687,6 +687,11 @@ export class Settings {
 		return globalInstance;
 	}
 
+	/** Return the initialized or in-flight global settings without starting a writable load. */
+	static get current(): Promise<Settings> | null {
+		return globalInstancePromise;
+	}
+
 	// ─────────────────────────────────────────────────────────────────────────
 	// Core API
 	// ─────────────────────────────────────────────────────────────────────────
@@ -2327,6 +2332,17 @@ export class Settings {
 		// turns it on only for Gemini models.
 		if (typeof raw.inlineToolDescriptors === "boolean") {
 			raw.inlineToolDescriptors = raw.inlineToolDescriptors ? "on" : "off";
+		}
+
+		// find.enabled: boolean -> enum (auto | on | off). Preserve an explicit
+		// choice; unset installs get `auto`, which enables `find` only when the
+		// judge role resolves to a native System One model.
+		const findObj = isRecord(raw.find) ? raw.find : undefined;
+		if (findObj && typeof findObj.enabled === "boolean") {
+			findObj.enabled = findObj.enabled ? "on" : "off";
+		}
+		if (typeof raw["find.enabled"] === "boolean") {
+			raw["find.enabled"] = raw["find.enabled"] ? "on" : "off";
 		}
 
 		// statusLine: rename "plan_mode" segment to "mode"

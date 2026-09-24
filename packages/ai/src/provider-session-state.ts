@@ -3,7 +3,7 @@
  *
  * A host that keeps one provider-session map per logical conversation (the
  * auth-gateway's server-owned store, an in-process omp session) can outlive the
- * credential that filled it: `AuthStorage.markUsageLimitReached` and the
+ * credential that filled it: `AuthStorage.limits.markReached` and the
  * auth-retry resolver both switch a session to a sibling account mid-flight.
  * Most of what a provider learns is a property of the *endpoint*, so rebuilding
  * the whole map on a switch would re-pay every rejected round-trip the map
@@ -19,7 +19,7 @@
  *   (grammar-too-large 400 for the model's tool schema),
  *   `replayUnsignedThinkingDisabled` / `thinkingReplayDisabled` (the endpoint
  *   is a signing proxy), `prefixDroppedThinkingBlocks` (blocks the API itself
- *   dropped), `controlStates` (per-conversation control baselines).
+ *   dropped).
  * - **OpenAI Responses** — the `previous_response_id` chain baselines are
  *   account-scoped: a stored response belongs to the account that created it.
  *   Strict-tools / reasoning-effort fallbacks, replay warmup and the chaining

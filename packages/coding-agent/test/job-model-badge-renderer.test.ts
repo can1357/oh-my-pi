@@ -5,9 +5,8 @@ import { AsyncJobManager } from "../src/async/job-manager";
 import { resetSettingsForTest, Settings, settings } from "../src/config/settings";
 import { getThemeByName, setThemeInstance, type Theme } from "@oh-my-pi/pi-tui/theme";
 import type { ToolSession } from "../src/tools";
-import { jobsRenderResult } from "@oh-my-pi/pi-tui/tools/hub";
-import { snapshotJobs } from "../src/tools/hub/jobs";
-import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/hub";
+import { type CoordinationDetails, waitToolRenderer } from "@oh-my-pi/pi-tui/tools/wait";
+import { snapshotJobs } from "../src/async/job-control";
 import { formatDuration, thinkingLevelGlyph } from "@oh-my-pi/pi-tui/render/render-utils";
 
 const ansiPattern = /\x1b\[[0-9;]*m/g;
@@ -17,11 +16,10 @@ let uiTheme: Theme;
 let priorShowResolvedModelBadge = false;
 
 function renderJobText(details: Omit<CoordinationDetails, "op">, expanded = false, live = false, width = 160): string {
-	const component = jobsRenderResult(
-		{ content: [{ type: "text", text: "Listed background jobs" }], details: { op: "jobs", ...details } },
+	const component = waitToolRenderer.renderResult(
+		{ content: [{ type: "text", text: "Listed background jobs" }], details: { op: "wait", ...details } },
 		{ expanded, isPartial: live, spinnerFrame: live ? 0 : undefined },
 		uiTheme,
-		{ op: "jobs" },
 	);
 	let text = component.render(width).join("\n");
 	text = text.replace(hyperlinkPattern, "");

@@ -11,7 +11,11 @@ import type { Settings } from "../config/settings";
 import { EditTool } from "../edit";
 import { checkPythonKernelAvailability } from "../eval/py/kernel";
 import type { ToolPathWithSource } from "../extensibility/custom-tools";
-import type { PreparedExtension } from "../extensibility/extensions/types";
+import type {
+	BeforeSubagentSpawnEvent,
+	BeforeSubagentSpawnEventResult,
+	PreparedExtension,
+} from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import type { GoalModeState, GoalRuntime } from "../goals";
 import { GoalTool } from "../goals/tools/goal-tool";
@@ -51,8 +55,8 @@ import { resolveEvalBackends } from "./eval-backends";
 import { GithubTool } from "./gh";
 import { GlobTool } from "./glob";
 import { GrepTool } from "./grep";
-import { HubTool, isIrcEnabled } from "./hub";
-import { FindTool } from "./jfind";
+import { isIrcEnabled } from "../irc/messaging";
+import { FindTool, isFindEnabled } from "./jfind";
 import { LearnTool } from "./learn";
 import { ManageSkillTool } from "./manage-skill";
 import { MemoryEditTool } from "./memory-edit";
@@ -67,7 +71,8 @@ import { supportsExternalThinking, ThinkTool } from "./think";
 import { type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { TodoTool } from "./todo";
 import { WriteTool } from "./write";
-import { isMountableUnderXdev, type XdevState } from "./xdev";
+import { WaitTool } from "./wait";
+import { isMountableUnderXdev, resolveXdevTool, type XdevState } from "./xdev";
 import { YieldTool } from "./yield";
 
 export * from "../edit";
@@ -99,21 +104,8 @@ export * from "./file-write-fallback";
 export * from "./gh";
 export * from "./glob";
 export * from "./grep";
-export * from "./hub";
 export * from "./jfind";
-export type {
-	HubOp,
-	HubPeerInfo,
-	HubListStatus,
-	HubRosterCounts,
-	JobSnapshot,
-	CancelStatus,
-	CancelOutcome,
-	AgentActivitySnapshot,
-	CoordinationDetails,
-	HubDetails,
-	HubRenderArgs,
-} from "@oh-my-pi/pi-tui/tools/hub";
+export type { AgentActivitySnapshot, CoordinationDetails, JobSnapshot } from "@oh-my-pi/pi-tui/tools/wait";
 export * from "./image-gen";
 export * from "./learn";
 export * from "./manage-skill";
@@ -135,6 +127,7 @@ export * from "./think";
 export * from "./todo";
 export * from "./tts";
 export * from "./vibe";
+export * from "./wait";
 export type { VibeToolDetails } from "@oh-my-pi/pi-tui/tools/vibe";
 export * from "./write";
 export * from "./xdev";
@@ -357,7 +350,7 @@ export interface ToolSession {
 	pendingFullWriteDescription?: boolean;
 	/** Agent registry for IRC routing across live sessions. */
 	agentRegistry?: AgentRegistry;
-	/** Idle→parked→revive lifecycle owner; lets the hub kill a non-job-backed agent registration. Default: AgentLifecycleManager.global(). */
+	/** Idle→parked→revive lifecycle owner; lets explicit cancellation stop a non-job-backed agent registration. Default: AgentLifecycleManager.global(). */
 	agentLifecycle?: () => AgentLifecycleManager;
 	/** Get artifacts directory for artifact:// URLs */
 	getArtifactsDir?: () => string | null;
@@ -377,6 +370,15 @@ export interface ToolSession {
 	getActiveModel?: () => Model | undefined;
 	/** Get the session's live per-family service tiers (undefined = none). Source of truth for subagent `tier.subagent: inherit`. */
 	getServiceTierByFamily?: () => ServiceTierByFamily | undefined;
+	/**
+	 * Fires `before_subagent_spawn` on this session's extensions before a child's
+	 * model resolves. `signal` cancels awaiting handlers. Undefined when the
+	 * session has no extension runner.
+	 */
+	emitBeforeSubagentSpawn?(
+		event: BeforeSubagentSpawnEvent,
+		signal?: AbortSignal,
+	): Promise<BeforeSubagentSpawnEventResult | undefined>;
 	/** Auth storage for passing to subagents (avoids re-discovery) */
 	authStorage?: import("../session/auth-storage").AuthStorage;
 	/** Model registry for passing to subagents (avoids re-discovery) */
@@ -531,7 +533,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	context_notes: ContextNotesTool.createIf,
 	new_context: NewContextTool.createIf,
 	task: s => TaskTool.create(s),
-	hub: s => new HubTool(s),
+	wait: s => new WaitTool(s),
 	todo: s => new TodoTool(s),
 	web_search: s => new WebSearchTool(s),
 	write: s => new WriteTool(s),
@@ -693,7 +695,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			return (!includeYield || session.prewalkArmed === true) && session.settings.get("todo.enabled");
 		if (name === "glob") return session.settings.get("glob.enabled");
 		if (name === "grep") return session.settings.get("grep.enabled");
-		if (name === "find") return session.settings.get("find.enabled");
+		if (name === "find") return isFindEnabled(session);
 		if (name === "github") return session.settings.get("github.enabled");
 		if (name === "ast_grep") return session.settings.get("astGrep.enabled");
 		if (name === "ast_edit") return session.settings.get("astEdit.enabled");
@@ -706,9 +708,14 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 				session.settings.get("checkpoint.enabled") &&
 				((session.taskDepth ?? 0) === 0 || requestedTools !== undefined)
 			);
-		if (name === "hub") {
+		// Subagents never block on `wait`: owned job results re-wake their run
+		// through the executor's quiescence barrier, and parent messages steer them.
+		if (name === "wait") {
+			if ((session.taskDepth ?? 0) > 0) return false;
 			return (
-				!restrictToolNames && session.enableIrc !== false && isIrcEnabled(session.settings, session.taskDepth ?? 0)
+				session.settings.get("async.enabled") ||
+				(session.enableIrc !== false && isIrcEnabled(session.settings, session.taskDepth ?? 0)) ||
+				session.settings.get("launch.enabled")
 			);
 		}
 		if (name === "retain" || name === "recall" || name === "reflect") {
@@ -811,12 +818,16 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			if (mountable) mountedNames.add(tool.name);
 			else kept.push(tool);
 		}
-		session.xdev = {
+		const xdevState: XdevState = {
 			tools: toolRegistry,
 			mountedNames,
 			builtInNames,
 			isActive: name => session.isToolActive?.(name) === true,
+			// Card rendering reads the same predicate as execution: mounted devices
+			// plus active top-level tools, which the `write` transport also accepts.
+			resolve: name => resolveXdevTool(xdevState, name),
 		};
+		session.xdev = xdevState;
 		tools = kept;
 	}
 	// Staged previews from deferrable tools (e.g. ast_edit) resolve through a

@@ -68,7 +68,7 @@ describe("Anthropic provider hard-timeout wiring", () => {
 
 	it("passes a composed signal to fetch even when the caller did not supply one", async () => {
 		const context = createSearchContext("anthropic", "claude-sonnet-4-5");
-		context.authStorage.setRuntimeApiKey("anthropic", "sk-test");
+		context.authStorage.keys.setRuntime("anthropic", "sk-test");
 
 		let capturedSignal: AbortSignal | null | undefined;
 		const fetchMock: FetchImpl = async (_input, init) => {
@@ -90,7 +90,7 @@ describe("Anthropic provider hard-timeout wiring", () => {
 
 	it("composes the caller signal with the hard timeout instead of forwarding it directly", async () => {
 		const context = createSearchContext("anthropic", "claude-sonnet-4-5");
-		context.authStorage.setRuntimeApiKey("anthropic", "sk-test");
+		context.authStorage.keys.setRuntime("anthropic", "sk-test");
 
 		const ac = new AbortController();
 		let capturedSignal: AbortSignal | null | undefined;
@@ -120,7 +120,7 @@ describe("Brave provider hard-timeout wiring", () => {
 
 	it("hands fetch a composed signal even with no caller signal — confirms the rollout reaches non-Anthropic providers", async () => {
 		const context = createSearchContext("web", "brave");
-		context.authStorage.setRuntimeApiKey("brave", "brave-test-key");
+		context.authStorage.keys.setRuntime("brave", "brave-test-key");
 		let capturedSignal: AbortSignal | null | undefined;
 		const fetchMock: FetchImpl = async (_input, init) => {
 			capturedSignal = init?.signal;

@@ -190,7 +190,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 				},
 			}),
 		);
-		authStorage.setRuntimeApiKey("custom-proxy", "runtime-key");
+		authStorage.keys.setRuntime("custom-proxy", "runtime-key");
 		const registry = new ModelRegistry(authStorage, modelsPath);
 		const model = registry.find("custom-proxy", "custom-model");
 		if (!model) throw new Error("Expected custom model");

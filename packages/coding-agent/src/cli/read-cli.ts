@@ -16,8 +16,7 @@ import { InternalUrlRouter } from "../internal-urls/router";
 import { closeDaemonClients } from "../launch/client";
 import { discoverAndLoadMCPTools } from "../mcp/loader";
 import { MCPManager } from "../mcp/manager";
-import { loadCliExtensionProviders } from "../sdk";
-import { discoverAuthStorage } from "../session/auth-broker-config";
+import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
 import type { AuthStorage } from "../session/auth-storage";
 import type { ToolSession } from "../tools";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
@@ -78,7 +77,7 @@ export async function runReadCommand(cmd: ReadCommandArgs): Promise<void> {
 		}
 
 		if (shouldDiscoverMcp(cmd.path)) {
-			authStorage = await discoverAuthStorage();
+			authStorage = await discoverAuthStorage(undefined, { settings });
 			const result = await discoverAndLoadMCPTools(cwd, {
 				enableProjectConfig: settings.get("mcp.enableProjectConfig") ?? true,
 				filterExa: true,
@@ -99,7 +98,7 @@ export async function runReadCommand(cmd: ReadCommandArgs): Promise<void> {
 		// "Model registry is unavailable for image questions." before resolving
 		// anything (issue #11338).
 		if (splitImageQuestionTarget(cmd.path).question) {
-			authStorage ??= await discoverAuthStorage();
+			authStorage ??= await discoverAuthStorage(undefined, { settings });
 			const modelRegistry = new ModelRegistry(authStorage);
 			await modelRegistry.hydrateCredentialScopedModelCaches();
 			await loadCliExtensionProviders(modelRegistry, settings, cwd);

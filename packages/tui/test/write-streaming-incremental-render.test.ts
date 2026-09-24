@@ -44,6 +44,23 @@ describe("write streaming preview incremental line tracking", () => {
 		});
 	}
 
+	it("renders agent messages and their receipt as a message card", async () => {
+		const uiTheme = await getUiTheme();
+		const args = { path: "agent://all", content: "Please review the change" };
+		const pending = writeToolRenderer.renderCall(args, { expanded: true, isPartial: true }, uiTheme);
+		expect(pending?.render(120).join("\n")).toContain("Please review the change");
+		const result = writeToolRenderer.renderResult(
+			{ content: [{ type: "text", text: "Broadcast delivered to 2 of 2 peer(s)." }] },
+			{ expanded: true, isPartial: false },
+			uiTheme,
+			args,
+		);
+		const text = Bun.stripANSI(result.render(120).join("\n"));
+		expect(text).toMatch(/IRC \S+ all broadcast/);
+		expect(text).toContain("Please review the change");
+		expect(text).toContain("Broadcast delivered to 2 of 2 peer(s).");
+	});
+
 	it("tracks an append-only stream through one shared render-state object", async () => {
 		// The reveal loop rebuilds via renderCall once per tick with the SAME
 		// persistent options object; simulate growth 5 → 12 → 13 → 25 → 40 lines.

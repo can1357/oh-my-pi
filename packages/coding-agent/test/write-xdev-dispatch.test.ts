@@ -9,14 +9,16 @@ import * as themeModule from "@oh-my-pi/pi-tui/theme";
 import { ToolChoiceQueue } from "@oh-my-pi/pi-coding-agent/session/tool-choice-queue";
 import { createTools, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { requiresApproval, resolveApproval } from "@oh-my-pi/pi-coding-agent/tools/approval";
+import { Text } from "@oh-my-pi/pi-tui";
 import { githubToolRenderer } from "@oh-my-pi/pi-tui/tools/github";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { type WriteRenderContext, writeToolRenderer } from "@oh-my-pi/pi-tui/tools/write";
-import type { XdevMountedRenderer } from "@oh-my-pi/pi-tui/tools/xdev";
 import {
+	dispatchXdevTool,
 	listXdevTools,
 	resolveMountedXdevTool,
+	resolveXdevTool,
 	XDEV_DOCS_PER_DEVICE_CAP,
 	XDEV_DOCS_TOTAL_BUDGET,
 	XDEV_EXTERNAL_DESCRIPTION_CAP,
@@ -27,11 +29,13 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/xdev";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
-/** Mirrors `ToolExecutionComponent#buildRenderContext`: mounted tools expose their render hooks to the write renderer. */
+/**
+ * Mirrors `ToolExecutionComponent#buildRenderContext`: the host state's own
+ * resolver (mounted devices plus active top-level tools, the same predicate
+ * dispatch uses) is what the write renderer renders through.
+ */
 function mountedRenderContext(xdev: XdevState): WriteRenderContext {
-	return {
-		resolveXdevMounted: name => resolveMountedXdevTool(xdev, name) as XdevMountedRenderer | undefined,
-	};
+	return { resolveXdevMounted: xdev.resolve };
 }
 
 // xdev mounting is default-on: discoverable tools like ast_edit unmount into
@@ -51,13 +55,19 @@ function xdevSession(cwd: string, overrides: Partial<ToolSession> = {}): ToolSes
 	};
 }
 
-function createTestXdevState(tools: Tool[], builtInNames: Iterable<string> = tools.map(tool => tool.name)): XdevState {
-	return {
+function createTestXdevState(
+	tools: Tool[],
+	builtInNames: Iterable<string> = tools.map(tool => tool.name),
+	isActive: (name: string) => boolean = () => false,
+): XdevState {
+	const state: XdevState = {
 		tools: new Map(tools.map(tool => [tool.name, tool])),
 		mountedNames: new Set(tools.map(tool => tool.name)),
 		builtInNames: new Set(builtInNames),
-		isActive: () => false,
+		isActive,
+		resolve: name => resolveXdevTool(state, name),
 	};
+	return state;
 }
 
 describe("read and write route xd:// device URLs", () => {
@@ -459,6 +469,51 @@ describe("read and write route xd:// device URLs", () => {
 		expect(lines.some(line => line.includes(backgroundPrefix))).toBe(true);
 	});
 
+	it("renders a dispatched top-level tool through its own renderer while it stays unmounted", async () => {
+		await themeModule.initTheme();
+		const uiTheme = (await themeModule.getThemeByName("dark")) ?? (await themeModule.getThemeByName("light"));
+		if (!uiTheme) throw new Error("expected an initialized theme");
+
+		// Inferred (like the neighboring device fixtures): `mergeCallAndResult` and
+		// the render hooks live on the coding-agent `Tool`, not on `AgentTool`.
+		const topLevelDevice = {
+			name: "pwsh",
+			label: "PowerShell 7",
+			description: "fixture",
+			parameters: type({ command: "string" }),
+			mergeCallAndResult: true,
+			renderCall: () => new Text("TOP-LEVEL-CALL", 0, 0),
+			renderResult: () => new Text("TOP-LEVEL-RESULT", 0, 0),
+			async execute() {
+				return { content: [{ type: "text" as const, text: "42" }] };
+			},
+		};
+		// An `essential` tool stays top-level: never mounted, but dispatchable.
+		const xdev = createTestXdevState([topLevelDevice], [], name => name === topLevelDevice.name);
+		xdev.mountedNames.clear();
+		const write = new WriteTool(xdevSession(process.cwd(), { xdev }));
+		const content = JSON.stringify({ command: "Write-Output 42" });
+		const result = await write.execute("write-xdev-top-level", { path: "xd://pwsh", content });
+		expect(result.isError ?? false).toBe(false);
+		expect(result.details?.xdev).toMatchObject({ tool: "pwsh", mode: "execute" });
+
+		const component = writeToolRenderer.renderResult(
+			result,
+			{
+				expanded: false,
+				isPartial: false,
+				renderContext: mountedRenderContext(xdev),
+			},
+			uiTheme,
+			{ path: "xd://pwsh", content },
+		);
+		const rendered = Bun.stripANSI(component.render(80).join("\n"));
+
+		expect(rendered).toContain("TOP-LEVEL-RESULT");
+		// The generic device card would have inlined the args instead.
+		expect(rendered).not.toContain('command="Write-Output 42"');
+	});
+
 	// Dynamic device summaries are third-party text inlined into the system
 	// prompt. A character bound is not a byte bound: a multi-byte summary passes
 	// several times the intended budget, and cutting a byte budget by character
@@ -520,7 +575,7 @@ describe("read and write route xd:// device URLs", () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-docs-"));
 		try {
 			const session = xdevSession(tempDir);
-			expect(session.settings.get("tools.xdevDocs")).toBe("builtins");
+			expect(session.settings.get("tools.xdevDocs")).toBe("catalog");
 			await createTools(session);
 			const xdev = session.xdev;
 			if (!xdev) throw new Error("expected xdev state");
@@ -551,7 +606,7 @@ describe("read and write route xd:// device URLs", () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-external-"));
 		try {
 			const session = xdevSession(tempDir);
-			expect(session.settings.get("tools.xdevDocs")).toBe("builtins");
+			expect(session.settings.get("tools.xdevDocs")).toBe("catalog");
 			await createTools(session);
 			const xdev = session.xdev;
 			if (!xdev) throw new Error("expected xdev state");
@@ -864,5 +919,42 @@ describe("device-only write transport for explicit lists omitting write", () => 
 		} finally {
 			await removeWithRetries(tempDir);
 		}
+	});
+});
+
+describe("device writes honor lenientArgValidation", () => {
+	// #12871: a device that sets lenientArgValidation and re-validates in
+	// `execute` must see the raw args on a schema mismatch. Previously every
+	// xd:// write ran the host's validateToolArguments unconditionally and a
+	// mismatch returned the generic "Invalid args for xd://…" text plus the
+	// full tool doc — the wrapped tool's own refusal never ran.
+	function fixtureDevice(lenient: boolean, seen: Record<string, unknown>[]): Tool {
+		return {
+			name: lenient ? "lenient_dev" : "strict_dev",
+			label: "fixture",
+			description: "fixture",
+			parameters: type({ op: "string" }),
+			lenientArgValidation: lenient,
+			async execute(_id: string, args: Record<string, unknown>) {
+				seen.push(args);
+				return { content: [{ type: "text" as const, text: "tool-owned refusal" }] };
+			},
+		};
+	}
+
+	it("hands raw args to a lenient device on schema mismatch, and still refuses for a strict one", async () => {
+		const seen: Record<string, unknown>[] = [];
+		const state = createTestXdevState([fixtureDevice(true, seen), fixtureDevice(false, seen)]);
+
+		const lenient = await dispatchXdevTool(state, "lenient_dev", JSON.stringify({ wrong: 1 }), "xd-lenient-1");
+		expect(seen).toEqual([{ wrong: 1 }]);
+		expect(lenient.result.content.find(entry => entry.type === "text")?.text).toBe("tool-owned refusal");
+
+		const strict = await dispatchXdevTool(state, "strict_dev", JSON.stringify({ wrong: 1 }), "xd-strict-1");
+		expect(strict.result.isError).toBe(true);
+		expect(strict.result.content.find(entry => entry.type === "text")?.text).toContain(
+			"Invalid args for xd://strict_dev",
+		);
+		expect(seen).toHaveLength(1);
 	});
 });
