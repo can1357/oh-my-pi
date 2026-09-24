@@ -485,6 +485,36 @@ function handleWorkerSendEpipe(err: Error): boolean {
 	return true;
 }
 
+let containedPipeWriteEpipes = 0;
+
+/**
+ * Contain an EPIPE from any pipe write that reached the fatal handlers
+ * (follow-up to #10930). A broken pipe means the peer is gone; the failed
+ * write is expected fallout and the peer's own machinery handles its
+ * absence. Everything needed for recovery (session persistence, logs)
+ * writes to files, which cannot EPIPE, while every subsystem riding pipes
+ * (terminals, subprocess stdin, shared sockets) already classifies EPIPE as
+ * a retryable disconnect. Bun 1.4.2 additionally stopped delivering stdout
+ * `error` events for dead-pipe writes, so these surface here with no
+ * listener to catch them and previously tore down the whole agent
+ * (ten field crashes rode in on exactly this path). Occurrences beyond the
+ * first are sampled so a render loop hammering a dead terminal cannot flood
+ * the log; a genuinely fatal non-EPIPE failure still exits below.
+ */
+function handlePipeWriteEpipe(err: Error): boolean {
+	if (classifyBrokenPipe(err) !== "stdio-write") return false;
+	const occurrence = containedPipeWriteEpipes++;
+	if (occurrence === 0 || occurrence % 16 === 0) {
+		const withPath = err as Error & { path?: unknown };
+		logger.warn("Ignoring EPIPE from pipe write; peer disconnected and its owner recovers itself", {
+			err,
+			path: withPath.path,
+			occurrences: occurrence + 1,
+		});
+	}
+	return true;
+}
+
 /**
  * Reports a caught top-level failure after terminal owners restore their display, then exits.
  */
@@ -521,9 +551,12 @@ if (Bun.isMainThread) {
 			}
 			const err = thrown instanceof Error ? thrown : new Error(String(thrown));
 			// A worker IPC `send()` race can surface through either global error event;
-			// contain it in both. Stdout write disconnects are attributed to stdout by
-			// registerStdioDisconnectHandling's `error` listener, not classified here.
+			// contain it in both. Pipe-write EPIPEs that still reach these handlers are
+			// contained as well: Bun 1.4.2 no longer delivers stdout `error` events for
+			// dead-pipe writes, so there may be no listener to attribute them, and one
+			// failed write to a vanished peer must not tear down the whole agent.
 			if (handleWorkerSendEpipe(err)) return;
+			if (handlePipeWriteEpipe(err)) return;
 			// A malformed advanced-serialization frame from a worker subprocess
 			// surfaces here as a process-level uncaughtException (oven-sh/bun#37287)
 			// rather than in the channel's ipc() callback, and Bun gives no way to
@@ -554,6 +587,7 @@ if (Bun.isMainThread) {
 		.on("unhandledRejection", async reason => {
 			const err = reason instanceof Error ? reason : new Error(String(reason));
 			if (handleWorkerSendEpipe(err)) return;
+			if (handlePipeWriteEpipe(err)) return;
 			if (isExpectedCleanupError(reason)) {
 				logger.warn("Ignoring expected cleanup rejection", { err });
 				return;
