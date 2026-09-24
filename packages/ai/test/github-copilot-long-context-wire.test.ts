@@ -119,7 +119,7 @@ describe("GitHub Copilot long-context variant wire model id", () => {
 
 /**
  * GitHub Copilot's Responses endpoint rejects the `detail: "original"` image
- * hint (an oh-my-pi extension that preserves native-resolution snapcompact
+ * hint (an omp extension that preserves native-resolution snapcompact
  * frames) with an HTTP 400. The catalog resolves `supportsImageDetailOriginal`
  * to `false` for Copilot, and the Responses request builder degrades the hint
  * to `"auto"` so the wire stays valid. Every other host preserves `"original"`.

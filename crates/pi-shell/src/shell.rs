@@ -1955,6 +1955,37 @@ mod tests {
 		(result, output)
 	}
 
+	/// Shell initialization must recover when a long-running host's inherited
+	/// working directory is deleted. This runs in a child process because cwd is
+	/// process-global.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn shell_initializes_after_process_cwd_is_deleted() {
+		const MARKER: &str = "PI_SHELL_TEST_DELETED_CWD";
+		if std::env::var_os(MARKER).is_none() {
+			run_isolated_kill_test(
+				"shell::tests::shell_initializes_after_process_cwd_is_deleted",
+				MARKER,
+				false,
+			)
+			.await;
+			return;
+		}
+
+		let dir = tempfile::tempdir().expect("temporary cwd");
+		std::env::set_current_dir(dir.path()).expect("enter temporary cwd");
+		std::fs::remove_dir(dir.path()).expect("delete process cwd");
+
+		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let session = create_session(&config)
+			.await
+			.expect("initialize shell after deleted cwd");
+		let fallback = std::env::var_os("HOME")
+			.map(std::path::PathBuf::from)
+			.unwrap_or_else(|| "/".into());
+		assert_eq!(session.shell.working_dir(), fallback);
+	}
+
 	/// Native Windows tools write the ANSI code page to pipes. On a Chinese
 	/// system that is GBK; treating it as UTF-8 used to turn `echo 中文` into
 	/// replacement characters.
@@ -4058,6 +4089,7 @@ mod tests {
 		let _ = std::fs::remove_dir_all(&tmp);
 		std::fs::create_dir_all(&tmp).expect("temp dir");
 		std::fs::write(tmp.join("data.txt"), "from-cwd\nfrom-pattern\n").expect("data");
+		std::fs::write(tmp.join("z-output.txt"), "from-cwd\n").expect("output seed");
 		let tmp_str = tmp.to_str().expect("utf8");
 
 		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
@@ -4072,10 +4104,10 @@ mod tests {
 
 		session
 			.shell
-			.run_string("rg from-cwd > cwd.txt", &si, &params)
+			.run_string("rg --sort path --max-count 1 from-cwd >> z-output.txt", &si, &params)
 			.await
 			.expect("rg cwd");
-		assert_eq!(read("cwd.txt"), "data.txt:from-cwd\n");
+		assert_eq!(read("z-output.txt"), "from-cwd\ndata.txt:from-cwd\n");
 
 		session
 			.shell
@@ -4670,6 +4702,119 @@ mod tests {
 
 		assert_eq!(result.exit_code, Some(1));
 		assert!(output.contains("< a\n---\n> b\n"), "diff output missing changed lines: {output:?}");
+	}
+
+	/// Builtins share the host process, so a descriptor path must reach the
+	/// command's descriptors rather than the host's: the host's fd 0 is its
+	/// terminal (`cat /dev/stdin` once blocked on the TUI's keystrokes for
+	/// good) and its fd 2 is not the capture pipe. Covers a utility operand,
+	/// a redirect, a utility output file, and `source`.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn descriptor_paths_reach_the_commands_descriptors() {
+		// The first command is the shape that hung the TUI.
+		let command = "for f in $(cat /dev/stdin <<'EOF'\na\nb\nEOF\n); do echo \"$f\"; done\necho \
+		               to-stderr > /dev/stderr\necho via-tee | tee /dev/stderr > /dev/null\nsource \
+		               /dev/stdin <<< 'echo sourced'";
+		let (result, output) = time::timeout(
+			Duration::from_secs(5),
+			run_command_capture(command, None, None, CancelToken::default()),
+		)
+		.await
+		.expect("descriptor paths must not read the host terminal");
+
+		assert_eq!(result.exit_code, Some(0), "output: {output:?}");
+		assert_eq!(output, "a\nb\nto-stderr\nvia-tee\nsourced\n");
+	}
+
+	/// A descriptor the shell does not have fails like a closed one, instead
+	/// of reaching whatever the host process holds at that number.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn descriptor_paths_never_reach_host_only_descriptors() {
+		use std::os::fd::AsRawFd as _;
+
+		let dir = unique_temp_dir("host-fd");
+		let host_path = dir.join("host-only.txt");
+		std::fs::write(&host_path, "host-only\n").expect("write host file");
+		let host_file = std::fs::File::open(&host_path).expect("open host file");
+		let fd = host_file.as_raw_fd();
+		let command =
+			format!("cat /dev/fd/{fd}; echo \"rc=$?\"; cat < /proc/self/fd/{fd}; echo \"rc=$?\"");
+
+		let (_, output) = time::timeout(
+			Duration::from_secs(5),
+			run_command_capture(&command, None, None, CancelToken::default()),
+		)
+		.await
+		.expect("closed descriptor paths should fail fast");
+		drop(host_file);
+		let _ = std::fs::remove_dir_all(&dir);
+
+		assert!(!output.contains("host-only"), "read a host-only descriptor: {output:?}");
+		assert_eq!(output.matches("rc=1").count(), 2, "both opens should fail: {output:?}");
+	}
+
+	/// `<(…)` operands resolve through the shell's descriptor table, so
+	/// utilities report the name the shell passed and script-file options read
+	/// them too.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn process_substitution_operands_keep_the_shell_fd_name() {
+		let command = "wc -l <(printf 'a\\nb\\n'); ls <(true); sed -n -f <(echo p) <<< from-sed";
+		let (result, output) = time::timeout(
+			Duration::from_secs(5),
+			run_command_capture(command, None, None, CancelToken::default()),
+		)
+		.await
+		.expect("process substitution should not hang");
+
+		assert_eq!(result.exit_code, Some(0), "output: {output:?}");
+		assert_eq!(output, "2 /dev/fd/63\n/dev/fd/63\nfrom-sed\n");
+	}
+
+	/// `sed`'s `w /dev/stdout` writes through sed's own output, as GNU sed
+	/// does: a second open of a redirected stdout truncates it and races the
+	/// primary output at its own offset.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn sed_w_dev_stdout_shares_sed_output() {
+		let dir = unique_temp_dir("sed-w-stdout");
+		let command = format!(
+			"cd '{}'; printf 'a\\nb\\n' | sed 'w /dev/stdout' > f; cat f; printf 'c\\n' | sed -n \
+			 's/c/d/w /dev/stdout'",
+			dir.display()
+		);
+		let (result, output) = time::timeout(
+			Duration::from_secs(5),
+			run_command_capture(&command, None, None, CancelToken::default()),
+		)
+		.await
+		.expect("sed should not hang");
+		let _ = std::fs::remove_dir_all(&dir);
+
+		assert_eq!(result.exit_code, Some(0), "output: {output:?}");
+		assert_eq!(output, "a\na\nb\nb\nd\n");
+	}
+
+	/// A descriptor the shell lacks is reported under the name the user
+	/// typed, and `readlink` reads `/dev/stdin` as the symlink it is instead
+	/// of the descriptor behind it.
+	#[cfg(target_os = "linux")]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn descriptor_paths_keep_their_spelling() {
+		let command = "pgrep -F /dev/fd/9; sed 'w /dev/fd/9' <<< x; readlink /dev/stdin <<< x";
+		let (_, output) = time::timeout(
+			Duration::from_secs(5),
+			run_command_capture(command, None, None, CancelToken::default()),
+		)
+		.await
+		.expect("closed descriptor paths should fail fast");
+
+		assert!(!output.contains("/dev/fd/-1"), "leaked the placeholder path: {output:?}");
+		assert!(output.contains("cannot read pidfile '/dev/fd/9'"), "output: {output:?}");
+		assert!(output.contains("creating file '/dev/fd/9'"), "output: {output:?}");
+		assert!(output.ends_with("/proc/self/fd/0\n"), "output: {output:?}");
 	}
 
 	#[cfg(unix)]

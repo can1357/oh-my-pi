@@ -8,7 +8,6 @@ import {
 } from "@oh-my-pi/pi-tui/tools/todo";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import type { ToolExample } from "@oh-my-pi/pi-ai";
 
 import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 
@@ -51,26 +50,24 @@ export function committedTodoPhases(result: AgentToolResult): TodoPhase[] | unde
 // Schema
 // =============================================================================
 
-const TodoOp = type('"init" | "start" | "done" | "rm" | "drop" | "block" | "unblock" | "append" | "view"').describe(
-	"operation to apply",
-);
+const TodoOp = type('"init" | "start" | "done" | "rm" | "drop" | "block" | "unblock" | "append" | "view"');
 
 const InitListEntry = type({
-	phase: type("string").describe("phase name"),
-	items: type("string").describe("task content").array().atLeastLength(1).describe("tasks for this phase"),
+	phase: type("string"),
+	items: type("string").array().atLeastLength(1),
 });
 
 const todoSchema = type({
 	op: TodoOp,
-	"list?": InitListEntry.array().describe("phased task list (init)"),
-	"task?": type("string").describe("task content"),
-	"phase?": type("string").describe("phase name"),
+	"list?": InitListEntry.array().describe("phases for init"),
+	"task?": type("string").describe("verbatim task content"),
+	"phase?": type("string"),
 	// No `atLeastLength(1)` here: `items` is only meaningful for `init`/`append`,
 	// and both enforce non-empty with op-specific errors. A stray `items: []` on
 	// an op that ignores it (e.g. `view`) must not be a hard schema rejection.
-	"items?": type("string").describe("task content").array().describe("tasks for single-phase init or append"),
-	"reason?": type("string").describe("blocker note (block op)"),
-}).describe("apply a single todo operation");
+	"items?": type("string").array().describe("tasks for flat init or append"),
+	"reason?": type("string").describe("blocker note for block"),
+});
 
 type TodoParams = TodoSchema;
 type TodoSchema = typeof todoSchema.infer;
@@ -725,50 +722,6 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 	// and repairs the one recoverable shape (missing `op`, unambiguous payload).
 	readonly lenientArgValidation = true;
 
-	readonly examples: readonly ToolExample<typeof todoSchema.infer>[] = [
-		{
-			caption: "Initial setup (multi-phase)",
-			call: {
-				op: "init",
-				list: [
-					{ phase: "Foundation", items: ["Scaffold crate", "Wire workspace"] },
-					{ phase: "Auth", items: ["Port credential store", "Wire OAuth providers"] },
-					{ phase: "Verification", items: ["Run cargo test"] },
-				],
-			},
-		},
-		{
-			caption: "View current state (read-only)",
-			call: { op: "view" },
-		},
-		{
-			caption: "Initial setup (single phase)",
-			call: {
-				op: "init",
-				list: [{ phase: "Implementation", items: ["Apply fix", "Run tests"] }],
-			},
-		},
-		{
-			caption: "Complete one task",
-			call: { op: "done", task: "Wire workspace" },
-		},
-		{
-			caption: "Complete a whole phase",
-			call: { op: "done", phase: "Auth" },
-		},
-		{
-			caption: "Remove all tasks",
-			call: { op: "rm" },
-		},
-		{
-			caption: "Drop one task",
-			call: { op: "drop", task: "Run cargo test" },
-		},
-		{
-			caption: "Append tasks to a phase",
-			call: { op: "append", phase: "Auth", items: ["Handle retries", "Run tests"] },
-		},
-	];
 	readonly loadMode = "discoverable";
 	constructor(private readonly session: ToolSession) {
 		this.description = prompt.render(todoDescription);

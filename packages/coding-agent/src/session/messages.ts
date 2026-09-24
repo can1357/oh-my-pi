@@ -149,6 +149,16 @@ export function buildReplanTitleContext(messages: AgentMessage[]): string {
 }
 
 /**
+ * True when a settled assistant message contributes reply text or thinking to
+ * {@link buildReplanTitleContext}. Deferred auto-titling waits for one before
+ * retitling from conversation context; aborted/errored turns do not count.
+ */
+export function isTitleContextReply(message: AssistantMessage): boolean {
+	if (message.stopReason === "aborted" || message.stopReason === "error") return false;
+	return textFromContent(message.content) !== "" || thinkingFromContent(message.content) !== "";
+}
+
+/**
  * Compares session messages by provider-replay semantics, ignoring runtime-only
  * fields that do not change a restored request.
  */
@@ -1058,7 +1068,11 @@ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
 			// stripped whether or not they were long enough for a continuity note.
 			const userInterrupted = m.stopReason === "aborted" && isUserInterruptAbort(m);
 			const source = interruptedNext || userInterrupted ? stripDemotedThinkingForLlm(m) : m;
-			if (userInterrupted && !interruptedNext && source.content.length === 0) return [];
+			// An empty interrupted response still carries the controls its request
+			// sent (e.g. an Anthropic `tool_removal`); later requests replay them from it.
+			if (userInterrupted && !interruptedNext && source.content.length === 0 && m.requestControls === undefined) {
+				return [];
+			}
 			const converted = convertMessageToLlm(source);
 			return converted ? [converted] : [];
 		}

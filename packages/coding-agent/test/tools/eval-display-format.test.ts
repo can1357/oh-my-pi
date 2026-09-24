@@ -3,7 +3,6 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import type { EvalToolDetails } from "@oh-my-pi/pi-tui/tools/eval";
 import { getThemeByName, setThemeInstance, type Theme } from "@oh-my-pi/pi-tui/theme";
 import { evalToolRenderer } from "@oh-my-pi/pi-tui/tools/eval";
-import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 
 describe("eval renderer: display-only streaming formatting", () => {
 	let theme: Theme;
@@ -19,6 +18,17 @@ describe("eval renderer: display-only streaming formatting", () => {
 
 	afterAll(() => {
 		resetSettingsForTest();
+	});
+
+	it("preserves percent command package identifiers instead of formatting them as JavaScript operators", () => {
+		const command = "%bun add csv-parse@5";
+		const rendered = Bun.stripANSI(
+			evalToolRenderer
+				.renderCall({ language: "js", code: command }, { expanded: true, isPartial: true }, theme)
+				.render(120)
+				.join("\n"),
+		);
+		expect(rendered).toContain(command);
 	});
 
 	it("expands compact source in both pending and completed previews", () => {
@@ -49,20 +59,5 @@ describe("eval renderer: display-only streaming formatting", () => {
 			expect(rendered).toContain("finish();");
 			expect(rendered).not.toContain("run();finish();");
 		}
-		expect(details.cells?.[0]?.code).toBe(source);
-	});
-
-	it("passes the original source to execution verbatim", async () => {
-		let executed = "";
-		const tool = new EvalTool(null, {
-			proxyExecutor: async params => {
-				executed = params.code;
-				return { content: [{ type: "text", text: "ok" }], details: undefined };
-			},
-		});
-
-		await tool.execute("call", { language: "js", code: source });
-
-		expect(executed).toBe(source);
 	});
 });

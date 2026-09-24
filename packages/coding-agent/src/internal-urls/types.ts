@@ -1,7 +1,7 @@
 /**
  * Types for the internal URL routing system.
  *
- * Internal URLs (`agent://`, `artifact://`, `history://`, `issue://`, `local://`, `mcp://`, `memory://`, `omp://`, `pr://`, `rule://`, `security://`, `skill://`, `ssh://`, `vault://`, and `xd://`) are resolved by tools like read,
+ * Internal URLs (`agent://`, `artifact://`, `history://`, `issue://`, `local://`, `mcp://`, `memory://`, `omp://`, `pr://`, `proc://`, `rule://`, `security://`, `skill://`, `ssh://`, `vault://`, and `xd://`) are resolved by tools like read,
  * providing access to agent outputs and server resources without exposing filesystem paths.
  */
 
@@ -10,6 +10,20 @@ import type { Skill } from "../extensibility/skills";
 import type { AgentRegistry } from "../registry/agent-registry";
 import type { LocalProtocolOptions } from "./local-protocol";
 import type { SessionEntry } from "../session/session-entries";
+import type { ToolSession } from "../tools";
+import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
+import type { ProcReadDetails, ProcWriteDetails } from "@oh-my-pi/pi-tui/tools/proc-render";
+
+export interface InternalWriteDetails {
+	message?: CoordinationDetails;
+	proc?: ProcWriteDetails;
+}
+
+export interface InternalWriteResult {
+	text: string;
+	details?: InternalWriteDetails;
+	isError?: boolean;
+}
 
 /**
  * Raw resource payload returned by protocol handlers. The `immutable` flag is
@@ -29,6 +43,8 @@ export interface InternalResource {
 	sourcePath?: string;
 	/** Additional notes about resolution */
 	notes?: string[];
+	/** Structured process snapshot used only for transcript rendering. */
+	details?: { proc: ProcReadDetails };
 	/**
 	 * True when the resolved content cannot be edited by the agent (e.g. sealed
 	 * artifacts, harness docs, machine-generated memory summaries). Hashline
@@ -148,9 +164,16 @@ export interface ResolveContext {
 	 * `rule://<name>`.
 	 */
 	rules?: readonly Rule[];
+	/**
+	 * Calling tool session. Session-bound schemes (`proc://`) require it and
+	 * throw when it is absent.
+	 */
+	session?: ToolSession;
 	/** Session-bound `xd://` documentation resolver. */
 	xd?: {
 		read(name: string | null): Promise<string>;
+		/** Resolve an `xd://<tool>/<topic>` doc topic; independent of device mounting. */
+		topic(name: string, topic: string): Promise<string>;
 	};
 	/**
 	 * When set, handlers that would otherwise materialize an expensive directory
@@ -183,6 +206,11 @@ export interface WriteContext {
 	signal?: AbortSignal;
 	/** Calling session's `local://` root mapping — see {@link ResolveContext.localProtocolOptions}. */
 	localProtocolOptions?: LocalProtocolOptions;
+	/**
+	 * Calling tool session. Session-bound writes (`agent://` messages,
+	 * `proc://` stdin/stop/mode) require it and throw when it is absent.
+	 */
+	session?: ToolSession;
 	/** Session-bound `xd://` device dispatcher. */
 	xd?: {
 		write(name: string | null, content: string): Promise<void>;
@@ -219,8 +247,11 @@ export interface ProtocolHandler {
 	 *
 	 * Handlers that omit this method are treated as read-only; the write tool
 	 * surfaces a clear "not writable" error when invoked against them.
+	 *
+	 * A returned result replaces the write tool's default "Successfully wrote
+	 * N bytes" result and may carry transcript-only display details.
 	 */
-	write?(url: InternalUrl, content: string, context?: WriteContext): Promise<void>;
+	write?(url: InternalUrl, content: string, context?: WriteContext): Promise<InternalWriteResult | void>;
 	/**
 	 * Optional autocomplete hook. Returns candidate completions for the
 	 * host/path portion of a `scheme://` URL while the user composes a prompt.

@@ -81,7 +81,7 @@ describe("indexModelsByRequestId (auth-gateway catalog)", () => {
 		const clientRegistry = new ModelRegistry(clientAuthStorage, modelsPath);
 		expect(clientRegistry.find("anthropic", "claude-sonnet-4-5")?.baseUrl).toBe("http://127.0.0.1:18899");
 		expect(clientRegistry.getAll().find(model => model.provider === "openai")?.transport).toBe("pi-native");
-		expect(await clientAuthStorage.getApiKey("anthropic")).toBe("gateway-token");
+		expect(await clientAuthStorage.keys.get("anthropic")).toBe("gateway-token");
 
 		// The gateway registry ignores models.yml entirely: bundled routing wins,
 		// no config key reaches AuthStorage, and no pi-native self-route survives.
@@ -95,7 +95,7 @@ describe("indexModelsByRequestId (auth-gateway catalog)", () => {
 
 		expect(gatewayModel.baseUrl).toBe(bundledModel.baseUrl);
 		expect(gatewayModel.transport).toBeUndefined();
-		expect(await gatewayAuthStorage.getApiKey("anthropic")).not.toBe("gateway-token");
+		expect(await gatewayAuthStorage.keys.get("anthropic")).not.toBe("gateway-token");
 		expect(gatewayRegistry.getAll().find(model => model.provider === "openai")?.transport).toBeUndefined();
 		expect(indexModelsByRequestId(gatewayRegistry.getAll(), new Set(["anthropic"])).get(gatewayModel.id)).toBe(
 			gatewayModel,

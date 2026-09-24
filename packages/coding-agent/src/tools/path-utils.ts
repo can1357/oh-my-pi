@@ -216,6 +216,11 @@ export function isLineInRanges(lineNumber: number, ranges: readonly LineRange[])
 	return false;
 }
 
+/** Windows path naming an NTFS stream: a colon after the root (`C:\`, `\\?\C:\`, UNC). */
+function needsWindowsStreamExistenceCheck(resolved: string): boolean {
+	return process.platform === "win32" && resolved.slice(path.win32.parse(resolved).root.length).includes(":");
+}
+
 /**
  * Three-way probe for whether the exact filesystem entry named by `filePath`
  * exists. `stat` (used earlier) failed for reasons other than "no such file"
@@ -231,11 +236,19 @@ export function isLineInRanges(lineNumber: number, ranges: readonly LineRange[])
  * Without this, a semicolon-joined `path` list long enough to trip the limit
  * (bare filenames past `NAME_MAX`, or a total past `PATH_MAX`) was read as one
  * literal path and the delimited split was suppressed (issue #7597).
+ *
+ * On Windows a colon after the root names an NTFS alternate data stream, and
+ * `lstat` of a nonexistent stream such as `file.md:1-40` can intermittently
+ * succeed with the base file's metadata while `open` fails with `ENOENT`. That
+ * false positive made the literal-preferring splitters drop a valid selector and
+ * `read` open `file.md:1-40` verbatim. Such paths are confirmed with an `F_OK`
+ * access check, which rejects missing streams and accepts real ones.
  */
 export async function probeLiteralPathExists(filePath: string, cwd: string): Promise<"exists" | "missing" | "unknown"> {
 	const resolved = resolveReadPath(filePath, cwd);
 	try {
 		await fs.promises.lstat(resolved);
+		if (needsWindowsStreamExistenceCheck(resolved)) await fs.promises.access(resolved, fs.constants.F_OK);
 		return "exists";
 	} catch (err) {
 		if (isEnoent(err) || isEnotdir(err) || hasFsCode(err, "ENAMETOOLONG")) return "missing";
@@ -271,6 +284,7 @@ export function probeLiteralPathExistsSync(filePath: string, cwd: string): "exis
 	const resolved = resolveReadPath(filePath, cwd);
 	try {
 		fs.lstatSync(resolved);
+		if (needsWindowsStreamExistenceCheck(resolved)) fs.accessSync(resolved, fs.constants.F_OK);
 		return "exists";
 	} catch (err) {
 		if (isEnoent(err) || isEnotdir(err) || hasFsCode(err, "ENAMETOOLONG")) return "missing";

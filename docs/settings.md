@@ -563,7 +563,7 @@ tools:
 | `tools.artifactTailBytes`      | number  | `20`    | KB of tail kept inline on spill.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `tools.artifactTailLines`      | number  | `500`   | Max tail lines kept inline on spill.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 
-Individual built-in tools and Eval preludes are toggled by their own keys, e.g. `bash.enabled`, `launch.enabled`, `eval.py`, `eval.js`, `glob.enabled`, `grep.enabled`, `fetch.enabled`, `browser.enabled`, `computer.enabled`, `astEdit.enabled`, `astGrep.enabled`, `find.enabled`, and `web_search.enabled`. Image questions use `read <image>?q=<question>` and honor `images.questionTimeoutMs`.
+Individual built-in tools and Eval preludes are toggled by their own keys, e.g. `bash.enabled`, `launch.enabled`, `eval.py`, `eval.js`, `glob.enabled`, `grep.enabled`, `fetch.enabled`, `browser.enabled`, `computer.enabled`, `astEdit.enabled`, `astGrep.enabled`, `find.enabled` (`auto`/`on`/`off`; `auto` enables `find` only when the `judge` role resolves to a native TypeSafe jev model), and `web_search.enabled`. Image questions use `read <image>?q=<question>` and honor `images.questionTimeoutMs`.
 
 ### Window-scoped computer use
 
@@ -621,6 +621,7 @@ lsp:
 | `bash.autoBackground.thresholdMs` | number  | `60000`   | Threshold before auto-backgrounding.                                                                                                                        |
 | `eval.py`                         | boolean | `true`    | Python eval backend. `PI_PY=0` disables for the process.                                                                                                    |
 | `eval.js`                         | boolean | `true`    | JavaScript eval backend. `PI_JS=0` disables for the process.                                                                                                |
+| `eval.autoProvision`              | boolean | `true`    | Create the managed JavaScript eval package environment on first `%bun add`.                                                                                 |
 | `eval.tools.enabled`              | boolean | `true`    | Expose kernel-defined `@tool` / `tool(fn)` functions to `task`, `agent()`, and `workpool()` subagents.                                                      |
 | `eval.workpool.freshAgents`       | boolean | `false`   | Spawn a new workpool agent for every item instead of reusing idle workers or batching queued items.                                                        |
 | `python.kernelMode`               | enum    | `session` | `session` (persistent kernel) or `per-call`.                                                                                                                |
@@ -670,6 +671,12 @@ read:
 ### Context, compaction, and memory
 
 `/extended-context on` opts in to larger context windows; `/extended-context off` restores standard windows and premium-pricing caps. For `openai-codex/gpt-6-astra` and its `-wm` route, off uses 272,000 tokens and on uses the documented 922,000-token input window (1.05M total context with 128K output), or a higher discovered maximum. The curated maximum corrects stale lower discovery values. Explicit per-model `contextWindow` overrides in `models.yml` take precedence in both modes; remove an override if you want the toggle to control that model again. On `openai-codex`, an explicit override still clamps to the server-honored ceiling (`min(override, maximum)`, mirroring Codex's `model_context_window`), so it cannot widen past the documented maximum.
+
+Custom providers can opt into the same toggle by setting `contextWindow` (normal)
+and `maxContextWindow` (extended) on a model or `modelOverrides` entry in
+`models.yml`. A `contextWindow` override without `maxContextWindow` remains
+fixed in both modes. See [model configuration](models.md); these values control
+local budgeting, not the upstream endpoint's accepted request size.
 
 Compaction headroom is separate from this opt-in. With the default 15% reserve, Astra's documented extended window has an auto-compaction threshold of 783,700 tokens. A larger window can consume more usage even when there is no additional long-context pricing multiplier.
 

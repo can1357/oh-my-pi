@@ -416,6 +416,55 @@ describe("retain.execute (Mnemopi backend)", () => {
 		expect(text).toContain("fact three");
 	});
 
+	// A failed write stored nothing, so reporting the whole batch as stored
+	// misleads the caller about the failure, its cause, and what was kept.
+	it("reports what a batch stored and why a later write failed instead of claiming success", async () => {
+		const settings = Settings.isolated({ "memory.backend": "mnemopi" });
+		const state = registerMnemopiState();
+		const memory = state.getScopedRetainTarget().memory;
+		const remember = memory.remember.bind(memory);
+		const storedIds: string[] = [];
+		let writes = 0;
+		vi.spyOn(memory, "remember").mockImplementation((content, options) => {
+			writes += 1;
+			if (writes === 2) throw new Error("database or disk is full");
+			const id = remember(content, options);
+			storedIds.push(id);
+			return id;
+		});
+
+		const tool = MemoryRetainTool.createIf(makeSession(settings))!;
+		const error = await tool
+			.execute("call-mnemopi-partial", {
+				items: [{ content: "fact kept" }, { content: "fact lost" }, { content: "fact never tried" }],
+			})
+			.catch((caught: unknown) => caught);
+
+		expect(error).toBeInstanceOf(Error);
+		expect((error as Error).message).toContain("did not store item 2 of 3: database or disk is full.");
+		expect((error as Error).message).toContain(`item 1 (id ${storedIds[0]})`);
+		expect((error as Error).message).toContain("Later items were not attempted.");
+		expect(writes).toBe(2);
+		expect(memory.get(storedIds[0]!)).toMatchObject({ content: "fact kept" });
+	});
+
+	it("does not claim untried items when the last item of a batch fails", async () => {
+		const settings = Settings.isolated({ "memory.backend": "mnemopi" });
+		const state = registerMnemopiState();
+		vi.spyOn(state.getScopedRetainTarget().memory, "remember").mockImplementation(() => {
+			throw new Error("database or disk is full");
+		});
+
+		const tool = MemoryRetainTool.createIf(makeSession(settings))!;
+		const error = await tool
+			.execute("call-mnemopi-last", { items: [{ content: "only fact" }] })
+			.catch((caught: unknown) => caught);
+
+		expect(error).toBeInstanceOf(Error);
+		expect((error as Error).message).toContain("item 1 of 1: database or disk is full. Nothing was stored.");
+		expect((error as Error).message).not.toContain("Later items");
+	});
+
 	it("isolates memories between projects when scoping is per-project", async () => {
 		const settings = Settings.isolated({
 			"memory.backend": "mnemopi",
@@ -1319,7 +1368,7 @@ describe("Mnemopi backend lifecycle", () => {
 		expect(ftsHits?.count ?? 0).toBe(0);
 	});
 
-	it("reports aborted searches and save-without-id failures", async () => {
+	it("reports aborted searches and failed saves", async () => {
 		const state = registerMnemopiState();
 		const session = state.session;
 		setMnemopiSessionState(session, state);
@@ -1336,13 +1385,15 @@ describe("Mnemopi backend lifecycle", () => {
 			message: "Search aborted.",
 		});
 
-		const rememberSpy = vi.spyOn(state, "rememberScoped").mockReturnValue(undefined);
+		const rememberSpy = vi.spyOn(state, "rememberScoped").mockImplementation(() => {
+			throw new Error("database or disk is full");
+		});
 		await expect(
-			mnemopiBackend.save!({ agentDir: "/tmp/agent", cwd: "/tmp", session }, { content: "memory without id" }),
+			mnemopiBackend.save!({ agentDir: "/tmp/agent", cwd: "/tmp", session }, { content: "memory that fails" }),
 		).resolves.toMatchObject({
 			backend: "mnemopi",
 			stored: 0,
-			message: "Mnemopi did not return a stored memory id.",
+			message: "Mnemopi did not store the memory: database or disk is full",
 		});
 		rememberSpy.mockRestore();
 	});

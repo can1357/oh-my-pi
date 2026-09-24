@@ -29,7 +29,7 @@ interface Harness {
 async function boot(respond: () => Response): Promise<Harness> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-systemone-"));
 	const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-	storage.setRuntimeApiKey("typesafe", "ts-secret");
+	storage.keys.setRuntime("typesafe", "ts-secret");
 	const jev = getBundledModel("typesafe", "jev-latest");
 	if (!jev) throw new Error("expected bundled typesafe/jev-latest");
 	const chat = createMockModel({ provider: "openrouter", id: "chat-only" });
@@ -77,7 +77,7 @@ describe("auth-gateway POST /v1/systemone", () => {
 	it("forwards the judgment with the broker credential and re-encodes TypeSafe's answer", async () => {
 		harness = await boot(() => Response.json(UPSTREAM_ANSWER));
 		const recorded: { provider: string; model: string; costUsd?: number; client?: { app?: string } }[] = [];
-		vi.spyOn(harness.storage, "recordObservedUsage").mockImplementation(entry => {
+		vi.spyOn(harness.storage.usage, "observe").mockImplementation(entry => {
 			recorded.push(entry);
 		});
 

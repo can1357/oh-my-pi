@@ -126,8 +126,8 @@ class MuxTestClient {
 	#receive(message: RpcMessage): void {
 		if (message.method !== undefined) {
 			if (message.id !== undefined) {
+				// Reply first, then queue the request so tests can await it via nextNotification.
 				this.#write({ jsonrpc: "2.0", id: message.id, result: message.params });
-				return;
 			}
 			const waiters = this.#notificationWaiters.get(message.method);
 			const waiter = waiters?.shift();
@@ -1487,6 +1487,61 @@ describe("LspMuxServer", () => {
 			expect(replacement.connected.spawned).toBe(true);
 			expect(replacement.connected.pid).not.toBe(first.connected.pid);
 			expect(replacement.connected.pid).not.toBe(second.connected.pid);
+		},
+		10_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"survives a language server that exits while documents are open",
+		async () => {
+			// Regression: session teardown wrote didClose to the exited child's
+			// stdin; that rejection escaped #closeSession (invoked via `void`
+			// from the socket "close" handler) and killed the whole daemon.
+			const { client } = await link();
+			await initialize(client);
+			const uri = "file:///crash.ts";
+			client.notify("textDocument/didOpen", {
+				textDocument: { uri, languageId: "typescript", version: 1, text: "x" },
+			});
+			await pollUntil(async () => (await state(client)).didOpen[uri] === 1, "didOpen to reach the server");
+			const closed = client.waitForClose();
+			client.notify(MUX_RESTART_METHOD);
+			await closed;
+			await pollUntil(() => Promise.resolve(server.serverKeys.length === 0), "exited server cleanup");
+			// The daemon itself must keep serving fresh sessions.
+			const fresh = await link();
+			await initialize(fresh.client);
+			expect(await fresh.client.request<{ alive: boolean }>("test/echo", { alive: true })).toEqual({ alive: true });
+		},
+		10_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"contains write failures when a language server stops reading stdin",
+		async () => {
+			// The server closes stdin, then sends a request (signalling stdin is closed) and stays
+			// alive, so tearing down the session's open document fails with EPIPE.
+			const request = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "workspace/applyEdit", params: {} });
+			connectParams.command = "sh";
+			connectParams.args = [
+				"-c",
+				'exec 0<&-; printf "%s" "$1"; exec sleep 30',
+				"sh",
+				`Content-Length: ${Buffer.byteLength(request)}\r\n\r\n${request}`,
+			];
+			const first = await link();
+			first.client.notify("textDocument/didOpen", {
+				textDocument: { uri: "file:///epipe.ts", languageId: "typescript", version: 1, text: "x" },
+			});
+			await first.client.nextNotification("workspace/applyEdit");
+			first.client.destroy();
+			await pollUntil(() => Promise.resolve(server.sessionCount === 0), "first session close");
+			// Teardown must finish and release the server for reuse instead of rejecting mid-cleanup.
+			await pollUntil(async () => {
+				const next = await link();
+				next.client.destroy();
+				return next.connected.pid === first.connected.pid;
+			}, "idle server reuse");
 		},
 		10_000,
 	);

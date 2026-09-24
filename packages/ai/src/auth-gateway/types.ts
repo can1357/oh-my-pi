@@ -99,6 +99,8 @@ export interface AuthGatewayParsedRequestOptions {
 	 * free-form bag. The gateway forwards as-is.
 	 */
 	metadata?: Record<string, unknown>;
+	/** Anthropic User Profile attribution from the inbound request header. */
+	userProfileId?: string;
 	/**
 	 * Captured allow-listed passthrough headers (anthropic-beta,
 	 * anthropic-version, openai-organization, openai-project, openai-beta,

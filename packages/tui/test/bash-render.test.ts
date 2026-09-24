@@ -128,6 +128,26 @@ describe("bashToolRenderer", () => {
 		expect(rendered).not.toContain("Wall time: 1.23 seconds");
 	});
 
+	it("shows a supervised service's readiness and output without a command timeout", async () => {
+		const component = bashToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "web: ready pid=42 ready\nREADY\nlistening" }],
+				details: { service: { name: "web", state: "ready", ready: true, timedOut: false, pid: 42 } },
+				isError: false,
+			},
+			{ expanded: false, isPartial: false },
+			uiTheme,
+			{ command: "bun run dev", name: "web", ready: { log: "READY" } },
+		);
+		const rendered = sanitizeText(component.render(120).join("\n"));
+		expect(rendered).toContain("Service: web");
+		expect(rendered).toContain("State: ready");
+		expect(rendered).toContain("Ready: yes");
+		expect(rendered).toContain("PID: 42");
+		expect(rendered).toContain("listening");
+		expect(rendered).not.toContain("Timeout:");
+	});
+
 	it("renders a backgrounded job as a static footer notice", async () => {
 		const component = bashToolRenderer.renderResult(
 			{

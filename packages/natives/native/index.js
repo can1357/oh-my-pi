@@ -45,7 +45,10 @@ export const VcsRepo = nativeBindings.VcsRepo;
 
 // functions
 export const __ompInstallTokioRuntime = nativeBindings.__ompInstallTokioRuntime ?? missingNativeExport("__ompInstallTokioRuntime");
-export const __piNativesV18_2_9 = nativeBindings.__piNativesV18_2_9;
+export const __piNativesV18_3_0 = nativeBindings.__piNativesV18_3_0;
+export const appleFmAvailability = nativeBindings.appleFmAvailability ?? missingNativeExport("appleFmAvailability");
+export const appleFmCancel = nativeBindings.appleFmCancel ?? missingNativeExport("appleFmCancel");
+export const appleFmGenerate = nativeBindings.appleFmGenerate ?? missingNativeExport("appleFmGenerate");
 export const astEdit = nativeBindings.astEdit ?? missingNativeExport("astEdit");
 export const astGrep = nativeBindings.astGrep ?? missingNativeExport("astGrep");
 export const astMatch = nativeBindings.astMatch ?? missingNativeExport("astMatch");
@@ -164,6 +167,7 @@ export const Encoding = {
 	DeepSeekV3: "DeepSeekV3",
 	KimiK2: "KimiK2",
 	Glm5: "Glm5",
+	Jev: "Jev",
 };
 export const FileType = {
 	File: 1,

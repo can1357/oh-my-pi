@@ -49,8 +49,8 @@ describe("AgentSession auto-compaction queue resume", () => {
 	beforeAll(async () => {
 		tempDir = TempDir.createSync("@pi-auto-compaction-queue-");
 		authStorage = await AuthStorage.create(":memory:");
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-		authStorage.setRuntimeApiKey("mock", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		authStorage.keys.setRuntime("mock", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 	});
 
