@@ -198,7 +198,7 @@ export function parseCSV(value: string): string[] {
  */
 export function parseArrayOrCSV(value: unknown, options?: { keepEmpty?: boolean }): string[] | undefined {
 	const parsed = Array.isArray(value)
-		? value.filter((item): item is string => typeof item === "string")
+		? value.filter((item): item is string => typeof item === "string" && item.trim() !== "")
 		: typeof value === "string"
 			? parseCSV(value)
 			: undefined;

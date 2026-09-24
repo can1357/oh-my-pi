@@ -106,6 +106,9 @@ describe("parseAgentFields", () => {
 		expect(parseAgentFields({ name: "quiet", description: "desc", tools: "" })?.tools).toBeUndefined();
 		expect(parseAgentFields({ name: "quiet", description: "desc", tools: "   " })?.tools).toBeUndefined();
 		expect(parseAgentFields({ name: "quiet", description: "desc", tools: [1, 2] })?.tools).toBeUndefined();
+		// An array of blank strings carries no tool names either — same absent
+		// default, not a yield-only strip.
+		expect(parseAgentFields({ name: "quiet", description: "desc", tools: ["", "   "] })?.tools).toBeUndefined();
 	});
 
 	test("maps legacy search alias to grep and keeps find canonical", () => {
