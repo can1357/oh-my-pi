@@ -1,8 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-
-const APP_NAME = "omp";
+import { APP_NAME, XDG_INIT_MARKER_FILENAME } from "@oh-my-pi/pi-utils/dirs";
 
 export async function initXdg(): Promise<void> {
 	if (process.platform !== "linux" && process.platform !== "darwin") {
@@ -18,6 +17,7 @@ export async function initXdg(): Promise<void> {
 
 	for (const dir of dirs) {
 		await fs.mkdir(dir, { recursive: true });
+		await Bun.write(path.join(dir, XDG_INIT_MARKER_FILENAME), "");
 		console.log(`Created ${dir.replace(os.homedir(), "~")}`);
 	}
 

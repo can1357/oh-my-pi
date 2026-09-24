@@ -4,11 +4,9 @@
  * Uses PI_CONFIG_DIR (default ".omp") for the config root and
  * PI_CODING_AGENT_DIR to override the agent directory.
  *
- * On Linux, if XDG_DATA_HOME / XDG_STATE_HOME / XDG_CACHE_HOME environment
- * variables are set, paths are redirected to XDG-compliant locations under
- * $XDG_*_HOME/omp/. This requires running `omp config migrate` first to
- * move data to the new locations. No filesystem existence checks are performed
- * — if the env var is set, omp trusts that the migration has been done.
+ * On Linux and macOS, XDG paths are adopted after `omp config init-xdg`
+ * initializes them. A fresh install may also adopt an existing app root, but
+ * an unrelated XDG directory must not relocate an existing ~/.omp store.
  */
 
 import * as fs from "node:fs";
@@ -19,6 +17,9 @@ import { isEnoent, isEnotdir } from "./fs-error";
 
 /** App name (e.g. "omp") */
 export const APP_NAME: string = "omp";
+
+/** Marker written by `omp config init-xdg` to distinguish explicit XDG setup. */
+export const XDG_INIT_MARKER_FILENAME = ".omp-initialized";
 
 /** Config directory name (e.g. ".omp") */
 export const CONFIG_DIR_NAME: string = ".omp";
@@ -306,12 +307,12 @@ export function getConfigAgentDirName(): string {
 // =============================================================================
 
 type XdgCategory = "data" | "state" | "cache";
-
 /**
- * Resolves and caches all omp directory paths. On Linux, when XDG environment
- * variables are set, paths are redirected under $XDG_*_HOME/omp/. A new
- * instance is created whenever the agent directory changes, which naturally
- * invalidates all cached paths.
+ * Resolves and caches all omp directory paths. On Linux and macOS, explicitly
+ * initialized XDG roots are used for default-profile state. Fresh installs may
+ * adopt an existing XDG app root, while an existing legacy config root remains
+ * canonical until XDG is initialized. A new instance is created whenever the
+ * agent directory changes, which naturally invalidates all cached paths.
  */
 class DirResolver {
 	readonly configRoot: string;
@@ -334,22 +335,28 @@ class DirResolver {
 		this.agentDir = agentDirOverride ? path.resolve(agentDirOverride) : defaultAgent;
 		const isDefault = this.agentDir === defaultAgent;
 
-		// XDG is a Linux convention. On supported platforms, default profile state
-		// resolves under $XDG_*_HOME/omp once `omp config init-xdg` has migrated
-		// the user's data. Named profiles follow a stricter rule: the XDG choice
-		// is keyed on the profile-specific XDG path, never the base app root.
+		// Default-profile state adopts XDG only after explicit initialization or
+		// when no legacy config root exists. `init-xdg` now writes a marker; all
+		// three app roots remain accepted for installations initialized before the
+		// marker existed. A single app root may be created by an unrelated feature
+		// and must not silently move an existing store.
 		//
-		// Why: if we consulted the base app root for named profiles too, the same
-		// profile could resolve to `~/.omp/profiles/<name>` on first activation
-		// (when no $XDG_*_HOME/omp exists yet) and then silently move to
-		// `$XDG_*_HOME/omp/profiles/<name>` the moment the base appeared, orphaning
-		// the earlier state. Pinning on the profile path means a profile's location
-		// is decided at first activation and stays put until the user explicitly
-		// migrates it (e.g. by mkdir'ing the XDG profile dir).
+		// Named profiles remain keyed on their profile-specific XDG path. This
+		// keeps a profile in its original location when only the base app root
+		// appears later.
 		let xdgData: string | undefined;
 		let xdgState: string | undefined;
 		let xdgCache: string | undefined;
 		if ((process.platform === "linux" || process.platform === "darwin") && isDefault) {
+			const dataHome = process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share");
+			const stateHome = process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state");
+			const cacheHome = process.env.XDG_CACHE_HOME || path.join(os.homedir(), ".cache");
+			const initializedBeforeMarkers =
+				fs.existsSync(path.join(dataHome, APP_NAME)) &&
+				fs.existsSync(path.join(stateHome, APP_NAME)) &&
+				fs.existsSync(path.join(cacheHome, APP_NAME));
+			const legacyRootExists = fs.existsSync(this.configRoot);
+
 			const resolveIf = (envVar: string) => {
 				const value = process.env[envVar];
 				if (!value) return undefined;
@@ -362,7 +369,9 @@ class DirResolver {
 						}
 						return undefined;
 					}
-					if (fs.existsSync(appRoot)) {
+					const explicitlyInitialized =
+						initializedBeforeMarkers || fs.existsSync(path.join(appRoot, XDG_INIT_MARKER_FILENAME));
+					if (fs.existsSync(appRoot) && (!legacyRootExists || explicitlyInitialized)) {
 						return appRoot;
 					}
 				} catch {}

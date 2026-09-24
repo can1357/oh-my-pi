@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -17,6 +17,7 @@ import {
 	resolveProfileEnv,
 	setAgentDir,
 	setProfile,
+	XDG_INIT_MARKER_FILENAME,
 } from "@oh-my-pi/pi-utils/dirs";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 
@@ -138,6 +139,33 @@ describe("profile directories", () => {
 		expect(getActiveProfile()).toBeUndefined();
 		expect(getConfigRootDir()).toBe(root);
 		expect(getAgentDir()).toBe(path.join(root, "agent"));
+	});
+
+	it("keeps the legacy default store until the XDG root is explicitly initialized", async () => {
+		if (process.platform === "win32") return;
+
+		const homedir = spyOn(os, "homedir").mockReturnValue(tempRoot);
+		try {
+			const legacyRoot = path.join(tempRoot, configDir);
+			const xdgData = path.join(tempRoot, "data");
+			const xdgState = path.join(tempRoot, "state");
+			const xdgCache = path.join(tempRoot, "cache");
+			const xdgAppRoot = path.join(xdgData, "omp");
+			process.env.XDG_DATA_HOME = xdgData;
+			process.env.XDG_STATE_HOME = xdgState;
+			process.env.XDG_CACHE_HOME = xdgCache;
+			await fs.mkdir(path.join(legacyRoot, "agent", "sessions"), { recursive: true });
+			await fs.mkdir(xdgAppRoot, { recursive: true });
+
+			setProfile(undefined);
+			expect(getSessionsDir()).toBe(path.join(legacyRoot, "agent", "sessions"));
+
+			await fs.writeFile(path.join(xdgAppRoot, XDG_INIT_MARKER_FILENAME), "");
+			setProfile(undefined);
+			expect(getSessionsDir()).toBe(path.join(xdgAppRoot, "sessions"));
+		} finally {
+			homedir.mockRestore();
+		}
 	});
 
 	it("keeps XDG-backed named profile state under profile-specific roots", async () => {
