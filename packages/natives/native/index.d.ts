@@ -648,7 +648,7 @@ export declare function __ompInstallTokioRuntime(): void
  * `packages/natives/native/index.js` (which derives the name from
  * `package.json#version`).
  */
-export declare function __piNativesV18_2_11(): void
+export declare function __piNativesV18_3_0(): void
 
 /**
  * Reports whether the on-device model can generate, as an `availability`

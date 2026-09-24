@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-coding-agent",
-	"version": "18.2.11",
+	"version": "18.3.0",
 	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
 	"keywords": [
 		"agent",
@@ -465,14 +465,6 @@
 		"./tools": {
 			"types": "./src/tools/index.ts",
 			"import": "./src/tools/index.ts"
-		},
-		"./tools/hub": {
-			"types": "./src/tools/hub/index.ts",
-			"import": "./src/tools/hub/index.ts"
-		},
-		"./tools/hub/*": {
-			"types": "./src/tools/hub/*.ts",
-			"import": "./src/tools/hub/*.ts"
 		},
 		"./tools/jfind": {
 			"types": "./src/tools/jfind/index.ts",

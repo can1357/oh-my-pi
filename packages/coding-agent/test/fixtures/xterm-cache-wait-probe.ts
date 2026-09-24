@@ -1,5 +1,5 @@
 import { statSync } from "node:fs";
-import "../../src/tools/hub/index";
+import "../../src/tools/wait";
 
 const paths = Object.keys(require.cache)
 	.filter(modulePath => modulePath.replaceAll("\\", "/").includes("/packages/utils/src/vterm"))

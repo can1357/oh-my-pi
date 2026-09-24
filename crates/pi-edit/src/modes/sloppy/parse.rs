@@ -177,6 +177,10 @@ fn envelope_line(line: &str) -> bool {
 }
 
 /// Remove foreign patch envelopes and the noise following end sentinels.
+///
+/// Insert bodies are literal, so envelope rows inside them are kept — except a
+/// closing sentinel (`*** End Patch`, …) followed only by blank or fence lines,
+/// which closes a wrapper around the whole payload rather than inserted text.
 pub fn strip_envelope_noise(lines: Vec<&str>) -> Vec<String> {
 	let mut result = Vec::new();
 	let mut skipping = false;
@@ -187,6 +191,13 @@ pub fn strip_envelope_noise(lines: Vec<&str>) -> Vec<String> {
 		if let Some(header) = parse_header(&line) {
 			inserting = !skipping && matches!(header, Header::Insert(_));
 		} else if inserting {
+			if ENVELOPE_END_RE.is_match(line.trim())
+				&& lines[index + 1..]
+					.iter()
+					.all(|rest| rest.trim().is_empty() || FENCE_LINE_RE.is_match(rest))
+			{
+				break;
+			}
 			result.push(line);
 			index += 1;
 			continue;

@@ -15,15 +15,7 @@
 import { describe, expect, it } from "bun:test";
 import type { MessageCreateParams, TextBlockParam } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
-import type {
-	AssistantMessage,
-	CacheRetention,
-	Context,
-	Message,
-	Model,
-	ModelSpec,
-	ProviderSessionState,
-} from "@oh-my-pi/pi-ai/types";
+import type { AssistantMessage, CacheRetention, Context, Message, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
@@ -84,6 +76,32 @@ async function captureWireBody(
 
 	if (!body) throw new Error("wire body was not captured");
 	return body;
+}
+
+/**
+ * Builds one OAuth request and aborts it once the payload is built. `message`
+ * is the terminal message; its `requestControls` go on the reply appended for
+ * the next turn.
+ */
+async function captureTurn(
+	model: Model<"anthropic-messages">,
+	context: Context,
+	sessionId: string,
+): Promise<{ body: MessageCreateParams; message: AssistantMessage }> {
+	const controller = new AbortController();
+	let body: MessageCreateParams | undefined;
+	const message = await streamAnthropic(model, context, {
+		apiKey: "sk-ant-api-test",
+		signal: controller.signal,
+		isOAuth: true,
+		sessionId,
+		onPayload: payload => {
+			body = payload as unknown as MessageCreateParams;
+			controller.abort();
+		},
+	}).result();
+	if (!body) throw new Error("wire body was not captured");
+	return { body, message };
 }
 
 function countCacheBreakpoints(body: MessageCreateParams): number {
@@ -535,47 +553,30 @@ describe("anthropic head caching (general API-key path)", () => {
 
 	it("skips undecoratable trailing messages so tool-control turns keep a rolling tail breakpoint", async () => {
 		const oAuthModel = buildModel({ ...MODEL_SPEC, id: "claude-fable-5-1", name: "Claude Fable 5.1" });
-		const providerSessionState = new Map<string, ProviderSessionState>();
-		const flap = (turn: number): Context["tools"] =>
-			turn % 2 === 0
-				? [
-						...(CONTEXT.tools ?? []),
-						{
-							name: "extra",
-							description: "Extra tool",
-							parameters: { type: "object", properties: {}, additionalProperties: false },
-						},
-					]
-				: CONTEXT.tools;
-		const captureFlap = (messages: Message[], tools: Context["tools"]): Promise<MessageCreateParams> => {
-			const controller = new AbortController();
-			const { promise, resolve } = Promise.withResolvers<MessageCreateParams>();
-			const stream = streamAnthropic(
-				oAuthModel,
-				{ systemPrompt: ["You are helpful."], messages, tools },
-				{
-					apiKey: "sk-ant-api-test",
-					signal: controller.signal,
-					isOAuth: true,
-					sessionId: "sess-1",
-					providerSessionState,
-					onPayload: payload => {
-						resolve(payload as unknown as MessageCreateParams);
-						controller.abort();
-					},
-				},
-			);
-			void stream.result().catch(() => undefined);
-			return promise;
+		const extra = {
+			name: "extra",
+			description: "Extra tool",
+			parameters: { type: "object", properties: {}, additionalProperties: false },
 		};
+		// Withdrawn `extra` stays declared through `inactiveTools`, so every other turn sends a tool control.
+		const flap = (turn: number): Pick<Context, "tools" | "inactiveTools"> =>
+			turn % 2 === 0
+				? { tools: [...(CONTEXT.tools ?? []), extra] }
+				: { tools: CONTEXT.tools, inactiveTools: [extra] };
+		const captureFlap = (messages: Message[], tools: Pick<Context, "tools" | "inactiveTools">) =>
+			captureTurn(oAuthModel, { systemPrompt: ["You are helpful."], messages, ...tools }, "sess-1");
 		const history: Message[] = [
 			{ role: "user", content: "hello", timestamp: 1 },
 			{ role: "developer", content: "Session policy reminder.", timestamp: 2 },
 		];
 		let flapBody: MessageCreateParams | undefined;
 		for (let turn = 1; turn <= 32; turn++) {
-			flapBody = await captureFlap([...history], flap(turn));
-			history.push(assistantMessage(`answer ${turn}`, turn * 2 + 10));
+			const flapTurn = await captureFlap([...history], flap(turn));
+			flapBody = flapTurn.body;
+			history.push({
+				...assistantMessage(`answer ${turn}`, turn * 2 + 10),
+				requestControls: flapTurn.message.requestControls,
+			});
 			history.push({ role: "user", content: `question ${turn}`, timestamp: turn * 2 + 11 });
 		}
 		if (!flapBody) throw new Error("wire body was not captured");
@@ -611,33 +612,18 @@ describe("anthropic head caching (general API-key path)", () => {
 	});
 	it("keeps the head breakpoint on the stable prefix when the recall suffix refreshes", async () => {
 		const oAuthModel = buildModel({ ...MODEL_SPEC, id: "claude-opus-5", name: "Claude Opus 5" });
-		const providerSessionState = new Map<string, ProviderSessionState>();
-		const captureRecall = (recall: string, messages: Message[]): Promise<MessageCreateParams> => {
-			const controller = new AbortController();
-			const { promise, resolve } = Promise.withResolvers<MessageCreateParams>();
-			const stream = streamAnthropic(
+		const captureRecall = (recall: string, messages: Message[]) =>
+			captureTurn(
 				oAuthModel,
 				{ systemPrompt: ["You are helpful.", "Follow the house style.", recall], messages, tools: CONTEXT.tools },
-				{
-					apiKey: "sk-ant-api-test",
-					signal: controller.signal,
-					isOAuth: true,
-					sessionId: "sess-recall",
-					providerSessionState,
-					onPayload: payload => {
-						resolve(payload as unknown as MessageCreateParams);
-						controller.abort();
-					},
-				},
+				"sess-recall",
 			);
-			void stream.result().catch(() => undefined);
-			return promise;
-		};
 		const messages: Message[] = [{ role: "user", content: "hello", timestamp: 1 }];
-		const before = await captureRecall("<memories>\nrecall v1\n</memories>", messages);
-		const after = await captureRecall("<memories>\nrecall v2\n</memories>", [
+		const first = await captureRecall("<memories>\nrecall v1\n</memories>", messages);
+		const before = first.body;
+		const { body: after } = await captureRecall("<memories>\nrecall v2\n</memories>", [
 			...messages,
-			assistantMessage("hi there", 2),
+			{ ...assistantMessage("hi there", 2), requestControls: first.message.requestControls },
 			{ role: "user", content: "again", timestamp: 3 },
 		]);
 		expect(countCacheBreakpoints(after)).toBeLessThanOrEqual(4);

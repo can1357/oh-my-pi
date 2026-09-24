@@ -141,6 +141,8 @@ export interface NonMessageTokenSource {
 		};
 	};
 	readonly skills?: readonly ContextSkill[];
+	/** Provider-facing, session-frozen descriptions when available. */
+	readonly renderedSkills?: readonly ContextSkill[];
 }
 
 /** Shared empty system-prompt part list, avoiding an allocation per render. */
@@ -318,7 +320,7 @@ function nonMessageTokenCacheEntry(
 	const systemPromptRef = session.systemPrompt ?? EMPTY_STRING_PARTS;
 	const toolsRef = session.agent?.state?.tools ?? EMPTY_TOOLS;
 	const toolsRevision = getToolSchemaMetadataRevision(toolsRef);
-	const skillsRef = session.skills ?? EMPTY_SKILLS;
+	const skillsRef = session.renderedSkills ?? session.skills ?? EMPTY_SKILLS;
 	let entry = cachedSession[NON_MESSAGE_TOKEN_CACHE];
 	if (
 		entry &&
@@ -383,7 +385,12 @@ export function computeNonMessageBreakdown(
 	if (entry.breakdown && entry.skillful === skillful) return entry.breakdown;
 	const tools = session.agent?.state?.tools ?? EMPTY_TOOLS;
 	const skillsTokens =
-		skillful === false ? 0 : estimateSkillsTokens(renderedSkills(session.skills ?? EMPTY_SKILLS, tools), tokenizer);
+		skillful === false
+			? 0
+			: estimateSkillsTokens(
+					renderedSkills(session.renderedSkills ?? session.skills ?? EMPTY_SKILLS, tools),
+					tokenizer,
+				);
 	const toolsTokens = estimateToolSchemaTokens(tools, tokenizer, sourceRevision);
 	const systemPromptParts = session.systemPrompt ?? EMPTY_STRING_PARTS;
 	const systemContextTokens = tokenizer.countTokens(Array.from(systemPromptParts.slice(1), part => part ?? ""));

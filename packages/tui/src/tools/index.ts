@@ -15,7 +15,7 @@ import { githubToolRenderer } from "./github";
 import { globToolRenderer } from "./glob";
 import { goalToolRenderer } from "./goal";
 import { grepToolRenderer } from "./grep";
-import { hubToolRenderer } from "./hub";
+import { waitToolRenderer } from "./wait";
 import { lspToolRenderer } from "./lsp";
 import { recallToolRenderer, reflectToolRenderer, retainToolRenderer } from "./memory";
 import { readToolRenderer } from "./read";
@@ -45,7 +45,7 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	glob: globToolRenderer,
 	grep: grepToolRenderer,
 	lsp: lspToolRenderer,
-	hub: hubToolRenderer,
+	wait: waitToolRenderer,
 	read: readToolRenderer,
 	// Keyed by xd:// resolution-device names: the write dispatch delegates here
 	// by dispatch tool, and historical `resolve` tool transcripts still render

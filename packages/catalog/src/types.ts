@@ -520,17 +520,17 @@ export interface AnthropicCompat {
 	/** Whether thinking requests may include `context_management` and its beta header. Default: true. */
 	supportsContextManagement?: boolean;
 	/**
-	 * Whether the model lineage supports Anthropic server-side compaction
-	 * (`compact-2026-01-12`: the `compact_20260112` edit and replayed
-	 * `compaction` blocks). Rule-owned per model line; the beta covers the
-	 * adaptive-thinking generation onward and rejects older lines. Default: false.
+	 * Whether the model and host support Anthropic on-demand compaction
+	 * (`compact-2026-09-04` requests and signed replay). Enabled on Opus 4.6+,
+	 * Sonnet 4.6+, Fable/Mythos 5+ on supported hosts. Default: false.
 	 */
 	supportsServerCompaction?: boolean;
 	/**
 	 * Whether the model is served by the first-party Anthropic provider (its
 	 * default route is the official API). Rule-owned on the provider; the
 	 * compaction transport pairs it with a per-request effective-URL check
-	 * because reroutes leave it stale-true. Default: false.
+	 * because reroutes leave it stale-true. Vertex is selected by its provider
+	 * contract instead. Default: false.
 	 */
 	firstPartyProvider?: boolean;
 	/**

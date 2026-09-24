@@ -11,7 +11,8 @@
 //   *** Insert After                  lines inserted after the match
 // Headers are standalone and case-insensitive. A body continues until the
 // next recognized header or EOF; no closing delimiter is used. Insert bodies
-// treat foreign Begin/End Patch rows as literal insertion text.
+// treat foreign Begin/End Patch rows as literal insertion text, except a
+// trailing End Patch, which the parser drops as a wrapper closer.
 start: begin_patch? edit+
 
 begin_patch: BEGIN_PATCH LF

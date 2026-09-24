@@ -56,19 +56,12 @@ import { formatCodeFrameLine } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 
-const searchPathEntry = type("string").describe(
-	'file, directory, glob, internal URL, or "<file>:<lines>" selector to search (e.g. "src/foo.ts:50-100", "src/foo.ts:50+10", "src/foo.ts:50-100,200-300")',
-);
 const searchSchema = type({
-	pattern: type("string").describe("regex pattern"),
-	"path?": searchPathEntry.describe(
-		'file, directory, glob, internal URL, or "<file>:<lines>" selector to search; pass several as a semicolon-delimited list ("src; tests"). Omitted -> searches the workspace root (".")',
-	),
-	"case?": type("boolean").describe("case-sensitive search"),
-	"gitignore?": type("boolean").describe("respect gitignore"),
-	"skip?": type("number")
-		.or("null")
-		.describe("files to skip before collecting results — use to paginate when the prior call hit the file limit"),
+	pattern: type("string"),
+	"path?": "string",
+	"case?": "boolean",
+	"gitignore?": "boolean",
+	"skip?": type("number").or("null"),
 });
 
 export type GrepToolInput = typeof searchSchema.infer;
@@ -749,6 +742,7 @@ async function resolveInternalSearchInputs(opts: {
 	getSessionBranch: ResolveContext["getSessionBranch"];
 	sessionId?: string;
 	agentRegistry?: ResolveContext["agentRegistry"];
+	session?: ResolveContext["session"];
 }): Promise<InternalSearchInputResolution> {
 	const internalRouter = InternalUrlRouter.instance();
 	const paths = opts.resolvedPaths.slice();
@@ -764,6 +758,7 @@ async function resolveInternalSearchInputs(opts: {
 		sessionFile: opts.sessionFile,
 		sessionId: opts.sessionId,
 		agentRegistry: opts.agentRegistry,
+		session: opts.session,
 		localProtocolOptions: opts.localProtocolOptions,
 		skills: opts.skills,
 		rules: opts.rules,
@@ -859,7 +854,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 	};
 	readonly label = "Grep";
 	readonly loadMode = "discoverable";
-	readonly summary = "Grep file contents using ripgrep (fast regex search)";
+	readonly summary = "Search file contents by regex";
 	get description(): string {
 		const displayMode = resolveFileDisplayMode(this.session);
 		return prompt.render(grepDescription, {
@@ -951,6 +946,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					getSessionBranch: () => getExperimentalContextSession(this.session).getBranch(),
 					sessionId: this.session.sessionManager?.getSessionId?.() ?? this.session.getSessionId?.() ?? undefined,
 					agentRegistry: this.session.agentRegistry,
+					session: this.session,
 				});
 				const searchablePaths = internalResolution.paths;
 				const { virtualResources, virtualPathSet, virtualInputIndexes } = internalResolution;
