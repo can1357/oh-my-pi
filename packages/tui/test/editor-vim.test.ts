@@ -1391,6 +1391,10 @@ describe("Editor vim mode", () => {
 			expect(editor.vimMode).toBe("insert");
 			editor.handleInput("fresh");
 			expect(editor.getText()).toBe("fresh baz.qux tail");
+
+			const single = vimEditor("x next.word");
+			single.handleInput("cWnew");
+			expect(single.getText()).toBe("new next.word");
 		});
 
 		it("applies WORD motion counts to operators", () => {
@@ -1403,6 +1407,28 @@ describe("Editor vim mode", () => {
 			const editor = vimEditor("foo-bar\nbaz.qux");
 			editor.handleInput("WdB");
 			expect(editor.getText()).toBe("baz.qux");
+		});
+
+		it("promotes leading W operators crossing a line boundary to linewise", () => {
+			const deleted = vimEditor("foo\nbar");
+			deleted.handleInput("dW");
+			expect(deleted.getText()).toBe("bar");
+
+			const yanked = vimEditor("foo\nbar");
+			yanked.handleInput("yWjP");
+			expect(yanked.getText()).toBe("foo\nfoo\nbar");
+		});
+
+		it("deletes empty and whitespace-only lines before the next WORD", () => {
+			const editor = vimEditor("\n   \nfoo");
+			editor.handleInput("dW");
+			expect(editor.getText()).toBe("foo");
+		});
+
+		it("preserves trailing whitespace when W has no following WORD", () => {
+			const editor = vimEditor("\n   ");
+			editor.handleInput("dW");
+			expect(editor.getText()).toBe("   ");
 		});
 
 		it("includes the final grapheme of a Visual E selection", () => {
