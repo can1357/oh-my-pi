@@ -528,6 +528,14 @@ describe("YieldTool", () => {
 		await expect(scalar.execute("scalar-array", { type: ["verdict"], data: ["yes"] })).rejects.toThrow(
 			/Section "verdict" does not match schema/,
 		);
+		const primitiveItems = new YieldTool(
+			createSession({
+				outputSchema: { type: "object", properties: { notes: { type: "array", items: { type: "string" } } } },
+			}),
+		);
+		await expect(primitiveItems.execute("primitive-batch", { type: ["notes"], data: ["one"] })).rejects.toThrow(
+			/Section "notes" does not match schema/,
+		);
 	});
 
 	it("leaves user-defined section labels unconstrained", async () => {

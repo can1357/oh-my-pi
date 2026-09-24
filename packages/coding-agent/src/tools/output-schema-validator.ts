@@ -30,7 +30,7 @@ export interface OutputValidator {
 	 * one element, while scalar properties use the property schema directly.
 	 */
 	readonly validateSection: ReadonlyMap<string, (value: unknown) => JsonSchemaValidationResult>;
-	/** Labels whose section validator checks one array item rather than the entire array. */
+	/** Labels whose section expects one object item, but can accept a batch of such items. */
 	readonly arraySectionLabels: ReadonlySet<string>;
 	/** Minimal structural examples for object-valued sections, used only in retry messages. */
 	readonly sectionShapes: ReadonlyMap<string, string>;
@@ -116,7 +116,14 @@ function buildArraySectionLabels(schema: Record<string, unknown>): ReadonlySet<s
 	const labels = new Set<string>();
 	if (isRecord(schema.properties)) {
 		for (const [label, property] of Object.entries(schema.properties)) {
-			if (isRecord(property) && property.type === "array" && property.items !== undefined) labels.add(label);
+			if (
+				isRecord(property) &&
+				property.type === "array" &&
+				isRecord(property.items) &&
+				property.items.type === "object"
+			) {
+				labels.add(label);
+			}
 		}
 	}
 	return labels;
