@@ -234,7 +234,7 @@ function defaultCreateProviderFileClient(
 async function defaultOpenAuthStorage(): Promise<AuthStorage> {
 	const store = await SqliteAuthCredentialStore.open(getAgentDbPath());
 	const storage = new AuthStorage(store);
-	await storage.reload();
+	await storage.credentials.reload();
 	return storage;
 }
 
@@ -507,8 +507,8 @@ async function collectDoctor(
 		let storage: AuthStorage | undefined;
 		try {
 			storage = await deps.openAuthStorage();
-			const authenticated = (["openai", "anthropic", "google"] as const).filter(provider =>
-				storage?.hasAuth(provider),
+			const authenticated = (["openai", "anthropic", "google"] as const).filter(
+				provider => storage?.keys.source(provider) !== undefined,
 			);
 			checks.push({
 				name: "config:provider-files",
@@ -587,7 +587,7 @@ async function collectProbe(
 
 function credentialValues(storage: AuthStorage, provider: ProviderFileProvider): string[] {
 	const values: string[] = [];
-	for (const row of storage.listStoredCredentials(provider)) {
+	for (const row of storage.credentials.list(provider)) {
 		const credential = row.credential;
 		if (credential.type === "api_key") values.push(credential.key);
 		else if (credential.access) values.push(credential.access);
@@ -598,7 +598,7 @@ function credentialValues(storage: AuthStorage, provider: ProviderFileProvider):
 async function credentialForEntry(storage: AuthStorage, entry: ProviderFileCacheEntry): Promise<string | undefined> {
 	const values = credentialValues(storage, entry.provider);
 	try {
-		const resolved = await storage.getApiKey(entry.provider);
+		const resolved = await storage.keys.get(entry.provider);
 		if (resolved) values.push(resolved);
 	} catch {
 		// A failed refresh is reported as skipped authentication, never with credential detail.

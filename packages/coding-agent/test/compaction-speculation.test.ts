@@ -166,7 +166,7 @@ describe("async speculative compaction", () => {
 
 	beforeAll(async () => {
 		authStorage = await AuthStorage.create(":memory:");
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!bundled) throw new Error("Expected built-in model");
@@ -264,11 +264,102 @@ describe("async speculative compaction", () => {
 		expect(events).toEqual(expect.arrayContaining(["auto_compaction_start", "auto_compaction_end"]));
 	});
 
+	it("applies an Anthropic snapshot after append-only growth without dropping its tail or new turns", async () => {
+		const bundled = getBundledModel("anthropic", "claude-sonnet-4-6");
+		if (!bundled) throw new Error("Expected compaction-capable Anthropic model");
+		model = { ...bundled, contextWindow: CONTEXT_WINDOW };
+		maintenance = createMaintenance({ methodOrder: ["remote"] });
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
+			started.resolve();
+			await release.promise;
+			return {
+				summary: "signed snapshot summary",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+				preserveData: {
+					anthropicCompaction: {
+						provider: "anthropic",
+						content: "signed snapshot summary",
+						signature: "snapshot-signature",
+					},
+				},
+			};
+		});
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await started.promise;
+		const snapshotLeafId = sessionManager.getBranch().at(-1)?.id;
+		// Growth beyond the recovery band does not change the signed snapshot.
+		const addedUser = userMessage("post-snapshot request " + "growth ".repeat(45_000));
+		const addedAssistant = assistantMessage("post-snapshot reply", model);
+		sessionManager.appendMessage(addedUser);
+		sessionManager.appendMessage(addedAssistant);
+		release.resolve();
+		await waitForState("armed");
+
+		await maintenance.runAutoCompaction("threshold", false, false, false, { triggerContextTokens: THRESHOLD });
+		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
+		if (entry?.type !== "compaction") throw new Error("Expected native compaction entry");
+		expect(entry.providerReplayThroughEntryId).toBe(snapshotLeafId);
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		expect(agent.state.messages.map(message => message.role)).toEqual([
+			"compactionSummary",
+			"assistant",
+			"user",
+			"assistant",
+		]);
+		expect(
+			agent.state.messages[0]?.role === "compactionSummary" ? agent.state.messages[0].providerPayload : undefined,
+		).toMatchObject({ signature: "snapshot-signature" });
+		expect(agent.state.messages.slice(-2)).toEqual([addedUser, addedAssistant]);
+		const rebuilt = sessionManager.buildSessionContext().messages;
+		expect(rebuilt.map(message => message.role)).toEqual(agent.state.messages.map(message => message.role));
+		expect(rebuilt.slice(-2)).toEqual([addedUser, addedAssistant]);
+		expect(rebuilt[0]?.role === "compactionSummary" ? rebuilt[0].providerPayload : undefined).toMatchObject({
+			signature: "snapshot-signature",
+		});
+	});
+
+	it("invalidates an Anthropic snapshot when its prefix is rewound", async () => {
+		const bundled = getBundledModel("anthropic", "claude-sonnet-4-6");
+		if (!bundled) throw new Error("Expected compaction-capable Anthropic model");
+		model = { ...bundled, contextWindow: CONTEXT_WINDOW };
+		maintenance = createMaintenance({ methodOrder: ["remote"] });
+		let invocation = 0;
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: `native summary ${++invocation}`,
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+			preserveData: {
+				anthropicCompaction: {
+					provider: "anthropic",
+					content: `native summary ${invocation}`,
+					signature: `signature ${invocation}`,
+				},
+			},
+		}));
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("armed");
+		const branch = sessionManager.getBranch();
+		sessionManager.branch(branch[branch.length - 2].id);
+		sessionManager.appendMessage(assistantMessage("rewritten prefix", model));
+		sessionManager.appendMessage(userMessage("new suffix"));
+
+		await maintenance.runAutoCompaction("threshold", false, false, false, { triggerContextTokens: THRESHOLD });
+		expect(compactSpy).toHaveBeenCalledTimes(2);
+		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
+		expect(entry?.type === "compaction" ? entry.summary : undefined).toBe("native summary 2");
+	});
+
 	it("preserves an in-flight native interval through the next compaction", async () => {
 		const bundled = getBundledModel("openai", "gpt-5");
 		if (!bundled) throw new Error("Expected built-in OpenAI model");
 		model = { ...bundled, contextWindow: CONTEXT_WINDOW };
-		authStorage.setRuntimeApiKey("openai", "test-key");
+		authStorage.keys.setRuntime("openai", "test-key");
 		maintenance = createMaintenance({ methodOrder: ["remote"] });
 		const started = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
@@ -380,7 +471,7 @@ describe("async speculative compaction", () => {
 		const bundled = getBundledModel("openai", "gpt-5");
 		if (!bundled) throw new Error("Expected built-in OpenAI model");
 		model = { ...bundled, contextWindow: CONTEXT_WINDOW };
-		authStorage.setRuntimeApiKey("openai", "test-key");
+		authStorage.keys.setRuntime("openai", "test-key");
 		maintenance = createMaintenance({
 			methodOrder: ["remote"],
 			obfuscatePreparationForProvider: preparation => ({ ...preparation, previousSummary: "MARKED PREVIOUS" }),
@@ -412,7 +503,7 @@ describe("async speculative compaction", () => {
 		const bundled = getBundledModel("openai", "gpt-5");
 		if (!bundled) throw new Error("Expected built-in OpenAI model");
 		model = { ...bundled, contextWindow: CONTEXT_WINDOW };
-		authStorage.setRuntimeApiKey("openai", "test-key");
+		authStorage.keys.setRuntime("openai", "test-key");
 		maintenance = createMaintenance({ methodOrder: ["remote"] });
 		let invocation = 0;
 		const nativeCompactionItem = {

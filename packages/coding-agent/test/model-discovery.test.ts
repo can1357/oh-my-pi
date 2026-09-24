@@ -10,7 +10,7 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { resolveModelCacheProviderId, resolveOllamaModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
-import type { ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/types";
+import type { ModelKind, ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { discoverOllamaModels, discoveryProbeTimeoutMs } from "@oh-my-pi/pi-coding-agent/config/model-discovery";
 import { RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS } from "@oh-my-pi/pi-coding-agent/config/model-provider-discovery";
 import { kNoAuth, ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -300,7 +300,7 @@ describe("ModelRegistry runtime discovery", () => {
 
 	test("refreshProvider online refreshes expired anthropic OAuth before model discovery", async () => {
 		const { refreshCalls } = await useAuthStorageWithRefreshTracker();
-		await authStorage.set("anthropic", {
+		await authStorage.credentials.set("anthropic", {
 			type: "oauth",
 			access: "sk-ant-oat-expired-anthropic",
 			refresh: "refresh-anthropic",
@@ -322,13 +322,13 @@ describe("ModelRegistry runtime discovery", () => {
 
 	test("refreshProvider online does not refresh unrelated expired OAuth credentials", async () => {
 		const { refreshCalls } = await useAuthStorageWithRefreshTracker();
-		await authStorage.set("anthropic", {
+		await authStorage.credentials.set("anthropic", {
 			type: "oauth",
 			access: "sk-ant-oat-expired-anthropic",
 			refresh: "refresh-anthropic",
 			expires: Date.now() - 60_000,
 		});
-		await authStorage.set("openai", {
+		await authStorage.credentials.set("openai", {
 			type: "oauth",
 			access: "expired-openai",
 			refresh: "refresh-openai",
@@ -342,13 +342,13 @@ describe("ModelRegistry runtime discovery", () => {
 		await registry.refreshProvider("anthropic", "online");
 
 		expect(refreshCalls).toEqual(["anthropic"]);
-		expect(authStorage.getOAuthCredential("openai")?.access).toBe("expired-openai");
+		expect(authStorage.credentials.getOAuth("openai")?.access).toBe("expired-openai");
 		expect(capture.modelListCalls).toBe(1);
 	});
 
 	test("refreshProvider offline does not touch expired OAuth credentials", async () => {
 		const { refreshCalls } = await useAuthStorageWithRefreshTracker();
-		await authStorage.set("anthropic", {
+		await authStorage.credentials.set("anthropic", {
 			type: "oauth",
 			access: "sk-ant-oat-expired-anthropic",
 			refresh: "refresh-anthropic",
@@ -363,11 +363,11 @@ describe("ModelRegistry runtime discovery", () => {
 		await registry.refreshProvider("anthropic", "offline");
 
 		expect(refreshCalls).toEqual([]);
-		expect(authStorage.getOAuthCredential("anthropic")?.access).toBe("sk-ant-oat-expired-anthropic");
+		expect(authStorage.credentials.getOAuth("anthropic")?.access).toBe("sk-ant-oat-expired-anthropic");
 	});
 	test("online-if-uncached refreshes expired OAuth when the discovery cache is stale for the model manager", async () => {
 		const { refreshCalls } = await useAuthStorageWithRefreshTracker();
-		await authStorage.set("anthropic", {
+		await authStorage.credentials.set("anthropic", {
 			type: "oauth",
 			access: "sk-ant-oat-expired-anthropic",
 			refresh: "refresh-anthropic",
@@ -390,7 +390,7 @@ describe("ModelRegistry runtime discovery", () => {
 
 	test("online-if-uncached leaves expired OAuth untouched when the discovery cache is fresh", async () => {
 		const { refreshCalls } = await useAuthStorageWithRefreshTracker();
-		await authStorage.set("anthropic", {
+		await authStorage.credentials.set("anthropic", {
 			type: "oauth",
 			access: "sk-ant-oat-expired-anthropic",
 			refresh: "refresh-anthropic",
@@ -408,7 +408,7 @@ describe("ModelRegistry runtime discovery", () => {
 
 		expect(refreshCalls).toEqual([]);
 		expect(capture.modelListCalls).toBe(0);
-		expect(authStorage.getOAuthCredential("anthropic")?.access).toBe("sk-ant-oat-expired-anthropic");
+		expect(authStorage.credentials.getOAuth("anthropic")?.access).toBe("sk-ant-oat-expired-anthropic");
 	});
 
 	test("online-if-uncached refreshes expired OAuth for authoritative providers even when the cache is fresh", async () => {
@@ -419,7 +419,7 @@ describe("ModelRegistry runtime discovery", () => {
 		// the manager is never added and unsupported bundled ids (gpt-5.4-nano)
 		// remain selectable for the whole cache TTL.
 		const { refreshCalls } = await useAuthStorageWithRefreshTracker();
-		await authStorage.set("openai-codex", {
+		await authStorage.credentials.set("openai-codex", {
 			type: "oauth",
 			access: "expired-openai-codex",
 			refresh: "refresh-openai-codex",
@@ -459,7 +459,7 @@ describe("ModelRegistry runtime discovery", () => {
 	});
 
 	test("Codex discovery falls back to a resolved non-OAuth token when no OAuth accounts exist", async () => {
-		authStorage.setRuntimeApiKey("openai-codex", "runtime-openai-codex");
+		authStorage.keys.setRuntime("openai-codex", "runtime-openai-codex");
 		let modelListCalls = 0;
 		const fetchMock: FetchImpl = async (input, init) => {
 			const url = String(input);
@@ -502,7 +502,7 @@ describe("ModelRegistry runtime discovery", () => {
 				return { ...credential, expires: Date.now() + 3_600_000 };
 			},
 		});
-		await authStorage.set("openai-codex", [
+		await authStorage.credentials.set("openai-codex", [
 			{ type: "oauth", access: "fresh-codex", refresh: "refresh-fresh", expires: Date.now() + 3_600_000 },
 			{ type: "oauth", access: "expired-codex", refresh: "refresh-expired", expires: Date.now() - 60_000 },
 		]);
@@ -524,7 +524,7 @@ describe("ModelRegistry runtime discovery", () => {
 	});
 
 	test("Gemini CLI discovery forwards a stored OAuth project id to the quota fallback", async () => {
-		await authStorage.set("google-gemini-cli", {
+		await authStorage.credentials.set("google-gemini-cli", {
 			type: "oauth",
 			access: "stored-gemini-token",
 			refresh: "stored-gemini-refresh",
@@ -546,7 +546,7 @@ describe("ModelRegistry runtime discovery", () => {
 	});
 
 	test("Gemini CLI discovery accepts project_id in a runtime credential override", async () => {
-		authStorage.setRuntimeApiKey(
+		authStorage.keys.setRuntime(
 			"google-gemini-cli",
 			JSON.stringify({ token: "runtime-gemini-token", project_id: "runtime-gcp-project" }),
 		);
@@ -565,7 +565,7 @@ describe("ModelRegistry runtime discovery", () => {
 	});
 
 	test("configured discovery suppresses built-in special OAuth discovery", async () => {
-		await authStorage.set("google-gemini-cli", {
+		await authStorage.credentials.set("google-gemini-cli", {
 			type: "oauth",
 			access: "fresh-google-gemini-cli",
 			refresh: "refresh-google-gemini-cli",
@@ -819,7 +819,7 @@ describe("ModelRegistry runtime discovery", () => {
 	});
 
 	test("discovers ollama-cloud through built-in descriptor flow without regressing local implicit ollama", async () => {
-		authStorage.setRuntimeApiKey("ollama-cloud", "cloud-test-key");
+		authStorage.keys.setRuntime("ollama-cloud", "cloud-test-key");
 
 		const fetchMock: FetchImpl = async (input, init) => {
 			const url = String(input);
@@ -1151,7 +1151,7 @@ describe("ModelRegistry runtime discovery", () => {
 				discovery: { type: "ollama" },
 			},
 		});
-		authStorage.setRuntimeApiKey("custom-local", "test-key");
+		authStorage.keys.setRuntime("custom-local", "test-key");
 
 		{
 			const fetchMock: FetchImpl = async input => {
@@ -1174,7 +1174,7 @@ describe("ModelRegistry runtime discovery", () => {
 			await primedRegistry.refreshProvider("custom-local");
 		}
 
-		authStorage.setRuntimeApiKey("custom-local", "");
+		authStorage.keys.setRuntime("custom-local", "");
 		// Empty credentials must short-circuit discovery to "unauthenticated" *before*
 		// any transport call; this guard fetch keeps the path provably network-free
 		// (no real socket, no connect timeout) and makes a future regression that
@@ -1191,7 +1191,7 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(state?.models).toContain("local-coder");
 	});
 	test("llama.cpp discovery honors configured API key", async () => {
-		authStorage.setRuntimeApiKey("llama.cpp", "test-llama-key");
+		authStorage.keys.setRuntime("llama.cpp", "test-llama-key");
 		const fetchMock: FetchImpl = async (input, init) => {
 			const url = String(input);
 			if (url === "http://127.0.0.1:8080/models") {
@@ -1312,7 +1312,7 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(llama?.input).toEqual(["text", "image"]);
 	});
 
-	test("llama.cpp discovery routes Qwen models to chat-completions with the chat-template disable dialect", async () => {
+	test("llama.cpp discovery routes Qwen models to chat-completions with the top-level disable dialect", async () => {
 		const fetchMock: FetchImpl = async input => {
 			const url = String(input);
 			if (url === "http://127.0.0.1:8080/models") {
@@ -1347,8 +1347,8 @@ describe("ModelRegistry runtime discovery", () => {
 			expect(qwen?.api).toBe("openai-completions");
 			expect(qwen?.baseUrl).toBe("http://127.0.0.1:8080/v1");
 			expect(qwen?.compat).toMatchObject({
-				thinkingFormat: "qwen-chat-template",
-				reasoningDisableMode: "qwen-template-false",
+				thinkingFormat: "qwen",
+				reasoningDisableMode: "qwen-enable-thinking-false",
 				qwenPreserveThinking: true,
 			});
 		}
@@ -1369,7 +1369,7 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(plain?.reasoning).toBe(false);
 		expect(plain?.api).toBe("openai-responses");
 		expect(plain?.baseUrl).toBe("http://127.0.0.1:8080/v1");
-		expect(plain?.compat).not.toMatchObject({ reasoningDisableMode: "qwen-template-false" });
+		expect(plain?.compat).not.toMatchObject({ reasoningDisableMode: "qwen-enable-thinking-false" });
 	});
 
 	test("discovery timeout rejects even when fetch ignores abort", async () => {
@@ -1547,7 +1547,8 @@ providers:
 			expect(model?.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.XHigh]);
 			expect(model?.thinking?.requiresEffort).toBe(true);
 			expect(model?.compat).toMatchObject({
-				thinkingFormat: "qwen-chat-template",
+				thinkingFormat: "qwen",
+				reasoningDisableMode: "qwen-enable-thinking-false",
 				qwenTemplateReasoningEffort: true,
 			});
 		}
@@ -1895,7 +1896,7 @@ providers:
 		expect(refreshed.maxTokens).toBe(16384);
 		expect(registry.find("llama.cpp", "cold-preset")?.contextWindow).toBe(16384);
 
-		await authStorage.set("projection-provider", {
+		await authStorage.credentials.set("projection-provider", {
 			type: "oauth",
 			access: "access-token",
 			refresh: "refresh-token",
@@ -2478,6 +2479,76 @@ providers:
 		expect(registry.find("openai-test", "medium")?.input).toEqual(["text"]);
 	});
 
+	test("openai-models-list discovery routes explicit non-chat output modalities to their runner kind", async () => {
+		writeRawModelsJson({
+			"openai-test": {
+				baseUrl: "http://127.0.0.1:9995",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "openai-models-list" },
+			},
+		});
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:9995/v1/models") {
+				return new Response(
+					JSON.stringify({
+						data: [
+							{
+								id: "openrouter/openai/text-embedding-3-small",
+								architecture: { input_modalities: ["text"], output_modalities: ["embeddings"] },
+								context_length: 8192,
+							},
+							{ id: "bare-embedder", output_modalities: ["embedding"] },
+							{ id: "image-generator", output: ["image"] },
+							{
+								id: "vision-chat",
+								architecture: { input_modalities: ["text", "image"], output_modalities: ["text"] },
+							},
+							{ id: "multimodal-chat", architecture: { output_modalities: ["text", "image"] } },
+							{ id: "speech-or-music", architecture: { output_modalities: ["audio"] } },
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+		// Embedding rows answer through `{baseUrl}/embeddings`, never the chat API.
+		expect(registry.find("openai-test", "openrouter/openai/text-embedding-3-small")).toMatchObject({
+			kind: "embedding",
+			api: "openai-embeddings",
+			baseUrl: "http://127.0.0.1:9995/v1",
+			contextWindow: 8192,
+			maxTokens: null,
+			supportsTools: false,
+		});
+		expect(registry.find("openai-test", "bare-embedder")?.kind).toBe("embedding");
+		expect(registry.find("openai-test", "image-generator")).toMatchObject({
+			kind: "image",
+			api: "openai-images",
+		});
+		// Text output — including multimodal rows — stays on the provider's chat API,
+		// and an audio-only row carries too little metadata to pick a runner.
+		for (const id of ["vision-chat", "multimodal-chat", "speech-or-music"]) {
+			const model = registry.find("openai-test", id);
+			expect(model?.kind).toBeUndefined();
+			expect(model?.api).toBe("openai-completions");
+		}
+		// The chat roster no longer offers models the chat endpoint cannot serve.
+		const rosterFor = (kind: ModelKind) =>
+			registry
+				.getAll(kind)
+				.filter(model => model.provider === "openai-test")
+				.map(model => model.id)
+				.sort();
+		expect(rosterFor("chat")).toEqual(["multimodal-chat", "speech-or-music", "vision-chat"]);
+		expect(rosterFor("embedding")).toEqual(["bare-embedder", "openrouter/openai/text-embedding-3-small"]);
+		expect(rosterFor("image")).toEqual(["image-generator"]);
+	});
+
 	test("openai-models-list with injectV1: false hits {baseUrl}/models verbatim", async () => {
 		// Gateways like opper.ai root their OpenAI-compatible surface at a
 		// versioned path (`https://api.opper.ai/v3/compat`); the default
@@ -2855,7 +2926,7 @@ providers:
 	test("built-in litellm discovery replaces partially and fully filtered rich refreshes", async () => {
 		using _litellmBaseUrl = withEnv("LITELLM_BASE_URL", "http://127.0.0.1:4007/v1");
 		writeRawModelsJson({});
-		authStorage.setRuntimeApiKey("litellm", "sk-litellm-test");
+		authStorage.keys.setRuntime("litellm", "sk-litellm-test");
 		let modelGroups: Record<string, unknown>[] = [
 			{
 				model_group: "keep-chat-a",
@@ -3184,7 +3255,7 @@ providers:
 		});
 		// Emulate a legacy write: the variant has no same-id static header source,
 		// so it is flagged unrestorable even though its base carries the headers.
-		authStorage.setRuntimeApiKey("github-copilot", "ghp_test_token");
+		authStorage.keys.setRuntime("github-copilot", "ghp_test_token");
 		const cacheProviderId = resolveModelCacheProviderId("github-copilot", { apiKey: "ghp_test_token" });
 		writeModelCache(cacheProviderId, Date.now(), [cachedVariant], true, "", cacheDbPath);
 		const db = new Database(cacheDbPath);

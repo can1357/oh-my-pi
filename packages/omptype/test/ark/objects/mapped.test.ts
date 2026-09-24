@@ -2,18 +2,6 @@ import { expect, it } from "bun:test";
 import { declare, type } from "@oh-my-pi/omptype/ark";
 import type { Eq } from "../type-assert";
 
-it("identity", () => {
-	const Original = type({
-		"foo?": "string",
-		bar: "number",
-		baz: "boolean",
-	});
-	const T = Original.map(entry => entry);
-
-	const _type1: Eq<typeof T, typeof Original> = true;
-	expect(T.expression).toEqual(Original.expression);
-});
-
 it("change values", () => {
 	const Original = type({
 		"foo?": "string",

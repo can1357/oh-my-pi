@@ -3,7 +3,6 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import type { ToolExample } from "@oh-my-pi/pi-ai";
 import * as natives from "@oh-my-pi/pi-natives";
 import { formatGroupedPaths, hasFsCode, isEnoent, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { InternalUrlRouter } from "../internal-urls";
@@ -13,6 +12,7 @@ import { truncateHead } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { sessionDelegationBias } from "../task/prompt-policy";
 import { isScoutSpawnable } from "../task/spawn-policy";
 import type { ToolSession } from ".";
+import { isFindEnabled } from "./jfind";
 import { applyListLimit } from "@oh-my-pi/pi-tui/tools/list-limit";
 import {
 	expandDelimitedPathEntries,
@@ -31,12 +31,10 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 
 const findSchema = type({
-	"path?": type("string").describe(
-		'glob, file, or directory to search — a single path or a semicolon-delimited list ("src/**/*.ts; test/**/*.ts"). Omitted -> searches the workspace root (".")',
-	),
-	"hidden?": type("boolean").describe("include hidden files"),
-	"gitignore?": type("boolean").describe("respect gitignore"),
-	"limit?": type("number").describe("max results"),
+	"path?": "string",
+	"hidden?": "boolean",
+	"gitignore?": "boolean",
+	"limit?": "number",
 });
 
 export type GlobToolInput = typeof findSchema.infer;
@@ -91,6 +89,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 	readonly label = "Glob";
 	get description(): string {
 		return prompt.render(globDescription, {
+			hasFind: this.session.isToolActive?.("find") ?? isFindEnabled(this.session),
 			eagerDelegation: sessionDelegationBias(this.session) === "eager",
 			scoutAvailable: isScoutSpawnable(
 				this.session.settings.get("task.disabledAgents") as string[] | undefined,
@@ -100,24 +99,6 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 	}
 	readonly parameters = findSchema;
 
-	readonly examples: readonly ToolExample<typeof findSchema.infer>[] = [
-		{
-			caption: "Glob files",
-			call: { path: "src/**/*.ts" },
-		},
-		{
-			caption: "Multiple targets — semicolon-delimited list",
-			call: { path: "src/**/*.ts; test/**/*.ts" },
-		},
-		{
-			caption: "Glob gitignored files like .env",
-			call: { path: ".env*", gitignore: false },
-		},
-		{
-			caption: "Glob directories matching a name (returns both files and dirs; directories are suffixed with `/`)",
-			call: { path: "**/tests" },
-		},
-	];
 	readonly strict = true;
 
 	readonly #customOps?: GlobOperations;

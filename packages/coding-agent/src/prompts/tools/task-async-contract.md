@@ -1,7 +1,8 @@
-No polling needed.
+Results auto-deliver; NEVER poll.{{#if waitTool}} Completely blocked? Call `wait` to receive the first settled job{{#if ircEnabled}} or peer message{{/if}}.{{/if}}
+{{#if ircEnabled}}Coordinate while peers run via `write agent://<id>` (or `agent://all` to broadcast).{{/if}}
 
-Settled-job inspection: `hub jobs` | `hub wait` delivers its snapshot → no duplicate `async-result`.
+`read proc://` lists jobs/services; `read proc://<id>` inspects status/output without consuming delivery. `write proc://<id>/kill` cancels/stops; omit `content`.
 
-Job IDs: process memory; delivered/recovered results expire shortly (~30s), unconsumed results within ~5min. Afterward use agent ID: `hub send`, `agent://<id>`, `history://<id>`.
+Job IDs are process-local; delivered results expire shortly (~30s), unconsumed results within ~5min. Agent output/transcripts remain readable at `agent://<id>` / `history://<id>`.{{#if ircEnabled}} `write agent://<id>` messages a live agent.{{/if}}
 
 `completed`: subagent yielded successfully; claimed artifacts unverified.

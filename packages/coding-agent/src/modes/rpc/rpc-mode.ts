@@ -10,6 +10,7 @@
  * - Events: AgentSessionEvent objects streamed as they occur
  * - Extension UI: Extension UI requests are emitted, client responds with extension_ui_response
  */
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { $env, isRecord, logger, Snowflake } from "@oh-my-pi/pi-utils";
@@ -37,6 +38,7 @@ import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins
 import { buildAvailableSlashCommands } from "../../slash-commands/available-commands";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import type { EventBus } from "../../utils/event-bus";
+import { selectRpcEntries } from "./rpc-compat";
 import { calculateTokensPerSecond } from "../../utils/token-rate";
 import { formatPersistenceDurabilityFailure, formatPersistenceFailure } from "../persistence-failure";
 import { initializeExtensions } from "../runtime-init";
@@ -1327,6 +1329,29 @@ export async function runRpcMode(
 				return success(id, "get_available_commands", { commands: await getAvailableCommands() });
 			}
 
+			case "get_entries": {
+				try {
+					return success(
+						id,
+						"get_entries",
+						selectRpcEntries(
+							session.sessionManager.getEntries(),
+							session.sessionManager.getLeafId(),
+							command.since,
+						),
+					);
+				} catch (err) {
+					return error(id, "get_entries", err instanceof Error ? err.message : String(err), "unknown_since");
+				}
+			}
+
+			case "get_tree": {
+				return success(id, "get_tree", {
+					tree: session.sessionManager.getTree(),
+					leafId: session.sessionManager.getLeafId(),
+				});
+			}
+
 			case "set_todos": {
 				session.setTodoPhases(command.phases);
 				return success(id, "set_todos", { todoPhases: session.getTodoPhases() });
@@ -1440,6 +1465,16 @@ export async function runRpcMode(
 					return success(id, "cycle_thinking_level", null);
 				}
 				return success(id, "cycle_thinking_level", { level });
+			}
+
+			case "get_available_thinking_levels": {
+				// Pi-compatible discovery: the selectable levels for the live model,
+				// including `off` (which `set_thinking_level` accepts but the
+				// effort-only helper excludes). OMP-only `auto`/`inherit` are
+				// intentionally omitted — that selector stays an OMP dialect.
+				return success(id, "get_available_thinking_levels", {
+					levels: [ThinkingLevel.Off, ...session.getAvailableThinkingLevels()],
+				});
 			}
 
 			// =================================================================
@@ -1595,7 +1630,7 @@ export async function runRpcMode(
 					id: provider.id,
 					name: provider.name,
 					available: provider.available,
-					authenticated: session.modelRegistry.authStorage.hasAuth(provider.id),
+					authenticated: session.modelRegistry.authStorage.keys.source(provider.id) !== undefined,
 				}));
 				return success(id, "get_login_providers", { providers });
 			}
@@ -1611,7 +1646,7 @@ export async function runRpcMode(
 				// onAuth, prompt input is the pasted OAuth code/redirect URL path.
 				let authEmitted = false;
 				try {
-					await session.modelRegistry.authStorage.login(command.providerId, {
+					await session.modelRegistry.authStorage.oauth.login(command.providerId, {
 						onAuth: info => {
 							authEmitted = true;
 							output({
@@ -1658,7 +1693,7 @@ export async function runRpcMode(
 
 			default: {
 				const unknownCommand = command as { type: string };
-				return error(undefined, unknownCommand.type, `Unknown command: ${unknownCommand.type}`);
+				return error(id, unknownCommand.type, `Unknown command: ${unknownCommand.type}`);
 			}
 		}
 	};

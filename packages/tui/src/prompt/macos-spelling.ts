@@ -2,6 +2,7 @@ import * as native from "@oh-my-pi/pi-natives";
 import { TERMINAL } from "../index";
 import type { EditorInlineReplacement, EditorTextAssistProvider, EditorWordReplacements } from "../components/editor";
 import { logger } from "@oh-my-pi/pi-utils";
+import { isMagicKeyword } from "./magic-keywords";
 import { maskNonProse } from "./markdown-prose";
 
 /** Styled underline: red curly undercurl via colon-subparameter SGR (4:3 + SGR 58 color). */
@@ -200,6 +201,8 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 		const match = COMPLETED_WORD.exec(textBeforeCursor);
 		if (!match) return null;
 		const word = match[1] ?? "";
+		// Magic keywords are deliberate non-dictionary words; never "fix" them.
+		if (isMagicKeyword(word)) return null;
 		const boundary = match[2] ?? "";
 		const start = match.index;
 		const masked = maskNonProse(textBeforeCursor);
@@ -350,7 +353,10 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 		if (generation !== this.#cacheGeneration || !this.#available) return [];
 		const masked = maskNonProse(text);
 		const ranges = checked
-			.filter(range => isProseWord(text, masked, range.start, range.start + range.length))
+			.filter(range => {
+				const end = range.start + range.length;
+				return isProseWord(text, masked, range.start, end) && !isMagicKeyword(text.slice(range.start, end));
+			})
 			.toSorted((left, right) => left.start - right.start);
 		const hadProjectedRanges = (this.#projectTypoRanges(text)?.length ?? 0) > 0;
 		if (this.#typoCache.size >= CACHE_LIMIT) this.#typoCache.clear();

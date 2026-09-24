@@ -969,7 +969,7 @@ it("setActiveToolsByName normalizes legacy tool names", async () => {
 	const globTool = makeFakeTool("glob");
 	session = await createSession([grepTool, globTool]);
 
-	await session.setActiveToolsByName(["Search", "find", "grep"]);
+	await session.setActiveToolsByName(["Search", "glob", "grep"]);
 
 	expect(session.getActiveToolNames()).toEqual(["grep", "glob"]);
 });

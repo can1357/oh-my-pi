@@ -36,7 +36,7 @@ describe("AgentSession prewalk", () => {
 	beforeAll(() => {
 		tempDir = TempDir.createSync("@pi-prewalk-");
 		authStorage = createInMemoryAuthStorage();
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 	});
 

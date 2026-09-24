@@ -5,7 +5,7 @@
 	"private": true,
 	"description": "Chrome extension that lets the omp browser tool drive your existing tabs (relay server lives in the omp CLI: `omp browser-relay`)",
 	"homepage": "https://omp.sh",
-	"author": "Stencil Labs, Inc.",
+	"author": { "name": "Stencil Labs, Inc.", "url": "https://stencil.so" },
 	"license": "MIT",
 	"repository": {
 		"type": "git",

@@ -37,7 +37,7 @@ async function createHub(state: ProviderDiscoveryState): Promise<ModelHubCompone
 		getAll: () => [],
 		getDiscoverableProviders: () => [state.provider],
 		getProviderDiscoveryState: () => state,
-		authStorage: { hasAuth: () => false },
+		authStorage: { keys: { source: () => undefined } },
 	} as unknown as ModelRegistry;
 	const ui = { requestRender: vi.fn(), terminal: { rows: 40 } } as unknown as TUI;
 	const hub = new ModelHubComponent(ui, createModelBrowserSource(Settings.isolated({})), modelRegistry, [], {
@@ -291,7 +291,7 @@ describe("issue #970 custom provider discovery", () => {
 			["providers:", "  vllm:", "    baseUrl: http://192.168.5.3:8085/v1", "    auth: none"].join("\n"),
 		);
 
-		await authStorage.set("vllm", { type: "api_key", key: "vllm-local" });
+		await authStorage.credentials.set("vllm", { type: "api_key", key: "vllm-local" });
 
 		const fetchMock: (input: string | URL | Request, init?: RequestInit) => Promise<Response> = async (
 			input,

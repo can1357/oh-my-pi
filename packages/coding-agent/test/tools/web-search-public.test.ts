@@ -1,30 +1,32 @@
-import { afterEach, describe, expect, it } from "bun:test";
-import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
-import { setExcludedSearchProviders } from "@oh-my-pi/pi-coding-agent/web/search/provider";
+import { afterAll, describe, expect, it } from "bun:test";
+import type { FetchImpl } from "@oh-my-pi/pi-ai";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import type { SearchParams } from "@oh-my-pi/pi-coding-agent/web/search/providers/base";
 import { searchPublicWeb } from "@oh-my-pi/pi-coding-agent/web/search/providers/public";
 import { SearchProviderError } from "@oh-my-pi/pi-coding-agent/web/search/types";
-import { type SearchProviderId } from "@oh-my-pi/pi-tui/tools/web-search";
+import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
-const fakeAuthStorage = {
-	async getApiKey() {
-		throw new Error("Public web search must not request API keys");
-	},
-	resolver() {
-		throw new Error("Public web search must not request credential resolvers");
-	},
-	hasAuth() {
-		throw new Error("Public web search must not check auth");
-	},
-} as unknown as AuthStorage;
+const authStorage = createInMemoryAuthStorage();
+const modelRegistry = new ModelRegistry(authStorage);
 
-/** Restrict the fan-out to the two engines these tests provide fixtures for. */
-const NON_TEST_ENGINES: readonly SearchProviderId[] = ["ecosia", "startpage", "mojeek"];
+function requirePublicModel() {
+	const model = modelRegistry.find("web", "public");
+	if (!model) throw new Error("Expected bundled web/public model");
+	return model;
+}
+
+const publicModel = requirePublicModel();
+
+afterAll(() => {
+	authStorage.close();
+});
 
 function makeParams(query: string, fetch: FetchImpl): SearchParams {
 	return {
 		query,
-		authStorage: fakeAuthStorage,
+		authStorage,
+		model: publicModel,
+		modelRegistry,
 		systemPrompt: "Public web search test prompt",
 		fetch,
 	};
@@ -44,15 +46,31 @@ function googleResult(url: string, title: string, snippet?: string): string {
 	</div></div>`;
 }
 
-/** Dispatch fixture bodies per engine host. */
-function makeFetchMock(bodies: { ddg: string; google: string }): FetchImpl {
+/** Dispatch fixtures for every public engine; secondary engines deterministically return no results or fail. */
+function makeFetchMock(
+	bodies: { ddg: string; google: string },
+	seen?: Set<string>,
+	secondaryResult: "empty" | "failure" = "empty",
+): FetchImpl {
 	return input => {
 		const url = typeof input === "string" ? input : input.toString();
 		if (url.includes("duckduckgo.com")) {
+			seen?.add("duckduckgo");
 			return Promise.resolve(new Response(bodies.ddg, { status: 200 }));
 		}
 		if (url.includes("google.com")) {
+			seen?.add("google");
 			return Promise.resolve(new Response(bodies.google, { status: 200 }));
+		}
+		const secondary = [
+			["startpage.com", "startpage"],
+			["ecosia.org", "ecosia"],
+			["mojeek.de", "mojeek"],
+		] as const;
+		for (const [host, engine] of secondary) {
+			if (!url.includes(host)) continue;
+			seen?.add(engine);
+			return Promise.resolve(new Response("", { status: secondaryResult === "empty" ? 200 : 503 }));
 		}
 		return Promise.reject(new Error(`Unexpected fetch in public web test: ${url}`));
 	};
@@ -61,25 +79,25 @@ function makeFetchMock(bodies: { ddg: string; google: string }): FetchImpl {
 const GOOGLE_CHALLENGE = `<html><body>Our systems have detected unusual traffic from your computer network.</body></html>`;
 const DDG_CHALLENGE = `<html><body><div class="anomaly-modal"></div></body></html>`;
 
-afterEach(() => {
-	setExcludedSearchProviders([]);
-});
-
 describe("Public Web aggregate provider", () => {
 	it("consolidates engines: dedups URL variants, ranks by consensus, keeps the best snippet", async () => {
-		setExcludedSearchProviders(NON_TEST_ENGINES);
-		const fetchMock = makeFetchMock({
-			ddg: [
-				ddgResult("https://example.com/shared", "Shared result", "short"),
-				ddgResult("https://a.example/one", "Alpha", "alpha snippet"),
-			].join("\n"),
-			google: [
-				googleResult("https://www.example.com/shared/", "Shared (google)", "a much longer consolidated snippet"),
-				googleResult("https://c.example/three", "Gamma", "gamma snippet"),
-			].join("\n"),
-		});
+		const seen = new Set<string>();
+		const fetchMock = makeFetchMock(
+			{
+				ddg: [
+					ddgResult("https://example.com/shared", "Shared result", "short"),
+					ddgResult("https://a.example/one", "Alpha", "alpha snippet"),
+				].join("\n"),
+				google: [
+					googleResult("https://www.example.com/shared/", "Shared (google)", "a much longer consolidated snippet"),
+					googleResult("https://c.example/three", "Gamma", "gamma snippet"),
+				].join("\n"),
+			},
+			seen,
+		);
 
 		const response = await searchPublicWeb(makeParams("consensus ranking", fetchMock));
+		expect(seen).toEqual(new Set(["startpage", "google", "duckduckgo", "ecosia", "mojeek"]));
 
 		expect(response.provider).toBe("public");
 		expect(response.sources).toEqual([
@@ -97,7 +115,6 @@ describe("Public Web aggregate provider", () => {
 	});
 
 	it("tolerates individual engine failures and returns the surviving results", async () => {
-		setExcludedSearchProviders(NON_TEST_ENGINES);
 		const fetchMock = makeFetchMock({
 			ddg: ddgResult("https://a.example/one", "Alpha", "alpha snippet"),
 			google: GOOGLE_CHALLENGE,
@@ -109,7 +126,6 @@ describe("Public Web aggregate provider", () => {
 	});
 
 	it("returns at the soft deadline with delivered results and aborts stragglers", async () => {
-		setExcludedSearchProviders(NON_TEST_ENGINES);
 		let stragglerAborted = false;
 		const fetchMock: FetchImpl = (input, init) => {
 			const url = typeof input === "string" ? input : input.toString();
@@ -118,7 +134,10 @@ describe("Public Web aggregate provider", () => {
 					new Response(ddgResult("https://a.example/one", "Alpha", "alpha snippet"), { status: 200 }),
 				);
 			}
-			// google: hangs until the aggregate cancels it at the deadline.
+			if (!["startpage.com", "google.com", "ecosia.org", "mojeek.de"].some(host => url.includes(host))) {
+				return Promise.reject(new Error(`Unexpected fetch in public web test: ${url}`));
+			}
+			// Every other public engine hangs until the aggregate cancels its stragglers at the deadline.
 			const { promise, reject } = Promise.withResolvers<Response>();
 			init?.signal?.addEventListener("abort", () => {
 				stragglerAborted = true;
@@ -134,14 +153,17 @@ describe("Public Web aggregate provider", () => {
 	});
 
 	it("waits past the soft deadline for the first success instead of returning empty", async () => {
-		setExcludedSearchProviders(NON_TEST_ENGINES);
 		const fetchMock: FetchImpl = async input => {
 			const url = typeof input === "string" ? input : input.toString();
 			if (url.includes("duckduckgo.com")) {
 				await Bun.sleep(60);
 				return new Response(ddgResult("https://a.example/one", "Alpha", "alpha snippet"), { status: 200 });
 			}
-			return new Response(GOOGLE_CHALLENGE, { status: 200 });
+			if (url.includes("google.com")) return new Response(GOOGLE_CHALLENGE, { status: 200 });
+			if (["startpage.com", "ecosia.org", "mojeek.de"].some(host => url.includes(host))) {
+				return new Response("fixture unavailable", { status: 503 });
+			}
+			throw new Error(`Unexpected fetch in public web test: ${url}`);
 		};
 
 		const response = await searchPublicWeb(makeParams("slow first success", fetchMock), { softMs: 10 });
@@ -150,13 +172,15 @@ describe("Public Web aggregate provider", () => {
 	});
 
 	it("returns whatever it has at the hard deadline even with zero successes", async () => {
-		setExcludedSearchProviders(NON_TEST_ENGINES);
 		const fetchMock: FetchImpl = input => {
 			const url = typeof input === "string" ? input : input.toString();
 			if (url.includes("duckduckgo.com")) {
 				return Promise.resolve(new Response(DDG_CHALLENGE, { status: 200 }));
 			}
-			// google: never settles and ignores abort — only the hard cap can end the wait.
+			if (!["startpage.com", "google.com", "ecosia.org", "mojeek.de"].some(host => url.includes(host))) {
+				return Promise.reject(new Error(`Unexpected fetch in public web test: ${url}`));
+			}
+			// Every other public engine ignores abort; only the hard cap can end the wait.
 			const { promise } = Promise.withResolvers<Response>();
 			return promise;
 		};
@@ -168,8 +192,7 @@ describe("Public Web aggregate provider", () => {
 	});
 
 	it("fails with an aggregated provider-tagged error when every engine fails", async () => {
-		setExcludedSearchProviders(NON_TEST_ENGINES);
-		const fetchMock = makeFetchMock({ ddg: DDG_CHALLENGE, google: GOOGLE_CHALLENGE });
+		const fetchMock = makeFetchMock({ ddg: DDG_CHALLENGE, google: GOOGLE_CHALLENGE }, undefined, "failure");
 
 		try {
 			await searchPublicWeb(makeParams("all blocked", fetchMock));
@@ -181,19 +204,6 @@ describe("Public Web aggregate provider", () => {
 			expect(providerError.status).toBe(503);
 			expect(providerError.message).toContain("duckduckgo:");
 			expect(providerError.message).toContain("google:");
-		}
-	});
-
-	it("rejects when settings exclude every credential-free engine", async () => {
-		setExcludedSearchProviders([...NON_TEST_ENGINES, "duckduckgo", "google"]);
-		const fetchMock: FetchImpl = () => Promise.reject(new Error("no engine should be queried"));
-
-		try {
-			await searchPublicWeb(makeParams("nothing left", fetchMock));
-			expect.unreachable("fully excluded fan-out should reject");
-		} catch (error) {
-			expect(error).toBeInstanceOf(SearchProviderError);
-			expect(error).toMatchObject({ provider: "public", status: 400 });
 		}
 	});
 });
