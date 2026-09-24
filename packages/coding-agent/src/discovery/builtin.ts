@@ -112,14 +112,21 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 		for (const [serverName, config] of Object.entries(data.mcpServers)) {
 			const serverConfig = config as Record<string, unknown>;
 
-			// Validate enabled: coerce string "true"/"false", warn on other types
+			// Validate enabled: expand `${VAR}` first, then coerce the expanded
+			// value through one accept-set — booleans pass through, "true"/"1"
+			// (any case) coerce to true, "false"/"0" to false, everything else
+			// warns and stays undefined (fail-open). Filters stay literal (never
+			// expanded): a filter entry is a tool-name pattern, so expanding
+			// `${TOOL}` there would make the same config select a different tool
+			// depending on which file it came from.
+			const expandedEnabledValue = expandEnvVarsDeep(serverConfig.enabled);
 			let enabled: boolean | undefined;
-			if (serverConfig.enabled === undefined || serverConfig.enabled === null) {
+			if (expandedEnabledValue === undefined || expandedEnabledValue === null) {
 				enabled = undefined;
-			} else if (typeof serverConfig.enabled === "boolean") {
-				enabled = serverConfig.enabled;
-			} else if (typeof serverConfig.enabled === "string") {
-				const lower = serverConfig.enabled.toLowerCase();
+			} else if (typeof expandedEnabledValue === "boolean") {
+				enabled = expandedEnabledValue;
+			} else if (typeof expandedEnabledValue === "string") {
+				const lower = expandedEnabledValue.toLowerCase();
 				if (lower === "false" || lower === "0") enabled = false;
 				else if (lower === "true" || lower === "1") enabled = true;
 				else {
@@ -131,20 +138,24 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				enabled = undefined;
 			}
 
-			// Validate timeout: coerce numeric strings, warn on invalid
+			// Validate timeout: expand `${VAR}` first, then accept finite numbers
+			// and numeric strings; anything else warns and stays undefined. A
+			// non-numeric expansion (`${UNSET}`) stays literal, fails the coerce,
+			// and warns — same as a bad literal.
+			const expandedTimeoutValue = expandEnvVarsDeep(serverConfig.timeout);
 			let timeout: number | undefined;
-			if (serverConfig.timeout === undefined || serverConfig.timeout === null) {
+			if (expandedTimeoutValue === undefined || expandedTimeoutValue === null) {
 				timeout = undefined;
-			} else if (typeof serverConfig.timeout === "number") {
-				if (Number.isFinite(serverConfig.timeout) && serverConfig.timeout >= 0) {
-					timeout = serverConfig.timeout;
+			} else if (typeof expandedTimeoutValue === "number") {
+				if (Number.isFinite(expandedTimeoutValue) && expandedTimeoutValue >= 0) {
+					timeout = expandedTimeoutValue;
 				} else {
 					logger.warn(`MCP server "${serverName}": invalid timeout ${serverConfig.timeout}, ignoring`);
 					timeout = undefined;
 				}
-			} else if (typeof serverConfig.timeout === "string") {
-				const parsed = Number(serverConfig.timeout);
-				if (Number.isFinite(parsed) && parsed >= 0) {
+			} else if (typeof expandedTimeoutValue === "string") {
+				const parsed = Number(expandedTimeoutValue);
+				if (expandedTimeoutValue.length > 0 && Number.isFinite(parsed) && parsed >= 0) {
 					timeout = parsed;
 				} else {
 					logger.warn(`MCP server "${serverName}": invalid timeout "${serverConfig.timeout}", ignoring`);
@@ -155,51 +166,23 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				timeout = undefined;
 			}
 
-			// Validate requestIdFormat: only the two documented encodings
-			const requestIdFormat = parseRequestIdFormat(serverConfig.requestIdFormat);
+			// Validate requestIdFormat: only the two documented encodings. The
+			// expanded value passes through the same parser the raw value does,
+			// so the expansion only injects `${VAR}` resolution a whole-object
+			// pass would have produced.
+			const requestIdFormat = parseRequestIdFormat(
+				serverConfig.requestIdFormat === undefined ? undefined : expandEnvVarsDeep(serverConfig.requestIdFormat),
+			);
 			if (requestIdFormat === undefined && serverConfig.requestIdFormat != null) {
 				logger.warn(
 					`MCP server "${serverName}": invalid requestIdFormat ${JSON.stringify(serverConfig.requestIdFormat)}, ignoring`,
 				);
 			}
-			// Strict array-of-nonempty-strings; comma globs like "{a,b}_*" survive intact
-			// Tool-filter entries are patterns, not values, so `${VAR}` in them
-			// stays literal: the fields that DO expand are expanded one by one
-			// rather than by expanding the whole server object. The scalar fields
-			// (enabled/timeout/requestIdFormat) expand too — their validation
-			// branches accept the string an expansion yields under the previous
-			// whole-object pass, and dropping the expansion would silently break
-			// `timeout: "${OMP_TIMEOUT_MS}"`.
-			const expandedEnabledRaw = expandEnvVarsDeep(serverConfig.enabled);
-			// The expanded `enabled` arrives as a string when it came from a
-			// `${VAR}` placeholder; the string branch above coerces a literal
-			// string the same way, so run the expanded value through the same
-			// accept-set here. Anything else stays undefined (fail-open).
-			const expandedEnabled =
-				typeof expandedEnabledRaw === "boolean"
-					? expandedEnabledRaw
-					: typeof expandedEnabledRaw === "string"
-						? expandedEnabledRaw === "true" || expandedEnabledRaw === "1"
-						: undefined;
-			// The expanded timeout arrives as a string when it came from a
-			// `${VAR}` placeholder; the string branch above coerces a literal
-			// string the same way, so coerce the expanded one here. A non-numeric
-			// expansion stays literal (`${UNSET}`), fails the coerce, and warns.
-			const expandedTimeoutRaw = expandEnvVarsDeep(serverConfig.timeout);
-			const expandedTimeout =
-				typeof expandedTimeoutRaw === "number" ? expandedTimeoutRaw : Number(expandedTimeoutRaw);
-			// The expanded requestIdFormat passes through the same parser the raw
-			// value does, so an unrecognized value is still dropped with a warn;
-			// the expansion only injects the `${VAR}` resolution a whole-object
-			// pass would have produced.
-			const expandedRequestIdFormat = parseRequestIdFormat(
-				serverConfig.requestIdFormat === undefined ? undefined : expandEnvVarsDeep(serverConfig.requestIdFormat),
-			);
 			result.push({
 				name: serverName,
-				enabled: expandedEnabled,
-				timeout: Number.isFinite(expandedTimeout) && expandedTimeout >= 0 ? expandedTimeout : undefined,
-				requestIdFormat: expandedRequestIdFormat,
+				enabled,
+				timeout,
+				requestIdFormat,
 				...parseMCPToolFilters(serverName, serverConfig),
 				command: expandEnvVarsDeep(serverConfig.command) as string | undefined,
 				args: expandEnvVarsDeep(serverConfig.args) as string[] | undefined,

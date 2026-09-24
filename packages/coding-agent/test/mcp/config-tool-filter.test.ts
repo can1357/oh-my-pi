@@ -168,6 +168,35 @@ test("scalar shared fields still environment-expand under per-field expansion", 
 		delete process.env.OMP_TEST_RID_FORMAT;
 	}
 });
+test("scalar enabled/timeout coerce case-insensitively and reject bad types", async () => {
+	// `enabled: \"TRUE\"` must enable (case-insensitive accept-set) while
+	// `enabled: \"bogus\"` fails open to undefined; `timeout: true` must not
+	// coerce to a 1 ms timeout and `timeout: null` must stay undefined.
+	process.env.OMP_TEST_MCP_ON = "TRUE";
+	try {
+		const upper = await loadFrom(path.join(".omp", "mcp.json"), {
+			svc: { type: "http", url: "https://mcp.slack.com/mcp", enabled: "${OMP_TEST_MCP_ON}" },
+		});
+		expect(upper.svc?.enabled).toBe(true);
+
+		const badEnabled = await loadFrom(path.join(".omp", "mcp.json"), {
+			svc: { type: "http", url: "https://mcp.slack.com/mcp", enabled: "bogus" },
+		});
+		expect(badEnabled.svc?.enabled).toBeUndefined();
+
+		const boolTimeout = await loadFrom(path.join(".omp", "mcp.json"), {
+			svc: { type: "http", url: "https://mcp.slack.com/mcp", timeout: true },
+		});
+		expect(boolTimeout.svc?.timeout).toBeUndefined();
+
+		const nullTimeout = await loadFrom(path.join(".omp", "mcp.json"), {
+			svc: { type: "http", url: "https://mcp.slack.com/mcp", timeout: null },
+		});
+		expect(nullTimeout.svc?.timeout).toBeUndefined();
+	} finally {
+		delete process.env.OMP_TEST_MCP_ON;
+	}
+});
 
 test("differing filter members prevent equivalence dedup from collapsing two aliases", async () => {
 	const configs = await loadFrom(path.join(".omp", "mcp.json"), {

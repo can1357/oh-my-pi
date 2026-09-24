@@ -8,9 +8,9 @@
 
 ### Fixed
 
-- Fixed MCP configs carrying a shared field (`timeout`, `requestIdFormat`, `enabledTools`, `disabledTools`, …) being rejected by the bundled JSON schema on every transport; such entries now validate.
-- Fixed `${VAR}` placeholders in MCP scalar fields (`timeout`, `enabled`, `requestIdFormat`) resolving to `undefined` in `.omp/mcp.json` and OMP extension configs; per-field expansion now covers them, and the expanded `timeout`/`enabled` strings coerce exactly as literal values did.
-- Fixed Exa stdio-endpoint URL arguments (`mcp-remote https://mcp.exa.ai/mcp?tools=…#fragment`) parsed without URL semantics, and Exa tool classification being case-insensitive and prototype-leaking: a server advertising `WEB_SEARCH_EXA` or `constructor` no longer reads as natively covered and is no longer dropped.
+- Fixed MCP configs carrying a shared field (`timeout`, `requestIdFormat`, `auth`, `oauth`, …) being rejected by the bundled JSON schema on every transport; such entries now validate.
+- Fixed scalar shared fields (`timeout`, `enabled`, `requestIdFormat`) losing `${VAR}` expansion in `.omp/mcp.json` and OMP extension configs once filters went literal; per-field expansion now covers them, and the expanded strings coerce exactly as literal values do.
+- Fixed Exa tool selection consulting the new filters (URL-semantic endpoint parsing, case-sensitive native classification, prototype-safe native set): a server whose enabled tools are non-native is kept instead of dropped.
 
 ## [18.3.0] - 2026-09-24
 

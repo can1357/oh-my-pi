@@ -345,13 +345,37 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 			// Root relative command/cwd at the plugin's config directory, not the
 			// session cwd (MCP stdio spawning resolves relative values there).
 			const rooted = resolvePluginStdioPaths({ command, cwd }, root.path);
+			const expandedPluginEnabled = expandEnvVarsDeep(cfg.enabled as unknown, pluginRootEnv) as unknown;
+			const pluginEnabled =
+				typeof expandedPluginEnabled === "boolean"
+					? expandedPluginEnabled
+					: typeof expandedPluginEnabled === "string"
+						? (() => {
+								const lower = (expandedPluginEnabled as string).toLowerCase();
+								if (lower === "true" || lower === "1") return true;
+								if (lower === "false" || lower === "0") return false;
+								return undefined;
+							})()
+						: undefined;
+			const expandedPluginTimeout = expandEnvVarsDeep(cfg.timeout as unknown, pluginRootEnv) as unknown;
+			const pluginTimeout =
+				typeof expandedPluginTimeout === "number" &&
+				Number.isFinite(expandedPluginTimeout) &&
+				expandedPluginTimeout >= 0
+					? expandedPluginTimeout
+					: typeof expandedPluginTimeout === "string" && (expandedPluginTimeout as string).length > 0
+						? (() => {
+								const parsed = Number(expandedPluginTimeout);
+								return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+							})()
+						: undefined;
 			const requestIdFormat = parseRequestIdFormat(
 				cfg.requestIdFormat === undefined ? undefined : expandEnvVarsDeep(cfg.requestIdFormat, pluginRootEnv),
 			);
 			items.push({
 				name: serverName,
-				...(cfg.enabled !== undefined && { enabled: expandEnvVarsDeep(cfg.enabled, pluginRootEnv) }),
-				...(cfg.timeout !== undefined && { timeout: expandEnvVarsDeep(cfg.timeout, pluginRootEnv) }),
+				...(pluginEnabled !== undefined && { enabled: pluginEnabled }),
+				...(pluginTimeout !== undefined && { timeout: pluginTimeout }),
 				...(requestIdFormat !== undefined && { requestIdFormat }),
 				...parseMCPToolFilters(serverName, cfg),
 				...(rooted.command !== undefined && { command: rooted.command }),
