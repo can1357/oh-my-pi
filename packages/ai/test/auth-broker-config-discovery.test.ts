@@ -95,6 +95,24 @@ describe("resolveAuthBrokerConfig config discovery", () => {
 			hotWindowFraction: DEFAULT_HOT_WINDOW_FRACTION,
 		});
 	});
+	test("parses per-account hotWindowFraction override", async () => {
+		const accountPolicies: AuthAccountPolicies = [
+			{
+				provider: "anthropic",
+				account: { email: "worker@example.com" },
+				hotWindowFraction: 1.0,
+			},
+		];
+		await Bun.write(
+			path.join(agentDir, "config.yml"),
+			`auth:\n  accountPolicies: ${JSON.stringify(accountPolicies)}\n`,
+		);
+		await expect(loadAuthAccountPolicyConfig({ agentDir })).resolves.toEqual({
+			accountPolicies,
+			defaultReservePct: DEFAULT_USAGE_RESERVE_PCT,
+			hotWindowFraction: DEFAULT_HOT_WINDOW_FRACTION,
+		});
+	});
 
 	test("treats an empty or comment-only config.yml as no configuration", async () => {
 		for (const content of ["", "# nothing configured yet\n"]) {

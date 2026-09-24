@@ -122,7 +122,12 @@ function parseAuthAccountPolicies(value: unknown): AuthAccountPolicies {
 		}
 		const policy = entry as Record<string, unknown>;
 		const unknownPolicyFields = Object.keys(policy).filter(
-			key => key !== "provider" && key !== "account" && key !== "priority" && key !== "reservePct",
+			key =>
+				key !== "provider" &&
+				key !== "account" &&
+				key !== "priority" &&
+				key !== "reservePct" &&
+				key !== "hotWindowFraction",
 		);
 		if (unknownPolicyFields.length > 0) {
 			throw new AIError.ConfigurationError(`${path} has unknown fields: ${unknownPolicyFields.join(", ")}`);
@@ -170,6 +175,15 @@ function parseAuthAccountPolicies(value: unknown): AuthAccountPolicies {
 				policy.reservePct > 100)
 		) {
 			throw new AIError.ConfigurationError(`${path}.reservePct must be between 0 and 100`);
+		}
+		if (
+			policy.hotWindowFraction !== undefined &&
+			(typeof policy.hotWindowFraction !== "number" ||
+				!Number.isFinite(policy.hotWindowFraction) ||
+				policy.hotWindowFraction < 0 ||
+				policy.hotWindowFraction > 1)
+		) {
+			throw new AIError.ConfigurationError(`${path}.hotWindowFraction must be between 0 and 1`);
 		}
 
 		return {
