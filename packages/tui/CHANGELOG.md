@@ -55,6 +55,9 @@
 - Fixed cursor placement when recalling prompts from history, keeping single-line entries at the end and preserving the appropriate position for multi-line entries.
 - Restored modified-key handling and terminal notifications over SSH sessions running inside tmux.
 - Fixed typed Enter occasionally being interpreted as a literal newline when terminal input events are batched.
+- Composer shape previews now use the full overlay width instead of clipping at 96 columns ([#12713](https://github.com/can1357/oh-my-pi/pull/12713) by [@F0Rextasy](https://github.com/F0Rextasy)).
+- Fixed recalled one-line prompts placing the caret at the start when reached with Up but at the end when reached with Down; a history entry that fits on one visual row now always opens at the end, while multi-row entries keep their top/bottom anchors ([#12814](https://github.com/can1357/oh-my-pi/pull/12814) by [@H4vC](https://github.com/H4vC)).
+- Fixed Agent Hub activity footer dropping the `2:activity` hint that the roster footer already shows ([#12432](https://github.com/can1357/oh-my-pi/issues/12432)).
 
 ## [18.2.8] - 2026-09-21
 

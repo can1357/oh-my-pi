@@ -767,7 +767,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			row(
 				theme.fg(
 					"dim",
-					"1:agents  j/k:select  Enter:transcript  Space:follow  f:filter  s:scope  /:search  Esc:close",
+					"1:agents  2:activity  j/k:select  Enter:transcript  Space:follow  f:filter  s:scope  /:search  Esc:close",
 				),
 				width,
 			),
