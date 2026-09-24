@@ -1374,7 +1374,7 @@ describe("runSubprocess yield reminders", () => {
 		expect(initArgs.enforceToolAllowlist).toBe(true);
 		// `todo` is parent-owned and stripped from both the active set and the
 		// persisted declaration. `wait` stays out too: a read-only scope without
-		// `task` gets no coordination tool (executor wait gate), matching the
+		// `task` gets no coordination tool (subagents never receive `wait`), matching the
 		// live session's grant.
 		expect(initArgs.declaredTools).toEqual(["read"]);
 	});

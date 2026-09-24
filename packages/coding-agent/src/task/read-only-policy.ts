@@ -65,9 +65,6 @@ export function isReadOnlyAgent(agent: AgentDefinition, evalBackends?: EvalBacke
 	//   depth reads one notch conservative — fail-safe toward writable).
 	//   Delegation to a writable child breaks the read-only contract even when
 	//   the agent's own allowlist is read-only.
-	// - non-restricted spawn paths auto-add `wait` (always-on coordination);
-	//   because `wait` is in `READ_ONLY_TOOL_NAMES`, the auto-add preserves
-	//   the read-only classification without needing to be mirrored here.
 	const effective = expandExecToolAlias(agent.tools, patterns, evalBackends ?? { python: true, js: true }).filter(
 		tool => !isToolDisallowed(tool, patterns),
 	);
