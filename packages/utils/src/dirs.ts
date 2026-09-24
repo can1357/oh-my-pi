@@ -15,6 +15,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { engines, version } from "../package.json" with { type: "json" };
+import { localDayStamp } from "./dates";
 import { isEnoent, isEnotdir } from "./fs-error";
 
 /** App name (e.g. "omp") */
@@ -601,9 +602,15 @@ export function getLogsDir(): string {
 	return dirs.rootSubdir("logs", "state");
 }
 
-/** Get this process's dated log path (~/.omp/logs/omp.YYYY-MM-DD.PID.log). */
+/**
+ * Get this process's dated log path (~/.omp/logs/omp.YYYY-MM-DD.PID.log).
+ *
+ * Stamped with the local calendar day, matching the name `RotatingFileSink`
+ * gives its active file. A UTC stamp resolved a file the logger never writes
+ * whenever the offset moved the date.
+ */
 export function getLogPath(date = new Date(), pid = process.pid): string {
-	return path.join(getLogsDir(), `${APP_NAME}.${date.toISOString().slice(0, 10)}.${pid}.log`);
+	return path.join(getLogsDir(), `${APP_NAME}.${localDayStamp(date)}.${pid}.log`);
 }
 
 /**

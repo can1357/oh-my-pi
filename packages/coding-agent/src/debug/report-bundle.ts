@@ -10,6 +10,7 @@ import * as path from "node:path";
 import type { WorkProfile } from "@oh-my-pi/pi-natives";
 import { APP_NAME, getLogPath, getLogsDir, getReportsDir, isEnoent } from "@oh-my-pi/pi-utils";
 import { writeArchive } from "@oh-my-pi/pi-utils/ar";
+import { localDayStamp } from "@oh-my-pi/pi-utils/dates";
 import type { CpuProfile, MemoryStats } from "./profiler";
 import { collectSystemInfo, sanitizeEnv } from "./system-info";
 
@@ -215,7 +216,8 @@ export async function getLogText(): Promise<string> {
  */
 async function collectSameDayLogs(linesPerFile: number): Promise<string> {
 	const logsDir = getLogsDir();
-	const today = new Date().toISOString().slice(0, 10);
+	// Local, matching the stamp RotatingFileSink puts in the filename.
+	const today = localDayStamp();
 	const sameDay: Array<{ name: string; mtimeMs: number }> = [];
 	try {
 		const entries = await fs.readdir(logsDir, { withFileTypes: true });

@@ -143,6 +143,18 @@ export function format(value: Date | number, pattern: string): string {
 	return result;
 }
 
+/**
+ * The local calendar day of `date` as `YYYY-MM-DD`.
+ *
+ * The stamp every dated log filename carries: the rotating sink names its
+ * active file with it, `getLogPath()` resolves the same name, and stale-log
+ * pruning compares against it. Local, never UTC — a UTC stamp puts a session
+ * and its own rotation on different calendar days at any non-zero offset.
+ */
+export function localDayStamp(date: Date = new Date()): string {
+	return `${pad(date.getFullYear(), 4)}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
 function plural(count: number, singular: string): string {
 	return `${count} ${count === 1 ? singular : `${singular}s`}`;
 }

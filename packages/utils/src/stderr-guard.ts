@@ -79,8 +79,15 @@ function stderrSharesStdoutTerminal(): boolean {
 /** Saved dup of the real stderr while suppression is active, else null. */
 let savedStderrFd: number | null = null;
 
+/** Newest log file the guard knows about; see {@link setStderrRedirectTarget}. */
+let redirectTarget: string | null = null;
+
 export interface SuppressTerminalStderrOptions {
-	/** Redirect target path; defaults to today's omp log file, then /dev/null. */
+	/**
+	 * Redirect target path; defaults to the log file the rotating sink last
+	 * reported (see {@link setStderrRedirectTarget}), then today's omp log
+	 * file, then /dev/null.
+	 */
 	redirectPath?: string;
 	/** Bypass the macOS + same-terminal gate. Tests only. */
 	force?: boolean;
@@ -102,12 +109,13 @@ export function suppressTerminalStderr(options?: SuppressTerminalStderrOptions):
 
 	let redirectFd: number;
 	try {
-		const redirectPath = options?.redirectPath ?? getLogPath();
+		const redirectPath = options?.redirectPath ?? redirectTarget ?? getLogPath();
 		// getLogsDir() only computes the path; the logger creates it lazily, so
 		// on a fresh profile ~/.omp/logs may not exist yet. Create it here so
 		// diagnostics land in the log instead of falling through to /dev/null.
 		fs.mkdirSync(path.dirname(redirectPath), { recursive: true });
 		redirectFd = fs.openSync(redirectPath, "a");
+		redirectTarget = redirectPath;
 	} catch {
 		try {
 			redirectFd = fs.openSync("/dev/null", "w");
@@ -129,6 +137,35 @@ export function suppressTerminalStderr(options?: SuppressTerminalStderrOptions):
 	fs.closeSync(redirectFd);
 	savedStderrFd = saved;
 	return true;
+}
+
+/**
+ * Point fd 2 at `logPath`, the log file the rotating sink is currently
+ * writing.
+ *
+ * The logger calls this on every sink rotation. Without it fd 2 keeps the
+ * descriptor opened at TUI start, so after local midnight raw stderr — this
+ * process's and every child that inherited fd 2 — keeps landing in the
+ * previous day's file, which the sink eventually prunes out from under it.
+ *
+ * The path is recorded even while suppression is inactive, so a later
+ * {@link suppressTerminalStderr} redirects to the live file instead of
+ * re-deriving a dated name. Best-effort: if the new file cannot be opened,
+ * fd 2 keeps its current target.
+ */
+export function setStderrRedirectTarget(logPath: string): void {
+	redirectTarget = logPath;
+	if (savedStderrFd === null) return;
+	const libc = libcFdOps();
+	if (!libc) return;
+	let redirectFd: number;
+	try {
+		redirectFd = fs.openSync(logPath, "a");
+	} catch {
+		return;
+	}
+	libc.dup2(redirectFd, STDERR_FILENO);
+	fs.closeSync(redirectFd);
 }
 
 /**
