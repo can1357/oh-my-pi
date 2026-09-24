@@ -967,7 +967,14 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			cwdStat = await fs.promises.stat(commandCwd);
 		} catch (err) {
 			if (isEnoent(err)) {
-				throw new ToolError(await withPathHint(`Working directory does not exist: ${commandCwd}`, commandCwd));
+				throw new ToolError(
+					await withPathHint(
+						`Working directory does not exist: ${commandCwd}`,
+						commandCwd,
+						this.session.cwd,
+						signal,
+					),
+				);
 			}
 			throw err;
 		}

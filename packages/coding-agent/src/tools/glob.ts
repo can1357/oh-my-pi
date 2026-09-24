@@ -230,6 +230,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 							`Path not found: ${partition.missing.join(", ")}`,
 							partition.missing[0] ?? "",
 							this.session.cwd,
+							signal,
 						),
 					);
 				}
@@ -387,7 +388,14 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 						// "Path not found" instead of leaking the raw errno (issue #7597).
 						if (isEnoent(err) || hasFsCode(err, "ENAMETOOLONG")) {
 							if (isSingle)
-								throw new ToolError(await withPathHint(`Path not found: ${scopePath}`, target.searchPath));
+								throw new ToolError(
+									await withPathHint(
+										`Path not found: ${scopePath}`,
+										target.searchPath,
+										this.session.cwd,
+										signal,
+									),
+								);
 							return { target, result: [] };
 						}
 						throw err;

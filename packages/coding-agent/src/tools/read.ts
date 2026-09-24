@@ -1751,7 +1751,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				if (!recoveredApprovedPlan && !suffixResolution) {
 					const delimitedResult = await this.#tryReadDelimitedPaths(readPath, signal);
 					if (delimitedResult) return delimitedResult;
-					throw new ToolError(await withPathHint(`Path '${localReadPath}' not found`, absolutePath));
+					throw new ToolError(
+						await withPathHint(`Path '${localReadPath}' not found`, absolutePath, this.session.cwd, signal),
+					);
 				}
 			} else {
 				throw error;

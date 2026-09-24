@@ -1504,7 +1504,7 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 		isDirectory = stat.isDirectory();
 	} catch {
 		const hint = opts.multipathStatHint && rawPaths.length > 1 ? opts.multipathStatHint : "";
-		throw new ToolError(await withPathHint(`Path not found: ${scopePath}${hint}`, searchPath));
+		throw new ToolError(await withPathHint(`Path not found: ${scopePath}${hint}`, searchPath, cwd));
 	}
 
 	return {

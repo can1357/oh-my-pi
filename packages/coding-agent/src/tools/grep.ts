@@ -1029,7 +1029,12 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 							const stats = await stat(absKey).catch(() => null);
 							if (!stats) {
 								throw new ToolError(
-									await withPathHint(`Path not found for line-range selector: ${spec.original}`, absKey),
+									await withPathHint(
+										`Path not found for line-range selector: ${spec.original}`,
+										absKey,
+										this.session.cwd,
+										signal,
+									),
 								);
 							}
 							if (!stats.isFile()) {
@@ -1074,6 +1079,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 							`Path not found: ${missingPaths.join(", ")}; list each target in the semicolon-delimited \`path\`${archiveHint}`,
 							missingPaths[0] ?? "",
 							this.session.cwd,
+							signal,
 						),
 					);
 				}

@@ -599,7 +599,7 @@ describe("tool path arrays", () => {
 		});
 		const text = getText(result);
 		const details = result.details as { notes?: string[]; displayReadTargetLinks?: Array<string | null> } | undefined;
-		const hint = `Nearest existing directory: ${tempDir}/ contains: apps/, folder with spaces/, other/, packages/, phases/`;
+		const hint = "Nearest existing directory: . contains: apps/, folder with spaces/, other/, packages/, phases/";
 
 		expect(text).toContain("Note: interpreted as 2 paths: missing.txt, packages/grep.txt");
 		expect(text).toContain("shared-needle packages");
