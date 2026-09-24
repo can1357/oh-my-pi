@@ -62,8 +62,34 @@ export interface ObservableSession {
 	detached?: boolean;
 	index?: number;
 	lastUpdate: number;
-	/** Latest progress snapshot from the subagent executor */
+	/**
+	 * Latest progress snapshot from the subagent executor. Usage counters
+	 * (`tokens`, `requests`, `toolCount`, `cost`, `durationMs`) are lifetime
+	 * totals across every run of this agent id, so a follow-up turn on a kept-alive
+	 * or revived agent adds to the earlier runs instead of restarting at zero.
+	 */
 	progress?: AgentProgress;
+}
+
+/** Usage counters the executor restarts at zero on every run of an agent. */
+type RunUsage = Pick<AgentProgress, "tokens" | "requests" | "toolCount" | "cost" | "durationMs">;
+
+function addRunUsage(base: RunUsage | undefined, run: RunUsage): RunUsage {
+	if (!base)
+		return {
+			tokens: run.tokens,
+			requests: run.requests,
+			toolCount: run.toolCount,
+			cost: run.cost,
+			durationMs: run.durationMs,
+		};
+	return {
+		tokens: base.tokens + run.tokens,
+		requests: base.requests + run.requests,
+		toolCount: base.toolCount + run.toolCount,
+		cost: base.cost + run.cost,
+		durationMs: base.durationMs + run.durationMs,
+	};
 }
 
 /** Coarse source of an observer change; callers use it to separate lifecycle work from high-frequency progress. */
@@ -78,6 +104,10 @@ const STATUS_MAP: Record<string, ObservableSession["status"]> = {
 
 export class SessionObserverRegistry {
 	#sessions = new Map<string, ObservableSession>();
+	/** Summed usage of an agent's settled runs. */
+	#settledUsageById = new Map<string, RunUsage>();
+	/** Raw executor snapshot of an agent's current, not yet settled run. */
+	#runProgressById = new Map<string, AgentProgress>();
 	#listeners = new Set<(kind: SessionObserverChangeKind) => void>();
 	#eventBusUnsubscribers: Array<() => void> = [];
 	#sortOrderById = new Map<string, number>();
@@ -168,6 +198,8 @@ export class SessionObserverRegistry {
 	/** Clear all tracked sessions (e.g. on session switch). Keeps EventBus subscriptions and listeners. */
 	resetSessions(): void {
 		this.#sessions.clear();
+		this.#settledUsageById.clear();
+		this.#runProgressById.clear();
 		this.#sortOrderById.clear();
 		this.#parentSortOrderById.clear();
 		this.#nextSortOrder = 0;
@@ -178,6 +210,8 @@ export class SessionObserverRegistry {
 		for (const unsub of this.#eventBusUnsubscribers) unsub();
 		this.#eventBusUnsubscribers = [];
 		this.#sessions.clear();
+		this.#settledUsageById.clear();
+		this.#runProgressById.clear();
 		this.#sortOrderById.clear();
 		this.#parentSortOrderById.clear();
 		this.#nextSortOrder = 0;
@@ -217,6 +251,7 @@ export class SessionObserverRegistry {
 						const sortOrder = this.#ensureSortOrder(payload.id);
 						this.#ensureParentSortOrder(payload.parentToolCallId, sortOrder);
 						const existing = this.#sessions.get(payload.id);
+						if (status !== "active") this.#settleRun(payload.id);
 						if (existing) {
 							existing.status = status;
 							existing.lastUpdate = Date.now();
@@ -250,8 +285,9 @@ export class SessionObserverRegistry {
 					TASK_SUBAGENT_PROGRESS_CHANNEL,
 					dedupe(data => {
 						const payload = data as SubagentProgressPayload;
-						const progress = payload.progress;
-						const id = progress.id;
+						const id = payload.progress.id;
+						this.#runProgressById.set(id, payload.progress);
+						const progress = this.#withSettledUsage(id, payload.progress);
 						const existing = this.#sessions.get(id);
 
 						const sortOrder = this.#ensureSortOrder(id);
@@ -285,5 +321,22 @@ export class SessionObserverRegistry {
 				),
 			);
 		}
+	}
+
+	/**
+	 * Fold a finished run into the agent's settled totals. The executor flushes
+	 * its final progress before the settled lifecycle frame, and a follow-up
+	 * turn starts a fresh monitor at zero, so later snapshots add on top.
+	 */
+	#settleRun(id: string): void {
+		const run = this.#runProgressById.get(id);
+		if (!run) return;
+		this.#runProgressById.delete(id);
+		this.#settledUsageById.set(id, addRunUsage(this.#settledUsageById.get(id), run));
+	}
+
+	#withSettledUsage(id: string, progress: AgentProgress): AgentProgress {
+		const settled = this.#settledUsageById.get(id);
+		return settled ? { ...progress, ...addRunUsage(settled, progress) } : progress;
 	}
 }
