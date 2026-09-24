@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `ctx.agentIdentity` to extension contexts: tells a handler whether it runs in the main session or a subagent, its recursion depth, registry id, display name, and parent chain ([#10228](https://github.com/can1357/oh-my-pi/issues/10228)).
+- Added `ctx.agentIdentity` to extension contexts: tells a handler whether it runs in the main session or a subagent, its recursion depth, registry id, display name, and parent chain ([#10228](https://github.com/can1357/oh-my-pi/issues/10228), [#10835](https://github.com/can1357/oh-my-pi/pull/10835) by [@szavadsky](https://github.com/szavadsky)).
 
 ## [18.3.0] - 2026-09-24
 
