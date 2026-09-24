@@ -63,6 +63,8 @@ interface BenchmarkClient {
 			cacheWrite: number;
 			total: number;
 		};
+		/** Priced USD cost accumulated by the session so far. */
+		cost: number;
 		assistantMessages: number;
 	}>;
 	getLastAssistantText(): Promise<string | null>;
@@ -785,6 +787,16 @@ export interface TokenStats {
 	total: number;
 }
 
+/** Wire-level usage of a run: provider token buckets plus priced cost, from session stats. */
+export interface RunUsage {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	/** Priced USD cost of the run; 0 when pricing is unavailable. */
+	costUsd: number;
+}
+
 export interface ToolCallStats {
 	read: number;
 	edit: number;
@@ -820,6 +832,8 @@ export interface TaskRunResult {
 	difficultyScore?: number;
 	error?: string;
 	tokens: TokenStats;
+	/** Wire-level usage (token buckets + cost) accumulated across the run's attempts. */
+	usage?: RunUsage;
 	duration: number;
 	indentScore?: number;
 	formattedEquivalent?: boolean;
@@ -863,6 +877,8 @@ export interface TaskResult {
 	success: boolean;
 	/** Token usage of the best run. */
 	tokens: TokenStats;
+	/** Wire-level usage of the best run, when the session reported it. */
+	usage?: RunUsage;
 	/** Duration (ms) of the best run. */
 	duration: number;
 	/** Indent score of the best run, or 0 if unscored. */
@@ -905,6 +921,8 @@ export interface BenchmarkSummary {
 	p99OneShotSuccessTokensPerTask: TokenStats;
 	/** Tokens summed over the best run of each task. */
 	totalTokens: TokenStats;
+	/** Wire-level usage (token buckets + cost) summed over the best run of each task. */
+	usage?: RunUsage;
 	/** Average tokens per task (sum of best runs / number of tasks). */
 	avgTokensPerTask: TokenStats;
 	/** Median tokens across best runs (per-task distribution). */
@@ -1019,6 +1037,7 @@ async function runSingleTask(
 	let formattedEquivalent: boolean | undefined;
 	let diffStats: { linesChanged: number; charsChanged: number } | undefined;
 	let tokens: TokenStats = { input: 0, output: 0, reasoning: 0, total: 0 };
+	let usage: RunUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 };
 	let agentResponse: string | undefined;
 	let diff: string | undefined;
 	const editFailures: EditFailure[] = [];
@@ -1189,6 +1208,13 @@ async function runSingleTask(
 					output: tokens.output + attemptTokens.output,
 					reasoning: tokens.reasoning + attemptTokens.reasoning,
 					total: tokens.total + attemptTokens.total,
+				};
+				usage = {
+					input: usage.input + attemptTokens.input,
+					output: usage.output + attemptTokens.output,
+					cacheRead: usage.cacheRead + Math.max(0, statsAfter.tokens.cacheRead - statsBefore.tokens.cacheRead),
+					cacheWrite: usage.cacheWrite + Math.max(0, statsAfter.tokens.cacheWrite - statsBefore.tokens.cacheWrite),
+					costUsd: usage.costUsd + Math.max(0, statsAfter.cost - statsBefore.cost),
 				};
 				await logEvent({ type: "stats", before: statsBefore, after: statsAfter, attempt: attempt + 1 });
 				allEvents = allEvents.concat(events);
@@ -1413,6 +1439,7 @@ async function runSingleTask(
 		difficultyScore: metadata?.difficultyScore,
 		error,
 		tokens,
+		usage,
 		duration,
 		indentScore,
 		formattedEquivalent,
@@ -1800,6 +1827,7 @@ function summarizeTaskRuns(task: EditTask, runs: TaskRunResult[]): TaskResult {
 	const best = bestIdx === -1 ? undefined : orderedRuns[bestIdx]!;
 
 	const tokens: TokenStats = best ? { ...best.tokens } : { input: 0, output: 0, reasoning: 0, total: 0 };
+	const usage = best?.usage;
 	const duration = best?.duration ?? 0;
 	const indentScore = typeof best?.indentScore === "number" ? best.indentScore : 0;
 	const toolCalls: ToolCallStats = best ? { ...best.toolCalls } : { ...EMPTY_TOOL_CALL_STATS };
@@ -1812,6 +1840,7 @@ function summarizeTaskRuns(task: EditTask, runs: TaskRunResult[]): TaskResult {
 		files: task.files,
 		runs: orderedRuns,
 		bestRunIndex: best?.runIndex ?? -1,
+		usage,
 		success: Boolean(best?.success),
 		tokens,
 		duration,
@@ -1977,6 +2006,13 @@ export function buildBenchmarkResult(params: {
 		reasoning: bestRuns.reduce((sum, r) => sum + r.tokens.reasoning, 0),
 		total: bestRuns.reduce((sum, r) => sum + r.tokens.total, 0),
 	};
+	const totalUsage: RunUsage = {
+		input: totalTokens.input,
+		output: totalTokens.output,
+		cacheRead: bestRuns.reduce((sum, r) => sum + (r.usage?.cacheRead ?? 0), 0),
+		cacheWrite: bestRuns.reduce((sum, r) => sum + (r.usage?.cacheWrite ?? 0), 0),
+		costUsd: bestRuns.reduce((sum, r) => sum + (r.usage?.costUsd ?? 0), 0),
+	};
 	const tokenDistribution = summarizeTokenDistribution(bestRuns);
 	const totalDuration = bestRuns.reduce((sum, r) => sum + r.duration, 0);
 	const totalToolCalls: ToolCallStats = {
@@ -2041,6 +2077,7 @@ export function buildBenchmarkResult(params: {
 		flakyTasks,
 		consistentlyPassingTasks,
 		totalTokens,
+		usage: totalUsage,
 		avgTokensPerTask: {
 			input: Math.round(totalTokens.input / taskDenom),
 			output: Math.round(totalTokens.output / taskDenom),

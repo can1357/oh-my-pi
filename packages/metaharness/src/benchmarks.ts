@@ -79,7 +79,17 @@ interface EditRun {
 	error?: string;
 	duration: number;
 	tokens: { input: number; output: number; reasoning: number };
+	usage?: EditUsage;
 	toolCalls?: { read: number; edit: number; write: number };
+}
+
+/** Wire-level usage emitted by the edit adapter (additive; absent in older result files). */
+interface EditUsage {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	costUsd: number;
 }
 
 interface EditTask {
@@ -87,7 +97,6 @@ interface EditTask {
 	name: string;
 	runs: EditRun[];
 }
-
 interface EditResult {
 	tasks: EditTask[];
 	summary: {
@@ -96,6 +105,7 @@ interface EditResult {
 		taskSuccessRate: number;
 		editSuccessRate: number;
 		totalTokens: { input: number; output: number };
+		usage?: EditUsage;
 	};
 }
 
@@ -150,17 +160,21 @@ function readEditSnapshot(jobDir: string): BenchmarkSnapshot {
 	const traces: BenchmarkTrace[] = [];
 	let tokIn = 0;
 	let tokOut = 0;
+	let tokCache = 0;
+	let costUsd = 0;
 	for (const task of result.tasks) {
 		for (const run of task.runs) {
 			tokIn += run.tokens.input;
 			tokOut += run.tokens.output;
+			tokCache += run.usage?.cacheRead ?? 0;
+			costUsd += run.usage?.costUsd ?? 0;
 			const runNumber = run.runIndex + 1;
 			traces.push({
 				name: `${task.id}__${runNumber}`,
 				task: task.id,
 				status: run.success ? "pass" : run.error ? "error" : "fail",
 				reward: run.success ? 1 : 0,
-				costUsd: 0,
+				costUsd: run.usage?.costUsd ?? 0,
 				durationMs: run.duration,
 				detail: JSON.stringify({ name: task.name, error: run.error ?? null, tools: run.toolCalls ?? null }),
 				tracePath: path.join("result.dump", task.id.replace(/[^a-zA-Z0-9._-]/g, "_"), `run-${runNumber}.md`),
@@ -177,10 +191,10 @@ function readEditSnapshot(jobDir: string): BenchmarkSnapshot {
 		fail: traces.length - pass,
 		error,
 		running: Math.max(0, result.summary.totalRuns - traces.length),
-		costUsd: 0,
+		costUsd,
 		tokIn,
 		tokOut,
-		tokCache: 0,
+		tokCache,
 		score: result.summary.taskSuccessRate,
 		metrics: {
 			task_success_rate: result.summary.taskSuccessRate,
