@@ -506,13 +506,7 @@ type VimChange =
 	  };
 
 /** Whitespace-delimited WORD motions, walking graphemes without flattening the buffer. */
-function bigWordMotion(
-	buf: VimBuffer,
-	key: "W" | "B" | "E",
-	count: number,
-	change: boolean,
-	operator: boolean,
-): VimPosition {
+function bigWordMotion(buf: VimBuffer, key: "W" | "B" | "E", count: number): VimPosition {
 	let line = buf.cursorLine;
 	let col = buf.cursorCol;
 	const text = (): string => buf.lines[line] ?? "";
@@ -522,7 +516,7 @@ function bigWordMotion(
 		return segment === undefined ? text().length : segment.index + segment.segment.length;
 	};
 	const previousCol = (at: number): number => segments.containing(at - 1)?.index ?? 0;
-	const space = (): boolean => col >= text().length || /\s/u.test(text().charAt(col));
+	const separatorAt = (at: number): boolean => at >= text().length || charClass(text().charAt(at), true) === 0;
 	const next = (): boolean => {
 		if (col < text().length) {
 			col = nextCol(col);
@@ -549,41 +543,37 @@ function bigWordMotion(
 	for (let i = 0; i < count; i++) {
 		const beforeLine = line;
 		const beforeCol = col;
-		if (change && i === 0 && text().length === 0) continue;
 		if (key === "B") {
 			if (!previous()) break;
-			while (space() && text().length > 0) {
+			while (separatorAt(col) && text().length > 0) {
 				if (!previous()) break;
 			}
 			while (col > 0) {
 				const prev = previousCol(col);
-				if (/\s/u.test(text().charAt(prev))) break;
+				if (separatorAt(prev)) break;
 				col = prev;
 			}
-		} else if (key === "W" && !change) {
-			while (!space()) next();
-			while (space()) {
-				// On an operator's final step, a WORD at the line end does not take the newline.
-				if (i === count - 1 && text().length > 0 && col >= text().length && operator) return { line, col };
+		} else if (key === "W") {
+			while (!separatorAt(col)) next();
+			while (separatorAt(col)) {
 				if (!next()) break;
 				// An empty line is a WORD boundary, unlike a whitespace-only line.
 				if (text().length === 0 && line !== beforeLine) break;
 			}
 		} else {
-			// `cW` includes the current WORD, even when only its final grapheme remains.
-			if (!(change && i === 0) && !next()) break;
-			while (space()) {
+			if (!next()) break;
+			while (separatorAt(col)) {
 				if (!next()) break;
 			}
-			if (!space()) {
+			if (!separatorAt(col)) {
 				let end = nextCol(col);
-				while (end < text().length && !/\s/u.test(text().charAt(end))) {
+				while (end < text().length && !separatorAt(end)) {
 					col = end;
 					end = nextCol(col);
 				}
 			}
 		}
-		if (line === beforeLine && col === beforeCol && !(change && i === 0)) break;
+		if (line === beforeLine && col === beforeCol) break;
 	}
 	return { line, col };
 }
@@ -993,30 +983,48 @@ export class VimState {
 				const change =
 					key === "W" &&
 					this.#operator === "c" &&
-					(line.length === 0 || (buf.cursorCol < line.length && !/\s/u.test(line.charAt(buf.cursorCol))));
-				const to = bigWordMotion(buf, key, count, change, this.#operator !== null);
-				const firstTextCol = line.search(/\S/u);
-				const leading = buf.cursorCol <= (firstTextCol < 0 ? line.length : firstTextCol);
-				if (key === "W" && !change && this.#operator !== null && to.line > buf.cursorLine && to.col === 0) {
-					// An exclusive column-zero endpoint stops at the previous line's end.
-					// Starting in leading whitespace promotes that span to whole lines.
-					const endLine = to.line - 1;
-					return {
-						to: { line: endLine, col: (buf.lines[endLine] ?? "").length },
-						inclusive: false,
-						linewise: leading,
-					};
+					(line.length === 0 ||
+						(buf.cursorCol < line.length && charClass(line.charAt(buf.cursorCol), true) !== 0));
+				let to: VimPosition;
+				if (change) {
+					const next = nextGraphemeStart(line, buf.cursorCol);
+					const atWordEnd = line.length === 0 || next >= line.length || charClass(line.charAt(next), true) === 0;
+					const remaining = atWordEnd ? count - 1 : count;
+					to = remaining === 0 ? cursorOf(buf) : bigWordMotion(buf, "E", remaining);
+				} else {
+					to = bigWordMotion(buf, key, count);
 				}
-				return {
-					to,
-					inclusive: key === "E" || change,
-					linewise:
-						key === "W" &&
-						this.#operator === "d" &&
-						leading &&
-						to.line > buf.cursorLine &&
-						to.col === (buf.lines[to.line] ?? "").length,
-				};
+
+				let firstTextCol = line.length;
+				for (const segment of segmenter.segment(line)) {
+					if (charClass(segment.segment, true) === 0) continue;
+					firstTextCol = segment.index;
+					break;
+				}
+				const leading = buf.cursorCol <= firstTextCol;
+				if (key === "W" && !change && this.#operator !== null && to.line > buf.cursorLine) {
+					const target = buf.lines[to.line] ?? "";
+					let targetIsBlank = to.col === target.length;
+					if (targetIsBlank) {
+						for (const segment of segmenter.segment(target)) {
+							if (charClass(segment.segment, true) === 0) continue;
+							targetIsBlank = false;
+							break;
+						}
+					}
+					if (targetIsBlank) to = { line: to.line, col: 0 };
+					if (to.col === 0) {
+						// An exclusive column-zero endpoint stops at the previous line's end. Starting
+						// at or before the first non-blank promotes that span to whole lines.
+						const endLine = to.line - 1;
+						return {
+							to: { line: endLine, col: (buf.lines[endLine] ?? "").length },
+							inclusive: false,
+							linewise: leading,
+						};
+					}
+				}
+				return { to, inclusive: key === "E" || change, linewise: false };
 			}
 			case "w": {
 				let col = buf.cursorCol;
