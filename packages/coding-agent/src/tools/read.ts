@@ -2170,11 +2170,13 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 								totalBytes: firstLineExceedsLimit ? (firstLineByteLength ?? previewBytes) : selectedBytes,
 								outputLines: firstLineExceedsLimit ? (previewBytes > 0 ? 1 : 0) : collectedLines.length,
 								outputBytes: firstLineExceedsLimit ? previewBytes : collectedBytes,
-								lastLinePartial: false,
+								// The exceeds-limit branch delivers a byte-capped window of
+								// one line (#10774): flag it so SDK consumers can tell the
+								// delivered prefix is not the complete source line.
+								lastLinePartial: firstLineExceedsLimit && previewBytes > 0,
 								firstLineExceedsLimit,
 							}
 						: undefined;
-
 					const shouldAddHashLines = !rawSelector && displayMode.hashLines;
 					const shouldAddLineNumbers = rawSelector ? false : shouldAddHashLines ? false : displayMode.lineNumbers;
 					let hashContext: HashlineHeaderContext | undefined;
@@ -2634,7 +2636,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			totalBytes: firstLineExceedsLimit ? (firstLineByteLength ?? previewBytes) : selectedBytes,
 			outputLines: firstLineExceedsLimit ? (previewBytes > 0 ? 1 : 0) : collectedLines.length,
 			outputBytes: firstLineExceedsLimit ? previewBytes : collectedBytes,
-			lastLinePartial: false,
+			// Mirror the plain-file path (#10774): the delivered preview is a
+			// partial byte window of the source line.
+			lastLinePartial: firstLineExceedsLimit && previewBytes > 0,
 			firstLineExceedsLimit,
 		};
 
