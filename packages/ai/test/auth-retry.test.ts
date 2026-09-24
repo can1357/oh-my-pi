@@ -116,6 +116,28 @@ describe("isAuthRetryableError", () => {
 				),
 			),
 		).toBe(false);
+		// OpenCode's free-tier gate denial (403 FreeTierError) is likewise
+		// model-scoped client policy: the same key still serves paid SKUs, so
+		// rotation cannot fix it.
+		expect(
+			isAuthRetryableError(
+				new ProviderHttpError(
+					'403 {"error":{"type":"FreeTierError","message":"OpenCode\'s free tier can only be used from within OpenCode"}}',
+					403,
+					{ code: "FreeTierError" },
+				),
+			),
+		).toBe(false);
+		// The bare marker must also stay non-rotatable even if the wording shifts.
+		expect(isAuthRetryableError(new Error("403 request rejected (type=FreeTierError)"))).toBe(false);
+		// A paid-SKU 403 on opencode that lacks the gate markers is still a
+		// normal access denial and must rotate. (A bare "403 forbidden" instead
+		// carries the static auth-failure text flag, which is out of scope here.)
+		expect(
+			isAuthRetryableError(
+				Object.assign(new Error("403 access to this model is denied for your plan"), { status: 403 }),
+			),
+		).toBe(true);
 		expect(isAuthRetryableError(authError(500))).toBe(false);
 		expect(isAuthRetryableError(new Error("network blip"))).toBe(false);
 		expect(isAuthRetryableError(undefined)).toBe(false);

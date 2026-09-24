@@ -5,6 +5,11 @@ import { resolveOpenAIRequestSetup } from "@oh-my-pi/pi-ai/providers/openai-shar
 import type { Model } from "@oh-my-pi/pi-ai/types";
 import { opencodeGoUsageProvider } from "@oh-my-pi/pi-ai/usage/opencode-go";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import {
+	OPENCODE_SESSION_TOKEN_PATTERN,
+	OPENCODE_USER_AGENT,
+	toOpenCodeSessionToken,
+} from "@oh-my-pi/pi-catalog/wire/opencode";
 import { USER_AGENT } from "@oh-my-pi/pi-utils";
 
 const OPENCODE_SESSION_HEADER = "x-opencode-session";
@@ -102,16 +107,37 @@ function makeOpenCodeGoAnthropicModel(): Model<"anthropic-messages"> {
 	});
 }
 
+describe("opencode session token formatter", () => {
+	it("produces the canonical ses_ shape the free-tier gate requires", () => {
+		const token = toOpenCodeSessionToken("session-1");
+		expect(token).toMatch(OPENCODE_SESSION_TOKEN_PATTERN);
+	});
+
+	it("is deterministic so routing and prompt cache survive across turns", () => {
+		expect(toOpenCodeSessionToken("session-1")).toBe(toOpenCodeSessionToken("session-1"));
+		expect(toOpenCodeSessionToken("session-2")).not.toBe(toOpenCodeSessionToken("session-1"));
+	});
+
+	it("keeps the alphanumeric tail free of lowercase hex collision ambiguity", () => {
+		// Tail must satisfy [0-9A-Za-z]{14} after the fixed 12-hex head.
+		const token = toOpenCodeSessionToken("session-1");
+		const head = token.slice(4, 16);
+		const tail = token.slice(16);
+		expect(head).toMatch(/^[0-9a-f]{12}$/);
+		expect(tail).toMatch(/^[0-9A-Za-z]{14}$/);
+	});
+});
+
 describe("opencode and gpt session header on OpenAI transports", () => {
-	it("sends the conversation session id to OpenCode", () => {
+	it("sends the canonical session token and client identity to OpenCode", () => {
 		const setup = resolveOpenAIRequestSetup(OPENCODE_GO_COMPLETIONS_MODEL, {
 			apiKey: "key",
 			messages: [],
 			sessionId: "session-1",
 			promptCacheSessionId: "cache-1",
 		});
-		expect(setup.headers[OPENCODE_SESSION_HEADER]).toBe("session-1");
-		expect(setup.headers["User-Agent"]).toBe(USER_AGENT);
+		expect(setup.headers[OPENCODE_SESSION_HEADER]).toBe(toOpenCodeSessionToken("session-1"));
+		expect(setup.headers["User-Agent"]).toBe(OPENCODE_USER_AGENT);
 		expect(setup.headers.session_id).toBeUndefined();
 	});
 
@@ -121,7 +147,7 @@ describe("opencode and gpt session header on OpenAI transports", () => {
 			messages: [],
 			promptCacheSessionId: "cache-1",
 		});
-		expect(setup.headers[OPENCODE_SESSION_HEADER]).toBe("cache-1");
+		expect(setup.headers[OPENCODE_SESSION_HEADER]).toBe(toOpenCodeSessionToken("cache-1"));
 	});
 
 	it("generates one session id at the inference boundary when the caller omitted it", async () => {
@@ -138,7 +164,7 @@ describe("opencode and gpt session header on OpenAI transports", () => {
 		);
 
 		expect(response.stopReason).toBe("stop");
-		expect(sessionId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+		expect(sessionId).toMatch(OPENCODE_SESSION_TOKEN_PATTERN);
 	});
 
 	it("replaces conflicting caller values with the authoritative session id", () => {
@@ -149,7 +175,7 @@ describe("opencode and gpt session header on OpenAI transports", () => {
 			sessionId: "session-1",
 		});
 		expect(setup.headers["X-OpenCode-Session"]).toBeUndefined();
-		expect(setup.headers[OPENCODE_SESSION_HEADER]).toBe("session-1");
+		expect(setup.headers[OPENCODE_SESSION_HEADER]).toBe(toOpenCodeSessionToken("session-1"));
 	});
 
 	it("sends session_id and x-client-request-id on OpenAI requests", () => {
@@ -241,8 +267,8 @@ describe("opencode session header on the Google transport", () => {
 
 		expect(response.stopReason).toBe("stop");
 		expect(headersSeen).toHaveLength(1);
-		expect(headersSeen[0]?.get(OPENCODE_SESSION_HEADER)).toBe("session-1");
-		expect(headersSeen[0]?.get("User-Agent")).toBe(USER_AGENT);
+		expect(headersSeen[0]?.get(OPENCODE_SESSION_HEADER)).toBe(toOpenCodeSessionToken("session-1"));
+		expect(headersSeen[0]?.get("User-Agent")).toBe(OPENCODE_USER_AGENT);
 	});
 });
 
@@ -253,9 +279,9 @@ describe("session header on the Anthropic transport", () => {
 			apiKey: "opencode_test_key",
 			sessionId: "session-1",
 		});
-		expect(options.defaultHeaders[OPENCODE_SESSION_HEADER]).toBe("session-1");
+		expect(options.defaultHeaders[OPENCODE_SESSION_HEADER]).toBe(toOpenCodeSessionToken("session-1"));
 		expect(options.defaultHeaders["X-Claude-Code-Session-Id"]).toBe("session-1");
-		expect(options.defaultHeaders["User-Agent"]).toBe(USER_AGENT);
+		expect(options.defaultHeaders["User-Agent"]).toBe(OPENCODE_USER_AGENT);
 	});
 
 	it("preserves the Claude fingerprint for OpenCode OAuth requests", () => {
@@ -266,7 +292,7 @@ describe("session header on the Anthropic transport", () => {
 			sessionId: "session-1",
 		});
 		expect(options.defaultHeaders["User-Agent"]).toMatch(/^claude-cli\//);
-		expect(options.defaultHeaders["User-Agent"]).not.toBe(USER_AGENT);
+		expect(options.defaultHeaders["User-Agent"]).not.toBe(OPENCODE_USER_AGENT);
 	});
 
 	it("preserves the Claude OAuth User-Agent on the wire", async () => {
@@ -312,7 +338,7 @@ describe("session header on the Anthropic transport", () => {
 			headers: { [OPENCODE_SESSION_HEADER]: "caller", "X-Claude-Code-Session-Id": "caller-claude" },
 			sessionId: "session-1",
 		});
-		expect(options.defaultHeaders[OPENCODE_SESSION_HEADER]).toBe("session-1");
+		expect(options.defaultHeaders[OPENCODE_SESSION_HEADER]).toBe(toOpenCodeSessionToken("session-1"));
 		expect(options.defaultHeaders["X-Claude-Code-Session-Id"]).toBe("session-1");
 	});
 });
@@ -336,11 +362,10 @@ describe("usage fetch carries attribution headers", () => {
 
 		expect(report?.provider).toBe("opencode-go");
 		expect(seen).toHaveLength(1);
-		// Background poll outside any conversation: stable install id keeps
-		// OpenCode attribution working (required from 09/06), and omp's UA
-		// replaces Bun's default.
-		expect(seen[0]?.["user-agent"]).toBe(USER_AGENT);
-		expect(typeof seen[0]?.[OPENCODE_SESSION_HEADER]).toBe("string");
-		expect(seen[0]?.[OPENCODE_SESSION_HEADER]?.length).toBeGreaterThan(0);
+		// Background poll outside any conversation: canonical OpenCode client
+		// identity keeps attribution working (session header required from
+		// 09/06, free-tier gate added in #12306).
+		expect(seen[0]?.["user-agent"]).toBe(OPENCODE_USER_AGENT);
+		expect(seen[0]?.[OPENCODE_SESSION_HEADER]).toMatch(OPENCODE_SESSION_TOKEN_PATTERN);
 	});
 });

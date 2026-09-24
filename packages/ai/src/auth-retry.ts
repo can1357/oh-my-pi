@@ -2,7 +2,7 @@ import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
 import type { LimitsApi, OAuthAccess, OAuthApi } from "./auth/types";
 import * as AIError from "./error";
 import { isAuthRetryableError, isInvalidatedOAuthTokenError } from "./error/auth-classify";
-import { isAccountPolicyError, isUsageLimit } from "./error/flags";
+import { isAccountPolicyError, isOpencodeFreeTierGateMessage, isUsageLimit } from "./error/flags";
 import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./error/rate-limit";
 
 /**
@@ -119,13 +119,16 @@ function isDirectCredentialRotationError(error: unknown): boolean {
 	if (isUsageLimit(error) || isInvalidatedOAuthTokenError(error)) return true;
 	const status = AIError.status(error);
 	const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
-	// A 403 normally means a valid token lacks access, so rotate through
-	// siblings. A concurrency-cap 403 is transient instead; do not burn a
-	// sibling before the caller's backoff layer can retry it.
 	const isForbidden =
 		status === 403 ||
 		(status === undefined && message !== undefined && extractHttpStatusFromError({ message }) === 403);
-	if (isForbidden && !isConcurrencyCapExclusion(status, message)) return true;
+	// A 403 normally means a valid token lacks access, so rotate through
+	// siblings. A concurrency-cap 403 is transient instead; do not burn a
+	// sibling before the caller's backoff layer can retry it. OpenCode's
+	// free-tier gate denial is model-scoped client policy: sibling keys fail
+	// identically, and the credential keeps serving paid SKUs.
+	if (isForbidden && !isConcurrencyCapExclusion(status, message) && !isOpencodeFreeTierGateMessage(message))
+		return true;
 	return isUsageLimitOutcome(status, message);
 }
 

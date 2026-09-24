@@ -15,6 +15,7 @@ import {
 } from "@oh-my-pi/pi-catalog/model-thinking";
 import { providerEntries } from "@oh-my-pi/pi-catalog/compat/providers";
 import { CODEX_BASE_URL } from "@oh-my-pi/pi-catalog/wire/codex";
+import { isOpenCodeProvider, withOpenCodeGateTools } from "@oh-my-pi/pi-catalog/wire/opencode";
 import { $env, $pickenv, getProviderInFlightRoot, isEnoent, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
 import { createAuthRetryKeyState, isApiKeyResolver, resolvedApiKeyBearer, resolveNextAuthRetryKey } from "./auth-retry";
@@ -938,8 +939,30 @@ function streamDispatch<TApi extends Api>(
 	context: Context,
 	options?: OptionsForApi<TApi>,
 ): AssistantMessageEventStream {
-	const requestOptions = withTransportFetch(model, (options || {}) as StreamOptions) as OptionsForApi<TApi>;
+	let requestOptions = withTransportFetch(model, (options || {}) as StreamOptions) as OptionsForApi<TApi>;
 	assertExplicitOpenAIResponsesPromptCacheSupport(model, requestOptions);
+	// OpenCode's gate requires at least two OpenCode core tool names in
+	// tools[] (schemas ignored) on every request, so tool-less auxiliary calls
+	// (advisors, one-shot helpers) are refused with 403 FreeTierError even when
+	// the client-identity headers are correct (#12306). Pad with stub entries
+	// here — the single dispatch funnel for stream/complete/streamSimple — and
+	// never expose them to the caller's tool registry: they are wire-shape
+	// filler, not executable work. A padded tool-less call additionally pins
+	// toolChoice to "none" (unless the caller set one): the caller expects text
+	// and has no exec handler, so a phantom call to a stub would surface as
+	// empty text. The gate reads tools[], not tool_choice, so the pin is
+	// gate-neutral.
+	if (isOpenCodeProvider(model.provider)) {
+		const originalTools = context.tools;
+		const paddedTools = withOpenCodeGateTools(originalTools);
+		if (paddedTools !== originalTools) {
+			context = { ...context, tools: paddedTools };
+			const existingChoice = (requestOptions as { toolChoice?: ToolChoice }).toolChoice;
+			if ((originalTools ?? []).length === 0 && existingChoice === undefined) {
+				requestOptions = { ...requestOptions, toolChoice: "none" } as OptionsForApi<TApi>;
+			}
+		}
+	}
 
 	// Check custom API registry first (extension-provided APIs like "vertex-claude-api")
 	const customApiProvider = getCustomApi(model.api);
@@ -1175,7 +1198,15 @@ function isRetryableUpstreamError(
 	// classify as RATE_LIMIT_EXCEEDED in `parseRateLimitReason` and stay in the
 	// provider's own backoff layer instead of burning siblings.
 	if (AIError.isCodexChatGPTAccountPolicyError(error, model.provider, model.id)) return true;
-	if (status === 401 || (status === 403 && !isConcurrencyCapExclusion(status, message))) return true;
+	if (
+		status === 401 ||
+		(status === 403 &&
+			!isConcurrencyCapExclusion(status, message) &&
+			// OpenCode's free-tier gate denial is model-scoped client policy —
+			// the same key keeps serving paid SKUs, so rotation cannot fix it.
+			!AIError.isOpencodeFreeTierGateMessage(message))
+	)
+		return true;
 	return isUsageLimitOutcome(status, message);
 }
 

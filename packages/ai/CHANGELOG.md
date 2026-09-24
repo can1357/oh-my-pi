@@ -16,6 +16,9 @@
 
 ### Fixed
 
+- Fixed OpenCode Zen/Go free-tier 403 `FreeTierError` on model requests: OpenCode's gate rejects clients whose `User-Agent` is not `opencode/<version>` and whose `x-opencode-session` is not the canonical `ses_<12 hex><14 alnum>` shape, which omp's identity failed on both counts. All OpenCode inference now sends the canonical client UA and a stable session token derived from the conversation id so routing and prompt caching stay pinned across turns ([#12556](https://github.com/can1357/oh-my-pi/pull/12556) by [@palprateek](https://github.com/palprateek))
+- Fixed OpenCode free-tier 403 on tool-less auxiliary calls (advisors, one-shot helpers): the gate also requires at least five OpenCode core tool names in `tools[]`, so `stream()` now pads such requests with stub entries for the missing names instead of letting the gateway refuse them ([#12556](https://github.com/can1357/oh-my-pi/pull/12556) by [@palprateek](https://github.com/palprateek)).
+- OpenCode `403 FreeTierError` denials no longer rotate sibling credentials or invalidate the stored key (the same key keeps serving paid models), and the surfaced message now explains the model-scoped restriction instead of reading like an auth failure ([#12556](https://github.com/can1357/oh-my-pi/pull/12556) by [@palprateek](https://github.com/palprateek)).
 - Fixed Claude Opus 5.5 not applying a mid-session switch to high-effort reasoning when the session started without an explicit effort setting.
 - Fixed Alibaba Token Plan monthly quotas not appearing in usage reports or the status line.
 

@@ -1,4 +1,4 @@
-import { USER_AGENT, getInstallId } from "@oh-my-pi/pi-utils";
+import { getInstallId, USER_AGENT } from "@oh-my-pi/pi-utils";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { toClinePassPublicModelId } from "../cline-pass-model-id";
 import {
@@ -46,6 +46,7 @@ import { normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
 import { CLINEPASS_API_BASE_URL, clinePassClientHeaders } from "../wire/cline-pass";
 import { CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL } from "../wire/cloudflare-ai-gateway";
 import { coreWeaveProjectHeaders } from "../wire/coreweave";
+import { OPENCODE_USER_AGENT, toOpenCodeSessionToken } from "../wire/opencode";
 import {
 	COPILOT_API_HEADERS,
 	COPILOT_DISCOVERY_HEADERS,
@@ -3053,10 +3054,13 @@ function openCodeModelManagerOptions(
 					baseUrl: discoveryBaseUrl,
 					apiKey,
 					// Live discovery hits the OpenCode gateway outside any
-					// conversation: attribute with the stable install id
-					// (x-opencode-session required from 09/06) and omp's UA
+					// conversation: attribute with the canonical client identity
+					// (x-opencode-session + opencode/* UA, see wire/opencode)
 					// instead of Bun's default.
-					headers: { "User-Agent": USER_AGENT, "x-opencode-session": getInstallId() },
+					headers: {
+						"User-Agent": OPENCODE_USER_AGENT,
+						"x-opencode-session": toOpenCodeSessionToken(getInstallId()),
+					},
 					mapModel: (entry, defaults) => {
 						const reference = references.get(defaults.id);
 						const name = toModelName(entry.name, reference?.name ?? defaults.name);

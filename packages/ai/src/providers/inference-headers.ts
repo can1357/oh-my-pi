@@ -1,6 +1,7 @@
 /** Shared inference request identity headers. */
 
-import { USER_AGENT } from "@oh-my-pi/pi-utils";
+import { isOpenCodeProvider, OPENCODE_USER_AGENT, toOpenCodeSessionToken } from "@oh-my-pi/pi-catalog/wire/opencode";
+import { getInstallId, USER_AGENT } from "@oh-my-pi/pi-utils";
 
 /** Options controlling provider and protocol inference headers. */
 export interface InferenceHeaderOptions {
@@ -33,20 +34,26 @@ function setHeader(headers: Record<string, string>, name: string, value: string)
  * understood by the active inference protocol and host.
  */
 export function applyInferenceHeaders(headers: Record<string, string>, options: InferenceHeaderOptions): void {
-	const isOpenCode = options.provider === "opencode-go" || options.provider === "opencode-zen";
-	const sessionId = options.sessionId;
-	if (!sessionId) return;
+	const isOpenCode = isOpenCodeProvider(options.provider);
 
 	if (options.protocol === "anthropic") {
-		setHeader(headers, "X-Claude-Code-Session-Id", sessionId);
-	} else if (options.protocol === "openai" && options.provider === "openai") {
-		setHeader(headers, "session_id", sessionId);
-		setHeader(headers, "x-client-request-id", sessionId);
+		if (options.sessionId) setHeader(headers, "X-Claude-Code-Session-Id", options.sessionId);
+	} else if (options.protocol === "openai" && options.provider === "openai" && options.sessionId) {
+		setHeader(headers, "session_id", options.sessionId);
+		setHeader(headers, "x-client-request-id", options.sessionId);
 	}
 
 	if (isOpenCode) {
-		setHeaderIfAbsent(headers, "User-Agent", USER_AGENT);
-		setHeader(headers, "x-opencode-session", sessionId);
+		// The free-tier gate reads the UA's leading token before anything else;
+		// only an explicit caller override (e.g. a Claude OAuth fingerprint) wins.
+		setHeaderIfAbsent(headers, "User-Agent", OPENCODE_USER_AGENT);
+		if (options.sessionId) {
+			setHeader(headers, "x-opencode-session", toOpenCodeSessionToken(options.sessionId));
+		} else {
+			// Background traffic outside any conversation (usage polls, model
+			// discovery) still has to carry the session header shape.
+			setHeaderIfAbsent(headers, "x-opencode-session", toOpenCodeSessionToken(getInstallId()));
+		}
 	}
 }
 

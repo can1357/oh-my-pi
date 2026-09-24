@@ -1046,7 +1046,12 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 			stream.push({ type: "done", reason: output.stopReason as "length" | "stop" | "toolUse", message: output });
 			stream.end();
 		} catch (error) {
-			const result = await AIError.finalize(error, { api: model.api, signal: options?.signal, rawRequestDump });
+			const result = await AIError.finalize(error, {
+				api: model.api,
+				provider: model.provider,
+				signal: options?.signal,
+				rawRequestDump,
+			});
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
 			output.errorId = result.id;

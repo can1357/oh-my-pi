@@ -18,7 +18,8 @@ import {
 	opencodeZenModelManagerOptions,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
-import { USER_AGENT, type FetchImpl } from "@oh-my-pi/pi-utils";
+import { OPENCODE_SESSION_TOKEN_PATTERN, OPENCODE_USER_AGENT } from "@oh-my-pi/pi-catalog/wire/opencode";
+import { type FetchImpl } from "@oh-my-pi/pi-utils";
 import { mergePreviousSnapshotModels } from "../scripts/generate-models";
 
 const LIVE_FREE_MODEL_IDS = [
@@ -725,8 +726,8 @@ describe("OpenCode provider discovery", () => {
 	});
 
 	test("sends attribution headers on live gateway discovery", async () => {
-		// The gateway requires x-opencode-session from 09/06 and uses it for
-		// optimization; without omp's UA the request arrives as "Bun fetch".
+		// The gateway requires x-opencode-session from 09/06 and gates the free
+		// tier on client identity: opencode/* UA + ses_-shaped session header.
 		for (const makeOptions of [opencodeGoModelManagerOptions, opencodeZenModelManagerOptions]) {
 			const seen: Array<Record<string, string>> = [];
 			const options = makeOptions({
@@ -738,9 +739,8 @@ describe("OpenCode provider discovery", () => {
 			});
 			await options.fetchDynamicModels?.();
 			expect(seen).toHaveLength(1);
-			expect(seen[0]?.["user-agent"]).toBe(USER_AGENT);
-			expect(typeof seen[0]?.["x-opencode-session"]).toBe("string");
-			expect(seen[0]?.["x-opencode-session"]?.length).toBeGreaterThan(0);
+			expect(seen[0]?.["user-agent"]).toBe(OPENCODE_USER_AGENT);
+			expect(seen[0]?.["x-opencode-session"]).toMatch(OPENCODE_SESSION_TOKEN_PATTERN);
 		}
 	});
 

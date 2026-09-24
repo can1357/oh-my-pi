@@ -802,6 +802,21 @@ export function isClinePassSurfaceGateMessage(errorMessage: string | undefined):
 	return errorMessage !== undefined && CLINE_PASS_SURFACE_GATE_PATTERN.test(errorMessage);
 }
 
+const OPENCODE_FREE_TIER_GATE_PATTERN = /free tier can only be used from within|\bFreeTierError\b/i;
+
+/**
+ * OpenCode Zen/Go answer free-tier requests failing the client-identity gate
+ * with `403 FreeTierError: OpenCode's free tier can only be used from within
+ * OpenCode` ([#12306](https://github.com/can1357/oh-my-pi/issues/12306)). The
+ * API key is valid — the denial is model-scoped client policy, not a revoked
+ * credential — so it must not rotate sibling credentials (they fail
+ * identically). Free models are refused while paid SKUs keep working on the
+ * same key, which is exactly why rotation cannot fix it.
+ */
+export function isOpencodeFreeTierGateMessage(errorMessage: string | undefined): boolean {
+	return errorMessage !== undefined && OPENCODE_FREE_TIER_GATE_PATTERN.test(errorMessage);
+}
+
 const GITHUB_COPILOT_POLICY_DENIAL_PATTERN = /GitHub Copilot access denied \(HTTP 403\)/;
 
 /**
