@@ -37,7 +37,10 @@ const CREDITS_EXHAUSTED_PATTERN =
 // in unrelated diagnostics ("Failed to fetch usage credits from billing
 // service"), which must not rotate a healthy credential.
 const ANTHROPIC_CREDITS_REQUIRED_PATTERN = /\busage credits are required\b|\bcredits_required\b/i;
-const SPEND_LIMIT_PATTERN = /spend.?limit/i;
+// Account billing ceilings: Anthropic "monthly spend limit" (#4787) and Google
+// "Your project has exceeded its monthly spending cap" (#13090). The `\b` after
+// `cap` keeps "spending capacity" — a throttle, not a billing ceiling — out.
+const SPEND_LIMIT_PATTERN = /spend(?:ing)?[\s_-]?(?:limit|cap)\b/i;
 const SUBSCRIPTION_CAP_PATTERN =
 	/\b(?:subscription|plan|membership)\b[^\n]{0,80}\b(?:rate.?limits?|quota|cap)\b|\b(?:rate.?limits?|quota|cap)\b[^\n]{0,80}\b(?:subscription|plan|membership)\b/i;
 const TRANSIENT_INTERVAL_RATE_LIMIT_PATTERN = /\bper\s+(?:second|minute)\b/i;
