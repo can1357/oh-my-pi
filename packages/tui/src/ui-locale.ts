@@ -766,6 +766,11 @@ const JAPANESE: Record<string, string> = {
 	"Update registry skills within their ranges": "登録済みスキルを許容バージョン内で更新する",
 };
 
+/**
+ * Localizes a static English settings or command label using PI_UI_LANG.
+ * Use for fixed UI copy; English mode and missing translations preserve the input.
+ * @throws If PI_UI_LANG is unsupported.
+ */
 export function translateUi(text: string): string {
 	return uiLanguage() === "ja" ? (JAPANESE[text] ?? text) : text;
 }
@@ -794,6 +799,11 @@ const JAPANESE_STATUS_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
 	[/^Max In-Flight Requests: (.+)$/, "同時実行リクエスト数の上限: $1"],
 ];
 
+/**
+ * Localizes a live settings or command status using PI_UI_LANG, preserving embedded values.
+ * Use for labels containing names or counts; English mode and unmatched labels preserve the input.
+ * @throws If PI_UI_LANG is unsupported.
+ */
 export function translateUiStatus(text: string): string {
 	if (uiLanguage() === "en") return text;
 	const translated = JAPANESE[text];
