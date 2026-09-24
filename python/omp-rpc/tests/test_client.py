@@ -20,7 +20,7 @@ from omp_rpc import (
     RpcError,
     host_tool,
 )
-from omp_rpc.client import _RpcFrameDecoder
+from omp_rpc.client import _BoundedHistory, _RpcFrameDecoder, _json_byte_size
 
 
 FAKE_SERVER = textwrap.dedent(
@@ -1505,6 +1505,64 @@ class RpcClientTests(unittest.TestCase):
                 client.prompt_and_wait("say hello", timeout=2.0)
 
         self.assertIn("max_event_history", str(ctx.exception))
+
+    def test_event_history_evicts_by_bytes(self) -> None:
+        # A large count cap with a small byte budget must still bound memory:
+        # the oldest frames are evicted from the front until within budget.
+        history: _BoundedHistory[str] = _BoundedHistory(
+            limit=1000, max_bytes=100, sizer=len
+        )
+        for _ in range(50):
+            history.append("x" * 30)
+        self.assertLessEqual(history.total_bytes, 100)
+        self.assertEqual(history.total_bytes, sum(map(len, history.snapshot())))
+        self.assertGreater(history.offset, 0)
+        self.assertEqual(history.current_index(), 50)
+
+    def test_event_history_drops_single_oversized_frame(self) -> None:
+        # A frame larger than the whole budget can never be retained; it is
+        # dropped rather than stored, but the index still advances so a waiter
+        # observes the gap instead of silently losing its place.
+        history: _BoundedHistory[str] = _BoundedHistory(
+            limit=10, max_bytes=50, sizer=len
+        )
+        history.append("small")
+        history.append("y" * 100)
+        self.assertEqual(history.snapshot(), ("small",))
+        self.assertEqual(history.current_index(), 2)
+        self.assertEqual(history.total_bytes, len("small"))
+
+    def test_json_byte_size_tracks_wire_encoding(self) -> None:
+        payload = {"type": "event", "text": "héllo"}
+        expected = len(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        )
+        self.assertEqual(_json_byte_size(payload), expected)
+
+    def test_stop_releases_event_and_ui_history(self) -> None:
+        client = self.make_client()
+        with client:
+            client.prompt_and_wait("say hello", timeout=2.0)
+            client.prompt("needs ui")
+            deadline = time.time() + 2.0
+            while client._ui_requests.qsize() == 0 and time.time() < deadline:
+                time.sleep(0.01)
+            self.assertGreater(len(client._events.snapshot()), 0)
+            self.assertGreater(client._ui_requests.qsize(), 0)
+        # __exit__ called stop(): retained history must be released, not left
+        # for GC timing.
+        self.assertEqual(client._events.snapshot(), ())
+        self.assertEqual(client._events.total_bytes, 0)
+        self.assertEqual(client._ui_requests.qsize(), 0)
+
+    def test_headless_ui_keeps_request_queue_drained(self) -> None:
+        with self.make_client() as client:
+            client.install_headless_ui()
+            for _ in range(3):
+                client.prompt_and_wait("needs ui", timeout=2.0)
+            self.assertEqual(client._ui_requests.qsize(), 0)
 
 
 HANGING_SERVER = textwrap.dedent(

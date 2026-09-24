@@ -237,13 +237,27 @@ For long-lived hosts, retained event and stderr history is bounded by default:
 ```python
 from omp_rpc import RpcClient
 
-with RpcClient(max_event_history=20_000, max_stderr_chunks=256) as client:
+with RpcClient(
+    max_event_history=20_000,      # cap by event count
+    max_event_bytes=256 * 1024**2,  # and by retained bytes (default 256 MiB)
+    max_stderr_chunks=256,
+) as client:
     ...
 ```
 
-If a single prompt streams more events than `max_event_history` allows,
-`prompt_and_wait()` raises a clear error so hosts can increase the limit instead
-of silently losing earlier events.
+`max_event_history` caps *how many* events are retained; `max_event_bytes` caps
+*how many bytes* they occupy. Because every streamed frame is cloned into the
+history, raising the event count alone can retain gigabytes when frames are
+large — the byte budget is what actually bounds memory. The oldest events are
+evicted from the front once either limit is exceeded, and a single frame larger
+than the whole byte budget is dropped rather than stored. Pass
+`max_event_bytes=None` to disable the byte budget (retention is then bounded by
+count only). The retained history is also cleared when the client stops, so a
+stopped client holds no events.
+
+If a single prompt streams more events than either limit allows,
+`prompt_and_wait()` raises a clear error so hosts can raise the limit instead of
+silently losing earlier events.
 
 Prompt lifecycle collection is intentionally single-flight. Only one of
 `prompt_and_wait()`, `wait_for_idle()`, or `collect_events()` may be active at a

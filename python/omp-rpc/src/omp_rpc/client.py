@@ -119,6 +119,7 @@ _TODO_STATUS_VALUES = frozenset({"pending", "in_progress", "completed", "abandon
 _MAX_RPC_FRAME_BYTES = 1024 * 1024
 _MAX_RPC_REASSEMBLED_BYTES = 64 * 1024 * 1024
 _RPC_CHUNK_PAYLOAD_BYTES = 256 * 1024
+_DEFAULT_MAX_EVENT_BYTES = 256 * 1024 * 1024
 _RPC_MESSAGES_PAGE_BUSY_ERROR = "Cannot page messages while the session is changing"
 _RPC_MESSAGES_PAGE_STALE_ERROR = "RPC message cursor is stale"
 _RPC_MESSAGES_PAGE_FALLBACK_CODES = frozenset({"session_busy", "stale_cursor"})
@@ -300,6 +301,20 @@ def _clone_json_object(value: object) -> JsonObject:
     return cast(JsonObject, _clone_json_value(value))
 
 
+def _json_byte_size(value: JsonObject) -> int:
+    """Approximate the UTF-8 serialized size of a retained event frame.
+
+    Used as the byte-budget sizer for the event history. Serialization mirrors
+    the wire encoding (`separators=(",", ":")`), so the estimate tracks the
+    bytes the child actually streamed. Returns 0 for the pathological case of a
+    non-serializable payload so a bad frame can never inflate the budget.
+    """
+    try:
+        return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    except (TypeError, ValueError):
+        return 0
+
+
 class RpcError(RuntimeError):
     """Base exception for the Python RPC client."""
 
@@ -394,20 +409,61 @@ class _PendingHostUriRequest:
 
 @dataclass(slots=True)
 class _BoundedHistory(Generic[THistoryItem]):
+    """A FIFO history bounded by item count and, optionally, by retained bytes.
+
+    `limit` caps the number of retained items. When `max_bytes` and `sizer` are
+    both set, the history additionally evicts the oldest items until the summed
+    item size is within `max_bytes`; a single item larger than the whole budget
+    is dropped without being stored. Every eviction advances `offset`, so a
+    consumer walking indices past a trimmed region observes the gap (e.g.
+    `_wait_for_agent_end` raises instead of silently losing events).
+    """
+
     limit: int | None
+    max_bytes: int | None = None
+    sizer: Callable[[THistoryItem], int] | None = None
     items: list[THistoryItem] = field(default_factory=list)
+    sizes: list[int] = field(default_factory=list)
     offset: int = 0
+    total_bytes: int = 0
 
     def clear(self) -> None:
         self.items.clear()
+        self.sizes.clear()
         self.offset = 0
+        self.total_bytes = 0
 
     def append(self, item: THistoryItem) -> None:
+        tracked = self.max_bytes is not None and self.sizer is not None
+        if not tracked:
+            self.items.append(item)
+            if self.limit is not None and len(self.items) > self.limit:
+                self._evict_front(len(self.items) - self.limit)
+            return
+
+        assert self.sizer is not None and self.max_bytes is not None
+        size = self.sizer(item)
+        if size > self.max_bytes:
+            # A single frame larger than the entire budget can never be held; drop
+            # it but advance the index so consumers see the gap.
+            self.offset += 1
+            return
         self.items.append(item)
+        self.sizes.append(size)
+        self.total_bytes += size
         if self.limit is not None and len(self.items) > self.limit:
-            trim = len(self.items) - self.limit
-            del self.items[:trim]
-            self.offset += trim
+            self._evict_front(len(self.items) - self.limit)
+        while self.total_bytes > self.max_bytes and len(self.items) > 1:
+            self._evict_front(1)
+
+    def _evict_front(self, count: int) -> None:
+        if count <= 0:
+            return
+        if self.sizes:
+            self.total_bytes -= sum(self.sizes[:count])
+            del self.sizes[:count]
+        del self.items[:count]
+        self.offset += count
 
     def current_index(self) -> int:
         return self.offset + len(self.items)
@@ -467,6 +523,7 @@ class RpcClient:
         startup_timeout: float = 30.0,
         request_timeout: float = 30.0,
         max_event_history: int | None = 10_000,
+        max_event_bytes: int | None = _DEFAULT_MAX_EVENT_BYTES,
         max_stderr_chunks: int | None = 512,
     ) -> None:
         self._command = tuple(command) if command is not None else None
@@ -496,6 +553,9 @@ class RpcClient:
         self._max_event_history = self._validate_history_limit(
             "max_event_history", max_event_history
         )
+        self._max_event_bytes = self._validate_history_limit(
+            "max_event_bytes", max_event_bytes
+        )
         self._max_stderr_chunks = self._validate_history_limit(
             "max_stderr_chunks", max_stderr_chunks
         )
@@ -513,7 +573,11 @@ class RpcClient:
         self._host_tool_dispatch_names: dict[str, str] = {}
         self._pending_host_uri_requests: dict[str, _PendingHostUriRequest] = {}
         self._request_id = 0
-        self._events = _BoundedHistory[JsonObject](self._max_event_history)
+        self._events = _BoundedHistory[JsonObject](
+            self._max_event_history,
+            max_bytes=self._max_event_bytes,
+            sizer=_json_byte_size,
+        )
         self._async_errors = _BoundedHistory[BaseException](
             _DEFAULT_ERROR_HISTORY_LIMIT
         )
@@ -719,6 +783,12 @@ class RpcClient:
                 self._stderr_thread.join(timeout=1.0)
             self._stdout_thread = None
             self._stderr_thread = None
+            # Release retained history deterministically instead of waiting for
+            # GC. The reader threads are joined above, so no appender races the
+            # clear; the event condition still guards concurrent snapshot readers.
+            with self._event_condition:
+                self._events.clear()
+            self._ui_requests = queue.Queue()
 
     def on_event(self, listener: AgentEventListener) -> Callable[[], None]:
         self._event_listeners.append(listener)
@@ -845,9 +915,20 @@ class RpcClient:
         Passive UI methods such as notifications and status updates are ignored.
         Confirm dialogs default to `False`. Select, input, and editor requests
         are cancelled unless an explicit value is provided.
+
+        The reader also enqueues every request onto the `next_ui_request`
+        polling queue, which a headless host never drains. This handler drains
+        one entry per request so that queue cannot grow while it is installed.
         """
 
         def handle(request: ExtensionUiRequest) -> None:
+            # Balance the reader's unconditional enqueue (see `_read_stdout_loop`)
+            # so the polling queue stays bounded under a headless listener.
+            try:
+                self._ui_requests.get_nowait()
+            except queue.Empty:
+                pass
+
             if on_request is not None:
                 try:
                     on_request(request)
@@ -1338,7 +1419,8 @@ class RpcClient:
                 if start_index < self._events.offset:
                     raise RpcError(
                         "Event history limit was exceeded while waiting for agent_end. "
-                        "Increase max_event_history to retain more streamed events."
+                        "Increase max_event_history (or max_event_bytes) to retain "
+                        "more streamed events."
                     )
 
                 if start_async_error_index < self._async_errors.offset:
