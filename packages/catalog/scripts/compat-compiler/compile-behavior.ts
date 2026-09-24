@@ -158,9 +158,16 @@ function parseModelOperations(node: KdlNodeView): CompiledModelOperations {
 }
 
 function parseQuotaTiers(node: KdlNodeView): CompiledQuotaRule {
-	const children = ensureContainer(node, ["provider"]);
+	const children = ensureContainer(node, ["provider", "default"]);
 	const provider = requiredProp(node, "provider");
-	const rule: CompiledQuotaRule = { provider, tiers: [], fallbacks: [] };
+	const defaultTier = propString(node, "default");
+	if (defaultTier !== undefined && !defaultTier) malformed(node);
+	const rule: CompiledQuotaRule = {
+		provider,
+		...(defaultTier !== undefined ? { defaultTier } : {}),
+		tiers: [],
+		fallbacks: [],
+	};
 	for (const child of children) {
 		switch (child.name) {
 			case "tier": {

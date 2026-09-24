@@ -1,7 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import { type AuthCredentialStore, AuthStorage } from "../src/auth-storage";
+import { isUsageLimitReached } from "../src/auth/usage-report";
 import type { UsageFetchContext, UsageFetchParams } from "../src/usage";
 import { cursorUsageProvider, parseCursorIndividualUsage, parseCursorUsage } from "../src/usage/cursor";
+import { defaultRankingStrategy } from "../src/usage/registry";
 
 function createCursorAccessToken(sub: string): string {
 	const payload = btoa(JSON.stringify({ sub })).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
@@ -436,6 +438,54 @@ describe("cursor usage provider", () => {
 				},
 				status: "ok",
 			});
+		});
+	});
+
+	describe("credential ranking", () => {
+		it("does not let an exhausted Other Models pool block Grok or Composer", () => {
+			const report = parseCursorIndividualUsage({
+				individualUsage: {
+					plan: {
+						enabled: true,
+						limit: 2000,
+						autoPercentUsed: 11,
+						apiPercentUsed: 100,
+					},
+				},
+			});
+			if (!report) throw new Error("expected Cursor usage report");
+			const scopeLimits = defaultRankingStrategy("cursor")?.scopeLimits;
+			if (!scopeLimits) throw new Error("expected Cursor ranking strategy");
+
+			const grokLimits = scopeLimits(report, { modelId: "grok-4.7-xhigh" });
+			const composerLimits = scopeLimits(report, { modelId: "composer-2.5" });
+			const otherLimits = scopeLimits(report, { modelId: "claude-opus-5-high" });
+
+			expect(grokLimits.map(limit => limit.id)).toEqual(["cursor:usd:individual-auto"]);
+			expect(composerLimits.map(limit => limit.id)).toEqual(["cursor:usd:individual-auto"]);
+			expect(otherLimits.map(limit => limit.id)).toEqual(["cursor:usd:individual-api"]);
+			expect(isUsageLimitReached(grokLimits)).toBe(false);
+			expect(isUsageLimitReached(composerLimits)).toBe(false);
+			expect(isUsageLimitReached(otherLimits)).toBe(true);
+		});
+
+		it("uses the combined pool when Cursor does not report split rails", () => {
+			const report = parseCursorIndividualUsage({
+				individualUsage: {
+					plan: {
+						enabled: true,
+						limit: 2000,
+						totalPercentUsed: 100,
+					},
+				},
+			});
+			if (!report) throw new Error("expected Cursor usage report");
+			const scopeLimits = defaultRankingStrategy("cursor")?.scopeLimits;
+			if (!scopeLimits) throw new Error("expected Cursor ranking strategy");
+
+			const limits = scopeLimits(report, { modelId: "grok-4.7-xhigh" });
+			expect(limits.map(limit => limit.id)).toEqual(["cursor:usd:individual-plan"]);
+			expect(isUsageLimitReached(limits)).toBe(true);
 		});
 	});
 
