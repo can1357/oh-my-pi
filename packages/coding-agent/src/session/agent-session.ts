@@ -154,6 +154,7 @@ import type {
 import { emitSessionShutdownEvent } from "../extensibility/extensions";
 import { ManagedTimers } from "../extensibility/extensions/managed-timers";
 import { createExtensionModelQuery } from "../extensibility/extensions/model-api";
+import { createExtensionSettingsQuery } from "../extensibility/extensions/settings-api";
 import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
 import type { CustomCommandContext } from "../extensibility/custom-commands/types";
 import { SkillDescriptionCatalog } from "../extensibility/skill-descriptions";
@@ -7133,6 +7134,7 @@ export class AgentSession {
 
 			model: this.model ?? undefined,
 			models: createExtensionModelQuery(this.#modelRegistry, this.settings, () => this.model ?? undefined),
+			settings: createExtensionSettingsQuery(this.settings),
 			isIdle: () => !this.isStreaming,
 			abort: () => {
 				void this.abort();
