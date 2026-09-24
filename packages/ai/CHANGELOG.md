@@ -4,8 +4,7 @@
 
 ### Fixed
 
-- Fixed OpenCode Go retrying an account with insufficient funds instead of switching to another signed-in account ([#13038](https://github.com/can1357/oh-my-pi/pull/13038) by [@fros1y](https://github.com/fros1y)).
-- Fixed multi-account SuperGrok (`xai-oauth`) setups picking accounts by session hash instead of quota headroom; accounts are now ranked by weekly usage and reset timing, and an account with spent included quota but on-demand headroom is no longer blocked until its billing period ends ([#13136](https://github.com/can1357/oh-my-pi/pull/13136) by [@zhaob1n](https://github.com/zhaob1n)).
+- Fixed multi-account provider selection for OpenCode Go and SuperGrok (xai-oauth), so accounts with insufficient funds or exhausted included quota are skipped in favor of eligible accounts with available billing headroom.
 
 ## [18.3.0] - 2026-09-24
 

@@ -4,8 +4,8 @@
 
 ### Fixed
 
-- Fixed `/dev/stdin`, `/dev/stdout`, `/dev/stderr`, `/dev/fd/N`, and `/dev/tty` in the bash tool reaching omp's own descriptors instead of the command's; `cat /dev/stdin <<'EOF'` no longer hangs the TUI ([#13121](https://github.com/can1357/oh-my-pi/pull/13121) by [@radkawar](https://github.com/radkawar))
-- Fixed task-backed native operations (grep, glob, ast, shell, vcs, …) ignoring an `AbortSignal` that was already aborted when the call started ([#13039](https://github.com/can1357/oh-my-pi/pull/13039) by [@HeyItsGilbert](https://github.com/HeyItsGilbert)).
+- Fixed shell commands using `/dev/stdin`, `/dev/stdout`, `/dev/stderr`, `/dev/fd/N`, and `/dev/tty` so they now access the command's descriptors correctly, including preventing heredoc commands from hanging the TUI.
+- Fixed native operations such as grep, glob, AST, shell, and VCS calls so they promptly honor an `AbortSignal` that was already aborted when the operation starts.
 
 ## [18.3.0] - 2026-09-24
 

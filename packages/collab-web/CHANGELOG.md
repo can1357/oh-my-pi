@@ -4,9 +4,8 @@
 
 ### Fixed
 
-- Fixed the web build bundling development React, which made every render about 3x slower; the build now pins `NODE_ENV=production` regardless of the environment it runs in ([#13063](https://github.com/can1357/oh-my-pi/pull/13063) by [@igasmi](https://github.com/igasmi)).
-- Fixed large sessions freezing browser guests: the transcript mounts the newest 100 entries and loads earlier ones when you scroll to the top or tap "show N earlier", keeping your reading position ([#13063](https://github.com/can1357/oh-my-pi/pull/13063) by [@igasmi](https://github.com/igasmi)).
-- Fixed joining and reconnecting blanking or thrashing the transcript: the snapshot is published once when it completes, the previous transcript stays visible during a reconnect, and the banner shows download progress ([#13063](https://github.com/can1357/oh-my-pi/pull/13063) by [@igasmi](https://github.com/igasmi)).
+- Improved the web client’s performance by ensuring production builds use the optimized React runtime.
+- Improved large-session browsing and reconnect behavior: recent transcript entries load quickly, earlier entries can be loaded on demand without losing your place, and the existing transcript remains visible while reconnecting with download progress shown.
 
 ## [18.3.0] - 2026-09-24
 

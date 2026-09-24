@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- The browser relay now supports several browser instances (for example Chrome and Edge) connected at the same time instead of the two knocking each other offline about once a second: tabs are tracked per extension instance, RPCs route to the browser that owns the tab, and target ids encode the instance (`PAGE<code>.<tabId>`); extensions that send no instance id keep the previous single-browser behavior ([#13005](https://github.com/can1357/oh-my-pi/pull/13005) by [@pavel-kalmykov](https://github.com/pavel-kalmykov)).
+- Fixed browser relay support for multiple browser instances, such as Chrome and Edge, connected simultaneously. Tabs and relay requests now remain associated with the correct browser, while extensions without an instance identifier continue to use the existing single-browser behavior.
 
 ## [18.0.7] - 2026-08-26
 
