@@ -347,6 +347,40 @@ describe("flushGrievances", () => {
 		expect(selectPushedIds(db).length).toBe(firstBatch);
 		expect(selectUnpushedIds(db).length).toBe(secondBatch);
 	});
+
+	it("clamps an oversized multibyte tool name so the collector's 128-byte limit cannot wedge the queue", async () => {
+		// Regression for #13091: a model wrote a Turkish sentence on the tool
+		// line; the collector answered 400 `entries[0].tool exceeds 128 bytes`
+		// and the oldest-first loop resent that same batch forever.
+		const longTool =
+			"eval içindeki tool.glob exact ve var olmayan yolunda boş eşleşme listesi yerine RuntimeError fırlatıyor, çağrıyı tümüyle düşürüyor";
+		expect(Buffer.byteLength(longTool, "utf-8")).toBeGreaterThan(128);
+		insertGrievance(db, longTool, "report body");
+		insertGrievance(db, "read", "later row");
+
+		const sentTools: string[] = [];
+		const fetchSpy = vi.fn(async (_input: string | URL | Request, init: RequestInit | undefined) => {
+			const body = JSON.parse(String(init?.body)) as { entries: Array<{ tool: string }> };
+			const oversized = body.entries.findIndex(e => Buffer.byteLength(e.tool, "utf-8") > 128);
+			if (oversized >= 0) {
+				return new Response(JSON.stringify({ error: `entries[${oversized}].tool exceeds 128 bytes` }), {
+					status: 400,
+				});
+			}
+			sentTools.push(...body.entries.map(e => e.tool));
+			return new Response("", { status: 200 });
+		});
+
+		const result = await flushGrievances(db, pushSettings(), { fetch: mockFetch(fetchSpy) });
+
+		expect(result).toEqual({ pushed: 2, ok: true });
+		expect(sentTools[0]?.endsWith("…")).toBe(true);
+		expect(longTool.startsWith(sentTools[0]!.slice(0, -1))).toBe(true);
+		expect(sentTools[1]).toBe("read");
+		// The local row keeps the full text for `omp grievances list`.
+		const stored = db.prepare("SELECT tool FROM grievances WHERE id = 1").get() as { tool: string };
+		expect(stored.tool).toBe(longTool);
+	});
 });
 
 describe("dispatchReportIssueDevice", () => {

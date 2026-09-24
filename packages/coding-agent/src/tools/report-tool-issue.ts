@@ -40,6 +40,7 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { XdevDispatch } from "./xdev";
 
 import { REPORT_ISSUE_DEVICE_NAME, REPORT_ISSUE_DEVICE_PATH } from "@oh-my-pi/pi-tui/tools/report-tool-issue";
+import { truncateLineBytes } from "@oh-my-pi/pi-tui/tools/streaming-output";
 
 /** Usage text for `read xd://report_issue`. */
 export function reportIssueDeviceUsage(): string {
@@ -336,6 +337,14 @@ const FAILURE_COOLDOWN_MS = 30_000;
  * consent grant) drain in single-digit requests.
  */
 const FLUSH_BATCH_SIZE = 50;
+/**
+ * The autoqa collector rejects the whole batch with HTTP 400 when any entry's
+ * `tool` exceeds this many UTF-8 bytes. Rows are pushed oldest-first, so one
+ * oversized row (a model writing a sentence on the tool line) would otherwise
+ * block every later grievance forever. Clamped on the wire only; the local
+ * row keeps the full text for `omp grievances`.
+ */
+const MAX_TOOL_BYTES = 128;
 
 let inFlightFlush: Promise<FlushResult> | null = null;
 let lastFailureAt = 0;
@@ -405,7 +414,7 @@ async function performFlush(db: Database, config: PushConfig, options: FlushOpti
 			// leaking the user's machine name.
 			platform: process.platform,
 			arch: process.arch,
-			entries: rows,
+			entries: rows.map(row => ({ ...row, tool: truncateLineBytes(row.tool, MAX_TOOL_BYTES).text })),
 		});
 		const headers: Record<string, string> = { "content-type": "application/json" };
 		if (config.token) headers.authorization = `Bearer ${config.token}`;
