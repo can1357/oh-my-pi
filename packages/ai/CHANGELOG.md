@@ -4,6 +4,12 @@
 
 ### Added
 
+- Added `messageIndex` field to Anthropic request controls for accurate replay of tool changes
+- Added `inactiveTools` and `AnthropicRequestControls` tracking to maintain stability across interrupted requests
+- Added schema-based validation for Anthropic User Profile API responses
+- Added support for Anthropic User Profiles API
+- Added credential-aware auth resolution for multi-account tracking
+- Implemented cross-credential thinking block redaction
 - Added support for Apple Foundation Models (on-device) integration, including tool calling and vision capabilities
 - Added multi-account discovery and authorization resolution for Codex cyber access programs
 - Added automated request replay logic to handle access program rejections
@@ -16,6 +22,7 @@
 
 ### Changed
 
+- Changed Anthropic control handling to ignore rewritten history records
 - Refactored `AuthStorage` into namespaced sub-modules (`credentials`, `keys`, `oauth`, `limits`, `health`, `blocks`, `resets`, `usage`)
 - Migrated all internal crypto-hashing to native `Bun` performance primitives
 

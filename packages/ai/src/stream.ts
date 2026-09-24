@@ -17,7 +17,7 @@ import { providerEntries } from "@oh-my-pi/pi-catalog/compat/providers";
 import { CODEX_BASE_URL } from "@oh-my-pi/pi-catalog/wire/codex";
 import { $env, $pickenv, getProviderInFlightRoot, isEnoent, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
-import { createAuthRetryKeyState, isApiKeyResolver, resolveNextAuthRetryKey } from "./auth-retry";
+import { createAuthRetryKeyState, isApiKeyResolver, resolvedApiKeyBearer, resolveNextAuthRetryKey } from "./auth-retry";
 import * as AIError from "./error";
 import { ProviderHttpError } from "./error";
 import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./error/rate-limit";
@@ -1561,7 +1561,7 @@ function streamSimpleRequest<TApi extends Api>(
 		// One inner attempt against a resolved key, or against the Bedrock AWS
 		// credential chain when its optional resolver has no stored bearer key.
 		// Retryable auth failures are buffered until replay is safe.
-		const runAttempt = async (apiKey?: string): Promise<AuthRetryFailure | undefined> => {
+		const runAttempt = async (apiKey?: string, credentialId?: number): Promise<AuthRetryFailure | undefined> => {
 			const bufferedEvents: AssistantMessageEvent[] = [];
 			let emittedReplayUnsafeEvent = false;
 			const flushBuffered = (): void => {
@@ -1570,9 +1570,14 @@ function streamSimpleRequest<TApi extends Api>(
 			};
 
 			try {
-				const attemptOptions = { ...requestOptions, apiKey };
+				const attemptOptions = { ...requestOptions, apiKey, credentialId };
 				const inner = streamSimpleRequest(model, context, attemptOptions);
 				for await (const event of inner) {
+					if (credentialId !== undefined) {
+						if ("partial" in event) event.partial.credentialId = credentialId;
+						else if (event.type === "done") event.message.credentialId = credentialId;
+						else event.error.credentialId = credentialId;
+					}
 					if (!emittedReplayUnsafeEvent && event.type === "start") {
 						bufferedEvents.push(event);
 						continue;
@@ -1599,7 +1604,11 @@ function streamSimpleRequest<TApi extends Api>(
 					if (outer.done) return undefined;
 				}
 				flushBuffered();
-				if (!outer.done) outer.end(await inner.result());
+				if (!outer.done) {
+					const result = await inner.result();
+					if (credentialId !== undefined) result.credentialId = credentialId;
+					outer.end(result);
+				}
 			} catch (error) {
 				if (
 					!emittedReplayUnsafeEvent &&
@@ -1628,8 +1637,11 @@ function streamSimpleRequest<TApi extends Api>(
 
 		void (async () => {
 			let lastKey: string | undefined;
+			let credentialId: number | undefined;
 			try {
-				lastKey = (await apiKeyResolver({ lastChance: false, error: undefined, signal })) || undefined;
+				const resolved = await apiKeyResolver({ lastChance: false, error: undefined, signal });
+				lastKey = resolvedApiKeyBearer(resolved);
+				credentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
 			} catch (error) {
 				// A thrown resolver is a broker/OAuth/network failure, not a missing
 				// key — surface the cause instead of masking it as "No API key".
@@ -1651,13 +1663,22 @@ function streamSimpleRequest<TApi extends Api>(
 				return;
 			}
 			const retryState = createAuthRetryKeyState(lastKey);
-			let failure = await runAttempt(lastKey);
+			let failure = await runAttempt(lastKey, credentialId);
 			if (!failure) return;
 			while (true) {
 				// Caller aborted between attempts: don't mint a fresh token or fire
 				// another doomed request — emit the captured failure instead.
 				if (signal?.aborted) break;
-				const nextKey = await resolveNextAuthRetryKey(retryState, apiKeyResolver, failure.error, signal);
+				let nextCredentialId: number | undefined;
+				const nextKey = await resolveNextAuthRetryKey(
+					retryState,
+					apiKeyResolver,
+					failure.error,
+					signal,
+					resolved => {
+						nextCredentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
+					},
+				);
 				if (nextKey === undefined) break;
 				// The resolver may have yielded while refreshing or rotating credentials.
 				// Preserve caller-abort precedence, then refuse a replay whose shared
@@ -1668,7 +1689,7 @@ function streamSimpleRequest<TApi extends Api>(
 					outer.fail(deadlineError);
 					return;
 				}
-				const next = await runAttempt(nextKey);
+				const next = await runAttempt(nextKey, nextCredentialId);
 				if (!next) return;
 				failure = next;
 			}
@@ -2073,6 +2094,7 @@ function mapOptionsForApi<TApi extends Api>(
 		maxTokens: options?.maxTokens ?? model.maxTokens ?? undefined,
 		signal: options?.signal,
 		apiKey: apiKey ?? (typeof options?.apiKey === "string" ? options.apiKey : undefined),
+		credentialId: options?.credentialId,
 		cacheRetention: options?.cacheRetention,
 		headers: options?.headers,
 		initiatorOverride: options?.initiatorOverride,
@@ -2099,6 +2121,7 @@ function mapOptionsForApi<TApi extends Api>(
 		anthropicCacheRefreshRequest: options?.anthropicCacheRefreshRequest,
 		anthropicPrefixMismatchBehavior: options?.anthropicPrefixMismatchBehavior,
 		anthropicCompaction: options?.anthropicCompaction,
+		userProfileId: options?.userProfileId,
 		...simpleProviderOptions,
 	};
 

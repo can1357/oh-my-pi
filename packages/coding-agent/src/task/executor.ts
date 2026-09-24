@@ -10,7 +10,7 @@ import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } fr
 import { AgentBusyError, EventLoopKeepalive, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
 import { logger, popLoopPhase, prompt, pushLoopPhase, untilAborted } from "@oh-my-pi/pi-utils";
-import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobManager } from "../async";
+import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobError, AsyncJobManager, type AsyncJobRunResult } from "../async";
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { ModelRegistry } from "../config/model-registry";
@@ -1051,6 +1051,8 @@ interface RunMonitorArgs {
 	softRequestBudgetNotice: boolean;
 	/** Wall-clock cap in ms; 0 disables the timer. */
 	maxRuntimeMs: number;
+	/** Fires each time a terminal `yield` is recorded for this run. */
+	onYieldAccepted?: () => void;
 }
 
 /**
@@ -1543,6 +1545,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			if (yieldCalled) {
 				yieldInvalidatedByAsync = false;
 				yieldAcceptedAt = Date.now();
+				args.onYieldAccepted?.();
 			}
 		}
 	};
@@ -2244,7 +2247,7 @@ async function driveSessionToYield(
 		// and are reaped at teardown.
 		//
 		// Before blocking on running jobs, tell the model ONCE what it is
-		// waiting on so it can use `wait` or cancel via `write proc://<id>` instead of sitting silent
+		// waiting on so it can stand by or cancel via `write proc://<id>/kill` instead of sitting silent
 		// until the jobs (or the runtime limit) expire. Runs that never yield
 		// (ladder exhausted / terminal model error) skip the barrier — more
 		// injected turns just multiply the failure noise; the teardown reap
@@ -2667,12 +2670,15 @@ async function relayWakeTurnOutput(args: {
 	abortReason: string | undefined;
 	/** A {@link finalizeRunResult} throw, so the waiter is notified instead of stranded. */
 	finalizeError: unknown;
+	/** Waker already receiving this turn's outcome as an async job delivery. */
+	jobOwnerId: string | undefined;
 }): Promise<void> {
 	const bus = IrcBus.global();
 	const sources = wakeSources(args.records, args.id);
 	if (sources.length === 0) return;
 	const failed = args.error !== undefined || args.aborted || args.finalizeError !== undefined;
 	for (const source of sources) {
+		if (source.from === args.jobOwnerId) continue;
 		const alreadyMessaged = bus.sentSince(args.id, source.from, args.turnStartTime);
 		// A completed turn's answer would duplicate what the agent already sent
 		// this waker, so dedup stays. A failed/cancelled turn is a distinct
@@ -2806,6 +2812,32 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 		const relay = Promise.withResolvers<void>();
 		session.trackIrcReply(relay.promise);
 		const sessionFile = AgentRegistry.global().get(id)?.sessionFile ?? options.sessionFile ?? undefined;
+		// A woken agent's yield is a completion its parent must receive exactly
+		// like the first run's. Register an owner-routed job the moment the yield
+		// is accepted — before the ref goes idle — so the parent's `wait` has a
+		// running job to block on while this turn finalizes, and the result then
+		// arrives through the ordinary async-result delivery.
+		let wakeJob: { ownerId: string; outcome: PromiseWithResolvers<AsyncJobRunResult> } | undefined;
+		const registerWakeJob = (): void => {
+			if (wakeJob) return;
+			const ownerId = AgentRegistry.global().get(id)?.parentId;
+			const manager = session.asyncJobManager;
+			if (!ownerId || !manager) return;
+			const outcome = Promise.withResolvers<AsyncJobRunResult>();
+			try {
+				manager.register("task", id, ({ signal }) => untilAborted(signal, outcome.promise), {
+					id,
+					agentId: id,
+					ownerId,
+				});
+				wakeJob = { ownerId, outcome };
+			} catch (error) {
+				logger.warn("IRC wake-turn job registration failed", {
+					id,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		};
 		const turnMonitor = createSubagentRunMonitor({
 			index,
 			id,
@@ -2822,6 +2854,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			softRequestBudget: 0,
 			softRequestBudgetNotice: false,
 			maxRuntimeMs,
+			onYieldAccepted: registerWakeJob,
 		});
 
 		const startedPayload = {
@@ -2914,6 +2947,21 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					error: caught instanceof Error ? caught.message : String(caught),
 				});
 			} finally {
+				// Once registered, the wake job carries this turn's outcome to the
+				// parent whatever it is: the yield result, or the failure that
+				// superseded it.
+				if (wakeJob && result) {
+					const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
+					const structured = result.structuredOutput;
+					if (result.aborted || result.exitCode !== 0 || result.error !== undefined) {
+						wakeJob.outcome.reject(new AsyncJobError(text, structured));
+					} else {
+						wakeJob.outcome.resolve(structured ? { text, structured } : { text });
+					}
+				} else if (wakeJob) {
+					const message = finalizeError instanceof Error ? finalizeError.message : String(finalizeError);
+					wakeJob.outcome.reject(new Error(`Wake turn of ${id} failed to finalize: ${message}`));
+				}
 				// Unconditional: a failed, cancelled, empty, or even un-finalized
 				// wake turn must still tell whoever woke it, or a `send await:true`
 				// waiter mistakes a dead peer for a healthy-but-silent one.
@@ -2929,6 +2977,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 						aborted,
 						abortReason,
 						finalizeError,
+						jobOwnerId: wakeJob?.ownerId,
 					});
 				} catch (relayError) {
 					logger.warn("IRC wake-turn relay threw", {
@@ -3372,19 +3421,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 
 	if (atMaxDepth && toolNames?.includes("task")) {
 		toolNames = toolNames.filter(name => name !== "task");
-	}
-	// Ordinary agents retain the host's collaboration wait capability.
-	// Restricted sessions must not widen their explicit host tool list.
-	if (
-		toolNames &&
-		!options.restrictToolNames &&
-		!toolNames.includes("wait") &&
-		(!isReadOnlyAgent(agent) || toolNames.includes("task")) &&
-		(subagentSettings.get("async.enabled") ||
-			(options.enableIrc !== false && isIrcEnabled(subagentSettings, childDepth)) ||
-			subagentSettings.get("launch.enabled"))
-	) {
-		toolNames = [...toolNames, "wait"];
 	}
 	if (toolNames?.includes("exec")) {
 		const backends = resolveEvalBackends({ settings } as ToolSession);
@@ -4049,6 +4085,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						shutdown: () => {},
 						getContextUsage: () => session.getContextUsage(),
 						getSystemPrompt: () => session.systemPrompt,
+						runEphemeralTurn: args => session.runEphemeralTurn(args),
 						compact: instructionsOrOptions => runExtensionCompact(session, instructionsOrOptions),
 					},
 				);

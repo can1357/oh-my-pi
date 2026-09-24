@@ -13,6 +13,7 @@
 
 ### Changed
 
+- Updated process tool rendering to support the explicit `proc://<id>/kill` lifecycle path
 - Updated status line context usage to include tool examples in token estimation
 - Mermaid flowcharts and state diagrams now re-pick layout on terminal resize: the shortest orientation that fits the width wins, and the narrowest is used only when none fit.
 - Updated model hub and oauth selector components to use namespaced `authStorage` API

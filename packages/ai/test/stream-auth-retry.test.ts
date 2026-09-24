@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import type { ApiKeyResolveContext } from "@oh-my-pi/pi-ai";
-import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai";
+import type { ApiKeyResolution, ApiKeyResolveContext } from "@oh-my-pi/pi-ai";
+import { registerCustomApi, resolveApiKeyOnce, seedApiKeyResolver, unregisterCustomApis } from "@oh-my-pi/pi-ai";
 import { OAuthError, ProviderHttpError, ProviderOperationDeadlineError } from "@oh-my-pi/pi-ai/error";
 import { classify } from "@oh-my-pi/pi-ai/error/flags";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
@@ -181,6 +181,51 @@ describe("streamSimple resolver auth retry", () => {
 		expect((caught as ProviderOperationDeadlineError).declinedDelayMs).toBe(0);
 	});
 
+	it("refuses a credential-identity auth replay once key resolution spends the operation budget", async () => {
+		let now = 15_000;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const attempted: Array<{ key: string | undefined; credentialId: number | undefined }> = [];
+		const original = authError();
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				attempted.push({
+					key: typeof options?.apiKey === "string" ? options.apiKey : undefined,
+					credentialId: options?.credentialId,
+				});
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => stream.fail(original));
+				return stream;
+			},
+			SOURCE_ID,
+		);
+
+		// The sibling rotation resolves a `ResolvedApiKey` carrying its credential
+		// identity; the spent budget must still refuse the replay it would start.
+		const stream = streamSimple(model(), context, {
+			operationTimeoutMs: 100,
+			apiKey: async (ctx): Promise<ApiKeyResolution> => {
+				if (ctx.error === undefined) return { apiKey: "first", credentialId: 1 };
+				await Promise.resolve();
+				now += 101;
+				return { apiKey: "sibling", credentialId: 2 };
+			},
+		});
+		let caught: unknown;
+		try {
+			for await (const _event of stream) {
+				// drain
+			}
+		} catch (error) {
+			caught = error;
+		}
+
+		expect(attempted).toEqual([{ key: "first", credentialId: 1 }]);
+		expect(caught).toBeInstanceOf(ProviderOperationDeadlineError);
+		expect(caught).not.toBe(original);
+		expect((caught as ProviderOperationDeadlineError).declinedDelayMs).toBe(0);
+	});
+
 	it("lets an abort after key resolution beat an expired auth-replay budget", async () => {
 		let now = 20_000;
 		vi.spyOn(Date, "now").mockImplementation(() => now);
@@ -222,6 +267,40 @@ describe("streamSimple resolver auth retry", () => {
 		expect(keys).toEqual(["key-1"]);
 		expect(caught).toBe(original);
 		expect(caught).not.toBeInstanceOf(ProviderOperationDeadlineError);
+	});
+
+	it("stamps the serving sibling after a 401 rotates away from the signed-in credential", async () => {
+		const attempted: Array<{ key: string | undefined; credentialId: number | undefined }> = [];
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				attempted.push({
+					key: typeof options?.apiKey === "string" ? options.apiKey : undefined,
+					credentialId: options?.credentialId,
+				});
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => (options?.apiKey === "first" ? stream.fail(authError()) : ok(stream)));
+				return stream;
+			},
+			SOURCE_ID,
+		);
+		const resolver = (ctx: ApiKeyResolveContext) =>
+			ctx.lastChance ? { apiKey: "sibling", credentialId: 2 } : { apiKey: "first", credentialId: 1 };
+		let preflight: ApiKeyResolution;
+		await resolveApiKeyOnce(resolver, undefined, resolved => {
+			preflight = resolved;
+		});
+		const stream = streamSimple(model(), context, { apiKey: seedApiKeyResolver(preflight, resolver) });
+		let doneCredentialId: number | undefined;
+		for await (const event of stream) {
+			if (event.type === "done") doneCredentialId = event.message.credentialId;
+		}
+		expect(attempted).toEqual([
+			{ key: "first", credentialId: 1 },
+			{ key: "sibling", credentialId: 2 },
+		]);
+		expect(doneCredentialId).toBe(2);
+		expect((await stream.result()).credentialId).toBe(2);
 	});
 
 	it("replays exactly once after a provider requests token refresh, then succeeds", async () => {

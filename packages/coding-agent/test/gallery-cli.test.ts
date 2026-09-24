@@ -166,7 +166,6 @@ describe("gallery harness", () => {
 		expect(failedReceipt).toContain("failed");
 		expect(failedReceipt).toContain("not running");
 		const cancel = await render("write_proc_cancel", "success");
-		expect(cancel).toContain("Proc cancel build-42");
 		expect(cancel).toContain("Build assets");
 		expect(cancel).toContain("cancelled");
 		const error = await render("write_agent", "error");
@@ -183,7 +182,9 @@ describe("gallery harness", () => {
 		expect(writeToolRenderer.renderCall({ path: "ag" }, options, theme)).toBeUndefined();
 		expect(writeToolRenderer.renderCall({ path: "agent://Reviewer" }, options, theme)).toBeUndefined();
 		expect(writeToolRenderer.renderCall({ path: "pro" }, options, theme)).toBeUndefined();
-		expect(writeToolRenderer.renderCall({ path: "proc://build-42", content: "" }, options, theme)).toBeDefined();
+		expect(
+			writeToolRenderer.renderCall({ path: "proc://build-42/kill" }, { ...options, argsComplete: true }, theme),
+		).toBeDefined();
 	});
 
 	it("falls back to a generic fixture for registry tools without curated sample data", () => {

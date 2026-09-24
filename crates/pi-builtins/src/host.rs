@@ -99,6 +99,8 @@ pub(crate) struct Host {
 	/// same serialized writer [`Host::stdout_writer`] returns, so interleaving
 	/// follows write order exactly.
 	pub stderr: StreamWriter,
+	/// Identity of the regular file backing stdout, when one exists.
+	stdout_handle:         Option<same_file::Handle>,
 
 	name:                  String,
 	cwd:                   PathBuf,
@@ -112,6 +114,17 @@ pub(crate) struct Host {
 	/// Emulated SIGPIPE state shared with every guarded stream handed out by
 	/// this host; see [`Sigpipe`].
 	sigpipe:               Arc<Sigpipe>,
+}
+
+fn output_handle(file: &OpenFile) -> Option<same_file::Handle> {
+	match file {
+		OpenFile::File(file) => file
+			.try_clone()
+			.ok()
+			.and_then(|file| same_file::Handle::from_file(file).ok()),
+		OpenFile::Stdout(_) => same_file::Handle::stdout().ok(),
+		_ => None,
+	}
 }
 
 /// Exit status of a process killed by SIGPIPE (128 + 13).
@@ -250,6 +263,13 @@ impl Host {
 		} else {
 			self.cwd.join(path)
 		}
+	}
+
+	/// Whether `path` identifies the regular file currently backing stdout.
+	pub fn path_is_stdout(&self, path: &Path) -> bool {
+		self.stdout_handle.as_ref().is_some_and(|stdout| {
+			same_file::Handle::from_path(path).is_ok_and(|candidate| stdout == &candidate)
+		})
 	}
 
 	/// Looks up an exported shell variable.
@@ -1013,6 +1033,7 @@ fn build_host<SE: ShellExtensions>(
 	let cancel = Arc::new(AtomicBool::new(false));
 
 	let stdout = or_null(context.try_fd(OpenFiles::STDOUT_FD))?;
+	let stdout_handle = output_handle(&stdout);
 	let stderr_file = or_null(context.try_fd(OpenFiles::STDERR_FD))?;
 	let sigpipe = Arc::new(Sigpipe::default());
 	// `2>&1` (and the default capture pipe): one shared writer keeps
@@ -1037,6 +1058,7 @@ fn build_host<SE: ShellExtensions>(
 		},
 		stdout,
 		stderr,
+		stdout_handle,
 		name: invoked,
 		cwd: context.shell.working_dir().to_path_buf(),
 		env,
@@ -1142,7 +1164,7 @@ mod testing {
 
 	use super::{
 		Arc, AtomicBool, GuardedStream, HashMap, Host, OpenFile, OsString, PathBuf, Read, Sigpipe,
-		SigpipeGuard, Stdin, StreamWriter, Utility, Write, io, openfiles, run_caught,
+		SigpipeGuard, Stdin, StreamWriter, Utility, Write, io, openfiles, output_handle, run_caught,
 	};
 
 	/// Captured in-memory output from [`Host::for_test`].
@@ -1221,6 +1243,7 @@ mod testing {
 					GuardedStream::Stderr,
 					&sigpipe,
 				)),
+				stdout_handle:         None,
 				name:                  name.to_string(),
 				cwd:                   cwd.into(),
 				env:                   HashMap::new(),
@@ -1238,6 +1261,7 @@ mod testing {
 		/// that model a departed reader (`… | head`) hand in the write end of a
 		/// pipe whose read end is already dropped.
 		pub(crate) fn set_test_stdout(&mut self, file: OpenFile) {
+			self.stdout_handle = output_handle(&file);
 			self.stdout = SigpipeGuard::wrap(file, GuardedStream::Stdout, &self.sigpipe);
 		}
 

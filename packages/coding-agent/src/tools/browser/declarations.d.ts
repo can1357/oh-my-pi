@@ -407,7 +407,7 @@ interface BrowserScreenshotChangeResult {
 	changed: boolean;
 	/** Monotonic revision for this page, full-page, or selector scope. */
 	revision: number;
-	/** Fraction of pixels that differ from the previous scope-local capture. */
+	/** Fraction of pixels that differ from the previous scope-local capture, ignoring ±2 per-channel rasterizer noise. */
 	pixelChangeRatio: number;
 }
 
@@ -421,7 +421,7 @@ interface BrowserDiffScreenshotOptions {
 
 /** Result of comparing the current viewport against a PNG baseline. */
 interface BrowserDiffScreenshotResult {
-	/** Fraction of pixels that differ from the baseline. */
+	/** Fraction of pixels that differ from the baseline, ignoring ±2 per-channel rasterizer noise. */
 	pixelChangeRatio: number;
 	/** Whether the changed-pixel ratio exceeded the threshold. */
 	changed: boolean;

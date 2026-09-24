@@ -42,6 +42,23 @@ export function visibleJobs(manager: AsyncJobManager, ids: string[], ownerId: st
 }
 
 /**
+ * Settled jobs owned by `ownerId` whose completion was accepted but has not
+ * reached the owner yet: delivery queued or awaiting yield-queue injection,
+ * dead-lettered, or skipped while a `wait` watched it. Consumed, acknowledged,
+ * and currently watched results are excluded.
+ */
+export function undeliveredJobs(manager: AsyncJobManager, ownerId: string | undefined): AsyncJob[] {
+	return manager
+		.getAllJobs(ownerId ? { ownerId } : undefined)
+		.filter(
+			job =>
+				(job.status === "completed" || job.status === "failed") &&
+				!manager.isJobResultConsumed(job.id) &&
+				!manager.isDeliverySuppressed(job.id),
+		);
+}
+
+/**
  * Running subagents from the registry that are not covered by one of the
  * caller's running jobs. Agents woken via peer messaging (idle wake / park
  * revival) and spawns owned by another agent run with no AsyncJobManager
@@ -104,7 +121,7 @@ function describeAgents(agents: AgentActivitySnapshot[]): string[] {
 		const stale = agent.live
 			? ""
 			: agent.acceptedAt !== undefined
-				? ` — final result accepted ${formatDuration(Math.max(0, Date.now() - agent.acceptedAt))} ago but still running; clear it with empty \`write proc://${agent.id}\``
+				? ` — final result accepted ${formatDuration(Math.max(0, Date.now() - agent.acceptedAt))} ago but still running; clear it with \`write proc://${agent.id}/kill\``
 				: " — no turn in flight (stale registration?)";
 		lines.push(`- \`${agent.id}\`${parent} — up ${formatDuration(agent.ageMs)}${activity}${stale}`);
 	}
@@ -114,7 +131,7 @@ function describeAgents(agents: AgentActivitySnapshot[]): string[] {
 	);
 	if (agents.some(agent => !agent.live)) {
 		lines.push(
-			"An agent with no turn in flight cannot answer a message and never satisfies `wait`; clear it with empty `write proc://<id>`.",
+			"An agent with no turn in flight cannot answer a message and never satisfies `wait`; clear it with `write proc://<id>/kill`.",
 		);
 	}
 	return lines;
@@ -126,6 +143,7 @@ interface TrackedJobLike {
 	status: string;
 	label: string;
 	startTime: number;
+	endTime?: number;
 	latestDetails?: AsyncJobDetails;
 	resultText?: string;
 	errorText?: string;
@@ -182,7 +200,7 @@ export function snapshotJobs(
 			type: latest.type,
 			status: latest.status as JobSnapshot["status"],
 			label: latest.label,
-			durationMs: Math.max(0, now - latest.startTime),
+			durationMs: Math.max(0, (latest.endTime ?? now) - latest.startTime),
 			...(exitCode !== undefined ? { exitCode } : {}),
 			...(resolvedModel ? { resolvedModel } : {}),
 			...(resolvedModelIdentity ? { resolvedModelIdentity } : {}),

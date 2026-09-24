@@ -296,9 +296,10 @@ function resolveBulkDirectives(raw: string, stripped: string): Map<number, strin
 
 const writeSchema = type({
 	path: "string",
-	content: "string",
+	"content?": "string",
 });
 
+/** Write arguments; only proc://<id>/kill permits omitted content. */
 export type WriteToolInput = typeof writeSchema.infer;
 
 /**
@@ -342,7 +343,7 @@ function stripWriteContent(session: ToolSession, content: string): { text: strin
 }
 /** `write agent://<id>`: a peer message (read tier, allowed in plan mode and device-only sessions). */
 const AGENT_URL_RE = /^agent:\/\//i;
-/** `write proc://<id>[/mode]`: service stdin, job cancel/service stop, or service mode (exec tier). */
+/** `write proc://<id>[/kill|/mode]`: service stdin, cancellation, or service mode (exec tier). */
 const PROC_URL_RE = /^proc:\/\//i;
 
 function endsWithReadTruncationNotice(content: string): boolean {
@@ -1185,7 +1186,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 
 	async execute(
 		_toolCallId: string,
-		{ path: rawPath, content }: WriteParams,
+		{ path: rawPath, content: rawContent }: WriteParams,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<WriteToolDetails>,
 		context?: AgentToolContext,
@@ -1201,6 +1202,10 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		// Peel a read-tool selector (`:raw`, `:1-20`, …) so the write target matches
 		// what `read` resolves for the same URL; line-range/malformed selectors throw.
 		const path = peelWriteUrlSelector(unwrapHashlineHeaderPath(rawPath));
+		if (rawContent === undefined && !(PROC_URL_RE.test(path) && path.endsWith("/kill"))) {
+			throw new ToolError("content is required except for proc://<id>/kill.");
+		}
+		const content = rawContent ?? "";
 		// A device-only session grants `write` purely as the xd:// transport (see
 		// createTools): device dispatches proceed, every other target is rejected
 		// before any handler, guard, conflict resolver, or bridge sees it. Active

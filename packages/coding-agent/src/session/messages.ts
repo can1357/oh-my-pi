@@ -1068,7 +1068,11 @@ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
 			// stripped whether or not they were long enough for a continuity note.
 			const userInterrupted = m.stopReason === "aborted" && isUserInterruptAbort(m);
 			const source = interruptedNext || userInterrupted ? stripDemotedThinkingForLlm(m) : m;
-			if (userInterrupted && !interruptedNext && source.content.length === 0) return [];
+			// An empty interrupted response still carries the controls its request
+			// sent (e.g. an Anthropic `tool_removal`); later requests replay them from it.
+			if (userInterrupted && !interruptedNext && source.content.length === 0 && m.requestControls === undefined) {
+				return [];
+			}
 			const converted = convertMessageToLlm(source);
 			return converted ? [converted] : [];
 		}

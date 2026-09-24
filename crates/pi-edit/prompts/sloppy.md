@@ -1,4 +1,4 @@
-Anchored edit patch.
+Anchored edit patch: Find quotes existing text; Replace replaces it; Insert Before/Insert After add lines without replacing it.
 
 <ops>
 - `*** Edit File: path` opens a file; bare `*** Edit File:` continues it. Repeat for more files; all edits apply atomically. Append ` all` to either opener to change every match. JSON-quote ambiguous paths.
@@ -10,19 +10,27 @@ Anchored edit patch.
 </ops>
 
 <example>
+Move code: delete with empty Replace, insert ahead of an unchanged anchor:
 ```text
-*** Edit File: "src/all" all
+*** Edit File: src/util.ts
 *** Find
-item();
-*** Insert After
-log();
-*** Edit File: src/b.ts
+const helper = () => 1;
+*** Replace
 *** Find
-load(…);
+run(target);
+*** Insert Before
+const helper = () => 1;
+```
+
+Keep skipped lines and part of a line:
+```text
+*** Edit File: src/users.ts
+*** Find
+function load(…){
 …
 return old(…);
 *** Replace
-load(…);
+function load(…){
 …
 return fresh(…);
 ```

@@ -247,7 +247,7 @@ describe("ACP event mapper", () => {
 
 	it("maps proc:// controls as execution and reads as resources, never editor file locations", () => {
 		expect(mapToolKind("write", { path: "proc://web/mode", content: "persist" })).toBe("execute");
-		expect(mapToolKind("write", { path: "proc://build-42", content: "" })).toBe("execute");
+		expect(mapToolKind("write", { path: "proc://build-42/kill" })).toBe("execute");
 		expect(mapToolKind("read", { path: "proc://web" })).toBe("read");
 		for (const [toolName, args] of [
 			["write", { path: "proc://web/mode", content: "persist" }],

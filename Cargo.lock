@@ -6187,6 +6187,7 @@ dependencies = [
  "rlimit",
  "rustc-hash",
  "rustix 1.1.5",
+ "same-file",
  "self_cell",
  "serde_json",
  "similar 3.2.0",

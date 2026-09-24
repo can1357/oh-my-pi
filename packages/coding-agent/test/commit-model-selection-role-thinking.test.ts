@@ -43,6 +43,7 @@ describe("commit role thinking selection", () => {
 				getAvailable: () => [defaultModel, commitModel],
 				getApiKey: async () => "test-key",
 				getApiKeyForProvider: async () => "test-key",
+				getApiKeyWithCredentialForProvider: async () => "test-key",
 				authStorage,
 				resolver: () => async () => "test-key",
 			};

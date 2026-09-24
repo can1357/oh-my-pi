@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added compaction support for `claude-mythos-preview` model
 - Added provider and auth rule definitions for on-device Apple Foundation Models
 - Added per-account discovery support for Codex cyber access entitlements
 - Added `org-scoped-identity` and `oauth-token-env` rule support for auth providers
