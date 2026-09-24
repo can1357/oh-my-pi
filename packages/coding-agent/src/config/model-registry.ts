@@ -751,6 +751,15 @@ export class ModelRegistry {
 		await this.#refreshRuntimeDiscoveries(strategy, new Set(this.#runtimeModelManagers.keys()));
 	}
 
+	/** Resolve one extension provider's cold catalog without waiting on unrelated providers. */
+	async refreshRuntimeProvider(
+		providerId: string,
+		strategy: ModelRefreshStrategy = "online-if-uncached",
+	): Promise<void> {
+		if (!this.#runtimeModelManagers.has(providerId)) return;
+		await this.#refreshRuntimeDiscoveries(strategy, new Set([providerId]));
+	}
+
 	#reloadStaticModels(options?: { force?: boolean; preserveRuntimeDiscovery?: boolean }): void {
 		const currentMtime = this.#modelsConfigFile.getMtimeMs();
 		const staticConfigUnchanged = currentMtime === this.#lastStaticLoadMtime;

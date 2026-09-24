@@ -1486,6 +1486,7 @@ export async function buildSessionOptions(
 		let authenticatedResolution: ResolveCliModelResult | undefined;
 		let firstUnauthenticatedResolution: ResolveCliModelResult | undefined;
 		let lastResolution: ResolveCliModelResult | undefined;
+		let needsExtensionResolution = false;
 
 		// Preserve fallback priority. Each provider-qualified candidate gets its
 		// scoped discovery opportunity before we advance to the next candidate.
@@ -1505,9 +1506,17 @@ export async function buildSessionOptions(
 			}
 
 			const requestedProvider = parseModelString(pattern)?.provider.toLowerCase();
-			if (!requestedProvider || refreshedProviders.has(requestedProvider)) continue;
+			if (!requestedProvider) {
+				needsExtensionResolution = true;
+				continue;
+			}
+			if (refreshedProviders.has(requestedProvider)) continue;
 			const discoverableProvider = discoverableProviders.get(requestedProvider);
-			if (!discoverableProvider) continue;
+			if (!discoverableProvider) {
+				// Extension providers are registered in createAgentSession, after this lookup.
+				needsExtensionResolution = true;
+				continue;
+			}
 
 			refreshedProviders.add(requestedProvider);
 			await modelRegistry.refreshDiscoverableProviders([discoverableProvider], "online-if-uncached");
@@ -1530,27 +1539,38 @@ export async function buildSessionOptions(
 			lastResolution ??
 			resolveCandidate(targetPatterns[0] ?? target);
 
-		if (resolved.warning) {
-			process.stderr.write(`${chalk.yellow(`Warning: ${resolved.warning}`)}\n`);
-		}
-		// Prewalk is an optional optimization (off by default): switch to a fast
-		// model at the first edit. If its hand-off target can't be resolved or has
-		// no configured auth, warn and leave prewalk unarmed rather than aborting
-		// startup and locking the user out of the app (issue #6064).
-		if (resolved.error || !resolved.model) {
-			process.stderr.write(
-				`${chalk.yellow(`Warning: prewalk disabled — ${resolved.error ?? `model "${target}" not found`}`)}\n`,
-			);
-		} else if (disabledProviders.has(resolved.model.provider)) {
-			process.stderr.write(
-				`${chalk.yellow(`Warning: prewalk disabled — provider "${resolved.model.provider}" is disabled`)}\n`,
-			);
-		} else if (!modelRegistry.hasConfiguredAuth(resolved.model)) {
-			process.stderr.write(
-				`${chalk.yellow(`Warning: prewalk disabled — no API key for ${resolved.model.provider}/${resolved.model.id}`)}\n`,
-			);
+		if (needsExtensionResolution) {
+			// An earlier extension candidate must get its turn before a later static fallback.
+			// Retain the expanded role patterns: --model may already have changed the default role.
+			options.deferredPrewalk = { target, patterns: targetPatterns };
+			// Keep an already-valid fallback while the SDK checks the earlier extension candidate.
+			if (authenticatedResolution?.model) {
+				options.prewalk = {
+					target: authenticatedResolution.model,
+					thinkingLevel: authenticatedResolution.thinkingLevel,
+				};
+			}
 		} else {
-			options.prewalk = { target: resolved.model, thinkingLevel: resolved.thinkingLevel };
+			if (resolved.warning) {
+				process.stderr.write(`${chalk.yellow(`Warning: ${resolved.warning}`)}\n`);
+			}
+			// Prewalk is optional: an unresolved or unauthenticated target warns rather
+			// than aborting the session (issue #6064).
+			if (resolved.error || !resolved.model) {
+				process.stderr.write(
+					`${chalk.yellow(`Warning: prewalk disabled — ${resolved.error ?? `model "${target}" not found`}`)}\n`,
+				);
+			} else if (disabledProviders.has(resolved.model.provider)) {
+				process.stderr.write(
+					`${chalk.yellow(`Warning: prewalk disabled — provider "${resolved.model.provider}" is disabled`)}\n`,
+				);
+			} else if (!modelRegistry.hasConfiguredAuth(resolved.model)) {
+				process.stderr.write(
+					`${chalk.yellow(`Warning: prewalk disabled — no API key for ${resolved.model.provider}/${resolved.model.id}`)}\n`,
+				);
+			} else {
+				options.prewalk = { target: resolved.model, thinkingLevel: resolved.thinkingLevel };
+			}
 		}
 	}
 

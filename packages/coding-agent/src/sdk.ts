@@ -30,6 +30,7 @@ import { prewarmOpenAICodexResponses } from "@oh-my-pi/pi-ai/providers/openai-co
 import { isOpenAICodexWebSocketPreferred } from "@oh-my-pi/pi-ai/providers/openai-codex-transport";
 import { FALLBACK_DIALECT, preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import type { Component } from "@oh-my-pi/pi-tui";
+import chalk from "@oh-my-pi/pi-utils/chalk";
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { getAgentDir, getModelDbPath, getProjectDir } from "@oh-my-pi/pi-utils/dirs";
 import * as logger from "@oh-my-pi/pi-utils/logger";
@@ -68,6 +69,7 @@ import {
 	pickDefaultAvailableModel,
 	resolveAllowedModels,
 	resolveCliModel,
+	type ResolveCliModelResult,
 	resolveConfiguredModelPatterns,
 	resolveModelRoleValue,
 } from "./config/model-resolver";
@@ -556,6 +558,8 @@ export interface CreateAgentSessionOptions {
 	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
 	/** Prewalk from the starting model to a fast/cheap target at the first edit/write once the todo list exists. */
 	prewalk?: Prewalk;
+	/** CLI prewalk selector awaiting extension provider registration; patterns retain role fallback order. */
+	deferredPrewalk?: { target: string; patterns: string[] };
 	/** Force read-only plan mode at start, auto-approve on the model's first resolve call, then switch to execute. */
 	planYolo?: PlanYolo;
 
@@ -1525,6 +1529,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				cacheDbPath: getModelDbPath(agentDir),
 			},
 		);
+	let prewalk = options.prewalk;
+	let deferredPrewalk = options.deferredPrewalk;
 	// Track whether we internally created the authStorage so we can close it
 	// if construction fails before the session takes ownership.
 	const ownsAuthStorage = !options.authStorage && !options.modelRegistry;
@@ -2050,7 +2056,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			outputSchema: options.outputSchema,
 			outputSchemaMode: options.outputSchemaMode,
 			requireYieldTool: options.requireYieldTool,
-			prewalkArmed: options.prewalk !== undefined,
+			get prewalkArmed() {
+				return prewalk !== undefined || deferredPrewalk !== undefined;
+			},
 			taskDepth: options.taskDepth ?? 0,
 			getSessionFile: () => sessionManager.getSessionFile() ?? null,
 			sessionManager,
@@ -2995,6 +3003,59 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						? `No model available matching enabledModels (${patterns.join(", ")}) with usable credentials. Configure auth for an allowed provider or adjust enabledModels.`
 						: "No models available. Use /login or set an API key environment variable. Then use /model to select a model.";
 			}
+		}
+
+		if (deferredPrewalk) {
+			const { target, patterns } = deferredPrewalk;
+			// Re-evaluate even a provisional static fallback against the post-extension catalog.
+			prewalk = undefined;
+			const refreshedProviders = new Set<string>();
+			let authenticated: ResolveCliModelResult | undefined;
+			let firstUnauthenticated: ResolveCliModelResult | undefined;
+			let lastResolution: ResolveCliModelResult | undefined;
+			const resolveCandidate = (pattern: string) =>
+				resolveCliModel({ cliModel: pattern, modelRegistry, settings, preferences: modelMatchPreferences });
+
+			for (const pattern of patterns) {
+				let candidate = resolveCandidate(pattern);
+				if (!candidate.model) {
+					const provider = parseModelString(pattern)?.provider;
+					if (
+						provider &&
+						!candidate.disabledProvider &&
+						!refreshedProviders.has(provider) &&
+						modelRegistry.hasProvider(provider)
+					) {
+						refreshedProviders.add(provider);
+						// The deferred --model path may already have started discovery for this provider.
+						if (runtimeDiscoveryPromise) await runtimeDiscoveryPromise;
+						else await modelRegistry.refreshRuntimeProvider(provider);
+						candidate = resolveCandidate(pattern);
+					}
+				}
+				lastResolution = candidate;
+				if (!candidate.model) continue;
+				if (modelRegistry.hasConfiguredAuth(candidate.model)) {
+					authenticated = candidate;
+					break;
+				}
+				firstUnauthenticated ??= candidate;
+			}
+
+			const resolved = authenticated ?? firstUnauthenticated ?? lastResolution;
+			if (resolved?.warning) process.stderr.write(`${chalk.yellow(`Warning: ${resolved.warning}`)}\n`);
+			if (!resolved?.model) {
+				process.stderr.write(
+					`${chalk.yellow(`Warning: prewalk disabled — ${resolved?.error ?? `model "${target}" not found`}`)}\n`,
+				);
+			} else if (!modelRegistry.hasConfiguredAuth(resolved.model)) {
+				process.stderr.write(
+					`${chalk.yellow(`Warning: prewalk disabled — no API key for ${resolved.model.provider}/${resolved.model.id}`)}\n`,
+				);
+			} else {
+				prewalk = { target: resolved.model, thinkingLevel: resolved.thinkingLevel };
+			}
+			deferredPrewalk = undefined;
 		}
 
 		if (model) {
@@ -4220,7 +4281,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			thinkingLevel: autoThinking ? AUTO_THINKING : effectiveThinkingLevel,
 			thinkingLevelCeiling: options.thinkingLevelCeiling,
 			initialRetryFallback,
-			prewalk: options.prewalk,
+			prewalk,
 			planYolo: options.planYolo,
 			serviceTierByFamily: initialServiceTierByFamily,
 			sessionManager,
