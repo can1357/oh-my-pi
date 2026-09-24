@@ -10,6 +10,7 @@
 
 - `omp update` and the startup update check now use your configured npm registry (`.npmrc`, `npm_config_registry`, or bunfig, including scoped registries and auth tokens) instead of always querying registry.npmjs.org ([#13115](https://github.com/can1357/oh-my-pi/pull/13115) by [@H4vC](https://github.com/H4vC))
 - Fixed auto-QA grievance pushes getting stuck forever behind one report the collector rejects: tool names are clamped to the collector's 128-byte limit, rejected reports are set aside with the server's error (shown in `omp grievances list` and `push`), and the rest of the queue keeps sending ([#13091](https://github.com/can1357/oh-my-pi/issues/13091), [#13119](https://github.com/can1357/oh-my-pi/pull/13119) by [@NaC-L](https://github.com/NaC-L))
+- Fixed the hashline edit tool rejecting line numbers the previous edit response displayed as "never displayed" ([#13144](https://github.com/can1357/oh-my-pi/issues/13144), [#13145](https://github.com/can1357/oh-my-pi/pull/13145) by [@radkawar](https://github.com/radkawar))
 
 ## [18.3.0] - 2026-09-24
 

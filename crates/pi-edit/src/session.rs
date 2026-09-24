@@ -4,7 +4,7 @@
 //! Threading and callbacks live in the napi layer; this type is single
 //! threaded and pure apart from file reads and the writer trait.
 
-use std::path::PathBuf;
+use std::{collections::BTreeSet, path::PathBuf};
 
 use async_trait::async_trait;
 
@@ -15,7 +15,7 @@ use crate::{
 	files::{FileCache, FileSource},
 	notebook,
 	path_policy::{PathPolicy, canonical_key},
-	store::{EditStore, file_hash},
+	store::{EditStore, file_hash, seen_lines_from_body},
 	stream_json::ArgStream,
 	text::{normalize_to_lf, strip_bom, utf16_len},
 };
@@ -244,6 +244,14 @@ impl Session {
 		let mut files = Vec::with_capacity(staged.len());
 		for (index, mut file) in staged.into_iter().enumerate() {
 			let canonical = canonical_key(&file.absolute);
+			let prior_seen = if file.record_snapshot {
+				self
+					.store
+					.by_content(&canonical, &file.before)
+					.and_then(|snapshot| snapshot.seen_lines)
+			} else {
+				None
+			};
 			let response = if file.op == FileOp::Noop {
 				WriteResponse::default()
 			} else {
@@ -260,12 +268,12 @@ impl Session {
 					.await?
 			};
 
-			let mut tag: Option<String> = None;
+			let mut minted: Option<(PathBuf, String)> = None;
 			match file.op {
 				FileOp::Delete => self.store.invalidate(&canonical),
 				FileOp::Noop => {
 					if file.record_snapshot {
-						tag = Some(self.store.record(&canonical, &file.after, None));
+						minted = Some((canonical.clone(), file.after.clone()));
 					}
 				},
 				FileOp::Create | FileOp::Update => {
@@ -278,8 +286,7 @@ impl Session {
 						if dest_canonical.is_none() && recorded != file.after {
 							file.warnings.push(write_drift_warning(&file.display));
 						}
-						let key = dest_canonical.as_deref().unwrap_or(&canonical);
-						tag = Some(self.store.record(key, &recorded, None));
+						minted = Some((dest_canonical.unwrap_or_else(|| canonical.clone()), recorded));
 					}
 					self.store.reset_noop(&canonical);
 				},
@@ -294,12 +301,26 @@ impl Session {
 				.map_or(file.display.as_str(), |m| m.display.as_str());
 			let header = match file.header {
 				HeaderKind::HashlineTag => {
-					let tag = tag.unwrap_or_else(|| file_hash(&file.after));
+					let tag = minted
+						.as_ref()
+						.map_or_else(|| file_hash(&file.after), |(_, recorded)| file_hash(recorded));
 					format!("[{header_path}#{tag}]")
 				},
 				HeaderKind::Path => format!("[{header_path}]"),
 			};
 			let text = format_file_text(&file, &header);
+			if let Some((key, recorded)) = &minted {
+				// Response rows number `after`; they only address the snapshot when the
+				// write landed verbatim.
+				let displayed = if *recorded == file.after {
+					seen_lines_from_body(&text)
+				} else {
+					Vec::new()
+				};
+				let seen =
+					post_edit_seen_lines(&file.before, recorded, prior_seen.as_ref(), &displayed);
+				self.store.record(key, recorded, Some(&seen));
+			}
 			let parse_regressed = file.op != FileOp::Delete
 				&& file.op != FileOp::Noop
 				&& file.existed
@@ -358,6 +379,38 @@ fn recorded_view(file: &StagedFile, written: &str) -> String {
 			.map_or_else(|_| file.after.clone(), |text| normalize_to_lf(&text).into_owned());
 	}
 	normalize_to_lf(strip_bom(written).1).into_owned()
+}
+
+/// Lines of `after` the model can anchor once an edit lands: unchanged lines
+/// whose pre-edit number it had seen (every line when `prior` carries no
+/// provenance), every line the edit wrote, and every row the response
+/// displayed.
+fn post_edit_seen_lines(
+	before: &str,
+	after: &str,
+	prior: Option<&BTreeSet<u32>>,
+	displayed: &[u32],
+) -> Vec<u32> {
+	let restricted = prior.filter(|seen| !seen.is_empty());
+	let mut seen = displayed.to_vec();
+	let mut old_line = 1_u32;
+	let mut new_line = 1_u32;
+	for part in pi_diff::line_changes_str(before, after) {
+		if part.removed {
+			old_line += part.count;
+			continue;
+		}
+		for offset in 0..part.count {
+			if part.added || restricted.is_none_or(|lines| lines.contains(&(old_line + offset))) {
+				seen.push(new_line + offset);
+			}
+		}
+		new_line += part.count;
+		if !part.added {
+			old_line += part.count;
+		}
+	}
+	seen
 }
 
 /// Model-facing text for one file (`formatEditResultText`).
