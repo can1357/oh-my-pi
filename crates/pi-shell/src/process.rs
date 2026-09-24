@@ -2568,7 +2568,7 @@ impl Process {
 			root: self.clone(),
 			protected,
 			live_at_capture: true,
-		};
+		}
 	}
 }
 
