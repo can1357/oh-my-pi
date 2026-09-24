@@ -2926,6 +2926,12 @@ export class AgentSession {
 			if (this.#recovery.isClassifierRefusal(assistantMsg)) return;
 			if (isEmptyErrorTurn(assistantMsg)) return;
 			if (assistantMsg.stopReason !== "aborted" && assistantMsg.stopReason !== "error" && assistantMsg.usage) {
+				// When a pending snapshot is live, nonMessageTokens is the send-time
+				// collapsed estimate while the breakdown below reflects persist-time
+				// state; after a mid-flight prompt rebuild the two can skew for one
+				// snapshot. The next successful response re-anchors both.
+				// The skillful argument must match the prompt render (sdk.ts) so the
+				// breakdown sums to the collapsed total.
 				const nonMessageBreakdown = computeNonMessageBreakdown(
 					this,
 					this.agent.tokenizer,
