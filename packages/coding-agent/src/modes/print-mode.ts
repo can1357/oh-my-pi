@@ -11,6 +11,7 @@ import { $flag, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { MCPManager } from "../mcp/manager";
 import { resolveMCPTimeoutMs } from "../mcp/timeout";
 import { type AgentSession, type AgentSessionEvent, SHUTDOWN_CONSOLIDATE_BUDGET_MS } from "../session/agent-session";
+import { CREDENTIAL_DISABLED_NOTICE_SOURCE } from "../session/credential-disabled-notice";
 import { isSilentAbort } from "../session/messages";
 import { flushTelemetryExport } from "../telemetry-export";
 import { formatPersistenceDurabilityFailure, formatPersistenceFailure } from "./persistence-failure";
@@ -183,14 +184,6 @@ async function runPrintModeCore(
 		);
 	}
 
-	// Always subscribe to enable session persistence via _handleAgentEvent
-	session.subscribe(event => {
-		// In JSON mode, output all events
-		if (mode === "json") {
-			writeStdoutLine(`${JSON.stringify(printableEvent(event))}\n`);
-		}
-	});
-
 	// process.stderr.write is fire-and-forget as well: a diagnostic buffered
 	// behind a backpressured pipe would still be undelivered when runPrintMode
 	// returns, and the caller drains stdout only. Serialize the persistence
@@ -224,6 +217,18 @@ async function runPrintModeCore(
 	session.sessionManager.onPersistenceError(error => {
 		persistenceFailure = error;
 		writeStderrLine(formatPersistenceFailure(error.message));
+	});
+
+	// Always subscribe to enable session persistence via _handleAgentEvent
+	session.subscribe(event => {
+		// In JSON mode, output all events
+		if (mode === "json") {
+			writeStdoutLine(`${JSON.stringify(printableEvent(event))}\n`);
+		} else if (event.type === "notice" && event.source === CREDENTIAL_DISABLED_NOTICE_SOURCE) {
+			// Text mode renders no session notices, but an automatic sign-out must not stay
+			// hidden behind a sibling account that quietly answers the prompt.
+			writeStderrLine(`Warning: ${event.message}`);
+		}
 	});
 
 	const timeoutMs = resolveMCPTimeoutMs();

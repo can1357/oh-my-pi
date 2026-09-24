@@ -31,6 +31,23 @@ function fingerprintOAuthBearer(bearer: string): string {
 /** One stored credential row as cached in memory. */
 export type StoredCredential = { id: number; credential: AuthCredential };
 
+/** {@link CredentialDisabledEvent} for a torn-down row, carrying the account identity it was signed in as. */
+export function credentialDisabledEvent(
+	provider: string,
+	row: StoredCredential,
+	disabledCause: string,
+): CredentialDisabledEvent {
+	const event: CredentialDisabledEvent = { provider, disabledCause, credentialId: row.id };
+	const { credential } = row;
+	if (credential.type === "oauth") {
+		if (credential.email) event.email = credential.email;
+		if (credential.accountId) event.accountId = credential.accountId;
+		if (credential.orgId) event.orgId = credential.orgId;
+		if (credential.orgName) event.orgName = credential.orgName;
+	}
+	return event;
+}
+
 /** Credential equality used for snapshot change detection. */
 export function authCredentialEquals(left: AuthCredential, right: AuthCredential): boolean {
 	if (left.type !== right.type) return false;
@@ -430,7 +447,7 @@ export class CredentialPool implements CredentialsApi {
 		const updated = entries.filter((_value, idx) => idx !== index);
 		this.replace(provider, updated);
 		this.reset(provider);
-		this.emitDisabled({ provider, disabledCause });
+		this.emitDisabled(credentialDisabledEvent(provider, target, disabledCause));
 		return true;
 	}
 
@@ -481,6 +498,9 @@ export class CredentialPool implements CredentialsApi {
 	}
 
 	emitDisabled(event: CredentialDisabledEvent): void {
+		// Every automatic disable leaves a log line, with or without subscribers: the event
+		// alone left nothing on disk once a session had moved on to a sibling account.
+		logger.warn("Auth credential disabled", { ...event });
 		if (this.#credentialDisabledListeners.size === 0) {
 			// No subscribers — buffer for later replay. Cap the backlog so a process that runs
 			// without subscribers for a long time can't grow memory unboundedly; drop oldest
@@ -721,7 +741,7 @@ export class CredentialPool implements CredentialsApi {
 			const next = entries.filter((_value, idx) => idx !== index);
 			this.replace(provider, next);
 			this.reset(provider);
-			this.emitDisabled({ provider, disabledCause });
+			this.emitDisabled(credentialDisabledEvent(provider, entries[index]!, disabledCause));
 			return true;
 		}
 		return false;

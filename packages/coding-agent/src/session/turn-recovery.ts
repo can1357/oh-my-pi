@@ -16,10 +16,12 @@ import type {
 	TextContent,
 	ThinkingContent,
 	ToolChoice,
+	AnthropicFallbackCreditHandle,
 } from "@oh-my-pi/pi-ai";
 import { calculateRateLimitBackoffMs, parseRateLimitReason } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
+import { fallbackCreditTargets } from "@oh-my-pi/pi-catalog/compat/fallback-credit";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
@@ -280,6 +282,10 @@ export class TurnRecovery {
 	#retryPromise: Promise<void> | undefined;
 	#retryResolve: (() => void) | undefined;
 	#activeRetryFallback: ActiveRetryFallbackState | undefined;
+	#activeFallbackCreditRedemption?: {
+		targetSelector: string;
+		handle: AnthropicFallbackCreditHandle;
+	};
 	#usageReserveApprovedSelector: string | undefined;
 	#pendingRetryErrors: PendingRetryError[] = [];
 	#usageLimitOutcomes = new WeakMap<AssistantMessage, Promise<UsageLimitOutcome>>();
@@ -420,11 +426,26 @@ export class TurnRecovery {
 		this.#unexpectedStopRetryCount = 0;
 		this.#malformedFunctionCallRetryCount = 0;
 		this.#acceptTerminalEmptyStopForPrompt = false;
+		this.#activeFallbackCreditRedemption = undefined;
 	}
 
 	/** Sets whether one terminal empty stop is accepted for the current prompt. */
 	setAcceptTerminalEmptyStop(accept: boolean): void {
 		this.#acceptTerminalEmptyStopForPrompt = accept;
+	}
+
+	/** Consumes any queued Anthropic fallback credit handle for the retry turn. */
+	consumeActiveFallbackCreditRedemption(targetModel?: Model): AnthropicFallbackCreditHandle | undefined {
+		const active = this.#activeFallbackCreditRedemption;
+		if (!active) return undefined;
+		if (targetModel && `${targetModel.provider}/${targetModel.id}` !== active.targetSelector) {
+			return undefined;
+		}
+		this.#activeFallbackCreditRedemption = undefined;
+		if (Date.now() >= active.handle.expiresAt) {
+			return undefined;
+		}
+		return active.handle;
 	}
 
 	/**
@@ -1961,6 +1982,11 @@ export class TurnRecovery {
 			: this.#host.agent.state.messages.findLast(
 					(message): message is AssistantMessage => message.role === "assistant" && message !== failedMessage,
 				);
+		// Permitted redemption targets are catalog policy on the refused model.
+		const failedModel = failedMessage.fallbackCreditHandle
+			? this.#host.modelRegistry.find(failedMessage.provider, failedMessage.model)
+			: undefined;
+		const creditTargets = failedModel ? fallbackCreditTargets(failedModel) : [];
 		for (const role of this.retryFallbackChainKeys(currentSelector)) {
 			for (const selector of this.findRetryFallbackCandidates(role, currentSelector, undefined, options)) {
 				if (this.isRetryFallbackSelectorSuppressed(selector)) continue;
@@ -1982,7 +2008,16 @@ export class TurnRecovery {
 				// model switch can satisfy neither constraint, so keep retrying the
 				// source model or consider a later cross-provider candidate whose
 				// message transform can safely demote the foreign thinking.
+				// Exception: when redeeming Anthropic fallback credit on refusal, the server
+				// validates thinking blocks across the boundary itself using the credit token.
+				const canRedeemFallbackCredit =
+					failedMessage.fallbackCreditHandle !== undefined &&
+					candidate.api === "anthropic-messages" &&
+					candidate.provider === failedMessage.provider &&
+					creditTargets.includes(candidate.id) &&
+					Date.now() < failedMessage.fallbackCreditHandle.expiresAt;
 				if (
+					!canRedeemFallbackCredit &&
 					candidate.api === "anthropic-messages" &&
 					latestAssistant?.api === "anthropic-messages" &&
 					latestAssistant.provider === candidate.provider &&
@@ -2006,10 +2041,19 @@ export class TurnRecovery {
 				}
 				const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
 				if (!apiKey) continue;
-				return this.applyRetryFallbackCandidate(role, selector, currentSelector, {
+				const previousEditMode = this.#host.resolveActiveEditMode();
+				const applied = await this.applyRetryFallbackCandidate(role, selector, currentSelector, {
 					...options,
 					reason: `Request failed: ${failedMessage.errorMessage ?? "provider returned an error without details"}`,
 				});
+				const editModeChanged = this.#host.resolveActiveEditMode() !== previousEditMode;
+				if (applied && options?.pinFallback === true && canRedeemFallbackCredit && !editModeChanged) {
+					this.#activeFallbackCreditRedemption = {
+						targetSelector: `${candidate.provider}/${candidate.id}`,
+						handle: failedMessage.fallbackCreditHandle!,
+					};
+				}
+				return applied;
 			}
 		}
 
