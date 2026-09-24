@@ -584,7 +584,9 @@ export class LspMuxServer {
 			}
 		} catch (error) {
 			logger.warn("LSP mux server reader failed", { server: server.key, error: String(error) });
-			this.#killServer(server);
+			void this.#killServerTracked(server).catch(killError => {
+				logger.warn("LSP mux server termination failed", { server: server.key, error: String(killError) });
+			});
 		} finally {
 			reader.releaseLock();
 		}
@@ -758,12 +760,18 @@ export class LspMuxServer {
 		const server = session.server;
 		try {
 			if (server) {
+				// Teardown writes are best-effort: the language server may already have
+				// closed its stdin, and #writeServer logs those failures. Only a write
+				// that never settles leaves the server unable to serve the next
+				// session, so the timeout below is what terminates it.
+				const writeBestEffort = (message: RpcMessage): Promise<void> =>
+					this.#writeServer(server, message).catch(() => {});
 				const cleanup: Promise<void>[] = [];
 				for (const uri of session.openUris) {
 					server.documents.delete(uri);
 					if (server.stopping) continue;
 					cleanup.push(
-						this.#writeServer(server, {
+						writeBestEffort({
 							jsonrpc: "2.0",
 							method: "textDocument/didClose",
 							params: { textDocument: { uri } },
@@ -774,9 +782,7 @@ export class LspMuxServer {
 					if (pending.session !== session) continue;
 					pending.drop = true;
 					if (server.stopping) continue;
-					cleanup.push(
-						this.#writeServer(server, { jsonrpc: "2.0", method: "$/cancelRequest", params: { id: muxId } }),
-					);
+					cleanup.push(writeBestEffort({ jsonrpc: "2.0", method: "$/cancelRequest", params: { id: muxId } }));
 				}
 				try {
 					if (!server.stopping) {
@@ -873,9 +879,9 @@ export class LspMuxServer {
 	 * Terminate a server outside a stop, keeping the outcome accountable.
 	 *
 	 * `#stopServer` records how its own attempt ended; a bare `#killServer` has
-	 * nothing around it that does, and each of its three callers — restart, a
-	 * failed `initialize`, and session cleanup — reaches it from a handler that
-	 * only logs. Root-exit cleanup then retires the server from `#servers`, so
+	 * nothing around it that does, and each of its callers — restart, a failed
+	 * `initialize`, session cleanup, and a server stream the reader rejected —
+	 * reaches it from a handler that only logs. Root-exit cleanup then retires the server from `#servers`, so
 	 * an attempt that left a helper running is carried by nothing at all and the
 	 * next shutdown reports success over it.
 	 */

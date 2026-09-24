@@ -740,9 +740,14 @@ describe("LspMuxServer", () => {
 			const helperSpy = spyOn(Process.prototype, "killTreeAndWait").mockImplementation(
 				async function (this: Process, options) {
 					if (this.pid !== helperPid) return killTreeAndWait.call(this, options);
+					// Held after the native call, which captures and signals the helper
+					// before it returns: holding it before let the root's group sweep
+					// kill the helper first, and the native side refuses a root that
+					// exited under its walk.
+					const swept = killTreeAndWait.call(this, options);
 					sweeping.resolve();
 					await release.promise;
-					return killTreeAndWait.call(this, options);
+					return swept;
 				},
 			);
 			let late: net.Socket | undefined;
