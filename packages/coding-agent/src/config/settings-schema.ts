@@ -85,6 +85,7 @@ import {
 	CONTEXT_LINE_MODE_VALUES,
 	CUSTOM_STATUS_LINE_DEFAULTS,
 	STATUS_LINE_PRESET_VALUES,
+	STATUS_LINE_SEGMENT_IDS,
 	STATUS_LINE_SEPARATOR_VALUES,
 	type StatusLinePreset,
 	type StatusLineSegmentId,
@@ -830,11 +831,32 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"statusLine.leftSegments": { type: "array", default: CUSTOM_STATUS_LINE_DEFAULTS.left },
+	"statusLine.leftSegments": {
+		type: "array",
+		default: CUSTOM_STATUS_LINE_DEFAULTS.left,
+		ui: {
+			tab: "appearance",
+			group: "Status Line",
+			label: "Left Segments",
+			description: `Ordered segment ids for the left group when statusLine.preset is custom. Unknown ids warn once and render nothing. Valid ids: ${STATUS_LINE_SEGMENT_IDS.join(", ")}.`,
+		},
+	},
 
-	"statusLine.rightSegments": { type: "array", default: CUSTOM_STATUS_LINE_DEFAULTS.right },
+	"statusLine.rightSegments": {
+		type: "array",
+		default: CUSTOM_STATUS_LINE_DEFAULTS.right,
+		ui: {
+			tab: "appearance",
+			group: "Status Line",
+			label: "Right Segments",
+			description: `Ordered segment ids for the right group when statusLine.preset is custom. Unknown ids warn once and render nothing. Valid ids: ${STATUS_LINE_SEGMENT_IDS.join(", ")}.`,
+		},
+	},
 
-	"statusLine.segmentOptions": { type: "record", default: {} as Record<string, unknown> },
+	"statusLine.segmentOptions": {
+		type: "record",
+		default: {} as Record<string, unknown>,
+	},
 
 	// Images and terminal
 	"terminal.showImages": {

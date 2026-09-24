@@ -28,6 +28,10 @@
 - Added configurable MCP startup behavior through `MCP_STARTUP_TIMEOUT_MS`/`mcp.startupTimeoutMs` and `OMP_MCP_REQUIRE_READY=1`, allowing headless runs to require MCP servers to become ready before the first turn.
 - Added native judgment usage reporting, including error stop reasons and messages, and added `openrouter/~typesafe/jev-latest` as a native judge candidate.
 
+### Added
+
+- Documented every custom status-line segment id, hide rule, and `segmentOptions` key in the settings reference ([#12371](https://github.com/can1357/oh-my-pi/pull/12371) by [@Frank-zhu0404](https://github.com/Frank-zhu0404)).
+
 ### Changed
 
 - Session compaction now supports native Anthropic snapshot branches and rewinds.
