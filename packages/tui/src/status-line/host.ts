@@ -35,7 +35,9 @@ export interface StatusLineSession {
 		getSessionName(): string | undefined;
 		getSessionId(): string;
 		getArtifactsDir?(): string | null;
-		getCostStatistics?(liveDescendants?: readonly { id: string; liveCost?: number; running?: boolean }[]): CostStatistics;
+		getCostStatistics?(
+			liveDescendants?: readonly { id: string; liveCost?: number; running?: boolean }[],
+		): CostStatistics;
 		getUsageStatistics(): {
 			input: number;
 			output: number;
