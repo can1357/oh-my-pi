@@ -32,17 +32,17 @@ describe("Serply web search provider", () => {
 	});
 
 	const fakeAuthStorage = {
-		async getApiKey() {
-			return apiKey;
-		},
-		hasAuth() {
-			return Boolean(apiKey);
-		},
-		resolver(_provider: string) {
-			return async () => apiKey;
-		},
-		async rotateSessionCredential() {
-			return false;
+		keys: {
+			async get() {
+				return apiKey;
+			},
+			source() {
+				return apiKey ? "runtime" : undefined;
+			},
+			resolver(provider: string) {
+				expect(provider).toBe("serply");
+				return async () => apiKey;
+			},
 		},
 	} as unknown as AuthStorage;
 

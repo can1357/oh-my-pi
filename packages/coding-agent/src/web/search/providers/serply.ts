@@ -163,7 +163,7 @@ export async function searchSerply(params: SearchParams): Promise<SearchResponse
 		timeoutMs: params.timeoutMs,
 		fetch: params.fetch,
 	};
-	const keyOrResolver: ApiKey = params.authStorage.resolver("serply", { sessionId: params.sessionId });
+	const keyOrResolver: ApiKey = params.authStorage.keys.resolver("serply", { sessionId: params.sessionId });
 	const response = await withAuth(keyOrResolver, key => callSerplySearch(key, serplyParams), {
 		signal: params.signal,
 		missingKeyMessage:
@@ -178,7 +178,7 @@ export class SerplyProvider extends SearchProvider {
 	readonly label = "Serply";
 
 	isAvailable(authStorage: AuthStorage): boolean {
-		return authStorage.hasAuth("serply") || !!getEnvApiKey("serply");
+		return authStorage.keys.source("serply") !== undefined || !!getEnvApiKey("serply");
 	}
 
 	search(params: SearchParams): Promise<SearchResponse> {
