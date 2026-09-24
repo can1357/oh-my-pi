@@ -69,6 +69,12 @@ export interface AgentTurnEndContext {
 	message: AgentMessage;
 	/** Tool results produced by this turn, already paired with `message` in the live context. */
 	toolResults: ToolResultMessage[];
+	/**
+	 * Passive model-visible messages appended after the tool results at this
+	 * boundary. The agent loop always sends an array (possibly empty);
+	 * absent is equivalent to empty for hosts that construct the context.
+	 */
+	additionalMessages?: AgentMessage[];
 	/** True when the current tool-loop batch is continuing without yielding to post-turn steering. */
 	willContinue: boolean;
 }
@@ -344,7 +350,11 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 
 	/**
 	 * Provides tool execution context, resolved per tool call.
-	 * Use for late-bound UI or session state access.
+	 * Use for late-bound UI or session state access. The loop passes the tool
+	 * call's {@link ToolCallContext}; hosts that support passive tool context
+	 * surface its `addAdditionalContext` sink as
+	 * {@link AgentToolContext.addAdditionalContext}. The returned object is
+	 * handed to the tool as-is.
 	 */
 	getToolContext?: (toolCall?: ToolCallContext) => AgentToolContext | undefined;
 
@@ -615,6 +625,13 @@ export interface ToolCallContext {
 	 * always safe (the message injects at the next batch boundary).
 	 */
 	steeringSignal?: AbortSignal;
+	/**
+	 * Loop-owned sink for passive context reported while this call executes.
+	 * Values join the call's context at the batch boundary and are injected
+	 * after the batch's tool results, in assistant tool-call order, before the
+	 * next provider request. Blank values are ignored.
+	 */
+	addAdditionalContext?: (context: string) => void;
 }
 
 /** A single tool-call content block emitted by an assistant message. */
@@ -817,11 +834,19 @@ export interface SpeculativeToolExecutionConfig {
  * written back to the tool-call block on the assistant message, and seen by
  * history, scheduling, execution events, and `tool.execute` alike. It is
  * ignored when `block` is true.
+ *
+ * Set `additionalContext` to attach passive model-visible context to this call.
+ * Non-empty values from a tool batch are injected in assistant tool-call order
+ * after every result settles and before the next provider request. It is
+ * dropped when the call is blocked or skipped, or when its final result is an
+ * error (including an approval denial raised by the tool's own gate). Within a
+ * call it follows any context the tool reported during execution.
  */
 export interface BeforeToolCallResult {
 	block?: boolean;
 	reason?: string;
 	args?: Record<string, unknown>;
+	additionalContext?: string;
 }
 
 /**
@@ -989,6 +1014,16 @@ export type ToolApproval = ToolApprovalDecision | ((args: unknown) => ToolApprov
  * Apps can extend via declaration merging.
  */
 export interface AgentToolContext {
+	/**
+	 * Attach trusted, agent-authored instructions to the next provider request.
+	 * The host emits them after tool results with developer/system priority where
+	 * the selected transport supports it. Do not use this channel for raw tool
+	 * output, retrieved documents, web content, or other untrusted data; return
+	 * those through the ordinary tool result instead. Hosts populate it from
+	 * {@link ToolCallContext.addAdditionalContext} (or their own collector for
+	 * calls dispatched outside the loop); absent when the host has no sink.
+	 */
+	addAdditionalContext?(context: string): void;
 	/** Present only while the matching outer tool owns its finalized stream session. */
 	[SPECULATIVE_STREAM_SESSION]?: ToolSpeculationStreamSession;
 }

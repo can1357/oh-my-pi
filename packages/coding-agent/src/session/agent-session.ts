@@ -3046,7 +3046,7 @@ export class AgentSession {
 
 	async #persistTurnMessagesForMidRunCompaction(context: AgentTurnEndContext | undefined): Promise<boolean> {
 		if (!context) return true;
-		const turnMessages = [context.message, ...context.toolResults];
+		const turnMessages = [context.message, ...context.toolResults, ...(context.additionalMessages ?? [])];
 		for (const message of turnMessages) {
 			await this.#waitForSessionMessagePersistence(message);
 		}
@@ -4226,10 +4226,10 @@ export class AgentSession {
 		}
 		// A computer call's event input is a synthetic {actions, pendingSafetyChecks}
 		// view, not the execution params — a revision cannot map back onto them.
-		if (callResult?.input !== undefined && !computer) {
-			return { args: callResult.input };
-		}
-		return undefined;
+		const args = callResult?.input !== undefined && !computer ? callResult.input : undefined;
+		const additionalContext = callResult?.additionalContext;
+		if (args === undefined && additionalContext === undefined) return undefined;
+		return { args, additionalContext };
 	}
 
 	/** Find the last assistant message in agent state (including aborted ones) */
