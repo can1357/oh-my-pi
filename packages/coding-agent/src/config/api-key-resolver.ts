@@ -1,4 +1,4 @@
-import type { ApiKeyResolver } from "@oh-my-pi/pi-ai/auth-retry";
+import type { ApiKeyResolution, ApiKeyResolver } from "@oh-my-pi/pi-ai/auth-retry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { isUsageLimitOutcome } from "@oh-my-pi/pi-ai/error/rate-limit";
 import type { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
@@ -27,6 +27,12 @@ export interface ApiKeyResolverRegistry {
 		sessionId?: string,
 		options?: { baseUrl?: string; modelId?: string; forceRefresh?: boolean; signal?: AbortSignal },
 	): Promise<string | undefined>;
+	/** Available on the full registry; structural shells may only resolve bare keys. */
+	getApiKeyWithCredentialForProvider?(
+		provider: string,
+		sessionId?: string,
+		options?: { baseUrl?: string; modelId?: string; forceRefresh?: boolean; signal?: AbortSignal },
+	): Promise<ApiKeyResolution>;
 	authStorage: Pick<AuthStorage, "limits">;
 	/**
 	 * Build an {@link ApiKeyResolver} implementing the central a/b/c auth-retry
@@ -53,9 +59,13 @@ export function createApiKeyResolver(
 	options: ApiKeyResolverOptions = {},
 ): ApiKeyResolver {
 	const { sessionId, baseUrl, modelId } = options;
+	const resolveKey = (forceRefresh: boolean | undefined, signal?: AbortSignal): Promise<ApiKeyResolution> =>
+		registry.getApiKeyWithCredentialForProvider
+			? registry.getApiKeyWithCredentialForProvider(provider, sessionId, { baseUrl, modelId, forceRefresh, signal })
+			: registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId, forceRefresh, signal });
 	return async ({ lastChance, error, signal, previousKey }) => {
 		if (error === undefined) {
-			return registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId });
+			return resolveKey(undefined);
 		}
 		if (lastChance) {
 			// Account constraint (401 / usage / account-rate-limit): rotate to a
@@ -77,8 +87,8 @@ export function createApiKeyResolver(
 				// auth decline can instead mean a peer refreshed the bearer.
 				if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) return undefined;
 			}
-			return registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId });
+			return resolveKey(undefined);
 		}
-		return registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId, forceRefresh: true, signal });
+		return resolveKey(true, signal);
 	};
 }

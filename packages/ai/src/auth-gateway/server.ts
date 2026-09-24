@@ -150,6 +150,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	if (options.frequencyPenalty !== undefined && !isCodex) opts.frequencyPenalty = options.frequencyPenalty;
 	if (options.repetitionPenalty !== undefined && !isCodex) opts.repetitionPenalty = options.repetitionPenalty;
 	if (options.metadata !== undefined) opts.metadata = options.metadata;
+	if (options.userProfileId !== undefined) opts.userProfileId = options.userProfileId;
 	if (options.headers !== undefined) opts.headers = { ...opts.headers, ...options.headers };
 	if (options.toolChoice !== undefined) {
 		opts.toolChoice =

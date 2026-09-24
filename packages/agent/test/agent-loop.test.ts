@@ -6,6 +6,7 @@ import {
 	agentLoopContinue,
 	agentLoopDetailed,
 	TERMINAL_TOOL_RESULT_ABORT_REASON,
+	TOOL_INTERRUPT_ABORT_REASON,
 } from "@oh-my-pi/pi-agent-core/agent-loop";
 import { SpeculativeOperationCoordinator } from "@oh-my-pi/pi-agent-core/speculative-execution";
 import type {
@@ -2059,6 +2060,7 @@ describe("agentLoop with AgentMessage", () => {
 		let steerReady = false;
 		let drained = false;
 		let observedAbort = false;
+		let observedReason: unknown;
 		let resolvedByTimeout = false;
 
 		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
@@ -2088,6 +2090,7 @@ describe("agentLoop with AgentMessage", () => {
 				}
 				await promise;
 				observedAbort = signal?.aborted === true;
+				observedReason = signal?.reason;
 				return { content: [{ type: "text", text: "waited" }], details: {} };
 			},
 		};
@@ -2119,11 +2122,91 @@ describe("agentLoop with AgentMessage", () => {
 		}
 
 		expect(observedAbort).toBe(true);
+		expect(observedReason).toBe(TOOL_INTERRUPT_ABORT_REASON);
 		expect(resolvedByTimeout).toBe(false);
 		expect(drained).toBe(true);
 		expect(
 			events.some(e => e.type === "message_start" && e.message.role === "user" && e.message.content === "interrupt"),
 		).toBe(true);
+	});
+
+	it("aborts an interruptible wait on queued steering in wait mode without soft-signalling other tools", async () => {
+		const toolSchema = type({});
+		let steerReady = false;
+		let drained = false;
+		let workSoftAborted: boolean | undefined;
+		let steeringSignal: AbortSignal | undefined;
+		const waitAborted = Promise.withResolvers<void>();
+
+		const waitTool: AgentTool<typeof toolSchema, Record<string, never>> = {
+			name: "wait",
+			label: "Wait",
+			description: "Blocks until aborted",
+			parameters: toolSchema,
+			interruptible: true,
+			async execute(_toolCallId, _params, signal) {
+				steerReady = true;
+				const { promise, resolve } = Promise.withResolvers<void>();
+				signal?.addEventListener("abort", () => resolve(), { once: true });
+				await promise;
+				waitAborted.resolve();
+				signal?.throwIfAborted();
+				return { content: [{ type: "text", text: "waited" }], details: {} };
+			},
+		};
+		const workTool: AgentTool<typeof toolSchema, Record<string, never>> = {
+			name: "work",
+			label: "Work",
+			description: "Foreground work that outlives the interrupt",
+			parameters: toolSchema,
+			async execute() {
+				await waitAborted.promise;
+				await new Promise<void>(resolve => setImmediate(resolve));
+				workSoftAborted = steeringSignal?.aborted === true;
+				return { content: [{ type: "text", text: "worked" }], details: {} };
+			},
+		};
+
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [waitTool, workTool] };
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{ type: "toolCall", id: "tool-1", name: "wait", arguments: {} },
+						{ type: "toolCall", id: "tool-2", name: "work", arguments: {} },
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "wait",
+			hasSteeringMessages: () => steerReady && !drained,
+			getSteeringMessages: async () => {
+				if (!steerReady || drained) return [];
+				drained = true;
+				return [createUserMessage("interrupt")];
+			},
+			getToolContext: toolCall => {
+				steeringSignal = toolCall?.steeringSignal;
+				return { toolCall } as AgentToolContext;
+			},
+		};
+
+		const events: AgentEvent[] = [];
+		for await (const event of agentLoop([createUserMessage("start")], context, config, undefined, mock.stream)) {
+			events.push(event);
+		}
+
+		expect(workSoftAborted).toBe(false);
+		const results = events.filter(
+			(event): event is Extract<AgentEvent, { type: "tool_execution_end" }> => event.type === "tool_execution_end",
+		);
+		expect(results.find(event => event.toolName === "wait")?.result.details).toMatchObject({ __interrupted: true });
+		expect(results.find(event => event.toolName === "work")?.isError).toBe(false);
+		expect(drained).toBe(true);
 	});
 
 	it("distinguishes an in-flight abort from a never-executed steering skip", async () => {
@@ -2267,6 +2350,7 @@ describe("agentLoop with AgentMessage", () => {
 		let ircReady = false;
 		let ircDrained = false;
 		let observedAbort = false;
+		let observedReason: unknown;
 		let resolvedByTimeout = false;
 		const ircMessage = createUserMessage("irc interrupt");
 
@@ -2297,6 +2381,7 @@ describe("agentLoop with AgentMessage", () => {
 				}
 				await promise;
 				observedAbort = signal?.aborted === true;
+				observedReason = signal?.reason;
 				return { content: [{ type: "text", text: "waited" }], details: {} };
 			},
 		};
@@ -2328,6 +2413,7 @@ describe("agentLoop with AgentMessage", () => {
 		}
 
 		expect(observedAbort).toBe(true);
+		expect(observedReason).toBe(TOOL_INTERRUPT_ABORT_REASON);
 		expect(resolvedByTimeout).toBe(false);
 		expect(ircDrained).toBe(true);
 		expect(
@@ -4094,6 +4180,63 @@ describe("agentLoop steering during the provider wait", () => {
 				e => e.type === "message_end" && e.message.role === "assistant" && e.message.stopReason === "aborted",
 			),
 		).toBe(false);
+	});
+
+	it("keeps the credential identity when a steer re-issue reuses the resolved credential", async () => {
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+		const queue = createSteeringQueue();
+		const mock = createMockModel();
+		const resolverStarted = Promise.withResolvers<void>();
+		const releaseCredential = Promise.withResolvers<void>();
+		const contexts: Context[] = [];
+		const seeds: unknown[] = [];
+		let resolverCalls = 0;
+
+		const streamFn: StreamFn = (_model, llmContext, options) => {
+			contexts.push(llmContext);
+			// The first resolution the transport's auth retry would make: the
+			// seed the loop handed over, before any refresh or rotation.
+			const key = options?.apiKey;
+			seeds.push(typeof key === "function" ? key({ lastChance: false, error: undefined }) : key);
+			const response = new AssistantMessageEventStream();
+			queueMicrotask(() => pushAnswer(response, "answer with steer"));
+			return response;
+		};
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "immediate",
+			getApiKey: () => async () => {
+				resolverCalls++;
+				resolverStarted.resolve();
+				await releaseCredential.promise;
+				return { apiKey: "resolved-key", credentialId: 7 };
+			},
+			...queue.config,
+			// Poll-only host: the steer below is caught at the pre-dispatch peek,
+			// and the replacement reuses the credential that attempt resolved.
+			waitForSteeringMessages: undefined,
+		};
+
+		const run = (async (): Promise<void> => {
+			for await (const _event of agentLoop([createUserMessage("start")], context, config, undefined, streamFn)) {
+				// drain
+			}
+		})();
+		await resolverStarted.promise;
+		queue.push("steer during credential resolution");
+		releaseCredential.resolve();
+		await run;
+
+		expect(resolverCalls).toBe(1);
+		expect(contexts).toHaveLength(1);
+		expect(
+			contexts[0]?.messages.some(m => m.role === "user" && m.content === "steer during credential resolution"),
+		).toBe(true);
+		// The reused credential keeps the resolver's full answer, so the request
+		// that reaches the transport is attributed to credential 7, not to a bare
+		// bearer string.
+		expect(seeds).toEqual([{ apiKey: "resolved-key", credentialId: 7 }]);
 	});
 
 	it("cancels a request that streamed nothing and re-issues it with the steer", async () => {

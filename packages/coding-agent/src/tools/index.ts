@@ -708,7 +708,10 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 				session.settings.get("checkpoint.enabled") &&
 				((session.taskDepth ?? 0) === 0 || requestedTools !== undefined)
 			);
+		// Subagents never block on `wait`: owned job results re-wake their run
+		// through the executor's quiescence barrier, and parent messages steer them.
 		if (name === "wait") {
+			if ((session.taskDepth ?? 0) > 0) return false;
 			return (
 				session.settings.get("async.enabled") ||
 				(session.enableIrc !== false && isIrcEnabled(session.settings, session.taskDepth ?? 0)) ||

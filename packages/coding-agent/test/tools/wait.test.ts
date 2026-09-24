@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { TOOL_INTERRUPT_ABORT_REASON } from "@oh-my-pi/pi-agent-core";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
@@ -69,6 +70,73 @@ describe("wait", () => {
 		await manager.waitForAll();
 		await manager.drainDeliveries({ timeoutMs: 500 });
 		expect(delivered).toEqual(["finished afterward"]);
+	});
+
+	test("a message interrupt returns a non-error result and leaves the completion auto-deliverable", async () => {
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const delivered: string[] = [];
+		manager.registerDeliverySink("Main", (_id, text) => {
+			delivered.push(text);
+		});
+		const { promise, resolve } = Promise.withResolvers<string>();
+		manager.register("bash", "still running", async () => promise, { ownerId: "Main" });
+		const controller = new AbortController();
+		const waiting = new WaitTool(session(manager)).execute("interrupted-by-message", {}, controller.signal);
+		controller.abort(TOOL_INTERRUPT_ABORT_REASON);
+		const result = await waiting;
+		expect(result.isError).toBeUndefined();
+		expect(result.content).toEqual([{ type: "text", text: "Wait interrupted by message." }]);
+		expect(result.details).toMatchObject({ op: "wait", interrupted: true });
+		resolve("finished afterward");
+		await manager.waitForAll();
+		await manager.drainDeliveries({ timeoutMs: 500 });
+		expect(delivered).toEqual(["finished afterward"]);
+	});
+
+	test("returns a settled job whose delivery has not reached the transcript yet", async () => {
+		const manager = new AsyncJobManager({});
+		// The owner's sink parks the result like a yield-queue receipt awaiting injection.
+		const injected = Promise.withResolvers<void>();
+		const sinkEntered = Promise.withResolvers<string>();
+		manager.registerDeliverySink("Main", async (_id, text) => {
+			sinkEntered.resolve(text);
+			await injected.promise;
+		});
+		const id = manager.register("task", "EchoPeer", async () => "received=kestrel42", {
+			ownerId: "Main",
+			agentId: "EchoPeer",
+		});
+		expect(await sinkEntered.promise).toBe("received=kestrel42");
+
+		const result = await new WaitTool(session(manager)).execute("wait-undelivered", {});
+		expect(result.details?.jobs?.[0]).toMatchObject({ id, status: "completed", resultText: "received=kestrel42" });
+		expect(manager.isDeliverySuppressed(id)).toBe(true);
+		injected.resolve();
+	});
+
+	test("blocks on a peer's completion job registered after the wait started", async () => {
+		const registry = AgentRegistry.global();
+		registry.register({ id: "Main", displayName: "Main", kind: "main", session: null });
+		registry.register({
+			id: "EchoPeer",
+			displayName: "EchoPeer",
+			kind: "sub",
+			parentId: "Main",
+			session: { isStreaming: true } as never,
+			status: "running",
+		});
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const waiting = new WaitTool(session(manager)).execute("wait-peer-yield", {});
+		// The peer's yield is accepted mid-turn: its completion job exists before the ref goes idle.
+		const finalized = Promise.withResolvers<string>();
+		const id = manager.register("task", "EchoPeer", async () => finalized.promise, {
+			ownerId: "Main",
+			agentId: "EchoPeer",
+		});
+		registry.setStatus("EchoPeer", "idle");
+		finalized.resolve("followup-done");
+		const result = await waiting;
+		expect(result.details?.jobs?.[0]).toMatchObject({ id, status: "completed", resultText: "followup-done" });
 	});
 
 	test("returns an incoming peer message without any background jobs", async () => {

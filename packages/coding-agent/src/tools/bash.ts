@@ -778,7 +778,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		requestedTimeoutSec?: number;
 		notices?: readonly string[];
 		onUpdate?: AgentToolUpdateCallback<BashToolDetails>;
-		forwardUpdates: boolean;
+		/** A foreground wait races the job: updates stream to the caller and the row stays hidden until promoted. */
+		foreground: boolean;
 	}): ManagedBashJobHandle {
 		const manager = this.session.asyncJobManager;
 		if (!manager) {
@@ -788,7 +789,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const label = options.command.length > 120 ? `${options.command.slice(0, 117)}...` : options.command;
 		let latestText = "";
 		let latestProgressDetails: BashProgressDetails | undefined;
-		let forwardUpdates = options.forwardUpdates;
+		let forwardUpdates = options.foreground;
 		const completion = Promise.withResolvers<ManagedBashJobCompletion>();
 
 		const jobId = manager.register(
@@ -858,6 +859,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			},
 			{
 				ownerId: this.session.getAgentId?.() ?? undefined,
+				foreground: options.foreground,
 				onProgress: async text => {
 					latestText = text;
 					if (!forwardUpdates) return;
@@ -1034,7 +1036,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				requestedTimeoutSec,
 				notices: pendingNotices,
 				onUpdate,
-				forwardUpdates: false,
+				foreground: false,
 			});
 			return this.#buildBackgroundStartResult(job.jobId, "", timeoutSec, {
 				requestedTimeoutSec,
@@ -1070,7 +1072,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				requestedTimeoutSec,
 				notices: pendingNotices,
 				onUpdate,
-				forwardUpdates: !startBackgrounded,
+				foreground: !startBackgrounded,
 			});
 			if (startBackgrounded) {
 				return this.#buildBackgroundStartResult(job.jobId, "", timeoutSec, {
@@ -1078,10 +1080,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					notices: pendingNotices,
 				});
 			}
-			// Suppress the completion delivery up front so a job finishing while we
-			// foreground-wait cannot also be injected by the delivery loop. Lifted
-			// via resumeDeliveries() if we end up backgrounding after all.
-			autoBgManager.acknowledgeDeliveries([job.jobId]);
+			// The job was registered as foreground-backed: hidden from listings and
+			// delivery-suppressed until backgroundJob() promotes it, so a command
+			// finishing within the wait never surfaces as a background job.
 			const waitResult = await raceJobSettlement(
 				job.completion,
 				autoBackgroundWaitMs,
@@ -1089,19 +1090,20 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				ctx?.toolCall?.steeringSignal,
 			);
 			if (waitResult.kind === "completed") {
-				autoBgManager.consumeJobResultWhenSettled(job.jobId);
+				autoBgManager.releaseForegroundJob(job.jobId);
 				return waitResult.result;
 			}
 			if (waitResult.kind === "failed") {
-				autoBgManager.consumeJobResultWhenSettled(job.jobId);
+				autoBgManager.releaseForegroundJob(job.jobId);
 				throw waitResult.error;
 			}
 			if (waitResult.kind === "aborted") {
 				autoBgManager.cancel(job.jobId);
+				autoBgManager.releaseForegroundJob(job.jobId);
 				throw new ToolAbortError(job.getLatestText() || "Command aborted");
 			}
 			job.stopUpdates();
-			autoBgManager.resumeDeliveries([job.jobId]);
+			autoBgManager.backgroundJob(job.jobId);
 			// "steer": a queued user/peer message arrived mid-wait — background
 			// the command (it keeps running) so the message injects promptly.
 			const notices =

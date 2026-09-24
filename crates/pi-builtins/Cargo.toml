@@ -96,6 +96,7 @@ self_cell = "1.0.4"
 serde_json = "1"
 smallvec.workspace = true
 similar = "3.2.0"
+same-file = "1.0.6"
 tempfile = "3.15.0"
 tokio-util = "0.7"
 xutf.workspace = true

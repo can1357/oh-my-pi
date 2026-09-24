@@ -115,6 +115,40 @@ describe("proc:// background jobs", () => {
 			await manager.dispose();
 		}
 	});
+
+	it("lists settled jobs with their frozen run duration instead of their age", async () => {
+		const clock = vi.spyOn(Date, "now").mockReturnValue(1_000);
+		const manager = new AsyncJobManager({});
+		const release = Promise.withResolvers<string>();
+		const doneId = manager.register("bash", "sleep 2; echo fast-done", () => release.promise, { ownerId: "Main" });
+		const blocked = Promise.withResolvers<string>();
+		const runningId = manager.register(
+			"bash",
+			"sleep 60",
+			async ({ signal }) => {
+				signal.addEventListener("abort", () => blocked.resolve("cancelled"), { once: true });
+				return blocked.promise;
+			},
+			{ ownerId: "Main" },
+		);
+		const session = toolSession(process.cwd(), manager, false);
+		try {
+			clock.mockReturnValue(3_000);
+			release.resolve("fast-done");
+			await manager.getJob(doneId)?.promise;
+			clock.mockReturnValue(40_000);
+			const list = await new ProcProtocolHandler().resolve(parseInternalUrl("proc://"), { session });
+			expect(list.content).toContain(`${doneId} [bash] completed in 2.0s — sleep 2; echo fast-done`);
+			expect(list.content).toContain(`${runningId} [bash] running up 39.0s — sleep 60`);
+			expect(list.details?.proc.jobs).toMatchObject([
+				{ id: doneId, durationMs: 2_000 },
+				{ id: runningId, durationMs: 39_000 },
+			]);
+		} finally {
+			clock.mockRestore();
+			await manager.dispose();
+		}
+	});
 });
 
 describe("bash services via proc://", () => {

@@ -189,29 +189,32 @@ export class SessionProviderBoundary {
 		}
 
 		if (sessionOnPayload) {
-			if (!options.onPayload) {
-				preparedOptions.onPayload = sessionOnPayload;
-			} else {
-				const requestOnPayload = options.onPayload;
-				preparedOptions.onPayload = async (payload, model) => {
-					const sessionPayload = await sessionOnPayload(payload, model);
-					const sessionResolvedPayload = sessionPayload ?? payload;
-					const requestPayload = await requestOnPayload(sessionResolvedPayload, model);
-					return requestPayload ?? sessionResolvedPayload;
-				};
-			}
+			const requestOnPayload = options.onPayload;
+			preparedOptions.onPayload = async (payload, model) => {
+				const sessionPayload = options.signal
+					? await sessionOnPayload(payload, model, options.signal)
+					: await sessionOnPayload(payload, model);
+				options.signal?.throwIfAborted();
+				const sessionResolvedPayload = sessionPayload ?? payload;
+				if (!requestOnPayload) return sessionResolvedPayload;
+				const requestPayload = options.signal
+					? await requestOnPayload(sessionResolvedPayload, model, options.signal)
+					: await requestOnPayload(sessionResolvedPayload, model);
+				options.signal?.throwIfAborted();
+				return requestPayload ?? sessionResolvedPayload;
+			};
 		}
 
 		if (sessionOnResponse) {
-			if (!options.onResponse) {
-				preparedOptions.onResponse = sessionOnResponse;
-			} else {
-				const requestOnResponse = options.onResponse;
-				preparedOptions.onResponse = async (response, model) => {
-					await sessionOnResponse(response, model);
-					await requestOnResponse(response, model);
-				};
-			}
+			const requestOnResponse = options.onResponse;
+			preparedOptions.onResponse = async (response, model) => {
+				if (options.signal) await sessionOnResponse(response, model, options.signal);
+				else await sessionOnResponse(response, model);
+				if (requestOnResponse) {
+					if (options.signal) await requestOnResponse(response, model, options.signal);
+					else await requestOnResponse(response, model);
+				}
+			};
 		}
 
 		if (sessionOnSseEvent) {
