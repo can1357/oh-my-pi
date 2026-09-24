@@ -217,7 +217,10 @@ export type SettingLayer = "global" | "override";
 // Handles
 // ═══════════════════════════════════════════════════════════════════════════
 
-/** Memoized value of one handle/derivation within one settings instance (see `Settings.valueCache`). */
+/**
+ * Memoized value of one handle/derivation within one settings instance, stored at
+ * `Settings.valueCache[slot]` and updated in place on recompute.
+ */
 export interface ValueCacheEntry {
 	revision: number;
 	inputs: readonly unknown[];
@@ -232,12 +235,21 @@ export interface ListenOptions<T> {
 	equals?: (a: T, b: T) => boolean;
 }
 
+/** Next {@link Derived.slot}; handles and derivations form a closed, module-level set. */
+let nextSlot = 0;
+
 /**
  * Read-only value computed from one or more settings. Reads are memoized per scope and recomputed
  * only when an input setting's effective value changes; derivation functions must be pure.
  */
 export abstract class Derived<T> {
-	/** Leaf settings this value depends on (change notifications subscribe to these ids). */
+	/**
+	 * Process-unique index of this handle/derivation: its entry in every `Settings.valueCache`,
+	 * and for leaf settings its change-listener bucket.
+	 */
+	readonly slot = nextSlot++;
+
+	/** Leaf settings this value depends on (change notifications subscribe to these). */
 	abstract get sources(): readonly AnySetting[];
 
 	/** Current input values for `settings`; the derivation recomputes only when one changes identity. */
@@ -250,21 +262,25 @@ export abstract class Derived<T> {
 	get(scope: ScopeLike): T {
 		const settings = settingsOf(scope);
 		const revision = settings.revision;
-		const cached = settings.valueCache.get(this);
+		const cached = settings.valueCache[this.slot];
 		if (cached?.revision === revision) return cached.value as T;
 		const inputs = this.inputs(settings);
-		if (cached && sameInputs(cached.inputs, inputs)) {
-			cached.revision = revision;
-			return cached.value as T;
+		if (!cached) {
+			const value = this.compute(inputs, settings);
+			settings.valueCache[this.slot] = { revision, inputs, value };
+			return value;
 		}
-		let value: unknown = this.compute(inputs, settings);
-		// Keep identity stable across equal recomputations so downstream derivations and
-		// listeners comparing by identity don't churn on unrelated layer rebuilds.
-		if (cached && typeof value === "object" && value !== null && Bun.deepEquals(cached.value, value)) {
-			value = cached.value;
+		if (!sameInputs(cached.inputs, inputs)) {
+			const value = this.compute(inputs, settings);
+			// Keep identity stable across equal recomputations so downstream derivations and
+			// listeners comparing by identity don't churn on unrelated layer rebuilds.
+			if (typeof value !== "object" || value === null || !Bun.deepEquals(cached.value, value)) {
+				cached.value = value;
+			}
+			cached.inputs = inputs;
 		}
-		settings.valueCache.set(this, { revision, inputs, value });
-		return value as T;
+		cached.revision = revision;
+		return cached.value as T;
 	}
 
 	/** Derives a memoized value from this one. */
@@ -285,21 +301,20 @@ export abstract class Derived<T> {
 	): () => void {
 		const settings = settingsOf(scope);
 		const equals = options?.equals ?? ((a: T, b: T) => Bun.deepEquals(a, b));
-		const ids = this.sources.map(source => source.id);
-		const inputs = new Set(ids);
+		const sources = this.sources;
 		const run = (next: T, previous: T) => {
 			try {
 				const result = onChange(next, previous);
-				if (result instanceof Promise) result.catch(error => reportListenerError(ids, error));
+				if (result instanceof Promise) result.catch(error => reportListenerError(sources, error));
 			} catch (error) {
-				reportListenerError(ids, error);
+				reportListenerError(sources, error);
 			}
 		};
 		let current = this.get(settings);
 		let queued = false;
 		let active = true;
-		const stop = settings.onEffectiveChange(path => {
-			if (queued || !inputs.has(path)) return;
+		const stop = settings.onEffectiveChange(sources, () => {
+			if (queued) return;
 			queued = true;
 			// One recompute per microtask, however many inputs a bulk reload touched.
 			queueMicrotask(() => {
@@ -328,8 +343,11 @@ function sameInputs(a: readonly unknown[], b: readonly unknown[]): boolean {
 	return true;
 }
 
-function reportListenerError(ids: readonly string[], error: unknown): void {
-	logger.warn("Settings: listener failed", { settings: ids.join(","), error: String(error) });
+function reportListenerError(sources: readonly AnySetting[], error: unknown): void {
+	logger.warn("Settings: listener failed", {
+		settings: sources.map(source => source.id).join(","),
+		error: String(error),
+	});
 }
 
 class MappedValue<S, T> extends Derived<T> {
@@ -411,18 +429,24 @@ export function combine<R extends Record<string, Derived<unknown>>, T = DerivedV
  */
 export class Setting<T, Id extends string = string> extends Derived<T> {
 	readonly id: Id;
+	/** {@link id} split into its dotted path, as addressed within a settings layer. */
+	readonly segments: readonly string[];
 	readonly definition: SettingDefinition;
 	readonly #sources: readonly AnySetting[];
 	/** Environment variable supplying this value, if declared (see {@link SettingEnv}). */
 	readonly envName: string | undefined;
 	readonly #parseEnv: ((raw: string) => unknown) | undefined;
 	readonly #envFallback: boolean;
+	/** Last raw environment text parsed, and its result: the variable is parsed once per distinct value. */
+	#envRaw: string | undefined;
+	#envParsed: T | undefined;
 	#warnedInvalid = false;
 	readonly #warnedItems = new Set<string>();
 
 	constructor(definition: SettingDefinition & { id: Id }) {
 		super();
 		this.id = definition.id;
+		this.segments = definition.id.split(".");
 		this.definition = definition;
 		this.#sources = [this];
 		const env = definition.env;
@@ -466,12 +490,17 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 	envValue(): T | undefined {
 		if (!this.envName || !this.#parseEnv) return undefined;
 		const raw = Bun.env[this.envName];
-		return raw === undefined ? undefined : (this.#parseEnv(raw) as T | undefined);
+		if (raw === undefined) return undefined;
+		if (raw !== this.#envRaw) {
+			this.#envParsed = this.#parseEnv(raw) as T | undefined;
+			this.#envRaw = raw;
+		}
+		return this.#envParsed;
 	}
 
 	/** Env value that currently takes effect in `scope`: a fallback env yields to any configured layer. */
 	#effectiveEnv(scope: ScopeLike): T | undefined {
-		if (this.#envFallback && settingsOf(scope).isConfigured(this.id)) return undefined;
+		if (this.#envFallback && settingsOf(scope).isConfigured(this)) return undefined;
 		return this.envValue();
 	}
 
@@ -564,7 +593,7 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 	}
 
 	protected inputs(settings: Settings): readonly unknown[] {
-		return [settings.rawValue(this.id)];
+		return [settings.rawValue(this)];
 	}
 
 	protected compute(inputs: readonly unknown[]): T {
@@ -622,12 +651,12 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 
 	/** Persists `value` to the global config (or sets a runtime-only override with `{ layer: "override" }`). */
 	set(scope: ScopeLike, value: T, options?: { layer?: SettingLayer }): void {
-		settingsOf(scope).writeValue(this.id, this.#normalize(value), options?.layer ?? "global");
+		settingsOf(scope).writeValue(this, this.#normalize(value), options?.layer ?? "global");
 	}
 
 	/** Runtime-only override (not persisted). */
 	override(scope: ScopeLike, value: T): void {
-		settingsOf(scope).writeValue(this.id, this.#normalize(value), "override");
+		settingsOf(scope).writeValue(this, this.#normalize(value), "override");
 	}
 
 	#normalize(value: T): unknown {
@@ -636,17 +665,17 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 
 	/** Removes a runtime override, restoring the persisted/default value. */
 	clearOverride(scope: ScopeLike): void {
-		settingsOf(scope).clearOverrideValue(this.id);
+		settingsOf(scope).clearOverrideValue(this);
 	}
 
 	/** Whether the environment or any settings layer (runtime, overlay, project, global) sets this value. */
 	isConfigured(scope: ScopeLike): boolean {
-		return this.envValue() !== undefined || settingsOf(scope).isConfigured(this.id);
+		return this.envValue() !== undefined || settingsOf(scope).isConfigured(this);
 	}
 
 	/** Layer supplying the effective value. */
 	provenance(scope: ScopeLike): SettingProvenance {
-		return this.#effectiveEnv(scope) !== undefined ? "env" : settingsOf(scope).getProvenance(this.id);
+		return this.#effectiveEnv(scope) !== undefined ? "env" : settingsOf(scope).getProvenance(this);
 	}
 }
 
@@ -710,18 +739,16 @@ let effectBinding: EffectBinding | undefined;
  */
 export function effect<T>(value: Derived<T>, apply: (value: T) => void | Promise<void>): void {
 	const bind: EffectBinder = settings => {
-		const ids = new Set(value.sources.map(source => source.id));
 		const run = (next: T) => {
 			try {
 				const result = apply(next);
-				if (result instanceof Promise) result.catch(error => reportListenerError([...ids], error));
+				if (result instanceof Promise) result.catch(error => reportListenerError(value.sources, error));
 			} catch (error) {
-				reportListenerError([...ids], error);
+				reportListenerError(value.sources, error);
 			}
 		};
 		let current = value.get(settings);
-		const unsubscribe = settings.onEffectiveChange(path => {
-			if (!ids.has(path)) return;
+		const unsubscribe = settings.onEffectiveChange(value.sources, () => {
 			const next = value.get(settings);
 			if (Bun.deepEquals(next, current)) return;
 			current = next;

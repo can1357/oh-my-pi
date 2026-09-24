@@ -242,8 +242,10 @@ import {
 	isMountableUnderXdev,
 	type LspStartupServerInfo,
 	listXdevTools,
+	planXdevPromptDocs,
 	ReadTool,
 	releaseComputerSessionsForOwner,
+	renderXdevPromptDocs,
 	resolveBuiltinToolPlan,
 	resolveMountedXdevExecutable,
 	SETTINGS_GATED_BUILTIN_TOOL_NAMES,
@@ -253,7 +255,6 @@ import {
 	WebSearchTool,
 	WriteTool,
 	warmupLspServers,
-	xdevDocsAll,
 	xdevEntries,
 } from "./tools";
 import { createBrowserPrelude } from "./tools/browser";
@@ -3567,8 +3568,23 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			const appendParts: string[] = [];
 			if (memoryInstructions) appendParts.push(memoryInstructions);
 			if (autoLearnInstructions) appendParts.push(autoLearnInstructions);
+			// List each mounted MCP tool once. A routed tool that the xd:// catalog
+			// would list carries its catalog summary on the route line and gets no
+			// catalog line; a tool the route bound omits keeps its catalog line.
+			const xdevPromptDocs = toolSession.xdev
+				? planXdevPromptDocs(
+						toolSession.xdev,
+						cfgToolsXdevDocs.get(settings),
+						cfgToolsXdevInlineDevices.get(settings),
+					)
+				: undefined;
 			const projection = projectMountedMCPXdevGuidance(
 				collectMountedMCPToolRoutes(toolSession.xdev ? listXdevTools(toolSession.xdev) : []),
+			);
+			const routedCatalogNames = new Set(
+				projection.mappings
+					.filter(mapping => xdevPromptDocs?.catalog.has(mapping.name))
+					.map(mapping => mapping.name),
 			);
 			if (projection.mappings.length > 0 || projection.hasOmittedMappings) {
 				appendParts.push(
@@ -3577,7 +3593,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							tools: projection.mappings.map(mapping => ({
 								mcpToolName: mapping.label,
 								path: mapping.path,
+								summary: xdevPromptDocs?.catalog.get(mapping.name),
 							})),
+							hasCatalogOnlyTools: routedCatalogNames.size > 0,
 							hasOmittedTools: projection.hasOmittedMappings,
 						})
 						.trim(),
@@ -3625,9 +3643,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				cwd: promptCwd,
 				additionalWorkspaceRoots: sessionManager.getAdditionalDirectories(),
 				xdevTools: toolSession.xdev ? xdevEntries(toolSession.xdev) : [],
-				xdevDocs: toolSession.xdev
-					? xdevDocsAll(toolSession.xdev, cfgToolsXdevDocs.get(settings), cfgToolsXdevInlineDevices.get(settings))
-					: "",
+				xdevDocs: xdevPromptDocs ? renderXdevPromptDocs(xdevPromptDocs, routedCatalogNames) : "",
 				resolvedCustomPrompt: options.customSystemPrompt,
 				systemPromptTemplate: options.systemPromptTemplate,
 				skills: cfgSkillful.get(settings) ? (session?.skills ?? skills) : [],
