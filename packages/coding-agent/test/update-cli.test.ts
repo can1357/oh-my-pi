@@ -8,6 +8,7 @@ import * as updateCli from "@oh-my-pi/pi-coding-agent/cli/update-cli";
 import {
 	buildBunInstallArgs,
 	buildHomebrewUpdateArgs,
+	buildHomebrewUpdateEnv,
 	buildMiseForceInstallArgs,
 	buildMiseUpdateEnv,
 	buildMiseUpgradeArgs,
@@ -552,6 +553,28 @@ describe("update-cli package manager commands", () => {
 	it("targets the Homebrew tap formula and switches to reinstall for forced updates", () => {
 		expect(buildHomebrewUpdateArgs(false)).toEqual(["upgrade", "can1357/tap/omp"]);
 		expect(buildHomebrewUpdateArgs(true)).toEqual(["reinstall", "can1357/tap/omp"]);
+	});
+
+	it("runs Homebrew self-updates noninteractively so brew cannot hang on a y prompt", () => {
+		// Regression: Homebrew's default ask mode prompts `[y/n]` when stdin is a
+		// TTY. `omp update` inherits the terminal, so `brew upgrade` hung waiting
+		// for confirmation (#12489). The env overlay must force official
+		// noninteractive flags over inherited values.
+		expect(
+			buildHomebrewUpdateEnv({
+				PATH: "/bin",
+				NONINTERACTIVE: "0",
+				HOMEBREW_NO_ASK: "0",
+				HOMEBREW_NO_AUTO_UPDATE: "0",
+			}),
+		).toEqual({
+			PATH: "/bin",
+			NONINTERACTIVE: "1",
+			HOMEBREW_NO_ASK: "1",
+			HOMEBREW_NO_AUTO_UPDATE: "1",
+			HOMEBREW_NO_ENV_HINTS: "1",
+			HOMEBREW_PAGER: "cat",
+		});
 	});
 
 	it("targets the mise GitHub backend and overrides release-age settings for attended updates", () => {
