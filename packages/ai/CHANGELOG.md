@@ -4,6 +4,9 @@
 
 ### Added
 
+- Added support for Anthropic User Profiles API
+- Added credential-aware auth resolution for multi-account tracking
+- Implemented cross-credential thinking block redaction
 - Added support for Apple Foundation Models (on-device) integration, including tool calling and vision capabilities
 - Added multi-account discovery and authorization resolution for Codex cyber access programs
 - Added automated request replay logic to handle access program rejections

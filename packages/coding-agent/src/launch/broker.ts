@@ -199,6 +199,7 @@ class DaemonLog {
 	#currentBytes = 0;
 	#queue: Promise<void> = Promise.resolve();
 	#closed = false;
+	#closing: Promise<void> | undefined;
 
 	constructor(logPath: string, previousPath: string, file: Bun.BunFile, writer: Bun.FileSink) {
 		this.#path = logPath;
@@ -207,6 +208,17 @@ class DaemonLog {
 		this.#writer = writer;
 	}
 
+	/** Opens an empty log for a newly started daemon, discarding output from any earlier daemon of the same name. */
+	static async create(dir: string): Promise<DaemonLog> {
+		await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+		const logPath = path.join(dir, LOG_FILE);
+		const previousPath = path.join(dir, PREVIOUS_LOG_FILE);
+		await Promise.all([fs.rm(previousPath, { force: true }), fs.rm(logPath, { force: true })]);
+		const file = Bun.file(logPath);
+		return new DaemonLog(logPath, previousPath, file, file.writer());
+	}
+
+	/** Opens a log for a relaunch of the same daemon, keeping the prior generation's output as the previous log. */
 	static async open(dir: string): Promise<DaemonLog> {
 		await fs.mkdir(dir, { recursive: true, mode: 0o700 });
 		const logPath = path.join(dir, LOG_FILE);
@@ -248,11 +260,12 @@ class DaemonLog {
 		return snapshot;
 	}
 
-	async close(): Promise<void> {
-		if (this.#closed) return;
+	close(): Promise<void> {
 		this.#closed = true;
-		await this.#queue;
-		await this.#writer.end();
+		this.#closing ??= this.#queue.then(async () => {
+			await this.#writer.end();
+		});
+		return this.#closing;
 	}
 
 	static async readFiles(
@@ -673,6 +686,8 @@ class DaemonBroker {
 			if (existing && existing.pendingCompletions.length > 0 && !replace) {
 				throw new Error(`Daemon ${spec.name} has unacknowledged completion notifications`);
 			}
+			// The replaced generation's log writer must finish before its files are discarded.
+			await existing?.log?.close();
 			if (spec.ready?.log) {
 				try {
 					new RegExp(spec.ready.log, "u");
@@ -699,7 +714,7 @@ class DaemonBroker {
 					detached: spec.detached,
 				},
 				dir,
-				log: await DaemonLog.open(dir),
+				log: await DaemonLog.create(dir),
 				generation: 0,
 				stopRequested: false,
 				logReady: !spec.ready?.log,

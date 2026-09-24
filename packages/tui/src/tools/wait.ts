@@ -120,6 +120,8 @@ export interface CoordinationDetails {
 	cancelled?: { id: string; status: CancelStatus }[];
 	/** Running subagents not represented by a job row in this result. */
 	agents?: AgentActivitySnapshot[];
+	/** `wait` was cut short by steering, a peer message, or a completion notice that injects next. */
+	interrupted?: boolean;
 }
 
 // =============================================================================
@@ -565,6 +567,13 @@ export const waitToolRenderer = {
 		options: RenderResultOptions,
 		uiTheme: Theme,
 	): Component {
+		if (result.details?.interrupted && !result.isError) {
+			return new Text(
+				renderStatusLine({ icon: "info", title: "Wait", meta: ["interrupted by message"] }, uiTheme),
+				0,
+				0,
+			);
+		}
 		const waited = result.details?.waited;
 		if (!waited) return jobsRenderResult(result, options, uiTheme);
 		return createCachedComponent(

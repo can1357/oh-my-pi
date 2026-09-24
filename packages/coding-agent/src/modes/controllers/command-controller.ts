@@ -1760,7 +1760,7 @@ const BAR_WIDTH_MAX = 24;
 const COLUMN_WIDTH_MIN = 4;
 
 function renderJobLine(job: AsyncJobSnapshotItem, now: number): string {
-	const duration = formatDuration(Math.max(0, now - job.startTime));
+	const duration = formatDuration(Math.max(0, (job.endTime ?? now) - job.startTime));
 	const status = formatJobStatus(job.status);
 	return `${theme.fg("dim", job.id)} ${theme.fg("dim", `[${job.type}]`)} ${status} ${theme.fg("dim", `(${duration})`)}`;
 }
