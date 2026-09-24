@@ -38,19 +38,25 @@ import { notifyProviderResponse } from "../utils/provider-response";
  * (`apiKey`, which the gateway injects from its own credential store; the
  * client's `apiKey` is the gateway *bearer*, sent in the `Authorization`
  * header rather than the request body).
+ *
+ * `operationDeadlineAt` is stripped even though it is a plain number: it is
+ * an epoch-ms stamp from the client's clock, meaningless to the gateway. The
+ * budget (`operationTimeoutMs`) does cross, and the gateway stamps its own
+ * deadline from it on entry.
  */
-const NON_WIRE_KEYS = new Set<keyof SimpleStreamOptions>([
-	"signal",
-	"apiKey",
-	"fetch",
-	"onPayload",
-	"onResponse",
-	"onSseEvent",
-	"execHandlers",
-	"cursorExecHandlers",
-	"cursorOnToolResult",
-	"providerSessionState",
-]);
+const NON_WIRE_KEYS: Record<string, true> = {
+	signal: true,
+	apiKey: true,
+	fetch: true,
+	onPayload: true,
+	onResponse: true,
+	onSseEvent: true,
+	execHandlers: true,
+	cursorExecHandlers: true,
+	cursorOnToolResult: true,
+	providerSessionState: true,
+	operationDeadlineAt: true,
+};
 const PI_NATIVE_STREAM_IDLE_TIMEOUT_ERROR = "pi-native stream stalled while waiting for the next event";
 const PI_NATIVE_STREAM_FIRST_EVENT_TIMEOUT_ERROR = "pi-native stream timed out while waiting for the first event";
 
@@ -64,7 +70,7 @@ function buildWireOptions(options: SimpleStreamOptions | undefined): Record<stri
 	const wire: Record<string, unknown> = {};
 	for (const [k, v] of Object.entries(options)) {
 		if (v === undefined) continue;
-		if (NON_WIRE_KEYS.has(k as keyof SimpleStreamOptions)) continue;
+		if (NON_WIRE_KEYS[k] === true) continue;
 		wire[k] = v;
 	}
 	return wire;

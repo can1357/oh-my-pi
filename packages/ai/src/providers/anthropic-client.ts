@@ -23,6 +23,7 @@
 import { scheduler } from "node:timers/promises";
 import * as AIError from "../error";
 import { AnthropicApiError, AnthropicConnectionError, AnthropicConnectionTimeoutError } from "../error";
+import { type OperationDeadlineOptions, operationDeadlineExceeded } from "../utils/operation-deadline";
 
 export { AnthropicApiError, AnthropicConnectionError, AnthropicConnectionTimeoutError };
 
@@ -49,6 +50,13 @@ export interface AnthropicRequestOptions {
 	 * the original error is surfaced. Non-positive values disable the cap. Defaults to 60000.
 	 */
 	maxRetryDelayMs?: number;
+	/**
+	 * Whole-operation budget and its absolute deadline, forwarded by the caller
+	 * so client-level retries count against the same budget as the provider loop
+	 * that wraps them. Omitted disables the check.
+	 */
+	operationTimeoutMs?: number;
+	operationDeadlineAt?: number;
 	/** Per-request headers merged after client defaults. */
 	headers?: Record<string, string>;
 }
@@ -259,7 +267,7 @@ export class AnthropicHttpClient {
 			} catch (error) {
 				if (callerSignal?.aborted) throw createAbortError();
 				if (attempt < maxRetries) {
-					await this.#backoff(attempt, undefined, callerSignal);
+					await this.#backoff(attempt, undefined, callerSignal, options);
 					continue;
 				}
 				if (error instanceof AIError.AnthropicConnectionTimeoutError) throw error;
@@ -278,7 +286,7 @@ export class AnthropicHttpClient {
 					throw await AIError.AnthropicApiError.fromResponse(response, callerSignal);
 				}
 				await response.body?.cancel().catch(() => {});
-				await this.#backoff(attempt, response.headers, callerSignal);
+				await this.#backoff(attempt, response.headers, callerSignal, options);
 				continue;
 			}
 
@@ -324,8 +332,17 @@ export class AnthropicHttpClient {
 		attempt: number,
 		responseHeaders: Headers | undefined,
 		signal: AbortSignal | undefined,
+		deadline: OperationDeadlineOptions | undefined,
 	): Promise<void> {
 		const delayMs = retryDelayFromHeaders(responseHeaders) ?? calculateAnthropicRetryDelayMs(attempt);
+		// A caller abort wins over the budget: an already-cancelled request must
+		// surface as aborted, not as a budget exhaustion the session would replay.
+		if (signal?.aborted) throw createAbortError();
+		// Client retries nest inside the caller's provider retry loop, so they
+		// spend the same whole-operation budget: refuse a sleep that would cross
+		// it rather than stacking another wait under one the caller already took.
+		const deadlineError = operationDeadlineExceeded(deadline, delayMs);
+		if (deadlineError) throw deadlineError;
 		try {
 			await scheduler.wait(delayMs, { signal });
 		} catch {

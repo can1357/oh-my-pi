@@ -27,6 +27,7 @@ import { shouldSendServiceTier } from "../types";
 import { normalizeSystemPrompts } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
+import { markOperationProgress, operationDeadlineExceeded } from "../utils/operation-deadline";
 import { normalizeSchemaForCCA, normalizeSchemaForGoogle, toolWireSchema } from "../utils/schema";
 import type {
 	Content,
@@ -1016,6 +1017,9 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 					retainTextSignature,
 					onFirstToken: () => {
 						firstTokenTime = performance.now();
+						// First output re-bases the operation deadline, so the
+						// budget bounds silence, not work.
+						markOperationProgress(options);
 					},
 				});
 
@@ -1032,8 +1036,16 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 						{ provider: model.provider, kind: "empty-body" },
 					);
 				}
+				const emptyRetryDelayMs = EMPTY_STREAM_BASE_DELAY_MS * 2 ** emptyAttempt;
+				// A caller abort wins over the budget: an already-cancelled request must
+				// surface as aborted, not as a budget exhaustion the session would replay.
+				if (options?.signal?.aborted) throw new AIError.AbortError();
+				// Whole-operation budget: a retry whose sleep would land past it is
+				// refused now, with its own error, instead of adding to the silence.
+				const deadlineError = operationDeadlineExceeded(options, emptyRetryDelayMs);
+				if (deadlineError) throw deadlineError;
 				try {
-					await scheduler.wait(EMPTY_STREAM_BASE_DELAY_MS * 2 ** emptyAttempt, { signal: options?.signal });
+					await scheduler.wait(emptyRetryDelayMs, { signal: options?.signal });
 				} catch {
 					throw new AIError.AbortError();
 				}

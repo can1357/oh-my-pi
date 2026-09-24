@@ -1,4 +1,4 @@
-import { attach, create, Flag } from "./flags";
+import { attach, create, Flag, PROVIDER_OPERATION_DEADLINE_PREFIX } from "./flags";
 
 /**
  * Caller-supplied input failed validation before/while building a provider
@@ -39,6 +39,36 @@ export class StreamTimeoutError extends Error {
 	constructor(message = "Request timed out.", options?: { cause?: unknown }) {
 		super(message, options?.cause === undefined ? undefined : { cause: options.cause });
 		this.name = "StreamTimeoutError";
+		attach(this, create(Flag.Transient, Flag.Timeout));
+	}
+}
+
+/**
+ * The whole-operation budget for one logical provider request ran out.
+ *
+ * Distinct from {@link StreamTimeoutError}: that watchdog fires when a live
+ * stream goes silent, while this one fires when the aggregate wall clock
+ * across every nested retry of the same request is spent. It is raised
+ * *instead of* a retry sleep that would land past the budget, so the failure
+ * is immediate rather than one more wait. Flagged transient so higher-level
+ * recovery may still replay the request with a fresh budget.
+ */
+export class ProviderOperationDeadlineError extends Error {
+	/** Configured budget for the operation, in milliseconds. */
+	readonly budgetMs: number;
+	/** Wall clock already spent on the operation when the retry was refused. */
+	readonly elapsedMs: number;
+	/** The retry sleep that was declined instead of taken. */
+	readonly declinedDelayMs: number;
+
+	constructor(budgetMs: number, elapsedMs: number, declinedDelayMs: number) {
+		super(
+			`${PROVIDER_OPERATION_DEADLINE_PREFIX} after ${Math.round(elapsedMs / 1000)}s of a ${Math.round(budgetMs / 1000)}s budget; declined a ${Math.round(declinedDelayMs)}ms retry wait.`,
+		);
+		this.name = "ProviderOperationDeadlineError";
+		this.budgetMs = budgetMs;
+		this.elapsedMs = elapsedMs;
+		this.declinedDelayMs = declinedDelayMs;
 		attach(this, create(Flag.Transient, Flag.Timeout));
 	}
 }

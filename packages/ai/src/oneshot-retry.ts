@@ -95,6 +95,13 @@ export interface OneshotRetryInfo {
 const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_BASE_DELAY_MS = 500;
 const DEFAULT_MAX_DELAY_MS = 30_000;
+/**
+ * Replays allowed for a budget-exhausted operation. Each replay costs another
+ * whole operation budget, so a side request (compaction/handoff summary,
+ * title, …) must not replay one for the full `maxAttempts`: one immediate
+ * replay preserves the transient-recovery property, then the failure stands.
+ */
+const ONESHOT_DEADLINE_MAX_RETRIES = 1;
 /** Cap on pure backoff growth. A provider hint may still exceed this, up to `maxDelayMs`. */
 const BACKOFF_CEILING_MS = 8_000;
 const RETRY_AFTER_MS_SUFFIX = /(?:^|\s)retry-after-ms=([0-9]+(?:\.[0-9]+)?)(?=\s|$)/i;
@@ -163,6 +170,7 @@ export async function retryTransientCompletion(
 	const baseDelayMs = options?.baseDelayMs ?? DEFAULT_BASE_DELAY_MS;
 	const maxDelayMs = options?.maxDelayMs ?? DEFAULT_MAX_DELAY_MS;
 	const signal = options?.signal;
+	let deadlineRetries = 0;
 
 	for (let attempt = 1; ; attempt++) {
 		let message: AssistantMessage | undefined;
@@ -193,8 +201,15 @@ export async function retryTransientCompletion(
 					: String(thrown)
 				: ((message as AssistantMessage).errorMessage ?? "unknown error");
 		const errorStatus = thrown !== undefined ? AIError.status(thrown) : (message as AssistantMessage).errorStatus;
+		// A budget exhaustion replays the whole request against a fresh budget,
+		// so one replay is still worth taking — but each costs a full budget,
+		// and the generic maxAttempts would turn the ceiling back into the
+		// multi-minute silence the budget exists to prevent.
+		const isOperationDeadline = AIError.isProviderOperationDeadlineText(errorMessage);
+		if (isOperationDeadline) deadlineRetries++;
+		const deadlineRetriesExhausted = isOperationDeadline && deadlineRetries > ONESHOT_DEADLINE_MAX_RETRIES;
 		const lastAttempt = attempt >= maxAttempts;
-		if (lastAttempt || !isRetryableOneshotFailure(errorId, errorStatus, errorMessage)) {
+		if (lastAttempt || deadlineRetriesExhausted || !isRetryableOneshotFailure(errorId, errorStatus, errorMessage)) {
 			if (thrown !== undefined) throw thrown;
 			return message as AssistantMessage;
 		}

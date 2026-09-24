@@ -68,6 +68,11 @@ const ALLOWED_OPTION_KEYS: ReadonlySet<keyof SimpleStreamOptions> = new Set([
 	"statefulResponses",
 	"streamFirstEventTimeoutMs",
 	"streamIdleTimeoutMs",
+	// Whole-operation retry budget: the gateway stamps its own
+	// `operationDeadlineAt` from this on entry, so nested provider retries
+	// server-side share one budget. The epoch deadline itself never crosses
+	// the wire — client and server clocks are not comparable.
+	"operationTimeoutMs",
 	"reasoning",
 	"disableReasoning",
 	"forceReasoningOff",

@@ -49,6 +49,14 @@ export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn =
 		const cacheRetention = cacheRetentionSetting === "auto" ? undefined : cacheRetentionSetting;
 		const streamFirstEventTimeoutMs = timeoutSecondsToMs(settings.get("providers.streamFirstEventTimeoutSeconds"));
 		const streamIdleTimeoutMs = timeoutSecondsToMs(settings.get("providers.streamIdleTimeoutSeconds"));
+		// Whole-request budget across pi-ai's nested retries. Separate knob from
+		// the watchdogs above: those bound silence inside one live stream, this
+		// one bounds the wall clock a request may spend without producing output
+		// (output extends it). Negative values are explicitly off — unlike the
+		// sibling watchdogs, this knob has no provider default to fall back to,
+		// so -1 must not silently mean "no budget" without saying so.
+		const operationTimeoutSeconds = settings.get("providers.operationTimeoutSeconds");
+		const operationTimeoutMs = operationTimeoutSeconds < 0 ? 0 : timeoutSecondsToMs(operationTimeoutSeconds);
 		// Server-side fallback (opt-in): when the user enables it AND the
 		// resolved model is a Claude Fable/Mythos on Anthropic's messages
 		// API, inject the `fallbacks: [{ model: "claude-opus-5-5" }]` chain.
@@ -74,6 +82,7 @@ export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn =
 			cacheRetention: streamOptions?.cacheRetention ?? cacheRetention,
 			streamFirstEventTimeoutMs: streamOptions?.streamFirstEventTimeoutMs ?? streamFirstEventTimeoutMs,
 			streamIdleTimeoutMs: streamOptions?.streamIdleTimeoutMs ?? streamIdleTimeoutMs,
+			operationTimeoutMs: streamOptions?.operationTimeoutMs ?? operationTimeoutMs,
 			maxRetryDelayMs: streamOptions?.maxRetryDelayMs ?? settings.get("retry.maxDelayMs"),
 			maxInFlightRequests: validateProviderMaxInFlightRequests(
 				streamOptions?.maxInFlightRequests ?? settings.get("providers.maxInFlightRequests"),

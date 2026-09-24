@@ -17,6 +17,7 @@ import { scheduler } from "node:timers/promises";
 import * as AIError from "../error";
 import type { AssistantMessage, AssistantMessageEvent, Context } from "../types";
 import { AssistantMessageEventStream } from "./event-stream";
+import { type OperationDeadlineOptions, markOperationProgress, operationDeadlineExceeded } from "./operation-deadline";
 
 export const MAX_EMPTY_COMPLETION_RETRIES = 2;
 export const EMPTY_COMPLETION_BASE_DELAY_MS = 500;
@@ -57,7 +58,7 @@ function isMeaningfulCompletionEvent(event: AssistantMessageEvent): boolean {
 	}
 }
 
-interface StreamRetryOptions {
+interface StreamRetryOptions extends OperationDeadlineOptions {
 	signal?: AbortSignal;
 	providerRetryWait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
 	acceptEmptyResponse?: boolean;
@@ -123,6 +124,9 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 						buffered.push(event);
 						continue;
 					}
+					// First meaningful event commits the attempt — and re-bases the
+					// operation deadline, so the budget bounds silence, not work.
+					if (!committed) markOperationProgress(options);
 					committed = true;
 					flush();
 					outer.push(event);
@@ -168,6 +172,15 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 			}
 
 			if (delayMs !== undefined && !signal?.aborted) {
+				// The operation budget covers this sleep and every nested retry that
+				// preceded it: once it is spent, another attempt only prolongs the
+				// silence, so surface the exhaustion instead of waiting it out.
+				const deadlineError = operationDeadlineExceeded(options, delayMs);
+				if (deadlineError) {
+					flush();
+					outer.fail(deadlineError);
+					return;
+				}
 				try {
 					if (options?.providerRetryWait) await options.providerRetryWait(delayMs, signal);
 					else await scheduler.wait(delayMs, { signal });

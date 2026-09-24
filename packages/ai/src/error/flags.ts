@@ -156,6 +156,18 @@ const TIMEOUT_PATTERN = /\b(?:operation\s+)?timed?\s*out\b|\btimeout\b|\bstream 
 const TRANSIENT_ENVELOPE_PATTERN = /anthropic stream envelope error:/i;
 const TRANSIENT_ENVELOPE_TRUNCATION_PATTERN = /before message_(?:start|stop)/i;
 export const STREAM_READ_ERROR_PATTERN = /stream[_ -]?read[_ -]?error/i;
+/**
+ * Leading text of {@link ProviderOperationDeadlineError}. Exported so the
+ * error class and the session layer agree on one spelling: recovery only ever
+ * sees the persisted `errorMessage` string, not the original instance.
+ */
+export const PROVIDER_OPERATION_DEADLINE_PREFIX = "Provider operation budget exhausted";
+
+/** Persisted-text form of a whole-operation budget exhaustion. */
+export function isProviderOperationDeadlineText(text: string | undefined): boolean {
+	return text !== undefined && text.startsWith(PROVIDER_OPERATION_DEADLINE_PREFIX);
+}
+
 /** Python h2/httpx diagnostics forwarded through provider or proxy error events. */
 export const PYTHON_HTTP2_STREAM_RESET_PATTERN = /<StreamReset stream_id:\d+, error_code:(?:2|7), remote_reset:True>/;
 /** Python h11/httpx EOF while reading an HTTP/1.1 chunked response body. */
@@ -552,6 +564,10 @@ function classifyText(
 		}
 		if (isTimeoutText(errorMessage)) kinds |= Flag.Transient | Flag.Timeout;
 		else if (isTransientErrorText(errorMessage)) kinds |= Flag.Transient;
+		// An exhausted whole-operation budget reaches recovery as persisted text
+		// once the original error instance is gone, so classify it from the text
+		// too — it is the transient timeout its own flags already say it is.
+		if (isProviderOperationDeadlineText(errorMessage)) kinds |= Flag.Transient | Flag.Timeout;
 		// A stream truncation, transport-level stream drop, or forwarded Codex HTTP
 		// body-read failure may not match TRANSIENT_TRANSPORT_PATTERN. Flag it
 		// explicitly so AIError.retriable and the turn-recovery layer treat it as

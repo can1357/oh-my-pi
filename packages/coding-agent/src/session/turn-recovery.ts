@@ -75,6 +75,8 @@ const UNEXPECTED_STOP_MAX_RETRIES = 3;
 const UNEXPECTED_STOP_TIMEOUT_MS = 4000;
 const EMPTY_STOP_MAX_RETRIES = 3;
 const MALFORMED_FUNCTION_CALL_MAX_RETRIES = 3;
+/** Session-level replays allowed for an exhausted provider-operation budget; each one costs a full budget. */
+const OPERATION_DEADLINE_MAX_RETRIES = 2;
 const SIBLING_UNBLOCK_BUFFER_MS = 1_000;
 const NON_WHITESPACE_RE = /\S/;
 const USAGE_PREFLIGHT_BLOCKED_PREFIX = "Usage preflight blocked:";
@@ -275,6 +277,11 @@ export class TurnRecovery {
 	readonly #host: TurnRecoveryHost;
 	#retryAbortController: AbortController | undefined;
 	#retryAttempt = 0;
+	// Exhausted-budget replays spent in this saga. Unlike #retryAttempt this
+	// is NOT reset by a model switch: each replay costs another whole budget,
+	// so the OPERATION_DEADLINE_MAX_RETRIES bound applies across the whole
+	// fallback chain, not per model.
+	#operationDeadlineRetries = 0;
 	#requestBodyReadTimeoutRecoveryPromptSequence: number | undefined;
 	#retryPromise: Promise<void> | undefined;
 	#retryResolve: (() => void) | undefined;
@@ -421,6 +428,17 @@ export class TurnRecovery {
 		this.#acceptTerminalEmptyStopForPrompt = false;
 	}
 
+	/**
+	 * Closes a retry saga: restarts both the per-model attempt counter and
+	 * the saga-wide exhausted-budget replay counter. Every saga end goes
+	 * through here so a later prompt starts with a full deadline bound; a
+	 * model switch mid-saga deliberately does NOT come through here.
+	 */
+	#resetSagaRetryCounters(): void {
+		this.#retryAttempt = 0;
+		this.#operationDeadlineRetries = 0;
+	}
+
 	/** Sets whether one terminal empty stop is accepted for the current prompt. */
 	setAcceptTerminalEmptyStop(accept: boolean): void {
 		this.#acceptTerminalEmptyStopForPrompt = accept;
@@ -475,7 +493,7 @@ export class TurnRecovery {
 			retryErrors,
 		});
 		this.#clearPendingRetryErrors();
-		this.#retryAttempt = 0;
+		this.#resetSagaRetryCounters();
 		this.resolveRetry();
 	}
 
@@ -483,7 +501,7 @@ export class TurnRecovery {
 	async onErrorSettledWithoutRetry(message: AssistantMessage, compaction: RecoveryCompactionResult): Promise<void> {
 		if (message.stopReason !== "error" || this.#retryAttempt === 0 || compaction.continuationScheduled) return;
 		const attempt = this.#retryAttempt;
-		this.#retryAttempt = 0;
+		this.#resetSagaRetryCounters();
 		await this.#host.emitSessionEvent({
 			type: "auto_retry_end",
 			success: false,
@@ -880,7 +898,7 @@ export class TurnRecovery {
 				finalError,
 			});
 			this.#clearPendingRetryErrors();
-			this.#retryAttempt = 0;
+			this.#resetSagaRetryCounters();
 			this.resolveRetry();
 			// A turn with no actionable output carries no transcript value, while its
 			// provider usage can anchor the next prompt at the full failed-request size
@@ -2188,6 +2206,12 @@ export class TurnRecovery {
 
 		const generation = this.#host.promptGeneration();
 		this.#retryAttempt++;
+		// An exhausted budget is identified by its persisted text (the original
+		// error instance is gone once the turn is re-driven). Count these
+		// replays separately: the generic counter resets on a model switch,
+		// but a replay on a new model still costs a whole budget.
+		const isOperationDeadlineError = AIError.isProviderOperationDeadlineText(message.errorMessage);
+		if (isOperationDeadlineError) this.#operationDeadlineRetries++;
 
 		// Create retry promise on first attempt so waitForRetry() can await it
 		// Ensure only one promise exists (avoid orphaned promises from concurrent calls)
@@ -2205,8 +2229,20 @@ export class TurnRecovery {
 		// configured chain.
 		const maxRetries = this.#isBoundedThinkingStreamClose(message)
 			? Math.min(retrySettings.maxRetries, 1)
-			: retrySettings.maxRetries;
-		const retryBudgetExhausted = this.#retryAttempt > maxRetries;
+			: AIError.isProviderOperationDeadlineText(message.errorMessage)
+				? // An exhausted operation budget is transient — a fresh request may
+					// well succeed — but each replay costs another whole budget, so the
+					// generic ten-attempt ladder would turn a 15-minute ceiling back
+					// into a multi-hour silence. Retry it, briefly.
+					Math.min(retrySettings.maxRetries, OPERATION_DEADLINE_MAX_RETRIES)
+				: retrySettings.maxRetries;
+		// Budget exhaustion is gated on the saga-wide deadline counter, not the
+		// per-model attempt counter: a model switch must not refund replays.
+		const deadlineRetriesCap = Math.min(retrySettings.maxRetries, OPERATION_DEADLINE_MAX_RETRIES);
+		const deadlineRetriesExhausted = isOperationDeadlineError && this.#operationDeadlineRetries > deadlineRetriesCap;
+		const retryBudgetExhausted = isOperationDeadlineError
+			? deadlineRetriesExhausted
+			: this.#retryAttempt > maxRetries;
 
 		const errorMessage = message.errorMessage || "Unknown error";
 		const id = this.#classifyRetryMessage(message);
@@ -2369,7 +2405,13 @@ export class TurnRecovery {
 			/\bGoUsageLimitError\b/.test(errorMessage) &&
 			(!this.#hasReplayUnsafeOutput(message) || this.#unexecutedToolCallsReplaySafe(message));
 
-		if (!staleOpenAIResponsesReplayError && !switchedCredential && currentSelector) {
+		// A spent operation-budget bound suppresses the fallback consult below:
+		// every replay costs another whole budget, so letting an exhausted
+		// error fail over would refund the bound once per fallback-chain
+		// entry. Non-exhausted deadline errors still consult and switch
+		// normally. (The Fireworks Fast degrade is intrinsic to the Fast
+		// contract, not a retry-loop hop, and is unaffected.)
+		if (!staleOpenAIResponsesReplayError && !switchedCredential && currentSelector && !deadlineRetriesExhausted) {
 			// A refusal chain stops at the retry budget: the exhausted-attempt
 			// last resort is for provider failures, not classifier decisions.
 			if (
@@ -2417,13 +2459,16 @@ export class TurnRecovery {
 					retryErrors,
 				});
 				this.#clearPendingRetryErrors();
-				this.#retryAttempt = 0;
+				this.#resetSagaRetryCounters();
 				this.resolveRetry(); // Resolve so waitForRetry() completes
 				return false;
 			}
-			// A fallback model gets a fresh retry budget. Credential rotation
+			// A fallback model gets a fresh generic retry budget. Credential rotation
 			// instead keeps the cumulative attempt count while bypassing the
 			// same-route budget: every distinct account must be tried first.
+			// Exhausted-budget replays are the exception: #operationDeadlineRetries
+			// is deliberately NOT reset here, so the deadline bound holds across
+			// the whole fallback chain (each replay costs another whole budget).
 			if (switchedModel) this.#retryAttempt = 1;
 		}
 		if ((classifierRefusal || accountPolicyDenial) && !switchedCredential && !switchedModel) {
@@ -2444,7 +2489,7 @@ export class TurnRecovery {
 				});
 				this.#clearPendingRetryErrors();
 			}
-			this.#retryAttempt = 0;
+			this.#resetSagaRetryCounters();
 			this.resolveRetry();
 			return false;
 		}
@@ -2469,7 +2514,7 @@ export class TurnRecovery {
 				});
 				this.#clearPendingRetryErrors();
 			}
-			this.#retryAttempt = 0;
+			this.#resetSagaRetryCounters();
 			this.resolveRetry();
 			return false;
 		}
@@ -2502,7 +2547,7 @@ export class TurnRecovery {
 		if (maxDelayMs > 0 && delayMs > maxDelayMs && !switchedCredential && !switchedModel && !waitForUsageReset) {
 			await this.persistTerminalEmptyErrorTurn(message);
 			const attempt = this.#retryAttempt;
-			this.#retryAttempt = 0;
+			this.#resetSagaRetryCounters();
 			await this.#host.emitSessionEvent({
 				type: "auto_retry_end",
 				success: false,
@@ -2552,7 +2597,7 @@ export class TurnRecovery {
 			}
 			// Aborted during sleep - emit end event so UI can clean up
 			const attempt = this.#retryAttempt;
-			this.#retryAttempt = 0;
+			this.#resetSagaRetryCounters();
 			this.#retryAbortController = undefined;
 			await this.#host.emitSessionEvent({
 				type: "auto_retry_end",
@@ -2625,7 +2670,7 @@ export class TurnRecovery {
 	async #failRetryAfterLocalContinueError(message: AssistantMessage, error: unknown): Promise<void> {
 		if (this.#retryAttempt === 0) return;
 		const attempt = this.#retryAttempt;
-		this.#retryAttempt = 0;
+		this.#resetSagaRetryCounters();
 		const localError = error instanceof Error ? error.message : String(error);
 		await this.persistTerminalEmptyErrorTurn(message);
 		await this.#host.emitSessionEvent({
@@ -2791,7 +2836,7 @@ export class TurnRecovery {
 		}
 
 		// Reset retry budget for a fresh attempt
-		this.#retryAttempt = 0;
+		this.#resetSagaRetryCounters();
 
 		// Re-attempt the turn
 		this.#host.scheduleAgentContinue({ source: "manual-retry", delayMs: 1 });

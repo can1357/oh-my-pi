@@ -220,6 +220,34 @@ describe("AnthropicMessagesClient timeout and abort", () => {
 		expect((error as Error).message).toBe("Request was aborted.");
 		expect(calls.length).toBe(1);
 	});
+
+	it("prefers the caller abort over an exhausted operation budget on the retry path", async () => {
+		// The abort lands mid-flight, after the loop-top check but before the
+		// retry backoff: the backoff must surface the abort, not re-label it
+		// as a budget exhaustion the session would replay.
+		const controller = new AbortController();
+		const { calls, fetch } = createFetchMock([
+			new Response(anthropicOverloadedErrorBody, { status: 429, headers: { "retry-after-ms": "1" } }),
+		]);
+		const abortingFetch = ((input: string | URL | Request, init?: RequestInit) => {
+			controller.abort();
+			return fetch(input, init);
+		}) as typeof fetch;
+		const client = new AnthropicMessagesClient({ apiKey: "sk-test", maxRetries: 5, fetch: abortingFetch });
+
+		const error = await client.messages
+			.create(params, {
+				signal: controller.signal,
+				operationTimeoutMs: 900_000,
+				operationDeadlineAt: Date.now() - 1,
+			})
+			.asResponse()
+			.catch(err => err);
+
+		expect(error).toBeInstanceOf(AIError.AbortError);
+		expect((error as Error).message).toBe("Request was aborted.");
+		expect(calls.length).toBe(1);
+	});
 });
 
 describe("AnthropicMessagesClient request assembly", () => {

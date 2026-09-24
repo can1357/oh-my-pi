@@ -302,6 +302,10 @@ describe("streamPiNative request shape", () => {
 			onSseEvent: () => undefined,
 			providerSessionState: new Map(),
 			maxTokens: 1024,
+			// The budget crosses so the gateway can stamp its own deadline;
+			// the client's epoch stamp never does (clocks are not comparable).
+			operationTimeoutMs: 900_000,
+			operationDeadlineAt: Date.now() + 900_000,
 		});
 		await stream.result();
 
@@ -313,8 +317,10 @@ describe("streamPiNative request shape", () => {
 		expect("onResponse" in body.options).toBe(false);
 		expect("onSseEvent" in body.options).toBe(false);
 		expect("providerSessionState" in body.options).toBe(false);
+		expect("operationDeadlineAt" in body.options).toBe(false);
 		// And the legitimate options survive
 		expect(body.options.maxTokens).toBe(1024);
+		expect(body.options.operationTimeoutMs).toBe(900_000);
 		expect(responseMetadata).toMatchObject({
 			status: 200,
 			requestId: "gateway-request-id",
