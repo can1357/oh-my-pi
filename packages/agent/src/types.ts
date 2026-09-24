@@ -24,6 +24,7 @@ import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import type { AppendOnlyContextManager } from "./append-only-context";
 import type { AgentRunCoverage, AgentRunSummary } from "./run-collector";
+import type { SentToolDefinitions } from "./sent-tool-definitions";
 import type { AgentTelemetryConfig } from "./telemetry";
 
 /** Stream function - can return sync or Promise for async config lookup */
@@ -239,6 +240,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * and provider send.
 	 */
 	transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
+
+	/** Remembers sent tool definitions to fill {@link Context.inactiveTools}. */
+	sentToolDefinitions?: SentToolDefinitions;
 
 	/**
 	 * Resolves the API key or resolver for the current model before each LLM call.

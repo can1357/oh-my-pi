@@ -1,3 +1,4 @@
+import { type } from "@oh-my-pi/omptype";
 import { AnthropicHttpClient, type AnthropicClientOptions, type AnthropicRequestOptions } from "./anthropic-client";
 
 const USER_PROFILES_BETA = "user-profiles-2026-09-04";
@@ -86,6 +87,30 @@ export interface UserProfileRequestOptions extends AnthropicRequestOptions {
 	workspaceId?: string;
 }
 
+const externalUserDetailsSchema = type({
+	account_status: "'active' | 'suspended' | 'blocked' | null",
+	country: "string | null",
+	email_hash: "string | null",
+	entity_type: "'individual' | 'business' | 'non_profit' | 'government' | null",
+	name_hash: "string | null",
+	onboarded_at: "string | null",
+	reference_id: "string | null",
+});
+const userProfileSchema = type({
+	type: "'user_profile'",
+	id: "string",
+	created_at: "string",
+	updated_at: "string",
+	metadata: { "[string]": "string" },
+	trust_grants: { "[string]": { status: "'active' | 'pending' | 'rejected'" } },
+	"access_type?": "'application' | 'passthrough'",
+	"external_user_details?": externalUserDetailsSchema,
+	"external_user_onboarded_at?": "string | null",
+	"name?": "string | null",
+});
+const userProfilePageSchema = type({ data: userProfileSchema.array(), next_page: "string | null" });
+const enrollmentUrlSchema = type({ type: "'enrollment_url'", expires_at: "string", url: "string" });
+
 /** Beta User Profiles REST API. Uses the same authentication, retries and errors as Messages. */
 export class AnthropicUserProfilesClient {
 	#http: AnthropicHttpClient;
@@ -97,7 +122,8 @@ export class AnthropicUserProfilesClient {
 	async #request<T>(
 		method: "GET" | "POST",
 		path: string,
-		params?: unknown,
+		params: unknown,
+		parse: (value: unknown) => T | type.errors,
 		options?: UserProfileRequestOptions,
 	): Promise<T> {
 		const requestHeaders = new Headers(options?.headers);
@@ -110,11 +136,13 @@ export class AnthropicUserProfilesClient {
 			headers[key] = value;
 		});
 		const response = await this.#http.request(method, path, params, { ...options, headers });
-		return response.json();
+		const parsed = parse(await response.json());
+		if (parsed instanceof type.errors) throw new Error(`Invalid Anthropic user profile response: ${parsed.summary}`);
+		return parsed;
 	}
 
 	createUserProfile(params: CreateUserProfileParams = {}, options?: UserProfileRequestOptions): Promise<UserProfile> {
-		return this.#request("POST", "/v1/user_profiles", params, options);
+		return this.#request("POST", "/v1/user_profiles", params, userProfileSchema, options);
 	}
 
 	listUserProfiles(
@@ -127,7 +155,7 @@ export class AnthropicUserProfilesClient {
 		if (params.order_by !== undefined) query.set("order_by", params.order_by);
 		if (params.page !== undefined) query.set("page", params.page);
 		const suffix = query.size ? `?${query}` : "";
-		return this.#request("GET", `/v1/user_profiles${suffix}`, undefined, options);
+		return this.#request("GET", `/v1/user_profiles${suffix}`, undefined, userProfilePageSchema, options);
 	}
 
 	/** Fetch all pages in cursor order, without buffering the complete list. */
@@ -144,7 +172,7 @@ export class AnthropicUserProfilesClient {
 	}
 
 	getUserProfile(id: string, options?: UserProfileRequestOptions): Promise<UserProfile> {
-		return this.#request("GET", `/v1/user_profiles/${encodeURIComponent(id)}`, undefined, options);
+		return this.#request("GET", `/v1/user_profiles/${encodeURIComponent(id)}`, undefined, userProfileSchema, options);
 	}
 
 	updateUserProfile(
@@ -152,10 +180,16 @@ export class AnthropicUserProfilesClient {
 		params: UpdateUserProfileParams,
 		options?: UserProfileRequestOptions,
 	): Promise<UserProfile> {
-		return this.#request("POST", `/v1/user_profiles/${encodeURIComponent(id)}`, params, options);
+		return this.#request("POST", `/v1/user_profiles/${encodeURIComponent(id)}`, params, userProfileSchema, options);
 	}
 
 	createEnrollmentUrl(id: string, options?: UserProfileRequestOptions): Promise<UserProfileEnrollmentUrl> {
-		return this.#request("POST", `/v1/user_profiles/${encodeURIComponent(id)}/enrollment_url`, undefined, options);
+		return this.#request(
+			"POST",
+			`/v1/user_profiles/${encodeURIComponent(id)}/enrollment_url`,
+			undefined,
+			enrollmentUrlSchema,
+			options,
+		);
 	}
 }

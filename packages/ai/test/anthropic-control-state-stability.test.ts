@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
-import type { AssistantMessage, Context, Message, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
+import type { AssistantMessage, Context, Message } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 
@@ -18,7 +18,7 @@ const MODEL = buildModel({
 });
 
 type WireMessage = { role: string; content: unknown; output_config?: { effort?: string } };
-type Payload = { output_config?: { effort?: string }; messages: WireMessage[] };
+type Payload = { output_config?: { effort?: string }; messages: WireMessage[]; tools?: { name: string }[] };
 
 let clock = 1;
 function user(text: string, steering?: boolean): Message {
@@ -56,19 +56,28 @@ function tool(name: string): NonNullable<Context["tools"]>[number] {
 	return { name, description: `${name} tool`, parameters: { type: "object", properties: {} } };
 }
 
-/** Builds one request through the real param path; every call shares `state` like one omp session. */
-function capture(
-	state: Map<string, ProviderSessionState>,
+type Turn = { payload: Payload; message: AssistantMessage };
+
+/**
+ * Builds one request through the real param path. `message` is the terminal
+ * message; its `requestControls` go on the reply appended for the next turn.
+ */
+async function capture(
 	messages: Message[],
 	reasoning: Effort,
-	options: { sessionId?: string; tools?: Context["tools"] } = {},
-): Promise<Payload> {
-	const { promise, resolve } = Promise.withResolvers<Payload>();
+	options: { sessionId?: string; tools?: Context["tools"]; inactiveTools?: Context["tools"] } = {},
+): Promise<Turn> {
+	let payload: Payload | undefined;
 	const controller = new AbortController();
 	controller.abort();
-	streamAnthropic(
+	const message = await streamAnthropic(
 		MODEL,
-		{ systemPrompt: ["Stable system prompt."], messages, tools: options.tools ?? [tool("read")] },
+		{
+			systemPrompt: ["Stable system prompt."],
+			messages,
+			tools: options.tools ?? [tool("read")],
+			inactiveTools: options.inactiveTools,
+		},
 		{
 			apiKey: "sk-ant-oat-test",
 			isOAuth: true,
@@ -76,11 +85,36 @@ function capture(
 			thinkingEnabled: true,
 			reasoning,
 			sessionId: options.sessionId ?? "session",
-			providerSessionState: state,
-			onPayload: payload => resolve(payload as Payload),
+			onPayload: captured => {
+				payload = captured as Payload;
+			},
 		},
+	).result();
+	if (!payload) throw new Error("expected a built payload");
+	return { payload, message };
+}
+
+/** `message` as the response to `turn`'s request. */
+function answering<T extends AssistantMessage>(message: T, turn: Turn): T {
+	return { ...message, requestControls: turn.message.requestControls };
+}
+
+/** Wire tool name `turn` declared for `name` (OAuth prefixes tool names). */
+function wireName(turn: Turn, index: number): string {
+	const name = turn.payload.tools?.[index]?.name;
+	if (!name) throw new Error(`expected declared tool ${index}`);
+	return name;
+}
+
+function referencesTool(payload: Payload, name: string): boolean {
+	return payload.messages.some(
+		message =>
+			Array.isArray(message.content) &&
+			message.content.some(
+				(block: { tool?: { type?: string; name?: string } }) =>
+					block.tool?.type === "tool_reference" && block.tool.name === name,
+			),
 	);
-	return promise;
 }
 
 /** Cache breakpoints move with the request; everything else must be byte-identical. */
@@ -108,54 +142,72 @@ function expectCacheStableContinuation(earlier: Payload, later: Payload): void {
 	expect(later.messages.slice(0, earlier.messages.length).map(serialize)).toEqual(earlier.messages.map(serialize));
 }
 
-describe("Anthropic control state across one session's requests", () => {
-	it("keeps the conversation's controls when side requests share the provider session state", async () => {
-		const state = new Map<string, ProviderSessionState>();
+describe("Anthropic controls derived from the transcript", () => {
+	it("replays a tool removal and an effort change from records so the next turn is a cache-stable continuation", async () => {
 		const turn0 = [user("start")];
-		await capture(state, turn0, Effort.High);
-		const turn1 = [...turn0, reply("ready"), user("continue")];
-		const beforeSideRequests = await capture(state, turn1, Effort.Low);
-		// `runEphemeralTurn` (/btw, /omfg, idle recap) sends the main history under a
-		// fresh `<session>:side:<snowflake>` id through the same providerSessionState.
-		for (let index = 0; index < 16; index++) {
-			await capture(state, [...turn1, user(`side question ${index}`)], Effort.Low, {
-				sessionId: `session:side:${index}`,
-			});
-		}
-		const afterSideRequests = await capture(state, [...turn1, reply("done"), user("again")], Effort.Low);
+		const first = await capture(turn0, Effort.High, { tools: [tool("read"), tool("grep")] });
+		const turn1 = [...turn0, answering(reply("ready"), first), user("continue")];
+		const changed = await capture(turn1, Effort.Low, { tools: [tool("read")], inactiveTools: [tool("grep")] });
 
-		expectCacheStableContinuation(beforeSideRequests, afterSideRequests);
+		expect(changed.payload.tools?.map(declared => declared.name)).toEqual([wireName(first, 0), wireName(first, 1)]);
+		expect(changed.payload.output_config?.effort).toBe("high");
+		expect(referencesTool(changed.payload, wireName(first, 1))).toBe(true);
+		expect(changed.payload.messages.flatMap(message => message.output_config?.effort ?? [])).toEqual(["low"]);
+
+		const next = await capture([...turn1, answering(reply("done"), changed), user("again")], Effort.Low, {
+			tools: [tool("read")],
+			inactiveTools: [tool("grep")],
+		});
+		expectCacheStableContinuation(changed.payload, next.payload);
 	});
 
-	it("keeps a new conversation's baseline when abandoned continued baselines fill the cache", async () => {
-		const state = new Map<string, ProviderSessionState>();
-		// Each compaction rewrites the root, abandoning a baseline that was continued.
-		for (let epoch = 0; epoch < 16; epoch++) {
-			const root = [user(`summary ${epoch}`)];
-			await capture(state, root, Effort.High);
-			await capture(state, [...root, reply(`reply ${epoch}`), user(`next ${epoch}`)], Effort.High);
-		}
-		const turn0 = [user("live summary")];
-		const firstRequest = await capture(state, turn0, Effort.High);
-		// An idle recap lands before the conversation's second request.
-		await capture(state, [...turn0, user("recap")], Effort.High, { sessionId: "session:side:recap" });
-		const secondRequest = await capture(state, [...turn0, reply("ok"), user("continue")], Effort.Low);
+	it("gives a side request the main request's messages as a byte-identical prefix", async () => {
+		const turn0 = [user("start")];
+		const first = await capture(turn0, Effort.High, { tools: [tool("read"), tool("grep")] });
+		const turn1 = [...turn0, answering(reply("ready"), first), user("continue")];
+		const changed = await capture(turn1, Effort.Low, { tools: [tool("read")], inactiveTools: [tool("grep")] });
+		const history = [...turn1, answering(reply("done"), changed), user("again")];
+		const options = { tools: [tool("read")], inactiveTools: [tool("grep")] };
 
-		expectCacheStableContinuation(firstRequest, secondRequest);
+		// Same tools and effort as the latest record: no tail control.
+		const main = await capture(history, Effort.Low, options);
+		const side = await capture([...history, user("side question")], Effort.Low, {
+			...options,
+			sessionId: "session:side:1",
+		});
+
+		expect(referencesTool(main.payload, wireName(first, 1))).toBe(true);
+		expect(main.payload.messages.at(-1)?.role).toBe("user");
+		expect(withoutCacheControl(side.payload.tools)).toEqual(withoutCacheControl(main.payload.tools));
+		expectCacheStableContinuation(main.payload, side.payload);
 	});
 
-	it("does not rewrite an already-sent tool control when a later effort change lands on its slot", async () => {
-		const state = new Map<string, ProviderSessionState>();
+	it("drops a declared tool whose definition is no longer available", async () => {
 		const turn0 = [user("start")];
-		await capture(state, turn0, Effort.Low, { tools: [tool("read"), tool("grep")] });
+		const first = await capture(turn0, Effort.High, { tools: [tool("read"), tool("grep")] });
+		const grep = wireName(first, 1);
+		const next = await capture([...turn0, answering(reply("ready"), first), user("continue")], Effort.High, {
+			tools: [tool("read")],
+		});
+
+		expect(next.payload.tools?.map(declared => declared.name)).toEqual([wireName(first, 0)]);
+		expect(referencesTool(next.payload, grep)).toBe(false);
+	});
+
+	it("keeps an interrupted request's tool control when the user steers with a different effort", async () => {
+		const turn0 = [user("start")];
+		const first = await capture(turn0, Effort.Low, { tools: [tool("read"), tool("grep")] });
 		const loop = [
 			...turn0,
-			assistant(
-				[
-					{ type: "thinking", thinking: "reading", thinkingSignature: "sig-read" },
-					{ type: "toolCall", id: "call_1", name: "read", arguments: {} },
-				],
-				"toolUse",
+			answering(
+				assistant(
+					[
+						{ type: "thinking", thinking: "reading", thinkingSignature: "sig-read" },
+						{ type: "toolCall", id: "call_1", name: "read", arguments: {} },
+					],
+					"toolUse",
+				),
+				first,
 			),
 			{
 				role: "toolResult",
@@ -166,19 +218,18 @@ describe("Anthropic control state across one session's requests", () => {
 				timestamp: clock++,
 			} satisfies Message,
 		];
+		const withdrawn = { tools: [tool("read")], inactiveTools: [tool("grep")] };
 		// `grep` leaves the roster: a `tool_removal` control is sent after the tool result.
-		const toolChange = await capture(state, loop, Effort.Low, { tools: [tool("read")] });
-		// The user interrupts the next step and steers with a different effort.
+		const toolChange = await capture(loop, Effort.Low, withdrawn);
+		// The user interrupts that request before any output and steers with a different effort.
 		const steered = await capture(
-			state,
-			[...loop, assistant([], "aborted"), user("stop, do it differently", true)],
+			[...loop, answering(assistant([], "aborted"), toolChange), user("stop, do it differently", true)],
 			Effort.Medium,
-			{ tools: [tool("read")] },
+			withdrawn,
 		);
 
-		expectCacheStableContinuation(toolChange, steered);
-		// Not rewriting the sent control must not drop the steer's effort either:
-		// it goes out exactly once, as its own control message.
-		expect(steered.messages.flatMap(message => message.output_config?.effort ?? [])).toEqual(["medium"]);
+		expectCacheStableContinuation(toolChange.payload, steered.payload);
+		// The steer's effort goes out exactly once, as its own control message.
+		expect(steered.payload.messages.flatMap(message => message.output_config?.effort ?? [])).toEqual(["medium"]);
 	});
 });

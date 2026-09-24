@@ -60,7 +60,7 @@ Most FS/bash tools resolve these; other schemes/selectors: `read` docs.
 - `agent://<id>`: output; nested IDs dotted, `/key/index` JSON path; write = message, `agent://all` broadcast only.
 - `history://<id>`: read-only transcript; bare lists registered agents, not persisted unregistered top-level sessions.
 - `artifact://<id>`: content; `local://<name>.md`: shared artifact.
-- `proc://`: jobs/services; `proc://<id>`: read status/output, write stdin, empty write cancels.
+- `proc://`: jobs/services; `proc://<id>`: read status/output, write service stdin; write `proc://<id>/kill` cancels/stops (no `content` needed).
 {{#if securityEnabled}}
 - `security://scans`: read-only scans/findings/reports.
 {{/if}}

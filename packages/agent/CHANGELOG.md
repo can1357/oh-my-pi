@@ -2,15 +2,17 @@
 
 ## [Unreleased]
 
+## [18.3.0] - 2026-09-24
+
 ### Added
 
-- Added `docTopics` method to `AgentTool` interface for on-demand documentation
-- Added `TOOL_INTERRUPT_ABORT_REASON`, the abort reason an interruptible tool's signal carries when queued steering, a peer message, or a background completion cuts it short, so tools can tell that apart from a run abort
+- Added support for documenting agent tools on demand through the new `AgentTool.docTopics` method.
+- Added `TOOL_INTERRUPT_ABORT_REASON` so interruptible tools can distinguish queued steering, peer messages, or background completions from a full run abort.
 
 ### Changed
 
-- Migrated Anthropic compaction to `compact-2026-09-04` with signature-based verification
-- Changed interrupt handling to respect wait mode and enable interrupts
+- Improved interrupt handling so tools respect wait mode and can be interrupted when appropriate.
+- Updated Anthropic compaction compatibility with signature verification.
 
 ## [18.2.11] - 2026-09-23
 

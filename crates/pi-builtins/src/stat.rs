@@ -2990,6 +2990,18 @@ mod win_tests {
 	use super::Stat;
 	use crate::host::run_util;
 
+	/// Temp dir plus its path.
+	///
+	/// Unlike `canonical_tempdir` in the Unix `tests` module, the path is left
+	/// exactly as `tempfile` reports it: `fs::canonicalize` yields a `\\?\`
+	/// verbatim path on Windows, and these tests hand the path back in as a
+	/// scope cwd for the Win32 stat and volume backends.
+	fn tempdir() -> (tempfile::TempDir, PathBuf) {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().to_path_buf();
+		(dir, path)
+	}
+
 	fn run_in(cwd: PathBuf, args: Vec<&str>) -> (i32, String, String) {
 		let (code, capture) = run_util::<Stat>(&args, "", cwd);
 		(code, capture.out(), capture.err())
