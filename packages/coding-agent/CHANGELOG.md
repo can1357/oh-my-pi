@@ -15,6 +15,8 @@
 
 ### Fixed
 
+- Fixed subagent `yield` retries for exact legacy `result` envelopes and batches of array-valued incremental sections; schema errors now identify invalid JSON, field paths, and the expected section shape, while thinking-only last turns explicitly request `data`.
+
 - `omp update` and the startup update check now use your configured npm registry (`.npmrc`, `npm_config_registry`, or bunfig, including scoped registries and auth tokens) instead of always querying registry.npmjs.org ([#13115](https://github.com/can1357/oh-my-pi/pull/13115) by [@H4vC](https://github.com/H4vC))
 - Fixed auto-QA grievance pushes getting stuck forever behind one report the collector rejects: tool names are clamped to the collector's 128-byte limit, rejected reports are set aside with the server's error (shown in `omp grievances list` and `push`), and the rest of the queue keeps sending ([#13091](https://github.com/can1357/oh-my-pi/issues/13091), [#13119](https://github.com/can1357/oh-my-pi/pull/13119) by [@NaC-L](https://github.com/NaC-L))
 - Fixed advisor reviews making an extra model request after a turn whose only tool calls were `advise`. That request re-sent the whole review context just so the advisor could reply "done", with no new notes. The review now ends after the advise-only turn; a turn that also calls other tools continues as before ([#13132](https://github.com/can1357/oh-my-pi/pull/13132) by [@alnaggar-dev](https://github.com/alnaggar-dev)).

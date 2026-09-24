@@ -254,6 +254,8 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 
 	readonly #validate?: (value: unknown) => JsonSchemaValidationResult;
 	readonly #validateSection?: ReadonlyMap<string, (value: unknown) => JsonSchemaValidationResult>;
+	readonly #arraySectionLabels: ReadonlySet<string>;
+	readonly #sectionShapes: ReadonlyMap<string, string>;
 	#rejectUnknownSections = false;
 	#knownSectionLabels: readonly string[] = [];
 	#isKnownSection?: (label: string) => boolean;
@@ -285,6 +287,8 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 	constructor(session: ToolSession) {
 		let validate: ((value: unknown) => JsonSchemaValidationResult) | undefined;
 		let validateSection: ReadonlyMap<string, (value: unknown) => JsonSchemaValidationResult> | undefined;
+		let arraySectionLabels: ReadonlySet<string> = new Set();
+		let sectionShapes: ReadonlyMap<string, string> = new Map();
 		let rejectUnknownSections = false;
 		let knownSectionLabels: readonly string[] = [];
 		let isKnownSection: ((label: string) => boolean) | undefined;
@@ -301,6 +305,8 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 				validate = value => validator.validate(value);
 				validateSection = validator.validateSection;
 				rejectUnknownSections = validator.rejectUnknownSections;
+				arraySectionLabels = validator.arraySectionLabels;
+				sectionShapes = validator.sectionShapes;
 				knownSectionLabels = validator.knownSectionLabels;
 				isKnownSection = label => validator.isKnownSection(label);
 			}
@@ -354,6 +360,8 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		this.#session = session;
 		this.#validate = validate;
 		this.#validateSection = validateSection;
+		this.#arraySectionLabels = arraySectionLabels;
+		this.#sectionShapes = sectionShapes;
 		this.#rejectUnknownSections = rejectUnknownSections;
 		this.#knownSectionLabels = knownSectionLabels;
 		this.#isKnownSection = isKnownSection;
@@ -394,7 +402,16 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<YieldDetails>> {
 		if (!isPlainRecord(params)) throw new Error("yield arguments must be an object");
-		const raw = params;
+		// Some callers still use the legacy result wrapper. Only unwrap its exact
+		// one-field form; an ambiguous or decorated envelope must not lose data.
+		const envelope = params.result;
+		const raw =
+			Object.keys(params).length === 1 &&
+			isPlainRecord(envelope) &&
+			Object.keys(envelope).length === 1 &&
+			(Object.hasOwn(envelope, "data") || Object.hasOwn(envelope, "error"))
+				? envelope
+				: params;
 		const workPoolItems = this.#workPoolItems();
 		let workPoolItemId: string | undefined;
 		let yieldType: string | string[] | undefined;
@@ -508,7 +525,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 				const remaining = MAX_EMPTY_RESULT_RETRIES - this.#emptyResultFailures;
 				throw new Error(
 					`yield used the last assistant turn as the result, but that turn contains no text (thinking only). ` +
-						`Put your result in \`data\`: ${YIELD_FORMAT_HINT} Empty last-turn result retries remaining before abort: ${remaining}.`,
+						`Pass \`data\` explicitly in this yield call: ${YIELD_FORMAT_HINT} Empty last-turn result retries remaining before abort: ${remaining}.`,
 				);
 			}
 		}
@@ -521,7 +538,26 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 						: this.#validate
 							? this.#validate(value)
 							: undefined;
-			let sectionFailure = validateData(data);
+			const labels = isIncremental ? (yieldType as string[]) : [];
+			const arrayBatch = labels.length > 0 && labels.every(label => this.#arraySectionLabels.has(label));
+			const validateBatch = (value: unknown): JsonSchemaValidationResult | undefined => {
+				if (!arrayBatch || !Array.isArray(value)) return validateData(value);
+				if (value.length === 0) {
+					return { success: false, issues: [{ path: [], message: "must contain at least one item" }] };
+				}
+				for (let index = 0; index < value.length; index++) {
+					const result = validateData(value[index]);
+					if (result && !result.success) {
+						return {
+							success: false,
+							issues: result.issues.map(issue => ({ ...issue, path: [index, ...issue.path] })),
+						};
+					}
+				}
+				return undefined;
+			};
+			let jsonDiagnostic = "";
+			let sectionFailure = validateBatch(data);
 			if (sectionFailure && !sectionFailure.success && typeof data === "string") {
 				// Lossless recovery: a JSON-encoded payload string parses to exactly
 				// the intended value (executor finalization already parses terminal
@@ -532,11 +568,18 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 				// (`resolveYieldPayload`), so accepting it here would report success
 				// and then warn post-mortem instead of giving a retryable error.
 				const decoded = parseJsonEncodedValue(data);
-				if (decoded.parsed && decoded.value !== null) {
-					const revalidated = validateData(decoded.value);
+				if (!decoded.parsed) {
+					jsonDiagnostic = "invalid JSON in `data`; ";
+				} else if (decoded.value === null) {
+					jsonDiagnostic = "decoded JSON is null (missing `data`); ";
+				} else if (decoded.value !== null) {
+					const revalidated = validateBatch(decoded.value);
 					if (revalidated === undefined || revalidated.success) {
 						data = decoded.value;
 						sectionFailure = revalidated;
+					} else {
+						sectionFailure = revalidated;
+						jsonDiagnostic = "decoded JSON fails the schema: ";
 					}
 				}
 			}
@@ -549,8 +592,11 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 							? ` Call yield again with the corrected shape — ${remaining} retry attempt(s) remain before the schema constraint is dropped.`
 							: " Call yield again with the corrected shape — this is the final retry before the schema constraint is dropped.";
 					const scope = isIncremental ? `Section ${formatYieldLabels(yieldType as string[])}` : "Output";
+					const shape = isIncremental && labels.length === 1 ? this.#sectionShapes.get(labels[0]) : undefined;
+					const shapeHint =
+						shape === undefined ? "" : ` Minimal valid shape for ${formatYieldLabels(labels)}: ${shape}.`;
 					throw new Error(
-						`${scope} does not match schema: ${formatAllValidationIssues(sectionFailure.issues)}.${retryHint}`,
+						`${scope} does not match schema: ${jsonDiagnostic}${formatAllValidationIssues(sectionFailure.issues)}.${shapeHint}${retryHint}`,
 					);
 				}
 				// Budget exhausted: capture the count for the message, accept, and

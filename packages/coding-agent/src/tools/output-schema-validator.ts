@@ -30,6 +30,10 @@ export interface OutputValidator {
 	 * one element, while scalar properties use the property schema directly.
 	 */
 	readonly validateSection: ReadonlyMap<string, (value: unknown) => JsonSchemaValidationResult>;
+	/** Labels whose section validator checks one array item rather than the entire array. */
+	readonly arraySectionLabels: ReadonlySet<string>;
+	/** Minimal structural examples for object-valued sections, used only in retry messages. */
+	readonly sectionShapes: ReadonlyMap<string, string>;
 	/** Whether top-level schema closure makes unknown incremental yield labels invalid. */
 	readonly rejectUnknownSections: boolean;
 	/** Finite top-level section labels declared directly by the schema. Pattern-backed labels are accepted via `isKnownSection`. */
@@ -99,11 +103,54 @@ export function buildOutputValidator(schema: unknown): BuildOutputValidatorResul
 			requiredFields: required,
 			validate: value => validateJsonSchemaValue(jsonSchemaRecord, value),
 			validateSection: buildSectionValidators(labelSchema),
+			arraySectionLabels: buildArraySectionLabels(labelSchema),
+			sectionShapes: buildSectionShapes(labelSchema),
 			rejectUnknownSections: sectionLabels.rejectUnknownSections,
 			knownSectionLabels: sectionLabels.labels,
 			isKnownSection: sectionLabels.isKnown,
 		},
 	};
+}
+
+function buildArraySectionLabels(schema: Record<string, unknown>): ReadonlySet<string> {
+	const labels = new Set<string>();
+	if (isRecord(schema.properties)) {
+		for (const [label, property] of Object.entries(schema.properties)) {
+			if (isRecord(property) && property.type === "array" && property.items !== undefined) labels.add(label);
+		}
+	}
+	return labels;
+}
+
+function exampleValue(schema: unknown): unknown {
+	if (!isRecord(schema)) return null;
+	if (schema.const !== undefined) return schema.const;
+	if (Array.isArray(schema.enum) && schema.enum.length > 0) return schema.enum[0];
+	if (schema.type === "object" && isRecord(schema.properties)) {
+		const result: Record<string, unknown> = {};
+		const required = extractRequiredFields(schema);
+		for (const name of required) {
+			if (name in schema.properties) result[name] = exampleValue(schema.properties[name]);
+		}
+		return result;
+	}
+	if (schema.type === "string") return "text";
+	if (schema.type === "integer" || schema.type === "number") return 0;
+	if (schema.type === "boolean") return false;
+	if (schema.type === "array") return [];
+	return null;
+}
+
+function buildSectionShapes(schema: Record<string, unknown>): ReadonlyMap<string, string> {
+	const shapes = new Map<string, string>();
+	if (!isRecord(schema.properties)) return shapes;
+	for (const [label, property] of Object.entries(schema.properties)) {
+		const section = isRecord(property) && property.type === "array" ? property.items : property;
+		if (isRecord(section) && section.type === "object" && isRecord(section.properties)) {
+			shapes.set(label, JSON.stringify(exampleValue(section)));
+		}
+	}
+	return shapes;
 }
 
 /**
