@@ -70,7 +70,7 @@ describe("system prompt trim mode", () => {
 		expect(off).toBe(unset);
 		// Original guidance blocks intact on the default path.
 		expect(off).toContain(
-			"- NEVER yield while actionable work remains; phase boundary/todo flip/sub-step never stops: same turn.",
+			"- NEVER yield before complete deliverable or while actionable work remains; phase boundary/todo flip/sub-step never stops: same turn.",
 		);
 		expect(off).toContain(", NEVER shell `grep`/`rg`/`awk`.");
 		expect(off).toContain("descriptive `find` FIRST");
@@ -93,7 +93,7 @@ describe("system prompt trim mode", () => {
 		expect(trimmed).not.toContain("NEVER narrate/consider session limits");
 		expect(trimmed).not.toContain("NEVER re-audit applied edit");
 		// The § Delivery contract itself stays untouched.
-		expect(trimmed).toContain("phase boundary/todo flip/sub-step never yields: same turn.");
+		expect(trimmed).toContain("NEVER punt half-solved work.");
 	});
 
 	it("reduces specialized-tool bullets to tool-name mappings", async () => {
