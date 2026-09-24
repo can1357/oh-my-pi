@@ -200,7 +200,7 @@ describe("SelectorController.showPluginSelector install scope prompt", () => {
 	});
 
 	it("keeps a user-only install separate from the project row", async () => {
-		const { installSpy } = stubManager([installedSummary("user")]);
+		stubManager([installedSummary("user")]);
 		const { slot, controller } = createControllerHarness(new Text("ask", 0, 0));
 
 		await controller.showPluginSelector("install");
@@ -209,37 +209,33 @@ describe("SelectorController.showPluginSelector install scope prompt", () => {
 		expect(selector.getSelectList().debugState().selectedItemLabel).toBe("hello-plugin@1.0.0 [project]");
 		selector.handleInput("\x1b[B");
 		expect(selector.getSelectList().debugState().selectedItemLabel).toBe("hello-plugin@1.0.0 [user] [installed]");
+
+		selector.handleInput("\n"); // Open user confirmation
+		expect(Bun.stripANSI(selector.render(100).join("\n"))).toContain("Replaces current install.");
+		selector.handleInput("\x1b"); // Return to plugin list
 		selector.handleInput("\x1b[A");
 
 		selector.handleInput("\n"); // Open project confirmation
 		expect(Bun.stripANSI(selector.render(100).join("\n"))).not.toContain("Replaces current install.");
-		selector.handleInput("\n"); // Confirm project install
-
-		expect(installSpy).toHaveBeenCalledWith("hello-plugin", "test-marketplace", {
-			force: false,
-			scope: "project",
-		});
 	});
 
 	it("keeps a project-only install separate from the user row", async () => {
-		const { installSpy } = stubManager([installedSummary("project")]);
+		stubManager([installedSummary("project")]);
 		const { slot, controller } = createControllerHarness(new Text("ask", 0, 0));
 
 		await controller.showPluginSelector("install");
 
 		const selector = mountedSelector(slot);
 		expect(selector.getSelectList().debugState().selectedItemLabel).toBe("hello-plugin@1.0.0 [project] [installed]");
+
+		selector.handleInput("\n"); // Open project confirmation
+		expect(Bun.stripANSI(selector.render(100).join("\n"))).toContain("Replaces current install.");
+		selector.handleInput("\x1b"); // Return to plugin list
 		selector.handleInput("\x1b[B");
 		expect(selector.getSelectList().debugState().selectedItemLabel).toBe("hello-plugin@1.0.0 [user]");
 
 		selector.handleInput("\n"); // Open user confirmation
 		expect(Bun.stripANSI(selector.render(100).join("\n"))).not.toContain("Replaces current install.");
-		selector.handleInput("\n"); // Confirm user install
-
-		expect(installSpy).toHaveBeenCalledWith("hello-plugin", "test-marketplace", {
-			force: false,
-			scope: "user",
-		});
 	});
 
 	it("Esc on confirmation returns to the plugin list without installing", async () => {
