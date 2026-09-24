@@ -7384,6 +7384,11 @@ export class AgentSession implements SettingsScope {
 			},
 			getContextUsage: () => this.getContextUsage(),
 			getAsyncJobSnapshot: () => this.getAsyncJobSnapshot(),
+			waitForInitialMCPConnections: async () => ({
+				pendingServers: [],
+				connectedServers: [],
+				failedServers: [],
+			}),
 			waitForIdle: () => this.waitForIdle(),
 			newSession: async options => {
 				const success = await this.newSession({ parentSession: options?.parentSession });

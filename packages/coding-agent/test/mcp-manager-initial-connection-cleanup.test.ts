@@ -220,4 +220,156 @@ describe("MCPManager initial connection ownership", () => {
 
 		stuckClose.resolve();
 	});
+	it("waits for the initial tools/list result and freezes that readiness snapshot", async () => {
+		const manager = new MCPManager(process.cwd(), null, async () => ({
+			configs: { connected: CONFIG, failed: CONFIG },
+			exaApiKeys: [],
+			sources: {},
+		}));
+		const connected = fakeConnection("connected");
+		const failed = fakeConnection("failed");
+		const toolsGate = Promise.withResolvers<never[]>();
+		const connectSpy = vi
+			.spyOn(mcpClient, "connectToServer")
+			.mockResolvedValueOnce(connected.connection)
+			.mockResolvedValueOnce(failed.connection)
+			.mockResolvedValueOnce(failed.connection);
+		vi.spyOn(mcpClient, "listTools")
+			.mockReturnValueOnce(toolsGate.promise)
+			.mockRejectedValueOnce(new Error("initial tools/list failed"))
+			.mockResolvedValueOnce([]);
+
+		const readiness = manager.waitForInitialConnections();
+		const loading = manager.discoverAndConnect();
+		let settled = false;
+		void readiness.then(() => {
+			settled = true;
+		});
+		await loading;
+		expect(settled).toBe(false);
+
+		toolsGate.resolve([]);
+		const snapshot = await readiness;
+		expect(snapshot).toEqual({
+			pendingServers: [],
+			connectedServers: ["connected"],
+			failedServers: [{ serverName: "failed", error: "initial tools/list failed" }],
+		});
+		expect(Object.isFrozen(snapshot)).toBe(true);
+		expect(Object.isFrozen(snapshot.connectedServers)).toBe(true);
+
+		await manager.connectServers({ failed: CONFIG }, {});
+		expect(connectSpy).toHaveBeenCalledTimes(3);
+		expect(await manager.waitForInitialConnections()).toBe(snapshot);
+	});
+
+	it("resolves an empty initial readiness snapshot", async () => {
+		const manager = new MCPManager(process.cwd(), null, async () => ({
+			configs: {},
+			exaApiKeys: [],
+			sources: {},
+		}));
+		const result = manager.waitForInitialConnections();
+		await manager.discoverAndConnect();
+		expect(await result).toEqual({ pendingServers: [], connectedServers: [], failedServers: [] });
+	});
+
+	it("captures an initial config discovery failure in readiness", async () => {
+		const manager = new MCPManager(process.cwd(), null, async () => {
+			throw new Error("config discovery failed");
+		});
+
+		const readiness = manager.waitForInitialConnections();
+		await expect(manager.discoverAndConnect()).rejects.toThrow("config discovery failed");
+		expect(await readiness).toEqual({
+			pendingServers: [],
+			connectedServers: [],
+			failedServers: [{ serverName: ".mcp.json", error: "config discovery failed" }],
+		});
+	});
+	it("does not let a non-discovery connect call settle readiness before initial discovery", async () => {
+		const manager = new MCPManager(process.cwd(), null, async () => ({
+			configs: { initial: CONFIG },
+			exaApiKeys: [],
+			sources: {},
+		}));
+		const initial = fakeConnection("initial");
+		const toolsGate = Promise.withResolvers<never[]>();
+		vi.spyOn(mcpClient, "connectToServer").mockResolvedValue(initial.connection);
+		vi.spyOn(mcpClient, "listTools").mockReturnValue(toolsGate.promise);
+
+		const readiness = manager.waitForInitialConnections();
+		await manager.connectServers({ initial: CONFIG }, {});
+		let settled = false;
+		void readiness.then(() => {
+			settled = true;
+		});
+		await manager.discoverAndConnect();
+		expect(settled).toBe(false);
+
+		toolsGate.resolve([]);
+		expect(await readiness).toEqual({
+			pendingServers: [],
+			connectedServers: ["initial"],
+			failedServers: [],
+		});
+	});
+
+	it("does not snapshot servers connected before the initial discovery", async () => {
+		const manager = new MCPManager(process.cwd(), null, async () => ({
+			configs: { initial: CONFIG },
+			exaApiKeys: [],
+			sources: {},
+		}));
+		const earlier = fakeConnection("earlier");
+		const initial = fakeConnection("initial");
+		vi.spyOn(mcpClient, "connectToServer")
+			.mockResolvedValueOnce(earlier.connection)
+			.mockResolvedValueOnce(initial.connection);
+		vi.spyOn(mcpClient, "listTools").mockResolvedValue([]);
+
+		const readiness = manager.waitForInitialConnections();
+		await manager.connectServers({ earlier: CONFIG }, {});
+		await manager.discoverAndConnect();
+
+		expect(await readiness).toEqual({
+			pendingServers: [],
+			connectedServers: ["initial"],
+			failedServers: [],
+		});
+	});
+
+	it("reports the first timeout when discovery finds its retry already running", async () => {
+		const manager = new MCPManager(process.cwd(), null, async () => ({
+			configs: { server: CONFIG },
+			exaApiKeys: [],
+			sources: {},
+		}));
+		const retryStarted = Promise.withResolvers<void>();
+		const retryGate = Promise.withResolvers<MCPServerConnection>();
+		const recovered = fakeConnection("server");
+		vi.spyOn(mcpClient, "connectToServer")
+			.mockRejectedValueOnce(new mcpClient.MCPConnectionTimeoutError("server", 100))
+			.mockImplementationOnce(() => {
+				retryStarted.resolve();
+				return retryGate.promise;
+			});
+		vi.spyOn(mcpClient, "listTools").mockResolvedValue([]);
+
+		const readiness = manager.waitForInitialConnections();
+		await manager.connectServers({ server: CONFIG }, {});
+		await retryStarted.promise;
+		await manager.discoverAndConnect();
+
+		expect(await readiness).toEqual({
+			pendingServers: [],
+			connectedServers: [],
+			failedServers: [
+				{ serverName: "server", error: 'Connection to MCP server "server" timed out after 100ms' },
+			],
+		});
+
+		retryGate.resolve(recovered.connection);
+		await manager.waitForPendingConnections();
+	});
 });
