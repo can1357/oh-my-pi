@@ -357,6 +357,17 @@ describe("isUsageLimit", () => {
 		).toBe(true);
 	});
 
+	// Google phrases the same ceiling as a cap ("Your project has exceeded its
+	// monthly spending cap."), which `/spend.?limit/` missed, so a transport that
+	// flattens the body to prose left the 429 transient and retryable (#13090).
+	it("detects a monthly spending-cap 429 as a credential-rotatable usage limit", () => {
+		expect(isUsageLimit("Google API error (429): Your project has exceeded its monthly spending cap.")).toBe(true);
+	});
+
+	it("keeps 'spending capacity' throttle wording out of the billing-cap branch", () => {
+		expect(parseRateLimitReason("429 model spending capacity reached, slow down")).toBe("MODEL_CAPACITY_EXHAUSTED");
+	});
+
 	it("detects bare 'quota reached' phrasing", () => {
 		expect(isUsageLimit("quota reached")).toBe(true);
 		expect(isUsageLimit("quota_reached")).toBe(true);
