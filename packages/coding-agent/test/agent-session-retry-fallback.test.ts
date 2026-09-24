@@ -3972,7 +3972,7 @@ describe("AgentSession retry fallback", () => {
 			settings,
 			modelRegistry,
 		});
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 		const { retryStartEvents, retryEndEvents } = trackRetryEvents(session);
 
 		await session.prompt("Recover according to the deployment's resource exhaustion policy");
