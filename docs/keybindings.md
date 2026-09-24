@@ -121,7 +121,7 @@ The status line also shows the mode, pending command, and multi-line Visual sele
 | ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `h` `j` `k` `l`           | Move by character and line (arrow keys work too)                                                                                                                                  |
 | `0` `^` `$`               | Line start / first non-blank / line end                                                                                                                                           |
-| `w` `b` `e`               | Next word, previous word, end of word                                                                                                                                             |
+| `w` `b` `e` / `W` `B` `E` | Move by word / whitespace-delimited WORD                                                                                                                                          |
 | `f` `F` `t` `T` + char    | Find / till that character on the line (`;` repeats, `,` reverses)                                                                                                                |
 | `gg` `G`                  | First line, last line (`5gg` and `5G` jump to line 5)                                                                                                                             |
 | `1`–`9` prefix            | Repeat a motion or operator, e.g. `3w`, `5j`, `2dd`                                                                                                                               |
