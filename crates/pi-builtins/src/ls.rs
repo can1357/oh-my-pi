@@ -37,7 +37,9 @@ use uucore::{
 	version_cmp::version_cmp,
 };
 
-use crate::host::{Host, StreamWriter, Utility, format_usage, matches_parser, os_bytes_lossy, util};
+use crate::host::{
+	Host, ShellPaths, StreamWriter, Utility, format_usage, matches_parser, os_bytes_lossy, util,
+};
 
 mod colors {
 //! Color handling for the `ls` builtin.
@@ -3077,7 +3079,7 @@ fn display_item_name(
 						&target_path
 					};
 
-					match fs::canonicalize(config.runtime.resolve(absolute_target)) {
+					match fs::canonicalize(config.runtime.paths.resolve(absolute_target)) {
 						Ok(resolved_target) => {
 							let target_data = PathData::new(
 								resolved_target.as_path().into(),
@@ -3728,18 +3730,12 @@ impl LsError {
 }
 
 struct LsRuntime {
-	cwd:     PathBuf,
-	stderr:  RefCell<OpenFile>,
-	status:  Cell<i32>,
+	paths:  ShellPaths,
+	stderr: RefCell<OpenFile>,
+	status: Cell<i32>,
 }
 
 impl LsRuntime {
-	fn resolve(&self, path: impl AsRef<Path>) -> PathBuf {
-		let normalized_path = brush_core::sys::fs::normalize_shell_path(path.as_ref());
-		let path = normalized_path.as_ref();
-		if path.is_absolute() { path.to_path_buf() } else { self.cwd.join(path) }
-	}
-
 	fn error(&self, err: LsError) {
 		self.status.set(err.code());
 		let _ = writeln!(self.stderr.borrow_mut(), "ls: {err}");
@@ -3769,7 +3765,7 @@ impl Utility for Ls {
 
 	fn run(self, host: &mut Host) -> i32 {
 		let runtime = Rc::new(LsRuntime {
-			cwd: host.cwd().to_path_buf(),
+			paths: host.paths().clone(),
 			stderr: RefCell::new(host.stderr_clone()),
 			status: Cell::new(0),
 		});
@@ -4583,7 +4579,7 @@ impl<'a> PathData<'a> {
 			)
 		};
 
-		let fs_path = config.runtime.resolve(&p_buf);
+		let fs_path = config.runtime.paths.resolve(&p_buf);
 		let must_dereference = match &config.dereference {
 			Dereference::All => true,
 			Dereference::Args => command_line,
@@ -4873,7 +4869,7 @@ pub fn list(locs: Vec<&Path>, config: &Config, stdout: OpenFile) -> std::io::Res
 
 		// Only runs if it must list recursively.
 		while let Some(dir_data) = state.stack.pop() {
-			let resolved_dir = config.runtime.resolve(&dir_data.0);
+			let resolved_dir = config.runtime.paths.resolve(&dir_data.0);
 			let read_dir = match fs::read_dir(&resolved_dir) {
 				Err(err) => {
 					// flush stdout buffer before the error to preserve formatting and order
@@ -5197,7 +5193,7 @@ fn get_security_context<'a>(
 	// 1.
 	if must_dereference
 		&& let Err(err) =
-			get_metadata_with_deref_opt(&config.runtime.resolve(path), must_dereference)
+			get_metadata_with_deref_opt(&config.runtime.paths.resolve(path), must_dereference)
 	{
 		// The Path couldn't be dereferenced, so return early and set exit code 1
 		// to indicate a minor error
@@ -5207,7 +5203,7 @@ fn get_security_context<'a>(
 				path.to_path_buf(),
 				err,
 				false,
-				config.runtime.resolve(path).is_dir(),
+				config.runtime.paths.resolve(path).is_dir(),
 			));
 		}
 		return Cow::Borrowed(SUBSTITUTE_STRING);

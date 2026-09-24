@@ -2473,8 +2473,13 @@ mod paths {
 		}
 	
 		/// Resolves a file operand against the shell working directory.
+		///
+		/// `/dev/stdin` stays literal: like `-`, tail reads it through
+		/// `host.stdin`, which observes cancellation.
 		pub fn resolve_path(&mut self, host: &Host) {
-			if let InputKind::File(path) = &mut self.kind {
+			if let InputKind::File(path) = &mut self.kind
+				&& path != Path::new(text::DEV_STDIN)
+			{
 				*path = host.resolve(&*path);
 			}
 		}

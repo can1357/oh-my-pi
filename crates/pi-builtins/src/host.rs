@@ -12,15 +12,18 @@
 //! A utility implements [`Utility`]: a `clap` argument model plus a synchronous
 //! [`Utility::run`] body. [`util`] wraps that into a [`Registration`] which
 //!
-//! 1. materializes process-substitution arguments (`diff <(a) <(b)`) into real
-//!    file descriptors,
-//! 2. parses `argv`, rendering `--help`/`--version` on stdout and usage errors
+//! 1. parses `argv`, rendering `--help`/`--version` on stdout and usage errors
 //!    on stderr with the utility's own exit status,
-//! 3. runs the body on a blocking thread, so a slow utility never stalls the
+//! 2. runs the body on a blocking thread, so a slow utility never stalls the
 //!    async runtime and concurrent pipeline stages stay isolated,
-//! 4. observes the shell's cancellation token (abort/`timeout`), and
-//! 5. contains panics at the builtin boundary instead of taking down the
+//! 3. observes the shell's cancellation token (abort/`timeout`), and
+//! 4. contains panics at the builtin boundary instead of taking down the
 //!    long-lived host process.
+//!
+//! Paths go through [`ShellPaths`], which also maps descriptor paths
+//! (`/dev/stdin`, `/dev/fd/63` from `diff <(a) <(b)`, `/dev/tty`) onto the
+//! *shell's* descriptors: the builtin shares the host process, whose own fd 0
+//! is the host's terminal.
 
 // The whole module is API consumed by the feature-gated utility modules; a build
 // with no utility features enabled legitimately uses none of it.
@@ -103,7 +106,7 @@ pub(crate) struct Host {
 	stdout_handle:         Option<same_file::Handle>,
 
 	name:                  String,
-	cwd:                   PathBuf,
+	paths:                 ShellPaths,
 	env:                   HashMap<String, String>,
 	cancel:                Arc<AtomicBool>,
 	exit_code:             i32,
@@ -237,6 +240,120 @@ impl Drop for CancelOnDrop {
 	}
 }
 
+/// Where [`ShellPaths::resolve`] points a descriptor path the shell cannot
+/// back: a closed descriptor, or `/dev/tty` with no terminal. No process has
+/// descriptor -1, so every filesystem call on it fails with `ENOENT`, which is
+/// what opening a closed descriptor's path reports. (A process without a
+/// terminal gets `ENXIO` for `/dev/tty`; a path cannot carry that errno.)
+#[cfg(unix)]
+const UNAVAILABLE_DESCRIPTOR: &str = "/dev/fd/-1";
+
+/// How a builtin running inside the host process sees paths.
+///
+/// Relative paths resolve against the shell's working directory, not the
+/// process's. Paths naming descriptors (`/dev/stdin`, `/dev/fd/63` from
+/// `<(…)`, `/dev/tty`) resolve against the shell's descriptors: opened for
+/// real they would reach the host process's own, and its fd 0 is the host's
+/// terminal, so `cat /dev/stdin` would block on the host's keystrokes.
+///
+/// Clones share the duplicated descriptors, which stay open while any clone
+/// is alive, so a resolved `/dev/fd/N` path never outlives its descriptor.
+/// The default resolves against the process working directory with no
+/// descriptors, for tests that build utility state without a shell.
+#[derive(Clone, Default)]
+pub(crate) struct ShellPaths {
+	cwd:         PathBuf,
+	#[cfg(unix)]
+	descriptors: Arc<[(brush_core::ShellFd, OpenFile)]>,
+}
+
+impl std::fmt::Debug for ShellPaths {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		let mut debug = f.debug_struct("ShellPaths");
+		debug.field("cwd", &self.cwd);
+		#[cfg(unix)]
+		debug.field("fds", &self.descriptors.iter().map(|(fd, _)| *fd).collect::<Vec<_>>());
+		debug.finish()
+	}
+}
+
+impl ShellPaths {
+	/// Captures the working directory and the descriptors visible to the
+	/// command in `context`: usually just 0/1/2, plus any from `exec N>` or
+	/// process substitution.
+	pub fn new<SE: ShellExtensions>(context: &ExecutionContext<'_, SE>) -> Self {
+		Self {
+			cwd:         context.shell.working_dir().to_path_buf(),
+			#[cfg(unix)]
+			descriptors: context
+				.open_fds()
+				.map(|(fd, file)| (fd, file.clone()))
+				.collect(),
+		}
+	}
+
+	/// A resolver with no descriptors, for tests that exercise path handling
+	/// without a shell.
+	#[cfg(test)]
+	pub fn with_cwd(cwd: impl Into<PathBuf>) -> Self {
+		Self { cwd: cwd.into(), ..Self::default() }
+	}
+
+	/// The shell working directory that relative paths resolve against.
+	pub fn cwd(&self) -> &Path {
+		&self.cwd
+	}
+
+	/// Resolves `path` to what the shell would open.
+	///
+	/// Relative paths join [`ShellPaths::cwd`]. Windows aliases (`/c/...`,
+	/// `/tmp`) become native paths via `brush_core::sys::fs::normalize_shell_path`.
+	/// A descriptor path becomes `/dev/fd/<host fd>` for the shell's
+	/// descriptor, or a path that cannot be opened when the shell has none.
+	pub fn resolve(&self, path: impl AsRef<Path>) -> PathBuf {
+		let normalized_path = brush_core::sys::fs::normalize_shell_path(path.as_ref());
+		let path = normalized_path.as_ref();
+		let resolved = if path.is_absolute() { path.to_path_buf() } else { self.cwd.join(path) };
+		#[cfg(unix)]
+		if let Some(descriptor) = openfiles::DescriptorPath::parse(&resolved) {
+			return self.descriptor_target(descriptor);
+		}
+		resolved
+	}
+
+	#[cfg(unix)]
+	fn descriptor_target(&self, descriptor: openfiles::DescriptorPath) -> PathBuf {
+		use std::os::fd::AsRawFd as _;
+
+		let fd = match descriptor {
+			openfiles::DescriptorPath::Fd(fd) => fd,
+			// Mirrors `brush_core::commands::child_session_action`: a command
+			// whose stdin is not a terminal runs with no controlling terminal,
+			// like the external commands the shell detaches into their own
+			// session.
+			openfiles::DescriptorPath::Terminal => {
+				return if self.file(OpenFiles::STDIN_FD).is_some_and(OpenFile::is_terminal) {
+					PathBuf::from("/dev/tty")
+				} else {
+					PathBuf::from(UNAVAILABLE_DESCRIPTOR)
+				};
+			},
+		};
+		match self.file(fd).and_then(|file| file.try_borrow_as_fd().ok()) {
+			Some(host_fd) => PathBuf::from(format!("/dev/fd/{}", host_fd.as_raw_fd())),
+			None => PathBuf::from(UNAVAILABLE_DESCRIPTOR),
+		}
+	}
+
+	#[cfg(unix)]
+	fn file(&self, fd: brush_core::ShellFd) -> Option<&OpenFile> {
+		self.descriptors
+			.iter()
+			.find(|(shell_fd, _)| *shell_fd == fd)
+			.map(|(_, file)| file)
+	}
+}
+
 impl Host {
 	/// The name the utility was invoked as. Differs from [`Utility::NAME`] when
 	/// one implementation backs several builtins (`grep` and `rg`).
@@ -246,23 +363,22 @@ impl Host {
 
 	/// The shell working directory that relative paths resolve against.
 	pub fn cwd(&self) -> &Path {
-		&self.cwd
+		self.paths.cwd()
 	}
 
-	/// Resolves `path` against [`Host::cwd`]; absolute paths pass through.
+	/// Resolves `path` to what the shell would open; see [`ShellPaths::resolve`].
 	///
-	/// Every path argument must go through this before touching the
-	/// filesystem: the host process's current directory is unrelated to the
-	/// shell's. Windows aliases (`/c/...`, `/tmp`) are rewritten to native
-	/// paths by `brush_core::sys::fs::normalize_shell_path`.
+	/// Every path argument must go through this (or [`Host::paths`]) before
+	/// touching the filesystem: the host process's working directory and
+	/// descriptors are unrelated to the shell's.
 	pub fn resolve(&self, path: impl AsRef<Path>) -> PathBuf {
-		let normalized_path = brush_core::sys::fs::normalize_shell_path(path.as_ref());
-		let path = normalized_path.as_ref();
-		if path.is_absolute() {
-			path.to_path_buf()
-		} else {
-			self.cwd.join(path)
-		}
+		self.paths.resolve(path)
+	}
+
+	/// The resolver behind [`Host::resolve`], for utility state that outlives
+	/// a `&Host` borrow.
+	pub fn paths(&self) -> &ShellPaths {
+		&self.paths
 	}
 
 	/// Whether `path` identifies the regular file currently backing stdout.
@@ -374,7 +490,7 @@ impl Host {
 	/// its compressor from inside the temp-file abstraction, for instance.
 	pub fn child_env(&self) -> ChildEnv {
 		ChildEnv {
-			cwd:    self.cwd.clone(),
+			cwd:    self.paths.cwd().to_path_buf(),
 			env:    Arc::new(
 				self
 					.env
@@ -831,11 +947,10 @@ pub(crate) fn util<U: Utility, SE: ShellExtensions>() -> Registration<SE> {
 
 /// Adapter turning a [`Utility`] into a brush builtin.
 ///
-/// Holds the raw argument vector rather than a parsed `U`: process-substitution
-/// arguments can only be materialized once the shell is in hand, which happens
-/// in [`builtins::Command::execute`], and parse failures must be reported on the
-/// utility's own terms (help on stdout, usage errors with the utility's exit
-/// status) rather than through brush's generic usage-error path.
+/// Holds the raw argument vector rather than a parsed `U`: parse failures must
+/// be reported on the utility's own terms (help on stdout, usage errors with
+/// the utility's exit status) rather than through brush's generic usage-error
+/// path.
 pub(crate) struct Util<U: Utility> {
 	argv:    Vec<String>,
 	_marker: PhantomData<fn() -> U>,
@@ -889,10 +1004,7 @@ async fn run_utility<U: Utility, SE: ShellExtensions>(
 	// Capture everything owned *before* the first await so the returned future
 	// stays `Send`: the borrowed `ExecutionContext` (and its `&mut Shell`) is
 	// dropped before we await the blocking task.
-	#[cfg_attr(not(unix), expect(unused_mut, reason = "rewritten only on unix"))]
-	let mut argv: Vec<OsString> = argv.into_iter().map(OsString::from).collect();
-	#[cfg(unix)]
-	let process_substitution_fds = materialize_process_substitution_fds(&context, &mut argv)?;
+	let argv: Vec<OsString> = argv.into_iter().map(OsString::from).collect();
 
 	let argv = match U::rewrite_argv(argv) {
 		Ok(argv) => argv,
@@ -924,8 +1036,6 @@ async fn run_utility<U: Utility, SE: ShellExtensions>(
 	drop(context);
 
 	let mut handle = tokio::task::spawn_blocking(move || {
-		#[cfg(unix)]
-		let _process_substitution_fds = process_substitution_fds;
 		run_caught::<U>(parsed, &mut host)
 	});
 
@@ -1060,7 +1170,7 @@ fn build_host<SE: ShellExtensions>(
 		stderr,
 		stdout_handle,
 		name: invoked,
-		cwd: context.shell.working_dir().to_path_buf(),
+		paths: ShellPaths::new(context),
 		env,
 		cancel,
 		exit_code: 0,
@@ -1077,43 +1187,6 @@ fn or_null(file: Option<OpenFile>) -> Result<OpenFile, Error> {
 		Some(file) => Ok(file),
 		None => openfiles::null(),
 	}
-}
-
-/// Recognizes brush's process-substitution arguments (`/dev/fd/<shell fd>`).
-#[cfg(unix)]
-fn process_substitution_fd(arg: &std::ffi::OsStr) -> Option<brush_core::ShellFd> {
-	arg.to_str()?
-		.strip_prefix("/dev/fd/")?
-		.parse::<brush_core::ShellFd>()
-		.ok()
-}
-
-/// Rewrites `/dev/fd/<shell fd>` arguments to real descriptors of the host
-/// process, returning the owned descriptors that must stay alive for the
-/// duration of the utility.
-///
-/// Brush allocates process-substitution pipes in its own descriptor table, so
-/// the shell fd number in the argument is meaningless to `open`.
-#[cfg(unix)]
-fn materialize_process_substitution_fds<SE: ShellExtensions>(
-	context: &ExecutionContext<'_, SE>,
-	argv: &mut [OsString],
-) -> Result<Vec<std::os::fd::OwnedFd>, Error> {
-	use std::os::fd::AsRawFd;
-
-	let mut fds = Vec::new();
-	for arg in argv {
-		let Some(shell_fd) = process_substitution_fd(arg) else {
-			continue;
-		};
-		let Some(file) = context.try_fd(shell_fd) else {
-			continue;
-		};
-		let fd = file.try_borrow_as_fd()?.try_clone_to_owned()?;
-		*arg = OsString::from(format!("/dev/fd/{}", fd.as_raw_fd()));
-		fds.push(fd);
-	}
-	Ok(fds)
 }
 
 /// Implements `clap::Parser` for a builder-style utility: `$ty` stores the
@@ -1163,8 +1236,9 @@ mod testing {
 	use parking_lot::Mutex;
 
 	use super::{
-		Arc, AtomicBool, GuardedStream, HashMap, Host, OpenFile, OsString, PathBuf, Read, Sigpipe,
-		SigpipeGuard, Stdin, StreamWriter, Utility, Write, io, openfiles, output_handle, run_caught,
+		Arc, AtomicBool, GuardedStream, HashMap, Host, OpenFile, OsString, PathBuf, Read, ShellPaths,
+		Sigpipe, SigpipeGuard, Stdin, StreamWriter, Utility, Write, io, openfiles, output_handle,
+		run_caught,
 	};
 
 	/// Captured in-memory output from [`Host::for_test`].
@@ -1245,7 +1319,7 @@ mod testing {
 				)),
 				stdout_handle:         None,
 				name:                  name.to_string(),
-				cwd:                   cwd.into(),
+				paths:                 ShellPaths::with_cwd(cwd),
 				env:                   HashMap::new(),
 				cancel,
 				exit_code:             0,
