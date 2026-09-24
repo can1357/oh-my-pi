@@ -157,6 +157,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			extension = providerExtension,
 			authenticatedProvider,
 			hasUI = false,
+			onPrewalkWarning,
 		}: {
 			model?: string;
 			defaultRole?: string;
@@ -164,6 +165,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			extension?: ExtensionFactory;
 			authenticatedProvider?: string;
 			hasUI?: boolean;
+			onPrewalkWarning?: (warning: string) => void;
 		} = {},
 	) {
 		const authStorage = createInMemoryAuthStorage();
@@ -188,6 +190,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			modelRegistry,
 			settings,
 			hasUI,
+			onPrewalkWarning,
 			disableExtensionDiscovery: true,
 			extensions: [extension],
 			skills: [],
@@ -243,7 +246,25 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
-	test("fetches only the requested cold extension provider for prewalk", async () => {
+	test("keeps a bundled fallback when the earlier extension target is absent", async () => {
+		const startup = getBundledModel("anthropic", "claude-opus-4-5");
+		const fallback = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!startup || !fallback) throw new Error("expected bundled models");
+		const session = await startPrewalkSession("@default", {
+			model: `${startup.provider}/${startup.id}`,
+			defaultRole: `runtime-provider/missing,${fallback.provider}/${fallback.id}`,
+			authenticatedProvider: fallback.provider,
+			extension: () => {},
+		});
+		try {
+			expect(session.model?.id).toBe(startup.id);
+			expect(session.getPrewalkState()?.target.id).toBe(fallback.id);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("fetches a mixed-case cold extension provider without probing unrelated providers", async () => {
 		const unrelatedFetch = vi.fn(async () => []);
 		const extension: ExtensionFactory = pi => {
 			pi.registerProvider("runtime-provider", dynamicOnlyProviderConfig);
@@ -252,7 +273,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 				fetchDynamicModels: unrelatedFetch,
 			});
 		};
-		const session = await startPrewalkSession("runtime-provider/cached-runtime-model", {
+		const session = await startPrewalkSession("Runtime-Provider/cached-runtime-model", {
 			model: "anthropic/claude-sonnet-4-5",
 			authenticatedProvider: "anthropic",
 			extension,
@@ -267,13 +288,16 @@ describe("createAgentSession deferred model pattern resolution", () => {
 	});
 
 	test("warns and continues when an extension prewalk target never registers", async () => {
-		const warnings = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-		const session = await startPrewalkSession("missing-provider/missing-model");
+		const writes = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+		const warnings: string[] = [];
+		const session = await startPrewalkSession("missing-provider/missing-model", {
+			onPrewalkWarning: warning => warnings.push(warning),
+		});
 		try {
 			expect(session.getPrewalkState()).toBeUndefined();
-			expect(warnings.mock.calls.map(([message]) => String(message)).join("\n")).toContain(
-				'prewalk disabled — Model "missing-provider/missing-model" not found',
-			);
+			expect(warnings).toHaveLength(1);
+			expect(warnings[0]).toContain("missing-provider/missing-model");
+			expect(writes).not.toHaveBeenCalled();
 		} finally {
 			await session.dispose();
 		}
