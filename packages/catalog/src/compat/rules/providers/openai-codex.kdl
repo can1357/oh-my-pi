@@ -5,6 +5,7 @@ provider "openai-codex" {
 	env "OPENAI_CODEX_OAUTH_TOKEN"
 	kind-apis {
 		image "openai-codex-responses"
+		stt "openai-codex-transcriptions"
 	}
 	web-search "codex"
 
@@ -16,10 +17,21 @@ provider "openai-codex" {
 			limits
 			supports-tools #false
 		}
+		model "transcribe" name="Transcribe" api="openai-codex-transcriptions" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
 	}
 
 	models "gpt-image-1" {
 		kind "image"
+	}
+
+	models "transcribe" {
+		kind "stt"
 	}
 
 	// Replaces the Codex provider's handwritten flex/priority pricing fallback.

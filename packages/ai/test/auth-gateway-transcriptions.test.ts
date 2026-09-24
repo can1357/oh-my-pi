@@ -64,9 +64,20 @@ async function boot(): Promise<Harness> {
 	const storage = await AuthStorage.create(path.join(dir, "auth.db"));
 	storage.keys.setRuntime("openai", "openai-secret");
 	storage.keys.setRuntime("openrouter", "openrouter-secret");
+	storage.keys.setRuntime(
+		"openai-codex",
+		"header.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC0xMjMifX0.signature",
+	);
 	const direct = transcriptionModel("openai", "whisper-1");
 	const routed = transcriptionModel("openrouter", "openai/whisper-large-v3");
+	const codex = transcriptionModel(
+		"openai-codex",
+		"transcribe",
+		"openai-codex-transcriptions",
+		"https://chatgpt.com/backend-api",
+	);
 	const local = transcriptionModel("local", "whisper-small", "local-inference", "local://inference");
+	const nonStt = transcriptionModel("openai", "gpt-4o-mini", "openai-responses" as Api);
 	const upstream: UpstreamRequest[] = [];
 	const fetchImpl: FetchImpl = async (input, init) => {
 		if (!(init?.body instanceof FormData)) throw new Error("Expected upstream multipart body");
@@ -92,7 +103,9 @@ async function boot(): Promise<Harness> {
 		resolveModel: id => {
 			if (id === direct.id || id === `openai/${direct.id}`) return direct;
 			if (id === routed.id || id === `openrouter/${routed.id}`) return routed;
+			if (id === codex.id || id === `openai-codex/${codex.id}`) return codex;
 			if (id === local.id || id === `local/${local.id}`) return local;
+			if (id === nonStt.id || id === `openai/${nonStt.id}`) return nonStt;
 			return undefined;
 		},
 		version: "test",
@@ -222,6 +235,21 @@ describe("auth-gateway POST /v1/audio/transcriptions", () => {
 		expect(await response.json()).toMatchObject({ error: { code: 400, type: "invalid_request_error" } });
 		expect(harness.upstream).toHaveLength(0);
 	});
+	it("dispatches Codex transcription models through the auth gateway", async () => {
+		harness = await boot();
+		const form = new FormData();
+		form.append("model", "openai-codex/transcribe");
+		form.append("file", new File([AUDIO], "dictation.wav", { type: "audio/wav" }));
+		const response = await fetch(`${harness.url}/v1/audio/transcriptions`, {
+			method: "POST",
+			headers: gatewayHeaders(),
+			body: form,
+		});
+		expect(response.status).toBe(200);
+		expect(await response.json()).toMatchObject({ text: "Hello from audio." });
+		expect(harness.upstream).toHaveLength(1);
+		expect(harness.upstream[0]!.url).toBe("https://chatgpt.com/backend-api/transcribe");
+	});
 
 	it("rejects local-only and unknown models with distinct client errors", async () => {
 		harness = await boot();
@@ -244,6 +272,15 @@ describe("auth-gateway POST /v1/audio/transcriptions", () => {
 			body: body("missing-model"),
 		});
 		expect(unknown.status).toBe(404);
+		const unsupported = await fetch(`${harness.url}/v1/audio/transcriptions`, {
+			method: "POST",
+			headers: gatewayHeaders(),
+			body: body("openai/gpt-4o-mini"),
+		});
+		expect(unsupported.status).toBe(400);
+		expect(await unsupported.json()).toMatchObject({
+			error: { message: expect.stringContaining("does not support audio transcription") },
+		});
 		expect(harness.upstream).toHaveLength(0);
 	});
 });
