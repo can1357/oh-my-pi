@@ -23,6 +23,9 @@ import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { GlobTool } from "../../src/tools/glob";
 import { GrepTool } from "../../src/tools/grep";
 
+import { cfgCompactionExperimentalContextManagement } from "@oh-my-pi/pi-coding-agent/session/context-settings";
+import { cfgReadSummarizeEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
+
 function getResultText(result: { content: Array<{ type: string; text?: string }> }): string {
 	return result.content
 		.filter(c => c.type === "text")
@@ -39,7 +42,7 @@ function virtualDocName(url: InternalUrl): string {
 function registerVirtualDocs(docs: ReadonlyMap<string, string>): void {
 	const handler: ProtocolHandler = {
 		scheme: "virtual",
-		immutable: true,
+		spec: { backing: "virtual", selectors: "lines", immutable: true },
 		async resolve(url: InternalUrl): Promise<InternalResource> {
 			const name = virtualDocName(url);
 			if (!name) {
@@ -204,7 +207,7 @@ describe("GrepTool internal URL resolution", () => {
 
 	it("greps the caller-bound full current branch without materializing a session file", async () => {
 		const settings = Settings.isolated({ "grep.contextBefore": 0, "grep.contextAfter": 0 });
-		settings.set("compaction.experimentalContextManagement", true);
+		cfgCompactionExperimentalContextManagement.set(settings, true);
 		const branch = [
 			{
 				type: "message",
@@ -523,6 +526,42 @@ describe("GrepTool internal URL resolution", () => {
 		expect(text).toMatch(/^\*\d+:.*needle/m);
 	});
 
+	it("accepts the single-slash local:/ spelling in find and search like read", async () => {
+		const localRoot = path.join(artifactsDir, "local");
+		await fs.mkdir(path.join(localRoot, "notes"), { recursive: true });
+		await Bun.write(path.join(localRoot, "notes", "plan.md"), "beta needle line\n");
+		LocalProtocolHandler.setOverride({ getArtifactsDir: () => artifactsDir, getSessionId: () => "session" });
+		const session = createSession();
+
+		const findResult = await new GlobTool(session).execute("find-single-slash", { path: "local:/notes" });
+		const searchResult = await new GrepTool(session).execute("search-single-slash", {
+			pattern: "needle",
+			path: "local:/notes/plan.md",
+		});
+
+		expect(getResultText(findResult)).toContain("plan.md");
+		expect(getResultText(searchResult)).toContain("beta needle line");
+	});
+
+	it("expands a glob in the first local:// segment for find and search", async () => {
+		const localRoot = path.join(artifactsDir, "local");
+		await fs.mkdir(localRoot, { recursive: true });
+		await Bun.write(path.join(localRoot, "draft-plan.md"), "gamma needle\n");
+		await Bun.write(path.join(localRoot, "notes.txt"), "gamma needle\n");
+		LocalProtocolHandler.setOverride({ getArtifactsDir: () => artifactsDir, getSessionId: () => "session" });
+		const session = createSession();
+
+		const findText = getResultText(await new GlobTool(session).execute("find-root-glob", { path: "local://*.md" }));
+		const searchText = getResultText(
+			await new GrepTool(session).execute("search-root-glob", { pattern: "needle", path: "local://*.md" }),
+		);
+
+		expect(findText).toContain("draft-plan.md");
+		expect(findText).not.toContain("notes.txt");
+		expect(searchText).toContain("draft-plan.md");
+		expect(searchText).not.toContain("notes.txt");
+	});
+
 	it("read local://<name>:<sel> honors URL selector even when a sibling literal `<name>:<sel>` file exists (issue #4618)", async () => {
 		const localRoot = path.join(artifactsDir, "local");
 		await fs.mkdir(localRoot, { recursive: true });
@@ -538,7 +577,7 @@ describe("GrepTool internal URL resolution", () => {
 		LocalProtocolHandler.setOverride({ getArtifactsDir: () => artifactsDir, getSessionId: () => "session" });
 
 		const session = createSession({ hasEditTool: true });
-		session.settings.set("read.summarize.enabled", false);
+		cfgReadSummarizeEnabled.set(session.settings, false);
 		const result = await new ReadTool(session).execute("test-read-local-url-selector", {
 			path: "local://notes.md:1-2",
 		});
@@ -652,7 +691,7 @@ describe("GrepTool internal URL resolution", () => {
 		// not be virtual-grepped — its listing text is not the directory's contents.
 		InternalUrlRouter.instance().register({
 			scheme: "dirstub",
-			immutable: true,
+			spec: { backing: "virtual", selectors: "none", immutable: true },
 			async resolve(url: InternalUrl): Promise<InternalResource> {
 				return { url: url.href, content: "sub/\nfile.txt", contentType: "text/plain", isDirectory: true };
 			},

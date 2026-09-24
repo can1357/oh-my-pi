@@ -4710,8 +4710,8 @@ export function sakanaModelManagerOptions(config?: SakanaModelManagerConfig): Mo
 
 const AIAND_DEFAULT_BASE_URL = "https://api.aiand.com/v1";
 
-/** `reasoning_efforts` wire values ai& reports, mapped onto pi effort levels. */
-const AIAND_EFFORT_BY_WIRE_VALUE: Record<string, Effort> = {
+/** Effort wire values discovery endpoints report (`reasoning_efforts`, `thinking`), mapped onto pi effort levels. */
+const EFFORT_BY_WIRE_VALUE: Record<string, Effort> = {
 	minimal: Effort.Minimal,
 	low: Effort.Low,
 	medium: Effort.Medium,
@@ -4728,18 +4728,23 @@ function normalizeAiandBaseUrl(baseUrl: string | undefined): string {
 
 const AIAND_STATIC_MODEL_IDS = seedModels("aiand").map(model => model.id);
 
-function mapAiandThinking(entry: OpenAICompatibleModelRecord): ThinkingConfig | undefined {
-	const efforts = Array.isArray(entry.reasoning_efforts)
-		? entry.reasoning_efforts.flatMap(value =>
-				typeof value === "string" && AIAND_EFFORT_BY_WIRE_VALUE[value] ? [AIAND_EFFORT_BY_WIRE_VALUE[value]] : [],
+/** Parse a discovered effort list, dropping unknown wire values; empty when absent or unrecognized. */
+function parseWireEfforts(value: unknown): Effort[] {
+	return Array.isArray(value)
+		? value.flatMap(item =>
+				typeof item === "string" && EFFORT_BY_WIRE_VALUE[item] ? [EFFORT_BY_WIRE_VALUE[item]] : [],
 			)
 		: [];
+}
+
+function mapAiandThinking(entry: OpenAICompatibleModelRecord): ThinkingConfig | undefined {
+	const efforts = parseWireEfforts(entry.reasoning_efforts);
 	if (efforts.length === 0) {
 		return undefined;
 	}
 	const defaultLevel =
 		typeof entry.reasoning_effort_default === "string"
-			? AIAND_EFFORT_BY_WIRE_VALUE[entry.reasoning_effort_default]
+			? EFFORT_BY_WIRE_VALUE[entry.reasoning_effort_default]
 			: undefined;
 	return {
 		mode: "effort",
@@ -4896,8 +4901,26 @@ function mapYoloAutoModel(
 	reference: ModelSpec<"openai-completions"> | undefined,
 ): ModelSpec<"openai-completions"> {
 	const model = mapWithBundledReference(entry, defaults, reference);
+	// `/v1/models` advertises each reasoning model's accepted effort ladder in
+	// `thinking`; it is authoritative over the seed/reference ladder. Rows
+	// without the field (e.g. `yolo-small`) keep the reference surface.
+	const efforts = parseWireEfforts(entry.thinking);
+	const thinking: ThinkingConfig | undefined =
+		efforts.length > 0
+			? {
+					...model.thinking,
+					mode: model.thinking?.mode ?? "effort",
+					efforts,
+					defaultLevel:
+						model.thinking?.defaultLevel && efforts.includes(model.thinking.defaultLevel)
+							? model.thinking.defaultLevel
+							: undefined,
+				}
+			: model.thinking;
 	return {
 		...model,
+		...(efforts.length > 0 && { reasoning: true }),
+		thinking,
 		// Flat-rate and no-store are provider-wide: they must win whether the
 		// reference came from the yolo bundle, the global index, or nowhere.
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },

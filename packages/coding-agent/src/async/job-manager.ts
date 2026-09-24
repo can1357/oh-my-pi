@@ -144,7 +144,8 @@ export interface AsyncJobManagerOptions {
 	 * would leak one agent's result into another session.
 	 */
 	onJobComplete?: AsyncJobDeliverySink;
-	maxRunningJobs?: number;
+	/** Running-job cap; a function is re-read on every capacity check so a live setting resizes the cap. */
+	maxRunningJobs?: number | (() => number);
 	retentionMs?: number;
 	/**
 	 * Delay after a job's `async-result` delivery settles before its retained
@@ -256,7 +257,7 @@ export class AsyncJobManager {
 	#nextAutoId = 1;
 	readonly #deliverySinks = new Map<string, AsyncJobDeliverySink>();
 	readonly #onJobComplete: AsyncJobManagerOptions["onJobComplete"];
-	readonly #maxRunningJobs: number;
+	readonly #maxRunningJobsOption: AsyncJobManagerOptions["maxRunningJobs"];
 	readonly #retentionMs: number;
 	readonly #retainedArtifactsCleanupGraceMs: number;
 	readonly #retainedArtifactsCleanupMaxWaitMs: number;
@@ -281,7 +282,7 @@ export class AsyncJobManager {
 
 	constructor(options: AsyncJobManagerOptions) {
 		this.#onJobComplete = options.onJobComplete;
-		this.#maxRunningJobs = Math.max(1, Math.floor(options.maxRunningJobs ?? DEFAULT_MAX_RUNNING_JOBS));
+		this.#maxRunningJobsOption = options.maxRunningJobs;
 		this.#retentionMs = Math.max(0, Math.floor(options.retentionMs ?? DEFAULT_RETENTION_MS));
 		this.#retainedArtifactsCleanupGraceMs = Math.max(
 			0,
@@ -295,6 +296,13 @@ export class AsyncJobManager {
 			0,
 			Math.floor(options.consumedResultEvictionMs ?? CONSUMED_RESULT_EVICTION_MS),
 		);
+	}
+
+	/** Effective running-job cap (at least 1), resolved at check time. */
+	get #maxRunningJobs(): number {
+		const option = this.#maxRunningJobsOption;
+		const value = typeof option === "function" ? option() : option;
+		return Math.max(1, Math.floor(value ?? DEFAULT_MAX_RUNNING_JOBS));
 	}
 
 	/** True when the running-job count has reached the configured cap. */
@@ -329,9 +337,10 @@ export class AsyncJobManager {
 		for (const existing of this.#jobs.values()) {
 			if (existing.status === "running" && !existing.queued) activeCount++;
 		}
-		if (activeCount >= this.#maxRunningJobs) {
+		const maxRunningJobs = this.#maxRunningJobs;
+		if (activeCount >= maxRunningJobs) {
 			throw new Error(
-				`Background job limit reached (${this.#maxRunningJobs}). Wait for running jobs to finish or cancel one.`,
+				`Background job limit reached (${maxRunningJobs}). Wait for running jobs to finish or cancel one.`,
 			);
 		}
 

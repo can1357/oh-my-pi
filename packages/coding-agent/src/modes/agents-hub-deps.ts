@@ -24,6 +24,14 @@ import { discoverAgents } from "../task/discovery";
 import { resolveAgentPrewalkDefault } from "../task/prewalk";
 import { createModelBrowserSource } from "./model-browser-source";
 
+import {
+	cfgTaskAgentAdvisor,
+	cfgTaskAgentModelOverrides,
+	cfgTaskAgentPrewalk,
+	cfgTaskDisabledAgents,
+	cfgTaskPrewalk,
+} from "../task/settings";
+
 function extractAssistantText(messages: AgentMessage[]): string | null {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const message = messages[i];
@@ -56,10 +64,10 @@ export function createAgentsHubDeps(
 		browserSource: createModelBrowserSource(settings),
 		loadAgents: async () => {
 			const { agents } = await discoverAgents(cwd, undefined, extensionRoots());
-			const disabled = new Set(settings.get("task.disabledAgents") ?? []);
-			const overrides = settings.get("task.agentModelOverrides") ?? {};
-			const prewalkOverrides = settings.get("task.agentPrewalk") ?? {};
-			const advisorOverrides = settings.get("task.agentAdvisor") ?? {};
+			const disabled = new Set(cfgTaskDisabledAgents.get(settings));
+			const overrides = cfgTaskAgentModelOverrides.get(settings);
+			const prewalkOverrides = cfgTaskAgentPrewalk.get(settings);
+			const advisorOverrides = cfgTaskAgentAdvisor.get(settings);
 			return agents.map(agent => {
 				const override = overrides[agent.name];
 				const overrideModel = (Array.isArray(override) ? override.join(",") : (override ?? "")).trim();
@@ -95,7 +103,7 @@ export function createAgentsHubDeps(
 		effectivePrewalkPattern: agent =>
 			resolveAgentPrewalkPattern({
 				settingsOverride: agent.prewalkOverride,
-				agentPrewalk: resolveAgentPrewalkDefault(agent, settings.get("task.prewalk") ?? false),
+				agentPrewalk: resolveAgentPrewalkDefault(agent, cfgTaskPrewalk.get(settings)),
 			}),
 		effectiveAdvisorPattern: agent => {
 			const selection = resolveAgentAdvisorSelection({
@@ -104,15 +112,15 @@ export function createAgentsHubDeps(
 			});
 			return selection ? (selection.model ?? "@advisor") : undefined;
 		},
-		setDisabledAgents: names => settings.set("task.disabledAgents", names),
+		setDisabledAgents: names => cfgTaskDisabledAgents.set(settings, names),
 		setOverrides: (property, overrides) => {
-			const key =
+			const setting =
 				property === "model"
-					? "task.agentModelOverrides"
+					? cfgTaskAgentModelOverrides
 					: property === "prewalk"
-						? "task.agentPrewalk"
-						: "task.agentAdvisor";
-			settings.set(key, overrides);
+						? cfgTaskAgentPrewalk
+						: cfgTaskAgentAdvisor;
+			setting.set(settings, overrides);
 		},
 		generateAgent: async (description, onText) => {
 			await modelRegistry.refresh();

@@ -9,7 +9,7 @@
   - `packages/coding-agent/src/session/agent-session.ts` — captures the active checkpoint after tool success.
   - `packages/coding-agent/src/session/session-manager.ts` — persists the normal session entry stream; not the active checkpoint marker.
   - `packages/coding-agent/src/tools/index.ts` — registers the tool and gates it behind `checkpoint.enabled`.
-  - `packages/coding-agent/src/config/settings-schema.ts` — defines the disabled-by-default feature flag.
+  - `packages/coding-agent/src/tools/settings.ts` — defines the disabled-by-default feature flag (`cfgCheckpointEnabled`).
 
 ## Registration / Visibility
 - Tool metadata: `approval = "read"`, `strict = true`, `loadMode = "discoverable"`. Execution is single-shot; the tool does not stream progress updates.

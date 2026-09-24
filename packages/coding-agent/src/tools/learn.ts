@@ -7,6 +7,9 @@ import { localBackend } from "../memory-backend/local-backend";
 import learnDescription from "../prompts/tools/learn.md" with { type: "text" };
 import type { ToolSession } from ".";
 
+import { cfgAutolearnEnabled } from "../autolearn/settings";
+import { cfgMemoryBackend } from "../memory-backend/settings";
+
 const learnSchema = type({
 	memory: type("string").describe("the durable, self-contained lesson to remember (what, when, why)"),
 	"context?": type("string").describe("optional source context for the lesson"),
@@ -30,7 +33,7 @@ export type LearnParams = typeof learnSchema.infer;
 export class LearnTool implements AgentTool<typeof learnSchema> {
 	readonly name = "learn";
 	readonly approval = (args: unknown) =>
-		(args as Partial<LearnParams>).skill || this.session.settings.get("memory.backend") === "local"
+		(args as Partial<LearnParams>).skill || cfgMemoryBackend.get(this.session.settings) === "local"
 			? "write"
 			: "read";
 	readonly label = "Learn";
@@ -43,8 +46,8 @@ export class LearnTool implements AgentTool<typeof learnSchema> {
 	constructor(private readonly session: ToolSession) {}
 
 	static createIf(session: ToolSession): LearnTool | null {
-		if (!session.settings.get("autolearn.enabled")) return null;
-		const backend = session.settings.get("memory.backend");
+		if (!cfgAutolearnEnabled.get(session.settings)) return null;
+		const backend = cfgMemoryBackend.get(session.settings);
 		if (backend !== "hindsight" && backend !== "mnemopi" && backend !== "local") return null;
 		if (backend === "hindsight" && !isHindsightConfigured(loadHindsightConfig(session.settings))) return null;
 		return new LearnTool(session);
@@ -52,33 +55,35 @@ export class LearnTool implements AgentTool<typeof learnSchema> {
 
 	async execute(_id: string, params: LearnParams): Promise<AgentToolResult> {
 		// 1) Persist or queue the lesson to long-term memory (mirrors MemoryRetainTool).
-		const backend = this.session.settings.get("memory.backend");
+		const backend = cfgMemoryBackend.get(this.session.settings);
 		let memoryMessage = "Lesson stored";
 		if (backend === "mnemopi") {
 			const state = this.session.getMnemopiSessionState?.();
 			if (!state) {
 				throw new Error("Mnemopi backend is not initialised for this session.");
 			}
-			const id = state.rememberScoped(params.memory, {
-				source: "coding-agent-learn",
-				importance: 0.8,
-				metadata: {
-					session_id: state.sessionId,
-					cwd: state.session.sessionManager.getCwd(),
-					context: params.context ?? null,
-					tool: "learn",
-				},
-				scope: "bank",
-				extract: true,
-				extractEntities: true,
-				veracity: "tool",
-				memoryType: "fact",
-			});
-			// rememberScoped returns undefined when the retain failed (closed DB /
-			// disk error); mirror mnemopiBackend.save and fail loudly rather than
-			// reporting (and minting a skill for) a lesson that was silently dropped.
-			if (!id) {
-				throw new Error("Mnemopi did not store the lesson (no memory id returned).");
+			// A failed write throws (closed DB / disk error). Fail loudly with the
+			// cause rather than reporting (and minting a skill for) a lesson that was
+			// never stored.
+			try {
+				state.rememberScoped(params.memory, {
+					source: "coding-agent-learn",
+					importance: 0.8,
+					metadata: {
+						session_id: state.sessionId,
+						cwd: state.session.sessionManager.getCwd(),
+						context: params.context ?? null,
+						tool: "learn",
+					},
+					scope: "bank",
+					extract: true,
+					extractEntities: true,
+					veracity: "tool",
+					memoryType: "fact",
+				});
+			} catch (error) {
+				const reason = error instanceof Error ? error.message : String(error);
+				throw new Error(`Mnemopi did not store the lesson: ${reason}`, { cause: error });
 			}
 		} else if (backend === "local") {
 			const result = await localBackend.save?.(

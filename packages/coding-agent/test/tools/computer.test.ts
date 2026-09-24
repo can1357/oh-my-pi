@@ -29,6 +29,8 @@ import type {
 	PointerOptions,
 } from "@oh-my-pi/pi-natives";
 
+import { cfgComputerEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
+
 /** Method name of the last step in a facade call chain, or "" when the chain is malformed. */
 function terminalMethod(chain: unknown): string {
 	if (!Array.isArray(chain) || chain.length === 0) return "";
@@ -749,7 +751,7 @@ describe("computer prelude", () => {
 		}));
 
 		expect(prelude.enabled?.()).toBe(true);
-		session.settings.override("computer.enabled", false);
+		cfgComputerEnabled.override(session.settings, false);
 		expect(prelude.enabled?.()).toBe(false);
 	});
 });

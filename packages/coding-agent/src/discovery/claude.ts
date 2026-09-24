@@ -31,6 +31,13 @@ import {
 	loadFilesFromDir,
 	scanSkillsFromDir,
 } from "./helpers";
+import type { Setting } from "../config/registry";
+
+import {
+	cfgCommandsEnableClaudeProject,
+	cfgCommandsEnableClaudeUser,
+	cfgSkillsEnableClaudeUser,
+} from "../extensibility/settings";
 
 const PROVIDER_ID = "claude";
 const DISPLAY_NAME = "Claude Code";
@@ -41,9 +48,9 @@ const CONFIG_DIR = ".claude";
  * Read a legacy per-capability `~/.claude` toggle. Defaults to off (opt-in);
  * also off when settings are not initialized (discovery unit tests).
  */
-function readClaudeUserToggle(key: "skills.enableClaudeUser" | "commands.enableClaudeUser"): boolean {
+function readClaudeUserToggle(toggle: Setting<boolean>): boolean {
 	try {
-		return settings.get(key) === true;
+		return toggle.get(settings) === true;
 	} catch {
 		return false;
 	}
@@ -188,7 +195,7 @@ async function loadContextFiles(ctx: LoadContext): Promise<LoadResult<ContextFil
 // =============================================================================
 
 async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
-	const userBase = getUserClaude(ctx, readClaudeUserToggle("skills.enableClaudeUser"));
+	const userBase = getUserClaude(ctx, readClaudeUserToggle(cfgSkillsEnableClaudeUser));
 	const userSkillsDir = userBase ? path.join(userBase, "skills") : null;
 
 	// Walk up from cwd finding .claude/skills/ in ancestors. Skip $HOME:
@@ -287,7 +294,7 @@ async function loadExtensionModules(ctx: LoadContext): Promise<LoadResult<Extens
  */
 function readClaudeProjectCommandsToggle(): boolean {
 	try {
-		return settings.get("commands.enableClaudeProject") ?? true;
+		return cfgCommandsEnableClaudeProject.get(settings);
 	} catch {
 		return true;
 	}
@@ -321,7 +328,7 @@ async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashComm
 	const warnings: string[] = [];
 	const enableProject = readClaudeProjectCommandsToggle();
 
-	const userBase = getUserClaude(ctx, readClaudeUserToggle("commands.enableClaudeUser"));
+	const userBase = getUserClaude(ctx, readClaudeUserToggle(cfgCommandsEnableClaudeUser));
 	if (userBase) {
 		const userCommandsDir = path.join(userBase, "commands");
 

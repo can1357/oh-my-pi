@@ -19,7 +19,7 @@
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `pat` | `string` | Yes | Single AST pattern. The wrapper trims it and rejects empty strings. |
-| `path` | `string` | No | One file, directory, glob, internal URL with a backing file, or fetched web URL — or several of those as a semicolon-delimited list (`"src; tests"`). Omitted or empty defaults to `.` (the workspace root). Empty entries are rejected. Internal-URL globs are rejected. |
+| `path` | `string` | No | One file, directory, glob, locatable internal URL or internal-URL glob, or fetched web URL — or several of those as a semicolon-delimited list (`"src; tests"`). Omitted or empty defaults to `.` (the workspace root). Empty entries are rejected. |
 | `skip` | `number` | No | Match offset. Defaults to `0`, then `Math.floor(...)`; negatives and non-finite values fail. |
 
 Pattern grammar and language support exposed to the model:
@@ -50,7 +50,7 @@ Pattern grammar and language support exposed to the model:
 
 ## Flow
 1. `AstGrepTool.execute()` validates `pat`, normalizes `skip`, then delegates path resolution to `resolveToolSearchScope()` in `packages/coding-agent/src/tools/path-utils.ts`, which normalizes entries, expands semicolon-delimited lists (plus conditional comma/whitespace splits), and rejects empty `path` entries.
-2. Internal URLs are resolved through the shared router; entries without `sourcePath` and internal-URL globs fail. Readable external URLs are materialized to immutable local files for searching.
+2. Internal URLs are located through the shared router (`requireLocal(…, { directory: true })`; URL globs through `locateGlob()`); URLs with no local file and globs over a non-locatable base fail. Readable external URLs are materialized to immutable local files for searching.
 3. For multiple path inputs, `partitionExistingPaths()` drops missing bases only when at least one surviving base remains; if all bases are missing the call fails.
 4. `parseSearchPathPreferringLiteral()` splits a single path into `basePath` plus optional `glob`. `resolveExplicitSearchPaths()` collapses multiple inputs into a common base plus a brace-union glob, or separate `targets` when the common ancestor is not itself one of the requested paths.
 5. The wrapper stats the resolved base path to decide whether output should be grouped as a directory result.
@@ -71,7 +71,7 @@ Pattern grammar and language support exposed to the model:
 - Single file: native path is the file; output is a flat list of rendered match lines.
 - Directory + optional glob: native scan walks the directory, then filters by compiled glob.
 - Multiple explicit paths/globs: wrapper unions them into one synthetic scope or runs per-target native calls when paths only meet at root.
-- Internal URL inputs: supported when the router resolves them to a backing file path. Readable external URLs are materialized to immutable temporary files.
+- Internal URL inputs: supported when the router locates them (or a glob's base) to a local path. Readable external URLs are materialized to immutable temporary files.
 - Hashline output mode vs plain line-number mode: controlled by `resolveFileDisplayMode()`; hashline mode requires the edit tool and hashline edit mode, and per-file anchors additionally require a successful whole-file snapshot (`recordFileSnapshot()`) — over-cap or unreadable files fall back to plain output.
 
 ## Side Effects
@@ -95,7 +95,7 @@ Pattern grammar and language support exposed to the model:
 - Multi-path union deduplicates identical path inputs before resolution in `resolveExplicitSearchPaths()`.
 
 ## Errors
-- TS wrapper throws `ToolError` for empty patterns, invalid `skip`, empty path entries, unsupported internal-URL globs, internal URLs without `sourcePath`, and missing paths. Supported external read URLs are materialized before search rather than rejected.
+- TS wrapper throws `ToolError` for empty patterns, invalid `skip`, empty path entries, internal-URL globs over a non-locatable base, internal URLs with no local file (`Cannot search <scheme>:// URL: no local file backs …`), and missing paths. Supported external read URLs are materialized before search rather than rejected.
 - Native code returns hard errors for:
   - unreadable search roots or bad glob compilation,
   - cancellation (`Aborted: Signal`) or timeout (`Aborted: Timeout`).

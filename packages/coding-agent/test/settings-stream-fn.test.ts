@@ -191,6 +191,28 @@ describe("createSettingsAwareStreamFn", () => {
 		expect(options?.loopGuard?.checkAssistantContent).toBe(true);
 		expect(options?.hideThinkingSummary).toBe(false);
 	});
+
+	it("lowers the output cap so prompt plus output fits the model's context window", () => {
+		// The reported DeepSeek /btw 400: a 666k-token prompt plus the model's
+		// 384k default output cap exceeded the window. Test-env counts are bytes/4.
+		const deepseek = { api: "openai-completions", contextWindow: 1_000_000, maxTokens: 384_000 } as unknown as Model;
+		const promptTokens = 666_387;
+		const context = {
+			messages: [{ role: "user", content: "x".repeat(promptTokens * 4), timestamp: 0 }],
+		} as unknown as Context;
+		const { fn: base, calls } = captureBase();
+		const wrapped = createSettingsAwareStreamFn(Settings.isolated({}), base);
+
+		wrapped(deepseek, context, { apiKey: "k" });
+		wrapped(deepseek, stubContext, { apiKey: "k" });
+
+		const fitted = calls[0]?.options?.maxTokens;
+		expect(fitted).toBeGreaterThan(0);
+		expect(promptTokens + (fitted ?? Number.POSITIVE_INFINITY)).toBeLessThanOrEqual(1_000_000);
+		// A prompt that leaves room keeps the transport's own default.
+		expect(calls[1]?.options?.maxTokens).toBeUndefined();
+	});
+
 	describe("providers.anthropic.serverSideFallback (opt-in)", () => {
 		const stubFableModel = {
 			api: "anthropic-messages",
@@ -201,6 +223,21 @@ describe("createSettingsAwareStreamFn", () => {
 			api: "anthropic-messages",
 			provider: "anthropic",
 			id: "claude-opus-4-8",
+		} as unknown as Model;
+		const stubFable51Model = {
+			api: "anthropic-messages",
+			provider: "anthropic",
+			id: "claude-fable-5-1",
+		} as unknown as Model;
+		const stubMythosModel = {
+			api: "anthropic-messages",
+			provider: "anthropic",
+			id: "claude-mythos-5-1",
+		} as unknown as Model;
+		const stubBedrockFableModel = {
+			api: "bedrock-converse-stream",
+			provider: "amazon-bedrock",
+			id: "anthropic.claude-fable-5-1",
 		} as unknown as Model;
 
 		it("stays off by default: no fallbacks injected on any model", () => {
@@ -213,14 +250,31 @@ describe("createSettingsAwareStreamFn", () => {
 			expect(calls[0]?.options?.fallbacks).toBeUndefined();
 		});
 
-		it("injects Opus 5.5 fallback for Fable when the setting is on", () => {
+		// Targets must be in the model's `allowed_fallback_models`; Fable 5 / 5.1
+		// publish ["claude-opus-4-8", "claude-opus-5"] and reject claude-opus-5-5
+		// with a 400 (#13059).
+		it.each([
+			["Fable 5", stubFableModel],
+			["Fable 5.1", stubFable51Model],
+			["Mythos 5.1", stubMythosModel],
+		])("injects an allowed Opus 5 fallback for %s when the setting is on", (_label, model) => {
 			const settings = Settings.isolated({ "providers.anthropic.serverSideFallback": true });
 			const { fn: base, calls } = captureBase();
 			const wrapped = createSettingsAwareStreamFn(settings, base);
 
-			wrapped(stubFableModel, stubContext, { apiKey: "k" });
+			wrapped(model, stubContext, { apiKey: "k" });
 
-			expect(calls[0]?.options?.fallbacks).toEqual([{ model: "claude-opus-5-5" }]);
+			expect(calls[0]?.options?.fallbacks).toEqual([{ model: "claude-opus-5" }]);
+		});
+
+		it("does NOT inject fallbacks for Fable off first-party Anthropic even when the setting is on", () => {
+			const settings = Settings.isolated({ "providers.anthropic.serverSideFallback": true });
+			const { fn: base, calls } = captureBase();
+			const wrapped = createSettingsAwareStreamFn(settings, base);
+
+			wrapped(stubBedrockFableModel, stubContext, { apiKey: "k" });
+
+			expect(calls[0]?.options?.fallbacks).toBeUndefined();
 		});
 
 		it("does NOT inject fallbacks on non-Fable/Mythos Anthropic models even when the setting is on", () => {
