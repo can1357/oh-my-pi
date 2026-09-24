@@ -45,7 +45,7 @@ export const VcsRepo = nativeBindings.VcsRepo;
 
 // functions
 export const __ompInstallTokioRuntime = nativeBindings.__ompInstallTokioRuntime ?? missingNativeExport("__ompInstallTokioRuntime");
-export const __piNativesV18_2_11 = nativeBindings.__piNativesV18_2_11;
+export const __piNativesV18_3_0 = nativeBindings.__piNativesV18_3_0;
 export const appleFmAvailability = nativeBindings.appleFmAvailability ?? missingNativeExport("appleFmAvailability");
 export const appleFmCancel = nativeBindings.appleFmCancel ?? missingNativeExport("appleFmCancel");
 export const appleFmGenerate = nativeBindings.appleFmGenerate ?? missingNativeExport("appleFmGenerate");

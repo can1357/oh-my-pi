@@ -19,7 +19,7 @@
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `path` | `string` | Yes | Target path. Plain paths write files. Writable internal URLs delegate to their handler. `xd://<device>` dispatches a mounted tool using JSON in `content`. `archive.ext:inner/path` writes an archive entry for `.zip` and ZIP-format aliases (`.jar`, `.war`, `.ear`, `.apk`, …), `.tar`, `.tar.gz`/`.tgz`, `.tar.zst`/`.tzst`, or `.asar`. `db.sqlite:table` inserts a row; `db.sqlite:table:key` updates/deletes one. `conflict://<id>` resolves a registered conflict and `conflict://*` performs a bulk resolution. A copied `[path#TAG]` wrapper is accepted and removed. |
-| `content` | `string` | Yes | Full replacement file/archive/internal-resource content, conflict replacement, or SQLite row payload. SQLite non-delete writes must parse as a JSON5 object; empty or whitespace-only content deletes a keyed row. For `xd://`, this is the mounted tool's JSON argument object. |
+| `content` | `string` | Except `proc://<id>/kill` | Full replacement file/archive/internal-resource content, conflict replacement, or SQLite row payload. Ignored for `/kill`. SQLite non-delete writes must parse as a JSON5 object; empty or whitespace-only content deletes a keyed row. For `xd://`, this is the mounted tool's JSON argument object. |
 
 Worked examples:
 
@@ -142,7 +142,7 @@ content: ""
 
 ### Writable internal resources and tool devices
 - `agent://<id>` with non-empty `content` sends a message to that peer (delivery receipt text); `agent://all` broadcasts to visible live peers. This write is read-approved and allowed in plan mode and `deviceOnlyWrite` when messaging is available. `agent://` reads remain output artifacts.
-- `proc://<id>` with non-empty content sends stdin to a service (Enter appended unless already newline-terminated); an empty content cancels a job or stops a service. `proc://<id>/mode` accepts `persist` or `session` to toggle persistence, or `detached` to restart without a PTY and persist beyond the broker. Proc writes require exec approval and are unavailable in `deviceOnlyWrite` sessions; proc reads do not consume job delivery.
+- `proc://<id>` sends `content` to service stdin (Enter appended unless already newline-terminated); empty content sends Enter, never cancels. `write({ path: "proc://<id>/kill" })` cancels a job or owned subagent, or stops a service; `content` is optional and ignored. `proc://<id>/mode` requires `content` of `persist` or `session` to toggle persistence, or `detached` to restart without a PTY and persist beyond the broker. Proc writes require exec approval and are unavailable in `deviceOnlyWrite` sessions; proc reads do not consume job delivery. `/kill` and `/mode` are write-only.
 - A registered internal handler with a `write` hook owns its resource semantics (for example, `vault://`). `local://` is instead resolved into the session-local artifact sandbox and follows the plain-file path.
 - `xd://` lists/dispatches tool devices mounted behind `write`. Read `xd://<name>` first for its generated input documentation, then pass one JSON object as `content`. The device's own schema, updates, result blocks, error flag, renderer metadata, and approval tier are preserved.
 - Unknown URI-like schemes are refused to prevent silent local-file creation. Use `./scheme://...` only when that filename is intentional.

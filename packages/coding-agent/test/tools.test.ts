@@ -2386,10 +2386,11 @@ function b() {
 			expect(getTextOutput(result)).toContain("short");
 			expect(result.details?.timeoutSeconds).toBe(300);
 			expect(result.details?.async).toBeUndefined();
+			await asyncJobManager.waitForAll();
 			await asyncJobManager.drainDeliveries({ timeoutMs: 1 });
-			const [job] = asyncJobManager.getAllJobs();
-			await job?.promise;
-			expect(job && asyncJobManager.isJobResultConsumed(job.id)).toBe(true);
+			// A command that finished in the foreground never becomes a background job row.
+			expect(asyncJobManager.getAllJobs()).toEqual([]);
+			expect(asyncJobManager.getJob("bg_1")).toBeUndefined();
 			expect(deliveries).toEqual([]);
 			await asyncJobManager.dispose();
 		});

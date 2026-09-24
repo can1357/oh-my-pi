@@ -4,7 +4,19 @@
 
 ### Added
 
-- Added `docTopics` method to `AgentTool` interface for on-demand documentation
+- Added passive tool-call context: `beforeToolCall` can return `additionalContext`, and tools can report context through `ToolCallContext.addAdditionalContext`; it is sent as a developer message after the batch's tool results ([#11998](https://github.com/can1357/oh-my-pi/pull/11998) by [@H4vC](https://github.com/H4vC))
+
+## [18.3.0] - 2026-09-24
+
+### Added
+
+- Added support for documenting agent tools on demand through the new `AgentTool.docTopics` method.
+- Added `TOOL_INTERRUPT_ABORT_REASON` so interruptible tools can distinguish queued steering, peer messages, or background completions from a full run abort.
+
+### Changed
+
+- Improved interrupt handling so tools respect wait mode and can be interrupted when appropriate.
+- Updated Anthropic compaction compatibility with signature verification.
 
 ## [18.2.11] - 2026-09-23
 

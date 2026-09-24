@@ -1,6 +1,6 @@
 import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 import { $env, $envExact } from "@oh-my-pi/pi-utils";
-import type { ApiKeyResolver } from "../auth-retry";
+import type { ApiKeyResolver, ResolvedApiKey } from "../auth-retry";
 import * as AIError from "../error";
 import { isUsageLimitOutcome } from "../error/rate-limit";
 import { AUTHENTICATED_SENTINEL } from "../registry/types";
@@ -266,17 +266,30 @@ export class KeyCascade implements KeysApi {
 		return undefined;
 	}
 
+	/** Resolve a bearer together with the stored row that supplied it. */
+	async getWithCredential(
+		provider: string,
+		sessionId?: string,
+		options?: AuthApiKeyOptions,
+	): Promise<ResolvedApiKey | undefined> {
+		let credentialId: number | undefined;
+		const apiKey = await this.get(provider, sessionId, options, id => {
+			credentialId = id;
+		});
+		return apiKey === undefined ? undefined : { apiKey, credentialId };
+	}
+
 	/**
 	 * Get API key for a provider.
-	 * Priority (first match wins):
-	 * 1. Runtime override (CLI --api-key)
-	 * 2. Config override (models.yml `providers.<name>.apiKey`)
-	 * 3. OAuth token from storage (auto-refreshed)
-	 * 4. API key persisted by a successful `/login`
-	 * 5. Environment variable
-	 * 6. Stored API key (e.g. a broker-migrated copy) — last resort, so an explicit env var wins
+	 * Priority (first match wins): runtime override, config override, OAuth,
+	 * login API key, environment variable, then another stored API key.
 	 */
-	async get(provider: string, sessionId?: string, options?: AuthApiKeyOptions): Promise<string | undefined> {
+	async get(
+		provider: string,
+		sessionId?: string,
+		options?: AuthApiKeyOptions,
+		onCredentialId?: (id: number) => void,
+	): Promise<string | undefined> {
 		// Runtime override takes highest priority
 		const runtimeKey = this.#deps.overrides.runtimeKey(provider);
 		if (runtimeKey) {
@@ -290,13 +303,14 @@ export class KeyCascade implements KeysApi {
 		// won't accept.
 		const configKey = this.#deps.overrides.configKey(provider);
 		if (configKey !== undefined) {
-			return await this.#deps.overrides.resolve(configKey);
+			return this.#deps.overrides.resolve(configKey);
 		}
 
 		// Precedence: a deliberate OAuth/login credential wins, then an explicit env var,
 		// then a stored static api_key (which may be a stale broker-migrated copy) as a last resort.
 		const oauthResolved = await this.#deps.selector.resolveOAuth(provider, sessionId, options);
 		if (oauthResolved) {
+			if (oauthResolved.credentialId !== undefined) onCredentialId?.(oauthResolved.credentialId);
 			return oauthResolved.apiKey;
 		}
 		const loginApiKeySelection = await this.#deps.selector.selectApiKey(
@@ -307,7 +321,12 @@ export class KeyCascade implements KeysApi {
 		);
 		if (loginApiKeySelection) {
 			this.#deps.affinity.record(provider, sessionId, "api_key", loginApiKeySelection.index);
-			return this.#deps.overrides.resolve(loginApiKeySelection.credential.key);
+			const credentialId = onCredentialId
+				? this.#deps.pool.entries(provider)[loginApiKeySelection.index]?.id
+				: undefined;
+			const apiKey = await this.#deps.overrides.resolve(loginApiKeySelection.credential.key);
+			if (apiKey !== undefined && credentialId !== undefined) onCredentialId?.(credentialId);
+			return apiKey;
 		}
 
 		// Past OAuth: the session sticky (if any) is stale — the request authenticates via
@@ -325,7 +344,10 @@ export class KeyCascade implements KeysApi {
 		);
 		if (apiKeySelection) {
 			this.#deps.affinity.record(provider, sessionId, "api_key", apiKeySelection.index);
-			return this.#deps.overrides.resolve(apiKeySelection.credential.key);
+			const credentialId = onCredentialId ? this.#deps.pool.entries(provider)[apiKeySelection.index]?.id : undefined;
+			const apiKey = await this.#deps.overrides.resolve(apiKeySelection.credential.key);
+			if (apiKey !== undefined && credentialId !== undefined) onCredentialId?.(credentialId);
+			return apiKey;
 		}
 		return undefined;
 	}
@@ -345,7 +367,7 @@ export class KeyCascade implements KeysApi {
 		const { sessionId, baseUrl, modelId } = options ?? {};
 		return async ({ lastChance, error, signal, previousKey }) => {
 			if (error === undefined) {
-				return this.get(provider, sessionId, {
+				return this.getWithCredential(provider, sessionId, {
 					baseUrl,
 					modelId,
 					signal,
@@ -366,13 +388,13 @@ export class KeyCascade implements KeysApi {
 					// because a peer may have refreshed the failed bearer.
 					if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) return undefined;
 				}
-				return this.get(provider, sessionId, {
+				return this.getWithCredential(provider, sessionId, {
 					baseUrl,
 					modelId,
 					signal,
 				});
 			}
-			return this.get(provider, sessionId, {
+			return this.getWithCredential(provider, sessionId, {
 				baseUrl,
 				modelId,
 				forceRefresh: true,

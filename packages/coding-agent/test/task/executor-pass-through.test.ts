@@ -202,7 +202,7 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(spy.mock.calls[1]?.[0]?.toolNames).toBeUndefined();
 	});
 
-	it("injects wait only for unrestricted writable or spawning subagents, and requires write for peers", async () => {
+	it("never grants subagents wait, and requires write for peers", async () => {
 		const session = yieldEmittingSession();
 		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
 
@@ -226,8 +226,8 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(writableResult.exitCode).toBe(0);
 		expect(spawningResult.exitCode).toBe(0);
 		expect(spy.mock.calls[0]?.[0]?.toolNames).toEqual(["read", "grep", "glob"]);
-		expect(spy.mock.calls[1]?.[0]?.toolNames).toEqual(["read", "write", "wait"]);
-		expect(spy.mock.calls[2]?.[0]?.toolNames).toEqual(["read", "task", "wait"]);
+		expect(spy.mock.calls[1]?.[0]?.toolNames).toEqual(["read", "write"]);
+		expect(spy.mock.calls[2]?.[0]?.toolNames).toEqual(["read", "task"]);
 
 		const promptText = (index: number): string => {
 			const prompt = spy.mock.calls[index]?.[0]?.systemPrompt;

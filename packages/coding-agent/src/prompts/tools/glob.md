@@ -1,4 +1,4 @@
-Glob files/dirs: `;`-separated paths; default workspace root. `memory://` accepts globs, other URLs exact only; `ssh://` → `read`.
+Glob files/dirs: `;`-separated paths; default workspace root.
 `gitignore` and `hidden` default true; ignored dotfiles need `gitignore: false`. Newest-first by directory; dirs end `/`.
 {{#ifAny eagerDelegation hasFind}}
 {{#if hasFind}}Behavior search → `find`.{{/if}}

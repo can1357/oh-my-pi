@@ -1,4 +1,4 @@
-"""oh-my-pi — Bazel build for the native (Rust) side of the workspace.
+"""omp — Bazel build for the native (Rust) side of the workspace.
 
 Builds the pi_natives NAPI cdylib for every shipped target with hermetic
 toolchains, replacing cargo-zigbuild/cargo-xwin/sccache plus the hand-rolled
@@ -16,7 +16,7 @@ pipeline. `crate_universe` derives the Bazel dependency graph directly from
 Cargo.toml/Cargo.lock and the module annotations; no separate repin step is required.
 """
 
-module(name = "oh-my-pi")
+module(name = "omp")
 
 bazel_dep(name = "bazel_skylib", version = "1.8.2")
 bazel_dep(name = "platforms", version = "1.1.0")

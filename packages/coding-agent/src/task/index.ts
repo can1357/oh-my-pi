@@ -32,6 +32,7 @@ import taskSpecializationAdvisoryTemplate from "../prompts/tools/task-specializa
 import taskFollowUpTemplate from "../prompts/tools/task-follow-up.md" with { type: "text" };
 import { TASK_EFFORTS, type TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import { truncateForPrompt } from "../tools/approval";
+import { hasWaitTool } from "../tools/wait";
 import { isIrcEnabled } from "../irc/messaging";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
@@ -953,7 +954,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			failedSchedules.length > 0
 				? ` Failed to schedule ${failedSchedules.length} spawn${failedSchedules.length === 1 ? "" : "s"}: ${failedSchedules.join("; ")}.`
 				: "";
-		const guidance = prompt.render(taskAsyncContractTemplate, { ircEnabled }).trim();
+		const guidance = prompt
+			.render(taskAsyncContractTemplate, { ircEnabled, waitTool: hasWaitTool(this.session) })
+			.trim();
 		const renderSpawnFeedback = (mixed: boolean): string =>
 			prompt
 				.render(taskSpawnFeedbackTemplate, {

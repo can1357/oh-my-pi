@@ -22,7 +22,7 @@ import {
 	truncateToWidth,
 } from "../render/render-utils";
 import type { CoordinationDetails } from "./wait";
-import { renderAgentWrite, renderProcWrite, type ProcWriteDetails } from "./proc-render";
+import { renderAgentWrite, renderProcWrite, type ProcWriteAction, type ProcWriteDetails } from "./proc-render";
 import type { FileDiagnosticsResult } from "./lsp";
 import type { OutputMeta } from "./output-meta";
 import type { RenderResultOptions, ToolActivityContext, ToolActivitySummary, ToolRenderer } from "./renderer";
@@ -318,6 +318,13 @@ export interface WriteRenderContext {
 	resolveXdevMounted?: (name: string) => XdevMountedRenderer | undefined;
 }
 
+function procWriteTarget(path: string): { id: string; action: ProcWriteAction } {
+	const target = path.slice("proc://".length);
+	if (target.endsWith("/kill")) return { id: target.slice(0, -5), action: "kill" };
+	if (target.endsWith("/mode")) return { id: target.slice(0, -5), action: "mode" };
+	return { id: target, action: "stdin" };
+}
+
 /** Render file writes and delegated tool-device calls. */
 export const writeToolRenderer = {
 	/** Compact one-line activity: device writes read as the mounted tool (`LSP · references foo`), file writes as `Write · <path>`. */
@@ -337,13 +344,8 @@ export const writeToolRenderer = {
 			};
 		}
 		if (/^proc:\/\//i.test(rawPath)) {
-			const target = rawPath.slice("proc://".length);
-			const action = target.endsWith("/mode")
-				? "mode"
-				: typeof writeArgs.content === "string" && writeArgs.content.length > 0
-					? "stdin"
-					: "cancel / stop";
-			return { label: "Process", detail: `${action} ${shortenPath(target.replace(/\/mode$/, ""))}` };
+			const { id, action } = procWriteTarget(rawPath);
+			return { label: "Process", detail: `${action} ${shortenPath(id)}` };
 		}
 		const xdev = parseXdUrl(rawPath);
 		if (xdev?.name) {
@@ -387,12 +389,11 @@ export const writeToolRenderer = {
 			);
 		}
 		if (/^proc:\/\//i.test(rawPath)) {
-			const target = rawPath.slice("proc://".length);
+			const { id, action } = procWriteTarget(rawPath);
 			return renderProcWrite(
-				target.replace(/\/mode$/, ""),
-				target.endsWith("/mode"),
+				id,
+				action,
 				typeof args.content === "string" ? args.content : undefined,
-				options.argsComplete === true,
 				undefined,
 				undefined,
 				options,
@@ -476,12 +477,11 @@ export const writeToolRenderer = {
 			);
 		}
 		if (typeof messagePath === "string" && /^proc:\/\//i.test(messagePath)) {
-			const target = messagePath.slice("proc://".length);
+			const { id, action } = procWriteTarget(messagePath);
 			return renderProcWrite(
-				target.replace(/\/mode$/, ""),
-				target.endsWith("/mode"),
+				id,
+				action,
 				typeof args?.content === "string" ? args.content : undefined,
-				true,
 				result,
 				result.details?.proc,
 				options,
