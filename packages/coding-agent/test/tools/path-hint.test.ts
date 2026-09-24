@@ -60,6 +60,10 @@ describe("describeNearestExistingDir", () => {
 		await fs.mkdir(path.join(root, "src", "sub"), { recursive: true });
 		const hint = await describeNearestExistingDir("src/missing.ts", root);
 		expect(hint).toBe("Nearest existing directory: src/ contains: sub/");
+
+		// Outside the base directory the hint falls back to a portable absolute path.
+		const outside = await describeNearestExistingDir(path.join(root, "nope"), path.join(tempRoot, "elsewhere-"));
+		expect(outside).toBe(`Nearest existing directory: ${root.replaceAll("\\", "/")}/ contains: src/`);
 	});
 
 	test("returns undefined when no ancestor exists within the hop budget", async () => {
