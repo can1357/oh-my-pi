@@ -22,8 +22,8 @@ type SettingsOverrides = Partial<Record<SettingPath, unknown>>;
 
 const activeHarnesses: Harness[] = [];
 const sharedAuthStorage = createInMemoryAuthStorage();
-sharedAuthStorage.setRuntimeApiKey("mock", "test-key");
-sharedAuthStorage.setRuntimeApiKey("anthropic", "test-key");
+sharedAuthStorage.keys.setRuntime("mock", "test-key");
+sharedAuthStorage.keys.setRuntime("anthropic", "test-key");
 const sharedModelRegistry = new ModelRegistry(sharedAuthStorage);
 
 afterAll(() => {
@@ -72,6 +72,9 @@ async function createHarness(
 
 	const mock = createMockModel({ responses });
 	const modelRegistry = sharedModelRegistry;
+	const getAvailable = modelRegistry.getAvailable.bind(modelRegistry);
+	vi.spyOn(modelRegistry, "getAvailable").mockImplementation(kind => (kind === "all" ? [mock] : getAvailable(kind)));
+	const modelSelector = `${mock.provider}/${mock.id}`;
 	const settings = Settings.isolated({
 		"compaction.enabled": false,
 		"retry.enabled": false,
@@ -79,8 +82,9 @@ async function createHarness(
 		"todo.eager": "default",
 		"todo.reminders": false,
 		...settingsOverrides,
+		modelRoles: { default: modelSelector, judge: modelSelector },
+		"retry.fallbackChains": { judge: [] },
 	});
-	settings.setModelRole("default", `${mock.provider}/${mock.id}`);
 
 	const model = getBundledModel("anthropic", "claude-sonnet-4-5") ?? mock;
 	const sessionManager = SessionManager.inMemory(tempDir.path());
@@ -220,7 +224,6 @@ describe("AgentSession unexpected stop guard", () => {
 			],
 			{
 				"features.unexpectedStopDetection": "smart",
-				"providers.unexpectedStopModel": "online",
 			},
 		);
 
@@ -257,7 +260,6 @@ describe("AgentSession unexpected stop guard", () => {
 			[unexpectedStop("I should apply the same fix to the JS eval worker. Doing that now.")],
 			{
 				"features.unexpectedStopDetection": "smart",
-				"providers.unexpectedStopModel": "online",
 			},
 		);
 
@@ -281,7 +283,6 @@ describe("AgentSession unexpected stop guard", () => {
 			],
 			{
 				"features.unexpectedStopDetection": "smart",
-				"providers.unexpectedStopModel": "online",
 			},
 		);
 
@@ -300,7 +301,6 @@ describe("AgentSession unexpected stop guard", () => {
 			[recordCall("alpha", "call-record-alpha"), { content: ["tool path complete"], stopReason: "aborted" }],
 			{
 				"features.unexpectedStopDetection": "smart",
-				"providers.unexpectedStopModel": "online",
 			},
 		);
 
@@ -318,7 +318,6 @@ describe("AgentSession unexpected stop guard", () => {
 			[{ content: ["I should continue but hit the length limit"], stopReason: "length" }],
 			{
 				"features.unexpectedStopDetection": "smart",
-				"providers.unexpectedStopModel": "online",
 			},
 		);
 

@@ -89,8 +89,8 @@ describe("issue #11820 prewalk into a models.yml discovery provider target", () 
 	function registry(): ModelRegistry {
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
-		authStorage.setRuntimeApiKey("my-provider", "test-provider-key");
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("my-provider", "test-provider-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		return new ModelRegistry(authStorage, writeDiscoveryConfig(), {
 			fetch: mockDiscovery(["some-model"]),
 		});

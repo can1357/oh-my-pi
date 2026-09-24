@@ -70,10 +70,14 @@ describe("StreamPublisher", () => {
 
 		const tui = new TUI(new VirtualTerminal(80, 24));
 		let listener: ((paint: TuiPaint) => void) | null = null;
-		const originalSetPaintListener = tui.setPaintListener.bind(tui);
-		spyOn(tui, "setPaintListener").mockImplementation(next => {
+		const originalAddPaintListener = tui.addPaintListener.bind(tui);
+		spyOn(tui, "addPaintListener").mockImplementation(next => {
 			listener = next;
-			originalSetPaintListener(next);
+			const unsubscribe = originalAddPaintListener(next);
+			return () => {
+				listener = null;
+				unsubscribe();
+			};
 		});
 		const statuses: Array<{ viewers: number } | null> = [];
 		const detached = Promise.withResolvers<void>();

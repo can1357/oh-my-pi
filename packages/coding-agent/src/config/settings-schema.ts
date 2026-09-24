@@ -1,6 +1,8 @@
+import { type AuthAccountPolicies, DEFAULT_USAGE_RESERVE_PCT } from "@oh-my-pi/pi-ai/auth-storage";
 import { ADVISOR_DEFAULT_BUDGET_PER_UPDATE } from "../advisor/emission-guard";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { DEFAULT_SHARE_URL, DEFAULT_STREAM_URL } from "@oh-my-pi/pi-wire";
+import { DEFAULT_SKILLS_URL } from "@oh-my-pi/pi-wire/skillshare";
 import { TREE_FILTER_MODES } from "@oh-my-pi/pi-tui/overlays/tree-selector";
 import { SHAPE_VARIANT_NAMES } from "@oh-my-pi/snapcompact";
 import {
@@ -10,13 +12,13 @@ import {
 } from "../blob-broker/destinations";
 import { DEFAULT_RELAY_URL } from "../collab/protocol";
 import { DEFAULT_LIVE_VOICE, LIVE_VOICE_OPTIONS, LIVE_VOICE_VALUES } from "../live/voices";
+import { MAGIC_KEYWORDS, type MagicKeywordId } from "../modes/magic-keywords";
 import type { AnyUiMetadata, SettingTab, SubmenuOption, UiBase } from "@oh-my-pi/pi-tui/overlays/settings-defs";
 import {
 	COMPACTION_METHOD_CHOICES,
 	type CompactionMethod,
 	DEFAULT_COMPACTION_METHOD_ORDER,
 } from "../session/compaction-methods";
-import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS, STT_MODEL_VALUES } from "../stt/models";
 import { STT_SUBMIT_TRIGGER_OPTIONS, STT_SUBMIT_TRIGGER_VALUES } from "../stt/submit-trigger";
 import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
 import {
@@ -29,33 +31,9 @@ import {
 	TINY_MODEL_DTYPE_SETTING_OPTIONS,
 	TINY_MODEL_DTYPE_SETTING_VALUES,
 } from "../tiny/dtype";
-import {
-	AUTO_THINKING_MODEL_OPTIONS,
-	AUTO_THINKING_MODEL_VALUES,
-	ONLINE_AUTO_THINKING_MODEL_KEY,
-	ONLINE_MEMORY_MODEL_KEY,
-	ONLINE_TINY_TITLE_MODEL_KEY,
-	TINY_MEMORY_MODEL_OPTIONS,
-	TINY_MEMORY_MODEL_VALUES,
-	TINY_TITLE_MODEL_OPTIONS,
-	TINY_TITLE_MODEL_VALUES,
-} from "../tiny/models";
-import { IMAGE_PROVIDER_CHOICES, type ImageProvider } from "../tools/image-providers";
-import {
-	DEFAULT_TTS_LOCAL_MODEL_KEY,
-	DEFAULT_TTS_VOICE,
-	TTS_LOCAL_MODEL_OPTIONS,
-	TTS_LOCAL_MODEL_VALUES,
-	TTS_LOCAL_VOICE_OPTIONS,
-	TTS_LOCAL_VOICE_VALUES,
-} from "../tts/models";
+import { DEFAULT_TTS_VOICE, TTS_LOCAL_VOICE_OPTIONS, TTS_LOCAL_VOICE_VALUES } from "../tts/models";
 import { EDIT_MODES } from "../utils/edit-mode";
-import {
-	DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS,
-	MAX_WEB_SEARCH_TIMEOUT_SECONDS,
-	SEARCH_PROVIDER_CHOICES,
-} from "../web/search/types";
-import { type SearchProviderId } from "@oh-my-pi/pi-tui/tools/web-search";
+import { DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS, MAX_WEB_SEARCH_TIMEOUT_SECONDS } from "../web/search/types";
 import {
 	SERVICE_TIER_ANTHROPIC_OPTIONS,
 	SERVICE_TIER_ANTHROPIC_VALUES,
@@ -123,6 +101,24 @@ export {
 } from "@oh-my-pi/pi-tui/status-line/schema";
 
 interface UiBoolean extends UiBase {}
+
+interface MagicKeywordSettingDef {
+	readonly type: "boolean";
+	readonly default: true;
+	readonly ui: UiBoolean;
+}
+
+/** One `magicKeywords.<id>` toggle per registered keyword, derived so the table stays the only list. */
+const MAGIC_KEYWORD_SETTINGS = Object.fromEntries(
+	MAGIC_KEYWORDS.map((keyword): [string, MagicKeywordSettingDef] => [
+		`magicKeywords.${keyword.id}`,
+		{
+			type: "boolean",
+			default: true,
+			ui: { tab: "interaction", group: "Magic Keywords", label: keyword.label, description: keyword.description },
+		},
+	]),
+) as { readonly [K in MagicKeywordId as `magicKeywords.${K}`]: MagicKeywordSettingDef };
 
 interface UiEnum<T extends readonly string[]> extends UiBase {
 	/** Submenu options. When omitted, the enum renders as an inline toggle derived from `values`. */
@@ -232,7 +228,7 @@ const EMPTY_STRING_RECORD: Record<string, string> = {};
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
 const EMPTY_AGENT_SERVICE_TIER_OVERRIDES: Record<string, ServiceTierInheritSettingValue> = {};
 const DEFAULT_CYCLE_ORDER: string[] = ["smol", "default", "slow"];
-const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["hub"];
+const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["wait"];
 const EMPTY_MODEL_TAGS_RECORD: ModelTagsSettings = {};
 const HINDSIGHT_RECALL_TYPES_DEFAULT: string[] = ["world", "experience"];
 export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
@@ -280,26 +276,26 @@ export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 	},
 	{
 		pattern: "^\\s*nohup\\s+|(?<!&)\\&\\s*$",
-		tool: "hub",
+		tool: "bash",
 		message:
-			'Use the `hub` tool (`op:"start"`) instead of nohup or background shell syntax so the process stays observable and managed.',
+			"Use `bash` with `name` instead of nohup or background shell syntax so the service stays observable and managed.",
 	},
 	{
 		pattern:
 			"^\\s*(?:(?:bun|npm|pnpm|yarn)\\s+(?:run\\s+)?(?:dev|start)(?:\\s|$)|(?:vite|next\\s+dev|nuxt\\s+dev|nodemon|lldb|gdb|tail\\s+-f)(?:\\s|$)|docker\\s+compose\\s+up(?!.*(?:\\s-d(?:\\s|$)|--detach))(?:\\s|$))",
-		tool: "hub",
-		message:
-			'Use the `hub` tool (`op:"start"`) for services, watchers, and debuggers so other omp instances can observe and control them.',
+		tool: "bash",
+		message: "Use `bash` with `name` for services, watchers, and debuggers; inspect with `read proc://<name>`.",
 	},
 	{
 		pattern:
 			"^\\s*(?:(?:bun|npm|pnpm|yarn)\\s+(?:run\\s+)?\\S+|cargo\\s+watch|watchexec|pytest|vitest|jest|tsc)(?:.|\\n)*(?:--watch|-w)(?:\\s|$)",
-		tool: "hub",
-		message: 'Use the `hub` tool (`op:"start"`) for watch mode so its output, input, and lifecycle stay managed.',
+		tool: "bash",
+		message: "Use `bash` with `name` for watch mode so its output, input, and lifecycle stay managed.",
 	},
 ];
 
 const DEFAULT_AGENT_MODEL_OVERRIDES: Record<string, string | string[]> = {};
+const EMPTY_AUTH_ACCOUNT_POLICIES: AuthAccountPolicies = [];
 
 export const SETTINGS_SCHEMA = {
 	// ────────────────────────────────────────────────────────────────────────
@@ -313,6 +309,7 @@ export const SETTINGS_SCHEMA = {
 	// per-machine overrides remain trivial.
 	"auth.broker.url": { type: "string", default: undefined },
 	"auth.broker.token": { type: "string", default: undefined, credential: true },
+	"auth.accountPolicies": { type: "array", default: EMPTY_AUTH_ACCOUNT_POLICIES },
 
 	autoResume: {
 		type: "boolean",
@@ -566,7 +563,11 @@ export const SETTINGS_SCHEMA = {
 			description: "Glyph set for icons and symbols (Unicode, Nerd Font, or ASCII)",
 			options: [
 				{ value: "unicode", label: "Unicode", description: "Standard symbols (default)" },
-				{ value: "nerd", label: "Nerd Font", description: "Requires Nerd Font" },
+				{
+					value: "nerd",
+					label: "Nerd Font",
+					description: "Requires a Nerd Font, or a Glyph Protocol terminal (icons ship in-band)",
+				},
 				{ value: "ascii", label: "ASCII", description: "Maximum compatibility" },
 			],
 		},
@@ -1777,7 +1778,7 @@ export const SETTINGS_SCHEMA = {
 	},
 	"retry.usageReservePct": {
 		type: "number",
-		default: 10,
+		default: DEFAULT_USAGE_RESERVE_PCT,
 		ui: {
 			tab: "model",
 			group: "Retry & Fallback",
@@ -1862,7 +1863,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Retry & Fallback",
 			label: "Anthropic Server-Side Fallback (Fable 5)",
 			description:
-				"When a Claude Fable 5 / Mythos 5 request is blocked by Anthropic's safety classifier, retry it on Claude Opus 4.8 server-side (Anthropic `server-side-fallback-2026-06-01` beta). Opt-in — leaving this off preserves the pre-fallback behavior for every request.",
+				"When a Claude Fable 5 / Mythos 5 request is blocked by Anthropic's safety classifier, retry it on Claude Opus 5.5 server-side (Anthropic `server-side-fallback-2026-06-01` beta). Opt-in — leaving this off preserves the pre-fallback behavior for every request.",
 		},
 	},
 
@@ -2216,42 +2217,10 @@ export const SETTINGS_SCHEMA = {
 			tab: "interaction",
 			group: "Magic Keywords",
 			label: "Magic Keywords",
-			description: "Enable hidden notices for standalone ultrathink, orchestrate, and workflowz keywords",
+			description: `Enable hidden notices for standalone ${MAGIC_KEYWORDS.map(keyword => keyword.word).join(", ")} keywords`,
 		},
 	},
-
-	"magicKeywords.ultrathink": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "interaction",
-			group: "Magic Keywords",
-			label: "Ultrathink Keyword",
-			description: "Let standalone ultrathink request maximum automatic thinking and append its hidden notice",
-		},
-	},
-
-	"magicKeywords.orchestrate": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "interaction",
-			group: "Magic Keywords",
-			label: "Orchestrate Keyword",
-			description: "Let standalone orchestrate append its hidden multi-agent orchestration notice",
-		},
-	},
-
-	"magicKeywords.workflow": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "interaction",
-			group: "Magic Keywords",
-			label: "Workflow Keyword",
-			description: "Let standalone workflowz append its hidden eval workflow notice",
-		},
-	},
+	...MAGIC_KEYWORD_SETTINGS,
 
 	// Notifications
 	"completion.notify": {
@@ -2470,6 +2439,19 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	// Skill registry (omp skill)
+	"skills.registryUrl": {
+		type: "string",
+		default: DEFAULT_SKILLS_URL,
+		ui: {
+			tab: "interaction",
+			group: "Skills",
+			label: "Skill Registry",
+			description:
+				"Skillshare registry used by `omp skill` to install, search, and publish skills (https://host[:port])",
+		},
+	},
+
 	// Speech-to-text
 	"stt.enabled": {
 		type: "boolean",
@@ -2487,19 +2469,6 @@ export const SETTINGS_SCHEMA = {
 		default: "en",
 	},
 
-	"stt.modelName": {
-		type: "enum",
-		values: STT_MODEL_VALUES,
-		default: DEFAULT_STT_MODEL_KEY,
-		ui: {
-			tab: "interaction",
-			group: "Speech",
-			label: "Speech Model",
-			description:
-				"Local on-device speech model. Parakeet TDT v3 (sherpa-onnx) is the SoTA default; Whisper base/small/large-v3-turbo tiers (transformers.js) trade size for multilingual coverage. Downloaded on first use.",
-			options: STT_MODEL_OPTIONS,
-		},
-	},
 	"stt.submitTrigger": {
 		type: "enum",
 		values: STT_SUBMIT_TRIGGER_VALUES,
@@ -3499,6 +3468,28 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"ttsr.judge": {
+		type: "enum",
+		values: ["auto", "on", "off"] as const,
+		default: "auto",
+		ui: {
+			tab: "context",
+			group: "Rules (TTSR)",
+			label: "Judged Rules",
+			description:
+				"Ask the judge model role each `question` rule about completed replies, reasoning, and tool calls; a yes injects the rule as a warning",
+			options: [
+				{
+					value: "auto",
+					label: "Auto",
+					description: "Judge only when the judge role resolves to a native TypeSafe jev model",
+				},
+				{ value: "on", label: "On", description: "Always judge, whichever model the judge role resolves to" },
+				{ value: "off", label: "Off", description: "Never judge; question rules stay inactive" },
+			],
+		},
+	},
+
 	"ttsr.contextMode": {
 		type: "enum",
 		values: ["discard", "keep"] as const,
@@ -4042,6 +4033,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"eval.autoProvision": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "shell",
+			group: "Eval & Runtimes",
+			label: "Eval Environment Provisioning",
+			description: "Automatically create the managed JavaScript eval package environment on first install",
+		},
+	},
+
 	"eval.tools.enabled": {
 		type: "boolean",
 		default: true,
@@ -4302,6 +4304,28 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"find.enabled": {
+		type: "enum",
+		values: ["auto", "on", "off"] as const,
+		default: "auto",
+		ui: {
+			tab: "tools",
+			group: "Available Tools",
+			label: "Find (semantic grep)",
+			description:
+				"Enable the find tool: natural-language search for files and line ranges, judged by the judge model role. Auto enables it only when the judge role resolves to a native TypeSafe jev model",
+			options: [
+				{
+					value: "auto",
+					label: "Auto",
+					description: "Enable when the judge role resolves to a native TypeSafe jev model",
+				},
+				{ value: "on", label: "On", description: "Always enable, whichever model the judge role resolves to" },
+				{ value: "off", label: "Off", description: "Disable the find tool" },
+			],
+		},
+	},
+
 	// Optional tools
 
 	"debug.enabled": {
@@ -4321,8 +4345,8 @@ export const SETTINGS_SCHEMA = {
 		ui: {
 			tab: "tools",
 			group: "Available Tools",
-			label: "Launch",
-			description: "Enable the launch tool for supervising shared long-running project processes",
+			label: "Services",
+			description: "Enable named bash services and proc:// supervision for shared long-running project processes",
 		},
 	},
 
@@ -4723,24 +4747,6 @@ export const SETTINGS_SCHEMA = {
 		default: 100,
 	},
 
-	"irc.timeoutMs": {
-		type: "number",
-		default: 120_000,
-		ui: {
-			tab: "tools",
-			group: "Execution",
-			label: "IRC Timeout",
-			description: "Timeout for hub send await:true in milliseconds; 0 disables the timeout",
-			options: [
-				{ value: "0", label: "Disabled" },
-				{ value: "30000", label: "30 seconds" },
-				{ value: "60000", label: "1 minute" },
-				{ value: "120000", label: "2 minutes" },
-				{ value: "300000", label: "5 minutes" },
-			],
-		},
-	},
-
 	"bash.autoBackground.thresholdMs": {
 		type: "number",
 		default: 60_000,
@@ -4761,7 +4767,7 @@ export const SETTINGS_SCHEMA = {
 	"tools.xdevDocs": {
 		type: "enum",
 		values: ["inline", "builtins", "catalog"] as const,
-		default: "builtins",
+		default: "catalog",
 		ui: {
 			tab: "tools",
 			group: "Discovery & MCP",
@@ -4801,6 +4807,17 @@ export const SETTINGS_SCHEMA = {
 			group: "Discovery & MCP",
 			label: "MCP Project Config",
 			description: "Load .mcp.json/mcp.json from project root",
+		},
+	},
+
+	"mcp.startupTimeoutMs": {
+		type: "number",
+		default: 250,
+		ui: {
+			tab: "tools",
+			group: "Discovery & MCP",
+			label: "MCP Startup Window",
+			description: "Wait this many milliseconds for initial MCP tool discovery; 0 waits until connections settle",
 		},
 	},
 
@@ -5404,30 +5421,6 @@ export const SETTINGS_SCHEMA = {
 				"Maximum concurrent Ollama Cloud subagent runs per process; 0 disables the provider-specific limit",
 		},
 	},
-	"providers.webSearchOrder": {
-		type: "array",
-		default: [] as SearchProviderId[],
-		ui: {
-			tab: "providers",
-			group: "Services",
-			label: "Web Search Provider Order",
-			description:
-				"Prioritized providers for the web_search tool; unlisted providers retain their default order afterward",
-			options: SEARCH_PROVIDER_CHOICES,
-			ordered: true,
-		},
-	},
-	"providers.webSearchExclude": {
-		type: "array",
-		default: [] as SearchProviderId[],
-		ui: {
-			tab: "providers",
-			group: "Services",
-			label: "Excluded Web Search Providers",
-			description: "Providers that web_search should never use, even as fallbacks",
-			options: SEARCH_PROVIDER_CHOICES,
-		},
-	},
 	"providers.webSearchTimeoutSeconds": {
 		type: "number",
 		default: DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS,
@@ -5443,16 +5436,6 @@ export const SETTINGS_SCHEMA = {
 				{ value: "180", label: "3 minutes" },
 				{ value: "300", label: "5 minutes" },
 			],
-		},
-	},
-	"providers.webSearchGeminiModel": {
-		type: "string",
-		default: undefined,
-		ui: {
-			tab: "providers",
-			group: "Services",
-			label: "Gemini web_search model",
-			description: "Model ID for Gemini Google Search grounding. Defaults to gemini-2.5-flash.",
 		},
 	},
 	"providers.antigravityEndpoint": {
@@ -5481,19 +5464,6 @@ export const SETTINGS_SCHEMA = {
 					description: "Force sandbox endpoint only",
 				},
 			],
-		},
-	},
-	"providers.imageOrder": {
-		type: "array",
-		default: [] as ImageProvider[],
-		ui: {
-			tab: "providers",
-			group: "Services",
-			label: "Image Provider Order",
-			description:
-				"Prioritized providers for image generation; unlisted providers follow the active session provider and the built-in order",
-			options: IMAGE_PROVIDER_CHOICES,
-			ordered: true,
 		},
 	},
 	"providers.fireworksTier": {
@@ -5526,48 +5496,6 @@ export const SETTINGS_SCHEMA = {
 			label: "Live Voice",
 			description: "Voice used by Codex-backed realtime voice sessions",
 			options: LIVE_VOICE_OPTIONS,
-		},
-	},
-	"providers.tts": {
-		type: "enum",
-		values: ["auto", "local", "xai", "deepinfra"] as const,
-		default: "auto",
-		ui: {
-			tab: "providers",
-			group: "Services",
-			label: "Text-to-Speech Provider",
-			description:
-				"Backend for the tts tool: local on-device neural TTS (Kokoro-82M), xAI Grok Voice, or DeepInfra speech",
-			options: [
-				{
-					value: "auto",
-					label: "Auto",
-					description: "Prefer local on-device TTS; route .mp3 output to xAI when credentials exist",
-				},
-				{ value: "local", label: "Local", description: "On-device neural TTS (Kokoro-82M); output is WAV/PCM16" },
-				{
-					value: "xai",
-					label: "xAI Grok Voice",
-					description: "Requires xAI Grok OAuth or XAI_API_KEY; MP3 or WAV",
-				},
-				{
-					value: "deepinfra",
-					label: "DeepInfra Speech",
-					description: "Requires DEEPINFRA_API_KEY; MP3 or WAV",
-				},
-			],
-		},
-	},
-	"tts.localModel": {
-		type: "enum",
-		values: TTS_LOCAL_MODEL_VALUES,
-		default: DEFAULT_TTS_LOCAL_MODEL_KEY,
-		ui: {
-			tab: "providers",
-			group: "Services",
-			label: "Local TTS Model",
-			description: "On-device neural TTS model (Kokoro-82M) used by the local TTS backend",
-			options: TTS_LOCAL_MODEL_OPTIONS,
 		},
 	},
 	"tts.localVoice": {
@@ -5632,44 +5560,6 @@ export const SETTINGS_SCHEMA = {
 			options: TTS_LOCAL_VOICE_OPTIONS,
 		},
 	},
-	"providers.judgmentProvider": {
-		type: "enum",
-		values: ["auto", "typesafe", "llm"] as const,
-		default: "auto",
-		ui: {
-			tab: "providers",
-			group: "Tiny Model",
-			label: "Judgment Provider",
-			description:
-				"Preferred backend for typed judgments (auto-thinking difficulty, Smart unexpected-stop detection, git AI staging, eval judge()). Auto uses TypeSafe when authenticated; failed TypeSafe requests fall back through tiny, smol, default, then the active session model.",
-			options: [
-				{ value: "auto", label: "Auto", description: "TypeSafe when authenticated, else the LLM bridge (default)" },
-				{
-					value: "typesafe",
-					label: "TypeSafe",
-					description: "Prefer TypeSafe; fall back through the online model roles on failure",
-				},
-				{
-					value: "llm",
-					label: "LLM",
-					description: "Never TypeSafe; keyword prompts to the tiny/smol or local model",
-				},
-			],
-		},
-	},
-	"providers.tinyModel": {
-		type: "enum",
-		values: TINY_TITLE_MODEL_VALUES,
-		default: ONLINE_TINY_TITLE_MODEL_KEY,
-		ui: {
-			tab: "providers",
-			group: "Tiny Model",
-			label: "Tiny Model",
-			description:
-				"Session-title model: online (the TINY role from /models, else @smol) by default, or a local on-device model",
-			options: TINY_TITLE_MODEL_OPTIONS,
-		},
-	},
 	"providers.tinyModelDevice": {
 		type: "enum",
 		values: TINY_MODEL_DEVICE_SETTING_VALUES,
@@ -5694,35 +5584,6 @@ export const SETTINGS_SCHEMA = {
 			description:
 				"ONNX quantization/precision for local tiny models. Default uses each model's shipped dtype (q4); lower precision is faster, higher is more faithful. Ignored by the MLX backend (its repos are pre-quantized 4-bit). The PI_TINY_DTYPE env var overrides this.",
 			options: TINY_MODEL_DTYPE_SETTING_OPTIONS,
-		},
-	},
-	"providers.memoryModel": {
-		type: "enum",
-		values: TINY_MEMORY_MODEL_VALUES,
-		default: ONLINE_MEMORY_MODEL_KEY,
-		ui: {
-			tab: "memory",
-			group: "General",
-			label: "Memory Model",
-			description:
-				"Mnemopi LLM for fact extraction + consolidation: online (the TINY role from /models, else smol/remote) by default, or a local on-device model",
-			condition: "mnemopiActive",
-			options: TINY_MEMORY_MODEL_OPTIONS,
-		},
-	},
-
-	"providers.autoThinkingModel": {
-		type: "enum",
-		values: AUTO_THINKING_MODEL_VALUES,
-		default: ONLINE_AUTO_THINKING_MODEL_KEY,
-		ui: {
-			tab: "model",
-			group: "Thinking",
-			label: "Auto Thinking Model",
-			description:
-				"Difficulty classifier for the `auto` thinking level: online (the TINY role from /models, else smol) by default, or a local on-device model",
-			condition: "autoThinkingActive",
-			options: AUTO_THINKING_MODEL_OPTIONS,
 		},
 	},
 	"providers.autoThinkingMaxEffort": {
@@ -5765,20 +5626,6 @@ export const SETTINGS_SCHEMA = {
 					description: "Mechanical + small-model classification of text-only stops",
 				},
 			],
-		},
-	},
-	"providers.unexpectedStopModel": {
-		type: "enum",
-		values: TINY_MEMORY_MODEL_VALUES,
-		default: ONLINE_MEMORY_MODEL_KEY,
-		ui: {
-			tab: "providers",
-			group: "Tiny Model",
-			label: "Unexpected Stop Model",
-			description:
-				"Classifier for Smart unexpected-stop detection: online (the TINY role from /models, else smol) by default, or a local on-device model.",
-			condition: "unexpectedStopSmart",
-			options: TINY_MEMORY_MODEL_OPTIONS,
 		},
 	},
 
@@ -5987,6 +5834,61 @@ export const SETTINGS_SCHEMA = {
 			label: "Codex Reset Salvage Horizon",
 			description:
 				"Spend a saved Codex reset automatically when it would otherwise expire within this many hours and either chat window (5h or weekly) has meaningful usage to restore (0 disables expiry salvage).",
+		},
+	},
+	// Claude Cedar/Juniper rate-limit resets (independent auto-redeem consent)
+	"claudeResets.autoRedeem": {
+		type: "enum",
+		values: ["unset", "yes", "no"] as const,
+		default: "unset" as const,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Claude Auto-Redeem Resets",
+			description:
+				"Spend eligible Claude Cedar or Juniper resets automatically. Cedar is spent only for covered limits; Juniper can only recover a sole 5-hour block. unset asks before the first spend, yes spends without prompting, and no disables blocked recovery and expiry salvage.",
+			options: [
+				{
+					value: "unset",
+					label: "Unset",
+					description: "Check live eligibility, then ask before spending the first Claude reset.",
+				},
+				{ value: "yes", label: "Yes", description: "Spend eligible Claude resets without prompting." },
+				{ value: "no", label: "No", description: "Do not run Claude reset auto-redeem checks." },
+			],
+		},
+	},
+	"claudeResets.minBlockedMinutes": {
+		type: "number",
+		default: 60,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Claude Auto-Redeem Min Block",
+			description:
+				"Only auto-redeem when the natural unblock — the latest reset among the exhausted covered windows — is at least this many minutes away. A 5-hour-only reset is never used for a weekly or model-scoped block.",
+		},
+	},
+	"claudeResets.keepCredits": {
+		type: "number",
+		default: 0,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Claude Auto-Redeem Reserve",
+			description:
+				"Keep at least this many Claude resets banked (0 allows the last eligible reset to be spent automatically). The reserve also applies to expiry salvage.",
+		},
+	},
+	"claudeResets.salvageHorizonHours": {
+		type: "number",
+		default: 12,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Claude Reset Salvage Horizon",
+			description:
+				"Use a server-selected Cedar reset within this many hours of expiry only when its covered windows have meaningful usage to restore and the grant permits early use or a covered window is exhausted (0 disables salvage).",
 		},
 	},
 	"provider.appendOnlyContext": {
@@ -6360,6 +6262,8 @@ export interface SkillsSettings {
 	ignoredSkills?: string[];
 	includeSkills?: string[];
 	disabledExtensions?: string[];
+	/** Skillshare registry base URL (`omp skill`). */
+	registryUrl?: string;
 }
 
 /** Conventional commit generation and changelog limits. */
@@ -6380,6 +6284,8 @@ export interface CommitSettings {
 
 export interface TtsrSettings {
 	enabled: boolean;
+	/** When judged (`question`) rules run: read by the session, not the TtsrManager. */
+	judge?: "auto" | "on" | "off";
 	contextMode: "discard" | "keep";
 	interruptMode: "never" | "prose-only" | "tool-only" | "always";
 	repeatMode: "once" | "after-gap";
@@ -6416,7 +6322,6 @@ export interface ThinkingBudgetsSettings {
 export interface SttSettings {
 	enabled: boolean;
 	language: string | undefined;
-	modelName: string;
 	streaming: boolean;
 }
 
@@ -6437,10 +6342,12 @@ export interface ShellMinimizerSettings {
 	sourceOutlineLevel: "default" | "aggressive";
 	legacyFilters: boolean | undefined;
 }
-export type CodexAutoRedeemMode = "unset" | "yes" | "no";
+/** Whether automatic reset redemption asks first, spends, or remains disabled. */
+export type ResetAutoRedeemMode = "unset" | "yes" | "no";
 
-export interface CodexResetsSettings {
-	autoRedeem: CodexAutoRedeemMode;
+/** Independent per-provider consent and scarcity policy for saved resets. */
+export interface ResetSettings {
+	autoRedeem: ResetAutoRedeemMode;
 	minBlockedMinutes: number;
 	keepCredits: number;
 	salvageHorizonHours: number;
@@ -6475,7 +6382,8 @@ export interface GroupTypeMap {
 	modelTags: ModelTagsSettings;
 	cycleOrder: string[];
 	shellMinimizer: ShellMinimizerSettings;
-	codexResets: CodexResetsSettings;
+	codexResets: ResetSettings;
+	claudeResets: ResetSettings;
 	gc: GcSettings;
 }
 

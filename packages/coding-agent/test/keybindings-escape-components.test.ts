@@ -84,7 +84,7 @@ describe("component escape bindings", () => {
 			getProviderDiscoveryState: () => undefined,
 			refresh: async () => {},
 			refreshProvider: async () => {},
-			authStorage: { hasAuth: () => false },
+			authStorage: { keys: { source: () => undefined } },
 		} as unknown as ModelRegistry;
 		const ui = {
 			requestRender: vi.fn(),

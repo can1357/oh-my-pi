@@ -7,6 +7,7 @@
  * close codes (host conflict, room full) and guest decryption failures never
  * reconnect. Hosts discard undecryptable guest frames without closing the room.
  */
+import { getProxyForUrl } from "@oh-my-pi/pi-ai/utils/proxy";
 import { logger } from "@oh-my-pi/pi-utils";
 import { open, sealSerialized } from "./crypto";
 import type { CollabFrame, RelayControlMessage } from "./protocol";
@@ -443,7 +444,11 @@ export class CollabSocket {
 
 	#openSocket(): void {
 		this.#clearBackpressureDrain();
-		const ws = new WebSocket(`${this.#opts.wsUrl}?role=${this.#opts.role}`);
+		const url = `${this.#opts.wsUrl}?role=${this.#opts.role}`;
+		const options = {
+			proxy: getProxyForUrl("collab", new URL(url)),
+		} satisfies Bun.WebSocketOptions;
+		const ws: WebSocket = Reflect.construct(WebSocket, [url, options]);
 		ws.binaryType = "arraybuffer";
 		this.#ws = ws;
 		ws.onopen = () => {

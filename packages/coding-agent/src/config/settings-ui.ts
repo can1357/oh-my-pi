@@ -82,13 +82,6 @@ const CONDITIONS: Record<string, () => boolean> = {
 			return false;
 		}
 	},
-	unexpectedStopSmart: () => {
-		try {
-			return Settings.instance.get("features.unexpectedStopDetection") === "smart";
-		} catch {
-			return false;
-		}
-	},
 };
 
 /** Adapt the application schema and settings store to the terminal overlay. */

@@ -9,6 +9,7 @@ import type { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../../src/eval/bridge-timeout";
 import {
+	EVAL_HANDLE_CONCURRENCY,
 	getCompletionHandle,
 	releaseCompletionHandles,
 	runEvalCompletion,
@@ -67,6 +68,7 @@ const REASONING_SLOW = makeModel("p", "slow", {
 
 interface SessionOptions {
 	available?: Model<Api>[];
+	cwd?: string;
 	apiKey?: string | null;
 	activeModel?: string;
 	roles?: Partial<Record<"smol" | "default" | "slow", string>>;
@@ -85,6 +87,7 @@ function makeSession(opts: SessionOptions = {}): ToolSession {
 		resolver: () => async () => (opts.apiKey === undefined ? "test-key" : opts.apiKey),
 	} as unknown as ModelRegistry;
 	return {
+		cwd: opts.cwd ?? process.cwd(),
 		settings,
 		modelRegistry,
 		getActiveModelString: () => opts.activeModel ?? "p/default",
@@ -159,6 +162,7 @@ const settings = Settings.isolated({ "async.enabled": false, "task.isolation.ena
 settings.setModelRole("smol", "p/smol");
 settings.setModelRole("slow", "p/slow");
 const session = {
+	cwd: ${JSON.stringify(tempDir.path())},
 	settings,
 	modelRegistry: {
 		getAvailable: () => [SMOL],
@@ -597,6 +601,37 @@ describe("runEvalCompletion", () => {
 		).rejects.toBeInstanceOf(ToolError);
 	});
 
+	it("bounds in-flight handles and admits queued ones as earlier requests settle", async () => {
+		const total = EVAL_HANDLE_CONCURRENCY + 8;
+		const gate = Promise.withResolvers<void>();
+		let inFlight = 0;
+		let peak = 0;
+		const admitted = Promise.withResolvers<void>();
+		vi.spyOn(ai, "completeSimple").mockImplementation(async () => {
+			inFlight++;
+			peak = Math.max(peak, inFlight);
+			if (inFlight === EVAL_HANDLE_CONCURRENCY) admitted.resolve();
+			await gate.promise;
+			inFlight--;
+			return assistant({ text: "ok" });
+		});
+		const session = makeSession();
+
+		const handles = await Promise.all(
+			Array.from({ length: total }, () => runEvalCompletion({ prompt: "q", model: "smol" }, { session })),
+		);
+		await admitted.promise;
+		expect(peak).toBe(EVAL_HANDLE_CONCURRENCY);
+		gate.resolve();
+		const waited = await runEvalWait(
+			{ items: handles.map(handle => ({ kind: "completion", id: handle.id })) },
+			{ session },
+		);
+
+		expect(waited.items.map(item => item.status)).toEqual(Array(total).fill("completed"));
+		expect(peak).toBe(EVAL_HANDLE_CONCURRENCY);
+	});
+
 	it("pauses the idle watchdog while a slow completion() request is in flight", async () => {
 		vi.useFakeTimers();
 		try {
@@ -661,7 +696,7 @@ describe("completion() through eval runtimes", () => {
 				"const [plain, structured] = await wait(handles);",
 				"return JSON.stringify({ plain, structured });",
 			].join("\n"),
-			{ cwd: tempDir.path(), sessionId, session: makeSession(), sessionFile },
+			{ cwd: tempDir.path(), sessionId, session: makeSession({ cwd: tempDir.path() }), sessionFile },
 		);
 
 		expect(result.exitCode).toBe(0);

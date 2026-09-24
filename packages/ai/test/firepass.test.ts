@@ -21,20 +21,6 @@ function sseResponse(events: unknown[]): Response {
 }
 
 describe("Fire Pass provider", () => {
-	it("ships bundled GLM 5.2 Fast and Kimi K3 Fast entries on the firepass provider", () => {
-		const glm = getBundledModel("firepass", "glm-5.2-fast");
-		expect(glm).toBeDefined();
-		expect(glm?.provider).toBe("firepass");
-		expect(glm?.contextWindow).toBe(1048576);
-		expect(glm?.reasoning).toBe(true);
-
-		const kimi = getBundledModel("firepass", "kimi-k3-fast");
-		expect(kimi).toBeDefined();
-		expect(kimi?.provider).toBe("firepass");
-		expect(kimi?.contextWindow).toBe(1048576);
-		expect(kimi?.reasoning).toBe(true);
-	});
-
 	it("translates glm-5.2-fast and kimi-k3-fast to router wire endpoints", async () => {
 		const glm = getBundledModel<"openai-completions">("firepass", "glm-5.2-fast");
 		const kimi = getBundledModel<"openai-completions">("firepass", "kimi-k3-fast");

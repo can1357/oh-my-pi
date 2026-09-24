@@ -27,7 +27,7 @@ describe("AgentSession.getAllToolInfos", () => {
 	it("returns ToolInfo objects with sourceInfo so upstream-pi extensions read sourceInfo.source", async () => {
 		const tempDir = TempDir.createSync("@getalltools-toolinfo-");
 		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const settings = Settings.isolated({ "compaction.enabled": false });
 		const model = buildModel({
 			id: "mock",
@@ -89,7 +89,7 @@ describe("AgentSession.getAllToolInfos", () => {
 	it("uses stored registered provenance instead of re-deriving a relative extension path", async () => {
 		const tempDir = TempDir.createSync("@getalltools-sourcepath-");
 		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const settings = Settings.isolated({ "compaction.enabled": false });
 		const model = buildModel({
 			id: "mock",

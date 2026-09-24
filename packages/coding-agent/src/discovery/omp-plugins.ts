@@ -317,6 +317,12 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 			continue;
 		}
 		const servers = parsed.mcpServers;
+		// Never whole-server expansion (see below); the plugin-root
+		// placeholders still reach the scalar fields via `pluginRootEnv`.
+		const pluginRootEnv = {
+			CLAUDE_PLUGIN_ROOT: root.path,
+			OMP_PLUGIN_ROOT: root.path,
+		};
 		if (!servers || typeof servers !== "object" || Array.isArray(servers)) continue;
 
 		for (const [serverName, serverCfg] of Object.entries(servers)) {
@@ -334,28 +340,28 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 			// different tool depending on which file it came from. Expansion runs
 			// before path rooting, so a placeholder resolving to an absolute path
 			// is not mistaken for a relative one.
-			const command = cfg.command === undefined ? undefined : expandEnvVarsDeep(cfg.command);
-			const cwd = cfg.cwd === undefined ? undefined : expandEnvVarsDeep(cfg.cwd);
+			const command = cfg.command === undefined ? undefined : expandEnvVarsDeep(cfg.command, pluginRootEnv);
+			const cwd = cfg.cwd === undefined ? undefined : expandEnvVarsDeep(cfg.cwd, pluginRootEnv);
 			// Root relative command/cwd at the plugin's config directory, not the
 			// session cwd (MCP stdio spawning resolves relative values there).
 			const rooted = resolvePluginStdioPaths({ command, cwd }, root.path);
 			const requestIdFormat = parseRequestIdFormat(
-				cfg.requestIdFormat === undefined ? undefined : expandEnvVarsDeep(cfg.requestIdFormat),
+				cfg.requestIdFormat === undefined ? undefined : expandEnvVarsDeep(cfg.requestIdFormat, pluginRootEnv),
 			);
 			items.push({
 				name: serverName,
-				...(cfg.enabled !== undefined && { enabled: expandEnvVarsDeep(cfg.enabled) }),
-				...(cfg.timeout !== undefined && { timeout: expandEnvVarsDeep(cfg.timeout) }),
+				...(cfg.enabled !== undefined && { enabled: expandEnvVarsDeep(cfg.enabled, pluginRootEnv) }),
+				...(cfg.timeout !== undefined && { timeout: expandEnvVarsDeep(cfg.timeout, pluginRootEnv) }),
 				...(requestIdFormat !== undefined && { requestIdFormat }),
 				...parseMCPToolFilters(serverName, cfg),
 				...(rooted.command !== undefined && { command: rooted.command }),
-				...(cfg.args !== undefined && { args: expandEnvVarsDeep(cfg.args) }),
-				...(cfg.env !== undefined && { env: expandEnvVarsDeep(cfg.env) }),
+				...(cfg.args !== undefined && { args: expandEnvVarsDeep(cfg.args, pluginRootEnv) }),
+				...(cfg.env !== undefined && { env: expandEnvVarsDeep(cfg.env, pluginRootEnv) }),
 				...(rooted.cwd !== undefined && { cwd: rooted.cwd }),
-				...(cfg.url !== undefined && { url: expandEnvVarsDeep(cfg.url) }),
-				...(cfg.headers !== undefined && { headers: expandEnvVarsDeep(cfg.headers) }),
-				...(cfg.auth !== undefined && { auth: expandEnvVarsDeep(cfg.auth) }),
-				...(cfg.oauth !== undefined && { oauth: expandEnvVarsDeep(cfg.oauth) }),
+				...(cfg.url !== undefined && { url: expandEnvVarsDeep(cfg.url, pluginRootEnv) }),
+				...(cfg.headers !== undefined && { headers: expandEnvVarsDeep(cfg.headers, pluginRootEnv) }),
+				...(cfg.auth !== undefined && { auth: expandEnvVarsDeep(cfg.auth, pluginRootEnv) }),
+				...(cfg.oauth !== undefined && { oauth: expandEnvVarsDeep(cfg.oauth, pluginRootEnv) }),
 				...(cfg.type !== undefined && { transport: cfg.type }),
 				_source: createSourceMeta(PROVIDER_ID, mcpPath, root.level),
 			});

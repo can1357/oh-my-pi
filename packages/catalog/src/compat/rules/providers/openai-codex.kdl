@@ -3,6 +3,24 @@
 provider "openai-codex" {
 	default-model "gpt-5.5"
 	env "OPENAI_CODEX_OAUTH_TOKEN"
+	kind-apis {
+		image "openai-codex-responses"
+	}
+	web-search "codex"
+
+	seed api="openai-codex-responses" base-url="https://chatgpt.com/backend-api" bundle="always" {
+		model "gpt-image-1" name="GPT Image 1" {
+			reasoning #false
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+	}
+
+	models "gpt-image-1" {
+		kind "image"
+	}
 
 	// Replaces the Codex provider's handwritten flex/priority pricing fallback.
 	service-tier-cost {
@@ -61,6 +79,22 @@ provider "openai-codex" {
 			context-window 272000
 		}
 		max-context-window 922000
+	}
+	models "gpt-6-sol" "gpt-6-sol-wm" {
+		cost-patch {
+			input 2.0
+			output 10.0
+			cache-read 0.2
+			cache-write 0
+		}
+	}
+	models "gpt-6-luna" "gpt-6-luna-wm" {
+		cost-patch {
+			input 0.1
+			output 0.5
+			cache-read 0.01
+			cache-write 0
+		}
 	}
 	class "openai" {
 		revision ">=5.3 <5.7" {

@@ -6,6 +6,7 @@ import {
 	agentLoopContinue,
 	agentLoopDetailed,
 	TERMINAL_TOOL_RESULT_ABORT_REASON,
+	TOOL_INTERRUPT_ABORT_REASON,
 } from "@oh-my-pi/pi-agent-core/agent-loop";
 import { SpeculativeOperationCoordinator } from "@oh-my-pi/pi-agent-core/speculative-execution";
 import type {
@@ -2058,6 +2059,7 @@ describe("agentLoop with AgentMessage", () => {
 		let steerReady = false;
 		let drained = false;
 		let observedAbort = false;
+		let observedReason: unknown;
 		let resolvedByTimeout = false;
 
 		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
@@ -2087,6 +2089,7 @@ describe("agentLoop with AgentMessage", () => {
 				}
 				await promise;
 				observedAbort = signal?.aborted === true;
+				observedReason = signal?.reason;
 				return { content: [{ type: "text", text: "waited" }], details: {} };
 			},
 		};
@@ -2118,11 +2121,91 @@ describe("agentLoop with AgentMessage", () => {
 		}
 
 		expect(observedAbort).toBe(true);
+		expect(observedReason).toBe(TOOL_INTERRUPT_ABORT_REASON);
 		expect(resolvedByTimeout).toBe(false);
 		expect(drained).toBe(true);
 		expect(
 			events.some(e => e.type === "message_start" && e.message.role === "user" && e.message.content === "interrupt"),
 		).toBe(true);
+	});
+
+	it("aborts an interruptible wait on queued steering in wait mode without soft-signalling other tools", async () => {
+		const toolSchema = type({});
+		let steerReady = false;
+		let drained = false;
+		let workSoftAborted: boolean | undefined;
+		let steeringSignal: AbortSignal | undefined;
+		const waitAborted = Promise.withResolvers<void>();
+
+		const waitTool: AgentTool<typeof toolSchema, Record<string, never>> = {
+			name: "wait",
+			label: "Wait",
+			description: "Blocks until aborted",
+			parameters: toolSchema,
+			interruptible: true,
+			async execute(_toolCallId, _params, signal) {
+				steerReady = true;
+				const { promise, resolve } = Promise.withResolvers<void>();
+				signal?.addEventListener("abort", () => resolve(), { once: true });
+				await promise;
+				waitAborted.resolve();
+				signal?.throwIfAborted();
+				return { content: [{ type: "text", text: "waited" }], details: {} };
+			},
+		};
+		const workTool: AgentTool<typeof toolSchema, Record<string, never>> = {
+			name: "work",
+			label: "Work",
+			description: "Foreground work that outlives the interrupt",
+			parameters: toolSchema,
+			async execute() {
+				await waitAborted.promise;
+				await new Promise<void>(resolve => setImmediate(resolve));
+				workSoftAborted = steeringSignal?.aborted === true;
+				return { content: [{ type: "text", text: "worked" }], details: {} };
+			},
+		};
+
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [waitTool, workTool] };
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{ type: "toolCall", id: "tool-1", name: "wait", arguments: {} },
+						{ type: "toolCall", id: "tool-2", name: "work", arguments: {} },
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "wait",
+			hasSteeringMessages: () => steerReady && !drained,
+			getSteeringMessages: async () => {
+				if (!steerReady || drained) return [];
+				drained = true;
+				return [createUserMessage("interrupt")];
+			},
+			getToolContext: toolCall => {
+				steeringSignal = toolCall?.steeringSignal;
+				return { toolCall } as AgentToolContext;
+			},
+		};
+
+		const events: AgentEvent[] = [];
+		for await (const event of agentLoop([createUserMessage("start")], context, config, undefined, mock.stream)) {
+			events.push(event);
+		}
+
+		expect(workSoftAborted).toBe(false);
+		const results = events.filter(
+			(event): event is Extract<AgentEvent, { type: "tool_execution_end" }> => event.type === "tool_execution_end",
+		);
+		expect(results.find(event => event.toolName === "wait")?.result.details).toMatchObject({ __interrupted: true });
+		expect(results.find(event => event.toolName === "work")?.isError).toBe(false);
+		expect(drained).toBe(true);
 	});
 
 	it("distinguishes an in-flight abort from a never-executed steering skip", async () => {
@@ -2266,6 +2349,7 @@ describe("agentLoop with AgentMessage", () => {
 		let ircReady = false;
 		let ircDrained = false;
 		let observedAbort = false;
+		let observedReason: unknown;
 		let resolvedByTimeout = false;
 		const ircMessage = createUserMessage("irc interrupt");
 
@@ -2296,6 +2380,7 @@ describe("agentLoop with AgentMessage", () => {
 				}
 				await promise;
 				observedAbort = signal?.aborted === true;
+				observedReason = signal?.reason;
 				return { content: [{ type: "text", text: "waited" }], details: {} };
 			},
 		};
@@ -2327,6 +2412,7 @@ describe("agentLoop with AgentMessage", () => {
 		}
 
 		expect(observedAbort).toBe(true);
+		expect(observedReason).toBe(TOOL_INTERRUPT_ABORT_REASON);
 		expect(resolvedByTimeout).toBe(false);
 		expect(ircDrained).toBe(true);
 		expect(
@@ -2334,6 +2420,220 @@ describe("agentLoop with AgentMessage", () => {
 				e => e.type === "message_start" && e.message.role === "user" && e.message.content === "irc interrupt",
 			),
 		).toBe(true);
+	});
+
+	it("cuts an interruptible wait short when a background completion is queued", async () => {
+		const toolSchema = type({});
+		let waiting = false;
+		let drained = false;
+		const notice = createUserMessage("process exited");
+
+		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
+			name: "wait",
+			label: "Wait",
+			description: "Blocks until aborted, then rejects like a broker request",
+			parameters: toolSchema,
+			interruptible: true,
+			async execute(_toolCallId, _params, signal) {
+				waiting = true;
+				// Only the interrupt abort releases this; a regression hangs into the test deadline.
+				const { promise, reject } = Promise.withResolvers<void>();
+				signal?.addEventListener("abort", () => reject(new Error("Daemon broker request aborted")), {
+					once: true,
+				});
+				await promise;
+				return { content: [{ type: "text", text: "waited" }], details: {} };
+			},
+		};
+
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "wait", arguments: {} }] },
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "immediate",
+			hasBackgroundCompletions: () => waiting && !drained,
+			getAsideMessages: async () => {
+				if (waiting && !drained) {
+					drained = true;
+					return [() => notice];
+				}
+				return [];
+			},
+		};
+
+		const events: AgentEvent[] = [];
+		for await (const event of agentLoop([createUserMessage("start")], context, config, undefined, mock.stream)) {
+			events.push(event);
+		}
+
+		const toolEnd = events.find(
+			(e): e is Extract<AgentEvent, { type: "tool_execution_end" }> => e.type === "tool_execution_end",
+		);
+		const content = toolEnd?.result.content[0];
+		if (content?.type !== "text") throw new Error("tool result must be text");
+		expect(content.text).toContain("Skipped due to a queued background completion");
+		expect(
+			events.some(
+				e => e.type === "message_start" && e.message.role === "user" && e.message.content === "process exited",
+			),
+		).toBe(true);
+	});
+
+	it("leaves the cooperative steering signal down for a queued background completion", async () => {
+		const toolSchema = type({});
+		let drained = false;
+		let steeringSignal: AbortSignal | undefined;
+		let softAbortedDuringRun: boolean | undefined;
+		const peeked = Promise.withResolvers<void>();
+		const notice = createUserMessage("job bg_9 completed");
+
+		// Stands in for auto-background bash: non-interruptible, and it detaches
+		// itself whenever the cooperative steering signal goes up.
+		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
+			name: "run",
+			label: "Run",
+			description: "Foreground command that backgrounds itself on a steer",
+			parameters: toolSchema,
+			async execute() {
+				// The batch watch peeked the completion queue; one macrotask later
+				// any abort it decided to raise has landed.
+				await peeked.promise;
+				await new Promise<void>(resolve => setImmediate(resolve));
+				softAbortedDuringRun = steeringSignal?.aborted === true;
+				return { content: [{ type: "text", text: "ran inline" }], details: {} };
+			},
+		};
+
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "run", arguments: {} }] },
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "immediate",
+			getToolContext: toolCall => {
+				steeringSignal = toolCall?.steeringSignal;
+				return { toolCall } as AgentToolContext;
+			},
+			hasBackgroundCompletions: () => {
+				peeked.resolve();
+				return !drained;
+			},
+			getAsideMessages: async () => {
+				if (drained) return [];
+				drained = true;
+				return [() => notice];
+			},
+		};
+
+		const events: AgentEvent[] = [];
+		for await (const event of agentLoop([createUserMessage("start")], context, config, undefined, mock.stream)) {
+			events.push(event);
+		}
+
+		// A completion notice must not push ordinary foreground work into the
+		// background: the detached job's own completion would then detach the
+		// next command, and so on (#12869).
+		expect(softAbortedDuringRun).toBe(false);
+		const toolEnd = events.find(
+			(e): e is Extract<AgentEvent, { type: "tool_execution_end" }> => e.type === "tool_execution_end",
+		);
+		const content = toolEnd?.result.content[0];
+		if (content?.type !== "text") throw new Error("tool result must be text");
+		expect(content.text).toBe("ran inline");
+		// Still delivered, at the batch boundary.
+		expect(
+			events.some(
+				e => e.type === "message_start" && e.message.role === "user" && e.message.content === "job bg_9 completed",
+			),
+		).toBe(true);
+	});
+
+	it("still raises the cooperative steering signal when a user steers after a background completion", async () => {
+		const toolSchema = type({});
+		let completionDrained = false;
+		let steerQueued = false;
+		let steeringDrained = false;
+		let steeringSignal: AbortSignal | undefined;
+		let softAbortedBeforeSteer: boolean | undefined;
+		let softAbortedAfterSteer = false;
+		let releaseSteeringWatch: (() => void) | undefined;
+		const peeked = Promise.withResolvers<void>();
+		const steeringMessage = createUserMessage("user steering");
+
+		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
+			name: "run",
+			label: "Run",
+			description: "Foreground command that backgrounds itself on a steer",
+			parameters: toolSchema,
+			async execute() {
+				await peeked.promise;
+				await new Promise<void>(resolve => setImmediate(resolve));
+				softAbortedBeforeSteer = steeringSignal?.aborted === true;
+				steerQueued = true;
+				releaseSteeringWatch?.();
+				await new Promise<void>(resolve => {
+					if (steeringSignal?.aborted) resolve();
+					else steeringSignal?.addEventListener("abort", () => resolve(), { once: true });
+				});
+				softAbortedAfterSteer = true;
+				return { content: [{ type: "text", text: "backgrounded" }], details: {} };
+			},
+		};
+
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "run", arguments: {} }] },
+				{ content: ["done"] },
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "immediate",
+			getToolContext: toolCall => {
+				steeringSignal = toolCall?.steeringSignal;
+				return { toolCall } as AgentToolContext;
+			},
+			hasBackgroundCompletions: () => {
+				peeked.resolve();
+				return !completionDrained;
+			},
+			hasSteeringMessages: () => steerQueued && !steeringDrained,
+			waitForSteeringMessages: () =>
+				new Promise<void>(resolve => {
+					releaseSteeringWatch = resolve;
+				}),
+			getSteeringMessages: async () => {
+				if (!steerQueued || steeringDrained) return [];
+				steeringDrained = true;
+				return [steeringMessage];
+			},
+			getAsideMessages: async () => {
+				if (completionDrained) return [];
+				completionDrained = true;
+				return [() => createUserMessage("job bg_9 completed")];
+			},
+		};
+
+		for await (const _ of agentLoop([createUserMessage("start")], context, config, undefined, mock.stream)) {
+			// drain
+		}
+
+		expect(softAbortedBeforeSteer).toBe(false);
+		expect(softAbortedAfterSteer).toBe(true);
 	});
 
 	it("keeps legacy steering queued until the injection boundary when no non-consuming peek exists", async () => {
@@ -2972,7 +3272,13 @@ describe("agentLoop with AgentMessage", () => {
 		}
 	});
 
-	it("discards resolved asides when a later thunk fails", async () => {
+	it("isolates discard hooks when a later aside thunk fails", async () => {
+		const throwingAside = createUserMessage("throwing completion");
+		Object.defineProperty(throwingAside, ASIDE_MESSAGE_DISCARD, {
+			value: () => {
+				throw new Error("discard failed");
+			},
+		});
 		const aside = createUserMessage("completion");
 		let discarded: Error | undefined;
 		Object.defineProperty(aside, ASIDE_MESSAGE_DISCARD, {
@@ -2993,6 +3299,7 @@ describe("agentLoop with AgentMessage", () => {
 					if (delivered) return [];
 					delivered = true;
 					return [
+						() => throwingAside,
 						() => aside,
 						() => {
 							throw new Error("later aside failed");
@@ -3011,6 +3318,86 @@ describe("agentLoop with AgentMessage", () => {
 		};
 		await expect(drain()).rejects.toThrow("later aside failed");
 		expect(discarded?.message).toBe("later aside failed");
+	});
+
+	it("fails the stream instead of hanging when an initial aside commit hook throws", async () => {
+		// Regression #12545: the aside-commit loop ran before agentLoop's try, so a
+		// throwing host commit hook escaped as an unhandled rejection and left the
+		// EventStream unsettled — stream.result() hung forever.
+		const message = createUserMessage("boom");
+		Object.defineProperty(message, ASIDE_MESSAGE_COMMIT, {
+			value: () => {
+				throw new Error("commit hook boom");
+			},
+		});
+		const mock = createMockModel({ handler: () => ({ content: ["done"] }) });
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+		const stream = agentLoop(
+			[message],
+			context,
+			{ model: mock.model, convertToLlm: identityConverter },
+			undefined,
+			mock.stream,
+		);
+		await expect(stream.result()).rejects.toThrow("commit hook boom");
+	});
+
+	it("surfaces the original error when a discard hook throws in the loop's finally", async () => {
+		// Regression #12545: discardAsides ran bare in runLoopBody's finally, so a
+		// throwing host discard hook replaced the in-flight loop error. Here the
+		// pending aside's commit hook throws mid-turn and its discard hook throws in
+		// the finally; the surfaced failure must stay the original commit error.
+		const toolSchema = type({ value: "string" });
+		let executed = false;
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				executed = true;
+				return { content: [{ type: "text", text: "done" }], details: { value: params.value } };
+			},
+		};
+		const aside = createUserMessage("completion");
+		Object.defineProperties(aside, {
+			[ASIDE_MESSAGE_COMMIT]: {
+				value: () => {
+					throw new Error("commit boom");
+				},
+			},
+			[ASIDE_MESSAGE_DISCARD]: {
+				value: () => {
+					throw new Error("discard boom");
+				},
+			},
+		});
+		let delivered = false;
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "first" } }] },
+				{ content: ["unused"] },
+			],
+		});
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const stream = agentLoop(
+			[createUserMessage("start")],
+			context,
+			{
+				model: mock.model,
+				convertToLlm: identityConverter,
+				getAsideMessages: async () => {
+					if (!delivered && executed) {
+						delivered = true;
+						return [aside];
+					}
+					return [];
+				},
+			},
+			undefined,
+			mock.stream,
+		);
+		await expect(stream.result()).rejects.toThrow("commit boom");
 	});
 
 	it("evaluates aside thunks at injection and skips ones that return null", async () => {
@@ -3628,6 +4015,80 @@ describe("agentLoop event-driven steering watch", () => {
 		}
 
 		expect(waitCalls).toBe(1);
+	});
+
+	it("preserves completed results and later tools when a steering callback throws", async () => {
+		const toolSchema = type({ value: "string", exclusive: "boolean" });
+		const executed: string[] = [];
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			concurrency: args => (args.exclusive ? "exclusive" : "shared"),
+			async execute(_toolCallId, params) {
+				executed.push(params.value);
+				return { content: [{ type: "text", text: `echoed: ${params.value}` }], details: { value: params.value } };
+			},
+		};
+
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{
+							type: "toolCall",
+							id: "tool-1",
+							name: "echo",
+							arguments: { value: "first-exclusive", exclusive: true },
+						},
+						{
+							type: "toolCall",
+							id: "tool-2",
+							name: "echo",
+							arguments: { value: "shared-sibling", exclusive: false },
+						},
+						{
+							type: "toolCall",
+							id: "tool-3",
+							name: "echo",
+							arguments: { value: "next-exclusive", exclusive: true },
+						},
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "immediate",
+			// A transient host-callback failure after the first tool ran must not
+			// reject the trailing checkSteering and poison the ordering chain.
+			hasSteeringMessages: () => {
+				if (executed.length >= 1) throw new Error("transient steering-callback failure");
+				return { queued: false };
+			},
+			getSteeringMessages: async () => [],
+		};
+
+		const results: ToolResultMessage[] = [];
+		const stream = agentLoop([createUserMessage("start")], context, config, undefined, mock.stream);
+		for await (const event of stream) {
+			if (event.type === "message_end" && event.message.role === "toolResult") {
+				results.push(event.message);
+			}
+		}
+
+		expect(executed).toEqual(["first-exclusive", "shared-sibling", "next-exclusive"]);
+		expect(
+			results.map(result => {
+				const block = result.content?.[0];
+				return block?.type === "text" ? block.text : "";
+			}),
+		).toEqual(["echoed: first-exclusive", "echoed: shared-sibling", "echoed: next-exclusive"]);
 	});
 });
 
