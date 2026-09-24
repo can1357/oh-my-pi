@@ -1,7 +1,9 @@
 import type { SummaryResult } from "@oh-my-pi/pi-natives";
 import { formatNumberedLine } from "./hashline-format";
 import { LINE_RANGE_CHUNK_SOURCE, parseLineRanges } from "./line-ranges";
+import * as os from "node:os";
 import * as path from "node:path";
+import { parseArchivePathCandidates } from "@oh-my-pi/pi-utils/ar";
 import type { Component } from "../tui";
 import { Text } from "../components/text";
 import type { RenderResultOptions, ToolActivityContext, ToolActivitySummary, ToolRenderer } from "./renderer";
@@ -219,6 +221,20 @@ export interface ReadRenderArgs {
 }
 
 const INTERNAL_URL_LIKE_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
+// A scheme-less host followed by a slash can be a web target. Do not force a
+// file: link onto it; explicit relative paths (./host/path) remain filesystem paths.
+const BARE_WEB_HOST_RE = /^(?:(?:[a-z][a-z0-9-]*|\[[0-9a-f:]+\])(?::\d+)|(?:[a-z0-9-]+\.)+[a-z0-9-]+(?::\d+)?)\//i;
+
+/** Local file a pending read/write input points at, before the tool resolves it:
+ * expands `~` and drops archive-member / SQLite-row selectors so the link opens
+ * the containing file. */
+export function pendingFileLinkPath(inputPath: string): string {
+	const expanded = inputPath.replace(/^~(?=$|[\\/])/, os.homedir());
+	if (!expanded.includes(":")) return path.resolve(expanded);
+	const archive = parseArchivePathCandidates(expanded).find(candidate => candidate.archivePath !== expanded);
+	const sqlite = expanded.match(/^(.+\.(?:sqlite3?|db3?))(?=[:?])/i);
+	return path.resolve(archive?.archivePath ?? sqlite?.[1] ?? expanded);
+}
 
 function splitReadRenderPath(rawPath: string): { path: string; sel?: string } {
 	if (INTERNAL_URL_LIKE_RE.test(rawPath)) {
@@ -259,8 +275,14 @@ function formatReadPathLink(
 	const plainDisplayPath = options.suffixResolution
 		? shortenPath(options.suffixResolution.to)
 		: shortenPath(basePath || options.resolvedPath || options.fallbackLabel || rawPath);
-	const absoluteInputPath = path.isAbsolute(basePath) ? basePath : undefined;
-	const target = options.resolvedPath ?? options.sourcePath ?? absoluteInputPath;
+	// Calls render before the tool has resolved a filesystem target. Preserve
+	// protocol resources as plain text, but resolve direct relative file paths
+	// so terminals receive an explicit file: link rather than guessing HTTPS.
+	const inputPath =
+		basePath && !INTERNAL_URL_LIKE_RE.test(basePath) && !BARE_WEB_HOST_RE.test(basePath)
+			? pendingFileLinkPath(basePath)
+			: undefined;
+	const target = options.resolvedPath ?? options.sourcePath ?? inputPath;
 	const line = firstReadSelectorLine(split.sel) ?? options.offset;
 	const linkOptions = line !== undefined ? { line } : undefined;
 	const linkedPath = target ? fileHyperlink(target, plainDisplayPath, linkOptions) : plainDisplayPath;

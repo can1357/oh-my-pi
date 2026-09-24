@@ -325,8 +325,11 @@ async function runPrintModeCore(
 
 	// A turn-fatal exit cannot hold automation for the full normal drain budget.
 	if (!strictMCPFailure) {
+		// Print mode's drain budget covers a fallback-chain switch; the reviewer's
+		// verdict is the point of a headless advisor run, so wait through recovery.
 		await session.waitForAdvisorCatchup(
 			terminalFailure ? PRINT_MODE_ERROR_ADVISOR_DRAIN_TIMEOUT_MS : PRINT_MODE_ADVISOR_DRAIN_TIMEOUT_MS,
+			{ waitThroughRecovery: true },
 		);
 	}
 	// Error spans must reach the exporter; the postmortem `exit` handler can't await.

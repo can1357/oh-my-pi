@@ -28,6 +28,7 @@ import projectPromptTemplate from "./prompts/system/project-prompt.md" with { ty
 import systemPromptTemplate from "./prompts/system/system-prompt.md" with { type: "text" };
 import { normalizeConcurrencyLimit } from "./task/parallel";
 import type { ActiveRepoContext } from "@oh-my-pi/pi-tui/status-line/host";
+import { XD_URL_PREFIX } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { resolveActiveRepoContext } from "./utils/active-repo-context";
 import { normalizePromptPath } from "./utils/prompt-path";
 import { AGENTS_MD_LIMIT, buildWorkspaceTree, type WorkspaceTree } from "./workspace-tree";
@@ -828,10 +829,10 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	// Build tool descriptions for system prompt rendering.
 	const toolPromptNames = new Map<string, string>(toolNames.map(name => [name, tools?.get(name)?.wireName ?? name]));
 	// xd://-mounted tools count as present for prompt gates ({{#has tools "lsp"}})
-	// and resolve their own name as the reference — the xd:// section explains
-	// the access path. The Tool Inventory list stays limited to real defs.
+	// and resolve to their `xd://<name>` URL, the only way to reach them. The
+	// Tool Inventory list stays limited to real defs.
 	for (const mounted of xdevTools) {
-		if (!toolPromptNames.has(mounted.name)) toolPromptNames.set(mounted.name, mounted.name);
+		if (!toolPromptNames.has(mounted.name)) toolPromptNames.set(mounted.name, `${XD_URL_PREFIX}${mounted.name}`);
 	}
 	const toolRefs = Object.fromEntries(toolPromptNames.entries());
 	const xdevToolNames = new Set(xdevTools.map(mounted => mounted.name));
@@ -920,6 +921,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		intentField: intentField ?? "",
 		eagerTasks,
 		eagerTasksAlways,
+		// Restrained bias yields to an explicit eager-tasks mode.
+		inlineFirstDelegation: delegationBias === "restrained" && !eagerTasks,
 		taskBatch,
 		MAX_CONCURRENCY: normalizeConcurrencyLimit(taskMaxConcurrency),
 		scoutAvailable,

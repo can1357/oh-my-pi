@@ -72,7 +72,7 @@ import { type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { TodoTool } from "./todo";
 import { WriteTool } from "./write";
 import { WaitTool } from "./wait";
-import { isMountableUnderXdev, type XdevState } from "./xdev";
+import { isMountableUnderXdev, resolveXdevTool, type XdevState } from "./xdev";
 import { YieldTool } from "./yield";
 
 export * from "../edit";
@@ -818,12 +818,16 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			if (mountable) mountedNames.add(tool.name);
 			else kept.push(tool);
 		}
-		session.xdev = {
+		const xdevState: XdevState = {
 			tools: toolRegistry,
 			mountedNames,
 			builtInNames,
 			isActive: name => session.isToolActive?.(name) === true,
+			// Card rendering reads the same predicate as execution: mounted devices
+			// plus active top-level tools, which the `write` transport also accepts.
+			resolve: name => resolveXdevTool(xdevState, name),
 		};
+		session.xdev = xdevState;
 		tools = kept;
 	}
 	// Staged previews from deferrable tools (e.g. ast_edit) resolve through a

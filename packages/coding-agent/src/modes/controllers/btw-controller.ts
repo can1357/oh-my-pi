@@ -485,6 +485,7 @@ export class BtwController {
 				}
 				return this.startFollowUp(record.id, question, signal);
 			},
+			spaceHold: input => this.ctx.dictationSpaceHold(input),
 			requestRender: () => this.ctx.ui.requestRender(),
 			getHeight: () => this.ctx.ui.terminal.rows,
 		});
