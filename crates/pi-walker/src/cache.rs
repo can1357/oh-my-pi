@@ -4,7 +4,7 @@ use std::{
 	borrow::Cow,
 	collections::HashMap,
 	fmt,
-	path::{Path, PathBuf},
+	path::{Component, Path, PathBuf, Prefix},
 	sync::{Arc, LazyLock},
 	time::{Duration, Instant},
 };
@@ -263,19 +263,30 @@ fn cache_key(root: &Path, mut options: WalkOptions) -> CacheKey {
 	CacheKey { root: root.to_path_buf(), options }
 }
 
+/// Normalize a filesystem path to a forward-slash string on Windows.
+///
+/// Verbatim (`\\?\`) and device (`\\.\`) paths are returned unchanged: Windows
+/// only honors those prefixes with backslash separators.
+pub fn normalize_path(path: &Path) -> Cow<'_, str> {
+	let text = path.to_string_lossy();
+	if cfg!(windows) && text.contains('\\') && !has_literal_prefix(path) {
+		Cow::Owned(text.replace('\\', "/"))
+	} else {
+		text
+	}
+}
+
+fn has_literal_prefix(path: &Path) -> bool {
+	matches!(
+		path.components().next(),
+		Some(Component::Prefix(prefix))
+			if prefix.kind().is_verbatim() || matches!(prefix.kind(), Prefix::DeviceNS(_))
+	)
+}
+
 /// Normalize a filesystem path to a forward-slash relative string.
 pub fn normalize_relative_path<'a>(root: &Path, path: &'a Path) -> Cow<'a, str> {
-	let relative = path.strip_prefix(root).unwrap_or(path);
-	if cfg!(windows) {
-		let relative = relative.to_string_lossy();
-		if relative.contains('\\') {
-			Cow::Owned(relative.replace('\\', "/"))
-		} else {
-			relative
-		}
-	} else {
-		relative.to_string_lossy()
-	}
+	normalize_path(path.strip_prefix(root).unwrap_or(path))
 }
 
 /// Return whether a path contains the exact component name.
