@@ -260,6 +260,11 @@ export const SEARCH_PROVIDER_OPTIONS = [
 		description: "Automatically uses the first configured web-search provider",
 	},
 	{
+		value: "anysearch",
+		label: "AnySearch",
+		description: "Anonymous search out of the box; optional API key via /login anysearch or ANYSEARCH_API_KEY",
+	},
+	{
 		value: "parallel",
 		label: "Parallel",
 		description: "Uses API auth when configured; otherwise searches through the keyless public MCP",

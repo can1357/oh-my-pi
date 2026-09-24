@@ -8,6 +8,11 @@ export const SEARCH_PROVIDER_OPTIONS = [
 		description: "Uses API auth when configured; otherwise searches through the keyless public MCP",
 	},
 	{
+		value: "anysearch",
+		label: "AnySearch",
+		description: "Anonymous search out of the box; optional API key via /login anysearch or ANYSEARCH_API_KEY",
+	},
+	{
 		value: "perplexity",
 		label: "Perplexity",
 		description: "Authenticated search with an anonymous consumer fallback for explicit selection",

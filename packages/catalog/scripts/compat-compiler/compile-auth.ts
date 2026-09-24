@@ -713,6 +713,9 @@ function provider(node: KdlNodeView): CompiledAuthProvider {
 				result.oauthTokenEnv = vars;
 				break;
 			}
+			case "defer-anonymous-search":
+				result.deferAnonymousSearch = singleBool(child);
+				break;
 			case "native-auth-api": {
 				leaf(child, []);
 				const apis = positionalStrings(child);

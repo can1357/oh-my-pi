@@ -5,6 +5,13 @@ provider "web" {
 	allow-unauthenticated #true
 
 	seed api="web-search" base-url="web://search" bundle="always" {
+		model "anysearch" name="AnySearch" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
 		model "parallel" name="Parallel" {
 			reasoning #false
 			input "text"

@@ -63,8 +63,12 @@ describe("web model role resolution", () => {
 
 		const candidates = resolveRoleChain("web", settings, pool);
 
-		expect(candidates.slice(0, 2).map(candidate => candidate.model.id)).toEqual(["parallel", "perplexity"]);
-		expect(candidates.slice(0, 2).every(candidate => candidate.explicit === false)).toBe(true);
+		expect(candidates.slice(0, 3).map(candidate => candidate.model.id)).toEqual([
+			"anysearch",
+			"parallel",
+			"perplexity",
+		]);
+		expect(candidates.slice(0, 3).every(candidate => candidate.explicit === false)).toBe(true);
 		expect(candidates.some(candidate => candidate.model.id === "duckduckgo")).toBe(true);
 	});
 

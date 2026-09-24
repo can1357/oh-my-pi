@@ -76,6 +76,7 @@
 		"deepinfra/black-forest-labs/FLUX-2-pro"
 	],
 	"web": [
+		"web/anysearch",
 		"web/parallel",
 		"web/perplexity",
 		"google/gemini-2.5-flash",

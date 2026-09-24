@@ -348,6 +348,7 @@ auth "anthropic" {
     allows-missing-api-key #true
     org-scoped-identity #true                   // qualify credential/report identity by org (one email can have multiple subscriptions)
     oauth-token-env "PROVIDER_OAUTH_TOKEN"      // dedicated OAuth bearer env vars, excluding borrowed API-key aliases in provider env
+    defer-anonymous-search #true                 // default web chain tries one available alternative before anonymous search; explicit chains are unchanged
     native-auth-api "bedrock-converse-stream"     // provider transport resolves auth; scan plans pin this API without secrets
     available #false
     show-in-login-list #false

@@ -84,6 +84,12 @@ export interface CredentialOrigin {
 	envVar?: string;
 }
 
+/** Result of atomically inserting a credential only while a provider has no active rows. */
+export interface ConditionalAuthCredentialInsertResult {
+	inserted: boolean;
+	credentials: StoredAuthCredential[];
+}
+
 /**
  * Auth credential with database row ID for updates/deletes.
  * Wraps AuthCredential with storage metadata.
@@ -784,6 +790,8 @@ export interface CredentialsApi {
 	 * Set credential for a provider.
 	 */
 	set(provider: string, credential: AuthCredentialEntry): Promise<void>;
+	/** Save a generated key without replacing active credentials or outranking a later environment key. */
+	addGeneratedApiKeyIfAbsent(provider: string, apiKey: string, signal?: AbortSignal): Promise<boolean>;
 	/**
 	 * Upsert a credential into the underlying store, refresh the in-memory
 	 * snapshot, and return the redacted snapshot entries for the provider.

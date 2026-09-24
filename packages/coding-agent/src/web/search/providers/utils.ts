@@ -1,3 +1,4 @@
+import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { AgentStorage } from "../../../session/agent-storage";
 import { DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS, SearchProviderError } from "../../../web/search/types";
 import { SEARCH_PROVIDER_LABELS, type SearchProviderId, type SearchSource } from "../types";
@@ -130,10 +131,11 @@ export function classifyProviderHttpError(
  * `undefined` for missing/non-string/blank values. Shared so tab/newline
  * folding cannot drift between providers.
  */
-export function normalizeSearchText(value: unknown): string | undefined {
+export function normalizeSearchText(value: unknown, maxLength = Number.POSITIVE_INFINITY): string | undefined {
 	if (typeof value !== "string") return undefined;
-	const text = value.replace(/\s+/g, " ").trim();
-	return text.length > 0 ? text : undefined;
+	const text = sanitizeText(value).replace(/\s+/g, " ").trim();
+	if (!text) return undefined;
+	return text.length <= maxLength ? text : `${text.slice(0, maxLength - 1)}…`;
 }
 
 /**
@@ -145,6 +147,7 @@ export async function readLimitedText(
 	provider: SearchProviderId,
 	maxBytes: number,
 	truncate = false,
+	status = 500,
 ): Promise<string> {
 	if (!response.body) return "";
 	const reader = response.body.getReader();
@@ -170,7 +173,7 @@ export async function readLimitedText(
 					throw new SearchProviderError(
 						provider,
 						`${SEARCH_PROVIDER_LABELS[provider]} API response exceeded 2 MiB`,
-						500,
+						status,
 					);
 				break;
 			}
@@ -180,4 +183,45 @@ export async function readLimitedText(
 	}
 
 	return new TextDecoder().decode(buffer.subarray(0, bytes));
+}
+
+export function normalizeSearchUrl(value: unknown): string | undefined {
+	if (typeof value !== "string" || value.length > 2_048) return undefined;
+	try {
+		const url = new URL(value);
+		if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
+		return url.toString();
+	} catch {
+		return undefined;
+	}
+}
+
+export function abortableSleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
+	signal?.throwIfAborted();
+	if (ms <= 0) return Promise.resolve();
+	const { promise, resolve, reject } = Promise.withResolvers<void>();
+	let timer: NodeJS.Timeout | undefined;
+	const cleanup = (): void => {
+		if (timer) {
+			clearTimeout(timer);
+			timer = undefined;
+		}
+		signal?.removeEventListener("abort", onAbort);
+	};
+	const onAbort = (): void => {
+		cleanup();
+		try {
+			signal?.throwIfAborted();
+			reject(new DOMException("The operation was aborted.", "AbortError"));
+		} catch (error) {
+			reject(error);
+		}
+	};
+	timer = setTimeout(() => {
+		cleanup();
+		resolve();
+	}, ms);
+	signal?.addEventListener("abort", onAbort, { once: true });
+	if (signal?.aborted) onAbort();
+	return promise;
 }

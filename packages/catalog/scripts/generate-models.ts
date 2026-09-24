@@ -555,7 +555,38 @@ async function fetchCodexDiscoveryModels(): Promise<ModelSpec<"openai-codex-resp
 	return [...models];
 }
 
+/** Rebuild one always-bundled seed without fetching or rewriting unrelated providers. */
+export function regenerateSeedProvider(
+	provider: string,
+	previous: Record<string, Record<string, Model<Api>>>,
+): Record<string, Record<string, Model<Api>>> {
+	const entry = providerEntry(provider);
+	if (entry?.seed?.bundle !== "always") {
+		throw new Error(`Provider ${provider} does not have an always-bundled seed`);
+	}
+	const rows = bundledSeedRows(entry, [], new Set());
+	const models = Object.fromEntries(rows.map(model => [model.id, buildModel(model)]));
+	// Retain non-seed rows: an always-bundled seed can coexist with discovery.
+	const merged = { ...previous[provider], ...models };
+	return {
+		...previous,
+		[provider]: Object.fromEntries(Object.entries(merged).sort(([a], [b]) => a.localeCompare(b))),
+	};
+}
+
 async function generateModels() {
+	const seedProviderIndex = Bun.argv.indexOf("--seed-provider");
+	if (seedProviderIndex !== -1) {
+		const provider = Bun.argv[seedProviderIndex + 1];
+		if (!provider || provider.startsWith("--")) throw new Error("--seed-provider requires a provider ID");
+		const models = regenerateSeedProvider(
+			provider,
+			prevModelsJson as unknown as Record<string, Record<string, Model<Api>>>,
+		);
+		await Bun.write(path.join(packageRoot, "src/models.json"), JSON.stringify(models));
+		console.log(`Regenerated ${provider} seed in src/models.json`);
+		return;
+	}
 	// Fetch models from dynamic sources.
 	const modelsDevModels = await loadModelsDevData();
 	const catalogProviderDescriptors = PROVIDER_DESCRIPTORS.filter(

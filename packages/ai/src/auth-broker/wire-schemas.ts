@@ -414,9 +414,11 @@ export const credentialUploadRequestSchema: FluentType<CredentialUploadRequest> 
 	"+": "reject",
 	provider: type("string").atLeastLength(1),
 	credential: writableAuthCredentialSchema,
+	"ifProviderAbsent?": "boolean",
 });
 
 export const credentialUploadResponseSchema: FluentType<CredentialUploadResponse> = type({
 	"+": "reject",
 	entries: credentialSnapshotEntrySchema.array(),
+	"inserted?": "boolean",
 });

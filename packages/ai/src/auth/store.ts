@@ -11,6 +11,7 @@ import type {
 } from "../usage";
 import type {
 	AuthCredential,
+	ConditionalAuthCredentialInsertResult,
 	DisabledCredentialSummary,
 	OAuthCredential,
 	StoredAuthCredential,
@@ -80,6 +81,12 @@ export interface CredentialRowStore {
 	 * so subsequent reads see the persisted result.
 	 */
 	upsertAuthCredential(provider: string, credential: AuthCredential): Promise<StoredAuthCredential[]>;
+	/** Atomically insert only if no active credential exists; remote stores forward this condition to the broker. */
+	insertAuthCredentialIfProviderAbsent?(
+		provider: string,
+		credential: AuthCredential,
+		signal?: AbortSignal,
+	): Promise<ConditionalAuthCredentialInsertResult>;
 	/** Disable all active rows for a provider (logout), forwarding remote writes to the broker before returning. */
 	deleteAuthCredentials(provider: string, disabledCause: string): Promise<void>;
 }
