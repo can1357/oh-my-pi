@@ -32,8 +32,10 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 			},
 		}
 
-		// Normalize the path (but don't canonicalize it).
-		let cleaned_path = abs_path.normalize();
+		// Normalize the path (but don't canonicalize it), then expand 8.3
+		// short-name components (e.g. `ADMINI~1`) so the stored working_dir has
+		// one spelling. Symlinks are not resolved, preserving logical `cd`.
+		let cleaned_path = crate::sys::fs::expand_to_long_path(&abs_path.normalize());
 
 		let pwd = cleaned_path.to_string_lossy().to_string();
 

@@ -15,7 +15,7 @@ use crate::{
 	files::{FileCache, FileSource},
 	notebook,
 	path_policy::{PathPolicy, canonical_key},
-	store::{EditStore, file_hash},
+	store::{EditStore, Snapshot, file_hash, seen_lines_from_body},
 	stream_json::ArgStream,
 	text::{normalize_to_lf, strip_bom, utf16_len},
 };
@@ -261,6 +261,9 @@ impl Session {
 			};
 
 			let mut tag: Option<String> = None;
+			// Updated files register their response rows (plus still-valid prior
+			// provenance) against the minted tag: (store key, carried lines, drifted).
+			let mut provenance: Option<(PathBuf, Vec<u32>, bool)> = None;
 			match file.op {
 				FileOp::Delete => self.store.invalidate(&canonical),
 				FileOp::Noop => {
@@ -270,16 +273,27 @@ impl Session {
 				},
 				FileOp::Create | FileOp::Update => {
 					let dest_canonical = file.move_to.as_ref().map(|m| canonical_key(&m.absolute));
+					let track_provenance = file.record_snapshot && file.op == FileOp::Update;
+					let prior = if track_provenance {
+						self.store.by_content(&canonical, &file.before)
+					} else {
+						None
+					};
 					if let Some(dest) = &dest_canonical {
 						self.store.relocate(&canonical, dest);
 					}
 					if file.record_snapshot {
 						let recorded = recorded_view(&file, &response.written);
-						if dest_canonical.is_none() && recorded != file.after {
+						let drifted = recorded != file.after;
+						if dest_canonical.is_none() && drifted {
 							file.warnings.push(write_drift_warning(&file.display));
 						}
-						let key = dest_canonical.as_deref().unwrap_or(&canonical);
-						tag = Some(self.store.record(key, &recorded, None));
+						let key = dest_canonical.unwrap_or_else(|| canonical.clone());
+						tag = Some(self.store.record(&key, &recorded, None));
+						if track_provenance {
+							let carried = carried_seen_lines(&file.before, &recorded, prior.as_ref());
+							provenance = Some((key, carried, drifted));
+						}
 					}
 					self.store.reset_noop(&canonical);
 				},
@@ -292,14 +306,24 @@ impl Session {
 				.move_to
 				.as_ref()
 				.map_or(file.display.as_str(), |m| m.display.as_str());
-			let header = match file.header {
-				HeaderKind::HashlineTag => {
-					let tag = tag.unwrap_or_else(|| file_hash(&file.after));
-					format!("[{header_path}#{tag}]")
-				},
-				HeaderKind::Path => format!("[{header_path}]"),
+			let response_tag = match file.header {
+				HeaderKind::HashlineTag => Some(tag.unwrap_or_else(|| file_hash(&file.after))),
+				HeaderKind::Path => None,
 			};
+			let header = response_tag
+				.as_ref()
+				.map_or_else(|| format!("[{header_path}]"), |tag| format!("[{header_path}#{tag}]"));
 			let text = format_file_text(&file, &header);
+			if let (Some((key, mut seen_lines, drifted)), Some(tag)) = (provenance, &response_tag) {
+				// A drifted write shows rows of the previewed text, not of the recorded
+				// version the tag names, so only carried lines stay anchorable.
+				if !drifted {
+					seen_lines.extend(seen_lines_from_body(&text));
+				}
+				if !seen_lines.is_empty() {
+					self.store.record_seen_lines(&key, tag, &seen_lines);
+				}
+			}
 			let parse_regressed = file.op != FileOp::Delete
 				&& file.op != FileOp::Noop
 				&& file.existed
@@ -358,6 +382,24 @@ fn recorded_view(file: &StagedFile, written: &str) -> String {
 			.map_or_else(|_| file.after.clone(), |text| normalize_to_lf(&text).into_owned());
 	}
 	normalize_to_lf(strip_bom(written).1).into_owned()
+}
+
+/// Prior-snapshot lines that keep both their number and content in `after`:
+/// the unchanged leading run, filtered by what `prior` displayed. A missing or
+/// unrestricted prior snapshot let the edit anchor anywhere, so the whole run
+/// carries over. Lines after the first change shifted, so their old numbers
+/// never carry.
+fn carried_seen_lines(before: &str, after: &str, prior: Option<&Snapshot>) -> Vec<u32> {
+	let unchanged = before
+		.split('\n')
+		.zip(after.split('\n'))
+		.take_while(|(old, new)| old == new)
+		.count();
+	let unchanged = u32::try_from(unchanged).unwrap_or(u32::MAX);
+	match prior.and_then(|snapshot| snapshot.seen_lines.as_ref()) {
+		Some(seen) if !seen.is_empty() => seen.range(1..=unchanged).copied().collect(),
+		_ => (1..=unchanged).collect(),
+	}
 }
 
 /// Model-facing text for one file (`formatEditResultText`).
