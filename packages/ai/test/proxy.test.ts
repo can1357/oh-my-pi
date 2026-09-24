@@ -99,8 +99,7 @@ function proxyEnvKeys(): Set<string> {
 }
 
 // Snapshot + clear every proxy-related env var so each test starts clean and
-// leaves nothing behind for later files. Provider-specific tests use unique
-// provider ids so the module-level resolver cache can never cross-contaminate.
+// leaves nothing behind for later files.
 let saved: Record<string, string | undefined>;
 
 beforeEach(() => {
