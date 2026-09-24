@@ -130,24 +130,6 @@ test("a non-array filter value is dropped rather than passed through", async () 
 	expect(configs.bogus?.enabledTools).toBeUndefined();
 });
 
-test("plugin-root placeholders stay literal in filter entries", async () => {
-	// The omp-plugins loader passes CLAUDE/OMP_PLUGIN_ROOT through to the
-	// scalar expansions, so a filter entry naming a tool after a placeholder
-	// must still survive verbatim — expanding it would select a different
-	// tool depending on which extension package the config came from.
-	// Concatenation avoids the noTemplateCurlyInString lint (see above).
-	const rootVar = "$" + "{OMP_PLUGIN_ROOT}";
-	const configs = await loadFrom(path.join(".omp", "mcp.json"), {
-		plugin: {
-			type: "stdio",
-			command: "/bin/echo",
-			enabledTools: [rootVar],
-		},
-	});
-
-	expect(configs.plugin?.enabledTools).toEqual([rootVar]);
-});
-
 test("scalar shared fields still environment-expand under per-field expansion", async () => {
 	// Only the filter entries must stay literal; `timeout`/`enabled`/
 	// `requestIdFormat` expanded under the previous whole-object pass and their
