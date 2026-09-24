@@ -59,26 +59,28 @@ export class LearnTool implements AgentTool<typeof learnSchema> {
 			if (!state) {
 				throw new Error("Mnemopi backend is not initialised for this session.");
 			}
-			const id = state.rememberScoped(params.memory, {
-				source: "coding-agent-learn",
-				importance: 0.8,
-				metadata: {
-					session_id: state.sessionId,
-					cwd: state.session.sessionManager.getCwd(),
-					context: params.context ?? null,
-					tool: "learn",
-				},
-				scope: "bank",
-				extract: true,
-				extractEntities: true,
-				veracity: "tool",
-				memoryType: "fact",
-			});
-			// rememberScoped returns undefined when the retain failed (closed DB /
-			// disk error); mirror mnemopiBackend.save and fail loudly rather than
-			// reporting (and minting a skill for) a lesson that was silently dropped.
-			if (!id) {
-				throw new Error("Mnemopi did not store the lesson (no memory id returned).");
+			// A failed write throws (closed DB / disk error). Fail loudly with the
+			// cause rather than reporting (and minting a skill for) a lesson that was
+			// never stored.
+			try {
+				state.rememberScoped(params.memory, {
+					source: "coding-agent-learn",
+					importance: 0.8,
+					metadata: {
+						session_id: state.sessionId,
+						cwd: state.session.sessionManager.getCwd(),
+						context: params.context ?? null,
+						tool: "learn",
+					},
+					scope: "bank",
+					extract: true,
+					extractEntities: true,
+					veracity: "tool",
+					memoryType: "fact",
+				});
+			} catch (error) {
+				const reason = error instanceof Error ? error.message : String(error);
+				throw new Error(`Mnemopi did not store the lesson: ${reason}`, { cause: error });
 			}
 		} else if (backend === "local") {
 			const result = await localBackend.save?.(

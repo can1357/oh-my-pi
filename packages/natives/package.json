@@ -1,10 +1,10 @@
 {
   "name": "@oh-my-pi/pi-natives",
-  "version": "18.2.9",
+  "version": "18.3.0",
   "description": "Native Rust bindings for PDF conversion, audio, WebRTC, grep, clipboard, image processing, syntax highlighting, PTY, and shell operations via N-API",
   "type": "module",
   "homepage": "https://omp.sh",
-  "author": "Stencil Labs, Inc.",
+  "author": { "name": "Stencil Labs, Inc.", "url": "https://stencil.so" },
   "license": "MIT",
   "repository": {
     "type": "git",

@@ -4710,8 +4710,8 @@ export function sakanaModelManagerOptions(config?: SakanaModelManagerConfig): Mo
 
 const AIAND_DEFAULT_BASE_URL = "https://api.aiand.com/v1";
 
-/** `reasoning_efforts` wire values ai& reports, mapped onto pi effort levels. */
-const AIAND_EFFORT_BY_WIRE_VALUE: Record<string, Effort> = {
+/** Effort wire values discovery endpoints report (`reasoning_efforts`, `thinking`), mapped onto pi effort levels. */
+const EFFORT_BY_WIRE_VALUE: Record<string, Effort> = {
 	minimal: Effort.Minimal,
 	low: Effort.Low,
 	medium: Effort.Medium,
@@ -4728,18 +4728,23 @@ function normalizeAiandBaseUrl(baseUrl: string | undefined): string {
 
 const AIAND_STATIC_MODEL_IDS = seedModels("aiand").map(model => model.id);
 
-function mapAiandThinking(entry: OpenAICompatibleModelRecord): ThinkingConfig | undefined {
-	const efforts = Array.isArray(entry.reasoning_efforts)
-		? entry.reasoning_efforts.flatMap(value =>
-				typeof value === "string" && AIAND_EFFORT_BY_WIRE_VALUE[value] ? [AIAND_EFFORT_BY_WIRE_VALUE[value]] : [],
+/** Parse a discovered effort list, dropping unknown wire values; empty when absent or unrecognized. */
+function parseWireEfforts(value: unknown): Effort[] {
+	return Array.isArray(value)
+		? value.flatMap(item =>
+				typeof item === "string" && EFFORT_BY_WIRE_VALUE[item] ? [EFFORT_BY_WIRE_VALUE[item]] : [],
 			)
 		: [];
+}
+
+function mapAiandThinking(entry: OpenAICompatibleModelRecord): ThinkingConfig | undefined {
+	const efforts = parseWireEfforts(entry.reasoning_efforts);
 	if (efforts.length === 0) {
 		return undefined;
 	}
 	const defaultLevel =
 		typeof entry.reasoning_effort_default === "string"
-			? AIAND_EFFORT_BY_WIRE_VALUE[entry.reasoning_effort_default]
+			? EFFORT_BY_WIRE_VALUE[entry.reasoning_effort_default]
 			: undefined;
 	return {
 		mode: "effort",
@@ -4896,8 +4901,26 @@ function mapYoloAutoModel(
 	reference: ModelSpec<"openai-completions"> | undefined,
 ): ModelSpec<"openai-completions"> {
 	const model = mapWithBundledReference(entry, defaults, reference);
+	// `/v1/models` advertises each reasoning model's accepted effort ladder in
+	// `thinking`; it is authoritative over the seed/reference ladder. Rows
+	// without the field (e.g. `yolo-small`) keep the reference surface.
+	const efforts = parseWireEfforts(entry.thinking);
+	const thinking: ThinkingConfig | undefined =
+		efforts.length > 0
+			? {
+					...model.thinking,
+					mode: model.thinking?.mode ?? "effort",
+					efforts,
+					defaultLevel:
+						model.thinking?.defaultLevel && efforts.includes(model.thinking.defaultLevel)
+							? model.thinking.defaultLevel
+							: undefined,
+				}
+			: model.thinking;
 	return {
 		...model,
+		...(efforts.length > 0 && { reasoning: true }),
+		thinking,
 		// Flat-rate and no-store are provider-wide: they must win whether the
 		// reference came from the yolo bundle, the global index, or nowhere.
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -4956,6 +4979,86 @@ export function yoloAutoModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 16.9 StepFun
+// ---------------------------------------------------------------------------
+
+/**
+ * StepFun discovery configuration: the API key plus optional base-URL and
+ * fetch overrides. Consumed by {@link stepfunModelManagerOptions}, and exported
+ * for extensions and tests that construct the manager directly.
+ */
+export interface StepfunModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/** StepFun's `/v1/models` row shape beyond the generic OpenAI-compatible fields. */
+interface StepfunModelRecord extends OpenAICompatibleModelRecord {
+	/** Reasoning tiers the endpoint advertises for the model, e.g. `["low","medium","high"]`. */
+	reasoning_effort_support_list?: unknown;
+}
+
+/**
+ * Translate StepFun's per-model `reasoning_effort_support_list` into a ladder.
+ * Every advertised value that names an OMP tier maps verbatim, in OMP's tier
+ * order; a row advertising nothing (or only tiers this client does not know)
+ * resolves to no thinking, so the wire path never sends a `reasoning_effort`
+ * the endpoint rejects. Same shape as `mapOpenRouterThinking` for OpenRouter's
+ * `reasoning.supported_efforts`.
+ */
+function mapStepfunThinking(entry: StepfunModelRecord): ThinkingConfig | undefined {
+	const advertised = Array.isArray(entry.reasoning_effort_support_list)
+		? entry.reasoning_effort_support_list.filter((value): value is string => typeof value === "string")
+		: [];
+	const efforts = THINKING_EFFORTS.filter(effort => advertised.includes(effort));
+	return efforts.length === 0 ? undefined : { mode: "effort", efforts };
+}
+
+/**
+ * Whether a StepFun `/v1/models` id is a chat model omp can route. StepFun's
+ * roster interleaves its audio and image SKUs with the chat models; the
+ * exclusion policy itself lives in `runtime/behavior.kdl` (`exclude-models
+ * provider="stepfun"`), not here.
+ */
+export function isStepfunChatModelId(id: string): boolean {
+	const normalized = id.trim().toLowerCase();
+	if (!normalized) return false;
+	return !isExcludedModel("stepfun", normalized);
+}
+
+/**
+ * StepFun model manager: plain OpenAI-compatible chat completions at
+ * `api.stepfun.ai/v1`. A successful `/v1/models` snapshot is authoritative over
+ * the bundled seed rows (`providers/stepfun.kdl`), so a model StepFun retires
+ * leaves the picker instead of lingering as a dead seed row, while models added
+ * later become selectable without an omp release.
+ */
+export function stepfunModelManagerOptions(
+	config?: StepfunModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return createOpenAICompatibleModelManagerOptions({
+		api: "openai-completions",
+		providerId: "stepfun",
+		defaultBaseUrl: "https://api.stepfun.ai/v1",
+		config,
+		requireApiKey: true,
+		filterModel: (_entry, model) => isStepfunChatModelId(model.id),
+		mapModel: (entry, model, reference) => {
+			const mapped = mapWithBundledReference(entry, model, reference);
+			// A model StepFun ships later has no bundled reference, so it starts
+			// from the generic defaults (`reasoning: false`, no thinking) and
+			// `mergeDynamicModels` adds it verbatim — the endpoint's own tiers are
+			// then the only thing that can give it a reasoning dial.
+			if (reference) return mapped;
+			const thinking = mapStepfunThinking(entry);
+			return thinking === undefined ? mapped : { ...mapped, reasoning: true, thinking };
+		},
+		// Must live on the manager options, not only the KDL descriptor:
+		// `createModelManager()` prunes the bundled slice from this flag.
+		dynamicModelsAuthoritative: true,
+	});
+}
 
 // ---------------------------------------------------------------------------
 // 17. Qwen Portal
@@ -5936,6 +6039,9 @@ export interface GithubCopilotModelManagerConfig {
 	fetch?: FetchImpl;
 }
 
+// Copilot ids whose cached route predates the Responses pin: a cache written by
+// an older build still says openai-completions, which Copilot answers with 400
+// unsupported_api_for_model (#7096, #8807, #12901).
 const COPILOT_CACHE_INVALIDATED_MODEL_IDS = [
 	"gpt-6-astra",
 	"gpt-6-astra-1m",
@@ -5943,6 +6049,8 @@ const COPILOT_CACHE_INVALIDATED_MODEL_IDS = [
 	"grok-4.5-1m",
 	"grok-4.6",
 	"grok-4.6-1m",
+	"grok-4.7",
+	"grok-4.7-1m",
 	"mai-code-1-flash-picker",
 ];
 
@@ -6211,7 +6319,13 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 													supportsReasoningEffort: false,
 												},
 											}
-										: {}),
+										: // The bundled row for an id whose route later moved to
+											// Responses/Messages still carries this chat-completions
+											// block, and `supportsReasoningEffort: false` suppresses
+											// the effort dial on a transport that supports it
+											// (grok-4.7, #12901). Compat is transport-scoped: let the
+											// rules resolve it for the route actually in use.
+											{ compat: undefined }),
 								}
 							: {
 									...defaults,

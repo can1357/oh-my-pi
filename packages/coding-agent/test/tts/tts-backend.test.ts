@@ -56,7 +56,7 @@ afterEach(() => {
 
 describe("speech role candidate ordering", () => {
 	test("hoists available default cloud candidates ahead of local for MP3 only", async () => {
-		await authStorage.set("xai", [{ type: "api_key", key: "xai-test-key" }]);
+		await authStorage.credentials.set("xai", [{ type: "api_key", key: "xai-test-key" }]);
 		const settings = Settings.isolated();
 		const registry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"), { settings });
 
@@ -68,7 +68,7 @@ describe("speech role candidate ordering", () => {
 	});
 
 	test("keeps an explicitly configured local candidate ahead of paid MP3 candidates", async () => {
-		await authStorage.set("xai", [{ type: "api_key", key: "xai-test-key" }]);
+		await authStorage.credentials.set("xai", [{ type: "api_key", key: "xai-test-key" }]);
 		const settings = Settings.isolated({ modelRoles: { speech: "local/kokoro" } });
 		const registry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"), { settings });
 
@@ -107,7 +107,7 @@ describe("tts speech chain execution", () => {
 	});
 
 	test("uses the selected openai-speech endpoint and model id", async () => {
-		await authStorage.set("deepinfra", [{ type: "api_key", key: "deepinfra-test-key" }]);
+		await authStorage.credentials.set("deepinfra", [{ type: "api_key", key: "deepinfra-test-key" }]);
 		const settings = Settings.isolated({
 			modelRoles: { speech: `${deepInfra.provider}/${deepInfra.id}` },
 			"retry.fallbackChains": { speech: [] },
@@ -138,7 +138,7 @@ describe("tts speech chain execution", () => {
 	});
 
 	test("does not fall back when the explicit speech fallback chain is empty", async () => {
-		await authStorage.set("xai", [{ type: "api_key", key: "xai-test-key" }]);
+		await authStorage.credentials.set("xai", [{ type: "api_key", key: "xai-test-key" }]);
 		const settings = Settings.isolated({
 			modelRoles: { speech: `${xai.provider}/${xai.id}` },
 			"retry.fallbackChains": { speech: [] },
@@ -162,7 +162,7 @@ describe("tts speech chain execution", () => {
 	});
 
 	test("advances from a cloud HTTP error to the next local candidate", async () => {
-		await authStorage.set("xai", [{ type: "api_key", key: "xai-test-key" }]);
+		await authStorage.credentials.set("xai", [{ type: "api_key", key: "xai-test-key" }]);
 		const settings = Settings.isolated();
 		const registry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"), { settings });
 		const localSynthesis = spyOn(ttsClient, "synthesize").mockResolvedValue({

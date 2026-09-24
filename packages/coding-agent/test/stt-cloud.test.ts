@@ -156,6 +156,27 @@ describe("STTController cloud transcription", () => {
 		await stopping;
 	});
 
+	it("keeps the mic off after a hold that begins and ends while the previous clip is transcribing", async () => {
+		const model = getBundledModel("openai", "whisper-1");
+		settings.setModelRole("dictation", "openai/whisper-1");
+		const transcribed = Promise.withResolvers<TranscriptionResult>();
+		vi.spyOn(transcription, "transcribeAudio").mockReturnValue(transcribed.promise);
+		const capture = vi.fn(() => ({ stop: vi.fn() }));
+		controller = new STTController(capture, { settings, registry: registryFor(model) });
+		const editor = makeEditor();
+
+		await controller.start(editor, makeOptions());
+		const transcribing = controller.stop();
+		await controller.start(editor, makeOptions());
+		transcribed.resolve({ text: "first clip", usage: ZERO_USAGE });
+		await transcribing;
+		await controller.stop();
+
+		expect(controller.state).toBe("idle");
+		expect(capture).toHaveBeenCalledTimes(1);
+		expect(editor.commitVolatileText).toHaveBeenCalledWith("first clip");
+	});
+
 	it("keeps local-inference models on the streaming worker path", async () => {
 		const model = getBundledModel("local", "whisper-base");
 		settings.setModelRole("dictation", "local/whisper-base");

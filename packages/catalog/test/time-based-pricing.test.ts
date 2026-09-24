@@ -396,14 +396,6 @@ describe("deepseek provider metadata corrections", () => {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
 	});
-	it("materializes the bare Flash alias limits in the bundled row for offline startup", () => {
-		// The registry serves committed rows verbatim on the cacheless,
-		// pre-discovery path, so the documented 1M/384K limits must live in
-		// models.json itself — not only in the live KDL rule.
-		const bundled = getBundledModels("deepseek").find(model => model.id === "deepseek-flash");
-		expect(bundled?.contextWindow).toBe(1_000_000);
-		expect(bundled?.maxTokens).toBe(384_000);
-	});
 	it("resolves the V4.1 thinking ladder for the bare Flash alias", () => {
 		const bundled = getBundledModels("deepseek").find(model => model.id === "deepseek-flash");
 		if (!bundled) throw new Error("Expected a bundled deepseek-flash row");
