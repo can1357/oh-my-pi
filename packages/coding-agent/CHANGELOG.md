@@ -5,6 +5,7 @@
 ### Added
 
 - Added case-sensitive per-agent compaction thresholds for task/eval subagents, with percentage or fixed-token limits that leave the main session threshold unchanged ([#13107](https://github.com/can1357/oh-my-pi/pull/13107) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+- The status-line `cost` segment supports `segmentOptions.cost.subagents: split | total`. Split shows this session's own spend and a live `Σ` total across nested task sessions; a trailing `+` marks running descendants. Existing status-line configurations retain their original aggregate. ([#13205](https://github.com/can1357/oh-my-pi/pull/13205) by [@schickling-assistant](https://github.com/schickling-assistant)).
 - Added trusted additional context support for extension and hook tool results, including `ctx.addAdditionalContext()` for registered tools, allowing instructions to be passed to the model without altering the tool result.
 - Added dictation support to `/btw` follow-up input, including microphone controls on the follow-up line.
 - Added opt-in CUDA support to the Nix package for tiny-model inference with the ONNX Runtime CUDA execution provider.
@@ -390,7 +391,6 @@
 ### Added
 
 - Added keyless Parallel web search when the provider is explicitly selected ([#9770](https://github.com/can1357/oh-my-pi/pull/9770) by [@georgeatparallel](https://github.com/georgeatparallel)).
-- The status-line `cost` segment supports `segmentOptions.cost.subagents: split | total`. Split shows this session's own spend and a live `Σ` total across nested task sessions; a trailing `+` marks running descendants. Existing status-line configurations retain their original aggregate.
 - Sloppy edits support `<SM:AFTER>` to insert new lines after an anchor without repeating or replacing it.
 - Fixed eligible full OpenAI Responses request-body timeouts by retrying once after conservative local tool-result elision, while preserving assistant/user history, unsafe partial output, and existing stateful retries ([#11878](https://github.com/can1357/oh-my-pi/pull/11878) by [@hellofrommorgan](https://github.com/hellofrommorgan)).
 - User append instructions (`APPEND_SYSTEM.md`, `--append-system-prompt`) now render under their own `## User Instructions` heading whenever generated blocks precede them, instead of trailing the `## MCP Server Instructions` section and reading as server-supplied, unverified content ([#11832](https://github.com/can1357/oh-my-pi/pull/11832) by [@iacore](https://github.com/iacore)).
