@@ -16,6 +16,7 @@ import {
 	resolveDefaultRepoMemoized,
 } from "@oh-my-pi/pi-coding-agent/tools/gh";
 import { parseIssueUrl, parsePullRequestUrl } from "@oh-my-pi/pi-coding-agent/tools/gh-common";
+import { resolveApproval } from "@oh-my-pi/pi-coding-agent/tools/approval";
 import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { withRepoLock } from "@oh-my-pi/pi-coding-agent/utils/repo-lock";
@@ -491,6 +492,33 @@ describe("github tool", () => {
 	afterEach(() => {
 		vi.useRealTimers();
 		vi.restoreAllMocks();
+	});
+
+	it("supports operation-specific approval policies without changing other operations", () => {
+		const tool = new GithubTool(createSession());
+		const policies = { "github.pr_checkout": "allow" };
+
+		expect(resolveApproval(tool, { op: "pr_checkout" }, "write", policies)).toMatchObject({
+			policy: "allow",
+			tier: "exec",
+			source: "user",
+			policyKey: "github.pr_checkout",
+		});
+		expect(resolveApproval(tool, { op: "pr_create" }, "write", policies)).toMatchObject({
+			policy: "prompt",
+			tier: "exec",
+			source: "mode",
+		});
+		expect(resolveApproval(tool, { op: "pr_push" }, "write", policies)).toMatchObject({
+			policy: "prompt",
+			tier: "exec",
+			source: "mode",
+		});
+		expect(resolveApproval(tool, { op: "repo_view" }, "write", policies)).toMatchObject({
+			policy: "allow",
+			tier: "read",
+			source: "mode",
+		});
 	});
 
 	it("formats repository metadata into readable text", async () => {

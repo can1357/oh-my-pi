@@ -9,11 +9,13 @@ import * as themeModule from "@oh-my-pi/pi-tui/theme";
 import { ToolChoiceQueue } from "@oh-my-pi/pi-coding-agent/session/tool-choice-queue";
 import { createTools, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { requiresApproval, resolveApproval } from "@oh-my-pi/pi-coding-agent/tools/approval";
+import { GithubTool } from "@oh-my-pi/pi-coding-agent/tools/gh";
 import { githubToolRenderer } from "@oh-my-pi/pi-tui/tools/github";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { type WriteRenderContext, writeToolRenderer } from "@oh-my-pi/pi-tui/tools/write";
 import type { XdevMountedRenderer } from "@oh-my-pi/pi-tui/tools/xdev";
+
 import {
 	listXdevTools,
 	resolveMountedXdevTool,
@@ -184,6 +186,43 @@ describe("read and write route xd:// device URLs", () => {
 
 		// An unrelated device's policy does not leak into this dispatch.
 		expect(resolveApproval(write, args, "always-ask", { other_device: "deny" }).policy).toBe("prompt");
+	});
+
+	it("preserves GitHub operation, tool, and write policy fallbacks through mounted dispatch", () => {
+		const github = new GithubTool(xdevSession(process.cwd()));
+		const xdev = createTestXdevState([github]);
+		const write = new WriteTool(xdevSession(process.cwd(), { xdev }));
+
+		for (const op of ["pr_checkout", "pr_create", "pr_push"]) {
+			const args = { path: "xd://github", content: JSON.stringify({ op }) };
+			const approval = write.approval;
+			if (typeof approval !== "function") throw new Error("expected a function approval");
+			expect(approval(args)).toEqual({
+				tier: "exec",
+				policyKey: `github.${op}`,
+				policyFallbackKey: "github",
+			});
+
+			expect(resolveApproval(write, args, "write", { github: "allow" })).toMatchObject({
+				policy: "allow",
+				source: "user",
+				policyKey: "github",
+			});
+			expect(resolveApproval(write, args, "write", { write: "allow" })).toMatchObject({
+				policy: "allow",
+				source: "user",
+				policyKey: "write",
+			});
+		}
+
+		const checkout = { path: "xd://github", content: JSON.stringify({ op: "pr_checkout" }) };
+		expect(
+			resolveApproval(write, checkout, "write", { github: "deny", "github.pr_checkout": "allow" }),
+		).toMatchObject({
+			policy: "allow",
+			source: "user",
+			policyKey: "github.pr_checkout",
+		});
 	});
 
 	it("records the effective tier reported after an execution decorator rewrites device args", async () => {

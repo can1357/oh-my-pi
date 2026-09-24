@@ -94,6 +94,11 @@ export interface ResolvedApproval {
 	policyKey?: string;
 }
 
+type NormalizedDecision = Omit<ResolvedApproval, "policy"> & {
+	policy?: ApprovalPolicy;
+	policyFallbackKey?: string;
+};
+
 const POLICY_VALUES: ReadonlySet<ApprovalPolicy> = new Set(["allow", "deny", "prompt"]);
 const TIER_VALUES: ReadonlySet<ToolTier> = new Set(["read", "write", "exec"]);
 
@@ -122,7 +127,7 @@ function isToolTier(value: unknown): value is ToolTier {
 	return typeof value === "string" && TIER_VALUES.has(value as ToolTier);
 }
 
-function normalizeDecision(value: unknown): Omit<ResolvedApproval, "policy"> & { policy?: ApprovalPolicy } {
+function normalizeDecision(value: unknown): NormalizedDecision {
 	if (isToolTier(value)) {
 		return { tier: value, override: false };
 	}
@@ -134,22 +139,24 @@ function normalizeDecision(value: unknown): Omit<ResolvedApproval, "policy"> & {
 		const policy = normalizePolicy(record.policy);
 		const policyKey =
 			typeof record.policyKey === "string" && record.policyKey.length > 0 ? record.policyKey : undefined;
+		const policyFallbackKey =
+			typeof record.policyFallbackKey === "string" && record.policyFallbackKey.length > 0
+				? record.policyFallbackKey
+				: undefined;
 		return {
 			tier,
 			override: record.override === true,
 			...(policy ? { policy } : {}),
 			...(reason ? { reason } : {}),
 			...(policyKey ? { policyKey } : {}),
+			...(policyFallbackKey ? { policyFallbackKey } : {}),
 		};
 	}
 
 	return { tier: "exec", override: false };
 }
 
-function getToolDecision(
-	tool: ApprovalSubject,
-	args: unknown,
-): Omit<ResolvedApproval, "policy"> & { policy?: ApprovalPolicy } {
+function getToolDecision(tool: ApprovalSubject, args: unknown): NormalizedDecision {
 	const approval = tool.approval;
 	const decision: ToolApprovalDecision | undefined = typeof approval === "function" ? approval(args) : approval;
 	return normalizeDecision(decision);
@@ -166,6 +173,11 @@ export function resolveToolTier(tool: ApprovalSubject, args: unknown): ToolTier 
 	return getToolDecision(tool, args).tier;
 }
 
+/** Resolve the mounted tool's operation policy key for an outer transport gate. */
+export function resolveToolPolicyKey(tool: ApprovalSubject, args: unknown): string | undefined {
+	return getToolDecision(tool, args).policyKey;
+}
+
 function modeApprovesTier(mode: ApprovalMode, tier: ToolTier): boolean {
 	return TIER_RANK[tier] <= TIER_RANK[APPROVAL_MODE_MAX_TIER[mode]];
 }
@@ -177,9 +189,9 @@ function modeApprovesTier(mode: ApprovalMode, tier: ToolTier): boolean {
  *  1. Tool `approval(args)` decision, defaulting to tier "exec" when omitted.
  *     A decision may carry a `policyKey` — `tools.approval.<policyKey>` is then
  *     the user override consulted instead of `tools.approval.<tool.name>`, with
- *     the invoking tool's own policy as the fallback when the user set none for
- *     the keyed sub-tool (e.g. an `xd://` device dispatch without a device
- *     policy still honors `tools.approval.write`).
+ *     an optional intermediate fallback and then the invoking tool's own policy
+ *     when the user set none for the keyed sub-tool (e.g. an operation-specific
+ *     `xd://github` dispatch falls back through `github` before `write`).
  *  2. User per-tool override, if set and valid.
  *  3. Active mode tier comparison.
  *
@@ -194,13 +206,17 @@ export function resolveApproval(
 ): ResolvedApproval {
 	const decision = getToolDecision(tool, args);
 	const policyKey = decision.policyKey ?? tool.name;
-	const userPolicy = Object.hasOwn(userConfig, policyKey) ? normalizePolicy(userConfig[policyKey]) : undefined;
-	const fallbackPolicy =
-		policyKey !== tool.name && userPolicy === undefined && Object.hasOwn(userConfig, tool.name)
-			? normalizePolicy(userConfig[tool.name])
-			: undefined;
-	const effectiveUserPolicy = userPolicy ?? fallbackPolicy;
-	const userPolicyKey = userPolicy !== undefined ? policyKey : tool.name;
+	const policyKeys = [...new Set([policyKey, decision.policyFallbackKey, tool.name].filter(key => key !== undefined))];
+	let effectiveUserPolicy: ApprovalPolicy | undefined;
+	let userPolicyKey = tool.name;
+	for (const key of policyKeys) {
+		if (!Object.hasOwn(userConfig, key)) continue;
+		const policy = normalizePolicy(userConfig[key]);
+		if (!policy) continue;
+		effectiveUserPolicy = policy;
+		userPolicyKey = key;
+		break;
+	}
 
 	// Legacy-name fallback for renamed tools (e.g. MCP mints that gained digits).
 	// Fail-closed: only `deny`/`prompt` carry over from the old key, so a

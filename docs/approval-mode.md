@@ -7,7 +7,7 @@ Tool approval has three inputs:
    - `write`: mutates workspace/session state but does not execute arbitrary code.
    - `exec`: executes code, shells out, drives a browser, spawns agents, or performs similarly broad actions.
 2. **Tool policy** — object-form declarations may set `policy: allow | deny | prompt`, optionally with `override` and a reason. This is used for argument-dependent safety/pattern rules.
-3. **User policy** — `tools.approval.<toolName>: allow | deny | prompt` overrides the active mode, but cannot bypass a tool's own deny/prompt policy or a non-yolo safety override.
+3. **User policy** — `tools.approval.<toolName>: allow | deny | prompt` overrides the active mode, but cannot bypass a tool's own deny/prompt policy or a non-yolo safety override. Tools may expose a more specific policy key for an individual operation; when that key is unset, the tool-level policy remains the fallback.
 
 Tools without an `approval` declaration, and malformed approval decisions, are treated as `exec`. This is the safe default for unknown custom tools. MCP server tools declare `write`.
 
@@ -52,6 +52,19 @@ Resolution per tool call:
 6. With no explicit policy, the active mode auto-approves or prompts by tier.
 
 Policy strings are trimmed and case-normalized. Invalid user values are ignored.
+
+### GitHub operation policies
+
+The native `github` tool exposes `github.<operation>` policy keys. This allows an individual operation to be approved without relaxing the rest of the tool:
+
+```yaml
+tools:
+  approvalMode: write
+  approval:
+    github.pr_checkout: allow
+```
+
+Here, `pr_checkout` is allowed while `pr_create` and `pr_push` retain the `exec`-tier prompt from `write` mode. Read-only operations remain auto-approved. A `github` entry still acts as the fallback for operations without a more specific configured policy.
 
 ## Safety overrides
 
