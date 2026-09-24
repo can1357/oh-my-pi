@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Bounded the shared Anthropic connection pool (128 sockets per host, `PI_ANTHROPIC_MAX_SOCKETS` to change it) and made cancelling a request that is waiting for a socket take effect immediately instead of after the wait ([#12868](https://github.com/can1357/oh-my-pi/pull/12868) by [@geoyws](https://github.com/geoyws)).
+
 ### Added
 
 - Added support for Anthropic fallback credit token capture and redemption, including the 3-step rejection ladder for prompt-cache repricing on classifier refusals.
@@ -25,7 +29,7 @@
 
 ### Fixed
 
-- Fixed Claude Opus 5.5 not applying a mid-session switch to high-effort reasoning when the session started without an explicit effort setting.
+- Fixed Claude Opus 5.5 ignoring a mid-session switch to high effort when the session started without an explicit effort; the change is now sent as a cache-preserving per-message effort control ([#12909](https://github.com/can1357/oh-my-pi/pull/12909) by [@h4vc](https://github.com/h4vc)).
 - Fixed Alibaba Token Plan monthly quotas not appearing in usage reports or the status line.
 
 ## [18.2.9] - 2026-09-22

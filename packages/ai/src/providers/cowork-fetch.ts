@@ -1,9 +1,9 @@
-import type { IncomingMessage } from "node:http";
+import type { ClientRequest, IncomingMessage } from "node:http";
 import * as https from "node:https";
 import * as stream from "node:stream";
 import * as tls from "node:tls";
 import * as zlib from "node:zlib";
-import { logger } from "@oh-my-pi/pi-utils";
+import { $env, logger } from "@oh-my-pi/pi-utils";
 import type { FetchImpl } from "../types";
 
 /** `host/path` for logging; query strings can carry keys. */
@@ -42,7 +42,113 @@ type CoworkRequestInit = RequestInit & {
 
 type RequestBody = string | Uint8Array;
 
-const directAgent = new https.Agent({ keepAlive: true });
+/**
+ * Per-host socket ceiling for the shared keepalive pool. `https.Agent` defaults
+ * to `Infinity`, and every request on this transport parks its socket for the
+ * whole streaming response — so one process fanning out subagents
+ * (`task.maxConcurrency` is 32 by default and offers 64 at the top of its
+ * presets) plus its main loop, speculation, compaction and advisor traffic
+ * opens a socket per concurrent turn against one host, with nothing bounding
+ * the total. 128 is twice the widest preset fan-out, so a fully fanned-out
+ * session still dials everything at once, and it bounds file descriptors and
+ * per-connection TLS state.
+ *
+ * Past the ceiling the agent queues FIFO. A queued request is not silent
+ * forever: the Anthropic client arms its first-event watchdog when the request
+ * is created, so one that never reaches a socket fails after
+ * `PI_STREAM_FIRST_EVENT_TIMEOUT_MS` (300 s by default) as a retry-eligible
+ * `StreamTimeoutError` — but it spends those five minutes with no indicator
+ * anywhere in the UI. `task.maxConcurrency` also offers "Unlimited" (0), and a
+ * session running that way can hold more concurrent turns than any fixed
+ * ceiling, so raise `PI_ANTHROPIC_MAX_SOCKETS` when that is the shape of the
+ * workload. Surfacing the wait itself (a `providerRetryWait`-style event while
+ * a request sits in the pool queue) is a deliberate follow-up, not this change.
+ *
+ * Only requests that stay on this transport are pooled here: a proxied request
+ * leaves for `globalThis.fetch` (see {@link coworkFetch}) and is bounded by
+ * Bun's own pool instead.
+ *
+ * `PI_ANTHROPIC_MAX_SOCKETS` overrides it (positive integer; anything else is
+ * ignored with a debug log), following the `PI_CODEX_WEBSOCKET_*` precedent in
+ * this package. There is no settings knob: `packages/ai` has no settings seam
+ * for a per-host socket budget.
+ */
+export const DEFAULT_MAX_SOCKETS_PER_HOST = 128;
+
+/** Resolves the per-host cap from its env override, falling back to the default. */
+export function resolveMaxSocketsPerHost(raw: string | undefined): number {
+	if (raw === undefined || raw === "") return DEFAULT_MAX_SOCKETS_PER_HOST;
+	const value = Number(raw);
+	if (Number.isInteger(value) && value > 0) return value;
+	logger.debug("Ignoring PI_ANTHROPIC_MAX_SOCKETS: not a positive integer", { raw });
+	return DEFAULT_MAX_SOCKETS_PER_HOST;
+}
+
+export const MAX_SOCKETS_PER_HOST = resolveMaxSocketsPerHost($env.PI_ANTHROPIC_MAX_SOCKETS);
+
+/**
+ * Process-wide ceiling, deliberately above {@link MAX_SOCKETS_PER_HOST} rather
+ * than equal to it. Agent keys split by host *and* by TLS material, so one
+ * saturated key must never consume the whole process budget: with the two equal,
+ * a second key's request queues until the first key gives a socket back, and on
+ * a keepalive agent an idle free socket keeps holding that budget. Twice the
+ * per-host cap leaves a full key saturated and still lets every other key dial.
+ */
+export const MAX_TOTAL_SOCKETS = MAX_SOCKETS_PER_HOST * 2;
+
+/**
+ * Idle sockets are the ones that hold budget without doing work, so the pool
+ * keeps few of them and drops them after a minute. The agent `timeout` only
+ * reaps sockets sitting in the free list — an in-flight streaming response is
+ * not cut short by it. Clamped to the cap so a small
+ * `PI_ANTHROPIC_MAX_SOCKETS` cannot end up allowing more idle sockets than
+ * sockets.
+ */
+const MAX_FREE_SOCKETS = Math.min(16, MAX_SOCKETS_PER_HOST);
+const IDLE_SOCKET_TIMEOUT_MS = 60_000;
+
+/** Exported so tests can read the pool's socket and queue books. */
+export const directAgent = new https.Agent({
+	keepAlive: true,
+	maxSockets: MAX_SOCKETS_PER_HOST,
+	maxTotalSockets: MAX_TOTAL_SOCKETS,
+	maxFreeSockets: MAX_FREE_SOCKETS,
+	timeout: IDLE_SOCKET_TIMEOUT_MS,
+});
+
+/**
+ * Drops a still-queued request from its per-host FIFO inside the agent.
+ *
+ * `destroy()` alone does not: a queued request has no socket to carry the error
+ * through, so it stays parked until the pool hands it a freed socket — which,
+ * with every socket held by a long streaming response, may be minutes away.
+ * The caller's abort would not settle until then, which is the opposite of what
+ * cancelling a request means. Removing it here settles the abort in the same
+ * tick and leaves the queue holding only requests that still want a socket.
+ *
+ * The queues are scanned by request identity rather than keyed by
+ * `agent.getName`: that key folds in TLS material and drops `servername` when
+ * it matches the host, so recomputing it from the request options here would
+ * miss the bucket the request is actually parked in.
+ */
+function dropFromAgentQueue(agent: https.Agent, request: ClientRequest): void {
+	// Agent internals, so shape drift is possible; an abort handler is the last
+	// place that may throw, and destroy + reject below still cancel correctly.
+	try {
+		const queues = agent.requests as Record<string, ClientRequest[] | undefined>;
+		for (const [name, queue] of Object.entries(queues)) {
+			if (queue === undefined) continue;
+			const index = queue.indexOf(request);
+			if (index < 0) continue;
+			queue.splice(index, 1);
+			// Mirrors the agent's own bookkeeping, which drops the key with its last entry.
+			if (queue.length === 0) delete queues[name];
+			return;
+		}
+	} catch (error) {
+		logger.debug("cowork transport could not dequeue an aborted request", { error });
+	}
+}
 
 /** Resolved at call time, so a proxy wrapper installed after this module loads is honored. */
 const fallbackFetch: FetchImpl = (input, init) => globalThis.fetch(input, init as RequestInit);
@@ -144,19 +250,30 @@ async function sendCoworkRequest(
 	const tlsOptions = resolveTlsOptions(url, init.tls);
 	const headers = buildOrderedHeaders(url, sourceHeaders, body);
 	const result = Promise.withResolvers<Response>();
+	// Declared before the abort listener is attached: a synchronous throw out of
+	// `https.request` would otherwise leave the binding in its temporal dead
+	// zone, and an abort arriving on that path would raise a ReferenceError from
+	// inside the listener instead of cancelling.
+	let request: ClientRequest | undefined;
 	const release = (): void => {
 		signal?.removeEventListener("abort", abort);
 	};
 	const abort = (): void => {
 		const reason = signal?.reason;
-		request?.destroy(reason instanceof Error ? reason : new DOMException("The operation was aborted.", "AbortError"));
+		const error = reason instanceof Error ? reason : new DOMException("The operation was aborted.", "AbortError");
+		// Order matters: the queue has to let go of the request before it is
+		// destroyed, and the caller is settled here because a queued request
+		// never reaches the `error` handler below.
+		if (request !== undefined) dropFromAgentQueue(directAgent, request);
+		request?.destroy(error);
+		result.reject(error);
 	};
 	if (signal?.aborted) {
 		release();
 		signal.throwIfAborted();
 	}
 	signal?.addEventListener("abort", abort, { once: true });
-	const request = https.request(
+	request = https.request(
 		{
 			protocol: url.protocol,
 			hostname: url.hostname,
