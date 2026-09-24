@@ -5,7 +5,6 @@
 ### Fixed
 
 - Fixed QwenCloud Token Plan dropping every effort selection on discovered Qwen 3.8 models that lack curated rows (e.g. `qwen3.8-plus`): the OpenAI `reasoning_effort` dialect and reasoning-history replay now apply to the whole Qwen 3.8 revision instead of only the exact `qwen3.8-max`/`qwen3.8-flash` ids, with `qwen3.8-max-preview` still pinned to the binary `enable_thinking` toggle ([#12376](https://github.com/can1357/oh-my-pi/issues/12376)).
-- Fixed Claude Opus 5.5 failing every turn that forces a tool (eager todo/task preludes, forced final yield, sharpshooter passes) with `400 tool_choice: type "tool" and "any" are not supported for this model`; forced selectors now downgrade to `auto` as they already did for Fable/Mythos ([#12939](https://github.com/can1357/oh-my-pi/issues/12939)).
 - Fixed Claude Opus 5.5 requests that force tool use, preventing turn failures and allowing forced tool selections to fall back to automatic tool selection when required.
 
 ## [18.3.0] - 2026-09-24
