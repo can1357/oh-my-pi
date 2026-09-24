@@ -11,7 +11,7 @@
   - `packages/coding-agent/src/tools/file-recorder.ts` — file ordering for grouped output.
   - `packages/coding-agent/src/tools/grouped-file-output.ts` — grouped per-file text layout.
   - `packages/coding-agent/src/session/streaming-output.ts` — line truncation and final byte truncation.
-  - `packages/coding-agent/src/config/settings-schema.ts` — default context lines.
+  - `packages/coding-agent/src/tools/settings.ts` — default context lines.
   - `packages/natives/native/index.d.ts` — native `grep()` types exposed to TS.
   - `crates/pi-natives/src/grep.rs` — native regex/file search implementation.
   - `docs/natives-text-search-pipeline.md` — native search pipeline overview.
@@ -57,19 +57,17 @@ The tool returns a single text block in `content[0].text` plus structured `detai
    - enables multiline only when `pattern` contains `\n` or an actual newline.
 2. Each `path` root is normalized with `normalizePathLikeInput()` again during shared scope resolution; this is a no-op for entries already normalized by delimiter expansion.
 3. Archive member paths such as `bundle.zip:src/foo.ts` are materialized to temporary UTF-8 scratch files before native grep. Binary or non-UTF-8 archive members are reported as skipped/unreadable.
-4. Internal URLs and external URLs are resolved before filesystem scope resolution (`resolveToolSearchScope()`):
-   - glob metacharacters (`*`, `?`, `[`, `{`) are rejected for internal URLs;
-   - `ssh://` paths fail early (`ssh://` has no local backing file);
+4. Internal URLs and external URLs are resolved before filesystem scope resolution (`resolveToolSearchScope()`), scheme-agnostically through `InternalUrlRouter`:
+   - internal URLs with glob metacharacters (`*`, `?`, `[`, `{`) in the path after the authority go to `router.locateGlob()`, which expands them under the located base directory of any locatable scheme; non-locatable URL globs fail. Authority brackets (an IPv6 host) are not glob syntax;
    - readable external URLs (`http(s)://`, collapsed `http(s):/host`, `www.` spellings when no local path exists) are fetched and materialized to immutable local files; `ftp`/`ws`/`wss` and declined fetches fail with an explicit error;
-   - resources with `sourcePath` are searched through their backing file;
-   - resources without `sourcePath` are searched in memory with JavaScript `RegExp`;
-   - `omp://` expands to every embedded documentation file via URL completion;
-   - immutable sources are tracked so output can suppress editable hashline numbered output per file.
+   - URLs that `router.locate()` maps to a local file or directory are searched through that path;
+   - other URLs are searched in memory: the handler's `enumerate` expansion when it has one (`omp://` expands to every embedded documentation file), else the resolved content under the URL itself. A directory resource with no local path is rejected instead of searching its listing text;
+   - paths located from schemes whose spec is `immutable` are tracked so output can suppress editable hashline numbered output per file.
 5. For multi-path calls, `partitionExistingPaths()` skips only ENOENT entries. If every filesystem entry is missing and no virtual internal resources remain, the tool errors.
 6. Path resolution branches:
    - one entry: `parseSearchPath()` splits `basePath` and optional glob;
    - multiple entries: `resolveExplicitSearchPaths()` (via `resolveToolSearchScope()`) computes a common base directory, brace-union glob, exact-file list, or per-entry target list. Targets fan out when the common ancestor is not itself a requested scope, or when a plain-file entry would otherwise be demoted into a directory walk's glob union (`fanOutFileTargets`).
-7. Line-range selectors are validated after path/archive/internal resolution. They are allowed only for single files, archive members, or virtual resources; glob/directory line-range selectors error.
+7. Line-range selectors are validated after path/archive/internal resolution. They are allowed only for single files, archive members, or virtual resources; glob (including internal-URL glob)/directory line-range selectors error.
 8. `grep.ts` stats the resolved base path to decide file vs directory behavior.
 9. It calls native `grep()` from `@oh-my-pi/pi-natives` with:
    - `pattern`, `ignoreCase`, `multiline`, `gitignore`;
@@ -113,11 +111,10 @@ The tool returns a single text block in `content[0].text` plus structured `detai
 4. **Archive member paths**
    - Supported for UTF-8 text entries only. The member is extracted to a temporary scratch file for native grep, then displayed as `archive.ext:member`.
 5. **Internal URL paths**
-   - Filesystem-backed resources search their resolved `sourcePath`.
-   - Virtual resources without `sourcePath` search their resolved content in memory.
-   - `omp://` expands to all embedded documentation files so it can be used as a docs search root.
-   - No internal-URL globbing.
-   - Immutable and virtual sources suppress editable hashline anchors.
+   - URLs the router locates search the local file or directory (`skill://<name>` searches the skill directory).
+   - Other URLs search in memory: the handler's `enumerate` documents (`omp://` expands to all embedded documentation files so it can be used as a docs search root), else the resolved content.
+   - URL globs expand under the located base of any locatable scheme (`memory://root/**/*.md`).
+   - Sources from immutable schemes and virtual sources suppress editable hashline anchors.
 
 ## Side Effects
 - Filesystem
@@ -126,7 +123,7 @@ The tool returns a single text block in `content[0].text` plus structured `detai
   - Records whole-file snapshots into the session file-snapshot store via `recordFileSnapshot()` for hashline anchors.
 - Session state (transcript, memory, jobs, checkpoints, registries)
   - Reads session settings for context defaults.
-  - Uses `session.internalRouter` to resolve internal URLs.
+  - Locates/resolves internal URLs through `InternalUrlRouter` with the session's `sessionResolveContext()`.
   - Populates tool `details.meta` with truncation/limit metadata.
 - Background work / cancellation
   - Wrapped in `untilAborted(signal, ...)` at the JS level.
@@ -138,7 +135,7 @@ The tool returns a single text block in `content[0].text` plus structured `detai
 - Native/JS preselection cap: `2000` matches (`INTERNAL_TOTAL_CAP`).
 - Line truncation: `512` characters per emitted line (`DEFAULT_MAX_COLUMN` in `packages/coding-agent/src/session/streaming-output.ts`). Native grep marks truncated lines; JS reports `linesTruncated`.
 - Final text truncation: `truncateHead()` default byte cap `50 * 1024` bytes (`DEFAULT_MAX_BYTES` in `packages/coding-agent/src/session/streaming-output.ts`). `grep.ts` overrides `maxLines` to `Number.MAX_SAFE_INTEGER`, so normal grep output is byte-capped, not line-capped.
-- Context defaults: `grep.contextBefore = 1`, `grep.contextAfter = 3` in `packages/coding-agent/src/config/settings-schema.ts`.
+- Context defaults: `grep.contextBefore = 1`, `grep.contextAfter = 3` in `packages/coding-agent/src/tools/settings.ts`.
 - Pagination: `skip` is a file-page offset for multi-file scopes. The result text says `Use skip=<N> for the next page` when more files remain.
 - Native directory-scan cache: disabled natively for this tool — `GrepOptions` has no `cache` field; `build_grep_walk_request` hard-codes `.cache(false)` in `crates/pi-natives/src/grep.rs`.
 - Native grep wall-clock budget: `30_000ms` per invocation (`SEARCH_GREP_TIMEOUT_MS` in `packages/coding-agent/src/tools/grep.ts`); hitting it raises `Grep timed out after 30s; ...`.
@@ -148,8 +145,8 @@ The tool returns a single text block in `content[0].text` plus structured `detai
 - `Pattern must not be empty` when trimmed `pattern` is empty.
 - `Skip must be a non-negative number` for negative or non-finite `skip`.
 - `Search scope entries must be non-empty paths or globs` when any normalized `path` entry is empty.
-- `Glob patterns are not supported for internal URLs: ...` for internal URL + glob metacharacters.
-- `Cannot search a remote ssh:// path (no local file): ...` for `ssh://` inputs, with a hint to `read` the remote path or grep a specific remote file.
+- `Glob patterns are not supported for internal URLs: ...` for an internal-URL glob whose base does not locate to a local directory (remote, virtual, or device schemes).
+- `grep cannot recurse the directory listing at ...` for a directory resource with no local path (e.g. a remote `ssh://` directory).
 - `Cannot search external URL: ... Use \`read\` to fetch web content, then search the returned text.` for non-fetchable external URL schemes (`ftp`/`ws`/`wss`) or declined fetches.
 - Line-range selector errors include `Line-range selector requires a single file, not a glob: ...`, `Line-range selector requires a single file: ... is a directory`, and `Path not found for line-range selector: ...`.
 - `Cannot search archive member(s): ...` when all archive selectors are unreadable, binary, or non-UTF-8.
@@ -162,7 +159,8 @@ The tool returns a single text block in `content[0].text` plus structured `detai
 - Filesystem-backed searches use Rust regex first and PCRE2 when the pattern needs features such as lookaround or backreferences. Virtual in-memory resources use JavaScript `RegExp`.
 - Native `build_matcher()` auto-escapes braces that cannot be valid quantifiers. Valid quantifiers such as `a{2,4}` remain regex syntax.
 - If Rust regex and PCRE2 both reject group syntax, native compilation retries after escaping unescaped parentheses, then finally treats the original pattern literally.
-- Internal URLs are resolved before path existence checks. Backed resources become ordinary filesystem paths; virtual resources stay in memory and do not mint editable hashline anchors.
+- Internal URLs are resolved before path existence checks. Located resources become ordinary filesystem paths; virtual resources stay in memory and do not mint editable hashline anchors.
+- Approval is the router's `readTier` over the raw `path` text (substring scan, so a delimited list cannot hide an exec-tier scheme such as `ssh://`).
 - `hidden:true` is hard-coded in `grep.ts`; there is no model-facing flag to exclude dotfiles.
 - `gitignore:false` only affects native directory traversal. It does not disable the tool's own path normalization or explicit-file handling.
 - When `path` resolves to multiple exact files, each target uses the `2000` internal cap before JS grouping.

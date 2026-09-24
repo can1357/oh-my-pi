@@ -82,6 +82,10 @@ import {
 } from "@oh-my-pi/pi-tui/overlays/usage-display";
 import { formatRemainingOnlyTotal, isUsedOnlyAbsoluteAmount } from "@oh-my-pi/pi-tui/prompt/usage-amounts";
 
+import { cfgDisplayCollapseCompacted, cfgTerminalShowImages } from "../settings";
+import { cfgProviderAppendOnlyContext } from "../../session/settings";
+import { cfgShareRedactSecrets, cfgShareServerUrl, cfgShareStore } from "../../commands/settings";
+
 function formatCreditValue(value: number): string {
 	return value.toLocaleString(undefined, { maximumFractionDigits: 4 });
 }
@@ -320,10 +324,10 @@ export class CommandController {
 		// server; the key rides in the link fragment and never leaves the client.
 		try {
 			const result = await shareSession(this.ctx.session.sessionManager, {
-				serverUrl: this.ctx.settings.get("share.serverUrl"),
-				store: this.ctx.settings.get("share.store"),
+				serverUrl: cfgShareServerUrl.get(this.ctx.settings),
+				store: cfgShareStore.get(this.ctx.settings),
 				state: this.ctx.session.state,
-				obfuscator: this.ctx.settings.get("share.redactSecrets") ? this.ctx.session.obfuscator : undefined,
+				obfuscator: cfgShareRedactSecrets.get(this.ctx.settings) ? this.ctx.session.obfuscator : undefined,
 			});
 			if (loader.signal.aborted) return;
 			restoreEditor();
@@ -358,9 +362,6 @@ export class CommandController {
 			info += `${theme.fg("dim", "No model selected")}\n`;
 		} else {
 			const authMode = resolveProviderAuthMode(this.ctx.session.modelRegistry.authStorage, model.provider);
-			const openaiWebsocketSetting = this.ctx.settings.get("providers.openaiWebsockets") ?? "auto";
-			const preferOpenAICodexWebsockets =
-				openaiWebsocketSetting === "on" ? true : openaiWebsocketSetting === "off" ? false : undefined;
 			const credentialSource = this.ctx.session.modelRegistry.authStorage.keys.describe(
 				model.provider,
 				stats.sessionId,
@@ -370,7 +371,7 @@ export class CommandController {
 				sessionId: stats.sessionId,
 				authMode,
 				credentialSource,
-				preferWebsockets: preferOpenAICodexWebsockets,
+				preferWebsockets: this.ctx.session.preferWebsockets,
 				providerSessionState: this.ctx.session.providerSessionState,
 			});
 			info += renderProviderSection(providerDetails, theme);
@@ -392,7 +393,7 @@ export class CommandController {
 		info += `${theme.fg("dim", "Total:")} ${stats.totalMessages}\n\n`;
 		// Append-only context
 		{
-			const setting = this.ctx.settings.get("provider.appendOnlyContext") ?? "auto";
+			const setting = cfgProviderAppendOnlyContext.get(this.ctx.settings);
 			const model = this.ctx.session.model;
 			const mode = shouldEnableAppendOnlyContext(setting, model);
 			const activeLabel = mode ? theme.fg("success", "active") : theme.fg("dim", "inactive");
@@ -1434,7 +1435,7 @@ export class CommandController {
 					truncation: meta?.truncation,
 					artifactError: meta?.artifactError,
 					images: result.images,
-					showImages: this.ctx.settings.get("terminal.showImages"),
+					showImages: cfgTerminalShowImages.get(this.ctx.settings),
 				});
 			}
 			try {
@@ -1628,7 +1629,7 @@ export class CommandController {
 			// intentional replacement, so drop the stale pre-compaction scrollback
 			// instead of repainting the shrunken frame below it. With collapse
 			// disabled the full history stays inline and scrollback is kept.
-			if (this.ctx.settings.get("display.collapseCompacted")) {
+			if (cfgDisplayCollapseCompacted.get(this.ctx.settings)) {
 				this.ctx.ui.requestRender(true, { clearScrollback: true });
 			} else {
 				this.ctx.ui.requestRender();

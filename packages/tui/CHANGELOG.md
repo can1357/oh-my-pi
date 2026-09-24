@@ -9,7 +9,13 @@
 
 ### Added
 
+- Added UI support for marking paginated content in read-tool results
+- Added transcript rendering for `cfg://` configuration read and write tool calls
 - Added push-to-talk dictation to `Input`, including live transcription text and `cursorOverride` support.
+
+### Changed
+
+- Updated settings selector to perform full unsets when input fields are cleared
 
 ### Fixed
 

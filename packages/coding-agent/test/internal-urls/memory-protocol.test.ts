@@ -4,7 +4,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
-import { splitMemoryGlobPattern } from "@oh-my-pi/pi-coding-agent/internal-urls/memory-protocol";
 import { getMemoryRoot } from "@oh-my-pi/pi-coding-agent/memories";
 import {
 	loadMnemopi,
@@ -91,23 +90,6 @@ describe("MemoryProtocolHandler", () => {
 
 		await expect(router.resolve("memory://", { settings })).rejects.toThrow("Unknown protocol: memory://");
 		await expect(router.resolve("memory://root", { settings })).rejects.toThrow("Unknown protocol: memory://");
-	});
-
-	it("advertises memory URLs only while a memory backend is enabled", () => {
-		const settings = Settings.isolated();
-		const session: ToolSession = {
-			cwd: process.cwd(),
-			hasUI: false,
-			settings,
-			getSessionFile: () => null,
-			getSessionSpawns: () => null,
-		};
-		const tool = new ReadTool(session);
-
-		expect(JSON.stringify(tool.parameters.toJsonSchema())).not.toContain("memory://");
-
-		settings.override("memory.backend", "local");
-		expect(JSON.stringify(tool.parameters.toJsonSchema())).toContain("memory://");
 	});
 
 	it("reads memory through the calling session's configured registry", async () => {
@@ -511,6 +493,25 @@ describe("MemoryProtocolHandler", () => {
 			const router = InternalUrlRouter.instance();
 			await expect(router.resolve("memory://root/linked/secret.md")).rejects.toThrow(
 				"memory:// URL escapes memory root",
+			);
+		});
+	});
+
+	it("refuses create targets escaping through a symlinked ancestor or dangling symlink", async () => {
+		if (process.platform === "win32") return;
+
+		await withMemoryFixture(async ({ cwd, memoryRoot, cleanupRoot }) => {
+			const outsideDir = path.join(cleanupRoot, "outside");
+			await fs.mkdir(outsideDir, { recursive: true });
+			await fs.symlink(outsideDir, path.join(memoryRoot, "linked"));
+			await fs.symlink(path.join(outsideDir, "victim.md"), path.join(memoryRoot, "dangling.md"));
+
+			const router = InternalUrlRouter.instance();
+			await expect(router.locate("memory://root/linked/new/f.md", { cwd }, { create: true })).rejects.toThrow(
+				"memory:// URL escapes memory root",
+			);
+			await expect(router.locate("memory://root/dangling.md", { cwd }, { create: true })).rejects.toThrow(
+				"memory:// URL goes through a dangling symlink",
 			);
 		});
 	});
@@ -1011,11 +1012,5 @@ describe("MemoryProtocolHandler — file-backed root vs non-local backends (issu
 			settings: Settings.isolated({ "memory.backend": "local" }),
 		});
 		expect((local ?? []).map(item => item.value)).toContain("root");
-	});
-
-	it("names the expected glob form rather than the rejected input", () => {
-		expect(() => splitMemoryGlobPattern("memory://**")).toThrow(
-			"Memory glob patterns require the root namespace (e.g. memory://root/**); got: memory://**",
-		);
 	});
 });

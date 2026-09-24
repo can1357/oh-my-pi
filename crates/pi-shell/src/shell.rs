@@ -71,7 +71,17 @@ fn shell_working_dir_matches(shell: &BrushShell, cwd: &str) -> bool {
 		return false;
 	}
 	let current = shell.working_dir();
-	current == requested
+	// On Windows the stored dir is already long-form (brush-core expands 8.3
+	// short names on every store), so only the requested spelling needs
+	// expansion for a short-spelled host cwd to match its long spelling.
+	#[cfg(windows)]
+	{
+		current == brush_core::sys::fs::expand_to_long_path(requested)
+	}
+	#[cfg(not(windows))]
+	{
+		current == requested
+	}
 }
 
 fn set_shell_working_dir_if_changed(shell: &mut BrushShell, cwd: &str) -> Result<()> {
@@ -1906,6 +1916,114 @@ mod tests {
 
 	use super::*;
 
+	/// 8.3 short spelling of `path` (`GetShortPathNameW`).
+	#[cfg(windows)]
+	fn short_name_of(path: &std::path::Path) -> std::path::PathBuf {
+		use std::os::windows::ffi::{OsStrExt, OsStringExt};
+		let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+		// SAFETY: `wide` is NUL-terminated; a null buffer with length 0 asks
+		// only for the required size.
+		let needed = unsafe {
+			windows_sys::Win32::Storage::FileSystem::GetShortPathNameW(
+				wide.as_ptr(),
+				std::ptr::null_mut(),
+				0,
+			)
+		};
+		assert!(needed > 0, "GetShortPathNameW failed for {}", path.display());
+		let mut buf = vec![0u16; needed as usize];
+		// SAFETY: `wide` is NUL-terminated and `buf` is writable for
+		// `buf.len()` u16s.
+		let written = unsafe {
+			windows_sys::Win32::Storage::FileSystem::GetShortPathNameW(
+				wide.as_ptr(),
+				buf.as_mut_ptr(),
+				buf.len() as u32,
+			)
+		};
+		assert!(written > 0, "GetShortPathNameW fill failed for {}", path.display());
+		buf.truncate(written as usize);
+		std::path::PathBuf::from(std::ffi::OsString::from_wide(&buf))
+	}
+
+	#[cfg(windows)]
+	const LONG_DIR_NAME: &str = "pi-shell-long-name-probe";
+
+	/// A fresh directory whose long name has a distinct 8.3 alias, as
+	/// `(guard, long, short)`. `None` when the volume does not generate short
+	/// names, since no spelling split can exist there.
+	#[cfg(windows)]
+	fn short_alias_fixture() -> Option<(tempfile::TempDir, std::path::PathBuf, std::path::PathBuf)> {
+		let root = tempfile::tempdir().expect("tempdir");
+		let long = root.path().join(LONG_DIR_NAME);
+		std::fs::create_dir(&long).expect("create long-named dir");
+		let short = short_name_of(&long);
+		(short.file_name() != long.file_name()).then_some((root, long, short))
+	}
+
+	/// The shell stores `working_dir` in long form both at construction and on
+	/// `cd`, even when handed the 8.3 short spelling of the directory.
+	#[cfg(windows)]
+	#[tokio::test]
+	async fn working_dir_stores_long_form() {
+		let Some((_root, _long, short)) = short_alias_fixture() else {
+			return;
+		};
+
+		let mut shell = BrushShell::builder()
+			.do_not_inherit_env(true)
+			.profile(ProfileLoadBehavior::Skip)
+			.rc(RcLoadBehavior::Skip)
+			.working_dir(short.clone())
+			.build()
+			.await
+			.expect("build shell");
+
+		assert_eq!(
+			shell.working_dir().file_name(),
+			Some(std::ffi::OsStr::new(LONG_DIR_NAME)),
+			"built from {}",
+			short.display()
+		);
+
+		shell
+			.set_working_dir(short.parent().expect("parent"))
+			.expect("cd parent");
+		shell.set_working_dir(&short).expect("cd short spelling");
+		assert_eq!(
+			shell.working_dir().file_name(),
+			Some(std::ffi::OsStr::new(LONG_DIR_NAME)),
+			"cd {}",
+			short.display()
+		);
+	}
+
+	/// A host cwd spelled with 8.3 short names matches the stored long form of
+	/// the same directory, so no redundant `set_working_dir` runs.
+	#[cfg(windows)]
+	#[tokio::test]
+	async fn short_spelled_cwd_matches_stored_long_form() {
+		let Some((_root, long, short)) = short_alias_fixture() else {
+			return;
+		};
+
+		let shell = BrushShell::builder()
+			.do_not_inherit_env(true)
+			.profile(ProfileLoadBehavior::Skip)
+			.rc(RcLoadBehavior::Skip)
+			.working_dir(long)
+			.build()
+			.await
+			.expect("build shell");
+
+		assert!(
+			shell_working_dir_matches(&shell, &short.to_string_lossy()),
+			"short spelling {} should match stored {}",
+			short.display(),
+			shell.working_dir().display()
+		);
+	}
+
 	#[cfg(unix)]
 	async fn kill_test_context() -> (ShellSessionCore, ExecutionParameters) {
 		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
@@ -2564,6 +2682,36 @@ mod tests {
 				.next()
 				.is_some_and(|value| value == pid.to_string())
 		}));
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn ps_builtin_lists_one_line_per_thread_with_m() {
+		// Field report: `ps -M -p <pid>` failed with "unsupported option '-M'".
+		let pid = std::process::id().to_string();
+		let (result, output) = execute_captured(format!("ps -M -p {pid}")).await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		let mut lines = output.lines();
+		let header: Vec<&str> = lines
+			.next()
+			.unwrap_or_default()
+			.split_whitespace()
+			.collect();
+		assert_eq!(header, ["USER", "PID", "TT", "%CPU", "STAT", "PRI", "STIME", "UTIME", "COMMAND"]);
+		let threads: Vec<Vec<&str>> = lines
+			.map(|line| line.split_whitespace().collect())
+			.collect();
+		// The multi-threaded tokio runtime guarantees several threads.
+		assert!(threads.len() > 1, "{output:?}");
+		// USER, TT and COMMAND print only on the first thread line.
+		assert_eq!(threads[0].get(1), Some(&pid.as_str()), "{output:?}");
+		assert!(threads[0].len() >= 9, "{output:?}");
+		for fields in &threads[1..] {
+			assert_eq!(fields.len(), 6, "{output:?}");
+			assert_eq!(fields[0], pid);
+			assert!(fields[1].parse::<f64>().is_ok(), "%CPU: {:?}", fields[1]);
+			#[cfg(target_os = "macos")]
+			assert!(fields[5].contains(':'), "UTIME: {:?}", fields[5]);
+		}
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
@@ -3457,6 +3605,7 @@ mod tests {
 			"date",
 			"diff",
 			"dirname",
+			#[cfg(unix)]
 			"errno",
 			"fd",
 			"find",

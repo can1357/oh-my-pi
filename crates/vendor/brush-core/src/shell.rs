@@ -228,7 +228,12 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 			// then `/` so an embedding host can recover by setting an explicit
 			// working directory afterwards. Other current-directory errors still
 			// propagate to preserve the shell's established error contract.
-			working_dir: initial_working_dir(options.working_dir, std::env::current_dir())?,
+			// Stored in long form so 8.3 short-name spellings (e.g. `ADMINI~1`)
+			// share one identity with their long spelling on Windows.
+			working_dir: crate::sys::fs::expand_to_long_path(&initial_working_dir(
+				options.working_dir,
+				std::env::current_dir(),
+			)?),
 			builtins: options.builtins,
 			parser_impl: options.parser,
 			key_bindings: options.key_bindings,
