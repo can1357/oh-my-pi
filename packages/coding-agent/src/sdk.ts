@@ -61,13 +61,16 @@ import { shouldEnableAppendOnlyContext } from "./config/append-only-context-mode
 import { shouldInlineToolDescriptors } from "./config/inline-tool-descriptors-mode";
 import { isAuthenticated, kNoAuth, ModelRegistry } from "./config/model-registry";
 import {
+	disabledProviderIds,
 	formatModelString,
 	formatModelStringWithRouting,
 	getModelMatchPreferences,
+	type ModelMatchPreferences,
 	parseModelPattern,
 	pickDefaultAvailableModel,
 	resolveAllowedModels,
 	resolveCliModel,
+	type ResolveCliModelResult,
 	resolveConfiguredModelPatterns,
 	resolveModelRoleValue,
 } from "./config/model-resolver";
@@ -556,6 +559,10 @@ export interface CreateAgentSessionOptions {
 	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
 	/** Prewalk from the starting model to a fast/cheap target at the first edit/write once the todo list exists. */
 	prewalk?: Prewalk;
+	/** CLI prewalk selector awaiting extension provider registration; patterns retain role fallback order. */
+	deferredPrewalk?: { target: string; patterns: string[] };
+	/** Host-owned display sink for non-fatal startup prewalk warnings. */
+	onPrewalkWarning?: (warning: string) => void;
 	/** Force read-only plan mode at start, auto-approve on the model's first resolve call, then switch to execute. */
 	planYolo?: PlanYolo;
 
@@ -994,6 +1001,96 @@ export async function loadCliExtensionProviders(
 	}
 	extensionsResult.runtime.pendingProviderRegistrations = [];
 	await modelRegistry.refreshRuntimeProviders();
+}
+
+/** Resolve prewalk with the same ordering before and after extension registration. */
+export async function resolvePrewalkTarget(
+	patterns: readonly string[],
+	target: string,
+	modelRegistry: ModelRegistry,
+	preferences: ModelMatchPreferences,
+	disabledProviders: ReadonlySet<string>,
+	{
+		deferUnregistered = false,
+		beforeRefresh,
+	}: { deferUnregistered?: boolean; beforeRefresh?: () => Promise<void> } = {},
+): Promise<{ prewalk?: Prewalk; warnings: string[]; deferred: boolean }> {
+	let refreshedProviders: Set<string> | undefined;
+	const resolveCandidate = (pattern: string) => resolveCliModel({ cliModel: pattern, modelRegistry, preferences });
+	let authenticated: ResolveCliModelResult | undefined;
+	let firstUnauthenticated: ResolveCliModelResult | undefined;
+	let lastResolution: ResolveCliModelResult | undefined;
+	let deferred = false;
+	let disabledProvider: string | undefined;
+
+	// Each provider-qualified candidate gets its scoped discovery opportunity
+	// before advancing to the next candidate in the configured role chain.
+	for (const pattern of patterns) {
+		disabledProvider = undefined;
+		let candidate = resolveCandidate(pattern);
+		lastResolution = candidate;
+		if (candidate.model && disabledProviders.has(candidate.model.provider)) {
+			disabledProvider = candidate.model.provider;
+			continue;
+		}
+		if (candidate.model && modelRegistry.hasConfiguredAuth(candidate.model)) {
+			authenticated = candidate;
+			break;
+		}
+		if (candidate.model) {
+			firstUnauthenticated ??= candidate;
+			continue;
+		}
+
+		const requestedProvider = parseModelString(pattern)?.provider.toLowerCase();
+		if (requestedProvider && disabledProviders.has(requestedProvider)) {
+			disabledProvider = requestedProvider;
+			continue;
+		}
+		if (!requestedProvider) {
+			if (deferUnregistered) deferred = true;
+			continue;
+		}
+		if (refreshedProviders?.has(requestedProvider)) continue;
+		const provider = modelRegistry.getDiscoveryProviderId(requestedProvider);
+		if (!provider) {
+			if (deferUnregistered) deferred = true;
+			continue;
+		}
+
+		(refreshedProviders ??= new Set()).add(requestedProvider);
+		await beforeRefresh?.();
+		await modelRegistry.refreshDiscoverableProviders([provider], "online-if-uncached");
+		candidate = resolveCandidate(pattern);
+		lastResolution = candidate;
+		if (candidate.model && disabledProviders.has(candidate.model.provider)) {
+			disabledProvider = candidate.model.provider;
+			continue;
+		}
+		if (candidate.model && modelRegistry.hasConfiguredAuth(candidate.model)) {
+			authenticated = candidate;
+			break;
+		}
+		if (candidate.model) firstUnauthenticated ??= candidate;
+	}
+
+	if (deferred) return { warnings: [], deferred: true };
+	const resolved = authenticated ?? firstUnauthenticated ?? lastResolution ?? resolveCandidate(patterns[0] ?? target);
+	const warnings = resolved.warning ? [resolved.warning] : [];
+	if (resolved.error || !resolved.model) {
+		warnings.push(
+			disabledProvider
+				? `prewalk disabled — provider "${disabledProvider}" is disabled`
+				: `prewalk disabled — ${resolved.error ?? `model "${target}" not found`}`,
+		);
+	} else if (disabledProviders.has(resolved.model.provider)) {
+		warnings.push(`prewalk disabled — provider "${resolved.model.provider}" is disabled`);
+	} else if (!modelRegistry.hasConfiguredAuth(resolved.model)) {
+		warnings.push(`prewalk disabled — no API key for ${resolved.model.provider}/${resolved.model.id}`);
+	} else {
+		return { prewalk: { target: resolved.model, thinkingLevel: resolved.thinkingLevel }, warnings, deferred: false };
+	}
+	return { warnings, deferred: false };
 }
 
 /**
@@ -1525,6 +1622,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				cacheDbPath: getModelDbPath(agentDir),
 			},
 		);
+	let prewalk = options.prewalk;
+	let deferredPrewalk = options.deferredPrewalk;
 	// Track whether we internally created the authStorage so we can close it
 	// if construction fails before the session takes ownership.
 	const ownsAuthStorage = !options.authStorage && !options.modelRegistry;
@@ -2050,7 +2149,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			outputSchema: options.outputSchema,
 			outputSchemaMode: options.outputSchemaMode,
 			requireYieldTool: options.requireYieldTool,
-			prewalkArmed: options.prewalk !== undefined,
+			get prewalkArmed() {
+				return prewalk !== undefined || deferredPrewalk !== undefined;
+			},
 			taskDepth: options.taskDepth ?? 0,
 			getSessionFile: () => sessionManager.getSessionFile() ?? null,
 			sessionManager,
@@ -2994,6 +3095,25 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					patterns && patterns.length > 0
 						? `No model available matching enabledModels (${patterns.join(", ")}) with usable credentials. Configure auth for an allowed provider or adjust enabledModels.`
 						: "No models available. Use /login or set an API key environment variable. Then use /model to select a model.";
+			}
+		}
+
+		if (deferredPrewalk) {
+			const { target, patterns } = deferredPrewalk;
+			const discoveryInFlight = runtimeDiscoveryPromise;
+			const selection = await resolvePrewalkTarget(
+				patterns,
+				target,
+				modelRegistry,
+				modelMatchPreferences,
+				disabledProviderIds(settings),
+				{ beforeRefresh: discoveryInFlight ? () => discoveryInFlight : undefined },
+			);
+			prewalk = selection.prewalk;
+			deferredPrewalk = undefined;
+			for (const warning of selection.warnings) {
+				logger.warn("Prewalk startup warning", { warning });
+				options.onPrewalkWarning?.(warning);
 			}
 		}
 
@@ -4220,7 +4340,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			thinkingLevel: autoThinking ? AUTO_THINKING : effectiveThinkingLevel,
 			thinkingLevelCeiling: options.thinkingLevelCeiling,
 			initialRetryFallback,
-			prewalk: options.prewalk,
+			prewalk,
 			planYolo: options.planYolo,
 			serviceTierByFamily: initialServiceTierByFamily,
 			sessionManager,

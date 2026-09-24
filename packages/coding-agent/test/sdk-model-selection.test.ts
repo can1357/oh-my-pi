@@ -148,6 +148,161 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
+	async function startPrewalkSession(
+		prewalkInto: string | undefined,
+		{
+			model = "runtime-provider/runtime-model",
+			defaultRole,
+			smolRole,
+			extension = providerExtension,
+			authenticatedProvider,
+			hasUI = false,
+			onPrewalkWarning,
+		}: {
+			model?: string;
+			defaultRole?: string;
+			smolRole?: string;
+			extension?: ExtensionFactory;
+			authenticatedProvider?: string;
+			hasUI?: boolean;
+			onPrewalkWarning?: (warning: string) => void;
+		} = {},
+	) {
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		if (authenticatedProvider) authStorage.keys.setRuntime(authenticatedProvider, "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+		const settings = Settings.isolated();
+		if (defaultRole) settings.setModelRole("default", defaultRole);
+		if (smolRole) settings.setModelRole("smol", smolRole);
+		const cliOptions = await buildCliSessionOptions(
+			parseArgs(["--model", model, ...(prewalkInto ? ["--prewalk-into", prewalkInto] : ["--prewalk"])]),
+			[],
+			SessionManager.inMemory(),
+			modelRegistry,
+			settings,
+		);
+		const { session } = await createAgentSession({
+			...cliOptions,
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			settings,
+			hasUI,
+			onPrewalkWarning,
+			disableExtensionDiscovery: true,
+			extensions: [extension],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+		});
+		return session;
+	}
+
+	test("resolves prewalk target registered by an extension", async () => {
+		const session = await startPrewalkSession("runtime-provider/runtime-fallback-model:low");
+		try {
+			expect(session.model?.id).toBe("runtime-model");
+			expect(session.getPrewalkState()?.target.id).toBe("runtime-fallback-model");
+			expect(session.getPrewalkState()?.thinkingLevel).toBe(Effort.Low);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("resolves the default smol prewalk role from an extension", async () => {
+		const session = await startPrewalkSession(undefined, {
+			smolRole: "runtime-provider/runtime-fallback-model:low",
+		});
+		try {
+			expect(session.getPrewalkState()?.target.id).toBe("runtime-fallback-model");
+			expect(session.getPrewalkState()?.thinkingLevel).toBe(Effort.Low);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("prefers an earlier extension role target to a later bundled fallback", async () => {
+		const fallback = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!fallback) throw new Error("expected claude-sonnet-4-5 to be bundled");
+		const session = await startPrewalkSession("@default", {
+			defaultRole: `runtime-provider/runtime-fallback-model:low,${fallback.provider}/${fallback.id}`,
+			authenticatedProvider: fallback.provider,
+		});
+		try {
+			expect(session.getPrewalkState()?.target.provider).toBe("runtime-provider");
+			expect(session.getPrewalkState()?.target.id).toBe("runtime-fallback-model");
+			expect(session.getPrewalkState()?.thinkingLevel).toBe(Effort.Low);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("keeps a bundled fallback when the earlier extension target is absent", async () => {
+		const startup = getBundledModel("anthropic", "claude-opus-4-5");
+		const fallback = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!startup || !fallback) throw new Error("expected bundled models");
+		const session = await startPrewalkSession("@default", {
+			model: `${startup.provider}/${startup.id}`,
+			defaultRole: `runtime-provider/missing,${fallback.provider}/${fallback.id}`,
+			authenticatedProvider: fallback.provider,
+			extension: () => {},
+		});
+		try {
+			expect(session.model?.id).toBe(startup.id);
+			expect(session.getPrewalkState()?.target.id).toBe(fallback.id);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("fetches a mixed-case cold extension provider without probing unrelated providers", async () => {
+		const unrelatedFetch = vi.fn(async () => []);
+		const extension: ExtensionFactory = pi => {
+			pi.registerProvider("runtime-provider", dynamicOnlyProviderConfig);
+			pi.registerProvider("unrelated-provider", {
+				...dynamicOnlyProviderConfig,
+				fetchDynamicModels: unrelatedFetch,
+			});
+		};
+		const session = await startPrewalkSession("Runtime-Provider/cached-runtime-model", {
+			model: "anthropic/claude-sonnet-4-5",
+			authenticatedProvider: "anthropic",
+			extension,
+			hasUI: true,
+		});
+		try {
+			expect(session.getPrewalkState()?.target.id).toBe("cached-runtime-model");
+			expect(unrelatedFetch).not.toHaveBeenCalled();
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("warns and continues when an extension prewalk target never registers", async () => {
+		const writes = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+		const warnings: string[] = [];
+		const session = await startPrewalkSession("missing-provider/missing-model", {
+			onPrewalkWarning: warning => warnings.push(warning),
+		});
+		try {
+			expect(session.getPrewalkState()).toBeUndefined();
+			expect(warnings).toHaveLength(1);
+			expect(warnings[0]).toContain("missing-provider/missing-model");
+			expect(writes).not.toHaveBeenCalled();
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	test("resolves explicit dynamic-only modelPattern from fresh runtime cache", async () => {
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);

@@ -609,14 +609,10 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Refresh only the named discovery-backed providers, leaving every other
-	 * provider's discovered models and any in-flight runtime discovery untouched.
-	 *
-	 * Unlike {@link refreshProvider}, this does no static reload and never
-	 * re-fetches the other runtime managers, so restoring a saved
-	 * discovery-backed model (e.g. on `omp --resume`) cannot wait on — or
-	 * duplicate — an unrelated provider's network/OAuth work. Ids that are not
-	 * configured discovery providers are ignored by the underlying filter.
+	 * Refresh only named discovery providers (configured `models.yml` providers or
+	 * extension `fetchDynamicModels` managers). Unlike {@link refreshProvider},
+	 * this avoids a static reload and leaves unrelated runtime discovery alone.
+	 * Unknown ids have no effect.
 	 */
 	async refreshDiscoverableProviders(
 		providerIds: Iterable<string>,
@@ -2687,6 +2683,18 @@ export class ModelRegistry {
 		return this.#discoverableProviders
 			.filter(provider => !disabledProviders.has(provider.provider))
 			.map(provider => provider.provider);
+	}
+
+	/** Canonical id of a configured or extension-backed discovery provider. */
+	getDiscoveryProviderId(requestedId: string): string | undefined {
+		const normalized = requestedId.toLowerCase();
+		for (const { provider } of this.#discoverableProviders) {
+			if (provider.toLowerCase() === normalized) return provider;
+		}
+		for (const provider of this.#runtimeModelManagers.keys()) {
+			if (provider.toLowerCase() === normalized) return provider;
+		}
+		return undefined;
 	}
 
 	/**

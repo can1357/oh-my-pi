@@ -31,7 +31,7 @@ import { applyStartupCwd } from "./cli/startup-cwd";
 import { getLatestRelease } from "./cli/update-cli";
 import { findConfigFile } from "./config";
 import { ModelRegistry } from "./config/model-registry";
-import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
+import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import {
 	DEFAULT_PREWALK_TARGET,
 	disabledProviderIds,
@@ -39,7 +39,6 @@ import {
 	getModelMatchPreferences,
 	resolveCliModel,
 	resolveConfiguredModelPatterns,
-	type ResolveCliModelResult,
 	resolveModelRoleValue,
 	resolveModelScope,
 	type ScopedModel,
@@ -89,6 +88,7 @@ import {
 	createAgentSession,
 	discoverAuthStorage,
 	loadSessionExtensions,
+	resolvePrewalkTarget,
 } from "./sdk";
 import type { AgentSession } from "./session/agent-session";
 import { createAuthStorageSettingsSync, describeAuthBrokerStartupError } from "./session/auth-broker-config";
@@ -1476,81 +1476,22 @@ export async function buildSessionOptions(
 			targetPatterns = configuredPatterns.length > 0 ? configuredPatterns : [targetSelector];
 		}
 
-		const resolveCandidate = (pattern: string) =>
-			resolveCliModel({ cliModel: pattern, modelRegistry, preferences: modelMatchPreferences });
-
-		const discoverableProviders = new Map(
-			modelRegistry.getDiscoverableProviders().map(provider => [provider.toLowerCase(), provider]),
+		const selection = await resolvePrewalkTarget(
+			targetPatterns,
+			target,
+			modelRegistry,
+			modelMatchPreferences,
+			disabledProviders,
+			{ deferUnregistered: true },
 		);
-		const refreshedProviders = new Set<string>();
-		let authenticatedResolution: ResolveCliModelResult | undefined;
-		let firstUnauthenticatedResolution: ResolveCliModelResult | undefined;
-		let lastResolution: ResolveCliModelResult | undefined;
-
-		// Preserve fallback priority. Each provider-qualified candidate gets its
-		// scoped discovery opportunity before we advance to the next candidate.
-		for (const pattern of targetPatterns) {
-			let candidate = resolveCandidate(pattern);
-			lastResolution = candidate;
-
-			// A disabled provider is unreachable; try the next fallback pattern.
-			if (candidate.model && disabledProviders.has(candidate.model.provider)) continue;
-			if (candidate.model && modelRegistry.hasConfiguredAuth(candidate.model)) {
-				authenticatedResolution = candidate;
-				break;
-			}
-			if (candidate.model) {
-				firstUnauthenticatedResolution ??= candidate;
-				continue;
-			}
-
-			const requestedProvider = parseModelString(pattern)?.provider.toLowerCase();
-			if (!requestedProvider || refreshedProviders.has(requestedProvider)) continue;
-			const discoverableProvider = discoverableProviders.get(requestedProvider);
-			if (!discoverableProvider) continue;
-
-			refreshedProviders.add(requestedProvider);
-			await modelRegistry.refreshDiscoverableProviders([discoverableProvider], "online-if-uncached");
-
-			candidate = resolveCandidate(pattern);
-			lastResolution = candidate;
-			if (candidate.model && disabledProviders.has(candidate.model.provider)) continue;
-			if (candidate.model && modelRegistry.hasConfiguredAuth(candidate.model)) {
-				authenticatedResolution = candidate;
-				break;
-			}
-			if (candidate.model) {
-				firstUnauthenticatedResolution ??= candidate;
-			}
-		}
-
-		const resolved =
-			authenticatedResolution ??
-			firstUnauthenticatedResolution ??
-			lastResolution ??
-			resolveCandidate(targetPatterns[0] ?? target);
-
-		if (resolved.warning) {
-			process.stderr.write(`${chalk.yellow(`Warning: ${resolved.warning}`)}\n`);
-		}
-		// Prewalk is an optional optimization (off by default): switch to a fast
-		// model at the first edit. If its hand-off target can't be resolved or has
-		// no configured auth, warn and leave prewalk unarmed rather than aborting
-		// startup and locking the user out of the app (issue #6064).
-		if (resolved.error || !resolved.model) {
-			process.stderr.write(
-				`${chalk.yellow(`Warning: prewalk disabled — ${resolved.error ?? `model "${target}" not found`}`)}\n`,
-			);
-		} else if (disabledProviders.has(resolved.model.provider)) {
-			process.stderr.write(
-				`${chalk.yellow(`Warning: prewalk disabled — provider "${resolved.model.provider}" is disabled`)}\n`,
-			);
-		} else if (!modelRegistry.hasConfiguredAuth(resolved.model)) {
-			process.stderr.write(
-				`${chalk.yellow(`Warning: prewalk disabled — no API key for ${resolved.model.provider}/${resolved.model.id}`)}\n`,
-			);
+		if (selection.deferred) {
+			// Preserve role fallback order until extensions have registered their providers.
+			options.deferredPrewalk = { target, patterns: targetPatterns };
 		} else {
-			options.prewalk = { target: resolved.model, thinkingLevel: resolved.thinkingLevel };
+			options.prewalk = selection.prewalk;
+			for (const warning of selection.warnings) {
+				process.stderr.write(`${chalk.yellow(`Warning: ${warning}`)}\n`);
+			}
 		}
 	}
 
@@ -2135,6 +2076,10 @@ export async function runRootCommand(
 		sessionOptions.modelRegistry = modelRegistry;
 		sessionOptions.hasUI = isInteractive || mode === "rpc-ui";
 		sessionOptions.settings = settingsInstance;
+		sessionOptions.onPrewalkWarning = warning => {
+			if (isInteractive) notifs.push({ kind: "warn", message: warning });
+			else process.stderr.write(`${chalk.yellow(`Warning: ${warning}`)}\n`);
+		};
 
 		// OTEL: register global OTLP exporters when an endpoint is configured via
 		// env, then switch on the agent loop's telemetry hooks so traces, run-level
