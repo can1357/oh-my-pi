@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { billingVariantPlain, classifyModel, collapseVariantId, routingVariantPlain } from "../src/compat/taxonomy";
+import {
+	AmbiguousIdentityError,
+	billingVariantPlain,
+	classifyModel,
+	collapseVariantId,
+	routingVariantPlain,
+} from "../src/compat/taxonomy";
 import { Effort } from "../src/effort";
 
 describe("classifyModel", () => {
@@ -9,6 +15,12 @@ describe("classifyModel", () => {
 			family: "opus",
 			revision: "4.6.0",
 		});
+	});
+
+	test("openai-compatible-chat UUID prefix ties openai vs cohere without lenient", () => {
+		const id = "openai-compatible-chat-b524a192-5149-4722-ba4c-aec8d52dbaef/cohere/north-mini-code:free";
+		expect(() => classifyModel("omni", id)).toThrow(AmbiguousIdentityError);
+		expect(classifyModel("omni", id, { lenient: true }).class).toBe("unknown");
 	});
 
 	test("namespaced aggregator ids classify by bare name", () => {

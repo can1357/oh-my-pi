@@ -938,6 +938,22 @@ describe("claude ranking strategy", () => {
 		expect(claudeRankingStrategy.blockScope?.({})).toBeUndefined();
 	});
 
+	it("keeps Anthropic OAuth ranking classification lenient for equal-rank ambiguous ids", () => {
+		const ambiguousId = "openai-compatible-chat-b524a192-5149-4722-ba4c-aec8d52dbaef/cohere/north-mini-code:free";
+		const report = usageReportWithWeeklyCaps({ sharedWeeklyUsed: 0.18, fableWeeklyUsed: 0.64 });
+		const scopeLimits = claudeRankingStrategy.scopeLimits;
+		if (!scopeLimits) throw new Error("expected claude scopeLimits");
+
+		expect(claudeRankingStrategy.blockScope?.({ modelId: ambiguousId })).toBeUndefined();
+		expect(scopeLimits(report, { modelId: ambiguousId }).map(limit => limit.id)).toEqual([
+			"anthropic:5h",
+			"anthropic:7d",
+		]);
+		expect(claudeRankingStrategy.findWindowLimits(report, { modelId: ambiguousId }).secondary?.id).toBe(
+			"anthropic:7d",
+		);
+	});
+
 	it("uses the Fable weekly cap as secondary when it is more used than the shared weekly cap", () => {
 		const report = usageReportWithWeeklyCaps({ sharedWeeklyUsed: 0.18, fableWeeklyUsed: 0.64 });
 

@@ -925,6 +925,21 @@ describe("Cursor history encoding", () => {
 		);
 	});
 
+	it("keeps Cursor request identity checks lenient for ambiguous discovered ids", () => {
+		const ambiguousId = "openai-compatible-chat-b524a192-5149-4722-ba4c-aec8d52dbaef/cohere/north-mini-code:free";
+		const messages: Context["messages"] = [
+			{ role: "user", content: "Hello", timestamp: 1 },
+			cursorAssistant(ambiguousId, [{ type: "text", text: "Hi." }], 2),
+			{ role: "user", content: "Continue", timestamp: 3 },
+		];
+		expect(() => buildCursorHistoryForTest(messages, undefined, ambiguousId)).not.toThrow();
+		const history = buildCursorHistoryForTest(messages, undefined, ambiguousId);
+		expect(history.rootPromptMessagesJson[1]).toEqual({
+			role: "assistant",
+			content: [{ type: "text", text: "Hi." }],
+		});
+	});
+
 	it("replays a same-model K3 turn missing thinking instead of bricking the session", () => {
 		const messages: Context["messages"] = [
 			{ role: "user", content: "Do a big multi-tool task", timestamp: 1 },
