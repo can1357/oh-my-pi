@@ -468,7 +468,7 @@ type AnthropicProviderSessionState = ProviderSessionState & {
 	 * this (baseUrl, modelId). Cleared on session close.
 	 */
 	thinkingReplayDisabled: boolean;
-	/** Thinking blocks the API permanently dropped after a prefix mismatch. */
+	/** Thinking blocks a prefix-mismatch 400 forced off the wire for good. */
 	prefixDroppedThinkingBlocks: Set<string>;
 };
 
@@ -1871,6 +1871,21 @@ function rememberPrefixBindingFailure(
 	return true;
 }
 
+/**
+ * A `drop_block` request tolerates the mismatch: the API drops the block
+ * server-side on every replay at no cost, so keeping it on the wire leaves the
+ * cached prefix byte-stable. Mirroring the drop client-side removes content
+ * from that message forward and rewrites the whole cached prefix next turn.
+ */
+function requestDropsMismatchedThinking(params: MessageCreateParamsStreaming): boolean {
+	const thinking = params.thinking;
+	return (
+		thinking !== undefined &&
+		thinking.type !== "disabled" &&
+		thinking.block_binding?.prefix_mismatch_behavior === "drop_block"
+	);
+}
+
 function applyReportedInputTransformations(
 	output: AssistantMessage,
 	params: MessageCreateParamsStreaming,
@@ -1893,7 +1908,7 @@ function applyReportedInputTransformations(
 	}
 	if (fresh.length === 0) return;
 	output.inputTransformations = [...(output.inputTransformations ?? []), ...fresh];
-	rememberPrefixDroppedThinking(params, fresh, state);
+	if (!requestDropsMismatchedThinking(params)) rememberPrefixDroppedThinking(params, fresh, state);
 	for (const transformation of fresh) {
 		if (transformation.reason !== "prefix_binding_mismatch") continue;
 		logger.warn("anthropic: dropped thinking block after conversation prefix changed", {

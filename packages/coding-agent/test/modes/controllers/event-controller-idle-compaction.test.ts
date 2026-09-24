@@ -38,6 +38,7 @@ function createAssistantMessage(): AssistantMessage {
 function createContext(
 	options: {
 		editorText?: string;
+		contextTokens?: number;
 		goalObjective?: string;
 		isCompacting?: boolean;
 		isStreaming?: boolean;
@@ -78,7 +79,7 @@ function createContext(
 			runEphemeralTurn,
 			model: { provider: "anthropic", id: "claude-sonnet-4-5" },
 			messages: [createAssistantMessage()],
-			getContextUsage: () => ({ tokens: 210, contextWindow: 1_000, percent: 21 }),
+			getContextUsage: () => ({ tokens: options.contextTokens ?? 210, contextWindow: 1_000, percent: 21 }),
 			getGoalModeState: () => goalState,
 		},
 	});
@@ -237,6 +238,52 @@ describe("EventController idle compaction teardown", () => {
 		vi.advanceTimersByTime(1_000);
 
 		expect(showStatus).not.toHaveBeenCalled();
+		controller.dispose();
+	});
+
+	it("keeps the idle recap silent above recap.maxContextTokens", async () => {
+		resetSettingsForTest();
+		await Settings.init({
+			inMemory: true,
+			overrides: {
+				"compaction.idleEnabled": false,
+				"completion.notify": "off",
+				"recap.idleSeconds": 1,
+				"recap.maxContextTokens": 100_000,
+			},
+		});
+		const runEphemeralTurn = vi.fn(async () => ({ replyText: "recap", assistantMessage: createAssistantMessage() }));
+		const context = createContext({ contextTokens: 100_001, sessionName: "Fix login flow", runEphemeralTurn });
+
+		const controller = new EventController(context);
+		await controller.handleEvent({ type: "agent_end", messages: [createAssistantMessage()] });
+		vi.advanceTimersByTime(1_000);
+		await flushMicrotasks();
+
+		expect(runEphemeralTurn).not.toHaveBeenCalled();
+		controller.dispose();
+	});
+
+	it("still schedules the idle recap when recap.maxContextTokens is 0", async () => {
+		resetSettingsForTest();
+		await Settings.init({
+			inMemory: true,
+			overrides: {
+				"compaction.idleEnabled": false,
+				"completion.notify": "off",
+				"recap.idleSeconds": 1,
+				"recap.maxContextTokens": 0,
+			},
+		});
+		const runEphemeralTurn = vi.fn(async () => ({ replyText: "recap", assistantMessage: createAssistantMessage() }));
+		const context = createContext({ contextTokens: 800_000, sessionName: "Fix login flow", runEphemeralTurn });
+
+		const controller = new EventController(context);
+		await controller.handleEvent({ type: "agent_end", messages: [createAssistantMessage()] });
+		vi.advanceTimersByTime(1_000);
+		await flushMicrotasks();
+
+		expect(runEphemeralTurn).toHaveBeenCalledTimes(1);
 		controller.dispose();
 	});
 

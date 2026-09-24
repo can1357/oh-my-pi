@@ -2306,6 +2306,24 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"recap.maxContextTokens": {
+		type: "number",
+		default: 100000,
+		ui: {
+			tab: "interaction",
+			group: "Notifications",
+			label: "Idle Recap Context Limit",
+			description: "Skip the idle recap once the context exceeds this many tokens (0 disables the limit)",
+			options: [
+				{ value: "0", label: "No limit" },
+				{ value: "50000", label: "50K tokens" },
+				{ value: "100000", label: "100K tokens" },
+				{ value: "200000", label: "200K tokens" },
+				{ value: "400000", label: "400K tokens" },
+			],
+		},
+	},
+
 	// Collab
 	"collab.relayUrl": {
 		type: "string",
@@ -6199,6 +6217,7 @@ export interface CompactionSettings {
 export interface RecapSettings {
 	enabled: boolean;
 	idleSeconds: number;
+	maxContextTokens: number;
 }
 
 export interface TitleSettings {

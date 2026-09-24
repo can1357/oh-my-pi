@@ -2441,6 +2441,10 @@ export class EventController {
 		const recapSettings = settings.getGroup("recap");
 		if (!recapSettings.enabled) return;
 		if (this.ctx.editor.getText().trim()) return;
+		// The recap is a status line, but its side-channel turn reads the whole
+		// prefix and perturbs it ahead of any signed thinking block that follows.
+		const maxContextTokens = recapSettings.maxContextTokens;
+		if (maxContextTokens > 0 && this.#currentContextTokens() > maxContextTokens) return;
 
 		const timeoutMs =
 			Math.max(IDLE_RECAP_MIN_SECONDS, Math.min(IDLE_RECAP_MAX_SECONDS, recapSettings.idleSeconds)) * 1000;
