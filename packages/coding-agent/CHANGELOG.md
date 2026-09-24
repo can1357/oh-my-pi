@@ -10,6 +10,7 @@
 
 - `omp update` and the startup update check now use your configured npm registry (`.npmrc`, `npm_config_registry`, or bunfig, including scoped registries and auth tokens) instead of always querying registry.npmjs.org ([#13115](https://github.com/can1357/oh-my-pi/pull/13115) by [@H4vC](https://github.com/H4vC))
 - Fixed auto-QA grievance pushes getting stuck forever behind one report the collector rejects: tool names are clamped to the collector's 128-byte limit, rejected reports are set aside with the server's error (shown in `omp grievances list` and `push`), and the rest of the queue keeps sending ([#13091](https://github.com/can1357/oh-my-pi/issues/13091), [#13119](https://github.com/can1357/oh-my-pi/pull/13119) by [@NaC-L](https://github.com/NaC-L))
+- Fixed the setup wizard reporting Gemini web search as "Not configured yet" when only Antigravity OAuth is signed in ([#13023](https://github.com/can1357/oh-my-pi/issues/13023), [#13052](https://github.com/can1357/oh-my-pi/pull/13052) by [@holny](https://github.com/holny))
 
 ## [18.3.0] - 2026-09-24
 
@@ -178,11 +179,6 @@
 - Improved responsiveness in long sessions by significantly reducing the time required to scan provider context for credential patterns.
 - Fixed native judges failing to honor configured request headers, enabling authenticated and header-routed judge providers to work as configured.
 - Fixed LSP requests hanging when aborted while waiting for an earlier write to complete.
-- Fixed native judges ignoring configured `headers`: the judge chain now resolves model headers and passes them to the System One transport, so gateway-authenticated and header-routed judge providers work without extra configuration.
-- Added support for buffered cloud transcription using OpenAI-compatible models
-- Added visual change detection capabilities for video processing using FFMPEG and SVG overlaying
-- Prevented LSP client from hanging when a request is aborted while waiting for a previous write
-- Fixed setup wizard reporting Gemini web search "Not configured yet" when only Antigravity OAuth is signed in ([#13052](https://github.com/can1357/oh-my-pi/pull/13052) by [@holny](https://github.com/holny))
 
 ## [18.2.7] - 2026-09-21
 
