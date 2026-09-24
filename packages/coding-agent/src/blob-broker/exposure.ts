@@ -11,6 +11,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { $which, getSafeProjectCwd, logger } from "@oh-my-pi/pi-utils";
+import { wrapToolCommand } from "@oh-my-pi/pi-utils/tool-cgroup";
 import { credentialString, type DestinationRuntimeConfig, optionString } from "./uploader-runtime";
 
 /** User-selectable exposure strategy. */
@@ -242,7 +243,13 @@ async function spawnUrlTunnel(
 	const fd = fs.openSync(logPath, "w");
 	let proc: Bun.Subprocess;
 	try {
-		proc = Bun.spawn(argv, { env: process.env, stdin: "ignore", stdout: fd, stderr: fd, cwd: getSafeProjectCwd() });
+		proc = Bun.spawn(wrapToolCommand(argv), {
+			env: process.env,
+			stdin: "ignore",
+			stdout: fd,
+			stderr: fd,
+			cwd: getSafeProjectCwd(),
+		});
 	} finally {
 		fs.closeSync(fd);
 	}
@@ -493,7 +500,7 @@ export async function startExposure(config: ExposureConfig, port: number): Promi
 			const binary = requireBinary("ssh");
 			const remotePort = config.sshRemotePort ?? 8787;
 			const proc = Bun.spawn(
-				[
+				wrapToolCommand([
 					binary,
 					"-o",
 					"BatchMode=yes",
@@ -503,7 +510,7 @@ export async function startExposure(config: ExposureConfig, port: number): Promi
 					"-R",
 					`${remotePort}:127.0.0.1:${port}`,
 					config.sshTarget,
-				],
+				]),
 				{ env: process.env, stdin: "ignore", stdout: "ignore", stderr: "ignore", cwd: os.homedir() },
 			);
 			const early = await Promise.race([

@@ -13,6 +13,7 @@ import type * as net from "node:net";
 import * as path from "node:path";
 import type { Subprocess } from "bun";
 import { $env, getTinyWorkerRuntimeDir, logger, prompt } from "@oh-my-pi/pi-utils";
+import { wrapToolCommand } from "@oh-my-pi/pi-utils/tool-cgroup";
 import packageJson from "../../package.json" with { type: "json" };
 import { settings } from "../config/settings";
 import { stageRunnerScript } from "../eval/runner-cache";
@@ -356,7 +357,7 @@ function spawnDetached(
 	const log = fs.openSync(logPath, "w");
 	try {
 		const proc = Bun.spawn({
-			cmd,
+			cmd: wrapToolCommand(cmd),
 			cwd,
 			env,
 			detached: true,

@@ -4,6 +4,7 @@
  */
 import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
+import { wrapToolCommand } from "@oh-my-pi/pi-utils/tool-cgroup";
 import type { Diagnostic, DiagnosticSeverity, LinterClient, ServerConfig } from "../../lsp/types";
 
 // =============================================================================
@@ -66,7 +67,7 @@ async function runBiome(
 	const command = resolvedCommand ?? "biome";
 
 	try {
-		const proc = Bun.spawn([command, ...args], {
+		const proc = Bun.spawn(wrapToolCommand([command, ...args]), {
 			cwd,
 			stdout: "pipe",
 			stderr: "pipe",

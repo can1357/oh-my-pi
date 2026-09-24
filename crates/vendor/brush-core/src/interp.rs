@@ -82,6 +82,16 @@ pub trait SpawnObserver: Send + Sync {
 	fn on_spawn(&self, pid: i32, pgid: Option<i32>);
 }
 
+/// Optional hook preparing placement before an external process exists.
+///
+/// A child that starts in the wrong resource domain cannot be moved without
+/// racing its own startup. An error aborts the launch, so placement failure
+/// can never silently run the command unplaced.
+pub trait SpawnPlacement: Send + Sync {
+	/// Prepares the command's placement before it is spawned.
+	fn prepare(&self, command: &mut std::process::Command) -> std::io::Result<()>;
+}
+
 /// Parameters for execution.
 #[derive(Clone, Default)]
 pub struct ExecutionParameters {
@@ -106,6 +116,8 @@ pub struct ExecutionParameters {
 	pub suppress_errexit:     bool,
 	/// Optional hook reporting spawned external children for scoped teardown.
 	spawn_observer:           Option<Arc<dyn SpawnObserver>>,
+	/// Optional hook preparing external children for resource placement.
+	spawn_placement:          Option<Arc<dyn SpawnPlacement>>,
 }
 
 impl ExecutionParameters {
@@ -154,6 +166,16 @@ impl ExecutionParameters {
 	/// Returns the active spawn-observer hook, if any.
 	pub fn spawn_observer(&self) -> Option<&Arc<dyn SpawnObserver>> {
 		self.spawn_observer.as_ref()
+	}
+
+	/// Assigns a spawn-placement hook for this execution.
+	pub fn set_spawn_placement(&mut self, placement: Arc<dyn SpawnPlacement>) {
+		self.spawn_placement = Some(placement);
+	}
+
+	/// Returns the active spawn-placement hook, if any.
+	pub fn spawn_placement(&self) -> Option<&Arc<dyn SpawnPlacement>> {
+		self.spawn_placement.as_ref()
 	}
 
 	/// Returns the standard input file; usable with `write!` et al.

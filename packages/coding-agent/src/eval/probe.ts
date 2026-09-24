@@ -18,6 +18,8 @@
  * the probe down instead of leaking the subprocess.
  */
 
+import { wrapToolCommand } from "@oh-my-pi/pi-utils/tool-cgroup";
+
 /** Wall-clock ceiling for a runtime-availability probe when no smaller bound is supplied. */
 export const DEFAULT_PROBE_TIMEOUT_MS = 10_000;
 
@@ -77,7 +79,7 @@ export async function runBoundedProbe(
 	const ceiling = Math.max(timeoutCeilingMs ?? 0, DEFAULT_PROBE_TIMEOUT_MS);
 	const bound = Math.min(timeoutMs && timeoutMs > 0 ? timeoutMs : ceiling, ceiling);
 	const detached = process.platform !== "win32";
-	const proc = Bun.spawn(command, {
+	const proc = Bun.spawn(wrapToolCommand(command), {
 		cwd,
 		env,
 		stdin: "ignore",
@@ -108,7 +110,7 @@ export async function runBoundedProbe(
 			}
 		} else {
 			try {
-				const killer = Bun.spawn(["taskkill.exe", "/PID", String(proc.pid), "/T", "/F"], {
+				const killer = Bun.spawn(wrapToolCommand(["taskkill.exe", "/PID", String(proc.pid), "/T", "/F"]), {
 					stdin: "ignore",
 					stdout: "ignore",
 					stderr: "ignore",

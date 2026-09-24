@@ -4,6 +4,7 @@ import * as Module from "node:module";
 import * as path from "node:path";
 import { withFileLock } from "./file-lock";
 import { isEexist, isEnoent } from "./fs-error";
+import { wrapToolCommand } from "./tool-cgroup";
 
 /**
  * On-demand runtime dependency support for native-heavy optional packages
@@ -419,7 +420,7 @@ async function readPipe(stream: ReadableStream<Uint8Array> | null): Promise<stri
 async function runRuntimeInstall(runtimeDir: string): Promise<void> {
 	// `process.execPath` is plain bun in source/bundle mode and the compiled
 	// binary otherwise; BUN_BE_BUN makes the compiled binary act as bun.
-	const proc = Bun.spawn([process.execPath, "install", "--cwd", runtimeDir, "--production"], {
+	const proc = Bun.spawn(wrapToolCommand([process.execPath, "install", "--cwd", runtimeDir, "--production"]), {
 		env: { ...Bun.env, BUN_BE_BUN: "1" },
 		stdout: "pipe",
 		stderr: "pipe",

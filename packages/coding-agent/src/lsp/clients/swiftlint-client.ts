@@ -2,6 +2,7 @@
  * SwiftLint CLI-based linter client.
  * Parses SwiftLint's JSON reporter output into LSP Diagnostic format.
  */
+import { wrapToolCommand } from "@oh-my-pi/pi-utils/tool-cgroup";
 import type { Diagnostic, DiagnosticSeverity, LinterClient, ServerConfig } from "../../lsp/types";
 
 /** Shape of a single violation from `swiftlint lint --reporter json`. */
@@ -35,7 +36,7 @@ async function runSwiftLint(
 	const command = resolvedCommand ?? "swiftlint";
 
 	try {
-		const proc = Bun.spawn([command, ...args], {
+		const proc = Bun.spawn(wrapToolCommand([command, ...args]), {
 			cwd,
 			stdout: "pipe",
 			stderr: "pipe",

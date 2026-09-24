@@ -11,6 +11,7 @@ import {
 	isEnoent,
 	logger,
 } from "@oh-my-pi/pi-utils";
+import { wrapToolCommand } from "@oh-my-pi/pi-utils/tool-cgroup";
 import { resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import { loadExtensions } from "../extensions/loader";
 import { refreshBunGitCache } from "./bun-git-cache";
@@ -535,7 +536,7 @@ export class PluginManager {
 				...(options.force ? ["--force"] : []),
 				packageInstallSpec,
 			];
-			const installProc = Bun.spawn(installArgs, {
+			const installProc = Bun.spawn(wrapToolCommand(installArgs), {
 				cwd: getPluginsDir(),
 				stdin: "ignore",
 				stdout: "pipe",
@@ -591,7 +592,7 @@ export class PluginManager {
 			// cache from the remote. Rollback is handled by the outer catch.
 			if (gitSource && existingActualName) {
 				await refreshBunGitCache(gitSource, getPluginsDir());
-				const updateProc = Bun.spawn(["bun", "update", actualName], {
+				const updateProc = Bun.spawn(wrapToolCommand(["bun", "update", actualName]), {
 					cwd: getPluginsDir(),
 					stdin: "ignore",
 					stdout: "pipe",
@@ -694,7 +695,7 @@ export class PluginManager {
 		validatePackageName(name);
 		await this.#ensurePackageJson();
 
-		const proc = Bun.spawn(["bun", "uninstall", name], {
+		const proc = Bun.spawn(wrapToolCommand(["bun", "uninstall", name]), {
 			cwd: getPluginsDir(),
 			stdin: "ignore",
 			stdout: "pipe",
@@ -1151,7 +1152,7 @@ export class PluginManager {
 
 	async #installPluginDependencies(): Promise<boolean> {
 		try {
-			const proc = Bun.spawn(["bun", "install"], {
+			const proc = Bun.spawn(wrapToolCommand(["bun", "install"]), {
 				cwd: getPluginsDir(),
 				stdin: "ignore",
 				stdout: "pipe",

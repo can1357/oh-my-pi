@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { $which, isEnoent } from "@oh-my-pi/pi-utils";
+import { wrapToolCommand } from "@oh-my-pi/pi-utils/tool-cgroup";
 import { isSettingsInitialized, settings } from "../config/settings";
 import { getDefault } from "../config/settings-schema";
 import { isMarkdownPath } from "@oh-my-pi/pi-tui/lang-from-path";
@@ -252,7 +253,7 @@ export async function spawnObsidian(
 	if (signal?.aborted) throw abortError();
 
 	const proc = Bun.spawn({
-		cmd: [bin, ...args],
+		cmd: wrapToolCommand([bin, ...args]),
 		stdout: "pipe",
 		stderr: "pipe",
 	});

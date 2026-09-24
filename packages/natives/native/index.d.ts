@@ -2428,6 +2428,8 @@ export interface PtyArgvStartOptions {
   cols?: number
   /** PTY row count. */
   rows?: number
+  /** Delegated Linux cgroup-v2 leaf for external child processes. */
+  workloadCgroup?: string
 }
 
 /** Result of a PTY command run. */
@@ -2461,6 +2463,8 @@ export interface PtyStartOptions {
    * Defaults to "sh" if not provided.
    */
   shell?: string
+  /** Delegated Linux cgroup-v2 leaf for external child processes. */
+  workloadCgroup?: string
 }
 
 /**
@@ -2586,6 +2590,8 @@ export interface ShellExecuteOptions {
   minimizer?: MinimizerOptions
   /** Abort signal for cancelling the operation. */
   signal?: unknown
+  /** Delegated Linux cgroup-v2 leaf for external child processes. */
+  workloadCgroup?: string
 }
 
 /** Options for configuring a persistent shell session. */
@@ -2596,6 +2602,8 @@ export interface ShellOptions {
   snapshotPath?: string
   /** Optional per-command output minimizer configuration. */
   minimizer?: MinimizerOptions
+  /** Delegated Linux cgroup-v2 leaf for external child processes. */
+  workloadCgroup?: string
 }
 
 /** Options for running a shell command. */

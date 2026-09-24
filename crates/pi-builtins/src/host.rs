@@ -47,7 +47,7 @@ use std::{
 use parking_lot::Mutex;
 
 use brush_core::{
-	Error, ExecutionContext, ExecutionResult, ShellExtensions,
+	Error, ExecutionContext, ExecutionResult, ShellExtensions, SpawnPlacement,
 	builtins::{self, Registration},
 	openfiles::{self, OpenFile, OpenFiles},
 };
@@ -117,6 +117,8 @@ pub(crate) struct Host {
 	/// Emulated SIGPIPE state shared with every guarded stream handed out by
 	/// this host; see [`Sigpipe`].
 	sigpipe:               Arc<Sigpipe>,
+	/// Resource placement inherited by external children, never this builtin's thread.
+	spawn_placement: Option<Arc<dyn SpawnPlacement>>,
 }
 
 fn output_handle(file: &OpenFile) -> Option<same_file::Handle> {
@@ -523,7 +525,16 @@ impl Host {
 					.collect(),
 			),
 			stderr: self.stderr.dup_file(),
+			spawn_placement: self.spawn_placement.clone(),
 		}
+	}
+
+	/// Prepares an external child before it can run outside the shell's policy.
+	pub fn prepare_child(&self, command: &mut std::process::Command) -> io::Result<()> {
+		if let Some(placement) = self.spawn_placement.as_ref() {
+			placement.prepare(command)?;
+		}
+		Ok(())
 	}
 
 	/// Runs `command` with stdin from the null device and stdout/stderr piped
@@ -545,6 +556,7 @@ impl Host {
 			.stdin(std::process::Stdio::null())
 			.stdout(std::process::Stdio::piped())
 			.stderr(std::process::Stdio::piped());
+		self.prepare_child(command)?;
 		let mut child = command.spawn()?;
 
 		let mut child_err = child.stderr.take();
@@ -741,6 +753,7 @@ pub(crate) struct ChildEnv {
 	cwd:    PathBuf,
 	env:    Arc<Vec<(String, String)>>,
 	stderr: OpenFile,
+	spawn_placement: Option<Arc<dyn SpawnPlacement>>,
 }
 
 impl ChildEnv {
@@ -749,14 +762,17 @@ impl ChildEnv {
 	///
 	/// Stdin and stdout are left untouched for the caller to wire; they default
 	/// to inherited, so a caller that leaves them alone MUST redirect them.
-	pub fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+	pub fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> io::Result<std::process::Command> {
 		let mut command = std::process::Command::new(program);
 		command
 			.current_dir(&self.cwd)
 			.env_clear()
 			.envs(self.env.iter().map(|(k, v)| (k, v)))
 			.stderr(std::process::Stdio::piped());
-		command
+		if let Some(placement) = self.spawn_placement.as_ref() {
+			placement.prepare(&mut command)?;
+		}
+		Ok(command)
 	}
 
 	/// Drains a child's piped stderr into the command's standard error on a
@@ -1201,6 +1217,7 @@ fn build_host<SE: ShellExtensions>(
 		stdin_is_search_input,
 		merged_out,
 		sigpipe,
+		spawn_placement: context.params.spawn_placement().cloned(),
 	})
 }
 
@@ -1350,6 +1367,7 @@ mod testing {
 				stdin_is_search_input: false,
 				merged_out:            None,
 				sigpipe,
+				spawn_placement: None,
 			};
 			(host, capture)
 		}

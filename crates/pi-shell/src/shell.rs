@@ -14,7 +14,7 @@ use anyhow::{Error, Result};
 use brush_core::{
 	ExecutionControlFlow, ExecutionExitCode, ExecutionParameters, ExecutionResult,
 	ProcessGroupPolicy, ProfileLoadBehavior, RcLoadBehavior, Shell as BrushShell, ShellValue,
-	ShellVariable, SourceInfo, SpawnObserver,
+	ShellVariable, SourceInfo, SpawnObserver, SpawnPlacement,
 	env::EnvironmentScope,
 	openfiles::{self, OpenFile, OpenFiles},
 };
@@ -36,7 +36,8 @@ use crate::{
 };
 
 struct ShellSessionCore {
-	shell: BrushShell,
+	shell:           BrushShell,
+	spawn_placement: Option<Arc<dyn SpawnPlacement>>,
 }
 
 impl Drop for ShellSessionCore {
@@ -102,9 +103,11 @@ struct ShellConfig {
 
 #[derive(Debug, Clone, Default)]
 pub struct ShellOptions {
-	pub session_env:   Option<HashMap<String, String>>,
-	pub snapshot_path: Option<String>,
-	pub minimizer:     Option<minimizer::MinimizerOptions>,
+	pub session_env:     Option<HashMap<String, String>>,
+	pub snapshot_path:   Option<String>,
+	pub minimizer:       Option<minimizer::MinimizerOptions>,
+	/// Delegated Linux cgroup-v2 leaf for this session's external children.
+	pub workload_cgroup: Option<String>,
 }
 
 struct ShellRunConfig {
@@ -142,26 +145,34 @@ pub struct ShellRunResult {
 
 #[derive(Debug, Clone, Default)]
 pub struct ShellExecuteOptions {
-	pub command:       String,
-	pub cwd:           Option<String>,
-	pub env:           Option<HashMap<String, String>>,
-	pub session_env:   Option<HashMap<String, String>>,
-	pub timeout_ms:    Option<u32>,
-	pub snapshot_path: Option<String>,
-	pub minimizer:     Option<minimizer::MinimizerOptions>,
+	pub command:         String,
+	pub cwd:             Option<String>,
+	pub env:             Option<HashMap<String, String>>,
+	pub session_env:     Option<HashMap<String, String>>,
+	pub timeout_ms:      Option<u32>,
+	pub snapshot_path:   Option<String>,
+	pub minimizer:       Option<minimizer::MinimizerOptions>,
+	/// Delegated Linux cgroup-v2 leaf for this execution's external children.
+	pub workload_cgroup: Option<String>,
 }
 
 pub type ShellExecuteResult = ShellRunResult;
 
 pub struct Shell {
-	session:     Arc<TokioMutex<Option<ShellSessionCore>>>,
-	abort_state: ShellAbortState,
-	config:      ShellConfig,
+	session:         Arc<TokioMutex<Option<ShellSessionCore>>>,
+	abort_state:     ShellAbortState,
+	config:          ShellConfig,
+	// Preserve the infallible constructor, but never run after placement setup fails.
+	spawn_placement: std::result::Result<Option<Arc<dyn SpawnPlacement>>, String>,
 }
 
 impl Shell {
 	#[must_use]
 	pub fn new(options: Option<ShellOptions>) -> Self {
+		let spawn_placement = prepare_spawn_placement(
+			options.as_ref().and_then(|options| options.workload_cgroup.as_deref()),
+		)
+		.map_err(|err| err.to_string());
 		let config = match options {
 			None => ShellConfig { session_env: None, snapshot_path: None, minimizer: None },
 			Some(opt) => {
@@ -180,6 +191,7 @@ impl Shell {
 			session: Arc::new(TokioMutex::new(None)),
 			abort_state: ShellAbortState::default(),
 			config,
+			spawn_placement,
 		}
 	}
 
@@ -199,6 +211,11 @@ impl Shell {
 			self.session.clone(),
 			self.abort_state.clone(),
 			self.config.clone(),
+			self
+				.spawn_placement
+				.as_ref()
+				.map_err(|err| Error::msg(err.clone()))?
+				.clone(),
 			run_config,
 			on_chunk,
 			&mut cancel_token,
@@ -240,11 +257,21 @@ impl Shell {
 	}
 }
 
+fn prepare_spawn_placement(path: Option<&str>) -> io::Result<Option<Arc<dyn SpawnPlacement>>> {
+	path
+		.map(|path| {
+			process::WorkloadCgroup::new(path)
+				.map(|placement| Arc::new(placement) as Arc<dyn SpawnPlacement>)
+		})
+		.transpose()
+}
+
 pub async fn execute_shell(
 	options: ShellExecuteOptions,
 	on_chunk: Option<Sender<String>>,
 	cancel_token: CancelToken,
 ) -> Result<ShellExecuteResult> {
+	let spawn_placement = prepare_spawn_placement(options.workload_cgroup.as_deref())?;
 	let minimizer = options
 		.minimizer
 		.as_ref()
@@ -256,7 +283,7 @@ pub async fn execute_shell(
 	};
 	let run_config =
 		ShellRunConfig { command: options.command, cwd: options.cwd, env: options.env, minimizer };
-	run_shell_oneshot(config, run_config, on_chunk, cancel_token).await
+	run_shell_oneshot(config, spawn_placement, run_config, on_chunk, cancel_token).await
 }
 
 /// Optional per-stream raw byte sinks for [`execute_shell_streams`].
@@ -281,6 +308,7 @@ pub async fn execute_shell_streams(
 	streams: StreamSinks,
 	cancel_token: CancelToken,
 ) -> Result<ShellExecuteResult> {
+	let spawn_placement = prepare_spawn_placement(options.workload_cgroup.as_deref())?;
 	let config = ShellConfig {
 		session_env:   options.session_env,
 		snapshot_path: options.snapshot_path,
@@ -292,13 +320,14 @@ pub async fn execute_shell_streams(
 		env:       options.env,
 		minimizer: None,
 	};
-	run_shell_oneshot_streams(config, run_config, streams, cancel_token).await
+	run_shell_oneshot_streams(config, spawn_placement, run_config, streams, cancel_token).await
 }
 
 async fn run_shell_session(
 	session: Arc<TokioMutex<Option<ShellSessionCore>>>,
 	abort_state: ShellAbortState,
 	config: ShellConfig,
+	spawn_placement: Option<Arc<dyn SpawnPlacement>>,
 	run_config: ShellRunConfig,
 	on_chunk: Option<Sender<String>>,
 	ct: &mut CancelToken,
@@ -328,6 +357,7 @@ async fn run_shell_session(
 				None => session_guard.insert(
 					create_session_for_run(
 						&config,
+						spawn_placement,
 						Some(spawn_registry.clone()),
 						Some(tokio_cancel.clone()),
 					)
@@ -387,6 +417,7 @@ async fn run_shell_session(
 
 async fn run_shell_oneshot(
 	config: ShellConfig,
+	spawn_placement: Option<Arc<dyn SpawnPlacement>>,
 	run_config: ShellRunConfig,
 	on_chunk: Option<Sender<String>>,
 	ct: CancelToken,
@@ -408,6 +439,7 @@ async fn run_shell_oneshot(
 		async move {
 			let mut session = create_session_for_run(
 				&config,
+				spawn_placement,
 				Some(spawn_registry.clone()),
 				Some(tokio_cancel.clone()),
 			)
@@ -452,6 +484,7 @@ async fn run_shell_oneshot(
 
 async fn run_shell_oneshot_streams(
 	config: ShellConfig,
+	spawn_placement: Option<Arc<dyn SpawnPlacement>>,
 	run_config: ShellRunConfig,
 	streams: StreamSinks,
 	ct: CancelToken,
@@ -473,6 +506,7 @@ async fn run_shell_oneshot_streams(
 		async move {
 			let mut session = create_session_for_run(
 				&config,
+				spawn_placement,
 				Some(spawn_registry.clone()),
 				Some(tokio_cancel.clone()),
 			)
@@ -595,7 +629,7 @@ fn merge_path_values(_existing: &str, incoming: &str) -> String {
 
 #[cfg(test)]
 async fn create_session(config: &ShellConfig) -> Result<ShellSessionCore> {
-	create_session_for_run(config, None, None).await
+	create_session_for_run(config, None, None, None).await
 }
 
 /// Copies the host environment into `shell`, merging duplicate `PATH` values
@@ -657,6 +691,7 @@ fn copy_env_into_shell(
 
 async fn create_session_for_run(
 	config: &ShellConfig,
+	spawn_placement: Option<Arc<dyn SpawnPlacement>>,
 	spawn_registry: Option<Arc<process::SpawnRegistry>>,
 	cancel_token: Option<CancellationToken>,
 ) -> Result<ShellSessionCore> {
@@ -735,15 +770,23 @@ async fn create_session_for_run(
 	configure_windows_path(&mut shell)?;
 
 	if let Some(snapshot_path) = config.snapshot_path.as_ref() {
-		source_snapshot(&mut shell, snapshot_path, spawn_registry, cancel_token).await?;
+		source_snapshot(
+			&mut shell,
+			snapshot_path,
+			spawn_placement.clone(),
+			spawn_registry,
+			cancel_token,
+		)
+		.await?;
 	}
 
-	Ok(ShellSessionCore { shell })
+	Ok(ShellSessionCore { shell, spawn_placement })
 }
 
 async fn source_snapshot(
 	shell: &mut BrushShell,
 	snapshot_path: &str,
+	spawn_placement: Option<Arc<dyn SpawnPlacement>>,
 	spawn_registry: Option<Arc<process::SpawnRegistry>>,
 	cancel_token: Option<CancellationToken>,
 ) -> Result<()> {
@@ -757,6 +800,9 @@ async fn source_snapshot(
 	}
 	if let Some(spawn_registry) = spawn_registry {
 		params.set_spawn_observer(spawn_registry);
+	}
+	if let Some(spawn_placement) = spawn_placement {
+		params.set_spawn_placement(spawn_placement);
 	}
 
 	let escaped = snapshot_path.replace('\'', "'\\''");
@@ -1105,6 +1151,9 @@ async fn run_shell_command_once(
 	params.process_group_policy = ProcessGroupPolicy::NewProcessGroup;
 	params.set_cancel_token(cancel_token.clone());
 	params.set_spawn_observer(spawn_registry.clone());
+	if let Some(spawn_placement) = session.spawn_placement.as_ref() {
+		params.set_spawn_placement(spawn_placement.clone());
+	}
 	let reader_cancel = CancellationToken::new();
 	let (activity_tx, activity_rx) = flume::bounded::<()>(1);
 	let reader_callback = on_chunk;
@@ -1237,6 +1286,9 @@ async fn run_shell_command_streams(
 	params.process_group_policy = ProcessGroupPolicy::NewProcessGroup;
 	params.set_cancel_token(cancel_token.clone());
 	params.set_spawn_observer(spawn_registry.clone());
+	if let Some(spawn_placement) = session.spawn_placement.as_ref() {
+		params.set_spawn_placement(spawn_placement.clone());
+	}
 	let reader_cancel = CancellationToken::new();
 	let (activity_tx, activity_rx) = flume::bounded::<()>(1);
 

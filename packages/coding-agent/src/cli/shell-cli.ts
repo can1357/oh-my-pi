@@ -7,6 +7,8 @@ import * as path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { Shell } from "@oh-my-pi/pi-natives";
 import { APP_NAME, getProjectDir } from "@oh-my-pi/pi-utils";
+import { resolveToolCgroup } from "@oh-my-pi/pi-utils/tool-cgroup";
+
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Settings } from "../config/settings";
 import { buildMinimizerOptions } from "../exec/bash-executor";
@@ -53,7 +55,12 @@ export async function runShellCommand(cmd: ShellCommandArgs): Promise<void> {
 	const { shell, env: shellEnv } = settings.getShellConfig();
 	const snapshotPath = cmd.noSnapshot || !shell.includes("bash") ? null : await getOrCreateSnapshot(shell, shellEnv);
 	const minimizer = buildMinimizerOptions(settings.getGroup("shellMinimizer"));
-	const shellSession = new Shell({ sessionEnv: shellEnv, snapshotPath: snapshotPath ?? undefined, minimizer });
+	const shellSession = new Shell({
+		sessionEnv: shellEnv,
+		snapshotPath: snapshotPath ?? undefined,
+		minimizer,
+		workloadCgroup: resolveToolCgroup(),
+	});
 
 	let active = false;
 	let lastChar: string | null = null;

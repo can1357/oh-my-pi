@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `--tool-cgroup <path>`: on Linux, external tool workloads are placed in a delegated cgroup-v2 leaf before they start, so a heavy tool cannot hold the interactive session at its memory limit and stall the UI that would cancel it. Children inherit the placement through `OMP_TOOL_CGROUP`; an unusable target fails the launch instead of running uncontained.
 - Added trusted additional context support for extension and hook tool results, including `ctx.addAdditionalContext()` for registered tools, allowing instructions to be passed to the model without altering the tool result.
 - Added dictation support to `/btw` follow-up input, including microphone controls on the follow-up line.
 - Added opt-in CUDA support to the Nix package for tiny-model inference with the ONNX Runtime CUDA execution provider.

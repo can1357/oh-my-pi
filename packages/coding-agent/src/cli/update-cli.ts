@@ -12,6 +12,7 @@ import { pipeline } from "node:stream/promises";
 import { $env, $which, APP_NAME, compareVersions, isEnoent, VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
+import { wrapToolCommand } from "@oh-my-pi/pi-utils/tool-cgroup";
 import { $ } from "bun";
 import { settings } from "../config/settings";
 import { theme } from "@oh-my-pi/pi-tui/theme";
@@ -1148,7 +1149,7 @@ interface MuslDetectionOptions {
 
 function detectLddOutput(): string | undefined {
 	try {
-		const result = Bun.spawnSync(["ldd", "--version"], { stdout: "pipe", stderr: "pipe" });
+		const result = Bun.spawnSync(wrapToolCommand(["ldd", "--version"]), { stdout: "pipe", stderr: "pipe" });
 		return `${result.stdout.toString("utf-8")}\n${result.stderr.toString("utf-8")}`;
 	} catch {
 		return undefined;

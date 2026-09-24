@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { $which, getPuppeteerDir, logger, removeWithRetries } from "@oh-my-pi/pi-utils";
 import type * as BrowsersNs from "@oh-my-pi/pi-utils/browsers";
+import { wrapToolCommand } from "@oh-my-pi/pi-utils/tool-cgroup";
 import type {
 	Browser,
 	CDPSession,
@@ -324,7 +325,7 @@ async function isChromiumExecutable(p: string): Promise<boolean> {
 	if (process.platform !== "linux") return true;
 	try {
 		const probeTimeoutMs = 3000;
-		const proc = Bun.spawn([p, "--version"], {
+		const proc = Bun.spawn(wrapToolCommand([p, "--version"]), {
 			stdout: "pipe",
 			stderr: "ignore",
 			signal: AbortSignal.timeout(probeTimeoutMs),

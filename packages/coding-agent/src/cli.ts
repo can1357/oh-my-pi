@@ -27,6 +27,7 @@ import {
 	setProfile,
 	VERSION,
 } from "@oh-my-pi/pi-utils/dirs";
+import { configureToolCgroup } from "@oh-my-pi/pi-utils/tool-cgroup";
 
 import { declareWorkerHostEntry, installWorkerInbox, isWorkerHostSelector } from "@oh-my-pi/pi-utils/worker-host";
 import { extractProfileFlags } from "./cli/profile-bootstrap";
@@ -499,6 +500,11 @@ export async function runCli(argv: string[]): Promise<void> {
 			);
 			return;
 		}
+		// Apply workload placement before any command, worker, or tool can spawn.
+		// This process keeps the interactive budget while external payloads move to
+		// the configured leaf; validation is fail-closed, so an unusable target
+		// stops the launch rather than yielding a session that only looks contained.
+		configureToolCgroup(extracted.toolCgroup);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		process.stderr.write(`Error: ${message}\n`);

@@ -17,7 +17,7 @@ use std::{
 };
 
 use clap::{ArgAction, Parser, ValueEnum};
-use grep_cli::DecompressionReaderBuilder;
+use grep_cli::{CommandReaderBuilder, DecompressionMatcher};
 use grep_matcher::{Captures, LineTerminator, Matcher};
 use grep_pcre2::{RegexMatcher as PcreMatcher, RegexMatcherBuilder as PcreMatcherBuilder};
 use grep_printer::{JSONBuilder, Stats};
@@ -1327,12 +1327,16 @@ fn process_file<M: Matcher, W: Write>(
 		return Ok(SearchOutcome { any_match: false, had_error: false });
 	}
 	let result = if cli.search_zip && !cli.no_search_zip {
-		let builder = DecompressionReaderBuilder::new();
-		if builder.get_matcher().has_command(path) {
-			builder
-				.build(path)
-				.map_err(|error| io::Error::other(error.to_string()))
-				.and_then(|reader| process_reader(matcher, searcher, reader, display, opts, stats, out))
+		if let Some(mut command) = DecompressionMatcher::new().command(path) {
+			command.arg(path);
+			host.prepare_child(&mut command)?;
+			match CommandReaderBuilder::new().build(&mut command) {
+				Ok(reader) => process_reader(matcher, searcher, reader, display, opts, stats, out),
+				// Preserve the decompression builder's passthrough when its
+				// external program cannot be spawned; no unplaced child is run.
+				Err(_) => File::open(path)
+					.and_then(|file| process_reader(matcher, searcher, file, display, opts, stats, out)),
+			}
 		} else {
 			File::open(path)
 				.and_then(|file| process_reader(matcher, searcher, file, display, opts, stats, out))

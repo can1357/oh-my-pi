@@ -100,13 +100,16 @@ impl ExecCommand {
 		context: brush_core::ExecutionContext<'_, SE>,
 	) -> Result<ExecutionResult, brush_core::Error> {
 		let argv0 = self.argv0();
-		let cmd = commands::compose_std_command(
+		let mut cmd = commands::compose_std_command(
 			&context,
 			&self.args[0],
 			argv0.as_ref(),
 			&self.args[1..],
 			self.empty_environment,
 		)?;
+		if let Some(placement) = context.params.spawn_placement() {
+			placement.prepare(&mut cmd)?;
+		}
 
 		let mut cmd = tokio::process::Command::from(cmd);
 		cmd.kill_on_drop(true);

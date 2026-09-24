@@ -1,8 +1,10 @@
+import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getGlobalDaemonRuntimeDir, isEexist, isEnoent, logger, postmortem } from "@oh-my-pi/pi-utils";
+import { resolveToolCgroup, wrapToolCommand } from "@oh-my-pi/pi-utils/tool-cgroup";
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
 import { resolveWorkerSpawnCmd, workerEnvFromParent } from "../subprocess/worker-client";
 import { canonicalProjectDir, daemonBrokerEndpoint, daemonRuntimeDir } from "./paths";
@@ -317,7 +319,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			[DAEMON_RUNTIME_DIR_ENV]: this.#runtimeDir,
 		};
 		if (this.#idleGraceMs !== undefined) overlay[DAEMON_IDLE_GRACE_ENV] = String(this.#idleGraceMs);
-		const child = Bun.spawn(spawn.cmd, {
+		const child = Bun.spawn(wrapToolCommand(spawn.cmd), {
 			cwd: spawn.cwd,
 			env: workerEnvFromParent(overlay),
 			stdin: "ignore",
@@ -475,7 +477,17 @@ export async function createDaemonBrokerClient(
 	options: DaemonBrokerClientOptions = {},
 ): Promise<DaemonBrokerClient> {
 	const canonical = await canonicalProjectDir(projectDir);
-	const runtimeDir = options.runtimeDir ?? daemonRuntimeDir(canonical);
+	const resolvedRuntimeDir = options.runtimeDir ?? daemonRuntimeDir(canonical);
+	// Namespace the broker directory by placement policy. A broker started before
+	// placement existed — or under a different leaf — would hold uncontained jobs
+	// behind a socket this session would otherwise reuse. Peers sharing one policy
+	// still share one broker; existing brokers keep running untouched, they are
+	// simply not adopted.
+	const policy = resolveToolCgroup();
+	const namespace = policy
+		? `tool-cgroup-${createHash("sha256").update(policy).digest("hex").slice(0, 16)}`
+		: undefined;
+	const runtimeDir = namespace ? path.join(resolvedRuntimeDir, namespace) : resolvedRuntimeDir;
 	const token = await readOrCreateToken(runtimeDir);
 	return new SocketDaemonClient(canonical, runtimeDir, token, options);
 }

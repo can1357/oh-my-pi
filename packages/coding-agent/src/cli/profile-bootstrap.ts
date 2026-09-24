@@ -57,6 +57,8 @@ export interface ProfileBootstrapResult {
 	argv: string[];
 	profile?: string;
 	aliasName?: string;
+	/** Validated placement target for external tool workloads (`--tool-cgroup`). */
+	toolCgroup?: string;
 }
 
 /**
@@ -78,6 +80,7 @@ export function extractProfileFlags(argv: readonly string[]): ProfileBootstrapRe
 	const stripped: string[] = [];
 	let profile: string | undefined;
 	let aliasName: string | undefined;
+	let toolCgroup: string | undefined;
 	let passThrough = false;
 	let sawSubcommand = false;
 	let canDispatchSubcommand = true;
@@ -161,6 +164,26 @@ export function extractProfileFlags(argv: readonly string[]): ProfileBootstrapRe
 			continue;
 		}
 
+		// Record the workload placement target here, not only in `parseArgs`: it
+		// must be applied before worker-selector dispatch and any subcommand or
+		// workload starts. Value consumption matches the other built-in string
+		// flags, so a flag-looking path stays the option's value.
+		if (arg === "--tool-cgroup" || arg.startsWith("--tool-cgroup=")) {
+			const inline = arg.startsWith("--tool-cgroup=");
+			const value = inline ? arg.slice("--tool-cgroup=".length) : argv[index + 1];
+			if (!value) {
+				throw new Error("--tool-cgroup requires a cgroup path");
+			}
+			toolCgroup = value;
+			canDispatchSubcommand = false;
+			stripped.push(arg);
+			if (!inline) {
+				stripped.push(value);
+				index += 1;
+			}
+			continue;
+		}
+
 		// Forward both the flag and its value untouched so the downstream parser
 		// gets exactly what the user typed. Critical for `--system-prompt
 		// --profile foo`: the bootstrap must NOT interpret `--profile` here, it
@@ -225,5 +248,5 @@ export function extractProfileFlags(argv: readonly string[]): ProfileBootstrapRe
 		stripped.push(arg);
 	}
 
-	return { argv: stripped, profile, aliasName };
+	return { argv: stripped, profile, aliasName, toolCgroup };
 }

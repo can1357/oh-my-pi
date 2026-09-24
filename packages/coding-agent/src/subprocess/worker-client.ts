@@ -15,6 +15,7 @@ import {
 	workerHostEntry,
 } from "@oh-my-pi/pi-utils";
 import { stripGitRepoLocationEnv } from "@oh-my-pi/pi-utils/env";
+import { wrapToolCommand } from "@oh-my-pi/pi-utils/tool-cgroup";
 import type { Subprocess } from "bun";
 
 /**
@@ -269,7 +270,7 @@ export function createWorkerSubprocess<Outbound>(options: {
 		void drainStderrCapture(stderrCapture, options.exitLabel, stderrTail).finally(() => stderrDrained.resolve());
 	};
 	const proc = Bun.spawn({
-		cmd: options.spawnCommand.cmd,
+		cmd: wrapToolCommand(options.spawnCommand.cmd),
 		cwd: options.spawnCommand.cwd,
 		detached: options.detached,
 		env: options.env,

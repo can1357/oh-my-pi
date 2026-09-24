@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import { isEnoent, logger, postmortem, ptree, stableStringifyJson, untilAborted } from "@oh-my-pi/pi-utils";
+import { resolveToolCgroup } from "@oh-my-pi/pi-utils/tool-cgroup";
 import { MessageFramer } from "../jsonrpc/message-framing";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { getConfig } from "./config";
@@ -1066,8 +1067,12 @@ export async function getOrCreateClient(
 		const baseCommand = config.resolvedCommand ?? config.command;
 		const baseArgs = config.args ?? [];
 
-		// Wrap with lspmux if available and supported
-		const { command, args, env } = isLspmuxSupported(baseCommand)
+		// An external lspmux owns its server process outside any cgroup this
+		// session could place it in, so placement drops the wrapper and lets the
+		// broker-shared path (namespaced per policy) or the private spawn below
+		// contain the server instead of attaching to an unowned one.
+		const lspmuxAllowed = isLspmuxSupported(baseCommand) && !resolveToolCgroup();
+		const { command, args, env } = lspmuxAllowed
 			? await getLspmuxCommand(baseCommand, baseArgs)
 			: { command: baseCommand, args: baseArgs };
 

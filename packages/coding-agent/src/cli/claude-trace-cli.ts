@@ -11,6 +11,7 @@ import * as tls from "node:tls";
 import * as zlib from "node:zlib";
 import { PtySession } from "@oh-my-pi/pi-natives";
 import xterm from "@oh-my-pi/pi-utils/vterm";
+import { resolveToolCgroup } from "@oh-my-pi/pi-utils/tool-cgroup";
 
 const DEFAULT_PROXY_HOST = "127.0.0.1";
 const DEFAULT_PROXY_PORT = 8080;
@@ -745,6 +746,7 @@ export async function runClaudeMessagesCapture(args: ClaudeTraceCommandArgs = {}
 			command,
 			cwd,
 			timeoutMs,
+			workloadCgroup: resolveToolCgroup(),
 			env,
 			cols: DEFAULT_COLS,
 			rows: DEFAULT_ROWS,

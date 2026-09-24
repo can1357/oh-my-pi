@@ -7,6 +7,7 @@ import { ExponentialYield } from "@oh-my-pi/pi-agent-core/utils/yield";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { type MinimizerOptions, PtySession, Shell, type ShellRunResult } from "@oh-my-pi/pi-natives";
 import { $env } from "@oh-my-pi/pi-utils/env";
+import { resolveToolCgroup } from "@oh-my-pi/pi-utils/tool-cgroup";
 import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
 import { Settings, type ShellMinimizerSettings } from "../config/settings";
 import { type OutputArtifactError, OutputSink, type OutputSummary } from "@oh-my-pi/pi-tui/tools/streaming-output";
@@ -417,6 +418,9 @@ async function executeUserShellPty(run: {
 	const result = await session.startArgv(
 		{
 			application: run.shell,
+			// Placement target for the PTY child: portable-pty cannot extend its
+			// pre_exec, so the native side wraps this argv in the cgroup bootstrap.
+			workloadCgroup: resolveToolCgroup(),
 			args: [...ensureInteractiveShellArgs(run.shell, run.args), run.command],
 			cwd: run.cwd,
 			env: run.env,
@@ -570,12 +574,25 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		}
 	}
 
+	// Shells inherit the placement policy at construction, so it must join the
+	// identity: a session created under one leaf must never be reused for a
+	// different one, or its children would silently run in the wrong budget.
+	const workloadCgroup = resolveToolCgroup();
 	const shellOptions = {
 		sessionEnv: shellEnv,
 		snapshotPath: snapshotPath ?? undefined,
 		minimizer,
+		workloadCgroup,
 	};
-	const sessionKey = buildSessionKey(shell, prefix, snapshotPath, shellEnv, options?.sessionKey, minimizer);
+	const sessionKey = buildSessionKey(
+		shell,
+		prefix,
+		snapshotPath,
+		shellEnv,
+		options?.sessionKey,
+		minimizer,
+		workloadCgroup,
+	);
 	const persistentSessionBroken = brokenShellSessions.has(sessionKey);
 	if (persistentSessionBroken) {
 		shellSessions.delete(sessionKey);
@@ -801,12 +818,19 @@ function buildSessionKey(
 	env: Record<string, string>,
 	agentSessionKey?: string,
 	minimizer?: MinimizerOptions,
+	workloadCgroup?: string,
 ): string {
 	const entries = Object.entries(env);
 	entries.sort(([a], [b]) => a.localeCompare(b));
 	const envSerialized = entries.map(([key, value]) => `${key}=${value}`).join("\n");
 	const minimizerSerialized = minimizer ? JSON.stringify(minimizer) : "";
-	return [agentSessionKey ?? "", shell, prefix ?? "", snapshotPath ?? "", envSerialized, minimizerSerialized].join(
-		"\n",
-	);
+	return [
+		agentSessionKey ?? "",
+		shell,
+		prefix ?? "",
+		snapshotPath ?? "",
+		envSerialized,
+		minimizerSerialized,
+		workloadCgroup ?? "",
+	].join("\n");
 }

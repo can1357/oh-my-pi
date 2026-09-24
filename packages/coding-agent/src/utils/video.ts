@@ -12,6 +12,7 @@ import { rasterizeSvg } from "@oh-my-pi/pi-natives";
 import { isVideoPath } from "@oh-my-pi/pi-tui/prompt/video";
 import { untilAborted } from "@oh-my-pi/pi-utils/abortable";
 import { TempDir } from "@oh-my-pi/pi-utils/temp";
+import { wrapToolCommand } from "@oh-my-pi/pi-utils/tool-cgroup";
 import { $which } from "@oh-my-pi/pi-utils/which";
 
 const VIDEO_MIME_BY_EXT: Record<string, string> = {
@@ -118,7 +119,7 @@ async function framePassthroughFlag(): Promise<string[]> {
 	if (cachedFpsModeFlag) return cachedFpsModeFlag;
 	try {
 		const ffmpeg = requireMediaBinary("ffmpeg");
-		const child = Bun.spawn([ffmpeg, "-version"], { stdout: "pipe", stderr: "pipe" });
+		const child = Bun.spawn(wrapToolCommand([ffmpeg, "-version"]), { stdout: "pipe", stderr: "pipe" });
 		const [stdout, ,] = await Promise.all([readStream(child.stdout), readStream(child.stderr), child.exited]);
 		const major = Number.parseInt(stdout.split("\n")[0]?.split("version")[1]?.trim().split(".")[0] ?? "", 10);
 		cachedFpsModeFlag = Number.isFinite(major) && major < 5 ? ["-vsync", "0"] : ["-fps_mode", "passthrough"];
@@ -174,7 +175,7 @@ export async function probeVideo(absolutePath: string, signal?: AbortSignal): Pr
 	const ffprobe = requireMediaBinary("ffprobe");
 	if (signal?.aborted) throw new VideoError("Video operation aborted.");
 	const child = Bun.spawn(
-		[
+		wrapToolCommand([
 			ffprobe,
 			"-v",
 			"error",
@@ -183,7 +184,7 @@ export async function probeVideo(absolutePath: string, signal?: AbortSignal): Pr
 			"-of",
 			"json",
 			absolutePath,
-		],
+		]),
 		{ stdout: "pipe", stderr: "pipe" },
 	);
 	const killOnAbort = () => {
@@ -306,7 +307,7 @@ export interface VideoPng {
 export async function runFfmpeg(args: string[], signal?: AbortSignal): Promise<void> {
 	const ffmpeg = requireMediaBinary("ffmpeg");
 	if (signal?.aborted) throw new VideoError("Video operation aborted.");
-	const child = Bun.spawn([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", ...args], {
+	const child = Bun.spawn(wrapToolCommand([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", ...args]), {
 		stdout: "pipe",
 		stderr: "pipe",
 	});

@@ -36,7 +36,11 @@ impl Compressor {
 		stdout: impl Into<Stdio>,
 		decompress: bool,
 	) -> SortResult<(Child, thread::JoinHandle<()>)> {
-		let mut command = self.env.command(&self.prog);
+		let mut command = self.env.command(&self.prog)
+			.map_err(|err| SortError::CompressProgExecutionFailed {
+				prog: self.prog.clone(),
+				error: err,
+			})?;
 		command.stdin(stdin).stdout(stdout);
 		if decompress {
 			command.arg("-d");
@@ -969,12 +973,14 @@ pub fn ext_sort(
 	// compressor installed only for the shell would be wrongly rejected.
 	let mut effective_settings = settings.clone();
 	if let Some(compress) = &settings.compress {
-		let mut probe = compress.env.command(&compress.prog);
-		probe
-			.stdin(std::process::Stdio::null())
-			.stdout(std::process::Stdio::null())
-			.stderr(std::process::Stdio::null());
-		match probe.spawn() {
+		let probe = compress.env.command(&compress.prog).and_then(|mut probe| {
+			probe
+				.stdin(std::process::Stdio::null())
+				.stdout(std::process::Stdio::null())
+				.stderr(std::process::Stdio::null())
+				.spawn()
+		});
+		match probe {
 			Ok(mut child) => {
 				// Kill the test process immediately
 				let _ = child.kill();

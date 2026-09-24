@@ -60,6 +60,10 @@ export const launchHelp = {
 		"from-claude": Flags.boolean({ description: "Import a Claude Code session into OMP" }),
 		"from-codex": Flags.boolean({ description: "Import a Codex session into OMP" }),
 		"session-dir": Flags.string({ description: "Directory for session storage and lookup" }),
+		"tool-cgroup": Flags.string({
+			description:
+				"Linux cgroup-v2 leaf to place external tool workloads in, keeping heavy tools out of this session's memory budget (or OMP_TOOL_CGROUP)",
+		}),
 		"no-session": Flags.boolean({ description: "Don't save session (ephemeral)" }),
 		models: Flags.string({ description: "Comma-separated model patterns for Ctrl+P cycling" }),
 		"no-tools": Flags.boolean({ description: "Disable all built-in tools" }),

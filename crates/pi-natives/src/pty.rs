@@ -30,43 +30,47 @@ use crate::{js::into_string, ps, task};
 #[napi(object)]
 pub struct PtyStartOptions<'env> {
 	/// Command string to execute.
-	pub command:    String,
+	pub command:         String,
 	/// Working directory for command execution.
-	pub cwd:        Option<String>,
+	pub cwd:             Option<String>,
 	/// Environment variables for this command.
-	pub env:        Option<HashMap<String, String>>,
+	pub env:             Option<HashMap<String, String>>,
 	/// Timeout in milliseconds before cancelling.
-	pub timeout_ms: Option<u32>,
+	pub timeout_ms:      Option<u32>,
 	/// Abort signal for cancelling the operation.
-	pub signal:     Option<Unknown<'env>>,
+	pub signal:          Option<Unknown<'env>>,
 	/// PTY column count.
-	pub cols:       Option<u16>,
+	pub cols:            Option<u16>,
 	/// PTY row count.
-	pub rows:       Option<u16>,
+	pub rows:            Option<u16>,
 	/// Shell binary to use (e.g. "sh", "bash", or an absolute path).
 	/// Defaults to "sh" if not provided.
-	pub shell:      Option<String>,
+	pub shell:           Option<String>,
+	/// Delegated Linux cgroup-v2 leaf for external child processes.
+	pub workload_cgroup: Option<String>,
 }
 
 /// Options for running an executable and argument vector in a PTY session.
 #[napi(object)]
 pub struct PtyArgvStartOptions<'env> {
 	/// Executable name or path.
-	pub application: String,
+	pub application:     String,
 	/// Arguments passed directly to the executable.
-	pub args:        Vec<String>,
+	pub args:            Vec<String>,
 	/// Working directory for command execution.
-	pub cwd:         Option<String>,
+	pub cwd:             Option<String>,
 	/// Environment variables for this command.
-	pub env:         Option<HashMap<String, String>>,
+	pub env:             Option<HashMap<String, String>>,
 	/// Timeout in milliseconds before cancelling.
-	pub timeout_ms:  Option<u32>,
+	pub timeout_ms:      Option<u32>,
 	/// Abort signal for cancelling the operation.
-	pub signal:      Option<Unknown<'env>>,
+	pub signal:          Option<Unknown<'env>>,
 	/// PTY column count.
-	pub cols:        Option<u16>,
+	pub cols:            Option<u16>,
 	/// PTY row count.
-	pub rows:        Option<u16>,
+	pub rows:            Option<u16>,
+	/// Delegated Linux cgroup-v2 leaf for external child processes.
+	pub workload_cgroup: Option<String>,
 }
 
 /// Result of a PTY command run.
@@ -88,11 +92,12 @@ enum PtyCommand {
 
 #[derive(Clone)]
 struct PtyRunConfig {
-	command: PtyCommand,
-	cwd:     Option<String>,
-	env:     Option<HashMap<String, String>>,
-	cols:    u16,
-	rows:    u16,
+	command:         PtyCommand,
+	cwd:             Option<String>,
+	env:             Option<HashMap<String, String>>,
+	cols:            u16,
+	rows:            u16,
+	workload_cgroup: Option<String>,
 }
 
 enum ReaderEvent {
@@ -163,11 +168,12 @@ impl PtySession {
 		on_start: Option<ThreadsafeFunction<u32>>,
 	) -> Result<PromiseRaw<'env, PtyRunResult>> {
 		let run_config = PtyRunConfig {
-			command: PtyCommand::Shell { command: options.command, shell: options.shell },
-			cwd:     options.cwd,
-			env:     options.env,
-			cols:    options.cols.unwrap_or(120).clamp(20, 400),
-			rows:    options.rows.unwrap_or(40).clamp(5, 200),
+			command:         PtyCommand::Shell { command: options.command, shell: options.shell },
+			cwd:             options.cwd,
+			env:             options.env,
+			cols:            options.cols.unwrap_or(120).clamp(20, 400),
+			rows:            options.rows.unwrap_or(40).clamp(5, 200),
+			workload_cgroup: options.workload_cgroup,
 		};
 		self.start_config(env, run_config, options.timeout_ms, options.signal, on_chunk, on_start)
 	}
@@ -185,11 +191,12 @@ impl PtySession {
 		on_start: Option<ThreadsafeFunction<u32>>,
 	) -> Result<PromiseRaw<'env, PtyRunResult>> {
 		let run_config = PtyRunConfig {
-			command: PtyCommand::Argv { application: options.application, args: options.args },
-			cwd:     options.cwd,
-			env:     options.env,
-			cols:    options.cols.unwrap_or(120).clamp(20, 400),
-			rows:    options.rows.unwrap_or(40).clamp(5, 200),
+			command:         PtyCommand::Argv { application: options.application, args: options.args },
+			cwd:             options.cwd,
+			env:             options.env,
+			cols:            options.cols.unwrap_or(120).clamp(20, 400),
+			rows:            options.rows.unwrap_or(40).clamp(5, 200),
+			workload_cgroup: options.workload_cgroup,
 		};
 		self.start_config(env, run_config, options.timeout_ms, options.signal, on_chunk, on_start)
 	}
@@ -292,6 +299,12 @@ fn run_pty_sync(
 	control_rx: flume::Receiver<ControlMessage>,
 	ct: task::CancelToken,
 ) -> Result<PtyRunResult> {
+	let placement = config
+		.workload_cgroup
+		.as_deref()
+		.map(pi_shell::process::WorkloadCgroup::new)
+		.transpose()
+		.map_err(|err| Error::from_reason(err.to_string()))?;
 	let pty_system = native_pty_system();
 	ct.heartbeat()
 		.map_err(|err| Error::from_reason(format!("PTY setup cancelled before openpty: {err}")))?;
@@ -331,10 +344,26 @@ fn run_pty_sync(
 			.map_err(|err| Error::from_reason(format!("Failed to open PTY: {err}")))?
 	};
 
+	// portable-pty's internal pre_exec is not extensible, so place its child
+	// with an argv bootstrap before execing the original application.
+	let command_builder = |application: &str| {
+		let Some(placement) = placement.as_ref() else {
+			return CommandBuilder::new(application);
+		};
+		const SCRIPT: &str = r#"if [ "$#" -lt 2 ]; then echo "omp: tool cgroup placement failed" >&2; exit 125; fi
+if ! echo 0 > "$1/cgroup.procs"; then echo "omp: tool cgroup placement failed" >&2; exit 125; fi
+shift
+exec "$@""#;
+		let mut cmd = CommandBuilder::new("/bin/sh");
+		cmd.args(["-p", "-c", SCRIPT, "omp-workload"]);
+		cmd.arg(placement.path());
+		cmd.arg(application);
+		cmd
+	};
 	let mut cmd = match config.command {
 		PtyCommand::Shell { command, shell } => {
 			let shell = shell.as_deref().unwrap_or("sh");
-			let mut cmd = CommandBuilder::new(shell);
+			let mut cmd = command_builder(shell);
 			let lower = shell.to_lowercase();
 			if lower.ends_with("cmd.exe") || lower.ends_with("cmd") {
 				cmd.arg("/c");
@@ -347,7 +376,7 @@ fn run_pty_sync(
 			cmd
 		},
 		PtyCommand::Argv { application, args } => {
-			let mut cmd = CommandBuilder::new(application);
+			let mut cmd = command_builder(&application);
 			for arg in args {
 				cmd.arg(arg);
 			}
@@ -1084,14 +1113,15 @@ mod zombie_repro_tests {
 			let (_tx, rx) = flume::unbounded();
 			let ct = task::CancelToken::new(Some(1), None);
 			let config = PtyRunConfig {
-				command: PtyCommand::Argv {
+				command:         PtyCommand::Argv {
 					application: STORM_CHILD_COMM.to_string(),
 					args:        vec!["5".to_string()],
 				},
-				cwd:     None,
-				env:     None,
-				cols:    80,
-				rows:    24,
+				cwd:             None,
+				env:             None,
+				cols:            80,
+				rows:            24,
+				workload_cgroup: None,
 			};
 			// Pre-spawn heartbeats bail with `Err`, so `Ok` means this iteration
 			// reached the post-spawn cancellation path.

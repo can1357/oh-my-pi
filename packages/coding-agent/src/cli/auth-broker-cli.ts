@@ -36,6 +36,7 @@ import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
 import { $which, APP_NAME, getAgentDbPath, getConfigRootDir, isEnoent, logger, VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { setTransports as setLoggerTransports } from "@oh-my-pi/pi-utils/logger";
+import { wrapToolCommand } from "@oh-my-pi/pi-utils/tool-cgroup";
 import { $ } from "bun";
 import { refreshManagedMcpOAuthCredential } from "../mcp/oauth-credentials";
 import { isManagedMCPOAuthCredentialId, mcpOAuthServerUrlFromCredentialId } from "../mcp/oauth-flow";
@@ -278,7 +279,7 @@ async function runRemoteLogin(provider: string, via: string, dryRun: boolean): P
 		throw new Error("ssh binary not found in PATH");
 	}
 	const proc = Bun.spawn({
-		cmd: [sshBin, ...sshArgs],
+		cmd: wrapToolCommand([sshBin, ...sshArgs]),
 		stdin: "inherit",
 		stdout: "inherit",
 		stderr: "inherit",

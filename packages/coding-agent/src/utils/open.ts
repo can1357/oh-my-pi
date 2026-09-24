@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as url from "node:url";
 import { $which, isWsl, logger } from "@oh-my-pi/pi-utils";
+import { wrapToolCommand } from "@oh-my-pi/pi-utils/tool-cgroup";
 
 const URL_SCHEME_PATTERN = /^[a-zA-Z][a-zA-Z\d+.-]*:/;
 
@@ -18,7 +19,7 @@ function getExistingWslLocalPath(urlOrPath: string): string | undefined {
 				: path.resolve(urlOrPath);
 		if (!localPath || !fs.existsSync(localPath)) return undefined;
 
-		const result = Bun.spawnSync(["wslpath", "-w", localPath], { stdout: "pipe", stderr: "ignore" });
+		const result = Bun.spawnSync(wrapToolCommand(["wslpath", "-w", localPath]), { stdout: "pipe", stderr: "ignore" });
 		if (result.exitCode !== 0) return undefined;
 
 		return result.stdout.toString().trim() || undefined;
@@ -87,7 +88,7 @@ export function openPath(urlOrPath: string): void {
 	}
 	let child: Bun.Subprocess | undefined;
 	try {
-		child = Bun.spawn(cmd, {
+		child = Bun.spawn(wrapToolCommand(cmd), {
 			stdin: "ignore",
 			stdout: "ignore",
 			stderr: "ignore",

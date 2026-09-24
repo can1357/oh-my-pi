@@ -698,6 +698,10 @@ pub(crate) fn execute_external_command(
 		}
 	}
 
+	if let Some(placement) = context.params.spawn_placement() {
+		placement.prepare(&mut cmd)?;
+	}
+
 	// When tracing is enabled, report.
 	tracing::debug!(
 		 target: trace_categories::COMMANDS,
