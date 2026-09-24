@@ -2,7 +2,7 @@ import type { AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Tool, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
 import type { CompactionBoundaries } from "./context-usage";
-import type { StatusLineSettings } from "./types";
+import type { CostStatistics, StatusLineSettings } from "./types";
 
 export interface StatusAccountIdentity {
 	accountId?: string;
@@ -34,6 +34,10 @@ export interface StatusLineSession {
 	sessionManager: {
 		getSessionName(): string | undefined;
 		getSessionId(): string;
+		getArtifactsDir?(): string | null;
+		getCostStatistics?(
+			liveDescendants?: readonly { id: string; liveCost?: number; running?: boolean }[],
+		): CostStatistics;
 		getUsageStatistics(): {
 			input: number;
 			output: number;
@@ -81,6 +85,8 @@ export interface StatusLineHost<TSession extends StatusLineSession = StatusLineS
 	getSettingsRevision(): number;
 	getSessionSettingsIdentity(session: TSession): unknown;
 	getSessionSettingsRevision(session: TSession): number;
+	/** Application-owned live agent lookup; undefined for display-only sessions. */
+	getCostStatistics?(session: TSession): CostStatistics | undefined;
 	goalStatusInFooter(session: TSession): boolean;
 	activeAccount(session: TSession, provider: string): StatusAccountIdentity | undefined;
 	canFetchUsageReports(session: TSession): boolean;

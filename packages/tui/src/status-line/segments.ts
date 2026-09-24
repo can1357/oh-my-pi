@@ -561,7 +561,15 @@ const tokenRateSegment: StatusLineSegment = {
 const costSegment: StatusLineSegment = {
 	id: "cost",
 	render(ctx) {
-		const { cost, premiumRequests } = ctx.usageStats;
+		const { premiumRequests, costStatistics } = ctx.usageStats;
+		const subagents = ctx.options?.cost?.subagents;
+		const cost =
+			subagents === "split"
+				? (costStatistics?.selfCost ?? ctx.usageStats.cost)
+				: subagents === "total"
+					? (costStatistics?.totalCost ?? ctx.usageStats.cost)
+					: ctx.usageStats.cost;
+		const hasDescendantSpend = costStatistics !== undefined && costStatistics.totalCost > costStatistics.selfCost;
 		const advisorCost = ctx.session.getAdvisorCost?.() ?? 0;
 		const state = ctx.session.state;
 		const pricingPeriod = state.model?.cost
@@ -578,6 +586,14 @@ const costSegment: StatusLineSegment = {
 				cost,
 				usingSubscription,
 				premiumRequests,
+				descendants:
+					hasDescendantSpend && costStatistics
+						? {
+								totalCost: costStatistics.totalCost,
+								pending: costStatistics.pending,
+								split: subagents === "split",
+							}
+						: undefined,
 				fractionDigits: 2,
 				startupPlaceholder: ctx.startupPlaceholder,
 				pricingPeriod,

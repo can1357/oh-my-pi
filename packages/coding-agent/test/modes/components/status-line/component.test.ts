@@ -23,6 +23,9 @@ function makeSessionWithLastMessage(
 	prewalkArmed: boolean = false,
 	{
 		cost = 0,
+		selfCost = cost,
+		totalCost = cost,
+		pending = false,
 		advisorCost = 0,
 		usingSubscription = false,
 		advisorUsingSubscription = false,
@@ -30,6 +33,9 @@ function makeSessionWithLastMessage(
 		sessionName = "test-session",
 	}: {
 		cost?: number;
+		selfCost?: number;
+		totalCost?: number;
+		pending?: boolean;
 		advisorCost?: number;
 		usingSubscription?: boolean;
 		advisorUsingSubscription?: boolean;
@@ -63,6 +69,8 @@ function makeSessionWithLastMessage(
 				cost,
 				tokensPerSecond: null,
 			}),
+			getArtifactsDir: () => null,
+			getCostStatistics: () => ({ selfCost, totalCost, pending }),
 			getSessionName: () => sessionName,
 		},
 		getPrewalkState: () => (prewalkArmed ? { target: { id: "cheap-model", provider: "openai" } } : undefined),
@@ -194,6 +202,49 @@ describe("StatusLineComponent", () => {
 
 		const stripped = statusLine.getTopBorder(WIDE_ENOUGH_FOR_COST_SEGMENT).content.replace(/\x1b\[[0-9;]*m/g, "");
 		expect(stripped).toContain("S2.67 + 👁 $0.41");
+	});
+
+	it("renders split own and live descendant spend without changing the default cost", () => {
+		const statusLine = statusLines.track(
+			new StatusLineComponent(
+				makeSessionWithLastMessage(null, false, {
+					cost: 12.3,
+					selfCost: 4.62,
+					totalCost: 12.3,
+					pending: true,
+					usingSubscription: true,
+				}) as unknown as AgentSession,
+				statusLineHost,
+			),
+		);
+		const before = Bun.stripANSI(statusLine.getTopBorder(WIDE_ENOUGH_FOR_COST_SEGMENT).content);
+		expect(before).toContain("S12.30");
+		statusLine.updateSettings({
+			preset: "custom",
+			leftSegments: ["cost"],
+			rightSegments: [],
+			segmentOptions: { cost: { subagents: "split" } },
+		});
+		const after = Bun.stripANSI(statusLine.getTopBorder(WIDE_ENOUGH_FOR_COST_SEGMENT).content);
+		expect(after).toContain("S4.62 Σ12.30+");
+		statusLine.updateSettings({
+			preset: "custom",
+			leftSegments: ["cost"],
+			rightSegments: [],
+			segmentOptions: { cost: { subagents: "total" } },
+		});
+		const total = Bun.stripANSI(statusLine.getTopBorder(WIDE_ENOUGH_FOR_COST_SEGMENT).content);
+		expect(total).toContain("S12.30+");
+	});
+
+	it("collapses split cost when no descendant has spent anything", () => {
+		const context = createGallerySegmentContext();
+		context.options.cost = { subagents: "split" };
+		context.usageStats.costStatistics = { selfCost: 4.62, totalCost: 4.62, pending: true };
+		context.usageStats.cost = 4.62;
+		const rendered = Bun.stripANSI(renderSegment("cost", context).content);
+		expect(rendered).toContain("$4.62");
+		expect(rendered).not.toContain("Σ");
 	});
 
 	it("renders advisor cost with subscription prefix when advisor is on subscription in Unicode preset", () => {

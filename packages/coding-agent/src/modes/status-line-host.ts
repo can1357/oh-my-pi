@@ -1,4 +1,6 @@
+import * as path from "node:path";
 import type { StatusLineHost, StatusLineSession } from "@oh-my-pi/pi-tui/status-line/host";
+import { AgentRegistry } from "../registry/agent-registry";
 import { settings } from "../config/settings";
 import type { AgentSession } from "../session/agent-session";
 import { getSessionCompactionBoundaries } from "../session/context-usage-runtime";
@@ -34,6 +36,20 @@ export const statusLineHost: StatusLineHost<StatusLineHostSession> = {
 	getSettingsRevision: () => settings.revision,
 	getSessionSettingsIdentity: session => session.settings,
 	getSessionSettingsRevision: session => session.settings?.revision ?? 0,
+	getCostStatistics: session => {
+		const artifactsDir = session.sessionManager.getArtifactsDir?.();
+		const live = artifactsDir
+			? AgentRegistry.global()
+					.list()
+					.filter(ref => ref.kind === "sub" && ref.sessionFile?.startsWith(`${artifactsDir}${path.sep}`))
+					.map(ref => ({
+						id: ref.id,
+						liveCost: ref.session?.sessionManager.getOwnCost(),
+						running: ref.status === "running",
+					}))
+			: [];
+		return session.sessionManager.getCostStatistics?.(live);
+	},
 	goalStatusInFooter: session => (session.settings ?? settings).get("goal.statusInFooter"),
 	activeAccount: (session, provider) =>
 		session.modelRegistry?.authStorage?.oauth.identity(provider, session.sessionId),

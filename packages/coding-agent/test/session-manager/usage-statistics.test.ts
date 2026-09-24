@@ -1,5 +1,9 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { describe, expect, it } from "bun:test";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { aggregateCost, ownCost } from "@oh-my-pi/pi-coding-agent/session/cost-statistics";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 describe("SessionManager usage statistics", () => {
 	const modelUsage = {
@@ -234,5 +238,69 @@ describe("SessionManager usage statistics", () => {
 		const usage = session.getUsageStatistics();
 		expect(usage.cacheRead).toBe(200);
 		expect(usage.cost).toBeCloseTo(18, 8);
+	});
+	it("attributes own model calls separately from task results and deduplicates live descendants", () => {
+		const parent = SessionManager.inMemory();
+		parent.appendModelUsage(modelUsage, { sessionId: parent.getSessionId(), parentId: parent.getLeafId() });
+		parent.appendMessage({
+			role: "toolResult",
+			toolCallId: "task_1",
+			toolName: "task",
+			content: [{ type: "text", text: "result" }],
+			details: { usage: { ...modelUsage.usage, cost: { ...modelUsage.usage.cost, total: 10 } } },
+			isError: false,
+			timestamp: 2,
+		});
+		const child = SessionManager.inMemory();
+		child.appendModelUsage(modelUsage, { sessionId: child.getSessionId(), parentId: child.getLeafId() });
+		const grandchild = SessionManager.inMemory();
+		grandchild.appendModelUsage(modelUsage, {
+			sessionId: grandchild.getSessionId(),
+			parentId: grandchild.getLeafId(),
+		});
+		expect(parent.getUsageStatistics().cost).toBeCloseTo(10.00153, 8);
+		expect(ownCost(parent.getEntries())).toBeCloseTo(0.00153, 8);
+		const costs = aggregateCost(parent.getOwnCost(), [
+			{ id: "child", entries: child.getEntries() },
+			{ id: "grandchild", entries: grandchild.getEntries() },
+			{ id: "child", liveCost: 3, running: true },
+		]);
+		expect(costs.selfCost).toBeCloseTo(0.00153, 8);
+		expect(costs.totalCost).toBeCloseTo(3.00306, 8);
+		expect(costs.pending).toBe(true);
+	});
+
+	it("walks nested persisted child transcripts without counting task result aggregates", () => {
+		using dir = TempDir.createSync("@omp-cost-descendants-");
+		const root = SessionManager.create(dir.path(), dir.path());
+		root.appendModelUsage(modelUsage, { sessionId: root.getSessionId(), parentId: root.getLeafId() });
+		const rootFile = root.getSessionFile();
+		if (!rootFile) throw new Error("Expected a persistent root");
+		const childDir = rootFile.slice(0, -".jsonl".length);
+		fs.mkdirSync(path.join(childDir, "child"), { recursive: true });
+		const makeChild = (file: string, id: string, parentSession: string): void => {
+			const child = SessionManager.inMemory();
+			child.appendModelUsage(modelUsage, { sessionId: child.getSessionId(), parentId: child.getLeafId() });
+			const header = {
+				type: "session",
+				version: 3,
+				id,
+				timestamp: new Date().toISOString(),
+				cwd: dir.path(),
+				parentSession,
+			};
+			fs.writeFileSync(file, [header, ...child.getEntries()].map(entry => JSON.stringify(entry)).join("\n") + "\n");
+		};
+		const childFile = path.join(childDir, "child.jsonl");
+		makeChild(childFile, "child", rootFile);
+		makeChild(path.join(childDir, "child", "grandchild.jsonl"), "grandchild", childFile);
+		makeChild(path.join(childDir, "__advisor.jsonl"), "advisor", rootFile);
+		const costs = root.getCostStatistics();
+		expect(costs.selfCost).toBeCloseTo(0.00153, 8);
+		expect(costs.totalCost).toBeCloseTo(0.00459, 8);
+		expect(costs.pending).toBe(false);
+		const live = root.getCostStatistics([{ id: "child", liveCost: 2, running: true }]);
+		expect(live.totalCost).toBeCloseTo(2.00306, 8);
+		expect(live.pending).toBe(true);
 	});
 });
