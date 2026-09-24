@@ -408,8 +408,8 @@ export async function runModelsCommand(command: ModelsCommandArgs): Promise<void
 			json,
 			kind,
 			additionalExtensionPaths: cliExtensionPaths,
-			settingsExtensions: cfgExtensions.get(settings) ?? [],
-			disabledExtensionIds: cfgDisabledExtensions.get(settings) ?? [],
+			settingsExtensions: cfgExtensions.get(settings),
+			disabledExtensionIds: cfgDisabledExtensions.get(settings),
 			disableExtensionDiscovery: Boolean(command.flags.noExtensions),
 		});
 	} finally {

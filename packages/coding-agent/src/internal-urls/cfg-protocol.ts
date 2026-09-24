@@ -6,11 +6,12 @@
  * - `cfg://<namespace>`       one namespace's subtree, e.g. `cfg://advisor`
  * - `cfg://<setting>`         one setting: value, type, default, source, description
  *
- * Write forms (content is the new value). Only a top-level session with a UI may
- * write, and every write requires user approval through the host registered with
- * {@link setCfgApprovalHost}. Subagents and headless sessions (print, RPC, ACP,
- * background forks) are refused so they never block on a prompt the user did
- * not start:
+ * Write forms (content is the new value). Only a session created with
+ * `settingsApproval` (the top-level TUI session) may write, and every write
+ * requires user approval through the host registered with {@link setCfgApprovalHost}.
+ * Other sessions (subagents, print, RPC, ACP, background forks) never see the
+ * scheme advertised and are refused so they never block on a prompt the user
+ * did not start:
  * - `cfg://<setting>`         session-only runtime override
  * - `cfg://<setting>/save`    persisted to the global config.yml
  *
@@ -31,6 +32,7 @@ import type {
 	InternalWriteResult,
 	ProtocolHandler,
 	ResolveContext,
+	SchemeHost,
 	SchemeSpec,
 	UrlCompletion,
 	WriteContext,
@@ -93,8 +95,8 @@ export interface CfgApprovalHost {
 	approve(request: CfgChangeRequest): Promise<boolean>;
 	/**
 	 * Called once per settings instance whose value changed, so the host can apply
-	 * live side effects (e.g. start the advisor runtime); a settings value alone
-	 * does not restart components that read it at startup.
+	 * side effects reserved for the user's in-process choices (a `defaultThinkingLevel`
+	 * change also switches the live session).
 	 */
 	applied(change: CfgAppliedChange): void;
 	persistentSettings: Settings;
@@ -212,7 +214,7 @@ function callerSession(context: ResolveContext | WriteContext | undefined): Tool
 /**
  * Settings of a caller allowed to write. Refuses sessions that must not raise
  * approval prompts: subagents (the user is not driving them) and sessions without
- * a UI (print, RPC, ACP, `/tan` forks, programmatic agents).
+ * `settingsApproval` (print, RPC, ACP, `/tan` forks, programmatic agents).
  */
 function writerSettings(context: WriteContext | undefined): Settings {
 	const session = callerSession(context);
@@ -221,7 +223,7 @@ function writerSettings(context: WriteContext | undefined): Settings {
 			`Subagents cannot change settings. Report the setting you need changed to the parent agent instead of writing ${CFG_URL_PREFIX}.`,
 		);
 	}
-	if (!session.hasUI) {
+	if (session.settingsApproval !== true) {
 		throw new Error(
 			`Changing settings requires user approval, but this session has no interactive UI. Ask the user to change the setting themselves.`,
 		);
@@ -235,11 +237,12 @@ export class CfgProtocolHandler implements ProtocolHandler {
 		backing: "virtual",
 		selectors: "lines",
 		immutable: true,
-		write: { payload: "verbatim", scope: "workspace", tier: () => "write" },
+		write: { via: "handler", payload: "verbatim", scope: "workspace", tier: () => "write" },
 	};
 
-	promptDoc(): string {
-		return cfgPromptDoc.trim();
+	/** Advertised only where writes can be approved; subagents and headless sessions never see `cfg://`. */
+	promptDoc(host: SchemeHost): string | undefined {
+		return host.settingsApproval ? cfgPromptDoc.trim() : undefined;
 	}
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
@@ -316,8 +319,10 @@ export class CfgProtocolHandler implements ProtocolHandler {
 
 		if (!save) {
 			leaf.override(settings, value);
-			host.applied({ path: leaf.id, value: leaf.get(settings), settings, save });
-			return finish("applied");
+			// A non-fallback env var outranks runtime overrides; report it instead of claiming the change.
+			const effective = leaf.get(settings);
+			host.applied({ path: leaf.id, value: effective, settings, save });
+			return finish("applied", Bun.deepEquals(effective, value) ? undefined : formatValue(leaf, effective));
 		}
 		const persistent = host.persistentSettings;
 		leaf.set(persistent, value);

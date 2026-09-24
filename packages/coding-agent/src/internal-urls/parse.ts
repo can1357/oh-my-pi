@@ -44,11 +44,6 @@ export function extractUriScheme(input: string): string | undefined {
 	return scheme.toLowerCase();
 }
 
-/** Rewrite the single-slash `local:/x` spelling to canonical `local://x`; other inputs pass through. */
-export function normalizeLocalScheme(input: string): string {
-	return input.replace(/^(local:)\/(?!\/)/, "$1//");
-}
-
 /**
  * Parse an internal URL into an InternalUrl.
  *

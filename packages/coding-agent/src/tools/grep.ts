@@ -21,7 +21,7 @@ import {
 import { getEditStore } from "../edit/store";
 import { formatHashlineHeader } from "@oh-my-pi/pi-tui/tools/hashline-format";
 import { sessionResolveContext } from "../internal-urls/context";
-import { extractUriScheme, parseInternalUrl } from "../internal-urls/parse";
+import { extractUriScheme } from "../internal-urls/parse";
 import { InternalUrlRouter } from "../internal-urls/router";
 import type { ResolveContext } from "../internal-urls/types";
 import grepDescription from "../prompts/tools/grep.md" with { type: "text" };
@@ -38,7 +38,6 @@ import { isFindEnabled } from "./jfind";
 import {
 	expandDelimitedPathEntries,
 	hasGlobPathChars,
-	hasUrlPathGlobChars,
 	isLineInRanges,
 	probeLiteralPathExists,
 	type ResolvedSearchTarget,
@@ -719,16 +718,12 @@ function mergeGrepResults(left: GrepResult, right: GrepResult, maxCount: number)
  */
 async function resolveVirtualInternalResource(
 	rawPath: string,
-	scheme: string,
 	context: ResolveContext,
 	ranges: readonly LineRange[] | undefined,
 ): Promise<VirtualSearchResource[]> {
 	const internalRouter = InternalUrlRouter.instance();
-	const handler = internalRouter.getHandler(scheme);
-	if (handler?.enumerate) {
-		const entries = await handler.enumerate(parseInternalUrl(rawPath), context);
-		return entries.map(entry => ({ path: entry.url, content: entry.content, ranges }));
-	}
+	const entries = await internalRouter.enumerate(rawPath, context);
+	if (entries) return entries.map(entry => ({ path: entry.url, content: entry.content, ranges }));
 	const resource = await internalRouter.resolve(rawPath, context);
 	// A directory listing with no local path (e.g. a remote dir) has no real
 	// contents to grep — searching its listing text would be misleading.
@@ -763,7 +758,7 @@ async function resolveInternalSearchInputs(opts: {
 		const ranges = spec?.ranges;
 		// URL globs stay for the scope resolver, which expands them over a
 		// locatable base or rejects them.
-		if (hasUrlPathGlobChars(rawPath)) {
+		if (internalRouter.isGlob(rawPath)) {
 			if (ranges) throw new ToolError(`Line-range selector requires a single file, not a glob: ${spec?.original}`);
 			continue;
 		}
@@ -777,7 +772,7 @@ async function resolveInternalSearchInputs(opts: {
 			}
 			continue;
 		}
-		const expanded = await resolveVirtualInternalResource(rawPath, scheme, opts.context, ranges);
+		const expanded = await resolveVirtualInternalResource(rawPath, opts.context, ranges);
 		virtualInputIndexes.add(idx);
 		for (const virtual of expanded) {
 			virtualResources.push(virtual);
@@ -833,7 +828,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 			hasFind: this.session.isToolActive?.("find") ?? isFindEnabled(this.session),
 			eagerDelegation: sessionDelegationBias(this.session) === "eager",
 			scoutAvailable: isScoutSpawnable(
-				cfgTaskDisabledAgents.get(this.session.settings) as string[] | undefined,
+				cfgTaskDisabledAgents.get(this.session.settings),
 				this.session.getSessionSpawns?.() ?? "*",
 			),
 		});

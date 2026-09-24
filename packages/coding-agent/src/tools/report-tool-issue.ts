@@ -185,7 +185,7 @@ function readPersistedConsent(settings: Settings | undefined): boolean | null {
 function persistConsent(localSettings: Settings | undefined, granted: boolean): void {
 	const value = granted ? "granted" : "denied";
 	try {
-		localSettings ? cfgDevAutoqaConsent.set(localSettings, value) : undefined;
+		if (localSettings) cfgDevAutoqaConsent.set(localSettings, value);
 	} catch (error) {
 		logger.warn("Failed to persist auto-QA consent to local settings snapshot", { error: String(error) });
 	}

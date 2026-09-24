@@ -1,4 +1,4 @@
-import { extractUriScheme, normalizeLocalScheme } from "../internal-urls/parse";
+import { extractUriScheme } from "../internal-urls/parse";
 import { type LineRange } from "@oh-my-pi/pi-tui/tools/line-ranges";
 import { splitPathAndSel, splitInternalUrlSel, isReadableUrlPath } from "@oh-my-pi/pi-tui/tools/read";
 import * as fs from "node:fs";
@@ -82,7 +82,7 @@ function normalizeAtPrefix(filePath: string): string {
 		// Windows absolute paths (drive letters / UNC / root-relative)
 		path.win32.isAbsolute(withoutAt) ||
 		// Internal URL shorthands
-		InternalUrlRouter.instance().canHandle(normalizeLocalScheme(withoutAt))
+		InternalUrlRouter.instance().canHandle(withoutAt)
 	) {
 		return withoutAt;
 	}
@@ -311,9 +311,9 @@ function assertNotInternalUrl(expanded: string, original: string): void {
 	);
 }
 
-/** Whether `filePath` (after `@`/`local:/` normalization) is a URL of a registered internal scheme. */
+/** Whether `filePath` (after `@`/single-slash alias normalization) is a URL of a registered internal scheme. */
 function isInternalUrlPath(filePath: string): boolean {
-	return InternalUrlRouter.instance().canHandle(normalizeLocalScheme(expandPath(filePath)));
+	return InternalUrlRouter.instance().canHandle(expandPath(filePath));
 }
 
 /**
@@ -325,11 +325,9 @@ function isInternalUrlPath(filePath: string): boolean {
  * filesystem root is almost never what they intended.
  */
 export function resolveToCwd(filePath: string, cwd: string): string {
-	const normalized = normalizeLocalScheme(filePath);
-	const expanded = normalizeWindowsDriveAliasPath(expandPath(normalized));
-	const expandedAndNormalized = normalizeLocalScheme(expanded);
+	const expanded = normalizeWindowsDriveAliasPath(expandPath(filePath));
 
-	assertNotInternalUrl(expandedAndNormalized, normalized);
+	assertNotInternalUrl(expanded, filePath);
 
 	if (/^\/+$/.test(expanded)) {
 		return cwd;
@@ -513,7 +511,7 @@ export function formatPathRelativeToCwd(
 	options: { trailingSlash?: boolean } = {},
 ): string {
 	const resolvedCwd = path.resolve(cwd);
-	const normalized = normalizeLocalScheme(filePath);
+	const normalized = InternalUrlRouter.instance().normalize(filePath);
 	if (isInternalUrlPath(normalized)) {
 		return normalized;
 	}
@@ -552,16 +550,6 @@ const GLOB_PATH_CHARS = ["*", "?", "[", "{"] as const;
 
 export function hasGlobPathChars(filePath: string): boolean {
 	return GLOB_PATH_CHARS.some(char => filePath.includes(char));
-}
-
-const URL_AUTHORITY_PREFIX_RE = /^[a-z][a-z0-9+.-]*:\/\/[^/]*/i;
-
-/**
- * Glob metacharacters in a `scheme://` URL's path, after the authority: an
- * authority is a name or host, never a glob (`[::1]` is an IPv6 literal).
- */
-export function hasUrlPathGlobChars(url: string): boolean {
-	return hasGlobPathChars(url.replace(URL_AUTHORITY_PREFIX_RE, ""));
 }
 
 type PathEntrySplitter = (item: string) => { basePath: string };
@@ -1267,6 +1255,8 @@ export interface ToolScopeOptions {
 	context: ResolveContext;
 	/** Collect absolute paths located from internal URLs whose scheme is immutable, plus immutable external materializations. */
 	trackImmutableSources?: boolean;
+	/** Refuse internal URLs whose located file tools may not write ({@link InternalUrlRouter.fileWritable}); rewrite tools. */
+	fileWritableOnly?: boolean;
 	/** Honor `exactFilePaths` from {@link resolveExplicitSearchPaths} (search-only). */
 	surfaceExactFilePaths?: boolean;
 	/** Fan plain-file entries out into per-target scans instead of folding them
@@ -1346,7 +1336,7 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 				`Cannot ${internalUrlAction} external URL: ${rawPath}. Use \`read\` to fetch web content, then search the returned text.`,
 			);
 		}
-		const internalUrl = normalizeLocalScheme(rawPath);
+		const internalUrl = internalRouter.normalize(rawPath);
 		if (!internalRouter.canHandle(internalUrl)) {
 			resolvedPathInputs.push(rawPath);
 			continue;
@@ -1354,9 +1344,12 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 		// Locating never materializes content or contacts a remote host: schemes
 		// without a local backing fail with the router's uniform error.
 		const scheme = extractUriScheme(internalUrl);
+		if (opts.fileWritableOnly && !internalRouter.fileWritable(internalUrl)) {
+			throw new ToolError(`Cannot ${internalUrlAction} ${rawPath}: ${scheme}:// URLs are not editable files`);
+		}
 		const immutable =
 			opts.trackImmutableSources === true && scheme !== undefined && internalRouter.spec(scheme)?.immutable === true;
-		if (hasUrlPathGlobChars(internalUrl)) {
+		if (internalRouter.isGlob(internalUrl)) {
 			const pattern = await internalRouter.locateGlob(internalUrl, opts.context);
 			if (pattern === null) {
 				throw new ToolError(`Glob patterns are not supported for internal URLs: ${rawPath}`);

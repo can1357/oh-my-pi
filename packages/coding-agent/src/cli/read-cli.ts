@@ -12,6 +12,7 @@ import { Settings } from "../config/settings";
 import { initializeWithSettings } from "../discovery";
 import { closeAllIdaDatabases } from "../ida";
 import { loadSkills } from "../extensibility/skills";
+import { extractUriScheme } from "../internal-urls/parse";
 import { InternalUrlRouter } from "../internal-urls/router";
 import { closeDaemonClients } from "../launch/client";
 import { discoverAndLoadMCPTools } from "../mcp/loader";
@@ -30,6 +31,19 @@ export interface ReadCommandArgs {
 	path: string;
 }
 
+/**
+ * Session state `omp read <path>` must load before resolving: the caller's
+ * skills for skill:// and MCP servers for MCP resources — `mcp://` or any
+ * scheme with no registered handler that the router's MCP fallback accepts.
+ * Filesystem paths, web URLs, and other registered schemes need neither.
+ */
+function readPrerequisites(input: string): { skills: boolean; mcp: boolean } {
+	const router = InternalUrlRouter.instance();
+	const scheme = extractUriScheme(input);
+	if (!scheme || !router.canResolve(input)) return { skills: false, mcp: false };
+	return { skills: scheme === "skill", mcp: scheme === "mcp" || router.getHandler(scheme) === undefined };
+}
+
 export async function runReadCommand(cmd: ReadCommandArgs): Promise<void> {
 	if (!cmd.path) {
 		process.stderr.write(chalk.red("error: path is required\n"));
@@ -38,6 +52,8 @@ export async function runReadCommand(cmd: ReadCommandArgs): Promise<void> {
 
 	const cwd = getProjectDir();
 	const settings = await Settings.init({ cwd });
+	// Capability providers (skills, MCP servers, SSH hosts) honor this session's provider switches.
+	initializeWithSettings(settings);
 
 	const session: ToolSession = {
 		cwd,
@@ -52,28 +68,26 @@ export async function runReadCommand(cmd: ReadCommandArgs): Promise<void> {
 	let failed = false;
 
 	try {
-		// Internal URLs and MCP resource URIs (hierarchical `test://notes` or
-		// opaque `urn:example:document`) resolve against session state this
-		// lightweight session lacks: loaded skills and MCP servers. Filesystem
-		// paths and web URLs need neither.
-		if (InternalUrlRouter.instance().canResolve(cmd.path)) {
-			initializeWithSettings(settings);
+		const needs = readPrerequisites(cmd.path);
+		if (needs.skills) {
 			const discovered = await loadSkills({
 				...cfgSkills.get(settings),
 				cwd,
-				disabledExtensions: cfgDisabledExtensions.get(settings) ?? [],
+				disabledExtensions: cfgDisabledExtensions.get(settings),
 				extensionRoots: {
 					explicit: [],
 					mode: "merge",
-					configured: cfgExtensions.get(settings) ?? [],
+					configured: cfgExtensions.get(settings),
 					configuredLevel: settings.extensionsSourceLevel(),
 				},
 			});
 			session.skills = discovered.skills;
+		}
 
+		if (needs.mcp) {
 			authStorage = await discoverAuthStorage(undefined, { settings });
 			const result = await discoverAndLoadMCPTools(cwd, {
-				enableProjectConfig: cfgMcpEnableProjectConfig.get(settings) ?? true,
+				enableProjectConfig: cfgMcpEnableProjectConfig.get(settings),
 				filterExa: true,
 				// `omp read` has no Eval prelude, so browser MCP remains available.
 				filterBrowser: false,

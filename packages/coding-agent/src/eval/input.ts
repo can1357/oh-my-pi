@@ -1,7 +1,6 @@
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { InternalUrlRouter } from "../internal-urls";
 import { sessionResolveContext } from "../internal-urls/context";
-import { normalizeLocalScheme } from "../internal-urls/parse";
 import type { ToolSession } from "../tools";
 import { resolveReadPathAsync } from "../tools/path-utils";
 import { throwIfAborted } from "../tools/tool-errors";
@@ -67,15 +66,14 @@ export async function prepareEvalSource(
 	const [file] = args;
 	if (args.length !== 1 || !file) throw new ToolError("Usage: %load <script path>. Quote paths containing spaces.");
 	let filename: string;
-	const target = normalizeLocalScheme(file);
 	const router = InternalUrlRouter.instance();
-	if (router.canHandle(target)) {
-		filename = await router.requireLocal(target, "load", sessionResolveContext(session, { signal }));
+	if (router.canHandle(file)) {
+		filename = await router.requireLocal(file, "load", sessionResolveContext(session, { signal }));
 	} else {
-		if (/^[a-z][a-z0-9+.-]*:\/\//i.test(target) && !target.startsWith("file://")) {
+		if (/^[a-z][a-z0-9+.-]*:\/\//i.test(file) && !file.startsWith("file://")) {
 			throw new ToolError("Eval scripts must be local. Download and inspect remote scripts before executing them.");
 		}
-		filename = await resolveReadPathAsync(target, session.cwd);
+		filename = await resolveReadPathAsync(file, session.cwd);
 	}
 	let code: string;
 	try {

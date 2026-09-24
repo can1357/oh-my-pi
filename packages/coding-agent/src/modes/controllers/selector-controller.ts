@@ -30,7 +30,6 @@ import { getRoleInfo } from "../../config/model-roles";
 import { settings } from "../../config/settings";
 import { createSettingsHost } from "../../config/settings-ui";
 import { createPluginSettingsHost } from "../../extensibility/plugins/settings-host";
-import type { disableProvider as DisableProvider, enableProvider as EnableProvider } from "../../discovery";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
 	getInstalledPluginsRegistryPath,
@@ -164,17 +163,6 @@ function loadProviderAuthUi(): ProviderAuthUiModules {
 			.LogoutAccountSelectorComponent,
 		OAuthSelectorComponent: require("@oh-my-pi/pi-tui/overlays/oauth-selector.js").OAuthSelectorComponent,
 	};
-}
-
-interface ProviderToggleModules {
-	disableProvider: typeof DisableProvider;
-	enableProvider: typeof EnableProvider;
-}
-
-/** Settings-only boundary for provider discovery mutations. */
-function loadProviderToggles(): ProviderToggleModules {
-	const discovery = require("../../discovery");
-	return { disableProvider: discovery.disableProvider, enableProvider: discovery.enableProvider };
 }
 
 export class SelectorController {
@@ -590,24 +578,17 @@ export class SelectorController {
 	}
 
 	/**
-	 * Apply the remaining imperative side effects of a setting change (settings
-	 * selector, `cfg://` writes). Values are already stored by the caller.
+	 * Apply the side effects of a setting change the user made in this process
+	 * (settings selector, approved `cfg://` writes); the value is already stored.
+	 * Only `defaultThinkingLevel` needs this: it also switches the live session,
+	 * which config reloads and parent-session writes must not do. Every other
+	 * setting applies through handle listeners owned by the session and InteractiveMode.
 	 */
 	handleSettingChange(id: string, value: unknown): void {
-		// Discovery provider toggles
-		if (id.startsWith("discovery.")) {
-			const providerId = id.replace("discovery.", "");
-			const { disableProvider, enableProvider } = loadProviderToggles();
-			if (value) {
-				enableProvider(providerId);
-			} else {
-				disableProvider(providerId);
-			}
-			return;
-		}
-
-		// Everything else applies through setting-handle listeners owned by
-		// the session and InteractiveMode, so non-UI `set()` paths stay live too.
+		if (id !== cfgDefaultThinkingLevel.id || typeof value !== "string") return;
+		const level = parseConfiguredThinkingLevel(value);
+		if (level === undefined || level === this.ctx.session.configuredThinkingLevel()) return;
+		this.ctx.session.setThinkingLevel(level);
 	}
 
 	showModelSelector(options?: { temporaryOnly?: boolean }): void {

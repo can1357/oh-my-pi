@@ -9,6 +9,8 @@
 //! callback (LSP writethrough / ACP bridge stay in TypeScript). Internal URL
 //! targets the engine misses resolve through the host `resolveUrl` callback,
 //! awaited without blocking a thread; previews and apply rerun on the answers.
+//! Apply never reuses a preview's answers: it asks again for every URL target
+//! the finished payload names, in one pass, before staging.
 //!
 //! [`EditStore`] holds the session-wide snapshot/clipboard/no-op state that
 //! read-side tools populate. The remaining exports are pure helpers used by
@@ -545,9 +547,20 @@ impl EditSession {
 		let writer = TsfnWriter { tsfn: writer };
 		let request =
 			ApplyRequest { lsp_batch_id: request.lsp_batch_id, lsp_flush: request.lsp_flush };
-		// Misses surface before the first write, so a retry is safe; each one
-		// follows a newly resolved URL, bounding attempts by distinct URLs + 1.
+		// Apply never reuses preview-time answers (resolved before approval,
+		// without this call's abort signal): every URL target the payload names
+		// is asked again, in one pass, before the first stage.
 		let mut resolved = HashSet::new();
+		if let Some(resolver) = &shared.resolve_url {
+			for url in session.apply_url_targets() {
+				let resolution = resolve_one(resolver, &url).await;
+				resolved.insert(url.clone());
+				session.provide(url, resolution);
+			}
+		}
+		// Misses the payload projection did not predict surface before the first
+		// write, so a retry is safe; each one follows a newly resolved URL,
+		// bounding attempts by distinct URLs + 1.
 		let outcome = loop {
 			let outcome = session.apply(request.clone(), &writer).await;
 			if matches!(outcome, Err(EditError::UnresolvedUrl(_)))

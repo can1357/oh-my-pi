@@ -26,7 +26,7 @@ export function createExtensionDashboardRuntime(options: {
 }): ExtensionDashboardRuntime {
 	const { cwd, settings, mcpManager, eventBus, onMcpToolsChanged, browserMcpFilterEnabled } = options;
 	return {
-		getDisabledExtensions: () => cfgDisabledExtensions.get(settings) ?? [],
+		getDisabledExtensions: () => cfgDisabledExtensions.get(settings),
 		setDisabledExtensions: ids => cfgDisabledExtensions.set(settings, ids),
 		getProviders: () =>
 			getAllProvidersInfo().map(provider => ({
@@ -54,7 +54,7 @@ export function createExtensionDashboardRuntime(options: {
 				manager: mcpManager,
 				session: onMcpToolsChanged ? { refreshMCPTools: onMcpToolsChanged } : undefined,
 				discovery: {
-					enableProjectConfig: cfgMcpEnableProjectConfig.get(settings) ?? true,
+					enableProjectConfig: cfgMcpEnableProjectConfig.get(settings),
 					filterExa: true,
 					filterBrowser: browserMcpFilterEnabled?.() ?? false,
 				},

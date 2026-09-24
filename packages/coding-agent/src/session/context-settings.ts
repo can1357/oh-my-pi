@@ -2,10 +2,12 @@ import { combine, register, type SettingValueOf } from "../config/registry";
 import { COMPACTION_METHOD_CHOICES, DEFAULT_COMPACTION_METHOD_ORDER } from "./compaction-methods";
 import { SHAPE_VARIANT_NAMES } from "@oh-my-pi/snapcompact";
 
+const EMPTY_STRING_ARRAY: string[] = [];
+
 export const cfgWorkspaceAdditionalDirectories = register({
 	id: "workspace.additionalDirectories",
 	type: "array",
-	default: [] as string[],
+	default: EMPTY_STRING_ARRAY,
 	ui: {
 		tab: "context",
 		group: "General",
@@ -388,7 +390,7 @@ export const cfgToolsFormat = register({
 		group: "Experimental",
 		label: "Tool Calling Mode",
 		description:
-			"Controls how tools are exposed to the model. Auto uses provider-native tool calls unless the selected model is marked as not supporting them, then falls back to the GLM owned dialect. Native forces provider-native tools; the other values force the named owned dialect. Applies on session start.",
+			"Controls how tools are exposed to the model. Auto uses provider-native tool calls unless the selected model is marked as not supporting them, then falls back to the GLM owned dialect. Native forces provider-native tools; the other values force the named owned dialect.",
 		options: [
 			{
 				value: "auto",

@@ -83,25 +83,27 @@ describe("read tool large artifact handling", () => {
 		expect(output).not.toContain("line-001");
 	});
 
-	it("streams bounded artifact reads without materializing the whole artifact", async () => {
+	it("streams bounded artifact reads and points large artifacts at paging and search workflows", async () => {
 		const result = await tool.execute("call-range", { path: "artifact://0:1-3" });
 		const output = getTextOutput(result);
 
 		expect(output).toContain("line-001");
 		expect(output).toContain("line-003");
 		expect(output).not.toContain("line-400");
-		// The read stays keyed to the URL; the backing file path never leaks.
-		expect(output).not.toContain(artifactDir);
+		expect(output).toContain("artifact://0:raw:1-3000");
+		expect(output).toMatch(/Backing file: .*session[/\\]0\.mcp\.log/);
 		expect(result.details?.meta?.source).toEqual({ type: "internal", value: "artifact://0" });
 	});
 
-	it("keeps bounded raw artifact chunks verbatim", async () => {
+	it("keeps bounded raw artifact chunks verbatim (no workflow notice appended)", async () => {
 		const result = await tool.execute("call-raw-range", { path: "artifact://0:raw:1-2" });
 		const output = getTextOutput(result);
 
 		expect(output).toStartWith("line-001");
 		expect(output).toContain("line-002");
 		expect(output).not.toContain("line-400");
+		// Raw chunks stay verbatim so copy/paste workflows never absorb the notice.
+		expect(output).not.toContain("Backing file:");
 	});
 
 	it("returns exactly the requested raw artifact range without context padding", async () => {

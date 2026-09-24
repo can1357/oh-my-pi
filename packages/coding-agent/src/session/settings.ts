@@ -27,10 +27,9 @@ import { configureProviderMaxInFlightRequests } from "@oh-my-pi/pi-ai/stream";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
 
-// Typed defaults for array/record settings — named constants avoid `as` casts
-// under `as const` while still letting SettingValue infer the correct element type.
 const EMPTY_STRING_ARRAY: string[] = [];
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
+const EMPTY_STRING_ARRAYS_RECORD: Record<string, string[]> = {};
 const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["wait"];
 
 // Power assertions: macOS IOKit, Linux login1/ScreenSaver, Windows execution state.
@@ -792,7 +791,7 @@ export const cfgRetryUsageReservePolicy = register({
 export const cfgRetryFallbackChains = register({
 	id: "retry.fallbackChains",
 	type: "record",
-	default: {} as Record<string, string[]>,
+	default: EMPTY_STRING_ARRAYS_RECORD,
 	ui: {
 		tab: "model",
 		group: "Retry & Fallback",

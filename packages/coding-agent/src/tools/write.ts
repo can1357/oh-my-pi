@@ -24,7 +24,6 @@ import {
 import { normalizeToLF } from "../edit/normalize";
 
 import { InternalUrlRouter, sessionResolveContext, sessionWriteContext } from "../internal-urls";
-import { parseInternalUrl } from "../internal-urls/parse";
 import { createLspWritethrough, type WritethroughCallback, writethroughNoop } from "../lsp";
 
 import { DeferredDiagnostics } from "../lsp/deferred-diagnostics";
@@ -109,9 +108,7 @@ function assertWriteTargetAddressable(target: string, router: InternalUrlRouter)
 	if (!uriLike) return;
 
 	const scheme = uriLike[1]!.toLowerCase();
-	const canonicalScheme = router.getHandler(scheme)
-		? scheme
-		: deviceSchemes.find(device => isOneEditAway(scheme, device));
+	const canonicalScheme = router.spec(scheme) ? scheme : deviceSchemes.find(device => isOneEditAway(scheme, device));
 	const suggestion = canonicalScheme
 		? ` Did you mean '${canonicalScheme}://${uriLike[2]}'?`
 		: deviceSchemes.length > 0
@@ -729,13 +726,14 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		// Peel a read-tool selector (`:raw`, `:1-20`, …) so the write target matches
 		// what `read` resolves for the same URL; line-range/malformed selectors throw.
 		// A `<file>:conflict://N` target is normalized to its URL; the note tells the model.
-		const recovered = recoverConflictUriPrefix(peelWriteUrlSelector(unwrapHashlineHeaderPath(rawPath)));
-		const path = recovered.path;
 		const router = InternalUrlRouter.instance();
-		const url = router.canHandle(path) ? parseInternalUrl(path) : undefined;
-		const handler = url ? router.getHandler(url.protocol.replace(/:$/, "")) : undefined;
-		const policy = handler?.spec.write;
-		if (rawContent === undefined && !(url && policy?.contentOptional?.(url))) {
+		const recovered = recoverConflictUriPrefix(
+			peelWriteUrlSelector(router.normalize(unwrapHashlineHeaderPath(rawPath))),
+		);
+		const path = recovered.path;
+		const target = router.writeTarget(path);
+		const policy = target?.spec.write;
+		if (rawContent === undefined && !(target && policy?.contentOptional?.(target.url))) {
 			throw new ToolError(`content is required for ${path}.`);
 		}
 		const content = rawContent ?? "";
@@ -763,11 +761,11 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				? { text: content, stripped: false }
 				: stripWriteContent(this.session, content);
 			assertWriteTargetAddressable(path, router);
-			if (url) {
-				if (handler?.write) {
+			if (target) {
+				if (policy?.via === "handler") {
 					// Device payloads are dispatch arguments, not resource text, so only
 					// non-device text writes are checked against a truncated read projection.
-					if (!verbatim && handler.spec.backing !== "device" && endsWithReadTruncationNotice(content)) {
+					if (!verbatim && target.spec.backing !== "device" && endsWithReadTruncationNotice(content)) {
 						const currentResource = await router.resolve(path, sessionResolveContext(this.session, { signal }));
 						assertNotShorterReadProjection(path, content, currentResource.content, cleanContent);
 					}
@@ -806,8 +804,8 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				}
 				// Read-only scheme: the router rejects the write with its uniform error.
 				if (!policy) await router.write(path, cleanContent);
-				// A writable scheme without a handler write is file-backed: the pipeline
-				// below locates its target (resolvePlanPath) so write and read share one path.
+				// `via: "file"`: the pipeline below writes the located target (resolvePlanPath),
+				// so write and read share one path.
 			}
 
 			const resolvedArchivePath = await this.#resolveArchiveWritePath(path);

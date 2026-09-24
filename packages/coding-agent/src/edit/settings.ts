@@ -5,6 +5,15 @@
 import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import { register } from "../config/registry";
 
+const EMPTY_STRING_RECORD: Record<string, string> = {};
+
+/** `PI_EDIT_FUZZY`: `1`/`true` force fuzzy matching, `0`/`false` disable it; `auto`/other text defers to the setting. */
+function parseEditFuzzyEnv(raw: string): boolean | undefined {
+	if (raw === "1" || raw === "true") return true;
+	if (raw === "0" || raw === "false") return false;
+	return undefined;
+}
+
 /** Every edit tool variant, as accepted by `edit.mode` and `PI_EDIT_VARIANT`. */
 export const EDIT_MODES = [
 	"apply_patch",
@@ -43,7 +52,7 @@ export const cfgEditMode = register({
 export const cfgEditModelVariants = register({
 	id: "edit.modelVariants",
 	type: "record",
-	default: {} as Record<string, string>,
+	default: EMPTY_STRING_RECORD,
 });
 
 /** {@link cfgEditModelVariants} with lowercased patterns; entries naming an unknown mode are dropped. */
@@ -60,7 +69,7 @@ export const cfgEditFuzzyMatch = register({
 	id: "edit.fuzzyMatch",
 	type: "boolean",
 	default: true,
-	env: "PI_EDIT_FUZZY",
+	env: { name: "PI_EDIT_FUZZY", parse: parseEditFuzzyEnv },
 	ui: {
 		tab: "files",
 		group: "Editing",

@@ -69,6 +69,7 @@ export class ProcProtocolHandler implements ProtocolHandler {
 		selectors: "lines",
 		immutable: true,
 		write: {
+			via: "handler",
 			payload: "verbatim",
 			scope: "workspace",
 			tier: () => "exec",

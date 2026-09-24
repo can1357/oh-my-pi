@@ -129,7 +129,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 			cwd,
 			packages,
 			environment: options.environment,
-			autoProvision: cfgEvalAutoProvision.get(options.session.settings) ?? true,
+			autoProvision: cfgEvalAutoProvision.get(options.session.settings),
 			signal: packageSignal,
 		};
 		const install =

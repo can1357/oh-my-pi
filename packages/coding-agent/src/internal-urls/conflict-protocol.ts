@@ -32,7 +32,7 @@ export class ConflictProtocolHandler implements ProtocolHandler {
 		immutable: false,
 		// Verbatim: `conflict://*` per-id directives must be parsed before hashline
 		// stripping, so the handler strips copied prefixes itself.
-		write: { payload: "verbatim", scope: "workspace", tier: () => "write" },
+		write: { via: "handler", payload: "verbatim", scope: "workspace", tier: () => "write" },
 	};
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {

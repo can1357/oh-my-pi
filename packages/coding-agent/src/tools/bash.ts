@@ -16,12 +16,11 @@ import type {
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
 import { isPosixShell } from "@oh-my-pi/pi-utils/procmgr";
-import { DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS, raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
+import { raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
 import type { Settings } from "../config/settings";
 import { applyDirenvPreflight, type BashResult, executeBash } from "../exec/bash-executor";
 import { InternalUrlRouter } from "../internal-urls";
 import { sessionResolveContext } from "../internal-urls/context";
-import { normalizeLocalScheme } from "../internal-urls/parse";
 import bashDescription from "../prompts/tools/bash.md" with { type: "text" };
 import type {
 	ClientBridgeTerminalExitStatus,
@@ -950,7 +949,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// Resolve internal URLs in the extracted cwd. URLs locate their directory
 		// form here (a bare skill URL → the skill directory): the result must pass
 		// the isDirectory check below.
-		if (cwd && InternalUrlRouter.instance().canHandle(normalizeLocalScheme(cwd))) {
+		if (cwd && InternalUrlRouter.instance().canHandle(cwd)) {
 			cwd = await expandInternalUrls(cwd, { context: internalUrlContext, noEscape: true, directory: true });
 		}
 
@@ -1063,9 +1062,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			!autoBgManager.atCapacity
 		) {
 			const autoBackgroundWaitMs = resolveAutoBackgroundWaitMs(
-				Math.floor(
-					cfgBashAutoBackgroundThresholdMs.get(this.session.settings) ?? DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS,
-				),
+				Math.floor(cfgBashAutoBackgroundThresholdMs.get(this.session.settings)),
 				timeoutMs,
 			);
 			const startBackgrounded = autoBackgroundWaitMs === 0;

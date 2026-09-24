@@ -9,7 +9,6 @@
  */
 
 import { InternalUrlRouter } from "../internal-urls";
-import { normalizeLocalScheme } from "../internal-urls/parse";
 import { FileChangeType, notifyWorkspaceWatchedFiles } from "../lsp/client";
 import type { ToolSession } from ".";
 import { invalidateFsScanAfterWrite } from "./fs-cache-invalidation";
@@ -29,7 +28,7 @@ export async function shouldRouteWriteThroughBridge(
 	absolutePath: string,
 ): Promise<boolean> {
 	const router = InternalUrlRouter.instance();
-	if (router.canHandle(normalizeLocalScheme(requestedPath))) return false;
+	if (router.canHandle(requestedPath)) return false;
 	// OMP-owned session artifacts (plan files, scratch notes) must stay off the
 	// editor buffer even when addressed by their absolute sandbox path — e.g.
 	// after tag-based path recovery rebinds a bare `plan.md#tag` onto the
@@ -37,7 +36,7 @@ export async function shouldRouteWriteThroughBridge(
 	if (await targetsLocalSandbox(session, absolutePath)) return false;
 
 	const state = session.getPlanModeState?.();
-	if (!state?.enabled || !router.canHandle(normalizeLocalScheme(state.planFilePath))) return true;
+	if (!state?.enabled || !router.canHandle(state.planFilePath)) return true;
 
 	return absolutePath !== (await resolvePlanPath(session, state.planFilePath));
 }

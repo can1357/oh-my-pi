@@ -9,9 +9,9 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { extractUriScheme, parseInternalUrl } from "../../internal-urls/parse";
+import { splitUrlScheme } from "@oh-my-pi/pi-tui/tools/url-scheme-host";
 import { InternalUrlRouter } from "../../internal-urls/router";
-import type { ProtocolHandler, ResolveContext } from "../../internal-urls/types";
+import type { ResolveContext } from "../../internal-urls/types";
 
 export interface UrlScope {
 	/** Temp corpus root: the cascade's `root`. */
@@ -24,22 +24,14 @@ export interface UrlScope {
 	scopePath: string;
 }
 
-function scopeHandler(url: string): ProtocolHandler | undefined {
-	const router = InternalUrlRouter.instance();
-	if (!router.canHandle(url)) return undefined;
-	const scheme = extractUriScheme(url);
-	return scheme ? router.getHandler(scheme) : undefined;
-}
-
 /** Whether `input` is a URL whose handler expands it into searchable documents (`enumerate`). */
 export function isEnumerableScope(input: string): boolean {
-	return scopeHandler(input.trim())?.enumerate !== undefined;
+	return InternalUrlRouter.instance().canEnumerate(input.trim());
 }
 
 /** Corpus-relative file for a document URL: its host/path segments, minus anything that could escape the corpus. */
 function corpusRel(url: string, index: number): string {
-	const segments = url
-		.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "")
+	const segments = (splitUrlScheme(url)?.rest ?? url)
 		.split(/[/\\]/)
 		.filter(segment => segment.length > 0 && segment !== "." && segment !== "..");
 	return segments.length > 0 ? segments.join("/") : String(index);
@@ -54,19 +46,18 @@ export async function materializeUrlScope(rawInput: string, context?: ResolveCon
 	const input = rawInput.trim();
 	// `find` searches whole files, so a trailing `:N-M` would silently be
 	// ignored downstream — reject it with the reason instead.
-	const { path: url, sel } = InternalUrlRouter.instance().split(input);
+	const router = InternalUrlRouter.instance();
+	const { path: url, sel } = router.split(router.normalize(input));
 	if (sel !== undefined) {
 		throw new ToolError(`find searches whole files; line-range selectors are not supported: ${input}`);
 	}
-	const handler = scopeHandler(url);
-	if (!handler?.enumerate) throw new ToolError(`No searchable documents behind ${url}`);
-	let entries: Array<{ url: string; content: string }>;
+	let entries: Array<{ url: string; content: string }> | null;
 	try {
-		entries = await handler.enumerate(parseInternalUrl(url), context);
+		entries = await router.enumerate(url, context);
 	} catch (error) {
 		throw new ToolError(error instanceof Error ? error.message : String(error));
 	}
-	if (entries.length === 0) throw new ToolError(`No searchable documents behind ${url}`);
+	if (!entries || entries.length === 0) throw new ToolError(`No searchable documents behind ${url}`);
 
 	const dir = await mkdtemp(path.join(tmpdir(), "find-scope-"));
 	const cleanup = async (): Promise<void> => {

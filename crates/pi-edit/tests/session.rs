@@ -573,12 +573,95 @@ async fn internal_url_targets_wait_for_host_answers() {
 	);
 
 	session.finish();
+	assert_eq!(session.apply_url_targets(), ["local://plan.md"]);
+	session.provide("local://plan.md".into(), UrlResolution {
+		absolute:      Some(backing.clone()),
+		error:         None,
+		plan_writable: true,
+	});
 	session
 		.apply(ApplyRequest::default(), &writer)
 		.await
 		.expect("plan-writable URL applies in plan mode");
 	assert_eq!(writer.requests.lock()[0].absolute, backing);
 	assert_eq!(std::fs::read_to_string(&backing).unwrap(), "two\n");
+}
+
+#[tokio::test]
+async fn apply_never_reuses_url_answers_given_to_previews() {
+	let mut ws = Workspace::new(EditMode::Replace);
+	ws.config.policy.url_schemes = vec!["local".into()];
+	let sandbox = tempfile::tempdir().expect("sandbox");
+	let stale = sandbox.path().join("stale.md");
+	let fresh = sandbox.path().join("fresh.md");
+	std::fs::write(&stale, "one\n").unwrap();
+	std::fs::write(&fresh, "one\n").unwrap();
+	let answer = |absolute: &std::path::Path| UrlResolution {
+		absolute:      Some(absolute.to_owned()),
+		error:         None,
+		plan_writable: false,
+	};
+	let writer = DiskWriter::default();
+
+	let mut session = ws.session();
+	session.set_args_json(r#"{"old_string":"one","new_string":"two","path":"local:/plan.md"}"#);
+	session.finish();
+	session.preview();
+	assert_eq!(session.take_unresolved(), ["local://plan.md"]);
+	session.provide("local://plan.md".into(), answer(&stale));
+	assert!(session.preview().files[0].diff.is_some(), "the preview uses its answer");
+
+	let err = session
+		.apply(ApplyRequest::default(), &writer)
+		.await
+		.expect_err("the preview answer is not reused");
+	assert!(matches!(&err, EditError::UnresolvedUrl(url) if url == "local://plan.md"), "{err}");
+	assert_eq!(session.take_unresolved(), ["local://plan.md"]);
+	session.provide("local://plan.md".into(), answer(&fresh));
+	session
+		.apply(ApplyRequest::default(), &writer)
+		.await
+		.expect("apply uses its own answer");
+	assert_eq!(std::fs::read_to_string(&fresh).unwrap(), "two\n");
+	assert_eq!(std::fs::read_to_string(&stale).unwrap(), "one\n");
+}
+
+#[tokio::test]
+async fn apply_url_targets_cover_every_url_before_the_first_stage() {
+	let mut ws = Workspace::new(EditMode::ApplyPatch);
+	ws.config.policy.url_schemes = vec!["local".into()];
+	ws.config.raw_input = true;
+	ws.write("plain.txt", "one\n");
+	let sandbox = tempfile::tempdir().expect("sandbox");
+	for name in ["a.md", "b.md"] {
+		std::fs::write(sandbox.path().join(name), "one\n").unwrap();
+	}
+	let mut session = ws.session();
+	session.push(
+		"*** Begin Patch\n*** Update File: local://a.md\n@@\n-one\n+two\n*** Update File: \
+		 local:/b.md\n*** Move to: local://c.md\n@@\n-one\n+two\n*** Update File: \
+		 plain.txt\n@@\n-one\n+two\n*** End Patch\n",
+	);
+	session.finish();
+	let targets = session.apply_url_targets();
+	assert_eq!(targets, ["local://a.md", "local://b.md", "local://c.md"]);
+	for url in targets {
+		let name = url.trim_start_matches("local://");
+		session.provide(url.clone(), UrlResolution {
+			absolute:      Some(sandbox.path().join(name)),
+			error:         None,
+			plan_writable: false,
+		});
+	}
+	let writer = DiskWriter::default();
+	session
+		.apply(ApplyRequest::default(), &writer)
+		.await
+		.expect("every URL answered up front: the first stage succeeds");
+	assert_eq!(std::fs::read_to_string(sandbox.path().join("a.md")).unwrap(), "two\n");
+	assert_eq!(std::fs::read_to_string(sandbox.path().join("c.md")).unwrap(), "two\n");
+	assert!(!sandbox.path().join("b.md").exists());
+	assert_eq!(ws.read("plain.txt").as_deref(), Some("two\n"));
 }
 
 #[tokio::test]

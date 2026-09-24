@@ -133,7 +133,7 @@ impl FileCache {
 	/// reads made for it.
 	pub fn provide(&mut self, url: String, resolution: UrlResolution) {
 		let policy = &self.policy;
-		let names_url = |authored: &str| policy.url_target(authored) == Some(url.as_str());
+		let names_url = |authored: &str| policy.url_target(authored).as_deref() == Some(url.as_str());
 		self
 			.resolutions
 			.retain(|(authored, _), _| !names_url(authored));
@@ -148,6 +148,20 @@ impl FileCache {
 	/// (deduped, first-seen order).
 	pub fn take_unresolved(&mut self) -> Vec<String> {
 		std::mem::take(&mut self.unresolved)
+	}
+
+	/// Drop every host URL answer and recorded miss, plus the resolutions and
+	/// reads made from them, so URL targets ask the host again.
+	pub fn forget_urls(&mut self) {
+		let policy = &self.policy;
+		self
+			.resolutions
+			.retain(|(authored, _), _| !policy.is_internal_url(authored));
+		self
+			.reads
+			.retain(|_, (_, read)| !policy.is_internal_url(&read.resolved.display));
+		self.urls.clear();
+		self.unresolved.clear();
 	}
 
 	/// Plan-mode write guard, judging URL targets by their host answers.

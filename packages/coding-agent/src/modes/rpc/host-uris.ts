@@ -53,7 +53,7 @@ class RpcHostUriProtocolHandler implements ProtocolHandler {
 			backing: "remote",
 			selectors: "none",
 			immutable: definition.immutable === true,
-			write: writable ? { payload: "text", scope: "workspace", tier: () => "write" } : undefined,
+			write: writable ? { via: "handler", payload: "text", scope: "workspace", tier: () => "write" } : undefined,
 		};
 		if (writable) {
 			this.write = (url, content, context) => this.#bridge.requestWrite(this.scheme, url, content, context);

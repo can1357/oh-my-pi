@@ -44,9 +44,10 @@ export function ensureWithinRoot(targetPath: string, rootPath: string, scheme: s
 }
 
 /**
- * Realpath of `targetPath` under the already-realpathed `realRoot`, checking the
- * lexical target, its real parent, and its real path for containment so symlinks
- * cannot escape the root. Returns `undefined` when the target does not exist.
+ * Realpath of an existing `targetPath` under the already-realpathed `realRoot`,
+ * checking the lexical target, its real parent (when it exists), and its real
+ * path for containment so symlinks cannot escape the root. Returns `undefined`
+ * when the target does not exist; write paths use {@link ensureCreatableWithinRoot}.
  */
 export async function containedRealPath(
 	targetPath: string,
@@ -71,6 +72,33 @@ export async function containedRealPath(
 	}
 	ensureWithinRoot(realTargetPath, realRoot, scheme);
 	return realTargetPath;
+}
+
+/**
+ * Throw {@link UrlContainmentError} unless creating `targetPath` (lexically under
+ * the already-realpathed `realRoot`) stays inside the root: the deepest existing
+ * entry on the way must canonically resolve within it, and no entry may be a
+ * dangling symlink a `mkdir -p` + write would follow out of the root.
+ */
+export async function ensureCreatableWithinRoot(targetPath: string, realRoot: string, scheme: string): Promise<void> {
+	ensureWithinRoot(targetPath, realRoot, scheme);
+	for (let current = targetPath; ; current = path.dirname(current)) {
+		try {
+			ensureWithinRoot(await fs.realpath(current), realRoot, scheme);
+			return;
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+		}
+		let isLink: boolean;
+		try {
+			isLink = (await fs.lstat(current)).isSymbolicLink();
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+			isLink = false;
+		}
+		if (isLink) throw new UrlContainmentError(`${scheme}:// URL goes through a dangling symlink`);
+		if (current === realRoot || path.dirname(current) === current) return;
+	}
 }
 
 /** Plain directory listing: directories first (`name/`), then files, by name; `(empty directory)` when empty. */

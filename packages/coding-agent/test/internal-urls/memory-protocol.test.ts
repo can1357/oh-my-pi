@@ -496,6 +496,25 @@ describe("MemoryProtocolHandler", () => {
 			);
 		});
 	});
+
+	it("refuses create targets escaping through a symlinked ancestor or dangling symlink", async () => {
+		if (process.platform === "win32") return;
+
+		await withMemoryFixture(async ({ cwd, memoryRoot, cleanupRoot }) => {
+			const outsideDir = path.join(cleanupRoot, "outside");
+			await fs.mkdir(outsideDir, { recursive: true });
+			await fs.symlink(outsideDir, path.join(memoryRoot, "linked"));
+			await fs.symlink(path.join(outsideDir, "victim.md"), path.join(memoryRoot, "dangling.md"));
+
+			const router = InternalUrlRouter.instance();
+			await expect(router.locate("memory://root/linked/new/f.md", { cwd }, { create: true })).rejects.toThrow(
+				"memory:// URL escapes memory root",
+			);
+			await expect(router.locate("memory://root/dangling.md", { cwd }, { create: true })).rejects.toThrow(
+				"memory:// URL goes through a dangling symlink",
+			);
+		});
+	});
 });
 
 interface MnemopiFixture {

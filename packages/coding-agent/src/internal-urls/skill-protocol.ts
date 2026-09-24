@@ -17,6 +17,7 @@ import skillDoc from "../prompts/internal-urls/skill.md" with { type: "text" };
 import {
 	buildDirectoryResource,
 	contentTypeForPath,
+	ensureCreatableWithinRoot,
 	UrlContainmentError,
 	validateRelativePath,
 } from "./filesystem-resource";
@@ -30,29 +31,6 @@ import type {
 	SchemeSpec,
 	UrlCompletion,
 } from "./types";
-
-/**
- * Would-be path for a missing plugin-skill target: the nearest existing
- * ancestor must canonically resolve inside the plugin root, and no entry on
- * the way may be a dangling symlink a write would follow out of the package.
- */
-async function containedCreatePath(containRoot: string, target: string, href: string): Promise<string> {
-	for (let current = target; ; current = path.dirname(current)) {
-		const contained = await resolveContainedPath(containRoot, current);
-		if (contained.status === "outside") {
-			throw new UrlContainmentError(`skill:// path resolves outside the plugin root: ${href}`);
-		}
-		if (contained.status === "ok") return target;
-		try {
-			await fs.lstat(current);
-		} catch (error) {
-			if (!isEnoent(error)) throw error;
-			if (path.dirname(current) === current) return target;
-			continue;
-		}
-		throw new UrlContainmentError(`skill:// path goes through a dangling symlink: ${href}`);
-	}
-}
 
 /**
  * Path a skill:// URL addresses, after traversal and plugin-root containment
@@ -100,7 +78,8 @@ async function skillTargetPath(
 		throw new UrlContainmentError(`skill:// path resolves outside the plugin root: ${url.href}`);
 	}
 	if (contained.status === "ok") return contained.realPath;
-	return create ? containedCreatePath(skill.containRoot, resolvedPath, url.href) : resolvedPath;
+	if (create) await ensureCreatableWithinRoot(resolvedPath, skill.containRoot, "skill");
+	return resolvedPath;
 }
 
 /**
@@ -114,6 +93,7 @@ export class SkillProtocolHandler implements ProtocolHandler {
 		immutable: true,
 		unbounded: true,
 		linkable: true,
+		shellOperand: true,
 	};
 
 	/** Advertised only when loaded skills are readable through an active tool. */
@@ -152,21 +132,25 @@ export class SkillProtocolHandler implements ProtocolHandler {
 		};
 	}
 
-	/** Skill file or directory; `options.directory` maps a bare `skill://<name>` to the skill base dir. */
+	/**
+	 * Skill file or directory; `options.directory` maps a bare `skill://<name>` to the skill base dir.
+	 * A missing plugin-skill target (or dangling symlink) cannot be proven inside the plugin root, so
+	 * it throws {@link UrlContainmentError} instead of locating to null.
+	 */
 	async locate(url: InternalUrl, context?: ResolveContext, options?: LocateOptions): Promise<string | null> {
-		const targetPath = await skillTargetPath(
-			url,
-			context?.skills ?? getActiveSkills(),
-			options?.directory === true,
-			options?.create === true,
-		);
+		const skills = context?.skills ?? getActiveSkills();
+		const targetPath = await skillTargetPath(url, skills, options?.directory === true, options?.create === true);
 		if (options?.create) return targetPath;
 		try {
 			await fs.stat(targetPath);
 			return targetPath;
 		} catch (error) {
-			if (isEnoent(error)) return null;
-			throw error;
+			if (!isEnoent(error)) throw error;
+			const skillName = url.rawHost || url.hostname;
+			if (skills.find(skill => skill.name === skillName)?.containRoot) {
+				throw new UrlContainmentError(`skill:// path does not exist: ${url.href}`);
+			}
+			return null;
 		}
 	}
 

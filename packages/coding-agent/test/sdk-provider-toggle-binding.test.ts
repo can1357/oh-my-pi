@@ -8,6 +8,7 @@ import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { createSubagentSettings } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 import { cfgDisabledProviders } from "@oh-my-pi/pi-coding-agent/config/model-settings";
@@ -26,7 +27,7 @@ const model = buildModel({
 } as ModelSpec<Api>) as Model<Api>;
 
 // Discovery provider toggles are process-global and follow live edits on the
-// top-level session's Settings; a subagent's isolated snapshot must not take over.
+// top-level session's Settings; a subagent's settings overlay must not take over.
 describe("discovery provider toggles with subagents", () => {
 	const sessions: AgentSession[] = [];
 
@@ -64,7 +65,7 @@ describe("discovery provider toggles with subagents", () => {
 		};
 		const parentSettings = Settings.isolated({ "compaction.enabled": false });
 		await start(parentSettings);
-		await start(Settings.isolated({ "compaction.enabled": false }), "0-Sub");
+		await start(createSubagentSettings(parentSettings), "0-Sub");
 
 		cfgDisabledProviders.set(parentSettings, ["claude"]);
 		expect(isProviderEnabled("claude")).toBe(false);

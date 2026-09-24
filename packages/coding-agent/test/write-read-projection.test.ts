@@ -186,7 +186,7 @@ describe("write tool read projection guard", () => {
 				backing: "virtual",
 				selectors: "lines",
 				immutable: false,
-				write: { payload: "text", scope: "workspace", tier: () => "write" },
+				write: { via: "handler", payload: "text", scope: "workspace", tier: () => "write" },
 			},
 			resolve: async resolvedUrl => ({
 				url: resolvedUrl.href,

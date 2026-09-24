@@ -10,7 +10,7 @@ import type { ImageContent, ToolExample } from "@oh-my-pi/pi-ai";
 import { formatBackgroundNotice } from "@oh-my-pi/pi-tui/tools/bash";
 import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { isRecord, prompt } from "@oh-my-pi/pi-utils";
-import { DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS, raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
+import { raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
 import { jsBackend, pythonBackend } from "../eval";
 import type { ExecutorBackend, ExecutorBackendResult } from "../eval/backend";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../eval/bridge-timeout";
@@ -377,7 +377,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		if (!session) return {};
 		const backends = resolveEvalBackends(session);
 		const depthAllowsSpawning = canSpawnAtDepth(
-			cfgTaskMaxRecursionDepth.get(session.settings) ?? 2,
+			cfgTaskMaxRecursionDepth.get(session.settings),
 			session.taskDepth ?? 0,
 		);
 		return {
@@ -589,10 +589,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			return await run(signal, emitToolUpdate);
 		}
 
-		const thresholdMs = Math.max(
-			0,
-			Math.floor(cfgEvalAutoBackgroundThresholdMs.get(session.settings) ?? DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS),
-		);
+		const thresholdMs = Math.max(0, Math.floor(cfgEvalAutoBackgroundThresholdMs.get(session.settings)));
 		// The wait budget mirrors #runCells' clamped cell timeout. The cell budget
 		// is runtime work (it pauses across agent()/tool bridge calls), so a cell
 		// can legitimately outlive it in wall time — exactly the case

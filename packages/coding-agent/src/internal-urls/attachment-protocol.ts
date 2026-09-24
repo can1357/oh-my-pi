@@ -13,7 +13,13 @@ function attachmentUri(url: InternalUrl): string {
 /** Session image attachments (`attachment://1`), located at their original image files. */
 export class AttachmentProtocolHandler implements ProtocolHandler {
 	readonly scheme = "attachment";
-	readonly spec: SchemeSpec = { backing: "file", selectors: "none", immutable: true };
+	readonly spec: SchemeSpec = {
+		backing: "file",
+		selectors: "none",
+		immutable: true,
+		imageQuestion: true,
+		shellOperand: true,
+	};
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
 		const uri = attachmentUri(url);

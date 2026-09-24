@@ -16,8 +16,6 @@ export interface ModelTagDef {
 /** Model tags keyed by tag id (`modelTags`). */
 export type ModelTagsSettings = Record<string, ModelTagDef>;
 
-// Typed defaults for array/record settings — named constants avoid `as` casts
-// under `as const` while still letting SettingValue infer the correct element type.
 const EMPTY_STRING_ARRAY: string[] = [];
 const EMPTY_STRING_RECORD: Record<string, string> = {};
 const DEFAULT_CYCLE_ORDER: string[] = ["smol", "default", "slow"];

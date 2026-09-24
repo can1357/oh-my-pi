@@ -13,8 +13,6 @@ export interface BashInterceptorRule {
 	allowSubcommands?: string[];
 }
 
-// Typed defaults for array/record settings — named constants avoid `as` casts
-// under `as const` while still letting SettingValue infer the correct element type.
 const EMPTY_STRING_ARRAY: string[] = [];
 export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 	{
