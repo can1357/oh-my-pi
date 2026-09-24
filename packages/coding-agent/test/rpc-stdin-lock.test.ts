@@ -7,7 +7,12 @@ import { isRecord, readJsonl } from "@oh-my-pi/pi-utils";
 // loaded CI runners, so the read loop carries its own deadline inside bun's:
 // on expiry the child is reaped and the failure surfaces the exit code and
 // the stderr tail instead of a bare timeout or an `undefined` response.
-const PROBE_DEADLINE_MS = 45_000;
+// Reaping and the stderr drain carry their own bounds too: SIGTERM first,
+// then SIGKILL, so a wedged child or a descendant holding the pipe open
+// cannot fall through to bun's bare 60 s timeout.
+const PROBE_DEADLINE_MS = 40_000;
+const REAP_TIMEOUT_MS = 5_000;
+const KILL_TIMEOUT_MS = 2_000;
 const STDERR_TAIL_CHARS = 2000;
 
 async function expectRpcOwnsStdin(): Promise<void> {
@@ -40,35 +45,71 @@ async function expectRpcOwnsStdin(): Promise<void> {
 	await child.stdin.flush();
 
 	const timedOut = Symbol("probe-timed-out");
-	const readProbe = (async () => {
-		for await (const frame of readJsonl<unknown>(child.stdout as ReadableStream<Uint8Array>)) {
-			if (isRecord(frame) && frame.type === "response" && frame.id === "probe") {
-				return frame;
+	let probeError: unknown;
+	const readProbe = (async (): Promise<Record<string, unknown> | undefined> => {
+		try {
+			for await (const frame of readJsonl<unknown>(child.stdout as ReadableStream<Uint8Array>)) {
+				if (isRecord(frame) && frame.type === "response" && frame.id === "probe") {
+					return frame;
+				}
 			}
+		} catch (err) {
+			probeError = err;
 		}
 		return undefined;
 	})();
 
-	let result: unknown;
+	let result: Record<string, unknown> | undefined | typeof timedOut;
 	let exitCode: number | null;
 	try {
-		result = await Promise.race([readProbe, Bun.sleep(PROBE_DEADLINE_MS).then(() => timedOut)]);
+		result = await Promise.race([readProbe, Bun.sleep(PROBE_DEADLINE_MS).then((): typeof timedOut => timedOut)]);
 	} finally {
-		child.stdin.end();
-		child.kill();
-		exitCode = await child.exited.catch(() => null);
+		try {
+			child.stdin.end();
+		} catch {}
+		try {
+			child.kill();
+		} catch {}
+		exitCode = await Promise.race([child.exited.catch(() => null), Bun.sleep(REAP_TIMEOUT_MS).then(() => null)]);
+		if (exitCode === null) {
+			try {
+				child.kill("SIGKILL");
+			} catch {}
+			exitCode = await Promise.race([child.exited.catch(() => null), Bun.sleep(KILL_TIMEOUT_MS).then(() => null)]);
+		}
 	}
 
-	const stderr = await stderrPromise;
+	let stderrError: unknown;
+	const readStderr = stderrPromise.catch((err: unknown) => {
+		stderrError = err;
+		return `<stderr read failed: ${String(err)}>`;
+	});
+	let stderr: string | null = await Promise.race([readStderr, Bun.sleep(REAP_TIMEOUT_MS).then((): null => null)]);
+	if (stderr === null) {
+		try {
+			child.kill("SIGKILL");
+		} catch {}
+		stderr = await Promise.race([readStderr, Bun.sleep(KILL_TIMEOUT_MS).then((): null => null)]);
+		if (stderr === null) {
+			throw new Error(
+				`RPC child stderr drain timed out (exit ${String(exitCode)}; probe ${result === timedOut ? "deadline expired" : result === undefined ? "stdout ended without response" : "response received"}); killing the child did not release the pipe — possible descendant holding stderr open`,
+			);
+		}
+	}
+	if (stderrError !== undefined) {
+		throw new Error(
+			`RPC child stderr unreadable (exit ${String(exitCode)}; probe ${result === timedOut ? "deadline expired" : result === undefined ? "stdout ended without response" : "response received"}; stderr read failed: ${String(stderrError)}); stdin-ownership invariant unverifiable`,
+		);
+	}
 	if (result === timedOut) {
 		throw new Error(
 			`RPC probe response not received within ${PROBE_DEADLINE_MS}ms (exit ${String(exitCode)}); child stderr tail:\n${stderr.slice(-STDERR_TAIL_CHARS)}`,
 		);
 	}
-	const stateResponse = result as Record<string, unknown> | undefined;
+	const stateResponse = result;
 	if (stateResponse === undefined) {
 		throw new Error(
-			`RPC child stdout ended without the probe response (exit ${String(exitCode)}); child stderr tail:\n${stderr.slice(-STDERR_TAIL_CHARS)}`,
+			`RPC child stdout ended without the probe response (exit ${String(exitCode)}${probeError === undefined ? "" : `; stdout read failed: ${String(probeError)}`}); child stderr tail:\n${stderr.slice(-STDERR_TAIL_CHARS)}`,
 		);
 	}
 	// The adversarial fixture is EXPECTED to fail loading — RPC claimed stdin
