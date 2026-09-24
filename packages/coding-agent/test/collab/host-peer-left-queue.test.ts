@@ -241,6 +241,11 @@ it("does not spend a reissued id's share on the departed asker's stale errors", 
 		asker.send({ t: "hello", proto: COLLAB_PROTO, name: "asker", writeToken });
 		for (let i = 0; i < STALE_PROMPTS; i++) asker.send({ t: "prompt", text: `turn ${i}` });
 	};
+	// Guests retry a room the relay recreated, and this one must stay gone: a
+	// rejoin would resend its hello and turns and take a share of its own.
+	asker.onClose = (_reason, willReconnect) => {
+		if (willReconnect) asker.close();
+	};
 	asker.connect();
 	await waitFor(() => started >= STALE_PROMPTS, "host never started the asker's turns");
 

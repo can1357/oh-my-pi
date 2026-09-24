@@ -277,7 +277,7 @@ it("does not shed a bystander when settling the shed guest's ask", async () => {
 	expect(bystander.frames.filter(frame => frame.t === "transcript").length).toBe(bystanderFetches);
 }, 30_000);
 
-it("settles an ask the guest holding it left with", async () => {
+it("retains an ask the guest holding it left with for the next writer", async () => {
 	const relay = installInMemoryRelay();
 	instrumentRelay(relay, { throttle: false });
 	const seen: HostObservations = { notices: [], participantCounts: [] };
@@ -289,31 +289,50 @@ it("settles an ask the guest holding it left with", async () => {
 	if ("error" in parsed) throw new Error(parsed.error);
 	const key = await importRoomKey(parsed.key);
 	const writeToken = parsed.writeToken ? Buffer.from(parsed.writeToken).toString("base64url") : undefined;
+	const joinWriter = (name: string): { socket: CollabSocket; received: CollabFrame[] } => {
+		const socket = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key });
+		cleanups.push(() => socket.close());
+		const received: CollabFrame[] = [];
+		socket.onFrame = frame => received.push(frame);
+		socket.onOpen = () => socket.send({ t: "hello", proto: COLLAB_PROTO, name, writeToken });
+		socket.connect();
+		return { socket, received };
+	};
 
-	const guest = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key });
-	cleanups.push(() => guest.close());
-	const received: CollabFrame[] = [];
-	guest.onFrame = frame => received.push(frame);
-	guest.onOpen = () => guest.send({ t: "hello", proto: COLLAB_PROTO, name: "answerer", writeToken });
-	guest.connect();
+	const first = joinWriter("answerer");
 	await waitFor(
-		() => seen.notices.some(notice => notice.includes("joined the collab session")),
+		() => seen.notices.some(notice => notice.includes("answerer joined the collab session")),
 		"host never welcomed the guest",
 	);
 
 	// Delivered this time: the dialog is on the guest's screen when it closes the
-	// tab, which leaves the ask with no recipient that can answer it.
+	// tab. Leaving is not a refusal to answer, so the ask goes back to waiting for
+	// a writer, exactly as one raised before anybody joined does.
 	const ask = host.requestGuestUi({ kind: "select", title: "pick one", options: [{ label: "a" }] });
 	if (!ask) throw new Error("host did not offer the ask to the writable guest");
-	await waitFor(() => received.some(frame => frame.t === "ui-request"), "guest never received the dialog");
+	let settled: unknown;
+	void ask.then(result => {
+		settled = result;
+	});
+	await waitFor(() => first.received.some(frame => frame.t === "ui-request"), "guest never received the dialog");
 
-	guest.close();
+	first.socket.close();
 	await waitFor(
-		() => seen.notices.some(notice => notice.includes("left the collab session")),
+		() => seen.notices.some(notice => notice.includes("answerer left the collab session")),
 		"host never observed the guest leaving",
 	);
-	const settled = await Promise.race([ask, Bun.sleep(2_000).then(() => "still waiting" as const)]);
-	expect(settled).toEqual({ kind: "unavailable" });
+	await Bun.sleep(100);
+	expect(settled).toBeUndefined();
+
+	const next = joinWriter("successor");
+	await waitFor(
+		() => next.received.some(frame => frame.t === "ui-request"),
+		"the next writer was never handed the retained ask",
+	);
+	const request = next.received.find(frame => frame.t === "ui-request");
+	if (request?.t !== "ui-request") throw new Error("expected a ui-request");
+	next.socket.send({ t: "ui-response", reqId: request.request.reqId, value: "a" });
+	expect(await ask).toEqual({ kind: "answered", value: "a" });
 }, 30_000);
 
 it("settles an ask whose holder gave up write permission", async () => {

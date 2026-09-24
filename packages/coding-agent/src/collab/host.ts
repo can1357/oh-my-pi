@@ -568,7 +568,7 @@ export class CollabHost {
 	/** @returns the writable peers the frame was admitted for. */
 	#sendWritablePeers(frame: CollabFrame): number[] {
 		const socket = this.#socket;
-		if (!socket) return [];
+		if (!socket || this.#sendSuppressed(frame)) return [];
 		const admitted: number[] = [];
 		for (const [peerId, peer] of this.#peers) {
 			if (peer.canWrite && socket.send(frame, peerId)) admitted.push(peerId);
@@ -577,16 +577,22 @@ export class CollabHost {
 	}
 
 	/**
-	 * Drop {@link peer} from every outstanding ask, settling the ones it was the
-	 * last recipient of. Called wherever a peer stops being able to answer:
-	 * departure, a shed, or a `hello` that gives up write permission. Without it
-	 * an ask the queue admitted counts as delivered for ever, and its caller waits
-	 * for a reply from somebody the host has already written off.
+	 * Drop {@link peer} from every outstanding ask. Called wherever a peer stops
+	 * being able to answer: departure, a shed, or a `hello` that gives up write
+	 * permission. Without it an ask the queue admitted counts as delivered for
+	 * ever, and its caller waits for a reply from somebody the host has already
+	 * written off.
+	 *
+	 * A departure returns the ask to the retained state a dialog raised before any
+	 * writer joined is in, so the next writer is handed it on join. A shed or a
+	 * demotion settles an ask that has no recipient left: the shed peer's rejoin
+	 * would replay the backlog it just outran, and the demoted peer is still in
+	 * the room without the right to answer.
 	 */
-	#dropAskRecipient(peer: number): void {
+	#dropAskRecipient(peer: number, retainWhenEmpty = false): void {
 		for (const pending of this.#pendingUi.values()) {
 			if (!pending.recipients.delete(peer)) continue;
-			if (pending.recipients.size === 0) pending.settle({ kind: "unavailable" });
+			if (pending.recipients.size === 0 && !retainWhenEmpty) pending.settle({ kind: "unavailable" });
 		}
 	}
 
@@ -819,12 +825,7 @@ export class CollabHost {
 
 	/** @returns false when a saturated queue discarded an advisory frame. */
 	#broadcast(frame: CollabFrame, advisory = false): boolean {
-		if (this.#stopped || !this.#socket) return false;
-		if (this.#ctx.sessionManager.getSessionId() !== this.#sessionId) {
-			void this.stop("session switched");
-			this.#ctx.session.emitNotice("warning", "Collab ended: session switched", "collab");
-			return false;
-		}
+		if (this.#stopped || !this.#socket || this.#sendSuppressed(frame)) return false;
 		if (advisory) return this.#socket.broadcastAdvisory(frame);
 		this.#socket.send(frame);
 		return true;
@@ -896,8 +897,18 @@ export class CollabHost {
 		// Ending an existing dialog contains only its old-room request ID, never
 		// current-session data. Do not strand guests if it settles during a
 		// provisional /resume that later rolls back. All other traffic stays gated.
-		if (this.ending || (!this.#sessionStillCurrent() && frame.t !== "ui-request-end")) return;
+		if (this.#sendSuppressed(frame)) return;
 		this.#socket?.send(frame, toPeer);
+	}
+
+	/**
+	 * The outbound gate every guest-bound frame passes, whichever helper builds it.
+	 * Ending an existing dialog contains only its old-room request ID, never
+	 * current-session data, so `ui-request-end` alone may leave during a
+	 * provisional `/resume` that later rolls back.
+	 */
+	#sendSuppressed(frame: CollabFrame): boolean {
+		return this.ending || (!this.#sessionStillCurrent() && frame.t !== "ui-request-end");
 	}
 
 	#handleFrame(frame: CollabFrame, fromPeer: number): void {
@@ -982,7 +993,9 @@ export class CollabHost {
 	 */
 	#sendError(message: string, toPeer: number): boolean {
 		const bounded = message.length <= ERROR_MESSAGE_MAX ? message : `${message.slice(0, ERROR_MESSAGE_MAX)}…`;
-		return this.#socket?.send({ t: "error", message: bounded }, toPeer) ?? false;
+		const frame: CollabFrame = { t: "error", message: bounded };
+		if (this.#sendSuppressed(frame)) return false;
+		return this.#socket?.send(frame, toPeer) ?? false;
 	}
 
 	/**
@@ -1110,11 +1123,20 @@ export class CollabHost {
 			entryCount: entries.length,
 			readOnly: canWrite ? undefined : true,
 		};
+		// Retained asks ride in the welcome batch rather than as one queue entry
+		// each: up to MAX_PENDING_UI_REQUESTS of them are replayed to a joining
+		// writer, which is past the per-peer share on its own.
+		const replayed = canWrite ? [...this.#pendingUi.values()] : [];
+		let replayBytes = 0;
+		for (const pending of replayed) {
+			replayBytes += Buffer.byteLength(JSON.stringify({ t: "ui-request", request: pending.request }));
+		}
 		// snapshotForReplication clones, and the batch holds that clone until it
 		// drains, so the queue is told what it is keeping alive: the serialized byte
 		// length of what stripping left, before an entry filter that only shrinks it
-		// further.
-		if (!socket.sendBatch(this.#welcomeWithSnapshot(welcome, entries), fromPeer, snapshotBytes)) {
+		// further, plus the replayed asks.
+		const batch = this.#welcomeWithSnapshot(welcome, entries, replayed);
+		if (!socket.sendBatch(batch, fromPeer, snapshotBytes + replayBytes)) {
 			// No welcome reached the guest, and a guest applies nothing before one. So
 			// there is no participant to announce, nothing to add to the roster, and
 			// above all nobody to hand a pending ask to: an ask recorded against a peer
@@ -1129,11 +1151,7 @@ export class CollabHost {
 			return;
 		}
 		if (canWrite) {
-			for (const pending of this.#pendingUi.values()) {
-				if (socket.send({ t: "ui-request", request: pending.request }, fromPeer)) {
-					pending.recipients.add(fromPeer);
-				}
-			}
+			for (const pending of replayed) pending.recipients.add(fromPeer);
 		} else {
 			// A repeated hello without the write token demotes the peer, and a
 			// read-only peer's answer is rejected, so it is no longer a recipient of
@@ -1163,9 +1181,11 @@ export class CollabHost {
 	*#welcomeWithSnapshot(
 		welcome: CollabFrame,
 		entries: (StoredSessionEntry & WireSessionEntry)[],
+		replayed: readonly PendingCollabUiRequest[] = [],
 	): Generator<CollabFrame> {
 		yield welcome;
 		yield* this.#snapshotChunks(entries);
+		for (const pending of replayed) yield { t: "ui-request", request: pending.request };
 	}
 
 	/**
@@ -1405,7 +1425,7 @@ export class CollabHost {
 	#handlePeerLeft(peer: number): void {
 		const name = this.#peers.get(peer)?.name;
 		this.#peers.delete(peer);
-		this.#dropAskRecipient(peer);
+		this.#dropAskRecipient(peer, true);
 		if (!this.#guestTrafficAllowed()) return;
 		if (name) this.#ctx.session.emitNotice("info", `${name} left the collab session`, "collab");
 		this.#updateStatusSegment();
@@ -1597,15 +1617,54 @@ export class CollabHost {
 	}
 
 	/** Incremental transcript read mirroring the hub's readFileIncremental contract. */
-	async #handleFetchTranscript(reqId: number, agentId: string, fromByte: number, fromPeer: number): Promise<void> {
+	async #handleFetchTranscript(reqId: unknown, agentId: unknown, fromByte: unknown, fromPeer: number): Promise<void> {
+		// The reply echoes both of these back — `reqId` so the guest can match it to
+		// its request, `fromByte` as the resume point — so this frame is a second
+		// carrier for a guest value, and #sendError cannot reach it: unnarrowed, a
+		// `reqId` came back at whatever length it arrived. Narrowed rather than
+		// truncated, because neither field is a label — a correlation id the host
+		// altered would match nothing at the other end.
+		// Safe integers, not merely finite: `fromByte` is a byte offset handed to
+		// `read`, and `reqId` is matched by identity at the other end. `Number.isFinite`
+		// admits -1, 0.5 and 2 ** 53, none of which is either of those things.
+		if (!Number.isSafeInteger(reqId) || (reqId as number) < 0) {
+			this.#sendError("fetch-transcript needs a non-negative integer reqId", fromPeer);
+			return;
+		}
+		if (!Number.isSafeInteger(fromByte) || (fromByte as number) < 0) {
+			this.#sendError("fetch-transcript needs a non-negative integer fromByte", fromPeer);
+			return;
+		}
+		return this.#fetchTranscript(reqId as number, agentId, fromByte as number, fromPeer);
+	}
+
+	async #fetchTranscript(reqId: number, agentId: unknown, fromByte: number, fromPeer: number): Promise<void> {
+		// The read is asynchronous, so the peer can leave — or the whole room can be
+		// recreated — before there is anything to reply with.
 		const stillTheAsker = this.#socket?.addressee(fromPeer);
+		// The one place a `transcript` frame is built, and the rule #sendError enforces
+		// for error replies holds here too: this frame carries an error string, and
+		// #sendError cannot reach it because it is not an error frame.
+		//
+		// No *unbounded* input reaches this bound today, and it is deliberately kept
+		// anyway. The only dynamic error here comes from `fs` and quotes a host-owned
+		// path, and #reason has already capped it to 513 units by the time it arrives
+		// — so the slice can fire on that one extra unit but can never be what saves
+		// the frame. That is a property of the callers, not of this site, which is
+		// exactly why the guard belongs here: no test can fail if it is deleted, so
+		// deleting it will look correct. It is structural: the premise of this design
+		// is that whatever last touches a frame bounds it, so
+		// that a caller composing a new message somewhere else cannot reintroduce the
+		// defect. Dropping it because today's one error happens to be host-owned is
+		// the reasoning that cost this branch three rounds — bound the ingredients,
+		// trust the current callers, meet a new ingredient.
 		const reply = (text: string, newSize: number, error?: string) => {
 			if (!stillTheAsker?.()) return;
 			const bounded =
 				error === undefined || error.length <= ERROR_MESSAGE_MAX ? error : `${error.slice(0, ERROR_MESSAGE_MAX)}…`;
-			this.#socket?.send({ t: "transcript", reqId, text, newSize, error: bounded }, fromPeer);
+			this.#send({ t: "transcript", reqId, text, newSize, error: bounded }, fromPeer);
 		};
-		const ref = AgentRegistry.global().get(agentId);
+		const ref = AgentRegistry.global().get(typeof agentId === "string" ? agentId : "");
 		if (!ref?.sessionFile || ref.kind === "advisor") {
 			reply("", fromByte, "no transcript available");
 			return;

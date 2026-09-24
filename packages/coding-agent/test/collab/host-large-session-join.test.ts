@@ -302,11 +302,20 @@ it("registers nothing for a join whose welcome the queue refused", async () => {
 	expect(seen.notices.filter(notice => notice.includes("refused joined"))).toEqual([]);
 	expect(seen.participantCounts.filter(count => count > 2)).toEqual([]);
 
-	// And it was never handed the pending ask. Once the one guest that could answer
-	// leaves, the ask has no recipients left and settles, instead of waiting on a
-	// participant that never joined.
+	// And it was never handed the pending ask. The one guest that could answer then
+	// leaves, which returns the ask to the retained state for whichever writer
+	// joins next rather than settling it.
+	expect(refused.frames.filter(frame => frame.t === "ui-request")).toEqual([]);
 	resident.close();
-	await waitFor(() => settled !== undefined, "the ask never settled after its only recipient left", 8_000);
+	await waitFor(
+		() => seen.notices.some(notice => notice.includes("resident left")),
+		"the host never observed the resident leaving",
+		8_000,
+	);
+	await Bun.sleep(100);
+	expect(settled).toBeUndefined();
+	await host.stop("test done");
+	await waitFor(() => settled !== undefined, "stopping the host never settled the retained ask");
 	expect(settled).toEqual({ kind: "unavailable" });
 	refused.close();
 }, 120_000);
