@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [18.3.0] - 2026-09-24
+
+### Breaking Changes
+
+- The `hub` tool is deprecated; use `wait`, `write`, and the `proc://` protocols instead.
+- The `irc.timeoutMs` configuration setting has been removed.
+- The edit mode syntax now uses `*** Edit File:`, `*** Find`, and `*** Replace` headers instead of `SM:` headers.
+- Cancelling a process through `write` now requires an explicit `proc://<id>/kill` target; other write targets validate content normally.
+
 ### Added
 
 - Added `ctx.agentIdentity` to extension contexts: tells a handler whether it runs in the main session or a subagent, its recursion depth, registry id, display name, and parent chain ([#10228](https://github.com/can1357/oh-my-pi/issues/10228)).
@@ -33,45 +42,40 @@
 - Added `/export` and `/usage` to focused subagent views: `/export` writes the focused subagent's transcript (including its own subagents) and `/usage` shows account usage without returning to the main session ([#12986](https://github.com/can1357/oh-my-pi/pull/12986) by [@H4vC](https://github.com/H4vC)).
 - Added saving of clipboard-pasted images to the session artifact directory so the agent receives a file path it can read, copy, or upload (for example, attaching a pasted screenshot to an issue tracker) ([#12985](https://github.com/can1357/oh-my-pi/pull/12985) by [@H4vC](https://github.com/H4vC)).
 - Added `/annotate` to attach notes to a code-review diff, the latest reply, a session message, a file, or quoted text, then paste them into the prompt or send them with a review ([#12601](https://github.com/can1357/oh-my-pi/pull/12601) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
+- Added `omp://` documentation scopes for `find` and `omp find`. Search all embedded harness documentation with `omp://` or a specific document with `omp://<file>.md`; results are returned as canonical URLs that `read` can open, including range selectors.
+- Added extension support for ephemeral, `/btw`-style side turns through `ctx.runEphemeralTurn()`, with optional tool suppression and output/context limits without adding the turn to session history.
+- Added background job and service management through the `wait` tool and `proc://` URLs, including supervised services in `bash` and direct agent messaging through `agent://` write targets.
+- Added `*** Insert Before` and `*** Insert After` edit operations for adding lines without replacing existing code.
+- Added the `toks` command for offline token counting, including support for Jev (TypeSafe Jev 1.13) encodings.
+- Added automatic discovery of Apple Foundation Models on supported Apple silicon devices.
+- Added `/changelog last [N]` for viewing the latest release or a selected number of recent releases.
+- Added terminal-based OAuth authentication with `omp login`, including browser-assisted login, account and organization details, and automatic model discovery refresh. Added provider support for `org-scoped-identity`, `oauth-token-env`, and per-account OAuth priority/reserve policies through `auth.accountPolicies`, with policy state shown by `omp usage`.
+- Added the `daybreak` badge to `omp usage` for enabled accounts.
+- Added `/export` and `/usage` to focused subagent views for exporting a focused transcript and viewing account usage without returning to the main session.
+- Pasted clipboard images are now saved in the session artifact directory, allowing agents to read, copy, or upload them by file path.
+- Added `/annotate` for attaching notes to diffs, replies, session messages, files, or quoted text and inserting or sending those notes in prompts and reviews.
+- Added configurable MCP startup behavior through `MCP_STARTUP_TIMEOUT_MS`/`mcp.startupTimeoutMs` and `OMP_MCP_REQUIRE_READY=1`, allowing headless runs to require MCP servers to become ready before the first turn.
+- Added native judgment usage reporting, including error stop reasons and messages, and added `openrouter/~typesafe/jev-latest` as a native judge candidate.
 
 ### Changed
 
-- Updated `write` tool usage to require explicit `proc://<id>/kill` for cancellation, enforcing content validation on all other write paths
-- Updated session compaction logic to support native Anthropic snapshot branches and rewinds
-- Changed browser screenshot pixel comparison to ignore minor rasterizer noise
-- Changed subagents to exclude the wait tool, preventing blocking on wait in nested agents
-- Changed default `bash.autoBackground.strategy` to `catalog`
-- Renamed `Launch` configuration group to `Services`
-- Improved terminal output for pipe-backed shells by normalizing line endings
-- Updated edit mode syntax to use `*** Edit File:`, `*** Find`, and `*** Replace` instead of `SM:` prefixed headers
-- Unified terminal OAuth flow logic across `omp login` and `omp auth-broker login`
-- Included identity account/organization info in terminal login success messages
-- Changed judgment fallback to consider only native candidates, preventing prompted models from replacing failed natives
-
-### Deprecated
-
-- Deprecated `hub` tool in favor of `wait`, `write`, and `proc://` protocols
-
-### Removed
-
-- Removed `irc.timeoutMs` configuration setting
+- Session compaction now supports native Anthropic snapshot branches and rewinds.
+- The default `bash.autoBackground.strategy` is now `catalog`.
+- The `Launch` configuration group has been renamed to `Services`.
+- Terminal OAuth behavior is now consistent between `omp login` and `omp auth-broker login`.
+- Judgment fallback now uses only native candidates, preventing prompted models from replacing failed native judges.
+- Browser screenshot comparisons now tolerate minor rasterizer differences.
 
 ### Fixed
 
-- Fixed auth rotation to support credential-aware API key resolution
-- Restricted agent `proc://` kill requests to ensure target process ownership
-- Fixed comma-separated line selectors such as `:19,59` in `read`, `grep` paths, and `fetch` reading from the first number through EOF. A bare number in a list is now that single line; a lone `:50` still reads from line 50.
-- Fixed `write` success text reporting JavaScript string length as bytes. The count is now the UTF-8 byte length.
-- Fixed `read proc://`, `/jobs`, and job details showing a finished job's age as its duration. Completed, failed, and cancelled jobs now show how long they ran, e.g. `bg_1 [bash] completed in 2.0s`.
-- Fixed bash and eval calls that finished in the foreground with auto-background enabled appearing in `read proc://` as `bg_` jobs with a made-up duration. Only calls that actually move to the background become jobs.
-- Fixed background job ids being reused after earlier jobs were cleaned up, which made `proc://bg_1` point to different jobs over a session. Each new background job now gets a new `bg_` number.
-- Fixed a named service started again under an existing name showing the previous process's output in its log, in `read proc://<name>`, and in the bash tool's start result. A new start now begins with an empty log; restarts under the service's restart policy and explicit restarts still keep the earlier output.
-- Fixed `wait` returning `No running background jobs to wait for.` while a subagent's finished result was still on its way to the parent. `wait` now returns that result, keeps waiting when a peer's result is registered after the wait started, and a result that finished while `wait` returned a peer message instead is still delivered.
-- Fixed results from subagents woken again by `write agent://<id>` or `agent://all` never reaching the parent, and later results overwriting earlier ones in `agent://<id>` unseen. Each result from a woken subagent now arrives like the first one (`Background job <id> has completed` plus the result), and `wait` can wait for it.
-- Fixed a `wait` cut short by an incoming message showing as an error (`Operation aborted`). It now returns `Wait interrupted by message.`; stopping the run yourself still reports an abort.
-- Fixed headless print mode (`-p`) silently dropping MCP servers slower than the startup window; print mode now waits for configured servers (bounded by `OMP_MCP_TIMEOUT_MS`) and warns on stderr when one is not ready ([#12188](https://github.com/can1357/oh-my-pi/issues/12188), reported by [@aaronjmars](https://github.com/aaronjmars)).
-- Fixed reader-mode `fetch` output passing inline SVG icons and base64 `data:` images to the model as unreadable payloads; they are now dropped and their alt text is kept ([#13006](https://github.com/can1357/oh-my-pi/pull/13006) by [@H4vC](https://github.com/H4vC)).
-- Fixed judged TTSR rules failing with `max_tokens_exceeded` on long non-Latin outputs: judged content was capped at 60,000 characters, which is ~60k Jev tokens of Chinese against Jev's ~33k-token branch limit. It is now cut to 32,000 Jev tokens counted locally, so long English outputs are also no longer truncated early.
+- Fixed credential-aware API key resolution during authentication rotation.
+- Fixed comma-separated line selectors in `read`, `grep` paths, and `fetch`; selectors now read the requested range, while a bare number selects only that line.
+- Fixed `write` reporting JavaScript character counts instead of UTF-8 byte counts.
+- Fixed background job and service status reporting, including incorrect durations, reused job IDs, stale logs after named-service restarts, and foreground calls incorrectly appearing as background jobs.
+- Fixed `wait` and agent messaging so completed subagent results and peer messages are delivered reliably, including when a wait is interrupted by an incoming message.
+- Fixed headless print mode dropping or silently ignoring MCP servers that start slowly; it now waits within the configured timeout and warns when a server is not ready.
+- Fixed reader-mode `fetch` sending inline SVG icons and base64 images as unreadable model input; alt text is retained instead.
+- Fixed long non-Latin judged TTSR output exceeding token limits by applying token-aware truncation.
 
 ## [18.2.11] - 2026-09-23
 
@@ -1810,59 +1814,4 @@
 - Fixed MCP request timeouts surfacing as `Unexpected end of JSON input` instead of `Request timeout after Nms` when the abort lands mid-JSON-body read.
 - Fixed CJS modules being misclassified as ESM when imported from an ESM parent module. The extension loader now identifies unshadowed CommonJS syntax from Babel's parsed AST before deferring to the importer's module kind. This resolves `SyntaxError: Missing 'default' export` for packages with conditional exports (e.g. playwright-core) where an ESM wrapper re-exports from a CJS entry, while ambiguous files continue to inherit their importer's classification.
 
-## [18.0.0] - 2026-08-22
-
-### Added
-
-- Added the `omp render` command to replay session threads and benchmark transcript pipeline performance.
-- Added configurable typo detection (`Ctrl+.` suggestions), Tab word completion, and opt-in autocorrect to the macOS prompt editor.
-- Added a live benchmark dashboard to `omp bench` with real-time performance estimates, p50/p95 statistics, distinct input/output throughput metrics, cost tracking, mixed challenge suites by default, and a `--prefill-bytes` option for synthetic prefill benchmarks.
-- Added the `/shake thinking` command to strip model reasoning blocks from session history.
-- Added icon support and usage-frequency ranking to slash-command autocomplete suggestions.
-- Enhanced the edit tool to support `＋`-prefixed line insertions, unified diff formats, bare selection replacements, and robust recovery for common syntax variations and ambiguous match spans.
-- Startup composer now renders immediately using cached session and theme data, allowing typing before session initialization finishes without dropping keystrokes.
-
-### Changed
-
-- Session history rewinds (via `Esc-Esc` or `/tree`) now truncate transcript tails in place instead of clearing and replaying the entire terminal scrollback.
-- Switched the fallback edit mode to `sloppy` for models lacking hashline support.
-- macOS spelling checks now run in the background to avoid blocking editor rendering and keystroke responsiveness.
-- Word completions accepted via Tab now insert a trailing space when not immediately followed by whitespace or punctuation.
-- Increased default visible autocomplete dropdown rows to 10 and added the `autocompleteMaxVisible` configuration setting.
-- Slash-command descriptions in the autocomplete popup now truncate to two lines instead of wrapping indefinitely.
-
-### Fixed
-
-- Fixed streaming code blocks not rendering syntax highlighting live until completion.
-- Fixed an issue where interrupting Claude during reasoning would replay partial thinking blocks on subsequent turns and cause API rejection errors.
-- Fixed session resume performance by avoiding redundant edit-matching execution across historical transcripts.
-- Fixed image requests to Kimi Code / Moonshot failing with 400 errors by sending inline base64 images directly.
-- Fixed reading WAL-mode SQLite databases that do not have active `-wal` or `-shm` files.
-- Fixed terminal transcript layout corruption on Windows caused by collapsed edit results with long wrapped diff lines ([#9302](https://github.com/can1357/oh-my-pi/issues/9302)).
-- Fixed disappearing terminal scrollback history below updating cards such as background jobs or hub status cards.
-- Fixed pasted image attachment thumbnails rendering as blank boxes in Kitty terminal graphics mode.
-- Fixed context gauge display issues in the status line for unnamed sessions.
-- Fixed accurate benchmark input token counts on providers with automatic prompt caching.
-- Fixed C# files incorrectly displaying D3.js icons in edit results ([#9323](https://github.com/can1357/oh-my-pi/issues/9323)).
-- Fixed incorrect token delta reporting in expanded context compaction summaries when pre-compaction usage was omitted by the provider ([#9293](https://github.com/can1357/oh-my-pi/issues/9293)).
-
-## [17.4.4] - 2026-08-22
-
-### Added
-
-- Added the `tui.resizeScrollback` setting (default `append`) controlling how a settled width resize refreshes pane scrollback when the terminal repaints in place (tmux/screen/Zellij panes, in-place direct terminals). Multiplexers rewrap old output naively on width changes, leaving history hard-broken at the old width; `append` re-emits the transcript at the new width below it (one fresh copy per settled resize), `rebuild` clears pane history first so it holds exactly one current-width copy (needs a host that honors ED3, like tmux; erases pre-session scrollback), and `preserve` keeps the old-width history untouched with zero growth ([#8193](https://github.com/can1357/oh-my-pi/issues/8193)).
-
-### Fixed
-
-- Fixed the composer image chip painting its right border inside the card and mangling the thumbnail's first row: the Kitty placement prefix was counted as visible width, breaking the thumbnail centering.
-- Fixed edit-tool whole-line inserts (an insert selection alone on its own line) splicing into the anchor line instead of landing on a new line when the anchor was the last matched line, preceded a blank line, or sat at EOF.
-- Edit tool prompt now documents whole-line insert selections and that a REWRITE `…` with no captured MATCH gap is written to the file literally.
-- Fixed multiplexer width resizes (tmux/screen/Zellij/cmux/Herdr panes) replaying the entire transcript into pane history — one duplicated transcript copy and seconds of visible scrolling per width change. The width-epoch boundary now resolves for real transcripts: finalized blocks without `getTranscriptBlockVersion` are treated as immutable per the documented contract, Container-derived blocks without a nested epoch source fall back to whole-segment stability instead of failing, and bash/eval/tool/read-group blocks report a block version for their genuine post-finalize mutations. The interactive resize listener no longer marks every SIGWINCH as "render pending", which forced the conservative replay-from-row-zero fallback on every settled resize ([#8193](https://github.com/can1357/oh-my-pi/issues/8193), [#7026](https://github.com/can1357/oh-my-pi/issues/7026)).
-
-## [17.4.3] - 2026-08-21
-
-### Fixed
-
-- Fixed the edit tool rejecting payloads containing a glued `«»` line: after MATCH it now reads as the mistyped `»` separator, elsewhere as a stray terminator to drop.
-
-Older entries are archived in [packages/coding-agent/CHANGELOG.md@da359efe2858](https://github.com/can1357/oh-my-pi/blob/da359efe2858f68baa4ae290574c7c4c9c8da3c3/packages/coding-agent/CHANGELOG.md).
+Older entries are archived in [packages/coding-agent/CHANGELOG.md@3642216898e4](https://github.com/can1357/oh-my-pi/blob/3642216898e473f6a4472e78f792e641891c6d62/packages/coding-agent/CHANGELOG.md).

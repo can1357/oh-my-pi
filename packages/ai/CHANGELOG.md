@@ -2,27 +2,15 @@
 
 ## [Unreleased]
 
+## [18.3.0] - 2026-09-24
+
 ### Added
 
-- Added `messageIndex` field to Anthropic request controls for accurate replay of tool changes
-- Added `inactiveTools` and `AnthropicRequestControls` tracking to maintain stability across interrupted requests
-- Added schema-based validation for Anthropic User Profile API responses
-- Added support for Anthropic User Profiles API
-- Added credential-aware auth resolution for multi-account tracking
-- Implemented cross-credential thinking block redaction
-- Added support for Apple Foundation Models (on-device) integration, including tool calling and vision capabilities
-- Added multi-account discovery and authorization resolution for Codex cyber access programs
-- Added automated request replay logic to handle access program rejections
-- Implemented `SessionAffinity` for persistent, sticky session-to-credential mapping
-- Added persistent rate-limit block tracking with auto-healing and account-specific routing policy support
-- Introduced `KeyCascade` for unified hierarchical authentication resolution
-- Added per-account OAuth routing policies with strict selectors, deterministic priority, and protected quota reserves ([#12243](https://github.com/can1357/oh-my-pi/pull/12243) by [@schickling-assistant](https://github.com/schickling-assistant)).
-
-### Changed
-
-- Changed Anthropic control handling to ignore rewritten history records
-- Refactored `AuthStorage` into namespaced sub-modules (`credentials`, `keys`, `oauth`, `limits`, `health`, `blocks`, `resets`, `usage`)
-- Migrated all internal crypto-hashing to native `Bun` performance primitives
+- Added support for Anthropic User Profiles, including schema-validated API responses.
+- Added support for Apple Foundation Models running on-device, including tool calling and vision capabilities.
+- Added multi-account authentication and authorization for Codex cyber access programs, including automatic request replay after access-program rejections.
+- Added credential-aware authentication routing with per-account OAuth policies, deterministic account selection, protected quota reserves, persistent rate-limit tracking, automatic recovery, and sticky session-to-credential affinity.
+- Added deprecated `getApiKey` and `reload` methods for backward compatibility.
 
 ## [18.2.11] - 2026-09-23
 
