@@ -8019,12 +8019,20 @@ export class AgentSession {
 		return this.#tools.skills;
 	}
 
-	/** Descriptions frozen when this session's system prompt was built. */
+	/**
+	 * Skills as they appear in the system prompt: same cap the render path
+	 * applies (skills.maxPromptEntries, overflow collapsed to the count line),
+	 * so token estimates (skillsTokens breakdown, /context panel) match what
+	 * the model actually sees instead of counting catalog entries the prompt
+	 * omitted.
+	 */
 	get renderedSkills(): readonly Skill[] {
 		const skills = this.skills;
 		if (skills !== this.#promptSkillsSource) {
 			this.#promptSkillsSource = skills;
-			this.#promptSkills = this.#skillDescriptions.snapshot(skills);
+			this.#promptSkills = this.#skillDescriptions.snapshot(
+				this.#skillDescriptions.applyPromptCap(skills, this.settings.get("skills.maxPromptEntries")),
+			);
 		}
 		return this.#promptSkills;
 	}

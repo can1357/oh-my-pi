@@ -118,6 +118,10 @@ function openDb(dbPath: string): Database | null {
 	}
 }
 
+function overflowDescription(count: number): string {
+	return `+${count} more not listed — run \`read skill://<name>\` or /skill:<name> when relevant`;
+}
+
 /** One prompt/session snapshot; completing a background job never mutates its rendered descriptions. */
 export class SkillDescriptionCatalog {
 	readonly #dbPath: string;
@@ -136,11 +140,28 @@ export class SkillDescriptionCatalog {
 			description: this.#snapshot.get(keyFor(skill)) ?? previewSkillDescription(skill.description),
 		}));
 	}
+	/**
+	 * The list the system prompt actually renders for `maxEntries`: first N
+	 * entries, plus the synthetic overflow line when capped. Shared by render()
+	 * and snapshot() so prompt content and token estimates stay aligned.
+	 */
+	applyPromptCap(skills: readonly Skill[], maxEntries: number): readonly Skill[] {
+		if (maxEntries <= 0 || skills.length <= maxEntries) return skills;
+		const overflowCount = skills.length - maxEntries;
+		return [
+			...skills.slice(0, maxEntries),
+			{
+				...skills[skills.length - 1],
+				name: "more-skills",
+				description: overflowDescription(overflowCount),
+			},
+		];
+	}
 
 	render(skills: readonly Skill[], maxEntries = 0): Array<Skill & { description: string }> {
 		if (skills.length === 0) return [];
-		const overflowCount = maxEntries > 0 && skills.length > maxEntries ? skills.length - maxEntries : 0;
-		const listed = overflowCount > 0 ? skills.slice(0, maxEntries) : skills;
+		const listed = maxEntries > 0 && skills.length > maxEntries ? skills.slice(0, maxEntries) : skills;
+		const overflowCount = skills.length - listed.length;
 		const db = openDb(this.#dbPath);
 		try {
 			const rendered = listed.map(skill => {
@@ -168,7 +189,7 @@ export class SkillDescriptionCatalog {
 				rendered.push({
 					...rendered[rendered.length - 1],
 					name: "more-skills",
-					description: `+${overflowCount} more not listed — run \`read skill://<name>\` or /skill:<name> when relevant`,
+					description: overflowDescription(overflowCount),
 				});
 			}
 			return rendered;
