@@ -1997,6 +1997,7 @@ export class AgentSession {
 				this.#modelMentions.syncFromBranch();
 			},
 			resetAdvisorRuntimes: (reason?: string) => this.#advisors.resetAllRuntimes(reason),
+			rebaseAdvisorPrefix: reason => this.#advisors.rebaseDeliveredPrefixes(reason),
 			rebaseAfterCompaction: () => this.#stats.rebaseAfterCompaction(),
 			recordAnchoredHistoryRewrite: tokensRemoved => this.#stats.recordAnchoredHistoryRewrite(tokensRemoved),
 			getContextBreakdown: options => this.getContextBreakdown(options),
