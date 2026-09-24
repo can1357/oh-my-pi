@@ -199,7 +199,7 @@ it("forwards inbound Anthropic user-profile attribution through the gateway to u
 			body: JSON.stringify({ model: model.id, max_tokens: 16, messages: [{ role: "user", content: "hello" }] }),
 		});
 		expect(response.status).toBe(200);
-		expect((await response.json()).content).toEqual([{ type: "text", text: "ok" }]);
+		expect(await response.json()).toMatchObject({ content: [{ type: "text", text: "ok" }] });
 		expect(upstreamHeaders).toEqual(["uprof_gateway"]);
 		const nativeResponse = await fetch(`${gateway.url}/v1/pi/stream`, {
 			method: "POST",

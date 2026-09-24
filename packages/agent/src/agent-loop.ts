@@ -1766,6 +1766,12 @@ async function prepareProviderCall(
 			tools: undefined,
 		};
 	}
+	// After `transformProviderContext`, so the recorded definitions are exactly what the provider receives.
+	if (config.sentToolDefinitions && llmContext.tools) {
+		config.sentToolDefinitions.record(llmContext.tools);
+		const inactiveTools = config.sentToolDefinitions.inactiveFor(llmContext.messages, llmContext.tools);
+		if (inactiveTools) llmContext = { ...llmContext, inactiveTools };
+	}
 	return { model, context: llmContext, promptToolWireTools, ownedDialect };
 }
 

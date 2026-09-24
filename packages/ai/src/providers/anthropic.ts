@@ -22,11 +22,15 @@ import type {
 	AnthropicCompactionPayload,
 	AnthropicFallbackContent,
 	AnthropicMessagePayload,
+	AnthropicOutputEffort,
+	AnthropicRequestControls,
 	AnthropicServerToolContent,
+	AnthropicToolChange,
 	Api,
 	AssistantMessage,
 	CacheRetention,
 	Context,
+	DeveloperMessage,
 	FetchImpl,
 	ImageContent,
 	Message,
@@ -444,43 +448,6 @@ type AnthropicOutputConfig = NonNullable<MessageCreateParamsStreaming["output_co
 const ANTHROPIC_STOP_SEQUENCES_MAX = 4;
 let warnedStopSequencesTrim = false;
 
-/**
- * A mid-conversation `role: "system"` message omp inserts at a fixed slot in
- * the wire history so top-level `tools` and `output_config.effort` can stay
- * byte-stable for preserved thinking and the prompt cache. `messageCount` is
- * the number of wire messages preceding the control; `anchor` fingerprints the
- * message right before it so a rewritten history (compaction, branch switch)
- * discards the transition instead of splicing it into the wrong turn.
- */
-type AnthropicControlTransition = {
-	messageCount: number;
-	anchor: string;
-	content: ContentBlockParam[];
-	effort?: AnthropicOutputEffort;
-	/**
-	 * Whether this transition was already materialized into a request payload.
-	 * A sent transition is immutable: the wire message it produced is part of
-	 * the prefix the model and the prompt cache have seen, so a later control
-	 * becomes its own transition instead of being folded into this one.
-	 */
-	sent: boolean;
-};
-
-type AnthropicControlState = {
-	/** `tools` declared at baseline plus later `defer_loading` additions, in wire order. */
-	declaredTools: AnthropicWireTool[] | undefined;
-	activeToolNames: Set<string>;
-	stableSystemBlocks: AnthropicSystemBlock[] | undefined;
-	systemFingerprint: string | undefined;
-	controlTransitions: AnthropicControlTransition[];
-	/** Whether the effort baseline was captured; `undefined` efforts are a valid baseline. */
-	effortBaselined: boolean;
-	/** Top-level `output_config.effort` of the baseline request; `undefined` = API default. */
-	baseEffortWire: AnthropicOutputEffort | undefined;
-	/** Effort in force at the conversation tail; `undefined` = API default. */
-	currentEffort: AnthropicOutputEffort | undefined;
-};
-
 type AnthropicProviderSessionState = ProviderSessionState & {
 	strictToolsDisabled: boolean;
 	fastModeDisabled: boolean;
@@ -503,32 +470,7 @@ type AnthropicProviderSessionState = ProviderSessionState & {
 	thinkingReplayDisabled: boolean;
 	/** Thinking blocks the API permanently dropped after a prefix mismatch. */
 	prefixDroppedThinkingBlocks: Set<string>;
-	/**
-	 * Conversation-scoped control baselines, isolated from side requests and
-	 * advisors: LRU of baselines a later request came back to. See
-	 * {@link getAnthropicControlState}.
-	 */
-	controlStates: Map<string, AnthropicControlState>;
-	/** LRU of baselines seen by exactly one request; promoted into `controlStates` on reuse. */
-	pendingControlStates: Map<string, AnthropicControlState>;
-	/** Last live-turn baseline for each conversation, independent of a rewritten root. */
-	lastControlStatesBySession: Map<string, AnthropicControlState>;
-	/** Pre-compaction controls bound to the signed block that replaces their root. */
-	compactionControlBaselines: Map<string, { state: AnthropicControlState; signature?: string }>;
 };
-
-function createAnthropicControlState(): AnthropicControlState {
-	return {
-		declaredTools: undefined,
-		activeToolNames: new Set(),
-		stableSystemBlocks: undefined,
-		systemFingerprint: undefined,
-		controlTransitions: [],
-		effortBaselined: false,
-		baseEffortWire: undefined,
-		currentEffort: undefined,
-	};
-}
 
 function createAnthropicProviderSessionState(): AnthropicProviderSessionState {
 	const state: AnthropicProviderSessionState = {
@@ -537,20 +479,12 @@ function createAnthropicProviderSessionState(): AnthropicProviderSessionState {
 		replayUnsignedThinkingDisabled: false,
 		thinkingReplayDisabled: false,
 		prefixDroppedThinkingBlocks: new Set(),
-		controlStates: new Map(),
-		pendingControlStates: new Map(),
-		lastControlStatesBySession: new Map(),
-		compactionControlBaselines: new Map(),
 		close: () => {
 			state.strictToolsDisabled = false;
 			state.fastModeDisabled = false;
 			state.replayUnsignedThinkingDisabled = false;
 			state.thinkingReplayDisabled = false;
 			state.prefixDroppedThinkingBlocks.clear();
-			state.controlStates.clear();
-			state.pendingControlStates.clear();
-			state.lastControlStatesBySession.clear();
-			state.compactionControlBaselines.clear();
 		},
 	};
 	return state;
@@ -566,8 +500,6 @@ function getAnthropicProviderSessionState(
 	const existing = providerSessionState.get(key) as AnthropicProviderSessionState | undefined;
 	if (existing) {
 		existing.prefixDroppedThinkingBlocks ??= new Set();
-		existing.controlStates ??= new Map();
-		existing.pendingControlStates ??= new Map();
 		return existing;
 	}
 	const created = createAnthropicProviderSessionState();
@@ -1040,7 +972,6 @@ function convertContentBlocks(
 	return blocks;
 }
 
-export type AnthropicOutputEffort = "low" | "medium" | "high" | "xhigh" | "max";
 export type AnthropicEffort = AnthropicOutputEffort | "adaptive";
 export type AnthropicThinkingDisplay = "summarized" | "omitted";
 
@@ -1675,9 +1606,9 @@ function contextReplaysAnthropicCompaction(
 	format: "signed" | "legacy",
 ): boolean {
 	return messages.some(message => {
+		if (message.role !== "user" && message.role !== "developer" && message.role !== "assistant") return false;
 		const payload = message.providerPayload;
 		return (
-			(message.role === "user" || message.role === "developer" || message.role === "assistant") &&
 			isReplayableAnthropicCompaction(payload, model) &&
 			(format === "signed" ? payload.signature !== undefined : payload.encryptedContent !== undefined)
 		);
@@ -2231,7 +2162,7 @@ const streamAnthropicOnce = (
 			}
 			const preparedContext = await prepareAnthropicManyImageContext(context, model.input.includes("image"));
 			const prepareParams = async (): Promise<MessageCreateParamsStreaming> => {
-				let nextParams = buildParams(model, preparedContext, isOAuthToken, options, {
+				const built = buildParams(model, preparedContext, isOAuthToken, options, {
 					compactionSupported,
 					disableStrictTools,
 					useUmansGatewayWebSearch: umansGatewayWebSearchHeader !== undefined,
@@ -2240,10 +2171,13 @@ const streamAnthropicOnce = (
 					prefixMismatchBehavior,
 					dropAllThinking,
 					droppedThinkingBlocks: providerSessionState?.prefixDroppedThinkingBlocks,
-					providerSessionState,
 					fallbacks,
 					effectiveBaseUrl: baseUrl,
 				});
+				let nextParams = built.params;
+				// The last build wins: a retry may rebuild with different controls.
+				if (built.requestControls) output.requestControls = built.requestControls;
+				else delete output.requestControls;
 				if (disableStrictTools) {
 					dropAnthropicStrictTools(nextParams);
 				}
@@ -2946,10 +2880,6 @@ const streamAnthropicOnce = (
 								if (rawStopReason === "compaction") {
 									output.stopDetails = { type: "compaction" };
 									output.providerPayload = compactionPayload;
-									if (compactionPayload?.signature && params.compaction && options?.sessionId) {
-										const snapshot = providerSessionState?.compactionControlBaselines.get(options.sessionId);
-										if (snapshot) snapshot.signature = compactionPayload.signature;
-									}
 								}
 							}
 							if (output.stopReason === "error") {
@@ -3868,17 +3798,13 @@ function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?:
  * normally form a volatile suffix after the stable prefix. The system cache
  * breakpoint anchors on the last stable segment instead of the array tail, so
  * a recall refresh re-bills only the suffix and the message tail for one turn
- * while the tools+stable-system prefix stays a cache hit. The fingerprint in
- * `planStableAnthropicSystem` is scoped the same way, so a recall-only change
- * no longer resets the tool/control baselines either.
+ * while the tools+stable-system prefix stays a cache hit.
  *
  * Only a genuinely trailing volatile run counts: a `before_agent_start`
  * extension override may append a stable policy block after the staged recall
- * block, and that block must stay fingerprinted stable (a change to it has to
- * re-baseline). A volatile block stranded mid-array still poisons the prefix
- * at its position — prefix caching is positional, so no classification can
- * save the bytes after it — but the stable tail is at least fingerprinted
- * instead of silently excluded.
+ * block, and that block stays in the cached head. A volatile block stranded
+ * mid-array still poisons the prefix at its position — prefix caching is
+ * positional, so no classification can save the bytes after it.
  *
  * Detection is by our own markup, not model identity: recall blocks always
  * open with `<memories>`. Stable segments containing recalled text elsewhere
@@ -3924,10 +3850,8 @@ function stableSystemSuffixStart(systemBlocks: readonly AnthropicSystemBlock[]):
  * buildAnthropicSystemBlocks, the system check skips adding a second system
  * breakpoint, while the tool check still anchors the last tool definition.
  *
- * Runs after the byte-stability plane (planStableAnthropicSystem /
- * planStableAnthropicTools), which hands back fresh block/tool copies each turn
- * and keys tool identity off a fingerprint that excludes cache_control — so
- * decorating here is byte-stable across turns and never forces a re-baseline.
+ * Runs on the fresh system blocks and wire tools built for this request, after
+ * the declared tool list was derived from the transcript's request controls.
  */
 function applyHeadCaching(
 	systemBlocks: AnthropicSystemBlock[] | undefined,
@@ -4023,361 +3947,260 @@ function extractClaudeCodeFirstUserMessageText(messages: readonly Message[]): st
 	return "";
 }
 
-const MAX_ANTHROPIC_CONTROL_STATES = 16;
+/**
+ * Marks a developer message synthesized from {@link AnthropicRequestControls}
+ * records. {@link convertAnthropicMessages} renders it as a bare
+ * mid-conversation `role: "system"` control. Object spread copies symbol keys,
+ * so the marker survives `transformMessages`.
+ */
+const ANTHROPIC_CONTROL = Symbol("anthropicControl");
 
-function resetAnthropicControlState(state: AnthropicControlState): void {
-	state.declaredTools = undefined;
-	state.activeToolNames.clear();
-	state.stableSystemBlocks = undefined;
-	state.systemFingerprint = undefined;
-	state.controlTransitions = [];
-	state.effortBaselined = false;
-	state.baseEffortWire = undefined;
-	state.currentEffort = undefined;
+/** One control message: tool changes (removals first) and an optional per-message effort. */
+type AnthropicControlSpec = { toolChanges: AnthropicToolChange[]; effort?: AnthropicOutputEffort };
+
+type AnthropicControlCarrier = object & { [ANTHROPIC_CONTROL]?: AnthropicControlSpec };
+
+/**
+ * An assistant message in `context.messages` whose request declared controls.
+ * `live` when it still sits at the index it was written at: the history before
+ * it is the one its request sent.
+ */
+type AnthropicControlRecord = { index: number; live: boolean; controls: AnthropicRequestControls };
+
+/** A control to splice in before `context.messages[index]`. */
+type AnthropicControlInsert = { index: number; spec: AnthropicControlSpec };
+
+type AnthropicToolControls = NonNullable<AnthropicRequestControls["tools"]>;
+type AnthropicEffortControls = NonNullable<AnthropicRequestControls["effort"]>;
+
+function anthropicControlOf(message: Message): AnthropicControlSpec | undefined {
+	const carrier: AnthropicControlCarrier = message;
+	return message.role === "developer" ? carrier[ANTHROPIC_CONTROL] : undefined;
 }
 
-function anthropicControlMessageProjection(message: MessageParam): MessageParam {
-	if (message.role !== "assistant" || !Array.isArray(message.content)) return message;
+function collectAnthropicControlRecords(messages: readonly Message[]): AnthropicControlRecord[] {
+	const records: AnthropicControlRecord[] = [];
+	for (let index = 0; index < messages.length; index++) {
+		const message = messages[index];
+		if (message?.role === "assistant" && message.requestControls) {
+			records.push({
+				index,
+				live: message.requestControls.messageIndex === index,
+				controls: message.requestControls,
+			});
+		}
+	}
+	return records;
+}
+
+/**
+ * Slot for an effort control of the request whose response lands at `end`:
+ * before the turn's user message, where Anthropic applies it to that
+ * response, or at `end` when the request continues a tool loop. It never
+ * lands between a `tool_use` and its `tool_result`, where `transformMessages`
+ * would flush synthetic aborted results; a mid-turn change therefore takes
+ * effect from the next step.
+ */
+function anthropicEffortInsertIndex(messages: readonly Message[], end: number): number {
+	for (let i = end - 1; i >= 0; i--) {
+		const role = messages[i]?.role;
+		if (role === "user") return i;
+		if (role === "assistant") return end;
+	}
+	return end;
+}
+
+/** `tool_removal`s (in `previous` order) then `tool_addition`s (in `next` order), limited to `declared`. */
+function diffAnthropicActiveTools(
+	previous: readonly string[],
+	next: readonly string[],
+	declared: ReadonlySet<string>,
+): AnthropicToolChange[] {
+	const previousSet = new Set(previous);
+	const nextSet = new Set(next);
+	const changes: AnthropicToolChange[] = [];
+	for (const name of previous) {
+		if (!nextSet.has(name) && declared.has(name)) changes.push({ type: "tool_removal", name });
+	}
+	for (const name of next) {
+		if (!previousSet.has(name) && declared.has(name)) changes.push({ type: "tool_addition", name });
+	}
+	return changes;
+}
+
+/**
+ * Keep top-level `tools` byte-stable across a conversation. The declared list
+ * is the latest record's, minus names with no definition in `tools` or
+ * `inactiveTools`, plus newly active tools appended with `defer_loading`.
+ * Every recorded active-set change is replayed as a control before the
+ * response of the request that made it; the change this request makes goes
+ * at the tail. Records at a different index than they were written at are
+ * rewritten history: they keep the declaration but emit no controls, so the
+ * net change from the declared baseline lands at the first live position.
+ */
+function planAnthropicToolControls(
+	context: Context,
+	records: readonly AnthropicControlRecord[],
+	enabled: boolean,
+): { tools: Tool[] | undefined; inserts: AnthropicControlInsert[]; record: AnthropicToolControls | undefined } {
+	if (!enabled || !context.tools) return { tools: context.tools, inserts: [], record: undefined };
+	const definitions = new Map<string, Tool>();
+	for (const tool of context.tools) definitions.set(tool.name, tool);
+	for (const tool of context.inactiveTools ?? []) {
+		if (!definitions.has(tool.name)) definitions.set(tool.name, tool);
+	}
+	const activeNames = context.tools.map(tool => tool.name);
+
+	const toolRecords: { index: number; live: boolean; tools: AnthropicToolControls }[] = [];
+	for (const record of records) {
+		if (record.controls.tools) {
+			toolRecords.push({ index: record.index, live: record.live, tools: record.controls.tools });
+		}
+	}
+	const inserts: AnthropicControlInsert[] = [];
+	let declared = activeNames;
+	const deferred = new Set<string>();
+	const latest = toolRecords.at(-1);
+	if (latest) {
+		// A declared name without a definition cannot be re-sent: accepted cache miss (e.g. after a resume).
+		declared = latest.tools.declared.filter(name => definitions.has(name));
+		const declaredSet = new Set(declared);
+		for (const name of latest.tools.deferred) {
+			if (declaredSet.has(name)) deferred.add(name);
+		}
+		for (const name of activeNames) {
+			if (declaredSet.has(name)) continue;
+			declared.push(name);
+			declaredSet.add(name);
+			deferred.add(name);
+		}
+		// The chain starts from what the top-level declaration makes active, so a
+		// rewritten history converges on the current roster instead of trusting a
+		// record whose earlier controls were summarized away.
+		let previous = declared.filter(name => !deferred.has(name));
+		for (const record of toolRecords) {
+			if (!record.live) continue;
+			const toolChanges = diffAnthropicActiveTools(previous, record.tools.active, declaredSet);
+			if (toolChanges.length > 0) inserts.push({ index: record.index, spec: { toolChanges } });
+			previous = record.tools.active;
+		}
+		const toolChanges = diffAnthropicActiveTools(previous, activeNames, declaredSet);
+		if (toolChanges.length > 0) inserts.push({ index: context.messages.length, spec: { toolChanges } });
+	}
+
+	const tools: Tool[] = [];
+	for (const name of declared) {
+		const tool = definitions.get(name);
+		if (tool) tools.push(deferred.has(name) ? { ...tool, deferLoading: true } : tool);
+	}
 	return {
-		...message,
-		content: message.content.filter(block => block.type !== "thinking" && block.type !== "redacted_thinking"),
+		tools,
+		inserts,
+		record: {
+			declared: tools.map(tool => tool.name),
+			deferred: tools.filter(tool => tool.deferLoading === true).map(tool => tool.name),
+			active: activeNames,
+		},
 	};
 }
 
 /**
- * Resolve the control baseline for a conversation, keyed by session id, stable
- * system prefix, and root message.
- *
- * Baselines live in two LRUs of `MAX_ANTHROPIC_CONTROL_STATES` each: a new key
- * enters `pendingControlStates` and moves to `controlStates` the first time a
- * later request resolves it. Side turns (`runEphemeralTurn`) and handoffs mint
- * a fresh session id per call, so their one-shot keys only churn the pending
- * tier and can never evict a live conversation's baseline — which would force
- * it to re-declare tools, system, and effort, a full prompt-cache miss. Each
- * tier still ages out plain-LRU. A signed compaction block becomes the new root;
- * the declared tool baseline is carried over separately so kept thinking
- * continues to see byte-identical top-level tools. Developer instructions
- * removed with the summarized range still need restating by the caller.
+ * Keep top-level `output_config.effort` byte-stable across a conversation and
+ * replay every recorded change as a per-message effort control. An omitted
+ * effort means the API's per-model default, which a per-message control cannot
+ * restore, so a request without an explicit effort keeps the level in force.
+ * Records at a different index than they were written at are rewritten history:
+ * they keep the top-level effort but emit no controls, so the net change lands
+ * at the first live position.
  */
-function getAnthropicControlState(
-	state: AnthropicProviderSessionState | undefined,
-	sessionId: string | undefined,
-	system: readonly AnthropicSystemBlock[] | undefined,
-	messages: readonly MessageParam[],
-): AnthropicControlState | undefined {
-	if (!state) return undefined;
-	const root = messages[0];
-	// Key on the stable system prefix, not the full array: a volatile recall
-	// suffix refresh must resolve the same baseline or the declared-tool,
-	// effort, and control-transition state it preserves is lost with it.
-	const stablePrefix = system?.slice(0, stableSystemSuffixStart(system)) ?? null;
-	const fingerprint = String(
-		Bun.hash(
-			JSON.stringify([
-				sessionId ?? "",
-				stablePrefix?.map(block => block.text) ?? null,
-				root ? anthropicControlMessageProjection(root) : null,
-			]),
-		),
-	);
-	const continued = state.controlStates.get(fingerprint) ?? state.pendingControlStates.get(fingerprint);
-	if (continued) {
-		state.pendingControlStates.delete(fingerprint);
-		touchAnthropicControlState(state.controlStates, fingerprint, continued);
-		return continued;
-	}
-	const created = createAnthropicControlState();
-	touchAnthropicControlState(state.pendingControlStates, fingerprint, created);
-	return created;
-}
-
-/** Mark `key` most recently used in `states`, evicting the least recently used entry past the cap. */
-function touchAnthropicControlState<V>(states: Map<string, V>, key: string, value: V): void {
-	states.delete(key);
-	states.set(key, value);
-	if (states.size <= MAX_ANTHROPIC_CONTROL_STATES) return;
-	const oldest = states.keys().next().value;
-	if (oldest !== undefined) states.delete(oldest);
-}
-
-/** Fingerprint of the wire message a control transition is attached after. */
-function anthropicControlAnchor(messages: readonly MessageParam[], messageCount: number): string {
-	if (messageCount === 0) return "";
-	const message = messages[messageCount - 1];
-	return message ? String(Bun.hash(JSON.stringify(anthropicControlMessageProjection(message)))) : "";
-}
-
-/** Clone a baseline without mutating live controls during a prefix-only summary call. */
-function cloneAnthropicControlState(
-	state: AnthropicControlState,
-	messages?: readonly MessageParam[],
-): AnthropicControlState {
-	return {
-		declaredTools: state.declaredTools?.map(tool => ({ ...tool })),
-		activeToolNames: new Set(state.activeToolNames),
-		stableSystemBlocks: state.stableSystemBlocks?.map(block => ({ ...block })),
-		systemFingerprint: state.systemFingerprint,
-		controlTransitions: state.controlTransitions
-			.filter(
-				transition =>
-					messages === undefined ||
-					(transition.messageCount <= messages.length &&
-						transition.anchor === anthropicControlAnchor(messages, transition.messageCount)),
-			)
-			.map(transition => ({ ...transition, content: transition.content.map(block => ({ ...block })) })),
-		effortBaselined: state.effortBaselined,
-		baseEffortWire: state.baseEffortWire,
-		currentEffort: state.currentEffort,
-	};
-}
-
-/**
- * Retain the original top-level controls after replacing the root. Materialized
- * transitions in the summarized range disappeared with their anchor messages:
- * replay their net tool/effort changes after the new user turn, not before the
- * retained tail (which would break its preserved thinking).
- */
-function restoreAnthropicCompactionControls(target: AnthropicControlState, source: AnthropicControlState): void {
-	target.declaredTools = source.declaredTools?.map(tool => ({ ...tool }));
-	target.activeToolNames = new Set(
-		source.declaredTools?.filter(tool => !tool.defer_loading).map(tool => tool.name) ?? [],
-	);
-	target.stableSystemBlocks = source.stableSystemBlocks?.map(block => ({ ...block }));
-	target.systemFingerprint = source.systemFingerprint;
-	target.controlTransitions = [];
-	target.effortBaselined = source.effortBaselined;
-	target.baseEffortWire = source.baseEffortWire;
-	target.currentEffort = source.baseEffortWire;
-}
-
-/**
- * Discard the control baseline when the request no longer continues the
- * conversation it was captured for: a different model, or a wire history that
- * shrank or was rewritten under a recorded transition (compaction, branch
- * switch, `/clear`). The next request re-baselines from its own payload.
- */
-function syncAnthropicControlState(state: AnthropicControlState, messages: readonly MessageParam[]): void {
-	for (const transition of state.controlTransitions) {
-		if (
-			transition.messageCount > messages.length ||
-			transition.anchor !== anthropicControlAnchor(messages, transition.messageCount)
-		) {
-			resetAnthropicControlState(state);
-			return;
-		}
-	}
-}
-
-/**
- * Keep the top-level `system` array byte-stable across a session. The stable
- * prefix captured on the first request is replayed verbatim (with the current
- * request's cache breakpoints) while its text is unchanged; the volatile
- * recall suffix always passes through current-turn. A stable-prefix change
- * re-baselines instead of duplicating the prompt as a mid-conversation
- * system message: omp's system prompt is one rendered segment that embeds
- * the tool roster, so replaying a second copy on every later request would
- * cost the full prompt again per change. The prefix rewrite is absorbed by
- * `prefix_mismatch_behavior: "drop_block"` and one cache miss, while a
- * recall-only change keeps the tool/control baselines intact.
- */
-function planStableAnthropicSystem(
-	current: AnthropicSystemBlock[] | undefined,
-	state: AnthropicControlState | undefined,
-	enabled: boolean,
-): AnthropicSystemBlock[] | undefined {
-	if (!state || !enabled) return current;
-	const suffixStart = stableSystemSuffixStart(current ?? []);
-	const fingerprint = JSON.stringify(current?.slice(0, suffixStart).map(block => block.text) ?? null);
-	if (state.systemFingerprint !== fingerprint) {
-		resetAnthropicControlState(state);
-		state.systemFingerprint = fingerprint;
-		state.stableSystemBlocks = current?.slice(0, suffixStart).map(block => ({ type: block.type, text: block.text }));
-	}
-	const stableReplay =
-		state.stableSystemBlocks?.map((block, index) => {
-			const cacheControl = current?.[index]?.cache_control;
-			return cacheControl ? { ...block, cache_control: cloneAnthropicCacheControl(cacheControl) } : { ...block };
-		}) ?? [];
-	const suffix = current?.slice(suffixStart).map(block => ({ ...block })) ?? [];
-	const replayed = [...stableReplay, ...suffix];
-	return replayed.length > 0 ? replayed : undefined;
-}
-
-function anthropicToolDefinitionKey(tool: AnthropicWireTool): string {
-	const stable = { ...tool };
-	delete stable.defer_loading;
-	delete stable.description;
-	return JSON.stringify(stable);
-}
-
-function cloneAnthropicTools(tools: readonly AnthropicWireTool[]): AnthropicWireTool[] {
-	return tools.map(tool => ({ ...tool }));
-}
-
-/**
- * Attach a control to the slot after `messageCount` wire messages. Controls
- * recorded for the same slot by the same request share one transition (one
- * wire message carries both the tool changes and the new effort), but a slot
- * whose transition already went out on an earlier request gets a new one:
- * appending to a sent transition would rewrite a message the prompt cache and
- * the model have already seen.
- */
-function recordAnthropicControlTransition(
-	state: AnthropicControlState,
-	messages: readonly MessageParam[],
-	messageCount: number,
-	content: ContentBlockParam[],
-	effort?: AnthropicOutputEffort,
-): void {
-	const existing = state.controlTransitions.findLast(
-		transition => transition.messageCount === messageCount && !transition.sent,
-	);
-	if (existing) {
-		existing.content.push(...content);
-		if (effort !== undefined) existing.effort = effort;
-		return;
-	}
-	state.controlTransitions.push({
-		messageCount,
-		anchor: anthropicControlAnchor(messages, messageCount),
-		content,
-		effort,
-		sent: false,
-	});
-}
-
-/**
- * Keep the top-level `tools` array byte-stable across a session. Tools that
- * leave the active set are withdrawn with `tool_removal`; tools that join are
- * appended with `defer_loading: true` (not part of the checked prefix until
- * referenced) and offered with `tool_addition`. A changed definition for an
- * already-declared name cannot be expressed as a control and re-baselines.
- */
-function planStableAnthropicTools(
-	current: AnthropicWireTool[] | undefined,
-	messages: readonly MessageParam[],
-	state: AnthropicControlState | undefined,
-	enabled: boolean,
-): AnthropicWireTool[] | undefined {
-	if (!state || !enabled || !current) return current;
-	if (!state.declaredTools) {
-		state.declaredTools = cloneAnthropicTools(current);
-		state.activeToolNames = new Set(current.map(tool => tool.name));
-		return cloneAnthropicTools(state.declaredTools);
-	}
-
-	const declaredByName = new Map(state.declaredTools.map(tool => [tool.name, tool]));
-	for (const tool of current) {
-		const declared = declaredByName.get(tool.name);
-		if (declared && anthropicToolDefinitionKey(declared) !== anthropicToolDefinitionKey(tool)) {
-			resetAnthropicControlState(state);
-			state.declaredTools = cloneAnthropicTools(current);
-			state.activeToolNames = new Set(current.map(candidate => candidate.name));
-			return cloneAnthropicTools(state.declaredTools);
-		}
-	}
-
-	const nextActive = new Set(current.map(tool => tool.name));
-	const changes: ContentBlockParam[] = [];
-	for (const activeName of state.activeToolNames) {
-		if (nextActive.has(activeName)) continue;
-		changes.push({
-			type: "tool_removal",
-			tool: { type: "tool_reference", name: activeName },
-		});
-	}
-	for (const tool of current) {
-		if (state.activeToolNames.has(tool.name)) continue;
-		if (!declaredByName.has(tool.name)) {
-			const deferred = { ...tool, defer_loading: true };
-			state.declaredTools.push(deferred);
-			declaredByName.set(tool.name, deferred);
-		}
-		changes.push({
-			type: "tool_addition",
-			tool: { type: "tool_reference", name: tool.name },
-		});
-	}
-	if (changes.length > 0) recordAnthropicControlTransition(state, messages, messages.length, changes);
-	state.activeToolNames = nextActive;
-	return cloneAnthropicTools(state.declaredTools);
-}
-
-/**
- * Keep top-level `output_config.effort` byte-stable across a session and carry
- * later changes as per-message effort. Anthropic applies a system message's
- * `output_config.effort` from the next `user` turn on, so the control is
- * anchored before the latest user message to take effect on this response.
- *
- * An omitted effort means the API's per-model default (`medium` on Opus 5.5,
- * `high` elsewhere), so it is tracked as its own state rather than assumed to
- * be any concrete level: every later explicit level is sent as a control. A
- * per-message control cannot express "back to the API default", so a request
- * that drops its effort mid-session keeps the level already in force instead
- * of rewriting the top-level value and invalidating the cache.
- */
-function planStableAnthropicEffort(
+function planAnthropicEffortControls(
 	current: AnthropicOutputEffort | undefined,
-	messages: readonly MessageParam[],
-	state: AnthropicControlState | undefined,
+	messages: readonly Message[],
+	records: readonly AnthropicControlRecord[],
 	enabled: boolean,
-): AnthropicOutputEffort | undefined {
-	if (!state || !enabled) return current;
-	if (!state.effortBaselined) {
-		state.effortBaselined = true;
-		state.baseEffortWire = current;
-		state.currentEffort = current;
-		return current;
+): {
+	topLevel: AnthropicOutputEffort | undefined;
+	inserts: AnthropicControlInsert[];
+	record: AnthropicEffortControls | undefined;
+} {
+	if (!enabled) return { topLevel: current, inserts: [], record: undefined };
+	const effortRecords: { index: number; live: boolean; effort: AnthropicEffortControls }[] = [];
+	for (const record of records) {
+		if (record.controls.effort) {
+			effortRecords.push({ index: record.index, live: record.live, effort: record.controls.effort });
+		}
 	}
-	if (current !== undefined && state.currentEffort !== current) {
-		const lastUserIndex = messages.findLastIndex(message => message.role === "user");
-		const messageCount = lastUserIndex >= 0 ? lastUserIndex : messages.length;
-		recordAnthropicControlTransition(state, messages, messageCount, [], current);
-		state.currentEffort = current;
+	const latest = effortRecords.at(-1);
+	if (!latest) {
+		return { topLevel: current, inserts: [], record: { topLevel: current ?? null, tail: current ?? null } };
 	}
-	return state.baseEffortWire;
+	const topLevel = latest.effort.topLevel ?? undefined;
+	const inserts: AnthropicControlInsert[] = [];
+	let tail = topLevel;
+	for (const record of effortRecords) {
+		if (!record.live) continue;
+		const recorded = record.effort.tail;
+		if (recorded !== null && recorded !== tail) {
+			inserts.push({
+				index: anthropicEffortInsertIndex(messages, record.index),
+				spec: { toolChanges: [], effort: recorded },
+			});
+		}
+		tail = recorded ?? tail;
+	}
+	if (current !== undefined && current !== tail) {
+		inserts.push({
+			index: anthropicEffortInsertIndex(messages, messages.length),
+			spec: { toolChanges: [], effort: current },
+		});
+		tail = current;
+	}
+	return { topLevel, inserts, record: { topLevel: topLevel ?? null, tail: tail ?? null } };
 }
 
-function materializeAnthropicControlTransitions(
-	messages: MessageParam[],
-	state: AnthropicControlState | undefined,
-): MessageParam[] {
-	if (!state || state.controlTransitions.length === 0) return messages;
-	const result = messages.slice();
-	// Insert in slot order so each splice offsets only the transitions after it.
-	const ordered = state.controlTransitions.toSorted((a, b) => a.messageCount - b.messageCount);
-	let offset = 0;
-	// Result index the previous transition rendered into. A transition folds
-	// into the system message before its slot only when that message came from
-	// the conversation itself: stacking onto the message an earlier transition
-	// produced would rewrite a control already on the wire.
-	let renderedIndex = -1;
-	for (const transition of ordered) {
-		transition.sent = true;
-		const index = Math.min(transition.messageCount + offset, result.length);
-		const previous = result[index - 1];
-		if (index - 1 !== renderedIndex && previous?.role === "system" && previous.clear_at === undefined) {
-			const content: ContentBlockParam[] =
-				typeof previous.content === "string"
-					? [{ type: "text", text: previous.content }, ...transition.content]
-					: [...previous.content, ...transition.content];
-			result[index - 1] = {
-				...previous,
-				content,
-				...(transition.effort === undefined ? {} : { output_config: { effort: transition.effort } }),
-			};
-			renderedIndex = index - 1;
+/**
+ * Splice control markers into `messages`. Inserts sharing an index come from
+ * one request and merge into one control: tool changes first, then the effort.
+ */
+function insertAnthropicControlMarkers(messages: Message[], inserts: readonly AnthropicControlInsert[]): Message[] {
+	if (inserts.length === 0) return messages;
+	const merged = new Map<number, AnthropicControlSpec>();
+	for (const { index, spec } of inserts) {
+		const existing = merged.get(index);
+		if (!existing) {
+			merged.set(index, { ...spec, toolChanges: [...spec.toolChanges] });
 			continue;
 		}
-		result.splice(index, 0, {
-			role: "system",
-			content: transition.content.map(block => ({ ...block })),
-			...(transition.effort === undefined ? {} : { output_config: { effort: transition.effort } }),
-		});
-		renderedIndex = index;
-		offset++;
+		existing.toolChanges.push(...spec.toolChanges);
+		if (spec.effort !== undefined) existing.effort = spec.effort;
+	}
+	const result = messages.slice();
+	for (const [index, spec] of [...merged].sort((a, b) => b[0] - a[0])) {
+		const marker: DeveloperMessage & AnthropicControlCarrier = {
+			role: "developer",
+			content: [],
+			attribution: "agent",
+			timestamp: messages[index - 1]?.timestamp ?? 0,
+		};
+		marker[ANTHROPIC_CONTROL] = spec;
+		result.splice(index, 0, marker);
 	}
 	return result;
+}
+
+/** Wire `tool_addition`/`tool_removal` blocks for `changes`. */
+function anthropicToolChangeBlocks(
+	changes: readonly AnthropicToolChange[],
+	isOAuthToken: boolean,
+	model: Model<"anthropic-messages">,
+): ContentBlockParam[] {
+	return changes.map((change): ContentBlockParam => ({
+		type: change.type,
+		tool: {
+			type: "tool_reference",
+			name: encodeAnthropicToolName(change.name, isOAuthToken, model.compat.escapeBuiltinToolNames),
+		},
+	}));
 }
 
 type AnthropicParamBuildOptions = {
@@ -4388,7 +4211,6 @@ type AnthropicParamBuildOptions = {
 	prefixMismatchBehavior?: "drop_block" | "error";
 	dropAllThinking: boolean;
 	droppedThinkingBlocks?: ReadonlySet<string>;
-	providerSessionState?: AnthropicProviderSessionState;
 	/** Sanitized server-side fallback entries; defaults to `options?.fallbacks` when omitted. */
 	fallbacks?: AnthropicOptions["fallbacks"];
 	/**
@@ -4411,7 +4233,7 @@ function buildParams(
 	isOAuthToken: boolean,
 	options: AnthropicOptions | undefined,
 	buildOptions: AnthropicParamBuildOptions,
-): MessageCreateParamsStreaming {
+): { params: MessageCreateParamsStreaming; requestControls: AnthropicRequestControls | undefined } {
 	const {
 		disableStrictTools,
 		useUmansGatewayWebSearch,
@@ -4420,7 +4242,6 @@ function buildParams(
 		prefixMismatchBehavior,
 		dropAllThinking,
 		droppedThinkingBlocks,
-		providerSessionState,
 		fallbacks = options?.fallbacks,
 		compactionSupported = supportsAnthropicCompaction(model),
 		effectiveBaseUrl,
@@ -4440,17 +4261,26 @@ function buildParams(
 	const firstUserMessageText = shouldInjectClaudeCodeInstruction
 		? extractClaudeCodeFirstUserMessageText(context.messages)
 		: "";
-	let systemBlocks = buildAnthropicSystemBlocks(context.systemPrompt, {
+	const systemBlocks = buildAnthropicSystemBlocks(context.systemPrompt, {
 		includeClaudeCodeInstruction: shouldInjectClaudeCodeInstruction,
 		firstUserMessageText,
 		cacheControl,
 	});
 
+	// Controls earlier requests recorded on their responses fix the declared
+	// tools, the top-level effort and every control message in between.
+	const records = collectAnthropicControlRecords(context.messages);
+	const toolPlan = planAnthropicToolControls(
+		context,
+		records,
+		model.compat.supportsMidConversationToolChanges === true,
+	);
+
 	// Pre-compute tools.
 	let tools: AnthropicWireTool[] | undefined;
-	if (context.tools) {
+	if (toolPlan.tools) {
 		tools = convertTools(
-			context.tools,
+			toolPlan.tools,
 			isOAuthToken,
 			disableStrictTools,
 			supportsEagerToolInputStreaming,
@@ -4542,7 +4372,7 @@ function buildParams(
 	const shouldKeepThinkingContext =
 		!options?.client &&
 		model.compat.supportsContextManagement !== false &&
-		!isVertexRawPredictUrl(effectiveBaseUrl) &&
+		(effectiveBaseUrl === undefined || !isVertexRawPredictUrl(effectiveBaseUrl)) &&
 		(thinking?.type === "adaptive" || thinking?.type === "enabled");
 	// A new on-demand compaction request cannot carry context_management.
 	// Later turns carrying its signed block may keep clear_thinking as usual.
@@ -4564,55 +4394,39 @@ function buildParams(
 	// the `effort-2025-11-24` beta, which that adapter can only accept in the body
 	// (`anthropic_beta`), never as the `anthropic-beta` HTTP header this path sets
 	// — so the field is dropped alongside the beta to avoid a 400 (#5614).
-	let wireMessages = convertAnthropicMessages(context.messages, effectiveModel, isOAuthToken, {
-		serverSideFallbackEnabled: !!fallbacks?.length,
-		replayCompaction: compactionSupported,
-		replayLegacyCompaction: !compactionRequest && !signedReplay,
-		dropAllThinking,
-		droppedThinkingBlocks,
-		credentialId: options?.credentialId,
-	});
-	let controlState = getAnthropicControlState(providerSessionState, options?.sessionId, systemBlocks, wireMessages);
-	const sessionId = options?.sessionId;
-	if (compactionRequest && controlState && providerSessionState && sessionId) {
-		// The compacting request contains only the summarized prefix. Work on a
-		// clone of the last live baseline so transitions anchored in the kept
-		// tail cannot reset it, or leak changes into the live conversation.
-		const liveState = providerSessionState.lastControlStatesBySession.get(sessionId) ?? controlState;
-		touchAnthropicControlState(providerSessionState.compactionControlBaselines, sessionId, {
-			state: cloneAnthropicControlState(liveState),
-		});
-		controlState = cloneAnthropicControlState(liveState, wireMessages);
-	} else if (!compactionRequest && controlState && providerSessionState && sessionId && signedReplay) {
-		const signature = context.messages[0]?.providerPayload;
-		const saved = providerSessionState.compactionControlBaselines.get(sessionId);
-		if (signature?.type === "anthropicCompaction" && saved?.signature === signature.signature) {
-			// The block replaced the old root. Keep the exact tool definitions
-			// (including deferred additions) and re-issue the net active changes
-			// only after the first new user turn.
-			restoreAnthropicCompactionControls(controlState, saved.state);
-			providerSessionState.compactionControlBaselines.delete(sessionId);
-		}
-	}
-	if (controlState) syncAnthropicControlState(controlState, wireMessages);
-	systemBlocks = planStableAnthropicSystem(systemBlocks, controlState, model.compat.supportsMidConversationSystem);
-	tools = planStableAnthropicTools(tools, wireMessages, controlState, model.compat.supportsMidConversationToolChanges);
+	const effortPlan = planAnthropicEffortControls(
+		outputConfigEffort,
+		context.messages,
+		records,
+		model.compat.supportsPerMessageEffort === true,
+	);
+	const wireMessages = convertAnthropicMessages(
+		insertAnthropicControlMarkers(context.messages, [...toolPlan.inserts, ...effortPlan.inserts]),
+		effectiveModel,
+		isOAuthToken,
+		{
+			serverSideFallbackEnabled: !!fallbacks?.length,
+			replayCompaction: compactionSupported,
+			replayLegacyCompaction: !compactionRequest && !signedReplay,
+			dropAllThinking,
+			droppedThinkingBlocks,
+			credentialId: options?.credentialId,
+		},
+	);
 	// Anchor the stable tools+system head so it stays cached across turns; the
 	// moving message tail is anchored separately in applyPromptCaching below.
 	applyHeadCaching(systemBlocks, tools, cacheControl);
-	const topLevelEffort = planStableAnthropicEffort(
-		outputConfigEffort,
-		wireMessages,
-		controlState,
-		model.compat.supportsPerMessageEffort,
-	);
-	wireMessages = materializeAnthropicControlTransitions(wireMessages, controlState);
-	if (!compactionRequest && controlState && providerSessionState && sessionId) {
-		touchAnthropicControlState(providerSessionState.lastControlStatesBySession, sessionId, controlState);
-	}
+	const requestControls: AnthropicRequestControls | undefined =
+		toolPlan.record || effortPlan.record
+			? {
+					messageIndex: context.messages.length,
+					...(toolPlan.record && { tools: toolPlan.record }),
+					...(effortPlan.record && { effort: effortPlan.record }),
+				}
+			: undefined;
 
 	const outputConfigEntries: AnthropicOutputConfig = {};
-	if (topLevelEffort && model.compat.supportsOutputEffort) outputConfigEntries.effort = topLevelEffort;
+	if (effortPlan.topLevel && model.compat.supportsOutputEffort) outputConfigEntries.effort = effortPlan.topLevel;
 	if (options?.taskBudget) {
 		if (compactionRequest || signedReplay) {
 			const taskBudget = { ...options.taskBudget };
@@ -4735,7 +4549,7 @@ function buildParams(
 	ensureMaxTokensForThinking(params, maxOutputTokens);
 	applyPromptCaching(params, cacheControl);
 
-	return params;
+	return { params, requestControls };
 }
 
 const EMPTY_ERROR_TOOL_RESULT_TEXT = "Tool failed with no output.";
@@ -4865,6 +4679,10 @@ export function convertAnthropicMessages(
 	// upgraded from the `user` role to the authoritative `system` role.
 	const developerParams: Array<{ index: number; payload?: AnthropicMessagePayload }> = [];
 	const params: AnthropicMessageParam[] = [];
+	// Controls rendered from request-control markers. The assistant repairs
+	// and the developer upgrade below look through them: they were inserted
+	// by this provider, not authored in the conversation.
+	const controlParams = new Set<AnthropicMessageParam>();
 	// Harness file metadata queued behind a replayed compaction block. Flushed
 	// after the next param boundary that keeps it clear of both the block (the
 	// fold below must still join the block with a following assistant turn, or
@@ -4895,6 +4713,17 @@ export function convertAnthropicMessages(
 	for (let i = 0; i < transformedMessages.length; i++) {
 		const msg = transformedMessages[i];
 
+		const control = anthropicControlOf(msg);
+		if (control) {
+			const controlParam: AnthropicMessageParam = {
+				role: "system",
+				content: anthropicToolChangeBlocks(control.toolChanges, isOAuthToken, model),
+				...(control.effort ? { output_config: { effort: control.effort } } : {}),
+			};
+			controlParams.add(controlParam);
+			params.push(controlParam);
+			continue;
+		}
 		if (
 			opts?.replayCompaction &&
 			(msg.role === "user" || msg.role === "developer") &&
@@ -4955,15 +4784,7 @@ export function convertAnthropicMessages(
 			if (payload?.toolChanges && model.compat.supportsMidConversationToolChanges) {
 				const blocks: ContentBlockParam[] =
 					typeof content === "string" ? [{ type: "text", text: content }] : content;
-				for (const change of payload.toolChanges) {
-					blocks.push({
-						type: change.type,
-						tool: {
-							type: "tool_reference",
-							name: encodeAnthropicToolName(change.name, isOAuthToken, model.compat.escapeBuiltinToolNames),
-						},
-					});
-				}
+				blocks.push(...anthropicToolChangeBlocks(payload.toolChanges, isOAuthToken, model));
 				content = blocks;
 			}
 			if (msg.role === "developer") developerParams.push({ index: params.length, payload });
@@ -5181,12 +5002,19 @@ export function convertAnthropicMessages(
 	// never consecutive. Requiring the next param to be `assistant` (or absent)
 	// covers both the "followed by assistant / last" and "no consecutive system"
 	// constraints. Anything that does not qualify stays a `user` message.
+	// Request controls are looked through, so recording one never demotes a
+	// neighbouring developer message on a later request.
+	const skipControls = (index: number, step: 1 | -1): number => {
+		let next = index + step;
+		while (next >= 0 && next < params.length && controlParams.has(params[next])) next += step;
+		return next;
+	};
 	if (developerParams.length > 0 && model.compat.supportsMidConversationSystem) {
 		for (const developer of developerParams.toReversed()) {
 			const idx = developer.index;
-			const followsUser = idx > 0 && params[idx - 1]?.role === "user";
-			const next = params[idx + 1];
-			const lastOrBeforeAssistant = idx === params.length - 1 || next?.role === "assistant";
+			const followsUser = params[skipControls(idx, -1)]?.role === "user";
+			const nextIndex = skipControls(idx, 1);
+			const lastOrBeforeAssistant = nextIndex >= params.length || params[nextIndex]?.role === "assistant";
 			const content = params[idx].content;
 			const systemCompatible =
 				typeof content === "string" ||
@@ -5251,17 +5079,21 @@ export function convertAnthropicMessages(
 	}
 	// Dropped empty user/developer turns can leave two assistant params adjacent;
 	// the API rejects consecutive assistant messages. Repair with the same neutral
-	// nudge used for trailing-assistant prefill below.
+	// nudge used for trailing-assistant prefill below, directly after the earlier
+	// assistant so request controls between them keep their slot.
 	for (let i = params.length - 1; i > 0; i--) {
-		if (params[i].role === "assistant" && params[i - 1]?.role === "assistant") {
-			params.splice(i, 0, { role: "user", content: "Continue." });
-		}
+		if (params[i].role !== "assistant") continue;
+		const previous = skipControls(i, -1);
+		if (params[previous]?.role !== "assistant") continue;
+		params.splice(previous + 1, 0, { role: "user", content: "Continue." });
+		i = previous + 1;
 	}
 	// A trailing compaction summary leaves its file metadata queued; emit it
 	// before the prefill check so the list ends the request as a user turn.
 	flushCompactionFiles();
-	if (params.length > 0 && params[params.length - 1]?.role === "assistant") {
-		params.push({ role: "user", content: "Continue." });
+	const last = skipControls(params.length, -1);
+	if (params[last]?.role === "assistant") {
+		params.splice(last + 1, 0, { role: "user", content: "Continue." });
 	}
 
 	return params;

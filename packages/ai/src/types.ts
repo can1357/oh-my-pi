@@ -901,12 +901,46 @@ export interface OpenAIResponsesHistoryPayload {
 	items: Array<Record<string, unknown>>;
 }
 
+/** Anthropic `output_config.effort` level. */
+export type AnthropicOutputEffort = "low" | "medium" | "high" | "xhigh" | "max";
+
+/** One `tool_addition`/`tool_removal` block of an Anthropic mid-conversation system message. */
+export interface AnthropicToolChange {
+	type: "tool_addition" | "tool_removal";
+	name: string;
+}
+
 /** Anthropic-only controls attached to a mid-conversation system message. */
 export interface AnthropicMessagePayload {
 	type: "anthropicMessage";
 	clearAt?: "never" | "next_user_message";
-	effort?: "low" | "medium" | "high" | "xhigh" | "max";
-	toolChanges?: Array<{ type: "tool_addition" | "tool_removal"; name: string }>;
+	effort?: AnthropicOutputEffort;
+	toolChanges?: AnthropicToolChange[];
+}
+
+/**
+ * Controls an Anthropic request declared, recorded on its response so later
+ * requests over the same transcript replay a byte-identical prefix.
+ * Written by the Anthropic provider; read by it and by the Agent's inactive-tool lookup.
+ */
+export interface AnthropicRequestControls {
+	/**
+	 * `context.messages.length` of the request that produced this response, i.e. the
+	 * response's own index. A record found at another index belongs to a history that was
+	 * rewritten before it (compaction, dropped messages) and is not replayed as controls.
+	 */
+	messageIndex: number;
+	/** Present when the request kept a stable tool declaration (`supportsMidConversationToolChanges`). Source tool names, not wire names. */
+	tools?: {
+		/** Top-level `tools` in wire order. */
+		declared: string[];
+		/** Subset of `declared` sent with `defer_loading: true`. */
+		deferred: string[];
+		/** Tools active at the end of the request, in `context.tools` order. */
+		active: string[];
+	};
+	/** Present when the request kept a stable effort (`supportsPerMessageEffort`); `null` = API default. */
+	effort?: { topLevel: AnthropicOutputEffort | null; tail: AnthropicOutputEffort | null };
 }
 
 /**
@@ -1078,6 +1112,11 @@ export interface AssistantMessage {
 	disabledFeatures?: string[];
 	/** Provider-reported input rewrites such as dropped bound-thinking blocks. */
 	inputTransformations?: ProviderInputTransformation[];
+	/**
+	 * Controls an Anthropic request declared, recorded on its response so later
+	 * requests over the same transcript replay a byte-identical prefix.
+	 */
+	requestControls?: AnthropicRequestControls;
 	/** Provider-specific opaque payload used to reconstruct transport-native history. */
 	providerPayload?: ProviderPayload;
 	timestamp: number; // Unix timestamp in milliseconds
@@ -1390,6 +1429,8 @@ export interface Context {
 	systemPrompt?: string[];
 	messages: Message[];
 	tools?: Tool[];
+	/** Definitions of tools the transcript's latest Anthropic request declared but that are no longer in `tools`; only the Anthropic provider reads it. */
+	inactiveTools?: Tool[];
 }
 
 export type AssistantMessageEvent =

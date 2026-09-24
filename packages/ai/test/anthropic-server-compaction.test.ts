@@ -4,14 +4,7 @@ import {
 	streamAnthropic,
 	supportsAnthropicCompaction,
 } from "@oh-my-pi/pi-ai/providers/anthropic";
-import type {
-	AssistantMessage,
-	Context,
-	Model,
-	ModelSpec,
-	ProviderSessionState,
-	UserMessage,
-} from "@oh-my-pi/pi-ai/types";
+import type { AssistantMessage, Context, Model, ModelSpec, UserMessage } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { withEnv, withOfficialAnthropicEndpoint } from "./helpers";
 
@@ -55,31 +48,35 @@ async function captureRequest(
 	options: Parameters<typeof streamAnthropic>[2],
 	messages: Context["messages"] = context.messages,
 	tools?: Context["tools"],
-): Promise<{ beta: string; payload: Record<string, unknown> }> {
+	inactiveTools?: Context["inactiveTools"],
+): Promise<{ beta: string; payload: Record<string, unknown>; message: AssistantMessage }> {
 	let beta = "";
 	let payload: Record<string, unknown> = {};
-	const fetchMock: typeof fetch = async (_input, init) => {
-		beta = new Headers(init?.headers).get("anthropic-beta") ?? "";
-		const body: unknown = JSON.parse(String(init?.body ?? "{}"));
-		payload = body !== null && typeof body === "object" ? { ...body } : {};
-		return new Response(
-			JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "captured" } }),
-			{
-				status: 400,
-				headers: { "Content-Type": "application/json" },
-			},
-		);
-	};
-	await streamAnthropic(
+	const fetchMock: typeof fetch = Object.assign(
+		async (_input: string | URL | Request, init?: RequestInit) => {
+			beta = new Headers(init?.headers).get("anthropic-beta") ?? "";
+			const body: unknown = JSON.parse(String(init?.body ?? "{}"));
+			payload = body !== null && typeof body === "object" ? { ...body } : {};
+			return new Response(
+				JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "captured" } }),
+				{
+					status: 400,
+					headers: { "Content-Type": "application/json" },
+				},
+			);
+		},
+		{ preconnect: fetch.preconnect },
+	);
+	const message = await streamAnthropic(
 		requestModel,
-		{ ...context, messages, tools },
+		{ ...context, messages, tools, inactiveTools },
 		{
 			apiKey: "sk-ant-test",
 			...options,
 			fetch: fetchMock,
 		},
 	).result();
-	return { beta, payload };
+	return { beta, payload, message };
 }
 
 async function captureInjected(
@@ -246,10 +243,13 @@ describe("Anthropic on-demand compaction requests", () => {
 describe("Anthropic on-demand compaction response", () => {
 	it("reads the complete signed block from content_block_start and sums usage iterations", async () => {
 		let requests = 0;
-		const fetchMock: typeof fetch = async () => {
-			requests++;
-			return sseResponse(mockEvents("compaction"));
-		};
+		const fetchMock: typeof fetch = Object.assign(
+			async () => {
+				requests++;
+				return sseResponse(mockEvents("compaction"));
+			},
+			{ preconnect: fetch.preconnect },
+		);
 		const result = await streamAnthropic(model, context, {
 			apiKey: "sk-ant-test",
 			anthropicCompaction: {},
@@ -271,7 +271,9 @@ describe("Anthropic on-demand compaction response", () => {
 	});
 
 	it("does not publish a block if the response stopped for another reason", async () => {
-		const fetchMock: typeof fetch = async () => sseResponse(mockEvents("end_turn"));
+		const fetchMock: typeof fetch = Object.assign(async () => sseResponse(mockEvents("end_turn")), {
+			preconnect: fetch.preconnect,
+		});
 		const result = await streamAnthropic(model, context, {
 			apiKey: "sk-ant-test",
 			anthropicCompaction: {},
@@ -283,23 +285,26 @@ describe("Anthropic on-demand compaction response", () => {
 
 	it("retries a 529 compaction_unavailable response without losing the summary", async () => {
 		let requests = 0;
-		const fetchMock: typeof fetch = async () => {
-			requests++;
-			if (requests === 1) {
-				return new Response(
-					JSON.stringify({
-						type: "error",
-						error: {
-							type: "overloaded_error",
-							message: "Compaction unavailable",
-							details: { error_code: "compaction_unavailable" },
-						},
-					}),
-					{ status: 529, headers: { "Content-Type": "application/json" } },
-				);
-			}
-			return sseResponse(mockEvents("compaction"));
-		};
+		const fetchMock: typeof fetch = Object.assign(
+			async () => {
+				requests++;
+				if (requests === 1) {
+					return new Response(
+						JSON.stringify({
+							type: "error",
+							error: {
+								type: "overloaded_error",
+								message: "Compaction unavailable",
+								details: { error_code: "compaction_unavailable" },
+							},
+						}),
+						{ status: 529, headers: { "Content-Type": "application/json" } },
+					);
+				}
+				return sseResponse(mockEvents("compaction"));
+			},
+			{ preconnect: fetch.preconnect },
+		);
 		const result = await streamAnthropic(model, context, {
 			apiKey: "sk-ant-test",
 			anthropicCompaction: {},
@@ -312,19 +317,22 @@ describe("Anthropic on-demand compaction response", () => {
 
 	it("does not retry a compaction signature 400 as a thinking-signature failure", async () => {
 		let requests = 0;
-		const fetchMock: typeof fetch = async () => {
-			requests++;
-			return new Response(
-				JSON.stringify({
-					type: "error",
-					error: {
-						type: "invalid_request_error",
-						message: "compaction_signature_invalid: Invalid `signature` in `thinking` block",
-					},
-				}),
-				{ status: 400, headers: { "Content-Type": "application/json" } },
-			);
-		};
+		const fetchMock: typeof fetch = Object.assign(
+			async () => {
+				requests++;
+				return new Response(
+					JSON.stringify({
+						type: "error",
+						error: {
+							type: "invalid_request_error",
+							message: "compaction_signature_invalid: Invalid `signature` in `thinking` block",
+						},
+					}),
+					{ status: 400, headers: { "Content-Type": "application/json" } },
+				);
+			},
+			{ preconnect: fetch.preconnect },
+		);
 		const result = await streamAnthropic(model, context, {
 			apiKey: "sk-ant-test",
 			fetch: fetchMock,
@@ -413,27 +421,28 @@ describe("Anthropic compaction replay", () => {
 		}
 	});
 
-	it("keeps the top-level tool baseline through compaction and restates net changes after kept thinking", async () => {
-		const preserved = buildModel({ ...spec, id: "claude-fable-5-1" });
-		const session = new Map<string, ProviderSessionState>();
-		const readTool: NonNullable<Context["tools"]>[number] = {
-			name: "read",
-			description: "Read a file",
-			parameters: { type: "object", properties: {} },
-		};
-		const removedTool: NonNullable<Context["tools"]>[number] = {
-			name: "grep",
-			description: "Search files",
-			parameters: { type: "object", properties: {} },
-		};
-		const addedTool: NonNullable<Context["tools"]>[number] = {
-			name: "write",
-			description: "Write a file",
-			parameters: { type: "object", properties: {} },
-		};
-		const tools = [readTool, addedTool];
-		const options = { sessionId: "conversation", providerSessionState: session };
-		const kept: AssistantMessage = {
+	const preserved = buildModel({ ...spec, id: "claude-fable-5-1" });
+	const readTool: NonNullable<Context["tools"]>[number] = {
+		name: "read",
+		description: "Read a file",
+		parameters: { type: "object", properties: {} },
+	};
+	const removedTool: NonNullable<Context["tools"]>[number] = {
+		name: "grep",
+		description: "Search files",
+		parameters: { type: "object", properties: {} },
+	};
+	const addedTool: NonNullable<Context["tools"]>[number] = {
+		name: "write",
+		description: "Write a file",
+		parameters: { type: "object", properties: {} },
+	};
+	const tools = [readTool, addedTool];
+	const options = { sessionId: "conversation" };
+
+	/** The retained assistant turn with signed thinking, answering the request `from` captured. */
+	function keptFrom(from: { message: AssistantMessage }): AssistantMessage {
+		return {
 			role: "assistant",
 			content: [
 				{ type: "thinking", thinking: "Keep this reasoning.", thinkingSignature: "sig_kept" },
@@ -452,31 +461,31 @@ describe("Anthropic compaction replay", () => {
 				totalTokens: 0,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			},
+			requestControls: from.message.requestControls,
 		};
+	}
+
+	/** Wire messages carrying `tool_addition`/`tool_removal` blocks, with their indices. */
+	function toolControls(wire: unknown): { index: number; json: string }[] {
+		if (!Array.isArray(wire)) throw new Error("Expected wire messages");
+		return wire
+			.map((message, index) => ({ index, json: JSON.stringify(message) }))
+			.filter(({ json }) => json.includes('"tool_addition"') || json.includes('"tool_removal"'));
+	}
+
+	it("keeps the declared tools through compaction and restates net changes after kept thinking", async () => {
+		const first = await captureRequest(preserved, options, context.messages, [readTool, removedTool]);
+		const kept = keptFrom(first);
 		const later: Context["messages"] = [...context.messages, kept, { role: "user", content: "more", timestamp: 3 }];
-		await captureRequest(preserved, options, context.messages, [readTool, removedTool]);
-		const changed = await captureRequest(preserved, options, later, tools);
+		const changed = await captureRequest(preserved, options, later, tools, [removedTool]);
 		expect(JSON.stringify(changed.payload.messages)).toContain("tool_addition");
 		expect(JSON.stringify(changed.payload.messages)).toContain("tool_removal");
-		let compactionPayload: Record<string, unknown> = {};
-		const fetchMock: typeof fetch = async (_input, init) => {
-			const body: unknown = JSON.parse(String(init?.body ?? "{}"));
-			compactionPayload = body !== null && typeof body === "object" ? { ...body } : {};
-			return sseResponse(mockEvents("compaction", preserved.id));
-		};
-		const compacted = await streamAnthropic(
-			preserved,
-			{ ...context, tools, messages: context.messages },
-			{ apiKey: "sk-ant-test", ...options, anthropicCompaction: {}, fetch: fetchMock },
-		).result();
-		expect(compacted.providerPayload).toMatchObject({ signature: SIGNATURE });
-		expect(compactionPayload.tools).toEqual(changed.payload.tools);
-		expect(compactionPayload.system).toEqual(changed.payload.system);
 		const swapped = await captureRequest(
 			preserved,
 			options,
 			[summaryMessage({ signature: SIGNATURE }), kept, { role: "user", content: "next", timestamp: 4 }],
 			tools,
+			[removedTool],
 		);
 		expect(swapped.payload.tools).toEqual(changed.payload.tools);
 		expect(swapped.payload.system).toEqual(changed.payload.system);
@@ -488,5 +497,42 @@ describe("Anthropic compaction replay", () => {
 		expect(changeIndex).toBeGreaterThan(nextIndex);
 		expect(JSON.stringify(wire[changeIndex])).toContain("tool_removal");
 		expect(JSON.stringify(wire)).toContain("sig_kept");
+	});
+
+	it("re-issues roster changes the summary absorbed after the retained tail", async () => {
+		const first = await captureRequest(preserved, options, context.messages, [readTool, removedTool]);
+		const later: Context["messages"] = [
+			...context.messages,
+			keptFrom(first),
+			{ role: "user", content: "more", timestamp: 3 },
+		];
+		const changed = await captureRequest(preserved, options, later, tools, [removedTool]);
+		expect(changed.message.requestControls).toMatchObject({
+			messageIndex: 3,
+			tools: { declared: ["read", "grep", "write"], deferred: ["write"], active: ["read", "write"] },
+		});
+		// The kept turn answered `changed`, whose tool control is now inside the summary.
+		const swapped = await captureRequest(
+			preserved,
+			options,
+			[summaryMessage({ signature: SIGNATURE }), keptFrom(changed), { role: "user", content: "next", timestamp: 4 }],
+			tools,
+			[removedTool],
+		);
+
+		expect(swapped.payload.tools).toEqual(changed.payload.tools);
+		const wire = swapped.payload.messages;
+		if (!Array.isArray(wire)) throw new Error("Expected wire messages");
+		const controls = toolControls(wire);
+		expect(controls).toHaveLength(1);
+		const [control] = controls;
+		expect(JSON.parse(control?.json ?? "{}").content).toEqual([
+			{ type: "tool_removal", tool: { type: "tool_reference", name: "grep" } },
+			{ type: "tool_addition", tool: { type: "tool_reference", name: "write" } },
+		]);
+		const nextIndex = wire.findIndex(message => JSON.stringify(message).includes('"next"'));
+		expect(control?.index).toBeGreaterThan(nextIndex);
+		const keptIndex = wire.findIndex(message => JSON.stringify(message).includes("sig_kept"));
+		expect(wire.slice(0, keptIndex).some(message => message.role === "system")).toBe(false);
 	});
 });

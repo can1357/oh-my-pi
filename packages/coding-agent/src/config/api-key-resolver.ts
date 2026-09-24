@@ -27,8 +27,8 @@ export interface ApiKeyResolverRegistry {
 		sessionId?: string,
 		options?: { baseUrl?: string; modelId?: string; forceRefresh?: boolean; signal?: AbortSignal },
 	): Promise<string | undefined>;
-	/** Available on the full registry; structural shells may only resolve bare keys. */
-	getApiKeyWithCredentialForProvider?(
+	/** Resolve the bearer and durable credential row identity, when available. */
+	getApiKeyWithCredentialForProvider(
 		provider: string,
 		sessionId?: string,
 		options?: { baseUrl?: string; modelId?: string; forceRefresh?: boolean; signal?: AbortSignal },
@@ -54,15 +54,13 @@ export interface ApiKeyResolverRegistry {
  * Also usable standalone for structural registries that don't carry the method.
  */
 export function createApiKeyResolver(
-	registry: Pick<ApiKeyResolverRegistry, "getApiKeyForProvider" | "authStorage">,
+	registry: Pick<ApiKeyResolverRegistry, "getApiKeyWithCredentialForProvider" | "authStorage">,
 	provider: string,
 	options: ApiKeyResolverOptions = {},
 ): ApiKeyResolver {
 	const { sessionId, baseUrl, modelId } = options;
 	const resolveKey = (forceRefresh: boolean | undefined, signal?: AbortSignal): Promise<ApiKeyResolution> =>
-		registry.getApiKeyWithCredentialForProvider
-			? registry.getApiKeyWithCredentialForProvider(provider, sessionId, { baseUrl, modelId, forceRefresh, signal })
-			: registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId, forceRefresh, signal });
+		registry.getApiKeyWithCredentialForProvider(provider, sessionId, { baseUrl, modelId, forceRefresh, signal });
 	return async ({ lastChance, error, signal, previousKey }) => {
 		if (error === undefined) {
 			return resolveKey(undefined);

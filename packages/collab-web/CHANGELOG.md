@@ -2,13 +2,15 @@
 
 ## [Unreleased]
 
+## [18.3.0] - 2026-09-24
+
 ### Added
 
-- Added `wait` tool renderer to handle coordinated job and messaging views
+- Added support for rendering coordinated job and messaging views through the `wait` tool.
 
 ### Removed
 
-- Removed obsolete `hub` tool renderer
+- Removed the obsolete `hub` tool renderer.
 
 ## [18.2.1] - 2026-09-15
 

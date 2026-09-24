@@ -121,7 +121,7 @@ function describeAgents(agents: AgentActivitySnapshot[]): string[] {
 		const stale = agent.live
 			? ""
 			: agent.acceptedAt !== undefined
-				? ` — final result accepted ${formatDuration(Math.max(0, Date.now() - agent.acceptedAt))} ago but still running; clear it with empty \`write proc://${agent.id}\``
+				? ` — final result accepted ${formatDuration(Math.max(0, Date.now() - agent.acceptedAt))} ago but still running; clear it with \`write proc://${agent.id}/kill\``
 				: " — no turn in flight (stale registration?)";
 		lines.push(`- \`${agent.id}\`${parent} — up ${formatDuration(agent.ageMs)}${activity}${stale}`);
 	}
@@ -131,7 +131,7 @@ function describeAgents(agents: AgentActivitySnapshot[]): string[] {
 	);
 	if (agents.some(agent => !agent.live)) {
 		lines.push(
-			"An agent with no turn in flight cannot answer a message and never satisfies `wait`; clear it with empty `write proc://<id>`.",
+			"An agent with no turn in flight cannot answer a message and never satisfies `wait`; clear it with `write proc://<id>/kill`.",
 		);
 	}
 	return lines;

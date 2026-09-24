@@ -19,6 +19,6 @@
 
 ## Related surfaces
 - `read proc://` lists caller-visible jobs and project services; `read proc://<id>` inspects state/output without consuming delivery.
-- Empty `write proc://<id>` cancels a job or stops a service. Non-empty writes send stdin only to a service.
+- `write proc://<id>/kill` cancels a job or owned subagent, or stops a service; no `content` needed. Bare `proc://<id>` writes send stdin only to a service, including empty input.
 - `write agent://<id>` sends a peer message; `agent://all` broadcasts to visible live peers. Bare `read history://` discovers registered agent transcripts. The final result of a subagent is delivered to its parent automatically.
 - Start supervised services with `bash` `name` and optional `ready`; inspect and control them through `proc://`.

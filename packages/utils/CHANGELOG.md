@@ -2,10 +2,6 @@
 
 ## [Unreleased]
 
-### Changed
-
-- Migrated internal cryptographic utilities to `Bun` performance-optimized hashers
-
 ## [18.2.7] - 2026-09-21
 
 ### Changed

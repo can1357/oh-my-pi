@@ -22,15 +22,15 @@ import type {
 	WriteContext,
 } from "./types";
 
-function target(url: InternalUrl): { id: string; mode: boolean } {
+function target(url: InternalUrl): { id: string; action: "stdin" | "mode" | "kill" } {
 	const path = url.rawPathname ?? url.pathname;
-	if (url.search || url.hash || (path !== "" && path !== "/" && path !== "/mode"))
+	if (url.search || url.hash || (path !== "" && path !== "/" && path !== "/mode" && path !== "/kill"))
 		throw new Error(
-			`Invalid proc:// URL: ${url.rawHref ?? url.href}. Use proc://, proc://<id>, or proc://<id>/mode.`,
+			`Invalid proc:// URL: ${url.rawHref ?? url.href}. Use proc://, proc://<id>, proc://<id>/kill, or proc://<id>/mode.`,
 		);
 	const id = url.rawHost;
 	if (id.includes("/") || id === "." || id === "..") throw new Error(`Invalid process id: ${id}`);
-	return { id, mode: path === "/mode" };
+	return { id, action: path === "/mode" ? "mode" : path === "/kill" ? "kill" : "stdin" };
 }
 
 function ownerJobs(session: ToolSession): AsyncJob[] {
@@ -64,8 +64,8 @@ export class ProcProtocolHandler implements ProtocolHandler {
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
 		const session = context?.session;
 		if (!session) throw new Error("proc:// requires a tool session");
-		const { id, mode } = target(url);
-		if (mode) throw new Error("proc://<id>/mode is writable only");
+		const { id, action } = target(url);
+		if (action !== "stdin") throw new Error(`proc://<id>/${action} is writable only`);
 		const jobs = ownerJobs(session);
 		const services = session.settings.get("launch.enabled") ? await listServices(session, context?.signal) : [];
 		if (!id) {
@@ -135,8 +135,8 @@ export class ProcProtocolHandler implements ProtocolHandler {
 	async write(url: InternalUrl, content: string, context?: WriteContext): Promise<InternalWriteResult> {
 		const session = context?.session;
 		if (!session) throw new Error("proc:// requires a tool session");
-		const { id, mode } = target(url);
-		if (!id) throw new Error("Write requires proc://<id> or proc://<id>/mode");
+		const { id, action } = target(url);
+		if (!id) throw new Error("Write requires proc://<id>, proc://<id>/kill, or proc://<id>/mode");
 		const ownerId = session.getAgentId?.() ?? undefined;
 		const job = ownerJobs(session).find(item => item.id === id);
 		const agent = runningAgentsOutsideJobs(session).find(item => item.id === id);
@@ -145,7 +145,7 @@ export class ProcProtocolHandler implements ProtocolHandler {
 			: undefined;
 		if ((job || agent) && service)
 			throw new Error(`proc://${id} is ambiguous: both job ${id} and service ${id} exist.`);
-		if (mode) {
+		if (action === "mode") {
 			if (!service) throw new Error(`Service not found: ${id}`);
 			if (content !== "persist" && content !== "session" && content !== "detached")
 				throw new Error("Service mode must be persist, session, or detached");
@@ -155,22 +155,24 @@ export class ProcProtocolHandler implements ProtocolHandler {
 				details: { proc: { action: "mode", daemon: updated, mode: content } },
 			};
 		}
-		if (service) {
-			const updated =
-				content === ""
-					? await stopService(session, id, context?.signal)
-					: await sendService(session, id, content, context?.signal);
+		if (action === "stdin") {
+			if (!service)
+				throw new Error(
+					`stdin is only available for services. To cancel, call write with ${JSON.stringify({ path: `proc://${id}/kill` })} (no content needed).`,
+				);
+			const updated = await sendService(session, id, content, context?.signal);
 			return {
-				text: `${content === "" ? "Stopped" : "Sent input to"} ${serviceStatus(updated)}`,
-				details: {
-					proc:
-						content === ""
-							? { action: "stop", daemon: updated }
-							: { action: "stdin", daemon: updated, input: content },
-				},
+				text: `Sent input to ${serviceStatus(updated)}`,
+				details: { proc: { action: "stdin", daemon: updated, input: content } },
 			};
 		}
-		if (content !== "") throw new Error("stdin is only available for services");
+		if (service) {
+			const updated = await stopService(session, id, context?.signal);
+			return {
+				text: `Stopped ${serviceStatus(updated)}`,
+				details: { proc: { action: "stop", daemon: updated } },
+			};
+		}
 		if ((job || agent) && session.asyncJobManager) {
 			const result = await executeCancel(session, session.asyncJobManager, ownerId, [id]);
 			return {

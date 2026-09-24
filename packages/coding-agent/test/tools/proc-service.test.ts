@@ -5,11 +5,13 @@ import { setProcessName, TempDir } from "@oh-my-pi/pi-utils";
 import { AsyncJobManager } from "../../src/async/job-manager";
 import { ProcProtocolHandler } from "../../src/internal-urls/proc-protocol";
 import { parseInternalUrl } from "../../src/internal-urls/parse";
+import { AgentRegistry } from "../../src/registry/agent-registry";
 import { startDaemonBrokerFromEnvironment } from "../../src/launch/broker";
 import { createDaemonBrokerClient } from "../../src/launch/client";
 import * as daemonClient from "../../src/launch/client";
 import { DAEMON_IDLE_GRACE_ENV, DAEMON_PROJECT_DIR_ENV, DAEMON_RUNTIME_DIR_ENV } from "../../src/launch/protocol";
 import { BashTool } from "../../src/tools/bash";
+import { WriteTool } from "../../src/tools/write";
 import type { ToolSession } from "../../src/tools";
 
 function startBroker(projectDir: string, runtimeDir: string): Promise<void> {
@@ -56,7 +58,7 @@ function toolSession(cwd: string, manager?: AsyncJobManager, launchEnabled = tru
 }
 
 describe("proc:// background jobs", () => {
-	it("lists a running owned job, does not consume its result on read, and cancels with an empty write", async () => {
+	it("lists owned jobs, preserves delivery on read, and scopes kill to the owner", async () => {
 		const manager = new AsyncJobManager({});
 		const pending = Promise.withResolvers<string>();
 		const id = manager.register(
@@ -83,13 +85,15 @@ describe("proc:// background jobs", () => {
 		const protocol = new ProcProtocolHandler();
 		try {
 			await expect(protocol.resolve(parseInternalUrl("proc://"))).rejects.toThrow("requires a tool session");
-			await expect(protocol.write(parseInternalUrl(`proc://${id}`), "")).rejects.toThrow("requires a tool session");
+			await expect(protocol.write(parseInternalUrl(`proc://${id}/kill`), "")).rejects.toThrow(
+				"requires a tool session",
+			);
 			const list = await protocol.resolve(parseInternalUrl("proc://"), { session });
 			expect(list.content).toContain(`${id} [bash] running`);
 			expect(list.content).not.toContain("other-job");
 			expect(list.details?.proc.jobs).toMatchObject([{ id, status: "running" }]);
 			await expect(protocol.resolve(parseInternalUrl("proc://other-job"), { session })).rejects.toThrow("not found");
-			await expect(protocol.write(parseInternalUrl("proc://other-job"), "", { session })).rejects.toThrow(
+			await expect(protocol.write(parseInternalUrl("proc://other-job/kill"), "", { session })).rejects.toThrow(
 				"not found",
 			);
 			const running = await protocol.resolve(parseInternalUrl(`proc://${id}`), { session });
@@ -99,7 +103,11 @@ describe("proc:// background jobs", () => {
 			await expect(protocol.write(parseInternalUrl(`proc://${id}`), "input", { session })).rejects.toThrow(
 				"stdin is only available for services",
 			);
-			const cancelled = await protocol.write(parseInternalUrl(`proc://${id}`), "", { session });
+			await expect(protocol.resolve(parseInternalUrl(`proc://${id}/kill`), { session })).rejects.toThrow(
+				"writable only",
+			);
+			expect(manager.getJob(id)?.status).toBe("running");
+			const cancelled = await protocol.write(parseInternalUrl(`proc://${id}/kill`), "ignored payload", { session });
 			expect(cancelled.text).toContain(`Cancelled background job ${id}`);
 			expect(cancelled.details?.proc).toMatchObject({ op: "cancel", cancelled: [{ id, status: "cancelled" }] });
 			expect(manager.getJob(id)?.status).toBe("cancelled");
@@ -114,6 +122,75 @@ describe("proc:// background jobs", () => {
 		} finally {
 			await manager.dispose();
 		}
+	});
+
+	it("kills without content and never interprets bare job writes as cancellation", async () => {
+		const manager = new AsyncJobManager({});
+		const pending = Promise.withResolvers<string>();
+		const id = manager.register(
+			"bash",
+			"running command",
+			async ({ signal }) => {
+				signal.addEventListener("abort", () => pending.resolve("cancelled"), { once: true });
+				return pending.promise;
+			},
+			{ ownerId: "Main" },
+		);
+		const write = new WriteTool(toolSession(process.cwd(), manager, false));
+		try {
+			await expect(
+				write.execute("invalid-cancel", {
+					path: `proc://${id}`,
+					content: '</antml>\n<parameter name="i">Cancelling background test run',
+				}),
+			).rejects.toThrow("stdin is only available for services");
+			await expect(write.execute("empty-stdin", { path: `proc://${id}`, content: "" })).rejects.toThrow(
+				"stdin is only available for services",
+			);
+			await expect(
+				write.execute("missing-stdin", write.parameters.assert({ path: `proc://${id}` })),
+			).rejects.toThrow("content is required");
+			expect(manager.getJob(id)?.status).toBe("running");
+			const result = await write.execute("kill", write.parameters.assert({ path: `proc://${id}/kill` }));
+			await manager.getJob(id)?.promise;
+			expect(result.details?.proc).toMatchObject({ op: "cancel", cancelled: [{ id, status: "cancelled" }] });
+			expect(manager.getJob(id)?.status).toBe("cancelled");
+		} finally {
+			await manager.dispose();
+		}
+	});
+
+	it.each([false, true])("kills only owned jobless agents (job manager: %s)", async withManager => {
+		const manager = withManager ? new AsyncJobManager({}) : undefined;
+		const registry = new AgentRegistry();
+		registry.register({ id: "Worker", displayName: "Worker", kind: "sub", parentId: "Main", session: null });
+		registry.register({ id: "Foreign", displayName: "Foreign", kind: "sub", parentId: "Other", session: null });
+		const session = toolSession(process.cwd(), manager, false);
+		session.agentRegistry = registry;
+		const write = new WriteTool(session);
+		try {
+			const denied = await write.execute("foreign", { path: "proc://Foreign/kill" });
+			expect(denied.details?.proc).toMatchObject({ cancelled: [{ id: "Foreign", status: "not_found" }] });
+			expect(registry.get("Foreign")?.status).toBe("running");
+			const killed = await write.execute("worker", { path: "proc://Worker/kill" });
+			expect(killed.details?.proc).toMatchObject({ cancelled: [{ id: "Worker", status: "cancelled" }] });
+			expect(registry.get("Worker")).toBeUndefined();
+		} finally {
+			await manager?.dispose();
+		}
+	});
+
+	it("requires file content instead of silently truncating a file", async () => {
+		using temp = TempDir.createSync("@omp-proc-write-");
+		const file = path.join(temp.path(), "keep.txt");
+		await Bun.write(file, "keep this");
+		const write = new WriteTool(toolSession(temp.path(), undefined, false));
+		await expect(write.execute("missing-content", write.parameters.assert({ path: file }))).rejects.toThrow(
+			"content is required",
+		);
+		expect(await Bun.file(file).text()).toBe("keep this");
+		await write.execute("empty-file", { path: file, content: "" });
+		expect(await Bun.file(file).text()).toBe("");
 	});
 
 	it("lists settled jobs with their frozen run duration instead of their age", async () => {
@@ -167,7 +244,7 @@ describe("bash services via proc://", () => {
 		const proc = new ProcProtocolHandler();
 		try {
 			const started = await bash.execute("service", {
-				command: "printf 'READY\\n'; read line; printf 'ACK:%s\\n' \"$line\"; read line",
+				command: "printf 'READY\\n'; while IFS= read -r line; do printf 'ACK:[%s]\\n' \"$line\"; done",
 				name: "echo-service",
 				ready: { log: "READY", timeout: 5 },
 				pty: false,
@@ -191,7 +268,7 @@ describe("bash services via proc://", () => {
 			await expect(proc.resolve(parseInternalUrl("proc://echo-service"), { session })).rejects.toThrow(
 				"both job echo-service and service echo-service",
 			);
-			await expect(proc.write(parseInternalUrl("proc://echo-service"), "", { session })).rejects.toThrow(
+			await expect(proc.write(parseInternalUrl("proc://echo-service/kill"), "", { session })).rejects.toThrow(
 				"both job echo-service and service echo-service",
 			);
 			manager.cancel(collisionId, { ownerId: "Main" });
@@ -209,16 +286,25 @@ describe("bash services via proc://", () => {
 				op: "wait",
 				name: "echo-service",
 				for: "exit",
-				pattern: "ACK:hello",
+				pattern: "ACK:\\[hello\\]",
 				timeoutMs: 2_000,
 			});
-			expect(observed.op === "wait" && observed.matched).toBe("ACK:hello");
+			expect(observed.op === "wait" && observed.matched).toBe("ACK:[hello]");
 			const read = await proc.resolve(parseInternalUrl("proc://echo-service"), { session });
-			expect(read.content).toContain("ACK:hello");
+			expect(read.content).toContain("ACK:[hello]");
 			expect(read.details?.proc).toMatchObject({
 				daemon: { name: "echo-service" },
-				log: expect.stringContaining("ACK:hello"),
+				log: expect.stringContaining("ACK:[hello]"),
 			});
+			await proc.write(parseInternalUrl("proc://echo-service"), "", { session });
+			const blank = await client.request({
+				op: "wait",
+				name: "echo-service",
+				for: "exit",
+				pattern: "ACK:\\[\\]",
+				timeoutMs: 2_000,
+			});
+			expect(blank.op === "wait" && blank.matched).toBe("ACK:[]");
 			const persisted = await proc.write(parseInternalUrl("proc://echo-service/mode"), "persist", { session });
 			expect(persisted.text).toContain("persistent");
 			expect(persisted.details?.proc).toMatchObject({ action: "mode", mode: "persist", daemon: { persist: true } });
@@ -239,8 +325,8 @@ describe("bash services via proc://", () => {
 				pty: false,
 			});
 			expect(restarted.content[0]?.type === "text" ? restarted.content[0].text : "").toContain("REPLACED");
-			const stopped = await proc.write(parseInternalUrl("proc://echo-service"), "", { session });
-			expect(stopped.text).toContain("Stopped");
+			const write = new WriteTool(session);
+			const stopped = await write.execute("kill", write.parameters.assert({ path: "proc://echo-service/kill" }));
 			expect(stopped.details?.proc).toMatchObject({ action: "stop", daemon: { name: "echo-service" } });
 			const background = await bash.execute("detach-candidate", {
 				command: "printf 'RUNNING\\n'; sleep 30",
@@ -260,7 +346,7 @@ describe("bash services via proc://", () => {
 			await expect(
 				proc.write(parseInternalUrl("proc://detach-candidate/mode"), "session", { session }),
 			).rejects.toThrow("must remain persistent");
-			await proc.write(parseInternalUrl("proc://detach-candidate"), "", { session });
+			await proc.write(parseInternalUrl("proc://detach-candidate/kill"), "", { session });
 			await expect(bash.execute("invalid", { command: "true", name: "bad", async: true })).rejects.toThrow(
 				"does not accept async or timeout",
 			);
