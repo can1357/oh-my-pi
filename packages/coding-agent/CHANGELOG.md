@@ -6,6 +6,7 @@
 
 - Added support for paged reading of large files with metadata signaling for UI recovery
 - Added `unset` capability to the configuration registry for removing overrides and reverting to defaults
+- Added TinyFish as an optional reader backend for the fetch/read URL tool, configurable with `TINYFISH_API_KEY` and `TINYFISH_FETCH_BASE_URL` (by [@riique](https://github.com/riique)).
 - Added support for universal (fat) Mach-O binaries in IDA tool, allowing selection of specific architecture slices via the `:@<arch>` syntax
 - Added automatic slice detection for universal binaries, defaulting to the host CPU architecture
 - Added case-sensitive per-agent compaction thresholds for task/eval subagents, with percentage or fixed-token limits that leave the main session threshold unchanged ([#13107](https://github.com/can1357/oh-my-pi/pull/13107) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
