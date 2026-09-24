@@ -7,6 +7,11 @@
 - Added `--agent` and `/agent` to run a discovered agent definition as the main-session persona (tools, model, thinking, spawns, system prompt), restorable on exit and across resume ([#6836](https://github.com/can1357/oh-my-pi/issues/6836), [#5306](https://github.com/can1357/oh-my-pi/issues/5306), [#7056](https://github.com/can1357/oh-my-pi/issues/7056)).
 - Added `additionalContext` to extension and hook `tool_call` results, plus `ctx.addAdditionalContext()` for registered tools, to pass trusted instructions to the model after a tool call without changing its result ([#11998](https://github.com/can1357/oh-my-pi/pull/11998) by [@H4vC](https://github.com/H4vC))
 
+### Fixed
+
+- `omp update` and the startup update check now use your configured npm registry (`.npmrc`, `npm_config_registry`, or bunfig, including scoped registries and auth tokens) instead of always querying registry.npmjs.org ([#13115](https://github.com/can1357/oh-my-pi/pull/13115) by [@H4vC](https://github.com/H4vC))
+- Fixed auto-QA grievance pushes getting stuck forever behind one report the collector rejects: tool names are clamped to the collector's 128-byte limit, rejected reports are set aside with the server's error (shown in `omp grievances list` and `push`), and the rest of the queue keeps sending ([#13091](https://github.com/can1357/oh-my-pi/issues/13091), [#13119](https://github.com/can1357/oh-my-pi/pull/13119) by [@NaC-L](https://github.com/NaC-L))
+
 ## [18.3.0] - 2026-09-24
 
 ### Breaking Changes
