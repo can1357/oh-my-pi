@@ -602,7 +602,9 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			// for internal-URL paths, debug is read-tier for inspection actions).
 			// Malformed JSON, non-object payloads, missing content, and approval
 			// functions that reject schema-invalid objects stay exec so the gate
-			// fails closed — the dispatch itself rejects invalid arguments too.
+			// fails closed. The dispatch rejects schema-invalid arguments too,
+			// except for `lenientArgValidation` devices, whose `execute` receives
+			// this same raw object — so the tier still describes what runs.
 			const rawContent = (args as Partial<WriteParams>).content;
 			if (typeof rawContent !== "string") return "exec";
 			let parsed: unknown;

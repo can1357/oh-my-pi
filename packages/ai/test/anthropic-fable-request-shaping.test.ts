@@ -281,7 +281,7 @@ describe("Anthropic preserved-thinking request shaping", () => {
 	});
 });
 
-describe("Anthropic Fable/Mythos forced tool_choice", () => {
+describe("Anthropic forced tool_choice", () => {
 	it("downgrades a forced tool to auto for Fable (which rejects forced tool use)", async () => {
 		const payload = await capturePayload(adaptiveModel("claude-fable-5"), {
 			toolChoice: { type: "tool", name: "get_weather" },
@@ -296,11 +296,20 @@ describe("Anthropic Fable/Mythos forced tool_choice", () => {
 		expect(payload.tool_choice?.type).toBe("auto");
 	});
 
-	it("preserves a forced tool_choice for non-Fable models (Opus 4.8 supports it)", async () => {
-		const payload = await capturePayload(adaptiveModel("claude-opus-4-8"), {
+	it("downgrades a forced tool to auto for Opus 5.5 (rejects forced tool use)", async () => {
+		const payload = await capturePayload(adaptiveModel("claude-opus-5-5"), {
 			toolChoice: { type: "tool", name: "get_weather" },
 		});
-		expect(payload.tool_choice?.type).toBe("tool");
+		expect(payload.tool_choice?.type).toBe("auto");
+	});
+
+	it("preserves a forced tool_choice below the Opus 5.5 floor (Opus 5, Opus 4.8)", async () => {
+		for (const id of ["claude-opus-5", "claude-opus-4-8"]) {
+			const payload = await capturePayload(adaptiveModel(id), {
+				toolChoice: { type: "tool", name: "get_weather" },
+			});
+			expect(payload.tool_choice?.type).toBe("tool");
+		}
 	});
 });
 

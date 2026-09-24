@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed `/dev/stdin`, `/dev/stdout`, `/dev/stderr`, `/dev/fd/N`, and `/dev/tty` in the bash tool reaching omp's own descriptors instead of the command's; `cat /dev/stdin <<'EOF'` no longer hangs the TUI ([#13121](https://github.com/can1357/oh-my-pi/pull/13121) by [@radkawar](https://github.com/radkawar))
+- Fixed task-backed native operations (grep, glob, ast, shell, vcs, …) ignoring an `AbortSignal` that was already aborted when the call started ([#13039](https://github.com/can1357/oh-my-pi/pull/13039) by [@HeyItsGilbert](https://github.com/HeyItsGilbert)).
 
 ## [18.3.0] - 2026-09-24
 

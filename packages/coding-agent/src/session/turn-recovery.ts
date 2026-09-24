@@ -38,6 +38,7 @@ import {
 	type ConfiguredThinkingLevel,
 	clampThinkingLevelToCeiling,
 	modelSupportsEffortCeiling,
+	resolveThinkingLevelForModel,
 } from "@oh-my-pi/pi-tui/thinking";
 import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import type { AgentSessionEvent } from "./agent-session-events";
@@ -1836,6 +1837,28 @@ export class TurnRecovery {
 		}
 	}
 
+	/**
+	 * Whether applying `candidate` at `selector`'s thinking level would leave the
+	 * request unchanged: the same routed model identity (provider, id AND the
+	 * `@upstream` route `formatModelStringWithRouting` preserves) and the same
+	 * effective thinking level after the ceiling clamp in
+	 * {@link applyRetryFallbackCandidate} and the per-model clamp in
+	 * `setThinkingLevel`. A different route or a different effective level is a
+	 * real change of request and stays eligible.
+	 */
+	#isNoOpRetryFallback(candidate: Model, selector: RetryFallbackSelector): boolean {
+		const active = this.#host.model();
+		if (!active || formatModelStringWithRouting(candidate) !== formatModelStringWithRouting(active)) return false;
+		const configured = this.#host.configuredThinkingLevel();
+		const requested = selector.thinkingLevel ?? configured;
+		if (requested === AUTO_THINKING || configured === AUTO_THINKING) return requested === configured;
+		const effective = resolveThinkingLevelForModel(
+			candidate,
+			clampThinkingLevelToCeiling(candidate, requested, this.#host.thinkingLevelCeiling()),
+		);
+		return effective === configured;
+	}
+
 	async applyRetryFallbackCandidate(
 		role: string,
 		selector: RetryFallbackSelector,
@@ -1944,6 +1967,15 @@ export class TurnRecovery {
 				const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 				const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
 				if (!candidate) continue;
+				// A candidate that would leave the request exactly as it is — same
+				// routed model, same effective thinking level — is not a switch, and
+				// must never be applied: `findRetryFallbackCandidates` excludes the
+				// current model by selector STRING, while what gets applied is what
+				// `resolveModelOverride` resolves that string to, clamped. When those
+				// disagree, the swap "succeeds" onto the failing request, the caller
+				// sets `switchedModel`, and the retry budget is reset to 1 on every
+				// failure — an unbounded retry loop against a model that cannot work.
+				if (this.#isNoOpRetryFallback(candidate, selector)) continue;
 				if (options?.excludeProvider === candidate.provider) continue;
 				// Anthropic signatures and redacted blocks are model-bound, while the
 				// latest assistant response must remain byte-identical. A same-provider

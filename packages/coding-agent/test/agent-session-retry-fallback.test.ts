@@ -6608,4 +6608,149 @@ describe("AgentSession retry fallback", () => {
 		const finalAssistant = getLastAssistantMessage(session);
 		expect(finalAssistant.content).toEqual([{ type: "text", text: "Recovered on the same model." }]);
 	});
+
+	it("does not reset the retry budget for a chain entry that resolves to the failing model", async () => {
+		const primaryModel = getBundledModel("openrouter", "z-ai/glm-5.2");
+		if (!primaryModel) {
+			throw new Error("Expected bundled test model to exist");
+		}
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+
+		const mock = createMockModel();
+		const requestedModels: string[] = [];
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				// A permanent route failure: retrying it can never succeed.
+				mock.push({ throw: "500 upstream is unwell" });
+				return mock.stream(model, context, options);
+			},
+		});
+
+		// The chain entry is a DIFFERENT selector string that resolves to the
+		// model already active. `findRetryFallbackCandidates` filters by string,
+		// so it survives the filter and the swap lands on the failing model.
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 2,
+			"retry.fallbackChains": { [primarySelector]: ["openrouter/glm-5.2"] },
+		});
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		mockSchedulerWaitWithClock();
+
+		await session.prompt("Fail on a route that cannot recover");
+		await session.waitForIdle();
+
+		// A "switch" onto the model that just failed is not a switch: the retry
+		// budget must still bound the attempts. Before the guard this reset the
+		// budget on every failure and the turn retried without limit.
+		expect(requestedModels.length).toBeLessThanOrEqual(1 + 2);
+		expect(requestedModels.every(selector => selector === primarySelector)).toBe(true);
+		expect(getLastAssistantMessage(session).stopReason).toBe("error");
+	});
+
+	it("treats a chain entry clamped back to the current effort as no switch", async () => {
+		const primaryModel = getBundledModel("openrouter", "z-ai/glm-5.2");
+		if (!primaryModel) {
+			throw new Error("Expected bundled test model to exist");
+		}
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+
+		const mock = createMockModel();
+		const requestedModels: string[] = [];
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				mock.push({ throw: "500 upstream is unwell" });
+				return mock.stream(model, context, options);
+			},
+		});
+
+		// The entry asks for `:high`, but the session ceiling is `low`, so applying
+		// it would clamp straight back to the level already in use: the same
+		// request, and still not a switch.
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 2,
+			"retry.fallbackChains": { [primarySelector]: ["openrouter/glm-5.2:high"] },
+		});
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			thinkingLevel: Effort.Low,
+			thinkingLevelCeiling: Effort.Low,
+		});
+		mockSchedulerWaitWithClock();
+
+		await session.prompt("Fail on a route that cannot recover");
+		await session.waitForIdle();
+
+		expect(requestedModels.length).toBeLessThanOrEqual(1 + 2);
+		expect(getLastAssistantMessage(session).stopReason).toBe("error");
+	});
+
+	it("still switches to the same model on a different upstream route", async () => {
+		const openRouterModel = getBundledModel("openrouter", "z-ai/glm-4.7");
+		if (!openRouterModel) {
+			throw new Error("Expected bundled OpenRouter test model to exist");
+		}
+		const routedPrimary = parseModelPattern("openrouter/z-ai/glm-4.7@cerebras", [openRouterModel]).model;
+		if (!routedPrimary) {
+			throw new Error("Expected routed OpenRouter primary to resolve");
+		}
+
+		const mock = createMockModel();
+		const requestedModels: string[] = [];
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: routedPrimary, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (requestedModel, context, options) => {
+				const route = (requestedModel.compat as { openRouterRouting?: { only?: string[] } } | undefined)
+					?.openRouterRouting?.only?.[0];
+				const requested = `${requestedModel.provider}/${requestedModel.id}${route ? `@${route}` : ""}`;
+				requestedModels.push(requested);
+				if (requested === "openrouter/z-ai/glm-4.7@cerebras") mock.push({ throw: "500 upstream is unwell" });
+				else mock.push({ content: [`ok:${requested}`] });
+				return mock.stream(requestedModel, context, options);
+			},
+		});
+
+		// Same provider and id, different endpoint: a real change of request.
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 2,
+			"retry.fallbackChains": { default: ["openrouter/z-ai/glm-4.7@chutes"] },
+		});
+		settings.setModelRole("default", "openrouter/z-ai/glm-4.7@cerebras");
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		mockSchedulerWaitWithClock();
+
+		await session.prompt("Fail over to another route of the same model");
+		await session.waitForIdle();
+
+		expect(requestedModels).toContain("openrouter/z-ai/glm-4.7@chutes");
+		expect(getLastAssistantMessage(session).stopReason).not.toBe("error");
+	});
 });

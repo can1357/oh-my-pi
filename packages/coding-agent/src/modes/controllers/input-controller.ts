@@ -684,11 +684,8 @@ export class InputController {
 			this.ctx.editor.setCustomKeyHandler(key, () => void this.ctx.handleLiveCommand());
 		}
 		// Hold the space bar to push-to-talk: the editor recognizes the auto-repeat burst, tracks
-		// the spam back out, and toggles STT on hold start / release. Gated on `stt.enabled` so a
-		// disabled STT leaves the space bar typing normally.
-		this.ctx.editor.sttHoldEnabled = () => settings.get("stt.enabled");
-		this.ctx.editor.onSpaceHoldStart = () => void this.ctx.handleSTTToggle();
-		this.ctx.editor.onSpaceHoldEnd = () => void this.ctx.handleSTTToggle();
+		// the spam back out, and starts STT on hold start / stops it on release.
+		this.ctx.editor.spaceHold.handler = this.ctx.dictationSpaceHold(this.ctx.editor);
 		for (const key of this.ctx.keybindings.getKeys("app.clipboard.copyLine")) {
 			this.ctx.editor.setCustomKeyHandler(key, () => this.handleCopyCurrentLine());
 		}
