@@ -928,6 +928,83 @@ async fn seen_line_guard_rejects_hidden_anchors_and_accepts_seen_anchors() {
 	assert_eq!(seen.read("a.txt").as_deref(), Some("one\nTWO\nthree\n"));
 }
 
+fn response_tag(text: &str) -> String {
+	let header = text.lines().next().expect("response header");
+	header
+		.rsplit_once('#')
+		.and_then(|(_, tag)| tag.strip_suffix(']'))
+		.expect("hashline response header")
+		.to_owned()
+}
+
+async fn edit(ws: &Workspace, tag: &str, body: &str) -> pi_edit::EditResult<pi_edit::ApplyOutcome> {
+	let args = json!({ "input": format!("[a.txt#{tag}]\n{body}") });
+	ws.apply_json(&args, &common::DiskWriter::default()).await
+}
+
+#[tokio::test]
+async fn seen_line_guard_accepts_lines_displayed_by_edit_responses() {
+	let source =
+		"line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\nline11\nline12\n";
+	let workspace = || {
+		let mut ws = Workspace::new(EditMode::Hashline);
+		ws.config.enforce_seen_lines = true;
+		ws.write("a.txt", source);
+		ws
+	};
+
+	// Partial read of 1-2, edit, then revert to the read content: the revert
+	// response displays line 3 under the original content's tag.
+	let ws = workspace();
+	let tag = ws.snapshot("a.txt", source, Some(&[1, 2]));
+	let changed = edit(&ws, &tag, "PUT 2.=2:\n+LINE2").await.expect("edit");
+	let reverted = edit(&ws, &response_tag(&changed.text), "PUT 2.=2:\n+line2")
+		.await
+		.expect("revert");
+	assert!(reverted.text.contains("\n3:line3"), "{}", reverted.text);
+	edit(&ws, &response_tag(&reverted.text), "PUT 3.=3:\n+LINE3")
+		.await
+		.expect("anchors a line the revert response displayed");
+
+	// A later partial read of the edited content must not hide lines the edit
+	// response displayed.
+	let ws = workspace();
+	let tag = ws.snapshot("a.txt", source, Some(&[2]));
+	let changed = edit(&ws, &tag, "PUT 2.=2:\n+LINE2").await.expect("edit");
+	let changed_tag = response_tag(&changed.text);
+	assert!(changed.text.contains("\n4:line4"), "{}", changed.text);
+	ws.snapshot("a.txt", &ws.read("a.txt").expect("edited"), Some(&[10]));
+	edit(&ws, &changed_tag, "PUT 4.=4:\n+LINE4")
+		.await
+		.expect("anchors a line the edit response displayed");
+
+	// Lines the edit response never showed and no read displayed stay guarded.
+	let ws = workspace();
+	let tag = ws.snapshot("a.txt", source, Some(&[2]));
+	let changed = edit(&ws, &tag, "PUT 2.=2:\n+LINE2").await.expect("edit");
+	let error = edit(&ws, &response_tag(&changed.text), "PUT 10.=10:\n+LINE10")
+		.await
+		.expect_err("rejects a line nothing displayed");
+	assert!(error.to_string().contains("never displayed"), "{error}");
+
+	// Lines displayed by a read before the edit stay anchorable afterwards.
+	let ws = workspace();
+	let tag = ws.snapshot("a.txt", source, Some(&[2, 11]));
+	let changed = edit(&ws, &tag, "PUT 2.=2:\n+A\n+B").await.expect("edit");
+	edit(&ws, &response_tag(&changed.text), "PUT 12.=12:\n+LINE11")
+		.await
+		.expect("anchors a read line shifted by the edit");
+	assert_eq!(
+		ws.read("a.txt").as_deref(),
+		Some(
+			source
+				.replace("line2\n", "A\nB\n")
+				.replace("line11\n", "LINE11\n")
+				.as_str()
+		)
+	);
+}
+
 fn preview_for(
 	workspace: &Workspace,
 	input: String,
