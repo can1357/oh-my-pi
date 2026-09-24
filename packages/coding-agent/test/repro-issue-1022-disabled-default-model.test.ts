@@ -60,7 +60,7 @@ describe("issue #1022 — path-scoped enabledModels respected by default fallbac
 		const authStorage = await AuthStorage.create(":memory:");
 		// Only anthropic has credentials. Per `enabledModels` the path allows
 		// only openai-codex, so no anthropic model should be selected.
-		authStorage.setRuntimeApiKey("anthropic", "test-anthropic-key");
+		authStorage.keys.setRuntime("anthropic", "test-anthropic-key");
 
 		const modelRegistry = new ModelRegistry(authStorage, path.join(testDir, "models.yml"));
 

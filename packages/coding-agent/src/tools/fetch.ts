@@ -540,6 +540,25 @@ function parseJinaReaderContent(responseBody: string): string | null {
 	return content;
 }
 
+/**
+ * Markdown image whose destination is an inline `data:` URI. The label allows
+ * backslash escapes (converters emit `\]` inside titles). The scheme is matched
+ * case-insensitively, the destination may be bare or `<…>`-wrapped, and an
+ * optional `"…"`, `'…'`, or `(…)` title is consumed; base64 payloads never
+ * contain `)` or whitespace.
+ */
+const DATA_URI_IMAGE_RE =
+	/!\[((?:\\.|[^\\\]])*)\]\(\s*(?:<data:[^>]*>|data:[^)\s]*)(?:\s+(?:"(?:\\.|[^\\"])*"|'(?:\\.|[^\\'])*'|\((?:\\.|[^\\)])*\)))?\s*\)/gi;
+
+/**
+ * Drop inline `data:` image payloads (inline `<svg>` icons, base64 `<img>`)
+ * from reader-mode markdown. They are unreadable to the model and routinely
+ * dwarf the article text; the alt text is kept when present.
+ */
+function stripDataUriImages(markdown: string): string {
+	return markdown.replace(DATA_URI_IMAGE_RE, (_match, alt: string) => (alt.trim() ? `![${alt}]` : ""));
+}
+
 /** Reader backends for {@link renderHtmlToText}, in default priority order. */
 export type FetchProvider = "native" | "trafilatura" | "lynx" | "parallel" | "firecrawl" | "jina";
 
@@ -660,8 +679,10 @@ export async function renderHtmlToText(
 		// overall-budget timeouts still fall through to later (local) renderers.
 		userSignal?.throwIfAborted();
 		try {
-			const content = await runners[method]();
-			if (!content || content.trim().length <= 100) continue;
+			const rendered = await runners[method]();
+			if (!rendered) continue;
+			const content = stripDataUriImages(rendered);
+			if (content.trim().length <= 100) continue;
 			if (!isLowQualityOutput(content)) {
 				return { content, ok: true, method };
 			}

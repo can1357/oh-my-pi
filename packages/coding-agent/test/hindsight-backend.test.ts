@@ -24,6 +24,7 @@ interface FakeSessionDeps {
 	cwd?: string;
 	entries?: Array<{ role: "user" | "assistant"; text: string }>;
 	settings?: Settings;
+	xdevEntries?: Array<{ name: string; summary: string }>;
 }
 
 function makeFakeSession(deps: FakeSessionDeps) {
@@ -68,6 +69,7 @@ function makeFakeSession(deps: FakeSessionDeps) {
 		},
 		refreshBaseSystemPrompt: vi.fn().mockResolvedValue(undefined),
 		getHindsightSessionState: () => hindsightState,
+		getXdevToolEntries: () => deps.xdevEntries ?? [],
 		setHindsightSessionState(state: HindsightSessionState | undefined) {
 			const previous = hindsightState;
 			hindsightState = state;
@@ -453,6 +455,28 @@ describe("hindsightBackend first-turn injection", () => {
 		expect(prompt).toContain("remembered fact");
 	});
 
+	it("names memory tools by their xd:// URL only when they are mounted as devices", async () => {
+		const settings = Settings.isolated({
+			"memory.backend": "hindsight",
+			"hindsight.apiUrl": "http://localhost:8888",
+		});
+		const session = makeFakeSession({
+			sessionId: "s-xd",
+			xdevEntries: [{ name: "recall", summary: "Search memory" }],
+		});
+		await hindsightBackend.start({
+			session: session as never,
+			settings,
+			modelRegistry: {} as never,
+			agentDir: "/tmp",
+			taskDepth: 0,
+		});
+
+		const prompt = await hindsightBackend.buildDeveloperInstructions("/tmp", settings, session as never);
+		expect(prompt).toContain("Use `xd://recall` proactively");
+		expect(prompt).toContain("Use `retain` to store");
+	});
+
 	it("places the <mental_models> block above the <memories> recall block in developer instructions", async () => {
 		// Stable, curated semantic memory must come first so the LLM's prior is
 		// anchored on it; the volatile per-turn recall block follows. Ordering
@@ -475,7 +499,7 @@ describe("hindsightBackend first-turn injection", () => {
 		state!.lastRecallSnippet = "<memories>\nrecalled fact\n</memories>";
 
 		const prompt = await hindsightBackend.buildDeveloperInstructions("/tmp", settings, session as never);
-		// `<memories>` and `<mental_models>` are mentioned in STATIC_INSTRUCTIONS
+		// `<memories>` and `<mental_models>` are mentioned in the static memory instructions
 		// bullets too. Match the actual injected block opener (tag + newline)
 		// to disambiguate documentation prose from the injected payloads.
 		const mmIdx = prompt!.indexOf("<mental_models>\n");

@@ -51,7 +51,7 @@ describe("Codex web search broker auth", () => {
 			contextWindow: 200_000,
 			maxTokens: 16_384,
 		});
-		const getOAuthAccess = vi.spyOn(authStorage, "getOAuthAccess").mockResolvedValue({
+		const getOAuthAccess = vi.spyOn(authStorage.oauth, "access").mockResolvedValue({
 			accessToken: "broker-refreshed-access-token",
 			accountId: "broker-account-id",
 		});

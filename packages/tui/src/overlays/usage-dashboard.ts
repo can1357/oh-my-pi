@@ -7,7 +7,16 @@
  */
 import * as os from "node:os";
 import { resolveUsedFraction, type UsageLimit, type UsageReport } from "@oh-my-pi/pi-ai";
-import { type Component, matchesKey, replaceTabs, routeSgrMouseInput, truncateToWidth, visibleWidth } from "../index";
+import {
+	type Component,
+	matchesKey,
+	replaceTabs,
+	routeSgrMouseInput,
+	sliceWithWidth,
+	truncateToWidth,
+	visibleWidth,
+	wrapTextWithAnsi,
+} from "../index";
 import { colorLuma, formatDuration, hexToRgb, rgbToHex, sanitizeText } from "@oh-my-pi/pi-utils";
 import { formatProviderName } from "../chrome/format";
 import {
@@ -19,6 +28,8 @@ import {
 import { colorToAnsi } from "../theme/color";
 import { ensureThemeSync, theme } from "../theme/theme";
 import { formatAbsoluteOnlyAmount } from "../prompt/usage-amounts";
+import { truncateMiddleToWidth } from "../render/render-utils";
+import { sanitizeDisplayLine } from "./extensions/display-text";
 import {
 	matchesSelectCancel,
 	matchesSelectDown,
@@ -72,6 +83,8 @@ export interface ProviderCard {
 		soonestExpiryMs?: number;
 		unavailableReasons: string[];
 	};
+	/** Labels of accounts with verified Daybreak access. */
+	daybreakAccounts?: string[];
 }
 
 /**
@@ -191,6 +204,17 @@ export function buildProviderCards(reports: UsageReport[], nowMs: number): Provi
 						unavailableReasons,
 					}
 				: undefined;
+		const daybreakAccounts = providerReports.flatMap((report, index) =>
+			report.metadata?.daybreak === true
+				? [
+						typeof report.metadata.email === "string" && report.metadata.email
+							? report.metadata.email
+							: typeof report.metadata.accountId === "string" && report.metadata.accountId
+								? report.metadata.accountId
+								: `account ${index + 1}`,
+					]
+				: [],
+		);
 		cards.push({
 			provider,
 			name: formatProviderName(provider),
@@ -198,8 +222,11 @@ export function buildProviderCards(reports: UsageReport[], nowMs: number): Provi
 			windows,
 			unlimited: windows.length === 0,
 			idle:
-				!resetCredits && windows.every(window => window.fraction !== undefined && window.fraction < IDLE_FRACTION),
+				!resetCredits &&
+				daybreakAccounts.length === 0 &&
+				windows.every(window => window.fraction !== undefined && window.fraction < IDLE_FRACTION),
 			resetCredits,
+			...(daybreakAccounts.length > 0 ? { daybreakAccounts } : {}),
 		});
 	}
 
@@ -333,6 +360,16 @@ export function formatActivityErrorDetail(error: string, homeDir = os.homedir())
 const CARD_MIN_WIDTH = 32;
 const CARD_GUTTER = 3;
 const CARD_MAX_WINDOWS = 4;
+const CARD_MIN_BAR_WIDTH = 12;
+const CARD_MAX_LABEL_LINES = 2;
+
+interface CardRowLayout {
+	labelWidth: number;
+	resetWidth: number;
+	barWidth: number;
+	stacked: boolean;
+	labelHeights: number[];
+}
 
 export class UsageDashboardComponent implements Component {
 	#options: UsageDashboardOptions;
@@ -423,7 +460,7 @@ export class UsageDashboardComponent implements Component {
 		return `${theme.fg(this.#statusColor(status), bar)}${theme.fg("dim", empty)}`;
 	}
 
-	#renderCardLines(card: ProviderCard, width: number): string[] {
+	#renderCardLines(card: ProviderCard, width: number, labels: string[][], layout: CardRowLayout): string[] {
 		const lines: string[] = [];
 		const cardStatus = card.unlimited ? "ok" : aggregateStatus(card.windows);
 		const accountsText = card.accounts > 1 ? theme.fg("dim", `${card.accounts} accts`) : "";
@@ -431,6 +468,11 @@ export class UsageDashboardComponent implements Component {
 		const title = theme.bold(truncateToWidth(card.name, Math.max(4, titleBudget)));
 		const titlePad = Math.max(0, width - 2 - visibleWidth(title) - visibleWidth(accountsText));
 		lines.push(`${this.#statusIcon(cardStatus)} ${title}${" ".repeat(titlePad)}${accountsText}`);
+
+		for (const account of card.daybreakAccounts ?? []) {
+			const label = sanitizeText(account.replace(/[\r\n\t]+/g, " "));
+			lines.push(`  ${theme.fg("success", truncateToWidth(`daybreak · ${label}`, width - 2))}`);
+		}
 
 		if (card.resetCredits) {
 			const resets = card.resetCredits;
@@ -457,35 +499,33 @@ export class UsageDashboardComponent implements Component {
 		}
 
 		const hidden = card.windows.length - CARD_MAX_WINDOWS;
-		const visibleWindows = card.windows.slice(0, CARD_MAX_WINDOWS);
-		// Fixed columns across every row of the card so bars all start and end
-		// at the same x: label | bar | pct | reset. The reset column sizes to
-		// the card's widest countdown instead of flexing per row.
-		const resetWidth = visibleWindows.reduce(
-			(max, window) => Math.max(max, window.resetMs !== undefined ? formatDuration(window.resetMs).length : 0),
-			0,
-		);
-		const labelWidth = Math.min(16, Math.max(6, width - 24));
-		const barWidth = Math.max(5, width - 2 - labelWidth - 1 - 5 - (resetWidth > 0 ? resetWidth + 1 : 0));
-		for (const window of visibleWindows) {
-			const tagPlain = window.windowTag
-				? truncateToWidth(window.windowTag, Math.max(2, Math.floor(labelWidth / 2) - 1))
-				: "";
-			const baseWidth = tagPlain ? labelWidth - visibleWidth(tagPlain) - 1 : labelWidth;
-			const basePlain = truncateToWidth(window.label, baseWidth).padEnd(baseWidth);
-			const label = tagPlain
-				? `${theme.fg("muted", basePlain)} ${theme.fg("dim", tagPlain)}`
-				: theme.fg("muted", basePlain);
+		const { labelWidth, resetWidth, barWidth, stacked, labelHeights } = layout;
+		const contentWidth = Math.max(1, width - 2);
+		for (let index = 0; index < Math.min(card.windows.length, CARD_MAX_WINDOWS); index++) {
+			const window = card.windows[index]!;
+			const labelLines = labels[index]!;
+			const label = labelLines[0] ?? "";
+			const prefix = stacked ? "" : `${label}${" ".repeat(labelWidth - visibleWidth(label))} `;
+			if (stacked) {
+				for (let line = 0; line < labelHeights[index]; line++) {
+					lines.push(`  ${labelLines[line] ?? ""}`);
+				}
+			}
 			if (window.fraction === undefined) {
 				const text = theme.fg("dim", window.usedText ?? "no data");
-				lines.push(truncateToWidth(`  ${label} ${text}`, width));
+				for (const line of wrapTextWithAnsi(`${prefix}${text}`, contentWidth)) lines.push(`  ${line}`);
 				continue;
 			}
 			const freePct = Math.max(0, Math.round((1 - window.fraction) * 100));
 			const pctText = theme.fg(this.#statusColor(window.status), `${freePct}%`.padStart(5));
 			const resetPlain = window.resetMs !== undefined ? formatDuration(window.resetMs) : "";
 			const resetText = resetWidth > 0 ? ` ${theme.fg("dim", resetPlain.padStart(resetWidth))}` : "";
-			lines.push(`  ${label} ${this.#miniBar(window.fraction, window.status, barWidth)}${pctText}${resetText}`);
+			for (const line of wrapTextWithAnsi(
+				`${prefix}${this.#miniBar(window.fraction, window.status, barWidth)}${pctText}${resetText}`,
+				contentWidth,
+			)) {
+				lines.push(`  ${line}`);
+			}
 		}
 		if (hidden > 0) lines.push(`  ${theme.fg("dim", `+${hidden} more`)}`);
 		return lines;
@@ -499,7 +539,62 @@ export class UsageDashboardComponent implements Component {
 		const cardWidth = Math.floor((innerWidth - (columns - 1) * CARD_GUTTER) / columns);
 		const lines: string[] = [];
 		for (let start = 0; start < active.length; start += columns) {
-			const rowCards = active.slice(start, start + columns).map(card => this.#renderCardLines(card, cardWidth));
+			const cards = active.slice(start, start + columns);
+			const windows = cards.map(card => card.windows.slice(0, CARD_MAX_WINDOWS));
+			const labels = windows.map(rows =>
+				rows.map(window => {
+					const label = theme.fg("muted", sanitizeDisplayLine(window.label));
+					const tag = window.windowTag ? sanitizeDisplayLine(window.windowTag) : "";
+					return tag ? `${label} ${theme.fg("dim", tag)}` : label;
+				}),
+			);
+			// One geometry per grid row: labels, bars, and resets share columns,
+			// and every card stacks together when inline bars would be too short.
+			const labelWidth = labels.reduce(
+				(max, rows) => rows.reduce((width, label) => Math.max(width, visibleWidth(label)), max),
+				0,
+			);
+			const resetWidth = windows.reduce(
+				(max, rows) =>
+					rows.reduce(
+						(width, window) =>
+							Math.max(width, window.resetMs !== undefined ? formatDuration(window.resetMs).length : 0),
+						max,
+					),
+				0,
+			);
+			const contentWidth = Math.max(1, cardWidth - 2);
+			const suffixWidth = 5 + (resetWidth > 0 ? resetWidth + 1 : 0);
+			const inlineBarWidth = contentWidth - labelWidth - 1 - suffixWidth;
+			const stacked = inlineBarWidth < CARD_MIN_BAR_WIDTH;
+			const labelLines = labels.map(rows =>
+				rows.map(label => {
+					if (!stacked) return [label];
+					// Bound wrapping work as well as height, keeping the suffix that
+					// distinguishes model-specific quota buckets.
+					const bounded = truncateMiddleToWidth(label, contentWidth * CARD_MAX_LABEL_LINES);
+					const lines = wrapTextWithAnsi(bounded, contentWidth);
+					if (lines.length <= CARD_MAX_LABEL_LINES) return lines;
+					// Word wrapping can waste enough cells to create a third line even
+					// when the label fits. Use a grapheme-safe column split in that case.
+					const first = sliceWithWidth(bounded, 0, contentWidth, true);
+					const rest = sliceWithWidth(bounded, first.width, visibleWidth(bounded) - first.width, true);
+					return [first.text, truncateMiddleToWidth(rest.text, contentWidth)];
+				}),
+			);
+			const labelHeights = Array.from({ length: CARD_MAX_WINDOWS }, (_, index) =>
+				Math.max(0, ...labelLines.map(rows => rows[index]?.length ?? 0)),
+			);
+			const layout: CardRowLayout = {
+				labelWidth,
+				resetWidth,
+				barWidth: Math.max(1, stacked ? contentWidth - suffixWidth : inlineBarWidth),
+				stacked,
+				labelHeights,
+			};
+			const rowCards = cards.map((card, index) =>
+				this.#renderCardLines(card, cardWidth, labelLines[index]!, layout),
+			);
 			const height = Math.max(...rowCards.map(card => card.length));
 			for (let lineIdx = 0; lineIdx < height; lineIdx++) {
 				const segments = rowCards.map(card => {

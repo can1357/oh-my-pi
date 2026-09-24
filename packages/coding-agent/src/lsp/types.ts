@@ -444,6 +444,8 @@ export interface LspClient {
 	status: "connecting" | "ready" | "error";
 	serverCapabilities?: LspServerCapabilities;
 	lastActivity: number;
+	/** Wall-clock time when this server process started; absent only on external test doubles. */
+	startedAt?: number;
 	/** Serializes outbound JSON-RPC writes to the server process. */
 	writeQueue: Promise<void>;
 	/** Tracks active work-done progress tokens from the server */

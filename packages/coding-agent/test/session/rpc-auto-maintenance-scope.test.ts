@@ -31,7 +31,7 @@ describe("AgentSession auto-maintenance controls are session-scoped by default",
 		configPath = path.join(agentDir, "config.yml");
 
 		authStorage = await AuthStorage.create(path.join(agentDir, "auth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage);
 
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5") as Model;

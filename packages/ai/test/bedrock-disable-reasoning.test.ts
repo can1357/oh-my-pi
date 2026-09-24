@@ -1,19 +1,8 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
-import type { Context, Model } from "@oh-my-pi/pi-ai/types";
+import type { Context, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
-
-const originalSkipAuth = process.env.AWS_BEDROCK_SKIP_AUTH;
-
-beforeAll(() => {
-	process.env.AWS_BEDROCK_SKIP_AUTH = "1";
-});
-
-afterAll(() => {
-	if (originalSkipAuth === undefined) delete process.env.AWS_BEDROCK_SKIP_AUTH;
-	else process.env.AWS_BEDROCK_SKIP_AUTH = originalSkipAuth;
-});
 
 function budgetModel(): Model<"bedrock-converse-stream"> {
 	return buildModel({
@@ -63,18 +52,31 @@ interface ThinkingPayload {
 	};
 }
 
+/** Every Converse request carries `messages` and `inferenceConfig`; reject anything else. */
+function isThinkingPayload(payload: unknown): payload is ThinkingPayload {
+	if (typeof payload !== "object" || payload === null) return false;
+	const { messages, inferenceConfig } = payload as { messages?: unknown; inferenceConfig?: unknown };
+	return Array.isArray(messages) && typeof inferenceConfig === "object" && inferenceConfig !== null;
+}
+
 /** Capture the mapped Bedrock wire payload through the public streamSimple path. */
 async function capture(
 	model: Model<"bedrock-converse-stream">,
-	options: Parameters<typeof streamSimple>[2],
+	options: SimpleStreamOptions,
 ): Promise<ThinkingPayload> {
 	const controller = new AbortController();
-	const { promise, resolve } = Promise.withResolvers<ThinkingPayload>();
+	const { promise, resolve, reject } = Promise.withResolvers<ThinkingPayload>();
 	void streamSimple(model, context, {
+		apiKey: "test-key",
 		signal: controller.signal,
 		...options,
 		onPayload: payload => {
-			resolve(payload as ThinkingPayload);
+			if (!isThinkingPayload(payload)) {
+				reject(new Error("expected a Bedrock request payload"));
+				controller.abort();
+				return undefined;
+			}
+			resolve(payload);
 			controller.abort();
 			return undefined;
 		},

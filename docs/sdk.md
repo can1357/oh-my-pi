@@ -191,15 +191,14 @@ If restore fails, `modelFallbackMessage` explains fallback.
 
 ### Auth priority
 
-`AuthStorage.getApiKey(...)` resolves in this order:
+`AuthStorage.keys.get(...)` resolves in this order:
 
-1. runtime override (`setRuntimeApiKey`, used by CLI `--api-key`)
+1. runtime override (`keys.setRuntime`, used by CLI `--api-key`)
 2. config-sourced API key override (`models.yml` provider `apiKey`)
 3. stored OAuth credential, including refresh when needed
 4. API key persisted by a successful `/login`
 5. provider environment variables
 6. other stored API-key credential in `agent.db` / broker-backed storage
-7. custom-provider resolver fallback
 
 Configured values are resolved asynchronously through the registry-installed resolver; catalog construction does not execute credential commands. `ModelRegistry.getProviderHeaders(provider)` and `resolveModelHeaders(model, signal?)` return promises. For direct provider requests, await the latter instead of reading config-backed values from `model.headers`. The AI client's `stream()` and `streamSimple()` materialize `model.resolveHeaders` automatically for each request attempt, including authentication retries.
 
