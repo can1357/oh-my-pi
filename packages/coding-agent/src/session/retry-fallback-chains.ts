@@ -52,12 +52,29 @@ export interface ActiveRetryFallbackState {
 	lastAppliedFallbackThinkingLevel: ConfiguredThinkingLevel | undefined;
 	pinned: boolean;
 	/**
+	 * Consecutive restores of the original selector that failed again without
+	 * serving. Bounds the cooldown-expiry revert policy: a primary whose
+	 * outage outlasts its (possibly heuristic) suppression would otherwise be
+	 * restored, fail, and fall forward again forever. Reset when the original
+	 * selector serves a turn.
+	 */
+	failedRestores?: number;
+	/**
 	 * Set once a turn on the fallback target settles successfully. Until then the
 	 * switch is only a routing decision — nothing has been produced by the new
 	 * model, so no observer may report the run as having used it.
 	 */
 	served?: boolean;
 }
+
+/**
+ * Circuit breaker for the cooldown-expiry revert policy: after this many
+ * consecutive failed restores of the same original selector, the session stops
+ * restoring and keeps serving from the fallback (as if the policy were
+ * `never` for this fallback arm). A restored primary that serves resets the
+ * count. Mirrors the retry-loop caps (3) used elsewhere in turn recovery.
+ */
+export const MAX_RETRY_FALLBACK_FAILED_RESTORES = 3;
 
 /** Model a session's produced work is attributed to. */
 export interface ServingModel {
@@ -129,7 +146,7 @@ export function formatRetryFallbackSelector(model: Model, thinkingLevel: Thinkin
 }
 
 /** Formats the model-only portion of a parsed fallback selector. */
-function formatRetryFallbackBaseSelector(selector: RetryFallbackSelector): string {
+export function formatRetryFallbackBaseSelector(selector: RetryFallbackSelector): string {
 	return `${selector.provider}/${selector.id}`;
 }
 

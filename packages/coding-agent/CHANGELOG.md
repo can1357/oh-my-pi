@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Stop restoring a fallback-chain primary that keeps failing after its cooldown expires: after 3 consecutive failed restores the session stays on the fallback instead of ping-ponging between primary and fallback forever ([#13065](https://github.com/can1357/oh-my-pi/pull/13065) by [@Deftera186](https://github.com/Deftera186)).
+
 ## [18.3.0] - 2026-09-24
 
 ### Breaking Changes

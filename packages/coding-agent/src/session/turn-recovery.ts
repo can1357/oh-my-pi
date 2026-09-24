@@ -51,11 +51,14 @@ import {
 	type ActiveRetryFallbackState,
 	calculateRetryBackoffDelayMs,
 	findRetryFallbackCandidates,
+	formatRetryFallbackBaseSelector,
 	formatRetryFallbackSelector,
 	getRetryFallbackChains,
 	getRetryFallbackRevertPolicy,
+	MAX_RETRY_FALLBACK_FAILED_RESTORES,
 	parseRetryFallbackSelector,
 	type RetryFallbackChains,
+	type RetryFallbackModelLookup,
 	type RetryFallbackResolutionContext,
 	type RetryFallbackRevertPolicy,
 	type RetryFallbackSelector,
@@ -90,6 +93,22 @@ const PREMATURE_STREAM_CLOSE_ERROR_RE =
 	/(?:stream closed before a (?:finish_reason|terminal response event)|Codex stream ended before terminal completion event)/i;
 const IMMUTABLE_ANTHROPIC_THINKING_ERROR_PATTERN =
 	/messages\.\d+\.content\.\d+.*\b(?:thinking|redacted_thinking)\b.*\blatest assistant message cannot be modified\b/is;
+
+/**
+ * Whether two raw fallback selectors name the same model, ignoring thinking
+ * level suffixes (a swap carries the session level while a chain entry may pin
+ * its own). Unparseable selectors never match.
+ */
+function sameRetryFallbackBaseSelector(
+	first: string,
+	second: string,
+	modelLookup: Pick<RetryFallbackModelLookup, "find">,
+): boolean {
+	const parsedFirst = parseRetryFallbackSelector(first, modelLookup);
+	const parsedSecond = parseRetryFallbackSelector(second, modelLookup);
+	if (!parsedFirst || !parsedSecond) return false;
+	return formatRetryFallbackBaseSelector(parsedFirst) === formatRetryFallbackBaseSelector(parsedSecond);
+}
 
 function hasNonWhitespace(value: string): boolean {
 	return NON_WHITESPACE_RE.test(value);
@@ -454,12 +473,26 @@ export class TurnRecovery {
 		// permanently unproven, hiding it from observers for the whole session.
 		if (this.#activeRetryFallback && !this.#activeRetryFallback.served && model) {
 			this.#activeRetryFallback.served = true;
-			await this.#host.emitSessionEvent({
-				type: "retry_fallback_succeeded",
-				model:
-					this.#lastServed?.attribution.selector ?? formatRetryFallbackSelector(model, this.#host.thinkingLevel()),
-				role: this.#activeRetryFallback.role,
-			});
+			if (
+				sameRetryFallbackBaseSelector(
+					formatRetryFallbackSelector(model, this.#host.thinkingLevel()),
+					this.#activeRetryFallback.originalSelector,
+					this.#host.modelRegistry,
+				)
+			) {
+				// The restored original served: it is healthy again, so a later
+				// outage starts a fresh restore count. This is a primary
+				// recovery, not a fallback success, so no event is emitted.
+				this.#activeRetryFallback.failedRestores = 0;
+			} else {
+				await this.#host.emitSessionEvent({
+					type: "retry_fallback_succeeded",
+					model:
+						this.#lastServed?.attribution.selector ??
+						formatRetryFallbackSelector(model, this.#host.thinkingLevel()),
+					role: this.#activeRetryFallback.role,
+				});
+			}
 		}
 		if (this.#retryAttempt === 0) {
 			return;
@@ -1906,8 +1939,21 @@ export class TurnRecovery {
 				originalThinkingLevel: currentThinkingLevel,
 				lastAppliedFallbackThinkingLevel: nextThinkingLevel,
 				pinned: options?.pinFallback === true,
+				failedRestores: 0,
 			};
 		} else {
+			if (
+				sameRetryFallbackBaseSelector(
+					currentSelector,
+					this.#activeRetryFallback.originalSelector,
+					this.#host.modelRegistry,
+				)
+			) {
+				// Falling back away from the recorded original means a restore put
+				// the primary back and it failed again without serving: count it
+				// toward the restore circuit breaker.
+				this.#activeRetryFallback.failedRestores = (this.#activeRetryFallback.failedRestores ?? 0) + 1;
+			}
 			this.#activeRetryFallback.lastAppliedFallbackThinkingLevel = nextThinkingLevel;
 			this.#activeRetryFallback.pinned = this.#activeRetryFallback.pinned || options?.pinFallback === true;
 		}
@@ -2097,6 +2143,15 @@ export class TurnRecovery {
 		if (!this.#activeRetryFallback) return false;
 		if (this.#activeRetryFallback.pinned) return false;
 		if (this.#getRetryFallbackRevertPolicy() !== "cooldown-expiry") return false;
+		if ((this.#activeRetryFallback.failedRestores ?? 0) >= MAX_RETRY_FALLBACK_FAILED_RESTORES) {
+			// Circuit breaker tripped: the original selector failed this many
+			// consecutive restores without serving, so its outage outlasts its
+			// suppression (typically a heuristic guess for a hintless error).
+			// Keep serving from the fallback instead of restoring, failing, and
+			// falling forward forever. The arm is kept, not cleared, so
+			// attribution still reports fallback routing.
+			return false;
+		}
 
 		const {
 			originalSelector: originalSelectorRaw,
@@ -2117,7 +2172,13 @@ export class TurnRecovery {
 		const currentModel = this.#host.model();
 		if (!currentModel) return false;
 		const currentSelector = formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel());
-		if (currentSelector === originalSelector.raw) {
+		if (
+			currentSelector === originalSelector.raw ||
+			sameRetryFallbackBaseSelector(currentSelector, originalSelectorRaw, this.#host.modelRegistry)
+		) {
+			// Already on the original model (the raw-string case is exact level
+			// included): restoring again would swap onto the same model and
+			// re-apply a stale thinking level, clobbering explicit user changes.
 			if (!this.isRetryFallbackSelectorSuppressed(originalSelector)) {
 				this.clearActiveRetryFallback();
 			}
@@ -2141,15 +2202,31 @@ export class TurnRecovery {
 			currentThinkingLevel === lastAppliedFallbackThinkingLevel ? originalThinkingLevel : currentThinkingLevel;
 		const primarySelector = formatModelStringWithRouting(primaryModel);
 		const previousEditMode = this.#host.resolveActiveEditMode();
-		// Clear before the swap: `setModelWithProviderSessionReset` and
-		// `setThinkingLevel` both notify subscribers, and an observer reading
+		// Clear routing flags before the swap (`setModelWithProviderSessionReset`
+		// and `setThinkingLevel` both notify subscribers, and an observer reading
 		// attribution in that window would see the restored primary still tagged
-		// as fallback-served.
+		// as fallback-served), but re-arm the chain record with its restore count
+		// intact: clearing it here would reset the restore circuit breaker on
+		// every restore, so a dead primary would be restored, fail, and fall
+		// forward forever.
+		const failedRestores = this.#activeRetryFallback.failedRestores ?? 0;
+		const restoreRole = this.#activeRetryFallback.role;
+		const restoreOriginalSelector = this.#activeRetryFallback.originalSelector;
+		const restoreOriginalThinkingLevel = this.#activeRetryFallback.originalThinkingLevel;
 		this.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(primaryModel);
 		this.#host.sessionManager.appendModelChange(primarySelector, EPHEMERAL_MODEL_CHANGE_ROLE);
 		this.#host.settings.getStorage()?.recordModelUsage(primarySelector);
 		this.#host.setThinkingLevel(thinkingToApply);
+		this.#activeRetryFallback = {
+			role: restoreRole,
+			originalSelector: restoreOriginalSelector,
+			originalThinkingLevel: restoreOriginalThinkingLevel,
+			lastAppliedFallbackThinkingLevel: thinkingToApply,
+			pinned: false,
+			served: false,
+			failedRestores,
+		};
 		await this.#host.syncAfterModelChange(previousEditMode);
 		return true;
 	}
