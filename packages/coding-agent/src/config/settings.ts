@@ -2778,43 +2778,46 @@ export class Settings {
 			const legacyWebOrder = legacy(providerSettings, "webSearchOrder", "providers.webSearchOrder");
 			const legacyWebExclude = legacy(providerSettings, "webSearchExclude", "providers.webSearchExclude");
 			const legacyGeminiModel = legacy(providerSettings, "webSearchGeminiModel", "providers.webSearchGeminiModel");
-			const webSelector = (provider: string, geminiModel: string): string | undefined => {
+			const geminiSelectors = (model: string): string[] => [
+				`google-gemini-cli/${model}`,
+				`google-antigravity/${model}`,
+				`google/${model}`,
+			];
+			const webSelectors = (provider: string, geminiModel: string): string[] => {
 				switch (provider) {
 					case "gemini":
-						return `google/${geminiModel}`;
+						return geminiSelectors(geminiModel);
 					case "anthropic":
-						return "anthropic/claude-haiku-4-5";
+						return ["anthropic/claude-haiku-4-5"];
 					case "codex":
-						return "openai-codex/gpt-5.6-luna";
+						return ["openai-codex/gpt-5.6-luna"];
 					case "xai":
-						return "xai/grok-4.5";
+						return ["xai/grok-4.5"];
 					case "auto":
-						return undefined;
+						return [];
 					default:
-						return MODEL_PRIO.web.includes(`web/${provider}`) ? `web/${provider}` : undefined;
+						return MODEL_PRIO.web.includes(`web/${provider}`) ? [`web/${provider}`] : [];
 				}
 			};
 			const geminiModel =
 				typeof legacyGeminiModel === "string" && legacyGeminiModel.trim()
 					? legacyGeminiModel.trim()
 					: "gemini-2.5-flash";
-			const webDefaults = MODEL_PRIO.web.map(selector => {
-				if (selector === "google/gemini-2.5-flash") return `google/${geminiModel}`;
-				if (selector === "google-antigravity/gemini-2.5-flash") {
-					return `google-antigravity/${geminiModel}`;
-				}
-				return selector;
+			const webDefaults = MODEL_PRIO.web.flatMap(selector => {
+				if (selector === "google/gemini-2.5-flash") return geminiSelectors(geminiModel);
+				if (selector === "google-antigravity/gemini-2.5-flash") return [];
+				return [selector];
 			});
 			const excludedWebProviders = new Set(
 				Array.isArray(legacyWebExclude)
 					? legacyWebExclude.filter(
 							(value): value is string =>
-								typeof value === "string" && webSelector(value, geminiModel) !== undefined,
+								typeof value === "string" && webSelectors(value, geminiModel).length > 0,
 						)
 					: [],
 			);
 			const isWebSelectorExcluded = (selector: string): boolean => {
-				if (excludedWebProviders.has("gemini") && /^(?:google|google-antigravity)\//.test(selector)) return true;
+				if (excludedWebProviders.has("gemini") && geminiSelectors(geminiModel).includes(selector)) return true;
 				if (excludedWebProviders.has("anthropic") && selector.startsWith("anthropic/")) return true;
 				if (excludedWebProviders.has("codex") && selector.startsWith("openai-codex/")) return true;
 				if (excludedWebProviders.has("xai") && (selector.startsWith("xai/") || selector.startsWith("xai-oauth/"))) {
@@ -2831,7 +2834,7 @@ export class Settings {
 					? [legacyWebSearch]
 					: [];
 			const orderedWebSelectors = orderedWebProviders.flatMap(value =>
-				typeof value === "string" ? (webSelector(value, geminiModel) ?? []) : [],
+				typeof value === "string" ? webSelectors(value, geminiModel) : [],
 			);
 			const shouldMigrateWeb =
 				orderedWebSelectors.length > 0 ||
