@@ -4,6 +4,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import {
 	__resetGlobalProxyFetch,
+	__resetProxyCache,
 	connectProxiedSocket,
 	getProxyForProvider,
 	getProxyForUrl,
@@ -103,6 +104,11 @@ function proxyEnvKeys(): Set<string> {
 let saved: Record<string, string | undefined>;
 
 beforeEach(() => {
+	// The resolver memoizes per provider for the lifetime of the process;
+	// earlier files (e.g. openai-responses-sampling-params) drain real
+	// providers with no proxy env set, which would otherwise cache
+	// `undefined` past the env writes below.
+	__resetProxyCache();
 	saved = {};
 	for (const key of proxyEnvKeys()) {
 		saved[key] = Bun.env[key];
@@ -111,6 +117,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	__resetProxyCache();
 	for (const key of proxyEnvKeys()) delete Bun.env[key];
 	for (const key in saved) {
 		const value = saved[key];
