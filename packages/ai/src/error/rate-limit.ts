@@ -313,7 +313,7 @@ const USAGE_LIMIT_PATTERN =
  * account-local usage cap rather than a bad credential or a transient blip.
  * HTTP 402 Payment Required represents an account-billing cap (xAI
  * Grok Build "usage balance exhausted", DeepSeek "Insufficient Balance",
- * OpenRouter credit exhaustion) when opaque, payment/deactivation/balance-worded,
+ * OpenCode "Insufficient account funds", OpenRouter credit exhaustion) when opaque, payment/deactivation/balance-worded,
  * or QUOTA_EXHAUSTED/CONCURRENT_LIMIT, while informative non-quota 402s (e.g.
  * endpoint subscription requirements) remain non-usage-limits. Always combine
  * with {@link isUsageLimitOutcome} when a message is available.
@@ -322,7 +322,7 @@ export function isUsageLimitStatus(status: number | undefined): boolean {
 	return status === 429 || status === 402;
 }
 const STATUS_402_QUOTA_PATTERN =
-	/\b(?:payment(?:\s+is)?[-_.\s]*required|deactivated_workspace|insufficient.?balance)\b/i;
+	/\b(?:payment(?:\s+is)?[-_.\s]*required|deactivated_workspace|insufficient.?balance|insufficient.?account.?funds)\b/i;
 
 export function is402BillingCapBody(message: string | undefined): boolean {
 	if (message === undefined || isOpaqueStatusBody(message)) return true;
