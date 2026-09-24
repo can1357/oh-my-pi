@@ -26,6 +26,8 @@ type FakeEditor = {
 	onRetry?: () => void;
 	onChange?: (text: string) => void;
 	onSubmit?: (text: string) => Promise<void>;
+	onSpaceHoldStart?: () => void;
+	onSpaceHoldEnd?: () => void;
 	setText(text: string): void;
 	getText(): string;
 	getExpandedText(): string;
@@ -164,6 +166,27 @@ async function createContext() {
 			addInputListener,
 			addStartListener,
 			getFocused: vi.fn(() => focused),
+			getFocusedTextEditor: vi.fn(() => {
+				if (focused === editor) return editor;
+				if (
+					focused &&
+					typeof (focused as { getFocusedTextEditor?: () => unknown }).getFocusedTextEditor === "function"
+				) {
+					return (focused as { getFocusedTextEditor: () => unknown }).getFocusedTextEditor();
+				}
+				return null;
+			}),
+			submitFocusedTextEditor: vi.fn((targetEditor?: unknown) => {
+				if (
+					focused &&
+					typeof (focused as { submitFocusedTextEditor?: (ed?: unknown) => void }).submitFocusedTextEditor ===
+						"function"
+				) {
+					(focused as { submitFocusedTextEditor: (ed?: unknown) => void }).submitFocusedTextEditor(targetEditor);
+				} else if (targetEditor && typeof (targetEditor as { submit?: () => void }).submit === "function") {
+					(targetEditor as { submit: () => void }).submit();
+				}
+			}),
 			hasOverlay: vi.fn(() => overlayVisible),
 			terminal: { write: terminalWrite, refreshAppearance },
 		} as unknown as InteractiveModeContext["ui"],
@@ -956,5 +979,88 @@ describe("InputController global tool-output expand (ctrl+o)", () => {
 
 		expect(dispatchInput(listeners, "\x0f")).toEqual({ consume: true });
 		expect(ctx.toolOutputExpanded).toBe(true);
+	});
+});
+
+describe("InputController global STT toggle (app.stt.toggle)", () => {
+	beforeAll(async () => {
+		await initTheme(false);
+	});
+
+	it("invokes ctx.handleSTTToggle once and consumes key when ask-like nested text owner has focus", async () => {
+		const context = await createContext();
+		context.setKeybinding("app.stt.toggle", ["ctrl+s"]);
+		const controller = new context.InputController(context.ctx);
+		controller.setupKeyHandlers();
+
+		const hookEditor = new HookEditorComponent(
+			context.ctx.ui,
+			"Ask Other Response",
+			undefined,
+			() => {},
+			() => {},
+		);
+		context.setFocused(hookEditor);
+
+		const listeners = registeredInputListeners(context.spies.addInputListener);
+		const CTRL_S = "\x13";
+
+		const result = dispatchInput(listeners, CTRL_S);
+
+		expect(result).toEqual({ consume: true });
+		expect(context.ctx.handleSTTToggle).toHaveBeenCalledTimes(1);
+	});
+
+	it("works when composer is focused and consumes key", async () => {
+		const context = await createContext();
+		context.setKeybinding("app.stt.toggle", ["ctrl+s"]);
+		const controller = new context.InputController(context.ctx);
+		controller.setupKeyHandlers();
+
+		context.setFocused(context.editor);
+
+		const listeners = registeredInputListeners(context.spies.addInputListener);
+		const CTRL_S = "\x13";
+
+		const result = dispatchInput(listeners, CTRL_S);
+
+		expect(result).toEqual({ consume: true });
+		expect(context.ctx.handleSTTToggle).toHaveBeenCalledTimes(1);
+	});
+
+	it("preserves composer space-hold handlers independently of shortcut toggle", async () => {
+		const context = await createContext();
+		const controller = new context.InputController(context.ctx);
+		controller.setupKeyHandlers();
+
+		expect(typeof context.editor.onSpaceHoldStart).toBe("function");
+		expect(typeof context.editor.onSpaceHoldEnd).toBe("function");
+
+		context.editor.onSpaceHoldStart?.();
+		expect(context.ctx.handleSTTToggle).toHaveBeenCalledTimes(1);
+
+		context.editor.onSpaceHoldEnd?.();
+		expect(context.ctx.handleSTTToggle).toHaveBeenCalledTimes(2);
+	});
+
+	it("does not create a second listener on repeated setupKeyHandlers calls", async () => {
+		const context = await createContext();
+		context.setKeybinding("app.stt.toggle", ["ctrl+s"]);
+		const controller = new context.InputController(context.ctx);
+
+		controller.setupKeyHandlers();
+		const initialListenerCount = context.spies.addInputListener.mock.calls.length;
+
+		controller.setupKeyHandlers();
+		const afterRepeatedCount = context.spies.addInputListener.mock.calls.length;
+
+		expect(afterRepeatedCount).toBe(initialListenerCount);
+
+		const listeners = registeredInputListeners(context.spies.addInputListener);
+		const CTRL_S = "\x13";
+
+		const result = dispatchInput(listeners, CTRL_S);
+		expect(result).toEqual({ consume: true });
+		expect(context.ctx.handleSTTToggle).toHaveBeenCalledTimes(1);
 	});
 });

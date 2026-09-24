@@ -4,6 +4,7 @@
 
 ### Added
 
+- The `app.stt.toggle` dictation shortcut now follows keyboard focus across every TUI text field (ask dialog `Other`/note prompts, the extension editor dialog, advisor instructions, plan review, agents hub, git commit description, annotations, subagent transcript viewer): recording survives dialogs opening or closing mid-capture, the transcript is inserted at the cursor of the field focused when recording stops (or into the composer draft with a status message when no text field is focused), and `stt.submitTrigger` applies to the receiving field ([#13169](https://github.com/can1357/oh-my-pi/pull/13169) by [@kml93](https://github.com/kml93))
 - Added `additionalContext` to extension and hook `tool_call` results, plus `ctx.addAdditionalContext()` for registered tools, to pass trusted instructions to the model after a tool call without changing its result ([#11998](https://github.com/can1357/oh-my-pi/pull/11998) by [@H4vC](https://github.com/H4vC))
 
 ### Fixed

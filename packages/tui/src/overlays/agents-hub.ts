@@ -201,6 +201,7 @@ export class AgentsHubComponent implements Component {
 	#createError: string | null = null;
 	#createStreamingText = "";
 
+	#disposed = false;
 	#renderBodyPane = (width: number, height: number | undefined): readonly string[] => {
 		const rows = Math.max(1, Math.floor(height ?? 10));
 		const lines: string[] = [this.#statusRow(width)];
@@ -254,7 +255,21 @@ export class AgentsHubComponent implements Component {
 		return hub;
 	}
 
-	dispose(): void {}
+	dispose(): void {
+		this.#disposed = true;
+	}
+
+	getFocusedTextEditor(): Editor | null {
+		if (this.#disposed || this.#createGenerating || this.#createSpec !== null) return null;
+		return this.#createInput;
+	}
+
+	submitFocusedTextEditor(): void {
+		if (this.#disposed || this.#createGenerating || this.#createSpec !== null || !this.#createInput) return;
+		this.#createInput.handleInput("\n");
+		this.#createDescription = this.#createInput.getExpandedText();
+	}
+
 	invalidate(): void {
 		this.#frame.invalidate();
 	}
@@ -613,8 +628,9 @@ export class AgentsHubComponent implements Component {
 		this.#createStreamingText = "";
 	}
 
-	async #generateAgentFromDescription(rawDescription: string): Promise<void> {
-		const description = rawDescription.trim();
+	async #generateAgentFromDescription(rawDescription?: string): Promise<void> {
+		const sourceText = rawDescription ?? this.#createInput?.getExpandedText() ?? this.#createDescription;
+		const description = sourceText.trim();
 		this.#createDescription = description;
 		if (!description) {
 			this.#createError = "Description is required.";

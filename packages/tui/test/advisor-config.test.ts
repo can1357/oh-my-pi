@@ -121,4 +121,34 @@ describe("advisor config editor warnings and synthetic default row", () => {
 		expect(frame).toContain('advisor "Bad" dropped');
 		expect(warnings).toEqual([]);
 	});
+
+	it("exposes active HookEditor via generic getFocusedTextEditor while list returns null, and submits via submitFocusedTextEditor", () => {
+		const overlay = buildOverlay(
+			{
+				advisors: [{ name: "Reviewer" }],
+				instructions: "Initial instructions",
+			},
+			() => {},
+		);
+
+		expect(overlay.getFocusedTextEditor()).toBeNull();
+
+		// Navigate to "Shared instructions" in the list:
+		// Row 0: Reviewer
+		// Row 1: + Add advisor
+		// Row 2: Shared instructions
+		overlay.handleInput("\x1b[B"); // Row 1: + Add advisor
+		overlay.handleInput("\x1b[B"); // Row 2: Shared instructions
+		overlay.handleInput("\r"); // Open instructions HookEditor
+
+		const editor = overlay.getFocusedTextEditor();
+		expect(editor).not.toBeNull();
+		expect(editor?.getText()).toBe("Initial instructions");
+
+		editor?.insertText(" appended");
+		expect(editor?.getText()).toBe("Initial instructions appended");
+
+		overlay.submitFocusedTextEditor();
+		expect(overlay.getFocusedTextEditor()).toBeNull();
+	});
 });

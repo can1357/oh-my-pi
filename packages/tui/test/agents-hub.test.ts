@@ -258,4 +258,34 @@ describe("AgentsHub configuration strips", () => {
 		expect(strip()).not.toContain("dev →");
 		expect(cancelled()).toBe(false);
 	});
+
+	test("active create-description editor receives text via getFocusedTextEditor and mirrors it when submitting Enter", async () => {
+		const settings = createSettings();
+		const { hub } = await createHub(settings);
+
+		// Hub starts on the agent list; no active text editor initially
+		expect(hub.getFocusedTextEditor()).toBeNull();
+
+		// Navigate to "+ New agent…" entry in the list and activate it:
+		// Rows: dev (0), scout (1), task (2), + New agent… (3)
+		hub.handleInput("\x1b[B"); // scout
+		hub.handleInput("\x1b[B"); // task
+		hub.handleInput("\x1b[B"); // + New agent…
+		hub.handleInput("\r"); // enter create flow
+
+		const editor = hub.getFocusedTextEditor();
+		expect(editor).not.toBeNull();
+		expect(editor?.getText()).toBe("");
+
+		editor?.insertText("A test agent description from STT");
+		expect(editor?.getText()).toBe("A test agent description from STT");
+
+		// Submitting Enter inserts a newline and mirrors the expanded description
+		hub.submitFocusedTextEditor();
+		expect(editor?.getText()).toBe("A test agent description from STT\n");
+
+		// Rendered create screen reflects the editor content with actual public render signature
+		const rendered = hub.render(80).join("\n");
+		expect(rendered).toContain("A test agent description from STT");
+	});
 });

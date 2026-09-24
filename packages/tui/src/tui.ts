@@ -18,6 +18,7 @@ import { getDebugLogPath } from "@oh-my-pi/pi-utils/dirs";
 import { $flag } from "@oh-my-pi/pi-utils/env";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
+import { Editor } from "./components/editor";
 import { DEFAULT_MAX_INLINE_IMAGES, ImageBudget } from "./components/image";
 import { TuiDebugServer } from "./debug-server";
 import { isKeyRelease, matchesKey } from "./keys";
@@ -112,6 +113,7 @@ function resizeInPlaceOverride(): boolean | null {
 type InputListenerResult = { consume?: boolean; data?: string } | undefined;
 type InputListener = (data: string) => InputListenerResult;
 type StartListener = () => void;
+type FocusListener = () => void;
 
 export interface RenderTimer {
 	cancel(): void;
@@ -793,6 +795,9 @@ export class TUI extends Container {
 	#inputListeners = new Set<InputListener>();
 	#startListeners = new Set<StartListener>();
 	#paintListeners = new Set<PaintListener>();
+	#focusListeners = new Set<FocusListener>();
+	#lastObservedFocusedEditor: Editor | null = null;
+	#isNotifyingFocusListeners = false;
 
 	/** Global callback for debug key (Shift+Ctrl+D). Called before input is forwarded to focused component. */
 	onDebug?: () => void;
@@ -1059,12 +1064,89 @@ export class TUI extends Container {
 			component.focused = true;
 			this.#syncTerminalCursorMode(component);
 		}
+		this.#notifyFocusListeners();
 	}
 
 	/** Component currently receiving keyboard input, if any. */
 	getFocused(): Component | null {
 		return this.#focusedComponent;
 	}
+
+	/** Resolve the active text editor, whether directly focused or owned by a focused component. */
+	getFocusedTextEditor(): Editor | null {
+		const focused = this.#focusedComponent;
+		if (!focused) {
+			return null;
+		}
+		if (focused instanceof Editor) {
+			return focused;
+		}
+		const owner = focused as { getFocusedTextEditor?: () => Editor | null };
+		if (typeof owner.getFocusedTextEditor === "function") {
+			return owner.getFocusedTextEditor() ?? null;
+		}
+		return null;
+	}
+
+	/** Submit the given text editor, delegating to its owner if the owner currently owns it. */
+	submitFocusedTextEditor(editor: Pick<Editor, "submit">): void {
+		const owner = this.#focusedComponent as
+			| {
+					getFocusedTextEditor?: () => Pick<Editor, "submit"> | null;
+					submitFocusedTextEditor?: () => void;
+				}
+			| null
+			| undefined;
+		if (
+			owner &&
+			!(owner instanceof Editor) &&
+			typeof owner.getFocusedTextEditor === "function" &&
+			owner.getFocusedTextEditor() === editor &&
+			typeof owner.submitFocusedTextEditor === "function"
+		) {
+			owner.submitFocusedTextEditor();
+			return;
+		}
+		editor.submit();
+	}
+
+	/** Subscribe to focus transitions and internal focus changes after input handling. */
+	addFocusListener(listener: FocusListener): () => void {
+		this.#focusListeners.add(listener);
+		return () => {
+			this.#focusListeners.delete(listener);
+		};
+	}
+	#notifyFocusListeners(): void {
+		this.#lastObservedFocusedEditor = this.getFocusedTextEditor();
+		if (this.#focusListeners.size === 0 || this.#isNotifyingFocusListeners) {
+			return;
+		}
+		this.#isNotifyingFocusListeners = true;
+		try {
+			this.#focusListeners.forEach(listener => {
+				try {
+					listener();
+				} catch (err) {
+					logger.error("TUI focus listener failed", { err });
+				}
+			});
+		} finally {
+			this.#isNotifyingFocusListeners = false;
+		}
+	}
+
+	#checkAsyncFocusChange(): void {
+		if (this.#focusListeners.size === 0 || this.#isNotifyingFocusListeners) {
+			return;
+		}
+		const currentEditor = this.getFocusedTextEditor();
+		if (currentEditor === this.#lastObservedFocusedEditor) {
+			return;
+		}
+		this.#notifyFocusListeners();
+	}
+
 	/** Last viewport successfully written by the renderer, for debug inspection. */
 	getDebugPaint():
 		| {
@@ -1072,7 +1154,7 @@ export class TUI extends Container {
 				windowTop: number;
 				altScreen: boolean;
 				cursor?: { x: number; y: number; visible?: boolean };
-		  }
+			}
 		| undefined {
 		return this.#debugPaint;
 	}
@@ -2075,6 +2157,7 @@ export class TUI extends Container {
 	}
 
 	requestRender(force = false, options?: RenderRequestOptions): void {
+		this.#checkAsyncFocusChange();
 		if (force) {
 			this.#prepareForcedRender(options?.clearScrollback === true);
 			this.#renderRequested = true;
@@ -2319,6 +2402,7 @@ export class TUI extends Container {
 				return;
 			}
 			focused.handleInput(data);
+			this.#notifyFocusListeners();
 			this.requestRender();
 		}
 	}

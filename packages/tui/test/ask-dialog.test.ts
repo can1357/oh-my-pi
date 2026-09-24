@@ -3,8 +3,10 @@ import { stripVTControlCharacters } from "node:util";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { ExtensionAskDialogQuestion } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { AskDialogComponent } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
+import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
+import type { Terminal, TerminalAppearance } from "@oh-my-pi/pi-tui/terminal";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
-import { setKeybindings } from "@oh-my-pi/pi-tui";
+import { setKeybindings, TUI } from "@oh-my-pi/pi-tui";
 
 const DOWN = "\x1b[B";
 const UP = "\x1b[A";
@@ -20,6 +22,56 @@ let darkTheme = await getThemeByName("dark");
 
 function render(component: AskDialogComponent): string {
 	return stripVTControlCharacters(component.render(80).join("\n"));
+}
+class MinimalTerminal implements Terminal {
+	columns = 80;
+	rows = 24;
+	kittyProtocolActive = false;
+	kittyEnableSequence: string | null = null;
+	keyboardEnhancementEnterSequence: string | null = null;
+	keyboardEnhancementExitSequence: string | null = null;
+	appearance: TerminalAppearance | undefined;
+	#onInput: ((data: string) => void) | undefined;
+	output = "";
+	cursorHidden = false;
+	cursorTransitions = 0;
+
+	start(onInput: (data: string) => void, _onResize: () => void): void {
+		this.#onInput = onInput;
+	}
+
+	stop(): void {
+		this.#onInput = undefined;
+	}
+
+	async drainInput(_maxMs?: number, _idleMs?: number): Promise<void> {}
+
+	write(data: string): void {
+		this.output += data;
+		if (data.length === 0) this.output += "";
+	}
+
+	moveBy(_lines: number): void {}
+
+	hideCursor(): void {
+		this.cursorHidden = true;
+		this.cursorTransitions += 1;
+	}
+
+	showCursor(): void {
+		this.cursorHidden = false;
+		this.cursorTransitions += 1;
+	}
+
+	clearLine(): void {}
+	clearFromCursor(): void {}
+	clearScreen(): void {}
+	setTitle(_title: string): void {}
+	setProgress(_active: boolean): void {}
+	onAppearanceChange(_callback: (appearance: TerminalAppearance) => void): void {}
+	sendInput(data: string): void {
+		this.#onInput?.(data);
+	}
 }
 
 describe("AskDialogComponent", () => {
@@ -1843,5 +1895,147 @@ describe("AskDialogComponent", () => {
 		const rows = rendered.split("\n").filter(line => line.includes("Retry now (Recommended)"));
 		expect(rows).toHaveLength(2);
 		expect(rows[1]).toContain("Retry now (Recommended) (2)");
+	});
+
+	it("inserts transcript into prompt-style Other HookEditor via TUI.getFocusedTextEditor and submits via TUI.submitFocusedTextEditor", async () => {
+		const terminal = new MinimalTerminal();
+		const tui = new TUI(terminal);
+		tui.start();
+
+		const onSubmit = vi.fn();
+
+		const onPrompt = vi.fn((title: string, prefill?: string) => {
+			const { promise, resolve } = Promise.withResolvers<string | undefined>();
+			const hookEditor = new HookEditorComponent(
+				tui,
+				title,
+				prefill,
+				value => {
+					hookEditor.dispose();
+					resolve(value);
+				},
+				() => {
+					hookEditor.dispose();
+					resolve(undefined);
+				},
+				{ promptStyle: true },
+			);
+			tui.setFocus(hookEditor);
+			return promise;
+		});
+
+		const questions: ExtensionAskDialogQuestion[] = [
+			{
+				id: "q1",
+				question: "Favorite language?",
+				options: [{ label: "TypeScript" }, { label: "Rust" }],
+			},
+		];
+
+		const component = new AskDialogComponent(questions, { onSubmit, onCancel: vi.fn(), onPrompt }, { tui });
+		tui.setFocus(component);
+
+		try {
+			// Before prompt opens: AskDialogComponent is focused, but has no active text editor
+			expect(tui.getFocusedTextEditor()).toBeNull();
+
+			// Navigate to "Other" option and open the prompt editor
+			component.handleInput(DOWN); // Rust
+			component.handleInput(DOWN); // Other (type your own)
+			component.handleInput(ENTER);
+
+			expect(onPrompt).toHaveBeenCalledTimes(1);
+
+			// HookEditorComponent is now focused. TUI.getFocusedTextEditor returns its nested Editor.
+			const activeEditor = tui.getFocusedTextEditor();
+			expect(activeEditor).not.toBeNull();
+			expect(activeEditor).toBeDefined();
+
+			// Simulate STT transcript insertion through TUI.getFocusedTextEditor
+			activeEditor!.insertText("Zig from STT");
+			expect(activeEditor!.getText()).toBe("Zig from STT");
+
+			// Submit via TUI.submitFocusedTextEditor
+			tui.submitFocusedTextEditor(activeEditor!);
+			await Promise.resolve();
+			await Promise.resolve();
+
+			// AskDialog receives the customInput and submits
+			expect(onSubmit).toHaveBeenCalledTimes(1);
+			const result = onSubmit.mock.calls[0][0].results[0];
+			expect(result.customInput).toBe("Zig from STT");
+			expect(result.selectedOptions).toEqual([]);
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("inserts transcript into prompt-style note HookEditor via TUI.getFocusedTextEditor and submits via TUI.submitFocusedTextEditor", async () => {
+		const terminal = new MinimalTerminal();
+		const tui = new TUI(terminal);
+		tui.start();
+
+		const onSubmit = vi.fn();
+
+		const onPrompt = vi.fn((title: string, prefill?: string) => {
+			const { promise, resolve } = Promise.withResolvers<string | undefined>();
+			const hookEditor = new HookEditorComponent(
+				tui,
+				title,
+				prefill,
+				value => {
+					hookEditor.dispose();
+					resolve(value);
+				},
+				() => {
+					hookEditor.dispose();
+					resolve(undefined);
+				},
+				{ promptStyle: true },
+			);
+			tui.setFocus(hookEditor);
+			return promise;
+		});
+
+		const questions: ExtensionAskDialogQuestion[] = [
+			{
+				id: "q1",
+				question: "Choose approach?",
+				options: [{ label: "Approach A" }, { label: "Approach B" }],
+			},
+		];
+
+		const component = new AskDialogComponent(questions, { onSubmit, onCancel: vi.fn(), onPrompt }, { tui });
+		tui.setFocus(component);
+
+		try {
+			// Open note on Approach A
+			component.handleInput("n");
+			expect(onPrompt).toHaveBeenCalledTimes(1);
+
+			// HookEditor is focused
+			const activeEditor = tui.getFocusedTextEditor();
+			expect(activeEditor).not.toBeNull();
+
+			// Insert note via STT generic seam
+			activeEditor!.insertText("Spoken rationale for Approach A");
+			expect(activeEditor!.getText()).toBe("Spoken rationale for Approach A");
+
+			// Submit note
+			tui.submitFocusedTextEditor(activeEditor!);
+			await Promise.resolve();
+			await Promise.resolve();
+
+			// Return focus to dialog and confirm submission
+			tui.setFocus(component);
+			component.handleInput(ENTER);
+
+			expect(onSubmit).toHaveBeenCalledTimes(1);
+			const result = onSubmit.mock.calls[0][0].results[0];
+			expect(result.selectedOptions).toEqual(["Approach A"]);
+			expect(result.note).toBe("Spoken rationale for Approach A");
+		} finally {
+			tui.stop();
+		}
 	});
 });

@@ -4,7 +4,8 @@ import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { HookSelectorSlider } from "@oh-my-pi/pi-tui/overlays/hook-selector";
 import { PlanReviewOverlay } from "@oh-my-pi/pi-tui/overlays/plan-review-overlay";
 import { getThemeByName, setThemeInstance, theme } from "@oh-my-pi/pi-tui/theme";
-import { setKeybindings } from "@oh-my-pi/pi-tui";
+import type { Terminal, TerminalAppearance } from "@oh-my-pi/pi-tui/terminal";
+import { setKeybindings, TUI } from "@oh-my-pi/pi-tui";
 
 const UP = "\x1b[A";
 const DOWN = "\x1b[B";
@@ -19,6 +20,56 @@ let darkTheme = await getThemeByName("dark");
 
 function render(component: PlanReviewOverlay): string {
 	return stripVTControlCharacters(component.render(80).join("\n"));
+}
+class MinimalTerminal implements Terminal {
+	columns = 80;
+	rows = 24;
+	kittyProtocolActive = false;
+	kittyEnableSequence: string | null = null;
+	keyboardEnhancementEnterSequence: string | null = null;
+	keyboardEnhancementExitSequence: string | null = null;
+	appearance: TerminalAppearance | undefined;
+	#onInput: ((data: string) => void) | undefined;
+	output = "";
+	cursorHidden = false;
+	cursorTransitions = 0;
+
+	start(onInput: (data: string) => void, _onResize: () => void): void {
+		this.#onInput = onInput;
+	}
+
+	stop(): void {
+		this.#onInput = undefined;
+	}
+
+	async drainInput(_maxMs?: number, _idleMs?: number): Promise<void> {}
+
+	write(data: string): void {
+		this.output += data;
+		if (data.length === 0) this.output += "";
+	}
+
+	moveBy(_lines: number): void {}
+
+	hideCursor(): void {
+		this.cursorHidden = true;
+		this.cursorTransitions += 1;
+	}
+
+	showCursor(): void {
+		this.cursorHidden = false;
+		this.cursorTransitions += 1;
+	}
+
+	clearLine(): void {}
+	clearFromCursor(): void {}
+	clearScreen(): void {}
+	setTitle(_title: string): void {}
+	setProgress(_active: boolean): void {}
+	onAppearanceChange(_callback: (appearance: TerminalAppearance) => void): void {}
+	sendInput(data: string): void {
+		this.#onInput?.(data);
+	}
 }
 
 const APPROVAL_OPTIONS = [
@@ -1101,5 +1152,99 @@ describe("PlanReviewOverlay", () => {
 		render(overlay);
 		expect(hoverRow(overlay, "Approve and keep context")).toBe(true);
 		expect(optionLineRaw(overlay, "Approve and keep context")).not.toContain(selectedBg);
+	});
+
+	it("inserts transcript into plan-review annotation via TUI.getFocusedTextEditor and commits on TUI.submitFocusedTextEditor", () => {
+		const terminal = new MinimalTerminal();
+		const tui = new TUI(terminal);
+		tui.start();
+
+		const onFeedbackChange = vi.fn();
+		const onAnnotationStateChange = vi.fn();
+		const overlay = new PlanReviewOverlay(
+			SECTION_PLAN,
+			{ promptTitle: "next", options: APPROVAL_OPTIONS },
+			{ onPick: vi.fn(), onCancel: vi.fn(), onFeedbackChange, onAnnotationStateChange },
+		);
+		render(overlay);
+		tui.setFocus(overlay);
+		try {
+			// While browsing options / sections / non-text overlay, TUI yields null
+			expect(tui.getFocusedTextEditor()).toBeNull();
+
+			// Focus the section table of contents and enter annotation mode
+			overlay.handleInput(TAB); // -> toc
+			expect(tui.getFocusedTextEditor()).toBeNull();
+
+			overlay.handleInput("a"); // annotate section
+
+			// Now in annotation mode: TUI.getFocusedTextEditor yields the annotation editor
+			const editor = tui.getFocusedTextEditor();
+			expect(editor).not.toBeNull();
+			expect(editor).toBeDefined();
+
+			// Insert transcript into the annotation editor via generic focus seam
+			editor!.insertText("Add comprehensive error handling");
+			expect(editor!.getText()).toBe("Add comprehensive error handling");
+
+			// Submit via TUI.submitFocusedTextEditor
+			tui.submitFocusedTextEditor(editor!);
+
+			// Annotation is committed to state and feedback
+			expect(onAnnotationStateChange).toHaveBeenCalledTimes(1);
+			const state = onAnnotationStateChange.mock.calls[0]?.[0];
+			expect(state.annotations).toHaveLength(1);
+			expect(state.annotations[0].note).toBe("Add comprehensive error handling");
+
+			expect(onFeedbackChange).toHaveBeenCalledTimes(1);
+			expect(onFeedbackChange.mock.calls[0]?.[0]).toContain("Add comprehensive error handling");
+
+			// After annotation is committed, TUI.getFocusedTextEditor reverts to null
+			expect(tui.getFocusedTextEditor()).toBeNull();
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("returns null for non-text overlay states (options list, toc, chooser, disposed)", () => {
+		const terminal = new MinimalTerminal();
+		const tui = new TUI(terminal);
+		tui.start();
+
+		const overlay = new PlanReviewOverlay(
+			SECTION_PLAN,
+			{ promptTitle: "next", options: APPROVAL_OPTIONS },
+			{ onPick: vi.fn(), onCancel: vi.fn() },
+		);
+		render(overlay);
+		tui.setFocus(overlay);
+		try {
+			// 1. Actions/options state
+			expect(tui.getFocusedTextEditor()).toBeNull();
+
+			// 2. ToC state
+			overlay.handleInput(TAB);
+			expect(tui.getFocusedTextEditor()).toBeNull();
+
+			// 3. Body state
+			overlay.handleInput(TAB);
+			expect(tui.getFocusedTextEditor()).toBeNull();
+
+			// Enter annotation mode
+			overlay.handleInput("a");
+			expect(tui.getFocusedTextEditor()).not.toBeNull();
+
+			// Cancel annotation mode -> back to non-text state
+			overlay.handleInput(CANCEL);
+			expect(tui.getFocusedTextEditor()).toBeNull();
+
+			// Enter annotation mode again, then dispose
+			overlay.handleInput("a");
+			expect(tui.getFocusedTextEditor()).not.toBeNull();
+			overlay.dispose();
+			expect(tui.getFocusedTextEditor()).toBeNull();
+		} finally {
+			tui.stop();
+		}
 	});
 });

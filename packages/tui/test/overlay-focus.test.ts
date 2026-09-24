@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
-import { type Component, Container, type Focusable, type OverlayFocusOwner, TUI } from "@oh-my-pi/pi-tui";
+import { type Component, Container, Editor, type Focusable, type OverlayFocusOwner, TUI } from "@oh-my-pi/pi-tui";
 import type { Terminal, TerminalAppearance } from "@oh-my-pi/pi-tui/terminal";
+import { defaultEditorTheme } from "./test-themes";
 
 class MinimalTerminal implements Terminal {
 	columns = 80;
@@ -244,6 +245,135 @@ describe("TUI overlay focus", () => {
 			expect(tui.getFocused()).toBe(editor);
 			expect(editor.inputs).toEqual(["\x1b[B"]);
 			expect(approvalPrompt.inputs).toEqual([]);
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("notifies focus listeners on direct-to-nested focus changes, internal input transitions, and unsubscribes cleanly", () => {
+		const terminal = new MinimalTerminal();
+		const tui = new TUI(terminal);
+
+		class DelegatingInputComponent extends FocusRecorder {
+			internalState = 0;
+
+			override handleInput(data: string): void {
+				super.handleInput(data);
+				if (data === "next") {
+					this.internalState += 1;
+				}
+			}
+		}
+
+		const directComponent = new FocusRecorder("direct");
+		const nestedContainer = new Container();
+		const nestedComponent = new DelegatingInputComponent("nested");
+		nestedContainer.addChild(nestedComponent);
+
+		tui.addChild(directComponent);
+		tui.addChild(nestedContainer);
+
+		let listenerCallCount = 0;
+		const unsubscribe = tui.addFocusListener(() => {
+			listenerCallCount += 1;
+		});
+
+		try {
+			tui.start();
+
+			// Initial focus setting to direct component
+			tui.setFocus(directComponent);
+			expect(listenerCallCount).toBe(1);
+			expect(tui.getFocused()).toBe(directComponent);
+
+			// Focus transition from direct component to nested component
+			tui.setFocus(nestedComponent);
+			expect(listenerCallCount).toBe(2);
+			expect(tui.getFocused()).toBe(nestedComponent);
+
+			// Internal focus / input transition via handleInput dispatch
+			terminal.sendInput("next");
+			expect(nestedComponent.inputs).toEqual(["next"]);
+			expect(nestedComponent.internalState).toBe(1);
+			expect(listenerCallCount).toBe(3);
+
+			// Unsubscribe cleanly and ensure subsequent transitions do not notify
+			unsubscribe();
+
+			tui.setFocus(directComponent);
+			expect(tui.getFocused()).toBe(directComponent);
+			expect(listenerCallCount).toBe(3);
+
+			terminal.sendInput("x");
+			expect(directComponent.inputs).toEqual(["x"]);
+			expect(listenerCallCount).toBe(3);
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("notifies focus listeners when a focused owner's getFocusedTextEditor changes across requestRender without explicit setFocus or input", () => {
+		const terminal = new MinimalTerminal();
+		const tui = new TUI(terminal);
+
+		class DynamicEditorOwner extends FocusRecorder {
+			activeEditor: Editor | null = null;
+
+			getFocusedTextEditor(): Editor | null {
+				return this.activeEditor;
+			}
+		}
+
+		const realEditor = new Editor(defaultEditorTheme);
+		const owner = new DynamicEditorOwner("dynamic-owner");
+		owner.activeEditor = realEditor;
+
+		tui.addChild(owner);
+
+		let listenerCallCount = 0;
+		let unsubscribedCallCount = 0;
+
+		const unsubscribe = tui.addFocusListener(() => {
+			listenerCallCount += 1;
+		});
+		const neverCalledUnsubscribe = tui.addFocusListener(() => {
+			unsubscribedCallCount += 1;
+		});
+		neverCalledUnsubscribe();
+
+		try {
+			tui.start();
+
+			// Initial state: editor active and owner focused
+			tui.setFocus(owner);
+			expect(tui.getFocused()).toBe(owner);
+			expect(tui.getFocusedTextEditor()).toBe(realEditor);
+			const initialCount = listenerCallCount;
+
+			// Change state asynchronously (e.g. background job error, editor removed)
+			// Calls tui.requestRender() without TUI.setFocus() or keyboard input
+			owner.activeEditor = null;
+			expect(tui.getFocusedTextEditor()).toBeNull();
+			tui.requestRender();
+
+			expect(listenerCallCount).toBe(initialCount + 1);
+			expect(unsubscribedCallCount).toBe(0);
+
+			// Change back asynchronously: editor reappears and requestRender() called
+			owner.activeEditor = realEditor;
+			expect(tui.getFocusedTextEditor()).toBe(realEditor);
+			tui.requestRender();
+
+			expect(listenerCallCount).toBe(initialCount + 2);
+			expect(unsubscribedCallCount).toBe(0);
+
+			// Unsubscribe the active listener and verify it remains silent on subsequent transitions
+			unsubscribe();
+			owner.activeEditor = null;
+			tui.requestRender();
+
+			expect(listenerCallCount).toBe(initialCount + 2);
+			expect(unsubscribedCallCount).toBe(0);
 		} finally {
 			tui.stop();
 		}

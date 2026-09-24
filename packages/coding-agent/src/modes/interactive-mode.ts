@@ -6628,9 +6628,14 @@ export class InteractiveMode implements InteractiveModeContext {
 				getSessionId: () => this.session.sessionId,
 			});
 		}
-		await this.#sttController.toggle(this.editor, {
+		if (this.#sttController.state === "idle" && !this.ui.getFocusedTextEditor()) {
+			return;
+		}
+		await this.#sttController.toggle(() => this.ui.getFocusedTextEditor(), this.editor, {
 			showWarning: (msg: string) => this.showWarning(msg),
 			showStatus: (msg: string) => this.showStatus(msg),
+			submitEditor: editor => this.ui.submitFocusedTextEditor(editor),
+			subscribeFocus: (listener: () => void) => this.ui.addFocusListener(listener),
 			onStateChange: (state: SttState) => {
 				// Duck assistant speech while the user is talking (push-to-talk); restore after.
 				if (state === "recording") vocalizer.duck();

@@ -210,6 +210,11 @@ export class AgentTranscriptViewer implements Component {
 		this.#builder.dispose();
 	}
 
+	getFocusedTextEditor(): Editor | null {
+		if (this.#disposed || !this.#sendable) return null;
+		return this.#editor ?? null;
+	}
+
 	#stopPolling(): void {
 		if (!this.#pollTimer) return;
 		clearInterval(this.#pollTimer);

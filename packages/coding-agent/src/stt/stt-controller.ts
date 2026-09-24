@@ -15,14 +15,16 @@ import { encodePcm16Wav } from "./wav";
 
 export type SttState = "idle" | "recording" | "transcribing";
 
-interface ToggleOptions {
+export interface ToggleOptions {
 	showWarning(msg: string): void;
 	showStatus(msg: string): void;
 	onStateChange(state: SttState): void;
+	submitEditor?(editor: Editor): void;
+	subscribeFocus?(listener: () => void): () => void;
 }
 
-/** The slice of the composer editor the controller drives. */
-interface Editor {
+/** The slice of a text editor the controller drives. */
+export interface Editor {
 	insertText(text: string): void;
 	setVolatileText(text: string): void;
 	clearVolatileText(): void;
@@ -58,6 +60,10 @@ export class STTController {
 	readonly #settings: Settings;
 	readonly #registry: SttRegistry | undefined;
 	readonly #getSessionId: (() => string) | undefined;
+	#resolveEditor: (() => Editor | null) | null = null;
+	#fallbackEditor: Editor | null = null;
+	#unsubscribeFocus: (() => void) | null = null;
+	#lastPartial = "";
 
 	// Live streaming capture.
 	#stream: SttStreamHandle | null = null;
@@ -102,7 +108,7 @@ export class STTController {
 		options.onStateChange(state);
 	}
 
-	async toggle(editor: Editor, options: ToggleOptions): Promise<void> {
+	async toggle(resolveEditor: () => Editor | null, fallbackEditor: Editor, options: ToggleOptions): Promise<void> {
 		if (this.#toggling) {
 			if (this.#state === "idle" || this.#state === "recording") this.#stopAfterStart = true;
 			return;
@@ -111,7 +117,7 @@ export class STTController {
 		try {
 			switch (this.#state) {
 				case "idle":
-					await this.#start(editor, options);
+					await this.#start(resolveEditor, fallbackEditor, options);
 					break;
 				case "recording":
 					await this.#stop(options);
@@ -192,10 +198,10 @@ export class STTController {
 		});
 	}
 
-	async #start(editor: Editor, options: ToggleOptions): Promise<void> {
+	async #start(resolveEditor: () => Editor | null, fallbackEditor: Editor, options: ToggleOptions): Promise<void> {
 		let model = this.#resolveModel();
 		if (model?.api === "openai-transcriptions") {
-			this.#startBuffered(editor, options, model);
+			this.#startBuffered(resolveEditor, fallbackEditor, options, model);
 			return;
 		}
 		if (model && model.api !== "local-inference") {
@@ -207,7 +213,7 @@ export class STTController {
 		if (!modelKey) return;
 		model = this.#resolveModel();
 		if (model?.api === "openai-transcriptions") {
-			this.#startBuffered(editor, options, model);
+			this.#startBuffered(resolveEditor, fallbackEditor, options, model);
 			return;
 		}
 		if (model && model.api !== "local-inference") {
@@ -219,7 +225,7 @@ export class STTController {
 			modelKey = await this.#ensureDeps(options, startModelKey);
 			if (!modelKey) return;
 		}
-		await this.#startStreaming(editor, options, modelKey);
+		await this.#startStreaming(resolveEditor, fallbackEditor, options, modelKey);
 	}
 
 	async #stop(options: ToggleOptions): Promise<void> {
@@ -227,10 +233,42 @@ export class STTController {
 		else await this.#stopStreaming(options);
 	}
 
+	#attachFocus(resolveEditor: () => Editor | null, fallbackEditor: Editor, options: ToggleOptions): void {
+		this.#resolveEditor = resolveEditor;
+		this.#fallbackEditor = fallbackEditor;
+		this.#streamEditor = resolveEditor();
+		this.#lastPartial = "";
+		this.#unsubscribeFocus = options.subscribeFocus?.(() => this.#handleFocusChange()) || null;
+	}
+
+	#releaseFocus(): void {
+		this.#unsubscribeFocus?.();
+		this.#unsubscribeFocus = null;
+		this.#resolveEditor = null;
+		this.#fallbackEditor = null;
+		this.#lastPartial = "";
+	}
+
+	#handleFocusChange(): boolean {
+		if (this.#disposed || this.#state !== "recording") return false;
+		const nextEditor = this.#resolveEditor?.() || null;
+		if (nextEditor === this.#streamEditor) return false;
+		this.#streamEditor?.clearVolatileText();
+		this.#streamEditor = nextEditor;
+		const preview = this.#currentVolatilePreview();
+		if (preview) nextEditor?.setVolatileText(preview);
+		return true;
+	}
+
 	// ── Buffered cloud transcription ────────────────────────────────
 
-	#startBuffered(editor: Editor, options: ToggleOptions, model: Model<Api>): void {
-		this.#streamEditor = editor;
+	#startBuffered(
+		resolveEditor: () => Editor | null,
+		fallbackEditor: Editor,
+		options: ToggleOptions,
+		model: Model<Api>,
+	): void {
+		this.#attachFocus(resolveEditor, fallbackEditor, options);
 		this.#streamCommitted = false;
 		this.#streamUtterance = "";
 		this.#streamAbort = new AbortController();
@@ -339,21 +377,32 @@ export class STTController {
 		this.#streamCommitted = false;
 		this.#streamAbort = null;
 		this.#streamUtterance = "";
+		this.#releaseFocus();
 	}
 
 	// ── Live streaming ──────────────────────────────────────────────
+	#currentVolatilePreview(): string {
+		const partial = this.#lastPartial.replace(/\s+/g, " ").trim();
+		if (!this.#streamUtterance) return partial;
+		if (!partial) return this.#streamUtterance;
+		return `${this.#streamUtterance} ${partial}`;
+	}
 
-	/** Segment text gets a leading space once a prior segment is committed, so
-	 *  phrases join naturally; the first phrase is inserted at the cursor as-is. */
+	/** Segments accumulate before final insertion; prefix each later segment with a space. */
 	#prefixed(text: string): string {
 		const normalized = text.replace(/\s+/g, " ").trim();
 		if (!normalized) return "";
 		return this.#streamCommitted ? ` ${normalized}` : normalized;
 	}
 
-	async #startStreaming(editor: Editor, options: ToggleOptions, modelKey: SttModelKey): Promise<void> {
+	async #startStreaming(
+		resolveEditor: () => Editor | null,
+		fallbackEditor: Editor,
+		options: ToggleOptions,
+		modelKey: SttModelKey,
+	): Promise<void> {
 		const language = this.#settings.get("stt.language");
-		this.#streamEditor = editor;
+		this.#attachFocus(resolveEditor, fallbackEditor, options);
 		this.#streamCommitted = false;
 		this.#streamUtterance = "";
 		this.#streamAbort = new AbortController();
@@ -362,18 +411,24 @@ export class STTController {
 			signal: this.#streamAbort.signal,
 			onPartial: text => {
 				if (this.#disposed || this.#state !== "recording") return;
-				this.#streamEditor?.setVolatileText(this.#prefixed(text));
+				this.#lastPartial = text;
+				if (this.#handleFocusChange()) return;
+				const preview = this.#currentVolatilePreview();
+				if (preview) this.#streamEditor?.setVolatileText(preview);
+				if (!preview) this.#streamEditor?.clearVolatileText();
 			},
 			onSegment: text => {
 				if (this.#disposed) return;
+				this.#lastPartial = "";
 				const prefixed = this.#prefixed(text);
 				if (prefixed) {
-					this.#streamEditor?.commitVolatileText(prefixed);
 					this.#streamCommitted = true;
 					this.#streamUtterance += prefixed;
-				} else {
-					this.#streamEditor?.clearVolatileText();
 				}
+				if (this.#handleFocusChange()) return;
+				if (this.#state !== "recording") return;
+				if (this.#streamUtterance) this.#streamEditor?.setVolatileText(this.#streamUtterance);
+				else this.#streamEditor?.clearVolatileText();
 			},
 		});
 		this.#stream = stream;
@@ -461,29 +516,28 @@ export class STTController {
 		this.#streamCommitted = false;
 		this.#streamAbort = null;
 		this.#streamUtterance = "";
+		this.#releaseFocus();
 	}
 
 	#finishTranscript(finalText: string, failed: boolean, options: ToggleOptions): void {
-		if (!this.#streamCommitted && finalText) {
-			const prefixed = this.#prefixed(finalText);
-			this.#streamEditor?.commitVolatileText(prefixed);
-			this.#streamCommitted = true;
-			this.#streamUtterance = prefixed;
-		} else {
-			this.#streamEditor?.clearVolatileText();
-		}
-		if (!failed) options.showStatus(this.#streamCommitted ? "" : "No speech detected.");
+		const focusedEditor = this.#resolveEditor?.() || null;
+		const targetEditor = focusedEditor || this.#fallbackEditor;
+		let transcript = this.#streamUtterance;
+		if (finalText) transcript = finalText;
+		transcript = transcript.trim();
+		this.#streamEditor?.clearVolatileText();
+		if (transcript) targetEditor?.commitVolatileText(transcript);
 
-		if (this.#streamCommitted && !failed && this.#streamEditor) {
-			const trigger = this.#settings.get("stt.submitTrigger");
-			const { submit, trimTrailing } = evaluateSubmitTrigger(this.#streamUtterance, trigger);
-			if (trimTrailing > 0) {
-				this.#streamEditor.deleteBeforeCursor(trimTrailing);
-			}
-			if (submit) {
-				this.#streamEditor.submit();
-			}
-		}
+		if (!failed && !transcript) options.showStatus("No speech detected.");
+		if (!failed && transcript && !focusedEditor) options.showStatus("Dictation inserted into composer draft.");
+		if (!failed && transcript && focusedEditor) options.showStatus("");
+
+		if (!transcript || failed || !targetEditor) return;
+		const trigger = this.#settings.get("stt.submitTrigger");
+		const { submit, trimTrailing } = evaluateSubmitTrigger(transcript, trigger);
+		if (trimTrailing > 0) targetEditor.deleteBeforeCursor(trimTrailing);
+		if (submit && options.submitEditor) options.submitEditor(targetEditor);
+		if (submit && !options.submitEditor) targetEditor.submit();
 	}
 
 	dispose(): void {

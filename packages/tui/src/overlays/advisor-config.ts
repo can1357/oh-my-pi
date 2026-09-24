@@ -21,6 +21,7 @@ import { formatDuration } from "@oh-my-pi/pi-utils";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import {
 	type Component,
+	type Editor,
 	Input,
 	routeSgrMouseInput,
 	type SelectItem,
@@ -320,6 +321,18 @@ export class AdvisorConfigOverlayComponent implements Component {
 	/** Forward enhanced-paste transports into a multiline instructions editor. */
 	pasteText(text: string): void {
 		if (this.#active instanceof HookEditorComponent) this.#active.pasteText(text);
+	}
+
+	getFocusedTextEditor(): Editor | null {
+		if (this.#screen !== "instructions") return null;
+		if (!(this.#active instanceof HookEditorComponent)) return null;
+		return this.#active.getFocusedTextEditor();
+	}
+
+	submitFocusedTextEditor(): void {
+		if (this.#screen !== "instructions") return;
+		if (!(this.#active instanceof HookEditorComponent)) return;
+		this.#active.submitFocusedTextEditor();
 	}
 
 	#routeMouseEvent(event: SgrMouseEvent): boolean {
