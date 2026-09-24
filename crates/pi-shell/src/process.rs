@@ -16,6 +16,145 @@ pub use pi_builtins::ProcessStatus;
 
 use crate::cancel::CancelToken;
 
+/// Placement into a delegated cgroup-v2 leaf for cooperative same-user
+/// processes, not a hostile-code sandbox. The parent opens and retains the
+/// membership file; only a newly forked child writes to it.
+pub struct WorkloadCgroup {
+	path:  std::path::PathBuf,
+	#[cfg(target_os = "linux")]
+	procs: std::sync::Arc<std::os::fd::OwnedFd>,
+}
+
+impl WorkloadCgroup {
+	/// Resolves and opens a writable memory-controller leaf without moving
+	/// the calling process or any of its native threads.
+	pub fn new(path: &str) -> std::io::Result<Self> {
+		Self::open(path).map_err(|err| {
+			std::io::Error::new(err.kind(), format!("tool cgroup {path}: {err}"))
+		})
+	}
+
+	/// Canonical leaf path for launchers that cannot attach a pre-exec hook.
+	pub fn path(&self) -> &std::path::Path {
+		&self.path
+	}
+
+	#[cfg(target_os = "linux")]
+	fn open(path: &str) -> std::io::Result<Self> {
+		use std::{
+			fs::{self, OpenOptions},
+			io,
+			os::{
+				fd::AsRawFd,
+				unix::fs::{MetadataExt, OpenOptionsExt},
+			},
+			path::Path,
+			sync::Arc,
+		};
+
+		if !Path::new(path).is_absolute() {
+			return Err(io::Error::new(io::ErrorKind::InvalidInput, "path must be absolute"));
+		}
+		// SAFETY: These identity queries have no pointer arguments or side effects.
+		let (uid, euid, gid, egid) =
+			unsafe { (libc::getuid(), libc::geteuid(), libc::getgid(), libc::getegid()) };
+		if uid != euid || gid != egid {
+			return Err(io::Error::new(
+				io::ErrorKind::PermissionDenied,
+				"real and effective identities must match",
+			));
+		}
+		let path = fs::canonicalize(path)?;
+		let directory = fs::metadata(&path)?;
+		if !directory.is_dir() || directory.uid() != euid || directory.gid() != egid {
+			return Err(io::Error::new(
+				io::ErrorKind::PermissionDenied,
+				"leaf must be a directory owned by the current user and group",
+			));
+		}
+		let procs = OpenOptions::new()
+			.write(true)
+			.custom_flags(libc::O_NOFOLLOW)
+			.open(path.join("cgroup.procs"))?;
+		let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
+		// SAFETY: procs owns a live fd and stat points to writable storage.
+		if unsafe { libc::fstatfs(procs.as_raw_fd(), stat.as_mut_ptr()) } != 0 {
+			return Err(io::Error::last_os_error());
+		}
+		// SAFETY: fstatfs succeeded and initialized stat.
+		if unsafe { stat.assume_init() }.f_type != libc::CGROUP2_SUPER_MAGIC {
+			return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a cgroup-v2 filesystem"));
+		}
+		let membership = procs.metadata()?;
+		if !membership.is_file()
+			|| membership.dev() != directory.dev()
+			|| membership.uid() != euid
+			|| membership.gid() != egid
+		{
+			return Err(io::Error::new(
+				io::ErrorKind::PermissionDenied,
+				"cgroup.procs must belong to the leaf and current user and group",
+			));
+		}
+		if !fs::read_to_string(path.join("cgroup.controllers"))?
+			.split_whitespace()
+			.any(|controller| controller == "memory")
+			|| !fs::metadata(path.join("memory.max"))?.is_file()
+		{
+			return Err(io::Error::new(io::ErrorKind::InvalidInput, "memory controller unavailable"));
+		}
+		if !fs::read_to_string(path.join("cgroup.subtree_control"))?.trim().is_empty() {
+			return Err(io::Error::new(io::ErrorKind::InvalidInput, "target must be a leaf"));
+		}
+		Ok(Self { path, procs: Arc::new(procs.into()) })
+	}
+
+	#[cfg(not(target_os = "linux"))]
+	fn open(_path: &str) -> std::io::Result<Self> {
+		Err(std::io::Error::new(
+			std::io::ErrorKind::Unsupported,
+			"cgroup-v2 placement is Linux-only",
+		))
+	}
+}
+
+impl brush_core::SpawnPlacement for WorkloadCgroup {
+	#[cfg(target_os = "linux")]
+	fn prepare(&self, command: &mut std::process::Command) -> std::io::Result<()> {
+		use std::{io, os::fd::AsRawFd, os::unix::process::CommandExt, sync::Arc};
+
+		let procs = Arc::clone(&self.procs);
+		// SAFETY: The closure only writes to its retained fd and reads errno.
+		// Keep this path async-signal-safe: no allocation, locking, or logging.
+		unsafe {
+			command.pre_exec(move || {
+				loop {
+					let written = libc::write(procs.as_raw_fd(), b"0\n".as_ptr().cast(), 2);
+					if written == 2 {
+						return Ok(());
+					}
+					if written >= 0 {
+						return Err(io::Error::from_raw_os_error(libc::EIO));
+					}
+					let error = io::Error::last_os_error();
+					if error.raw_os_error() != Some(libc::EINTR) {
+						return Err(error);
+					}
+				}
+			});
+		}
+		Ok(())
+	}
+
+	#[cfg(not(target_os = "linux"))]
+	fn prepare(&self, _command: &mut std::process::Command) -> std::io::Result<()> {
+		Err(std::io::Error::new(
+			std::io::ErrorKind::Unsupported,
+			"cgroup-v2 placement is Linux-only",
+		))
+	}
+}
+
 #[cfg(target_os = "linux")]
 mod platform {
 	use std::{

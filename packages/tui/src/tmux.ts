@@ -1,5 +1,6 @@
 import { $which } from "@oh-my-pi/pi-utils";
 import { isBunTestRuntime } from "@oh-my-pi/pi-utils/env";
+import { wrapToolCommand } from "@oh-my-pi/pi-utils/tool-cgroup";
 
 /** Whether the process is running inside a tmux session. */
 export function isInsideTmux(env: NodeJS.ProcessEnv = Bun.env): boolean {
@@ -24,7 +25,7 @@ function queryTmuxClientTerminalName(env: NodeJS.ProcessEnv): string | null {
 	const tmux = $which("tmux", { PATH: env.PATH });
 	if (!tmux) return null;
 	try {
-		const result = Bun.spawnSync([tmux, "display-message", "-p", "#{client_termtype}"], {
+		const result = Bun.spawnSync(wrapToolCommand([tmux, "display-message", "-p", "#{client_termtype}"]), {
 			env,
 			stdout: "pipe",
 			stderr: "ignore",

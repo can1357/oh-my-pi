@@ -9,6 +9,7 @@
 
 import { Process } from "@oh-my-pi/pi-natives";
 import type { Spawn, Subprocess } from "bun";
+import { wrapToolCommand } from "./tool-cgroup";
 
 type InMask = "pipe" | "ignore" | Buffer | Uint8Array | null;
 
@@ -637,7 +638,10 @@ function spawnInternal<In extends InMask = InMask>(
 	const { timeout = -1, signal, stderr, detached, subreaper = false, ...rest } = opts ?? {};
 	const useSubreaper = subreaper && process.platform === "linux";
 	const commandEnv = rest.env ?? Bun.env;
-	const child = Bun.spawn(useSubreaper ? [process.execPath, "-e", LINUX_SUBREAPER_SCRIPT] : cmd, {
+	// Placement wraps the outer argv, so the subreaper and every process below
+	// it are contained; the payload keeps its own argv and exit status.
+	const argv = wrapToolCommand(useSubreaper ? [process.execPath, "-e", LINUX_SUBREAPER_SCRIPT] : cmd);
+	const child = Bun.spawn(argv, {
 		stdin: "ignore",
 		stdout: "pipe",
 		stderr: "pipe",

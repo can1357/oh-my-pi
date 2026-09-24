@@ -8095,14 +8095,19 @@ fn substitute(
 		// Execute the pattern space as a shell command if the 'e' flag is set
 		if sub.execute {
 			let cmd_str = pattern.as_str()?.to_string();
-			let output_bytes = shell_command(&cmd_str, host).and_then(|mut command| command.output()).map_err(|e| {
-				input_runtime_error::<()>(
-					&command.location,
-					context,
-					format!("failed to execute shell command: {e}"),
-				)
-				.unwrap_err()
-			})?;
+			let output_bytes = shell_command(&cmd_str, host)
+				.and_then(|mut child_command| {
+					host.prepare_child(&mut child_command)?;
+					child_command.output()
+				})
+				.map_err(|e| {
+					input_runtime_error::<()>(
+						&command.location,
+						context,
+						format!("failed to execute shell command: {e}"),
+					)
+					.unwrap_err()
+				})?;
 			let mut shell_out = String::from_utf8_lossy(&output_bytes.stdout).into_owned();
 			if shell_out.ends_with("\r\n") {
 				// On windows, both return carriage and newline characters are used

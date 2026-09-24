@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { wrapToolCommand } from "@oh-my-pi/pi-utils/tool-cgroup";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 
 /** Project type detection result */
@@ -58,7 +59,7 @@ function parseGoWorkspaceBuildPatterns(output: string): string[] {
 async function resolveGoWorkspaceDiagnosticsCommand(cwd: string, signal?: AbortSignal): Promise<string[]> {
 	const fallback = ["go", "build", "./..."];
 	try {
-		const proc = Bun.spawn(["go", "work", "edit", "-json"], {
+		const proc = Bun.spawn(wrapToolCommand(["go", "work", "edit", "-json"]), {
 			cwd,
 			stdout: "pipe",
 			stderr: "pipe",
@@ -195,7 +196,7 @@ async function runProjectDiagnostics(cwd: string, projectType: ProjectType, sign
 		return "Cannot detect project type. Supported: Rust (Cargo.toml), TypeScript (tsconfig.json), Go (go.work/go.mod), Python (pyproject.toml)";
 	}
 	try {
-		const proc = Bun.spawn(command, {
+		const proc = Bun.spawn(wrapToolCommand(command), {
 			cwd,
 			stdout: "pipe",
 			stderr: "pipe",

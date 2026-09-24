@@ -1,4 +1,5 @@
 import { $which, isRecord } from "@oh-my-pi/pi-utils";
+import { wrapToolCommand } from "@oh-my-pi/pi-utils/tool-cgroup";
 import { REJECT_PROMPT_COMMAND } from "../exec/non-interactive-env";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
@@ -138,7 +139,7 @@ export const github = {
 		const timeoutSignal = AbortSignal.timeout(GH_COMMAND_TIMEOUT_MS);
 		const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 		try {
-			const child = Bun.spawn(["gh", ...args], {
+			const child = Bun.spawn(wrapToolCommand(["gh", ...args]), {
 				cwd,
 				env: GH_NON_INTERACTIVE_ENV,
 				stdin: "ignore",

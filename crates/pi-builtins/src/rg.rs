@@ -16,7 +16,7 @@ use std::{
 };
 
 use clap::{ArgAction, Parser, ValueEnum};
-use grep_cli::{CommandReader, DecompressionReaderBuilder};
+use grep_cli::{CommandReader, CommandReaderBuilder, DecompressionMatcher};
 use grep_matcher::{Captures, LineTerminator, Matcher};
 use grep_pcre2::{RegexMatcher as PcreMatcher, RegexMatcherBuilder as PcreMatcherBuilder};
 use grep_printer::{JSONBuilder, Stats};
@@ -1330,18 +1330,24 @@ fn process_file<M: Matcher, W: Write>(
 	}
 	let fs = host.fs();
 	let result = if cli.search_zip && !cli.no_search_zip {
-		let builder = DecompressionReaderBuilder::new();
-		if !builder.get_matcher().has_command(path) {
+		if let Some(mut command) = DecompressionMatcher::new().command(path) {
+			if fs.is_native_local(path) {
+				command.arg(path);
+				host.prepare_child(&mut command)?;
+				match CommandReaderBuilder::new().build(&mut command) {
+					Ok(reader) => process_reader(matcher, searcher, reader, display, opts, stats, out),
+					// Preserve the decompression builder's passthrough when its
+					// external program cannot be spawned; no unplaced child is run.
+					Err(_) => fs.open(path)
+						.and_then(|file| process_reader(matcher, searcher, file, display, opts, stats, out)),
+				}
+			} else {
+				open_provider_decompression(host, command, path)
+					.and_then(|reader| process_reader(matcher, searcher, reader, display, opts, stats, out))
+			}
+		} else {
 			fs.open(path)
 				.and_then(|file| process_reader(matcher, searcher, file, display, opts, stats, out))
-		} else if fs.is_native_local(path) {
-			builder
-				.build(path)
-				.map_err(|error| io::Error::other(error.to_string()))
-				.and_then(|reader| process_reader(matcher, searcher, reader, display, opts, stats, out))
-		} else {
-			open_provider_decompression(&builder, fs, path)
-				.and_then(|reader| process_reader(matcher, searcher, reader, display, opts, stats, out))
 		}
 	} else {
 		fs.open(path)
@@ -1392,16 +1398,14 @@ impl Read for ProviderDecompression {
 /// decompressor's stdin. External decompressors cannot open virtual paths, so
 /// the path itself is never passed to the child process.
 fn open_provider_decompression(
-	builder: &DecompressionReaderBuilder,
-	fs: &pi_vfs::BlockingFs,
+	host: &Host,
+	mut command: std::process::Command,
 	path: &Path,
 ) -> io::Result<ProviderDecompression> {
-	let mut file = fs.open(path)?;
-	let Some(mut command) = builder.get_matcher().command(path) else {
-		return Ok(ProviderDecompression::Passthru(file));
-	};
+	let mut file = host.fs().open(path)?;
 	let (stdin, mut feed) = io::pipe()?;
 	command.stdin(stdin);
+	host.prepare_child(&mut command)?;
 	let reader = match CommandReader::new(&mut command) {
 		Ok(reader) => reader,
 		// Match `DecompressionReaderBuilder::build`: an unavailable decompressor

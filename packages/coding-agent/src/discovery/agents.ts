@@ -7,6 +7,7 @@
  */
 import * as path from "node:path";
 import { isWsl, windowsPathToWslMount } from "@oh-my-pi/pi-utils";
+import { wrapToolCommand } from "@oh-my-pi/pi-utils/tool-cgroup";
 import { registerProvider } from "../capability";
 import { type ContextFile, contextFileCapability } from "../capability/context-file";
 import { readFile } from "../capability/fs";
@@ -57,7 +58,7 @@ const HOST_PROBE_TIMEOUT_MS = 500;
  */
 export function runHostProbe(cmd: string[], timeoutMs = HOST_PROBE_TIMEOUT_MS): string | undefined {
 	try {
-		const result = Bun.spawnSync(cmd, {
+		const result = Bun.spawnSync(wrapToolCommand(cmd), {
 			stdout: "pipe",
 			stderr: "ignore",
 			timeout: timeoutMs,

@@ -1,5 +1,6 @@
 import { encodeSixel } from "@oh-my-pi/pi-natives";
 import { $env, isBunTestRuntime, isTerminalHeadless, isWsl } from "@oh-my-pi/pi-utils/env";
+import { wrapToolCommand } from "@oh-my-pi/pi-utils/tool-cgroup";
 import { sendDesktopNotification, shouldDeliverDesktopNotification } from "./desktop-notify";
 import {
 	detectKittyUnicodePlaceholdersSupport,
@@ -65,7 +66,7 @@ function sendCmuxNotification(message: string | TerminalNotification, env: NodeJ
 	const { title, body } = notificationTitleAndBody(message);
 	try {
 		const child = Bun.spawn({
-			cmd: ["cmux", "notify", "--surface", surfaceId, "--title", title, "--body", body],
+			cmd: wrapToolCommand(["cmux", "notify", "--surface", surfaceId, "--title", title, "--body", body]),
 			stdin: "ignore",
 			stdout: "ignore",
 			stderr: "ignore",
@@ -115,7 +116,7 @@ function sendHerdrNotification(message: string | TerminalNotification, env: Node
 		kinds.includes("ask") || kinds.includes("error") ? "request" : kinds.includes("completion") ? "done" : "none";
 	try {
 		const child = Bun.spawn({
-			cmd: ["herdr", "notification", "show", title, "--body", body, "--sound", sound],
+			cmd: wrapToolCommand(["herdr", "notification", "show", title, "--body", body, "--sound", sound]),
 			stdin: "ignore",
 			stdout: "ignore",
 			stderr: "ignore",

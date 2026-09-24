@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { wrapToolCommand } from "@oh-my-pi/pi-utils/tool-cgroup";
 import { dbPath } from "./config";
 
 export type SqlitePageSize = number | "os";
@@ -21,7 +22,7 @@ function isValidPageSize(size: number): boolean {
 function detectSystemPageSize(): number | undefined {
 	if (detectedSystemPageSize !== undefined) return detectedSystemPageSize ?? undefined;
 	try {
-		const proc = Bun.spawnSync(["getconf", "PAGE_SIZE"], { stdout: "pipe" });
+		const proc = Bun.spawnSync(wrapToolCommand(["getconf", "PAGE_SIZE"]), { stdout: "pipe" });
 		if (proc.exitCode === 0) {
 			const size = Number(proc.stdout.toString().trim());
 			if (isValidPageSize(size)) {

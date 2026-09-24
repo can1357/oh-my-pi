@@ -2524,6 +2524,8 @@ export interface PtyArgvStartOptions {
   cols?: number
   /** PTY row count. */
   rows?: number
+  /** Delegated Linux cgroup-v2 leaf for external child processes. */
+  workloadCgroup?: string
 }
 
 /** Result of a PTY command run. */
@@ -2557,6 +2559,8 @@ export interface PtyStartOptions {
    * Defaults to "sh" if not provided.
    */
   shell?: string
+  /** Delegated Linux cgroup-v2 leaf for external child processes. */
+  workloadCgroup?: string
 }
 
 /**
@@ -2684,6 +2688,8 @@ export interface ShellExecuteOptions {
   signal?: unknown
   /** Filesystem backing the command (native when absent). */
   filesystem?: ShellFilesystem
+  /** Delegated Linux cgroup-v2 leaf for external child processes. */
+  workloadCgroup?: string
 }
 
 /** Host filesystem injected into shell sessions. */
@@ -3013,6 +3019,8 @@ export interface ShellOptions {
   minimizer?: MinimizerOptions
   /** Filesystem backing every run of this session (native when absent). */
   filesystem?: ShellFilesystem
+  /** Delegated Linux cgroup-v2 leaf for external child processes. */
+  workloadCgroup?: string
 }
 
 /** Options for running a shell command. */

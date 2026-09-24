@@ -5,6 +5,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { $env, $which, Snowflake } from "@oh-my-pi/pi-utils";
+import { wrapToolCommand } from "@oh-my-pi/pi-utils/tool-cgroup";
 
 /**
  * Returns the user's preferred editor command, or a platform default.
@@ -72,7 +73,7 @@ export async function openInEditor(
 		const spawnCommand = resolveEditorSpawnCommand(editorCmd, tmpFile);
 		// Inherit the real pane pty so terminal editors (including emacsclient,
 		// which resolves the device via ttyname) render into the visible pane.
-		const child = Bun.spawn(spawnCommand.cmd, {
+		const child = Bun.spawn(wrapToolCommand(spawnCommand.cmd), {
 			stdin: "inherit",
 			stdout: "inherit",
 			stderr: "inherit",

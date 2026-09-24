@@ -70,25 +70,28 @@ impl From<MinimizerOptions> for minimizer::MinimizerOptions {
 #[napi(object, object_to_js = false)]
 pub struct ShellOptions {
 	/// Environment variables to apply once per session.
-	pub session_env:   Option<HashMap<String, String>>,
+	pub session_env:     Option<HashMap<String, String>>,
 	/// Optional snapshot file to source on session creation.
-	pub snapshot_path: Option<String>,
+	pub snapshot_path:   Option<String>,
 	/// Optional per-command output minimizer configuration.
-	pub minimizer:     Option<MinimizerOptions>,
+	pub minimizer:       Option<MinimizerOptions>,
 	/// Filesystem backing every run of this session (native when absent).
-	pub filesystem:    Option<ShellFilesystem>,
+	pub filesystem:      Option<ShellFilesystem>,
+	/// Delegated Linux cgroup-v2 leaf for external child processes.
+	pub workload_cgroup: Option<String>,
 }
 
 impl From<ShellOptions> for CoreShellOptions {
 	fn from(value: ShellOptions) -> Self {
 		Self {
-			session_env:   value.session_env,
-			snapshot_path: value.snapshot_path,
-			minimizer:     value.minimizer.map(Into::into),
-			filesystem:    value
+			session_env:     value.session_env,
+			snapshot_path:   value.snapshot_path,
+			minimizer:       value.minimizer.map(Into::into),
+			filesystem:      value
 				.filesystem
 				.map(ShellFilesystem::into_fs)
 				.unwrap_or_default(),
+			workload_cgroup: value.workload_cgroup,
 		}
 	}
 }
@@ -115,23 +118,25 @@ pub struct ShellRunOptions<'env> {
 #[napi(object, object_to_js = false)]
 pub struct ShellExecuteOptions<'env> {
 	/// Command string to execute in the shell.
-	pub command:       String,
+	pub command:         String,
 	/// Working directory for the command.
-	pub cwd:           Option<String>,
+	pub cwd:             Option<String>,
 	/// Environment variables to apply for this command only.
-	pub env:           Option<HashMap<String, String>>,
+	pub env:             Option<HashMap<String, String>>,
 	/// Environment variables to apply once per session.
-	pub session_env:   Option<HashMap<String, String>>,
+	pub session_env:     Option<HashMap<String, String>>,
 	/// Timeout in milliseconds before cancelling the command.
-	pub timeout_ms:    Option<u32>,
+	pub timeout_ms:      Option<u32>,
 	/// Optional snapshot file to source on session creation.
-	pub snapshot_path: Option<String>,
+	pub snapshot_path:   Option<String>,
 	/// Optional per-command output minimizer configuration.
-	pub minimizer:     Option<MinimizerOptions>,
+	pub minimizer:       Option<MinimizerOptions>,
 	/// Abort signal for cancelling the operation.
-	pub signal:        Option<Unknown<'env>>,
+	pub signal:          Option<Unknown<'env>>,
 	/// Filesystem backing the command (native when absent).
-	pub filesystem:    Option<ShellFilesystem>,
+	pub filesystem:      Option<ShellFilesystem>,
+	/// Delegated Linux cgroup-v2 leaf for external child processes.
+	pub workload_cgroup: Option<String>,
 }
 
 /// Telemetry for a single minimization.
@@ -284,17 +289,18 @@ pub fn execute_shell<'env>(
 ) -> Result<PromiseRaw<'env, ShellRunResult>> {
 	let cancel_token = task::CancelToken::new(options.timeout_ms, options.signal);
 	let exec_options = CoreShellExecuteOptions {
-		command:       options.command,
-		cwd:           options.cwd,
-		env:           options.env,
-		session_env:   options.session_env,
-		timeout_ms:    options.timeout_ms,
-		snapshot_path: options.snapshot_path,
-		minimizer:     options.minimizer.map(Into::into),
-		filesystem:    options
+		command:         options.command,
+		cwd:             options.cwd,
+		env:             options.env,
+		session_env:     options.session_env,
+		timeout_ms:      options.timeout_ms,
+		snapshot_path:   options.snapshot_path,
+		minimizer:       options.minimizer.map(Into::into),
+		filesystem:      options
 			.filesystem
 			.map(ShellFilesystem::into_fs)
 			.unwrap_or_default(),
+		workload_cgroup: options.workload_cgroup,
 	};
 	task::future(env, "shell.execute", async move {
 		let (chunk_tx, drain_handle) = bridge_chunks(on_chunk);

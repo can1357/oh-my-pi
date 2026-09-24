@@ -19,6 +19,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { $env, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { wrapToolCommand } from "@oh-my-pi/pi-utils/tool-cgroup";
 import * as AIError from "../error";
 import type { FetchImpl } from "../types";
 import { raceWithSignal } from "../utils/abort";
@@ -659,7 +660,7 @@ async function readCredentialProcess(
 	signal: AbortSignal | undefined,
 ): Promise<ResolvedCredentials> {
 	const argv = buildCredentialProcessArgv(profile, command);
-	const child = Bun.spawn(argv, {
+	const child = Bun.spawn(wrapToolCommand(argv), {
 		stdin: "ignore",
 		stdout: "pipe",
 		stderr: "pipe",

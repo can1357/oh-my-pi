@@ -2,6 +2,7 @@ import { BashInteractiveOverlayComponent } from "@oh-my-pi/pi-tui/tools/bash-int
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { type PtyRunResult, PtySession } from "@oh-my-pi/pi-natives";
+import { resolveToolCgroup } from "@oh-my-pi/pi-utils/tool-cgroup";
 import { loadXtermTerminal } from "@oh-my-pi/pi-tui/tools/terminal-output";
 import { Settings } from "../config/settings";
 import { OutputSink, type OutputSummary } from "@oh-my-pi/pi-tui/tools/streaming-output";
@@ -101,6 +102,7 @@ export async function runInteractiveBashPty(
 							command: options.command,
 							cwd: options.cwd,
 							timeoutMs: options.timeoutMs,
+							workloadCgroup: resolveToolCgroup(),
 							// Interactive PTY: inherit the user's environment (the Rust side
 							// applies these as overrides), with a real TERM so editors,
 							// pagers, and TUIs behave like a normal terminal.
