@@ -16,6 +16,7 @@
 - Added `cfg://` protocol for reading and modifying agent settings with user approval
 - Added `--detailed` bench mode to run separate single-user, parallel, and prefill phases, allowing measurement of aggregate throughput and scaling efficiency under `--par` concurrent requests
 - Added automatic capping of synthetic prefill input size based on model context window limits
+- `/session` now shows GitHub Copilot AI units separately from premium requests and credit meters ([#13197](https://github.com/can1357/oh-my-pi/pull/13197) by [@joslack](https://github.com/joslack)).
 - Added trusted additional context support for extension and hook tool results, including `ctx.addAdditionalContext()` for registered tools, allowing instructions to be passed to the model without altering the tool result.
 - Added dictation support to `/btw` follow-up input, including microphone controls on the follow-up line.
 - Added opt-in CUDA support to the Nix package for tiny-model inference with the ONNX Runtime CUDA execution provider.
