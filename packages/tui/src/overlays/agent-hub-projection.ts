@@ -158,9 +158,10 @@ export function aggregateMetrics<TRecord extends AgentRecordLike>(args: {
 	return { metrics: total, hasFallbackLiveSessions };
 }
 
-/** Parent-before-child projection preserving the roster's stable sibling order. */
+/** Parent-before-child projection preserving initial subtree rank and prepending new siblings. */
 export function projectAgentTree<TRecord extends AgentRecordLike>(
 	refs: readonly TRecord[],
+	rosterRank: ReadonlyMap<TRecord, number> | undefined,
 ): AgentTreeProjection<TRecord> {
 	const ids = new Set<string>();
 	const operationalIndex = new Map<string, number>();
@@ -193,7 +194,12 @@ export function projectAgentTree<TRecord extends AgentRecordLike>(
 			if (!current) continue;
 			if (current.expanded) {
 				let order = operationalIndex.get(current.ref.id) ?? Number.MAX_SAFE_INTEGER;
+				const parentRank = rosterRank?.get(current.ref);
 				for (const child of children.get(current.ref.id) ?? []) {
+					const childRank = rosterRank?.get(child);
+					// A child spawned later cannot move an existing parent's group.
+					if (parentRank !== undefined && childRank !== undefined && childRank < 0 && childRank < parentRank)
+						continue;
 					order = Math.min(order, subtreeOrder.get(child.id) ?? Number.MAX_SAFE_INTEGER);
 				}
 				subtreeOrder.set(current.ref.id, order);

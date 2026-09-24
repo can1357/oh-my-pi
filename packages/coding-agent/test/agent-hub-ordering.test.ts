@@ -1008,6 +1008,51 @@ describe("Agent hub row ordering", () => {
 		}
 	});
 
+	it("keeps existing tree groups in place when new roots and children arrive", () => {
+		vi.useFakeTimers();
+		geometry = stubStdoutGeometry(120);
+		geometry.setRows(50);
+		const agents = new AgentRegistry();
+		setSystemTime(1_000);
+		agents.register({ id: "P1", displayName: "Parent 1", kind: "sub", parentId: "Main", session: null });
+		setSystemTime(1_100);
+		agents.register({ id: "C0", displayName: "Old child", kind: "sub", parentId: "P1", session: null });
+		setSystemTime(2_000);
+		agents.register({ id: "P2", displayName: "Parent 2", kind: "sub", parentId: "Main", session: null });
+		const hub = makeHub(agents);
+
+		try {
+			hub.handleInput("t");
+			expect(renderedAgentIds(hub)).toEqual(["P2", "P1", "C0"]);
+			expect(selectedAgentId(hub)).toBe("P2");
+
+			setSystemTime(3_000);
+			agents.register({ id: "C1", displayName: "New child", kind: "sub", parentId: "P1", session: null });
+			setSystemTime(4_000);
+			agents.register({ id: "N", displayName: "New root", kind: "sub", parentId: "Main", session: null });
+			vi.advanceTimersByTime(100);
+
+			expect(renderedAgentIds(hub)).toEqual(["N", "P2", "P1", "C1", "C0"]);
+			expect(selectedAgentId(hub)).toBe("P2");
+			expect(Bun.stripANSI(renderedRosterHeaderLineRaw(hub, "C1", 120))).toContain("├──");
+			setSystemTime(5_000);
+			agents.register({ id: "M", displayName: "Newest root", kind: "sub", parentId: "Main", session: null });
+			vi.advanceTimersByTime(100);
+			setSystemTime(6_000);
+			agents.register({ id: "NC", displayName: "New root's child", kind: "sub", parentId: "N", session: null });
+			vi.advanceTimersByTime(100);
+			expect(renderedAgentIds(hub)).toEqual(["M", "N", "NC", "P2", "P1", "C1", "C0"]);
+			expect(selectedAgentId(hub)).toBe("P2");
+
+			hub.handleInput("t");
+			expect(renderedAgentIds(hub)).toEqual(["NC", "M", "N", "C1", "P2", "C0", "P1"]);
+		} finally {
+			hub.dispose();
+			vi.useRealTimers();
+			setSystemTime();
+		}
+	});
+
 	it("renders parent lineage with bash-style tree connectors", () => {
 		geometry = stubStdoutGeometry(120);
 		geometry.setRows(32);

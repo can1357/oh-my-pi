@@ -224,7 +224,6 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	/** Initial status/recency rank stays fixed while open; new generations
 	 *  prepend without changing the relative order of existing rows. */
 	#rowOrder: Map<TRecord, number> | undefined;
-	#nextRowOrder = 0;
 	#nextNewRowOrder = 0;
 	#hoveredRow: number | null = null;
 	/** Per-render screen-line to agent-row map, shared by click and hover routing. */
@@ -556,8 +555,9 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		if (!rowOrder) {
 			ordered = refs.sort(compareRosterAgents);
 			if (!this.#loadingPersistedSubagents && ordered.length > 0) {
-				this.#rowOrder = new Map();
-				for (const ref of ordered) this.#rowOrder.set(ref, this.#nextRowOrder++);
+				const rowOrder = new Map<TRecord, number>();
+				for (const [index, ref] of ordered.entries()) rowOrder.set(ref, index);
+				this.#rowOrder = rowOrder;
 			}
 		} else {
 			for (const rankedRef of rowOrder.keys()) {
@@ -575,9 +575,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 					rowOrder.set(newcomers[i]!, --this.#nextNewRowOrder);
 				}
 			}
-			ordered = refs.sort(
-				(a, b) => (rowOrder.get(a) ?? Number.MAX_SAFE_INTEGER) - (rowOrder.get(b) ?? Number.MAX_SAFE_INTEGER),
-			);
+			ordered = refs.sort((a, b) => rowOrder.get(a)! - rowOrder.get(b)!);
 		}
 		const query = this.#agentFilter.trim();
 		const rosterRows =
@@ -586,7 +584,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 				: ordered;
 
 		if (this.#viewMode === "tree") {
-			const tree = projectAgentTree(rosterRows);
+			const tree = projectAgentTree(rosterRows, rowOrder);
 			this.#rows = tree.rows;
 			this.#treeDepthById = tree.depthById;
 			this.#treeParentById = tree.parentById;

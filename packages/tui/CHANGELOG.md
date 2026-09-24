@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Agent Hub keeps existing agents in place while open; new agents appear first in the flat roster or within their tree sibling group.
+
 ## [18.3.0] - 2026-09-24
 
 ### Added

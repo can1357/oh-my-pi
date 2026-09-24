@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Agent Hub keeps existing agents in place while open; new agents appear first in the flat roster or within their tree sibling group.
+
 ## [18.3.0] - 2026-09-24
 
 ### Breaking Changes
@@ -36,7 +40,6 @@
 - Terminal OAuth behavior is now consistent between `omp login` and `omp auth-broker login`.
 - Judgment fallback now uses only native candidates, preventing prompted models from replacing failed native judges.
 - Browser screenshot comparisons now tolerate minor rasterizer differences.
-- Agent Hub keeps existing agents in their opening order as activity changes and places newly spawned agents at the top.
 
 ### Fixed
 
