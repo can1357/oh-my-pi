@@ -851,7 +851,7 @@ export class SessionTools {
 		// Skip the gate only on explicit yolo opt-in; honour per-tool policies
 		// that require a prompt or deny (matching the normal approval wrapper).
 		if (this.#isExplicitAutoApproveMode()) {
-			const userPolicies = (cfgToolsApproval.get(this.#host.settings) ?? {}) as Record<string, unknown>;
+			const userPolicies: Record<string, unknown> = cfgToolsApproval.get(this.#host.settings);
 			const toolPolicy = userPolicies[tool.name];
 			if (!toolPolicy || toolPolicy === "allow") return tool;
 		}
@@ -1560,7 +1560,7 @@ export class SessionTools {
 			const discovered = await loadSkills({
 				...skillsSettings,
 				cwd: this.#host.sessionManager.getCwd(),
-				disabledExtensions: cfgDisabledExtensions.get(this.#host.settings) ?? [],
+				disabledExtensions: cfgDisabledExtensions.get(this.#host.settings),
 				extensionRoots: this.#host.effectiveExtensionRoots(),
 			});
 			this.#skills = discovered.skills;

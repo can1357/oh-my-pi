@@ -294,7 +294,6 @@ import {
 	cfgSessionToolGates,
 } from "./tools/settings";
 import { cfgToolsFormat } from "./session/context-settings";
-import { cfgCompactionExperimentalContextManagement } from "./session/context-settings";
 import { cfgAutolearnEnabled } from "./autolearn/settings";
 import { cfgBrowserEnabled } from "./tools/browser/settings";
 import {
@@ -764,6 +763,12 @@ export interface CreateAgentSessionOptions {
 	 */
 	interactivePrompts?: boolean;
 	/**
+	 * The user approves agent `cfg://` settings writes through the process-global
+	 * host (`setCfgApprovalHost`). Only the top-level TUI session sets this; every
+	 * other session gets no `cfg://` in its prompt and has writes refused. Default: false.
+	 */
+	settingsApproval?: boolean;
+	/**
 	 * Defer `confirm` reserve-policy fallback until AgentSession prompt-time UI is configured.
 	 * ACP uses this while capabilities are negotiated without enabling UI-only tools.
 	 */
@@ -935,8 +940,8 @@ export async function discoverSessionExtensionPaths(
 	const explicitOnly = roots ? roots.mode === "explicit-only" : options.disableExtensionDiscovery;
 	const configuredPaths = explicitOnly
 		? [...explicit]
-		: [...explicit, ...(roots?.configured ?? cfgExtensions.get(settings) ?? [])];
-	const disabledExtensionIds = explicitOnly ? undefined : (cfgDisabledExtensions.get(settings) ?? []);
+		: [...explicit, ...(roots?.configured ?? cfgExtensions.get(settings))];
+	const disabledExtensionIds = explicitOnly ? undefined : cfgDisabledExtensions.get(settings);
 	return discoverExtensionPaths(configuredPaths, cwd, disabledExtensionIds, {
 		ambient: !explicitOnly,
 	});
@@ -1495,20 +1500,28 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		options.settingsManager ??
 		logger.time("settings", Settings.init, { cwd, agentDir }));
 	// Provider toggles are process-global and mirror live edits on the bound
-	// Settings: a subagent's isolated snapshot must not steal that binding from
+	// Settings: a subagent's settings overlay must not steal that binding from
 	// the top-level session (parent edits would stop reaching discovery).
-	if (!options.parentTaskPrefix) logger.time("initializeWithSettings", initializeWithSettings, settings);
+	const restoreProviderToggles = options.parentTaskPrefix
+		? undefined
+		: logger.time("initializeWithSettings", initializeWithSettings, settings);
 	// Process-wide setting effects (theme, credential redaction, request limits, …) follow one
 	// primary instance: `Settings.init` binds the global one; an SDK embedding without it binds its
 	// top-level session here. Subagents never rebind; teardown unbinds only what this session bound.
 	const unbindSessionEffects =
 		!options.parentTaskPrefix && !options.taskDepth && !effectsSettings() ? bindEffects(settings) : undefined;
+	// Until the session is handed back (its dispose wrapper then owns the effect binding and
+	// the credential listener), any startup failure below releases both and hands the
+	// provider toggles back to the settings bound before this call.
+	using startupCleanup = new DisposableStack();
+	if (restoreProviderToggles) startupCleanup.defer(restoreProviderToggles);
+	if (unbindSessionEffects) startupCleanup.defer(unbindSessionEffects);
 	// Snapshot this session's effective configured lane onto its invocation scope
 	// so startup sub-discovery sees the same complete policy that post-startup
 	// reloads and recursively spawned children consume.
 	const extensionRoots = options.extensionRoots?.();
 	setInvocationConfiguredExtensions(
-		extensionRoots?.configured ?? cfgExtensions.get(settings) ?? [],
+		extensionRoots?.configured ?? cfgExtensions.get(settings),
 		extensionRoots?.configuredLevel ?? settings.extensionsSourceLevel(),
 	);
 
@@ -1542,7 +1555,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	let credentialDisabledTarget: ExtensionRunner | undefined;
 	// Set once the session exists; the built-in warning covers disables from then on.
 	let credentialNoticeSession: AgentSession | undefined;
-	const unsubscribeCredentialDisabled: (() => void) | undefined = authStorage.credentials.onDisabled(event => {
+	const unsubscribeCredentialDisabled = authStorage.credentials.onDisabled(event => {
 		if (credentialNoticeSession) {
 			const notice = formatCredentialDisabledNotice(event);
 			if (notice) credentialNoticeSession.emitNotice("warning", notice, CREDENTIAL_DISABLED_NOTICE_SOURCE);
@@ -1554,6 +1567,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			startupCredentialDisabledEvents.push(event);
 		}
 	});
+	startupCleanup.defer(unsubscribeCredentialDisabled);
 	await logger.time("hydrateCredentialScopedModelCaches", () => modelRegistry.hydrateCredentialScopedModelCaches());
 	if (!options.modelRegistry) {
 		modelRegistry.refreshInBackground();
@@ -1622,7 +1636,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			: logger.time("discoverCustomCommands", loadCustomCommandsInternal, { cwd, agentDir });
 	customCommandsPromise.catch(() => {});
 	const skillsSettings = cfgSkills.get(settings);
-	const disabledExtensionIds = cfgDisabledExtensions.get(settings) ?? [];
+	const disabledExtensionIds = cfgDisabledExtensions.get(settings);
 	const discoveredSkillsPromise =
 		options.skills === undefined
 			? logger.time("discoverSkills", discoverSkills, cwd, agentDir, {
@@ -1947,7 +1961,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		!options.parentTaskPrefix && !AsyncJobManager.instance()
 			? new AsyncJobManager({
 					// Re-read per capacity check so `async.maxJobs` resizes the cap live.
-					maxRunningJobs: () => Math.min(100, cfgAsyncMaxJobs.get(settings) ?? 100),
+					maxRunningJobs: () => Math.min(100, cfgAsyncMaxJobs.get(settings)),
 				})
 			: undefined;
 
@@ -2005,6 +2019,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			toolRegistry,
 			hasUI: options.hasUI ?? false,
 			canPromptUser: options.interactivePrompts ?? options.hasUI ?? false,
+			settingsApproval: options.settingsApproval === true && !isSubagentSession,
 			// Explicit resolvers retain their existing pass-through contract. Ordinary
 			// sessions inherit stored affinity into the child's own provider session.
 			getApiKey: options.getApiKey,
@@ -2234,13 +2249,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			((): EffectiveExtensionRoots => ({
 				explicit: options.additionalExtensionPaths ?? [],
 				mode: options.disableExtensionDiscovery ? "explicit-only" : "merge",
-				configured: cfgExtensions.get(settings) ?? [],
+				configured: cfgExtensions.get(settings),
 				configuredLevel: settings.extensionsSourceLevel(),
 			}));
 		const mcpDiscoverOptions = {
 			onStatus: onMCPStatus,
 			startupTimeoutMs: cfgMcpStartupTimeoutMs.get(settings),
-			enableProjectConfig: cfgMcpEnableProjectConfig.get(settings) ?? true,
+			enableProjectConfig: cfgMcpEnableProjectConfig.get(settings),
 			// Always filter Exa - we have native integration
 			filterExa: true,
 			// Filter browser MCP only when Eval can expose the built-in browser prelude.
@@ -2265,7 +2280,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							const mcpResult = await logger.time("discoverAndLoadMCPTools", () =>
 								deferredMCPManager.discoverAndConnect({
 									...mcpDiscoverOptions,
-									enableProjectConfig: cfgMcpEnableProjectConfig.get(settings) ?? true,
+									enableProjectConfig: cfgMcpEnableProjectConfig.get(settings),
 								}),
 							);
 							// The session can be torn down while servers are still connecting.
@@ -3488,7 +3503,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				: initialActiveRepoContext;
 			if (hasSession && options.contextFiles === undefined) {
 				contextFiles = await logger.time("discoverContextFiles", discoverContextFiles, promptCwd, agentDir, [
-					...(cfgDisabledExtensions.get(settings) ?? []),
+					...cfgDisabledExtensions.get(settings),
 				]);
 				toolSession.contextFiles = contextFiles;
 				session.setAdvisorContextPrompt(formatAdvisorContextPrompt(contextFiles));
@@ -3618,7 +3633,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// namespace catalog; native tool calling lets the compact name list suffice.
 			const nativeTools = resolveDialect(cfgToolsFormat.get(settings), agent?.state.model ?? model) === undefined;
 			const inlineToolDescriptors = resolveInlineToolDescriptors();
-			const includeWorkspaceTree = cfgIncludeWorkspaceTree.get(settings) ?? false;
+			const includeWorkspaceTree = cfgIncludeWorkspaceTree.get(settings);
 			if (includeWorkspaceTree && !workspaceTreePromise) {
 				const scan = scanWorkspaceTree();
 				workspaceTreePromise = scan;
@@ -3663,10 +3678,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				eagerTasksAlways: cfgTaskEager.get(settings) === "always",
 				taskBatch: cfgTaskBatch.get(settings),
 				taskMaxConcurrency: cfgTaskMaxConcurrency.get(settings),
-				scoutAvailable: isScoutSpawnable(
-					cfgTaskDisabledAgents.get(settings) as string[] | undefined,
-					options.spawns ?? "*",
-				),
+				scoutAvailable: isScoutSpawnable(cfgTaskDisabledAgents.get(settings), options.spawns ?? "*"),
 				delegationBias: sessionDelegationBias(toolSession),
 				taskIrcEnabled: !restrictToolNames && isIrcEnabled(settings, options.taskDepth ?? 0),
 				autoQaEnabled: !restrictToolNames && isAutoQaEnabled(settings),
@@ -3677,7 +3689,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				includeWorkspaceTree,
 				memoryBackend: memoryBackend?.id,
 				securityEnabled: cfgSecurityEnabled.get(settings),
-				experimentalContextManagement: cfgCompactionExperimentalContextManagement.get(settings) === true,
+				settingsApproval: toolSession.settingsApproval === true,
 				browserEnabled: getEvalPreludes().some(definition => definition.name === "browser"),
 				computerEnabled: getEvalPreludes().some(definition => definition.name === "computer"),
 				model: getActiveModelString(),
@@ -4044,9 +4056,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			deadline: options.deadline,
 			transformContext,
 			transformProviderContext,
-			steeringMode: cfgSteeringMode.get(settings) ?? "one-at-a-time",
-			followUpMode: cfgFollowUpMode.get(settings) ?? "one-at-a-time",
-			interruptMode: cfgInterruptMode.get(settings) ?? "immediate",
+			steeringMode: cfgSteeringMode.get(settings),
+			followUpMode: cfgFollowUpMode.get(settings),
+			interruptMode: cfgInterruptMode.get(settings),
 			...cfgSampling.get(settings),
 			getToolContext: tc => toolContextStore.getContext(tc),
 			getApiKey: effectiveGetApiKey,
@@ -4660,7 +4672,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					await originalDispose();
 				} finally {
 					unregisterUnlessParked();
-					unsubscribeCredentialDisabled?.();
+					unsubscribeCredentialDisabled();
 					unbindSessionEffects?.();
 					unsubscribeMcpNotifications?.();
 					unregisterMcpPostmortem?.();
@@ -4963,7 +4975,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			const ownedMCPManager = mcpManager;
 			const owningSession = session;
 			cfgMcpEnableProjectConfig.listen(owningSession, async enabled => {
-				await ownedMCPManager.reconcileProjectConfig(enabled ?? true);
+				if (owningSession.isDisposed) return;
+				await ownedMCPManager.reconcileProjectConfig(enabled);
 				if (owningSession.isDisposed) return;
 				await owningSession.refreshMCPTools(ownedMCPManager.getTools());
 			});
@@ -4984,6 +4997,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			logger.warn("Code Mode initialization at session startup failed", { error: String(error) });
 		}
 
+		startupCleanup.move();
 		return {
 			session,
 			extensionsResult,
@@ -4996,11 +5010,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			subagentEventBus,
 		};
 	} catch (error) {
-		// Release the subscription if the throw happened after install but before the
-		// dispose-wrap took ownership. Idempotent with dispose() — Set.delete is a no-op
-		// for already-removed listeners.
-		unsubscribeCredentialDisabled?.();
-		unbindSessionEffects?.();
 		try {
 			if (hasSession) {
 				await session.dispose();

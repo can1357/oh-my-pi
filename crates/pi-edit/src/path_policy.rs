@@ -1,11 +1,13 @@
 //! Path resolution and write authorization for edit targets.
 //!
 //! Plain paths resolve against the session `cwd`/`home_dir`. Internal URLs
-//! (any `scheme://` registered in [`PathPolicy::url_schemes`]) are opaque
-//! here: their backing files come from host answers ([`UrlResolution`])
-//! keyed by the authored URL.
+//! (any `scheme://` registered in [`PathPolicy::url_schemes`], or its
+//! single-slash `scheme:/` spelling) are opaque here: their backing files
+//! come from host answers ([`UrlResolution`]) keyed by the canonical
+//! `scheme://` URL.
 
 use std::{
+	borrow::Cow,
 	collections::HashMap,
 	path::{Component, Path, PathBuf},
 	time::{Duration, Instant},
@@ -49,9 +51,10 @@ pub struct PathPolicy {
 impl PathPolicy {
 	/// The internal URL `authored` names: the hashline-header-unwrapped
 	/// target (minus one leading `@` mention marker) when it starts with a
-	/// registered `scheme://` (case-insensitive). This is the resolution
-	/// table key and the URL handed to the host.
-	pub fn url_target<'a>(&self, authored: &'a str) -> Option<&'a str> {
+	/// registered `scheme://` (case-insensitive), with the single-slash
+	/// `scheme:/x` spelling rewritten to `scheme://x`. This is the
+	/// resolution table key and the URL handed to the host.
+	pub fn url_target<'a>(&self, authored: &'a str) -> Option<Cow<'a, str>> {
 		self.url_key(unwrap_hashline_header_path(authored))
 	}
 
@@ -77,8 +80,8 @@ impl PathPolicy {
 		let absolute = match self.url_key(&display) {
 			Some(url) => {
 				let resolution = urls
-					.get(url)
-					.ok_or_else(|| EditError::UnresolvedUrl(url.to_owned()))?;
+					.get(url.as_ref())
+					.ok_or_else(|| EditError::UnresolvedUrl(url.as_ref().to_owned()))?;
 				if let Some(error) = &resolution.error {
 					return Err(EditError::apply(error.clone()));
 				}
@@ -93,28 +96,31 @@ impl PathPolicy {
 	}
 
 	/// [`Self::url_target`] for an already-unwrapped display path.
-	fn url_key<'a>(&self, display: &'a str) -> Option<&'a str> {
+	fn url_key<'a>(&self, display: &'a str) -> Option<Cow<'a, str>> {
 		let url = display.strip_prefix('@').unwrap_or(display);
-		let (scheme, _) = url.split_once("://")?;
-		self
+		let (scheme, rest) = url.split_once(':')?;
+		if !self
 			.url_schemes
 			.iter()
 			.any(|known| known.eq_ignore_ascii_case(scheme))
-			.then_some(url)
+		{
+			return None;
+		}
+		if rest.starts_with("//") {
+			return Some(Cow::Borrowed(url));
+		}
+		let path = rest.strip_prefix('/')?;
+		Some(Cow::Owned(format!("{scheme}://{path}")))
 	}
 
-	/// Resolve a filesystem path (never a URL) against `cwd` and `home_dir`.
+	/// Resolve a filesystem path (never a URL) against `cwd` and `home_dir`,
+	/// lexically normalized so the path written is the path plan mode judged.
 	fn resolve_path(&self, display: &str) -> PathBuf {
 		let expanded = expand_path(display, &self.home_dir);
 		if expanded.chars().all(|c| c == '/') {
 			return self.cwd.clone();
 		}
-		let path = PathBuf::from(strip_windows_verbatim(&expanded));
-		if path.is_absolute() {
-			path
-		} else {
-			lexical_normalize(&self.cwd.join(path))
-		}
+		lexical_absolute(Path::new(&expanded), &self.cwd)
 	}
 
 	/// Locate a missing authored path by unique trailing-suffix match under
@@ -182,7 +188,7 @@ impl PathPolicy {
 		let display = unwrap_hashline_header_path(display);
 		let writable = match self.url_key(display) {
 			Some(url) => urls
-				.get(url)
+				.get(url.as_ref())
 				.is_some_and(|resolution| resolution.plan_writable),
 			None => self.in_plan_writable_root(&self.resolve_path(display)),
 		};
@@ -196,14 +202,17 @@ impl PathPolicy {
 		))
 	}
 
-	/// True when `absolute` lies inside one of [`Self::plan_writable_roots`],
-	/// lexically or after resolving symlinks in the root or the parent.
-	pub fn in_plan_writable_root(&self, absolute: &Path) -> bool {
-		let absolute = lexical_absolute(absolute, &self.cwd);
-		self
-			.plan_writable_roots
-			.iter()
-			.any(|root| within_root(&absolute, &lexical_absolute(root, &self.cwd)))
+	/// True when `absolute` physically lies inside one of
+	/// [`Self::plan_writable_roots`]: both sides are compared by
+	/// [`physical_path`], so a symlink under a root cannot lead outside it.
+	fn in_plan_writable_root(&self, absolute: &Path) -> bool {
+		let Some(target) = physical_path(&lexical_absolute(absolute, &self.cwd)) else {
+			return false;
+		};
+		self.plan_writable_roots.iter().any(|root| {
+			physical_path(&lexical_absolute(root, &self.cwd))
+				.is_some_and(|root| is_within(&target, &root))
+		})
 	}
 
 	/// Whether hashline tag recovery may rebind `authored` onto `recovered`.
@@ -269,26 +278,26 @@ pub fn canonical_key(absolute: &Path) -> PathBuf {
 	strip_windows_verbatim_path(resolved)
 }
 
-/// `absolute` (lexically absolute) lies inside `root` (lexically absolute),
-/// directly or once symlinks in `root` or in `absolute`'s parent resolve.
-fn within_root(absolute: &Path, root: &Path) -> bool {
-	if is_within(absolute, root) {
-		return true;
+/// Where `path` (lexically absolute and normalized) physically lands: its
+/// deepest existing ancestor canonicalized (symlinks resolved, verbatim
+/// prefix stripped) with the missing tail re-appended. `None` when a missing
+/// tail component is a dangling symlink (or otherwise unresolvable entry),
+/// whose destination cannot be judged.
+fn physical_path(path: &Path) -> Option<PathBuf> {
+	let mut existing = path;
+	let mut tail = Vec::new();
+	loop {
+		if let Ok(real) = std::fs::canonicalize(existing) {
+			let mut real = strip_windows_verbatim_path(real);
+			real.extend(tail.iter().rev());
+			return Some(real);
+		}
+		if std::fs::symlink_metadata(existing).is_ok() {
+			return None;
+		}
+		tail.push(existing.file_name()?);
+		existing = existing.parent()?;
 	}
-	let Ok(real_root) = std::fs::canonicalize(root) else {
-		return false;
-	};
-	if is_within(absolute, &real_root) {
-		return true;
-	}
-	let Some(parent) = absolute.parent() else {
-		return false;
-	};
-	let Some(name) = absolute.file_name() else {
-		return false;
-	};
-	std::fs::canonicalize(parent)
-		.is_ok_and(|real_parent| is_within(&real_parent.join(name), &real_root))
 }
 
 fn expand_path(value: &str, home: &Path) -> String {
@@ -336,8 +345,9 @@ fn expand_path(value: &str, home: &Path) -> String {
 	{
 		value = percent_decode(value.get(7..).unwrap_or_default()).unwrap_or(value);
 	}
-	if value.starts_with(r"\\?\") {
-		value.drain(..4);
+	let stripped = strip_windows_verbatim(&value);
+	if stripped.len() != value.len() {
+		value = stripped.into_owned();
 	}
 	if value == "~" {
 		return home.to_string_lossy().into_owned();
@@ -362,12 +372,29 @@ fn is_windows_drive(value: &str) -> bool {
 		&& value.as_bytes().get(1) == Some(&b':')
 }
 
-fn strip_windows_verbatim(value: &str) -> &str {
-	value.strip_prefix(r"\\?\").unwrap_or(value)
+/// Drop a Windows verbatim prefix: `\\?\UNC\server\share…` →
+/// `\\server\share…`, `\\?\C:\…` → `C:\…`; anything else is unchanged.
+fn strip_windows_verbatim(value: &str) -> Cow<'_, str> {
+	const UNC: &str = r"\\?\UNC\";
+	if value
+		.get(..UNC.len())
+		.is_some_and(|prefix| prefix.eq_ignore_ascii_case(UNC))
+	{
+		let rest = &value[UNC.len()..];
+		return Cow::Owned(format!(r"\\{rest}"));
+	}
+	Cow::Borrowed(value.strip_prefix(r"\\?\").unwrap_or(value))
 }
 
+/// [`strip_windows_verbatim`] for a path; paths without the prefix are
+/// returned as-is (never round-tripped through lossy UTF-8).
 fn strip_windows_verbatim_path(path: PathBuf) -> PathBuf {
-	PathBuf::from(strip_windows_verbatim(&path.to_string_lossy()))
+	let stripped = {
+		let text = path.to_string_lossy();
+		let stripped = strip_windows_verbatim(&text);
+		(stripped.len() != text.len()).then(|| PathBuf::from(stripped.as_ref()))
+	};
+	stripped.unwrap_or(path)
 }
 
 fn percent_decode(value: &str) -> Result<String, String> {
@@ -591,13 +618,85 @@ mod tests {
 			p.resolve("file:///tmp/a%20b", &urls).unwrap().absolute,
 			PathBuf::from("/tmp/a b")
 		);
-		// Unregistered schemes and the single-slash spelling are plain paths.
+		// Unregistered schemes and scheme-colon names without a slash are plain
+		// paths.
 		assert_eq!(p.resolve("other://x", &urls).unwrap().absolute, tmp.path().join("other:/x"));
-		assert_eq!(p.resolve("sbx:/x", &urls).unwrap().absolute, tmp.path().join("sbx:/x"));
+		assert_eq!(p.resolve("sbx:x", &urls).unwrap().absolute, tmp.path().join("sbx:x"));
 		assert!(matches!(
 			p.resolve("[@SBX://x.md#AB12]", &urls),
 			Err(EditError::UnresolvedUrl(url)) if url == "SBX://x.md"
 		));
+	}
+
+	#[test]
+	fn single_slash_urls_resolve_through_the_host_never_the_working_tree() {
+		let tmp = tempfile::tempdir().unwrap();
+		let p = policy(tmp.path());
+		let urls = HashMap::new();
+		// `sbx:/../x` must reach the host (which refuses traversal) instead of
+		// lexically collapsing to `<cwd>/x`.
+		for (authored, url) in [
+			("sbx:/notes.md", "sbx://notes.md"),
+			("@SBX:/notes.md", "SBX://notes.md"),
+			("[sbx:/notes.md#AB12]", "sbx://notes.md"),
+			("sbx:/../src/main.rs", "sbx://../src/main.rs"),
+		] {
+			assert!(
+				matches!(p.resolve(authored, &urls), Err(EditError::UnresolvedUrl(missed)) if missed == url),
+				"{authored}"
+			);
+		}
+		let backing = tmp.path().join("sandbox/notes.md");
+		let urls =
+			HashMap::from([("sbx://notes.md".to_owned(), answer(Some(backing.clone()), None, true))]);
+		assert_eq!(p.resolve("sbx:/notes.md", &urls).unwrap().absolute, backing);
+		let mut plan = p;
+		plan.plan_active = true;
+		assert!(
+			plan
+				.enforce_write("sbx:/notes.md", FileOp::Create, None, &urls)
+				.is_ok()
+		);
+	}
+
+	#[test]
+	fn strips_windows_verbatim_prefixes() {
+		assert_eq!(strip_windows_verbatim(r"\\?\C:\work\a.rs"), r"C:\work\a.rs");
+		assert_eq!(strip_windows_verbatim(r"\\?\UNC\server\share\a.rs"), r"\\server\share\a.rs");
+		assert_eq!(strip_windows_verbatim(r"\\?\unc\server\share"), r"\\server\share");
+		assert_eq!(strip_windows_verbatim(r"\\server\share"), r"\\server\share");
+		assert_eq!(expand_path(r"\\?\UNC\server\share\a.rs", Path::new("")), r"\\server\share\a.rs");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn plan_mode_judges_where_the_write_physically_lands() {
+		let tmp = tempfile::tempdir().unwrap();
+		let sandbox = tmp.path().join("sandbox");
+		let outside = tmp.path().join("outside");
+		std::fs::create_dir_all(&sandbox).unwrap();
+		std::fs::create_dir_all(&outside).unwrap();
+		std::os::unix::fs::symlink(&outside, sandbox.join("link")).unwrap();
+		std::os::unix::fs::symlink(outside.join("victim.txt"), sandbox.join("dangling")).unwrap();
+		let mut p = policy(tmp.path());
+		p.plan_active = true;
+		let urls = HashMap::new();
+		let refused = |target: PathBuf| {
+			p.enforce_write(target.to_str().unwrap(), FileOp::Create, None, &urls)
+				.is_err()
+		};
+		assert!(refused(sandbox.join("link/escape.txt")));
+		assert!(refused(sandbox.join("link/new-dir/escape.txt")));
+		assert!(refused(sandbox.join("dangling")));
+		assert!(!refused(sandbox.join("nested/new/plan.md")));
+		// `link/..` is lexical: it names `sandbox/plan.md`, and that is the
+		// path the writer receives.
+		let dotted = sandbox.join("link/../plan.md");
+		assert!(!refused(dotted.clone()));
+		assert_eq!(
+			p.resolve(dotted.to_str().unwrap(), &urls).unwrap().absolute,
+			sandbox.join("plan.md")
+		);
 	}
 
 	#[test]

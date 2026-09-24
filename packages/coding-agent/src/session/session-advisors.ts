@@ -764,7 +764,7 @@ export class SessionAdvisors {
 	// Advisor runtime lifecycle
 	// -------------------------------------------------------------------------
 	#advisorImmuneTurnLimit(): number {
-		const immuneTurns = cfgAdvisorImmuneTurns.get(this.#host.settings) as number;
+		const immuneTurns = cfgAdvisorImmuneTurns.get(this.#host.settings);
 		if (!Number.isFinite(immuneTurns) || immuneTurns <= 0) return 0;
 		return Math.trunc(immuneTurns);
 	}

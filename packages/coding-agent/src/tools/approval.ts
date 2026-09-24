@@ -95,7 +95,8 @@ export interface ResolvedApproval {
 const POLICY_VALUES: ReadonlySet<ApprovalPolicy> = new Set(["allow", "deny", "prompt"]);
 const TIER_VALUES: ReadonlySet<ToolTier> = new Set(["read", "write", "exec"]);
 
-const TIER_RANK: Record<ToolTier, number> = {
+/** Ordering of capability tiers, least to most privileged. */
+export const TIER_RANK: Readonly<Record<ToolTier, number>> = {
 	read: 0,
 	write: 1,
 	exec: 2,

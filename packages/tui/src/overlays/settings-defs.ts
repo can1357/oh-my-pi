@@ -132,6 +132,8 @@ export interface SettingsHost {
 	entries: readonly SettingsDisplayEntry[];
 	get(path: string): unknown;
 	set(path: string, value: unknown): void;
+	/** Removes the persisted value so the default (or an environment fallback) applies again. */
+	unset(path: string): void;
 	normalizeProviderLimits(value: unknown): Record<string, number>;
 	validateProviderLimits(value: unknown): Record<string, number>;
 }

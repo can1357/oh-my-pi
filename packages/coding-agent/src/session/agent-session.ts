@@ -226,7 +226,6 @@ import {
 } from "../tools/browser/tab-supervisor";
 import type { CheckpointState, CompletedRewindState } from "../tools/checkpoint";
 import { releaseComputerSessionsForOwner } from "../tools/computer/supervisor";
-import { normalizeLocalScheme } from "../internal-urls/parse";
 import { isAutoQaEnabled } from "../tools/report-tool-issue";
 import {
 	buildResolveReminderMessage,
@@ -1399,7 +1398,7 @@ export class AgentSession implements SettingsScope {
 			(() => ({
 				explicit: config.additionalExtensionPaths ?? [],
 				mode: config.disableExtensionDiscovery ? "explicit-only" : "merge",
-				configured: cfgExtensions.get(this.settings) ?? [],
+				configured: cfgExtensions.get(this.settings),
 				configuredLevel: this.settings.extensionsSourceLevel(),
 			}));
 		this.#preparedExtensions = config.preparedExtensions;
@@ -2223,19 +2222,17 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * Applies session-level settings (queue modes, thinking, sampling, service
-	 * tiers, advisors, think tool, skillful) to the live session whenever they
-	 * change. Setters that persist route back here idempotently.
+	 * Applies session-level settings (queue modes, sampling, service tiers,
+	 * advisors, think tool, skillful) to the live session whenever they change.
+	 * Setters that persist route back here idempotently. `defaultThinkingLevel`
+	 * is deliberately absent: it seeds new sessions, and a later write (config
+	 * reload, another process, a parent session) must not override a running
+	 * session's selection — the settings panel and `cfg://` apply it explicitly.
 	 */
 	#watchSessionSettings(): void {
 		cfgSteeringMode.listen(this, mode => this.agent.setSteeringMode(mode));
 		cfgFollowUpMode.listen(this, mode => this.agent.setFollowUpMode(mode));
 		cfgInterruptMode.listen(this, mode => this.agent.setInterruptMode(mode));
-		cfgDefaultThinkingLevel.listen(this, configured => {
-			const level = parseConfiguredThinkingLevel(configured);
-			if (level === undefined || level === this.configuredThinkingLevel()) return;
-			this.setThinkingLevel(level);
-		});
 		cfgSampling.listen(this, sampling => {
 			this.agent.temperature = sampling.temperature;
 			this.agent.topP = sampling.topP;
@@ -4424,7 +4421,7 @@ export class AgentSession implements SettingsScope {
 		// call never reaches extensions. Deny is mode-independent (tool decision
 		// or user policy), so resolving under the most permissive mode is exact;
 		// the wrapper still enforces the mode-accurate gate before execution.
-		const userPolicies = (cfgToolsApproval.get(this.settings) ?? {}) as Record<string, unknown>;
+		const userPolicies: Record<string, unknown> = cfgToolsApproval.get(this.settings);
 		const approvalArgs = computer ? { actions: computer.actions } : ctx.args;
 		if (resolveApproval(ctx.tool, approvalArgs, "yolo", userPolicies).policy === "deny") {
 			return undefined;
@@ -4936,8 +4933,10 @@ export class AgentSession implements SettingsScope {
 
 	/**
 	 * Synchronously mark the session as disposing so new work is rejected
-	 * immediately: eval starts throw, queued asides are dropped, and the
-	 * aside provider is detached. Idempotent; `dispose()` runs it first.
+	 * immediately: eval starts throw, queued asides are dropped, the aside
+	 * provider is detached, and settings listeners bound to the session stop
+	 * (a config reload mid-teardown must not reconnect or re-steer anything).
+	 * Idempotent; `dispose()` runs it first.
 	 *
 	 * Wrappers that await other teardown before delegating to `dispose()` MUST
 	 * call this before their first await — otherwise work started in that async
@@ -4945,6 +4944,7 @@ export class AgentSession implements SettingsScope {
 	 */
 	beginDispose(): void {
 		this.#isDisposed = true;
+		for (const dispose of this.#disposers.splice(0)) dispose();
 		this.#modelDiscoveryAbortController.abort();
 		this.#queuedMessageDrainBlocked = false;
 		this.#usagePreflightReadyForNextModelCall = false;
@@ -5178,6 +5178,7 @@ export class AgentSession implements SettingsScope {
 		this.setHindsightSessionState(undefined);
 		hindsightState?.dispose();
 		this.#disconnectFromAgent();
+		// beginDispose() drained the rest; this catches registrations made during teardown.
 		for (const dispose of this.#disposers.splice(0)) dispose();
 		this.#eventListeners = [];
 		this.#runStateListeners.clear();
@@ -6387,8 +6388,7 @@ export class AgentSession implements SettingsScope {
 	}
 
 	#isScoutAvailable(): boolean {
-		const disabledAgents = cfgTaskDisabledAgents.get(this.settings) as string[] | undefined;
-		return this.#scoutAllowedBySpawnPolicy && !disabledAgents?.includes("scout");
+		return this.#scoutAllowedBySpawnPolicy && !cfgTaskDisabledAgents.get(this.settings).includes("scout");
 	}
 
 	async #buildPlanModeMessage(): Promise<CustomMessage | null> {
@@ -6399,8 +6399,7 @@ export class AgentSession implements SettingsScope {
 		const resolvedPlanPath = resolvePlanFilePath(state.planFilePath, planPathOptions);
 		const resolvedSessionPlan = resolvePlanFilePath(sessionPlanUrl, planPathOptions);
 		const displayPlanPath =
-			InternalUrlRouter.instance().canHandle(normalizeLocalScheme(state.planFilePath)) ||
-			resolvedPlanPath !== resolvedSessionPlan
+			InternalUrlRouter.instance().canHandle(state.planFilePath) || resolvedPlanPath !== resolvedSessionPlan
 				? state.planFilePath
 				: sessionPlanUrl;
 
@@ -9420,7 +9419,7 @@ export class AgentSession implements SettingsScope {
 	 * manager as needed. Called on model switch AND setting change.
 	 */
 	#syncAppendOnlyContext(model: Model | null | undefined): void {
-		const setting = cfgProviderAppendOnlyContext.get(this.settings) ?? "auto";
+		const setting = cfgProviderAppendOnlyContext.get(this.settings);
 		const enable = shouldEnableAppendOnlyContext(setting, model);
 		const providerId = model?.provider;
 		const prev = this.#lastAppendOnlyResolution;

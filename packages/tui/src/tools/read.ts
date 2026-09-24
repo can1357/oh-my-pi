@@ -245,7 +245,6 @@ function readUrlCard(rawPath: string, details?: ReadToolDetails): { card: ReadUr
 	return { card: READ_URL_CARDS[url.scheme], target };
 }
 
-const INTERNAL_URL_LIKE_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
 // A scheme-less host followed by a slash can be a web target. Do not force a
 // file: link onto it; explicit relative paths (./host/path) remain filesystem paths.
 const BARE_WEB_HOST_RE = /^(?:(?:[a-z][a-z0-9-]*|\[[0-9a-f:]+\])(?::\d+)|(?:[a-z0-9-]+\.)+[a-z0-9-]+(?::\d+)?)\//i;
@@ -262,7 +261,7 @@ export function pendingFileLinkPath(inputPath: string): string {
 }
 
 function splitReadRenderPath(rawPath: string): { path: string; sel?: string } {
-	if (INTERNAL_URL_LIKE_RE.test(rawPath)) {
+	if (splitUrlScheme(rawPath)) {
 		const internal = splitInternalUrlSel(rawPath);
 		if (internal.sel) return internal;
 	}
@@ -304,7 +303,7 @@ function formatReadPathLink(
 	// protocol resources as plain text, but resolve direct relative file paths
 	// so terminals receive an explicit file: link rather than guessing HTTPS.
 	const inputPath =
-		basePath && !INTERNAL_URL_LIKE_RE.test(basePath) && !BARE_WEB_HOST_RE.test(basePath)
+		basePath && !splitUrlScheme(basePath) && !BARE_WEB_HOST_RE.test(basePath)
 			? pendingFileLinkPath(basePath)
 			: undefined;
 	const target = options.resolvedPath ?? options.sourcePath ?? inputPath;

@@ -12,6 +12,7 @@ import { MEMORY_BACKEND_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/memory-back
 import { computeMnemopiBankScope } from "@oh-my-pi/pi-coding-agent/mnemopi/config";
 import { getMnemopiSessionState } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
@@ -60,6 +61,8 @@ describe("AgentSession memory backend lifecycle", () => {
 		session = undefined;
 		resetMemoryForTests();
 		authStorage.close();
+		// `Settings.loadIsolated` opens agent.db under tempDir; close it before the directory goes away.
+		AgentStorage.close();
 		tempDir.removeSync();
 	});
 

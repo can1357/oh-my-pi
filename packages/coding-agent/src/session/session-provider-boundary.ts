@@ -10,7 +10,6 @@ import type { ModelRegistry } from "../config/model-registry";
 import { formatModelString } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import { InternalUrlRouter, type LocalProtocolOptions } from "../internal-urls";
-import { normalizeLocalScheme } from "../internal-urls/parse";
 import { deobfuscateSessionContext, obfuscateMessages } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import { stripPendingSecretPlaceholderSuffix } from "../secrets/placeholder";
@@ -82,9 +81,8 @@ export class SessionProviderBoundary {
 				try {
 					if (source) {
 						const router = InternalUrlRouter.instance();
-						const url = normalizeLocalScheme(source);
-						if (!router.canHandle(url)) return [{ label, uri, image, sourcePath: source }];
-						const sourcePath = router.locateSync(url, {
+						if (!router.canHandle(source)) return [{ label, uri, image, sourcePath: source }];
+						const sourcePath = router.locateSync(source, {
 							localProtocolOptions: this.#host.localProtocolOptions(),
 						});
 						if (sourcePath === undefined) throw new Error(`No local file backs ${source}`);

@@ -10,9 +10,10 @@ import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse"
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 import { cfgAdvisorEnabled, cfgAdvisorSyncBacklog } from "@oh-my-pi/pi-coding-agent/advisor/settings";
+import { cfgEditFuzzyMatch } from "@oh-my-pi/pi-coding-agent/edit/settings";
 
 function sessionWith(settings: Settings, caller: Partial<ToolSession> = {}): ToolSession {
-	return { settings, hasUI: true, taskDepth: 0, ...caller } as unknown as ToolSession;
+	return { settings, hasUI: true, settingsApproval: true, taskDepth: 0, ...caller } as unknown as ToolSession;
 }
 
 const handler = new CfgProtocolHandler();
@@ -62,7 +63,7 @@ describe("CfgProtocolHandler", () => {
 		await expect(write("cfg://advisor/enabled", "true", settings, { taskDepth: 1 })).rejects.toThrow(
 			"Subagents cannot change settings",
 		);
-		await expect(write("cfg://advisor/enabled/save", "true", settings, { hasUI: false })).rejects.toThrow(
+		await expect(write("cfg://advisor/enabled/save", "true", settings, { settingsApproval: false })).rejects.toThrow(
 			"no interactive UI",
 		);
 		expect(asked).toEqual([]);
@@ -98,6 +99,24 @@ describe("CfgProtocolHandler", () => {
 			{ path: "advisor.enabled", previous: "false", value: "true", save: false },
 			{ path: "advisor.enabled", previous: "false", value: "true", save: false },
 		]);
+	});
+
+	it("reports a session change an environment variable still overrides", async () => {
+		const settings = Settings.isolated();
+		setCfgApprovalHost({ approve: async () => true, applied: () => {}, persistentSettings: Settings.isolated() });
+		const previous = Bun.env.PI_EDIT_FUZZY;
+		Bun.env.PI_EDIT_FUZZY = "1";
+		try {
+			const result = await write("cfg://edit/fuzzyMatch", "false", settings);
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+			expect(result.details?.cfg).toMatchObject({ outcome: "applied", effective: "true" });
+			expect(text).toContain("Effective value is still true");
+			expect(text).not.toContain("/save");
+			expect(cfgEditFuzzyMatch.get(settings)).toBe(true);
+		} finally {
+			if (previous === undefined) delete Bun.env.PI_EDIT_FUZZY;
+			else Bun.env.PI_EDIT_FUZZY = previous;
+		}
 	});
 
 	it("persists /save writes to the host settings and mirrors them into a separate session instance", async () => {

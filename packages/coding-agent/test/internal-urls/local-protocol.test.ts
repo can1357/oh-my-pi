@@ -147,6 +147,31 @@ describe("LocalProtocolHandler", () => {
 		});
 	});
 
+	it("refuses write targets reaching outside the local root through missing dirs or dangling symlinks", async () => {
+		if (process.platform === "win32") return;
+
+		await withTempDir(async tempDir => {
+			const localRoot = path.join(tempDir, "local");
+			const outsideDir = path.join(tempDir, "outside");
+			await fs.mkdir(localRoot, { recursive: true });
+			await fs.mkdir(outsideDir, { recursive: true });
+			await fs.symlink(outsideDir, path.join(localRoot, "link"));
+			await fs.symlink(path.join(outsideDir, "victim.txt"), path.join(localRoot, "dangling"));
+			const context = { localProtocolOptions: { getArtifactsDir: () => tempDir } };
+			const router = InternalUrlRouter.instance();
+
+			await expect(router.locate("local://link/newdir/f", context, { create: true })).rejects.toThrow(
+				"local:// URL escapes local root",
+			);
+			await expect(router.locate("local://dangling", context, { create: true })).rejects.toThrow(
+				"local:// URL goes through a dangling symlink",
+			);
+			expect(await router.locate("local://fresh/dir/f", context, { create: true })).toBe(
+				path.join(localRoot, "fresh", "dir", "f"),
+			);
+		});
+	});
+
 	it("prefers caller-supplied context.localProtocolOptions over the installed override", async () => {
 		await withTempDir(async tempDir => {
 			const overrideArtifactsDir = path.join(tempDir, "override-artifacts");

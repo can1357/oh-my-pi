@@ -1,9 +1,10 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import {
+	HistoryProtocolHandler,
 	type InternalResource,
 	type InternalUrl,
 	InternalUrlRouter,
@@ -12,8 +13,10 @@ import {
 	type ResolveContext,
 	resolveLocalUrlToPath,
 	type SchemeSpec,
+	VaultProtocolHandler,
 } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { UrlContainmentError } from "@oh-my-pi/pi-coding-agent/internal-urls/filesystem-resource";
+import { ProcProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/proc-protocol";
 import { expandInternalUrls } from "@oh-my-pi/pi-coding-agent/tools/bash-skill-urls";
 
 function shellEscape(p: string): string {
@@ -23,7 +26,7 @@ function shellEscape(p: string): string {
 /** File-backed test scheme: locates URLs from a fixed table; `error`/`escape` entries throw plain/containment errors. */
 class FixtureProtocolHandler implements ProtocolHandler {
 	readonly scheme = "fixture";
-	readonly spec: SchemeSpec = { backing: "file", selectors: "lines", immutable: true };
+	readonly spec: SchemeSpec = { backing: "file", selectors: "lines", immutable: true, shellOperand: true };
 
 	readonly #entries: Record<string, { path?: string; error?: string; escape?: string }>;
 
@@ -84,6 +87,21 @@ afterAll(async () => {
 });
 
 describe("expandInternalUrls", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("never expands locatable schemes that are not shell operands (proc://, history://, vault://)", async () => {
+		// Each of these locates a real backing file (service log, transcript, vault note), but
+		// the file is not what the URL means to a shell: `echo x > proc://web` sends stdin.
+		for (const handler of [ProcProtocolHandler, HistoryProtocolHandler, VaultProtocolHandler]) {
+			vi.spyOn(handler.prototype, "locate").mockResolvedValue("/tmp/backing/output.log");
+		}
+		for (const command of ["echo x > proc://web", "cat history://Worker", "cat vault://Work/note.md"]) {
+			await expect(expandInternalUrls(command, { context, create: true })).resolves.toBe(command);
+		}
+	});
+
 	it("expands URLs of different locatable schemes in one command", async () => {
 		const command = "cat fixture://12 skill://valid-skill/scripts/init.py";
 

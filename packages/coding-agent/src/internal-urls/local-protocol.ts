@@ -8,6 +8,7 @@ import {
 	buildDirectoryResource,
 	containedRealPath,
 	contentTypeForPath,
+	ensureCreatableWithinRoot,
 	ensureWithinRoot,
 	validateRelativePath,
 } from "./filesystem-resource";
@@ -366,10 +367,11 @@ async function resolveLocalTarget(url: InternalUrl, opts: LocalProtocolOptions):
 }
 
 /**
- * Locate a local:// URL without creating anything. Returns the realpath of an
- * existing target, the lexical path under the session root when `create` is set
- * and the target is missing (writes land where `resolveLocalUrlToPath` points),
- * else null. Containment is enforced on every existing ancestor.
+ * Locate a local:// URL without creating anything. With `create`, returns the
+ * lexical path under the session root (writes land where `resolveLocalUrlToPath`
+ * points) once creating it provably stays inside the root — the deepest existing
+ * ancestor must realpath inside it and no entry may be a dangling symlink.
+ * Otherwise returns the realpath of an existing target, else null.
  */
 async function locateLocalTarget(
 	url: InternalUrl,
@@ -388,13 +390,12 @@ async function locateLocalTarget(
 		if (isEnoent(error)) return create ? targetPath : null;
 		throw error;
 	}
-	const realTarget = await containedRealPath(
-		relativePath ? path.resolve(realRoot, relativePath) : realRoot,
-		realRoot,
-		"local",
-	);
-	if (create) return targetPath;
-	return realTarget ?? null;
+	const underRealRoot = relativePath ? path.resolve(realRoot, relativePath) : realRoot;
+	if (create) {
+		await ensureCreatableWithinRoot(underRealRoot, realRoot, "local");
+		return targetPath;
+	}
+	return (await containedRealPath(underRealRoot, realRoot, "local")) ?? null;
 }
 
 /**
@@ -412,7 +413,10 @@ export class LocalProtocolHandler implements ProtocolHandler {
 		selectors: "lines",
 		immutable: false,
 		linkable: true,
-		write: { payload: "text", scope: "sandbox", tier: () => "read" },
+		imageQuestion: true,
+		shellOperand: true,
+		singleSlashAlias: true,
+		write: { via: "file", payload: "text", scope: "sandbox", tier: () => "read" },
 	};
 
 	static #override: LocalProtocolOptions | undefined;

@@ -1694,8 +1694,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Same wiring for cfg:// writes: every settings change the agent makes is
 		// confirmed here, and `/save` persists to disk. Subagents and headless
 		// sessions are refused by the handler before reaching this host. Changes
-		// to this session's settings run the settings panel's live side effects
-		// (advisor runtime, thinking level, …).
+		// to this session's settings get the settings panel's in-process side
+		// effects (a `defaultThinkingLevel` change also switches the live session).
 		setCfgApprovalHost({
 			approve: request => this.#promptCfgChange(request),
 			applied: change => {
@@ -1881,11 +1881,14 @@ export class InteractiveMode implements InteractiveModeContext {
 			})) ?? undefined;
 		if (this.#streamPublisher) {
 			this.ui.renderNow();
-			// Live stream redaction follows `stream.redactPatterns` edits.
+			// Live stream redaction follows `stream.redactPatterns` edits; only the
+			// newest edit's load applies, however the async loads interleave.
+			let redactorLoads = 0;
 			this.#eventBusUnsubscribers.push(
 				cfgStreamRedactPatterns.listen(this.settings, async patterns => {
+					const load = ++redactorLoads;
 					const redactor = await StreamRedactor.load(streamCwd, patterns);
-					this.#streamPublisher?.setRedactor(redactor);
+					if (load === redactorLoads) this.#streamPublisher?.setRedactor(redactor);
 				}),
 			);
 		}

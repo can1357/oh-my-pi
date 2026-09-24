@@ -153,25 +153,27 @@ Legacy migration still supported:
 Each setting is declared once with `register({ id, type, default, env?, protocolDefault?, validate?, pathScoped?, credential?, ui? })` in its domain's settings module (for example `src/tools/settings.ts`, `src/session/settings.ts`, `src/config/model-settings.ts`). `src/config/all-settings.ts` imports every domain in settings-panel order. `register` returns a typed `Setting` handle (`cfgX`); code reads and writes through it rather than by string key:
 
 - `cfgX.get(scope)` — effective value; `scope` is a `Settings` instance or anything carrying one (`AgentSession`, `ToolSession`). Reads are memoized per scope.
-- `cfgX.set(scope, v)` — writes the **global** layer and queues a background save.
+- `cfgX.set(scope, v)` — writes the **global** layer and queues a background save; values the definition's type rejects throw.
+- `cfgX.unset(scope)` — removes the key from the global layer (what `omp config reset` and clearing a settings-panel text field do), so later default changes still apply.
 - `cfgX.override(scope, v)` / `cfgX.clearOverride(scope)` — runtime-only override, never persisted.
 - `cfgX.map(fn)` / `combine({...}, fn)` — memoized derived values; `.listen(scope, cb)` observes changes of a handle or derivation.
 - `cfgX.provenance(scope)` — layer supplying the value: `"env" | "runtime" | "overlay" | "project" | "global" | "default"`.
+- `cfgX.layered(scope)` — the value from the settings layers alone, ignoring the environment variable (what the settings panel shows and edits).
 
-A configured value that does not fit the declared type (or enum values) is ignored with a warning and the default is used; a definition's `validate` rejects malformed values on load and before every write.
+A configured value that does not fit the declared type (or enum values) is ignored with a warning and the default is used; a definition's `validate` rejects malformed values on load, on every reload (a keep-last-good watcher reload keeps the previous layers instead), and before every write. A configured `null` counts as unset everywhere.
 
 ### Layers (`src/config/settings.ts`)
 
 Effective precedence, highest first:
 
-1. Environment variable declared on the definition (`env: "NAME"`), parsed by the setting's type; unparseable text counts as unset
+1. Environment variable declared on the definition (`env: "NAME"`), parsed by the setting's type; unparseable text counts as unset. Booleans follow `parseFlag`: empty is unset, `1`/`y`/`true`/`yes`/`on` (lower or upper case) is true, any other text is false
 2. Runtime overrides: in-memory, non-persistent
 3. Config overlays: `PI_CONFIG_FILES` (platform path-list), followed by repeated `omp --config <path>` files; all are loaded as `config.yml`-style YAML for this process only
 4. Project settings: discovered via the settings capability (`settings.json` and `config.yml` from providers)
 5. Global settings: the first present file among `~/.omp/agent/config.yml` and `config.yaml`
 6. Definition default
 
-A definition may instead declare `env: { name, fallback: true }`: that variable only replaces the default, and any configured layer wins over it (used by `SEARXNG_*` and `MNEMOPI_EMBEDDING_MODEL`).
+A definition may instead declare `env: { name, fallback: true }`: that variable only replaces the default, and any layer configuring a non-null value wins over it (used by `SEARXNG_BASIC_*`). `fallback: "blank"` also lets the variable win over a configured empty or whitespace string (used by `SEARXNG_ENDPOINT`, `SEARXNG_TOKEN`, and `MNEMOPI_EMBEDDING_MODEL`).
 
 Within the overlay list, later files override earlier files (`PI_CONFIG_FILES` entries load before `--config` files). Overlay paths are resolved relative to the active project directory (after `~` expansion).
 

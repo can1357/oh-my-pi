@@ -526,6 +526,42 @@ describe("GrepTool internal URL resolution", () => {
 		expect(text).toMatch(/^\*\d+:.*needle/m);
 	});
 
+	it("accepts the single-slash local:/ spelling in find and search like read", async () => {
+		const localRoot = path.join(artifactsDir, "local");
+		await fs.mkdir(path.join(localRoot, "notes"), { recursive: true });
+		await Bun.write(path.join(localRoot, "notes", "plan.md"), "beta needle line\n");
+		LocalProtocolHandler.setOverride({ getArtifactsDir: () => artifactsDir, getSessionId: () => "session" });
+		const session = createSession();
+
+		const findResult = await new GlobTool(session).execute("find-single-slash", { path: "local:/notes" });
+		const searchResult = await new GrepTool(session).execute("search-single-slash", {
+			pattern: "needle",
+			path: "local:/notes/plan.md",
+		});
+
+		expect(getResultText(findResult)).toContain("plan.md");
+		expect(getResultText(searchResult)).toContain("beta needle line");
+	});
+
+	it("expands a glob in the first local:// segment for find and search", async () => {
+		const localRoot = path.join(artifactsDir, "local");
+		await fs.mkdir(localRoot, { recursive: true });
+		await Bun.write(path.join(localRoot, "draft-plan.md"), "gamma needle\n");
+		await Bun.write(path.join(localRoot, "notes.txt"), "gamma needle\n");
+		LocalProtocolHandler.setOverride({ getArtifactsDir: () => artifactsDir, getSessionId: () => "session" });
+		const session = createSession();
+
+		const findText = getResultText(await new GlobTool(session).execute("find-root-glob", { path: "local://*.md" }));
+		const searchText = getResultText(
+			await new GrepTool(session).execute("search-root-glob", { pattern: "needle", path: "local://*.md" }),
+		);
+
+		expect(findText).toContain("draft-plan.md");
+		expect(findText).not.toContain("notes.txt");
+		expect(searchText).toContain("draft-plan.md");
+		expect(searchText).not.toContain("notes.txt");
+	});
+
 	it("read local://<name>:<sel> honors URL selector even when a sibling literal `<name>:<sel>` file exists (issue #4618)", async () => {
 		const localRoot = path.join(artifactsDir, "local");
 		await fs.mkdir(localRoot, { recursive: true });

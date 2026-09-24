@@ -1,5 +1,5 @@
 import { getReadToolPath, type ProtectedToolContext } from "@oh-my-pi/pi-agent-core/compaction/tool-protection";
-import { normalizeLocalScheme } from "../internal-urls/parse";
+import { InternalUrlRouter } from "../internal-urls/router";
 
 /** Canonical plan alias every session's `local://` root resolves. */
 const LOCAL_PLAN_ALIAS = "local://PLAN.md";
@@ -7,8 +7,9 @@ const LOCAL_PLAN_ALIAS = "local://PLAN.md";
 /** True when `readPath` targets `planTarget`, ignoring `local:/` vs `local://`
  *  scheme spelling and any trailing read selector (`:1-50`, `:raw`, …). */
 function readTargetsPlan(readPath: string, planTarget: string): boolean {
-	const read = normalizeLocalScheme(readPath);
-	const target = normalizeLocalScheme(planTarget);
+	const router = InternalUrlRouter.instance();
+	const read = router.normalize(readPath);
+	const target = router.normalize(planTarget);
 	return read === target || read.startsWith(`${target}:`);
 }
 

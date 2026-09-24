@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { InternalUrlRouter } from "../internal-urls";
 import { UrlContainmentError } from "../internal-urls/filesystem-resource";
-import { extractUriScheme, normalizeLocalScheme } from "../internal-urls/parse";
+import { extractUriScheme } from "../internal-urls/parse";
 import type { ResolveContext } from "../internal-urls/types";
 
 // Candidate `scheme://…` tokens (quoted or bare), plus the single-slash
@@ -117,11 +117,11 @@ function shellEscape(p: string): string {
 }
 
 /**
- * Local path backing a router URL, or null to leave the token for the shell.
- * Only mutable schemes create missing targets: immutable backings (skill
- * packages, artifacts) are never written into. Root-containment violations
- * fail closed instead of leaving the token for the shell, which would read it
- * as a relative path.
+ * Local path backing a shell-operand URL ({@link SchemeSpec.shellOperand}), or null to
+ * leave the token for the shell. Only mutable schemes create missing targets:
+ * immutable backings (skill packages, artifacts) are never written into.
+ * Root-containment violations fail closed instead of leaving the token for the
+ * shell, which would read it as a relative path.
  */
 async function locateOperand(
 	router: InternalUrlRouter,
@@ -129,7 +129,9 @@ async function locateOperand(
 	options: InternalUrlExpansionOptions,
 ): Promise<string | null> {
 	const scheme = extractUriScheme(url);
-	const create = options.create === true && scheme !== undefined && router.spec(scheme)?.immutable === false;
+	const spec = scheme === undefined ? undefined : router.spec(scheme);
+	if (!spec?.shellOperand) return null;
+	const create = options.create === true && !spec.immutable;
 	try {
 		const located = await router.locate(url, options.context, { directory: options.directory, create });
 		if (located !== null && create) {
@@ -143,9 +145,9 @@ async function locateOperand(
 }
 
 /**
- * Expand locatable internal URLs in a bash command string to shell-escaped absolute paths.
- * Unlocatable URLs and literal mentions inside larger quoted text are left unchanged;
- * containment violations throw.
+ * Expand shell-operand internal URLs ({@link SchemeSpec.shellOperand}) in a bash command
+ * string to shell-escaped absolute paths. Other schemes, unlocatable URLs, and literal
+ * mentions inside larger quoted text are left unchanged; containment violations throw.
  */
 export async function expandInternalUrls(command: string, options: InternalUrlExpansionOptions): Promise<string> {
 	if (!command.includes(":/")) return command;
@@ -161,7 +163,7 @@ export async function expandInternalUrls(command: string, options: InternalUrlEx
 
 		if (isEmbeddedInQuotedText(command, token, index)) continue;
 
-		const url = normalizeLocalScheme(unquoteToken(token));
+		const url = router.normalize(unquoteToken(token));
 		if (!router.canHandle(url)) continue;
 		const resolvedPath = await locateOperand(router, url, options);
 		if (resolvedPath === null) continue;

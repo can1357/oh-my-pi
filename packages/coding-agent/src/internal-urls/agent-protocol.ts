@@ -40,10 +40,9 @@ interface OutputScan {
 	availableIds: Set<string>;
 }
 
-/** True when the URL extracts a value (`/<json-path>` or a non-empty `?q=`) instead of naming the whole output. */
-function hasExtraction(url: InternalUrl): boolean {
-	const urlPath = url.pathname;
-	return (urlPath !== "" && urlPath !== "/") || !!url.searchParams.get("q");
+/** True when the URL extracts a `/<json-path>` value instead of naming the whole output. */
+function hasPathExtraction(url: InternalUrl): boolean {
+	return url.pathname !== "" && url.pathname !== "/";
 }
 
 /**
@@ -76,7 +75,8 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		selectors: "lines",
 		immutable: true,
 		linkable: true,
-		write: { payload: "verbatim", scope: "coordination", tier: () => "read" },
+		shellOperand: true,
+		write: { via: "handler", payload: "verbatim", scope: "coordination", tier: () => "read" },
 	};
 
 	promptDoc(): string {
@@ -84,13 +84,13 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	}
 
 	/**
-	 * The `<id>.md` output file. Extraction URLs (`/<json-path>`, `?q=`) render a
-	 * value rather than the file, so they locate to null, as do missing ids.
+	 * The `<id>.md` output file. JSON-path URLs (`/<json-path>`) render a value
+	 * rather than the file, so they locate to null, as do missing ids.
 	 */
 	async locate(url: InternalUrl, context?: ResolveContext): Promise<string | null> {
 		const outputId = url.rawHost || url.hostname;
 		if (!outputId) throw new Error("agent:// URL requires an output ID: agent://<id>");
-		if (outputId === "all" || hasExtraction(url)) return null;
+		if (outputId === "all" || hasPathExtraction(url)) return null;
 		const dirs = await this.#outputDirs(context);
 		if (dirs.length === 0) return null;
 		return (await this.#findOutput(dirs, outputId)).foundPath ?? null;
@@ -111,7 +111,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		}
 		const to = url.rawHost || url.hostname;
 		if (!to) throw new Error("agent:// URL requires a recipient: agent://<id>");
-		if (url.pathname !== "" && url.pathname !== "/") {
+		if (hasPathExtraction(url)) {
 			throw new Error("agent:// message target cannot have a JSON-path suffix.");
 		}
 		if (!content.trim()) throw new Error("agent:// messages require non-empty content.");
@@ -138,15 +138,14 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			throw new Error("agent:// URL requires an output ID: agent://<id>");
 		}
 
-		const urlPath = url.pathname;
-		const hasPathExtraction = urlPath && urlPath !== "/" && urlPath !== "";
+		const extraction = hasPathExtraction(url);
 
 		const dirs = await this.#outputDirs(context);
 		if (dirs.length === 0) {
 			throw new Error("No session - agent outputs unavailable");
 		}
 
-		const pathSegments = hasPathExtraction ? urlPath.split("/").filter(Boolean) : [];
+		const pathSegments = extraction ? url.pathname.split("/").filter(Boolean) : [];
 		const decodedSegments = pathSegments.map(segment => {
 			try {
 				return decodeURIComponent(segment);
@@ -170,7 +169,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		let contentType: InternalResource["contentType"] = "text/markdown";
 
 		let extractedFrom = scan.foundPath;
-		if (hasPathExtraction) {
+		if (extraction) {
 			let jsonValue: unknown;
 			let parsed = false;
 			if (scan.jsonPath) {
@@ -215,7 +214,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			size: Buffer.byteLength(content, "utf-8"),
 			sourcePath: extractedFrom,
 			notes,
-			shape: hasExtraction(url) ? "value" : "document",
+			shape: extraction ? "value" : "document",
 		};
 	}
 

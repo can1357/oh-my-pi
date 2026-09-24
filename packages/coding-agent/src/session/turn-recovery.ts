@@ -2788,7 +2788,7 @@ export class TurnRecovery {
 
 	/** Whether auto-retry is enabled */
 	get autoRetryEnabled(): boolean {
-		return cfgRetryEnabled.get(this.#host.settings) ?? true;
+		return cfgRetryEnabled.get(this.#host.settings);
 	}
 
 	/**

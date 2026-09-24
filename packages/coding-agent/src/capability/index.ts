@@ -373,10 +373,15 @@ export function disableUserSource(providerId: string): void {
  * Bind the capability system to `activeSettings`: provider switches are read live
  * from its `enabledProviders`/`disabledProviders` (settings UI, `set()` from any
  * caller, on-disk reloads — the next discovery pass sees them) and persisted to it,
- * until the next call replaces it.
+ * until the next call replaces it. Returns a function restoring the previous binding
+ * (a no-op once a later call has replaced this one).
  */
-export function initializeWithSettings(activeSettings: Settings): void {
+export function initializeWithSettings(activeSettings: Settings): () => void {
+	const previous = settings;
 	settings = activeSettings;
+	return () => {
+		if (settings === activeSettings) settings = previous;
+	};
 }
 
 /**

@@ -136,7 +136,7 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 		return prompt.render(astGrepDescription, {
 			eagerDelegation: sessionDelegationBias(this.session) === "eager",
 			scoutAvailable: isScoutSpawnable(
-				cfgTaskDisabledAgents.get(this.session.settings) as string[] | undefined,
+				cfgTaskDisabledAgents.get(this.session.settings),
 				this.session.getSessionSpawns?.() ?? "*",
 			),
 		});

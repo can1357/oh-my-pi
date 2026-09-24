@@ -15,8 +15,6 @@ import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { configureCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
-import { configureProviderMaxInFlightRequests } from "@oh-my-pi/pi-ai/stream";
 import {
 	getAgentDbPath,
 	getAgentDir,
@@ -45,12 +43,12 @@ import {
 	all as allSettings,
 	bindEffects,
 	lookup as lookupSetting,
-	unbindEffects,
+	resetRegistryForTest,
 	type ValueCacheEntry,
 } from "./registry";
 // Registers every setting before any instance is read (definitions live next to their domains).
 import "./all-settings";
-import { cfgDisabledProviders, cfgEnabledProviders, cfgModelRoles, cfgModelRoleStorage } from "./model-settings";
+import { cfgModelRoles, cfgModelRoleStorage } from "./model-settings";
 import { cfgShellPath } from "../exec/settings";
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -138,6 +136,9 @@ type ProjectSettingsReadResult = {
 /** `strict` rejects on any unreadable layer; `keep-last-good` keeps each failed layer's previous value. */
 type PersistedReloadMode = "strict" | "keep-last-good";
 
+/** Layer refreshes serialized by `Settings.#exclusive`: disk reloads and cwd re-scopes. */
+type LayerRefreshKind = PersistedReloadMode | "rescope";
+
 /** Quiet period after the last config-file event before the watcher reloads from disk. */
 const CONFIG_WATCH_DEBOUNCE_MS = 200;
 
@@ -155,7 +156,7 @@ export interface SettingsOptions {
 	inMemory?: boolean;
 	/** Read config sources without opening storage or writing migrations */
 	readOnly?: boolean;
-	/** Initial runtime overrides, keyed by setting id. */
+	/** Initial runtime overrides, keyed by setting id (legacy ids migrate; values are checked like `override`). */
 	overrides?: Readonly<Record<string, unknown>>;
 	/** Extra config.yml-style overlays loaded after global/project settings */
 	configFiles?: string[];
@@ -179,13 +180,6 @@ function getByPath(obj: RawSettings, segments: readonly string[]): unknown {
 	return current;
 }
 
-/** @throws Error when `values` names an id no setting is registered under (typo guard for overrides). */
-function assertKnownSettingIds(values: Readonly<Record<string, unknown>>): void {
-	for (const id in values) {
-		if (!lookupSetting(id)) throw new Error(`Unknown setting "${id}"`);
-	}
-}
-
 /**
  * Set a nested value in an object by path segments.
  * Creates intermediate objects as needed.
@@ -200,6 +194,59 @@ function setByPath(obj: RawSettings, segments: readonly string[], value: unknown
 		current = current[segment] as RawSettings;
 	}
 	current[segments[segments.length - 1]] = value;
+}
+
+/** Removes the value at `segments`, pruning the parent objects the removal leaves empty. */
+function deleteByPath(obj: RawSettings, segments: readonly string[]): void {
+	const parents: RawSettings[] = [];
+	let current = obj;
+	for (let i = 0; i < segments.length - 1; i++) {
+		const next = current[segments[i]];
+		if (!isRecord(next)) return;
+		parents.push(current);
+		current = next;
+	}
+	delete current[segments[segments.length - 1]];
+	for (let i = parents.length - 1; i >= 0 && Object.keys(current).length === 0; i--) {
+		delete parents[i][segments[i]];
+		current = parents[i];
+	}
+}
+
+/**
+ * @throws Error when a leaf of `layer` sits at a path that names no registered setting (typo guard
+ * for constructor overrides).
+ */
+function assertKnownSettingPaths(layer: RawSettings, prefix = ""): void {
+	for (const key in layer) {
+		const id = prefix ? `${prefix}.${key}` : key;
+		if (lookupSetting(id)) continue;
+		const value = layer[key];
+		if (!isRecord(value)) throw new Error(`Unknown setting "${id}"`);
+		assertKnownSettingPaths(value, id);
+	}
+}
+
+/** `project` as it merges over the global layer: `null` (cleared) model roles fall back to global. */
+function projectLayerForMerge(project: RawSettings): RawSettings {
+	const projectRoles = getByPath(project, ["modelRoles"]);
+	if (!isRecord(projectRoles)) return project;
+
+	let filteredRoles: Record<string, unknown> | undefined;
+	for (const role in projectRoles) {
+		if (!Object.hasOwn(projectRoles, role) || modelRoleValueFromUnknown(projectRoles[role]) !== undefined) continue;
+		filteredRoles ??= { ...projectRoles };
+		delete filteredRoles[role];
+	}
+	return filteredRoles ? { ...project, modelRoles: filteredRoles } : project;
+}
+
+/** One instance's own layers, lowest precedence first. */
+interface OwnLayers {
+	global: RawSettings;
+	project: RawSettings;
+	configOverlay: RawSettings;
+	overrides: RawSettings;
 }
 
 /**
@@ -374,6 +421,13 @@ function runChangeListeners(listeners: ReadonlySet<SettingChangeListener>, setti
 	}
 }
 
+/** Value `setting` has in the `merged` layers, path-scoped entries resolved for `cwd`; `null` counts as unset. */
+function configuredValue(merged: RawSettings, setting: AnySetting, cwd: string): unknown {
+	const value = getByPath(merged, setting.segments);
+	if (value === undefined || value === null) return undefined;
+	return resolvePathScopedStringArray(setting, value, cwd) ?? value;
+}
+
 function resolvePathScopedStringArray(setting: AnySetting, value: unknown, cwd: string): string[] | undefined {
 	const scope = setting.definition.pathScoped;
 	if (!scope || !Array.isArray(value)) return undefined;
@@ -474,6 +528,8 @@ export class Settings {
 	#overlayShellPathSource: string | undefined;
 	/** Runtime overrides (not persisted) */
 	#overrides: RawSettings = {};
+	/** Settings whose runtime override is a soft-pinned default ({@link pinDefaultValue}). */
+	#softPins = new Set<AnySetting>();
 	/** Merged view (global + project + overrides) */
 	#merged: RawSettings = {};
 	/** Monotonic revision of merged layers and cwd-scoped resolution. */
@@ -489,8 +545,8 @@ export class Settings {
 	#childForwarders = new Set<SettingChangeListener>();
 	/** Instance this overlay reads through to ({@link overlay}); overlays never persist or write back. */
 	#parent: Settings | undefined;
-	/** Set while a batch of parent change notifications is being applied (one rebuild per batch). */
-	#parentSyncPending = false;
+	/** Parent {@link revision} `#merged` was last built from; any other parent revision re-merges. */
+	#syncedParentRevision = -1;
 
 	/** Paths modified during this session (for partial save) */
 	#modified = new Set<string>();
@@ -520,8 +576,8 @@ export class Settings {
 	#savePromise?: Promise<void>;
 	#projectSaveTimer?: NodeJS.Timeout;
 	#projectSavePromise?: Promise<void>;
-	/** In-flight persisted-layer refresh; concurrent strict callers share it, others queue behind it. */
-	#activeReload?: { mode: PersistedReloadMode; promise: Promise<void> };
+	/** In-flight layer refresh; concurrent strict reloads share it, others queue behind it. */
+	#activeReload?: { kind: LayerRefreshKind; promise: Promise<void> };
 	/** Whether {@link startWatching} is active. */
 	#watchingFiles = false;
 	/** Directory watchers for config sources, keyed by directory, with the basenames that trigger a reload. */
@@ -541,14 +597,32 @@ export class Settings {
 		this.#configFiles = configFiles.map(file => path.resolve(this.#cwd, expandTilde(file)));
 		this.#persist = !options.inMemory && options.readOnly !== true;
 		liveSettingsInstances.add(new WeakRef(this));
+		if (options.overrides) this.#overrides = this.#overrideLayer(options.overrides);
+	}
 
-		if (options.overrides) {
-			for (const [key, value] of Object.entries(options.overrides)) {
-				setByPath(this.#overrides, key.split("."), value);
-			}
-
-			this.#overrides = this.#migrateRawSettings(this.#overrides);
+	/**
+	 * Runtime-override layer for dotted constructor `overrides`: legacy ids migrate first, then every
+	 * path must belong to a registered setting and every value is normalized and checked like a
+	 * handle `override`. `undefined` values are skipped; `null` stays as an unset tombstone.
+	 *
+	 * @throws Error on an unknown setting or a value its definition rejects.
+	 */
+	#overrideLayer(overrides: Readonly<Record<string, unknown>>): RawSettings {
+		const raw: RawSettings = {};
+		for (const key in overrides) {
+			const value = overrides[key];
+			if (value !== undefined) setByPath(raw, key.split("."), value);
 		}
+		const layer = this.#migrateRawSettings(raw);
+		assertKnownSettingPaths(layer);
+		for (const setting of allSettings()) {
+			const value = getByPath(layer, setting.segments);
+			if (value === undefined || value === null) continue;
+			const normalized = setting.definition.normalize ? setting.definition.normalize(value) : value;
+			setting.assertWritable(normalized);
+			setByPath(layer, setting.segments, normalized);
+		}
+		return layer;
 	}
 
 	// ─────────────────────────────────────────────────────────────────────────
@@ -557,13 +631,13 @@ export class Settings {
 
 	/**
 	 * Initialize the global singleton.
-	 * Call once at startup before accessing `settings`.
+	 * Call once at startup before accessing `settings`. Rejects (never throws) on an invalid
+	 * override or configuration.
 	 */
 	static init(options: SettingsOptions = {}): Promise<Settings> {
 		if (globalInstancePromise) return globalInstancePromise;
 
-		const instance = new Settings(options);
-		const promise = instance.#load();
+		const promise = Promise.try(() => new Settings(options).#load());
 		globalInstancePromise = promise;
 
 		return promise.then(
@@ -588,16 +662,14 @@ export class Settings {
 	 * opening agent.db, migrating legacy settings, or writing marker files.
 	 */
 	static loadReadOnly(options: SettingsOptions = {}): Promise<Settings> {
-		const instance = new Settings({ ...options, readOnly: true });
-		return instance.#loadReadOnly();
+		return Promise.try(() => new Settings({ ...options, readOnly: true }).#loadReadOnly());
 	}
 
 	/**
 	 * Load a persisted settings instance without touching the global singleton.
 	 */
 	static loadIsolated(options: SettingsOptions = {}): Promise<Settings> {
-		const instance = new Settings(options);
-		return instance.#load();
+		return Promise.try(() => new Settings(options).#load());
 	}
 
 	/**
@@ -608,7 +680,6 @@ export class Settings {
 		overrides: Readonly<Record<string, unknown>> = {},
 		options: { storage?: AgentStorage | null } = {},
 	): Settings {
-		assertKnownSettingIds(overrides);
 		const instance = new Settings({ inMemory: true, overrides });
 		instance.#storage = options.storage ?? null;
 		instance.#rebuildMerged();
@@ -620,10 +691,9 @@ export class Settings {
 	 * live (a later edit here reaches the child and its listeners), while `overrides` and every
 	 * later write on the child stay in the child — never persisted, never written back here.
 	 *
-	 * @throws Error when `overrides` names an unknown setting.
+	 * @throws Error when `overrides` names an unknown setting or a value its definition rejects.
 	 */
 	overlay(overrides: Readonly<Record<string, unknown>> = {}): Settings {
-		assertKnownSettingIds(overrides);
 		const child = new Settings({ inMemory: true, cwd: this.#cwd, agentDir: this.#agentDir, overrides });
 		child.#storage = this.#storage;
 		child.#parent = this;
@@ -645,17 +715,21 @@ export class Settings {
 
 	/** Re-merges after a parent change and forwards it unless the child's own layers pin the value. */
 	#applyParentChange(setting: AnySetting): void {
-		if (!this.#parentSyncPending) {
-			// The parent rebuilt before notifying, so one re-merge covers the whole batch.
-			this.#parentSyncPending = true;
-			queueMicrotask(() => {
-				this.#parentSyncPending = false;
-			});
-			this.#rebuildMerged();
-		}
-		const own = getByPath(this.#ownLayersMerged(), setting.segments);
+		this.#syncParent();
+		const own = getByPath(this.#mergeOwnLayers(this.#ownLayers()), setting.segments);
 		if (own !== undefined && (typeof own !== "object" || own === null || Array.isArray(own))) return;
 		this.#notifyChange(setting);
+	}
+
+	/** Re-merges an overlay whose parent changed since the last merge (every parent write bumps its revision). */
+	#syncParent(): void {
+		if (this.#parent && this.#parent.revision !== this.#syncedParentRevision) this.#rebuildMerged();
+	}
+
+	/** Merged layers, re-merged first when the parent moved on. */
+	#mergedView(): RawSettings {
+		this.#syncParent();
+		return this.#merged;
 	}
 
 	/**
@@ -689,31 +763,32 @@ export class Settings {
 	 * says is impossible (#13183).
 	 */
 	rawValue(setting: AnySetting): unknown {
-		const value = getByPath(this.#merged, setting.segments);
-		if (value === undefined || value === null) return undefined;
-		return resolvePathScopedStringArray(setting, value, this.#cwd) ?? value;
+		return configuredValue(this.#mergedView(), setting, this.#cwd);
 	}
 
 	/**
 	 * Whether `setting` has an explicitly configured value (global config, project
 	 * config, or runtime override) rather than falling back to the schema default.
+	 * A configured `null` counts as unset, like in {@link rawValue}.
 	 */
 	isConfigured(setting: AnySetting): boolean {
-		return getByPath(this.#merged, setting.segments) !== undefined;
+		const value = getByPath(this.#mergedView(), setting.segments);
+		return value !== undefined && value !== null;
 	}
 
 	/**
 	 * Layer supplying the effective value of `setting`, in merge precedence order:
-	 * runtime override → config overlay → project → global → schema default.
+	 * runtime override → config overlay → project → global → (overlay parent) → schema default.
+	 * A value that merges to `null` is unset and reports `"default"`.
 	 */
 	getProvenance(setting: AnySetting): SettingProvenance {
+		if (!this.isConfigured(setting)) return "default";
 		const segments = setting.segments;
 		if (getByPath(this.#overrides, segments) !== undefined) return "runtime";
 		if (getByPath(this.#configOverlay, segments) !== undefined) return "overlay";
-		if (getByPath(this.#projectSettingsForMerge(), segments) !== undefined) return "project";
+		if (getByPath(projectLayerForMerge(this.#project), segments) !== undefined) return "project";
 		if (getByPath(this.#global, segments) !== undefined) return "global";
-		if (this.#parent && this.#parent.isConfigured(setting)) return this.#parent.getProvenance(setting);
-		return "default";
+		return this.#parent?.getProvenance(setting) ?? "default";
 	}
 
 	/**
@@ -722,13 +797,14 @@ export class Settings {
 	 * listeners (process-wide effects apply synchronously). On an {@link overlay} both layers are
 	 * local to the overlay.
 	 *
-	 * @throws Error when the value fails its definition's `items` or `validate` check.
+	 * @throws Error when the value does not fit the definition's type or fails its `items`/`validate` check.
 	 */
 	writeValue(setting: AnySetting, value: unknown, layer: "global" | "override"): void {
 		setting.assertWritable(value);
 		if (layer === "override" && setting === cfgModelRoles) {
 			this.#savedRuntimeModelRoleOverrides.clear();
 		}
+		if (layer === "override") this.#softPins.delete(setting);
 		const prev = setting.get(this);
 		const segments = setting.segments;
 		if (layer === "global") {
@@ -744,20 +820,62 @@ export class Settings {
 		this.#fireIfChanged(setting, prev);
 	}
 
+	/**
+	 * Registry plumbing behind `Setting.unset`: removes `setting` from the global layer (the removal
+	 * is persisted in the background), so lower layers and the default apply again.
+	 */
+	unsetGlobalValue(setting: AnySetting): void {
+		const segments = setting.segments;
+		const current = getByPath(this.#global, segments);
+		if (current === undefined) return;
+		const prev = setting.get(this);
+		this.#captureGlobalMutation(setting.id, this.#modifiedPathMutations, current);
+		deleteByPath(this.#global, segments);
+		this.#persistedMutationGeneration++;
+		this.#modified.add(setting.id);
+		this.#rebuildMerged();
+		this.#queueSave();
+		this.#fireIfChanged(setting, prev);
+	}
+
+	/**
+	 * Registry plumbing behind `Setting.pinDefault`: overrides `setting` with its default unless a
+	 * layer configures it, keeping the override soft — a disk reload or re-scope that makes a
+	 * persisted layer configure the setting drops it, and an explicit override/clear ends it.
+	 */
+	pinDefaultValue(setting: AnySetting): void {
+		const value = setting.default;
+		if (value === undefined || this.isConfigured(setting)) return;
+		this.writeValue(setting, value, "override");
+		this.#softPins.add(setting);
+	}
+
+	/**
+	 * Removes from `layers.overrides` (replaced by a copy) every soft pin the persisted `layers`
+	 * (global, project, `--config` overlay, parent) now configure; returns the settled settings.
+	 */
+	#settlePins(layers: OwnLayers): AnySetting[] {
+		if (this.#softPins.size === 0) return [];
+		const persisted = this.#mergeOverParent(this.#mergeOwnLayers({ ...layers, overrides: {} }));
+		const settled = [...this.#softPins].filter(setting => {
+			const value = getByPath(persisted, setting.segments);
+			return value !== undefined && value !== null;
+		});
+		if (settled.length === 0) return settled;
+		layers.overrides = structuredClone(layers.overrides);
+		for (const setting of settled) deleteByPath(layers.overrides, setting.segments);
+		return settled;
+	}
+
 	/** Registry plumbing behind `Setting.clearOverride`: drops the runtime override of `setting`. */
 	clearOverrideValue(setting: AnySetting): void {
 		if (setting === cfgModelRoles) {
 			this.#savedRuntimeModelRoleOverrides.clear();
 		}
+		this.#softPins.delete(setting);
+		if (getByPath(this.#overrides, setting.segments) === undefined) return;
 		const prev = setting.get(this);
-		const segments = setting.segments;
-		let current = this.#overrides;
-		for (let i = 0; i < segments.length - 1; i++) {
-			const segment = segments[i];
-			if (!(segment in current)) return;
-			current = current[segment] as RawSettings;
-		}
-		delete current[segments[segments.length - 1]];
+		deleteByPath(this.#overrides, setting.segments);
 		this.#rebuildMerged();
 		this.#fireIfChanged(setting, prev);
 	}
@@ -930,7 +1048,7 @@ export class Settings {
 	async #reloadFromWatch(): Promise<void> {
 		if (!this.#watchingFiles) return;
 		try {
-			await this.#reload("keep-last-good");
+			await this.#exclusive("keep-last-good", () => this.#reloadPersistedLayers("keep-last-good"));
 		} catch (error) {
 			logger.warn("Settings: failed to apply on-disk config change", { error: String(error) });
 		}
@@ -965,21 +1083,38 @@ export class Settings {
 		}
 	}
 
+	/**
+	 * Independent instance scoped to `cwd`: same global, `--config` overlay, and runtime layers, the
+	 * project layer re-read for `cwd` (persisted instances). An {@link overlay} clones its parent for
+	 * `cwd` and re-applies its own layers on top, so inherited values carry over.
+	 *
+	 * @throws Error when a configured value fails its definition's `validate` check.
+	 */
 	async cloneForCwd(cwd: string): Promise<Settings> {
-		const cloned = new Settings({
-			cwd,
-			agentDir: this.#agentDir,
-			inMemory: !this.#persist,
-		});
-		cloned.#storage = this.#storage;
-		cloned.#configPath = this.#configPath;
+		let cloned: Settings;
+		if (this.#parent) {
+			cloned = (await this.#parent.cloneForCwd(cwd)).overlay();
+			cloned.#project = structuredClone(this.#project);
+		} else {
+			cloned = new Settings({
+				cwd,
+				agentDir: this.#agentDir,
+				inMemory: !this.#persist,
+			});
+			cloned.#storage = this.#storage;
+			cloned.#configPath = this.#configPath;
+			cloned.#project = this.#persist ? await cloned.#loadProjectSettings() : structuredClone(this.#project);
+			if (!this.#persist) cloned.#projectShellPathSource = this.#projectShellPathSource;
+			cloned.#configFiles = [...this.#configFiles];
+			cloned.#overlayShellPathSource = this.#overlayShellPathSource;
+		}
 		cloned.#global = structuredClone(this.#global);
-		cloned.#project = this.#persist ? await cloned.#loadProjectSettings() : structuredClone(this.#project);
-		if (!this.#persist) cloned.#projectShellPathSource = this.#projectShellPathSource;
-		cloned.#configFiles = [...this.#configFiles];
 		cloned.#configOverlay = structuredClone(this.#configOverlay);
-		cloned.#overlayShellPathSource = this.#overlayShellPathSource;
-		cloned.#overrides = this.#buildOriginalOverrides();
+		// A soft-pinned default yields to a value the clone's own scope configures.
+		cloned.#softPins = new Set(this.#softPins);
+		const layers = { ...cloned.#ownLayers(), overrides: this.#buildOriginalOverrides() };
+		for (const setting of cloned.#settlePins(layers)) cloned.#softPins.delete(setting);
+		cloned.#overrides = layers.overrides;
 		cloned.#rebuildMerged();
 		cloned.#validateAll();
 		return cloned;
@@ -989,28 +1124,32 @@ export class Settings {
 	 * Re-read the current global, project, and explicit overlay layers from disk
 	 * without replacing this instance or discarding runtime overrides.
 	 *
-	 * All sources are loaded before any live layer is replaced, so readers never
-	 * observe a partially refreshed configuration. Concurrent callers share the
-	 * same reload.
+	 * All sources are loaded and validated before any live layer is replaced, so
+	 * readers never observe a partially refreshed or invalid configuration.
+	 * Concurrent callers share the same reload.
+	 *
+	 * @throws Error when a source fails to load or a value fails its definition's
+	 * `validate` check; the previous layers stay in effect.
 	 */
 	async reloadFromDisk(): Promise<void> {
 		if (!this.#persist) return;
-		await this.#reload("strict");
+		await this.#exclusive("strict", () => this.#reloadPersistedLayers("strict"));
 	}
 
 	/**
-	 * Run one persisted-layer refresh at a time. Concurrent strict callers share
-	 * an in-flight strict reload; anything else queues behind the active reload so
-	 * it never misses a write that landed after that reload read the files.
+	 * Run one disk reload at a time, also serialized with {@link reloadForCwd}
+	 * (which holds the same slot). Concurrent strict reloads share the in-flight
+	 * one; anything else queues behind the active refresh so it never misses a
+	 * write or scope change that landed after that refresh read the files.
 	 */
-	async #reload(mode: PersistedReloadMode): Promise<void> {
+	async #exclusive(kind: LayerRefreshKind, refresh: () => Promise<void>): Promise<void> {
 		for (;;) {
 			const active = this.#activeReload;
 			if (!active) break;
-			if (mode === "strict" && active.mode === "strict") return active.promise;
+			if (kind === "strict" && active.kind === "strict") return active.promise;
 			await active.promise.catch(() => {});
 		}
-		const entry = { mode, promise: this.#reloadPersistedLayers(mode) };
+		const entry = { kind, promise: refresh() };
 		this.#activeReload = entry;
 		try {
 			await entry.promise;
@@ -1024,7 +1163,6 @@ export class Settings {
 		for (;;) {
 			await this.flush();
 			const mutationGeneration = this.#persistedMutationGeneration;
-			const previous = this.#snapshot();
 
 			const [globalResult, projectResult, overlayResult] = await Promise.allSettled([
 				this.#readExistingMainYaml(false),
@@ -1040,20 +1178,36 @@ export class Settings {
 				});
 			}
 
-			if (globalResult.status === "fulfilled") {
-				this.#configPath = globalResult.value.configPath;
-				this.#global = globalResult.value.settings ?? {};
+			const candidate: OwnLayers = {
+				global: globalResult.status === "fulfilled" ? (globalResult.value.settings ?? {}) : this.#global,
+				project: projectResult.status === "fulfilled" ? projectResult.value.settings : this.#project,
+				configOverlay: overlayResult.status === "fulfilled" ? overlayResult.value.settings : this.#configOverlay,
+				overrides: this.#overrides,
+			};
+			const settled = this.#settlePins(candidate);
+			try {
+				this.#validateAll(this.#mergeOverParent(this.#mergeOwnLayers(candidate)), this.#cwd);
+			} catch (error) {
+				if (!keepLastGood) throw error;
+				logger.warn("Settings: keeping last good config; on-disk change is invalid", { error: String(error) });
+				return;
 			}
+
+			const previous = this.#snapshot();
+			if (globalResult.status === "fulfilled") this.#configPath = globalResult.value.configPath;
 			if (projectResult.status === "fulfilled") {
-				this.#project = projectResult.value.settings;
 				this.#projectFileSettings = projectResult.value.fileSettings;
 				this.#projectShellPathSource = projectResult.value.shellPathSource;
 				this.#projectSourcePaths = projectResult.value.sourcePaths;
 			}
 			if (overlayResult.status === "fulfilled") {
-				this.#configOverlay = overlayResult.value.settings;
 				this.#overlayShellPathSource = overlayResult.value.shellPathSource;
 			}
+			this.#global = candidate.global;
+			this.#project = candidate.project;
+			this.#configOverlay = candidate.configOverlay;
+			this.#overrides = candidate.overrides;
+			for (const setting of settled) this.#softPins.delete(setting);
 			this.#rebuildMerged();
 			this.#fireChangesSince(previous);
 			return;
@@ -1071,22 +1225,57 @@ export class Settings {
 	 * (the `settings` proxy, the active session, controllers) observes the new
 	 * project scope without swapping references — used when the process changes
 	 * directory mid-run (`/move`, cross-project resume). No-op when `cwd` is
-	 * already the current scope.
+	 * already the current scope. Serialized with disk reloads.
+	 *
+	 * @throws Error when a value configured for the new scope fails its definition's
+	 * `validate` check; the instance then stays on its previous scope.
 	 */
 	async reloadForCwd(cwd: string): Promise<void> {
 		const normalized = path.normalize(cwd);
-		if (normalized === this.#cwd) return;
-		await this.flush();
-		this.#restoreRuntimeModelRoleOverrides();
-		const previous = this.#snapshot();
-		this.#cwd = normalized;
-		if (this.#persist) {
-			this.#project = await this.#loadProjectSettings();
+		for (let active = this.#activeReload; active; active = this.#activeReload) {
+			await active.promise.catch(() => {});
 		}
-		this.#rebuildMerged();
-		this.#fireChangesSince(previous);
-		this.#validateAll();
-		this.#syncFileWatchers();
+		// Holds the refresh slot while running inline (not through `#exclusive`): callers resume
+		// right after listeners are notified, as consumers sequencing a move (memory rebind) expect.
+		const settled = Promise.withResolvers<void>();
+		settled.promise.catch(() => {});
+		const entry = { kind: "rescope" as const, promise: settled.promise };
+		this.#activeReload = entry;
+		try {
+			if (normalized === this.#cwd) return;
+			await this.flush();
+			const project = this.#persist ? await this.#readProjectSettings(true, { cwd: normalized }) : undefined;
+			const candidate: OwnLayers = {
+				global: this.#global,
+				project: project?.settings ?? this.#project,
+				configOverlay: this.#configOverlay,
+				overrides:
+					this.#savedRuntimeModelRoleOverrides.size === 0 ? this.#overrides : this.#buildOriginalOverrides(),
+			};
+			const settledPins = this.#settlePins(candidate);
+			this.#validateAll(this.#mergeOverParent(this.#mergeOwnLayers(candidate)), normalized);
+
+			const previous = this.#snapshot();
+			this.#cwd = normalized;
+			this.#overrides = candidate.overrides;
+			for (const setting of settledPins) this.#softPins.delete(setting);
+			this.#savedRuntimeModelRoleOverrides.clear();
+			if (project) {
+				this.#project = project.settings;
+				this.#projectFileSettings = project.fileSettings;
+				this.#projectShellPathSource = project.shellPathSource;
+				this.#projectSourcePaths = project.sourcePaths;
+			}
+			this.#rebuildMerged();
+			this.#fireChangesSince(previous);
+			this.#syncFileWatchers();
+		} catch (error) {
+			settled.reject(error);
+			throw error;
+		} finally {
+			if (this.#activeReload === entry) this.#activeReload = undefined;
+			settled.resolve();
+		}
 	}
 
 	// ─────────────────────────────────────────────────────────────────────────
@@ -1111,6 +1300,7 @@ export class Settings {
 	 * and path-scoped array re-resolution.
 	 */
 	get revision(): number {
+		this.#syncParent();
 		return this.#revision;
 	}
 
@@ -1120,19 +1310,23 @@ export class Settings {
 	 * Exposes arbitrary namespaced keys (e.g. an extension's own `piVim` block)
 	 * that the typed, schema-bound {@link get} cannot reach. Used by the legacy
 	 * pi `SettingsManager` shim to match upstream Pi's `getGlobalSettings()`.
-	 * The clone means callers cannot mutate internal state.
+	 * The clone means callers cannot mutate internal state. An {@link overlay}
+	 * reports its parent's layer with the overlay's own writes merged on top.
 	 */
 	getGlobalSettings(): RawSettings {
-		return structuredClone(this.#global);
+		const own = structuredClone(this.#global);
+		return this.#parent ? this.#deepMerge(this.#parent.getGlobalSettings(), own) : own;
 	}
 
 	/**
 	 * Raw project settings layer (`.claude/settings.yml`, `.omp/config.yml`,
 	 * etc.), deep-cloned. Companion to {@link getGlobalSettings} for the legacy
-	 * pi `SettingsManager` shim's `getProjectSettings()`.
+	 * pi `SettingsManager` shim's `getProjectSettings()`; an {@link overlay}
+	 * likewise reports its parent's layer under its own.
 	 */
 	getProjectSettings(): RawSettings {
-		return structuredClone(this.#project);
+		const own = structuredClone(this.#project);
+		return this.#parent ? this.#deepMerge(this.#parent.getProjectSettings(), own) : own;
 	}
 
 	getPlansDirectory(): string {
@@ -1143,18 +1337,20 @@ export class Settings {
 	 * Get shell configuration based on settings.
 	 */
 	getShellConfig() {
-		const shell = cfgShellPath.get(this);
-		let configSource = this.#configPath ?? path.join(this.#agentDir, MAIN_CONFIG_FILENAMES[0]);
-		if (Object.hasOwn(this.#project, "shellPath")) {
-			configSource = this.#projectShellPathSource ?? "the active project configuration";
-		}
+		return procmgr.getShellConfig(cfgShellPath.get(this), { configSource: this.#shellPathSource() });
+	}
+
+	/** Where the effective `shellPath` comes from, for error messages; an overlay defers to its parent. */
+	#shellPathSource(): string {
+		if (Object.hasOwn(this.#overrides, "shellPath")) return "the runtime settings override";
 		if (Object.hasOwn(this.#configOverlay, "shellPath")) {
-			configSource = this.#overlayShellPathSource ?? "the active config overlay";
+			return this.#overlayShellPathSource ?? "the active config overlay";
 		}
-		if (Object.hasOwn(this.#overrides, "shellPath")) {
-			configSource = "the runtime settings override";
+		if (Object.hasOwn(this.#project, "shellPath")) {
+			return this.#projectShellPathSource ?? "the active project configuration";
 		}
-		return procmgr.getShellConfig(shell, { configSource });
+		if (this.#parent && !Object.hasOwn(this.#global, "shellPath")) return this.#parent.#shellPathSource();
+		return this.#configPath ?? path.join(this.#agentDir, MAIN_CONFIG_FILENAMES[0]);
 	}
 
 	/**
@@ -1165,12 +1361,15 @@ export class Settings {
 	 * `--config` overlay or a runtime override) replaces it; otherwise `"user"`.
 	 * Callers pass this into {@link EffectiveExtensionRoots.configuredLevel} so
 	 * discovery labels roots by the authority that produced them rather than
-	 * re-deriving provenance from a partial disk scan.
+	 * re-deriving provenance from a partial disk scan. An {@link overlay} whose
+	 * own layers leave `extensions` alone reports its parent's level.
 	 */
 	extensionsSourceLevel(): "user" | "project" {
 		if (Object.hasOwn(this.#overrides, "extensions")) return "user";
 		if (Object.hasOwn(this.#configOverlay, "extensions")) return "user";
-		return Object.hasOwn(this.#project, "extensions") ? "project" : "user";
+		if (Object.hasOwn(this.#project, "extensions")) return "project";
+		if (this.#parent && !Object.hasOwn(this.#global, "extensions")) return this.#parent.extensionsSourceLevel();
+		return "user";
 	}
 
 	#modelRolesFromLayer(layer: RawSettings): Record<string, string> {
@@ -1235,34 +1434,12 @@ export class Settings {
 	}
 
 	/**
-	 * Restore original process-wide model-role overrides that were temporarily
-	 * replaced by project edits, mutating `#overrides` in place without
-	 * rebuilding. All remaining captures are valid because superseding
-	 * operations (late `overrideModelRoles`, global-mode `setModelRole`,
-	 * whole-map `override`/`clearOverride`) invalidate the affected captures
-	 * at the point of supersession. Caller is responsible for `#rebuildMerged()`.
-	 */
-	#restoreRuntimeModelRoleOverrides(): void {
-		if (this.#savedRuntimeModelRoleOverrides.size === 0) return;
-		const runtimeRoles = getByPath(this.#overrides, ["modelRoles"]);
-		if (!isRecord(runtimeRoles)) {
-			this.#savedRuntimeModelRoleOverrides.clear();
-			return;
-		}
-		for (const [role, originalValue] of this.#savedRuntimeModelRoleOverrides) {
-			if (originalValue === undefined) {
-				delete runtimeRoles[role];
-			} else {
-				runtimeRoles[role] = originalValue;
-			}
-		}
-		this.#savedRuntimeModelRoleOverrides.clear();
-	}
-
-	/**
 	 * Produce a deep copy of `#overrides` with original process-wide model-role
-	 * overrides restored, for use by {@link cloneForCwd}. All remaining
-	 * captures are valid (see {@link #restoreRuntimeModelRoleOverrides}).
+	 * overrides restored (temporarily replaced by project edits), for
+	 * {@link cloneForCwd} and {@link reloadForCwd}. All remaining captures are
+	 * valid because superseding operations (late `overrideModelRoles`,
+	 * global-mode `setModelRole`, whole-map `override`/`clearOverride`)
+	 * invalidate the affected captures at the point of supersession.
 	 * Does not mutate the current instance's `#overrides`.
 	 */
 	#buildOriginalOverrides(): RawSettings {
@@ -1373,19 +1550,19 @@ export class Settings {
 		return modelRoleValueFromUnknown(roles[role]);
 	}
 	/**
-	 * Get a model role from only the global settings layer.
+	 * Get a model role from only the global settings layer (an {@link overlay}'s own, else its parent's).
 	 */
 	getGlobalModelRole(role: ModelRole | string): string | undefined {
 		const modelId = this.#modelRolesFromLayer(this.#global)[role];
-		return modelId || undefined;
+		return modelId || this.#parent?.getGlobalModelRole(role);
 	}
 
 	/**
-	 * Get a model role from only the current project settings layer.
+	 * Get a model role from only the current project settings layer (an {@link overlay}'s own, else its parent's).
 	 */
 	getProjectModelRole(role: ModelRole | string): string | undefined {
 		const modelId = this.#modelRolesFromLayer(this.#project)[role];
-		return modelId || undefined;
+		return modelId || this.#parent?.getProjectModelRole(role);
 	}
 
 	/**
@@ -1395,16 +1572,16 @@ export class Settings {
 	 * for runtime and config-overlay layers and detects ownership by key
 	 * presence rather than normalized value, so a `null` tombstone in the
 	 * overlay or runtime layer correctly blocks lower layers. The project
-	 * layer is checked through {@link #projectSettingsForMerge} because a
+	 * layer is checked through {@link projectLayerForMerge} because a
 	 * project null is a cleared value (falls back to global), not a
 	 * tombstone.
 	 */
 	getModelRoleProvenance(role: ModelRole | string): SettingProvenance {
 		if (this.#modelRoleLayerOwns(this.#overrides, role)) return "runtime";
 		if (this.#modelRoleLayerOwns(this.#configOverlay, role)) return "overlay";
-		if (this.#modelRoleLayerOwns(this.#projectSettingsForMerge(), role)) return "project";
+		if (this.#modelRoleLayerOwns(projectLayerForMerge(this.#project), role)) return "project";
 		if (this.#modelRoleLayerOwns(this.#global, role)) return "global";
-		return "default";
+		return this.#parent?.getModelRoleProvenance(role) ?? "default";
 	}
 
 	/**
@@ -1446,27 +1623,6 @@ export class Settings {
 			}
 		}
 		this.#setRuntimeModelRoleOverrides(next);
-	}
-
-	/**
-	 * Get enabled providers (for compatibility with discovery system).
-	 */
-	getEnabledProviders(): string[] {
-		return cfgEnabledProviders.get(this);
-	}
-
-	/**
-	 * Set enabled providers (for compatibility with discovery system).
-	 */
-	setEnabledProviders(ids: string[]): void {
-		cfgEnabledProviders.set(this, ids);
-	}
-
-	/**
-	 * Set disabled providers (for compatibility with discovery system).
-	 */
-	setDisabledProviders(ids: string[]): void {
-		cfgDisabledProviders.set(this, ids);
 	}
 
 	// ─────────────────────────────────────────────────────────────────────────
@@ -1922,17 +2078,19 @@ export class Settings {
 	/**
 	 * `rejectNewWarnings` fails the read (without logging or recording the
 	 * warnings) when a project settings file newly fails to parse, so a
-	 * keep-last-good reload can retain the previous project layer.
+	 * keep-last-good reload can retain the previous project layer. `cwd`
+	 * (default: the current scope) selects the project to read.
 	 */
 	async #readProjectSettings(
 		quarantineInvalid: boolean,
-		options: { rejectNewWarnings?: boolean } = {},
+		options: { rejectNewWarnings?: boolean; cwd?: string } = {},
 	): Promise<ProjectSettingsReadResult> {
+		const cwd = options.cwd ?? this.#cwd;
 		// Resolve once: capability discovery, fs-cache invalidation, and the
 		// warning prefix below must all derive from the same absolute scope so
 		// relative cwds (e.g. ".") produce absolute provider paths that match.
-		const discoveryCwd = path.resolve(this.#cwd);
-		const projectConfigDir = getProjectAgentDir(this.#cwd);
+		const discoveryCwd = path.resolve(cwd);
+		const projectConfigDir = getProjectAgentDir(cwd);
 		const projectConfigPath = path.join(projectConfigDir, "config.yml");
 		invalidateCapabilityFsCache(projectConfigPath);
 		invalidateCapabilityFsCache(path.join(projectConfigDir, "settings.json"));
@@ -3139,7 +3297,8 @@ export class Settings {
 						continue;
 					}
 					const value = getByPath(this.#global, segments);
-					setByPath(current, segments, value);
+					if (value === undefined) deleteByPath(current, segments);
+					else setByPath(current, segments, value);
 					shouldWrite = true;
 				}
 
@@ -3311,40 +3470,47 @@ export class Settings {
 	// Utilities
 	// ─────────────────────────────────────────────────────────────────────────
 
-	#projectSettingsForMerge(): RawSettings {
-		const projectRoles = getByPath(this.#project, ["modelRoles"]);
-		if (!isRecord(projectRoles)) return this.#project;
-
-		let filteredRoles: Record<string, unknown> | undefined;
-		for (const role in projectRoles) {
-			if (!Object.hasOwn(projectRoles, role) || modelRoleValueFromUnknown(projectRoles[role]) !== undefined)
-				continue;
-			filteredRoles ??= { ...projectRoles };
-			delete filteredRoles[role];
-		}
-		return filteredRoles ? { ...this.#project, modelRoles: filteredRoles } : this.#project;
-	}
-
 	#rebuildMerged(): void {
 		this.#revision++;
-		const base = this.#parent ? this.#deepMerge({}, this.#parent.#merged) : {};
-		this.#merged = this.#deepMerge(base, this.#ownLayersMerged());
+		if (this.#parent) this.#syncedParentRevision = this.#parent.revision;
+		this.#merged = this.#mergeOverParent(this.#mergeOwnLayers(this.#ownLayers()));
 	}
 
-	/** This instance's own layers (global, project, `--config` overlay, runtime) merged in precedence order. */
-	#ownLayersMerged(): RawSettings {
-		let merged = this.#deepMerge(this.#deepMerge({}, this.#global), this.#projectSettingsForMerge());
-		merged = this.#deepMerge(merged, this.#configOverlay);
-		return this.#deepMerge(merged, this.#overrides);
+	#ownLayers(): OwnLayers {
+		return {
+			global: this.#global,
+			project: this.#project,
+			configOverlay: this.#configOverlay,
+			overrides: this.#overrides,
+		};
 	}
 
-	/** Checks every configured value against its definition (`validate` throws; unknown `items` warn). */
-	#validateAll(): void {
-		for (const setting of allSettings()) setting.checkConfigured(this.rawValue(setting));
+	/** `layers` (global, project, `--config` overlay, runtime) merged in precedence order. */
+	#mergeOwnLayers(layers: OwnLayers): RawSettings {
+		let merged = this.#deepMerge(this.#deepMerge({}, layers.global), projectLayerForMerge(layers.project));
+		merged = this.#deepMerge(merged, layers.configOverlay);
+		return this.#deepMerge(merged, layers.overrides);
 	}
 
+	/** `own` merged over an overlay parent's current view (itself for a root instance). */
+	#mergeOverParent(own: RawSettings): RawSettings {
+		return this.#parent ? this.#deepMerge(this.#parent.#mergedView(), own) : own;
+	}
+
+	/**
+	 * Checks every value configured in `merged` (path-scoped entries resolved for `cwd`) against its
+	 * definition: `validate` throws, unknown `items` warn. Defaults to the live layers.
+	 */
+	#validateAll(merged: RawSettings = this.#mergedView(), cwd: string = this.#cwd): void {
+		for (const setting of allSettings()) setting.checkConfigured(configuredValue(merged, setting, cwd));
+	}
+
+	/**
+	 * `overrides` deep-merged over `base`. Keys follow the higher layer's order, then base-only keys:
+	 * record order is meaningful to some consumers (`retry.fallbackChains` is searched in order).
+	 */
 	#deepMerge(base: RawSettings, overrides: RawSettings): RawSettings {
-		const result = { ...base };
+		const result: RawSettings = {};
 		for (const key of Object.keys(overrides)) {
 			const override = overrides[key];
 			const baseVal = base[key];
@@ -3364,6 +3530,7 @@ export class Settings {
 				result[key] = override;
 			}
 		}
+		for (const key of Object.keys(base)) if (!Object.hasOwn(result, key)) result[key] = base[key];
 		return result;
 	}
 }
@@ -3450,12 +3617,11 @@ export function resetSettingsForTest(): void {
 		ref.deref()?.cancelPendingSaves();
 	}
 	liveSettingsInstances.clear();
-	unbindEffects();
 	globalInstance = null;
 	globalInstancePromise = null;
 	clearBoundSettingsMethods();
-	configureProviderMaxInFlightRequests(undefined);
-	configureCredentialRedaction(false);
+	// Effect-owned process state (theme, redaction, request limits, …) returns to its defaults.
+	resetRegistryForTest(Settings.isolated());
 }
 
 /**

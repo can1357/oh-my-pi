@@ -1,23 +1,45 @@
 import { describe, expect, it } from "bun:test";
 import { orderedSettings } from "@oh-my-pi/pi-coding-agent/config/all-settings";
-import { all, bindEffects, combine, effect, effectsSettings } from "@oh-my-pi/pi-coding-agent/config/registry";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { all, bindEffects, combine, effect, lookup } from "@oh-my-pi/pi-coding-agent/config/registry";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 
-import { cfgTemperature, cfgTopK, cfgTopP } from "@oh-my-pi/pi-coding-agent/session/settings";
+import {
+	cfgProvidersMaxInFlightRequests,
+	cfgTemperature,
+	cfgTopK,
+	cfgTopP,
+} from "@oh-my-pi/pi-coding-agent/session/settings";
+import { cfgSteeringMode } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { cfgEditFuzzyMatch } from "@oh-my-pi/pi-coding-agent/edit/settings";
-import { cfgSearxngEndpoint } from "@oh-my-pi/pi-coding-agent/web/settings";
+import { cfgEvalPy } from "@oh-my-pi/pi-coding-agent/eval/settings";
+import { cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
+import { cfgSearxngBasicPassword, cfgSearxngEndpoint } from "@oh-my-pi/pi-coding-agent/web/settings";
 
 const tick = () => Promise.resolve();
 
+/** Runs `fn` with environment variables set (`undefined` unsets), restoring the previous values after. */
+function withEnv(vars: Record<string, string | undefined>, fn: () => void): void {
+	const saved: Record<string, string | undefined> = {};
+	for (const name in vars) {
+		saved[name] = Bun.env[name];
+		const value = vars[name];
+		if (value === undefined) delete Bun.env[name];
+		else Bun.env[name] = value;
+	}
+	try {
+		fn();
+	} finally {
+		for (const name in saved) {
+			const value = saved[name];
+			if (value === undefined) delete Bun.env[name];
+			else Bun.env[name] = value;
+		}
+	}
+}
+
 describe("settings registry", () => {
 	it("lets an override env beat every layer while a fallback env only replaces the default", () => {
-		const saved: Record<string, string | undefined> = {
-			PI_EDIT_FUZZY: Bun.env.PI_EDIT_FUZZY,
-			SEARXNG_ENDPOINT: Bun.env.SEARXNG_ENDPOINT,
-		};
-		try {
-			Bun.env.PI_EDIT_FUZZY = "0";
-			Bun.env.SEARXNG_ENDPOINT = "https://env.example";
+		withEnv({ PI_EDIT_FUZZY: "0", SEARXNG_ENDPOINT: "https://env.example" }, () => {
 			const configured = Settings.isolated({ "edit.fuzzyMatch": true, "searxng.endpoint": "https://cfg.example" });
 			expect(cfgEditFuzzyMatch.get(configured)).toBe(false);
 			expect(cfgEditFuzzyMatch.provenance(configured)).toBe("env");
@@ -27,17 +49,43 @@ describe("settings registry", () => {
 			const bare = Settings.isolated();
 			expect(cfgSearxngEndpoint.get(bare)).toBe("https://env.example");
 			expect(cfgSearxngEndpoint.isConfigured(bare)).toBe(true);
+		});
+	});
 
-			// Unparseable text counts as unset rather than coercing to a wrong value.
-			Bun.env.PI_EDIT_FUZZY = "auto";
-			expect(cfgEditFuzzyMatch.get(configured)).toBe(true);
-		} finally {
-			for (const name in saved) {
-				const value = saved[name];
-				if (value === undefined) delete Bun.env[name];
-				else Bun.env[name] = value;
-			}
-		}
+	it("parses a boolean env var like parseFlag: empty is unset, unlisted text is false", () => {
+		const configuredOff = Settings.isolated({ "eval.py": false });
+		withEnv({ PI_PY: "" }, () => {
+			expect(cfgEvalPy.get(configuredOff)).toBe(false);
+			expect(cfgEvalPy.provenance(configuredOff)).toBe("runtime");
+		});
+		withEnv({ PI_PY: "y" }, () => expect(cfgEvalPy.get(configuredOff)).toBe(true));
+		withEnv({ PI_PY: "disabled" }, () => {
+			expect(cfgEvalPy.get(Settings.isolated())).toBe(false);
+			expect(cfgEvalPy.provenance(Settings.isolated())).toBe("env");
+		});
+	});
+
+	it("treats a configured null as unset for fallback env vars and provenance", () => {
+		withEnv({ SEARXNG_BASIC_PASSWORD: "env-secret" }, () => {
+			const cleared = Settings.isolated({ "searxng.basicPassword": null });
+			expect(cfgSearxngBasicPassword.get(cleared)).toBe("env-secret");
+			expect(cfgSearxngBasicPassword.provenance(cleared)).toBe("env");
+		});
+		withEnv({ SEARXNG_BASIC_PASSWORD: undefined }, () => {
+			const cleared = Settings.isolated({ "searxng.basicPassword": null });
+			expect(cfgSearxngBasicPassword.isConfigured(cleared)).toBe(false);
+			expect(cfgSearxngBasicPassword.provenance(cleared)).toBe("default");
+		});
+	});
+
+	it("rejects writes whose value does not fit the setting's type", () => {
+		const settings = Settings.isolated({ temperature: 0.2 });
+		const temperature = lookup("temperature");
+		expect(() => temperature?.set(settings, "hot")).toThrow("Invalid value for temperature");
+		expect(() => temperature?.override(settings, Number.NaN)).toThrow("Invalid value for temperature");
+		expect(() => lookup("steeringMode")?.override(settings, "sometimes")).toThrow("Invalid value for steeringMode");
+		expect(cfgTemperature.get(settings)).toBe(0.2);
+		expect(cfgTemperature.provenance(settings)).toBe("runtime");
 	});
 
 	it("recomputes a derivation only when one of its inputs changes", () => {
@@ -118,33 +166,96 @@ describe("settings registry", () => {
 		expect(cfgTopP.get(parent)).not.toBe(0.5);
 	});
 
-	it("applies effects synchronously for the bound instance only", () => {
-		const previous = effectsSettings();
+	it("delivers every synchronous parent write to an overlay", async () => {
+		const parent = Settings.isolated();
+		const child = parent.overlay();
+		const grandchild = child.overlay();
+		const seen: string[] = [];
+		cfgTemperature.listen(child, value => {
+			seen.push(`temperature=${value}`);
+		});
+		cfgTopP.listen(child, value => {
+			seen.push(`topP=${value}`);
+		});
+
+		cfgTemperature.override(parent, 0.7);
+		cfgTopP.override(parent, 0.33);
+		cfgSteeringMode.override(parent, "all");
+		expect(cfgTopP.get(child)).toBe(0.33);
+		expect(cfgSteeringMode.get(child)).toBe("all");
+		expect(cfgSteeringMode.get(grandchild)).toBe("all");
+		await tick();
+		expect(seen.sort()).toEqual(["temperature=0.7", "topP=0.33"]);
+	});
+
+	it("keeps an overlay's inherited values in its cwd clone and in layer accessors", async () => {
+		const parent = Settings.isolated({ temperature: 0.2 });
+		parent.setModelRole("smol", "anthropic/parent-global");
+		const child = parent.overlay({ topP: 0.5 });
+
+		const clone = await child.cloneForCwd(parent.getCwd());
+		expect(cfgTemperature.get(clone)).toBe(0.2);
+		expect(cfgTemperature.provenance(clone)).toBe("runtime");
+		expect(cfgTopP.get(clone)).toBe(0.5);
+		expect(clone.getModelRole("smol")).toBe("anthropic/parent-global");
+
+		expect(child.getGlobalModelRole("smol")).toBe("anthropic/parent-global");
+		expect(child.getModelRoleSource("smol")).toBe("global");
+		expect(child.getModelRoleProvenance("smol")).toBe("global");
+		expect(child.getGlobalSettings()).toMatchObject({ modelRoles: { smol: "anthropic/parent-global" } });
+	});
+
+	it("drives effects synchronously from the newest outstanding hold only", () => {
 		const applied: number[] = [];
-		effect(cfgTemperature, value => {
+		const removeEffect = effect(cfgTemperature, value => {
 			applied.push(value);
 		});
-		const primary = Settings.isolated({ temperature: 0.2 });
-		const staleUnbind = bindEffects(Settings.isolated());
-		const unbind = bindEffects(primary);
+		const outer = Settings.isolated({ temperature: 0.2 });
+		const inner = Settings.isolated({ temperature: 0.4 });
+		const releaseOuter = bindEffects(outer);
+		const releaseInner = bindEffects(inner);
+		const releaseRepeat = bindEffects(inner);
 		try {
-			expect(applied.at(-1)).toBe(0.2);
-			cfgTemperature.override(primary, 0.4);
 			expect(applied.at(-1)).toBe(0.4);
+			cfgTemperature.override(inner, 0.5);
+			expect(applied.at(-1)).toBe(0.5);
 
 			const seen = applied.length;
-			cfgTemperature.override(primary.overlay(), 0.9);
-			cfgTemperature.override(Settings.isolated(), 0.9);
-			staleUnbind();
-			cfgTemperature.override(primary, 0.5);
-			expect(applied.slice(seen)).toEqual([0.5]);
+			cfgTemperature.override(inner.overlay(), 0.9);
+			cfgTemperature.override(outer, 0.3);
+			expect(applied).toHaveLength(seen);
 
-			unbind();
-			cfgTemperature.override(primary, 0.6);
-			expect(applied.at(-1)).toBe(0.5);
+			// A repeat holder's release (idempotent) leaves the other hold on the same instance in charge.
+			releaseRepeat();
+			releaseRepeat();
+			cfgTemperature.override(inner, 0.6);
+			expect(applied.at(-1)).toBe(0.6);
+
+			// Releasing the newest hold hands effects back to the previous one, re-applying its value.
+			releaseInner();
+			expect(applied.at(-1)).toBe(0.3);
+			cfgTemperature.override(inner, 0.7);
+			expect(applied.at(-1)).toBe(0.3);
 		} finally {
-			unbind();
-			if (previous) bindEffects(previous);
+			removeEffect();
+			releaseRepeat();
+			releaseInner();
+			releaseOuter();
+		}
+	});
+
+	it("restores effect-owned state to the defaults on test reset", () => {
+		let current: number | undefined;
+		const removeEffect = effect(cfgTemperature, value => {
+			current = value;
+		});
+		try {
+			bindEffects(Settings.isolated({ temperature: 0.4 }));
+			expect(current).toBe(0.4);
+			resetSettingsForTest();
+			expect(current).toBe(cfgTemperature.default);
+		} finally {
+			removeEffect();
 		}
 	});
 
@@ -157,5 +268,20 @@ describe("settings registry", () => {
 	it("rejects overrides for unknown setting ids", () => {
 		expect(() => Settings.isolated({ temprature: 0.2 })).toThrow('Unknown setting "temprature"');
 		expect(() => Settings.isolated().overlay({ "nope.nope": 1 })).toThrow('Unknown setting "nope.nope"');
+	});
+
+	it("migrates, normalizes, and validates constructor overrides like handle writes", () => {
+		expect(cfgSteeringMode.get(Settings.isolated({ queueMode: "all" }))).toBe("all");
+		expect(
+			cfgProvidersMaxInFlightRequests.get(Settings.isolated({ "providers.maxInFlightRequests": { openai: 2.7 } })),
+		).toEqual({ openai: 2 });
+		expect(() => Settings.isolated({ "providers.maxInFlightRequests": { openai: 0 } })).toThrow(
+			"Provider request limits must be positive numbers: openai",
+		);
+		expect(() =>
+			Settings.isolated().overlay({ "task.agentCompactionThresholdOverrides": { scout: "eighty" } }),
+		).toThrow("Invalid task.agentCompactionThresholdOverrides.scout");
+		expect(() => Settings.isolated({ temperature: "hot" })).toThrow("Invalid value for temperature");
+		expect(cfgModelRoles.get(Settings.isolated({ modelRoles: { smol: "a/b" } }))).toEqual({ smol: "a/b" });
 	});
 });

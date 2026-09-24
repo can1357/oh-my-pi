@@ -571,7 +571,7 @@ describe("subagent runtime model resolution", () => {
 		expect(childModelRole).toBeUndefined();
 	});
 
-	it("preserves malformed fallback configuration for child validation", async () => {
+	it("treats a null fallback configuration as unset without installing a subagent chain", async () => {
 		const primary = model("lm-studio", "local-reviewer");
 		let childFallbackChains: unknown;
 		let childModelRole: string | undefined;
@@ -599,7 +599,8 @@ describe("subagent runtime model resolution", () => {
 			enableLsp: false,
 		});
 
-		expect(childFallbackChains).toBeNull();
+		// A configured null is unset (settings contract): the child reads the empty default.
+		expect(childFallbackChains).toEqual({});
 		expect(childModelRole).toBeUndefined();
 	});
 

@@ -15,8 +15,6 @@ import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import type { Setting } from "../config/registry";
 import type { Settings } from "../config/settings";
-import { InternalUrlRouter } from "../internal-urls";
-import { extractUriScheme } from "../internal-urls/parse";
 
 import {
 	type OutputSummary,
@@ -373,6 +371,12 @@ export class OutputMetaBuilder {
 		return this;
 	}
 
+	/** Mark the output as a bounded page of a file its source re-reads with line selectors ({@link OutputMeta.pagedSource}). */
+	pagedSource(): this {
+		this.#meta.pagedSource = true;
+		return this;
+	}
+
 	/** Add LSP diagnostics. No-op if no messages. */
 	diagnostics(summary: string, messages: string[]): this {
 		if (messages.length === 0) return this;
@@ -497,15 +501,10 @@ async function spillLargeResultToArtifact(
 	const existingMeta: OutputMeta | undefined = result.details?.meta;
 	if (existingMeta?.truncation?.artifactId) return result;
 
-	// Reading an immutable, line-addressable file (artifact://, agent://, ...) already
-	// addresses recoverable full output: the source URL pages it with `:N-M`. Spilling
-	// that read would only create a redundant artifact containing another file's page
-	// (and can repeat indefinitely on subsequent artifact reads).
-	if (toolName === "read" && existingMeta?.source?.type === "internal") {
-		const scheme = extractUriScheme(existingMeta.source.value);
-		const spec = scheme ? InternalUrlRouter.instance().spec(scheme) : undefined;
-		if (spec?.backing === "file" && spec.immutable && spec.selectors === "lines") return result;
-	}
+	// A bounded page of a file its source URL re-reads with `:N-M` is already recoverable.
+	// Spilling it would only create a redundant artifact holding another file's page (and
+	// can repeat indefinitely on subsequent artifact reads).
+	if (existingMeta?.pagedSource) return result;
 
 	// Measure total text content
 	const textParts: string[] = [];

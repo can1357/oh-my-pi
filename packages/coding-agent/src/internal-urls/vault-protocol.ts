@@ -1,10 +1,16 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { $which, isEnoent } from "@oh-my-pi/pi-utils";
+import { $which } from "@oh-my-pi/pi-utils";
 import { isSettingsInitialized, settings } from "../config/settings";
 
 import vaultDoc from "../prompts/internal-urls/vault.md" with { type: "text" };
-import { containedRealPath, contentTypeForPath, ensureWithinRoot, validateRelativePath } from "./filesystem-resource";
+import {
+	containedRealPath,
+	contentTypeForPath,
+	ensureCreatableWithinRoot,
+	ensureWithinRoot,
+	validateRelativePath,
+} from "./filesystem-resource";
 import { parseInternalUrl } from "./parse";
 import type {
 	InternalResource,
@@ -13,7 +19,6 @@ import type {
 	ProtocolHandler,
 	ResolveContext,
 	SchemeSpec,
-	WriteContext,
 } from "./types";
 import { cfgVaultEnabled } from "../tools/settings";
 
@@ -392,66 +397,6 @@ function getCachedVaultRoot(ref: VaultReference): string | undefined {
 	return cached ? path.resolve(cached) : undefined;
 }
 
-function findExistingAncestorSync(targetPath: string, rootPath: string): string {
-	let current = targetPath;
-	while (true) {
-		ensureWithinRoot(current, rootPath, "vault");
-		try {
-			return fs.realpathSync.native(current);
-		} catch (error) {
-			if (!isEnoent(error)) throw error;
-			const parent = path.dirname(current);
-			if (parent === current) throw error;
-			current = parent;
-		}
-	}
-}
-
-export function resolveVaultUrlToPath(input: string | InternalUrl): string {
-	if (!isVaultEnabled()) throw new VaultDisabledError();
-	const parsed = parseVaultUrl(input);
-	if (parsed.kind !== "fs-file" && parsed.kind !== "fs-dir") {
-		throw new Error("vault:// path resolution only supports plain filesystem paths");
-	}
-
-	const cachedRoot = getCachedVaultRoot(parsed.ref);
-	if (!cachedRoot) {
-		throw new Error(
-			"vault:// path resolution requires a cached vault root; read vault:// first or use the write tool",
-		);
-	}
-
-	const resolvedRoot = fs.realpathSync.native(cachedRoot);
-	const targetPath = parsed.relativePath ? path.resolve(resolvedRoot, parsed.relativePath) : resolvedRoot;
-	ensureWithinRoot(targetPath, resolvedRoot, "vault");
-
-	try {
-		const realTarget = fs.realpathSync.native(targetPath);
-		ensureWithinRoot(realTarget, resolvedRoot, "vault");
-	} catch (error) {
-		if (!isEnoent(error)) throw error;
-		const realParent = findExistingAncestorSync(path.dirname(targetPath), resolvedRoot);
-		ensureWithinRoot(realParent, resolvedRoot, "vault");
-	}
-
-	return targetPath;
-}
-
-async function findExistingAncestor(targetPath: string, rootPath: string): Promise<string> {
-	let current = targetPath;
-	while (true) {
-		ensureWithinRoot(current, rootPath, "vault");
-		try {
-			return await fs.promises.realpath(current);
-		} catch (error) {
-			if (!isEnoent(error)) throw error;
-			const parent = path.dirname(current);
-			if (parent === current) throw error;
-			current = parent;
-		}
-	}
-}
-
 async function countVaultEntries(rootPath: string): Promise<VaultCounts> {
 	const pending = [rootPath];
 	let files = 0;
@@ -630,7 +575,7 @@ export class VaultProtocolHandler implements ProtocolHandler {
 		backing: "file",
 		selectors: "lines",
 		immutable: false,
-		write: { payload: "text", scope: "workspace", tier: () => "write" },
+		write: { via: "file", payload: "text", scope: "workspace", tier: () => "write" },
 	};
 
 	readonly #spawnObsidian: typeof spawnObsidian;
@@ -710,25 +655,16 @@ export class VaultProtocolHandler implements ProtocolHandler {
 		const realTargetPath = await containedRealPath(targetPath, root, "vault");
 		if (realTargetPath !== undefined) return realTargetPath;
 		if (!options?.create) return null;
-		ensureWithinRoot(await findExistingAncestor(path.dirname(targetPath), root), root, "vault");
+		await ensureCreatableWithinRoot(targetPath, root, "vault");
 		return targetPath;
 	}
 
-	async write(url: InternalUrl, content: string, context?: WriteContext): Promise<void> {
-		if (!isVaultEnabled()) throw new VaultDisabledError();
-		const parsed = parseVaultUrl(url);
-		if (parsed.kind !== "fs-file") {
-			throw new Error("vault:// write only supports plain file paths");
-		}
-		await this.#writeFile(parsed, content, context);
-	}
-
-	async #spawn(args: string[], context?: ResolveContext | WriteContext): Promise<ObsidianSpawnResult> {
+	async #spawn(args: string[], context?: ResolveContext): Promise<ObsidianSpawnResult> {
 		const bin = requireObsidianBinary(this.#resolveObsidianBinary);
 		return this.#spawnObsidian(bin, args, context?.signal, DEFAULT_OBSIDIAN_TIMEOUT_MS);
 	}
 
-	async #loadVaultDirectory(context?: ResolveContext | WriteContext): Promise<Map<string, string>> {
+	async #loadVaultDirectory(context?: ResolveContext): Promise<Map<string, string>> {
 		if (cachedVaultDirectory) return cachedVaultDirectory;
 		const result = await this.#spawn(["vaults", "verbose"], context);
 		assertCliSuccess("vaults", result);
@@ -736,7 +672,7 @@ export class VaultProtocolHandler implements ProtocolHandler {
 		return cachedVaultDirectory;
 	}
 
-	async #resolveVaultRoot(ref: VaultReference, context?: ResolveContext | WriteContext): Promise<string> {
+	async #resolveVaultRoot(ref: VaultReference, context?: ResolveContext): Promise<string> {
 		const cached = getCachedVaultRoot(ref);
 		if (cached) return cached;
 
@@ -821,7 +757,7 @@ export class VaultProtocolHandler implements ProtocolHandler {
 
 	async #resolveFsTarget(
 		parsed: Extract<ParsedVaultUrl, { kind: "fs-dir" | "fs-file" }>,
-		context?: ResolveContext | WriteContext,
+		context?: ResolveContext,
 	): Promise<{ root: string; targetPath: string }> {
 		const root = await this.#resolveVaultRoot(parsed.ref, context);
 		const resolvedRoot = await fs.promises.realpath(root);
@@ -888,31 +824,6 @@ export class VaultProtocolHandler implements ProtocolHandler {
 			size: Buffer.byteLength(content, "utf-8"),
 			sourcePath: realTargetPath,
 		};
-	}
-
-	async #writeFile(
-		parsed: Extract<ParsedVaultUrl, { kind: "fs-file" }>,
-		content: string,
-		context?: WriteContext,
-	): Promise<void> {
-		const { root, targetPath } = await this.#resolveFsTarget(parsed, context);
-		try {
-			const realTargetPath = await fs.promises.realpath(targetPath);
-			ensureWithinRoot(realTargetPath, root, "vault");
-			const stat = await fs.promises.stat(realTargetPath);
-			if (stat.isDirectory()) {
-				throw new Error(`vault:// URL must resolve to a file: ${parsed.url}`);
-			}
-		} catch (error) {
-			if (!isEnoent(error)) throw error;
-			const parentDir = path.dirname(targetPath);
-			const existingAncestor = await findExistingAncestor(parentDir, root);
-			ensureWithinRoot(existingAncestor, root, "vault");
-			await fs.promises.mkdir(parentDir, { recursive: true });
-			const realParent = await fs.promises.realpath(parentDir);
-			ensureWithinRoot(realParent, root, "vault");
-		}
-		await Bun.write(targetPath, content);
 	}
 
 	async #runCli(

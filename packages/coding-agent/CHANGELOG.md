@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added support for paged reading of large files with metadata signaling for UI recovery
+- Added `unset` capability to the configuration registry for removing overrides and reverting to defaults
 - Added support for universal (fat) Mach-O binaries in IDA tool, allowing selection of specific architecture slices via the `:@<arch>` syntax
 - Added automatic slice detection for universal binaries, defaulting to the host CPU architecture
 - Added case-sensitive per-agent compaction thresholds for task/eval subagents, with percentage or fixed-token limits that leave the main session threshold unchanged ([#13107](https://github.com/can1357/oh-my-pi/pull/13107) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
@@ -32,6 +34,9 @@
 
 ### Changed
 
+- Refactored domain-specific settings to a type-safe registry supporting dynamic reactivity and layered environment variable overrides
+- Updated URL resolution to use a canonical router, replacing ad-hoc `normalizeLocalScheme` logic
+- Hardened filesystem access across `local://`, `memory://`, and `vault://` protocols with robust symlink and containment validation
 - Materialized specific Mach-O slices into temporary store IDBs to ensure IDA analyzes only the selected architecture
 - Updated IDA and read tool documentation to describe universal binary slice selection
 - Refactored all domain-specific settings to use the registry, enabling dynamic UI and session state updates without full restarts

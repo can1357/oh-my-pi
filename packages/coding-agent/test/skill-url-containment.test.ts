@@ -65,10 +65,10 @@ describe("bash skill:// expansion containment", () => {
 		await expect(expand("cat skill://docs", skill)).rejects.toThrow("resolves outside the plugin root");
 	});
 
-	it("never hands bash a missing instruction file", async () => {
+	it("fails closed on a bare URI whose instruction file is missing", async () => {
 		const skill: Skill = { ...pluginSkill(), filePath: path.join(skillDir, "gone.md") };
 
-		await expect(expand("skill://docs", skill)).resolves.toBe("skill://docs");
+		await expect(expand("cat skill://docs", skill)).rejects.toThrow("does not exist");
 	});
 
 	it("resolves a bare URI to the base directory for directory callers", async () => {
@@ -98,10 +98,8 @@ describe("bash skill:// expansion containment", () => {
 		);
 	});
 
-	it("never hands bash a dangling symlink that would write outside the plugin root", async () => {
-		const command = "tee skill://docs/references/dangle.md";
-
-		await expect(expand(command, pluginSkill())).resolves.toBe(command);
+	it("fails closed on dangling symlinks instead of handing bash the raw token", async () => {
+		await expect(expand("tee skill://docs/references/dangle.md", pluginSkill())).rejects.toThrow("does not exist");
 	});
 
 	it("leaves uncontained (non-plugin) skills unrestricted", async () => {

@@ -11,7 +11,7 @@ import type {
 import type { ToolExample } from "@oh-my-pi/pi-ai";
 import { type AstReplaceChange, type AstReplaceFileChange, astEdit } from "@oh-my-pi/pi-natives";
 
-import { $envpos, prompt, untilAborted } from "@oh-my-pi/pi-utils";
+import { $envpos, isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { getEditStore } from "../edit/store";
 import { normalizeToLF } from "../edit/normalize";
 import { InternalUrlRouter, sessionResolveContext } from "../internal-urls";
@@ -21,7 +21,7 @@ import astEditDescription from "../prompts/tools/ast-edit.md" with { type: "text
 
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import type { ToolSession } from ".";
-import { truncateForPrompt } from "./approval";
+import { TIER_RANK, truncateForPrompt } from "./approval";
 import { parseReadUrlTarget } from "./fetch";
 import { createFileRecorder, formatResultPath } from "./file-recorder";
 import { formatGroupedFiles } from "@oh-my-pi/pi-tui/tools/grouped-file-output";
@@ -150,17 +150,16 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 	readonly name = "ast_edit";
 	/** Highest write tier over every path; read only when every path is a read-tier write target. */
 	readonly approval = (args: unknown): ToolTier => {
-		const paths = Array.isArray((args as Partial<AstEditSchemaInfer>).paths)
-			? ((args as Partial<AstEditSchemaInfer>).paths as string[])
-			: [];
-		if (paths.length === 0) return "write";
+		const paths = isRecord(args) ? args.paths : undefined;
+		if (!Array.isArray(paths) || paths.length === 0) return "write";
 		const router = InternalUrlRouter.instance();
 		let tier: ToolTier = "read";
 		for (const target of paths) {
+			// A malformed entry fails closed rather than reaching a tier decision.
+			if (typeof target !== "string") return "exec";
 			const decision = router.writeTier(target, undefined, undefined);
 			const targetTier = typeof decision === "string" ? decision : decision.tier;
-			if (targetTier === "exec") return "exec";
-			if (targetTier === "write") tier = "write";
+			if (TIER_RANK[targetTier] > TIER_RANK[tier]) tier = targetTier;
 		}
 		return tier;
 	};
@@ -270,7 +269,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 				cwd: this.session.cwd,
 				internalUrlAction: "rewrite",
 				context: resolveContext,
-				trackImmutableSources: true,
+				fileWritableOnly: true,
 				resolveExternalUrl: async rawPath => {
 					if (!parseReadUrlTarget(rawPath)) return undefined;
 					throw new ToolError(
@@ -278,27 +277,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 					);
 				},
 			});
-			const {
-				searchPath: resolvedSearchPath,
-				scopePath,
-				isDirectory,
-				multiTargets,
-				globFilter,
-				immutableSourcePaths,
-			} = scope;
-			if (immutableSourcePaths.size > 0) {
-				// Name the URLs the model wrote; fall back to the backing paths when no
-				// input URL locates onto one (delimited or glob entries).
-				const router = InternalUrlRouter.instance();
-				const immutableUrls: string[] = [];
-				for (const rawPath of params.paths) {
-					if (!router.canHandle(rawPath)) continue;
-					const located = await router.locate(rawPath, resolveContext).catch(() => null);
-					if (located !== null && immutableSourcePaths.has(path.resolve(located))) immutableUrls.push(rawPath);
-				}
-				const named = immutableUrls.length > 0 ? immutableUrls : [...immutableSourcePaths];
-				throw new ToolError(`Cannot rewrite immutable resource: ${named.join(", ")}`);
-			}
+			const { searchPath: resolvedSearchPath, scopePath, isDirectory, multiTargets, globFilter } = scope;
 
 			const result = await runAstEditOnce(multiTargets, resolvedSearchPath, globFilter, {
 				rewrites: normalizedRewrites,

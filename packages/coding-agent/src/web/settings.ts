@@ -34,7 +34,7 @@ export const cfgSearxngEndpoint = register({
 	id: "searxng.endpoint",
 	type: "string",
 	default: undefined,
-	env: { name: "SEARXNG_ENDPOINT", fallback: true },
+	env: { name: "SEARXNG_ENDPOINT", fallback: "blank" },
 	ui: {
 		tab: "providers",
 		group: "Services",
@@ -47,7 +47,7 @@ export const cfgSearxngToken = register({
 	id: "searxng.token",
 	type: "string",
 	default: undefined,
-	env: { name: "SEARXNG_TOKEN", fallback: true },
+	env: { name: "SEARXNG_TOKEN", fallback: "blank" },
 	credential: true,
 });
 

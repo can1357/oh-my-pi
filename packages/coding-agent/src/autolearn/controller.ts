@@ -22,7 +22,6 @@ import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
 import { cfgAutolearnAutoContinue, cfgAutolearnEnabled, cfgAutolearnMinToolCalls } from "./settings";
 
 const AUTOLEARN_NUDGE_AUTOCONTINUE = autolearnNudgeAutoContinue.trim();
-const DEFAULT_MIN_TOOL_CALLS = 5;
 
 /**
  * Build the standing auto-learn guidance for the system prompt from the tools
@@ -113,7 +112,7 @@ export class AutoLearnController {
 		}
 		// The controller is installed regardless of the flag; honor its live value.
 		if (!cfgAutolearnEnabled.get(this.#settings)) return;
-		const minToolCalls = cfgAutolearnMinToolCalls.get(this.#settings) ?? DEFAULT_MIN_TOOL_CALLS;
+		const minToolCalls = cfgAutolearnMinToolCalls.get(this.#settings);
 		if (toolCalls < minToolCalls) return;
 		// Never interrupt plan-mode review.
 		if (this.#session.getPlanModeState()?.enabled) return;

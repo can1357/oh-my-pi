@@ -16,7 +16,6 @@ import { applyListLimit } from "@oh-my-pi/pi-tui/tools/list-limit";
 import {
 	expandDelimitedPathEntries,
 	formatPathRelativeToCwd,
-	hasUrlPathGlobChars,
 	normalizePathLikeInput,
 	parseFindPattern,
 	partitionExistingPaths,
@@ -92,7 +91,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			hasFind: this.session.isToolActive?.("find") ?? isFindEnabled(this.session),
 			eagerDelegation: sessionDelegationBias(this.session) === "eager",
 			scoutAvailable: isScoutSpawnable(
-				cfgTaskDisabledAgents.get(this.session.settings) as string[] | undefined,
+				cfgTaskDisabledAgents.get(this.session.settings),
 				this.session.getSessionSpawns?.() ?? "*",
 			),
 		});
@@ -165,7 +164,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 					continue;
 				}
 				// Locating never contacts a remote host; schemes without local files fail uniformly.
-				if (hasUrlPathGlobChars(rawPattern)) {
+				if (internalRouter.isGlob(rawPattern)) {
 					const located = await internalRouter.locateGlob(rawPattern, resolveContext);
 					if (located === null) {
 						throw new ToolError(`Glob patterns are not supported for internal URLs: ${rawPattern}`);

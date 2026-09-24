@@ -2,11 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
-import { cfgTemperature } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { cfgProvidersMaxInFlightRequests, cfgTemperature } from "@oh-my-pi/pi-coding-agent/session/settings";
 
 describe("Settings config-file watching", () => {
 	let state: SettingsTestState | undefined;
@@ -26,6 +27,8 @@ describe("Settings config-file watching", () => {
 	afterEach(() => {
 		restoreSettingsTestState(state);
 		state = undefined;
+		// Persisted instances open agent.db under tempDir; close it before the directory goes away.
+		AgentStorage.close();
 		tempDir.removeSync();
 	});
 
@@ -66,5 +69,22 @@ describe("Settings config-file watching", () => {
 		const recovered = nextChange();
 		await replaceConfig(YAML.stringify({ temperature: 0.3 }));
 		expect(await recovered).toBe(0.3);
+	});
+
+	it("keeps the last good values when an on-disk edit fails validation", async () => {
+		await Bun.write(
+			path.join(agentDir, "config.yml"),
+			YAML.stringify({ providers: { maxInFlightRequests: { openai: 2 } } }),
+		);
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+		settings.startWatching();
+
+		const rejected = Promise.withResolvers<void>();
+		vi.spyOn(logger, "warn").mockImplementation((message: string) => {
+			if (message.includes("on-disk change is invalid")) rejected.resolve();
+		});
+		await replaceConfig(YAML.stringify({ providers: { maxInFlightRequests: { openai: 0 } } }));
+		await rejected.promise;
+		expect(cfgProvidersMaxInFlightRequests.get(settings)).toEqual({ openai: 2 });
 	});
 });

@@ -5,6 +5,10 @@
 import { combine, register } from "../config/registry";
 import { BUILTIN_BLOB_DESTINATIONS, type BlobDestinationId, type BlobDestinationMetadata } from "./destinations";
 
+const DEFAULT_IMAGES_URLS_BACKENDS: BlobDestinationId[] = ["provider-files", "tailscale", "cloudflared", "litterbox"];
+const EMPTY_IMAGES_URLS_OPTIONS: Partial<Record<BlobDestinationId, Record<string, unknown>>> = {};
+const EMPTY_IMAGES_URLS_CREDENTIALS: Partial<Record<BlobDestinationId, Record<string, string>>> = {};
+
 const BUILTIN_BLOB_DESTINATION_METADATA: readonly BlobDestinationMetadata<BlobDestinationId>[] =
 	Object.values(BUILTIN_BLOB_DESTINATIONS);
 
@@ -34,7 +38,7 @@ export const cfgImagesUrlsEnabled = register({
 export const cfgImagesUrlsBackends = register({
 	id: "images.urls.backends",
 	type: "array",
-	default: ["provider-files", "tailscale", "cloudflared", "litterbox"] as BlobDestinationId[],
+	default: DEFAULT_IMAGES_URLS_BACKENDS,
 	ui: {
 		tab: "model",
 		group: "Vision",
@@ -48,13 +52,13 @@ export const cfgImagesUrlsBackends = register({
 export const cfgImagesUrlsOptions = register({
 	id: "images.urls.options",
 	type: "record",
-	default: {} as Partial<Record<BlobDestinationId, Record<string, unknown>>>,
+	default: EMPTY_IMAGES_URLS_OPTIONS,
 });
 
 export const cfgImagesUrlsCredentials = register({
 	id: "images.urls.credentials",
 	type: "record",
-	default: {} as Partial<Record<BlobDestinationId, Record<string, string>>>,
+	default: EMPTY_IMAGES_URLS_CREDENTIALS,
 	credential: true,
 });
 
