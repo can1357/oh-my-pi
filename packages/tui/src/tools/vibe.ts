@@ -23,6 +23,8 @@ export interface VibeToolDetails {
 	op: VibeOp;
 	/** Live TV-wall snapshot of the owner's worker sessions at (or during) the call. */
 	screens: VibeScreenSnapshot[];
+	/** Dead sessions left off `screens` (killed or unrecoverable); shown as a count. */
+	hiddenDead?: string[];
 	spawned?: { id: string; cli: VibeCli; jobId: string };
 	send?: VibeSendOutcome;
 	wait?: {
@@ -373,13 +375,21 @@ export function createVibeToolRenderer(op: VibeOp) {
 				return new Text(header, 0, 0);
 			}
 
-			// wait/list: the TV wall.
+			// wait/list: the TV wall. Dead sessions arrive pre-filtered (see
+			// `hiddenDead`) so a long-running director's wall stays legible.
 			const screens = details.screens;
+			const hiddenDead = details.hiddenDead?.length ?? 0;
+			const deadMeta = hiddenDead > 0 ? [uiTheme.fg("dim", `${hiddenDead} dead hidden`)] : [];
 			if (screens.length === 0) {
 				const fallback = result.content.find(part => part.type === "text")?.text ?? "no sessions";
+				const gist = hiddenDead > 0 ? "no live sessions" : fallback;
 				return new Text(
 					renderStatusLine(
-						{ icon: "warning", title: `vibe ${op}`, meta: [uiTheme.fg("dim", frameText(fallback, 60))] },
+						{
+							icon: "warning",
+							title: `vibe ${op}`,
+							meta: [uiTheme.fg("dim", frameText(gist, 60)), ...deadMeta],
+						},
 						uiTheme,
 					),
 					0,
@@ -394,6 +404,7 @@ export function createVibeToolRenderer(op: VibeOp) {
 				if (running > 0) meta.push(uiTheme.fg("accent", `${running} on air`));
 				if (settledById.size > 0) meta.push(uiTheme.fg("success", `${settledById.size} settled`));
 				if (details.wait?.timedOut) meta.push(uiTheme.fg("warning", "timed out"));
+				meta.push(...deadMeta);
 				const title =
 					op === "wait"
 						? waiting

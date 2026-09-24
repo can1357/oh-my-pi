@@ -57,6 +57,28 @@ function screensOf(session: ToolSession, ids?: string[]): VibeScreenSnapshot[] {
 	return VibeSessionRegistry.global().screens(session, ids);
 }
 
+/**
+ * TV-wall snapshot. Named `ids` show exactly those sessions; otherwise dead
+ * sessions (killed, unrecoverable) are left off the wall and reported by id,
+ * so a director that kills finished workers doesn't re-render every corpse on
+ * each status check. `keep` retains dead sessions whose turn just settled.
+ */
+function wallOf(
+	session: ToolSession,
+	ids?: string[],
+	keep?: ReadonlySet<string>,
+): Pick<VibeToolDetails, "screens" | "hiddenDead"> {
+	const all = screensOf(session, ids);
+	if (ids?.length) return { screens: all };
+	const screens: VibeScreenSnapshot[] = [];
+	const hiddenDead: string[] = [];
+	for (const screen of all) {
+		if (screen.state === "dead" && !keep?.has(screen.id)) hiddenDead.push(screen.id);
+		else screens.push(screen);
+	}
+	return hiddenDead.length > 0 ? { screens, hiddenDead } : { screens };
+}
+
 function textResult(text: string, details: VibeToolDetails): AgentToolResult<VibeToolDetails> {
 	return { content: [{ type: "text", text }], details };
 }
@@ -135,7 +157,7 @@ export class VibeWaitTool implements AgentTool<typeof vibeWaitSchema, VibeToolDe
 				content: [{ type: "text", text: "" }],
 				details: {
 					op: "wait",
-					screens: screensOf(this.session, params.sessions),
+					...wallOf(this.session, params.sessions),
 					wait: { settled: [], stillRunning: [], timedOut: false, waiting: true },
 				},
 			});
@@ -154,7 +176,7 @@ export class VibeWaitTool implements AgentTool<typeof vibeWaitSchema, VibeToolDe
 		}
 		const details: VibeToolDetails = {
 			op: "wait",
-			screens: screensOf(this.session, params.sessions),
+			...wallOf(this.session, params.sessions, new Set(outcome.settled.map(entry => entry.id))),
 			wait: {
 				settled: outcome.settled.map(({ id, jobId, status }) => ({ id, jobId, status })),
 				stillRunning: outcome.stillRunning,
@@ -219,11 +241,8 @@ export class VibeListTool implements AgentTool<typeof vibeListSchema, VibeToolDe
 	}
 
 	async execute(): Promise<AgentToolResult<VibeToolDetails>> {
-		const screens = screensOf(this.session);
-		const details: VibeToolDetails = { op: "list", screens };
-		if (screens.length === 0) {
-			return textResult("No vibe sessions. Spawn one with vibe_spawn.", details);
-		}
+		const { screens, hiddenDead } = wallOf(this.session);
+		const details: VibeToolDetails = { op: "list", screens, hiddenDead };
 		const lines = screens.map(screen => {
 			const parts = [
 				`- \`${screen.id}\` [${screen.cli}] ${screen.state}`,
@@ -234,6 +253,14 @@ export class VibeListTool implements AgentTool<typeof vibeListSchema, VibeToolDe
 			if (screen.lastActivity) parts.push(`last: ${screen.lastActivity}`);
 			return parts.join(" · ");
 		});
+		if (lines.length === 0) {
+			lines.push(hiddenDead ? "No live vibe sessions." : "No vibe sessions. Spawn one with vibe_spawn.");
+		}
+		if (hiddenDead) {
+			lines.push(
+				`Dead (${hiddenDead.length}, transcripts at history://<id>): ${hiddenDead.map(id => `\`${id}\``).join(", ")}`,
+			);
+		}
 		return textResult(lines.join("\n"), details);
 	}
 }

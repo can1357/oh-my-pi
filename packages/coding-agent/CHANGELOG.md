@@ -71,6 +71,7 @@
 - Fixed supervised service exits being missed or repeatedly replayed instead of being delivered to the session that started the service.
 - Fixed memory backend failures to identify the affected item and underlying storage error.
 - Fixed `write xd://<tool>` validation behavior so devices can return precise schema-mismatch responses.
+- `/vibe` status checks no longer redraw every killed worker: `vibe_wait` and `vibe_list` leave dead sessions off the wall and show a `N dead hidden` count, and `vibe_list` collapses them to one trailing line of ids (transcripts stay at `history://<id>`). Sessions named explicitly in `vibe_wait`, or whose turn settled as they died, still render.
 
 ## [18.3.0] - 2026-09-24
 

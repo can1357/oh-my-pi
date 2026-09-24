@@ -205,4 +205,25 @@ describe("vibe tool renderers", () => {
 			expect(line.length).toBeLessThanOrEqual(width);
 		}
 	});
+
+	it("reports dead sessions left off the wall as a header count, with or without live screens", () => {
+		const renderer = createVibeToolRenderer("list");
+		const render = (details: VibeToolDetails) =>
+			renderLines(
+				renderer.renderResult(
+					{ content: [{ type: "text", text: "" }], details },
+					{ expanded: false, isPartial: false },
+					uiTheme,
+					{},
+				) as { render(width: number): readonly string[] },
+			);
+
+		const withLive = render({ op: "list", screens: [makeScreen({ id: "Live" })], hiddenDead: ["A", "B", "C"] });
+		expect(withLive[0]).toContain("3 dead hidden");
+		expect(withLive.join("\n")).not.toContain("A dead");
+
+		const onlyDead = render({ op: "list", screens: [], hiddenDead: ["A", "B"] });
+		expect(onlyDead.join("\n")).toContain("no live sessions");
+		expect(onlyDead.join("\n")).toContain("2 dead hidden");
+	});
 });
