@@ -74,9 +74,6 @@
 ### Fixed
 
 - Corrected Yolo-Auto metadata for Qwen Flash: `qwen3.8-flash` and the paid `yolo` route now report the documented 256K context window and use the Qwen chat-template reasoning dialect, with `qwen3.8-flash` as the provider default.
-- Discovery validators reuse hoisted module-scope schemas instead of constructing a fresh schema per property per row.
-- Model identity classification now uses a prebuilt override index and a bounded per-id memo instead of re-scanning the taxonomy on every call.
-- Compat glob patterns reuse cached wildcard segments instead of re-splitting on every match.
 
 ## [18.2.4] - 2026-09-17
 

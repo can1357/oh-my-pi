@@ -8,10 +8,6 @@
 
 ### Fixed
 
-- Fixed Edit calls getting stuck generating repeated closing tags after an empty `SM:AFTER` insertion.
-- Fixed Edit previews and application panicking on Unicode no-op edits and overlapping duplicate matches.
-- Fixed live subagent messages getting stuck behind persisted-agent discovery, and roster discovery looping on dot-named transcripts.
-- Fixed llama.cpp discovery of PrismML Bonsai 2 27B GGUFs: built-in and custom-named providers now share catalog rules for chat-completions routing and the Qwen 3.8 thinking ladder (`low`/`medium`/`xhigh`), including cached models.
 - models.yml `compat` now accepts the `replayReasoningContent` and `qwenPreserveThinking` keys, so remote OpenAI-compatible endpoints that require historical reasoning content (e.g. DashScope Qwen 3.8) can opt into reasoning-history replay instead of the schema rejecting the override ([#12376](https://github.com/can1357/oh-my-pi/issues/12376)).
 - `omp update` and the startup update check now use your configured npm registry (`.npmrc`, `npm_config_registry`, or bunfig, including scoped registries and auth tokens) instead of always querying registry.npmjs.org ([#13115](https://github.com/can1357/oh-my-pi/pull/13115) by [@H4vC](https://github.com/H4vC))
 - Fixed auto-QA grievance pushes getting stuck forever behind one report the collector rejects: tool names are clamped to the collector's 128-byte limit, rejected reports are set aside with the server's error (shown in `omp grievances list` and `push`), and the rest of the queue keeps sending ([#13091](https://github.com/can1357/oh-my-pi/issues/13091), [#13119](https://github.com/can1357/oh-my-pi/pull/13119) by [@NaC-L](https://github.com/NaC-L))
