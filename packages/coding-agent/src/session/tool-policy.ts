@@ -94,7 +94,7 @@ export class SessionToolPolicy {
 		registry: () => ReadonlySet<string>; // ToolSession registry getter
 		isDefaultActive: (name: string) => boolean; // registry tool defaultActive metadata
 	}) {
-		// Legacy aliases (`search` → `grep`, `find` → `glob`) normalize here: the
+		// Legacy alias (`search` → `grep`) normalizes here: the
 		// grant drives effective() and the persona explicit.tools intersect, so
 		// a raw alias would silently strip the canonical name.
 		this.cliGrant = options.toolNames ? new Set(normalizeToolNames(options.toolNames)) : null;
@@ -187,8 +187,8 @@ export class SessionToolPolicy {
 		return this.cliLspReadOnly || (!this.effective("write") && !this.effective("edit"));
 	}
 
-	hubEnabled(): boolean {
-		return this.effective("hub");
+	waitEnabled(): boolean {
+		return this.effective("wait");
 	}
 
 	/**

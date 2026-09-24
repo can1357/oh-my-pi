@@ -498,6 +498,103 @@ describe("PlanReviewOverlay", () => {
 		expect(feedback).not.toContain("```md");
 	});
 
+	it("reopens existing section annotations through a chooser, preserves order, and cancels safely", () => {
+		const onAnnotationStateChange = vi.fn();
+		const overlay = new PlanReviewOverlay(
+			SECTION_PLAN,
+			{ promptTitle: "next", options: APPROVAL_OPTIONS },
+			{ onPick: vi.fn(), onCancel: vi.fn(), onAnnotationStateChange },
+		);
+		render(overlay);
+		overlay.handleInput(TAB); // -> toc (Overview)
+		overlay.handleInput("a");
+		for (const ch of "first note") overlay.handleInput(ch);
+		overlay.handleInput(ENTER);
+		overlay.handleInput("a");
+		for (const ch of "second note") overlay.handleInput(ch);
+		overlay.handleInput(ENTER);
+
+		overlay.handleInput("e");
+		expect(render(overlay)).toContain("Edit annotation");
+		expect(render(overlay)).toContain("first note");
+		expect(render(overlay)).toContain("second note");
+		overlay.handleInput(DOWN);
+		overlay.handleInput(ENTER); // choose the second note
+		expect(render(overlay)).toContain("second note");
+		overlay.handleInput("\x15");
+		for (const ch of "discarded edit") overlay.handleInput(ch);
+		expect(render(overlay)).toContain("discarded edit");
+		overlay.handleInput(CANCEL);
+		expect(render(overlay)).toContain("second note");
+		expect(render(overlay)).not.toContain("discarded edit");
+
+		overlay.handleInput("e");
+		overlay.handleInput(ENTER); // choose the first note
+		overlay.handleInput("\x15"); // clear the prefilled draft
+		for (const ch of "updated first note") overlay.handleInput(ch);
+		overlay.handleInput(ENTER);
+
+		const state = onAnnotationStateChange.mock.calls.at(-1)?.[0];
+		expect(state.annotations.map((annotation: { note: string }) => annotation.note)).toEqual([
+			"updated first note",
+			"second note",
+		]);
+		expect(
+			state.annotations.every((annotation: { target: { kind: string } }) => annotation.target.kind === "section"),
+		).toBe(true);
+	});
+
+	it("edits a line annotation without changing its anchor", () => {
+		const onAnnotationStateChange = vi.fn();
+		const overlay = new PlanReviewOverlay(
+			"# Plan\n\nfirst line\n\nsecond line\n",
+			{ promptTitle: "next", options: APPROVAL_OPTIONS },
+			{ onPick: vi.fn(), onCancel: vi.fn(), onAnnotationStateChange },
+		);
+		render(overlay);
+		overlay.handleInput(TAB); // -> body
+		overlay.handleInput("a");
+		for (const ch of "original note") overlay.handleInput(ch);
+		overlay.handleInput(ENTER);
+		const original = onAnnotationStateChange.mock.calls.at(-1)?.[0].annotations[0];
+
+		overlay.handleInput("e");
+		overlay.handleInput("\x15");
+		for (const ch of "edited note") overlay.handleInput(ch);
+		overlay.handleInput(ENTER);
+
+		const edited = onAnnotationStateChange.mock.calls.at(-1)?.[0].annotations[0];
+		expect(edited.target).toEqual(original.target);
+		expect(edited.note).toBe("edited note");
+	});
+
+	it("deletes an existing annotation on an empty submit and restores it with undo", () => {
+		const onAnnotationStateChange = vi.fn();
+		const onFeedbackChange = vi.fn();
+		const overlay = new PlanReviewOverlay(
+			SECTION_PLAN,
+			{ promptTitle: "next", options: APPROVAL_OPTIONS },
+			{ onPick: vi.fn(), onCancel: vi.fn(), onAnnotationStateChange, onFeedbackChange },
+		);
+		render(overlay);
+		overlay.handleInput(TAB); // -> toc (Overview)
+		overlay.handleInput("a");
+		for (const ch of "remove me") overlay.handleInput(ch);
+		overlay.handleInput(ENTER);
+		onAnnotationStateChange.mockClear();
+		onFeedbackChange.mockClear();
+
+		overlay.handleInput("e");
+		overlay.handleInput("\x15");
+		overlay.handleInput(ENTER);
+		expect(onAnnotationStateChange).toHaveBeenLastCalledWith({ annotations: [] });
+		expect(onFeedbackChange).toHaveBeenLastCalledWith("");
+
+		overlay.handleInput("u");
+		expect(render(overlay)).toContain("remove me");
+		expect(onAnnotationStateChange.mock.calls.at(-1)?.[0].annotations[0]?.note).toBe("remove me");
+	});
+
 	it("anchors body annotations to the visible line and restores their serializable state", () => {
 		const onAnnotationStateChange = vi.fn();
 		const onFeedbackChange = vi.fn();
@@ -559,6 +656,64 @@ describe("PlanReviewOverlay", () => {
 		const restoredRow = restoredLines.findIndex(line => line.includes(topVisibleRow));
 		const restoredCalloutRow = restoredLines.findIndex(line => line.includes(note));
 		expect(restoredCalloutRow).toBe(restoredRow + 1);
+	});
+	it("selects the correct line annotation after an earlier callout shifts body rows", () => {
+		const rows = Array.from({ length: 8 }, (_, index) => `row-${String(index).padStart(2, "0")}`);
+		const firstNote = "first note";
+		const secondNote = "second note";
+		const editedSecondNote = "edited second note";
+		const onAnnotationStateChange = vi.fn();
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 14 });
+		try {
+			const overlay = new PlanReviewOverlay(
+				rows.join("\n"),
+				{
+					promptTitle: "next",
+					options: APPROVAL_OPTIONS,
+					annotationState: {
+						annotations: [
+							{
+								section: { index: 0, title: "" },
+								target: { kind: "line", row: 0, context: "row-00" },
+								note: firstNote,
+							},
+							{
+								section: { index: 0, title: "" },
+								target: { kind: "line", row: 1, context: "row-01" },
+								note: secondNote,
+							},
+						],
+					},
+				},
+				{ onPick: vi.fn(), onCancel: vi.fn(), onAnnotationStateChange },
+			);
+			render(overlay);
+			onAnnotationStateChange.mockClear();
+
+			overlay.handleInput(TAB); // actions -> body
+			overlay.handleInput(DOWN); // first callout row
+			overlay.handleInput(DOWN); // second source row
+			overlay.handleInput("e");
+			overlay.handleInput("\x15"); // clear the prefilled second note
+			for (const ch of editedSecondNote) overlay.handleInput(ch);
+			overlay.handleInput(ENTER);
+
+			expect(onAnnotationStateChange).toHaveBeenCalledTimes(1);
+			const saved = onAnnotationStateChange.mock.calls[0]?.[0].annotations;
+			expect(saved).toHaveLength(2);
+			expect(saved[0]).toMatchObject({
+				target: { kind: "line", context: "row-00" },
+				note: firstNote,
+			});
+			expect(saved[1]).toMatchObject({
+				target: { kind: "line", context: "row-01" },
+				note: editedSecondNote,
+			});
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
 	});
 
 	it("clears non-empty restored state with stale anchors without notifying for empty state", () => {
@@ -752,6 +907,17 @@ describe("PlanReviewOverlay", () => {
 		overlay.handleInput("\x05"); // ctrl+e
 
 		expect(editorDraft).toBe("draft");
+		expect(render(overlay)).toContain("Annotate");
+		expect(render(overlay)).toContain("- add rollback command");
+		// A multi-line draft renders as separate editor rows, never as an embedded newline.
+		const draftLines = overlay.render(80);
+		expect(draftLines.some(line => line.includes("\n"))).toBe(false);
+		expect(draftLines.map(line => stripVTControlCharacters(line)).filter(line => line.includes("- "))).toHaveLength(
+			2,
+		);
+		expect(onFeedbackChange).not.toHaveBeenCalled();
+
+		overlay.handleInput(ENTER);
 		const out = render(overlay);
 		expect(out).toContain("- add rollback command");
 		expect(out).toContain("- include smoke test");

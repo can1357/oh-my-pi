@@ -64,7 +64,7 @@ describe("InteractiveMode persona resume reconcile", () => {
 		await Settings.init({ inMemory: true, cwd: tempDir.path() });
 		Settings.instance.set("startup.quiet", true);
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!bundled) throw new Error("Expected built-in anthropic model to exist");
 		model = bundled;

@@ -146,9 +146,8 @@ describe("task.batch schema gating", () => {
 		mockDiscovery();
 		const tool = await TaskTool.create(createSession({ settings: { "task.batch": true } }));
 
-		expect(tool.description).toContain("Same-file edits are not guaranteed to merge");
-		expect(tool.description).toContain("coordinate through `hub` before editing shared files");
-		expect(tool.description).toContain("Name one integration owner");
+		expect(tool.description).toContain("Shared edits need one integration owner");
+		expect(tool.description).toContain("siblings coordinate via `write agent://<id>`");
 		expect(tool.description).not.toContain("Concurrent edits to the same files auto-resolve");
 	});
 
@@ -159,25 +158,25 @@ describe("task.batch schema gating", () => {
 		mockDiscovery();
 
 		const batch = await TaskTool.create(createSession({ settings: { "task.batch": true } }));
-		expect(batch.description).toContain("passing multiple items in a single `tasks[]` batch");
-		expect(batch.description).not.toContain("Run ONE subagent synchronously");
+		expect(batch.description).toContain("Spawn `tasks[]` concurrently");
+		expect(batch.description).toContain("`context`");
+		expect(batch.description).not.toContain("Spawn one agent");
 
 		const flat = await TaskTool.create(createSession({ settings: { "task.batch": false } }));
-		expect(flat.description).toContain("Delegate work to ONE background subagent per call");
-		expect(flat.description).not.toContain("passing multiple items in a single `tasks[]` batch");
+		expect(flat.description).toContain("Spawn one agent");
+		expect(flat.description).toContain("the task");
+		expect(flat.description).not.toContain("Spawn `tasks[]` concurrently");
 	});
 
 	it("describes a restricted specialist as the spawn-policy default", async () => {
 		mockDiscovery(scoutAgent);
 		const tool = await TaskTool.create(createSession({ spawns: "scout" }));
 
-		expect(tool.description).toContain("spawn-policy default (`scout`)");
+		expect(tool.description).toContain("Omit `agent` only for default (`scout`)");
 		expect(tool.description).not.toContain("general-purpose worker");
 		expect(tool.description).not.toContain("default worker");
-		expect(tool.description).toContain("Omit `agent` when the spawn-policy default is the best fit");
-		expect(tool.description).toContain("### scout (READ-ONLY)");
+		expect(tool.description).toContain("Read-only research MUST use `scout`");
 	});
-
 	it("hides effort by default and exposes it when task.enableEffort is enabled", async () => {
 		mockDiscovery();
 

@@ -102,7 +102,7 @@ All commands accept optional `id?: string`.
 
 Important edge behavior from runtime:
 
-- Unknown command responses are emitted with `id: undefined` (even if the request had an `id`).
+- Unknown command responses echo the request `id` when one was provided.
 - Malformed JSON and synchronous dispatch failures emit `command: "parse"` with `id: undefined`. Exceptions while handling a recognized command emit a failure with that command's `type` and `id`.
 - `prompt` and `abort_and_prompt` return immediate success, then may emit a later error response with the **same** id if async prompt scheduling fails.
 - `prompt` success responses may include `data.agentInvoked`. `false` means the prompt completed locally without an agent turn; `true` means the prompt produced agent lifecycle events; omitted means the host must rely on session events for completion.
@@ -130,6 +130,8 @@ Important edge behavior from runtime:
 - `{ id?, type: "get_state" }`
 - `{ id?, type: "set_fast_mode", enabled: boolean }`
 - `{ id?, type: "get_available_commands" }`
+- `{ id?, type: "get_entries", since?: string }`
+- `{ id?, type: "get_tree" }`
 - `{ id?, type: "set_todos", phases: TodoPhase[] }`
 - `{ id?, type: "set_host_tools", tools: RpcHostToolDefinition[] }`
 - `{ id?, type: "set_host_uri_schemes", schemes: RpcHostUriSchemeDefinition[] }`
@@ -147,6 +149,7 @@ Important edge behavior from runtime:
 
 - `{ id?, type: "set_thinking_level", level: ThinkingLevel }`
 - `{ id?, type: "cycle_thinking_level" }`
+- `{ id?, type: "get_available_thinking_levels" }`
 
 ### Queue modes
 
@@ -529,6 +532,41 @@ from older runtimes, where it is absent, remain terminal-compatible.
 in `available_commands_update` frames at startup and after command metadata
 changes. Each command has `name`, `source`, and optional `aliases`,
 `description`, `input.hint`, and `subcommands`.
+
+Command discovery is intentionally an OMP dialect: Pi's `get_commands` (a
+`RpcSlashCommand[]` projection over extensions → prompt templates → skills) is
+not served because OMP's richer catalog (builtins/custom/MCP/file commands,
+broader `source` enum, no Pi `sourceInfo`) is not wire-compatible with it.
+
+### Pi-compatible history/tree commands with OMP-native entry payloads
+
+The commands and reconciliation semantics below are Pi-compatible, but the
+returned `SessionEntry` payload union is OMP-native, not wire-identical to
+Pi. Concretely: Pi `model_change` carries `provider` + `modelId` while OMP
+carries a combined `model` plus role/fallback metadata; Pi uses a `usage`
+entry where OMP uses `model_usage`; and OMP has additional entry types (for
+example service-tier, title, mode, credential, and reset records). A
+permissive client that consumes the common structural subset
+(`id`/`parentId` plus message entries) can share one durable-history
+algorithm across both, while a strict Pi `SessionEntry` decoder cannot assume
+identical payloads.
+
+`get_entries` reads the canonical append-history (not the active branch only)
+and returns `{ entries, leafId }`. Without `since` it returns all entries in
+append order; with `since` it returns entries strictly after the matching
+durable entry id. An unknown `since` fails explicitly with
+`code: "unknown_since"`. `get_tree` returns the raw session tree as
+`{ tree, leafId }` straight from `SessionManager`, not a UI projection.
+
+`get_available_thinking_levels` returns `{ levels }`: the selectable levels
+for the live model with `"off"` first (it is accepted by
+`set_thinking_level` but excluded from the effort-only model helper). OMP-only
+`auto`/`inherit` selectors are intentionally omitted from discovery.
+
+Lifecycle stays OMP: terminal settle is `agent_end` with
+`isTerminal !== false`, not Pi's `agent_settled`; `prompt_result`/
+`agentInvoked`, `ready`, negotiation, chunking, host tools, and subagents are
+OMP extensions a Pi-family adapter must dialect around.
 
 ### Subagent subscriptions
 

@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { RenderResultOptions } from "../src/tools/renderer";
 import { getThemeByName, setThemeInstance, type Theme } from "@oh-my-pi/pi-tui/theme";
-import { bashToolRenderer } from "@oh-my-pi/pi-tui/tools/bash";
+import { bashToolRenderer, formatBackgroundNotice } from "@oh-my-pi/pi-tui/tools/bash";
 import { previewWindowRows } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
@@ -128,13 +128,33 @@ describe("bashToolRenderer", () => {
 		expect(rendered).not.toContain("Wall time: 1.23 seconds");
 	});
 
+	it("shows a supervised service's readiness and output without a command timeout", async () => {
+		const component = bashToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "web: ready pid=42 ready\nREADY\nlistening" }],
+				details: { service: { name: "web", state: "ready", ready: true, timedOut: false, pid: 42 } },
+				isError: false,
+			},
+			{ expanded: false, isPartial: false },
+			uiTheme,
+			{ command: "bun run dev", name: "web", ready: { log: "READY" } },
+		);
+		const rendered = sanitizeText(component.render(120).join("\n"));
+		expect(rendered).toContain("Service: web");
+		expect(rendered).toContain("State: ready");
+		expect(rendered).toContain("Ready: yes");
+		expect(rendered).toContain("PID: 42");
+		expect(rendered).toContain("listening");
+		expect(rendered).not.toContain("Timeout:");
+	});
+
 	it("renders a backgrounded job as a static footer notice", async () => {
 		const component = bashToolRenderer.renderResult(
 			{
 				content: [
 					{
 						type: "text",
-						text: "started\n\nBackgrounded as job bash-42; result will be delivered automatically.",
+						text: `started\n\n${formatBackgroundNotice("bash-42")}`,
 					},
 				],
 				details: {
@@ -150,7 +170,7 @@ describe("bashToolRenderer", () => {
 		const rendered = sanitizeText(component.render(120).join("\n"));
 		expect(rendered).toContain("started");
 		expect(rendered).toContain("Backgrounded: bash-42");
-		expect(rendered).not.toContain("result will be delivered automatically");
+		expect(rendered).not.toContain("Do NOT poll");
 	});
 
 	it("folds raw output artifact notices into the status footer", async () => {

@@ -38,7 +38,7 @@ describe("PersonaRuntime", () => {
 
 	// Codex R6-1: a frontmatter `tools:` list is stored as the persona grant
 	// BEFORE the session's later normalization pass, so a legacy alias
-	// (`search`/`find`) would never match the canonical registry name — the
+	// (`search`) would never match the canonical registry name — the
 	// persona silently loses its own search capability.
 	// Case-insensitive `exec` shorthand (expand runs BEFORE normalization, so the
 	// helper itself must match case-insensitively or `tools: [EXEC]` grants a
@@ -55,9 +55,8 @@ describe("PersonaRuntime", () => {
 	it("normalizes legacy aliases in persona-declared tool grants", () => {
 		const { session } = makeSessionStub();
 		const runtime = makeRuntime(session);
-		runtime.policy.enterPersona(makeAgent({ tools: ["search", "find", "read"] }), {});
+		runtime.policy.enterPersona(makeAgent({ tools: ["search", "read"] }), {});
 		expect(runtime.policy.effective("grep")).toBe(true); // search -> grep
-		expect(runtime.policy.effective("glob")).toBe(true); // find -> glob
 		expect(runtime.policy.effective("read")).toBe(true);
 		expect(runtime.policy.effective("write")).toBe(false); // still narrowed
 	});
@@ -695,7 +694,7 @@ describe("PersonaRuntime", () => {
 		// Registry BEFORE enter: the built-ins, no extension tool yet; the
 		// pre-persona presentation has `glob` DEACTIVATED (in registry, not
 		// enabled) so the test also pins that the merge stays selective.
-		stub.registeredToolNames = ["read", "grep", "glob", "write", "edit", "bash", "task", "hub"];
+		stub.registeredToolNames = ["read", "grep", "glob", "write", "edit", "bash", "task", "wait"];
 		stub.enabledToolNames = ["read", "grep", "write"];
 		await runtime.enter(makeAgent(), {}, makeHooks());
 		// Mid-persona: an extension registers a default-active tool; the funnel
@@ -755,7 +754,7 @@ describe("PersonaRuntime", () => {
 		expect(last?.toolNames).not.toContain("bash"); // deactivation survives exit
 		// Both halves hold simultaneously: every name the user left untouched is
 		// restored via the seed or the merge, and the deactivated one alone is
-		// dropped. The stub's live set never carried edit/task/hub, so they are
+		// dropped. The stub's live set never carried edit/task/wait, so they are
 		// absent both pre-enter and post-exit.
 		expect(last?.toolNames).toEqual(["read", "grep", "glob", "write"]);
 		expect(last?.mountedToolNames).toEqual(["xd://alpha"]);

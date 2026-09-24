@@ -1,10 +1,21 @@
-import { afterEach, beforeEach, describe, expect, it, setSystemTime, vi } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, it, setSystemTime, vi } from "bun:test";
 import { AuthStorage, type FetchImpl } from "@oh-my-pi/pi-ai";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resolveConfigValue } from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
 import type { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { searchWithParallel } from "@oh-my-pi/pi-coding-agent/web/parallel";
 import { ParallelProvider, searchParallel } from "@oh-my-pi/pi-coding-agent/web/search/providers/parallel";
 import { USER_AGENT } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+
+const anonymousAuthStorage = createInMemoryAuthStorage();
+const modelRegistry = new ModelRegistry(anonymousAuthStorage);
+const parallelModel = modelRegistry.find("web", "parallel");
+if (!parallelModel) throw new Error("Expected bundled web/parallel model");
+
+afterAll(() => {
+	anonymousAuthStorage.close();
+});
 
 describe("Parallel web search", () => {
 	const fakeStorage = {
@@ -25,17 +36,13 @@ describe("Parallel web search", () => {
 		},
 	} as unknown as AgentStorage;
 	const fakeAuthStorage = {
-		async getApiKey() {
-			return process.env.PARALLEL_API_KEY ?? undefined;
+		keys: {
+			get: async () => process.env.PARALLEL_API_KEY ?? undefined,
+			source: () => (process.env.PARALLEL_API_KEY ? { kind: "env", concrete: true } : undefined),
+			resolver: (_provider: string) => async () => process.env.PARALLEL_API_KEY ?? undefined,
 		},
-		hasAuth() {
-			return Boolean(process.env.PARALLEL_API_KEY);
-		},
-		resolver(_provider: string) {
-			return async () => process.env.PARALLEL_API_KEY ?? undefined;
-		},
-		async rotateSessionCredential() {
-			return false;
+		limits: {
+			rotate: async () => false,
 		},
 	} as unknown as AuthStorage;
 
@@ -147,10 +154,12 @@ describe("Parallel web search", () => {
 		]);
 	});
 
-	it("admits credential-free Parallel to the automatic chain", () => {
+	it("admits credential-free Parallel only when explicitly selected", () => {
 		delete process.env.PARALLEL_API_KEY;
+		const provider = new ParallelProvider();
 
-		expect(new ParallelProvider().isAvailable(fakeAuthStorage)).toBe(true);
+		expect(provider.isAvailable(anonymousAuthStorage)).toBe(false);
+		expect(provider.isExplicitlyAvailable(anonymousAuthStorage)).toBe(true);
 	});
 
 	it("uses anonymous MCP and maps structured results when Parallel has no credential", async () => {
@@ -278,7 +287,7 @@ describe("Parallel web search", () => {
 		}
 	});
 
-	it("sends trusted session and active model metadata with anonymous MCP searches", async () => {
+	it("sends trusted session and selected model metadata with anonymous MCP searches", async () => {
 		delete process.env.PARALLEL_API_KEY;
 		const fetchMock = mockMcpFetch({
 			result: { structuredContent: { search_id: "search-parallel-mcp-metadata", results: [] } },
@@ -287,9 +296,11 @@ describe("Parallel web search", () => {
 		await new ParallelProvider().search({
 			query: "session-aware search",
 			systemPrompt: "",
-			authStorage: fakeAuthStorage,
+			authStorage: anonymousAuthStorage,
+			model: parallelModel,
+			modelRegistry,
+			explicit: true,
 			sessionId: "stable-session-123",
-			modelName: "claude-opus-4.7",
 			fetch: fetchMock,
 		});
 
@@ -299,7 +310,7 @@ describe("Parallel web search", () => {
 					objective: "session-aware search",
 					search_queries: ["session-aware search"],
 					session_id: "stable-session-123",
-					model_name: "claude-opus-4.7",
+					model_name: "parallel",
 				},
 			},
 		});
@@ -405,14 +416,10 @@ describe("Parallel web search", () => {
 		delete process.env.PARALLEL_API_KEY;
 		const storedAuthStorage = {
 			...fakeAuthStorage,
-			async getApiKey() {
-				return "stored-parallel-key";
-			},
-			hasAuth() {
-				return true;
-			},
-			resolver() {
-				return async () => "stored-parallel-key";
+			keys: {
+				get: async () => "stored-parallel-key",
+				source: () => ({ kind: "api_key", concrete: true }),
+				resolver: () => async () => "stored-parallel-key",
 			},
 		} as unknown as AuthStorage;
 		let capturedUrl: string | undefined;
@@ -441,7 +448,7 @@ describe("Parallel web search", () => {
 		delete process.env.PARALLEL_API_KEY;
 		const authStorage = await AuthStorage.create(":memory:", { configValueResolver: resolveConfigValue });
 		try {
-			await authStorage.set("parallel", { type: "api_key", key: "!false" });
+			await authStorage.credentials.set("parallel", { type: "api_key", key: "!false" });
 			const fetchMock = vi.fn(
 				mockMcpFetch({
 					result: { structuredContent: { search_id: "unexpected-anonymous-search", results: [] } },

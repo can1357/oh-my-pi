@@ -8,7 +8,7 @@ import type { PersonaModelApplyHooks } from "@oh-my-pi/pi-coding-agent/session/p
 import { PersonaRuntime } from "@oh-my-pi/pi-coding-agent/session/persona-runtime";
 import { type DiscoveredAgent, SessionToolPolicy } from "@oh-my-pi/pi-coding-agent/session/tool-policy";
 
-export const ALL_TOOLS = new Set(["read", "grep", "glob", "write", "edit", "bash", "task", "hub"]);
+export const ALL_TOOLS = new Set(["read", "grep", "glob", "write", "edit", "bash", "task", "wait"]);
 
 /** Default persona frontmatter; `systemPrompt` is asserted through appendPrompt in the runtime suites. */
 export function makePersonaAgent(overrides: Partial<DiscoveredAgent> = {}): DiscoveredAgent {

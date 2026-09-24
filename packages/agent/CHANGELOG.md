@@ -2,6 +2,36 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added passive tool-call context: `beforeToolCall` can return `additionalContext`, and tools can report context through `ToolCallContext.addAdditionalContext`; it is sent as a developer message after the batch's tool results ([#11998](https://github.com/can1357/oh-my-pi/pull/11998) by [@H4vC](https://github.com/H4vC))
+
+## [18.3.0] - 2026-09-24
+
+### Added
+
+- Added support for documenting agent tools on demand through the new `AgentTool.docTopics` method.
+- Added `TOOL_INTERRUPT_ABORT_REASON` so interruptible tools can distinguish queued steering, peer messages, or background completions from a full run abort.
+
+### Changed
+
+- Improved interrupt handling so tools respect wait mode and can be interrupted when appropriate.
+- Updated Anthropic compaction compatibility with signature verification.
+
+## [18.2.11] - 2026-09-23
+
+### Fixed
+
+- Fixed background job completions interrupting foreground Bash and eval calls, which could cause those calls to be repeatedly moved into the background.
+
+## [18.2.9] - 2026-09-22
+
+### Fixed
+
+- Fixed stream finalization when a provider ends without emitting a completion or error event, ensuring the final assistant message is preserved and corresponding message lifecycle events are emitted.
+- Fixed tool execution being incorrectly skipped when host steering callbacks reject during a tool batch.
+- Fixed stream hangs and preserved the original error when host aside-commit or discard callbacks fail.
+
 ## [18.2.5] - 2026-09-17
 
 ### Fixed

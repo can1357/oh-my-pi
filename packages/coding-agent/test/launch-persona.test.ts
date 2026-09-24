@@ -51,7 +51,7 @@ let modelRegistry: ModelRegistry;
 beforeAll(() => {
 	workspace = TempDir.createSync("@omp-launch-persona-");
 	authStorage = createInMemoryAuthStorage();
-	authStorage.setRuntimeApiKey("anthropic", "test-key");
+	authStorage.keys.setRuntime("anthropic", "test-key");
 	modelRegistry = new ModelRegistry(authStorage);
 });
 

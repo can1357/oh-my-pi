@@ -73,13 +73,12 @@ describe("createTools", () => {
 		const session = createTestSession({
 			settings: createSettingsWithOverrides({ "astGrep.enabled": false }),
 		});
-		const tools = await createTools(session, ["search", "find", "grep"]);
+		const tools = await createTools(session, ["search", "glob", "grep"]);
 		const names = tools.map(t => t.name);
 
 		expect(names.filter(name => name === "grep")).toHaveLength(1);
 		expect(names).toContain("glob");
 		expect(names).not.toContain("search");
-		expect(names).not.toContain("find");
 	});
 
 	it("includes bash and eval when both eval backends are allowed", async () => {
@@ -350,6 +349,14 @@ describe("createTools", () => {
 		expect(names).toContain("rewind");
 	});
 
+	it("withholds wait from subagents even when explicitly requested", async () => {
+		const settings = createSettingsWithOverrides({ "async.enabled": true });
+		const main = (await createTools(createTestSession({ settings }), ["read", "wait"])).map(t => t.name);
+		const sub = (await createTools(createTestSession({ taskDepth: 1, settings }), ["read", "wait"])).map(t => t.name);
+		expect(main).toContain("wait");
+		expect(sub).not.toContain("wait");
+	});
+
 	it("excludes checkpoint/rewind from subagent when not explicitly requested", async () => {
 		const names = (
 			await createTools(
@@ -447,11 +454,11 @@ describe("createTools", () => {
 		expect(names).toContain("rewind");
 	});
 
-	it("keeps hub in an ordinary unrestricted session with a live tool policy (fr-vQ)", async () => {
+	it("keeps wait in an ordinary unrestricted session with a live tool policy (fr-vQ)", async () => {
 		// The policy's registry view is EMPTY during this first createTools pass;
-		// consulting policy.hubEnabled() eagerly denied hub everywhere. The gate
+		// consulting policy.waitEnabled() eagerly denied wait everywhere. The gate
 		// must fall back to the classic unrestricted derivation until the session
-		// registry holds `hub`.
+		// registry holds `wait`.
 		const registry = new Map<string, Tool>();
 		const policy = new SessionToolPolicy({
 			registry: () => new Set(registry.keys()),
@@ -460,14 +467,14 @@ describe("createTools", () => {
 		const names = (await createTools(createTestSession({ toolRegistry: registry, getToolPolicy: () => policy }))).map(
 			t => t.name,
 		);
-		expect(names).toContain("hub");
+		expect(names).toContain("wait");
 	});
 
-	it("drops hub when the persona grant omits it once the registry is primed (fr-vQ)", async () => {
+	it("drops wait when the persona grant omits it once the registry is primed (fr-vQ)", async () => {
 		const registry = new Map<string, Tool>();
 		// Primed registry simulates a later createTools rebuild (persona
-		// enter/exit): the policy layers now decide hub availability.
-		registry.set("hub", {} as Tool);
+		// enter/exit): the policy layers now decide wait availability.
+		registry.set("wait", {} as Tool);
 		const policy = new SessionToolPolicy({
 			registry: () => new Set(registry.keys()),
 			isDefaultActive: () => true,
@@ -475,7 +482,7 @@ describe("createTools", () => {
 		policy.enterPersona({ name: "x", description: "x", systemPrompt: "x", source: "bundled", tools: ["read"] }, {});
 		const tools = await createTools(createTestSession({ toolRegistry: registry, getToolPolicy: () => policy }));
 		const names = tools.map(t => t.name);
-		expect(names).not.toContain("hub");
+		expect(names).not.toContain("wait");
 		expect(names).toContain("read");
 	});
 

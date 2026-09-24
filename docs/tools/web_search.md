@@ -131,7 +131,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
     - `limit` and `num_search_results` are collapsed together before dispatch.
     - Output may include `answer`, `sources`, `citations`, `searchQueries`, `usage`, `model`.
   - **Anthropic** — `packages/coding-agent/src/web/search/providers/anthropic.ts`
-    - Availability: `ANTHROPIC_SEARCH_API_KEY` env var, otherwise `authStorage.hasAuth("anthropic")`; search credentials come from `authStorage.getApiKey("anthropic")` when no search-specific key is set.
+    - Availability: `ANTHROPIC_SEARCH_API_KEY` env var, otherwise `authStorage.keys.source("anthropic")`; search credentials come from `authStorage.keys.get("anthropic")` when no search-specific key is set.
     - Env overrides specific to search (do not affect chat completions):
       - `ANTHROPIC_SEARCH_API_KEY` — highest-priority search auth; overrides `ANTHROPIC_API_KEY` / OAuth / `ANTHROPIC_FOUNDRY_API_KEY` for the search call only.
       - `ANTHROPIC_SEARCH_BASE_URL` — search-only base URL for either `ANTHROPIC_SEARCH_API_KEY` or fallback Anthropic credentials; overrides `ANTHROPIC_BASE_URL` (and `FOUNDRY_BASE_URL` in Foundry mode); defaults to `https://api.anthropic.com`.
@@ -147,7 +147,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
     - Ignores `recency`, `max_tokens`, and `temperature`. `num_search_results ?? limit` slices parsed sources locally.
     - Output may include `answer`, `sources`, `usage`, `model`, `requestId`. If the stream has no `url_citation` annotations, the adapter falls back to markdown links and bare URLs from the answer.
   - **xAI** — `packages/coding-agent/src/web/search/providers/xai.ts`
-    - Availability: `shouldPreferXAIOAuth()` prefers the `xai-oauth` credential — true when `XAI_OAUTH_TOKEN` is set or a stored `xai-oauth` credential exists whose origin would not be shadowed by a shared `XAI_API_KEY` env key — otherwise `authStorage.hasAuth("xai")` (`XAI_API_KEY` env or `agent.db` credential for `xai`).
+    - Availability: `shouldPreferXAIOAuth()` prefers the `xai-oauth` credential — true when `XAI_OAUTH_TOKEN` is set or a stored `xai-oauth` credential exists whose origin would not be shadowed by a shared `XAI_API_KEY` env key — otherwise `authStorage.keys.source("xai")` (`XAI_API_KEY` env or `agent.db` credential for `xai`).
     - Querying: POSTs the Responses API with model `grok-4.5`, `tools: [{ type: "web_search", ... }]`, and reasoning effort `low`. A custom model-registry endpoint is supported, but official xAI OAuth credentials are refused for custom endpoints.
     - Up to five `site:` or `-site:` hosts map to mutually exclusive `allowed_domains` / `excluded_domains` filters (allow-list wins); path restrictions remain for central filtering. Absolute dates stay as query hints because the current Responses `web_search` tool has no date fields.
     - The request carries no `search_parameters` (the deprecated Live Search field now returns 410), so `recency` is ignored beyond natural-language date hints in the query text.

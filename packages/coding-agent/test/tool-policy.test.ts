@@ -14,7 +14,7 @@ const makeAgent = (overrides: Partial<DiscoveredAgent> = {}): DiscoveredAgent =>
 
 const NO_EXPLICIT: PersonaExplicitOverrides = {};
 
-const ALL_TOOLS = new Set(["read", "grep", "glob", "write", "edit", "bash", "task", "hub", "lsp", "eval"]);
+const ALL_TOOLS = new Set(["read", "grep", "glob", "write", "edit", "bash", "task", "wait", "lsp", "eval"]);
 const defaultActive = (name: string): boolean => name !== "lsp"; // lsp tools are defaultInactive
 
 function makePolicy(
@@ -108,19 +108,19 @@ describe("SessionToolPolicy", () => {
 		expect(policy.effective("write")).toBe(true);
 	});
 
-	it("hubEnabled follows effective('hub') with no extra persona check", () => {
+	it("waitEnabled follows effective('wait') with no extra persona check", () => {
 		const policy = makePolicy();
-		expect(policy.hubEnabled()).toBe(true);
+		expect(policy.waitEnabled()).toBe(true);
 		policy.enterPersona(makeAgent({ tools: ["read"] }), NO_EXPLICIT);
-		expect(policy.hubEnabled()).toBe(false);
+		expect(policy.waitEnabled()).toBe(false);
 		policy.exitPersona();
-		expect(policy.hubEnabled()).toBe(true);
+		expect(policy.waitEnabled()).toBe(true);
 	});
 
-	it("persona grant from registry (no tools frontmatter) keeps hub and strips task only for spawns:[]", () => {
+	it("persona grant from registry (no tools frontmatter) keeps wait and strips task only for spawns:[]", () => {
 		const policy = makePolicy();
 		policy.enterPersona(makeAgent(), NO_EXPLICIT);
-		expect(policy.hubEnabled()).toBe(true);
+		expect(policy.waitEnabled()).toBe(true);
 		expect(policy.effective("task")).toBe(true); // spawns undefined → no strip
 	});
 

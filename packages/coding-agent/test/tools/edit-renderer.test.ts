@@ -174,7 +174,7 @@ describe("editToolRenderer", () => {
 	it("uses sloppy input section headers for the streaming call path", async () => {
 		const uiTheme = await getUiTheme();
 		const component = editToolRenderer.renderCall(
-			{ input: `*** SM:EDIT src/engine/disk.rs\n*** SM:FIND\nfn parse_disk_ref(` },
+			{ input: "*** Edit File: src/engine/disk.rs\n*** Find\nfn parse_disk_ref(" },
 			{ expanded: false, isPartial: true, spinnerFrame: 0, renderContext: { editMode: "sloppy" } },
 			uiTheme,
 		);
@@ -185,7 +185,7 @@ describe("editToolRenderer", () => {
 
 	it("counts extra sloppy sections in the streaming call header", async () => {
 		const uiTheme = await getUiTheme();
-		const input = `*** SM:EDIT a.ts\n*** SM:FIND\nfoo\n*** SM:EDIT b.ts\n*** SM:FIND\nbar`;
+		const input = "*** Edit File: a.ts\n*** Find\nfoo\n*** Edit File: b.ts\n*** Find\nbar";
 		const component = editToolRenderer.renderCall(
 			{ input },
 			{ expanded: false, isPartial: true, spinnerFrame: 0, renderContext: { editMode: "sloppy" } },

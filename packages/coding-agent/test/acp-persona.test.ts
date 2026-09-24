@@ -77,7 +77,7 @@ class PersonaStubSession {
 	) {
 		this.sessionManager = SessionManager.create(cwd);
 		this.sessionId = this.sessionManager.getSessionId();
-		const registry = new Set(["read", "grep", "glob", "write", "edit", "bash", "task", "hub"]);
+		const registry = new Set(["read", "grep", "glob", "write", "edit", "bash", "task", "wait"]);
 		this.stub = {
 			isStreaming: false,
 			enabledToolNames: ["read", "grep", "glob", "write"],

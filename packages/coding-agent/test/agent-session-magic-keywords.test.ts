@@ -68,7 +68,7 @@ describe("AgentSession magic keyword settings", () => {
 	beforeAll(async () => {
 		authRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-magic-keywords-auth-"));
 		authStorage = await AuthStorage.create(path.join(authRoot, "auth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage, path.join(authRoot, "models.yml"));
 	});
 
@@ -122,27 +122,6 @@ describe("AgentSession magic keyword settings", () => {
 		]);
 	});
 
-	it("renders the eval-specific workflowz notice", async () => {
-		const created = await createMagicKeywordSession(modelRegistry);
-		session = created.session;
-		created.settings.set("task.batch", false);
-		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
-
-		await session.prompt("please workflowz this");
-
-		const promptMessages = promptSpy.mock.calls[0]![0] as unknown as Array<{
-			content?: string;
-			customType?: string;
-		}>;
-		const notice = promptMessages.find(message => message.customType === "workflow-notice");
-		expect(notice?.customType).toBe("workflow-notice");
-		expect(notice?.content).toContain("Default to `workpool()`");
-		expect(notice?.content).toContain('`hub` with `op:"wait", ids:["<pool-name>"]`');
-		expect(notice?.content).toContain("**Python:**");
-		expect(notice?.content).toContain("**JavaScript:**");
-		expect(notice?.content).not.toContain("parallel(thunks)");
-	});
-
 	it("updates the workflowz notice when scout is disabled during the session", async () => {
 		const created = await createMagicKeywordSession(modelRegistry);
 		session = created.session;
@@ -177,6 +156,27 @@ describe("AgentSession magic keyword settings", () => {
 
 		const promptMessages = promptSpy.mock.calls[0]![0] as unknown as Array<{ customType?: string }>;
 		expect(promptMessages.map(message => message.customType).filter(Boolean)).toEqual([]);
+	});
+
+	it("appends the jevify notice only while the eval tool is active", async () => {
+		const withEval = await createMagicKeywordSession(modelRegistry, [mockEvalTool]);
+		session = withEval.session;
+		const withEvalSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+		await session.prompt("jevify this commit for unrelated changes");
+		const withEvalMessages = withEvalSpy.mock.calls[0]![0] as unknown as Array<{
+			content?: string;
+			customType?: string;
+		}>;
+		const notice = withEvalMessages.find(message => message.customType === "jevify-notice");
+		expect(notice?.content).toContain("judge(state, questions)");
+		await session.dispose();
+
+		const withoutEval = await createMagicKeywordSession(modelRegistry, [mockTaskTool]);
+		session = withoutEval.session;
+		const withoutEvalSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+		await session.prompt("jevify this commit for unrelated changes");
+		const withoutEvalMessages = withoutEvalSpy.mock.calls[0]![0] as unknown as Array<{ customType?: string }>;
+		expect(withoutEvalMessages.map(message => message.customType).filter(Boolean)).toEqual([]);
 	});
 
 	it("skips workflowz notice when the eval tool is inactive", async () => {

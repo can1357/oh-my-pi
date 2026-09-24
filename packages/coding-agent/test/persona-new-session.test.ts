@@ -68,7 +68,7 @@ describe("persona state teardown for /new sessions", () => {
 		});
 		const authStorage = await AuthStorage.create(":memory:");
 		authStorages.push(authStorage);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const policy = new SessionToolPolicy({
 			registry: () => new Set(["read", "grep", "bash", "edit", "write", "task"]),
 			isDefaultActive: () => true,

@@ -37,7 +37,7 @@ describe("AgentSession deferred model restore", () => {
 		tempDir = TempDir.createSync("@pi-deferred-restore-");
 		await Settings.init({ inMemory: true, cwd: tempDir.path() });
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 		const defaultModel = modelRegistry.find("anthropic", "claude-sonnet-4-5");
 		if (!defaultModel) throw new Error("Expected claude-sonnet-4-5 in registry");

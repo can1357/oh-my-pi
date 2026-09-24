@@ -1,11 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import type { Api, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	classifyUnexpectedStop,
 	isUnexpectedStopCandidate,
 } from "@oh-my-pi/pi-coding-agent/session/unexpected-stop-classifier";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { asGlobalFetch } from "./helpers/fetch-mock";
 
 function makeAssistantMessage(options: {
@@ -26,6 +29,14 @@ function makeAssistantMessage(options: {
 afterEach(() => {
 	vi.restoreAllMocks();
 });
+
+function makeRegistry(models: Model<Api>[], keys: Record<string, string> = {}): ModelRegistry {
+	const authStorage = createInMemoryAuthStorage();
+	for (const provider in keys) authStorage.keys.setRuntime(provider, keys[provider]!);
+	const registry = new ModelRegistry(authStorage, "/nonexistent/unexpected-stop-models.yml");
+	vi.spyOn(registry, "getAvailable").mockReturnValue(models);
+	return registry;
+}
 
 describe("isUnexpectedStopCandidate", () => {
 	it("returns true for a text-only stop", () => {
@@ -107,24 +118,8 @@ describe("classifyUnexpectedStop", () => {
 		const baseModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!baseModel) throw new Error("Expected bundled Claude Sonnet 4.5 model");
 		const model = { ...baseModel, reasoning: false };
-		const settings = {
-			get(path: string) {
-				if (path === "providers.unexpectedStopModel") return "online";
-				return undefined;
-			},
-			getModelRole(role: string) {
-				return role === "smol" ? `${model.provider}/${model.id}` : undefined;
-			},
-			getStorage() {
-				return undefined;
-			},
-		} as never;
-		const registry = {
-			authStorage: { hasAuth: () => false },
-			getAvailable: () => [model],
-			getApiKey: async () => "test-key",
-			resolver: () => async () => "test-key",
-		} as never;
+		const settings = Settings.isolated({ modelRoles: { judge: `${model.provider}/${model.id}` } });
+		const registry = makeRegistry([model], { [model.provider]: "test-key" });
 		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
 			stopReason: "stop",
 			content: [{ type: "text", text: "YES" }],
@@ -148,27 +143,31 @@ describe("classifyUnexpectedStop", () => {
 		expect(options?.maxTokens).toBeGreaterThan(1024);
 	});
 
-	it("routes to TypeSafe when a credential exists and thresholds the yes-probability", async () => {
-		const settings = {
-			get(path: string) {
-				if (path === "providers.unexpectedStopModel") return "online";
-				return undefined;
-			},
-			getModelRole() {
-				return undefined;
-			},
-			getStorage() {
-				return undefined;
-			},
-		} as never;
-		const registry = {
-			authStorage: { hasAuth: (provider: string) => provider === "typesafe", resolver: () => "ts-key" },
-			getAvailable: () => [],
-		} as never;
+	it("uses the selected TypeSafe judge and thresholds the yes-probability", async () => {
+		const jev = {
+			id: "jev-preview",
+			name: "JEV Preview",
+			api: "typesafe",
+			provider: "typesafe",
+			baseUrl: "https://judge.example.test/",
+			kind: "judge",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 4096,
+		} as Model<Api>;
+		const settings = Settings.isolated({ modelRoles: { judge: "typesafe/jev-preview" } });
+		const registry = makeRegistry([jev], { typesafe: "ts-key" });
 		const completeSimpleMock = vi.spyOn(ai, "completeSimple");
 		const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(
-			asGlobalFetch(async (_url, init) => {
-				const body = JSON.parse(String(init?.body)) as { questions: Record<string, { type: string }> };
+			asGlobalFetch(async (url, init) => {
+				expect(String(url)).toBe("https://judge.example.test/v1/systemone");
+				const body = JSON.parse(String(init?.body)) as {
+					model: string;
+					questions: Record<string, { type: string }>;
+				};
+				expect(body.model).toBe("jev-preview");
 				expect(body.questions.stopped.type).toBe("noul");
 				expect(new Headers(init?.headers).get("authorization")).toBe("Bearer ts-key");
 				return Response.json({
@@ -191,19 +190,8 @@ describe("classifyUnexpectedStop", () => {
 	});
 
 	it("returns undefined instead of throwing when every judge fails", async () => {
-		const settings = {
-			get(path: string) {
-				if (path === "providers.unexpectedStopModel") return "online";
-				return undefined;
-			},
-			getModelRole() {
-				return undefined;
-			},
-			getStorage() {
-				return undefined;
-			},
-		} as never;
-		const registry = { authStorage: { hasAuth: () => false }, getAvailable: () => [] } as never;
+		const settings = Settings.isolated({ modelRoles: { judge: "missing/judge" } });
+		const registry = makeRegistry([]);
 
 		expect(await classifyUnexpectedStop("Doing that now.", { settings, registry, sessionId: "s" })).toBeUndefined();
 	});

@@ -20,6 +20,10 @@ export interface SessionSnapshot {
 	localRoots?: Record<string, string>;
 	/** Enabled host-capability snippets projected for this JavaScript cell. */
 	preludes?: EvalPreludeSource[];
+	/** Selected package directory consulted only after the importing file's project. */
+	packageRoot?: string;
+	/** Model-visible description of the selected package environment. */
+	packageEnvironment?: string;
 }
 
 export interface RunErrorPayload {

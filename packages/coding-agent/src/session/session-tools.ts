@@ -297,6 +297,14 @@ export class SessionTools {
 	 */
 	#basePromptXdevNames: ReadonlySet<string> = new Set();
 	#toolRegistryMutationScope = new AsyncLocalStorage<boolean>();
+	/**
+	 * Render-scoped candidate hint visibility. Rebuild frames run inside
+	 * `.run(candidate, …)` so tool getters read the candidate during render and
+	 * signature computation; everything outside the frame reads the committed
+	 * {@link #skillHintVisible}. Abandoned frames simply exit their scope — no
+	 * rollback write that could clobber a newer commit.
+	 */
+	#skillHintRenderScope = new AsyncLocalStorage<boolean>();
 	#toolRegistryMutationTail: Promise<void> = Promise.resolve();
 	#promptModelKey: string | undefined;
 	#rebuildSystemPrompt: SessionToolsOptions["rebuildSystemPrompt"];
@@ -333,6 +341,17 @@ export class SessionTools {
 	#skillWarnings: SkillWarning[];
 	#skillsSettings: SkillsSettings | undefined;
 	#skillsReloadable: boolean;
+	/**
+	 * Snapshot of the skill-URI hint visibility taken at the last system-prompt
+	 * rebuild. The provider-visible system prompt is deliberately byte-stable
+	 * across mid-session `/skillful` toggles (a notice rides the next turn
+	 * instead), so the provider-side hint in `BashTool.description` and
+	 * `ReadTool.parameters` must freeze to the same state — reading the live
+	 * setting per request would mutate the provider tool prefix without the
+	 * intended prompt refresh. The setters below carry the snapshot into the
+	 * tools; the refresh lifecycle updates it.
+	 */
+	#skillHintVisible = false;
 	#acpPermissionDecisions = new Map<string, "allow_always" | "reject_always">();
 
 	constructor(host: SessionToolsHost, options: SessionToolsOptions) {
@@ -374,6 +393,7 @@ export class SessionTools {
 		this.#skillWarnings = options.skillWarnings ?? [];
 		this.#skillsSettings = options.skillsSettings;
 		this.#skillsReloadable = options.skillsReloadable ?? true;
+		this.#skillHintVisible = this.#deriveSkillHintVisible();
 		// Seed from the construction slate (top-level tools plus xd:// mounts).
 		// Left empty, getEnabledToolNames() falls back to live agent.state.tools,
 		// so an early reconcile (think/Code Mode after the startup model
@@ -440,6 +460,23 @@ export class SessionTools {
 		return this.#skillsSettings;
 	}
 
+	/**
+	 * Skill-URI hint visibility (see {@link #skillHintVisible}). Tools
+	 * read this instead of the live `skillful` setting so the provider tool
+	 * prefix stays byte-stable between system-prompt rebuilds.
+	 *
+	 * Inside a rebuild frame ({@link #skillHintRenderScope}) this returns the
+	 * candidate so the rendered prompt and computed signature see the new
+	 * state; outside, the committed snapshot.
+	 */
+	get skillHintVisible(): boolean {
+		return this.#skillHintRenderScope.getStore() ?? this.#skillHintVisible;
+	}
+
+	/** Derives the candidate visibility from the live setting without publishing it. */
+	#deriveSkillHintVisible(): boolean {
+		return this.#host.settings.get("skillful") === true && (this.#skills?.length ?? 0) > 0;
+	}
 	/** Drops cached per-session ACP `allow_always`/`reject_always` decisions. */
 	clearAcpPermissionDecisions(): void {
 		this.#acpPermissionDecisions.clear();
@@ -1069,10 +1106,13 @@ export class SessionTools {
 		let rebuiltSignature: string | undefined;
 		let frozenSignature: string | undefined;
 		let rebuiltXdevCatalogNames: readonly string[] | undefined;
+		let candidateSkillHintVisible: boolean | undefined;
 		try {
 			if (restrictDeviceOnlyWrite) this.#setDeviceOnlyWrite?.(true);
 			if (upgradeDeviceOnlyWrite) this.#setPendingFullWriteDescription?.(true);
 			if (this.#rebuildSystemPrompt) {
+				// Local alias: closures below cannot observe the field narrowing.
+				const rebuildSystemPrompt = this.#rebuildSystemPrompt;
 				// The provider receives only `appliedNames`, but prompt capability and
 				// safety gates must see every enabled tool that remains callable via
 				// the Code Mode eval bridge. The rendered tool inventory is restricted
@@ -1090,11 +1130,14 @@ export class SessionTools {
 					const tool = this.#toolRegistry.get(name);
 					return tool ? [tool] : [];
 				});
-				const signature = this.#computeAppliedToolSignature(
-					promptToolNames,
-					promptTools,
-					directToolNames,
-					mountedSignatureTools,
+				// Derive the candidate visibility and run both the signature
+				// computation and the awaited render inside its scope: the tool
+				// getters read the candidate, so prompt, signature and provider
+				// schemas describe the same state. Nothing publishes outside this
+				// frame until the commit below.
+				const candidate = this.#deriveSkillHintVisible();
+				const signature = this.#skillHintRenderScope.run(candidate, () =>
+					this.#computeAppliedToolSignature(promptToolNames, promptTools, directToolNames, mountedSignatureTools),
 				);
 				const freezeImplicitPromptRefresh =
 					!forcePromptRefresh &&
@@ -1104,14 +1147,18 @@ export class SessionTools {
 					this.#host.agent.state.messages.some(message => message.role === "assistant");
 				if (freezeImplicitPromptRefresh) {
 					frozenSignature = signature;
+					candidateSkillHintVisible = undefined;
 				} else if (forcePromptRefresh || signature !== this.#lastAppliedToolSignature) {
 					const built = await untilAborted(
 						signal,
-						this.#rebuildSystemPrompt(promptToolNames, this.#toolRegistry, { directToolNames }),
+						this.#skillHintRenderScope.run(candidate, () =>
+							rebuildSystemPrompt(promptToolNames, this.#toolRegistry, { directToolNames }),
+						),
 					);
 					rebuiltSystemPrompt = built.systemPrompt;
 					rebuiltSignature = signature;
 					rebuiltXdevCatalogNames = built.xdevCatalogNames;
+					candidateSkillHintVisible = candidate;
 				}
 			}
 			signal?.throwIfAborted();
@@ -1164,6 +1211,9 @@ export class SessionTools {
 				// tracking any later frozen changes that must follow a delivered base.
 				this.#basePromptReflectsRosterDelta = true;
 				this.#pendingToolRosterDeltaAfterBase = undefined;
+				// Publish the exact visibility the prompt rendered with — never
+				// re-derive from live settings, which could diverge mid-flight.
+				this.#skillHintVisible = candidateSkillHintVisible ?? this.#skillHintVisible;
 			} else if (frozenSignature) {
 				this.#notifyToolRosterDelta(previousActiveToolNames, appliedNames);
 				this.#lastAppliedToolSignature = frozenSignature;
@@ -1724,6 +1774,8 @@ export class SessionTools {
 
 	async #prepareBaseSystemPrompt(isCurrent?: () => boolean): Promise<SystemPromptPreparation | undefined> {
 		if (this.#host.isDisposed() || !this.#rebuildSystemPrompt || isCurrent?.() === false) return;
+		// Local alias: closures below cannot observe the field narrowing.
+		const rebuildSystemPrompt = this.#rebuildSystemPrompt;
 		const activeToolNames = this.getActiveToolNames();
 		const promptToolNames =
 			this.#codeModeDirectWireSignature === undefined ? activeToolNames : this.getEnabledToolNames();
@@ -1731,15 +1783,39 @@ export class SessionTools {
 		const directToolNames = this.#codeModeDirectWireSignature === undefined ? undefined : activeToolNames;
 		this.#setActiveToolNames?.(this.#toolPredicateNames ?? activeToolNames);
 		const previousBaseSystemPrompt = this.#baseSystemPrompt;
-		const built = await this.#rebuildSystemPrompt(promptToolNames, this.#toolRegistry, { directToolNames });
-		if (this.#host.isDisposed() || isCurrent?.() === false) return;
+		// Derive the candidate and run the awaited render inside its scope: the
+		// tool getters read the candidate while the prompt renders, so the built
+		// prompt and the captured signature describe the same state. Nothing is
+		// published to {@link #skillHintVisible} here — an abandoned, stale or
+		// throwing preparation leaves the committed snapshot untouched, and the
+		// scope frame (not a rollback write) guarantees no clobbering of a newer
+		// winner.
+		const candidate = this.#deriveSkillHintVisible();
+		const built = await this.#skillHintRenderScope.run(candidate, () =>
+			rebuildSystemPrompt(promptToolNames, this.#toolRegistry, { directToolNames }),
+		);
+		const promptTools = promptToolNames
+			.map(name => this.#toolRegistry.get(name))
+			.filter((tool): tool is AgentTool => tool != null);
+		const mountedSignatureTools = [...(this.#xdev?.mountedNames ?? [])].flatMap(name => {
+			const tool = this.#toolRegistry.get(name);
+			return tool ? [tool] : [];
+		});
+		const signature = this.#skillHintRenderScope.run(candidate, () =>
+			this.#computeAppliedToolSignature(promptToolNames, promptTools, directToolNames, mountedSignatureTools),
+		);
 		return {
 			systemPrompt: built.systemPrompt,
 			commit: () => {
+				// Publish only to a live, current session whose base this
+				// preparation still owns.
 				if (this.#host.isDisposed() || isCurrent?.() === false) return false;
-				// A handler may have rebuilt policy while this preparation was awaiting its final commit.
+				// A handler may have rebuilt policy while this preparation was
+				// awaiting its final commit: its own lifecycle published its own
+				// snapshot, so only carry the prompt forward.
 				if (this.#baseSystemPrompt !== previousBaseSystemPrompt) return true;
 				this.#baseSystemPrompt = built.systemPrompt;
+				this.#skillHintVisible = candidate;
 				this.#setBasePromptXdevNames(built.xdevCatalogNames);
 				this.#host.clearMemoryPromotionSnapshot();
 				if (
@@ -1756,20 +1832,7 @@ export class SessionTools {
 				this.#basePromptReflectsRosterDelta = true;
 				this.#pendingToolRosterDeltaAfterBase = undefined;
 				this.#promptModelKey = this.#currentPromptModelKey();
-				// Match the committed prompt so an unchanged tool set can skip rebuilding it.
-				const promptTools = promptToolNames
-					.map(name => this.#toolRegistry.get(name))
-					.filter((tool): tool is AgentTool => tool != null);
-				const mountedSignatureTools = [...(this.#xdev?.mountedNames ?? [])].flatMap(name => {
-					const tool = this.#toolRegistry.get(name);
-					return tool ? [tool] : [];
-				});
-				this.#lastAppliedToolSignature = this.#computeAppliedToolSignature(
-					promptToolNames,
-					promptTools,
-					directToolNames,
-					mountedSignatureTools,
-				);
+				this.#lastAppliedToolSignature = signature;
 				return true;
 			},
 		};
@@ -1779,12 +1842,13 @@ export class SessionTools {
 	async buildSystemPromptForAgentStart(
 		promptText: string,
 		isCurrent: () => boolean,
+		signal?: AbortSignal,
 	): Promise<SystemPromptPreparation> {
 		const backend = await resolveMemoryBackend(this.#host.settings);
 		if (!isCurrent() || !backend.beforeAgentStartPrompt) return { systemPrompt: this.#baseSystemPrompt };
 
 		try {
-			const memory = await backend.beforeAgentStartPrompt(this.#host.memoryBackendSession(), promptText);
+			const memory = await backend.beforeAgentStartPrompt(this.#host.memoryBackendSession(), promptText, signal);
 			if (!isCurrent() || !memory) return { systemPrompt: this.#baseSystemPrompt };
 			const injected = memory.context;
 			if (!injected) {

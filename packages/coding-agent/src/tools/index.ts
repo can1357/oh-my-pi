@@ -11,7 +11,11 @@ import type { Settings } from "../config/settings";
 import { EditTool } from "../edit";
 import { checkPythonKernelAvailability } from "../eval/py/kernel";
 import type { ToolPathWithSource } from "../extensibility/custom-tools";
-import type { PreparedExtension } from "../extensibility/extensions/types";
+import type {
+	BeforeSubagentSpawnEvent,
+	BeforeSubagentSpawnEventResult,
+	PreparedExtension,
+} from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import type { GoalModeState, GoalRuntime } from "../goals";
 import { GoalTool } from "../goals/tools/goal-tool";
@@ -52,7 +56,8 @@ import { resolveEvalBackends } from "./eval-backends";
 import { GithubTool } from "./gh";
 import { GlobTool } from "./glob";
 import { GrepTool } from "./grep";
-import { HubTool, isIrcEnabled } from "./hub";
+import { isIrcEnabled } from "../irc/messaging";
+import { FindTool, isFindEnabled } from "./jfind";
 import { LearnTool } from "./learn";
 import { ManageSkillTool } from "./manage-skill";
 import { MemoryEditTool } from "./memory-edit";
@@ -67,6 +72,7 @@ import { supportsExternalThinking, ThinkTool } from "./think";
 import { type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { TodoTool } from "./todo";
 import { WriteTool } from "./write";
+import { WaitTool } from "./wait";
 import { isMountableUnderXdev, type XdevState } from "./xdev";
 import { YieldTool } from "./yield";
 
@@ -99,20 +105,8 @@ export * from "./file-write-fallback";
 export * from "./gh";
 export * from "./glob";
 export * from "./grep";
-export * from "./hub";
-export type {
-	HubOp,
-	HubPeerInfo,
-	HubListStatus,
-	HubRosterCounts,
-	JobSnapshot,
-	CancelStatus,
-	CancelOutcome,
-	AgentActivitySnapshot,
-	CoordinationDetails,
-	HubDetails,
-	HubRenderArgs,
-} from "@oh-my-pi/pi-tui/tools/hub";
+export * from "./jfind";
+export type { AgentActivitySnapshot, CoordinationDetails, JobSnapshot } from "@oh-my-pi/pi-tui/tools/wait";
 export * from "./image-gen";
 export * from "./learn";
 export * from "./manage-skill";
@@ -134,6 +128,7 @@ export * from "./think";
 export * from "./todo";
 export * from "./tts";
 export * from "./vibe";
+export * from "./wait";
 export type { VibeToolDetails } from "@oh-my-pi/pi-tui/tools/vibe";
 export * from "./write";
 export * from "./xdev";
@@ -213,6 +208,13 @@ export interface ToolSession {
 	workspaceTree?: WorkspaceTree;
 	/** Pre-loaded skills */
 	skills?: readonly Skill[];
+	/**
+	 * Frozen skill-URI hint visibility: snapshot taken at the last system-prompt
+	 * rebuild. Tools with a provider-side `skill://` hint read this instead of
+	 * the live `skillful` setting so the tool prefix stays byte-stable between
+	 * rebuilds (mid-session `/skillful` toggles ride the prompt, not the prefix).
+	 */
+	skillHintVisible?: boolean;
 	/** Rediscover live session skills after a tool mutates their backing files. */
 	refreshSkills?: () => Promise<void>;
 	/** Pre-loaded prompt templates */
@@ -299,11 +301,12 @@ export interface ToolSession {
 	getEvalSessionId?: () => string | null;
 	/** Get session file */
 	getSessionFile: () => string | null;
-	/** Owning journal; full SDK managers also supply registered identity without changing advisor-local IDs. */
-	sessionManager?: Pick<
-		SessionManager,
-		"appendCustomEntry" | "ensureOnDisk" | "flush" | "getBranch" | "getEntries"
-	> & { getSessionId?: SessionManager["getSessionId"] };
+	/**
+	 * Owning journal; full SDK managers also supply registered identity and the
+	 * cost ledger (`appendModelUsage`) without changing advisor-local IDs.
+	 */
+	sessionManager?: Pick<SessionManager, "appendCustomEntry" | "ensureOnDisk" | "flush" | "getBranch" | "getEntries"> &
+		Partial<Pick<SessionManager, "getSessionId" | "getLeafId" | "appendModelUsage">>;
 	/** Get eval kernel owner ID for session-scoped retained-kernel cleanup. */
 	getEvalKernelOwnerId?: () => string | null;
 	/** Current enabled eval prelude definitions. */
@@ -354,7 +357,7 @@ export interface ToolSession {
 	pendingFullWriteDescription?: boolean;
 	/** Agent registry for IRC routing across live sessions. */
 	agentRegistry?: AgentRegistry;
-	/** Idle→parked→revive lifecycle owner; lets the hub kill a non-job-backed agent registration. Default: AgentLifecycleManager.global(). */
+	/** Idle→parked→revive lifecycle owner; lets explicit cancellation stop a non-job-backed agent registration. Default: AgentLifecycleManager.global(). */
 	agentLifecycle?: () => AgentLifecycleManager;
 	/** Get artifacts directory for artifact:// URLs */
 	getArtifactsDir?: () => string | null;
@@ -382,6 +385,15 @@ export interface ToolSession {
 	getActiveModel?: () => Model | undefined;
 	/** Get the session's live per-family service tiers (undefined = none). Source of truth for subagent `tier.subagent: inherit`. */
 	getServiceTierByFamily?: () => ServiceTierByFamily | undefined;
+	/**
+	 * Fires `before_subagent_spawn` on this session's extensions before a child's
+	 * model resolves. `signal` cancels awaiting handlers. Undefined when the
+	 * session has no extension runner.
+	 */
+	emitBeforeSubagentSpawn?(
+		event: BeforeSubagentSpawnEvent,
+		signal?: AbortSignal,
+	): Promise<BeforeSubagentSpawnEventResult | undefined>;
 	/** Auth storage for passing to subagents (avoids re-discovery) */
 	authStorage?: import("../session/auth-storage").AuthStorage;
 	/** Model registry for passing to subagents (avoids re-discovery) */
@@ -529,13 +541,14 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	github: GithubTool.createIf,
 	glob: s => new GlobTool(s, { rootPathAlias: true }),
 	grep: s => new GrepTool(s),
+	find: s => new FindTool(s),
 	lsp: LspTool.createIf,
 	checkpoint: CheckpointTool.createIf,
 	rewind: RewindTool.createIf,
 	context_notes: ContextNotesTool.createIf,
 	new_context: NewContextTool.createIf,
 	task: s => TaskTool.create(s),
-	hub: s => new HubTool(s),
+	wait: s => new WaitTool(s),
 	todo: s => new TodoTool(s),
 	web_search: s => new WebSearchTool(s),
 	write: s => new WriteTool(s),
@@ -563,7 +576,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	const includeYield = session.requireYieldTool === true;
 	const enableLsp = session.enableLsp ?? true;
 	// LIVE flag derivation: the session tool policy (persona/cli layers) owns
-	// hub availability — consulted LAZILY in the gate below. (LSP read-only is
+	// wait availability — consulted LAZILY in the gate below. (LSP read-only is
 	// enforced by the tool itself.)
 	const toolPolicy = session.getToolPolicy?.();
 	const requestedTools = restrictToolNames
@@ -704,6 +717,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			return (!includeYield || session.prewalkArmed === true) && session.settings.get("todo.enabled");
 		if (name === "glob") return session.settings.get("glob.enabled");
 		if (name === "grep") return session.settings.get("grep.enabled");
+		if (name === "find") return isFindEnabled(session);
 		if (name === "github") return session.settings.get("github.enabled");
 		if (name === "ast_grep") return session.settings.get("astGrep.enabled");
 		if (name === "ast_edit") return session.settings.get("astEdit.enabled");
@@ -716,18 +730,23 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 				session.settings.get("checkpoint.enabled") &&
 				((session.taskDepth ?? 0) === 0 || requestedTools !== undefined)
 			);
-		if (name === "hub") {
+		// Subagents never block on `wait`: owned job results re-wake their run
+		// through the executor's quiescence barrier, and parent messages steer them.
+		if (name === "wait") {
+			if ((session.taskDepth ?? 0) > 0) return false;
 			// The policy is the live answer ONLY once the session registry holds
-			// `hub`: `effective()` intersects the registry, which is still EMPTY
+			// `wait`: `effective()` intersects the registry, which is still EMPTY
 			// during this first createTools pass (it populates it below) — asking
-			// now would always deny and drop hub/IRC from ordinary unrestricted
+			// now would always deny and drop wait/IRC from ordinary unrestricted
 			// sessions. So the initial build falls back to the classic
 			// unrestricted-session gate; later rebuilds (persona enter/exit,
 			// toggles) see the populated registry and the policy layers decide
 			// (persona grant, CLI grant, toggles already intersected).
-			if (toolPolicy && session.toolRegistry?.has("hub")) return toolPolicy.hubEnabled();
+			if (toolPolicy && session.toolRegistry?.has("wait")) return toolPolicy.waitEnabled();
 			return (
-				!restrictToolNames && session.enableIrc !== false && isIrcEnabled(session.settings, session.taskDepth ?? 0)
+				session.settings.get("async.enabled") ||
+				(session.enableIrc !== false && isIrcEnabled(session.settings, session.taskDepth ?? 0)) ||
+				session.settings.get("launch.enabled")
 			);
 		}
 		if (name === "retain" || name === "recall" || name === "reflect") {
@@ -873,6 +892,10 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 }
 
 export type { AskToolDetails, QuestionResult } from "@oh-my-pi/pi-tui/tools/ask";
+// Issue #12680: extensions that shadow the built-in ask tool reach the native
+// renderer through the injected pi.pi namespace (the root barrel of this
+// package). Re-export it so the pi-tui renderer migration doesn't drop it.
+export { askToolRenderer } from "@oh-my-pi/pi-tui/tools/ask";
 export type {
 	TodoStatus,
 	TodoOperation,

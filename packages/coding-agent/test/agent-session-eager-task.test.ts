@@ -91,7 +91,7 @@ describe("AgentSession eager task prelude", () => {
 		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
 
 		const authStorage = createInMemoryAuthStorage();
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), `models-${harnesses.length}.yml`));
 		const settings = Settings.isolated({
 			"compaction.enabled": false,

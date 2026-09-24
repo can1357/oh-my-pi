@@ -17,7 +17,7 @@ const REGISTRY = new Set([
 	"checkpoint",
 	"rewind",
 	"task",
-	"hub",
+	"wait",
 	"ext_tool",
 ]);
 const DEFAULT_ACTIVE = (name: string): boolean => name !== "ext_tool";

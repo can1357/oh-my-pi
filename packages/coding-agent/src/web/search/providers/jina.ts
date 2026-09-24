@@ -6,7 +6,7 @@
  */
 
 import { type ApiKey, type AuthStorage, type FetchImpl, withAuth } from "@oh-my-pi/pi-ai";
-import type { SearchResponse, SearchSource } from "@oh-my-pi/pi-tui/tools/web-search";
+import type { SearchResponse, SearchSource } from "../types";
 import { SearchProviderError } from "../../../web/search/types";
 import { formatQuery, parseSearchQuery } from "../query";
 import { clampNumResults } from "../utils";
@@ -94,7 +94,7 @@ async function callJinaSearch(
 /** Execute Jina web search. */
 export async function searchJina(params: JinaSearchParams): Promise<SearchResponse> {
 	const numResults = clampNumResults(params.num_results, DEFAULT_NUM_RESULTS, MAX_NUM_RESULTS);
-	const keyOrResolver: ApiKey = params.authStorage.resolver("jina", {
+	const keyOrResolver: ApiKey = params.authStorage.keys.resolver("jina", {
 		sessionId: params.sessionId,
 	});
 	const response = await withAuth(
@@ -131,7 +131,7 @@ export class JinaProvider extends SearchProvider {
 	readonly label = "Jina";
 
 	isAvailable(authStorage: AuthStorage): boolean {
-		return authStorage.hasAuth("jina");
+		return authStorage.keys.source("jina") !== undefined;
 	}
 
 	search(params: SearchParamsWithFetch): Promise<SearchResponse> {

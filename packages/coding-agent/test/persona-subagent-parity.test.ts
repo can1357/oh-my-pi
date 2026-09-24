@@ -22,7 +22,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
  * ExecutorOptions.parentEffectiveGrant → deriveChildToolNames).
  */
 
-const ALL_TOOLS = new Set(["read", "grep", "glob", "write", "edit", "bash", "task", "hub", "eval"]);
+const ALL_TOOLS = new Set(["read", "grep", "glob", "write", "edit", "bash", "task", "wait", "eval"]);
 
 function makePersona(overrides: Partial<DiscoveredAgent> = {}): DiscoveredAgent {
 	return {
@@ -165,9 +165,9 @@ describe("subagent spawn inheritance parity", () => {
 
 		// And the child capability set the executor derives is identical:
 		// persona [read, task] does not cage — child keeps its frontmatter
-		// [read, write, bash] plus the ordinary hub auto-append.
+		// [read, write, bash] plus the ordinary wait auto-append.
 		expect(childCapabilities(launchPolicy)).toEqual(childCapabilities(livePolicy));
-		expect(childCapabilities(launchPolicy)).toEqual(["read", "write", "bash", "hub"]);
+		expect(childCapabilities(launchPolicy)).toEqual(["read", "write", "bash", "wait"]);
 	});
 
 	it("persona-active parent with unrestricted baseline leaves child [read, bash] intact", async () => {
@@ -184,7 +184,7 @@ describe("subagent spawn inheritance parity", () => {
 
 		expect(resolved.restrictToolNames).toBe(false);
 		expect(resolved.parentEffectiveGrant).toBeNull();
-		expect(childCapabilities(policy, child)).toEqual(["read", "bash", "hub"]);
+		expect(childCapabilities(policy, child)).toEqual(["read", "bash", "wait"]);
 	});
 
 	it("CLI-restricted parent still cages the child even with a widening persona", async () => {
@@ -323,12 +323,12 @@ describe("subagent spawn inheritance parity", () => {
 		expect(resolved.parentEffectiveGrant).toBeNull();
 
 		// Unrestricted: child keeps its full frontmatter list, and an ordinary
-		// agent still gets the hub auto-append.
-		expect(childCapabilities(policy)).toEqual(["read", "write", "bash", "hub"]);
+		// agent still gets the wait auto-append.
+		expect(childCapabilities(policy)).toEqual(["read", "write", "bash", "wait"]);
 	});
 
-	it("hub auto-append is skipped for a baseline-restricted parent (hub not in baseline grant)", () => {
-		// CLI grant excludes hub; the widening persona cannot restore it for the
+	it("wait auto-append is skipped for a baseline-restricted parent (wait not in baseline grant)", () => {
+		// CLI grant excludes wait; the widening persona cannot restore it for the
 		// child.
 		const policy = new SessionToolPolicy({
 			toolNames: ["read", "task"],
@@ -342,7 +342,7 @@ describe("subagent spawn inheritance parity", () => {
 			restrictToolNames: policy.isBaselineRestricted(),
 			atMaxDepth: false,
 		});
-		expect(child).not.toContain("hub");
+		expect(child).not.toContain("wait");
 	});
 
 	it("cliGrant narrowing counts as baseline restriction and caps the child", () => {
@@ -360,7 +360,7 @@ describe("subagent spawn inheritance parity", () => {
 			restrictToolNames: policy.isBaselineRestricted(),
 			atMaxDepth: false,
 		});
-		// restrictToolNames=true suppresses the hub auto-append for restricted
+		// restrictToolNames=true suppresses the wait auto-append for restricted
 		// hosts: child is exactly the intersected frontmatter.
 		expect(new Set(child)).toEqual(new Set(["read"]));
 	});
@@ -418,20 +418,20 @@ describe("subagent spawn inheritance parity", () => {
 		);
 		expect(new Set(child)).toEqual(new Set(["bash", "eval"]));
 	});
-	// fw_sH: a raw legacy alias (`search`→grep, `find`→glob) must normalize
-	// BEFORE the parent intersect — the grant holds canonical names only, so a
+	// fw_sH: a raw legacy alias (`search`→grep) must normalize BEFORE the
+	// parent intersect — the grant holds canonical names only, so a
 	// first-intersect alias would be discarded with nothing left to re-normalize.
 	it("child legacy alias under a canonical-granting parent keeps the canonical tool (fw_sH)", () => {
 		const grant = new Set(["read", "grep", "glob"]);
 		const child = deriveChildToolNames(
-			{ ...CHILD_AGENT, tools: ["search", "find"], spawns: undefined },
+			{ ...CHILD_AGENT, tools: ["search"], spawns: undefined },
 			{
 				parentEffectiveGrant: grant,
 				restrictToolNames: true,
 				atMaxDepth: false,
 			},
 		);
-		expect(new Set(child)).toEqual(new Set(["grep", "glob"]));
+		expect(new Set(child)).toEqual(new Set(["grep"]));
 	});
 	it("executor dispatch carries the parent's baseline grant end to end", async () => {
 		const persona = makePersona();
@@ -479,7 +479,7 @@ describe("subagent spawn inheritance parity", () => {
 	it("persona holding a mutation tool passes mutations through when the baseline grants them", () => {
 		// Persona [read, bash, task]; baseline unrestricted → the persona does
 		// not cage: the child keeps its full frontmatter [read, write, bash].
-		// (restrictToolNames=false here would auto-append hub; restricted=true
+		// (restrictToolNames=false here would auto-append wait; restricted=true
 		// via an explicit grant keeps the assertion on the intersect alone.)
 		const policy = makePolicy({
 			persona: makePersona({ tools: ["read", "bash", "task"] }),

@@ -127,6 +127,8 @@ Core methods:
 - `registerFileWriteFallback`, `registerFileDeleteFallback`
 - `events` (shared event bus)
 
+`ExtensionAPI` methods retain their extension binding when destructured or passed as callbacks.
+
 `getServiceTiers()` returns a detached snapshot of the session's live per-family tier map. `setServiceTier(family, tier)` changes one family for subsequent requests; pass `undefined` to clear that session override. OpenAI accepts `auto`, `default`, `flex`, `scale`, or `priority`; Anthropic accepts `priority`; Google accepts `flex` or `priority`. Changes made while a response is streaming do not alter that in-flight request.
 
 ### Provider registration
@@ -231,8 +233,37 @@ Handlers and tool `execute` receive `ctx` with:
 - `isIdle()`, `hasPendingMessages()`, `abort()`
 - `shutdown()`
 - `getSystemPrompt()`
+- `runEphemeralTurn(...)` (optional; see below)
 - `memory` (optional structured memory runtime — status/search/save across the configured backend)
 - `setInterval(fn, ms, ...args)` / `setTimeout(fn, ms, ...args)` / `clearTimer(timer)` — managed timers (see below)
+
+### Ephemeral side turns (`ctx.runEphemeralTurn`)
+
+Run the same side-turn pipeline as `/btw` using the current model and conversational context. The question and response are not appended to session history, and the request can run while the main turn is active. The snapshot may include in-flight assistant text.
+
+```ts
+if (!ctx.runEphemeralTurn) {
+  throw new Error("This host does not support ephemeral turns");
+}
+await requireConsultationConsent(remoteCaller);
+await auditConsultationRequest(remoteCaller, remoteQuestion);
+const { replyText } = await ctx.runEphemeralTurn({
+  promptText: remoteQuestion,
+  tools: false,
+  maxTokens: 4096,
+  maxContextBytes: 1_048_576,
+  onTextDelta: delta => sendRemoteChunk(delta),
+  signal: requestAbortController.signal,
+});
+```
+
+For example, a Synadia/NATS bridge can answer another agent's question from the local context and stream the response back without injecting a live user message. **A side turn sends the current conversation snapshot to the configured model provider and returns its answer to the calling extension.** Bridge extensions must obtain user consent where appropriate, authenticate and authorize callers, and audit every remote request before using this API. Agent-to-agent consultation extensions can set `maxTokens` and a serialized, post-transform `maxContextBytes` cap (measured after secret obfuscation) before inference. Transports that omit or overwrite caller output-token limits, including Codex Responses, Cursor, GitLab Duo Workflow, Ollama Cloud discovery models, and Antigravity, reject `maxTokens` before inference instead of silently starting an uncapped request. Antigravity rejects requested caps conservatively across its transport because effort routing can select wire profiles with fixed output limits. A requested cap disables optional budget thinking, since those transports may otherwise raise the wire limit to fit a thinking budget; models that require budget thinking reject the cap. `tools: false` also rejects before inference on Cursor, whose transport exposes native tools independently of the supplied tool catalog. Both caps must be positive safe integers. Omit `maxTokens` only when an uncapped turn is acceptable, or choose an API that supports output limits. The extension owns transport, access controls, request limits, and cancellation (including shutdown); this API adds no network dependency. `onTextDelta` may return a promise: delivery is awaited in order, including the final flush, and a delivery error rejects the side turn and aborts the provider request instead of leaving it streaming.
+
+Hooks may start a side turn, including from delayed callbacks. Only `context`, `before_provider_request`, and `after_provider_response` hooks reached *within* a running side turn reject a nested `runEphemeralTurn` call, which bounds recursion; the caller's `onTextDelta` runs outside that guard. Side turns inherit the active event-handler signal (only while that handler is still running) and, for registered tools, the tool invocation’s abort signal. An explicit `options.signal` is combined with those signals; it does not replace them. `maxContextBytes` is checked before `before_provider_request` hooks run; a hook that replaces the payload is not re-measured.
+
+Tool calls are always discarded rather than executed. Pass `tools: false` to remove tool definitions after context transforms and set `toolChoice: "none"` at the provider boundary. Omitting it preserves `/btw`'s tool catalog for prompt-cache reuse; disabling it may reduce cache hits. Existing context/provider hooks still run. It is not a sandbox or a guarantee that arbitrary extension hooks have no side effects. Model inference consumes the configured provider's resources. `dedupeReply` defaults to `true` and removes repeated reply text; set it to `false` to retain the provider's exact text. Callers should use `replyText` for the final result.
+
+Use `history` only for detached prior side-turn messages; it is cloned with `structuredClone`, so pass cloneable message data. A `conversationKey` keeps related side turns on one provider lineage. Rotate it after cancellation or failure before retrying. A side turn also rejects with a retryable error if its session or exact model instance changes before dispatch; callers should retry from a new current-context snapshot rather than reuse the old one.
 
 ### Background work (`ctx.setInterval` / `ctx.setTimeout`)
 
@@ -335,12 +366,16 @@ is not requeued, and explicitly cleared or replaced queues are not resurrected.
 
 ### Tool lifecycle
 
-- `tool_call` (pre-exec, may block, or revise the tool's execution `input`; for model-issued calls it fires at arg-prep time in the agent loop, so a revision is revalidated and seen by concurrency scheduling, execution events, the persisted assistant message, and the approval gate alike)
+- `tool_call` (pre-exec, may block, revise the tool's execution `input`, or return passive `additionalContext`; for model-issued calls it fires at arg-prep time in the agent loop, so a revision is revalidated and seen by concurrency scheduling, execution events, the persisted assistant message, and the approval gate alike; passive context from non-blocking handlers is delivered after the batch's tool results in assistant call order, before the next provider request)
 - `tool_result` (post-exec, may patch content/details/isError)
 - `tool_execution_start` / `tool_execution_update` / `tool_execution_end` (observability)
 - `tool_approval_requested` / `tool_approval_resolved` (observability; emitted by `wrapper.ts` only when a tool requires approval and an approval handler is registered)
 
 `tool_result` is middleware-style: handlers run in extension order and each sees prior modifications.
+
+### Subagent lifecycle
+
+- `before_subagent_spawn` → `{ model?: string | string[]; block?: boolean; reason?: string; note?: string }`. Fires in the parent session exactly once per spawned child (`task`, eval `agent()`, workpool workers), at dispatch before the child resolves its model — never during a frontend's validation preflight, so stateful routers (round-robin, quota) advance once per child. The event carries `agent`, `invocationKind`, `modelRole` (the pre-expansion role alias, when any), the expanded `patterns` core would use, and an optional stable `spawnKey`. A returned `model` replaces the spawn's attempt-ordered patterns while keeping the role identity, so the remaining entries become the child's retry fallback chain; handlers run in extension order and the last returned `model` wins, along with its `note`, which the task UI shows as the spawn's routing reason on live, async, and settled rows. `block: true` refuses the spawn with `reason`. Cancelling the spawn releases an awaiting handler (its result is discarded and pending `ctx.ui` dialogs close) instead of holding the spawn until the handler timeout.
 
 ### Reliability/runtime signals
 
@@ -396,6 +431,36 @@ execute(
 	ctx,
 ): Promise<AgentToolResult>
 ```
+
+### Adding passive context after a tool call
+
+A `tool_call` handler can return `additionalContext` without changing the tool result:
+
+```ts
+pi.on("tool_call", async event => {
+  if (event.toolName === "search") {
+    return { additionalContext: "Use this result before searching again." };
+  }
+});
+```
+
+`additionalContext` carries trusted handler-authored instructions for the next provider request. The
+host emits them after the tool results with developer/system priority where the selected transport
+supports it. Raw tool output and other untrusted data must stay in the ordinary tool result.
+
+Non-empty context from every non-blocking handler is preserved in registration order. OMP waits
+until the tool batch settles, then emits the context after the corresponding tool results in
+assistant tool-call order and before the next provider request. Handler context is delivered only when
+the call actually runs and returns a non-error result: if the call is blocked by this or a later
+handler, denied at the approval prompt, skipped by an interrupt, or fails, its collected context is
+discarded.
+
+Registered tools can add context during execution through
+`ctx.addAdditionalContext?.("...")`. Context a tool adds itself is kept even when the tool then
+returns an error. Within one call, the tool's own context (including tools reached through nested
+`xd://` dispatch) comes before `tool_call` handler context.
+Calls Cursor executes on its exec channel deliver context after their buffered results, on the next
+provider request.
 
 ### Delegating to a native built-in (`ctx.invokeTool`)
 
