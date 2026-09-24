@@ -523,6 +523,49 @@ describe("AsyncJobManager", () => {
 		expect(manager.getJob(jobId)).toBeUndefined();
 	});
 
+	test("never recycles auto ids after settled jobs are evicted", async () => {
+		const manager = new AsyncJobManager({ retentionMs: 0, onJobComplete: async () => {} });
+		const first = manager.register("bash", "first", async () => "one");
+		const second = manager.register("bash", "second", async () => "two");
+		await manager.waitForAll();
+		expect(manager.getJob(first)).toBeUndefined();
+		expect(manager.getJob(second)).toBeUndefined();
+
+		const third = manager.register("bash", "third", async () => "three");
+		expect([first, second, third]).toEqual(["bg_1", "bg_2", "bg_3"]);
+		await manager.dispose();
+	});
+
+	test("keeps a foreground-backed job out of listings and delivery unless promoted", async () => {
+		const completions: string[] = [];
+		const manager = new AsyncJobManager({
+			onJobComplete: async jobId => {
+				completions.push(jobId);
+			},
+		});
+
+		// Released before its body settles (the foreground waiter wins the race).
+		const pending = Promise.withResolvers<string>();
+		const racing = manager.register("bash", "racing foreground", () => pending.promise, { foreground: true });
+		expect(manager.getAllJobs()).toEqual([]);
+		expect(manager.getRunningJobs()).toEqual([]);
+		manager.releaseForegroundJob(racing);
+		pending.resolve("done");
+		await manager.waitForAll();
+		expect(manager.getJob(racing)).toBeUndefined();
+
+		// Settled before promotion: stays hidden until promoted, then delivers once.
+		const promoted = manager.register("bash", "promoted", async () => "slow", { foreground: true });
+		expect(promoted).toBe(racing);
+		await manager.waitForAll();
+		expect(manager.getRecentJobs()).toEqual([]);
+		expect(manager.backgroundJob(promoted)).toBeTrue();
+		expect(manager.getAllJobs().map(job => job.id)).toEqual([promoted]);
+		await manager.drainDeliveries({ timeoutMs: 2_000 });
+		expect(completions).toEqual([promoted]);
+		await manager.dispose();
+	});
+
 	test("evicts a consumed settled row on the short grace instead of full retention", async () => {
 		// A settled job whose result reached its consumer (sink delivery or a
 		// foreground snapshot) must not linger in `hub jobs` reads for the full
@@ -898,6 +941,24 @@ describe("AsyncJobManager", () => {
 
 		expect(mainDeliveries).toEqual(["owned-1"]);
 		expect(defaultDeliveries).toEqual(["unowned-1"]);
+	});
+
+	test("delivers a completion that settled while a wait watched it but returned something else", async () => {
+		const delivered: string[] = [];
+		const manager = new AsyncJobManager({});
+		manager.registerDeliverySink("Main", (_jobId, text) => {
+			delivered.push(text);
+		});
+		const id = manager.register("task", "EchoPeer", async () => "received=kestrel42", { ownerId: "Main" });
+		manager.watchJobs([id]);
+		await manager.getJob(id)?.promise;
+		await manager.drainDeliveries({ timeoutMs: 500 });
+		expect(delivered).toEqual([]);
+
+		// The wait returned a peer message instead of this job's result.
+		manager.unwatchJobs([id]);
+		await manager.drainDeliveries({ timeoutMs: 500 });
+		expect(delivered).toEqual(["received=kestrel42"]);
 	});
 
 	test("dead-letters an owned delivery when its owner has no live sink", async () => {

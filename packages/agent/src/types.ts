@@ -163,8 +163,10 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 
 	/**
 	 * When to interrupt tool execution for steering messages.
-	 * - "immediate" = check after each tool call (default)
-	 * - "wait" = defer steering until the current turn completes
+	 * - "immediate" = cut interruptible waits short and raise the cooperative
+	 *   `steeringSignal` for other running tools (default)
+	 * - "wait" = let non-interruptible tools finish undisturbed; interruptible
+	 *   waits are still cut short, since they have no work to complete
 	 */
 	interruptMode?: "immediate" | "wait";
 
@@ -259,8 +261,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	/**
 	 * Peeks whether steering messages are queued, without consuming them.
 	 *
-	 * Polled while a tool batch runs (unless interruptMode is "wait") to decide
-	 * whether to abort in-flight and skip not-yet-started *interruptible* waits;
+	 * Polled while a tool batch runs (in "wait" mode, only when the batch holds an
+	 * interruptible tool) to decide whether to abort in-flight and skip
+	 * not-yet-started *interruptible* waits;
 	 * every other already-emitted call still executes and the message injects
 	 * at the batch boundary. The queue keeps
 	 * owning its messages until the loop reaches the next injection boundary and
@@ -289,7 +292,8 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Peeks whether IRC messages should interrupt an interruptible waiting tool.
 	 *
 	 * Uses the same delivery rules as steering: the poll is non-consuming, only
-	 * runs for interruptible tools, and is ignored when interruptMode is "wait".
+	 * runs for interruptible tools, and cuts them short even when interruptMode
+	 * is "wait".
 	 * The host owns message injection at the next boundary.
 	 */
 	hasIrcInterrupts?: () => boolean | Promise<boolean>;
@@ -298,7 +302,7 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * process) is queued for aside injection at the next boundary.
 	 *
 	 * Same rules as {@link hasIrcInterrupts}: non-consuming, only cuts
-	 * *interruptible* waits short, ignored when interruptMode is "wait". Without
+	 * *interruptible* waits short, in either interruptMode. Without
 	 * it a completion notice sits behind an hour-long `wait` that the agent
 	 * would have abandoned had it seen the notice. Unlike a peer IRC it never
 	 * raises {@link ToolCallContext.steeringSignal}: a queued completion must
@@ -1064,7 +1068,7 @@ export interface AgentTool<
 	 * cleanly (e.g. `job` poll), so the abort surfaces the tool's current
 	 * snapshot rather than corrupting a side effect. Every other call runs to
 	 * completion even when steering is queued; the message lands at the next
-	 * batch boundary. Honored only when `interruptMode` is "immediate".
+	 * batch boundary. Honored in both `interruptMode`s.
 	 */
 	interruptible?: boolean | ((args: Partial<Static<TParameters>>) => boolean);
 	/**

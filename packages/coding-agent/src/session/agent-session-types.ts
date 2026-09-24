@@ -7,6 +7,7 @@ import type {
 	ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
 import type {
+	AssistantMessage,
 	Context,
 	Effort,
 	ImageContent,
@@ -67,7 +68,10 @@ export interface AgentSessionDisposeOptions {
 /** Listener notified when command metadata changes. */
 export type CommandMetadataChangedListener = () => void | Promise<void>;
 /** Public summary of an asynchronous job. */
-export type AsyncJobSnapshotItem = Pick<AsyncJob, "id" | "type" | "status" | "label" | "startTime" | "agentId">;
+export type AsyncJobSnapshotItem = Pick<
+	AsyncJob,
+	"id" | "type" | "status" | "label" | "startTime" | "endTime" | "agentId"
+>;
 
 /** Snapshot of running, recent, and pending-delivery asynchronous jobs. */
 export interface AsyncJobSnapshot {
@@ -491,3 +495,28 @@ export interface ResetSessionContextResult {
 
 /** Queued user content restored to the editor. */
 export type RestoredQueuedMessage = { text: string; images?: ImageContent[] };
+
+/** Options for the same ephemeral side turn used by /btw. */
+export interface EphemeralTurnOptions {
+	promptText: string;
+	/** Detached prior side-turn messages to prepend to this request. They are copied and never appended to the session history. */
+	history?: readonly Message[];
+	/** Opaque provider-lineage key for a series of related side turns. Rotate it after cancellation or failure before retrying. */
+	conversationKey?: string;
+	/** Omit tool definitions and request no tool calls. Rejects before inference on transports with mandatory native tools (Cursor). Tool calls are never executed, even when this option is omitted. */
+	tools?: false;
+	/** Optional positive safe-integer output-token cap. Transports that omit or overwrite caller output limits reject this option before inference. On budget-thinking models a cap disables optional thinking (models that require it reject the cap). */
+	maxTokens?: number;
+	/** Positive safe-integer UTF-8 byte cap. Reject before inference when the serialized post-transform, secret-obfuscated provider context exceeds it. Measured before `before_provider_request` hooks; payload replacements are not re-measured. */
+	maxContextBytes?: number;
+	/** Awaited in order; a delivery failure rejects the side turn and aborts the request. */
+	onTextDelta?: (delta: string) => void | Promise<void>;
+	signal?: AbortSignal;
+	dedupeReply?: boolean;
+}
+
+/** A side-turn response that is not appended to session history. */
+export interface EphemeralTurnResult {
+	replyText: string;
+	assistantMessage: AssistantMessage;
+}

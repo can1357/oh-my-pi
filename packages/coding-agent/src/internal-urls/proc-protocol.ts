@@ -71,10 +71,13 @@ export class ProcProtocolHandler implements ProtocolHandler {
 		if (!id) {
 			const now = Date.now();
 			const rows = [
-				...jobs.map(
-					job =>
-						`${job.id} [${job.type}] ${job.status} up ${formatDuration(now - job.startTime)} — ${job.label.replace(/\s+/g, " ")}`,
-				),
+				...jobs.map(job => {
+					const duration =
+						job.endTime === undefined
+							? `up ${formatDuration(now - job.startTime)}`
+							: `in ${formatDuration(job.endTime - job.startTime)}`;
+					return `${job.id} [${job.type}] ${job.status} ${duration} — ${job.label.replace(/\s+/g, " ")}`;
+				}),
 				...runningAgentsOutsideJobs(session).map(
 					agent => `${agent.id} [task] running up ${formatDuration(agent.ageMs)} — ${agent.activity ?? "agent"}`,
 				),

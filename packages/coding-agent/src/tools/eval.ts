@@ -47,6 +47,7 @@ import { upsertStatusEvent } from "@oh-my-pi/pi-tui/tools/eval";
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "./output-meta";
 import { ToolAbortError, throwIfAborted } from "./tool-errors";
+import { hasWaitTool } from "./wait";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
@@ -201,6 +202,8 @@ export interface EvalToolDescriptionOptions {
 	evalTools?: boolean;
 	/** Push `workpool()` as the default for independent items (model delegation bias `eager`). Default: true. */
 	eagerDelegation?: boolean;
+	/** Point blocked callers at the `wait` tool; false when the session lacks it (subagents). Default: true. */
+	waitTool?: boolean;
 	/** Enabled preludes; each becomes an `xd://eval/<name>` doc topic. */
 	preludes?: readonly Pick<EvalPreludeDefinition, "name" | "documentation">[];
 	/**
@@ -219,6 +222,7 @@ function evalTemplateContext(options: EvalToolDescriptionOptions) {
 		js: options.js ?? true,
 		evalTools: options.evalTools ?? true,
 		eagerDelegation: options.eagerDelegation ?? true,
+		waitTool: options.waitTool ?? true,
 		autoBackgroundEnabled: options.autoBackgroundEnabled ?? false,
 		spawns: spawnPolicy.enabled,
 		spawnDefaultAgent: spawnPolicy.defaultAgent,
@@ -374,6 +378,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			autoBackgroundEnabled: session.settings.get("eval.autoBackground.enabled"),
 			evalTools: session.settings.get("eval.tools.enabled"),
 			eagerDelegation: sessionDelegationBias(session) === "eager",
+			waitTool: hasWaitTool(session),
 			preludes: getEnabledEvalPreludes(session.getEvalPreludes?.() ?? []),
 			inlineTopics: session.isToolActive?.("read") === false,
 			autoProvision: session.settings.get("eval.autoProvision"),
@@ -639,16 +644,15 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					throw error;
 				}
 			},
-			{ ownerId: session.getAgentId?.() ?? undefined },
+			{ ownerId: session.getAgentId?.() ?? undefined, foreground: !startBackgrounded },
 		);
 
 		if (startBackgrounded) {
 			return this.#buildBackgroundStartResult(jobId, cells, languages, notice, latestText, latestDetails);
 		}
-		// Suppress the completion delivery up front so a job finishing while we
-		// foreground-wait cannot also be injected by the delivery loop. Lifted
-		// via resumeDeliveries() if we end up backgrounding after all.
-		autoBgManager.acknowledgeDeliveries([jobId]);
+		// The job was registered as foreground-backed: hidden from listings and
+		// delivery-suppressed until backgroundJob() promotes it, so a cell
+		// finishing within the wait never surfaces as a background job.
 		const waitResult = await raceJobSettlement(
 			completion.promise,
 			autoBackgroundWaitMs,
@@ -656,19 +660,20 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			ctx?.toolCall?.steeringSignal,
 		);
 		if (waitResult.kind === "completed") {
-			autoBgManager.consumeJobResultWhenSettled(jobId);
+			autoBgManager.releaseForegroundJob(jobId);
 			return waitResult.result;
 		}
 		if (waitResult.kind === "failed") {
-			autoBgManager.consumeJobResultWhenSettled(jobId);
+			autoBgManager.releaseForegroundJob(jobId);
 			throw waitResult.error;
 		}
 		if (waitResult.kind === "aborted") {
 			autoBgManager.cancel(jobId);
+			autoBgManager.releaseForegroundJob(jobId);
 			throw new ToolAbortError(latestText || "Eval cell aborted");
 		}
 		forwardUpdates = false;
-		autoBgManager.resumeDeliveries([jobId]);
+		autoBgManager.backgroundJob(jobId);
 		// "steer": a queued user/peer message arrived mid-wait — background the
 		// cell (it keeps running) so the message injects promptly.
 		const steerNotice =
