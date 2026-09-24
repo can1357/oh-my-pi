@@ -92,10 +92,9 @@ const CREDENTIAL_SCOPED_PROVIDERS = new Set(["devin"]);
  * - `fallback`: only when the provider's authoritative discovery did not succeed.
  * - `empty`: only when no other source produced a row for the provider.
  *
- * xai-oauth is the one projected seed: its rows are curated facts that
- * `buildXaiOAuthStaticSeed` bakes into full Responses specs, and the bundle
- * carries the baked form so `ModelRegistry.#loadModels()` honours a persisted
- * `modelRoles.default = "xai-oauth/<id>"` synchronously at boot.
+ * xai-oauth projects curated chat rows into Responses specs while preserving
+ * runner seed transports. The bundle carries both so configured roles resolve
+ * synchronously before live discovery completes.
  */
 function bundledSeedRows(
 	entry: CompiledProvider,
@@ -171,16 +170,16 @@ async function resolveProviderApiKey(providerId: string, catalog: CatalogDiscove
 	try {
 		const authStorage = await discoverAuthStorage();
 		try {
-			const storedApiKey = await authStorage.getApiKey(providerId);
+			const storedApiKey = await authStorage.keys.get(providerId);
 			if (storedApiKey) {
 				return storedApiKey;
 			}
 			if (catalog.oauthProvider) {
-				// AuthStorage.getApiKey refreshes through the broker-aware
+				// AuthStorage.keys.get refreshes through the broker-aware
 				// single-flighted machinery, so a build-time invocation no
 				// longer silently falls back to bundled models when an
 				// expired-but-refreshable OAuth credential is on disk.
-				const oauthKey = await authStorage.getApiKey(catalog.oauthProvider);
+				const oauthKey = await authStorage.keys.get(catalog.oauthProvider);
 				if (oauthKey) {
 					return oauthKey;
 				}
@@ -250,7 +249,7 @@ async function loadModelsDevData(): Promise<ModelSpec[]> {
 		const data = await fetchWellKnownModels();
 		const models = mapModelsDevToModels(data as Record<string, unknown>, MODELS_DEV_PROVIDER_DESCRIPTORS);
 		models.sort((a, b) => a.id.localeCompare(b.id));
-		console.log(`Loaded ${models.length} tool-capable models from stencil.so`);
+		console.log(`Loaded ${models.length} models from stencil.so`);
 		return models;
 	} catch (error) {
 		console.error("Failed to load stencil.so data:", error);
@@ -460,9 +459,9 @@ async function getOAuthAccessFromStorage(provider: OAuthProvider): Promise<OAuth
 			// expired-but-refreshable credential gets rotated before discovery,
 			// and identity metadata (accountId/projectId/email) flows through
 			// for Codex/Antigravity downstream calls.
-			let access = await authStorage.getOAuthAccess(provider);
+			let access = await authStorage.oauth.access(provider);
 			if (!access && provider === "google-antigravity") {
-				access = await authStorage.getOAuthAccess("google-gemini-cli");
+				access = await authStorage.oauth.access("google-gemini-cli");
 			}
 			return access ?? null;
 		} finally {
@@ -522,7 +521,7 @@ async function fetchCodexDiscoveryModels(): Promise<ModelSpec<"openai-codex-resp
 	try {
 		const authStorage = await discoverAuthStorage();
 		try {
-			const accesses = await authStorage.getOAuthAccesses("openai-codex");
+			const accesses = await authStorage.oauth.accessAll("openai-codex");
 			for (const access of accesses) {
 				if (!access.ok) {
 					console.warn(`Codex account failed to resolve (${access.error}), keeping previous models.`);
@@ -748,7 +747,7 @@ async function generateModels() {
 
 	console.log(`
 Model Statistics:`);
-	console.log(`  Total tool-capable models: ${totalModels}`);
+	console.log(`  Total models: ${totalModels}`);
 	console.log(`  Reasoning-capable models: ${reasoningModels}`);
 
 	for (const [provider, models] of Object.entries(MODELS)) {

@@ -10,6 +10,7 @@ import {
 	DisplayOption,
 	GetCliModelConfigsRequestSchema,
 	GetCliModelConfigsResponseSchema,
+	type Metadata,
 	MetadataSchema,
 	ModelDimensionKind,
 } from "./devin-proto";
@@ -323,52 +324,76 @@ export async function fetchDevinModels(
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), timeoutMs);
 	const signal = options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal;
+	const fetchImpl = discoveryFetch(options.fetch);
+
+	const fetchCatalog = async (metadata: Metadata): Promise<ModelSpec<"devin-agent">[] | null> => {
+		try {
+			const request = create(GetCliModelConfigsRequestSchema, { metadata });
+			// `toBinary` always allocates a fresh ArrayBuffer-backed view; the DOM
+			// `BodyInit` typing just cannot see that through its ArrayBufferLike signature.
+			const body = toBinary(GetCliModelConfigsRequestSchema, request) as Uint8Array<ArrayBuffer>;
+			const response = await fetchImpl(requestUrl, {
+				method: "POST",
+				headers: {
+					"content-type": "application/proto",
+					"connect-protocol-version": "1",
+					accept: "*/*",
+				},
+				body,
+				signal,
+			});
+			if (!response.ok) return null;
+
+			const decoded = decodeDevinUnaryMessage(
+				GetCliModelConfigsResponseSchema,
+				new Uint8Array(await response.arrayBuffer()),
+			);
+			return decoded ? normalizeDevinModels(decoded.clientModelConfigs, options.baseUrl) : null;
+		} catch {
+			return null;
+		}
+	};
 
 	try {
-		const request = create(GetCliModelConfigsRequestSchema, {
-			metadata: create(MetadataSchema, {
-				...devinDiscoveryMetadata(options.apiKey),
-				supportedModelDisplays: [...DEVIN_SUPPORTED_MODEL_DISPLAYS],
-			}),
+		const nativeMetadata = create(MetadataSchema, {
+			...devinDiscoveryMetadata(options.apiKey),
+			supportedModelDisplays: [...DEVIN_SUPPORTED_MODEL_DISPLAYS],
 		});
-		const body = toBinary(GetCliModelConfigsRequestSchema, request);
-
-		const headers: Record<string, string> = {
-			"content-type": "application/proto",
-			"connect-protocol-version": "1",
-			accept: "*/*",
-		};
-
-		const fetchImpl = discoveryFetch(options.fetch);
-		const response = await fetchImpl(requestUrl, { method: "POST", headers, body, signal });
-		if (!response.ok) {
-			return null;
+		const nativeModels = await fetchCatalog(nativeMetadata);
+		const nativeIsSeedOnly =
+			nativeModels !== null &&
+			nativeModels.length > 0 &&
+			nativeModels.every(model => model.id === "swe-1-6" || model.id === "swe-1-6-fast");
+		if (nativeModels !== null && nativeModels.length > 0 && !nativeIsSeedOnly) {
+			return nativeModels;
 		}
 
-		const decoded = decodeDevinUnaryMessage(
-			GetCliModelConfigsResponseSchema,
-			new Uint8Array(await response.arrayBuffer()),
-		);
-		if (!decoded) {
-			return null;
-		}
-		const models = normalizeDevinModels(decoded.clientModelConfigs, options.baseUrl);
-		if (models.length === 0) {
-			// The backend gates the native catalog on the pinned CLI identity; an
-			// empty-but-200 response is the failure signature of a stale version
-			// pin (there is no explicit error). Treat it as failed discovery so
-			// the static seed survives, and leave a trail for diagnosis. Apply
-			// this after filtering because a response containing only disabled or
-			// internal configs is equally unusable.
-			logger.warn("Devin returned an empty native model catalog; the pinned CLI identity may be stale", {
+		// Legacy Windsurf Enterprise seats expose their full credential-scoped
+		// roster only to the editor identity and raw windsurf_api_key. Native
+		// chisel discovery returns the two-row fallback seed for those seats.
+		const legacyMetadata = create(MetadataSchema, {
+			apiKey: options.apiKey ?? "",
+			ideName: "windsurf",
+			ideVersion: "3.2.23",
+			extensionName: "windsurf",
+			extensionVersion: "1.48.2",
+			locale: "en",
+		});
+		const legacyModels = await fetchCatalog(legacyMetadata);
+		const models =
+			legacyModels !== null && (nativeModels === null || legacyModels.length > nativeModels.length)
+				? legacyModels
+				: nativeModels;
+		if (models === null || models.length === 0) {
+			// The backend gates the native catalog on the pinned client identity;
+			// an empty-but-200 response is the failure signature of a stale pin.
+			logger.warn("Devin returned an empty model catalog; the pinned client identities may be stale", {
 				metadata: devinDiscoveryMetadata(undefined),
 			});
 			return null;
 		}
 
 		return models;
-	} catch {
-		return null;
 	} finally {
 		clearTimeout(timer);
 	}

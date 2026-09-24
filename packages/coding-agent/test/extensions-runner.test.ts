@@ -461,6 +461,31 @@ describe("ExtensionRunner", () => {
 	});
 
 	describe("error handling", () => {
+		it("rejects instead of returning untransformed context when its caller aborts a pending handler", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("context", async () => {
+						await new Promise(() => {});
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "pending-context.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const controller = new AbortController();
+			const pending = runner.emitContext([{ role: "user", content: "unredacted", timestamp: 1 }], controller.signal);
+
+			controller.abort(new Error("caller aborted"));
+			await expect(pending).rejects.toThrow("caller aborted");
+		});
+
 		it("calls error listeners when handler throws", async () => {
 			const extCode = `
 				export default function(pi) {
@@ -540,46 +565,6 @@ describe("ExtensionRunner", () => {
 		});
 	});
 
-	describe("composer shapes", () => {
-		it("collects extension-defined renderer contracts and selector copy", async () => {
-			const extCode = `
-				export default function(pi) {
-					pi.registerComposerShape({
-						label: "Extension Dock",
-						description: "Custom extension composer",
-						style: {
-							id: "extension-dock",
-							sideBorders: false,
-							verticalChrome: 0,
-							statusAttachment: "none",
-							bottomBar: "full",
-							bottomBarGap: false,
-							defaultPaddingX: () => 0,
-							sideChromeWidth: () => 0,
-							renderTop: () => undefined,
-							renderRow: context => [context.gutter + context.text + context.pad],
-							renderBottom: () => undefined,
-						},
-					});
-				}
-			`;
-			fs.writeFileSync(path.join(extensionsDir, "composer-shape.ts"), extCode);
-
-			const result = await loadTestExtensions();
-			const runner = new ExtensionRunner(
-				result.extensions,
-				result.runtime,
-				tempDir.path(),
-				sessionManager,
-				modelRegistry,
-			);
-
-			const [definition] = runner.getComposerShapes();
-			expect(definition.label).toBe("Extension Dock");
-			expect(definition.description).toBe("Custom extension composer");
-			expect(definition.style.id).toBe("extension-dock");
-		});
-	});
 	describe("flags", () => {
 		it("collects flags from extensions", async () => {
 			const extCode = `

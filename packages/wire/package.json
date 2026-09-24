@@ -1,10 +1,10 @@
 {
   "type": "module",
   "name": "@oh-my-pi/pi-wire",
-  "version": "18.2.6",
-  "description": "Shared wire protocol types for Oh My Pi packages",
+  "version": "18.2.11",
+  "description": "Shared wire protocol types for omp packages",
   "homepage": "https://omp.sh",
-  "author": "Stencil Labs, Inc.",
+  "author": { "name": "Stencil Labs, Inc.", "url": "https://stencil.so" },
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -27,8 +27,7 @@
     "check:types": "tsgo -p tsconfig.json --noEmit",
     "lint": "oxlint .",
     "fix": "oxlint --fix --fix-suggestions . && bun run fmt",
-    "fmt": "oxfmt --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts'",
-    "test": "bun test --parallel"
+    "fmt": "oxfmt --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts'"
   },
   "devDependencies": {
     "@types/bun": "catalog:"

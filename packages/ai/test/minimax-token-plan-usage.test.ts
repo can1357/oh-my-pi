@@ -20,17 +20,19 @@ function emptyStore(): AuthCredentialStore {
 			return [];
 		},
 		updateAuthCredential() {},
-		deleteAuthCredential() {},
+		async deleteAuthCredential() {
+			return false;
+		},
 		tryDisableAuthCredentialIfMatches() {
 			return false;
 		},
-		replaceAuthCredentialsForProvider() {
+		async replaceAuthCredentials() {
 			return [];
 		},
-		upsertAuthCredentialForProvider() {
+		async upsertAuthCredential() {
 			return [];
 		},
-		deleteAuthCredentialsForProvider() {},
+		async deleteAuthCredentials() {},
 		getCache() {
 			return null;
 		},
@@ -321,10 +323,10 @@ describe("MiniMax Token Plan usage", () => {
 
 	test("registers the Token Plan id in AuthStorage's default usage resolver", async () => {
 		const storage = new AuthStorage(emptyStore());
-		await storage.reload();
+		await storage.credentials.reload();
 		try {
-			expect(storage.usageProviderFor("minimax-code")).toBe(minimaxCodeUsageProvider);
-			expect(storage.usageProviderFor("minimax-code-cn")).toBeUndefined();
+			expect(storage.usage.providerFor("minimax-code")).toBe(minimaxCodeUsageProvider);
+			expect(storage.usage.providerFor("minimax-code-cn")).toBeUndefined();
 		} finally {
 			storage.close();
 		}
@@ -344,9 +346,9 @@ describe("MiniMax Token Plan usage", () => {
 		// Without a MiniMax ranking strategy AuthStorage matches `shared` or an exact
 		// catalog id, so a bucket-name scope would report no models at all.
 		const storage = new AuthStorage(emptyStore());
-		await storage.reload();
+		await storage.credentials.reload();
 		try {
-			expect(storage.getUsageReportingModelIds("minimax-code", ["MiniMax-M3", "MiniMax-M2"], [report])).toEqual([
+			expect(storage.usage.reportingModelIds("minimax-code", ["MiniMax-M3", "MiniMax-M2"], [report])).toEqual([
 				"MiniMax-M3",
 				"MiniMax-M2",
 			]);

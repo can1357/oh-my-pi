@@ -183,6 +183,59 @@ describe("installRuntimeModuleResolver", () => {
 		expect(resolver._resolveFilename("sharp", runtimeParent, false)).toBe(sharpStub);
 	});
 
+	test("corrects a stock hit and a runtime-parent miss when the cache is reached through a symlink", async () => {
+		// Reaching the fastembed runtime cache through a link (Windows junction,
+		// a home directory redirected onto another volume) used to skip the
+		// stock-hit correction, so a compiled binary loaded `@huggingface/hub`'s
+		// root `index.ts` instead of its `dist` entry and died on that TS
+		// source's transitive `@huggingface/xetchunk-wasm` import (#13034).
+		const nodeModules = await makeNodeModules({
+			"@huggingface/hub": {
+				manifest: { exports: { ".": { require: "./dist/index.js" } }, main: "./dist/index.js" },
+				files: ["index.ts", "dist/index.js"],
+			},
+			fastembed: {
+				manifest: { main: "lib/cjs/index.js" },
+				files: ["lib/cjs/index.js"],
+			},
+			"@anush008/tokenizers": {
+				manifest: { main: "index.js" },
+				files: ["index.js"],
+			},
+		});
+		const linkedRuntimeDir = `${path.dirname(nodeModules)}-link`;
+		await fs.symlink(path.dirname(nodeModules), linkedRuntimeDir, "junction");
+		tempDirs.push(linkedRuntimeDir);
+		const linkedNodeModules = path.join(linkedRuntimeDir, "node_modules");
+		const realNodeModules = await fs.realpath(nodeModules);
+
+		const moduleWithResolver = Module as unknown as { default?: ResolveFilenameModule } & ResolveFilenameModule;
+		const resolver = moduleWithResolver.default ?? moduleWithResolver;
+		const pristine = resolver._resolveFilename;
+		// Stand in for the compiled-binary resolver: it ignores `exports`/`main`
+		// for real-FS packages (Bun #1763) and reports realpath-resolved paths.
+		resolver._resolveFilename = (request: string): string => {
+			if (request !== "@huggingface/hub") throw new Error(`Cannot find module '${request}'`);
+			return path.join(realNodeModules, "@huggingface", "hub", "index.ts");
+		};
+
+		const uninstall = installRuntimeModuleResolver({ runtimeNodeModules: linkedNodeModules });
+		try {
+			// Bun reports the requesting module realpath-resolved, so the parent
+			// lands outside the registered (linked) root as a plain string.
+			const fastembedParent = { filename: path.join(realNodeModules, "fastembed", "lib", "cjs", "index.js") };
+			expect(resolver._resolveFilename("@huggingface/hub", fastembedParent, false)).toBe(
+				path.join(linkedNodeModules, "@huggingface", "hub", "dist", "index.js"),
+			);
+			expect(resolver._resolveFilename("@anush008/tokenizers", fastembedParent, false)).toBe(
+				path.join(linkedNodeModules, "@anush008", "tokenizers", "index.js"),
+			);
+		} finally {
+			uninstall();
+			resolver._resolveFilename = pristine;
+		}
+	});
+
 	test("uninstall restores the stock resolver and createRequire relative requires", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-runtime-uninstall-"));
 		tempDirs.push(root);

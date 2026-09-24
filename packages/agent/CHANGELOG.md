@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `SentToolDefinitions` to cache and track tool wire definitions across agent turns
+- Added `docTopics` method to `AgentTool` interface for on-demand documentation
+- Added `TOOL_INTERRUPT_ABORT_REASON`, the abort reason an interruptible tool's signal carries when queued steering, a peer message, or a background completion cuts it short, so tools can tell that apart from a run abort
+
+### Changed
+
+- Migrated Anthropic compaction to `compact-2026-09-04` with signature-based verification
+- Changed interrupt handling to respect wait mode and enable interrupts
+
+## [18.2.11] - 2026-09-23
+
+### Fixed
+
+- Fixed background job completions interrupting foreground Bash and eval calls, which could cause those calls to be repeatedly moved into the background.
+
+## [18.2.9] - 2026-09-22
+
+### Fixed
+
+- Fixed stream finalization when a provider ends without emitting a completion or error event, ensuring the final assistant message is preserved and corresponding message lifecycle events are emitted.
+- Fixed tool execution being incorrectly skipped when host steering callbacks reject during a tool batch.
+- Fixed stream hangs and preserved the original error when host aside-commit or discard callbacks fail.
+
 ## [18.2.5] - 2026-09-17
 
 ### Fixed
