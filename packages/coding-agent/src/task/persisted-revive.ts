@@ -74,7 +74,7 @@ export function createPersistedSubagentReviverFactory(
 		// and the parent was told messaging is impossible. A retained workspace
 		// (capture/persist failure) still exists on disk and would pass the cwd
 		// probe below, so gate on the stamped contract instead — otherwise a
-		// restart + Hub message revives the agent outside isolation, in the
+		// restart + peer message revives the agent outside isolation, in the
 		// parent cwd, contradicting the delivery notice.
 		if (peek.init.isolated) return undefined;
 		try {

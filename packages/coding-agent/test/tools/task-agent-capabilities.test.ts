@@ -126,17 +126,11 @@ describe("task agent capability descriptions", () => {
 		expect(isReadOnlyAgent({ ...base, disallowedTools: ["write"] })).toBe(false);
 	});
 
-	it("does not classify an agent declaring `hub` as read-only", () => {
-		// `hub` resolves to exec approval for start/stop/restart, process-stdin
-		// `send`, unrecognized ops and malformed params, so declaring it must
-		// disqualify an agent from the read-only label surfaced to the model.
+	it("keeps `wait` read-only while any exec-tier tool disqualifies the agent", () => {
 		const scout = agentByName(loadBundledAgents(), "scout");
 
-		expect(isReadOnlyAgent({ ...scout, tools: ["read", "grep", "hub", "yield"] })).toBe(false);
-		expect(isReadOnlyAgent({ ...scout, tools: ["hub"] })).toBe(false);
-
-		// Guard against over-correcting: the positive case must still hold.
-		expect(isReadOnlyAgent({ ...scout, tools: ["read", "grep", "yield"] })).toBe(true);
+		expect(isReadOnlyAgent({ ...scout, tools: ["read", "grep", "wait", "yield"] })).toBe(true);
+		expect(isReadOnlyAgent({ ...scout, tools: ["read", "grep", "wait", "bash"] })).toBe(false);
 	});
 
 	it("disables read summarization for scout, leaves other agents summarizing", () => {

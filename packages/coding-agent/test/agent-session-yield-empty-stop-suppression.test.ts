@@ -13,7 +13,7 @@ import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-cor
 import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/hub";
+import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -27,7 +27,7 @@ const recordToolSchema = type({ value: type("string") });
 type Harness = { session: AgentSession; tempDir: TempDir };
 const activeHarnesses: Harness[] = [];
 const sharedAuthStorage = createInMemoryAuthStorage();
-sharedAuthStorage.setRuntimeApiKey("mock", "test-key");
+sharedAuthStorage.keys.setRuntime("mock", "test-key");
 const sharedModelRegistry = new ModelRegistry(sharedAuthStorage);
 
 afterAll(() => {

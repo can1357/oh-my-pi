@@ -430,6 +430,42 @@ describe("devin native discovery request", () => {
 		expect(requestMetadata?.apiKey).toBe("devin-session-token$fixture-token");
 	});
 
+	it("falls back to the legacy Windsurf identity when native discovery returns only the seed", async () => {
+		const nativePayload = toBinary(
+			GetCliModelConfigsResponseSchema,
+			create(GetCliModelConfigsResponseSchema, {
+				clientModelConfigs: [config({ uid: "swe-1-6" }), config({ uid: "swe-1-6-fast" })],
+			}),
+		);
+		const legacyPayload = toBinary(
+			GetCliModelConfigsResponseSchema,
+			create(GetCliModelConfigsResponseSchema, {
+				clientModelConfigs: [
+					config({ uid: "swe-1-6" }),
+					config({ uid: "swe-1-6-fast" }),
+					config({ uid: "glm-5-2" }),
+				],
+			}),
+		);
+		const requests: Metadata[] = [];
+		const fetchImpl: FetchImpl = async (_input, init) => {
+			const metadata = fromBinary(
+				GetCliModelConfigsRequestSchema,
+				new Uint8Array(init?.body as Uint8Array),
+			).metadata;
+			if (metadata === undefined) throw new Error("expected discovery metadata");
+			requests.push(metadata);
+			const payload = metadata.ideName === "windsurf" ? legacyPayload : nativePayload;
+			return new Response(payload, { status: 200, headers: { "content-type": "application/proto" } });
+		};
+
+		const discovered = await fetchDevinModels({ apiKey: "legacy-key", fetch: fetchImpl });
+
+		expect(discovered?.map(entry => entry.id)).toEqual(["glm-5-2", "swe-1-6", "swe-1-6-fast"]);
+		expect(requests.map(metadata => metadata.ideName)).toEqual(["chisel", "windsurf"]);
+		expect(requests[1]?.apiKey).toBe("legacy-key");
+	});
+
 	it("treats an empty-but-200 catalog as failed discovery so the seed survives", async () => {
 		const emptyPayload = toBinary(
 			GetCliModelConfigsResponseSchema,

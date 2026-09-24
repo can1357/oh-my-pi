@@ -12,6 +12,7 @@ export const BUILTIN_TOOL_NAMES = [
 	"github",
 	"glob",
 	"grep",
+	"find",
 	"lsp",
 	"checkpoint",
 	"rewind",
@@ -19,7 +20,7 @@ export const BUILTIN_TOOL_NAMES = [
 	"new_context",
 	"security_scan",
 	"task",
-	"hub",
+	"wait",
 	"todo",
 	"web_search",
 	"write",
@@ -37,10 +38,7 @@ export const HIDDEN_TOOL_NAMES = ["yield", "goal", "think"] as const;
 
 export type HiddenToolName = (typeof HIDDEN_TOOL_NAMES)[number];
 
-const LEGACY_BUILTIN_TOOL_NAME_ALIASES: ReadonlyMap<string, BuiltinToolName> = new Map([
-	["search", "grep"],
-	["find", "glob"],
-]);
+const LEGACY_BUILTIN_TOOL_NAME_ALIASES: ReadonlyMap<string, BuiltinToolName> = new Map([["search", "grep"]]);
 
 const CANONICAL_TOOL_NAMES: Record<string, true> = Object.fromEntries(
 	[...BUILTIN_TOOL_NAMES, ...HIDDEN_TOOL_NAMES].map(name => [name, true]),

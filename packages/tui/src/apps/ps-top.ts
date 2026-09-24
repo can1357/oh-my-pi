@@ -15,7 +15,7 @@ import { type Component, TUI } from "../tui";
 import { truncateToWidth } from "../utils";
 import { formatDuration } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
-import type { DaemonSnapshot, DaemonSpec } from "../tools/hub";
+import type { DaemonSnapshot, DaemonSpec } from "../tools/daemon";
 import {
 	collapseCommand,
 	daemonLabel,

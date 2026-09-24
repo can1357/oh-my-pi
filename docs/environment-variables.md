@@ -63,6 +63,7 @@ These are consumed via `getEnvApiKey()` (`packages/ai/src/stream.ts`) unless not
 | `XIAOMI_TOKEN_PLAN_CN_API_KEY`  | Xiaomi MiMo Token Plan auth (CN)                 | Using `xiaomi-token-plan-cn` provider                          |                                                                                                     |
 | `XIAOMI_TOKEN_PLAN_SGP_API_KEY` | Xiaomi MiMo Token Plan auth (SGP)                | Using `xiaomi-token-plan-sgp` provider                         |                                                                                                     |
 | `MOONSHOT_API_KEY`              | Moonshot auth                                    | Using `moonshot` provider                                      | `KIMI_API_KEY` is accepted as a fallback alias                                                                      |
+| `STEPFUN_API_KEY`               | StepFun auth                                     | Using `stepfun` provider                                       | Keys are region-scoped: the `.ai` key works against `api.stepfun.ai`, the `.com` key against `api.stepfun.com`  |
 | `XAI_API_KEY`                   | xAI auth                                         | Using xAI models or as fallback for `xai-oauth`                |                                                                                                     |
 | `XAI_OAUTH_TOKEN`               | xAI OAuth/SuperGrok auth                         | Using `xai-oauth` provider                                     | Takes precedence over `XAI_API_KEY` for `xai-oauth`                                                 |
 | `OPENROUTER_API_KEY`            | OpenRouter auth                                  | Using OpenRouter models                                        | Also used by image tool when preferred/auto provider is OpenRouter                                  |
@@ -106,6 +107,8 @@ These are consumed via `getEnvApiKey()` (`packages/ai/src/stream.ts`) unless not
 | `AIAND_API_KEY`                 | ai& auth                                         | Using `aiand` provider                                         |                                                                                                     |
 | `GMI_API_KEY`                   | GMI Cloud auth                                   | Using `gmi-cloud` provider                                     |                                                                                                     |
 | `MODEL_API_KEY` / `META_API_KEY` | Meta Model API auth                             | Using `meta` provider                                          | Either variable works                                                                               |
+| `SINGULARITYAPI_DEV_API_KEY`    | SingularityAPI universal gateway auth            | Using `singularityapi-dev` provider                            | Pay-as-you-go, 300+ models; validated against `https://api.singularityapi.dev/v1/models`    |
+| `SINGULARITYAPI_TECH_API_KEY`   | SingularityAPI reserved lanes auth               | Using `singularityapi-tech` provider                           | Slot-reserved DeepSeek lanes; validated against `https://api.singularityapi.tech/v1/models` |
 
 ### GitHub/Copilot tokens
 
@@ -356,12 +359,9 @@ therefore completes through the paste-code path.
 | `PI_PERPLEXITY_API_MODEL`                           | Perplexity direct API model override (default `sonar-pro`)                |
 | `FIRECRAWL_API_KEY`                                 | Firecrawl search provider (keyless fallback when unset) and fetch reader backend (required) |
 | `FIRECRAWL_BASE_URL`                                | Firecrawl API endpoint override (`FIRECRAWL_API_URL` is a fallback alias) |
-| `GOOGLE_GEMINI_BASE_URL`                            | Gemini search endpoint override; must be a valid absolute HTTP(S) URL     |
 | `TAVILY_API_KEY`                                    | Tavily search provider                                                    |
 | `ZAI_API_KEY`                                       | z.ai search provider (also checks stored OAuth in `agent.db`)             |
-| `OPENAI_API_KEY` / Codex OAuth in DB                | Codex search provider availability/auth                                   |
-| `PI_CODEX_WEB_SEARCH_MODEL`                         | Codex search provider model override                                      |
-| `GEMINI_SEARCH_MODEL`                               | Gemini search model override                                              |
+| `OPENAI_API_KEY` / Codex OAuth in DB                | Codex search model availability/auth                                      |
 | `MOONSHOT_SEARCH_API_KEY` / `KIMI_SEARCH_API_KEY`   | Kimi/Moonshot search provider env auth                                    |
 | `MOONSHOT_SEARCH_BASE_URL` / `KIMI_SEARCH_BASE_URL` | Kimi/Moonshot search endpoint override                                    |
 | `KAGI_API_KEY`                                      | Kagi search provider                                                      |
@@ -375,30 +375,18 @@ DuckDuckGo search is keyless — it queries the no-JS HTML frontend (`html.duckd
 
 SearXNG also reads the equivalent `searxng.endpoint`, `searxng.token`, `searxng.basicUsername`, and `searxng.basicPassword` settings from `~/.omp/agent/config.yml`; environment variables are fallbacks.
 
-### Anthropic web search auth chain
+### Anthropic web search authentication
 
-`searchAnthropic()` resolves credentials in this order:
+For an Anthropic catalog model, `searchAnthropic()` uses credentials in this order:
 
 1. `ANTHROPIC_SEARCH_API_KEY`
-2. `authStorage.getApiKey("anthropic")` fallback credentials (runtime and config overrides, stored OAuth, a login-sourced API key, generic Anthropic environment fallback, then other stored API keys; the environment fallback is `ANTHROPIC_FOUNDRY_API_KEY` → `ANTHROPIC_OAUTH_TOKEN` → `ANTHROPIC_API_KEY` in Foundry mode, or `ANTHROPIC_OAUTH_TOKEN` → `ANTHROPIC_API_KEY` otherwise)
+2. The model registry's credential resolver for the selected model/provider, including configured runtime credentials, stored OAuth or API-key login, and that provider's normal environment fallback
 
-For either credential path, base URL resolution is:
+`ANTHROPIC_SEARCH_API_KEY` is a search-only auth source: it does not change chat credentials. The selected catalog model supplies the model ID and endpoint, so there are no separate Anthropic search model or base-URL environment overrides.
 
-1. `ANTHROPIC_SEARCH_BASE_URL`
-2. `FOUNDRY_BASE_URL` when `CLAUDE_CODE_USE_FOUNDRY` is enabled
-3. `ANTHROPIC_BASE_URL`
-4. `https://api.anthropic.com`
-
-Related vars:
-
-| Variable                    | Default / behavior                                                                                                                                                                                                                         |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `ANTHROPIC_SEARCH_API_KEY`  | API key used exclusively for the Anthropic web search provider. Highest-priority search auth; overrides `ANTHROPIC_API_KEY` / OAuth / Foundry for search calls without affecting chat completions.                                         |
-| `ANTHROPIC_SEARCH_BASE_URL` | Base URL used exclusively for the Anthropic web search provider. Applied to either `ANTHROPIC_SEARCH_API_KEY` or fallback Anthropic credentials; overrides `ANTHROPIC_BASE_URL` (and `FOUNDRY_BASE_URL` in Foundry mode) for search calls. |
-| `ANTHROPIC_SEARCH_MODEL`    | Search model override. Defaults to `claude-haiku-4-5`.                                                                                                                                                                                     |
-| `ANTHROPIC_BASE_URL`        | Generic fallback base URL for Anthropic requests when no search-specific base URL is set.                                                                                                                                                  |
-
-Use `ANTHROPIC_SEARCH_BASE_URL` (optionally with `ANTHROPIC_SEARCH_API_KEY`) to keep chat routed through an enterprise gateway (`ANTHROPIC_BASE_URL` or `CLAUDE_CODE_USE_FOUNDRY=true`) while pointing web search at a direct Anthropic endpoint, or vice versa.
+| Variable                   | Default / behavior                                                                                                                                                                                 |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ANTHROPIC_SEARCH_API_KEY` | API key used exclusively for an Anthropic web-search request. It is tried before the selected model's normal credential resolver and does not affect chat completions.                             |
 
 ### Perplexity OAuth flow behavior flag
 
@@ -408,13 +396,13 @@ Use `ANTHROPIC_SEARCH_BASE_URL` (optionally with `ANTHROPIC_SEARCH_API_KEY`) to 
 
 ### TypeSafe judgments
 
-Small typed decisions the agent makes about its own state (the `auto` thinking-level difficulty classifier, Smart unexpected-stop detection, git TUI AI staging) go through one judgment interface. With a TypeSafe credential they run on TypeSafe's System One model (`POST /v1/systemone`); a failed request falls back through the `tiny`, `smol`, `default`, and active-session models. Without TypeSafe, features use that chat chain or their configured local on-device model. `providers.judgmentProvider` (`auto` / `typesafe` / `llm`) pins the preferred backend.
+Small typed decisions the app makes about its own state (the `auto` thinking-level difficulty classifier, Smart unexpected-stop detection, git TUI AI staging, and `judge()` eval helper) use the `judge` model role. With a TypeSafe credential, the catalog discovers the account-visible judge roster from `GET /v1/models`—including `jev-latest` and `jev-preview` when advertised—and the role selects an exact catalog model. The built-in judge chain is `typesafe/jev-latest`, `openrouter/~typesafe/jev-latest`, `tiny`, `smol`, `default`, then the active-session model. Once the chain reaches a native System One model (TypeSafe directly or through OpenRouter), it only falls back to other native models: when every native judge fails, the judgment fails instead of degrading to a prompted chat or on-device model. Each failed candidate is logged as `judgment candidate failed`. Configure `modelRoles.judge` or `retry.fallbackChains.judge` to select `typesafe/jev-preview` or another judge candidate.
 
-| Variable                 | Default / behavior                                                          |
-| ------------------------ | --------------------------------------------------------------------------- |
-| `TYPESAFE_API_KEY`       | TypeSafe API key; alternatively use `/login typesafe`                       |
-| `TYPESAFE_BASE_URL`      | API root override (default `https://api.typesafe.ai`); also used by `/login` validation |
-| `TYPESAFE_DEFAULT_MODEL` | System One model name (default `jev-latest`)                                |
+| Variable                 | Default / behavior                                                                                                                                                                                                                                       |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `TYPESAFE_API_KEY`       | TypeSafe API key for discovery and System One requests; alternatively use `/login typesafe`                                                                                                                                                             |
+| `TYPESAFE_BASE_URL`      | API root override (default `https://api.typesafe.ai`), used by model discovery, `/login` validation, and System One requests                                                                                                                             |
+| `TYPESAFE_DEFAULT_MODEL` | Standalone `pi-ai` TypeSafe client default when its caller does not pass a model (default `jev-latest`). The coding-agent app passes the model selected by the `judge` role, so this variable does not override app role selection or discovered model IDs. |
 
 ---
 
@@ -473,7 +461,9 @@ Python subprocess filtering denies common API keys and allows safe base variable
 | `PI_FORCE_IMAGE_PROTOCOL`    | Forces supported image protocol (`kitty`, `iterm2`/`iterm`, `sixel`, `none`) where used. Setting `kitty` inside tmux also opts into Kitty Unicode placeholder placement unless `PI_KITTY_PLACEHOLDERS=0` or `PI_NO_KITTY_PLACEHOLDERS=1` disables it                                                                                                                                                                                                                                                                                                                                                       |
 | `PI_ALLOW_SIXEL_PASSTHROUGH` | Allows SIXEL passthrough when `PI_FORCE_IMAGE_PROTOCOL=sixel`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `PI_NO_PTY`                  | If `1`, disables interactive PTY path for bash tool                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `OMP_MCP_TIMEOUT_MS`         | Overrides MCP client request timeout (ms) for every MCP server. `0` disables client-side timeouts (`AbortSignal` never fires). Invalid (negative or non-numeric) values are ignored with a warning and the per-server config or default (`30000`) is used.                                                                                                                                                                                                                                                                                                                                                 |
+| `OMP_MCP_TIMEOUT_MS`         | Overrides MCP client request timeout (ms) for every MCP server and print-mode readiness wait (default `30000`). `0` disables both deadlines; print mode may wait indefinitely for a server. Invalid (negative or non-numeric) values are ignored with a warning and the per-server config or default is used. |
+| `OMP_MCP_STARTUP_TIMEOUT_MS` | Initial MCP discovery window (ms), overriding `mcp.startupTimeoutMs` (default `250`). `0` waits for initial connections to settle; invalid values are logged and ignored. Print mode independently waits for full readiness before its first turn. |
+| `OMP_MCP_REQUIRE_READY`      | Set to `1` to make print mode exit 1 before the first turn if any configured MCP server remains pending or has failed. Without it, unavailable servers produce per-server stderr warnings and the turn proceeds.                                                                                                                                                                                                                                                                                                                                                 |
 | `PI_DISABLE_UUTILS_BUILTINS` | Non-empty except `0`/`false` disables the bash tool's uutils built-ins; `shell.env.PI_DISABLE_UUTILS_BUILTINS` wins                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `OMP_NO_WEBP`                | `1` or `true` (case-insensitive) disables WebP in image-resize format selection                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `MNEMOPI_EMBEDDING_MODEL`    | Embedding-model override for mnemopi memory configuration when no explicit override is supplied                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
@@ -585,6 +575,7 @@ These are read as runtime signals; they are usually set by the terminal/OS rathe
 | `PI_HARDWARE_CURSOR`           | If `1`, enables hardware cursor mode                                                                                                                                                                                                               |
 | `PI_NO_SYNC_OUTPUT`            | If set (any non-empty value), disables DEC 2026 synchronized-output wrappers while keeping TUI autowrap guards                                                                                                                                     |
 | `PI_NO_DECCARA`                | If set (truthy), disables Kitty DECCARA rectangular-SGR background fills (forces padded-string rendering)                                                                                                                                          |
+| `PI_NO_GLYPH_PROTOCOL`         | If `1`, skips the Glyph Protocol handshake (APC `25a1`), so nerd-preset icons come only from the terminal's own fonts instead of the outlines omp registers in-band on Rio/Ghostty                                                             |
 | `PI_DEBUG_REDRAW`              | If `1`, enables redraw debug logging                                                                                                                                                                                                               |
 | `PI_FORCE_IMAGE_PROTOCOL`      | Forces terminal image protocol detection (`kitty`, `iterm2`/`iterm`, `sixel`, `none`). Setting `kitty` inside a terminal multiplexer also opts into Kitty Unicode placeholder placement unless `PI_KITTY_PLACEHOLDERS=0` or `PI_NO_KITTY_PLACEHOLDERS=1` disables it |
 | `PI_KITTY_PLACEHOLDERS`        | `1` forces Kitty Unicode placeholder placement on; `0` forces it off. Under a terminal multiplexer, use `1` only after confirming the outer terminal supports Kitty `U=1` placeholders—otherwise U+10EEEE may render as literal PUA boxes              |
@@ -622,10 +613,19 @@ OMP initializes OTLP export only when at least one signal has an endpoint. `OTEL
 | --------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
 | `OTEL_EXPORTER_OTLP_ENDPOINT`                                                                                   | Common endpoint fallback                                                                        |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | Per-signal endpoint; wins over the common endpoint                                              |
+| `OTEL_EXPORTER_OTLP_HEADERS`                                                                                    | Common OTLP request headers, as a `key=value,key2=value2` list with percent-encoded values       |
+| `OTEL_EXPORTER_OTLP_TRACES_HEADERS`, `OTEL_EXPORTER_OTLP_LOGS_HEADERS`, `OTEL_EXPORTER_OTLP_METRICS_HEADERS`    | Per-signal request headers; merged per key over the common headers, which they override          |
 | `OTEL_TRACES_EXPORTER`, `OTEL_LOGS_EXPORTER`, `OTEL_METRICS_EXPORTER`                                           | A list containing `none` disables that signal                                                   |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` and per-signal `..._PROTOCOL` variants                                            | Only `http/protobuf` is enabled by this runtime; another explicit protocol disables that signal |
 | `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`                                                                 | OpenTelemetry resource metadata                                                                 |
 | `OTEL_LOG_LEVEL`                                                                                                | Minimum exported OMP log level                                                                  |
+
+Header values are percent-decoded, so encode spaces and the `,`/`=` delimiters:
+
+```bash
+export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="http://localhost:8000/v1/traces"
+export OTEL_EXPORTER_OTLP_TRACES_HEADERS="authorization=Bearer%20$LAMINAR_PROJECT_API_KEY"
+```
 
 ---
 
@@ -637,5 +637,6 @@ Treat these as secrets; do not log or commit them:
 - Cloud credentials (`AWS_*`, `GOOGLE_APPLICATION_CREDENTIALS` path may expose service-account material)
 - Search/provider auth vars (`EXA_API_KEY`, `BRAVE_API_KEY`, `PERPLEXITY_API_KEY`, Anthropic search keys)
 - Foundry mTLS material (`CLAUDE_CODE_CLIENT_CERT`, `CLAUDE_CODE_CLIENT_KEY`, `NODE_EXTRA_CA_CERTS` when it points to private CA bundles)
+- OTLP exporter headers (`OTEL_EXPORTER_OTLP_HEADERS` and the per-signal `..._{TRACES,LOGS,METRICS}_HEADERS` variants) — they carry ingest bearer tokens/project keys
 
 Python runtime also explicitly strips many common key vars before spawning kernel subprocesses (`packages/coding-agent/src/eval/py/runtime.ts`).

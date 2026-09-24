@@ -195,7 +195,18 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		private readonly runtime: IExtensionRuntime,
 		private readonly cwd: string,
 		public readonly events: EventBus,
-	) {}
+	) {
+		// Extensions destructure `pi.on` or forward API methods as callbacks, so every
+		// prototype method must keep its receiver when detached. Walk the prototype
+		// rather than listing methods: a new method is bound without touching this.
+		const prototype = ConcreteExtensionAPI.prototype;
+		for (const name of Object.getOwnPropertyNames(prototype)) {
+			if (name === "constructor") continue;
+			const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
+			if (typeof descriptor?.value !== "function") continue;
+			Object.defineProperty(this, name, { value: descriptor.value.bind(this), writable: true, configurable: true });
+		}
+	}
 
 	on<F extends HandlerFn>(event: string, handler: F): void {
 		const list = this.extension.handlers.get(event) ?? [];

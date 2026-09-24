@@ -213,14 +213,14 @@ describe("createSettingsAwareStreamFn", () => {
 			expect(calls[0]?.options?.fallbacks).toBeUndefined();
 		});
 
-		it("injects Opus 4.8 fallback for Fable when the setting is on", () => {
+		it("injects Opus 5.5 fallback for Fable when the setting is on", () => {
 			const settings = Settings.isolated({ "providers.anthropic.serverSideFallback": true });
 			const { fn: base, calls } = captureBase();
 			const wrapped = createSettingsAwareStreamFn(settings, base);
 
 			wrapped(stubFableModel, stubContext, { apiKey: "k" });
 
-			expect(calls[0]?.options?.fallbacks).toEqual([{ model: "claude-opus-4-8" }]);
+			expect(calls[0]?.options?.fallbacks).toEqual([{ model: "claude-opus-5-5" }]);
 		});
 
 		it("does NOT inject fallbacks on non-Fable/Mythos Anthropic models even when the setting is on", () => {

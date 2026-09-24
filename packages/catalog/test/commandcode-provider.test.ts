@@ -204,13 +204,13 @@ describe("Command Code provider support", () => {
 	test("registers discovery, defaults, and both API key environment names", () => {
 		const descriptor = PROVIDER_DESCRIPTORS.find(item => item.providerId === "commandcode");
 		expect(descriptor).toMatchObject({
-			defaultModel: "claude-sonnet-4-6",
+			defaultModel: "claude-sonnet-5",
 			allowUnauthenticated: true,
 			dynamicModelsAuthoritative: true,
 			catalogDiscovery: { label: "Command Code", allowUnauthenticated: true },
 			skipCrossProviderReferenceFills: true,
 		});
-		expect(DEFAULT_MODEL_PER_PROVIDER.commandcode).toBe("claude-sonnet-4-6");
+		expect(DEFAULT_MODEL_PER_PROVIDER.commandcode).toBe("claude-sonnet-5");
 		// Fresh installs resolve the default synchronously from the bundle:
 		// dropping the default id from models.json must fail here, not at boot.
 		expect(getBundledModels("commandcode").some(model => model.id === DEFAULT_MODEL_PER_PROVIDER.commandcode)).toBe(

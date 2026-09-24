@@ -25,7 +25,7 @@ import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runne
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { AgentProgress, SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { snapshotJobs } from "@oh-my-pi/pi-coding-agent/tools/hub/jobs";
+import { snapshotJobs } from "@oh-my-pi/pi-coding-agent/async/job-control";
 
 const taskAgent: AgentDefinition = {
 	name: "task",
@@ -151,11 +151,35 @@ describe("task spawn routing", () => {
 		await job!.promise;
 
 		expect(job!.status).toBe("completed");
-		expect(job!.resultText).toContain("Spawnling is now idle");
-		expect(job!.resultText).toContain("message it via `hub` to follow up");
 		expect(job!.resultText).toContain("history://Spawnling");
 		expect(runSpy).toHaveBeenCalledTimes(1);
 		expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual(["openai/gpt-4.1-mini"]);
+	});
+
+	it("fires before_subagent_spawn once per child even though the task preflight resolves policy first", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [{ ...taskAgent, model: ["anthropic/claude-sonnet-4"] }],
+			projectAgentsDir: null,
+		});
+		const runSpy = vi
+			.spyOn(executorModule, "runSubprocess")
+			.mockImplementation(async options => makeResult(options.id ?? "?"));
+		const manager = createManager();
+		const session = createSession({ manager });
+		const signals: Array<AbortSignal | undefined> = [];
+		session.emitBeforeSubagentSpawn = async (_event, signal) => {
+			signals.push(signal);
+			return { model: `openai/gpt-4.1-mini-${signals.length}`, note: `pool ${signals.length}` };
+		};
+		const tool = await TaskTool.create(session);
+
+		const result = await tool.execute("tc-route", { agent: "task", name: "Routed", task: "Do it." } as TaskParams);
+		await manager.getJob(result.details!.async!.jobId!)!.promise;
+
+		expect(signals).toHaveLength(1);
+		expect(signals[0]).toBeInstanceOf(AbortSignal);
+		expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual(["openai/gpt-4.1-mini-1"]);
+		expect(runSpy.mock.calls[0]?.[0].modelRoute).toBe("pool 1");
 	});
 
 	for (const { label, runnerOverrides, expectRetained } of [

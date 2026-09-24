@@ -82,14 +82,14 @@ describe("openai-codex workspace-scoped credential identity", () => {
 		if (tempDir) await removeWithRetries(tempDir);
 	});
 
-	it("stores a personal plan and an enterprise seat of one email side by side and updates same-workspace logins in place", () => {
+	it("stores a personal plan and an enterprise seat of one email side by side and updates same-workspace logins in place", async () => {
 		if (!store) throw new Error("test setup failed");
 
-		store.upsertAuthCredentialForProvider(
+		await store.upsertAuthCredential(
 			"openai-codex",
 			codexCredential({ suffix: "personal", accountId: PERSONAL_WS, orgId: PERSONAL_WS, orgName: "plus" }),
 		);
-		store.upsertAuthCredentialForProvider(
+		await store.upsertAuthCredential(
 			"openai-codex",
 			codexCredential({ suffix: "team", accountId: TEAM_WS, orgId: TEAM_WS, orgName: "enterprise" }),
 		);
@@ -100,7 +100,7 @@ describe("openai-codex workspace-scoped credential identity", () => {
 		]);
 
 		// Same-workspace re-login: replaces the matching row instead of adding a third.
-		const rows = store.upsertAuthCredentialForProvider(
+		const rows = await store.upsertAuthCredential(
 			"openai-codex",
 			codexCredential({ suffix: "team-renewed", accountId: TEAM_WS, orgId: TEAM_WS, orgName: "enterprise" }),
 		);
@@ -115,14 +115,14 @@ describe("openai-codex workspace-scoped credential identity", () => {
 		}
 	});
 
-	it("keeps two members of one workspace separate even though they share the workspace id", () => {
+	it("keeps two members of one workspace separate even though they share the workspace id", async () => {
 		if (!store) throw new Error("test setup failed");
 
-		store.upsertAuthCredentialForProvider(
+		await store.upsertAuthCredential(
 			"openai-codex",
 			codexCredential({ suffix: "alice", accountId: TEAM_WS, orgId: TEAM_WS, email: "alice@example.com" }),
 		);
-		store.upsertAuthCredentialForProvider(
+		await store.upsertAuthCredential(
 			"openai-codex",
 			codexCredential({ suffix: "bob", accountId: TEAM_WS, orgId: TEAM_WS, email: "bob@example.com" }),
 		);
@@ -133,16 +133,13 @@ describe("openai-codex workspace-scoped credential identity", () => {
 		]);
 	});
 
-	it("upgrades a legacy email-keyed row on the first workspace-scoped login with the same email", () => {
+	it("upgrades a legacy email-keyed row on the first workspace-scoped login with the same email", async () => {
 		if (!store) throw new Error("test setup failed");
 
-		store.upsertAuthCredentialForProvider(
-			"openai-codex",
-			codexCredential({ suffix: "legacy", accountId: PERSONAL_WS }),
-		);
+		await store.upsertAuthCredential("openai-codex", codexCredential({ suffix: "legacy", accountId: PERSONAL_WS }));
 		expect(readIdentityRows(dbPath)).toEqual([{ identity_key: `email:${EMAIL}`, disabled_cause: null }]);
 
-		store.upsertAuthCredentialForProvider(
+		await store.upsertAuthCredential(
 			"openai-codex",
 			codexCredential({ suffix: "team", accountId: TEAM_WS, orgId: TEAM_WS, orgName: "team" }),
 		);
@@ -156,16 +153,13 @@ describe("openai-codex workspace-scoped credential identity", () => {
 
 		// Pre-org login → bare email key, then upstream invalidates the refresh
 		// token and the row is auto-disabled (a tombstone).
-		store.upsertAuthCredentialForProvider(
-			"openai-codex",
-			codexCredential({ suffix: "legacy", accountId: PERSONAL_WS }),
-		);
+		await store.upsertAuthCredential("openai-codex", codexCredential({ suffix: "legacy", accountId: PERSONAL_WS }));
 		const legacyId = store.listAuthCredentials("openai-codex")[0].id;
-		store.deleteAuthCredential(legacyId, "oauth refresh failed: OAuthError: 401 refresh_token_invalidated");
+		await store.deleteAuthCredential(legacyId, "oauth refresh failed: OAuthError: 401 refresh_token_invalidated");
 
 		// Same human logs in again, now workspace-scoped: the org-scoped login
 		// claims and hard-deletes the pre-org tombstone instead of stranding it.
-		store.upsertAuthCredentialForProvider(
+		await store.upsertAuthCredential(
 			"openai-codex",
 			codexCredential({ suffix: "team", accountId: TEAM_WS, orgId: TEAM_WS, orgName: "team" }),
 		);
@@ -181,35 +175,32 @@ describe("openai-codex workspace-scoped credential identity", () => {
 		// Alice's org-scoped row is disabled (tombstone). Bob, a different member
 		// of the SAME workspace, logs in. The shared-workspace guard must keep
 		// Alice's tombstone — it is not Bob's subscription.
-		store.upsertAuthCredentialForProvider(
+		await store.upsertAuthCredential(
 			"openai-codex",
 			codexCredential({ suffix: "alice", accountId: TEAM_WS, orgId: TEAM_WS, email: "alice@example.com" }),
 		);
 		const aliceId = store.listAuthCredentials("openai-codex")[0].id;
-		store.deleteAuthCredential(aliceId, "oauth refresh failed: OAuthError: 401 refresh_token_invalidated");
+		await store.deleteAuthCredential(aliceId, "oauth refresh failed: OAuthError: 401 refresh_token_invalidated");
 
-		store.upsertAuthCredentialForProvider(
+		await store.upsertAuthCredential(
 			"openai-codex",
 			codexCredential({ suffix: "bob", accountId: TEAM_WS, orgId: TEAM_WS, email: "bob@example.com" }),
 		);
 		expect(await store.listDisabledCredentials("openai-codex")).toHaveLength(1);
 	});
 
-	it("never clobbers workspace-scoped rows with a workspace-less credential", () => {
+	it("never clobbers workspace-scoped rows with a workspace-less credential", async () => {
 		if (!store) throw new Error("test setup failed");
 
-		store.upsertAuthCredentialForProvider(
+		await store.upsertAuthCredential(
 			"openai-codex",
 			codexCredential({ suffix: "personal", accountId: PERSONAL_WS, orgId: PERSONAL_WS, orgName: "plus" }),
 		);
-		store.upsertAuthCredentialForProvider(
+		await store.upsertAuthCredential(
 			"openai-codex",
 			codexCredential({ suffix: "team", accountId: TEAM_WS, orgId: TEAM_WS, orgName: "enterprise" }),
 		);
-		store.upsertAuthCredentialForProvider(
-			"openai-codex",
-			codexCredential({ suffix: "orgless", accountId: PERSONAL_WS }),
-		);
+		await store.upsertAuthCredential("openai-codex", codexCredential({ suffix: "orgless", accountId: PERSONAL_WS }));
 
 		expect(readIdentityRows(dbPath)).toEqual([
 			{ identity_key: `email:${EMAIL}|org:${PERSONAL_WS}`, disabled_cause: null },
@@ -234,17 +225,19 @@ function makeStore(rows: StoredAuthCredential[]): AuthCredentialStore {
 			return rows;
 		},
 		updateAuthCredential() {},
-		deleteAuthCredential() {},
+		async deleteAuthCredential() {
+			return false;
+		},
 		tryDisableAuthCredentialIfMatches() {
 			return false;
 		},
-		replaceAuthCredentialsForProvider() {
+		async replaceAuthCredentials() {
 			return rows;
 		},
-		upsertAuthCredentialForProvider() {
+		async upsertAuthCredential() {
 			return rows;
 		},
-		deleteAuthCredentialsForProvider() {},
+		async deleteAuthCredentials() {},
 		getCache(key) {
 			const entry = cache.get(key);
 			if (!entry) return null;
@@ -318,13 +311,13 @@ describe("openai-codex usage report dedupe partitions by workspace", () => {
 					provider === "openai-codex" ? codexUsage.openaiCodexUsageProvider : undefined,
 			},
 		);
-		await storage.reload();
+		await storage.credentials.reload();
 
 		vi.spyOn(codexUsage.openaiCodexUsageProvider, "fetchUsage").mockImplementation(async () =>
 			emailOnlyReport(EMAIL),
 		);
 
-		const reports = ((await storage.fetchUsageReports()) ?? []).filter(r => r.provider === "openai-codex");
+		const reports = ((await storage.usage.reports()) ?? []).filter(r => r.provider === "openai-codex");
 		expect(reports).toHaveLength(2);
 		const orgIds = reports.map(report => report.metadata?.orgId).sort();
 		expect(orgIds).toEqual([PERSONAL_WS, TEAM_WS].sort());
@@ -337,13 +330,13 @@ describe("openai-codex usage report dedupe partitions by workspace", () => {
 			usageProviderResolver: provider =>
 				provider === "openai-codex" ? codexUsage.openaiCodexUsageProvider : undefined,
 		});
-		await storage.reload();
+		await storage.credentials.reload();
 
 		vi.spyOn(codexUsage.openaiCodexUsageProvider, "fetchUsage").mockImplementation(async () =>
 			emailOnlyReport(EMAIL),
 		);
 
-		const reports = ((await storage.fetchUsageReports()) ?? []).filter(r => r.provider === "openai-codex");
+		const reports = ((await storage.usage.reports()) ?? []).filter(r => r.provider === "openai-codex");
 		expect(reports).toHaveLength(1);
 	});
 });

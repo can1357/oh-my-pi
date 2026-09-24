@@ -60,6 +60,8 @@ export interface PythonToolInvokeOptions {
 export interface PythonExecutorOptions {
 	/** Working directory for command execution */
 	cwd?: string;
+	/** Source filename for file-backed execution and tracebacks. */
+	filename?: string;
 	/** Timeout in milliseconds */
 	timeoutMs?: number;
 	/** Absolute wall-clock deadline in milliseconds since epoch */
