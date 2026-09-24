@@ -6,7 +6,9 @@ import * as path from "node:path";
 import { removeWithRetries, removeSyncWithRetries } from "@oh-my-pi/pi-utils/temp";
 
 describe("removeWithRetries", () => {
-	it("forces a major GC before the first retry of a locked removal", async () => {
+	// Retries are Windows-only by design (`shouldRetryRemove` gates on
+	// `process.platform === "win32"`), so the locked-removal path only exists there.
+	it.skipIf(process.platform !== "win32")("forces a major GC before the first retry of a locked removal", async () => {
 		// bun on Windows finalizes SQLite db/-wal/-shm file and directory
 		// handles on GC, so a closed database can still block deletion for
 		// seconds. The first retry must trigger one forced collection instead
@@ -51,7 +53,7 @@ describe("removeWithRetries", () => {
 });
 
 describe("removeSyncWithRetries", () => {
-	it("forces a major GC before the first retry of a locked removal", () => {
+	it.skipIf(process.platform !== "win32")("forces a major GC before the first retry of a locked removal", () => {
 		const target = path.join(os.tmpdir(), `pi-temp-gc-test-${process.pid}-${Date.now()}`);
 		fs.mkdirSync(target, { recursive: true });
 		let attempts = 0;
