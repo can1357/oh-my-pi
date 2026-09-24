@@ -306,15 +306,11 @@ async function generateTitleOnlineWithModels(
 
 		try {
 			if (credentialSourceSessionId && sessionId && credentialSourceSessionId !== sessionId) {
-				const foregroundCredential = registry.authStorage
-					.listOAuthAccounts(model.provider, credentialSourceSessionId)
+				const foregroundCredential = registry.authStorage.oauth
+					.accounts(model.provider, credentialSourceSessionId)
 					.find(account => account.active);
 				if (foregroundCredential) {
-					registry.authStorage.pinSessionOAuthAccount(
-						model.provider,
-						sessionId,
-						foregroundCredential.credentialId,
-					);
+					registry.authStorage.sessions.pin(model.provider, sessionId, foregroundCredential.credentialId);
 				}
 			}
 			const apiKey = await registry.getApiKey(model, sessionId);

@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-ai",
-	"version": "18.2.9",
+	"version": "18.3.0",
 	"description": "Unified LLM API with automatic model discovery and provider configuration",
 	"keywords": [
 		"ai",
@@ -16,7 +16,7 @@
 		"url": "https://github.com/can1357/oh-my-pi/issues"
 	},
 	"license": "MIT",
-	"author": "Stencil Labs, Inc.",
+	"author": { "name": "Stencil Labs, Inc.", "url": "https://stencil.so" },
 	"contributors": [
 		"Mario Zechner"
 	],

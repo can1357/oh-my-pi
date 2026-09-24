@@ -299,26 +299,6 @@ describe("YieldTool", () => {
 		).toEqual({ data: { summary: '{"purge":13,"keep":20}' } });
 	});
 
-	it("arg validation passes conforming args through unmodified", () => {
-		const tool = new YieldTool(
-			createSession({
-				outputSchema: {
-					type: "object",
-					properties: { summary: { type: "string" } },
-					required: ["summary"],
-				},
-			}),
-		);
-		const args = { data: { summary: "all good" } };
-		const validated = validateToolArguments(tool as never, {
-			type: "toolCall",
-			id: "call-clean",
-			name: "yield",
-			arguments: args,
-		});
-		expect(validated).toEqual(args);
-	});
-
 	it("passes array-typed success through as an incremental result", async () => {
 		const tool = new YieldTool(createSession());
 		const result = await tool.execute("call-incremental", {

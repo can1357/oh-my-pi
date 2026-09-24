@@ -1,10 +1,12 @@
 import type { SummaryResult } from "@oh-my-pi/pi-natives";
 import { formatNumberedLine } from "./hashline-format";
 import { LINE_RANGE_CHUNK_SOURCE, parseLineRanges } from "./line-ranges";
+import * as os from "node:os";
 import * as path from "node:path";
+import { parseArchivePathCandidates } from "@oh-my-pi/pi-utils/ar";
 import type { Component } from "../tui";
 import { Text } from "../components/text";
-import type { RenderResultOptions, ToolRenderer } from "./renderer";
+import type { RenderResultOptions, ToolActivityContext, ToolActivitySummary, ToolRenderer } from "./renderer";
 import { getLanguageFromPath } from "../lang-from-path";
 import type { Theme } from "../theme/theme";
 import { fileHyperlink, renderCodeCell, renderMarkdownCell, renderStatusLine } from "../render";
@@ -16,6 +18,7 @@ import { formatBytes, sanitizeDisplayLines, shortenPath, wrapBrackets } from "..
 
 import type { OutputMeta } from "./output-meta";
 import type { TruncationResult } from "./streaming-output";
+import { renderProcRead, type ProcReadDetails } from "./proc-render";
 
 /** Read result metadata retains truncation statistics, not a second copy of the body. */
 export type ReadTruncationStats = Omit<TruncationResult, "content">;
@@ -23,6 +26,7 @@ export type ReadTruncationStats = Omit<TruncationResult, "content">;
 /** Display metadata for file and URL reads. */
 export interface ReadToolDetails {
 	kind?: "file" | "url";
+	proc?: ProcReadDetails;
 	/** Filesystem hyperlink target resolved by the executing tool. */
 	displayTarget?: string;
 	truncation?: ReadTruncationStats;
@@ -91,6 +95,7 @@ const INTERNAL_SCHEMES_WITH_SELECTORS: Record<string, true> = {
 	memory: true,
 	omp: true,
 	pr: true,
+	proc: true,
 	rule: true,
 	security: true,
 	skill: true,
@@ -216,6 +221,20 @@ export interface ReadRenderArgs {
 }
 
 const INTERNAL_URL_LIKE_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
+// A scheme-less host followed by a slash can be a web target. Do not force a
+// file: link onto it; explicit relative paths (./host/path) remain filesystem paths.
+const BARE_WEB_HOST_RE = /^(?:(?:[a-z][a-z0-9-]*|\[[0-9a-f:]+\])(?::\d+)|(?:[a-z0-9-]+\.)+[a-z0-9-]+(?::\d+)?)\//i;
+
+/** Local file a pending read/write input points at, before the tool resolves it:
+ * expands `~` and drops archive-member / SQLite-row selectors so the link opens
+ * the containing file. */
+export function pendingFileLinkPath(inputPath: string): string {
+	const expanded = inputPath.replace(/^~(?=$|[\\/])/, os.homedir());
+	if (!expanded.includes(":")) return path.resolve(expanded);
+	const archive = parseArchivePathCandidates(expanded).find(candidate => candidate.archivePath !== expanded);
+	const sqlite = expanded.match(/^(.+\.(?:sqlite3?|db3?))(?=[:?])/i);
+	return path.resolve(archive?.archivePath ?? sqlite?.[1] ?? expanded);
+}
 
 function splitReadRenderPath(rawPath: string): { path: string; sel?: string } {
 	if (INTERNAL_URL_LIKE_RE.test(rawPath)) {
@@ -256,8 +275,14 @@ function formatReadPathLink(
 	const plainDisplayPath = options.suffixResolution
 		? shortenPath(options.suffixResolution.to)
 		: shortenPath(basePath || options.resolvedPath || options.fallbackLabel || rawPath);
-	const absoluteInputPath = path.isAbsolute(basePath) ? basePath : undefined;
-	const target = options.resolvedPath ?? options.sourcePath ?? absoluteInputPath;
+	// Calls render before the tool has resolved a filesystem target. Preserve
+	// protocol resources as plain text, but resolve direct relative file paths
+	// so terminals receive an explicit file: link rather than guessing HTTPS.
+	const inputPath =
+		basePath && !INTERNAL_URL_LIKE_RE.test(basePath) && !BARE_WEB_HOST_RE.test(basePath)
+			? pendingFileLinkPath(basePath)
+			: undefined;
+	const target = options.resolvedPath ?? options.sourcePath ?? inputPath;
 	const line = firstReadSelectorLine(split.sel) ?? options.offset;
 	const linkOptions = line !== undefined ? { line } : undefined;
 	const linkedPath = target ? fileHyperlink(target, plainDisplayPath, linkOptions) : plainDisplayPath;
@@ -266,9 +291,19 @@ function formatReadPathLink(
 
 /** Render file, image, and URL reads in the transcript. */
 export const readToolRenderer = {
+	activitySummary(args: unknown, _context: ToolActivityContext): ToolActivitySummary {
+		const input = args as ReadRenderArgs | undefined;
+		const rawPath =
+			typeof input?.file_path === "string" ? input.file_path : typeof input?.path === "string" ? input.path : "";
+		if (/^proc:\/\//i.test(rawPath))
+			return { label: "Process", detail: rawPath.slice("proc://".length) || "jobs & services" };
+		return { label: "Read", detail: shortenPath(rawPath) };
+	},
 	renderCall(args: ReadRenderArgs, _options: RenderResultOptions, uiTheme: Theme): Component {
 		const rawPath =
 			typeof args.file_path === "string" ? args.file_path : typeof args.path === "string" ? args.path : "";
+		if (/^proc:\/\//i.test(rawPath))
+			return renderProcRead(rawPath.slice("proc://".length), undefined, undefined, _options, uiTheme);
 		if (isReadableUrlPath(rawPath)) {
 			return renderReadUrlCall({ path: rawPath, raw: args.raw }, _options, uiTheme);
 		}
@@ -296,6 +331,14 @@ export const readToolRenderer = {
 		const urlDetails = result.details as ReadUrlToolDetails | undefined;
 		const baseRawPathForKind =
 			typeof args?.file_path === "string" ? args.file_path : typeof args?.path === "string" ? args.path : "";
+		if (/^proc:\/\//i.test(baseRawPathForKind))
+			return renderProcRead(
+				baseRawPathForKind.slice("proc://".length),
+				result,
+				result.details?.proc,
+				options,
+				uiTheme,
+			);
 		if (urlDetails?.kind === "url" || isReadableUrlPath(baseRawPathForKind)) {
 			return renderReadUrlResult(
 				result as {

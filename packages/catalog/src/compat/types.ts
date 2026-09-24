@@ -552,6 +552,10 @@ export interface CompiledAuthProvider {
 	name: string;
 	env?: { vars: string[] } | { hook: string };
 	allowsMissingApiKey?: boolean;
+	/** Qualify credential and usage-report identity by org when an email may have multiple subscriptions. */
+	orgScopedIdentity?: boolean;
+	/** Environment variables carrying this provider's own OAuth bearer, excluding borrowed API-key aliases. */
+	oauthTokenEnv?: string[];
 	/** APIs whose provider transport resolves credentials without a stored account. */
 	nativeAuthApis?: string[];
 	available?: boolean;

@@ -90,7 +90,7 @@ function makeRegistry(models: () => Model[], overrides: RegistryOverrides = {}):
 				)),
 		getDiscoverableProviders: overrides.getDiscoverableProviders ?? (() => []),
 		getProviderDiscoveryState: overrides.getProviderDiscoveryState ?? (() => undefined),
-		authStorage: { hasAuth: () => false },
+		authStorage: { keys: { source: () => undefined } },
 	} as unknown as ModelRegistry;
 }
 

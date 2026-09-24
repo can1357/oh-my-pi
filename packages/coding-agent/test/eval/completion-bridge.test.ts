@@ -68,6 +68,7 @@ const REASONING_SLOW = makeModel("p", "slow", {
 
 interface SessionOptions {
 	available?: Model<Api>[];
+	cwd?: string;
 	apiKey?: string | null;
 	activeModel?: string;
 	roles?: Partial<Record<"smol" | "default" | "slow", string>>;
@@ -86,6 +87,7 @@ function makeSession(opts: SessionOptions = {}): ToolSession {
 		resolver: () => async () => (opts.apiKey === undefined ? "test-key" : opts.apiKey),
 	} as unknown as ModelRegistry;
 	return {
+		cwd: opts.cwd ?? process.cwd(),
 		settings,
 		modelRegistry,
 		getActiveModelString: () => opts.activeModel ?? "p/default",
@@ -160,6 +162,7 @@ const settings = Settings.isolated({ "async.enabled": false, "task.isolation.ena
 settings.setModelRole("smol", "p/smol");
 settings.setModelRole("slow", "p/slow");
 const session = {
+	cwd: ${JSON.stringify(tempDir.path())},
 	settings,
 	modelRegistry: {
 		getAvailable: () => [SMOL],
@@ -693,7 +696,7 @@ describe("completion() through eval runtimes", () => {
 				"const [plain, structured] = await wait(handles);",
 				"return JSON.stringify({ plain, structured });",
 			].join("\n"),
-			{ cwd: tempDir.path(), sessionId, session: makeSession(), sessionFile },
+			{ cwd: tempDir.path(), sessionId, session: makeSession({ cwd: tempDir.path() }), sessionFile },
 		);
 
 		expect(result.exitCode).toBe(0);

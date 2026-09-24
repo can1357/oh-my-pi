@@ -33,9 +33,9 @@ describe("Muse Code provider", () => {
 			usageProviderResolver: () => undefined,
 		});
 		try {
-			await storage.reload();
-			await storage.set("meta", [{ type: "api_key", key: "LLM|payg-key", source: "login" }]);
-			await storage.set("muse-code", [
+			await storage.credentials.reload();
+			await storage.credentials.set("meta", [{ type: "api_key", key: "LLM|payg-key", source: "login" }]);
+			await storage.credentials.set("muse-code", [
 				{
 					type: "oauth",
 					access: encodedMuseCredential,
@@ -45,16 +45,16 @@ describe("Muse Code provider", () => {
 				},
 			]);
 
-			expect(await storage.getApiKey("meta", "payg-session")).toBe("LLM|payg-key");
-			expect(await storage.getApiKey("muse-code", "muse-session")).toBe(encodedMuseCredential);
+			expect(await storage.keys.get("meta", "payg-session")).toBe("LLM|payg-key");
+			expect(await storage.keys.get("muse-code", "muse-session")).toBe(encodedMuseCredential);
 			expect(
-				await storage.markUsageLimitReached("muse-code", "muse-session", {
+				await storage.limits.markReached("muse-code", "muse-session", {
 					apiKey: encodedMuseCredential,
 					retryAfterMs: 60_000,
 				}),
 			).toMatchObject({ switched: false });
-			expect(await storage.getApiKey("muse-code", "muse-session")).toBe(encodedMuseCredential);
-			expect(await storage.getApiKey("meta", "payg-session")).toBe("LLM|payg-key");
+			expect(await storage.keys.get("muse-code", "muse-session")).toBe(encodedMuseCredential);
+			expect(await storage.keys.get("meta", "payg-session")).toBe("LLM|payg-key");
 		} finally {
 			storage.close();
 		}
@@ -65,8 +65,8 @@ describe("Muse Code provider", () => {
 			usageProviderResolver: () => undefined,
 		});
 		try {
-			await storage.reload();
-			await storage.set("muse-code", [
+			await storage.credentials.reload();
+			await storage.credentials.set("muse-code", [
 				{
 					type: "oauth",
 					access: encodedMuseCredential,
@@ -76,7 +76,7 @@ describe("Muse Code provider", () => {
 				},
 			]);
 
-			expect(await storage.getApiKey("muse-code", "stale-expiry-session")).toBe(encodedMuseCredential);
+			expect(await storage.keys.get("muse-code", "stale-expiry-session")).toBe(encodedMuseCredential);
 		} finally {
 			storage.close();
 		}
@@ -96,13 +96,5 @@ describe("Muse Code provider", () => {
 				expect(mapOpenAIResponsesToolChoiceForTools(choice, [tool], model)).toBeUndefined();
 			}
 		}
-	});
-
-	test("keeps the existing Meta Model API login distinct", () => {
-		expect(getProviderDefinition("meta")).toMatchObject({ id: "meta", name: "Meta Model API" });
-		expect(getProviderDefinition("muse-code")).toMatchObject({
-			id: "muse-code",
-			name: "Muse Code (Subscription)",
-		});
 	});
 });

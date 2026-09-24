@@ -18,7 +18,7 @@ afterAll(() => authStorage.close());
 describe("Tavily web search provider", () => {
 	beforeEach(() => {
 		process.env.TAVILY_API_KEY = "test-tavily-key";
-		vi.spyOn(authStorage, "resolver").mockImplementation(provider => {
+		vi.spyOn(authStorage.keys, "resolver").mockImplementation(provider => {
 			expect(provider).toBe("tavily");
 			return async () => process.env.TAVILY_API_KEY;
 		});
@@ -133,7 +133,7 @@ describe("Tavily web search provider", () => {
 		};
 
 		const response = await searchTavily({
-			...makeParams("Oh My Pi omp latest release notes advisor"),
+			...makeParams("omp latest release notes advisor"),
 			numSearchResults: 5,
 			recency: "month",
 			fetch: fetchMock,
@@ -141,12 +141,12 @@ describe("Tavily web search provider", () => {
 
 		expect(requestBodies).toHaveLength(2);
 		expect(requestBodies[0]).toMatchObject({
-			query: "Oh My Pi omp latest release notes advisor",
+			query: "omp latest release notes advisor",
 			max_results: 5,
 			time_range: "month",
 		});
 		expect(requestBodies[1]).toMatchObject({
-			query: "Oh My Pi omp latest release notes advisor",
+			query: "omp latest release notes advisor",
 			max_results: 5,
 		});
 		expect(requestBodies[1]).not.toHaveProperty("time_range");

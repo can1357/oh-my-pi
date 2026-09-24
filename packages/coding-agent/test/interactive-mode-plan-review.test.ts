@@ -84,7 +84,7 @@ describe("InteractiveMode plan review rendering", () => {
 		sharedTempDir = TempDir.createSync("@pi-plan-review-shared-");
 		await Settings.init({ inMemory: true, cwd: sharedTempDir.path() });
 		authStorage = await AuthStorage.create(path.join(sharedTempDir.path(), "testauth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 	});
 
@@ -427,9 +427,9 @@ describe("InteractiveMode plan review rendering", () => {
 			return { hide: vi.fn() } as never;
 		});
 		let feedback = "";
-		// Resolve the instant the real $EDITOR subprocess commits its output back
-		// through onFeedbackChange — a deterministic signal, not a polled timer.
+		// The terminal restarts after external output returns to the draft.
 		const { promise: editorApplied, resolve: markEditorApplied } = Promise.withResolvers<void>();
+		vi.spyOn(mode.ui, "start").mockImplementation(() => markEditorApplied());
 
 		try {
 			Bun.env.EDITOR = editorPath;
@@ -441,7 +441,6 @@ describe("InteractiveMode plan review rendering", () => {
 				{
 					onFeedbackChange: value => {
 						feedback = value;
-						if (value.includes("- include smoke test")) markEditorApplied();
 					},
 				},
 			);
@@ -453,8 +452,9 @@ describe("InteractiveMode plan review rendering", () => {
 			overlay.handleInput("a");
 			for (const ch of "draft") overlay.handleInput(ch);
 			overlay.handleInput("\x05"); // ctrl+e
-			// The subprocess is real; block on its commit signal instead of polling.
 			await editorApplied;
+			expect(feedback).toBe("");
+			overlay.handleInput("\r"); // Explicitly save the returned draft.
 			expect(feedback).toContain("## Rollout\n```md\n- add rollback command\n- include smoke test\n```");
 
 			overlay.handleInput("\x1b[B"); // Rollout -> Verify
@@ -1159,7 +1159,7 @@ describe("InteractiveMode plan review rendering", () => {
 		// was active before plan mode (#planModePreviousModelState), which silently
 		// reverted the operator's pick — sliding to "slow" still executed on the
 		// default model. The fix defers application until after the plan-mode exit.
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const slow = session.modelRegistry.find("anthropic", "claude-opus-4-5");
 		const def = session.modelRegistry.find("anthropic", "claude-sonnet-4-5");
 		if (!slow || !def) throw new Error("Expected sonnet + opus to exist in registry");

@@ -49,19 +49,37 @@ export interface CopySelectorDeps {
 	proseOnlyThinking?: () => boolean;
 	linkTargets?: ReadonlyMap<string, string>;
 	requestRender: () => void;
-	/** The outlined content was chosen — copy it. `label` feeds the status line. */
-	onPick: (content: string, label: string) => void;
+	/** Replaces the "Copy" header when the picker is reused for another purpose. */
+	title?: string;
+	/** Verb shown for the pick action in hints and block controls (default "copy"). */
+	actionLabel?: string;
+	/**
+	 * The outlined content was chosen — copy it. `label` feeds the status line;
+	 * `source` names the transcript entry (and inner block, when descended) it came from.
+	 */
+	onPick: (content: string, label: string, source: CopyPickSource) => void;
 	/** `o` on a link block — open `href` with the system opener. Absent: `o` is ignored. */
 	onOpen?: (href: string, label: string) => void;
 	onCancel: () => void;
 }
 
+/** Where picked content came from in the transcript. */
+export interface CopyPickSource {
+	entry: TranscriptEntry;
+	/** The inner block, when the pick happened in the descended block view. */
+	block?: CopyBlock;
+}
+
 /** One copyable inner block of a transcript turn. */
-interface CopyBlock {
+export interface CopyBlock {
 	/** Short kind label ("code · ts", "bash command", "read result", …). */
 	label: string;
 	/** Exact text placed on the clipboard. */
 	content: string;
+	/** Transcript entry that produced this block. */
+	entry: TranscriptEntry;
+	/** Markdown code/quote block, or a bash/eval tool-call command. */
+	kind?: "code" | "quote" | "command";
 	/** Highlight language for the block preview. */
 	language?: string;
 	/** Set for link blocks: the URL `o` opens. `content` is the same URL. */
@@ -245,13 +263,13 @@ export class CopySelectorComponent implements Component {
 		if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
 			if (this.#blocks) {
 				const block = this.#blocks[this.#blockSelected];
-				if (block) this.deps.onPick(block.content, block.label);
+				if (block) this.deps.onPick(block.content, block.label, { entry: block.entry, block });
 				return;
 			}
 			const target = this.#targets[this.#selected];
 			if (!target) return;
 			const item = targetCopy(target, this.#blocksFor(target));
-			this.deps.onPick(item.content, item.label);
+			this.deps.onPick(item.content, item.label, { entry: target.entries[0]! });
 			return;
 		}
 		// Page/home/end/shift+arrow scrolling without moving the selection.
@@ -283,7 +301,7 @@ export class CopySelectorComponent implements Component {
 			if (block.href && this.deps.onOpen) this.deps.onOpen(block.href, block.label);
 			return;
 		}
-		this.deps.onPick(block.content, block.label);
+		this.deps.onPick(block.content, block.label, { entry: block.entry, block });
 	}
 
 	#moveVertical(delta: -1 | 1): void {
@@ -363,9 +381,10 @@ export class CopySelectorComponent implements Component {
 
 		const selectedBlock = this.#blocks?.[this.#blockSelected];
 		const openHint = selectedBlock?.href && this.deps.onOpen ? "  o open" : "";
+		const action = this.deps.actionLabel ?? "copy";
 		const hint = this.#blocks
-			? `${this.#blockSelected + 1}/${this.#blocks.length}  ↑/↓ block  ←/esc back  enter copy${openHint}  click ${theme.cmd.copy}/${theme.cmd.share}`
-			: `${this.#targets.length > 0 ? `${this.#selected + 1}/${this.#targets.length}  ` : ""}↑/↓ step  ${blocks.length > 0 ? "→ blocks  " : ""}enter copy  ${this.#truncated ? "a earlier turns  " : ""}ctrl+o expand  esc close`;
+			? `${this.#blockSelected + 1}/${this.#blocks.length}  ↑/↓ block  ←/esc back  enter ${action}${openHint}  click ${theme.cmd.copy}/${theme.cmd.share}`
+			: `${this.#targets.length > 0 ? `${this.#selected + 1}/${this.#targets.length}  ` : ""}↑/↓ step  ${blocks.length > 0 ? "→ blocks  " : ""}enter ${action}  ${this.#truncated ? "a earlier turns  " : ""}ctrl+o expand  esc close`;
 		const anchorId = target
 			? this.#blocks
 				? `copy:${target.turnId}:block:${this.#blockSelected}`
@@ -373,7 +392,9 @@ export class CopySelectorComponent implements Component {
 			: undefined;
 		return {
 			header: [
-				`${theme.cmd.copy} ${theme.bold("Copy")}${theme.sep.dot}${theme.fg("dim", "pick what to put on the clipboard")}`,
+				this.deps.title
+					? theme.bold(this.deps.title)
+					: `${theme.cmd.copy} ${theme.bold("Copy")}${theme.sep.dot}${theme.fg("dim", "pick what to put on the clipboard")}`,
 			],
 			body: {
 				lines: composed.lines,
@@ -409,7 +430,7 @@ export class CopySelectorComponent implements Component {
 			const selected = index === this.#blockSelected;
 			const captionColor: ThemeColor = selected ? OUTLINE_COLOR : "dim";
 			const controls: Array<{ action: ControlRegion["action"]; text: string }> = [
-				{ action: "copy", text: `${theme.cmd.copy} copy` },
+				{ action: "copy", text: `${theme.cmd.copy} ${this.deps.actionLabel ?? "copy"}` },
 			];
 			if (block.href && this.deps.onOpen) controls.push({ action: "open", text: `${theme.cmd.share} open` });
 			const controlsWidth = controls.reduce((sum, control) => sum + visibleWidth(control.text) + 2, 0);
@@ -497,16 +518,18 @@ function toolResultText(message: Extract<SessionMessageEntry["message"], { role:
 		.trim();
 }
 
-function pushMarkdownBlocks(blocks: CopyBlock[], text: string): void {
+function pushMarkdownBlocks(blocks: CopyBlock[], text: string, entry: TranscriptEntry): void {
 	for (const block of extractBlocks(text)) {
 		if (block.kind === "code") {
 			blocks.push({
 				label: block.lang ? `${block.lang} code` : "code",
 				content: block.code,
+				entry,
+				kind: "code",
 				language: block.lang || undefined,
 			});
 		} else {
-			blocks.push({ label: "quote", content: block.text });
+			blocks.push({ label: "quote", content: block.text, entry, kind: "quote" });
 		}
 	}
 	// Links follow the message's blocks. The preview shows the whole URL on one
@@ -515,6 +538,7 @@ function pushMarkdownBlocks(blocks: CopyBlock[], text: string): void {
 		blocks.push({
 			label: link.text !== link.href ? `link${theme.sep.dot}${link.text}` : "link",
 			content: link.href,
+			entry,
 			href: link.href,
 		});
 	}
@@ -528,10 +552,10 @@ function collectBlocks(entries: readonly TranscriptEntry[]): CopyBlock[] {
 		if (!message) continue;
 		switch (message.role) {
 			case "user":
-				pushMarkdownBlocks(blocks, rawUserText(message));
+				pushMarkdownBlocks(blocks, rawUserText(message), entry);
 				break;
 			case "assistant": {
-				pushMarkdownBlocks(blocks, assistantVisibleText(message));
+				pushMarkdownBlocks(blocks, assistantVisibleText(message), entry);
 				for (const content of message.content) {
 					if (content.type !== "toolCall") continue;
 					const command = commandFromToolCall(content);
@@ -539,6 +563,8 @@ function collectBlocks(entries: readonly TranscriptEntry[]): CopyBlock[] {
 						blocks.push({
 							label: command.kind === "bash" ? "bash command" : "eval code",
 							content: command.code,
+							entry,
+							kind: "command",
 							language: command.language,
 						});
 					}
@@ -547,16 +573,16 @@ function collectBlocks(entries: readonly TranscriptEntry[]): CopyBlock[] {
 			}
 			case "toolResult": {
 				const text = toolResultText(message);
-				if (text) blocks.push({ label: `${message.toolName} result`, content: text });
+				if (text) blocks.push({ label: `${message.toolName} result`, content: text, entry });
 				break;
 			}
 			case "bashExecution":
-				blocks.push({ label: "command", content: message.command, language: "bash" });
-				if (message.output.trim()) blocks.push({ label: "output", content: message.output });
+				blocks.push({ label: "command", content: message.command, entry, language: "bash" });
+				if (message.output.trim()) blocks.push({ label: "output", content: message.output, entry });
 				break;
 			case "pythonExecution":
-				blocks.push({ label: "eval code", content: message.code, language: "python" });
-				if (message.output.trim()) blocks.push({ label: "output", content: message.output });
+				blocks.push({ label: "eval code", content: message.code, entry, language: "python" });
+				if (message.output.trim()) blocks.push({ label: "output", content: message.output, entry });
 				break;
 			default:
 				break;

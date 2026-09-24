@@ -9,7 +9,7 @@
  * {@link AgentLifecycleManager.ensureLive}. Only this manager flips
  * `parked` ↔ `idle`.
  *
- * Park/dispose is gated against concurrent ensureLive/hub-send:
+ * Park/dispose is gated against concurrent ensureLive/peer sends:
  * - A disposing session is never handed out.
  * - ensureLive during an in-flight park either cancels the park (session still
  *   live) or waits for detach+park and then revives.
@@ -259,7 +259,7 @@ export class AgentLifecycleManager {
 	 * agent `parked`. No-op unless the id is adopted and live.
 	 *
 	 * The session is detached (and status flipped to `parked`) *before*
-	 * `session.dispose()` so concurrent {@link ensureLive}/hub-send never
+	 * `session.dispose()` so concurrent {@link ensureLive}/peer sends never
 	 * observe or inject into a disposing session. A concurrent ensureLive that
 	 * arrives before detach cancels the park and keeps the live session.
 	 */

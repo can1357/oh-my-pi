@@ -37,7 +37,7 @@ async function harness(
 	const root = TempDir.createSync("@pi-yield-report-");
 	roots.push(root);
 	const auth = createInMemoryAuthStorage();
-	auth.setRuntimeApiKey("mock", "test-key");
+	auth.keys.setRuntime("mock", "test-key");
 	const modelRegistry = new ModelRegistry(auth);
 	stores.push(modelRegistry);
 	const input = options.input ?? { type: "result" };
