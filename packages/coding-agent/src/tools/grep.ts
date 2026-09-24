@@ -987,6 +987,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 						cwd: this.session.cwd,
 						internalUrlAction: "search",
 						settings: this.session.settings,
+						signal,
 						localProtocolOptions: this.session.localProtocolOptions,
 						skills: this.session.skills,
 						rules: this.session.activeRules,

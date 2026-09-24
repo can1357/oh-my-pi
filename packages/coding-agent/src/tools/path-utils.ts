@@ -1460,7 +1460,12 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 		const partition = await partitionExistingPaths(resolvedPathInputs, cwd, parseSearchPath);
 		if (partition.valid.length === 0) {
 			throw new ToolError(
-				await withPathHint(`Path not found: ${partition.missing.join(", ")}`, partition.missing[0] ?? "", cwd),
+				await withPathHint(
+					`Path not found: ${partition.missing.join(", ")}`,
+					partition.missing[0] ?? "",
+					cwd,
+					opts.signal,
+				),
 			);
 		}
 		effectivePaths = partition.valid;
@@ -1504,7 +1509,7 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 		isDirectory = stat.isDirectory();
 	} catch {
 		const hint = opts.multipathStatHint && rawPaths.length > 1 ? opts.multipathStatHint : "";
-		throw new ToolError(await withPathHint(`Path not found: ${scopePath}${hint}`, searchPath, cwd));
+		throw new ToolError(await withPathHint(`Path not found: ${scopePath}${hint}`, searchPath, cwd, opts.signal));
 	}
 
 	return {
