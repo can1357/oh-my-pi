@@ -257,6 +257,8 @@ export interface SessionInitEntry extends SessionEntryBase {
 	readSummarize?: boolean;
 	/** Effective advisor for this subagent: `"on"` = advisor-role model, else an explicit model pattern; absent = unadvised. */
 	advisor?: string;
+	/** Effective thresholds for a child with an explicit compaction override. */
+	compactionThreshold?: { thresholdPercent: number; thresholdTokens: number };
 	/** True when the subagent ran inside an isolation worktree: never revivable, transcript-only after park. Absent on older files. */
 	isolated?: boolean;
 }

@@ -5,6 +5,7 @@
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { resolveThresholdTokens, shouldCompact } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Model, ServiceTierByFamily } from "@oh-my-pi/pi-ai";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -521,6 +522,47 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 
 		expect(result.exitCode).toBe(0);
 		expect(initSpy).toHaveBeenCalledWith(expect.objectContaining({ modelRole: "reviewer" }));
+	});
+});
+
+describe("runSubprocess per-agent compaction threshold overrides", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("applies the override to the named child only, not to agents that child spawns", async () => {
+		const createSession = vi
+			.spyOn(sdkModule, "createAgentSession")
+			.mockResolvedValueOnce(createSessionResult(yieldEmittingSession()))
+			.mockResolvedValueOnce(createSessionResult(yieldEmittingSession()));
+		const rootSettings = Settings.isolated({ "compaction.thresholdTokens": 40_000 });
+
+		const child = await runSubprocess({
+			...baseOptions,
+			id: "compaction-override-child",
+			settings: rootSettings,
+			compactionThresholdOverride: { thresholdPercent: 80, thresholdTokens: -1 },
+		});
+		expect(child.exitCode).toBe(0);
+		const childSettings = createSession.mock.calls[0]?.[0]?.settings;
+		if (!childSettings) throw new Error("Expected child settings");
+		const childCompaction = childSettings.getGroup("compaction");
+		expect(resolveThresholdTokens(200_000, childCompaction)).toBe(160_000);
+		expect(shouldCompact(50_000, 200_000, childCompaction)).toBe(false);
+		expect(shouldCompact(160_001, 200_000, childCompaction)).toBe(true);
+
+		// A grandchild without its own entry is spawned from the child's settings.
+		const grandchild = await runSubprocess({
+			...baseOptions,
+			id: "compaction-override-grandchild",
+			settings: childSettings,
+		});
+		expect(grandchild.exitCode).toBe(0);
+		const grandchildSettings = createSession.mock.calls[1]?.[0]?.settings;
+		if (!grandchildSettings) throw new Error("Expected grandchild settings");
+		const grandchildCompaction = grandchildSettings.getGroup("compaction");
+		expect(resolveThresholdTokens(200_000, grandchildCompaction)).toBe(40_000);
+		expect(shouldCompact(50_000, 200_000, grandchildCompaction)).toBe(true);
 	});
 });
 

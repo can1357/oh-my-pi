@@ -55,6 +55,7 @@ import { replaceFileAtomically } from "../utils/atomic-file";
 import { type EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import { normalizeEditMode } from "../utils/edit-mode";
 import { stringifyYamlConfig } from "@oh-my-pi/pi-utils/yaml-config";
+import { validateAgentCompactionThresholdOverrides } from "./compaction-threshold";
 import { validateAgentServiceTierOverrides } from "./service-tier";
 import { STATUS_LINE_SEGMENT_IDS } from "@oh-my-pi/pi-tui/status-line/schema";
 import {
@@ -603,6 +604,9 @@ export class Settings {
 		if (options.configFiles) configFiles.push(...options.configFiles);
 		this.#configFiles = configFiles.map(file => path.resolve(this.#cwd, expandTilde(file)));
 		this.#persist = !options.inMemory && options.readOnly !== true;
+		if (options.overrides && Object.hasOwn(options.overrides, "task.agentCompactionThresholdOverrides")) {
+			validateAgentCompactionThresholdOverrides(options.overrides["task.agentCompactionThresholdOverrides"]);
+		}
 		liveSettingsInstances.add(new WeakRef(this));
 
 		if (options.overrides) {
@@ -726,6 +730,9 @@ export class Settings {
 	 * Triggers hooks for settings that have side effects.
 	 */
 	set<P extends SettingPath>(path: P, value: SettingValue<P>): void {
+		if (path === "task.agentCompactionThresholdOverrides") {
+			validateAgentCompactionThresholdOverrides(value);
+		}
 		assertKnownStatusLineSegments(path, value);
 		const prev = this.get(path);
 		const segments = path.split(".");
@@ -749,6 +756,9 @@ export class Settings {
 	 * Apply runtime overrides (not persisted).
 	 */
 	override<P extends SettingPath>(path: P, value: SettingValue<P>): void {
+		if (path === "task.agentCompactionThresholdOverrides") {
+			validateAgentCompactionThresholdOverrides(value);
+		}
 		if (path === "modelRoles") {
 			this.#savedRuntimeModelRoleOverrides.clear();
 		}
@@ -1495,6 +1505,7 @@ export class Settings {
 		this.#project = projectResult.value;
 		this.#configOverlay = await this.#loadConfigOverlays();
 		this.#rebuildMerged();
+		validateAgentCompactionThresholdOverrides(this.get("task.agentCompactionThresholdOverrides"));
 		return this;
 	}
 
@@ -3485,6 +3496,9 @@ const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
 	},
 	"task.agentServiceTierOverrides": value => {
 		validateAgentServiceTierOverrides(value);
+	},
+	"task.agentCompactionThresholdOverrides": value => {
+		validateAgentCompactionThresholdOverrides(value);
 	},
 	"secrets.enabled": value => {
 		configureCredentialRedaction(value === true);
