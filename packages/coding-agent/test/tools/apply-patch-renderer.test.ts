@@ -151,6 +151,40 @@ describe("apply_patch rendering", () => {
 		}
 	});
 
+	it("shows the complete settled diff when an approval preview is expanded", async () => {
+		await getUiTheme();
+		const uiStub = { requestRender() {}, requestComponentRender() {} } as unknown as TUI;
+		const input = [
+			"*** Begin Patch",
+			"*** Update File: preview.ts",
+			"@@",
+			"-before",
+			"+after",
+			"*** End Patch",
+		].join("\n");
+		const component = new ToolExecutionComponent("apply_patch", { input }, {}, undefined, uiStub);
+		const middle = Array.from({ length: 120 }, (_unused, index) => ` ${index + 2}|middle-${index}`);
+		const diff = [" 1|HEAD_APPROVAL_SENTINEL", ...middle, " 122|TAIL_APPROVAL_SENTINEL"].join("\n");
+
+		component.updateStreamPreview({
+			generation: 1,
+			streaming: false,
+			files: [{ path: "preview.ts", diff, firstChangedLine: 1 }],
+		});
+		component.setExpanded(true);
+
+		const beforeArgsComplete = Bun.stripANSI(component.render(160).join("\n"));
+		expect(beforeArgsComplete).toContain("… (content above)");
+		expect(beforeArgsComplete).not.toContain("HEAD_APPROVAL_SENTINEL");
+		expect(beforeArgsComplete).toContain("TAIL_APPROVAL_SENTINEL");
+
+		component.setArgsComplete();
+		const approvalPreview = Bun.stripANSI(component.render(160).join("\n"));
+		expect(approvalPreview).toContain("HEAD_APPROVAL_SENTINEL");
+		expect(approvalPreview).toContain("TAIL_APPROVAL_SENTINEL");
+		expect(approvalPreview).not.toContain("… (content above)");
+	});
+
 	it("refreshes streaming preview immediately on arg updates without scheduling a debounce", async () => {
 		await getUiTheme();
 		const uiStub = { requestRender() {}, requestComponentRender() {} } as unknown as TUI;

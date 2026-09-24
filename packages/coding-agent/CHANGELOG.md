@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Expanded edit approval previews now reveal the complete settled diff while live streaming previews remain bounded ([#11638](https://github.com/can1357/oh-my-pi/issues/11638), [#13060](https://github.com/can1357/oh-my-pi/pull/13060) by [@kvnloo](https://github.com/kvnloo)).
+
 ## [18.3.0] - 2026-09-24
 
 ### Breaking Changes

@@ -295,6 +295,8 @@ export class ToolExecutionComponent extends Container {
 	// Edit preview state
 	#editMode?: EditMode;
 	#editDiffPreview?: PerFileDiffPreview[];
+	/** True once the edit preview worker emits its terminal `streaming: false` batch. */
+	#editDiffPreviewSettled = false;
 	#previewReady?: PromiseWithResolvers<void>;
 	// Cached converted images for Kitty protocol (which requires PNG), keyed by index
 	#convertedImages: Map<number, { data: string; mimeType: string }> = new Map();
@@ -449,7 +451,10 @@ export class ToolExecutionComponent extends Container {
 		) {
 			return;
 		}
-		if ("streaming" in update && update.streaming === false) this.#previewReady?.resolve();
+		if ("streaming" in update && update.streaming === false) {
+			this.#editDiffPreviewSettled = true;
+			this.#previewReady?.resolve();
+		}
 		if (update.files.length === 0) return;
 		const rawFiles: unknown[] = update.files;
 		const files = rawFiles.filter(
@@ -1278,6 +1283,7 @@ export class ToolExecutionComponent extends Container {
 			context.nowMs = this.#taskRenderNowMs;
 		} else if (isEditLikeToolName(this.#toolName)) {
 			context.editMode = this.#editMode;
+			context.editDiffPreviewSettled = this.#editDiffPreviewSettled;
 			const previews = this.#editDiffPreview;
 			if (previews && previews.length > 0) {
 				const first = previews[0];
