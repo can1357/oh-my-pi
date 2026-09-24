@@ -700,30 +700,79 @@ function policyEnabledProviders(
 	return providers;
 }
 
-function formatPolicyLine(
+/** Optional per-account JSON field on reports and accountsWithoutUsage. */
+export type UsagePolicyDiagnostics = {
+	priority: number;
+	reservePct: number;
+	reserveSource: "global" | "override";
+} & ({ state: "unknown"; remainingPct?: never } | { state: "eligible" | "inside-reserve"; remainingPct: number });
+
+function computePolicyDiagnostics(
 	provider: string,
 	identity: OAuthAccountIdentity,
 	limits: UsageLimit[] | undefined,
 	options: UsagePolicyDiagnosticsOptions,
-): string {
+): UsagePolicyDiagnostics {
 	const policy = options.getAccountPolicy(provider, identity);
-	const priority = policy?.priority ?? 0;
 	const configuredReservePct = policy?.reservePct;
-	const inherited = configuredReservePct === undefined;
 	const reservePct = Math.max(0, Math.min(100, configuredReservePct ?? options.globalReservePct));
-	const reserveLabel = `${reservePct}% ${inherited ? "(global)" : "(override)"}`;
 	// `omp usage` has no model/session context, so report the conservative
 	// account-wide state from the most-consumed visible window. Actual routing
 	// still scopes limits and selection in AuthStorage.
 	const usedFractions = (limits ?? [])
 		.map(resolveUsedFraction)
 		.filter((fraction): fraction is number => fraction !== undefined && Number.isFinite(fraction));
-	if (usedFractions.length === 0) {
-		return `policy: priority ${priority} · reserve ${reserveLabel} · reserve unknown`;
-	}
+	const base = {
+		priority: policy?.priority ?? 0,
+		reservePct,
+		reserveSource: configuredReservePct === undefined ? "global" : "override",
+	} as const;
+	if (usedFractions.length === 0) return { ...base, state: "unknown" };
 	const remainingPct = Math.max(0, 1 - Math.max(...usedFractions)) * 100;
-	const state = remainingPct <= reservePct ? "inside reserve" : "eligible";
-	return `policy: priority ${priority} · reserve ${reserveLabel} · ${state} · ${remainingPct.toFixed(1)}% left`;
+	return {
+		...base,
+		state: remainingPct <= reservePct ? "inside-reserve" : "eligible",
+		remainingPct,
+	};
+}
+
+function formatPolicyLine(policy: UsagePolicyDiagnostics): string {
+	const reserveLabel = `${policy.reservePct}% (${policy.reserveSource})`;
+	if (policy.state === "unknown") {
+		return `policy: priority ${policy.priority} · reserve ${reserveLabel} · reserve unknown`;
+	}
+	return `policy: priority ${policy.priority} · reserve ${reserveLabel} · ${policy.state === "inside-reserve" ? "inside reserve" : "eligible"} · ${policy.remainingPct.toFixed(1)}% left`;
+}
+
+/** Add policy only where the text view displays it (providers with a configured account policy). */
+export function annotateUsagePolicy(
+	reports: UsageReport[],
+	unreported: UsageAccountIdentity[],
+	accounts: UsageAccountIdentity[],
+	options: UsagePolicyDiagnosticsOptions,
+): {
+	reports: (UsageReport & { policy?: UsagePolicyDiagnostics })[];
+	accountsWithoutUsage: (UsageAccountIdentity & { policy?: UsagePolicyDiagnostics })[];
+} {
+	const enabled = policyEnabledProviders(reports, accounts, options);
+	return {
+		reports: reports.map(report =>
+			enabled.has(report.provider)
+				? {
+						...report,
+						policy: computePolicyDiagnostics(report.provider, metadataIdentity(report), report.limits, options),
+					}
+				: report,
+		),
+		accountsWithoutUsage: unreported.map(account =>
+			enabled.has(account.provider) && account.type === "oauth"
+				? {
+						...account,
+						policy: computePolicyDiagnostics(account.provider, accountOAuthIdentity(account), undefined, options),
+					}
+				: account,
+		),
+	};
 }
 
 /**
@@ -791,7 +840,7 @@ export function formatUsageBreakdown(
 			lines.push(`  ${formatAccountHeader(report, providerReports, index, nowMs, redaction)}`);
 			if (policyOptions && policyProviders.has(provider)) {
 				lines.push(
-					`      ${chalk.dim(formatPolicyLine(provider, metadataIdentity(report), report.limits, policyOptions))}`,
+					`      ${chalk.dim(formatPolicyLine(computePolicyDiagnostics(provider, metadataIdentity(report), report.limits, policyOptions)))}`,
 				);
 			}
 			if (report.limits.length === 0) {
@@ -815,7 +864,7 @@ export function formatUsageBreakdown(
 			lines.push(`  ${chalk.dim("○")} ${chalk.dim(`${label} — no usage data`)}`);
 			if (policyOptions && account.type === "oauth" && policyProviders.has(provider)) {
 				lines.push(
-					`      ${chalk.dim(formatPolicyLine(provider, accountOAuthIdentity(account), undefined, policyOptions))}`,
+					`      ${chalk.dim(formatPolicyLine(computePolicyDiagnostics(provider, accountOAuthIdentity(account), undefined, policyOptions)))}`,
 				);
 			}
 		}
@@ -1259,10 +1308,16 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			: undefined;
 
 		if (cmd.json) {
-			// Drop the heavy provider-specific `raw` payload — same shape as the
-			// broker/gateway `/v1/usage` endpoints.
-			let trimmed = filteredReports.map(({ raw: _raw, ...rest }) => rest);
-			let unreportedAccounts = collectUnreportedAccounts(filteredReports, accounts);
+			// Compute policy against original identities before masking, then drop
+			// the heavy provider-specific `raw` payload.
+			const annotated = annotateUsagePolicy(
+				filteredReports,
+				collectUnreportedAccounts(filteredReports, accounts),
+				accounts,
+				policyOptions,
+			);
+			let trimmed = annotated.reports.map(({ raw: _raw, ...rest }) => rest);
+			let unreportedAccounts = annotated.accountsWithoutUsage;
 			if (redaction) {
 				trimmed = trimmed.map(report => redactReportForJson(report, redaction));
 				unreportedAccounts = unreportedAccounts.map(account => ({

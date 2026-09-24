@@ -5,6 +5,7 @@ import type { UsageReport } from "@oh-my-pi/pi-ai";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import {
 	buildRedactionMap,
+	annotateUsagePolicy,
 	collectUnreportedAccounts,
 	computeProviderWindowStats,
 	formatUsageBreakdown,
@@ -397,6 +398,61 @@ describe("collectUnreportedAccounts", () => {
 		expect(collectUnreportedAccounts([legacyReport, freshReport], [legacy, fresh])).toEqual([]);
 		// The org-attributed sibling alone still does NOT cover the legacy row.
 		expect(collectUnreportedAccounts([freshReport], [legacy, fresh])).toEqual([legacy]);
+	});
+});
+
+describe("usage JSON policy", () => {
+	it("annotates eligible, reserved, and unknown accounts with the same values as the text view", () => {
+		const eligible = makeReport("openai-codex", "preferred@example.test", [
+			makeLimit({ id: "5h", provider: "openai-codex", usedFraction: 0.2 }),
+			makeLimit({ id: "7d", provider: "openai-codex", usedFraction: 0.4 }),
+		]);
+		const reserved = makeReport("openai-codex", "inherited@example.test", [
+			makeLimit({ id: "5h", provider: "openai-codex", usedFraction: 0.95 }),
+		]);
+		const unrelated = makeReport("anthropic", "unrelated@example.test", []);
+		const unreported: UsageAccountIdentity[] = [
+			{ provider: "openai-codex", type: "oauth", email: "offline@example.test" },
+			{ provider: "openai-codex", type: "api_key" },
+		];
+		const options: UsagePolicyDiagnosticsOptions = {
+			globalReservePct: 10,
+			getAccountPolicy: (_provider, identity) =>
+				identity.email === "preferred@example.test"
+					? { provider: "openai-codex", account: { email: identity.email }, priority: 20, reservePct: 50 }
+					: undefined,
+		};
+		const annotated = annotateUsagePolicy([eligible, reserved, unrelated], unreported, unreported, options);
+		const json = JSON.parse(JSON.stringify(annotated));
+
+		expect(json.reports[0].policy).toEqual({
+			priority: 20,
+			reservePct: 50,
+			reserveSource: "override",
+			state: "eligible",
+			remainingPct: 60,
+		});
+		expect(json.reports[1].policy).toEqual({
+			priority: 0,
+			reservePct: 10,
+			reserveSource: "global",
+			state: "inside-reserve",
+			remainingPct: expect.closeTo(5),
+		});
+		expect(json.reports[2]).not.toHaveProperty("policy");
+		expect(json.accountsWithoutUsage[0].policy).toEqual({
+			priority: 0,
+			reservePct: 10,
+			reserveSource: "global",
+			state: "unknown",
+		});
+		expect(json.accountsWithoutUsage[1]).not.toHaveProperty("policy");
+		const text = stripVTControlCharacters(
+			formatUsageBreakdown([eligible, reserved, unrelated], unreported, Date.now(), undefined, [], options),
+		);
+		expect(text).toContain("policy: priority 20 · reserve 50% (override) · eligible · 60.0% left");
+		expect(text).toContain("policy: priority 0 · reserve 10% (global) · inside reserve · 5.0% left");
+		expect(text).toContain("policy: priority 0 · reserve 10% (global) · reserve unknown");
 	});
 });
 
