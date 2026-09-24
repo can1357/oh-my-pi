@@ -6374,7 +6374,7 @@ dependencies = [
  "jj-lib",
  "libc",
  "pi-iso",
- "rustix 1.1.4",
+ "rustix 1.1.5",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
