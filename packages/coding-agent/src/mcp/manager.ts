@@ -40,7 +40,11 @@ import {
 	refreshStoredManagedMcpOAuthCredential,
 } from "./oauth-credentials";
 import type { MCPStoredOAuthCredential } from "./oauth-flow";
-import type { McpConnectionStatusEvent } from "./startup-events";
+import type {
+	McpConnectionFailure,
+	McpConnectionStatusEvent,
+	McpConnectionStatusSnapshot,
+} from "./startup-events";
 import { resolveMCPStartupTimeoutMs } from "./timeout";
 
 import type { MCPToolDetails } from "@oh-my-pi/pi-tui/tools/mcp";
@@ -84,10 +88,22 @@ type TrackedPromise<T> = {
 	reason?: unknown;
 };
 
-function createMcpStartupFailure(serverName: string, error: string, source?: SourceMeta): McpConnectionStatusEvent {
+function createMcpStartupFailure(
+	serverName: string,
+	error: string,
+	source?: SourceMeta,
+): Extract<McpConnectionStatusEvent, { type: "failed" }> {
 	return source
 		? { type: "failed", serverName, error, sourcePath: source.path }
 		: { type: "failed", serverName, error };
+}
+
+function toMcpConnectionFailure(event: Extract<McpConnectionStatusEvent, { type: "failed" }>): McpConnectionFailure {
+	return {
+		serverName: event.serverName,
+		error: event.error,
+		...(event.sourcePath ? { sourcePath: event.sourcePath } : {}),
+	};
 }
 
 /**
@@ -289,6 +305,9 @@ export class MCPManager {
 	#pendingReconnections = new Map<string, Promise<MCPServerConnection | null>>();
 	/** Preserved configs for reconnection after connection loss. */
 	#serverConfigs = new Map<string, MCPServerConfig>();
+	#initialConnectionsStarted = false;
+	#initialAttemptFailures = new Map<string, McpConnectionFailure>();
+	#initialConnectionsReady = Promise.withResolvers<McpConnectionStatusSnapshot>();
 	#discoverOptions: MCPDiscoverOptions | undefined;
 	#browserFilterMutationTail: Promise<void> = Promise.resolve();
 	/** Settles when the latest {@link MCPManager.discoverAndConnect} call does; reconciles wait on it. */
@@ -316,6 +335,24 @@ export class MCPManager {
 		private loadConfigs: MCPConfigLoader = loadAllMCPConfigs,
 		private reconnectPolicy: MCPReconnectPolicy = DEFAULT_RECONNECT_POLICY,
 	) {}
+
+	/**
+	 * Resolve after the first initial `tools/list` attempts settle. A hung attempt
+	 * keeps this pending; retries and later connects do not alter its snapshot.
+	 */
+	waitForInitialConnections(): Promise<McpConnectionStatusSnapshot> {
+		return this.#initialConnectionsReady.promise;
+	}
+
+	#resolveInitialConnections(snapshot: McpConnectionStatusSnapshot): void {
+		this.#initialConnectionsReady.resolve(
+			Object.freeze({
+				pendingServers: Object.freeze([...snapshot.pendingServers]),
+				connectedServers: Object.freeze([...snapshot.connectedServers]),
+				failedServers: Object.freeze(snapshot.failedServers.map(failure => Object.freeze({ ...failure }))),
+			}),
+		);
+	}
 
 	/**
 	 * Register a listener for MCP connection lifecycle events
@@ -537,6 +574,8 @@ export class MCPManager {
 	}
 
 	async #discoverAndConnect(options?: MCPDiscoverOptions): Promise<MCPLoadResult> {
+		const isInitialDiscovery = !this.#initialConnectionsStarted;
+		if (isInitialDiscovery) this.#initialConnectionsStarted = true;
 		this.#discoverOptions = options ? { ...options } : undefined;
 		let loadedConfigs: LoadMCPConfigsResult;
 		try {
@@ -551,10 +590,17 @@ export class MCPManager {
 			this.#startupServers.add(".mcp.json");
 			options?.onStatus?.({ type: "failed", serverName: ".mcp.json", error: message });
 			this.#emitConnectionStatus({ type: "failed", serverName: ".mcp.json", error: message });
+			if (isInitialDiscovery) {
+				this.#resolveInitialConnections({
+					pendingServers: [],
+					connectedServers: [],
+					failedServers: [{ serverName: ".mcp.json", error: message }],
+				});
+			}
 			throw error;
 		}
 		const { configs, exaApiKeys, sources } = loadedConfigs;
-		const result = await this.connectServers(configs, sources, options?.onStatus, options?.startupTimeoutMs);
+		const result = await this.connectServers(configs, sources, options?.onStatus, options?.startupTimeoutMs, isInitialDiscovery);
 		result.exaApiKeys = exaApiKeys;
 		return result;
 	}
@@ -666,7 +712,9 @@ export class MCPManager {
 		sources: Record<string, SourceMeta>,
 		onStatus?: (event: McpConnectionStatusEvent) => void,
 		startupTimeoutMs?: number,
+		isInitialDiscovery = false,
 	): Promise<MCPLoadResult> {
+
 		const notify = (event: McpConnectionStatusEvent) => {
 			onStatus?.(event);
 			this.#emitConnectionStatus(event);
@@ -684,8 +732,11 @@ export class MCPManager {
 		let allowBackgroundLogging = false;
 		const statusServerNames: string[] = [];
 		const validationFailures: Array<{ name: string; message: string }> = [];
+		const initialFailures = new Map<string, McpConnectionFailure>();
+		const initialPendingServers = new Set<string>();
 
 		// Prepare connection tasks
+		const initialToolLoads: Array<{ name: string; promise: Promise<ToolLoadResult> }> = [];
 		const connectionTasks: ConnectionTask[] = [];
 
 		for (const [name, config] of Object.entries(configs)) {
@@ -700,18 +751,27 @@ export class MCPManager {
 
 			// Skip if already connected
 			if (this.#connections.has(name)) {
-				connectedServers.add(name);
+				const pendingToolLoad = this.#pendingToolLoads.get(name);
+				if (isInitialDiscovery && pendingToolLoad) initialToolLoads.push({ name, promise: pendingToolLoad });
+				else connectedServers.add(name);
 				continue;
 			}
-
 			if (
 				this.#pendingConnections.has(name) ||
 				this.#pendingToolLoads.has(name) ||
 				this.#pendingReconnections.has(name)
 			) {
+				const pendingToolLoad = this.#pendingToolLoads.get(name);
+				if (isInitialDiscovery) {
+					if (pendingToolLoad) initialToolLoads.push({ name, promise: pendingToolLoad });
+					else {
+						const previousFailure = this.#initialAttemptFailures.get(name);
+						if (previousFailure) initialFailures.set(name, previousFailure);
+						else initialPendingServers.add(name);
+					}
+				}
 				continue;
 			}
-
 			statusServerNames.push(name);
 
 			// Validate config
@@ -817,6 +877,7 @@ export class MCPManager {
 			const tracked = trackPromise(toolsPromise);
 			connectionTasks.push({ name, config, tracked, toolsPromise });
 
+			if (isInitialDiscovery) initialToolLoads.push({ name, promise: tracked.promise });
 			const startupUpdate = toolsPromise
 				.then(async ({ connection, serverTools }) => {
 					if (this.#pendingToolLoads.get(name) !== toolsPromise) return;
@@ -835,6 +896,12 @@ export class MCPManager {
 					if (this.#pendingToolLoads.get(name) !== toolsPromise) return;
 					this.#pendingToolLoads.delete(name);
 					const message = error instanceof Error ? error.message : String(error);
+					if (!this.#initialAttemptFailures.has(name)) {
+						this.#initialAttemptFailures.set(
+							name,
+							toMcpConnectionFailure(createMcpStartupFailure(name, message, sources[name])),
+						);
+					}
 					notify(createMcpStartupFailure(name, message, sources[name]));
 					if (allowBackgroundLogging && !reportedErrors.has(name)) {
 						logger.error("MCP tool load failed", { path: `mcp:${name}`, error: message });
@@ -921,6 +988,30 @@ export class MCPManager {
 					}
 				}
 			}
+		}
+		if (isInitialDiscovery) {
+			const initialConnected = new Set(connectedServers);
+			for (const { name, message } of validationFailures) {
+				initialFailures.set(name, toMcpConnectionFailure(createMcpStartupFailure(name, message, sources[name])));
+			}
+			void Promise.allSettled(initialToolLoads.map(task => task.promise)).then(results => {
+				for (const [index, result] of results.entries()) {
+					const task = initialToolLoads[index]!;
+					if (result.status === "fulfilled") initialConnected.add(task.name);
+					else {
+						const message = result.reason instanceof Error ? result.reason.message : String(result.reason);
+						initialFailures.set(
+							task.name,
+							toMcpConnectionFailure(createMcpStartupFailure(task.name, message, sources[task.name])),
+						);
+					}
+				}
+				this.#resolveInitialConnections({
+					pendingServers: Array.from(initialPendingServers),
+					connectedServers: Array.from(initialConnected),
+					failedServers: Array.from(initialFailures.values()),
+				});
+			});
 		}
 
 		allowBackgroundLogging = true;

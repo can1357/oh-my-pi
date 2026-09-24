@@ -141,7 +141,11 @@ import {
 	shouldFilterBrowserMCPForPrelude,
 } from "./mcp";
 import { parseMCPToolName } from "@oh-my-pi/pi-tui/tools/mcp";
-import { MCP_CONNECTION_STATUS_EVENT_CHANNEL, type McpConnectionStatusEvent } from "./mcp/startup-events";
+import {
+	MCP_CONNECTION_STATUS_EVENT_CHANNEL,
+	type McpConnectionStatusEvent,
+	type McpConnectionStatusSnapshot,
+} from "./mcp/startup-events";
 import { resolveMCPToolAlias } from "./mcp/tool-bridge";
 import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memory-backend";
 import { MEMORY_BACKEND_TOOL_NAMES } from "./memory-backend/tool-names";
@@ -3101,6 +3105,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				depth: taskDepth,
 				...(options.parentAgentId ? { parentId: options.parentAgentId } : {}),
 			}),
+			() =>
+				mcpManager?.waitForInitialConnections() ??
+				Promise.resolve<McpConnectionStatusSnapshot>({
+					pendingServers: [],
+					connectedServers: [],
+					failedServers: [],
+				}),
 		);
 
 		credentialDisabledTarget = extensionRunner;
