@@ -28,6 +28,7 @@
 - Fixed memory storage error reporting so failed `retain`, `learn`, and backend saves identify the failed item and include the underlying storage error.
 - Fixed malformed user-level `mcp.json` files disabling all MCP sources; valid sources now continue loading with a warning.
 - Fixed retry fallback loops that could retry indefinitely when a fallback resolved to the same effective request.
+- Fixed service requests the project's service broker cannot parse, such as commands added by a newer omp after an update, waiting 30 seconds to time out; the broker now rejects them immediately with the reason ([#13213](https://github.com/can1357/oh-my-pi/pull/13213) by [@eggpeat](https://github.com/eggpeat)).
 - Fixed the setup wizard incorrectly reporting Gemini web search as unconfigured when Antigravity OAuth is active.
 - Fixed headless print mode abandoning the advisor's final review when the review model fails and a configured fallback reviewer is available.
 - Fixed embedded shell startup when the inherited working directory has been deleted.
