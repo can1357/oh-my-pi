@@ -137,7 +137,7 @@ import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } fr
 import { buildStaticInlineHint } from "../slash-commands/builtin-completions";
 import { formatCoarseDuration } from "@oh-my-pi/pi-tui/chrome/format";
 import { STTController, type SttState } from "../stt";
-import { resolveCliEntryCmd } from "../subprocess/worker-client";
+import { resolveRestartCmd } from "../subprocess/worker-client";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { labelEchoesHandle } from "../task/label";
 import { agentTypeBadge, formatTaskId } from "@oh-my-pi/pi-tui/tools/task";
@@ -2208,6 +2208,9 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		using _ = new EventLoopKeepalive();
 		return await promise;
+	}
+	interruptIdleInputForAutoRestart(): void {
+		this.onInputCallback?.({ text: "", cancelled: true, started: false });
 	}
 
 	#scheduleLoopAutoSubmit(): void {
@@ -5839,7 +5842,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 
-		const cmd = [...resolveCliEntryCmd(), ...restartArgv(process.argv.slice(2), this.#resumableSessionId())];
+		const cmd = [...resolveRestartCmd(), ...restartArgv(process.argv.slice(2), this.#resumableSessionId())];
 		await postmortem.cleanup();
 		await postmortem.drainStdout();
 		if (process.platform !== "win32") {
