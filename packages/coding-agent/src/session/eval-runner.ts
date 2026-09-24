@@ -78,6 +78,7 @@ export class EvalRunner {
 				sessionId: namespacePythonSessionId(sessionId),
 				kernelOwnerId: this.#kernelOwnerId,
 				kernelMode: this.#host.settings.get("python.kernelMode"),
+				maxRssMb: this.#host.settings.get("python.maxRssMb"),
 				interpreter: this.#host.settings.get("python.interpreter")?.trim() || undefined,
 				onChunk,
 				signal: abortController.signal,

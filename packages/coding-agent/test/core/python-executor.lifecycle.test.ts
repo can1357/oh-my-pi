@@ -15,18 +15,24 @@ Bun.env.PI_PYTHON_SKIP_CHECK = "1";
 
 class FakeKernel {
 	#result: KernelExecuteResult;
-	#onExecute?: (options?: KernelExecuteOptions) => void;
+	#onExecute?: (options?: KernelExecuteOptions) => void | Promise<void>;
 	#alive: boolean;
 	readonly executeCalls: string[] = [];
 	shutdownCalls = 0;
+	readonly pid: number | undefined;
 
 	constructor(
 		result: KernelExecuteResult,
-		options: { alive?: boolean; onExecute?: (options?: KernelExecuteOptions) => void } = {},
+		options: {
+			alive?: boolean;
+			onExecute?: (options?: KernelExecuteOptions) => void | Promise<void>;
+			pid?: number;
+		} = {},
 	) {
 		this.#result = result;
 		this.#onExecute = options.onExecute;
 		this.#alive = options.alive ?? true;
+		this.pid = options.pid;
 	}
 
 	isAlive(): boolean {
@@ -39,7 +45,7 @@ class FakeKernel {
 
 	async execute(code: string, options?: KernelExecuteOptions): Promise<KernelExecuteResult> {
 		this.executeCalls.push(code);
-		this.#onExecute?.(options);
+		await this.#onExecute?.(options);
 		return this.#result;
 	}
 
@@ -406,5 +412,99 @@ describe("executePython session lifecycle", () => {
 
 		expect(startCount).toBe(2);
 		expect(shutdownCount).toBe(2);
+	});
+
+	it("recycles a retained kernel after a cell when RSS exceeds python.maxRssMb", async () => {
+		const firstKernel = new FakeKernel(okResult, { pid: 4242 });
+		const secondKernel = new FakeKernel(okResult, { pid: 4243 });
+		const kernels = [firstKernel, secondKernel];
+		let startCount = 0;
+
+		PythonKernel.start = async () => {
+			startCount += 1;
+			return kernels.shift() as unknown as PythonKernel;
+		};
+
+		const first = await executePython("print('one')", {
+			sessionId: "session-rss-recycle",
+			maxRssMb: 1,
+			readRssKb: async () => 1 * 1024 + 1,
+		});
+
+		expect(startCount).toBe(2);
+		expect(firstKernel.executeCalls).toEqual(["print('one')"]);
+		expect(firstKernel.shutdownCalls).toBe(1);
+		expect(first.output).toContain("python.maxRssMb=1");
+
+		await executePython("print('two')", {
+			sessionId: "session-rss-recycle",
+			maxRssMb: 1,
+			readRssKb: async () => 1,
+		});
+		expect(secondKernel.executeCalls).toEqual(["print('two')"]);
+	});
+
+	it("waits for a sibling cell before recycling the sampled kernel", async () => {
+		let releaseHold: () => void = () => undefined;
+		const hold = new Promise<void>(resolve => {
+			releaseHold = resolve;
+		});
+		let holding = true;
+		const firstKernel = new FakeKernel(okResult, {
+			pid: 5151,
+			onExecute: async () => {
+				if (!holding) return;
+				holding = false;
+				await hold;
+			},
+		});
+		const secondKernel = new FakeKernel(okResult, { pid: 5152 });
+		const kernels = [firstKernel, secondKernel];
+		PythonKernel.start = async () => kernels.shift() as unknown as PythonKernel;
+
+		const sibling = executePython("hold", {
+			sessionId: "session-rss-concurrent",
+			maxRssMb: 1,
+			readRssKb: async () => 1 * 1024 + 1,
+		});
+		await flushMicrotasks();
+		const finished = executePython("print('done')", {
+			sessionId: "session-rss-concurrent",
+			maxRssMb: 1,
+			readRssKb: async () => 1 * 1024 + 1,
+		});
+		await flushMicrotasks();
+		expect(firstKernel.shutdownCalls).toBe(0);
+		releaseHold();
+		const done = await finished;
+		const held = await sibling;
+		expect(firstKernel.shutdownCalls).toBe(1);
+		expect(firstKernel.executeCalls).toEqual(["hold", "print('done')"]);
+		expect(done.output).toContain("python.maxRssMb=1");
+		expect(held.output).toContain("python.maxRssMb=1");
+	});
+
+	it("does not recycle when python.maxRssMb is 0", async () => {
+		const kernel = new FakeKernel(okResult, { pid: 4242 });
+		let startCount = 0;
+		PythonKernel.start = async () => {
+			startCount += 1;
+			return kernel as unknown as PythonKernel;
+		};
+
+		await executePython("print('one')", {
+			sessionId: "session-rss-disabled",
+			maxRssMb: 0,
+			readRssKb: async () => 50_000_000,
+		});
+		await executePython("print('two')", {
+			sessionId: "session-rss-disabled",
+			maxRssMb: 0,
+			readRssKb: async () => 50_000_000,
+		});
+
+		expect(startCount).toBe(1);
+		expect(kernel.shutdownCalls).toBe(0);
+		expect(kernel.executeCalls).toEqual(["print('one')", "print('two')"]);
 	});
 });

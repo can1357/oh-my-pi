@@ -27,6 +27,13 @@ import {
 	normalizeKernelSessionCwd,
 	requireRemainingKernelTimeoutMs,
 } from "../kernel-session-registry";
+import {
+	appendRssRecycleAnnotation,
+	formatKernelRssRecycleAnnotation,
+	kernelRssExceedsLimit,
+	normalizeMaxRssMb,
+	readProcessRssKb,
+} from "../process-rss";
 import type { PythonShadowPlan, PythonShadowSnapshot } from "./kernel";
 import {
 	checkPythonKernelAvailability,
@@ -82,6 +89,13 @@ export interface PythonExecutorOptions {
 	kernelOwnerId?: string;
 	/** Kernel mode (session reuse vs per-call) */
 	kernelMode?: PythonKernelMode;
+	/**
+	 * Recycle the retained kernel after a cell when its RSS exceeds this many
+	 * megabytes. `0` disables. Unset uses {@link normalizeMaxRssMb}'s default.
+	 */
+	maxRssMb?: number;
+	/** @internal Test seam for RSS sampling. */
+	readRssKb?: (pid: number) => Promise<number | undefined>;
 	/**
 	 * Explicit interpreter path (`python.interpreter` resolved from the
 	 * session's settings). Skips automatic runtime discovery when set.
@@ -182,6 +196,12 @@ interface SessionKernelReplacement {
 interface PythonSession extends KernelSession<PythonKernel> {
 	generation: number;
 	replacement?: SessionKernelReplacement;
+	/** Cells currently inside executeWithKernel on this session. */
+	activeCells: number;
+	resolveIdle?: () => void;
+	whenIdle?: Promise<void>;
+	/** In-flight RSS recycle. Waiters receive the same note instead of starting another replacement. */
+	rssRecycle?: Promise<string | undefined>;
 }
 
 function normalizeExplicitInterpreter(cwd: string, interpreter: string | undefined): string {
@@ -352,23 +372,37 @@ async function executeWithKernel(
 	code: string,
 	options: PythonExecutorOptions | undefined,
 ): Promise<PythonResult> {
-	const remainingMs = getRemainingTimeoutMs(options?.deadlineMs);
-	await kernel.syncPreludes?.(
-		pythonPreludeSources(options?.toolSession),
-		options?.signal,
-		Math.max(1, remainingMs ?? 10_000),
-	);
-	return executeWithKernelBase<PythonExecutorOptions>({
-		kernel,
-		code,
-		options,
-		runIdPrefix: "py",
-		errorLogLabel: "Python",
-		cancelledErrorClass: PythonExecutionCancelledError,
-		buildKernelEnvPatch: buildManagedKernelEnvPatch,
-		formatKernelTimeoutAnnotation,
-		formatTimeoutAnnotation,
-	});
+	const cwd = options?.cwd;
+	const session = cwd ? sessionRegistry.getPresentSession(cwd, options ?? {}) : undefined;
+	// A recycle already in progress is shutting the sampled kernel down. Wait
+	// before counting this cell so the drain can finish, then run on the
+	// replacement. Counting first would deadlock the drain.
+	while (session?.rssRecycle) {
+		await session.rssRecycle.catch(() => undefined);
+	}
+	if (session) beginPythonCell(session);
+	const liveKernel = session?.kernel.isAlive() ? session.kernel : kernel;
+	try {
+		const remainingMs = getRemainingTimeoutMs(options?.deadlineMs);
+		await liveKernel.syncPreludes?.(
+			pythonPreludeSources(options?.toolSession),
+			options?.signal,
+			Math.max(1, remainingMs ?? 10_000),
+		);
+		return await executeWithKernelBase<PythonExecutorOptions>({
+			kernel: liveKernel,
+			code,
+			options,
+			runIdPrefix: "py",
+			errorLogLabel: "Python",
+			cancelledErrorClass: PythonExecutionCancelledError,
+			buildKernelEnvPatch: buildManagedKernelEnvPatch,
+			formatKernelTimeoutAnnotation,
+			formatTimeoutAnnotation,
+		});
+	} finally {
+		if (session) endPythonCell(session);
+	}
 }
 
 async function ensureKernelAvailable(cwd: string, options: PythonExecutorOptions): Promise<void> {
@@ -380,6 +414,99 @@ async function ensureKernelAvailable(cwd: string, options: PythonExecutorOptions
 	if (!availability.ok) {
 		throw new Error(availability.reason ?? "Python kernel unavailable");
 	}
+}
+
+function appendKernelAnnotation(result: PythonResult, note: string): PythonResult {
+	return appendRssRecycleAnnotation(result, note);
+}
+
+function beginPythonCell(session: PythonSession): void {
+	session.activeCells += 1;
+}
+
+function endPythonCell(session: PythonSession): void {
+	session.activeCells = Math.max(0, session.activeCells - 1);
+	if (session.activeCells === 0) {
+		session.resolveIdle?.();
+		session.resolveIdle = undefined;
+		session.whenIdle = undefined;
+	}
+}
+
+/** Fresh read so a concurrent writer is visible after an earlier `if` narrowed the field. */
+function inflightRssRecycle(session: PythonSession): Promise<string | undefined> | undefined {
+	return session.rssRecycle;
+}
+
+function waitForPythonSessionIdle(session: PythonSession): Promise<void> {
+	if (session.activeCells === 0) return Promise.resolve();
+	if (!session.whenIdle) {
+		session.whenIdle = new Promise(resolve => {
+			session.resolveIdle = resolve;
+		});
+	}
+	return session.whenIdle;
+}
+
+async function recycleRetainedPythonKernelIfOverRss(
+	cwd: string,
+	options: PythonExecutorOptions,
+): Promise<string | undefined> {
+	const maxRssMb = normalizeMaxRssMb(options.maxRssMb);
+	if (maxRssMb <= 0) return undefined;
+	const session = sessionRegistry.getPresentSession(cwd, options);
+	if (!session) return undefined;
+	// Shutdown marks the sampled kernel dead before the note is ready. A sibling
+	// that reaches this check in that window must wait for the note instead of
+	// bailing out on the dead kernel.
+	const inflightAtStart = inflightRssRecycle(session);
+	if (inflightAtStart) {
+		return await inflightAtStart.catch(() => undefined);
+	}
+	const kernel = session.kernel.isAlive() ? session.kernel : undefined;
+	const pid = kernel?.pid;
+	if (pid === undefined) return undefined;
+	const sampledGeneration = session.generation;
+	let rssKb: number | undefined;
+	try {
+		rssKb = await (options.readRssKb ?? readProcessRssKb)(pid);
+	} catch {
+		return undefined;
+	}
+	if (!kernelRssExceedsLimit(rssKb, maxRssMb)) return undefined;
+	const rssMb = Math.max(1, Math.round((rssKb ?? 0) / 1024));
+	const inflightAfterSample = inflightRssRecycle(session);
+	if (inflightAfterSample) {
+		return await inflightAfterSample.catch(() => undefined);
+	}
+	let finishRecycle: (note?: string) => void = () => undefined;
+	session.rssRecycle = new Promise(resolve => {
+		finishRecycle = resolve;
+	});
+	let note: string | undefined;
+	try {
+		while (session.activeCells > 0) {
+			await waitForPythonSessionIdle(session);
+		}
+		if (session.generation !== sampledGeneration || session.kernel.pid !== pid || !session.kernel.isAlive()) {
+			return undefined;
+		}
+		await sessionRegistry.recycleLiveKernel(cwd, options);
+		note = formatKernelRssRecycleAnnotation(rssMb, maxRssMb);
+	} catch (err) {
+		logger.warn("Failed to recycle Python kernel after RSS cap", {
+			error: err instanceof Error ? err.message : String(err),
+			pid,
+			rssMb,
+			maxRssMb,
+		});
+		return undefined;
+	} finally {
+		session.rssRecycle = undefined;
+		finishRecycle(note);
+	}
+	logger.warn("Recycled Python kernel after RSS exceeded python.maxRssMb", { pid, rssMb, maxRssMb });
+	return note;
 }
 
 async function ensureToolBridge(options: PythonExecutorOptions): Promise<void> {
@@ -412,7 +539,7 @@ const sessionRegistry = createKernelSessionRegistry<PythonKernel, PythonExecutor
 		const normalizedCwd = normalizeKernelSessionCwd(cwd);
 		return `${sessionId}\0${normalizedCwd}\0${normalizeExplicitInterpreter(normalizedCwd, interpreter)}`;
 	},
-	createSession: session => ({ ...session, generation: 0 }),
+	createSession: session => ({ ...session, generation: 0, activeCells: 0 }),
 	startKernel,
 	executeWithKernel,
 	replaceSessionKernel,
@@ -598,7 +725,9 @@ export async function executePython(code: string, options?: PythonExecutorOption
 		if (kernelMode === "per-call") {
 			return await executePerCall(code, cwd, executionOptions);
 		}
-		return await sessionRegistry.executeOnSession(code, cwd, executionOptions);
+		const result = await sessionRegistry.executeOnSession(code, cwd, executionOptions);
+		const recycleNote = await recycleRetainedPythonKernelIfOverRss(cwd, executionOptions);
+		return recycleNote ? appendKernelAnnotation(result, recycleNote) : result;
 	} catch (err) {
 		if (isCancellationError(err, PythonExecutionCancelledError) || executionOptions.signal?.aborted) {
 			return createCancelledPythonResult(

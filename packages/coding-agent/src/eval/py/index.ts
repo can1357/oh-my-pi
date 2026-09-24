@@ -53,6 +53,7 @@ export default {
 
 	async execute(code: string, opts: ExecutorBackendExecOptions): Promise<ExecutorBackendResult> {
 		const kernelMode = readSetting<PythonExecutorOptions["kernelMode"]>(opts.session, "python.kernelMode");
+		const maxRssMb = readSetting<number>(opts.session, "python.maxRssMb");
 		const identity = resolvePythonKernelIdentity(opts.session);
 		const executorOptions: PythonExecutorOptions = {
 			cwd: identity.cwd,
@@ -61,6 +62,7 @@ export default {
 			signal: opts.signal,
 			sessionId: identity.sessionId,
 			kernelMode,
+			maxRssMb,
 			interpreter: identity.interpreter,
 			sessionFile: opts.sessionFile,
 			artifactsDir: opts.session.getArtifactsDir?.() ?? undefined,

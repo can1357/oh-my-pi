@@ -4107,6 +4107,24 @@ export const SETTINGS_SCHEMA = {
 				"Optional path to an exact Python executable. When set, automatic Python runtime discovery is skipped.",
 		},
 	},
+	"python.maxRssMb": {
+		type: "number",
+		default: 1024,
+		ui: {
+			tab: "shell",
+			group: "Eval & Runtimes",
+			label: "Python Kernel RSS Cap (MB)",
+			description:
+				"POSIX only. Recycle the retained Python eval kernel after a cell when ps reports RSS above this many megabytes. 0 disables. Windows cannot sample RSS, so the cap does not recycle there.",
+			options: [
+				{ value: "0", label: "Off", description: "No RSS cap" },
+				{ value: "512", label: "512 MB" },
+				{ value: "1024", label: "1024 MB", description: "Default" },
+				{ value: "2048", label: "2048 MB" },
+				{ value: "4096", label: "4096 MB" },
+			],
+		},
+	},
 
 	// ────────────────────────────────────────────────────────────────────────
 	// Tools
