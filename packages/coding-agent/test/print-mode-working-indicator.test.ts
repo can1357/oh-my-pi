@@ -7,6 +7,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/modes/print-mode";
 import type { PlanModeState } from "@oh-my-pi/pi-coding-agent/plan-mode/state";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { CREDENTIAL_DISABLED_NOTICE_SOURCE } from "@oh-my-pi/pi-coding-agent/session/credential-disabled-notice";
 import type { PlanProposalHandler } from "@oh-my-pi/pi-coding-agent/tools/resolve";
 
 function makeAssistantMessage(text: string): AssistantMessage {
@@ -261,6 +262,29 @@ describe("print mode working indicator", () => {
 		await run;
 
 		expect(stderrOutput.join("")).toBe("Working...\n");
+	});
+
+	it("writes an automatic sign-out notice to stderr in text mode and no other notice", async () => {
+		const delayed = createDelayedSession(makeAssistantMessage("final answer"));
+		const run = runPrintMode(delayed.session, { mode: "text", initialMessage: "hello" });
+		const signedOut = "A Test account was signed out automatically. Run /login to sign in again.";
+
+		await delayed.promptStarted;
+		try {
+			delayed.emit({ type: "notice", level: "warning", message: "Advisor lagging", source: "advisor" });
+			delayed.emit({
+				type: "notice",
+				level: "warning",
+				message: signedOut,
+				source: CREDENTIAL_DISABLED_NOTICE_SOURCE,
+			});
+		} finally {
+			delayed.resolvePrompt();
+			await run;
+		}
+
+		expect(stderrOutput.join("")).toBe(`Working...\nWarning: ${signedOut}\n`);
+		expect(stdoutOutput.join("")).toBe("final answer\n");
 	});
 
 	it("flushes late JSON advisor events after catch-up before disposing", async () => {
