@@ -31,7 +31,11 @@ import { settings } from "../../config/settings";
 import { createSettingsHost } from "../../config/settings-ui";
 import { createPluginSettingsHost } from "../../extensibility/plugins/settings-host";
 import type { disableProvider as DisableProvider, enableProvider as EnableProvider } from "../../discovery";
-import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
+import {
+	clearPluginRootsAndCaches,
+	resolveActiveProjectRegistryPath,
+	resolveOrDefaultProjectRegistryPath,
+} from "../../discovery/helpers";
 import {
 	getInstalledPluginsRegistryPath,
 	getMarketplacesCacheDir,
@@ -1288,30 +1292,43 @@ export class SelectorController {
 	}
 
 	async showPluginSelector(mode: "install" | "uninstall" = "install"): Promise<void> {
+		const installedRegistryPath = getInstalledPluginsRegistryPath();
+		const projectInstalledRegistryPath = await resolveOrDefaultProjectRegistryPath(getProjectDir());
 		const mgr = new MarketplaceManager({
 			marketplacesRegistryPath: getMarketplacesRegistryPath(),
-			installedRegistryPath: getInstalledPluginsRegistryPath(),
-			projectInstalledRegistryPath: (await resolveActiveProjectRegistryPath(getProjectDir())) ?? undefined,
+			installedRegistryPath,
+			projectInstalledRegistryPath,
 			marketplacesCacheDir: getMarketplacesCacheDir(),
 			pluginsCacheDir: getPluginsCacheDir(),
 			clearPluginRootsCache: clearPluginRootsAndCaches,
 		});
 
 		const [marketplaces, installed] = await Promise.all([mgr.listMarketplaces(), mgr.listInstalledPlugins()]);
-		const installedIds = new Set(installed.map(p => p.id));
+		const installedRows = new Set(installed.map(p => `${p.id}#${p.scope}`));
 
 		if (mode === "uninstall") {
-			// Show only installed plugins for uninstall
-			const items = installed.map(p => {
-				const entry = p.entries[0];
+			// Show only installed plugins, one row per scope. Selecting a row opens
+			// a dedicated confirmation list with the exact registry path; Esc or
+			// Cancel returns to the plugin list without uninstalling.
+			const items = installed.flatMap(p => {
 				const atIdx = p.id.lastIndexOf("@");
 				const pluginName = atIdx > 0 ? p.id.slice(0, atIdx) : p.id;
 				const mkt = atIdx > 0 ? p.id.slice(atIdx + 1) : "unknown";
-				return {
-					plugin: { name: pluginName, version: entry?.version, description: undefined as string | undefined },
-					marketplace: mkt,
-					scope: p.scope,
-				};
+				const targetPath = p.scope === "project" ? projectInstalledRegistryPath : installedRegistryPath;
+				return [
+					{
+						plugin: {
+							name: pluginName,
+							version: p.entries[0]?.version,
+							description: undefined as string | undefined,
+						},
+						marketplace: mkt,
+						scope: p.scope,
+						confirmation: targetPath
+							? `Uninstall ${p.id} from ${p.scope} scope? Removes from ${shortenPath(targetPath)}`
+							: undefined,
+					},
+				];
 			});
 			this.showSelector(done => {
 				const selector = new PluginSelectorComponent(marketplaces.length, items, new Set(), {
@@ -1333,12 +1350,14 @@ export class SelectorController {
 						this.ctx.ui.requestRender();
 					},
 				});
-				return { component: selector, focus: selector.getSelectList() };
+				return { component: selector, focus: selector };
 			});
 			return;
 		}
 
-		// Install mode: show all available plugins from all marketplaces
+		// Install mode shows every available plugin once per scope. Selecting a row
+		// opens an interactive confirmation list with the exact registry path;
+		// Cancel returns to the plugin list and Confirm performs the install.
 		const allPlugins: Array<{
 			plugin: { name: string; version?: string; description?: string };
 			marketplace: string;
@@ -1350,15 +1369,42 @@ export class SelectorController {
 			}
 		}
 
+		const installRows = allPlugins.flatMap(({ plugin, marketplace }) => {
+			const id = `${plugin.name}@${marketplace}`;
+			const projectInstalled = installedRows.has(`${id}#project`);
+			const userInstalled = installedRows.has(`${id}#user`);
+			const rows: Array<{
+				plugin: { name: string; version?: string; description?: string };
+				marketplace: string;
+				scope: "user" | "project";
+				confirmation: string;
+			}> = [];
+			if (projectInstalledRegistryPath !== undefined) {
+				rows.push({
+					plugin,
+					marketplace,
+					scope: "project",
+					confirmation: `Install ${id} to project scope?${projectInstalled ? " Replaces current install. " : " "}Writes to ${shortenPath(projectInstalledRegistryPath)}`,
+				});
+			}
+			rows.push({
+				plugin,
+				marketplace,
+				scope: "user",
+				confirmation: `Install ${id} to user scope?${userInstalled ? " Replaces current install. " : " "}Writes to ${shortenPath(installedRegistryPath)}`,
+			});
+			return rows;
+		});
+
 		this.showSelector(done => {
-			const selector = new PluginSelectorComponent(marketplaces.length, allPlugins, installedIds, {
-				onSelect: async (name, marketplace) => {
+			const selector = new PluginSelectorComponent(marketplaces.length, installRows, installedRows, {
+				onSelect: async (name, marketplace, scope) => {
 					done();
 					this.ctx.showStatus(`Installing ${name} from ${marketplace}...`);
 					this.ctx.ui.requestRender();
 					try {
-						const force = installedIds.has(`${name}@${marketplace}`);
-						await mgr.installPlugin(name, marketplace, { force });
+						const force = scope !== undefined && installedRows.has(`${name}@${marketplace}#${scope}`);
+						await mgr.installPlugin(name, marketplace, { force, scope });
 						this.ctx.showStatus(`Installed ${name} from ${marketplace}`);
 					} catch (err) {
 						this.ctx.showStatus(`Install failed: ${err}`);
@@ -1370,7 +1416,7 @@ export class SelectorController {
 					this.ctx.ui.requestRender();
 				},
 			});
-			return { component: selector, focus: selector.getSelectList() };
+			return { component: selector, focus: selector };
 		});
 	}
 

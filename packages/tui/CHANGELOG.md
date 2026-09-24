@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an interactive Confirm/Cancel screen to the marketplace plugin selector ([#13001](https://github.com/can1357/oh-my-pi/pull/13001) by [@aksalatdev](https://github.com/aksalatdev)).
+
 ## [18.3.0] - 2026-09-24
 
 ### Added
@@ -12,6 +16,8 @@
 - Added supervised bash service rendering with status, readiness, and output information.
 - Added a fullscreen annotation overlay for diffs and text, including multi-line notes, editing, deletion, and undo ([#12601](https://github.com/can1357/oh-my-pi/pull/12601) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 - Added Daybreak-enabled account listings to the usage dashboard.
+- Added a fullscreen annotation overlay for diffs and text, with multi-line notes, editing, deletion, and undo ([#12601](https://github.com/can1357/oh-my-pi/pull/12601) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
+- Added Daybreak-enabled account listing to usage dashboard overlay
 
 ### Changed
 
