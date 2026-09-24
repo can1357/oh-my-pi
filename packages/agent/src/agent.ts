@@ -1651,25 +1651,30 @@ export class Agent {
 				return this.#dequeueSteeringMessagesAfterHooks(signal ?? loopSignal);
 			},
 			hasSteeringMessages: () => {
-				if (this.#steeringQueue.length === 0) {
-					return { queued: false };
+				// `pending` is raw queue occupancy, not the one-at-a-time batch size
+				// below: the provider-wait watcher compares it against the count it
+				// saw when the request was issued, so it must move with every queued
+				// message even while only the first one would be injected.
+				const pending = this.#steeringQueue.length;
+				if (pending === 0) {
+					return { queued: false, pending: 0 };
 				}
-				const messageCount = this.#steeringMode === "one-at-a-time" ? 1 : this.#steeringQueue.length;
+				const messageCount = this.#steeringMode === "one-at-a-time" ? 1 : pending;
 				let hasAgentSteering = false;
 				for (let i = 0; i < messageCount; i++) {
 					const message = this.#steeringQueue[i];
 					const role = "role" in message ? message.role : undefined;
 					const attribution = "attribution" in message ? message.attribution : undefined;
 					if (attribution === "user") {
-						return { queued: true, source: "user" };
+						return { queued: true, source: "user", pending };
 					}
 					if (role !== "user") continue;
 					if (attribution !== "agent") {
-						return { queued: true, source: "user" };
+						return { queued: true, source: "user", pending };
 					}
 					hasAgentSteering = true;
 				}
-				return { queued: true, source: hasAgentSteering ? "agent" : "system" };
+				return { queued: true, source: hasAgentSteering ? "agent" : "system", pending };
 			},
 			waitForSteeringMessages: signal => this.#waitForSteeringMessages(signal),
 			hasIrcInterrupts: this.hasIrcInterrupts,

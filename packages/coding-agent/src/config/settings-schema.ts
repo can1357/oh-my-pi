@@ -1904,7 +1904,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "interaction",
 			group: "Input",
 			label: "Interrupt Mode",
-			description: "When steering messages interrupt tool execution",
+			description:
+				"Choose when a queued steering message takes effect: immediately, cancelling tool execution and a model request that has not streamed any output yet, or only once the current response finishes.",
 		},
 	},
 

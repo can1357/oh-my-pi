@@ -6470,7 +6470,8 @@ export class AgentSession {
 			// Steer/follow-up/aside the keyword notices BEFORE the queued user message so the
 			// model reads the steering notice ahead of the prompt it modifies.
 			for (const notice of keywordNotices) {
-				await this.#queueCustomMessage(notice, streamingBehavior);
+				// Silent: the queued user message below carries the submission's notice.
+				await this.#queueCustomMessage(notice, streamingBehavior, undefined, { silent: true });
 			}
 			await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, {
 				timestamp: submittedAt,
@@ -6523,7 +6524,8 @@ export class AgentSession {
 				throw new AgentBusyError();
 			}
 			for (const notice of keywordNotices) {
-				await this.#queueCustomMessage(notice, streamingBehavior);
+				// Silent: the queued user message below carries the submission's notice.
+				await this.#queueCustomMessage(notice, streamingBehavior, undefined, { silent: true });
 			}
 			await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, {
 				timestamp: submittedAt,
@@ -6687,7 +6689,8 @@ export class AgentSession {
 			if (!streamingBehavior) throw new AgentBusyError();
 
 			for (const notice of keywordNotices) {
-				await this.#queueCustomMessage(notice, streamingBehavior);
+				// Silent: the queued custom message below carries the submission's notice.
+				await this.#queueCustomMessage(notice, streamingBehavior, undefined, { silent: true });
 			}
 			await this.#queueCustomMessage(message, streamingBehavior, options.queueChipText);
 			outcome.sessionClaimed = true;
@@ -6703,7 +6706,8 @@ export class AgentSession {
 			}
 
 			for (const notice of keywordNotices) {
-				await this.#queueCustomMessage(notice, streamingBehavior);
+				// Silent: the queued custom message below carries the submission's notice.
+				await this.#queueCustomMessage(notice, streamingBehavior, undefined, { silent: true });
 			}
 			await this.#queueCustomMessage(message, streamingBehavior, options?.queueChipText);
 			outcome.sessionClaimed = true;
@@ -7338,6 +7342,27 @@ export class AgentSession {
 		}
 	}
 
+	/**
+	 * Acknowledge a user-attributed steer queued mid-run, from every queue path
+	 * (`#queueUserMessage` for typed/steered text, `#queueCustomMessage` for
+	 * collab guest prompts and skill commands). Hidden companions queued ahead
+	 * of the user's text (magic-keyword notices) stay silent — the submission's
+	 * own notice covers them. The copy discriminates: while the model call has
+	 * streamed nothing and `interruptMode` is not `"wait"`, the loop cancels it
+	 * and the steer interrupts instead of waiting for the boundary.
+	 */
+	#emitQueuedSteerNotice(
+		deliverAs: "steer" | "followUp" | "aside",
+		attribution: MessageAttribution | undefined,
+	): void {
+		if (deliverAs !== "steer" || attribution !== "user" || !this.isStreaming) return;
+		const willInterrupt = this.interruptMode !== "wait" && this.agent.state.streamMessage === null;
+		this.emitNotice(
+			"info",
+			willInterrupt ? "Queued — interrupting the current step" : "Queued — will apply after the current response",
+		);
+	}
+
 	async #queueUserMessage(
 		text: string,
 		images: ImageContent[] | undefined,
@@ -7413,6 +7438,14 @@ export class AgentSession {
 				attribution,
 				timestamp: timestamp ?? Date.now(),
 			});
+			// Typed input that lands mid-run is otherwise acknowledged only by the
+			// pending bar repainting, which reads as "swallowed" on a long turn.
+			// Same feedback the compaction queue gives (`queueCompactionMessage`),
+			// emitted from the session so every front-end (TUI, RPC, collab) shows
+			// it. The copy discriminates: when the loop can still cancel a model
+			// call that has streamed nothing, the steer interrupts instead of
+			// waiting for the boundary.
+			this.#emitQueuedSteerNotice(mode, attribution);
 		}
 		this.#scheduleIdleQueueDrain();
 	}
@@ -7609,6 +7642,7 @@ export class AgentSession {
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
 		deliverAs: "steer" | "followUp" | "aside",
 		queueChipText?: string,
+		opts?: { silent?: boolean },
 	): Promise<void> {
 		// Captured before the normalization await below — see #sessionGeneration's doc comment.
 		const sessionGeneration = this.#sessionGeneration;
@@ -7651,6 +7685,7 @@ export class AgentSession {
 		} else {
 			this.agent.steer(normalizedAppMessage);
 		}
+		if (!opts?.silent) this.#emitQueuedSteerNotice(deliverAs, appMessage.attribution);
 		this.#scheduleIdleQueueDrain();
 	}
 

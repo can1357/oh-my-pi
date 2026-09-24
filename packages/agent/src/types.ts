@@ -154,6 +154,20 @@ export interface SteeringQueueState {
 	queued: boolean;
 	/** Best-effort origin used only to word synthetic skipped-tool results. */
 	source?: SteeringInterruptSource;
+	/**
+	 * Number of messages currently sitting in the steering queue.
+	 *
+	 * Occupancy, NOT the batch size a boundary dequeue would take: a host in
+	 * one-at-a-time steering mode still reports every queued message here. The
+	 * provider-wait watcher snapshots this count when it arms and only cancels
+	 * the request once a later peek reports a strictly larger count, so a
+	 * message left queued from an earlier turn cannot pass for a new arrival
+	 * and cannot blind the watcher to the steer typed after it.
+	 *
+	 * Omit it when the queue cannot count itself; the watcher then degrades to
+	 * the boolean edge (empty once, then occupied).
+	 */
+	pending?: number;
 }
 
 /**
@@ -163,11 +177,15 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	model: Model;
 
 	/**
-	 * When to interrupt tool execution for steering messages.
+	 * When a queued steering message may cut the current work short.
 	 * - "immediate" = cut interruptible waits short and raise the cooperative
-	 *   `steeringSignal` for other running tools (default)
-	 * - "wait" = let non-interruptible tools finish undisturbed; interruptible
-	 *   waits are still cut short, since they have no work to complete
+	 *   `steeringSignal` for other running tools, and cancel a model request
+	 *   that has not streamed anything yet — still waiting or in retry
+	 *   backoff — so the loop re-issues it with the steer in context instead of
+	 *   parking the message (default)
+	 * - "wait" = let non-interruptible tools and model requests finish
+	 *   undisturbed; interruptible waits are still cut short, since they have
+	 *   no work to complete
 	 */
 	interruptMode?: "immediate" | "wait";
 
@@ -255,10 +273,12 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	/**
 	 * Returns steering messages to inject into the conversation mid-run.
 	 *
-	 * Called at injection boundaries only (loop start and after a tool batch
-	 * fully settles), so dequeued messages are immediately injected. The
-	 * mid-batch interrupt poll uses {@link hasSteeringMessages} instead and
-	 * never consumes the queue.
+	 * Called at injection boundaries (loop start and after a tool batch fully
+	 * settles) and, additionally, right after steering cancelled a model call
+	 * that had streamed nothing — that drain empties the queue before the call
+	 * is re-issued, so the message cannot interrupt its own replacement. The
+	 * mid-batch interrupt poll and the provider-wait watch use
+	 * {@link hasSteeringMessages} instead and never consume the queue.
 	 */
 	getSteeringMessages?: (signal?: AbortSignal) => Promise<AgentMessage[]>;
 
@@ -269,15 +289,28 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * interruptible tool) to decide whether to abort in-flight and skip
 	 * not-yet-started *interruptible* waits;
 	 * every other already-emitted call still executes and the message injects
-	 * at the batch boundary. The queue keeps
-	 * owning its messages until the loop reaches the next injection boundary and
-	 * dequeues via {@link getSteeringMessages} — so callers can still cancel or
-	 * restore queued messages while in-flight tools settle, and an external
-	 * abort in that window leaves the queue intact for a post-abort continue.
+	 * at the batch boundary. In "immediate" mode it is also watched while a
+	 * model call is still waiting on its first stream event: a request that has
+	 * produced no output is cancelled and re-issued with the steer folded in.
+	 * The queue keeps
+	 * owning its messages until the loop reaches an injection boundary (or that
+	 * cancellation) and dequeues via {@link getSteeringMessages} — so callers
+	 * can still cancel or restore queued messages while in-flight tools settle,
+	 * and an external abort in either window leaves the queue intact for a
+	 * post-abort continue.
 	 *
 	 * Returning `true` is treated as user-originated steering for compatibility.
 	 * Return a {@link SteeringQueueState} when the queue can distinguish system
-	 * advisories from real user messages.
+	 * advisories from real user messages, and populate its
+	 * {@link SteeringQueueState.pending} occupancy count so the provider-wait
+	 * watch can tell a new arrival from a message that was already queued when
+	 * the request was issued.
+	 *
+	 * An asynchronous implementation must report the queue as it stood when it
+	 * was called (read it before the first `await`). The provider-wait watch
+	 * holds the request until this first answer arrives and uses it as the
+	 * baseline, so an answer read later would count a steer that arrived in the
+	 * meantime as already queued, and that steer would wait for the boundary.
 	 *
 	 * When omitted, steering never interrupts a running tool batch; queued
 	 * messages are still delivered at the next injection boundary.
@@ -285,10 +318,17 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	hasSteeringMessages?: () => boolean | SteeringQueueState | Promise<boolean | SteeringQueueState>;
 
 	/**
-	 * Wakes the in-flight tool interrupt watcher when a steering message is queued.
-	 * The callback must not consume the queue; the loop still calls
-	 * {@link hasSteeringMessages} before aborting and injects through
+	 * Wakes the loop's steering watchers — the in-flight tool interrupt watch and
+	 * the provider-wait watch — when a steering message is queued. The callback
+	 * must not consume the queue; the loop still calls
+	 * {@link hasSteeringMessages} before cancelling anything and injects through
 	 * {@link getSteeringMessages}.
+	 *
+	 * Implementations may (and the built-in `Agent` does) resolve *immediately*
+	 * while the queue is merely non-empty, so a resolution is not proof that
+	 * anything arrived. The provider-wait watch therefore re-peeks after every
+	 * resolution and throttles itself to the poll cadence when the count did
+	 * not grow, instead of resubscribing to an already-settled waiter.
 	 */
 	waitForSteeringMessages?: (signal?: AbortSignal) => Promise<void>;
 
