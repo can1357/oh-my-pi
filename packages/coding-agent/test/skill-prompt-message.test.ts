@@ -25,7 +25,7 @@ describe("buildSkillPromptMessage", () => {
 	test("defaults public skill prompt rendering to user-invoked bug-fix directory guidance", async () => {
 		const { dir, skill } = await createSkill("Review the supplied code carefully.");
 		try {
-			const built = await buildSkillPromptMessage(skill, {
+			const built = await buildSkillPromptMessage([skill], {
 				args: "focus on risks",
 				prompt: "/skill:reviewer focus on risks",
 			});
@@ -41,16 +41,52 @@ describe("buildSkillPromptMessage", () => {
 				args: "focus on risks",
 				prompt: "/skill:reviewer focus on risks",
 				lineCount: 1,
+				skills: [{ name: "reviewer", path: skill.filePath, lineCount: 1 }],
 			});
 		} finally {
 			await removeWithRetries(dir);
 		}
 	});
 
+	test("renders multiple skills in single prompt", async () => {
+		const skill1 = await createSkill("Body 1");
+		const dir2 = await fs.mkdtemp(path.join(os.tmpdir(), `omp-skill-prompt-2-${Snowflake.next()}-`));
+		const filePath2 = path.join(dir2, "SKILL.md");
+		await Bun.write(filePath2, `---\nname: helper\ndescription: Help\n---\n\nBody 2\n`);
+		const skill2 = {
+			name: "helper",
+			description: "Help",
+			filePath: filePath2,
+			baseDir: dir2,
+			source: "test",
+		};
+		try {
+			const built = await buildSkillPromptMessage([skill1.skill, skill2], {
+				args: "do both",
+				prompt: "/skill:reviewer /skill:helper do both",
+			});
+
+			expect(built.message).toContain('User invoked the "reviewer" skill');
+			expect(built.message).toContain("Body 1");
+			expect(built.message).toContain(`[Skill directory: ${skill1.dir}]`);
+			expect(built.message).toContain('User invoked the "helper" skill');
+			expect(built.message).toContain("Body 2");
+			expect(built.message).toContain(`[Skill directory: ${dir2}]`);
+			expect(built.message).toContain("User: do both");
+			expect(built.details.skills).toEqual([
+				{ name: "reviewer", path: skill1.skill.filePath, lineCount: 1 },
+				{ name: "helper", path: filePath2, lineCount: 1 },
+			]);
+		} finally {
+			await removeWithRetries(skill1.dir);
+			await removeWithRetries(dir2);
+		}
+	});
+
 	test("keeps autoload skills on non-user minimal framing", async () => {
 		const { dir, skill } = await createSkill("Review silently loaded context.");
 		try {
-			const built = await buildSkillPromptMessage(skill, { args: "" }, "autoload");
+			const built = await buildSkillPromptMessage([skill], { args: "" }, "autoload");
 
 			expect(built.message).toContain("Review silently loaded context.");
 			expect(built.message).toContain(`Skill: ${skill.filePath}`);

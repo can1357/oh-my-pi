@@ -107,11 +107,34 @@ describe("SkillMessageComponent", () => {
 				path: skillPath,
 				lineCount: 88,
 				prompt: "/skill:atomic-commit then /skill:other",
+				skills: [{ name: "atomic-commit", path: skillPath, lineCount: 88 }],
 			}),
 		);
 		const text = strip(component.render(80));
 		expect(text).toContain(chip());
 		expect(text).toContain("/skill:other");
+	});
+
+	it("chips every loaded skill when multiple skills are invoked", () => {
+		const otherPath = path.join(os.homedir(), ".agent/skills/other-skill/SKILL.md");
+		const component = new SkillMessageComponent(
+			makeMessage({
+				name: "atomic-commit",
+				path: skillPath,
+				lineCount: 88,
+				prompt: "/skill:atomic-commit /skill:other-skill do work",
+				skills: [
+					{ name: "atomic-commit", path: skillPath, lineCount: 88 },
+					{ name: "other-skill", path: otherPath, lineCount: 12 },
+				],
+			}),
+		);
+		const text = strip(component.render(80));
+		expect(text).toContain(chip());
+		expect(text).toContain(skillChipLabel("other-skill"));
+		expect(text).not.toContain("/skill:atomic-commit");
+		expect(text).not.toContain("/skill:other-skill");
+		expect(text).toContain("do work");
 	});
 
 	it("falls back to a callout built from args for sessions recorded before prompts were stored", () => {

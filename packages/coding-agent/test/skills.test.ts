@@ -602,12 +602,12 @@ describe("collision handling", () => {
 describe("parseSkillInvocation", () => {
 	describe("leading `/skill:<name>` form", () => {
 		it("parses a bare leading command", () => {
-			expect(parseSkillInvocation("/skill:foo")).toEqual({ name: "foo", args: "", prompt: "/skill:foo" });
+			expect(parseSkillInvocation("/skill:foo")).toEqual({ names: ["foo"], args: "", prompt: "/skill:foo" });
 		});
 
 		it("captures everything after the first space as args", () => {
 			expect(parseSkillInvocation("/skill:foo focus on auth")).toEqual({
-				name: "foo",
+				names: ["foo"],
 				args: "focus on auth",
 				prompt: "/skill:foo focus on auth",
 			});
@@ -615,7 +615,7 @@ describe("parseSkillInvocation", () => {
 
 		it("terminates the name at a newline so a multi-line draft still invokes the skill", () => {
 			expect(parseSkillInvocation("/skill:foo\nfocus on auth")).toEqual({
-				name: "foo",
+				names: ["foo"],
 				args: "focus on auth",
 				prompt: "/skill:foo\nfocus on auth",
 			});
@@ -623,7 +623,7 @@ describe("parseSkillInvocation", () => {
 
 		it("allows leading whitespace before the `/skill:<name>` command", () => {
 			expect(parseSkillInvocation("  /skill:foo focus on auth")).toEqual({
-				name: "foo",
+				names: ["foo"],
 				args: "focus on auth",
 				prompt: "/skill:foo focus on auth",
 			});
@@ -637,7 +637,7 @@ describe("parseSkillInvocation", () => {
 	describe("mid-prompt `/skill:<name>` form (issue #3913)", () => {
 		it("threads surrounding prose through as args when the skill token appears after typed text", () => {
 			expect(parseSkillInvocation("fix the auth bug /skill:security-scan ")).toEqual({
-				name: "security-scan",
+				names: ["security-scan"],
 				args: "fix the auth bug",
 				prompt: "fix the auth bug /skill:security-scan",
 			});
@@ -645,7 +645,7 @@ describe("parseSkillInvocation", () => {
 
 		it("collapses prose on both sides of the skill token into a single args string", () => {
 			expect(parseSkillInvocation("leading /skill:foo trailing")).toEqual({
-				name: "foo",
+				names: ["foo"],
 				args: "leading trailing",
 				prompt: "leading /skill:foo trailing",
 			});
@@ -653,7 +653,7 @@ describe("parseSkillInvocation", () => {
 
 		it("preserves embedded newlines in args when the skill token spans a line break", () => {
 			expect(parseSkillInvocation("explain this\nthen use /skill:security-scan ")).toEqual({
-				name: "security-scan",
+				names: ["security-scan"],
 				args: "explain this\nthen use",
 				prompt: "explain this\nthen use /skill:security-scan",
 			});
@@ -680,13 +680,13 @@ describe("parseSkillInvocation", () => {
 			// `$echo`, `${HOME}`, and `$200` are not python commands — `pythonCommandPrefixLength`
 			// returns 0 for them — so the mid-prompt parser must still see the embedded skill.
 			expect(parseSkillInvocation("$echo /skill:reviewer")).toEqual({
-				name: "reviewer",
+				names: ["reviewer"],
 				args: "$echo",
 				prompt: "$echo /skill:reviewer",
 			});
 			// oxlint-disable-next-line no-template-curly-in-string -- testing literal string containing shell variable
 			expect(parseSkillInvocation("${HOME}/bin /skill:foo")).toEqual({
-				name: "foo",
+				names: ["foo"],
 				// oxlint-disable-next-line no-template-curly-in-string -- testing literal string containing shell variable
 				args: "${HOME}/bin",
 				// oxlint-disable-next-line no-template-curly-in-string -- testing literal string containing shell variable
@@ -706,6 +706,28 @@ describe("parseSkillInvocation", () => {
 			// `/skill:foo/bar` mid-prompt is ambiguous with a path — the mid-prompt
 			// regex requires `[^\s/]+`, so this falls through with no match.
 			expect(parseSkillInvocation("see /skill:foo/bar")).toBeUndefined();
+		});
+
+		it("parses multiple skill tokens in draft order without duplicates", () => {
+			expect(parseSkillInvocation("/skill:foo /skill:bar do it")).toEqual({
+				names: ["foo", "bar"],
+				args: "do it",
+				prompt: "/skill:foo /skill:bar do it",
+			});
+			expect(parseSkillInvocation("/skill:foo x /skill:foo")).toEqual({
+				names: ["foo"],
+				args: "x",
+				prompt: "/skill:foo x /skill:foo",
+			});
+		});
+
+		it("threads unknown skill tokens into args when filtered by isKnown predicate", () => {
+			expect(parseSkillInvocation("/skill:typo /skill:real go", name => name === "real")).toEqual({
+				names: ["real"],
+				args: "/skill:typo go",
+				prompt: "/skill:typo /skill:real go",
+			});
+			expect(parseSkillInvocation("/skill:foo go", () => false)).toBeUndefined();
 		});
 	});
 });
