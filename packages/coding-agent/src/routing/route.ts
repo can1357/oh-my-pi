@@ -35,7 +35,7 @@ const COMPLEXITY_CRITERIA = [
 	"Mechanical: single location, known pattern, no design decision",
 	"Moderate: several locations, or requires some judgment",
 	"Hard: architectural, ambiguous, or getting it wrong is expensive",
-];
+] as const;
 
 /** Policy thresholds and the decision's `complexity` metadata speak 0..1; normalize the raw level index before either. */
 const normalizeComplexity = (raw: number): number => raw / (COMPLEXITY_CRITERIA.length - 1);
