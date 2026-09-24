@@ -1164,7 +1164,7 @@ mod testing {
 
 	use super::{
 		Arc, AtomicBool, GuardedStream, HashMap, Host, OpenFile, OsString, PathBuf, Read, Sigpipe,
-		SigpipeGuard, Stdin, StreamWriter, Utility, Write, io, openfiles, run_caught,
+		SigpipeGuard, Stdin, StreamWriter, Utility, Write, io, openfiles, output_handle, run_caught,
 	};
 
 	/// Captured in-memory output from [`Host::for_test`].
