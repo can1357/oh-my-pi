@@ -1262,6 +1262,18 @@ describe("Settings", () => {
 			expect(isolated.get("enabledModels")).toEqual([]);
 		});
 
+		it("treats a config key written without a value as unset", async () => {
+			// YAML parses a valueless key as null. `get()` returned it verbatim, so
+			// `resolveRoleChain` crashed the process at startup on
+			// `settings.get("retry.fallbackChains")[role]` (#13183).
+			await Bun.write(getConfigPath(), "retry:\n  fallbackChains:\ninlineToolDescriptors:\n");
+
+			const settings = await Settings.loadIsolated({ cwd: projectDir, agentDir });
+
+			expect(settings.get("retry.fallbackChains")).toEqual({});
+			expect(settings.get("inlineToolDescriptors")).toBe("auto");
+		});
+
 		it("invalidates cached resolved values after set, override, and clearOverride", () => {
 			const isolated = Settings.isolated();
 

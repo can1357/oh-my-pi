@@ -699,6 +699,11 @@ export class Settings {
 	/**
 	 * Get a setting value (sync).
 	 * Returns the merged value from global + project + overrides, or the default.
+	 *
+	 * A configured `null` is treated as unset: YAML writes `null` for a key left
+	 * without a value (`fallbackChains:`), and no schema entry has a null
+	 * default, so returning it verbatim would hand callers a value the schema
+	 * says is impossible (#13183).
 	 */
 	get<P extends SettingPath>(path: P): SettingValue<P> {
 		if (this.#resolvedCache.has(path)) {
@@ -707,7 +712,9 @@ export class Settings {
 
 		const value = getByPath(this.#merged, SETTING_PATH_SEGMENTS[path]);
 		const resolved =
-			value !== undefined ? (resolvePathScopedStringArray(path, value, this.#cwd) ?? value) : getDefault(path);
+			value !== undefined && value !== null
+				? (resolvePathScopedStringArray(path, value, this.#cwd) ?? value)
+				: getDefault(path);
 		this.#resolvedCache.set(path, resolved);
 		return resolved as SettingValue<P>;
 	}
