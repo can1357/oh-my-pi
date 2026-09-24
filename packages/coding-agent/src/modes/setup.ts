@@ -1,4 +1,4 @@
-import type { WebSearchGrounding } from "@oh-my-pi/pi-catalog/types";
+import type { Model, WebSearchGrounding } from "@oh-my-pi/pi-catalog/types";
 import { runProviderSetupWizard as runProviderWizard } from "@oh-my-pi/pi-tui/setup/lazy";
 import type { SetupHost, SetupScene } from "@oh-my-pi/pi-tui/setup/scenes/types";
 import {
@@ -10,7 +10,7 @@ import {
 	type SetupSceneSelectionOptions,
 } from "@oh-my-pi/pi-tui/setup/wizard";
 import { formatModelString, resolveModelRoleValue, rolePriorityDefaults } from "../config/model-resolver";
-import { getRoleInfo } from "../config/model-roles";
+import { getRoleInfo, roleCandidatePool } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import { captureBrowserSession } from "../utils/browser-session";
 import { copyToClipboard } from "../utils/clipboard";
@@ -35,24 +35,33 @@ function isWebSearchGrounding(id: SearchProviderId): id is WebSearchGrounding {
 	return id in WEB_SEARCH_GROUNDINGS;
 }
 
-function webRoleModels(ctx: InteractiveModeContext) {
-	return ctx.session.modelRegistry.getAll("all").filter(getRoleInfo("web", ctx.settings).accepts);
+/**
+ * Web-role candidate pools, lazily: the credentialed pool the runtime resolves
+ * against first (#13023), then the full catalog so an unconfigured provider can
+ * still be saved and highlighted as the preference.
+ */
+function* webRolePools(ctx: InteractiveModeContext): Generator<Model[]> {
+	yield roleCandidatePool("web", ctx.settings, ctx.session.modelRegistry);
+	yield ctx.session.modelRegistry.getAll("all").filter(getRoleInfo("web", ctx.settings).accepts);
 }
 
 function resolveWebSearchSelection(ctx: InteractiveModeContext, id: SearchProviderId) {
-	const models = webRoleModels(ctx);
-	if (!isWebSearchGrounding(id)) {
-		const selector = `web/${id}`;
-		const model = resolveModelRoleValue(selector, models, { settings: ctx.settings }).model;
-		return model ? { selector, model } : undefined;
-	}
+	for (const models of webRolePools(ctx)) {
+		if (!isWebSearchGrounding(id)) {
+			const selector = `web/${id}`;
+			const model = resolveModelRoleValue(selector, models, { settings: ctx.settings }).model;
+			if (model) return { selector, model };
+			continue;
+		}
 
-	for (const selector of rolePriorityDefaults("web")) {
-		const model = resolveModelRoleValue(selector, models, { settings: ctx.settings }).model;
-		if (model?.webSearch === id) return { selector, model };
+		for (const selector of rolePriorityDefaults("web")) {
+			const model = resolveModelRoleValue(selector, models, { settings: ctx.settings }).model;
+			if (model?.webSearch === id) return { selector, model };
+		}
+		const model = models.find(candidate => candidate.webSearch === id);
+		if (model) return { selector: formatModelString(model), model };
 	}
-	const model = models.find(candidate => candidate.webSearch === id);
-	return model ? { selector: formatModelString(model), model } : undefined;
+	return undefined;
 }
 
 /** Bind application preferences and runtime effects to the setup presentation. */
@@ -75,7 +84,11 @@ export function createSetupHost(ctx: InteractiveModeContext): SetupHost {
 		get webSearchOrder() {
 			const configured = ctx.settings.getModelRole("web")?.trim();
 			if (!configured) return [];
-			const model = resolveModelRoleValue(configured, webRoleModels(ctx), { settings: ctx.settings }).model;
+			let model: Model | undefined;
+			for (const models of webRolePools(ctx)) {
+				model = resolveModelRoleValue(configured, models, { settings: ctx.settings }).model;
+				if (model) break;
+			}
 			if (model?.provider === "web") {
 				const option = SEARCH_PROVIDER_OPTIONS.find(candidate => candidate.value === model.id);
 				if (option && option.value !== "auto" && option.value !== "none") return [option.value];

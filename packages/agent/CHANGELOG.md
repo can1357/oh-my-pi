@@ -4,7 +4,8 @@
 
 ### Added
 
-- Added passive tool-call context: `beforeToolCall` can return `additionalContext`, and tools can report context through `ToolCallContext.addAdditionalContext`; it is sent as a developer message after the batch's tool results ([#11998](https://github.com/can1357/oh-my-pi/pull/11998) by [@H4vC](https://github.com/H4vC))
+- Added passive tool-call context support, allowing hooks and tools to provide additional context that is included with tool results for subsequent model processing.
+- Added automatic output-token limit adjustment so requests fit within the model’s context window.
 
 ## [18.3.0] - 2026-09-24
 

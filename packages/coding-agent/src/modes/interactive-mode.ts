@@ -48,7 +48,6 @@ import {
 	formatDuration,
 	formatNumber,
 	getProjectDir,
-	hsvToRgb,
 	isEnoent,
 	logger,
 	postmortem,
@@ -137,7 +136,8 @@ import type { ShakeMode } from "../session/shake-types";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } from "../slash-commands/builtin-registry";
 import { buildStaticInlineHint } from "../slash-commands/builtin-completions";
 import { formatCoarseDuration } from "@oh-my-pi/pi-tui/chrome/format";
-import { STTController, type SttState } from "../stt";
+import { type DictationTarget, MicCursor, type SttCallbacks, STTController, type SttState } from "../stt";
+import type { SpaceHoldHandler } from "@oh-my-pi/pi-tui/space-hold";
 import { resolveCliEntryCmd } from "../subprocess/worker-client";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { labelEchoesHandle } from "../task/label";
@@ -1218,10 +1218,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 	readonly #uiHelpers: UiHelpers;
 	#sttController: STTController | undefined;
-	#voiceAnimationInterval: NodeJS.Timeout | undefined;
-	#voiceHue = 0;
-	#voicePreviousShowHardwareCursor: boolean | null = null;
-	#voicePreviousUseTerminalCursor: boolean | null = null;
+	#micCursor: MicCursor | undefined;
 	#resizeHandler?: () => void;
 	#observerRegistry: SessionObserverRegistry;
 	/** Click override for the pinned jump-list density; undefined follows `display.pinnedAgents`. */
@@ -5724,7 +5721,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.loadingAnimation) {
 			this.#stopLoadingAnimation(false);
 		}
-		this.#cleanupMicAnimation();
+		this.#micCursor?.dispose();
+		this.#micCursor = undefined;
 		// Stop the shared tool-spinner ticker: a live block missed by per-component
 		// stopAnimation would otherwise keep an 80ms interval pinning the process.
 		stopSharedSpinnerTicker();
@@ -6654,22 +6652,40 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async handleSTTToggle(): Promise<void> {
+		await this.#readySTTController()?.toggle(this.editor, this.#dictationCallbacks(this.editor));
+	}
+
+	dictationSpaceHold(target: DictationTarget): SpaceHoldHandler {
+		return {
+			enabled: () => settings.get("stt.enabled"),
+			onStart: () => void this.#readySTTController()?.start(target, this.#dictationCallbacks(target)),
+			onEnd: () => void this.#sttController?.stop(),
+		};
+	}
+
+	/** The speech-to-text controller, created on first use; undefined (after a warning) while live mode
+	 *  or a disabled STT rules dictation out. */
+	#readySTTController(): STTController | undefined {
 		if (this.#liveCommandController.active) {
 			this.showWarning("End live mode before using push-to-talk speech input.");
-			return;
+			return undefined;
 		}
 		if (!settings.get("stt.enabled")) {
 			this.showWarning("Speech-to-text is disabled. Enable it in settings: stt.enabled");
-			return;
+			return undefined;
 		}
-		if (!this.#sttController) {
-			this.#sttController = new STTController({
-				settings: this.settings,
-				registry: this.session.modelRegistry,
-				getSessionId: () => this.session.sessionId,
-			});
-		}
-		await this.#sttController.toggle(this.editor, {
+		this.#sttController ??= new STTController({
+			settings: this.settings,
+			registry: this.session.modelRegistry,
+			getSessionId: () => this.session.sessionId,
+		});
+		return this.#sttController;
+	}
+
+	/** Callbacks for a capture dictating into `target`: the mic glyph replaces its cursor while the
+	 *  capture runs. */
+	#dictationCallbacks(target: DictationTarget): SttCallbacks {
+		return {
 			showWarning: (msg: string) => this.showWarning(msg),
 			showStatus: (msg: string) => this.showStatus(msg),
 			onStateChange: (state: SttState) => {
@@ -6677,20 +6693,17 @@ export class InteractiveMode implements InteractiveModeContext {
 				if (state === "recording") vocalizer.duck();
 				else vocalizer.unduck();
 				if (state === "recording") {
-					this.#voicePreviousShowHardwareCursor = this.ui.getShowHardwareCursor();
-					this.#voicePreviousUseTerminalCursor = this.editor.getUseTerminalCursor();
-					this.ui.setShowHardwareCursor(false);
-					this.editor.setUseTerminalCursor(false);
-					this.#startMicAnimation();
+					this.#micCursor?.dispose();
+					this.#micCursor = new MicCursor(this.ui, target);
 				} else if (state === "transcribing") {
-					this.#stopMicAnimation();
-					this.#setMicCursor({ r: 200, g: 200, b: 200 });
+					this.#micCursor?.showTranscribing();
 				} else {
-					this.#cleanupMicAnimation();
+					this.#micCursor?.dispose();
+					this.#micCursor = undefined;
 				}
 				this.ui.requestRender();
 			},
-		});
+		};
 	}
 
 	/** Start a `/record` screen capture, or stop the running one and report where it was saved. */
@@ -6733,54 +6746,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		await this.#liveCommandController.handleCommand();
-	}
-
-	#setMicCursor(color: { r: number; g: number; b: number }): void {
-		this.editor.cursorOverride = `\x1b[38;2;${color.r};${color.g};${color.b}m${theme.icon.mic}\x1b[0m`;
-		// Theme symbols can be wide (for example, 🎤), so measure the rendered override.
-		this.editor.cursorOverrideWidth = visibleWidth(this.editor.cursorOverride);
-	}
-
-	#updateMicIcon(): void {
-		const { r, g, b } = hsvToRgb({ h: this.#voiceHue, s: 0.9, v: 1.0 });
-		this.#setMicCursor({ r, g, b });
-	}
-
-	#startMicAnimation(): void {
-		if (this.#voiceAnimationInterval) return;
-		this.#voiceHue = 0;
-		this.#updateMicIcon();
-		this.#voiceAnimationInterval = setInterval(() => {
-			this.#voiceHue = (this.#voiceHue + 8) % 360;
-			this.#updateMicIcon();
-			// Component-scoped: the hue sweep only recolors the editor's cursor
-			// glyph, so the transcript subtree is reused per animation frame.
-			this.ui.requestComponentRender(this.editor);
-		}, 60);
-	}
-
-	#stopMicAnimation(): void {
-		if (this.#voiceAnimationInterval) {
-			clearInterval(this.#voiceAnimationInterval);
-			this.#voiceAnimationInterval = undefined;
-		}
-	}
-
-	#cleanupMicAnimation(): void {
-		if (this.#voiceAnimationInterval) {
-			clearInterval(this.#voiceAnimationInterval);
-			this.#voiceAnimationInterval = undefined;
-		}
-		this.editor.cursorOverride = undefined;
-		this.editor.cursorOverrideWidth = undefined;
-		if (this.#voicePreviousShowHardwareCursor !== null) {
-			this.ui.setShowHardwareCursor(this.#voicePreviousShowHardwareCursor);
-			this.#voicePreviousShowHardwareCursor = null;
-		}
-		if (this.#voicePreviousUseTerminalCursor !== null) {
-			this.editor.setUseTerminalCursor(this.#voicePreviousUseTerminalCursor);
-			this.#voicePreviousUseTerminalCursor = null;
-		}
 	}
 
 	async showDebugSelector(): Promise<void> {

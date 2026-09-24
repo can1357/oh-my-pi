@@ -36,6 +36,7 @@ import {
 } from "./xdev";
 import { isResolutionDeviceName, renderResolutionDeviceCall } from "./resolve";
 import { REPORT_ISSUE_DEVICE_NAME, renderReportIssueDeviceCall } from "./report-tool-issue";
+import { pendingFileLinkPath } from "./read";
 
 /** Details returned by the write tool for transcript rendering. */
 export interface WriteToolDetails {
@@ -412,7 +413,11 @@ export const writeToolRenderer = {
 		const filePath = shortenPath(rawPath);
 		const lang = rawPath ? (getLanguageFromPath(rawPath) ?? "text") : "text";
 		const langIcon = uiTheme.fg("muted", uiTheme.getLangIcon(lang));
-		const pathDisplay = filePath ? uiTheme.fg("accent", filePath) : uiTheme.fg("toolOutput", "…");
+		const styledPath = filePath ? uiTheme.fg("accent", filePath) : uiTheme.fg("toolOutput", "…");
+		// The result has not resolved its target yet. Link the containing file
+		// rather than an archive member or database row selector.
+		const pathDisplay =
+			filePath && args.content !== undefined ? fileHyperlink(pendingFileLinkPath(rawPath), styledPath) : styledPath;
 		// No status icon on the head row: it's the head of the framed block, and
 		// native-scrollback commits are prefix-only — an animated glyph would pin
 		// the commit boundary at the top, and the pending hourglass just adds
