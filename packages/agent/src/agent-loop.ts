@@ -22,6 +22,7 @@ import {
 	type ToolResultProviderMetadata,
 	type TSchema,
 	toolWireSchema,
+	type UserMessage,
 	validateToolArguments,
 } from "@oh-my-pi/pi-ai";
 import {
@@ -38,6 +39,7 @@ import {
 	getStreamingPartialJson,
 	kCursorExecResolved,
 } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { schemaDefinesProperty } from "@oh-my-pi/pi-ai/utils/schema/json-schema-validator";
 import { stamp } from "@oh-my-pi/pi-ai/utils/schema/stamps";
 import {
 	createHarmonyAuditEvent,
@@ -51,6 +53,7 @@ import {
 } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import { logger, sanitizeText, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
+import { LiveSteeringChannel } from "./live-steering";
 import { agentPauseGate } from "./pause";
 import { type AgentRunCoverage, type AgentRunSummary, ToolCallBlockedError } from "./run-collector";
 import { SpeculativeOperationCoordinator } from "./speculative-execution";
@@ -1020,6 +1023,13 @@ function resolveIntentMode(intent: AgentTool["intent"]): "require" | "optional" 
 	return "require";
 }
 
+/**
+ * Longest `i` value accepted as an intent. The injected field is described as
+ * a "concise intent" (INTENT_FIELD_DESCRIPTION); anything past this is a tool
+ * payload the model put in the wrong field, not a label.
+ */
+const MAX_INTENT_LENGTH = 200;
+
 function extractIntent(args: Record<string, unknown>): { intent?: string; strippedArgs: Record<string, unknown> } {
 	const { [INTENT_FIELD]: intent, ...strippedArgs } = args;
 	if (typeof intent !== "string") {
@@ -1181,6 +1191,10 @@ async function runLoopBody(
 	let preserveSoftRequirementState = false;
 
 	let pendingMessages: AgentMessage[] = [];
+	// Steering the provider took from the queue during the last response:
+	// `liveAccepted` reached the model inside it, `liveDeferred` did not.
+	let liveAccepted: AgentMessage[] = [];
+	let liveDeferred: AgentMessage[] = [];
 	try {
 		let messagesToEmit = [...initialMessages];
 		if (isDeadlineExceeded(config.deadline)) {
@@ -1325,6 +1339,7 @@ async function runLoopBody(
 					}
 
 					preparedProviderCall = await prepareProviderCall(currentContext, config, signal);
+					preparedProviderCall.liveSteering = openLiveSteering(config, signal, preparedProviderCall);
 					gateResult = (await config.beforeModelCall?.(preparedProviderCall.context, signal)) || undefined;
 				} catch (error) {
 					if (!turnOpen) {
@@ -1450,6 +1465,12 @@ async function runLoopBody(
 						await emitHarmonyAudit(config, err, "abort_retry", harmonyRetryAttempt);
 						harmonyRetryAttempt++;
 						continue;
+					}
+				} finally {
+					const channel = preparedProviderCall.liveSteering;
+					if (channel) {
+						liveAccepted.push(...channel.accepted);
+						liveDeferred.push(...channel.deferred);
 					}
 				}
 				if (recovered) {
@@ -1677,16 +1698,36 @@ async function runLoopBody(
 				// instantly aborts — message lands in history, agent never responds. The
 				// mid-batch interrupt poll only peeks (hasSteeringMessages), so the queue
 				// still owns every message until this dequeue.
-				const steering = signal?.aborted ? [] : (await config.getSteeringMessages?.(signal)) || [];
-				if (hasMoreToolCalls) {
-					// Mid-work: fold any non-interrupting asides into the next turn alongside steering.
-					const asides = signal?.aborted ? [] : resolveAsides(await config.getAsideMessages?.());
-					pendingMessages = asides.length > 0 ? [...steering, ...asides] : steering;
+				// Aborted: live-taken steering stays unrecorded, so the agent returns
+				// it to the queue for the continuation run.
+				const live = signal?.aborted ? [] : [...liveAccepted, ...liveDeferred];
+				const liveReachedModel = !signal?.aborted && liveAccepted.length > 0;
+				if (liveReachedModel) {
+					for (const message of liveAccepted) {
+						if (message.role === "user") message.liveSteered = true;
+					}
+				}
+				liveAccepted = [];
+				liveDeferred = [];
+				if (liveReachedModel) {
+					// The server continues from exactly this steering; anything else
+					// queued now would not line up with its continuation, so it waits
+					// for the next boundary (or is steered into that response).
+					pendingMessages = live;
 				} else {
-					// Stop boundary: only steering (live user input) forces another turn here. Leave
-					// asides for the outer drain below so a passive aside can't trigger an extra model
-					// turn ahead of a queued follow-up — the outer drain batches asides + follow-ups together.
-					pendingMessages = steering;
+					const steering = signal?.aborted
+						? []
+						: [...live, ...((await config.getSteeringMessages?.(signal)) || [])];
+					if (hasMoreToolCalls) {
+						// Mid-work: fold any non-interrupting asides into the next turn alongside steering.
+						const asides = signal?.aborted ? [] : resolveAsides(await config.getAsideMessages?.());
+						pendingMessages = asides.length > 0 ? [...steering, ...asides] : steering;
+					} else {
+						// Stop boundary: only steering (live user input) forces another turn here. Leave
+						// asides for the outer drain below so a passive aside can't trigger an extra model
+						// turn ahead of a queued follow-up — the outer drain batches asides + follow-ups together.
+						pendingMessages = steering;
+					}
 				}
 			}
 
@@ -1755,6 +1796,45 @@ interface PreparedProviderCall {
 	context: Context;
 	promptToolWireTools: Context["tools"];
 	ownedDialect: Dialect | undefined;
+	/** Steering source offered to the provider for this call. */
+	liveSteering?: LiveSteeringChannel;
+}
+
+/**
+ * Offer queued steering to a provider that can deliver it into the response it
+ * is streaming. Latency decides whether steering lands before the model commits
+ * to its next output, so claims convert only the steering batch — message-level
+ * transforms (steering envelope, redaction) — never the whole transcript.
+ * Provider-context transforms rewrite images, so image-bearing steering waits
+ * for the boundary rather than risk bytes the next request would not replay.
+ */
+function openLiveSteering(
+	config: AgentLoopConfig,
+	loopSignal: AbortSignal | undefined,
+	prepared: PreparedProviderCall,
+): LiveSteeringChannel | undefined {
+	const { getSteeringMessages, waitForSteeringMessages } = config;
+	if (!getSteeringMessages || !waitForSteeringMessages || prepared.ownedDialect) return undefined;
+	const bound = (signal: AbortSignal): AbortSignal => (loopSignal ? AbortSignal.any([signal, loopSignal]) : signal);
+	return new LiveSteeringChannel({
+		wait: signal => waitForSteeringMessages(bound(signal)),
+		take: signal => getSteeringMessages(bound(signal)),
+		toProvider: async (messages, signal) => {
+			const transformed = config.transformContext
+				? await config.transformContext(messages, bound(signal))
+				: messages;
+			const converted = normalizeMessagesForProvider(await config.convertToLlm(transformed), prepared.model);
+			const userMessages: UserMessage[] = [];
+			for (const message of converted) {
+				if (message.role !== "user") return undefined;
+				if (typeof message.content !== "string" && message.content.some(part => part.type === "image")) {
+					return undefined;
+				}
+				userMessages.push(message);
+			}
+			return userMessages.length > 0 ? userMessages : undefined;
+		},
+	});
 }
 
 async function prepareProviderCall(
@@ -1770,7 +1850,8 @@ async function prepareProviderCall(
 
 	const llmMessages = await config.convertToLlm(messages);
 	const normalizedMessages = normalizeMessagesForProvider(llmMessages, model);
-	const ownedDialect: Dialect | undefined = config.dialect ?? resolveOwnedDialectFromEnv(Bun.env.PI_DIALECT);
+	const ownedDialect: Dialect | undefined =
+		(config.getDialect ? config.getDialect(model) : config.dialect) ?? resolveOwnedDialectFromEnv(Bun.env.PI_DIALECT);
 	const pruneToolDescriptions = !!config.pruneToolDescriptions && !ownedDialect;
 	let llmContext: Context;
 	if (config.appendOnlyContext) {
@@ -1939,6 +2020,7 @@ async function streamAssistantResponse(
 				cwd: effectiveCwd,
 				signal: finalRequestSignal,
 				onResponse: captureOnResponse,
+				liveSteering: providerCall.liveSteering,
 			});
 			if (promptToolWireTools && ownedDialect) {
 				// Re-materialize in-band tool-call text as native toolCall content blocks
@@ -2756,6 +2838,19 @@ async function prepareToolCallDispatch(
 		if (intentTracing) {
 			const { intent, strippedArgs } = extractIntent(toolCall.arguments);
 			argsForExecution = strippedArgs;
+			// A payload in `i` would be stripped and the tool run with the leftover
+			// args. Unknown tools fall through to the not-found error; a tool that
+			// owns `i` as a real parameter has nowhere else to put the value.
+			if (
+				intent !== undefined &&
+				intent.length > MAX_INTENT_LENGTH &&
+				tool &&
+				!schemaDefinesProperty(toolWireSchema(tool), INTENT_FIELD)
+			) {
+				entry.args = strippedArgs;
+				entry.validationErrorMessage = `\`${INTENT_FIELD}\` is a short intent label (at most ${MAX_INTENT_LENGTH} chars); the value you sent is ${intent.length} chars. The tool was not run. Put that content in the tool's own parameters and retry with a brief \`${INTENT_FIELD}\`.`;
+				continue;
+			}
 			if (intent) {
 				toolCall.intent = intent;
 			} else if (typeof tool?.intent === "function") {

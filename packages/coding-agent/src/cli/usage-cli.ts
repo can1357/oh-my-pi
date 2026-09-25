@@ -31,6 +31,8 @@ import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
 import { collapseSharedUsageReports, summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
 import { formatCodexUsageReportLabel } from "../slash-commands/helpers/active-oauth-account";
 
+import { cfgRetryUsageReservePct } from "../session/settings";
+
 const BAR_WIDTH = 28;
 
 export interface UsageCommandArgs {
@@ -1214,7 +1216,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			return;
 		}
 		const policyOptions: UsagePolicyDiagnosticsOptions = {
-			globalReservePct: settings.get("retry.usageReservePct"),
+			globalReservePct: cfgRetryUsageReservePct.get(settings),
 			getAccountPolicy: (provider, identity) => authStorage.oauth.policy(provider, identity),
 		};
 		const modelRegistry = new ModelRegistry(authStorage);
