@@ -69,7 +69,8 @@ import { decideAttempt, type ExecutionState } from "./route-conductor";
 import { type CompiledRoute, RouteRegistry } from "./route-graph";
 import {
 	commitGateObservesDownstreamSse,
-	observeSseCommit,
+	holdSseUntilCommit,
+	pumpHeldSseAttempts,
 	StreamCommitGate,
 	type StreamCommitState,
 } from "./stream-commit-gate";
@@ -230,7 +231,40 @@ export function applyParsedGatewayOptions(opts: SimpleStreamOptions, options: Au
 	if (options.responseFormat !== undefined) opts.responseFormat = options.responseFormat;
 }
 
+/** Total pre-commit attempts (initial + retries) for held Responses preludes. */
+const MAX_HELD_PRECOMMIT_ATTEMPTS = 3;
 
+/**
+ * Terminal `response.failed` frame for a held-prelude stream whose retry could
+ * not even be opened (e.g. `streamSimple` threw while still probing). Nothing
+ * has reached the client yet, so the honest terminal is synthesized in the
+ * Responses envelope shape the encoder emits for stream failures.
+ */
+/** Terminal non-stream decision (route pick, credential respond, abort) hit while opening a held-prelude attempt. */
+class HeldAttemptRespondError extends Error {
+	constructor(readonly response: Response) {
+		super("held attempt produced a terminal response");
+	}
+}
+
+function encodeResponsesFailedFrame(modelId: string, message: string): Uint8Array {
+	const frame = {
+		type: "response.failed",
+		sequence_number: 0,
+		response: {
+			id: `resp_${crypto.randomUUID().replaceAll("-", "")}`,
+			object: "response",
+			created_at: Math.floor(Date.now() / 1000),
+			status: "failed",
+			model: modelId,
+			output: [],
+			usage: null,
+			error: { message },
+			incomplete_details: null,
+		},
+	};
+	return new TextEncoder().encode(`event: response.failed\ndata: ${JSON.stringify(frame)}\n\n`);
+}
 
 function clientClosedResponse(route: { module: FormatModule }): Response {
 	return route.module.formatError(499, "request_aborted", "client closed request");
@@ -726,94 +760,198 @@ async function handleFormatEndpoint(
 
 	let events: AssistantMessageEventStream | undefined;
 	try {
-		for (let attempt = 0; attempt < attemptCap; attempt++) {
+		const holdsPrelude = commitGateObservesDownstreamSse(route.label);
+		// `releaseXOnStreamEnd` awaits the visible attempt's canonical result
+		// before settling; retries replace it so the last attempt wins.
+		let settled: Promise<AssistantMessage> | undefined;
+		const recordUsage = (events: AssistantMessageEventStream) => {
+			void events
+				.result()
+				.then(message =>
+					recordGatewayUsage(bootOpts.storage, model, client, message.usage, message.timestamp || undefined),
+				)
+				.catch(() => {});
+		};
+
+		let sseStream: ReadableStream<Uint8Array>;
+		if (holdsPrelude) {
+			// Held-prelude failover: the gate buffers metadata frames until first
+			// output so a pre-commit retryable terminal can be retried without the
+			// dead attempt's frames reaching the client. Each attempt re-runs the
+			// conductor machinery (target pick, credential resolve, session lease)
+			// and gets its own abort scope — cancelling a dead attempt's encoder
+			// must not poison the shared request signal a replacement still needs.
+			const openHeldAttempt = async (): Promise<ReadableStream<Uint8Array>> => {
+				const attemptCtl = new AbortController();
+				const onParentAbort = () => attemptCtl.abort(controller.signal.reason);
+				if (controller.signal.aborted) attemptCtl.abort(controller.signal.reason);
+				else controller.signal.addEventListener("abort", onParentAbort, { once: true });
+				for (let attempt = 0; attempt < attemptCap; attempt++) {
+					try {
+						if (controller.signal.aborted) throw new HeldAttemptRespondError(clientClosedResponse(route));
+						const picked = pickTarget();
+						if (picked) throw new HeldAttemptRespondError(picked);
+						const cred = await resolveCredential();
+						if (cred.type === "retry") continue;
+						if (cred.type === "respond") throw new HeldAttemptRespondError(cred.response);
+						const attemptOpts = buildAttemptStreamOpts(cred.apiKey);
+						logger.info("auth-gateway request", {
+							requestId,
+							format: route.label,
+							model: parsed.modelId,
+							resolvedProvider: model.provider,
+							resolvedModel: model.id,
+							stream: parsed.stream,
+							peer,
+						});
+						let attemptEvents: AssistantMessageEventStream;
+						try {
+							attemptEvents = streamSimple(model, parsed.context, { ...attemptOpts, signal: attemptCtl.signal });
+						} catch (error) {
+							const classified = classifyGatewayError(error);
+							logger.warn("auth-gateway streamSimple threw", {
+								format: route.label,
+								error: classified.message,
+								peer,
+							});
+							if (considerFallback(classified)) continue;
+							throw error;
+						}
+						recordUsage(attemptEvents);
+						// The stream outlives this call, so the lease travels with it and
+						// is released when the canonical result settles — same detach the
+						// non-held path does so the loop's finally can't close live state.
+						const streamLease = attemptLease;
+						attemptLease = undefined;
+						settled = attemptEvents.result();
+						void settled
+							.catch(() => {})
+							.finally(() => {
+								controller.signal.removeEventListener("abort", onParentAbort);
+								streamLease?.release();
+							});
+						return holdSseUntilCommit(
+							route.module.encodeStream(attemptEvents, parsed.modelId, parsed.options, {
+								signal: attemptCtl.signal,
+								onCancel: reason =>
+									attemptCtl.abort(reason instanceof Error ? reason : new Error("attempt stream cancelled")),
+							}),
+							commitGate,
+						);
+					} finally {
+						releaseAttemptLease();
+					}
+				}
+				throw lastClassified ?? new Error("Upstream request failed");
+			};
+			let firstSse: ReadableStream<Uint8Array>;
+			try {
+				firstSse = await openHeldAttempt();
+			} catch (error) {
+				bootOpts.storage.releaseTurnReservation(requestId);
+				if (error instanceof HeldAttemptRespondError) return error.response;
+				const classified = classifyGatewayError(error);
+				logger.warn("auth-gateway streamSimple threw", { format: route.label, error: classified.message, peer });
+				return classifiedError(classified);
+			}
+			sseStream = pumpHeldSseAttempts(firstSse, openHeldAttempt, commitGate, {
+				maxAttempts: MAX_HELD_PRECOMMIT_ATTEMPTS,
+				onAbort: (error, attempt) =>
+					logger.info("auth-gateway held prelude ended pre-commit; retrying", {
+						route: route.label,
+						event: error.eventType,
+						attempt,
+						peer,
+					}),
+				synthesizeFailure: error => {
+					const classified = classifyGatewayError(error);
+					return encodeResponsesFailedFrame(parsed.modelId, classified.message);
+				},
+			});
+		} else {
+			for (let attempt = 0; attempt < attemptCap; attempt++) {
+				if (controller.signal.aborted) {
+					bootOpts.storage.releaseTurnReservation(requestId);
+					return clientClosedResponse(route);
+				}
+				const picked = pickTarget();
+				if (picked) {
+					bootOpts.storage.releaseTurnReservation(requestId);
+					return picked;
+				}
+				const cred = await resolveCredential();
+				if (cred.type === "retry") continue;
+				if (cred.type === "respond") {
+					bootOpts.storage.releaseTurnReservation(requestId);
+					return cred.response;
+				}
+				const streamOpts = buildAttemptStreamOpts(cred.apiKey);
+				logger.info("auth-gateway request", {
+					requestId,
+					format: route.label,
+					model: parsed.modelId,
+					resolvedProvider: model.provider,
+					resolvedModel: model.id,
+					stream: parsed.stream,
+					peer,
+				});
+				try {
+					events = streamSimple(model, parsed.context, streamOpts);
+					break;
+				} catch (error) {
+					const classified = classifyGatewayError(error);
+					logger.warn("auth-gateway streamSimple threw", {
+						format: route.label,
+						error: classified.message,
+						peer,
+					});
+					if (considerFallback(classified)) continue;
+					bootOpts.storage.releaseTurnReservation(requestId);
+					return classifiedError(classified);
+				}
+			}
+			if (!events) {
+				bootOpts.storage.releaseTurnReservation(requestId);
+				if (lastClassified) return classifiedError(lastClassified);
+				return formatError(502, "upstream_error", "Upstream request failed");
+			}
 			if (controller.signal.aborted) {
 				bootOpts.storage.releaseTurnReservation(requestId);
 				return clientClosedResponse(route);
 			}
-			const picked = pickTarget();
-			if (picked) {
-				bootOpts.storage.releaseTurnReservation(requestId);
-				return picked;
-			}
-			const cred = await resolveCredential();
-			if (cred.type === "retry") continue;
-			if (cred.type === "respond") {
-				bootOpts.storage.releaseTurnReservation(requestId);
-				return cred.response;
-			}
-			const streamOpts = buildAttemptStreamOpts(cred.apiKey);
-			logger.info("auth-gateway request", {
-				requestId,
-				format: route.label,
-				model: parsed.modelId,
-				resolvedProvider: model.provider,
-				resolvedModel: model.id,
-				stream: parsed.stream,
-				peer,
-			});
-			try {
-				events = streamSimple(model, parsed.context, streamOpts);
-				break;
-			} catch (error) {
-				const classified = classifyGatewayError(error);
-				logger.warn("auth-gateway streamSimple threw", {
-					format: route.label,
-					error: classified.message,
-					peer,
-				});
-				if (considerFallback(classified)) continue;
-				bootOpts.storage.releaseTurnReservation(requestId);
-				return classifiedError(classified);
-			}
-		}
-		if (!events) {
-			bootOpts.storage.releaseTurnReservation(requestId);
-			if (lastClassified) return classifiedError(lastClassified);
-			return formatError(502, "upstream_error", "Upstream request failed");
-		}
-		if (controller.signal.aborted) {
-			bootOpts.storage.releaseTurnReservation(requestId);
-			return clientClosedResponse(route);
-		}
-		const settled = events.result();
-		// A streamed turn outlives this function, so the lease travels with the
-		// event stream and is released when the turn settles. Detach it from the
-		// attempt variable so the function-level finally does not close a live
-		// stream's provider state.
-		const streamLease = attemptLease;
-		attemptLease = undefined;
-		void settled
-			.then(message =>
-				recordGatewayUsage(bootOpts.storage, model, client, message.usage, message.timestamp || undefined),
-			)
-			.catch(() => {})
-			.finally(() => streamLease?.release());
-		// Non-Responses formats may never feed onSseEvent; mark the commit gate
-		// from the canonical assistant result before EOF can settle a probe.
-		void settled
-			.then(message => {
-				if (message.stopReason === "error" || message.stopReason === "aborted") {
+			settled = events.result();
+			// A streamed turn outlives this function, so the lease travels with the
+			// event stream and is released when the turn settles. Detach it from the
+			// attempt variable so the function-level finally does not close a live
+			// stream's provider state.
+			const streamLease = attemptLease;
+			attemptLease = undefined;
+			recordUsage(events);
+			void settled
+				.catch(() => {})
+				.finally(() => streamLease?.release());
+			// Non-Responses formats may never feed onSseEvent; mark the commit gate
+			// from the canonical assistant result before EOF can settle a probe.
+			void settled
+				.then(message => {
+					if (message.stopReason === "error" || message.stopReason === "aborted") {
+						commitGate.classifyAndObserve("response.failed", 1);
+					} else {
+						commitGate.classifyAndObserve("response.output_text.delta", 1);
+						commitGate.classifyAndObserve("response.completed", 1);
+					}
+				})
+				.catch(() => {
 					commitGate.classifyAndObserve("response.failed", 1);
-				} else {
-					commitGate.classifyAndObserve("response.output_text.delta", 1);
-					commitGate.classifyAndObserve("response.completed", 1);
-				}
-			})
-			.catch(() => {
-				commitGate.classifyAndObserve("response.failed", 1);
+				});
+			sseStream = route.module.encodeStream(events, parsed.modelId, parsed.options, {
+				signal: controller.signal,
+				onCancel: reason => {
+					if (!controller.signal.aborted) {
+						controller.abort(reason instanceof Error ? reason : new Error("client closed request"));
+					}
+				},
 			});
-
-		let sseStream = route.module.encodeStream(events, parsed.modelId, parsed.options, {
-			signal: controller.signal,
-			onCancel: reason => {
-				if (!controller.signal.aborted) {
-					controller.abort(reason instanceof Error ? reason : new Error("client closed request"));
-				}
-			},
-		});
-		if (route.label === "openai-responses") {
-			sseStream = observeSseCommit(sseStream, commitGate);
 		}
 		sseStream = releaseTurnOnStreamEnd(sseStream, bootOpts.storage, requestId, commitGate, settled);
 		return new Response(sseStream, {
