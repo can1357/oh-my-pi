@@ -872,12 +872,18 @@ export class SessionTools {
 					// Preserve the exact arguments authorized by a selected or
 					// persisted ACP grant; inner handlers may mutate `args` in place.
 					const approvedCtx = (ctx ? { ...ctx, acpApprovedArgs: structuredCloneJSON(args) } : ctx) as never;
+					const isCommandTool = target.name === "bash" || target.name === "powershell";
 					const command =
-						target.name === "bash" && args && typeof args === "object" && !Array.isArray(args)
+						isCommandTool && args && typeof args === "object" && !Array.isArray(args)
 							? stringProperty(args, "command")
 							: undefined;
 					const commandContent = command
-						? [{ type: "content" as const, content: { type: "text" as const, text: `$ ${command}` } }]
+						? [
+								{
+									type: "content" as const,
+									content: { type: "text" as const, text: `${target.name === "powershell" ? "PS> " : "$ "}${command}` },
+								},
+							]
 						: undefined;
 					// Short-circuit on persisted decisions.
 					const persisted = this.#acpPermissionDecisions.get(permissionIntent.cacheKey);
@@ -903,7 +909,7 @@ export class SessionTools {
 								toolCallId,
 								toolName: target.name,
 								title: permissionIntent.title,
-								...(target.name === "bash" ? { kind: "execute" } : {}),
+								...(isCommandTool ? { kind: "execute" } : {}),
 								status: "pending",
 								rawInput: args,
 								...(commandContent ? { content: commandContent } : {}),

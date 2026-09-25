@@ -61,6 +61,7 @@ pub mod power;
 pub mod iso;
 pub mod prof;
 pub mod ps;
+pub mod pshost;
 pub mod pty;
 pub mod shell;
 pub mod summary;
