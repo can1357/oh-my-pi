@@ -61,7 +61,12 @@ import {
 	cfgPersonality,
 	cfgSystemPromptTemplates,
 } from "./session/settings";
-import { cfgOvnfsPath, cfgTaskBatch, cfgTaskEager } from "./task/settings";
+import {
+	cfgOvnfsPath,
+	cfgTaskAgentCatalogDescriptionBudgetChars,
+	cfgTaskBatch,
+	cfgTaskEager,
+} from "./task/settings";
 import {
 	cfgAsyncEnabled,
 	cfgOutEnabled,
@@ -103,6 +108,7 @@ export const cfgSystemPromptInputs = combine({
 	taskBatch: cfgTaskBatch,
 	// Separate-checkout guidance names the ovnfs command.
 	ovnfsPath: cfgOvnfsPath,
+	taskAgentCatalogBudget: cfgTaskAgentCatalogDescriptionBudgetChars,
 	// Rule bucketing (TTSR registrations, rulebook, always-apply) runs at rebuild time.
 	ttsrEnabled: cfgTtsrEnabled,
 	ttsrBuiltinRules: cfgTtsrBuiltinRules,
