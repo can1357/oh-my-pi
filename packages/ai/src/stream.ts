@@ -2101,6 +2101,7 @@ function mapOptionsForApi<TApi extends Api>(
 		// Gateway-forwarded continuation/structured-output fields: parsed from
 		// the wire by format parsers and must survive the provider mapping.
 		previousResponseId: options?.previousResponseId,
+		store: options?.store,
 		parallelToolCalls: options?.parallelToolCalls,
 		seed: options?.seed,
 		logitBias: options?.logitBias,
