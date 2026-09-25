@@ -764,6 +764,9 @@ async function handleFormatEndpoint(
 		// `releaseXOnStreamEnd` awaits the visible attempt's canonical result
 		// before settling; retries replace it so the last attempt wins.
 		let settled: Promise<AssistantMessage> | undefined;
+		// The dead attempt's pre-commit terminal, fed back through the conductor
+		// on the next openHeldAttempt so sibling/fallback policy drives retries.
+		let heldFailure: GatewayErrorClassification | undefined;
 		const recordUsage = (events: AssistantMessageEventStream) => {
 			void events
 				.result()
@@ -789,6 +792,11 @@ async function handleFormatEndpoint(
 				for (let attempt = 0; attempt < attemptCap; attempt++) {
 					try {
 						if (controller.signal.aborted) throw new HeldAttemptRespondError(clientClosedResponse(route));
+						if (heldFailure !== undefined) {
+							const failure = heldFailure;
+							heldFailure = undefined;
+							if (!considerFallback(failure)) throw new HeldAttemptRespondError(classifiedError(failure));
+						}
 						const picked = pickTarget();
 						if (picked) throw new HeldAttemptRespondError(picked);
 						const cred = await resolveCredential();
@@ -856,13 +864,23 @@ async function handleFormatEndpoint(
 			}
 			sseStream = pumpHeldSseAttempts(firstSse, openHeldAttempt, commitGate, {
 				maxAttempts: MAX_HELD_PRECOMMIT_ATTEMPTS,
-				onAbort: (error, attempt) =>
+				onAbort: (error, attempt) => {
+					// Held retries only run after a retryable terminal, so the dead
+					// attempt maps to a provider-transient the conductor can route.
+					heldFailure = {
+						status: 502,
+						type: "upstream_error",
+						message: `held prelude terminated pre-commit on ${error.eventType}`,
+						owner: "provider",
+						disposition: "provider_transient",
+					};
 					logger.info("auth-gateway held prelude ended pre-commit; retrying", {
 						route: route.label,
 						event: error.eventType,
 						attempt,
 						peer,
-					}),
+					});
+				},
 				synthesizeFailure: error => {
 					const classified = classifyGatewayError(error);
 					return encodeResponsesFailedFrame(parsed.modelId, classified.message);

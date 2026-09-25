@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
-import { StreamCommitGate, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
+import { RouteRegistry, StreamCommitGate, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 
@@ -11,7 +11,10 @@ afterEach(() => {
 	clearCustomApis();
 });
 
-async function boot(mock: ReturnType<typeof createMockModel>) {
+async function boot(
+	mock: ReturnType<typeof createMockModel>,
+	opts: { resolveModel?: (id: string) => ReturnType<typeof createMockModel>["model"] | undefined; routeRegistry?: RouteRegistry } = {},
+) {
 	registerMockApi();
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-commit-wire-"));
 	const storage = await AuthStorage.create(path.join(dir, "auth.db"));
@@ -20,7 +23,8 @@ async function boot(mock: ReturnType<typeof createMockModel>) {
 		bind: "127.0.0.1:0",
 		bearerTokens: ["t"],
 		storage,
-		resolveModel: () => mock.model,
+		resolveModel: opts.resolveModel ?? (() => mock.model),
+		routeRegistry: opts.routeRegistry,
 		version: "test",
 	});
 	return {
@@ -43,19 +47,40 @@ async function postResponses(url: string, model: string): Promise<Response> {
 
 describe("auth-gateway StreamCommitGate wiring", () => {
 	it("holds the Responses prelude and fails over without exposing the dead attempt", async () => {
-		const mock = createMockModel({ provider: "openrouter", id: "mock/commit-failover" });
-		// Attempt 1 dies pre-commit with a retryable terminal; attempt 2 succeeds.
-		mock.push({ throw: new Error("upstream exploded") });
-		mock.push({ content: ["recovered"] });
-		const gw = await boot(mock);
+		// The conductor owns retry policy on this branch: provider-transient
+		// pre-commit terminals fail over through the route's fallback target.
+		const primary = createMockModel({ provider: "openrouter", id: "mock/commit-primary" });
+		primary.push({ throw: new Error("upstream exploded") });
+		const backup = createMockModel({ provider: "openrouter", id: "mock/commit-backup" });
+		backup.push({ content: ["recovered"] });
+		const registry = new RouteRegistry(
+			id => (id === "mock/commit-primary" ? primary.model : id === "mock/commit-backup" ? backup.model : undefined),
+		);
+		registry.register({
+			id: "mock/route",
+			root: {
+				type: "fallback",
+				on: ["provider_transient"],
+				children: [
+					{ type: "target", model: "mock/commit-primary" },
+					{ type: "target", model: "mock/commit-backup" },
+				],
+			},
+		});
+		const gw = await boot(primary, {
+			resolveModel: id =>
+				id === "mock/commit-primary" ? primary.model : id === "mock/commit-backup" ? backup.model : undefined,
+			routeRegistry: registry,
+		});
 		try {
-			const res = await postResponses(gw.url, "mock/commit-failover");
+			const res = await postResponses(gw.url, "mock/route");
 			expect(res.status).toBe(200);
 			const body = await res.text();
 			// The failover is transparent: the client sees only the surviving
 			// attempt — one prelude, the recovery content, and no failed frame
 			// or error text from the discarded first attempt.
-			expect(mock.calls.length).toBe(2);
+			expect(primary.calls.length).toBe(1);
+			expect(backup.calls.length).toBe(1);
 			expect(body).toContain("recovered");
 			expect(body).not.toContain("upstream exploded");
 			expect(body.match(/event: response\.created/g)?.length).toBe(1);
