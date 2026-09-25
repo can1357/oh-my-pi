@@ -247,6 +247,10 @@ class PersonaStubSession {
 		return true;
 	}
 
+	subscribeCommandMetadataChanged(_listener: () => void): () => void {
+		return () => {};
+	}
+
 	subscribe(_listener: (event: unknown) => void): () => void {
 		return () => {};
 	}

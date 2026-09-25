@@ -93,7 +93,7 @@ describe("createAcpSessionFactory MCP isolation (issue #1234)", () => {
 		const tempDir = TempDir.createSync("@pi-acp-roots-live-");
 		try {
 			const settings = Settings.isolated({});
-			const fakeSession = {} as AgentSession;
+			const fakeSession = { addDisposer } as AgentSession;
 			let captured: CreateAgentSessionOptions | undefined;
 			const factory = createAcpSessionFactory({
 				// The CLI hands the factory a launch-cwd provider; the factory
