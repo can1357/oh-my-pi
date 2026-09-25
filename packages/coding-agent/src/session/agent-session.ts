@@ -2870,7 +2870,9 @@ export class AgentSession implements SettingsScope {
 		}
 		if (event.type === "message_update") {
 			this.#emit(event);
-			void this.#queueExtensionEvent(event);
+			if (this.#extensionRunner?.hasHandlers("message_update")) {
+				void this.#queueExtensionEvent(event);
+			}
 			return;
 		}
 		// Deliver synchronously before awaiting extension notifications. This keeps

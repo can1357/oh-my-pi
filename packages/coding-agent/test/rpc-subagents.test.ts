@@ -316,7 +316,16 @@ describe("RPC subagent registry", () => {
 
 		expect(frames).toHaveLength(1);
 		expect(frames[0]).toEqual({ type: "subagent_event", payload: eventPayload });
+		registry.setSubscriptionLevel("progress");
+		eventBus.emit(TASK_SUBAGENT_EVENT_CHANNEL, eventPayload);
+		expect(frames).toHaveLength(1);
+		registry.setSubscriptionLevel("events");
+		eventBus.emit(TASK_SUBAGENT_EVENT_CHANNEL, eventPayload);
+		expect(frames).toHaveLength(2);
 		registry.dispose();
+		registry.setSubscriptionLevel("events");
+		eventBus.emit(TASK_SUBAGENT_EVENT_CHANNEL, eventPayload);
+		expect(frames).toHaveLength(2);
 	});
 });
 
