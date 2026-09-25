@@ -12,7 +12,6 @@
  * same callback is covered by status-line-dispose-async-leak.test.ts.)
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
-import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -352,7 +351,7 @@ describe("StatusLineComponent reftable branch resolve honors mid-flight invalida
 	it("generic invalidate does not abort or restart a live reftable HEAD resolve", async () => {
 		useReftable();
 		gitControls.statusSummary.mockReturnValue(Promise.withResolvers<GitStatus | null>().promise);
-		vi.spyOn(nodeFs, "watchFile").mockImplementation(() => {
+		vi.spyOn(vcs, "watch").mockImplementation(() => {
 			throw new Error("watch unavailable");
 		});
 
@@ -393,7 +392,7 @@ describe("StatusLineComponent reftable branch resolve honors mid-flight invalida
 	it("polls a reftable branch after HEAD watcher installation fails", async () => {
 		useReftable();
 		gitControls.statusSummary.mockReturnValue(Promise.withResolvers<GitStatus | null>().promise);
-		vi.spyOn(nodeFs, "watchFile").mockImplementation(() => {
+		vi.spyOn(vcs, "watch").mockImplementation(() => {
 			throw new Error("watch unavailable");
 		});
 		let now = 1_000_000;
@@ -627,25 +626,6 @@ describe("StatusLineComponent applyCwdChange re-points watcher ownership", () =>
 		]);
 	});
 
-	// Test double for node:fs.StatWatcher — `vcs.watch` only calls
-	// `.unref()` on it; the listener is captured from the watchFile call args.
-	function fakeStatWatcher(): nodeFs.StatWatcher {
-		return { unref: vi.fn() } as unknown as nodeFs.StatWatcher;
-	}
-
-	type StatsListener = (curr: nodeFs.Stats, prev: nodeFs.Stats) => void;
-
-	function statCall(
-		spy: { mock: { calls: unknown[][] } },
-		index: number,
-	): { target: string; listener: StatsListener } {
-		const call = spy.mock.calls[index] as unknown as [string, unknown, StatsListener] | undefined;
-		if (!call) throw new Error(`watchFile call ${index} not recorded`);
-		return { target: call[0], listener: call[2] };
-	}
-
-	const statsOf = (n: number) => ({ mtimeMs: n, ino: n, size: n }) as nodeFs.Stats;
-
 	it("retires the old stat-watch and re-points at the new repo on cwd change", () => {
 		vi.spyOn(vcs, "repo").mockImplementation((cwd: string) => {
 			if (cwd === dirA) return repoA;
@@ -659,8 +639,13 @@ describe("StatusLineComponent applyCwdChange re-points watcher ownership", () =>
 		});
 		gitControls.defaultBranch.mockReturnValue(Promise.withResolvers<string | null>().promise);
 		gitControls.statusSummary.mockReturnValue(Promise.withResolvers<GitStatus | null>().promise);
-		const watchFileSpy = vi.spyOn(nodeFs, "watchFile").mockReturnValue(fakeStatWatcher());
-		const unwatchFileSpy = vi.spyOn(nodeFs, "unwatchFile").mockImplementation(() => {});
+		const callbacks: (() => void)[] = [];
+		const unwatchA = vi.fn();
+		const unwatchB = vi.fn();
+		vi.spyOn(vcs, "watch").mockImplementation((repository, onChange) => {
+			callbacks.push(onChange);
+			return repository === repoA ? unwatchA : unwatchB;
+		});
 
 		const onBranchChange = vi.fn();
 		setProjectDir(dirA);
@@ -668,7 +653,6 @@ describe("StatusLineComponent applyCwdChange re-points watcher ownership", () =>
 		component.updateSettings(gitSegment);
 		component.watchBranch(onBranchChange);
 		expect(component.getTopBorder(80).content).toContain("branch-a");
-		expect(watchFileSpy).toHaveBeenCalledWith(repoAInfo.headPath, expect.anything(), expect.any(Function));
 
 		// Move cwd to repo B — the SessionManager's cwd has already moved.
 		setProjectDir(dirB);
@@ -677,24 +661,20 @@ describe("StatusLineComponent applyCwdChange re-points watcher ownership", () =>
 		// calls are attributable solely to watcher events.
 		onBranchChange.mockClear();
 
-		// Old stat-watch is retired: its exact (path, listener) pair unwatched.
-		expect(unwatchFileSpy).toHaveBeenCalledWith(repoAInfo.headPath, statCall(watchFileSpy, 0).listener);
-		// New stat-watch is live on repo B's HEAD.
-		expect(watchFileSpy).toHaveBeenCalledWith(repoBInfo.headPath, expect.anything(), expect.any(Function));
+		expect(unwatchA).toHaveBeenCalledTimes(1);
 
 		// Stale stat event from repo A's retired watch must not invalidate B's
 		// caches or request a repaint — the ownership guard rejects it.
-		statCall(watchFileSpy, 0).listener(statsOf(2), statsOf(1));
+		callbacks[0]();
 		expect(onBranchChange).not.toHaveBeenCalled();
 
 		// Fresh stat event from repo B's watch refreshes B.
-		statCall(watchFileSpy, 1).listener(statsOf(2), statsOf(1));
+		callbacks[1]();
 		expect(onBranchChange).toHaveBeenCalledTimes(1);
 		expect(component.getTopBorder(80).content).toContain("branch-b");
 
-		// No watch leak: dispose unwatches B's (path, listener) pair.
 		component.dispose();
-		expect(unwatchFileSpy).toHaveBeenCalledWith(repoBInfo.headPath, statCall(watchFileSpy, 1).listener);
+		expect(unwatchB).toHaveBeenCalledTimes(1);
 	});
 
 	it("falls back to bounded polling when the new cwd has no repository", () => {
@@ -702,8 +682,8 @@ describe("StatusLineComponent applyCwdChange re-points watcher ownership", () =>
 		vi.spyOn(vcs, "gitInfo").mockImplementation((cwd: string) => (cwd === dirA ? repoAInfo : null));
 		gitControls.defaultBranch.mockReturnValue(Promise.withResolvers<string | null>().promise);
 		gitControls.statusSummary.mockReturnValue(Promise.withResolvers<GitStatus | null>().promise);
-		const watchFileSpy = vi.spyOn(nodeFs, "watchFile").mockReturnValue(fakeStatWatcher());
-		const unwatchFileSpy = vi.spyOn(nodeFs, "unwatchFile").mockImplementation(() => {});
+		const unwatch = vi.fn();
+		const watchSpy = vi.spyOn(vcs, "watch").mockReturnValue(unwatch);
 
 		const onBranchChange = vi.fn();
 		setProjectDir(dirA);
@@ -717,9 +697,8 @@ describe("StatusLineComponent applyCwdChange re-points watcher ownership", () =>
 		onBranchChange.mockClear();
 		component.applyCwdChange();
 
-		// Old stat-watch retired; no new watch created (watchFile not called again).
-		expect(unwatchFileSpy).toHaveBeenCalledTimes(1);
-		expect(watchFileSpy).toHaveBeenCalledTimes(1);
+		expect(unwatch).toHaveBeenCalledTimes(1);
+		expect(watchSpy).toHaveBeenCalledTimes(1);
 		// applyCwdChange still requests a repaint so the stale segment clears.
 		expect(onBranchChange).toHaveBeenCalledTimes(1);
 
@@ -757,7 +736,6 @@ describe("StatusLineComponent git watcher survives atomic HEAD renames", () => {
 		vi.restoreAllMocks();
 		gitControls.defaultBranch.mockReturnValue(Promise.withResolvers<string | null>().promise);
 		gitControls.statusSummary.mockReturnValue(Promise.withResolvers<GitStatus | null>().promise);
-		const watchFileSpy = vi.spyOn(nodeFs, "watchFile");
 
 		setProjectDir(repoDir);
 		const component = new StatusLineComponent(makeSession(), statusLineHost);
@@ -772,13 +750,6 @@ describe("StatusLineComponent git watcher survives atomic HEAD renames", () => {
 				branchChanged.resolve();
 			}
 		});
-		// Platform-independent pin: the watch must be a stat-poll of the HEAD
-		// *path* (inode-independent), not an fs.watch event subscription.
-		expect(watchFileSpy).toHaveBeenCalledWith(
-			path.join(repoDir, ".git", "HEAD"),
-			expect.objectContaining({ interval: vcs.HEAD_WATCH_INTERVAL_MS }),
-			expect.any(Function),
-		);
 		// Prime the branch cache off the initial HEAD. The status/default mocks
 		// never resolve, so this cold paint cannot fire #onBranchChange itself.
 		component.getTopBorder(80);

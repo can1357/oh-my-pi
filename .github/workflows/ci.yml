@@ -181,10 +181,9 @@ jobs:
            run: bun run collab:web:build
 
    # Rust validation (tests, clippy, rustfmt) runs on non-PR events only.
-   # Native-changing PRs are rare enough that they do not warrant PR-side
-   # Rust validation or a PR-side addon build (see native_addons): Rust is
-   # validated post-merge on main (kata remote cache, warm) and again at
-   # release. A skipped required check still satisfies branch protection.
+   # Full Rust validation remains post-merge on main (kata remote cache,
+   # warm) and at release. PRs still need source-matched addons for TS tests.
+   # A skipped required check still satisfies branch protection.
    rust_validate:
       name: Validate Rust workspace (bazel)
       if: github.event_name != 'pull_request'
@@ -224,35 +223,96 @@ jobs:
          - name: Rustfmt
            run: bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build --config=rustfmt //crates/...
 
-   # Provides the native addons every downstream TS job installs. PRs never
-   # build: they fetch the latest release's Linux x64 pair from the
-   # @oh-my-pi/pi-natives-linux-x64 npm leaf instead. The workspace loader
-   # skips its version sentinel for workspace loads, so release addons load
-   # fine under a newer checkout; a PR whose TS tests depend on changed
-   # native behavior fails visibly and the native side lands via main.
-   # Main (kata, cluster remote cache) builds all Linux-hosted targets with
-   # bazel. Job name says "bazel" for continuity with required checks.
+   # Provides source-matched native addons to every downstream TS job.
+   # PRs reuse their merge base's Linux x64 artifact only when native build
+   # inputs are unchanged; missing/expired artifacts or changed inputs use
+   # a hosted build. A release addon can lag already-merged native behavior.
+   # Main (kata, cluster remote cache) builds all Linux-hosted targets.
    native_addons:
       name: Build native addons (bazel)
       runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      permissions:
+         contents: read
+         actions: read
       steps:
          - uses: actions/checkout@v4
+           with:
+              fetch-depth: 2
 
-         # ---- PR path: latest release addons from npm ----
-         - name: Fetch release native addons (npm)
+         # ---- PR path: exact base artifact, or build the Linux x64 pair ----
+         - name: Find source-matched base native addons
+           id: base_addons
            if: github.event_name == 'pull_request'
            shell: bash
+           env:
+              GH_TOKEN: ${{ github.token }}
+              BASE_REF: ${{ github.base_ref }}
            run: |
               set -euo pipefail
-              tarball="$(npm view @oh-my-pi/pi-natives-linux-x64@latest dist.tarball)"
-              echo "Fetching $tarball"
-              curl -fsSL --retry 3 "$tarball" | tar -xz -C "$RUNNER_TEMP"
-              mkdir -p bazel-bin/natives-linux-x64-baseline bazel-bin/natives-linux-x64-modern
-              cp "$RUNNER_TEMP/package/pi_natives.linux-x64-baseline.node" bazel-bin/natives-linux-x64-baseline/
-              cp "$RUNNER_TEMP/package/pi_natives.linux-x64-modern.node" bazel-bin/natives-linux-x64-modern/
+              # Checkout is GitHub's synthetic merge commit; its first parent
+              # is the actual base tested, including when an old run is retried.
+              base="$(git rev-parse HEAD^1)"
+              if ! git diff --quiet "$base" HEAD -- \
+                crates bazel .cargo Cargo.toml Cargo.lock MODULE.bazel MODULE.bazel.lock \
+                BUILD.bazel .bazelrc .bazelignore .bazelversion rust-toolchain.toml rustfmt.toml \
+                scripts/bazel-natives.ts .github/actions/bazel-natives .github/actions/bazel-cache; then
+                echo "Native build inputs changed; building the PR checkout."
+                exit 0
+              fi
+              runs="$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/runs" \
+                -H 'User-Agent: OpenAI File Downloader, XaiImageApiFetch/1.0' \
+                -f head_sha="$base" -f event=push -f branch="$BASE_REF" -f per_page=100 \
+                --jq '.workflow_runs[] | select(.path == ".github/workflows/ci.yml") | .id')"
+              for run in $runs; do
+                artifact="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run/artifacts" \
+                  -H 'User-Agent: OpenAI File Downloader, XaiImageApiFetch/1.0' \
+                  --jq '.artifacts[] | select(.name == "natives-linux-x64" and .expired == false) | .id')"
+                if [ -n "$artifact" ]; then
+                  echo "Using native addons from base $base, CI run $run."
+                  gh run download "$run" --repo "$GITHUB_REPOSITORY" --name natives-linux-x64 --dir bazel-bin
+                  echo "reused=true" >> "$GITHUB_OUTPUT"
+                  exit 0
+                fi
+              done
+              echo "No retained native artifact for base $base; building the PR checkout."
+
+         # Main builds all Linux-hosted targets; PR cache misses build x64 only.
+         - id: cache
+           if: github.event_name != 'pull_request' || steps.base_addons.outputs.reused != 'true'
+           uses: ./.github/actions/bazel-cache
+           with:
+              scope: linux
+         - name: Build native addons once
+           if: github.event_name != 'pull_request' || steps.base_addons.outputs.reused != 'true'
+           env:
+              PR_BUILD: ${{ github.event_name == 'pull_request' }}
+           run: |
+              set -eo pipefail
+              if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
+              # The addon cdylib links each peak at several GiB of rustc RSS;
+              # the aggregate //:natives-linux-all build runs all six
+              # concurrently, which OOMs the kata pod and takes the bazel
+              # server with it (exit 37 "Server terminated abruptly", runs
+              # 30556752623 / 30557524371). Build one addon per invocation —
+              # analysis and cached actions are shared through the persistent
+              # server, so only the heavy links serialize — then assemble the
+              # aggregate as a no-op (also catches targets added to the
+              # filegroup but missing from this list).
+              : > "$RUNNER_TEMP/bazel-build.log"
+              targets=(natives-linux-x64-baseline natives-linux-x64-modern)
+              if [ "$PR_BUILD" != true ]; then
+                targets=(natives-linux-arm64 natives-linux-musl-arm64 natives-linux-musl-x64-baseline
+                  "${targets[@]}" natives-win32-x64-baseline)
+              fi
+              for target in "${targets[@]}"; do
+                bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build "//:$target" 2>&1 | tee -a "$RUNNER_TEMP/bazel-build.log"
+              done
+              if [ "$PR_BUILD" != true ]; then
+                bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build //:natives-linux-all 2>&1 | tee -a "$RUNNER_TEMP/bazel-build.log"
+              fi
          # A corrupt download must fail here, not as a confusing dlopen error
          # in every downstream test shard.
-         - name: Smoke release addons
+         - name: Smoke source-matched addons
            if: github.event_name == 'pull_request'
            shell: bash
            run: |
@@ -274,56 +334,11 @@ jobs:
               "$loader" "$RUNNER_TEMP/smoke-addons.js" \
                 "$PWD/bazel-bin/natives-linux-x64-baseline/pi_natives.linux-x64-baseline.node" \
                 "$PWD/bazel-bin/natives-linux-x64-modern/pi_natives.linux-x64-modern.node"
-         # Make the policy visible on the rare native-touching PR instead of
-         # leaving a reviewer to wonder which addons the tests exercised.
-         # Best-effort: a diff-API failure must not fail the job over a notice.
-         - name: Note native changes tested against release addons
-           if: github.event_name == 'pull_request'
-           shell: bash
-           env:
-              GH_TOKEN: ${{ github.token }}
-           run: |
-              if gh pr diff ${{ github.event.pull_request.number }} --name-only 2>/dev/null \
-                 | grep -qE '^(crates/|bazel/|Cargo\.(toml|lock)|MODULE\.bazel(\.lock)?|BUILD\.bazel|\.bazelrc|\.bazelignore|\.bazelversion|rust-toolchain\.toml|rustfmt\.toml)'; then
-                echo "::notice title=Native sources changed::PR CI tests against the latest release addons by design; native changes are validated post-merge on main and at release."
-              fi
-
-         # ---- main path: bazel build of all Linux-hosted targets ----
-         - id: cache
-           if: github.event_name != 'pull_request'
-           uses: ./.github/actions/bazel-cache
-           with:
-              scope: linux
-         - name: Build native addons once
-           if: github.event_name != 'pull_request'
-           run: |
-              set -eo pipefail
-              if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
-              # The addon cdylib links each peak at several GiB of rustc RSS;
-              # the aggregate //:natives-linux-all build runs all six
-              # concurrently, which OOMs the kata pod and takes the bazel
-              # server with it (exit 37 "Server terminated abruptly", runs
-              # 30556752623 / 30557524371). Build one addon per invocation —
-              # analysis and cached actions are shared through the persistent
-              # server, so only the heavy links serialize — then assemble the
-              # aggregate as a no-op (also catches targets added to the
-              # filegroup but missing from this list).
-              : > "$RUNNER_TEMP/bazel-build.log"
-              for target in \
-                natives-linux-arm64 \
-                natives-linux-musl-arm64 \
-                natives-linux-musl-x64-baseline \
-                natives-linux-x64-baseline \
-                natives-linux-x64-modern \
-                natives-win32-x64-baseline; do
-                bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build "//:$target" 2>&1 | tee -a "$RUNNER_TEMP/bazel-build.log"
-              done
-              bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build //:natives-linux-all 2>&1 | tee -a "$RUNNER_TEMP/bazel-build.log"
          # Cache-hit visibility: a supposedly warm build that executes
          # thousands of actions is the failure mode that made CI slow — make
          # it visible in the run summary instead of discovering it weeks in.
          - name: Report bazel cache stats
-           if: github.event_name != 'pull_request'
+           if: github.event_name != 'pull_request' || steps.base_addons.outputs.reused != 'true'
            shell: bash
            run: |
               # Bazel runs with --color=yes (config=ci); strip ANSI before
