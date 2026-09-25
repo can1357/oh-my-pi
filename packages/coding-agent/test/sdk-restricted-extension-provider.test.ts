@@ -161,12 +161,15 @@ describe("restricted sessions sharing extension providers", () => {
 	): Promise<void> {
 		const { session: parent } = await createAgentSession({
 			...createOptions(),
+			agentId: "PolicyParent",
 			extensions: [providerExtension, extension],
 		});
 		try {
 			const { session: child } = await createAgentSession({
 				...createOptions(),
 				model: parent.model,
+				agentId: "PolicyChild",
+				parentAgentId: parent.getAgentId(),
 				restrictToolNames: true,
 				preloadedPreparedExtensions: parent.preparedExtensions,
 				extensions: [
@@ -201,7 +204,7 @@ describe("restricted sessions sharing extension providers", () => {
 			pi.on("tool_call", (event, ctx) => {
 				if (!initialized) throw new Error("Policy has not initialized");
 				if (event.toolName === "read" && event.input.path === blocked) {
-					return { block: true, reason: `Denied by ${ctx.sessionManager.getSessionId()}` };
+					return { block: true, reason: `Denied by ${ctx.agentId}, child of ${ctx.parentAgentId}` };
 				}
 			});
 		};
@@ -209,17 +212,22 @@ describe("restricted sessions sharing extension providers", () => {
 			const { session: grandchild } = await createAgentSession({
 				...createOptions(),
 				model: child.model,
+				agentId: "PolicyGrandchild",
+				parentAgentId: child.getAgentId(),
 				restrictToolNames: true,
 				preloadedPreparedExtensions: child.preparedExtensions,
 			});
 			try {
 				await initializeExtensions(grandchild, { reportSendError: vi.fn(), reportRuntimeError: vi.fn() });
-				for (const session of [child, grandchild]) {
+				for (const [session, owner] of [
+					[child, parent],
+					[grandchild, child],
+				]) {
 					const read = session.getToolByName("read");
 					if (!read) throw new Error("Missing restricted read tool");
 					expect(session.sessionManager.getSessionId()).not.toBe(parent.sessionManager.getSessionId());
 					await expect(read.execute("denied", { path: blocked })).rejects.toThrow(
-						`Denied by ${session.sessionManager.getSessionId()}`,
+						`Denied by ${session.getAgentId()}, child of ${owner.getAgentId()}`,
 					);
 					const result = await read.execute("allowed", { path: allowed });
 					expect(result.content).toEqual(

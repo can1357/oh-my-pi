@@ -223,6 +223,8 @@ Handlers and tool `execute` receive `ctx` with:
 - `ui`
 - `hasUI`
 - `cwd`
+- `agentId` (stable registry identity for an agent session; omitted by standalone runner hosts)
+- `parentAgentId` (stable registry identity of the spawning agent for subagent sessions)
 - `sessionManager` (read-only)
 - `modelRegistry`, `model`
 - `models` (read-only model query — see below)
