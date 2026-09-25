@@ -318,6 +318,7 @@ describe("Cursor conversation checkpoints", () => {
 			[],
 			undefined,
 			undefined,
+			undefined,
 			true,
 		);
 

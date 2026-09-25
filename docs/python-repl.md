@@ -12,7 +12,7 @@ It covers tool behavior, runner lifecycle, environment handling, execution seman
 - Prelude helpers loaded into every kernel: `src/eval/py/prelude.py`
 - Host-side subagent helper bridge: `src/eval/agent-bridge.ts`
 - MIME bundle renderer (text + structured outputs): `src/eval/py/display.ts`
-- Interactive-mode renderer for user-triggered Python runs: `src/modes/components/eval-execution.ts`
+- Interactive-mode renderer for user-triggered Python runs: `packages/tui/src/chat/eval-execution.ts`
 - Runtime/env filtering and Python resolution: `src/eval/py/runtime.ts`
 
 ## What eval's Python backend is
@@ -24,7 +24,7 @@ Current tool input:
 ```ts
 {
   language: "py";
-  code: string;
+  code: string;    // inline source or a standalone %load / %pip install
   title?: string;
   timeout?: number; // seconds; default 30, 0 disables, otherwise clamped to 1..3600
   reset?: boolean;  // wipe the Python kernel before this call
@@ -81,7 +81,7 @@ The runner's source transformer rewrites IPython-style magics to plain Python ca
 
 | Magic                             | Effect                                                                                                                                                      |
 | --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `%pip <args>`                     | `python -m pip <args>` with live streaming output. Newly installed packages are evicted from `sys.modules` so the next `import` picks up the fresh install. |
+| `%pip <args>`                     | `python -m pip <args>` with live streaming output; pauses the cell watchdog. Newly installed packages are evicted from `sys.modules` so the next `import` picks up the fresh install. |
 | `%cd <path>`                      | `os.chdir(path)` (with `~` expansion); emits status event.                                                                                                  |
 | `%pwd`                            | Returns `os.getcwd()`.                                                                                                                                      |
 | `%ls [path]`                      | Returns `sorted(os.listdir(path))`.                                                                                                                         |
@@ -90,7 +90,7 @@ The runner's source transformer rewrites IPython-style magics to plain Python ca
 | `%time <expr>` / `%timeit <expr>` | Time the expression; emits status event with elapsed ms.                                                                                                    |
 | `%who` / `%whos`                  | List user-namespace names.                                                                                                                                  |
 | `%reset`                          | Clear user globals and re-inject prelude.                                                                                                                   |
-| `%load <path>`                    | Read a file into a fresh cell and execute.                                                                                                                  |
+| `%load <path>`                    | Execute a quoted file path in the retained namespace with top-level await and filename-aware tracebacks; does not echo source. A standalone `%load` cell is read by the host instead (supports `local://`). |
 | `%run <path>`                     | `runpy.run_path` and merge globals back.                                                                                                                    |
 | `%%bash`                          | Run the cell body via `bash`. The only registered shell cell magic — `%%sh` does not exist, and unregistered names raise `Cell magic function '%%<name>' not found`. |
 | `%%capture [name]`                | Run body with stdout/stderr captured into `name`.                                                                                                           |
@@ -146,7 +146,7 @@ The backend settings `eval.py` / `eval.js` default to `true`. Optional boolean e
 
 The tool's session-scoped schema lists only enabled runtimes. If Python preflight fails while another runtime is enabled, `eval` remains available for that runtime and a `py` call reports a Python-backend availability error with enabled alternatives.
 
-Python prelude helpers include `agent(prompt, *, agent=None, label=None, schema=None, schema_mode=None, isolated=None, apply=None, merge=None, tools=None)`, which registers a background subagent job and returns an `AgentHandle` (`.id`, `.handle` = `agent://<id>`, `.status`, `.done()`, `.wait(timeout=None)`, `.send()`, `.cancel()`, `.output()`, awaitable). `completion(...)` likewise returns a `CompletionHandle`. `wait(handles, timeout=None, raise_errors=True)` barriers over handles in input order. `workpool(...)` returns a `WorkPool` (`push`, `status`, `peek`, `close`); its name is the aggregate async-job id used with `hub wait`. `tool.<name>(args)` is a coroutine (`await tool.read({...})`); `@tool` registers a kernel-local function as a tool for subagents (schema inferred from type hints) when `eval.tools.enabled` is on.
+Python prelude helpers include `agent(prompt, *, agent=None, label=None, schema=None, schema_mode=None, isolated=None, apply=None, merge=None, tools=None)`, which registers a background subagent job and returns an `AgentHandle` (`.id`, `.handle` = `agent://<id>`, `.status`, `.done()`, `.wait(timeout=None)`, `.send()`, `.cancel()`, `.output()`, awaitable). `completion(...)` likewise returns a `CompletionHandle`. `wait(handles, timeout=None, raise_errors=True)` barriers over handles in input order. `workpool(...)` returns a `WorkPool` (`push`, `status`, `peek`, `close`); its name is the aggregate async-job id; results auto-deliver, and the zero-argument `wait` tool blocks only when nothing else remains to do. `tool.<name>(args)` is a coroutine (`await tool.read({...})`); `@tool` registers a kernel-local function as a tool for subagents (schema inferred from type hints) when `eval.tools.enabled` is on.
 
 The runner accepts a `{"type": "tool", "id", "op": "describe"|"call", ...}` request alongside cell requests. It is served on a dedicated daemon thread (POSIX; between cells on Windows) against the kernel's `__omp_tools__` registry, replies with an `application/json` display bundle (`{ok, tools, missing}` or `{ok, value}`), and reports a raising tool as an `error` frame without touching the running cell. See `docs/tools/eval.md` for the caller-facing contract.
 

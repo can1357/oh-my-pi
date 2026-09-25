@@ -469,3 +469,121 @@ where
 		Self { files }
 	}
 }
+
+/// A path that names one of the calling process's own descriptors, or its
+/// controlling terminal, rather than a file.
+///
+/// Opening such a path for real reaches the *process's* descriptor table. A
+/// shell embedded in a larger host shares that process, so `/dev/stdin` would
+/// be the host's terminal rather than the command's input. Callers resolve
+/// these paths against the shell's descriptors instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DescriptorPath {
+	/// `/dev/stdin`, `/dev/stdout`, `/dev/stderr`, or `N` under `/dev/fd`,
+	/// `/proc/self/fd`, `/proc/thread-self/fd`, or `/proc/<this pid>/fd`.
+	Fd(ShellFd),
+	/// `/dev/tty`.
+	Terminal,
+}
+
+impl DescriptorPath {
+	/// Classifies an absolute path; `None` for every other path, including
+	/// relative paths and the descriptor directories themselves.
+	pub fn parse(path: &std::path::Path) -> Option<Self> {
+		use std::path::Component;
+
+		let mut components = path.components();
+		if components.next() != Some(Component::RootDir) {
+			return None;
+		}
+		let mut names = [""; 4];
+		let mut len = 0;
+		for component in components {
+			let Component::Normal(name) = component else {
+				return None;
+			};
+			*names.get_mut(len)? = name.to_str()?;
+			len += 1;
+		}
+
+		match names[..len] {
+			["dev", "stdin"] => Some(Self::Fd(OpenFiles::STDIN_FD)),
+			["dev", "stdout"] => Some(Self::Fd(OpenFiles::STDOUT_FD)),
+			["dev", "stderr"] => Some(Self::Fd(OpenFiles::STDERR_FD)),
+			["dev", "tty"] => Some(Self::Terminal),
+			["dev", "fd", fd] | ["proc", "self" | "thread-self", "fd", fd] => decimal(fd).map(Self::Fd),
+			["proc", pid, "fd", fd] if decimal::<u32>(pid) == Some(std::process::id()) => {
+				decimal(fd).map(Self::Fd)
+			},
+			_ => None,
+		}
+	}
+
+	/// The error opening this path fails with in a process that lacks the
+	/// descriptor (`ENOENT`) or has no controlling terminal (`ENXIO`).
+	pub fn unavailable_error(self) -> std::io::Error {
+		#[cfg(unix)]
+		{
+			let errno = match self {
+				Self::Fd(_) => nix::errno::Errno::ENOENT,
+				Self::Terminal => nix::errno::Errno::ENXIO,
+			};
+			std::io::Error::from_raw_os_error(errno as i32)
+		}
+		#[cfg(not(unix))]
+		{
+			std::io::Error::from(std::io::ErrorKind::NotFound)
+		}
+	}
+}
+
+/// Parses an unsigned decimal path component, as the kernel spells
+/// descriptor numbers and pids; signs and other text are not numbers here.
+fn decimal<T: std::str::FromStr>(name: &str) -> Option<T> {
+	if name.is_empty() || !name.bytes().all(|byte| byte.is_ascii_digit()) {
+		return None;
+	}
+	name.parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+	use std::path::Path;
+
+	use super::DescriptorPath::{self, Fd, Terminal};
+
+	fn parse(path: &str) -> Option<DescriptorPath> {
+		DescriptorPath::parse(Path::new(path))
+	}
+
+	#[test]
+	fn descriptor_paths_name_this_process_only() {
+		let own = std::process::id();
+		for (path, expected) in [
+			("/dev/stdin", Fd(0)),
+			("/dev/stdout", Fd(1)),
+			("/dev/stderr", Fd(2)),
+			("/dev/tty", Terminal),
+			("/dev/fd/63", Fd(63)),
+			("//dev/./fd/7", Fd(7)),
+			("/proc/self/fd/3", Fd(3)),
+			("/proc/thread-self/fd/4", Fd(4)),
+			(&format!("/proc/{own}/fd/5"), Fd(5)),
+		] {
+			assert_eq!(parse(path), Some(expected), "{path}");
+		}
+
+		for path in [
+			"/dev/fd",
+			"/dev/fd/-1",
+			"/dev/fd/+3",
+			"/dev/fd/3/x",
+			"/dev/null",
+			"dev/stdin",
+			"/dev/../dev/stdin",
+			&format!("/proc/{}/fd/3", own.wrapping_add(1)),
+		] {
+			assert_eq!(parse(path), None, "{path}");
+		}
+	}
+}

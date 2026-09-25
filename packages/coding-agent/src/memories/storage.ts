@@ -37,11 +37,31 @@ const GLOBAL_KIND = "memory_consolidate_global";
 const DEFAULT_RETRY_REMAINING = 3;
 
 /**
+ * Case-fold a project cwd into a stable memory scope key on case-insensitive
+ * filesystems.
+ *
+ * Windows reports the same directory with drifting casing across launches
+ * (`C:\Users\me\Documents\proj` vs `...\documents\proj`). The on-disk memory
+ * root (`getMemoryRoot`) collapses both into one directory because NTFS is
+ * case-insensitive, but the scope keys derived from cwd — `global:${cwd}` job
+ * keys, `threads.cwd`, and the `t.cwd = ?` output filter — compare with
+ * SQLite's default BINARY collation. Without folding, one project's memories
+ * split across two scopes that share a single directory: Phase 2 for one casing
+ * sees zero outputs, wipes the shared `MEMORY.md`/`memory_summary.md`/`skills/`,
+ * and advances its watermark, permanently stranding the other casing's outputs
+ * (#12596). Fold to lower case on win32 so one physical directory maps to one
+ * scope key, matching the filesystem's own case-insensitivity.
+ */
+export function normalizeScopeCwd(cwd: string, platform: NodeJS.Platform = process.platform): string {
+	return platform === "win32" ? cwd.toLowerCase() : cwd;
+}
+
+/**
  * Per-project job key so Phase 2 consolidation is isolated to a single cwd.
  * Previously a single "global" key caused cross-project memory contamination.
  */
 function globalJobKey(cwd: string): string {
-	return `global:${cwd}`;
+	return `global:${normalizeScopeCwd(cwd)}`;
 }
 
 export function openMemoryDb(dbPath: string): Database {
@@ -114,7 +134,7 @@ ON CONFLICT(id) DO UPDATE SET
 `);
 	const tx = db.transaction((rows: MemoryThread[]) => {
 		for (const row of rows) {
-			stmt.run(row.id, row.updatedAt, row.rolloutPath, row.cwd, row.sourceKind);
+			stmt.run(row.id, row.updatedAt, row.rolloutPath, normalizeScopeCwd(row.cwd), row.sourceKind);
 		}
 	});
 	tx(threads);
@@ -501,7 +521,7 @@ WHERE (TRIM(COALESCE(o.raw_memory, '')) != '' OR TRIM(COALESCE(o.rollout_summary
 ORDER BY o.source_updated_at DESC
 LIMIT ?
 `)
-		.all(cwd, limit) as Array<{
+		.all(normalizeScopeCwd(cwd), limit) as Array<{
 		thread_id: string;
 		source_updated_at: number;
 		raw_memory: string;

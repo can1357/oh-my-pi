@@ -20,6 +20,7 @@ import type {
 	ToolResultMessage,
 	UserMessage,
 } from "../types";
+import { isCursorExecResolved } from "../utils/block-symbols";
 import {
 	type AnthropicAssistantContentBlock,
 	type AnthropicMessage,
@@ -356,6 +357,23 @@ const REASONING_EFFORT_BY_WIRE: Partial<Record<string, Effort>> = {
 	max: Effort.Max,
 };
 
+/**
+ * Recover the id of the model this request will actually reach, for labelling
+ * replayed assistant turns.
+ *
+ * `/v1/models` advertises `<provider>/<id>` and nothing else, so that is what
+ * clients send, but `resolveModel` resolves a catalog model whose id is the
+ * bare half. Labelling a replayed turn with the full id the client sent leaves
+ * `transform-messages` reading it as written by some other model.
+ *
+ * A prefix naming another provider is left intact: it describes a different
+ * route, so removing it would invent history rather than recover it.
+ */
+function stampedAssistantModelId(wireModelId: string, provider: string): string {
+	const prefix = `${provider}/`;
+	return wireModelId.startsWith(prefix) ? wireModelId.slice(prefix.length) : wireModelId;
+}
+
 export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	const data = anthropicMessagesRequestSchema(body);
 	if (data instanceof type.errors) {
@@ -370,14 +388,18 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 		} else if (message.role === "system") {
 			messages.push(walkSystemMessage(message, now));
 		} else {
+			const content = walkAssistantContent(message.content);
 			const assistant: AssistantMessage = {
 				role: "assistant",
-				content: walkAssistantContent(message.content),
+				content,
 				api: "anthropic-messages",
 				provider: "anthropic",
-				model: data.model,
+				model: stampedAssistantModelId(data.model, "anthropic"),
 				usage: emptyUsage(),
-				stopReason: "stop",
+				// The wire carries no stop reason, but tool calls answered by their
+				// `tool_result` blocks did request execution. A constant "stop" reads
+				// as an abandoned tool-use turn and strips the turn's signatures.
+				stopReason: content.some(block => block.type === "toolCall") ? "toolUse" : "stop",
 				timestamp: now,
 			};
 			messages.push(assistant);
@@ -444,6 +466,8 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	if (headers) {
 		const captured = captureRequestHeaders(headers);
 		if (Object.keys(captured).length > 0) options.headers = captured;
+		const userProfileId = headers.get("anthropic-user-profile-id");
+		if (userProfileId) options.userProfileId = userProfileId;
 	}
 
 	return {
@@ -486,14 +510,33 @@ function randomFallback(): string {
 	return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-function mapStopReasonOut(reason: StopReason): "end_turn" | "max_tokens" | "tool_use" {
+/**
+ * True for a `toolCall` block the client is expected to execute.
+ *
+ * Cursor's exec channel stamps {@link kCursorExecResolved} on calls it already
+ * ran server-side — `todo`, `web_fetch`, `connect_scm`, a native it declined —
+ * and those are not handoffs: the client never declared the tool, has no
+ * implementation to run, and repeating one would reapply a side effect the
+ * server already committed. Only unresolved calls are real external handoffs.
+ */
+function isClientToolUse(content: AssistantMessage["content"][number]): content is ToolCall {
+	return content.type === "toolCall" && !isCursorExecResolved(content);
+}
+
+function mapStopReasonOut(reason: StopReason, hasToolUse: boolean): "end_turn" | "max_tokens" | "tool_use" {
 	switch (reason) {
 		case "length":
 			return "max_tokens";
 		case "toolUse":
 			return "tool_use";
 		default:
-			return "end_turn";
+			// A provider whose protocol has no separate tool-use stop — Cursor
+			// ends the turn with `stop` when it hands a client-declared tool
+			// back for the caller to execute — still owes the client
+			// `tool_use`, or the canonical Anthropic loop (run tools while
+			// `stop_reason === "tool_use"`) never runs the tool it asked for.
+			// The OpenAI chat wire maps the same case to `tool_calls`.
+			return hasToolUse ? "tool_use" : "end_turn";
 	}
 }
 
@@ -517,6 +560,9 @@ function encodeContentBlocks(message: AssistantMessage): Record<string, unknown>
 				blocks.push(c.block);
 				break;
 			case "toolCall":
+				// Cursor already executed this one; the client must not run it
+				// again and cannot answer it. See `isClientToolUse`.
+				if (!isClientToolUse(c)) break;
 				blocks.push({ type: "tool_use", id: c.id, name: c.name, input: c.arguments ?? {} });
 				break;
 		}
@@ -553,7 +599,7 @@ export function encodeResponse(
 		role: "assistant",
 		model: resolveAuthGatewayWireModelId(message, requestedModelId, options),
 		content: encodeContentBlocks(message),
-		stop_reason: mapStopReasonOut(message.stopReason),
+		stop_reason: mapStopReasonOut(message.stopReason, message.content.some(isClientToolUse)),
 		// TODO: surface the matched stop sequence once pi-ai's
 		// `AssistantMessage.stopReason` carries the matched string. Intentionally
 		// `null` for now (Anthropic schema allows it).
@@ -634,6 +680,23 @@ export function encodeStream(
 			const messageId = newMessageId();
 			let started = false;
 			const open = new Map<number, OpenBlock>();
+			// Cursor's exec channel hands back calls it already ran server-side;
+			// `isClientToolUse` keeps them off the wire. Anthropic clients (the
+			// official SDK included) append every `content_block_start` to their
+			// snapshot and then address deltas by `index`, so a hole in the
+			// numbering misroutes each later delta. Shift emitted indices down by
+			// the number of blocks suppressed before them — identity while
+			// nothing is suppressed. A suppressed call always closes the
+			// preceding text/thinking block before it opens, so no block that is
+			// still open is ever renumbered.
+			const suppressed = new Set<number>();
+			const wireIndex = (contentIndex: number): number => {
+				let shift = 0;
+				for (const index of suppressed) {
+					if (index < contentIndex) shift++;
+				}
+				return contentIndex - shift;
+			};
 
 			const ensureStart = (partial: AssistantMessage | undefined) => {
 				if (started) return;
@@ -664,10 +727,11 @@ export function encodeStream(
 			const emitServerToolBlocksBefore = (message: AssistantMessage, beforeIndex: number) => {
 				const limit = Math.min(beforeIndex, message.content.length);
 				while (nextContentIndexToInspect < limit) {
-					const index = nextContentIndexToInspect++;
-					const content = message.content[index];
+					const contentIndex = nextContentIndexToInspect++;
+					const content = message.content[contentIndex];
 					if (content?.type !== "anthropicServerTool") continue;
 					ensureStart(message);
+					const index = wireIndex(contentIndex);
 					controller.enqueue(
 						sseFrame("content_block_start", {
 							type: "content_block_start",
@@ -679,10 +743,11 @@ export function encodeStream(
 				}
 			};
 
-			const closeBlock = (index: number) => {
-				if (!open.has(index)) return;
-				controller.enqueue(sseFrame("content_block_stop", { type: "content_block_stop", index }));
-				open.delete(index);
+			const closeBlock = (contentIndex: number) => {
+				const block = open.get(contentIndex);
+				if (!block) return;
+				controller.enqueue(sseFrame("content_block_stop", { type: "content_block_stop", index: block.index }));
+				open.delete(contentIndex);
 			};
 
 			pingTimer = setInterval(() => {
@@ -721,11 +786,12 @@ export function encodeStream(
 					case "text_start": {
 						emitServerToolBlocksBefore(ev.partial, ev.contentIndex);
 						ensureStart(ev.partial);
-						open.set(ev.contentIndex, { index: ev.contentIndex, kind: "text" });
+						const index = wireIndex(ev.contentIndex);
+						open.set(ev.contentIndex, { index, kind: "text" });
 						controller.enqueue(
 							sseFrame("content_block_start", {
 								type: "content_block_start",
-								index: ev.contentIndex,
+								index,
 								content_block: { type: "text", text: "" },
 							}),
 						);
@@ -735,7 +801,7 @@ export function encodeStream(
 						controller.enqueue(
 							sseFrame("content_block_delta", {
 								type: "content_block_delta",
-								index: ev.contentIndex,
+								index: wireIndex(ev.contentIndex),
 								delta: { type: "text_delta", text: ev.delta },
 							}),
 						);
@@ -746,11 +812,12 @@ export function encodeStream(
 					case "thinking_start": {
 						emitServerToolBlocksBefore(ev.partial, ev.contentIndex);
 						ensureStart(ev.partial);
-						open.set(ev.contentIndex, { index: ev.contentIndex, kind: "thinking" });
+						const index = wireIndex(ev.contentIndex);
+						open.set(ev.contentIndex, { index, kind: "thinking" });
 						controller.enqueue(
 							sseFrame("content_block_start", {
 								type: "content_block_start",
-								index: ev.contentIndex,
+								index,
 								content_block: { type: "thinking", thinking: "" },
 							}),
 						);
@@ -760,7 +827,7 @@ export function encodeStream(
 						controller.enqueue(
 							sseFrame("content_block_delta", {
 								type: "content_block_delta",
-								index: ev.contentIndex,
+								index: wireIndex(ev.contentIndex),
 								delta: { type: "thinking_delta", thinking: ev.delta },
 							}),
 						);
@@ -771,7 +838,7 @@ export function encodeStream(
 							controller.enqueue(
 								sseFrame("content_block_delta", {
 									type: "content_block_delta",
-									index: ev.contentIndex,
+									index: wireIndex(ev.contentIndex),
 									delta: { type: "signature_delta", signature: c.thinkingSignature },
 								}),
 							);
@@ -783,11 +850,21 @@ export function encodeStream(
 						emitServerToolBlocksBefore(ev.partial, ev.contentIndex);
 						ensureStart(ev.partial);
 						const tc = ev.partial.content[ev.contentIndex] as ToolCall | undefined;
-						open.set(ev.contentIndex, { index: ev.contentIndex, kind: "tool_use" });
+						if (tc && !isClientToolUse(tc)) {
+							// Cursor's exec channel already ran this call and
+							// buffered its result. Streaming it would invite the
+							// client to repeat a committed side effect and answer
+							// a tool it never declared, so drop the whole block —
+							// start, deltas and stop — from the wire.
+							suppressed.add(ev.contentIndex);
+							break;
+						}
+						const index = wireIndex(ev.contentIndex);
+						open.set(ev.contentIndex, { index, kind: "tool_use" });
 						controller.enqueue(
 							sseFrame("content_block_start", {
 								type: "content_block_start",
-								index: ev.contentIndex,
+								index,
 								content_block: {
 									type: "tool_use",
 									id: tc?.id ?? "",
@@ -799,10 +876,11 @@ export function encodeStream(
 						break;
 					}
 					case "toolcall_delta":
+						if (suppressed.has(ev.contentIndex)) break;
 						controller.enqueue(
 							sseFrame("content_block_delta", {
 								type: "content_block_delta",
-								index: ev.contentIndex,
+								index: wireIndex(ev.contentIndex),
 								delta: { type: "input_json_delta", partial_json: ev.delta },
 							}),
 						);
@@ -819,7 +897,12 @@ export function encodeStream(
 								// TODO: surface matched stop sequence once pi-ai
 								// propagates it on the `done` event.
 								delta: {
-									stop_reason: mapStopReasonOut(ev.reason),
+									// A call Cursor resolved after it opened (an MCP
+									// frame answered by a local handler) already
+									// streamed; the client still must not be told to
+									// run it, so it does not terminate the turn with
+									// `tool_use` either.
+									stop_reason: mapStopReasonOut(ev.reason, ev.message.content.some(isClientToolUse)),
 									stop_sequence: null,
 								},
 								...(bindingControlsRequested
@@ -834,9 +917,7 @@ export function encodeStream(
 					}
 					case "error": {
 						const msg = ev.error.errorMessage ?? "stream error";
-						controller.enqueue(
-							sseFrame("error", { type: "error", error: { type: "api_error", message: msg } }),
-						);
+						controller.enqueue(sseFrame("error", { type: "error", error: { type: "api_error", message: msg } }));
 						controller.close();
 						return "return";
 					}

@@ -1,19 +1,21 @@
 import type { ReactNode } from "react";
-import type { ConnectionPhase } from "../../lib/client";
+import type { ConnectionPhase, GuestSnapshot } from "../../lib/client";
 
 export interface BannersProps {
 	phase: ConnectionPhase;
 	endedReason: string | null;
+	loading: GuestSnapshot["loading"];
 	onRejoin(): void;
 	onNewLink(): void;
 }
 
-export function Banners({ phase, endedReason, onRejoin, onNewLink }: BannersProps): ReactNode {
+export function Banners({ phase, endedReason, loading, onRejoin, onNewLink }: BannersProps): ReactNode {
+	const progress = loading && loading.total > 0 ? ` ${Math.floor((loading.received / loading.total) * 100)}%` : "";
 	if (phase === "connecting" || phase === "waiting") {
 		return (
 			<div className="sh-banner" role="status">
 				<span className="sh-banner-dot" />
-				{phase === "connecting" ? "connecting to relay…" : "joining session…"}
+				{phase === "connecting" ? "connecting to relay…" : `joining session…${progress}`}
 			</div>
 		);
 	}
@@ -21,7 +23,7 @@ export function Banners({ phase, endedReason, onRejoin, onNewLink }: BannersProp
 		return (
 			<div className="sh-banner" role="status">
 				<span className="sh-banner-dot" />
-				reconnecting…
+				{`reconnecting…${progress}`}
 			</div>
 		);
 	}
