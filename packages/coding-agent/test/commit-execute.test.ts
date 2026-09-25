@@ -50,6 +50,8 @@ describe("abortOnGitFailure (issue #7834)", () => {
 	it("surfaces a refusing hook's message and aborts with a sentinel instead of the raw error", async () => {
 		const dir = await mkTempDir("omp-commit-hook-");
 		await initRepoWithCommit(dir);
+		// Native discovery reads user config too; explicitly enable this fixture's hooks.
+		await runGit(dir, ["config", "core.hooksPath", ".git/hooks"]);
 		const hook = path.join(dir, ".git", "hooks", "pre-commit");
 		await fs.writeFile(hook, '#!/bin/sh\necho "policy: this change is not allowed" >&2\nexit 1\n');
 		await fs.chmod(hook, 0o755);

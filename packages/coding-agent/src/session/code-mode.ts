@@ -25,6 +25,8 @@ export const CODE_MODE_KEEP_TOOLS: Record<string, true> = {
 	// an eval result they are invisible to it, so they must stay direct.
 	checkpoint: true,
 	rewind: true,
+	// Rollover requests likewise depend on the direct toolResult's toolName.
+	new_context: true,
 	__agent__: true,
 	__budget__: true,
 	__completion__: true,

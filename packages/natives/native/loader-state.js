@@ -6,6 +6,7 @@ import * as path from "node:path";
 import * as zlib from "node:zlib";
 import packageJson from "../package.json" with { type: "json" };
 import { embeddedAddon } from "./embedded-addon.js";
+import { containsVersionSentinel, versionSentinelFor } from "./version-sentinel.js";
 
 /**
  * Native addon loader for `@oh-my-pi/pi-natives`.
@@ -656,6 +657,18 @@ function maybeStageNodeModulesAddon(ctx, errors) {
 }
 
 
+/** Any release sentinel a `.node` may carry (`__piNativesV{major}_{minor}_{patch}`). */
+const VERSION_SENTINEL_ANY_RE = /^__piNativesV[A-Za-z0-9_]+$/;
+
+/**
+ * Release version encoded in a sentinel export name.
+ * @param {string} sentinel
+ * @returns {string}
+ */
+function sentinelVersion(sentinel) {
+	return sentinel.slice("__piNativesV".length).replace(/_/g, ".");
+}
+
 /**
  * Before version sentinels were exported, published native addons still shared
  * this stable core ABI. Let those on-disk addons bridge a package-version bump
@@ -681,7 +694,10 @@ export function validateLoadedBindings(ctx, bindings, candidate) {
 	// `node_modules` install or a compiled bundle) the local `.node` only gains
 	// the renamed sentinel after `bun --cwd=packages/natives run build`. Skip
 	// validation there so a stale post-pull dev tree boots while the rebuild
-	// completes; install and compiled-binary paths still validate.
+	// completes; install and compiled-binary paths still validate. The mismatch
+	// is not swallowed silently: `native/index.js` exports `missingNativeExport`
+	// for every symbol the stale addon predates, so the first call through one
+	// reports the addon, both releases, and the rebuild command.
 	if (ctx.isWorkspaceLoad) return;
 	if (typeof bindings[ctx.versionSentinelExport] === "function") return;
 
@@ -695,7 +711,7 @@ export function validateLoadedBindings(ctx, bindings, candidate) {
 	//     exports, which carry the PRIOR sentinel — disk is already consistent,
 	//     so reinstall is a no-op and only restarting the process re-syncs.
 	const residentSentinel = Object.keys(bindings).find(
-		key => key !== ctx.versionSentinelExport && /^__piNativesV[A-Za-z0-9_]+$/.test(key),
+		key => key !== ctx.versionSentinelExport && VERSION_SENTINEL_ANY_RE.test(key),
 	);
 	// A prior sentinel alone cannot distinguish a resident old module from an
 	// actually stale file: `require` returns the same exports in both cases.
@@ -703,14 +719,14 @@ export function validateLoadedBindings(ctx, bindings, candidate) {
 	// the current sentinel; otherwise a restart would simply reload stale disk.
 	let diskHasExpectedSentinel = false;
 	try {
-		diskHasExpectedSentinel = fs.readFileSync(candidate).includes(ctx.versionSentinelExport);
+		diskHasExpectedSentinel = containsVersionSentinel(fs.readFileSync(candidate), ctx.versionSentinelExport);
 	} catch {
 		// The successful require above normally guarantees readability. If the
 		// file disappears concurrently, retain the safe reinstall diagnosis.
 	}
 	if (isCompatiblePreSentinelNativeAddon(bindings, diskHasExpectedSentinel)) return;
 	if (residentSentinel && diskHasExpectedSentinel) {
-		const residentVersion = residentSentinel.slice("__piNativesV".length).replace(/_/g, ".");
+		const residentVersion = sentinelVersion(residentSentinel);
 		throw new Error(
 			`Loaded ${candidate}, which exposes the @oh-my-pi/pi-natives@${residentVersion} version ` +
 				`sentinel \`${residentSentinel}\` but not the @${ctx.packageVersion} sentinel ` +
@@ -724,6 +740,87 @@ export function validateLoadedBindings(ctx, bindings, candidate) {
 		`Loaded ${candidate} but it does not expose the @oh-my-pi/pi-natives@${ctx.packageVersion} ` +
 			`version sentinel \`${ctx.versionSentinelExport}\`. The .node file on disk is from a different ` +
 			"release than this loader — reinstall to re-sync.",
+	);
+}
+
+/**
+ * Identity of the addon `loadNative()` returned, in the shape the
+ * missing-export diagnostic reports. Null until a load succeeds.
+ * @type {{ path: string; sentinel: string | null; expectedSentinel: string; packageVersion: string; stale: boolean } | null}
+ */
+let loadedAddon = null;
+
+/**
+ * Describe a loaded addon so a symbol it predates can name the file, the
+ * release the file came from, and the release this tree expects.
+ * @param {Record<string, unknown>} bindings
+ * @param {string} candidate
+ * @param {{ packageVersion: string; versionSentinelExport: string }} ctx
+ */
+function describeLoadedAddon(bindings, candidate, ctx) {
+	const sentinel = Object.keys(bindings).find(key => VERSION_SENTINEL_ANY_RE.test(key)) ?? null;
+	return {
+		path: candidate,
+		sentinel,
+		expectedSentinel: ctx.versionSentinelExport,
+		packageVersion: ctx.packageVersion,
+		stale: sentinel !== ctx.versionSentinelExport,
+	};
+}
+
+/**
+ * The addon behind this process's `@oh-my-pi/pi-natives` exports.
+ * @returns {{ path: string; sentinel: string | null; expectedSentinel: string; packageVersion: string; stale: boolean } | null}
+ */
+export function nativeAddonStatus() {
+	return loadedAddon;
+}
+
+/**
+ * Stand-in for an export the loaded addon does not provide.
+ *
+ * A workspace tree tolerates a sentinel mismatch on purpose: a checkout that
+ * pulled a new release keeps running until `bun run build:native` finishes
+ * (see `validateLoadedBindings`), and PR CI loads release addons under a newer
+ * checkout the same way. Such an addon has no value for any symbol added after
+ * its build, so a bare `undefined` export surfaced as `<symbol> is not a
+ * function` — every `write` call in a tree that pulled the read-projection
+ * guard, for one — with nothing naming the stale addon.
+ *
+ * Only a stale addon gets the stub. On a current addon an absent export is not
+ * version drift but a symbol this build does not implement, and callers probe
+ * for exactly that (`typeof native.x === "function"`); they must keep seeing
+ * `undefined`.
+ * @param {string} symbolName
+ * @param {ReturnType<typeof nativeAddonStatus>} [addon]
+ * @returns {((...args: unknown[]) => never) | undefined}
+ */
+export function missingNativeExport(symbolName, addon = loadedAddon) {
+	if (!addon?.stale) return undefined;
+	return () => {
+		throw new Error(missingNativeExportMessage(symbolName, addon));
+	};
+}
+
+/**
+ * Actionable text for {@link missingNativeExport}. `addon` is injectable so the
+ * wording can be pinned without a stale `.node` on disk.
+ * @param {string} symbolName
+ * @param {ReturnType<typeof nativeAddonStatus>} [addon]
+ * @returns {string}
+ */
+export function missingNativeExportMessage(symbolName, addon = loadedAddon) {
+	const rebuild = "rebuild it with `bun run build:native`";
+	if (!addon) return `@oh-my-pi/pi-natives does not export \`${symbolName}\`; ${rebuild}.`;
+	if (!addon.stale) {
+		return `@oh-my-pi/pi-natives export \`${symbolName}\` is missing from ${addon.path}; ${rebuild}.`;
+	}
+	const loaded = addon.sentinel
+		? `the @oh-my-pi/pi-natives@${sentinelVersion(addon.sentinel)} addon`
+		: "an addon built before version sentinels existed";
+	return (
+		`@oh-my-pi/pi-natives export \`${symbolName}\` is missing: ${addon.path} is ${loaded}, not ` +
+		`@${addon.packageVersion} (\`${addon.expectedSentinel}\`) — ${rebuild}.`
 	);
 }
 
@@ -837,7 +934,7 @@ export function initLoaderContext(overrides = {}) {
 	// physically cannot expose the symbol this loader is looking for. That
 	// turns the silent `<sym> is not a function` crash from a Windows
 	// locked-file update into an actionable load-time error.
-	const versionSentinelExport = `__piNativesV${packageVersion.replace(/[^A-Za-z0-9]/g, "_")}`;
+	const versionSentinelExport = versionSentinelFor(packageVersion);
 
 	return {
 		platformTag,
@@ -874,6 +971,7 @@ export function loadNative() {
 			const bindings = require_(candidate);
 			validateLoadedBindings(ctx, bindings, candidate);
 			installNativeTokioRuntime(bindings);
+			loadedAddon = describeLoadedAddon(bindings, candidate, ctx);
 	        cleanupStaleNativeVersions({ nativesDir: ctx.nativesDir, currentVersion: ctx.packageVersion });
 			startupMarker("native:loadNative:done");
 			return bindings;

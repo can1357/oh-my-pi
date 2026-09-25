@@ -1,10 +1,11 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 
 import { resetSettingsForTest, Settings } from "../../src/config/settings";
-import { renderMCPResult } from "../../src/mcp/render";
-import { MCPTool, type MCPToolDetails } from "../../src/mcp/tool-bridge";
+import { renderMCPResult } from "@oh-my-pi/pi-tui/tools/mcp";
+import { MCPTool } from "../../src/mcp/tool-bridge";
+import { type MCPToolDetails } from "@oh-my-pi/pi-tui/tools/mcp";
 import type { MCPServerConnection, MCPToolCallResult, MCPToolDefinition } from "../../src/mcp/types";
-import { getThemeByName, initTheme } from "../../src/modes/theme/theme";
+import { getThemeByName, initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { CustomToolContext, CustomToolResult } from "../../src/extensibility/custom-tools/types";
 
 function toolFor(result: MCPToolCallResult): MCPTool {

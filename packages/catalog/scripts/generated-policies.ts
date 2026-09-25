@@ -8,12 +8,13 @@ import { modelLimitsFor, pricingPeerFor } from "../src/compat/behavior";
 import { isCollapsedVariantSpec } from "../src/compat/collapse";
 import { resolveModelPolicy } from "../src/compat/resolve";
 import { compareRevision, parseRevision } from "../src/compat/revision";
+import { seedModels } from "../src/compat/providers";
 import { classifyModel } from "../src/compat/taxonomy";
 import { resolveCursorInput } from "../src/discovery/cursor";
 import { bareModelId, getLongestModelLikeIdSegment } from "../src/identity/id";
 import { buildModelReferenceIndex, resolveModelReference } from "../src/identity/reference";
 import { isOllamaCloudOutputCapped, OLLAMA_CLOUD_MAX_OUTPUT_TOKENS } from "../src/provider-models/ollama";
-import { ALIBABA_TOKEN_PLAN_STATIC_MODELS } from "../src/provider-models/openai-compat";
+import { providerEntry } from "../src/compat/providers";
 import type { Api, Model, ModelSpec } from "../src/types";
 import { buildCanonicalModelIndex, buildCanonicalReferenceData } from "./equivalence";
 
@@ -23,31 +24,6 @@ function revisionsEqual(left: string | undefined, right: string): boolean {
 	const parsedRight = parseRevision(right);
 	return parsedLeft !== undefined && parsedRight !== undefined && compareRevision(parsedLeft, parsedRight) === 0;
 }
-
-const CLOUDFLARE_AI_GATEWAY_BASE_URL = "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic";
-
-/**
- * Static fallback model injected when Cloudflare AI Gateway discovery
- * returns no results. Ensures the provider always has at least one usable
- * model entry in the catalog.
- */
-export const CLOUDFLARE_FALLBACK_MODEL: ModelSpec<"anthropic-messages"> = {
-	id: "claude-sonnet-4-5",
-	name: "Claude Sonnet 4.5",
-	api: "anthropic-messages",
-	provider: "cloudflare-ai-gateway",
-	baseUrl: CLOUDFLARE_AI_GATEWAY_BASE_URL,
-	reasoning: true,
-	input: ["text", "image"],
-	cost: {
-		input: 3,
-		output: 15,
-		cacheRead: 0.3,
-		cacheWrite: 3.75,
-	},
-	contextWindow: 200000,
-	maxTokens: 64000,
-};
 
 /** True when any component of a model's per-million-token cost is nonzero. */
 export function hasBillableCost(cost: ModelSpec["cost"]): boolean {
@@ -124,6 +100,9 @@ export function rebakeModelThinking(model: ModelSpec<Api>): void {
 	const thinking = resolveModelPolicy({ ...model, thinking: undefined }).thinking;
 	if (thinking) {
 		model.thinking = requiresProviderAuthoredEffort ? { ...thinking, requiresEffort: true } : thinking;
+		// Mirror `buildModel`: an exact `thinking-efforts` rule upgrades a
+		// neutral discovery default, so the bundled row stays reasoning-capable.
+		model.reasoning = true;
 	} else {
 		delete model.thinking;
 	}
@@ -212,6 +191,10 @@ export function applyCanonicalLimitFallback(models: ModelSpec<Api>[]): void {
 	const referenceIndex = buildModelReferenceIndex(catalog);
 
 	for (const model of models) {
+		// Providers whose discovery is the deployment truth opt out of
+		// cross-provider fills (see the descriptor fact): an omitted
+		// upstream limit stays unknown, with KDL owning corrections.
+		if (providerEntry(model.provider)?.skipCrossProviderReferenceFills === true) continue;
 		if (model.contextWindow !== null && model.maxTokens !== null) {
 			continue;
 		}
@@ -229,7 +212,8 @@ export function applyCanonicalLimitFallback(models: ModelSpec<Api>[]): void {
 				model.contextWindow = reference.contextWindow;
 			}
 			if (model.maxTokens === null && reference.maxTokens !== null) {
-				model.maxTokens = reference.maxTokens;
+				model.maxTokens =
+					model.contextWindow !== null ? Math.min(model.contextWindow, reference.maxTokens) : reference.maxTokens;
 			}
 			if (model.contextWindow !== null && model.maxTokens !== null) {
 				break;
@@ -268,7 +252,7 @@ function applyGeneratedModelPolicy(model: ModelSpec<Api>): void {
 		if (limits.maxTokens !== undefined) model.maxTokens = limits.maxTokens;
 	}
 	if (model.provider === "alibaba-token-plan") {
-		const reference = ALIBABA_TOKEN_PLAN_STATIC_MODELS.find(candidate => candidate.id === model.id);
+		const reference = seedModels("alibaba-token-plan").find(candidate => candidate.id === model.id);
 		if (reference) model.name = reference.name;
 	}
 

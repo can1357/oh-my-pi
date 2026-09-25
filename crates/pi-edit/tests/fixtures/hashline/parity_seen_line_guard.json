@@ -44,7 +44,7 @@
 			"name": "rejects editing an unsearched line under a search-minted tag"
 		},
 		{
-			"name": "applies an edit on an unseen line when edit.enforceSeenLines is off (default)"
+			"name": "applies an edit on an unseen line when edit.enforceSeenLines is off"
 		}
 	]
 }

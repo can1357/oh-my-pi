@@ -272,19 +272,31 @@ impl ExecutionParameters {
 		&self,
 		shell: &Shell<impl extensions::ShellExtensions>,
 	) -> impl Iterator<Item = (ShellFd, openfiles::OpenFile)> {
-		let our_fds = self.open_files.iter_fds();
-		let shell_fds = shell
-			.persistent_open_files()
-			.iter_fds()
-			.filter(|(fd, _)| !self.open_files.contains_fd(*fd));
-
 		#[allow(clippy::needless_collect)]
-		let all_fds: Vec<_> = our_fds
-			.chain(shell_fds)
+		let all_fds: Vec<_> = self
+			.open_fds(shell)
 			.map(|(fd, file)| (fd, file.clone()))
 			.collect();
 
 		all_fds.into_iter()
+	}
+
+	/// Like [`Self::iter_fds`], but borrows each open file instead of
+	/// duplicating it, so a caller that wants a few descriptors pays for only
+	/// those.
+	///
+	/// # Arguments
+	///
+	/// * `shell` - The shell context.
+	pub fn open_fds<'a>(
+		&'a self,
+		shell: &'a Shell<impl extensions::ShellExtensions>,
+	) -> impl Iterator<Item = (ShellFd, &'a openfiles::OpenFile)> {
+		let shell_fds = shell
+			.persistent_open_files()
+			.iter_fds()
+			.filter(|(fd, _)| !self.open_files.contains_fd(*fd));
+		self.open_files.iter_fds().chain(shell_fds)
 	}
 }
 
