@@ -152,7 +152,7 @@ export function classifyCommitEvent(eventType: string): CommitClass {
 	if (eventType === "response.completed" || eventType === "message_stop") return "terminal-success";
 	if (eventType === "response.failed") return "terminal-retryable";
 	if (eventType === "response.incomplete") return "terminal-success";
-	if (eventType === "response.error") return "terminal-failure";
+	if (eventType === "error" || eventType === "response.error") return "terminal-failure";
 	return "output";
 }
 
@@ -203,7 +203,7 @@ export function holdSseUntilCommit(
 					controller.enqueue(chunk);
 					return;
 				}
-				gate.bufferPrelude(chunk);
+				const buffered = gate.bufferPrelude(chunk);
 				pending += decoder.decode(chunk, { stream: true });
 				let next = nextSseFrame(pending);
 				while (next) {
@@ -211,29 +211,30 @@ export function holdSseUntilCommit(
 					const state = gate.classifyAndObserve(eventType, next.frame.length);
 					pending = next.rest;
 					next = nextSseFrame(pending);
-					if (state === "terminated") {
-						const kind = classifyCommitEvent(eventType);
-						if (kind === "terminal-success") {
-							// Empty/metadata-only successful completions still need held frames flushed.
-							committed = true;
-							for (const held of gate.takePrelude() ?? []) controller.enqueue(held);
-							return;
-						}
-						// Dead attempt: its held frames belong to it and are never
-						// forwarded. The failover loop catches PreludeAbortedError,
-						// discards them, and dispatches a replacement attempt.
+					if (state === "terminated" && !(classifyCommitEvent(eventType) === "terminal-success")) {
 						throw new PreludeAbortedError(gate.takePrelude() ?? [], eventType);
 					}
-					if (state === "committed") {
+					if (state === "committed" || classifyCommitEvent(eventType) === "terminal-success") {
 						committed = true;
 						for (const held of gate.takePrelude() ?? []) controller.enqueue(held);
+						if (!buffered) controller.enqueue(chunk);
 						return;
 					}
 				}
+				if (!buffered) {
+					// Cap crossed: force commit observation and keep the rejected chunk.
+					gate.classifyAndObserve("", chunk.byteLength);
+					committed = true;
+					for (const held of gate.takePrelude() ?? []) controller.enqueue(held);
+					controller.enqueue(chunk);
+				}
 			},
-			flush() {
-				// truncated tail without commit: treat as metadata-only commit so
-				// a holding consumer never stalls
+			flush(controller) {
+				if (committed) return;
+				const held = gate.takePrelude() ?? [];
+				if (held.length === 0) return;
+				gate.classifyAndObserve("", 0);
+				for (const chunk of held) controller.enqueue(chunk);
 			},
 		}),
 	);
