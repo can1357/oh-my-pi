@@ -67,7 +67,7 @@ export type MCPRequestIdFormat = "string" | "number";
 interface MCPServerConfigBase {
 	/** Whether this server is enabled (default: true) */
 	enabled?: boolean;
-	/** MCP request timeout in milliseconds (default: 30000, 0 to disable) */
+	/** MCP request timeout: milliseconds when >= 1000, seconds when a bare value < 1000 (Claude-Code-style manifests; default: 30000, 0 to disable) */
 	timeout?: number;
 	/**
 	 * Encoding for outgoing JSON-RPC request ids (default: `"number"`).
