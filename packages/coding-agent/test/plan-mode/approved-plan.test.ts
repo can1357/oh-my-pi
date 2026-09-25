@@ -6,7 +6,7 @@ import {
 	resolveApprovedPlan,
 	resolvePlanTitle,
 } from "@oh-my-pi/pi-coding-agent/plan-mode/approved-plan";
-import { normalizeLocalScheme } from "@oh-my-pi/pi-coding-agent/tools/path-utils";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 
 describe("planFileUrlForSlug", () => {
 	it("maps a slug to its local plan URL", () => {
@@ -67,9 +67,10 @@ describe("resolveApprovedPlan", () => {
 		// Mirror the real reader: canonicalize the local scheme before lookup, so a
 		// `local:/…` state path resolves the same file as the scanner's `local://…`.
 		const canonical = (files: Record<string, string>) => {
+			const router = InternalUrlRouter.instance();
 			const map: Record<string, string> = {};
-			for (const url in files) map[normalizeLocalScheme(url)] = files[url];
-			return async (url: string) => map[normalizeLocalScheme(url)] ?? null;
+			for (const url in files) map[router.normalize(url)] = files[url];
+			return async (url: string) => map[router.normalize(url)] ?? null;
 		};
 		const result = await resolveApprovedPlan({
 			suppliedTitle: undefined,

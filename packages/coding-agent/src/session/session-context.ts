@@ -475,11 +475,12 @@ export function buildSessionContext(
 		const compactionIdx = path.findIndex(e => e.type === "compaction" && e.id === compaction.id);
 
 		// A natively replayed summary must not invalidate the retained tail's
-		// bound thinking: stamping it with the entry commit timestamp would
-		// expose that as historyRewriteAt newer than the tail and strip its
-		// signatures on the next request. Predate the marker before the first
-		// retained entry instead (other lanes keep the commit timestamp).
-		let summaryTimestamp = compaction.timestamp;
+		// bound thinking: the commit timestamp as historyRewriteAt would be newer
+		// than the tail and strip its signatures on the next request. Predate the
+		// marker before the first retained entry instead (other lanes use the
+		// commit timestamp). The summary itself keeps the commit timestamp, which
+		// still retires the tail's pre-compaction usage reports.
+		let historyRewriteAt: number | undefined;
 		if (anthropicPayload !== undefined) {
 			const firstKeptIdx = path.findIndex(entry => entry.id === compaction.firstKeptEntryId);
 			const snapshotIdx =
@@ -491,9 +492,7 @@ export function buildSessionContext(
 				(snapshotIdx >= 0 && snapshotIdx < compactionIdx - 1 ? path[snapshotIdx + 1] : undefined) ??
 				path[compactionIdx + 1];
 			const retainedAt = firstRetained ? new Date(firstRetained.timestamp).getTime() : NaN;
-			if (Number.isFinite(retainedAt)) {
-				summaryTimestamp = new Date(retainedAt - 1).toISOString();
-			}
+			if (Number.isFinite(retainedAt)) historyRewriteAt = retainedAt - 1;
 		}
 
 		// Re-attach any archived snapcompact frames so the model can keep
@@ -502,7 +501,7 @@ export function buildSessionContext(
 		const compactionSummaryMsg = createCompactionSummaryMessage(
 			compaction.summary,
 			compaction.tokensBefore,
-			summaryTimestamp,
+			compaction.timestamp,
 			{
 				shortSummary: compaction.shortSummary,
 				providerPayload,
@@ -510,6 +509,7 @@ export function buildSessionContext(
 				warning: compaction.warning,
 				method: compaction.method,
 				tokensAfter: compaction.tokensAfter,
+				historyRewriteAt,
 			},
 		);
 		// Agent context (non-transcript): summary first so the LLM sees the
