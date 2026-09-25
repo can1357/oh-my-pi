@@ -122,6 +122,30 @@ describe("job renderer task-result preview", () => {
 		expect(header!.match(/SpawnProbe/g)).toHaveLength(1);
 	});
 
+	it("shows progress delivery modes on running jobs during a wait", () => {
+		const component = waitToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "" }],
+				details: {
+					op: "wait",
+					jobs: [
+						{ id: "WakeJob", type: "bash", status: "running", label: "build", durationMs: 100, progress: "wake" },
+						{ id: "AmbientJob", type: "bash", status: "running", label: "lint", durationMs: 100, progress: "ambient" },
+						{ id: "SilentJob", type: "bash", status: "running", label: "check", durationMs: 100 },
+					],
+				},
+			},
+			{ expanded: true, isPartial: true } as Parameters<typeof waitToolRenderer.renderResult>[1],
+			theme,
+		);
+		const lines = component.render(120).map(line => Bun.stripANSI(line));
+		expect(lines.find(line => line.includes("WakeJob"))).toContain("wake");
+		expect(lines.find(line => line.includes("AmbientJob"))).toContain("ambient");
+		const silent = lines.find(line => line.includes("SilentJob"));
+		expect(silent).toBeDefined();
+		expect(silent).not.toMatch(/wake|ambient/);
+	});
+
 	describe("collapse and filter when turned into a result", () => {
 		const jobsData = [
 			{
@@ -204,6 +228,7 @@ describe("job renderer task-result preview", () => {
 			const lines = component.render(120) as readonly string[];
 			expect(lines).toHaveLength(0);
 		});
+
 
 		it("renders agent rows for running agents outside job control", () => {
 			const result = {

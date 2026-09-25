@@ -154,7 +154,7 @@ describe("bashToolRenderer", () => {
 				content: [
 					{
 						type: "text",
-						text: `started\n\n${formatBackgroundNotice("bash-42")}`,
+						text: `started\n\n${formatBackgroundNotice("bash-42", "sleep 30")}`,
 					},
 				],
 				details: {
@@ -171,6 +171,7 @@ describe("bashToolRenderer", () => {
 		expect(rendered).toContain("started");
 		expect(rendered).toContain("Backgrounded: bash-42");
 		expect(rendered).not.toContain("Do NOT poll");
+		expect(rendered).not.toContain("(sleep 30)");
 	});
 
 	it("folds raw output artifact notices into the status footer", async () => {

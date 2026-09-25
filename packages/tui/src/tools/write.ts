@@ -327,6 +327,7 @@ export interface WriteRenderContext {
 function procWriteTarget(target: string): { id: string; action: ProcWriteAction } {
 	if (target.endsWith("/kill")) return { id: target.slice(0, -5), action: "kill" };
 	if (target.endsWith("/mode")) return { id: target.slice(0, -5), action: "mode" };
+	if (target.endsWith("/progress")) return { id: target.slice(0, -9), action: "progress" };
 	return { id: target, action: "stdin" };
 }
 

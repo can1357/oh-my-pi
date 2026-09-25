@@ -21,6 +21,8 @@ import { loadSkills, type Skill } from "./extensibility/skills";
 import { InternalUrlRouter } from "./internal-urls/router";
 import type { SchemeHost } from "./internal-urls/types";
 import activeRepoContextTemplate from "./prompts/system/active-repo-context.md" with { type: "text" };
+import asyncProgressTemplate from "./prompts/system/async-progress.md" with { type: "text" };
+import chattyProgressGuidanceTemplate from "./prompts/system/chatty-progress-guidance.md" with { type: "text" };
 import computerSafetyPrompt from "./prompts/system/computer-safety.md" with { type: "text" };
 import customSystemPromptTemplate from "./prompts/system/custom-system-prompt.md" with { type: "text" };
 import defaultPersonality from "./prompts/system/personalities/default.md" with { type: "text" };
@@ -584,6 +586,12 @@ export interface BuildSystemPromptOptions {
 	autoQaEnabled?: boolean;
 	/** Whether active `write` is restricted to xd:// dispatch and the plan artifact sandbox. */
 	writeTransportOnly?: boolean;
+	/** Which active tools can push background output to the model. */
+	asyncProgress?: {
+		bash?: boolean;
+		service?: boolean;
+		procWrite?: boolean;
+	};
 }
 
 /** Result of building provider-facing system prompt messages. */
@@ -676,6 +684,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		xdevDocs = "",
 		autoQaEnabled = false,
 		writeTransportOnly = false,
+		asyncProgress = {},
 		activeRepoContext: providedActiveRepoContext,
 	} = options;
 	const inlineToolDescriptors = providedInlineToolDescriptors ?? false;
@@ -957,6 +966,25 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		...contextPromptSources,
 	];
 	const injectedAlwaysApplyRules = dedupeAlwaysApplyRules(alwaysApplyRules, promptSources);
+	const asyncProgressCapabilities = {
+		bash: asyncProgress.bash === true && toolNames.includes("bash"),
+		service: asyncProgress.service === true && toolNames.includes("bash"),
+		procWrite: asyncProgress.procWrite === true && toolNames.includes("write") && !writeTransportOnly,
+	};
+	const asyncProgressPrompt =
+		asyncProgressCapabilities.bash || asyncProgressCapabilities.service
+			? prompt
+					.render(asyncProgressTemplate, {
+						...asyncProgressCapabilities,
+						toolRefs,
+						chattyGuidance: prompt
+							.render(chattyProgressGuidanceTemplate, {
+								...asyncProgressCapabilities,
+							})
+							.trim(),
+					})
+					.trim()
+			: "";
 
 	const environment = getEnvironmentInfo();
 	const data = {
@@ -1004,6 +1032,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		xdevDocs,
 		autoQaEnabled,
 		writeTransportOnly,
+		asyncProgressPrompt,
 	};
 	const selectedTemplate = resolvedCustomPrompt
 		? customSystemPromptTemplate
