@@ -128,6 +128,24 @@ await wait(5_000);`,
 		}
 	}, 30_000);
 
+	it("captures console args whose toString/valueOf are not callable", async () => {
+		const html = `<!doctype html><title>hostile</title><script>
+				console.log("hostile", { toString: "x", valueOf: "y" });
+				console.log("after hostile");
+			</script>`;
+		await invoke({ action: "open", name: "console", url: `data:text/html,${encodeURIComponent(html)}` });
+		try {
+			const result = (await call("console")) as CaptureResult;
+			expect(result.entries.map(entry => entry.text)).toEqual([
+				'hostile {"toString":"x","valueOf":"y"}',
+				"after hostile",
+			]);
+			expect(result.entries[0]?.args).toEqual(["hostile", { toString: "x", valueOf: "y" }]);
+		} finally {
+			await invoke({ action: "close", name: "console" });
+		}
+	}, 30_000);
+
 	it("writes Chromium traces and CPU profiles and reports lifecycle metrics", async () => {
 		await invoke({ action: "open", name: "console", url: "data:text/html,<title>profile</title>" });
 		try {

@@ -124,6 +124,15 @@ function boundedArgument(value: unknown): unknown {
 	return `${json.slice(0, MAX_ARG_CHARS)}…`;
 }
 
+/** Join-ready text for a serialized console argument; `String()` throws when page data carries non-callable `toString`/`valueOf`. */
+function consoleArgumentText(value: unknown): string {
+	try {
+		return String(value);
+	} catch {
+		return JSON.stringify(value) ?? Object.prototype.toString.call(value);
+	}
+}
+
 async function serializeArgument(message: ConsoleMessage, index: number): Promise<unknown> {
 	const handle = message.args()[index];
 	if (!handle) return undefined;
@@ -272,7 +281,7 @@ export class PageConsoleCapture {
 				this.#pending = this.#pending.then(async () => {
 					const args = await serializedArgs;
 					if (this.#generation !== generation) return;
-					const text = args.map(value => String(value)).join(" ");
+					const text = args.map(consoleArgumentText).join(" ");
 					this.#push({
 						seq,
 						ts: event.timestamp,
@@ -448,16 +457,21 @@ export const CMUX_CONSOLE_CAPTURE_SCRIPT = String.raw`(() => {
 		state.entries.push({ seq: state.nextSeq++, ts: Date.now(), ...entry });
 		while (state.entries.length > 500) { state.entries.shift(); state.dropped++; }
 	};
+	const text = value => {
+		try { return String(value); } catch {}
+		try { return JSON.stringify(value) ?? Object.prototype.toString.call(value); } catch {}
+		return Object.prototype.toString.call(value);
+	};
 	const safe = value => {
 		try {
 			const json = JSON.stringify(value);
 			return json && json.length > 8192 ? json.slice(0, 8192) + "…" : value;
-		} catch { return String(value); }
+		} catch { return text(value); }
 	};
 	for (const level of ["log", "info", "warn", "error", "debug"]) {
 		const original = console[level].bind(console);
 		console[level] = (...args) => {
-			push({ type: "console", level, text: args.map(value => String(value)).join(" ").slice(0, 16384), args: args.map(safe) });
+			push({ type: "console", level, text: args.map(text).join(" ").slice(0, 16384), args: args.map(safe) });
 			return original(...args);
 		};
 	}
