@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import type { Model } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import { MAIN_AGENT_RULE_NAME, SUB_AGENT_RULE_NAME } from "../capability/rule";
 import type { ModelRegistry } from "../config/model-registry";
@@ -19,6 +20,8 @@ import {
 	compactionThresholdSettings,
 	createMCPProxyTools,
 	createSubagentSettings,
+	modelRequiresStructuredOutputHardening,
+	resolveStructuredOutputHarnessPolicy,
 } from "./executor";
 import type { AgentDefinition } from "./types";
 
@@ -151,6 +154,30 @@ export function createPersistedSubagentReviverFactory(
 			const restrictToolNames = init.restrictToolNames === true;
 			const mcpManager = restrictToolNames ? undefined : MCPManager.instance();
 			const mcpProxyTools = mcpManager ? createMCPProxyTools(mcpManager) : [];
+			let effectiveOutputSchemaMode = init.outputSchemaMode;
+			const requestedOutputSchemaMode = init.outputSchemaRequestedMode ?? init.outputSchemaMode;
+			const resolveOutputSchemaFailurePolicy =
+				init.outputSchema !== undefined && init.outputSchemaCorrectionLocked !== true
+					? (liveModel: Model) => {
+							if (!modelRequiresStructuredOutputHardening(liveModel)) {
+								effectiveOutputSchemaMode = requestedOutputSchemaMode;
+								return undefined;
+							}
+							effectiveOutputSchemaMode = "strict";
+							try {
+								const policy = resolveStructuredOutputHarnessPolicy(
+									true,
+									init.outputSchema,
+									requestedOutputSchemaMode,
+								);
+								return policy.failureToolNames
+									? { mode: policy.mode ?? "strict", toolNames: policy.failureToolNames }
+									: undefined;
+							} catch {
+								return { mode: "strict" as const, toolNames: ["yield"] };
+							}
+						}
+					: undefined;
 			const { session } = await createAgentSession({
 				cwd: ctx.session.sessionManager.getCwd(),
 				authStorage: ctx.authStorage,
@@ -189,6 +216,9 @@ export function createPersistedSubagentReviverFactory(
 				toolNames: revivedToolNames,
 				outputSchema: init.outputSchema,
 				outputSchemaMode: init.outputSchemaMode,
+				outputSchemaFailureToolNames:
+					init.outputSchemaCorrectionLocked === true ? init.outputSchemaFailureToolNames : undefined,
+				resolveOutputSchemaFailurePolicy,
 				restrictToolNames: restrictToolNames || undefined,
 				requireYieldTool: true,
 				systemPrompt: () => [init.systemPrompt],
@@ -249,6 +279,7 @@ export function createPersistedSubagentReviverFactory(
 				sessionFile,
 				outputSchema: init.outputSchema,
 				outputSchemaMode: init.outputSchemaMode,
+				getOutputSchemaMode: () => effectiveOutputSchemaMode,
 				// Anchor artifacts to the revived ref's own dir (its parent's children
 				// dir), not the live root session's, matching the spawn callers (#11563).
 				artifactsDir: path.dirname(sessionFile),

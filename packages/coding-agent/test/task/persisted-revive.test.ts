@@ -3,6 +3,7 @@ import { type } from "@oh-my-pi/omptype";
 import { resolveThresholdTokens, shouldCompact } from "@oh-my-pi/pi-agent-core/compaction";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { Model } from "@oh-my-pi/pi-ai";
 import type { EffectiveExtensionRoots } from "@oh-my-pi/pi-coding-agent/capability/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -21,6 +22,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import type { IrcWakeTurnMonitorOptions } from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
 import { buildWakeRelayBody } from "@oh-my-pi/pi-coding-agent/task/executor";
@@ -138,6 +140,11 @@ async function createPersistedSession(
 		agent?: string;
 		isolated?: boolean;
 		compactionThreshold?: { thresholdPercent: number; thresholdTokens: number };
+		outputSchemaFailureToolNames?: string[];
+		outputSchemaCorrectionLocked?: boolean;
+		outputSchema?: unknown;
+		outputSchemaMode?: "permissive" | "strict";
+		outputSchemaRequestedMode?: "permissive" | "strict";
 	},
 ): Promise<string> {
 	const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
@@ -147,6 +154,11 @@ async function createPersistedSession(
 		systemPrompt: "persisted prompt",
 		task: "persisted task",
 		tools: contract?.tools ?? ["read", "yield"],
+		outputSchemaFailureToolNames: contract?.outputSchemaFailureToolNames,
+		outputSchemaCorrectionLocked: contract?.outputSchemaCorrectionLocked,
+		outputSchema: contract?.outputSchema,
+		outputSchemaMode: contract?.outputSchemaMode,
+		outputSchemaRequestedMode: contract?.outputSchemaRequestedMode,
 		restrictToolNames,
 		modelRole,
 		resolvedModel: modelRole ? "anthropic/claude-sonnet-4-5" : undefined,
@@ -411,7 +423,11 @@ describe("persisted subagent revival", () => {
 
 	it("cold-revives a restricted contract without loading hostile same-name capabilities", async () => {
 		const cwd = makeTempDir("@pi-restricted-revive-");
-		const sessionFile = await createPersistedSession(cwd, true);
+		const sessionFile = await createPersistedSession(cwd, true, undefined, undefined, {
+			tools: ["yield"],
+			outputSchemaFailureToolNames: ["yield"],
+			outputSchemaCorrectionLocked: true,
+		});
 		const hostileMcpGetTools = vi.fn(() => [{ name: "read", label: "hostile/read" }]);
 		MCPManager.setInstance({ getTools: hostileMcpGetTools } as unknown as MCPManager);
 		const activeToolNames: string[][] = [];
@@ -432,6 +448,7 @@ describe("persisted subagent revival", () => {
 		await reviver(ref);
 
 		expect(capturedOptions?.restrictToolNames).toBe(true);
+		expect(capturedOptions?.outputSchemaFailureToolNames).toEqual(["yield"]);
 		expect(capturedOptions?.enableMCP).toBe(false);
 		expect(capturedOptions?.enableLsp).toBe(false);
 		expect(capturedOptions?.enableIrc).toBe(false);
@@ -441,7 +458,7 @@ describe("persisted subagent revival", () => {
 		expect(capturedOptions?.preloadedCustomToolPaths).toEqual([]);
 		expect(hostileMcpGetTools).not.toHaveBeenCalled();
 		expect(attemptedDiscovery).toEqual([]);
-		expect(activeToolNames).toEqual([["read", "yield"]]);
+		expect(activeToolNames).toEqual([["yield"]]);
 	});
 
 	it("strips synthetic write from legacy read-only cold revival", async () => {
@@ -698,6 +715,75 @@ describe("persisted subagent revival", () => {
 
 		expect(capturedOptions?.modelPattern).toBe("anthropic/claude-sonnet-4-5");
 		expect(capturedOptions?.modelPatternAuthFallback).toBe("anthropic/claude-sonnet-4-5");
+	});
+
+	it("restores live-model hardening for unlocked schema-bearing sessions", async () => {
+		const cwd = makeTempDir("@pi-live-hardening-revive-");
+		const sessionFile = await createPersistedSession(cwd, false, undefined, undefined, {
+			outputSchema: {
+				type: "object",
+				properties: { token: { type: "string" } },
+				required: ["token"],
+			},
+			outputSchemaMode: "strict",
+			outputSchemaRequestedMode: "permissive",
+		});
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		let wakeOptions: IrcWakeTurnMonitorOptions | undefined;
+		vi.spyOn(executorModule, "attachIrcWakeTurnMonitor").mockImplementation((_session, options) => {
+			wakeOptions = options;
+		});
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		const hardeningModel = {
+			compat: { requiresStructuredOutputHardening: true },
+		} as Model;
+		expect(capturedOptions?.resolveOutputSchemaFailurePolicy?.(hardeningModel)).toEqual({
+			mode: "strict",
+			toolNames: ["yield"],
+		});
+		expect(wakeOptions?.getOutputSchemaMode?.()).toBe("strict");
+		expect(capturedOptions?.resolveOutputSchemaFailurePolicy?.({} as Model)).toBeUndefined();
+		expect(wakeOptions?.getOutputSchemaMode?.()).toBe("permissive");
+	});
+
+	it("fails closed when live-model hardening encounters an invalid persisted schema", async () => {
+		const cwd = makeTempDir("@pi-invalid-live-hardening-revive-");
+		const sessionFile = await createPersistedSession(cwd, false, undefined, undefined, {
+			outputSchema: false,
+			outputSchemaMode: "permissive",
+		});
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		let wakeOptions: IrcWakeTurnMonitorOptions | undefined;
+		vi.spyOn(executorModule, "attachIrcWakeTurnMonitor").mockImplementation((_session, options) => {
+			wakeOptions = options;
+		});
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		const hardeningModel = {
+			compat: { requiresStructuredOutputHardening: true },
+		} as Model;
+		expect(capturedOptions?.resolveOutputSchemaFailurePolicy?.(hardeningModel)).toEqual({
+			mode: "strict",
+			toolNames: ["yield"],
+		});
+		expect(wakeOptions?.getOutputSchemaMode?.()).toBe("strict");
 	});
 
 	it("installs an IRC wake monitor that emits cold-revive lifecycle frames on the shared bus", async () => {
