@@ -76,6 +76,7 @@ import {
 	zenmuxModelManagerOptions,
 	zhipuCodingPlanModelManagerOptions,
 } from "./openai-compat";
+import { openzooModelManagerOptions } from "./openzoo";
 import {
 	cursorModelManagerOptions,
 	devinModelManagerOptions,
@@ -135,6 +136,7 @@ const MODEL_MANAGER_FACTORIES: Readonly<Partial<Record<KnownProvider, ModelManag
 	"opencode-go": config => opencodeGoModelManagerOptions(config),
 	"opencode-zen": config => opencodeZenModelManagerOptions(config),
 	openrouter: config => openrouterModelManagerOptions(config),
+	openzoo: config => openzooModelManagerOptions(config),
 	qianfan: config => qianfanModelManagerOptions(config),
 	"qwen-portal": config => qwenPortalModelManagerOptions(config),
 	sakana: config => sakanaModelManagerOptions(config),
