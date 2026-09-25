@@ -167,6 +167,7 @@ fn global_key_chord(input: &mut Enigo, keys: &[KeyName]) -> CoreResult<()> {
 
 mod background {
 	use std::ffi::c_void;
+	use std::mem::{size_of, zeroed};
 
 	use windows_sys::Win32::{
 		Foundation::{GetLastError, HWND, LPARAM, POINT, WPARAM},
@@ -181,19 +182,21 @@ mod background {
 				VK_UP, VkKeyScanW,
 			},
 			WindowsAndMessaging::{
-				GetClassNameW, IsWindow, PostMessageW, WM_CHAR, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK,
-				WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP,
-				WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN,
-				WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+				GA_ROOT, GetAncestor, GetClassNameW, GetGUIThreadInfo, GetWindowThreadProcessId,
+				GUITHREADINFO, IsWindow, PostMessageW, WM_CHAR, WM_KEYDOWN, WM_KEYUP,
+				WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN,
+				WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDBLCLK,
+				WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
 			},
 		},
 	};
-
 	use super::{CoreResult, DesktopError, KeyName, Modifiers, MouseButton, PointerEvent};
 	use crate::desktop::win32::{
 		capture,
 		delivery::{EventKind, would_be_silently_dropped},
 	};
+use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus;
 
 	const MK_LBUTTON: usize = 0x0001;
 	const MK_RBUTTON: usize = 0x0002;
@@ -237,6 +240,55 @@ mod background {
 			)));
 		}
 		Ok(())
+	}
+
+	/// Resolves the window that owns keyboard input for `top_level`.
+	///
+	/// Posted messages bypass the target's message loop, so they must land on the
+	/// exact window holding keyboard focus. Classic applications host their input
+	/// sink in a child control (Notepad's edit control); posting characters to the
+	/// frame silently loses them.
+	///
+	/// `GetFocus` cannot see other threads' focus directly, so this briefly attaches
+	/// the calling thread to the target's input queue to read it. Caret-less custom
+	/// controls are covered by that path; the GUI-thread caret/active windows and the
+	/// frame remain as validated fallbacks.
+	fn input_sink(top_level: HWND) -> HWND {
+		let rooted = |candidate: HWND| {
+			// SAFETY: IsWindow and GetAncestor are pure queries on returned handles.
+			!candidate.is_null()
+				&& unsafe { IsWindow(candidate) != 0 }
+				&& unsafe { GetAncestor(candidate, GA_ROOT) } == top_level
+		};
+		// SAFETY: pure query on a validated handle; the process id is not needed.
+		let thread = unsafe { GetWindowThreadProcessId(top_level, std::ptr::null_mut()) };
+		if thread == 0 {
+			return top_level;
+		}
+		// SAFETY: attach/detach is the documented pattern for reading another
+		// thread's focus state; the attached section covers a single scalar read.
+		let current = unsafe { GetCurrentThreadId() };
+		if unsafe { AttachThreadInput(current, thread, 1) } != 0 {
+			// SAFETY: after attaching, both threads share one input queue, so this
+			// returns the target queue's focused window.
+			let focus = unsafe { GetFocus() };
+			unsafe { AttachThreadInput(current, thread, 0) };
+			if rooted(focus) {
+				return focus;
+			}
+		}
+		// SAFETY: info is fully initialized before the call and read afterwards.
+		let mut info: GUITHREADINFO = unsafe { zeroed() };
+		info.cbSize = size_of::<GUITHREADINFO>() as u32;
+		// SAFETY: GetGUIThreadInfo only writes through the provided pointer.
+		if unsafe { GetGUIThreadInfo(thread, &mut info) } != 0 {
+			for candidate in [info.hwndCaret, info.hwndActive] {
+				if rooted(candidate) {
+					return candidate;
+				}
+			}
+		}
+		top_level
 	}
 
 	fn post(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> CoreResult<()> {
@@ -523,13 +575,19 @@ mod background {
 
 	pub(super) fn key_chord(id: &str, keys: &[KeyName]) -> CoreResult<()> {
 		let hwnd = hwnd(id)?;
-		let kind = if keys.len() > 1 || keys.iter().any(|key| key.is_modifier()) {
-			EventKind::KeyCombo
-		} else {
-			EventKind::Keystroke
-		};
-		ensure_delivery(id, hwnd, kind)?;
-		let mut emitter = KeyEmitter { hwnd, alt_depth: 0 };
+		ensure_delivery(
+			id,
+			hwnd,
+			if keys.len() > 1 || keys.iter().any(|key| key.is_modifier()) {
+				EventKind::KeyCombo
+			} else {
+				EventKind::Keystroke
+			},
+		)?;
+		// Route to the focused child window so the target's own TranslateMessage
+		// pass synthesizes characters for printable keys; posting to the frame
+		// loses them.
+		let mut emitter = KeyEmitter { hwnd: input_sink(hwnd), alt_depth: 0 };
 		let mut held = Vec::with_capacity(keys.len());
 		for &key in keys {
 			if let Err(error) = emitter.key(key, true) {
@@ -554,11 +612,12 @@ mod background {
 	pub(super) fn type_text(id: &str, text: &str) -> CoreResult<()> {
 		let hwnd = hwnd(id)?;
 		ensure_delivery(id, hwnd, EventKind::TextInput)?;
+		let sink = input_sink(hwnd);
 		for character in text.chars() {
 			let character = if character == '\n' { '\r' } else { character };
 			let mut units = [0; 2];
 			for &unit in character.encode_utf16(&mut units).iter() {
-				post(hwnd, WM_CHAR, usize::from(unit), 1)?;
+				post(sink, WM_CHAR, usize::from(unit), 1)?;
 			}
 		}
 		Ok(())
