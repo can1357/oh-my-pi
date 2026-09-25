@@ -278,11 +278,24 @@ function canonicalizeTarget(candidate: string): string {
 				"enable it in the parent's cgroup.subtree_control first",
 		);
 	}
-	if (!statSync(path.join(canonical, "memory.max")).isFile()) {
+	let memoryMax: Stats;
+	try {
+		memoryMax = statSync(path.join(canonical, "memory.max"));
+	} catch (error) {
+		throw new Error(`tool cgroup ${candidate}: ${(error as NodeJS.ErrnoException).code ?? "missing"} for memory.max`);
+	}
+	if (!memoryMax.isFile()) {
 		throw new Error(`tool cgroup ${candidate}: memory.max is unavailable, so no limit would apply`);
 	}
 
-	const subtree = readFileSync(path.join(canonical, "cgroup.subtree_control"), "utf8").trim();
+	let subtree: string;
+	try {
+		subtree = readFileSync(path.join(canonical, "cgroup.subtree_control"), "utf8").trim();
+	} catch (error) {
+		throw new Error(
+			`tool cgroup ${candidate}: ${(error as NodeJS.ErrnoException).code ?? "missing"} for cgroup.subtree_control`,
+		);
+	}
 	if (subtree !== "") {
 		throw new Error(
 			`tool cgroup ${candidate}: ${canonical} already delegates ${subtree}; place workloads in a leaf, not a parent`,

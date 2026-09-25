@@ -134,6 +134,19 @@ describe.skipIf(!leaf)("delegated leaf", () => {
 		expect(resolveToolCgroup()).toBe(realpathSync(leaf!));
 	});
 
+	it("keeps the packaged bootstrap in step with the Rust PTY copy", () => {
+		// The PTY path cannot extend portable-pty's pre_exec, so it carries the same
+		// script as a Rust literal. Nothing links the two at build time — this fails
+		// the moment either drifts.
+		const rust = readFileSync(new URL("../../../crates/pi-natives/src/pty.rs", import.meta.url), "utf8");
+		const literal = /const SCRIPT: &str = r#"(?<script>[\s\S]*?)"#;/.exec(rust)?.groups?.script;
+		expect(literal).toBeString();
+		configureToolCgroup(leaf);
+		const script = wrapToolCommand(["true"])[3];
+		if (typeof script !== "string") throw new Error("bootstrap script missing from the wrapped argv");
+		expect(script).toBe(literal);
+	});
+
 	it("runs the bootstrap through an interpreter invocation this host accepts", () => {
 		// `-p` is bash/ksh only: dash and busybox ash exit 2 on it, which would fail
 		// every placed spawn before membership was written. Whatever flags are
