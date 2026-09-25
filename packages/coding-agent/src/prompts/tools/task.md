@@ -14,9 +14,12 @@ Shared edits need one integration owner{{#if ircEnabled}}; siblings coordinate v
 {{#if evalToolsEnabled}}`tools`: eval-defined, run in your kernel.
 {{/if}}{{#if effortEnabled}}`effort`: `"lo"`|`"med"`|`"hi"` by complexity.
 {{/if}}`schemaMode`: default permissive warns after retries; strict fails.
+`saveSnapshotAs`: publish an immutable child-session snapshot under this parent session's artifacts only after a successful terminal `yield`; async jobs publish after settlement. `fromSnapshot`: fork a fresh child from a snapshot label or id in the same parent session. Reuse requires the same agent definition, resolved model, and tools; the new call supplies its own context and task.
+Example: warm up `reviewer` with `saveSnapshotAs: "review-ready"`, then run independent review items with `fromSnapshot: "review-ready"` and distinct tasks. Snapshots have no list/delete tool surface.
+
 {{#if isolationEnabled}}{{#if applyIsolatedChanges}}`isolated`: worktree; successful changes apply to parent.
 {{else}}`isolated`: worktree; changes retained, not applied.
-{{/if}}{{/if}}Children start blank;{{#if ircEnabled}} parent IRC steers immediately;{{/if}} large payloads via `local://<path>`, NEVER inline.
+{{/if}}{{/if}}Children start blank unless `fromSnapshot` forks saved history;{{#if ircEnabled}} parent IRC steers immediately;{{/if}} large payloads via `local://<path>`, NEVER inline.
 
 # Format
 {{#if batchEnabled}}`context`: shared (`# Goal`, `# Constraints`, `# Contract` interfaces); NEVER repeat per task.

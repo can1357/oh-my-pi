@@ -56,6 +56,7 @@ import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "@oh-my-pi/pi-tui/tools/task";
 import { repairTaskParams } from "@oh-my-pi/pi-tui/tools/task-repair-args";
 import { resolveEffectiveSubagentPolicy, runStructuredSubagent, StructuredSubagentError } from "./structured-subagent";
+import { loadTaskSnapshot, publishTaskSnapshot } from "./snapshots";
 
 import { cfgAsyncEnabled } from "../tools/settings";
 import {
@@ -280,6 +281,8 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 	if ("outputSchema" in params) item.outputSchema = params.outputSchema;
 	if ("schemaMode" in params) item.schemaMode = params.schemaMode;
 	if ("tools" in params) item.tools = params.tools;
+	if ("saveSnapshotAs" in params) item.saveSnapshotAs = params.saveSnapshotAs;
+	if ("fromSnapshot" in params) item.fromSnapshot = params.fromSnapshot;
 	if ("effort" in params) item.effort = params.effort;
 	if ("isolated" in params) item.isolated = params.isolated;
 	return [item];
@@ -302,6 +305,8 @@ function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string
 	if ("outputSchema" in item) spawn.outputSchema = item.outputSchema;
 	if ("schemaMode" in item) spawn.schemaMode = item.schemaMode;
 	if ("tools" in item) spawn.tools = item.tools;
+	if ("saveSnapshotAs" in item) spawn.saveSnapshotAs = item.saveSnapshotAs;
+	if ("fromSnapshot" in item) spawn.fromSnapshot = item.fromSnapshot;
 	if ("effort" in item) spawn.effort = item.effort;
 	if (item.isolated !== undefined) {
 		spawn.isolated = item.isolated;
@@ -715,6 +720,17 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			}
 		}
 		const normalizedSpawnParams = spawnItems.map(item => spawnParamsFor(params, item, defaultAgent));
+		// Snapshot references must be valid before any child or background job starts.
+		const parentSessionFile = this.session.getSessionFile();
+		for (const spawn of normalizedSpawnParams) {
+			if (spawn.saveSnapshotAs === undefined && spawn.fromSnapshot === undefined) continue;
+			if (!parentSessionFile) {
+				return createTaskModeError("Task snapshots require a persisted parent session.");
+			}
+			if (spawn.fromSnapshot !== undefined && spawn.isolated === true) {
+				return createTaskModeError("A task cannot use `fromSnapshot` in an isolated workspace.");
+			}
+		}
 		const resolvedAgents = normalizedSpawnParams.map(spawn => spawn.agent ?? defaultAgent);
 		// Resolve every item before choosing an execution path. No executor or
 		// job manager may observe a batch unless every effective policy is valid.
@@ -744,6 +760,25 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			);
 		}
 		const policies = preflights.map(preflight => preflight.policy!);
+		for (let index = 0; index < normalizedSpawnParams.length; index++) {
+			const reference = normalizedSpawnParams[index]?.fromSnapshot;
+			if (reference === undefined) continue;
+			try {
+				const snapshot = await loadTaskSnapshot({ parentSessionFile: parentSessionFile!, reference });
+				if (
+					snapshot.agentName !== policies[index]?.agentName ||
+					snapshot.cwd !== this.session.cwd ||
+					(snapshot.agentPrompt !== undefined &&
+						snapshot.agentPrompt !== policies[index]?.effectiveAgent.systemPrompt)
+				) {
+					return createTaskModeError(
+						`Task ${index + 1} has an incompatible agent definition or working directory for snapshot \`${reference}\`.`,
+					);
+				}
+			} catch (error) {
+				return createTaskModeError(`Task ${index + 1} snapshot preflight failed: ${String(error)}`);
+			}
+		}
 		const itemBlocking = policies.map(policy => policy.effectiveAgent.blocking === true);
 
 		// Execution mode is per item: an item whose agent type declares
@@ -1501,6 +1536,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
 				...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
 				...(params.effort !== undefined ? { effort: params.effort } : {}),
+				...(params.fromSnapshot !== undefined ? { fromSnapshot: params.fromSnapshot } : {}),
 				...(params.tools?.length
 					? {
 							customTools: createEvalCustomTools(
@@ -1543,12 +1579,34 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					});
 				},
 			});
-			return this.#buildResultPayload(
-				execution.result,
+			const result = execution.result;
+			const payload = this.#buildResultPayload(
+				result,
 				execution.policy.discovery.projectAgentsDir,
 				Date.now() - startTime,
 				execution.mergeSummary,
 			);
+			if (params.saveSnapshotAs !== undefined) {
+				if (result.exitCode !== 0 || result.aborted || result.error) {
+					payload.content.push({ type: "text", text: "No snapshot was published because the task failed." });
+					return payload;
+				}
+				try {
+					await AgentRegistry.global().get(result.id)?.session?.sessionManager.flush();
+					const snapshot = await publishTaskSnapshot({
+						parentSessionFile: this.session.getSessionFile()!,
+						sourceSessionFile: path.join(execution.artifactsDir, `${result.id}.jsonl`),
+						label: params.saveSnapshotAs,
+						agentName: execution.policy.agentName,
+						agentId: result.id,
+						agentPrompt: execution.policy.effectiveAgent.systemPrompt,
+					});
+					payload.content.push({ type: "text", text: `Snapshot ${snapshot.id} (${snapshot.label}) is ready.` });
+				} catch (error) {
+					payload.content.push({ type: "text", text: `Snapshot publication failed: ${String(error)}` });
+				}
+			}
+			return payload;
 		} catch (error) {
 			const message = error instanceof StructuredSubagentError ? error.message : String(error);
 			return {

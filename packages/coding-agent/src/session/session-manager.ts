@@ -3352,6 +3352,8 @@ export class SessionManager {
 			suppressBreadcrumb?: boolean;
 			sessionFile?: string;
 			resetInheritedCost?: boolean;
+			/** Reuse the source prompt-cache identity only if the caller keeps the same provider-facing prompt. */
+			inheritPromptCacheKey?: boolean;
 			repairInterruptedTail?: boolean;
 		},
 	): Promise<SessionManager> {
@@ -3379,7 +3381,10 @@ export class SessionManager {
 		manager.#resetToNewSession(
 			{
 				parentSession: sourceHeader?.id,
-				providerPromptCacheKey: sourceHeader?.providerPromptCacheKey ?? sourceHeader?.id,
+				providerPromptCacheKey:
+					options?.inheritPromptCacheKey === false
+						? undefined
+						: (sourceHeader?.providerPromptCacheKey ?? sourceHeader?.id),
 			},
 			options?.sessionFile,
 		);
