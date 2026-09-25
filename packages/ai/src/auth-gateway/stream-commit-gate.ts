@@ -124,10 +124,12 @@ export class StreamCommitGate {
 /** Thrown/streamed when a held stream hits a pre-commit retryable terminal. */
 export class PreludeAbortedError extends Error {
 	readonly frames: Uint8Array[];
+	readonly eventType: string;
 	constructor(frames: Uint8Array[], eventType: string) {
 		super(`upstream stream ended before commit (${eventType})`);
 		this.name = "PreludeAbortedError";
 		this.frames = frames;
+		this.eventType = eventType;
 	}
 }
 
@@ -257,10 +259,116 @@ export function holdSseUntilCommit(
 	);
 }
 
+export interface HeldSsePumpOptions {
+	/** Total attempts including the first. Defaults to 3. */
+	maxAttempts?: number;
+	/** Invoked after each discarded pre-commit attempt. */
+	onAbort?: (error: PreludeAbortedError, attempt: number) => void;
+	/** Terminal frame enqueued when reopening an attempt throws before any commit. */
+	synthesizeFailure?: (error: unknown) => Uint8Array | undefined;
+	/** Called exactly once when the pump settles (done, flushed, failed, or cancelled). */
+	onSettle?: () => void;
+}
+
+/**
+ * Decision consumer for {@link holdSseUntilCommit}: pumps held attempts into one
+ * downstream body so a pre-commit retryable terminal fails over transparently —
+ * the dead attempt's metadata frames are discarded and the replacement attempt's
+ * prelude becomes the only prelude the client sees. The first attempt is passed
+ * in already open so its setup errors can still surface as HTTP errors to the
+ * caller; `openNext` supplies replacements, and `gate.reset()` runs between
+ * attempts. Retryable exhaustion (or a pre-commit `terminal-failure`) flushes
+ * the last attempt's held frames so the client observes the provider's real
+ * terminal event rather than a silent truncation.
+ */
+export function pumpHeldSseAttempts(
+	first: ReadableStream<Uint8Array>,
+	openNext: () => ReadableStream<Uint8Array> | Promise<ReadableStream<Uint8Array>>,
+	gate: StreamCommitGate,
+	options?: HeldSsePumpOptions,
+): ReadableStream<Uint8Array> {
+	const maxAttempts = options?.maxAttempts ?? 3;
+	let inner: ReturnType<ReadableStream<Uint8Array>["getReader"]> | undefined;
+	let settled = false;
+	const settle = () => {
+		if (!settled) {
+			settled = true;
+			options?.onSettle?.();
+		}
+	};
+	return new ReadableStream<Uint8Array>({
+		async start(out) {
+			let sse = first;
+			// `start` resolving does not close the stream — every exit path must
+			// close/error the controller explicitly.
+			const close = () => {
+				try {
+					out.close();
+				} catch {}
+			};
+			try {
+				for (let attempt = 1; ; attempt++) {
+					let reader: ReturnType<ReadableStream<Uint8Array>["getReader"]> | undefined;
+					try {
+						const rd = sse.getReader();
+						reader = inner = rd;
+						for (;;) {
+							const { done, value } = await rd.read();
+							if (done) {
+								close();
+								return;
+							}
+							out.enqueue(value);
+						}
+					} catch (error) {
+						if (!(error instanceof PreludeAbortedError)) {
+							try {
+								out.error(error);
+							} catch {}
+							return;
+						}
+						options?.onAbort?.(error, attempt);
+						const retryable = classifyCommitEvent(error.eventType) === "terminal-retryable";
+						if (!retryable || attempt >= maxAttempts) {
+							// Honest terminal: flush the dead attempt's held frames so the
+							// client sees the provider's real `response.failed`/`error`.
+							for (const frame of error.frames) out.enqueue(frame);
+							close();
+							return;
+						}
+					} finally {
+						inner = undefined;
+						if (reader) {
+							reader.releaseLock();
+							await sse.cancel().catch(() => {});
+						}
+					}
+					try {
+						gate.reset();
+						sse = await openNext();
+					} catch (error) {
+						const frame = options?.synthesizeFailure?.(error);
+						if (frame) out.enqueue(frame);
+						close();
+						return;
+					}
+				}
+			} finally {
+				settle();
+			}
+		},
+		async cancel(reason) {
+			settle();
+			if (inner) await inner.cancel(reason).catch(() => {});
+		},
+	});
+}
+
 /**
  * Observe encoded SSE bytes into a {@link StreamCommitGate} without altering the
- * downstream payload. Used by the gateway streaming path so a pre-commit
- * `response.failed` can be classified (Wave A does not failover yet).
+ * downstream payload. Observe-only counterpart to {@link holdSseUntilCommit} —
+ * frames pass through unbuffered, so a pre-commit terminal is classified but
+ * not held back.
  */
 export function observeSseCommit(
 	stream: ReadableStream<Uint8Array>,
