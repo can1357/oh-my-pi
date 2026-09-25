@@ -4,6 +4,7 @@
 
 ### Breaking Changes
 
+- Custom `pi-tui` status-line integrations must now provide `aiu` in usage statistics and billing-summary options (use 0 when unavailable) ([#13197](https://github.com/can1357/oh-my-pi/pull/13197) by [@joslack](https://github.com/joslack)).
 - Replaced the `CustomEditor` space-hold callbacks and `sttHoldEnabled` option with the `spaceHold.handler` API.
 - Removed `Editor.cursorOverrideWidth`; widths for `cursorOverride` glyphs are now measured automatically.
 
@@ -11,6 +12,8 @@
 
 - Added UI support for marking paginated content in read-tool results
 - Added transcript rendering for `cfg://` configuration read and write tool calls
+- The compact status line now shows positive GitHub Copilot AI-unit totals instead of estimated dollar and premium-request values ([#13197](https://github.com/can1357/oh-my-pi/pull/13197) by [@joslack](https://github.com/joslack)).
+- The compact status line now shows positive GitHub Copilot AI-unit totals alongside existing billing values ([#13197](https://github.com/can1357/oh-my-pi/pull/13197) by [@joslack](https://github.com/joslack)).
 - Added push-to-talk dictation to `Input`, including live transcription text and `cursorOverride` support.
 
 ### Changed

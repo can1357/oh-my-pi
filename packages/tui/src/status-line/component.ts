@@ -2130,6 +2130,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			orchestrationCacheRead: 0,
 			premiumRequests: 0,
 			cost: 0,
+			aiu: 0,
 		};
 		const usageStats = {
 			...aggregateUsageStats,

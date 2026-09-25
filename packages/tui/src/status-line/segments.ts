@@ -561,7 +561,7 @@ const tokenRateSegment: StatusLineSegment = {
 const costSegment: StatusLineSegment = {
 	id: "cost",
 	render(ctx) {
-		const { cost, premiumRequests } = ctx.usageStats;
+		const { cost, premiumRequests, aiu } = ctx.usageStats;
 		const advisorCost = ctx.session.getAdvisorCost?.() ?? 0;
 		const state = ctx.session.state;
 		const pricingPeriod = state.model?.cost
@@ -578,6 +578,7 @@ const costSegment: StatusLineSegment = {
 				cost,
 				usingSubscription,
 				premiumRequests,
+				aiu,
 				fractionDigits: 2,
 				startupPlaceholder: ctx.startupPlaceholder,
 				pricingPeriod,

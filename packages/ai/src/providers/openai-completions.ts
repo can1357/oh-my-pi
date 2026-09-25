@@ -81,6 +81,7 @@ import {
 } from "./openai-reasoning-fallback";
 import { servedModelFromOpenRouterReasoning } from "./anthropic-signature";
 import { resolveCopilotRequestIdentity, wrapFetchForCopilotFallback } from "./github-copilot-headers";
+import { applyCopilotUsage, type CopilotUsageCarrier } from "./github-copilot-usage";
 import {
 	applyChatCompletionsReasoningParams,
 	applyChatCompletionsToolStream,
@@ -1203,8 +1204,12 @@ const streamOpenAICompletionsOnce = (
 			let streamFinishedAt: number | undefined;
 			let sawUsagePayload = false;
 			let awaitTrailingUsageDetails = false;
+			// Copilot's billing block rides on the usage-bearing chunk, but each usage
+			// payload replaces `output.usage`; keep the latest block and re-apply it.
+			let copilotUsage: unknown;
 			const applyUsagePayload = (rawUsage: object): void => {
 				output.usage = parseChunkUsage(rawUsage, model, premiumRequestsTotal, output.timestamp);
+				applyCopilotUsage(model, output.usage, copilotUsage);
 				sawUsagePayload = true;
 				awaitTrailingUsageDetails = !hasPositiveCacheReadTokenField(rawUsage);
 			};
@@ -1261,8 +1266,12 @@ const streamOpenAICompletionsOnce = (
 						typeof upstreamProvider === "string" && upstreamProvider.length > 0 ? upstreamProvider : undefined;
 				}
 
+				const chunkCopilotUsage = (chunk as CopilotUsageCarrier).copilot_usage;
+				if (chunkCopilotUsage !== undefined) copilotUsage = chunkCopilotUsage;
 				if (chunk.usage) {
 					applyUsagePayload(chunk.usage);
+				} else if (chunkCopilotUsage !== undefined) {
+					applyCopilotUsage(model, output.usage, copilotUsage);
 				}
 
 				const choice = Array.isArray(chunk.choices) ? chunk.choices[0] : undefined;

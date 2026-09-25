@@ -62,6 +62,7 @@ export function createGallerySegmentContext(sessionOptions?: GallerySessionOptio
 			orchestrationCacheRead: 3_000,
 			premiumRequests: sessionOptions?.premiumRequests ?? 2,
 			cost: sessionOptions?.cost ?? 0.42,
+			aiu: 0,
 			tokensPerSecond: 87.3,
 		},
 		contextPercent: 62,

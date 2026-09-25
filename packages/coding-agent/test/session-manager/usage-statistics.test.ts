@@ -174,7 +174,7 @@ describe("SessionManager usage statistics", () => {
 		const usage = session.getUsageStatistics();
 		expect(usage.premiumRequests).toBeCloseTo(3.33, 8);
 	});
-	it("defaults premium requests to zero when usage payload omits the field", () => {
+	it("defaults premium requests and Copilot AIU to zero when usage omits them", () => {
 		const session = SessionManager.inMemory();
 
 		session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
@@ -198,6 +198,7 @@ describe("SessionManager usage statistics", () => {
 
 		const usage = session.getUsageStatistics();
 		expect(usage.premiumRequests).toBe(0);
+		expect(usage.aiu).toBe(0);
 	});
 
 	it("accumulates the full billed cost across turns, including cache-read cost", () => {

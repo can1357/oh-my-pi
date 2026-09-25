@@ -2,9 +2,10 @@ import { beforeAll, describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
+import { formatBillingSummary } from "../src/status-line/metrics";
 import { renderSegment } from "../src/status-line/segments";
 import type { SegmentContext } from "../src/status-line/types";
-import { initTheme } from "../src/theme";
+import { initTheme, theme } from "../src/theme";
 
 beforeAll(async () => {
 	await initTheme();
@@ -17,6 +18,7 @@ interface CostCtxOptions {
 	now?: Date;
 	usingSubscription?: boolean;
 	premiumRequests?: number;
+	aiu?: number;
 	onAdvisorSubscriptionProbe: () => void;
 }
 
@@ -30,6 +32,7 @@ function costCtx(options: CostCtxOptions): SegmentContext {
 			cacheWrite: 0,
 			premiumRequests: options.premiumRequests ?? 0,
 			cost: options.cost ?? 0,
+			aiu: options.aiu ?? 0,
 			tokensPerSecond: null,
 		},
 		session: {
@@ -103,18 +106,50 @@ describe("cost status-line segment", () => {
 		expect(renderSegment("cost", ctx).visible).toBe(false);
 	});
 
-	it("keeps the tariff adjacent to primary spend before credits and advisor billing", () => {
+	it("keeps subscription and tariff indicators alongside AIU and advisor billing", () => {
 		const ctx = costCtx({
 			cost: 1.25,
 			advisorCost: 0.5,
 			premiumRequests: 2,
+			aiu: 1.7114,
 			usingSubscription: true,
 			model: getBundledModel("deepseek", "deepseek-v4-flash"),
 			now: new Date("2026-09-10T02:00:00Z"),
 			onAdvisorSubscriptionProbe: () => {},
 		});
 		const rendered = stripVTControlCharacters(renderSegment("cost", ctx).content);
-		expect(rendered).toMatch(/1\.25.*↑ ★ 2 \+ .*0\.50/);
+		const subscriptionPrefix =
+			theme.getSymbolPreset() === "nerd" && theme.icon.subscription ? `${theme.icon.subscription} ` : "S";
+		expect(rendered).toStartWith(`${subscriptionPrefix}1.25 ↑ ★ 2 1.71 AIU + `);
+		expect(rendered).toContain("0.50");
 		expect(rendered).not.toContain("↓");
+	});
+
+	it("keeps dollar spend and premium requests visible in sessions with AIU", () => {
+		const ctx = costCtx({
+			cost: 0.01,
+			premiumRequests: 2,
+			aiu: 1.7114,
+			onAdvisorSubscriptionProbe: () => {},
+		});
+		expect(stripVTControlCharacters(renderSegment("cost", ctx).content)).toBe("$0.01 ★ 2 1.71 AIU");
+	});
+
+	it("formats small AIU consistently without exponential notation", () => {
+		const ctx = costCtx({ aiu: 0.00075, onAdvisorSubscriptionProbe: () => {} });
+		expect(stripVTControlCharacters(renderSegment("cost", ctx).content)).toBe("0.00075 AIU");
+		expect(
+			formatBillingSummary(
+				{ cost: 0, usingSubscription: false, premiumRequests: 0, aiu: 0.00075, fractionDigits: 3 },
+				theme,
+			),
+		).toBe("0.00075 AIU");
+		ctx.usageStats.aiu = 5e-9;
+		expect(stripVTControlCharacters(renderSegment("cost", ctx).content)).toBe("0.000000005 AIU");
+	});
+
+	it("uses premium requests when the AIU total is zero", () => {
+		const ctx = costCtx({ cost: 0.01, premiumRequests: 2, aiu: 0, onAdvisorSubscriptionProbe: () => {} });
+		expect(stripVTControlCharacters(renderSegment("cost", ctx).content)).toBe("$0.01 ★ 2");
 	});
 });

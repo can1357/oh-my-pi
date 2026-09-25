@@ -128,6 +128,7 @@ import {
 	resolveGitHubCopilotBaseUrl,
 	wrapFetchForCopilotFallback,
 } from "./github-copilot-headers";
+import { applyCopilotUsage, type CopilotUsageCarrier } from "./github-copilot-usage";
 import { servedModelFromAnthropicSignature } from "./anthropic-signature";
 import { getOpenAIPromptCacheKey } from "./openai-shared";
 import { applyInferenceHeaders } from "./inference-headers";
@@ -3103,6 +3104,7 @@ const streamAnthropicOnce = (
 									calculateCost(model, output.usage, output.timestamp);
 								}
 							}
+							applyCopilotUsage(model, output.usage, (event as CopilotUsageCarrier).copilot_usage);
 						} else if (event.type === "message_stop") {
 							sawTerminalEnvelope = true;
 							sawMessageStop = true;

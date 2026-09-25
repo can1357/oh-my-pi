@@ -6,6 +6,7 @@ export interface BillingSummaryOptions {
 	readonly cost: number;
 	readonly usingSubscription: boolean;
 	readonly premiumRequests: number;
+	readonly aiu: number;
 	readonly fractionDigits: number;
 	readonly startupPlaceholder?: boolean;
 	readonly pricingPeriod?: "peak" | "off-peak";
@@ -38,6 +39,11 @@ function formatSpendPlaceholder(usingSubscription: boolean, uiTheme: Theme): str
 	return "S…";
 }
 
+function formatAiu(amount: number): string {
+	const rounded = amount.toFixed(2);
+	return rounded === "0.00" ? amount.toFixed(9).replace(/0+$/, "").replace(/\.$/, "") : rounded;
+}
+
 function formatAdvisorSpend(
 	amount: number,
 	usingSubscription: boolean,
@@ -59,7 +65,15 @@ function formatAdvisorSpend(
 export function formatBillingSummary(options: BillingSummaryOptions, uiTheme: Theme): string | undefined {
 	const premiumRequests = normalizePremiumRequests(options.premiumRequests);
 	const advisorCost = options.advisor?.cost ?? 0;
-	if (!options.cost && !advisorCost && !options.usingSubscription && !premiumRequests && !options.pricingPeriod) {
+	const hasAiu = options.aiu > 0;
+	if (
+		!options.cost &&
+		!advisorCost &&
+		!options.usingSubscription &&
+		!premiumRequests &&
+		!options.pricingPeriod &&
+		!hasAiu
+	) {
 		return undefined;
 	}
 
@@ -78,6 +92,7 @@ export function formatBillingSummary(options: BillingSummaryOptions, uiTheme: Th
 	}
 	if (options.pricingPeriod) parts.push(options.pricingPeriod === "peak" ? "↑" : "↓");
 	if (premiumRequests) parts.push(`★ ${placeholder ? "…" : formatNumber(premiumRequests)}`);
+	if (hasAiu) parts.push(`${placeholder ? "…" : formatAiu(options.aiu)} AIU`);
 	if (advisorCost && options.advisor) {
 		const prefix = parts.length > 0 ? "+ " : "";
 		parts.push(

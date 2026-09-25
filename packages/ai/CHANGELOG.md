@@ -4,6 +4,7 @@
 
 ### Added
 
+- GitHub Copilot responses now expose server-reported AI units in usage data ([#13197](https://github.com/can1357/oh-my-pi/pull/13197) by [@joslack](https://github.com/joslack)).
 - Added support for Anthropic fallback credit token capture and redemption, including the 3-step rejection ladder for prompt-cache repricing on classifier refusals.
 - Added Vercel AI Gateway app attribution: requests now send `http-referer: https://omp.sh/` and `x-title: omp` unless you set those headers yourself.
 
