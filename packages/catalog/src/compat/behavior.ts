@@ -2,8 +2,8 @@
  * Typed accessors over the compiled runtime-behavior vocabulary
  * (`rules/runtime/behavior.kdl`): provider/model heuristics that run before
  * or outside exact bundled-model lookup — responses routing, API routing,
- * quota tiers, plan requirements, model limits, roster exclusions, hosted
- * defaults, and pricing peers.
+ * quota tiers, plan requirements, model limits, roster and discovery-mode
+ * exclusions, hosted defaults, and pricing peers.
  */
 import { globMatch } from "./cascade";
 import rules from "./rules.json";
@@ -103,6 +103,11 @@ export function quotaTierFor(provider: string, model: string): string | undefine
 	return undefined;
 }
 
+/** UTC offset for a provider's timezone-naive absolute retry-reset timestamps. */
+export function retryResetTimezoneOffsetFor(provider: string): string | undefined {
+	return behavior.retryResetTimezones.find(rule => rule.provider === provider)?.offset;
+}
+
 /** Whether a provider has catalog-authored model quota scopes. */
 export function hasQuotaTierPolicy(provider: string): boolean {
 	return behavior.quotaTiers.some(rule => rule.provider === provider);
@@ -176,12 +181,27 @@ export function isExcludedModel(provider: string, model: string): boolean {
 	return behavior.excludeModels.some(rule => rule.provider === provider && matchesList(rule.match, lower, lower));
 }
 
+/** Whether an exact upstream discovery mode is excluded from a provider's coding-model roster. */
+export function isExcludedDiscoveryMode(provider: string, mode: string): boolean {
+	return behavior.excludeDiscoveryModes.some(rule => rule.provider === provider && rule.modes.includes(mode));
+}
+
 /**
  * Whether a provider is retired: its entire roster is excluded from the
  * generated bundle and must never be resurrected from the previous snapshot.
  */
 export function isRetiredProvider(provider: string): boolean {
 	return behavior.retiredProviders.includes(provider);
+}
+
+/**
+ * Whether a provider's bundled rows may seed cross-provider bare-id enrichment
+ * references. Gateway-namespaced providers (ClinePass) are isolated so their
+ * limits, pricing, and reasoning controls never contaminate an unrelated proxy
+ * model that happens to advertise the same bare id.
+ */
+export function isBareIdReferenceProvider(provider: string): boolean {
+	return !behavior.referenceIsolatedProviders.includes(provider);
 }
 
 /** The declared subscription tier required to use a provider model id, if any. */
@@ -204,4 +224,15 @@ export function pricingPeerFor(
 	if (!rule) return undefined;
 	const alias = rule.aliases.find(candidate => candidate.model === model);
 	return { peers: rule.peers, peerId: alias?.peerId ?? model };
+}
+
+/** Gateway protocol eligibility is owned by runtime KDL rules. */
+export function gatewaySurfaceAllowsApi(surface: string, api: string): boolean {
+	const rule = behavior.gatewaySurfaces?.find(candidate => candidate.name === surface);
+	const lower = api.toLowerCase();
+	return (
+		rule?.allow.some(
+			allow => (allow.any || matchesList(allow.match, api, lower)) && !matchesList(allow.exclude, api, lower),
+		) ?? false
+	);
 }

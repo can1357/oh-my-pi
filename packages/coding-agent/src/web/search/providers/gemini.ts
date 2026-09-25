@@ -2,72 +2,58 @@
  * Google Gemini Web Search Provider
  *
  * Uses Gemini's Google Search grounding via Cloud Code Assist API.
- * Auth is resolved through `AuthStorage.getOAuthAccess(...)` for both
- * `google-gemini-cli` (stable prod) and `google-antigravity` (daily sandbox)
- * — the broker is the sole refresh authority, so this module never opens a
+ * Cloud Code Assist auth is resolved through `AuthStorage.oauth.access(...)`
+ * for the selected catalog provider; developer API auth uses the selected
+ * model's registry resolver. The broker is the sole refresh authority, so this module never opens a
  * sibling SQLite store and never POSTs the broker sentinel to a Google token
  * endpoint.
  */
-import { type AuthStorage, type FetchImpl, type OAuthAccess, withOAuthAccess } from "@oh-my-pi/pi-ai";
+import {
+	type Api,
+	type AuthStorage,
+	type FetchImpl,
+	type Model,
+	type OAuthAccess,
+	withAuth,
+	withOAuthAccess,
+} from "@oh-my-pi/pi-ai";
 import { parseCloudflareAiGatewayCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare-ai-gateway";
 import { getAntigravityUserAgent, getGeminiCliHeaders } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import { fetchWithRetry, USER_AGENT } from "@oh-my-pi/pi-utils";
 
-import type { SearchCitation, SearchResponse, SearchSource } from "../../../web/search/types";
+import type { SearchCitation, SearchResponse, SearchSource } from "../types";
+import type { ModelRegistry } from "../../../config/model-registry";
 import { SearchProviderError } from "../../../web/search/types";
 import { formatQuery, GOOGLE_QUERY_SYNTAX, parseSearchQuery, type StructuredQuery } from "../query";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
 import { classifyProviderHttpError, withHardTimeout } from "./utils";
 
-const DEFAULT_ENDPOINT = "https://cloudcode-pa.googleapis.com";
-const DEVELOPER_API_PROVIDER = "google";
-const CLOUDFLARE_GATEWAY_PROVIDER = "cloudflare-ai-gateway";
-const DEFAULT_DEVELOPER_API_HOST = "https://generativelanguage.googleapis.com";
-const DEVELOPER_API_VERSION = "v1beta";
-const ANTIGRAVITY_DAILY_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
-const ANTIGRAVITY_SANDBOX_ENDPOINT = "https://daily-cloudcode-pa.sandbox.googleapis.com";
-const ANTIGRAVITY_ENDPOINT_FALLBACKS = [ANTIGRAVITY_DAILY_ENDPOINT, ANTIGRAVITY_SANDBOX_ENDPOINT] as const;
-const DEFAULT_MODEL = "gemini-2.5-flash";
 const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 1000;
 const RATE_LIMIT_BUDGET_MS = 5 * 60 * 1000;
 
-function resolveGeminiSearchModel(configuredModel: string | undefined): string {
-	const envModel = Bun.env.GEMINI_SEARCH_MODEL?.trim();
-	if (envModel) return envModel;
-	const model = configuredModel?.trim();
-	return model || DEFAULT_MODEL;
-}
-
 interface GeminiDeveloperEndpoint {
 	url: string;
-	authProvider: typeof DEVELOPER_API_PROVIDER | typeof CLOUDFLARE_GATEWAY_PROVIDER;
 	isCloudflareGateway: boolean;
 }
 
-function resolveGeminiDeveloperEndpoint(): GeminiDeveloperEndpoint {
-	const configuredHost = Bun.env.GOOGLE_GEMINI_BASE_URL?.trim().replace(/\/+$/, "");
-	const host = configuredHost || DEFAULT_DEVELOPER_API_HOST;
+function resolveGeminiDeveloperEndpoint(baseUrl: string): GeminiDeveloperEndpoint {
+	const url = baseUrl.trim().replace(/\/+$/, "");
 	let parsed: URL;
 	try {
-		parsed = new URL(host);
+		parsed = new URL(url);
 	} catch {
-		throw new SearchProviderError("gemini", "GOOGLE_GEMINI_BASE_URL must be a valid absolute URL", 400);
+		throw new SearchProviderError("gemini", `Gemini model base URL must be a valid absolute URL: ${baseUrl}`, 400);
 	}
 	if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
-		throw new SearchProviderError("gemini", "GOOGLE_GEMINI_BASE_URL must use HTTP or HTTPS", 400);
+		throw new SearchProviderError("gemini", "Gemini model base URL must use HTTP or HTTPS", 400);
 	}
-	const isCloudflareGateway = parsed.hostname === "gateway.ai.cloudflare.com";
 	return {
-		url: `${host}/${DEVELOPER_API_VERSION}`,
-		authProvider: isCloudflareGateway ? CLOUDFLARE_GATEWAY_PROVIDER : DEVELOPER_API_PROVIDER,
-		isCloudflareGateway,
+		url,
+		isCloudflareGateway: parsed.hostname === "gateway.ai.cloudflare.com",
 	};
 }
-
-const GEMINI_PROVIDERS = ["google-gemini-cli", "google-antigravity"] as const;
-type GeminiProviderId = (typeof GEMINI_PROVIDERS)[number];
 
 interface GeminiToolParams {
 	google_search?: Record<string, unknown>;
@@ -88,10 +74,10 @@ export interface GeminiSearchParams extends GeminiToolParams {
 	signal?: AbortSignal;
 	timeoutMs?: number;
 	authStorage: AuthStorage;
+	model: Model<Api>;
+	modelRegistry: ModelRegistry;
 	sessionId?: string;
 	fetch?: FetchImpl;
-	antigravityEndpointMode?: "auto" | "production" | "sandbox";
-	geminiModel?: string;
 }
 
 export function buildGeminiRequestTools(params: GeminiToolParams): Array<Record<string, Record<string, unknown>>> {
@@ -114,7 +100,7 @@ interface GeminiAuth {
 
 /** First configured Gemini OAuth provider plus its pre-resolved access. */
 interface GeminiAuthSeed {
-	provider: GeminiProviderId;
+	provider: string;
 	access: OAuthAccess;
 	projectId: string;
 }
@@ -128,28 +114,16 @@ interface GeminiSearchResult {
 	usage?: { inputTokens: number; outputTokens: number; totalTokens: number };
 }
 
-/**
- * Walks the configured Gemini OAuth providers in deterministic order and
- * returns the first one that yields a usable access token + projectId via
- * {@link AuthStorage.getOAuthAccess}. AuthStorage handles refresh + broker
- * routing internally; this helper never touches refresh tokens directly.
- * The resolved access seeds `withOAuthAccess` so the happy path resolves once.
- */
+/** Resolve the selected Gemini provider's OAuth access and required project identity. */
 export async function findGeminiAuth(
 	authStorage: AuthStorage,
+	provider: string,
 	sessionId: string | undefined,
 	signal: AbortSignal | undefined,
 ): Promise<GeminiAuthSeed | null> {
-	for (const provider of GEMINI_PROVIDERS) {
-		const access = await authStorage.getOAuthAccess(provider, sessionId, { signal });
-		if (!access?.accessToken || !access.projectId) continue;
-		return { provider, access, projectId: access.projectId };
-	}
-	return null;
-}
-
-function hasGeminiOAuth(authStorage: AuthStorage): boolean {
-	return GEMINI_PROVIDERS.some((provider: GeminiProviderId) => authStorage.hasOAuth(provider));
+	const access = await authStorage.oauth.access(provider, sessionId, { signal });
+	if (!access?.accessToken || !access.projectId) return null;
+	return { provider, access, projectId: access.projectId };
 }
 
 /** Cloud Code Assist API response types */
@@ -401,6 +375,8 @@ async function finalizeGeminiSearchResult(
 async function callGeminiSearch(
 	auth: GeminiAuth,
 	model: string,
+	baseUrl: string,
+	configuredHeaders: Record<string, string> | undefined,
 	query: string,
 	systemPrompt: string | undefined,
 	maxOutputTokens: number | undefined,
@@ -409,21 +385,8 @@ async function callGeminiSearch(
 	fetchImpl: FetchImpl | undefined,
 	signal: AbortSignal | undefined,
 	timeoutMs: number | undefined,
-	mode?: "auto" | "production" | "sandbox",
 ): Promise<GeminiSearchResult> {
-	let endpoints: string[];
-	if (auth.isAntigravity) {
-		const m = mode ?? "auto";
-		if (m === "sandbox") {
-			endpoints = [ANTIGRAVITY_SANDBOX_ENDPOINT];
-		} else if (m === "production") {
-			endpoints = [ANTIGRAVITY_DAILY_ENDPOINT];
-		} else {
-			endpoints = [...ANTIGRAVITY_ENDPOINT_FALLBACKS];
-		}
-	} else {
-		endpoints = [DEFAULT_ENDPOINT];
-	}
+	const endpoint = baseUrl.replace(/\/+$/, "");
 	const headers = auth.isAntigravity ? { "User-Agent": getAntigravityUserAgent() } : getGeminiCliHeaders();
 
 	const requestMetadata = auth.isAntigravity
@@ -473,9 +436,10 @@ async function callGeminiSearch(
 		}
 		(requestBody.request as Record<string, unknown>).generationConfig = generationConfig;
 	}
-	const buildInit = (): RequestInit => ({
+	const response = await fetchWithRetry(() => `${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
 		method: "POST",
 		headers: {
+			...configuredHeaders,
 			Authorization: `Bearer ${auth.accessToken}`,
 			"Content-Type": "application/json",
 			Accept: "text/event-stream",
@@ -483,43 +447,16 @@ async function callGeminiSearch(
 		},
 		body: JSON.stringify(requestBody),
 		signal: withHardTimeout(signal, timeoutMs),
+		fetch: fetchImpl,
+		maxAttempts: MAX_RETRIES + 1,
+		defaultDelayMs: attempt => BASE_DELAY_MS * 2 ** attempt,
+		maxDelayMs: RATE_LIMIT_BUDGET_MS,
 	});
 
-	let response: Response | undefined;
-
-	for (let i = 0; i < endpoints.length; i++) {
-		const endpoint = endpoints[i];
-		const isLastEndpoint = i === endpoints.length - 1;
-		try {
-			response = await fetchWithRetry(() => `${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
-				...buildInit(),
-				fetch: fetchImpl,
-				maxAttempts: isLastEndpoint ? MAX_RETRIES + 1 : 1,
-				defaultDelayMs: attempt => BASE_DELAY_MS * 2 ** attempt,
-				maxDelayMs: RATE_LIMIT_BUDGET_MS,
-			});
-
-			if (response.ok) {
-				break;
-			}
-
-			if (response.status === 429 || (response.status >= 500 && response.status < 600)) {
-				if (!isLastEndpoint) {
-					continue;
-				}
-			}
-			break;
-		} catch (error) {
-			if (isLastEndpoint) {
-				throw error;
-			}
-		}
-	}
-
-	if (!response?.ok) {
-		const rawErrorText = response ? await response.text() : "Network error";
+	if (!response.ok) {
+		const rawErrorText = await response.text();
 		const errorText = auth.accessToken ? rawErrorText.split(auth.accessToken).join("[redacted]") : rawErrorText;
-		const status = response?.status ?? 502;
+		const status = response.status;
 		const classified = classifyProviderHttpError("gemini", status, errorText);
 		if (classified) throw classified;
 		throw new SearchProviderError("gemini", `Gemini Cloud Code API error (${status}): ${errorText}`, status);
@@ -535,6 +472,7 @@ async function callGeminiSearch(
 async function callGeminiDeveloperSearch(
 	apiKey: string,
 	endpoint: GeminiDeveloperEndpoint,
+	configuredHeaders: Record<string, string> | undefined,
 	model: string,
 	query: string,
 	systemPrompt: string | undefined,
@@ -575,6 +513,7 @@ async function callGeminiDeveloperSearch(
 	const response = await fetchWithRetry(() => `${endpoint.url}/models/${model}:streamGenerateContent?alt=sse`, {
 		method: "POST",
 		headers: {
+			...configuredHeaders,
 			...(endpoint.isCloudflareGateway
 				? { "cf-aig-authorization": `Bearer ${apiKey}` }
 				: { "x-goog-api-key": apiKey }),
@@ -612,32 +551,71 @@ async function callGeminiDeveloperSearch(
  * Executes a web search using Google Gemini with Google Search grounding.
  */
 export async function searchGemini(params: GeminiSearchParams): Promise<SearchResponse> {
-	const selectedModel = resolveGeminiSearchModel(params.geminiModel);
+	const selectedModel = params.model.id;
 	// Gemini's googleSearch grounding forwards the query to Google Search, which
 	// understands the classic operator set natively. Normalize directive aliases
 	// (domain: → site:, since: → after:, …) to canonical Google forms; leave
 	// directive-free queries byte-identical.
 	const parsed = params.parsedQuery ?? parseSearchQuery(params.query);
 	const searchQuery = parsed.hasDirectives ? formatQuery(parsed, GOOGLE_QUERY_SYNTAX) : params.query;
-	const seed = await findGeminiAuth(params.authStorage, params.sessionId, params.signal);
 	let result: GeminiSearchResult;
 
-	if (seed) {
-		const isAntigravity = seed.provider === "google-antigravity";
+	if (params.model.api === "google-gemini-cli") {
+		const seed = await findGeminiAuth(params.authStorage, params.model.provider, params.sessionId, params.signal);
+		if (!seed) {
+			throw new Error(`No Gemini OAuth credentials found for selected provider "${params.model.provider}".`);
+		}
+		const isAntigravity = params.model.provider === "google-antigravity";
 		result = await withOAuthAccess(
 			params.authStorage,
 			seed.provider,
-			access =>
+			async access => {
 				// Derive bearer + projectId from the access this attempt received; a
 				// re-resolved access may omit projectId, in which case the seed's
-				// project is still the right tenant for the credential. The
-				// `fetchWithRetry` transport backoff stays INSIDE this attempt — auth
-				callGeminiSearch(
+				// project is still the right tenant for the credential.
+				const configuredHeaders = await params.modelRegistry.resolveModelHeaders(params.model, params.signal);
+				return callGeminiSearch(
 					{
 						accessToken: access.accessToken,
 						projectId: access.projectId ?? seed.projectId,
 						isAntigravity,
 					},
+					selectedModel,
+					params.model.baseUrl,
+					configuredHeaders,
+					searchQuery,
+					params.system_prompt,
+					params.max_output_tokens,
+					params.temperature,
+					{
+						google_search: params.google_search,
+						code_execution: params.code_execution,
+						url_context: params.url_context,
+					},
+					params.fetch,
+					params.signal,
+					params.timeoutMs,
+				);
+			},
+			{ sessionId: params.sessionId, signal: params.signal, seed: seed.access },
+		);
+	} else if (params.model.api === "google-generative-ai") {
+		const endpoint = resolveGeminiDeveloperEndpoint(params.model.baseUrl);
+		const keyOrResolver = params.modelRegistry.resolver(params.model, params.sessionId);
+		result = await withAuth(
+			keyOrResolver,
+			async storedApiKey => {
+				const configuredHeaders = await params.modelRegistry.resolveModelHeaders(params.model, params.signal);
+				const apiKey = endpoint.isCloudflareGateway
+					? parseCloudflareAiGatewayCredential(storedApiKey)?.token
+					: storedApiKey;
+				if (!apiKey) {
+					throw new SearchProviderError("gemini", "Selected Gemini credential is empty", 401);
+				}
+				return callGeminiDeveloperSearch(
+					apiKey,
+					endpoint,
+					configuredHeaders,
 					selectedModel,
 					searchQuery,
 					params.system_prompt,
@@ -651,41 +629,18 @@ export async function searchGemini(params: GeminiSearchParams): Promise<SearchRe
 					params.fetch,
 					params.signal,
 					params.timeoutMs,
-					params.antigravityEndpointMode,
-				),
-			{ sessionId: params.sessionId, signal: params.signal, seed: seed.access },
+				);
+			},
+			{
+				signal: params.signal,
+				missingKeyMessage: `No Gemini credentials found for selected provider "${params.model.provider}".`,
+			},
 		);
 	} else {
-		const endpoint = resolveGeminiDeveloperEndpoint();
-		const storedApiKey = await params.authStorage.getApiKey(endpoint.authProvider, params.sessionId, {
-			signal: params.signal,
-		});
-		const apiKey = endpoint.isCloudflareGateway
-			? parseCloudflareAiGatewayCredential(storedApiKey ?? "")?.token
-			: storedApiKey;
-		if (!apiKey) {
-			throw new Error(
-				endpoint.isCloudflareGateway
-					? 'No Cloudflare AI Gateway credential found. Configure provider "cloudflare-ai-gateway" or set CLOUDFLARE_AI_GATEWAY_API_KEY.'
-					: "No Gemini credentials found. Set GEMINI_API_KEY, configure an API key for provider \"google\", or login with 'omp /login google-gemini-cli' / 'omp /login google-antigravity' to enable Gemini web search.",
-			);
-		}
-		result = await callGeminiDeveloperSearch(
-			apiKey,
-			endpoint,
-			selectedModel,
-			searchQuery,
-			params.system_prompt,
-			params.max_output_tokens,
-			params.temperature,
-			{
-				google_search: params.google_search,
-				code_execution: params.code_execution,
-				url_context: params.url_context,
-			},
-			params.fetch,
-			params.signal,
-			params.timeoutMs,
+		throw new SearchProviderError(
+			"gemini",
+			`Selected model ${params.model.provider}/${params.model.id} does not use a Gemini grounding transport`,
+			400,
 		);
 	}
 
@@ -711,16 +666,17 @@ export class GeminiProvider extends SearchProvider {
 	readonly id = "gemini";
 	readonly label = "Gemini";
 
-	isAvailable(authStorage: AuthStorage): boolean {
-		// Cheap, in-memory check — avoids driving the refresh pipeline during
-		// the provider-chain probe. `searchGemini` refreshes OAuth lazily on the
-		// actual request and resolves developer API keys through AuthStorage.
-		if (hasGeminiOAuth(authStorage)) return true;
-		try {
-			return authStorage.hasAuth(resolveGeminiDeveloperEndpoint().authProvider);
-		} catch {
+	isAvailable(authStorage: AuthStorage, model?: Model<Api>): boolean {
+		if (model) {
+			if (model.api === "google-gemini-cli") return authStorage.credentials.hasOAuth(model.provider);
+			if (model.api === "google-generative-ai") return authStorage.keys.source(model.provider) !== undefined;
 			return false;
 		}
+		return (
+			authStorage.credentials.hasOAuth("google-antigravity") ||
+			authStorage.credentials.hasOAuth("google-gemini-cli") ||
+			authStorage.keys.source("google") !== undefined
+		);
 	}
 
 	search(params: SearchParams): Promise<SearchResponse> {
@@ -737,9 +693,10 @@ export class GeminiProvider extends SearchProvider {
 			signal: params.signal,
 			timeoutMs: params.timeoutMs,
 			authStorage: params.authStorage,
+			model: params.model,
+			modelRegistry: params.modelRegistry,
 			sessionId: params.sessionId,
 			fetch: params.fetch,
-			geminiModel: params.geminiModel,
 		});
 	}
 }

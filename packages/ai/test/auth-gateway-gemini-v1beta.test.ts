@@ -102,7 +102,9 @@ describe("auth-gateway gemini-v1beta: parseRequest", () => {
 			contents: [{ role: "user", parts: [{ text: "path model" }] }],
 		});
 		expect(parsed.modelId).toBe("");
-		expect(parsed.context.messages[0]).toEqual(expect.objectContaining({ content: "path model" }));
+		expect(parsed.context.messages[0]).toEqual(
+			expect.objectContaining({ role: "user", content: "path model" }),
+		);
 	});
 
 	it("joins multiple text parts and maps model role to assistant", () => {
@@ -116,7 +118,9 @@ describe("auth-gateway gemini-v1beta: parseRequest", () => {
 			generationConfig: { temperature: 0.5, maxOutputTokens: 32, topK: 8 },
 		});
 		expect(parsed.context.systemPrompt).toEqual(["sys"]);
-		expect(parsed.context.messages[0]).toEqual(expect.objectContaining({ role: "user", content: "ab" }));
+		expect(parsed.context.messages[0]).toEqual(
+			expect.objectContaining({ role: "user", content: "ab" }),
+		);
 		expect(parsed.context.messages[1]?.role).toBe("assistant");
 		expect(parsed.options.temperature).toBe(0.5);
 		expect(parsed.options.maxOutputTokens).toBe(32);
@@ -222,6 +226,17 @@ it("correlates id-less functionResponse with the preceding same-name functionCal
 	expect(toolResult && "toolCallId" in toolResult ? toolResult.toolCallId : undefined).toBe(
 		call && "id" in call ? call.id : undefined,
 	);
+});
+
+it("parses functionDeclarations and toolConfig into context tools", () => {
+	const parsed = parseRequest({
+		model: "gemini-2.5-flash",
+		contents: [{ role: "user", parts: [{ text: "hi" }] }],
+		tools: [{ functionDeclarations: [{ name: "lookup", description: "d", parameters: { type: "object" } }] }],
+		toolConfig: { functionCallingConfig: { mode: "ANY" } },
+	});
+	expect(parsed.context.tools?.map(tool => tool.name)).toEqual(["lookup"]);
+	expect(parsed.options.toolChoice).toBe("required");
 });
 
 it("emits functionCall parts for toolCall content blocks", () => {

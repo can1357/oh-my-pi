@@ -1,8 +1,8 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { releaseTurnOnStreamEnd } from "@oh-my-pi/pi-ai/auth-gateway/server";
+import { releaseTurnOnStreamEnd, renewReservationUntilSettled } from "@oh-my-pi/pi-ai/auth-gateway/server";
 import { StreamCommitGate } from "@oh-my-pi/pi-ai/auth-gateway/stream-commit-gate";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai/types";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
@@ -141,5 +141,20 @@ describe("releaseTurnOnStreamEnd", () => {
 		);
 		await wrapped.cancel("client cancelled");
 		expect(outcomes).toEqual([false]);
+	});
+	it("renews an active inference reservation past its TTL and stops after settlement", async () => {
+		if (!storage) throw new Error("setup failed");
+		vi.useFakeTimers();
+		storage.tryAcquireTurnReservation({ credentialId: 99, incarnation: 1, requestId: "long" });
+		const deferred = Promise.withResolvers<void>();
+		const pending = renewReservationUntilSettled(storage, "long", deferred.promise);
+		vi.advanceTimersByTime(300_000);
+		expect(storage.tryAcquireTurnReservation({ credentialId: 99, incarnation: 1, requestId: "other" }).ok).toBe(
+			false,
+		);
+		deferred.resolve();
+		await pending;
+		vi.advanceTimersByTime(300_000);
+		expect(storage.tryAcquireTurnReservation({ credentialId: 99, incarnation: 1, requestId: "other" }).ok).toBe(true);
 	});
 });

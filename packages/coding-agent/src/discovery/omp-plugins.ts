@@ -313,7 +313,10 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 			logger.warn(`[omp-plugins] Invalid JSON in ${mcpPath}`);
 			continue;
 		}
-		const servers = expandEnvVarsDeep(parsed.mcpServers);
+		const servers = expandEnvVarsDeep(parsed.mcpServers, {
+			CLAUDE_PLUGIN_ROOT: root.path,
+			OMP_PLUGIN_ROOT: root.path,
+		});
 		if (!servers || typeof servers !== "object" || Array.isArray(servers)) continue;
 
 		for (const [serverName, serverCfg] of Object.entries(servers)) {

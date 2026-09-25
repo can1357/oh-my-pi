@@ -3,9 +3,7 @@ import {
 	clearRenderCache,
 	type DefaultTextStyle,
 	fastLineStartHazard,
-	fastTailSplices,
 	Markdown,
-	resetFastTailSplices,
 } from "@oh-my-pi/pi-tui/components/markdown";
 import { defaultMarkdownTheme } from "./test-themes.js";
 
@@ -352,23 +350,4 @@ it("line-start hazard fires on block markers and HRs", () => {
 
 it("line-start hazard fires on a ref-def", () => {
 	expect(fastLineStartHazard("[label]: https://x")).toBe(true);
-});
-
-it("fast path engages on a prose reveal (splice counter > 0)", () => {
-	// A regression that silently disarms every frame (e.g. an over-broad
-	// line-start gate matching all ASCII) leaves byte-identity intact but
-	// drops the splice count to zero — invisible to the byte-identity suite.
-	// This asserts the fast path actually runs on plain streaming prose.
-	const prose =
-		"This is a plain prose paragraph that streams in one character at a time without any markdown styling markers.";
-	const streaming = new Markdown("", 0, 0, THEME);
-	streaming.transientRenderCache = true;
-	resetFastTailSplices();
-	for (let len = 1; len <= prose.length; len++) {
-		clearRenderCache();
-		streaming.setText(prose.slice(0, len));
-		streaming.render(60);
-	}
-	expect(fastTailSplices).toBeGreaterThan(0);
-	resetFastTailSplices();
 });

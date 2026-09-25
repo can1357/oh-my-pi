@@ -1,3 +1,4 @@
+import { RouteRegistry } from "../src/auth-gateway/route-graph";
 import { describe, expect, it } from "bun:test";
 import type { CompiledRoute } from "@oh-my-pi/pi-ai/auth-gateway";
 import { decideAttempt, type ExecutionState } from "@oh-my-pi/pi-ai/auth-gateway/route-conductor";
@@ -194,6 +195,16 @@ describe("decideAttempt", () => {
 		expect(action).toEqual({ type: "fallback_target", targetModelId: "tertiary" });
 	});
 
+	it("falls back to quota targets once siblings are exhausted", () => {
+		const action = decideAttempt({
+			route: route({ fallbacks: { credential_quota: ["claude", "gemini"] } }),
+			state: state({ attemptedTargets: new Set(["primary"]), siblingsExhausted: true }),
+			classification: classification("credential_quota"),
+			commitState: "probing",
+		});
+		expect(action).toEqual({ type: "fallback_target", targetModelId: "claude" });
+	});
+
 	it("returns terminal on request_terminal", () => {
 		const action = decideAttempt({
 			route: route(),
@@ -213,4 +224,131 @@ describe("decideAttempt", () => {
 		});
 		expect(action).toEqual({ type: "terminal" });
 	});
+
+	it("rotates balance rr targets across fresh executions", () => {
+		const balanceRoute = {
+			generation: 1,
+			id: "balance-rr",
+			root: {
+				type: "balance" as const,
+				strategy: "rr" as const,
+				children: [
+					{ type: "target" as const, model: "a" },
+					{ type: "target" as const, model: "b" },
+				],
+			},
+			targets: ["a", "b"],
+			fallbacks: {},
+			fallbackByTarget: {},
+		} as CompiledRoute;
+		const first = decideAttempt({
+			route: balanceRoute,
+			state: state({ routeId: "balance-rr", currentTarget: "a", attemptedTargets: new Set() }),
+			commitState: "probing",
+		});
+		const second = decideAttempt({
+			route: balanceRoute,
+			state: state({ routeId: "balance-rr", currentTarget: "a", attemptedTargets: new Set() }),
+			commitState: "probing",
+		});
+		expect(first).toEqual({ type: "dispatch", targetModelId: "a" });
+		expect(second).toEqual({ type: "dispatch", targetModelId: "b" });
+	});
+
+	it("prefers the highest-weight balance child on fresh dispatch", () => {
+		const balanceRoute = {
+			generation: 1,
+			id: "balance-weighted",
+			root: {
+				type: "balance" as const,
+				strategy: "weighted" as const,
+				children: [
+					{ type: "target" as const, model: "low", weight: 1 },
+					{ type: "target" as const, model: "high", weight: 9 },
+				],
+			},
+			targets: ["low", "high"],
+			fallbacks: {},
+			fallbackByTarget: {},
+		} as CompiledRoute;
+		const action = decideAttempt({
+			route: balanceRoute,
+			state: state({ routeId: "balance-weighted", currentTarget: "low", attemptedTargets: new Set() }),
+			commitState: "probing",
+		});
+		expect(action).toEqual({ type: "dispatch", targetModelId: "high" });
+	});
+});
+
+it("advances to the next domain after the final child target exhausts quota", () => {
+	const registry = new RouteRegistry(() => undefined);
+	registry.register({
+		id: "domains",
+		root: {
+			type: "domain",
+			name: "accounts",
+			children: [
+				{
+					type: "fallback",
+					on: ["credential_quota"],
+					children: [
+						{ type: "target", model: "a" },
+						{ type: "target", model: "b" },
+					],
+				},
+				{ type: "target", model: "c" },
+			],
+		},
+	});
+	const compiled = registry.resolve("domains")!;
+	expect(
+		decideAttempt({
+			route: compiled,
+			state: state({
+				routeId: compiled.id,
+				generation: compiled.generation,
+				currentTarget: "b",
+				attemptedTargets: new Set(["a", "b"]),
+				siblingsExhausted: true,
+			}),
+			classification: {
+				status: 429,
+				type: "rate_limit_error",
+				message: "quota",
+				owner: "quota",
+				disposition: "credential_quota",
+			},
+			commitState: "probing",
+		}),
+	).toEqual({ type: "fallback_target", targetModelId: "c" });
+});
+
+it("rotates initial dispatch across balance children", () => {
+	const balanceRoute = {
+		generation: 1,
+		id: "bal",
+		root: {
+			type: "balance" as const,
+			strategy: "rr" as const,
+			children: [
+				{ type: "target" as const, model: "a" },
+				{ type: "target" as const, model: "b" },
+			],
+		},
+		targets: ["a", "b"],
+		fallbacks: {},
+			fallbackByTarget: {},
+	} satisfies CompiledRoute;
+	const first = decideAttempt({
+		route: balanceRoute,
+		state: state({ currentTarget: "a", attemptedTargets: new Set() }),
+		commitState: "probing",
+	});
+	const second = decideAttempt({
+		route: balanceRoute,
+		state: state({ currentTarget: "a", attemptedTargets: new Set() }),
+		commitState: "probing",
+	});
+	expect(first).toEqual({ type: "dispatch", targetModelId: "a" });
+	expect(second).toEqual({ type: "dispatch", targetModelId: "b" });
 });

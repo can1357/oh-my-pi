@@ -1,4 +1,5 @@
-import type { Api, Model } from "../types";
+import { surfaceAllowsApi } from "./route-surface";
+import type { Api, Context, Model } from "../types";
 
 export interface ModelCapabilities {
 	text: boolean;
@@ -58,12 +59,11 @@ export function capabilitiesFor(model: Model<Api>): ModelCapabilities {
 	return {
 		text: true,
 		vision: model.input.includes("image"),
-		tools: true,
-		parallelTools: true,
+		tools: model.supportsTools !== false,
+		parallelTools: model.supportsTools !== false,
 		reasoning: model.reasoning,
-		responsesApi:
-			model.api.includes("responses") || model.api === "openai-codex-responses" || model.api === "openai-responses",
-		messagesApi: model.api.includes("anthropic"),
+		responsesApi: surfaceAllowsApi("openai-responses", model.api),
+		messagesApi: surfaceAllowsApi("anthropic-messages", model.api),
 	};
 }
 
@@ -99,4 +99,13 @@ export function fitsRequest(caps: ModelCapabilities, need: RequestNeed): boolean
 	if (need.tools && !caps.tools) return false;
 	if (need.reasoning && !caps.reasoning) return false;
 	return true;
+}
+
+/** Request facts shared by conditional route selection. */
+export function requestNeeds(context: Context): RequestNeed {
+	return {
+		vision: context.messages.some(
+			message => Array.isArray(message.content) && message.content.some(block => block.type === "image"),
+		),
+	};
 }

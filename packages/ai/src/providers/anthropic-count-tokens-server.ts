@@ -2,8 +2,8 @@
  * Anthropic Messages count_tokens handler for the auth-gateway.
  *
  * Token counts are a documented character estimate
- * (`ceil(JSON.stringify(messages).length / 4)`), not tiktoken or Anthropic's
- * tokenizer. Unknown models 404; invalid JSON 400.
+ * (`ceil(JSON.stringify(payload).length / 4)`), not tiktoken or Anthropic's
+ * tokenizer. Unknown models 404; invalid JSON / malformed `messages` 400.
  *
  * @see https://docs.anthropic.com/en/api/messages-count-tokens
  */
@@ -11,11 +11,11 @@ import { isRecord } from "@oh-my-pi/pi-utils";
 import { json } from "../auth-gateway/http";
 
 /**
- * Estimate input tokens from the serialized `messages` payload.
+ * Estimate input tokens from serialized Anthropic input fields.
  * Character/4 ceiling — not tiktoken.
  */
-function estimateInputTokens(messages: unknown): number {
-	const serialized = JSON.stringify(messages) ?? "";
+function estimateInputTokens(payload: unknown): number {
+	const serialized = JSON.stringify(payload) ?? "";
 	return Math.ceil(serialized.length / 4);
 }
 
@@ -39,5 +39,14 @@ export async function handleCountTokens(
 		return json(404, { error: `Unknown model: ${modelId}` });
 	}
 
-	return json(200, { input_tokens: estimateInputTokens(parsed.messages) });
+	if (!("messages" in parsed) || !Array.isArray(parsed.messages)) {
+		return json(400, { error: "messages must be an array" });
+	}
+
+	const estimatePayload: Record<string, unknown> = { messages: parsed.messages };
+	if ("system" in parsed) estimatePayload.system = parsed.system;
+	if ("tools" in parsed) estimatePayload.tools = parsed.tools;
+	if ("tool_choice" in parsed) estimatePayload.tool_choice = parsed.tool_choice;
+
+	return json(200, { input_tokens: estimateInputTokens(estimatePayload) });
 }

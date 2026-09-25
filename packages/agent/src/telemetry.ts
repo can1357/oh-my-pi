@@ -1756,6 +1756,7 @@ export async function instrumentedCompleteSimple<TApi extends Api>(
 			const message = span.retry
 				? await retryTransientCompletion(runOnce, {
 						...span.retry,
+						provider: model.provider,
 						// Framework-owned: the caller must not be able to detach the
 						// abort signal or the header source by passing them itself.
 						signal: options.signal,

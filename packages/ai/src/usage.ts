@@ -59,6 +59,8 @@ export interface UsageScope {
 	tier?: string;
 	windowId?: string;
 	shared?: boolean;
+	/** Stable identity shared by routing-specific copies of one upstream quota. */
+	sharedGroup?: string;
 }
 
 /** Normalized limit entry for a single window or quota bucket. */
@@ -78,11 +80,29 @@ export interface UsageLimit {
  * Per-credit detail for a saved/banked rate-limit reset.
  *
  * Populated when the provider's listing endpoint returns individual credit
- * metadata (e.g. OpenAI Codex `wham/rate-limit-reset-credits`). Callers that
+ * metadata (e.g. OpenAI Codex credits or Claude Cedar grants). Callers that
  * only need the count can ignore this; display layers use `expiresAt` to show
  * when banked resets expire ([#3339](https://github.com/can1357/oh-my-pi/issues/3339)).
  */
 export interface UsageResetCreditDetail {
+	/** Opaque provider credit/grant identifier. */
+	id?: string;
+	/** Human-facing name for the reset. */
+	title?: string;
+	/** Provider reset program/family. */
+	program?: string;
+	/** Resets still banked in this credit/grant. */
+	remainingCount?: number;
+	/** Whether the provider says this credit can be redeemed now. */
+	usable?: boolean;
+	/** Whether redemption requires an exhausted covered limit. */
+	requiresLimit?: boolean;
+	/** Normalized {@link UsageLimit.id}s this credit resets. */
+	clears?: string[];
+	/** Normalized limit ids currently preventing redemption. */
+	blocking?: string[];
+	/** Used fractions for covered limits, keyed by normalized limit id. */
+	usedFractions?: Record<string, number>;
 	/** ISO timestamp when the credit was granted. */
 	grantedAt?: string;
 	/** ISO timestamp when the credit expires and can no longer be redeemed. */
@@ -91,17 +111,32 @@ export interface UsageResetCreditDetail {
 	status?: string;
 }
 
+/** Reset credit carrying the provider id required by its consume endpoint. */
+export interface UsageResetCredit extends UsageResetCreditDetail {
+	id: string;
+}
+
 /**
  * Saved/banked rate-limit resets an account can redeem on demand.
  *
  * Surfaced by providers that let users defer a usage-window reset and spend it
- * later (OpenAI Codex "saved rate limit resets"). The redeem itself is a
- * separate, provider-specific action; this is the read-only count for display.
+ * later (OpenAI Codex and Claude Cedar resets). The redeem itself is a
+ * separate, provider-specific action; this is the read-only state for display.
  */
 export interface UsageResetCredits {
-	/** Number of resets available to redeem right now. */
+	/** Number of banked resets, including grants that are not currently usable. */
 	availableCount: number;
-	/** Individual credit details (expiry dates, etc.) when the provider exposes them. */
+	/** Number of resets the provider says can be redeemed now. */
+	redeemableCount?: number;
+	/** Provider-selected credit/grant eligible for the next redemption. */
+	nextCreditId?: string;
+	/** Whether this account is eligible for the reset program. */
+	eligible?: boolean;
+	/** Provider reason the program or its credits are unavailable. */
+	reason?: string;
+	/** ISO timestamp until which redemption is cooling down. */
+	cooldownUntil?: string;
+	/** Individual credit details (expiry dates, coverage, etc.) when exposed. */
 	credits?: UsageResetCreditDetail[];
 }
 
@@ -276,6 +311,7 @@ export const usageScopeSchema = type({
 	"tier?": "string",
 	"windowId?": "string",
 	"shared?": "boolean",
+	"sharedGroup?": "string",
 });
 
 export const usageLimitSchema = type({
@@ -289,6 +325,15 @@ export const usageLimitSchema = type({
 });
 
 export const usageResetCreditDetailSchema = type({
+	"id?": "string",
+	"title?": "string",
+	"program?": "string",
+	"remainingCount?": "number",
+	"usable?": "boolean",
+	"requiresLimit?": "boolean",
+	"clears?": "string[]",
+	"blocking?": "string[]",
+	"usedFractions?": { "[string]": "number" },
 	"grantedAt?": "string",
 	"expiresAt?": "string",
 	"status?": "string",
@@ -296,6 +341,11 @@ export const usageResetCreditDetailSchema = type({
 
 export const usageResetCreditsSchema = type({
 	availableCount: "number",
+	"redeemableCount?": "number",
+	"nextCreditId?": "string",
+	"eligible?": "boolean",
+	"reason?": "string",
+	"cooldownUntil?": "string",
 	"credits?": usageResetCreditDetailSchema.array(),
 });
 
@@ -356,9 +406,15 @@ export interface UsageFetchContext {
 /** Provider implementation for fetching usage information. */
 export interface UsageProvider {
 	id: Provider;
+	/** Bump to retire cached reports of an older shape during last-good retention. */
+	cacheVersion?: number;
 	fetchUsage(params: UsageFetchParams, ctx: UsageFetchContext): Promise<UsageReport | null>;
 	/** Parse provider rate-limit response headers (lowercased keys) into a usage report, if supported. */
-	parseRateLimitHeaders?(headers: Record<string, string>, now?: number): UsageReport | null;
+	parseRateLimitHeaders?(
+		headers: Record<string, string>,
+		now?: number,
+		context?: { responseStatus?: number },
+	): UsageReport | null;
 	supports?(params: UsageFetchParams): boolean;
 	/** True when fetchUsage contacts upstream and can authenticate the credential for health checks. */
 	validatesCredentials?: boolean;
@@ -374,8 +430,19 @@ export interface CredentialRankingContext {
 	modelId?: string;
 }
 
+/** Classify an account report as eligible, ineligible, or unknown for a model's plan gate. */
+export type PlanGate = (report: UsageReport | null) => boolean | undefined;
+
 /** Strategy for usage-based credential ranking. Providers implement this to opt into smart credential selection. */
 export interface CredentialRankingStrategy {
+	/**
+	 * Account-plan gate for `context.modelId`: a classifier for the account behind a usage report —
+	 * eligible (`true`), ineligible (`false`), or unknown (`undefined`, plan not reported) — or
+	 * `undefined` when every plan may serve the model.
+	 */
+	planGate?(context: CredentialRankingContext): PlanGate | undefined;
+	/** Idle window after which a session pin stops suppressing usage re-ranking because the provider's prompt cache cannot still be warm; omit for indefinite stickiness. */
+	stickyWarmMs?: number;
 	/** Extract the primary (short) and secondary (long) window limits from a usage report. */
 	findWindowLimits(
 		report: UsageReport,
@@ -392,7 +459,7 @@ export interface CredentialRankingStrategy {
 	scopeLimits?(report: UsageReport, context?: CredentialRankingContext): UsageLimit[];
 	/**
 	 * Restrict limits for the opt-in, non-destructive usage-reserve health
-	 * check ({@link AuthStorage.getModelUsageHealth}). Distinct from
+	 * check ({@link AuthStorage.health.model}). Distinct from
 	 * {@link scopeLimits}, which gates credential-wide hard blocks: a provider
 	 * whose model/tier counters are trusted only at confirmed exhaustion for
 	 * hard-blocking can still expose them here so the reserve margin protects
@@ -421,10 +488,13 @@ export interface CredentialRankingStrategy {
 	 * gating it. {@link AuthStorage} clears a stale block under a returned scope
 	 * once every listed limit is below exhaustion, so a 429 whose retry-after
 	 * overstated the real reset does not sideline a recovered account until the
-	 * clock runs out. Scopes not returned expire by clock only. Codex heals
-	 * through its meter metadata instead and omits this.
+	 * clock runs out. Scopes not returned expire by clock only.
+	 *
+	 * `healthy` is the provider's own verdict for the scope (e.g. meter metadata):
+	 * false never heals; true heals even with empty limits; absent requires
+	 * non-empty limits with none exhausted.
 	 */
-	healableBlockScopes?(report: UsageReport): { blockScope: string; limits: UsageLimit[] }[];
+	healableBlockScopes?(report: UsageReport): { blockScope: string; limits: UsageLimit[]; healthy?: boolean }[];
 	/** Fallback window durations (ms) when limits don't specify durationMs. */
 	windowDefaults: {
 		primaryMs: number;

@@ -96,11 +96,10 @@ function pickTwoChoice(candidates: readonly QuotaShareInput[]): QuotaShareInput 
 	if (second === undefined) return lowest;
 	// Fair-share tiebreak: between the two finalists, debt repayment outranks
 	// weight — this is what makes equally healthy accounts alternate.
-	if ((second.deficit ?? 0) > (lowest.deficit ?? 0)) {
-		return second;
-	}
-	if (second.weight > lowest.weight) {
-		return second;
-	}
+	const secondDeficit = second.deficit ?? 0;
+	const lowestDeficit = lowest.deficit ?? 0;
+	if (secondDeficit > lowestDeficit) return second;
+	if (lowestDeficit > secondDeficit) return lowest;
+	if (second.weight > lowest.weight) return second;
 	return lowest;
 }

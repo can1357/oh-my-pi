@@ -52,15 +52,17 @@ describe("auth-gateway filter routes", () => {
 		});
 	});
 
-	it("returns 501 for POST /v1/audio/speech with a bearer", async () => {
+	it("returns 404 for POST /v1/audio/speech with an unknown model", async () => {
 		await withFilterGateway(async ({ url }) => {
 			const res = await fetch(`${url}/v1/audio/speech`, {
 				method: "POST",
 				headers: { Authorization: "Bearer t", "Content-Type": "application/json" },
 				body: JSON.stringify({ model: "tts-1", input: "hi", voice: "alloy" }),
 			});
-			expect(res.status).toBe(501);
-			expect(await res.json()).toEqual({ error: "not available on this gateway" });
+			expect(res.status).toBe(404);
+			expect(await res.json()).toEqual({
+				error: { code: 404, message: "Unknown model: tts-1", type: "invalid_request_error" },
+			});
 		});
 	});
 
@@ -81,7 +83,13 @@ describe("auth-gateway filter routes", () => {
 				body: JSON.stringify({ model: "gpt-image-1" }),
 			});
 			expect(res.status).toBe(400);
-			expect(await res.json()).toEqual({ error: "Missing prompt" });
+			expect(await res.json()).toEqual({
+				error: {
+					code: 400,
+					message: "images: prompt must be a string (length at least 1) (was missing)",
+					type: "invalid_request_error",
+				},
+			});
 		});
 	});
 

@@ -398,6 +398,24 @@ function applyOpenAiSampling(options: ParsedRequest["options"], body: Record<str
 	if (stopSequences && options.stopSequences === undefined) options.stopSequences = stopSequences;
 }
 
+
+
+function mapGeminiToolChoice(toolConfig: unknown): ParsedRequest["options"]["toolChoice"] {
+	if (!isRecord(toolConfig)) return undefined;
+	const fcc = toolConfig.functionCallingConfig ?? toolConfig.function_calling_config;
+	if (!isRecord(fcc)) return undefined;
+	const allowed = fcc.allowedFunctionNames ?? fcc.allowed_function_names;
+	if (Array.isArray(allowed)) {
+		const names = allowed.filter((name): name is string => typeof name === "string" && name.length > 0);
+		if (names.length === 1) return { name: names[0]! };
+	}
+	const mode = typeof fcc.mode === "string" ? fcc.mode.toUpperCase() : "";
+	if (mode === "NONE") return "none";
+	if (mode === "ANY") return "required";
+	if (mode === "AUTO") return "auto";
+	return undefined;
+}
+
 // ---------------------------------------------------------------------------
 // parseRequest
 // ---------------------------------------------------------------------------
@@ -438,6 +456,9 @@ export function parseRequest(body: unknown, _headers?: Headers, defaultStream = 
 	applyOpenAiSampling(options, body);
 
 	const tools = buildToolsFromGeminiBody(body.tools);
+	const toolChoice = mapGeminiToolChoice(body.toolConfig ?? body.tool_config);
+	if (toolChoice !== undefined) options.toolChoice = toolChoice;
+
 	const context: Context = {
 		messages,
 		...(systemParts.length > 0 ? { systemPrompt: systemParts } : {}),
