@@ -712,6 +712,22 @@ Cerebras provides ultra-fast inference on wafer-scale engine hardware for open-w
 - **Manager Options & Discovery**: `cerebrasModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts` uses `createOpenAICompatibleModelManagerOptions` with `providerId: "cerebras"` and default base URL `https://api.cerebras.ai/v1`.
 - **Gemma Image Capability Override**: `applyCerebrasDiscoveryOverrides` in `packages/catalog/src/provider-models/openai-compat.ts` checks `CEREBRAS_IMAGE_INPUT_MODEL_IDS` (`Set(["gemma-4-31b"])`) during model mapping to explicitly append `"image"` to `input` capabilities (`input: ["text", "image"]`), overriding missing vision capability flags in remote endpoint discovery metadata.
 
+## Cheaper Inference (`cheaperinference`)
+Cheaper Inference is an OpenAI-compatible gateway at `https://api.cheaperinference.com/v1` that serves models from several labs under their bare ids (`gpt-5.4-mini`, `gpt-5.4`, `claude-sonnet-5`, `gemini-3.1-pro`). Each model costs 15–60% less than the list price of its lab. It uses the OpenAI Chat Completions transport (`openai-completions`).
+
+### Special casings
+- **`max_tokens` Output Budget**: The provider rule sets `max-tokens-field "max_tokens"` in `packages/catalog/src/compat/rules/providers/cheaperinference.kdl`, the spelling the gateway honors on both Claude and GPT rows.
+- **System Role and No `store`**: The same file sets `supports-developer-role #false` and `supports-store #false`, so system prompts ride the `system` role on every upstream lab.
+- **Chat-Only Roster**: `/v1/models` lists image and video generation rows next to the chat models. `cheaperInferenceModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts` keeps only rows with `type: "text"`.
+
+### Auth & usage
+- **Environment Variable**: Authenticates via `CHEAPER_INFERENCE_API_KEY` (provider entry in `packages/catalog/src/compat/rules/providers/cheaperinference.kdl`). Keys start with `ci_live_`.
+- **API Key Login**: Declared in `packages/catalog/src/compat/rules/auth/cheaperinference.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`) with sign-up URL `https://cheaperinference.com/signup`. Validation probes `https://api.cheaperinference.com/v1/models` (`validate "models-endpoint"`), which requires a key.
+
+### Catalog model handling
+- **Runtime-Only Discovery**: The provider entry has no `discovery` node, so `generate-models.ts` never snapshots it and `models.json` carries no rows. `cheaperInferenceModelManagerOptions` fetches `/v1/models` with the configured key; the snapshot is authoritative (`dynamic-models-authoritative #true`).
+- **Row Mapping**: `context_length` and `max_output_tokens` become the limits, `capabilities.vision` adds image input, `capabilities.reasoning` marks the row as reasoning so the class rules supply its effort ladder, and the `pricing.*_per_million` decimal strings become the per-million cost.
+
 ## Cloudflare AI Gateway (`cloudflare-ai-gateway`)
 Cloudflare AI Gateway proxies requests through Cloudflare's edge infrastructure to model providers, utilizing the Anthropic Messages transport. Base URLs require substituting `<account>` and `<gateway>` path placeholders with the user's specific Cloudflare account ID and gateway slug in model configurations.
 

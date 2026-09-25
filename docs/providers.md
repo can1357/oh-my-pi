@@ -157,12 +157,15 @@ Each provider has one or more environment variables that supply a key when no st
 | `vllm`                           | `VLLM_API_KEY` (optional for an unauthenticated local server)                 |
 | `yolo-auto`                      | `YOLO_AUTO_API_KEY`                                                            |
 | `charm-hyper`                    | `CHARM_HYPER_API_KEY`, then `HYPER_API_KEY`                                   |
+| `cheaperinference`               | `CHEAPER_INFERENCE_API_KEY`                                                   |
 | `singularityapi-dev`             | `SINGULARITYAPI_DEV_API_KEY`                                                  |
 | `singularityapi-tech`            | `SINGULARITYAPI_TECH_API_KEY`                                                 |
 
 `/login cloudflare-ai-gateway` prompts for the gateway token, Cloudflare account ID, and gateway ID, then stores all three together. To use environment variables, set all three values listed above. OMP selects the Anthropic, OpenAI, or Workers AI gateway route for each model; you do not need a `models.yml` base URL override.
 
 `charm-hyper` is Charm's OpenAI-compatible inference gateway for coding agents. Issue or manage a key at `https://hyper.charm.land/`; the model list is discovered live from the provider's public `/v1/models` endpoint, and `HYPER_API_KEY` is accepted as a fallback alias for `CHARM_HYPER_API_KEY`.
+
+`cheaperinference` is Cheaper Inference, an OpenAI-compatible gateway that serves models from several labs under their bare ids (`gpt-5.4-mini`, `gpt-5.4`, `claude-sonnet-5`). Each model costs 15–60% less than the list price of its lab. Create a `ci_live_...` key at `https://cheaperinference.com/signup` (or run `/login cheaperinference`) and set `CHEAPER_INFERENCE_API_KEY`; the chat roster, limits, and tariffs are discovered live from `https://api.cheaperinference.com/v1/models`.
 
 SingularityAPI sells two unrelated products behind one brand, so OMP models them as two providers: they share no key, no billing model, and no effort ladder, and neither key is accepted by the other host.
 

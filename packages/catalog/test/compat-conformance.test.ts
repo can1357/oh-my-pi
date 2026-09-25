@@ -27,6 +27,10 @@ const RUNTIME_ONLY_PROVIDERS = new Set([
 	// lanes), so no rows are frozen into models.json.
 	"singularityapi-dev",
 	"singularityapi-tech",
+	// Keyed gateway discovery via cheaperInferenceModelManagerOptions: every
+	// row, including its tariff, comes from the live /v1/models snapshot, which
+	// requires a key, so no bundled rows are frozen into models.json.
+	"cheaperinference",
 	// User-configured LiteLLM proxy (models.yml provider or litellm auth flow;
 	// PROXY_OPENAI_COMPAT_PROVIDERS) that forwards upstream chat templates.
 	"litellm",

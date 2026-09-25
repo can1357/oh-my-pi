@@ -1,0 +1,12 @@
+// Validation targets `/v1/models`: the endpoint requires a key, so the probe
+// checks the pasted key without sending a chat request.
+auth "cheaperinference" {
+	name "Cheaper Inference"
+	login "api-key" {
+		auth-url "https://cheaperinference.com/signup"
+		instructions "Create or copy an API key from your Cheaper Inference account"
+		prompt "Paste your Cheaper Inference API key" placeholder="ci_live_..."
+		normalize "strip-bearer"
+		validate "models-endpoint" label="Cheaper Inference" url="https://api.cheaperinference.com/v1/models"
+	}
+}

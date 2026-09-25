@@ -7673,3 +7673,90 @@ export function singularityApiTechModelManagerOptions(
 ): ModelManagerOptions<Api> {
 	return singularityApiModelManagerOptions("singularityapi-tech", SINGULARITYAPI_TECH_API_BASE_URL, config);
 }
+
+// ---------------------------------------------------------------------------
+// Cheaper Inference
+// ---------------------------------------------------------------------------
+
+/** Cheaper Inference discovery configuration: the API key plus optional base-URL and fetch overrides. */
+export interface CheaperInferenceModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * Cheaper Inference's `/v1/models` row shape beyond the generic
+ * OpenAI-compatible fields: `type` (`text`, `image` or `video`), limits in
+ * `context_length`/`max_output_tokens`, boolean `capabilities` flags, and
+ * `pricing` in USD per million tokens as decimal strings.
+ */
+interface CheaperInferenceModelRecord extends OpenAICompatibleModelRecord {
+	type?: unknown;
+	context_length?: unknown;
+	max_output_tokens?: unknown;
+	capabilities?: unknown;
+	pricing?: unknown;
+}
+
+/** Per-million USD passes through unscaled; a published zero rate is a real price, not a missing value. */
+function toCheaperInferenceRate(value: unknown): number {
+	const parsed = toNumber(value);
+	return parsed !== undefined && parsed >= 0 ? parsed : 0;
+}
+
+function resolveCheaperInferenceCost(pricing: unknown): ModelSpec<"openai-completions">["cost"] {
+	if (!isRecord(pricing)) return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+	return {
+		input: toCheaperInferenceRate(pricing.input_per_million),
+		output: toCheaperInferenceRate(pricing.output_per_million),
+		cacheRead: toCheaperInferenceRate(pricing.cache_read_input_per_million),
+		cacheWrite: toCheaperInferenceRate(pricing.cache_write_input_per_million),
+	};
+}
+
+/**
+ * Cheaper Inference gateway: OpenAI Chat Completions at
+ * `api.cheaperinference.com/v1` in front of models from several labs, served
+ * under their bare ids (`gpt-5.4-mini`, `claude-sonnet-5`, …). `/v1/models`
+ * requires a key and interleaves image and video generation rows with the chat
+ * models; only `text` rows reach the chat picker. The snapshot is
+ * authoritative, so a model the gateway stops serving leaves the picker.
+ */
+export function cheaperInferenceModelManagerOptions(
+	config?: CheaperInferenceModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? "https://api.cheaperinference.com/v1";
+	return {
+		providerId: "cheaperinference",
+		dynamicModelsAuthoritative: true,
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "cheaperinference",
+					baseUrl,
+					apiKey,
+					mapModel: (
+						entry: OpenAICompatibleModelRecord,
+						defaults: ModelSpec<"openai-completions">,
+					): ModelSpec<"openai-completions"> | null => {
+						const record = entry as CheaperInferenceModelRecord;
+						if (record.type !== undefined && record.type !== "text") return null;
+						const capabilities = isRecord(record.capabilities) ? record.capabilities : undefined;
+						return {
+							...defaults,
+							// The class rules supply the effort ladder for reasoning rows.
+							reasoning: capabilities?.reasoning === true,
+							input: capabilities?.vision === true ? ["text", "image"] : ["text"],
+							contextWindow: toPositiveNumber(record.context_length, defaults.contextWindow),
+							maxTokens: toPositiveNumber(record.max_output_tokens, defaults.maxTokens),
+							cost: resolveCheaperInferenceCost(record.pricing),
+						};
+					},
+					fetch: config?.fetch,
+				}),
+		}),
+	};
+}
