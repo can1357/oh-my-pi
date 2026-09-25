@@ -11,7 +11,7 @@
 
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs/promises";
-import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { ImageContent, ProviderFileReference, TextContent } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type {
 	BusChannel,
@@ -38,6 +38,7 @@ import {
 	type CollabParticipant,
 	type CollabPromptDetails,
 	type CollabSessionState,
+	describeThrown,
 	formatCollabLink,
 	formatCollabWebLink,
 	generateRoomId,
@@ -130,6 +131,203 @@ const TRANSCRIPT_ENTRY_TOO_LARGE_ERROR = `transcript entry exceeds transcript fe
 const SNAPSHOT_CHUNK_BYTES = 512 * 1024;
 const MAX_PENDING_UI_REQUESTS = 64;
 /**
+ * Longest guest-supplied label this host will put into a frame it sends.
+ *
+ * Not a limit on what an id or a name may be — an agent lookup takes the id whole,
+ * so a longer real one still addresses its agent — only on how much of it a guest
+ * can make the host emit. Unbounded, a reply that quotes one is as large as the
+ * guest chose — an unknown-agent kill quoted the id in the prefix and again
+ * inside the error, so the reply ran to about twice whatever arrived. The queue
+ * admits one oversized entry on an empty queue, so a large enough label builds a
+ * frame past the relay's payload limit and closes the host socket: a
+ * guest-triggered disconnect out of an error path whose whole purpose is to be
+ * polite about a mistake.
+ *
+ * The number is the cap {@link CollabHost.#handleHello} already applied to a peer
+ * name, the other guest-supplied label that reaches a frame; it is shared rather
+ * than repeated so the two cannot drift. Both sites truncate to it rather than
+ * refusing past it: a label over the cap is still the one its sender chose, and a
+ * bound that replaced it with something else would make the reply that quotes it
+ * wrong about which agent or which guest it means.
+ */
+const GUEST_LABEL_MAX = 64;
+/**
+ * Ceiling on the text of an `error` frame, applied where the frame is sent rather
+ * than where its parts are chosen.
+ *
+ * Bounding the ingredients does not work, and this branch proved it twice: the
+ * agent-command replies bound the id and then interpolated `String(err)`, and
+ * `AgentLifecycleManager#ensureLive` embeds the id it was given, twice, in prose
+ * of its own. Bounding the label bought almost nothing: the reply still carried
+ * the id twice through prose composed elsewhere, so it still scaled with what
+ * the guest sent. That message belongs to another module and its own callers, so
+ * the only place that can bound it is the last one that touches it.
+ *
+ * 512 UTF-16 code units, which is what `slice` counts — not bytes. Astral text
+ * costs four bytes per two units, so 512 units is 256 code points and about 1 KiB
+ * in UTF-8; still four orders of magnitude inside the relay's payload limit,
+ * which is the property that matters, but the unit is worth stating because the
+ * budget elsewhere in this feature is named in bytes and these are not the same
+ * number. A split surrogate at the cut is not a corruption risk: `JSON.stringify`
+ * escapes a lone surrogate, so the frame stays valid JSON.
+ *
+ * 512 because the longest error this file composes from its own literals plus a
+ * fully-sized {@link GUEST_LABEL_MAX} label measures 154 units — the `kill` reply
+ * for an unknown agent, which spends the label twice. What gets cut is therefore
+ * never this host's own wording. Prose from elsewhere has no such headroom and no
+ * ceiling to compute one from: the revive path `AgentLifecycleManager.ensureLive`
+ * runs into (`#resolveAndRevive`) interpolates the *untruncated* id twice, so the
+ * same reply reaches 586 units at a 200-unit id and grows from there. That is what
+ * the cap is for, and why it cannot be replaced by arithmetic over the ingredients.
+ */
+const ERROR_MESSAGE_MAX = 512;
+
+/**
+ * Schemes a replicated image URL may use.
+ *
+ * `http:` is here on purpose and not as an oversight: the blob broker's own
+ * exposure emits `http://127.0.0.1:<port>` and `http://<bindHost>:<port>`
+ * (`blob-broker/exposure.ts`), so requiring TLS would reject URLs this codebase
+ * produces for itself. What the allowlist is for is everything else — `file:`,
+ * `data:`, `javascript:` — which `URL.canParse` accepts happily and which
+ * providers would be handed verbatim.
+ */
+const IMAGE_URL_PROTOCOLS = new Set(["http:", "https:"]);
+const IMAGE_DETAIL_VALUES = new Set(["auto", "low", "high", "original"]);
+/**
+ * Image media types this codebase can actually carry.
+ *
+ * Not a list chosen here. `normalizeAnthropicImageMediaType`
+ * (`providers/anthropic.ts`), `createImageBlock` (`providers/amazon-bedrock.ts`)
+ * and `EXT_BY_MIME` (`blob-broker/store.ts`) each recognise jpeg, png, gif and
+ * webp; the first two also read `image/jpg` as a spelling of `image/jpeg`, and
+ * `EXT_BY_MIME` does not, so that spelling costs a `.bin` extension on a broker
+ * blob and nothing else.
+ *
+ * `image/svg+xml` is left out although `IMAGE_EXTENSION_BY_MIME`
+ * (`session/blob-store.ts`) maps it: no provider converter accepts SVG, and it is
+ * the one image type that carries script, which matters because of where this
+ * value lands.
+ *
+ * An allowlist rather than a media-type grammar check, because the values that do
+ * damage are well-formed media types. This string is not decoration in any of its
+ * sinks:
+ *
+ * - The blob broker serves the guest's own bytes back under it as a response
+ *   `content-type` (`blob-broker/store.ts`), on an origin this process operates.
+ * - `EXT_BY_MIME[mimeType]` is a plain object read, so `"__proto__"` resolves to
+ *   `Object.prototype` rather than `undefined`, the `?? "bin"` fallback never
+ *   fires, and the path the broker publishes stops matching the
+ *   `BLOB_PATH_PATTERN` its own request handler parses.
+ * - The OpenAI, Cursor and completions converters build
+ *   `data:${mimeType};base64,${data}`, where a `,` in the value ends the media
+ *   type early and hands the rest of the URL to the sender.
+ */
+const IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"]);
+const PROVIDER_FILE_PROVIDERS = new Set(["openai", "anthropic", "google"]);
+
+/**
+ * Image content off the wire, rebuilt from the fields {@link ImageContent}
+ * declares, or `null` if it is not image content at all.
+ *
+ * Rebuilt rather than checked, because a check leaves whatever else the sender
+ * attached. An earlier version tolerated unknown properties on purpose, reasoning
+ * that a newer guest might carry fields this host has no opinion about — sound
+ * where such a field is read and dropped, and wrong here, because this object is
+ * put into a session message, persisted, and handed to
+ * {@link shrinkForReplication}, which measures it with `JSON.stringify` before
+ * walking it: both recurse, so a sufficiently nested unknown property takes one
+ * of them to `RangeError`, and which one it reaches first belongs to the runtime
+ * rather than to the payload. Copying the known fields makes the shape the host
+ * stores a property of this function rather than of what arrived. A newer field
+ * is dropped instead of honoured, which is the safe direction to be wrong.
+ *
+ * Takes `unknown` and reads properties off it directly, which is only total for
+ * the input it actually gets: this runs on `JSON.parse` output, which is plain
+ * data. A `Proxy` with a throwing `get` would throw out of the destructuring, and
+ * nothing on this path can produce one.
+ */
+function toImageContent(value: unknown): ImageContent | null {
+	if (typeof value !== "object" || value === null) return null;
+	const candidate = value as Record<string, unknown>;
+	if (candidate.type !== "image") return null;
+	const { data, mimeType, detail, url, providerFile } = candidate;
+	// `data` is deliberately not inspected beyond its type, unlike `mimeType`
+	// beside it. Every sink either carries it as a JSON string value, where
+	// `JSON.stringify` escapes it, or appends it after the `;base64,` of a data
+	// URL, where nothing following can re-open the media type. So a wrong value
+	// costs a rejected turn — the price of any wrong image — while the scan would
+	// run over what is routinely megabytes on the prompt path.
+	if (typeof data !== "string" || typeof mimeType !== "string") return null;
+	if (!IMAGE_MIME_TYPES.has(mimeType)) return null;
+	if (detail !== undefined && !IMAGE_DETAIL_VALUES.has(detail as string)) return null;
+	if (url !== undefined && !isReplicableImageUrl(url)) return null;
+	const image: ImageContent = { type: "image", data, mimeType };
+	if (detail !== undefined) image.detail = detail as ImageContent["detail"];
+	if (url !== undefined) image.url = url;
+	if (providerFile !== undefined) {
+		const reference = toProviderFileReference(providerFile);
+		if (!reference) return null;
+		image.providerFile = reference;
+	}
+	return image;
+}
+
+/**
+ * Whether a replicated image URL is one this host will hand to a provider.
+ *
+ * Checked, not merely typed, because neither `ImageContent.url` nor
+ * `ProviderFileReference.uri` is decoration: the OpenAI converter puts the former
+ * straight into `image_url`, and the Google one puts *either* into the same
+ * `fileUri` (`providers/google-shared.ts`), so a scheme of the sender's choosing
+ * decides where a fetch attributed to the operator's credential points. Both
+ * doors onto that sink take this predicate; checking only one leaves the other
+ * open. Parsing alone is not the check — `URL.canParse("javascript:alert(1)")` is
+ * `true`.
+ *
+ * Length is not bounded here, and the bound that used to be was removed rather
+ * than corrected: 2048 was this feature's own invention, no consumer between here
+ * and the provider states a ceiling to replace it with, and a long but well-formed
+ * `https:` URL costs a rejected turn and nothing worse. A number with no source is
+ * worse than no number, because it reads like a constraint that was looked up.
+ */
+function isReplicableImageUrl(value: unknown): value is string {
+	if (typeof value !== "string" || value.length === 0) return false;
+	let parsed: URL;
+	try {
+		parsed = new URL(value);
+	} catch {
+		return false;
+	}
+	return IMAGE_URL_PROTOCOLS.has(parsed.protocol);
+}
+
+function toProviderFileReference(value: unknown): ProviderFileReference | null {
+	if (typeof value !== "object" || value === null) return null;
+	const { provider, id, uri, expiresAt } = value as Record<string, unknown>;
+	if (!PROVIDER_FILE_PROVIDERS.has(provider as string)) return null;
+	if (id !== undefined && typeof id !== "string") return null;
+	// Not merely a string, unlike `id`: `id` is handed to OpenAI and Anthropic as an
+	// opaque handle they look up, while `uri` is dereferenced — see
+	// {@link isReplicableImageUrl}. The only producer of this field is the Gemini
+	// Files API response (`blob-broker/provider-files-gemini.ts`), which returns an
+	// `https:` URL, so the allowlist costs no reachable capability.
+	if (uri !== undefined && !isReplicableImageUrl(uri)) return null;
+	// Finite, not merely a number: `JSON.parse("1e999")` is `Infinity`, which is
+	// `typeof "number"` and passes a bare check. It then serializes back out as
+	// `null`, so the entry this rebuild exists to keep well-formed would be
+	// persisted with a null where the type declares a number. `NaN` the same.
+	// Finiteness rather than a safe integer, unlike `fromByte`: nothing indexes with
+	// this and the declared contract is only `number`, so the property that matters
+	// is that it survives a round trip.
+	if (expiresAt !== undefined && (typeof expiresAt !== "number" || !Number.isFinite(expiresAt))) return null;
+	const reference: ProviderFileReference = { provider: provider as ProviderFileReference["provider"] };
+	if (id !== undefined) reference.id = id;
+	if (uri !== undefined) reference.uri = uri;
+	if (expiresAt !== undefined) reference.expiresAt = expiresAt;
+	return reference;
+}
+/**
  * Outcome of {@link CollabHost.requestGuestUi}. `answered` carries the guest's
  * response (an `undefined` value is a genuine guest cancel); `unavailable`
  * means the collab channel went away (teardown, relay drop) or the request was
@@ -142,6 +340,8 @@ interface PendingCollabUiRequest {
 	promise: Promise<CollabGuestUiResult>;
 	settle(result: CollabGuestUiResult): void;
 	responsePending?: boolean;
+	/** Peers that were handed this dialog and can still answer it. */
+	recipients: Set<number>;
 }
 
 /**
@@ -338,16 +538,61 @@ export class CollabHost {
 		};
 		const onAbort = (): void => settle({ kind: "unavailable" });
 		signal?.addEventListener("abort", onAbort, { once: true });
-		this.#pendingUi.set(reqId, { request: fullRequest, promise, settle });
-		this.#sendWritablePeers({ t: "ui-request", request: fullRequest });
+		const recipients = new Set<number>();
+		this.#pendingUi.set(reqId, { request: fullRequest, promise, recipients, settle });
+		// A registration only means something if somebody was asked, and it stops
+		// meaning anything once nobody who was asked can answer. The queue can
+		// refuse a targeted frame under pressure, and the caller awaits this with no
+		// timeout of its own, so an ask nobody received settles here instead of
+		// waiting for a reply that cannot come. A partial delivery still stands: one
+		// guest holding the dialog is enough to answer it, which is why the
+		// recipients are tracked rather than counted.
+		const hadWritable = this.#hasWritablePeers();
+		for (const peerId of this.#sendWritablePeers({ t: "ui-request", request: fullRequest })) {
+			recipients.add(peerId);
+		}
+		// Nobody connected yet: keep the ask for the first writer that joins.
+		// Writable peers that all refused the frame cannot answer it, and the
+		// caller awaits this with no timeout of its own.
+		if (hadWritable && recipients.size === 0) settle({ kind: "unavailable" });
 		return promise;
 	}
 
-	#sendWritablePeers(frame: CollabFrame): void {
+	#hasWritablePeers(): boolean {
+		for (const peer of this.#peers.values()) {
+			if (peer.canWrite) return true;
+		}
+		return false;
+	}
+
+	/** @returns the writable peers the frame was admitted for. */
+	#sendWritablePeers(frame: CollabFrame): number[] {
 		const socket = this.#socket;
-		if (!socket) return;
+		if (!socket || this.#sendSuppressed(frame)) return [];
+		const admitted: number[] = [];
 		for (const [peerId, peer] of this.#peers) {
-			if (peer.canWrite) this.#send(frame, peerId);
+			if (peer.canWrite && socket.send(frame, peerId)) admitted.push(peerId);
+		}
+		return admitted;
+	}
+
+	/**
+	 * Drop {@link peer} from every outstanding ask. Called wherever a peer stops
+	 * being able to answer: departure, a shed, or a `hello` that gives up write
+	 * permission. Without it an ask the queue admitted counts as delivered for
+	 * ever, and its caller waits for a reply from somebody the host has already
+	 * written off.
+	 *
+	 * A departure returns the ask to the retained state a dialog raised before any
+	 * writer joined is in, so the next writer is handed it on join. A shed or a
+	 * demotion settles an ask that has no recipient left: the shed peer's rejoin
+	 * would replay the backlog it just outran, and the demoted peer is still in
+	 * the room without the right to answer.
+	 */
+	#dropAskRecipient(peer: number, retainWhenEmpty = false): void {
+		for (const pending of this.#pendingUi.values()) {
+			if (!pending.recipients.delete(peer)) continue;
+			if (pending.recipients.size === 0 && !retainWhenEmpty) pending.settle({ kind: "unavailable" });
 		}
 	}
 
@@ -387,6 +632,7 @@ export class CollabHost {
 		socket.onControl = msg => {
 			if (msg.t === "peer-left") this.#handlePeerLeft(msg.peer);
 		};
+		socket.onPeerOverload = peer => this.#handlePeerOverload(peer);
 		socket.onClose = (reason, willReconnect) => {
 			this.#relayConnected = false;
 			if (this.#stopped) return;
@@ -428,7 +674,9 @@ export class CollabHost {
 		// resolves), and anything that happens after its welcome snapshot must
 		// reach it; the local registry work below is independent of that.
 		this.#unsubscribe = this.#ctx.session.subscribe(event => {
-			if (isWireAgentEvent(event)) this.#send({ t: "event", event: shrinkReplicatedEvent(event) });
+			if (isWireAgentEvent(event)) {
+				this.#broadcast({ t: "event", event: shrinkReplicatedEvent(event) }, event.type === "notice");
+			}
 			this.#onEventForState(event);
 		});
 		// Subagent frames publish on the session tree's observability bus at
@@ -575,6 +823,14 @@ export class CollabHost {
 		}
 	}
 
+	/** @returns false when a saturated queue discarded an advisory frame. */
+	#broadcast(frame: CollabFrame, advisory = false): boolean {
+		if (this.#stopped || !this.#socket || this.#sendSuppressed(frame)) return false;
+		if (advisory) return this.#socket.broadcastAdvisory(frame);
+		this.#socket.send(frame);
+		return true;
+	}
+
 	/**
 	 * The session this room mirrors is still the active one. Every path that
 	 * reads or mutates session state on a guest's behalf (broadcasts, joins,
@@ -641,8 +897,18 @@ export class CollabHost {
 		// Ending an existing dialog contains only its old-room request ID, never
 		// current-session data. Do not strand guests if it settles during a
 		// provisional /resume that later rolls back. All other traffic stays gated.
-		if (this.ending || (!this.#sessionStillCurrent() && frame.t !== "ui-request-end")) return;
+		if (this.#sendSuppressed(frame)) return;
 		this.#socket?.send(frame, toPeer);
+	}
+
+	/**
+	 * The outbound gate every guest-bound frame passes, whichever helper builds it.
+	 * Ending an existing dialog contains only its old-room request ID, never
+	 * current-session data, so `ui-request-end` alone may leave during a
+	 * provisional `/resume` that later rolls back.
+	 */
+	#sendSuppressed(frame: CollabFrame): boolean {
+		return this.ending || (!this.#sessionStillCurrent() && frame.t !== "ui-request-end");
 	}
 
 	#handleFrame(frame: CollabFrame, fromPeer: number): void {
@@ -651,7 +917,10 @@ export class CollabHost {
 		// peer's lifetime at reception; re-read it here rather than acting on a
 		// sender that is already gone and registering a ghost participant.
 		if (!this.#socket?.isServing(fromPeer)) {
-			logger.debug("collab host ignoring frame from a peer it no longer serves", { type: frame.t, fromPeer });
+			logger.debug("collab host ignoring frame from a peer it no longer serves", {
+				type: this.#label(frame.t),
+				fromPeer,
+			});
 			return;
 		}
 		// An old-room answer may wait for rollback, but cannot settle against
@@ -684,27 +953,103 @@ export class CollabHost {
 				void this.#handleFetchTranscript(frame.reqId, frame.agentId, frame.fromByte, fromPeer);
 				break;
 			default:
-				logger.debug("collab host ignoring unexpected frame", { type: frame.t, fromPeer });
+				logger.debug("collab host ignoring unexpected frame", { type: this.#label(frame.t), fromPeer });
 		}
 	}
 
-	/** Timing-safe write-token check; peers without a valid token are read-only. */
-	#verifyWriteToken(token: string | undefined): boolean {
+	/**
+	 * Timing-safe write-token check; peers without a valid token are read-only.
+	 *
+	 * Takes `unknown` because the protocol's field types are what a guest claims,
+	 * not what it sent: the frame is `JSON.parse`d and cast. `Buffer.from` throws
+	 * `ERR_INVALID_ARG_TYPE` on anything that is not a string, and the throw would
+	 * unwind into `CollabSocket`'s frame-handler catch — losing the whole `hello`
+	 * with nothing but a debug line, which a guest cannot tell apart from a welcome
+	 * the queue refused. A token that is not a string is a token that does not
+	 * match, so it answers the same `false` a wrong one does and the guest joins
+	 * read-only.
+	 */
+	#verifyWriteToken(token: unknown): boolean {
 		const expected = this.#writeToken;
-		if (!expected || !token) return false;
+		if (!expected || typeof token !== "string" || !token) return false;
 		const bytes = Buffer.from(token, "base64url");
 		return bytes.byteLength === expected.byteLength && timingSafeEqual(bytes, expected);
 	}
 
-	/** Reject a mutating frame from a read-only peer with a targeted error. */
-	#rejectReadOnly(action: string, fromPeer: number): void {
-		this.#send({ t: "error", message: `${action} is disabled on a read-only link` }, fromPeer);
+	/**
+	 * Every `error` frame leaves through here, so no reply can exceed
+	 * {@link ERROR_MESSAGE_MAX} code units of message, plus the one the ellipsis
+	 * costs when it fires — 513, not 512 — whatever composed it.
+	 *
+	 * A cap on the whole message rather than on its parts, because the parts are not
+	 * all chosen here: an error raised elsewhere arrives already carrying whatever a
+	 * guest put into the request that produced it. Callers may still quote a bounded
+	 * label for readability — that is what {@link #label} is for — but nothing
+	 * downstream depends on their remembering to.
+	 *
+	 * This closes the `error` carrier, not the idea of echoing a guest value: a
+	 * frame of another type that embeds one is bounded at its own site, and
+	 * `#handleFetchTranscript`'s `reqId` is the one that needed it.
+	 */
+	#sendError(message: string, toPeer: number): boolean {
+		const bounded = message.length <= ERROR_MESSAGE_MAX ? message : `${message.slice(0, ERROR_MESSAGE_MAX)}…`;
+		const frame: CollabFrame = { t: "error", message: bounded };
+		if (this.#sendSuppressed(frame)) return false;
+		return this.#socket?.send(frame, toPeer) ?? false;
 	}
 
 	/**
-	 * Guests must not drive the session while it is still starting up (an
-	 * auto-started room is live before the session's startup hooks finish):
-	 * refuse with a targeted error instead of running an agent turn beside them.
+	 * An error someone else raised, rendered for quoting.
+	 *
+	 * The argument on {@link #sendError} is about the error text, not about the
+	 * error frame, so it holds for every consumer of that text and not just the
+	 * reply: `ensureLive` embeds the id it was handed, twice, and a log line takes
+	 * whatever volume a reply would. Bounded once, here, so a caller cannot bound
+	 * one consumer and forget the other — which is exactly what happened when only
+	 * the reply was fixed.
+	 *
+	 * Rendering is not safe by default either, and this helper originally assumed it
+	 * was, one function below the doc comment on {@link #label} that says a nested
+	 * value throws out of a template. {@link describeThrown} owns that; call this
+	 * once per handler and reuse the result rather than converting twice.
+	 */
+	#reason(err: unknown): string {
+		return describeThrown(err, ERROR_MESSAGE_MAX);
+	}
+
+	/**
+	 * A value of unknown provenance, reduced to something safe to put in a frame or
+	 * a log line: bounded in length, and never one whose own stringification can
+	 * throw. A nested array reaches this handler at depths a template cannot survive
+	 * — it does not have to, because it lands in the object arm below and is
+	 * reported as unnamed without being converted at all.
+	 *
+	 * A number or a boolean is reported as itself, because for some of these fields
+	 * that is the well-formed case and the reply has to name what actually arrived —
+	 * a stale `proto` is a number, and saying it was unnamed would make the mismatch
+	 * unreadable. A string is truncated rather than replaced, because a long one is
+	 * still the name its sender chose. Nothing else has a name to give.
+	 */
+	#label(value: unknown): string {
+		if (typeof value === "number" || typeof value === "boolean") return String(value);
+		if (typeof value !== "string" || value.length === 0) return "(unnamed)";
+		return value.length <= GUEST_LABEL_MAX ? value : `${value.slice(0, GUEST_LABEL_MAX)}…`;
+	}
+
+	/** Reject a mutating frame from a read-only peer with a targeted error. */
+	#rejectReadOnly(action: string, fromPeer: number): void {
+		this.#sendError(`${action} is disabled on a read-only link`, fromPeer);
+	}
+
+	/**
+	 * Every field here is `unknown` for the reason given on {@link #verifyWriteToken}:
+	 * the declared protocol types describe what a well-behaved guest sends, and this
+	 * is the boundary where that stops being a guarantee. `proto` needs no narrowing
+	 * to reach the right branch — a non-number is never equal to {@link COLLAB_PROTO},
+	 * so it takes the mismatch path — but it does need one to be quoted back, which
+	 * is why the reply runs it through {@link #label} rather than `String`: the value
+	 * is guest-sized, and a nested array throws out of a template. `name` needs one
+	 * to be used at all: `.trim()` throws on a non-string, including `null`.
 	 */
 	#rejectWhileStarting(action: string, fromPeer: number): boolean {
 		if (this.#guestActionsReady()) return false;
@@ -715,62 +1060,103 @@ export class CollabHost {
 		return true;
 	}
 
-	#handleHello(name: string, proto: number, writeToken: string | undefined, fromPeer: number): void {
+	#handleHello(name: unknown, proto: unknown, writeToken: unknown, fromPeer: number): void {
 		if (this.#ctx.session.isSessionTransitioning) {
-			this.#send({ t: "error", message: "Session transition in progress; join again when it completes" }, fromPeer);
+			this.#sendError("Session transition in progress; join again when it completes", fromPeer);
 			return;
 		}
 		if (proto !== COLLAB_PROTO) {
-			this.#send(
-				{ t: "error", message: `protocol mismatch: host speaks v${COLLAB_PROTO}, guest sent v${proto}` },
+			// `proto` is guest-controlled, so the reply that quotes it back would be
+			// too — unbounded, it was as long as the guest chose. Labelled here for the
+			// reader, and bounded by #sendError regardless of what reaches it.
+			this.#sendError(
+				`protocol mismatch: host speaks v${COLLAB_PROTO}, guest sent v${this.#label(proto)}`,
 				fromPeer,
 			);
 			return;
 		}
-		const cleanName = name.trim().slice(0, 64) || `guest-${fromPeer}`;
+		// A name that is not a string is a name this host cannot use, which is what
+		// a blank one already means: the guest gets the generated one either way.
+		const cleanName = (typeof name === "string" ? name.trim().slice(0, GUEST_LABEL_MAX) : "") || `guest-${fromPeer}`;
 		const canWrite = this.#verifyWriteToken(writeToken);
+		// Registered before the snapshot is built, because `#buildState` reads the
+		// roster and the welcome has to show the joiner itself. Held against the
+		// batch's admission below, so a hello whose welcome the queue refused leaves
+		// the host's view of the room exactly as it found it.
+		const registered = this.#peers.get(fromPeer);
 		this.#peers.set(fromPeer, { name: cleanName, canWrite });
 
-		// Enqueue the snapshot synchronously so live traffic cannot overtake it;
-		// materialize its chunks only as the transport drains.
-		// `copyForReplication` rather than the default `structuredClone`: a payload
-		// the engine cannot clone is exactly what the shrinker below exists to
-		// bound, so letting the copy throw here would abort the chunk train before
-		// the bound ever runs (issue #11433).
 		const snapshot = this.#ctx.sessionManager.snapshotForReplication(copyForReplication);
-		// `null` means the snapshot is not serializable as-is (a non-JSON leaf
-		// such as `BigInt`, or a `toJSON` that throws — depth and cycles are
-		// already bounded by `copyForReplication` above); treat it as over the
-		// threshold so images are stripped before the chunker has to fall back
-		// to placeholders.
-		const snapshotBytes = replicationByteLength(snapshot);
-		if (snapshotBytes === null || snapshotBytes > WELCOME_IMAGE_STRIP_THRESHOLD) {
+		let serialized = "";
+		const measured = replicationByteLength(snapshot);
+		if (measured !== null) serialized = JSON.stringify(snapshot);
+		if (measured === null || serialized.length > WELCOME_IMAGE_STRIP_THRESHOLD) {
 			let stripped = 0;
 			for (const entry of snapshot.entries) {
 				if (entry.type === "message") stripped += stripImagesFromMessage(entry.message);
 			}
+			// Re-serialize: stripping is what decides how much of this snapshot the
+			// queue will hold, and an image-heavy session shrinks by an order of
+			// magnitude. Charging the arrival size instead refuses joins the budget
+			// has room for and sheds guests to make room for memory nobody holds.
+			if (stripped > 0) serialized = JSON.stringify(snapshot);
 			logger.info("collab welcome exceeded size threshold; stripped images", { stripped });
 		}
+		// The charge is in bytes, the unit every other charge and the budget itself
+		// are in. Free next to the serialization it reads, and it costs nothing to
+		// hold the string this far: the batch below retains the whole clone anyway.
+		const snapshotBytes = Buffer.byteLength(serialized);
 		const entries = snapshot.entries.filter(isWireSessionEntry);
 		const socket = this.#socket;
 		if (!socket) return;
-		this.#send(
-			{
-				t: "welcome",
-				proto: COLLAB_PROTO,
-				header: snapshot.header,
-				state: this.#buildState(),
-				agents: this.#snapshotAgents(),
-				entryCount: entries.length,
-				readOnly: canWrite ? undefined : true,
-			},
-			fromPeer,
-		);
-		socket.sendBatch(this.#snapshotChunks(entries), fromPeer);
+		if (!this.#guestTrafficAllowed()) {
+			if (registered) this.#peers.set(fromPeer, registered);
+			else this.#peers.delete(fromPeer);
+			return;
+		}
+		const welcome: CollabFrame = {
+			t: "welcome",
+			proto: COLLAB_PROTO,
+			header: snapshot.header,
+			state: this.#buildState(),
+			agents: this.#snapshotAgents(),
+			entryCount: entries.length,
+			readOnly: canWrite ? undefined : true,
+		};
+		// Retained asks ride in the welcome batch rather than as one queue entry
+		// each: up to MAX_PENDING_UI_REQUESTS of them are replayed to a joining
+		// writer, which is past the per-peer share on its own.
+		const replayed = canWrite ? [...this.#pendingUi.values()] : [];
+		let replayBytes = 0;
+		for (const pending of replayed) {
+			replayBytes += Buffer.byteLength(JSON.stringify({ t: "ui-request", request: pending.request }));
+		}
+		// snapshotForReplication clones, and the batch holds that clone until it
+		// drains, so the queue is told what it is keeping alive: the serialized byte
+		// length of what stripping left, before an entry filter that only shrinks it
+		// further, plus the replayed asks.
+		const batch = this.#welcomeWithSnapshot(welcome, entries, replayed);
+		if (!socket.sendBatch(batch, fromPeer, snapshotBytes + replayBytes)) {
+			// No welcome reached the guest, and a guest applies nothing before one. So
+			// there is no participant to announce, nothing to add to the roster, and
+			// above all nobody to hand a pending ask to: an ask recorded against a peer
+			// that cannot answer it is the hang this policy already closed once, and a
+			// registered ghost reaches it by a different route. Undoing the
+			// registration is the whole remedy — never a promotion, since it only ever
+			// restores what this id already had, and a relay does not reissue an id
+			// inside a room.
+			if (registered) this.#peers.set(fromPeer, registered);
+			else this.#peers.delete(fromPeer);
+			logger.debug("collab: welcome batch was not admitted; leaving the peer unregistered", { fromPeer });
+			return;
+		}
 		if (canWrite) {
-			for (const pending of this.#pendingUi.values()) {
-				this.#send({ t: "ui-request", request: pending.request }, fromPeer);
-			}
+			for (const pending of replayed) pending.recipients.add(fromPeer);
+		} else {
+			// A repeated hello without the write token demotes the peer, and a
+			// read-only peer's answer is rejected, so it is no longer a recipient of
+			// anything it was handed while it could still write.
+			this.#dropAskRecipient(fromPeer);
 		}
 		this.#ctx.session.emitNotice(
 			"info",
@@ -779,6 +1165,27 @@ export class CollabHost {
 		);
 		this.#updateStatusSegment();
 		this.#scheduleStateBroadcast();
+	}
+
+	/**
+	 * The welcome and the chunks built from the same {@link entries} are one unit:
+	 * the welcome primes the guest's accumulator with `entryCount` and the train
+	 * terminates it, so a guest given one without the other finalizes a replica it
+	 * believes is complete. Yielding both from one generator makes them a single
+	 * queue entry, so admission, supersede and cancellation are one decision and a
+	 * partial admission cannot be expressed. It is also what lets a snapshot past
+	 * the whole send budget ship at all: the budget admits an entry with nothing
+	 * ahead of it, and a welcome queued on the line before would be that
+	 * something.
+	 */
+	*#welcomeWithSnapshot(
+		welcome: CollabFrame,
+		entries: (StoredSessionEntry & WireSessionEntry)[],
+		replayed: readonly PendingCollabUiRequest[] = [],
+	): Generator<CollabFrame> {
+		yield welcome;
+		yield* this.#snapshotChunks(entries);
+		for (const pending of replayed) yield { t: "ui-request", request: pending.request };
 	}
 
 	/**
@@ -872,21 +1279,64 @@ export class CollabHost {
 		}
 	}
 
-	#handlePrompt(text: string, images: ImageContent[] | undefined, fromPeer: number): void {
+	/**
+	 * `images` is `unknown` for the reason given on {@link #verifyWriteToken}: the
+	 * declared type is the sender's claim, and this one was spread, which a truthy
+	 * non-iterable throws out of.
+	 *
+	 * `text` is refused below rather than merely typed, which is why nothing further
+	 * down has to cope with it. It is written here because the reason is not local:
+	 * the two paths it used to reach failed differently, and one failed late.
+	 * Without images a non-string became the content whole and `promptCustomMessage`
+	 * rejected it in its first statement, before any session insertion, so the catch
+	 * below replied. With images it went into a `TextContent`, where nothing
+	 * rejected it — `join` stringifies a copy and the original was persisted as
+	 * sent, so the entry was invalid session state and a later turn threw on
+	 * `item.text.toWellFormed()` inside a provider serializer, a different
+	 * subsystem, minutes away, with nothing left to tell the guest.
+	 */
+	#handlePrompt(text: unknown, images: unknown, fromPeer: number): void {
 		const peer = this.#peers.get(fromPeer);
 		if (!peer?.canWrite) {
 			this.#rejectReadOnly("prompting", fromPeer);
 			return;
 		}
+		if (typeof text !== "string") {
+			this.#sendError("prompt failed: message text must be a string", fromPeer);
+			return;
+		}
+		// An element is content the guest meant to send, which an `images` field that
+		// is not an array at all is not — so a malformed element is refused rather
+		// than dropped. It is the text defect one field over: unchecked,
+		// `{type:"text",text:42}` is accepted into the content, persisted, and throws
+		// a turn later at `item.text.toWellFormed()` inside a provider serializer.
+		const offered = Array.isArray(images) ? images : [];
+		const supplied = offered.map(toImageContent);
+		if (supplied.some(image => image === null)) {
+			this.#sendError("prompt failed: every image must carry string data and a supported image type", fromPeer);
+			return;
+		}
+		const normalized = supplied as ImageContent[];
 		const name = peer.name;
+		// `Array.isArray`, not a length test: `{ length: 1 }` passed a length test and
+		// then threw out of the spread, and that throw unwound into `CollabSocket`'s
+		// frame-handler catch — losing the whole prompt for a debug line. Anything
+		// that is not an array carries no images, which is the path a prompt without
+		// any already takes, so the text still gets through.
 		const content: string | (TextContent | ImageContent)[] =
-			images && images.length > 0 ? [{ type: "text", text }, ...images] : text;
+			normalized.length > 0 ? [{ type: "text", text }, ...normalized] : text;
 		const details: CollabPromptDetails = { from: name };
 		if (this.#ctx.session.isStreaming) {
 			this.#ctx.updatePendingMessagesDisplay();
 			this.#ctx.ui.requestRender();
 			this.#scheduleStateBroadcast();
 		}
+		// A turn can outlast the guest by minutes, which is too long to hold a
+		// retirement record for, so this reply is best-effort. Captured up front all
+		// the same: `isServing` read at the reply site knows nothing about room
+		// boundaries, and a reconnect reissues this id to somebody else, whose own
+		// share of the queue a burst of stale errors is enough to spend.
+		const stillTheAsker = this.#socket?.bestEffortAddressee(fromPeer);
 		this.#ctx.session
 			.promptCustomMessage(
 				{
@@ -902,8 +1352,11 @@ export class CollabHost {
 				if (dispatched === false) return this.#notifyPromptDropped(fromPeer);
 			})
 			.catch(err => {
-				logger.warn("collab guest prompt failed", { error: String(err) });
-				this.#send({ t: "error", message: `prompt failed: ${String(err)}` }, fromPeer);
+				const reason = this.#reason(err);
+				logger.warn("collab guest prompt failed", { error: reason });
+				if (stillTheAsker?.()) {
+					this.#sendError(`prompt failed: ${reason}`, fromPeer);
+				}
 			});
 	}
 
@@ -937,7 +1390,7 @@ export class CollabHost {
 				if (!this.#guestTrafficAllowed()) return;
 				this.#ctx.session.emitNotice("info", `${name} interrupted`, "collab");
 			})
-			.catch(err => logger.warn("collab guest abort failed", { error: String(err) }));
+			.catch(err => logger.warn("collab guest abort failed", { error: this.#reason(err) }));
 	}
 
 	/**
@@ -972,11 +1425,36 @@ export class CollabHost {
 	#handlePeerLeft(peer: number): void {
 		const name = this.#peers.get(peer)?.name;
 		this.#peers.delete(peer);
-		// Relay controls arrive outside the normal frame handler.
+		this.#dropAskRecipient(peer, true);
 		if (!this.#guestTrafficAllowed()) return;
 		if (name) this.#ctx.session.emitNotice("info", `${name} left the collab session`, "collab");
 		this.#updateStatusSegment();
 		this.#scheduleStateBroadcast();
+	}
+
+	/** The socket discarded this peer's backlog to keep the room alive; drop it and tell it to rejoin. */
+	#handlePeerOverload(peer: number): void {
+		if (this.#stopped) return;
+		const name = this.#peers.get(peer)?.name;
+		this.#peers.delete(peer);
+		// Before the resync error, so the `ui-request-end` frames a settle fans out
+		// are not addressed to the peer that just lost its backlog.
+		this.#dropAskRecipient(peer);
+		this.#sendError("the host discarded your backlog; rejoin to resync", peer);
+		if (name) {
+			this.#ctx.session.emitNotice(
+				"warning",
+				`${name} fell too far behind and was dropped; they can rejoin`,
+				"collab",
+			);
+		}
+		this.#updateStatusSegment();
+		// Deliberately no state broadcast. Removing the peer changes `participants`,
+		// so the frame would defeat the JSON dedupe, and admitting it into a queue
+		// that is still full sheds the next peer, whose report schedules another
+		// changed state — walking the whole roster one participant per debounce
+		// interval. `state` is level-triggered, so the next real change re-sends the
+		// current roster; the local status segment above is already up to date.
 	}
 
 	#buildState(): CollabSessionState {
@@ -1039,35 +1517,70 @@ export class CollabHost {
 		if (this.ending || this.#agentsDebounce) return;
 		this.#agentsDebounce = setTimeout(() => {
 			this.#agentsDebounce = null;
-			this.#send({ t: "agents", agents: this.#snapshotAgents() });
+			// Level-triggered like `state`, and re-sent on the next registry change.
+			this.#broadcast({ t: "agents", agents: this.#snapshotAgents() }, true);
 		}, AGENTS_DEBOUNCE_MS);
 	}
 
-	#handleAgentCmd(cmd: "chat" | "kill" | "revive", agentId: string, text: string | undefined, fromPeer: number): void {
+	/**
+	 * All three fields are `unknown` for the reason given on {@link #verifyWriteToken}.
+	 * Two hazards live here, and they pull in opposite directions: a value that
+	 * matches nothing and is answered by nothing, which a guest cannot tell apart
+	 * from a frame the queue refused; and a value quoted back into the answer, which
+	 * is how an error path polite enough to reply became one a guest can size.
+	 */
+	#handleAgentCmd(cmd: unknown, agentId: unknown, text: unknown, fromPeer: number): void {
 		if (!this.#peers.get(fromPeer)?.canWrite) {
 			this.#rejectReadOnly("agent control", fromPeer);
 			return;
 		}
+		// Two different uses, so two different values. The lookup takes the id whole,
+		// because truncating it would let a long id address the agent that owns its
+		// prefix. The quoting is bounded by {@link GUEST_LABEL_MAX}, because every
+		// reply below embeds it and a guest chooses its length; and it is only ever a
+		// string, because interpolating a nested array throws `RangeError` out of the
+		// reply — measured reachable, since a 5,000-deep one survives `JSON.stringify`
+		// and `JSON.parse` on the way here. Where serialization stops carrying it is
+		// stack-bound and varies by runtime, so this depends on 5,000 working rather
+		// than on where the ceiling is.
+		//
+		// Bounded two ways, because the reasons differ and only one of them is
+		// anonymity. An id that is absent or not a string names nothing, and saying so
+		// is accurate. A long one names something — the lookup just used it — so it is
+		// truncated rather than disowned: nothing above the cap enforces that ids stay
+		// short, and a long id is likelier to be one a guest actually typed, which is
+		// exactly when a reply has to say which agent failed.
+		const id = typeof agentId === "string" ? agentId : "";
+		const quoted = this.#label(id);
 		// Advisor refs are excluded from snapshots, but reject control by id defensively:
 		// a stale/malicious client must never chat/kill/revive a read-only advisor transcript.
-		if (AgentRegistry.global().get(agentId)?.kind === "advisor") {
-			this.#send({ t: "error", message: `agent ${agentId}: advisor transcripts are read-only` }, fromPeer);
+		if (AgentRegistry.global().get(id)?.kind === "advisor") {
+			this.#sendError(`agent ${quoted}: advisor transcripts are read-only`, fromPeer);
 			return;
 		}
+		// Best-effort and room-scoped for the same reason as a failed prompt: agent
+		// work has no bound, and past a reconnect this id is somebody else's.
+		const stillTheAsker = this.#socket?.bestEffortAddressee(fromPeer);
 		const fail = (err: unknown) => {
-			logger.warn("collab agent-cmd failed", { cmd, agentId, error: String(err) });
-			this.#send({ t: "error", message: `agent ${agentId}: ${String(err)}` }, fromPeer);
+			const reason = this.#reason(err);
+			logger.warn("collab agent-cmd failed", { cmd, agentId: quoted, error: reason });
+			if (!stillTheAsker?.()) return;
+			this.#sendError(`agent ${quoted}: ${reason}`, fromPeer);
 		};
 		switch (cmd) {
 			case "chat": {
-				const trimmed = text?.trim();
+				// `.trim()` throws on a number, and the throw would be swallowed, so a
+				// malformed message would vanish rather than be answered. A message that
+				// is not a string is not a message, which is what an empty one already
+				// means: the guest gets the same reply either way.
+				const trimmed = typeof text === "string" ? text.trim() : "";
 				if (!trimmed) {
-					this.#send({ t: "error", message: `agent ${agentId}: empty chat message` }, fromPeer);
+					this.#sendError(`agent ${quoted}: empty chat message`, fromPeer);
 					return;
 				}
 				// Mirrors the hub's #submitChatMessage: revive if parked, steer if mid-turn.
 				AgentLifecycleManager.global()
-					.ensureLive(agentId)
+					.ensureLive(id)
 					.then(session => {
 						if (!this.#guestTrafficAllowed() || !this.#guestActionsReady()) return;
 						return session.prompt(trimmed, { streamingBehavior: "steer" });
@@ -1077,28 +1590,81 @@ export class CollabHost {
 			}
 			case "kill": {
 				const kill = async () => {
-					const ref = AgentRegistry.global().get(agentId);
-					if (!ref || !this.#guestTrafficAllowed()) return;
+					const ref = AgentRegistry.global().get(id);
+					if (!ref) throw new Error(`unknown agent "${quoted}"`);
+					if (!this.#guestTrafficAllowed()) return;
 					if (ref.status === "running" && ref.session) {
 						await ref.session.abort({ reason: USER_INTERRUPT_LABEL });
 					}
 					if (!this.#guestTrafficAllowed() || !this.#guestActionsReady()) return;
-					await AgentLifecycleManager.global().release(agentId, ref, { tombstone: true });
+					await AgentLifecycleManager.global().release(id, ref, { tombstone: true });
 				};
 				kill().catch(fail);
 				break;
 			}
 			case "revive":
-				AgentLifecycleManager.global().ensureLive(agentId).catch(fail);
+				AgentLifecycleManager.global().ensureLive(id).catch(fail);
+				break;
+			default:
+				// Without this a `cmd` matching no case fell out of the switch and
+				// returned: nothing run, nothing said. Answered like a command this host
+				// knows but cannot carry out. The value is not echoed back — the guest
+				// sent it, and it is unvalidated enough that repeating it is the sender
+				// choosing what the host emits.
+				this.#sendError(`agent ${quoted}: unknown agent command`, fromPeer);
 				break;
 		}
 	}
 
 	/** Incremental transcript read mirroring the hub's readFileIncremental contract. */
-	async #handleFetchTranscript(reqId: number, agentId: string, fromByte: number, fromPeer: number): Promise<void> {
-		const reply = (text: string, newSize: number, error?: string) =>
-			this.#send({ t: "transcript", reqId, text, newSize, error }, fromPeer);
-		const ref = AgentRegistry.global().get(agentId);
+	async #handleFetchTranscript(reqId: unknown, agentId: unknown, fromByte: unknown, fromPeer: number): Promise<void> {
+		// The reply echoes both of these back — `reqId` so the guest can match it to
+		// its request, `fromByte` as the resume point — so this frame is a second
+		// carrier for a guest value, and #sendError cannot reach it: unnarrowed, a
+		// `reqId` came back at whatever length it arrived. Narrowed rather than
+		// truncated, because neither field is a label — a correlation id the host
+		// altered would match nothing at the other end.
+		// Safe integers, not merely finite: `fromByte` is a byte offset handed to
+		// `read`, and `reqId` is matched by identity at the other end. `Number.isFinite`
+		// admits -1, 0.5 and 2 ** 53, none of which is either of those things.
+		if (!Number.isSafeInteger(reqId) || (reqId as number) < 0) {
+			this.#sendError("fetch-transcript needs a non-negative integer reqId", fromPeer);
+			return;
+		}
+		if (!Number.isSafeInteger(fromByte) || (fromByte as number) < 0) {
+			this.#sendError("fetch-transcript needs a non-negative integer fromByte", fromPeer);
+			return;
+		}
+		return this.#fetchTranscript(reqId as number, agentId, fromByte as number, fromPeer);
+	}
+
+	async #fetchTranscript(reqId: number, agentId: unknown, fromByte: number, fromPeer: number): Promise<void> {
+		// The read is asynchronous, so the peer can leave — or the whole room can be
+		// recreated — before there is anything to reply with.
+		const stillTheAsker = this.#socket?.addressee(fromPeer);
+		// The one place a `transcript` frame is built, and the rule #sendError enforces
+		// for error replies holds here too: this frame carries an error string, and
+		// #sendError cannot reach it because it is not an error frame.
+		//
+		// No *unbounded* input reaches this bound today, and it is deliberately kept
+		// anyway. The only dynamic error here comes from `fs` and quotes a host-owned
+		// path, and #reason has already capped it to 513 units by the time it arrives
+		// — so the slice can fire on that one extra unit but can never be what saves
+		// the frame. That is a property of the callers, not of this site, which is
+		// exactly why the guard belongs here: no test can fail if it is deleted, so
+		// deleting it will look correct. It is structural: the premise of this design
+		// is that whatever last touches a frame bounds it, so
+		// that a caller composing a new message somewhere else cannot reintroduce the
+		// defect. Dropping it because today's one error happens to be host-owned is
+		// the reasoning that cost this branch three rounds — bound the ingredients,
+		// trust the current callers, meet a new ingredient.
+		const reply = (text: string, newSize: number, error?: string) => {
+			if (!stillTheAsker?.()) return;
+			const bounded =
+				error === undefined || error.length <= ERROR_MESSAGE_MAX ? error : `${error.slice(0, ERROR_MESSAGE_MAX)}…`;
+			this.#send({ t: "transcript", reqId, text, newSize, error: bounded }, fromPeer);
+		};
+		const ref = AgentRegistry.global().get(typeof agentId === "string" ? agentId : "");
 		if (!ref?.sessionFile || ref.kind === "advisor") {
 			reply("", fromByte, "no transcript available");
 			return;
@@ -1132,8 +1698,9 @@ export class CollabHost {
 			}
 			reply(slice.toString("utf-8"), reachedEof ? stat.size : fromByte + slice.byteLength);
 		} catch (err) {
-			logger.debug("collab transcript read failed", { agentId, error: String(err) });
-			reply("", fromByte, String(err));
+			const reason = this.#reason(err);
+			logger.debug("collab transcript read failed", { agentId: this.#label(agentId), error: reason });
+			reply("", fromByte, reason);
 		}
 	}
 
@@ -1144,8 +1711,12 @@ export class CollabHost {
 			const state = this.#buildState();
 			const json = JSON.stringify(state);
 			if (json === this.#lastStateJson) return;
-			this.#lastStateJson = json;
-			this.#send({ t: "state", state });
+			// `state` is a level-triggered snapshot: a guest can cause an endless
+			// stream of distinct ones (a repeated hello under a new name defeats the
+			// dedupe), and as replica-bearing broadcasts they would reach the terminal
+			// path and end the room. Advisory instead — and only recorded as sent when
+			// it was admitted, or the dedupe would pin a value the guests never saw.
+			if (this.#broadcast({ t: "state", state }, true)) this.#lastStateJson = json;
 		}, STATE_DEBOUNCE_MS);
 	}
 

@@ -28,7 +28,7 @@ it("delivers a complete snapshot batch and subsequent live entry through the loc
 	host.onOpen = ready.resolve;
 	host.onFrame = (frame, peer) => {
 		if (frame.t !== "hello") return;
-		host.sendBatch(snapshot(), peer);
+		host.sendBatch(snapshot(), peer, 0);
 		host.send({ t: "entry", entry: entry("live") }, peer);
 	};
 	guest.onOpen = () => guest.send({ t: "hello", proto: COLLAB_PROTO, name: "receiver" });
