@@ -14,6 +14,8 @@ import * as provider from "@oh-my-pi/pi-coding-agent/web/search/provider";
 import type { SearchProviderId, SearchResponse, SearchSource } from "@oh-my-pi/pi-coding-agent/web/search/types";
 import { createInMemoryAuthStorage } from "../../helpers/agent-session-setup";
 
+import { cfgRetryFallbackChains } from "@oh-my-pi/pi-coding-agent/session/settings";
+
 const SOURCES: SearchSource[] = [
 	{ title: "Docs page", url: "https://docs.example.com/guide" },
 	{ title: "Blog post", url: "https://blog.other.com/post" },
@@ -24,7 +26,7 @@ const openAuthStorages: AuthStorage[] = [];
 async function stubRoleProvider(id: SearchProviderId, behaviour: (params: SearchParams) => Promise<SearchResponse>) {
 	const settings = await Settings.init({ inMemory: true });
 	settings.setModelRole("web", `web/${id}`);
-	settings.set("retry.fallbackChains", { web: [] });
+	cfgRetryFallbackChains.set(settings, { web: [] });
 	const authStorage = createInMemoryAuthStorage();
 	openAuthStorages.push(authStorage);
 	const modelRegistry = new ModelRegistry(authStorage, undefined, { settings });

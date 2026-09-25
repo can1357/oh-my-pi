@@ -6,16 +6,15 @@ use std::{
 	ffi::OsString,
 	fmt,
 	io::{self, Write},
-	path::Path,
+	path::{Path, PathBuf},
 };
 
 use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser, parser::ValuesRef};
+use pi_vfs::{BlockingFs, DirOptions, is_virtual_path, parent_path};
 use uucore::{display::Quotable, fs};
 #[cfg(not(windows))]
 use uucore::mode;
-#[cfg(all(unix, target_os = "linux"))]
-use uucore::fsxattr;
 
 use crate::host::{Host, Utility, format_usage, matches_parser, util};
 
@@ -220,22 +219,65 @@ fn mkdir(path: &Path, config: &Config, host: &mut Host) -> Result<(), MkdirError
 		));
 	}
 	// `mkdir -p foo/.` succeeds, although `std::fs::create_dir("foo/.")` does not.
-	let path = fs::dir_strip_dot_for_creation(path);
+	let path = strip_dot_for_creation(path);
 	create_dir(&path, false, config, host)
 }
 
-#[cfg(all(unix, target_os = "linux"))]
-fn chmod(fs_path: &Path, display_path: &Path, mode: u32) -> Result<(), MkdirError> {
-	use std::{
-		fs::{Permissions, set_permissions},
-		os::unix::fs::PermissionsExt,
+/// Drops trailing `/.` components so the directory itself is created.
+///
+/// URL operands keep their `scheme://` root, which component-based stripping
+/// would collapse to `scheme:/`.
+fn strip_dot_for_creation(path: &Path) -> PathBuf {
+	if !is_virtual_path(path) {
+		return fs::dir_strip_dot_for_creation(path);
+	}
+	let Some(mut spelled) = path.to_str() else {
+		return path.to_path_buf();
 	};
+	while let Some(stripped) = spelled.strip_suffix("/.").or_else(|| spelled.strip_suffix("/./")) {
+		if stripped.ends_with(":/") {
+			// `scheme://.` names the root itself.
+			break;
+		}
+		spelled = stripped;
+	}
+	PathBuf::from(spelled)
+}
 
-	set_permissions(fs_path, Permissions::from_mode(mode)).map_err(|source| {
-		MkdirError::io_with_context(
-			source,
-			format!("cannot set permissions {}", display_path.quote()),
-		)
+#[cfg(all(unix, target_os = "linux"))]
+fn chmod(
+	filesystem: &BlockingFs,
+	fs_path: &Path,
+	display_path: &Path,
+	mode: u32,
+) -> Result<(), MkdirError> {
+	filesystem
+		.set_permissions(fs_path, pi_vfs::Permissions::from_mode(mode))
+		.map_err(|source| {
+			MkdirError::io_with_context(
+				source,
+				format!("cannot set permissions {}", display_path.quote()),
+			)
+		})
+}
+
+/// Permission bits inherited from the `system.posix_acl_default` ACL on `path`,
+/// or 0 when it has none.
+///
+/// The xattr value is a 4 byte header followed by `posix_acl_entry` records
+/// (`e_tag: u16, e_perm: u16, e_id: u32`) separated by `0xFFFFFFFF`; see
+/// `include/uapi/linux/posix_acl_xattr.h`.
+#[cfg(all(unix, target_os = "linux"))]
+fn acl_default_perm_bits(filesystem: &BlockingFs, path: &Path) -> u32 {
+	let Ok(Some(value)) = filesystem.get_xattr(path, "system.posix_acl_default", false) else {
+		return 0;
+	};
+	if value.len() < 3 {
+		return 0;
+	}
+	let entries: Vec<u8> = value[3..].iter().copied().filter(|&byte| byte != 255).collect();
+	entries.chunks_exact(4).fold(0, |perm, entry| {
+		(perm << 3) | u32::from(entry[2]) | u32::from(entry[3])
 	})
 }
 
@@ -247,7 +289,7 @@ fn create_dir(
 	config: &Config,
 	host: &mut Host,
 ) -> Result<(), MkdirError> {
-	let path_exists = host.resolve(path).exists();
+	let path_exists = host.fs().exists(host.resolve(path));
 	if path_exists && !config.recursive {
 		return Err(MkdirError::Message(format!("{}: File exists", path.maybe_quote())));
 	}
@@ -258,7 +300,7 @@ fn create_dir(
 	if config.recursive {
 		let mut dirs_to_create = Vec::with_capacity(16);
 		let mut current = path;
-		while let Some(parent) = current.parent() {
+		while let Some(parent) = parent_path(current) {
 			if parent == Path::new("") {
 				break;
 			}
@@ -267,7 +309,7 @@ fn create_dir(
 		}
 
 		for dir in dirs_to_create.iter().rev() {
-			if !host.resolve(dir).exists() {
+			if !host.fs().exists(host.resolve(dir)) {
 				create_single_dir(dir, true, config, host)?;
 			}
 		}
@@ -295,19 +337,16 @@ impl Drop for UmaskGuard {
 	}
 }
 
-#[cfg(unix)]
-fn create_dir_with_mode(path: &Path, mode: u32) -> io::Result<()> {
-	use std::os::unix::fs::DirBuilderExt;
-
-	// GNU mkdir creates with the exact requested mode atomically by temporarily
-	// disabling the process umask.
-	let _guard = UmaskGuard::set(rustix::fs::Mode::empty());
-	std::fs::DirBuilder::new().mode(mode).create(path)
-}
-
-#[cfg(not(unix))]
-fn create_dir_with_mode(path: &Path, _mode: u32) -> io::Result<()> {
-	std::fs::create_dir(path)
+/// Creates `path` with exactly `mode`.
+///
+/// GNU mkdir creates native directories with the requested mode atomically by
+/// temporarily disabling the process umask; providers apply `mode` as given.
+fn create_dir_with_mode(filesystem: &BlockingFs, path: &Path, mode: u32) -> io::Result<()> {
+	#[cfg(unix)]
+	let _guard = filesystem
+		.is_native_local(path)
+		.then(|| UmaskGuard::set(rustix::fs::Mode::empty()));
+	filesystem.create_dir_with(path, &DirOptions::new().mode(mode))
 }
 
 fn create_single_dir(
@@ -316,9 +355,10 @@ fn create_single_dir(
 	config: &Config,
 	host: &mut Host,
 ) -> Result<(), MkdirError> {
+	let filesystem = host.fs().clone();
 	let fs_path = host.resolve(path);
 	#[cfg(all(unix, target_os = "linux"))]
-	let path_exists = fs_path.exists();
+	let path_exists = filesystem.exists(&fs_path);
 
 	#[cfg(unix)]
 	let create_mode = if is_parent {
@@ -330,7 +370,7 @@ fn create_single_dir(
 	#[cfg(not(unix))]
 	let create_mode = config.mode;
 
-	match create_dir_with_mode(&fs_path, create_mode) {
+	match create_dir_with_mode(&filesystem, &fs_path, create_mode) {
 		Ok(()) => {
 			if config.verbose {
 				writeln!(host.stdout, "mkdir: created directory {}", path.quote())
@@ -339,15 +379,15 @@ fn create_single_dir(
 
 			#[cfg(all(unix, target_os = "linux"))]
 			if !path_exists {
-				let acl_perm_bits = fsxattr::get_acl_perm_bits_from_xattr(&fs_path);
+				let acl_perm_bits = acl_default_perm_bits(&filesystem, &fs_path);
 				if acl_perm_bits != 0 {
-					chmod(&fs_path, path, create_mode | acl_perm_bits)?;
+					chmod(&filesystem, &fs_path, path, create_mode | acl_perm_bits)?;
 				}
 			}
 
 			Ok(())
 		},
-		Err(_) if fs_path.is_dir() => {
+		Err(_) if filesystem.is_dir(&fs_path) => {
 			let ends_with_parent_dir =
 				matches!(path.components().next_back(), Some(std::path::Component::ParentDir));
 			if config.verbose && is_parent && config.recursive && !ends_with_parent_dir {

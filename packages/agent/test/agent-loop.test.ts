@@ -6177,11 +6177,14 @@ describe("agentLoop streaming snapshots", () => {
 		};
 
 		// Interleaved block lifecycle: block 0 finalizes first; block 2 starts
-		// and ends while block 1 is still streaming. Events are pushed one
-		// microtask at a time, mutating the live partial immediately before each
-		// push (the mutate-then-push stream contract), so the consumer observes
-		// each event with only the deltas delivered so far applied.
+		// and ends while block 1 is still streaming. Each event mutates the live
+		// partial immediately before its push (the mutate-then-push stream
+		// contract). The producer advances in lockstep with the consumer — one
+		// step per observed assistant event — so each snapshot sees exactly the
+		// deltas delivered so far even when the loop parks in `yieldIfDue()`; a
+		// free-running timer producer would race ahead during that sleep.
 		const partial = createAssistantMessage([], "stop");
+		let advance = (): void => {};
 		const streamFn = () => {
 			const stream = new AssistantMessageEventStream();
 			stream.push({ type: "start", partial });
@@ -6211,13 +6214,9 @@ describe("agentLoop streaming snapshots", () => {
 				() => stream.push({ type: "done", reason: "stop", message: partial }),
 			];
 			let step = 0;
-			const runNext = (): void => {
-				if (step < steps.length) {
-					steps[step++]!();
-					setTimeout(runNext, 0);
-				}
+			advance = () => {
+				if (step < steps.length) steps[step++]!();
 			};
-			setTimeout(runNext, 0);
 			return stream;
 		};
 
@@ -6225,6 +6224,12 @@ describe("agentLoop streaming snapshots", () => {
 		const stream = agentLoop([createUserMessage("stream")], context, config, undefined, streamFn);
 		for await (const event of stream) {
 			events.push(event);
+			if (
+				(event.type === "message_start" && event.message.role === "assistant") ||
+				event.type === "message_update"
+			) {
+				advance();
+			}
 		}
 
 		type MessageUpdate = Extract<AgentEvent, { type: "message_update" }>;
