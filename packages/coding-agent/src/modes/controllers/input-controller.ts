@@ -12,7 +12,7 @@ import { isEnoent, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
 import { formatModelRoleAlias, roleCandidatePool } from "../../config/model-roles";
 import { resolveModelRoleValue } from "../../config/model-resolver";
 import { isSettingsInitialized, settings } from "../../config/settings";
-import { resolveLocalRoot, resolveLocalUrlToPath } from "../../internal-urls";
+import { InternalUrlRouter, resolveLocalRoot } from "../../internal-urls";
 import { AskDialogComponent } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { extractImagePathFromText } from "@oh-my-pi/pi-tui/prompt/custom-editor";
@@ -62,6 +62,17 @@ import { blobExtensionForImageMimeType } from "@oh-my-pi/pi-tui/prompt/image-for
 import { VideoError, buildVideoContactSheetPng, probeVideo } from "../../utils/video";
 import { isVideoPath } from "@oh-my-pi/pi-tui/prompt/video";
 import { resizeImage } from "../../utils/image-resize";
+
+import { cfgCycleOrder } from "../../config/model-settings";
+import {
+	cfgDisplayHideToolActivity,
+	cfgDoubleEscapeAction,
+	cfgEmojiAutocomplete,
+	cfgImagesAutoResize,
+	cfgPasteLargeMenuThreshold,
+	cfgTuiMouse,
+} from "../settings";
+import { cfgHideThinkingBlock } from "../../session/settings";
 
 /**
  * Slash commands that may carry secrets in their arguments should never be
@@ -578,7 +589,7 @@ export class InputController {
 			} else {
 				// Double-interrupt with an empty editor runs the configured action:
 				// the transcript rewind selector (default) or the session tree.
-				const doubleEscapeAction = settings.get("doubleEscapeAction");
+				const doubleEscapeAction = cfgDoubleEscapeAction.get(settings);
 				if (doubleEscapeAction !== "none") {
 					const now = Date.now();
 					if (now - this.ctx.lastEscapeTime < 500) {
@@ -756,7 +767,7 @@ export class InputController {
 	 */
 	#handleInlineMouse(data: string): { consume?: boolean; data?: string } | undefined {
 		if (!data.startsWith("\x1b[<")) return undefined;
-		if (!settings.get("tui.mouse")) return undefined;
+		if (!cfgTuiMouse.get(settings)) return undefined;
 		if (this.ctx.ui.hasOverlay()) return undefined;
 		const event = parseSgrMouse(data);
 		if (!event) return undefined;
@@ -911,7 +922,7 @@ export class InputController {
 		this.ctx.editor.onSubmit = async (text: string) => {
 			text = this.#compactDraftImages(text.trim());
 			const hasPendingImages = this.ctx.editor.pendingImages.length > 0;
-			if ((!isSettingsInitialized() || settings.get("emojiAutocomplete")) && text) text = expandEmoticons(text);
+			if ((!isSettingsInitialized() || cfgEmojiAutocomplete.get(settings)) && text) text = expandEmoticons(text);
 
 			// Focused subagent session: the editor is a plain chat box for it.
 			// Everything below (continue shortcuts, slash/bash/python, loop,
@@ -1908,7 +1919,7 @@ export class InputController {
 			this.ctx.showStatus(unsupportedMessage);
 			return null;
 		}
-		if (settings.get("images.autoResize")) {
+		if (cfgImagesAutoResize.get(settings)) {
 			try {
 				const resized = await resizeImage({
 					type: "image",
@@ -1952,10 +1963,13 @@ export class InputController {
 		const extension = blobExtensionForImageMimeType(image.mimeType) ?? "png";
 		const url = `local://pasted-image-${Bun.hash(bytes).toString(16)}.${extension}`;
 		try {
-			const filePath = resolveLocalUrlToPath(url, {
-				getArtifactsDir: () => this.ctx.sessionManager.getArtifactsDir(),
-				getSessionId: () => this.ctx.sessionManager.getSessionId(),
+			const filePath = InternalUrlRouter.instance().locateSync(url, {
+				localProtocolOptions: {
+					getArtifactsDir: () => this.ctx.sessionManager.getArtifactsDir(),
+					getSessionId: () => this.ctx.sessionManager.getSessionId(),
+				},
 			});
+			if (filePath === undefined) throw new Error(`No local file backs ${url}`);
 			await Bun.write(filePath, bytes);
 			return url;
 		} catch (error) {
@@ -2222,7 +2236,7 @@ export class InputController {
 	 * before the submit lands, so the paste is staged the way cancelling the menu would.
 	 */
 	handleLargePaste(text: string, lineCount: number, options: PasteOptions = {}): boolean {
-		const threshold = this.ctx.settings.get("paste.largeMenuThreshold");
+		const threshold = cfgPasteLargeMenuThreshold.get(this.ctx.settings);
 		if (!(threshold > 0) || lineCount < threshold || options.submitAfterPaste) {
 			// Below the menu threshold: stage the paste as a text-attachment chip
 			// (compact token in the buffer, band card above the editor).
@@ -2423,7 +2437,7 @@ export class InputController {
 			return;
 		}
 		try {
-			const cycleOrder = settings.get("cycleOrder");
+			const cycleOrder = cfgCycleOrder.get(settings);
 			const result = await this.ctx.session.cycleRoleModels(cycleOrder, direction);
 			if (!result) {
 				this.ctx.showStatus("Only one role model available");
@@ -2460,7 +2474,7 @@ export class InputController {
 
 	toggleToolActivityVisibility(): void {
 		this.ctx.hideToolActivity = !this.ctx.hideToolActivity;
-		this.ctx.settings.set("display.hideToolActivity", this.ctx.hideToolActivity);
+		cfgDisplayHideToolActivity.set(this.ctx.settings, this.ctx.hideToolActivity);
 
 		if (!this.ctx.hideToolActivity) {
 			this.ctx.toolOutputExpanded = false;
@@ -2509,7 +2523,7 @@ export class InputController {
 			return;
 		}
 		this.ctx.hideThinkingBlock = !this.ctx.hideThinkingBlock;
-		this.ctx.settings.set("hideThinkingBlock", this.ctx.hideThinkingBlock);
+		cfgHideThinkingBlock.set(this.ctx.settings, this.ctx.hideThinkingBlock);
 
 		for (const child of this.ctx.chatContainer.children) {
 			if (child instanceof AssistantMessageComponent) {
@@ -2566,6 +2580,8 @@ export class InputController {
 		const shortcuts = runner.getShortcuts();
 		for (const [keyId, shortcut] of shortcuts) {
 			this.ctx.editor.setCustomKeyHandler(keyId, () => {
+				// Bound once at startup; a live `disabledExtensions` edit may have suspended the owner since.
+				if (!runner.isExtensionActive(shortcut.extensionPath)) return;
 				const ctx = runner.createCommandContext();
 				try {
 					runner.runScoped(() => shortcut.handler(ctx));

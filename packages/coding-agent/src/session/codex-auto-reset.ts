@@ -61,7 +61,7 @@ import type {
 	UsageReport,
 	UsageResetCreditDetail,
 } from "@oh-my-pi/pi-ai";
-import type { ResetAutoRedeemMode } from "../config/settings-schema";
+import type { ResetAutoRedeemMode } from "./settings";
 import { reportMatchesActiveAccount } from "../slash-commands/helpers/active-oauth-account";
 
 /** A chat window counts as exhausted at `usedFraction >= 0.999` (used_percent >= 99.9). */

@@ -133,6 +133,7 @@ describe("eval js read() URI delegation", () => {
 			calls.push({ name, args });
 			return { text: "resource contents" };
 		});
+		sandbox.__omp_helpers__ = { hasRoot: () => false };
 
 		const result = await vm.runInContext(`read("mcp://server/resource", { offset: 10, limit: 5 })`, sandbox);
 

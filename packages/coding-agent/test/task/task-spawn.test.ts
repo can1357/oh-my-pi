@@ -27,6 +27,8 @@ import type { AgentProgress, SingleResult, TaskParams } from "@oh-my-pi/pi-tui/t
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { snapshotJobs } from "@oh-my-pi/pi-coding-agent/async/job-control";
 
+import { cfgTaskMaxConcurrency } from "@oh-my-pi/pi-coding-agent/task/settings";
+
 const taskAgent: AgentDefinition = {
 	name: "task",
 	description: "General-purpose task agent",
@@ -837,7 +839,7 @@ describe("task spawn routing", () => {
 		await pollUntil(() => started.length === 1);
 
 		// Tighten the cap mid-session. The next spawn MUST see the new ceiling.
-		settings.override("task.maxConcurrency", 1);
+		cfgTaskMaxConcurrency.override(settings, 1);
 		const second = await tool.execute("tc-2", { agent: "task", name: "Second", task: "Work B." } as TaskParams);
 		const secondJob = manager.getJob(second.details!.async!.jobId)!;
 
@@ -894,7 +896,7 @@ describe("task spawn routing", () => {
 		expect([...started].sort()).toEqual(["First", "Fourth", "Second", "Third"]);
 		expect(fifthJob.queued).toBe(true);
 
-		settings.override("task.maxConcurrency", 1);
+		cfgTaskMaxConcurrency.override(settings, 1);
 		gates.get("First")!.resolve();
 		await jobs[0]!.promise;
 		await Promise.resolve();

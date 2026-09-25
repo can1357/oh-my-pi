@@ -12,6 +12,8 @@ import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
+import { cfgDisplaySmoothStreaming } from "@oh-my-pi/pi-coding-agent/modes/settings";
+
 beforeAll(async () => {
 	await initTheme();
 });
@@ -75,7 +77,7 @@ describe("EventController queues exclusive device writes until execution starts"
 
 	it("keeps the second exclusive xd:// write queued after message_end until its own start", async () => {
 		await Settings.init({ inMemory: true, cwd: process.cwd() });
-		settings.set("display.smoothStreaming", false);
+		cfgDisplaySmoothStreaming.set(settings, false);
 
 		const searchArgs = { action: "grep_all", pattern: "Broken", scope: "game.StarterPlayer" };
 		const scriptsArgs = { action: "get_source", instancePath: "game.Workspace.Thumper" };

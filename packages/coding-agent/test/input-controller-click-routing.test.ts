@@ -8,6 +8,8 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 
+import { cfgTuiMouse } from "@oh-my-pi/pi-coding-agent/modes/settings";
+
 const ESC = String.fromCharCode(27);
 // SGR click on viewport row 2 (1-based y=3): the pinned expander row when the
 // candidates below resolve it to the toggle sentinel.
@@ -67,7 +69,7 @@ describe("InputController click routing", () => {
 	beforeEach(async () => {
 		AgentRegistry.resetGlobalForTests();
 		await Settings.init({ inMemory: true });
-		settings.set("tui.mouse", true);
+		cfgTuiMouse.set(settings, true);
 	});
 
 	afterEach(() => {

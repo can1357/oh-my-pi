@@ -304,6 +304,21 @@ pub enum ErrorKind {
 	#[error("cannot convert open file to native file descriptor")]
 	CannotConvertToNativeFd,
 
+	/// A virtual (filesystem-provider) file has no native file descriptor, so it
+	/// cannot be handed to an external process.
+	#[error("virtual file has no native file descriptor; external commands cannot use it")]
+	VirtualFileHasNoNativeFd,
+
+	/// An external command was started while the shell's working directory is
+	/// only reachable through the virtual filesystem.
+	#[error("cannot run external command '{0}' in virtual working directory {1}")]
+	ExternalCommandInVirtualWorkingDir(String, PathBuf),
+
+	/// An external command path resolves only through the virtual filesystem;
+	/// the operating system cannot execute it.
+	#[error("cannot execute virtual path as an external command: {0}")]
+	ExternalCommandIsVirtual(PathBuf),
+
 	/// History file is too large to import.
 	#[error("history file is too large to import")]
 	HistoryFileTooLargeToImport,
@@ -366,7 +381,9 @@ impl From<&ErrorKind> for results::ExecutionExitCode {
 			ErrorKind::ParseError(..) => Self::InvalidUsage,
 			ErrorKind::FunctionParseError(..) => Self::InvalidUsage,
 			ErrorKind::TestCommandParseError(..) => Self::InvalidUsage,
-			ErrorKind::FailedToExecuteCommand(..) => Self::CannotExecute,
+			ErrorKind::FailedToExecuteCommand(..)
+			| ErrorKind::ExternalCommandInVirtualWorkingDir(..)
+			| ErrorKind::ExternalCommandIsVirtual(..) => Self::CannotExecute,
 			ErrorKind::FunctionNameShadowsSpecialBuiltin { .. } => Self::InvalidUsage,
 			ErrorKind::IoError(io_err) => io_err.into(),
 			ErrorKind::BuiltinError(inner, ..) => inner.as_exit_code(),

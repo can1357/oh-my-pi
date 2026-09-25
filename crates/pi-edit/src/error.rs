@@ -28,6 +28,10 @@ pub enum EditError {
 	/// Plan mode rejected a working-tree write.
 	#[error("{0}")]
 	Plan(String),
+	/// An internal URL target has no host answer yet. Raised before any
+	/// write, so the host can resolve the URL, `provide` it, and retry.
+	#[error("Internal URL not resolved yet: {0}")]
+	UnresolvedUrl(String),
 	/// Filesystem failure reading a target.
 	#[error("{source}")]
 	Io {

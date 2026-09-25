@@ -16,8 +16,6 @@
 - On Linux a walk counts as short whenever it could not look, not only when it ran out of budget: the per-number identity cap, a `/proc` directory, `children` file, `stat` or `status` that is present but unreadable, and a listed child that cannot be pinned. A process-group scan reports the same way when a listed member cannot be pinned. Anything that merely vanished mid-walk stays ordinary churn — an exited or unreaped child is not a gap — because reading churn as a gap would make every ordinary termination refuse.
 - Fixed process group 1 passing the liveness check that several ownership decisions consult. `kill(-1, …)` is the broadcast form rather than group one, so it answered yes for almost any caller.
 - A spawn whose handle could not be opened at all is counted rather than dropped, since a child that was never pinned cannot be safely signalled later and a target set that omits it must not read as one with nothing to do. The PTY child is pinned at spawn where the host allows it and terminated through that handle rather than through its number; where `pidfd_open` or `OpenProcess` refuses a live child, the child itself is still reached through the handle the PTY owns, and what is lost is whatever it went on to spawn — covered by the process group on Unix and by nothing on Windows.
-- Fixed shell commands using `/dev/stdin`, `/dev/stdout`, `/dev/stderr`, `/dev/fd/N`, and `/dev/tty` so they now access the command's descriptors correctly, including preventing heredoc commands from hanging the TUI.
-- Fixed native operations such as grep, glob, AST, shell, and VCS calls so they promptly honor an `AbortSignal` that was already aborted when the operation starts.
 
 ### Known gaps
 
@@ -31,6 +29,18 @@ Completeness reporting is Linux-only. **macOS and Windows descendant walks and p
 - A process group recorded for termination is a bare number, and the wave signals it as one: PTY cancellation and background-job cleanup both record the group id and then send `TERM` and `KILL` to it with nothing established about whose group it now is, so a group that empties and has its id reused takes the wave. The pinned process target alongside it does not cover this — the group is a separate target with its own signal. This is the group-shaped twin of the bare-pid case above, and the identity guards added elsewhere cannot be routed onto it: authenticating a group needs a reference to its leader pinned when the group was recorded, and with no such anchor the leader check refuses every group instead of the reused ones. The fix therefore belongs at the recording site, the same move that replaced a bare pid with a pinned handle for the PTY child. Deferred rather than done here, because it changes destructive group semantics.
 - `kill` and `pkill` derive the ancestor chain they refuse to signal from an unchecked process-table snapshot, so a short snapshot can leave an ancestor unprotected; Windows `kill -0` answers process existence from the same snapshot.
 - A cancelled shell run counts the children it could never pin and reports that count nowhere. Plumbing is not what blocks it: all three cancellation paths already await the termination bridge (`shell.rs:347`, `:417`, `:483`) and all three normal paths abort and then await it (`:359-360`, `:428-429`, `:494-495`), so a value can come back without restructuring. The cost is result handling in the three cancellation arms, six result literals (`:348`, `:368`, `:418`, `:433`, `:484`, `:499` — `ShellExecuteResult` at `:143` is an alias of the same struct, not a second one), two native fixtures, and a new field on each of two parallel structs — the serde wire type in `pi-shell` and the `#[napi(object)]` in `pi-natives` that converts from it. What actually defers it is the decision at the end: on the cancellation path the JS caller never reads the native result at all, quarantining the pending run and returning a synthetic cancellation notice, so surfacing the count means first deciding what a cancelled run should tell the agent about children it could not account for. Deferred with the `kill`/`pkill` residual above.
+
+## [18.3.1] - 2026-09-25
+
+### Added
+
+- Added support for asynchronous file I/O and custom filesystem providers in native shell execution, including resolving arbitrary `scheme://` paths through native operation options.
+
+### Fixed
+
+- Fixed shell access to standard and special file descriptors, including `/dev/stdin`, `/dev/stdout`, `/dev/stderr`, `/dev/fd/N`, and `/dev/tty`, preventing heredoc commands from hanging the TUI.
+- Fixed native operations such as grep, glob, AST, shell, and VCS calls to promptly honor an `AbortSignal` that was already aborted when the operation starts.
+- Fixed Windows path formatting in the shell’s `fd` and `find` builtins so POSIX path patterns match correctly.
 
 ## [18.3.0] - 2026-09-24
 
