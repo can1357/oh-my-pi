@@ -47,7 +47,7 @@ describe("AgentSession advisor provider-options parity", () => {
 
 	beforeAll(() => {
 		authStorage = createInMemoryAuthStorage();
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!bundled) throw new Error("Expected built-in anthropic model to exist");
@@ -182,7 +182,7 @@ describe("AgentSession advisor provider-options parity", () => {
 	});
 
 	it("caps Codex SSE attempts inside each advisor-level retry", async () => {
-		authStorage.setRuntimeApiKey("openai-codex", "test-key");
+		authStorage.keys.setRuntime("openai-codex", "test-key");
 		const capturedStreamOptions: Array<SimpleStreamOptions | undefined> = [];
 		const capturedModels: Model[] = [];
 		let requestCount = 0;

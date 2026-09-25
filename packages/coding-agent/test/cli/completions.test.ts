@@ -1,4 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { buildSpec, type CompletionSpec, generateCompletion } from "@oh-my-pi/pi-coding-agent/cli/completion-gen";
 import { generateLiveCompletion } from "@oh-my-pi/pi-coding-agent/commands/completions";
 import type { CliConfig, CommandCtor } from "@oh-my-pi/pi-utils/cli";
@@ -74,6 +77,53 @@ describe("generateCompletion — bash", () => {
 		expect(out).toContain('compgen -W "list clear"');
 		expect(out).toContain("_omp_cmd_commit()");
 		expect(out).toContain('compgen -W "--push"');
+	});
+});
+
+const hasZsh = (() => {
+	try {
+		return Bun.spawnSync(["zsh", "--version"]).exitCode === 0;
+	} catch {
+		return false;
+	}
+})();
+
+describe.skipIf(!hasZsh)("zsh action helper under _arguments' calling convention", () => {
+	it("reads the completion kind past the compadd options zsh prepends", () => {
+		const script = generateCompletion("zsh", spec);
+		const start = script.indexOf("_omp_call() {");
+		expect(start).toBeGreaterThanOrEqual(0);
+		const fn = script.slice(start, script.indexOf("\n}\n", start) + 3);
+
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-zsh-action-"));
+		try {
+			// `command omp` bypasses shell functions, so the stub must be an
+			// executable on PATH.
+			const bin = path.join(dir, "omp");
+			fs.writeFileSync(bin, `#!/bin/sh\nprintf '%s\\n' "$*" >> "${dir}/argv.log"\n`, { mode: 0o755 });
+			fs.writeFileSync(
+				path.join(dir, "harness.zsh"),
+				// _describe only exists inside a completion context.
+				`_describe() { :; }\n${fn}\n_omp_call -n -J -default- sessions\n`,
+			);
+
+			const result = Bun.spawnSync(["zsh", "-f", path.join(dir, "harness.zsh")], {
+				cwd: dir,
+				env: { ...process.env, PATH: `${dir}:${process.env.PATH}` },
+			});
+			expect(result.exitCode).toBe(0);
+
+			const argv = fs.existsSync(path.join(dir, "argv.log"))
+				? fs.readFileSync(path.join(dir, "argv.log"), "utf8")
+				: "";
+			// zsh calls the action as `fn <compadd options> <expl> <kind>`.
+			// Both valueless flags (-n) and option/value pairs (-J -default-) can
+			// precede the kind. Before the fix the stub saw `__complete -n -- `.
+			expect(argv).toContain("__complete sessions --");
+			expect(argv).not.toContain("__complete -n");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });
 

@@ -13,15 +13,15 @@
   - `packages/coding-agent/src/dap/types.ts` — request/response/capability shapes
   - `packages/coding-agent/src/tools/tool-timeouts.ts` — per-tool timeout clamp
   - `packages/coding-agent/src/debug/index.ts` — interactive debug selector menu
-  - `packages/coding-agent/src/debug/log-viewer.ts` — recent-log TUI viewer
-  - `packages/coding-agent/src/debug/raw-sse.ts` — raw SSE TUI viewer
-  - `packages/coding-agent/src/debug/raw-sse-buffer.ts` — bounded SSE capture buffer
+  - `packages/tui/src/apps/debug/log-viewer.ts` — recent-log TUI viewer
+  - `packages/tui/src/apps/debug/raw-sse.ts` — raw SSE TUI viewer
+  - `packages/tui/src/apps/debug/raw-sse-buffer.ts` — bounded SSE capture buffer
   - `packages/coding-agent/src/debug/remote-debugger.ts` — one-shot JavaScriptCore remote inspector socket
   - `packages/coding-agent/src/debug/profiler.ts` — CPU/heap profiling helpers
   - `packages/coding-agent/src/debug/report-bundle.ts` — `.tar.gz` report bundling, log source, cache cleanup
   - `packages/coding-agent/src/debug/system-info.ts` — system snapshot collection and env redaction
-  - `packages/coding-agent/src/debug/terminal-info.ts` — terminal state collection/formatting
-  - `packages/coding-agent/src/debug/protocol-probe.ts` — terminal protocol probe panel and sample image
+  - `packages/tui/src/apps/debug/terminal-info.ts` — terminal state collection/formatting
+  - `packages/tui/src/apps/debug/protocol-probe.ts` — terminal protocol probe panel and sample image
 
 ## Inputs
 
@@ -141,7 +141,7 @@ Side-channel artifacts outside the model tool result:
    - `performance`: `startCpuProfile()`, wait for Enter/Escape, stop profiling, read a 30-second work profile with `getWorkProfile(30)`, then bundle via `createReportBundle()`
    - `work`: read `getWorkProfile(30)`, write a temp SVG, open it externally
    - `dump`: create a report bundle immediately
-   - `memory`: force GC, call `Bun.generateHeapSnapshot("v8")`, then bundle
+   - `memory`: force GC, collect numeric process and heap statistics with `collectMemoryStats()`, then bundle
    - `logs`: build a `DebugLogSource` and mount `DebugLogViewerComponent`
    - `raw-sse`: resolve a `RawSseDebugBuffer` from the session and mount `RawSseViewerComponent`
    - `remote-debugger`: reuse or start a loopback JavaScriptCore `RemoteInspectorServer` socket and display its host/port; the Bun API is process-wide and has no stop operation
@@ -252,7 +252,7 @@ GDB example for an OpenOCD remote target:
   - `raw-sse` — live view over the session’s `RawSseDebugBuffer`; supports tail-follow, scrolling, copy-all.
   - `remote-debugger` — starts or reuses the process-wide JavaScriptCore WebKit inspector on `127.0.0.1` and an automatically reserved port; it is experimental, cannot be stopped/rebound, and requires a compatible Safari/WebKit inspector client.
   - `performance` — CPU profile + 30-second work profile + report bundle.
-  - `memory` — heap snapshot + report bundle.
+  - `memory` — numeric memory statistics (`memory.json`) + report bundle.
   - `dump` — report bundle without profiler artifacts.
   - `work` — standalone work-profile flamegraph export/open.
   - `system` — formatted OS/arch/CPU/memory/version/cwd/shell/terminal dump.
@@ -264,6 +264,8 @@ GDB example for an OpenOCD remote target:
 - Filesystem
   - Resolves program/file/cwd paths against the session cwd.
   - Report creation writes `.tar.gz` bundles and may read the session JSONL, artifact files, subagent session JSONLs, and log files.
+  - Memory reports include only numeric process/heap counters, not heap snapshots or runtime-derived type names. Session data, artifacts, logs, settings, raw SSE diagnostics, and environment values may still contain private data; review the archive before sharing. Environment redaction matches variable names, not arbitrary secrets in values.
+  - Older memory reports containing `heap.heapsnapshot` must be treated as credential-bearing files. Do not share them; if one was already shared, revoke or rotate exposed provider and MCP credentials, including OAuth refresh tokens, and remove shared copies.
   - Work-profile export writes `/tmp/work-profile-<timestamp>.svg`.
   - Log source reads daily log files from the logs dir.
   - Artifact-cache cleanup removes session artifact directories older than the cutoff.
@@ -275,7 +277,7 @@ GDB example for an OpenOCD remote target:
   - Spawns debugger adapters (`gdb`, `lldb-dap`, `python -m debugpy.adapter`, `dlv`, and others from `defaults.json`) detached.
   - Reverse DAP `runInTerminal` requests spawn the debuggee detached via `ptree.spawn()`.
   - `getWorkProfile(30)` comes from `@oh-my-pi/pi-natives`.
-  - CPU profiling uses `node:inspector/promises`; heap snapshots use `Bun.generateHeapSnapshot("v8")`; raw/log viewers sanitize text via `sanitizeText()` from `@oh-my-pi/pi-utils`.
+  - CPU profiling uses `node:inspector/promises`; memory statistics use `process.memoryUsage()` and numeric counters from `bun:jsc`'s `heapStats()` after GC; raw/log viewers sanitize text via `sanitizeText()` from `@oh-my-pi/pi-utils`.
   - `openPath()` launches the OS default file/browser handler for artifact dirs and SVGs.
   - Log/raw-SSE viewers can call `copyToClipboard()`.
 - Session state (transcript, memory, jobs, checkpoints, registries)
@@ -302,11 +304,11 @@ GDB example for an OpenOCD remote target:
 - Output capture cap: `MAX_OUTPUT_BYTES = 128 * 1024`; whole chunks are dropped from the front (then the front chunk is byte-sliced so exactly the cap remains) and `outputTruncated` is recorded.
 - Initial stop capture timeout after launch/attach: `STOP_CAPTURE_TIMEOUT_MS = 5_000`.
 - Socket-mode adapter readiness timeout: `10_000` ms in `waitForCondition()` and TCP connect timeout logic in `packages/coding-agent/src/dap/client.ts`.
-- Raw SSE buffer caps in `packages/coding-agent/src/debug/raw-sse-buffer.ts`:
+- Raw SSE buffer caps in `packages/tui/src/apps/debug/raw-sse-buffer.ts`:
   - `MAX_RAW_SSE_EVENTS = 1_000`
   - `MAX_RAW_SSE_CHARS = 512_000`
   - `MAX_RAW_SSE_EVENT_CHARS = 64_000` per event; over-budget events first get `tools` schemas compacted (name kept, schema/description elided), then a head+tail trim that keeps the first and last portions with a `: omp-debug-elided chars=...` comment in the middle and a final `: omp-debug-truncated originalChars=...` marker
-- Log viewer window in `packages/coding-agent/src/debug/log-viewer.ts`:
+- Log viewer window in `packages/tui/src/apps/debug/log-viewer.ts`:
   - `INITIAL_LOG_CHUNK = 50`
   - `LOAD_OLDER_CHUNK = 50`
 - Report/log ingestion caps in `packages/coding-agent/src/debug/report-bundle.ts`:

@@ -90,8 +90,8 @@ function describeTokenEndpointValue(value: unknown): string | undefined {
 export const openAICodexProfileHook: AfterExchangeHook = async (credentials, context) => {
 	const idToken = isRecord(context.raw) && typeof context.raw.id_token === "string" ? context.raw.id_token : undefined;
 	const { accountId, email, planType } = getTokenProfile(credentials.access, idToken);
-	if (context.phase === "login" && !accountId) {
-		throw new AIError.OAuthError("Failed to extract accountId from token", {
+	if (context.phase === "login" && !accountId && !email) {
+		throw new AIError.OAuthError("Failed to extract account identity from token", {
 			kind: "validation",
 			provider: context.provider,
 		});
@@ -190,18 +190,17 @@ async function exchangeCodeForToken(
 	}
 
 	const { accountId, email, planType } = getTokenProfile(tokenData.access_token, tokenData.id_token);
-	if (!accountId) {
-		throw new AIError.OAuthError("Failed to extract accountId from token", { kind: "validation" });
+	if (!accountId && !email) {
+		throw new AIError.OAuthError("Failed to extract account identity from token", { kind: "validation" });
 	}
 
 	return {
 		access: tokenData.access_token,
 		refresh: tokenData.refresh_token,
 		expires: Date.now() + tokenData.expires_in * 1000,
-		accountId,
-		email,
-		orgId: accountId,
-		orgName: planType,
+		...(accountId ? { accountId, orgId: accountId } : {}),
+		...(email ? { email } : {}),
+		...(planType ? { orgName: planType } : {}),
 	};
 }
 

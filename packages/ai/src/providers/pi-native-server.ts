@@ -57,6 +57,7 @@ const ALLOWED_OPTION_KEYS: ReadonlySet<keyof SimpleStreamOptions> = new Set([
 	"maxTokens",
 	"cacheRetention",
 	"cachedContent",
+	"userProfileId",
 	"headers",
 	"initiatorOverride",
 	"maxRetryDelayMs",
@@ -70,6 +71,7 @@ const ALLOWED_OPTION_KEYS: ReadonlySet<keyof SimpleStreamOptions> = new Set([
 	"streamIdleTimeoutMs",
 	"reasoning",
 	"disableReasoning",
+	"forceReasoningOff",
 	"hideThinkingSummary",
 	"thinkingBudgets",
 	"toolChoice",
@@ -84,6 +86,9 @@ const ALLOWED_OPTION_KEYS: ReadonlySet<keyof SimpleStreamOptions> = new Set([
 	"openrouterVariant",
 	"loopGuard",
 	"acceptEmptyResponse",
+	// Anthropic on-demand compaction request: the gateway constructs the
+	// top-level `compaction` parameter, so the option must survive the hop.
+	"anthropicCompaction",
 ] as const satisfies readonly (keyof SimpleStreamOptions)[]);
 
 // ---------------------------------------------------------------------------

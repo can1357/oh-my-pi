@@ -18,7 +18,7 @@ import { AgentSession } from "../src/session/agent-session";
 import type { ToolNamespacesInfo } from "../src/session/code-mode";
 import { buildToolNamespacesInfo, resolveCodeMode } from "../src/session/code-mode";
 import { SessionManager } from "../src/session/session-manager";
-import { generateCodeModeDeclarations } from "../src/tools/eval-format/code-mode-declarations";
+import { generateCodeModeDeclarations } from "@oh-my-pi/pi-tui/tools/eval-format/code-mode-declarations";
 
 const ENABLED = [
 	"eval",
@@ -373,6 +373,15 @@ describe("Code Mode session reconciliation", () => {
 		expect(session.getEnabledToolNames()).toEqual(["read"]);
 		expect(session.getActiveToolNames()).toEqual(["read"]);
 		expect(session.codeModeNamespacesInfo).toBeUndefined();
+	});
+
+	test("retains the startup tools array when reconciliation keeps the exact roster", async () => {
+		const { session } = createSession(Settings.isolated({ "providers.openai-codex.codeMode": "off" }));
+		const startupTools = session.agent.state.tools;
+
+		await session.setActiveToolsByName(["eval", "read"]);
+
+		expect(session.agent.state.tools).toBe(startupTools);
 	});
 
 	test("startup reconcile survives a transiently narrow live tool set", async () => {

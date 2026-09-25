@@ -5,11 +5,20 @@ import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { type ApiKey, completeSimple, Effort, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
-import { getAgentDbPath, getMemoriesDir, isEnoent, logger, parseJsonlLenient, prompt } from "@oh-my-pi/pi-utils";
+import {
+	getAgentDbPath,
+	getMemoriesDir,
+	isEnoent,
+	logger,
+	parseJsonlLenient,
+	peekFile,
+	prompt,
+} from "@oh-my-pi/pi-utils";
 
 import type { ModelRegistry } from "../config/model-registry";
 import { getModelMatchPreferences, resolveModelRoleValue } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
+import { redactMemorySecrets as redactSecrets } from "../memory-backend/redact";
 import type { MemoryBackendSaveInput, MemoryBackendSaveResult } from "../memory-backend/types";
 import consolidationTemplate from "../prompts/memories/consolidation.md" with { type: "text" };
 import consolidationSystemTemplate from "../prompts/memories/consolidation_system.md" with { type: "text" };
@@ -31,6 +40,7 @@ import {
 	markStage1Failed,
 	markStage1SucceededNoOutput,
 	markStage1SucceededWithOutput,
+	normalizeScopeCwd,
 	openMemoryDb,
 	type Stage1Claim,
 	type Stage1OutputRow,
@@ -640,7 +650,8 @@ function markPhase2FailureWithFallback(
 	}
 }
 
-async function collectThreads(session: AgentSession, currentThreadId?: string): Promise<MemoryThread[]> {
+/** @internal Exported for unit-testing. */
+export async function collectThreads(session: AgentSession, currentThreadId?: string): Promise<MemoryThread[]> {
 	const sessionDir = session.sessionManager.getSessionDir();
 	const files = await fs.readdir(sessionDir);
 	const threads: MemoryThread[] = [];
@@ -656,10 +667,26 @@ async function collectThreads(session: AgentSession, currentThreadId?: string): 
 		let cwd = "";
 		let id = name.slice(0, -6);
 		try {
-			const fileText = await Bun.file(fullPath).text();
+			// Bounded head read: session files can grow to hundreds of MBs, but the
+			// session header line always lives at line 1 (or line 2 after a title
+			// slot). Reading a small head slice avoids full-file read and line-split
+			// allocations on startup for every past session. If the candidate line
+			// falls on the slice boundary, fall back to a full read.
+			const HEAD_CAP = 64 * 1024;
+			let isLarge = stat.size > HEAD_CAP;
+			let fileText = isLarge
+				? await peekFile(fullPath, HEAD_CAP, bytes => new TextDecoder().decode(bytes))
+				: await Bun.file(fullPath).text();
+			let lines = fileText.split(/\r?\n/);
 			let sawTitleSlot = false;
-			for (const rawLine of fileText.split(/\r?\n/)) {
-				const line = rawLine.trim();
+			for (let i = 0; i < lines.length; i++) {
+				// If the slice was cut before this line terminated, fall back to full read
+				if (isLarge && i === lines.length - 1) {
+					fileText = await Bun.file(fullPath).text();
+					lines = fileText.split(/\r?\n/);
+					isLarge = false;
+				}
+				const line = lines[i].trim();
 				if (!line) continue;
 				const parsed = parseJsonlLenient<Record<string, unknown>>(line);
 				const header = Array.isArray(parsed) && parsed.length > 0 ? parsed[0] : undefined;
@@ -753,21 +780,23 @@ async function runStage1Job(options: {
 			response_items_json: truncatedItems,
 		});
 
-		const response = await retryTransientCompletion(() =>
-			completeSimple(
-				model,
-				{
-					systemPrompt: [stageOneSystemTemplate],
-					messages: [{ role: "user", content: [{ type: "text", text: inputPrompt }], timestamp: Date.now() }],
-				},
-				{
-					apiKey,
-					sessionId: options.sessionId,
-					metadata: options.metadata,
-					maxTokens: Math.max(1024, Math.min(4096, Math.floor(modelMaxTokens * 0.2))),
-					reasoning: clampThinkingLevelForModel(model, Effort.Low),
-				},
-			),
+		const response = await retryTransientCompletion(
+			() =>
+				completeSimple(
+					model,
+					{
+						systemPrompt: [stageOneSystemTemplate],
+						messages: [{ role: "user", content: [{ type: "text", text: inputPrompt }], timestamp: Date.now() }],
+					},
+					{
+						apiKey,
+						sessionId: options.sessionId,
+						metadata: options.metadata,
+						maxTokens: Math.max(1024, Math.min(4096, Math.floor(modelMaxTokens * 0.2))),
+						reasoning: clampThinkingLevelForModel(model, Effort.Low),
+					},
+				),
+			{ provider: model.provider },
 		);
 
 		if (response.stopReason === "error") {
@@ -894,21 +923,23 @@ async function runConsolidationModel(options: {
 		rollout_summaries: truncateByApproxTokens(rolloutSummaries, 12_000),
 	});
 
-	const response = await retryTransientCompletion(() =>
-		completeSimple(
-			model,
-			{
-				systemPrompt: [consolidationSystemTemplate],
-				messages: [{ role: "user", content: [{ type: "text", text: input }], timestamp: Date.now() }],
-			},
-			{
-				apiKey,
-				sessionId: options.sessionId,
-				metadata: options.metadata,
-				maxTokens: 8192,
-				reasoning: clampThinkingLevelForModel(model, Effort.Medium),
-			},
-		),
+	const response = await retryTransientCompletion(
+		() =>
+			completeSimple(
+				model,
+				{
+					systemPrompt: [consolidationSystemTemplate],
+					messages: [{ role: "user", content: [{ type: "text", text: input }], timestamp: Date.now() }],
+				},
+				{
+					apiKey,
+					sessionId: options.sessionId,
+					metadata: options.metadata,
+					maxTokens: 8192,
+					reasoning: clampThinkingLevelForModel(model, Effort.Medium),
+				},
+			),
+		{ provider: model.provider },
 	);
 	if (response.stopReason === "error") {
 		throw new Error(response.errorMessage || "phase2 model error");
@@ -1131,25 +1162,6 @@ function hasExactKeys(value: Record<string, unknown>, expectedKeys: string[], al
 	return true;
 }
 
-function redactSecrets(input: string): string {
-	let out = input;
-	const patterns = [
-		/(?:sk|pk|rk|tok|key|secret|token|password)[-_A-Za-z0-9]{12,}/g,
-		/[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/g,
-		/(?:AKIA|ASIA)[A-Z0-9]{16}/g,
-		// Common provider token prefixes (GitHub, npm, Slack, Google).
-		/(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}/g,
-		/github_pat_[A-Za-z0-9_]{20,}/g,
-		/npm_[A-Za-z0-9]{30,}/g,
-		/xox[baprs]-[A-Za-z0-9-]{10,}/g,
-		/AIza[A-Za-z0-9_-]{30,}/g,
-	];
-	for (const pattern of patterns) {
-		out = out.replace(pattern, "[REDACTED]");
-	}
-	return out;
-}
-
 function sanitizeSkillName(name: string): string {
 	return name
 		.toLowerCase()
@@ -1278,7 +1290,7 @@ function loadMemoryConfig(settings: Settings): MemoryRuntimeConfig {
 }
 
 export function getMemoryRoot(agentDir: string, cwd: string): string {
-	return path.join(getMemoriesDir(agentDir), encodeProjectPath(cwd));
+	return path.join(getMemoriesDir(agentDir), encodeProjectPath(normalizeScopeCwd(cwd)));
 }
 
 /**
