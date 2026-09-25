@@ -717,7 +717,6 @@ const streamOpenAIResponsesOnce = (
 							);
 							const fallbackParams = fallbackBuilt.params;
 							if (chainState && !chainState.disabled) fallbackParams.store = true;
-							const fallbackClientPreviousResponseId = options?.previousResponseId;
 							// Preserve caller storage intent (e.g. via onPayload): a
 							// stored first attempt whose retry is not retained breaks
 							// subsequent previous_response_id continuations.
