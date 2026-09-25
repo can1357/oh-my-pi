@@ -1018,6 +1018,12 @@ const CACHE_PROMPT_SHRINK_RATIO = 0.97;
 const CACHE_BAD_MISS_MIN_TOKENS = 2048;
 /** ...and more than this fraction of its expected cache hit. */
 const CACHE_BAD_MISS_RATIO = 0.1;
+/**
+ * Providers cache in fixed blocks (OpenAI 128 tokens, DeepSeek 64), so a
+ * perfect hit can still leave the predecessor's last partial block uncached.
+ * Shortfalls up to this size are rounding, not misses.
+ */
+const CACHE_BLOCK_ROUNDING_TOKENS = 256;
 
 /** Full prompt size of one request: uncached input + cache reads + cache writes. */
 function promptTokensSql(alias: string): string {
@@ -1046,7 +1052,8 @@ interface CacheMissRow {
  * this request starting is under 5 minutes. Models that never reported a cache
  * read (all-time) have no warm cache to miss and are excluded. The smaller of
  * the two prompts is the expected cache hit; whatever this request did not
- * read from cache is missed.
+ * read from cache is missed, unless the shortfall is within cache-block
+ * rounding (256 tokens).
  *
  * With a cutoff, pairs are selected by the later request's timestamp; the
  * predecessor may precede the cutoff. Avoidable cost prices missed tokens at
@@ -1072,7 +1079,11 @@ export function getCacheMissStats(cutoff?: number | null): CacheMissStats[] {
 				b.model,
 				b.agent_type,
 				MIN(${prevPrompt}, ${prompt}) AS expected,
-				MAX(0, MIN(${prevPrompt}, ${prompt}) - b.cache_read_tokens) AS missed
+				CASE
+					WHEN MIN(${prevPrompt}, ${prompt}) - b.cache_read_tokens > ${CACHE_BLOCK_ROUNDING_TOKENS}
+						THEN MIN(${prevPrompt}, ${prompt}) - b.cache_read_tokens
+					ELSE 0
+				END AS missed
 			FROM ordered o
 			JOIN messages b ON b.id = o.id
 			JOIN messages a ON a.id = o.prev_id
