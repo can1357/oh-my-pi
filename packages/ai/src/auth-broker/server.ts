@@ -35,6 +35,7 @@ import type {
 import {
 	AUTH_BROKER_CAPABILITIES_HEADER,
 	AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES,
+	AUTH_BROKER_CAPABILITY_RETRY_AFTER_BLOCKS,
 	DEFAULT_AUTH_BROKER_BIND,
 	DEFAULT_REFRESH_INTERVAL_MS,
 	DEFAULT_REFRESH_SKEW_MS,
@@ -106,13 +107,9 @@ function isAuthorized(req: Request, tokens: ReadonlySet<string>): boolean {
 	return tokens.has(match[1].trim());
 }
 
-function supportsCodexMeterBlockScopes(req: Request): boolean {
+function supportsBrokerCapability(req: Request, expected: string): boolean {
 	const capabilities = req.headers.get(AUTH_BROKER_CAPABILITIES_HEADER);
-	return (
-		capabilities
-			?.split(",")
-			.some(capability => capability.trim() === AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES) ?? false
-	);
+	return capabilities?.split(",").some(capability => capability.trim() === expected) ?? false;
 }
 
 /**
@@ -352,6 +349,7 @@ function projectCredentialBlocksForLegacyClient(blocks: readonly CredentialBlock
 			blockScope: "shared",
 			blockedUntilMs: Math.max(shared?.blockedUntilMs ?? 0, block.blockedUntilMs),
 			...(updatedAtMs !== undefined ? { updatedAtMs } : {}),
+			...(block.retryAfter === true || shared?.retryAfter === true ? { retryAfter: true } : {}),
 		};
 	}
 	if (shared) projected.push(shared);
@@ -362,6 +360,7 @@ function buildCredentialBlockGroups(
 	blocks: readonly StoredCredentialBlock[],
 	serverNowMs: number,
 	clientSupportsCodexMeterBlockScopes: boolean,
+	clientSupportsRetryAfterBlocks: boolean,
 ): Map<number, CredentialBlockSnapshot[]> {
 	const byCredentialId = new Map<number, CredentialBlockSnapshot[]>();
 	for (const block of blocks) {
@@ -371,6 +370,7 @@ function buildCredentialBlockGroups(
 			blockScope: block.blockScope,
 			blockedUntilMs: block.blockedUntilMs,
 			updatedAtMs: block.updatedAtMs,
+			...(clientSupportsRetryAfterBlocks && block.retryAfter === true ? { retryAfter: true } : {}),
 		};
 		const existing = byCredentialId.get(block.credentialId);
 		if (existing) {
@@ -393,6 +393,7 @@ function buildSnapshot(
 	storage: AuthStorage,
 	refresher: AuthBrokerRefresher | undefined,
 	clientSupportsCodexMeterBlockScopes: boolean,
+	clientSupportsRetryAfterBlocks: boolean,
 ): SnapshotResponse {
 	const serverNowMs = Date.now();
 	const base = storage.credentials.snapshot();
@@ -402,6 +403,7 @@ function buildSnapshot(
 		storage.blocks.list(credentialIds),
 		serverNowMs,
 		clientSupportsCodexMeterBlockScopes,
+		clientSupportsRetryAfterBlocks,
 	);
 	const credentials: SnapshotEntry[] = base.credentials.map(entry => {
 		const blocks = blocksByCredentialId.get(entry.id);
@@ -426,13 +428,22 @@ async function serveSnapshot(
 	peer: string,
 ): Promise<Response> {
 	await storage.credentials.reload();
-	const clientSupportsCodexMeterBlockScopes = supportsCodexMeterBlockScopes(req);
+	const clientSupportsCodexMeterBlockScopes = supportsBrokerCapability(
+		req,
+		AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES,
+	);
+	const clientSupportsRetryAfterBlocks = supportsBrokerCapability(req, AUTH_BROKER_CAPABILITY_RETRY_AFTER_BLOCKS);
 	let currentGeneration = storage.credentials.generation;
 	const clientGeneration = parseGenerationTag(req.headers.get("if-none-match"));
 	const waitMs = parseWaitMs(url);
 
 	if (clientGeneration === undefined || currentGeneration !== clientGeneration || waitMs <= 0) {
-		const body = buildSnapshot(storage, refresher, clientSupportsCodexMeterBlockScopes);
+		const body = buildSnapshot(
+			storage,
+			refresher,
+			clientSupportsCodexMeterBlockScopes,
+			clientSupportsRetryAfterBlocks,
+		);
 		logger.info("auth-broker snapshot served", {
 			peer,
 			credentials: body.credentials.length,
@@ -452,7 +463,12 @@ async function serveSnapshot(
 	await storage.credentials.reload();
 	currentGeneration = storage.credentials.generation;
 	if (currentGeneration !== clientGeneration) {
-		const body = buildSnapshot(storage, refresher, clientSupportsCodexMeterBlockScopes);
+		const body = buildSnapshot(
+			storage,
+			refresher,
+			clientSupportsCodexMeterBlockScopes,
+			clientSupportsRetryAfterBlocks,
+		);
 		logger.info("auth-broker snapshot long-poll changed", {
 			peer,
 			credentials: body.credentials.length,
@@ -498,7 +514,11 @@ function serveSnapshotStream(
 ): Response {
 	const encoder = new TextEncoder();
 	const openedAt = Date.now();
-	const clientSupportsCodexMeterBlockScopes = supportsCodexMeterBlockScopes(req);
+	const clientSupportsCodexMeterBlockScopes = supportsBrokerCapability(
+		req,
+		AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES,
+	);
+	const clientSupportsRetryAfterBlocks = supportsBrokerCapability(req, AUTH_BROKER_CAPABILITY_RETRY_AFTER_BLOCKS);
 	const lastByCredId = new Map<number, string>();
 	let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
 	let unsubscribe: (() => void) | null = null;
@@ -556,7 +576,12 @@ function serveSnapshotStream(
 				pendingBumps = 0;
 				await storage.credentials.reload();
 				if (closed) return;
-				const snapshot = buildSnapshot(storage, refresher, clientSupportsCodexMeterBlockScopes);
+				const snapshot = buildSnapshot(
+					storage,
+					refresher,
+					clientSupportsCodexMeterBlockScopes,
+					clientSupportsRetryAfterBlocks,
+				);
 				// Generation must move forward; a duplicate listener firing without a
 				// real bump is a no-op below (fingerprints unchanged).
 				if (snapshot.generation < lastGeneration) {
@@ -611,7 +636,12 @@ function serveSnapshotStream(
 		async start(c) {
 			controller = c;
 			await storage.credentials.reload();
-			const initial = buildSnapshot(storage, refresher, clientSupportsCodexMeterBlockScopes);
+			const initial = buildSnapshot(
+				storage,
+				refresher,
+				clientSupportsCodexMeterBlockScopes,
+				clientSupportsRetryAfterBlocks,
+			);
 			lastGeneration = initial.generation;
 			for (const entry of initial.credentials) lastByCredId.set(entry.id, fingerprintEntry(entry));
 			const initialEvent: SnapshotStreamSnapshotEvent = { kind: "snapshot", ...initial };

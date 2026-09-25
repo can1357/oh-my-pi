@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Gateway error classifications now carry a failure owner and retry/failover disposition (`credential_permanent`, `provider_transient`, `policy_terminal`, …); provider status codes stay authoritative over message wording, and context-overflow detection reuses the central classifier.
+- Auth gateway holds Responses SSE metadata preludes behind a StreamCommitGate: a pre-commit retryable terminal (`response.failed`) is retried transparently without exposing the dead attempt's frames to the client, the first output event or 4 MiB prelude cap commits the stream, and post-commit terminals (`response.completed`/`response.failed`/`response.incomplete`/`response.error`) end failover eligibility.
+
+### Fixed
+
+- Gateway requests now forward `previous_response_id`, `store`, `parallel_tool_calls`, `logit_bias`, `user`, and `response_format` to providers instead of dropping them; Responses requests map `response_format` JSON-schema (including `description`) to the flat `text.format` shape and never send Chat-Completions-only `seed`, and native `/v1/responses` `text.format` is parsed into `responseFormat`.
+- Fixed OpenAI Responses continuation pairing a caller-supplied `previous_response_id` with an internally computed delta from a different stored response, and restricted stale-baseline recovery to internally owned chain ids so a stale caller id can no longer silently drop prior context. Azure Responses requests now forward `previous_response_id`, `store`, `parallel_tool_calls`, `user`, and `text.format` the same way.
+- Gateway `/v1/responses` responses now expose the upstream provider's response id instead of a locally minted one, and the gateway remembers which session key stored each response id so a later `previous_response_id` continuation stays on the account that can actually resolve it; `previous_response_id` sent to `openai-codex-responses` models is rejected loudly instead of silently dropping prior context.
+- Fixed gateway error classification swallowing retryable failures: authoritative statuses now outrank abort wording, 403 account caps rotate as quota, Trusted-Access/cyber-policy denials rotate credentials instead of terminating, statusless policy/OAuth-expiry wording reaches the same credential dispositions instead of a synthetic 502, 400 model-missing responses fail over by model, dead OAuth grants (`invalid_token` et al) retire permanently, and concurrency-cap 429s stay in provider backoff.
+- Fixed OpenAI Responses gateway retries to preserve caller storage through strict-tool fallback, retain structured-output descriptions, and treat top-level `event: error` SSE frames as terminal failures.
+- Stream commit classification now recognizes Anthropic `message_delta`, `content_block_stop`, and `message_stop` SSE events instead of treating them as generated output.
+- Provider preludes remain eligible for fallback, and successful empty streams retain their response frames.
+- Azure Responses continuations retain prior response IDs, and invalid gateway requests return HTTP 400.
+- Treat deterministic request-validation failures as terminal instead of retrying another provider.
+
 ## [18.3.1] - 2026-09-25
 
 ### Added
@@ -13,6 +30,23 @@
 
 ### Fixed
 
+- Exhausted credential pools support isolated anonymous recovery probes, and older brokers retain cooldown updates.
+- Preserve older broker client compatibility by negotiating Retry-After snapshot fields, dispatch compiled gateway targets, and keep heartbeat-only streams eligible for failover.
+
+- Prefer healthy API-key siblings before leasing a cooldown probe, and acquire API-key probes under the ranking block scope that caused the cooldown.
+- Preserve Retry-After provenance across broker snapshots, retain in-memory reconciliation deadlines for new backoff maps, and commit when prelude buffering hits the cap.
+- Require probe leases for blocked API-key selections, avoid double-forwarding the commit chunk, and skip settlement waits on failed stream release.
+- Persist Retry-After provenance in SQLite credential blocks, compare OAuth orgId on equality, and observe remaining SSE frames in the commit chunk.
+- Fixed OpenAI Responses continuation pairing a caller-supplied `previous_response_id` with an internally computed delta from a different stored response, and restricted stale-baseline recovery to internally owned chain ids so a stale caller id can no longer silently drop prior context.
+- Auth gateway observes Responses SSE through a StreamCommitGate: metadata-only preludes stay failover-eligible, the first output event or 4 MiB cap commits, and post-commit terminals (`response.completed`/`response.failed`/`response.incomplete`/`response.error`) end failover eligibility instead of being misread as output.
+- Settle probes from canonical stream results, reuse request-owned probe leases on auth retry, and observe post-commit SSE terminals.
+- Require probe leases on allow-blocked paths, forward successful terminal-only SSE preludes, return 429 while credentials cool down, and carry Retry-After provenance on durable blocks when the store round-trips it.
+- Fixed quota probes honoring global Retry-After when selection uses a chat/spark scope, and workspace deactivation attributing rotated bearers via fingerprint history.
+- Fixed quota-probe leases releasing on abort/5xx/fallback via `clearQuotaProbe`, and settling only on successful stream completion.
+
+- Fixed deactivated_workspace fan-out tests for org-scoped identities, and treated empty previousResponseId as present rather than falling through to internal chaining.
+- Fixed quota-probe leases still applying on the allowBlocked OAuth pass for Retry-After blocks, workspace deactivation fan-out matching only organization-qualified identity keys, and Chat→Responses `json_schema.description` preservation.
+- Fixed multi-account provider selection for OpenCode Go and SuperGrok (xai-oauth), so accounts with insufficient funds or exhausted included quota are skipped in favor of eligible accounts with available billing headroom.
 - Fixed account selection for OpenCode Go and SuperGrok (xai-oauth) so accounts without available funds or included quota are skipped in favor of eligible accounts.
 - Improved visibility into automatically disabled authentication credentials by logging a warning and including the affected account details in credential-disabled events.
 
@@ -426,6 +460,8 @@
 - Improved OAuth sign-in flows, including a fallback message when the browser cannot automatically close the OAuth success tab.
 - Fixed Cloudflare AI Gateway onboarding and routing so gateway account and endpoint configuration is preserved correctly while gateway credentials are not sent as upstream OpenAI authorization headers.
 - Fixed Codex OAuth quota handling so chat and Spark usage remain independent, legacy shared quota limits continue to work, and incomplete usage reports are not incorrectly treated as unlimited.
+- Gateway error classifications now carry a failure owner and retry/failover disposition (`credential_permanent`, `provider_transient`, `policy_terminal`, …); provider status codes stay authoritative over message wording, and context-overflow detection reuses the central classifier.
+- Gateway requests now forward `previous_response_id`, `parallel_tool_calls`, `logit_bias`, `user`, and `response_format` to providers instead of dropping them; Responses requests map `response_format` JSON-schema to the flat `text.format` shape and never send Chat-Completions-only `seed`.
 
 ## [18.0.8] - 2026-08-27
 
