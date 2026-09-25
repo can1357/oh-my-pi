@@ -7332,6 +7332,49 @@ describe("speculative tool execution", () => {
 		expect(ordinaryArguments).toEqual([]);
 	});
 
+	it("admits finalized calls by customWireName as well as name (issue #12546)", async () => {
+		const schema = type({ value: "string" });
+		let speculativeExecutions = 0;
+		const tool: AgentTool<typeof schema> = {
+			name: "apply_patch",
+			customWireName: "apply_patch_custom",
+			label: "Apply patch",
+			description: "Applies a patch",
+			parameters: schema,
+			speculation: {
+				finalized: {
+					assess: () => ({ eligible: true, effect: { kind: "pure" } }),
+					async execute() {
+						speculativeExecutions++;
+						return { kind: "result", result: { content: [] }, isError: false };
+					},
+				},
+			},
+			async execute() {
+				return { content: [] };
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const loopConfig: AgentLoopConfig = {
+			model: createMockModel({ responses: [] }).model,
+			convertToLlm: identityConverter,
+		};
+		const coordinator = new SpeculativeOperationCoordinator({ enabled: true }, { context, loopConfig });
+		const toolCall = {
+			type: "toolCall" as const,
+			id: "wire-1",
+			name: "apply_patch_custom",
+			arguments: { value: "run" },
+		};
+
+		coordinator.admitFinalized(context, toolCall, loopConfig, undefined);
+		await coordinator.finalizeAdmissions();
+
+		await coordinator.claim(tool, toolCall, { value: "run" });
+		expect(speculativeExecutions).toBe(1);
+		await coordinator.close("test complete");
+	});
+
 	it("falls back from a structured error returned by direct speculative execution", async () => {
 		const schema = type({ value: "string" });
 		let speculativeExecutions = 0;

@@ -652,6 +652,18 @@ describe("agent-loop OTEL instrumentation", () => {
 		expect(events[0]?.usage.inputTokens).toBe(7);
 	});
 
+	it("records ResponseModel by id, not display name, in recordManualChatTelemetry (issue #12546)", async () => {
+		const mock = createMockModel({ ...MOCK_IDENT, responses: [] });
+		const telemetry = resolveTelemetry({}, undefined);
+		await recordManualChatTelemetry(telemetry, {
+			model: { ...mock.model, name: "Display Name" },
+			stepNumber: 0,
+		});
+		const chat = findSpan(exporter.getFinishedSpans(), "chat mock-model");
+		expect(chat?.attributes[GenAIAttr.ResponseModel]).toBe("mock-model");
+		exporter.reset();
+	});
+
 	it("captures async onChatUsage rejections via onTelemetryWarning", async () => {
 		const mock = createMockModel({
 			...MOCK_IDENT,
