@@ -143,8 +143,46 @@ function isPrivateHostname(hostname: string): boolean {
 		.replace(/^\[|\]$/g, "")
 		.replace(/\.+$/, "");
 	if (host === "localhost" || host.endsWith(".localhost")) return true;
+	// IPv4-mapped IPv6 literals (`::ffff:a00:1`) are not in the IPv4 BlockList —
+	// unwrap them or the private-range check silently misses.
+	const mapped = ipv4FromMappedIpv6(host);
+	if (mapped !== undefined) return privateAddresses.check(mapped, "ipv4");
 	const family = net.isIP(host);
 	return family !== 0 && privateAddresses.check(host, family === 4 ? "ipv4" : "ipv6");
+}
+
+/** Expand an IPv6 literal to 8 hextets, or return undefined when invalid. */
+function expandIpv6(host: string): number[] | undefined {
+	if (net.isIPv6(host) !== true) return undefined;
+	const halves = host.split("::");
+	if (halves.length > 2) return undefined;
+	const head = (halves[0] ?? "").split(":").filter(s => s.length > 0);
+	const tail = halves.length === 2 ? halves[1]!.split(":").filter(s => s.length > 0) : [];
+	// A mapped/compatible literal may carry a dotted IPv4 tail — convert it to
+	// the two hextets it encodes (`::ffff:10.0.0.1` → hextets a00, 1).
+	const last = tail[tail.length - 1] ?? head[head.length - 1];
+	const v4hextets: string[] = [];
+	if (last !== undefined && last.includes(".")) {
+		if (net.isIPv4(last) !== true) return undefined;
+		const octets = last.split(".").map(Number);
+		v4hextets.push(((octets[0]! << 8) | octets[1]!).toString(16), ((octets[2]! << 8) | octets[3]!).toString(16));
+		if (tail.length > 0) tail.pop();
+		else head.pop();
+	}
+	const hextets = [...head, ...Array(8 - head.length - tail.length - v4hextets.length).fill("0"), ...tail, ...v4hextets];
+	if (hextets.length !== 8) return undefined;
+	const parsed = hextets.map(h => parseInt(h, 16));
+	return parsed.some(n => Number.isNaN(n) || n < 0 || n > 0xffff) ? undefined : parsed;
+}
+
+/** `::ffff:10.0.0.1` / `0:0:0:0:0:ffff:a00:1` → `10.0.0.1`, else undefined. */
+function ipv4FromMappedIpv6(host: string): string | undefined {
+	const hextets = expandIpv6(host);
+	if (hextets === undefined) return undefined;
+	if (hextets.slice(0, 5).some(h => h !== 0) || hextets[5] !== 0xffff) return undefined;
+	const hi = hextets[6]!;
+	const lo = hextets[7]!;
+	return `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
 }
 
 async function readLimitedBody(response: Response, maxBytes: number): Promise<string> {
