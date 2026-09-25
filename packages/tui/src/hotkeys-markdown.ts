@@ -63,6 +63,8 @@ export function buildHotkeysMarkdown(bindings: HotkeysMarkdownBindings): string 
 		"| `Ctrl+K` | Delete to end of line |",
 		`| \`${hotkeyLabel(bindings, "app.clipboard.copyLine")}\` | Copy current line |`,
 		`| \`${hotkeyLabel(bindings, "app.clipboard.copyPrompt")}\` | Copy whole prompt |`,
+		`| \`${hotkeyLabel(bindings, "app.clipboard.copyCodeBlock")}\` | Copy newest code block (repeat walks older) |`,
+		`| \`${hotkeyLabel(bindings, "app.clipboard.copyCodeBlockPrev")}\` | Copy next newer code block |`,
 		"",
 		"**Other**",
 		"| Key | Action |",

@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import {
 	extractCodeBlocks,
+	extractCodeBlocksNewestFirst,
 	extractLastCommand,
 	extractLastLink,
 	extractLinks,
@@ -141,5 +142,30 @@ describe("extractLastLink", () => {
 		] as unknown as AgentMessage[];
 		expect(extractLastLink(messages)).toEqual({ text: "https://example.com/b", href: "https://example.com/b" });
 		expect(extractLastLink(messages.slice(3))).toBeUndefined();
+	});
+});
+
+describe("extractCodeBlocksNewestFirst", () => {
+	it("walks messages newest-first and reverses blocks within a message", () => {
+		const messages = [
+			{ role: "assistant", content: [{ type: "text", text: "old\n```ts\nconst oldValue = 1;\n```" }] },
+			{
+				role: "assistant",
+				content: [{ type: "text", text: "new\n```sh\necho first\n```\n```py\nprint('last')\n```" }],
+			},
+		] as unknown as AgentMessage[];
+		expect(extractCodeBlocksNewestFirst(messages)).toEqual([
+			{ lang: "py", code: "print('last')" },
+			{ lang: "sh", code: "echo first" },
+			{ lang: "ts", code: "const oldValue = 1;" },
+		]);
+	});
+
+	it("skips user and text-less messages and returns [] when nothing qualifies", () => {
+		const messages = [
+			{ role: "user", content: "```\nnot assistant\n```" },
+			{ role: "assistant", content: [{ type: "text", text: "no fence here" }] },
+		] as unknown as AgentMessage[];
+		expect(extractCodeBlocksNewestFirst(messages)).toEqual([]);
 	});
 });

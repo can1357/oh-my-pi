@@ -99,6 +99,24 @@ export function extractLastCodeBlock(messages: readonly AgentMessage[]): CodeBlo
 	return undefined;
 }
 
+/**
+ * Walk the transcript backwards and return every fenced assistant code block,
+ * newest first: messages in reverse order, and within each message the blocks
+ * in reverse document order.
+ */
+export function extractCodeBlocksNewestFirst(messages: readonly AgentMessage[]): CodeBlock[] {
+	const blocks: CodeBlock[] = [];
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const text = assistantText(messages[i]);
+		if (!text) continue;
+		const messageBlocks = extractCodeBlocks(text);
+		for (let k = messageBlocks.length - 1; k >= 0; k--) {
+			blocks.push(messageBlocks[k]!);
+		}
+	}
+	return blocks;
+}
+
 /** Extract `>`-quoted blocks from assistant markdown, in document order. */
 export function extractQuoteBlocks(text: string): QuoteBlock[] {
 	return extractBlocks(text)
