@@ -11,6 +11,7 @@
 - Preserved MCP `structuredContent` in live tool result `details`, allowing eval callers to consume server data without parsing the model-facing JSON rendering; spilled results omit the duplicate structured payload from session persistence while retaining the artifact reference ([#13397](https://github.com/can1357/oh-my-pi/issues/13397), [#13398](https://github.com/can1357/oh-my-pi/pull/13398) by [@shawnkoh](https://github.com/shawnkoh)).
 - Fixed a Collab host ending with `a host is already connected for this room` after a brief network drop: when the relay still holds the dropped connection, the host now retries every few seconds for up to 150 s and reclaims its room, and a refused retry no longer resets the guest list or drops queued updates ([#12514](https://github.com/can1357/oh-my-pi/issues/12514), [#13355](https://github.com/can1357/oh-my-pi/pull/13355) by [@alphastorm](https://github.com/alphastorm))
 - Fixed a one-shot command that stopped before completing (for example `omp config set` on a fresh Windows profile) exiting 0 with no output; it now exits 1 with a stderr line naming the command and pointing at `PI_DEBUG_STARTUP` ([#13373](https://github.com/can1357/oh-my-pi/pull/13373) by [@alphastorm](https://github.com/alphastorm))
+- Added `plan.executeAfterCompactionFailure` to preserve best-effort plan execution by default while allowing operators to halt after failed approval compaction ([#12765](https://github.com/can1357/oh-my-pi/pull/12765) by [@gabrielrinaldi](https://github.com/gabrielrinaldi)).
 
 ## [18.3.2] - 2026-09-25
 
