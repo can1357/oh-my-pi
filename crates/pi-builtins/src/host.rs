@@ -770,7 +770,25 @@ impl<SE: ShellExtensions> CommandRunner<SE> {
 		let mut simple =
 			SimpleCommand::new(ShellForCommand::ParentShell(&mut self.shell), params, name, args);
 		simple.use_functions = false;
-		let spawned = simple.execute().await?;
+		let spawned = match simple.execute().await {
+			Ok(spawned) => spawned,
+			// Nothing ran; the utility reports that in its own words.
+			Err(error)
+				if matches!(
+					ExecutionExitCode::from(&error),
+					ExecutionExitCode::NotFound | ExecutionExitCode::CannotExecute
+				) =>
+			{
+				return Err(error);
+			},
+			// A builtin ran and failed: report it as the shell does after any
+			// command, and hand back the status it would put in `$?`.
+			Err(error) => {
+				let mut stderr = self.params.stderr(&self.shell);
+				let _ = self.shell.display_error(&mut stderr, &error).await;
+				return Ok(CommandStatus::Exited(ExecutionExitCode::from(&error).into()));
+			},
+		};
 		wait_status(spawned, cancel).await
 	}
 }

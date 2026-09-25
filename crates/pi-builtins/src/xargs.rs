@@ -1403,6 +1403,16 @@ mod tests {
 		assert_eq!(out, "");
 	}
 
+	/// Contract: a builtin that runs and fails is a failed command (123) with
+	/// the shell's own diagnostic, not a command that could not be run (126).
+	#[tokio::test]
+	async fn failing_builtin_yields_123() {
+		let (code, _, err) = run_simple(&["cd"], "definitely-missing-dir\n").await;
+		assert_eq!(code, 123);
+		assert!(err.contains("cd:"), "got: {err:?}");
+		assert!(!err.contains("could not be run"), "got: {err:?}");
+	}
+
 	#[tokio::test]
 	async fn missing_command_yields_127() {
 		let (code, _, err) = run_simple(&["definitely-not-a-real-command-xyz"], "x\n").await;

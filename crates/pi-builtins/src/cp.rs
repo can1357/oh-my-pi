@@ -9,7 +9,6 @@
 //! the provider's handles. Diagnostics follow GNU cp.
 
 use std::{
-	borrow::Cow,
 	cmp::Ordering,
 	ffi::OsString,
 	fmt,
@@ -1309,8 +1308,8 @@ fn copy_operand(
 	options: &Options,
 ) -> CopyResult<()> {
 	let filesystem = host.fs().clone();
-	let dest = construct_dest_path(host, source, target, target_type, options)
-		.unwrap_or_else(|_| target.to_path_buf());
+	let dest_path = construct_dest_path(host, source, target, target_type, options);
+	let dest = dest_path.as_deref().unwrap_or(target).to_path_buf();
 	let dest_fs = host.resolve(&dest);
 	let source_fs = host.resolve(source);
 
@@ -1333,14 +1332,9 @@ fn copy_operand(
 		}
 	}
 
-	copy_source(host, state, source, target, target_type, options)?;
+	copy_source(host, state, source, target, dest_path, options)?;
 	state.copied_destinations.insert(dest);
 	Ok(())
-}
-
-/// The last name of `path`, for building a destination under a directory.
-fn last_name(path: &Path) -> Option<Cow<'_, std::ffi::OsStr>> {
-	file_name(path)
 }
 
 /// `source` below its root, for `--parents`: `/a/b` is `a/b`, and a URL
@@ -1386,7 +1380,7 @@ fn construct_dest_path(
 				// Copying `.` into an existing directory copies its contents.
 				target.to_path_buf()
 			} else {
-				match last_name(source) {
+				match file_name(source) {
 					Some(name) => child_path(target, &name),
 					None => target.to_path_buf(),
 				}
@@ -1396,12 +1390,14 @@ fn construct_dest_path(
 	})
 }
 
+/// Copies `source` into `target`: a directory recursively, anything else as
+/// a file to `dest` (from [`construct_dest_path`]).
 fn copy_source(
 	host: &mut Host,
 	state: &mut CopyState,
 	source: &Path,
 	target: &Path,
-	target_type: TargetType,
+	dest: CopyResult<PathBuf>,
 	options: &Options,
 ) -> CopyResult<()> {
 	let filesystem = host.fs().clone();
@@ -1412,7 +1408,7 @@ fn copy_source(
 		return copy_directory(host, state, source, target, options);
 	}
 
-	let dest = construct_dest_path(host, source, target, target_type, options)?;
+	let dest = dest?;
 	if options.parents {
 		make_parent_dirs(host, state, source, &dest, options)?;
 	}
@@ -1737,12 +1733,32 @@ fn file_id(filesystem: &BlockingFs, path: &Path, follow: bool) -> Option<FileId>
 	metadata.ok()?.file_id()
 }
 
-/// Whether `a` and `b` are the same file; files without identity never match.
+/// Whether `a` and `b` are the same file. Identities decide when both come
+/// from one namespace; otherwise (a provider without identities, or one
+/// aliasing host files) the same location does.
 fn paths_refer_to_same_file(filesystem: &BlockingFs, a: &Path, b: &Path, dereference: bool) -> bool {
-	matches!(
-		(file_id(filesystem, a, dereference), file_id(filesystem, b, dereference)),
-		(Some(a), Some(b)) if a == b
-	)
+	let stat = |path: &Path| {
+		if dereference { filesystem.metadata(path) } else { filesystem.symlink_metadata(path) }
+	};
+	let (Ok(a_metadata), Ok(b_metadata)) = (stat(a), stat(b)) else {
+		return false;
+	};
+	match (a_metadata.file_id(), b_metadata.file_id()) {
+		(Some(a), Some(b)) if a.is_native() == b.is_native() => a == b,
+		_ if dereference => {
+			matches!((location(filesystem, a), location(filesystem, b)), (Some(a), Some(b)) if a == b)
+		},
+		_ => normalize_lexically(a) == normalize_lexically(b),
+	}
+}
+
+/// Where `path` physically is: the canonical host file a provider path
+/// aliases, else its canonical path.
+fn location(filesystem: &BlockingFs, path: &Path) -> Option<PathBuf> {
+	match filesystem.backing_path(path).ok().flatten() {
+		Some(backing) => Some(filesystem.canonicalize(&backing).unwrap_or(backing)),
+		None => filesystem.canonicalize(path).ok(),
+	}
 }
 
 /// Whether `source` and `target` are hard links to the same file, without
@@ -2200,9 +2216,9 @@ fn copy_file(
 		}
 	}
 
-	if are_hardlinks_to_same_file(&filesystem, &source_fs, &dest_fs)
+	if options.remove_destination()
 		&& source != dest
-		&& options.remove_destination()
+		&& are_hardlinks_to_same_file(&filesystem, &source_fs, &dest_fs)
 	{
 		filesystem.remove_file(&dest_fs)?;
 	}
@@ -2860,7 +2876,7 @@ fn copy_directory(
 			if root == Path::new(".") || root.as_os_str().as_encoded_bytes().ends_with(b"/.") {
 				child_path(&target, std::ffi::OsStr::new("."))
 			} else {
-				match last_name(root) {
+				match file_name(root) {
 					Some(name) => child_path(&target, &name),
 					None => target.clone(),
 				}
@@ -2905,7 +2921,7 @@ fn copy_directory(
 	// Also fix permissions for parent directories,
 	// if we were asked to create them.
 	if options.parents
-		&& let Some(name) = last_name(root)
+		&& let Some(name) = file_name(root)
 	{
 		let dest = child_path(&target, &name);
 		for (x, y) in aligned_ancestors(root, &dest) {

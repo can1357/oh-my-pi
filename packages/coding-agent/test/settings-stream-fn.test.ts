@@ -10,6 +10,7 @@
 import { describe, expect, it } from "bun:test";
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
 import type { Context, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createSettingsAwareStreamFn } from "@oh-my-pi/pi-coding-agent/session/settings-stream-fn";
@@ -195,7 +196,11 @@ describe("createSettingsAwareStreamFn", () => {
 	it("lowers the output cap so prompt plus output fits the model's context window", () => {
 		// The reported DeepSeek /btw 400: a 666k-token prompt plus the model's
 		// 384k default output cap exceeded the window. Test-env counts are bytes/4.
-		const deepseek = { api: "openai-completions", contextWindow: 1_000_000, maxTokens: 384_000 } as unknown as Model;
+		const deepseek: Model = {
+			...getBundledModel("deepseek", "deepseek-v4-pro"),
+			contextWindow: 1_000_000,
+			maxTokens: 384_000,
+		};
 		const promptTokens = 666_387;
 		const context = {
 			messages: [{ role: "user", content: "x".repeat(promptTokens * 4), timestamp: 0 }],

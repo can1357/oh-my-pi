@@ -1269,12 +1269,9 @@ fn search_one_file<M: Matcher + Sync>(
 	policy: ReadPolicy,
 ) -> FileOutcome {
 	let read = match policy {
-		ReadPolicy::Full => read_file_bytes_with_size(
-			fs,
-			&file.path,
-			file_size_hint(file.size),
-			&mut worker.buffer,
-		),
+		ReadPolicy::Full => {
+			read_file_bytes_with_size(fs, &file.path, file_size_hint(file.size), &mut worker.buffer)
+		},
 		ReadPolicy::Prefix => read_file_prefix(fs, &file.path, &mut worker.buffer),
 	};
 	match read {

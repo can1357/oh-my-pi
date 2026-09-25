@@ -1015,11 +1015,13 @@ describe("AgentSession auto-compaction progress guard", () => {
 			expect(session.agent.state.messages).toContain(truncated);
 		});
 
-		it("retries a turn with nothing actionable without compacting", async () => {
+		it("retries a reasoning-only turn without compacting", async () => {
+			// Signed thinking is replay-worthy but delivers nothing: the budget went
+			// to reasoning, so retry rather than keep a truncated non-answer.
 			const handoffSpy = vi.spyOn(compactionModule, "generateHandoffFromContext");
 			const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
 
-			await endTurn(lengthStop([{ type: "thinking", thinking: "unfinished reasoning" }]));
+			await endTurn(lengthStop([{ type: "thinking", thinking: "unfinished reasoning", thinkingSignature: "sig" }]));
 
 			expect(handoffSpy).not.toHaveBeenCalled();
 			expect(continueSpy).toHaveBeenCalledTimes(1);
