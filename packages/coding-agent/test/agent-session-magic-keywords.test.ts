@@ -16,7 +16,11 @@ import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 import { cfgMagicKeyword, cfgMagicKeywordsEnabled } from "@oh-my-pi/pi-coding-agent/modes/settings";
-import { cfgTaskDisabledAgents } from "@oh-my-pi/pi-coding-agent/task/settings";
+import {
+	cfgTaskIsolationAllowNested,
+	cfgTaskIsolationEnabled,
+	cfgTaskDisabledAgents,
+} from "@oh-my-pi/pi-coding-agent/task/settings";
 
 const mockTaskTool: AgentTool = {
 	name: "task",
@@ -163,7 +167,7 @@ describe("AgentSession magic keyword settings", () => {
 	it("advertises isolation controls in the workflowz notice when isolation is available", async () => {
 		const created = await createMagicKeywordSession(modelRegistry);
 		session = created.session;
-		created.settings.set("task.isolation.enabled", true);
+		cfgTaskIsolationEnabled.set(created.settings, true);
 		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
 
 		await session.prompt("please workflowz this");
@@ -183,7 +187,7 @@ describe("AgentSession magic keyword settings", () => {
 		// settings axis.
 		const created = await createMagicKeywordSession(modelRegistry, [mockTaskTool, mockEvalTool], true);
 		session = created.session;
-		created.settings.set("task.isolation.enabled", true);
+		cfgTaskIsolationEnabled.set(created.settings, true);
 		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
 
 		await session.prompt("please workflowz this");
@@ -198,8 +202,8 @@ describe("AgentSession magic keyword settings", () => {
 	it("advertises isolation controls in the workflowz notice for an isolated session with allowNested", async () => {
 		const created = await createMagicKeywordSession(modelRegistry, [mockTaskTool, mockEvalTool], true);
 		session = created.session;
-		created.settings.set("task.isolation.enabled", true);
-		created.settings.set("task.isolation.allowNested", true);
+		cfgTaskIsolationEnabled.set(created.settings, true);
+		cfgTaskIsolationAllowNested.set(created.settings, true);
 		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
 
 		await session.prompt("please workflowz this");

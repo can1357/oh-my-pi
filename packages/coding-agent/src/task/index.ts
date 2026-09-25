@@ -64,7 +64,6 @@ import {
 	cfgTaskEnableEffort,
 	cfgTaskEnableLsp,
 	cfgTaskIsolationApply,
-	cfgTaskIsolationEnabled,
 	cfgTaskMaxConcurrency,
 	cfgTaskMaxRecursionDepth,
 	cfgTaskMaxRuntimeMs,
