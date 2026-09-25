@@ -37,8 +37,11 @@ class "openai" {
 	revision "=5.6" {
 		delegation-bias "gated"
 	}
+	// GPT-6 accepts `response.steer` over the Responses WebSocket: user input
+	// joins the in-flight response instead of waiting for the next request.
 	revision ">=6" {
 		delegation-bias "restrained"
+		supports-steering #true
 	}
 	// GPT-6 Astra changes reasoning effort mid-conversation through a
 	// `configuration_update` input item so the request-level effort (and the

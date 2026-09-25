@@ -144,7 +144,9 @@ impl ModeEngine for SloppyEngine {
 		let mut staged = Vec::with_capacity(sections.len());
 		for section in sections {
 			let read = files.read(&section.path).map_err(|error| {
-				if multi_file {
+				// An unresolved internal URL stays typed so the host can
+				// resolve it and retry.
+				if multi_file && !matches!(error, EditError::UnresolvedUrl(_)) {
 					EditError::matched(format!(
 						"[{}]: {error}\nNo files were modified — sections apply atomically.",
 						section.path

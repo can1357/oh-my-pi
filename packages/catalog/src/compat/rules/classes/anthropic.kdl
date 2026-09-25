@@ -36,6 +36,16 @@ class "anthropic" {
 			supports-server-compaction #true
 		}
 	}
+	// Sonnet 4.5 and newer end generation with `model_context_window_exceeded`
+	// when prompt + max_tokens overruns the window, instead of a 400, so the
+	// full output cap can be requested without sizing the prompt. Verified for
+	// the Claude API only:
+	// https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons#model-context-window-exceeded
+	on "anthropic" {
+		revision ">=4.5" {
+			stops-output-at-context-window #true
+		}
+	}
 	// Opus 5.5 rejects forced tool selection the way Fable/Mythos do — a
 	// `tool_choice` of `tool` or `any` fails the request with 400
 	// `invalid_request_error`: `tool_choice: type "tool" and "any" are not

@@ -114,6 +114,12 @@ pub trait ShellState {
 	/// Sets the key bindings helper for the shell.
 	fn set_key_bindings(&mut self, key_bindings: Option<KeyBindingsHelper>);
 
+	/// Returns the filesystem the shell resolves user paths through.
+	fn filesystem(&self) -> &pi_vfs::Fs;
+
+	/// Replaces the filesystem the shell resolves user paths through.
+	fn set_filesystem(&mut self, filesystem: pi_vfs::Fs);
+
 	/// Returns the shell's current working directory.
 	fn working_dir(&self) -> &Path;
 

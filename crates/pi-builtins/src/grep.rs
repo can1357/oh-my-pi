@@ -5,7 +5,6 @@
 
 use std::{
 	ffi::{OsStr, OsString},
-	fs::File,
 	io::{self, Read, Write},
 	path::{Path, PathBuf},
 };
@@ -976,7 +975,7 @@ fn search_file_path<M: Matcher, W: Write>(
 	had_error: &mut bool,
 ) -> io::Result<bool> {
 	let display_path = display_path_for_operand(operand, resolved, path);
-	match File::open(path) {
+	match host.fs().open(path) {
 		Ok(file) => {
 			let display = display_path.as_os_str().as_encoded_bytes();
 			match process_reader(matcher, searcher, file, display, opts, out) {
@@ -1010,8 +1009,13 @@ fn search_file_path<M: Matcher, W: Write>(
 	}
 }
 
-fn grep_walk_request(root: &Path, follow_links: pi_walker::FollowLinks) -> pi_walker::WalkRequest {
+fn grep_walk_request(
+	fs: &pi_vfs::BlockingFs,
+	root: &Path,
+	follow_links: pi_walker::FollowLinks,
+) -> pi_walker::WalkRequest {
 	pi_walker::WalkRequest::new(root)
+		.filesystem(fs.clone())
 		.hidden(true)
 		.gitignore(false)
 		.skip_git(false)
@@ -1042,7 +1046,7 @@ fn search_dir<M: Matcher, W: Write>(
 	out: &mut W,
 	had_error: &mut bool,
 ) -> io::Result<bool> {
-	let request = grep_walk_request(resolved, follow_links);
+	let request = grep_walk_request(host.fs(), resolved, follow_links);
 	let mut any = false;
 	let had_error_state = std::cell::Cell::new(*had_error);
 	let cancel = host.cancel_flag();
@@ -1141,15 +1145,13 @@ fn search_dir<M: Matcher, W: Write>(
 }
 
 fn read_auxiliary_file(host: &mut Host, path: &OsStr) -> Result<Vec<u8>, String> {
-	let mut bytes = Vec::new();
 	let result = if path == OsStr::new("-") {
-		host.stdin.read_to_end(&mut bytes)
+		let mut bytes = Vec::new();
+		host.stdin.read_to_end(&mut bytes).map(|_| bytes)
 	} else {
-		File::open(host.resolve(path)).and_then(|mut file| file.read_to_end(&mut bytes))
+		host.fs().read(host.resolve(path))
 	};
-	result
-		.map(|_| bytes)
-		.map_err(|error| format!("{}: {error}", path.to_string_lossy()))
+	result.map_err(|error| format!("{}: {error}", path.to_string_lossy()))
 }
 
 fn pattern_file_lines(bytes: &[u8]) -> Vec<String> {
@@ -1326,7 +1328,7 @@ fn execute_search<M: Matcher>(
 		}
 
 		let resolved = host.resolve(operand);
-		match std::fs::metadata(&resolved) {
+		match host.fs().metadata(&resolved) {
 			Ok(metadata) if metadata.is_dir() => match directory_action {
 				DirectoryAction::Recurse => {
 					if rules.allows_dir(Path::new(operand)) {
