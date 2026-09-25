@@ -365,4 +365,26 @@ describe("classifyGatewayError authoritative-status precedence", () => {
 		expect(c.owner).toBe("provider");
 		expect(c.disposition).toBe("provider_transient");
 	});
+
+	it("routes a statusless cyber_policy denial through the credential lane, not a synthetic 502", () => {
+		const c = classifyGatewayError(new Error("cyber_policy"));
+		expect(c.status).toBe(403);
+		expect(c.owner).toBe("credential");
+		expect(c.disposition).toBe("credential_transient");
+		expect(isRetryableGatewayDisposition(c.disposition)).toBe(true);
+	});
+
+	it("routes a statusless structured policy error through the credential lane", () => {
+		const c = classifyGatewayError(Object.assign(new Error("request denied"), { code: "cyber_policy" }));
+		expect(c.status).toBe(403);
+		expect(c.owner).toBe("credential");
+		expect(c.disposition).toBe("credential_transient");
+	});
+
+	it("treats statusless OAuth-expiry wording as a permanent credential failure", () => {
+		const c = classifyGatewayError(new Error("refresh token expired"));
+		expect(c.status).toBe(401);
+		expect(c.owner).toBe("credential");
+		expect(c.disposition).toBe("credential_permanent");
+	});
 });
