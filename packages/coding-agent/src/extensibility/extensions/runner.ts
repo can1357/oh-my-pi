@@ -1877,7 +1877,13 @@ export class ExtensionRunner {
 					type: "before_agent_start",
 					prompt,
 					images,
-					systemPrompt: currentSystemPrompt,
+					// Upstream Pi exposes event.systemPrompt as a single string; omp stores it
+					// internally as a content-block array for prefix caching. Serialize to a
+					// string for the extension contract so upstream extensions (e.g. calling
+					// .replace() on it) keep working. omp-native extensions that need the
+					// block structure use event.systemPromptBlocks instead.
+					systemPrompt: currentSystemPrompt.join("\n"),
+					systemPromptBlocks: [...currentSystemPrompt],
 				};
 				const handlerResult = await this.#runHandlerWithTimeout(
 					handler,
