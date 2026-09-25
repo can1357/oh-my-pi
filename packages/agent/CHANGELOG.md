@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Compaction summary prompts now include an Incomplete Todos section so pending/in_progress items from additional-context survive the cut ([#8874](https://github.com/can1357/oh-my-pi/issues/8874)).
+
 ## [18.3.1] - 2026-09-25
 
 ### Added
@@ -127,9 +131,6 @@
 ### Fixed
 
 - Fixed agent startup and context compaction failures for models with unrecognized tokenizer encodings.
-### Changed
-
-- Compaction summary prompts now include an Incomplete Todos section so pending/in_progress items from additional-context survive the cut ([#8874](https://github.com/can1357/oh-my-pi/issues/8874)).
 
 ## [18.0.10] - 2026-08-28
 

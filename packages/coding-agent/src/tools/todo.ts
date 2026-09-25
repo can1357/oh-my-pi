@@ -465,8 +465,11 @@ function applyEntry(
 			// Model init must not erase unresolved model drops the settle gate protects.
 			const replacementContents = new Set(next.flatMap(phase => phase.tasks.map(task => task.content)));
 			const retained: TodoPhase[] = [];
+			const retainedContents = new Set<string>();
 			for (const phase of phases) {
-				const drops = phase.tasks.filter(t => t.status === "abandoned" && t.droppedBy !== "user");
+				const drops = phase.tasks.filter(
+					t => t.status === "abandoned" && t.droppedBy !== "user" && !retainedContents.has(t.content),
+				);
 				if (drops.length === 0) continue;
 				const existing = next.find(p => p.name === phase.name);
 				if (existing) {
@@ -474,11 +477,15 @@ function applyEntry(
 						if (replacementContents.has(drop.content)) continue;
 						if (!existing.tasks.some(t => t.content === drop.content)) {
 							existing.tasks.push(cloneTask(drop));
+							retainedContents.add(drop.content);
 						}
 					}
 				} else {
 					const unmatched = drops.filter(drop => !replacementContents.has(drop.content));
-					if (unmatched.length > 0) retained.push({ name: phase.name, tasks: unmatched.map(cloneTask) });
+					if (unmatched.length > 0) {
+						retained.push({ name: phase.name, tasks: unmatched.map(cloneTask) });
+						for (const drop of unmatched) retainedContents.add(drop.content);
+					}
 				}
 			}
 			return retained.length === 0 ? next : [...next, ...retained];

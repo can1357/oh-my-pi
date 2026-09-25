@@ -46,6 +46,8 @@ export function encodeIncompleteTodoTitle(title: string): string {
 		.replace(/\r\n/g, "\\r\\n")
 		.replace(/\r/g, "\\r")
 		.replace(/\n/g, "\\n")
+		.replace(/\u2028/g, "\\u2028")
+		.replace(/\u2029/g, "\\u2029")
 		.replace(/[ \t]+$/g, whitespace => whitespace.replace(/ /g, "\\s").replace(/\t/g, "\\t"));
 }
 
@@ -55,6 +57,14 @@ export function decodeIncompleteTodoTitle(title: string): string {
 	for (let i = 0; i < title.length; i++) {
 		if (title[i] === "\\" && i + 1 < title.length) {
 			const next = title[i + 1];
+			if (next === "u" && i + 5 < title.length) {
+				const code = Number.parseInt(title.slice(i + 2, i + 6), 16);
+				if (code === 0x2028 || code === 0x2029) {
+					out += String.fromCharCode(code);
+					i += 5;
+					continue;
+				}
+			}
 			if (next === "s" || next === "t") {
 				out += next === "s" ? " " : "\t";
 				i++;
