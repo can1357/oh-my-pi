@@ -3,18 +3,20 @@ import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
-import { Composer } from "@oh-my-pi/pi-coding-agent/modes/composer";
+import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
+import { Composer } from "@oh-my-pi/pi-tui/prompt/composer";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import type { AgentProgress } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
+
+import { cfgTuiMouse } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 function plainRows(rows: readonly string[]): string[] {
 	return rows.map(row => Bun.stripANSI(row).trimEnd());
@@ -115,7 +117,7 @@ describe("inline click-to-focus geometry", () => {
 	});
 
 	it("bands the hovered live card and clears it off-target", async () => {
-		settings.set("tui.mouse", true);
+		cfgTuiMouse.set(settings, true);
 		await mode.init({ suppressWelcomeIntro: true });
 		void mode.getUserInput();
 		await term.waitForRender();
@@ -204,12 +206,12 @@ describe("inline click-to-focus geometry", () => {
 		// Disabling capture mid-hover clears the controller cache too: after
 		// re-enabling, motion over the same card must restore the band instead
 		// of looking unchanged and skipping the repaint.
-		settings.set("tui.mouse", false);
+		cfgTuiMouse.set(settings, false);
 		mode.ui.requestRender();
 		await term.waitForRender(() => !changed(before));
 		expect(workerBg()).toEqual(before);
 
-		settings.set("tui.mouse", true);
+		cfgTuiMouse.set(settings, true);
 		mode.ui.requestRender();
 		await term.waitForRender();
 		const cardRow = plainRows(term.getViewport()).findIndex(line => line.includes("HoverWorker"));
@@ -226,7 +228,7 @@ describe("inline click-to-focus geometry", () => {
 	});
 
 	it("expands and collapses the pinned jump list through SGR clicks", async () => {
-		settings.set("tui.mouse", true);
+		cfgTuiMouse.set(settings, true);
 		await mode.init({ suppressWelcomeIntro: true });
 		void mode.getUserInput();
 		await term.waitForRender();

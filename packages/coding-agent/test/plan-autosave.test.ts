@@ -4,12 +4,11 @@ import * as path from "node:path";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
-import * as modes from "@oh-my-pi/pi-coding-agent/modes";
-import { getSettingsForTab } from "@oh-my-pi/pi-coding-agent/modes/components/settings-defs";
+import { getSettingsForTab } from "@oh-my-pi/pi-tui/overlays/settings-defs";
+import { createSettingsHost } from "@oh-my-pi/pi-coding-agent/config/settings-ui";
 import {
 	autosaveApprovedPlan,
 	defaultPlanAutosaveDir,
-	planSaveFileName,
 	resolvePlanAutosaveDir,
 } from "@oh-my-pi/pi-coding-agent/plan-mode/plan-autosave";
 import type { PlanModeState } from "@oh-my-pi/pi-coding-agent/plan-mode/state";
@@ -17,6 +16,8 @@ import type { PlanYolo } from "@oh-my-pi/pi-coding-agent/session/agent-session-t
 import { PrewalkCoordinator, type PrewalkCoordinatorHost } from "@oh-my-pi/pi-coding-agent/session/prewalk";
 import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+
+import { cfgPlanAutosave, cfgPlanEnabled } from "@oh-my-pi/pi-coding-agent/plan-mode/settings";
 
 let tempDir: TempDir | undefined;
 
@@ -38,7 +39,7 @@ function makeCwd(): string {
 
 describe("plan autosave settings UI", () => {
 	it("gates the autosave directory on plan.autosave", () => {
-		const defs = getSettingsForTab("tasks");
+		const defs = getSettingsForTab(createSettingsHost().entries, "tasks");
 		const autosave = defs.find(def => def.path === "plan.autosave");
 		const autosaveDir = defs.find(def => def.path === "plan.autosaveDir");
 		if (!autosave?.condition || !autosaveDir?.condition) {
@@ -48,15 +49,12 @@ describe("plan autosave settings UI", () => {
 		expect(autosave.condition()).toBe(true);
 		expect(autosaveDir.condition()).toBe(false);
 
-		Settings.instance.set("plan.autosave", true);
+		cfgPlanAutosave.set(Settings.instance, true);
 		expect(autosaveDir.condition()).toBe(true);
 
-		Settings.instance.set("plan.enabled", false);
+		cfgPlanEnabled.set(Settings.instance, false);
 		expect(autosave.condition()).toBe(false);
 		expect(autosaveDir.condition()).toBe(false);
-	});
-	it("stays reachable from the public modes barrel", () => {
-		expect(modes.planSaveFileName).toBe(planSaveFileName);
 	});
 });
 

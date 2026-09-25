@@ -9,15 +9,15 @@ import {
 	expandPath,
 	probeLiteralPathExists,
 	resolveToCwd,
-	splitPathAndSel,
 	splitPathAndSelPreferringLiteral,
 	splitPathAndSelPreferringLiteralSync,
 } from "@oh-my-pi/pi-coding-agent/tools/path-utils";
+import { splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { GrepOutputMode } from "@oh-my-pi/pi-natives";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { runGrepCommand } from "../../src/cli/grep-cli";
-import { initTheme } from "../../src/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { GrepTool } from "../../src/tools/grep";
 
 function getText(result: { content: Array<{ type: string; text?: string }> }): string {
@@ -116,6 +116,49 @@ describe("literal colon filename resolution (issue #4618)", () => {
 					lstat.mockRestore();
 				}
 			} finally {
+				Object.defineProperty(process, "platform", platform);
+			}
+		});
+
+		it("keeps the selector when Windows lstat falsely reports a missing stream as present", async () => {
+			// Windows can intermittently answer `lstat("file.md:1-40")` with the base
+			// file's metadata although that NTFS stream does not exist and `open`
+			// fails with ENOENT. The splitters dropped the selector and `read` opened
+			// the unsplit path, surfacing a raw ENOENT for an existing file.
+			const base = path.join(tmpDir, "notes.md");
+			await Bun.write(base, "line one\nline two\nline three\nline four\n");
+			const stream = `${base}:1-2`;
+			const baseStat = await fs.promises.lstat(base);
+			const realLstat = fs.promises.lstat;
+			const realLstatSync = fs.lstatSync;
+			const realBunFile = Bun.file.bind(Bun);
+			const platform = Object.getOwnPropertyDescriptor(process, "platform");
+			if (platform === undefined) throw new Error("process.platform descriptor is unavailable");
+			Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
+			const lstat = spyOn(fs.promises, "lstat").mockImplementation((async (target: fs.PathLike) =>
+				String(target) === stream ? baseStat : await realLstat(target)) as typeof fs.promises.lstat);
+			const lstatSync = spyOn(fs, "lstatSync").mockImplementation(((target: fs.PathLike) =>
+				String(target) === stream ? baseStat : realLstatSync(target)) as typeof fs.lstatSync);
+			const bunFile = spyOn(Bun, "file").mockImplementation((source, options) => {
+				const file = realBunFile(source as string, options);
+				if (source === stream) file.stat = async () => baseStat;
+				return file;
+			});
+
+			try {
+				const expectedSelector = { path: base, sel: "1-2" };
+				expect(await splitPathAndSelPreferringLiteral(stream, tmpDir)).toEqual(expectedSelector);
+				expect(splitPathAndSelPreferringLiteralSync(stream, tmpDir)).toEqual(expectedSelector);
+
+				const result = await new ReadTool(createSession()).execute("read-false-positive-stream", { path: stream });
+				const output = getText(result);
+				expect(output).toContain("line one");
+				expect(output).toContain("line two");
+				expect(output).not.toContain("ENOENT");
+			} finally {
+				bunFile.mockRestore();
+				lstatSync.mockRestore();
+				lstat.mockRestore();
 				Object.defineProperty(process, "platform", platform);
 			}
 		});
@@ -336,6 +379,36 @@ describe("literal colon filename resolution (issue #4618)", () => {
 			const output = getText(result);
 
 			expect(output).toContain("literal archive needle");
+		});
+
+		it("applies line ranges to an existing file whose name contains glob characters", async () => {
+			const literal = path.join(tmpDir, "{proposal} {acme} offer.md");
+			await Bun.write(literal, "offer included\nignored\noffer excluded\n");
+
+			const tool = new GrepTool(createSession());
+			const result = await tool.execute("grep-ranged-brace-literal", {
+				pattern: "offer",
+				path: `${literal}:1-2`,
+			});
+			const output = getText(result);
+
+			expect(output).toContain("offer included");
+			expect(output).not.toContain("offer excluded");
+		});
+
+		it("preserves ranged glob-named files before delimiter expansion", async () => {
+			const literal = path.join(tmpDir, "a;b[1].md");
+			await Bun.write(literal, "needle included\nignored\nneedle excluded\n");
+
+			const tool = new GrepTool(createSession());
+			const result = await tool.execute("grep-ranged-delimiter-literal", {
+				pattern: "needle",
+				path: `${literal}:1-2`,
+			});
+			const output = getText(result);
+
+			expect(output).toContain("needle included");
+			expect(output).not.toContain("needle excluded");
 		});
 
 		it("preserves `:N-M` line-range filtering when the literal file does not exist", async () => {

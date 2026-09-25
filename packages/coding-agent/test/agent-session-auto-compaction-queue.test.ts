@@ -1,11 +1,14 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { Agent, AgentBusyError } from "@oh-my-pi/pi-agent-core";
+import { CompactionCancelledError } from "@oh-my-pi/pi-agent-core/compaction";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import type { CompactOptions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -13,6 +16,28 @@ import * as unexpectedStopClassifier from "@oh-my-pi/pi-coding-agent/session/une
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 import * as logger from "@oh-my-pi/pi-utils/logger";
+import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
+
+import {
+	cfgCompactionAutoContinue,
+	cfgCompactionDropUseless,
+	cfgCompactionKeepRecentTokens,
+	cfgCompactionMethodOrder,
+	cfgCompactionReserveTokens,
+	cfgCompactionSupersedeReads,
+	cfgCompactionThresholdPercent,
+	cfgCompactionThresholdTokens,
+	cfgContextPromotionEnabled,
+} from "@oh-my-pi/pi-coding-agent/session/context-settings";
+import {
+	cfgFeaturesUnexpectedStopDetection,
+	cfgRetryBaseDelayMs,
+	cfgRetryEnabled,
+	cfgRetryFallbackChains,
+	cfgRetryMaxDelayMs,
+	cfgRetryMaxRetries,
+	cfgRetryModelFallback,
+} from "@oh-my-pi/pi-coding-agent/session/settings";
 
 const runtimeSignalStoreKey = "__ompRuntimeSignals";
 
@@ -25,6 +50,12 @@ function getRuntimeSignals(): string[] {
 	}
 	return globalWithSignals[runtimeSignalStoreKey];
 }
+
+/** Parks a prompt inside its awaited `before_agent_start` hook. */
+type AgentStartGate = { entered: PromiseWithResolvers<void>; release: PromiseWithResolvers<void> };
+
+/** Hooks for the `/park` fixture command: run `action` synchronously, then await `gate` (if set). */
+type ParkCommandGlobals = typeof globalThis & { __ompParkGate?: Promise<void>; __ompParkAction?: () => void };
 
 /**
  * Regression test: auto-compaction completion should resume the agent loop when
@@ -39,7 +70,8 @@ describe("AgentSession auto-compaction queue resume", () => {
 	beforeAll(async () => {
 		tempDir = TempDir.createSync("@pi-auto-compaction-queue-");
 		authStorage = await AuthStorage.create(":memory:");
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		authStorage.keys.setRuntime("mock", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 	});
 
@@ -56,6 +88,11 @@ describe("AgentSession auto-compaction queue resume", () => {
 					const gate = (globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> })
 						.__ompManualCompactGate;
 					if (gate) await gate;
+					if (
+						(globalThis as typeof globalThis & { __ompManualCompactCancel?: boolean }).__ompManualCompactCancel
+					) {
+						return { cancel: true };
+					}
 					return {
 						compaction: {
 							summary: "compacted",
@@ -66,6 +103,13 @@ describe("AgentSession auto-compaction queue resume", () => {
 						},
 					};
 				});
+				pi.on("before_agent_start", async () => {
+					const gate = (globalThis as typeof globalThis & { __ompAgentStartGate?: AgentStartGate })
+						.__ompAgentStartGate;
+					if (!gate) return;
+					gate.entered.resolve();
+					await gate.release.promise;
+				});
 				pi.on("auto_compaction_start", event => {
 					getRuntimeSignals().push(`compaction:start:${event.reason}`);
 				});
@@ -74,6 +118,23 @@ describe("AgentSession auto-compaction queue resume", () => {
 				});
 				pi.on("todo_reminder", event => {
 					getRuntimeSignals().push(`todo:${event.attempt}/${event.maxAttempts}`);
+				});
+				// Handled entirely inside prompt(); starts no agent turn.
+				pi.registerCommand("noop", {
+					handler: async () => {
+						getRuntimeSignals().push("command:noop");
+					},
+				});
+				// Local command whose handler can fire a side effect and/or stay
+				// pending on a gate, standing in for an extension that keeps working
+				// after a manual compaction released it.
+				pi.registerCommand("park", {
+					handler: async () => {
+						const globals = globalThis as ParkCommandGlobals;
+						globals.__ompParkAction?.();
+						if (globals.__ompParkGate) await globals.__ompParkGate;
+						getRuntimeSignals().push("command:park");
+					},
 				});
 			},
 			tempDir.path(),
@@ -136,6 +197,12 @@ describe("AgentSession auto-compaction queue resume", () => {
 				getRuntimeSignals().length = 0;
 				(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate =
 					undefined;
+				(globalThis as typeof globalThis & { __ompAgentStartGate?: AgentStartGate }).__ompAgentStartGate =
+					undefined;
+				(globalThis as ParkCommandGlobals).__ompParkGate = undefined;
+				(globalThis as ParkCommandGlobals).__ompParkAction = undefined;
+				(globalThis as typeof globalThis & { __ompManualCompactCancel?: boolean }).__ompManualCompactCancel =
+					undefined;
 				vi.restoreAllMocks();
 			}
 		}
@@ -168,6 +235,10 @@ describe("AgentSession auto-compaction queue resume", () => {
 		// so consumers must see it as a non-terminal scheduling pause.
 		const agentEndTerminalStates: Array<boolean | undefined> = [];
 		const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
+		// Session subscribers are notified before extension listeners settle, so the
+		// continuation's delay timer is armed some microtasks after
+		// auto_compaction_end reaches this test; wait for the arm itself.
+		const waitSpy = vi.spyOn(scheduler, "wait");
 		session.subscribe((event: AgentSessionEvent) => {
 			if (event.type === "auto_compaction_end") onCompactionDone();
 			if (event.type === "agent_end") agentEndTerminalStates.push(event.isTerminal);
@@ -204,7 +275,9 @@ describe("AgentSession auto-compaction queue resume", () => {
 
 		// Wait for compaction completion, then verify waitForIdle blocks on queued continuation.
 		await compactionDone;
-		await Promise.resolve();
+		while (!waitSpy.mock.calls.some(([delayMs]) => delayMs === 100)) {
+			await Promise.resolve();
+		}
 		const idlePromise = session.waitForIdle();
 		let idleResolved = false;
 		void idlePromise.then(() => {
@@ -223,7 +296,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 	});
 
 	it("marks manual compaction active before abort teardown can yield", async () => {
-		session.settings.set("compaction.keepRecentTokens", 1);
+		cfgCompactionKeepRecentTokens.set(session.settings, 1);
 		sessionManager.appendMessage({
 			role: "assistant",
 			content: [{ type: "text", text: "previous answer" }],
@@ -272,7 +345,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		// arrives mid-compaction (async IRC, an xd:// mount notice, an SDK steer)
 		// would hang until the next explicit prompt unless compact() re-drains
 		// after reconnecting.
-		session.settings.set("compaction.keepRecentTokens", 1);
+		cfgCompactionKeepRecentTokens.set(session.settings, 1);
 		sessionManager.appendMessage({
 			role: "assistant",
 			content: [{ type: "text", text: "previous answer" }],
@@ -323,10 +396,834 @@ describe("AgentSession auto-compaction queue resume", () => {
 		expect(continueSpy).toHaveBeenCalledTimes(1);
 	});
 
+	it("resumes the turn a manual compaction interrupted", async () => {
+		// /compact mid-turn aborts the live tool loop. Left alone the agent sits idle
+		// on a half-finished loop until the user types "continue" — an autoresearch
+		// run dies this way. The compaction must resume the interrupted turn once the
+		// summary is committed, the same way context-full compaction does.
+		cfgCompactionKeepRecentTokens.set(session.settings, 1);
+		cfgCompactionAutoContinue.override(session.settings, true);
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "previous answer" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: {
+				input: 1_000,
+				output: 100,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1_100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		});
+		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+		// A turn is in flight when /compact lands; the abort ends it.
+		session.agent.state.isStreaming = true;
+		vi.spyOn(session, "abort").mockImplementation(async () => {
+			session.agent.state.isStreaming = false;
+		});
+		type Dispatched = { role: string; attribution?: string; synthetic?: boolean };
+		const prompted: Dispatched[][] = [];
+		vi.spyOn(session.agent, "prompt").mockImplementation(async message => {
+			prompted.push((Array.isArray(message) ? message : [message]) as Dispatched[]);
+		});
+
+		await session.compact();
+		await session.waitForIdle();
+
+		// Exactly one turn starts, driven by the synthetic auto-continue nudge.
+		expect(prompted).toHaveLength(1);
+		const resume = prompted[0]?.filter(message => message.role === "developer" && message.synthetic === true);
+		expect(resume).toHaveLength(1);
+		expect(resume?.[0]?.attribution).toBe("agent");
+	});
+
+	it("does not start a turn when a manual compaction interrupted nothing", async () => {
+		cfgCompactionKeepRecentTokens.set(session.settings, 1);
+		cfgCompactionAutoContinue.override(session.settings, true);
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "previous answer" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: {
+				input: 1_000,
+				output: 100,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1_100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		});
+		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockImplementation(async () => {});
+
+		await session.compact();
+		await session.waitForIdle();
+
+		expect(promptSpy).not.toHaveBeenCalled();
+	});
+
+	it("does not resume when compaction lands while a prompt is still in setup", async () => {
+		// Between `session.prompt()` and the message reaching `agent.prompt()` the
+		// session reports busy (in-flight count) while the agent owns no turn. The
+		// compaction abort bumps the generation and drops that prompt; nudging the
+		// model to "resume" would run it on the previous transcript with the user's
+		// input never sent.
+		cfgCompactionKeepRecentTokens.set(session.settings, 1);
+		cfgCompactionAutoContinue.override(session.settings, true);
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "previous answer" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: {
+				input: 1_000,
+				output: 100,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1_100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		});
+		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockImplementation(async () => {});
+		const dropped: string[] = [];
+		session.setPromptDropped(prompt => dropped.push(prompt.text));
+
+		// Park the prompt inside its awaited before_agent_start hook: in-flight, but
+		// the message has not reached the agent.
+		const gate: AgentStartGate = { entered: Promise.withResolvers<void>(), release: Promise.withResolvers<void>() };
+		(globalThis as typeof globalThis & { __ompAgentStartGate?: AgentStartGate }).__ompAgentStartGate = gate;
+		const pending = session.prompt("new request");
+		await gate.entered.promise;
+		expect(session.isStreaming).toBe(true);
+		expect(session.agent.state.isStreaming).toBe(false);
+
+		const compacted = session.compact();
+		gate.release.resolve();
+		await compacted;
+		await pending;
+		// The abort bumped the generation, so the parked prompt is handed back unsent…
+		expect(dropped).toEqual(["new request"]);
+		await session.waitForIdle();
+
+		// …and nothing "resumes" a turn the agent never owned.
+		expect(promptSpy).not.toHaveBeenCalled();
+	});
+
+	it("leaves the resume to the caller when suppressContinuation is set", async () => {
+		// Plan-mode "Approve and compact context" dispatches the execution turn
+		// itself after compaction; resuming the aborted approval turn on top of it
+		// would double-prompt.
+		cfgCompactionKeepRecentTokens.set(session.settings, 1);
+		cfgCompactionAutoContinue.override(session.settings, true);
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "previous answer" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: {
+				input: 1_000,
+				output: 100,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1_100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		});
+		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+		session.agent.state.isStreaming = true;
+		vi.spyOn(session, "abort").mockImplementation(async () => {
+			session.agent.state.isStreaming = false;
+		});
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockImplementation(async () => {});
+
+		await session.compact(undefined, { suppressContinuation: true });
+		await session.waitForIdle();
+
+		expect(promptSpy).not.toHaveBeenCalled();
+	});
+
+	it("lets a prompt submitted during the compaction supersede the resume", async () => {
+		// An RPC/SDK prompt sent while a manual compaction runs parks on the cleanup
+		// barrier. It is the user's next intent: it must dispatch once compaction
+		// ends instead of losing the session to the synthetic resume (and, without
+		// a streamingBehavior, surfacing AgentBusyError).
+		cfgCompactionKeepRecentTokens.set(session.settings, 1);
+		cfgCompactionAutoContinue.override(session.settings, true);
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "previous answer" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: {
+				input: 1_000,
+				output: 100,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1_100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		});
+		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+		session.agent.state.isStreaming = true;
+		vi.spyOn(session, "abort").mockImplementation(async () => {
+			session.agent.state.isStreaming = false;
+		});
+		type Dispatched = { role: string; content?: unknown; synthetic?: boolean };
+		const prompted: Dispatched[][] = [];
+		vi.spyOn(session.agent, "prompt").mockImplementation(async message => {
+			prompted.push((Array.isArray(message) ? message : [message]) as Dispatched[]);
+		});
+
+		// Park the compaction inside its awaited hook so the prompt below arrives
+		// while it is in flight.
+		const gate = Promise.withResolvers<void>();
+		(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate =
+			gate.promise;
+		const compacted = session.compact();
+		while (!getRuntimeSignals().includes("before_compact:enter")) {
+			await Promise.resolve();
+		}
+		const redirected = session.prompt("redirect");
+		gate.resolve();
+		await compacted;
+		await redirected;
+		await session.waitForIdle();
+
+		// Exactly one turn: the user's prompt. No synthetic nudge raced it.
+		expect(prompted).toHaveLength(1);
+		const roles = prompted[0]?.map(message => message.role);
+		expect(roles).toContain("user");
+		expect(prompted[0]?.some(message => message.synthetic === true)).toBe(false);
+	});
+
+	it("parks a custom prompt submitted during the compaction and lets it supersede the resume", async () => {
+		// Skill invocations and collab peer prompts arrive via promptCustomMessage().
+		// They must wait for the cleanup barrier like prompt() (no turn against the
+		// disconnected session) and, once dispatched, take the session instead of
+		// the synthetic resume.
+		cfgCompactionKeepRecentTokens.set(session.settings, 1);
+		cfgCompactionAutoContinue.override(session.settings, true);
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "previous answer" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: {
+				input: 1_000,
+				output: 100,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1_100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		});
+		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+		session.agent.state.isStreaming = true;
+		vi.spyOn(session, "abort").mockImplementation(async () => {
+			session.agent.state.isStreaming = false;
+		});
+		type Dispatched = { role: string; customType?: string; synthetic?: boolean };
+		const prompted: Dispatched[][] = [];
+		vi.spyOn(session.agent, "prompt").mockImplementation(async message => {
+			prompted.push((Array.isArray(message) ? message : [message]) as Dispatched[]);
+		});
+
+		const gate = Promise.withResolvers<void>();
+		(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate =
+			gate.promise;
+		const compacted = session.compact();
+		while (!getRuntimeSignals().includes("before_compact:enter")) {
+			await Promise.resolve();
+		}
+		const peerPrompt = session.promptCustomMessage({
+			customType: "collab-prompt",
+			content: "peer redirect",
+			display: true,
+			attribution: "user",
+		});
+		// Parked: nothing reaches the agent while the compaction is in flight.
+		await Promise.resolve();
+		expect(prompted).toHaveLength(0);
+		gate.resolve();
+		await compacted;
+		expect(await peerPrompt).toBe(true);
+		await session.waitForIdle();
+
+		// Exactly one turn: the peer's prompt. No synthetic nudge raced it.
+		expect(prompted).toHaveLength(1);
+		expect(prompted[0]?.some(message => message.customType === "collab-prompt")).toBe(true);
+		expect(prompted[0]?.some(message => message.synthetic === true)).toBe(false);
+	});
+
+	it("hands the resume back when the prompt submitted during compaction is a local command", async () => {
+		// An extension command typed during a manual compaction parks on the same
+		// barrier as a real prompt, but it is handled inside prompt() and starts no
+		// turn. It must not swallow the resume, or the interrupted work is stranded
+		// exactly the way it was before the fix.
+		cfgCompactionKeepRecentTokens.set(session.settings, 1);
+		cfgCompactionAutoContinue.override(session.settings, true);
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "previous answer" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: {
+				input: 1_000,
+				output: 100,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1_100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		});
+		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+		session.agent.state.isStreaming = true;
+		vi.spyOn(session, "abort").mockImplementation(async () => {
+			session.agent.state.isStreaming = false;
+		});
+		type Dispatched = { role: string; synthetic?: boolean };
+		const prompted: Dispatched[][] = [];
+		vi.spyOn(session.agent, "prompt").mockImplementation(async message => {
+			prompted.push((Array.isArray(message) ? message : [message]) as Dispatched[]);
+		});
+
+		const gate = Promise.withResolvers<void>();
+		(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate =
+			gate.promise;
+		const compacted = session.compact();
+		while (!getRuntimeSignals().includes("before_compact:enter")) {
+			await Promise.resolve();
+		}
+		const command = session.prompt("/noop");
+		gate.resolve();
+		await compacted;
+		expect(await command).toBe(false);
+		await session.waitForIdle();
+
+		expect(getRuntimeSignals()).toContain("command:noop");
+		// The command consumed nothing, so the interrupted turn still resumes.
+		expect(prompted).toHaveLength(1);
+		expect(prompted[0]?.some(message => message.role === "developer" && message.synthetic === true)).toBe(true);
+	});
+
+	it("drops the resume once any parked prompt starts a turn, even if a local command releases first", async () => {
+		cfgCompactionKeepRecentTokens.set(session.settings, 1);
+		cfgCompactionAutoContinue.override(session.settings, true);
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "previous answer" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: {
+				input: 1_000,
+				output: 100,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1_100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		});
+		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+		session.agent.state.isStreaming = true;
+		vi.spyOn(session, "abort").mockImplementation(async () => {
+			session.agent.state.isStreaming = false;
+		});
+		type Dispatched = { role: string; synthetic?: boolean };
+		const prompted: Dispatched[][] = [];
+		vi.spyOn(session.agent, "prompt").mockImplementation(async message => {
+			prompted.push((Array.isArray(message) ? message : [message]) as Dispatched[]);
+		});
+
+		const gate = Promise.withResolvers<void>();
+		(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate =
+			gate.promise;
+		const compacted = session.compact();
+		while (!getRuntimeSignals().includes("before_compact:enter")) {
+			await Promise.resolve();
+		}
+		// Parked in this order, the local command releases before the real prompt
+		// dispatches; the still-parked prompt must keep the resume withheld.
+		const command = session.prompt("/noop");
+		const redirected = session.prompt("redirect");
+		gate.resolve();
+		await compacted;
+		await command;
+		await redirected;
+		await session.waitForIdle();
+
+		// Exactly one turn: the user's prompt. No synthetic nudge.
+		expect(prompted).toHaveLength(1);
+		expect(prompted[0]?.map(message => message.role)).toContain("user");
+		expect(prompted[0]?.some(message => message.synthetic === true)).toBe(false);
+	});
+	it("keeps the resume when a parked prompt is refused only because another prompt is in setup", async () => {
+		// Two prompts park during the compaction. The first enters turn setup
+		// (in-flight, agent owns no turn) and the second is refused with
+		// AgentBusyError on that setup-only busy state. That refusal claims
+		// nothing. The first then reaches `agent.prompt`, which rejects: no turn
+		// started, so it claims nothing either and the interrupted turn resumes.
+		cfgCompactionKeepRecentTokens.set(session.settings, 1);
+		cfgCompactionAutoContinue.override(session.settings, true);
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "previous answer" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: {
+				input: 1_000,
+				output: 100,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1_100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		});
+		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+		session.agent.state.isStreaming = true;
+		vi.spyOn(session, "abort").mockImplementation(async () => {
+			session.agent.state.isStreaming = false;
+		});
+		type Dispatched = { role: string; synthetic?: boolean };
+		const prompted: Dispatched[][] = [];
+		vi.spyOn(session.agent, "prompt")
+			.mockImplementation(async message => {
+				prompted.push((Array.isArray(message) ? message : [message]) as Dispatched[]);
+			})
+			// The first prompt reaches dispatch and the agent rejects it: no turn.
+			.mockImplementationOnce(async () => {
+				throw new Error("provider rejected the request");
+			});
+
+		const compactGate = Promise.withResolvers<void>();
+		(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate =
+			compactGate.promise;
+		const startGate: AgentStartGate = {
+			entered: Promise.withResolvers<void>(),
+			release: Promise.withResolvers<void>(),
+		};
+		(globalThis as typeof globalThis & { __ompAgentStartGate?: AgentStartGate }).__ompAgentStartGate = startGate;
+		const compacted = session.compact();
+		while (!getRuntimeSignals().includes("before_compact:enter")) {
+			await Promise.resolve();
+		}
+		// Capture the rejections up front: `second` rejects as soon as it observes
+		// `first` in setup, well before the awaits below reach it.
+		const first = session.prompt("first").then(
+			() => undefined,
+			(error: unknown) => error,
+		);
+		const second = session.prompt("second").then(
+			() => undefined,
+			(error: unknown) => error,
+		);
+		compactGate.resolve();
+		await compacted;
+
+		// First prompt parked in before_agent_start: session busy, agent idle.
+		await startGate.entered.promise;
+		expect(session.isStreaming).toBe(true);
+		expect(session.agent.state.isStreaming).toBe(false);
+		expect(await second).toBeInstanceOf(AgentBusyError);
+
+		startGate.release.resolve();
+		expect(await first).toEqual(new Error("provider rejected the request"));
+		await session.waitForIdle();
+
+		// Neither parked prompt produced a successful turn, so the interrupted one
+		// resumes — and nothing else starts.
+		expect(prompted).toHaveLength(1);
+		expect(prompted[0]?.some(message => message.role === "developer" && message.synthetic === true)).toBe(true);
+	});
+
+	it("resumes the interrupted turn when there was nothing to compact", async () => {
+		// The abort has already ended the turn by the time compact() discovers the
+		// session is too small. Rejecting without a resume strands the work exactly
+		// like the original bug; the rejection appended nothing, so resuming is safe.
+		cfgCompactionAutoContinue.override(session.settings, true);
+		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+		session.agent.state.isStreaming = true;
+		vi.spyOn(session, "abort").mockImplementation(async () => {
+			session.agent.state.isStreaming = false;
+		});
+		type Dispatched = { role: string; synthetic?: boolean };
+		const prompted: Dispatched[][] = [];
+		vi.spyOn(session.agent, "prompt").mockImplementation(async message => {
+			prompted.push((Array.isArray(message) ? message : [message]) as Dispatched[]);
+		});
+
+		await expect(session.compact()).rejects.toThrow("Nothing to compact");
+		await session.waitForIdle();
+
+		expect(prompted).toHaveLength(1);
+		expect(prompted[0]?.some(message => message.role === "developer" && message.synthetic === true)).toBe(true);
+	});
+
+	it("does not resume when a session_before_compact hook vetoes the compaction", async () => {
+		// A hook cancel is an explicit refusal, not a no-op: unlike "nothing to
+		// compact", it must not turn into an autonomous resume of the aborted turn.
+		cfgCompactionKeepRecentTokens.set(session.settings, 1);
+		cfgCompactionAutoContinue.override(session.settings, true);
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "previous answer" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: {
+				input: 1_000,
+				output: 100,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1_100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		});
+		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+		session.agent.state.isStreaming = true;
+		vi.spyOn(session, "abort").mockImplementation(async () => {
+			session.agent.state.isStreaming = false;
+		});
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockImplementation(async () => {});
+		(globalThis as typeof globalThis & { __ompManualCompactCancel?: boolean }).__ompManualCompactCancel = true;
+
+		await expect(session.compact()).rejects.toBeInstanceOf(CompactionCancelledError);
+		await session.waitForIdle();
+
+		expect(promptSpy).not.toHaveBeenCalled();
+	});
+
+	it("carries a withheld resume into a second manual compaction", async () => {
+		// The first compaction withholds its resume for a parked local command that
+		// is still running when a second /compact starts. That pass interrupts
+		// nothing itself; it must take over the withheld resume instead of
+		// discarding it, or the command's release finds nothing to hand back.
+		cfgCompactionKeepRecentTokens.set(session.settings, 1);
+		cfgCompactionAutoContinue.override(session.settings, true);
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "previous answer" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: {
+				input: 1_000,
+				output: 100,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1_100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		});
+		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+		session.agent.state.isStreaming = true;
+		vi.spyOn(session, "abort").mockImplementation(async () => {
+			session.agent.state.isStreaming = false;
+		});
+		type Dispatched = { role: string; synthetic?: boolean };
+		const prompted: Dispatched[][] = [];
+		vi.spyOn(session.agent, "prompt").mockImplementation(async message => {
+			prompted.push((Array.isArray(message) ? message : [message]) as Dispatched[]);
+		});
+
+		const compactGate = Promise.withResolvers<void>();
+		(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate =
+			compactGate.promise;
+		const parkGate = Promise.withResolvers<void>();
+		(globalThis as ParkCommandGlobals).__ompParkGate = parkGate.promise;
+		const compacted = session.compact();
+		while (!getRuntimeSignals().includes("before_compact:enter")) {
+			await Promise.resolve();
+		}
+		const command = session.prompt("/park");
+		compactGate.resolve();
+		await compacted;
+		await session.waitForIdle();
+		// Withheld: the parked command has not released yet.
+		expect(prompted).toHaveLength(0);
+
+		// Second manual pass while the command is still pending. Nothing is
+		// streaming, so it interrupts nothing of its own; the branch already ends
+		// in a compaction entry, so it may also reject as already compacted.
+		(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate = undefined;
+		await session.compact().catch(() => undefined);
+		await session.waitForIdle();
+		expect(prompted).toHaveLength(0);
+
+		parkGate.resolve();
+		expect(await command).toBe(false);
+		await session.waitForIdle();
+
+		expect(getRuntimeSignals()).toContain("command:park");
+		expect(prompted).toHaveLength(1);
+		expect(prompted[0]?.some(message => message.role === "developer" && message.synthetic === true)).toBe(true);
+	});
+
+	/**
+	 * First manual compaction withholds its resume for a parked `/park` command;
+	 * a second pass (with `options`) inherits it and is then vetoed by the hook.
+	 * Returns the turns dispatched once the parked command releases.
+	 */
+	async function vetoedTakeoverAfterWithheldResume(
+		options?: CompactOptions,
+	): Promise<{ role: string; synthetic?: boolean }[][]> {
+		cfgCompactionKeepRecentTokens.set(session.settings, 1);
+		cfgCompactionAutoContinue.override(session.settings, true);
+		const appendAssistant = (text: string): void => {
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text }],
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "claude-sonnet-4-5",
+				stopReason: "stop",
+				usage: {
+					input: 1_000,
+					output: 100,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 1_100,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				timestamp: Date.now(),
+			});
+		};
+		appendAssistant("previous answer");
+		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+		session.agent.state.isStreaming = true;
+		vi.spyOn(session, "abort").mockImplementation(async () => {
+			session.agent.state.isStreaming = false;
+		});
+		const prompted: { role: string; synthetic?: boolean }[][] = [];
+		vi.spyOn(session.agent, "prompt").mockImplementation(async message => {
+			prompted.push((Array.isArray(message) ? message : [message]) as { role: string; synthetic?: boolean }[]);
+		});
+
+		const compactGate = Promise.withResolvers<void>();
+		(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate =
+			compactGate.promise;
+		const parkGate = Promise.withResolvers<void>();
+		(globalThis as ParkCommandGlobals).__ompParkGate = parkGate.promise;
+		const compacted = session.compact();
+		while (!getRuntimeSignals().includes("before_compact:enter")) {
+			await Promise.resolve();
+		}
+		const command = session.prompt("/park");
+		compactGate.resolve();
+		await compacted;
+		await session.waitForIdle();
+		expect(prompted).toHaveLength(0);
+
+		// Give the second pass something to compact so it reaches the hook, then
+		// veto it there.
+		appendAssistant("next answer");
+		(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate = undefined;
+		(globalThis as typeof globalThis & { __ompManualCompactCancel?: boolean }).__ompManualCompactCancel = true;
+		await expect(session.compact(undefined, options)).rejects.toBeInstanceOf(CompactionCancelledError);
+		await session.waitForIdle();
+		expect(prompted).toHaveLength(0);
+
+		parkGate.resolve();
+		expect(await command).toBe(false);
+		await session.waitForIdle();
+		expect(getRuntimeSignals()).toContain("command:park");
+		return prompted;
+	}
+
+	it("keeps an inherited resume when the second manual compaction is vetoed", async () => {
+		// The vetoed pass commits nothing and is not a no-op, but the inherited
+		// resume was earned by the first pass: it must survive so the command's
+		// release still resumes the interrupted turn.
+		const prompted = await vetoedTakeoverAfterWithheldResume();
+
+		expect(prompted).toHaveLength(1);
+		expect(prompted[0]?.some(message => message.role === "developer" && message.synthetic === true)).toBe(true);
+	});
+
+	it("drops an inherited resume when the vetoed second compaction suppresses continuation", async () => {
+		// A `suppressContinuation` takeover (plan-mode approve-and-compact) owns
+		// whatever turn follows; on cancel it deliberately dispatches nothing, so
+		// the inherited resume must not resurrect the pre-approval turn later.
+		const prompted = await vetoedTakeoverAfterWithheldResume({ suppressContinuation: true });
+
+		expect(prompted).toHaveLength(0);
+	});
+
+	it("drops the resume when a prompt arriving after the cleanup starts a turn while a parked command is still settling", async () => {
+		// The parked local command is still running when a second prompt arrives.
+		// That prompt no longer waits on the barrier, but it competes for the same
+		// session: once it starts a turn, the command's later release must not
+		// schedule the stale resume on top of it.
+		cfgCompactionKeepRecentTokens.set(session.settings, 1);
+		cfgCompactionAutoContinue.override(session.settings, true);
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "previous answer" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: {
+				input: 1_000,
+				output: 100,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1_100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		});
+		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+		session.agent.state.isStreaming = true;
+		vi.spyOn(session, "abort").mockImplementation(async () => {
+			session.agent.state.isStreaming = false;
+		});
+		type Dispatched = { role: string; synthetic?: boolean };
+		const prompted: Dispatched[][] = [];
+		vi.spyOn(session.agent, "prompt").mockImplementation(async message => {
+			prompted.push((Array.isArray(message) ? message : [message]) as Dispatched[]);
+		});
+
+		const compactGate = Promise.withResolvers<void>();
+		(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate =
+			compactGate.promise;
+		const parkGate = Promise.withResolvers<void>();
+		(globalThis as ParkCommandGlobals).__ompParkGate = parkGate.promise;
+		const compacted = session.compact();
+		while (!getRuntimeSignals().includes("before_compact:enter")) {
+			await Promise.resolve();
+		}
+		const command = session.prompt("/park");
+		compactGate.resolve();
+		await compacted;
+
+		// Arrives after the cleanup barrier cleared, while /park is still pending.
+		await session.prompt("later");
+		parkGate.resolve();
+		expect(await command).toBe(false);
+		await session.waitForIdle();
+
+		// Exactly one turn: the later prompt. No stale nudge after it.
+		expect(prompted).toHaveLength(1);
+		expect(prompted[0]?.map(message => message.role)).toContain("user");
+		expect(prompted[0]?.some(message => message.synthetic === true)).toBe(false);
+	});
+
+	it("lets a turn an extension triggers from a parked command replace the resume", async () => {
+		// `pi.sendMessage(..., { triggerTurn: true })` from a command handler is
+		// fire-and-forget: the command returns (locally handled, no turn of its own)
+		// while the send is still in setup. That send must claim the session before
+		// the command's release can hand the resume back, or the nudge races it.
+		cfgCompactionKeepRecentTokens.set(session.settings, 1);
+		cfgCompactionAutoContinue.override(session.settings, true);
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "previous answer" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: {
+				input: 1_000,
+				output: 100,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1_100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		});
+		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+		session.agent.state.isStreaming = true;
+		vi.spyOn(session, "abort").mockImplementation(async () => {
+			session.agent.state.isStreaming = false;
+		});
+		type Dispatched = { role: string; customType?: string; synthetic?: boolean };
+		const prompted: Dispatched[][] = [];
+		vi.spyOn(session.agent, "prompt").mockImplementation(async message => {
+			prompted.push((Array.isArray(message) ? message : [message]) as Dispatched[]);
+		});
+
+		let sent: Promise<boolean> | undefined;
+		(globalThis as ParkCommandGlobals).__ompParkAction = () => {
+			sent = session.sendCustomMessage(
+				{ customType: "extension-directive", content: "carry on with the new plan", display: false },
+				{ triggerTurn: true },
+			);
+		};
+		const compactGate = Promise.withResolvers<void>();
+		(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate =
+			compactGate.promise;
+		const compacted = session.compact();
+		while (!getRuntimeSignals().includes("before_compact:enter")) {
+			await Promise.resolve();
+		}
+		const command = session.prompt("/park");
+		compactGate.resolve();
+		await compacted;
+		expect(await command).toBe(false);
+		expect(await sent).toBe(true);
+		await session.waitForIdle();
+
+		// Exactly one turn: the extension's. No synthetic nudge before or after it.
+		expect(prompted).toHaveLength(1);
+		expect(prompted[0]?.some(message => message.customType === "extension-directive")).toBe(true);
+		expect(prompted[0]?.some(message => message.synthetic === true)).toBe(false);
+	});
+
 	it("cancels an in-flight auto-compaction when manual compact startup aborts", async () => {
 		// Give the branch something to summarize so auto-compaction reaches the
 		// awaited session_before_compact hook, where the test parks it.
-		session.settings.set("compaction.keepRecentTokens", 1);
+		cfgCompactionKeepRecentTokens.set(session.settings, 1);
 		sessionManager.appendMessage({
 			role: "assistant",
 			content: [{ type: "text", text: "previous answer" }],
@@ -637,13 +1534,13 @@ describe("AgentSession auto-compaction queue resume", () => {
 			session.agent.clearAllQueues();
 		});
 
-		session.settings.set("compaction.thresholdTokens", 76384);
-		session.settings.set("compaction.thresholdPercent", -1);
-		session.settings.set("compaction.methodOrder", ["soft"]);
-		session.settings.set("compaction.dropUseless", true);
-		session.settings.set("compaction.supersedeReads", true);
-		session.settings.set("compaction.keepRecentTokens", 10000);
-		session.settings.set("compaction.reserveTokens", 16384);
+		cfgCompactionThresholdTokens.set(session.settings, 76384);
+		cfgCompactionThresholdPercent.set(session.settings, -1);
+		cfgCompactionMethodOrder.set(session.settings, ["soft"]);
+		cfgCompactionDropUseless.set(session.settings, true);
+		cfgCompactionSupersedeReads.set(session.settings, true);
+		cfgCompactionKeepRecentTokens.set(session.settings, 10000);
+		cfgCompactionReserveTokens.set(session.settings, 16384);
 
 		// Final assistant turn: billed at ~91k context tokens, just over the
 		// reporter's threshold. The pre-fix code would have subtracted ≥20k of
@@ -691,12 +1588,18 @@ describe("AgentSession auto-compaction queue resume", () => {
 				updatedAt: now,
 			},
 		});
-		session.settings.set("compaction.thresholdTokens", 76384);
-		session.settings.set("compaction.thresholdPercent", -1);
-		session.settings.set("compaction.autoContinue", true);
-		session.settings.set("contextPromotion.enabled", false);
-		session.settings.set("features.unexpectedStopDetection", "smart");
-		session.settings.set("providers.unexpectedStopModel", "online");
+		cfgCompactionThresholdTokens.set(session.settings, 76384);
+		cfgCompactionThresholdPercent.set(session.settings, -1);
+		cfgCompactionAutoContinue.set(session.settings, true);
+		cfgContextPromotionEnabled.set(session.settings, false);
+		cfgFeaturesUnexpectedStopDetection.set(session.settings, "smart");
+		const judgeModel = createMockModel();
+		const getAvailable = modelRegistry.getAvailable.bind(modelRegistry);
+		vi.spyOn(modelRegistry, "getAvailable").mockImplementation(kind =>
+			kind === "all" ? [judgeModel] : getAvailable(kind),
+		);
+		session.settings.setModelRole("judge", `${judgeModel.provider}/${judgeModel.id}`);
+		cfgRetryFallbackChains.set(session.settings, { judge: [] });
 
 		vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockResolvedValue(true);
 		vi.spyOn(session.agent, "continue").mockImplementation(async () => {
@@ -749,17 +1652,17 @@ describe("AgentSession auto-compaction queue resume", () => {
 				updatedAt: now,
 			},
 		});
-		session.settings.set("compaction.thresholdTokens", 76384);
-		session.settings.set("compaction.thresholdPercent", -1);
-		session.settings.set("compaction.autoContinue", true);
-		session.settings.set("contextPromotion.enabled", false);
-		session.settings.set("retry.enabled", true);
-		session.settings.set("retry.baseDelayMs", 5);
-		session.settings.set("retry.maxDelayMs", 5_000);
-		session.settings.set("retry.maxRetries", 1);
-		session.settings.set("retry.modelFallback", false);
+		cfgCompactionThresholdTokens.set(session.settings, 76384);
+		cfgCompactionThresholdPercent.set(session.settings, -1);
+		cfgCompactionAutoContinue.set(session.settings, true);
+		cfgContextPromotionEnabled.set(session.settings, false);
+		cfgRetryEnabled.set(session.settings, true);
+		cfgRetryBaseDelayMs.set(session.settings, 5);
+		cfgRetryMaxDelayMs.set(session.settings, 5_000);
+		cfgRetryMaxRetries.set(session.settings, 1);
+		cfgRetryModelFallback.set(session.settings, false);
 
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 		vi.spyOn(session.agent, "continue").mockImplementation(async () => {
 			session.agent.clearAllQueues();
 		});
@@ -818,6 +1721,9 @@ describe("AgentSession auto-compaction queue resume", () => {
 		};
 		session.agent.emitExternalEvent({ type: "message_end", message: recoveredOverThreshold });
 		await withTimeout(retryEnded, 1000, "Retry end timed out");
+		// Subscribers see auto_retry_end before the retry lifecycle closes behind
+		// the extension notification; the state must settle within the same task.
+		await scheduler.yield();
 		expect(session.isRetrying).toBe(false);
 
 		session.agent.emitExternalEvent({ type: "agent_end", messages: [recoveredOverThreshold] });
@@ -851,10 +1757,10 @@ describe("AgentSession auto-compaction queue resume", () => {
 				updatedAt: now,
 			},
 		});
-		session.settings.set("compaction.thresholdTokens", 76384);
-		session.settings.set("compaction.thresholdPercent", -1);
-		session.settings.set("compaction.autoContinue", true);
-		session.settings.set("contextPromotion.enabled", false);
+		cfgCompactionThresholdTokens.set(session.settings, 76384);
+		cfgCompactionThresholdPercent.set(session.settings, -1);
+		cfgCompactionAutoContinue.set(session.settings, true);
+		cfgContextPromotionEnabled.set(session.settings, false);
 
 		vi.spyOn(session.agent, "continue").mockImplementation(async () => {
 			session.agent.clearAllQueues();
@@ -994,10 +1900,11 @@ describe("AgentSession auto-compaction queue resume", () => {
 		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
 
 		await withTimeout(reminderDone, 1000, "Todo reminder timed out");
-		await Promise.resolve();
+		// The extension notification and the resume it precedes settle behind the
+		// agent_end handler that waitForIdle drains.
+		await session.waitForIdle();
 
 		expect(getRuntimeSignals()).toContain("todo:1/3");
 		expect(continueSpy).toHaveBeenCalledTimes(1);
-		await session.waitForIdle();
 	});
 });

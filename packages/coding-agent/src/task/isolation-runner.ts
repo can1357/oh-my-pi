@@ -10,7 +10,7 @@
  * Shape:
  *   1. {@link prepareIsolationContext} — resolve git root + capture baseline.
  *   2. {@link runIsolatedSubprocess}    — start worktree, run, capture
- *                                        branch/patch, tear worktree down.
+ *                                        changes, and transfer cleanup ownership.
  *   3. {@link mergeIsolatedChanges}     — apply captured changes back to the
  *                                        parent repo (skip when the caller
  *                                        opted out).
@@ -25,6 +25,7 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { prompt } from "@oh-my-pi/pi-utils";
 import isolationErrorTemplate from "../prompts/tools/isolation-error.md" with { type: "text" };
 import isolationSummaryTemplate from "../prompts/tools/isolation-summary.md" with { type: "text" };
+import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
 import type { ToolSession } from "../tools";
 import { generateCommitMessage } from "../utils/commit-message-generator";
@@ -32,7 +33,7 @@ import { trackLateCleanup } from "../utils/late-cleanup";
 import type { ExecutorOptions } from "./executor";
 import { runSubprocess } from "./executor";
 import { needsNativeTeardown, writeRetainedBackend } from "./isolation-ownership";
-import type { SingleResult } from "./types";
+import type { NestedRepoPatch, SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import {
 	applyNestedPatches,
 	captureBaseline,
@@ -45,9 +46,10 @@ import {
 	getRepoRoot,
 	type IsolationHandle,
 	mergeTaskBranches,
-	type NestedRepoPatch,
 	type WorktreeBaseline,
 } from "./worktree";
+
+import { cfgTaskIsolationCommits } from "./settings";
 
 type IsoBackendKind = natives.IsoBackendKind;
 
@@ -162,7 +164,7 @@ export type BuildCommitMessage = () => undefined | ((diff: string) => Promise<st
  */
 export function makeIsolationCommitMessage(session: ToolSession): BuildCommitMessage {
 	return () => {
-		const style = session.settings.get("task.isolation.commits");
+		const style = cfgTaskIsolationCommits.get(session.settings);
 		if (style !== "ai" || !session.modelRegistry) return undefined;
 		const registry = session.modelRegistry;
 		const settings = session.settings;
@@ -358,17 +360,76 @@ function renderIsolationError(context: IsolationErrorContext): string {
  * the caller can still surface the subagent's output; only isolation setup
  * itself routes through {@link IsolatedRunOptions.buildFailureResult}.
  *
- * The isolation handle is torn down in `finally` — except when captured
- * changes could not be written to disk, in which case the workspace is the
- * only remaining copy and is retained under a unique `.retained-*` sibling
- * (its path is named in `result.error`), out of reach of later same-id runs.
+ * Kept-alive runs retain the isolation handle through idle/parked lifecycle
+ * transitions, then capture final changes and clean up on release. One-shot
+ * and failed startup paths clean up in `finally`. If captured changes cannot
+ * be written to disk, the workspace is retained under a unique `.retained-*`
+ * sibling and its path is named in the resulting error.
  */
 export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<SingleResult> {
+	const taskBaseline = structuredClone(opts.context.baseline);
 	let handle: IsolationHandle | undefined;
 	let deferredCleanup: Promise<void> | undefined;
 	let retainWorkspace = false;
+	let baseReleasePromise: Promise<void> | undefined;
+	let cleanupPromise: Promise<void> | undefined;
+	let releasePromise: Promise<void> | undefined;
+	const releaseBase = (): Promise<void> => {
+		baseReleasePromise ??= opts.baseOptions.onRelease?.() ?? Promise.resolve();
+		return baseReleasePromise;
+	};
+	const cleanupHandle = (): Promise<void> => {
+		cleanupPromise ??= (async () => {
+			await releaseBase();
+			if (handle && !retainWorkspace) await cleanupIsolation(handle);
+		})();
+		return cleanupPromise;
+	};
+	const releaseIsolation = (): Promise<void> => {
+		releasePromise ??= (async () => {
+			if (!handle || retainWorkspace) {
+				await releaseBase();
+				return;
+			}
+			try {
+				let patchResult: IsolationPatchArtifacts;
+				try {
+					patchResult = await writeIsolationPatch(handle.mergedDir, taskBaseline, opts.artifactsDir, opts.agentId);
+				} catch (captureErr) {
+					retainWorkspace = true;
+					const retained = await retainIsolationWorkspace(handle.mergedDir, handle.backend);
+					throw new Error(
+						renderIsolationError({
+							kind: "patch-capture-failed",
+							message: captureErr instanceof Error ? captureErr.message : String(captureErr),
+							retainedDir: retained.dir,
+							sidecarMissing: !retained.sidecarOk,
+						}),
+					);
+				}
+				AgentRegistry.global().setHistory(opts.agentId, {
+					patchPath: patchResult.patchPath,
+					nestedPatchPaths: patchResult.nestedPatchPaths,
+				});
+				const commitResult = await commitToBranch(
+					handle.mergedDir,
+					taskBaseline,
+					opts.agentId,
+					opts.description,
+					undefined,
+				);
+				AgentRegistry.global().setHistory(opts.agentId, {
+					patchPath: patchResult.patchPath,
+					branchName: commitResult?.branchName,
+					nestedPatchPaths: patchResult.nestedPatchPaths,
+				});
+			} finally {
+				await cleanupHandle();
+			}
+		})();
+		return releasePromise;
+	};
 	try {
-		const taskBaseline = structuredClone(opts.context.baseline);
 		handle = await ensureIsolation(opts.context.repoRoot, opts.agentId, opts.preferredBackend);
 		const isolationDir = handle.mergedDir;
 		const isolationBackend = handle.backend;
@@ -382,6 +443,12 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				deferredCleanup = completion;
 				opts.baseOptions.onCleanupDeferred?.(completion);
 			},
+			// One-shot runs get `releaseBase` (never touches the worktree): their
+			// `finalizeSubagentLifecycle` calls `onRelease` before this function's
+			// post-run capture, so the handle must survive until the `finally`
+			// below cleans it up. Only kept-alive runs hand full capture+cleanup
+			// (`releaseIsolation`) to the agent lifecycle.
+			onRelease: opts.baseOptions.keepAlive === false ? releaseBase : releaseIsolation,
 		});
 		opts.onSubprocessResult?.(result);
 		// A successful result cannot be captured while deferred owner jobs or
@@ -497,18 +564,19 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 	} catch (err) {
 		return rememberAgentArtifacts(opts.buildFailureResult(err));
 	} finally {
-		if (handle && !retainWorkspace) {
-			const isolationHandle = handle;
+		if (
+			handle &&
+			!retainWorkspace &&
+			!releasePromise &&
+			!(opts.baseOptions.keepAlive !== false && AgentLifecycleManager.global().has(opts.agentId))
+		) {
 			if (deferredCleanup) {
-				trackLateCleanup(
-					deferredCleanup.then(() => cleanupIsolation(isolationHandle)),
-					{
-						agentId: opts.agentId,
-						resource: "isolation",
-					},
-				);
+				trackLateCleanup(deferredCleanup.then(cleanupHandle), {
+					agentId: opts.agentId,
+					resource: "isolation",
+				});
 			} else {
-				await cleanupIsolation(isolationHandle);
+				await cleanupHandle();
 			}
 		}
 	}

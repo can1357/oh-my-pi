@@ -312,14 +312,14 @@ describe("buildSessionContext", () => {
 			expect((ctx.messages[1] as { content: string }).content).toBe("after compact");
 		});
 
-		it("attaches the Anthropic native replay payload and still emits the kept raw messages", () => {
+		it("attaches the signed Anthropic replay payload before the kept raw messages", () => {
 			const nativeCompaction: CompactionEntry = {
 				...compaction("3", "2", "Native summary", "2"),
 				preserveData: {
 					anthropicCompaction: {
 						provider: "anthropic",
 						content: "Native summary",
-						encryptedContent: "enc_state",
+						signature: "sig_state",
 						model: "claude-fable-5",
 					},
 				},
@@ -340,13 +340,31 @@ describe("buildSessionContext", () => {
 				type: "anthropicCompaction",
 				provider: "anthropic",
 				content: "Native summary",
-				encryptedContent: "enc_state",
+				signature: "sig_state",
 			});
 		});
 
-		it("predates native summaries before the retained tail but keeps local commit timestamps", () => {
+		it("replays new turns after an empty-tail snapshot with an earlier rewrite marker", () => {
+			const snapshot = msg("1", null, "user", "summarized snapshot");
+			const newTurn = msg("2", "1", "assistant", "new assistant");
+			const compactionEntry: CompactionEntry = {
+				...compaction("3", "2", "Snapshot summary", ""),
+				providerReplayThroughEntryId: "1",
+				preserveData: {
+					anthropicCompaction: { provider: "anthropic", content: "Snapshot summary", signature: "sig" },
+				},
+			};
+			const ctx = buildSessionContext([snapshot, newTurn, compactionEntry]);
+			expect(ctx.messages.map(message => message.role)).toEqual(["compactionSummary", "assistant"]);
+			if (ctx.messages[0]?.role !== "compactionSummary") throw new Error("Expected compaction summary");
+			expect(ctx.messages[0].providerPayload).toMatchObject({ signature: "sig" });
+			expect(ctx.messages[0].historyRewriteAt).toBeLessThan(new Date(newTurn.timestamp).getTime());
+		});
+
+		it("predates native rewrite markers before the retained tail; summaries keep commit timestamps", () => {
 			// A rewrite marker newer than the tail strips the tail's bound
-			// thinking on the next request; native replay must not do that.
+			// thinking on the next request; native replay must not do that. The
+			// commit timestamp still retires the tail's pre-compaction usage.
 			const mayDay = new Date("2025-05-01T00:00:00Z").getTime();
 			const retainedAssistant: SessionMessageEntry = {
 				type: "message",
@@ -382,7 +400,7 @@ describe("buildSessionContext", () => {
 					anthropicCompaction: {
 						provider: "anthropic",
 						content: "Native summary",
-						encryptedContent: "enc_state",
+						signature: "sig_state",
 						model: "claude-fable-5",
 					},
 				},
@@ -397,10 +415,11 @@ describe("buildSessionContext", () => {
 			expect(ctx.messages.map(message => message.role)).toEqual(["compactionSummary", "assistant", "user"]);
 			const summary = ctx.messages[0];
 			if (summary?.role !== "compactionSummary") throw new Error("Expected compaction summary message");
-			expect(new Date(summary.timestamp).getTime()).toBe(mayDay - 1);
+			expect(summary.timestamp).toBe(new Date("2025-06-01T00:00:00Z").getTime());
 			const [llmSummary] = defaultConvertToLlm([summary]);
 			if (llmSummary?.role !== "user") throw new Error("Expected user LLM message");
 			expect(llmSummary.historyRewriteAt).toBe(mayDay - 1);
+			expect(llmSummary.timestamp).toBe(summary.timestamp);
 
 			// A local compaction keeps the entry commit timestamp.
 			const localCtx = buildSessionContext(
@@ -697,6 +716,183 @@ describe("buildSessionContext", () => {
 			// cacheMissExplainedAt: the kept assistant (index 1) should NOT be a miss;
 			// the post-compaction assistant (index 4) SHOULD be a miss.
 			expect(transcript.cacheMissExplainedAt).toEqual([false, false, false, false, true]);
+		});
+
+		it("collapsed display trims a mid-turn kept head instead of leading with stale fragments", () => {
+			// findCutPoint may cut the kept region at an assistant message whose
+			// tool results follow (token-precise cuts keep exactly what fits).
+			// The collapsed transcript must not lead with those orphan rows — a
+			// subagent spawn prompt from far back in the conversation is the
+			// reported case — while the wire context keeps the exact kept region.
+			const base = { type: "message" as const, timestamp: "2025-01-01T00:00:00Z" };
+			const spawnAssistant: SessionMessageEntry = {
+				...base,
+				id: "2",
+				parentId: "1",
+				message: {
+					role: "assistant",
+					content: [
+						{ type: "text", text: "Delegating to a subagent." },
+						{ type: "toolCall", id: "call_spawn", name: "task", arguments: { task: "map the repo" } },
+					],
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "claude-test",
+					usage: {
+						input: 1,
+						output: 1,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 2,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: 1,
+				},
+			};
+			const spawnResult: SessionMessageEntry = {
+				...base,
+				id: "3",
+				parentId: "2",
+				message: {
+					role: "toolResult",
+					toolCallId: "call_spawn",
+					toolName: "task",
+					content: [{ type: "text", text: "subagent report" }],
+					isError: false,
+					timestamp: 1,
+				},
+			};
+			const entries: SessionEntry[] = [
+				msg("1", null, "user", "spawn request"),
+				spawnAssistant,
+				spawnResult,
+				msg("4", "3", "user", "kept question"),
+				msg("5", "4", "assistant", "kept response"),
+				compaction("6", "5", "Compacted mid-turn", "2"),
+				msg("7", "6", "user", "after compact"),
+			];
+
+			const transcript = buildSessionContext(entries, undefined, undefined, {
+				transcript: true,
+				collapseCompactedHistory: true,
+			});
+
+			// Display head starts at the first turn boundary below the cut; the
+			// orphan spawn prompt and its result never lead the terminal.
+			expect(transcript.messages.map(m => m.role)).toEqual(["user", "assistant", "compactionSummary", "user"]);
+			const dump = JSON.stringify(transcript.messages);
+			expect(dump).toContain("kept question");
+			expect(dump).toContain("after compact");
+			expect(dump).not.toContain("subagent report");
+
+			// Wire context is untouched: summary first, then the exact kept region
+			// (mid-turn head included) and the post-compaction tail.
+			const wire = buildSessionContext(entries);
+			expect(wire.messages.map(m => m.role)).toEqual([
+				"compactionSummary",
+				"assistant",
+				"toolResult",
+				"user",
+				"assistant",
+				"user",
+			]);
+			expect(JSON.stringify(wire.messages)).toContain("subagent report");
+		});
+
+		it("keeps a mid-turn suffix when no later turn boundary exists", () => {
+			const entries: SessionEntry[] = [
+				msg("1", null, "user", "old request"),
+				msg("2", "1", "assistant", "kept assistant suffix"),
+				compaction("3", "2", "Compacted before the suffix", "2"),
+			];
+
+			const transcript = buildSessionContext(entries, undefined, undefined, {
+				transcript: true,
+				collapseCompactedHistory: true,
+			});
+
+			// The summary excludes firstKeptEntryId and everything after it, so
+			// hiding this suffix would make the newest response disappear.
+			expect(transcript.messages.map(m => m.role)).toEqual(["assistant", "compactionSummary"]);
+			expect(JSON.stringify(transcript.messages)).toContain("kept assistant suffix");
+		});
+
+		it("trimmed assistants consume reset state before the first visible turn", () => {
+			const entries: SessionEntry[] = [
+				msg("1", null, "user", "old request"),
+				msg("2", "1", "assistant", "first orphan assistant"),
+				modelChange("3", "2", "anthropic", "claude-test"),
+				msg("4", "3", "assistant", "assistant after the reset"),
+				msg("5", "4", "user", "first visible question"),
+				msg("6", "5", "assistant", "first visible answer"),
+				compaction("7", "6", "Compacted mid-turn", "2"),
+			];
+
+			const transcript = buildSessionContext(entries, undefined, undefined, {
+				transcript: true,
+				collapseCompactedHistory: true,
+			});
+
+			expect(transcript.messages.map(m => m.role)).toEqual(["user", "assistant", "compactionSummary"]);
+			// The hidden assistant after model_change consumed that reset. The
+			// visible assistant uses the same model and is therefore not a miss.
+			expect(transcript.cacheMissExplainedAt).toEqual([false, false, false]);
+		});
+
+		it("trimmed prefix entries still drive cache-miss reset tracking", () => {
+			// Regression (autoreview): a mode_change inside the trimmed orphan
+			// head must still update the reset tracker. Skipping it leaves the
+			// tracker in "none", so the retained plan-exit mode_change computes
+			// none→none and the following warm-to-cold assistant loses (or, in
+			// mirrored sequences, gains) its cache-miss marker relative to the
+			// untrimmed transcript.
+			const base = { type: "message" as const, timestamp: "2025-01-01T00:00:00Z" };
+			const spawnResult: SessionMessageEntry = {
+				...base,
+				id: "3",
+				parentId: "2",
+				message: {
+					role: "toolResult",
+					toolCallId: "call_spawn",
+					toolName: "task",
+					content: [{ type: "text", text: "subagent report" }],
+					isError: false,
+					timestamp: 1,
+				},
+			};
+			const entries: SessionEntry[] = [
+				msg("1", null, "user", "spawn request"),
+				msg("2", "1", "assistant", "delegating"),
+				spawnResult,
+				{ type: "mode_change", id: "4", parentId: "3", timestamp: "2025-01-01T00:00:00Z", mode: "plan" },
+				msg("5", "4", "user", "kept question"),
+				msg("6", "5", "assistant", "kept response"),
+				{ type: "mode_change", id: "7", parentId: "6", timestamp: "2025-01-01T00:00:00Z", mode: "none" },
+				msg("8", "7", "user", "later question"),
+				msg("9", "8", "assistant", "later response"),
+				compaction("10", "9", "Compacted mid-turn", "2"),
+				msg("11", "10", "user", "after compact"),
+			];
+
+			const transcript = buildSessionContext(entries, undefined, undefined, {
+				transcript: true,
+				collapseCompactedHistory: true,
+			});
+
+			expect(transcript.messages.map(m => m.role)).toEqual([
+				"user",
+				"assistant",
+				"user",
+				"assistant",
+				"compactionSummary",
+				"user",
+			]);
+			// Both assistants that follow plan transitions are marked, matching
+			// the untrimmed walk: the trimmed prefix's plan entry marks the first
+			// kept assistant (index 1), and the retained plan-exit marks index 3.
+			// Without prefix tracking, neither is marked (tracker stuck in "none").
+			expect(transcript.cacheMissExplainedAt).toEqual([false, true, false, true, false, false]);
 		});
 	});
 

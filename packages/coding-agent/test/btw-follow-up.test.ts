@@ -3,15 +3,17 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AssistantMessage, Message, Usage } from "@oh-my-pi/pi-ai";
-import { BtwHistoryPanel } from "@oh-my-pi/pi-coding-agent/modes/components/btw-history-panel";
+import { BtwHistoryPanel } from "@oh-my-pi/pi-tui/overlays/btw-history-panel";
 import { BtwController } from "@oh-my-pi/pi-coding-agent/modes/controllers/btw-controller";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { type BtwHistoryRecord, BtwHistoryStore, getBtwTurns } from "@oh-my-pi/pi-coding-agent/session/btw-history";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
+import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
-import { Container, type TUI } from "@oh-my-pi/pi-tui";
+import { Container, Input, type TUI } from "@oh-my-pi/pi-tui";
+import type { DictationTarget } from "@oh-my-pi/pi-coding-agent/stt/push-to-talk";
+import { SPACE_HOLD_MECHANICAL_RUN, type SpaceHoldHandler } from "@oh-my-pi/pi-tui/space-hold";
 
 interface TurnArgs {
 	promptText: string;
@@ -89,6 +91,7 @@ async function harness() {
 		requests.push({ args, resolve: pending.resolve, reject: pending.reject });
 		return pending.promise;
 	});
+	const dictationTargets: DictationTarget[] = [];
 	const session = {
 		model: { provider: "anthropic", id: "claude-sonnet-4-5" },
 		isStreaming: false,
@@ -108,6 +111,11 @@ async function harness() {
 		showStatus: vi.fn(),
 		showError: vi.fn(),
 		handleBtwBranch: vi.fn(async () => {}),
+		dictationSpaceHold: (target: DictationTarget): SpaceHoldHandler => ({
+			enabled: () => true,
+			onStart: () => dictationTargets.push(target),
+			onEnd: () => {},
+		}),
 	} as unknown as InteractiveModeContext;
 	const controller = new BtwController(ctx);
 	cleanups.push(async () => {
@@ -134,7 +142,18 @@ async function harness() {
 		return record;
 	}
 
-	return { directory, manager, managers, ctx, controller, requests, runEphemeralTurn, complete, root };
+	return {
+		directory,
+		manager,
+		managers,
+		ctx,
+		controller,
+		requests,
+		runEphemeralTurn,
+		complete,
+		root,
+		dictationTargets,
+	};
 }
 
 describe("BTW follow-up lifecycle", () => {
@@ -577,6 +596,40 @@ describe("BTW follow-up lifecycle", () => {
 		expect(topics.find(topic => topic.question === "Current topic")?.followUps?.[0]?.answer).toBe("Continued answer");
 	});
 
+	it("dictates a follow-up into the composer when the space bar is held there", async () => {
+		const h = await harness();
+		await h.controller.start("Current topic");
+		await h.complete("Current answer");
+		const overlay = vi.spyOn(h.ctx.ui, "showOverlay");
+		expect(h.controller.handleFollowUp()).toBe(true);
+		const panel = overlay.mock.calls.at(-1)?.[0];
+		if (!(panel instanceof BtwHistoryPanel)) throw new Error("Expected BTW follow-up composer");
+		vi.useFakeTimers();
+		try {
+			for (let i = 0; i < SPACE_HOLD_MECHANICAL_RUN + 2; i++) {
+				vi.advanceTimersByTime(30);
+				panel.handleInput(" ");
+			}
+		} finally {
+			vi.useRealTimers();
+		}
+		// The hold targets the composer, and the spaces typed before it was recognized are tracked back out.
+		const [composer] = h.dictationTargets;
+		if (!(composer instanceof Input)) throw new Error("Expected dictation into the follow-up composer");
+		expect(composer.getValue()).toBe("");
+		composer.commitVolatileText("Spoken follow-up");
+		const started = Promise.withResolvers<boolean>();
+		const start = h.controller.startFollowUp.bind(h.controller);
+		vi.spyOn(h.controller, "startFollowUp").mockImplementation(async (...args) => {
+			const accepted = await start(...args);
+			started.resolve(accepted);
+			return accepted;
+		});
+		panel.handleInput("\r");
+		expect(await started.promise).toBe(true);
+		expect(h.requests.at(-1)!.args.promptText).toContain("Spoken follow-up");
+	});
+
 	it("resumes only the selected chronological conversation, including cancelled partial output, without promoting it into main chat", async () => {
 		const h = await harness();
 		const file = h.manager.getSessionFile()!;
@@ -846,6 +899,23 @@ describe("BTW follow-up composer", () => {
 		expect(followUp).toHaveBeenCalledTimes(1);
 	});
 
+	it("switches history panes with Ctrl+/ like Tab", () => {
+		const tabbed = composer(vi.fn(async () => true));
+		tabbed.panel.handleInput("\t");
+		const tabRender = Bun.stripANSI(tabbed.panel.render(120).join("\n"));
+		const slashed = composer(vi.fn(async () => true));
+		slashed.panel.handleInput(String.fromCharCode(31));
+		expect(Bun.stripANSI(slashed.panel.render(120).join("\n"))).toBe(tabRender);
+		expect(Bun.stripANSI(slashed.panel.render(120).join("\n"))).toContain("switch pane");
+	});
+
+	it("confirms a history copy visually until the answer changes", () => {
+		const h = composer(vi.fn(async () => true));
+		h.panel.markCopied(h.record.id, h.record.answer);
+		expect(Bun.stripANSI(h.panel.render(120).join("\n"))).toContain("Copied to clipboard");
+		h.panel.update([{ ...h.record, answer: "Follow-up answer", updatedAt: 3 }]);
+		expect(Bun.stripANSI(h.panel.render(120).join("\n"))).not.toContain("Copied to clipboard");
+	});
 	it("treats f/c/x as draft text and lets Escape cancel only the composer", () => {
 		const followUp = vi.fn(async () => true);
 		const h = composer(followUp);

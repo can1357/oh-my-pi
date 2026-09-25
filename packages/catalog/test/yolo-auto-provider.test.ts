@@ -168,7 +168,7 @@ describe("Yolo-Auto provider discovery", () => {
 	test("prefers curated metadata over a stale previous bundle", async () => {
 		// A credentialed `gen:models` run bakes live discovery into
 		// models.json; that previous bundle row must not shadow later
-		// corrections to YOLO_AUTO_STATIC_MODELS. Simulate a stale bundle row
+		// corrections to the yolo-auto seed. Simulate a stale bundle row
 		// (262K context, no template dialect) and require the curated surface.
 		const originalGetBundledModels = modelsModule.getBundledModels;
 		vi.spyOn(modelsModule, "getBundledModels").mockImplementation((provider => {
@@ -203,5 +203,71 @@ describe("Yolo-Auto provider discovery", () => {
 		} finally {
 			vi.restoreAllMocks();
 		}
+	});
+
+	test("discovers qwen3.8-flash and yolo at the documented 256K deployment cap", async () => {
+		// The flat-rate /v1/models response carries bare ids with no limit
+		// fields. Without provider-local seeds the bare qwen3.8-flash slug
+		// resolved through the global reference index, which prefers the
+		// largest bundled window (1M) and misreported the deployment cap.
+		const fetch: FetchImpl = async () =>
+			new Response(JSON.stringify({ data: [{ id: "qwen3.8-flash" }, { id: "yolo" }] }), { status: 200 });
+		const models = await yoloAutoModelManagerOptions({ apiKey: "yolo-test-key", fetch }).fetchDynamicModels?.();
+
+		for (const id of ["qwen3.8-flash", "yolo"]) {
+			const spec = models?.find(candidate => candidate.id === id);
+			if (!spec) throw new Error(`yolo-auto/${id} missing from discovery`);
+			const model = buildModel(spec);
+			expect(model).toMatchObject({
+				provider: "yolo-auto",
+				contextWindow: 262144,
+				maxTokens: 131072,
+				identity: { class: "qwen", revision: "3.8.0" },
+				compat: {
+					supportsReasoningEffort: true,
+					thinkingFormat: "qwen-chat-template",
+					supportsStore: false,
+					supportsDeveloperRole: false,
+				},
+			});
+			// The opaque `yolo` alias must carry the same tokenizer as the
+			// explicit Flash row or context accounting falls back to estimates.
+			expect(model.tokenizer).toBe("qwen3");
+		}
+	});
+
+	test("takes each model's effort ladder from the live `thinking` field", async () => {
+		// Live /v1/models advertises minimal..xhigh for the Qwen3.8 rows; the
+		// seed ladder previously stopped at high, hiding xhigh from the picker.
+		const ladder = ["minimal", "low", "medium", "high", "xhigh"];
+		const fetch: FetchImpl = async () =>
+			new Response(
+				JSON.stringify({
+					object: "list",
+					data: [
+						{ id: "qwen3.8-flash", context_length: 262144, thinking: ladder },
+						{ id: "yolo", context_length: 262144, thinking: ladder },
+						{ id: "qwen3.8-27b", context_length: 262144, thinking: [...ladder, "turbo"] },
+						{ id: "deepseek-flash-v4" },
+					],
+				}),
+				{ status: 200 },
+			);
+		const models = await yoloAutoModelManagerOptions({ apiKey: "yolo-test-key", fetch }).fetchDynamicModels?.();
+		const built = (id: string) => {
+			const spec = models?.find(candidate => candidate.id === id);
+			if (!spec) throw new Error(`yolo-auto/${id} missing from discovery`);
+			return buildModel(spec);
+		};
+
+		const expected = [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh];
+		for (const id of ["qwen3.8-flash", "yolo", "qwen3.8-27b"]) {
+			const model = built(id);
+			expect(model.reasoning).toBe(true);
+			// Unknown wire values ("turbo") are dropped, not surfaced as levels.
+			expect(model.thinking?.efforts).toEqual(expected);
+		}
+		// A row without `thinking` keeps its reference ladder and wire remap.
+		expect(built("deepseek-flash-v4").thinking?.effortMap).toMatchObject({ xhigh: "max" });
 	});
 });

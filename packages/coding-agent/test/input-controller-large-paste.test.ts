@@ -10,9 +10,10 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { CustomEditor } from "@oh-my-pi/pi-coding-agent/modes/components/custom-editor";
+import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
-import { getEditorTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { getEditorTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 
 function createContext(options?: {
@@ -33,7 +34,7 @@ function createContext(options?: {
 			options?.editor ??
 			({ insertTextAttachment, insertText, pasteText } as unknown as InteractiveModeContext["editor"]),
 		ui: { requestRender } as unknown as InteractiveModeContext["ui"],
-		settings: { get: () => options?.threshold ?? 100 } as unknown as InteractiveModeContext["settings"],
+		settings: Settings.isolated({ "paste.largeMenuThreshold": options?.threshold ?? 100 }),
 		sessionManager: {
 			getCwd: () => process.cwd(),
 			getArtifactsDir: () => options?.artifactsDir ?? null,

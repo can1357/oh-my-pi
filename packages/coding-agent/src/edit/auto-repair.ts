@@ -23,6 +23,8 @@ import { invalidateFsScanAfterWrite } from "../tools/fs-cache-invalidation";
 import repairPromptSource from "./auto-repair.md" with { type: "text" };
 import type { AppliedEditSnapshot } from "./blackbox";
 
+import { cfgEditAutoRepairEnabled } from "./settings";
+
 /** Context lines shown around the culprit hunks. */
 const CONTEXT_LINES = 6;
 /** Largest repair region worth sending to a small model. */
@@ -32,7 +34,7 @@ const MAX_PAIR_SEARCH_HUNKS = 24;
 /** Initial attempt plus one feedback retry. */
 const MAX_ATTEMPTS = 2;
 const COMPLETION_MAX_TOKENS = 8192;
-const REPAIR_TIMEOUT_MS = 60_000;
+const REPAIR_TIMEOUT_MS = 20_000;
 
 /** One changed line run in pre-image (`a`) / post-image (`b`) coordinates. */
 interface EditHunk {
@@ -288,7 +290,7 @@ export async function attemptEditAutoRepair(options: {
 	signal?: AbortSignal;
 }): Promise<EditAutoRepairOutcome | undefined> {
 	const { session, snapshot, writethrough } = options;
-	if (!session.settings.get("edit.autoRepair.enabled")) return undefined;
+	if (!cfgEditAutoRepairEnabled.get(session.settings)) return undefined;
 	const registry = session.modelRegistry;
 	if (!registry) return undefined;
 	const model = resolveRoleSelection(["smol"], session.settings, registry.getAvailable())?.model;
@@ -310,6 +312,10 @@ export async function attemptEditAutoRepair(options: {
 	}
 	if (parsesSource(current, snapshot.path)) return undefined;
 
+	const modelName = `${model.provider}/${model.id}`;
+	logger.debug("Edit auto-repair started", { path: snapshot.path, model: modelName });
+	// One budget across both attempts: the edit tool result blocks on this, so
+	// a slow repair model must not stall the turn past the ceiling.
 	const timeout = AbortSignal.timeout(REPAIR_TIMEOUT_MS);
 	const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
 	const complete = async (builtPrompt: string): Promise<string> => {
@@ -326,10 +332,19 @@ export async function attemptEditAutoRepair(options: {
 						signal,
 					},
 				),
-			{ signal },
+			{ signal, provider: model.provider },
 		);
 		if (response.stopReason === "error") {
 			throw new Error(response.errorMessage ?? "auto-repair completion failed");
+		}
+		// An abort resolves (not rejects) with empty content; treating that as a
+		// candidate would silently burn the retry and hide the stall.
+		if (response.stopReason === "aborted") {
+			throw new Error(
+				timeout.aborted
+					? `auto-repair timed out after ${REPAIR_TIMEOUT_MS}ms waiting on ${modelName}`
+					: "auto-repair aborted",
+			);
 		}
 		return response.content.map(block => (block.type === "text" ? block.text : "")).join("");
 	};
@@ -345,5 +360,5 @@ export async function attemptEditAutoRepair(options: {
 		regionLines: repair.region.bEnd - repair.region.bStart,
 	});
 	const diffResult = editDiffString(current, repair.content, snapshot.path);
-	return { diff: diffResult.diff, model: `${model.provider}/${model.id}`, attempts: repair.attempts };
+	return { diff: diffResult.diff, model: modelName, attempts: repair.attempts };
 }

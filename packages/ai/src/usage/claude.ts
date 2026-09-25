@@ -2,7 +2,6 @@ import { scheduler } from "node:timers/promises";
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import { toNumber } from "@oh-my-pi/pi-catalog/utils";
 import * as AIError from "../error";
-import { claudeCodeVersion } from "../providers/claude-code-fingerprint";
 import {
 	type CredentialRankingContext,
 	type CredentialRankingStrategy,
@@ -13,64 +12,22 @@ import {
 	type UsageLimit,
 	type UsageProvider,
 	type UsageReport,
+	type UsageResetCredits,
 	type UsageStatus,
 	type UsageWindow,
 } from "../usage";
 import { isRecord } from "../utils";
+import { buildClaudeOAuthHeaders, claudeOAuthBaseUrls } from "./claude-api";
+import { listClaudeResetCredits, parseClaudeResetCreditsFromUsagePayload } from "./claude-reset";
 import { HOUR_MS, parseIsoTimestamp, WEEK_MS } from "./shared";
 
-const DEFAULT_ENDPOINT = "https://api.anthropic.com/api/oauth";
 const MAX_ATTEMPTS = 3;
 const BASE_RETRY_DELAY_MS = 500;
+/** Shared windows that gate every Claude request, whatever the model. */
+const CLAUDE_SHARED_GATE_WINDOW_IDS = ["5h", "7d"] as const;
 
-const CLAUDE_HEADERS = {
-	accept: "application/json, text/plain, */*",
-	"accept-encoding": "gzip, compress, deflate, br",
-	"anthropic-beta":
-		"claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,advanced-tool-use-2025-11-20,effort-2025-11-24,extended-cache-ttl-2025-04-11",
-	"content-type": "application/json",
-	"user-agent": `claude-cli/${claudeCodeVersion} (external, cli)`,
-	connection: "keep-alive",
-} as const;
-
-function normalizeClaudeBaseUrl(baseUrl?: string): string {
-	if (!baseUrl?.trim()) return DEFAULT_ENDPOINT;
-	const trimmed = baseUrl.trim().replace(/\/+$/, "");
-	const lower = trimmed.toLowerCase();
-	if (lower.endsWith("/api/oauth")) return trimmed;
-	let url: URL;
-	try {
-		url = new URL(trimmed);
-	} catch {
-		return DEFAULT_ENDPOINT;
-	}
-	let path = url.pathname.replace(/\/+$/, "");
-	if (path === "/") path = "";
-	if (path.toLowerCase().endsWith("/v1")) {
-		path = path.slice(0, -3);
-	}
-	if (!path) return `${url.origin}/api/oauth`;
-	return `${url.origin}${path}/api/oauth`;
-}
-
-/**
- * Subscription usage is served by Anthropic's OAuth API, which a custom
- * `baseUrl` pointed at a Messages-only endpoint does not expose. Probe the
- * configured host first so a full mirror keeps answering (including its own
- * `/profile` identity), then fall back to the canonical endpoint — but only
- * when the configured host answered that it has no usage endpoint there (see
- * {@link ClaudeUsagePayloadResult.endpointAbsent}), so a host that refuses the
- * credential or fails transiently keeps the request.
- *
- * Without the fallback the report degrades to rate-limit headers, and those
- * carry the model-scoped weekly row only on responses for that model family,
- * so a scoped window can read far below its real utilization until a request
- * hits the family again.
- */
-function claudeUsageBaseUrls(baseUrl?: string): readonly string[] {
-	const configured = normalizeClaudeBaseUrl(baseUrl);
-	return configured === DEFAULT_ENDPOINT ? [DEFAULT_ENDPOINT] : [configured, DEFAULT_ENDPOINT];
-}
+const CLAUDE_USAGE_BETAS =
+	"claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,advanced-tool-use-2025-11-20,effort-2025-11-24,extended-cache-ttl-2025-04-11";
 
 interface ClaudeUsageBucket {
 	utilization?: number;
@@ -244,7 +201,8 @@ function hasUsageData(payload: ClaudeUsageResponse): boolean {
 		parseBucket(payload.seven_day_opus)?.utilization !== undefined ||
 		parseBucket(payload.seven_day_sonnet)?.utilization !== undefined ||
 		parseApiLimitEntries(payload.limits).some(entry => entry.bucket.utilization !== undefined) ||
-		buildClaudeExtraUsageLimit(payload) !== null
+		buildClaudeExtraUsageLimit(payload) !== null ||
+		parseClaudeResetCreditsFromUsagePayload(payload) !== null
 	);
 }
 
@@ -314,7 +272,9 @@ function looksLikeUsagePayload(payload: ClaudeUsageResponse): boolean {
 		"seven_day" in payload ||
 		"limits" in payload ||
 		"extra_usage" in payload ||
-		"spend" in payload
+		"spend" in payload ||
+		"cedar_ember" in payload ||
+		"juniper_tide" in payload
 	);
 }
 
@@ -682,14 +642,11 @@ async function fetchClaudeUsage(params: UsageFetchParams, ctx: UsageFetchContext
 	const credential = params.credential;
 	if (credential.type !== "oauth" || !credential.accessToken) return null;
 
-	const headers: Record<string, string> = {
-		...CLAUDE_HEADERS,
-		authorization: `Bearer ${credential.accessToken}`,
-	};
+	const headers = buildClaudeOAuthHeaders(credential.accessToken, { beta: CLAUDE_USAGE_BETAS });
 
 	let baseUrl: string | undefined;
 	let payload: ClaudeUsageResponse | null = null;
-	for (const candidate of claudeUsageBaseUrls(params.baseUrl)) {
+	for (const candidate of claudeOAuthBaseUrls(params.baseUrl)) {
 		const result = await fetchUsagePayload(`${candidate}/usage`, headers, ctx, params.signal);
 		if (result.payload && hasUsageData(result.payload)) {
 			baseUrl = candidate;
@@ -764,7 +721,22 @@ async function fetchClaudeUsage(params: UsageFetchParams, ctx: UsageFetchContext
 		buildClaudeExtraUsageLimit(payload),
 	].filter((limit): limit is UsageLimit => limit !== null);
 
-	if (limits.length === 0) return null;
+	const resetCreditList =
+		parseClaudeResetCreditsFromUsagePayload(payload, credential.orgId, baseUrl) ??
+		(await listClaudeResetCredits({
+			accessToken: credential.accessToken,
+			...(credential.orgId ? { orgId: credential.orgId } : {}),
+			...(params.baseUrl ? { baseUrl: params.baseUrl } : {}),
+			fetch: ctx.fetch,
+			...(params.signal ? { signal: params.signal } : {}),
+		}));
+	const hasResetInventory =
+		resetCreditList !== null &&
+		(resetCreditList.availableCount > 0 ||
+			resetCreditList.nextCreditId !== undefined ||
+			resetCreditList.credits.length > 0);
+	if (limits.length === 0 && !hasResetInventory) return null;
+
 	const identity = extractUsageIdentity(payload);
 	let accountId = identity.accountId ?? credential.accountId;
 	let email = identity.email ?? credential.email;
@@ -773,16 +745,24 @@ async function fetchClaudeUsage(params: UsageFetchParams, ctx: UsageFetchContext
 		accountId = accountId ?? profileIdentity.accountId;
 		email = email ?? profileIdentity.email;
 	}
+	let resetCredits: UsageResetCredits | undefined;
+	let reportOrgId = credential.orgId;
+	if (resetCreditList) {
+		const { orgId, baseUrl: _baseUrl, ...usageResetCredits } = resetCreditList;
+		resetCredits = usageResetCredits;
+		reportOrgId ??= orgId;
+	}
 
 	const report: UsageReport = {
 		provider: params.provider,
 		fetchedAt: Date.now(),
 		limits,
+		...(resetCredits ? { resetCredits } : {}),
 		metadata: {
 			endpoint: url,
 			...(accountId ? { accountId } : {}),
 			...(email ? { email } : {}),
-			...(credential.orgId ? { orgId: credential.orgId } : {}),
+			...(reportOrgId ? { orgId: reportOrgId } : {}),
 		},
 		raw: payload,
 	};
@@ -792,6 +772,11 @@ async function fetchClaudeUsage(params: UsageFetchParams, ctx: UsageFetchContext
 
 export const claudeUsageProvider: UsageProvider = {
 	id: "anthropic",
+	// v2: cache identity gained an `org:` component so two subscriptions on one
+	// account email stop sharing a slot. v3 retires parsed reports created before
+	// Anthropic extra-usage rows existed; header ingestion can otherwise keep
+	// renewing those incomplete reports throughout the 24h last-good retention.
+	cacheVersion: 3,
 	fetchUsage: fetchClaudeUsage,
 	parseRateLimitHeaders: parseClaudeRateLimitHeaders,
 	supports: params => params.provider === "anthropic" && params.credential.type === "oauth",
@@ -901,6 +886,15 @@ function findClaudeSecondaryLimit(
 }
 
 export const claudeRankingStrategy: CredentialRankingStrategy = {
+	/**
+	 * Anthropic-only idle window after which a session's pinned credential no
+	 * longer suppresses usage-based re-ranking. Anthropic caps OAuth prompt-cache
+	 * retention at `ttl: "1h"` (ephemeral ~5min otherwise), so after this long
+	 * without an Anthropic resolve the conversation-prefix cache is no longer
+	 * guaranteed warm. Other providers retain indefinite stickiness until their
+	 * own cache lifetimes are verified.
+	 */
+	stickyWarmMs: 60 * 60_000,
 	findWindowLimits(report, context) {
 		const primary = report.limits.find(limit => limit.id === "anthropic:5h");
 		const secondary = findClaudeSecondaryLimit(report, context);
@@ -920,6 +914,37 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
 	blockScope(context) {
 		const kind = getClaudeModelKind(context);
 		return kind === "fable" || kind === "mythos" ? `tier:${kind}` : undefined;
+	},
+	/**
+	 * A reactive Fable/Mythos block carries the reset the 429 reported, but
+	 * Anthropic can restore the tier earlier (plan change, corrected counter),
+	 * and the block then idles a usable account for days. Judge each tier scope
+	 * against the limits that actually gate a request of that kind — its own
+	 * weekly row plus the shared umbrella windows — so a healthy report lifts
+	 * the block while a spent shared 5-hour wall keeps it.
+	 *
+	 * Only Fable/Mythos appear: {@link blockScope} scopes reactive blocks for
+	 * those tiers alone, so no other scope can exist to heal.
+	 */
+	healableBlockScopes(report) {
+		const sharedLimits = report.limits.filter(limit => limit.scope.shared === true);
+		// The endpoint returns a report as soon as one window parses, and a tier
+		// 429 can be caused by a shared wall. A payload missing a shared gate
+		// leaves the block's cause unknown, so vouch for nothing rather than
+		// clear a block that still holds.
+		const everySharedGateReported = CLAUDE_SHARED_GATE_WINDOW_IDS.every(windowId =>
+			sharedLimits.some(limit => limit.scope.windowId === windowId || limit.window?.id === windowId),
+		);
+		if (!everySharedGateReported) return [];
+		const tiers = new Set<string>();
+		for (const limit of report.limits) {
+			const tier = limit.scope.tier;
+			if (tier === "fable" || tier === "mythos") tiers.add(tier);
+		}
+		return [...tiers].map(tier => ({
+			blockScope: `tier:${tier}`,
+			limits: [...sharedLimits, ...report.limits.filter(limit => limit.scope.tier === tier)],
+		}));
 	},
 	windowDefaults: { primaryMs: 5 * 60 * 60 * 1000, secondaryMs: 7 * 24 * 60 * 60 * 1000 },
 };

@@ -1,6 +1,7 @@
 import { MCPManager } from "../mcp/manager";
 import type { MCPResourceReadResult } from "../mcp/types";
-import type { InternalResource, InternalUrl, ProtocolHandler } from "./types";
+import mcpDoc from "../prompts/internal-urls/mcp.md" with { type: "text" };
+import type { InternalResource, InternalUrl, ProtocolHandler, SchemeSpec } from "./types";
 
 function escapeRegex(text: string): string {
 	return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -115,7 +116,16 @@ function formatAvailableResources(mcpManager: MCPManager): string {
  */
 export class McpProtocolHandler implements ProtocolHandler {
 	readonly scheme = "mcp";
-	readonly immutable = true;
+	readonly spec: SchemeSpec = { backing: "remote", selectors: "opaque", immutable: true };
+
+	/**
+	 * Always advertised: the system prompt is built before MCP discovery settles
+	 * (`MCPManager.instance()` and its server set are populated asynchronously),
+	 * so there is no reliable synchronous "has servers" signal at prompt time.
+	 */
+	promptDoc(): string {
+		return mcpDoc.trim();
+	}
 
 	async resolve(url: InternalUrl): Promise<InternalResource> {
 		const mcpManager = MCPManager.instance();
@@ -126,6 +136,12 @@ export class McpProtocolHandler implements ProtocolHandler {
 		const uri = extractResourceUri(url);
 		let targetServer = resolveTargetServer(mcpManager, uri);
 		if (!targetServer) {
+			// A configured server may still be handshaking when discovery returned
+			// (the `connectServers` startup race deliberately leaves slow servers in
+			// flight). This one-shot read must observe the final attached state
+			// rather than the mid-handshake snapshot, so wait for pending connects
+			// before loading catalogs and retrying.
+			await mcpManager.waitForPendingConnections();
 			await Promise.allSettled(mcpManager.getConnectedServers().map(name => mcpManager.ensureServerResources(name)));
 			targetServer = resolveTargetServer(mcpManager, uri);
 		}

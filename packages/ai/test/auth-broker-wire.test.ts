@@ -77,9 +77,9 @@ describe("auth-broker wire surface", () => {
 		}
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "auth-broker-wire-"));
 		store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
-		store.saveOAuth("anthropic", mintOAuthCredential("a", Date.now() + 60_000));
+		await store.saveOAuth("anthropic", mintOAuthCredential("a", Date.now() + 60_000));
 		storage = new AuthStorage(store);
-		await storage.reload();
+		await storage.credentials.reload();
 		token = "test-bearer";
 		handle = startAuthBroker({
 			storage,
@@ -227,7 +227,7 @@ describe("auth-broker wire surface", () => {
 	});
 
 	test("ignores external SQLite commits outside auth tables", async () => {
-		const generation = storage!.getGeneration();
+		const generation = storage!.credentials.generation;
 		const db = new Database(path.join(tempDir, "agent.db"));
 		try {
 			db.run("CREATE TABLE unrelated_state (id INTEGER PRIMARY KEY, value TEXT NOT NULL)");
@@ -236,8 +236,8 @@ describe("auth-broker wire surface", () => {
 			db.close();
 		}
 
-		expect(await storage!.pollExternalChanges()).toBe(false);
-		expect(storage!.getGeneration()).toBe(generation);
+		expect(await storage!.credentials.poll()).toBe(false);
+		expect(storage!.credentials.generation).toBe(generation);
 	});
 
 	test("does not double-bump after a local auth write with an unrelated external commit pending", async () => {
@@ -248,15 +248,15 @@ describe("auth-broker wire surface", () => {
 		} finally {
 			db.close();
 		}
-		storage!.upsertCredential("unit-local", { type: "api_key", key: "local-key" });
-		const generation = storage!.getGeneration();
+		await storage!.credentials.upsert("unit-local", { type: "api_key", key: "local-key" });
+		const generation = storage!.credentials.generation;
 
-		expect(await storage!.pollExternalChanges()).toBe(false);
-		expect(storage!.getGeneration()).toBe(generation);
+		expect(await storage!.credentials.poll()).toBe(false);
+		expect(storage!.credentials.generation).toBe(generation);
 	});
 
 	test("preserves a pending external auth commit while acknowledging local changes", async () => {
-		const generation = storage!.getGeneration();
+		const generation = storage!.credentials.generation;
 		const db = new Database(path.join(tempDir, "agent.db"));
 		try {
 			db.run("UPDATE auth_credentials SET updated_at = updated_at + 1 WHERE provider = 'anthropic'");
@@ -265,26 +265,28 @@ describe("auth-broker wire surface", () => {
 		}
 
 		store!.acknowledgeLocalChanges();
-		expect(await storage!.pollExternalChanges()).toBe(true);
-		expect(storage!.getGeneration()).toBeGreaterThan(generation);
+		expect(await storage!.credentials.poll()).toBe(true);
+		expect(storage!.credentials.generation).toBeGreaterThan(generation);
 	});
 
 	test("projects Codex meter blocks for legacy clients and observes writes from another connection", async () => {
 		await handle!.close();
 		handle = undefined;
-		const credential = storage!.upsertCredential("openai-codex", {
-			...mintOAuthCredential("codex-scopes", Date.now() + 60_000),
-		})[0];
+		const credential = (
+			await storage!.credentials.upsert("openai-codex", {
+				...mintOAuthCredential("codex-scopes", Date.now() + 60_000),
+			})
+		)[0];
 		if (!credential) throw new Error("expected Codex credential");
 		const chatBlockedUntilMs = Date.now() + 60_000;
 		const sparkBlockedUntilMs = Date.now() + 120_000;
-		storage!.upsertCredentialBlock({
+		storage!.blocks.upsert({
 			credentialId: credential.id,
 			providerKey: "openai-codex:oauth",
 			blockScope: "chat",
 			blockedUntilMs: chatBlockedUntilMs,
 		});
-		storage!.upsertCredentialBlock({
+		storage!.blocks.upsert({
 			credentialId: credential.id,
 			providerKey: "openai-codex:oauth",
 			blockScope: "spark",
@@ -306,7 +308,7 @@ describe("auth-broker wire surface", () => {
 		} finally {
 			db.close();
 		}
-		await storage!.pollExternalChanges();
+		await storage!.credentials.poll();
 		expect(readRawCodexCredentialBlocks(path.join(tempDir, "agent.db"), credential.id)).toEqual([
 			{
 				block_scope: "chat",
@@ -373,8 +375,8 @@ describe("auth-broker wire surface", () => {
 		]);
 
 		expect(
-			storage!
-				.listCredentialBlocks([credential.id])
+			storage!.blocks
+				.list([credential.id])
 				.map(block => block.blockScope)
 				.sort(),
 		).toEqual(["chat", "spark"]);
@@ -415,8 +417,8 @@ describe("auth-broker wire surface", () => {
 		if (initial.status !== 200) throw new Error("expected snapshot");
 
 		const pending = client.fetchSnapshot({ ifGenerationGt: initial.generation, waitMs: 1000 });
-		setTimeout(() => {
-			storage!.upsertCredential("anthropic", mintOAuthCredential("b", Date.now() + 120_000));
+		setTimeout(async () => {
+			await storage!.credentials.upsert("anthropic", mintOAuthCredential("b", Date.now() + 120_000));
 		}, 10);
 
 		const changed = await pending;
@@ -636,7 +638,7 @@ describe("auth-broker wire surface", () => {
 				expect(first.value.credentials[0].provider).toBe("anthropic");
 			}
 
-			storage!.upsertCredential("anthropic", mintOAuthCredential("b", Date.now() + 120_000));
+			await storage!.credentials.upsert("anthropic", mintOAuthCredential("b", Date.now() + 120_000));
 
 			const next = await nextMatching(iter, event => event.kind === "entry");
 			if (next.kind !== "entry") throw new Error("expected entry frame");
@@ -653,19 +655,21 @@ describe("auth-broker wire surface", () => {
 	});
 
 	test("SSE stream projects Codex meter blocks only for clients without the capability", async () => {
-		const credential = storage!.upsertCredential("openai-codex", {
-			...mintOAuthCredential("codex-stream-scopes", Date.now() + 60_000),
-		})[0];
+		const credential = (
+			await storage!.credentials.upsert("openai-codex", {
+				...mintOAuthCredential("codex-stream-scopes", Date.now() + 60_000),
+			})
+		)[0];
 		if (!credential) throw new Error("expected Codex credential");
 		const chatBlockedUntilMs = Date.now() + 60_000;
 		const sparkBlockedUntilMs = Date.now() + 120_000;
-		storage!.upsertCredentialBlock({
+		storage!.blocks.upsert({
 			credentialId: credential.id,
 			providerKey: "openai-codex:oauth",
 			blockScope: "chat",
 			blockedUntilMs: chatBlockedUntilMs,
 		});
-		storage!.upsertCredentialBlock({
+		storage!.blocks.upsert({
 			credentialId: credential.id,
 			providerKey: "openai-codex:oauth",
 			blockScope: "spark",
@@ -710,7 +714,7 @@ describe("auth-broker wire surface", () => {
 			]);
 
 			const updatedChatBlockedUntilMs = sparkBlockedUntilMs + 60_000;
-			storage!.upsertCredentialBlock({
+			storage!.blocks.upsert({
 				credentialId: credential.id,
 				providerKey: "openai-codex:oauth",
 				blockScope: "chat",
@@ -768,7 +772,7 @@ describe("auth-broker wire surface", () => {
 			const first = await iter.next();
 			if (first.done) throw new Error("expected snapshot frame");
 
-			await storage!.refreshCredentialById(id);
+			await storage!.oauth.refresh(id);
 
 			const next = await nextMatching(
 				iter,
@@ -796,7 +800,7 @@ describe("auth-broker wire surface", () => {
 			const first = await iter.next();
 			if (first.done) throw new Error("expected snapshot frame");
 
-			const disabled = storage!.disableCredentialById(id, "revoked by test");
+			const disabled = await storage!.credentials.disable(id, "revoked by test");
 			expect(disabled).toBe(true);
 
 			const next = await nextMatching(iter, event => event.kind === "removed");
@@ -810,9 +814,9 @@ describe("auth-broker wire surface", () => {
 
 	test("SSE stream keepalive comment arrives on cadence", async () => {
 		const localStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "keepalive.db"));
-		localStore.saveOAuth("anthropic", mintOAuthCredential("k", Date.now() + 60_000));
+		await localStore.saveOAuth("anthropic", mintOAuthCredential("k", Date.now() + 60_000));
 		const localStorage = new AuthStorage(localStore);
-		await localStorage.reload();
+		await localStorage.credentials.reload();
 		const localToken = "keepalive-bearer";
 		const localHandle = startAuthBroker({
 			storage: localStorage,

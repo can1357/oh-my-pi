@@ -9,6 +9,8 @@ import type { ImageAttachmentEntry, ToolSession } from "@oh-my-pi/pi-coding-agen
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
+import { cfgImagesAutoResize } from "@oh-my-pi/pi-coding-agent/modes/settings";
+
 const TINY_PNG_BASE64 =
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
 const TINY_SVG =
@@ -59,7 +61,7 @@ function createSession(
 	settings = Settings.isolated(),
 	options: CreateSessionOptions = {},
 ): ToolSession {
-	settings.set("images.autoResize", false);
+	cfgImagesAutoResize.set(settings, false);
 	const availableModels = options.availableModels ?? [model];
 	const activeModel = options.activeModel ?? model;
 	if (options.configureVisionRole !== false) {

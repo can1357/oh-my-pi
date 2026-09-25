@@ -13,6 +13,8 @@ import { customMessageContentText } from "../session/checkpoint-entries";
 import { appendSharpshooterDelta } from "./queue";
 import type { SharpshooterDelta, SharpshooterDeltaKind, SharpshooterDeltaSource, SharpshooterFriction } from "./types";
 
+import { cfgSharpshooterModel } from "./settings";
+
 const SHARPSHOOTER_DELTA_KINDS = {
 	architecture_decision: true,
 	product_decision: true,
@@ -153,7 +155,7 @@ export async function resolveSharpshooterModel(
 	settings: Settings,
 	modelRegistry: ModelRegistry,
 ): Promise<Model | undefined> {
-	const selector = settings.get("sharpshooter.model");
+	const selector = cfgSharpshooterModel.get(settings);
 	if (selector) {
 		const resolved = resolveModelRoleValue(selector, modelRegistry.getAll(), {
 			settings,
@@ -212,22 +214,24 @@ async function runSharpshooterExtraction(
 	if (!model || session.isDisposed) return;
 
 	const input = prompt.render(extractInputTemplate, { ...envelope });
-	const response = await retryTransientCompletion(() =>
-		completeSimple(
-			model,
-			{
-				systemPrompt: [prompt.render(extractSystemTemplate)],
-				messages: [{ role: "user", content: [{ type: "text", text: input }], timestamp: Date.now() }],
-				tools: [recordDeltasTool],
-			},
-			{
-				apiKey: modelRegistry.resolver(model, session.sessionId),
-				sessionId: session.sessionId,
-				maxTokens: 2048,
-				reasoning: clampThinkingLevelForModel(model, Effort.Low),
-				toolChoice: "required",
-			},
-		),
+	const response = await retryTransientCompletion(
+		() =>
+			completeSimple(
+				model,
+				{
+					systemPrompt: [prompt.render(extractSystemTemplate)],
+					messages: [{ role: "user", content: [{ type: "text", text: input }], timestamp: Date.now() }],
+					tools: [recordDeltasTool],
+				},
+				{
+					apiKey: modelRegistry.resolver(model, session.sessionId),
+					sessionId: session.sessionId,
+					maxTokens: 2048,
+					reasoning: clampThinkingLevelForModel(model, Effort.Low),
+					toolChoice: "required",
+				},
+			),
+		{ provider: model.provider },
 	);
 	if (response.stopReason === "error") {
 		throw new Error(response.errorMessage || "Sharpshooter extraction model error");

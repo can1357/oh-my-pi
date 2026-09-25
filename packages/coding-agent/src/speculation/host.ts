@@ -15,12 +15,19 @@ import { BINARY_SNIFF_BYTES, isProbablyBinaryHeader, readImageMetadata } from "@
 import type { Settings } from "../config/settings";
 import { normalizeToLF } from "../edit/normalize";
 import type { ToolSession } from "../tools";
-import { type ApprovalMode, resolveApproval } from "../tools/approval";
+import { resolveApproval } from "../tools/approval";
 import { CONVERTIBLE_EXTENSIONS } from "../utils/markit";
 import { type LocalReadSpeculationEvidence, resolveSpeculativeReadTarget, SNAPSHOT_MAX_BYTES } from "../tools/read";
 import { isCpuProfilePath } from "../utils/cpuprofile";
 import { isSampleProfilePath } from "../utils/sample-profile";
-import { isVideoPath } from "../utils/video";
+import { isVideoPath } from "@oh-my-pi/pi-tui/prompt/video";
+
+import {
+	cfgToolsApproval,
+	cfgToolsApprovalMode,
+	cfgToolsSpeculativeExecutionEnabled,
+	cfgToolsSpeculativeExecutionMaxInFlight,
+} from "../tools/settings";
 
 type LocalReadEvidence = {
 	path: string;
@@ -112,7 +119,7 @@ export class CodingAgentSpeculativeExecutionHost implements SpeculativeExecution
 	) {}
 
 	async authorize(context: SpeculativeOperationContext): Promise<SpeculativeAuthorization> {
-		if (!this.settings.get("tools.speculativeExecution.enabled")) {
+		if (!cfgToolsSpeculativeExecutionEnabled.get(this.settings)) {
 			return { allowed: false, reason: "speculative execution is disabled" };
 		}
 		const operation = operationGrant(context);
@@ -125,9 +132,12 @@ export class CodingAgentSpeculativeExecutionHost implements SpeculativeExecution
 		if (hasLifecycleHandlers(this.extensionRunner)) {
 			return { allowed: false, reason: "active extension lifecycle handler" };
 		}
-		const approvalMode = this.settings.get("tools.approvalMode") as ApprovalMode;
-		const policies = this.settings.get("tools.approval") as Record<string, unknown>;
-		const approval = resolveApproval(context.tool, context.args, approvalMode, policies);
+		const approval = resolveApproval(
+			context.tool,
+			context.args,
+			cfgToolsApprovalMode.get(this.settings),
+			cfgToolsApproval.get(this.settings),
+		);
 		if (approval.policy !== "allow") return { allowed: false, reason: "tool approval is not auto-allow" };
 		const resource = context.effect.resources[0];
 		if (!resource || context.effect.resources.length !== 1 || resource.access !== "read") {
@@ -293,10 +303,10 @@ export function createSpeculativeToolExecutionConfig(
 	const host = new CodingAgentSpeculativeExecutionHost(settings, toolSession, extensionRunner);
 	return {
 		get enabled() {
-			return settings.get("tools.speculativeExecution.enabled");
+			return cfgToolsSpeculativeExecutionEnabled.get(settings);
 		},
 		get maxInFlight() {
-			return settings.get("tools.speculativeExecution.maxInFlight");
+			return cfgToolsSpeculativeExecutionMaxInFlight.get(settings);
 		},
 		host,
 	};

@@ -15,10 +15,12 @@ const arkSessionNotification = type({
 
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AcpAgent } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-agent";
 import {
 	buildToolCallStartUpdate,
 	mapAgentSessionEventToAcpSessionUpdates,
+	mapToolKind,
 	normalizeReplayToolArguments,
 } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-event-mapper";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -77,7 +79,7 @@ class ReplayTestSession {
 	customCommands: [] = [];
 	skills: [] = [];
 	extensionRunner = undefined;
-	settings = { get: (_key: string) => false };
+	settings = Settings.isolated();
 
 	constructor(cwd: string, sessionDir?: string) {
 		this.sessionManager = SessionManager.create(cwd, sessionDir);
@@ -219,101 +221,62 @@ describe("ACP event mapper", () => {
 		expect(update.content).toContainEqual({ type: "content", content: { type: "text", text: "$ npm run check" } });
 	});
 
-	it("keeps internal Hub traffic off the ACP session stream", () => {
+	it("keeps write agent:// messages off the ACP session stream", () => {
+		const args = { path: "agent://Scout", content: "Private coordination" };
 		const events: AgentSessionEvent[] = [
-			{
-				type: "tool_execution_start",
-				toolCallId: "tc-hub-send",
-				toolName: "hub",
-				args: { op: "send", to: "Scout", message: "Private coordination" },
-			},
+			{ type: "tool_execution_start", toolCallId: "tc-agent-message", toolName: "write", args },
 			{
 				type: "tool_execution_update",
-				toolCallId: "tc-hub-send",
-				toolName: "hub",
-				args: { op: "send", to: "Scout", message: "Private coordination" },
+				toolCallId: "tc-agent-message",
+				toolName: "write",
+				args,
 				partialResult: { content: [{ type: "text", text: "delivering" }] },
 			},
 			{
 				type: "tool_execution_end",
-				toolCallId: "tc-hub-send",
-				toolName: "hub",
+				toolCallId: "tc-agent-message",
+				toolName: "write",
 				isError: false,
-				result: { content: [{ type: "text", text: "delivered" }] },
+				result: { content: [{ type: "text", text: "Delivered to Scout." }] },
 			},
 		] satisfies AgentSessionEvent[];
-
 		const updates = events.flatMap(event =>
-			mapAgentSessionEventToAcpSessionUpdates(event, "session-1", {
-				getToolArgs: () => ({ op: "send", to: "Scout", message: "Private coordination" }),
-			}),
+			mapAgentSessionEventToAcpSessionUpdates(event, "session-1", { getToolArgs: () => args }),
 		);
-
 		expect(updates).toEqual([]);
 	});
 
-	it("keeps xd-routed Hub traffic off the ACP session stream", () => {
-		const args = {
-			path: "xd://hub",
-			content: JSON.stringify({ op: "inbox", from: "Scout" }),
-		};
-		const events = [
-			{
-				type: "tool_execution_start",
-				toolCallId: "tc-xd-hub-inbox",
-				toolName: "write",
-				args,
-			},
-			{
-				type: "tool_execution_end",
-				toolCallId: "tc-xd-hub-inbox",
-				toolName: "write",
-				isError: false,
-				result: { content: [{ type: "text", text: "Private reply" }] },
-			},
-		] satisfies AgentSessionEvent[];
-
-		const updates = events.flatMap(event =>
-			mapAgentSessionEventToAcpSessionUpdates(event, "session-1", {
-				getToolArgs: () => args,
-			}),
-		);
-
-		expect(updates).toEqual([]);
-	});
-
-	it("keeps Hub process control visible over ACP", () => {
-		const updates = mapAgentSessionEventToAcpSessionUpdates(
-			{
-				type: "tool_execution_start",
-				toolCallId: "tc-hub-process-send",
-				toolName: "hub",
-				args: { op: "send", name: "server", text: "ping" },
-			},
-			"session-1",
-		);
-
-		expect(updates).toHaveLength(1);
-		expect(updates[0]?.update).toEqual(
-			expect.objectContaining({
-				sessionUpdate: "tool_call",
-				rawInput: { op: "send", name: "server", text: "ping" },
-			}),
-		);
+	it("maps proc:// controls as execution and reads as resources, never editor file locations", () => {
+		expect(mapToolKind("write", { path: "proc://web/mode", content: "persist" })).toBe("execute");
+		expect(mapToolKind("write", { path: "proc://build-42/kill" })).toBe("execute");
+		expect(mapToolKind("read", { path: "proc://web" })).toBe("read");
+		for (const [toolName, args] of [
+			["write", { path: "proc://web/mode", content: "persist" }],
+			["read", { path: "proc://web" }],
+		] as const) {
+			const updates = mapAgentSessionEventToAcpSessionUpdates(
+				{ type: "tool_execution_start", toolCallId: `tc-${toolName}-proc`, toolName, args } as AgentSessionEvent,
+				"session-1",
+				{ cwd: "/tmp" },
+			);
+			expect(updates).toHaveLength(1);
+			expect(updates[0]?.update).toMatchObject({ kind: toolName === "write" ? "execute" : "read" });
+			expect(updates[0]?.update).not.toHaveProperty("locations");
+		}
 	});
 
 	it("keeps background job-wait results visible over ACP", () => {
 		const events = [
 			{
 				type: "tool_execution_start",
-				toolCallId: "tc-hub-job-wait",
-				toolName: "hub",
-				args: { op: "wait", ids: ["bash_a1b2c3"] },
+				toolCallId: "tc-job-wait",
+				toolName: "wait",
+				args: {},
 			},
 			{
 				type: "tool_execution_end",
-				toolCallId: "tc-hub-job-wait",
-				toolName: "hub",
+				toolCallId: "tc-job-wait",
+				toolName: "wait",
 				isError: false,
 				result: { content: [{ type: "text", text: "job output" }] },
 			},
@@ -321,40 +284,26 @@ describe("ACP event mapper", () => {
 
 		const updates = events.flatMap(event =>
 			mapAgentSessionEventToAcpSessionUpdates(event, "session-1", {
-				getToolArgs: () => ({ op: "wait", ids: ["bash_a1b2c3"] }),
+				getToolArgs: () => ({}),
 			}),
 		);
 
 		expect(updates.map(update => update.update.sessionUpdate)).toEqual(["tool_call", "tool_call_update"]);
 	});
 
-	it("keeps a bare Hub wait visible so job deliveries reach ACP", () => {
+	it("keeps wait visible so job deliveries reach ACP", () => {
 		const updates = mapAgentSessionEventToAcpSessionUpdates(
 			{
 				type: "tool_execution_start",
-				toolCallId: "tc-hub-bare-wait",
-				toolName: "hub",
-				args: { op: "wait" },
+				toolCallId: "tc-bare-wait",
+				toolName: "wait",
+				args: {},
 			},
 			"session-1",
 		);
 
 		expect(updates).toHaveLength(1);
 		expect(updates[0]?.update.sessionUpdate).toBe("tool_call");
-	});
-
-	it("hides a peer-scoped Hub wait from ACP", () => {
-		const updates = mapAgentSessionEventToAcpSessionUpdates(
-			{
-				type: "tool_execution_start",
-				toolCallId: "tc-hub-peer-wait",
-				toolName: "hub",
-				args: { op: "wait", from: "Scout" },
-			},
-			"session-1",
-		);
-
-		expect(updates).toEqual([]);
 	});
 
 	it("uses command text for a new command tool even when intent is generic", () => {
@@ -650,7 +599,7 @@ describe("ACP event mapper", () => {
 		});
 	});
 
-	it("does not serialize a hub wait progress envelope into content text", () => {
+	it("does not serialize a wait progress envelope into content text", () => {
 		const partialResult = {
 			content: [{ type: "text", text: "" }],
 			details: {
@@ -664,9 +613,9 @@ describe("ACP event mapper", () => {
 		const updates = mapAgentSessionEventToAcpSessionUpdates(
 			{
 				type: "tool_execution_update",
-				toolCallId: "tc-hub-wait",
-				toolName: "hub",
-				args: { op: "wait", i: "waiting for jobs" },
+				toolCallId: "tc-wait",
+				toolName: "wait",
+				args: { i: "waiting for jobs" },
 				partialResult,
 			} as AgentSessionEvent,
 			"session-1",

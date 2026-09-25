@@ -523,8 +523,8 @@ describe("model thinking derivation", () => {
 		expect(mapEffortToGoogleThinkingLevel(Effort.Minimal)).toBe("MINIMAL");
 	});
 
-	it("drops minimal from Gemini 3.7 Flash only on the direct google-level transports (#10543)", () => {
-		// Google's thinkingLevel table marks `minimal` unsupported for 3.7 Flash
+	it("drops minimal from Gemini 3.7+ Flash only on the direct google-level transports (#10543)", () => {
+		// Google's thinkingLevel table marks `minimal` unsupported for 3.7+ Flash
 		// (400 THINKING_LEVEL_MINIMAL). Only the direct google-level transports emit
 		// `thinkingLevel` on the wire, so the tier is dropped there; budget and
 		// reasoning-effort resellers never send the rejected value and keep it. These
@@ -537,7 +537,15 @@ describe("model thinking derivation", () => {
 		expect(getSupportedEfforts(vertexFlash37)).toEqual([Effort.Low, Effort.Medium, Effort.High]);
 		expect(() => requireSupportedEffort(vertexFlash37, Effort.Minimal)).toThrow(/not supported/);
 
-		// Every other Flash revision on the same transport keeps the four-tier scale.
+		// The drop is open-ended: 3.8 Flash rejects MINIMAL the same way.
+		const googleFlash38 = createModel({
+			id: "gemini-3.8-flash",
+			api: "google-generative-ai",
+			provider: "google",
+		});
+		expect(getSupportedEfforts(googleFlash38)).toEqual([Effort.Low, Effort.Medium, Effort.High]);
+
+		// Earlier Flash revisions on the same transport keep the four-tier scale.
 		const vertexFlash36 = createModel({
 			id: "gemini-3.6-flash",
 			api: "google-vertex",
@@ -720,6 +728,25 @@ describe("model thinking derivation", () => {
 		expect(() => mapEffortToAnthropicAdaptiveEffort(sonnet46, Effort.Max)).toThrow(/not supported/);
 	});
 
+	it("clamps a custom adaptive ladder's minimal tier to low (issue #10994)", () => {
+		// Built-in Claude ladders exclude minimal, but a custom anthropic-messages
+		// provider can declare it. The Anthropic adaptive wire has no minimal tier,
+		// so the mapper must clamp rather than forward it verbatim (400).
+		const custom = createModel({
+			id: "claude-opus-5",
+			api: "anthropic-messages",
+			provider: "ccs",
+			baseUrl: "https://ccs.example/anthropic",
+			thinking: {
+				mode: "anthropic-adaptive",
+				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+			},
+		});
+		expect(getSupportedEfforts(custom)).toContain(Effort.Minimal);
+		expect(mapEffortToAnthropicAdaptiveEffort(custom, Effort.Minimal)).toBe("low");
+		expect(mapEffortToAnthropicAdaptiveEffort(custom, Effort.High)).toBe("high");
+	});
+
 	it("bakes adaptive display support for Opus 4.7+, Sonnet 5+, and Fable/Mythos 5", () => {
 		const opus46 = createModel({ id: "claude-opus-4.6", api: "anthropic-messages", provider: "anthropic" });
 		const opus47 = createModel({ id: "claude-opus-4-7", api: "anthropic-messages", provider: "anthropic" });
@@ -779,6 +806,36 @@ describe("model thinking derivation", () => {
 		expect(direct.compat.supportsTurnScopedSystem).toBe(true);
 	});
 
+	it("uses Bedrock Fable 5.1's five supported effort levels", () => {
+		const ids = [
+			"global.anthropic.claude-fable-5-1",
+			"eu.anthropic.claude-fable-5-1",
+			"us.anthropic.claude-fable-5-1",
+			"us-gov.anthropic.claude-fable-5-1",
+		];
+
+		for (const id of ids) {
+			const model = createModel({
+				id,
+				api: "bedrock-converse-stream",
+				provider: "amazon-bedrock",
+			});
+
+			expect(getSupportedEfforts(model)).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max]);
+			expect(() => mapEffortToAnthropicAdaptiveEffort(model, Effort.Minimal)).toThrow(/not supported/);
+			expect(mapEffortToAnthropicAdaptiveEffort(model, Effort.XHigh)).toBe("xhigh");
+			expect(mapEffortToAnthropicAdaptiveEffort(model, Effort.Max)).toBe("max");
+		}
+
+		const previousRevision = createModel({
+			id: "global.anthropic.claude-fable-5",
+			api: "bedrock-converse-stream",
+			provider: "amazon-bedrock",
+		});
+		expect(getSupportedEfforts(previousRevision)).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.Max]);
+		expect(() => mapEffortToAnthropicAdaptiveEffort(previousRevision, Effort.XHigh)).toThrow(/not supported/);
+	});
+
 	it("does not advertise mid-conversation system messages on Claude Sonnet 5", () => {
 		const sonnet5 = createModel({
 			id: "claude-sonnet-5",
@@ -795,7 +852,7 @@ describe("model thinking derivation", () => {
 		expect(opus48.compat.supportsMidConversationSystem).toBe(true);
 	});
 
-	it("bakes server-side compaction support for the adaptive-thinking lineage only, on any host", () => {
+	it("bakes on-demand compaction for supported Claude models and deployments only", () => {
 		const supported = [
 			"claude-opus-4-6",
 			"claude-opus-4-8",
@@ -803,6 +860,7 @@ describe("model thinking derivation", () => {
 			"claude-sonnet-5",
 			"claude-fable-5",
 			"claude-mythos-5",
+			"claude-mythos-preview",
 		];
 		const unsupported = ["claude-haiku-4-5", "claude-sonnet-4-5", "claude-opus-4-5", "claude-opus-4-1"];
 		for (const id of supported) {
@@ -815,13 +873,16 @@ describe("model thinking derivation", () => {
 				createModel({ id, api: "anthropic-messages", provider: "anthropic" }).compat.supportsServerCompaction,
 			).toBe(false);
 		}
-		// A lineage truth, not a deployment contract: the same model line carries
-		// it on a gateway; whether the gateway delivers the beta is decided at
-		// request time from the effective endpoint.
 		expect(
-			createModel({ id: "claude-sonnet-4-6", api: "anthropic-messages", provider: "opencode-zen" }).compat
+			createModel({ id: "claude-sonnet-4-6", api: "anthropic-messages", provider: "google-vertex" }).compat
 				.supportsServerCompaction,
 		).toBe(true);
+		for (const provider of ["amazon-bedrock", "opencode-zen"]) {
+			expect(
+				createModel({ id: "claude-sonnet-4-6", api: "anthropic-messages", provider }).compat
+					.supportsServerCompaction,
+			).toBe(false);
+		}
 	});
 
 	it("classifies OpenAI-schema Bedrock models as effort, leaving gpt-oss on budget", () => {

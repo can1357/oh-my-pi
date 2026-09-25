@@ -26,10 +26,10 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as pluginHelpers from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
-import { Composer } from "@oh-my-pi/pi-coding-agent/modes/composer";
+import { Composer } from "@oh-my-pi/pi-tui/prompt/composer";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { beginStartupComposer, stopPendingStartupComposer } from "@oh-my-pi/pi-coding-agent/modes/startup-composer";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
@@ -39,6 +39,15 @@ import { VirtualTerminal } from "../../../tui/test/virtual-terminal";
 import { createTestSession, type TestSessionContext } from "../utilities";
 import { FakeWebSocket, installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
 
+import { cfgCollabAutoStart } from "@oh-my-pi/pi-coding-agent/collab/settings";
+import {
+	cfgMarketplaceAutoUpdate,
+	cfgStartupChangelogMode,
+	cfgStartupCheckUpdate,
+	cfgStartupSetupWizard,
+	cfgStartupShowSplash,
+} from "@oh-my-pi/pi-coding-agent/modes/settings";
+
 const RELAY_URL = "ws://localhost:8788";
 const WEB_URL = "https://collab.example";
 
@@ -46,8 +55,8 @@ interface ControllerContextState {
 	sessionId: string;
 	transition?: Promise<void>;
 	transitionWaited?: () => void;
-	autoStart: "off" | "view" | "control";
-	relayUrl: string;
+	/** Real settings carrying the collab relay/web/auto-start values the controller reads. */
+	settings: Settings;
 	showStatus: string[];
 	/** Resolves with the first status message the controller shows. */
 	firstStatus: PromiseWithResolvers<string>;
@@ -66,14 +75,17 @@ interface ControllerContextState {
  * session identity, the session-change subscription, and the observable
  * seams (status messages, status-line collab segment).
  */
-function makeControllerContext(over: Partial<Pick<ControllerContextState, "autoStart" | "relayUrl">> = {}): {
+function makeControllerContext(over: { autoStart?: "off" | "view" | "control"; relayUrl?: string } = {}): {
 	ctx: InteractiveModeContext;
 	state: ControllerContextState;
 } {
 	const state: ControllerContextState = {
 		sessionId: `sess-${crypto.randomUUID()}`,
-		autoStart: over.autoStart ?? "off",
-		relayUrl: over.relayUrl ?? RELAY_URL,
+		settings: Settings.isolated({
+			"collab.autoStart": over.autoStart ?? "off",
+			"collab.relayUrl": over.relayUrl ?? RELAY_URL,
+			"collab.webUrl": WEB_URL,
+		}),
 		showStatus: [],
 		firstStatus: Promise.withResolvers<string>(),
 		sessionChangeCallbacks: new Set(),
@@ -81,13 +93,8 @@ function makeControllerContext(over: Partial<Pick<ControllerContextState, "autoS
 		prompts: [],
 		prompted: [],
 	};
-	const settingValues = (): Record<string, string> => ({
-		"collab.autoStart": state.autoStart,
-		"collab.relayUrl": state.relayUrl,
-		"collab.webUrl": WEB_URL,
-	});
 	const ctx = {
-		settings: { get: (key: string) => settingValues()[key] ?? "" },
+		settings: state.settings,
 		sessionManager: {
 			getSessionId: () => state.sessionId,
 			getCwd: () => "/tmp/collab-controller-test",
@@ -235,11 +242,11 @@ describe("interactive collaboration startup", () => {
 		resetSettingsForTest();
 		await initTheme();
 		activeSettings = await Settings.init({ inMemory: true, cwd: tmp });
-		activeSettings.override("startup.checkUpdate", false);
-		activeSettings.override("startup.changelogMode", "hidden");
-		activeSettings.override("startup.setupWizard", false);
-		activeSettings.override("startup.showSplash", false);
-		activeSettings.override("marketplace.autoUpdate", "off");
+		cfgStartupCheckUpdate.override(activeSettings, false);
+		cfgStartupChangelogMode.override(activeSettings, "hidden");
+		cfgStartupSetupWizard.override(activeSettings, false);
+		cfgStartupShowSplash.override(activeSettings, false);
+		cfgMarketplaceAutoUpdate.override(activeSettings, "off");
 		testSession = await createTestSession({
 			settingsOverrides: {
 				"collab.autoStart": "view",
@@ -279,7 +286,7 @@ describe("interactive collaboration startup", () => {
 
 		expect(mode.collabHost).toBeUndefined();
 		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
-		expect(mode.settings.get("collab.autoStart")).toBe("view");
+		expect(cfgCollabAutoStart.get(mode.settings)).toBe("view");
 		// Renderer-only initialization must not disable a later explicit start.
 		await mode.collabController.start({ access: "view" });
 		expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([{ access: "view", generation: 1 }]);
@@ -479,7 +486,7 @@ describe("interactive collaboration startup", () => {
 		expect(local.sessionManager.getSessionFile()).toBe(localFile);
 		expect(local.collabGuest).toBeUndefined();
 		expect(local.collabHost?.sessionId).toBe(local.sessionManager.getSessionId());
-		expect(local.settings.get("collab.autoStart")).toBe("view");
+		expect(cfgCollabAutoStart.get(local.settings)).toBe("view");
 	});
 
 	it.each(["stop", "shutdown"] as const)(
@@ -508,7 +515,7 @@ describe("interactive collaboration startup", () => {
 			await local.collabController.idle();
 			expect(local.collabGuest).toBeUndefined();
 			expect(local.collabHost).toBeUndefined();
-			expect(local.settings.get("collab.autoStart")).toBe("view");
+			expect(cfgCollabAutoStart.get(local.settings)).toBe("view");
 			if (operation === "stop") {
 				await local.session.newSession();
 				await local.collabController.idle();
@@ -857,7 +864,7 @@ describe("CollabController", () => {
 		expect(ctx.collabHost).toBeUndefined();
 
 		// The user flips the setting in /settings, then starts a new session.
-		state.autoStart = "control";
+		cfgCollabAutoStart.override(state.settings, "control");
 		switchSession(state, `sess-next-${crypto.randomUUID()}`);
 		await settled(publishSpy, 1);
 

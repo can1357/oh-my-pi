@@ -1,6 +1,9 @@
 // Provider-wire compat for "github-copilot"; regenerated from the frozen census using deployment contract selectors.
 
 provider "github-copilot" {
+	default-model "gpt-5.5"
+	env "COPILOT_GITHUB_TOKEN"
+
 	// Replaces the strict-mode provider whitelist entry.
 	supports-strict-mode #true
 	// Replaces Anthropic request-builder provider checks: Copilot rejects strict

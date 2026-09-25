@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+## [18.3.1] - 2026-09-25
+
+### Fixed
+
+- Improved large-session browsing and reconnect behavior: recent transcript entries load quickly, earlier entries can be loaded on demand without losing your place, and the existing transcript remains visible with download progress during reconnects.
+
+## [18.3.0] - 2026-09-24
+
+### Added
+
+- Added support for rendering coordinated job and messaging views through the `wait` tool.
+
+### Removed
+
+- Removed the obsolete `hub` tool renderer.
+
+## [18.2.1] - 2026-09-15
+
+### Fixed
+
+- Browser collab guests now automatically rejoin when a transient host network drop recreates the relay room ([#11858](https://github.com/can1357/oh-my-pi/issues/11858)).
+
 ## [18.1.17] - 2026-09-10
 
 ### Fixed

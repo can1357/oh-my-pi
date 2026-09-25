@@ -1,7 +1,5 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
-import { getOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/stream";
-import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import { zenmuxModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 
@@ -22,18 +20,6 @@ describe("zenmux provider support", () => {
 		expect(getEnvApiKey("zenmux")).toBe("zenmux-test-key");
 	});
 
-	test("registers built-in descriptor and default model", () => {
-		const descriptor = PROVIDER_DESCRIPTORS.find(item => item.providerId === "zenmux");
-		expect(descriptor).toBeDefined();
-		expect(descriptor?.defaultModel).toBe("anthropic/claude-opus-4.8");
-		expect(descriptor?.catalogDiscovery?.envVars).toContain("ZENMUX_API_KEY");
-		expect(DEFAULT_MODEL_PER_PROVIDER.zenmux).toBe("anthropic/claude-opus-4.8");
-	});
-
-	test("registers ZenMux in OAuth provider selector", () => {
-		const provider = getOAuthProviders().find(item => item.id === "zenmux");
-		expect(provider?.name).toBe("ZenMux");
-	});
 	test("routes Anthropic-owned models to anthropic-messages", async () => {
 		const fetchMock: FetchImpl = vi.fn(
 			async () =>

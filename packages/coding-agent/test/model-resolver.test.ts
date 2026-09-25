@@ -3,12 +3,13 @@ import { type Api, Effort, type Model, type ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models";
+import { parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import {
 	expandRoleAlias,
 	extractExplicitThinkingSelector,
 	filterAvailableModelsByEnabledPatterns,
+	formatModelStringWithRouting,
 	parseModelPattern,
-	parseModelString,
 	pickDefaultAvailableModel,
 	resolveAgentAdvisorSelection,
 	resolveAgentModelPatterns,
@@ -17,10 +18,13 @@ import {
 	resolveAllowedModels,
 	resolveCliModel,
 	resolveExplicitModelRole,
+	resolveModelFromSettings,
 	resolveModelFromString,
 	resolveModelOverride,
 	resolveModelRoleValue,
 	resolveModelScope,
+	resolveRoleChain,
+	rolePriorityDefaults,
 	resolveProviderModelReference,
 } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { DEFAULT_MODEL_ROLE_ALIAS, LEGACY_MODEL_ROLE_ALIAS_PREFIX } from "@oh-my-pi/pi-coding-agent/config/model-roles";
@@ -332,8 +336,8 @@ function createBedrockDefaultModel(
 	overrides?: Partial<ModelSpec<"bedrock-converse-stream">>,
 ): Model<"bedrock-converse-stream"> {
 	return buildModel({
-		id: "us.anthropic.claude-opus-4-8",
-		name: "Claude Opus 4.8 (US)",
+		id: DEFAULT_MODEL_PER_PROVIDER["amazon-bedrock"],
+		name: "Claude Opus (US)",
 		api: "bedrock-converse-stream",
 		provider: "amazon-bedrock",
 		baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
@@ -366,6 +370,21 @@ function createOpusModel(provider: string, id: string, name: string): Model<"ant
 }
 
 const allModels = [...mockModels, ...mockOpenRouterModels, ...mockProviderOverlapModels, ...mockCodexOverlapModels];
+
+function roleChainModel(provider: string, id: string): Model<Api> {
+	return buildModel({
+		id,
+		name: `${provider}/${id}`,
+		api: "openai-completions",
+		provider,
+		baseUrl: `https://${provider}.example.com`,
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128000,
+		maxTokens: 8192,
+	});
+}
 
 describe("pickDefaultAvailableModel", () => {
 	test("prefers Codex OAuth over plain OpenAI for the shared GPT default", () => {
@@ -863,11 +882,143 @@ describe("parseModelPattern", () => {
 	});
 });
 
+describe("role priorities and chains", () => {
+	test("role priority defaults accept arbitrary role names safely", () => {
+		expect(rolePriorityDefaults("not-a-built-in-role")).toEqual([]);
+		expect(rolePriorityDefaults("__proto__")).toEqual([]);
+		expect(rolePriorityDefaults("memory")).toEqual(rolePriorityDefaults("smol"));
+	});
+
+	test("appends non-explicit web defaults after a configured primary", () => {
+		const exa = roleChainModel("web", "exa");
+		const parallel = roleChainModel("web", "parallel");
+		const perplexity = roleChainModel("web", "perplexity");
+		const settings = Settings.isolated({ modelRoles: { web: "web/exa" } });
+
+		const chain = resolveRoleChain("web", settings, [exa, parallel, perplexity]);
+
+		expect(chain.map(candidate => [formatModelStringWithRouting(candidate.model), candidate.explicit])).toEqual([
+			["web/exa", true],
+			["web/parallel", false],
+			["web/perplexity", false],
+		]);
+	});
+
+	test("upgrades a default primary when a configured fallback resolves the same route", () => {
+		const parallel = roleChainModel("web", "parallel");
+		const settings = Settings.isolated({
+			"retry.fallbackChains": { web: ["web/parallel"] },
+		});
+
+		const chain = resolveRoleChain("web", settings, [parallel]);
+
+		expect(chain.map(candidate => [formatModelStringWithRouting(candidate.model), candidate.explicit])).toEqual([
+			["web/parallel", true],
+		]);
+	});
+
+	test("treats an empty configured role value as explicit by key presence", () => {
+		const parallel = roleChainModel("web", "parallel");
+		const settings = Settings.isolated({ modelRoles: { web: "" } });
+
+		const chain = resolveRoleChain("web", settings, [parallel]);
+
+		expect(chain.map(candidate => [formatModelStringWithRouting(candidate.model), candidate.explicit])).toEqual([
+			["web/parallel", true],
+		]);
+	});
+
+	test("an explicitly empty retry chain disables role-default fallbacks", () => {
+		const exa = roleChainModel("web", "exa");
+		const parallel = roleChainModel("web", "parallel");
+		const settings = Settings.isolated({
+			modelRoles: { web: "web/exa" },
+			"retry.fallbackChains": { web: [] },
+		});
+
+		expect(resolveRoleChain("web", settings, [exa, parallel]).map(candidate => candidate.model.id)).toEqual(["exa"]);
+	});
+
+	test("hoists a provider within defaults without moving an explicit primary", () => {
+		const openai = roleChainModel("openai", "gpt-image-1");
+		const xai = roleChainModel("xai", "grok-imagine-image");
+		const defaults = resolveRoleChain("image", Settings.isolated(), [openai, xai], { hoistProvider: "xai" });
+		expect(defaults.map(candidate => candidate.model.provider)).toEqual(["xai", "openai"]);
+
+		const configured = resolveRoleChain(
+			"image",
+			Settings.isolated({ modelRoles: { image: "openai/gpt-image-1" } }),
+			[openai, xai],
+			{ hoistProvider: "xai" },
+		);
+		expect(configured.map(candidate => [candidate.model.provider, candidate.explicit])).toEqual([
+			["openai", true],
+			["xai", false],
+		]);
+
+		const google = roleChainModel("google-antigravity", "gemini-3-pro-image");
+		const explicitFallbacks = resolveRoleChain(
+			"image",
+			Settings.isolated({
+				modelRoles: { image: "openai/gpt-image-1" },
+				"retry.fallbackChains": {
+					image: ["google-antigravity/gemini-3-pro-image", "xai/grok-imagine-image"],
+				},
+			}),
+			[openai, google, xai],
+			{ hoistProvider: "xai" },
+		);
+		expect(explicitFallbacks.map(candidate => candidate.model.provider)).toEqual([
+			"openai",
+			"google-antigravity",
+			"xai",
+		]);
+		expect(explicitFallbacks.every(candidate => candidate.explicit)).toBe(true);
+	});
+
+	test("deduplicates by routed identity while retaining distinct upstream routes", () => {
+		const settings = Settings.isolated({
+			modelRoles: { routed: "openrouter/z-ai/glm-4.7@cerebras" },
+			"retry.fallbackChains": {
+				routed: ["openrouter/z-ai/glm-4.7@openai", "openrouter/z-ai/glm-4.7@cerebras"],
+			},
+		});
+
+		const chain = resolveRoleChain("routed", settings, mockOpenRouterModels);
+		expect(chain.map(candidate => formatModelStringWithRouting(candidate.model))).toEqual([
+			"openrouter/z-ai/glm-4.7@cerebras",
+			"openrouter/z-ai/glm-4.7@openai",
+		]);
+		expect(chain.every(candidate => candidate.explicit)).toBe(true);
+	});
+
+	test("ignores configured kind roles during default chat-model resolution", () => {
+		const chat = roleChainModel("anthropic", "chat-model");
+		const image = roleChainModel("openai", "gpt-image-1");
+		const settings = Settings.isolated({ modelRoles: { image: "openai/gpt-image-1" } });
+
+		expect(resolveModelFromSettings({ settings, availableModels: [chat, image] })).toBe(chat);
+	});
+
+	test("memory inherits configured tiny without kind roles inheriting configured default", () => {
+		const tiny = roleChainModel("local", "tiny-model");
+		const defaultModel = roleChainModel("local", "default-model");
+		const image = roleChainModel("openai", "gpt-image-1");
+		const settings = Settings.isolated({
+			modelRoles: {
+				default: "local/default-model",
+				tiny: "local/tiny-model",
+			},
+		});
+
+		expect(resolveRoleChain("memory", settings, [defaultModel, tiny])[0]?.model.id).toBe("tiny-model");
+		expect(resolveRoleChain("image", settings, [defaultModel, image])[0]?.model.id).toBe("gpt-image-1");
+	});
+});
+
 describe("resolveModelRoleValue", () => {
 	test("resolves @role:<thinking> by expanding role alias before parsing thinking", () => {
-		const settings = {
-			getModelRole: (role: string) => (role === "smol" ? "openrouter/qwen/qwen3-coder:exacto" : undefined),
-		} as NonNullable<Parameters<typeof resolveModelRoleValue>[2]>["settings"];
+		const settings = Settings.isolated({ modelRoles: { smol: "openrouter/qwen/qwen3-coder:exacto" } });
 
 		const result = resolveModelRoleValue("@smol:high", allModels, { settings });
 
@@ -878,9 +1029,7 @@ describe("resolveModelRoleValue", () => {
 	});
 
 	test("resolves @role:max by expanding role alias before parsing thinking", () => {
-		const settings = {
-			getModelRole: (role: string) => (role === "smol" ? "openai-codex/gpt-5.3-codex" : undefined),
-		} as NonNullable<Parameters<typeof resolveModelRoleValue>[2]>["settings"];
+		const settings = Settings.isolated({ modelRoles: { smol: "openai-codex/gpt-5.3-codex" } });
 
 		const result = resolveModelRoleValue("@smol:max", allModels, { settings });
 
@@ -892,9 +1041,7 @@ describe("resolveModelRoleValue", () => {
 	});
 
 	test("resolves @default through configured default role alias", () => {
-		const settings = {
-			getModelRole: (role: string) => (role === "default" ? "openrouter/qwen/qwen3-coder:exacto" : undefined),
-		} as NonNullable<Parameters<typeof resolveModelRoleValue>[2]>["settings"];
+		const settings = Settings.isolated({ modelRoles: { default: "openrouter/qwen/qwen3-coder:exacto" } });
 
 		const result = resolveModelRoleValue("@default", allModels, { settings });
 
@@ -903,6 +1050,24 @@ describe("resolveModelRoleValue", () => {
 		expect(result.thinkingLevel).toBeUndefined();
 		expect(result.explicitThinkingLevel).toBe(false);
 		expect(result.warning).toBeUndefined();
+	});
+
+	test("resolves a custom role that references another custom role (#10853)", () => {
+		// modelRoles.fast_worker = "@task" must expand through the referenced
+		// role to its concrete model at the pure resolution layer, without
+		// relying on the retry model-fallback path (which retry.modelFallback:
+		// false disables).
+		const settings = Settings.isolated({
+			modelRoles: {
+				task: "openrouter/qwen/qwen3-coder:exacto",
+				fast_worker: "@task",
+			},
+		});
+
+		const result = resolveModelRoleValue("@fast_worker", allModels, { settings });
+
+		expect(result.model?.provider).toBe("openrouter");
+		expect(result.model?.id).toBe("qwen/qwen3-coder:exacto");
 	});
 
 	test("splits direct comma fallback chains before parsing thinking selectors", () => {
@@ -1136,6 +1301,66 @@ describe("resolveAgentModelPatterns", () => {
 		});
 
 		expect(resolveAgentModelPatterns({ agentModel: "@tiny", settings })).toEqual(["baseten/custom-smol:max"]);
+	});
+
+	test("uses configured slow for unconfigured advisor before priority defaults", () => {
+		const settings = Settings.isolated({
+			modelRoles: {
+				default: "local/default",
+				slow: "baseten/custom-slow:max",
+			},
+		});
+
+		expect(resolveAgentModelPatterns({ agentModel: "@advisor", settings })).toEqual(["baseten/custom-slow:max"]);
+	});
+
+	test("expands nested role aliases from the configured slow fallback", () => {
+		const settings = Settings.isolated({
+			modelRoles: {
+				default: "openrouter/qwen/qwen3-coder:exacto",
+				smol: "@default",
+				slow: "@smol",
+			},
+		});
+
+		const result = resolveModelRoleValue("@advisor", allModels, { settings });
+
+		expect(result.model?.provider).toBe("openrouter");
+		expect(result.model?.id).toBe("qwen/qwen3-coder:exacto");
+	});
+
+	test("outer advisor thinking level overrides the inherited slow effort", () => {
+		const settings = Settings.isolated({
+			modelRoles: { slow: "nanogpt/coding-router:max" },
+		});
+
+		const result = resolveModelRoleValue("@advisor:high", [mockMaxSuffixModels[0]], { settings });
+
+		expect(result.model?.id).toBe("coding-router");
+		expect(result.thinkingLevel).toBe(Effort.High);
+		expect(result.explicitThinkingLevel).toBe(true);
+	});
+
+	test("outer advisor thinking level preserves an inherited literal suffix model id", () => {
+		const settings = Settings.isolated({
+			modelRoles: { slow: "nanogpt/coding-router:max" },
+		});
+
+		const result = resolveModelRoleValue("@advisor:high", mockMaxSuffixModels, { settings });
+
+		expect(result.model?.id).toBe("coding-router:max");
+		expect(result.thinkingLevel).toBe(Effort.High);
+		expect(result.explicitThinkingLevel).toBe(true);
+	});
+
+	test("keeps advisor on the built-in slow chain when slow is unconfigured", () => {
+		const baseline = resolveAgentModelPatterns({ agentModel: "@advisor", settings: Settings.isolated() });
+		const settings = Settings.isolated({ modelRoles: { default: "local/default" } });
+
+		const advisor = resolveAgentModelPatterns({ agentModel: "@advisor", settings });
+
+		expect(advisor).not.toContain("local/default");
+		expect(advisor).toEqual(baseline);
 	});
 
 	test("breaks the tiny/smol fallback cycle via a default alias", () => {
@@ -1780,6 +2005,63 @@ describe("resolveCliModel", () => {
 		expect(result.model?.provider).toBe("zai");
 		expect(result.model?.id).toBe("glm-5");
 	});
+
+	describe("issue #13079: disabledProviders gates an explicit pin", () => {
+		const registry = { getAll: () => openaiGpt55Models, getAvailable: () => openaiGpt55Models };
+		const settings = Settings.isolated({ disabledProviders: ["openai-codex"] });
+
+		test("refuses a provider-qualified pin and names the disabled provider", () => {
+			const result = resolveCliModel({
+				cliModel: "openai-codex/gpt-5.5",
+				modelRegistry: registry,
+				settings,
+			});
+
+			expect(result.model).toBeUndefined();
+			expect(result.disabledProvider).toBe("openai-codex");
+			expect(result.error).toContain("openai-codex");
+		});
+
+		test("refuses a --provider/--model pair naming the disabled provider", () => {
+			const result = resolveCliModel({
+				cliProvider: "openai-codex",
+				cliModel: "gpt-5.5",
+				modelRegistry: registry,
+				settings,
+			});
+
+			expect(result.model).toBeUndefined();
+			expect(result.disabledProvider).toBe("openai-codex");
+		});
+
+		test("falls through to an enabled provider carrying the same id", () => {
+			const result = resolveCliModel({
+				cliModel: "gpt-5.5",
+				modelRegistry: registry,
+				availableModels: openaiGpt55Models.filter(model => model.provider === "openai-codex"),
+				settings,
+			});
+
+			expect(result.error).toBeUndefined();
+			expect(result.disabledProvider).toBeUndefined();
+			expect(result.model?.provider).toBe("openai");
+		});
+
+		test("refuses a configured role whose only candidate is disabled", () => {
+			const result = resolveCliModel({
+				cliModel: "task",
+				modelRegistry: registry,
+				settings: Settings.isolated({
+					disabledProviders: ["openai-codex"],
+					modelRoles: { task: "openai-codex/gpt-5.5" },
+				}),
+			});
+
+			expect(result.model).toBeUndefined();
+			expect(result.disabledProvider).toBe("openai-codex");
+			expect(result.configuredPatterns).toBeUndefined();
+		});
+	});
 });
 
 describe("resolveModelScope", () => {
@@ -2070,6 +2352,13 @@ describe("provider routing selector (@upstream)", () => {
 		expect(openRouterOnly(result.model)).toEqual(["cerebras"]);
 	});
 
+	test("pins a tiered upstream slug with a path segment", () => {
+		const result = parseModelPattern("openrouter/z-ai/glm-4.7@google-ai-studio/priority:high", allModels);
+		expect(result.model?.id).toBe("z-ai/glm-4.7");
+		expect(result.thinkingLevel).toBe(Effort.High);
+		expect(openRouterOnly(result.model)).toEqual(["google-ai-studio/priority"]);
+	});
+
 	test("combines @slug with a trailing thinking level", () => {
 		const result = parseModelPattern("openrouter/z-ai/glm-4.7@cerebras:high", allModels);
 		expect(result.model?.id).toBe("z-ai/glm-4.7");
@@ -2161,6 +2450,36 @@ describe("provider routing selector (@upstream)", () => {
 		expect(result.model?.id).toBe("z-ai/glm-4.7");
 		expect(result.selector).toBe("openrouter/z-ai/glm-4.7@cerebras");
 		expect(openRouterOnly(result.model)).toEqual(["cerebras"]);
+	});
+
+	test("resolveCliModel routes an aggregator id the first-party provider also bundles", () => {
+		// `google/gemini-2.5-pro` is provider-locked to the bundled `google` provider when
+		// matched as a raw id; the explicit `openrouter/` prefix must unlock it so the
+		// tiered upstream selector reaches OpenRouter's copy.
+		const mirrored = buildModel({
+			id: "google/gemini-2.5-pro",
+			name: "Gemini 2.5 Pro",
+			api: "openai-completions",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1 },
+			contextWindow: 128000,
+			maxTokens: 8192,
+		});
+		const models = [...allModels, mirrored];
+		const registry = { getAll: () => models, getAvailable: () => models } as unknown as Parameters<
+			typeof resolveCliModel
+		>[0]["modelRegistry"];
+		const result = resolveCliModel({
+			cliModel: "openrouter/google/gemini-2.5-pro@google-ai-studio/priority",
+			modelRegistry: registry,
+		});
+		expect(result.error).toBeUndefined();
+		expect(result.model?.provider).toBe("openrouter");
+		expect(result.selector).toBe("openrouter/google/gemini-2.5-pro@google-ai-studio/priority");
+		expect(openRouterOnly(result.model)).toEqual(["google-ai-studio/priority"]);
 	});
 });
 
@@ -2339,10 +2658,17 @@ describe("effort-tier variant aliases", () => {
 		}),
 	];
 
-	test("provider-qualified retired tier ids resolve to the collapsed model", () => {
+	test("provider-qualified retired tier ids preserve their routed effort", () => {
 		const result = parseModelPattern("google-antigravity/gemini-3.5-flash-low", variantModels);
 		expect(result.model?.id).toBe("gemini-3.5-flash");
+		expect(result.thinkingLevel).toBe(Effort.High);
+	});
+
+	test("the default wire id shared by several levels leaves the thinking level unset", () => {
+		const result = parseModelPattern("google-antigravity/gemini-3.5-flash-extra-low", variantModels);
+		expect(result.model?.id).toBe("gemini-3.5-flash");
 		expect(result.thinkingLevel).toBeUndefined();
+		expect(result.explicitThinkingLevel).toBe(false);
 	});
 
 	test("retired tier ids keep explicit :level suffixes", () => {

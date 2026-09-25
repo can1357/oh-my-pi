@@ -5,12 +5,14 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
-import type { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import type { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
+
+import { cfgDisplaySmoothStreaming } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 beforeAll(async () => {
 	await initTheme();
@@ -75,7 +77,7 @@ describe("EventController queues exclusive device writes until execution starts"
 
 	it("keeps the second exclusive xd:// write queued after message_end until its own start", async () => {
 		await Settings.init({ inMemory: true, cwd: process.cwd() });
-		settings.set("display.smoothStreaming", false);
+		cfgDisplaySmoothStreaming.set(settings, false);
 
 		const searchArgs = { action: "grep_all", pattern: "Broken", scope: "game.StarterPlayer" };
 		const scriptsArgs = { action: "get_source", instancePath: "game.Workspace.Thumper" };

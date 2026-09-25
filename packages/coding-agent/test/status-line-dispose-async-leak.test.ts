@@ -15,9 +15,10 @@
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { StatusLineSettings } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
-import { StatusLineComponent } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import type { StatusLineSettings } from "@oh-my-pi/pi-tui/status-line";
+import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
+import { statusLineHost } from "@oh-my-pi/pi-coding-agent/modes/status-line-host";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
 import type { VcsGitRepo, VcsGitRepoInfo, VcsHeadState, VcsRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
@@ -47,13 +48,17 @@ beforeEach(() => {
 		linkedWorktree: () => null,
 	} as unknown as VcsGitRepo;
 	vi.spyOn(vcs, "git").mockReturnValue(gitRepository);
-	vi.spyOn(vcs, "repo").mockReturnValue({
+	const repository = {
 		kind: () => "git",
 		asGit: () => gitRepository,
 		asJj: () => null,
 		root: () => fakeRepoInfo.repoRoot,
 		watchTarget: () => fakeRepoInfo.headPath,
-	} as unknown as VcsRepo);
+	} as unknown as VcsRepo;
+	vi.spyOn(vcs, "repo").mockReturnValue(repository);
+	// The render path resolves the branch through the display detector first;
+	// left unstubbed it finds the real checkout and caches its branch.
+	vi.spyOn(vcs, "repoForDisplay").mockReturnValue(repository);
 });
 
 afterEach(() => {
@@ -140,7 +145,7 @@ describe("StatusLineComponent dispose guards async callbacks", () => {
 		defaultBranchMock.mockImplementation(() => new Promise<string | null>(r => (resolveDefault = r)));
 
 		const onBranchChange = vi.fn();
-		const component = new StatusLineComponent(makeSession());
+		const component = new StatusLineComponent(makeSession(), statusLineHost);
 		component.updateSettings(gitSegmentSettings);
 		component.watchBranch(onBranchChange);
 
@@ -169,7 +174,7 @@ describe("StatusLineComponent dispose guards async callbacks", () => {
 		defaultBranchMock.mockResolvedValue("develop");
 
 		const onBranchChange = vi.fn();
-		const component = new StatusLineComponent(makeSession());
+		const component = new StatusLineComponent(makeSession(), statusLineHost);
 		component.updateSettings(gitSegmentSettings);
 		component.watchBranch(onBranchChange);
 		component.getTopBorder(80);
@@ -196,7 +201,7 @@ describe("StatusLineComponent dispose guards async callbacks", () => {
 
 		const onBranchChange = vi.fn();
 		const components = new StatusLineTestComponents();
-		const component = components.track(new StatusLineComponent(makeSession()));
+		const component = components.track(new StatusLineComponent(makeSession(), statusLineHost));
 		component.updateSettings(gitSegmentSettings);
 		component.watchBranch(onBranchChange);
 		component.getTopBorder(80);

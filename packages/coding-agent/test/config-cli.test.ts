@@ -139,6 +139,27 @@ describe("config CLI schema coverage", () => {
 		expect(parsed.type).toBe("array");
 		expect(parsed.value).toEqual(["claude-opus-4-6", "gpt-5.3-codex"]);
 	});
+
+	it("rejects unknown status line segment ids", async () => {
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => {
+			throw new Error("process.exit");
+		}) as typeof process.exit);
+
+		await expect(
+			runConfigCommand({
+				action: "set",
+				key: "statusLine.leftSegments",
+				value: '["modle","git"]',
+				flags: { json: true },
+			}),
+		).rejects.toThrow("process.exit");
+		expect(exitSpy).toHaveBeenCalledWith(1);
+		expect(console.error).toHaveBeenCalledWith(
+			expect.stringContaining('Unknown status line segment: "modle". Valid status line segments: pi, status, model'),
+		);
+	});
 	it("sets numeric idle compaction settings from CLI values", async () => {
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		await runConfigCommand({
@@ -196,6 +217,25 @@ describe("config CLI schema coverage", () => {
 		expect(Buffer.byteLength(output)).toBeGreaterThan(65_536);
 		const parsed: unknown = JSON.parse(output);
 		expect(parsed).toMatchObject({ modelRoles: { type: "record" } });
+	});
+	it("reports the value written to config.yml and the layer that still overrides it", async () => {
+		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
+		const overlayPath = path.join(testAgentDir.path(), "overlay.yml");
+		await Bun.write(overlayPath, "compaction:\n  enabled: false\n");
+		const previousConfigFiles = process.env.PI_CONFIG_FILES;
+		process.env.PI_CONFIG_FILES = overlayPath;
+		try {
+			const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+			await runConfigCommand({ action: "set", key: "compaction.enabled", value: "true", flags: { json: true } });
+			expect(JSON.parse(String(logSpy.mock.calls.at(-1)?.[0]))).toEqual({
+				key: "compaction.enabled",
+				value: true,
+				overriddenBy: "overlay",
+			});
+		} finally {
+			if (previousConfigFiles === undefined) delete process.env.PI_CONFIG_FILES;
+			else process.env.PI_CONFIG_FILES = previousConfigFiles;
+		}
 	});
 	it("loads PI_CONFIG_FILES overlays in path-list order", async () => {
 		if (!testAgentDir) throw new Error("Test agent directory was not initialized");

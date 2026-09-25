@@ -3,15 +3,18 @@ import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import * as loopCondition from "@oh-my-pi/pi-coding-agent/modes/loop-condition";
 import type { LoopConditionVerdict } from "@oh-my-pi/pi-coding-agent/modes/loop-condition";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+
+import { cfgLoopMode } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 async function flushMicrotasks(): Promise<void> {
 	await Promise.resolve();
@@ -47,7 +50,7 @@ describe("InteractiveMode loop auto-submit", () => {
 	});
 
 	beforeEach(() => {
-		settings.set("loop.mode", "prompt");
+		cfgLoopMode.set(settings, "prompt");
 		vi.spyOn(mode, "addMessageToChat").mockReturnValue([]);
 		vi.spyOn(mode, "ensureLoadingAnimation").mockImplementation(() => {});
 	});
@@ -102,7 +105,7 @@ describe("InteractiveMode loop auto-submit", () => {
 
 	it("does not recompact when a compact loop turn starts another prompt before resubmitting", async () => {
 		vi.useFakeTimers();
-		settings.set("loop.mode", "compact");
+		cfgLoopMode.set(settings, "compact");
 		let streaming = false;
 		Object.defineProperty(session, "isCompacting", { configurable: true, get: () => false });
 		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => streaming });
@@ -160,7 +163,7 @@ describe("InteractiveMode loop auto-submit", () => {
 
 	it("disables reset loops when vibe blocks the session transition", async () => {
 		vi.useFakeTimers();
-		settings.set("loop.mode", "reset");
+		cfgLoopMode.set(settings, "reset");
 		mode.vibeModeEnabled = true;
 		mode.loopModeEnabled = true;
 		mode.loopPrompt = "do not resubmit";
@@ -368,7 +371,7 @@ describe("InteractiveMode loop auto-submit", () => {
 		// exercised instead of assigned directly.
 		it("disables a reset loop when vibe is enabled while the condition is in flight", async () => {
 			vi.useFakeTimers();
-			settings.set("loop.mode", "reset");
+			cfgLoopMode.set(settings, "reset");
 			idleSession();
 			const pending = Promise.withResolvers<LoopConditionVerdict>();
 			vi.spyOn(loopCondition, "evaluateLoopCondition").mockImplementation(async () => await pending.promise);
@@ -399,7 +402,7 @@ describe("InteractiveMode loop auto-submit", () => {
 		// entering transition, not just the settled flag.
 		it("disables a reset loop when the condition resolves during vibe activation", async () => {
 			vi.useFakeTimers();
-			settings.set("loop.mode", "reset");
+			cfgLoopMode.set(settings, "reset");
 			idleSession();
 			const pending = Promise.withResolvers<LoopConditionVerdict>();
 			vi.spyOn(loopCondition, "evaluateLoopCondition").mockImplementation(async () => await pending.promise);
@@ -430,5 +433,90 @@ describe("InteractiveMode loop auto-submit", () => {
 			await vibeEnter;
 			expect(mode.vibeModeEnabled).toBe(true);
 		});
+	});
+
+	it("resubmits a /skill: prompt dispatched inline by the submit handler", async () => {
+		vi.useFakeTimers();
+		const skillPath = path.join(tempDir.path(), "recap.md");
+		await Bun.write(skillPath, "---\nname: recap\n---\nSummarize recent changes.\n");
+		mode.skillCommands.set("skill:recap", {
+			name: "recap",
+			description: "",
+			filePath: skillPath,
+			baseDir: tempDir.path(),
+			source: "test",
+		});
+		new InputController(mode).setupEditorSubmitHandler();
+		const promptCustomMessage = vi.spyOn(session, "promptCustomMessage").mockResolvedValue(true);
+		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => false });
+		Object.defineProperty(session, "isCompacting", { configurable: true, get: () => false });
+
+		mode.disableLoopMode();
+		mode.loopModeEnabled = true;
+		const resolved: SubmittedUserInput[] = [];
+		pendingInput = mode.getUserInput();
+		void pendingInput.then(input => resolved.push(input));
+
+		await mode.editor.onSubmit?.("/skill:recap go");
+
+		expect(promptCustomMessage).toHaveBeenCalledTimes(1);
+		expect(mode.loopPrompt).toBe("/skill:recap go");
+		expect(resolved).toHaveLength(0);
+
+		vi.advanceTimersByTime(800);
+		await flushMicrotasks();
+
+		expect(resolved).toHaveLength(1);
+		expect(resolved[0].text).toBe("/skill:recap go");
+		mode.skillCommands.delete("skill:recap");
+	});
+
+	it("paints no optimistic user row for a resubmitted /skill: loop prompt", async () => {
+		vi.useFakeTimers();
+		const skillPath = path.join(tempDir.path(), "recap.md");
+		await Bun.write(skillPath, "---\nname: recap\n---\nSummarize recent changes.\n");
+		mode.skillCommands.set("skill:recap", {
+			name: "recap",
+			description: "",
+			filePath: skillPath,
+			baseDir: tempDir.path(),
+			source: "test",
+		});
+		Object.defineProperty(session, "isCompacting", { configurable: true, get: () => false });
+		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => false });
+
+		mode.loopModeEnabled = true;
+		mode.loopPrompt = "/skill:recap go";
+		const resolved: SubmittedUserInput[] = [];
+		pendingInput = mode.getUserInput();
+		void pendingInput.then(input => resolved.push(input));
+
+		vi.advanceTimersByTime(800);
+		await flushMicrotasks();
+
+		expect(resolved).toHaveLength(1);
+		expect(resolved[0].text).toBe("/skill:recap go");
+		// A plain loop prompt paints one; the skill row comes from the dispatched
+		// custom message instead.
+		expect(mode.addMessageToChat).not.toHaveBeenCalled();
+		mode.skillCommands.delete("skill:recap");
+	});
+
+	it("paints an optimistic user row for a resubmitted plain loop prompt", async () => {
+		vi.useFakeTimers();
+		Object.defineProperty(session, "isCompacting", { configurable: true, get: () => false });
+		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => false });
+
+		mode.loopModeEnabled = true;
+		mode.loopPrompt = "repeat this";
+		const resolved: SubmittedUserInput[] = [];
+		pendingInput = mode.getUserInput();
+		void pendingInput.then(input => resolved.push(input));
+
+		vi.advanceTimersByTime(800);
+		await flushMicrotasks();
+
+		expect(resolved).toHaveLength(1);
+		expect(mode.addMessageToChat).toHaveBeenCalledTimes(1);
 	});
 });

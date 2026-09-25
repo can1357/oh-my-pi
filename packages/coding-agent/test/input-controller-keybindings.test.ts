@@ -1,9 +1,12 @@
 import { beforeAll, describe, expect, it, type Mock, vi } from "bun:test";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { AskDialogComponent } from "@oh-my-pi/pi-coding-agent/modes/components/ask-dialog";
-import { TreeSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tree-selector";
+import { AskDialogComponent } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
+import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
+import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { SpaceHoldGesture } from "@oh-my-pi/pi-tui/space-hold";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { type KeyId, matchesKey } from "@oh-my-pi/pi-tui";
@@ -20,13 +23,8 @@ type FakeEditor = {
 	onCycleModelBackward?: () => void;
 	onSelectModelTemporary?: () => void;
 	onSelectModel?: () => void;
-	onHistorySearch?: () => void;
 	onPasteImage?: () => Promise<boolean>;
 	onCopyPrompt?: () => void;
-	onExpandTools?: () => void;
-	onToggleToolActivity?: () => void;
-	onToggleThinking?: () => void;
-	onExternalEditor?: () => void;
 	onRetry?: () => void;
 	onChange?: (text: string) => void;
 	onSubmit?: (text: string) => Promise<void>;
@@ -39,6 +37,7 @@ type FakeEditor = {
 	setActionKeys(action: string, keys: string[]): void;
 	setCustomKeyHandler(key: string, handler: () => void): void;
 	clearCustomKeyHandlers(): void;
+	spaceHold: SpaceHoldGesture;
 	pasteText(text: string): void;
 	imageLinks?: (string | undefined)[];
 	pendingImages: ImageContent[];
@@ -64,7 +63,10 @@ function registeredInputListeners(addInputListener: Mock<(listener: InputListene
 async function createContext() {
 	let editorText = "";
 	const keyMap: Record<string, KeyId[]> = {
-		"app.display.reset": ["ctrl+l"],
+		"app.display.reset": ["alt+l"],
+		"app.thinking.toggle": ["ctrl+t"],
+		"app.history.search": ["ctrl+r"],
+		"app.editor.external": ["ctrl+g"],
 		"app.model.selectTemporary": ["ctrl+y"],
 		"app.model.select": ["alt+m"],
 		"app.retry": ["alt+r"],
@@ -144,6 +146,7 @@ async function createContext() {
 		setActionKeys,
 		setCustomKeyHandler,
 		clearCustomKeyHandlers,
+		spaceHold: new SpaceHoldGesture(() => {}),
 		pendingImages: [],
 		pendingImageLinks: [],
 		clearDraft(historyText?: string) {
@@ -215,7 +218,7 @@ async function createContext() {
 		isPythonMode: false,
 		hideToolActivity: false,
 		toolOutputExpanded: false,
-		settings: { set: vi.fn() },
+		settings: Settings.isolated(),
 		chatContainer: { children: [], setToolActivityVisible: vi.fn() },
 		handleHotkeysCommand: vi.fn(),
 		handlePlanModeCommand: vi.fn(),
@@ -224,6 +227,7 @@ async function createContext() {
 		showUserMessageSelector: vi.fn(),
 		showSessionSelector: vi.fn(),
 		handleSTTToggle: vi.fn(),
+		dictationSpaceHold: vi.fn(),
 		showDebugSelector: vi.fn(),
 		showHistorySearch: vi.fn(),
 		toggleThinkingBlockVisibility: vi.fn(),
@@ -288,7 +292,7 @@ describe("InputController keybinding setup", () => {
 
 		controller.setupKeyHandlers();
 
-		expect(spies.setActionKeys).toHaveBeenCalledWith("app.display.reset", ["ctrl+l"]);
+		expect(spies.setActionKeys).toHaveBeenCalledWith("app.display.reset", ["alt+l"]);
 		expect(spies.setActionKeys).toHaveBeenCalledWith("app.model.selectTemporary", ["ctrl+y"]);
 		expect(spies.setActionKeys).toHaveBeenCalledWith("app.model.select", ["alt+m"]);
 		expect(editor.onDisplayReset).toBeDefined();
@@ -303,24 +307,6 @@ describe("InputController keybinding setup", () => {
 		expect(spies.showModelSelector).toHaveBeenNthCalledWith(1, { temporaryOnly: true });
 		expect(spies.showModelSelector).toHaveBeenNthCalledWith(2);
 		expect(spies.resetDisplayAfterAppearanceRefresh).toHaveBeenCalledTimes(1);
-	});
-
-	it("registers the tool activity visibility action", async () => {
-		const { InputController, ctx, editor, spies } = await createContext();
-		const controller = new InputController(ctx);
-
-		controller.setupKeyHandlers();
-
-		expect(spies.setActionKeys).toHaveBeenCalledWith("app.tools.toggleVisibility", ["ctrl+shift+o"]);
-		expect(editor.onToggleToolActivity).toBeDefined();
-
-		editor.onToggleToolActivity?.();
-
-		expect(ctx.hideToolActivity).toBe(true);
-		expect(ctx.settings.set).toHaveBeenCalledWith("display.hideToolActivity", true);
-		expect(spies.clearInlineImages).toHaveBeenCalledTimes(1);
-		expect(spies.resetDisplay).toHaveBeenCalledTimes(1);
-		expect(ctx.chatContainer.setToolActivityVisible).toHaveBeenCalledWith(false);
 	});
 
 	it("does not mark pasted shell prompts as Python mode while editing", async () => {
@@ -715,6 +701,140 @@ describe("InputController keybinding setup", () => {
 				userInitiated: true,
 			});
 		}
+	});
+});
+
+describe("InputController global editor actions", () => {
+	const CTRL_T = "\x14";
+	const CTRL_R = "\x12";
+	const CTRL_G = "\x07";
+	const CTRL_SHIFT_O = "\x1b[111;6u";
+	const ALT_L = "\x1bl";
+
+	beforeAll(async () => {
+		await initTheme(false);
+	});
+
+	it("routes shortcuts while an ask dialog holds focus", async () => {
+		const context = await createContext();
+		const controller = new context.InputController(context.ctx);
+		const openExternalEditor = vi.spyOn(controller, "openExternalEditor").mockResolvedValue();
+		controller.setupKeyHandlers();
+		const listeners = registeredInputListeners(context.spies.addInputListener);
+		const dialog = new AskDialogComponent([{ id: "q1", question: "Choose one?", options: [{ label: "Option A" }] }], {
+			onSubmit: () => {},
+			onCancel: () => {},
+			onPrompt: async () => undefined,
+		});
+		context.setFocused(dialog);
+
+		expect(dispatchInput(listeners, CTRL_T)).toEqual({ consume: true });
+		expect(context.ctx.toggleThinkingBlockVisibility).toHaveBeenCalledTimes(1);
+		expect(dispatchInput(listeners, CTRL_R)).toEqual({ consume: true });
+		expect(context.ctx.showHistorySearch).toHaveBeenCalledTimes(1);
+		expect(dispatchInput(listeners, CTRL_G)).toEqual({ consume: true });
+		expect(openExternalEditor).toHaveBeenCalledTimes(1);
+		expect(dispatchInput(listeners, CTRL_SHIFT_O)).toEqual({ consume: true });
+		expect(context.ctx.hideToolActivity).toBe(true);
+		expect(dispatchInput(listeners, ALT_L)).toEqual({ consume: true });
+		expect(context.spies.resetDisplayAfterAppearanceRefresh).toHaveBeenCalledTimes(1);
+	});
+
+	it("still routes transcript actions when the main editor holds focus", async () => {
+		const context = await createContext();
+		const controller = new context.InputController(context.ctx);
+		controller.setupKeyHandlers();
+		const listeners = registeredInputListeners(context.spies.addInputListener);
+
+		expect(dispatchInput(listeners, CTRL_T)).toEqual({ consume: true });
+		expect(context.ctx.toggleThinkingBlockVisibility).toHaveBeenCalledTimes(1);
+	});
+
+	it("defers while an overlay owns the active surface", async () => {
+		const context = await createContext();
+		const controller = new context.InputController(context.ctx);
+		controller.setupKeyHandlers();
+		context.setOverlayVisible(true);
+		const listeners = registeredInputListeners(context.spies.addInputListener);
+
+		expect(dispatchInput(listeners, CTRL_T)).toBeUndefined();
+		expect(context.ctx.toggleThinkingBlockVisibility).not.toHaveBeenCalled();
+		expect(dispatchInput(listeners, ALT_L)).toBeUndefined();
+		expect(context.spies.resetDisplayAfterAppearanceRefresh).not.toHaveBeenCalled();
+	});
+
+	it("defers display reset to the tree selector's own Alt+L labeled-only filter", async () => {
+		const context = await createContext();
+		const controller = new context.InputController(context.ctx);
+		controller.setupKeyHandlers();
+		const listeners = registeredInputListeners(context.spies.addInputListener);
+		const tree = [
+			{
+				entry: { id: "root", type: "message", parentId: null, message: { role: "user", content: "hi" } },
+				children: [],
+			},
+		] as unknown as SessionTreeNode[];
+		context.setFocused(
+			new TreeSelectorComponent(
+				tree,
+				"root",
+				20,
+				() => {},
+				() => {},
+			),
+		);
+
+		expect(dispatchInput(listeners, ALT_L)).toBeUndefined();
+		expect(context.spies.resetDisplayAfterAppearanceRefresh).not.toHaveBeenCalled();
+		context.setKeybinding("app.display.reset", ["ctrl+l"]);
+		expect(dispatchInput(listeners, "\x0c")).toEqual({ consume: true });
+		expect(context.spies.resetDisplayAfterAppearanceRefresh).toHaveBeenCalledTimes(1);
+	});
+
+	it("defers external editing to a focused ask-dialog prompt editor untracked by ctx.hookEditor", async () => {
+		const context = await createContext();
+		const controller = new context.InputController(context.ctx);
+		const openExternalEditor = vi.spyOn(controller, "openExternalEditor").mockResolvedValue();
+		controller.setupKeyHandlers();
+		const hookEditor = new HookEditorComponent(
+			context.ctx.ui,
+			"Edit",
+			undefined,
+			() => {},
+			() => {},
+		);
+		// The ask dialog's "Other" prompt focuses a HookEditorComponent without
+		// assigning ctx.hookEditor; the defer must recognize it structurally.
+		context.setFocused(hookEditor);
+		const listeners = registeredInputListeners(context.spies.addInputListener);
+
+		expect(dispatchInput(listeners, CTRL_G)).toBeUndefined();
+		expect(openExternalEditor).not.toHaveBeenCalled();
+	});
+
+	it("defers the tree selector's Ctrl+Shift+O filter binding", async () => {
+		const context = await createContext();
+		const controller = new context.InputController(context.ctx);
+		controller.setupKeyHandlers();
+		const tree = [
+			{
+				entry: { id: "root", type: "message", parentId: null, message: { role: "user", content: "hi" } },
+				children: [],
+			},
+		] as unknown as SessionTreeNode[];
+		context.setFocused(
+			new TreeSelectorComponent(
+				tree,
+				"root",
+				20,
+				() => {},
+				() => {},
+			),
+		);
+		const listeners = registeredInputListeners(context.spies.addInputListener);
+
+		expect(dispatchInput(listeners, CTRL_SHIFT_O)).toBeUndefined();
+		expect(context.ctx.hideToolActivity).toBe(false);
 	});
 });
 

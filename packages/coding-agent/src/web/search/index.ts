@@ -8,41 +8,40 @@
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { modelKind } from "@oh-my-pi/pi-catalog/types";
+import { formatAge, prompt } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../../config/model-registry";
+import { resolveModelRoleValue, resolveRoleChain } from "../../config/model-resolver";
+import { roleCandidatePool } from "../../config/model-roles";
 import { settings } from "../../config/settings";
-import type { CustomTool, CustomToolContext, RenderResultOptions } from "../../extensibility/custom-tools/types";
-import type { Theme } from "../../modes/theme/theme";
+import type { CustomTool, CustomToolContext } from "../../extensibility/custom-tools/types";
 import webSearchSystemPrompt from "../../prompts/system/web-search.md" with { type: "text" };
 import webSearchDescription from "../../prompts/tools/web-search.md" with { type: "text" };
 import { discoverAuthStorage } from "../../sdk";
 import type { ToolSession } from "../../tools";
-import { formatAge } from "../../tools/render-utils";
 import { throwIfAborted } from "../../tools/tool-errors";
 import {
 	formatSearchProviderFailure,
 	formatSearchProviderFailures,
+	getGroundedSearchProvider,
 	getSearchProvider,
-	getSearchProviderLabel,
-	isSearchProviderExcluded,
-	resolveProviderCandidates,
 	type SearchProvider,
-	type SearchProviderCandidate,
 } from "./provider";
 import { applyQueryConstraints, parseSearchQuery } from "./query";
-import { renderSearchCall, renderSearchResult, type SearchRenderDetails } from "./render";
 import {
 	DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS,
 	MAX_WEB_SEARCH_TIMEOUT_SECONDS,
-	SEARCH_PROVIDER_PREFERENCES,
 	SearchProviderError,
 	type SearchResponse,
+	type SearchResultDetails,
 } from "./types";
+
+import { cfgProvidersAntigravityEndpoint, cfgProvidersWebSearchTimeoutSeconds } from "../../session/settings";
 
 /** Web search tool parameters schema */
 export const webSearchSchema = type({
 	query: "string",
-	"provider?": type.enumerated(...SEARCH_PROVIDER_PREFERENCES).describe("Search provider (default: auto)"),
+	model: "string?",
 	recency: "'day' | 'week' | 'month' | 'year'?",
 	limit: "number?",
 	max_tokens: "number?",
@@ -139,48 +138,32 @@ async function executeSearch(
 	_toolCallId: string,
 	params: SearchQueryParams,
 	options: ExecuteSearchOptions,
-): Promise<{ content: Array<{ type: "text"; text: string }>; details: SearchRenderDetails }> {
-	const { authStorage, modelRegistry, sessionId, signal } = options;
-	const explicitProvider = params.provider;
-	let candidates: SearchProviderCandidate[];
-	if (explicitProvider && explicitProvider !== "auto") {
-		if (isSearchProviderExcluded(explicitProvider)) {
-			const label = getSearchProviderLabel(explicitProvider);
-			const message = `${label} web search is excluded by configuration.`;
-			return {
-				content: [{ type: "text" as const, text: `Error: ${message}` }],
-				details: { response: { provider: explicitProvider, sources: [] }, error: message },
-			};
-		}
-		candidates = [{ id: explicitProvider, explicit: true }];
-	} else {
-		// `--provider auto` and the default both walk the configured chain;
-		// exclusions still apply.
-		candidates = resolveProviderCandidates();
-	}
+): Promise<{ content: Array<{ type: "text"; text: string }>; details: SearchResultDetails }> {
+	const { authStorage, sessionId, signal } = options;
+	const modelRegistry = options.modelRegistry ?? new ModelRegistry(authStorage, undefined, { settings });
+	const pool = roleCandidatePool("web", settings, modelRegistry);
+	const candidates = params.model
+		? (() => {
+				const resolved = resolveModelRoleValue(params.model, pool, { settings });
+				return resolved.model
+					? [{ model: resolved.model, explicit: true, thinkingLevel: resolved.thinkingLevel }]
+					: [];
+			})()
+		: resolveRoleChain("web", settings, pool);
 
 	const parsedQuery = parseSearchQuery(params.query);
 
-	// Invariant across providers; read once and tolerate an uninitialized
-	// Settings singleton (e.g. `omp q ...` CLI path, unit tests) so the
-	// provider-fallback loop never aborts before any provider runs.
+	// Invariant across candidates; resolve once before walking the role chain.
 	let antigravityEndpointMode: "auto" | "production" | "sandbox" | undefined;
 	try {
-		antigravityEndpointMode = settings.get("providers.antigravityEndpoint");
+		antigravityEndpointMode = cfgProvidersAntigravityEndpoint.get(settings);
 	} catch {
 		antigravityEndpointMode = undefined;
 	}
 
-	let geminiModel: string | undefined;
-	try {
-		geminiModel = settings.get("providers.webSearchGeminiModel");
-	} catch {
-		geminiModel = undefined;
-	}
-
 	let timeoutMs = DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS * 1_000;
 	try {
-		const configuredSeconds = settings.get("providers.webSearchTimeoutSeconds");
+		const configuredSeconds = cfgProvidersWebSearchTimeoutSeconds.get(settings);
 		if (Number.isFinite(configuredSeconds) && configuredSeconds > 0) {
 			timeoutMs = Math.ceil(Math.min(configuredSeconds, MAX_WEB_SEARCH_TIMEOUT_SECONDS) * 1_000);
 		}
@@ -188,18 +171,26 @@ async function executeSearch(
 		// Preserve the default for one-shot callers that do not initialize Settings.
 	}
 
-	const failures: Array<{ provider: Pick<SearchProvider, "id" | "label">; error: unknown }> = [];
+	const failures: Array<{ provider: { id: string; label: string }; error: unknown }> = [];
 	let availableProviderCount = 0;
-	let lastProvider: Pick<SearchProvider, "id" | "label"> | undefined;
+	let lastProvider: { id: string; label: string } | undefined;
+	let failedResponseProvider: SearchResponse["provider"] = "none";
 	for (const candidate of candidates) {
 		let provider: SearchProvider | undefined;
-		const providerMeta = { id: candidate.id, label: getSearchProviderLabel(candidate.id) };
-		lastProvider = providerMeta;
+		const candidateMeta = { id: candidate.model.id, label: candidate.model.name };
+		lastProvider = candidateMeta;
 		try {
-			provider = await getSearchProvider(candidate.id);
+			if (modelKind(candidate.model) === "search") {
+				provider = await getSearchProvider(candidate.model.id);
+			} else if (candidate.model.webSearch) {
+				provider = await getGroundedSearchProvider(candidate.model.webSearch);
+			} else {
+				throw new Error(`Model ${candidate.model.provider}/${candidate.model.id} does not support web search`);
+			}
+			lastProvider = provider;
 			const available = candidate.explicit
-				? await provider.isExplicitlyAvailable(authStorage)
-				: await provider.isAvailable(authStorage);
+				? await provider.isExplicitlyAvailable(authStorage, candidate.model)
+				: await provider.isAvailable(authStorage, candidate.model);
 			if (!available && !candidate.explicit) continue;
 			if (!available && candidate.explicit) {
 				throw new SearchProviderError(
@@ -222,10 +213,12 @@ async function executeSearch(
 				signal,
 				timeoutMs,
 				authStorage,
+				model: candidate.model,
+				thinkingLevel: candidate.thinkingLevel,
 				modelRegistry,
+				explicit: candidate.explicit,
 				sessionId,
 				antigravityEndpointMode,
-				geminiModel,
 			});
 
 			// Lenient constraint pass over whatever the provider returned: enforce
@@ -261,12 +254,15 @@ async function executeSearch(
 			// failure and the loop falls through to the next provider (or to the
 			// summary error), masking the cancellation.
 			throwIfAborted(signal);
-			failures.push({ provider: provider ?? providerMeta, error });
+			failedResponseProvider = provider?.id ?? "none";
+			failures.push({ provider: provider ?? candidateMeta, error });
 		}
 	}
 
 	if (availableProviderCount === 0 && failures.length === 0) {
-		const message = "No web search provider configured.";
+		const message = params.model
+			? `No web search model matches selector "${params.model}".`
+			: "No web search model configured.";
 		return {
 			content: [{ type: "text" as const, text: `Error: ${message}` }],
 			details: { response: { provider: "none", sources: [] }, error: message },
@@ -283,7 +279,7 @@ async function executeSearch(
 	return {
 		content: [{ type: "text" as const, text: `Error: ${message}` }],
 		details: {
-			response: { provider: lastFailure?.provider.id ?? lastProvider?.id ?? "none", sources: [] },
+			response: { provider: failedResponseProvider, sources: [] },
 			error: message,
 		},
 	};
@@ -298,18 +294,22 @@ async function executeSearch(
  */
 export async function runSearchQuery(
 	params: SearchQueryParams,
-	options: { authStorage?: AuthStorage; modelRegistry?: ModelRegistry; sessionId?: string; signal?: AbortSignal } = {},
-): Promise<{ content: Array<{ type: "text"; text: string }>; details: SearchRenderDetails }> {
+	options: {
+		authStorage?: AuthStorage;
+		modelRegistry?: ModelRegistry;
+		sessionId?: string;
+		signal?: AbortSignal;
+	} = {},
+): Promise<{ content: Array<{ type: "text"; text: string }>; details: SearchResultDetails }> {
 	const createdAuthStorage = options.authStorage || options.modelRegistry ? undefined : await discoverAuthStorage();
 	const authStorage = options.authStorage ?? options.modelRegistry?.authStorage ?? createdAuthStorage;
 	if (!authStorage) {
 		throw new Error("Failed to initialize authentication storage");
 	}
-	const modelRegistry = options.modelRegistry ?? (createdAuthStorage ? new ModelRegistry(authStorage) : undefined);
 	try {
 		return await executeSearch("cli-web-search", params, {
 			authStorage,
-			modelRegistry,
+			modelRegistry: options.modelRegistry,
 			sessionId: options.sessionId,
 			signal: options.signal,
 		});
@@ -321,9 +321,9 @@ export async function runSearchQuery(
 /**
  * Web search tool implementation.
  *
- * Supports the configured web-search provider chain with automatic fallback.
+ * Supports the configured web model role chain with automatic fallback.
  */
-export class WebSearchTool implements AgentTool<typeof webSearchSchema, SearchRenderDetails> {
+export class WebSearchTool implements AgentTool<typeof webSearchSchema, SearchResultDetails> {
 	readonly name = "web_search";
 	readonly approval = "read" as const;
 	readonly label = "Web Search";
@@ -344,9 +344,9 @@ export class WebSearchTool implements AgentTool<typeof webSearchSchema, SearchRe
 		_toolCallId: string,
 		params: SearchToolParams,
 		signal?: AbortSignal,
-		_onUpdate?: AgentToolUpdateCallback<SearchRenderDetails>,
+		_onUpdate?: AgentToolUpdateCallback<SearchResultDetails>,
 		_context?: AgentToolContext,
-	): Promise<AgentToolResult<SearchRenderDetails>> {
+	): Promise<AgentToolResult<SearchResultDetails>> {
 		const authStorage = this.#session.authStorage ?? (await discoverAuthStorage());
 		const sessionId = this.#session.getSessionId?.() ?? undefined;
 		return executeSearch(_toolCallId, params, {
@@ -359,7 +359,7 @@ export class WebSearchTool implements AgentTool<typeof webSearchSchema, SearchRe
 }
 
 /** Web search tool as CustomTool for consumers embedding the custom-tool API. */
-export const webSearchCustomTool: CustomTool<typeof webSearchSchema, SearchRenderDetails> = {
+export const webSearchCustomTool: CustomTool<typeof webSearchSchema, SearchResultDetails> = {
 	name: "web_search",
 	label: "Web Search",
 	description: prompt.render(webSearchDescription),
@@ -382,20 +382,11 @@ export const webSearchCustomTool: CustomTool<typeof webSearchSchema, SearchRende
 			signal,
 		});
 	},
-
-	renderCall(args: SearchToolParams, options: RenderResultOptions, theme: Theme) {
-		return renderSearchCall(args, options, theme);
-	},
-
-	renderResult(result, options: RenderResultOptions, theme: Theme, args) {
-		return renderSearchResult(result, options, theme, args);
-	},
 };
 
-export function getSearchTools(): CustomTool<any, any>[] {
+export function getSearchTools(): CustomTool<typeof webSearchSchema, SearchResultDetails>[] {
 	return [webSearchCustomTool];
 }
 
-export { getSearchProvider, setExcludedSearchProviders, setSearchProviderOrder } from "./provider";
+export { getSearchProvider } from "./provider";
 export type { SearchProviderId as SearchProvider, SearchResponse } from "./types";
-export { isSearchProviderId, isSearchProviderPreference } from "./types";

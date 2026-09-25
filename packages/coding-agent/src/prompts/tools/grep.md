@@ -1,13 +1,5 @@
-Searches files/internal URLs: Rust regex, PCRE2 fallback.
-
-<instruction>
-- `path`: known files, directories, globs, internal URLs; roots `;`-separated.
-- Broad searches may time out → narrow scope or use `glob` first.
-- One-file line selector: `src/foo.ts:50-100`; never selects search root.
-- Literal `\n` or `\\n` enables cross-line patterns.
-</instruction>
-
-<critical>
-- MUST use instead of shell `grep`/`rg`.
-{{#if eagerDelegation}}- Open-ended multi-round search MUST use {{#if scoutAvailable}}Task + scout,{{else}}Task,{{/if}} not chained calls.{{/if}}
-</critical>
+Regex: Rust, then PCRE2. `path`: `;`-separated file/dir/glob/URL; default `.`. Default case-sensitive, gitignore respected; `skip` paginates files.
+File-only selector: `src/foo.ts:50-100`. Literal `\n`/`\\n` enables cross-line.
+Bare glob `*.ts` matches any depth; `dir/*.ts` only `dir`'s direct children (`dir/**/*.ts` recurses).
+{{#if hasFind}}Behavior/unknown symbol → `find`; literals/regex → `grep`.{{/if}}
+{{#if eagerDelegation}}Multi-round search MUST use {{#if scoutAvailable}}Task + scout{{else}}Task{{/if}}, not chained calls.{{/if}}

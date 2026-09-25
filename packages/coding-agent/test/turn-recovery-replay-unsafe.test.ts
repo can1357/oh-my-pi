@@ -59,8 +59,14 @@ function createHost(
 			settings.setModelRole(role, selector);
 		}
 	}
+	const agentState = { messages: options.messages ?? [] };
 	return {
-		agent: { state: { messages: options.messages ?? [] } } as never,
+		agent: {
+			state: agentState,
+			replaceMessages(messages: AgentMessage[]) {
+				agentState.messages = messages;
+			},
+		} as never,
 		sessionManager: {
 			getLastModelChangeRole: () => options.lastModelChangeRole,
 		} as never,
@@ -81,6 +87,7 @@ function createHost(
 		abortInProgress: () => false,
 		streamingEditAbortTriggered: () => false,
 		promptGeneration: () => 0,
+		promptSequence: () => 0,
 		sessionId: () => "test-session",
 		emitSessionEvent: async () => {},
 		scheduleAgentContinue: () => {},
@@ -88,10 +95,13 @@ function createHost(
 		appendSessionMessage: () => {},
 		sessionMessageAlreadyPersisted: () => false,
 		setModelWithProviderSessionReset: async () => {},
+		resolveActiveEditMode: () => "hashline",
+		syncAfterModelChange: async () => {},
 		resetCurrentResponsesProviderSession: () => {},
-		maybeAutoRedeemCodexReset: async () => false,
+		maybeAutoRedeemReset: async () => false,
 		runAutoCompaction: async () =>
 			({ deferredHandoff: false, continuationScheduled: false }) as RecoveryCompactionResult,
+		shakeForRequestBodyReadTimeout: async () => false,
 		withBashBranchTransition: <T>(operation: () => T): T => operation(),
 	};
 }
@@ -109,8 +119,9 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		authStorage = await AuthStorage.create(tempDir.join("testauth.db"));
 		// Live-role resolution (#liveRetryRoleHint) filters by provider auth;
 		// pin a runtime key so the test does not depend on host env credentials.
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-		modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const modelRegistrySettings = Settings.isolated();
+		modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"), { settings: modelRegistrySettings });
 	});
 
 	afterAll(() => {
@@ -268,6 +279,47 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		const recovery = new TurnRecovery(createHost(model, modelRegistry));
 		const message = makeMessage([{ type: "text", text: "Here is the first part of my answer" }], model);
 		expect(recovery.isRetryableError(message)).toBe(false);
+	});
+
+	it("keeps visible partial output when the full-replay timeout recovery is vetoed", async () => {
+		const message = {
+			...makeMessage([{ type: "text", text: "Visible partial answer" }], model),
+			api: "openai-responses" as const,
+			errorStatus: 408,
+			errorMessage: "Timed out reading request body.",
+			requestBodyReadTimeoutFullReplay: true,
+		};
+		const host = createHost(model, modelRegistry, { messages: [message] });
+		const recovery = new TurnRecovery(host);
+		expect(await recovery.handleResponsesRequestBodyReadTimeout(message)).toBe("handled-terminal");
+		expect(host.agent.state.messages).toContain(message);
+	});
+
+	it("keeps tool-call output when the full-replay timeout recovery is vetoed", async () => {
+		const message = {
+			...makeMessage([{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "pwd" } }], model),
+			api: "openai-responses" as const,
+			errorStatus: 408,
+			errorMessage: "Timed out reading request body.",
+			requestBodyReadTimeoutFullReplay: true,
+		};
+		const host = createHost(model, modelRegistry, { messages: [message] });
+		const recovery = new TurnRecovery(host);
+		expect(await recovery.handleResponsesRequestBodyReadTimeout(message)).toBe("handled-terminal");
+		expect(host.agent.state.messages).toContain(message);
+	});
+
+	it("ignores a stale full-replay marker on an aborted turn", async () => {
+		const message = {
+			...makeMessage([], model),
+			api: "openai-responses" as const,
+			stopReason: "aborted" as const,
+			errorStatus: 408,
+			errorMessage: "Timed out reading request body.",
+			requestBodyReadTimeoutFullReplay: true,
+		};
+		const recovery = new TurnRecovery(createHost(model, modelRegistry, { messages: [message] }));
+		expect(await recovery.handleResponsesRequestBodyReadTimeout(message)).toBe("not-applicable");
 	});
 
 	it("does not replay a long OpenCode Go usage limit after committed text", () => {
@@ -990,7 +1042,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		expect(recovery.resolveRetryFallbackRole(selector, model)).toBe("default");
 	});
 
-	it("does not attach the default chain to a model that is not default's primary", () => {
+	it("attaches the default chain to an ephemeral-hopped model that is not default's primary (#12421)", () => {
 		const other = getBundledModel("openai", "gpt-4o-mini");
 		if (!other) throw new Error("Expected bundled model gpt-4o-mini");
 		const recovery = new TurnRecovery(
@@ -1004,7 +1056,12 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 				},
 			}),
 		);
-		expect(recovery.resolveRetryFallbackRole(`${other.provider}/${other.id}`, other)).toBeUndefined();
+		// Resolving no chain let a wait past retry.maxDelayMs fail-fast with no
+		// walk (#12421), for `/model`-chosen models and ephemeral hops alike. A
+		// walk that produced the hop stays reachable first through
+		// retryFallbackChainKeys' pinned `#activeRetryFallback.role`, so
+		// attaching `default` here cannot displace the owning chain.
+		expect(recovery.resolveRetryFallbackRole(`${other.provider}/${other.id}`, other)).toBe("default");
 	});
 
 	// Gemini reports MALFORMED_FUNCTION_CALL when the model transcribes the call

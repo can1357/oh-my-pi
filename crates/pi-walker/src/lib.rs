@@ -5,6 +5,12 @@
 //! use for globbing, grep candidate discovery, AST scans, and shell builtins.
 //! The crate exposes plain Rust types, visitor interfaces, cache policy, and a
 //! caller-supplied heartbeat so consumers do not inherit N-API dependencies.
+//!
+//! Every directory read, metadata lookup, and ignore-file read goes through the
+//! request's [`BlockingFs`] (native host filesystem by default). Platform bulk
+//! directory syscalls are used only where that filesystem reports
+//! [`BlockingFs::is_native_local`], and the shared scan cache only when it has
+//! no provider.
 
 mod cache;
 
@@ -16,6 +22,7 @@ use std::{
 	borrow::Cow,
 	cell::{Cell, RefCell},
 	cmp::Ordering,
+	collections::BinaryHeap,
 	convert::Infallible,
 	ffi::OsStr,
 	fmt,
@@ -30,11 +37,12 @@ use std::{
 
 pub use cache::{
 	cache_ttl_ms, classify_file_type, contains_component, empty_recheck_ms, invalidate_all,
-	invalidate_path, invalidate_path_string, max_cache_entries, normalize_relative_path,
-	parallel_for_each, parallel_for_each_init, resolve_search_path, should_parallelize,
-	should_skip_path, walk_workers,
+	invalidate_path, invalidate_path_string, max_cache_entries, normalize_path,
+	normalize_relative_path, parallel_for_each, parallel_for_each_init, resolve_search_path,
+	should_parallelize, should_skip_path, walk_workers,
 };
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
+use pi_vfs::BlockingFs;
 
 const HEARTBEAT_INTERVAL: usize = 128;
 
@@ -133,7 +141,8 @@ pub enum SizeHintPolicy {
 	FromDetail,
 	/// Request minimal metadata even on platforms with cheap size hints.
 	Never,
-	/// Request full metadata only when the platform exposes cheap file sizes.
+	/// Request full metadata only when the platform exposes cheap file sizes
+	/// and the request's filesystem reads the root natively.
 	WhenCheap,
 	/// Request full metadata for every yielded entry.
 	Always,
@@ -596,8 +605,12 @@ impl Default for WalkOptions {
 }
 
 /// High-level traversal request that owns a root and wraps [`WalkOptions`].
-#[derive(Clone, Debug, Eq, PartialEq)]
+///
+/// Requests compare equal only when they traverse the same filesystem
+/// instance ([`BlockingFs::ptr_eq`]) with identical policy.
+#[derive(Clone, Debug)]
 pub struct WalkRequest {
+	filesystem:       BlockingFs,
 	root:             PathBuf,
 	options:          WalkOptions,
 	cache_policy:     CachePolicy,
@@ -607,6 +620,22 @@ pub struct WalkRequest {
 	visit_order:      VisitOrder,
 	size_hint_policy: SizeHintPolicy,
 }
+
+impl PartialEq for WalkRequest {
+	fn eq(&self, other: &Self) -> bool {
+		self.filesystem.ptr_eq(&other.filesystem)
+			&& self.root == other.root
+			&& self.options == other.options
+			&& self.cache_policy == other.cache_policy
+			&& self.filter == other.filter
+			&& self.limit == other.limit
+			&& self.empty_recheck == other.empty_recheck
+			&& self.visit_order == other.visit_order
+			&& self.size_hint_policy == other.size_hint_policy
+	}
+}
+
+impl Eq for WalkRequest {}
 
 impl WalkRequest {
 	/// Create a request rooted at `root` with default [`WalkOptions`].
@@ -627,6 +656,7 @@ impl WalkRequest {
 			VisitOrder::PreOrder
 		};
 		Self {
+			filesystem: BlockingFs::native(),
 			root: root.into(),
 			options,
 			cache_policy,
@@ -643,8 +673,20 @@ impl WalkRequest {
 		&self.root
 	}
 
+	/// Traverse through `filesystem` instead of the native host filesystem.
+	///
+	/// Directory listings, metadata, symlink targets, repository markers, and
+	/// ignore files (including git's global excludes) are all read through this
+	/// filesystem. Native bulk directory syscalls apply only to directories it
+	/// reports as [`BlockingFs::is_native_local`]; the shared scan cache applies
+	/// only when it has no provider ([`BlockingFs::is_native`]).
+	pub fn filesystem(mut self, filesystem: BlockingFs) -> Self {
+		self.filesystem = filesystem;
+		self
+	}
+
 	/// Return low-level options after applying high-level policies.
-	pub const fn options(&self) -> WalkOptions {
+	pub fn options(&self) -> WalkOptions {
 		self.effective_options()
 	}
 
@@ -716,6 +758,9 @@ impl WalkRequest {
 	}
 
 	/// Enable or disable the shared scan cache for owned collection.
+	///
+	/// The cache applies only to the native host filesystem; requests with a
+	/// filesystem provider are always scanned fresh.
 	pub const fn cache(mut self, cache: bool) -> Self {
 		self.cache_policy = if cache {
 			CachePolicy::Enabled
@@ -993,7 +1038,7 @@ impl WalkRequest {
 			visitor,
 			predicate,
 		};
-		walk_entries(&self.root, options, &mut adapter, &mut heartbeat)
+		walk_entries_in(&self.filesystem, &self.root, options, &mut adapter, &mut heartbeat)
 	}
 
 	/// Run `operation` for each accepted regular file.
@@ -1058,7 +1103,9 @@ impl WalkRequest {
 	/// Candidates may be delivered in any order. [`WalkOptions::order`],
 	/// [`WalkRequest::visit_order`], [`WalkOptions::emit_root`], and
 	/// [`WalkRequest::limit`] are ignored. Directory-open errors are skipped
-	/// with grep-style semantics instead of being delivered to visitors.
+	/// with grep-style semantics instead of being delivered to visitors, except
+	/// that a cancelled filesystem ([`pi_vfs::is_cancelled`]) ends the walk
+	/// instead of being skipped directory by directory.
 	///
 	/// [`ParallelWalkControl::Stop`] sets a shared stop flag; workers check that
 	/// flag before reading each directory and while processing directory
@@ -1089,6 +1136,15 @@ impl WalkRequest {
 		let mut options = self.effective_options();
 		if matches!(rank, Some(WalkRank::MtimeDescPathAsc)) {
 			options.detail = WalkDetail::Full;
+		}
+		if !options.cache
+			&& let (Some(rank), Some(limit)) = (rank, limit)
+		{
+			let mut collector = RankedCollectVisitor::new(&self.filter, rank, limit);
+			walk_entries_in(&self.filesystem, &self.root, options, &mut collector, || {
+				heartbeat().map_err(|err| err.to_string())
+			})?;
+			return Ok(collector.into_outcome());
 		}
 		let mut scan = self.collect_entries_with_options(options, &heartbeat)?;
 		let mut backend = if scan.cache_age_ms == 0 {
@@ -1144,19 +1200,22 @@ impl WalkRequest {
 		mtime_order.then_with(|| left.path.cmp(&right.path))
 	}
 
-	const fn effective_options(&self) -> WalkOptions {
+	fn effective_options(&self) -> WalkOptions {
 		let mut options = self.options;
-		options.cache = matches!(self.cache_policy, CachePolicy::Enabled);
+		options.cache = matches!(self.cache_policy, CachePolicy::Enabled)
+			&& cache::shares_scan_cache(&self.filesystem, &self.root);
 		options.contents_first = matches!(self.visit_order, VisitOrder::ContentsFirst);
 		match self.size_hint_policy {
 			SizeHintPolicy::FromDetail => {},
 			SizeHintPolicy::Never => options.detail = WalkDetail::Minimal,
 			SizeHintPolicy::WhenCheap => {
-				options.detail = if supports_cheap_size_hints() {
-					WalkDetail::Full
-				} else {
-					WalkDetail::Minimal
-				};
+				// Provider-backed listings pay one metadata call per entry for sizes.
+				options.detail =
+					if supports_cheap_size_hints() && self.filesystem.is_native_local(&self.root) {
+						WalkDetail::Full
+					} else {
+						WalkDetail::Minimal
+					};
 			},
 			SizeHintPolicy::Always => options.detail = WalkDetail::Full,
 		}
@@ -1175,7 +1234,7 @@ impl WalkRequest {
 		H: Fn() -> std::result::Result<(), E> + Sync,
 		E: fmt::Display,
 	{
-		collect_entries(&self.root, options, heartbeat)
+		cache::collect_entries_in(&self.filesystem, &self.root, options, heartbeat)
 	}
 
 	fn should_recheck_empty(&self, cache_age_ms: u64) -> bool {
@@ -1290,10 +1349,12 @@ where
 }
 
 struct ParallelWalkContext {
-	root:    PathBuf,
-	options: WalkOptions,
-	filter:  WalkFilter,
-	matcher: FastIgnore,
+	fs:       BlockingFs,
+	root:     PathBuf,
+	url_root: bool,
+	options:  WalkOptions,
+	filter:   WalkFilter,
+	matcher:  FastIgnore,
 }
 
 struct ParallelWalkShared<'a, E, S, H> {
@@ -1364,16 +1425,20 @@ where
 	}
 
 	options.cache = false;
-	let Some(root_entry) = root_entry(&request.root, options.detail, options.follow_links)? else {
+	let fs = &request.filesystem;
+	let Some(root_entry) = root_entry(fs, &request.root, options.detail, options.follow_links)?
+	else {
 		return Ok(WalkStatus::Complete);
 	};
 	let context = ParallelWalkContext {
+		fs: fs.clone(),
 		root: request.root.clone(),
+		url_root: pi_vfs::is_virtual_path(&request.root),
 		options,
 		filter: request.filter.clone(),
-		matcher: FastIgnore::new(options.use_gitignore),
+		matcher: FastIgnore::new(fs, options.use_gitignore),
 	};
-	let root_ignore = context.matcher.root_state(&context.root);
+	let root_ignore = context.matcher.root_state(&context.fs, &context.root);
 	let shared = ParallelWalkShared::new(sink, heartbeat);
 
 	if root_entry.file_type == FileType::File && options.min_depth == 0 {
@@ -1424,7 +1489,7 @@ where
 	options.emit_root = true;
 	options.directory_errors = DirectoryErrorMode::Visit;
 	let mut visitor = SerialCandidateVisitor { filter: &request.filter, sink };
-	walk_entries(&request.root, options, &mut visitor, heartbeat)
+	walk_entries_in(&request.filesystem, &request.root, options, &mut visitor, heartbeat)
 }
 
 fn emit_parallel_root_file<E, S, H>(
@@ -1543,6 +1608,7 @@ fn walk_parallel_dir<'scope, E, S, H>(
 	}
 	let mut scratch = take_parallel_scratch();
 	let ignore_entries = match collect_directory_entries(
+		&context.fs,
 		&dir,
 		context.options.detail,
 		&mut scratch,
@@ -1550,6 +1616,11 @@ fn walk_parallel_dir<'scope, E, S, H>(
 		derive_ignore_from_entries,
 	) {
 		Ok(ignore_entries) => ignore_entries,
+		Err(ReadDirError::Io(err)) if pi_vfs::is_cancelled(&err) => {
+			shared.request_stop();
+			recycle_parallel_scratch(scratch);
+			return;
+		},
 		Err(ReadDirError::Io(_) | ReadDirError::Walk(WalkError::InvalidData { .. })) => {
 			recycle_parallel_scratch(scratch);
 			return;
@@ -1561,6 +1632,7 @@ fn walk_parallel_dir<'scope, E, S, H>(
 		},
 	};
 	let dir_ignore = context.matcher.state_from_entries(
+		&context.fs,
 		&ignore_state,
 		&dir,
 		ignore_entries,
@@ -1597,7 +1669,7 @@ fn walk_parallel_dir<'scope, E, S, H>(
 		}
 
 		let relative_len = relative.len();
-		absolute.push(name);
+		let parent = enter_child_path(&mut absolute, name, context.url_root);
 		push_relative_name(&mut relative, &name_str);
 		let is_dir = entry.file_type == FileType::Dir;
 		if !context.matcher.is_ignored(&dir_ignore, &absolute, is_dir) {
@@ -1623,7 +1695,7 @@ fn walk_parallel_dir<'scope, E, S, H>(
 							size:     entry.size,
 						};
 						if !emit_parallel_candidate(shared, &candidate) {
-							absolute.pop();
+							leave_child_path(&mut absolute, parent);
 							relative.truncate(relative_len);
 							break;
 						}
@@ -1668,13 +1740,13 @@ fn walk_parallel_dir<'scope, E, S, H>(
 				WalkDecision::SkipDescend => {},
 				WalkDecision::Stop => {
 					shared.request_stop();
-					absolute.pop();
+					leave_child_path(&mut absolute, parent);
 					relative.truncate(relative_len);
 					break;
 				},
 			}
 		}
-		absolute.pop();
+		leave_child_path(&mut absolute, parent);
 		relative.truncate(relative_len);
 	}
 	recycle_parallel_scratch(scratch);
@@ -1724,9 +1796,17 @@ pub struct CollectedEntry {
 
 impl CollectedEntry {
 	/// Return this entry's absolute path under `root`.
+	///
+	/// URL roots are extended one raw component at a time with
+	/// [`pi_vfs::child_path`], matching the paths traversal delivered.
 	pub fn absolute_path(&self, root: &Path) -> PathBuf {
 		if self.path.is_empty() {
 			root.to_path_buf()
+		} else if pi_vfs::is_virtual_path(root) {
+			self
+				.path
+				.split('/')
+				.fold(root.to_path_buf(), |dir, name| pi_vfs::child_path(&dir, OsStr::new(name)))
 		} else {
 			root.join(&self.path)
 		}
@@ -1799,99 +1879,90 @@ pub fn is_under_pruned_relative_dir(relative: &str, pruned_dirs: &[String]) -> b
 		.any(|dir| is_relative_ancestor(dir, relative))
 }
 
-/// Return the root device id used by same-filesystem traversal filters.
+/// Return the native root device id used by same-filesystem traversal filters.
 ///
-/// Non-Unix platforms return `None`, making same-filesystem filtering a no-op.
-#[cfg(unix)]
+/// Returns `None` when the host filesystem does not report device ids (for
+/// example on Windows), making same-filesystem filtering a no-op.
 pub fn root_device_id(path: &Path, follow_links: FollowLinks) -> Option<u64> {
-	use std::os::unix::fs::MetadataExt;
-
-	metadata_for_follow_policy(path, follow_links.follow_at_depth(0))
-		.ok()
-		.map(|metadata| metadata.dev())
+	root_device_id_in(&BlockingFs::native(), path, follow_links)
+		.filter(|device| device.native)
+		.map(|device| device.dev)
 }
 
-/// Return the root device id used by same-filesystem traversal filters.
+/// Device identity for same-filesystem filtering.
 ///
-/// Non-Unix platforms return `None`, making same-filesystem filtering a no-op.
-#[cfg(not(unix))]
-pub const fn root_device_id(_path: &Path, _follow_links: FollowLinks) -> Option<u64> {
-	None
+/// Provider device numbers live in a separate namespace from host device
+/// numbers ([`pi_vfs::FileId::is_native`]), so equal numbers from different
+/// namespaces never count as the same filesystem.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DeviceId {
+	native: bool,
+	dev:    u64,
 }
 
-/// Return whether `path` is on the root filesystem represented by
+impl DeviceId {
+	fn of(metadata: &pi_vfs::Metadata) -> Option<Self> {
+		metadata
+			.file_id()
+			.map(|id| Self { native: id.is_native(), dev: id.dev() })
+	}
+}
+
+fn root_device_id_in(fs: &BlockingFs, path: &Path, follow_links: FollowLinks) -> Option<DeviceId> {
+	metadata_for_follow_policy(fs, path, follow_links.follow_at_depth(0))
+		.ok()
+		.and_then(|metadata| DeviceId::of(&metadata))
+}
+
+/// Return whether native `path` is on the root filesystem represented by
 /// `root_device`.
 ///
-/// When `root_device` is `None`, this returns true. On non-Unix platforms this
-/// is always true, matching the existing no-op same-filesystem behavior there.
-#[cfg(unix)]
+/// When `root_device` is `None`, this returns true, matching the no-op
+/// same-filesystem behavior where device ids are unavailable. Entries whose
+/// device id is unknown are treated as off the root filesystem.
 pub fn is_path_on_root_file_system(
 	path: &Path,
 	depth: usize,
 	follow_links: FollowLinks,
 	root_device: Option<u64>,
 ) -> bool {
-	use std::os::unix::fs::MetadataExt;
-
-	let Some(root_device) = root_device else {
-		return true;
-	};
-	metadata_for_follow_policy(path, follow_links.follow_at_depth(depth))
-		.is_ok_and(|metadata| metadata.dev() == root_device)
+	is_effective_path_on_root_file_system(
+		&BlockingFs::native(),
+		path,
+		depth,
+		follow_links,
+		root_device.map(|dev| DeviceId { native: true, dev }),
+		None,
+	)
 }
 
-/// Return whether `path` is on the root filesystem represented by
-/// `root_device`.
-///
-/// When `root_device` is `None`, this returns true. On non-Unix platforms this
-/// is always true, matching the existing no-op same-filesystem behavior there.
-#[cfg(not(unix))]
-pub const fn is_path_on_root_file_system(
-	_path: &Path,
-	_depth: usize,
-	_follow_links: FollowLinks,
-	_root_device: Option<u64>,
-) -> bool {
-	true
-}
-
-#[cfg(unix)]
 fn is_effective_path_on_root_file_system(
+	fs: &BlockingFs,
 	path: &Path,
 	depth: usize,
 	follow_links: FollowLinks,
-	root_device: Option<u64>,
-	followed_metadata: Option<&std::fs::Metadata>,
+	root_device: Option<DeviceId>,
+	followed_metadata: Option<&pi_vfs::Metadata>,
 ) -> bool {
-	use std::os::unix::fs::MetadataExt;
-
 	let Some(root_device) = root_device else {
 		return true;
 	};
 	if let Some(metadata) = followed_metadata {
-		return metadata.dev() == root_device;
+		return DeviceId::of(metadata) == Some(root_device);
 	}
-	metadata_for_follow_policy(path, follow_links.follow_at_depth(depth))
-		.is_ok_and(|metadata| metadata.dev() == root_device)
+	metadata_for_follow_policy(fs, path, follow_links.follow_at_depth(depth))
+		.is_ok_and(|metadata| DeviceId::of(&metadata) == Some(root_device))
 }
 
-#[cfg(not(unix))]
-const fn is_effective_path_on_root_file_system(
-	_path: &Path,
-	_depth: usize,
-	_follow_links: FollowLinks,
-	_root_device: Option<u64>,
-	_followed_metadata: Option<&std::fs::Metadata>,
-) -> bool {
-	true
-}
-
-#[cfg(unix)]
-fn metadata_for_follow_policy(path: &Path, follow: bool) -> io::Result<std::fs::Metadata> {
+fn metadata_for_follow_policy(
+	fs: &BlockingFs,
+	path: &Path,
+	follow: bool,
+) -> io::Result<pi_vfs::Metadata> {
 	if follow {
-		std::fs::metadata(path)
+		fs.metadata(path)
 	} else {
-		std::fs::symlink_metadata(path)
+		fs.symlink_metadata(path)
 	}
 }
 
@@ -1944,10 +2015,10 @@ pub struct PreDescendDecision {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum DirectoryIdentity {
-	#[cfg(unix)]
-	Unix { dev: u64, ino: u64 },
-	#[cfg(not(unix))]
-	Generic(std::path::PathBuf),
+	/// Filesystem-reported object identity.
+	Id(pi_vfs::FileId),
+	/// Resolved path for filesystems without object identities.
+	Canonical(PathBuf),
 }
 
 #[derive(Default)]
@@ -1969,17 +2040,13 @@ impl SymlinkAncestorStack {
 	}
 }
 
-fn directory_identity(path: &Path) -> io::Result<DirectoryIdentity> {
-	#[cfg(unix)]
-	{
-		use std::os::unix::fs::MetadataExt;
-		let metadata = std::fs::metadata(path)?;
-		Ok(DirectoryIdentity::Unix { dev: metadata.dev(), ino: metadata.ino() })
-	}
-	#[cfg(not(unix))]
-	{
-		let canonical = std::fs::canonicalize(path)?;
-		Ok(DirectoryIdentity::Generic(canonical))
+fn directory_identity(fs: &BlockingFs, path: &Path) -> io::Result<DirectoryIdentity> {
+	match fs.file_id(path, true) {
+		Ok(id) => Ok(DirectoryIdentity::Id(id)),
+		Err(err) if err.kind() == io::ErrorKind::Unsupported => {
+			fs.canonicalize(path).map(DirectoryIdentity::Canonical)
+		},
+		Err(err) => Err(err),
 	}
 }
 
@@ -2197,6 +2264,96 @@ struct CollectVisitor<E> {
 	_error:  std::marker::PhantomData<fn() -> E>,
 }
 
+struct RankedEntry {
+	entry: CollectedEntry,
+	rank:  WalkRank,
+}
+
+impl Ord for RankedEntry {
+	fn cmp(&self, other: &Self) -> Ordering {
+		match (self.rank, other.rank) {
+			(WalkRank::PathAsc, WalkRank::PathAsc) => self.entry.path.cmp(&other.entry.path),
+			(WalkRank::MtimeDescPathAsc, WalkRank::MtimeDescPathAsc) => {
+				WalkRequest::compare_mtime_desc_path_asc(&self.entry, &other.entry)
+			},
+			(WalkRank::PathAsc, WalkRank::MtimeDescPathAsc) => Ordering::Less,
+			(WalkRank::MtimeDescPathAsc, WalkRank::PathAsc) => Ordering::Greater,
+		}
+	}
+}
+
+impl PartialOrd for RankedEntry {
+	fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+		Some(self.cmp(other))
+	}
+}
+
+impl PartialEq for RankedEntry {
+	fn eq(&self, other: &Self) -> bool {
+		self.cmp(other) == Ordering::Equal
+	}
+}
+
+impl Eq for RankedEntry {}
+
+struct RankedCollectVisitor<'a> {
+	filter:   &'a WalkFilter,
+	rank:     WalkRank,
+	limit:    usize,
+	entries:  BinaryHeap<RankedEntry>,
+	scanned:  usize,
+	filtered: usize,
+}
+
+impl<'a> RankedCollectVisitor<'a> {
+	const fn new(filter: &'a WalkFilter, rank: WalkRank, limit: usize) -> Self {
+		Self { filter, rank, limit, entries: BinaryHeap::new(), scanned: 0, filtered: 0 }
+	}
+
+	fn into_outcome(self) -> WalkOutcome {
+		let stats = WalkStats {
+			cache_age_ms:     0,
+			scanned_entries:  self.scanned,
+			filtered_entries: self.filtered,
+			limited_entries:  self.scanned - self.filtered - self.entries.len(),
+		};
+		let entries = self
+			.entries
+			.into_sorted_vec()
+			.into_iter()
+			.map(|entry| entry.entry)
+			.collect();
+		WalkOutcome { entries, backend: WalkBackend::Fresh, stats }
+	}
+}
+
+impl EntryVisitor for RankedCollectVisitor<'_> {
+	type Error = String;
+
+	fn visit(&mut self, entry: Entry<'_>) -> std::result::Result<WalkControl, Self::Error> {
+		self.scanned += 1;
+		let entry = CollectedEntry {
+			path:      entry.relative.to_string(),
+			file_type: entry.file_type,
+			mtime:     entry.mtime,
+			size:      entry.size,
+		};
+		if !self.filter.accepts_collected(&entry) {
+			self.filtered += 1;
+			return Ok(WalkControl::Continue);
+		}
+		let candidate = RankedEntry { entry, rank: self.rank };
+		if self.entries.len() < self.limit {
+			self.entries.push(candidate);
+		} else if let Some(mut worst) = self.entries.peek_mut()
+			&& candidate < *worst
+		{
+			*worst = candidate;
+		}
+		Ok(WalkControl::Continue)
+	}
+}
+
 impl<E> CollectVisitor<E> {
 	const fn new() -> Self {
 		Self { entries: Vec::new(), _error: std::marker::PhantomData }
@@ -2217,10 +2374,9 @@ impl<E> EntryVisitor for CollectVisitor<E> {
 	}
 }
 
-#[allow(clippy::missing_const_for_fn, reason = "calls non-const root_device_id on unix")]
-fn root_device_for_options(root: &Path, options: WalkOptions) -> Option<u64> {
+fn root_device_for_options(fs: &BlockingFs, root: &Path, options: WalkOptions) -> Option<DeviceId> {
 	if options.same_file_system {
-		root_device_id(root, options.follow_links)
+		root_device_id_in(fs, root, options.follow_links)
 	} else {
 		None
 	}
@@ -2336,8 +2492,12 @@ impl<E> From<io::Error> for ReadDirError<E> {
 	}
 }
 
-fn file_type_from_metadata(metadata: &std::fs::Metadata) -> Option<FileType> {
-	let file_type = metadata.file_type();
+fn file_type_from_metadata(metadata: &pi_vfs::Metadata) -> Option<FileType> {
+	walker_file_type(metadata.file_type())
+}
+
+/// Map a filesystem entry type to the walker kinds, skipping special files.
+fn walker_file_type(file_type: pi_vfs::FileType) -> Option<FileType> {
 	if file_type.is_symlink() {
 		Some(FileType::Symlink)
 	} else if file_type.is_dir() {
@@ -2349,6 +2509,15 @@ fn file_type_from_metadata(metadata: &std::fs::Metadata) -> Option<FileType> {
 	}
 }
 
+/// Modification time in milliseconds since the Unix epoch, when representable.
+fn metadata_mtime_millis(metadata: &pi_vfs::Metadata) -> Option<f64> {
+	metadata
+		.modified()
+		.ok()
+		.and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+		.map(|duration| duration.as_millis() as f64)
+}
+
 struct RootEntry {
 	file_type: FileType,
 	mtime:     Option<f64>,
@@ -2356,18 +2525,20 @@ struct RootEntry {
 }
 
 fn root_entry<E>(
+	fs: &BlockingFs,
 	root: &Path,
 	detail: WalkDetail,
 	follow_links: FollowLinks,
 ) -> std::result::Result<Option<RootEntry>, WalkError<E>> {
 	let metadata = if follow_links.follow_at_depth(0) {
-		match std::fs::metadata(root) {
+		match fs.metadata(root) {
 			Ok(metadata) => metadata,
 			Err(err) if is_missing_metadata_error(&err) => {
-				std::fs::symlink_metadata(root).map_err(|err| WalkError::InvalidData {
-					path:    root.to_path_buf(),
-					message: err.to_string(),
-				})?
+				fs.symlink_metadata(root)
+					.map_err(|err| WalkError::InvalidData {
+						path:    root.to_path_buf(),
+						message: err.to_string(),
+					})?
 			},
 			Err(err) => {
 				return Err(WalkError::InvalidData {
@@ -2377,15 +2548,16 @@ fn root_entry<E>(
 			},
 		}
 	} else {
-		std::fs::symlink_metadata(root).map_err(|err| WalkError::InvalidData {
-			path:    root.to_path_buf(),
-			message: err.to_string(),
-		})?
+		fs.symlink_metadata(root)
+			.map_err(|err| WalkError::InvalidData {
+				path:    root.to_path_buf(),
+				message: err.to_string(),
+			})?
 	};
 	Ok(entry_from_metadata(&metadata, detail))
 }
 
-fn entry_from_metadata(metadata: &std::fs::Metadata, detail: WalkDetail) -> Option<RootEntry> {
+fn entry_from_metadata(metadata: &pi_vfs::Metadata, detail: WalkDetail) -> Option<RootEntry> {
 	let file_type = file_type_from_metadata(metadata)?;
 	let size = if detail == WalkDetail::Full && file_type == FileType::File {
 		Some(metadata.len() as f64)
@@ -2393,11 +2565,7 @@ fn entry_from_metadata(metadata: &std::fs::Metadata, detail: WalkDetail) -> Opti
 		None
 	};
 	let mtime = if detail == WalkDetail::Full {
-		metadata
-			.modified()
-			.ok()
-			.and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-			.map(|duration| duration.as_millis() as f64)
+		metadata_mtime_millis(metadata)
 	} else {
 		None
 	};
@@ -2408,9 +2576,11 @@ fn is_missing_metadata_error(err: &io::Error) -> bool {
 	matches!(err.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory)
 }
 
-/// Scans entries using the shared cache when [`WalkOptions::cache`] is true.
+/// Scans the native host filesystem, using the shared cache when
+/// [`WalkOptions::cache`] is true.
 ///
-/// The native scanner implements every [`WalkOptions`] traversal contract.
+/// The native scanner implements every [`WalkOptions`] traversal contract. Use
+/// [`WalkRequest::filesystem`] to scan an injected filesystem.
 pub fn collect_entries<E, H>(
 	root: &Path,
 	options: WalkOptions,
@@ -2420,10 +2590,11 @@ where
 	H: Fn() -> std::result::Result<(), E> + Sync,
 	E: fmt::Display,
 {
-	cache::collect_entries(root, options, heartbeat)
+	cache::collect_entries_in(&BlockingFs::native(), root, options, heartbeat)
 }
 
-fn collect_entries_native<E, H>(
+fn scan_entries<E, H>(
+	fs: &BlockingFs,
 	root: &Path,
 	options: WalkOptions,
 	heartbeat: H,
@@ -2432,7 +2603,7 @@ where
 	H: FnMut() -> std::result::Result<(), E>,
 {
 	let mut collector = CollectVisitor::new();
-	let _status = walk_entries(root, options, &mut collector, heartbeat)?;
+	let _status = walk_entries_in(fs, root, options, &mut collector, heartbeat)?;
 	if options.contents_first {
 		sort_collected_depth_first(&mut collector.entries);
 	} else {
@@ -2451,9 +2622,25 @@ pub fn collect_entries_without_heartbeat(
 	collect_entries(root, options, || Ok::<(), Infallible>(()))
 }
 
-/// Streams entries using the native scanner for every [`WalkOptions`]
-/// traversal contract.
+/// Streams native host filesystem entries for every [`WalkOptions`] traversal
+/// contract.
+///
+/// Use [`WalkRequest::filesystem`] to stream an injected filesystem.
 pub fn walk_entries<V, H>(
+	root: &Path,
+	options: WalkOptions,
+	visitor: &mut V,
+	heartbeat: H,
+) -> std::result::Result<WalkStatus, WalkError<V::Error>>
+where
+	V: EntryVisitor,
+	H: FnMut() -> std::result::Result<(), V::Error>,
+{
+	walk_entries_in(&BlockingFs::native(), root, options, visitor, heartbeat)
+}
+
+fn walk_entries_in<V, H>(
+	fs: &BlockingFs,
 	root: &Path,
 	options: WalkOptions,
 	visitor: &mut V,
@@ -2467,12 +2654,14 @@ where
 		return Ok(WalkStatus::Complete);
 	}
 
-	let root_device = root_device_for_options(root, options);
-	let matcher = FastIgnore::new(options.use_gitignore);
-	let root_ignore = matcher.root_state(root);
+	let root_device = root_device_for_options(fs, root, options);
+	let matcher = FastIgnore::new(fs, options.use_gitignore);
+	let root_ignore = matcher.root_state(fs, root);
 
 	let mut context = WalkContext {
+		fs,
 		root_path: root,
+		url_root: pi_vfs::is_virtual_path(root),
 		options,
 		root_device,
 		symlink_ancestors: SymlinkAncestorStack::default(),
@@ -2488,9 +2677,11 @@ where
 }
 
 struct WalkContext<'a, H> {
+	fs:                &'a BlockingFs,
 	root_path:         &'a Path,
+	url_root:          bool,
 	options:           WalkOptions,
-	root_device:       Option<u64>,
+	root_device:       Option<DeviceId>,
 	symlink_ancestors: SymlinkAncestorStack,
 	matcher:           FastIgnore,
 	absolute_path:     PathBuf,
@@ -2511,14 +2702,15 @@ impl<H> WalkContext<'_, H> {
 		V: EntryVisitor,
 		H: FnMut() -> std::result::Result<(), V::Error>,
 	{
-		let root_entry = root_entry(root, self.options.detail, self.options.follow_links)?;
+		let root_entry = root_entry(self.fs, root, self.options.detail, self.options.follow_links)?;
 		let Some(root_entry) = root_entry else {
 			return Ok(WalkStatus::Complete);
 		};
 
-		// Seed the ancestor stack only when descendant symlink traversal can loop.
+		// Seed the ancestor stack only when descendant symlink traversal can
+		// loop.
 		if self.options.follow_links == FollowLinks::Always
-			&& let Ok(id) = directory_identity(root)
+			&& let Ok(id) = directory_identity(self.fs, root)
 		{
 			self.symlink_ancestors.push(id);
 		}
@@ -2545,7 +2737,8 @@ impl<H> WalkContext<'_, H> {
 			&& self.options.min_depth == 0
 			&& decision.emit
 		{
-			let name = root.file_name().unwrap_or(root.as_os_str());
+			let decoded_name = pi_vfs::file_name(root);
+			let name = decoded_name.as_deref().unwrap_or(root.as_os_str());
 			match visitor
 				.visit_pre_decided(Entry {
 					path: root,
@@ -2581,7 +2774,8 @@ impl<H> WalkContext<'_, H> {
 			&& self.options.min_depth == 0
 			&& decision.emit
 		{
-			let name = root.file_name().unwrap_or(root.as_os_str());
+			let decoded_name = pi_vfs::file_name(root);
+			let name = decoded_name.as_deref().unwrap_or(root.as_os_str());
 			match visitor
 				.visit_pre_decided(Entry {
 					path: root,
@@ -2613,16 +2807,16 @@ impl<H> WalkContext<'_, H> {
 		self.scratch_pool.push(scratch);
 	}
 
-	fn push_entry_path(&mut self, name: &OsStr, name_str: &str) -> usize {
+	fn push_entry_path(&mut self, name: &OsStr, name_str: &str) -> (SavedParent, usize) {
 		let relative_len = self.relative_path.len();
-		self.absolute_path.push(name);
+		let parent = enter_child_path(&mut self.absolute_path, name, self.url_root);
 		push_relative_name(&mut self.relative_path, name_str);
-		relative_len
+		(parent, relative_len)
 	}
 
-	fn pop_entry_path(&mut self, relative_len: usize) {
+	fn pop_entry_path(&mut self, (parent, relative_len): (SavedParent, usize)) {
 		self.relative_path.truncate(relative_len);
-		self.absolute_path.pop();
+		leave_child_path(&mut self.absolute_path, parent);
 	}
 
 	fn walk_dir<V>(
@@ -2637,7 +2831,7 @@ impl<H> WalkContext<'_, H> {
 		H: FnMut() -> std::result::Result<(), V::Error>,
 	{
 		if self.options.follow_links == FollowLinks::Always
-			&& let Ok(identity) = directory_identity(&self.absolute_path)
+			&& let Ok(identity) = directory_identity(self.fs, &self.absolute_path)
 		{
 			self.symlink_ancestors.push(identity);
 			let result = self.walk_dir_inner(depth, ignore_state, derive_ignore_from_entries, visitor);
@@ -2661,6 +2855,7 @@ impl<H> WalkContext<'_, H> {
 	{
 		let mut scratch = self.take_scratch();
 		let ignore_entries = match collect_directory_entries(
+			self.fs,
 			&self.absolute_path,
 			self.options.detail,
 			&mut scratch,
@@ -2678,6 +2873,7 @@ impl<H> WalkContext<'_, H> {
 			scratch.sort_by_name();
 		}
 		let dir_ignore = self.matcher.state_from_entries(
+			self.fs,
 			ignore_state,
 			&self.absolute_path,
 			ignore_entries,
@@ -2714,7 +2910,7 @@ impl<H> WalkContext<'_, H> {
 				continue;
 			}
 
-			let relative_len = self.push_entry_path(name, &name_str);
+			let parent_lengths = self.push_entry_path(name, &name_str);
 			let entry_result = self.walk_current_entry(
 				name,
 				entry.file_type,
@@ -2724,7 +2920,7 @@ impl<H> WalkContext<'_, H> {
 				&dir_ignore,
 				visitor,
 			);
-			self.pop_entry_path(relative_len);
+			self.pop_entry_path(parent_lengths);
 			if entry_result? {
 				self.recycle_scratch(scratch);
 				return Ok(true);
@@ -2758,32 +2954,10 @@ impl<H> WalkContext<'_, H> {
 		let followed_metadata = if entry_file_type == FileType::Symlink
 			&& self.options.follow_links == FollowLinks::Always
 		{
-			match std::fs::metadata(&self.absolute_path) {
+			match self.fs.metadata(&self.absolute_path) {
 				Ok(metadata) => Some(metadata),
 				Err(err) => {
-					if self.options.directory_errors == DirectoryErrorMode::SkipSkippable
-						&& is_skippable_directory_error(&err)
-					{
-						return Ok(false);
-					}
-					if self.options.directory_errors == DirectoryErrorMode::Visit {
-						match visitor
-							.visit_directory_error(DirectoryError {
-								path:  &self.absolute_path,
-								error: &err,
-							})
-							.map_err(WalkError::Interrupted)?
-						{
-							WalkControl::Quit => return Ok(true),
-							WalkControl::SkipDescend | WalkControl::Continue => {
-								return Ok(false);
-							},
-						}
-					}
-					return Err(WalkError::InvalidData {
-						path:    self.absolute_path.clone(),
-						message: err.to_string(),
-					});
+					return handle_directory_io_error(&self.absolute_path, &err, self.options, visitor);
 				},
 			}
 		} else {
@@ -2809,11 +2983,7 @@ impl<H> WalkContext<'_, H> {
 				} else {
 					size = None;
 				}
-				mtime = target_metadata
-					.modified()
-					.ok()
-					.and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-					.map(|duration| duration.as_millis() as f64);
+				mtime = metadata_mtime_millis(target_metadata);
 			}
 		}
 
@@ -2825,6 +2995,7 @@ impl<H> WalkContext<'_, H> {
 		}
 
 		if !is_effective_path_on_root_file_system(
+			self.fs,
 			&self.absolute_path,
 			next_depth,
 			self.options.follow_links,
@@ -2835,7 +3006,7 @@ impl<H> WalkContext<'_, H> {
 		}
 
 		if followed_symlink_dir && descend {
-			match directory_identity(&self.absolute_path) {
+			match directory_identity(self.fs, &self.absolute_path) {
 				Ok(target_id) => {
 					if self.symlink_ancestors.contains(&target_id) {
 						let loop_err = io::Error::other("filesystem loop detected");
@@ -2862,29 +3033,7 @@ impl<H> WalkContext<'_, H> {
 					}
 				},
 				Err(err) => {
-					if self.options.directory_errors == DirectoryErrorMode::SkipSkippable
-						&& is_skippable_directory_error(&err)
-					{
-						return Ok(false);
-					}
-					if self.options.directory_errors == DirectoryErrorMode::Visit {
-						match visitor
-							.visit_directory_error(DirectoryError {
-								path:  &self.absolute_path,
-								error: &err,
-							})
-							.map_err(WalkError::Interrupted)?
-						{
-							WalkControl::Quit => return Ok(true),
-							WalkControl::SkipDescend | WalkControl::Continue => {
-								return Ok(false);
-							},
-						}
-					}
-					return Err(WalkError::InvalidData {
-						path:    self.absolute_path.clone(),
-						message: err.to_string(),
-					});
+					return handle_directory_io_error(&self.absolute_path, &err, self.options, visitor);
 				},
 			}
 		}
@@ -2959,6 +3108,7 @@ impl<H> WalkContext<'_, H> {
 }
 
 fn collect_directory_entries<E>(
+	fs: &BlockingFs,
 	dir: &Path,
 	detail: WalkDetail,
 	scratch: &mut DirScratch,
@@ -2969,17 +3119,101 @@ fn collect_directory_entries<E>(
 	let mut ignore_entries = IgnoreEntryNames::default();
 	let track_ignore_entries = derive_ignore_from_entries && matcher.use_gitignore;
 	let mut read_buffer = std::mem::take(&mut scratch.read_buffer);
-	let result = platform::read_dir_entries(dir, detail, &mut read_buffer, |entry| {
-		if track_ignore_entries {
-			ignore_entries.record(entry.name.as_ref(), entry.file_type);
+	let result = {
+		let emit = |entry: RawDirEntry<'_>| -> std::result::Result<ReadDirControl, WalkError<E>> {
+			if track_ignore_entries {
+				ignore_entries.record(entry.name.as_ref(), entry.file_type);
+			}
+			scratch.push(entry);
+			Ok(ReadDirControl::Continue)
+		};
+		if fs.is_native_local(dir) {
+			platform::read_dir_entries(dir, detail, &mut read_buffer, emit)
+		} else {
+			read_dir_entries_in(fs, dir, detail, emit)
 		}
-		scratch.push(entry);
-		Ok(ReadDirControl::Continue)
-	});
+	};
 	scratch.read_buffer = read_buffer;
 	result?;
 	Ok(ignore_entries)
 }
+
+/// Read one directory through an injected filesystem provider.
+///
+/// Mirrors the platform readers: special files are skipped, and entries that
+/// disappear or become unreadable between the listing and their metadata lookup
+/// are skipped like native scan races. Entry names that are not a single path
+/// component and all other listing or metadata errors are returned.
+fn read_dir_entries_in<F, E>(
+	fs: &BlockingFs,
+	path: &Path,
+	detail: WalkDetail,
+	mut emit: F,
+) -> std::result::Result<ReadDirControl, ReadDirError<E>>
+where
+	F: FnMut(RawDirEntry<'_>) -> std::result::Result<ReadDirControl, WalkError<E>>,
+{
+	for entry in fs.read_dir(path)? {
+		let entry = entry?;
+		let name = entry.file_name();
+		if is_invalid_provider_entry_name(&name) {
+			return Err(ReadDirError::Io(io::Error::new(
+				io::ErrorKind::InvalidData,
+				format!("filesystem returned invalid directory entry name {}", name.display()),
+			)));
+		}
+		let file_type = match entry.file_type() {
+			Ok(file_type) => file_type,
+			Err(err) if is_skippable_entry_error(&err) => continue,
+			Err(err) => return Err(err.into()),
+		};
+		let Some(file_type) = walker_file_type(file_type) else {
+			continue;
+		};
+		let (mtime, size) = if detail == WalkDetail::Full {
+			match entry.metadata() {
+				Ok(metadata) => (
+					metadata_mtime_millis(&metadata),
+					(file_type == FileType::File).then(|| metadata.len() as f64),
+				),
+				Err(err) if is_skippable_entry_error(&err) => continue,
+				Err(err) => return Err(err.into()),
+			}
+		} else {
+			(None, None)
+		};
+		let raw_entry = RawDirEntry { name: Cow::Owned(name), file_type, mtime, size };
+		if emit(raw_entry).map_err(ReadDirError::Walk)? == ReadDirControl::Stop {
+			return Ok(ReadDirControl::Stop);
+		}
+	}
+	Ok(ReadDirControl::Continue)
+}
+
+/// Return whether a provider directory entry name is not a single path
+/// component.
+///
+/// `.` and `..` pass through so traversal skips them like native listings.
+/// Names that are empty, contain separators, or parse as roots/prefixes would
+/// make the walker address a different path than the listed child.
+fn is_invalid_provider_entry_name(name: &OsStr) -> bool {
+	if is_dot_entry(name) {
+		return false;
+	}
+	name
+		.as_encoded_bytes()
+		.iter()
+		.any(|&byte| std::path::is_separator(char::from(byte)))
+		|| !matches!(
+			Path::new(name).components().next(),
+			Some(std::path::Component::Normal(component)) if component == name
+		)
+}
+
+fn is_skippable_entry_error(err: &io::Error) -> bool {
+	matches!(err.kind(), io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied)
+}
+
 /// Return whether [`WalkDetail::Full`] provides file sizes without per-entry
 /// metadata syscalls on this platform.
 pub const fn supports_cheap_size_hints() -> bool {
@@ -3031,8 +3265,13 @@ impl IgnoreEntryNames {
 	}
 }
 
-fn has_repo_marker(dir: &Path) -> bool {
-	dir.join(".git").exists() || dir.join(".jj").exists()
+fn has_repo_marker(fs: &BlockingFs, dir: &Path) -> bool {
+	fs.exists(ignore_file_path(dir, ".git")) || fs.exists(ignore_file_path(dir, ".jj"))
+}
+
+/// Join a repository-relative ignore source below `dir`, keeping URL roots.
+fn ignore_file_path(dir: &Path, relative: &str) -> PathBuf {
+	pi_vfs::join_path(dir, Path::new(relative))
 }
 
 fn ignore_line_covers_root(
@@ -3041,13 +3280,44 @@ fn ignore_line_covers_root(
 	line: &str,
 	explicit_root: &Path,
 ) -> bool {
-	let mut builder = ignore::gitignore::GitignoreBuilder::new(matcher_root);
+	let mut builder = ignore::gitignore::GitignoreBuilder::new(ignore_match_path(matcher_root));
 	builder.add_line(Some(source.to_path_buf()), line).is_ok()
 		&& builder.build().is_ok_and(|matcher| {
 			matcher
-				.matched_path_or_any_parents(explicit_root, true)
+				.matched_path_or_any_parents(ignore_match_path(explicit_root), true)
 				.is_ignore()
 		})
+}
+
+/// Spelling handed to the `ignore` crate for matcher roots and matched paths.
+///
+/// URL paths carry percent-encoded segments ([`pi_vfs::child_path`]), while
+/// gitignore globs name raw entries like walk-relative filters do, so URL
+/// segments are decoded once. Roots and candidates use the same spelling,
+/// keeping the crate's prefix stripping consistent. Host paths are borrowed.
+fn ignore_match_path(path: &Path) -> Cow<'_, Path> {
+	let Some(scheme) = pi_vfs::url_scheme(path) else {
+		return Cow::Borrowed(path);
+	};
+	let bytes = path.as_os_str().as_encoded_bytes();
+	if !bytes.contains(&b'%') {
+		return Cow::Borrowed(path);
+	}
+	let mut decoded = std::ffi::OsString::from(format!("{scheme}://"));
+	for (index, segment) in bytes[scheme.len() + 3..]
+		.split(|&byte| byte == b'/')
+		.enumerate()
+	{
+		if index > 0 {
+			decoded.push("/");
+		}
+		// SAFETY: `segment` lies between ASCII `/` bytes (or the ASCII
+		// `scheme://` root and the end) of `path`'s encoded bytes, which are
+		// valid `OsStr` split points.
+		let segment = unsafe { OsStr::from_encoded_bytes_unchecked(segment) };
+		decoded.push(pi_vfs::decode_segment(segment));
+	}
+	Cow::Owned(PathBuf::from(decoded))
 }
 
 /// Load an ignore source, removing ancestor rules that cover an explicit walk
@@ -3056,56 +3326,106 @@ fn ignore_line_covers_root(
 /// Unrelated parent rules remain active, while ignore files discovered at or
 /// below the root are loaded without filtering.
 fn load_gitignore(
+	fs: &BlockingFs,
 	matcher_root: &Path,
 	file: &Path,
 	explicit_root: Option<&Path>,
 ) -> Option<ignore::gitignore::Gitignore> {
-	if !file.is_file() {
+	if !fs.is_file(file) {
 		return None;
 	}
-	let mut builder = ignore::gitignore::GitignoreBuilder::new(matcher_root);
-	let _ = builder.add(file);
+	let mut builder = ignore::gitignore::GitignoreBuilder::new(ignore_match_path(matcher_root));
+	let _ = add_ignore_file(&mut builder, fs, file);
 	let matcher = builder.build().ok().filter(|matcher| !matcher.is_empty())?;
 	let Some(explicit_root) = explicit_root else {
 		return Some(matcher);
 	};
 	if !matcher
-		.matched_path_or_any_parents(explicit_root, true)
+		.matched_path_or_any_parents(ignore_match_path(explicit_root), true)
 		.is_ignore()
 	{
 		return Some(matcher);
 	}
 
-	let handle = std::fs::File::open(file).ok()?;
-	let mut filtered = ignore::gitignore::GitignoreBuilder::new(matcher_root);
-	let source = Some(file.to_path_buf());
-	for (index, line) in io::BufReader::new(handle).lines().enumerate() {
-		let Ok(line) = line else {
-			break;
+	let mut filtered = ignore::gitignore::GitignoreBuilder::new(ignore_match_path(matcher_root));
+	let _ = add_ignore_lines(&mut filtered, fs, file, |line| {
+		!ignore_line_covers_root(matcher_root, file, line, explicit_root)
+	});
+	filtered.build().ok().filter(|matcher| !matcher.is_empty())
+}
+
+/// Add every gitignore rule in `path` to `builder`, reading through `fs`.
+///
+/// Mirrors [`ignore::gitignore::GitignoreBuilder::add`] (leading UTF-8 BOM
+/// trimming, per-line error tagging, stop at the first read error, partial
+/// errors) without letting the ignore crate open host paths directly.
+pub fn add_ignore_file(
+	builder: &mut ignore::gitignore::GitignoreBuilder,
+	fs: &BlockingFs,
+	path: &Path,
+) -> Option<ignore::Error> {
+	add_ignore_lines(builder, fs, path, |_| true)
+}
+
+/// [`add_ignore_file`] restricted to lines accepted by `keep`.
+fn add_ignore_lines(
+	builder: &mut ignore::gitignore::GitignoreBuilder,
+	fs: &BlockingFs,
+	path: &Path,
+	mut keep: impl FnMut(&str) -> bool,
+) -> Option<ignore::Error> {
+	let with_path = |err: ignore::Error| ignore::Error::WithPath {
+		path: path.to_path_buf(),
+		err:  Box::new(err),
+	};
+	let file = match fs.open(path) {
+		Ok(file) => file,
+		Err(err) => return Some(with_path(ignore::Error::Io(err))),
+	};
+	let mut errors = Vec::new();
+	for (index, line) in io::BufReader::new(file).lines().enumerate() {
+		let tagged = |err: ignore::Error| {
+			with_path(ignore::Error::WithLineNumber { line: index as u64 + 1, err: Box::new(err) })
+		};
+		let line = match line {
+			Ok(line) => line,
+			Err(err) => {
+				errors.push(tagged(ignore::Error::Io(err)));
+				break;
+			},
 		};
 		let line = if index == 0 {
 			line.trim_start_matches('\u{feff}')
 		} else {
-			line.as_str()
+			&line
 		};
-		if ignore_line_covers_root(matcher_root, file, line, explicit_root) {
+		if !keep(line) {
 			continue;
 		}
-		let _ = filtered.add_line(source.clone(), line);
+		if let Err(err) = builder.add_line(Some(path.to_path_buf()), line) {
+			errors.push(tagged(err));
+		}
 	}
-	filtered.build().ok().filter(|matcher| !matcher.is_empty())
+	match errors.len() {
+		0 => None,
+		1 => errors.pop(),
+		_ => Some(ignore::Error::Partial(errors)),
+	}
 }
 
 impl IgnoreState {
-	fn build(dir: &Path, parent: Option<Arc<Self>>) -> Arc<Self> {
-		let has_git = has_repo_marker(dir);
-		let git_exclude = dir.join(".git/info/exclude");
+	fn empty() -> Arc<Self> {
+		Self::new(None, None, None, None, false)
+	}
+
+	fn build(fs: &BlockingFs, dir: &Path, parent: Option<Arc<Self>>) -> Arc<Self> {
+		let has_git = has_repo_marker(fs, dir);
 		Self::new(
 			parent,
-			load_gitignore(dir, &dir.join(".ignore"), None),
-			load_gitignore(dir, &dir.join(".gitignore"), None),
+			load_gitignore(fs, dir, &ignore_file_path(dir, ".ignore"), None),
+			load_gitignore(fs, dir, &ignore_file_path(dir, ".gitignore"), None),
 			if has_git {
-				load_gitignore(dir, &git_exclude, None)
+				load_gitignore(fs, dir, &ignore_file_path(dir, ".git/info/exclude"), None)
 			} else {
 				None
 			},
@@ -3113,15 +3433,20 @@ impl IgnoreState {
 		)
 	}
 
-	fn build_parent(dir: &Path, parent: Option<Arc<Self>>, explicit_root: &Path) -> Arc<Self> {
-		let has_git = has_repo_marker(dir);
-		let git_exclude = dir.join(".git/info/exclude");
+	fn build_parent(
+		fs: &BlockingFs,
+		dir: &Path,
+		parent: Option<Arc<Self>>,
+		explicit_root: &Path,
+	) -> Arc<Self> {
+		let has_git = has_repo_marker(fs, dir);
+		let explicit_root = Some(explicit_root);
 		Self::new(
 			parent,
-			load_gitignore(dir, &dir.join(".ignore"), Some(explicit_root)),
-			load_gitignore(dir, &dir.join(".gitignore"), Some(explicit_root)),
+			load_gitignore(fs, dir, &ignore_file_path(dir, ".ignore"), explicit_root),
+			load_gitignore(fs, dir, &ignore_file_path(dir, ".gitignore"), explicit_root),
 			if has_git {
-				load_gitignore(dir, &git_exclude, Some(explicit_root))
+				load_gitignore(fs, dir, &ignore_file_path(dir, ".git/info/exclude"), explicit_root)
 			} else {
 				None
 			},
@@ -3129,25 +3454,29 @@ impl IgnoreState {
 		)
 	}
 
-	fn build_from_entry_names(dir: &Path, parent: &Arc<Self>, names: IgnoreEntryNames) -> Arc<Self> {
+	fn build_from_entry_names(
+		fs: &BlockingFs,
+		dir: &Path,
+		parent: &Arc<Self>,
+		names: IgnoreEntryNames,
+	) -> Arc<Self> {
 		if !names.has_relevant() {
 			return Arc::clone(parent);
 		}
-		let git_exclude = dir.join(".git/info/exclude");
 		Self::new(
 			Some(Arc::clone(parent)),
 			if names.ignore_file {
-				load_gitignore(dir, &dir.join(".ignore"), None)
+				load_gitignore(fs, dir, &ignore_file_path(dir, ".ignore"), None)
 			} else {
 				None
 			},
 			if names.gitignore_file {
-				load_gitignore(dir, &dir.join(".gitignore"), None)
+				load_gitignore(fs, dir, &ignore_file_path(dir, ".gitignore"), None)
 			} else {
 				None
 			},
 			if names.git_dir {
-				load_gitignore(dir, &git_exclude, None)
+				load_gitignore(fs, dir, &ignore_file_path(dir, ".git/info/exclude"), None)
 			} else {
 				None
 			},
@@ -3179,58 +3508,174 @@ impl IgnoreState {
 		})
 	}
 
-	fn build_parents(root: &Path, use_gitignore: bool) -> Option<Arc<Self>> {
-		if !use_gitignore {
-			return None;
-		}
+	fn build_parents(fs: &BlockingFs, root: &Path) -> Option<Arc<Self>> {
 		let mut ancestors = Vec::new();
-		let mut current = root.parent();
+		let mut current = pi_vfs::parent_path(root);
 		let mut repo_start = None;
 		while let Some(path) = current {
 			ancestors.push(path);
-			if repo_start.is_none() && has_repo_marker(path) {
+			if repo_start.is_none() && has_repo_marker(fs, path) {
 				repo_start = Some(ancestors.len() - 1);
 			}
-			current = path.parent();
+			current = pi_vfs::parent_path(path);
 		}
 
 		let repo_start = repo_start?;
 		let mut parent = None;
 		for ancestor in ancestors[..=repo_start].iter().rev() {
-			parent = Some(Self::build_parent(ancestor, parent, root));
+			parent = Some(Self::build_parent(fs, ancestor, parent, root));
 		}
 		parent
 	}
 }
 
-impl FastIgnore {
-	fn new(use_gitignore: bool) -> Self {
-		let global = if use_gitignore {
-			let (matcher, _err) = ignore::gitignore::Gitignore::global();
-			if matcher.is_empty() {
-				None
-			} else {
-				Some(matcher)
+/// Load git's global excludes file through `fs`.
+///
+/// Mirrors [`ignore::gitignore::Gitignore::global`]: the matcher is rooted at
+/// the process working directory and the excludes path comes from
+/// `core.excludesFile` in `$GIT_CONFIG_GLOBAL`, else `$HOME/.gitconfig`, else
+/// `$XDG_CONFIG_HOME/git/config` (default `$HOME/.config/git/config`), else
+/// `$GIT_CONFIG_SYSTEM` (default `/etc/gitconfig`), falling back to
+/// `$XDG_CONFIG_HOME/git/ignore` (default `$HOME/.config/git/ignore`). Every
+/// config and excludes file is read through `fs`, so providers answer for the
+/// same paths they serve.
+fn global_gitignore(fs: &BlockingFs) -> Option<ignore::gitignore::Gitignore> {
+	let cwd = std::env::current_dir().ok()?;
+	let path = global_excludes_path(fs)?;
+	if !fs.is_file(&path) {
+		return None;
+	}
+	let mut builder = ignore::gitignore::GitignoreBuilder::new(cwd);
+	let _ = add_ignore_file(&mut builder, fs, &path);
+	builder.build().ok().filter(|matcher| !matcher.is_empty())
+}
+
+fn global_excludes_path(fs: &BlockingFs) -> Option<PathBuf> {
+	let env_path = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
+	let home = home_dir();
+	let config_home = env_path("XDG_CONFIG_HOME")
+		.map(PathBuf::from)
+		.or_else(|| home.as_ref().map(|home| home.join(".config")));
+	let excludes_in = |config: Option<PathBuf>| {
+		let contents = fs.read(config?).ok()?;
+		parse_excludes_file(&contents, home.as_deref())
+	};
+	excludes_in(env_path("GIT_CONFIG_GLOBAL").map(PathBuf::from))
+		.or_else(|| excludes_in(home.as_ref().map(|home| home.join(".gitconfig"))))
+		.or_else(|| excludes_in(config_home.as_ref().map(|dir| dir.join("git/config"))))
+		.or_else(|| {
+			excludes_in(Some(
+				env_path("GIT_CONFIG_SYSTEM")
+					.map_or_else(|| PathBuf::from("/etc/gitconfig"), PathBuf::from),
+			))
+		})
+		.or_else(|| config_home.map(|dir| dir.join("git/ignore")))
+}
+
+#[allow(deprecated, reason = "matches the ignore crate's home directory lookup")]
+fn home_dir() -> Option<PathBuf> {
+	std::env::home_dir()
+}
+
+/// Extract `core.excludesFile` from raw git config contents.
+///
+/// Byte-for-byte equivalent of the ignore crate's lazy match
+/// `(?im-u)^\s*excludesfile\s*=\s*"?\s*(\S+?)\s*"?\s*$` (first match wins,
+/// ASCII case-insensitive key, `\s` = ASCII whitespace), followed by replacing
+/// every `~` with the home directory.
+fn parse_excludes_file(data: &[u8], home: Option<&Path>) -> Option<PathBuf> {
+	const KEY: &[u8] = b"excludesfile";
+	let is_space = |byte: u8| matches!(byte, b'\t' | b'\n' | 0x0b | 0x0c | b'\r' | b' ');
+	let skip_space = |mut index: usize| {
+		while data.get(index).is_some_and(|&byte| is_space(byte)) {
+			index += 1;
+		}
+		index
+	};
+	// `\s*$` in multi-line mode: whitespace from `index` reaches a newline or
+	// the end of input.
+	let ends_line = |index: usize| {
+		let end = skip_space(index);
+		end == data.len() || data[index..end].contains(&b'\n')
+	};
+	// `\s*"?\s*$` starting at `index`.
+	let value_tail_matches = |index: usize| {
+		let quote = skip_space(index);
+		ends_line(index) || (data.get(quote) == Some(&b'"') && ends_line(quote + 1))
+	};
+	// `(\S+?)\s*"?\s*$` starting at `start`; returns the lazy capture.
+	let capture_at = |start: usize| {
+		let mut end = start;
+		while data.get(end).is_some_and(|&byte| !is_space(byte)) {
+			end += 1;
+			if value_tail_matches(end) {
+				return Some(&data[start..end]);
 			}
+		}
+		None
+	};
+	let line_starts = std::iter::once(0).chain(
+		data
+			.iter()
+			.enumerate()
+			.filter(|(_, byte)| **byte == b'\n')
+			.map(|(index, _)| index + 1),
+	);
+	let value = line_starts
+		.filter(|&start| start <= data.len())
+		.find_map(|start| {
+			let key_start = skip_space(start);
+			let key = data.get(key_start..key_start + KEY.len())?;
+			if !key.eq_ignore_ascii_case(KEY) {
+				return None;
+			}
+			let equals = skip_space(key_start + KEY.len());
+			if data.get(equals) != Some(&b'=') {
+				return None;
+			}
+			let value_start = skip_space(equals + 1);
+			// Greedy `"?` first, then backtrack to capturing the quote itself.
+			(data.get(value_start) == Some(&b'"'))
+				.then(|| capture_at(skip_space(value_start + 1)))
+				.flatten()
+				.or_else(|| capture_at(value_start))
+		})?;
+	let value = std::str::from_utf8(value).ok()?;
+	Some(PathBuf::from(match home {
+		Some(home) => value.replace('~', &home.to_string_lossy()),
+		None => value.to_owned(),
+	}))
+}
+
+impl FastIgnore {
+	fn new(fs: &BlockingFs, use_gitignore: bool) -> Self {
+		let global = if use_gitignore {
+			global_gitignore(fs)
 		} else {
 			None
 		};
 		Self { global, use_gitignore }
 	}
 
-	fn root_state(&self, root: &Path) -> Arc<IgnoreState> {
-		IgnoreState::build(root, IgnoreState::build_parents(root, self.use_gitignore))
+	fn root_state(&self, fs: &BlockingFs, root: &Path) -> Arc<IgnoreState> {
+		// Ignore state is never consulted without gitignore matching, so skip
+		// the repository-marker and ignore-file reads entirely.
+		if !self.use_gitignore {
+			return IgnoreState::empty();
+		}
+		IgnoreState::build(fs, root, IgnoreState::build_parents(fs, root))
 	}
 
 	fn state_from_entries(
 		&self,
+		fs: &BlockingFs,
 		parent: &Arc<IgnoreState>,
 		dir: &Path,
 		names: IgnoreEntryNames,
 		derive_ignore_from_entries: bool,
 	) -> Arc<IgnoreState> {
 		if self.use_gitignore && derive_ignore_from_entries {
-			IgnoreState::build_from_entry_names(dir, parent, names)
+			IgnoreState::build_from_entry_names(fs, dir, parent, names)
 		} else {
 			Arc::clone(parent)
 		}
@@ -3246,6 +3691,8 @@ impl FastIgnore {
 		if !state.chain_has_matchers && !global_matcher_applies {
 			return false;
 		}
+		let path = ignore_match_path(path);
+		let path = path.as_ref();
 
 		let mut saw_git = false;
 		let mut ignore_match = ignore::Match::None;
@@ -3313,23 +3760,39 @@ where
 {
 	match err {
 		ReadDirError::Walk(err) => Err(err),
-		ReadDirError::Io(err)
-			if options.directory_errors == DirectoryErrorMode::SkipSkippable
-				&& is_skippable_directory_error(&err) =>
-		{
-			Ok(false)
-		},
-		ReadDirError::Io(err) if options.directory_errors == DirectoryErrorMode::Visit => {
+		ReadDirError::Io(err) => handle_directory_io_error(dir, &err, options, visitor),
+	}
+}
+
+/// Apply [`WalkOptions::directory_errors`] to an I/O error reading `path`.
+///
+/// Returns whether traversal should stop. A cancelled filesystem aborts the
+/// walk in every mode instead of reporting one error per remaining directory.
+fn handle_directory_io_error<V>(
+	path: &Path,
+	err: &io::Error,
+	options: WalkOptions,
+	visitor: &mut V,
+) -> std::result::Result<bool, WalkError<V::Error>>
+where
+	V: EntryVisitor,
+{
+	if pi_vfs::is_cancelled(err) {
+		return Err(WalkError::InvalidData { path: path.to_path_buf(), message: err.to_string() });
+	}
+	match options.directory_errors {
+		DirectoryErrorMode::SkipSkippable if is_skippable_directory_error(err) => Ok(false),
+		DirectoryErrorMode::Visit => {
 			match visitor
-				.visit_directory_error(DirectoryError { path: dir, error: &err })
+				.visit_directory_error(DirectoryError { path, error: err })
 				.map_err(WalkError::Interrupted)?
 			{
 				WalkControl::Quit => Ok(true),
 				WalkControl::SkipDescend | WalkControl::Continue => Ok(false),
 			}
 		},
-		ReadDirError::Io(err) => {
-			Err(WalkError::InvalidData { path: dir.to_path_buf(), message: err.to_string() })
+		DirectoryErrorMode::SkipSkippable => {
+			Err(WalkError::InvalidData { path: path.to_path_buf(), message: err.to_string() })
 		},
 	}
 }
@@ -3378,6 +3841,40 @@ fn is_hidden_name(name: &OsStr) -> bool {
 		.is_some_and(|value| value.as_bytes().first() == Some(&b'.'))
 }
 
+/// Parent path saved by [`enter_child_path`] and restored by
+/// [`leave_child_path`].
+enum SavedParent {
+	/// Host child appended with [`PathBuf::push`]; restored with `pop`.
+	Pushed,
+	/// URL child built by [`pi_vfs::child_path`]; restored by replacement.
+	Replaced(PathBuf),
+}
+
+/// Descend from directory `path` into its raw entry `name`.
+///
+/// Host paths append in place. URL paths use [`pi_vfs::child_path`], which
+/// joins with `/` on every platform and percent-encodes the raw name exactly as
+/// providers spell child paths; [`PathBuf::push`] would insert `\` on Windows
+/// and [`PathBuf::pop`] would collapse `local://a` to `local:`.
+fn enter_child_path(path: &mut PathBuf, name: &OsStr, url_path: bool) -> SavedParent {
+	if url_path {
+		let child = pi_vfs::child_path(path, name);
+		SavedParent::Replaced(std::mem::replace(path, child))
+	} else {
+		path.push(name);
+		SavedParent::Pushed
+	}
+}
+
+fn leave_child_path(path: &mut PathBuf, parent: SavedParent) {
+	match parent {
+		SavedParent::Pushed => {
+			path.pop();
+		},
+		SavedParent::Replaced(parent) => *path = parent,
+	}
+}
+
 fn push_relative_name(relative: &mut String, name: &str) {
 	if !relative.is_empty() {
 		relative.push('/');
@@ -3423,7 +3920,8 @@ mod platform {
 
 	impl Drop for FdGuard {
 		fn drop(&mut self) {
-			// SAFETY: `FdGuard` owns this file descriptor and closes it exactly once.
+			// SAFETY: `FdGuard` owns this file descriptor and closes it exactly
+			// once.
 			unsafe { libc::close(self.0) };
 		}
 	}
@@ -3456,8 +3954,9 @@ mod platform {
 			buffer.resize(BUFFER_SIZE, 0);
 		}
 		loop {
-			// SAFETY: `fd` is an open directory descriptor, `attrs` points to a valid
-			// attrlist for the duration of the call, and `buffer` is writable.
+			// SAFETY: `fd` is an open directory descriptor, `attrs` points to a
+			// valid attrlist for the duration of the call, and `buffer` is
+			// writable.
 			let count = unsafe {
 				libc::getattrlistbulk(
 					fd.0,
@@ -3567,8 +4066,9 @@ mod platform {
 	fn open_dir(path: &Path) -> io::Result<FdGuard> {
 		let path = CString::new(path.as_os_str().as_bytes())
 			.map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))?;
-		// SAFETY: `path` is a NUL-terminated C string; flags open the directory for
-		// metadata traversal only and do not transfer ownership of the string.
+		// SAFETY: `path` is a NUL-terminated C string; flags open the directory
+		// for metadata traversal only and do not transfer ownership of the
+		// string.
 		let fd =
 			unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) };
 		if fd < 0 {
@@ -3724,7 +4224,8 @@ mod platform {
 
 	impl Drop for FdGuard {
 		fn drop(&mut self) {
-			// SAFETY: `FdGuard` owns this file descriptor and closes it exactly once.
+			// SAFETY: `FdGuard` owns this file descriptor and closes it exactly
+			// once.
 			unsafe { libc::close(self.0) };
 		}
 	}
@@ -3749,7 +4250,8 @@ mod platform {
 			buffer.resize(BUFFER_SIZE, 0);
 		}
 		loop {
-			// SAFETY: `fd` is an open directory descriptor and `buffer` is writable.
+			// SAFETY: `fd` is an open directory descriptor and `buffer` is
+			// writable.
 			let read = unsafe {
 				libc::syscall(
 					libc::SYS_getdents64,
@@ -3861,8 +4363,8 @@ mod platform {
 		} else {
 			STATX_TYPE
 		};
-		// SAFETY: `name` is NUL-terminated, `statx` is writable, and `dirfd` is an
-		// open directory descriptor for an AT_* relative metadata query.
+		// SAFETY: `name` is NUL-terminated, `statx` is writable, and `dirfd` is
+		// an open directory descriptor for an AT_* relative metadata query.
 		let rc = unsafe {
 			libc::syscall(
 				libc::SYS_statx,
@@ -4037,8 +4539,8 @@ mod platform {
 
 		loop {
 			let mut iosb = IO_STATUS_BLOCK::default();
-			// SAFETY: `handle` is an open directory handle, `buffer` is writable, and
-			// the query class matches the record parser below.
+			// SAFETY: `handle` is an open directory handle, `buffer` is writable,
+			// and the query class matches the record parser below.
 			let status = unsafe {
 				NtQueryDirectoryFile(
 					handle.0,
@@ -4068,8 +4570,8 @@ mod platform {
 					return Err(invalid_data("truncated NtQueryDirectoryFile record").into());
 				}
 				let info = unsafe {
-					// SAFETY: Bounds were checked above; records are byte-packed in the
-					// buffer and may not be aligned for Rust references.
+					// SAFETY: Bounds were checked above; records are byte-packed in
+					// the buffer and may not be aligned for Rust references.
 					std::ptr::read_unaligned(
 						buffer[offset..]
 							.as_ptr()
@@ -4389,6 +4891,116 @@ mod tests {
 	}
 
 	#[test]
+	fn ranked_collection_matches_full_sort_after_filtering_at_every_limit() {
+		let tree = temp_tree("ranked-limits");
+		fs::create_dir(tree.path().join("nested")).expect("create nested directory");
+		for index in 0..24 {
+			let relative = format!("nested/{index:02}.txt");
+			let file = fs::File::create(tree.path().join(relative)).expect("create ranked file");
+			file.set_len(index).expect("set size");
+			file
+				.set_modified(UNIX_EPOCH + Duration::from_secs(100 + index / 3))
+				.expect("set modification time");
+		}
+		let request = WalkRequest::from_options(tree.path(), WalkOptions {
+			detail: WalkDetail::Full,
+			..test_options()
+		})
+		.filter(WalkFilter::files_only().max_file_size(20))
+		.limit(1);
+		for rank in [WalkRank::PathAsc, WalkRank::MtimeDescPathAsc] {
+			for limit in [0, 1, 4, 21, 100, usize::MAX] {
+				let reference = request
+					.clone()
+					.cache(true)
+					.collect_ranked(rank, limit)
+					.expect("full-sort cached collector");
+				let actual = request
+					.collect_ranked(rank, limit)
+					.expect("streaming ranked collector");
+				assert_eq!(actual.entries, reference.entries);
+				assert_eq!(actual.stats.scanned_entries, 25);
+				assert_eq!(actual.stats.filtered_entries, 4);
+				assert_eq!(actual.stats.limited_entries, 21usize.saturating_sub(limit));
+				assert_eq!(actual.backend, WalkBackend::Fresh);
+			}
+		}
+	}
+
+	#[test]
+	fn ranked_collection_keeps_heartbeat_cancellation_after_limit_is_filled() {
+		let tree = temp_tree("ranked-cancel");
+		for index in 0..300 {
+			fs::write(tree.path().join(format!("{index}.txt")), "x").expect("create file");
+		}
+		for limit in [0, 1] {
+			let beats = std::sync::atomic::AtomicUsize::new(0);
+			let result = WalkRequest::from_options(tree.path(), test_options())
+				.collect_ranked_with_heartbeat(WalkRank::PathAsc, limit, || {
+					if beats.fetch_add(1, AtomicOrdering::Relaxed) == 0 {
+						Ok(())
+					} else {
+						Err("cancelled")
+					}
+				});
+			assert!(matches!(result, Err(WalkError::Interrupted(message)) if message == "cancelled"));
+		}
+	}
+
+	#[test]
+	fn ranked_heap_preserves_total_float_order_and_path_ties() {
+		let filter = WalkFilter::default();
+		let inputs = [
+			("missing", None),
+			("negative-nan", Some(-f64::NAN)),
+			("negative-zero", Some(-0.0)),
+			("tie-z", Some(2.0)),
+			("positive-zero", Some(0.0)),
+			("positive-nan", Some(f64::NAN)),
+			("infinity", Some(f64::INFINITY)),
+			("tie-a", Some(2.0)),
+		];
+		let expected = [
+			"positive-nan",
+			"infinity",
+			"tie-a",
+			"tie-z",
+			"positive-zero",
+			"negative-zero",
+			"negative-nan",
+			"missing",
+		];
+		for limit in [0, 1, 4, 8, 100] {
+			let mut collector = RankedCollectVisitor::new(&filter, WalkRank::MtimeDescPathAsc, limit);
+			for (relative, mtime) in inputs {
+				collector
+					.visit(Entry {
+						path: Path::new(relative),
+						relative,
+						name: OsStr::new(relative),
+						file_type: FileType::File,
+						mtime,
+						size: None,
+						depth: 1,
+					})
+					.expect("collect synthetic metadata");
+				assert!(collector.entries.len() <= limit);
+			}
+			let outcome = collector.into_outcome();
+			assert_eq!(
+				outcome
+					.entries
+					.iter()
+					.map(|entry| entry.path.as_str())
+					.collect::<Vec<_>>(),
+				expected[..limit.min(expected.len())]
+			);
+			assert_eq!(outcome.stats.scanned_entries, inputs.len());
+			assert_eq!(outcome.stats.limited_entries, inputs.len().saturating_sub(limit));
+		}
+	}
+
+	#[test]
 	fn walk_request_files_only_returns_relative_files_and_excludes_directories() {
 		let tree = temp_tree("request-files-only");
 		fs::write(tree.path().join("alpha.txt"), "alpha").expect("top-level file should be written");
@@ -4516,6 +5128,7 @@ mod tests {
 
 	#[test]
 	fn walk_request_rechecks_stale_empty_cached_files_only_result() {
+		let _cache_test_guard = cache::cache_test_guard();
 		let tree = temp_tree("request-empty-recheck");
 		let _cache_guard = CachePathGuard::new(tree.path());
 		let request = WalkRequest::from_options(tree.path(), test_options())
@@ -4579,6 +5192,7 @@ mod tests {
 
 	#[test]
 	fn walk_request_rechecks_stale_cache_empty_after_glob_filter() {
+		let _cache_test_guard = cache::cache_test_guard();
 		let tree = temp_tree("request-filtered-empty-recheck");
 		let _cache_guard = CachePathGuard::new(tree.path());
 		fs::write(tree.path().join("old.txt"), "old")

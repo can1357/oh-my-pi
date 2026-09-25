@@ -20,10 +20,13 @@ import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
-import type { AgentDefinition, SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { createSessionDefaults } from "../helpers/session-defaults";
+
+import { cfgTaskAgentPrewalk, cfgTaskPrewalk } from "@oh-my-pi/pi-coding-agent/task/settings";
 
 function yieldEmittingSession(
 	initialTools: string[] = ["read", "yield"],
@@ -223,7 +226,7 @@ describe("runSubprocess per-agent prewalk", () => {
 
 	it("task.agentPrewalk 'off' disables a frontmatter-enabled prewalk", async () => {
 		const settings = Settings.isolated();
-		settings.set("task.agentPrewalk", { task: "off" });
+		cfgTaskAgentPrewalk.set(settings, { task: "off" });
 		const spy = vi
 			.spyOn(sdkModule, "createAgentSession")
 			.mockResolvedValue(createSessionResult(yieldEmittingSession()));
@@ -244,7 +247,7 @@ describe("runSubprocess per-agent prewalk", () => {
 	it("task.agentPrewalk 'on' enables prewalk for an agent without frontmatter", async () => {
 		const settings = Settings.isolated();
 		settings.setModelRole("smol", `${target.provider}/${target.id}`);
-		settings.set("task.agentPrewalk", { task: "on" });
+		cfgTaskAgentPrewalk.set(settings, { task: "on" });
 		const spy = vi
 			.spyOn(sdkModule, "createAgentSession")
 			.mockResolvedValue(createSessionResult(yieldEmittingSession()));
@@ -261,7 +264,7 @@ describe("runSubprocess per-agent prewalk", () => {
 	it("task.prewalk arms the bundled generic task agent without frontmatter", async () => {
 		const settings = Settings.isolated();
 		settings.setModelRole("smol", `${target.provider}/${target.id}`);
-		settings.set("task.prewalk", true);
+		cfgTaskPrewalk.set(settings, true);
 		const spy = vi
 			.spyOn(sdkModule, "createAgentSession")
 			.mockResolvedValue(createSessionResult(yieldEmittingSession()));
@@ -289,7 +292,7 @@ describe("runSubprocess per-agent prewalk", () => {
 		expect(offByDefault.exitCode).toBe(0);
 		expect(spy.mock.calls[0]?.[0]?.prewalk).toBeUndefined();
 
-		settings.set("task.prewalk", true);
+		cfgTaskPrewalk.set(settings, true);
 		const otherAgent = await runSubprocess({
 			...baseOptions("subagent-prewalk-setting-other-agent", settings),
 			agent: { ...baseAgent, name: "sonic", model: [`${primary.provider}/${primary.id}`] },

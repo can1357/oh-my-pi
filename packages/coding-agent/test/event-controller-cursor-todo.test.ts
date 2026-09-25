@@ -1,11 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
-import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
+import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 
@@ -74,14 +74,22 @@ function todoEnd(
 	} as Extract<AgentSessionEvent, { type: "tool_execution_end" }>;
 }
 
-function evalEnd(toolCallId: string): Extract<AgentSessionEvent, { type: "tool_execution_end" }> {
+function evalEnd(
+	toolCallId: string,
+	statusEvents?: Array<{
+		op: string;
+		committed?: boolean;
+		phases?: { name: string; tasks: { content: string; status: string }[] }[];
+	}>,
+	isError = false,
+): Extract<AgentSessionEvent, { type: "tool_execution_end" }> {
 	return {
 		type: "tool_execution_end",
 		toolCallId,
 		toolName: "eval",
-		isError: false,
-		result: { content: [{ type: "text", text: "done" }] },
-	} as Extract<AgentSessionEvent, { type: "tool_execution_end" }>;
+		isError,
+		result: { content: [{ type: "text", text: "done" }], details: statusEvents ? { statusEvents } : undefined },
+	} as unknown as Extract<AgentSessionEvent, { type: "tool_execution_end" }>;
 }
 
 function evalStart(toolCallId: string): Extract<AgentSessionEvent, { type: "tool_execution_start" }> {
@@ -180,6 +188,33 @@ describe("EventController + Cursor todo bridge", () => {
 		expect(block).toHaveProperty("isTranscriptBlockFinalized");
 		expect((block as AssistantMessageComponent).isTranscriptBlockFinalized()).toBe(true);
 		expectRetirableResult(block);
+	});
+
+	it("shows current Todo phases rather than a snapshot captured during Eval", async () => {
+		const f = createFixture();
+		const recorded = [{ name: "Old", tasks: [{ content: "Earlier", status: "completed" }] }];
+		const current = [{ name: "Current", tasks: [{ content: "Later", status: "in_progress" as const }] }];
+		f.ctx.viewSession.getTodoPhases = () => current;
+
+		await f.controller.handleEvent(evalEnd("eval-todo-1", [{ op: "todo", committed: true, phases: recorded }]));
+
+		expect(f.ctx.setTodos).toHaveBeenCalledWith(current);
+	});
+
+	it("keeps the Todo panel current when Eval fails after a nested update", async () => {
+		const f = createFixture();
+		const current = [{ name: "Current", tasks: [{ content: "Committed", status: "completed" as const }] }];
+		f.ctx.viewSession.getTodoPhases = () => current;
+
+		await f.controller.handleEvent(evalEnd("eval-todo-error", [{ op: "todo", committed: true }], true));
+
+		expect(f.ctx.setTodos).toHaveBeenCalledWith(current);
+	});
+	it("does not restart Todo auto-clear after a nested read-only view", async () => {
+		const f = createFixture();
+		f.ctx.viewSession.getTodoPhases = () => [];
+		await f.controller.handleEvent(evalEnd("eval-todo-view", [{ op: "todo", committed: false }]));
+		expect(f.ctx.setTodos).not.toHaveBeenCalled();
 	});
 
 	it("settles a held completion when execution start creates the card", async () => {

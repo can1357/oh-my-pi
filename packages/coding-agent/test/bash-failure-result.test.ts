@@ -1,4 +1,9 @@
 import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { Shell } from "@oh-my-pi/pi-natives";
@@ -13,22 +18,16 @@ function makeSession(): ToolSession {
 		hasUI: false,
 		skills: [],
 		getSessionFile: () => null,
-		settings: {
-			get(key: string) {
-				if (key === "async.enabled") return false;
-				if (key === "bash.autoBackground.enabled") return false;
-				if (key === "bash.autoBackground.thresholdMs") return 60_000;
-				if (key === "bashInterceptor.enabled") return false;
-				if (key === "astGrep.enabled") return false;
-				if (key === "astEdit.enabled") return false;
-				if (key === "grep.enabled") return false;
-				if (key === "glob.enabled") return false;
-				return undefined;
-			},
-			getBashInterceptorRules() {
-				return [];
-			},
-		},
+		settings: Settings.isolated({
+			"async.enabled": false,
+			"bash.autoBackground.enabled": false,
+			"bash.autoBackground.thresholdMs": 60_000,
+			"bashInterceptor.enabled": false,
+			"astGrep.enabled": false,
+			"astEdit.enabled": false,
+			"grep.enabled": false,
+			"glob.enabled": false,
+		}),
 		getClientBridge: () => undefined,
 	} as unknown as ToolSession;
 }
@@ -144,6 +143,117 @@ describe("BashTool execution results", () => {
 
 			expect(result.isError).toBeUndefined();
 			expect(stdout).toBe(scenario.expected);
+		}
+	});
+});
+
+describe("BashTool skill:// working directory", () => {
+	async function skillFixture(): Promise<{ dir: string; skillDir: string; skill: Skill }> {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "bash-skill-cwd-")));
+		const skillDir = path.join(dir, "skill");
+		await fs.mkdir(skillDir, { recursive: true });
+		await fs.writeFile(path.join(skillDir, "SKILL.md"), "body\n");
+		return {
+			dir,
+			skillDir,
+			skill: {
+				name: "docs",
+				description: "d",
+				filePath: path.join(skillDir, "SKILL.md"),
+				baseDir: skillDir,
+				source: "test",
+			},
+		};
+	}
+
+	it("runs a command with a bare skill URI as cwd, resolving relative paths inside it", async () => {
+		const { dir, skill } = await skillFixture();
+		try {
+			const tool = new BashTool({ ...makeSession(), skills: [skill] });
+			const result = await tool.execute("call-skill-cwd", { command: "pwd; cat SKILL.md", cwd: "skill://docs" });
+			const text = result.content.find(c => c.type === "text")?.text ?? "";
+
+			expect(result.isError).toBeUndefined();
+			expect(text).toContain("skill://docs");
+			expect(text).toContain("body");
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("runs a leading cd into a bare skill URI", async () => {
+		const { dir, skill } = await skillFixture();
+		try {
+			const tool = new BashTool({ ...makeSession(), skills: [skill] });
+			const result = await tool.execute("call-skill-cd", { command: "cd skill://docs && cat SKILL.md" });
+			const text = result.content.find(c => c.type === "text")?.text ?? "";
+
+			expect(result.isError).toBeUndefined();
+			expect(text).toContain("body");
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("BashTool skill:// containment failures", () => {
+	async function containedFixture(): Promise<{ dir: string; outsideFile: string; skill: Skill }> {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "bash-skill-contained-")));
+		const pluginRoot = path.join(dir, "plugin");
+		const skillDir = path.join(pluginRoot, "skills", "docs");
+		await fs.mkdir(skillDir, { recursive: true });
+		await fs.writeFile(path.join(skillDir, "SKILL.md"), "body\n");
+		const outsideFile = path.join(dir, "secret.md");
+		await fs.writeFile(outsideFile, "outside contents\n");
+		return {
+			dir,
+			outsideFile,
+			skill: {
+				name: "docs",
+				description: "d",
+				filePath: outsideFile,
+				baseDir: skillDir,
+				source: "agent-plugins:user",
+				containRoot: pluginRoot,
+			},
+		};
+	}
+
+	it("refuses a read through a symlink past the plugin boundary", async () => {
+		const { dir, outsideFile, skill } = await containedFixture();
+		await fs.symlink(outsideFile, path.join(skill.baseDir, "leak.md"));
+		try {
+			const tool = new BashTool({ ...makeSession(), skills: [skill] });
+			const result = await tool.execute("call-skill-leak", { command: "cat skill://docs/leak.md" });
+			const text = result.content.find(c => c.type === "text")?.text ?? "";
+
+			expect(result.isError).toBe(true);
+			expect(text).not.toContain("outside contents");
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects a working directory past the plugin boundary instead of running in it", async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "bash-skill-contained-")));
+		const pluginRoot = path.join(dir, "plugin");
+		await fs.mkdir(pluginRoot, { recursive: true });
+		const skill: Skill = {
+			name: "docs",
+			description: "d",
+			filePath: path.join(dir, "SKILL.md"),
+			baseDir: dir,
+			source: "agent-plugins:user",
+			containRoot: pluginRoot,
+		};
+		try {
+			const tool = new BashTool({ ...makeSession(), skills: [skill] });
+
+			await expect(tool.execute("call-skill-leak-cwd", { command: "pwd", cwd: "skill://docs" })).rejects.toThrow(
+				"resolves outside the plugin root",
+			);
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
 		}
 	});
 });

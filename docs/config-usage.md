@@ -9,7 +9,8 @@ Primary implementation:
 - `packages/coding-agent/src/config.ts`
 - `packages/coding-agent/src/config/config-file.ts` (re-exported from `config.ts`)
 - `packages/coding-agent/src/config/settings.ts`
-- `packages/coding-agent/src/config/settings-schema.ts`
+- `packages/coding-agent/src/config/registry.ts` (setting definitions, typed handles)
+- `packages/coding-agent/src/config/all-settings.ts` (imports every domain's `settings.ts` definitions)
 - `packages/coding-agent/src/discovery/builtin.ts`
 - `packages/coding-agent/src/discovery/helpers.ts`
 
@@ -147,24 +148,40 @@ Legacy migration still supported:
 
 ## 4) Settings resolution model (`src/config/settings.ts`)
 
-The runtime settings model is layered:
+### Definitions (`src/config/registry.ts`)
 
-1. Global settings: the first present file among `~/.omp/agent/config.yml` and `config.yaml`
-2. Project settings: discovered via the settings capability (`settings.json` and `config.yml` from providers)
+Each setting is declared once with `register({ id, type, default, env?, protocolDefault?, validate?, pathScoped?, credential?, ui? })` in its domain's settings module (for example `src/tools/settings.ts`, `src/session/settings.ts`, `src/config/model-settings.ts`). `src/config/all-settings.ts` imports every domain in settings-panel order. `register` returns a typed `Setting` handle (`cfgX`); code reads and writes through it rather than by string key:
+
+- `cfgX.get(scope)` — effective value; `scope` is a `Settings` instance or anything carrying one (`AgentSession`, `ToolSession`). Reads are memoized per scope.
+- `cfgX.set(scope, v)` — writes the **global** layer and queues a background save; values the definition's type rejects throw.
+- `cfgX.unset(scope)` — removes the key from the global layer (what `omp config reset` and clearing a settings-panel text field do), so later default changes still apply.
+- `cfgX.override(scope, v)` / `cfgX.clearOverride(scope)` — runtime-only override, never persisted.
+- `cfgX.map(fn)` / `combine({...}, fn)` — memoized derived values; `.listen(scope, cb)` observes changes of a handle or derivation.
+- `cfgX.provenance(scope)` — layer supplying the value: `"env" | "runtime" | "overlay" | "project" | "global" | "default"`.
+- `cfgX.layered(scope)` — the value from the settings layers alone, ignoring the environment variable (what the settings panel shows and edits).
+
+A configured value that does not fit the declared type (or enum values) is ignored with a warning and the default is used; a definition's `validate` rejects malformed values on load, on every reload, and before every write. A keep-last-good watcher reload, and a save that merges external edits to `config.yml`, keep only the invalid file's layer at its last good values (the warning names the file) while the other layers still refresh. A configured `null` counts as unset everywhere.
+
+### Layers (`src/config/settings.ts`)
+
+Effective precedence, highest first:
+
+1. Environment variable declared on the definition (`env: "NAME"`), parsed by the setting's type; unparseable text counts as unset. Booleans follow `parseFlag`: empty is unset, `1`/`y`/`true`/`yes`/`on` (lower or upper case) is true, any other text is false
+2. Runtime overrides: in-memory, non-persistent
 3. Config overlays: `PI_CONFIG_FILES` (platform path-list), followed by repeated `omp --config <path>` files; all are loaded as `config.yml`-style YAML for this process only
-4. Runtime overrides: in-memory, non-persistent
-5. Schema defaults: from `SETTINGS_SCHEMA`
+4. Project settings: discovered via the settings capability (`settings.json` and `config.yml` from providers)
+5. Global settings: the first present file among `~/.omp/agent/config.yml` and `config.yaml`
+6. Definition default
 
-Effective precedence:
+A definition may instead declare `env: { name, fallback: true }`: that variable only replaces the default, and any layer configuring a non-null value wins over it (used by `SEARXNG_BASIC_*`). `fallback: "blank"` also lets the variable win over a configured empty or whitespace string (used by `SEARXNG_ENDPOINT`, `SEARXNG_TOKEN`, and `MNEMOPI_EMBEDDING_MODEL`).
 
-`defaults <- global <- project <- PI_CONFIG_FILES overlays <- --config overlays <- runtime overrides`
+Within the overlay list, later files override earlier files (`PI_CONFIG_FILES` entries load before `--config` files). Overlay paths are resolved relative to the active project directory (after `~` expansion).
 
-Within either overlay list, later files override earlier files. Overlay paths are resolved relative to the active project directory (after `~` expansion).
+Definitions with `protocolDefault: ["rpc", "acp"]` make RPC/ACP hosts start from the definition default: at startup `applyProtocolDefaults` (`src/main.ts`) pins the default as a soft runtime override unless the value is already configured. The pin is released by a `cfgX.set`/`cfgX.unset` of that setting (settings panel, agents hub, `cfg://`), by a reload that finds a persisted layer configuring it (a `config.yml` edit picked up by the RPC file watcher), and by a re-scope or clone into a project that configures it (an ACP session's own project config).
 
-Write behavior:
+Subagents receive `parent.overlay(overrides)`: reads fall through to the parent live, while the overrides and any later writes stay in the child and are never persisted.
 
-- `settings.set(...)` writes to the **global** layer (the global YAML file selected at startup) and queues a background save.
-- Project settings and config overlays are read-only from the settings API.
+Project settings and config overlays are read-only from the settings API.
 
 ### Settings load failures
 
@@ -183,7 +200,6 @@ On startup, if neither global `config.yml` nor `config.yaml` exists:
 Field-level migrations in `#migrateRawSettings`:
 
 - `queueMode` -> `steeringMode`
-- `ask.timeout` milliseconds -> seconds when old value looks like ms (`> 1000`)
 - Legacy flat `theme: "..."` -> `theme.dark/theme.light` structure
 
 ---
@@ -344,7 +360,7 @@ Settings capability items are not deduplicated; `Settings.#loadProjectSettings()
 
 - `ConfigFile` JSON -> YAML migration for YAML-targeted files.
 - Settings migration from `settings.json` and `agent.db` to `config.yml`.
-- Field migrations cover renamed/removed settings and value-shape changes, including `queueMode`, changelog settings, `ask.timeout`, flat `theme`, retired image-tool settings, task isolation/eager settings, removed edit and compaction modes, `inlineToolDescriptors`, status-line segments, provider/search settings, memories/hindsight settings, and nested-leaf renames. Consult `Settings.#migrateRawSettings()` for the current exhaustive list.
+- Field migrations cover renamed/removed settings and value-shape changes, including `queueMode`, changelog settings, flat `theme`, retired image-tool settings, task isolation/eager settings, removed edit and compaction modes, `inlineToolDescriptors`, status-line segments, provider/search settings, memories/hindsight settings, and nested-leaf renames. Consult `Settings.#migrateRawSettings()` for the current exhaustive list.
 - Legacy setting names `skills.enablePiUser` / `skills.enablePiProject` are still active gates for native skill source.
 
 If these compatibility paths are removed in code, update this document immediately; several runtime behaviors still depend on them today.

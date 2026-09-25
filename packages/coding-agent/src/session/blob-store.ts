@@ -1,7 +1,9 @@
+import { blobExtensionForImageMimeType, normalizeBlobExtension } from "@oh-my-pi/pi-tui/prompt/image-format";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent, logger } from "@oh-my-pi/pi-utils";
+import type { LazyFrameData } from "@oh-my-pi/snapcompact";
 
 const BLOB_PREFIX = "blob:sha256:";
 
@@ -33,23 +35,6 @@ export interface BlobPutResult {
  * across sessions.
  */
 
-const IMAGE_EXTENSION_BY_MIME: Record<string, string> = {
-	"image/png": "png",
-	"image/jpeg": "jpg",
-	"image/jpg": "jpg",
-	"image/gif": "gif",
-	"image/webp": "webp",
-	"image/svg+xml": "svg",
-};
-
-function normalizeBlobExtension(extension: string | undefined): string | undefined {
-	if (!extension) return undefined;
-	const normalized = extension.startsWith(".") ? extension.slice(1) : extension;
-	if (normalized.length === 0 || normalized.length > 32) return undefined;
-	if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(normalized)) return undefined;
-	return normalized.toLowerCase();
-}
-
 async function ensureDisplayPath(blobPath: string, displayPath: string, data: Buffer): Promise<void> {
 	if (displayPath === blobPath) return;
 	try {
@@ -80,16 +65,6 @@ function ensureDisplayPathSync(blobPath: string, displayPath: string, data: Buff
 		});
 	}
 	fs.writeFileSync(displayPath, data);
-}
-
-export function blobExtensionForImageMimeType(mimeType: string | undefined): string | undefined {
-	if (!mimeType) return undefined;
-	const lower = mimeType.toLowerCase();
-	const known = IMAGE_EXTENSION_BY_MIME[lower];
-	if (known) return known;
-	if (!lower.startsWith("image/")) return undefined;
-	const subtype = lower.slice("image/".length).split(";")[0]?.split("+")[0];
-	return normalizeBlobExtension(subtype);
 }
 
 export class BlobStore {
@@ -160,6 +135,16 @@ export class BlobStore {
 		const blobPath = path.join(this.dir, hash);
 		try {
 			return fs.readFileSync(blobPath);
+		} catch (err) {
+			if (isEnoent(err)) return null;
+			throw err;
+		}
+	}
+
+	/** Stored byte length without reading the blob; null when it is absent. */
+	sizeSync(hash: string): number | null {
+		try {
+			return fs.statSync(path.join(this.dir, hash)).size;
 		} catch (err) {
 			if (isEnoent(err)) return null;
 			throw err;
@@ -292,4 +277,20 @@ export function resolveImageDataSync(blobStore: BlobStore, data: string): string
 		return data;
 	}
 	return buffer.toString("base64");
+}
+
+/**
+ * Price a persisted frame payload without reading it, then read it only if the
+ * snapcompact frame budget keeps it. Missing blobs are dropped instead of sent
+ * to a provider as storage references.
+ */
+export function lazyImageDataSync(blobStore: BlobStore, data: string): LazyFrameData | undefined {
+	const hash = parseBlobRef(data);
+	if (!hash) return isBlobRef(data) ? undefined : { bytes: data.length, read: () => data };
+	const size = blobStore.sizeSync(hash);
+	if (size === null) {
+		logger.warn("Blob not found for image reference", { hash });
+		return undefined;
+	}
+	return { bytes: Math.ceil(size / 3) * 4, read: () => resolveImageDataSync(blobStore, data) };
 }

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	PRINT_MODE_ADVISOR_DRAIN_TIMEOUT_MS,
 	PRINT_MODE_ERROR_ADVISOR_DRAIN_TIMEOUT_MS,
@@ -7,6 +8,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/modes/print-mode";
 import type { PlanModeState } from "@oh-my-pi/pi-coding-agent/plan-mode/state";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { CREDENTIAL_DISABLED_NOTICE_SOURCE } from "@oh-my-pi/pi-coding-agent/session/credential-disabled-notice";
 import type { PlanProposalHandler } from "@oh-my-pi/pi-coding-agent/tools/resolve";
 
 function makeAssistantMessage(text: string): AssistantMessage {
@@ -68,15 +70,16 @@ function createDelayedSession(
 			getHeader: () => undefined,
 			buildSessionContext: () => ({ messages: [] }),
 			getEntries: () => [],
+			onPersistenceError: () => () => {},
 			appendModeChange: (mode: string, data?: Record<string, unknown>) => {
 				modeChanges.push({ mode, data });
 				return "mode-change";
 			},
 		},
-		settings: {
-			get: (key: string) =>
-				key === "plan.enabled" || (key === "plan.defaultOnStartup" && options.defaultPlanMode === true),
-		},
+		settings: Settings.isolated({
+			"plan.enabled": true,
+			"plan.defaultOnStartup": options.defaultPlanMode === true,
+		}),
 		model: undefined,
 		isStreaming: false,
 		getPlanReferencePath: () => "",
@@ -262,6 +265,29 @@ describe("print mode working indicator", () => {
 		expect(stderrOutput.join("")).toBe("Working...\n");
 	});
 
+	it("writes an automatic sign-out notice to stderr in text mode and no other notice", async () => {
+		const delayed = createDelayedSession(makeAssistantMessage("final answer"));
+		const run = runPrintMode(delayed.session, { mode: "text", initialMessage: "hello" });
+		const signedOut = "A Test account was signed out automatically. Run /login to sign in again.";
+
+		await delayed.promptStarted;
+		try {
+			delayed.emit({ type: "notice", level: "warning", message: "Advisor lagging", source: "advisor" });
+			delayed.emit({
+				type: "notice",
+				level: "warning",
+				message: signedOut,
+				source: CREDENTIAL_DISABLED_NOTICE_SOURCE,
+			});
+		} finally {
+			delayed.resolvePrompt();
+			await run;
+		}
+
+		expect(stderrOutput.join("")).toBe(`Working...\nWarning: ${signedOut}\n`);
+		expect(stdoutOutput.join("")).toBe("final answer\n");
+	});
+
 	it("flushes late JSON advisor events after catch-up before disposing", async () => {
 		const message = makeAssistantMessage("advisor-aware answer");
 		const messages: AssistantMessage[] = [];
@@ -277,8 +303,9 @@ describe("print mode working indicator", () => {
 				getHeader: () => undefined,
 				buildSessionContext: () => ({ messages: [] }),
 				getEntries: () => [],
+				onPersistenceError: () => () => {},
 			},
-			settings: { get: () => false },
+			settings: Settings.isolated(),
 			extensionRunner: undefined,
 			subscribe: (listener: (event: AgentSessionEvent) => void) => {
 				subscriber = listener;
@@ -338,8 +365,9 @@ describe("print mode working indicator", () => {
 				getHeader: () => undefined,
 				buildSessionContext: () => ({ messages: [] }),
 				getEntries: () => [],
+				onPersistenceError: () => () => {},
 			},
-			settings: { get: () => false },
+			settings: Settings.isolated(),
 			extensionRunner: undefined,
 			subscribe: () => () => {},
 			prompt: async () => {
@@ -382,8 +410,9 @@ describe("print mode working indicator", () => {
 				getHeader: () => undefined,
 				buildSessionContext: () => ({ messages: [] }),
 				getEntries: () => [],
+				onPersistenceError: () => () => {},
 			},
-			settings: { get: () => false },
+			settings: Settings.isolated(),
 			extensionRunner: undefined,
 			subscribe: () => () => {},
 			prompt: async () => {

@@ -1,16 +1,16 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
+import { customToolToDefinition } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentTool, ToolApproval } from "@oh-my-pi/pi-agent-core";
-import { LSP_READONLY_ACTIONS } from "@oh-my-pi/pi-coding-agent/lsp";
 import {
 	type ApprovalMode,
 	denyError,
 	formatApprovalPrompt,
 	requiresApproval,
 	resolveApproval,
+	resolveApprovalFromContext,
 	truncateForPrompt,
 } from "@oh-my-pi/pi-coding-agent/tools/approval";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
-import { DEBUG_READONLY_ACTIONS } from "@oh-my-pi/pi-coding-agent/tools/debug";
 import { Settings } from "../../src/config/settings";
 import { EditTool } from "../../src/edit";
 import type { ToolSession } from "../../src/tools";
@@ -26,27 +26,21 @@ function tool(
 }
 
 function createBashTool(settingsOverrides: Record<string, unknown> = {}, resolvedShell = "/bin/bash"): BashTool {
-	const settings = {
-		get(key: string): unknown {
-			if (Object.hasOwn(settingsOverrides, key)) return settingsOverrides[key];
-			switch (key) {
-				case "async.enabled":
-				case "bash.autoBackground.enabled":
-				case "astGrep.enabled":
-				case "astEdit.enabled":
-				case "grep.enabled":
-				case "glob.enabled":
-					return false;
-				case "bash.autoBackground.thresholdMs":
-					return 60_000;
-				default:
-					return undefined;
-			}
-		},
-		getShellConfig() {
-			return { shell: resolvedShell, args: ["-c"], env: {}, prefix: undefined };
-		},
-	};
+	const settings = Settings.isolated({
+		"async.enabled": false,
+		"bash.autoBackground.enabled": false,
+		"astGrep.enabled": false,
+		"astEdit.enabled": false,
+		"grep.enabled": false,
+		"glob.enabled": false,
+		...settingsOverrides,
+	});
+	spyOn(settings, "getShellConfig").mockReturnValue({
+		shell: resolvedShell,
+		args: ["-c"],
+		env: {},
+		prefix: undefined,
+	});
 	return new BashTool({ settings } as unknown as ConstructorParameters<typeof BashTool>[0]);
 }
 
@@ -174,6 +168,63 @@ describe("MCP fallback and prompt formatting", () => {
 		expect(resolveApproval(subject, {}, "always-ask")).toMatchObject({ policy: "prompt", tier: "write" });
 	});
 
+	it("honors deny/prompt policies written against a tool's legacy (pre-rename) name", () => {
+		// MCP mints gained digits (context7 → mcp__context7_*); a forgotten
+		// `tools.approval.mcp__context_query_docs: deny` must keep protecting the
+		// renamed tool instead of silently reverting to the mode default.
+		const renamed = { ...tool("mcp__context7_query_docs", "write"), legacyName: "mcp__context_query_docs" };
+		expect(resolveApproval(renamed, {}, "yolo", { mcp__context_query_docs: "deny" })).toMatchObject({
+			policy: "deny",
+			source: "user",
+			policyKey: "mcp__context_query_docs",
+		});
+		expect(resolveApproval(renamed, {}, "yolo", { mcp__context_query_docs: "prompt" }).policy).toBe("prompt");
+	});
+
+	it("does not inherit a legacy-name allow", () => {
+		// Fail-closed: a stale `allow` under the old name must not mask a deny
+		// set under the new name, so legacy keys only carry deny/prompt.
+		const renamed = { ...tool("mcp__context7_query_docs", "write"), legacyName: "mcp__context_query_docs" };
+		expect(resolveApproval(renamed, {}, "always-ask", { mcp__context_query_docs: "allow" }).policy).toBe("prompt");
+		expect(
+			resolveApproval(renamed, {}, "yolo", {
+				mcp__context_query_docs: "allow",
+				mcp__context7_query_docs: "deny",
+			}).policy,
+		).toBe("deny");
+	});
+
+	it("prefers the current-name policy over the legacy one", () => {
+		const renamed = { ...tool("mcp__context7_query_docs", "write"), legacyName: "mcp__context_query_docs" };
+		expect(
+			resolveApproval(renamed, {}, "yolo", {
+				mcp__context_query_docs: "deny",
+				mcp__context7_query_docs: "allow",
+			}),
+		).toMatchObject({ policy: "allow", policyKey: "mcp__context7_query_docs" });
+	});
+
+	it("ignores legacyName for tools whose mint did not change", () => {
+		const unchanged = { ...tool("mcp__puppeteer_screenshot", "write"), legacyName: "mcp__puppeteer_screenshot" };
+		expect(resolveApproval(unchanged, {}, "yolo", { mcp__puppeteer_screenshot: "deny" }).policy).toBe("deny");
+	});
+
+	it("survives the sdk custom-tool → definition bridge", () => {
+		// The eager/headless path (sdk.ts customToolToDefinition) rebuilds the
+		// tool as a ToolDefinition; legacyName must be forwarded so the alias
+		// still reaches RegisteredToolAdapter → resolveApproval.
+		const definition = customToolToDefinition({
+			name: "mcp__context7_query_docs",
+			label: "context7/query-docs",
+			description: "MCP tool from context7",
+			parameters: { type: "object" },
+			legacyName: "mcp__context_query_docs",
+			approval: "write",
+		} as never);
+		expect(definition.legacyName).toBe("mcp__context_query_docs");
+		expect(resolveApproval(definition, {}, "yolo", { mcp__context_query_docs: "deny" }).policy).toBe("deny");
+	});
+
 	it("formats MCP origin, reason, and per-tool details", () => {
 		const subject = tool("mcp__server__dangerous", undefined, () => ["Path: /tmp/out", "Content:\nhello"]);
 		expect(formatApprovalPrompt(subject, {}, "Needs confirmation").split("\n")).toEqual([
@@ -208,16 +259,7 @@ describe("MCP fallback and prompt formatting", () => {
 	}
 
 	function sloppySection(path: string, find = "old", put = "new"): string {
-		return [
-			`<SM:EDIT path="${path}">`,
-			"<SM:FIND>",
-			find,
-			"</SM:FIND>",
-			"<SM:PUT>",
-			put,
-			"</SM:PUT>",
-			"</SM:EDIT>",
-		].join("\n");
+		return [`*** Edit File: ${path}`, "*** Find", find, "*** Replace", put].join("\n");
 	}
 
 	it("shows the file from a sloppy edit section header", () => {
@@ -872,11 +914,46 @@ describe("tool-owned dynamic approval declarations", () => {
 			source: "mode",
 		});
 	});
+});
 
-	it("exports LSP and debug read-only action sets from their owning tools", () => {
-		expect(LSP_READONLY_ACTIONS.has("diagnostics")).toBe(true);
-		expect(LSP_READONLY_ACTIONS.has("rename")).toBe(false);
-		expect(DEBUG_READONLY_ACTIONS.has("variables")).toBe(true);
-		expect(DEBUG_READONLY_ACTIONS.has("continue")).toBe(false);
+describe("resolveApprovalFromContext fail-closed default", () => {
+	it("fails closed to always-ask with no grant when context is missing", () => {
+		expect(resolveApprovalFromContext(undefined)).toEqual({ approvalMode: "always-ask", userPolicies: {} });
+		expect(resolveApprovalFromContext(null)).toEqual({ approvalMode: "always-ask", userPolicies: {} });
+		expect(resolveApprovalFromContext({})).toEqual({ approvalMode: "always-ask", userPolicies: {} });
+	});
+
+	it("does not allow an exec-tier tool when context is missing", () => {
+		const { approvalMode, userPolicies } = resolveApprovalFromContext(undefined);
+		expect(resolveApproval(tool("bash", "exec"), {}, approvalMode, userPolicies).policy).toBe("prompt");
+	});
+
+	it("honors configured mode and per-tool policies when settings are present", () => {
+		expect(
+			resolveApprovalFromContext({
+				settings: Settings.isolated({ "tools.approvalMode": "write", "tools.approval": { bash: "deny" } }),
+			}),
+		).toEqual({ approvalMode: "write", userPolicies: { bash: "deny" } });
+		expect(resolveApprovalFromContext({ settings: Settings.isolated({ "tools.approvalMode": "yolo" }) })).toEqual({
+			approvalMode: "yolo",
+			userPolicies: {},
+		});
+	});
+
+	it("keeps the schema default yolo when settings exist but approvalMode is unset", () => {
+		expect(resolveApprovalFromContext({ settings: Settings.isolated() })).toEqual({
+			approvalMode: "yolo",
+			userPolicies: {},
+		});
+	});
+
+	it("lets --auto-approve force yolo while still reading user policies", () => {
+		expect(
+			resolveApprovalFromContext({
+				autoApprove: true,
+				settings: Settings.isolated({ "tools.approvalMode": "always-ask", "tools.approval": { bash: "deny" } }),
+			}),
+		).toEqual({ approvalMode: "yolo", userPolicies: { bash: "deny" } });
+		expect(resolveApprovalFromContext({ autoApprove: true })).toEqual({ approvalMode: "yolo", userPolicies: {} });
 	});
 });

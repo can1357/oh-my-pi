@@ -10,11 +10,11 @@ import {
 	getBtwLatestTurn,
 	getBtwTurns,
 } from "../../session/btw-history";
-import { TRUNCATE_LENGTHS } from "../../tools/render-utils";
+import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { copyToClipboard } from "../../utils/clipboard";
-import { BtwHistoryPanel } from "../components/btw-history-panel";
-import { BtwPanelComponent } from "../components/btw-panel";
-import { sanitizeErrorLine } from "../components/error-block";
+import { BtwHistoryPanel } from "@oh-my-pi/pi-tui/overlays/btw-history-panel";
+import { BtwPanelComponent } from "@oh-my-pi/pi-tui/overlays/btw-panel";
+import { sanitizeErrorLine } from "@oh-my-pi/pi-tui/chrome/error-block";
 import type { InteractiveModeContext } from "../types";
 
 interface BtwRequest {
@@ -127,12 +127,18 @@ export class BtwController {
 		);
 	}
 
-	async #copyAnswer(answer: string): Promise<boolean> {
+	async #copyAnswer(answer: string, options?: { historyRecordId?: string }): Promise<boolean> {
 		if (this.#copyInFlight || !answer.trim()) return false;
 		this.#copyInFlight = true;
+		// Clipboard writes settle asynchronously; the user may close this panel or
+		// start another /btw before they do. Confirm only the still-active surface.
+		const inlineRequest = options?.historyRecordId === undefined ? this.#activeRequest : undefined;
 		try {
 			await copyToClipboard(replaceTabs(answer).trim());
 			this.ctx.showStatus("Copied /btw answer to clipboard");
+			if (options?.historyRecordId !== undefined) this.#historyPanel?.markCopied(options.historyRecordId, answer);
+			else if (inlineRequest && this.#visible && this.#activeRequest === inlineRequest)
+				inlineRequest.component.markCopied();
 			return true;
 		} catch (error) {
 			this.ctx.showError(sanitizeErrorLine(error));
@@ -462,7 +468,7 @@ export class BtwController {
 			onClose: () => this.#closeHistory(),
 			onCopy: record => {
 				const answer = getBtwCopyText(record);
-				if (answer !== undefined) void this.#copyAnswer(answer);
+				if (answer !== undefined) void this.#copyAnswer(answer, { historyRecordId: record.id });
 			},
 			onCancel: record => {
 				if (this.#activeRequest?.record.id === record.id) this.handleCancel();
@@ -479,6 +485,7 @@ export class BtwController {
 				}
 				return this.startFollowUp(record.id, question, signal);
 			},
+			spaceHold: input => this.ctx.dictationSpaceHold(input),
 			requestRender: () => this.ctx.ui.requestRender(),
 			getHeight: () => this.ctx.ui.terminal.rows,
 		});

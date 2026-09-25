@@ -10,10 +10,13 @@ import {
 	resolveModelFromString,
 } from "../config/model-resolver";
 import imageQuestionSystemPromptTemplate from "../prompts/tools/image-question-system.md" with { type: "text" };
-import { concreteThinkingLevel, resolveThinkingLevelForModel, toReasoningEffort } from "../thinking";
+import { concreteThinkingLevel, resolveThinkingLevelForModel, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../tools";
-import { ToolError } from "../tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { LoadedImageInput } from "./image-loading";
+
+import { cfgImagesBlockImages } from "../modes/settings";
+import { cfgImagesQuestionTimeoutMs } from "../tools/settings";
 
 /** Vision-capable model selected for an explicit image question. */
 export interface ResolvedImageQuestionModel {
@@ -84,7 +87,7 @@ export async function askImageQuestion(
 	signal: AbortSignal | undefined,
 	completeImpl: typeof completeSimple = completeSimple,
 ): Promise<ImageQuestionResult> {
-	if (session.settings.get("images.blockImages")) {
+	if (cfgImagesBlockImages.get(session.settings)) {
 		throw new ToolError(
 			"Image submission is disabled by settings (images.blockImages=true). Disable it to ask about images.",
 		);
@@ -108,7 +111,7 @@ export async function askImageQuestion(
 	}
 
 	const telemetry = resolveTelemetry(session.getTelemetry?.(), session.getSessionId?.() ?? undefined);
-	const timeoutMs = session.settings.get("images.questionTimeoutMs");
+	const timeoutMs = cfgImagesQuestionTimeoutMs.get(session.settings);
 	const hasTimeout = typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0;
 	const timeoutSignal = hasTimeout ? AbortSignal.timeout(timeoutMs) : undefined;
 	const effectiveSignal = timeoutSignal ? (signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal) : signal;
