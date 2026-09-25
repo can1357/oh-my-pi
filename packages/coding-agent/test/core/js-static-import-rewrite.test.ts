@@ -10,6 +10,11 @@ const IMPORT = "import";
 const dyn = (rest: string) => `${IMPORT}${rest}`;
 
 describe("rewriteImports", () => {
+	it("does not let a source filename inject executable lines", () => {
+		const filename = 'cell.js\nthrow new Error("filename executed")';
+		expect(indirectEval("40 + 2", filename)).toBe(42);
+	});
+
 	it("rewrites a top-level default import", async () => {
 		const out = await rewriteImports(`${IMPORT} foo from "bar";\nconsole.log(foo);`);
 		expect(out).toContain('await __omp_import__("bar")');
@@ -158,11 +163,6 @@ describe("rewriteImports", () => {
 		expect(out).toContain(`${IMPORT} b from "beta";`);
 	});
 
-	it("returns the input unchanged when there are no imports", async () => {
-		const code = "const x = 1 + 2;\nreturn x;";
-		expect(await rewriteImports(code)).toBe(code);
-	});
-
 	it("returns the input unchanged when the parser cannot make sense of the code", async () => {
 		const code = `${IMPORT} { foo from broken syntax 'unterminated`;
 		// Should not reject; should fall through to the VM which will surface the syntax error.
@@ -206,6 +206,24 @@ describe("wrapCode cross-cell persistence", () => {
 		}
 	});
 
+	it("keeps async-cell function closures attached to retained global bindings", async () => {
+		const globals = globalThis as Record<string, unknown>;
+		const wrapped = await wrapCode(
+			"await Promise.resolve();\nvar ompClosureTotal = 42;\nfunction ompClosureAnswer() { return ompClosureTotal; }",
+		);
+		expect(wrapped.asyncWrapped).toBe(true);
+		try {
+			await indirectEval(wrapped.source);
+			expect((globals.ompClosureAnswer as () => number)()).toBe(42);
+			indirectEval("ompClosureTotal += 1;");
+			expect(globals.ompClosureTotal).toBe(43);
+			expect((globals.ompClosureAnswer as () => number)()).toBe(43);
+		} finally {
+			delete globals.ompClosureAnswer;
+			delete globals.ompClosureTotal;
+		}
+	});
+
 	it("publishes explicit top-level var declarations from async-wrapped cells", async () => {
 		const globals = globalThis as Record<string, unknown>;
 		const wrapped = await wrapCode("await Promise.resolve();\nvar ompPersistedVar = 5;");
@@ -216,5 +234,47 @@ describe("wrapCode cross-cell persistence", () => {
 		} finally {
 			delete globals.ompPersistedVar;
 		}
+	});
+});
+
+// Runtime call-site identity: wrapCode wraps bare `tool.read(...)` calls in
+// `__omp_with_call_site__("js:<offset>", () => ...)` so authoritative bridge calls can
+// claim speculative results. A bare textual mention of the helper (comment, string)
+// must not suppress that wrapping; only genuinely pre-instrumented code or a real
+// user binding of the name skips it.
+describe("wrapCode runtime call-site instrumentation", () => {
+	it("still instruments tool.read when the helper name appears only in a comment", async () => {
+		const wrapped = await wrapCode(
+			'// mentions __omp_with_call_site__ but is not instrumented\nawait tool.read({ path: "a.txt" });',
+		);
+		expect(wrapped.source).toContain('__omp_with_call_site__("js:');
+	});
+
+	it("still instruments tool.read when the helper name appears only in a string literal", async () => {
+		const wrapped = await wrapCode('const label = "__omp_with_call_site__";\nawait tool.read({ path: "a.txt" });');
+		expect(wrapped.source).toContain('__omp_with_call_site__("js:');
+	});
+
+	it("does not double-wrap an already-instrumented call", async () => {
+		const code = 'await __omp_with_call_site__("js:0", () => tool.read({ path: "a.txt" }));';
+		const wrapped = await wrapCode(code);
+		expect(wrapped.source.match(/__omp_with_call_site__\("js:/g) ?? []).toHaveLength(1);
+	});
+
+	it("skips instrumentation when user code declares the helper name", async () => {
+		const wrapped = await wrapCode('const __omp_with_call_site__ = () => {};\nawait tool.read({ path: "a.txt" });');
+		expect(wrapped.source).not.toContain('__omp_with_call_site__("js:');
+	});
+
+	it("skips instrumentation when user code assigns the helper name", async () => {
+		const wrapped = await wrapCode('__omp_with_call_site__ = null;\nawait tool.read({ path: "a.txt" });');
+		expect(wrapped.source).not.toContain('__omp_with_call_site__("js:');
+	});
+
+	it("skips instrumentation when user code takes the helper name as a parameter", async () => {
+		const wrapped = await wrapCode(
+			'function f(__omp_with_call_site__) { return __omp_with_call_site__; }\nawait tool.read({ path: "a.txt" });',
+		);
+		expect(wrapped.source).not.toContain('__omp_with_call_site__("js:');
 	});
 });

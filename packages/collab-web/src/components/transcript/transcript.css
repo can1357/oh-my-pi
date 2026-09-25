@@ -206,6 +206,26 @@
 	font-size: 11px;
 }
 
+.tr-earlier {
+	display: block;
+	margin: 4px auto 10px;
+	padding: 4px 12px;
+	border: 1px solid var(--border);
+	border-radius: 999px;
+	background: none;
+	color: var(--fg-faint);
+	font-family: var(--font-mono);
+	font-size: 10px;
+	text-transform: uppercase;
+	letter-spacing: 0.08em;
+	cursor: pointer;
+}
+
+.tr-earlier:hover {
+	color: var(--fg-muted);
+	border-color: var(--border-strong);
+}
+
 .tr-shimmer {
 	color: var(--fg-muted);
 	font-size: 12.5px;

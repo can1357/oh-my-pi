@@ -11,9 +11,10 @@
 import { prompt } from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobType } from "../async";
 import asyncResultTemplate from "../prompts/tools/async-result.md" with { type: "text" };
-import type { StructuredSubagentOutput } from "../task/types";
+import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
 import type { CustomMessage } from "./messages";
-import { truncateMiddle } from "./streaming-output";
+import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { truncateMiddle } from "@oh-my-pi/pi-tui/tools/streaming-output";
 
 /**
  * `customType` of the injected async-result follow-up message. The task
@@ -46,12 +47,15 @@ type AsyncResultJobDetails = {
 	type?: AsyncJobType;
 	label?: string;
 	durationMs?: number;
+	/** Source capture metadata belongs to this job, not to the enclosing delivery report. */
+	meta?: OutputMeta;
 	/** Full structured payload (source/mode/status/data/error), when the job used an output schema. */
 	schema?: StructuredSubagentOutput;
 };
 
 export type AsyncResultDetails = {
 	jobs: AsyncResultJobDetails[];
+	meta?: OutputMeta;
 };
 
 /**
@@ -69,6 +73,16 @@ export function renderStructuredJson(structured: StructuredSubagentOutput): stri
 		return undefined;
 	}
 	return truncateMiddle(serialized, { maxBytes: ASYNC_PREVIEW_MAX_CHARS }).content;
+}
+
+/**
+ * Headline for the delivery's "Structured output:" line. `unavailable` means
+ * no payload was ever validated (the run failed before yielding, or the
+ * schema itself was unusable) — never a schema verdict, so it must not read
+ * as "schema unavailable"/"schema invalid".
+ */
+export function structuredStatusLabel(status: StructuredSubagentOutput["status"]): string {
+	return status === "unavailable" ? "unavailable" : `schema ${status}`;
 }
 
 export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): CustomMessage<AsyncResultDetails> | null {
@@ -90,20 +104,24 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			type: entry.job?.type,
 			label: entry.job?.label,
 			durationMs: entry.durationMs,
+			meta: entry.job?.latestDetails?.meta,
 			structured,
 			structuredJson,
 			hasStructuredData,
 			schemaStatus: structured?.status,
+			schemaStatusLabel: structured ? structuredStatusLabel(structured.status) : undefined,
 			schemaError: structured?.error,
 			schemaValid: structured?.status === "valid",
 		};
 	});
 	const details: AsyncResultDetails = {
+		meta: { source: { type: "report", value: "background job delivery" } },
 		jobs: jobs.map(job => ({
 			jobId: job.jobId,
 			type: job.type,
 			label: job.label,
 			durationMs: job.durationMs,
+			...(job.meta ? { meta: job.meta } : {}),
 			...(job.structured ? { schema: job.structured } : {}),
 		})),
 	};

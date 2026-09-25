@@ -1,6 +1,7 @@
-import type { LineRange } from "./path-utils";
-import { parseLineRanges, parseTailCount } from "./path-utils";
-import { ToolError } from "./tool-errors";
+import type { LineRange } from "@oh-my-pi/pi-tui/tools/line-ranges";
+import { parseTailCount } from "./path-utils";
+import { parseLineRanges } from "@oh-my-pi/pi-tui/tools/line-ranges";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 /** Parsed representation of a path-embedded selector. */
 export type ParsedSelector =
 	| { kind: "none" }

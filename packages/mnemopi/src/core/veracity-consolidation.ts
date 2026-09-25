@@ -1,5 +1,4 @@
 import type { Database } from "bun:sqlite";
-import { createHash } from "node:crypto";
 import { type DatabasePath, openDatabase } from "../db";
 
 export const VERACITY_WEIGHTS = Object.freeze({
@@ -123,12 +122,12 @@ export function computeFactId(subject: string, predicate: string, object: string
 		if (value === "") throw new RangeError(`compute_fact_id: ${name} must be non-empty`);
 	}
 
-	const chunks: Buffer[] = [];
+	const hash = new Bun.SHA256();
 	for (const value of [subject, predicate, object]) {
 		const bytes = Buffer.from(value.normalize("NFC"), "utf8");
-		chunks.push(Buffer.from(`${bytes.length}:`, "ascii"), bytes);
+		hash.update(`${bytes.length}:`).update(bytes);
 	}
-	return `cf_${createHash("sha256").update(Buffer.concat(chunks)).digest("hex").slice(0, 24)}`;
+	return `cf_${hash.digest("hex").slice(0, 24)}`;
 }
 export function clampVeracity(raw: unknown, context = "veracity"): Veracity {
 	if (raw === null || raw === undefined) return "unknown";

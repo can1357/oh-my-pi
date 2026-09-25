@@ -56,6 +56,7 @@ export default {
 		const identity = resolvePythonKernelIdentity(opts.session);
 		const executorOptions: PythonExecutorOptions = {
 			cwd: identity.cwd,
+			filename: opts.filename,
 			idleTimeoutMs: opts.idleTimeoutMs,
 			signal: opts.signal,
 			sessionId: identity.sessionId,

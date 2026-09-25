@@ -125,6 +125,14 @@ export function classifyGatewayError(err: unknown): GatewayErrorClassification {
 		return withOwnerDisposition(err, { status: 499, type: "request_aborted", message });
 	}
 
+	// Free-text abort wording sits below authoritative statuses on purpose: a
+	// provider-reported `HTTP 503: upstream request aborted` is a retryable
+	// outage, not a client cancellation. Genuine cancels arrive as AbortError
+	// (handled above) or structural Flag.Abort / status 499.
+	if (/\baborted\b|\babort signal\b/i.test(message)) {
+		return withOwnerDisposition(err, { status: 499, type: "request_aborted", message });
+	}
+
 	if (
 		// Match rate-limit phrasings before auth wording: some providers
 		// describe throttling as "unauthorized due to rate limit".

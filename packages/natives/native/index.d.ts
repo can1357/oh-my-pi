@@ -648,7 +648,27 @@ export declare function __ompInstallTokioRuntime(): void
  * `packages/natives/native/index.js` (which derives the name from
  * `package.json#version`).
  */
-export declare function __piNativesV18_1_14(): void
+export declare function __piNativesV18_3_0(): void
+
+/**
+ * Reports whether the on-device model can generate, as an `availability`
+ * event JSON: `{available, reason?, contextSize?, variant?, vision?,
+ * toolCalling?}`.
+ */
+export declare function appleFmAvailability(): Promise<string>
+
+/**
+ * Cancels a generation; its stream then ends with a `cancelled` error event.
+ * Unknown or finished handles are ignored.
+ */
+export declare function appleFmCancel(handle: number): void
+
+/**
+ * Starts one model turn for a JSON request and streams JSON events to
+ * `on_event` until a terminal `done` or `error` event. Returns a handle for
+ * [`apple_fm_cancel`].
+ */
+export declare function appleFmGenerate(request: string, onEvent: (err: null | Error, event: string) => void): number
 
 /**
  * Apply ast-grep rewrite rules to matching files; honors `dryRun` and returns
@@ -1007,7 +1027,7 @@ export declare function cosineSimilarityPairs(vectors: Float64Array, count: numb
  * use ordinary encoding (no special-token handling) and the Claude
  * encodings count message content without the fixed per-message frame.
  * Defaults to `o200k_base`; pass a `Claude*` encoding for exact Claude
- * counts, or the matching family encoding for Qwen/DeepSeek/Kimi/GLM.
+ * counts, or the matching family encoding for Qwen/DeepSeek/Kimi/GLM/Jev.
  */
 export declare function countTokens(input: string | string[], encoding?: Encoding | undefined | null): number
 
@@ -1451,7 +1471,9 @@ export declare enum Encoding {
   /** Kimi K2 … K3. */
   KimiK2 = 'KimiK2',
   /** GLM-5.x exact; GLM-4.x near-exact. */
-  Glm5 = 'Glm5'
+  Glm5 = 'Glm5',
+  /** `TypeSafe` Jev 1.13 judgment `state` (request frame excluded). */
+  Jev = 'Jev'
 }
 
 /**
@@ -1479,7 +1501,7 @@ export declare function execReplace(argv: Array<string>): void
  */
 export declare function executeShell(options: ShellExecuteOptions, onChunk?: ((error: Error | null, chunk: string) => void) | undefined | null): Promise<ShellRunResult>
 
-/** Locate `<SM:EDIT path="…">` payloads the model emitted as plain text. */
+/** Locate `*** Edit File: path` payloads the model emitted as plain text. */
 export declare function extractInlineSloppyRegions(text: string): Array<InlineSloppyRegion>
 
 /**
@@ -1752,6 +1774,9 @@ export declare function hashlineFormatHeader(path: string, tag: string): string
 
 /** `N:line` numbered display rows starting at `startLine` (default 1). */
 export declare function hashlineFormatNumberedLines(text: string, startLine?: number | undefined | null): string
+
+/** Whether a row is a truncation notice emitted by `read`. */
+export declare function hashlineIsReadTruncationNotice(line: string): boolean
 
 /** Count of one canonical hashline op header shape in a payload. */
 export interface HashlineOpCount {
@@ -2101,6 +2126,36 @@ export declare function matchesKittySequence(data: string, expectedCodepoint: nu
  */
 export declare function matchesLegacySequence(data: string, keyName: string): boolean
 
+/**
+ * Options for [`render_mermaid_ascii`]; every field defaults like the
+ * TypeScript renderer (`useAscii: false`, paddings 5, border padding 1,
+ * `colorMode: "auto"`).
+ */
+export interface MermaidRenderOptions {
+  /** `+-|>` instead of Unicode box-drawing characters. */
+  useAscii?: boolean
+  paddingX?: number
+  paddingY?: number
+  boxBorderPadding?: number
+  /** Force the flowchart/state layout direction. */
+  direction?: 'TD' | 'TB' | 'LR' | 'BT' | 'RL'
+  /** `auto` (or omitted) detects from the terminal environment. */
+  colorMode?: 'none' | 'auto' | 'ansi16' | 'ansi256' | 'truecolor' | 'html'
+  theme?: MermaidTheme
+}
+
+/** Theme colors for [`render_mermaid_ascii`]; hex strings, all optional. */
+export interface MermaidTheme {
+  fg?: string
+  border?: string
+  line?: string
+  arrow?: string
+  accent?: string
+  bg?: string
+  corner?: string
+  junction?: string
+}
+
 /** N-API opt-in handle for the minimizer. */
 export interface MinimizerOptions {
   /** Master switch. Absent / false = disabled. */
@@ -2429,6 +2484,16 @@ export declare function rasterizeSvg(input: Uint8Array, maxWidthPx: number, maxH
  * Returns an error if clipboard access fails or image encoding fails.
  */
 export declare function readImageFromClipboard(): Promise<ClipboardImage | undefined | null>
+
+/**
+ * Render Mermaid diagram text (flowchart, state, sequence, class, ER, or
+ * xychart) to ASCII/Unicode art. Synchronous: callers render inside the
+ * TUI compositor.
+ *
+ * # Errors
+ * Unparseable flowchart source or an unknown `direction`/`colorMode` value.
+ */
+export declare function renderMermaidAscii(text: string, options?: MermaidRenderOptions | undefined | null): string
 
 /**
  * Render one snapcompact frame on a libuv worker: print pre-normalized text
@@ -2773,10 +2838,23 @@ export interface VcsDiffOptions {
   files?: Array<string>
   context?: number
   binary?: boolean
+  /**
+   * Fail with an `OutputTooLarge` `VcsError` once the rendered patch exceeds
+   * this many bytes, instead of buffering an arbitrarily large string.
+   * Carried as a double so a budget past 2^32 reaches the renderer intact
+   * (a `u32` field would wrap it); values beyond `usize` saturate.
+   */
+  maxBytes?: number
 }
 
 /** Discover the repository owning a directory. */
 export declare function vcsDiscover(dir: string): VcsRepo | null
+
+/**
+ * Discover the repository presenting a directory: equal-root jj+git ties
+ * prefer Jujutsu. Git-safe automation must keep using [`vcs_discover`].
+ */
+export declare function vcsDiscoverForDisplay(dir: string): VcsRepo | null
 
 /** Clone a Git repository. */
 export declare function vcsGitClone(url: string, target: string, options: VcsCloneOptions, signal?: unknown | undefined | null): Promise<void>
@@ -2938,7 +3016,10 @@ export interface VectorTopK {
  */
 export declare function visibleWidth(text: string, tabWidth: number): number
 
-/** Warm syntax grammars and scope matchers on the native worker pool. */
+/**
+ * Warm syntax grammars, scope matchers, and the regexes of commonly
+ * highlighted languages on the native worker pool.
+ */
 export declare function warmHighlighter(): Promise<undefined>
 
 /** Profiling results returned to JavaScript. */

@@ -1,8 +1,8 @@
 import type { TSchema } from "@oh-my-pi/pi-ai";
-import { $env, logger } from "@oh-my-pi/pi-utils";
+import { $env, isRecord, logger } from "@oh-my-pi/pi-utils";
 import type { CustomTool, CustomToolResult } from "../extensibility/custom-tools/types";
 import { type CallMcpOptions, callMCP } from "../mcp/json-rpc";
-import type { ExaSearchResponse, MCPCallResponse, MCPTool, MCPToolsResponse, MCPToolWrapperConfig } from "./types";
+import type { ExaSearchResponse, MCPTool, MCPToolWrapperConfig } from "./types";
 
 type MCPWrappedToolDetails = {
 	response?: ExaSearchResponse;
@@ -17,8 +17,21 @@ export function findApiKey(): string | null {
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
-	if (typeof value !== "object" || value === null) return null;
-	return value as Record<string, unknown>;
+	return isRecord(value) ? value : null;
+}
+
+function isMcpTool(value: unknown): value is MCPTool {
+	if (!isRecord(value)) return false;
+	return (
+		typeof value.name === "string" &&
+		(value.description === undefined || typeof value.description === "string") &&
+		isRecord(value.inputSchema)
+	);
+}
+
+function toolsFromMcpResult(result: unknown): MCPTool[] {
+	if (!isRecord(result) || !Array.isArray(result.tools)) return [];
+	return result.tools.filter(isMcpTool);
 }
 
 function parseJsonContent(text: string): unknown | null {
@@ -77,27 +90,27 @@ export async function fetchExaTools(apiKey: string | null, toolNames: string[]):
 	if (apiKey) params.set("exaApiKey", apiKey);
 	params.set("toolNames", toolNames.join(","));
 	const url = `https://mcp.exa.ai/mcp?${params.toString()}`;
-	const response = (await callMCP(url, "tools/list")) as MCPToolsResponse;
+	const response = await callMCP(url, "tools/list");
 
 	if (response.error) {
 		logger.error("MCP tools/list error", { toolNames, error: response.error });
 		throw new Error(`MCP error: ${response.error.message}`);
 	}
 
-	return response.result?.tools ?? [];
+	return toolsFromMcpResult(response.result);
 }
 
 /** Fetch available tools from Websets MCP */
 export async function fetchWebsetsTools(apiKey: string): Promise<MCPTool[]> {
 	const url = `https://websetsmcp.exa.ai/mcp?exaApiKey=${encodeURIComponent(apiKey)}`;
-	const response = (await callMCP(url, "tools/list")) as MCPToolsResponse;
+	const response = await callMCP(url, "tools/list");
 
 	if (response.error) {
 		logger.error("Websets MCP tools/list error", { error: response.error });
 		throw new Error(`MCP error: ${response.error.message}`);
 	}
 
-	return response.result?.tools ?? [];
+	return toolsFromMcpResult(response.result);
 }
 
 /** Call a tool on Exa MCP (simplified: toolName as first arg for easier use) */
@@ -111,7 +124,7 @@ export async function callExaTool(
 	if (apiKey) params.set("exaApiKey", apiKey);
 	params.set("tools", toolName);
 	const url = `https://mcp.exa.ai/mcp?${params.toString()}`;
-	const response = (await callMCP(
+	const response = await callMCP(
 		url,
 		"tools/call",
 		{
@@ -119,7 +132,7 @@ export async function callExaTool(
 			arguments: args,
 		},
 		options,
-	)) as MCPCallResponse;
+	);
 
 	if (response.error) {
 		logger.error("MCP tools/call error", { toolName, args, error: response.error });
@@ -136,10 +149,10 @@ export async function callWebsetsTool(
 	args: Record<string, unknown>,
 ): Promise<unknown> {
 	const url = `https://websetsmcp.exa.ai/mcp?exaApiKey=${encodeURIComponent(apiKey)}`;
-	const response = (await callMCP(url, "tools/call", {
+	const response = await callMCP(url, "tools/call", {
 		name: toolName,
 		arguments: args,
-	})) as MCPCallResponse;
+	});
 
 	if (response.error) {
 		logger.error("Websets MCP tools/call error", { toolName, args, error: response.error });

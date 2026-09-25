@@ -192,6 +192,155 @@ describe("auth-gateway conductor wiring", () => {
 		}
 	});
 
+	it("skips an unresolved primary target and dispatches the next resolved target", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-conductor-wire-unresolved-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey("backup-provider", "test-key");
+		const backup = createMockModel({
+			provider: "backup-provider",
+			id: "backup-id",
+			handler: { content: ["ok"] },
+		});
+		const resolveModel = (id: string) => (id === "backup-id" ? backup.model : undefined);
+		const registry = new RouteRegistry(resolveModel);
+		registry.register({
+			id: "virtual-impl",
+			root: {
+				type: "fallback",
+				on: ["model_unavailable"],
+				children: [
+					{ type: "target", model: "missing-id" },
+					{ type: "target", model: "backup-id" },
+				],
+			},
+		});
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["t"],
+			storage,
+			resolveModel,
+			routeRegistry: registry,
+			version: "test",
+		});
+		try {
+			const res = await fetch(`${handle.url}/v1/chat/completions`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+				body: JSON.stringify({
+					model: "virtual-impl",
+					messages: [{ role: "user", content: "hi" }],
+					stream: false,
+				}),
+			});
+			expect(res.status).toBe(200);
+			expect(backup.calls).toHaveLength(1);
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("skips a credentialless primary target and dispatches the next eligible target", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-conductor-wire-credentialless-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey("backup-provider", "test-key");
+		const primary = createMockModel({
+			provider: "primary-provider",
+			id: "primary-id",
+			handler: { content: ["bad"] },
+		});
+		const backup = createMockModel({
+			provider: "backup-provider",
+			id: "backup-id",
+			handler: { content: ["ok"] },
+		});
+		const resolveModel = (id: string) => {
+			if (id === "primary-id") return primary.model;
+			if (id === "backup-id") return backup.model;
+			return undefined;
+		};
+		const registry = new RouteRegistry(resolveModel);
+		registry.register({
+			id: "virtual-impl",
+			root: {
+				type: "fallback",
+				on: ["provider_unavailable"],
+				children: [
+					{ type: "target", model: "primary-id" },
+					{ type: "target", model: "backup-id" },
+				],
+			},
+		});
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["t"],
+			storage,
+			resolveModel,
+			routeRegistry: registry,
+			version: "test",
+		});
+		try {
+			const res = await fetch(`${handle.url}/v1/chat/completions`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+				body: JSON.stringify({
+					model: "virtual-impl",
+					messages: [{ role: "user", content: "hi" }],
+					stream: false,
+				}),
+			});
+			expect(res.status).toBe(200);
+			expect(primary.calls).toHaveLength(0);
+			expect(backup.calls).toHaveLength(1);
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("returns the credential error when every route target is credentialless", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-conductor-wire-no-credential-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		const primary = createMockModel({
+			provider: "primary-provider",
+			id: "primary-id",
+			handler: { content: ["bad"] },
+		});
+		const resolveModel = (id: string) => (id === "primary-id" ? primary.model : undefined);
+		const registry = new RouteRegistry(resolveModel);
+		registry.register({ id: "virtual-impl", root: { type: "target", model: "primary-id" } });
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["t"],
+			storage,
+			resolveModel,
+			routeRegistry: registry,
+			version: "test",
+		});
+		try {
+			const res = await fetch(`${handle.url}/v1/chat/completions`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+				body: JSON.stringify({
+					model: "virtual-impl",
+					messages: [{ role: "user", content: "hi" }],
+					stream: false,
+				}),
+			});
+			expect(res.status).toBe(401);
+			expect(primary.calls).toHaveLength(0);
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("does not call backup after completeSimple usage then error (negative)", async () => {
 		registerMockApi();
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-conductor-wire-usage-"));
@@ -250,6 +399,65 @@ describe("auth-gateway conductor wiring", () => {
 			expect(res.status).not.toBe(200);
 			expect(backup.calls.length).toBe(0);
 			expect(primary.calls.length).toBe(1);
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+	it("does not use an overflow-only fallback for a credentialless target", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-conductor-wire-credentialless-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey("backup-provider", "test-key");
+		const primary = createMockModel({
+			provider: "primary-provider",
+			id: "primary-id",
+			handler: { content: ["bad"] },
+		});
+		const backup = createMockModel({
+			provider: "backup-provider",
+			id: "backup-id",
+			handler: { content: ["ok"] },
+		});
+		const resolveModel = (id: string) => {
+			if (id === "primary-id") return primary.model;
+			if (id === "backup-id") return backup.model;
+			return undefined;
+		};
+		const registry = new RouteRegistry(resolveModel);
+		registry.register({
+			id: "virtual-impl",
+			root: {
+				type: "fallback",
+				on: ["context_overflow"],
+				children: [
+					{ type: "target", model: "primary-id" },
+					{ type: "target", model: "backup-id" },
+				],
+			},
+		});
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["t"],
+			storage,
+			resolveModel,
+			routeRegistry: registry,
+			version: "test",
+		});
+		try {
+			const res = await fetch(`${handle.url}/v1/chat/completions`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+				body: JSON.stringify({
+					model: "virtual-impl",
+					messages: [{ role: "user", content: "hi" }],
+					stream: false,
+				}),
+			});
+			expect(res.status).toBe(401);
+			expect(primary.calls).toHaveLength(0);
+			expect(backup.calls).toHaveLength(0);
 		} finally {
 			await handle.close();
 			storage.close();

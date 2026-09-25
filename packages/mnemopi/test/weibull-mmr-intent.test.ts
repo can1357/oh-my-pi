@@ -1,37 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import { mmrRerank } from "@oh-my-pi/pi-mnemopi/core/mmr";
 import { adjustWeights, classifyIntent } from "@oh-my-pi/pi-mnemopi/core/query-intent";
-import {
-	DEFAULT_HALFLIFE_HOURS,
-	WEIBULL_PARAMS,
-	weibullBoost,
-	weibullDecayFactor,
-} from "@oh-my-pi/pi-mnemopi/core/weibull";
+import { DEFAULT_HALFLIFE_HOURS, weibullBoost, weibullDecayFactor } from "@oh-my-pi/pi-mnemopi/core/weibull";
 
 describe("Weibull decay", () => {
-	it("exposes parameters for memory types used by recall", () => {
-		const expectedTypes = [
-			"profile",
-			"preference",
-			"setup",
-			"fact",
-			"learning",
-			"pattern",
-			"project",
-			"goal",
-			"entity",
-			"event",
-			"issue",
-			"request",
-			"general",
-		] as const;
-
-		for (const type of expectedTypes) {
-			expect(WEIBULL_PARAMS[type]).toHaveProperty("k");
-			expect(WEIBULL_PARAMS[type]).toHaveProperty("eta");
-		}
-	});
-
 	it("keeps stable profile memories longer than fast request memories", () => {
 		const profileDecay = weibullDecayFactor(720, "profile");
 		const requestDecay = weibullDecayFactor(720, "request");

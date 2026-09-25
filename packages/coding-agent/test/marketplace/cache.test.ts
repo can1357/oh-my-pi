@@ -62,16 +62,22 @@ describe("isValidVersionForCache", () => {
 // ── getCachedPluginPath ──────────────────────────────────────────────────────
 
 describe("getCachedPluginPath", () => {
-	it("throws on invalid marketplace name (uppercase)", () => {
-		expect(() => getCachedPluginPath("/cache", "My-Market", "plugin", "1.0.0")).toThrow(/Invalid marketplace name/);
+	it("accepts a mixed-case marketplace name", () => {
+		expect(getCachedPluginPath("/cache", "HexRaysSA", "plugin", "1.0.0")).toBe(
+			path.join("/cache", "HexRaysSA___plugin___1.0.0"),
+		);
 	});
 
 	it("throws on invalid marketplace name (space)", () => {
-		expect(() => getCachedPluginPath("/cache", "bad market", "plugin", "1.0.0")).toThrow();
+		expect(() => getCachedPluginPath("/cache", "bad market", "plugin", "1.0.0")).toThrow(/Invalid marketplace name/);
 	});
 
-	it("throws on invalid plugin name (uppercase)", () => {
-		expect(() => getCachedPluginPath("/cache", "market", "My-Plugin", "1.0.0")).toThrow(/Invalid plugin name/);
+	it("throws on invalid marketplace name (slash)", () => {
+		expect(() => getCachedPluginPath("/cache", "a/b", "plugin", "1.0.0")).toThrow(/Invalid marketplace name/);
+	});
+
+	it("throws on invalid plugin name (space)", () => {
+		expect(() => getCachedPluginPath("/cache", "market", "bad plugin", "1.0.0")).toThrow(/Invalid plugin name/);
 	});
 
 	it("throws on invalid version containing ..", () => {

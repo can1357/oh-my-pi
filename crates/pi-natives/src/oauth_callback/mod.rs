@@ -30,6 +30,8 @@ mod unsupported {
 	}
 }
 
+#[cfg(target_os = "linux")]
+use std::sync::LazyLock;
 use std::{
 	collections::BTreeMap,
 	fs::{self, File},
@@ -63,6 +65,20 @@ use crate::{
 	file_lock::FileLock,
 	task::{self, AbortReason, AbortToken, CancelToken},
 };
+
+/// Whether the host kernel is WSL, read once from `/proc/sys/kernel/osrelease`.
+///
+/// A host probe the hermetic unit tests cannot control, so it is pinned to
+/// `false` under `#[cfg(test)]`; tests exercise WSL rejection through the
+/// `WSL_DISTRO_NAME` / `WSL_INTEROP` env keys they own instead.
+#[cfg(all(target_os = "linux", not(test)))]
+static WSL_KERNEL: LazyLock<bool> = LazyLock::new(|| {
+	fs::read_to_string("/proc/sys/kernel/osrelease")
+		.is_ok_and(|release| release.to_ascii_lowercase().contains("microsoft"))
+});
+
+#[cfg(all(target_os = "linux", test))]
+static WSL_KERNEL: LazyLock<bool> = LazyLock::new(|| false);
 
 const JOURNAL_VERSION: u32 = 1;
 const JOURNAL_LIMIT: u64 = 1024 * 1024;
@@ -780,45 +796,30 @@ fn ensure_storage_root(root: &Path) -> AnyResult<()> {
 }
 
 fn session_supported(env: &BTreeMap<String, String>) -> bool {
-	if ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"]
+	let supported = !["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"]
 		.iter()
-		.any(|name| env.get(*name).is_some_and(|value| !value.is_empty()))
-	{
-		return false;
-	}
+		.any(|name| env.get(*name).is_some_and(|value| !value.is_empty()));
 	#[cfg(target_os = "linux")]
-	{
-		if env
-			.get("WSL_DISTRO_NAME")
-			.is_some_and(|value| !value.is_empty())
-			|| env
-				.get("WSL_INTEROP")
-				.is_some_and(|value| !value.is_empty())
-			|| fs::read_to_string("/proc/sys/kernel/osrelease")
-				.is_ok_and(|release| release.to_ascii_lowercase().contains("microsoft"))
-		{
-			return false;
-		}
-		if !["DISPLAY", "WAYLAND_DISPLAY"]
+	let supported = supported
+		&& env.get("WSL_DISTRO_NAME").is_none_or(String::is_empty)
+		&& env.get("WSL_INTEROP").is_none_or(String::is_empty)
+		&& !*WSL_KERNEL
+		&& ["DISPLAY", "WAYLAND_DISPLAY"]
 			.iter()
-			.any(|name| env.get(*name).is_some_and(|value| !value.is_empty()))
-		{
-			return false;
-		}
-	}
+			.any(|name| env.get(*name).is_some_and(|value| !value.is_empty()));
 	#[cfg(target_os = "windows")]
-	if env
-		.get("SESSIONNAME")
-		.is_some_and(|value| value.eq_ignore_ascii_case("services"))
-	{
-		return false;
-	}
-	true
+	let supported = supported
+		&& !env
+			.get("SESSIONNAME")
+			.is_some_and(|value| value.eq_ignore_ascii_case("services"));
+	supported
 }
 
 fn napi_error(error: impl std::fmt::Display) -> Error {
 	Error::from_reason(error.to_string())
 }
 
+#[cfg(test)]
+mod darwin_compiler;
 #[cfg(test)]
 mod tests;

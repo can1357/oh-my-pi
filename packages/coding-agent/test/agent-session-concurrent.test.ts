@@ -9,8 +9,13 @@ import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ToolCall } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, AssistantMessageEvent, ToolCall } from "@oh-my-pi/pi-ai";
+import {
+	accumulateToolCallArgumentsDelta,
+	finalizeToolCallArgumentsDone,
+} from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { kStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
@@ -50,8 +55,8 @@ beforeAll(async () => {
 	sharedDir = path.join(os.tmpdir(), `pi-concurrent-shared-${Snowflake.next()}`);
 	fs.mkdirSync(sharedDir, { recursive: true });
 	sharedAuthStorage = await AuthStorage.create(path.join(sharedDir, "auth.db"));
-	sharedAuthStorage.setRuntimeApiKey("anthropic", "test-key");
-	sharedAuthStorage.setRuntimeApiKey("openai-codex", "test-key");
+	sharedAuthStorage.keys.setRuntime("anthropic", "test-key");
+	sharedAuthStorage.keys.setRuntime("openai-codex", "test-key");
 	sharedModelRegistry = new ModelRegistry(sharedAuthStorage, path.join(sharedDir, "models.yml"));
 });
 
@@ -419,7 +424,51 @@ describe("AgentSession concurrent prompt guard", () => {
 		).toBe(false);
 	});
 
-	it("caps consecutive session_stop continuations at eight", async () => {
+	it("does not restart after a message_end listener aborts the completed run", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({
+			handler: () => ({ content: ["Done"] }),
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: mock.stream,
+			convertToLlm,
+		});
+		let stopCount = 0;
+		const extensionRunner = {
+			emit: vi.fn().mockResolvedValue(undefined),
+			emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
+			hasHandlers: vi.fn((eventType: string) => eventType === "session_stop"),
+			emitSessionStop: vi.fn(() => {
+				stopCount++;
+				return Promise.resolve({ continue: true, additionalContext: "Must not restart." });
+			}),
+		} as unknown as ExtensionRunner;
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: sharedModelRegistry,
+			extensionRunner,
+		});
+		let abortPromise: Promise<void> | undefined;
+		session.subscribe(event => {
+			if (event.type === "message_end" && event.message.role === "assistant") {
+				abortPromise = session.abort();
+			}
+		});
+
+		await session.prompt("First message");
+		await abortPromise;
+		await session.waitForIdle();
+
+		expect(stopCount).toBe(0);
+		expect(mock.calls).toHaveLength(1);
+		expect(session.queuedMessageCount).toBe(0);
+	});
+
+	it("caps consecutive advisory session_stop continuations at eight", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const mock = createMockModel({
 			handler: () => ({ content: ["Pass"] }),
@@ -434,7 +483,9 @@ describe("AgentSession concurrent prompt guard", () => {
 			emit: vi.fn().mockResolvedValue(undefined),
 			emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
 			hasHandlers: vi.fn((eventType: string) => eventType === "session_stop"),
-			emitSessionStop: vi.fn(() => Promise.resolve({ decision: "block" as const, reason: "Run another pass." })),
+			emitSessionStop: vi.fn(() =>
+				Promise.resolve({ continue: true, additionalContext: "Run another advisory pass." }),
+			),
 		} as unknown as ExtensionRunner;
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated();
@@ -446,6 +497,74 @@ describe("AgentSession concurrent prompt guard", () => {
 
 		expect(mock.calls).toHaveLength(9);
 		expect(extensionRunner.emitSessionStop).toHaveBeenCalledTimes(9);
+	});
+
+	it("keeps hard session_stop blocks active beyond eight attempts", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({
+			handler: () => ({ content: ["Pass"] }),
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: mock.stream,
+			convertToLlm,
+		});
+		let stopCount = 0;
+		const extensionRunner = {
+			emit: vi.fn().mockResolvedValue(undefined),
+			emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
+			hasHandlers: vi.fn((eventType: string) => eventType === "session_stop"),
+			emitSessionStop: vi.fn(() => {
+				stopCount++;
+				return Promise.resolve(
+					stopCount <= 10 ? { decision: "block" as const, reason: "Run another pass." } : undefined,
+				);
+			}),
+		} as unknown as ExtensionRunner;
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated();
+		const modelRegistry = sharedModelRegistry;
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, extensionRunner });
+
+		await session.prompt("First message");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(11);
+		expect(extensionRunner.emitSessionStop).toHaveBeenCalledTimes(11);
+	});
+
+	it("continues once when a session_stop hard block omits context", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({
+			handler: () => ({ content: ["Pass"] }),
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: mock.stream,
+			convertToLlm,
+		});
+		let stopCount = 0;
+		const extensionRunner = {
+			emit: vi.fn().mockResolvedValue(undefined),
+			emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
+			hasHandlers: vi.fn((eventType: string) => eventType === "session_stop"),
+			emitSessionStop: vi.fn(() => {
+				stopCount++;
+				return Promise.resolve(stopCount === 1 ? { decision: "block" as const } : undefined);
+			}),
+		} as unknown as ExtensionRunner;
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated();
+		const modelRegistry = sharedModelRegistry;
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, extensionRunner });
+
+		await session.prompt("First message");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(2);
+		expect(extensionRunner.emitSessionStop).toHaveBeenCalledTimes(2);
 	});
 
 	it("emits session_stop only after empty-stop recovery reaches a final stop", async () => {
@@ -1299,6 +1418,208 @@ describe("AgentSession TTSR resume gate", () => {
 		expect(toolResultText(matchedToolCallContent.id)).toBe("");
 	});
 
+	it("does not join text across an assistant message boundary while a message_start handler stalls", async () => {
+		// Two assistant responses inside ONE agent turn: a Harmony leak in the first
+		// response makes the loop abort it and stream again without a new turn_start
+		// (agent-loop abort_retry). The first response streams half of a rule's
+		// condition; the retry streams the other half while a message_start
+		// extension handler is still awaiting. The halves must not meet: the
+		// buffer reset runs before the awaited fan-out, and message_update skips it.
+		collapseSchedulerSettleDelays();
+		// A bundled Harmony-mitigation target, so the leak marker takes the
+		// abort_retry path instead of streaming through as ordinary text.
+		const model = getBundledModel("openai-codex", "gpt-5.6-sol")!;
+		const splitRule: Rule = {
+			name: "split-phrase",
+			path: "/tmp/split-phrase.md",
+			content: "Do not say the phrase",
+			condition: ["FORBIDDEN"],
+			scope: ["text"],
+			_source: { provider: "test", providerName: "test", path: "/tmp/split-phrase.md", level: "project" },
+		};
+		const ttsrManager = new TtsrManager({
+			enabled: true,
+			contextMode: "discard",
+			interruptMode: "always",
+			repeatMode: "once",
+			repeatGap: 10,
+		});
+		ttsrManager.addRule(splitRule);
+
+		// `entered` resolves when the retry's message_start handler is running;
+		// `released` lets it finish. The retry's delta is pushed in between, so it
+		// is processed while message_start still awaits its fan-out.
+		const retryStartEntered = Promise.withResolvers<void>();
+		const retryStartReleased = Promise.withResolvers<void>();
+		const leak = "<|channel|>analysis ";
+		let streamCallCount = 0;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: () => {
+				const stream = new AssistantMessageEventStream();
+				const first = ++streamCallCount === 1;
+				queueMicrotask(() => {
+					if (first) {
+						const partial = makeMsg("");
+						stream.push({ type: "start", partial });
+						stream.push({ type: "text_delta", contentIndex: 0, delta: leak, partial: makeMsg(leak) });
+						stream.push({
+							type: "text_delta",
+							contentIndex: 0,
+							delta: "FORBID",
+							partial: makeMsg(`${leak}FORBID`),
+						});
+						stream.push({ type: "done", reason: "stop", message: makeMsg(`${leak}FORBID`) });
+					} else {
+						const partial = makeMsg("");
+						stream.push({ type: "start", partial });
+						void retryStartEntered.promise.then(() => {
+							stream.push({ type: "text_delta", contentIndex: 0, delta: "DEN", partial: makeMsg("DEN") });
+							setTimeout(() => {
+								retryStartReleased.resolve();
+								stream.push({ type: "done", reason: "stop", message: makeMsg("DEN") });
+							}, 10);
+						});
+					}
+				});
+				return stream;
+			},
+		});
+
+		let assistantStarts = 0;
+		const extensionRunner = {
+			emit: vi.fn(async (event: { type: string; message?: { role?: string } }) => {
+				if (event.type === "message_start" && event.message?.role === "assistant" && ++assistantStarts === 2) {
+					retryStartEntered.resolve();
+					await retryStartReleased.promise;
+				}
+				return undefined;
+			}),
+			emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
+			hasHandlers: vi.fn((eventType: string) => eventType === "message_start"),
+			emitSessionStop: vi.fn().mockResolvedValue(undefined),
+		} as unknown as ExtensionRunner;
+
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated();
+		const modelRegistry = sharedModelRegistry;
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, ttsrManager, extensionRunner });
+
+		const triggered: string[] = [];
+		let turnStarts = 0;
+		session.subscribe(event => {
+			if (event.type === "ttsr_triggered") triggered.push(...event.rules.map(rule => rule.name));
+			if (event.type === "turn_start") turnStarts++;
+		});
+
+		await session.prompt("Say the phrase across two responses");
+		await session.waitForIdle();
+
+		expect(triggered).toEqual([]);
+		expect(turnStarts).toBe(1);
+		expect(assistantStarts).toBe(2);
+		expect(streamCallCount).toBe(2);
+	});
+
+	it("still catches a phrase split across deltas of one message while a turn_start handler stalls", async () => {
+		// The mirror image: the turn-start reset must also run before the awaited
+		// fan-out, or a turn_start handler still awaiting as streaming begins lets
+		// the late reset wipe deltas already buffered for the current message.
+		collapseSchedulerSettleDelays();
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const splitRule: Rule = {
+			name: "split-phrase",
+			path: "/tmp/split-phrase.md",
+			content: "Do not say the phrase",
+			condition: ["FORBIDDEN"],
+			scope: ["text"],
+			_source: { provider: "test", providerName: "test", path: "/tmp/split-phrase.md", level: "project" },
+		};
+		const ttsrManager = new TtsrManager({
+			enabled: true,
+			contextMode: "discard",
+			interruptMode: "always",
+			repeatMode: "once",
+			repeatGap: 10,
+		});
+		ttsrManager.addRule(splitRule);
+
+		// The turn_start handler is held open until the first half has streamed;
+		// the second half is pushed only after the handler has finished, so a
+		// reset misplaced behind the fan-out would wipe the first half in between.
+		const turnStartEntered = Promise.withResolvers<void>();
+		const turnStartReleased = Promise.withResolvers<void>();
+		const turnStartFinished = Promise.withResolvers<void>();
+		let streamCallCount = 0;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: (_model, _context, options) => {
+				const stream = new AssistantMessageEventStream();
+				if (++streamCallCount === 1) {
+					const signal = options?.signal;
+					void turnStartEntered.promise.then(() => {
+						const partial = makeMsg("");
+						stream.push({ type: "start", partial });
+						stream.push({ type: "text_delta", contentIndex: 0, delta: "FORBID", partial: makeMsg("FORBID") });
+						setTimeout(() => turnStartReleased.resolve(), 10);
+						void turnStartFinished.promise.then(() => {
+							setTimeout(() => {
+								stream.push({
+									type: "text_delta",
+									contentIndex: 0,
+									delta: "DEN",
+									partial: makeMsg("FORBIDDEN"),
+								});
+							}, 10);
+						});
+						if (signal) {
+							signal.addEventListener(
+								"abort",
+								() => stream.push({ type: "error", reason: "aborted", error: makeMsg("FORBIDDEN", "aborted") }),
+								{ once: true },
+							);
+						}
+					});
+				} else {
+					pushContinuationStream(stream, () => {});
+				}
+				return stream;
+			},
+		});
+
+		const extensionRunner = {
+			emit: vi.fn(async (event: { type: string }) => {
+				if (event.type === "turn_start") {
+					turnStartEntered.resolve();
+					await turnStartReleased.promise;
+					turnStartFinished.resolve();
+				}
+				return undefined;
+			}),
+			emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
+			hasHandlers: vi.fn((eventType: string) => eventType === "turn_start"),
+			emitSessionStop: vi.fn().mockResolvedValue(undefined),
+		} as unknown as ExtensionRunner;
+
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated();
+		const modelRegistry = sharedModelRegistry;
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, ttsrManager, extensionRunner });
+
+		const triggered: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "ttsr_triggered") triggered.push(...event.rules.map(rule => rule.name));
+		});
+
+		await session.prompt("Say the phrase");
+		await session.waitForIdle();
+
+		expect(triggered).toEqual(["split-phrase"]);
+		expect(streamCallCount).toBe(2);
+	});
+
 	it("relativizes the rule file path in the TTSR interrupt injection (no absolute leak)", async () => {
 		collapseSchedulerSettleDelays();
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
@@ -1655,6 +1976,243 @@ describe("AgentSession TTSR resume gate", () => {
 		expect(text).toContain('rule="no-unwrap"');
 		expect(text).toContain("Do not use .unwrap()");
 		expect(text.indexOf("<system-reminder")).toBeLessThan(text.indexOf("edit applied"));
+	});
+
+	it("matches finalized write arguments regardless of streaming chunk boundaries", async () => {
+		const model = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!model) throw new Error("Expected bundled Codex test model to exist");
+
+		const serializedArguments = JSON.stringify({ path: "probe.cpp", content: "// TTSR_PROBE\n" });
+		const rule: Rule = {
+			name: "stream-probe",
+			path: "/tmp/stream-probe.md",
+			content: "Report that the probe rule matched.",
+			condition: ["TTSR_PROBE"],
+			scope: ["tool:write"],
+			globs: ["**/*.cpp"],
+			interruptMode: "never",
+			_source: { provider: "test", providerName: "test", path: "/tmp/stream-probe.md", level: "project" },
+		};
+
+		class SnapshotStream extends AssistantMessageEventStream {
+			override push(event: AssistantMessageEvent): void {
+				super.push(structuredClone(event));
+			}
+		}
+
+		async function runDelivery(chunkSize: number): Promise<{ reminder: string; persistedInjections: number }> {
+			const ttsrManager = new TtsrManager({
+				enabled: true,
+				contextMode: "discard",
+				interruptMode: "never",
+				repeatMode: "once",
+				repeatGap: 10,
+			});
+			ttsrManager.addRule(rule);
+
+			const writeTool: AgentTool = {
+				name: "write",
+				label: "Write",
+				description: "Write a file",
+				parameters: type({ path: "string", content: "string" }),
+				execute: async () => ({ content: [{ type: "text" as const, text: "write applied" }] }),
+				matcherDigest: args => {
+					if (!args || typeof args !== "object" || !("content" in args)) return undefined;
+					return typeof args.content === "string" ? args.content : undefined;
+				},
+			};
+			const toolCall = {
+				type: "toolCall" as const,
+				id: `call_stream_${chunkSize}`,
+				name: "write",
+				arguments: {},
+				[kStreamingPartialJson]: "",
+			};
+			const makeToolCallMessage = (): AssistantMessage => ({
+				role: "assistant",
+				content: [toolCall],
+				api: "openai-codex-responses",
+				provider: "openai-codex",
+				model: model.id,
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				timestamp: Date.now(),
+			});
+			let streamCallCount = 0;
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model, systemPrompt: ["Test"], tools: [writeTool] },
+				streamFn: () => {
+					streamCallCount++;
+					const stream = new SnapshotStream();
+					queueMicrotask(() => {
+						if (streamCallCount > 1) {
+							const done = makeMsg("ok");
+							stream.push({ type: "start", partial: done });
+							stream.push({ type: "done", reason: "stop", message: done });
+							return;
+						}
+
+						const partial = makeToolCallMessage();
+						stream.push({ type: "start", partial });
+						stream.push({ type: "toolcall_start", contentIndex: 0, partial });
+						for (let offset = 0; offset < serializedArguments.length; offset += chunkSize) {
+							accumulateToolCallArgumentsDelta(
+								toolCall,
+								serializedArguments.slice(offset, offset + chunkSize),
+								stream,
+								partial,
+								0,
+							);
+						}
+						finalizeToolCallArgumentsDone(toolCall, serializedArguments);
+						stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial });
+						stream.push({ type: "done", reason: "toolUse", message: partial });
+					});
+					return stream;
+				},
+			});
+			const sessionManager = SessionManager.inMemory();
+			session = new AgentSession({
+				agent,
+				sessionManager,
+				settings: Settings.isolated(),
+				modelRegistry: sharedModelRegistry,
+				ttsrManager,
+			});
+
+			await session.prompt("Write the probe");
+			const result = agent.state.messages.find(
+				(message): message is Extract<typeof message, { role: "toolResult" }> =>
+					message.role === "toolResult" && message.toolCallId === toolCall.id,
+			);
+			const reminder = Array.isArray(result?.content)
+				? result.content
+						.filter((content): content is { type: "text"; text: string } => content.type === "text")
+						.map(content => content.text)
+						.join("\n")
+				: "";
+			const persistedInjections = sessionManager
+				.getEntries()
+				.filter(entry => entry.type === "ttsr_injection" && entry.injectedRules.includes(rule.name)).length;
+			await session.dispose();
+			return { reminder, persistedInjections };
+		}
+
+		const oneChunk = await runDelivery(serializedArguments.length);
+		const throttledChunks = await runDelivery(12);
+
+		for (const delivery of [oneChunk, throttledChunks]) {
+			expect(delivery.reminder).toContain('rule="stream-probe"');
+			expect(delivery.persistedInjections).toBe(1);
+		}
+	});
+
+	it("matches finalized arguments for end-only tool calls without matcher hooks", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const rule: Rule = {
+			name: "probe-args",
+			path: "/tmp/probe-args.md",
+			content: "Report that the probe rule matched.",
+			condition: ["TTSR_PROBE"],
+			scope: ["tool:probe_tool"],
+			interruptMode: "never",
+			_source: { provider: "test", providerName: "test", path: "/tmp/probe-args.md", level: "project" },
+		};
+		const ttsrManager = new TtsrManager({
+			enabled: true,
+			contextMode: "discard",
+			interruptMode: "never",
+			repeatMode: "once",
+			repeatGap: 10,
+		});
+		ttsrManager.addRule(rule);
+
+		// No matcherDigest/matcherEntries: the finalized arguments are the only
+		// content TTSR can see when the provider skips intermediate deltas.
+		const probeTool: AgentTool = {
+			name: "probe_tool",
+			label: "Probe",
+			description: "A tool without matcher hooks",
+			parameters: type({ marker: "string" }),
+			execute: async () => ({ content: [{ type: "text" as const, text: "probe ran" }] }),
+		};
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: "call_end_only",
+			name: "probe_tool",
+			arguments: { marker: "TTSR_PROBE" },
+		};
+		const makeToolCallMessage = (): AssistantMessage => ({
+			role: "assistant",
+			content: [toolCall],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "mock",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		});
+		let streamCallCount = 0;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [probeTool] },
+			streamFn: () => {
+				streamCallCount++;
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					if (streamCallCount > 1) {
+						const done = makeMsg("ok");
+						stream.push({ type: "start", partial: done });
+						stream.push({ type: "done", reason: "stop", message: done });
+						return;
+					}
+					const partial = makeToolCallMessage();
+					stream.push({ type: "start", partial });
+					// start -> end with no intermediate toolcall_delta.
+					stream.push({ type: "toolcall_start", contentIndex: 0, partial });
+					stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial });
+					stream.push({ type: "done", reason: "toolUse", message: partial });
+				});
+				return stream;
+			},
+		});
+		const sessionManager = SessionManager.inMemory();
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated(),
+			modelRegistry: sharedModelRegistry,
+			ttsrManager,
+		});
+
+		await session.prompt("Run the probe");
+		const result = agent.state.messages.find(
+			(message): message is Extract<typeof message, { role: "toolResult" }> =>
+				message.role === "toolResult" && message.toolCallId === toolCall.id,
+		);
+		const reminder = Array.isArray(result?.content)
+			? result.content
+					.filter((content): content is { type: "text"; text: string } => content.type === "text")
+					.map(content => content.text)
+					.join("\n")
+			: "";
+		expect(reminder).toContain('rule="probe-args"');
+		expect(reminder.indexOf("<system-reminder")).toBeLessThan(reminder.indexOf("probe ran"));
 	});
 
 	it("interruptMode never deduplicates the reminder across sibling tool calls in one batch", async () => {
