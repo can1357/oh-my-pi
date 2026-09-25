@@ -1,5 +1,5 @@
 import { scheduler } from "node:timers/promises";
-import { $flag, logger, structuredCloneJSON } from "@oh-my-pi/pi-utils";
+import { $flag, extractHttpStatusFromError, logger, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { getEnvApiKey } from "../stream";
 import type {
@@ -44,7 +44,10 @@ import {
 } from "../utils/schema";
 import {
 	isForcedToolChoice,
+	isForcedToolChoiceRejected,
+	isForcedToolChoiceRejection,
 	mapToOpenAIResponsesToolChoice,
+	noteForcedToolChoiceRejected,
 	type OpenAIResponsesToolChoice,
 } from "../utils/tool-choice";
 import { compactGrammarDefinition } from "./grammar";
@@ -623,6 +626,7 @@ const streamOpenAIResponsesOnce = (
 				}
 			};
 			let strictRetryAvailable = true;
+			let forcedToolChoiceRetryAvailable = true;
 			let activeStrictToolsApplied = builtParams.strictToolsApplied;
 			let forceDisableStrictTools = false;
 			const openResponsesStreamWithFallbacks = async (): Promise<AsyncIterable<ResponseStreamEvent>> => {
@@ -670,6 +674,52 @@ const streamOpenAIResponsesOnce = (
 								key: activeReasoningEffortFallbackKey,
 								fallback: reasoningEffortFallback,
 							};
+							continue;
+						}
+						const status = extractHttpStatusFromError(error) ?? capturedErrorResponse?.status;
+						const errorText = [
+							error instanceof Error ? error.message : undefined,
+							capturedErrorResponse?.bodyText,
+						]
+							.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+							.join("\n");
+						if (
+							forcedToolChoiceRetryAvailable &&
+							!requestSignal.aborted &&
+							isForcedToolChoice(chained.params.tool_choice) &&
+							isForcedToolChoiceRejection(status, errorText)
+						) {
+							forcedToolChoiceRetryAvailable = false;
+							noteForcedToolChoiceRejected(model, resolvedBaseUrl);
+							const fallbackBuilt = buildParams(
+								model,
+								context,
+								options,
+								providerSessionState,
+								strictToolsScope,
+								forceDisableStrictTools,
+								chainState?.canAppend ? chainState.lastParams?.input : undefined,
+							);
+							const fallbackParams = fallbackBuilt.params;
+							if (chainState && !chainState.disabled) fallbackParams.store = true;
+							let fallbackChained: OpenAIResponsesChainedParams =
+								chainState && !chainState.disabled
+									? buildOpenAIResponsesChainedParams(
+											fallbackParams,
+											fallbackBuilt.trailingScaffoldingItems,
+											chainState,
+										)
+									: { params: fallbackParams };
+							sentPreviousResponseId = fallbackChained.previousResponseId;
+							fallbackChained = {
+								...fallbackChained,
+								params: await applyPayloadReplacement(fallbackChained.params),
+							};
+							chained = fallbackChained;
+							activeRawRequestDump.body = chained.params;
+							activeParams = fallbackParams;
+							activeTrailingScaffoldingItems = fallbackBuilt.trailingScaffoldingItems;
+							activeStrictToolsApplied = fallbackBuilt.strictToolsApplied;
 							continue;
 						}
 						const compiledGrammarTooLarge =
@@ -1425,7 +1475,7 @@ export function mapOpenAIResponsesToolChoiceForTools(
 	model: Model<"openai-responses">,
 ): OpenAIResponsesToolChoice {
 	if (!model.compat.supportsToolChoice) return undefined;
-	if (isForcedToolChoice(choice) && !model.compat.supportsForcedToolChoice) {
+	if (isForcedToolChoice(choice) && (!model.compat.supportsForcedToolChoice || isForcedToolChoiceRejected(model))) {
 		return "auto";
 	}
 	if (typeof choice !== "string" && choice?.type === "computer") {

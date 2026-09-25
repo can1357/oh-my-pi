@@ -9,6 +9,7 @@ import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
 import { parseGitHubCopilotApiKey } from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import {
 	$env,
+	extractHttpStatusFromError,
 	isEnoent,
 	logger,
 	parseJsonWithRepair,
@@ -88,7 +89,12 @@ import { COMBINATOR_KEYS, NO_STRICT, toolWireSchema } from "../utils/schema";
 import { spillToDescription } from "../utils/schema/spill";
 import { createSdkStreamRequestOptions } from "../utils/sdk-stream-timeout";
 import { notifyRawSseEvent } from "../utils/sse-debug";
-import { isForcedToolChoice } from "../utils/tool-choice";
+import {
+	isForcedToolChoice,
+	isForcedToolChoiceRejected,
+	isForcedToolChoiceRejection,
+	noteForcedToolChoiceRejected,
+} from "../utils/tool-choice";
 import {
 	AnthropicConnectionTimeoutError,
 	type AnthropicFetchOptions,
@@ -2107,7 +2113,9 @@ const streamAnthropicOnce = (
 				const sendsAdaptiveEffortPin =
 					isAdaptiveOnlyThinking(model) &&
 					(options?.thinkingEnabled === false ||
-						(model.compat.supportsForcedToolChoice && isForcedToolChoice(options?.toolChoice)));
+						(model.compat.supportsForcedToolChoice &&
+							!isForcedToolChoiceRejected(model, baseUrl) &&
+							isForcedToolChoice(options?.toolChoice)));
 				if (
 					model.reasoning &&
 					model.compat.supportsOutputEffort &&
@@ -2486,6 +2494,7 @@ const streamAnthropicOnce = (
 			// Provider-level transport/rate-limit failures: only before any streamed content starts.
 			// Malformed envelopes/JSON: only before replay-unsafe text/tool events are visible on this stream.
 			let providerRetryAttempt = 0;
+			let retriedForcedToolChoice = false;
 			const firstEventTimeoutAbortError = new AIError.StreamTimeoutError(
 				"Anthropic stream timed out while waiting for the first event",
 			);
@@ -3207,6 +3216,46 @@ const streamAnthropicOnce = (
 							providerSessionState.strictToolsDisabled = true;
 						}
 						disableStrictTools = true;
+						params = await rebuildParams(streamFailure);
+						resetStreamOutputState();
+						continue;
+					}
+					const streamFailureStatus = extractHttpStatusFromError(streamFailure);
+					let streamFailureErrorJson: string | undefined;
+					let streamFailureBodyJson: string | undefined;
+					if (streamFailure && typeof streamFailure === "object") {
+						if (
+							"error" in streamFailure &&
+							typeof streamFailure.error === "object" &&
+							streamFailure.error !== null
+						) {
+							streamFailureErrorJson = JSON.stringify(streamFailure.error);
+						}
+						if (
+							"body" in streamFailure &&
+							typeof streamFailure.body === "object" &&
+							streamFailure.body !== null
+						) {
+							streamFailureBodyJson = JSON.stringify(streamFailure.body);
+						}
+					}
+					const streamFailureText = [
+						streamFailure instanceof Error ? streamFailure.message : String(streamFailure),
+						streamFailureErrorJson,
+						streamFailureBodyJson,
+					]
+						.filter((value): value is string => typeof value === "string" && value.length > 0)
+						.join("\n");
+					const carriedForcedToolChoice =
+						params.tool_choice?.type === "any" || params.tool_choice?.type === "tool";
+					if (
+						!retriedForcedToolChoice &&
+						firstTokenTime === undefined &&
+						carriedForcedToolChoice &&
+						isForcedToolChoiceRejection(streamFailureStatus, streamFailureText)
+					) {
+						retriedForcedToolChoice = true;
+						noteForcedToolChoiceRejected(model, baseUrl);
 						params = await rebuildParams(streamFailure);
 						resetStreamOutputState();
 						continue;
@@ -4839,7 +4888,9 @@ function buildParams(
 		const choiceType = params.tool_choice?.type;
 		if (
 			(choiceType === "any" || choiceType === "tool") &&
-			(compactionRequest || !model.compat.supportsForcedToolChoice)
+			(compactionRequest ||
+				!model.compat.supportsForcedToolChoice ||
+				isForcedToolChoiceRejected(model, effectiveBaseUrl))
 		) {
 			params.tool_choice = { type: "auto" };
 		}

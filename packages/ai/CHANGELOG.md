@@ -11,6 +11,7 @@
 
 ### Fixed
 
+- Fixed forced `tool_choice` requests failing turns when models reject forced selectors: Anthropic, OpenAI Completions, and OpenAI Responses transports now self-heal by catching HTTP 400 forced-tool-choice rejections before stream output begins, recording the model in a process-lifetime rejection memo, logging a warning, and immediately retrying once with automatic tool selection while keeping tools advertised.
 - Fixed multi-account provider selection for OpenCode Go and SuperGrok (xai-oauth), so accounts with insufficient funds or exhausted included quota are skipped in favor of eligible accounts with available billing headroom.
 - Automatic credential disables (definitive OAuth refresh failure, upstream token invalidation, auth-broker disable) are now logged as an `Auth credential disabled` warning, and `credential_disabled` events carry the disabled row's id and the account's email, account id, and organization ([#13190](https://github.com/can1357/oh-my-pi/pull/13190) by [@alphastorm](https://github.com/alphastorm)).
 
