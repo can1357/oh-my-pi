@@ -369,3 +369,24 @@ describe("MiniMax Anthropic adaptive thinking", () => {
 		expect(payload.output_config?.effort).toBeUndefined();
 	});
 });
+
+describe("Anthropic forced tool_choice with zero max tokens (issue #12597)", () => {
+	it("floors max_tokens to 1 instead of sending a guaranteed 400", async () => {
+		const payload = await capturePayload(makeAnthropicModel("claude-haiku-4-5"), {
+			maxTokens: 0,
+			toolChoice: { type: "tool", name: "yield" },
+		});
+
+		expect(payload.tool_choice?.type).toBe("tool");
+		expect((payload as { max_tokens?: number }).max_tokens).toBe(1);
+	});
+
+	it("leaves an explicit positive budget untouched", async () => {
+		const payload = await capturePayload(makeAnthropicModel("claude-haiku-4-5"), {
+			maxTokens: 64,
+			toolChoice: { type: "tool", name: "yield" },
+		});
+
+		expect((payload as { max_tokens?: number }).max_tokens).toBe(64);
+	});
+});
