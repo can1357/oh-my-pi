@@ -1247,7 +1247,7 @@ You are the wide fixture persona.`,
 			"fixture-wide.md",
 		);
 		await writeFixtureAgent(READER_AGENT_MD);
-		const mkJournal = async (name: string, persona: string, ceiling: string[]) => {
+		const mkJournal = async (_name: string, persona: string, ceiling: string[]) => {
 			const m = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
 			m.appendMessage({ role: "user", content: "turn", timestamp: Date.now() });
 			m.appendModeChange("agent", { name: persona, explicit: { tools: ceiling } });

@@ -228,7 +228,7 @@ export async function reconcileAcpSessionPersona(
 ): Promise<void> {
 	const result = await reconcileSessionPersona(session, {
 		buildHooks: current => createAcpPersonaModelHooks(current, emitNotice),
-		onGone: (current, name) => emitNotice(PERSONA_GONE_NOTICE_TEMPLATE.replace("{name}", name)),
+		onGone: (_current, name) => emitNotice(PERSONA_GONE_NOTICE_TEMPLATE.replace("{name}", name)),
 		onError: (current, persona, error) => {
 			// No journal write and no client notice on an internal failure: the
 			// session simply resumes without the persona rather than failing load.
@@ -245,7 +245,7 @@ export async function reconcileAcpSessionPersona(
 		// is already the journal's LAST mode: appending ahead of a transparent
 		// plan/goal/vibe marker would make `agent` the resolved mode on the next
 		// load and silently lose the outer mode's state.
-		const entries = session.sessionManager.getEntries();
+		const entries = session.sessionManager.getBranch();
 		const desired = readPersistedAgentPersona(entries);
 		if (desired && personaJournalModeIsTail(entries)) {
 			appendPersonaJournalEntry(session, desired);
@@ -265,7 +265,7 @@ export async function reconcileAcpSessionPersona(
 	if (!launchPersona) return;
 	const runtime = session.getPersonaRuntime?.();
 	if (!runtime) return;
-	const persisted = readPersistedAgentPersona(session.sessionManager.getEntries());
+	const persisted = readPersistedAgentPersona(session.sessionManager.getBranch());
 	const baselineOverride = persisted?.baseline ? deserializePersonaBaseline(session, persisted.baseline) : undefined;
 	try {
 		await runtime.reconcile(

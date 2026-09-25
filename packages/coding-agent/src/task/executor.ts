@@ -3409,7 +3409,11 @@ export function deriveChildToolNames(agent: AgentDefinition, options: ChildToolN
 		toolNames = parentGrant ? expanded.filter(name => parentGrant.has(name)) : expanded;
 		// Auto-include task tool if spawns defined but task not in tools. The
 		// intersection may have dropped it — re-add only if the parent can run it.
+		// An explicitly empty `spawns: []` is a deny-all spawn policy: granting
+		// task would only fail later at preflight, so leave it out.
+		const spawnsDenyAll = agent.spawns !== undefined && agent.spawns !== "*" && agent.spawns.length === 0;
 		if (
+			!spawnsDenyAll &&
 			agent.spawns !== undefined &&
 			!toolNames.includes("task") &&
 			!options.atMaxDepth &&

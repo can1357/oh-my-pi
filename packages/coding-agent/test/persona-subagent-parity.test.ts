@@ -341,6 +341,17 @@ describe("subagent spawn inheritance parity", () => {
 		expect(child).not.toContain("wait");
 	});
 
+	it("child with empty spawns keeps no task tool (deny-all)", () => {
+		// An explicitly empty `spawns: []` denies all spawning: auto-adding
+		// task would only fail later at preflight, so the derivation leaves
+		// the intersected frontmatter alone.
+		const child = deriveChildToolNames(
+			{ ...CHILD_AGENT, tools: ["read"], spawns: [] },
+			{ parentEffectiveGrant: null, restrictToolNames: false, atMaxDepth: false },
+		);
+		expect(child).toEqual(["read"]);
+	});
+
 	it("cliGrant narrowing counts as baseline restriction and caps the child", () => {
 		// The baseline layer is registry ∩ cliGrant ∩ sessionToggles; a persona
 		// (even a widening one) must not lift the CLI grant for descendants.

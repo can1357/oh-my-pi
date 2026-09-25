@@ -4325,14 +4325,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * resume never reaches this with an active runtime: the runtime is fresh.)
 	 */
 	async #reconcilePersonaFromSession(): Promise<void> {
-		const desired = readPersistedAgentPersona(this.sessionManager.getEntries());
+		const desired = readPersistedAgentPersona(this.sessionManager.getBranch());
 		if (!desired) {
 			await this.#exitSourcePersonaForSwitch("on switch to a non-persona session");
-			// The target records no persona, so no ceiling carrier survives:
-			// drop a journal-installed grant the SOURCE session reinstalled
-			// (switchSession already exited the persona, so the shared
-			// reconcile's clear never runs here). A live CLI --tools grant is
-			// untouched; a cold resume never had a journal install to drop.
 			// The target records no persona, so no ceiling carrier survives:
 			// drop a journal-installed grant the SOURCE session reinstalled
 			// (switchSession already exited the persona, so the shared
