@@ -409,10 +409,63 @@ export class TranscriptContainer extends Container {
 			}
 		}
 		const drop = Math.max(0, output.length - capacity);
+		if (drop > 0) {
+			// Rows clipped off the top of the live viewport would vanish without
+			// ever entering native scrollback when retirement is pinned by an
+			// unfinalized frontier block (issue #12584). Force-retire the
+			// equivalent number of finished stable-prefix rows first, so every
+			// dropped row is already committed.
+			this.#retireForViewportDrop(width, drop);
+		}
 		this.#commitViewportSpans(owners.slice(drop), output.length - drop);
 		return drop > 0 ? output.slice(drop) : output;
 	}
-
+	/**
+	 * Synchronously retire up to `rowBudget` finished rows from the transcript
+	 * head: settled-prefix commits, then appendOnly stable-prefix emission.
+	 * Never touches the unfinalized frontier that pins pressure retirement.
+	 */
+	#retireForViewportDrop(width: number, rowBudget: number): void {
+		if (rowBudget <= 0 || this.#offered !== undefined) return;
+		this.#syncEntries();
+		this.#settleFinalized();
+		let remaining = Math.max(0, Math.trunc(rowBudget));
+		while (remaining > 0 && this.#frontier < this.#entries.length) {
+			const entry = this.#entries[this.#frontier]!;
+			if (entry.state === "settled") {
+				const rendered = this.#renderEntry(entry, width);
+				const unemitted = rendered.slice(this.#projectedEmittedRowCount(entry, this.#frontier, width));
+				if (unemitted.length <= remaining) {
+					entry.state = "committed";
+					entry.emitted = 0;
+					this.#frontier++;
+					remaining -= unemitted.length + 1;
+					continue;
+				}
+				break;
+			}
+			if (entry.mode === "appendOnly" && !entry.stableFrozen && entry.emitted < entry.stableRows.length) {
+				const before = this.#renderStablePrefix(entry, entry.emitted, width);
+				let emittedEnd = entry.emitted;
+				while (emittedEnd < entry.stableRows.length && emittedEnd - entry.emitted < remaining) {
+					const after = this.#renderStablePrefix(entry, emittedEnd + 1, width);
+					if (!isRowPrefix(before, after) || after.length === before.length) break;
+					emittedEnd += 1;
+				}
+				if (emittedEnd > entry.emitted) {
+					const advanced = emittedEnd - entry.emitted;
+					entry.emitted = emittedEnd;
+					remaining -= advanced;
+					if (entry.emitted >= entry.stableRows.length) {
+						this.#completeFullyEmittedHeads(width);
+					}
+				}
+				break;
+			}
+			break;
+		}
+		if (remaining < rowBudget) this.#pinnedFrontier = undefined;
+	}
 	/** Offers stable-head emission or the shortest finalized prefix needed under pressure. */
 	peekFinalizedBatch(width: number, capacity: number): HistoryBatch | undefined {
 		return this.#peekBatch(width, capacity, "pressure");
