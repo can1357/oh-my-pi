@@ -79,7 +79,7 @@ interface SidebarEntry extends HubSidebarEntry<"all" | "source" | "new" | "separ
 type ListRow = { kind: "agent"; agent: HubAgent } | { kind: "new" };
 
 /** The per-agent knob a strip or the model browser is editing. */
-type PropertyKind = "model" | "prewalk" | "advisor";
+export type PropertyKind = "model" | "prewalk" | "advisor";
 
 type StripChip = HubStripChip<
 	| { kind: "toggle" }
@@ -108,8 +108,10 @@ export interface AgentsHubDeps {
 	resolvePatterns: (patterns: string[]) => string | undefined;
 	effectivePrewalkPattern: (agent: HubAgent) => string | undefined;
 	effectiveAdvisorPattern: (agent: HubAgent) => string | undefined;
-	setDisabledAgents: (names: string[]) => void;
-	setOverrides: (property: PropertyKind, overrides: Record<string, string>) => void;
+	/** Persist one agent's enabled state; other agents are untouched. */
+	setAgentDisabled: (name: string, disabled: boolean) => void;
+	/** Persist one agent's override for `property`; `undefined` clears it. Other agents are untouched. */
+	setAgentOverride: (property: PropertyKind, name: string, value: string | undefined) => void;
 	generateAgent: (description: string, onText: (text: string) => void) => Promise<string>;
 	saveAgent: (scope: "project" | "user", spec: GeneratedAgentSpec) => Promise<string>;
 }
@@ -339,22 +341,9 @@ export class AgentsHubComponent implements Component {
 
 	#toggleAgent(agent: HubAgent): void {
 		agent.disabled = !agent.disabled;
-		const disabled = this.#allAgents
-			.filter(entry => entry.disabled)
-			.map(entry => entry.name)
-			.sort((a, b) => a.localeCompare(b));
-		this.#deps.setDisabledAgents(disabled);
+		this.#deps.setAgentDisabled(agent.name, agent.disabled);
 		this.#notice = `${agent.name} ${agent.disabled ? "disabled" : "enabled"}`;
 		this.#tui.requestRender();
-	}
-
-	#persistRecord(property: PropertyKind): void {
-		const overrides: Record<string, string> = {};
-		for (const agent of this.#allAgents) {
-			const value = this.#overrideFor(agent, property)?.trim();
-			if (value) overrides[agent.name] = value;
-		}
-		this.#deps.setOverrides(property, overrides);
 	}
 
 	#overrideFor(agent: HubAgent, property: PropertyKind): string | undefined {
@@ -381,7 +370,7 @@ export class AgentsHubComponent implements Component {
 				agent.advisorOverride = trimmed;
 				break;
 		}
-		this.#persistRecord(property);
+		this.#deps.setAgentOverride(property, agent.name, trimmed);
 		this.#notice = this.#describeProperty(agent, property);
 		this.#tui.requestRender();
 	}

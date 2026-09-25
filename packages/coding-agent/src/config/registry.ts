@@ -737,10 +737,30 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 	}
 
 	/**
+	 * Persists one entry of this record setting to the global config; `undefined` removes the entry.
+	 * The record's other entries, persisted or supplied by another layer, stay as they are.
+	 *
+	 * @throws Error when this is not a record setting or the entry does not fit the definition.
+	 */
+	setEntry(scope: ScopeLike, key: string, value: RecordEntryOf<T> | undefined): void {
+		settingsOf(scope).writeEntry(this, key, value === undefined ? undefined : this.#normalizeEntry(key, value));
+	}
+
+	/**
+	 * Adds (`member`) or removes `item` in this list setting's persisted global value, leaving every
+	 * other item as it is.
+	 *
+	 * @throws Error when this is not a list setting or the resulting list does not fit the definition.
+	 */
+	setMember(scope: ScopeLike, item: string, member: boolean): void {
+		settingsOf(scope).writeMember(this, item, member);
+	}
+
+	/**
 	 * Holds the default as a runtime override only while no persisted layer — global, project,
 	 * `--config` overlay — configures this setting; no-op when the environment or any layer already
-	 * configures it, and dropped by a {@link set}/{@link unset} of this setting or when a reload or
-	 * re-scope configures it (protocol-host defaults).
+	 * configures it, and dropped by a global write ({@link set}, {@link setEntry}, {@link setMember}) or
+	 * {@link unset} of this setting or when a reload or re-scope configures it (protocol-host defaults).
 	 */
 	pinDefault(scope: ScopeLike): void {
 		if (this.envValue() === undefined) settingsOf(scope).pinDefaultValue(this);
@@ -748,6 +768,12 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 
 	#normalize(value: T): unknown {
 		return this.definition.normalize ? this.definition.normalize(value) : value;
+	}
+
+	/** `value` as the `key` entry of this record, normalized like a whole-record write. */
+	#normalizeEntry(key: string, value: unknown): unknown {
+		const normalize = this.definition.normalize;
+		return normalize ? (normalize({ [key]: value }) as Record<string, unknown>)[key] : value;
 	}
 
 	/** Removes a runtime override, restoring the persisted/default value. */
@@ -768,6 +794,8 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 
 /** Value type of a handle or derivation. */
 export type SettingValueOf<H> = H extends Derived<infer T> ? T : never;
+/** Entry value type of a record setting's value `T` (see {@link Setting.setEntry}). */
+export type RecordEntryOf<T> = T extends Readonly<Record<string, infer V>> ? V : never;
 /** Handle of any registered setting (runtime/string-keyed surfaces: UI, CLI, `cfg://`). */
 export type AnySetting = Setting<unknown>;
 

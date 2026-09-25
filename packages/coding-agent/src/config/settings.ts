@@ -187,35 +187,70 @@ function getByPath(obj: RawSettings, segments: readonly string[]): unknown {
 
 /**
  * Set a nested value in an object by path segments.
- * Creates intermediate objects as needed.
+ * Creates intermediate objects as needed, replacing whatever non-record (a malformed `[]` included) is in the way.
  */
 function setByPath(obj: RawSettings, segments: readonly string[], value: unknown): void {
 	let current = obj;
 	for (let i = 0; i < segments.length - 1; i++) {
 		const segment = segments[i];
-		if (!(segment in current) || typeof current[segment] !== "object" || current[segment] === null) {
-			current[segment] = {};
-		}
+		if (!isRecord(current[segment])) current[segment] = {};
 		current = current[segment] as RawSettings;
 	}
 	current[segments[segments.length - 1]] = value;
 }
 
-/** Removes the value at `segments`, pruning the parent objects the removal leaves empty. */
+/**
+ * Removes the value at `segments`, pruning the parent objects the removal leaves empty. Every record on the
+ * path below `obj` is replaced by a copy rather than edited: a merged view or a cached read may share it.
+ */
 function deleteByPath(obj: RawSettings, segments: readonly string[]): void {
-	const parents: RawSettings[] = [];
-	let current = obj;
+	const containers: RawSettings[] = [obj];
 	for (let i = 0; i < segments.length - 1; i++) {
-		const next = current[segments[i]];
+		const next = containers[i][segments[i]];
 		if (!isRecord(next)) return;
-		parents.push(current);
-		current = next;
+		containers.push(next);
 	}
-	delete current[segments[segments.length - 1]];
-	for (let i = parents.length - 1; i >= 0 && Object.keys(current).length === 0; i--) {
-		delete parents[i][segments[i]];
-		current = parents[i];
+	if (!Object.hasOwn(containers[containers.length - 1], segments[containers.length - 1])) return;
+	let replacement: RawSettings | undefined;
+	for (let i = containers.length - 1; i >= 0; i--) {
+		const container = i === 0 ? obj : { ...containers[i] };
+		if (replacement) container[segments[i]] = replacement;
+		else delete container[segments[i]];
+		replacement = Object.keys(container).length > 0 ? container : undefined;
 	}
+}
+
+/** Whether `prefix` is `segments` or the path of one of its ancestors. */
+function isPathPrefix(prefix: readonly string[], segments: readonly string[]): boolean {
+	return prefix.length <= segments.length && prefix.every((segment, i) => segment === segments[i]);
+}
+
+/**
+ * Whether the pending global change at `segments`, captured as `mutation`, still applies to the config file read
+ * as `current` at `generation`: the file is the generation the change was captured at, or holds the captured
+ * value there apart from the subtrees at `written`, the paths the saving process writes itself. Those vouch for
+ * their own subtrees: a whole record's captured value may hold a pending write of one of its entries, and an entry
+ * of a record written whole was written at its latest value.
+ */
+function pendingChangeApplies(
+	mutation: PendingYamlMutation | undefined,
+	segments: readonly string[],
+	current: RawSettings,
+	generation: YamlGeneration,
+	written: readonly (readonly string[])[],
+): boolean {
+	if (mutation === undefined || mutation.generation.kind === "unreadable") return false;
+	if (yamlGenerationsMatch(mutation.generation, generation)) return true;
+	const onDisk: RawSettings = { value: getByPath(current, segments) };
+	const captured: RawSettings = { value: mutation.baseValue };
+	for (const writtenPath of written) {
+		if (isPathPrefix(writtenPath, segments)) return true;
+		if (!isPathPrefix(segments, writtenPath)) continue;
+		const inner = ["value", ...writtenPath.slice(segments.length)];
+		deleteByPath(onDisk, inner);
+		deleteByPath(captured, inner);
+	}
+	return Bun.deepEquals(onDisk.value, captured.value);
 }
 
 /**
@@ -563,13 +598,16 @@ export class Settings {
 	/** Parent {@link revision} `#merged` was last built from; any other parent revision re-merges. */
 	#syncedParentRevision = -1;
 
-	/** Paths modified during this session (for partial save) */
-	#modified = new Set<string>();
+	/**
+	 * Global-layer paths written during this session (for partial save), keyed by
+	 * `JSON.stringify(segments)`: a record entry key may itself contain dots.
+	 */
+	#modified = new Map<string, readonly string[]>();
 	/** Individual project model roles modified during this session */
 	#modifiedProjectModelRoles = new Set<string>();
 	/** Individual global model roles modified during this session (for partial save) */
 	#modifiedGlobalModelRoles = new Set<string>();
-	/** On-disk generations and prior values observed before each pending global mutation. */
+	/** On-disk generations and prior values observed before each pending global mutation, keyed like {@link #modified}. */
 	#modifiedPathMutations = new Map<string, PendingYamlMutation>();
 	#modifiedGlobalModelRoleMutations = new Map<string, PendingYamlMutation>();
 	/** Changes whenever a live API mutates a persisted layer. */
@@ -822,15 +860,11 @@ export class Settings {
 		}
 		if (layer === "override") this.#softPins.delete(setting);
 		const prev = setting.get(this);
-		const segments = setting.segments;
 		if (layer === "global") {
-			this.#captureGlobalMutation(setting.id, this.#modifiedPathMutations, getByPath(this.#global, segments));
-			setByPath(this.#global, segments, value);
-			this.#persistedMutationGeneration++;
-			this.#modified.add(setting.id);
+			this.#stageGlobal(setting.segments, value);
 			this.#releaseSoftPin(setting);
 		} else {
-			setByPath(this.#overrides, segments, value);
+			setByPath(this.#overrides, setting.segments, value);
 		}
 		this.#rebuildMerged();
 		if (layer === "global") this.#queueSave();
@@ -843,20 +877,71 @@ export class Settings {
 	 * the default — supply the value.
 	 */
 	unsetGlobalValue(setting: AnySetting): void {
-		const segments = setting.segments;
-		const current = getByPath(this.#global, segments);
+		const current = getByPath(this.#global, setting.segments);
 		if (current === undefined && !this.#softPins.has(setting)) return;
 		const prev = setting.get(this);
 		this.#releaseSoftPin(setting);
-		if (current !== undefined) {
-			this.#captureGlobalMutation(setting.id, this.#modifiedPathMutations, current);
-			deleteByPath(this.#global, segments);
-			this.#persistedMutationGeneration++;
-			this.#modified.add(setting.id);
-		}
+		if (current !== undefined) this.#stageGlobal(setting.segments, undefined);
 		this.#rebuildMerged();
 		if (current !== undefined) this.#queueSave();
 		this.#fireIfChanged(setting, prev);
+	}
+
+	/**
+	 * Registry plumbing behind `Setting.setEntry`: writes `value` as the `key` entry of record `setting`
+	 * in the global layer (`undefined` removes the entry). The record's other entries, and every entry
+	 * another layer supplies, stay untouched, and only that entry is persisted; otherwise like a global
+	 * {@link writeValue}.
+	 *
+	 * @throws Error when `setting` is not a record or the entry fails the definition's `validate` check.
+	 */
+	writeEntry(setting: AnySetting, key: string, value: unknown): void {
+		if (setting.type !== "record") throw new Error(`Setting ${setting.id} is not a record`);
+		if (value !== undefined) setting.assertWritable({ [key]: value });
+		const record = getByPath(this.#global, setting.segments);
+		const staged = value !== undefined || (isRecord(record) && Object.hasOwn(record, key));
+		if (!staged && !this.#softPins.has(setting)) return;
+		const prev = setting.get(this);
+		this.#releaseSoftPin(setting);
+		if (staged) {
+			// Replace rather than mutate the record: the merged view and cached reads may share it.
+			if (isRecord(record)) setByPath(this.#global, setting.segments, { ...record });
+			this.#stageGlobal([...setting.segments, key], value);
+		}
+		this.#rebuildMerged();
+		if (staged) this.#queueSave();
+		this.#fireIfChanged(setting, prev);
+	}
+
+	/**
+	 * Registry plumbing behind `Setting.setMember`: adds (`member`) or removes `item` in list `setting`
+	 * of the global layer, seeded from the default when that layer has no list, so the persisted list
+	 * changes by that item only; otherwise like a global {@link writeValue}.
+	 *
+	 * @throws Error when `setting` is not a list or the resulting list fails its `items`/`validate` check.
+	 */
+	writeMember(setting: AnySetting, item: string, member: boolean): void {
+		if (setting.type !== "array") throw new Error(`Setting ${setting.id} is not a list`);
+		const list = getByPath(this.#global, setting.segments);
+		const base: readonly unknown[] = Array.isArray(list) ? list : (setting.default as readonly unknown[]);
+		const present = base.includes(item);
+		if (present === member && !this.#softPins.has(setting)) return;
+		let next = [...base];
+		if (present !== member) next = member ? [...base, item] : base.filter(entry => entry !== item);
+		this.writeValue(setting, next, "global");
+	}
+
+	/**
+	 * Applies `value` at `segments` of the global layer (`undefined` removes it) and queues that path —
+	 * a setting, or one entry of a record setting — for the next save.
+	 */
+	#stageGlobal(segments: readonly string[], value: unknown): void {
+		const key = JSON.stringify(segments);
+		this.#captureGlobalMutation(key, this.#modifiedPathMutations, getByPath(this.#global, segments));
+		if (value === undefined) deleteByPath(this.#global, segments);
+		else setByPath(this.#global, segments, value);
+		this.#persistedMutationGeneration++;
+		this.#modified.set(key, segments);
 	}
 
 	/** Drops `setting`'s soft-pinned default override, if any (the caller rebuilds the merged view). */
@@ -3363,29 +3448,23 @@ export class Settings {
 				const current =
 					loaded.settings ?? (this.#quarantinedYamlTargets.has(configPath) ? structuredClone(this.#global) : {});
 				let shouldWrite = false;
-				const appliedPaths: string[] = [];
+				const writtenPaths: (readonly string[])[] = [];
 
 				// Apply pending changes unless a newer file generation also
 				// changed that setting. Disjoint external edits still merge.
-				for (const modPath of modifiedPaths) {
-					const segments = modPath.split(".");
-					const mutation = modifiedPathMutations.get(modPath);
-					const canApply =
-						mutation !== undefined &&
-						mutation.generation.kind !== "unreadable" &&
-						(yamlGenerationsMatch(mutation.generation, loaded.generation) ||
-							Bun.deepEquals(getByPath(current, segments), mutation.baseValue));
-					if (!canApply) {
+				for (const [modKey, segments] of modifiedPaths) {
+					const mutation = modifiedPathMutations.get(modKey);
+					if (!pendingChangeApplies(mutation, segments, current, loaded.generation, writtenPaths)) {
 						logger.warn("Settings: skipped stale change after external config edit", {
 							path: configPath,
-							setting: modPath,
+							setting: segments.join("."),
 						});
 						continue;
 					}
 					const value = getByPath(this.#global, segments);
 					if (value === undefined) deleteByPath(current, segments);
 					else setByPath(current, segments, value);
-					appliedPaths.push(modPath);
+					writtenPaths.push(segments);
 					shouldWrite = true;
 				}
 
@@ -3444,15 +3523,28 @@ export class Settings {
 					await this.#writeYamlAtomically(writePath, current);
 				}
 				this.#quarantinedYamlTargets.delete(configPath);
-				// A path written again after this save's snapshot was merged at its newer live value.
-				// Drop it from pending unless it changed again while the write was in flight, so the
-				// next save doesn't take this save's write for a stale external edit.
-				for (const modPath of appliedPaths) {
-					if (!this.#modified.has(modPath)) continue;
-					const segments = modPath.split(".");
-					if (!settingValuesEqual(getByPath(this.#global, segments), getByPath(current, segments))) continue;
-					this.#modified.delete(modPath);
-					this.#modifiedPathMutations.delete(modPath);
+				// This write changed the file only at `writtenPaths`. A change staged after this save's snapshot at
+				// an overlapping path (the same one, an entry of a record written whole, or the reverse) is dropped
+				// once the file holds its live value; otherwise, unless an external edit already conflicts with it,
+				// it is rebased onto the file just written, so the next save doesn't take this write for such an edit.
+				let writtenGeneration: YamlGeneration | undefined;
+				for (const [modKey, segments] of this.#modified) {
+					const overlapping = writtenPaths.some(
+						other => isPathPrefix(other, segments) || isPathPrefix(segments, other),
+					);
+					if (!overlapping) continue;
+					const written = getByPath(current, segments);
+					const mutation = this.#modifiedPathMutations.get(modKey);
+					if (settingValuesEqual(getByPath(this.#global, segments), written)) {
+						this.#modified.delete(modKey);
+						this.#modifiedPathMutations.delete(modKey);
+					} else if (pendingChangeApplies(mutation, segments, current, loaded.generation, writtenPaths)) {
+						writtenGeneration ??= this.#readYamlGeneration(configPath);
+						this.#modifiedPathMutations.set(modKey, {
+							generation: writtenGeneration,
+							baseValue: structuredClone(written),
+						});
+					}
 				}
 				this.#adoptSavedGlobal(current, configPath);
 				// These pending roles were included in this write. Remove each
@@ -3473,8 +3565,8 @@ export class Settings {
 				? this.#readYamlGeneration(configPath)
 				: undefined;
 			// Re-add failed paths for retry, retaining any newer mutation's generation.
-			for (const p of modifiedPaths) {
-				this.#modified.add(p);
+			for (const [p, segments] of modifiedPaths) {
+				this.#modified.set(p, segments);
 				if (!this.#modifiedPathMutations.has(p)) {
 					const mutation = modifiedPathMutations.get(p) ?? {
 						generation: { kind: "unreadable" },
@@ -3522,8 +3614,7 @@ export class Settings {
 			}
 			setByPath(saved, ["modelRoles"], roles);
 		}
-		for (const id of this.#modified) {
-			const segments = id.split(".");
+		for (const segments of this.#modified.values()) {
 			const value = getByPath(this.#global, segments);
 			if (value === undefined) deleteByPath(saved, segments);
 			else setByPath(saved, segments, value);
