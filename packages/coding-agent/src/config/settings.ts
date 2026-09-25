@@ -1684,6 +1684,22 @@ export class Settings {
 	/*
 	 * Override model roles (helper for modelRoles record).
 	 */
+	/**
+	 * Legacy dotted-path runtime override: the write half of the pre-registry
+	 * `SettingsManager.create(cwd).override(path, value)` API that pi
+	 * extensions still call through the legacy shim. Resolves `path` to its
+	 * registered setting and applies a checked, non-persistent runtime
+	 * override on this instance.
+	 *
+	 * @throws Error when no setting is registered under `path`, or when the
+	 *   value does not fit the setting's definition.
+	 */
+	override(path: string, value: unknown): void {
+		const setting = lookupSetting(path);
+		if (!setting) throw new Error(`Unknown setting: ${path}`);
+		setting.override(this, value as never);
+	}
+
 	overrideModelRoles(roles: ReadOnlyDict<string>): void {
 		const next = this.#modelRolesFromLayer(this.#overrides);
 		for (const [role, modelId] of Object.entries(roles)) {
