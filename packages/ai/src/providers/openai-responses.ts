@@ -542,15 +542,20 @@ const streamOpenAIResponsesOnce = (
 				// Platform `previous_response_id` chaining only resolves stored responses.
 				params.store = true;
 			}
+			// A caller-supplied store:true (e.g. starting a client-driven chain)
+			// must persist the response even with no internal chain state.
+			if (options?.store === true) params.store = true;
 			applyReasoningEffortFallbackForRequest(params);
 			// A caller-supplied `previous_response_id` names the client's own stored
 			// response; internal chain deltas are computed against a DIFFERENT
 			// baseline (the provider session's last response), so pairing them with
 			// the client's id would send the delta to the wrong conversation.
-			// Branch before any delta construction — the client id wins.
+			// Branch before any delta construction — the client id wins. An empty
+			// string still counts as supplied: the malformed id reaches upstream
+			// validation rather than silently continuing a different stored chain.
 			const clientPreviousResponseId = options?.previousResponseId;
 			let chainedInternal = false;
-			let chained: OpenAIResponsesChainedParams = clientPreviousResponseId
+			let chained: OpenAIResponsesChainedParams = clientPreviousResponseId !== undefined
 				? {
 						params: { ...params, previous_response_id: clientPreviousResponseId },
 						previousResponseId: clientPreviousResponseId,
@@ -558,7 +563,7 @@ const streamOpenAIResponsesOnce = (
 				: chainState && !chainState.disabled
 					? buildOpenAIResponsesChainedParams(params, trailingScaffoldingItems, chainState)
 					: { params };
-			chainedInternal = chained.previousResponseId !== undefined && !clientPreviousResponseId;
+			chainedInternal = chained.previousResponseId !== undefined && clientPreviousResponseId === undefined;
 			sentPreviousResponseId = chained.previousResponseId;
 			const idleTimeoutMs =
 				options?.streamIdleTimeoutMs ?? getOpenAIStreamIdleTimeoutMs(model.compat.streamIdleTimeoutMs);
@@ -718,7 +723,7 @@ const streamOpenAIResponsesOnce = (
 							// subsequent previous_response_id continuations.
 							else if (activeParams.store === true) fallbackParams.store = true;
 							const fallbackClientPreviousResponseId = options?.previousResponseId;
-							let fallbackChained: OpenAIResponsesChainedParams = fallbackClientPreviousResponseId
+							let fallbackChained: OpenAIResponsesChainedParams = fallbackClientPreviousResponseId !== undefined
 								? {
 										params: {
 											...fallbackParams,
@@ -734,7 +739,8 @@ const streamOpenAIResponsesOnce = (
 										)
 									: { params: fallbackParams };
 							chainedInternal =
-								fallbackChained.previousResponseId !== undefined && !fallbackClientPreviousResponseId;
+								fallbackChained.previousResponseId !== undefined &&
+								fallbackClientPreviousResponseId === undefined;
 							sentPreviousResponseId = fallbackChained.previousResponseId;
 							fallbackChained = {
 								...fallbackChained,
@@ -1296,7 +1302,37 @@ export function buildParams(
 	if (options?.user !== undefined) params.user = options.user;
 	// `seed` is a Chat Completions parameter — the Responses API has no such
 	// field and rejects it as an unknown parameter.
-	applyResponsesFormatParams(params, options?.responseFormat);
+	const responseFormat = options?.responseFormat;
+	if (responseFormat !== undefined && typeof responseFormat === "object" && responseFormat !== null) {
+		const format = responseFormat as {
+			type?: string;
+			json_schema?: { name?: string; description?: string; schema?: unknown; strict?: boolean };
+		};
+		if (
+			format.type === "json_schema" &&
+			format.json_schema &&
+			(format.json_schema.name !== undefined || format.json_schema.schema !== undefined)
+		) {
+			// Chat Completions nests `{ name, description, schema, strict }` under
+			// `json_schema`; Responses `text.format` requires those fields flat at
+			// the top level. `description` steers the model's output, so it must
+			// survive the flatten.
+			params.text = {
+				...params.text,
+				format: {
+					type: "json_schema",
+					name: format.json_schema.name ?? "response",
+					...(format.json_schema.description !== undefined
+						? { description: format.json_schema.description }
+						: {}),
+					schema: format.json_schema.schema,
+					...(format.json_schema.strict !== undefined ? { strict: format.json_schema.strict } : {}),
+				} as never,
+			};
+		} else {
+			params.text = { ...params.text, format: responseFormat as never };
+		}
+	}
 	if (options?.include?.length) params.include = Array.from(new Set(options.include));
 	maybeAddOpenRouterAnthropicCacheControl(params, model, cacheRetention);
 	const outputToken = resolveOpenAIOutputTokenParam({
