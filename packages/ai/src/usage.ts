@@ -489,7 +489,15 @@ export interface CredentialRankingStrategy {
 	 * false never heals; true heals even with empty limits; absent requires
 	 * non-empty limits with none exhausted.
 	 */
-	healableBlockScopes?(report: UsageReport): { blockScope: string; limits: UsageLimit[]; healthy?: boolean }[];
+	healableBlockScopes?(
+		report: UsageReport,
+	): { blockScope: string | undefined; limits: UsageLimit[]; healthy?: boolean }[];
+	/**
+	 * Whether this provider strategy vouches for and can heal unscoped blocks
+	 * (e.g. Claude Opus/Sonnet requests). When true, a live unscoped block does
+	 * not prevent probing for recovery.
+	 */
+	healsUnscopedBlock?: boolean;
 	/** Fallback window durations (ms) when limits don't specify durationMs. */
 	windowDefaults: {
 		primaryMs: number;
