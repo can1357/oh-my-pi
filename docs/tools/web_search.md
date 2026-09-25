@@ -47,6 +47,7 @@
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `query` | `string` | Yes | Raw query. The orchestrator parses Google-style directives (`site:`/`-site:`, `after:`/`before:`, `inurl:`, `intitle:`, `filetype:`, quoted phrases, exclusions, and `OR`) so providers can map them to native filters or supported syntax; the original string remains available to adapters. |
+| `model` | `string` | No | Per-query selector for a search engine such as `web/exa`, or an available chat model with web grounding. Omit it to use the configured `web` role chain. Explicit selectors resolve to at most one candidate and retain the existing availability checks. |
 | `recency` | `"day" \| "week" \| "month" \| "year"` | No | Relative time filter. Implemented by Brave, Perplexity, Tavily, SearXNG, Kagi, TinyFish, Firecrawl, DuckDuckGo, Startpage, Google, and Mojeek; other adapters ignore it. |
 | `limit` | `number` | No | Max results to return. Usually becomes the provider request's result-count parameter when `num_search_results` is absent. TinyFish uses it for paginated fetches before slicing. xAI uses the collapsed value only as a local cap on parsed sources/citations, defaulting to `10` and max `30`. |
 | `max_tokens` | `number` | No | Passed through as provider token caps (`maxOutputTokens`, `max_tokens`, or xAI `max_output_tokens`) only by Anthropic, Gemini, xAI, and Perplexity API-key mode. Ignored by the other providers. |
@@ -85,7 +86,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
 ## Flow
 1. `WebSearchTool.execute()` in `packages/coding-agent/src/web/search/index.ts` delegates directly to `executeSearch()`.
 2. `executeSearch()` builds the candidate pool with `roleCandidatePool("web", …)`: available models the `web` role accepts, i.e. `web/*` search-engine catalog models (kind `search`) and chat models that declare a `webSearch` grounding. It then orders candidates:
-   - if `params.model` is set (not in the model-facing schema; `omp q --model <selector>` sets it), that selector resolves to at most one candidate, marked explicit;
+   - if `params.model` is set through the tool or `omp q --model <selector>`, that selector resolves to at most one candidate, marked explicit;
    - otherwise `resolveRoleChain("web", …)` (`packages/coding-agent/src/config/model-resolver.ts`) yields the `web` role chain described under [Provider selection](#modes--variants).
 3. Candidates are walked in order. A `search`-kind model loads its engine by catalog id through `getSearchProvider()`; a chat model loads its grounding backend (`gemini`, `anthropic`, `codex`, `xai`, `openrouter`) through `getGroundedSearchProvider()`. Provider modules load only when a candidate reaches them. Explicit candidates are checked with `isExplicitlyAvailable()`, others with `isAvailable()`. An unavailable non-explicit candidate is skipped silently; an unavailable explicit candidate is recorded as a failure (`<Provider> web search is unavailable. Configure its credentials or select the automatic provider chain.`) and the walk continues.
 4. If no candidate was available and none failed, `executeSearch()` returns `Error: No web search model configured.` (or `No web search model matches selector "<model>".` when `params.model` was given) with `details.response.provider = "none"`.
@@ -293,7 +294,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
   - SearXNG `findAuth()` can throw configuration errors before any HTTP call if Basic auth fields are incomplete or invalid.
 
 ## Notes
-- The model-facing schema does not expose a provider or model; CLI/internal callers can pin one through `SearchQueryParams.model`.
+- The model-facing schema and CLI share `SearchQueryParams.model` for per-query selection. Omitting `model` preserves the configured `web` role chain.
 - `executeSearch()` loads provider modules lazily as the chain reaches them. Provider instances are cached per id (`packages/coding-agent/src/web/search/provider.ts`), and asking for labels via `getSearchProviderLabel()` does not trigger imports.
 - Most providers treat `limit` and `num_search_results` as the same number because adapters pass `params.numSearchResults ?? params.limit`. Perplexity preserves both concepts. TinyFish uses the collapsed value as a local cap, serializes `num_results` per page, and paginates when more results are needed. xAI uses it only to cap parsed sources/citations (`10` default, `30` max).
 - `recency` has native or engine-query mappings in Brave, Perplexity, Tavily, SearXNG, Kagi, TinyFish, Firecrawl, DuckDuckGo, Startpage, Google, and Mojeek. xAI retains absolute date directives as natural-language query hints because its current Responses tool has no date parameters; Ecosia ignores recency. Public Web passes the request through to its engines.

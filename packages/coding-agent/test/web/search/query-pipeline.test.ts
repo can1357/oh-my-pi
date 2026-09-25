@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { runSearchQuery } from "@oh-my-pi/pi-coding-agent/web/search";
+import { runSearchQuery, WebSearchTool } from "@oh-my-pi/pi-coding-agent/web/search";
 import type { SearchParams } from "@oh-my-pi/pi-coding-agent/web/search/provider";
 import * as provider from "@oh-my-pi/pi-coding-agent/web/search/provider";
 import type { SearchProviderId, SearchResponse, SearchSource } from "@oh-my-pi/pi-coding-agent/web/search/types";
@@ -41,7 +41,16 @@ async function stubRoleProvider(id: SearchProviderId, behaviour: (params: Search
 		if (requested !== id) throw new Error(`Unexpected provider: ${requested}`);
 		return stub;
 	});
-	return { authStorage, modelRegistry, getProvider };
+	return {
+		authStorage,
+		modelRegistry,
+		getProvider,
+		cwd: process.cwd(),
+		hasUI: false,
+		getSessionFile: () => null,
+		getSessionSpawns: () => null,
+		settings,
+	};
 }
 
 describe("web search directive pipeline", () => {
@@ -79,7 +88,7 @@ describe("web search directive pipeline", () => {
 		);
 	});
 
-	it("uses a request model override instead of modelRoles.web", async () => {
+	it.each(["query", "tool"] as const)("uses the explicit model through %s", async mode => {
 		const context = await stubRoleProvider("jina", async params => ({
 			provider: "jina",
 			sources: [{ title: params.model.id, url: "https://jina.example" }],
@@ -99,9 +108,21 @@ describe("web search directive pipeline", () => {
 			throw new Error(`Unexpected provider: ${requested}`);
 		});
 
-		const result = await runSearchQuery({ query: "override", model: "web/exa" }, context);
+		const params = { query: "override", model: "web/exa" };
+		const result =
+			mode === "query"
+				? await runSearchQuery(params, context)
+				: await new WebSearchTool(context).execute("override", params);
 
-		expect(result.details.response.provider).toBe("exa");
-		expect(result.details.response.sources[0]?.title).toBe("exa");
+		expect(result.details?.response.provider).toBe("exa");
+		expect(result.details?.response.sources[0]?.title).toBe("exa");
+	});
+
+	it("reports an unmatched tool selector before provider execution", async () => {
+		const context = await stubRoleProvider("brave", async () => ({ provider: "brave", sources: SOURCES }));
+		const tool = new WebSearchTool(context);
+		const result = await tool.execute("unmatched", { query: "test", model: "web/missing-fixture-engine" });
+		expect(result.details?.error).toContain('No web search model matches selector "web/missing-fixture-engine"');
+		expect(context.getProvider).toHaveBeenCalledTimes(0);
 	});
 });

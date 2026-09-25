@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `web_search` now accepts an optional `model` selector for per-query search backend selection; omitting it keeps the configured `web` role chain ([#11926](https://github.com/can1357/oh-my-pi/pull/11926) by [@cyriusweng](https://github.com/cyriusweng)).
+
 ### Fixed
 
 - Fixed the Windows bash tool exporting `TEMP`, `TMP`, and `TMPDIR` with 8.3 short names such as `ADMINI~1`, so they now match the long-form `pwd`/`$PWD` after `cd "$TEMP"` ([#13265](https://github.com/can1357/oh-my-pi/pull/13265) by [@CoderTCY](https://github.com/CoderTCY))

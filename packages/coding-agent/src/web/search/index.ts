@@ -41,6 +41,7 @@ import { cfgProvidersAntigravityEndpoint, cfgProvidersWebSearchTimeoutSeconds } 
 /** Web search tool parameters schema */
 export const webSearchSchema = type({
 	query: "string",
+	model: "string?",
 	recency: "'day' | 'week' | 'month' | 'year'?",
 	limit: "number?",
 	max_tokens: "number?",
@@ -50,9 +51,7 @@ export const webSearchSchema = type({
 
 export type SearchToolParams = typeof webSearchSchema.infer;
 
-export interface SearchQueryParams extends SearchToolParams {
-	model?: string;
-}
+export type SearchQueryParams = SearchToolParams;
 
 /** Truncate text for tool output */
 function truncateText(text: string, maxLen: number): string {

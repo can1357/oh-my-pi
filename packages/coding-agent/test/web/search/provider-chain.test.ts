@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resolveModelRoleValue, resolveRoleChain } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { roleCandidatePool } from "@oh-my-pi/pi-coding-agent/config/model-roles";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { webSearchSchema } from "@oh-my-pi/pi-coding-agent/web/search";
 import { getSearchProvider } from "@oh-my-pi/pi-coding-agent/web/search/provider";
 import { createInMemoryAuthStorage } from "../../helpers/agent-session-setup";
 
@@ -106,5 +108,21 @@ describe("web model candidate availability", () => {
 
 		expect(candidate.explicit).toBe(true);
 		expect(await provider.isExplicitlyAvailable(authStorage, candidate.model)).toBe(true);
+	});
+});
+
+describe("webSearchSchema model selection", () => {
+	it("retains explicit engine and grounded-model selectors", () => {
+		for (const model of ["web/exa", "openrouter/google/gemini-2.5-flash"]) {
+			expect(webSearchSchema({ query: "test", model })).toEqual({ query: "test", model });
+		}
+	});
+
+	it("accepts the configured role by omission", () => {
+		expect(webSearchSchema({ query: "test" })).toEqual({ query: "test" });
+	});
+
+	it("validates the selector's string type", () => {
+		expect(webSearchSchema({ query: "test", model: 42 })).toBeInstanceOf(type.errors);
 	});
 });
