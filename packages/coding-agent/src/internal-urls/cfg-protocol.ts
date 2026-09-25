@@ -66,6 +66,7 @@ const TREE_COMMENT_MAX_CHARS = 120;
 const PROVENANCE_LABELS: Record<SettingProvenance, string> = {
 	env: "environment variable",
 	runtime: "session override",
+	setup: "loaded profile",
 	overlay: "--config overlay",
 	project: "project config",
 	global: "global config",
