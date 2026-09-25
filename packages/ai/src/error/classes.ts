@@ -91,8 +91,8 @@ export class AnthropicApiError extends ProviderHttpError {
 	declare readonly headers: Headers;
 	readonly requestId: string | null;
 
-	constructor(status: number, message: string, headers: Headers) {
-		super(message, status, { headers });
+	constructor(status: number, message: string, headers: Headers, options?: { code?: string; cause?: unknown }) {
+		super(message, status, { headers, code: options?.code, cause: options?.cause });
 		this.name = "AnthropicApiError";
 		// Match the Anthropic transport retry contract after its retry budget is exhausted.
 		if (status === 409) attach(this, create(Flag.Transient));
@@ -179,7 +179,27 @@ export class AnthropicApiError extends ProviderHttpError {
 		}
 
 		const detail = bodyChunks.join("").trim() || "status code (no body)";
-		return new AnthropicApiError(response.status, `${response.status} ${detail}`, response.headers);
+		let code: string | undefined;
+		try {
+			const parsed: unknown = JSON.parse(detail);
+			if (parsed && typeof parsed === "object" && "error" in parsed) {
+				const err = parsed.error;
+				if (err && typeof err === "object") {
+					if (
+						"details" in err &&
+						err.details &&
+						typeof err.details === "object" &&
+						"error_code" in err.details &&
+						typeof err.details.error_code === "string"
+					) {
+						code = err.details.error_code;
+					} else if ("type" in err && typeof err.type === "string") {
+						code = err.type;
+					}
+				}
+			}
+		} catch {}
+		return new AnthropicApiError(response.status, `${response.status} ${detail}`, response.headers, { code });
 	}
 }
 

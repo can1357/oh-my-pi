@@ -11,37 +11,42 @@ static HL_PREFIX_PLUS_RE: LazyLock<Regex> =
 	LazyLock::new(|| Regex::new(r"^\s*(?:(?:>>>|>>)\s*)?\+\s*\d+:").expect("valid regex"));
 static HL_HEADER_RE: LazyLock<Regex> =
 	LazyLock::new(|| Regex::new(r"^\s*\[[^#\r\n]+#[0-9a-fA-F]{4}\]\s*$").expect("valid regex"));
-static READ_TRUNCATION_NOTICE_RE: LazyLock<Regex> = LazyLock::new(|| {
-	Regex::new(
-	r"^\s*\[(?:(?:Showing lines \d+-\d+ of \d+|\d+ more lines? in (?:file|\S+))\b.*\bUse :L?\d+|(?:…|\.\.\.)?\d+\s*ln elided;\s*re-read needed ranges with .+)\]\s*$",
-).expect("valid regex")
-});
 static READ_RANGE_ELISION_RE: LazyLock<Regex> = LazyLock::new(|| {
 	Regex::new(r"^\s*[1-9]\d*\s*-\s*[1-9]\d*:.*(?:…|\.\.\.).*$").expect("valid regex")
 });
 static READ_SINGLE_ELISION_RE: LazyLock<Regex> =
 	LazyLock::new(|| Regex::new(r"^\s*(?:…|\.\.\.)\s*$").expect("valid regex"));
 
+/// Whether a row is a truncation notice emitted by `read`.
+pub fn is_read_truncation_notice(line: &str) -> bool {
+	let trimmed = line.trim();
+	let Some(body) = trimmed
+		.strip_prefix('[')
+		.and_then(|value| value.strip_suffix(']'))
+	else {
+		return false;
+	};
+	let showing_notice = body.starts_with("Showing ")
+		&& (body.contains(" line") || body.contains("lines ") || body.contains("bytes "))
+		&& (body.contains(" of ") || body.contains(" elided"));
+	let more_notice = (body.starts_with("More lines in ")
+		|| body
+			.split_once(" more line")
+			.is_some_and(|(count, _)| count.parse::<usize>().is_ok()))
+		&& body.contains(" in ")
+		&& body.contains(". Use ")
+		&& body.ends_with(" to continue");
+	let elided_notice = (body.starts_with('…') || body.starts_with("..."))
+		&& body.contains("ln elided;")
+		&& body.contains("re-read needed ranges");
+	let oversized_line_notice =
+		body.starts_with("Line ") && body.contains(" exceeds ") && body.contains(" limit.");
+	showing_notice || more_notice || elided_notice || oversized_line_notice
+}
+
 /// Whether a row is display-only metadata emitted by `read`.
 pub fn is_read_metadata_line(line: &str) -> bool {
-	let trimmed = line.trim();
-	let read_notice = trimmed.starts_with("[Showing lines ")
-		&& trimmed.contains(" of ")
-		&& trimmed.contains("Use :")
-		&& trimmed.ends_with(']');
-	let more_notice = trimmed.starts_with('[')
-		&& trimmed.contains(" more line")
-		&& trimmed.contains(" in ")
-		&& trimmed.contains("Use :")
-		&& trimmed.ends_with(']');
-	let elided_notice = trimmed.starts_with('[')
-		&& trimmed.contains("ln elided;")
-		&& trimmed.contains("re-read needed ranges")
-		&& trimmed.ends_with(']');
-	read_notice
-		|| more_notice
-		|| elided_notice
-		|| READ_TRUNCATION_NOTICE_RE.is_match(line)
+	is_read_truncation_notice(line)
 		|| READ_RANGE_ELISION_RE.is_match(line)
 		|| READ_SINGLE_ELISION_RE.is_match(line)
 }

@@ -277,19 +277,24 @@ export class LspMuxServer {
 		this.#sessions.add(session);
 		this.#disarmMuxIdle();
 		socket.on("data", chunk => {
-			session.framer.push(Buffer.from(chunk));
-			for (const text of session.framer.drain(header => {
-				logger.warn("LSP mux client framing resync", { header: header.slice(0, 200) });
-			})) {
-				try {
-					const parsed: unknown = JSON.parse(text);
-					if (!isRecord(parsed) || parsed.jsonrpc !== "2.0") throw new Error("invalid JSON-RPC message");
-					void this.#fromSession(session, parsed as unknown as RpcMessage).catch(error => {
-						logger.warn("LSP mux client message handling failed", { error: String(error) });
-					});
-				} catch (error) {
-					logger.warn("LSP mux client sent malformed JSON", { error: String(error) });
+			try {
+				session.framer.push(Buffer.from(chunk));
+				for (const text of session.framer.drain(header => {
+					logger.warn("LSP mux client framing resync", { header: header.slice(0, 200) });
+				})) {
+					try {
+						const parsed: unknown = JSON.parse(text);
+						if (!isRecord(parsed) || parsed.jsonrpc !== "2.0") throw new Error("invalid JSON-RPC message");
+						void this.#fromSession(session, parsed as unknown as RpcMessage).catch(error => {
+							logger.warn("LSP mux client message handling failed", { error: String(error) });
+						});
+					} catch (error) {
+						logger.warn("LSP mux client sent malformed JSON", { error: String(error) });
+					}
 				}
+			} catch (error) {
+				logger.warn("LSP mux client framing failed", { error: String(error) });
+				socket.destroy();
 			}
 		});
 		socket.on("error", error => logger.warn("LSP mux session socket error", { error: error.message }));
@@ -472,6 +477,7 @@ export class LspMuxServer {
 			}
 		} catch (error) {
 			logger.warn("LSP mux server reader failed", { server: server.key, error: String(error) });
+			this.#killServer(server);
 		} finally {
 			reader.releaseLock();
 		}
@@ -643,10 +649,17 @@ export class LspMuxServer {
 		this.#sessions.delete(session);
 		const server = session.server;
 		if (server) {
+			// Teardown writes are best-effort: the language server may already
+			// have exited (crash or mux restart) and writing its stdin then
+			// rejects. #writeServer already logs those failures — a rejection
+			// escaping here runs from the socket "close" handler with no caller
+			// to catch it, and the unhandled rejection would kill the daemon.
+			const writeBestEffort = (message: RpcMessage): Promise<void> =>
+				this.#writeServer(server, message).catch(() => {});
 			let cleanup: Promise<void> | undefined;
 			for (const uri of session.openUris) {
 				server.documents.delete(uri);
-				cleanup = this.#writeServer(server, {
+				cleanup = writeBestEffort({
 					jsonrpc: "2.0",
 					method: "textDocument/didClose",
 					params: { textDocument: { uri } },
@@ -656,7 +669,7 @@ export class LspMuxServer {
 			for (const [muxId, pending] of server.pending) {
 				if (pending.session !== session) continue;
 				pending.drop = true;
-				await this.#writeServer(server, { jsonrpc: "2.0", method: "$/cancelRequest", params: { id: muxId } });
+				await writeBestEffort({ jsonrpc: "2.0", method: "$/cancelRequest", params: { id: muxId } });
 			}
 			server.initializeWaiters.delete(session);
 			server.sessions.delete(session);

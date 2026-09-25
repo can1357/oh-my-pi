@@ -6,6 +6,7 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "../../config/model-registry";
 import type { SessionManager } from "../../session/session-manager";
 import { createNoOpUIContext } from "../utils";
+import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shared-events";
 import type {
 	AppendEntryHandler,
 	BranchHandler,
@@ -326,6 +327,7 @@ export class HookRunner {
 	async emitToolCall(event: ToolCallEvent): Promise<ToolCallEventResult | undefined> {
 		const ctx = this.#createContext();
 		let result: ToolCallEventResult | undefined;
+		const aggregated = { input: undefined as ToolCallEventResult["input"], additionalContext: [] as string[] };
 
 		for (const hook of this.hooks) {
 			const handlers = hook.handlers.get("tool_call");
@@ -333,19 +335,19 @@ export class HookRunner {
 
 			for (const handler of handlers) {
 				// No timeout - let user take their time
-				const handlerResult = await handler(event, ctx);
+				const handlerResult = (await handler(event, ctx)) as ToolCallEventResult | undefined;
 
-				if (handlerResult) {
-					result = handlerResult as ToolCallEventResult;
-					// If blocked, stop processing further hooks
-					if (result.block) {
-						return result;
-					}
+				if (!handlerResult) continue;
+				if (handlerResult.block) {
+					return handlerResult;
 				}
+				const { additionalContext: _context, input: _input, ...controlResult } = handlerResult;
+				accumulateToolCallResult(aggregated, handlerResult);
+				result = controlResult;
 			}
 		}
 
-		return result;
+		return buildAggregatedToolCallResult(result, aggregated);
 	}
 
 	/**

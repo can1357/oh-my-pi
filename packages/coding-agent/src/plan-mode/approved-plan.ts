@@ -1,5 +1,5 @@
 import { normalizeLocalScheme } from "../tools/path-utils";
-import { ToolError } from "../tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 /** Shape forwarded from the plan-proposal handler to InteractiveMode's
  *  approval popup. Populated by the `xd://propose` dispatch when the agent

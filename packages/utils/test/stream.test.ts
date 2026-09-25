@@ -1,11 +1,13 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import { sanitizeText } from "@oh-my-pi/pi-utils/sanitize-text";
 import {
+	ConcatSink,
 	parseJsonlLenient,
 	readJsonl,
 	readLines,
 	readSseEvents,
 	readSseJson,
+	readSseJsonOrText,
 	type ServerSentEvent,
 } from "@oh-my-pi/pi-utils/stream";
 
@@ -60,6 +62,36 @@ describe("readLines", () => {
 		}
 
 		expect(output).toEqual(["alpha", "beta", "gamma"]);
+	});
+
+	it("keeps retained split lines stable after the stream drains", async () => {
+		const readable = new ReadableStream<Uint8Array>({
+			start(controller) {
+				for (const chunk of ["hel", "lo\nwor", "ld\n"]) {
+					controller.enqueue(encoder.encode(chunk));
+				}
+				controller.close();
+			},
+		});
+
+		const lines = await collectAsync(readLines(readable));
+		const dec = new TextDecoder();
+		expect(lines.map(line => dec.decode(line))).toEqual(["hello", "world"]);
+	});
+
+	it("keeps a retained split line stable beside an unterminated tail", async () => {
+		const readable = new ReadableStream<Uint8Array>({
+			start(controller) {
+				for (const chunk of ["hel", "lo\nwor", "ld"]) {
+					controller.enqueue(encoder.encode(chunk));
+				}
+				controller.close();
+			},
+		});
+
+		const lines = await collectAsync(readLines(readable));
+		const dec = new TextDecoder();
+		expect(lines.map(line => dec.decode(line))).toEqual(["hello", "world"]);
 	});
 });
 
@@ -143,6 +175,54 @@ describe("readJsonl", () => {
 
 		const output = await collectAsync(readJsonl(readable));
 		expect(output).toEqual([{ z: 9 }]);
+	});
+});
+
+describe("ConcatSink", () => {
+	const text = (sink: ConcatSink) => new TextDecoder().decode(sink.flush());
+
+	it("accumulates appended chunks in order", () => {
+		const sink = new ConcatSink();
+		sink.append(encoder.encode("abc"));
+		sink.append(encoder.encode("de"));
+		expect(sink.isEmpty).toBe(false);
+		expect(text(sink)).toBe("abcde");
+	});
+
+	it("keeps the remainder after consuming a prefix", () => {
+		const sink = new ConcatSink();
+		sink.append(encoder.encode("abcde"));
+		sink.consume(2);
+		expect(text(sink)).toBe("cde");
+		sink.append(encoder.encode("fg"));
+		expect(text(sink)).toBe("cdefg");
+	});
+
+	it("empties when consuming at or past the buffered length", () => {
+		const sink = new ConcatSink();
+		sink.append(encoder.encode("abc"));
+		sink.consume(3);
+		expect(sink.isEmpty).toBe(true);
+		expect(sink.flush()).toBeUndefined();
+
+		sink.append(encoder.encode("xy"));
+		sink.consume(99);
+		expect(sink.isEmpty).toBe(true);
+	});
+
+	it("ignores non-positive consume counts", () => {
+		const sink = new ConcatSink();
+		sink.append(encoder.encode("abc"));
+		sink.consume(0);
+		sink.consume(-5);
+		expect(text(sink)).toBe("abc");
+	});
+
+	it("preserves multibyte sequences split across appends", () => {
+		const bytes = encoder.encode("é🚀");
+		const sink = new ConcatSink();
+		for (const byte of bytes) sink.append(new Uint8Array([byte]));
+		expect(text(sink)).toBe("é🚀");
 	});
 });
 
@@ -342,6 +422,84 @@ describe("readSseJson", () => {
 	});
 });
 
+describe("readSseJsonOrText", () => {
+	it("yields parsed events and stops at the [DONE] sentinel", async () => {
+		const stream = bytesStreamFromChunks([
+			encoder.encode('data: {"a":1}\n\n'),
+			encoder.encode("data: \n\n"),
+			encoder.encode("data: [DONE]\n\n"),
+			encoder.encode('data: {"c":3}\n\n'),
+		]);
+
+		expect(await collectAsync(readSseJsonOrText(stream))).toEqual([{ a: 1 }]);
+	});
+
+	it("yields a non-JSON frame as its raw text instead of throwing", async () => {
+		// The whole point of the reader: a proxy that already committed to the
+		// stream answers with a plain-text throttle line, and the consumer has to
+		// see the text rather than lose the turn to a SyntaxError.
+		const stream = bytesStreamFromChunks([
+			encoder.encode("data: 429 Too Many Requests\n\n"),
+			encoder.encode('data: {"a":1}\n\n'),
+		]);
+
+		expect(await collectAsync(readSseJsonOrText(stream))).toEqual(["429 Too Many Requests", { a: 1 }]);
+	});
+
+	it("joins a multi-line HTML frame into one text yield", async () => {
+		// SSE joins consecutive `data:` fields with \n, which is exactly how an
+		// nginx throttle page arrives: several lines, none of them JSON.
+		const stream = bytesStreamFromChunks([
+			encoder.encode(
+				"data: <html>\ndata: <head><title>Service Temporarily Unavailable</title></head>\ndata: </html>\n\n",
+			),
+		]);
+
+		expect(await collectAsync(readSseJsonOrText(stream))).toEqual([
+			"<html>\n<head><title>Service Temporarily Unavailable</title></head>\n</html>",
+		]);
+	});
+
+	it("yields a double-encoded JSON string frame as the decoded string", async () => {
+		// A gateway that JSON-wraps its text error page *parses*, so it arrives as
+		// the string value rather than as rejected text. Both lanes are
+		// indistinguishable by type, which is the safe direction: a consumer
+		// branching on `typeof === "string"` classifies it instead of trusting it.
+		const stream = bytesStreamFromChunks([encoder.encode('data: "429 Too Many Requests"\n\n')]);
+
+		expect(await collectAsync(readSseJsonOrText(stream))).toEqual(["429 Too Many Requests"]);
+	});
+
+	it("ends iteration on a cut-off container-shaped tail, exactly like readSseJson", async () => {
+		const stream = bytesStreamFromChunks([encoder.encode('data: {"a":1}\n\n'), encoder.encode('data: {"b":2,}')]);
+
+		expect(await collectAsync(readSseJsonOrText(stream))).toEqual([{ a: 1 }]);
+	});
+
+	it("rethrows nothing for a middle malformed frame that readSseJson rejects", async () => {
+		// The strict reader's contract is unchanged; this reader's contract is that
+		// the same input is surfaced as text. Both share one frame loop, so pin them
+		// against each other.
+		const chunks = [encoder.encode('data: {"a":1\n\n'), encoder.encode('data: {"b":2}\n\n')];
+
+		expect(await collectAsync(readSseJsonOrText(bytesStreamFromChunks(chunks)))).toEqual(['{"a":1', { b: 2 }]);
+		await expect(collectAsync(readSseJson(bytesStreamFromChunks(chunks)))).rejects.toThrow(SyntaxError);
+	});
+
+	it("reports raw events to diagnostic observers", async () => {
+		const stream = bytesStreamFromChunks([
+			encoder.encode("event: message\ndata: not json\n\n"),
+			encoder.encode("data: [DONE]\n\n"),
+		]);
+		const observed: ServerSentEvent[] = [];
+
+		const output = await collectAsync(readSseJsonOrText(stream, undefined, event => observed.push(event)));
+
+		expect(output).toEqual(["not json"]);
+		expect(observed.map(event => event.data)).toEqual(["not json", "[DONE]"]);
+	});
+});
+
 function bytesStreamFromChunks(chunks: Uint8Array[]): ReadableStream<Uint8Array> {
 	return new ReadableStream<Uint8Array>({
 		start(controller) {
@@ -384,7 +542,7 @@ describe("readSseEvents", () => {
 
 	it("skips comment lines but preserves them in raw", async () => {
 		const stream = bytesStreamFromChunks([encoder.encode(": keep-alive\nevent: ping\ndata: ok\n\n")]);
-		const [evt] = await collectAsync(readSseEvents(stream));
+		const [evt] = await collectAsync(readSseEvents(stream, undefined, { captureRaw: true }));
 		expect(evt.event).toBe("ping");
 		expect(evt.data).toBe("ok");
 		expect(evt.raw).toEqual([": keep-alive", "event: ping", "data: ok"]);
@@ -392,13 +550,13 @@ describe("readSseEvents", () => {
 
 	it("does not carry pure comment keepalives into the next event raw lines", async () => {
 		const stream = bytesStreamFromChunks([encoder.encode(": keepalive\n\nevent: ping\ndata: ok\n\n")]);
-		const [evt] = await collectAsync(readSseEvents(stream));
+		const [evt] = await collectAsync(readSseEvents(stream, undefined, { captureRaw: true }));
 		expect(evt.raw).toEqual(["event: ping", "data: ok"]);
 	});
 
 	it("yields control-only id/retry events for reconnecting transports", async () => {
 		const stream = bytesStreamFromChunks([encoder.encode("id: stream-1\nretry: 25\n\n")]);
-		const events = await collectAsync(readSseEvents(stream));
+		const events = await collectAsync(readSseEvents(stream, undefined, { captureRaw: true }));
 
 		expect(events).toEqual([
 			{
@@ -424,6 +582,52 @@ describe("readSseEvents", () => {
 		expect(events.map(e => `${e.event}=${e.data}`)).toEqual(["a=1", "b=2"]);
 	});
 
+	it("dispatches multiple CR-only events before EOF", async () => {
+		let sourceClosed = false;
+		let closeSource = () => {};
+		const stream = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(encoder.encode("event: first\rdata: 1\r\revent: second\rdata: 2\r\r"));
+				closeSource = () => {
+					if (sourceClosed) return;
+					sourceClosed = true;
+					controller.close();
+				};
+			},
+		});
+		const iterator = readSseEvents(stream)[Symbol.asyncIterator]();
+
+		const first = await iterator.next();
+		const second = await iterator.next();
+		expect(sourceClosed).toBe(false);
+		closeSource();
+		const end = await iterator.next();
+		expect(first.done).toBe(false);
+		expect(first.value?.event).toBe("first");
+		expect(first.value?.data).toBe("1");
+		expect(second.done).toBe(false);
+		expect(second.value?.event).toBe("second");
+		expect(second.value?.data).toBe("2");
+		expect(end.done).toBe(true);
+	});
+
+	it("handles chunk-split CRLF and UTF-8 sequences together", async () => {
+		const stream = bytesStreamFromChunks([
+			encoder.encode("event: utf\r"),
+			encoder.encode("\ndata: caf"),
+			Uint8Array.of(0xc3),
+			Uint8Array.of(0xa9, 0x0d),
+			encoder.encode("\n\r"),
+			encoder.encode("\nevent: next\r\ndata: ok\r\n\r\n"),
+		]);
+		const events = await collectAsync(readSseEvents(stream, undefined, { captureRaw: true }));
+
+		expect(events).toEqual([
+			{ event: "utf", data: "café", raw: ["event: utf", "data: café"] },
+			{ event: "next", data: "ok", raw: ["event: next", "data: ok"] },
+		] satisfies ServerSentEvent[]);
+	});
+
 	it("recovers when a chunk boundary splits inside a field name", async () => {
 		const stream = bytesStreamFromChunks([
 			encoder.encode("eve"),
@@ -447,10 +651,18 @@ describe("readSseEvents", () => {
 
 	it("flushes a pending event even without the trailing blank line", async () => {
 		const stream = bytesStreamFromChunks([encoder.encode("event: trailing\ndata: tail\n")]);
-		const events = await collectAsync(readSseEvents(stream));
+		const events = await collectAsync(readSseEvents(stream, undefined, { captureRaw: true }));
 		expect(events).toEqual([
 			{ event: "trailing", data: "tail", raw: ["event: trailing", "data: tail"] },
 		] satisfies ServerSentEvent[]);
+	});
+
+	it("leaves raw empty by default so the token path pays no per-line slices", async () => {
+		const stream = bytesStreamFromChunks([encoder.encode("event: ping\ndata: ok\n\n")]);
+		const [evt] = await collectAsync(readSseEvents(stream));
+		expect(evt.event).toBe("ping");
+		expect(evt.data).toBe("ok");
+		expect(evt.raw).toEqual([]);
 	});
 
 	it("treats a tail without any newline as a complete final line", async () => {
