@@ -115,7 +115,7 @@ const FORCED_TOOL_CHOICE_REJECTION_PATTERNS: readonly RegExp[] = [
  * documented in this repository.
  */
 export function isForcedToolChoiceRejection(status: number | undefined, errorText: string | undefined): boolean {
-	if (status !== 400 || !errorText || typeof errorText !== "string") return false;
+	if (status !== 400 || !errorText) return false;
 	return FORCED_TOOL_CHOICE_REJECTION_PATTERNS.some(pattern => pattern.test(errorText));
 }
 
@@ -142,12 +142,6 @@ export function noteForcedToolChoiceRejected(
 ): void {
 	const key = createForcedToolChoiceKey(model, baseUrlOverride);
 	rejectedModels.add(key);
-	if (baseUrlOverride) {
-		rejectedModels.add(createForcedToolChoiceKey(model));
-	}
-	if (model.baseUrl) {
-		rejectedModels.add(createForcedToolChoiceKey(model, model.baseUrl));
-	}
 	if (!warnedKeys.has(key)) {
 		warnedKeys.add(key);
 		logger.warn("forced tool_choice rejected by model, downgrading to auto", {
@@ -158,17 +152,11 @@ export function noteForcedToolChoiceRejected(
 	}
 }
 
-export function isForcedToolChoiceRejected(
+function isForcedToolChoiceRejected(
 	model: { provider: string; baseUrl?: string; id: string },
 	baseUrlOverride?: string,
 ): boolean {
-	if (baseUrlOverride && rejectedModels.has(createForcedToolChoiceKey(model, baseUrlOverride))) {
-		return true;
-	}
-	if (model.baseUrl && rejectedModels.has(createForcedToolChoiceKey(model, model.baseUrl))) {
-		return true;
-	}
-	return rejectedModels.has(createForcedToolChoiceKey(model));
+	return rejectedModels.has(createForcedToolChoiceKey(model, baseUrlOverride));
 }
 
 export function supportsForcedToolChoice(
@@ -178,9 +166,4 @@ export function supportsForcedToolChoice(
 	if (model.compat?.supportsForcedToolChoice === false) return false;
 	if (isForcedToolChoiceRejected(model, baseUrlOverride)) return false;
 	return true;
-}
-
-export function clearForcedToolChoiceRejectedForTests(): void {
-	rejectedModels.clear();
-	warnedKeys.clear();
 }

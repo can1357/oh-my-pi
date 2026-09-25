@@ -91,9 +91,9 @@ import { createSdkStreamRequestOptions } from "../utils/sdk-stream-timeout";
 import { notifyRawSseEvent } from "../utils/sse-debug";
 import {
 	isForcedToolChoice,
-	isForcedToolChoiceRejected,
 	isForcedToolChoiceRejection,
 	noteForcedToolChoiceRejected,
+	supportsForcedToolChoice,
 } from "../utils/tool-choice";
 import {
 	AnthropicConnectionTimeoutError,
@@ -2113,9 +2113,7 @@ const streamAnthropicOnce = (
 				const sendsAdaptiveEffortPin =
 					isAdaptiveOnlyThinking(model) &&
 					(options?.thinkingEnabled === false ||
-						(model.compat.supportsForcedToolChoice &&
-							!isForcedToolChoiceRejected(model, baseUrl) &&
-							isForcedToolChoice(options?.toolChoice)));
+						(supportsForcedToolChoice(model, baseUrl) && isForcedToolChoice(options?.toolChoice)));
 				if (
 					model.reasoning &&
 					model.compat.supportsOutputEffort &&
@@ -4888,9 +4886,7 @@ function buildParams(
 		const choiceType = params.tool_choice?.type;
 		if (
 			(choiceType === "any" || choiceType === "tool") &&
-			(compactionRequest ||
-				!model.compat.supportsForcedToolChoice ||
-				isForcedToolChoiceRejected(model, effectiveBaseUrl))
+			(compactionRequest || !supportsForcedToolChoice(model, effectiveBaseUrl))
 		) {
 			params.tool_choice = { type: "auto" };
 		}

@@ -90,7 +90,7 @@ import {
 } from "../utils/harmony-leak";
 import type { CapturedHttpErrorResponse } from "../utils/http-inspector";
 import { getOpenRouterHeaders } from "../utils/openrouter-headers";
-import { isForcedToolChoice, isForcedToolChoiceRejected } from "../utils/tool-choice";
+import { isForcedToolChoice, supportsForcedToolChoice } from "../utils/tool-choice";
 import {
 	buildCopilotDynamicHeaders,
 	getCachedCopilotIntegrationId,
@@ -939,8 +939,7 @@ export function resolveOpenAICompatPolicy<TApi extends Api>(
 	const modelSupported = Boolean(model.reasoning);
 	const forcedToolChoiceSuppressesReasoning =
 		baseCompat.disableReasoningOnForcedToolChoice &&
-		baseCompat.supportsForcedToolChoice &&
-		!isForcedToolChoiceRejected(model) &&
+		supportsForcedToolChoice({ ...model, compat: baseCompat }) &&
 		isForcedToolChoice(options.toolChoice);
 	const anyToolChoiceSuppressesReasoning =
 		!forcedToolChoiceSuppressesReasoning &&

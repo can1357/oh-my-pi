@@ -44,10 +44,10 @@ import {
 } from "../utils/schema";
 import {
 	isForcedToolChoice,
-	isForcedToolChoiceRejected,
 	isForcedToolChoiceRejection,
 	mapToOpenAIResponsesToolChoice,
 	noteForcedToolChoiceRejected,
+	supportsForcedToolChoice,
 	type OpenAIResponsesToolChoice,
 } from "../utils/tool-choice";
 import { compactGrammarDefinition } from "./grammar";
@@ -495,6 +495,7 @@ const streamOpenAIResponsesOnce = (
 					promptCacheSessionId,
 				});
 			const premiumRequestsTotal = copilotPremiumRequests;
+			const resolvedBaseUrl = (baseUrl ?? "https://api.openai.com/v1").replace(/\/+$/, "");
 			const providerSessionState = getOpenAIResponsesProviderSessionState(model, options?.providerSessionState);
 			const strictToolsScope = getOpenAIStrictToolsScope(model, baseUrl);
 			const promptCacheBreakpointPolicy =
@@ -515,11 +516,11 @@ const streamOpenAIResponsesOnce = (
 				strictToolsScope,
 				false,
 				chainState?.canAppend ? chainState.lastParams?.input : undefined,
+				resolvedBaseUrl,
 			);
 			const { params, trailingScaffoldingItems } = builtParams;
 			let activeParams = params;
 			let activeTrailingScaffoldingItems = trailingScaffoldingItems;
-			const resolvedBaseUrl = (baseUrl ?? "https://api.openai.com/v1").replace(/\/+$/, "");
 			const requestReasoningEffortFallbacks = new Map<string, OpenAIReasoningEffortFallback>();
 			const attemptedReasoningEffortFallbacks = new Set<string>();
 			let pendingReasoningEffortFallback: { key: string; fallback: OpenAIReasoningEffortFallback } | undefined;
@@ -699,6 +700,7 @@ const streamOpenAIResponsesOnce = (
 								strictToolsScope,
 								forceDisableStrictTools,
 								chainState?.canAppend ? chainState.lastParams?.input : undefined,
+								resolvedBaseUrl,
 							);
 							const fallbackParams = fallbackBuilt.params;
 							if (chainState && !chainState.disabled) fallbackParams.store = true;
@@ -746,6 +748,7 @@ const streamOpenAIResponsesOnce = (
 								strictToolsScope,
 								true,
 								chainState?.canAppend ? chainState.lastParams?.input : undefined,
+								resolvedBaseUrl,
 							);
 							const fallbackParams = fallbackBuilt.params;
 							if (chainState && !chainState.disabled) fallbackParams.store = true;
@@ -800,6 +803,8 @@ const streamOpenAIResponsesOnce = (
 							providerSessionState,
 							strictToolsScope,
 							forceDisableStrictTools,
+							undefined,
+							resolvedBaseUrl,
 						);
 						const currentParams = currentBuilt.params;
 						// Only ZDR forces `store: false` (the org never persists responses). A
@@ -1229,6 +1234,7 @@ export function buildParams(
 	strictToolsScope?: OpenAIStrictToolsScope,
 	disableStrictToolsOverride = false,
 	statefulCacheBaseline?: ResponseInput,
+	effectiveBaseUrl?: string,
 ): { params: OpenAIResponsesSamplingParams; trailingScaffoldingItems: number; strictToolsApplied: boolean } {
 	const policy = resolveOpenAICompatPolicy(model, {
 		endpoint: "responses",
@@ -1356,7 +1362,12 @@ export function buildParams(
 								emittedNames.has(t.customWireName ?? t.name) ||
 								(t.native?.type === "computer" && emittedComputer),
 						);
-			const toolChoice = mapOpenAIResponsesToolChoiceForTools(options.toolChoice, survivingTools, model);
+			const toolChoice = mapOpenAIResponsesToolChoiceForTools(
+				options.toolChoice,
+				survivingTools,
+				model,
+				effectiveBaseUrl,
+			);
 			if (toolChoice !== undefined && params.tools.length > 0) {
 				if (
 					typeof toolChoice === "object" &&
@@ -1473,9 +1484,10 @@ export function mapOpenAIResponsesToolChoiceForTools(
 	choice: ToolChoice | undefined,
 	tools: Tool[],
 	model: Model<"openai-responses">,
+	effectiveBaseUrl?: string,
 ): OpenAIResponsesToolChoice {
 	if (!model.compat.supportsToolChoice) return undefined;
-	if (isForcedToolChoice(choice) && (!model.compat.supportsForcedToolChoice || isForcedToolChoiceRejected(model))) {
+	if (isForcedToolChoice(choice) && !supportsForcedToolChoice(model, effectiveBaseUrl)) {
 		return "auto";
 	}
 	if (typeof choice !== "string" && choice?.type === "computer") {

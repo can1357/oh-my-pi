@@ -64,10 +64,10 @@ import {
 } from "../utils/stream-markup-healing";
 import {
 	isForcedToolChoice,
-	isForcedToolChoiceRejected,
 	isForcedToolChoiceRejection,
 	mapToOpenAICompletionsToolChoice,
 	noteForcedToolChoiceRejected,
+	supportsForcedToolChoice,
 } from "../utils/tool-choice";
 import type {
 	ChatCompletionAssistantMessageParam,
@@ -1940,7 +1940,7 @@ function buildParams(
 	}
 	if (
 		isForcedToolChoice(params.tool_choice) &&
-		(!initialCompat.supportsForcedToolChoice || isForcedToolChoiceRejected(model, baseUrl))
+		!supportsForcedToolChoice({ ...model, compat: initialCompat }, baseUrl)
 	) {
 		// Some thinking-required OpenAI-compatible models reject forced
 		// `tool_choice` while still accepting tools with the default auto
