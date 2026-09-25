@@ -105,6 +105,8 @@ export interface StoredCredentialBlock {
 	blockScope: string;
 	/** Epoch milliseconds. */
 	blockedUntilMs: number;
+	/** True when the block came from a provider Retry-After / usage wait window. */
+	retryAfter?: boolean;
 	/** Last row update timestamp in epoch milliseconds, when provided by the backing store. */
 	updatedAtMs?: number;
 }
@@ -428,6 +430,21 @@ export interface UsageLimitMarkResult {
 }
 
 /** Combined model availability state across stored accounts. */
+/** Default in-flight turn reservation TTL; at least the gateway's 255s idleTimeout. */
+export const DEFAULT_TURN_RESERVATION_TTL_MS = 255_000;
+
+export interface TurnReservation {
+	credentialId: number;
+	incarnation: number;
+	requestId: string;
+	expiresAtMs: number;
+	release(): void;
+}
+
+export type TurnReservationResult =
+	| { ok: true; reservation: TurnReservation }
+	| { ok: false; heldByRequestId: string; expiresAtMs: number };
+
 export type ModelUsageHealthState = "healthy" | "reserve" | "depleted" | "unknown";
 
 /** Usage health of one stored credential for a model. */
@@ -475,6 +492,8 @@ export type AuthApiKeyOptions = {
 	 * that a peer/broker rotated out from under us is replaced before retrying.
 	 */
 	forceRefresh?: boolean;
+	/** Gateway / concurrent selector identity for in-flight quota probes. */
+	requestId?: string;
 };
 
 /**
