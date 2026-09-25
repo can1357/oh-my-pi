@@ -128,4 +128,18 @@ describe("settings layout", () => {
 		expect(nextRendered).toContain("Claude Code");
 		expect(nextRendered).toContain("Preview:");
 	});
+
+	// A numeric setting that declares no `ui.options` is dropped from the panel, which
+	// would leave the budget unreachable from /settings even though it works in config.
+	it("exposes the agent catalogue description budget in the tasks tab", () => {
+		const defs = getSettingsForTab(createSettingsHost().entries, "tasks");
+
+		const def = defs.find(entry => entry.path === "task.agentCatalogDescriptionBudgetChars");
+		expect(def).toMatchObject({ type: "submenu" });
+		if (def?.type !== "submenu") throw new Error("agent catalogue budget is not rendered as a submenu");
+		const values = def.options.map(option => option.value);
+		// The documented endpoints must be selectable.
+		expect(values).toContain("-1");
+		expect(values).toContain("0");
+	});
 });

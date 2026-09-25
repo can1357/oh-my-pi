@@ -47,7 +47,7 @@ import {
 	cfgInlineToolDescriptors,
 	cfgPersonality,
 } from "./session/settings";
-import { cfgTaskBatch, cfgTaskEager } from "./task/settings";
+import { cfgTaskAgentCatalogDescriptionBudgetChars, cfgTaskBatch, cfgTaskEager } from "./task/settings";
 import {
 	cfgAsyncEnabled,
 	cfgToolsIntentTracing,
@@ -81,6 +81,7 @@ export const cfgSystemPromptInputs = combine({
 	evalAutoBackground: cfgEvalAutoBackgroundEnabled,
 	taskEager: cfgTaskEager,
 	taskBatch: cfgTaskBatch,
+	taskAgentCatalogBudget: cfgTaskAgentCatalogDescriptionBudgetChars,
 	// Rule bucketing (TTSR registrations, rulebook, always-apply) runs at rebuild time.
 	ttsrEnabled: cfgTtsrEnabled,
 	ttsrBuiltinRules: cfgTtsrBuiltinRules,
