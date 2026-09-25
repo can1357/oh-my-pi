@@ -1283,6 +1283,9 @@
 ### Removed
 
 - Removed the legacy TinyTitleDownloadProgress overlay in favor of the centralized agent HUD.
+### Added
+
+- Tool cards can now show passive model context as one sanitized, dim line without exposing it as a separate transcript message.
 
 ## [18.3.1] - 2026-09-25
 
