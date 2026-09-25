@@ -7,7 +7,7 @@
  * - Convenience helpers: captureText / execText, AbortSignal, timeouts.
  */
 
-import { Process } from "@oh-my-pi/pi-natives";
+import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import type { Spawn, Subprocess } from "bun";
 
 type InMask = "pipe" | "ignore" | Buffer | Uint8Array | null;
@@ -182,7 +182,6 @@ export class ChildProcess<In extends InMask = InMask> {
 	#exitReasonPending?: Exception;
 	#stderrDone: Promise<void>;
 	#exited: Promise<number>;
-	#openPipeReaders = 1;
 	// Pipe reads race this cutoff only when attachTimeout() configures a
 	// command deadline. Untimed commands preserve complete EOF-based capture.
 	#drainCutoff: Promise<void>;
@@ -195,9 +194,32 @@ export class ChildProcess<In extends InMask = InMask> {
 	#hardKillSweep?: Promise<void>;
 	#terminateGroup: boolean;
 	#hardKillTree: boolean;
-	// Windows has no process groups. Retaining the root's native handle pins
-	// its PID after exit so killTree() can still enumerate its original children.
-	#windowsRootProcess?: Process;
+	// The root's own native handle, retained from before it could exit. One
+	// field rather than a Windows one and a POSIX one, because they were always
+	// the same handle opened for the same reason — and holding it twice invited
+	// exactly one bug: a site that consulted one of them, missed the other, and
+	// fell back to reopening the pid, which after reuse names a stranger.
+	//
+	// Windows keeps it because it has no process groups, so the retained handle
+	// is what pins the pid after exit and keeps the Toolhelp walk enumerable.
+	// A detached POSIX child keeps it because it leads its own group. A
+	// hard-kill root keeps it because the sweep it is about to take is the most
+	// destructive thing here, and a recycled number would aim it at a stranger.
+	#pinnedRoot?: Process;
+	// Whether the retained handle is a Windows root, which is a different claim
+	// from `#terminateGroup`: `detached` is accepted on Windows, where there are
+	// no process groups to terminate.
+	#windowsRoot = false;
+	// Whether the retained handle is a POSIX group leader. A detached child's
+	// pgid is just its old pid — a number the kernel hands out again once the
+	// group has emptied — so the handle pinned while it was alive is the only
+	// evidence that later separates our group from whoever inherited it.
+	#groupLeader = false;
+	// Set when the constructor needed a pinned root and could not open one.
+	// Distinguishes "there was never anything to pin" from "the pin failed":
+	// only the second means a group, a retained-handle tree, or a subtree due a
+	// hard sweep exists that nothing here can ever reach by identity.
+	#unpinnedRoot = false;
 	constructor(
 		readonly proc: PipedSubprocess<In>,
 		readonly exposeStderr: boolean,
@@ -207,7 +229,19 @@ export class ChildProcess<In extends InMask = InMask> {
 	) {
 		this.#terminateGroup = terminateGroup;
 		this.#hardKillTree = hardKillTree;
-		this.#windowsRootProcess = process.platform === "win32" ? (Process.fromPid(proc.pid) ?? undefined) : undefined;
+		// One open for all three, because they want the same handle for the same
+		// reason: a root that has to stay identifiable after it exits. Windows has
+		// no other way to enumerate its tree, a detached child leads a group that
+		// outlives it, and a hard-kill root is about to have a whole tree swept
+		// from under it — which is the one where reopening the number instead
+		// costs the most, since a recycled pid means sweeping a stranger's
+		// descendants rather than merely missing our own.
+		const needsPinnedRoot = process.platform === "win32" || terminateGroup || hardKillTree;
+		const pinnedRoot = needsPinnedRoot ? (Process.fromPid(proc.pid) ?? undefined) : undefined;
+		this.#pinnedRoot = pinnedRoot;
+		this.#windowsRoot = process.platform === "win32" && pinnedRoot !== undefined;
+		this.#groupLeader = terminateGroup && process.platform !== "win32" && pinnedRoot !== undefined;
+		this.#unpinnedRoot = needsPinnedRoot && pinnedRoot === undefined;
 		if (retainFullStderr) this.#stderrChunks = [];
 		// Eagerly drain stderr into a truncated tail, retaining raw chunks only for explicit full capture.
 		const dec = new TextDecoder();
@@ -249,7 +283,6 @@ export class ChildProcess<In extends InMask = InMask> {
 					trim();
 				}
 			} catch {}
-			this.#openPipeReaders--;
 			this.#stderrTail += dec.decode();
 			trim();
 		})();
@@ -337,6 +370,28 @@ export class ChildProcess<In extends InMask = InMask> {
 		return this;
 	}
 
+	/**
+	 * Whether the root is still running, as the kernel reports it.
+	 *
+	 * `proc.exitCode` only turns non-null once Bun's reaper has observed the
+	 * exit, at least one loop turn after the process is gone. Routing the
+	 * dead-leader fallbacks on that lag leaves the native handle to discover the
+	 * exit instead, and a handle for a dead root can no longer reach the group
+	 * or the descendants that outlived it.
+	 */
+	#rootIsLive(): boolean {
+		if (this.proc.exitCode !== null) return false;
+		// The pin wherever there is one. `exitCode` stays null for a child killed
+		// by a signal — Bun reports `signalCode` instead — so this predicate
+		// cannot lean on it, and a reopened pid after reuse answers for whoever
+		// holds the number now. The pinned handle keeps answering for the process
+		// it was opened on: a pidfd on Linux, a retained handle on Windows, a
+		// start-time identity check on macOS. A child with no pin never had a
+		// group or a tree claim to protect, so the number is all it ever had.
+		const root = this.#pinnedRoot ?? Process.fromPid(this.proc.pid);
+		return root?.status() === ProcessStatus.Running;
+	}
+
 	kill(reason?: Exception, gracefulMs?: number) {
 		if (reason && !this.#exitReasonPending) {
 			this.#exitReasonPending = reason;
@@ -344,17 +399,45 @@ export class ChildProcess<In extends InMask = InMask> {
 			// group leader; wait() still needs to report the later deadline.
 			if (this.proc.exitCode !== null) this.#exitReason = reason;
 		}
-		// An AbortSignal can race a timeout after its hard subreaper sweep has
-		// started. Do not replace that sweep with a normal root termination: the
-		// root must stay alive until adopted descendants have been collected.
 		if (this.#hardKillSweep) return;
-		if (gracefulMs !== undefined && gracefulMs < 0 && this.#hardKillTree && this.proc.exitCode === null) {
-			// Keep the subreaper alive while descendants are killed. A single
-			// killTree() snapshot can miss a worker whose parent exits during the
-			// walk and reparents it to the subreaper after that root was enumerated.
-			const root = Process.fromPid(this.proc.pid);
+		if (this.#hardKillTree && this.#unpinnedRoot) {
+			// Refused before anything is probed or opened, because every answer
+			// available from here is about a number rather than about our child.
+			// A hard sweep is the most destructive thing this class does, and the
+			// constructor could not pin the root it would be aimed at — so the
+			// liveness probe below would be asking whoever holds the pid now, and
+			// the fallback beside it would hand that stranger's tree to
+			// `killTreeAndWait()`. Rejecting says the sweep did not happen, which
+			// is true and is the only safe thing left to say.
+			//
+			// Nothing is signalled on the way out, not even the root. The runtime's
+			// own `kill` is `kill(pid, signal)` — its pidfd only watches — so it is
+			// no safer than anything else here once the pid may have been reused.
+			// There is no identity-safe way to reach this child, which is what the
+			// rejection says.
+			this.#terminating = Promise.reject(
+				new Error(`Hard-kill tree unreachable: root ${this.pid} could not be pinned`),
+			);
+			void this.#terminating.catch(() => {});
+			return;
+		}
+		if (gracefulMs !== undefined && gracefulMs < 0 && this.#hardKillTree && this.#rootIsLive()) {
+			// terminate() sends its polite wave to the root before rebuilding the
+			// hard-kill tree. A subreaper root can die in that gap and release its
+			// adopted descendants, so snapshot and hard-kill the live tree first.
+			// Liveness is the kernel's answer, not Bun's: `children_checked`
+			// answers a root it finds already gone with an empty walk marked
+			// complete, so entering here on the strength of a lagging `exitCode`
+			// buys a hard-kill of nothing that reports the tree swept.
+			// The pin first, for the reason above and with more at stake here: this
+			// hard-kills a whole tree, so a reopened recycled pid would sweep a
+			// stranger's descendants and its group with them.
+			// The pin and nothing else: a hard-kill root that could not be pinned
+			// was already refused above, so there is no case left where reopening
+			// the number would be the right answer here.
+			const root = this.#pinnedRoot;
 			if (root) {
-				const sweep = this.#hardKillSubreaperTree(root).catch(e => void e);
+				const sweep = this.#hardKillSubreaperTree(root);
 				this.#hardKillSweep = sweep;
 				this.#terminating = sweep;
 				void sweep.finally(() => {
@@ -363,26 +446,45 @@ export class ChildProcess<In extends InMask = InMask> {
 				return;
 			}
 		}
-		if (
-			this.proc.exitCode !== null &&
-			this.#terminateGroup &&
-			this.#openPipeReaders > 0 &&
-			process.platform !== "win32"
-		) {
-			// Bun detached children are POSIX session/process-group leaders. If
-			// the leader has exited, the native Process handle cannot rediscover
-			// its PGID, but a pipe-holding descendant keeps that exact group alive.
-			try {
-				process.kill(-this.proc.pid, "SIGKILL");
-			} catch {}
-			this.#terminating = Promise.resolve();
+		const groupLeader = this.#groupLeader ? this.#pinnedRoot : undefined;
+		if (groupLeader && !this.#rootIsLive()) {
+			// Bun detached children are POSIX session/process-group leaders. If the
+			// leader has exited, the native Process handle cannot rediscover its
+			// PGID, so the group is reached through the pinned leader: by its
+			// retained identity where the kernel can scope a signal that way, and
+			// otherwise by a number it will only signal while the leader still
+			// occupies its pid. Nothing about the caller's streams enters into that,
+			// so the attempt is unconditional: gating it on a live stdout reader only
+			// meant survivors of a caller that never read — or finished reading —
+			// were never signalled.
+			this.#terminating = Promise.try(() => groupLeader.killOwnGroupAndWait());
+			void this.#terminating.catch(() => {});
 			return;
 		}
-		if (this.proc.exitCode !== null && this.#windowsRootProcess && this.#openPipeReaders > 0) {
+		if (this.#windowsRoot && this.#pinnedRoot && !this.#rootIsLive()) {
 			// The retained handle keeps the dead root PID reserved, making the
 			// Windows Toolhelp descendant walk identity-safe after root exit.
-			this.#windowsRootProcess.killTree();
-			this.#terminating = Promise.resolve();
+			const root = this.#pinnedRoot;
+			this.#terminating = Promise.try(() => root.killTreeAndWait());
+			void this.#terminating.catch(() => {});
+			return;
+		}
+		if (this.#hardKillTree && !this.#rootIsLive()) {
+			// A subreaper root this cannot establish as running is the one shape
+			// nothing here can sweep. Once it is gone its adopted descendants have
+			// been reparented away, so no walk rooted at its pid names them, and it
+			// leads no group to reach them through — the two branches above are
+			// exactly the cases where a pin exists, and neither took this one.
+			// Falling through would call terminate(), whose capture answers a dead
+			// root with an empty plan and reports the tree gone; refusing says the
+			// sweep did not happen instead of claiming one that swept nothing. The
+			// unreferenceable case joins it rather than being separated out: a root
+			// that cannot be probed cannot be walked either, so the sweep is just as
+			// absent, and only the reason for it differs.
+			this.#terminating = Promise.reject(
+				new Error(`Subreaper tree unreachable: root ${this.pid} is gone or cannot be referenced`),
+			);
+			void this.#terminating.catch(() => {});
 			return;
 		}
 		if (!this.proc.killed) {
@@ -392,10 +494,36 @@ export class ChildProcess<In extends InMask = InMask> {
 						? { group: true }
 						: undefined
 					: { gracefulMs, group: this.#terminateGroup };
-			this.#terminating = (this.#windowsRootProcess ?? Process.fromPid(this.proc.pid))
-				?.terminate(options)
-				?.catch(e => void e);
+			// The pin, or a fresh open only where none was ever needed. A root whose
+			// pin was required and failed — detached, or Windows — must not be
+			// reached by number: it leads a group or owns a retained tree, and
+			// after reuse that number names a stranger's. Leaving the terminator
+			// unset there is what `killAndWait()` reports as unattempted.
+			const target = this.#pinnedRoot ?? (this.#unpinnedRoot ? undefined : Process.fromPid(this.proc.pid));
+			this.#terminating = target?.terminate(options);
+			void this.#terminating?.catch(() => {});
 		}
+	}
+
+	async killAndWait(reason?: Exception, gracefulMs?: number): Promise<void> {
+		this.kill(reason, gracefulMs);
+		// No terminator at all is not a completed sweep. kill() leaves this unset
+		// while the child is unexited only when no reference to the root could be
+		// opened — a host where `pidfd_open` is refused, or `/proc` is not there —
+		// and awaiting the root's own exit promise then either reports success over
+		// a tree nothing signalled or never settles at all. A child Bun has already
+		// seen exit is the other case and stays a success: its survivors, if any,
+		// were reparented before this call and no handle here can name them.
+		// `killed` alone is not enough to call an unattempted termination a
+		// success. It says the root is gone, and for an ordinary child that also
+		// says its survivors are past reach. A detached child leads a group that
+		// outlives it, and a Windows root's retained handle is what keeps its tree
+		// enumerable — so where the constructor needed that pin and did not get
+		// one, the exit says nothing about what the child left running.
+		if (this.#terminating === undefined && (!this.proc.killed || this.#unpinnedRoot))
+			throw new Error(`Process tree termination unattempted: ${this.pid}`);
+		if ((await this.#terminating) === false) throw new Error(`Process tree termination timed out: ${this.pid}`);
+		await this.proc.exited;
 	}
 
 	async #hardKillSubreaperTree(root: Process): Promise<void> {
@@ -422,12 +550,12 @@ export class ChildProcess<In extends InMask = InMask> {
 	async #throwIfAborted(): Promise<void> {
 		const exitReason = this.exitReason;
 		if (!exitReason?.aborted) return;
-		if (this.#terminating) await this.#terminating;
+		if (this.#terminating) await this.#terminating.catch(() => {});
 		throw exitReason;
 	}
 
 	async text(): Promise<string> {
-		const p = this.#readStream(this.proc.stdout);
+		const p = this.#readStream(this.stdout);
 		if (this.#nothrow) return p;
 		const [text] = await Promise.all([p, this.exitedCleanly]);
 		await this.#throwIfAborted();
@@ -438,7 +566,6 @@ export class ChildProcess<In extends InMask = InMask> {
 	 * Read a pipe fully, stopping early only at an explicit command deadline.
 	 */
 	async #readStream(stream: ReadableStream<Uint8Array>): Promise<string> {
-		this.#openPipeReaders++;
 		const reader = stream.getReader();
 		const dec = new TextDecoder();
 		let out = "";
@@ -458,13 +585,11 @@ export class ChildProcess<In extends InMask = InMask> {
 		} catch {
 			// A cancelled or failed read keeps whatever was already collected.
 		}
-		this.#openPipeReaders--;
 		return out + dec.decode();
 	}
 
 	async #readBytes(): Promise<Uint8Array<ArrayBuffer>> {
-		const reader = this.proc.stdout.getReader();
-		this.#openPipeReaders++;
+		const reader = this.stdout.getReader();
 		const chunks: Uint8Array[] = [];
 		let length = 0;
 		try {
@@ -484,7 +609,6 @@ export class ChildProcess<In extends InMask = InMask> {
 		} catch {
 			// A cancelled or failed read keeps whatever was already collected.
 		} finally {
-			this.#openPipeReaders--;
 			reader.releaseLock();
 		}
 
@@ -530,7 +654,7 @@ export class ChildProcess<In extends InMask = InMask> {
 			throw new Error('Full stderr capture must be requested when spawning the process (pass stderr: "full")');
 		}
 
-		const stdoutP = this.#readStream(this.proc.stdout);
+		const stdoutP = this.#readStream(this.stdout);
 		const stderrP =
 			stderrMode === "full" && stderrChunks
 				? this.#stderrDone.then(() => new TextDecoder().decode(Buffer.concat(stderrChunks)))
@@ -554,7 +678,7 @@ export class ChildProcess<In extends InMask = InMask> {
 		// On abort/timeout, hold the result until the tree is actually gone: the
 		// native terminate() is graceful-first, and reporting before it finishes
 		// would leave timed-out descendants alive past the caller's budget.
-		if (exitError?.aborted && this.#terminating) await this.#terminating;
+		if (exitError?.aborted && this.#terminating) await this.#terminating.catch(() => {});
 
 		const exitCode = this.exitCode ?? (exitError && !exitError.aborted ? exitError.exitCode : null);
 		const ok = exitCode === 0;
@@ -588,13 +712,16 @@ export class ChildProcess<In extends InMask = InMask> {
 		// A clean command clears it in wait(), so fast invocations do not hold
 		// the event loop for the unused remainder.
 		const timer = setTimeout(() => {
-			// A detached group can remain alive after its leader exits. Only use
-			// the dead-leader fallback while an inherited pipe proves that exact
-			// group still has a live member; this avoids stale-PGID reuse.
-			if (
-				this.proc.exitCode === null ||
-				(this.#openPipeReaders > 0 && (this.#terminateGroup || this.#windowsRootProcess))
-			) {
+			// A detached group can remain alive after its leader exits, so the
+			// deadline still has work to do once the root is gone: reach that group
+			// through the pinned leader (or the retained Windows handle), both of
+			// which refuse a pid that is no longer ours.
+			//
+			// This fires for a root that already exited leaving nothing behind, too,
+			// and records a timeout over a command that finished. Telling the two
+			// apart needs the sweep to report what it found, and it reports only that
+			// it completed — an empty tree and a killed one both come back `true`.
+			if (this.proc.exitCode === null || this.#terminateGroup || this.#windowsRoot) {
 				this.kill(new TimeoutError(ms, this.#stderrTail), -1);
 			}
 			this.#resolveDrainCutoff();

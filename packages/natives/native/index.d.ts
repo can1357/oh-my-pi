@@ -294,6 +294,19 @@ export declare class Process {
    */
   killTree(signal?: number | undefined | null): number
   /**
+   * Hard-kill the captured tree and wait up to 5000ms for every process to
+   * exit.
+   */
+  killTreeAndWait(options?: ProcessWaitOptions | undefined | null): Promise<boolean>
+  /**
+   * Hard-kill the process group this process leads and wait up to 5000ms for
+   * its captured members.
+   *
+   * Rejects when the pid has since been handed to a different process,
+   * because the group would then be someone else's.
+   */
+  killOwnGroupAndWait(options?: ProcessWaitOptions | undefined | null): Promise<boolean>
+  /**
    * Gracefully terminate this process and its descendants.
    *
    * By default this waits 1000ms after polite termination before
@@ -308,6 +321,26 @@ export declare class Process {
   waitForExit(options?: ProcessWaitOptions | undefined | null): Promise<boolean>
   /** Process group id for this process, when supported by the platform. */
   groupId(): number | null
+  /**
+   * Live descendants of this process as stable process references, with any
+   * protected subtree pruned.
+   *
+   * Unlike [`Process::children`] this is the whole subtree, which is what a
+   * caller pinning a tree for later termination needs: once the root exits
+   * its survivors are reparented out of reach of a walk rooted at its pid.
+   *
+   * Throws rather than returning a subtree it knows is partial: the caller
+   * pins what it is handed and later reports that tree terminated, so a
+   * short walk passed off as an ordinary one is a sweep that misses a
+   * process and says nothing about it.
+   *
+   * Linux pins each reference at the point of listing. macOS and Windows
+   * build the underlying table from bare pids and reopen them when the walk
+   * collects, so a listed process that exits and has its number reused in
+   * between is replaced by whoever holds it now — closing that is part of the
+   * platform-enumeration follow-up, which can run on those hosts.
+   */
+  descendants(): Array<Process>
   /** Direct children of this process as stable process references. */
   children(): Array<Process>
   /** Current status of this process reference. */
@@ -1800,6 +1833,24 @@ export interface GrepResult {
   /** Number of files skipped because they exceed the size limit. */
   skippedOversized?: number
 }
+
+/**
+ * Whether a process group on this host stays reachable once its leader has
+ * been reaped.
+ *
+ * Callers that terminate a detached child learn of its exit only after the
+ * runtime has reaped it, and from there a pgid number alone cannot be told
+ * apart from one the kernel has since handed to an unrelated session. Where
+ * this returns true the group is reached through the leader's retained pidfd
+ * instead and needs no such proof; where it returns false, taking group
+ * ownership of a child buys nothing a pinned descendant set does not already
+ * give.
+ *
+ * Measured from the syscall's argument validation, not inferred from a release
+ * string, and it promises only that the scope exists — a group can still empty
+ * or be refused, so callers keep their own attribution checks.
+ */
+export declare function groupOutlivesItsLeader(): boolean
 
 /**
  * Count canonical hashline op header shapes (`PUT N.=M:`, `CUT N*`, …) in
