@@ -34,6 +34,7 @@ import {
 	createSourceMeta,
 	expandEnvVarsDeep,
 	loadFilesFromDir,
+	parseMCPToolFilters,
 	parseRequestIdFormat,
 	scanSkillsFromDir,
 } from "./helpers";
@@ -278,6 +279,8 @@ interface RawMcpServer {
 	enabled?: boolean;
 	timeout?: number;
 	requestIdFormat?: unknown;
+	enabledTools?: unknown;
+	disabledTools?: unknown;
 	instructions?: unknown;
 	command?: string;
 	args?: string[];
@@ -314,10 +317,13 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 			logger.warn(`[omp-plugins] Invalid JSON in ${mcpPath}`);
 			continue;
 		}
-		const servers = expandEnvVarsDeep(parsed.mcpServers, {
+		const servers = parsed.mcpServers;
+		// Never whole-server expansion (see below); the plugin-root
+		// placeholders still reach the scalar fields via `pluginRootEnv`.
+		const pluginRootEnv = {
 			CLAUDE_PLUGIN_ROOT: root.path,
 			OMP_PLUGIN_ROOT: root.path,
-		});
+		};
 		if (!servers || typeof servers !== "object" || Array.isArray(servers)) continue;
 
 		for (const [serverName, serverCfg] of Object.entries(servers)) {
@@ -327,13 +333,46 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				warnings.push(`[omp-plugins] Skipping MCP server "${serverName}" in ${mcpPath}: missing command or url`);
 				continue;
 			}
+			// `${...}` expansion covers exactly the fields discovery documents
+			// (`command`, `args`, `env`, `cwd`, `url`, `headers`, `auth`, `oauth`,
+			// and the scalar `enabled`/`timeout`/`requestIdFormat`), never
+			// whole-server expansion: a filter entry is a tool-name pattern,
+			// so expanding `${TOOL}` there would make the same config select a
+			// different tool depending on which file it came from. Expansion runs
+			// before path rooting, so a placeholder resolving to an absolute path
+			// is not mistaken for a relative one.
+			const command = cfg.command === undefined ? undefined : expandEnvVarsDeep(cfg.command, pluginRootEnv);
+			const cwd = cfg.cwd === undefined ? undefined : expandEnvVarsDeep(cfg.cwd, pluginRootEnv);
 			// Root relative command/cwd at the plugin's config directory, not the
 			// session cwd (MCP stdio spawning resolves relative values there).
-			const rooted = resolvePluginStdioPaths({ command: cfg.command, cwd: cfg.cwd }, root.path);
-			// Report a dropped value, as the native and standalone loaders do: a
-			// typo would otherwise silently revert the id encoding or re-enable
-			// the server's instructions.
-			const requestIdFormat = parseRequestIdFormat(cfg.requestIdFormat);
+			const rooted = resolvePluginStdioPaths({ command, cwd }, root.path);
+			const expandedPluginEnabled = expandEnvVarsDeep(cfg.enabled as unknown, pluginRootEnv) as unknown;
+			const pluginEnabled =
+				typeof expandedPluginEnabled === "boolean"
+					? expandedPluginEnabled
+					: typeof expandedPluginEnabled === "string"
+						? (() => {
+								const lower = (expandedPluginEnabled as string).toLowerCase();
+								if (lower === "true" || lower === "1") return true;
+								if (lower === "false" || lower === "0") return false;
+								return undefined;
+							})()
+						: undefined;
+			const expandedPluginTimeout = expandEnvVarsDeep(cfg.timeout as unknown, pluginRootEnv) as unknown;
+			const pluginTimeout =
+				typeof expandedPluginTimeout === "number" &&
+				Number.isFinite(expandedPluginTimeout) &&
+				expandedPluginTimeout >= 0
+					? expandedPluginTimeout
+					: typeof expandedPluginTimeout === "string" && (expandedPluginTimeout as string).length > 0
+						? (() => {
+								const parsed = Number(expandedPluginTimeout);
+								return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+							})()
+						: undefined;
+			const requestIdFormat = parseRequestIdFormat(
+				cfg.requestIdFormat === undefined ? undefined : expandEnvVarsDeep(cfg.requestIdFormat, pluginRootEnv),
+			);
 			if (requestIdFormat === undefined && cfg.requestIdFormat != null) {
 				logger.warn(
 					`[omp-plugins] MCP server "${serverName}" in ${mcpPath}: invalid requestIdFormat ${JSON.stringify(cfg.requestIdFormat)}, ignoring`,
@@ -347,18 +386,19 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 			}
 			items.push({
 				name: serverName,
-				...(cfg.enabled !== undefined && { enabled: cfg.enabled }),
-				...(cfg.timeout !== undefined && { timeout: cfg.timeout }),
+				...(pluginEnabled !== undefined && { enabled: pluginEnabled }),
+				...(pluginTimeout !== undefined && { timeout: pluginTimeout }),
 				...(requestIdFormat !== undefined && { requestIdFormat }),
+				...parseMCPToolFilters(serverName, cfg),
 				...(instructions !== undefined && { instructions }),
 				...(rooted.command !== undefined && { command: rooted.command }),
-				...(cfg.args !== undefined && { args: cfg.args }),
-				...(cfg.env !== undefined && { env: cfg.env }),
+				...(cfg.args !== undefined && { args: expandEnvVarsDeep(cfg.args, pluginRootEnv) }),
+				...(cfg.env !== undefined && { env: expandEnvVarsDeep(cfg.env, pluginRootEnv) }),
 				...(rooted.cwd !== undefined && { cwd: rooted.cwd }),
-				...(cfg.url !== undefined && { url: cfg.url }),
-				...(cfg.headers !== undefined && { headers: cfg.headers }),
-				...(cfg.auth !== undefined && { auth: cfg.auth }),
-				...(cfg.oauth !== undefined && { oauth: cfg.oauth }),
+				...(cfg.url !== undefined && { url: expandEnvVarsDeep(cfg.url, pluginRootEnv) }),
+				...(cfg.headers !== undefined && { headers: expandEnvVarsDeep(cfg.headers, pluginRootEnv) }),
+				...(cfg.auth !== undefined && { auth: expandEnvVarsDeep(cfg.auth, pluginRootEnv) }),
+				...(cfg.oauth !== undefined && { oauth: expandEnvVarsDeep(cfg.oauth, pluginRootEnv) }),
 				...(cfg.type !== undefined && { transport: cfg.type }),
 				_source: createSourceMeta(PROVIDER_ID, mcpPath, root.level),
 			});

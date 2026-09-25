@@ -6,6 +6,56 @@
 
 ### Added
 
+- Added per-server `enabledTools` and `disabledTools` MCP tool filtering ([#6299](https://github.com/can1357/oh-my-pi/issues/6299)): per-server tool allow/deny lists (literal names or globs) are applied at the tool-reception boundary, so the session, `/mcp test`, `/session`, and the persisted tool cache all see one consistent filtered catalog. Tool-filter entries stay literal (`${VAR}` never expands inside one); Codex `enabled_tools`/`disabled_tools` map onto the same feature.
+
+### Fixed
+
+- Fixed MCP configs carrying a shared field (`timeout`, `requestIdFormat`, `auth`, `oauth`, …) being rejected by the bundled JSON schema on every transport; such entries now validate.
+- Fixed scalar shared fields (`timeout`, `enabled`, `requestIdFormat`) losing `${VAR}` expansion in `.omp/mcp.json` and OMP extension configs once filters went literal; per-field expansion now covers them, and the expanded strings coerce exactly as literal values do.
+- Fixed Exa tool selection consulting the new filters (URL-semantic endpoint parsing, case-sensitive native classification, prototype-safe native set): a server whose enabled tools are non-native is kept instead of dropped.
+- Added `cp` builtin for native filesystem copy operations
+- Added native support for `local://` and `omp://` URLs in `find`, `glob`, `grep`, and AST tools
+- Added shared access to IDA databases across all omp processes in a project
+- Added project-scoped IDA host daemon management via broker
+- Added `InternalUrlFilesystem` for native shell-level resolution of virtual `scheme://` paths
+- Added support for shell execution in virtual working directories
+- Added `ida.maxOpen` setting to cap concurrent database workers, automatically evicting the least recently used idle database
+- Added `ida.idleCloseSec` setting to save and close databases idle beyond the configured duration
+- Added dirty-state tracking for automated autosave after database activity quiescence
+- Added `Always for this session` option to cfg:// approval prompts for session-wide changes
+- Added timeout handling for cfg:// approval prompts, aborting writes after 10 s with a clear error message
+- Added `providers.openaiLiveSteering` setting to toggle mid-response input delivery
+- Added explicit memory backend settlement for reliable cross-project CWD transitions
+- Added automatic prevention of user session overrides shadowed by environment variables
+- Added configuration approval UI signals for saved settings shadowed by higher-precedence layers
+- Added support for paged reading of large files with metadata signaling for UI recovery
+- Added `unset` capability to the configuration registry for removing overrides and reverting to defaults
+- Added `/slow [on|off|status]`: on OpenAI and Google models it switches the session to the `flex` service tier; on Anthropic it is the only switch for subscription slow mode (not in `/settings`). While on, when a Claude subscription hits its 5-hour session limit and Anthropic offers lower-priority service, omp switches over automatically and keeps working on spare capacity until the limit resets instead of waiting. `/slow on` also continues right away if the offer is already available, `/slow off` stops it, and the status line shows `low priority until HH:MM` while it's on ([#13222](https://github.com/can1357/oh-my-pi/pull/13222) by [@H4vC](https://github.com/H4vC)).
+- Added support for universal (fat) Mach-O binaries in IDA tool, allowing selection of specific architecture slices via the `:@<arch>` syntax
+- Added automatic slice detection for universal binaries, defaulting to the host CPU architecture
+- Added case-sensitive per-agent compaction thresholds for task/eval subagents, with percentage or fixed-token limits that leave the main session threshold unchanged ([#13107](https://github.com/can1357/oh-my-pi/pull/13107) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+- Added centralized settings registry for type-safe configuration management and live reactivity
+- Added `InternalUrlRouter` for unified, spec-driven resource resolution and write-tier policy enforcement
+- Added `attachment://` and `conflict://` URL protocol handlers
+- Added live auth-broker and credential store swapping during runtime
+- Added `cfg://` protocol for reading and modifying agent settings with user approval
+- Added `--detailed` bench mode to run separate single-user, parallel, and prefill phases, allowing measurement of aggregate throughput and scaling efficiency under `--par` concurrent requests
+- Added automatic capping of synthetic prefill input size based on model context window limits
+- Added trusted additional context support for extension and hook tool results, including `ctx.addAdditionalContext()` for registered tools, allowing instructions to be passed to the model without altering the tool result.
+- Added dictation support to `/btw` follow-up input, including microphone controls on the follow-up line.
+- Added opt-in CUDA support to the Nix package for tiny-model inference with the ONNX Runtime CUDA execution provider.
+- Added support for multiple simultaneous browser instances, allowing tabs from browsers such as Chrome and Edge to remain connected and usable at the same time.
+- Added a `prompt_result` frame in RPC mode for every accepted prompt, sent when the agent yields and tied to the prompt's own id. It reports `completed`, `aborted` or `error`, and a late `agent_end` from an earlier run no longer completes a newer prompt.
+- Added structured provider errors to RPC `prompt_result` (message, provider, model, HTTP status, retryable), with local request-dump paths removed from the message.
+- Added a `session_settled` RPC frame, `prompt_result.sessionSettled`, `get_state.isSettled`/`hasPendingAsyncWork`, and an `agent_end.yielded` flag, so hosts can tell when the agent yielded apart from when the session is done and no background job will wake it again.
+- Added `--no-ui` for `--mode rpc`, which keeps extension dialogs and UI requests off the wire for hosts with no interactive surface.
+- Added the `open_session` RPC command, which resumes the newest session in a directory or starts a new one there, so a pre-spawned RPC process can be bound to a conversation after startup.
+- Added the `set_event_filter` RPC command to forward only chosen session event types, and a `messageId` on RPC message start/update/end frames.
+- Added `openSession`, `setEventFilter`, `onPromptResult`, `onSessionSettled` and `waitForSettled` to the TypeScript and Python RPC clients. `promptAndWait` now waits for the prompt's own `prompt_result`.
+- Added IDA Pro support to `read`: executables (ELF/PE/Mach-O) and `.i64`/`.idb` databases open through idalib, with overview, pseudocode, asm, imports, exports, strings and xrefs views.
+- Added the discoverable `ida` tool to open, save, close and list databases, rename, comment, set types, make functions, and run persistent per-database Python via `exec` with helpers like `pseudocode()`, `xrefs_to()` and `callers()`. Databases are shared across agents in the same process.
+- Added the `ida.enabled`, `ida.python` and `ida.installDir` settings; IDA features appear only when a local IDA install with idalib is found.
+- Added a per-server `instructions: false` MCP option that leaves that server's instructions out of the system prompt while keeping its tools, for servers whose guidance conflicts with your tool policy ([#13196](https://github.com/can1357/oh-my-pi/pull/13196) by [@alphastorm](https://github.com/alphastorm)).
 - Added native filesystem support for `local://` and `omp://` URLs across file-search, content-search, AST, shell, and related tools, including support for virtual working directories.
 - Added a native `cp` builtin for filesystem copy operations.
 - Added IDA Pro integration for opening executables and IDA databases, browsing pseudocode, assembly, imports, exports, strings, and cross-references, and performing database-aware actions such as renaming, commenting, type editing, function creation, saving, and persistent Python execution.

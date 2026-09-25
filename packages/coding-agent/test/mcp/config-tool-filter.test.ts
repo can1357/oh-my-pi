@@ -1,0 +1,225 @@
+/**
+ * `enabledTools` / `disabledTools` must survive the documented config path,
+ * and must not be lost to (or collapse in) connection-equivalence deduplication.
+ *
+ * The filters are only useful if a value written in config actually reaches
+ * the reception filter in `listTools`: discovery parses config into the
+ * canonical `MCPServer` shape and `convertToLegacyConfig()` turns that back
+ * into the `MCPServerConfig` the client reads. A field missing from either
+ * step silently re-enables every tool — the opposite of the allowlist intent.
+ *
+ * Both OMP-native loaders are covered: `.omp/mcp.json` (native provider) and
+ * a standalone project-root `.mcp.json` (mcp-json provider).
+ *
+ * Separately, `isSameMCPConnection` deduplicates same-endpoint aliases.
+ * Different filter members mean different contributed tool sets, so aliases
+ * differing only in filters must both survive; identical (order/duplicate-
+ * insensitive) filter sets must still collapse to one.
+ */
+import { afterEach, beforeEach, expect, test, vi } from "bun:test";
+import * as os from "node:os";
+import * as path from "node:path";
+import * as fs from "node:fs/promises";
+import { clearCache as clearFsCache } from "@oh-my-pi/pi-coding-agent/capability/fs";
+import { loadAllMCPConfigs } from "@oh-my-pi/pi-coding-agent/mcp/config";
+import { getConfigRootDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+
+const originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
+const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
+
+let tempAgentDir = "";
+let tempCwd = "";
+let tempHome = "";
+let originalHome: string | undefined;
+
+beforeEach(async () => {
+	originalHome = process.env.HOME;
+	tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-toolfilter-home-"));
+	tempAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-toolfilter-agent-"));
+	tempCwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-toolfilter-cwd-"));
+	process.env.HOME = tempHome;
+	vi.spyOn(os, "homedir").mockReturnValue(tempHome);
+	setAgentDir(tempAgentDir);
+	clearFsCache();
+});
+
+afterEach(async () => {
+	vi.restoreAllMocks();
+	if (originalAgentDirEnv) {
+		setAgentDir(originalAgentDirEnv);
+	} else {
+		setAgentDir(fallbackAgentDir);
+		delete process.env.PI_CODING_AGENT_DIR;
+	}
+	if (originalHome === undefined) delete process.env.HOME;
+	else process.env.HOME = originalHome;
+	clearFsCache();
+	await removeWithRetries(tempHome);
+	await removeWithRetries(tempAgentDir);
+	await removeWithRetries(tempCwd);
+});
+
+async function loadFrom(file: string, mcpServers: Record<string, unknown>) {
+	await Bun.write(path.join(tempCwd, file), JSON.stringify({ mcpServers }));
+	clearFsCache();
+	const { configs } = await loadAllMCPConfigs(tempCwd);
+	return configs;
+}
+
+test("enabledTools/disabledTools from .omp/mcp.json reach the transport config", async () => {
+	const configs = await loadFrom(path.join(".omp", "mcp.json"), {
+		slack: {
+			type: "http",
+			url: "https://mcp.slack.com/mcp",
+			enabledTools: ["search", "channel_*"],
+			disabledTools: ["{create,delete}_*"],
+		},
+		plain: { type: "stdio", command: "/bin/echo" },
+	});
+
+	expect(configs.slack?.enabledTools).toEqual(["search", "channel_*"]);
+	// Comma globs must survive intact — strings are not CSV-split.
+	expect(configs.slack?.disabledTools).toEqual(["{create,delete}_*"]);
+	expect(configs.plain?.enabledTools).toBeUndefined();
+	expect(configs.plain?.disabledTools).toBeUndefined();
+});
+
+test("enabledTools/disabledTools from a standalone .mcp.json reach the transport config", async () => {
+	const configs = await loadFrom(".mcp.json", {
+		slack: { type: "http", url: "https://mcp.slack.com/mcp", enabledTools: ["read_*"] },
+	});
+
+	expect(configs.slack?.enabledTools).toEqual(["read_*"]);
+});
+
+test("a filter entry is not environment-expanded, in either native loader", async () => {
+	// Filter entries are tool-name patterns, so `${…}` in one stays literal even
+	// when the variable is set; the fields that DO expand must still expand. A
+	// whole-object expansion pass would silently rewrite the pattern and select
+	// a different tool than the config asked for.
+	const previous = process.env.OMP_TEST_FILTER_TOOL;
+	process.env.OMP_TEST_FILTER_TOOL = "expanded_name";
+	try {
+		for (const file of [path.join(".omp", "mcp.json"), ".mcp.json"]) {
+			const configs = await loadFrom(file, {
+				slack: {
+					type: "http",
+					url: "https://mcp.slack.com/mcp",
+					enabledTools: ["${OMP_TEST_FILTER_TOOL}"],
+					headers: { Authorization: "Bearer ${OMP_TEST_FILTER_TOOL}" },
+				},
+			});
+
+			expect(configs.slack?.enabledTools).toEqual(["${OMP_TEST_FILTER_TOOL}"]);
+			// The non-pattern field is still expanded.
+			const httpConfig = configs.slack as { headers?: Record<string, string> } | undefined;
+			expect(httpConfig?.headers?.Authorization).toBe("Bearer expanded_name");
+		}
+	} finally {
+		if (previous === undefined) delete process.env.OMP_TEST_FILTER_TOOL;
+		else process.env.OMP_TEST_FILTER_TOOL = previous;
+	}
+});
+
+test("a non-array filter value is dropped rather than passed through", async () => {
+	const configs = await loadFrom(path.join(".omp", "mcp.json"), {
+		bogus: { type: "stdio", command: "/bin/echo", enabledTools: "read, write" },
+	});
+
+	expect(configs.bogus).toBeDefined();
+	expect(configs.bogus?.enabledTools).toBeUndefined();
+});
+
+test("scalar shared fields still environment-expand under per-field expansion", async () => {
+	// Only the filter entries must stay literal; `timeout`/`enabled`/
+	// `requestIdFormat` expanded under the previous whole-object pass and their
+	// validation branches coerce the expanded string — dropping the expansion
+	// would silently fall back to the 30 s default and ignore an `enabled` flag.
+	// A placeholder resolving to `false` still suppresses the server, so the
+	// positive case carries the observable assertions.
+	process.env.OMP_TEST_TIMEOUT_MS = "5000";
+	process.env.OMP_TEST_MCP_DISABLED = "false";
+	process.env.OMP_TEST_RID_FORMAT = "string";
+	try {
+		const configs = await loadFrom(path.join(".omp", "mcp.json"), {
+			timed: {
+				type: "http",
+				url: "https://mcp.slack.com/mcp",
+				timeout: "${OMP_TEST_TIMEOUT_MS}",
+				requestIdFormat: "${OMP_TEST_RID_FORMAT}",
+			},
+		});
+
+		expect(configs.timed).toBeDefined();
+		expect(configs.timed?.timeout).toBe(5000);
+		expect(configs.timed?.requestIdFormat).toBe("string");
+
+		const suppressed = await loadFrom(path.join(".omp", "mcp.json"), {
+			timed: {
+				type: "http",
+				url: "https://mcp.slack.com/mcp",
+				enabled: "${OMP_TEST_MCP_DISABLED}",
+			},
+		});
+		expect(suppressed.timed).toBeUndefined();
+	} finally {
+		delete process.env.OMP_TEST_TIMEOUT_MS;
+		delete process.env.OMP_TEST_MCP_DISABLED;
+		delete process.env.OMP_TEST_RID_FORMAT;
+	}
+});
+test("scalar enabled/timeout coerce case-insensitively and reject bad types", async () => {
+	// `enabled: \"TRUE\"` must enable (case-insensitive accept-set) while
+	// `enabled: \"bogus\"` fails open to undefined; `timeout: true` must not
+	// coerce to a 1 ms timeout and `timeout: null` must stay undefined.
+	process.env.OMP_TEST_MCP_ON = "TRUE";
+	try {
+		const upper = await loadFrom(path.join(".omp", "mcp.json"), {
+			svc: { type: "http", url: "https://mcp.slack.com/mcp", enabled: "${OMP_TEST_MCP_ON}" },
+		});
+		expect(upper.svc?.enabled).toBe(true);
+
+		const badEnabled = await loadFrom(path.join(".omp", "mcp.json"), {
+			svc: { type: "http", url: "https://mcp.slack.com/mcp", enabled: "bogus" },
+		});
+		expect(badEnabled.svc?.enabled).toBeUndefined();
+
+		const boolTimeout = await loadFrom(path.join(".omp", "mcp.json"), {
+			svc: { type: "http", url: "https://mcp.slack.com/mcp", timeout: true },
+		});
+		expect(boolTimeout.svc?.timeout).toBeUndefined();
+
+		const nullTimeout = await loadFrom(path.join(".omp", "mcp.json"), {
+			svc: { type: "http", url: "https://mcp.slack.com/mcp", timeout: null },
+		});
+		expect(nullTimeout.svc?.timeout).toBeUndefined();
+	} finally {
+		delete process.env.OMP_TEST_MCP_ON;
+	}
+});
+
+test("differing filter members prevent equivalence dedup from collapsing two aliases", async () => {
+	const configs = await loadFrom(path.join(".omp", "mcp.json"), {
+		"slack-allow-search": { type: "http", url: "https://mcp.slack.com/mcp", enabledTools: ["search"] },
+		"slack-allow-read": { type: "http", url: "https://mcp.slack.com/mcp", enabledTools: ["read_*"] },
+	});
+
+	// Same endpoint would previously make these equivalent, so the second
+	// entry would shadow the first and its filter would vanish. Both must
+	// survive — assert key presence directly, since optional chaining on a
+	// shadowed (absent) key would otherwise make this pass vacuously.
+	expect(Object.keys(configs).sort()).toEqual(["slack-allow-read", "slack-allow-search"]);
+	expect(configs["slack-allow-search"]?.enabledTools).toEqual(["search"]);
+	expect(configs["slack-allow-read"]?.enabledTools).toEqual(["read_*"]);
+});
+
+test("identical filter sets (reordered, duplicated) still dedup to one connection", async () => {
+	const configs = await loadFrom(path.join(".omp", "mcp.json"), {
+		"slack-a": { type: "http", url: "https://mcp.slack.com/mcp", enabledTools: ["search", "read"] },
+		"slack-b": { type: "http", url: "https://mcp.slack.com/mcp", enabledTools: ["read", "search", "search"] },
+	});
+
+	// Normalized (unique, sorted) members are equal, so both entries name the
+	// same connection and only one survives.
+	expect(Object.keys(configs)).toHaveLength(1);
+});

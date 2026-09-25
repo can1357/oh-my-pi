@@ -97,4 +97,259 @@ describe("Exa MCP filtering", () => {
 
 		expect(Object.keys(result.configs)).toEqual(["exa"]);
 	});
+
+	test("keeps an unrestricted exa server whose allowlist selects a non-native tool", () => {
+		const configs: Record<string, MCPServerConfig> = {
+			exa: { type: "http", url: "https://mcp.exa.ai/mcp", enabledTools: ["web_fetch_exa"] },
+		};
+		const result = filterExaMCPServers(configs, { exa: SOURCE });
+
+		expect(Object.keys(result.configs)).toEqual(["exa"]);
+	});
+
+	test("filters an unrestricted exa server whose allowlist selects only native tools", () => {
+		const configs: Record<string, MCPServerConfig> = {
+			exa: { type: "http", url: "https://mcp.exa.ai/mcp", enabledTools: ["web_search_exa"] },
+		};
+		const result = filterExaMCPServers(configs, { exa: SOURCE });
+
+		expect(result.configs).toEqual({});
+	});
+
+	test("classifies an allowlist by the names it denotes, not its own spelling", () => {
+		// I classify an entry by whether it selects a name the native
+		// integration lacks. The pool is the native name plus every entry's own
+		// spelling, so a literal entry is judged by the name it spells, while a
+		// glob whose spelling is not the native tool keeps the server — the
+		// conservative direction, one mounted server it may not need rather
+		// than one silently missing.
+		const configs: Record<string, MCPServerConfig> = {
+			nativeLiteral: {
+				type: "http",
+				url: "https://mcp.exa.ai/mcp",
+				enabledTools: ["web_search_exa"],
+			},
+			nonNativeLiteral: {
+				type: "http",
+				url: "https://mcp.exa.ai/mcp",
+				enabledTools: ["web_fetch_exa"],
+			},
+			globSpellingNative: {
+				type: "http",
+				url: "https://mcp.exa.ai/mcp",
+				enabledTools: ["web_search_ex[a]"],
+			},
+			unbounded: {
+				type: "http",
+				url: "https://mcp.exa.ai/mcp",
+				enabledTools: ["web_*"],
+			},
+		};
+		const result = filterExaMCPServers(configs, {
+			nativeLiteral: SOURCE,
+			nonNativeLiteral: SOURCE,
+			globSpellingNative: SOURCE,
+			unbounded: SOURCE,
+		});
+
+		expect(Object.keys(result.configs).sort()).toEqual(["nonNativeLiteral", "unbounded"]);
+	});
+
+	test("keeps an unrestricted exa server whose glob denotes a non-native tool", () => {
+		// `web_fetch_ex[a]` denotes `web_fetch_exa`, which the native
+		// integration does not provide. The pool holds only the native name and
+		// the entry's own spelling, so the glob matches nothing there and the
+		// selection is unknown — dropping the server would silently discard the
+		// tool the entry names. Contrast the glob spelled at the native name,
+		// which matches the pool and drops the server.
+		const configs: Record<string, MCPServerConfig> = {
+			nonNativeGlob: {
+				type: "http",
+				url: "https://mcp.exa.ai/mcp",
+				enabledTools: ["web_fetch_ex[a]"],
+			},
+			mixedWithNativeLiteral: {
+				type: "http",
+				url: "https://mcp.exa.ai/mcp",
+				enabledTools: ["web_search_exa", "web_fetch_ex[a]"],
+			},
+			unresolvedWithDenyAll: {
+				type: "http",
+				url: "https://mcp.exa.ai/mcp",
+				enabledTools: ["web_fetch_ex[a]"],
+				disabledTools: ["*"],
+			},
+			nativeGlob: {
+				type: "http",
+				url: "https://mcp.exa.ai/mcp",
+				enabledTools: ["web_search_ex[a]"],
+			},
+		};
+		const result = filterExaMCPServers(configs, {
+			nonNativeGlob: SOURCE,
+			mixedWithNativeLiteral: SOURCE,
+			unresolvedWithDenyAll: SOURCE,
+			nativeGlob: SOURCE,
+		});
+
+		// The unresolved entry keeps the server even when another entry DID
+		// resolve — that resolution cannot speak for the fetch tool. A deny-all
+		// still wins over both: nothing survives it, named or not.
+		expect(Object.keys(result.configs).sort()).toEqual(["mixedWithNativeLiteral", "nonNativeGlob"]);
+	});
+
+	test("does not read an inherited object member as native", () => {
+		// The native set is looked up by name, and a tool the server really
+		// advertises may be called `constructor` or `__proto__`. An ordinary
+		// object answers those from `Object.prototype`, which would classify a
+		// selected non-native tool as covered and silently unmount the server.
+		for (const name of ["constructor", "__proto__", "toString", "web_fetch_exa"]) {
+			const configs: Record<string, MCPServerConfig> = {
+				exa: { type: "http", url: "https://mcp.exa.ai/mcp", enabledTools: [name] },
+			};
+			const result = filterExaMCPServers(configs, { exa: SOURCE });
+
+			expect(Object.keys(result.configs)).toEqual(["exa"]);
+		}
+		// The one name that IS native still drops the server.
+		const native: Record<string, MCPServerConfig> = {
+			exa: { type: "http", url: "https://mcp.exa.ai/mcp", enabledTools: ["web_search_exa"] },
+		};
+		expect(filterExaMCPServers(native, { exa: SOURCE }).configs).toEqual({});
+	});
+
+	test("drops an exa server whose restriction and filters leave no non-native tool", () => {
+		// `tools=` enumerates what the server advertises, so an allowlist selects
+		// FROM that set rather than adding to it: a native-only enumeration with
+		// an allowlist naming a tool the server does not serve contributes
+		// nothing beyond the native integration.
+		const cases: Record<string, MCPServerConfig> = {
+			nativeEnumAllowNonNative: {
+				type: "http",
+				url: "https://mcp.exa.ai/mcp?tools=web_search_exa",
+				enabledTools: ["web_fetch_exa"],
+			},
+			extraEnumAllowNative: {
+				type: "http",
+				url: "https://mcp.exa.ai/mcp?tools=web_fetch_exa",
+				enabledTools: ["web_search_exa"],
+			},
+			denyAll: { type: "http", url: "https://mcp.exa.ai/mcp", disabledTools: ["*"] },
+			denyTheExtraTool: {
+				type: "http",
+				url: "https://mcp.exa.ai/mcp?tools=web_search_exa,web_fetch_exa",
+				disabledTools: ["web_fetch_exa"],
+			},
+		};
+		const result = filterExaMCPServers(cases, {
+			nativeEnumAllowNonNative: SOURCE,
+			extraEnumAllowNative: SOURCE,
+			denyAll: SOURCE,
+			denyTheExtraTool: SOURCE,
+		});
+
+		expect(result.configs).toEqual({});
+	});
+
+	test("keeps an exa server whose denylist leaves its non-native tool reachable", () => {
+		// The denylist subtracts from what the server advertises; denying only the
+		// native tool leaves the extra one, which is why the server stays mounted.
+		const configs: Record<string, MCPServerConfig> = {
+			exa: {
+				type: "http",
+				url: "https://mcp.exa.ai/mcp?tools=web_search_exa,web_fetch_exa",
+				disabledTools: ["web_search_exa"],
+			},
+		};
+		const result = filterExaMCPServers(configs, { exa: SOURCE });
+
+		expect(Object.keys(result.configs)).toEqual(["exa"]);
+	});
+
+	test("keeps a deny-only exa server unless the denylist denies every name", () => {
+		// The server is mounted for tools the native integration lacks, so a
+		// denylist that leaves any name reachable keeps it — including a broad
+		// pattern like `*probe`, which matches some names but not `web_fetch_exa`.
+		// Only an entry that is built of `*`/`?` and carries a `*` denies them all.
+		for (const disabledTools of [["web_search_exa"], ["*probe"], ["web_*"], ["?*_exa"]]) {
+			const keep = filterExaMCPServers(
+				{ exa: { type: "http", url: "https://mcp.exa.ai/mcp", disabledTools } },
+				{ exa: SOURCE },
+			);
+			expect(Object.keys(keep.configs)).toEqual(["exa"]);
+		}
+		// `?` demands a character, so an entry with two of them denies only names
+		// of two or more — a one-character tool survives and the server must stay.
+		for (const disabledTools of [["*"], ["**"], ["?*"], ["*?"]]) {
+			const drop = filterExaMCPServers(
+				{ exa: { type: "http", url: "https://mcp.exa.ai/mcp", disabledTools } },
+				{ exa: SOURCE },
+			);
+			expect(drop.configs).toEqual({});
+		}
+		for (const disabledTools of [["??*"], ["*??"], ["?*?"]]) {
+			const keep = filterExaMCPServers(
+				{ exa: { type: "http", url: "https://mcp.exa.ai/mcp", disabledTools } },
+				{ exa: SOURCE },
+			);
+			expect(Object.keys(keep.configs)).toEqual(["exa"]);
+		}
+	});
+
+	test("reads a URL-encoded stdio tools list as the tools the endpoint serves", () => {
+		// The endpoint decodes its own query string, so this wrapper advertises
+		// `web_search_exa` AND `web_fetch_exa`. Treating `%2C` as literal text reads
+		// one synthetic name, which matches no allowlist entry — dropping a server
+		// whose selected non-native tool the endpoint really serves.
+		const configs: Record<string, MCPServerConfig> = {
+			exa: {
+				type: "stdio",
+				command: "npx",
+				args: ["-y", "mcp-remote", "https://mcp.exa.ai/mcp?tools=web_search_exa%2Cweb_fetch_exa"],
+				enabledTools: ["web_fetch_exa"],
+			},
+		};
+		const result = filterExaMCPServers(configs, { exa: SOURCE });
+
+		expect(Object.keys(result.configs)).toEqual(["exa"]);
+	});
+	test("reads a stdio endpoint URL with URL semantics, like the HTTP branch", () => {
+		// A stdio wrapper often forwards the endpoint URL verbatim. A `#fragment`
+		// is never sent to the endpoint, and `+` decodes to a space there — the
+		// synthetic advertised set must match the HTTP branch, or a server whose
+		// selected non-native tool the endpoint really serves is dropped.
+		for (const args of [
+			["-y", "mcp-remote", "https://mcp.exa.ai/mcp?tools=web_fetch_exa#section"],
+			["-y", "mcp-remote", "https://mcp.exa.ai/mcp?tools=web_search_exa%2C+web_fetch_exa"],
+		]) {
+			const configs: Record<string, MCPServerConfig> = {
+				exa: { type: "stdio", command: "npx", args, enabledTools: ["web_fetch_exa"] },
+			};
+			expect(Object.keys(filterExaMCPServers(configs, { exa: SOURCE }).configs)).toEqual(["exa"]);
+		}
+	});
+
+	test("keeps a differently-cased native name, which the native integration does not provide", () => {
+		// MCP tool names are case-sensitive, so `WEB_SEARCH_EXA` is not the native
+		// `web_search_exa`. Folding case when classifying read them as equal and
+		// dropped a server the allowlist had explicitly selected.
+		const configs: Record<string, MCPServerConfig> = {
+			exa: { type: "http", url: "https://mcp.exa.ai/mcp", enabledTools: ["WEB_SEARCH_EXA"] },
+		};
+		const result = filterExaMCPServers(configs, { exa: SOURCE });
+
+		expect(Object.keys(result.configs)).toEqual(["exa"]);
+	});
+
+	test("keeps an exa server restricted only by a denylist", () => {
+		// A denylist selects the complement of what it names, so it always leaves
+		// the server's non-native tools reachable; dropping the server would take
+		// `web_fetch_exa` with it.
+		const configs: Record<string, MCPServerConfig> = {
+			exa: { type: "http", url: "https://mcp.exa.ai/mcp", disabledTools: ["web_search_exa"] },
+		};
+		const result = filterExaMCPServers(configs, { exa: SOURCE });
+
+		expect(Object.keys(result.configs)).toEqual(["exa"]);
+	});
 });

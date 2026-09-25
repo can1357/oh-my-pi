@@ -558,10 +558,12 @@
 		"@opentelemetry/sdk-trace-base": "catalog:",
 		"@opentelemetry/sdk-trace-node": "catalog:",
 		"axe-core": "4.13.0",
+		"picomatch": "4.0.7",
 		"puppeteer-core": "catalog:"
 	},
 	"devDependencies": {
-		"@types/bun": "catalog:"
+		"@types/bun": "catalog:",
+		"@types/picomatch": "4.0.3"
 	},
 	"optionalDependencies": {
 		"@huggingface/transformers": "catalog:",

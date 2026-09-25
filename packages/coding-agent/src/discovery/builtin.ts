@@ -31,6 +31,7 @@ import {
 	expandEnvVarsDeep,
 	getExtensionNameFromPath,
 	loadFilesFromDir,
+	parseMCPToolFilters,
 	parseRequestIdFormat,
 	SOURCE_PATHS,
 	scanSkillsFromDir,
@@ -108,18 +109,24 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 		const data = tryParseJson<{ mcpServers?: Record<string, unknown> }>(content);
 		if (!data?.mcpServers) return result;
 
-		const expanded = expandEnvVarsDeep(data.mcpServers);
-		for (const [serverName, config] of Object.entries(expanded)) {
+		for (const [serverName, config] of Object.entries(data.mcpServers)) {
 			const serverConfig = config as Record<string, unknown>;
 
-			// Validate enabled: coerce string "true"/"false", warn on other types
+			// Validate enabled: expand `${VAR}` first, then coerce the expanded
+			// value through one accept-set — booleans pass through, "true"/"1"
+			// (any case) coerce to true, "false"/"0" to false, everything else
+			// warns and stays undefined (fail-open). Filters stay literal (never
+			// expanded): a filter entry is a tool-name pattern, so expanding
+			// `${TOOL}` there would make the same config select a different tool
+			// depending on which file it came from.
+			const expandedEnabledValue = expandEnvVarsDeep(serverConfig.enabled);
 			let enabled: boolean | undefined;
-			if (serverConfig.enabled === undefined || serverConfig.enabled === null) {
+			if (expandedEnabledValue === undefined || expandedEnabledValue === null) {
 				enabled = undefined;
-			} else if (typeof serverConfig.enabled === "boolean") {
-				enabled = serverConfig.enabled;
-			} else if (typeof serverConfig.enabled === "string") {
-				const lower = serverConfig.enabled.toLowerCase();
+			} else if (typeof expandedEnabledValue === "boolean") {
+				enabled = expandedEnabledValue;
+			} else if (typeof expandedEnabledValue === "string") {
+				const lower = expandedEnabledValue.toLowerCase();
 				if (lower === "false" || lower === "0") enabled = false;
 				else if (lower === "true" || lower === "1") enabled = true;
 				else {
@@ -131,20 +138,24 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				enabled = undefined;
 			}
 
-			// Validate timeout: coerce numeric strings, warn on invalid
+			// Validate timeout: expand `${VAR}` first, then accept finite numbers
+			// and numeric strings; anything else warns and stays undefined. A
+			// non-numeric expansion (`${UNSET}`) stays literal, fails the coerce,
+			// and warns — same as a bad literal.
+			const expandedTimeoutValue = expandEnvVarsDeep(serverConfig.timeout);
 			let timeout: number | undefined;
-			if (serverConfig.timeout === undefined || serverConfig.timeout === null) {
+			if (expandedTimeoutValue === undefined || expandedTimeoutValue === null) {
 				timeout = undefined;
-			} else if (typeof serverConfig.timeout === "number") {
-				if (Number.isFinite(serverConfig.timeout) && serverConfig.timeout >= 0) {
-					timeout = serverConfig.timeout;
+			} else if (typeof expandedTimeoutValue === "number") {
+				if (Number.isFinite(expandedTimeoutValue) && expandedTimeoutValue >= 0) {
+					timeout = expandedTimeoutValue;
 				} else {
 					logger.warn(`MCP server "${serverName}": invalid timeout ${serverConfig.timeout}, ignoring`);
 					timeout = undefined;
 				}
-			} else if (typeof serverConfig.timeout === "string") {
-				const parsed = Number(serverConfig.timeout);
-				if (Number.isFinite(parsed) && parsed >= 0) {
+			} else if (typeof expandedTimeoutValue === "string") {
+				const parsed = Number(expandedTimeoutValue);
+				if (expandedTimeoutValue.length > 0 && Number.isFinite(parsed) && parsed >= 0) {
 					timeout = parsed;
 				} else {
 					logger.warn(`MCP server "${serverName}": invalid timeout "${serverConfig.timeout}", ignoring`);
@@ -155,8 +166,13 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				timeout = undefined;
 			}
 
-			// Validate requestIdFormat: only the two documented encodings
-			const requestIdFormat = parseRequestIdFormat(serverConfig.requestIdFormat);
+			// Validate requestIdFormat: only the two documented encodings. The
+			// expanded value passes through the same parser the raw value does,
+			// so the expansion only injects `${VAR}` resolution a whole-object
+			// pass would have produced.
+			const requestIdFormat = parseRequestIdFormat(
+				serverConfig.requestIdFormat === undefined ? undefined : expandEnvVarsDeep(serverConfig.requestIdFormat),
+			);
 			if (requestIdFormat === undefined && serverConfig.requestIdFormat != null) {
 				logger.warn(
 					`MCP server "${serverName}": invalid requestIdFormat ${JSON.stringify(serverConfig.requestIdFormat)}, ignoring`,
@@ -169,20 +185,20 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 					`MCP server "${serverName}": invalid instructions ${JSON.stringify(serverConfig.instructions)}, ignoring`,
 				);
 			}
-
 			result.push({
 				name: serverName,
 				enabled,
 				timeout,
 				requestIdFormat,
 				instructions,
-				command: serverConfig.command as string | undefined,
-				args: serverConfig.args as string[] | undefined,
-				env: serverConfig.env as Record<string, string> | undefined,
-				cwd: serverConfig.cwd as string | undefined,
-				url: serverConfig.url as string | undefined,
-				headers: serverConfig.headers as Record<string, string> | undefined,
-				auth: serverConfig.auth as
+				...parseMCPToolFilters(serverName, serverConfig),
+				command: expandEnvVarsDeep(serverConfig.command) as string | undefined,
+				args: expandEnvVarsDeep(serverConfig.args) as string[] | undefined,
+				env: expandEnvVarsDeep(serverConfig.env) as Record<string, string> | undefined,
+				cwd: expandEnvVarsDeep(serverConfig.cwd) as string | undefined,
+				url: expandEnvVarsDeep(serverConfig.url) as string | undefined,
+				headers: expandEnvVarsDeep(serverConfig.headers) as Record<string, string> | undefined,
+				auth: expandEnvVarsDeep(serverConfig.auth) as
 					| {
 							type: "oauth" | "apikey";
 							credentialId?: string;
@@ -191,7 +207,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 							clientSecret?: string;
 					  }
 					| undefined,
-				oauth: serverConfig.oauth as
+				oauth: expandEnvVarsDeep(serverConfig.oauth) as
 					| {
 							clientId?: string;
 							clientSecret?: string;
