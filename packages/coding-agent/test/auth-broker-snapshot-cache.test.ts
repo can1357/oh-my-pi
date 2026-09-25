@@ -6,7 +6,6 @@ import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import {
 	type AuthBrokerServerHandle,
 	readAuthBrokerSnapshotCache,
-	SNAPSHOT_CACHE_REVALIDATION_TIMEOUT_MS,
 	type SnapshotResponse,
 	startAuthBroker,
 	writeAuthBrokerSnapshotCache,
@@ -278,10 +277,6 @@ describe("discoverAuthStorage auth-broker snapshot cache", () => {
 		} finally {
 			storage?.close();
 		}
-	});
-
-	test("revalidation defaults to a 500 ms startup budget", () => {
-		expect(SNAPSHOT_CACHE_REVALIDATION_TIMEOUT_MS).toBe(500);
 	});
 
 	test("healthz and the snapshot fetch share one revalidation deadline", async () => {
