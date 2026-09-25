@@ -17,6 +17,7 @@ export interface ExecutionState {
 	fallbackCount: number;
 	committed: boolean;
 	currentTarget: string;
+	/** True after a sibling-credential retry for the current target failed. */
 	siblingsExhausted: boolean;
 }
 

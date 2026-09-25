@@ -1,3 +1,34 @@
+import { scheduler } from "node:timers/promises";
+
+/**
+ * Largest delay `setTimeout` (and `timers/promises` `scheduler.wait`)
+ * accepts without 32-bit signed overflow: larger values wrap and fire
+ * almost immediately instead of sleeping. Chunk day-scale provider waits
+ * (e.g. a monthly quota reset parsed from an error hint) so the full
+ * duration elapses instead of overflowing the timer.
+ */
+export const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+/**
+ * Abortable sleep for arbitrarily long delays. Waits longer than
+ * {@link MAX_TIMER_DELAY_MS} chunk the sleep into back-to-back timer waits
+ * so no single timer overflows; an abort during any chunk rejects like
+ * `scheduler.wait`.
+ *
+ * Uses a monotonic deadline so a timer that wakes prematurely is re-armed for
+ * the unelapsed duration instead of shortening the requested sleep.
+ */
+export async function sleepLong(delayMs: number, signal?: AbortSignal): Promise<void> {
+	signal?.throwIfAborted();
+	const deadline = performance.now() + delayMs;
+	while (true) {
+		const remaining = deadline - performance.now();
+		if (!(remaining > 0)) return;
+		await scheduler.wait(Math.min(remaining, MAX_TIMER_DELAY_MS), { signal });
+		signal?.throwIfAborted();
+	}
+}
+
 /**
  * Wrap a promise with a timeout and optional abort signal.
  * Rejects with the given error or a new error containing the given message if

@@ -170,11 +170,11 @@ describe("createAgentSession credential_disabled subscription", () => {
 		initializeRunnerForTest(session.extensionRunner);
 
 		try {
-			await authStorage.set("anthropic", [expiredOAuth()]);
+			await authStorage.credentials.set("anthropic", [expiredOAuth()]);
 			failOAuthRefresh();
 
 			const observed = ext.next();
-			await authStorage.getApiKey("anthropic", "session-fanout");
+			await authStorage.keys.get("anthropic", "session-fanout");
 			const extEvent = await observed;
 
 			expect(embedderEvents).toEqual([
@@ -202,9 +202,9 @@ describe("createAgentSession credential_disabled subscription", () => {
 		failOAuthRefresh();
 
 		// Pre-dispose: both fire.
-		await authStorage.set("anthropic", [expiredOAuth()]);
+		await authStorage.credentials.set("anthropic", [expiredOAuth()]);
 		const firstExt = ext.next();
-		await authStorage.getApiKey("anthropic", "pre-dispose");
+		await authStorage.keys.get("anthropic", "pre-dispose");
 		await firstExt;
 		expect(embedderEvents).toHaveLength(1);
 		expect(ext.events).toHaveLength(1);
@@ -212,8 +212,8 @@ describe("createAgentSession credential_disabled subscription", () => {
 		await session.dispose();
 
 		// Post-dispose: only the embedder fires; the extension's listener was unsubscribed.
-		await authStorage.set("openai", [expiredOAuth()]);
-		await authStorage.getApiKey("openai", "post-dispose");
+		await authStorage.credentials.set("openai", [expiredOAuth()]);
+		await authStorage.keys.get("openai", "post-dispose");
 		// Drain async dispatch turns before asserting absence.
 		await drainCredentialDisabledDispatch();
 
@@ -250,9 +250,9 @@ describe("createAgentSession credential_disabled subscription", () => {
 		failOAuthRefresh();
 
 		// All three sessions + embedder receive the first event.
-		await authStorage.set("anthropic", [expiredOAuth()]);
+		await authStorage.credentials.set("anthropic", [expiredOAuth()]);
 		const wait1All = Promise.all([ext1.next(), ext2.next(), ext3.next()]);
-		await authStorage.getApiKey("anthropic", "concurrent-1");
+		await authStorage.keys.get("anthropic", "concurrent-1");
 		await wait1All;
 		expect(embedderEvents.map(e => e.provider)).toEqual(["anthropic"]);
 		expect(ext1.events.map(e => e.provider)).toEqual(["anthropic"]);
@@ -262,9 +262,9 @@ describe("createAgentSession credential_disabled subscription", () => {
 		// Dispose session1; sessions 2 and 3 + embedder still receive.
 		await session1.session.dispose();
 
-		await authStorage.set("openai", [expiredOAuth()]);
+		await authStorage.credentials.set("openai", [expiredOAuth()]);
 		const wait2 = Promise.all([ext2.next(), ext3.next()]);
-		await authStorage.getApiKey("openai", "concurrent-2");
+		await authStorage.keys.get("openai", "concurrent-2");
 		await wait2;
 		await drainCredentialDisabledDispatch();
 		expect(embedderEvents.map(e => e.provider)).toEqual(["anthropic", "openai"]);
@@ -275,9 +275,9 @@ describe("createAgentSession credential_disabled subscription", () => {
 		// Dispose session2; only session3 + embedder receive.
 		await session2.session.dispose();
 
-		await authStorage.set("google", [expiredOAuth()]);
+		await authStorage.credentials.set("google", [expiredOAuth()]);
 		const wait3 = ext3.next();
-		await authStorage.getApiKey("google", "concurrent-3");
+		await authStorage.keys.get("google", "concurrent-3");
 		await wait3;
 		await drainCredentialDisabledDispatch();
 		expect(embedderEvents.map(e => e.provider)).toEqual(["anthropic", "openai", "google"]);
@@ -288,8 +288,8 @@ describe("createAgentSession credential_disabled subscription", () => {
 		// Dispose the last session; only the embedder receives.
 		await session3.session.dispose();
 
-		await authStorage.set("anthropic", [expiredOAuth()]);
-		await authStorage.getApiKey("anthropic", "concurrent-final");
+		await authStorage.credentials.set("anthropic", [expiredOAuth()]);
+		await authStorage.keys.get("anthropic", "concurrent-final");
 		await drainCredentialDisabledDispatch();
 		expect(embedderEvents.map(e => e.provider)).toEqual(["anthropic", "openai", "google", "anthropic"]);
 		expect(ext1.events).toHaveLength(1);
@@ -312,9 +312,9 @@ describe("createAgentSession credential_disabled subscription", () => {
 			// Fire the event BEFORE initializing. Extension must NOT see it yet — the runner
 			// would otherwise emit with `hasUI=false`, an unset model, and no-op runtime
 			// actions, defeating the headline re-login flow.
-			await authStorage.set("anthropic", [expiredOAuth()]);
+			await authStorage.credentials.set("anthropic", [expiredOAuth()]);
 			failOAuthRefresh();
-			await authStorage.getApiKey("anthropic", "pre-init");
+			await authStorage.keys.get("anthropic", "pre-init");
 			await drainCredentialDisabledDispatch();
 			expect(ext.events).toHaveLength(0);
 
@@ -351,9 +351,9 @@ describe("createAgentSession credential_disabled subscription", () => {
 		try {
 			// Fire BEFORE initialize — simulates an OAuth invalid_grant during startup model
 			// probes when the embedder constructor handler is set.
-			await authStorage.set("anthropic", [expiredOAuth()]);
+			await authStorage.credentials.set("anthropic", [expiredOAuth()]);
 			failOAuthRefresh();
-			await authStorage.getApiKey("anthropic", "startup-with-embedder");
+			await authStorage.keys.get("anthropic", "startup-with-embedder");
 			await drainCredentialDisabledDispatch();
 
 			// Embedder fires immediately (sync push from AuthStorage's fan-out loop). The
@@ -402,8 +402,8 @@ describe("createAgentSession credential_disabled subscription", () => {
 		// Now fire a real disable. Only the embedder must observe it — no leftover listener
 		// from either failed startup attempt.
 		failOAuthRefresh();
-		await authStorage.set("anthropic", [expiredOAuth()]);
-		await authStorage.getApiKey("anthropic", "post-failure");
+		await authStorage.credentials.set("anthropic", [expiredOAuth()]);
+		await authStorage.keys.get("anthropic", "post-failure");
 		await drainCredentialDisabledDispatch();
 
 		expect(embedderEvents).toEqual([
@@ -439,7 +439,7 @@ describe("createAgentSession credential_disabled subscription", () => {
 		initializeRunnerForTest(session.extensionRunner);
 
 		try {
-			await authStorage.set("anthropic", [expiredOAuth()]);
+			await authStorage.credentials.set("anthropic", [expiredOAuth()]);
 			failOAuthRefresh();
 
 			const observed = ext.next();

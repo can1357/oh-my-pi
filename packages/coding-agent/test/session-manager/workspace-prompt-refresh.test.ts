@@ -23,7 +23,7 @@ describe("workspace directories in the system prompt", () => {
 		const dir = TempDir.createSync("@ws-prompt-add-");
 		const auth = await AuthStorage.create(path.join(dir.path(), "auth.db"));
 		try {
-			auth.setRuntimeApiKey("mock", "test-key");
+			auth.keys.setRuntime("mock", "test-key");
 			const extraDir = path.join(dir.path(), "extra-root");
 			fs.mkdirSync(extraDir, { recursive: true });
 			const laterDir = path.join(dir.path(), "later-root");

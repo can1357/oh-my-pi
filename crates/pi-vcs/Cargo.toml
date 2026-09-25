@@ -2,8 +2,9 @@
 name = "pi-vcs"
 version.workspace = true
 edition.workspace = true
-license = "MIT"
+license.workspace = true
 authors.workspace = true
+homepage.workspace = true
 repository.workspace = true
 
 [lints]

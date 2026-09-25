@@ -49,22 +49,23 @@ function validateClaudeRegistryFormat(content: string): Record<string, unknown> 
 // ── ID helpers ───────────────────────────────────────────────────────
 
 describe("isValidNameSegment", () => {
-	it("accepts lowercase alphanumeric with hyphens", () => {
+	it("accepts alphanumeric with hyphens (any case)", () => {
 		expect(isValidNameSegment("hello")).toBe(true);
 		expect(isValidNameSegment("my-plugin")).toBe(true);
 		expect(isValidNameSegment("a1-b2-c3")).toBe(true);
 		expect(isValidNameSegment("x")).toBe(true);
+		expect(isValidNameSegment("Hello")).toBe(true);
+		expect(isValidNameSegment("HexRaysSA")).toBe(true);
+		expect(isValidNameSegment("UPPER")).toBe(true);
 	});
 
 	it("rejects invalid segments", () => {
 		expect(isValidNameSegment("")).toBe(false);
-		expect(isValidNameSegment("Hello")).toBe(false);
 		expect(isValidNameSegment("my plugin")).toBe(false);
 		expect(isValidNameSegment("my@plugin")).toBe(false);
 		expect(isValidNameSegment("my/plugin")).toBe(false);
 		expect(isValidNameSegment("-leading")).toBe(false);
 		expect(isValidNameSegment("trailing-")).toBe(false);
-		expect(isValidNameSegment("UPPER")).toBe(false);
 		expect(isValidNameSegment("a".repeat(65))).toBe(false);
 	});
 });
@@ -79,7 +80,7 @@ describe("buildPluginId / parsePluginId", () => {
 	});
 
 	it("buildPluginId rejects invalid names", () => {
-		expect(() => buildPluginId("Bad", "market")).toThrow(/Invalid plugin name/);
+		expect(() => buildPluginId("bad name", "market")).toThrow(/Invalid plugin name/);
 		expect(() => buildPluginId("ok", "Bad Market")).toThrow(/Invalid marketplace name/);
 	});
 
@@ -100,8 +101,8 @@ describe("buildPluginId / parsePluginId", () => {
 	});
 
 	it("parsePluginId returns null for invalid segments", () => {
-		expect(parsePluginId("BAD@market")).toBeNull();
-		expect(parsePluginId("plugin@BAD")).toBeNull();
+		expect(parsePluginId("bad name@market")).toBeNull();
+		expect(parsePluginId("plugin@bad name")).toBeNull();
 	});
 
 	it("parsePluginId splits on last @", () => {

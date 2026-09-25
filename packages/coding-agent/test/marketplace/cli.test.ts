@@ -1,7 +1,6 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 
-// Import from the zero-dep classify module — plugin-cli.ts transitively loads native addons.
-import { classifyInstallTarget } from "@oh-my-pi/pi-coding-agent/cli/classify-install-target";
+import { classifyInstallTarget, handleMarketplaceInstall } from "@oh-my-pi/pi-coding-agent/cli/classify-install-target";
 
 const KNOWN = new Set(["my-marketplace"]);
 
@@ -80,4 +79,36 @@ describe("classifyInstallTarget", () => {
 			expect(classifyInstallTarget("pkg@1.2.3", KNOWN)).toEqual({ type: "npm", spec: "pkg@1.2.3" });
 		});
 	});
+});
+
+it("marketplace dry-run validates preconditions and emits a preview without invoking installPlugin", async () => {
+	const manager = {
+		validateInstallPlugin: async () => undefined,
+		installPlugin: async () => undefined,
+	};
+	const validationSpy = spyOn(manager, "validateInstallPlugin");
+	const installSpy = spyOn(manager, "installPlugin");
+	const previews: unknown[] = [];
+	const handled = await handleMarketplaceInstall(
+		manager,
+		{
+			type: "marketplace",
+			name: "hello",
+			marketplace: "my-marketplace",
+		},
+		{ dryRun: true, force: true, scope: "project" },
+		preview => previews.push(preview),
+	);
+
+	expect(handled).toBe(true);
+	expect(validationSpy).toHaveBeenCalledWith("hello", "my-marketplace", { force: true, scope: "project" });
+	expect(installSpy).not.toHaveBeenCalled();
+	expect(previews).toEqual([
+		{
+			dryRun: true,
+			action: "install",
+			plugin: "hello",
+			marketplace: "my-marketplace",
+		},
+	]);
 });

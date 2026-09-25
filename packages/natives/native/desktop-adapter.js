@@ -68,6 +68,65 @@ function sourceDimensions(capture) {
 	};
 }
 
+function displaysEqual(a, b) {
+	if (a === b) return true;
+	if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+	for (let i = 0; i < a.length; i++) {
+		const x = a[i];
+		const y = b[i];
+		if (
+			x === y ||
+			(x?.id === y?.id &&
+				x?.x === y?.x &&
+				x?.y === y?.y &&
+				x?.width === y?.width &&
+				x?.height === y?.height &&
+				x?.scale === y?.scale &&
+				x?.pixelX === y?.pixelX &&
+				x?.pixelY === y?.pixelY &&
+				x?.pixelWidth === y?.pixelWidth &&
+				x?.pixelHeight === y?.pixelHeight)
+		) {
+			continue;
+		}
+		return false;
+	}
+	return true;
+}
+
+// Field-by-field frame comparison: the JSON.stringify signature allocated a
+// full string over the display list on every capture and every input action.
+// A rolling hash would risk collisions where string equality had none, so
+// compare the same fields directly instead.
+function sameFrame(a, b) {
+	if (a === b) return true;
+	if (!a || !b) return false;
+	return a.target === b.target && a.width === b.width && a.height === b.height && displaysEqual(a.displays, b.displays);
+}
+
+// Lightweight projection of the fields sameFrame reads: the stored capture
+// must NOT retain the full screenshot (`data: Uint8Array`, multi-MB per
+// target) after callers finish with it.
+function frameIdentity(capture) {
+	const displays = Array.isArray(capture.displays) ? capture.displays.map(displayOf) : capture.displays;
+	return { target: capture.target, width: capture.width, height: capture.height, displays };
+}
+
+function displayOf(display) {
+	return {
+		id: display?.id,
+		x: display?.x,
+		y: display?.y,
+		width: display?.width,
+		height: display?.height,
+		scale: display?.scale,
+		pixelX: display?.pixelX,
+		pixelY: display?.pixelY,
+		pixelWidth: display?.pixelWidth,
+		pixelHeight: display?.pixelHeight,
+	};
+}
+
 function frameSignature(capture) {
 	return JSON.stringify({
 		target: capture.target,
@@ -164,7 +223,7 @@ export function adaptDesktopSession(NativeDesktopSession) {
 			try {
 				const capture = await native.execute(Array.isArray(actions) ? actions : [actions], target);
 				const previous = this.#capturedTargets.get(target);
-				if (capture && previous?.native === native && frameSignature(capture) !== previous.signature) {
+				if (capture && previous?.native === native && !sameFrame(capture, previous.capture)) {
 					this.#capturedTargets.delete(target);
 				}
 			} catch (error) {
@@ -201,7 +260,11 @@ export function adaptDesktopSession(NativeDesktopSession) {
 				const native = this.#sessionForCapture(caps);
 				const capture = await native.capture(target);
 				const adapted = { ...capture, ...sourceDimensions(capture), target };
-				this.#capturedTargets.set(target, { native, signature: frameSignature(adapted) });
+				// Store only the comparison fields, not the screenshot bytes:
+				// `adapted` carries the full PNG `data` (multi-MB per target).
+				// Keep the string signature for any external reader of the
+				// stored shape.
+				this.#capturedTargets.set(target, { native, capture: frameIdentity(adapted), signature: frameSignature(adapted) });
 				return adapted;
 			} catch (error) {
 				throw normalizeError(error, "CaptureFailed");

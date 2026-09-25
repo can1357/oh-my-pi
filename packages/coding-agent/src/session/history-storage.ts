@@ -1,7 +1,7 @@
-import { Database, type Statement } from "bun:sqlite";
+import type { Database, Statement } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { checkpointWal, getDbBusyTimeoutMs, getHistoryDbPath, logger, postmortem } from "@oh-my-pi/pi-utils";
+import { checkpointWal, getHistoryDbPath, logger, openSqliteDatabaseSync, postmortem } from "@oh-my-pi/pi-utils";
 
 /** A unique prompt with provenance from its most recent submission. */
 export interface HistoryEntry {
@@ -15,6 +15,8 @@ export interface HistoryEntry {
 	cwd?: string;
 	/** Session ID of the most recent submission, if known. */
 	sessionId?: string;
+	/** Number of times this prompt has been submitted, including the first. */
+	useCount: number;
 }
 
 type HistoryRow = {
@@ -23,6 +25,7 @@ type HistoryRow = {
 	created_at: number;
 	cwd: string | null;
 	session_id: string | null;
+	use_count: number;
 };
 
 const SQLITE_NOW_EPOCH = "CAST(strftime('%s','now') AS INTEGER)";
@@ -45,7 +48,11 @@ function normalizePrompt(prompt: string): string {
 		.replace(/[^\S\n]+\n/g, "\n")
 		.trim();
 }
-/** Bumped when stored rows need the one-time dump-and-rebuild pass on open; see `#rebuildHistory`. */
+/**
+ * Bumped only when stored rows need the one-time dump-and-rebuild pass on open;
+ * see `#rebuildHistory`. Purely additive columns go through `#ensureColumn`
+ * instead so existing stores are never rewritten for them.
+ */
 const HISTORY_DATA_VERSION = 1;
 
 /** Canonical `history` schema; `#rebuildHistory` recreates the table from this exact DDL. */
@@ -55,7 +62,8 @@ CREATE TABLE IF NOT EXISTS history (
 	prompt TEXT NOT NULL UNIQUE,
 	created_at INTEGER NOT NULL DEFAULT (${SQLITE_NOW_EPOCH}),
 	cwd TEXT,
-	session_id TEXT
+	session_id TEXT,
+	use_count INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_history_created_at ON history(created_at DESC);
 `;
@@ -75,15 +83,8 @@ export class HistoryStorage {
 	// Cache substring-fallback prepared statements keyed by token count.
 	#substringStmts = new Map<number, Statement>();
 
-	private constructor(dbPath: string) {
-		this.#ensureDir(dbPath);
-
-		this.#db = new Database(dbPath);
-
-		// Install the busy handler BEFORE any lock-taking statement. See #2421.
-		// Headless hosts bound the wait so lock contention cannot freeze the
-		// protocol loop for the full interactive timeout.
-		this.#db.run(`PRAGMA busy_timeout = ${getDbBusyTimeoutMs()}`);
+	private constructor(db: Database) {
+		this.#db = db;
 
 		const hadFts = this.#db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='history_fts'").get();
 		this.#db.run(`
@@ -92,6 +93,9 @@ PRAGMA synchronous=NORMAL;
 ${HISTORY_TABLE_DDL}
 		`);
 
+		// Additive column on stores created before the counter existed; runs before
+		// the rebuild so the dump below always sees it.
+		this.#ensureColumn("use_count", "INTEGER NOT NULL DEFAULT 1");
 		const rebuilt = this.#rebuildHistory();
 
 		this.#db.run(`
@@ -110,10 +114,10 @@ END;
 			}
 		}
 		this.#recentStmt = this.#db.prepare(
-			"SELECT id, prompt, created_at, cwd, session_id FROM history ORDER BY created_at DESC, id DESC LIMIT ?",
+			"SELECT id, prompt, created_at, cwd, session_id, use_count FROM history ORDER BY created_at DESC, id DESC LIMIT ?",
 		);
 		this.#searchStmt = this.#db.prepare(
-			"SELECT h.id, h.prompt, h.created_at, h.cwd, h.session_id FROM history_fts f JOIN history h ON h.id = f.rowid WHERE history_fts MATCH ? ORDER BY h.created_at DESC, h.id DESC LIMIT ?",
+			"SELECT h.id, h.prompt, h.created_at, h.cwd, h.session_id, h.use_count FROM history_fts f JOIN history h ON h.id = f.rowid WHERE history_fts MATCH ? ORDER BY h.created_at DESC, h.id DESC LIMIT ?",
 		);
 		this.#upsertRowStmt = this.#db.prepare(`
 INSERT INTO history (prompt, created_at, cwd, session_id)
@@ -121,22 +125,32 @@ VALUES (?, ${SQLITE_NOW_EPOCH}, ?, ?)
 ON CONFLICT(prompt) DO UPDATE SET
 	created_at = excluded.created_at,
 	cwd = excluded.cwd,
-	session_id = excluded.session_id
+	session_id = excluded.session_id,
+	use_count = history.use_count + 1
 		`);
 	}
 
-	/** Opens the process-wide prompt history database. */
+	/** Opens the process-wide prompt history database, quarantining a corrupt store once. */
 	static open(dbPath: string = getHistoryDbPath()): HistoryStorage {
 		const existing = HistoryStorage.#instance;
 		if (existing) return existing;
 
-		const instance = new HistoryStorage(dbPath);
-		// Exit-only: a keep-alive cleanup leaves the handle valid so the editor can
-		// keep submitting prompts; the real exit closes. Register before publishing
-		// so a real-exit-in-progress late registration cannot close this instance.
-		cancelExitCleanup = postmortem.register("history-storage", () => HistoryStorage.close(), { exitOnly: true });
-		HistoryStorage.#instance = instance;
-		return instance;
+		fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+		return openSqliteDatabaseSync(
+			dbPath,
+			db => {
+				const instance = new HistoryStorage(db);
+				// Exit-only: a keep-alive cleanup leaves the handle valid so the editor can
+				// keep submitting prompts; the real exit closes. Register before publishing
+				// so a real-exit-in-progress late registration cannot close this instance.
+				cancelExitCleanup = postmortem.register("history-storage", () => HistoryStorage.close(), {
+					exitOnly: true,
+				});
+				HistoryStorage.#instance = instance;
+				return instance;
+			},
+			{ recoverCorruption: true },
+		);
 	}
 
 	/** Checkpoints and closes the process-wide database, and permits reopening it. */
@@ -176,7 +190,8 @@ ON CONFLICT(prompt) DO UPDATE SET
 	}
 
 	/**
-	 * Stores a prompt and replaces its provenance with the latest submission.
+	 * Stores a prompt, replaces its provenance with the latest submission, and
+	 * bumps its use count on resubmission.
 	 * The write is synchronous: prompt submission is human-paced, not a hot
 	 * path, so the row is durable the moment `add()` returns and can never be
 	 * lost to an exit racing a deferred flush. Failures are logged, not thrown.
@@ -272,25 +287,27 @@ ON CONFLICT(prompt) DO UPDATE SET
 		return ids;
 	}
 
-	#ensureDir(dbPath: string): void {
-		const dir = path.dirname(dbPath);
-		fs.mkdirSync(dir, { recursive: true });
-	}
-
 	#historySchemaHasColumn(column: string): boolean {
 		const columns = this.#db.prepare("PRAGMA table_info(history)").all() as Array<{ name: string }>;
 		return columns.some(col => col.name === column);
+	}
+
+	/** Adds `column` to `history` when absent; `definition` must carry a default so existing rows stay valid. */
+	#ensureColumn(column: string, definition: string): void {
+		if (this.#historySchemaHasColumn(column)) return;
+		this.#db.run(`ALTER TABLE history ADD COLUMN ${column} ${definition}`);
 	}
 
 	/**
 	 * One-time dump-and-rebuild pass, gated by `PRAGMA user_version` (owned by
 	 * this pass — nothing else versions history.db). Dumps every row, folds each
 	 * prompt through {@link normalizePrompt} in JS, keeps the most recent
-	 * submission per normalized prompt (the upsert's "latest wins" rule), and
-	 * recreates the table from {@link HISTORY_TABLE_DDL}. Subsumes every legacy
-	 * shape at once — unixepoch defaults, missing session_id, non-unique prompt,
-	 * per-line trailing padding — without per-shape SQL migrations. Returns
-	 * whether it ran so the caller can rebuild the FTS index.
+	 * submission per normalized prompt (the upsert's "latest wins" rule) with
+	 * the use counts of every collapsed row summed, and recreates the table from
+	 * {@link HISTORY_TABLE_DDL}. Subsumes every legacy shape at once — unixepoch
+	 * defaults, missing session_id, non-unique prompt, per-line trailing
+	 * padding — without per-shape SQL migrations. Returns whether it ran so the
+	 * caller can rebuild the FTS index.
 	 */
 	#rebuildHistory(): boolean {
 		const versionRow = this.#db.prepare("PRAGMA user_version").get() as { user_version: number };
@@ -299,7 +316,7 @@ ON CONFLICT(prompt) DO UPDATE SET
 		try {
 			const sessionIdSelection = this.#historySchemaHasColumn("session_id") ? "session_id" : "NULL AS session_id";
 			rows = this.#db
-				.prepare(`SELECT id, prompt, created_at, cwd, ${sessionIdSelection} FROM history`)
+				.prepare(`SELECT id, prompt, created_at, cwd, ${sessionIdSelection}, use_count FROM history`)
 				.all() as HistoryRow[];
 		} catch (error) {
 			logger.error("HistoryStorage rebuild dump failed", { error: String(error) });
@@ -310,12 +327,16 @@ ON CONFLICT(prompt) DO UPDATE SET
 			const prompt = normalizePrompt(row.prompt);
 			if (!prompt) continue;
 			const incumbent = winners.get(prompt);
-			// Most recent submission wins, matching the upsert's "latest provenance" rule.
+			if (!incumbent) {
+				winners.set(prompt, { ...row, prompt });
+				continue;
+			}
+			// Most recent submission wins, matching the upsert's "latest provenance" rule;
+			// every collapsed row still counts as a submission.
+			const useCount = incumbent.use_count + row.use_count;
 			const rowWins =
-				!incumbent ||
-				row.created_at > incumbent.created_at ||
-				(row.created_at === incumbent.created_at && row.id > incumbent.id);
-			if (rowWins) winners.set(prompt, { ...row, prompt });
+				row.created_at > incumbent.created_at || (row.created_at === incumbent.created_at && row.id > incumbent.id);
+			winners.set(prompt, rowWins ? { ...row, prompt, use_count: useCount } : { ...incumbent, use_count: useCount });
 		}
 		this.#db.transaction(() => {
 			this.#db.run("DROP INDEX IF EXISTS idx_history_created_at");
@@ -324,10 +345,10 @@ ON CONFLICT(prompt) DO UPDATE SET
 			this.#db.run("DROP TABLE history");
 			this.#db.run(HISTORY_TABLE_DDL);
 			const insert = this.#db.prepare(
-				"INSERT INTO history (id, prompt, created_at, cwd, session_id) VALUES (?, ?, ?, ?, ?)",
+				"INSERT INTO history (id, prompt, created_at, cwd, session_id, use_count) VALUES (?, ?, ?, ?, ?, ?)",
 			);
 			for (const row of winners.values()) {
-				insert.run(row.id, row.prompt, row.created_at, row.cwd, row.session_id);
+				insert.run(row.id, row.prompt, row.created_at, row.cwd, row.session_id, row.use_count);
 			}
 			this.#db.run(`PRAGMA user_version = ${HISTORY_DATA_VERSION}`);
 		})();
@@ -367,7 +388,7 @@ ON CONFLICT(prompt) DO UPDATE SET
 		if (stmt) return stmt;
 		const whereClause = Array(tokenCount).fill("prompt LIKE ? ESCAPE '\\' COLLATE NOCASE").join(" AND ");
 		stmt = this.#db.prepare(
-			`SELECT id, prompt, created_at, cwd, session_id FROM history WHERE ${whereClause} ORDER BY created_at DESC, id DESC LIMIT ?`,
+			`SELECT id, prompt, created_at, cwd, session_id, use_count FROM history WHERE ${whereClause} ORDER BY created_at DESC, id DESC LIMIT ?`,
 		);
 		this.#substringStmts.set(tokenCount, stmt);
 		return stmt;
@@ -380,6 +401,7 @@ ON CONFLICT(prompt) DO UPDATE SET
 			created_at: row.created_at,
 			cwd: row.cwd ?? undefined,
 			sessionId: row.session_id ?? undefined,
+			useCount: row.use_count,
 		};
 	}
 }

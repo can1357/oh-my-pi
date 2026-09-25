@@ -56,7 +56,14 @@ export class RouteRegistry {
 
 	/** Register/replace a virtual route. Bumps generation. Rejects cycles and empty fallback children. */
 	register(definition: RouteDefinition): void {
+		if (definition.id === "" || definition.id === "." || definition.id === "..")
+			throw new AIError.ValidationError("Route ID cannot be a URL dot segment");
 		const compiled = compileNode(definition.root, new Set());
+		if (new Set(compiled.targets).size !== compiled.targets.length) {
+			throw new AIError.ValidationError(
+				"Duplicate route targets require distinct route positions and are not supported",
+			);
+		}
 		this.#generation += 1;
 		this.#routes.set(definition.id, {
 			generation: this.#generation,
@@ -137,7 +144,7 @@ function compileNode(node: RouteNode, seenOnPath: ReadonlySet<string>): NodeComp
 	for (const disposition of node.on) {
 		if (afterPrimary.length === 0) continue;
 		const existing = fallbacks[disposition];
-		fallbacks[disposition] = existing ? [...existing, ...afterPrimary] : [...afterPrimary];
+		fallbacks[disposition] = [...new Set([...afterPrimary, ...(existing ?? [])])];
 	}
 	for (let index = 0; index < parts.length; index++) {
 		const nextEntries = parts.slice(index + 1).flatMap(part => part.entries);

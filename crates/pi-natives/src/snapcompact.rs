@@ -1294,9 +1294,10 @@ fn render_snapcompact_png_sync(
 					.into());
 			}
 
-			// Stretch shape: rasterize at the font's natural cell on a tight canvas
-			// (layout stays in character cells from the target grid), Lanczos3-
-			// resample to the target cell, paste onto the white frame.
+			// Stretch shape: rasterize at the font's natural cell on a tight
+			// canvas (layout stays in character cells from the target grid),
+			// Lanczos3- resample to the target cell, paste onto the white
+			// frame.
 			let native = Grid { cell_w: natural_w, cell_h: natural_h, ..grid };
 			let src_w = grid.cols * natural_w;
 			let src_h = used * grid.repeat * natural_h;
