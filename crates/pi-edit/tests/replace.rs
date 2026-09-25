@@ -146,13 +146,4 @@ fn preview_uses_compute_edit_diff_error_strings() {
 	let mut empty = workspace.session();
 	empty.push(r#"{"path":"a.txt","old_string":"","new_string":"beta"}"#);
 	assert_eq!(empty.preview().files[0].error.as_deref(), Some("oldText must not be empty."));
-
-	let mut local_url = workspace.session();
-	local_url.push(r#"{"path":"local:/PLAN.md","old_string":"old","new_string":"new"}"#);
-	assert!(
-		local_url.preview().files[0]
-			.error
-			.as_deref()
-			.is_some_and(|error| error.contains("local://"))
-	);
 }

@@ -5,7 +5,6 @@
 use std::{
 	cell::RefCell,
 	ffi::OsString,
-	fs::File,
 	io::{self, BufRead, BufReader, Read, Write},
 	iter::Cycle,
 	rc::Rc,
@@ -14,6 +13,7 @@ use std::{
 
 use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command};
+use pi_vfs::File;
 use uucore::{display::Quotable, i18n::charmap::mb_char_len};
 
 use crate::host::{Host, Stdin, Utility, format_usage, matches_parser, os_bytes, util};
@@ -118,7 +118,7 @@ fn paste(
 		if filename == "-" {
 			prepared.push(PreparedSource::StandardInput);
 		} else {
-			let file = File::open(host.resolve(&filename)).map_err(|err| {
+			let file = host.fs().open(host.resolve(&filename)).map_err(|err| {
 				format!("{}: {}", filename.to_string_lossy(), strip_errno(&err))
 			})?;
 			prepared.push(PreparedSource::File(BufReader::new(file)));
