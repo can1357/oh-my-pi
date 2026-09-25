@@ -578,8 +578,7 @@ export class TranscriptContainer extends Container {
 			entry.emitted = offered.emittedEnd;
 		} else if (offered.kind === "commit") {
 			for (let index = this.#frontier; index < offered.end; index++) {
-				this.#entries[index]!.state = "committed";
-				this.#entries[index]!.emitted = 0;
+				this.#retireEntry(this.#entries[index]!);
 			}
 			this.#frontier = offered.end;
 		}
@@ -632,7 +631,7 @@ export class TranscriptContainer extends Container {
 
 	#renderEntry(entry: TranscriptEntry, width: number): readonly string[] {
 		const rendered = trimBlankEdges(entry.component.render(width));
-		if (entry.mode === "mutable" || entry.stableFrozen) return rendered;
+		if (entry.state === "committed" || entry.mode === "mutable" || entry.stableFrozen) return rendered;
 		const appendOnly = entry.component as Component & AppendOnlyTranscriptBlock;
 		const stable = appendOnly.getTranscriptStableRows();
 		if (!isStablePrefix(entry.stableRows, stable)) {
@@ -773,10 +772,17 @@ export class TranscriptContainer extends Container {
 			const rendered = this.#renderEntry(entry, width);
 			if (entry.emitted !== entry.stableRows.length) return;
 			if (this.#renderStablePrefix(entry, entry.emitted, width).length !== rendered.length) return;
-			entry.state = "committed";
-			entry.emitted = 0;
+			this.#retireEntry(entry);
 			this.#frontier++;
 		}
+	}
+
+	#retireEntry(entry: TranscriptEntry): void {
+		entry.state = "committed";
+		entry.emitted = 0;
+		entry.stableRows = EMPTY_STABLE_ROWS;
+		entry.renderedStableByWidth = new Map();
+		entry.stableRowCountByWidth = new Map();
 	}
 
 	#startReplay(): void {
