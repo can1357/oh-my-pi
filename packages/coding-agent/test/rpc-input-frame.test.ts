@@ -327,6 +327,8 @@ describe("RpcInputDispatcher", () => {
 						tokensPerSecond: null,
 						messageCount: 0,
 						queuedMessageCount: 0,
+						hasPendingAsyncWork: false,
+						isSettled: true,
 						todoPhases: [],
 					},
 				};

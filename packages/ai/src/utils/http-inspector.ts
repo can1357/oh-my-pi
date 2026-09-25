@@ -59,6 +59,25 @@ export function shouldDumpRejectedRequest(error: unknown): boolean {
 	return status === 400 || status === 413;
 }
 
+const RAW_HTTP_REQUEST_LINE = "raw-http-request=";
+const RAW_HTTP_REQUEST_SAVE_FAILED_LINE = "raw-http-request-save-failed=";
+
+/**
+ * Remove the local request-dump lines {@link appendRawHttpRequestDumpFor400} appends,
+ * leaving only the provider-facing error text. Hosts that relay provider errors
+ * (RPC `prompt_result`) must not leak OMP-local file paths.
+ */
+export function stripRawHttpRequestDiagnostics(message: string): string {
+	const lines = message.split("\n");
+	let end = lines.length;
+	while (
+		end > 0 &&
+		(lines[end - 1].startsWith(RAW_HTTP_REQUEST_LINE) || lines[end - 1].startsWith(RAW_HTTP_REQUEST_SAVE_FAILED_LINE))
+	)
+		end--;
+	return end === lines.length ? message : lines.slice(0, end).join("\n");
+}
+
 export async function appendRawHttpRequestDumpFor400(
 	message: string,
 	error: unknown,
@@ -75,10 +94,10 @@ export async function appendRawHttpRequestDumpFor400(
 
 	try {
 		await Bun.write(filePath, `${JSON.stringify(payload, null, 2)}\n`);
-		return `${message}\nraw-http-request=${filePath}`;
+		return `${message}\n${RAW_HTTP_REQUEST_LINE}${filePath}`;
 	} catch (writeError) {
 		const writeMessage = writeError instanceof Error ? writeError.message : String(writeError);
-		return `${message}\nraw-http-request-save-failed=${writeMessage}`;
+		return `${message}\n${RAW_HTTP_REQUEST_SAVE_FAILED_LINE}${writeMessage}`;
 	}
 }
 

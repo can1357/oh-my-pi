@@ -39,6 +39,9 @@ import { formatRoleModelValue, resolveRoleModelFull } from "./role-models";
 import { EPHEMERAL_MODEL_CHANGE_ROLE } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 
+import { cfgDefaultThinkingLevel, cfgProvidersFireworksTier } from "./settings";
+import { cfgDisabledProviders, cfgEnabledModels } from "../config/model-settings";
+
 /** Capabilities borrowed from the owning AgentSession. */
 export interface ModelControlsHost {
 	agent: Agent;
@@ -131,9 +134,11 @@ export class ModelControls {
 		return this.#autoResolvedLevel;
 	}
 
-	/** Models explicitly scoped to the session's cycle command. */
+	/** Models explicitly scoped to the session's cycle command, minus currently disabled providers. */
 	get scopedModels(): ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }> {
-		return this.#scopedModels;
+		const disabledProviders = cfgDisabledProviders.get(this.#host.settings);
+		if (disabledProviders.length === 0) return this.#scopedModels;
+		return this.#scopedModels.filter(scoped => !disabledProviders.includes(scoped.model.provider));
 	}
 
 	/**
@@ -297,7 +302,7 @@ export class ModelControls {
 	 * @returns The new model info, or undefined if only one model available
 	 */
 	async cycleModel(direction: "forward" | "backward" = "forward"): Promise<ModelCycleResult | undefined> {
-		if (this.#scopedModels.length > 0) {
+		if (this.scopedModels.length > 0) {
 			return this.#cycleScopedModel(direction);
 		}
 		return this.#cycleAvailableModel(direction);
@@ -399,7 +404,7 @@ export class ModelControls {
 		const apiKeysByProvider = new Map<string, string | undefined>();
 		const result: Array<{ model: Model; thinkingLevel?: ThinkingLevel }> = [];
 
-		for (const scoped of this.#scopedModels) {
+		for (const scoped of this.scopedModels) {
 			const provider = scoped.model.provider;
 			let apiKey: string | undefined;
 			if (apiKeysByProvider.has(provider)) {
@@ -480,7 +485,7 @@ export class ModelControls {
 	 */
 	getAvailableModels(): Model[] {
 		const all = this.#host.modelRegistry.getAvailable();
-		const patterns = this.#host.settings.get("enabledModels");
+		const patterns = cfgEnabledModels.get(this.#host.settings);
 		if (!patterns || patterns.length === 0) return all;
 		return filterAvailableModelsByEnabledPatterns(all, patterns, this.#host.settings);
 	}
@@ -517,7 +522,7 @@ export class ModelControls {
 			}
 			this.#applyThinkingLevelToAgent(provisional);
 			if (persist) {
-				this.#host.settings.set("defaultThinkingLevel", AUTO_THINKING);
+				cfgDefaultThinkingLevel.set(this.#host.settings, AUTO_THINKING);
 			}
 			const isChanging = !wasAuto || previousLevel !== provisional;
 			if (isChanging) {
@@ -546,7 +551,7 @@ export class ModelControls {
 			this.#host.clearInheritedProviderPromptCacheKey();
 			this.#host.sessionManager.appendThinkingLevelChange(effectiveLevel, effectiveLevel);
 			if (persist && effectiveLevel !== undefined && effectiveLevel !== ThinkingLevel.Off) {
-				this.#host.settings.set("defaultThinkingLevel", effectiveLevel);
+				cfgDefaultThinkingLevel.set(this.#host.settings, effectiveLevel);
 			}
 			this.#host.emit({ type: "thinking_level_changed", thinkingLevel: effectiveLevel });
 		}
@@ -701,7 +706,7 @@ export class ModelControls {
 	 */
 	effectiveServiceTier(model: Model | undefined = this.#model): ServiceTier | undefined {
 		if (model?.provider === "fireworks") {
-			return this.#host.settings.get("providers.fireworksTier") === "priority" && !isFireworksFastModelId(model.id)
+			return cfgProvidersFireworksTier.get(this.#host.settings) === "priority" && !isFireworksFastModelId(model.id)
 				? "priority"
 				: undefined;
 		}

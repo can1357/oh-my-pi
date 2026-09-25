@@ -792,6 +792,7 @@ dependencies = [
  "libc",
  "nix 0.31.3",
  "normalize-path",
+ "pi-vfs",
  "pretty_assertions",
  "rand 0.10.3",
  "rpds",
@@ -1991,13 +1992,12 @@ checksum = "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0"
 
 [[package]]
 name = "encoding_rs"
-version = "0.8.41"
+version = "0.8.42"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b5ef0006ac9ab233c38522f5ae99cae3625151de8f706cacee1cba4b8e2832a"
+checksum = "8e985e0451871ad22fb8d2b6b076e2028a502a0d3950998c2c5c0a4f9b5d9679"
 dependencies = [
  "cfg-if",
  "core_detect",
- "multiversion",
  "multiversion_no_op",
  "rustversion",
  "scopeguard",
@@ -2144,17 +2144,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "faccess"
-version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59ae66425802d6a903e268ae1a08b8c38ba143520f227a205edf4e9c7e3e26d5"
-dependencies = [
- "bitflags 1.3.2",
- "libc",
- "winapi",
-]
-
-[[package]]
 name = "fancy-regex"
 version = "0.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2170,6 +2159,17 @@ name = "fancy-regex"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72cf461f865c862bb7dc573f643dd6a2b6842f7c30b07882b56bd148cc2761b8"
+dependencies = [
+ "bit-set",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
+name = "fancy-regex"
+version = "0.19.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d301f5bf187b3c295fce6468d3875037a0bccc5f6b151c63cac2f85babf21912"
 dependencies = [
  "bit-set",
  "regex-automata",
@@ -2439,12 +2439,6 @@ checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
 ]
-
-[[package]]
-name = "fs_extra"
-version = "1.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
 
 [[package]]
 name = "fsevent-sys"
@@ -5028,27 +5022,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "multiversion"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4ca4bea16ffc3f443cf7d866912118196bfef4c6a1556ca00f9f9b00bb43f7c"
-dependencies = [
- "multiversion-macros",
-]
-
-[[package]]
-name = "multiversion-macros"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d416831a7317ef4b08bee00b69cbbb9c8763da7959a7026244d6266869f9c83"
-dependencies = [
- "proc-macro2",
- "quote",
- "rustversion",
- "syn 3.0.6",
-]
-
-[[package]]
 name = "multiversion_no_op"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6063,7 +6036,7 @@ dependencies = [
 
 [[package]]
 name = "pi-ast"
-version = "18.3.0"
+version = "18.3.1"
 dependencies = [
  "anyhow",
  "ast-grep-core",
@@ -6133,7 +6106,7 @@ dependencies = [
 
 [[package]]
 name = "pi-builtins"
-version = "18.3.0"
+version = "18.3.1"
 dependencies = [
  "ansi-width",
  "anyhow",
@@ -6150,12 +6123,10 @@ dependencies = [
  "codesnake",
  "compare",
  "dns-lookup",
- "faccess",
  "fancy-regex 0.17.0",
  "filetime",
  "flume",
  "foldhash 0.2.0",
- "fs_extra",
  "futures",
  "glob",
  "globset",
@@ -6188,6 +6159,7 @@ dependencies = [
  "os_display",
  "parking_lot",
  "parse_datetime",
+ "pi-vfs",
  "pi-walker",
  "platform-info",
  "pretty_assertions",
@@ -6219,11 +6191,11 @@ dependencies = [
 
 [[package]]
 name = "pi-diff"
-version = "18.3.0"
+version = "18.3.1"
 
 [[package]]
 name = "pi-edit"
-version = "18.3.0"
+version = "18.3.1"
 dependencies = [
  "async-trait",
  "parking_lot",
@@ -6242,7 +6214,7 @@ dependencies = [
 
 [[package]]
 name = "pi-iso"
-version = "18.3.0"
+version = "18.3.1"
 dependencies = [
  "async-trait",
  "libc",
@@ -6254,7 +6226,7 @@ dependencies = [
 
 [[package]]
 name = "pi-natives"
-version = "18.3.0"
+version = "18.3.1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -6304,6 +6276,7 @@ dependencies = [
  "pi-iso",
  "pi-shell",
  "pi-vcs",
+ "pi-vfs",
  "pi-voice",
  "pi-walker",
  "pipewire",
@@ -6339,9 +6312,10 @@ dependencies = [
 
 [[package]]
 name = "pi-shell"
-version = "18.3.0"
+version = "18.3.1"
 dependencies = [
  "anyhow",
+ "async-trait",
  "brush-core",
  "brush-parser",
  "bytes",
@@ -6352,6 +6326,7 @@ dependencies = [
  "os_pipe",
  "parking_lot",
  "pi-builtins",
+ "pi-vfs",
  "regex",
  "serde",
  "serde_json",
@@ -6367,7 +6342,7 @@ dependencies = [
 
 [[package]]
 name = "pi-vcs"
-version = "18.3.0"
+version = "18.3.1"
 dependencies = [
  "gix",
  "gix-utils",
@@ -6381,8 +6356,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "pi-vfs"
+version = "18.3.1"
+dependencies = [
+ "async-trait",
+ "libc",
+ "parking_lot",
+ "tokio",
+ "tokio-util",
+ "windows-sys 0.61.2",
+ "xattr",
+]
+
+[[package]]
 name = "pi-voice"
-version = "18.3.0"
+version = "18.3.1"
 dependencies = [
  "bytes",
  "flume",
@@ -6396,12 +6384,13 @@ dependencies = [
 
 [[package]]
 name = "pi-walker"
-version = "18.3.0"
+version = "18.3.1"
 dependencies = [
  "globset",
  "ignore",
  "libc",
  "parking_lot",
+ "pi-vfs",
  "rayon",
  "windows-sys 0.61.2",
 ]
@@ -7986,15 +7975,14 @@ dependencies = [
 
 [[package]]
 name = "tiktoken-rs"
-version = "0.12.0"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "027853bbf8c7763b77c5c595f1c271c7d536ced7d6f83452911b944621e57fc2"
+checksum = "2aeff724640cfe13037336ddf35befdffd2909cbdb65cf041cc8a4cf8c584cfa"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
  "bstr",
- "fancy-regex 0.17.0",
- "lazy_static",
+ "fancy-regex 0.19.2",
  "regex",
  "rustc-hash",
 ]
@@ -10494,18 +10482,18 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.8.57"
+version = "0.8.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d35102a9f36d089ccae9e4c6802bc118be4487b80aaffc0ab4e0cf5ce92d2873"
+checksum = "c17e8fafad82b542ff3717217ecdc736231b59e387768c9630123b4ce4d2db44"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.57"
+version = "0.8.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "146c01f5ab44258da43cf276c74a2763db2ff3969c9c652c3f2de07041d0b2bc"
+checksum = "595f56e044df4f46a0c9a626f65c3d99eb8488f7e8a8baa12dd76326d9710bf2"
 dependencies = [
  "proc-macro2",
  "quote",
