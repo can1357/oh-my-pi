@@ -66,6 +66,8 @@ function decodeAssignRequest(body: RequestInit["body"]): AssignModelRequest {
 
 function decodeChatRequest(body: RequestInit["body"]): GetChatMessageRequest {
 	const framed = new Uint8Array(body as ArrayBuffer);
+	const flag = framed[0];
+	if (flag !== 0x01) throw new Error(`expected gzip Connect frame (flag 0x01), got 0x${flag.toString(16)}`);
 	const length = new DataView(framed.buffer, framed.byteOffset, framed.byteLength).getUint32(1, false);
 	return fromBinary(GetChatMessageRequestSchema, gunzipSync(framed.subarray(5, 5 + length)));
 }

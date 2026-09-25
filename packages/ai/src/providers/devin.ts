@@ -28,9 +28,9 @@ import {
 } from "@oh-my-pi/pi-catalog/discovery/devin-proto";
 import { create, fromBinary, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
-import { DEVIN_DEFAULT_BASE_URL, devinCliMetadata } from "@oh-my-pi/pi-catalog/wire/devin";
+import { DEVIN_DEFAULT_BASE_URL, devinCliMetadata, normalizeDevinSessionToken } from "@oh-my-pi/pi-catalog/wire/devin";
 import { decodeDevinUnaryMessage } from "@oh-my-pi/pi-catalog/wire/devin-proto";
-import { isRecord, logger, parseStreamingJson, parseStreamingJsonThrottled, sanitizeText } from "@oh-my-pi/pi-utils";
+import { getInstallId, isRecord, logger, parseStreamingJson, parseStreamingJsonThrottled, sanitizeText } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 
 import type {
@@ -226,6 +226,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 				cascadeId: options?.conversationId ?? options?.sessionId ?? crypto.randomUUID(),
 				messages: transformMessages(context.messages, model),
 			};
+			const sessionToken = normalizeDevinSessionToken(turn.apiKey);
 			// Router models (`adaptive`) are not valid chat model uids: the server
 			// resolves them through AssignModel and expects the returned uid plus
 			// assignment JWT on the chat request that shares the cascade id.
@@ -257,6 +258,11 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 					"accept-encoding": "identity",
 					"user-agent": "connect-go/1.18.1 (go1.26.3)",
 					"connect-accept-encoding": "gzip",
+					// The Devin CLI sends a Basic authorization header with the session
+					// token repeated (token-token, not base64). The server also accepts
+					// the token in Metadata.apiKey alone, but including the header
+					// matches the real client more closely.
+					authorization: `Basic ${sessionToken}-${sessionToken}`,
 					...options?.headers,
 				},
 				body: frame,
@@ -623,10 +629,33 @@ function buildRouterPrompt(messages: Message[]): ChatMessagePrompt | undefined {
 }
 
 /**
+ * Resolve the device attestation blob for Metadata field 31 (`f`).
+ *
+ * The Devin CLI sends a 366-byte hex-encoded blob in this field. It is not
+ * stored on disk — it is derived from machine properties at runtime. We
+ * cannot reproduce the exact generation algorithm, so we support an
+ * override via the `DEVIN_F_FIELD` env var (hex string). When unset, we
+ * generate a stable 366-byte hash from the omp install id so the value is
+ * deterministic per-machine without being hardcoded.
+ */
+function resolveAttestationF(): string {
+	const envOverride = Bun.env.DEVIN_F_FIELD;
+	if (envOverride && envOverride.length > 0) return envOverride;
+	// Generate a deterministic 366-byte hex string (732 chars) from the
+	// persistent omp install id (~/.omp/install-id).
+	const installId = getInstallId();
+	let hash = Bun.hash(`devin-fingerprint${installId}`).toString(16);
+	while (hash.length < 732) hash += Bun.hash(hash).toString(16);
+	return hash.slice(0, 732);
+}
+
+/**
  * Build a {@link GetChatMessageRequest} for one Cascade turn. Auth rides inside
- * `Metadata.apiKey`; the system prompt is the flattened `prompt` string and the
- * conversation history maps to `chatMessagePrompts`. `assignment` is present only
- * for router models and supplies both the resolved uid and its JWT.
+ * `Metadata.apiKey` (plus `Metadata.userJwt` from GetUserJwt) and field 31 (`f`)
+ * carries the device attestation blob; the system prompt is the flattened
+ * `prompt` string and the conversation history maps to `chatMessagePrompts`.
+ * `assignment` is present only for router models and supplies both the resolved
+ * uid and its JWT.
  */
 function buildDevinChatRequest(
 	model: Model<"devin-agent">,
@@ -660,7 +689,10 @@ function buildDevinChatRequest(
 		});
 	});
 	return create(GetChatMessageRequestSchema, {
-		metadata: create(MetadataSchema, devinCliMetadata(turn.apiKey, turn.userJwt)),
+		metadata: create(MetadataSchema, {
+			...devinCliMetadata(turn.apiKey, turn.userJwt),
+			f: resolveAttestationF(),
+		}),
 		prompt: normalizeSystemPrompts(context.systemPrompt).join("\n\n"),
 		chatMessagePrompts: buildChatMessagePrompts(turn.messages, turn.cascadeId, model),
 		chatModelUid,

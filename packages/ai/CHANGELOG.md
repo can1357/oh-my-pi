@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Devin chat now uses CLI-compatible authentication and transport while preserving model assignment and caller generation settings ([#8534](https://github.com/can1357/oh-my-pi/pull/8534)).
 ## [18.3.1] - 2026-09-25
 
 ### Added
@@ -305,6 +308,7 @@
 
 ### Changed
 
+- Provider request builders now read resolved model policy (`model.compat`, `model.identity`, `model.thinking`, behavior rules) for every model-conditional decision — Harmony escaping, vision stripping, thinking transports and ladders, Claude Code instruction injection, Google beta headers and thought-signature handling, Cloudflare gateway routing, Codex service-tier pricing, and quota metering — instead of matching model names.
 - Updated OpenAI Codex requests to improve routing by communicating the selected model and service tier across Responses, WebSocket, and remote-compaction requests.
 
 ## [18.1.7] - 2026-09-03
@@ -420,7 +424,6 @@
 - Fixed Z.AI browser sign-in to report an occupied callback port before opening the browser.
 
 ## [18.0.9] - 2026-08-28
-
 ### Fixed
 
 - Improved OAuth sign-in flows, including a fallback message when the browser cannot automatically close the OAuth success tab.
