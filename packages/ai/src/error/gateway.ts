@@ -147,6 +147,19 @@ export function classifyGatewayError(err: unknown): GatewayErrorClassification {
 	if (/\b(?:unsupported|invalid_request|invalid request|bad request|malformed)\b/i.test(message)) {
 		return withOwnerDisposition(err, { status: 400, type: "invalid_request_error", message });
 	}
+	// Statusless OAuth-expiry wording (bare `invalid_token`, "refresh token
+	// expired") is a dead credential, not a provider outage — route it through
+	// the 401 bucket so the owner arm assigns credential_permanent.
+	if (isOAuthExpiry(message)) {
+		return withOwnerDisposition(err, { status: 401, type: "authentication_error", message });
+	}
+	// Statusless account-policy denials (bare `cyber_policy`, trusted-access
+	// wording, or a structured policy error without a status) are
+	// account-scoped: a sibling credential may hold the entitlement. The
+	// synthesized 502 would otherwise label this a retryable provider outage.
+	if (POLICY_PATTERN.test(message) || isAccountPolicyError(err)) {
+		return withOwnerDisposition(err, { status: 403, type: "authentication_error", message });
+	}
 	// Bare overflow wording with no status signal is a context problem, not an
 	// upstream outage — classifying it 502 would make it retryable.
 	if (matchesOverflowText(message)) {
