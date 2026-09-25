@@ -1,3 +1,4 @@
+import { Settings } from "../../config/settings";
 import type { AgentSession } from "../../session/agent-session";
 
 export const GALLERY_CONTEXT_WINDOW = 200_000;
@@ -37,10 +38,7 @@ export function createGallerySession(options: GallerySessionOptions = {}): Agent
 		autoResolvedThinkingLevel: () => undefined,
 		isStreaming: false,
 		modelRegistry: { isUsingOAuth: () => options.usingSubscription ?? false },
-		settings: {
-			get: (path: string) => path === "goal.statusInFooter",
-			getGroup: () => ({ enabled: true, reserveTokens: 20_000 }),
-		},
+		settings: Settings.isolated({ "goal.statusInFooter": true, "compaction.reserveTokens": 20_000 }),
 		sessionManager: {
 			getUsageStatistics: () => ({
 				input: 12_400,

@@ -14,24 +14,25 @@
 //! // JS: await native.glob({ pattern: "*.rs", path: "." })
 //! ```
 
-use std::{cmp::Ordering, path::Path};
+use std::{cmp::Ordering, path::PathBuf};
 
 use napi::{
 	bindgen_prelude::*,
 	threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode},
 };
 use napi_derive::napi;
+use pi_vfs::BlockingFs;
 
 // Re-export entry types so existing `glob::FileType` / `glob::GlobMatch` paths still work.
 pub use crate::iofs::{FileType, GlobMatch};
-use crate::{glob_util, iofs, task};
+use crate::{glob_util, iofs, shell::vfs::ShellFilesystem, task};
 
 /// Input options for `glob`, including traversal, filtering, and cancellation.
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 pub struct GlobOptions<'env> {
 	/// Glob pattern to match (e.g., "*.ts").
 	pub pattern:              String,
-	/// Directory to search.
+	/// Directory to search: a host path or an absolute `scheme://` URL.
 	pub path:                 String,
 	/// Filter by file type: "file", "dir", or "symlink". Symlinks are
 	/// matched for file/dir filters based on their target type.
@@ -55,6 +56,9 @@ pub struct GlobOptions<'env> {
 	pub signal:               Option<Unknown<'env>>,
 	/// Timeout in milliseconds for the operation.
 	pub timeout_ms:           Option<u32>,
+	/// Filesystem the search root is resolved and walked through (native when
+	/// absent).
+	pub filesystem:           Option<ShellFilesystem>,
 }
 
 /// Result payload returned by a glob operation.
@@ -68,7 +72,9 @@ pub struct GlobResult {
 
 /// Internal runtime config for a single glob execution.
 struct GlobConfig {
-	root:                  std::path::PathBuf,
+	/// Filesystem `root` is walked and symlink targets are resolved through.
+	filesystem:            BlockingFs,
+	root:                  PathBuf,
 	pattern:               String,
 	recursive:             bool,
 	include_hidden:        bool,
@@ -90,9 +96,8 @@ fn compare_matches_by_rank(a: &GlobMatch, b: &GlobMatch) -> Ordering {
 		.then_with(|| a.path.cmp(&b.path))
 }
 
-fn resolve_symlink_target_type(root: &Path, relative_path: &str) -> Option<FileType> {
-	let target_path = root.join(relative_path);
-	let metadata = std::fs::metadata(target_path).ok()?;
+fn resolve_symlink_target_type(fs: &BlockingFs, target_path: PathBuf) -> Option<FileType> {
+	let metadata = fs.metadata(target_path).ok()?;
 	if metadata.is_dir() {
 		Some(FileType::Dir)
 	} else if metadata.is_file() {
@@ -102,19 +107,24 @@ fn resolve_symlink_target_type(root: &Path, relative_path: &str) -> Option<FileT
 	}
 }
 
-fn apply_file_type_filter(entry: &GlobMatch, config: &GlobConfig) -> Option<FileType> {
+fn apply_file_type_filter(
+	entry: &pi_walker::CollectedEntry,
+	config: &GlobConfig,
+) -> Option<FileType> {
+	let file_type = iofs::from_walker_file_type(entry.file_type);
 	let Some(filter) = config.file_type_filter else {
-		return Some(entry.file_type);
+		return Some(file_type);
 	};
-	if entry.file_type == filter {
-		return Some(entry.file_type);
+	if file_type == filter {
+		return Some(file_type);
 	}
-	if entry.file_type != FileType::Symlink {
+	if file_type != FileType::Symlink {
 		return None;
 	}
 	match filter {
 		FileType::File | FileType::Dir => {
-			let resolved = resolve_symlink_target_type(&config.root, &entry.path)?;
+			let resolved =
+				resolve_symlink_target_type(&config.filesystem, entry.absolute_path(&config.root))?;
 			if resolved == filter {
 				Some(resolved)
 			} else {
@@ -151,10 +161,10 @@ fn collect_native_filtered_matches(
 	let mut collected = Vec::new();
 	for entry in outcome.entries {
 		ct.heartbeat()?;
-		let mut matched_entry = GlobMatch::from(entry);
-		let Some(effective_file_type) = apply_file_type_filter(&matched_entry, config) else {
+		let Some(effective_file_type) = apply_file_type_filter(&entry, config) else {
 			continue;
 		};
+		let mut matched_entry = GlobMatch::from(entry);
 		matched_entry.file_type = effective_file_type;
 		collected.push(matched_entry);
 		if !config.sort_by_mtime && collected.len() >= config.max_results {
@@ -187,6 +197,7 @@ fn run_glob(
 		pi_walker::WalkDetail::Minimal
 	};
 	let base_request = pi_walker::WalkRequest::new(config.root.clone())
+		.filesystem(config.filesystem.clone())
 		.hidden(config.include_hidden)
 		.gitignore(config.use_gitignore)
 		.skip_git(true)
@@ -270,8 +281,10 @@ pub fn glob(
 		include_node_modules,
 		timeout_ms,
 		signal,
+		filesystem,
 	} = options;
 
+	let filesystem = ShellFilesystem::blocking(filesystem);
 	let pattern = pattern.trim();
 	let pattern = if pattern.is_empty() { "*" } else { pattern };
 	let pattern = pattern.to_string();
@@ -281,7 +294,8 @@ pub fn glob(
 	task::blocking("glob", ct, move |ct| {
 		run_glob(
 			GlobConfig {
-				root: pi_walker::resolve_search_path(&path).map_err(iofs::map_walker_error)?,
+				root: iofs::resolve_search_dir(&filesystem, &path)?,
+				filesystem,
 				include_hidden: hidden.unwrap_or(false),
 				file_type_filter: file_type,
 				recursive: recursive.unwrap_or(true),
@@ -307,6 +321,8 @@ mod tests {
 		sync::atomic::{AtomicU64, Ordering},
 		time::{SystemTime, UNIX_EPOCH},
 	};
+
+	use pi_vfs::BlockingFs;
 
 	static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -355,6 +371,7 @@ mod tests {
 
 		let result = super::run_glob(
 			super::GlobConfig {
+				filesystem:            BlockingFs::native(),
 				root:                  root.path().to_path_buf(),
 				pattern:               "*.rs".to_string(),
 				recursive:             true,
@@ -398,6 +415,7 @@ mod tests {
 		let run = |pattern: &str| {
 			super::run_glob(
 				super::GlobConfig {
+					filesystem:            BlockingFs::native(),
 					root:                  root.path().to_path_buf(),
 					pattern:               pattern.to_string(),
 					recursive:             false,
@@ -428,5 +446,72 @@ mod tests {
 		let mut recursive_paths = match_paths(&recursive);
 		recursive_paths.sort_unstable();
 		assert_eq!(recursive_paths, ["deep/child.txt", "deep/nested/leaf.txt", "top.txt"]);
+	}
+
+	#[test]
+	fn run_glob_lists_provider_url_tree_with_raw_relative_paths() {
+		let (_mem, filesystem) = crate::testing::MemFs::with_files(&[
+			("mem://root/dir/a.rs", "fn a() {}\n"),
+			("mem://root/dir/a%20b.rs", "fn ab() {}\n"),
+			("mem://root/dir/sub/b.rs", "fn b() {}\n"),
+			("mem://root/dir/sub/c.txt", "c\n"),
+			("mem://root/outside.rs", "fn outside() {}\n"),
+		]);
+		let root = crate::iofs::resolve_search_dir(&filesystem, "mem://root/dir")
+			.expect("URL root resolves through the provider");
+		assert_eq!(root, Path::new("mem://root/dir"), "URL root keeps its URL spelling");
+
+		let run = |pattern: &str, file_type_filter: Option<super::FileType>| {
+			let result = super::run_glob(
+				super::GlobConfig {
+					filesystem: filesystem.clone(),
+					root: root.clone(),
+					pattern: pattern.to_string(),
+					recursive: true,
+					include_hidden: false,
+					file_type_filter,
+					max_results: usize::MAX,
+					use_gitignore: true,
+					mentions_node_modules: false,
+					sort_by_mtime: false,
+					cache: true,
+				},
+				None,
+				crate::task::CancelToken::default(),
+			)
+			.expect("glob over a provider tree succeeds");
+			let mut paths: Vec<String> = match_paths(&result)
+				.into_iter()
+				.map(str::to_string)
+				.collect();
+			paths.sort_unstable();
+			paths
+		};
+
+		assert_eq!(run("*.rs", None), ["a b.rs", "a.rs", "sub/b.rs"]);
+		assert_eq!(run("*", Some(super::FileType::Dir)), ["sub"]);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn resolve_search_dir_canonicalizes_host_directories_on_the_native_fs() {
+		let root = TempDirGuard::new();
+		fs::create_dir_all(root.path().join("real")).expect("create real directory");
+		fs::write(root.path().join("file.txt"), "x").expect("write regular file");
+		std::os::unix::fs::symlink(root.path().join("real"), root.path().join("link"))
+			.expect("create directory symlink");
+		let native = BlockingFs::native();
+		let resolve = |name: &str| {
+			crate::iofs::resolve_search_dir(&native, &root.path().join(name).to_string_lossy())
+		};
+
+		assert_eq!(
+			resolve("link").expect("symlinked directory resolves"),
+			fs::canonicalize(root.path().join("real")).expect("canonicalize real directory"),
+		);
+		let not_dir = resolve("file.txt").expect_err("a file is not a search root");
+		assert!(not_dir.reason.contains("Search path must be a directory"), "{}", not_dir.reason);
+		let missing = resolve("missing").expect_err("a missing root is rejected");
+		assert!(missing.reason.contains("Path not found"), "{}", missing.reason);
 	}
 }

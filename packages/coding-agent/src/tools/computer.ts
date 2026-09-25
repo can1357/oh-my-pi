@@ -16,6 +16,14 @@ import { throwIfAborted } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { clampTimeout } from "./tool-timeouts";
 
+import {
+	cfgComputerDisplay,
+	cfgComputerEnabled,
+	cfgComputerMaxHeight,
+	cfgComputerMaxWidth,
+	cfgToolsMaxTimeout,
+} from "./settings";
+
 // Image transports that cannot preserve native screenshot detail resize frames
 // without returning transformed dimensions. Keep their native coordinate frames
 // below the empirically verified threshold so pointer actions match what the
@@ -138,7 +146,7 @@ export function createComputerPrelude(
 		exports: ["computer"],
 		codeModeDeclarations: computerPreludeAssets.codeModeDeclarations,
 		approval: computerApproval,
-		enabled: () => session.settings.get("computer.enabled") === true,
+		enabled: () => cfgComputerEnabled.get(session.settings) === true,
 		invoke: async (parameters, context) => {
 			const parsed = getComputerParamsSchema()(parameters);
 			if (parsed instanceof type.errors) {
@@ -227,8 +235,8 @@ function resolveComputerRunCode(params: ComputerRunParams | ComputerCallParams):
 /** Freezes the current session settings into the snapshot every worker command carries. */
 function buildComputerSnapshot(session: ToolSession, readOnly: boolean): ComputerSessionSnapshot {
 	const coordinateSafe = usesCoordinateSafeImageSizing(session.getActiveModel?.());
-	const configuredMaxWidth = session.settings.get("computer.maxWidth");
-	const configuredMaxHeight = session.settings.get("computer.maxHeight");
+	const configuredMaxWidth = cfgComputerMaxWidth.get(session.settings);
+	const configuredMaxHeight = cfgComputerMaxHeight.get(session.settings);
 	return {
 		cwd: session.cwd,
 		sessionId: session.getEvalSessionId?.() ?? session.getSessionId?.() ?? "computer",
@@ -238,7 +246,7 @@ function buildComputerSnapshot(session: ToolSession, readOnly: boolean): Compute
 		captureMaxHeight: coordinateSafe
 			? Math.min(configuredMaxHeight, COORDINATE_SAFE_MAX_CAPTURE_HEIGHT)
 			: configuredMaxHeight,
-		display: session.settings.get("computer.display") ?? "all",
+		display: cfgComputerDisplay.get(session.settings),
 		readOnly,
 	};
 }
@@ -252,7 +260,7 @@ async function runComputer(
 	const code = resolveComputerRunCode(params);
 	// Direct inspection calls run read-only so the desktop guard backs the read approval tier.
 	const readOnly = params.action === "call" ? isReadOnlyComputerCall(params.chain) : (params.read_only ?? false);
-	const timeoutSeconds = clampTimeout("computer", params.timeout, session.settings.get("tools.maxTimeout"));
+	const timeoutSeconds = clampTimeout("computer", params.timeout, cfgToolsMaxTimeout.get(session.settings));
 	const snapshot = buildComputerSnapshot(session, readOnly);
 	const run = await controller.run(code, timeoutSeconds * 1000, snapshot, signal);
 	throwIfAborted(signal);

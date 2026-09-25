@@ -8,6 +8,11 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
+import {
+	cfgToolsSpeculativeExecutionEnabled,
+	cfgToolsSpeculativeExecutionMaxInFlight,
+} from "@oh-my-pi/pi-coding-agent/tools/settings";
+
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
@@ -40,7 +45,7 @@ describe("createSpeculativeToolExecutionConfig", () => {
 
 		expect(config.enabled).toBe(false);
 
-		settings.set("tools.speculativeExecution.enabled", true);
+		cfgToolsSpeculativeExecutionEnabled.set(settings, true);
 
 		expect(config.enabled).toBe(true);
 	});
@@ -56,7 +61,7 @@ describe("createSpeculativeToolExecutionConfig", () => {
 
 		expect(config.maxInFlight).toBe(2);
 
-		settings.set("tools.speculativeExecution.maxInFlight", 5);
+		cfgToolsSpeculativeExecutionMaxInFlight.set(settings, 5);
 
 		expect(config.maxInFlight).toBe(5);
 	});
@@ -94,12 +99,12 @@ describe("createSpeculativeToolExecutionConfig", () => {
 
 		expect(await host?.authorize(context)).toMatchObject({ allowed: false });
 
-		settings.set("tools.speculativeExecution.enabled", true);
+		cfgToolsSpeculativeExecutionEnabled.set(settings, true);
 
 		expect(config.host).toBe(host);
 		expect(await host?.authorize(context)).toMatchObject({ allowed: true });
 
-		settings.set("tools.speculativeExecution.enabled", false);
+		cfgToolsSpeculativeExecutionEnabled.set(settings, false);
 
 		expect(config.host).toBe(host);
 		expect(await host?.authorize(context)).toMatchObject({ allowed: false });

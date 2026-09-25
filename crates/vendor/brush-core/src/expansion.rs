@@ -1,6 +1,6 @@
 //! Word expansion utilities.
 
-use std::{borrow::Cow, cmp::min, io::Write as _};
+use std::{borrow::Cow, cmp::min};
 
 use brush_parser::word::{ParameterTransformOp, SubstringMatchKind};
 use itertools::Itertools;
@@ -778,7 +778,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			if self.disable_pathname_expansion || self.shell.options().disable_filename_globbing {
 				result.push(String::from(field));
 			} else {
-				result.extend(self.expand_pathnames_in_field(field)?);
+				result.extend(self.expand_pathnames_in_field(field).await?);
 			}
 		}
 
@@ -825,7 +825,10 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		fields
 	}
 
-	fn expand_pathnames_in_field(&self, field: WordField) -> Result<Vec<String>, error::Error> {
+	async fn expand_pathnames_in_field(
+		&self,
+		field: WordField,
+	) -> Result<Vec<String>, error::Error> {
 		let pattern = patterns::Pattern::from(field.clone())
 			.set_extended_globbing(self.parser_options.enable_extended_globbing)
 			.set_case_insensitive(self.shell.options().case_insensitive_pathname_expansion);
@@ -837,11 +840,8 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		// On error (e.g. malformed pattern), default to NoGlob so the field
 		// passes through as a literal rather than triggering failglob.
 		let expansion = pattern
-			.expand(
-				self.shell.working_dir(),
-				Some(&patterns::Pattern::accept_all_expand_filter),
-				&options,
-			)
+			.expand(self.shell.filesystem(), self.shell.working_dir(), &options)
+			.await
 			.unwrap_or_default();
 
 		if expansion.is_unmatched_glob() && self.shell.options().fail_expansion_on_globs_without_match
@@ -924,10 +924,11 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 
 				// Strips null bytes from command substitution output for compatibility.
 				if cmd_output.contains('\0') {
-					writeln!(
-						self.params.stderr(self.shell),
-						"warning: command substitution: ignored null byte in input",
-					)?;
+					self
+						.params
+						.stderr(self.shell)
+						.write_all_async(b"warning: command substitution: ignored null byte in input\n")
+						.await?;
 					cmd_output.retain(|c| c != '\0');
 				}
 
