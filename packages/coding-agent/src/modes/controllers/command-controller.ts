@@ -457,7 +457,7 @@ export class CommandController {
 			}
 		}
 
-		this.ctx.showSessionInfo(info);
+		this.ctx.showInfoPanel("Session Info", info);
 	}
 
 	static readonly #advisorStatusGlyph: Record<string, string> = {
@@ -602,12 +602,11 @@ export class CommandController {
 
 		const now = Date.now();
 		const lineWidth = Math.max(24, (this.ctx.ui.terminal.columns ?? 100) - 24);
-		let info = `${theme.bold("Background Jobs")}\n\n`;
-		info += `${theme.fg("dim", "Running:")} ${snapshot.running.length}\n`;
+		let info = `${theme.fg("dim", "Running:")} ${snapshot.running.length}\n`;
 
 		if (snapshot.running.length === 0 && snapshot.recent.length === 0) {
 			info += `\n${theme.fg("dim", "No async jobs yet.")}\n`;
-			this.ctx.presentCommandOutput([new Spacer(1), new Text(info, 1, 0)]);
+			this.ctx.showInfoPanel("Background Jobs", info.trimEnd());
 			return;
 		}
 
@@ -627,7 +626,7 @@ export class CommandController {
 			}
 		}
 
-		this.ctx.presentCommandOutput([new Spacer(1), new Text(info.trimEnd(), 1, 0)]);
+		this.ctx.showInfoPanel("Background Jobs", info.trimEnd());
 	}
 
 	async handleUsageCommand(reports?: UsageReport[] | null): Promise<void> {
@@ -691,7 +690,7 @@ export class CommandController {
 
 	handleHotkeysCommand(): void {
 		const hotkeys = buildHotkeysMarkdown({ keybindings: this.ctx.keybindings });
-		showMarkdownPanel(this.ctx, "Keyboard Shortcuts", hotkeys);
+		this.ctx.showInfoPanel("Keyboard Shortcuts", hotkeys, { markdown: true });
 	}
 
 	handleToolsCommand(): void {
@@ -699,7 +698,7 @@ export class CommandController {
 			tools: this.ctx.session.agent.state.tools,
 			xdevTools: this.ctx.session.getXdevToolEntries(),
 		});
-		showMarkdownPanel(this.ctx, "Available Tools", tools);
+		this.ctx.showInfoPanel("Available Tools", tools, { markdown: true });
 	}
 
 	handleContextCommand(): void {
@@ -708,14 +707,7 @@ export class CommandController {
 			this.ctx.showWarning("Context usage is unavailable: no model is selected for this session.");
 			return;
 		}
-		const output = renderContextUsage(breakdown, theme);
-		const block = new TranscriptBlock();
-		block.addChild(new DynamicBorder());
-		block.addChild(new Text(theme.bold(theme.fg("accent", "Context Usage")), 1, 0));
-		block.addChild(new Spacer(1));
-		block.addChild(new Text(output, 1, 0));
-		block.addChild(new DynamicBorder());
-		this.ctx.presentCommandOutput(block);
+		this.ctx.showInfoPanel("Context Usage", renderContextUsage(breakdown, theme));
 	}
 
 	async handleMemoryCommand(text: string): Promise<void> {
@@ -730,13 +722,7 @@ export class CommandController {
 				this.ctx.showWarning("Memory payload is empty (memory backend off, disabled, or no memory available).");
 				return;
 			}
-			const block = new TranscriptBlock();
-			block.addChild(new DynamicBorder());
-			block.addChild(new Text(theme.bold(theme.fg("accent", "Memory Injection Payload")), 1, 0));
-			block.addChild(new Spacer(1));
-			block.addChild(new Markdown(payload, 1, 1, getMarkdownTheme()));
-			block.addChild(new DynamicBorder());
-			this.ctx.presentCommandOutput(block);
+			this.ctx.showInfoPanel("Memory Injection Payload", payload, { markdown: true });
 			return;
 		}
 
@@ -796,7 +782,9 @@ export class CommandController {
 					this.ctx.showWarning(memoryStatsUnavailableMessage(backend.id, action));
 					return;
 				}
-				showMarkdownPanel(this.ctx, `Memory ${action === "stats" ? "Stats" : "Diagnostics"}`, payload);
+				this.ctx.showInfoPanel(`Memory ${action === "stats" ? "Stats" : "Diagnostics"}`, payload, {
+					markdown: true,
+				});
 			} catch (error) {
 				this.ctx.showError(`Memory ${action} failed: ${error instanceof Error ? error.message : String(error)}`);
 			}

@@ -62,6 +62,12 @@ interface AppKeybindings {
 	"app.history.search": true;
 	"app.stt.toggle": true;
 	"app.live.toggle": true;
+	"app.context.show": true;
+	"app.hotkeys.show": true;
+	"app.tools.show": true;
+	"app.memory.view": true;
+	"app.memory.stats": true;
+	"app.jobs.show": true;
 }
 
 /** Application action identifier registered alongside the base TUI keybindings. */
@@ -220,6 +226,30 @@ export const KEYBINDINGS = {
 	"app.session.deleteNoninvasive": {
 		defaultKeys: "ctrl+backspace",
 		description: "Delete session (non-invasive)",
+	},
+	"app.context.show": {
+		defaultKeys: [],
+		description: "Show context usage in a transient panel",
+	},
+	"app.hotkeys.show": {
+		defaultKeys: [],
+		description: "Show keyboard shortcuts in a transient panel",
+	},
+	"app.tools.show": {
+		defaultKeys: [],
+		description: "Show available tools in a transient panel",
+	},
+	"app.memory.view": {
+		defaultKeys: [],
+		description: "Show the injected memory payload in a transient panel",
+	},
+	"app.memory.stats": {
+		defaultKeys: [],
+		description: "Show memory statistics in a transient panel",
+	},
+	"app.jobs.show": {
+		defaultKeys: [],
+		description: "Show background jobs in a transient panel",
 	},
 	"app.tree.foldOrUp": {
 		defaultKeys: ["ctrl+left", "alt+left"],

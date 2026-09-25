@@ -3,7 +3,7 @@ import { type Component, type OverlayHandle, setKeybindings, TUI, visibleWidth }
 import type { Terminal, TerminalAppearance } from "@oh-my-pi/pi-tui/terminal";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { Settings } from "../../../src/config/settings";
-import { SessionInfoOverlay } from "@oh-my-pi/pi-tui/overlays/session-info-overlay";
+import { InfoPanelOverlay } from "@oh-my-pi/pi-tui/overlays/info-panel-overlay";
 import { getThemeByName, setThemeInstance, type Theme } from "@oh-my-pi/pi-tui/theme";
 
 class MinimalTerminal implements Terminal {
@@ -83,12 +83,13 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-describe("SessionInfoOverlay", () => {
+describe("InfoPanelOverlay", () => {
 	it("renders session details, footer help, and fixed-width box rows", () => {
-		const overlay = new SessionInfoOverlay(
+		const overlay = new InfoPanelOverlay(
 			{ terminal: { rows: 12 } },
 			"File: /tmp/session.jsonl\nProvider: openai\nTokens: 42",
 			() => {},
+			{ title: "Session Info" },
 		);
 
 		const lines = overlay.render(48);
@@ -104,12 +105,33 @@ describe("SessionInfoOverlay", () => {
 		expect(lines).toHaveLength(7);
 	});
 
+	it("renders a custom title and markdown content", () => {
+		const overlay = new InfoPanelOverlay(
+			{ terminal: { rows: 12 } },
+			"# Keyboard Shortcuts\n\n| Action | Key |\n| --- | --- |\n| Submit | enter |",
+			() => {},
+			{ title: "Keyboard Shortcuts", markdown: true },
+		);
+
+		const lines = overlay.render(48);
+		const plain = lines.map(line => line.replace(/\x1b\[[0-9;]*m/g, ""));
+		const text = plain.join("\n");
+
+		expect(plain[0]).toContain("Keyboard Shortcuts");
+		expect(plain.filter(line => line.trim() === "").length).toBeLessThan(lines.length - 1);
+		expect(text).toContain("Submit");
+		expect(text).toContain("enter");
+		expect(text).not.toContain("#");
+		expect(lines.map(line => visibleWidth(line))).toEqual(Array(lines.length).fill(48));
+	});
+
 	it("preserves exact-width details when the scrollbar is visible", () => {
 		const exactWidthDetail = `${"A".repeat(43)}Z`;
-		const overlay = new SessionInfoOverlay(
+		const overlay = new InfoPanelOverlay(
 			{ terminal: { rows: 8 } },
 			[exactWidthDetail, "line 2", "line 3", "line 4", "line 5"].join("\n"),
 			() => {},
+			{ title: "Session Info" },
 		);
 
 		const text = overlay
@@ -121,10 +143,11 @@ describe("SessionInfoOverlay", () => {
 	});
 
 	it("keeps narrow panels within the terminal height", () => {
-		const overlay = new SessionInfoOverlay(
+		const overlay = new InfoPanelOverlay(
 			{ terminal: { rows: 8 } },
 			Array.from({ length: 20 }, (_, index) => `Detail ${index}`).join("\n"),
 			() => {},
+			{ title: "Session Info" },
 		);
 
 		const lines = overlay.render(12);
@@ -138,10 +161,11 @@ describe("SessionInfoOverlay", () => {
 	it("scrolls long details and closes on the configured cancel key", () => {
 		setKeybindings(KeybindingsManager.inMemory({ "tui.select.cancel": "ctrl+g" }));
 		const onClose = vi.fn();
-		const overlay = new SessionInfoOverlay(
+		const overlay = new InfoPanelOverlay(
 			{ terminal: { rows: 8 } },
 			Array.from({ length: 20 }, (_, index) => `Detail ${index}`).join("\n"),
 			onClose,
+			{ title: "Session Info" },
 		);
 
 		const initial = overlay
@@ -168,7 +192,7 @@ describe("SessionInfoOverlay", () => {
 		const editor = new InputRecorder("editor");
 		let handle: OverlayHandle | undefined;
 		const onClose = vi.fn(() => handle?.hide());
-		const overlay = new SessionInfoOverlay(tui, "File: in-memory", onClose);
+		const overlay = new InfoPanelOverlay(tui, "File: in-memory", onClose, { title: "Session Info" });
 
 		tui.addChild(editor);
 		tui.setFocus(editor);

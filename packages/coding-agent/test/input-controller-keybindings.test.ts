@@ -221,6 +221,7 @@ async function createContext() {
 		settings: Settings.isolated(),
 		chatContainer: { children: [], setToolActivityVisible: vi.fn() },
 		handleHotkeysCommand: vi.fn(),
+		handleContextCommand: vi.fn(),
 		handlePlanModeCommand: vi.fn(),
 		handleClearCommand: vi.fn(),
 		showTreeSelector: vi.fn(),
@@ -835,6 +836,24 @@ describe("InputController global editor actions", () => {
 
 		expect(dispatchInput(listeners, CTRL_SHIFT_O)).toBeUndefined();
 		expect(context.ctx.hideToolActivity).toBe(false);
+	});
+});
+
+describe("InputController transient info panel actions", () => {
+	beforeAll(async () => {
+		await initTheme(false);
+	});
+
+	it("binds mapped keys to their info panel command and leaves defaults unbound", async () => {
+		const context = await createContext();
+		context.setKeybinding("app.context.show", ["ctrl+alt+c"]);
+		const controller = new context.InputController(context.ctx);
+		controller.setupKeyHandlers();
+
+		const contextHandler = context.customHandlers.get("ctrl+alt+c");
+		expect(contextHandler).toBeFunction();
+		contextHandler!();
+		expect(context.ctx.handleContextCommand).toHaveBeenCalledTimes(1);
 	});
 });
 

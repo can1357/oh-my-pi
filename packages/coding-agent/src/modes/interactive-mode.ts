@@ -214,7 +214,7 @@ import type { HookSelectorComponent, HookSelectorSlider } from "@oh-my-pi/pi-tui
 import { type PlanReviewAnnotationState, PlanReviewOverlay } from "@oh-my-pi/pi-tui/overlays/plan-review-overlay";
 import { PlanSaveOverlay, type PlanSaveOverlayResult } from "@oh-my-pi/pi-tui/overlays/plan-save-overlay";
 import { ServedModelTracker } from "@oh-my-pi/pi-tui/chat/served-model-marker";
-import { SessionInfoOverlay } from "@oh-my-pi/pi-tui/overlays/session-info-overlay";
+import { InfoPanelOverlay } from "@oh-my-pi/pi-tui/overlays/info-panel-overlay";
 import { SkillMessageComponent } from "@oh-my-pi/pi-tui/chat/skill-message";
 import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
 import { statusLineHost } from "./status-line-host";
@@ -1193,7 +1193,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#planModeHasEntered = false;
 	#planReviewOverlay: PlanReviewOverlay | undefined;
 	#planReviewOverlayHandle: OverlayHandle | undefined;
-	#sessionInfoOverlayHandle: OverlayHandle | undefined;
+	#infoPanelOverlayHandle: OverlayHandle | undefined;
 	#planReviewCancel: (() => void) | undefined;
 	/** Serializable review annotations keyed by the resolved plan file path. */
 	#planReviewAnnotationState = new Map<string, PlanReviewAnnotationState>();
@@ -1306,7 +1306,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	clearTransientSessionUi(): void {
-		this.#hideSessionInfo();
+		this.#hideInfoPanel();
 		if (this.loadingAnimation) {
 			this.loadingAnimation.stop();
 			this.loadingAnimation = undefined;
@@ -6056,7 +6056,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// InteractiveMode instance (e.g. test harnesses, headless re-init).
 		setAutoQaConsentHandler(null, null);
 		setCfgApprovalHost(null);
-		this.#hideSessionInfo();
+		this.#hideInfoPanel();
 		if (this.#ownsStartedUi) {
 			this.ui.stop();
 			this.#ownsStartedUi = false;
@@ -6384,10 +6384,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#renderDeferredCommandNotice();
 		this.ui.requestRender();
 	}
-	showSessionInfo(info: string): void {
-		this.#hideSessionInfo();
-		const overlay = new SessionInfoOverlay(this.ui, info, () => this.#hideSessionInfo());
-		this.#sessionInfoOverlayHandle = this.ui.showOverlay(overlay, {
+	showInfoPanel(title: string, content: string, options: { markdown?: boolean } = {}): void {
+		this.#hideInfoPanel();
+		const overlay = new InfoPanelOverlay(this.ui, content, () => this.#hideInfoPanel(), { title, ...options });
+		this.#infoPanelOverlayHandle = this.ui.showOverlay(overlay, {
 			anchor: "bottom-center",
 			width: "100%",
 			maxHeight: "100%",
@@ -6397,9 +6397,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.requestRender();
 	}
 
-	#hideSessionInfo(): void {
-		const handle = this.#sessionInfoOverlayHandle;
-		this.#sessionInfoOverlayHandle = undefined;
+	#hideInfoPanel(): void {
+		const handle = this.#infoPanelOverlayHandle;
+		this.#infoPanelOverlayHandle = undefined;
 		if (!handle) return;
 		handle.hide();
 		// Focus the visible editor-slot owner, not this.editor: an extension ask
