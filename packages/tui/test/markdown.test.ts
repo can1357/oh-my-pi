@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import {
 	autolinkSchemeScanIndex,
@@ -8,6 +8,7 @@ import {
 	renderInlineMarkdown,
 	urlTokenPossible,
 } from "@oh-my-pi/pi-tui/components/markdown";
+import * as hyperlinkModule from "@oh-my-pi/pi-tui/render/hyperlink";
 import { setTerminalTextSizing, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { type Component, TUI } from "@oh-my-pi/pi-tui/tui";
 import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
@@ -1567,6 +1568,7 @@ bar`,
 		});
 
 		it("hides the URL of labeled links when OSC 8 carries the target", () => {
+			const detected = spyOn(hyperlinkModule, "isHyperlinkRenderingDetected").mockReturnValue(true);
 			const lines = new Markdown("[click here](https://example.com)", 0, 0, defaultMarkdownTheme)
 				.render(80)
 				.map(inspectHyperlinks);
@@ -1580,6 +1582,16 @@ bar`,
 				.flatMap(line => [...line.visible].filter((_, i) => line.targets[i] === "https://example.com"))
 				.join("");
 			expect(linked).toBe("click here");
+			detected.mockRestore();
+		});
+
+		it("keeps the URL of labeled links when OSC 8 is forced rather than detected", () => {
+			const detected = spyOn(hyperlinkModule, "isHyperlinkRenderingDetected").mockReturnValue(false);
+			const output = new Markdown("[forced link](https://example.org)", 0, 0, defaultMarkdownTheme)
+				.render(80)
+				.join("\n");
+			expect(stripTerminalSequences(output).trim()).toBe("forced link (https://example.org)");
+			detected.mockRestore();
 		});
 
 		it("keeps the URL of labeled links whose OSC 8 target is resolved to a different URI", () => {

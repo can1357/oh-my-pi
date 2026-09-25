@@ -14,6 +14,7 @@ import { plainText } from "../native/spans";
 import { md } from "../native/describe";
 import type { DescribeContext, NativeNode } from "../native/node";
 import type { SymbolTheme } from "../symbols";
+import { isHyperlinkRenderingDetected } from "../render/hyperlink";
 import { TERMINAL } from "../terminal-capabilities";
 import type { Component } from "../tui";
 import {
@@ -3316,7 +3317,10 @@ export class Markdown implements Component {
 					// text="foo@bar.com" but href="mailto:foo@bar.com")
 					const hrefForComparison = href.startsWith("mailto:") ? href.slice(7) : href;
 					const labelCarriesHref =
-						clickableLinkText !== styledLinkText && target === href && /^https?:\/\//i.test(href);
+						clickableLinkText !== styledLinkText &&
+						target === href &&
+						/^https?:\/\//i.test(href) &&
+						isHyperlinkRenderingDetected();
 					if (!href || labelCarriesHref || token.text === href || token.text === hrefForComparison)
 						result += clickableLinkText + stylePrefix;
 					else {
