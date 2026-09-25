@@ -22,6 +22,9 @@ use crate::desktop::{
 };
 
 const DEVICE_DISCOVERY_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
+const DEVICE_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
+const DEVICE_DISCOVERY_WAKE_INTERVAL: Duration = Duration::from_millis(100);
+const DEVICE_DISCOVERY_MAX_EVENTS: usize = 128;
 
 #[derive(Clone, Copy)]
 struct DiscoveryTargets {
@@ -193,23 +196,55 @@ impl Libei {
 		events: &mut EiConvertEventStream,
 		targets: DiscoveryTargets,
 	) -> CoreResult<()> {
+		self.discover_devices_with_timeout(runtime, events, targets, DEVICE_DISCOVERY_TIMEOUT)
+	}
+
+	fn discover_devices_with_timeout(
+		&mut self,
+		runtime: &tokio::runtime::Runtime,
+		events: &mut EiConvertEventStream,
+		targets: DiscoveryTargets,
+		timeout: Duration,
+	) -> CoreResult<()> {
 		runtime.block_on(async {
 			let mut pending_pointer = None;
 			let mut pending_keyboard = None;
 			let mut drain_deadline = None;
-			for _ in 0..128 {
-				let event = if let Some(deadline) = drain_deadline {
-					match tokio::time::timeout_at(deadline, events.next()).await {
-						Ok(event) => event,
-						Err(_) => break,
+			let discovery_deadline = tokio::time::Instant::now() + timeout;
+			let mut processed_events = 0;
+			loop {
+				let now = tokio::time::Instant::now();
+				let deadline = drain_deadline
+					.unwrap_or(discovery_deadline)
+					.min(discovery_deadline);
+				if now >= deadline {
+					if targets.is_complete(self.pointer.is_some(), self.keyboard.is_some()) {
+						break;
 					}
-				} else {
-					events.next().await
+					return Err(DesktopError::input_failed(if drain_deadline.is_some() {
+						"libei device discovery ended before every granted device resumed"
+					} else {
+						"libei device discovery timed out"
+					}));
 				}
-				.ok_or_else(|| {
-					DesktopError::input_failed("libei disconnected during device discovery")
-				})?
-				.map_err(|err| DesktopError::input_failed(format!("libei device discovery: {err}")))?;
+				let wake_deadline = (now + DEVICE_DISCOVERY_WAKE_INTERVAL).min(deadline);
+				let Ok(event) = tokio::time::timeout_at(wake_deadline, events.next()).await else {
+					// Messages can remain queued after handshake's separate block_on;
+					// drain them rather than waiting indefinitely for another readiness edge.
+					self
+						.context
+						.read()
+						.map_err(|err| DesktopError::input_failed(format!("libei socket read: {err}")))?;
+					continue;
+				};
+				let event = event
+					.ok_or_else(|| {
+						DesktopError::input_failed("libei disconnected during device discovery")
+					})?
+					.map_err(|err| {
+						DesktopError::input_failed(format!("libei device discovery: {err}"))
+					})?;
+				processed_events += 1;
 				match event {
 					EiEvent::SeatAdded(event) => {
 						event.seat.bind_capabilities(&[
@@ -262,6 +297,16 @@ impl Libei {
 				if drain_deadline.is_none() && (self.pointer.is_some() || self.keyboard.is_some()) {
 					drain_deadline = Some(tokio::time::Instant::now() + DEVICE_DISCOVERY_DRAIN_TIMEOUT);
 				}
+				if processed_events >= DEVICE_DISCOVERY_MAX_EVENTS {
+					return Err(DesktopError::input_failed(
+						"libei device discovery exceeded the event limit",
+					));
+				}
+			}
+			if !targets.is_complete(self.pointer.is_some(), self.keyboard.is_some()) {
+				return Err(DesktopError::input_failed(
+					"libei device discovery ended before every granted device resumed",
+				));
 			}
 			Ok(())
 		})
@@ -283,7 +328,15 @@ impl Libei {
 							"libei disconnected while reading keyboard state",
 						));
 					},
-					Err(_) => break,
+					Err(_) => {
+						if self.context.read().map_err(|err| {
+							DesktopError::input_failed(format!("libei keyboard socket read: {err}"))
+						})? == 0
+						{
+							break;
+						}
+						continue;
+					},
 				};
 				match event {
 					EiEvent::KeyboardModifiers(event) => {
@@ -698,7 +751,113 @@ fn evdev_char(character: char) -> Option<(u32, bool)> {
 
 #[cfg(test)]
 mod tests {
+	use std::{
+		os::unix::net::UnixStream,
+		sync::{
+			Arc,
+			atomic::{AtomicBool, Ordering},
+		},
+		thread,
+	};
+
 	use super::*;
+
+	fn test_runtime() -> &'static tokio::runtime::Runtime {
+		Box::leak(Box::new(
+			tokio::runtime::Builder::new_current_thread()
+				.enable_io()
+				.enable_time()
+				.build()
+				.unwrap(),
+		))
+	}
+
+	fn eis_fixture(
+		socket: UnixStream,
+		with_devices: bool,
+		extra_seats: usize,
+		stop: Arc<AtomicBool>,
+	) {
+		let context = reis::eis::Context::new(socket).unwrap();
+		let mut handshaker = reis::handshake::EisHandshaker::new(&context, 1);
+		loop {
+			match context.read() {
+				Ok(_) => {},
+				Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+					thread::sleep(Duration::from_millis(1));
+					continue;
+				},
+				Err(err) => panic!("EIS fixture socket read failed: {err}"),
+			}
+			while let Some(result) = context.pending_request() {
+				let reis::PendingRequestResult::Request(request) = result else {
+					panic!("EIS fixture received an invalid handshake request");
+				};
+				let Some(response) = handshaker.handle_request(request).unwrap() else {
+					continue;
+				};
+				let connection = response.connection;
+				if with_devices {
+					let seat = connection.seat(1);
+					seat.capability(2 << 1, "ei_pointer_absolute");
+					seat.capability(2 << 2, "ei_keyboard");
+					seat.done();
+
+					let pointer = seat.device(1);
+					pointer.name("test pointer");
+					pointer.device_type(reis::eis::device::DeviceType::Virtual);
+					pointer.region(0, 0, 1920, 1080, 1.0);
+					pointer.interface::<reis::eis::PointerAbsolute>(1);
+					pointer.done();
+					pointer.resumed(2);
+
+					let keyboard = seat.device(1);
+					keyboard.name("test keyboard");
+					keyboard.device_type(reis::eis::device::DeviceType::Virtual);
+					keyboard.interface::<reis::eis::Keyboard>(1);
+					keyboard.done();
+					keyboard.resumed(3);
+				} else {
+					for _ in 0..extra_seats {
+						connection.seat(1).done();
+					}
+				}
+				context.flush().unwrap();
+				while !stop.load(Ordering::Relaxed) {
+					let _ = context.read();
+					thread::sleep(Duration::from_millis(1));
+				}
+				return;
+			}
+			thread::sleep(Duration::from_millis(1));
+		}
+	}
+
+	fn handshaken_fixture(
+		with_devices: bool,
+		extra_seats: usize,
+	) -> (Libei, EiConvertEventStream, Arc<AtomicBool>, thread::JoinHandle<()>) {
+		let (client_socket, server_socket) = UnixStream::pair().unwrap();
+		let stop = Arc::new(AtomicBool::new(false));
+		let server_stop = Arc::clone(&stop);
+		let server =
+			thread::spawn(move || eis_fixture(server_socket, with_devices, extra_seats, server_stop));
+		let runtime = test_runtime();
+		let context = ei::Context::new(client_socket).unwrap();
+		let (_connection, events) = runtime
+			.block_on(context.handshake_tokio("omp-test", ei::handshake::ContextType::Sender))
+			.unwrap();
+		let backend = Libei {
+			context,
+			pointer: None,
+			keyboard: None,
+			sequence: 1,
+			runtime,
+			events: None,
+			portal_session: None,
+		};
+		(backend, events, stop, server)
+	}
 
 	#[test]
 	fn discovery_waits_for_every_granted_device() {
@@ -706,5 +865,55 @@ mod tests {
 
 		assert!(!targets.is_complete(false, true));
 		assert!(targets.is_complete(true, true));
+	}
+
+	#[test]
+	fn discovery_reads_prequeued_socket_events_after_handshake() {
+		let (mut backend, mut events, stop, server) = handshaken_fixture(true, 0);
+		backend
+			.discover_devices_with_timeout(
+				backend.runtime,
+				&mut events,
+				DiscoveryTargets::ALL,
+				Duration::from_secs(1),
+			)
+			.unwrap();
+		assert!(backend.pointer.is_some());
+		assert!(backend.keyboard.is_some());
+		stop.store(true, Ordering::Relaxed);
+		server.join().unwrap();
+	}
+
+	#[test]
+	fn discovery_times_out_when_a_socket_peer_never_resumes_devices() {
+		let (mut backend, mut events, stop, server) = handshaken_fixture(false, 0);
+		let error = backend
+			.discover_devices_with_timeout(
+				backend.runtime,
+				&mut events,
+				DiscoveryTargets::ALL,
+				Duration::from_millis(25),
+			)
+			.unwrap_err();
+		assert!(error.to_string().contains("device discovery timed out"));
+		stop.store(true, Ordering::Relaxed);
+		server.join().unwrap();
+	}
+
+	#[test]
+	fn discovery_errors_when_the_socket_event_cap_is_exhausted() {
+		let (mut backend, mut events, stop, server) =
+			handshaken_fixture(false, DEVICE_DISCOVERY_MAX_EVENTS);
+		let error = backend
+			.discover_devices_with_timeout(
+				backend.runtime,
+				&mut events,
+				DiscoveryTargets::ALL,
+				Duration::from_secs(1),
+			)
+			.unwrap_err();
+		assert!(error.to_string().contains("exceeded the event limit"));
+		stop.store(true, Ordering::Relaxed);
+		server.join().unwrap();
 	}
 }
