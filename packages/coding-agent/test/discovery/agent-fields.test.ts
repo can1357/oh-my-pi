@@ -98,6 +98,19 @@ describe("parseAgentFields", () => {
 		expect(parseAgentFields({ name: "quiet", description: "desc" })?.tools).toBeUndefined();
 	});
 
+	test("treats a malformed tools value as absent rather than an empty toolset", () => {
+		// Only the `[]` literal means "present but empty". A blank CSV or an
+		// array holding no strings carries no tool names, so it must degrade to
+		// the absent-field default (unrestricted); parsing it as `[]` would
+		// silently strip every tool down to `yield`.
+		expect(parseAgentFields({ name: "quiet", description: "desc", tools: "" })?.tools).toBeUndefined();
+		expect(parseAgentFields({ name: "quiet", description: "desc", tools: "   " })?.tools).toBeUndefined();
+		expect(parseAgentFields({ name: "quiet", description: "desc", tools: [1, 2] })?.tools).toBeUndefined();
+		// An array of blank strings carries no tool names either — same absent
+		// default, not a yield-only strip.
+		expect(parseAgentFields({ name: "quiet", description: "desc", tools: ["", "   "] })?.tools).toBeUndefined();
+	});
+
 	test("maps legacy search alias to grep and keeps find canonical", () => {
 		const fields = parseAgentFields({
 			name: "reviewer",
@@ -149,6 +162,89 @@ describe("parseAgentFields", () => {
 
 		expect(fields).toBeDefined();
 		expect(fields?.autoloadSkills).toBeUndefined();
+	});
+
+	test("parses skills allowlist from array frontmatter", () => {
+		const fields = parseAgentFields({
+			name: "worker",
+			description: "desc",
+			skills: ["alpha", "beta-*"],
+		});
+
+		expect(fields).toBeDefined();
+		expect(fields?.skills).toEqual(["alpha", "beta-*"]);
+	});
+
+	test("parses skills allowlist from CSV string", () => {
+		const fields = parseAgentFields({
+			name: "worker",
+			description: "desc",
+			skills: "alpha, beta-*",
+		});
+
+		expect(fields).toBeDefined();
+		expect(fields?.skills).toEqual(["alpha", "beta-*"]);
+	});
+
+	test("keeps empty skills allowlist as an empty array", () => {
+		const fields = parseAgentFields({
+			name: "worker",
+			description: "desc",
+			skills: [],
+		});
+
+		expect(fields).toBeDefined();
+		expect(fields?.skills).toEqual([]);
+	});
+
+	test("treats skills none as an empty allowlist", () => {
+		const fields = parseAgentFields({
+			name: "worker",
+			description: "desc",
+			skills: "none",
+		});
+
+		expect(fields).toBeDefined();
+		expect(fields?.skills).toEqual([]);
+	});
+
+	test("returns undefined skills when field absent", () => {
+		const fields = parseAgentFields({
+			name: "worker",
+			description: "desc",
+		});
+
+		expect(fields).toBeDefined();
+		expect(fields?.skills).toBeUndefined();
+	});
+
+	test("treats a blank skills value as absent rather than an empty allowlist", () => {
+		// Only `[]` and the `"none"` sentinel mean "list nothing". A blank value
+		// is malformed and must fall back to the absent default (unrestricted);
+		// reading it as an empty allowlist would hide every skill because the
+		// user left a field blank.
+		for (const blank of ["", "   ", ["", "  "]]) {
+			expect(parseAgentFields({ name: "worker", description: "desc", skills: blank })?.skills).toBeUndefined();
+		}
+		// A CSV that pairs the sentinel with a real name is a name list, not the
+		// sentinel: only an exact `"none"` lists nothing.
+		expect(parseAgentFields({ name: "worker", description: "desc", skills: "none, git-*" })?.skills).toEqual([
+			"none",
+			"git-*",
+		]);
+	});
+
+	test("parses hideSkills and unhideSkills from frontmatter", () => {
+		const fields = parseAgentFields({
+			name: "worker",
+			description: "desc",
+			hideSkills: ["internal-*"],
+			unhideSkills: ["internal-tools"],
+		});
+
+		expect(fields).toBeDefined();
+		expect(fields?.hideSkills).toEqual(["internal-*"]);
+		expect(fields?.unhideSkills).toEqual(["internal-tools"]);
 	});
 
 	test("parses readSummarize from boolean frontmatter", () => {
