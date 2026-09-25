@@ -35,6 +35,7 @@ import type { CustomMessage } from "../session/messages";
 import type { UsageStatistics } from "../session/session-entries";
 import type { SessionManager } from "../session/session-manager";
 import type { ToolChoiceQueue } from "../session/tool-choice-queue";
+import type { SessionToolPolicy } from "../session/tool-policy";
 import { TaskTool } from "../task";
 import type { AgentOutputManager } from "../task/output-manager";
 import { type AgentDefinition, canSpawnAtDepth } from "../task/types";
@@ -286,7 +287,13 @@ export interface ToolSession {
 	customToolPaths?: ToolPathWithSource[];
 	/** Whether LSP integrations are enabled */
 	enableLsp?: boolean;
-	/** Whether LSP is limited to navigation and diagnostics. */
+	/**
+	 * Whether LSP is limited to navigation and diagnostics. When the session
+	 * exposes `getToolPolicy`, this derives LIVE from the policy
+	 * (`SessionToolPolicy.lspReadOnly()` — a persona dropping write/edit forces
+	 * it on; exit restores it); without a policy it falls back to the
+	 * session-start value the host supplies.
+	 */
 	lspReadOnly?: boolean;
 	/** Whether this invocation may expose IRC. `false` removes it even for subagents. */
 	enableIrc?: boolean;
@@ -390,8 +397,16 @@ export interface ToolSession {
 	getArtifactManager?: () => ArtifactManager | null;
 	/** Allocate a new artifact path and ID for session-scoped truncated output. */
 	allocateOutputArtifact?: (toolType: string) => Promise<{ id?: string; path?: string }>;
-	/** Get session spawns */
-	getSessionSpawns: () => string | null;
+	/**
+	 * Effective session spawn policy. Session-owned overrides (persona `spawns`
+	 * frontmatter) win when set; the string form is the host CLI `--spawns`
+	 * fallback (comma-separated agent names), `null` = unrestricted.
+	 */
+	getSessionSpawns: () => string | string[] | "*" | null;
+	/** Live scout availability (task.disabledAgents ∩ persona-aware spawn policy). Optional: stub sessions fall back to the local derivation. */
+	isScoutSpawnable?: () => boolean;
+	/** Session-wide tool policy (launch/persona state). Absent on minimal test/tool-session stubs. */
+	getToolPolicy?: () => SessionToolPolicy | undefined;
 	/** Session-scoped agent definitions (user-tagged model pseudonyms) merged after discovered agents. */
 	getSessionAgents?: () => readonly AgentDefinition[];
 	/** Get resolved model string if explicitly set for this session */
@@ -733,6 +748,9 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 			const goalState = session.getGoalModeState?.();
 			return goalState === undefined || goalState.enabled === true || goalState.goal.status === "dropped";
 		}
+		// lspReadOnly does NOT drop lsp: the tool self-restricts to
+		// navigation/diagnostics actions (see LspTool's lspReadOnly check), so it
+		// stays registered read-only even in restricted sessions.
 		if (name === "lsp") return enableLsp && cfgLspEnabled.get(session.settings);
 		if (name === "bash") return cfgBashEnabled.get(session.settings);
 		if (name === "eval") return allowEval;

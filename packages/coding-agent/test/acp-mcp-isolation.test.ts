@@ -19,6 +19,7 @@ import { createAcpSessionFactory } from "@oh-my-pi/pi-coding-agent/main";
 import type { CreateAgentSessionOptions, CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { cfgExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 const authStorage = createInMemoryAuthStorage();
@@ -69,6 +70,53 @@ describe("createAcpSessionFactory MCP isolation (issue #1234)", () => {
 			expect(result.session).toBe(fakeSession);
 			expect(captured).toHaveLength(1);
 			expect(captured[0].enableMCP).toBe(false);
+		} finally {
+			await tempDir.remove();
+		}
+	});
+
+	// Regression (Codex P2): the ACP session pins the WORKSPACE's creation-time
+	// roots view but must stay live for settings changes — a reload of the
+	// session's own `extensions` list must land on the next discovery read.
+	// Pre-fix the pinned closure returned the creation snapshot forever.
+	it("serves the session settings' live configured lane from the pinned roots provider", async () => {
+		const tempDir = TempDir.createSync("@pi-acp-roots-live-");
+		try {
+			const settings = Settings.isolated({});
+			const fakeSession = {} as AgentSession;
+			let captured: CreateAgentSessionOptions | undefined;
+			const factory = createAcpSessionFactory({
+				// The CLI hands the factory a launch-cwd provider; the factory
+				// must REPLACE it with the per-workspace pinned closure.
+				baseOptions: {
+					extensionRoots: () => ({
+						explicit: [],
+						mode: "merge",
+						configured: [],
+						configuredLevel: "user",
+					}),
+				} as CreateAgentSessionOptions,
+				settings,
+				sessionDir: tempDir.join("sessions"),
+				authStorage,
+				modelRegistry,
+				parsedArgs: {},
+				rawArgs: [],
+				createSession: async options => {
+					captured = options;
+					return { session: fakeSession } as CreateAgentSessionResult;
+				},
+			});
+
+			await factory(tempDir.path());
+			const provider = captured?.extensionRoots;
+			if (!provider) throw new Error("Expected the factory to pass an extensionRoots provider");
+			expect(provider().configured).toEqual([]);
+
+			// The SESSION's own settings (the clone the factory made), reloaded
+			// with a configured extension — the next provider read must carry it.
+			if (captured?.settings) cfgExtensions.override(captured.settings, [tempDir.join("configured-pkg")]);
+			expect(provider().configured).toEqual([tempDir.join("configured-pkg")]);
 		} finally {
 			await tempDir.remove();
 		}

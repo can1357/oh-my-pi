@@ -356,10 +356,12 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 			IS_LINE_NUMBER_MODE: !displayMode.hashLines && displayMode.lineNumbers,
 			hasFind: this.session.isToolActive?.("find") ?? isFindEnabled(this.session),
 			eagerDelegation: sessionDelegationBias(this.session) === "eager",
-			scoutAvailable: isScoutSpawnable(
-				cfgTaskDisabledAgents.get(this.session.settings),
-				this.session.getSessionSpawns?.() ?? "*",
-			),
+			scoutAvailable:
+				this.session.isScoutSpawnable?.() ??
+				isScoutSpawnable(
+					cfgTaskDisabledAgents.get(this.session.settings),
+					this.session.getSessionSpawns?.() ?? "*",
+				),
 		});
 	}
 	readonly parameters = searchSchema;

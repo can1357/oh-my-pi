@@ -16,12 +16,16 @@ export interface ResolvedSpawnPolicy {
 }
 
 /** Resolves spawn frontmatter into the default and prompt/error surfaces. */
-export function resolveSpawnPolicy(parentSpawns: string | boolean | null | undefined): ResolvedSpawnPolicy {
+export function resolveSpawnPolicy(
+	parentSpawns: string | string[] | "*" | boolean | null | undefined,
+): ResolvedSpawnPolicy {
 	let normalized: string;
 	if (parentSpawns === false) {
 		normalized = "";
 	} else if (parentSpawns === true || parentSpawns === null || parentSpawns === undefined) {
 		normalized = "*";
+	} else if (Array.isArray(parentSpawns)) {
+		normalized = parentSpawns.join(",");
 	} else {
 		normalized = parentSpawns.trim();
 	}
@@ -63,7 +67,7 @@ export function resolveSpawnPolicy(parentSpawns: string | boolean | null | undef
  */
 export function isScoutSpawnable(
 	disabledAgents: readonly string[] | undefined,
-	spawns: string | boolean | null | undefined,
+	spawns: string | string[] | "*" | boolean | null | undefined,
 ): boolean {
 	if (disabledAgents?.includes("scout")) return false;
 	const policy = resolveSpawnPolicy(spawns);

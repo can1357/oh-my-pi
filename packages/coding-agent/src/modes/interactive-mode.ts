@@ -62,7 +62,7 @@ import type { CollabGuestLink } from "../collab/guest";
 import { CollabController } from "../collab/controller";
 import type { CollabHost } from "../collab/host";
 import { formatKeyHint, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
-import { formatModelString, type ResolvedModelRoleValue } from "../config/model-resolver";
+import { formatModelString, type ResolvedModelRoleValue, resolveModelOverride } from "../config/model-resolver";
 import { isSettingsInitialized, Settings, settings } from "../config/settings";
 import { clearClaudePluginRootsCache } from "../discovery/helpers";
 import type {
@@ -118,6 +118,14 @@ import type { CompactMode } from "../session/compact-modes";
 import type { ForeignSessionSource } from "../session/foreign-session-store";
 import { HistoryStorage } from "../session/history-storage";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
+import {
+	appendPersonaJournalEntry,
+	clearPersonaJournalEntry,
+	readPersistedAgentPersona,
+	reconcileSessionPersona,
+} from "../session/persisted-persona";
+import { createDefaultPersonaModelHooks, type PersonaModelApplyHooks } from "../session/persona-model-hooks";
+import type { PersonaExplicitOverrides } from "../session/tool-policy";
 import { resolveMarkdownLinkTargets } from "../internal-urls/hyperlink-targets";
 import { modelMentionDisplayName } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
 import { modelMentionChipLabel } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
@@ -132,11 +140,12 @@ import { type DictationTarget, MicCursor, type SttCallbacks, STTController, type
 import type { SpaceHoldHandler } from "@oh-my-pi/pi-tui/space-hold";
 import { resolveCliEntryCmd } from "../subprocess/worker-client";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
+import { type AgentDefinition, discoverAgents, getAgent } from "../task";
 import { labelEchoesHandle } from "../task/label";
 import { agentTypeBadge, formatTaskId } from "@oh-my-pi/pi-tui/tools/task";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
-import { isMCPToolName } from "../tools/builtin-names";
 import type { LspStartupServerInfo } from "../tools";
+import { isMCPToolName } from "../tools/builtin-names";
 import { resolvePlanFilePath } from "../plan-mode/plan-files";
 import { resolveToCwd } from "../tools/path-utils";
 import { StreamPublisher } from "../stream/publisher";
@@ -196,6 +205,7 @@ import {
 	type VibeParentSession,
 	VibeSessionRegistry,
 } from "../vibe/runtime";
+import { AgentPersonaPickerComponent } from "./components/agent-persona-picker";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-tui/chat/read-tool-group";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
@@ -1171,6 +1181,14 @@ export class InteractiveMode implements InteractiveModeContext {
 	#headerAfter: readonly Component[] = [];
 	#planModePreviousToolPresentation: { enabled: string[]; mounted: string[] } | undefined;
 	#goalModePreviousTools: string[] | undefined;
+	// j2x: the pre-switch persona teardown discards the outer mode's pre-mode
+	// snapshots so a successful switch cannot replay them onto the target.
+	// A FAILED switch restores the persona runtime state but not these TUI
+	// snapshots — stashing them here keeps the still-active source mode's
+	// presentation restorable until #clearTransientModeState clears the stash
+	// on the next successful reconciliation.
+	#personaSwitchRollbackPlan: { enabled: string[]; mounted: string[] } | undefined;
+	#personaSwitchRollbackGoal: string[] | undefined;
 	#vibeModePreviousTools: string[] | undefined;
 	#vibeModeOwnerScope: VibeOwnerScope | undefined;
 	// In-flight #enterVibeMode promise: set before the activateVibeTools await
@@ -1194,6 +1212,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	#goalSuppressNextContinuation = false;
 	#planModePreviousModelState: { model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined;
 	#pendingModelSwitch: { model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined;
+	/** Session file of the last mode reconciliation (same-file reload vs real boundary). */
+	#reconciledSessionFile: string | undefined;
+	/** Consecutive flush failures for the currently owed persona restore (retry cap). */
+	#pendingModelSwitchFailures = 0;
 	/** Whether #pendingModelSwitch was queued by the live plan-role reconciler. */
 	#pendingPlanModelSwitch = false;
 	#planModeHasEntered = false;
@@ -1937,6 +1959,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.session.setSessionBeforeSwitchReconciler?.(async () => {
 			await this.#liveCommandController.stop();
 			await this.#quiesceVibeForSessionSwitch();
+			// j2d: tear the SOURCE persona down BEFORE switchSession restores the
+			// target's model/thinking. The post-switch reconciler runs AFTER that
+			// restore, so a runtime.exit() there re-applies the source persona's
+			// baseline via setModel — clobbering the target's restored model (and
+			// journaling the clobber as a model_change). The pre-switch hook runs
+			// before switchSession captures/restores any model state; the
+			// reconcile path below still ENTERS the target persona after the
+			// restore, which is the correct ordering for entry.
+			await this.#exitSourcePersonaForSwitch();
 		});
 		this.session.setSessionSwitchReconciler?.(() => this.#reconcileModeFromSession({ preserveActiveGoal: true }));
 		await logger.time("InteractiveMode.init:reconcileMode", () => this.#reconcileModeFromSession());
@@ -3971,6 +4002,15 @@ export class InteractiveMode implements InteractiveModeContext {
 	async #applyPlanModeModel(): Promise<void> {
 		const resolved = this.session.resolveRoleModelWithThinking("plan");
 		if (!resolved.model) return;
+		// fwkeR: a mid-turn persona exit queued its pre-persona restore in
+		// #pendingModelSwitch. Plan mode's transition would overwrite the slot
+		// (and capture the still-live persona model as its previous state),
+		// losing the restore forever. Flush the queue FIRST so the base-session
+		// model lands before plan's own capture. A plan-queued switch owns the
+		// slot already and is left alone.
+		if (this.#pendingModelSwitch && !this.#pendingPlanModelSwitch) {
+			await this.flushPendingModelSwitch();
+		}
 
 		const currentModel = this.session.model;
 		// Capture the pre-plan model so #exitPlanMode can restore it. Only the
@@ -4048,29 +4088,71 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
+	/** Drops the pending model queue without applying it (session-boundary handoff). */
+	clearPendingModelSwitch(): void {
+		this.#pendingModelSwitch = undefined;
+		this.#pendingPlanModelSwitch = false;
+		this.#pendingModelSwitchFailures = 0;
+	}
+
 	/** Apply any deferred model switch after the current stream ends. */
 	async flushPendingModelSwitch(): Promise<void> {
 		const pending = this.#pendingModelSwitch;
+		if (!pending) return;
+		const pendingWasPlan = this.#pendingPlanModelSwitch;
 		this.#pendingModelSwitch = undefined;
 		this.#pendingPlanModelSwitch = false;
-		if (!pending) return;
 		try {
 			await this.session.setModelTemporary(pending.model, pending.thinkingLevel);
 		} catch (error) {
+			// A persona restore (the only entry whose failure strands a cleared
+			// persona on its persona model) stays owed for the next boundary, and
+			// the runtime's parked baseline stays intact with it. A plan-role
+			// switch re-derives from settings on the next transition, so it is
+			// not re-queued — retrying a rejected switch every turn could loop.
+			const retries = ++this.#pendingModelSwitchFailures;
+			const giveUp = pendingWasPlan || retries >= 3;
+			if (!giveUp && !this.#pendingModelSwitch) {
+				this.#pendingModelSwitch = pending;
+			}
 			this.showWarning(
-				`Failed to switch model after streaming: ${error instanceof Error ? error.message : String(error)}`,
+				giveUp
+					? `Giving up on the deferred model switch after ${retries} failures (${error instanceof Error ? error.message : String(error)}); switch with /model if needed.`
+					: `Failed to switch model after streaming: ${error instanceof Error ? error.message : String(error)}`,
 			);
+			if (giveUp) this.#pendingModelSwitchFailures = 0;
+			return;
 		}
+		this.#pendingModelSwitchFailures = 0;
+		// Consumed for real: drop the runtime's parked pre-chain baseline so a
+		// later mid-turn enter captures the live model instead of a stale value.
+		this.session.getPersonaRuntime()?.onPendingModelRestoreFlushed();
 	}
 
 	async #clearTransientModeState(options?: {
 		preserveVibe?: boolean;
 		vibeScopeAlreadySuspended?: boolean;
+		/** This reconciliation crossed a REAL session boundary (different file / fresh session). */
+		sessionBoundary?: boolean;
 	}): Promise<void> {
+		// A re-queued (failed-flush) persona restore is SOURCE-session state:
+		// surviving into a switched-in target would clobber the target's
+		// restored model at its first agent_end, repeatedly until manually
+		// overridden. A SAME-session reload is not a boundary — the owed entry
+		// still belongs to the continuing session — so the discard is scoped,
+		// matching the session-level slot's switchingToDifferentSession guard.
+		if (options?.sessionBoundary) {
+			this.#pendingModelSwitch = undefined;
+			this.#pendingPlanModelSwitch = false;
+			this.#pendingModelSwitchFailures = 0;
+		}
 		if (this.planModeEnabled || this.planModePaused) {
 			this.session.setPlanModeState(undefined);
 			try {
-				const previousPresentation = this.#planModePreviousToolPresentation;
+				// j2x: a failed persona switch discarded the primary snapshot but
+				// left the stash behind — the still-active source mode restores
+				// from it.
+				const previousPresentation = this.#planModePreviousToolPresentation ?? this.#personaSwitchRollbackPlan;
 				if (previousPresentation) {
 					await this.session.restoreNonMCPToolPresentation(
 						previousPresentation.enabled,
@@ -4092,8 +4174,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 
 		if (this.goalModeEnabled || this.goalModePaused) {
-			if (this.#goalModePreviousTools !== undefined) {
-				await this.session.setActiveToolsByName(this.#goalModePreviousTools);
+			// j2x: a failed persona switch discarded the primary snapshot but
+			// left the stash behind — the still-active source mode restores
+			// from it.
+			const goalPreviousTools = this.#goalModePreviousTools ?? this.#personaSwitchRollbackGoal;
+			if (goalPreviousTools !== undefined) {
+				await this.session.setActiveToolsByName(goalPreviousTools);
 			}
 			this.session.setGoalModeState(undefined);
 			this.goalModeEnabled = false;
@@ -4105,6 +4191,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#cancelGoalContinuation();
 			this.#updateGoalModeStatus();
 		}
+		// j2x: the switch committed — the stash belongs to the (former) source
+		// session; drop it so a later failed switch cannot restore stale
+		// snapshots from an older boundary.
+		this.#personaSwitchRollbackPlan = undefined;
+		this.#personaSwitchRollbackGoal = undefined;
 
 		if (this.vibeModeEnabled && !options?.preserveVibe) {
 			const ownerScope = this.#vibeModeOwnerScope;
@@ -4127,6 +4218,14 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/** Reconcile mode state from session entries on resume/switch. */
 	async #reconcileModeFromSession(options?: { preserveActiveGoal?: boolean }): Promise<void> {
+		// A different session FILE (or a fresh one) is a real boundary; a
+		// same-session reload is not — the pending model queue belongs to the
+		// continuing session and survives reloads (parity with the
+		// session-level slot's switchingToDifferentSession guard). First pass
+		// after init has no prior file: nothing queued, boundary irrelevant.
+		const sessionFile = this.sessionManager.getSessionFile();
+		const sessionBoundary = this.#reconciledSessionFile !== undefined && this.#reconciledSessionFile !== sessionFile;
+		this.#reconciledSessionFile = sessionFile;
 		const vibeScopeAlreadySuspended = this.#vibeScopeSuspendedForSwitch;
 		this.#vibeScopeSuspendedForSwitch = false;
 		const sessionContext = this.sessionManager.buildSessionContext();
@@ -4149,8 +4248,19 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.#clearTransientModeState({
 			preserveVibe,
 			vibeScopeAlreadySuspended,
+			sessionBoundary,
 		});
 		await VibeSessionRegistry.global().rehydrate(vibeSession);
+		// Persona resume parity with the ACP surface (plan §3): a stored session can
+		// end under agent mode (`mode_change agent {name}`), so the persona is
+		// re-applied — or degraded to unrestricted when the definition is gone —
+		// through `PersonaRuntime.reconcile`. Runs after #clearTransientModeState so
+		// a persona-active source session's tool partition is torn down before the
+		// target's grant is applied. A CLI `--agent` override is handled by the
+		// launch seam (pendingPersonaAgent in sdk.ts, which appends its own
+		// mode_change agent entry), so the journal read below sees the override as
+		// the last entry and never fights the CLI flag.
+		await this.#reconcilePersonaFromSession();
 		const goalEnabled = cfgGoalEnabled.get(this.session.settings);
 		if (!goalEnabled && (sessionContext.mode === "goal" || sessionContext.mode === "goal_paused")) {
 			this.session.goalRuntime.clearAccounting();
@@ -4210,6 +4320,114 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.planModePaused = true;
 			this.#planModeHasEntered = true;
 			this.#updatePlanModeStatus();
+		}
+	}
+
+	/**
+	 * Re-apply the persisted persona on resume/switch through the shared
+	 * `reconcileSessionPersona` helper, mirroring the ACP `session/load` path.
+	 * A gone persona degrades to unrestricted with a transient status notice
+	 * rather than failing the resume.
+	 *
+	 * The runtime is reused across an in-process `switchSession`, so a
+	 * persona-active SOURCE session switching to a target whose journal has no
+	 * `agent` entry must exit the persona here — otherwise the source's grant,
+	 * identity prompt, and narrowed presentation leak into the target. (A cold
+	 * resume never reaches this with an active runtime: the runtime is fresh.)
+	 */
+	async #reconcilePersonaFromSession(): Promise<void> {
+		const desired = readPersistedAgentPersona(this.sessionManager.getBranch());
+		if (!desired) {
+			await this.#exitSourcePersonaForSwitch("on switch to a non-persona session");
+			// The target records no persona, so no ceiling carrier survives:
+			// drop a journal-installed grant the SOURCE session reinstalled
+			// (switchSession already exited the persona, so the shared
+			// reconcile's clear never runs here). A live CLI --tools grant is
+			// untouched; a cold resume never had a journal install to drop.
+			// The source teardown already filtered the LIVE presentation through
+			// that ceiling (`granted()` gates the exit's snapshot replay), so
+			// clearing the grant alone leaves only ceilinged names active while
+			// `effective()` reports the target unrestricted — repopulate the
+			// presentation from the policy's now-unbounded effective set.
+			const policy = this.session.getToolPolicy();
+			if (policy?.journalCeiling) {
+				policy.clearCliGrantFromJournal();
+				const restored = policy.effectiveSet();
+				await this.session.setActiveToolPresentation(
+					[...restored],
+					this.session.getMountedXdevToolNames().filter(name => restored.has(name)),
+				);
+			} else {
+				policy?.clearCliGrantFromJournal();
+			}
+			return;
+		}
+		await reconcileSessionPersona(this.session, {
+			buildHooks: () => this.#createPersonaModelHooks(),
+			onGone: async () => {
+				// The runtime may still hold the SOURCE persona here: exiting (not
+				// just skipping) clears its grant, identity prompt, and narrowed
+				// presentation before the target session lands.
+				await this.#exitSourcePersonaForSwitch("on switch to a persona-less target");
+				this.showStatus(`Agent persona "${desired.name}" is no longer available; session resumed without it.`, {
+					dim: true,
+				});
+			},
+			onError: () => {
+				this.showStatus(`Failed to restore agent persona "${desired.name}"; session resumed without it.`, {
+					dim: true,
+				});
+			},
+		});
+	}
+
+	/**
+	 * j2d: shared source-persona teardown for session switches. Called from the
+	 * BEFORE-switch hook so it runs before `switchSession` restores the target's
+	 * model/thinking (a post-restore exit would re-apply the source persona's
+	 * baseline over the target's restored model). Also still safe from the
+	 * post-switch reconciler path: by then the before-hook already exited the
+	 * persona, so this is a no-op.
+	 */
+	async #exitSourcePersonaForSwitch(reasonSuffix = ""): Promise<void> {
+		// A persona running UNDER an outer plan/goal mode leaves the mode's
+		// pre-mode tool snapshot holding the persona's restricted presentation.
+		// The post-switch #clearTransientModeState() would replay that
+		// SOURCE-session snapshot onto the TARGET session (and #clearTransientModeState
+		// runs even when the target has no mode, because the live flags still say
+		// plan/goal until then), leaking the source persona's tool restrictions
+		// onto a plain target — and out of a later target-persona exit. The mode
+		// itself is torn down after the switch; only its stale source snapshot is
+		// discarded here, so the restore step is skipped and the target's own
+		// active set survives.
+		// j2x: stash the snapshots BEFORE discarding. A failed switch (persona
+		// exit rollback, bash/journal flush failure) restores the persona
+		// runtime state but not these TUI-owned fields — the stash keeps the
+		// still-active source mode's presentation restorable, and the plan/goal
+		// exit paths reinstate from it.
+		this.#personaSwitchRollbackPlan = this.#planModePreviousToolPresentation;
+		this.#personaSwitchRollbackGoal = this.#goalModePreviousTools;
+		this.#planModePreviousToolPresentation = undefined;
+		this.#goalModePreviousTools = undefined;
+		const runtime = this.session.getPersonaRuntime();
+		if (!runtime?.policy.isPersonaActive()) {
+			this.#personaSwitchRollbackPlan = undefined;
+			this.#personaSwitchRollbackGoal = undefined;
+			return;
+		}
+		try {
+			await runtime.exit(this.#createPersonaModelHooks());
+		} catch (error) {
+			// The exit's internal rollback reinstated the persona; reinstate the
+			// mode snapshots with it — the source mode is still active.
+			this.#planModePreviousToolPresentation = this.#personaSwitchRollbackPlan;
+			this.#goalModePreviousTools = this.#personaSwitchRollbackGoal;
+			this.#personaSwitchRollbackPlan = undefined;
+			this.#personaSwitchRollbackGoal = undefined;
+			logger.warn(`Failed to exit source persona ${reasonSuffix}`.trim(), {
+				sessionFile: this.sessionManager.getSessionFile(),
+				error: error instanceof Error ? error.message : String(error),
+			});
 		}
 	}
 
@@ -4305,6 +4523,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				thinkingLevel: prev.thinkingLevel,
 			};
 			this.#pendingPlanModelSwitch = false;
+			// Fresh entry: the retry budget restarts (else a prior failed
+			// persona restore's count would make this give up early).
+			this.#pendingModelSwitchFailures = 0;
 		} else {
 			await this.session.setModelTemporary(prev.model, prev.thinkingLevel);
 		}
@@ -4370,7 +4591,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			: undefined;
 		this.session.setPlanModeState(undefined);
 		try {
-			const previousPresentation = this.#planModePreviousToolPresentation;
+			// j2x: a failed persona switch discarded the primary snapshot but
+			// left the stash behind — the still-active source mode restores
+			// from it.
+			const previousPresentation = this.#planModePreviousToolPresentation ?? this.#personaSwitchRollbackPlan;
 			if (previousPresentation) {
 				await this.session.restoreNonMCPToolPresentation(
 					previousPresentation.enabled,
@@ -4490,7 +4714,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		paused?: boolean;
 		reason?: "completed" | "paused" | "dropped";
 	}): Promise<void> {
-		const previousTools = this.#goalModePreviousTools;
+		// j2x: a failed persona switch discarded the primary snapshot but left
+		// the stash behind — the still-active source mode restores from it.
+		const previousTools = this.#goalModePreviousTools ?? this.#personaSwitchRollbackGoal;
 		if (this.goalModeEnabled && previousTools) {
 			await this.session.setActiveToolsByName(previousTools);
 		}
@@ -5106,6 +5332,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showWarning("Exit vibe mode first.");
 			return false;
 		}
+		// The persona guard stops mode ENTRY only; unwinding an already-active
+		// transparent plan (a resumed `agent -> plan` journal) must stay
+		// available — exitAgentPersona refuses under an active plan, so guarding
+		// the exit branches too deadlocks the user in both states. Entry into
+		// plan below still refuses while a persona is active.
 		if (this.planModeEnabled) {
 			const planFilePath = this.planModePlanFilePath ?? (await this.#getPlanFilePath());
 			if (await this.#hasPlanModeDraftContent(planFilePath)) {
@@ -5129,6 +5360,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#updatePlanModeStatus();
 			this.sessionManager.appendModeChange("none");
 			this.showStatus("Plan mode disabled.");
+			return false;
+		}
+		if (this.session.toolPolicy?.isPersonaActive()) {
+			this.showWarning("Exit the agent persona first (/agent).");
 			return false;
 		}
 		if (!cfgPlanEnabled.get(this.session.settings)) {
@@ -5185,6 +5420,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		if (this.goalModeEnabled || this.goalModePaused) {
 			this.showWarning("Exit goal mode first.");
+			return false;
+		}
+		if (this.session.toolPolicy?.isPersonaActive()) {
+			this.showWarning("Exit the agent persona first (/agent).");
 			return false;
 		}
 		await this.#enterVibeMode();
@@ -5422,6 +5661,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showWarning("Goal mode is disabled. Enable it in settings (goal.enabled).");
 			return false;
 		}
+		// Plan parity: the persona guard stops goal ENTRY only — subcommands and
+		// the active/paused menus (drop/pause/resume) must stay available under
+		// a transparent goal resume, where exitAgentPersona refuses until the
+		// goal is unwound. Guarding them too deadlocks both states.
 		const { sub, rest: subRest } = parseGoalSubcommand(rest ?? "");
 		if (sub) return await this.#dispatchGoalSubcommand(sub, subRest, input);
 		if (this.goalModeEnabled) {
@@ -5439,6 +5682,10 @@ export class InteractiveMode implements InteractiveModeContext {
 				return false;
 			}
 			await this.#openGoalMenu("paused");
+			return false;
+		}
+		if (this.session.toolPolicy?.isPersonaActive()) {
+			this.showWarning("Exit the agent persona first (/agent).");
 			return false;
 		}
 		if (subRest) return await this.#startGoalFromObjective(subRest, input);
@@ -5465,6 +5712,13 @@ export class InteractiveMode implements InteractiveModeContext {
 			}
 			if (!cfgGoalEnabled.get(this.session.settings)) {
 				this.showWarning("Goal mode is disabled. Enable it in settings (goal.enabled).");
+				return false;
+			}
+			// The interview is fresh goal entry: it installs the goal tool and
+			// records the pre-interview toolset, which would widen past an
+			// active persona's grant — same entry refusal as /goal.
+			if (this.session.toolPolicy?.isPersonaActive()) {
+				this.showWarning("Exit the agent persona first (/agent).");
 				return false;
 			}
 			if (this.goalModeEnabled) {
@@ -5717,6 +5971,13 @@ export class InteractiveMode implements InteractiveModeContext {
 				)?.trim();
 		if (!objective) return false;
 		if (this.goalModeEnabled) return await this.#replaceGoalFromObjective(objective, input);
+		// Fresh goal START is mode entry: refuse under a persona (the dispatcher
+		// runs before handleGoalModeCommand's entry guard, which exists only to
+		// keep the unwind subcommands reachable).
+		if (this.session.toolPolicy?.isPersonaActive()) {
+			this.showWarning("Exit the agent persona first (/agent).");
+			return false;
+		}
 		return await this.#startGoalFromObjective(objective, input);
 	}
 
@@ -7139,6 +7400,280 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	switchSessionModel(model: Model, thinkingLevel?: ConfiguredThinkingLevel): Promise<void> {
 		return this.#selectorController.switchSessionModel(model, thinkingLevel);
+	}
+
+	/**
+	 * Live agent persona switch (`/agent <name>`) through the session's
+	 * PersonaRuntime. Mid-turn: the TUI queues the model channel via the
+	 * existing pending-switch flush (plan §8); tools/prompt still apply.
+	 *
+	 * Plan/goal/vibe modes own the tool partition and the pre-mode presentation
+	 * snapshot; a persona entered on top would fight the mode's teardown restore
+	 * at exit. The runtime has no mode-side transaction seam, so a persona
+	 * switch under a mode is refused rather than torn through — the user exits
+	 * the mode first (matching how the modes themselves refuse each other).
+	 */
+	async switchAgentPersona(agentName: string): Promise<void> {
+		if (this.planModeEnabled || this.planModePaused) {
+			this.showWarning("Exit plan mode before switching agent personas.");
+			return;
+		}
+		if (this.goalModeEnabled || this.goalModePaused) {
+			this.showWarning("Exit goal mode before switching agent personas.");
+			return;
+		}
+		if (this.vibeModeEnabled) {
+			this.showWarning("Exit vibe mode before switching agent personas.");
+			return;
+		}
+		const runtime = this.session.getPersonaRuntime();
+		if (!runtime) {
+			this.showWarning("Persona switching is unavailable: this session has no persona runtime.");
+			return;
+		}
+		const discovery = await discoverAgents(
+			this.sessionManager.getCwd(),
+			undefined,
+			this.session.effectiveExtensionRoots,
+		);
+		const agent = getAgent(discovery.agents, agentName);
+		if (!agent) {
+			const available = discovery.agents.map(candidate => candidate.name).join(", ") || "none";
+			this.showError(`Unknown agent: ${agentName}. Available: ${available}`);
+			return;
+		}
+		// j2m: the CLI `--tools`/`--no-tools` ceiling is durable policy state the
+		// runtime does not know about — `enter` with empty explicit overrides would
+		// let a wider persona frontmatter widen the session past it. Serialize the
+		// ceiling into `explicit.tools` BEFORE enter so #computePersonaGrant's
+		// intersect path runs (cliGrant null → leave explicit.tools undefined).
+		const cliGrant = this.session.getToolPolicy()?.cliGrant ?? null;
+		const explicitOverrides: PersonaExplicitOverrides = cliGrant ? { tools: [...cliGrant] } : {};
+		await this.#applyPersonaSwitch(agent, explicitOverrides);
+		// Caller-owned journal persistence (runtime stays pure; resume reconcile reads).
+		// j2g: the runtime's captured pre-persona baseline rides the entry so a
+		// resume can re-enter with it as the authoritative exit baseline.
+		appendPersonaJournalEntry(this.session, {
+			name: agent.name,
+			explicit: explicitOverrides,
+			baseline: runtime.getActiveBaseline(),
+		});
+		this.showStatus(`Agent persona: ${agent.name}`);
+	}
+
+	/**
+	 * Clears the active persona (`/agent` with a persona active).
+	 *
+	 * Always available: exiting is the recovery path out of "mode entry refused
+	 * while a persona was active" — a mode-side guard here would deadlock the
+	 * user inside the persona. Mode entry refuses while a persona is active
+	 * (handlePlanModeCommand and friends); the persona must be exited first,
+	 * and this is that exit.
+	 */
+	async exitAgentPersona(): Promise<void> {
+		const runtime = this.session.getPersonaRuntime();
+		if (!runtime) {
+			this.showWarning("Persona switching is unavailable: this session has no persona runtime.");
+			return;
+		}
+		// fw_r-: mode entry refuses while a persona is active (mutual
+		// exclusion — the persona's tool grant and the mode partition would
+		// fight). The exit must refuse under an active mode for the same
+		// reason: a transparent plan/goal/vibe resume can land here with the
+		// mode running, and the exit's restore would clobber the mode's
+		// partition. Exit the mode first.
+		if (this.planModeEnabled || this.planModePaused) {
+			this.showWarning("Exit plan mode before switching or clearing the agent persona.");
+			return;
+		}
+		if (this.goalModeEnabled || this.goalModePaused) {
+			this.showWarning("Exit goal mode before switching or clearing the agent persona.");
+			return;
+		}
+		if (this.vibeModeEnabled) {
+			this.showWarning("Exit vibe mode before switching or clearing the agent persona.");
+			return;
+		}
+		const hooks = this.#createPersonaModelHooks();
+		try {
+			// Plan/vibe parity: the teardown rebuilds the system prompt, which
+			// predictably invalidates the provider prompt cache (plan §9).
+			this.lastAssistantUsage = undefined;
+			await runtime.exit(hooks);
+		} finally {
+			this.#afterPersonaSwitch();
+		}
+		clearPersonaJournalEntry(this.session);
+		this.showStatus("Agent persona cleared.");
+	}
+
+	/** Bare `/agent` with no persona active: open the discovered-agents picker. */
+	async showAgentPersonaPicker(): Promise<void> {
+		const runtime = this.session.getPersonaRuntime();
+		if (!runtime) {
+			this.showWarning("Persona switching is unavailable: this session has no persona runtime.");
+			return;
+		}
+		await this.#loadPersonaPickerAgents();
+		this.#selectorController.showSelector(done => {
+			const picker = new AgentPersonaPickerComponent(
+				this.#personaPickerAgents,
+				agentName => {
+					done();
+					void this.switchAgentPersona(agentName).catch(error =>
+						this.showError(error instanceof Error ? error.message : String(error)),
+					);
+				},
+				() => done(),
+			);
+			return { component: picker, focus: picker.getSelectList() };
+		});
+	}
+
+	/** Lazily-resolved picker list; discovery is async so cache the latest result. */
+	#personaPickerAgents: Array<{ name: string; description: string }> = [];
+
+	async #loadPersonaPickerAgents(): Promise<void> {
+		const discovery = await discoverAgents(
+			this.sessionManager.getCwd(),
+			undefined,
+			this.session.effectiveExtensionRoots,
+		);
+		this.#personaPickerAgents = discovery.agents.map(agent => ({
+			name: agent.name,
+			description: agent.description,
+		}));
+	}
+
+	/** TUI persona-model hooks: queue the mid-turn model switch like the plan-mode reconciler. */
+	#createPersonaModelHooks(): PersonaModelApplyHooks {
+		// Snapshot the deferred queue as it stands BEFORE this transaction touches
+		// it, so a rollback restores a prior owner's entry instead of deleting it.
+		// A chained switch (persona A entered mid-turn, then B in the same turn)
+		// already holds A's queued model switch here; B's enter/exit mutate the
+		// slot, and a failed B must leave A's queued switch intact — otherwise A
+		// stays active at agent_end while the session sits on the pre-A model.
+		// Shallow copy: the merge path mutates the live entry's thinkingLevel.
+		const priorPending = this.#pendingModelSwitch ? { ...this.#pendingModelSwitch } : undefined;
+		const priorPlanFlag = this.#pendingPlanModelSwitch;
+		const priorFailures = this.#pendingModelSwitchFailures;
+		return {
+			...createDefaultPersonaModelHooks(this.session),
+			// The runtime's non-deferred enter reads+drops the surface queue
+			// through this channel (persona entries only — a plan-role switch is
+			// a role transition the next boundary still owes, not a
+			// persona-lineage entry). Without it a RETAINED failed-flush restore
+			// or a stale persona-model switch would land mid-persona at a later
+			// agent_end (the TUI queue is invisible to the session-level default
+			// hooks channel).
+			getSurfaceDeferredRestore: () =>
+				this.#pendingPlanModelSwitch || !this.#pendingModelSwitch
+					? undefined
+					: { model: this.#pendingModelSwitch.model, thinkingLevel: this.#pendingModelSwitch.thinkingLevel },
+			clearSurfaceDeferredRestore: () => {
+				if (!this.#pendingPlanModelSwitch) this.#pendingModelSwitch = undefined;
+			},
+			shouldDeferModelSwitch: () => this.session.isStreaming,
+			deferModelSwitchWhileStreaming: agent => {
+				// A thinking-only persona (thinking set, no model) still queues:
+				// `#pendingModelSwitch` carries `thinkingLevel` alongside `model`
+				// and `flushPendingModelSwitch` forwards both to
+				// `setModelTemporary`, which applies a thinking-only change
+				// without touching the model (fo80k).
+				// j2w: when a pending entry ALREADY exists (a persona A exit queued
+				// its pre-persona model restore mid-turn), B's thinking-only switch
+				// must MERGE into it — overwrite the thinking level, keep the queued
+				// restore model. Replacing the entry wholesale would replace A's
+				// baseline restore with A's live persona model.
+				if (!agent.model || agent.model.length === 0) {
+					if (agent.thinkingLevel !== undefined) {
+						if (this.#pendingModelSwitch) {
+							this.#pendingModelSwitch.thinkingLevel = agent.thinkingLevel;
+						} else {
+							this.#pendingModelSwitch = {
+								model: this.session.model as Model,
+								thinkingLevel: agent.thinkingLevel,
+							};
+							this.#pendingPlanModelSwitch = false;
+							this.#pendingModelSwitchFailures = 0;
+						}
+					}
+					return;
+				}
+				const resolved = resolveModelOverride(agent.model, this.session.modelRegistry, this.session.settings);
+				if (!resolved.model) return;
+				// The pattern itself can carry the thinking level (`model: [provider/m:high]`).
+				// The default hooks resolve that suffix in the synchronous apply
+				// (persona-model-hooks.ts j2v); the queue must receive the same value
+				// or the deferred switch lands on the model's default effort instead
+				// of the pattern's.
+				const queuedThinking =
+					agent.thinkingLevel ?? (resolved.explicitThinkingLevel ? resolved.thinkingLevel : undefined);
+				this.#pendingModelSwitch = {
+					model: resolved.model,
+					thinkingLevel: queuedThinking,
+				};
+				this.#pendingPlanModelSwitch = false;
+				this.#pendingModelSwitchFailures = 0;
+			},
+			// Mid-turn exit: the RUNTIME passes its own captured pre-persona
+			// baseline (the hook instance that ran apply does not survive exit);
+			// queue it for the same flush that pending model switches use, so the
+			// restore survives the turn boundary.
+			deferModelRestoreWhileStreaming: baseline => {
+				const model = baseline.model ?? this.session.model;
+				if (!model) return;
+				this.#pendingModelSwitch = {
+					model,
+					thinkingLevel: baseline.thinkingLevel,
+				};
+				this.#pendingPlanModelSwitch = false;
+				// Fresh entry: the retry budget restarts.
+				this.#pendingModelSwitchFailures = 0;
+			},
+			// Rollback safety: the deferred queue mutation must be undone when
+			// the runtime rolls the transaction back — otherwise agent_end would
+			// apply a model switch belonging to a switch that failed. Restore the
+			// transaction-start entry rather than clearing: a chained switch's
+			// prior queued entry (another persona's, or plan's) is not this
+			// transaction's to delete.
+			onPersonaSwitchFailed: () => {
+				this.#pendingModelSwitch = priorPending;
+				this.#pendingPlanModelSwitch = priorPlanFlag;
+				this.#pendingModelSwitchFailures = priorFailures;
+			},
+		};
+	}
+
+	/** Shared switch body: enter with TUI hooks, then refresh UI state. */
+	async #applyPersonaSwitch(agent: AgentDefinition, explicit: PersonaExplicitOverrides = {}): Promise<void> {
+		const runtime = this.session.getPersonaRuntime();
+		if (!runtime) return;
+		const hooks = this.#createPersonaModelHooks();
+		try {
+			// Plan-mode parity: a persona switch rebuilds the system prompt, which
+			// predictably invalidates the provider prompt cache (plan §9).
+			this.lastAssistantUsage = undefined;
+			await runtime.enter(agent, explicit, hooks);
+			await this.#loadPersonaPickerAgents();
+			// The activation notice runs only on success — an enter failure
+			// surfaces as the error; a success notice on top would claim the
+			// persona activated when it did not. The finally still refreshes
+			// rendering because the rollback may have touched presentation.
+			this.#afterPersonaSwitch(agent.name);
+		} finally {
+			this.#afterPersonaSwitch();
+		}
+	}
+
+	/** Post-switch UI bookkeeping shared by enter/exit. */
+	#afterPersonaSwitch(agentName?: string): void {
+		this.statusLine.invalidate();
+		this.updateEditorBorderColor();
+		this.ui.requestRender();
+		if (agentName !== undefined) {
+			this.session.emitNotice("info", `Agent persona: ${agentName}`);
+		}
 	}
 
 	showPluginSelector(mode?: "install" | "uninstall"): void {

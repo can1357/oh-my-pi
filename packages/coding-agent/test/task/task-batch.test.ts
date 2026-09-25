@@ -36,6 +36,14 @@ const taskAgent: AgentDefinition = {
 	source: "bundled",
 };
 
+const scoutAgent: AgentDefinition = {
+	name: "scout",
+	description: "Read-only research agent",
+	systemPrompt: "You are a scout agent.",
+	tools: ["read"],
+	source: "bundled",
+};
+
 function createSession(
 	options: {
 		manager?: AsyncJobManager;
@@ -136,6 +144,41 @@ describe("task.batch schema gating", () => {
 		expect(itemProperties.schemaMode).toBeDefined();
 	});
 
+	it("requires coordination instead of promising same-file auto-resolution", async () => {
+		mockDiscovery();
+		const tool = await TaskTool.create(createSession({ settings: { "task.batch": true } }));
+
+		expect(tool.description).toContain("Shared edits need one integration owner");
+		expect(tool.description).toContain("siblings coordinate via `write agent://<id>`");
+		expect(tool.description).not.toContain("Concurrent edits to the same files auto-resolve");
+	});
+
+	// Regression: renderDescription must forward `batchEnabled` to the Handlebars
+	// template. Omitting it left the default `task.batch=true` session advertising
+	// the single-agent wording while the wire schema required `{ context, tasks[] }`.
+	it("description branches on the batch setting to match the wire schema", async () => {
+		mockDiscovery();
+
+		const batch = await TaskTool.create(createSession({ settings: { "task.batch": true } }));
+		expect(batch.description).toContain("Spawn `tasks[]` concurrently");
+		expect(batch.description).toContain("`context`");
+		expect(batch.description).not.toContain("Spawn one agent");
+
+		const flat = await TaskTool.create(createSession({ settings: { "task.batch": false } }));
+		expect(flat.description).toContain("Spawn one agent");
+		expect(flat.description).toContain("the task");
+		expect(flat.description).not.toContain("Spawn `tasks[]` concurrently");
+	});
+
+	it("describes a restricted specialist as the spawn-policy default", async () => {
+		mockDiscovery(scoutAgent);
+		const tool = await TaskTool.create(createSession({ spawns: "scout" }));
+
+		expect(tool.description).toContain("Omit `agent` only for default (`scout`)");
+		expect(tool.description).not.toContain("general-purpose worker");
+		expect(tool.description).not.toContain("default worker");
+		expect(tool.description).toContain("Read-only research MUST use `scout`");
+	});
 	it("hides effort by default and exposes it when task.enableEffort is enabled", async () => {
 		mockDiscovery();
 
