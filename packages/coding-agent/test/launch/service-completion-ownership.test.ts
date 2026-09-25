@@ -13,7 +13,7 @@ import {
 	type DaemonCompletionNotification,
 } from "../../src/launch/protocol";
 import { listServices, sendService, startService, waitForOwnedServiceCompletion } from "../../src/launch/services";
-import type { ToolSession } from "../../src/tools";
+import type { LaunchContextBoundary, ToolSession } from "../../src/tools";
 
 interface EmbeddedBroker {
 	/** Settles once this in-process broker has shut down and flushed its metadata. */
@@ -111,7 +111,7 @@ describe("session-owned supervised services", () => {
 		const previousTitle = process.title;
 		const broker = await startBroker(projectDir, runtimeDir);
 		let sessionId = "old-session";
-		const callbacks: Array<() => void> = [];
+		const callbacks: Array<(boundary: LaunchContextBoundary) => void> = [];
 		const deliveries: Array<[string, DaemonCompletionNotification]> = [];
 		const session: ToolSession = {
 			cwd: projectDir,
@@ -121,7 +121,7 @@ describe("session-owned supervised services", () => {
 			getSessionSpawns: () => "*",
 			getAgentId: () => "Main",
 			getSessionId: () => sessionId,
-			registerSessionChangeCallback: callback => {
+			registerContextBoundaryCallback: callback => {
 				callbacks.push(callback);
 			},
 			queueLaunchCompletion: notification => {
@@ -131,7 +131,7 @@ describe("session-owned supervised services", () => {
 		};
 		const switchTo = (nextSessionId: string): void => {
 			sessionId = nextSessionId;
-			for (const callback of callbacks) callback();
+			for (const callback of callbacks.splice(0)) callback("switch");
 		};
 		try {
 			vi.spyOn(brokerClients, "daemonClientForProject").mockResolvedValue(client);
@@ -203,7 +203,9 @@ describe("session-owned supervised services", () => {
 		});
 		try {
 			vi.spyOn(brokerClients, "daemonClientForProject").mockImplementation(async () => client);
-			await listServices(makeSession("original-session", [], callback => disposeOriginal.push(callback)));
+			await listServices(makeSession("original-session", [], callback => {
+				disposeOriginal.push(callback);
+			}));
 			const started = await client.request({
 				op: "start",
 				owner: "original-session",

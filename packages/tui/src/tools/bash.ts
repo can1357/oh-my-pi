@@ -47,6 +47,8 @@ export interface BashToolDetails {
 		ready: boolean;
 		timedOut: boolean;
 		pid?: number;
+		/** Live output monitor delivery attached at start; absent when unmonitored. */
+		progress?: "wake" | "ambient";
 	};
 	async?: {
 		state: "running" | "completed" | "failed";
@@ -374,6 +376,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 						statsParts.push(`Service: ${service.name}`, `State: ${service.state}`);
 						statsParts.push(`Ready: ${service.ready ? "yes" : service.timedOut ? "timed out" : "no"}`);
 						if (service.pid !== undefined) statsParts.push(`PID: ${service.pid}`);
+						if (service.progress) statsParts.push(`Progress: ${service.progress}`);
 					}
 					if (wallTimeMs !== undefined) {
 						statsParts.push(`Wall: ${formatWallTimeSeconds(wallTimeMs)}s`);

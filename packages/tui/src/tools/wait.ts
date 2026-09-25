@@ -35,7 +35,7 @@ export function isWaitingPollDetails(details: unknown): boolean {
 	return d.jobs.every(job => job?.status === "running");
 }
 /** Coordination details retained by wait and background job operations. */
-export type CoordinationOp = "send" | "wait" | "jobs" | "cancel";
+export type CoordinationOp = "send" | "wait" | "jobs" | "cancel" | "monitor";
 
 /** Background-job row surfaced by `wait`/`cancel`/`jobs` results. */
 export interface JobSnapshot {
@@ -46,6 +46,8 @@ export interface JobSnapshot {
 	durationMs: number;
 	/** Process exit status when the job reports one. */
 	exitCode?: number;
+	/** Progress delivery mode currently in effect; absent when the job has no progress channel. */
+	progress?: JobProgressMode;
 	/** Effective task model selector, including an explicit reasoning suffix when configured. */
 	resolvedModel?: string;
 	/** Provider/id including routing, with no added thinking suffix. */
@@ -77,6 +79,24 @@ export interface CancelOutcome {
 	id: string;
 	status: CancelStatus;
 	message: string;
+}
+
+/** Delivery mode a background job's live progress is routed under. */
+export type JobProgressMode = "wake" | "ambient";
+
+/**
+ * Result of retuning one background job's progress mode. `unmonitored` is a
+ * job launched without `progress` — a progress channel cannot be added after
+ * launch; `suppressed` is a job whose progress a `wait` currently withholds.
+ */
+export type JobRetuneStatus = "retuned" | "unchanged" | "not_found" | "not_running" | "unmonitored" | "suppressed";
+
+/** Per-id outcome of retuning background job progress through `proc://<id>/progress`. */
+export interface JobRetuneOutcome {
+	id: string;
+	status: JobRetuneStatus;
+	/** Mode in effect after the attempt, when the job still carries a progress channel. */
+	progress?: JobProgressMode;
 }
 
 /**
@@ -118,6 +138,8 @@ export interface CoordinationDetails {
 	waited?: IrcMessage | null;
 	jobs?: JobSnapshot[];
 	cancelled?: { id: string; status: CancelStatus }[];
+	/** Present on `op:"monitor"`: per-id job progress retune outcomes. */
+	retuned?: JobRetuneOutcome[];
 	/** Running subagents not represented by a job row in this result. */
 	agents?: AgentActivitySnapshot[];
 	/** `wait` was cut short by steering, a peer message, or a completion notice that injects next. */
@@ -310,10 +332,14 @@ function jobsRenderResult(
 							job.status === "running" ? options.spinnerFrame : undefined,
 						)}${job.exitCode === undefined ? "" : `${uiTheme.sep.dot}${uiTheme.fg(job.exitCode === 0 ? "muted" : "error", `exit ${job.exitCode}`)}`}`;
 						const typeBadge = formatBadge(job.type, statusToColor(job.status), uiTheme);
+						const progressSuffix = job.progress
+							? ` ${formatBadge(replaceTabs(job.progress), "accent", uiTheme)}`
+							: "";
 						const durationSuffix = `${uiTheme.sep.dot}${uiTheme.fg("dim", formatDuration(job.durationMs))}`;
+						const rowSuffix = `${progressSuffix}${durationSuffix}`;
 						const displayId = truncateToWidth(
 							replaceTabs(job.id).replace(/\s+/g, " "),
-							Math.max(0, rowWidth - visibleWidth(`${icon} ${typeBadge} ${durationSuffix}`)),
+							Math.max(0, rowWidth - visibleWidth(`${icon} ${typeBadge} ${rowSuffix}`)),
 							Ellipsis.Unicode,
 						);
 						const rawLabelLines = (job.label || "(no label)").split(/\r?\n/);
@@ -336,7 +362,7 @@ function jobsRenderResult(
 										uiTheme,
 										Math.min(
 											FEED_MODEL_BADGE_WIDTH,
-											Math.max(0, rowWidth - visibleWidth(`${rowPrefix}${displayId}${durationSuffix}`) - 1),
+											Math.max(0, rowWidth - visibleWidth(`${rowPrefix}${displayId}${rowSuffix}`) - 1),
 										),
 									)
 								: "";
@@ -355,9 +381,9 @@ function jobsRenderResult(
 						let row = `${rowPrefix}${modelLead}${headLabel}`;
 						const distinctLabel = job.label.trim() !== job.id;
 						const label = visibleLabelLines[0] ?? "";
-						const inlineLabel = distinctLabel && visibleWidth(`${row} ${label}${durationSuffix}`) <= rowWidth;
+						const inlineLabel = distinctLabel && visibleWidth(`${row} ${label}${rowSuffix}`) <= rowWidth;
 						if (inlineLabel) row += ` ${uiTheme.fg("toolOutput", label)}`;
-						row += durationSuffix;
+						row += rowSuffix;
 						lines.push(truncateToWidth(row, rowWidth, ""));
 						const continuationWidth = Math.max(0, rowWidth - visibleWidth("  "));
 						for (let i = distinctLabel && !inlineLabel ? 0 : 1; i < visibleLabelLines.length; i++) {

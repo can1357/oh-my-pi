@@ -29,6 +29,7 @@
 | `name` | `string` | No | Supervised service name (≤48 characters; project-unique). Present only when `launch.enabled` and the session can launch. A live name restarts using the new spec. Incompatible with `async` and `timeout`. |
 | `ready` | `{ log?: string; port?: number; host?: string; timeout?: number }` | No | Service readiness: output regex and/or TCP port must pass; host defaults to `127.0.0.1`, timeout to 30 seconds. Only with `name`. |
 | `env` | `Record<string, string>` | No | Environment overrides for the service. Only with `name`. |
+| `progress` | `"wake" \| "ambient" \| "off"` | No | Service live-output subscription. `wake` starts a follow-up turn when idle; `ambient` delivers during active turns; `off` (default) starts without monitoring. Only with `name`. |
 
 Named service example:
 ```json
@@ -61,6 +62,39 @@ The tool returns a single `text` content block plus optional `details`.
   - cancellation, missing exit status, validation failures, intercepted commands, and client-terminal-bridge timeouts throw `ToolError` / `ToolAbortError`.
 
 Stdout and stderr are merged before the model sees them. Definite non-zero exit codes are appended to the returned error result text as `Command exited with code <n>`.
+
+## Live service progress
+
+Start a named service with progress when its output should reach the agent before exit:
+
+```json
+{"command":"bun run dev","name":"web","ready":{"port":5173},"progress":"wake"}
+```
+
+Use `wake` for actionable output; use `ambient` for diagnostics that can wait for an active turn. Wake-ups spend model requests and share one session-wide wake-turn budget with background-job progress. Ambient delivery does not start an extra turn.
+
+Change the calling session's subscription with `write`:
+
+```json
+{"path":"proc://web/progress","content":"wake"}
+{"path":"proc://web/progress","content":"ambient"}
+{"path":"proc://web/progress","content":"off"}
+```
+
+- `wake` or `ambient` attaches to a running service or retunes an existing subscription. A new attachment captures future output only; it does not replay earlier logs.
+- `off` detaches this session's monitor without stopping the service or affecting other watchers. A service started without monitoring can gain a monitor later.
+- `read proc://` and `read proc://web` show watchers, their delivery modes, and capture artifacts.
+- Monitoring and lifetime are independent: `proc://web/mode` changes service survival, not progress delivery. Fully detached services cannot be live-monitored; read their output through `proc://web`, or relaunch with named `bash` service mode when safe.
+- Complete non-empty merged output lines are batched over a trailing 200 ms window. A final partial line is flushed before completion. Progress is rate-limited; truncated or suppressed previews link the raw capture at `artifact://<id>`.
+- Inline progress is not an exhaustive log. Read the artifact or service output before concluding that no error or state transition occurred.
+- Progress and completion are separate. Do not poll `proc://` or call `wait` to keep a turn alive for wake progress; finish other work, then end the turn and let the harness resume it. Use `ready` at launch when readiness must be observed before continuing.
+- For noisy progress, lower source verbosity on a safe relaunch (calling named `bash` again replaces the live service with the new command). To keep it running, write `ambient` or `off` to its progress URL. Output queued before a mode change can still arrive afterward.
+
+### Background-job retuning
+
+For a caller-owned running job that already has a progress channel, `write proc://<job-id>/progress` accepts `wake` or `ambient`. This retunes routing without restarting the job, changing its artifact, or consuming its result. Queued output is merged into the new delivery queue; an already-permitted wake batch may still start a turn after switching to ambient.
+
+Jobs reject `off`: their progress channel cannot be detached. A job launched without a channel cannot gain one later. This differs from service monitoring; Bash's `progress` input currently requires a service `name`. Jobs that are settled or whose progress is withheld by an active `wait` cannot be retuned.
 
 ## Command policy and dedicated-tool routing
 
