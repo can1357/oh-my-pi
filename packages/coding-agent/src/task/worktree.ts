@@ -1046,7 +1046,7 @@ export async function mergeTaskBranches(
 					conflictResult = {
 						merged,
 						processed,
-						failed: [...failed, ...branches.slice(merged.length + failed.length).map(b => b.branchName)],
+						failed: [...failed, ...branches.slice(processed.length + failed.length).map(b => b.branchName)],
 						conflict: `${branchName}: ${stderr}`,
 						partialCommitsLanded: revisionsLanded > 0,
 					};

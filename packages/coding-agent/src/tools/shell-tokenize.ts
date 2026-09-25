@@ -258,7 +258,9 @@ const SHELL_INTERPRETER_COMMANDS: Record<string, true> = {
 };
 
 const SHELL_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*\+?=/u;
-const SHELL_REINTERPRET_OPTION = /^(?:-[^-]*[ce]|--(?:command|eval)(?:=.*)?)$/u;
+// `c`/`e` need not be the final cluster char: Bash getopt accepts combined
+// forms like `-cl`/`-le`, where `-c` still consumes the next argv as the script.
+const SHELL_REINTERPRET_OPTION = /^(?:-[a-zA-Z]*[ce][a-zA-Z]*|--(?:command|eval)(?:=.*)?)$/u;
 
 /**
  * Parses the deliberately small command language eligible for compound-command
@@ -906,6 +908,9 @@ function hasDirectStatusMaskingOperator(command: string): boolean {
 			continue;
 		}
 		if (ch === ";") return true;
+		// Unquoted newlines are statement separators like `;` — a trailing
+		// `true` on the next line reports exit 0 even when the check failed.
+		if (ch === "\n" || ch === "\r") return true;
 		if (ch === "|") {
 			if (command[i + 1] === "|") return true;
 			return true;
