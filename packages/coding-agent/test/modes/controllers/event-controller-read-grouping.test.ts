@@ -24,6 +24,8 @@ import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-
 import { type Component, Image, ImageProtocol, setTerminalImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
+import { cfgDisplayShowTokenUsage, cfgTerminalShowImages } from "@oh-my-pi/pi-coding-agent/modes/settings";
+
 beforeAll(async () => {
 	await initTheme(false, undefined, undefined, "dark", "light");
 });
@@ -119,7 +121,7 @@ describe("EventController read-group accretion", () => {
 	});
 
 	it("nests a read-only completion's usage inside the active group", async () => {
-		settings.set("display.showTokenUsage", true);
+		cfgDisplayShowTokenUsage.set(settings, true);
 		const { controller, chatContainer } = createFixture();
 		const message = assistantMessage([thinking("Reviewing the target"), read("usage.ts:1-50")]);
 		message.usage = {
@@ -145,7 +147,7 @@ describe("EventController read-group accretion", () => {
 	});
 
 	it("keeps usage standalone when visible content follows a read", async () => {
-		settings.set("display.showTokenUsage", true);
+		cfgDisplayShowTokenUsage.set(settings, true);
 		const { controller, chatContainer } = createFixture();
 		const message = assistantMessage([read("usage.ts:1-50"), thinking("Read complete")]);
 		message.usage = {
@@ -172,7 +174,7 @@ describe("EventController read-group accretion", () => {
 	});
 
 	it("starts a fresh group after standalone usage for a mixed-tool turn ending in read", async () => {
-		settings.set("display.showTokenUsage", true);
+		cfgDisplayShowTokenUsage.set(settings, true);
 		const { controller, chatContainer } = createFixture();
 		const message = assistantMessage([toolCall("bash", "bash-mixed", { command: "true" }), read("first.ts:1-50")]);
 		message.usage = {
@@ -237,7 +239,7 @@ describe("EventController read-group accretion", () => {
 	});
 
 	it("retains live read images while hidden so the visibility toggle can reveal them", async () => {
-		Settings.instance.override("terminal.showImages", false);
+		cfgTerminalShowImages.override(Settings.instance, false);
 		setTerminalImageProtocol(ImageProtocol.Sixel);
 		const { controller, chatContainer } = createFixture();
 		const toolCall = read("hidden.png");

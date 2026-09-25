@@ -68,7 +68,7 @@ function makeHostContext(): { ctx: InteractiveModeContext; state: HostContextSta
 		tornDown: Promise.withResolvers<void>(),
 	};
 	const ctx = {
-		settings: { get: () => "" },
+		settings: Settings.isolated(),
 		sessionManager: {
 			getSessionId: () => {
 				state.onSessionIdRead?.();

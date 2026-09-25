@@ -30,7 +30,7 @@ import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memor
 /** Minimal host `InteractiveModeContext`: only the members `CollabHost` reads. */
 function makeHostContext(manager: SessionManager): InteractiveModeContext {
 	return {
-		settings: { get: () => "" },
+		settings: Settings.isolated(),
 		sessionManager: manager,
 		session: {
 			isStreaming: false,
@@ -77,7 +77,7 @@ function makeGuestHarness(model: Model, modelRegistry: ModelRegistry): GuestHarn
 	const session = new AgentSession({ agent, sessionManager: manager, settings: Settings.isolated(), modelRegistry });
 
 	const ctx = {
-		settings: { get: () => "" },
+		settings: Settings.isolated(),
 		sessionManager: manager,
 		session,
 		statusContainer: { clear: () => {}, disposeChildren: () => {} },

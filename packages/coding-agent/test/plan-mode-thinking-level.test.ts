@@ -14,6 +14,8 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 
+import { cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
+
 describe("plan mode thinking level", () => {
 	let session: AgentSession;
 	let modelRegistry: ModelRegistry;
@@ -43,7 +45,7 @@ describe("plan mode thinking level", () => {
 	});
 
 	function configureRoles(modelRoles: Record<string, string>): AgentSession {
-		sessionSettings.override("modelRoles", modelRoles);
+		cfgModelRoles.override(sessionSettings, modelRoles);
 		return session;
 	}
 
