@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `tui.hyperlinks: auto` staying off inside Herdr panes ([#13268](https://github.com/can1357/oh-my-pi/pull/13268) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
+
 ## [18.3.1] - 2026-09-25
 
 ### Breaking Changes

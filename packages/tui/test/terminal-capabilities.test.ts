@@ -594,6 +594,53 @@ describe("shouldEnableHyperlinksByDefault", () => {
 		expect(shouldEnableHyperlinksByDefault({ TERM: "screen-256color" }, "kitty")).toBe(false);
 	});
 
+	it("enables hyperlinks inside Herdr panes even when the pane resolves to a generic terminal", () => {
+		expect(shouldEnableHyperlinksByDefault({ HERDR_ENV: "1", TERM: "xterm-256color" }, "base")).toBe(true);
+		expect(shouldEnableHyperlinksByDefault({ HERDR_PANE_ID: "w1:p1" }, "base")).toBe(true);
+	});
+
+	it("keeps screen above Herdr as a veto (screen cannot forward OSC 8)", () => {
+		expect(shouldEnableHyperlinksByDefault({ STY: "1234.pts-0.host", HERDR_ENV: "1" }, "base")).toBe(false);
+	});
+
+	it("lets the explicit override win over Herdr pane detection", () => {
+		expect(shouldEnableHyperlinksByDefault({ PI_NO_HYPERLINKS: "1", HERDR_ENV: "1" }, "base")).toBe(false);
+		expect(shouldEnableHyperlinksByDefault({ PI_FORCE_HYPERLINKS: "1", HERDR_ENV: "1" }, "base")).toBe(true);
+	});
+
+	it("prefers Herdr pane detection over the tmux version gate when nested", () => {
+		// Herdr consumes OSC 8 itself and re-emits or self-handles links, so an
+		// intermediate tmux whose version would gate a direct tmux session does
+		// not change the outcome: worst case the re-emitted sequences degrade to
+		// plain text, and Ctrl-click still opens through Herdr.
+		const nested = { HERDR_ENV: "1", TMUX: "/tmp/tmux-1000/default,1,0", TERM_PROGRAM: "tmux" };
+		expect(shouldEnableHyperlinksByDefault({ ...nested, TERM_PROGRAM_VERSION: "3.2" }, "base")).toBe(true);
+		expect(shouldEnableHyperlinksByDefault({ ...nested, TERM_PROGRAM_VERSION: "4.0" }, "base")).toBe(true);
+	});
+
+	it("treats empty-string multiplexer markers as absent", () => {
+		expect(shouldEnableHyperlinksByDefault({ HERDR_ENV: "1", STY: "", TMUX: "", TERM: "" }, "base")).toBe(true);
+	});
+
+	it('requires the exact "1" value for override variables', () => {
+		expect(shouldEnableHyperlinksByDefault({ PI_FORCE_HYPERLINKS: "true" }, "warp")).toBe(false);
+		expect(shouldEnableHyperlinksByDefault({ PI_NO_HYPERLINKS: "true" }, "kitty")).toBe(true);
+	});
+
+	it("keeps tmux off when TERM_PROGRAM_VERSION is unparseable", () => {
+		expect(
+			shouldEnableHyperlinksByDefault(
+				{ TMUX: "/tmp/tmux-1000/default,1,0", TERM_PROGRAM: "tmux", TERM_PROGRAM_VERSION: "v3.4" },
+				"kitty",
+			),
+		).toBe(false);
+	});
+
+	it("lets Herdr panes win over the screen and tmux TERM fallbacks", () => {
+		expect(shouldEnableHyperlinksByDefault({ HERDR_ENV: "1", TERM: "screen-256color" }, "base")).toBe(true);
+		expect(shouldEnableHyperlinksByDefault({ HERDR_ENV: "1", TERM: "tmux-256color" }, "base")).toBe(true);
+	});
+
 	it("treats TMUX as authoritative even when TERM is screen-family (tmux's historical default-terminal)", () => {
 		// tmux's historical `default-terminal` is `screen-256color`, so a tmux
 		// session can have a screen-family TERM. The TMUX env signals tmux is the
