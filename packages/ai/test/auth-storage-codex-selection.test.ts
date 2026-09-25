@@ -17,6 +17,7 @@ import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
 import type { UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import { removeWithRetries } from "../../utils/src/temp";
 import { logger } from "@oh-my-pi/pi-utils";
+import { trace } from "@opentelemetry/api";
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
@@ -391,18 +392,22 @@ describe("AuthStorage codex oauth ranking", () => {
 		const dispose = logger.registerLogSink(event => {
 			if (event.message === "auth.oauth_credential_selected") events.push(event);
 		});
+		const span = trace.getTracer("auth-selection-test").startSpan("select");
+		const spanEvent = vi.spyOn(span, "addEvent");
+		vi.spyOn(trace, "getActiveSpan").mockReturnValue(span);
 		try {
-			expect(await authStorage.keys.get("openai-codex", "event-session", { modelId: "gpt-5.3-codex" })).toBe(
-				"api-acct-near",
-			);
+			const selected = await authStorage.keys.get("openai-codex", "event-session", { modelId: "gpt-5.3-codex" });
+			expect(selected).toBe("api-acct-near");
 			expect(await authStorage.keys.get("openai-codex", "event-session", { modelId: "gpt-5.3-codex" })).toBe(
 				"api-acct-near",
 			);
 		} finally {
 			dispose();
+			span.end();
 		}
 		expect(events).toHaveLength(2);
 		const [first, second] = events.map(event => event.context);
+		const candidatesJson = JSON.stringify(first?.candidates);
 		expect(first).toMatchObject({
 			provider: "openai-codex",
 			model: "gpt-5.3-codex",
@@ -423,6 +428,17 @@ describe("AuthStorage codex oauth ranking", () => {
 			usageFetchedAt: expect.any(Number),
 		});
 		expect(candidates[0]?.secondaryRequiredDrain).toBeGreaterThan(candidates[1]?.secondaryRequiredDrain as number);
+		expect(spanEvent).toHaveBeenCalledWith(
+			"auth.oauth_credential_selected",
+			expect.objectContaining({
+				"auth.provider": "openai-codex",
+				"auth.model": "gpt-5.3-codex",
+				"auth.has_session_id": true,
+				"auth.credential_id": first?.credentialId,
+				"auth.reason": "rank",
+				"auth.candidates": candidatesJson,
+			}),
+		);
 		expect(JSON.stringify(events)).not.toMatch(
 			/near@example|far@example|acct-near|acct-far|access-|refresh-|api-acct/,
 		);
