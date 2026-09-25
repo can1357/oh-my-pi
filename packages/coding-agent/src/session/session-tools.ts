@@ -7,7 +7,7 @@ import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelString } from "../config/model-resolver";
-import type { Settings, SkillsSettings } from "../config/settings";
+import type { Settings } from "../config/settings";
 import type { CustomTool, CustomToolContext } from "../extensibility/custom-tools/types";
 import { CustomToolAdapter } from "../extensibility/custom-tools/wrapper";
 import type { ExtensionRunner, SourceInfo, ToolInfo } from "../extensibility/extensions";
@@ -52,6 +52,17 @@ import { toolReadsSkillUris } from "../system-prompt";
 import type { CustomMessage } from "./messages";
 import type { SessionManager } from "./session-manager";
 
+import { cfgDisabledExtensions, cfgSkills, type SkillsSettings } from "../extensibility/settings";
+import {
+	cfgExternalThinking,
+	cfgIncludeModelInPrompt,
+	cfgProvidersOpenaiCodexCodeMode,
+	cfgProvidersOpenaiCodexCodeModeDirectTools,
+	cfgSkillful,
+} from "./settings";
+import { cfgStartupQuiet } from "../modes/settings";
+import { cfgToolsApproval, cfgToolsApprovalMode, cfgToolsXdevDocs, cfgToolsXdevInlineDevices } from "../tools/settings";
+
 /** Capabilities borrowed from the owning AgentSession. */
 export interface SessionToolsHost {
 	agent: Agent;
@@ -79,6 +90,16 @@ export interface SessionToolsHost {
 	setCodeModeNamespacesInfo?(info: unknown): void;
 }
 
+/** Registry delta applied by the SDK's settings-gated tool reconcile. */
+export interface SettingsGatedToolDelta {
+	/** Newly registered names: `builtIn` marks built-in factory provenance, `activate` joins the enabled set. */
+	readonly added: readonly { readonly name: string; readonly builtIn: boolean; readonly activate: boolean }[];
+	/** Names whose registry entries were removed. */
+	readonly removed: readonly string[];
+	/** `xd://` state after following `tools.xdev`; undefined while mounting is off. */
+	readonly xdev: XdevState | undefined;
+}
+
 interface SessionToolsOptions {
 	autoApprove?: boolean;
 	toolRegistry?: Map<string, AgentTool>;
@@ -101,6 +122,11 @@ interface SessionToolsOptions {
 	setPendingFullWriteDescription?: (enabled: boolean) => void;
 	/** Registers the hidden `goal` tool when goal mode is enabled at runtime. */
 	ensureGoalRegistered?: () => Promise<boolean>;
+	/**
+	 * Re-resolves settings-gated tools against live settings, mutating the shared
+	 * registry; `isBuiltIn` reports this session's built-in provenance.
+	 */
+	reconcileSettingsGatedTools?: (isBuiltIn: (name: string) => boolean) => Promise<SettingsGatedToolDelta>;
 	rebuildSystemPrompt?: (
 		toolNames: string[],
 		tools: Map<string, AgentTool>,
@@ -336,6 +362,7 @@ export class SessionTools {
 	 */
 	readonly #deviceOnlyWriteTransportAvailable: boolean;
 	#ensureGoalRegistered: SessionToolsOptions["ensureGoalRegistered"];
+	#reconcileSettingsGatedTools: SessionToolsOptions["reconcileSettingsGatedTools"];
 	#skills: Skill[];
 	#skillWarnings: SkillWarning[];
 	#skillsSettings: SkillsSettings | undefined;
@@ -381,6 +408,7 @@ export class SessionTools {
 		this.#setDeviceOnlyWrite = options.setDeviceOnlyWrite;
 		this.#setPendingFullWriteDescription = options.setPendingFullWriteDescription;
 		this.#ensureGoalRegistered = options.ensureGoalRegistered;
+		this.#reconcileSettingsGatedTools = options.reconcileSettingsGatedTools;
 		this.#rebuildSystemPrompt = options.rebuildSystemPrompt;
 		this.#getMcpServerInstructions = options.getMcpServerInstructions;
 		this.#xdev = options.xdev;
@@ -476,7 +504,7 @@ export class SessionTools {
 
 	/** Derives the candidate visibility from the live setting without publishing it. */
 	#deriveSkillHintVisible(): boolean {
-		return this.#host.settings.get("skillful") === true && (this.#skills?.length ?? 0) > 0;
+		return cfgSkillful.get(this.#host.settings) === true && (this.#skills?.length ?? 0) > 0;
 	}
 	/** Drops cached per-session ACP `allow_always`/`reject_always` decisions. */
 	clearAcpPermissionDecisions(): void {
@@ -760,7 +788,7 @@ export class SessionTools {
 	#currentPromptModelKey(): string | undefined {
 		const activeModel = this.#host.model();
 		if (!activeModel) return undefined;
-		if (this.#host.settings.get("includeModelInPrompt")) return formatModelString(activeModel);
+		if (cfgIncludeModelInPrompt.get(this.#host.settings)) return formatModelString(activeModel);
 		return `delegation-bias:${resolveDelegationBias(activeModel)}`;
 	}
 
@@ -778,8 +806,8 @@ export class SessionTools {
 	/** Whether a model transition crosses a Code Mode presentation boundary. */
 	codeModeChangesBetween(previousModel: Model | undefined, nextModel: Model): boolean {
 		const enabledToolNames = this.getEnabledToolNames();
-		const setting = this.#host.settings.get("providers.openai-codex.codeMode");
-		const extraDirectTools = this.#host.settings.get("providers.openai-codex.codeModeDirectTools");
+		const setting = cfgProvidersOpenaiCodexCodeMode.get(this.#host.settings);
+		const extraDirectTools = cfgProvidersOpenaiCodexCodeModeDirectTools.get(this.#host.settings);
 		const resolve = (model: Model | undefined) =>
 			resolveCodeMode({
 				provider: model?.provider ?? "",
@@ -850,7 +878,7 @@ export class SessionTools {
 		// Skip the gate only on explicit yolo opt-in; honour per-tool policies
 		// that require a prompt or deny (matching the normal approval wrapper).
 		if (this.#isExplicitAutoApproveMode()) {
-			const userPolicies = (this.#host.settings.get("tools.approval") ?? {}) as Record<string, unknown>;
+			const userPolicies: Record<string, unknown> = cfgToolsApproval.get(this.#host.settings);
 			const toolPolicy = userPolicies[tool.name];
 			if (!toolPolicy || toolPolicy === "allow") return tool;
 		}
@@ -947,8 +975,8 @@ export class SessionTools {
 	#isExplicitAutoApproveMode(): boolean {
 		return (
 			this.#autoApprove ||
-			(this.#host.settings.isConfigured("tools.approvalMode") &&
-				this.#host.settings.get("tools.approvalMode") === "yolo")
+			(cfgToolsApprovalMode.isConfigured(this.#host.settings) &&
+				cfgToolsApprovalMode.get(this.#host.settings) === "yolo")
 		);
 	}
 
@@ -1020,8 +1048,8 @@ export class SessionTools {
 		const codeMode = resolveCodeMode({
 			provider: this.#host.model()?.provider ?? "",
 			toolMode: this.#host.model()?.toolMode,
-			setting: this.#host.settings.get("providers.openai-codex.codeMode"),
-			extraDirectTools: this.#host.settings.get("providers.openai-codex.codeModeDirectTools"),
+			setting: cfgProvidersOpenaiCodexCodeMode.get(this.#host.settings),
+			extraDirectTools: cfgProvidersOpenaiCodexCodeModeDirectTools.get(this.#host.settings),
 			enabledToolNames: toolNames,
 			evalTransportAvailable: this.#hasCodeModeEvalTransport(),
 		});
@@ -1369,7 +1397,7 @@ export class SessionTools {
 			if (!pending.added.delete(name)) pending.removed.add(name);
 		}
 		this.#pendingXdevMountDelta = pending.added.size > 0 || pending.removed.size > 0 ? pending : undefined;
-		if (this.#host.settings.get("startup.quiet")) return;
+		if (cfgStartupQuiet.get(this.#host.settings)) return;
 		const parts: string[] = [];
 		if (addedNames.length > 0) parts.push(`mounted ${addedNames.join(", ")}`);
 		if (removedNames.length > 0) parts.push(`unmounted ${removedNames.join(", ")}`);
@@ -1592,8 +1620,8 @@ export class SessionTools {
 			? xdevDocsFor(
 					this.#xdev,
 					new Set(addedNames),
-					this.#host.settings.get("tools.xdevDocs"),
-					this.#host.settings.get("tools.xdevInlineDevices"),
+					cfgToolsXdevDocs.get(this.#host.settings),
+					cfgToolsXdevInlineDevices.get(this.#host.settings),
 				)
 			: "";
 		return {
@@ -1614,11 +1642,11 @@ export class SessionTools {
 	async refreshSkills(): Promise<void> {
 		resetCapabilities();
 		if (this.#skillsReloadable) {
-			const skillsSettings = this.#host.settings.getGroup("skills");
+			const skillsSettings = cfgSkills.get(this.#host.settings);
 			const discovered = await loadSkills({
 				...skillsSettings,
 				cwd: this.#host.sessionManager.getCwd(),
-				disabledExtensions: this.#host.settings.get("disabledExtensions") ?? [],
+				disabledExtensions: cfgDisabledExtensions.get(this.#host.settings),
 				extensionRoots: this.#host.effectiveExtensionRoots(),
 			});
 			this.#skills = discovered.skills;
@@ -1754,21 +1782,15 @@ export class SessionTools {
 	}
 
 	/**
-	 * Session-scoped enable/disable for the private `think` scratchpad tool.
-	 *
-	 * Enabling constructs the tool once and refreshes the model's tool contract;
-	 * disabling removes it from the active set while preserving its registry entry.
+	 * Reconciles the private `think` scratchpad with the `externalThinking`
+	 * setting and the active model. Enabling constructs the tool once;
+	 * disabling removes it from the active set but keeps its registry entry.
 	 *
 	 * @returns false when enabling was requested but this session cannot build the tool.
 	 */
-	setThinkToolEnabled(enabled: boolean): Promise<boolean> {
-		return this.#setThinkToolActive(enabled && supportsExternalThinking(this.#host.model()));
-	}
-
-	/** Reconciles the external scratchpad after the active model changes. */
 	reconcileThinkTool(): Promise<boolean> {
 		return this.#setThinkToolActive(
-			this.#host.settings.get("externalThinking") && supportsExternalThinking(this.#host.model()),
+			cfgExternalThinking.get(this.#host.settings) && supportsExternalThinking(this.#host.model()),
 		);
 	}
 
@@ -1792,6 +1814,40 @@ export class SessionTools {
 				await this.#applyActiveToolsByName([...active, "think"]);
 			}
 			return true;
+		});
+	}
+
+	/**
+	 * Re-resolves settings-gated tools (built-in factories, image/speech generation,
+	 * `xd://` mounting) against live settings: registers newly allowed tools,
+	 * unregisters disallowed ones, and reapplies the enabled set with one forced
+	 * prompt rebuild — unconditionally unless `refreshPrompt` is false, then only
+	 * when the tool set changed. Unrelated selections, MCP/extension tools, and the
+	 * Code Mode partition are preserved.
+	 */
+	reconcileBuiltinTools({ refreshPrompt = true }: { refreshPrompt?: boolean } = {}): Promise<void> {
+		return this.runToolRegistryMutation(async () => {
+			const reconcile = this.#reconcileSettingsGatedTools;
+			if (!reconcile || this.#host.isDisposed()) return;
+			// Sampled before the delta: it still carries names mounted under the
+			// `xd://` state the reconcile may release.
+			const enabled = new Set(this.getEnabledToolNames());
+			const delta = await reconcile(name => this.#builtInToolNames.has(name));
+			for (const name of delta.removed) {
+				enabled.delete(name);
+				this.#builtInToolNames.delete(name);
+			}
+			for (const { name, builtIn, activate } of delta.added) {
+				this.setToolBuiltIn(name, builtIn);
+				if (activate) enabled.add(name);
+			}
+			const xdevChanged = delta.xdev !== this.#xdev;
+			if (xdevChanged) {
+				this.#xdev = delta.xdev;
+				if (delta.xdev) delta.xdev.decorateExecution = tool => this.#wrapToolForAcpPermission(tool);
+			}
+			if (!refreshPrompt && !xdevChanged && delta.added.length === 0 && delta.removed.length === 0) return;
+			await this.#applyActiveToolsByName([...enabled], true);
 		});
 	}
 
@@ -1967,7 +2023,7 @@ export class SessionTools {
 	 *
 	 * Inputs NOT covered: tool input schemas; memory instructions read from disk;
 	 * and SDK-init-time closure constants in `sdk.ts` (`inlineToolDescriptors`,
-	 * `eagerTasks`, `intentField`, `mcpDiscoveryEnabled`, `secretsEnabled`). The
+	 * `eagerTasks`, `intentField`, `mcpDiscoveryEnabled`). The
 	 * closure-captured ones cannot change at runtime regardless of skip behavior.
 	 * For everything else, callers must explicitly call {@link refreshBaseSystemPrompt}
 	 * after side-effecting changes; see the memory hooks and {@link syncAfterModelChange}.

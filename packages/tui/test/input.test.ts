@@ -31,6 +31,34 @@ describe("Input component", () => {
 		resetHangulCompatibilityJamoWidthForTests();
 	});
 
+	it("replaces a volatile dictation preview in place and undoes the committed dictation in one step", () => {
+		const input = setupAtEnd("ask ");
+		input.setVolatileText("hel");
+		input.setVolatileText("hello wor");
+		input.commitVolatileText("hello world");
+		expect(input.getValue()).toBe("ask hello world");
+		input.handleInput("\x1f"); // Ctrl+_ (undo)
+		expect(input.getValue()).toBe("ask ");
+	});
+
+	it("keeps the value intact when the caret leaves a live dictation preview", () => {
+		const input = setupAtEnd("ask ");
+		input.setVolatileText("hello");
+		input.handleInput("\x1b[H"); // Home
+		input.setVolatileText("hello world");
+		input.commitVolatileText("hello world");
+		// The new preview lands at the caret, as in Editor; nothing before it is duplicated.
+		expect(input.getValue()).toBe("hello worldask hello");
+	});
+
+	it("fits a wide cursor override at the end of a line that fills the width", () => {
+		const input = setupAtEnd("x".repeat(40));
+		input.prompt = "";
+		input.cursorOverride = "\x1b[35m🎤\x1b[0m";
+		expect(input.render(20)[0]).toContain("🎤");
+		expect(renderedWidth(input, 20)).toBe(20);
+	});
+
 	it("moves by CJK and punctuation blocks (backward)", () => {
 		const text = "天气不错，去散步吧！";
 

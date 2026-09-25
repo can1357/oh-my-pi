@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import type { Writable } from "node:stream";
-import { logger, TempDir } from "@oh-my-pi/pi-utils";
+import { logger, openCloexecSync, TempDir } from "@oh-my-pi/pi-utils";
 import type { BunFile } from "bun";
 
 const READ_BYTES = 64 * 1024;
@@ -73,7 +73,8 @@ export class RpcOutputWriter {
 			try {
 				const file = dir.join("output");
 				const handle = Bun.file(file);
-				this.#spool = { dir, file: handle, fd: fs.openSync(file, "wx+", 0o600), read: 0, written: 0 };
+				const fd = openCloexecSync(file, fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
+				this.#spool = { dir, file: handle, fd, read: 0, written: 0 };
 			} catch (error) {
 				dir.removeSync();
 				throw error;

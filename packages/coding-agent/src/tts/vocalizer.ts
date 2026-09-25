@@ -48,6 +48,8 @@ import { BlockAccumulator, type SpeechEnhancer } from "./speech-enhancer";
 import { createStreamingPlayer, DUCK_GAIN } from "./streaming-player";
 import { type TtsStreamHandle, ttsClient } from "./tts-client";
 
+import { cfgSpeechEnabled, cfgSpeechEnhanced, cfgSpeechVoice } from "./settings";
+
 /** Quiet time on the delta stream before the buffered partial is spoken. */
 const IDLE_FLUSH_MS = 1000;
 /** Coalesce completed blocks until this many chars before one rewrite call. */
@@ -165,9 +167,9 @@ export class Vocalizer {
 	 */
 	pushDelta(text: string): void {
 		const speechSettings = this.#modelSource?.settings ?? settings;
-		if (this.#suspensions > 0 || !speechSettings.get("speech.enabled")) return;
+		if (this.#suspensions > 0 || !cfgSpeechEnabled.get(speechSettings)) return;
 		if (!text) return;
-		if (this.#enhanced || (!this.#speakable && this.#enhancer && speechSettings.get("speech.enhanced"))) {
+		if (this.#enhanced || (!this.#speakable && this.#enhancer && cfgSpeechEnhanced.get(speechSettings))) {
 			this.#pushEnhanced(text);
 			return;
 		}
@@ -378,7 +380,7 @@ export class Vocalizer {
 	#openSession(abort: AbortController): TtsStreamHandle {
 		const source = this.#modelSource;
 		const modelKey = source ? resolveLocalSpeechModelId(source) : TTS_LOCAL_MODELS[0].key;
-		const voice = (source?.settings ?? settings).get("speech.voice") || DEFAULT_TTS_VOICE;
+		const voice = cfgSpeechVoice.get(source?.settings ?? settings) || DEFAULT_TTS_VOICE;
 		const handle = ttsClient.synthesizeStream(modelKey, { voice, signal: abort.signal });
 		const player = this.#createPlayer();
 		player.setGain(this.#ducked ? DUCK_GAIN : 1);

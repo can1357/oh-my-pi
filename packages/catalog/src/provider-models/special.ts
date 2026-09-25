@@ -345,6 +345,7 @@ export function devinModelManagerOptions(config: DevinModelManagerConfig = {}): 
 	const staticModels = seedModels<"devin-agent">("devin");
 	return {
 		providerId: "devin",
+		cacheProviderId: resolveModelCacheProviderId("devin"),
 		// A configured host serves its own Cascade deployment; keep the seed on it.
 		staticModels:
 			baseUrl === undefined || baseUrl === DEVIN_DEFAULT_BASE_URL

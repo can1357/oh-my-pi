@@ -219,6 +219,11 @@ For task dispatch, model precedence is:
 
 Role aliases in either of the first two sources are expanded through `modelRoles`. The shared eval bridge can also supply an invocation-local model override ahead of the settings override; the task wire schema does not expose that field.
 
+Compaction triggers are separate from model and service-tier selection: an exact, case-sensitive
+`task.agentCompactionThresholdOverrides[agentName]` entry (`90000` or `"80%"`) replaces the
+`compaction.threshold*` settings for that agent only; agents without an entry, including agents it
+spawns, use the main session's thresholds. See [Settings](./settings.md#context-compaction-and-memory).
+
 Service-tier precedence is independent of model selection: an exact, case-sensitive
 `task.agentServiceTierOverrides[agentName]` entry overrides `tier.subagent`; an absent entry preserves
 the global behavior. `inherit` snapshots the parent session's live per-family tiers (including

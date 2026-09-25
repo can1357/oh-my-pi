@@ -251,7 +251,6 @@ export class AnnotationOverlay implements Component {
 		// Keep the editor's CURSOR_MARKER for terminal cursor placement, but
 		// replace its visible end-of-input caret with a stable blank cell.
 		this.#editor.cursorOverride = " ";
-		this.#editor.cursorOverrideWidth = 1;
 		this.#editor.setScrollbarVisible(true);
 		this.#editor.onSubmit = value => this.#commitAnnotation(value);
 		this.#externalEditorLabel = keybindings.getDisplayString("app.editor.external");
