@@ -104,6 +104,10 @@
 ### Fixed
 
 - Prevented magic keywords from triggering spelling autocorrect and underlining
+- Added kind-filtered image, web, speech, dictation, and judge role selection with editable default fallback chains in the model hub.
+### Fixed
+
+- Improved `/tree` responsiveness for long linear session histories by avoiding quadratic ancestor metadata allocation ([#12527](https://github.com/can1357/oh-my-pi/pull/12527) by [@azain47](https://github.com/azain47)).
 
 ## [18.2.5] - 2026-09-17
 

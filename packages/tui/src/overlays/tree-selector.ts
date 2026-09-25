@@ -185,6 +185,7 @@ class TreeList implements Component {
 			getChildren: node => this.#orderedChildren(node),
 			getChildDepth: (_node, row, children) =>
 				children.length > 1 || (this.#multipleRoots && row.parentKey === undefined) ? row.depth + 1 : row.depth,
+			compactSameDepthAncestors: true,
 			theme,
 			filter: this.#buildFilter(),
 			maxRows: maxVisibleLines,
