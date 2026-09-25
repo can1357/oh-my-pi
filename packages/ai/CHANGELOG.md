@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added privacy-safe OAuth account selection events with ranking context in structured logs and active OpenTelemetry spans ([#13278](https://github.com/can1357/oh-my-pi/pull/13278) by [@schickling-assistant](https://github.com/schickling-assistant)).
+
 ## [18.3.1] - 2026-09-25
 
 ### Added

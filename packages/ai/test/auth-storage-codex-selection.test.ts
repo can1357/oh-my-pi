@@ -16,6 +16,8 @@ import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
 import type { UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import { removeWithRetries } from "../../utils/src/temp";
+import { logger } from "@oh-my-pi/pi-utils";
+import { trace } from "@opentelemetry/api";
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
@@ -362,6 +364,171 @@ describe("AuthStorage codex oauth ranking", () => {
 			await removeWithRetries(tempDir);
 			tempDir = "";
 		}
+	});
+
+	test("emits privacy-safe ranking inputs and the selected row on rank and pin", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		await authStorage.credentials.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-near", "near@example.com") },
+			{ type: "oauth", ...createCredential("acct-far", "far@example.com") },
+		]);
+		usageByAccount.set(
+			"acct-near",
+			createCodexUsageReport({
+				accountId: "acct-near",
+				primary: { usedFraction: 0.4, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.8, resetInMs: HOUR_MS },
+			}),
+		);
+		usageByAccount.set(
+			"acct-far",
+			createCodexUsageReport({
+				accountId: "acct-far",
+				primary: { usedFraction: 0.3, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.4, resetInMs: WEEK_MS },
+			}),
+		);
+		const events: logger.LogEvent[] = [];
+		const dispose = logger.registerLogSink(event => {
+			if (event.message === "auth.oauth_credential_selected") events.push(event);
+		});
+		const span = trace.getTracer("auth-selection-test").startSpan("select");
+		const spanEvent = vi.spyOn(span, "addEvent");
+		vi.spyOn(trace, "getActiveSpan").mockReturnValue(span);
+		try {
+			const selected = await authStorage.keys.get("openai-codex", "event-session", { modelId: "gpt-5.3-codex" });
+			expect(selected).toBe("api-acct-near");
+			expect(await authStorage.keys.get("openai-codex", "event-session", { modelId: "gpt-5.3-codex" })).toBe(
+				"api-acct-near",
+			);
+		} finally {
+			dispose();
+			span.end();
+		}
+		expect(events).toHaveLength(2);
+		const [first, second] = events.map(event => event.context);
+		const candidatesJson = JSON.stringify(first?.candidates);
+		expect(first).toMatchObject({
+			provider: "openai-codex",
+			model: "gpt-5.3-codex",
+			hasSessionId: true,
+			reason: "rank",
+			credentialId: expect.any(Number),
+		});
+		expect(second).toMatchObject({ credentialId: first?.credentialId, reason: "pin" });
+		const candidates = first?.candidates as Array<Record<string, unknown>>;
+		expect(candidates).toHaveLength(2);
+		expect(candidates[0]).toMatchObject({
+			credentialId: first?.credentialId,
+			blocked: false,
+			inReserve: false,
+			primaryUsed: 0.4,
+			priority: 0,
+			usageChecked: true,
+			usageFetchedAt: expect.any(Number),
+		});
+		expect(candidates[0]?.secondaryRequiredDrain).toBeGreaterThan(candidates[1]?.secondaryRequiredDrain as number);
+		expect(spanEvent).toHaveBeenCalledWith(
+			"auth.oauth_credential_selected",
+			expect.objectContaining({
+				"auth.provider": "openai-codex",
+				"auth.model": "gpt-5.3-codex",
+				"auth.has_session_id": true,
+				"auth.credential_id": first?.credentialId,
+				"auth.reason": "rank",
+				"auth.candidates": candidatesJson,
+			}),
+		);
+		expect(JSON.stringify(events)).not.toMatch(
+			/near@example|far@example|acct-near|acct-far|access-|refresh-|api-acct/,
+		);
+	});
+
+	test("distinguishes single-account, explicit pin, and constrained fallback selections", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		await authStorage.credentials.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-first", "first@example.com") },
+		]);
+		const events: logger.LogEvent[] = [];
+		const dispose = logger.registerLogSink(event => {
+			if (event.message === "auth.oauth_credential_selected") events.push(event);
+		});
+		try {
+			expect(await authStorage.keys.get("openai-codex")).toBe("api-acct-first");
+			expect(events[0]?.context).toMatchObject({
+				hasSessionId: false,
+				reason: "single",
+				candidates: [{ credentialId: expect.any(Number), usageFetchedAt: null }],
+			});
+			await authStorage.credentials.set("openai-codex", [
+				{ type: "oauth", ...createCredential("acct-first", "first@example.com") },
+				{ type: "oauth", ...createCredential("acct-second", "second@example.com") },
+			]);
+			usageByAccount.set(
+				"acct-first",
+				createCodexUsageReport({
+					accountId: "acct-first",
+					primary: { usedFraction: 0.3, resetInMs: HOUR_MS },
+					secondary: { usedFraction: 0.8, resetInMs: HOUR_MS },
+				}),
+			);
+			usageByAccount.set(
+				"acct-second",
+				createCodexUsageReport({
+					accountId: "acct-second",
+					primary: { usedFraction: 0.3, resetInMs: HOUR_MS },
+					secondary: { usedFraction: 0.4, resetInMs: WEEK_MS },
+				}),
+			);
+			const first = authStorage.oauth.accounts("openai-codex").find(account => account.accountId === "acct-first");
+			if (!first) throw new Error("missing first credential");
+			expect(authStorage.sessions.pin("openai-codex", "event-explicit-pin", first.credentialId)).toBe(true);
+			expect(await authStorage.keys.get("openai-codex", "event-explicit-pin")).toBe("api-acct-first");
+			expect(events[1]?.context).toMatchObject({ reason: "explicit-pin", credentialId: first.credentialId });
+			expect(await authStorage.keys.get("openai-codex", "event-constrained", { accountIds: ["acct-second"] })).toBe(
+				"api-acct-second",
+			);
+			expect(events[2]?.context).toMatchObject({ reason: "fallback" });
+		} finally {
+			dispose();
+		}
+	});
+
+	test("reports blocked last-resort selection without account identity", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		await authStorage.credentials.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-blocked", "blocked@example.com") },
+			{ type: "oauth", ...createCredential("acct-exhausted", "exhausted@example.com") },
+		]);
+		for (const accountId of ["acct-blocked", "acct-exhausted"]) {
+			usageByAccount.set(
+				accountId,
+				createCodexUsageReport({
+					accountId,
+					primary: { usedFraction: 1, resetInMs: HOUR_MS },
+					secondary: { usedFraction: 1, resetInMs: WEEK_MS },
+				}),
+			);
+		}
+		const events: logger.LogEvent[] = [];
+		const dispose = logger.registerLogSink(event => {
+			if (event.message === "auth.oauth_credential_selected") events.push(event);
+		});
+		try {
+			expect(await authStorage.keys.get("openai-codex", "event-blocked")).toBeDefined();
+		} finally {
+			dispose();
+		}
+		expect(events).toHaveLength(1);
+		expect(events[0]?.context).toMatchObject({
+			reason: "block",
+			credentialId: expect.any(Number),
+			candidates: [
+				{ blocked: true, primaryUsed: 1, credentialId: expect.any(Number) },
+				{ blocked: true, primaryUsed: 1, credentialId: expect.any(Number) },
+			],
+		});
+		expect(JSON.stringify(events)).not.toMatch(/blocked@example|exhausted@example|acct-blocked|acct-exhausted/);
 	});
 
 	test("prefers near-reset weekly account over lower-used far-reset account", async () => {

@@ -153,7 +153,8 @@
 		"@oh-my-pi/pi-catalog": "catalog:",
 		"@oh-my-pi/pi-natives": "catalog:",
 		"@oh-my-pi/pi-utils": "catalog:",
-		"@oh-my-pi/pi-wire": "catalog:"
+		"@oh-my-pi/pi-wire": "catalog:",
+		"@opentelemetry/api": "catalog:"
 	},
 	"devDependencies": {
 		"@types/bun": "catalog:"

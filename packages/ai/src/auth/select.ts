@@ -1,4 +1,5 @@
 import { logger } from "@oh-my-pi/pi-utils";
+import { trace } from "@opentelemetry/api";
 import * as AIError from "../error";
 import { getOAuthApiKey, getOAuthProvider } from "../registry/oauth";
 import type { OAuthCredentials, OAuthProvider } from "../registry/oauth/types";
@@ -337,7 +338,7 @@ export class CredentialSelector {
 		blockScope?: string;
 		/** Scopes a block may live under for this request; reads honour all of them. */
 		blockScopes?: readonly string[];
-	}): Promise<OAuthCandidate[]> {
+	}): Promise<{ candidates: OAuthCandidate[]; ranked: RankedOAuthCandidate[] }> {
 		const nowMs = Date.now();
 		const { strategy } = args;
 		const ranked: RankedOAuthCandidate[] = [];
@@ -475,7 +476,7 @@ export class CredentialSelector {
 				orderPos,
 			});
 		}
-		return orderUsageRankedCandidates(ranked, args.planGate !== undefined);
+		return { candidates: orderUsageRankedCandidates(ranked, args.planGate !== undefined), ranked };
 	}
 
 	/**
@@ -598,7 +599,7 @@ export class CredentialSelector {
 				...baseRankingOrder.filter(index => index !== sessionPreferredRankingPos),
 			];
 		}
-		const candidates: OAuthCandidate[] = shouldRank
+		const rankedResult = shouldRank
 			? await this.#rankOAuthSelections({
 					providerKey,
 					provider,
@@ -612,14 +613,44 @@ export class CredentialSelector {
 					blockScope,
 					blockScopes,
 				})
-			: policyOrder
-					.map(idx => credentials[idx])
-					.filter((selection): selection is { credential: OAuthCredential; index: number } => Boolean(selection))
-					.map(selection => ({
-						selection,
-						usage: null,
-						usageChecked: false,
-					}));
+			: undefined;
+		const candidates: OAuthCandidate[] =
+			rankedResult?.candidates ??
+			policyOrder
+				.map(idx => credentials[idx])
+				.filter((selection): selection is { credential: OAuthCredential; index: number } => Boolean(selection))
+				.map(selection => ({
+					selection,
+					usage: null,
+					usageChecked: false,
+				}));
+		// Snapshot stable row IDs before preflight refreshes can reorder or disable rows.
+		// Only numeric IDs and usage metrics enter the event; account identity and tokens never do.
+		// Primary is the provider's short window (5h for Codex), secondary its long
+		// window (weekly for Codex); absent measurements remain null, not zero.
+		const rankingInputs = candidates.map(candidate => {
+			const ranked = rankedResult?.ranked.find(entry => entry.selection === candidate.selection);
+			return {
+				credentialId: this.#deps.pool.entries(provider)[candidate.selection.index]?.id,
+				blocked:
+					ranked?.blocked ??
+					this.#deps.blocks.isBlocked(provider, providerKey, candidate.selection.index, blockScopes),
+				inReserve: ranked?.inReserve ?? false,
+				primaryUsed: ranked?.usageMeasured ? ranked.primaryUsed : null,
+				primaryRequiredDrain: ranked?.usageMeasured ? ranked.primaryRequiredDrain : null,
+				secondaryRequiredDrain: ranked?.usageMeasured ? ranked.secondaryRequiredDrain : null,
+				priority:
+					ranked?.accountPriority ??
+					this.#deps.policies.forCredential(provider, candidate.selection.credential)?.priority ??
+					0,
+				usageChecked: candidate.usageChecked,
+				usageFetchedAt: candidate.usage?.fetchedAt ?? null,
+			};
+		});
+		const candidateCredentialIds = new Map(
+			candidates.map((candidate, index) => [candidate, rankingInputs[index]?.credentialId]),
+		);
+		const preferredCredentialId = this.#deps.pool.entries(provider)[sessionPreferredIndex ?? -1]?.id;
 		const preflightFailures = new Set<OAuthCandidate>();
 
 		const sessionPreferredCandidate = candidates.findIndex(
@@ -807,8 +838,8 @@ export class CredentialSelector {
 		if (enforcePlanRequirement) passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts });
 		if (enforceAccounts) passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts: false });
 
-		for (const pass of passes) {
-			for (const candidate of candidates) {
+		for (const [passIndex, pass] of passes.entries()) {
+			for (const [candidateIndex, candidate] of candidates.entries()) {
 				if (preflightFailures.has(candidate)) continue;
 				const candidateAccountId = candidate.selection.credential.accountId;
 				if (pass.enforceAccounts && (candidateAccountId === undefined || !accountIds?.has(candidateAccountId)))
@@ -825,7 +856,43 @@ export class CredentialSelector {
 					blockScope,
 					blockScopes,
 				});
-				if (resolved) return resolved;
+				if (resolved) {
+					// A recursive re-resolve already logged the account it actually selected.
+					if (resolved.credentialId !== candidateCredentialIds.get(candidate)) return resolved;
+					const selectedIsPin =
+						resolved.credentialId !== undefined && resolved.credentialId === preferredCredentialId;
+					const reason =
+						credentials.length === 1
+							? "single"
+							: selectedIsPin && sessionPinIsExplicit
+								? "explicit-pin"
+								: pass.allowBlocked &&
+									  this.#deps.blocks.isBlocked(provider, providerKey, candidate.selection.index, blockScopes)
+									? "block"
+									: passIndex > 0 || candidateIndex > 0
+										? "fallback"
+										: selectedIsPin
+											? "pin"
+											: "rank";
+					const event = {
+						provider,
+						model: options?.modelId,
+						hasSessionId: sessionId !== undefined,
+						credentialId: resolved.credentialId,
+						reason,
+						candidates: rankingInputs,
+					};
+					logger.info("auth.oauth_credential_selected", event);
+					trace.getActiveSpan()?.addEvent("auth.oauth_credential_selected", {
+						"auth.provider": provider,
+						...(options?.modelId === undefined ? {} : { "auth.model": options.modelId }),
+						"auth.has_session_id": event.hasSessionId,
+						...(resolved.credentialId === undefined ? {} : { "auth.credential_id": resolved.credentialId }),
+						"auth.reason": reason,
+						"auth.candidates": JSON.stringify(rankingInputs),
+					});
+					return resolved;
+				}
 			}
 		}
 
