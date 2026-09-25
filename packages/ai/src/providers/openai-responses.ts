@@ -1361,6 +1361,9 @@ export function buildParams(
 		applyOpenAIGatewayRouting(params, model.compat);
 	}
 
+	// Model-level `compat.extraBody` (models.yml / catalog rules) is the baseline;
+	// the per-call option stays the escape hatch and wins on key conflicts.
+	applyOpenAIExtraBody(params, model.compat.extraBody);
 	applyOpenAIExtraBody(params, options?.extraBody);
 	applyOpenAIResponsesPromptCachePolicy(params, model, options, statefulCacheBaseline);
 
