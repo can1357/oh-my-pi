@@ -2,16 +2,17 @@
 
 ## [Unreleased]
 
+## [18.3.1] - 2026-09-25
+
 ### Added
 
-- Added support for `stops-output-at-context-window` model compatibility flag, preventing unnecessary output cap adjustments for models that truncate at the window limit
-- Added live steering support for Codex WebSocket transports, allowing mid-response user input to be processed without waiting for a new request boundary
-- Added passive tool-call context support, allowing hooks and tools to provide additional context that is included with tool results for subsequent model processing.
-- Added automatic output-token limit adjustment so requests fit within the model’s context window.
+- Added live steering support for Codex WebSocket transports, allowing users to provide input while a response is in progress.
+- Added passive tool-call context support, allowing hooks and tools to supply additional context for subsequent model processing.
+- Improved context-window handling by automatically adjusting output-token limits and supporting models that truncate output at the context-window limit.
 
 ### Changed
 
-- Optimized prompt token counting by using provider-reported usage for anchored prefixes, restricting local estimation to message deltas
+- Improved prompt token counting for requests with anchored prefixes by using provider-reported usage and limiting local estimation to new message content.
 
 ## [18.3.0] - 2026-09-24
 
