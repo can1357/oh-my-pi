@@ -617,9 +617,18 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	if (data.previous_response_id !== undefined) options.previousResponseId = data.previous_response_id;
 	if (data.user !== undefined) options.user = data.user;
 	if (isObj(data.metadata)) options.metadata = data.metadata;
-	// Explicit store:true must reach the provider so the creating turn persists
-	// for later previous_response_id continuations.
-	if (data.store === true) options.store = true;
+	// Responses structured outputs arrive as `text.format` (not Chat
+	// Completions `response_format`). Forward into options.responseFormat so
+	// applyParsedGatewayOptions / providers see the schema.
+	if (isObj(data.text) && "format" in data.text && data.text.format !== undefined) {
+		options.responseFormat = data.text.format;
+	} else if (isObj(body) && body.response_format !== undefined) {
+		options.responseFormat = body.response_format;
+	}
+	// `store` persists the response server-side — required for a later
+	// client-supplied `previous_response_id` to resolve (platform chaining only
+	// resolves stored responses). Forward it into provider options.
+	if (data.store !== undefined) options.store = data.store === true;
 
 	return {
 		modelId: data.model,
