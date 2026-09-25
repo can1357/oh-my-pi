@@ -139,12 +139,12 @@ describe.skipIf(!leaf)("delegated leaf", () => {
 		// script as a Rust literal. Nothing links the two at build time — this fails
 		// the moment either drifts.
 		const rust = readFileSync(new URL("../../../crates/pi-natives/src/pty.rs", import.meta.url), "utf8");
-		const literal = /const SCRIPT: &str = r#"(?<script>[\s\S]*?)"#;/.exec(rust)?.groups?.script;
-		expect(literal).toBeString();
+		const match = /const SCRIPT: &str = r#"(?<script>[\s\S]*?)"#;/.exec(rust)?.groups?.script;
+		if (typeof match !== "string") throw new Error("could not read the PTY bootstrap literal");
 		configureToolCgroup(leaf);
 		const script = wrapToolCommand(["true"])[3];
 		if (typeof script !== "string") throw new Error("bootstrap script missing from the wrapped argv");
-		expect(script).toBe(literal);
+		expect(script).toBe(match);
 	});
 
 	it("runs the bootstrap through an interpreter invocation this host accepts", () => {
