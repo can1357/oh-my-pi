@@ -1,13 +1,22 @@
 /** Session-scoped service supervision through the shared project broker. */
 import * as path from "node:path";
 import { TERMINAL_STATES } from "@oh-my-pi/pi-tui/apps/ps-data";
-import type { DaemonSnapshot, DaemonSpec } from "@oh-my-pi/pi-tui/tools/daemon";
+import type { DaemonMonitorWatcher, DaemonSnapshot, DaemonSpec } from "@oh-my-pi/pi-tui/tools/daemon";
 import { formatDuration, replaceTabs } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { getDaemonRuntimeDir, sanitizeText } from "@oh-my-pi/pi-utils";
+import { getDaemonRuntimeDir, logger, sanitizeText } from "@oh-my-pi/pi-utils";
+import type { AsyncJobProgressDelivery } from "../async";
 import { type DaemonBrokerClient, daemonClientForProject } from "./client";
 import { canonicalProjectDir } from "./paths";
-import type { DaemonOperation, DaemonRpcResult } from "./protocol";
+import { DAEMON_OUTPUT_MONITOR_CAPABILITY, type DaemonOperation, type DaemonRpcResult } from "./protocol";
+import {
+	beginLocalStop,
+	DETACHED_MONITOR_ERROR,
+	detachOutputSink,
+	monitorStopReason,
+	type OutputLease,
+	registerOutputSink,
+} from "./service-monitor";
 import { renderTerminalOutputIsolated } from "./terminal-output-worker-client";
 import type { ToolSession } from "../tools";
 import { resolveToCwd } from "../tools/path-utils";
@@ -20,6 +29,9 @@ export interface ServiceReady {
 	host?: string;
 	timeout?: number;
 }
+/** Live output delivery for a service monitor; `off` leaves (or makes) the service unmonitored. */
+export type ServiceProgress = AsyncJobProgressDelivery | "off";
+
 export interface ServiceStart {
 	name: string;
 	command: string;
@@ -27,6 +39,8 @@ export interface ServiceStart {
 	pty?: boolean;
 	env?: Record<string, string>;
 	ready?: ServiceReady;
+	/** Attach this session's live output monitor before launch; omitted or `off` starts unmonitored. */
+	progress?: ServiceProgress;
 }
 
 const serviceStateKey = Symbol("ownedServices");
@@ -89,19 +103,23 @@ function subscribe(session: ToolSession, client: DaemonBrokerClient): void {
 		}
 		return session.queueLaunchCompletion?.(notification);
 	});
-	session.registerDisposeCallback?.(() => {
-		unsubscribe({ preservePending: true });
+	let active = true;
+	let unregisterDispose: (() => void) | void;
+	let unregisterBoundary: (() => void) | void;
+	const cleanup = (preservePending: boolean): void => {
+		if (!active) return;
+		active = false;
+		unsubscribe({ preservePending });
+		unregisterDispose?.();
+		unregisterBoundary?.();
 		clients.delete(client);
 		serviceState(session).owned.clear();
 		for (const listener of serviceState(session).listeners) listener();
-	});
-	session.registerSessionChangeCallback?.(() => {
-		// The previous session stays resumable (`/resume`, fork parent), so keep its
-		// completions queued in the broker for replay when that session id re-subscribes.
-		unsubscribe({ preservePending: true });
-		clients.delete(client);
-		serviceState(session).owned.clear();
-		for (const listener of serviceState(session).listeners) listener();
+	};
+	unregisterDispose = session.registerDisposeCallback?.(() => cleanup(true));
+	unregisterBoundary = session.registerContextBoundaryCallback?.(boundary => {
+		// Switch and new leave the previous conversation resumable. Reset erases it.
+		cleanup(boundary !== "reset");
 	});
 }
 
@@ -109,8 +127,9 @@ async function request(
 	session: ToolSession,
 	operation: DaemonOperation,
 	signal?: AbortSignal,
+	brokerClient?: DaemonBrokerClient,
 ): Promise<DaemonRpcResult> {
-	const client = await daemonClientForProject(session.cwd);
+	const client = brokerClient ?? (await daemonClientForProject(session.cwd));
 	subscribe(session, client);
 	const result = await client.request(operation, signal);
 	if (result.op === "list") {
@@ -122,9 +141,17 @@ async function request(
 }
 
 export async function listServices(session: ToolSession, signal?: AbortSignal): Promise<DaemonSnapshot[]> {
+	return (await listServicesWithMonitors(session, signal)).daemons;
+}
+
+/** Services plus every live output monitor; `monitors` is absent from brokers that predate watcher reporting. */
+export async function listServicesWithMonitors(
+	session: ToolSession,
+	signal?: AbortSignal,
+): Promise<{ daemons: DaemonSnapshot[]; monitors?: DaemonMonitorWatcher[] }> {
 	const result = await request(session, { op: "list" }, signal);
 	if (result.op !== "list") throw new Error("Unexpected daemon list response");
-	return result.daemons;
+	return { daemons: result.daemons, ...(result.monitors ? { monitors: result.monitors } : {}) };
 }
 
 export async function findService(
@@ -188,6 +215,7 @@ export async function startService(
 	daemon: DaemonSnapshot;
 	readyTimedOut: boolean;
 	log: string;
+	monitorStopped?: string;
 }> {
 	if (!cfgLaunchEnabled.get(session.settings)) throw new ToolError("Service launch is disabled in this session.");
 	if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$/.test(params.name))
@@ -223,17 +251,96 @@ export async function startService(
 		persist: false,
 		detached: false,
 	};
-	const result = await request(
-		session,
-		{ op: "start", spec, owner: serviceOwner(session) ?? undefined, replace: true },
-		signal,
-	);
-	if (result.op !== "start") throw new Error("Unexpected daemon start response");
+	const delivery = params.progress === "off" ? undefined : params.progress;
+	const owner = serviceOwner(session) ?? undefined;
+	if (delivery && !owner) throw new ToolError("Live progress monitoring requires a session owner");
+	const client = await daemonClientForProject(session.cwd);
+	let lease: OutputLease | undefined;
+	let result: DaemonRpcResult;
+	try {
+		if (delivery && owner) {
+			await requireOutputMonitor(client, signal);
+			// Advertise the start-pending subscription after all local and broker
+			// validation, but before the launch request, so early output cannot be lost.
+			lease = await registerOutputSink(session, client, params.name, owner, delivery, true);
+			if (!lease) throw new ToolError("This session cannot accept service progress delivery");
+		}
+		result = await request(session, { op: "start", spec, owner, replace: true }, signal, client);
+		if (result.op !== "start") throw new Error("Unexpected daemon start response");
+		if (lease) {
+			lease.bindDaemon(result.daemon.id);
+			lease.registration.startedAt = result.daemon.startedAt;
+			await lease.retain();
+		}
+	} catch (error) {
+		await rollbackMonitorLease(lease, params.name);
+		throw error;
+	}
 	return {
 		daemon: result.daemon,
 		readyTimedOut: result.readyTimedOut,
 		log: await serviceLogs(session, params.name, signal),
+		...(lease ? { monitorStopped: monitorStopReason(lease.registration) } : {}),
 	};
+}
+
+/**
+ * Attach, retune, or detach this session's live output monitor on a running
+ * service. Monitoring starts at the current output cursor (it never replays
+ * logs) and never changes the service's lifecycle. `detached` reports whether
+ * an `off` request actually removed a monitor.
+ */
+export async function monitorService(
+	session: ToolSession,
+	name: string,
+	progress: ServiceProgress,
+	signal?: AbortSignal,
+): Promise<{ daemon: DaemonSnapshot; detached?: boolean }> {
+	if (!cfgLaunchEnabled.get(session.settings)) throw new ToolError("Service launch is disabled in this session.");
+	const delivery = progress === "off" ? undefined : progress;
+	const owner = serviceOwner(session) ?? undefined;
+	if (delivery && !owner) throw new ToolError("Live progress monitoring requires a session owner");
+	const client = await daemonClientForProject(session.cwd);
+	if (delivery) await requireOutputMonitor(client, signal);
+	const result = await request(session, { op: "describe", name }, signal, client);
+	if (result.op !== "describe") throw new Error("Unexpected daemon describe response");
+	const daemon = result.daemon;
+	if (!delivery || !owner) return { daemon, detached: await detachOutputSink(session, client, name) };
+	if (daemon.detached) throw new ToolError(DETACHED_MONITOR_ERROR);
+	if (TERMINAL_STATES[daemon.state]) throw new ToolError(`Cannot monitor ${name}: service is ${daemon.state}`);
+	let lease: OutputLease | undefined;
+	try {
+		lease = await registerOutputSink(session, client, name, owner, delivery, false, daemon.id);
+		if (!lease) throw new ToolError("This session cannot accept service progress delivery");
+		lease.bindDaemon(daemon.id);
+		lease.registration.startedAt = daemon.startedAt;
+		await lease.retain();
+		const stopped = monitorStopReason(lease.registration);
+		if (stopped !== undefined) throw new ToolError(`Cannot monitor ${name}: ${stopped}`);
+	} catch (error) {
+		await rollbackMonitorLease(lease, name);
+		throw error;
+	}
+	return { daemon };
+}
+
+async function requireOutputMonitor(client: DaemonBrokerClient, signal?: AbortSignal): Promise<void> {
+	const ping = await client.request({ op: "ping" }, signal);
+	if (ping.op !== "ping" || !ping.capabilities?.includes(DAEMON_OUTPUT_MONITOR_CAPABILITY)) {
+		throw new ToolError("The running daemon broker cannot monitor output; restart it with this omp build");
+	}
+}
+
+/** Undo a monitor lease whose operation failed; a rollback failure must not mask the operation's error. */
+async function rollbackMonitorLease(lease: OutputLease | undefined, name: string): Promise<void> {
+	try {
+		await lease?.reject();
+	} catch (error) {
+		logger.warn("Service monitor lease rollback failed", {
+			name,
+			error: error instanceof Error ? error.message : String(error),
+		});
+	}
 }
 
 export async function sendService(
@@ -249,8 +356,19 @@ export async function sendService(
 }
 
 export async function stopService(session: ToolSession, name: string, signal?: AbortSignal): Promise<DaemonSnapshot> {
-	const result = await request(session, { op: "stop", name, timeoutMs: 5_000 }, signal);
-	if (result.op !== "stop") throw new Error("Unexpected daemon stop response");
+	const client = await daemonClientForProject(session.cwd);
+	// A terminal stop response is this session's completion surface; a monitor
+	// notification racing it must not synthesize a second one.
+	const localStop = beginLocalStop(session, client, name);
+	let result: DaemonRpcResult;
+	try {
+		result = await request(session, { op: "stop", name, timeoutMs: 5_000 }, signal, client);
+		if (result.op !== "stop") throw new Error("Unexpected daemon stop response");
+	} catch (error) {
+		localStop?.settle("failed");
+		throw error;
+	}
+	localStop?.settle(TERMINAL_STATES[result.daemon.state] ? "terminal" : "non-terminal");
 	return result.daemon;
 }
 

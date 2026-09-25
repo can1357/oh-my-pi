@@ -25,10 +25,11 @@
 | `timeout` | `number` | No | Timeout in seconds. Default `300`. `0` disables the deadline. Positive values are capped by `tools.maxTimeout` when that setting is positive, then clamped to the Bash range `1..3600`. |
 | `cwd` | `string` | No | Working directory, resolved against `session.cwd` via `resolveToCwd`. Must exist and be a directory. |
 | `pty` | `boolean` | No | Request PTY mode. Default `false`. Foreground PTY requires a UI and `PI_NO_PTY !== "1"`; named services forward this setting to the broker. |
-| `async` | `boolean` | No | Background execution request. Present only when `async.enabled` is true for the session. Returns immediately with a job id instead of waiting; it does not change the effective deadline, including a disabled deadline from `timeout: 0`. |
+| `async` | `boolean \| "auto"` | No | `true` starts a background job immediately. `"auto"` starts inline for `bash.asyncAuto.inlineGraceMs` (default 1000 ms), then promotes the same process if still running. A timeout at or below grace + 1 s stays inline. Present only when `async.enabled` is true. Neither mode changes the command deadline; `timeout: 0` disables it. |
 | `name` | `string` | No | Supervised service name (≤48 characters; project-unique). Present only when `launch.enabled` and the session can launch. A live name restarts using the new spec. Incompatible with `async` and `timeout`. |
 | `ready` | `{ log?: string; port?: number; host?: string; timeout?: number }` | No | Service readiness: output regex and/or TCP port must pass; host defaults to `127.0.0.1`, timeout to 30 seconds. Only with `name`. |
 | `env` | `Record<string, string>` | No | Environment overrides for the service. Only with `name`. |
+| `progress` | `"wake" \| "ambient" \| "off"` | No | Named services accept all three modes; `off` (default) starts without monitoring. Finite commands require `async: true` or `"auto"` and accept only `wake` or `ambient`. Delivery starts after backgrounding: `wake` starts an idle follow-up turn; `ambient` waits for an active turn. Complete non-empty output lines collect into trailing 200 ms events; truncated/suppressed previews link the full artifact. |
 
 Named service example:
 ```json
@@ -48,19 +49,53 @@ The tool returns a single `text` content block plus optional `details`.
   - `details.timedOut: true`: present on local/PTY timeout results.
   - `details.meta.truncation`: present when output was truncated in memory; includes `artifactId` when full output spilled to an artifact.
   - non-zero exits and local/PTY timeouts return a tool result marked `isError`; definite non-zero output ends with `Command exited with code <n>`.
-- Success, background start (`async: true` or auto-background):
-  - `content[0].text`: optional preview tail and notices, followed by `Backgrounded as job <id>; result will be delivered automatically.`
+- Success, background start (`async: true`, promoted `async: "auto"`, or settings-driven auto-background):
+  - `content[0].text`: optional preview tail and notices, followed by `Backgrounded as job <id> (<command label>); result will be delivered automatically.` The label is the command collapsed to one line (max 120 chars) — the same label completion notices and `read proc://` show — so parallel results remain attributable.
   - `details.async`: `{ state: "running", jobId, type: "bash" }`.
   - `read proc://` lists owned jobs and project services; `read proc://<id>` inspects status/output without consuming result delivery; `write proc://<id>/kill` cancels the job without requiring `content`.
 - Success, named service (`name`): executes `command` through the user's shell under the launch broker, returning readiness, exit, or readiness timeout with state and log tail. A live name is stopped and restarted with the new spec; exit notifications still auto-deliver. `read proc://<name>` inspects status/logs; `write proc://<name>` sends stdin (appends Enter unless content already ends with newline, including empty content); `write proc://<name>/kill` stops it. `write proc://<name>/mode` accepts `persist`, `session`, or `detached`.
 - Background progress / completion:
   - delivered through `onUpdate` / async job manager, not the initial return.
   - running updates contain tail text and `details.async.state: "running"` only after the job is considered backgrounded.
+  - with `progress: "wake"`, complete output lines push `async-progress` follow-up turns even while the agent is idle; `progress: "ambient"` uses non-waking step-boundary asides instead. Lines emitted while the agent is busy are retained and delivered together rather than replaced by the newest line. Partial lines are held until completed, including the final unterminated line.
   - completion/failure updates carry final text and `details.async.state: "completed" | "failed"`. A non-zero exit or timeout is recorded as a failed background job.
 - Failure:
   - cancellation, missing exit status, validation failures, intercepted commands, and client-terminal-bridge timeouts throw `ToolError` / `ToolAbortError`.
 
 Stdout and stderr are merged before the model sees them. Definite non-zero exit codes are appended to the returned error result text as `Command exited with code <n>`.
+
+## Live service progress
+
+Start a named service with progress when its output should reach the agent before exit:
+
+```json
+{"command":"bun run dev","name":"web","ready":{"port":5173},"progress":"wake"}
+```
+
+Use `wake` for actionable output; use `ambient` for diagnostics that can wait for an active turn. Wake-ups spend model requests and share one session-wide wake-turn budget with background-job progress. Ambient delivery does not start an extra turn.
+
+Change the calling session's subscription with `write`:
+
+```json
+{"path":"proc://web/progress","content":"wake"}
+{"path":"proc://web/progress","content":"ambient"}
+{"path":"proc://web/progress","content":"off"}
+```
+
+- `wake` or `ambient` attaches to a running service or retunes an existing subscription. A new attachment captures future output only; it does not replay earlier logs.
+- `off` detaches this session's monitor without stopping the service or affecting other watchers. A service started without monitoring can gain a monitor later.
+- `read proc://` and `read proc://web` show watchers, their delivery modes, and capture artifacts.
+- Monitoring and lifetime are independent: `proc://web/mode` changes service survival, not progress delivery. Fully detached services cannot be live-monitored; read their output through `proc://web`, or relaunch with named `bash` service mode when safe.
+- Complete non-empty merged output lines are batched over a trailing 200 ms window. A final partial line is flushed before completion. Progress is rate-limited; truncated or suppressed previews link the raw capture at `artifact://<id>`.
+- Inline progress is not an exhaustive log. Read the artifact or service output before concluding that no error or state transition occurred.
+- Progress and completion are separate. Do not poll `proc://` or call `wait` to keep a turn alive for wake progress; finish other work, then end the turn and let the harness resume it. Use `ready` at launch when readiness must be observed before continuing.
+- For noisy progress, lower source verbosity on a safe relaunch (calling named `bash` again replaces the live service with the new command). To keep it running, write `ambient` or `off` to its progress URL. Output queued before a mode change can still arrive afterward.
+
+### Background-job retuning
+
+For a caller-owned running job that already has a progress channel, `write proc://<job-id>/progress` accepts `wake` or `ambient`. This retunes routing without restarting the job, changing its artifact, or consuming its result. Queued output is merged into the new delivery queue; an already-permitted wake batch may still start a turn after switching to ambient.
+
+Jobs reject `off`: their progress channel cannot be detached. A job launched without a channel cannot gain one later. Unlike services, finite Bash commands require `async: true` or `async: "auto"` to select progress at launch. Jobs that are settled or whose progress is withheld by an active `wait` cannot be retuned.
 
 ## Command policy and dedicated-tool routing
 
@@ -135,16 +170,18 @@ Choose the setting by the desired outcome:
 
 1. `BashTool.execute()` in `packages/coding-agent/src/tools/bash.ts` reads `command`. A `name` selects supervised service mode (through the user's shell and launch broker); normal Bash execution defaults `timeout` to `300`.
 2. If `cwd` is absent, it rewrites a leading `cd <path> && ...` into the structured `cwd` field and strips that prefix from `command`.
-3. If `async: true` is requested while `async.enabled` is off, it throws `ToolError` before any execution.
+3. `pty: true` combined with `async: "auto"` throws `ToolError`. If `async: true` or `async: "auto"` is requested while `async.enabled` is off, it throws before execution. Finite-command `progress` requires one of these modes and rejects `off`; named services accept `wake`, `ambient`, or `off`.
 4. If `bashInterceptor.enabled` is on, `checkBashInterception()` runs against both the original command and the `cd`-stripped command. For each form, configured regexes still check the complete input first, then each flat command separated by unquoted/unescaped `&&`, `||`, `;`, `|`, `|&`, `&`, or newlines (excluding stages that consume piped stdin from `|` or `|&`, including across blank/comment continuations), followed by versions of those fragments without leading `NAME=value` assignments. A matching enabled rule throws before execution.
 5. The command text is passed through unchanged; a per-run `InternalUrlFilesystem` is injected into the native shell so every `scheme://` path resolves at operation time.
 6. A host `cwd` resolves against `session.cwd` and `fs.stat()` verifies it is a directory; a URL `cwd` is checked through the URL filesystem and handed to the shell as-is (service and PTY modes refuse it).
 7. `timeout: 0` disables the deadline. Otherwise `clampTimeout("bash", requestedTimeoutSec, tools.maxTimeout)` applies a positive global ceiling (when configured), then `TOOL_TIMEOUTS.bash` (`min: 1`, `max: 3600`). When clamped, `#buildCompletedResult()` / `#buildBackgroundStartResult()` append a notice line.
 8. Execution path splits:
    1. `async: true` -> `#startManagedBashJob()` registers a session async job and returns immediately.
-   2. Non-PTY with `bash.autoBackground.enabled`, an async job manager below its running-job cap, and no client-terminal bridge available (the bridge wins when both apply) -> starts a managed job, waits up to `min(thresholdMs, timeoutMs - 1000)`, and either returns the completed result or converts the run into a background job.
-   3. Non-PTY client-terminal bridge, when the session advertises terminal capability and `pty` is false -> creates a remote terminal, streams/polls current output, and releases the terminal after completion.
-   4. Otherwise runs foreground execution.
+   2. `async: "auto"` -> starts a managed job, waits up to the configured `bash.asyncAuto.inlineGraceMs`, returns completed work inline, or promotes the same process and activates requested progress delivery. When the command's deadline is at or below the grace plus a 1 s buffer (`resolveAutoBackgroundWaitMs` returns `undefined`), no job is registered and the call runs inline to completion. The explicit mode works independently of `bash.autoBackground.enabled`. At the running-job cap it runs inline to completion and appends `Background job limit reached; ran inline to completion instead of promoting to a background job.` to the result, whereas `async: true` at the cap throws `ToolError`.
+      Foreground-backed jobs stay hidden from `proc://` and suppress background delivery until `backgroundJob` promotes them; inline completion or abort releases them with `releaseForegroundJob`.
+   3. Non-PTY with `bash.autoBackground.enabled`, an async job manager below its running-job cap, and no client-terminal bridge available (the bridge wins when both apply) -> applies the same inline-then-promote lifecycle (and the same deadline rule) to unmarked foreground calls, without model-facing progress.
+   4. Non-PTY client-terminal bridge, when the session advertises terminal capability and `pty` is false -> creates a remote terminal, streams/polls current output, and releases the terminal after completion.
+   5. Otherwise runs foreground execution.
 9. Foreground non-PTY without client terminal calls `executeBash()` from `packages/coding-agent/src/exec/bash-executor.ts`; that path performs direnv/devenv preflight itself.
 10. Foreground PTY and client-terminal paths run the same direnv preflight in `BashTool` before dispatch. With `bash.direnv: "auto"` (the default), an allowed `.envrc` may merge environment changes into the command; `"off"` disables this. `bash.direnvLoadTimeoutMs` defaults to `30_000`, and a positive command timeout also bounds the preflight.
 11. Local non-PTY and PTY paths allocate an output artifact first when `session.allocateOutputArtifact` is available. The artifact path/id are passed into the sink so large output can spill to disk.
@@ -170,14 +207,18 @@ Choose the setting by the desired outcome:
 4. Explicit background job
    - Requires `async: true` and `async.enabled`.
    - Registers a job with `session.asyncJobManager` and returns `{ state: "running", jobId }` immediately. `timeout: 0` leaves the job without a tool-imposed deadline.
-5. Auto-backgrounded non-PTY job
+5. Explicit auto job
+   - Requires `async: "auto"` and `async.enabled`; a missing job manager throws.
+   - Starts inline, returns short work directly, and activates progress only if it outlives the grace window and becomes a background job. Promotion first drains chunk deliveries still in flight into the inline preview, bounded to five progress batch windows (1 s); a delivery stalled past that bound (or a preview that outgrew its 50 KiB tail) promotes anyway with progress coverage marked gapped, so the completion keeps the terminal text instead of claiming it was already shown.
+   - At the running-job cap, or when the deadline cannot outlive the grace, runs inline to completion (the cap case appends a notice).
+6. Settings-driven auto-backgrounded non-PTY job
    - Requires `bash.autoBackground.enabled`, no PTY/client-terminal bridge, and an async job manager below its running-job cap.
    - Starts like a foreground managed job, then backgrounds it when it outlives the wait window; at capacity, Bash falls back to direct foreground execution.
-6. Named supervised service
+7. Named supervised service
    - Requires `launch.enabled` and a launch-capable session; `async` and `timeout` are incompatible.
    - Runs through the launch broker with project-unique `name`, optional `env`, and optional readiness conditions. Reusing a live name restarts it with the new spec.
    - Readiness waits for all supplied log/port conditions, service exit, or timeout. Inspect with `read proc://<name>`.
-7. Intercepted command
+8. Intercepted command
    - No subprocess created.
    - Returns a `ToolError` pointing the model at the dedicated tool or named service mode.
 
@@ -208,7 +249,7 @@ Choose the setting by the desired outcome:
 - Default timeout: `300s` (`TOOL_TIMEOUTS.bash.default` in `packages/coding-agent/src/tools/tool-timeouts.ts`).
 - `timeout: 0` disables the command deadline.
 - Positive timeout clamp: `tools.maxTimeout` is an optional global ceiling (`0` means no global ceiling), followed by the Bash `1..3600s` range.
-- Auto-background default threshold: `60_000ms` (`DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS` in `packages/coding-agent/src/tools/bash.ts`), further capped to `timeoutMs - 1000` when a deadline exists; a disabled deadline leaves the threshold uncapped.
+- Auto-background default threshold: `60_000ms` (`DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS` in `packages/coding-agent/src/async/auto-background.ts`); explicit-auto grace default `1_000ms` (`bash.asyncAuto.inlineGraceMs`). A deadline at or below the threshold plus `AUTO_BACKGROUND_TIMEOUT_BUFFER_MS` (1 s) disables backgrounding for that call; a disabled deadline never does.
 - Non-PTY executor with a deadline arms a host-side timer at `max(1_000, timeoutMs)` and passes the same positive timeout to the native run; `timeout: 0` passes no deadline. A timed-out persistent shell session is quarantined (`packages/coding-agent/src/exec/bash-executor.ts`).
 - In-memory output tail cap: `50 * 1024` bytes (`DEFAULT_MAX_BYTES` in `packages/coding-agent/src/session/streaming-output.ts`). Once exceeded, the sink keeps only the tail window in memory.
 - Streaming callback throttle in `executeBash()`: `50ms` between `onChunk` calls when streaming is enabled.

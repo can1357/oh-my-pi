@@ -12,9 +12,9 @@ import {
 } from "../render/render-utils";
 import type { Theme } from "../theme/theme";
 import type { RenderResultOptions } from "./renderer";
-import type { AgentActivitySnapshot, CoordinationDetails, JobSnapshot } from "./wait";
+import type { AgentActivitySnapshot, CoordinationDetails, JobRetuneOutcome, JobRetuneStatus, JobSnapshot } from "./wait";
 import type { IrcDeliveryReceipt } from "./irc";
-import type { DaemonSnapshot } from "./daemon";
+import type { DaemonMonitorWatcher, DaemonSnapshot } from "./daemon";
 import { styleTerminalRow } from "./terminal-output";
 import { card, type CardToolResult as ToolResult, firstText, safe } from "./result-card";
 
@@ -24,16 +24,27 @@ export interface ProcReadDetails {
 	daemons?: DaemonSnapshot[];
 	job?: JobSnapshot;
 	daemon?: DaemonSnapshot;
+	/** Live output monitors; absent when the broker predates watcher reporting. */
+	monitors?: DaemonMonitorWatcher[];
 	log?: string;
 	terminalRows?: string[];
 }
 
 export type ProcWriteDetails =
 	| CoordinationDetails
-	| { action: "stop" | "stdin" | "mode"; daemon: DaemonSnapshot; input?: string; mode?: string };
+	| {
+			action: "stop" | "stdin" | "mode" | "progress";
+			daemon: DaemonSnapshot;
+			input?: string;
+			mode?: string;
+			/** `progress`: monitor delivery mode this write resulted in. */
+			progress?: "wake" | "ambient" | "off";
+			/** `progress` off: whether an active monitor was actually detached. */
+			detached?: boolean;
+	  };
 
 /** Process operation selected by a write URL, independent of its content. */
-export type ProcWriteAction = "stdin" | "mode" | "kill";
+export type ProcWriteAction = "stdin" | "mode" | "kill" | "progress";
 
 function preview(body: string, expanded: boolean, theme: Theme, tone: "dim" | "toolOutput" = "dim"): string[] {
 	if (!body.trim()) return [];
@@ -126,6 +137,56 @@ function daemonMeta(daemon: DaemonSnapshot, theme: Theme): string[] {
 	return meta;
 }
 
+/** Indented `↳ watched by owner · mode · age · state` row under a service line; owner ids are sanitized like any display text. */
+function watcherRow(watcher: DaemonMonitorWatcher, daemon: DaemonSnapshot, theme: Theme): string {
+	const owner = truncateToWidth(safe(watcher.owner), TRUNCATE_LENGTHS.TITLE);
+	const facts = [theme.fg("accent", watcher.delivery ?? "unknown mode")];
+	if (watcher.since !== undefined) facts.push(`${formatDuration(Math.max(0, Date.now() - watcher.since))} ago`);
+	if (!watcher.connected) facts.push(theme.fg("warning", "disconnected"));
+	if (watcher.daemonId === undefined) facts.push(theme.fg("muted", "awaiting start"));
+	else if (watcher.daemonId !== daemon.id) facts.push(theme.fg("warning", "previous incarnation"));
+	return `  ${theme.fg("dim", "↳ watched by")} ${owner} ${theme.fg("dim", facts.join(theme.sep.dot))}`;
+}
+
+const RETUNE_WARNING_STATUS: Record<JobRetuneStatus, boolean> = {
+	retuned: false,
+	unchanged: false,
+	not_found: true,
+	not_running: true,
+	unmonitored: true,
+	suppressed: true,
+};
+
+/**
+ * Compact per-id retune row. The model-facing explanation of each status lives
+ * in the write result text; duplicating those sentences here would put two
+ * copies of the same copy in two packages and blow past a feed row's width.
+ */
+function jobRetuneRow(outcome: JobRetuneOutcome, theme: Theme): string {
+	const id = safe(outcome.id);
+	const mode = outcome.progress ? safe(outcome.progress) : "?";
+	const text = (() => {
+		switch (outcome.status) {
+			case "retuned":
+				return `${id} → ${mode}`;
+			case "unchanged":
+				return `${id} already ${mode}`;
+			case "not_found":
+				return `${id} not your job`;
+			case "not_running":
+				return `${id} already settled`;
+			case "unmonitored":
+				return `${id} launched without progress`;
+			case "suppressed":
+				return `${id} withheld by a wait`;
+		}
+	})();
+	return theme.fg(
+		RETUNE_WARNING_STATUS[outcome.status] ? "warning" : outcome.status === "retuned" ? "success" : "accent",
+		text,
+	);
+}
+
 function jobRow(job: JobSnapshot, theme: Theme): string {
 	const icon = formatStatusIcon(
 		job.status === "cancelled"
@@ -137,7 +198,8 @@ function jobRow(job: JobSnapshot, theme: Theme): string {
 					: "done",
 		theme,
 	);
-	return `${icon} ${formatBadge(job.type, job.status === "failed" ? "error" : job.status === "cancelled" ? "warning" : "accent", theme)} ${theme.fg("toolOutput", safe(job.id))} ${theme.fg("dim", safe(job.label))} ${theme.fg("dim", formatDuration(job.durationMs))}`;
+	const progress = job.progress ? ` ${formatBadge(safe(job.progress), "accent", theme)}` : "";
+	return `${icon} ${formatBadge(job.type, job.status === "failed" ? "error" : job.status === "cancelled" ? "warning" : "accent", theme)} ${theme.fg("toolOutput", safe(job.id))}${progress} ${theme.fg("dim", safe(job.label))} ${theme.fg("dim", formatDuration(job.durationMs))}`;
 }
 
 /** Render live and completed process writes with the URL-selected operation. */
@@ -153,15 +215,34 @@ export function renderProcWrite(
 	return card((_width, expanded) => {
 		const title = `Proc ${action} ${safe(id || "…")}`;
 		const daemon = details && "daemon" in details ? details.daemon : undefined;
+		const retuned = details && "op" in details && details.op === "monitor" ? (details.retuned ?? []) : [];
+		const meta = daemon ? daemonMeta(daemon, theme) : (action === "mode" || action === "progress") && content ? [safe(content)] : [];
+		if (daemon && details && "action" in details && details.action === "progress") {
+			// wake/ambient/off/no-op must be distinguishable at a glance; details carry the authoritative state.
+			meta.unshift(
+				details.progress === "off"
+					? theme.fg("muted", details.detached === false ? "no active monitor" : "monitor off")
+					: theme.fg("accent", `monitor ${safe(details.progress ?? content ?? "")}`),
+			);
+		}
 		const header = renderStatusLine(
 			{
 				icon:
-					result === undefined ? "pending" : result.isError ? "error" : action === "kill" ? "aborted" : "success",
+					result === undefined
+						? "pending"
+						: result.isError
+							? retuned.length > 0
+								? "warning"
+								: "error"
+							: action === "kill"
+								? "aborted"
+								: "success",
 				title,
-				meta: daemon ? daemonMeta(daemon, theme) : action === "mode" && content ? [safe(content)] : [],
+				meta,
 			},
 			theme,
 		);
+		if (retuned.length > 0) return [header, ...retuned.map(outcome => jobRetuneRow(outcome, theme))];
 		if (result?.isError) return [header, formatErrorDetail(firstText(result) || "Process operation failed.", theme)];
 		const lines = [header];
 		if (content && action === "stdin") lines.push(...preview(content, expanded, theme));
@@ -229,7 +310,8 @@ export function renderProcRead(
 						`  ${styleTerminalRow(truncateToWidth(safe(line), TRUNCATE_LENGTHS.LINE, Ellipsis.Unicode), theme.fg("toolOutput", ""))}`,
 				);
 			if (output.length > limit) visible.unshift(theme.fg("dim", `  … ${output.length - limit} earlier lines`));
-			return [header, ...visible];
+			const watchers = details.monitors?.map(watcher => watcherRow(watcher, daemon, theme)) ?? [];
+			return [header, ...watchers, ...visible];
 		}
 		if (id && !details?.jobs && !details?.daemons && !details?.agents) {
 			return [header, ...preview(firstText(result), expanded, theme, "toolOutput")];
@@ -243,10 +325,15 @@ export function renderProcRead(
 			...(agents.length ? [`${agents.length} agents`] : []),
 		];
 		const listHeader = renderStatusLine({ icon: "info", title, meta }, theme);
-		const items = [
+		const items: Array<{ label: string | string[] }> = [
 			...jobs.map(job => ({ label: jobRow(job, theme) })),
 			...services.map(service => ({
-				label: `${formatBadge("service", "accent", theme)} ${theme.fg("toolOutput", safe(service.name))} ${formatBadge(service.state, service.state === "failed" ? "error" : service.state === "ready" || service.state === "running" ? "success" : "warning", theme)} ${daemonMeta(service, theme).slice(1).join(theme.sep.dot)}`,
+				label: [
+					`${formatBadge("service", "accent", theme)} ${theme.fg("toolOutput", safe(service.name))} ${formatBadge(service.state, service.state === "failed" ? "error" : service.state === "ready" || service.state === "running" ? "success" : "warning", theme)} ${daemonMeta(service, theme).slice(1).join(theme.sep.dot)}`,
+					...(details?.monitors ?? [])
+						.filter(watcher => watcher.name === service.name)
+						.map(watcher => watcherRow(watcher, service, theme)),
+				],
 			})),
 			...agents.map(agent => ({
 				label: `${formatBadge("agent", agent.live ? "accent" : "warning", theme)} ${theme.fg("toolOutput", safe(agent.id))} ${theme.fg("dim", formatDuration(agent.ageMs))}`,
