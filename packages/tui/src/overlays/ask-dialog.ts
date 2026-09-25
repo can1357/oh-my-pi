@@ -858,6 +858,19 @@ export class AskDialogComponent implements Component {
 				// focused option; Space toggles. Advances to the next question
 				// (submitting only for a single-question dialog), matching
 				// single-select Enter (#8252).
+				if (
+					this.#questions.length === 1 &&
+					state.selectedOptions.size === 0 &&
+					state.customInput === undefined
+				) {
+					// An untouched multi-select almost never means "nothing":
+					// land on the Submit tab so a second Enter confirms the
+					// empty answer explicitly instead of submitting it (#12521).
+					this.#activeTabIndex = this.#submitTabIndex();
+					this.#submitScrollOffset = 0;
+					this.#requestRender();
+					return;
+				}
 				this.#advanceAfterQuestion();
 				return;
 			}
