@@ -988,6 +988,19 @@ mod tests {
 	}
 
 	#[test]
+	fn parses_go_new_with_expression_operand() {
+		// Go 1.26 `new(expr)` must parse alongside the classic `new(T)` form.
+		let result = summarize(
+			"package p\n\nfunc f() {\n\tframe.Due = new(work.Due.Add(delay))\n\tx := new(g(1))\n\ty \
+			 := new(T)\n\t_, _ = x, y\n}\n",
+			"fixture.go",
+		);
+
+		assert!(result.parsed);
+		assert_eq!(result.language.as_deref(), Some("go"));
+	}
+
+	#[test]
 	fn summarizes_emacs_lisp_defun_body() {
 		let code = "(defun greet (name)\n  \"Doc.\"\n  (let ((message (format \"Hello %s\" \
 		            name)))\n    (message \"%s\" message)\n    message)\n)\n";

@@ -15,21 +15,35 @@ import {
 import { listServices, sendService, startService, waitForOwnedServiceCompletion } from "../../src/launch/services";
 import type { ToolSession } from "../../src/tools";
 
-function startBroker(projectDir: string, runtimeDir: string): Promise<void> {
+interface EmbeddedBroker {
+	/** Settles once this in-process broker has shut down and flushed its metadata. */
+	finished: Promise<void>;
+}
+
+/**
+ * Start the in-process broker and wait until it accepts connections. A client
+ * that connects earlier spawns a broker process, which can claim the scope in a
+ * broker-restart handoff; `finished` would then not track the broker that
+ * flushes the metadata these tests read.
+ */
+async function startBroker(projectDir: string, runtimeDir: string): Promise<EmbeddedBroker> {
 	const previousProjectDir = process.env[DAEMON_PROJECT_DIR_ENV];
 	const previousRuntimeDir = process.env[DAEMON_RUNTIME_DIR_ENV];
 	const previousGrace = process.env[DAEMON_IDLE_GRACE_ENV];
 	process.env[DAEMON_PROJECT_DIR_ENV] = projectDir;
 	process.env[DAEMON_RUNTIME_DIR_ENV] = runtimeDir;
 	process.env[DAEMON_IDLE_GRACE_ENV] = "5000";
-	const broker = startDaemonBrokerFromEnvironment();
+	const listening = Promise.withResolvers<boolean>();
+	const finished = startDaemonBrokerFromEnvironment({ onListening: () => listening.resolve(true) });
 	if (previousProjectDir === undefined) delete process.env[DAEMON_PROJECT_DIR_ENV];
 	else process.env[DAEMON_PROJECT_DIR_ENV] = previousProjectDir;
 	if (previousRuntimeDir === undefined) delete process.env[DAEMON_RUNTIME_DIR_ENV];
 	else process.env[DAEMON_RUNTIME_DIR_ENV] = previousRuntimeDir;
 	if (previousGrace === undefined) delete process.env[DAEMON_IDLE_GRACE_ENV];
 	else process.env[DAEMON_IDLE_GRACE_ENV] = previousGrace;
-	return broker;
+	const claimed = await Promise.race([listening.promise, finished.then(() => false)]);
+	if (!claimed) throw new Error("In-process daemon broker did not claim its scope");
+	return { finished };
 }
 
 describe("session-owned supervised services", () => {
@@ -40,7 +54,7 @@ describe("session-owned supervised services", () => {
 		await fs.mkdir(projectDir);
 		const client = await brokerClients.createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
 		const previousTitle = process.title;
-		const broker = startBroker(projectDir, runtimeDir);
+		const broker = await startBroker(projectDir, runtimeDir);
 		const settings = Settings.isolated();
 		const firstCompletions: DaemonCompletionNotification[] = [];
 		const secondCompletions: DaemonCompletionNotification[] = [];
@@ -83,7 +97,7 @@ describe("session-owned supervised services", () => {
 			vi.restoreAllMocks();
 			await client.request({ op: "shutdown" }).catch(() => undefined);
 			client.close();
-			await broker;
+			await broker.finished;
 			process.title = previousTitle;
 		}
 	}, 15_000);
@@ -95,7 +109,7 @@ describe("session-owned supervised services", () => {
 		await fs.mkdir(projectDir);
 		const client = await brokerClients.createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
 		const previousTitle = process.title;
-		const broker = startBroker(projectDir, runtimeDir);
+		const broker = await startBroker(projectDir, runtimeDir);
 		let sessionId = "old-session";
 		const callbacks: Array<() => void> = [];
 		const deliveries: Array<[string, DaemonCompletionNotification]> = [];
@@ -141,7 +155,7 @@ describe("session-owned supervised services", () => {
 				deliveries.map(([receiver, { owner, daemon }]) => [receiver, owner, daemon.name, daemon.state]),
 			).toEqual([["old-session", "old-session", "old-service", "failed"]]);
 			await client.request({ op: "shutdown" });
-			await broker;
+			await broker.finished;
 			const metadata = (await Bun.file(path.join(runtimeDir, "daemons", "old-service", "meta.json")).json()) as {
 				pendingCompletions: DaemonCompletionNotification[];
 			};
@@ -150,7 +164,7 @@ describe("session-owned supervised services", () => {
 			vi.restoreAllMocks();
 			await client.request({ op: "shutdown" }).catch(() => undefined);
 			client.close();
-			await broker;
+			await broker.finished;
 			process.title = previousTitle;
 		}
 	}, 15_000);
@@ -162,7 +176,7 @@ describe("session-owned supervised services", () => {
 		await fs.mkdir(projectDir);
 		let client = await brokerClients.createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
 		const previousTitle = process.title;
-		let broker = startBroker(projectDir, runtimeDir);
+		let broker = await startBroker(projectDir, runtimeDir);
 		let daemonPid: number | undefined;
 		const laterCompletions: DaemonCompletionNotification[] = [];
 		const resumedCompletions: DaemonCompletionNotification[] = [];
@@ -211,10 +225,10 @@ describe("session-owned supervised services", () => {
 			await client.request({ op: "ping" });
 			await client.request({ op: "shutdown" });
 			client.close();
-			await broker;
+			await broker.finished;
 
 			client = await brokerClients.createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
-			broker = startBroker(projectDir, runtimeDir);
+			broker = await startBroker(projectDir, runtimeDir);
 			const running = await listServices(makeSession("later-session", laterCompletions));
 			expect(running.find(daemon => daemon.name === "detached-service")?.pid).toBe(daemonPid);
 			const processRef = Process.fromPid(daemonPid);
@@ -230,7 +244,10 @@ describe("session-owned supervised services", () => {
 			expect(completion.owner).toBe("original-session");
 			expect(completion.daemon.name).toBe("detached-service");
 			await client.request({ op: "shutdown" });
-			await broker;
+			// Closed before the broker drops its socket, so no completion reconnect spawns a
+			// broker process that recovers and rewrites the metadata read below.
+			client.close();
+			await broker.finished;
 			const metadata = (await Bun.file(
 				path.join(runtimeDir, "daemons", "detached-service", "meta.json"),
 			).json()) as {
@@ -241,7 +258,7 @@ describe("session-owned supervised services", () => {
 			vi.restoreAllMocks();
 			await client.request({ op: "shutdown" }).catch(() => undefined);
 			client.close();
-			await broker;
+			await broker.finished;
 			if (daemonPid !== undefined) {
 				const processRef = Process.fromPid(daemonPid);
 				if (processRef?.status() === "running") {
