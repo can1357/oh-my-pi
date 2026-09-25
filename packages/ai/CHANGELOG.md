@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `@oh-my-pi/pi-ai/error` gateway-classification surface: `classifyGatewayError` maps arbitrary upstream errors to a `GatewayErrorClassification` (owner + disposition + HTTP status/type), and `isRetryableGatewayDisposition` reports whether a disposition may fail over to another credential or provider.
+
+### Fixed
+
+- Product-surface model restrictions no longer rotate otherwise valid credentials.
+- Fixed gateway error classification swallowing retryable failures: authoritative statuses now outrank abort wording, 403 account caps rotate as quota, Trusted-Access/cyber-policy denials rotate credentials instead of terminating, 400 model-missing responses fail over by model, dead OAuth grants (`invalid_token` et al) retire permanently, and concurrency-cap 429s stay in provider backoff.
+- Fixed gateway classification for structurally flagged authentication failures and transient provider errors, including exhausted Anthropic 409 conflicts; strict-tool fallback now preserves storage overrides from the actual first request payload.
+
 ## [18.3.1] - 2026-09-25
 
 ### Added
@@ -13,10 +23,6 @@
 
 ### Fixed
 
-- Product-surface model restrictions no longer rotate otherwise valid credentials.
-- Fixed gateway error classification swallowing retryable failures: authoritative statuses now outrank abort wording, 403 account caps rotate as quota, Trusted-Access/cyber-policy denials rotate credentials instead of terminating, 400 model-missing responses fail over by model, dead OAuth grants (`invalid_token` et al) retire permanently, and concurrency-cap 429s stay in provider backoff.
-- Fixed gateway classification for structurally flagged authentication failures and transient provider errors, including exhausted Anthropic 409 conflicts; strict-tool fallback now preserves storage overrides from the actual first request payload.
-- Fixed multi-account provider selection for OpenCode Go and SuperGrok (xai-oauth), so accounts with insufficient funds or exhausted included quota are skipped in favor of eligible accounts with available billing headroom.
 - Fixed account selection for OpenCode Go and SuperGrok (xai-oauth) so accounts without available funds or included quota are skipped in favor of eligible accounts.
 - Improved visibility into automatically disabled authentication credentials by logging a warning and including the affected account details in credential-disabled events.
 
