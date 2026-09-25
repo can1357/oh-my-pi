@@ -279,6 +279,104 @@ describe("AgentSession owner-routed async delivery", () => {
 		}
 	});
 
+	it("points the follow-up's full output at the streamed capture, not the elided inline body", async () => {
+		await using temp = await TempDir.create("@capture-followup-sink-");
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+		const store = SessionManager.inMemory(temp.path());
+		store.adoptArtifactManager(new ArtifactManager(path.join(temp.path(), "artifacts")));
+		const settings = Settings.isolated();
+		session = new AgentSession({
+			agent,
+			sessionManager: store,
+			settings,
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "SinkCaptureOwner",
+			asyncJobManager: manager,
+		});
+		const head = "head line\n".repeat(800);
+		const tail = "tail line\n".repeat(800);
+		const complete = `${head}SINK-UNIQUE-MIDDLE\n${tail}`;
+		const allocate = vi.spyOn(store, "allocateArtifactPath");
+		let capturedId: string | undefined;
+		try {
+			manager.register(
+				"bash",
+				"sink capture",
+				async ({ reportProgress }) => {
+					// Mirrors the OutputSink: the raw stream lands in its own artifact
+					// while the tool result keeps only a middle-elided inline body.
+					capturedId = await store.saveArtifact(complete, "bash");
+					const inline = `${head}[…1ln elided…]\n${tail}`;
+					const meta: OutputMeta = {
+						truncation: {
+							direction: "middle",
+							truncatedBy: "middle",
+							totalLines: 1601,
+							totalBytes: Buffer.byteLength(complete),
+							outputLines: 1600,
+							outputBytes: Buffer.byteLength(inline),
+							elidedLines: 1,
+							elidedBytes: Buffer.byteLength("SINK-UNIQUE-MIDDLE\n"),
+							artifactId: capturedId,
+						},
+					};
+					await reportProgress(inline, { meta });
+					return inline;
+				},
+				{ id: "sink-followup", ownerId: "SinkCaptureOwner" },
+			);
+			await session.settleAsyncWork();
+			if (!capturedId) throw new Error("Expected the job to save its own capture");
+			const text = agent.state.messages
+				.filter(
+					(message): message is CustomMessage =>
+						message.role === "custom" && message.customType === "async-result",
+				)
+				.map(message =>
+					typeof message.content === "string"
+						? message.content
+						: message.content.map(block => (block.type === "text" ? block.text : "")).join("\n"),
+				)
+				.join("\n");
+			expect(text).toContain(`Full output: artifact://${capturedId}`);
+			// No second, lossy artifact: the delivery reuses the sink's capture.
+			expect(allocate).not.toHaveBeenCalled();
+			const readSession: ToolSession = {
+				cwd: temp.path(),
+				hasUI: false,
+				getSessionFile: () => null,
+				getSessionSpawns: () => null,
+				settings,
+				localProtocolOptions: {
+					getArtifactsDir: () => store.getArtifactsDir(),
+					getSessionId: () => store.getSessionId(),
+				},
+			};
+			const read = await new ReadTool(readSession).execute("recover-sink", {
+				path: `artifact://${capturedId}:raw:1-2000`,
+			});
+			const recovered = read.content.map(block => (block.type === "text" ? block.text : "")).join("\n");
+			expect(recovered).toContain("SINK-UNIQUE-MIDDLE");
+			expect(recovered).not.toContain("elided");
+		} finally {
+			allocate.mockRestore();
+			await session.dispose();
+			await store.close();
+		}
+	});
+
 	it("retains every capture warning on its own live and rebuilt async batch row", async () => {
 		const entries = ["open", "write", undefined].map((artifactError, index): AsyncResultEntry => {
 			const meta: OutputMeta | undefined =

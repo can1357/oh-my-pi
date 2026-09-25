@@ -2716,6 +2716,12 @@ export class AgentSession implements SettingsScope {
 		const body = meta?.artifactError ? stripOutputNotice(result, meta).trimEnd() : result;
 		const preview = `${body.slice(0, ASYNC_PREVIEW_MAX_CHARS)}\n\n[Output truncated. Showing first ${ASYNC_PREVIEW_MAX_CHARS.toLocaleString()} characters.]`;
 		if (meta?.artifactError) return `${preview}\n[${formatArtifactErrorNotice(meta.artifactError)}]`;
+		// Streaming executors (bash/eval/ssh) and the centralized spill already
+		// mirrored the complete output into their own artifact; `result` is only
+		// the elided/column-capped inline body, so re-spilling it would advertise
+		// a lossy copy as "Full output" (issue #13142). Link the real capture.
+		const captured = meta?.truncation?.artifactId ?? meta?.limits?.columnTruncated?.artifactId;
+		if (captured) return `${preview}\nFull output: artifact://${captured}`;
 		try {
 			const { path: artifactPath, id: artifactId } = await this.sessionManager.allocateArtifactPath("async");
 			if (artifactPath && artifactId) {
