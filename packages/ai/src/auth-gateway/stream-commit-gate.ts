@@ -146,7 +146,7 @@ export function classifyCommitEvent(eventType: string): CommitClass {
 	if (eventType === "response.completed" || eventType === "message_stop") return "terminal-success";
 	if (eventType === "response.failed") return "terminal-retryable";
 	if (eventType === "response.incomplete") return "terminal-success";
-	if (eventType === "response.error") return "terminal-failure";
+	if (eventType === "error" || eventType === "response.error") return "terminal-failure";
 	return "output";
 }
 
