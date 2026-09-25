@@ -1479,6 +1479,64 @@ describe("agentLoop with AgentMessage", () => {
 		}
 	});
 
+	it("rejects payload-shaped intent instead of silently dropping it", async () => {
+		const toolSchema = type({ path: "string", content: "string" });
+		const executedParams: Record<string, unknown>[] = [];
+		const tool: AgentTool<typeof toolSchema, { path: string; content: string }> = {
+			name: "write",
+			label: "Write",
+			description: "Write a file",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				executedParams.push(params);
+				return { content: [{ type: "text", text: "written" }], details: params };
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{
+							type: "toolCall",
+							id: "tool-1",
+							name: "write",
+							arguments: {
+								path: "local://guide.md",
+								[INTENT_FIELD]: "# Guide\n\nSeveral kilobytes of markdown",
+								content: "Writing search query reconstruction guide",
+							},
+						},
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			intentTracing: true,
+		};
+
+		const messages = await agentLoop(
+			[createUserMessage("write the guide")],
+			context,
+			config,
+			undefined,
+			mock.stream,
+		).result();
+		const result = messages.find((message): message is ToolResultMessage => message.role === "toolResult");
+		const text = (result?.content ?? [])
+			.filter((content): content is { type: "text"; text: string } => content.type === "text")
+			.map(content => content.text)
+			.join("\n");
+
+		expect(executedParams).toEqual([]);
+		expect(result?.isError).toBe(true);
+		expect(text).toContain("intent");
+		expect(text).toContain("content");
+	});
+
 	it("normalizes trailing periods from intent at extraction site", async () => {
 		const context: AgentContext = {
 			systemPrompt: ["test"],

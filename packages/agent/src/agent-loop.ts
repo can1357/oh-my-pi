@@ -1022,7 +1022,11 @@ function resolveIntentMode(intent: AgentTool["intent"]): "require" | "optional" 
 	return "require";
 }
 
-function extractIntent(args: Record<string, unknown>): { intent?: string; strippedArgs: Record<string, unknown> } {
+function extractIntent(args: Record<string, unknown>): {
+	intent?: string;
+	strippedArgs: Record<string, unknown>;
+	validationError?: string;
+} {
 	const { [INTENT_FIELD]: intent, ...strippedArgs } = args;
 	if (typeof intent !== "string") {
 		return { strippedArgs };
@@ -1031,6 +1035,13 @@ function extractIntent(args: Record<string, unknown>): { intent?: string; stripp
 		.trim()
 		.replace(/\s*\.+$/, "")
 		.trim();
+	if (/[\r\n]/u.test(trimmed)) {
+		return {
+			strippedArgs,
+			validationError:
+				"Invalid intent: `i` must be a concise single-line label. Move tool payload into the tool's own parameters (for example, `content`) and retry.",
+		};
+	}
 	return { intent: trimmed.length > 0 ? trimmed : undefined, strippedArgs };
 }
 
@@ -2828,8 +2839,12 @@ async function prepareToolCallDispatch(
 		prepared.set(toolCall.id, entry);
 		let argsForExecution = toolCall.arguments as Record<string, unknown>;
 		if (intentTracing) {
-			const { intent, strippedArgs } = extractIntent(toolCall.arguments);
+			const { intent, strippedArgs, validationError } = extractIntent(toolCall.arguments);
 			argsForExecution = strippedArgs;
+			if (validationError) {
+				entry.validationErrorMessage = validationError;
+				continue;
+			}
 			if (intent) {
 				toolCall.intent = intent;
 			} else if (typeof tool?.intent === "function") {
