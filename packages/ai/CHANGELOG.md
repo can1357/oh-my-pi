@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Gateway error classifications now carry a failure owner and retry/failover disposition (`credential_permanent`, `provider_transient`, `policy_terminal`, …); provider status codes stay authoritative over message wording, and context-overflow detection reuses the central classifier.
+- Auth gateway holds Responses SSE metadata preludes behind a StreamCommitGate: a pre-commit retryable terminal (`response.failed`) is retried transparently without exposing the dead attempt's frames to the client, the first output event or 4 MiB prelude cap commits the stream, and post-commit terminals (`response.completed`/`response.failed`/`response.incomplete`/`response.error`) end failover eligibility.
+
+### Fixed
+
+- Gateway requests now forward `previous_response_id`, `store`, `parallel_tool_calls`, `logit_bias`, `user`, and `response_format` to providers instead of dropping them; Responses requests map `response_format` JSON-schema (including `description`) to the flat `text.format` shape and never send Chat-Completions-only `seed`, and native `/v1/responses` `text.format` is parsed into `responseFormat`.
+- Fixed OpenAI Responses continuation pairing a caller-supplied `previous_response_id` with an internally computed delta from a different stored response, and restricted stale-baseline recovery to internally owned chain ids so a stale caller id can no longer silently drop prior context. Azure Responses requests now forward `previous_response_id`, `store`, `parallel_tool_calls`, `user`, and `text.format` the same way.
+- Gateway `/v1/responses` responses now expose the upstream provider's response id instead of a locally minted one, and the gateway remembers which session key stored each response id so a later `previous_response_id` continuation stays on the account that can actually resolve it; `previous_response_id` sent to `openai-codex-responses` models is rejected loudly instead of silently dropping prior context.
+- Fixed gateway error classification swallowing retryable failures: authoritative statuses now outrank abort wording, 403 account caps rotate as quota, Trusted-Access/cyber-policy denials rotate credentials instead of terminating, statusless policy/OAuth-expiry wording reaches the same credential dispositions instead of a synthetic 502, 400 model-missing responses fail over by model, dead OAuth grants (`invalid_token` et al) retire permanently, and concurrency-cap 429s stay in provider backoff.
+- Fixed OpenAI Responses gateway retries to preserve caller storage through strict-tool fallback, retain structured-output descriptions, and treat top-level `event: error` SSE frames as terminal failures.
+- Stream commit classification now recognizes Anthropic `message_delta`, `content_block_stop`, and `message_stop` SSE events instead of treating them as generated output.
+- Provider preludes remain eligible for fallback, and successful empty streams retain their response frames.
+- Azure Responses continuations retain prior response IDs, and invalid gateway requests return HTTP 400.
+- Treat deterministic request-validation failures as terminal instead of retrying another provider.
+
 ## [18.3.1] - 2026-09-25
 
 ### Added
@@ -13,6 +30,19 @@
 
 ### Fixed
 
+- OAuth project changes invalidate stale credential reservations and cooldown state.
+- Recover fully blocked API-key pools with exclusive probes, clear the actual blocked scope after successful inference, and preserve nested fallback order.
+
+- Release failed/cancelled streams without awaiting pending settlement so turn and probe locks cannot stall.
+- Parse Responses text.format and store into gateway options, and reapply store on strict-tool retries.
+- Settle quota probes only after canonical success evidence, and release API-key turn reservations when credential helpers fail.
+- Reserve stored API-key selections for turn exclusivity, run no-status message heuristics before default provider failure, and assert virtual-route dispatch behavior.
+- Fixed virtual route dispatch resolving `compiled.targets[0]`, and reacquiring turn reservations after broker prepare/incarnation bump.
+
+- Fixed suffix fallback edges, rejected ambiguous cross-branch target reuse, distinguished failed terminals for probe settlement, and released reservations on abort.
+- Fixed nested route-graph fallback edges retaining their entry target via `fallbackByTarget` so unentered branches cannot steal failover.
+- Fixed caller-owned Responses continuations forcing `store: true`, and settled successful pi-native streaming probes without a commit gate.
+- Fixed multi-account provider selection for OpenCode Go and SuperGrok (xai-oauth), so accounts with insufficient funds or exhausted included quota are skipped in favor of eligible accounts with available billing headroom.
 - Fixed account selection for OpenCode Go and SuperGrok (xai-oauth) so accounts without available funds or included quota are skipped in favor of eligible accounts.
 - Improved visibility into automatically disabled authentication credentials by logging a warning and including the affected account details in credential-disabled events.
 
@@ -304,7 +334,6 @@
 - Added GPT-6 Astra support for preserving prompt caching when changing the thinking level during a conversation across the OpenAI and OpenAI Codex providers.
 
 ### Changed
-
 - Updated OpenAI Codex requests to improve routing by communicating the selected model and service tier across Responses, WebSocket, and remote-compaction requests.
 
 ## [18.1.7] - 2026-09-03

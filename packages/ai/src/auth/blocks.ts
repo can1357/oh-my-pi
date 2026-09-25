@@ -3,6 +3,7 @@ import type { Provider } from "../types";
 import type { CredentialRankingContext, CredentialRankingStrategy, UsageReport } from "../usage";
 import type { RankingStrategyResolver } from "../usage/registry";
 import type { CredentialPool } from "./pool";
+import type { QuotaProbeLeaseBook } from "./probe-lease";
 import { isSqliteCorruptionError, USAGE_REPORT_TTL_MS } from "./sqlite-credential-store";
 import type { AuthCredentialStore } from "./store";
 import { isUsageLimitReached, usageReportMetadataValue, usageReportScopeAccountId } from "./usage-report";
@@ -109,6 +110,12 @@ export interface CredentialBlocksDeps {
 	health: BlockStoreHealth;
 	usageCache: UsageCache;
 	strategies: RankingStrategyResolver;
+	/**
+	 * Shared probe-lease book. When present, mark() feeds hard/retry-after
+	 * cooldowns and blockedUntil() re-asserts Retry-After provenance for
+	 * still-active persisted blocks (restarts lose in-memory provenance).
+	 */
+	probeBook?: QuotaProbeLeaseBook;
 }
 
 /** Temporary rate-limit blocks: id-keyed in memory, mirrored to the store, healed by live usage. */
@@ -204,6 +211,7 @@ export class CredentialBlocks implements BlocksApi {
 		).filter(scope => scope.length > 0);
 		const credentialId = this.#deps.pool.entries(provider)[credentialIndex]?.id;
 		if (credentialId === undefined) return undefined;
+		this.#hydrateRetryAfterProvenance(credentialId);
 		let blockedUntil = this.#getCredentialBlockedUntilForKey(providerKey, credentialId, nowMs);
 		for (const blockScope of scopes) {
 			const scopedBlockedUntil = this.#getCredentialBlockedUntilForKey(
@@ -222,6 +230,9 @@ export class CredentialBlocks implements BlocksApi {
 			(blockedUntil === undefined || persistedGlobalBlockedUntil > blockedUntil)
 		) {
 			blockedUntil = persistedGlobalBlockedUntil;
+			// Restarts lose in-memory Retry-After provenance; treat still-active persisted
+			// blocks as Retry-After-sourced so allowBlocked cannot bypass probe leases.
+			this.#deps.probeBook?.noteRetryAfterBlock(credentialId, "", persistedGlobalBlockedUntil);
 		}
 		for (const blockScope of scopes) {
 			const persistedScopedBlockedUntil = this.#readPersistedCredentialBlock(credentialId, providerKey, blockScope);
@@ -230,9 +241,50 @@ export class CredentialBlocks implements BlocksApi {
 				(blockedUntil === undefined || persistedScopedBlockedUntil > blockedUntil)
 			) {
 				blockedUntil = persistedScopedBlockedUntil;
+				this.#deps.probeBook?.noteRetryAfterBlock(credentialId, blockScope, persistedScopedBlockedUntil);
 			}
 		}
 		return blockedUntil;
+	}
+
+	/**
+	 * Actual quota block scopes live for this credential, excluding unrelated
+	 * in-flight turn reservations. The global `""` scope is always a candidate;
+	 * request-derived scopes are appended after it so `activeScopes()[0]` is the
+	 * provider-imposed wait when both are live.
+	 */
+	activeScopes(providerKey: string, credentialId: number, scopes: readonly string[] = []): string[] {
+		const nowMs = Date.now();
+		return [...new Set(["", ...scopes])].filter(
+			scope =>
+				this.#getCredentialBlockedUntilForKey(
+					scope ? scopedBackoffKey(providerKey, scope) : providerKey,
+					credentialId,
+					nowMs,
+				) !== undefined || this.#readPersistedCredentialBlock(credentialId, providerKey, scope) !== undefined,
+		);
+	}
+
+	/** Re-apply Retry-After provenance from durable blocks after restart / peer reload. */
+	#hydrateRetryAfterProvenance(credentialId: number): void {
+		const probeBook = this.#deps.probeBook;
+		if (!probeBook) return;
+		const listCredentialBlocks = this.#deps.store.listCredentialBlocks?.bind(this.#deps.store);
+		if (!listCredentialBlocks) return;
+		try {
+			for (const block of listCredentialBlocks([credentialId])) {
+				if (!block.retryAfter) continue;
+				if (block.blockedUntilMs <= Date.now()) continue;
+				probeBook.noteRetryAfterBlock(credentialId, block.blockScope, block.blockedUntilMs);
+			}
+		} catch (err) {
+			if (!this.#deps.health.damaged) {
+				logger.debug("Failed to hydrate credential block provenance from persistent store", {
+					err,
+					credentialId,
+				});
+			}
+		}
 	}
 
 	/** Checks if a credential is temporarily blocked due to usage limits. */
@@ -309,6 +361,11 @@ export class CredentialBlocks implements BlocksApi {
 		this.#credentialBackoff.set(backoffKey, backoffMap);
 		this.#deps.usageCache.invalidate(provider);
 
+		const probeBook = this.#deps.probeBook;
+		if (probeBook && !probeBook.isRetryAfterSourced(credentialId, blockScope ?? "")) {
+			probeBook.noteHardCooldown(credentialId, blockScope ?? "");
+		}
+
 		const upsertCredentialBlock = this.#deps.store.upsertCredentialBlock?.bind(this.#deps.store);
 		if (!upsertCredentialBlock || this.#deps.health.damaged) return;
 		try {
@@ -317,6 +374,7 @@ export class CredentialBlocks implements BlocksApi {
 				providerKey,
 				blockScope: blockScope ?? "",
 				blockedUntilMs: nextBlockedUntil,
+				retryAfter: probeBook?.isRetryAfterSourced(credentialId, blockScope ?? ""),
 			});
 		} catch (err) {
 			if (this.#deps.health.handle(err)) return;
@@ -327,6 +385,47 @@ export class CredentialBlocks implements BlocksApi {
 				providerKey,
 				blockScope,
 				blockedUntilMs: nextBlockedUntil,
+			});
+		}
+	}
+
+	/**
+	 * Record provider-stated Retry-After provenance for a credential+scope so
+	 * quota-probe leases refuse while the wait is active, and the persisted
+	 * block written by {@link mark} is tagged `retryAfter`.
+	 */
+	noteRetryAfter(credentialId: number, blockScope: string, blockedUntilMs: number): void {
+		this.#deps.probeBook?.noteRetryAfterBlock(credentialId, blockScope, blockedUntilMs);
+	}
+
+	/**
+	 * Record a heuristic (non-Retry-After) hard cooldown: bumps the probe-lease
+	 * generation so a stale in-flight probe cannot clear the new cooldown.
+	 */
+	noteHardCooldown(credentialId: number, blockScope: string): void {
+		this.#deps.probeBook?.noteHardCooldown(credentialId, blockScope);
+	}
+
+	/**
+	 * Drop every in-memory and persisted block for a credential across both
+	 * credential-type keys — used when the row's identity (and hence its
+	 * incarnation) changes and prior cooldowns no longer apply.
+	 */
+	clearCredential(provider: string, credentialId: number): void {
+		for (const type of ["oauth", "api_key"] as const) {
+			const baseKey = providerTypeKey(provider, type);
+			const scopedPrefix = `${baseKey}\0`;
+			for (const key of this.#credentialBackoff.keys()) {
+				if (key === baseKey || key.startsWith(scopedPrefix)) this.#deleteCredentialBackoff(key, credentialId);
+			}
+		}
+		try {
+			this.deleteAll(credentialId);
+		} catch (err) {
+			logger.debug("Failed to clear persisted credential blocks", {
+				err,
+				provider,
+				credentialId,
 			});
 		}
 	}
