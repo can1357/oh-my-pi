@@ -535,6 +535,9 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					limitReached: false,
 				};
 				let skippedOversizedCount = 0;
+				// Scope globs are relative to their base path: `dir/*.go` must stay in
+				// `dir`. Only a bare glob rooted at cwd (`*.ts`) matches at any depth.
+				const cwdRoot = path.resolve(this.session.cwd);
 				try {
 					if (exactFilePaths || multiTargets) {
 						const matches: GrepMatch[] = [];
@@ -554,6 +557,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 									pattern: normalizedPattern,
 									path: target.basePath,
 									glob: target.glob,
+									recursive: path.resolve(target.basePath) === cwdRoot,
 									ignoreCase,
 									multiline: effectiveMultiline,
 									hidden: true,
@@ -601,6 +605,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 								pattern: normalizedPattern,
 								path: searchPath,
 								glob: globFilter,
+								recursive: path.resolve(searchPath) === cwdRoot,
 								ignoreCase,
 								multiline: effectiveMultiline,
 								hidden: true,
