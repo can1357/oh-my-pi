@@ -5,8 +5,6 @@
 import { combine, register, type SettingValueOf } from "../config/registry";
 import { DEFAULT_SKILLS_URL } from "@oh-my-pi/pi-wire/skillshare";
 
-// Typed defaults for array/record settings — named constants avoid `as` casts
-// under `as const` while still letting SettingValue infer the correct element type.
 const EMPTY_STRING_ARRAY: string[] = [];
 
 export const cfgExtensions = register({ id: "extensions", type: "array", default: EMPTY_STRING_ARRAY });
@@ -67,12 +65,20 @@ export const cfgSkillsEnableAgentsProject = register({
 export const cfgSkillsCustomDirectories = register({
 	id: "skills.customDirectories",
 	type: "array",
-	default: [] as string[],
+	default: EMPTY_STRING_ARRAY,
 });
 
-export const cfgSkillsIgnoredSkills = register({ id: "skills.ignoredSkills", type: "array", default: [] as string[] });
+export const cfgSkillsIgnoredSkills = register({
+	id: "skills.ignoredSkills",
+	type: "array",
+	default: EMPTY_STRING_ARRAY,
+});
 
-export const cfgSkillsIncludeSkills = register({ id: "skills.includeSkills", type: "array", default: [] as string[] });
+export const cfgSkillsIncludeSkills = register({
+	id: "skills.includeSkills",
+	type: "array",
+	default: EMPTY_STRING_ARRAY,
+});
 
 /** Skill discovery options (`skills.*` except the `omp skill` registry URL). */
 export const cfgSkills = combine({

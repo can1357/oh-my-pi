@@ -147,6 +147,78 @@ describe("LocalProtocolHandler", () => {
 		});
 	});
 
+	it("refuses write targets reaching outside the local root through missing dirs or dangling symlinks", async () => {
+		if (process.platform === "win32") return;
+
+		await withTempDir(async tempDir => {
+			const localRoot = path.join(tempDir, "local");
+			const outsideDir = path.join(tempDir, "outside");
+			await fs.mkdir(localRoot, { recursive: true });
+			await fs.mkdir(outsideDir, { recursive: true });
+			await fs.symlink(outsideDir, path.join(localRoot, "link"));
+			await fs.symlink(path.join(outsideDir, "victim.txt"), path.join(localRoot, "dangling"));
+			const context = { localProtocolOptions: { getArtifactsDir: () => tempDir } };
+			const router = InternalUrlRouter.instance();
+
+			await expect(router.locate("local://link/newdir/f", context, { create: true })).rejects.toThrow(
+				"local:// URL escapes local root",
+			);
+			await expect(router.locate("local://dangling", context, { create: true })).rejects.toThrow(
+				"local:// URL goes through a dangling symlink",
+			);
+			expect(await router.locate("local://fresh/dir/f", context, { create: true })).toBe(
+				path.join(localRoot, "fresh", "dir", "f"),
+			);
+		});
+	});
+
+	it("names the URL, never the host path, when a write target cannot be created", async () => {
+		if (process.platform === "win32") return;
+
+		await withTempDir(async tempDir => {
+			const localRoot = path.join(tempDir, "local");
+			await fs.mkdir(localRoot, { recursive: true });
+			await fs.symlink(path.join(localRoot, "loopB"), path.join(localRoot, "loopA"));
+			await fs.symlink(path.join(localRoot, "loopA"), path.join(localRoot, "loopB"));
+			await Bun.write(path.join(localRoot, "file.txt"), "x");
+			const context = { localProtocolOptions: { getArtifactsDir: () => tempDir } };
+			const router = InternalUrlRouter.instance();
+			const failure = async (url: string) => {
+				const error = await router.locate(url, context, { create: true }).then(
+					() => undefined,
+					(caught: unknown) => caught,
+				);
+				expect(error).toBeInstanceOf(Error);
+				return error instanceof Error ? error.message : "";
+			};
+
+			const loop = await failure("local://loopA/x.md");
+			expect(loop).toBe("local:// URL goes through a symlink loop: local://loopA/x.md");
+			const notDir = await failure("local://file.txt/x.md");
+			expect(notDir).toBe("local:// URL goes through a file, not a directory: local://file.txt/x.md");
+		});
+	});
+
+	it("refuses write targets under a local root that is a dangling symlink", async () => {
+		if (process.platform === "win32") return;
+
+		await withTempDir(async tempDir => {
+			await fs.symlink(path.join(tempDir, "gone"), path.join(tempDir, "local"));
+			const context = { localProtocolOptions: { getArtifactsDir: () => tempDir } };
+			const router = InternalUrlRouter.instance();
+
+			await expect(router.locate("local://x.md", context, { create: true })).rejects.toThrow(
+				"local:// URL goes through a dangling symlink: local://x.md",
+			);
+			expect(await router.locate("local://x.md", context)).toBeNull();
+			// A merely missing root is created by the write.
+			const missing = { localProtocolOptions: { getArtifactsDir: () => path.join(tempDir, "fresh") } };
+			expect(await router.locate("local://x.md", missing, { create: true })).toBe(
+				path.join(tempDir, "fresh", "local", "x.md"),
+			);
+		});
+	});
+
 	it("prefers caller-supplied context.localProtocolOptions over the installed override", async () => {
 		await withTempDir(async tempDir => {
 			const overrideArtifactsDir = path.join(tempDir, "override-artifacts");

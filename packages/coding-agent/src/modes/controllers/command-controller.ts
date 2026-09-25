@@ -393,7 +393,7 @@ export class CommandController {
 		info += `${theme.fg("dim", "Total:")} ${stats.totalMessages}\n\n`;
 		// Append-only context
 		{
-			const setting = cfgProviderAppendOnlyContext.get(this.ctx.settings) ?? "auto";
+			const setting = cfgProviderAppendOnlyContext.get(this.ctx.settings);
 			const model = this.ctx.session.model;
 			const mode = shouldEnableAppendOnlyContext(setting, model);
 			const activeLabel = mode ? theme.fg("success", "active") : theme.fg("dim", "inactive");

@@ -86,25 +86,6 @@ interface MemoryRuntimeConfig {
 	summaryInjectionTokenLimit: number;
 }
 
-const DEFAULTS: MemoryRuntimeConfig = {
-	enabled: false,
-	maxRolloutsPerStartup: 64,
-	maxRolloutAgeDays: 30,
-	minRolloutIdleHours: 12,
-	threadScanLimit: 300,
-	maxRawMemoriesForGlobal: 200,
-	stage1Concurrency: 8,
-	stage1LeaseSeconds: 120,
-	stage1RetryDelaySeconds: 120,
-	phase2LeaseSeconds: 180,
-	phase2RetryDelaySeconds: 180,
-	phase2HeartbeatSeconds: 30,
-	rolloutPayloadPercent: 0.7,
-	phase1InputTokenLimit: 4_000,
-	fallbackTokenLimit: 16_000,
-	summaryInjectionTokenLimit: 5_000,
-};
-
 interface Stage1Stats {
 	claimed: number;
 	succeeded: number;
@@ -1289,22 +1270,21 @@ async function resolveMemoryModel(options: {
 function loadMemoryConfig(settings: Settings): MemoryRuntimeConfig {
 	return {
 		enabled: cfgMemoryBackend.get(settings) === "local",
-		maxRolloutsPerStartup: cfgMemoriesMaxRolloutsPerStartup.get(settings) ?? DEFAULTS.maxRolloutsPerStartup,
-		maxRolloutAgeDays: cfgMemoriesMaxRolloutAgeDays.get(settings) ?? DEFAULTS.maxRolloutAgeDays,
-		minRolloutIdleHours: cfgMemoriesMinRolloutIdleHours.get(settings) ?? DEFAULTS.minRolloutIdleHours,
-		threadScanLimit: cfgMemoriesThreadScanLimit.get(settings) ?? DEFAULTS.threadScanLimit,
-		maxRawMemoriesForGlobal: cfgMemoriesMaxRawMemoriesForGlobal.get(settings) ?? DEFAULTS.maxRawMemoriesForGlobal,
-		stage1Concurrency: cfgMemoriesStage1Concurrency.get(settings) ?? DEFAULTS.stage1Concurrency,
-		stage1LeaseSeconds: cfgMemoriesStage1LeaseSeconds.get(settings) ?? DEFAULTS.stage1LeaseSeconds,
-		stage1RetryDelaySeconds: cfgMemoriesStage1RetryDelaySeconds.get(settings) ?? DEFAULTS.stage1RetryDelaySeconds,
-		phase2LeaseSeconds: cfgMemoriesPhase2LeaseSeconds.get(settings) ?? DEFAULTS.phase2LeaseSeconds,
-		phase2RetryDelaySeconds: cfgMemoriesPhase2RetryDelaySeconds.get(settings) ?? DEFAULTS.phase2RetryDelaySeconds,
-		phase2HeartbeatSeconds: cfgMemoriesPhase2HeartbeatSeconds.get(settings) ?? DEFAULTS.phase2HeartbeatSeconds,
-		rolloutPayloadPercent: cfgMemoriesRolloutPayloadPercent.get(settings) ?? DEFAULTS.rolloutPayloadPercent,
-		phase1InputTokenLimit: cfgMemoriesPhase1InputTokenLimit.get(settings) ?? DEFAULTS.phase1InputTokenLimit,
-		fallbackTokenLimit: cfgMemoriesFallbackTokenLimit.get(settings) ?? DEFAULTS.fallbackTokenLimit,
-		summaryInjectionTokenLimit:
-			cfgMemoriesSummaryInjectionTokenLimit.get(settings) ?? DEFAULTS.summaryInjectionTokenLimit,
+		maxRolloutsPerStartup: cfgMemoriesMaxRolloutsPerStartup.get(settings),
+		maxRolloutAgeDays: cfgMemoriesMaxRolloutAgeDays.get(settings),
+		minRolloutIdleHours: cfgMemoriesMinRolloutIdleHours.get(settings),
+		threadScanLimit: cfgMemoriesThreadScanLimit.get(settings),
+		maxRawMemoriesForGlobal: cfgMemoriesMaxRawMemoriesForGlobal.get(settings),
+		stage1Concurrency: cfgMemoriesStage1Concurrency.get(settings),
+		stage1LeaseSeconds: cfgMemoriesStage1LeaseSeconds.get(settings),
+		stage1RetryDelaySeconds: cfgMemoriesStage1RetryDelaySeconds.get(settings),
+		phase2LeaseSeconds: cfgMemoriesPhase2LeaseSeconds.get(settings),
+		phase2RetryDelaySeconds: cfgMemoriesPhase2RetryDelaySeconds.get(settings),
+		phase2HeartbeatSeconds: cfgMemoriesPhase2HeartbeatSeconds.get(settings),
+		rolloutPayloadPercent: cfgMemoriesRolloutPayloadPercent.get(settings),
+		phase1InputTokenLimit: cfgMemoriesPhase1InputTokenLimit.get(settings),
+		fallbackTokenLimit: cfgMemoriesFallbackTokenLimit.get(settings),
+		summaryInjectionTokenLimit: cfgMemoriesSummaryInjectionTokenLimit.get(settings),
 	};
 }
 

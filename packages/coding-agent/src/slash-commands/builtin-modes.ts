@@ -16,6 +16,7 @@ import type { ParsedSlashCommand, SlashCommandSpec, TuiSlashCommandRuntime } fro
 
 import { cfgComputerDisplay, cfgComputerEnabled, cfgComputerMaxHeight, cfgComputerMaxWidth } from "../tools/settings";
 import { cfgSkillful } from "../session/settings";
+import { formatSlowModeResetClock } from "../session/anthropic-slow-mode";
 import { cfgExtendedContext } from "../session/context-settings";
 import { cfgGoalEnabled } from "../goals/settings";
 import { cfgPlanEnabled } from "../plan-mode/settings";
@@ -77,6 +78,36 @@ async function runWithDetachedModeDraft(
 /** `/fast status` label for the active model: "on" when its family is priority, else "off". */
 function formatFastModeStatus(session: AgentSession): string {
 	return session.isFastModeEnabled() ? "on" : "off";
+}
+
+const SLOW_UNSUPPORTED =
+	"The current model has no slow mode: /slow uses the flex tier on OpenAI/Google models and subscription slow mode on Anthropic.";
+
+/**
+ * `/slow [on|off|status]` for the active model: the `flex` service tier on
+ * OpenAI/Google, subscription slow mode (`providers.anthropic.slowMode`
+ * `auto`/`off`) on Anthropic. Bare invocation toggles. Returns the user-facing
+ * reply, or `undefined` for an unknown argument.
+ */
+function runSlowCommand(arg: string, session: AgentSession): string | undefined {
+	if (arg !== "" && arg !== "toggle" && arg !== "on" && arg !== "off" && arg !== "status") return undefined;
+	const anthropic = session.model?.provider === "anthropic";
+	if (arg === "status") {
+		if (!session.isSlowModeEnabled()) return "Slow mode is off.";
+		if (!anthropic) return "Slow mode is on (flex tier).";
+		const label = session.getAnthropicSlowModeLabel();
+		return label ? `Slow mode is on (${label}).` : "Slow mode is on (auto at the Claude session limit).";
+	}
+	const enabled = arg === "on" || (arg !== "off" && !session.isSlowModeEnabled());
+	if (!session.setSlowMode(enabled)) return SLOW_UNSUPPORTED;
+	if (!session.isSlowModeEnabled()) {
+		return anthropic ? "Slow mode off: requests wait for your Claude usage limit as usual." : "Slow mode off.";
+	}
+	if (!anthropic) return "Slow mode on: requests use the flex tier (lower cost, higher latency).";
+	const resetsAtSec = session.getAnthropicSlowModeLane()?.activeResetsAtSec();
+	return resetsAtSec !== undefined
+		? `Slow mode on: continuing at lower priority until your limit resets at ${formatSlowModeResetClock(resetsAtSec)}. Your weekly limit still applies, and responses may pause while waiting for spare capacity.`
+		: "Slow mode on: when your Claude subscription hits its session limit and Anthropic offers lower-priority service, requests switch to it automatically.";
 }
 
 /** `/extended-context status` label for the premium long-context window setting. */
@@ -487,6 +518,34 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				return;
 			}
 			runtime.ctx.showStatus("Usage: /fast [on|off|status]");
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "slow",
+		icon: "fast",
+		description:
+			"Toggle slow mode: flex tier on OpenAI/Google; on Anthropic, continue at lower priority after the Claude session limit",
+		acpDescription: "Toggle slow mode",
+		acpInputHint: "[on|off|status]",
+		subcommands: [
+			{ name: "on", description: "Flex tier, or Anthropic lower priority at the session limit (auto)" },
+			{ name: "off", description: "Standard service; stop Anthropic lower-priority mode" },
+			{ name: "status", description: "Show slow mode status" },
+		],
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime =>
+			runtime.ctx.session.isSlowModeEnabled() ? "Slow mode: on" : "Slow mode: off",
+		handle: async (command, runtime) => {
+			const message = runSlowCommand(command.args.trim().toLowerCase(), runtime.session);
+			if (message === undefined) return usage("Usage: /slow [on|off|status]", runtime);
+			await runtime.output(message);
+			return commandConsumed();
+		},
+		handleTui: (command, runtime) => {
+			const message = runSlowCommand(command.args.trim().toLowerCase(), runtime.ctx.session);
+			refreshStatusLine(runtime.ctx);
+			runtime.ctx.showStatus(message ?? "Usage: /slow [on|off|status]");
 			runtime.ctx.editor.setText("");
 		},
 	},

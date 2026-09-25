@@ -420,6 +420,7 @@ async fn hashline_rem_streaming_preview_does_not_error_on_invalid_utf8() {
 			cwd:                  cwd.clone(),
 			home_dir:             cwd,
 			url_schemes:          Vec::new(),
+			url_alias_schemes:    Vec::new(),
 			plan_writable_roots:  Vec::new(),
 			plan_active:          false,
 			block_auto_generated: true,
@@ -573,12 +574,132 @@ async fn internal_url_targets_wait_for_host_answers() {
 	);
 
 	session.finish();
+	assert_eq!(session.begin_apply_url_targets(), ["local://plan.md"]);
+	session.provide("local://plan.md".into(), UrlResolution {
+		absolute:      Some(backing.clone()),
+		error:         None,
+		plan_writable: true,
+	});
 	session
 		.apply(ApplyRequest::default(), &writer)
 		.await
 		.expect("plan-writable URL applies in plan mode");
 	assert_eq!(writer.requests.lock()[0].absolute, backing);
 	assert_eq!(std::fs::read_to_string(&backing).unwrap(), "two\n");
+}
+
+#[tokio::test]
+async fn apply_never_reuses_url_answers_given_to_previews() {
+	let mut ws = Workspace::new(EditMode::Replace);
+	ws.config.policy.url_schemes = vec!["local".into()];
+	ws.config.policy.url_alias_schemes = vec!["local".into()];
+	let sandbox = tempfile::tempdir().expect("sandbox");
+	let stale = sandbox.path().join("stale.md");
+	let fresh = sandbox.path().join("fresh.md");
+	std::fs::write(&stale, "one\n").unwrap();
+	std::fs::write(&fresh, "one\n").unwrap();
+	let answer = |absolute: &std::path::Path| UrlResolution {
+		absolute:      Some(absolute.to_owned()),
+		error:         None,
+		plan_writable: false,
+	};
+	let writer = DiskWriter::default();
+
+	let mut session = ws.session();
+	session.set_args_json(r#"{"old_string":"one","new_string":"two","path":"local:/plan.md"}"#);
+	session.finish();
+	session.preview();
+	assert_eq!(session.take_unresolved(), ["local://plan.md"]);
+	session.provide("local://plan.md".into(), answer(&stale));
+	assert!(session.preview().files[0].diff.is_some(), "the preview uses its answer");
+
+	let err = session
+		.apply(ApplyRequest::default(), &writer)
+		.await
+		.expect_err("the preview answer is not reused");
+	assert!(matches!(&err, EditError::UnresolvedUrl(url) if url == "local://plan.md"), "{err}");
+	assert_eq!(session.take_unresolved(), ["local://plan.md"]);
+	session.provide("local://plan.md".into(), answer(&fresh));
+	session
+		.apply(ApplyRequest::default(), &writer)
+		.await
+		.expect("apply uses its own answer");
+	assert_eq!(std::fs::read_to_string(&fresh).unwrap(), "two\n");
+	assert_eq!(std::fs::read_to_string(&stale).unwrap(), "one\n");
+}
+
+#[tokio::test]
+async fn begin_apply_url_targets_cover_every_url_before_the_first_stage() {
+	enum Payload {
+		Raw(&'static str),
+		Json(serde_json::Value),
+	}
+	// Every mode that can move a file: section paths plus move destinations.
+	let rows = [
+		(
+			EditMode::ApplyPatch,
+			Payload::Raw(
+				"*** Begin Patch\n*** Update File: local://a.md\n@@\n-one\n+two\n*** Update File: \
+				 local:/b.md\n*** Move to: local://c.md\n@@\n-one\n+two\n*** Update File: \
+				 plain.txt\n@@\n-one\n+two\n*** End Patch\n",
+			),
+			&["local://a.md", "local://b.md", "local://c.md"][..],
+		),
+		(
+			EditMode::Hashline,
+			Payload::Json(serde_json::json!({ "input": "[local:/b.md#TAG]\nMV local://c.md" })),
+			&["local://b.md", "local://c.md"][..],
+		),
+		(
+			EditMode::Patch,
+			Payload::Json(serde_json::json!({ "path": "local:/b.md", "edits": [
+				{ "op": "update", "rename": "local://c.md", "diff": "@@\n-one\n+two" },
+			] })),
+			&["local://b.md", "local://c.md"][..],
+		),
+	];
+	for (mode, payload, expected) in rows {
+		let mut ws = Workspace::new(mode);
+		ws.config.policy.url_schemes = vec!["local".into()];
+		ws.config.policy.url_alias_schemes = vec!["local".into()];
+		ws.write("plain.txt", "one\n");
+		let sandbox = tempfile::tempdir().expect("sandbox");
+		for name in ["a.md", "b.md"] {
+			std::fs::write(sandbox.path().join(name), "one\n").unwrap();
+		}
+		let tag = ws.snapshot(sandbox.path().join("b.md").to_str().unwrap(), "one\n", None);
+		let mut session = match payload {
+			Payload::Raw(input) => {
+				ws.config.raw_input = true;
+				let mut session = ws.session();
+				session.push(input);
+				session
+			},
+			Payload::Json(args) => {
+				let mut session = ws.session();
+				session.set_args_json(&args.to_string().replace("#TAG]", &format!("#{tag}]")));
+				session
+			},
+		};
+		session.finish();
+		let targets = session.begin_apply_url_targets();
+		assert_eq!(targets, expected, "{mode:?}");
+		for url in targets {
+			let name = url.trim_start_matches("local://");
+			session.provide(url.clone(), UrlResolution {
+				absolute:      Some(sandbox.path().join(name)),
+				error:         None,
+				plan_writable: false,
+			});
+		}
+		let writer = DiskWriter::default();
+		session
+			.apply(ApplyRequest::default(), &writer)
+			.await
+			.unwrap_or_else(|err| panic!("{mode:?}: every URL answered up front, yet {err}"));
+		assert!(sandbox.path().join("c.md").exists(), "{mode:?}");
+		assert!(!sandbox.path().join("b.md").exists(), "{mode:?}");
+	}
 }
 
 #[tokio::test]

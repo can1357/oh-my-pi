@@ -83,7 +83,7 @@ export function createSetupHost(ctx: InteractiveModeContext): SetupHost {
 			return ctx.statusLine;
 		},
 		get composerShape() {
-			return cfgComposerShape.get(ctx.settings) ?? "band";
+			return cfgComposerShape.get(ctx.settings);
 		},
 		get symbolPreset() {
 			return cfgSymbolPreset.get(ctx.settings);

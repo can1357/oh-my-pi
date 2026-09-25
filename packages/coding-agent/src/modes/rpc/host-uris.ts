@@ -17,9 +17,6 @@ import type {
 
 type RpcHostUriOutput = (frame: RpcHostUriRequest | RpcHostUriCancelRequest) => void;
 
-/** OMP-owned namespaces that RPC hosts may not replace. */
-const RESERVED_HOST_URI_SCHEMES: ReadonlySet<string> = new Set(["security"]);
-
 type PendingUriRequest = {
 	operation: "read" | "write";
 	url: string;
@@ -53,7 +50,7 @@ class RpcHostUriProtocolHandler implements ProtocolHandler {
 			backing: "remote",
 			selectors: "none",
 			immutable: definition.immutable === true,
-			write: writable ? { payload: "text", scope: "workspace", tier: () => "write" } : undefined,
+			write: writable ? { via: "handler", payload: "text", scope: "workspace", tier: () => "write" } : undefined,
 		};
 		if (writable) {
 			this.write = (url, content, context) => this.#bridge.requestWrite(this.scheme, url, content, context);
@@ -104,7 +101,9 @@ export class RpcHostUriBridge {
 			if (!/^[a-z][a-z0-9+.-]*$/.test(scheme)) {
 				throw new Error(`Host URI scheme contains invalid characters: ${raw.scheme}`);
 			}
-			if (RESERVED_HOST_URI_SCHEMES.has(scheme)) {
+			// Built-in schemes are OMP-owned: a host shadowing one would change its semantics for
+			// the whole process, and `clear()` would then delete it for later sessions.
+			if (this.#router.isBuiltin(scheme)) {
 				throw new Error(`Host URI scheme is reserved by OMP: ${scheme}://`);
 			}
 			normalized.set(scheme, {

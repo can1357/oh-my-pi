@@ -294,7 +294,7 @@ async function loadExtensionModules(ctx: LoadContext): Promise<LoadResult<Extens
  */
 function readClaudeProjectCommandsToggle(): boolean {
 	try {
-		return cfgCommandsEnableClaudeProject.get(settings) ?? true;
+		return cfgCommandsEnableClaudeProject.get(settings);
 	} catch {
 		return true;
 	}

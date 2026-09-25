@@ -12,16 +12,17 @@ import type {
 	AgentToolResult,
 	AgentToolUpdateCallback,
 	ToolApprovalDecision,
+	ToolTier,
 } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
 import { isPosixShell } from "@oh-my-pi/pi-utils/procmgr";
-import { DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS, raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
+import { raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
 import type { Settings } from "../config/settings";
 import { applyDirenvPreflight, type BashResult, executeBash } from "../exec/bash-executor";
 import { InternalUrlRouter } from "../internal-urls";
 import { sessionResolveContext } from "../internal-urls/context";
-import { normalizeLocalScheme } from "../internal-urls/parse";
+import { InternalUrlFilesystem, UrlFsError } from "../internal-urls/url-filesystem";
 import bashDescription from "../prompts/tools/bash.md" with { type: "text" };
 import type {
 	ClientBridgeTerminalExitStatus,
@@ -42,7 +43,6 @@ import { type BashInteractiveResult, runInteractiveBashPty } from "./bash-intera
 import { checkBashInterception } from "./bash-interceptor";
 import { rewriteGitWorktreeAdd } from "./bash-worktree-rewrite";
 import { canUseInteractiveBashPty } from "./bash-pty-selection";
-import { expandInternalUrls } from "./bash-skill-urls";
 import { resolveEvalBackends } from "./eval-backends";
 import { invalidateGithubCacheForBashCommand } from "./gh-cache-invalidation";
 import { startService, type ServiceReady } from "../launch/services";
@@ -472,7 +472,7 @@ function formatTimeoutClampNotice(
  */
 export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	readonly name = "bash";
-	/** Bash resolves `skill://` URIs in commands and working directories. */
+	/** Bash reads `skill://` paths through its shell filesystem, including as a working directory. */
 	readonly readsSkillUris = true;
 	readonly approval = (args: unknown): ToolApprovalDecision => {
 		const rawCommand = (args as Partial<BashToolInput>).command;
@@ -604,6 +604,11 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	readonly strict = true;
 
 	constructor(private readonly session: ToolSession) {}
+
+	/** URL filesystem for one embedded-shell run: this session's context, cancelled by the run's own signal. */
+	#urlFilesystem(signal: AbortSignal | undefined, tier: ToolTier): InternalUrlFilesystem {
+		return new InternalUrlFilesystem({ context: sessionResolveContext(this.session, { signal }), tier });
+	}
 
 	/** Service launch mode: live `launch.enabled` while `bash` itself is an active tool. */
 	get #launchEnabled(): boolean {
@@ -791,6 +796,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		onUpdate?: AgentToolUpdateCallback<BashToolDetails>;
 		/** A foreground wait races the job: updates stream to the caller and the row stays hidden until promoted. */
 		foreground: boolean;
+		/** Approval tier bounding the job's URL filesystem. */
+		approvalTier: ToolTier;
 	}): ManagedBashJobHandle {
 		const manager = this.session.asyncJobManager;
 		if (!manager) {
@@ -816,6 +823,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						sessionKey: `${this.session.getSessionId?.() ?? ""}:async:${jobId}`,
 						timeout: options.timeoutMs ?? 0,
 						signal: runSignal,
+						// Bound to the job's own signal: the job outlives the call that started it.
+						filesystem: this.#urlFilesystem(runSignal, options.approvalTier).shellFilesystem(),
 						artifactPath,
 						artifactId,
 						onChunk: chunk => {
@@ -944,34 +953,53 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			command = rewriteGitWorktreeAdd(command, resolveCliEntryCmd());
 		}
 
-		const internalUrlContext = sessionResolveContext(this.session, { signal });
-		command = await expandInternalUrls(command, { context: internalUrlContext, create: true });
-
-		// Resolve internal URLs in the extracted cwd. URLs locate their directory
-		// form here (a bare skill URL → the skill directory): the result must pass
-		// the isDirectory check below.
-		if (cwd && InternalUrlRouter.instance().canHandle(normalizeLocalScheme(cwd))) {
-			cwd = await expandInternalUrls(cwd, { context: internalUrlContext, noEscape: true, directory: true });
-		}
-
 		// Best-effort cache invalidation: drop github-cache rows for any issue/PR
 		// number touched by a mutating `gh` subcommand inside this bash call so
 		// subsequent issue:// / pr:// reads pick up the post-mutation state
 		// instead of the cached pre-mutation snapshot.
 		invalidateGithubCacheForBashCommand(command);
 
-		const commandCwd = cwd ? resolveToCwd(cwd, this.session.cwd) : this.session.cwd;
-		let cwdStat: fs.Stats;
-		try {
-			cwdStat = await fs.promises.stat(commandCwd);
-		} catch (err) {
-			if (isEnoent(err)) {
-				throw new ToolError(`Working directory does not exist: ${commandCwd}`);
+		// URL paths resolve through the embedded shell's filesystem, within the
+		// tier this command was approved at. A URL cwd stays a URL: only that
+		// filesystem can enter it, so external backends (service, PTY, client
+		// terminal) never run there.
+		const approval = this.approval({ command: rawCommand });
+		const approvalTier = typeof approval === "string" ? approval : approval.tier;
+		const router = InternalUrlRouter.instance();
+		const virtualCwd = cwd && router.canHandle(cwd) ? router.normalize(cwd) : undefined;
+		const commandCwd = virtualCwd ?? (cwd ? resolveToCwd(cwd, this.session.cwd) : this.session.cwd);
+		if (virtualCwd !== undefined) {
+			if (name !== undefined || canUseInteractiveBashPty(pty === true, ctx)) {
+				throw new ToolError(
+					`Working directory ${virtualCwd} exists only in the embedded shell; ${name !== undefined ? "services" : "pty commands"} run external processes and need a host directory.`,
+				);
 			}
-			throw err;
-		}
-		if (!cwdStat.isDirectory()) {
-			throw new ToolError(`Working directory is not a directory: ${commandCwd}`);
+			const cwdStat = await this.#urlFilesystem(signal, approvalTier)
+				.stat(virtualCwd)
+				.catch((err: unknown) => {
+					if (err instanceof UrlFsError && err.code === "ENOENT") {
+						throw new ToolError(`Working directory does not exist: ${virtualCwd}`);
+					}
+					throw new ToolError(
+						`Working directory ${virtualCwd} is unavailable: ${err instanceof Error ? err.message : String(err)}`,
+					);
+				});
+			if (cwdStat.type !== "directory") {
+				throw new ToolError(`Working directory is not a directory: ${virtualCwd}`);
+			}
+		} else {
+			let cwdStat: fs.Stats;
+			try {
+				cwdStat = await fs.promises.stat(commandCwd);
+			} catch (err) {
+				if (isEnoent(err)) {
+					throw new ToolError(`Working directory does not exist: ${commandCwd}`);
+				}
+				throw err;
+			}
+			if (!cwdStat.isDirectory()) {
+				throw new ToolError(`Working directory is not a directory: ${commandCwd}`);
+			}
 		}
 
 		if (name !== undefined) {
@@ -1037,6 +1065,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				notices: pendingNotices,
 				onUpdate,
 				foreground: false,
+				approvalTier,
 			});
 			return this.#buildBackgroundStartResult(job.jobId, "", timeoutSec, {
 				requestedTimeoutSec,
@@ -1049,7 +1078,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// auto-background would otherwise silently disable the terminal route).
 		const clientBridge = this.session.getClientBridge?.();
 		const bridgeTerminalAvailable = Boolean(
-			clientBridge?.capabilities.terminal && clientBridge.createTerminal && !pty,
+			clientBridge?.capabilities.terminal && clientBridge.createTerminal && !pty && virtualCwd === undefined,
 		);
 
 		const autoBgManager = this.session.asyncJobManager;
@@ -1063,9 +1092,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			!autoBgManager.atCapacity
 		) {
 			const autoBackgroundWaitMs = resolveAutoBackgroundWaitMs(
-				Math.floor(
-					cfgBashAutoBackgroundThresholdMs.get(this.session.settings) ?? DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS,
-				),
+				Math.floor(cfgBashAutoBackgroundThresholdMs.get(this.session.settings)),
 				timeoutMs,
 			);
 			const startBackgrounded = autoBackgroundWaitMs === 0;
@@ -1078,6 +1105,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				notices: pendingNotices,
 				onUpdate,
 				foreground: !startBackgrounded,
+				approvalTier,
 			});
 			if (startBackgrounded) {
 				return this.#buildBackgroundStartResult(job.jobId, "", timeoutSec, {
@@ -1132,8 +1160,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// (the backend's own timeout is installed only after this await), matching
 		// the executeBash branch so a cold `.envrc` can't outlast a short call.
 		const backendPreflight =
-			(clientBridge?.capabilities.terminal && clientBridge.createTerminal && !pty) ||
-			canUseInteractiveBashPty(pty === true, ctx)
+			bridgeTerminalAvailable || canUseInteractiveBashPty(pty === true, ctx)
 				? await applyDirenvPreflight(command, commandCwd, {
 						signal,
 						timeoutMs: cfgBashDirenvLoadTimeoutMs.get(this.session.settings),
@@ -1143,8 +1170,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				: undefined;
 
 		// Route through the client terminal when the client advertises the terminal capability.
-		// Skip when pty=true (PTY needs the local terminal UI).
-		if (clientBridge?.capabilities.terminal && clientBridge.createTerminal && !pty) {
+		// Skip when pty=true (PTY needs the local terminal UI) or the cwd is a URL
+		// (only the embedded shell's filesystem can enter it).
+		if (clientBridge?.capabilities.terminal && clientBridge.createTerminal && !pty && virtualCwd === undefined) {
 			// Invariant (ACP terminal bridge): createTerminal has no signal in its
 			// contract; allocation cannot be cancelled retroactively. Guard before
 			// allocation. Shared timeout helper / pure AbortSignal fusion rejected:
@@ -1436,6 +1464,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					sessionKey: this.session.getSessionId?.() ?? undefined,
 					timeout: timeoutMs ?? 0,
 					signal,
+					filesystem: this.#urlFilesystem(signal, approvalTier).shellFilesystem(),
 					artifactPath,
 					artifactId,
 					onChunk: streamTailUpdates(tailBuffer, onUpdate),

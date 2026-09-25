@@ -6,23 +6,26 @@
  * - `cfg://<namespace>`       one namespace's subtree, e.g. `cfg://advisor`
  * - `cfg://<setting>`         one setting: value, type, default, source, description
  *
- * Write forms (content is the new value). Only a top-level session with a UI may
- * write, and every write requires user approval through the host registered with
- * {@link setCfgApprovalHost}. Subagents and headless sessions (print, RPC, ACP,
- * background forks) are refused so they never block on a prompt the user did
- * not start:
+ * Write forms (content is the new value). Only a session created with
+ * `settingsApproval` (the top-level TUI session) may write, and every write
+ * requires user approval through the host registered with {@link setCfgApprovalHost}.
+ * Other sessions (subagents, print, RPC, ACP, background forks) never see the
+ * scheme advertised and are refused so they never block on a prompt the user
+ * did not start:
  * - `cfg://<setting>`         session-only runtime override
  * - `cfg://<setting>/save`    persisted to the global config.yml
  *
  * Credential values are always redacted.
  */
-import { prompt } from "@oh-my-pi/pi-utils";
+import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 import { fuzzyFilter } from "@oh-my-pi/pi-tui/fuzzy";
 import { type CfgWriteDetails, type CfgWriteOutcome } from "@oh-my-pi/pi-tui/tools/cfg-render";
 import { CFG_SAVE_SEGMENT, CFG_URL_PREFIX, parseCfgUrl } from "@oh-my-pi/pi-tui/tools/cfg-url";
 import { type AnySetting, all } from "../config/registry";
 import type { SettingProvenance, Settings } from "../config/settings";
 import cfgPromptDoc from "../prompts/internal-urls/cfg.md" with { type: "text" };
+import cfgEnvShadowedTemplate from "../prompts/tools/cfg-env-shadowed.md" with { type: "text" };
+import cfgApprovalTimeoutTemplate from "../prompts/tools/cfg-approval-timeout.md" with { type: "text" };
 import cfgWriteResultTemplate from "../prompts/tools/cfg-write-result.md" with { type: "text" };
 import type { ToolSession } from "../tools";
 import type {
@@ -31,6 +34,7 @@ import type {
 	InternalWriteResult,
 	ProtocolHandler,
 	ResolveContext,
+	SchemeHost,
 	SchemeSpec,
 	UrlCompletion,
 	WriteContext,
@@ -75,6 +79,8 @@ export interface CfgChangeRequest {
 	value: string;
 	/** Persist to config.yml instead of scoping the change to the session. */
 	save: boolean;
+	/** Higher layer that will keep a `/save` from taking effect here (e.g. `project config`); absent when it applies. */
+	shadowedBy?: string;
 }
 
 /** An approved change that took effect on one {@link Settings} instance. */
@@ -87,14 +93,22 @@ export interface CfgAppliedChange {
 	save: boolean;
 }
 
+/**
+ * The user's answer to a {@link CfgChangeRequest}: `once` applies this change, `session`
+ * also approves later writes of the same kind for the rest of the session (a session grant
+ * from a `/save` prompt covers saves and session changes), `deny` declines, and `timeout`
+ * means nobody answered, so the write fails and the agent carries on without it.
+ */
+export type CfgApproval = "once" | "session" | "deny" | "timeout";
+
 /** Host UI that approves `cfg://` writes, plus the disk-backed settings `/save` persists to. */
 export interface CfgApprovalHost {
-	/** Resolves `true` only when the user explicitly approves the change. */
-	approve(request: CfgChangeRequest): Promise<boolean>;
+	/** Asks the user; dismissing the prompt must resolve `deny`. */
+	approve(request: CfgChangeRequest): Promise<CfgApproval>;
 	/**
 	 * Called once per settings instance whose value changed, so the host can apply
-	 * live side effects (e.g. start the advisor runtime); a settings value alone
-	 * does not restart components that read it at startup.
+	 * side effects reserved for the user's in-process choices (a `defaultThinkingLevel`
+	 * change also switches the live session).
 	 */
 	applied(change: CfgAppliedChange): void;
 	persistentSettings: Settings;
@@ -103,6 +117,8 @@ export interface CfgApprovalHost {
 let approvalHost: CfgApprovalHost | null = null;
 /** Tail of the approval chain; concurrent writes prompt one at a time. */
 let approvalQueue: Promise<unknown> = Promise.resolve();
+/** "Always for this session" answer: which session it covers and whether it extends to `/save`. */
+let sessionGrant: { sessionId: string; save: boolean } | undefined;
 
 /**
  * Register the process-global approval host for `cfg://` writes. `/save`
@@ -112,6 +128,22 @@ let approvalQueue: Promise<unknown> = Promise.resolve();
  */
 export function setCfgApprovalHost(host: CfgApprovalHost | null): void {
 	approvalHost = host;
+	sessionGrant = undefined;
+}
+
+/** Answers from the session grant when it covers this write; otherwise asks the host and records a new grant. */
+async function decide(
+	host: CfgApprovalHost,
+	request: CfgChangeRequest,
+	sessionId: string | undefined,
+): Promise<CfgApproval> {
+	const grant = sessionId !== undefined && sessionGrant?.sessionId === sessionId ? sessionGrant : undefined;
+	if (grant && (grant.save || !request.save)) return "once";
+	const answer = await host.approve(request);
+	if (answer === "session" && sessionId !== undefined) {
+		sessionGrant = { sessionId, save: request.save || (grant?.save ?? false) };
+	}
+	return answer;
 }
 
 function formatValue(setting: AnySetting, value: unknown): string {
@@ -203,6 +235,61 @@ function renderLeaf(settings: Settings, setting: AnySetting): string {
 	return lines.join("\n");
 }
 
+/**
+ * Layer that keeps a written `value` from taking effect on `settings`, or undefined when it applies.
+ * Decided by which layer owns the setting; `effective` only clears a false alarm where that layer
+ * already agrees (settings layers deep-merge, so a record write shows up as a subset of the effective record).
+ */
+function shadowingLayer(
+	setting: AnySetting,
+	settings: Settings,
+	value: unknown,
+	above: readonly SettingProvenance[],
+): SettingProvenance | undefined {
+	const owner = setting.provenance(settings);
+	if (!above.includes(owner)) return undefined;
+	const effective = setting.get(settings);
+	if (!isRecord(value) || !isRecord(effective)) {
+		return Bun.deepEquals(effective, value) ? undefined : owner;
+	}
+	for (const key in value) {
+		if (!Bun.deepEquals(effective[key], value[key])) return owner;
+	}
+	return undefined;
+}
+
+/**
+ * {@link shadowingLayer} judged before a `/save` lands on `persistent`. Layers deep-merge records, so a
+ * written key is shadowed only when its current value comes from a higher layer rather than the global
+ * config the save replaces; an env var replaces the value whole and is judged as is.
+ */
+function saveShadowingLayer(
+	setting: AnySetting,
+	persistent: Settings,
+	value: unknown,
+	above: readonly SettingProvenance[],
+): SettingProvenance | undefined {
+	const owner = setting.provenance(persistent);
+	const effective = setting.get(persistent);
+	if (owner === "env" || !above.includes(owner) || !isRecord(value) || !isRecord(effective)) {
+		return shadowingLayer(setting, persistent, value, above);
+	}
+	let global: unknown = persistent.getGlobalSettings();
+	for (const segment of setting.segments) global = isRecord(global) ? global[segment] : undefined;
+	for (const key in value) {
+		const current = effective[key];
+		if (current === undefined || Bun.deepEquals(current, value[key])) continue;
+		if (isRecord(global) && Bun.deepEquals(global[key], current)) continue;
+		return owner;
+	}
+	return undefined;
+}
+
+/** Only an environment variable outranks a session override. */
+const ABOVE_SESSION: readonly SettingProvenance[] = ["env"];
+/** Every layer that outranks the global config.yml a `/save` writes. */
+const ABOVE_GLOBAL: readonly SettingProvenance[] = ["env", "runtime", "overlay", "project"];
+
 function callerSession(context: ResolveContext | WriteContext | undefined): ToolSession {
 	const session = context?.session;
 	if (!session?.settings) throw new Error(`${CFG_URL_PREFIX} requires a calling session.`);
@@ -212,7 +299,7 @@ function callerSession(context: ResolveContext | WriteContext | undefined): Tool
 /**
  * Settings of a caller allowed to write. Refuses sessions that must not raise
  * approval prompts: subagents (the user is not driving them) and sessions without
- * a UI (print, RPC, ACP, `/tan` forks, programmatic agents).
+ * `settingsApproval` (print, RPC, ACP, `/tan` forks, programmatic agents).
  */
 function writerSettings(context: WriteContext | undefined): Settings {
 	const session = callerSession(context);
@@ -221,7 +308,7 @@ function writerSettings(context: WriteContext | undefined): Settings {
 			`Subagents cannot change settings. Report the setting you need changed to the parent agent instead of writing ${CFG_URL_PREFIX}.`,
 		);
 	}
-	if (!session.hasUI) {
+	if (session.settingsApproval !== true) {
 		throw new Error(
 			`Changing settings requires user approval, but this session has no interactive UI. Ask the user to change the setting themselves.`,
 		);
@@ -235,11 +322,12 @@ export class CfgProtocolHandler implements ProtocolHandler {
 		backing: "virtual",
 		selectors: "lines",
 		immutable: true,
-		write: { payload: "verbatim", scope: "workspace", tier: () => "write" },
+		write: { via: "handler", payload: "verbatim", scope: "workspace", tier: () => "write" },
 	};
 
-	promptDoc(): string {
-		return cfgPromptDoc.trim();
+	/** Advertised only where writes can be approved; subagents and headless sessions never see `cfg://`. */
+	promptDoc(host: SchemeHost): string | undefined {
+		return host.settingsApproval ? cfgPromptDoc.trim() : undefined;
 	}
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
@@ -285,7 +373,11 @@ export class CfgProtocolHandler implements ProtocolHandler {
 			save,
 		};
 		const settingUrl = `${CFG_URL_PREFIX}${leaf.id.replaceAll(".", "/")}`;
-		const finish = (outcome: CfgWriteOutcome, effective?: string): InternalWriteResult => {
+		const finish = (
+			outcome: CfgWriteOutcome,
+			shadow?: { layer: SettingProvenance; scope: Settings },
+		): InternalWriteResult => {
+			const effective = shadow ? formatValue(leaf, leaf.get(shadow.scope)) : undefined;
 			const details: CfgWriteDetails = { ...request, outcome, ...(effective !== undefined ? { effective } : {}) };
 			const text = prompt
 				.render(cfgWriteResultTemplate, {
@@ -297,27 +389,62 @@ export class CfgProtocolHandler implements ProtocolHandler {
 					saved: outcome === "applied" && save,
 					applied: outcome === "applied" && !save,
 					effective,
-					provenance: PROVENANCE_LABELS[leaf.provenance(settings)],
+					provenance: shadow ? PROVENANCE_LABELS[shadow.layer] : undefined,
 				})
 				.trim();
 			return { content: [{ type: "text", text }], details: { cfg: details } };
 		};
 
 		if (!save && Bun.deepEquals(previous, value)) return finish("unchanged");
+		// Refuse before prompting: approving a session change a non-fallback env var overrides is a no-op.
+		// A fallback env var yields to the override the write adds, so it does not shadow.
+		if (!save && !leaf.envFallback && shadowingLayer(leaf, settings, value, ABOVE_SESSION)) {
+			throw new Error(
+				prompt
+					.render(cfgEnvShadowedTemplate, {
+						path: leaf.id,
+						effective: formatValue(leaf, previous),
+						env: leaf.envName,
+					})
+					.trim(),
+			);
+		}
 		const host = approvalHost;
 		if (!host) {
 			throw new Error(
 				`Changing settings requires user approval, but no interactive UI is attached. Ask the user to change \`${leaf.id}\` themselves.`,
 			);
 		}
-		const decision = approvalQueue.then(() => host.approve(request));
+		if (save) {
+			// Saving may still be meant for other projects, so ask anyway, but name the layer that wins here.
+			// A session sharing the persistent instance drops its own override on save, so it does not shadow.
+			const persistent = host.persistentSettings;
+			const above = ABOVE_GLOBAL.filter(
+				layer => !(layer === "env" && leaf.envFallback) && !(layer === "runtime" && settings === persistent),
+			);
+			const layer = saveShadowingLayer(leaf, persistent, value, above);
+			if (layer) {
+				request.shadowedBy =
+					layer === "env" && leaf.envName ? `environment variable ${leaf.envName}` : PROVENANCE_LABELS[layer];
+			}
+		}
+		const sessionId = callerSession(context).getSessionId?.() ?? undefined;
+		const decision = approvalQueue.then(() => decide(host, request, sessionId));
 		approvalQueue = decision.catch(() => undefined);
-		if (!(await decision)) return finish("declined");
+		const answer = await decision;
+		if (answer === "timeout") {
+			throw new Error(
+				prompt.render(cfgApprovalTimeoutTemplate, { path: leaf.id, previous: request.previous }).trim(),
+			);
+		}
+		if (answer === "deny") return finish("declined");
 
 		if (!save) {
 			leaf.override(settings, value);
 			host.applied({ path: leaf.id, value: leaf.get(settings), settings, save });
-			return finish("applied");
+			// A non-fallback env var outranks runtime overrides; report it instead of claiming the change.
+			const layer = shadowingLayer(leaf, settings, value, ABOVE_SESSION);
+			return finish("applied", layer ? { layer, scope: settings } : undefined);
 		}
 		const persistent = host.persistentSettings;
 		leaf.set(persistent, value);
@@ -330,9 +457,10 @@ export class CfgProtocolHandler implements ProtocolHandler {
 			leaf.override(settings, value);
 			host.applied({ path: leaf.id, value: leaf.get(persistent), settings: persistent, save });
 		}
-		const effective = leaf.get(settings);
-		host.applied({ path: leaf.id, value: effective, settings, save });
-		return finish("applied", Bun.deepEquals(effective, value) ? undefined : formatValue(leaf, effective));
+		host.applied({ path: leaf.id, value: leaf.get(settings), settings, save });
+		// Judged on the persistent instance: a separate session carries the mirrored override above.
+		const layer = shadowingLayer(leaf, persistent, value, ABOVE_GLOBAL);
+		return finish("applied", layer ? { layer, scope: persistent } : undefined);
 	}
 
 	async complete(): Promise<UrlCompletion[]> {

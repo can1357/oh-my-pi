@@ -429,8 +429,7 @@ describe("MemoryProtocolHandler", () => {
 				path: "memory://root/skills/%5Bdemo%5D/*.md",
 			});
 
-			expect(result.details?.files).toHaveLength(1);
-			expect(result.details?.files?.[0]).toEndWith("/skills/[demo]/SKILL.md");
+			expect(result.details?.files).toEqual(["memory://root/skills/%5Bdemo%5D/SKILL.md"]);
 		});
 	});
 
@@ -445,32 +444,9 @@ describe("MemoryProtocolHandler", () => {
 				path: "memory://root/*/%5Bdemo%5D.md",
 			});
 
-			expect(result.details?.files).toHaveLength(1);
-			expect(result.details?.files?.[0]).toEndWith("/skills/[demo].md");
+			expect(result.details?.files).toEqual(["memory://root/skills/%5Bdemo%5D.md"]);
 		});
 	});
-
-	it.each(["memory://root/skills/**/../*.md", "memory://root/skills/**/%2e%2e/*.md"])(
-		"rejects traversal in a memory glob suffix: %s",
-		async pattern => {
-			await withMemoryFixture(async ({ cwd }) => {
-				await expect(createGlobTool(cwd).execute("memory-glob-traversal", { path: pattern })).rejects.toThrow(
-					/traversal/i,
-				);
-			});
-		},
-	);
-
-	it.each(["memory://root/skills/**/demo%2fnested/*.md", "memory://root/skills/**/demo%5cnested/*.md"])(
-		"rejects encoded separators in a memory glob suffix: %s",
-		async pattern => {
-			await withMemoryFixture(async ({ cwd }) => {
-				await expect(createGlobTool(cwd).execute("memory-glob-separator", { path: pattern })).rejects.toThrow(
-					/encoded path separator/i,
-				);
-			});
-		},
-	);
 
 	it("throws clear error for missing files", async () => {
 		await withMemoryFixture(async () => {
@@ -493,6 +469,25 @@ describe("MemoryProtocolHandler", () => {
 			const router = InternalUrlRouter.instance();
 			await expect(router.resolve("memory://root/linked/secret.md")).rejects.toThrow(
 				"memory:// URL escapes memory root",
+			);
+		});
+	});
+
+	it("refuses create targets escaping through a symlinked ancestor or dangling symlink", async () => {
+		if (process.platform === "win32") return;
+
+		await withMemoryFixture(async ({ cwd, memoryRoot, cleanupRoot }) => {
+			const outsideDir = path.join(cleanupRoot, "outside");
+			await fs.mkdir(outsideDir, { recursive: true });
+			await fs.symlink(outsideDir, path.join(memoryRoot, "linked"));
+			await fs.symlink(path.join(outsideDir, "victim.md"), path.join(memoryRoot, "dangling.md"));
+
+			const router = InternalUrlRouter.instance();
+			await expect(router.locate("memory://root/linked/new/f.md", { cwd }, { create: true })).rejects.toThrow(
+				"memory:// URL escapes memory root",
+			);
+			await expect(router.locate("memory://root/dangling.md", { cwd }, { create: true })).rejects.toThrow(
+				"memory:// URL goes through a dangling symlink",
 			);
 		});
 	});

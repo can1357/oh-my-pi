@@ -64,10 +64,10 @@ export function createAgentsHubDeps(
 		browserSource: createModelBrowserSource(settings),
 		loadAgents: async () => {
 			const { agents } = await discoverAgents(cwd, undefined, extensionRoots());
-			const disabled = new Set(cfgTaskDisabledAgents.get(settings) ?? []);
-			const overrides = cfgTaskAgentModelOverrides.get(settings) ?? {};
-			const prewalkOverrides = cfgTaskAgentPrewalk.get(settings) ?? {};
-			const advisorOverrides = cfgTaskAgentAdvisor.get(settings) ?? {};
+			const disabled = new Set(cfgTaskDisabledAgents.get(settings));
+			const overrides = cfgTaskAgentModelOverrides.get(settings);
+			const prewalkOverrides = cfgTaskAgentPrewalk.get(settings);
+			const advisorOverrides = cfgTaskAgentAdvisor.get(settings);
 			return agents.map(agent => {
 				const override = overrides[agent.name];
 				const overrideModel = (Array.isArray(override) ? override.join(",") : (override ?? "")).trim();
@@ -103,7 +103,7 @@ export function createAgentsHubDeps(
 		effectivePrewalkPattern: agent =>
 			resolveAgentPrewalkPattern({
 				settingsOverride: agent.prewalkOverride,
-				agentPrewalk: resolveAgentPrewalkDefault(agent, cfgTaskPrewalk.get(settings) ?? false),
+				agentPrewalk: resolveAgentPrewalkDefault(agent, cfgTaskPrewalk.get(settings)),
 			}),
 		effectiveAdvisorPattern: agent => {
 			const selection = resolveAgentAdvisorSelection({
@@ -148,6 +148,8 @@ export function createAgentsHubDeps(
 				contextFiles: [],
 				promptTemplates: [],
 				slashCommands: [],
+				// A helper for the host session: the host keeps the process-wide effects and provider toggles.
+				bindProcessState: false,
 			});
 			const unsubscribe = session.subscribe(event => {
 				if (event.type === "message_update" && "assistantMessageEvent" in event) {

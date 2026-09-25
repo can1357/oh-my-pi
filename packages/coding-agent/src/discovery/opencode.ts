@@ -411,7 +411,7 @@ function readOpencodeCommandToggles(): { enableUser: boolean; enableProject: boo
 	try {
 		return {
 			enableUser: cfgCommandsEnableOpencodeUser.get(settings) === true,
-			enableProject: cfgCommandsEnableOpencodeProject.get(settings) ?? true,
+			enableProject: cfgCommandsEnableOpencodeProject.get(settings),
 		};
 	} catch {
 		return { enableUser: false, enableProject: true };

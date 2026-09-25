@@ -17,6 +17,8 @@ import { setInlineImageMaxColumns, setInlineImageMaxRows } from "@oh-my-pi/pi-tu
 import { setShimmerMode } from "@oh-my-pi/pi-tui/theme/shimmer";
 import { setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "@oh-my-pi/pi-tui/theme/theme";
 
+const EMPTY_UNKNOWN_RECORD: Record<string, unknown> = {};
+
 // ────────────────────────────────────────────────────────────────────────
 // General settings (no UI)
 // ────────────────────────────────────────────────────────────────────────
@@ -63,9 +65,7 @@ export const cfgThemeDark = register({
 		options: "runtime",
 	},
 });
-effect(cfgThemeDark, name => {
-	if (name !== undefined) setAutoThemeMapping("dark", name);
-});
+effect(cfgThemeDark, name => setAutoThemeMapping("dark", name));
 
 export const cfgThemeLight = register({
 	id: "theme.light",
@@ -79,9 +79,7 @@ export const cfgThemeLight = register({
 		options: "runtime",
 	},
 });
-effect(cfgThemeLight, name => {
-	if (name !== undefined) setAutoThemeMapping("light", name);
-});
+effect(cfgThemeLight, name => setAutoThemeMapping("light", name));
 
 export const cfgSymbolPreset = register({
 	id: "symbolPreset",
@@ -132,9 +130,7 @@ export const cfgComposerShape = register({
 		options: "runtime",
 	},
 });
-effect(cfgComposerShape, shape => {
-	if (shape !== undefined) setEditorGapComposerShape(shape);
-});
+effect(cfgComposerShape, setEditorGapComposerShape);
 
 export const cfgComposerTokenRate = register({
 	id: "composer.tokenRate",
@@ -292,7 +288,7 @@ export const cfgStatusLineRightSegments = register({
 export const cfgStatusLineSegmentOptions = register({
 	id: "statusLine.segmentOptions",
 	type: "record",
-	default: {} as Record<string, unknown>,
+	default: EMPTY_UNKNOWN_RECORD,
 });
 
 // Images and terminal
@@ -1040,6 +1036,18 @@ export const cfgStartupChangelogMode = register({
 	},
 });
 
+export const cfgMagicKeywordsEnabled = register({
+	id: "magicKeywords.enabled",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "interaction",
+		group: "Magic Keywords",
+		label: "Magic Keywords",
+		description: `Enable hidden notices for standalone ${MAGIC_KEYWORDS.map(keyword => keyword.word).join(", ")} keywords`,
+	},
+});
+
 /** One `magicKeywords.<id>` toggle per registered keyword, keyed by keyword id. */
 export const cfgMagicKeyword = Object.fromEntries(
 	MAGIC_KEYWORDS.map(keyword => [
@@ -1052,18 +1060,6 @@ export const cfgMagicKeyword = Object.fromEntries(
 		}),
 	]),
 ) as Record<MagicKeywordId, Setting<boolean>>;
-
-export const cfgMagicKeywordsEnabled = register({
-	id: "magicKeywords.enabled",
-	type: "boolean",
-	default: true,
-	ui: {
-		tab: "interaction",
-		group: "Magic Keywords",
-		label: "Magic Keywords",
-		description: `Enable hidden notices for standalone ${MAGIC_KEYWORDS.map(keyword => keyword.word).join(", ")} keywords`,
-	},
-});
 
 // Notifications
 export const cfgCompletionNotify = register({

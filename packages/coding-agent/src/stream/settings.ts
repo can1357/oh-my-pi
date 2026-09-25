@@ -5,8 +5,6 @@
 import { register } from "../config/registry";
 import { DEFAULT_STREAM_URL } from "@oh-my-pi/pi-wire";
 
-// Typed defaults for array/record settings — named constants avoid `as` casts
-// under `as const` while still letting SettingValue infer the correct element type.
 const EMPTY_STRING_ARRAY: string[] = [];
 
 // Live streaming (omp stream)

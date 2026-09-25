@@ -247,7 +247,7 @@ export class SshProtocolHandler implements ProtocolHandler {
 		portAuthority: true,
 		immutable: false,
 		readTier: "exec",
-		write: { payload: "text", scope: "workspace", tier: () => "exec" },
+		write: { via: "handler", payload: "text", scope: "workspace", tier: () => "exec" },
 	};
 
 	/** Advertised only when an `ssh` client is on PATH. */

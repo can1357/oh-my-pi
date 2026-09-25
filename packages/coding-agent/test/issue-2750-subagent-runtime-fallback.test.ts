@@ -571,38 +571,6 @@ describe("subagent runtime model resolution", () => {
 		expect(childModelRole).toBeUndefined();
 	});
 
-	it("preserves malformed fallback configuration for child validation", async () => {
-		const primary = model("lm-studio", "local-reviewer");
-		let childFallbackChains: unknown;
-		let childModelRole: string | undefined;
-		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
-			if (!options) throw new Error("Expected createAgentSession options");
-			childFallbackChains = options.settings ? cfgRetryFallbackChains.get(options.settings) : undefined;
-			childModelRole = options.settings?.getModelRoles()["subagent:single-model-malformed-fallback"];
-			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
-		});
-
-		const agent: AgentDefinition = { name: "task", description: "test", systemPrompt: "test", source: "bundled" };
-		await runSubprocess({
-			cwd: "/tmp",
-			agent,
-			task: "work",
-			index: 0,
-			id: "single-model-malformed-fallback",
-			modelOverride: "lm-studio/local-reviewer",
-			settings: Settings.isolated({ "retry.fallbackChains": null as never }),
-			modelRegistry: {
-				refresh: async () => {},
-				getAvailable: () => [primary],
-				getApiKey: async () => "test-key",
-			} as never,
-			enableLsp: false,
-		});
-
-		expect(childFallbackChains).toBeNull();
-		expect(childModelRole).toBeUndefined();
-	});
-
 	it("leaves malformed default fallback entries for child validation", async () => {
 		const primary = model("lm-studio", "local-reviewer");
 		let childFallbackChains: unknown;

@@ -60,7 +60,7 @@ export class XdProtocolHandler implements ProtocolHandler {
 		selectors: "none",
 		immutable: true,
 		compactTranscript: true,
-		write: { payload: "text", scope: "device", tier: deviceWriteTier },
+		write: { via: "handler", payload: "text", scope: "device", tier: deviceWriteTier },
 	};
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {

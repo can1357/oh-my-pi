@@ -31,7 +31,7 @@ import {
 	readQueueChipText,
 	resolveAbortLabel,
 } from "../../session/messages";
-import { type ApprovalMode, resolveApproval } from "../../tools/approval";
+import { resolveApproval } from "../../tools/approval";
 import { previewLine, PREVIEW_LIMITS, TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { PROPOSE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
 import { writeDeviceDispatch } from "../../tools/resolve";
@@ -1762,8 +1762,8 @@ export class EventController {
 	#toolWillPromptForApproval(toolName: string, args: unknown): boolean {
 		const tool = this.ctx.viewSession.getToolByName(toolName);
 		if (!tool) return false;
-		const mode = (cfgToolsApprovalMode.get(settings) ?? "yolo") as ApprovalMode;
-		const userPolicies = (cfgToolsApproval.get(settings) ?? {}) as Record<string, unknown>;
+		const mode = cfgToolsApprovalMode.get(settings);
+		const userPolicies: Record<string, unknown> = cfgToolsApproval.get(settings);
 		return resolveApproval(tool, args, mode, userPolicies).policy === "prompt";
 	}
 

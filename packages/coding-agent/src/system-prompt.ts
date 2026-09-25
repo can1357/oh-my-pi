@@ -556,8 +556,8 @@ export interface BuildSystemPromptOptions {
 	memoryBackend?: string;
 	/** Whether the read-only security:// resource namespace is active. */
 	securityEnabled?: boolean;
-	/** Whether `compaction.experimentalContextManagement` is on for the session. */
-	experimentalContextManagement?: boolean;
+	/** Whether the user approves `cfg://` writes for this session; gates advertising `cfg://`. */
+	settingsApproval?: boolean;
 	/** Whether the browser eval prelude is enabled for this session. */
 	browserEnabled?: boolean;
 	/** Whether the computer eval prelude is enabled for this session. */
@@ -663,7 +663,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		delegationBias = "eager",
 		memoryBackend,
 		securityEnabled = false,
-		experimentalContextManagement = false,
+		settingsApproval = false,
 		browserEnabled = false,
 		computerEnabled = false,
 		model,
@@ -939,7 +939,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		ruleCount: rules?.length ?? 0,
 		memoryBackend,
 		securityEnabled,
-		experimentalContextManagement,
+		settingsApproval,
 	};
 	const filteredSkills = (options.skillDescriptions ?? new SkillDescriptionCatalog()).render(
 		hasSkillReader ? skills.filter(skill => skill.hide !== true) : [],
