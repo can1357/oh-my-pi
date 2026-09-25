@@ -30,6 +30,7 @@ Only below `:` headers. Row: verbatim `+TEXT` (leading whitespace preserved); `+
 - Ranges: changed lines only; NEVER widen over keepers. Non-adjacent changes: separate hunks.
 - Whole construct: `PUT N*:`; internal lines: `PUT N.=M:`.
 - `PUT N*:` resolves exactly node N. Leading decorators/attributes/doc-comments are separate nodes: point N at first decorator to include both. Standalone line-comments never swept: use `PUT N.=M:`.
+- After every accepted `PUT`, re-read the touched span and assert that every straddled name or definition still exists; a successful edit response does not prove neighboring lines survived.
 - Block ops: opening line of multi-line construct, NEVER closer, last line, bare inner statement. One statement: plain `PUT N.=N:` / `CUT N.=N` / `PUT >N:`. At closer: `PUT >M:`.
 - Markdown headings are block openers. Block op on `##`/`###`: whole section through deeper headings to next same/higher heading. After section `PUT >N*:`: end body with blank line to separate next heading.
 - Pure addition: `PUT <N:` / `PUT >N:`, NEVER widened `PUT N.=M:`.

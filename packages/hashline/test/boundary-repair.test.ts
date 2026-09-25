@@ -438,7 +438,9 @@ describe("boundary-balance repair", () => {
 			"+    auto* handle = payloadFor<PyThreadHandle>(self);",
 			"+    if (!handle || !handle.isStarted())",
 		].join("\n");
-		expect(() => apply(file, diff)).toThrow(/rejected: the body opens by restating/);
+		expect(() => apply(file, diff)).toThrow(
+			/rejected: the body opens by restating[\s\S]*range covering exactly the lines that change/,
+		);
 	});
 
 	// Mirror direction: trailing echo, payload one line short of the widened
@@ -447,7 +449,9 @@ describe("boundary-balance repair", () => {
 	it("rejects a trailing keeper echo when the payload cannot fill the widened range", () => {
 		const file = ["a();", "b();", "c();", "keep();"].join("\n");
 		const diff = ["PUT 2-3:", "+B();", "+keep();"].join("\n");
-		expect(() => apply(file, diff)).toThrow(/rejected: the body ends by restating/);
+		expect(() => apply(file, diff)).toThrow(
+			/rejected: the body ends by restating[\s\S]*range covering exactly the lines that change/,
+		);
 	});
 
 	// A statement swapped onto a lone closer at the closer's own depth claims
@@ -463,7 +467,9 @@ describe("boundary-balance repair", () => {
 			"        handle.setIdent(currentIdent());",
 		].join("\n");
 		const diff = ["PUT 4-4:", "+        after();"].join("\n");
-		expect(() => apply(file, diff)).toThrow(/selected boundary row is required/);
+		expect(() => apply(file, diff)).toThrow(
+			/selected boundary row is required[\s\S]*range that excludes every unchanged boundary row/,
+		);
 	});
 
 	// Contrast with the rejection above: a payload indented deeper than the

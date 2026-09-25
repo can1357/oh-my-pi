@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- After range replacements, the edit guidance now requires re-reading the touched span to verify neighboring definitions survived.
+
 ## [18.0.4] - 2026-08-24
 
 ### Changed
