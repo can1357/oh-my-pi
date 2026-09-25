@@ -301,6 +301,7 @@ interface StatusLineExternalInputs {
 	isStreaming: boolean | undefined;
 	isAutoThinking: boolean | undefined;
 	isFastModeActive: boolean;
+	anthropicSlowModeLabel: string | undefined;
 	compactionSpeculation: unknown;
 }
 
@@ -2402,6 +2403,10 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			isAutoThinking: this.session.isAutoThinking,
 			isFastModeActive:
 				typeof this.session.isFastModeActive === "function" ? this.session.isFastModeActive() : false,
+			anthropicSlowModeLabel:
+				typeof this.session.getAnthropicSlowModeLabel === "function"
+					? this.session.getAnthropicSlowModeLabel()
+					: undefined,
 			compactionSpeculation: this.session.compactionSpeculation,
 		};
 	}
@@ -2456,6 +2461,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			left.isStreaming === right.isStreaming &&
 			left.isAutoThinking === right.isAutoThinking &&
 			left.isFastModeActive === right.isFastModeActive &&
+			left.anthropicSlowModeLabel === right.anthropicSlowModeLabel &&
 			left.compactionSpeculation === right.compactionSpeculation
 		);
 	}

@@ -303,6 +303,10 @@ const modelSegment: StatusLineSegment = {
 			content += accentFg(ctx, "statusLineModel", tail);
 		}
 
+		// Anthropic slow mode: a warning-colored badge so a throttled lane is never
+		// mistaken for normal service.
+		const slowModeLabel = ctx.session.getAnthropicSlowModeLabel?.();
+		if (slowModeLabel) content += theme.fg("warning", `${theme.sep.dot}${slowModeLabel}`);
 		return { content, visible: true };
 	},
 };

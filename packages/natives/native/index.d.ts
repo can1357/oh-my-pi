@@ -1359,6 +1359,11 @@ export interface EditPolicy {
   planActive: boolean
   /** Registered internal URL schemes (router spec keys). */
   urlSchemes: Array<string>
+  /**
+   * The `urlSchemes` whose single-slash `scheme:/x` spelling aliases
+   * `scheme://x` (spec `singleSlashAlias`).
+   */
+  urlAliasSchemes: Array<string>
   /** Plain-path roots writable in plan mode. */
   planWritableRoots: Array<string>
   homeDir: string

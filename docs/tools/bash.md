@@ -137,7 +137,7 @@ Choose the setting by the desired outcome:
 2. If `cwd` is absent, it rewrites a leading `cd <path> && ...` into the structured `cwd` field and strips that prefix from `command`.
 3. If `async: true` is requested while `async.enabled` is off, it throws `ToolError` before any execution.
 4. If `bashInterceptor.enabled` is on, `checkBashInterception()` runs against both the original command and the `cd`-stripped command. For each form, configured regexes still check the complete input first, then each flat command separated by unquoted/unescaped `&&`, `||`, `;`, `|`, `|&`, `&`, or newlines (excluding stages that consume piped stdin from `|` or `|&`, including across blank/comment continuations), followed by versions of those fragments without leading `NAME=value` assignments. A matching enabled rule throws before URL expansion or execution.
-5. `expandInternalUrls()` rewrites every internal URL the router can `locate` to a local path inside `command` and protocol-looking `cwd` values; unlocatable URLs are left unchanged. Command replacements are shell-escaped; `cwd` replacements use raw filesystem paths because they are not interpolated into shell text.
+5. `expandInternalUrls()` rewrites every shell-operand internal URL (`spec.shellOperand`: skill, agent, artifact, memory, rule, local, attachment) to its located local path inside `command` and protocol-looking `cwd` values. Other schemes, mentions inside larger quoted text, heredoc bodies, and `#` comments are left unchanged. Command replacements are shell-escaped; `cwd` replacements use raw filesystem paths because they are not interpolated into shell text.
 6. `resolveToCwd()` resolves `cwd` against `session.cwd`; `fs.stat()` verifies that the target exists and is a directory.
 7. `timeout: 0` disables the deadline. Otherwise `clampTimeout("bash", requestedTimeoutSec, tools.maxTimeout)` applies a positive global ceiling (when configured), then `TOOL_TIMEOUTS.bash` (`min: 1`, `max: 3600`). When clamped, `#buildCompletedResult()` / `#buildBackgroundStartResult()` append a notice line.
 8. Execution path splits:
@@ -223,7 +223,7 @@ Choose the setting by the desired outcome:
   - matched command -> `ToolError` with `Blocked: <rule.message>` and the original command.
   - invalid interceptor regexes are silently skipped by `compileRules()`.
 - Internal URL expansion:
-  - root-containment violations (path traversal/symlink escapes) throw `ToolError` from `packages/coding-agent/src/tools/bash-skill-urls.ts`; URLs that do not locate (unknown skill, remote/virtual schemes, lookup failures) stay literal in the command.
+  - a shell-operand URL never reaches the shell raw: a line selector (`local://notes.md:1-5`; only `:raw`/`:conflicts` are peeled), a missing target (`<url> does not exist as a local file`), a lookup failure, or a root-containment violation throws `ToolError` from `packages/coding-agent/src/tools/bash-skill-urls.ts`. Immutable schemes never create missing targets.
 - Execution:
   - non-zero exit -> returned tool result marked `isError`, with `details.exitCode` and text ending in `Command exited with code <n>`.
   - missing exit code -> thrown `ToolError` with `Command failed: missing exit status`.

@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { isEnoent } from "@oh-my-pi/pi-utils";
+import { hasFsCode, isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
 import { isMarkdownPath } from "@oh-my-pi/pi-tui/lang-from-path";
 import type { InternalResource } from "./types";
 
@@ -36,10 +36,13 @@ export class UrlContainmentError extends Error {
 	override name = "UrlContainmentError";
 }
 
-/** Throw `<scheme>:// URL escapes <scheme> root` unless `targetPath` is `rootPath` or lies beneath it. */
-export function ensureWithinRoot(targetPath: string, rootPath: string, scheme: string): void {
+/**
+ * Throw `<scheme>:// URL escapes <scheme> root[: <url>]` unless `targetPath` is `rootPath` or lies beneath it.
+ * The message names the URL, never the on-disk path.
+ */
+export function ensureWithinRoot(targetPath: string, rootPath: string, scheme: string, url?: string): void {
 	if (targetPath !== rootPath && !targetPath.startsWith(`${rootPath}${path.sep}`)) {
-		throw new UrlContainmentError(`${scheme}:// URL escapes ${scheme} root`);
+		throw new UrlContainmentError(`${scheme}:// URL escapes ${scheme} root${url ? `: ${url}` : ""}`);
 	}
 }
 
@@ -48,16 +51,18 @@ export function ensureWithinRoot(targetPath: string, rootPath: string, scheme: s
  * checking the lexical target, its real parent (when it exists), and its real
  * path for containment so symlinks cannot escape the root. Returns `undefined`
  * when the target does not exist; write paths use {@link ensureCreatableWithinRoot}.
+ * Escape errors name `url`.
  */
 export async function containedRealPath(
 	targetPath: string,
 	realRoot: string,
 	scheme: string,
+	url: string,
 ): Promise<string | undefined> {
-	ensureWithinRoot(targetPath, realRoot, scheme);
+	ensureWithinRoot(targetPath, realRoot, scheme, url);
 	if (targetPath !== realRoot) {
 		try {
-			ensureWithinRoot(await fs.realpath(path.dirname(targetPath)), realRoot, scheme);
+			ensureWithinRoot(await fs.realpath(path.dirname(targetPath)), realRoot, scheme, url);
 		} catch (error) {
 			if (!isEnoent(error)) throw error;
 		}
@@ -70,7 +75,7 @@ export async function containedRealPath(
 		if (isEnoent(error)) return undefined;
 		throw error;
 	}
-	ensureWithinRoot(realTargetPath, realRoot, scheme);
+	ensureWithinRoot(realTargetPath, realRoot, scheme, url);
 	return realTargetPath;
 }
 
@@ -78,15 +83,25 @@ export async function containedRealPath(
  * Throw {@link UrlContainmentError} unless creating `targetPath` (lexically under
  * the already-realpathed `realRoot`) stays inside the root: the deepest existing
  * entry on the way must canonically resolve within it, and no entry may be a
- * dangling symlink a `mkdir -p` + write would follow out of the root.
+ * dangling symlink a `mkdir -p` + write would follow out of the root. Errors name
+ * `url`, never the on-disk path; symlink loops and file ancestors fail closed.
  */
-export async function ensureCreatableWithinRoot(targetPath: string, realRoot: string, scheme: string): Promise<void> {
-	ensureWithinRoot(targetPath, realRoot, scheme);
+export async function ensureCreatableWithinRoot(
+	targetPath: string,
+	realRoot: string,
+	scheme: string,
+	url: string,
+): Promise<void> {
+	ensureWithinRoot(targetPath, realRoot, scheme, url);
 	for (let current = targetPath; ; current = path.dirname(current)) {
 		try {
-			ensureWithinRoot(await fs.realpath(current), realRoot, scheme);
+			ensureWithinRoot(await fs.realpath(current), realRoot, scheme, url);
 			return;
 		} catch (error) {
+			if (hasFsCode(error, "ELOOP")) {
+				throw new UrlContainmentError(`${scheme}:// URL goes through a symlink loop: ${url}`);
+			}
+			if (isEnotdir(error)) throw new Error(`${scheme}:// URL goes through a file, not a directory: ${url}`);
 			if (!isEnoent(error)) throw error;
 		}
 		let isLink: boolean;
@@ -96,7 +111,7 @@ export async function ensureCreatableWithinRoot(targetPath: string, realRoot: st
 			if (!isEnoent(error)) throw error;
 			isLink = false;
 		}
-		if (isLink) throw new UrlContainmentError(`${scheme}:// URL goes through a dangling symlink`);
+		if (isLink) throw new UrlContainmentError(`${scheme}:// URL goes through a dangling symlink: ${url}`);
 		if (current === realRoot || path.dirname(current) === current) return;
 	}
 }

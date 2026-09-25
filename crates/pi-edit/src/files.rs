@@ -150,16 +150,11 @@ impl FileCache {
 		std::mem::take(&mut self.unresolved)
 	}
 
-	/// Drop every host URL answer and recorded miss, plus the resolutions and
-	/// reads made from them, so URL targets ask the host again.
+	/// Drop every host URL answer and recorded miss, plus every cached read
+	/// and resolution (some were made from those answers), so URL targets ask
+	/// the host again.
 	pub fn forget_urls(&mut self) {
-		let policy = &self.policy;
-		self
-			.resolutions
-			.retain(|(authored, _), _| !policy.is_internal_url(authored));
-		self
-			.reads
-			.retain(|_, (_, read)| !policy.is_internal_url(&read.resolved.display));
+		self.clear();
 		self.urls.clear();
 		self.unresolved.clear();
 	}

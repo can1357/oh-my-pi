@@ -116,7 +116,7 @@ async function locateInRoot(
 		throw error;
 	}
 	const target = directory && isBareMemoryUrl(url) ? resolvedRoot : resolveMemoryUrlToPath(url, resolvedRoot);
-	return { root: resolvedRoot, target, real: await containedRealPath(target, resolvedRoot, "memory") };
+	return { root: resolvedRoot, target, real: await containedRealPath(target, resolvedRoot, "memory", url.href) };
 }
 
 /** True for `memory://root` with no path, which reads the default summary file. */
@@ -362,7 +362,7 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 			};
 		}
 		if (!options?.create || !wouldBe) return null;
-		await ensureCreatableWithinRoot(wouldBe.target, wouldBe.root, "memory");
+		await ensureCreatableWithinRoot(wouldBe.target, wouldBe.root, "memory", url.href);
 		return wouldBe.target;
 	}
 

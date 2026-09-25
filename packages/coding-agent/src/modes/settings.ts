@@ -65,9 +65,7 @@ export const cfgThemeDark = register({
 		options: "runtime",
 	},
 });
-effect(cfgThemeDark, name => {
-	if (name !== undefined) setAutoThemeMapping("dark", name);
-});
+effect(cfgThemeDark, name => setAutoThemeMapping("dark", name));
 
 export const cfgThemeLight = register({
 	id: "theme.light",
@@ -81,9 +79,7 @@ export const cfgThemeLight = register({
 		options: "runtime",
 	},
 });
-effect(cfgThemeLight, name => {
-	if (name !== undefined) setAutoThemeMapping("light", name);
-});
+effect(cfgThemeLight, name => setAutoThemeMapping("light", name));
 
 export const cfgSymbolPreset = register({
 	id: "symbolPreset",
@@ -134,9 +130,7 @@ export const cfgComposerShape = register({
 		options: "runtime",
 	},
 });
-effect(cfgComposerShape, shape => {
-	if (shape !== undefined) setEditorGapComposerShape(shape);
-});
+effect(cfgComposerShape, setEditorGapComposerShape);
 
 export const cfgComposerTokenRate = register({
 	id: "composer.tokenRate",

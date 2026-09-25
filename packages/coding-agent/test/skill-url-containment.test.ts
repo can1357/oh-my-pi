@@ -102,6 +102,13 @@ describe("bash skill:// expansion containment", () => {
 		await expect(expand("tee skill://docs/references/dangle.md", pluginSkill())).rejects.toThrow("does not exist");
 	});
 
+	it("fails closed on missing targets of non-plugin skills too, creating nothing", async () => {
+		const local: Skill = { ...pluginSkill(), containRoot: undefined };
+
+		await expect(expand("mkdir -p skill://docs/new-dir", local)).rejects.toThrow("does not exist");
+		await expect(fs.stat(path.join(skillDir, "new-dir"))).rejects.toThrow();
+	});
+
 	it("leaves uncontained (non-plugin) skills unrestricted", async () => {
 		const local: Skill = { ...pluginSkill(), containRoot: undefined };
 

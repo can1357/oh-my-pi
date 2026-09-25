@@ -70,6 +70,9 @@ pub struct EditPolicy {
 	pub plan_active:          bool,
 	/// Registered internal URL schemes (router spec keys).
 	pub url_schemes:          Vec<String>,
+	/// The `urlSchemes` whose single-slash `scheme:/x` spelling aliases
+	/// `scheme://x` (spec `singleSlashAlias`).
+	pub url_alias_schemes:    Vec<String>,
 	/// Plain-path roots writable in plan mode.
 	pub plan_writable_roots:  Vec<String>,
 	pub home_dir:             String,
@@ -85,6 +88,7 @@ impl EditPolicy {
 				cwd:                  PathBuf::from(self.cwd),
 				home_dir:             PathBuf::from(self.home_dir),
 				url_schemes:          self.url_schemes,
+				url_alias_schemes:    self.url_alias_schemes,
 				plan_writable_roots:  self
 					.plan_writable_roots
 					.into_iter()
@@ -552,7 +556,7 @@ impl EditSession {
 		// is asked again, in one pass, before the first stage.
 		let mut resolved = HashSet::new();
 		if let Some(resolver) = &shared.resolve_url {
-			for url in session.apply_url_targets() {
+			for url in session.begin_apply_url_targets() {
 				let resolution = resolve_one(resolver, &url).await;
 				resolved.insert(url.clone());
 				session.provide(url, resolution);
@@ -787,6 +791,7 @@ pub fn edit_auto_generated_message(absolute_path: String, display_path: String) 
 		cwd:                  PathBuf::new(),
 		home_dir:             PathBuf::new(),
 		url_schemes:          Vec::new(),
+		url_alias_schemes:    Vec::new(),
 		plan_writable_roots:  Vec::new(),
 		plan_active:          false,
 		block_auto_generated: true,

@@ -100,7 +100,8 @@ The tool returns a single text block plus structured `details`.
   - `Path is not a directory: ...`
   - timeout result text is `glob timed out after <seconds>s; returning <N> partial matches — narrow the pattern instead of retrying blindly` and is returned as a successful, truncated partial result rather than an error.
   - `Glob patterns are not supported for internal URLs: ...` when a URL glob's base does not locate to a local directory.
-  - `Cannot glob <scheme>:// URL: no local file backs ...` for exact URLs with no local file (remote/virtual schemes add a `read` hint).
+  - `Globs are not supported in <scheme>:// ids: ...` for a glob in an id authority (`skill://*/SKILL.md`, `artifact://*`); only `local://` globs from its first segment.
+  - `Cannot glob <scheme>:// URL: no local file backs ...` for exact URLs with no local file (remote/virtual schemes add a `read` hint). Unknown ids of locatable read-only schemes report the handler's own error instead (`Cannot glob artifact://9: Artifact 9 not found. Available: …`).
 - If the caller aborts, the local branch converts `AbortError` into `ToolAbortError`.
 - Non-`ENOENT` stat failures and other unexpected errors are rethrown.
 - Empty matches are not errors; they return the no-files text result.

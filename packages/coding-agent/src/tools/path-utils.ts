@@ -1,6 +1,6 @@
 import { extractUriScheme } from "../internal-urls/parse";
 import { type LineRange } from "@oh-my-pi/pi-tui/tools/line-ranges";
-import { splitPathAndSel, splitInternalUrlSel, isReadableUrlPath } from "@oh-my-pi/pi-tui/tools/read";
+import { splitPathAndSel, isReadableUrlPath } from "@oh-my-pi/pi-tui/tools/read";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -281,27 +281,6 @@ export function splitPathAndSelPreferringLiteralSync(rawPath: string, cwd: strin
 	if (strict.sel === undefined) return strict;
 	const probe = probeLiteralPathExistsSync(rawPath, cwd);
 	return probe === "exists" || (probe === "unknown" && process.platform !== "win32") ? { path: rawPath } : strict;
-}
-
-/**
- * Peel a read-tool selector off an internal-URL write target so `write` resolves
- * the same file `read` does (e.g. `ssh://h/f:raw` -> `ssh://h/f`). Only the
- * whole-file display modes `raw`/`conflicts` are accepted (they do not change
- * which bytes are written); any other selector-shaped tail `splitInternalUrlSel`
- * peels — a line range, a compound like `raw:1-20`, or a malformed `:-N` — throws,
- * because `write` addresses a whole file, not a partial range, and silently
- * stripping it would write to a path the caller never named. Non-URL paths and
- * URLs without a selector pass through unchanged.
- */
-export function peelWriteUrlSelector(rawPath: string): string {
-	const { path, sel } = splitInternalUrlSel(rawPath);
-	if (sel === undefined) return rawPath;
-	// Case-insensitive to match read's selector grammar (parseSel + the /i regexes above).
-	if (/^(?:raw|conflicts)$/i.test(sel)) return path;
-	throw new ToolError(
-		`write does not accept the trailing selector ":${sel}" — it writes a whole file. ` +
-			`Remove ":${sel}", or if the filename truly ends with it, percent-encode the ":" as %3A.`,
-	);
 }
 
 function assertNotInternalUrl(expanded: string, original: string): void {

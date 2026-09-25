@@ -28,6 +28,7 @@ import type { DiscoverAuthStorageOptions } from "@oh-my-pi/pi-ai/auth-broker/dis
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import { prewarmOpenAICodexResponses } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { isOpenAICodexWebSocketPreferred } from "@oh-my-pi/pi-ai/providers/openai-codex-transport";
+import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { FALLBACK_DIALECT, preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { $env } from "@oh-my-pi/pi-utils/env";
@@ -74,7 +75,7 @@ import {
 import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
 import { buildServiceTierByFamily } from "./config/service-tier";
-import { bindEffects, combine, effectsSettings } from "./config/registry";
+import { bindEffects, combine } from "./config/registry";
 import { Settings } from "./config/settings";
 import { CursorExecHandlers, type CursorMcpResourceAdapter } from "./cursor";
 import { createBridgeEditTool, createBridgeGrepFactory } from "./cursor-bridge-tools";
@@ -195,6 +196,7 @@ import {
 	projectMountedMCPXdevGuidance,
 	type SettingsGatedToolDelta,
 } from "./session/session-tools";
+import { anthropicSlowModeHasNoSiblingHeadroom } from "./session/anthropic-slow-mode";
 import { createSettingsAwareStreamFn, resolveOpenAIWebsocketPreference } from "./session/settings-stream-fn";
 import { SnapcompactInlineTransformer } from "./session/snapcompact-inline";
 import { createSnapcompactSavingsRecorder } from "./session/snapcompact-savings-journal";
@@ -703,6 +705,13 @@ export interface CreateAgentSessionOptions {
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	/** Whether to include the yield tool by default */
 	requireYieldTool?: boolean;
+	/**
+	 * Whether this top-level session takes over, until disposed, the process-global state that
+	 * follows one settings instance: setting effects and capability provider toggles. Helper
+	 * sessions a host session spawns on its behalf (security scan, agent-spec generation) pass
+	 * `false`. Subagents (`parentTaskPrefix`/`taskDepth`) never bind. Default: true.
+	 */
+	bindProcessState?: boolean;
 	/** Task recursion depth (for subagent sessions). Default: 0 */
 	taskDepth?: number;
 	/** Parent Hindsight state to alias for subagent memory tools. */
@@ -1499,20 +1508,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const settings = await (options.settings ??
 		options.settingsManager ??
 		logger.time("settings", Settings.init, { cwd, agentDir }));
-	// Provider toggles are process-global and mirror live edits on the bound
-	// Settings: a subagent's settings overlay must not steal that binding from
-	// the top-level session (parent edits would stop reaching discovery).
-	const restoreProviderToggles = options.parentTaskPrefix
-		? undefined
-		: logger.time("initializeWithSettings", initializeWithSettings, settings);
-	// Process-wide setting effects (theme, credential redaction, request limits, …) follow one
-	// primary instance: `Settings.init` binds the global one; an SDK embedding without it binds its
-	// top-level session here. Subagents never rebind; teardown unbinds only what this session bound.
-	const unbindSessionEffects =
-		!options.parentTaskPrefix && !options.taskDepth && !effectsSettings() ? bindEffects(settings) : undefined;
-	// Until the session is handed back (its dispose wrapper then owns the effect binding and
-	// the credential listener), any startup failure below releases both and hands the
-	// provider toggles back to the settings bound before this call.
+	// Discovery provider toggles and process-wide setting effects (theme, request limits, …)
+	// follow the newest holder: each top-level session holds both on its settings until disposed,
+	// then hands them back to the previous holder. Subagents and helper sessions never take them,
+	// so a parent's live edits keep reaching discovery and effects.
+	const bindsProcessState = options.bindProcessState !== false && !options.parentTaskPrefix && !options.taskDepth;
+	const restoreProviderToggles = bindsProcessState
+		? logger.time("initializeWithSettings", initializeWithSettings, settings)
+		: undefined;
+	const unbindSessionEffects = bindsProcessState ? bindEffects(settings) : undefined;
+	// Until the session is handed back (its dispose wrapper then owns the process-state holds
+	// and the credential listener), any startup failure below releases them.
 	using startupCleanup = new DisposableStack();
 	if (restoreProviderToggles) startupCleanup.defer(restoreProviderToggles);
 	if (unbindSessionEffects) startupCleanup.defer(unbindSessionEffects);
@@ -3999,10 +4005,25 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// the session drives. Wrapped in a per-provider concurrency limiter so
 		// each LLM HTTP request — not the whole subagent lifecycle — holds the
 		// slot, preventing the nested-spawn deadlock from issue #3749.
-		const settingsAwareStreamFn = wrapStreamFnWithBlobUrlFallback(
-			wrapStreamFnWithProviderConcurrency(settings, createSettingsAwareStreamFn(settings)),
+		const settingsBoundStreamFn = wrapStreamFnWithBlobUrlFallback(
+			wrapStreamFnWithProviderConcurrency(
+				settings,
+				createSettingsAwareStreamFn(settings, undefined, {
+					canAutoAccept: streamModel =>
+						anthropicSlowModeHasNoSiblingHeadroom(modelRegistry.authStorage, streamModel, session?.sessionId),
+					notify: (level, message) => session?.emitNotice(level, message, "anthropic-slow-mode"),
+					onLane: lane => session?.noteAnthropicSlowModeLane(lane),
+				}),
+			),
 			() => blobBroker.current,
 		);
+		// Outbound credential-pattern redaction follows THIS session's `secrets.enabled` per
+		// request, not the process-wide switch (the newest effect holder's): concurrent ACP/SDK
+		// sessions in one process each keep their own policy.
+		const settingsAwareStreamFn: StreamFn = (streamModel, context, streamOptions) =>
+			withCredentialRedaction(cfgSecretsEnabled.get(settings), () =>
+				settingsBoundStreamFn(streamModel, context, streamOptions),
+			);
 		// Primary-agent (and its auto-learn capture twin) provider options read per
 		// request, so `/settings` changes to budgets, Kimi format, or the Codex
 		// websocket policy reach the next call without a session recreate.
@@ -4674,6 +4695,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					unregisterUnlessParked();
 					unsubscribeCredentialDisabled();
 					unbindSessionEffects?.();
+					restoreProviderToggles?.();
 					unsubscribeMcpNotifications?.();
 					unregisterMcpPostmortem?.();
 					for (const callback of disposeCallbacks) callback();
