@@ -2,6 +2,7 @@ import { BashInteractiveOverlayComponent } from "@oh-my-pi/pi-tui/tools/bash-int
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { type PtyRunResult, PtySession } from "@oh-my-pi/pi-natives";
+import { TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { loadXtermTerminal } from "@oh-my-pi/pi-tui/tools/terminal-output";
 import { Settings } from "../config/settings";
 import { OutputSink, type OutputSummary } from "@oh-my-pi/pi-tui/tools/streaming-output";
@@ -126,6 +127,15 @@ export async function runInteractiveBashPty(
 						sink.push(`PTY error: ${error instanceof Error ? error.message : String(error)}\n`);
 						finalize({ exitCode: undefined, cancelled: false, timedOut: false });
 					});
+				if (settings.get("ask.notify") !== "off" && !options.signal?.aborted) {
+					TERMINAL.sendNotification({
+						title: "Oh My Pi",
+						body: "Terminal input requested — input is forwarded to the PTY",
+						type: "ask",
+						urgency: "normal",
+						actions: "focus",
+					});
+				}
 				return component;
 			},
 			{ overlay: true },
