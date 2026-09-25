@@ -425,7 +425,7 @@ export class CredentialBlocks implements BlocksApi {
 		for (const { blockScope, limits, healthy } of strategy?.healableBlockScopes?.(report) ?? []) {
 			if (healthy === false || isUsageLimitReached(limits) || (healthy === undefined && limits.length === 0))
 				continue;
-			this.#clearHealedBlockScope(provider, providerKey, credentialId, credentialIndex, blockScope);
+			this.#clearHealedBlockScope(provider, providerKey, credentialId, blockScope);
 		}
 	}
 
@@ -433,19 +433,23 @@ export class CredentialBlocks implements BlocksApi {
 	 * Drop one scope's block after a healthy report, unless the block is too
 	 * fresh: `/usage` can lag the request path that just returned 429, so local
 	 * and broker-sourced blocks get one usage-cache window before a healthy
-	 * report may clear them.
+	 * report may clear them. Only a block stored under this exact scope counts:
+	 * {@link CredentialBlocks.blockedUntil} also merges the unscoped block, so a
+	 * tier heal would otherwise "clear" (and log) the unscoped deadline it
+	 * leaves in place.
 	 */
 	#clearHealedBlockScope(
 		provider: Provider,
 		providerKey: string,
 		credentialId: number,
-		credentialIndex: number,
 		blockScope: string | undefined,
 	): void {
-		const blockedUntilMs = this.blockedUntil(provider, providerKey, credentialIndex, blockScope);
-		if (blockedUntilMs === undefined) return;
 		const nowMs = Date.now();
 		const scopedKey = scopedBackoffKey(providerKey, blockScope);
+		const memoryBlockedUntilMs = this.#getCredentialBlockedUntilForKey(scopedKey, credentialId, nowMs);
+		const storedBlockedUntilMs = this.#readPersistedCredentialBlock(credentialId, providerKey, blockScope);
+		const blockedUntilMs = Math.max(memoryBlockedUntilMs ?? 0, storedBlockedUntilMs ?? 0);
+		if (blockedUntilMs <= nowMs) return;
 		const globalProbeAfterMs = this.#credentialBackoff.get(providerKey)?.get(credentialId)?.probeAfter ?? 0;
 		const scopedProbeAfterMs = this.#credentialBackoff.get(scopedKey)?.get(credentialId)?.probeAfter ?? 0;
 		const storeGlobalProbeAfterMs = this.#readPersistedCredentialBlockReconcileAfter(credentialId, providerKey, "");

@@ -344,6 +344,30 @@ describe("claude usage-block healing", () => {
 		expect(selected).toBe("access-2");
 	});
 
+	it("does not report a tier heal for an unscoped block it leaves in place", async () => {
+		// Extra Usage keeps the unscoped block; the healthy Fable row may only
+		// clear a block stored under `tier:fable`. Reporting the unscoped
+		// deadline as a cleared tier block made a still-blocked account look
+		// recovered in the logs on every usage refresh.
+		const { storage, clearedScopes, blocks } = makeHarness(
+			claudeReport([
+				sharedLimit("5h", "5h", 0.02),
+				sharedLimit("7d", "7d", 0.05),
+				tierLimit("fable", 0),
+				extraLimit(52, 50),
+			]),
+			"",
+		);
+		storages.push(storage);
+		await storage.credentials.reload();
+
+		const selected = await storage.keys.get("anthropic", "s-fable-under-unscoped", { modelId: "claude-fable-5-1" });
+
+		expect(clearedScopes).toEqual([]);
+		expect(blocks.has("1:")).toBe(true);
+		expect(selected).toBe("access-2");
+	});
+
 	it("lifts an unscoped block when Extra Usage is present and has headroom", async () => {
 		const { storage, clearedScopes } = makeHarness(
 			claudeReport([sharedLimit("5h", "5h", 0.02), sharedLimit("7d", "7d", 0.05), extraLimit(10, 50)]),

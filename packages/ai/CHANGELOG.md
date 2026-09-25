@@ -2,14 +2,16 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed stale unscoped Claude OAuth rate-limit blocks so healthy live usage reports can lift them before clock expiry, allowing recovered accounts to be re-selected ([#13249](https://github.com/can1357/oh-my-pi/pull/13249) by [@jwaldrip](https://github.com/jwaldrip)).
+- Fixed Claude `tier:fable`/`tier:mythos` block healing reporting the unscoped block's deadline as cleared while that unscoped block still held the credential, which made a blocked account look recovered in the logs on every usage refresh.
+
 ## [18.3.2] - 2026-09-25
 
 ### Fixed
 
 - Fixed capped Anthropic and Bedrock Claude requests with thinking enabled, including on-demand compaction, ending at `max_tokens` with no answer; every capped request now gets its effort's thinking budget on top of the requested output ([#13300](https://github.com/can1357/oh-my-pi/pull/13300) by [@alphastorm](https://github.com/alphastorm))
-### Fixed
-
-- Fixed stale unscoped Claude OAuth rate-limit blocks so healthy live usage reports can lift them before clock expiry, allowing recovered accounts to be re-selected ([#13249](https://github.com/can1357/oh-my-pi/pull/13249) by [@jwaldrip](https://github.com/jwaldrip)).
 
 ## [18.3.1] - 2026-09-25
 
@@ -24,10 +26,6 @@
 
 - Fixed account selection for OpenCode Go and SuperGrok (xai-oauth) so accounts without available funds or included quota are skipped in favor of eligible accounts.
 - Improved visibility into automatically disabled authentication credentials by logging a warning and including the affected account details in credential-disabled events.
-- Fixed stale unscoped Claude OAuth rate-limit blocks so healthy live usage reports can lift them before clock expiry, allowing recovered accounts to be re-selected.
-- Fixed stale unscoped Claude OAuth rate-limit blocks so healthy live usage reports can lift them before clock expiry, allowing recovered accounts to be re-selected ([#13249](https://github.com/can1357/oh-my-pi/pull/13249) by [@jwaldrip](https://github.com/jwaldrip)).
-- Fixed multi-account provider selection for OpenCode Go and SuperGrok (xai-oauth), so accounts with insufficient funds or exhausted included quota are skipped in favor of eligible accounts with available billing headroom.
-- Automatic credential disables (definitive OAuth refresh failure, upstream token invalidation, auth-broker disable) are now logged as an `Auth credential disabled` warning, and `credential_disabled` events carry the disabled row's id and the account's email, account id, and organization ([#13190](https://github.com/can1357/oh-my-pi/pull/13190) by [@alphastorm](https://github.com/alphastorm)).
 
 ## [18.3.0] - 2026-09-24
 
