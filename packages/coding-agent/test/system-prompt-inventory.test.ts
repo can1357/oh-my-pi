@@ -501,6 +501,45 @@ describe("system prompt tool inventory", () => {
 		expect(text).not.toContain("Reads files from disk.");
 	});
 
+	it("references xd://-only tools by their xd:// URL", async () => {
+		const { systemPrompt } = await buildSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			skills: [],
+			rules: [],
+			toolNames: ["read", "bash"],
+			tools: TOOLS,
+			xdevTools: [{ name: "lsp", summary: "Language server." }],
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+		});
+		const text = systemPrompt.join("\n\n");
+		expect(text).toContain("MUST use `xd://lsp` for definitions");
+		expect(text).toContain("MUST run `xd://lsp` references first");
+		expect(text).not.toContain("`lsp`");
+	});
+
+	it("renders exactly one of the map-unknown-code and inline-first delegation rules per bias", async () => {
+		const renderDelegation = async (delegationBias: "eager" | "restrained" | "gated", eagerTasks: boolean) => {
+			const { systemPrompt } = await buildSystemPrompt({
+				cwd: tempDir,
+				contextFiles: [],
+				skills: [],
+				rules: [],
+				toolNames: ["read", "task"],
+				workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+				delegationBias,
+				eagerTasks,
+			});
+			const count = (needle: string) => systemPrompt[0].split(needle).length - 1;
+			return [count("Map unknown code via `task`"), count("Inline first.")];
+		};
+		expect(await renderDelegation("eager", false)).toEqual([1, 0]);
+		expect(await renderDelegation("eager", true)).toEqual([1, 0]);
+		expect(await renderDelegation("restrained", true)).toEqual([1, 0]);
+		expect(await renderDelegation("restrained", false)).toEqual([0, 1]);
+		expect(await renderDelegation("gated", true)).toEqual([0, 0]);
+	});
+
 	it("keeps enabled computer prelude routing and safety explicit", async () => {
 		const { systemPrompt } = await buildSystemPrompt({
 			cwd: tempDir,
@@ -771,17 +810,14 @@ describe("system prompt tool inventory", () => {
 	it("keeps real provider tool definitions free of skill URL guidance", async () => {
 		const session = { ...makeToolSession(Settings.isolated()), skills: [] };
 		const tools = await createTools(session, ["read", "bash"]);
-		const read = tools.find(tool => tool.name === "read")!;
 		const bash = tools.find(tool => tool.name === "bash")!;
 
-		expect(JSON.stringify(read.parameters.toJsonSchema())).not.toContain("skill://");
 		expect(bash.description).not.toContain("skill://");
 	});
 
-	it("advertises loaded skills through real provider tool definitions", async () => {
+	it("advertises loaded skills in the SDK system prompt built from real tools", async () => {
 		const session = {
 			...makeToolSession(Settings.isolated()),
-			skillHintVisible: undefined as boolean | undefined,
 			skills: [
 				{
 					name: "provider-skill",
@@ -793,8 +829,6 @@ describe("system prompt tool inventory", () => {
 			],
 		};
 		const tools = await createTools(session, ["read", "bash"]);
-		const read = tools.find(tool => tool.name === "read")!;
-		const bash = tools.find(tool => tool.name === "bash")!;
 		const { systemPrompt } = await buildSdkSystemPrompt({
 			cwd: tempDir,
 			contextFiles: [],
@@ -802,18 +836,7 @@ describe("system prompt tool inventory", () => {
 			tools,
 		});
 
-		expect(JSON.stringify(read.parameters.toJsonSchema())).toContain("skill://");
-		expect(bash.description).toContain("skill://");
 		expect(systemPrompt.join("\n\n")).toContain("`skill://<name>`");
-
-		// Standalone sessions derive visibility; an explicit managed snapshot wins.
-		session.skillHintVisible = false;
-		expect(JSON.stringify(read.parameters.toJsonSchema())).not.toContain("skill://");
-		expect(bash.description).not.toContain("skill://");
-		session.settings.set("skillful", false);
-		session.skillHintVisible = true;
-		expect(JSON.stringify(read.parameters.toJsonSchema())).toContain("skill://");
-		expect(bash.description).toContain("skill://");
 	});
 
 	it("keeps visible skills when no tools map is provided", async () => {

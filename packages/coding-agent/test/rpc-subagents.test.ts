@@ -418,6 +418,7 @@ function handle(frame) {
 		write({ type: "subagent_progress", payload: { index: 0, agent: "task", agentSource: "bundled", task: "Do work", assignment: "Implement work", sessionFile: "/tmp/subagent.jsonl", progress } });
 		write({ type: "subagent_event", payload: { id: "SubagentA", event: { type: "agent_start" } } });
 		write({ type: "agent_end", messages: [] });
+		write({ type: "prompt_result", id: frame.id, agentInvoked: true, status: "completed" });
 	}
 }
 `,

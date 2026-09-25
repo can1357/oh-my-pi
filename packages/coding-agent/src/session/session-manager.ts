@@ -1492,6 +1492,10 @@ export class SessionManager {
 		this.#clearDiskError();
 		this.#expectedDiskSize = null;
 		this.#reconcileSessionDirForFallback();
+		if (options?.sessionDir && this.#persist) {
+			this.#sessionDir = path.resolve(options.sessionDir);
+			this.#storage.ensureDirSync(this.#sessionDir);
+		}
 		this.#sessionId = mintSessionId();
 		this.#sessionName = undefined;
 		this.#titleSource = undefined;
@@ -2892,6 +2896,7 @@ export class SessionManager {
 		spawns?: string;
 		readSummarize?: boolean;
 		advisor?: string;
+		compactionThreshold?: { thresholdPercent: number; thresholdTokens: number };
 		isIsolated?: boolean;
 		isolated?: boolean;
 	}): string {
@@ -3733,6 +3738,7 @@ export interface PersistedSessionInit {
 	spawns?: string;
 	readSummarize?: boolean;
 	advisor?: string;
+	compactionThreshold?: { thresholdPercent: number; thresholdTokens: number };
 	/** Whether the session ran inside an isolation worktree (nested-isolation gate marker, revivable). */
 	isIsolated?: boolean;
 	isolated?: boolean;
@@ -3762,6 +3768,7 @@ export function extractSessionInit(entries: readonly FileEntry[]): PersistedSess
 			advisor: entry.advisor,
 			isIsolated: entry.isIsolated,
 			isolated: entry.isolated,
+			...(entry.compactionThreshold !== undefined ? { compactionThreshold: entry.compactionThreshold } : undefined),
 		};
 	}
 	return init;

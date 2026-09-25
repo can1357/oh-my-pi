@@ -517,6 +517,69 @@ describe("devin native display filtering", () => {
 		expect(fusion.cost).toEqual({ input: 10, output: 50, cacheRead: 0.25, cacheWrite: 0 });
 	});
 
+	it("sends Fusion pairings through an available lead rather than the composite uid", async () => {
+		const pairing = (uid: string, init: Partial<ConfigInit> = {}) =>
+			config({ uid, isModelRouter: true, harnessUids: ["fusion"], ...init });
+		const configs = [
+			config({
+				uid: "gpt-6-sol-high",
+				contextWindow: 400_000,
+				maxOutputTokens: 128_000,
+				features: { supportsToolCalls: true, supportsImages: true },
+				dimensions: [
+					{ label: "Input", value: 2 },
+					{ label: "Output", value: 8 },
+				],
+			}),
+			config({ uid: "gpt-6-sol-high-priority" }),
+			config({ uid: "claude-opus-5-high" }),
+			config({ uid: "claude-opus-5-high-priority", disabled: true }),
+			config({ uid: "swe-1-6-fast" }),
+			config({ uid: "swe-1-6-priority" }),
+			config({ uid: "swe-2-high" }),
+			config({ uid: "kimi-k3", disabled: true }),
+			pairing("fusion-gpt-6-sol-high-sidekick-swe-2-high", {
+				contextWindow: 1_000_000,
+				maxOutputTokens: 256_000,
+				dimensions: [
+					{ label: "Input", value: 10 },
+					{ label: "Output", value: 50 },
+				],
+			}),
+			pairing("fusion-gpt-6-sol-high-fast-sidekick-swe-2-high"),
+			pairing("fusion-claude-opus-5-high-fast-sidekick-swe-2-high"),
+			pairing("fusion-swe-1-6-fast-sidekick-swe-2-high"),
+			pairing("fusion-kimi-k3-sidekick-swe-2-high"),
+			pairing("fusion-sidekick-swe-2-high"),
+			pairing("fusion"),
+		];
+		const payload = toBinary(
+			GetCliModelConfigsResponseSchema,
+			create(GetCliModelConfigsResponseSchema, { clientModelConfigs: configs }),
+		);
+		const fetched = await fetchDevinModels({
+			apiKey: "fixture-token",
+			fetch: async () => new Response(payload, { status: 200, headers: { "content-type": "application/proto" } }),
+		});
+		const find = (id: string) => fetched?.find(entry => entry.id === id);
+		const wireId = (id: string) => find(id)?.requestModelId;
+		expect(wireId("fusion-gpt-6-sol-high-sidekick-swe-2-high")).toBe("gpt-6-sol-high");
+		expect(wireId("fusion-gpt-6-sol-high-fast-sidekick-swe-2-high")).toBe("gpt-6-sol-high-priority");
+		expect(wireId("fusion-claude-opus-5-high-fast-sidekick-swe-2-high")).toBe("claude-opus-5-high");
+		// A lead whose own uid ends in `-fast` routes as written, not to a `-priority` lane.
+		expect(wireId("fusion-swe-1-6-fast-sidekick-swe-2-high")).toBe("swe-1-6-fast");
+		// No live lead: the composite uid is unservable, so the pairing is not listed.
+		expect(find("fusion-kimi-k3-sidekick-swe-2-high")).toBeUndefined();
+		expect(wireId("fusion-sidekick-swe-2-high")).toBeUndefined();
+		expect(wireId("fusion")).toBeUndefined();
+		// Only the lead runs, so limits and pricing are the lead's, not the composite card's.
+		const routed = find("fusion-gpt-6-sol-high-sidekick-swe-2-high");
+		expect(routed?.contextWindow).toBe(400_000);
+		expect(routed?.maxTokens).toBe(128_000);
+		expect(routed?.input).toEqual(["text", "image"]);
+		expect(routed?.cost).toEqual({ input: 2, output: 8, cacheRead: 0, cacheWrite: 0 });
+	});
+
 	it("stops composite pricing at the Sidekick marker even with a sparse headline card", () => {
 		const fusion = model("fusion-sparse");
 		expect(fusion.cost).toEqual({ input: 10, output: 50, cacheRead: 0, cacheWrite: 0 });

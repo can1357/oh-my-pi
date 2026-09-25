@@ -1,3 +1,6 @@
+import type { Settings } from "../config/settings";
+import { cfgTaskIsolationAllowNested, cfgTaskIsolationEnabled } from "./settings";
+
 /** Default agent used when a session has unrestricted spawning. */
 export const DEFAULT_SPAWN_AGENT = "task";
 
@@ -57,12 +60,9 @@ export function resolveSpawnPolicy(parentSpawns: string | boolean | null | undef
 	};
 }
 
-/**
- * Minimal session surface the nested-isolation gate consults. Structurally
- * compatible with ToolSession without importing tools/index.ts (cycle risk).
- */
+/** Session surface the nested-isolation gate consults. */
 export interface IsolationGateSession {
-	readonly settings: { get(path: string): unknown };
+	readonly settings: Settings;
 	readonly isIsolated?: boolean;
 }
 
@@ -78,8 +78,8 @@ export interface IsolationGateSession {
 export function isIsolationAvailable(session: IsolationGateSession, planMode: boolean): boolean {
 	return (
 		!planMode &&
-		session.settings.get("task.isolation.enabled") === true &&
-		(session.settings.get("task.isolation.allowNested") === true || session.isIsolated !== true)
+		cfgTaskIsolationEnabled.get(session.settings) === true &&
+		(cfgTaskIsolationAllowNested.get(session.settings) === true || session.isIsolated !== true)
 	);
 }
 

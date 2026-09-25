@@ -65,7 +65,7 @@ function isPrewalkImplementationAction(result: ToolResultMessage): boolean {
 export interface PrewalkCoordinatorHost {
 	agent: Agent;
 	sessionManager: SessionManager;
-	settings: Pick<Settings, "get">;
+	settings: Settings;
 	model(): Model | undefined;
 	configuredThinkingLevel(): ConfiguredThinkingLevel | undefined;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
@@ -221,6 +221,19 @@ export class PrewalkCoordinator {
 			display: false,
 			timestamp: Date.now(),
 		});
+	}
+
+	/** Drops a pending prewalk hand-off (e.g. `prewalk.enabled` turned off); no-op when none is armed. */
+	disarm(): void {
+		const active = this.#prewalk;
+		if (!active) return;
+		this.#scrubPlanNudge();
+		this.#clearPrewalkState();
+		this.#host.emitNotice(
+			"info",
+			`Prewalk: disarmed; staying on the active model instead of switching to ${active.target.provider}/${active.target.id}.`,
+			"prewalk",
+		);
 	}
 
 	/** Arms a prewalk immediately for an explicit slash-command request. */

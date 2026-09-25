@@ -61,6 +61,8 @@ export interface NewSessionOptions {
 	drop?: boolean;
 	/** Additional workspace directories to seed on the new session. */
 	additionalDirectories?: string[];
+	/** Directory for the new session file (and later `/new` sessions); defaults to the current session directory. */
+	sessionDir?: string;
 }
 
 export interface SessionEntryBase {
@@ -259,6 +261,8 @@ export interface SessionInitEntry extends SessionEntryBase {
 	advisor?: string;
 	/** Whether this session runs inside an isolation worktree (nested-isolation gate must persist across cold revives). */
 	isIsolated?: boolean;
+	/** Effective thresholds for a child with an explicit compaction override. */
+	compactionThreshold?: { thresholdPercent: number; thresholdTokens: number };
 	/** True when the subagent ran inside an isolation worktree: never revivable, transcript-only after park. Absent on older files. */
 	isolated?: boolean;
 }
