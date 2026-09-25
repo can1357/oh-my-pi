@@ -119,8 +119,8 @@ describe("task async preflight", () => {
 		},
 	);
 
-	// A missing snapshot must fail before an async job can launch any reviewer.
-	it("rejects a missing snapshot before registering a reviewer job", async () => {
+	// A missing snapshot must fail before an async job can launch any subagent.
+	it("rejects a missing snapshot before registering a subagent job", async () => {
 		const directory = TempDir.createSync("@omp-snapshot-preflight-");
 		try {
 			mockDiscovery();
@@ -131,8 +131,8 @@ describe("task async preflight", () => {
 			);
 
 			const result = await tool.execute("snapshot-preflight", {
-				context: "Review the complete change.",
-				tasks: [{ name: "MissingSnapshot", agent: "task", task: "Review it.", fromSnapshot: "unknown" }],
+				context: "Analyze the complete change.",
+				tasks: [{ name: "MissingSnapshot", agent: "task", task: "Analyze it.", fromSnapshot: "unknown" }],
 			} as TaskParams);
 
 			expect(textOf(result)).toContain("Task snapshot not found: unknown");

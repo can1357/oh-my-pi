@@ -185,7 +185,7 @@ describe("task spawn routing", () => {
 			);
 
 			const result = await tool.execute("failed-warmup", {
-				context: "Warm up a reviewer.",
+				context: "Warm up a subagent.",
 				tasks: [{ agent: "task", task: "Study the base.", saveSnapshotAs: "failed-checkpoint" }],
 			} as TaskParams);
 
