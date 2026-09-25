@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Info commands (`/context`, `/hotkeys`, `/tools`, `/memory view|stats`, `/jobs`, `/session info`, `/ssh list|help`) now open a transient panel instead of appending transcript blocks. ([#13261](https://github.com/can1357/oh-my-pi/pull/13261) by [@kml93](https://github.com/kml93))
+
 ## [18.3.1] - 2026-09-25
 
 ### Added
