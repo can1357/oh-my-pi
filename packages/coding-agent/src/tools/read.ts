@@ -2460,12 +2460,13 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					content = [{ type: "text", text: outputText }];
 				}
 			}
-			if (located) {
-				// A located text read is a bounded page its URL re-reads with selectors: spilling it
-				// to an artifact would only duplicate recoverable content.
-				pagedSource = true;
+			// A page of artifact storage is re-readable with selectors: spilling it would only
+			// duplicate it into another artifact. Every other located read spills like a plain file.
+			if (located?.spec.artifactStore) pagedSource = true;
+			// Immutable sources have no write path, so the hint never lands in a written-back file.
+			if (located && immutable && !isRawSelector(parsed) && fileSize > MAX_URL_RAW_INLINE_BYTES) {
 				const firstText = content.find((c): c is TextContent => c.type === "text");
-				if (firstText && !isRawSelector(parsed) && fileSize > MAX_URL_RAW_INLINE_BYTES) {
+				if (firstText) {
 					firstText.text += `\n\n[${formatLocatedFileNotice(located.url, absolutePath, fileSize, false)}]`;
 				}
 			}

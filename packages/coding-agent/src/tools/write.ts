@@ -43,7 +43,7 @@ import { recoverConflictUriPrefix } from "./conflict-detect";
 import { invalidateFsScanAfterWrite } from "./fs-cache-invalidation";
 
 import { outputMeta } from "./output-meta";
-import { formatPathRelativeToCwd, peelWriteUrlSelector, probeLiteralPathExists } from "./path-utils";
+import { formatPathRelativeToCwd, probeLiteralPathExists } from "./path-utils";
 import { splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
 import {
 	enforcePlanModeWrite,
@@ -469,7 +469,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		return { writethrough, deferred: enableDiagnostics ? this.#deferredDiagnostics : undefined };
 	}
 
-	async #resolveArchiveWritePath(writePath: string): Promise<ResolvedArchiveWritePath | null> {
+	async #resolveArchiveWritePath(writePath: string, signal?: AbortSignal): Promise<ResolvedArchiveWritePath | null> {
 		const candidates = parseArchivePathCandidates(writePath).filter(candidate => candidate.archivePath !== writePath);
 		if (candidates.length === 0) {
 			return null;
@@ -477,14 +477,14 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 
 		const fallbackCandidate = candidates[candidates.length - 1]!;
 		const fallback: ResolvedArchiveWritePath = {
-			absolutePath: await resolvePlanPath(this.session, fallbackCandidate.archivePath),
+			absolutePath: await resolvePlanPath(this.session, fallbackCandidate.archivePath, signal),
 			archivePath: fallbackCandidate.archivePath,
 			archiveSubPath: normalizeArchiveWriteSubPath(fallbackCandidate.subPath),
 			exists: false,
 		};
 
 		for (const candidate of candidates) {
-			const absolutePath = await resolvePlanPath(this.session, candidate.archivePath);
+			const absolutePath = await resolvePlanPath(this.session, candidate.archivePath, signal);
 			try {
 				const stat = await Bun.file(absolutePath).stat();
 				if (stat.isDirectory()) {
@@ -579,7 +579,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		};
 	}
 
-	async #resolveSqliteWritePath(writePath: string): Promise<ResolvedSqliteWritePath | null> {
+	async #resolveSqliteWritePath(writePath: string, signal?: AbortSignal): Promise<ResolvedSqliteWritePath | null> {
 		const candidates = parseSqlitePathCandidates(writePath).filter(candidate => candidate.sqlitePath !== writePath);
 		if (candidates.length === 0) {
 			return null;
@@ -588,7 +588,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		const fallbackCandidate = candidates[candidates.length - 1]!;
 		const fallbackTarget = parseSqliteWriteTarget(fallbackCandidate.subPath, fallbackCandidate.queryString);
 		const fallback: ResolvedSqliteWritePath = {
-			absolutePath: await resolvePlanPath(this.session, fallbackCandidate.sqlitePath),
+			absolutePath: await resolvePlanPath(this.session, fallbackCandidate.sqlitePath, signal),
 			sqlitePath: fallbackCandidate.sqlitePath,
 			table: fallbackTarget.table,
 			key: fallbackTarget.key,
@@ -598,7 +598,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		let sawExistingNonSqlite = false;
 		for (const candidate of candidates) {
 			const target = parseSqliteWriteTarget(candidate.subPath, candidate.queryString);
-			const absolutePath = await resolvePlanPath(this.session, candidate.sqlitePath);
+			const absolutePath = await resolvePlanPath(this.session, candidate.sqlitePath, signal);
 			try {
 				const stat = await Bun.file(absolutePath).stat();
 				if (stat.isDirectory()) {
@@ -727,9 +727,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		// what `read` resolves for the same URL; line-range/malformed selectors throw.
 		// A `<file>:conflict://N` target is normalized to its URL; the note tells the model.
 		const router = InternalUrlRouter.instance();
-		const recovered = recoverConflictUriPrefix(
-			peelWriteUrlSelector(router.normalize(unwrapHashlineHeaderPath(rawPath))),
-		);
+		const recovered = recoverConflictUriPrefix(router.peelWriteSelector(unwrapHashlineHeaderPath(rawPath), "write"));
 		const path = recovered.path;
 		const target = router.writeTarget(path);
 		const policy = target?.spec.write;
@@ -746,7 +744,10 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			this.session.deviceOnlyWrite === true &&
 			policy?.scope !== "device" &&
 			policy?.scope !== "coordination" &&
-			!(this.session.getPlanModeState?.()?.enabled === true && (await targetsLocalSandbox(this.session, path)))
+			!(
+				this.session.getPlanModeState?.()?.enabled === true &&
+				(await targetsLocalSandbox(this.session, path, signal))
+			)
 		) {
 			throw new ToolError(
 				"This `write` tool is limited to the xd:// device transport: call it with path `xd://<tool>` and the device's JSON arguments in `content` (`read xd://` lists mounted devices). Active plan mode additionally permits local:// sandbox drafts. Filesystem writes are not available elsewhere.",
@@ -774,7 +775,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					// dispatched tool's own tier and policy).
 					if (policy?.scope !== "device") {
 						if (policy?.scope !== "coordination") {
-							await enforcePlanModeWrite(this.session, path, { op: "update" });
+							await enforcePlanModeWrite(this.session, path, { op: "update", signal });
 						}
 						emitWriteProgress(onUpdate, cleanContent, path);
 					}
@@ -808,10 +809,11 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				// so write and read share one path.
 			}
 
-			const resolvedArchivePath = await this.#resolveArchiveWritePath(path);
+			const resolvedArchivePath = await this.#resolveArchiveWritePath(path, signal);
 			if (resolvedArchivePath) {
 				await enforcePlanModeWrite(this.session, resolvedArchivePath.archivePath, {
 					op: resolvedArchivePath.exists ? "update" : "create",
+					signal,
 				});
 
 				emitWriteProgress(
@@ -835,9 +837,9 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				return archiveResult;
 			}
 
-			const resolvedSqlitePath = await this.#resolveSqliteWritePath(path);
+			const resolvedSqlitePath = await this.#resolveSqliteWritePath(path, signal);
 			if (resolvedSqlitePath) {
-				await enforcePlanModeWrite(this.session, resolvedSqlitePath.sqlitePath, { op: "update" });
+				await enforcePlanModeWrite(this.session, resolvedSqlitePath.sqlitePath, { op: "update", signal });
 
 				emitWriteProgress(onUpdate, cleanContent, path, resolvedSqlitePath.absolutePath);
 				const sqliteResult = await this.#writeSqliteRow(path, cleanContent, resolvedSqlitePath);
@@ -854,13 +856,18 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			}
 
 			await assertNotReadSelectorMisfire(path, cleanContent, this.session.cwd);
-			await enforcePlanModeWrite(this.session, path, { op: "create" });
-			const absolutePath = await resolvePlanPath(this.session, path);
-			const displayPath = formatPathRelativeToCwd(absolutePath, this.session.cwd);
+			await enforcePlanModeWrite(this.session, path, { op: "create", signal });
+			const absolutePath = await resolvePlanPath(this.session, path, signal);
+			// A located URL write keeps its URL identity in progress, results, and the hashline header.
+			const displayPath = target ? path : formatPathRelativeToCwd(absolutePath, this.session.cwd);
 			const batchRequest = getLspBatchRequest(context?.toolCall);
 
+			const existing = await fs.stat(absolutePath).catch(() => undefined);
+			if (target && existing?.isDirectory()) {
+				throw new ToolError(`${target.url.protocol}// URL must resolve to a file: ${path}`);
+			}
 			// Check if file exists and is auto-generated before overwriting.
-			if (await fs.exists(absolutePath)) {
+			if (existing) {
 				await assertEditableFile(absolutePath, path, this.session.settings);
 			}
 			await assertNotTruncatedFileReadProjection(
@@ -884,7 +891,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				// use it so a drifted write (e.g. client format-on-save) still
 				// hands back a tag that matches what's actually on disk.
 				const madeExecutable = await maybeMarkExecutableForShebang(absolutePath, bridgeWrite.text);
-				const header = maybeWriteSnapshotHeader(this.session, absolutePath, bridgeWrite.text);
+				const header = maybeWriteSnapshotHeader(this.session, absolutePath, bridgeWrite.text, displayPath);
 				const writeLine = `Successfully wrote ${Buffer.byteLength(cleanContent, "utf8")} bytes to ${displayPath}`;
 				let resultText = header ? `${header}\n${writeLine}` : writeLine;
 				if (stripped) {
@@ -910,7 +917,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			const finalContent = diagnostics.finalContent;
 			const madeExecutable = await maybeMarkExecutableForShebang(absolutePath, finalContent);
 
-			const header = maybeWriteSnapshotHeader(this.session, absolutePath, finalContent);
+			const header = maybeWriteSnapshotHeader(this.session, absolutePath, finalContent, displayPath);
 			const writeLine = `Successfully wrote ${Buffer.byteLength(finalContent, "utf8")} bytes to ${displayPath}`;
 			let resultText = header ? `${header}\n${writeLine}` : writeLine;
 			if (stripped) {

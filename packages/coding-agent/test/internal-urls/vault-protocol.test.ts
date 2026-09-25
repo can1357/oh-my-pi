@@ -144,6 +144,25 @@ describe("VaultProtocolHandler", () => {
 		});
 	});
 
+	it("refuses write targets that address a directory", async () => {
+		await withTempDir(async tempDir => {
+			const root = path.join(tempDir, "vault");
+			await fs.mkdir(path.join(root, "Folder"), { recursive: true });
+			VaultProtocolHandler.setVaultDirectoryForTests({ Work: root });
+			const handler = new VaultProtocolHandler({ resolveObsidianBinary: () => null });
+
+			for (const target of ["vault://Work/Folder", "vault://Work/Folder/", "vault://Work/New/"]) {
+				await expect(handler.locate(resourceUrl(target), undefined, { create: true })).rejects.toThrow(
+					`vault:// URL must resolve to a file: ${target}`,
+				);
+			}
+			// Reads still locate the directory.
+			expect(await handler.locate(resourceUrl("vault://Work/Folder"))).toBe(
+				await fs.realpath(path.join(root, "Folder")),
+			);
+		});
+	});
+
 	it("reads markdown files from the cached vault root without spawning obsidian", async () => {
 		await withTempDir(async tempDir => {
 			const root = path.join(tempDir, "vault");

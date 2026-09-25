@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { DEFAULT_STREAM_URL, STREAM_TITLE_MAX } from "@oh-my-pi/pi-wire";
+import { STREAM_TITLE_MAX } from "@oh-my-pi/pi-wire";
 import { CliUsageError, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { streamHelp as commandHelp } from "../cli/command-help";
 import { Settings } from "../config/settings";
@@ -33,7 +33,7 @@ export default class Stream extends Command {
 		const settings = await Settings.loadReadOnly({ cwd });
 		let urls: StreamUrls;
 		try {
-			urls = resolveStreamUrls(flags.server ?? cfgStreamServerUrl.get(settings) ?? DEFAULT_STREAM_URL);
+			urls = resolveStreamUrls(flags.server ?? cfgStreamServerUrl.get(settings));
 		} catch (error) {
 			throw new CliUsageError(error instanceof Error ? error.message : String(error));
 		}

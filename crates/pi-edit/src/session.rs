@@ -218,7 +218,7 @@ impl Session {
 	/// Entering the phase drops every preview-time answer: those were
 	/// resolved before approval and without the call's abort signal. Empty
 	/// while the arguments are incomplete.
-	pub fn apply_url_targets(&mut self) -> Vec<String> {
+	pub fn begin_apply_url_targets(&mut self) -> Vec<String> {
 		self.begin_apply();
 		let snapshot = self.args.snapshot();
 		if !snapshot.complete {
@@ -278,7 +278,7 @@ impl Session {
 	/// for every file, then write in payload order. A writer failure aborts
 	/// the loop; files already written stay written and the error is
 	/// returned verbatim. URL targets never reuse preview-time answers (see
-	/// [`Self::apply_url_targets`]).
+	/// [`Self::begin_apply_url_targets`]).
 	///
 	/// # Errors
 	/// Staging and plan-mode failures, all raised before the first write —

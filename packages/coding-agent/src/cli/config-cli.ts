@@ -5,7 +5,7 @@
  * The settings registry (`config/registry.ts`) is the source of truth for available settings.
  */
 
-import { APP_NAME, getAgentDir } from "@oh-my-pi/pi-utils";
+import { APP_NAME, getAgentDir, isRecord } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { orderedSettings } from "../config/all-settings";
 import { type AnySetting, lookup } from "../config/registry";
@@ -301,22 +301,61 @@ async function handleSet(key: string | undefined, value: string | undefined, fla
 		process.exit(1);
 	}
 
-	// Report the saved value; when an environment variable still supplies the effective value, say so
-	// instead of echoing the variable's value as if it had been set.
-	const saved = def.setting.layered(settings);
-	const envName = def.setting.provenance(settings) === "env" ? def.setting.envName : undefined;
+	// Report the value written to config.yml. When another layer or an environment variable still
+	// supplies the effective value, say which instead of echoing its value as if it had been set.
+	const saved = globalValue(def.setting);
+	const shadow = shadowingSource(def.setting);
 
 	if (flags.json) {
-		console.log(JSON.stringify({ key: def.path, value: saved, ...(envName ? { overriddenBy: envName } : {}) }));
+		console.log(JSON.stringify({ key: def.path, value: saved, ...shadow?.json }));
 		return;
 	}
 	console.log(chalk.green(`${theme.status.success} Set ${def.path} = ${formatValue(saved)}`));
-	if (envName) {
-		console.log(
-			chalk.yellow(
-				`${theme.status.warning} $${envName} overrides this value; unset it for the saved value to apply.`,
-			),
-		);
+	if (shadow) console.log(chalk.yellow(`${theme.status.warning} ${shadow.message}`));
+}
+
+/** Value `setting` holds in the global config layer — what `config set` wrote. */
+function globalValue(setting: AnySetting): unknown {
+	let value: unknown = settings.getGlobalSettings();
+	for (const segment of setting.segments) value = isRecord(value) ? value[segment] : undefined;
+	return value;
+}
+
+/** Where the effective value comes from when it is not the global config (or the default), if anywhere. */
+function shadowingSource(setting: AnySetting): { json: Record<string, string>; message: string } | undefined {
+	const provenance = setting.provenance(settings);
+	switch (provenance) {
+		case "global":
+		case "default":
+			return undefined;
+		case "env": {
+			const name = setting.envName;
+			if (!name) return undefined;
+			return setting.envFallback
+				? {
+						json: { fallbackEnv: name },
+						message: `$${name} is used as a fallback while the saved value is blank.`,
+					}
+				: {
+						json: { overriddenBy: name },
+						message: `$${name} overrides this value; unset it for the saved value to apply.`,
+					};
+		}
+		case "project":
+			return {
+				json: { overriddenBy: provenance },
+				message: "Project settings override this value here; edit or remove it there for the saved value to apply.",
+			};
+		case "overlay":
+			return {
+				json: { overriddenBy: provenance },
+				message: "A --config / PI_CONFIG_FILES overlay overrides this value for this process.",
+			};
+		case "runtime":
+			return {
+				json: { overriddenBy: provenance },
+				message: "A runtime override supplies the effective value for this process.",
+			};
 	}
 }
 

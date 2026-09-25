@@ -371,7 +371,7 @@ export class OutputMetaBuilder {
 		return this;
 	}
 
-	/** Mark the output as a bounded page of a file its source re-reads with line selectors ({@link OutputMeta.pagedSource}). */
+	/** Mark the output as a bounded page of session artifact storage its source re-reads with line selectors ({@link OutputMeta.pagedSource}). */
 	pagedSource(): this {
 		this.#meta.pagedSource = true;
 		return this;
@@ -501,9 +501,9 @@ async function spillLargeResultToArtifact(
 	const existingMeta: OutputMeta | undefined = result.details?.meta;
 	if (existingMeta?.truncation?.artifactId) return result;
 
-	// A bounded page of a file its source URL re-reads with `:N-M` is already recoverable.
-	// Spilling it would only create a redundant artifact holding another file's page (and
-	// can repeat indefinitely on subsequent artifact reads).
+	// A bounded page of artifact storage its source URL re-reads with `:N-M` is already
+	// recoverable. Spilling it would only create a redundant artifact holding another
+	// artifact's page (and can repeat indefinitely on subsequent artifact reads).
 	if (existingMeta?.pagedSource) return result;
 
 	// Measure total text content

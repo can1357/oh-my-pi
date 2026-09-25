@@ -148,6 +148,8 @@ export function createAgentsHubDeps(
 				contextFiles: [],
 				promptTemplates: [],
 				slashCommands: [],
+				// A helper for the host session: the host keeps the process-wide effects and provider toggles.
+				bindProcessState: false,
 			});
 			const unsubscribe = session.subscribe(event => {
 				if (event.type === "message_update" && "assistantMessageEvent" in event) {

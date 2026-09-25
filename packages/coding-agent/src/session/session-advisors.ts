@@ -1990,9 +1990,9 @@ export class SessionAdvisors {
 					id,
 					parentId,
 					// ISO like every CompactionEntry: the next round reads this
-					// back as previousSummaryTimestamp, and a millis string
-					// does not survive `new Date()` (NaN rewrite marker).
-					timestamp: new Date(message.timestamp || Date.now()).toISOString(),
+					// back as previousSummaryTimestamp (the reused rewrite marker),
+					// and a millis string does not survive `new Date()` (NaN marker).
+					timestamp: new Date(message.historyRewriteAt ?? (message.timestamp || Date.now())).toISOString(),
 					summary: message.summary,
 					shortSummary: message.shortSummary,
 					firstKeptEntryId: advisorSummary.firstKeptEntryId || `msg-${i + 1}`,
@@ -2164,20 +2164,24 @@ export class SessionAdvisors {
 		const advisorUsageAnchorStartIndex = recentMessages.length + 1;
 		const anthropicPayload = getAnthropicCompactionPayload(compactResult.preserveData);
 		// A native summary replays its block on later requests, so its rewrite
-		// marker must precede the retained tail: a fresh timestamp would make
+		// marker must precede the retained tail: the commit time would make
 		// `historyRewriteAt` newer than the tail and strip its bound thinking
 		// on the very next request. Reuse the previous compaction's marker when
 		// one exists, else sit just before the retained tail. Local summaries
-		// keep the existing fresh timestamp.
+		// use the commit time, which the summary always keeps as its timestamp.
 		const firstRetained = preparation.recentMessages[0];
-		const summaryTimestamp =
-			anthropicPayload !== undefined
-				? (preparation.previousSummaryTimestamp ??
-					(firstRetained ? new Date(firstRetained.timestamp - 1).toISOString() : new Date().toISOString()))
-				: new Date().toISOString();
+		const historyRewriteAt =
+			anthropicPayload === undefined
+				? undefined
+				: preparation.previousSummaryTimestamp !== undefined
+					? new Date(preparation.previousSummaryTimestamp).getTime()
+					: firstRetained
+						? firstRetained.timestamp - 1
+						: undefined;
 		const summaryMessage = {
-			...createCompactionSummaryMessage(summary, tokensBefore, summaryTimestamp, {
+			...createCompactionSummaryMessage(summary, tokensBefore, new Date().toISOString(), {
 				shortSummary,
+				historyRewriteAt,
 				// Carry provider-native replay state on the in-memory summary so
 				// later advisor requests replay it instead of ordinary summary text.
 				providerPayload: anthropicPayload ?? providerPayload,

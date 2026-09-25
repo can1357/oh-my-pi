@@ -15,7 +15,6 @@ import { prompt } from "@oh-my-pi/pi-utils";
 import {
 	acquireIdaDatabase,
 	cfgIdaAvailable,
-	closeIdaDatabase,
 	findOpenIdaDatabase,
 	type IdaDatabase,
 	listIdaDatabases,
@@ -122,12 +121,14 @@ export class IdaTool implements AgentTool<typeof idaSchema, IdaToolDetails> {
 		const result = toolResult(details);
 		switch (params.action) {
 			case "list": {
-				const dbs = listIdaDatabases();
+				const dbs = await listIdaDatabases(this.session);
 				if (dbs.length === 0) return result.text("No IDA databases open.").done();
-				const lines = dbs.map(
-					db =>
-						`${db.id}  ${db.info.module}  ${db.info.format}  ${db.info.arch}/${db.info.bitness}  ${shortenPath(db.idbPath)}`,
-				);
+				const lines = dbs.map(db => {
+					const { state, info, current } = db.status;
+					if (state === "opening") return `${db.id}  (opening)  ${shortenPath(db.ref)}`;
+					const running = current ? `  [${current.method} running]` : "";
+					return `${db.id}  ${info.module}  ${info.format}  ${info.arch}/${info.bitness}  ${shortenPath(db.idbPath)}${running}`;
+				});
 				return result.text(lines.join("\n")).done();
 			}
 			case "open": {
@@ -151,7 +152,7 @@ export class IdaTool implements AgentTool<typeof idaSchema, IdaToolDetails> {
 				const db = await this.#resolveDb(params.db, false, signal);
 				details.db = db.id;
 				const save = params.save ?? true;
-				await closeIdaDatabase(db.id, { save });
+				await db.close({ save });
 				return result.text(`Closed ${db.id}${save ? " (saved)" : " (discarded unsaved changes)"}`).done();
 			}
 			case "rename": {
@@ -226,13 +227,13 @@ export class IdaTool implements AgentTool<typeof idaSchema, IdaToolDetails> {
 	/** Resolve `db` (id, path, or omitted) to an open database; `open` opens/creates it when needed. */
 	async #resolveDb(ref: string | undefined, open: boolean, signal?: AbortSignal): Promise<IdaDatabase> {
 		if (!ref) {
-			const dbs = listIdaDatabases();
+			const dbs = (await listIdaDatabases(this.session)).filter(db => db.status.state === "open");
 			if (dbs.length === 0) throw new ToolError("No IDA database open; pass db=<binary path>");
 			if (dbs.length > 1)
 				throw new ToolError(`Multiple IDA databases open (${dbs.map(db => db.id).join(", ")}); pass db`);
 			return dbs[0];
 		}
-		const byId = findOpenIdaDatabase(ref);
+		const byId = await findOpenIdaDatabase(this.session, ref);
 		if (byId) return byId;
 		const { path: sourcePath, arch } = splitSliceRef(ref);
 		const abs = resolveToCwd(sourcePath, this.session.cwd);
@@ -240,7 +241,7 @@ export class IdaTool implements AgentTool<typeof idaSchema, IdaToolDetails> {
 		if (!stat?.isFile()) throw new ToolError(`db not found: ${ref}`);
 		if (open) return acquireIdaDatabase(this.session, abs, { arch, signal });
 		const loc = await locateIdb(abs, { arch });
-		const db = findOpenIdaDatabase(loc.id);
+		const db = await findOpenIdaDatabase(this.session, loc.id);
 		if (!db) throw new ToolError(`${ref} is not open`);
 		return db;
 	}

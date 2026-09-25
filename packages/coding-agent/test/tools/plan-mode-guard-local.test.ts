@@ -13,7 +13,6 @@ import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const ARTIFACTS_DIR = path.join(os.tmpdir(), "agent-artifacts");
 const REPO_ROOT = path.join(os.tmpdir(), "repo");
-const PLANS_DIR = path.join(os.tmpdir(), "plans");
 
 interface SessionOverrides {
 	artifactsDir?: string | null;
@@ -28,9 +27,7 @@ function makeSession(overrides: SessionOverrides): ToolSession {
 		hasUI: false,
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
-		settings: {
-			getPlansDirectory: () => PLANS_DIR,
-		},
+		settings: Settings.isolated(),
 		getArtifactsDir: () => overrides.artifactsDir ?? null,
 		getSessionId: () => overrides.sessionId ?? null,
 		getPlanModeState: () => overrides.planMode,
