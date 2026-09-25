@@ -13,6 +13,7 @@
 //! | `DeepSeekV3` | `DeepSeek` V3 … V4 | byte-level BPE, 3-stage split chain |
 //! | `KimiK2` | Kimi K2 … K3 | byte-level BPE (tiktoken ranks) |
 //! | `Glm5` | GLM-5.x (exact), GLM-4.x (near-exact) | byte-level BPE, `ignore_merges` |
+//! | `Jev` | `TypeSafe` Jev 1.13 | measured whole-word vocab + restricted o200k BPE (count-only) |
 //!
 //! Semantics are `encode_ordinary`: plain content, no special tokens, no
 //! chat-template frame. This matches budget-estimation use where fragments
@@ -28,6 +29,7 @@
 
 mod bpe;
 mod claude;
+mod jev;
 mod pretoken;
 mod scan;
 mod tables;
@@ -61,6 +63,8 @@ pub enum Encoding {
 	KimiK2,
 	/// GLM-5 (154,820-token vocabulary; ID-preserving superset of GLM-4.x).
 	Glm5,
+	/// `TypeSafe` Jev 1.13 `state` input tokens (measured reconstruction).
+	Jev,
 }
 
 impl Encoding {
@@ -74,17 +78,20 @@ impl Encoding {
 			Self::ClaudeV5Sonnet => {
 				claude::content_token_count(text.units(), claude::Family::V5Sonnet)
 			},
+			Self::Jev => jev::content_token_count(text.units()),
 			_ => tables::bpe_for(self).count(text.units()),
 		}
 	}
 
 	/// Token ids for `text`, in any UTF flavor.
 	///
-	/// `None` for the Claude families: ctok reconstructs counts, not
-	/// boundaries, so no id sequence exists.
+	/// `None` for the Claude families and Jev: both are reconstructed from
+	/// counts, not boundaries, so no id sequence exists.
 	pub fn encode<T: Utf + ?Sized>(self, text: &T) -> Option<Vec<u32>> {
 		match self {
-			Self::ClaudeV3 | Self::ClaudeV47 | Self::ClaudeV5 | Self::ClaudeV5Sonnet => None,
+			Self::ClaudeV3 | Self::ClaudeV47 | Self::ClaudeV5 | Self::ClaudeV5Sonnet | Self::Jev => {
+				None
+			},
 			_ => Some(tables::bpe_for(self).encode(text.units())),
 		}
 	}
@@ -99,6 +106,8 @@ mod tests {
 	mod deepseek;
 	#[path = "glm.rs"]
 	mod glm;
+	#[path = "jev.rs"]
+	mod jev;
 	#[path = "kimi.rs"]
 	mod kimi;
 	#[path = "openai.rs"]

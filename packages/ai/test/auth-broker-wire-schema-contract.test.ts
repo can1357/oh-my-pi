@@ -64,7 +64,13 @@ const USAGE_REPORT = {
 		{
 			id: "rolling",
 			label: "Rolling window",
-			scope: { provider: "anthropic", windowId: "rolling", providerExtension: true },
+			scope: {
+				provider: "anthropic",
+				windowId: "rolling",
+				shared: true,
+				sharedGroup: "3p:rolling",
+				providerExtension: true,
+			},
 			window: { id: "rolling", label: "5 hour", durationMs: 18_000_000 },
 			amount: { used: 1, limit: 10, remaining: 9, unit: "tokens", providerExtension: "kept" },
 			status: "ok",

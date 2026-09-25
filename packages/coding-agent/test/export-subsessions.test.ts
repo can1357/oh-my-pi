@@ -89,6 +89,15 @@ describe("collectSubSessions", () => {
 		expect(html).not.toContain(subPreviousPath);
 	});
 
+	test("rejects a missing input without creating session or export files", async () => {
+		const missingInput = path.join(root, "missing.jsonl");
+		const outputPath = path.join(root, "export.html");
+
+		await expect(exportFromFile(missingInput, { outputPath })).rejects.toThrow(`File not found: ${missingInput}`);
+		expect(await Bun.file(missingInput).exists()).toBe(false);
+		expect(await Bun.file(outputPath).exists()).toBe(false);
+	});
+
 	test("skips corrupt, empty, backup, and non-jsonl files", async () => {
 		await Bun.write(path.join(root, "main/Good.jsonl"), sessionJsonl("good", ["g1"]));
 		await Bun.write(path.join(root, "main/corrupt.jsonl"), "{not json\n");

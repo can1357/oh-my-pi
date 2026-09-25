@@ -7,9 +7,12 @@ import {
 	ChatToolCallSchema,
 	GetChatMessageRequestSchema,
 	GetChatMessageResponseSchema,
+	GetUserJwtResponseSchema,
 	StopReason,
 } from "@oh-my-pi/pi-catalog/discovery/devin-proto";
 import { create, fromBinary, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
+
+const AUTH_PAYLOAD = toBinary(GetUserJwtResponseSchema, create(GetUserJwtResponseSchema, { userJwt: "user-jwt" }));
 
 function frameConnectMessage(payload: Uint8Array): Uint8Array {
 	const out = new Uint8Array(5 + payload.length);
@@ -36,7 +39,8 @@ const devinModel: Model<"devin-agent"> = buildModel({
 /** Capture the protobuf request from a streamDevin call. */
 async function captureRequest(context: Context, tools?: Context["tools"]) {
 	let requestPayload: Uint8Array | undefined;
-	const fetchImpl = (async (_input: string | URL | Request, init?: RequestInit) => {
+	const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+		if (String(input).includes("GetUserJwt")) return new Response(AUTH_PAYLOAD);
 		requestPayload = new Uint8Array(init?.body as ArrayBuffer);
 		return new Response(new Uint8Array());
 	}) as typeof fetch;
@@ -137,7 +141,8 @@ describe("streamDevin tool calling", () => {
 			),
 		];
 
-		const fetchImpl = (async (_input: string | URL | Request) => {
+		const fetchImpl = (async (input: string | URL | Request) => {
+			if (String(input).includes("GetUserJwt")) return new Response(AUTH_PAYLOAD);
 			let index = 0;
 			return new Response(
 				new ReadableStream<Uint8Array>({
@@ -229,7 +234,8 @@ describe("streamDevin tool calling", () => {
 			),
 		];
 
-		const fetchImpl = (async (_input: string | URL | Request) => {
+		const fetchImpl = (async (input: string | URL | Request) => {
+			if (String(input).includes("GetUserJwt")) return new Response(AUTH_PAYLOAD);
 			let index = 0;
 			return new Response(
 				new ReadableStream<Uint8Array>({

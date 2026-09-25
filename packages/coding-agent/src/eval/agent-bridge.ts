@@ -12,15 +12,12 @@ import {
 	StructuredSubagentError,
 	type StructuredSubagentIsolationControls,
 	type StructuredSubagentResult,
-	type StructuredSubagentSchemaMode,
 } from "../task/structured-subagent";
-import type { AgentProgress, SingleResult } from "../task/types";
-import type { NestedRepoPatch } from "../task/worktree";
+import type { AgentProgress, SingleResult, StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
+import type { NestedRepoPatch } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "../tools";
-import { ToolError } from "../tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { JsStatusEvent } from "./js/shared/types";
-// Import review tools for side effects (registers subagent tool handlers).
-import "../tools/review";
 
 /** Synthetic bridge name reserved for the `agent()` helper across both runtimes. */
 export const EVAL_AGENT_BRIDGE_NAME = "__agent__";
@@ -76,8 +73,12 @@ export interface EvalAgentResult {
 		schemaStatus?: "valid" | "invalid";
 		isolated?: boolean;
 		patchPath?: string;
+		/** False when `patchPath` is an empty root diff and the work lives in `nestedPatchPaths`. */
+		hasRootChanges?: boolean;
 		branchName?: string;
 		nestedPatches?: NestedRepoPatch[];
+		/** On-disk copies of `nestedPatches`, written before the isolation workspace was removed. */
+		nestedPatchPaths?: string[];
 		changesApplied?: boolean | null;
 		isolationSummary?: string;
 	};
@@ -155,8 +156,10 @@ async function buildEvalAgentResult(execution: StructuredSubagentResult): Promis
 			...(schemaStatus !== undefined ? { schemaStatus } : {}),
 			...(policy.isIsolated ? { isolated: true, changesApplied } : {}),
 			...(result.patchPath !== undefined ? { patchPath: result.patchPath } : {}),
+			...(result.hasRootChanges !== undefined ? { hasRootChanges: result.hasRootChanges } : {}),
 			...(result.branchName !== undefined ? { branchName: result.branchName } : {}),
 			...(nestedPatches !== undefined ? { nestedPatches } : {}),
+			...(result.nestedPatchPaths?.length ? { nestedPatchPaths: result.nestedPatchPaths } : {}),
 			...(isolationSummary !== undefined ? { isolationSummary } : {}),
 		},
 	};

@@ -1,0 +1,13 @@
+[package]
+name = "cfg_aliases"
+version = "0.1.1"
+edition = "2018"
+license = "MIT"
+authors = ["Zicklag <zicklag@katharostech.com>"]
+description = "A tiny utility to help save you a lot of effort with long winded cfg checks."
+keywords = ["cfg", "alias", "conditional", "compilation", "build"]
+categories = ["development-tools", "development-tools::build-utils"]
+documentation = "https://docs.rs/cfg_aliases"
+homepage = "https://github.com/katharostech/cfg_aliases"
+repository = "https://github.com/katharostech/cfg_aliases"
+publish = false

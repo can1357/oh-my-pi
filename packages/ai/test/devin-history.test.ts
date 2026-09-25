@@ -3,11 +3,8 @@ import { gunzipSync } from "node:zlib";
 import { streamDevin } from "@oh-my-pi/pi-ai/providers/devin";
 import type { AssistantMessage, Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { GetChatMessageRequestSchema } from "@oh-my-pi/pi-catalog/discovery/devin-proto";
-import { fromBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
-
-/** Connect streaming flag bit 0x01 = gzip-compressed payload. */
-const CONNECT_COMPRESSED_FLAG = 0x01;
+import { GetChatMessageRequestSchema, GetUserJwtResponseSchema } from "@oh-my-pi/pi-catalog/discovery/devin-proto";
+import { create, fromBinary, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 
 const devinModel: Model<"devin-agent"> = buildModel({
 	id: "devin-test",
@@ -46,30 +43,22 @@ function assistant(overrides: Partial<AssistantMessage>): AssistantMessage {
 }
 
 async function captureRequest(context: Context) {
+	const authPayload = toBinary(GetUserJwtResponseSchema, create(GetUserJwtResponseSchema, { userJwt: "jwt" }));
 	let requestPayload: Uint8Array | undefined;
-	let requestHeaders: Headers | undefined;
-	const fetchImpl = (async (_input: string | URL | Request, init?: RequestInit) => {
+	const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+		if (String(input).includes("GetUserJwt")) return new Response(authPayload);
 		requestPayload = new Uint8Array(init?.body as ArrayBuffer);
-		requestHeaders = new Headers(init?.headers);
 		return new Response(new Uint8Array());
 	}) as typeof fetch;
 
 	await streamDevin(devinModel, context, { apiKey: "token", fetch: fetchImpl }).result();
 	if (!requestPayload) throw new Error("Devin chat request was not captured");
-	const flag = requestPayload[0];
 	const length = new DataView(requestPayload.buffer, requestPayload.byteOffset, requestPayload.byteLength).getUint32(
 		1,
 		false,
 	);
-	const payload = requestPayload.subarray(5, 5 + length);
-	// CLI wire format is uncompressed Connect frames (flag 0x00). Compressed
-	// frames remain decodable for older captures, but new requests must not gzip.
-	expect(flag & CONNECT_COMPRESSED_FLAG).toBe(0);
-	const decoded = flag & CONNECT_COMPRESSED_FLAG ? gunzipSync(payload) : payload;
-	const request = fromBinary(GetChatMessageRequestSchema, decoded);
-	// Attach headers for tests that assert on the HTTP transport layer.
-	(request as unknown as { __headers?: Headers }).__headers = requestHeaders;
-	return request;
+	const compressed = requestPayload.subarray(5, 5 + length);
+	return fromBinary(GetChatMessageRequestSchema, gunzipSync(compressed));
 }
 
 describe("streamDevin history handoff", () => {
@@ -126,22 +115,5 @@ describe("streamDevin history handoff", () => {
 		});
 
 		expect(request.prompt).toBe("You are a test.");
-	});
-
-	it("sends a Basic authorization header with the session token repeated", async () => {
-		const request = await captureRequest({
-			messages: [{ role: "user", content: "hi", timestamp: 0 }],
-		});
-		const headers = (request as unknown as { __headers?: Headers }).__headers;
-		expect(headers).toBeDefined();
-		// The CLI sends "Basic <token>-<token>" (not base64). With apiKey "token"
-		// (normalized to "devin-session-token$token"), the header should be
-		// "Basic devin-session-token$token-devin-session-token$token".
-		const auth = headers!.get("authorization");
-		expect(auth).toMatch(/^Basic devin-session-token\$token-devin-session-token\$token$/);
-		// User-Agent should be suppressed (empty string, not Bun's default).
-		expect(headers!.get("user-agent")).toBe("");
-		// Accept-Encoding should be identity, not Bun's default gzip/deflate/br/zstd.
-		expect(headers!.get("accept-encoding")).toBe("identity");
 	});
 });

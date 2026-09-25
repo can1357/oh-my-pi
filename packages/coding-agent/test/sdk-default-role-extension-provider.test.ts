@@ -71,7 +71,7 @@ describe("issue #3569 fresh launch default role from extension provider", () => 
 		// Mirrors the reporter's environment: `OPENAI_API_KEY` is configured for a
 		// bundled provider whose `pickDefaultAvailableModel` entry would otherwise
 		// win the startup fallback.
-		authStorage.setRuntimeApiKey("openai", "test-openai-key");
+		authStorage.keys.setRuntime("openai", "test-openai-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
 
 		const settings = Settings.isolated();

@@ -71,7 +71,6 @@ function makeConfig(overrides: Partial<HindsightConfig> = {}): HindsightConfig {
 		retainTimeoutMs: 60_000,
 		mentalModelsEnabled: false,
 		mentalModelAutoSeed: false,
-		mentalModelRefreshIntervalMs: 5 * 60 * 1000,
 		mentalModelMaxRenderChars: 16_000,
 		...overrides,
 	};
@@ -218,8 +217,11 @@ describe("Hindsight tool factories", () => {
 		expect(MemoryReflectTool.createIf(session)).toBeNull();
 	});
 
-	it("retain/recall/reflect factories return tool instances when memory.backend === hindsight", () => {
-		const settings = Settings.isolated({ "memory.backend": "hindsight" });
+	it("retain/recall/reflect factories return tool instances when Hindsight is configured", () => {
+		const settings = Settings.isolated({
+			"memory.backend": "hindsight",
+			"hindsight.apiUrl": "http://localhost:8888",
+		});
 		const session = makeSession(settings);
 		expect(MemoryRetainTool.createIf(session)).toBeInstanceOf(MemoryRetainTool);
 		expect(MemoryRecallTool.createIf(session)).toBeInstanceOf(MemoryRecallTool);
@@ -412,6 +414,55 @@ describe("retain.execute (Mnemopi backend)", () => {
 		expect(text).toContain("fact one");
 		expect(text).toContain("fact two");
 		expect(text).toContain("fact three");
+	});
+
+	// A failed write stored nothing, so reporting the whole batch as stored
+	// misleads the caller about the failure, its cause, and what was kept.
+	it("reports what a batch stored and why a later write failed instead of claiming success", async () => {
+		const settings = Settings.isolated({ "memory.backend": "mnemopi" });
+		const state = registerMnemopiState();
+		const memory = state.getScopedRetainTarget().memory;
+		const remember = memory.remember.bind(memory);
+		const storedIds: string[] = [];
+		let writes = 0;
+		vi.spyOn(memory, "remember").mockImplementation((content, options) => {
+			writes += 1;
+			if (writes === 2) throw new Error("database or disk is full");
+			const id = remember(content, options);
+			storedIds.push(id);
+			return id;
+		});
+
+		const tool = MemoryRetainTool.createIf(makeSession(settings))!;
+		const error = await tool
+			.execute("call-mnemopi-partial", {
+				items: [{ content: "fact kept" }, { content: "fact lost" }, { content: "fact never tried" }],
+			})
+			.catch((caught: unknown) => caught);
+
+		expect(error).toBeInstanceOf(Error);
+		expect((error as Error).message).toContain("did not store item 2 of 3: database or disk is full.");
+		expect((error as Error).message).toContain(`item 1 (id ${storedIds[0]})`);
+		expect((error as Error).message).toContain("Later items were not attempted.");
+		expect(writes).toBe(2);
+		expect(memory.get(storedIds[0]!)).toMatchObject({ content: "fact kept" });
+	});
+
+	it("does not claim untried items when the last item of a batch fails", async () => {
+		const settings = Settings.isolated({ "memory.backend": "mnemopi" });
+		const state = registerMnemopiState();
+		vi.spyOn(state.getScopedRetainTarget().memory, "remember").mockImplementation(() => {
+			throw new Error("database or disk is full");
+		});
+
+		const tool = MemoryRetainTool.createIf(makeSession(settings))!;
+		const error = await tool
+			.execute("call-mnemopi-last", { items: [{ content: "only fact" }] })
+			.catch((caught: unknown) => caught);
+
+		expect(error).toBeInstanceOf(Error);
+		expect((error as Error).message).toContain("item 1 of 1: database or disk is full. Nothing was stored.");
+		expect((error as Error).message).not.toContain("Later items");
 	});
 
 	it("isolates memories between projects when scoping is per-project", async () => {
@@ -925,9 +976,10 @@ describe("Mnemopi backend lifecycle", () => {
 		await state.dispose({ timeoutMs: BUDGET_MS });
 		const elapsedMs = (Bun.nanoseconds() - start) / 1_000_000;
 
-		// Dispose must surrender within the budget (plus a generous slack); the
-		// in-flight consolidate is detached, not awaited.
-		expect(elapsedMs).toBeLessThan(BUDGET_MS * 5);
+		// Dispose must surrender within the budget; the in-flight consolidate is
+		// detached, not awaited. The ceiling is only there to catch a hang, so
+		// it absorbs a full second of timer/scheduling delay on a loaded runner.
+		expect(elapsedMs).toBeLessThan(BUDGET_MS + 1_000);
 		expect(elapsedMs).toBeGreaterThanOrEqual(BUDGET_MS - 10);
 		expect(flushSpy).toHaveBeenCalled();
 		expect(flushCalls).toBe(1);
@@ -995,24 +1047,27 @@ describe("Mnemopi backend lifecycle", () => {
 		}
 	});
 
-	it("dispose with no timeoutMs retains, flushes, and closes without sleeping (#3641)", async () => {
-		const state = registerMnemopiState();
-		const retainMemory = state.getScopedRetainTarget().memory;
-		const flushSpy = vi.spyOn(retainMemory, "flushExtractions").mockResolvedValue();
-		const sleepSpy = vi.spyOn(retainMemory, "sleep");
-		const closeSpy = vi.spyOn(retainMemory, "close");
+	it.each([{}, { retain: false }])(
+		"unbounded dispose drains and closes without sleeping (options: %j)",
+		async options => {
+			const state = registerMnemopiState();
+			const retainMemory = state.getScopedRetainTarget().memory;
+			const flushSpy = vi.spyOn(retainMemory, "flushExtractions").mockResolvedValue();
+			const sleepSpy = vi.spyOn(retainMemory, "sleep");
+			const closeSpy = vi.spyOn(retainMemory, "close");
 
-		await state.dispose();
+			await state.dispose(options);
 
-		// Unbounded dispose still runs the consolidate-then-close pipeline, but
-		// skips the synchronous bank sleep so the interactive shutdown path stays
-		// fast (#3641). Full consolidation remains reachable via `/memory enqueue`.
-		expect(flushSpy).toHaveBeenCalledTimes(1);
-		expect(sleepSpy).not.toHaveBeenCalled();
-		expect(closeSpy).toHaveBeenCalledTimes(1);
+			// Unbounded dispose still runs the consolidate-then-close pipeline, but
+			// skips the synchronous bank sleep so the interactive shutdown path stays
+			// fast (#3641). Full consolidation remains reachable via `/memory enqueue`.
+			expect(flushSpy).toHaveBeenCalledTimes(1);
+			expect(sleepSpy).not.toHaveBeenCalled();
+			expect(closeSpy).toHaveBeenCalledTimes(1);
 
-		registeredMnemopiState = undefined;
-	});
+			registeredMnemopiState = undefined;
+		},
+	);
 
 	it("dispose retains the current session without scheduling LLM fact extraction", async () => {
 		const state = registerMnemopiState();
@@ -1271,7 +1326,49 @@ describe("Mnemopi backend lifecycle", () => {
 		});
 	});
 
-	it("reports aborted searches and save-without-id failures", async () => {
+	it("redacts credentials in saved content and metadata context before they reach the bank", async () => {
+		const config = makeMnemopiConfig({ bank: "project-alpha", retainBank: "project-alpha" });
+		const state = registerMnemopiState(config, { cwd: "/work/project-alpha" });
+		const session = state.session;
+		setMnemopiSessionState(session, state);
+		const dbPath = state.memory.dbPath;
+		if (!dbPath) throw new Error("Expected a file-backed Mnemopi database");
+
+		const token = `npm_${"aB3dEfGh1JkLmN0pQrStUvWxYz2345678901".slice(0, 36)}`;
+		const save = await mnemopiBackend.save!(
+			{ agentDir: path.dirname(config.dbPath), cwd: "/work/project-alpha", session },
+			{
+				content: `publish the package with ${token}`,
+				source: "test-source",
+				context: `registry auth uses ${token}`,
+				importance: 0.8,
+			},
+		);
+		expect(save).toMatchObject({ backend: "mnemopi", stored: 1 });
+
+		const db = new Database(dbPath, { readonly: true });
+		const row = db
+			.prepare<{ content: string; embed_text: string | null; metadata_json: string | null }, []>(`
+				SELECT content, embed_text, metadata_json
+				FROM working_memory
+				WHERE source = 'test-source'
+			`)
+			.get();
+		const ftsHits = db
+			.prepare<{ count: number }, [string]>(`
+				SELECT COUNT(*) AS count FROM fts_working WHERE fts_working MATCH ?
+			`)
+			.get(token);
+		db.close();
+
+		expect(row).toBeDefined();
+		expect(row?.content).toBe("publish the package with [REDACTED]");
+		expect(row?.embed_text ?? "").not.toContain("npm_");
+		expect(JSON.parse(row?.metadata_json ?? "{}").context).toBe("registry auth uses [REDACTED]");
+		expect(ftsHits?.count ?? 0).toBe(0);
+	});
+
+	it("reports aborted searches and failed saves", async () => {
 		const state = registerMnemopiState();
 		const session = state.session;
 		setMnemopiSessionState(session, state);
@@ -1288,13 +1385,15 @@ describe("Mnemopi backend lifecycle", () => {
 			message: "Search aborted.",
 		});
 
-		const rememberSpy = vi.spyOn(state, "rememberScoped").mockReturnValue(undefined);
+		const rememberSpy = vi.spyOn(state, "rememberScoped").mockImplementation(() => {
+			throw new Error("database or disk is full");
+		});
 		await expect(
-			mnemopiBackend.save!({ agentDir: "/tmp/agent", cwd: "/tmp", session }, { content: "memory without id" }),
+			mnemopiBackend.save!({ agentDir: "/tmp/agent", cwd: "/tmp", session }, { content: "memory that fails" }),
 		).resolves.toMatchObject({
 			backend: "mnemopi",
 			stored: 0,
-			message: "Mnemopi did not return a stored memory id.",
+			message: "Mnemopi did not store the memory: database or disk is full",
 		});
 		rememberSpy.mockRestore();
 	});

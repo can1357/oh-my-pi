@@ -198,19 +198,25 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 
 		let path_to_open = self.absolute_path(path.as_ref());
 
-		// See if this is a reference to a file descriptor, in which case the actual
-		// /dev/fd* file path for this process may not match with what's in the
-		// execution parameters.
-		if let Some(parent) = path_to_open.parent()
-			&& parent == Path::new("/dev/fd")
-			&& let Some(filename) = path_to_open.file_name()
-			&& let Ok(fd_num) = filename.to_string_lossy().to_string().parse::<ShellFd>()
-			&& let Some(open_file) = params.try_fd(self, fd_num)
-		{
-			return open_file.try_clone();
+		// A path naming one of this process's descriptors resolves against the
+		// shell's descriptors. The process's own table is not the shell's: when
+		// the shell is embedded, fd 0 is the host's terminal, and a redirect that
+		// opened it would block on the host's keystrokes.
+		match openfiles::DescriptorPath::parse(&path_to_open) {
+			Some(descriptor @ openfiles::DescriptorPath::Fd(fd_num)) => params
+				.try_fd(self, fd_num)
+				.ok_or_else(|| descriptor.unavailable_error()),
+			// Mirrors `commands::child_session_action`: a command whose stdin is
+			// not a terminal runs with no controlling terminal.
+			Some(descriptor @ openfiles::DescriptorPath::Terminal)
+				if !params
+					.try_fd(self, openfiles::OpenFiles::STDIN_FD)
+					.is_some_and(|stdin| stdin.is_terminal()) =>
+			{
+				Err(descriptor.unavailable_error())
+			},
+			_ => Ok(options.open(path_to_open)?.into()),
 		}
-
-		Ok(options.open(path_to_open)?.into())
 	}
 
 	/// Replaces the shell's currently configured open files with the given set.

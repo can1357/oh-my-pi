@@ -94,6 +94,70 @@ describe("AgentSession session stats", () => {
 		expect(stats.assistantMessages).toBe(0);
 	});
 
+	it("keeps mixed peak and off-peak charges in session and footer totals after resume", async () => {
+		const target = modelRegistry.find("deepseek", "deepseek-v4-flash");
+		if (!target) throw new Error("Expected bundled DeepSeek Flash");
+		using tempDir = TempDir.createSync("@omp-session-mixed-cost-");
+		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		manager.appendMessage({ role: "user", content: "First request", timestamp: 1 });
+		for (const [timestamp, inputCost, outputCost] of [
+			[Date.parse("2026-09-10T03:59:59Z"), 0.3, 1.2],
+			[Date.parse("2026-09-10T04:00:00Z"), 0.15, 0.6],
+		]) {
+			manager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "Recorded response" }],
+				api: target.api,
+				provider: target.provider,
+				model: target.id,
+				timestamp,
+				stopReason: "stop",
+				usage: {
+					input: 1_000_000,
+					output: 1_000_000,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2_000_000,
+					cost: {
+						input: inputCost,
+						output: outputCost,
+						cacheRead: 0,
+						cacheWrite: 0,
+						total: inputCost + outputCost,
+					},
+				},
+			});
+		}
+		session = createStatsSession(manager, target);
+		expect(session.getSessionStats().cost).toBeCloseTo(2.25, 8);
+		// This is the production status line's cumulative usage aggregator.
+		expect(manager.getUsageStatistics().cost).toBeCloseTo(2.25, 8);
+		await manager.flush();
+		const file = manager.getSessionFile();
+		if (!file) throw new Error("Expected persisted session file");
+		await session.dispose();
+		session = undefined;
+		await manager.close();
+
+		const resumed = await SessionManager.open(file, undefined, undefined, {
+			initialCwd: tempDir.path(),
+			suppressBreadcrumb: true,
+		});
+		session = createStatsSession(resumed, target);
+		try {
+			expect(session.getSessionStats().cost).toBeCloseTo(2.25, 8);
+			expect(resumed.getUsageStatistics()).toMatchObject({
+				input: 2_000_000,
+				output: 2_000_000,
+				cost: 2.25,
+			});
+		} finally {
+			await session.dispose();
+			session = undefined;
+			await resumed.close();
+		}
+	});
+
 	it.each([
 		["reset", (manager: SessionManager) => manager.appendResetBoundary()],
 		[
