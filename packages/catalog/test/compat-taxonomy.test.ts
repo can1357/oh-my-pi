@@ -88,6 +88,22 @@ describe("classifyModel", () => {
 			logicalId: "qwen/qwq-32b",
 		});
 	});
+
+	test("reviewed Bonsai basenames and quantized namespaces retain their wire id and Qwen generation", () => {
+		for (const [model, revision] of [
+			["Bonsai-27B", "3.6.0"],
+			["PrismML/Ternary-Bonsai-27B-q2_0", "3.6.0"],
+			["local/prefix-Ternary-BONSAI-2-27B-Q5_K_S.gguf", "3.8.0"],
+		] as const) {
+			expect(classifyModel("custom-local", model)).toEqual({ class: "qwen", revision });
+		}
+	});
+
+	test("Bonsai override globs do not absorb adjacent model sizes", () => {
+		for (const model of ["bonsai-270b", "bonsai-2-270b", "ternary-bonsai-270b-q4_k_m.gguf", "namespace/bonsai-7b"]) {
+			expect(classifyModel("llama.cpp", model)).toEqual({ class: "unknown" });
+		}
+	});
 });
 
 describe("collapse and variant vocabulary", () => {

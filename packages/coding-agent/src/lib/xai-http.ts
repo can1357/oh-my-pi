@@ -78,16 +78,17 @@ function resolveXAIBaseURL(
 /**
  * Resolve an xAI tool endpoint and its provider/model header overrides.
  */
-export function resolveXAIHttpTransport(
+export async function resolveXAIHttpTransport(
 	modelRegistry: ModelRegistry,
 	provider: XAIHttpProvider,
 	modelId?: string,
-): XAIHttpTransport {
+): Promise<XAIHttpTransport> {
+	const model = modelId ? modelRegistry.find(provider, modelId) : undefined;
 	return {
 		baseURL: resolveXAIBaseURL(modelRegistry, provider, modelId),
-		headers:
-			(modelId ? modelRegistry.find(provider, modelId)?.headers : undefined) ??
-			modelRegistry.getProviderHeaders(provider),
+		headers: model
+			? await modelRegistry.resolveModelHeaders(model)
+			: await modelRegistry.getProviderHeaders(provider),
 	};
 }
 
@@ -110,7 +111,7 @@ export function resolveXAIHttpTransport(
  *      overrides for image/TTS traffic. The gate routes the borrow case to
  *      step 2 while preserving every dedicated xai-oauth path.
  *   2. xai (plain API key). Delegates to ModelRegistry.getApiKeyForProvider
- *      which runs AuthStorage.getApiKey's full cascade: runtime override →
+ *      which runs AuthStorage.keys.get's full cascade: runtime override →
  *      models.yml config override → stored api_key credential → OAuth
  *      resolution → XAI_API_KEY env var → custom fallback resolver.
  *
@@ -127,7 +128,8 @@ export async function resolveXAIHttpCredentials(
 	modelId?: string,
 ): Promise<XAICredentials | null> {
 	const hasDedicatedXaiOAuth =
-		modelRegistry.authStorage.hasNonEnvCredential("xai-oauth") || Boolean($env.XAI_OAUTH_TOKEN);
+		modelRegistry.authStorage.keys.source("xai-oauth", { env: "none" }) !== undefined ||
+		Boolean($env.XAI_OAUTH_TOKEN);
 	if (hasDedicatedXaiOAuth) {
 		const oauthKey = await modelRegistry.getApiKeyForProvider("xai-oauth");
 		if (oauthKey) {

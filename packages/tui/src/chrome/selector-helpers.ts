@@ -1,0 +1,119 @@
+/**
+ * Shared scaffolding for the TUI selector/list/dashboard components: viewport
+ * windowing, scrollbar-aware row widths, ScrollView rendering, selection
+ * clamping, search-character classification, tab-cycling keys, and full-screen
+ * padding. Behaviour is identical to the per-component copies these helpers
+ * replace.
+ */
+import { centeredViewportRange, scrollOffsetForRow, viewportOverflows } from "../components/scroll-viewport";
+import { extractPrintableText, matchesKey } from "../keys";
+import { ScrollView } from "../components/scroll-view";
+import { theme } from "../theme/index";
+/**
+ * Render `rows` through a {@link ScrollView} with the shared list theme (muted
+ * track / accent thumb) and an "auto" scrollbar, positioned at `scrollOffset`.
+ * Returns the rendered lines for the caller to append to its output.
+ */
+export function renderScrollableList(
+	rows: readonly string[],
+	options: { width: number; totalRows: number; scrollOffset: number },
+): readonly string[] {
+	const sv = new ScrollView(rows, {
+		height: rows.length,
+		scrollbar: "auto",
+		totalRows: options.totalRows,
+		theme: { track: t => theme.fg("muted", t), thumb: t => theme.fg("accent", t) },
+	});
+	sv.setScrollOffset(options.scrollOffset);
+	return sv.render(options.width);
+}
+
+/**
+ * Center a viewport window of `maxVisible` rows on `selectedIndex` within a
+ * list of `total` rows, clamped to valid bounds. Used by the selection-centered
+ * list panes (history search, tree selector).
+ */
+export function centeredWindow(
+	selectedIndex: number,
+	total: number,
+	maxVisible: number,
+): { startIndex: number; endIndex: number } {
+	const range = centeredViewportRange(selectedIndex, total, maxVisible);
+	return { startIndex: range.start, endIndex: range.end };
+}
+
+/**
+ * Width available for row content, reserving the rightmost column for the
+ * scrollbar when the list overflows its visible window.
+ */
+export function contentRowWidth(width: number, total: number, maxVisible: number): number {
+	return Math.max(0, width - (viewportOverflows(total, maxVisible) ? 1 : 0));
+}
+
+/**
+ * Clamp `selectedIndex` into `[0, total)` and nudge `scrollOffset` so the
+ * selection stays within the visible window of `maxVisible` rows. Returns the
+ * adjusted pair; on an empty list both reset to 0.
+ */
+export function clampSelection(
+	selectedIndex: number,
+	scrollOffset: number,
+	total: number,
+	maxVisible: number,
+): { selectedIndex: number; scrollOffset: number } {
+	if (total === 0) {
+		return { selectedIndex: 0, scrollOffset: 0 };
+	}
+
+	const selected = Math.max(0, Math.min(selectedIndex, total - 1));
+
+	const scroll = scrollOffsetForRow(scrollOffset, selected, total, maxVisible, "nearest");
+
+	return { selectedIndex: selected, scrollOffset: scroll };
+}
+
+/**
+ * Classify a key event for search-query text entry. Returns the single
+ * printable character to append to the query, or `null` when the key is not a
+ * searchable character: non-printable or multi-byte.
+ */
+export function searchableChar(data: string): string | null {
+	const printableText = extractPrintableText(data);
+	if (printableText && printableText.length === 1) {
+		const printableCharCode = printableText.charCodeAt(0);
+		if (printableCharCode > 32 && printableCharCode < 127) {
+			return printableText;
+		}
+	}
+	return null;
+}
+
+/**
+ * Handle the shared tab-cycling keys: Tab/Right advance to the next tab,
+ * Shift+Tab/Left to the previous. Invokes `switchTab` with the direction and
+ * returns true when the key was consumed.
+ */
+export function handleTabSwitchKey(data: string, switchTab: (direction: 1 | -1) => void): boolean {
+	if (matchesKey(data, "tab") || matchesKey(data, "right")) {
+		switchTab(1);
+		return true;
+	}
+	if (matchesKey(data, "shift+tab") || matchesKey(data, "left")) {
+		switchTab(-1);
+		return true;
+	}
+	return false;
+}
+
+/**
+ * Pad `lines` with blank rows up to `rows` so a full-screen overlay covers the
+ * viewport instead of letting the transcript peek through below it. Copies
+ * before padding — the source array may be component-owned and must not be
+ * mutated.
+ */
+export function padLinesToHeight(lines: readonly string[], rows: number): readonly string[] {
+	if (lines.length >= rows) return lines;
+	const padded = lines.slice();
+	while (padded.length < rows) padded.push("");
+	return padded;
+}

@@ -19,8 +19,9 @@ test("dry-balance resolves configured bare role names", async () => {
 	const model = fakeModel("acme", "balance-model");
 	const registry: DryBalanceModelRegistry = {
 		authStorage: {
-			getOAuthAccess: async () =>
-				({ accessToken: "test-token", email: "test@example.com" }) as unknown as OAuthAccess,
+			oauth: {
+				access: async () => ({ accessToken: "test-token", email: "test@example.com" }) as unknown as OAuthAccess,
+			},
 		},
 		getAll: () => [model],
 		getAvailable: () => [model],

@@ -1,4 +1,4 @@
-"""oh-my-pi — Bazel build for the native (Rust) side of the workspace.
+"""omp — Bazel build for the native (Rust) side of the workspace.
 
 Builds the pi_natives NAPI cdylib for every shipped target with hermetic
 toolchains, replacing cargo-zigbuild/cargo-xwin/sccache plus the hand-rolled
@@ -16,7 +16,7 @@ pipeline. `crate_universe` derives the Bazel dependency graph directly from
 Cargo.toml/Cargo.lock and the module annotations; no separate repin step is required.
 """
 
-module(name = "oh-my-pi")
+module(name = "omp")
 
 bazel_dep(name = "bazel_skylib", version = "1.8.2")
 bazel_dep(name = "platforms", version = "1.1.0")
@@ -165,40 +165,24 @@ crate.from_cargo(
     ],
 )
 
-# audiopus_sys builds its vendored opus via the `cmake` crate: give the build
-# script a PATH that resolves cmake/make (runner image, GH runners, NixOS, and
-# other dev hosts) and the policy override its old CMakeLists needs under CMake
-# 4.x. The patch pins CMAKE_INSTALL_LIBDIR=lib because the crate always links
-# from <prefix>/lib while CMake uses lib64 on some aarch64 systems. The cmake
-# crate picks up CC/CFLAGS from the Bazel cc toolchain on its own.
+# opusic-sys builds its bundled Opus via `cmake` and selects Ninja from PATH.
+# The target-specific toolchain keeps MSVC cross builds on the wrapper
+# compiler/linker; CFLAGS keeps Zig cross builds free of host UBSan links.
 crate.annotation(
     build_script_env = {
-        "CMAKE_POLICY_VERSION_MINIMUM": "3.5",
-        # Release artifacts must use the vendored Opus rather than a host
-        # pkg-config result whose library may not exist on the target system.
-        "OPUS_NO_PKG": "1",
-        # msvc cross only (cmake-rs reads VAR_<triple> before VAR; the key is
-        # inert for every other target): without a generator override cmake-rs
-        # insists on a Visual Studio generator for msvc targets, which cannot
-        # exist on linux/mac hosts. Ninja must be on the PATH below.
-        "CMAKE_GENERATOR_x86_64_pc_windows_msvc": "Ninja",
-        # msvc cross only: cmake's vs_link_exe insists on rc/mt tools for
-        # MSVC-ABI exe links (try_compile), which find_program can't locate on
-        # linux/mac PATH. @msvc_cc's toolchain.cmake pins compiler/linker/
-        # rc/mt to the wrapper dir (self-locating via CMAKE_CURRENT_LIST_DIR).
-        # $${pwd} → exec root in the rules_rust runner; the canonical repo
-        # path must track the repo rule/name in the msvc section below.
         "CMAKE_TOOLCHAIN_FILE_x86_64_pc_windows_msvc": "$${pwd}/external/+msvc_cc_repository+msvc_cc/toolchain.cmake",
-        # zig cc enables UBSan by default; cmake's try-compile links a test
-        # exe with the raw wrapper (no toolchain features), which would demand
-        # the UBSan runtime. Opus shipped without sanitizers under
-        # cargo-zigbuild too.
         "CFLAGS": "-fno-sanitize=undefined",
         "PATH": "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin:/run/current-system/sw/bin",
     },
-    crate = "audiopus_sys",
-    patch_args = ["-p1"],
-    patches = ["//bazel/patches:audiopus-sys-libdir.patch"],
+    crate = "opusic-sys",
+)
+
+# cargo-bazel omits workspace-local build dependencies from generated registry
+# build scripts; restore nix 0.28's edge to the patched cfg_aliases crate.
+crate.annotation(
+    build_script_deps = ["@@//crates/vendor/cfg_aliases:cfg_aliases"],
+    crate = "nix",
+    version = "0.28.0",
 )
 
 # Release addons must never pick up a host libpcre2 (Homebrew paths leaked into
@@ -239,6 +223,11 @@ msvc_cc = use_repo_rule("//bazel/toolchains/msvc:cc.bzl", "msvc_cc_repository")
 
 msvc_cc(name = "msvc_cc")
 
+# Swift toolchain probe for the Apple Foundation Models bridge in pi-natives.
+applefm_swift = use_repo_rule("//bazel/toolchains/swift:applefm.bzl", "applefm_swift_repository")
+
+applefm_swift(name = "applefm_swift")
+
 # blake3 assembles MASM .asm for x64 msvc targets; cc-rs resolves `ml64.exe`
 # from the build-script PATH on non-windows hosts. Prepend @msvc_cc's wrapper
 # dir (bin/ml64.exe → llvm-ml -m64; the dir rides into the sandbox with the
@@ -246,7 +235,7 @@ msvc_cc(name = "msvc_cc")
 # rules_rust build-script runner. The leading entry is the canonical repo path
 # of @msvc_cc (`+<repo rule>+<name>`) — keep in sync if the rule or repo in
 # this section is ever renamed. On non-msvc targets the dir simply does not
-# exist and the rest of the PATH matches the audiopus_sys annotation above.
+# exist and the rest of the PATH matches the opusic-sys annotation above.
 crate.annotation(
     build_script_env = {
         "PATH": "$${pwd}/external/+msvc_cc_repository+msvc_cc/bin:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin",

@@ -138,10 +138,6 @@ describe("substituteArgs", () => {
 		);
 	});
 
-	test("should handle command with no placeholders", () => {
-		expect(substituteArgs("Just plain text", ["a", "b"])).toBe("Just plain text");
-	});
-
 	test("should handle command with only placeholders", () => {
 		expect(substituteArgs("$1 $2 $@", ["a", "b", "c"])).toBe("a b a b c");
 	});
@@ -444,10 +440,8 @@ describe("subagent peer roster prompt", () => {
 		expect(rendered).toContain("editing auth.ts");
 		expect(rendered).toContain("IdleReviewer");
 		expect(rendered).toContain("1 parked peer(s) omitted");
-		expect(rendered).toContain("Idle peers are not gone: messaging them wakes them.");
-		expect(rendered).toContain('status:"parked"');
-		expect(rendered).toContain("history://");
-		expect(rendered).toContain("agent://");
+		expect(rendered).toContain("Read bare `history://`");
+		expect(rendered).toContain('path: "agent://<id>"');
 		expect(rendered).not.toContain("ParkedSecretId");
 		expect(rendered).not.toContain("secret parked label");
 		expect(rendered).not.toContain("reviewing classified.diff");

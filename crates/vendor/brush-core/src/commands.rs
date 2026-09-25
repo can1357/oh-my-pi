@@ -82,6 +82,11 @@ impl<SE: ShellExtensions> ExecutionContext<'_, SE> {
 	pub fn iter_fds(&self) -> impl Iterator<Item = (ShellFd, openfiles::OpenFile)> {
 		self.params.iter_fds(self.shell)
 	}
+
+	/// Iterates over all open file descriptors without duplicating them.
+	pub fn open_fds(&self) -> impl Iterator<Item = (ShellFd, &openfiles::OpenFile)> {
+		self.params.open_fds(self.shell)
+	}
 }
 
 /// An argument to a command.

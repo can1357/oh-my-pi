@@ -20,8 +20,50 @@ export type KnownApi =
 	| "ollama-chat"
 	| "cursor-agent"
 	| "gitlab-duo-agent"
-	| "devin-agent";
+	| "devin-agent"
+	| "apple-foundation-models";
 export type Api = KnownApi | (string & {});
+
+/** Catalog kinds used to isolate role-specific runners from session chat models. */
+export const MODEL_KINDS = [
+	"chat",
+	"tiny",
+	"image",
+	"tts",
+	"stt",
+	"search",
+	"judge",
+	"embedding",
+	"rerank",
+	"video",
+] as const;
+/** Technical capability of a catalog model; absent model kinds mean chat. */
+export type ModelKind = (typeof MODEL_KINDS)[number];
+/** Kinds a provider maps to a runner transport through `kind-apis` in its KDL; discovery drops rows of these kinds when the provider declares no API. */
+export const KIND_API_KINDS = ["image", "tts", "stt", "embedding", "rerank", "video"] as const;
+export type KindApiKind = (typeof KIND_API_KINDS)[number];
+/** Grounding transport available to chat models selected by the web role. */
+export type WebSearchGrounding = "gemini" | "anthropic" | "codex" | "xai" | "openrouter";
+/** Non-chat runner protocols accepted by catalog seeds, outside the chat dispatch union. */
+export const RUNNER_APIS = [
+	"local-inference",
+	"web-search",
+	"typesafe",
+	"openrouter-decisions",
+	"openai-images",
+	"openrouter-images",
+	"xai-tts",
+	"openai-speech",
+	"openai-embeddings",
+	"openrouter-rerank",
+	"openrouter-video",
+	"openai-transcriptions",
+] as const;
+
+/** Resolve a model's kind while preserving chat semantics for existing catalog rows. */
+export function modelKind(model: Pick<Model, "kind">): ModelKind {
+	return model.kind ?? "chat";
+}
 
 /** Canonical thinking transport used by a model. */
 export type ThinkingControlMode =
@@ -327,6 +369,12 @@ export interface OpenAICompat {
 	 * Default: auto-detected (DeepSeek reasoning models).
 	 */
 	disableReasoningOnToolChoice?: boolean;
+	/**
+	 * Disable reasoning whenever the request advertises function tools.
+	 * Use for model surfaces that reject every tools-plus-reasoning combination.
+	 * Default: false.
+	 */
+	disableReasoningWithTools?: boolean;
 	/** OpenRouter-specific routing preferences. Only used when baseUrl points to OpenRouter. */
 	openRouterRouting?: OpenRouterRouting;
 	/** Vercel AI Gateway routing preferences. Only used when baseUrl points to Vercel AI Gateway. */
@@ -421,12 +469,24 @@ export interface OpenAICompat {
 	strictResponsesPairing?: boolean;
 	/** Whether the Responses API accepts the `detail: "original"` image hint. Default: auto-detected (false for GitHub Copilot, which rejects it with a 400). */
 	supportsImageDetailOriginal?: boolean;
+	/**
+	 * Whether the Responses endpoint accepts `configuration_update` input items
+	 * that change `reasoning.effort` mid-conversation while the request-level
+	 * effort stays pinned for prompt caching (GPT-6 Astra). Default:
+	 * rule-detected (`true` for `gpt-6-astra` on any host, `false` otherwise).
+	 * Set `false` for custom `openai-responses` / `openai-codex-responses`
+	 * endpoints that reject the item type with HTTP 400; effort changes are then
+	 * sent as the top-level `reasoning.effort`.
+	 */
+	supportsConfigurationUpdate?: boolean;
 	/** Whether streamed reasoning deltas for the same field may repeat the full cumulative text snapshot. Default: false. */
 	reasoningDeltasMayBeCumulative?: boolean;
 	/** Strip leaked DeepSeek chat-template special tokens from visible content deltas. Default: auto-detected. */
 	stripDeepseekSpecialTokens?: boolean;
 	/** Heal leaked chat-template/tool-call/thinking markup from visible content deltas. Default: auto-detected. */
 	streamMarkupHealingPattern?: OpenAIStreamMarkupHealingPattern;
+	/** Whether this wire may revise already-streamed text (`stream-revision` axis). Unassigned: append-only. */
+	streamRevision?: "none" | "possible";
 	/** Treat an empty length-finished stream as a context-window error. Default: auto-detected. */
 	emptyLengthFinishIsContextError?: boolean;
 	/** Normalize tool call ids to OpenAI's 40-character limit. Default: auto-detected. */
@@ -459,6 +519,20 @@ export interface OpenAICompat {
 export interface AnthropicCompat {
 	/** Whether thinking requests may include `context_management` and its beta header. Default: true. */
 	supportsContextManagement?: boolean;
+	/**
+	 * Whether the model and host support Anthropic on-demand compaction
+	 * (`compact-2026-09-04` requests and signed replay). Enabled on Opus 4.6+,
+	 * Sonnet 4.6+, Fable/Mythos 5+ on supported hosts. Default: false.
+	 */
+	supportsServerCompaction?: boolean;
+	/**
+	 * Whether the model is served by the first-party Anthropic provider (its
+	 * default route is the official API). Rule-owned on the provider; the
+	 * compaction transport pairs it with a per-request effective-URL check
+	 * because reroutes leave it stale-true. Vertex is selected by its provider
+	 * contract instead. Default: false.
+	 */
+	firstPartyProvider?: boolean;
 	/**
 	 * Whether requests may carry `output_config.effort` (and its effort beta
 	 * header). Vertex AI rejects the field/header. Default: true.
@@ -585,6 +659,8 @@ export interface AnthropicCompat {
 export interface BedrockCompat {
 	/** Whether this endpoint accepts no checkpoints, automatic caching, or explicit cachePoint blocks. */
 	promptCacheMode?: "none" | "automatic" | "explicit";
+	/** Whether this wire may revise already-streamed text (`stream-revision` axis). Unassigned: append-only. */
+	streamRevision?: "none" | "possible";
 	/** Whether explicit cachePoint blocks accept `ttl: "1h"`; omitted TTL means Bedrock's 5-minute default. */
 	supportsLongPromptCacheRetention?: boolean;
 	/**
@@ -609,6 +685,8 @@ export interface BedrockCompat {
 /** Fully-resolved Bedrock Converse prompt-cache capabilities, materialized once by `buildModel`. */
 export interface ResolvedBedrockCompat {
 	promptCacheMode: NonNullable<BedrockCompat["promptCacheMode"]>;
+	/** See {@link BedrockCompat.streamRevision}. */
+	streamRevision?: BedrockCompat["streamRevision"];
 	supportsLongPromptCacheRetention: boolean;
 	promptCacheMinimumTokens: number;
 	promptCacheMaximumCheckpoints: number;
@@ -674,6 +752,7 @@ export interface ResolvedOpenAISharedCompat {
 	filterReasoningHistory: boolean;
 	disableReasoningOnForcedToolChoice: boolean;
 	disableReasoningOnToolChoice: boolean;
+	disableReasoningWithTools?: boolean;
 	supportsToolChoice: boolean;
 	supportsForcedToolChoice: boolean;
 	supportsNamedToolChoice: boolean;
@@ -691,6 +770,8 @@ export interface ResolvedOpenAISharedCompat {
 	requiresAssistantContentForToolCalls: boolean;
 	stripDeepseekSpecialTokens: boolean;
 	streamMarkupHealingPattern?: OpenAIStreamMarkupHealingPattern;
+	/** See {@link OpenAICompat.streamRevision}. */
+	streamRevision?: OpenAICompat["streamRevision"];
 	/** See {@link OpenAICompat.streamFirstEventTimeoutMs}. */
 	streamFirstEventTimeoutMs?: number;
 	reasoningDeltasMayBeCumulative: boolean;
@@ -751,6 +832,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "filterReasoningHistory"
 			| "disableReasoningOnForcedToolChoice"
 			| "disableReasoningOnToolChoice"
+			| "disableReasoningWithTools"
 			| "supportsToolChoice"
 			| "supportsForcedToolChoice"
 			| "supportsNamedToolChoice"
@@ -787,10 +869,12 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "toolSchemaFlavor"
 			| "streamFirstEventTimeoutMs"
 			| "streamIdleTimeoutMs"
+			| "streamRevision"
 			| "cacheControlFormat"
 			| "thinkingKeep"
 			| "strictResponsesPairing"
 			| "supportsImageDetailOriginal"
+			| "supportsConfigurationUpdate"
 			| "stripImageInput"
 			| "thinkingLoopGuard"
 			| "whenThinking"
@@ -879,6 +963,13 @@ export type ResolvedAnthropicCompat = Required<Omit<AnthropicCompat, "streamIdle
 	 * env headers, and cache-TTL shaping without per-request URL parsing.
 	 */
 	officialEndpoint: boolean;
+	/**
+	 * The model is served by the first-party Anthropic provider. Unlike
+	 * `officialEndpoint` (URL-derived per deployment), this is provider
+	 * identity for compaction gating, always paired with a per-request
+	 * effective-URL check.
+	 */
+	firstPartyProvider: boolean;
 };
 
 /**
@@ -1029,9 +1120,30 @@ export interface LongContextTokenCost extends TokenCost {
 	inputThresholdInclusive?: boolean;
 }
 
-/** Base token rates plus an optional long-context tier. */
+/** Recurring UTC peak interval; weekdays use Sunday = 0, and the end is exclusive. */
+export interface PeakPricingWindow {
+	weekdays: readonly number[];
+	startMinute: number;
+	endMinute: number;
+}
+
+/** Complete replacement rate card effective from a Unix-millisecond timestamp. */
+export interface EffectiveTokenCost extends TokenCost {
+	effectiveFrom: number;
+	longContext?: LongContextTokenCost;
+}
+
+/** Scheduled discounts applied after selecting the effective rate card and context tier. */
+export interface TimeBasedCost {
+	offPeakMultiplier: number;
+	peakWindows: readonly PeakPricingWindow[];
+	effectiveRates?: readonly EffectiveTokenCost[];
+}
+
+/** Base token rates plus optional long-context and time-based pricing. */
 export interface ModelCost extends TokenCost {
 	longContext?: LongContextTokenCost;
+	timeBased?: TimeBasedCost;
 }
 
 /**
@@ -1052,9 +1164,23 @@ export type ModelTokenizer =
 	| "kimi-k2"
 	| "glm5";
 
+/** One account's discovered entitlements on a model; see {@link Model.accountAccess}. */
+export interface ModelAccountAccess {
+	/**
+	 * Codex `available_access_programs.cyber`: cyber access programs this account
+	 * may request on the model (`standard`, `daybreak_blue`, `daybreak_red`).
+	 * Absent when the backend reported no program metadata.
+	 */
+	cyberPrograms?: readonly string[];
+}
+
 // Model interface for the unified model system
 export interface Model<TApi extends Api = Api> {
 	id: string;
+	/** Role-specific runner capability; omitted for ordinary chat models. */
+	kind?: ModelKind;
+	/** Grounding transport supported by this chat model. */
+	webSearch?: WebSearchGrounding;
 	/**
 	 * Structured model identity resolved by the compat engine: vendor lineage
 	 * class, product family, and revision. Baked into models.json rows and
@@ -1069,6 +1195,15 @@ export interface Model<TApi extends Api = Api> {
 	requiresGlyphTokenization?: boolean;
 	/** Whether this model requires Cursor's tool-schema combiner projection. */
 	requiresCursorToolSchemaProjection?: boolean;
+	/** Whether this model requires tool-result images hoisted into sibling user content blocks. */
+	requiresToolResultImageHoisting?: boolean;
+	/**
+	 * Whether the host continues a trailing assistant message verbatim instead of
+	 * treating it as a completed turn (Ollama, on both its native and OpenAI-compat
+	 * endpoints). Callers that need a committed output prefix (session titling)
+	 * read this before appending one. Rule-owned via `supports-assistant-prefill`.
+	 */
+	supportsAssistantPrefill?: boolean;
 	/**
 	 * Model id to send on the wire when it differs from `id`. Used by catalog
 	 * variants that present one upstream model under several local entries —
@@ -1088,6 +1223,12 @@ export interface Model<TApi extends Api = Api> {
 	name: string;
 	api: TApi;
 	provider: Provider;
+	/**
+	 * Discovery backend whose catalog policy applies when it differs from the
+	 * credential-bearing provider id. Persisted so cached and rebuilt custom
+	 * providers retain their transport backend's policy.
+	 */
+	providerType?: string;
 	baseUrl: string;
 	reasoning: boolean;
 	/**
@@ -1117,6 +1258,25 @@ export interface Model<TApi extends Api = Api> {
 	gitlabDuoWorkflowRootNamespaceId?: string;
 	/** Cursor `max_mode` request flag returned by `GetUsableModels` for premium models that require max mode. */
 	cursorMaxMode?: boolean;
+	/**
+	 * Per-wire-id `max_mode` markers for the members a collapsed Cursor row
+	 * routes to, recorded by `collapseVariants` from live `GetUsableModels`
+	 * rows. {@link cursorMaxMode} on a collapsed row is an OR across members,
+	 * so it cannot tell a `-low` route that needs no max mode from an Opus
+	 * `-fast` route that does; transports look the routed wire id up here
+	 * first. Absent on raw rows (their own `cursorMaxMode` already describes
+	 * their single wire id) and on bundled snapshots that predate discovery.
+	 */
+	cursorMaxModeRoutes?: Readonly<Record<string, boolean>>;
+	/**
+	 * Per-account availability recorded by multi-account discovery: provider
+	 * account id (Codex: ChatGPT `chatgpt_account_id`) → that account's
+	 * entitlements on this model. An account appears only when its own catalog
+	 * lists the model, so credential selection can route account-gated models
+	 * (e.g. `gpt-daybreak-blue-latest`) straight to eligible accounts. Absent on
+	 * bundled/config rows and on single-account discovery.
+	 */
+	accountAccess?: Readonly<Record<string, ModelAccountAccess>>;
 	cost: ModelCost;
 	/** Premium Copilot requests charged per user-initiated request (defaults to 1). */
 	premiumMultiplier?: number;
@@ -1137,6 +1297,12 @@ export interface Model<TApi extends Api = Api> {
 	 */
 	omitMaxOutputTokens?: boolean;
 	headers?: Record<string, string>;
+	/**
+	 * Materialize config-backed headers immediately before a request. Catalog
+	 * inspection never invokes this hook; transports receive a cloned model
+	 * whose `headers` is a plain resolved record and whose hook is removed.
+	 */
+	resolveHeaders?: (signal?: AbortSignal) => Promise<Record<string, string> | undefined>;
 	/**
 	 * Streaming transport override. When `"pi-native"`, `streamSimple` routes
 	 * the request to the model's `baseUrl` via the auth-gateway's
@@ -1250,6 +1416,8 @@ export interface ModelSpec<TApi extends Api = Api> extends Omit<
 	| "compatConfig"
 	| "requiresGlyphTokenization"
 	| "requiresCursorToolSchemaProjection"
+	| "requiresToolResultImageHoisting"
+	| "supportsAssistantPrefill"
 	| "supportsComputerUseConfig"
 > {
 	/** Sparse compatibility overrides; resolved into `Model.compat` by `buildModel`. */

@@ -244,6 +244,36 @@ describe("MCP Streamable HTTP transport timeouts", () => {
 		});
 	});
 
+	it("uses one deadline across delayed SSE headers and a stalled response body", async () => {
+		// Real time is required here: fake timers do not drive Bun's fetch/socket
+		// abort path, and elapsed time is the end-to-end contract under test.
+		const timeoutMs = 250;
+		const headerDelayMs = 160;
+		server = Bun.serve({
+			port: 0,
+			async fetch() {
+				await Bun.sleep(headerDelayMs);
+				return stalledBodyResponse(": accepted\n\n", {
+					headers: { "Content-Type": "text/event-stream" },
+				});
+			},
+		});
+		const transport = await connectedTransport(timeoutMs);
+		const startedAt = performance.now();
+
+		try {
+			await expect(withPendingGuard(transport.request("tools/list"), "SSE request")).rejects.toMatchObject({
+				transport: "http",
+				stage: "receive",
+				failure: "timeout",
+				retryable: false,
+			});
+			expect(performance.now() - startedAt).toBeLessThan(timeoutMs + 100);
+		} finally {
+			await transport.close();
+		}
+	});
+
 	it("keeps the timeout result when the caller aborts before the JSON body rejection propagates", async () => {
 		vi.useFakeTimers();
 		const caller = new AbortController();
@@ -393,6 +423,137 @@ describe("MCP Streamable HTTP transport timeouts", () => {
 		await withPendingGuard(closing, "transport close");
 	});
 
+	it("preserves caller cancellation when it wins a stalled SSE response", async () => {
+		const requestReceived = Promise.withResolvers<void>();
+		const caller = new AbortController();
+		server = Bun.serve({
+			port: 0,
+			fetch() {
+				requestReceived.resolve();
+				return stalledBodyResponse(": accepted\n\n", {
+					headers: { "Content-Type": "text/event-stream" },
+				});
+			},
+		});
+		const transport = await connectedTransport(GUARD_TIMEOUT_MS);
+
+		try {
+			const request = transport.request("tools/list", undefined, { signal: caller.signal });
+			await requestReceived.promise;
+			const nextTurn = Promise.withResolvers<void>();
+			setImmediate(nextTurn.resolve);
+			await nextTurn.promise;
+			caller.abort();
+
+			const error = await withPendingGuard(request, "caller-aborted SSE request").then(
+				() => undefined,
+				reason => reason,
+			);
+			expect(error).toMatchObject({ name: "AbortError" });
+			expect(error).not.toBeInstanceOf(MCPTransportError);
+		} finally {
+			await transport.close();
+		}
+	});
+
+	it("keeps draining an accepted request stream after its caller aborts", async () => {
+		const caller = new AbortController();
+		const notificationReceived = Promise.withResolvers<void>();
+		const sendNotification = Promise.withResolvers<void>();
+		server = Bun.serve({
+			port: 0,
+			async fetch(req) {
+				const body = (await req.json()) as { id: string | number };
+				let cancelled = false;
+				return new Response(
+					new ReadableStream<Uint8Array>({
+						start(controller) {
+							controller.enqueue(
+								encoder.encode(`data: {"jsonrpc":"2.0","id":${JSON.stringify(body.id)},"result":{}}\n\n`),
+							);
+							void sendNotification.promise.then(() => {
+								if (cancelled) return;
+								try {
+									controller.enqueue(
+										encoder.encode('data: {"jsonrpc":"2.0","method":"notifications/progress"}\n\n'),
+									);
+									controller.close();
+								} catch {
+									// The negative path intentionally cancels the client stream.
+								}
+							});
+						},
+						cancel() {
+							cancelled = true;
+						},
+					}),
+					{ headers: { "Content-Type": "text/event-stream" } },
+				);
+			},
+		});
+		const transport = await connectedTransport(GUARD_TIMEOUT_MS);
+		transport.onNotification = method => {
+			if (method === "notifications/progress") notificationReceived.resolve();
+		};
+
+		try {
+			await transport.request("tools/list", undefined, { signal: caller.signal });
+			caller.abort();
+			sendNotification.resolve();
+			await withPendingGuard(notificationReceived.promise, "post-response notification");
+		} finally {
+			await transport.close();
+		}
+	});
+
+	it("keeps draining an accepted notification stream past the POST deadline", async () => {
+		const notificationReceived = Promise.withResolvers<void>();
+		const sendNotification = Promise.withResolvers<void>();
+		server = Bun.serve({
+			port: 0,
+			fetch() {
+				let cancelled = false;
+				return new Response(
+					new ReadableStream<Uint8Array>({
+						start(controller) {
+							controller.enqueue(encoder.encode(": accepted\n\n"));
+							void sendNotification.promise.then(() => {
+								if (cancelled) return;
+								try {
+									controller.enqueue(
+										encoder.encode('data: {"jsonrpc":"2.0","method":"notifications/progress"}\n\n'),
+									);
+									controller.close();
+								} catch {
+									// The negative path intentionally cancels the client stream.
+								}
+							});
+						},
+						cancel() {
+							cancelled = true;
+						},
+					}),
+					{ headers: { "Content-Type": "text/event-stream" } },
+				);
+			},
+		});
+		const transport = await connectedTransport();
+		transport.onNotification = method => {
+			if (method === "notifications/progress") notificationReceived.resolve();
+		};
+
+		try {
+			await transport.notify("notifications/initialized");
+			// Let the former read timeout expire on the real fetch/body stream,
+			// then prove the accepted response remains owned by the transport.
+			await Bun.sleep(REQUEST_TIMEOUT_MS * 2);
+			sendNotification.resolve();
+			await withPendingGuard(notificationReceived.promise, "notification response drain");
+		} finally {
+			await transport.close();
+		}
+	});
+
 	it("keeps an abandoned SSE request rejection observed after caller cancellation", async () => {
 		const requestReceived = Promise.withResolvers<void>();
 		const caller = new AbortController();
@@ -495,6 +656,65 @@ describe("MCP Streamable HTTP protocol version header", () => {
 });
 
 describe("MCP Streamable HTTP POST response resumption", () => {
+	it("reports a timeout when a resumed HTTP error body stalls", async () => {
+		let posts = 0;
+		server = Bun.serve({
+			port: 0,
+			fetch(req) {
+				if (req.method === "POST") {
+					posts++;
+					return new Response("id: stream-1\nretry: 0\ndata:\n\n", {
+						headers: { "Content-Type": "text/event-stream" },
+					});
+				}
+				return stalledBodyResponse("unavailable", { status: 503 });
+			},
+		});
+		const transport = await connectedTransport();
+		try {
+			await expect(
+				withPendingGuard(transport.request("tools/call"), "stalled resume error body"),
+			).rejects.toMatchObject({
+				failure: "timeout",
+				retryable: false,
+			});
+			expect(posts).toBe(1);
+		} finally {
+			await transport.close();
+		}
+	});
+
+	it("bounds resumed-stream auth refresh by the original request deadline", async () => {
+		const refresh = Promise.withResolvers<Record<string, string> | null>();
+		let posts = 0;
+		server = Bun.serve({
+			port: 0,
+			fetch(req) {
+				if (req.method === "POST") {
+					posts++;
+					return new Response("id: stream-1\nretry: 0\ndata:\n\n", {
+						headers: { "Content-Type": "text/event-stream" },
+					});
+				}
+				return new Response("expired", { status: 401 });
+			},
+		});
+		const transport = await connectedTransport();
+		transport.onAuthError = () => refresh.promise;
+		try {
+			await expect(
+				withPendingGuard(transport.request("tools/call"), "stalled resume auth refresh"),
+			).rejects.toMatchObject({
+				failure: "timeout",
+				retryable: false,
+			});
+			expect(posts).toBe(1);
+		} finally {
+			refresh.resolve(null);
+			await transport.close();
+		}
+	});
+
 	it("resumes a closed response stream with Last-Event-ID after the requested retry delay", async () => {
 		const observed: {
 			lastEventId: string | null;
