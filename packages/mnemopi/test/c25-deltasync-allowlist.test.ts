@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Mnemopi } from "@oh-my-pi/pi-mnemopi/core/memory";
-import { ALLOWED_DELTA_TABLES, DeltaSync, SyncCheckpoint } from "@oh-my-pi/pi-mnemopi/core/streaming";
+import { DeltaSync, SyncCheckpoint } from "@oh-my-pi/pi-mnemopi/core/streaming";
 
 const roots: string[] = [];
 
@@ -30,11 +30,6 @@ afterEach(() => {
 });
 
 describe("C25 DeltaSync table allowlist", () => {
-	it("keeps the public table allowlist explicit", () => {
-		expect(ALLOWED_DELTA_TABLES).toBeInstanceOf(Set);
-		expect([...ALLOWED_DELTA_TABLES].sort()).toEqual(["episodic_memory", "working_memory"]);
-	});
-
 	it("accepts allowed tables and rejects unknown, injected, and non-string table values", () => {
 		const { memory, root } = seededMemory();
 		try {

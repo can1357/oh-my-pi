@@ -16,7 +16,7 @@ describe("auth-gateway RouteRegistry wiring", () => {
 		registerMockApi();
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-route-wire-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-		storage.setRuntimeApiKey("openrouter", "test-key");
+		storage.keys.setRuntime("openrouter", "test-key");
 		// The catalog resolves the bare id to a provider-qualified model;
 		// dispatch must serve the compiled target end to end.
 		const mock = createMockModel({ provider: "openrouter", id: "mock/concrete-target" });

@@ -15,7 +15,7 @@ async function boot(id: string) {
 	registerMockApi();
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-commit-wire-"));
 	const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-	storage.setRuntimeApiKey("openrouter", "test-key");
+	storage.keys.setRuntime("openrouter", "test-key");
 	const mock = createMockModel({ provider: "openrouter", id });
 	mock.push({ content: ["hello"] });
 	const handle = startAuthGateway({

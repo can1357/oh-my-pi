@@ -27,6 +27,14 @@ Retry and compaction are checked from the same `agent_end` path, but they are in
 
 So: overload/rate/server/network-style failures use this retry policy; context-window overflow uses compaction recovery.
 
+### Responses request-body-read timeout exception
+
+An exact OpenAI Responses HTTP 408 whose error text says `Timed out reading request body` is special only when the provider recorded that the **actual submitted request** was a full replay, not a `previous_response_id` delta. The transport surfaces that full-replay case after the first response. Delta and unknown/legacy request shapes retain ordinary transport retry behavior: mutating history after a delta can force a larger full replay, so automatic local elision must not infer safety from the diagnostic alone. Before any full-replay recovery, the session preserves the normal replay-safety veto and retry budget, requires enabled compaction with `shake` in `compaction.methodOrder`, then performs one conservative, artifact-backed local `shake elide`. The one-shot marker is scoped to the logical prompt sequence; prompt generation remains the cancellation/session-transition fence. A retry occurs only when that operation rewrote eligible history; disabled, no-progress, artifact-save failure, cancellation, an exhausted retry budget, or a second matching error terminates the turn without an unchanged replay.
+
+Automatic request-body-timeout recovery elides only eligible tool-result text. It never rewrites assistant/user text, fenced/XML blocks, reasoning, images, or native Responses replay payloads; a session with no eligible tool result terminates rather than submitting another unchanged request.
+
+This is not context-overflow or payload-rejection handling and does not establish a provider byte limit or gateway cause. It never walks configured compaction methods, so it does not select remote compaction, handoff, or snapcompact; ordinary 408/429/5xx retries remain unchanged.
+
 ## Retry classification
 
 `TurnRecovery.isRetryableError(...)` requires all of the following:
@@ -148,12 +156,20 @@ On `auto_retry_end` (`#handleAutoRetryEnd`), it stops and clears the `retryLoade
 
 `prompt()` ultimately waits on `#waitForPostPromptRecovery()` after `agent.prompt(...)` returns; that loop awaits the retry lifecycle promise alongside TTSR resume and deferred post-prompt tasks.
 
-Effect:
+The retry lifecycle promise belongs to the logical prompt execution, but its resolution is not a persistence or event-delivery barrier. Core event subscribers run asynchronously: successful retry recovery can still be rewriting persisted error annotations before it emits `auto_retry_end`, even after the retry promise resolves.
 
-- a prompt call does not fully resolve until any started retry chain finishes (success/failure/cancel)
-- retry lifecycle is part of one logical prompt execution boundary
+Headless callers that detach listeners or dispose the session after a prompt should wait for session settlement first:
 
-This prevents callers from treating a retrying turn as complete too early.
+```ts
+await session.prompt(input);
+await session.waitForIdle();
+unsubscribe();
+await session.dispose();
+```
+
+`AgentSession.waitForIdle()` drains core streaming, pending advisor card events, internal session event handlers, and deferred recovery. It rechecks for streaming and event handlers started during settlement. This keeps a successful retry's `auto_retry_end` observable before the caller unsubscribes, without changing retry policy or the ordering of `agent_end` relative to `auto_retry_end`.
+
+This barrier does not await arbitrary asynchronous work started by public subscribers. Call it outside callbacks whose completion the session itself awaits; otherwise the drain can wait on its own caller. The barrier has no timeout of its own, so hosts still need an external deadline for stalled work.
 
 ## Controls: settings and RPC
 
@@ -174,7 +190,7 @@ Defined in settings schema under retry group:
 
 Programmatic toggles in session:
 
-- `setAutoRetryEnabled(enabled)` writes `retry.enabled`
+- `setAutoRetryEnabled(enabled)` applies a session-scoped `retry.enabled` override; pass `persist: true` to write the global setting
 - `autoRetryEnabled` reads `retry.enabled`
 - `isRetrying` reports whether retry lifecycle promise is active
 
@@ -196,8 +212,20 @@ Session-level retry events:
 
 - `auto_retry_start { attempt, maxAttempts, delayMs, errorMessage, errorId? }`
 - `auto_retry_end { success, attempt, finalError?, retryErrors? }`
-- `retry_fallback_applied { from, to, role }`
+- `retry_fallback_applied { from, to, role, reason? }`
 - `retry_fallback_succeeded { model, role }`
+
+`from`, `to`, and `role` retain their existing selector semantics.
+The optional `reason` explains the decision using the triggering health snapshot
+or provider error. The TUI displays a sanitized, bounded preview below the
+source-to-target warning; extensions and RPC receive the complete reason.
+Usage preflight notices distinguish plan-ineligible accounts, exhausted or
+blocked accounts, and the configured reserve threshold. They include the time
+until the earliest reported future reset when available,
+and state that no request was sent to the source model for that attempt.
+Startup quota skips use the same explanation in `modelFallbackMessage`.
+Request-failure notices include the provider's error instead of implying a
+preflight skip.
 
 On success, `auto_retry_end` also carries additive `retryErrors`: one `RetryErrorUpdate` (`entryId`, `persistenceKey?`, `note`, `retryRecovery`) per persisted error entry left behind by the retry chain, recording how recovery happened (`recovery`: `plain`/`wait`/`credential`/`model`, plus a human-readable `note` such as `rate-limited; switched account; retried`) and which successful message superseded each error (`supersededBy` with timestamp/provider/model/responseId). Extensions and RPC consumers receive the same fields.
 

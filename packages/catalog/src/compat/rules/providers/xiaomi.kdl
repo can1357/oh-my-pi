@@ -1,6 +1,10 @@
 // Provider-wire compat for "xiaomi"; regenerated from the frozen census using deployment contract selectors.
 
 provider "xiaomi" {
+	default-model "mimo-v2.5"
+	env "XIAOMI_API_KEY"
+	discovery label="Xiaomi"
+
 	class "mimo" {
 		family "v2" {
 			allows-synthetic-reasoning-content-for-tool-calls #false

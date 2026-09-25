@@ -1,5 +1,11 @@
 import type { ElementHandle, JSHandle, Page } from "puppeteer-core";
-import { ToolError } from "../../tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import {
+	type AriaHrefMap,
+	collectAriaSnapshotRefs,
+	postProcessAriaSnapshot,
+	type SnapshotPostProcessOptions,
+} from "../snapshot-plus";
 import ariaBundle from "./aria-snapshot.bundle.txt" with { type: "text" };
 // `aria-snapshot.bundle.txt` is a generated, committed artifact: Playwright's
 // injected ARIA-snapshot sources (pinned, Apache-2.0) bundled to a CJS module.
@@ -7,11 +13,19 @@ import ariaBundle from "./aria-snapshot.bundle.txt" with { type: "text" };
 //   bun scripts/generate-aria-snapshot.ts
 // (fetches the pinned tag, bundles in a temp dir, rewrites the .txt artifact.)
 
-export interface AriaSnapshotOptions {
+export interface AriaSnapshotOptions extends SnapshotPostProcessOptions {
 	/** Maximum tree depth to render. */
 	depth?: number;
 	/** Append `[box=x,y,w,h]` bounding boxes to each node. */
 	boxes?: boolean;
+	/** Return a revisioned full, unchanged, or delta result. */
+	diff?: boolean;
+}
+
+/** Raw snapshot text and resolved link destinations produced in a browser realm. */
+export interface AriaSnapshotPayload {
+	snapshot: string;
+	hrefs: Record<string, string>;
 }
 
 /**
@@ -19,11 +33,12 @@ export interface AriaSnapshotOptions {
  * page CSP never applies. They run the generated Playwright ARIA-snapshot bundle
  * (CJS, see scripts/generate-aria-snapshot.ts) in a throwaway module scope.
  *
- * Puppeteer serializes these functions to a CDP `Runtime.evaluate` in the page's
- * MAIN world (the only world where the bundle's `_ariaRef` ref expandos live —
- * isolated-world locators/query-handlers cannot see them). Nothing is installed
- * on `window`; the only footprint is the `_ariaRef` markers the snapshot writes,
- * which are the price of actionable `[ref=eN]` ids.
+ * Our Puppeteer patch intentionally routes these unmarked functions through its
+ * isolated world. Capture and ref resolution therefore share the same stealthier
+ * `_ariaRef` expando namespace without exposing markers to page scripts. Nothing
+ * is installed on `window`; the only footprint is the isolated-world `_ariaRef`
+ * markers needed for actionable `[ref=eN]` ids. The cmux backend evaluates its
+ * standalone script in the page world, so refs are backend-local.
  */
 function buildEvaluator(params: string, call: string): (...args: unknown[]) => unknown {
 	return new Function(
@@ -36,6 +51,10 @@ function buildEvaluator(params: string, call: string): (...args: unknown[]) => u
 // passed positionally to page.evaluate, never ones nested inside an object.
 const evaluateAriaSnapshot = buildEvaluator("root, request", "ariaSnapshot(root, request)");
 const evaluateResolveRef = buildEvaluator("ref", "resolveAriaRef(ref)");
+const evaluateAriaHrefs = new Function(
+	"refs",
+	`var module = { exports: {} };\n${ariaBundle}\nvar hrefs = {}; for (var ref of refs) { var el = module.exports.resolveAriaRef(ref); if (el && el.tagName === "A" && el.href) hrefs[ref] = el.href; } return hrefs;`,
+) as unknown as (refs: string[]) => Record<string, string>;
 
 /**
  * Capture a Playwright-format ARIA snapshot of `root` (or the whole document when
@@ -49,13 +68,19 @@ export async function captureAriaSnapshot(
 	options: AriaSnapshotOptions = {},
 ): Promise<string> {
 	const request = { depth: options.depth, boxes: options.boxes };
-	return (await page.evaluate(evaluateAriaSnapshot as never, root as never, request as never)) as string;
+	const snapshot = (await page.evaluate(evaluateAriaSnapshot as never, root as never, request as never)) as string;
+	let hrefs: AriaHrefMap = {};
+	if (options.urls) {
+		const refs = collectAriaSnapshotRefs(snapshot);
+		hrefs = (await page.evaluate(evaluateAriaHrefs as never, refs as never)) as Record<string, string>;
+	}
+	return postProcessAriaSnapshot(snapshot, options, hrefs);
 }
 
 /**
  * Resolve a `[ref=eN]` id from the latest snapshot to a live `ElementHandle`, or
- * null when the ref no longer matches any element. Runs in the main world so it
- * sees the `_ariaRef` expandos the snapshot wrote.
+ * null when the ref no longer matches any element. It uses the same isolated
+ * world as capture, where that snapshot wrote its `_ariaRef` expandos.
  */
 export async function resolveAriaRefHandle(page: Page, ref: string): Promise<ElementHandle | null> {
 	const handle = (await page.evaluateHandle(evaluateResolveRef as never, ref as never)) as JSHandle;
@@ -122,10 +147,22 @@ export function parseAriaRefSelector(selector: string): string | null {
  * `browser.eval` RPC takes a script string and returns the completion value (it
  * has no ElementHandle to pass in). The script resolves `selector` via
  * `document.querySelector` in-page (CSS selectors only) or falls back to the
- * whole document. Like the puppeteer path it installs nothing on `window`.
+ * whole document. Like the puppeteer path it installs nothing on `window`, but
+ * cmux runs the expression in the page world and therefore has its own ref
+ * namespace.
  */
 export function buildAriaSnapshotScript(selector: string | undefined, options: AriaSnapshotOptions = {}): string {
 	const request = { depth: options.depth, boxes: options.boxes };
 	const sel = selector ? JSON.stringify(selector) : "null";
 	return `(function(){var module={exports:{}};\n${ariaBundle}\nvar __sel=${sel};var __root=__sel?document.querySelector(__sel):null;if(__sel&&!__root)throw new Error("tab.ariaSnapshot: selector "+__sel+" matched no element");return module.exports.ariaSnapshot(__root,${JSON.stringify(request)});})()`;
+}
+
+/** Build the cmux page-world expression returning snapshot text plus link destinations. */
+export function buildAriaSnapshotPayloadScript(
+	selector: string | undefined,
+	options: AriaSnapshotOptions = {},
+): string {
+	const request = { depth: options.depth, boxes: options.boxes };
+	const sel = selector ? JSON.stringify(selector) : "null";
+	return `(function(){var module={exports:{}};\n${ariaBundle}\nvar __sel=${sel};var __root=__sel?document.querySelector(__sel):null;if(__sel&&!__root)throw new Error("tab.ariaSnapshot: selector "+__sel+" matched no element");var snapshot=module.exports.ariaSnapshot(__root,${JSON.stringify(request)});var hrefs={};if(${options.urls === true}){for(var match of snapshot.matchAll(/\\[ref=(e\\d+)\\]/g)){var ref=match[1],el=module.exports.resolveAriaRef(ref);if(el&&el.tagName==="A"&&el.href)hrefs[ref]=el.href;}}return {snapshot:snapshot,hrefs:hrefs};})()`;
 }

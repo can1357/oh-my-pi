@@ -24,7 +24,9 @@ import { settingsCapability } from "../capability/settings";
 import { settings as activeSettings } from "../config/settings";
 import type { Skill } from "../capability/skill";
 import { skillCapability } from "../capability/skill";
-import { type SlashCommand, slashCommandCapability, slashCommandFrontmatterDisplay } from "../capability/slash-command";
+import { type SlashCommand, slashCommandCapability } from "../capability/slash-command";
+import { type SystemPrompt, systemPromptCapability } from "../capability/system-prompt";
+import { slashCommandFrontmatterDisplay } from "@oh-my-pi/pi-tui/overlays/extensions/inspector-model";
 import type { CustomTool } from "../capability/tool";
 import { toolCapability } from "../capability/tool";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
@@ -591,4 +593,36 @@ registerProvider<Settings>(settingsCapability.id, {
 	description: "Load settings from config.toml",
 	priority: PRIORITY,
 	load: loadSettings,
+});
+
+// System Prompt (SYSTEM.md, SYSTEM_TEMPLATE.md)
+async function loadSystemPrompt(ctx: LoadContext): Promise<LoadResult<SystemPrompt>> {
+	const items: SystemPrompt[] = [];
+
+	const load = async (filePath: string | null, level: "user" | "project", kind: "text" | "template") => {
+		if (!filePath) return;
+		const content = await readFile(filePath);
+		if (content) {
+			items.push({ path: filePath, content, kind, level, _source: createSourceMeta(PROVIDER_ID, filePath, level) });
+		}
+	};
+
+	// Project entries first: dedupe is first-wins, so a project file claims its
+	// key before a same-scope user file can survive.
+	const projectDir = getProjectCodexDir(ctx);
+	const userDir = getUserCodexDir(ctx);
+	await load(path.join(projectDir, "SYSTEM_TEMPLATE.md"), "project", "template");
+	await load(path.join(projectDir, "SYSTEM.md"), "project", "text");
+	await load(userDir ? path.join(userDir, "SYSTEM_TEMPLATE.md") : null, "user", "template");
+	await load(userDir ? path.join(userDir, "SYSTEM.md") : null, "user", "text");
+
+	return { items, warnings: [] };
+}
+
+registerProvider<SystemPrompt>(systemPromptCapability.id, {
+	id: PROVIDER_ID,
+	displayName: DISPLAY_NAME,
+	description: "Load SYSTEM.md and SYSTEM_TEMPLATE.md from .codex (project cwd + user home)",
+	priority: PRIORITY,
+	load: loadSystemPrompt,
 });
