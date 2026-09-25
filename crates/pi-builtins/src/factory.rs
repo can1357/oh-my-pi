@@ -187,7 +187,7 @@ pub fn default_builtins<SE: brush_core::ShellExtensions>(
 ///
 /// These are kept out of [`default_builtins`] because they shadow real system
 /// binaries: the embedding shell decides whether to install them (and may
-/// withhold the destructive ones — `rm`, `mv`, `ln`).
+/// withhold the destructive ones — `rm`, `mv`, `cp`, `ln`).
 #[allow(clippy::too_many_lines, reason = "one line per utility")]
 pub fn utility_builtins<SE: brush_core::ShellExtensions>()
 -> Vec<(&'static str, builtins::Registration<SE>)> {
@@ -210,6 +210,8 @@ pub fn utility_builtins<SE: brush_core::ShellExtensions>()
 	m.push(("cmp", cmp::cmp_builtin::<SE>()));
 	#[cfg(feature = "util.comm")]
 	m.push(("comm", comm::comm_builtin::<SE>()));
+	#[cfg(feature = "util.cp")]
+	m.push(("cp", cp::cp_builtin::<SE>()));
 	#[cfg(feature = "util.combine")]
 	m.push(("combine", combine::combine_builtin::<SE>()));
 	#[cfg(feature = "util.cut")]

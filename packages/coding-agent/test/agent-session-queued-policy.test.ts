@@ -31,6 +31,8 @@ import { SessionProviderBoundary } from "@oh-my-pi/pi-coding-agent/session/sessi
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
+import { cfgMnemopiInjectionTokenLimit } from "@oh-my-pi/pi-coding-agent/mnemopi/settings";
+
 const BASE = ["base identity", "base tools"];
 
 function extension(name: string, handler: (event: BeforeAgentStartEvent) => Promise<unknown>): Extension {
@@ -206,7 +208,7 @@ describe("queued user delivery policy", () => {
 			const state = new HindsightSessionState({
 				sessionId: session.sessionId,
 				session,
-				config: loadHindsightConfig(settings, {}),
+				config: loadHindsightConfig(settings),
 				client,
 				bankId: "test-bank",
 				banksSet: new Set(["test-bank"]),
@@ -485,7 +487,7 @@ describe("queued user delivery policy", () => {
 			recalls++;
 			return `recall prefix ${"memory detail ".repeat(500)}recall overflow`;
 		});
-		session.settings.set("mnemopi.injectionTokenLimit", limit);
+		cfgMnemopiInjectionTokenLimit.set(session.settings, limit);
 		await session.refreshBaseSystemPrompt();
 		await session.prompt("bounded first recall");
 		// The fixture's base/tool blocks precede the backend-owned instruction blocks.
@@ -498,7 +500,7 @@ describe("queued user delivery policy", () => {
 			expect(memoryPrompt).toContain("recall prefix");
 		}
 
-		session.settings.set("mnemopi.injectionTokenLimit", 6000);
+		cfgMnemopiInjectionTokenLimit.set(session.settings, 6000);
 		await session.refreshBaseSystemPrompt();
 		await session.prompt("use the committed full recall");
 		expect(recalls).toBe(1);

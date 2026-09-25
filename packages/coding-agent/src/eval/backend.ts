@@ -1,4 +1,5 @@
-import { buildEvalUrlRoots, type LocalProtocolOptions } from "../internal-urls";
+import { buildEvalUrlRoots, LocalProtocolHandler } from "../internal-urls";
+import { contextLocalProtocolOptions } from "../internal-urls/context";
 import type { OutputArtifactError } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import type { ToolSession } from "../tools";
 import type { BackendProbeOptions } from "./probe";
@@ -68,20 +69,12 @@ export interface ExecutorBackend {
 
 /**
  * Resolve the on-disk roots that the eval helpers substitute for internal-URL
- * schemes (currently `local://`). Prefers the session's own
- * {@link LocalProtocolOptions} — the exact mapping `read local://…` uses — so an
+ * schemes (currently `local://`) from {@link contextLocalProtocolOptions} resolved
+ * like the local:// handler does — the exact mapping `read local://…` uses — so an
  * eval `write("local://x")` and a later `read local://x` agree on the location.
+ * Empty when no `local://` root resolves (read would fail the same way).
  */
 export function resolveEvalUrlRoots(session: ToolSession): Record<string, string> {
-	return buildEvalUrlRoots(resolveEvalLocalProtocolOptions(session));
-}
-
-/** Keep file-backed eval and prelude helpers on the calling session's local URL root. */
-export function resolveEvalLocalProtocolOptions(session: ToolSession): LocalProtocolOptions {
-	return (
-		session.localProtocolOptions ?? {
-			getArtifactsDir: () => session.getArtifactsDir?.() ?? null,
-			getSessionId: () => session.getSessionId?.() ?? null,
-		}
-	);
+	const options = LocalProtocolHandler.resolveOptions({ localProtocolOptions: contextLocalProtocolOptions(session) });
+	return options ? buildEvalUrlRoots(options) : {};
 }

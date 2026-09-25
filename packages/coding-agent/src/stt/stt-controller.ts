@@ -13,6 +13,8 @@ import { resolveSttModelSpec, type SttModelKey } from "./models";
 import { evaluateSubmitTrigger } from "./submit-trigger";
 import { encodePcm16Wav } from "./wav";
 
+import { cfgSttLanguage, cfgSttSubmitTrigger } from "./settings";
+
 export type SttState = "idle" | "recording" | "transcribing";
 
 /** How a capture reports progress and state to its host. */
@@ -312,7 +314,7 @@ export class STTController {
 		let failed = false;
 		let finalText = "";
 		try {
-			const language = this.#settings.get("stt.language");
+			const language = cfgSttLanguage.get(this.#settings);
 			const result = await transcribeAudio(
 				model,
 				{
@@ -368,7 +370,7 @@ export class STTController {
 	}
 
 	async #startStreaming(editor: SttTarget, options: SttCallbacks, modelKey: SttModelKey): Promise<void> {
-		const language = this.#settings.get("stt.language");
+		const language = cfgSttLanguage.get(this.#settings);
 		this.#streamEditor = editor;
 		this.#streamCallbacks = options;
 		this.#streamCommitted = false;
@@ -493,7 +495,7 @@ export class STTController {
 		if (!failed) options.showStatus(this.#streamCommitted ? "" : "No speech detected.");
 
 		if (this.#streamCommitted && !failed && this.#streamEditor) {
-			const trigger = this.#settings.get("stt.submitTrigger");
+			const trigger = cfgSttSubmitTrigger.get(this.#settings);
 			const { submit, trimTrailing } = evaluateSubmitTrigger(this.#streamUtterance, trigger);
 			if (trimTrailing > 0) {
 				this.#streamEditor.deleteBeforeCursor(trimTrailing);
