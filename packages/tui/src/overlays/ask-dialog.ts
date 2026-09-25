@@ -855,9 +855,18 @@ export class AskDialogComponent implements Component {
 		if (question.multi) {
 			if (isEnter) {
 				// Enter confirms the current selection without toggling the
-				// focused option; Space toggles. Advances to the next question
+				// focused option; Space toggles. An empty multi-select routes
+				// to the review tab instead of submitting, so an accidental
+				// Enter with nothing selected cannot silently submit an empty
+				// answer (issue #12521). Advances to the next question
 				// (submitting only for a single-question dialog), matching
 				// single-select Enter (#8252).
+				if (state.selectedOptions.size === 0 && state.customInput === undefined) {
+					this.#activeTabIndex = this.#hasSubmitTab() ? this.#submitTabIndex() : this.#currentQuestionIndex();
+					this.#submitScrollOffset = 0;
+					this.#requestRender();
+					return;
+				}
 				this.#advanceAfterQuestion();
 				return;
 			}
@@ -1047,6 +1056,16 @@ export class AskDialogComponent implements Component {
 	#renderSubmitBody(width: number, rows: number): RenderedList {
 		const allLines: string[] = [];
 		const unanswered = this.#unansweredCount();
+		const emptyMulti = this.#questions.some(
+			(question, index) =>
+				question.multi === true &&
+				(this.#states[index]?.selectedOptions.size ?? 0) === 0 &&
+				this.#states[index]?.customInput === undefined,
+		);
+		if (emptyMulti) {
+			allLines.push(theme.fg("warning", "A multi-select question has nothing selected; Enter submits it empty."));
+			allLines.push("");
+		}
 		if (unanswered > 0) {
 			allLines.push(
 				theme.fg(
