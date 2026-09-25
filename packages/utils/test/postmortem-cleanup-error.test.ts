@@ -330,7 +330,7 @@ describe("postmortem expected cleanup errors", () => {
 		expect(result.stdout).toContain('["outer","late","settled"]');
 	});
 
-	it("finishes an async late registration before a SIGTERM exit", async () => {
+	it.skipIf(process.platform === "win32")("finishes an async late registration before a SIGTERM exit", async () => {
 		const result = await runPostmortemProbe(`
 			import { postmortem } from "${postmortemModuleUrl}";
 

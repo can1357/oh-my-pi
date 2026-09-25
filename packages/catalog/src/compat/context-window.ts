@@ -6,8 +6,11 @@ import { resolveModelPolicy } from "./resolve";
  * Rule-owned maxima by provider/id/api. Resolve once per process rather than
  * walking the static policy cascade on every catalog rebuild. Null caches the
  * absence of a curated maximum; undefined means the key has not been resolved.
+ * Bounded: one entry per distinct model; the wire-id set is bounded.
  */
 const ruleMaximumCache = new Map<string, number | null>();
+const clampOverrideCache = new Map<string, boolean>();
+const RULE_POLICY_CACHE_MAX = 8192;
 
 /**
  * Extended-context capacity. Curated maxima correct stale lower discovery
@@ -20,6 +23,7 @@ export function resolveMaxContextWindow(model: Model): number | undefined {
 	if (curated === undefined) {
 		const maximum = resolveModelPolicy(toModelSpec(model)).catalog.maxContextWindow;
 		curated = typeof maximum === "number" && Number.isFinite(maximum) && maximum > 0 ? maximum : null;
+		if (ruleMaximumCache.size >= RULE_POLICY_CACHE_MAX) ruleMaximumCache.clear();
 		ruleMaximumCache.set(key, curated);
 	}
 
@@ -49,7 +53,13 @@ export function codexOverrideCeiling(model: Model): number | undefined {
  * it here keeps provider deployment contracts out of TypeScript.
  */
 export function clampsContextOverride(model: Model): boolean {
-	return resolveModelPolicy(toModelSpec(model)).catalog.clampContextOverride === true;
+	const key = `${model.provider} ${model.id} ${model.api}`;
+	const cached = clampOverrideCache.get(key);
+	if (cached !== undefined) return cached;
+	const clamps = resolveModelPolicy(toModelSpec(model)).catalog.clampContextOverride === true;
+	if (clampOverrideCache.size >= RULE_POLICY_CACHE_MAX) clampOverrideCache.clear();
+	clampOverrideCache.set(key, clamps);
+	return clamps;
 }
 
 /**

@@ -27,6 +27,7 @@ function state(overrides: Partial<ExecutionState> = {}): ExecutionState {
 		fallbackCount: 0,
 		committed: false,
 		currentTarget: "primary",
+		siblingsExhausted: false,
 		...overrides,
 	};
 }
@@ -94,6 +95,16 @@ describe("decideAttempt", () => {
 			commitState: "probing",
 		});
 		expect(action).toEqual({ type: "fallback_target", targetModelId: "tertiary" });
+	});
+
+	it("falls back to quota targets once siblings are exhausted", () => {
+		const action = decideAttempt({
+			route: route({ fallbacks: { credential_quota: ["claude", "gemini"] } }),
+			state: state({ attemptedTargets: new Set(["primary"]), siblingsExhausted: true }),
+			classification: classification("credential_quota"),
+			commitState: "probing",
+		});
+		expect(action).toEqual({ type: "fallback_target", targetModelId: "claude" });
 	});
 
 	it("returns terminal on request_terminal", () => {

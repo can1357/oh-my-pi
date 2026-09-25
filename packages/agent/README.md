@@ -154,8 +154,9 @@ const agent = new Agent({
   // Dynamic model-scoped API key resolution (for expiring OAuth tokens)
   getApiKey: async (model) => tokenForModel(model),
 
-  // Tool execution context (late-bound UI/session access)
-  getToolContext: () => ({ /* app-defined */ }),
+  // Tool execution context (late-bound UI/session access). Surface the loop's
+  // passive-context sink so tools can call ctx.addAdditionalContext(...).
+  getToolContext: toolCall => ({ addAdditionalContext: toolCall?.addAdditionalContext /* app-defined */ }),
 });
 ```
 

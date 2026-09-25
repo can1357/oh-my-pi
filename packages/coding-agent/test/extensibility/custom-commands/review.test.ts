@@ -110,6 +110,7 @@ describe("ReviewCommand", () => {
 		onEditorCall?: (call: EditorCall) => void;
 		onSelectCall?: (call: SelectCall) => void;
 		onNotify?: (call: NotifyCall) => void;
+		cwd?: string;
 	}): HookCommandContext {
 		const selectResults = [...(options?.selectResults ?? [])];
 		return {
@@ -117,6 +118,7 @@ describe("ReviewCommand", () => {
 			sessionManager: {
 				getEntries: () => options?.sessionEntries ?? [],
 				getBranch: () => options?.branchEntries ?? options?.sessionEntries ?? [],
+				getCwd: () => options?.cwd,
 			},
 			ui: {
 				select: (title: string, selectOptions: string[]) => {
@@ -246,6 +248,30 @@ describe("ReviewCommand", () => {
 			jjRepoSpy.mockRestore();
 			jjDiffSpy.mockRestore();
 			gitRepoSpy.mockRestore();
+		}
+	});
+
+	it("uses the live session cwd instead of the load-time cwd (issue #12501)", async () => {
+		const staleDir = path.join(tmpDir, "stale-checkout");
+		const liveDir = path.join(tmpDir, "live-worktree");
+		const requireSpy = spyOn(vcs, "require").mockReturnValue({
+			kind: () => "git",
+			uncommittedDiff: async () => "diff --git a/f.txt b/f.txt",
+		} as unknown as VcsRepo);
+		try {
+			const command = new ReviewCommand({ cwd: staleDir } as unknown as CustomCommandAPI);
+			const ctx = createContext({
+				selectedMode: "2. Review uncommitted changes",
+				cwd: liveDir,
+			});
+
+			const result = await command.execute([], ctx);
+
+			expect(result).toBeDefined();
+			expect(requireSpy).toHaveBeenCalledWith(liveDir);
+			expect(requireSpy).not.toHaveBeenCalledWith(staleDir);
+		} finally {
+			requireSpy.mockRestore();
 		}
 	});
 
