@@ -18,6 +18,7 @@ import { grepToolRenderer } from "./grep";
 import { waitToolRenderer } from "./wait";
 import { lspToolRenderer } from "./lsp";
 import { recallToolRenderer, reflectToolRenderer, retainToolRenderer } from "./memory";
+import { powershellToolRenderer } from "./powershell";
 import { readToolRenderer } from "./read";
 import type { ToolRenderer } from "./renderer";
 import { resolveRenderer } from "./resolve";
@@ -47,6 +48,7 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	lsp: lspToolRenderer,
 	wait: waitToolRenderer,
 	read: readToolRenderer,
+	powershell: powershellToolRenderer,
 	// Keyed by xd:// resolution-device names: the write dispatch delegates here
 	// by dispatch tool, and historical `resolve` tool transcripts still render
 	// through the `resolve` entry. Both devices carry the same ResolveDetails.

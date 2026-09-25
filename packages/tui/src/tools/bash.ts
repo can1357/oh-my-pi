@@ -190,6 +190,8 @@ export interface ShellRendererConfig<TArgs> {
 	resolveCwd?: (args: TArgs | undefined) => string | undefined;
 	resolveEnv?: (args: TArgs | undefined) => Record<string, unknown> | undefined;
 	showHeader?: boolean;
+	commandLanguage?: string;
+	commandPrefix?: string;
 }
 
 function getPartialJson<TArgs>(args: TArgs | undefined): string | undefined {
@@ -215,16 +217,20 @@ export function getBashEnvForDisplay(args: BashRenderArgs): Record<string, unkno
  * reset SGR state at line boundaries, which made the previous single-string
  * `theme.fg("dim", ...)` form render only the first line as dim.
  */
-export function formatBashCommandLines(args: BashRenderArgs, uiTheme: Theme): string[] {
+export function formatBashCommandLines(
+	args: BashRenderArgs,
+	uiTheme: Theme,
+	config: Pick<ShellRendererConfig<unknown>, "commandLanguage" | "commandPrefix"> = {},
+): string[] {
 	const command = replaceTabs(args.command || "…");
 	const cwd = getProjectDir();
 	const displayWorkdir = formatToolWorkingDirectory(args.cwd, cwd);
 	const envAssignments = formatBashEnvAssignments(getBashEnvForDisplay(args));
-	const prefixParts = ["$"];
+	const prefixParts = [config.commandPrefix ?? "$"];
 	if (displayWorkdir) prefixParts.push(`cd ${displayWorkdir} &&`);
 	if (envAssignments) prefixParts.push(envAssignments);
 	const prefix = uiTheme.fg("dim", `${prefixParts.join(" ")} `);
-	const highlightedLines = highlightCode(command, "bash");
+	const highlightedLines = highlightCode(command, config.commandLanguage ?? "bash");
 	if (highlightedLines.length === 0) return [prefix.trimEnd()];
 	return highlightedLines.map((line, i) => (i === 0 ? `${prefix}${line}` : line));
 }
@@ -243,7 +249,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 	return {
 		renderCall(args: TArgs, options: RenderResultOptions, uiTheme: Theme): Component {
 			const renderArgs = toBashRenderArgs(args, config);
-			const cmdLines = formatBashCommandLines(renderArgs, uiTheme);
+			const cmdLines = formatBashCommandLines(renderArgs, uiTheme, config);
 			return framedToolCard(uiTheme, () => {
 				const header =
 					config.showHeader === false
@@ -275,7 +281,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 			args?: TArgs,
 		): Component {
 			const renderArgs = toBashRenderArgs(args, config);
-			const cmdLines = args ? formatBashCommandLines(renderArgs, uiTheme) : undefined;
+			const cmdLines = args ? formatBashCommandLines(renderArgs, uiTheme, config) : undefined;
 			const isError = result.isError === true;
 			const isPartial = options.isPartial === true;
 			const success = !isPartial && !isError;

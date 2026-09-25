@@ -1,6 +1,7 @@
 export const BUILTIN_TOOL_NAMES = [
 	"read",
 	"bash",
+	"powershell",
 	"edit",
 	"ast_grep",
 	"ast_edit",

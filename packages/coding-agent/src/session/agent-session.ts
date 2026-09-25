@@ -229,6 +229,8 @@ import {
 import type { CheckpointState, CompletedRewindState } from "../tools/checkpoint";
 import { releaseComputerSessionsForOwner } from "../tools/computer/supervisor";
 import { isAutoQaEnabled } from "../tools/report-tool-issue";
+import { disposePsHostSession } from "../tools/pshost-manager";
+import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
 import {
 	buildResolveReminderMessage,
 	isPreviewResolutionToolCall,
@@ -5033,6 +5035,19 @@ export class AgentSession implements SettingsScope {
 		}
 	}
 
+	async #disposePsHost(sessionId: string | undefined): Promise<void> {
+		if (!sessionId) return;
+		try {
+			await withTimeout(
+				Promise.all([disposePsHostSession(sessionId), disposePsHostSession(`${sessionId}-advisor`)]),
+				3_000,
+				"Timed out disposing PowerShell hosts during dispose",
+			);
+		} catch (error) {
+			logger.warn("Failed to dispose PowerShell hosts during dispose", { error: String(error) });
+		}
+	}
+
 	/**
 	 * Turn-settle checkpoint for owned headless browser tabs (issue #8246).
 	 * Close tabs idle past `browser.idleCloseSec` as the memory backstop,
@@ -5160,6 +5175,7 @@ export class AgentSession implements SettingsScope {
 			this.#disposeOwnedAsyncJobs(),
 			this.#eval.disposeKernels(),
 			this.#releaseOwnedBrowserTabs(this.sessionManager.getSessionId()),
+			this.#disposePsHost(this.sessionManager.getSessionId()),
 			this.#releaseOwnedComputerSessions(this.#eval.getKernelOwnerId()),
 			shutdownTinyTitleClient(),
 			this.#disconnectOwnedMcp(),
