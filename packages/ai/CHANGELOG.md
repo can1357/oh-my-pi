@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed generic Google Antigravity 429 responses imposing a 30-minute quota cooldown; they now use a 45–75-second capacity backoff while preserving explicit quota errors and credential rotation ([#11713](https://github.com/can1357/oh-my-pi/pull/11713) by [@iliaal](https://github.com/iliaal)).
+
 ## [18.3.1] - 2026-09-25
 
 ### Added

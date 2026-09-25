@@ -411,7 +411,12 @@ export interface SessionAdvisorsHost {
 		currentModel?: Model | null,
 	): RetryFallbackSelector[];
 	isRetryFallbackSelectorSuppressed(selector: RetryFallbackSelector): boolean;
-	noteRetryFallbackCooldown(currentSelector: string, retryAfterMs: number | undefined, errorMessage: string): void;
+	noteRetryFallbackCooldown(
+		currentSelector: string,
+		retryAfterMs: number | undefined,
+		errorMessage: string,
+		currentModel: Model,
+	): void;
 	createCodexCompactionContext(options: {
 		trigger: CodexCompactionContext["trigger"];
 		reason: CodexCompactionContext["reason"];
@@ -1790,7 +1795,7 @@ export class SessionAdvisors {
 			return declineUsageLimit();
 		}
 
-		this.#host.noteRetryFallbackCooldown(currentSelector, retryAfterMs, message);
+		this.#host.noteRetryFallbackCooldown(currentSelector, retryAfterMs, message, currentModel);
 		for (const role of chainKeys) {
 			for (const selector of this.#host.findRetryFallbackCandidates(role, currentSelector, currentModel)) {
 				if (this.#host.isRetryFallbackSelectorSuppressed(selector)) continue;

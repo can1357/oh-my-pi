@@ -1,3 +1,4 @@
+import type { Model } from "@oh-my-pi/pi-catalog/types";
 import { extractRetryHint } from "@oh-my-pi/pi-utils/fetch-retry";
 
 /**
@@ -172,6 +173,32 @@ function parseGoogleRpcRateLimitReason(errorMessage: string): RateLimitReason | 
 	return undefined;
 }
 
+/** Google's generic RESOURCE_EXHAUSTED message, carrying no cause of its own. */
+const GOOGLE_GENERIC_RESOURCE_EXHAUSTED_MESSAGE_PATTERN =
+	/^\s*resource has been exhausted\s*(?:\(\s*e\.g\.\s+check quota\s*\))?\s*\.?\s*$/i;
+
+/**
+ * Antigravity also returns the "check quota" boilerplate for non-quota
+ * rejections. ErrorInfo supplies a cause; RetryInfo supplies timing only.
+ * Deployment policy gates the shorter backoff, while credential rotation
+ * remains independent through USAGE_LIMIT_PATTERN.
+ */
+function isBareGoogleResourceExhaustedBody(errorMessage: string): boolean {
+	const error = asRecord(parseJsonBody(errorMessage)?.error);
+	if (typeof error?.status !== "string" || error.status.trim().toUpperCase() !== "RESOURCE_EXHAUSTED") {
+		return false;
+	}
+	if (
+		Array.isArray(error.details) &&
+		error.details.some(value => asRecord(value)?.["@type"] === GOOGLE_RPC_ERROR_INFO_TYPE)
+	) {
+		return false;
+	}
+	const message = error.message;
+	if (message === undefined || message === null || message === "") return true;
+	return typeof message === "string" && GOOGLE_GENERIC_RESOURCE_EXHAUSTED_MESSAGE_PATTERN.test(message);
+}
+
 function isQuotaExhaustedReason(reason: RateLimitReason): boolean {
 	return reason === "QUOTA_EXHAUSTED" || reason === "INSUFFICIENT_G1_CREDITS_BALANCE";
 }
@@ -186,9 +213,17 @@ function isQuotaExhaustedReason(reason: RateLimitReason): boolean {
  * Bare "resource exhausted" / "resource_exhausted" maps to MODEL_CAPACITY (transient, short wait).
  * Explicit details such as "quota exceeded" retain their normal classification.
  */
-export function parseRateLimitReason(errorMessage: string): RateLimitReason {
+export function parseRateLimitReason(errorMessage: string, model?: Pick<Model, "compat">): RateLimitReason {
 	const structuredReason = parseGoogleRpcRateLimitReason(errorMessage);
 	if (structuredReason !== undefined) return structuredReason;
+	if (
+		model?.compat &&
+		"genericResourceExhaustedIsCapacity" in model.compat &&
+		model.compat.genericResourceExhaustedIsCapacity &&
+		isBareGoogleResourceExhaustedBody(errorMessage)
+	) {
+		return "MODEL_CAPACITY_EXHAUSTED";
+	}
 	const lowerWithStatus = errorMessage.toLowerCase();
 	const lower = lowerWithStatus.replace(RESOURCE_EXHAUSTED_PATTERN, "");
 	const hasResourceExhaustedStatus = lower !== lowerWithStatus;

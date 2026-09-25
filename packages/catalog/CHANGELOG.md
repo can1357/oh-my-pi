@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Scoped generic resource-exhaustion capacity backoff to Google Antigravity, preserving quota handling on other Google deployments ([#11713](https://github.com/can1357/oh-my-pi/pull/11713) by [@iliaal](https://github.com/iliaal)).
+
 ## [18.3.1] - 2026-09-25
 
 ### Added

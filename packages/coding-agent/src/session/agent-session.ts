@@ -1980,8 +1980,8 @@ export class AgentSession implements SettingsScope {
 			findRetryFallbackCandidates: (role, selector, model) =>
 				this.#recovery.findRetryFallbackCandidates(role, selector, model),
 			isRetryFallbackSelectorSuppressed: selector => this.#recovery.isRetryFallbackSelectorSuppressed(selector),
-			noteRetryFallbackCooldown: (selector, retryAfterMs, errorMessage) =>
-				this.#recovery.noteRetryFallbackCooldown(selector, retryAfterMs, errorMessage),
+			noteRetryFallbackCooldown: (selector, retryAfterMs, errorMessage, currentModel) =>
+				this.#recovery.noteRetryFallbackCooldown(selector, retryAfterMs, errorMessage, currentModel),
 			createCodexCompactionContext: createMaintenanceCodexCompactionContext,
 			sessionId: () => this.sessionId,
 		};
