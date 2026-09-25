@@ -1630,6 +1630,13 @@ export class ModelHubComponent implements Component {
 			return;
 		}
 
+		// Enter on the sidebar is a pane switch, like →: it lands on the model
+		// rows instead of acting on a row the user cannot see is selected.
+		if (this.#focus === "scope" && (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n")) {
+			this.#focus = "list";
+			return;
+		}
+
 		const beforeQuery = this.#browser.query;
 		const isPrintable = extractPrintableText(data) !== undefined;
 		this.#browser.handleInput(data);
@@ -2274,19 +2281,22 @@ export class ModelHubComponent implements Component {
 			return "←/→ thinking level · Enter apply · Esc keep";
 		}
 		if (this.#assigning !== null) {
+			if (this.#focus === "scope") {
+				return "Enter/→ models · ↑/↓ providers · type to search · Alt+←/→ kind · Esc cancel";
+			}
 			switch (this.#assigning.kind) {
 				case "fallback":
-					return "Enter pick fallback · ↑/↓ providers · type to search · Alt+←/→ kind · Esc cancel";
+					return "Enter pick fallback · ↑/↓ models · ← providers · type to search · Alt+←/→ kind · Esc cancel";
 				case "fallbackKey":
-					return "Enter pick the protected model · ↑/↓ providers · type to search · Alt+←/→ kind · Esc cancel";
+					return "Enter pick the protected model · ↑/↓ models · ← providers · type to search · Alt+←/→ kind · Esc cancel";
 				default:
-					return "Enter assign · ↑/↓ providers · type to search · Alt+←/→ kind · Esc cancel";
+					return "Enter assign · ↑/↓ models · ← providers · type to search · Alt+←/→ kind · Esc cancel";
 			}
 		}
 		const entry = this.#activeEntry();
 		if (entry.kind === "roles") {
 			if (this.#focus !== "list") {
-				return "↑/↓ providers · → roles · Alt+←/→ tabs · Esc close";
+				return "↑/↓ providers · Enter/→ roles · Alt+←/→ tabs · Esc close";
 			}
 			const row = this.#rolesRows[this.#roleIndex];
 			if (row?.kind === "fallback") {
@@ -2308,9 +2318,11 @@ export class ModelHubComponent implements Component {
 		if (entry.kind === "provider" && entry.locked) {
 			return entry.oauth ? "Enter log in · ↑/↓ providers · Esc close" : "↑/↓ providers · Esc close";
 		}
-		const arrows = this.#focus === "scope" ? "↑/↓ providers · → models" : "↑/↓ models · ← providers";
 		const refresh = entry.kind === "provider" ? " · F5 refresh" : "";
-		return `Enter assign roles · ${arrows} · type to search · Alt+←/→ kind${refresh} · Esc close`;
+		if (this.#focus === "scope") {
+			return `Enter/→ models · ↑/↓ providers · type to search · Alt+←/→ kind${refresh} · Esc close`;
+		}
+		return `Enter assign roles · ↑/↓ models · ← providers · type to search · Alt+←/→ kind${refresh} · Esc close`;
 	}
 
 	#renderFooter(width: number): string {
