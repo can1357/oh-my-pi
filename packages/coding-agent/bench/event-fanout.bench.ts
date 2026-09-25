@@ -1,9 +1,12 @@
 import { Agent, type AgentEvent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { ModelRegistry } from "../src/config/model-registry";
 import { Settings } from "../src/config/settings";
-import type { ExtensionRunner } from "../src/extensibility/extensions/runner";
+import { ExtensionRuntime, loadExtensionFromFactory } from "../src/extensibility/extensions/loader";
+import { ExtensionRunner } from "../src/extensibility/extensions/runner";
 import { RpcSubagentRegistry } from "../src/modes/rpc/rpc-subagents";
 import { AgentSession } from "../src/session/agent-session";
+import { AuthStorage } from "../src/session/auth-storage";
 import { SessionManager } from "../src/session/session-manager";
 import { TASK_SUBAGENT_EVENT_CHANNEL } from "../src/task/types";
 import { EventBus } from "../src/utils/event-bus";
@@ -55,17 +58,27 @@ const update: AgentEvent = {
 async function measureSession(hasHandler: boolean): Promise<void> {
 	const agent = new Agent({ initialState: { systemPrompt: [], tools: [], messages: [] } });
 	let extensionEmitted = 0;
-	const runner = {
-		hasHandlers: () => hasHandler,
-		emit: async () => {
-			extensionEmitted++;
+	const runtime = new ExtensionRuntime();
+	const manager = SessionManager.inMemory();
+	const authStorage = await AuthStorage.create(":memory:");
+	const registry = new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true });
+	const extension = await loadExtensionFromFactory(
+		api => {
+			if (hasHandler)
+				api.on("message_update", () => {
+					extensionEmitted++;
+				});
 		},
-	} as unknown as ExtensionRunner;
+		manager.getCwd(),
+		new EventBus(),
+		runtime,
+	);
+	const runner = new ExtensionRunner([extension], runtime, manager.getCwd(), manager, registry);
 	const session = new AgentSession({
 		agent,
-		sessionManager: SessionManager.inMemory(),
+		sessionManager: manager,
 		settings: Settings.isolated({ "compaction.enabled": false }),
-		modelRegistry: {} as never,
+		modelRegistry: registry,
 		extensionRunner: runner,
 	});
 	let seen = 0;
@@ -85,6 +98,7 @@ async function measureSession(hasHandler: boolean): Promise<void> {
 	});
 	unsubscribe();
 	await session.dispose();
+	authStorage.close();
 }
 
 async function measureRpc(): Promise<void> {

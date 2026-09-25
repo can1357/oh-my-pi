@@ -1,12 +1,13 @@
 import { expect, test } from "bun:test";
 import { Agent, type AgentEvent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import type { ModelRegistry } from "../src/config/model-registry";
+import { ModelRegistry } from "../src/config/model-registry";
 import { Settings } from "../src/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "../src/extensibility/extensions/loader";
 import { ExtensionRunner } from "../src/extensibility/extensions/runner";
 import type { ExtensionAPI } from "../src/extensibility/extensions/types";
 import { AgentSession } from "../src/session/agent-session";
+import { AuthStorage } from "../src/session/auth-storage";
 import { SessionManager } from "../src/session/session-manager";
 import { EventBus } from "../src/utils/event-bus";
 
@@ -22,7 +23,8 @@ async function makeSession() {
 		new EventBus(),
 		runtime,
 	);
-	const registry = {} as ModelRegistry;
+	const authStorage = await AuthStorage.create(":memory:");
+	const registry = new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true });
 	const runner = new ExtensionRunner([extension], runtime, manager.getCwd(), manager, registry);
 	const agent = new Agent({ initialState: { systemPrompt: [], tools: [], messages: [] } });
 	const session = new AgentSession({
@@ -50,6 +52,7 @@ async function makeSession() {
 		timestamp: Date.now(),
 	};
 	return {
+		authStorage,
 		api,
 		runner,
 		session,
@@ -65,7 +68,7 @@ async function makeSession() {
 }
 
 test("late message_update registration observes an update already queued", async () => {
-	const { api, runner, session, emit } = await makeSession();
+	const { api, authStorage, runner, session, emit } = await makeSession();
 	const received: string[] = [];
 	try {
 		expect(runner.hasHandlers("message_update")).toBe(false);
@@ -77,11 +80,12 @@ test("late message_update registration observes an update already queued", async
 		expect(received).toEqual(["A"]);
 	} finally {
 		await session.dispose();
+		authStorage.close();
 	}
 });
 
 test("updates queued across a registration microtask keep their delivery order", async () => {
-	const { api, session, emit } = await makeSession();
+	const { api, authStorage, session, emit } = await makeSession();
 	const received: string[] = [];
 	try {
 		emit("A");
@@ -95,11 +99,12 @@ test("updates queued across a registration microtask keep their delivery order",
 		expect(received).toEqual(["B"]);
 	} finally {
 		await session.dispose();
+		authStorage.close();
 	}
 });
 
 test("async message_update handlers finish before the next update starts", async () => {
-	const { api, session, emit } = await makeSession();
+	const { api, authStorage, session, emit } = await makeSession();
 	const firstStarted = Promise.withResolvers<void>();
 	const releaseFirst = Promise.withResolvers<void>();
 	const secondDone = Promise.withResolvers<void>();
@@ -126,11 +131,12 @@ test("async message_update handlers finish before the next update starts", async
 	} finally {
 		releaseFirst.resolve();
 		await session.dispose();
+		authStorage.close();
 	}
 });
 
 test("a failing message_update handler does not block later updates", async () => {
-	const { api, session, emit } = await makeSession();
+	const { api, authStorage, session, emit } = await makeSession();
 	const received: string[] = [];
 	api.on("message_update", event => {
 		if (event.assistantMessageEvent.type !== "text_delta") return;
@@ -144,5 +150,6 @@ test("a failing message_update handler does not block later updates", async () =
 		expect(received).toEqual(["B"]);
 	} finally {
 		await session.dispose();
+		authStorage.close();
 	}
 });
