@@ -9,6 +9,8 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
+import { cfgWorkspaceAdditionalDirectories } from "@oh-my-pi/pi-coding-agent/session/context-settings";
+
 registerMockApi();
 
 /**
@@ -74,6 +76,69 @@ describe("workspace directories in the system prompt", () => {
 				expect(systemPrompt).toContain("<workspace-roots>");
 				expect(systemPrompt).toContain(extraDir);
 				expect(systemPrompt).toContain(laterDir);
+			} finally {
+				await session.dispose();
+			}
+		} finally {
+			auth.close();
+			dir.removeSync();
+		}
+	});
+
+	it("follows live workspace.additionalDirectories edits without touching other roots", async () => {
+		const dir = TempDir.createSync("@ws-setting-live-");
+		const auth = await AuthStorage.create(path.join(dir.path(), "auth.db"));
+		try {
+			auth.keys.setRuntime("mock", "test-key");
+			const cliDir = path.join(dir.path(), "cli-root");
+			const settingDir = path.join(dir.path(), "setting-root");
+			fs.mkdirSync(cliDir, { recursive: true });
+			fs.mkdirSync(settingDir, { recursive: true });
+
+			const mockModel = createMockModel({ id: "text", handler: () => ({ content: ["ok"] }) });
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"todo.enabled": false,
+				"retry.enabled": false,
+			});
+			const sessionManager = SessionManager.inMemory(dir.path());
+			const { session } = await createAgentSession({
+				cwd: dir.path(),
+				agentDir: dir.path(),
+				additionalDirectories: [cliDir],
+				authStorage: auth,
+				modelRegistry: new ModelRegistry(auth, path.join(dir.path(), "models.yml")),
+				model: mockModel,
+				settings,
+				sessionManager,
+				disableExtensionDiscovery: true,
+				enableMCP: false,
+				enableLsp: false,
+				skills: [],
+				rules: [],
+				contextFiles: [],
+			});
+			const lastSystemPrompt = async (): Promise<string> => {
+				await session.prompt("noop");
+				return (mockModel.calls?.at(-1)?.context?.systemPrompt as string[] | undefined)?.join("\n") ?? "";
+			};
+			// Let the coalesced watch run, then drain the prompt rebuild it queued.
+			const settle = async (): Promise<void> => {
+				await Bun.sleep(0);
+				await session.runToolRegistryMutation(async () => {});
+			};
+			try {
+				cfgWorkspaceAdditionalDirectories.set(settings, [settingDir]);
+				await settle();
+				expect(sessionManager.getAdditionalDirectories()).toEqual([cliDir, settingDir]);
+				expect(await lastSystemPrompt()).toContain(settingDir);
+
+				cfgWorkspaceAdditionalDirectories.set(settings, []);
+				await settle();
+				expect(sessionManager.getAdditionalDirectories()).toEqual([cliDir]);
+				const systemPrompt = await lastSystemPrompt();
+				expect(systemPrompt).not.toContain(settingDir);
+				expect(systemPrompt).toContain(cliDir);
 			} finally {
 				await session.dispose();
 			}

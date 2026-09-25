@@ -1,25 +1,32 @@
 import type { AstEditToolDetails } from "@oh-my-pi/pi-tui/tools/ast-edit";
-import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import type {
+	AgentTool,
+	AgentToolContext,
+	AgentToolResult,
+	AgentToolUpdateCallback,
+	ToolApprovalDecision,
+} from "@oh-my-pi/pi-agent-core";
 import type { ToolExample } from "@oh-my-pi/pi-ai";
-import { type AstReplaceChange, type AstReplaceFileChange, astEdit } from "@oh-my-pi/pi-natives";
+import { type AstReplaceChange, type AstReplaceFileChange, astEdit, type ShellFilesystem } from "@oh-my-pi/pi-natives";
 
-import { $envpos, prompt, untilAborted } from "@oh-my-pi/pi-utils";
+import { $envpos, isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { getEditStore } from "../edit/store";
 import { normalizeToLF } from "../edit/normalize";
+import { InternalUrlRouter, sessionResolveContext } from "../internal-urls";
+import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
 import { formatHashlineHeader } from "@oh-my-pi/pi-tui/tools/hashline-format";
 
 import astEditDescription from "../prompts/tools/ast-edit.md" with { type: "text" };
 
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import type { ToolSession } from ".";
-import { truncateForPrompt } from "./approval";
+import { resolveToolTier, strictestApproval, truncateForPrompt } from "./approval";
 import { parseReadUrlTarget } from "./fetch";
-import { createFileRecorder, formatResultPath } from "./file-recorder";
+import { createFileRecorder, formatResultPath, resultSnapshotPath } from "./file-recorder";
 import { formatGroupedFiles } from "@oh-my-pi/pi-tui/tools/grouped-file-output";
 
-import { isInternalUrlPath, resolveToolSearchScope } from "./path-utils";
+import { relativeSearchResultPath, resolveSearchResultPath, resolveToolSearchScope } from "./path-utils";
 import {
 	capParseErrors,
 	formatCodeFrameLine,
@@ -50,6 +57,7 @@ interface AstEditCallOptions {
 	maxFiles: number;
 	failOnParseError: boolean;
 	signal?: AbortSignal;
+	filesystem: ShellFilesystem;
 }
 
 interface AstEditAggregatedResult {
@@ -84,6 +92,7 @@ async function runAstEditTargets(
 			maxFiles: options.maxFiles,
 			failOnParseError: options.failOnParseError,
 			signal: options.signal,
+			filesystem: options.filesystem,
 		});
 		totalReplacements += targetResult.totalReplacements;
 		filesSearched += targetResult.filesSearched;
@@ -91,13 +100,12 @@ async function runAstEditTargets(
 		applied = applied && targetResult.applied;
 		if (targetResult.parseErrors) parseErrors.push(...targetResult.parseErrors);
 		for (const change of targetResult.changes) {
-			const absolute = path.resolve(target.basePath, change.path);
-			const rebased = path.relative(commonBasePath, absolute).replace(/\\/g, "/");
-			aggregatedChanges.push({ ...change, path: rebased });
+			const absolute = resolveSearchResultPath(target.basePath, change.path);
+			aggregatedChanges.push({ ...change, path: relativeSearchResultPath(commonBasePath, absolute) });
 		}
 		for (const fileChange of targetResult.fileChanges) {
-			const absolute = path.resolve(target.basePath, fileChange.path);
-			const rebased = path.relative(commonBasePath, absolute).replace(/\\/g, "/");
+			const absolute = resolveSearchResultPath(target.basePath, fileChange.path);
+			const rebased = relativeSearchResultPath(commonBasePath, absolute);
 			fileCounts.set(rebased, (fileCounts.get(rebased) ?? 0) + fileChange.count);
 		}
 	}
@@ -134,6 +142,7 @@ function runAstEditOnce(
 		maxFiles: options.maxFiles,
 		failOnParseError: options.failOnParseError,
 		signal: options.signal,
+		filesystem: options.filesystem,
 	});
 }
 
@@ -141,11 +150,18 @@ type AstEditSchemaInfer = typeof astEditSchema.infer;
 
 export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolDetails> {
 	readonly name = "ast_edit";
-	readonly approval = (args: unknown) => {
-		const paths = Array.isArray((args as Partial<AstEditSchemaInfer>).paths)
-			? ((args as Partial<AstEditSchemaInfer>).paths as string[])
-			: [];
-		return paths.length > 0 && paths.every(path => isInternalUrlPath(path)) ? "read" : "write";
+	/** Strictest write decision ({@link strictestApproval}) over every path; "write" when none is given. */
+	readonly approval = (args: unknown): ToolApprovalDecision => {
+		const paths = isRecord(args) ? args.paths : undefined;
+		if (!Array.isArray(paths) || paths.length === 0) return "write";
+		const router = InternalUrlRouter.instance();
+		const decisions: ToolApprovalDecision[] = [];
+		for (const target of paths) {
+			// A malformed entry fails closed rather than reaching a tier decision.
+			if (typeof target !== "string") return "exec";
+			decisions.push(router.writeTier(target, undefined, undefined));
+		}
+		return strictestApproval(decisions);
 	};
 	readonly formatApprovalDetails = (args: unknown): string[] => {
 		const params = args as Partial<AstEditSchemaInfer>;
@@ -247,18 +263,16 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 			const normalizedRewrites = Object.fromEntries(ops);
 			const maxFiles = $envpos("PI_MAX_AST_FILES", 1000);
 
+			const resolveContext = sessionResolveContext(this.session, { signal });
+			// Internal URLs resolve inside the native rewrite, bounded by the tier this call was approved at.
+			const tier = resolveToolTier(this, params);
+			const urlFilesystem = new InternalUrlFilesystem({ context: resolveContext, tier });
 			const scope = await resolveToolSearchScope({
 				rawPaths: params.paths,
 				cwd: this.session.cwd,
 				internalUrlAction: "rewrite",
-				settings: this.session.settings,
-				signal,
-				sessionFile: this.session.getSessionFile() ?? undefined,
-				sessionId: this.session.sessionManager?.getSessionId?.() ?? this.session.getSessionId?.() ?? undefined,
-				agentRegistry: this.session.agentRegistry,
-				localProtocolOptions: this.session.localProtocolOptions,
-				skills: this.session.skills,
-				rules: this.session.activeRules,
+				filesystem: urlFilesystem,
+				fileWritableOnly: true,
 				resolveExternalUrl: async rawPath => {
 					if (!parseReadUrlTarget(rawPath)) return undefined;
 					throw new ToolError(
@@ -274,6 +288,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 				maxFiles,
 				failOnParseError: false,
 				signal,
+				filesystem: urlFilesystem.shellFilesystem(),
 			});
 
 			const { errors: cappedParseErrors, total: parseErrorsTotal } = capParseErrors(result.parseErrors);
@@ -323,10 +338,12 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 			if (useHashLines) {
 				const snapshotStore = getEditStore(this.session);
 				for (const relativePath of fileList) {
-					const absolutePath = path.resolve(this.session.cwd, relativePath);
+					// A `local://` result binds to its backing file.
+					const snapshotPath = await resultSnapshotPath(relativePath, this.session.cwd, resolveContext);
+					if (snapshotPath === undefined) continue;
 					try {
-						const fullText = normalizeToLF(await Bun.file(absolutePath).text());
-						const tag = snapshotStore.recordSnapshot(absolutePath, fullText);
+						const fullText = normalizeToLF(await Bun.file(snapshotPath).text());
+						const tag = snapshotStore.recordSnapshot(snapshotPath, fullText);
 						hashContexts.set(relativePath, { tag });
 					} catch {
 						// Best-effort: if a file disappears between ast-edit and rendering, emit plain line output.
@@ -411,11 +428,14 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 					label: `AST Edit: ${result.totalReplacements} replacement${previewReplacementPlural} in ${result.filesTouched} file${previewFilePlural}`,
 					sourceToolName: this.name,
 					apply: async (_reason: string) => {
+						// The apply outlives the preview call: its filesystem carries no signal.
+						const applyContext = sessionResolveContext(this.session);
 						const applyResult = await runAstEditOnce(multiTargets, resolvedSearchPath, globFilter, {
 							rewrites: normalizedRewrites,
 							dryRun: false,
 							maxFiles,
 							failOnParseError: false,
+							filesystem: new InternalUrlFilesystem({ context: applyContext, tier }).shellFilesystem(),
 						});
 						const { errors: cappedApplyParseErrors, total: applyParseErrorsTotal } = capParseErrors(
 							applyResult.parseErrors,
@@ -440,10 +460,11 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 						if (useHashLines) {
 							const snapshotStore = getEditStore(this.session);
 							for (const relativePath of appliedFileList) {
-								const appliedAbsolutePath = path.resolve(this.session.cwd, relativePath);
+								const appliedPath = await resultSnapshotPath(relativePath, this.session.cwd, applyContext);
+								if (appliedPath === undefined) continue;
 								try {
-									const fullText = normalizeToLF(await Bun.file(appliedAbsolutePath).text());
-									const freshTag = snapshotStore.recordSnapshot(appliedAbsolutePath, fullText);
+									const fullText = normalizeToLF(await Bun.file(appliedPath).text());
+									const freshTag = snapshotStore.recordSnapshot(appliedPath, fullText);
 									freshTagLines.push(formatHashlineHeader(relativePath, freshTag));
 								} catch {
 									// File disappeared between apply and re-read; skip its tag.

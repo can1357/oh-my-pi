@@ -27,6 +27,8 @@ import type { SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { isRecord } from "@oh-my-pi/pi-utils";
 
+import { cfgTaskEnableEffort } from "@oh-my-pi/pi-coding-agent/task/settings";
+
 const taskAgent: AgentDefinition = {
 	name: "task",
 	description: "General-purpose task agent",
@@ -142,7 +144,7 @@ describe("task.batch schema gating", () => {
 		expect(getSchemaProperties(flat).effort).toBeUndefined();
 		expect(flat.description).not.toContain("`effort`");
 
-		flatSession.settings.override("task.enableEffort", true);
+		cfgTaskEnableEffort.override(flatSession.settings, true);
 		expect(getSchemaProperties(flat).effort).toBeDefined();
 		expect(flat.description).toContain("`effort`");
 
@@ -151,7 +153,7 @@ describe("task.batch schema gating", () => {
 		expect(getBatchItemProperties(batch).effort).toBeUndefined();
 		expect(batch.description).not.toContain("`effort`");
 
-		batchSession.settings.override("task.enableEffort", true);
+		cfgTaskEnableEffort.override(batchSession.settings, true);
 		expect(getBatchItemProperties(batch).effort).toBeDefined();
 		expect(batch.description).toContain("`effort`");
 	});
