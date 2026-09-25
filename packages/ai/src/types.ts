@@ -507,8 +507,6 @@ export interface StreamOptions {
 	 * `x-grok-conv-id`; when omitted, they fall back to `sessionId`.
 	 */
 	promptCacheKey?: string;
-	/** Persist the response for later previous_response_id continuation (Responses-style APIs). */
-	store?: boolean;
 	/**
 	 * OpenAI GPT-5.6+ prompt-cache policy. Ignored by providers that do not
 	 * support explicit OpenAI cache breakpoints; explicit mode fails locally on
@@ -526,6 +524,12 @@ export interface StreamOptions {
 	 * internal chain state (`statefulResponses` / lastResponseId) for this request.
 	 */
 	previousResponseId?: string;
+	/**
+	 * OpenAI Responses `store`: persist the response server-side so a later
+	 * `previous_response_id` continuation can resolve it. Platform chaining only
+	 * resolves stored responses.
+	 */
+	store?: boolean;
 	/** OpenAI `parallel_tool_calls`. */
 	parallelToolCalls?: boolean;
 	/** OpenAI deterministic-sampling `seed`. */
