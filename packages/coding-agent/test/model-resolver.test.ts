@@ -29,6 +29,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { DEFAULT_MODEL_ROLE_ALIAS, LEGACY_MODEL_ROLE_ALIAS_PREFIX } from "@oh-my-pi/pi-coding-agent/config/model-roles";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import MODEL_PRIO from "../src/priority.json" with { type: "json" };
 
 // Mock models for testing
 const mockModels: Model<"anthropic-messages">[] = [
@@ -1102,6 +1103,65 @@ describe("resolveModelRoleValue", () => {
 		expect(idOnly.model?.id).toBe("gpt-5.3-codex");
 		expect(idOnly.thinkingLevel).toBe(Effort.XHigh);
 		expect(idOnly.explicitThinkingLevel).toBe(true);
+	});
+
+	test("does not resolve MODEL_PRIO.smol patterns into gemini ids mid-word", () => {
+		const geminiPro: Model<"openai-completions">[] = [
+			buildModel({
+				id: "gemini-3.1-pro-preview",
+				name: "Gemini 3.1 Pro Preview",
+				api: "openai-completions",
+				provider: "custom",
+				baseUrl: "https://gemini.example/v1",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0.2 },
+				contextWindow: 1000000,
+				maxTokens: 65536,
+			}),
+		];
+
+		for (const pattern of MODEL_PRIO.smol) {
+			expect(parseModelPattern(pattern, geminiPro, undefined).model).toBeUndefined();
+		}
+	});
+
+	test("resolves short generic smol patterns at token boundaries", () => {
+		const miniModel: Model<"openai-completions">[] = [
+			buildModel({
+				id: "gpt-5.4-mini",
+				name: "GPT-5.4 Mini",
+				api: "openai-completions",
+				provider: "custom",
+				baseUrl: "https://mini.example/v1",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0.5, output: 1, cacheRead: 0.05, cacheWrite: 0.1 },
+				contextWindow: 128000,
+				maxTokens: 16384,
+			}),
+		];
+
+		expect(parseModelPattern("mini", miniModel, undefined).model?.id).toBe("gpt-5.4-mini");
+	});
+
+	test("prefix selectors still match at the start of an id", () => {
+		const geminiPro: Model<"openai-completions">[] = [
+			buildModel({
+				id: "gemini-3.1-pro-preview",
+				name: "Gemini 3.1 Pro Preview",
+				api: "openai-completions",
+				provider: "custom",
+				baseUrl: "https://gemini.example/v1",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0.2 },
+				contextWindow: 1000000,
+				maxTokens: 65536,
+			}),
+		];
+
+		expect(parseModelPattern("gem", geminiPro, undefined).model?.id).toBe("gemini-3.1-pro-preview");
 	});
 
 	test("clamps explicit thinking selectors from model metadata", () => {
