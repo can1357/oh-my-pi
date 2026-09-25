@@ -21,7 +21,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "18.3.0"
+version = "18.3.1"
 edition = "2024"
 license = "MIT"
 authors = ["Stencil Labs, Inc."]
