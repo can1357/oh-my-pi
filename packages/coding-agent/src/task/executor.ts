@@ -280,9 +280,8 @@ function installSubagentRetryFallbackChain(args: {
 	inheritedFallbackChain: string[] | undefined;
 	model: Model<Api> | undefined;
 	authFallbackUsed: boolean;
-	modelSelectionClosed?: boolean;
 }): string | undefined {
-	const { settings, id, candidates, inheritedFallbackChain, model, authFallbackUsed, modelSelectionClosed } = args;
+	const { settings, id, candidates, inheritedFallbackChain, model, authFallbackUsed } = args;
 	if (!model || authFallbackUsed || candidates.length === 0) return undefined;
 
 	const selectedIndex = candidates.findIndex(
@@ -290,7 +289,7 @@ function installSubagentRetryFallbackChain(args: {
 	);
 	if (selectedIndex < 0) return undefined;
 	const fallbackSelectors = candidates.slice(selectedIndex + 1).map(candidate => candidate.selector);
-	const existingFallbackChains = modelSelectionClosed ? {} : cfgRetryFallbackChains.get(settings);
+	const existingFallbackChains = cfgRetryFallbackChains.get(settings);
 	// A single configured model may reuse its role's (or the default) configured chain, but never an implicit parent fallback.
 	const fallbackChain = fallbackSelectors.length > 0 ? fallbackSelectors : inheritedFallbackChain;
 	if (
@@ -3628,7 +3627,13 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 
 			const configuredModelPatterns = resolveConfiguredModelPatterns(modelPatterns, settings);
 			if (modelSelectionClosed) {
-				subagentSettings.override("retry.fallbackChains", {});
+				// Record settings merge by key, so an empty map does not mask the
+				// parent's exact, wildcard, role, or default chains.
+				const inheritedChains = cfgRetryFallbackChains.get(subagentSettings);
+				cfgRetryFallbackChains.override(
+					subagentSettings,
+					Object.fromEntries(Object.keys(inheritedChains).map(key => [key, []])),
+				);
 			}
 			const inheritedRetryFallbackChain =
 				!modelSelectionClosed && configuredModelPatterns.length === 1
@@ -3689,7 +3694,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				inheritedFallbackChain: inheritedRetryFallbackChain,
 				model,
 				authFallbackUsed,
-				modelSelectionClosed,
 			});
 			if (retryFallbackRole) {
 				logger.debug("Configured subagent runtime model fallback chain", {

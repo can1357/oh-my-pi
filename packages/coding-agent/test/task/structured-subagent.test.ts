@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgDisabledProviders } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import type { AgentCompactionThresholdOverride } from "@oh-my-pi/pi-coding-agent/config/compaction-threshold";
 import type { BeforeSubagentSpawnEvent } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import {
@@ -381,7 +382,7 @@ describe("structured subagent primitive", () => {
 		await fs.rm(evalLabeled.artifactsDir, { recursive: true, force: true });
 	});
 
-	it("derives modelRole from the raw selector source in request, override, definition order", async () => {
+	it("retains the configured role when settings outrank a caller model", async () => {
 		const customAgent = { ...AGENT, model: ["@definition"] };
 		mockDiscovery(customAgent);
 		const roleSession = session({
@@ -394,8 +395,8 @@ describe("structured subagent primitive", () => {
 		cfgTaskAgentModelOverrides.override(roleSession.settings, { worker: "@override" });
 
 		const requestPolicy = await resolveEffectiveSubagentPolicy(request({ session: roleSession, model: "@request" }));
-		expect(requestPolicy.modelRole).toBeUndefined();
-		expect(requestPolicy.modelSelectionClosed).toBe(true);
+		expect(requestPolicy.modelRole).toBe("override");
+		expect(requestPolicy.modelSelectionClosed).toBe(false);
 		expect(requestPolicy.modelOverride).toEqual(["openai/gpt-4o"]);
 
 		const overridePolicy = await resolveEffectiveSubagentPolicy(request({ session: roleSession }));
@@ -453,8 +454,8 @@ describe("structured subagent primitive", () => {
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 
-	it("caller model wins over settings override and agent frontmatter model", async () => {
-		const agent = { ...AGENT, model: ["frontmatter/agent"] };
+	it("uses per-agent settings before custom frontmatter and caller candidates", async () => {
+		const agent = { ...AGENT, source: "project" as const, model: ["frontmatter/agent"] };
 		mockDiscovery(agent);
 		const models = [
 			registryModel("caller", "model"),
@@ -462,18 +463,47 @@ describe("structured subagent primitive", () => {
 			registryModel("settings", "override"),
 		];
 		const childSession = session({
-			modelRoles: { task: "settings/override" },
 			modelRegistry: {
 				getAvailable: () => models,
 				getAll: () => models,
 				getApiKey: async () => "test-key",
 			} as never,
 		});
-		childSession.settings.override("task.agentModelOverrides", { worker: "settings/override" });
+		cfgTaskAgentModelOverrides.override(childSession.settings, { worker: "settings/override" });
 
-		const policy = await resolveEffectiveSubagentPolicy(request({ session: childSession, model: "caller/model" }));
-		expect(policy.modelOverride).toEqual(["caller/model"]);
+		const configured = await resolveEffectiveSubagentPolicy(
+			request({ session: childSession, model: "caller/model" }),
+		);
+		expect(configured.modelOverride).toEqual(["settings/override"]);
+		const runSpy = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(result());
+		const dispatched = await runStructuredSubagent(request({ session: childSession, model: "caller/model" }));
+		expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual(["settings/override"]);
+		expect(dispatched.policy.modelSelectionClosed).toBe(false);
+		expect(configured.modelSelectionClosed).toBe(false);
+
+		cfgTaskAgentModelOverrides.override(childSession.settings, {});
+		const custom = await resolveEffectiveSubagentPolicy(request({ session: childSession, model: "missing/model" }));
+		expect(custom.modelOverride).toEqual(["frontmatter/agent"]);
+		expect(custom.modelSelectionClosed).toBe(false);
+
+		mockDiscovery({ ...AGENT, model: ["frontmatter/agent"] });
+		const bundled = await resolveEffectiveSubagentPolicy(request({ session: childSession, model: "caller/model" }));
+		expect(bundled.modelOverride).toEqual(["caller/model"]);
+		expect(bundled.modelSelectionClosed).toBe(true);
+	});
+
+	it("treats a configured bundled role as a default below the caller model", async () => {
+		mockDiscovery({ ...AGENT, model: ["@task"] });
+		const childSession = session({ modelRoles: { task: "openai/gpt-4o" } });
+		const policy = await resolveEffectiveSubagentPolicy(request({ session: childSession, model: "openai/gpt-4o" }));
+		expect(policy.modelOverride).toEqual(["openai/gpt-4o"]);
 		expect(policy.modelRole).toBeUndefined();
+		expect(policy.modelSelectionClosed).toBe(true);
+		await expect(
+			resolveEffectiveSubagentPolicy(request({ session: childSession, model: "missing/model" })),
+		).rejects.toThrow("Requested model candidates missing/model are unavailable");
+		const fallback = await resolveEffectiveSubagentPolicy(request({ session: childSession }));
+		expect(fallback.modelRole).toBe("task");
 	});
 	it("rejects an empty request selector before applying inherited model policy", async () => {
 		const customAgent = { ...AGENT, model: ["@definition"] };
@@ -490,6 +520,14 @@ describe("structured subagent primitive", () => {
 		await expect(resolveEffectiveSubagentPolicy(request({ model: [] }))).rejects.toThrow("non-empty selector");
 		await expect(resolveEffectiveSubagentPolicy(request({ model: ["  ", "\t"] }))).rejects.toThrow(
 			"non-empty selector",
+		);
+	});
+
+	it("rejects an unavailable caller alias instead of falling back to a bundled agent", async () => {
+		mockDiscovery({ ...AGENT, model: ["openai/gpt-4o"] });
+		const childSession = session({ modelRoles: { empty: "" } });
+		await expect(resolveEffectiveSubagentPolicy(request({ session: childSession, model: "@empty" }))).rejects.toThrow(
+			"Requested model candidates @empty are unavailable",
 		);
 	});
 
@@ -610,7 +648,7 @@ describe("structured subagent primitive", () => {
 	it("reports every caller candidate reason before leasing or dispatch", async () => {
 		mockDiscovery();
 		const childSession = session();
-		childSession.settings.override("disabledProviders", ["disabled"]);
+		cfgDisabledProviders.override(childSession.settings, ["disabled"]);
 		childSession.modelRegistry = {
 			getAvailable: () => [],
 			getAll: () =>

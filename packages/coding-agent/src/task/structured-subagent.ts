@@ -343,6 +343,7 @@ export async function resolveEffectiveSubagentPolicy(
 		requestModel: request.model,
 		settingsOverride: agentModelOverrides[agentName],
 		agentModel: effectiveAgent.model,
+		agentModelPriority: effectiveAgent.source !== "bundled",
 		settings: request.session.settings,
 		activeModelPattern: parentActiveModelPattern,
 		fallbackModelPattern: request.session.getModelString?.(),
@@ -353,6 +354,7 @@ export async function resolveEffectiveSubagentPolicy(
 	let modelOverride: string[] | undefined;
 	let modelRole: string | undefined;
 	let modelSelectionClosed = false;
+	const selection = resolveAgentModelSelection(modelResolution);
 	if (request.model !== undefined) {
 		const candidates = typeof request.model === "string" ? [request.model] : request.model;
 		if (candidates.length === 0 || candidates.some(candidate => candidate.trim().length === 0)) {
@@ -361,6 +363,11 @@ export async function resolveEffectiveSubagentPolicy(
 				"Caller model candidates must contain at least one non-empty selector.",
 			);
 		}
+	}
+	const configuredModelWins =
+		selection.origin === "settings" || (selection.origin === "agent" && modelResolution.agentModelPriority);
+	if (request.model !== undefined && !configuredModelWins) {
+		const candidates = typeof request.model === "string" ? [request.model] : request.model;
 		const modelRegistry = request.session.modelRegistry;
 		if (!modelRegistry) {
 			throw new StructuredSubagentError(
@@ -384,9 +391,8 @@ export async function resolveEffectiveSubagentPolicy(
 		modelOverride = resolved.patterns;
 		modelSelectionClosed = true;
 	} else {
-		const resolved = resolveAgentModelSelection(modelResolution);
-		modelOverride = resolved.patterns;
-		modelRole = resolved.role;
+		modelOverride = selection.patterns;
+		modelRole = selection.role;
 	}
 	const isolationEnabled = cfgTaskIsolationEnabled.get(request.session.settings);
 	const isIsolated = request.isolation?.requested === true;

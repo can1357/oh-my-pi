@@ -159,7 +159,6 @@ describe("task.batch schema gating", () => {
 		expect(itemProperties.schemaMode).toBeDefined();
 	});
 
-
 	it("hides effort by default and exposes it when task.enableEffort is enabled", async () => {
 		mockDiscovery();
 
@@ -405,7 +404,6 @@ describe("task.batch spawning", () => {
 				settings: {
 					"async.enabled": true,
 					"task.batch": true,
-					"task.agentModelOverrides": { task: "openai/gpt-4.1-mini" },
 				},
 			}),
 		);

@@ -1200,7 +1200,7 @@ describe("resolveAgentAdvisorSelection", () => {
 	});
 });
 describe("resolveAgentModelPatterns", () => {
-	test("pairs the first non-empty source's role with its patterns, skipping aliases with no patterns", () => {
+	test("pairs the highest configured source's role with its patterns, skipping aliases with no patterns", () => {
 		const settings = Settings.isolated({
 			modelRoles: {
 				empty: "",
@@ -1216,7 +1216,7 @@ describe("resolveAgentModelPatterns", () => {
 				agentModel: ["@definition"],
 				settings,
 			}),
-		).toEqual({ patterns: ["openai/gpt-4o"], role: "override" });
+		).toEqual({ patterns: ["openai/gpt-4o"], role: "override", origin: "settings" });
 
 		expect(
 			resolveAgentModelSelection({
@@ -1225,10 +1225,10 @@ describe("resolveAgentModelPatterns", () => {
 				agentModel: ["@definition"],
 				settings,
 			}),
-		).toEqual({ patterns: ["anthropic/claude-sonnet-4-5"], role: "definition" });
+		).toEqual({ patterns: ["anthropic/claude-sonnet-4-5"], role: "definition", origin: "agent" });
 
-		// An explicit selector carries no role identity, so the child must not
-		// capture the routing of a role that happens to name the same model.
+		// A configured override wins even when the request names the same model;
+		// the role identity must remain attached to the configuration source.
 		expect(
 			resolveAgentModelSelection({
 				requestModel: "openai/gpt-4o",
@@ -1236,7 +1236,39 @@ describe("resolveAgentModelPatterns", () => {
 				agentModel: ["@definition"],
 				settings,
 			}),
-		).toEqual({ patterns: ["openai/gpt-4o"], role: undefined });
+		).toEqual({ patterns: ["openai/gpt-4o"], role: "override", origin: "settings" });
+	});
+
+	test("custom agent definitions outrank requests; bundled defaults do not", () => {
+		const settings = Settings.isolated();
+		const options = {
+			requestModel: "caller/model",
+			agentModel: "agent/model",
+			settings,
+		};
+		expect(resolveAgentModelSelection({ ...options, agentModelPriority: true })).toEqual({
+			patterns: ["agent/model"],
+			role: undefined,
+			origin: "agent",
+		});
+		expect(resolveAgentModelSelection(options)).toEqual({
+			patterns: ["caller/model"],
+			role: undefined,
+			origin: "request",
+		});
+	});
+
+	test("custom agent role selectors outrank a spawn model and parent", () => {
+		const settings = Settings.isolated({ modelRoles: { smol: "fast/model" } });
+		expect(
+			resolveAgentModelSelection({
+				requestModel: "caller/model",
+				agentModel: "@smol",
+				agentModelPriority: true,
+				settings,
+				activeModelPattern: "parent/model",
+			}),
+		).toEqual({ patterns: ["fast/model"], role: "smol", origin: "agent" });
 	});
 
 	test("falls back to the active session model when @task is unset", () => {

@@ -11,7 +11,7 @@ Shared edits need one integration owner{{#if ircEnabled}}; siblings coordinate v
 
 # Inputs
 `name`: CamelCase ≤32, auto-generated if omitted; address agent by name. `outputSchema` overrides agent/session schemas.
-`model`: optional selector or ordered candidate list per spawn (batch: per item). Candidates are tried in order; if none is usable, dispatch fails without fallback outside the list.
+`model`: optional selector or ordered candidate list per spawn (batch: per item). Per-agent settings and custom definitions take precedence, followed by per-spawn `model`, bundled defaults and parent model. If the per-spawn list wins, candidates are tried in order; unavailable candidates fail without outside fallback.
 {{#if evalToolsEnabled}}`tools`: eval-defined, run in your kernel.
 {{/if}}{{#if effortEnabled}}`effort`: `"lo"`|`"med"`|`"hi"` by complexity.
 {{/if}}`schemaMode`: default permissive warns after retries; strict fails.
