@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Agent loop forwards `routed_model` stream events to `onAssistantMessageEvent` / `message_update` subscribers.
 ## [18.3.1] - 2026-09-25
 
 ### Added

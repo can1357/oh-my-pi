@@ -130,6 +130,11 @@ export function wrapLeakedThinkingStream(inner: AssistantMessageEventStream): As
 					case "toolcall_end":
 						projector?.toolEnd(event.contentIndex, event.toolCall);
 						break;
+					case "routed_model":
+						// Forward Cursor auto-routing checkpoints so gateway SSE
+						// encoders can release deferred envelopes.
+						out.push(event);
+						break;
 					case "done": {
 						projector ??= new LeakedThinkingProjector(out, event.message);
 						const content = projector.finish(event.message);

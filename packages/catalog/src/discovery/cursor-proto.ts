@@ -179,6 +179,25 @@ export interface AgentRunRequest extends ProtoMessage {
 	mcpFileSystemOptions?: McpFileSystemOptions;
 	skillOptions?: SkillOptions;
 	customSystemPrompt?: string;
+	suggestNextPrompt: boolean;
+	subagentTypeName: string;
+	excludeWorkspaceContext: boolean;
+	harness: string;
+	selectedSubagentModels: RequestedModel[];
+	selectedSubagentModelDetails: ModelDetails[];
+	conversationGroupId: string;
+	preFetchedBlobs: PreFetchedBlob[];
+	devRawModelSlug: string;
+	clientSupportsInlineImages: boolean;
+	subagentModelOverrides: SubagentModelOverride[];
+	canCreateCloudSubagents: boolean;
+	suppressSubagentProgressUpdateTool: boolean;
+	clientSupportsSendToUser: boolean;
+	computerUseCoordinateMode: number;
+	runId: string;
+	agentSessionId: string;
+	clientSupportsPromptContextUsageRpc: boolean;
+	clientSupportsRoutedModelUpdate: boolean;
 }
 
 export const AgentRunRequestSchema: MessageCodec<AgentRunRequest> = pb<AgentRunRequest>("agent.v1.AgentRunRequest", [
@@ -191,6 +210,55 @@ export const AgentRunRequestSchema: MessageCodec<AgentRunRequest> = pb<AgentRunR
 	{ no: 6, name: "mcpFileSystemOptions", kind: "message", T: () => McpFileSystemOptionsSchema },
 	{ no: 7, name: "skillOptions", kind: "message", T: () => SkillOptionsSchema },
 	{ no: 8, name: "customSystemPrompt", kind: "string", optional: true },
+	{ no: 10, name: "suggestNextPrompt", kind: "bool" },
+	{ no: 11, name: "subagentTypeName", kind: "string" },
+	{ no: 12, name: "excludeWorkspaceContext", kind: "bool" },
+	{ no: 13, name: "harness", kind: "string" },
+	{ no: 14, name: "selectedSubagentModels", kind: "message", T: () => RequestedModelSchema, repeat: true },
+	{ no: 15, name: "selectedSubagentModelDetails", kind: "message", T: () => ModelDetailsSchema, repeat: true },
+	{ no: 16, name: "conversationGroupId", kind: "string" },
+	{ no: 17, name: "preFetchedBlobs", kind: "message", T: () => PreFetchedBlobSchema, repeat: true },
+	{ no: 18, name: "devRawModelSlug", kind: "string" },
+	{ no: 19, name: "clientSupportsInlineImages", kind: "bool" },
+	{ no: 20, name: "subagentModelOverrides", kind: "message", T: () => SubagentModelOverrideSchema, repeat: true },
+	{ no: 21, name: "canCreateCloudSubagents", kind: "bool" },
+	{ no: 22, name: "suppressSubagentProgressUpdateTool", kind: "bool" },
+	{ no: 23, name: "clientSupportsSendToUser", kind: "bool" },
+	{ no: 24, name: "computerUseCoordinateMode", kind: "int32" },
+	{ no: 25, name: "runId", kind: "string" },
+	{ no: 26, name: "agentSessionId", kind: "string" },
+	{ no: 27, name: "clientSupportsPromptContextUsageRpc", kind: "bool" },
+	{ no: 28, name: "clientSupportsRoutedModelUpdate", kind: "bool" },
+]);
+
+/** Cursor agent message agent.v1.PreFetchedBlob. */
+export interface PreFetchedBlob extends ProtoMessage {
+	id: string;
+	data: Uint8Array;
+}
+
+export const PreFetchedBlobSchema: MessageCodec<PreFetchedBlob> = pb<PreFetchedBlob>("agent.v1.PreFetchedBlob", [
+	{ no: 1, name: "id", kind: "string" },
+	{ no: 2, name: "data", kind: "bytes" },
+]);
+
+/** Cursor agent message agent.v1.SubagentModelOverride. */
+export interface SubagentModelOverride extends ProtoMessage {
+	subagentType: string;
+	selection:
+		| { case: undefined; value?: undefined }
+		| { case: "requestedModel"; value: RequestedModel };
+}
+
+export const SubagentModelOverrideSchema: MessageCodec<SubagentModelOverride> = pb<SubagentModelOverride>("agent.v1.SubagentModelOverride", [
+	{ no: 1, name: "subagentType", kind: "string" },
+	{
+		kind: "oneof",
+		name: "selection",
+		variants: [
+			{ no: 2, name: "requestedModel", kind: "message", T: () => RequestedModelSchema },
+		],
+	},
 ]);
 
 /** Cursor agent message agent.v1.AgentServerMessage. */
@@ -2797,6 +2865,24 @@ export interface GetBlobResult extends ProtoMessage {
 
 export const GetBlobResultSchema: MessageCodec<GetBlobResult> = pb<GetBlobResult>("agent.v1.GetBlobResult", [
 	{ no: 1, name: "blobData", kind: "bytes", optional: true },
+]);
+
+/** Cursor agent message agent.v1.GetDefaultModelForCliRequest. */
+export interface GetDefaultModelForCliRequest extends ProtoMessage {
+}
+
+export const GetDefaultModelForCliRequestSchema: MessageCodec<GetDefaultModelForCliRequest> = pb<GetDefaultModelForCliRequest>("agent.v1.GetDefaultModelForCliRequest", [
+]);
+
+/** Cursor agent message agent.v1.GetDefaultModelForCliResponse. */
+export interface GetDefaultModelForCliResponse extends ProtoMessage {
+	modelId: string;
+	displayName: string;
+}
+
+export const GetDefaultModelForCliResponseSchema: MessageCodec<GetDefaultModelForCliResponse> = pb<GetDefaultModelForCliResponse>("agent.v1.GetDefaultModelForCliResponse", [
+	{ no: 1, name: "modelId", kind: "string" },
+	{ no: 2, name: "displayName", kind: "string" },
 ]);
 
 /** Cursor agent message agent.v1.GetDiffRequest. */

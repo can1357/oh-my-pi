@@ -7,7 +7,7 @@
  * Everything credential-shaped lives here so each route drives the same
  * broker-backed rotation policy and the same usage ledger.
  */
-import { extractHttpStatusFromError, logger } from "@oh-my-pi/pi-utils";
+import { $env, extractHttpStatusFromError, logger } from "@oh-my-pi/pi-utils";
 import type { ApiKeyResolver } from "../auth-retry";
 import type { AuthApiKeyOptions, AuthStorage } from "../auth-storage";
 import * as AIError from "../error";
@@ -128,6 +128,15 @@ export async function resolveGatewayApiKey(
  * failure with a fresh credential. Returning `undefined` aborts the retry
  * and surfaces the original error to the caller.
  */
+/**
+ * Default cooldown for Cursor credentials that fail with a non-usage-limit
+ * auth error in the gateway path. Cursor 401s are often temporary token
+ * expiries; a short cooldown lets the OAuth refresh fix the token while a
+ * sibling credential handles traffic. Overridable via
+ * `CURSOR_GATEWAY_COOLDOWN_MS` env var.
+ */
+const CURSOR_GATEWAY_DEFAULT_COOLDOWN_MS = 60_000;
+
 async function refreshGatewayApiKeyAfterAuthError(
 	storage: AuthStorage,
 	model: Model<Api>,
@@ -162,6 +171,41 @@ async function refreshGatewayApiKeyAfterAuthError(
 		});
 		if (!switched) return undefined;
 		return storage.keys.get(provider, sessionId, modelKeyOptions(model, signal));
+	}
+	// Cursor auth failures are often temporary token expiries rather than
+	// permanently bad credentials. Apply a short cooldown (default 60s) so the
+	// OAuth refresh has a chance to fix the token while a sibling credential
+	// handles traffic. Only fall through to permanent invalidation when no
+	// sibling is available.
+	if (provider === "cursor") {
+		const rawCooldown = $env.CURSOR_GATEWAY_COOLDOWN_MS;
+		const parsedCooldown = rawCooldown !== undefined && rawCooldown !== "" ? Number(rawCooldown) : undefined;
+		const cooldownMs =
+			parsedCooldown !== undefined && Number.isFinite(parsedCooldown) && parsedCooldown >= 0
+				? parsedCooldown
+				: CURSOR_GATEWAY_DEFAULT_COOLDOWN_MS;
+		const { switched, retryAtMs } = await storage.limits.markReached(provider, sessionId, {
+			retryAfterMs: cooldownMs,
+			providerTimed: true,
+			baseUrl: model.baseUrl,
+			modelId: model.id,
+			apiKey: oldKey,
+			signal,
+		});
+		logger.debug("auth-gateway retrying cursor credential after cooldown block", {
+			format,
+			provider,
+			peer,
+			switched,
+			cooldownMs,
+			retryAtMs,
+			error: message,
+		});
+		if (switched) {
+			return storage.keys.get(provider, sessionId, modelKeyOptions(model, signal));
+		}
+		// No sibling available — fall through to invalidation so the next
+		// request re-resolves from scratch after the cooldown expires.
 	}
 	await storage.limits.invalidateMatching(provider, oldKey, { sessionId, signal });
 	logger.debug("auth-gateway retrying provider request after credential invalidation", {
