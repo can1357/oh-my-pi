@@ -23,6 +23,8 @@ import { invalidateFsScanAfterWrite } from "../tools/fs-cache-invalidation";
 import repairPromptSource from "./auto-repair.md" with { type: "text" };
 import type { AppliedEditSnapshot } from "./blackbox";
 
+import { cfgEditAutoRepairEnabled } from "./settings";
+
 /** Context lines shown around the culprit hunks. */
 const CONTEXT_LINES = 6;
 /** Largest repair region worth sending to a small model. */
@@ -288,7 +290,7 @@ export async function attemptEditAutoRepair(options: {
 	signal?: AbortSignal;
 }): Promise<EditAutoRepairOutcome | undefined> {
 	const { session, snapshot, writethrough } = options;
-	if (!session.settings.get("edit.autoRepair.enabled")) return undefined;
+	if (!cfgEditAutoRepairEnabled.get(session.settings)) return undefined;
 	const registry = session.modelRegistry;
 	if (!registry) return undefined;
 	const model = resolveRoleSelection(["smol"], session.settings, registry.getAvailable())?.model;

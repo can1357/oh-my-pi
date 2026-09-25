@@ -139,6 +139,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"requires-reasoning-off-juice-instruction": wire("requiresReasoningOffJuiceInstruction", ["openai-responses"]),
 	"supports-all-turns-reasoning-context": wire("supportsAllTurnsReasoningContext", ["openai-responses"]),
 	"supports-configuration-update": wire("supportsConfigurationUpdate", ["openai-responses"]),
+	"supports-steering": wire("supportsSteering", ["openai-responses"]),
 	"strip-deepseek-special-tokens": wire("stripDeepseekSpecialTokens", OAI),
 	"stream-markup-healing-pattern": wire("streamMarkupHealingPattern", OAI, "scalar", [
 		"kimi",
@@ -303,6 +304,18 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		shape: "scalar",
 		values: [true, false],
 	},
+	/**
+	 * The host accepts a prompt plus `max_tokens` beyond the context window and
+	 * ends generation at the window (Anthropic `model_context_window_exceeded`)
+	 * instead of rejecting the request, so callers must not lower the output cap
+	 * to fit the window.
+	 */
+	"stops-output-at-context-window": {
+		key: "stopsOutputAtContextWindow",
+		set: "catalog",
+		shape: "scalar",
+		values: [true, false],
+	},
 	"clamp-context-override": { key: "clampContextOverride", set: "catalog", shape: "scalar" },
 	"context-promotion-target": { key: "contextPromotionTarget", set: "catalog", shape: "scalar" },
 	"context-window-floor": { key: "contextWindowFloor", set: "catalog", shape: "scalar" },
@@ -341,6 +354,12 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 * `allowed_fallback_models` (GET /v1/models/{id}); anything else is a 400.
 	 */
 	"server-side-fallback-models": { key: "serverSideFallbackModels", set: "catalog", shape: "array" },
+	/**
+	 * Anthropic model ids a refusal's `fallback_credit_token` may be redeemed
+	 * on (the refused model's permitted fallback targets). Unordered; a retry
+	 * on any other model cannot redeem the credit.
+	 */
+	"fallback-credit-targets": { key: "fallbackCreditTargets", set: "catalog", shape: "array" },
 	priority: { key: "priority", set: "catalog", shape: "scalar" },
 	"service-tier-cost": { key: "serviceTierCost", set: "catalog", shape: "object" },
 	"time-based-cost": { key: "timeBased", set: "catalog", shape: "object" },

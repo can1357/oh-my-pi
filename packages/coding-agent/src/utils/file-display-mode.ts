@@ -2,7 +2,8 @@
  * Resolve line-display mode for file-like outputs (read, grep, @file mentions).
  */
 
-import { resolveEditMode } from "./edit-mode";
+import { type EditModeSessionLike, resolveEditMode } from "./edit-mode";
+import { cfgReadLineNumbers } from "../tools/settings";
 
 export interface FileDisplayMode {
 	lineNumbers: boolean;
@@ -10,12 +11,9 @@ export interface FileDisplayMode {
 }
 
 /** Session-like object providing settings and tool availability for display mode resolution. */
-export interface FileDisplayModeSession {
+export interface FileDisplayModeSession extends EditModeSessionLike {
 	/** Whether the edit tool is available. Hashlines are suppressed without it. */
 	hasEditTool?: boolean;
-	settings: {
-		get(key: "readLineNumbers" | "edit.mode"): unknown;
-	};
 }
 
 /**
@@ -39,6 +37,6 @@ export function resolveFileDisplayMode(
 	const hashLines = !raw && !immutable && hasEditTool && usesHashLineAnchors;
 	return {
 		hashLines,
-		lineNumbers: !raw && (hashLines || settings.get("readLineNumbers") === true),
+		lineNumbers: !raw && (hashLines || cfgReadLineNumbers.get(settings) === true),
 	};
 }

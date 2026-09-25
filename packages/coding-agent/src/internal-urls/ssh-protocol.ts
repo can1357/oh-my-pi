@@ -19,40 +19,31 @@
  * SSH provider via `import "./discovery"` (sdk.ts) / `initializeWithSettings`
  * (main.ts) before any tool resolves.
  */
+import { $which } from "@oh-my-pi/pi-utils";
 import * as capability from "../capability";
 import { type SSHHost, sshCapability } from "../capability/ssh";
 import type { SSHConnectionTarget } from "../ssh/connection-manager";
 import {
 	listRemoteDir,
-	type RemoteDirEntry,
 	type RemotePathKind,
 	readRemoteFile,
 	statRemotePath,
 	writeRemoteFile,
 } from "../ssh/file-transfer";
-import { isMarkdownPath } from "@oh-my-pi/pi-tui/lang-from-path";
+import sshDoc from "../prompts/internal-urls/ssh.md" with { type: "text" };
+import { contentTypeForPath, formatDirectoryListing } from "./filesystem-resource";
 import type {
 	InternalResource,
 	InternalUrl,
 	ProtocolHandler,
 	ResolveContext,
+	SchemeSpec,
 	UrlCompletion,
 	WriteContext,
 } from "./types";
 
 /** Largest remote text file `ssh://` will materialize (mirrors the local:// cap). */
 const SSH_TEXT_MAX_BYTES = 1024 * 1024;
-
-/** POSIX-aware content type from the last path segment's extension. */
-function contentTypeFor(remotePath: string): InternalResource["contentType"] {
-	if (isMarkdownPath(remotePath)) return "text/markdown";
-	const slash = remotePath.lastIndexOf("/");
-	const base = slash === -1 ? remotePath : remotePath.slice(slash + 1);
-	const dot = base.lastIndexOf(".");
-	const ext = dot <= 0 ? "" : base.slice(dot).toLowerCase();
-	if (ext === ".json") return "application/json";
-	return "text/plain";
-}
 
 /** Decode the whole buffer as UTF-8 text, or null if it holds a NUL or invalid byte. */
 function decodeUtf8Text(bytes: Uint8Array): string | null {
@@ -248,15 +239,21 @@ async function resolveTarget(url: InternalUrl, cwd?: string): Promise<SSHConnect
 	return { name: rawAuthority, host: isIpv6Literal ? sshHost : rawAuthority };
 }
 
-/** Format a one-level remote directory listing — mirrors buildDirectoryResource's plain `name/` lines. */
-function formatDirListing(entries: readonly RemoteDirEntry[]): string {
-	if (entries.length === 0) return "(empty directory)";
-	return entries.map(entry => `${entry.name}${entry.isDirectory ? "/" : ""}`).join("\n");
-}
-
 export class SshProtocolHandler implements ProtocolHandler {
 	readonly scheme = "ssh";
-	readonly immutable = false;
+	readonly spec: SchemeSpec = {
+		backing: "remote",
+		selectors: "lines",
+		portAuthority: true,
+		immutable: false,
+		readTier: "exec",
+		write: { via: "handler", payload: "text", scope: "workspace", tier: () => "exec" },
+	};
+
+	/** Advertised only when an `ssh` client is on PATH. */
+	promptDoc(): string | undefined {
+		return $which("ssh") ? sshDoc.trim() : undefined;
+	}
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
 		// Bare `ssh://` (or `ssh:///`) with no host lists the configured hosts. A
@@ -312,7 +309,7 @@ export class SshProtocolHandler implements ProtocolHandler {
 		return {
 			url: url.href,
 			content,
-			contentType: contentTypeFor(remotePath),
+			contentType: contentTypeForPath(remotePath),
 			size: fileResult.bytes.length,
 		};
 	}
@@ -327,7 +324,7 @@ export class SshProtocolHandler implements ProtocolHandler {
 	): Promise<InternalResource> {
 		// `search`/`find` reject an ssh:// directory outright, so they pass `skipListing`
 		// to avoid draining a full remote `ls` we would only discard.
-		const content = skipListing ? "" : formatDirListing(await listRemoteDir(target, remotePath, { signal }));
+		const content = skipListing ? "" : formatDirectoryListing(await listRemoteDir(target, remotePath, { signal }));
 		return {
 			url: url.href,
 			content,

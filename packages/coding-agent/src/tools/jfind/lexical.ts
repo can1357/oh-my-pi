@@ -22,13 +22,16 @@ function escapeRegex(keyword: string): string {
 
 export interface GrepIndexOptions {
 	includeHidden: boolean;
+	/** Filesystem URL roots and their entries resolve through. */
+	filesystem: natives.ShellFilesystem;
 	signal?: AbortSignal;
 	timeoutMs?: number;
 }
 
 /**
  * Count keyword occurrences (case-insensitive, any keyword) in every file under
- * `root`. Only lines containing a keyword are inspected, so counts are per
+ * `root`, keyed like `FileEntry.rel`: root-relative, or a file root's own
+ * path. Only lines containing a keyword are inspected, so counts are per
  * matching line rather than per file byte.
  */
 export async function grepIndex(
@@ -46,6 +49,7 @@ export async function grepIndex(
 		hidden: options.includeHidden,
 		gitignore: true,
 		mode: natives.GrepOutputMode.Content,
+		filesystem: options.filesystem,
 		signal: options.signal,
 		timeoutMs: options.timeoutMs,
 	});

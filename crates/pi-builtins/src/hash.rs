@@ -88,6 +88,7 @@ impl builtins::Command for HashCommand {
 				if context
 					.shell
 					.find_first_executable_in_path_using_cache(name)
+					.await
 					.is_none()
 				{
 					writeln!(context.stderr(), "{name}: not found")?;
