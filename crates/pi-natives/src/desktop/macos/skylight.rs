@@ -160,8 +160,8 @@ fn ensure_skylight_loaded() -> Option<()> {
 }
 
 fn symbol<T: Copy>(name: &CStr) -> Option<T> {
-	// SAFETY: `name` is NUL-terminated and RTLD_DEFAULT is valid for process-wide
-	// lookup.
+	// SAFETY: `name` is NUL-terminated and RTLD_DEFAULT is valid for
+	// process-wide lookup.
 	let raw = unsafe { libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr()) };
 	if raw.is_null() {
 		return None;
@@ -187,8 +187,8 @@ pub(super) fn stamp_event(
 ) -> CoreResult<()> {
 	let spi = required()?;
 	let ptr = event_ptr(event);
-	// SAFETY: The event is alive for these calls; all function pointers passed the
-	// atomic exact-signature probe.
+	// SAFETY: The event is alive for these calls; all function pointers passed
+	// the atomic exact-signature probe.
 	unsafe {
 		(spi.set_integer)(ptr, 0, phase);
 		(spi.set_integer)(ptr, 1, click_state);
@@ -209,9 +209,9 @@ pub(super) fn post_dual(pid: pid_t, event: &CGEvent) -> CoreResult<()> {
 	// SAFETY: `event` remains retained for both posts and `post_to_pid` was
 	// atomically resolved with its exact ABI.
 	unsafe { (spi.post_to_pid)(pid, event_ptr(event)) };
-	// The public post supplements a successful SkyLight post for plain AppKit; it
-	// is never a fallback. SAFETY: `event` remains retained for the synchronous
-	// public CoreGraphics post.
+	// The public post supplements a successful SkyLight post for plain AppKit;
+	// it is never a fallback. SAFETY: `event` remains retained for the
+	// synchronous public CoreGraphics post.
 	unsafe { CGEventPostToPid(pid, event.as_ptr()) };
 	Ok(())
 }
@@ -220,9 +220,9 @@ pub(super) fn post_keyboard(pid: pid_t, event: &CGEvent) -> CoreResult<()> {
 	let spi = required()?;
 	attach_keyboard_authentication(pid, event);
 	// The authenticated SkyLight route reaches Chromium and AppKit. Posting the
-	// same event through the public per-pid queue as well would deliver every key
-	// twice. SAFETY: `event` remains retained and the exact symbol is part of the
-	// required atomic probe.
+	// same event through the public per-pid queue as well would deliver every
+	// key twice. SAFETY: `event` remains retained and the exact symbol is part
+	// of the required atomic probe.
 	unsafe { (spi.post_to_pid)(pid, event_ptr(event)) };
 	Ok(())
 }
@@ -230,8 +230,8 @@ pub(super) fn post_keyboard(pid: pid_t, event: &CGEvent) -> CoreResult<()> {
 pub(super) fn activate_without_raise(pid: pid_t, wid: u32) -> CoreResult<()> {
 	let spi = required()?;
 	let mut previous = ProcessSerialNumber::default();
-	// SAFETY: `previous` is writable and exactly the 8-byte PSN record expected by
-	// this SPI.
+	// SAFETY: `previous` is writable and exactly the 8-byte PSN record expected
+	// by this SPI.
 	if unsafe { (spi.get_front)(&mut previous) } != 0 {
 		return Err(DesktopError::background_unavailable(format!(
 			"window {wid} could not resolve the front process for background input; retry with \
@@ -275,8 +275,8 @@ pub(super) fn with_foreground<T>(
 		return with_public_foreground(pid, action);
 	};
 	let mut previous = ProcessSerialNumber::default();
-	// SAFETY: `previous` is a writable PSN and the foreground-only function pointer
-	// passed its exact-signature probe.
+	// SAFETY: `previous` is a writable PSN and the foreground-only function
+	// pointer passed its exact-signature probe.
 	let previous_known = unsafe { (spi.get_front)(&mut previous) } == 0;
 	let Some(target) = process_psn(spi.psn, pid, wid) else {
 		return with_public_foreground(pid, action);
@@ -339,8 +339,8 @@ fn process_psn(lookup: PsnLookup, pid: pid_t, wid: u32) -> Option<ProcessSerialN
 			&& owner_connection != 0
 		{
 			let mut psn = ProcessSerialNumber::default();
-			// SAFETY: `psn` is writable and has the exact 8-byte layout required by the
-			// SPI.
+			// SAFETY: `psn` is writable and has the exact 8-byte layout required
+			// by the SPI.
 			if unsafe { get_connection_psn(owner_connection, &mut psn) } == 0 {
 				return Some(psn);
 			}
@@ -371,8 +371,8 @@ fn attach_keyboard_authentication(pid: pid_t, event: &CGEvent) {
 	let Some(spi) = AUTHENTICATION.as_ref() else {
 		return;
 	};
-	// SAFETY: Both C strings are static; runtime lookup functions have their exact
-	// Objective-C ABI.
+	// SAFETY: Both C strings are static; runtime lookup functions have their
+	// exact Objective-C ABI.
 	let class = unsafe { (spi.objc_get_class)(c"SLSEventAuthenticationMessage".as_ptr()) };
 	// SAFETY: The selector C string is static and NUL-terminated.
 	let selector =
@@ -380,18 +380,18 @@ fn attach_keyboard_authentication(pid: pid_t, event: &CGEvent) {
 	if class.is_null() || selector.is_null() {
 		return;
 	}
-	// SAFETY: This guard is required because macOS 14 has the class but lacks the
-	// macOS 15+ factory selector.
+	// SAFETY: This guard is required because macOS 14 has the class but lacks
+	// the macOS 15+ factory selector.
 	if !unsafe { (spi.class_responds)(class, selector) } {
 		return;
 	}
-	// __CGEvent stores its SLSEventRecord pointer after CFRuntimeBase and a padded
-	// u32.
+	// __CGEvent stores its SLSEventRecord pointer after CFRuntimeBase and a
+	// padded u32.
 	let event_raw = event_ptr(event);
 	let mut record = ptr::null_mut();
 	for offset in [24usize, 32, 16] {
-		// SAFETY: These are the known pointer-aligned candidate slots in __CGEvent;
-		// read_unaligned avoids alignment assumptions.
+		// SAFETY: These are the known pointer-aligned candidate slots in
+		// __CGEvent; read_unaligned avoids alignment assumptions.
 		let candidate =
 			unsafe { ptr::read_unaligned(event_raw.cast::<u8>().add(offset).cast::<*mut c_void>()) };
 		if !candidate.is_null() {

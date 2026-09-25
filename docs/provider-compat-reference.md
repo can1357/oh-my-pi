@@ -128,6 +128,7 @@ Types: `OpenAICompat` / `ResolvedOpenAISharedCompat` in `packages/catalog/src/ty
 | `supportsLongPromptCacheRetention` | Official OpenAI | Sends `prompt_cache_retention: "24h"` when requested |
 | `strictResponsesPairing` | Azure OpenAI, Copilot Responses | Enforces strict 1:1 tool-call/tool-result pairing when building Responses input items |
 | `supportsImageDetailOriginal` | `false` for Copilot, xai-oauth | `detail: "original"` vs `detail: "auto"` on input images (hosts that 400 on `original` get `auto`) |
+| `supportsConfigurationUpdate` | `true` for `gpt-6-astra` (class rule, any host); `false` otherwise | Pins request-level `reasoning.effort` to the session baseline and carries later changes as `configuration_update` input items; set `false` in `models.yml` for custom proxies that 400 on the item type — the changed effort is then sent at the request level and no item is emitted |
 | `supportsObfuscationOptOut` | Official OpenAI | Allows `stream_options: { include_obfuscation: false }` |
 
 ## 2. Reasoning levels

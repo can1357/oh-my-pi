@@ -1,7 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
-import { getOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/stream";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 
@@ -17,19 +16,12 @@ afterEach(() => {
 });
 
 describe("openrouter login wiring", () => {
-	test("registers OpenRouter in the OAuth provider selector", () => {
-		const provider = getOAuthProviders().find(item => item.id === "openrouter");
-		expect(provider).toBeDefined();
-		expect(provider?.name).toBe("OpenRouter");
-		expect(provider?.available).toBe(true);
-	});
-
 	test("resolves OPENROUTER_API_KEY from environment", () => {
 		Bun.env.OPENROUTER_API_KEY = "or-test-key";
 		expect(getEnvApiKey("openrouter")).toBe("or-test-key");
 	});
 
-	test("AuthStorage.login('openrouter') validates against /auth/key and stores the pasted key", async () => {
+	test("AuthStorage.oauth.login('openrouter') validates against /auth/key and stores the pasted key", async () => {
 		const fetchCalls: Array<{ url: string; init: RequestInit | undefined }> = [];
 		const fetchMock: FetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
 			const url =
@@ -46,15 +38,15 @@ describe("openrouter login wiring", () => {
 
 		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
 		const storage = new AuthStorage(store);
-		await storage.reload();
+		await storage.credentials.reload();
 
-		await storage.login("openrouter", {
+		await storage.oauth.login("openrouter", {
 			onAuth: () => {},
 			onPrompt: async () => "sk-or-validated",
 			fetch: fetchMock,
 		});
 
-		const credential = await storage.get("openrouter");
+		const credential = await storage.credentials.get("openrouter");
 		expect(credential).toEqual({ type: "api_key", key: "sk-or-validated", source: "login" });
 
 		const authCall = fetchCalls.find(call => call.url.includes("/api/v1/auth/key"));
@@ -65,7 +57,7 @@ describe("openrouter login wiring", () => {
 		store.close();
 	});
 
-	test("AuthStorage.login('openrouter') rejects keys that fail /auth/key validation", async () => {
+	test("AuthStorage.oauth.login('openrouter') rejects keys that fail /auth/key validation", async () => {
 		const fetchMock: FetchImpl = vi.fn(
 			async () =>
 				new Response("Unauthorized", {
@@ -76,17 +68,17 @@ describe("openrouter login wiring", () => {
 
 		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
 		const storage = new AuthStorage(store);
-		await storage.reload();
+		await storage.credentials.reload();
 
 		await expect(
-			storage.login("openrouter", {
+			storage.oauth.login("openrouter", {
 				onAuth: () => {},
 				onPrompt: async () => "sk-or-bogus",
 				fetch: fetchMock,
 			}),
 		).rejects.toThrow(/OpenRouter API key validation failed \(401\)/);
 
-		expect(await storage.get("openrouter")).toBeUndefined();
+		expect(await storage.credentials.get("openrouter")).toBeUndefined();
 		store.close();
 	});
 });

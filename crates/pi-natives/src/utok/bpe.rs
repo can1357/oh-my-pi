@@ -207,6 +207,20 @@ impl RankTable {
 		n
 	}
 
+	/// Token count of `piece` from the merge loop alone: unlike
+	/// [`count_piece`](Self::count_piece), a whole-piece table hit is not
+	/// short-circuited, so entries the merges cannot reach stay split. Jev
+	/// resolves whole pieces against a separate vocabulary and uses its
+	/// base table only for merging.
+	pub fn count_merged(&self, piece: &[u8]) -> u32 {
+		if piece.is_empty() {
+			return 0;
+		}
+		let mut n = 0u32;
+		self.merge(piece, |_, _| n += 1);
+		n
+	}
+
 	/// tiktoken's `byte_pair_merge`: start from single bytes, repeatedly
 	/// merge the adjacent pair with the lowest rank, then emit each final
 	/// span via `emit(start, end)`.
@@ -288,8 +302,10 @@ impl BpeEncoding {
 	}
 
 	/// Normalize/transcode as required, split, and feed each piece's
-	/// UTF-8 bytes to `f` alongside the rank table.
-	fn run<U: Unit>(&self, units: &[U], f: &mut impl FnMut(&RankTable, &[u8])) {
+	/// UTF-8 bytes to `f` alongside the rank table. Crate-visible so
+	/// count-only families that price pieces differently (Jev) reuse the
+	/// normalization and splitting unchanged.
+	pub(crate) fn run<U: Unit>(&self, units: &[U], f: &mut impl FnMut(&RankTable, &[u8])) {
 		if let Some(bytes) = U::as_utf8(units) {
 			// UTF-8 flavor: valid by construction (`str`/`String` input).
 			if self.nfc

@@ -2,16 +2,15 @@
 name = "pi-voice"
 version.workspace = true
 edition.workspace = true
-license = "MIT"
+license.workspace = true
 authors.workspace = true
+homepage.workspace = true
 repository.workspace = true
 
 [lints]
 workspace = true
 
 [dependencies]
-# Forces the static libopus build for the `opus` codec crate.
-audiopus_sys.workspace = true
 bytes.workspace = true
 flume.workspace = true
 opus.workspace = true

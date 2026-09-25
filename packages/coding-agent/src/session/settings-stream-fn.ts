@@ -10,9 +10,15 @@
  * OpenRouter never saw `providers.openrouterVariant`, breaking sticky routing
  * and OpenRouter response-cache hits across advisor calls.
  */
-import type { StreamFn } from "@oh-my-pi/pi-agent-core";
+import {
+	fitOutputTokensToContextWindow,
+	type StreamFn,
+	Tokenizer,
+	tokenizerEncodingForModel,
+} from "@oh-my-pi/pi-agent-core";
 import { type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
-import { classifyModel } from "@oh-my-pi/pi-catalog/identity";
+import { serverSideFallbackModels } from "@oh-my-pi/pi-catalog/compat/server-side-fallback";
+import type { Encoding } from "@oh-my-pi/pi-natives";
 import { type Settings, validateProviderMaxInFlightRequests } from "../config/settings";
 
 function timeoutSecondsToMs(value: number): number | undefined {
@@ -26,8 +32,14 @@ function timeoutSecondsToMs(value: number): number | undefined {
  * `settings` per call and forwards to `base` (defaults to `streamSimple`).
  *
  * Caller-supplied `streamOptions` always win — the helper only fills holes.
+ * The one exception is the output cap, which is lowered when prompt plus cap
+ * would exceed the model's context window (see
+ * {@link fitOutputTokensToContextWindow}); every request this session drives,
+ * including side turns like `/btw`, goes through here.
  */
 export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn = streamSimple): StreamFn {
+	// One tokenizer per encoding, so per-message counts are reused across requests.
+	const tokenizers = new Map<Encoding | null, Tokenizer>();
 	return (model, context, streamOptions) => {
 		const openrouterRoutingPreset = settings.get("providers.openrouterVariant");
 		const openrouterVariant =
@@ -49,25 +61,28 @@ export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn =
 		const cacheRetention = cacheRetentionSetting === "auto" ? undefined : cacheRetentionSetting;
 		const streamFirstEventTimeoutMs = timeoutSecondsToMs(settings.get("providers.streamFirstEventTimeoutSeconds"));
 		const streamIdleTimeoutMs = timeoutSecondsToMs(settings.get("providers.streamIdleTimeoutSeconds"));
-		// Server-side fallback (opt-in): when the user enables it AND the
-		// resolved model is a Claude Fable/Mythos on Anthropic's messages
-		// API, inject the `fallbacks: [{ model: "claude-opus-4-8" }]` chain.
-		// The provider layer picks it up, sends the beta header, and honors
-		// the response signals. Every other model / API is untouched.
-		const serverSideFallbackEligible =
-			settings.get("providers.anthropic.serverSideFallback") &&
-			model.api === "anthropic-messages" &&
-			model.provider === "anthropic";
-		const serverSideFallbackIdentity = serverSideFallbackEligible
-			? (model.identity ?? classifyModel(model.provider, model.id ?? "", { lenient: true }))
-			: undefined;
-		const serverSideFallbackEnabled =
-			serverSideFallbackIdentity?.class === "anthropic" &&
-			(serverSideFallbackIdentity.family === "fable" || serverSideFallbackIdentity.family === "mythos");
+		// Server-side fallback (opt-in): when the user enables it, inject the
+		// catalog-owned `fallbacks` chain (`server-side-fallback-models` axis,
+		// authored for Fable/Mythos on first-party Anthropic). The provider
+		// layer picks it up, sends the beta header, and honors the response
+		// signals. Models without a rule-assigned chain are untouched.
+		const serverSideFallbackChain =
+			streamOptions?.fallbacks === undefined && settings.get("providers.anthropic.serverSideFallback")
+				? serverSideFallbackModels(model)
+				: [];
 		const fallbacks =
-			streamOptions?.fallbacks ?? (serverSideFallbackEnabled ? [{ model: "claude-opus-4-8" }] : undefined);
+			streamOptions?.fallbacks ??
+			(serverSideFallbackChain.length > 0 ? serverSideFallbackChain.map(id => ({ model: id })) : undefined);
+		const encoding = tokenizerEncodingForModel(model);
+		let tokenizer = tokenizers.get(encoding);
+		if (!tokenizer) {
+			tokenizer = new Tokenizer(model);
+			tokenizers.set(encoding, tokenizer);
+		}
+		const maxTokens = fitOutputTokensToContextWindow(model, context, streamOptions?.maxTokens, tokenizer);
 		const merged: SimpleStreamOptions = {
 			...streamOptions,
+			maxTokens,
 			openrouterVariant: streamOptions?.openrouterVariant ?? openrouterVariant,
 			antigravityEndpointMode: streamOptions?.antigravityEndpointMode ?? antigravityEndpointMode,
 			textVerbosity: streamOptions?.textVerbosity ?? textVerbosity,

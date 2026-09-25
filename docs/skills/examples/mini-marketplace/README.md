@@ -1,6 +1,6 @@
 # mini-marketplace
 
-A minimal `oh-my-pi` marketplace catalog that demonstrates the `marketplace.json` format. It lists one plugin (`my-plugin`) using a relative path source.
+A minimal `omp` marketplace catalog that demonstrates the `marketplace.json` format. It lists one plugin (`my-plugin`) using a relative path source.
 
 ## Install command
 

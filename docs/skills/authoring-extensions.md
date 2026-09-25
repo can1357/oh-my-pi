@@ -5,7 +5,7 @@ description: Use when creating a new omp extension. Covers ExtensionAPI, factory
 
 # Authoring Extensions
 
-Extensions are the primary way to add capabilities to `oh-my-pi`. A single extension module can register tools the LLM can call, slash commands users can invoke, and event handlers that run throughout the session lifecycle — all from one TypeScript file. Its default factory may initialize synchronously or return a promise.
+Extensions are the primary way to add capabilities to `omp`. A single extension module can register tools the LLM can call, slash commands users can invoke, and event handlers that run throughout the session lifecycle — all from one TypeScript file. Its default factory may initialize synchronously or return a promise.
 
 ## Minimum viable extension
 

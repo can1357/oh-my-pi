@@ -17,14 +17,18 @@ import * as path from "node:path";
 import { removeWithRetries, VERSION } from "@oh-my-pi/pi-utils";
 import { SETTINGS_SCHEMA, Settings } from "../../src/config/settings";
 import {
+	CHANGELOG_COMMAND_USAGE,
 	type ChangelogEntry,
+	DEFAULT_LAST_CHANGELOG_COUNT,
 	formatStartupChangelogSummary,
 	getNewEntries,
 	parseChangelog,
+	parseChangelogView,
 	RECENT_CHANGELOG_ENTRY_LIMIT,
 	readLastChangelogVersion,
 	renderChangelogEntries,
 	resolveStartupChangelogForDisplay,
+	selectChangelogEntries,
 	STARTUP_CHANGELOG_FULL_HINT,
 	STARTUP_CHANGELOG_MAX_BYTES,
 	selectStartupChangelog,
@@ -77,6 +81,32 @@ describe("startup changelog mode settings", () => {
 			const settings = await Settings.loadReadOnly({ cwd: agentDir, agentDir });
 			expect(settings.get("startup.changelogMode")).toBe("hidden");
 		});
+	});
+});
+describe("parseChangelogView", () => {
+	const entries = [release(1, 0, 3, "c"), release(1, 0, 2, "b"), release(1, 0, 1, "a")];
+
+	test("maps bare, full, and last counts", () => {
+		expect(parseChangelogView("")).toEqual({ kind: "recent", count: RECENT_CHANGELOG_ENTRY_LIMIT });
+		expect(parseChangelogView("full")).toEqual({ kind: "full" });
+		expect(parseChangelogView("last")).toEqual({ kind: "last", count: DEFAULT_LAST_CHANGELOG_COUNT });
+		expect(parseChangelogView("LAST 2")).toEqual({ kind: "last", count: 2 });
+	});
+
+	test("rejects unknown args and a zero count with one usage string", () => {
+		expect(parseChangelogView("yesterday")).toEqual({ error: CHANGELOG_COMMAND_USAGE });
+		expect(parseChangelogView("last 0")).toEqual({
+			error: `${CHANGELOG_COMMAND_USAGE} (N must be a positive integer)`,
+		});
+	});
+
+	test("slices last N and leaves an oversized count to the caller title", () => {
+		const last = parseChangelogView("last 2");
+		if ("error" in last) throw new Error(last.error);
+		expect(selectChangelogEntries(entries, last).map(entry => entry.patch)).toEqual([3, 2]);
+		const oversized = parseChangelogView("last 999999");
+		if ("error" in oversized) throw new Error(oversized.error);
+		expect(selectChangelogEntries(entries, oversized)).toHaveLength(entries.length);
 	});
 });
 

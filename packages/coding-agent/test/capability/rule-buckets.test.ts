@@ -17,6 +17,7 @@ function makeRule(partial: Partial<Rule>): Rule {
 		description: partial.description,
 		condition: partial.condition,
 		astCondition: partial.astCondition,
+		question: partial.question,
 		scope: partial.scope,
 		agents: partial.agents,
 		interruptMode: partial.interruptMode,
@@ -36,6 +37,51 @@ describe("bucketRules", () => {
 		expect(mgr.checkDelta("contains FORBIDDEN token", { source: "text" }).map(r => r.name)).toEqual(["no-foo"]);
 	});
 
+	it("replaces an edited TTSR rule while preserving its injection state", () => {
+		const mgr = new TtsrManager({
+			enabled: true,
+			contextMode: "discard",
+			interruptMode: "always",
+			repeatMode: "after-gap",
+			repeatGap: 0,
+		});
+		const original = makeRule({ name: "guard", condition: ["OLD"], content: "old content" });
+		bucketRules([original], mgr);
+		mgr.markInjected([original]);
+
+		const updated = makeRule({ name: "guard", condition: ["NEW"], content: "new content" });
+		bucketRules([updated], mgr, { replaceTtsrRules: true });
+
+		expect(mgr.getInjectedRuleNames()).toEqual(["guard"]);
+		expect(mgr.getRules()).toEqual([updated]);
+		expect(mgr.checkDelta("OLD", { source: "text" })).toEqual([]);
+		mgr.resetBuffer();
+		expect(mgr.checkDelta("NEW", { source: "text" })).toEqual([updated]);
+	});
+
+	it("removes stale TTSR registrations and injection state after rename or deletion", () => {
+		const mgr = new TtsrManager();
+		const original = makeRule({ name: "old-guard", condition: ["OLD"] });
+		bucketRules([original], mgr);
+		mgr.markInjected([original]);
+
+		const renamed = makeRule({ name: "new-guard", condition: ["NEW"] });
+		bucketRules([renamed], mgr, { replaceTtsrRules: true });
+
+		expect(mgr.getRules()).toEqual([renamed]);
+		expect(mgr.getInjectedRuleNames()).toEqual([]);
+		expect(mgr.checkDelta("OLD", { source: "text" })).toEqual([]);
+		mgr.resetBuffer();
+		expect(mgr.checkDelta("NEW", { source: "text" })).toEqual([renamed]);
+
+		mgr.markInjected([renamed]);
+		bucketRules([], mgr, { replaceTtsrRules: true });
+
+		expect(mgr.hasRules()).toBe(false);
+		expect(mgr.getInjectedRuleNames()).toEqual([]);
+		expect(mgr.checkDelta("NEW", { source: "text" })).toEqual([]);
+	});
+
 	it("registers an ast-only rule as TTSR and excludes it from rulebook/always buckets", () => {
 		const mgr = new TtsrManager();
 		const ttsr = makeRule({ name: "no-console", astCondition: ["console.log($A)"], description: "blocks console" });
@@ -46,6 +92,24 @@ describe("bucketRules", () => {
 		expect(alwaysApplyRules).toHaveLength(0);
 		expect(mgr.hasRules()).toBe(true);
 		expect(mgr.hasAstRules()).toBe(true);
+	});
+
+	it("registers a question-only rule as judged TTSR that never matches the stream", () => {
+		const mgr = new TtsrManager();
+		const judged = makeRule({
+			name: "honest-tests",
+			question: "Does the reply claim tests pass?",
+			condition: ["tests pass"],
+			description: "no unverified claims",
+		});
+
+		const { rulebookRules, alwaysApplyRules } = bucketRules([judged], mgr);
+
+		expect(rulebookRules).toHaveLength(0);
+		expect(alwaysApplyRules).toHaveLength(0);
+		expect(mgr.hasJudgedRules()).toBe(true);
+		// Its condition only gates the question; streamed text never interrupts.
+		expect(mgr.checkDelta("all tests pass", { source: "text" })).toEqual([]);
 	});
 
 	it("splits non-TTSR rules into always-apply and rulebook by metadata", () => {

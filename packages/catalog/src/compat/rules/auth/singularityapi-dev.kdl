@@ -1,0 +1,22 @@
+// SingularityAPI universal inference gateway (api.singularityapi.dev): 300+
+// models behind one OpenAI-compatible endpoint, pay-as-you-go `sk-sapi-...`
+// bearer keys, per-million-token tariffs published per model. SingularityAPI
+// ships two unrelated products behind one brand — this gateway and the
+// slot-reserved DeepSeek lanes on api.singularityapi.tech — with disjoint
+// keys, dashboards, effort ladders, and billing, so each owns its own
+// provider id, env var, and login flow (neither key works on the other host,
+// verified 2026-09-22).
+// Key validation probes the non-billable `GET /v1/models`: it answers 401
+// `invalid_api_key` for a missing, malformed, or unknown key (verified
+// 2026-09-22), so a bad key is rejected without spending.
+auth "singularityapi-dev" {
+	name "SingularityAPI"
+	env "SINGULARITYAPI_DEV_API_KEY"
+	login "api-key" {
+		auth-url "https://app.singularityapi.dev"
+		instructions "Create an API key from the SingularityAPI dashboard, then paste it here"
+		prompt "Paste your SingularityAPI API key" placeholder="sk-sapi-..."
+		normalize "strip-bearer"
+		validate "models-endpoint" label="SingularityAPI" url="https://api.singularityapi.dev/v1/models"
+	}
+}
