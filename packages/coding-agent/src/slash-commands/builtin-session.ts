@@ -4,68 +4,108 @@ import type { SessionOAuthAccountList } from "../session/agent-session-types";
 import {
 	getChangelogPath,
 	parseChangelog,
-	RECENT_CHANGELOG_ENTRY_LIMIT,
+	parseChangelogView,
 	renderChangelogEntries,
+	selectChangelogEntries,
 } from "../utils/changelog";
 import { formatTokenCount, refreshStatusLine } from "./builtin-modes";
 import { buildContextReportText } from "./helpers/context-report";
-import { formatDuration } from "./helpers/format";
+import { formatCoarseDuration } from "@oh-my-pi/pi-tui/chrome/format";
+import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { handleMcpAcp } from "./helpers/mcp";
 import { commandConsumed, errorMessage, parseSubcommand, usage } from "./helpers/parse";
-import { describeRedeemOutcome, type ResetUsageAccount, toResetUsageAccounts } from "./helpers/reset-usage";
+import { describeRedeemOutcome, toResetUsageAccounts } from "./helpers/reset-usage";
+import type { ResetUsageAccount } from "@oh-my-pi/pi-tui/overlays/reset-usage-selector";
 import { matchSessionPinAccounts, toSessionPinAccounts } from "./helpers/session-pin";
 import { launchStatsDashboard, parseStatsDashboardArgs } from "./helpers/stats-dashboard";
 import { handleTodoAcp } from "./helpers/todo";
 import { buildUsageReportText } from "./helpers/usage-report";
 import type { SlashCommandRuntime, SlashCommandSpec } from "./types";
 
+function normalizeResetProvider(value: string): string | undefined {
+	switch (value.trim().toLowerCase()) {
+		case "anthropic":
+		case "claude":
+			return "anthropic";
+		case "openai-codex":
+		case "codex":
+			return "openai-codex";
+		default:
+			return undefined;
+	}
+}
+
 async function handleUsageResetCommand(
 	arg: string,
 	session: AgentSession,
 	output: SlashCommandRuntime["output"],
 ): Promise<void> {
+	const safe = (value: string): string => sanitizeText(value.replace(/[\r\n\t]+/g, " "));
 	let accounts: ResetUsageAccount[];
 	try {
 		accounts = toResetUsageAccounts(await session.listResetCredits());
 	} catch (error) {
-		await output(`Could not load saved resets: ${errorMessage(error)}`);
+		await output(`Could not load saved resets: ${safe(errorMessage(error))}`);
 		return;
 	}
 	if (accounts.length === 0) {
-		await output("No Codex accounts found. Use /login to add one.");
+		await output("No provider accounts found. Use /login to add one.");
 		return;
 	}
 	const targetArg = arg.trim();
 	if (!targetArg) {
-		const lines = ["Saved Codex rate-limit resets:"];
+		const lines = ["Saved rate-limit resets:"];
 		for (const account of accounts) {
-			const detail = account.error ? `unavailable (${account.error})` : `${account.availableCount} available`;
-			lines.push(`- ${account.label}: ${detail}${account.active ? " (active)" : ""}`);
+			let detail: string;
+			if (account.error) {
+				detail = `unavailable (${safe(account.error)})`;
+			} else {
+				detail = `${account.availableCount} saved, ${account.redeemableCount} usable now`;
+				if (account.expiresAt) detail += `, expires ${safe(account.expiresAt)}`;
+				if (account.redeemableCount === 0 && account.unavailableReason) {
+					detail += ` (${safe(account.unavailableReason)})`;
+				}
+			}
+			lines.push(
+				`- ${safe(account.label)} [${safe(account.providerLabel)} · ${account.provider}/${account.target.credentialId}]: ${detail}${account.active ? " (active)" : ""}`,
+			);
 		}
-		lines.push("", "Spend one with `/usage reset <account email>` or `/usage reset active`.");
+		lines.push("", "Spend one with `/usage reset <provider>/<credential id>` or `/usage reset <provider>/active`.");
 		await output(lines.join("\n"));
 		return;
 	}
-	const wanted = targetArg.toLowerCase();
-	const target =
-		wanted === "active"
-			? accounts.find(account => account.active)
-			: accounts.find(
-					account =>
-						account.label.toLowerCase() === wanted ||
-						account.target.email?.toLowerCase() === wanted ||
-						account.target.accountId?.toLowerCase() === wanted,
-				);
-	if (!target) {
-		await output(`No Codex account matches "${targetArg}".`);
+
+	const slash = targetArg.indexOf("/");
+	if (slash <= 0) {
+		await output("Choose an account with `/usage reset <provider>/<credential id>`.");
 		return;
 	}
-	if (target.availableCount <= 0) {
-		await output(`${target.label}: no saved resets to spend.`);
+	const requestedProvider = normalizeResetProvider(targetArg.slice(0, slash));
+	const requestedAccount = targetArg
+		.slice(slash + 1)
+		.trim()
+		.toLowerCase();
+	if (!requestedProvider) {
+		await output(`Unknown reset provider "${safe(targetArg.slice(0, slash))}". Use anthropic or openai-codex.`);
+		return;
+	}
+	const requestedCredentialId = /^\d+$/.test(requestedAccount) ? Number(requestedAccount) : undefined;
+	const target = accounts.find(account => {
+		if (account.provider !== requestedProvider) return false;
+		if (requestedAccount === "active") return account.active;
+		return requestedCredentialId !== undefined && account.target.credentialId === requestedCredentialId;
+	});
+	if (!target) {
+		await output(`No stored account matches "${safe(targetArg)}". List choices with \`/usage reset\`.`);
+		return;
+	}
+	if (target.redeemableCount <= 0) {
+		const reason = target.unavailableReason ? ` (${safe(target.unavailableReason)})` : "";
+		await output(`${safe(target.label)} [${safe(target.providerLabel)}]: no saved resets usable right now${reason}.`);
 		return;
 	}
 	const outcome = await session.redeemResetCredit(target.target);
-	await output(describeRedeemOutcome(outcome, target.label));
+	await output(safe(describeRedeemOutcome(outcome, target.label)));
 }
 
 async function handleSessionPinCommand(
@@ -92,10 +132,7 @@ async function handleSessionPinCommand(
 	const providerName = provider?.name ?? accountList.provider;
 	const accounts = toSessionPinAccounts(accountList.accounts);
 	if (accounts.length === 0) {
-		const source = session.modelRegistry.authStorage.describeCredentialSource(
-			accountList.provider,
-			session.sessionId,
-		);
+		const source = session.modelRegistry.authStorage.keys.describe(accountList.provider, session.sessionId);
 		await output(
 			source
 				? `No stored OAuth accounts for ${providerName}. Current auth comes from ${source}.`
@@ -267,7 +304,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			const snapshot = runtime.session.getAsyncJobSnapshot({ recentLimit: 5 });
 			if (!snapshot || (snapshot.running.length === 0 && snapshot.recent.length === 0)) {
 				await runtime.output(
-					"No background jobs running. (Background jobs run async tools — e.g. long-running bash, debug, or task subagents that would otherwise tie up a turn. They appear here while alive and for ~5 minutes after.)",
+					"No background jobs running. (Background jobs run async tools — e.g. long-running bash, debug, or task subagents that would otherwise tie up a turn. They appear here while alive and briefly after (until their result is delivered; at most ~5 minutes).)",
 				);
 				return commandConsumed();
 			}
@@ -276,14 +313,16 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			if (snapshot.running.length > 0) {
 				lines.push("", "Running Jobs");
 				for (const job of snapshot.running) {
-					lines.push(`  [${job.id}] ${job.type} (${job.status}) — ${formatDuration(now - job.startTime)}`);
+					lines.push(`  [${job.id}] ${job.type} (${job.status}) — ${formatCoarseDuration(now - job.startTime)}`);
 					lines.push(`    ${job.label}`);
 				}
 			}
 			if (snapshot.recent.length > 0) {
 				lines.push("", "Recent Jobs");
 				for (const job of snapshot.recent) {
-					lines.push(`  [${job.id}] ${job.type} (${job.status}) — ${formatDuration(now - job.startTime)}`);
+					lines.push(
+						`  [${job.id}] ${job.type} (${job.status}) — ${formatCoarseDuration((job.endTime ?? now) - job.startTime)}`,
+					);
 					lines.push(`    ${job.label}`);
 				}
 			}
@@ -300,10 +339,14 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		icon: "gauge",
 		description: "Show provider usage and limits",
 		acpDescription: "Show token usage",
-		acpInputHint: "[show|reset [account|active]]",
+		acpInputHint: "[show|reset [provider/credential-id|provider/active]]",
 		subcommands: [
 			{ name: "show", description: "Show provider usage and limits" },
-			{ name: "reset", description: "Spend a saved Codex rate-limit reset", usage: "[account|active]" },
+			{
+				name: "reset",
+				description: "Spend a saved provider rate-limit reset",
+				usage: "[provider/credential-id|provider/active]",
+			},
 		],
 		allowArgs: true,
 		handle: async (command, runtime) => {
@@ -316,7 +359,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				await handleUsageResetCommand(rest, runtime.session, runtime.output);
 				return commandConsumed();
 			}
-			return usage("Usage: /usage [show|reset [account|active]]", runtime);
+			return usage("Usage: /usage [show|reset [provider/credential-id|provider/active]]", runtime);
 		},
 		handleTui: async (command, runtime) => {
 			const { verb, rest } = parseSubcommand(command.args);
@@ -334,7 +377,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				runtime.ctx.editor.setText("");
 				return;
 			}
-			runtime.ctx.showStatus("Usage: /usage [show|reset [account|active]]");
+			runtime.ctx.showStatus("Usage: /usage [show|reset [provider/credential-id|provider/active]]");
 			runtime.ctx.editor.setText("");
 		},
 	},
@@ -363,14 +406,18 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		icon: "news",
 		description: "Show changelog entries",
 		acpDescription: "Show changelog",
-		acpInputHint: "[full]",
-		subcommands: [{ name: "full", description: "Show complete changelog" }],
+		acpInputHint: "[full|last [N]]",
+		subcommands: [
+			{ name: "full", description: "Show complete changelog" },
+			{ name: "last", description: "Show the last N releases (default 1)", usage: "[N]" },
+		],
 		allowArgs: true,
 		handle: async (command, runtime) => {
+			const view = parseChangelogView(command.args);
+			if ("error" in view) return usage(view.error, runtime);
 			const changelogPath = getChangelogPath();
 			const allEntries = await parseChangelog(changelogPath);
-			const showFull = command.args.trim().toLowerCase() === "full";
-			const entriesToShow = showFull ? allEntries : allEntries.slice(0, RECENT_CHANGELOG_ENTRY_LIMIT);
+			const entriesToShow = selectChangelogEntries(allEntries, view);
 			if (entriesToShow.length === 0) {
 				await runtime.output("No changelog entries found.");
 				return commandConsumed();
@@ -379,8 +426,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			return commandConsumed();
 		},
 		handleTui: async (command, runtime) => {
-			const showFull = command.args.split(/\s+/).filter(Boolean).includes("full");
-			await runtime.ctx.handleChangelogCommand(showFull);
+			await runtime.ctx.handleChangelogCommand(command.args);
 			runtime.ctx.editor.setText("");
 		},
 	},
@@ -472,9 +518,19 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "hub",
+		icon: "agents",
+		description: "Open the live Agent Hub",
+		handleTui: (_command, runtime) => {
+			runtime.ctx.showAgentHub({ initialSection: "activity" });
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
 		name: "branch",
+		aliases: ["rewind"],
 		icon: "branch",
-		description: "Create a new branch from a previous message",
+		description: "Rewind to a previous message, keeping the old path as a branch",
 		handleTui: (_command, runtime) => {
 			runtime.ctx.showUserMessageSelector();
 			runtime.ctx.editor.setText("");

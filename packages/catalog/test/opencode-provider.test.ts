@@ -3,12 +3,13 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
+import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
-import { PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import {
 	fetchWellKnownModels,
 	MODELS_DEV_PROVIDER_DESCRIPTORS,
@@ -17,7 +18,8 @@ import {
 	opencodeZenModelManagerOptions,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
-import type { FetchImpl } from "@oh-my-pi/pi-utils";
+import { USER_AGENT, type FetchImpl } from "@oh-my-pi/pi-utils";
+import { mergePreviousSnapshotModels } from "../scripts/generate-models";
 
 const LIVE_FREE_MODEL_IDS = [
 	"deepseek-v4-flash-free",
@@ -489,15 +491,6 @@ describe("Shared models.dev catalog fallback", () => {
 });
 
 describe("OpenCode provider discovery", () => {
-	test("treats the OpenCode model endpoints as authoritative catalogs", () => {
-		for (const providerId of ["opencode-go", "opencode-zen"]) {
-			const descriptor = PROVIDER_DESCRIPTORS.find(item => item.providerId === providerId);
-			expect(descriptor?.dynamicModelsAuthoritative).toBe(true);
-		}
-		expect(opencodeGoModelManagerOptions().dynamicModelsAuthoritative).toBe(true);
-		expect(opencodeZenModelManagerOptions().dynamicModelsAuthoritative).toBe(true);
-	});
-
 	test("invalidates cached GLM-5.3 Flash effort metadata on upgrade (issue #9960)", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-opencode-glm53-flash-cache-"));
 		const cacheDbPath = path.join(tempDir, "models.db");
@@ -573,10 +566,54 @@ describe("OpenCode provider discovery", () => {
 			expect(flash?.input).toEqual(["text", "image"]);
 			expect(flash?.thinking).toEqual({
 				mode: "effort",
-				efforts: [Effort.Low, Effort.High, Effort.Max],
+				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
 				defaultLevel: Effort.Max,
 				requiresEffort: true,
 			});
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	test("drops cached Gemini 3.7 Flash effort metadata when refresh fails (#10543)", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-opencode-gemini37-cache-"));
+		const cacheDbPath = path.join(tempDir, "models.db");
+		try {
+			const options = opencodeZenModelManagerOptions({ apiKey: "zen-account-key" });
+			const cacheProviderId = options.cacheProviderId;
+			if (!cacheProviderId) throw new Error("OpenCode Zen cache provider id is missing");
+			const bundledModels = getBundledModels("opencode-zen");
+			const current = bundledModels.find(model => model.id === "gemini-3.7-flash");
+			if (!current?.thinking) throw new Error("OpenCode Zen Gemini 3.7 Flash is missing thinking metadata");
+			const stale = {
+				...current,
+				thinking: {
+					...current.thinking,
+					efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+				},
+			};
+			writeModelCache(cacheProviderId, Date.now(), [stale], true, "merge-v3:pre-10543", cacheDbPath);
+
+			let fetches = 0;
+			const upgraded = await resolveProviderModels(
+				{
+					...options,
+					staticModels: bundledModels,
+					cacheDbPath,
+					modelsDev: undefined,
+					fetchDynamicModels: async () => {
+						fetches++;
+						throw new Error("offline");
+					},
+				},
+				"online-if-uncached",
+			);
+			expect(fetches).toBe(1);
+			expect(upgraded.models.find(model => model.id === current.id)?.thinking?.efforts).toEqual([
+				Effort.Low,
+				Effort.Medium,
+				Effort.High,
+			]);
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
@@ -611,6 +648,99 @@ describe("OpenCode provider discovery", () => {
 				api: "openai-responses",
 				baseUrl: "https://opencode.ai/zen/go/v1",
 			});
+		}
+	});
+
+	test("routes muse-spark-1.3 contributor ids to the responses API (#10610)", () => {
+		// models.dev omits the muse-spark-1.3 ids under both gateways, so without
+		// an override they fall through to openai-completions even though the Go
+		// and Zen gateways serve them only at /v1/responses
+		// (opencode.ai/docs/go/#endpoints, opencode.ai/docs/zen/#endpoints).
+		// Sending completions requests 500s on every turn.
+		const goDescriptor = MODELS_DEV_PROVIDER_DESCRIPTORS.find(item => item.providerId === "opencode-go");
+		expect(goDescriptor?.resolveApi?.("muse-spark-1.3-contributor", { tool_call: true })).toEqual({
+			api: "openai-responses",
+			baseUrl: "https://opencode.ai/zen/go/v1",
+		});
+		const zenDescriptor = MODELS_DEV_PROVIDER_DESCRIPTORS.find(item => item.providerId === "opencode-zen");
+		expect(zenDescriptor?.resolveApi?.("muse-spark-1.3-contributor-free", { tool_call: true })).toEqual({
+			api: "openai-responses",
+			baseUrl: "https://opencode.ai/zen/v1",
+		});
+	});
+
+	test("routes gateway-listed Union Alpha to Messages on Go and Zen (#12359)", async () => {
+		for (const [makeOptions, baseUrl] of [
+			[opencodeGoModelManagerOptions, "https://opencode.ai/zen/go"],
+			[opencodeZenModelManagerOptions, "https://opencode.ai/zen"],
+		] as const) {
+			const options = makeOptions({
+				apiKey: "test-key",
+				fetch: async () => modelListResponse(["union-alpha"]),
+			});
+			const models = await options.fetchDynamicModels?.();
+			expect(models?.find(model => model.id === "union-alpha")).toMatchObject({
+				api: "anthropic-messages",
+				baseUrl,
+			});
+			expect(options.dropCachedModelIdsOnStaticMismatch).toContain("union-alpha");
+		}
+	});
+
+	test("routes gateway-listed OpenCode Zen GPT-6 Astra to Responses (#12030)", async () => {
+		const options = opencodeZenModelManagerOptions({
+			apiKey: "test-key",
+			fetch: async () => modelListResponse(["gpt-6-astra"]),
+		});
+		const models = await options.fetchDynamicModels?.();
+
+		expect(models?.find(model => model.id === "gpt-6-astra")).toMatchObject({
+			api: "openai-responses",
+			baseUrl: "https://opencode.ai/zen/v1",
+		});
+		expect(options.dropCachedModelIdsOnStaticMismatch).toContain("gpt-6-astra");
+	});
+
+	test("routes unbundled future muse-spark revisions to responses on both gateways", async () => {
+		// Both gateways serve every Muse Spark SKU at /responses; a revision
+		// that neither models.dev nor the exact pins know yet must not fall
+		// through to chat completions and 500 on every request (#10610).
+		const go = opencodeGoModelManagerOptions({
+			apiKey: "test-key",
+			fetch: async () => modelListResponse(["muse-spark-1.4-contributor"]),
+		});
+		const zen = opencodeZenModelManagerOptions({
+			apiKey: "test-key",
+			fetch: async () => modelListResponse(["muse-spark-1.4-contributor-free"]),
+		});
+		const [goModels, zenModels] = await Promise.all([go.fetchDynamicModels?.(), zen.fetchDynamicModels?.()]);
+		expect(goModels?.find(model => model.id === "muse-spark-1.4-contributor")).toMatchObject({
+			api: "openai-responses",
+			baseUrl: "https://opencode.ai/zen/go/v1",
+		});
+		expect(zenModels?.find(model => model.id === "muse-spark-1.4-contributor-free")).toMatchObject({
+			api: "openai-responses",
+			baseUrl: "https://opencode.ai/zen/v1",
+		});
+	});
+
+	test("sends attribution headers on live gateway discovery", async () => {
+		// The gateway requires x-opencode-session from 09/06 and uses it for
+		// optimization; without omp's UA the request arrives as "Bun fetch".
+		for (const makeOptions of [opencodeGoModelManagerOptions, opencodeZenModelManagerOptions]) {
+			const seen: Array<Record<string, string>> = [];
+			const options = makeOptions({
+				apiKey: "test-key",
+				fetch: (async (input: string | URL | Request, init?: RequestInit) => {
+					seen.push(Object.fromEntries(new Headers(init?.headers).entries()));
+					return modelListResponse(["muse-spark-1.4-contributor"]);
+				}) as typeof fetch,
+			});
+			await options.fetchDynamicModels?.();
+			expect(seen).toHaveLength(1);
+			expect(seen[0]?.["user-agent"]).toBe(USER_AGENT);
+			expect(typeof seen[0]?.["x-opencode-session"]).toBe("string");
+			expect(seen[0]?.["x-opencode-session"]?.length).toBeGreaterThan(0);
 		}
 	});
 
@@ -788,5 +918,103 @@ describe("OpenCode provider discovery", () => {
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
+	});
+	test("resolves the OpenCode Go long-usage fallback policy from KDL", () => {
+		const policy = resolveModelPolicy({
+			id: "deepseek-v4-flash",
+			name: "DeepSeek V4 Flash",
+			api: "openai-completions",
+			provider: "opencode-go",
+			baseUrl: "https://opencode.ai/zen/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 16_384,
+		});
+
+		expect(policy.catalog).toMatchObject({ longUsageLimitFallback: true });
+	});
+
+	test("serves image input on the OpenCode Go DeepSeek Flash lanes", () => {
+		// The deepseek class rule strips image input for the whole lineage, which
+		// is right for the DeepSeek API but wrong for this gateway: both Flash
+		// lanes accept image_url and read an unguessable pixel-rendered string
+		// back verbatim (live gateway, 2026-09-11). The rule declares the
+		// modality as well as clearing the strip, because live discovery seeds
+		// `input: ["text"]` and the wire guard requires the declared modality —
+		// clearing the strip alone would leave the lane text-only.
+		const discovered = (id: string) =>
+			buildModel({
+				id,
+				name: id,
+				api: "openai-completions",
+				provider: "opencode-go",
+				baseUrl: "https://opencode.ai/zen/go/v1",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 1_048_576,
+				maxTokens: 384_000,
+			});
+
+		for (const id of ["deepseek-flash", "deepseek-v4.1-flash"]) {
+			const model = discovered(id);
+			expect(model.input).toContain("image");
+			expect(sendsImageInputOnWire(model)).toBe(true);
+		}
+		// The plain V4 Flash lane carries no such evidence and stays text-only.
+		const plain = discovered("deepseek-v4-flash");
+		expect(plain.input).toEqual(["text"]);
+		expect(sendsImageInputOnWire(plain)).toBe(false);
+	});
+});
+
+describe("issue #10416 — retired bare opencode provider", () => {
+	// #309 split `opencode` into `opencode-go` / `opencode-zen`, and models.dev's
+	// `opencode` key is remapped to `opencode-zen`. The legacy `opencode` rows
+	// survived as previous-snapshot zombies and surfaced in the picker as a dead
+	// provider with no descriptor/auth path.
+	test("prunes bare `opencode` rows while restoring live previous-snapshot providers", () => {
+		const staleModel = buildModel({
+			id: "legacy-opencode-model",
+			name: "Legacy OpenCode Model",
+			api: "openai-completions",
+			provider: "opencode",
+			baseUrl: "https://legacy.invalid/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 16_384,
+		});
+		const liveModel = buildModel({
+			id: "live-fallback-model",
+			name: "Live Fallback Model",
+			api: "openai-completions",
+			provider: "fixture-provider",
+			baseUrl: "https://fixture.invalid/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 16_384,
+		});
+
+		const merged = mergePreviousSnapshotModels(
+			[],
+			{
+				opencode: { [staleModel.id]: staleModel },
+				"fixture-provider": { [liveModel.id]: liveModel },
+			},
+			new Set(),
+		);
+
+		expect(merged.map(model => `${model.provider}/${model.id}`)).toEqual(["fixture-provider/live-fallback-model"]);
+	});
+
+	test("the split OpenCode providers remain populated", () => {
+		expect(getBundledModels("opencode-go").length).toBeGreaterThan(0);
+		expect(getBundledModels("opencode-zen").length).toBeGreaterThan(0);
 	});
 });

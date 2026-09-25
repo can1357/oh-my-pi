@@ -15,7 +15,7 @@
   - `packages/coding-agent/src/async/job-manager.ts` — background job registration, progress, and result delivery.
   - `packages/coding-agent/src/task/parallel.ts` — `Semaphore` used for the session-scoped concurrency bound.
   - `@oh-my-pi/pi-natives` (`crates/pi-iso`) — isolation PAL: `isoResolve` / `isoStart` / `isoStop` backend resolution and fallback.
-  - `packages/coding-agent/src/task/worktree.ts` — isolation mode mapping (`parseIsolationMode`) and lifecycle (`ensureIsolation`/`cleanupIsolation`), patch capture, branch merge.
+  - `packages/coding-agent/src/task/worktree.ts` — isolation backend mapping (`parseIsolationBackend`) and lifecycle (`ensureIsolation`/`cleanupIsolation`), patch capture, branch merge.
   - `packages/coding-agent/src/task/output-manager.ts` — session-scoped `agent://` id allocation.
   - `packages/coding-agent/src/task/name-generator.ts` — default AdjectiveNoun agent ids.
   - `packages/coding-agent/src/internal-urls/agent-protocol.ts` — resolve `agent://<id>` to saved subagent output.
@@ -26,7 +26,7 @@
 
 ## Inputs
 
-The wire schema is shape-swapped by `task.batch` (default on). One unit of work is the task item `{ name?, agent?, task, effort?, outputSchema?, schemaMode?, isolated? }`. `isolated` exists only when `task.isolation.mode` is not `none` **and plan mode is disabled**; `effort` exists only when `task.enableEffort=true` (default off).
+The wire schema is shape-swapped by `task.batch` (default on). One unit of work is the task item `{ name?, agent?, task, effort?, outputSchema?, schemaMode?, isolated? }`. `isolated` exists only when `task.isolation.enabled` is true **and plan mode is disabled**; `effort` exists only when `task.enableEffort=true` (default off).
 
 - **Batch shape** (`task.batch` on): `{ context, tasks: item[] }` — one subagent per item, all run under the same fan-out rules; there is no top-level agent field. `context` is **required** shared background rendered into every spawned subagent's system prompt (`CONTEXT` section); `agent`, `outputSchema`, and `schemaMode` are per item. `effort` is added only when its setting enables it; `isolated` additionally requires plan mode to be disabled.
 - **Flat shape** (`task.batch` off): `{ ...item }` — exactly one spawn per call. Shared background goes into a `local://` file (e.g. `local://ctx.md`) that each spawn's `task` references; subagents share the parent's `local://` root.
@@ -41,9 +41,11 @@ The wire schema is shape-swapped by `task.batch` (default on). One unit of work 
 | `effort` | `"lo" \| "med" \| "hi"` | No | Present only with `task.enableEffort=true`. Per-spawn thinking effort, mapped onto the resolved model's supported range (lowest/middle/highest level it tops out at, e.g. `high`/`xhigh`/`max`). Overrides the agent's default selector, including `auto`; omitting it keeps the agent's configured selector — automatic per-prompt classification only for agents configured `auto` (e.g. the bundled `task`); `scout`/`sonic` configure `medium`. Item field in batch shape, top-level in flat shape. |
 | `outputSchema` | JSON Schema (`object \| boolean \| string \| null` at the coarse wire-validation layer) | No | Invocation-specific structured-output contract. Takes precedence over agent frontmatter `output` and the inherited parent session schema. Item field in batch shape, top-level in flat shape. |
 | `schemaMode` | `"permissive" \| "strict"` | No | Validation mode for the effective output schema. Overrides the parent session mode; defaults to `permissive`. Item field in batch shape, top-level in flat shape. |
-| `isolated` | `boolean` | No | Run in an isolated workspace and return patches. Exists only when `task.isolation.mode` is not `none` and plan mode is disabled; per item in batch shape, top-level in flat shape. Isolated agents are torn down at completion — not revivable. |
+| `isolated` | `boolean` | No | Run in an isolated workspace and return patches. Exists only when `task.isolation.enabled` is true and plan mode is disabled; per item in batch shape, top-level in flat shape. Isolated agents are torn down at completion — not revivable. |
 
 There is no wire label field: the one-line UI label shown in the TUI/registry is generated automatically from the `task` text by the tiny/title model (fire-and-forget), so callers never provide it.
+
+Users can tag models with `^` in the composer. The resulting session-local `m1`, `m2`, … pseudonyms are accepted as `agent` by task, eval `agent()`, and `workpool()`; each uses the bundled task template pinned to the tagged selector. See [user-tagged model agents](../task-agent-discovery.md#user-tagged-model-agents) for persistence, boundaries, and precedence.
 
 Runtime stays permissive: the flat form is accepted even while `task.batch` is on (internal callers such as the commit flow's `analyze_files`, and stale transcripts). The model only ever sees one shape.
 
@@ -54,9 +56,9 @@ There is no legacy per-call `schema` parameter. Use `outputSchema` and optional 
 The tool returns one text block plus `details: TaskToolDetails`.
 
 Background response (`async.enabled=true`):
-- `content`: `` Spawned agent `<id>` (job `<jobId>`). The result will be delivered when it yields. ... `` plus a coordination hint (`hub` DM when messaging is enabled, otherwise `hub` job control). A batch call instead returns `` Spawned N background agents using <agent types>. ... `` (the deduped per-item agent types, comma-joined) with a per-agent `- `<id>` (job `<jobId>`)` listing.
+- `content`: `` Spawned agent `<id>` (job `<jobId>`). `` plus auto-delivery guidance: use `wait` only when blocked, `read proc://<id>` for non-consuming inspection, `write proc://<id>/kill` to cancel, and `write agent://<id>` to coordinate when peer messaging is enabled. A batch call instead returns `` Spawned N background agents using <agent types>. ... `` (the deduped per-item agent types, comma-joined) with a per-agent `- `<id>` (job `<jobId>`)` listing.
 - `details`: `{ projectAgentsDir, results, totalDurationMs, progress: [<AgentProgress per spawn>], async: { state, jobId, type: "task" } }`. The call keeps one shared `progress[]` snapshot; `async.jobId` is the first started job and `async.state` aggregates over the async spawns ("running" until every job settles, "failed" if any spawn failed) — jobs that settled before the call returned are already reflected. A mixed call's `results` carries the blocking spawns' inline `SingleResult`s (pure background calls return `results: []`).
-- Live progress keeps streaming into the same tool block via `onUpdate(...)`; each final result arrives later as an async-result injection into the parent conversation. The delivery text appends a follow-up hint: `` <id> is now idle — message it via `hub` to follow up; transcript at history://<id> `` (aborted variant points at the transcript only).
+- Live progress keeps streaming into the same tool block via `onUpdate(...)`; each final result arrives later as an async-result injection into the parent conversation. The delivery text appends a follow-up hint: `` <id> is now idle — message it via `write agent://<id>` to follow up; transcript at history://<id> `` when messaging is enabled (aborted variant points at the transcript only).
 
 Settled response (`async.enabled=false`, no job manager, every item's agent `blocking: true`, or async job body):
 - `content`: summary rendered from `packages/coding-agent/src/prompts/tools/task-summary.md` with a preview capped at 5000 chars; `agent://<id>` holds the full output. A sync batch concatenates the per-spawn summaries.
@@ -73,7 +75,7 @@ Settled response (`async.enabled=false`, no job manager, every item's agent `blo
 
 Artifacts and side channels:
 - Every subagent with an artifacts dir writes `<id>.md`; `agent://<id>` resolves to that file.
-- A subagent's own children are dot-qualified (`<id>.<child>`); `agent://<id>/<child>` reads that nested output. When the path names no nested output and the file is JSON, `agent://<id>/<path>` and `agent://<id>?q=<query>` perform JSON extraction.
+- A subagent's own children are dot-qualified (`<id>.<child>`); `agent://<id>.<child>` reads that nested output. A slash path is always JSON extraction: `agent://<id>/<key>/<index>/…` extracts that value from a JSON output (e.g. `agent://<id>.<child>/reports/0/data`).
 - Each subagent gets `<id>.jsonl` session history when the parent persists artifacts; `history://<id>` renders it as a concise transcript (works for live and parked agents).
 - Isolated patch mode writes `<id>.patch` before merge.
 
@@ -91,18 +93,18 @@ Artifacts and side channels:
 6. It resolves each spawn's requested `agent` type, rejects unknown or settings-disabled agents, and enforces parent spawn policy plus `PI_BLOCKED_AGENT` self-recursion prevention.
 7. Model priority: `task.agentModelOverrides` → agent frontmatter → configured task role/session fallback. Output schema priority: per-call `outputSchema` → agent frontmatter `output` → inherited parent session schema.
 8. Plan mode swaps in an `effectiveAgent` with a read-only tool subset and plan-mode prompt; `runSubprocess(...)` receives the effective agent.
-9. If `isolated`, it requires a git repo (`getRepoRoot(...)` / `captureBaseline(...)`), maps `task.isolation.mode` to a backend-kind hint (`parseIsolationMode`), and materializes the workspace via the natives PAL (`ensureIsolation` → `isoResolve`/`isoStart`), walking the candidate list when a backend is unavailable.
+9. If `isolated`, it requires a git repo (`getRepoRoot(...)` / `captureBaseline(...)`), maps `isolation.backend` to a backend-kind hint (`parseIsolationBackend`), and materializes the workspace via the natives PAL (`ensureIsolation` → `isoResolve`/`isoStart`), walking the candidate list when a backend is unavailable.
 10. Artifacts dir comes from the parent session file when available, otherwise a temp dir. When the session is executing an approved plan, the plan reference is handed to the subagent.
 11. Non-isolated spawns call `runSubprocess(...)` directly with parent cwd; isolated spawns run inside the isolation workspace, then commit to a branch (`mergeMode === "branch"`) or capture a patch, and always clean up the workspace.
-12. `runSubprocess(...)` creates a child agent session with an isolated settings snapshot (parent settings inherited — `async.enabled` and `bash.autoBackground.enabled` are **inherited** from the parent, not force-disabled; `tier.openai`/`tier.anthropic`/`tier.google` are re-resolved through `tier.subagent`; `tools.approvalMode` is forced to `yolo` because headless subagents have no UI to confirm prompts against; `advisor.enabled` is forced off unless the spawn opts in per agent; per-spawn overrides may disable read summarization and clear extra workspace roots for isolated runs), child `agentId` equal to the allocated id, child internal URL router/`AgentOutputManager`, output schema, the shared `context` (batch calls) in the system prompt's `CONTEXT` section, and the IRC peer roster in the system prompt.
-13. Child tool availability: explicit `agent.tools` if provided; auto-add `task` when the agent has `spawns` and depth allows; strip `task` at `task.maxRecursionDepth`; ensure `hub` is present in explicit tool lists; expand `exec` to `eval` + `bash`; strip parent-owned `todo` — unless the spawn is prewalk-armed, whose plan nudge + todo gate need the child to commit its own todo list before the model hand-off.
+12. `runSubprocess(...)` creates a child agent session with an isolated settings snapshot (parent settings inherited — `async.enabled` and `bash.autoBackground.enabled` are **inherited** from the parent, not force-disabled; `tier.openai`/`tier.anthropic`/`tier.google` are first re-resolved through `tier.subagent`, then the child session resolves an exact `task.agentServiceTierOverrides[agentName]` entry handed over by task/eval dispatch against its final model and persists the result; `tools.approvalMode` is forced to `yolo` because headless subagents have no UI to confirm prompts against; `advisor.enabled` is forced off unless the spawn opts in per agent; per-spawn overrides may disable read summarization and clear extra workspace roots for isolated runs), child `agentId` equal to the allocated id, child internal URL router/`AgentOutputManager`, output schema, the shared `context` (batch calls) in the system prompt's `CONTEXT` section, and the IRC peer roster in the system prompt.
+13. Child tool availability: explicit `agent.tools` if provided; auto-add `task` when the agent has `spawns` and depth allows; strip `task` at `task.maxRecursionDepth`; inject `wait` when async jobs, peer messaging, or supervised services are available; peer messaging via `write` requires that tool in an explicit list; expand `exec` to `eval` + `bash`; strip parent-owned `todo` — unless the spawn is prewalk-armed, whose plan nudge + todo gate need the child to commit its own todo list before the model hand-off.
 14. The child must finish through the hidden `yield` tool; up to 3 reminder prompts, the last forcing `toolChoice = yield` when supported. `finalizeSubprocessOutput(...)` reconciles raw text, `yield` payloads, structured schemas, and abort states.
 15. End-of-run lifecycle (keep-alive, in the run finalizer):
     - caller signal, wall-clock timeout, or internal hard abort → registry status `aborted`, session disposed — terminal;
     - soft-request-budget abort on a non-isolated kept-alive agent → treated as resumable: the agent becomes `idle` and may receive a follow-up/revival;
     - isolated run → status `parked` without a reviver (workspace is merged + cleaned, so the session is not revivable; transcript stays readable via `history://`), then session disposed and detached;
     - everything else (success and failure alike) → status `idle` with the live session attached, and `AgentLifecycleManager.global().adopt(id, { idleTtlMs, revive })` arms the park timer. The reviver reopens the session JSONL.
-16. Lifecycle thereafter: `idle` agents are parked after `task.agentIdleTtlMs` (session disposed; `AgentRef` + session file retained); messaging (`hub`) or the Agent Hub revives them back to `idle`. `"Main"` is never parked.
+16. Lifecycle thereafter: `idle` agents are parked after `task.agentIdleTtlMs` (session disposed; `AgentRef` + session file retained); `write agent://<id>` or the Agent Hub revives them back to `idle`. `"Main"` is never parked.
 
 ## Modes / Variants
 - Execution mode
@@ -111,9 +113,9 @@ Artifacts and side channels:
 - Batch mode (`task.batch`, default on)
   - on — `{ context, tasks[] }`: one independent spawn per item, required `context` shared across the call's spawns, with `agent`, `outputSchema`, and `schemaMode` per item. `effort` appears only when its setting enables it; `isolated` also requires plan mode to be disabled. Lifecycle, revival, and concurrency semantics match N parallel single calls.
   - off — single spawn per call; `tasks`/`context` are rejected and removed from the schema, with the same conditional `effort`/`isolated` fields.
-- Isolation mode (`task.isolation.mode`): `none`, `auto`, `apfs`, `btrfs`, `zfs`, `reflink`, `overlayfs`, `projfs`, `block-clone`, `rcopy` (legacy `worktree`, `fuse-overlay`, `fuse-projfs` accepted for back-compat); the PAL resolves the actual backend with fallback.
+- Isolation is enabled with `task.isolation.enabled`; `isolation.backend` selects `auto`, `apfs`, `btrfs`, `zfs`, `reflink`, `overlayfs`, `projfs`, `block-clone`, or `rcopy`, and the PAL resolves the actual backend with fallback.
 - Isolation merge strategy: patch mode (capture/apply root patches) or branch mode (commit to `omp/task/<id>`, cherry-pick into parent).
-- Agent source precedence is first-wins by exact name: project `.omp/agents`; user `.omp/agent/agents`; OMP extension-package `agents/` roots in CLI → project settings → user settings → installed npm/link plugin order; Claude marketplace plugin agents (project before user); then bundled (`scout`, `designer`, `reviewer`, `security-reviewer`, `librarian`, `task`, `sonic`).
+- Agent source precedence is first-wins by exact name: project `.omp/agents`; user `.omp/agent/agents`; OMP extension-package `agents/` roots in CLI → project settings → user settings → installed npm/link plugin order; Claude marketplace plugin agents (project before user); then bundled (`scout`, `reviewer`, `security-reviewer`, `task`, `sonic`).
 - Prewalk: agent frontmatter `prewalk` or `task.agentPrewalk[agentName]` can start on the normal model and hand off to a cheaper resolved model at the first edit/write. `task.prewalk` (default off) arms this behavior for the bundled generic `task` agent. Missing/unconfigured targets and exact model+effort no-ops skip the handoff rather than failing the spawn.
 - Advisor: agent frontmatter `advisor` or `task.agentAdvisor[agentName]` (`"on"` / `"off"` / model pattern) pairs the child session with an advisor; an explicit pattern lands on the child's `modelRoles.advisor`. Subagents default to no advisor.
 
@@ -135,7 +137,7 @@ Artifacts and side channels:
   - Allocates session-scoped output ids through `AgentOutputManager` so `agent://` stays unique across invocations.
   - Shares the parent `local://` root and `ArtifactManager` with subagents.
 - Background work / cancellation
-  - `hub` cancel (or parent tool-call abort) cancels background jobs; parent tool-call abort cancels sync runs through the call signal. A hard-aborted run lands `aborted` and is torn down.
+  - `write proc://<jobId>/kill` (no `content` needed) or parent tool-call abort cancels background jobs; parent tool-call abort cancels sync runs through the call signal. A hard-aborted run lands `aborted` and is torn down. An owned running subagent without a job can be cancelled through `proc://<agentId>/kill`, which aborts and releases its session.
   - Missing-`yield` recovery sends up to three internal reminder prompts to the child session.
 
 ## Limits & Caps
@@ -166,8 +168,8 @@ Artifacts and side channels:
 ## Notes
 - Parallelism is parallel `task` calls in one assistant message — or, with `task.batch`, a `tasks[]` batch in one call; either way the session-scoped semaphore bounds the fan-out. With `async.enabled=true`, each spawn is an independent background job.
 - Shared background convention without batch mode: write it once to a `local://` file and reference that path in each spawn's `task` — subagents share the parent's `local://` root. With `task.batch`, the required `context` parameter carries the shared background directly into each spawn's system prompt.
-- Prefer messaging an existing agent (`hub`) over a fresh spawn for follow-up work: it already holds the relevant context. `hub` op:"list" shows idle/parked candidates; messaging a parked agent revives it. `history://<id>` shows what an agent has done.
-- Peer-messaging availability is derived, not configured (`isIrcEnabled` in `packages/coding-agent/src/tools/hub/messaging.ts`): it exists exactly when there is someone to message — the session can spawn subagents, or it is a subagent itself. Messaging is the only follow-up path to a finished subagent, so task without hub messaging would strand idle agents.
+- Prefer messaging an existing agent via `write agent://<id>` over a fresh spawn for follow-up work: it already holds the relevant context. Bare `history://` discovers registered transcripts; messaging a parked agent revives it. `history://<id>` shows what an agent has done.
+- Peer-messaging availability is derived, not configured (`isIrcEnabled` in the messaging helper): it requires a caller with `write` and someone to message — the session can spawn subagents, or it is a subagent itself. Without peer messaging, the follow-up hint does not suggest it.
 - Agent discovery precedence is first-wins by exact name: project `.omp` agents before user `.omp`, then OMP extension-package `agents/` roots in `listOmpExtensionRoots` order (CLI, project setting, user setting, installed npm/link plugins), Claude marketplace plugin agents (project before user), and bundled agents. Direct `.claude/agents`, `.codex/agents`, and `.gemini/agents` roots are skipped. Create-time discovery is memoized per cwd for the prompt description; execution-time discovery stays fresh.
 - Child sessions do not inherit conversation history. Built-in carry-over is the workspace tree/skills/context files, the shared `local://` root, and the approved-plan reference when one exists.
 - When the parent passes `mcpManager`, child sessions disable standalone MCP discovery and get proxy tools that reuse parent connections.

@@ -197,7 +197,7 @@ export function readUnixArEntriesFromBuffer(bytes: Uint8Array, options: FormatRe
 	const records: RawArMember[] = [];
 	let longNames: Uint8Array | undefined;
 	let metadataSize = 0;
-	for (let position = SIGNATURE.length; position < bytes.byteLength; ) {
+	for (let position = SIGNATURE.length; position < bytes.byteLength;) {
 		if (bytes.byteLength - position < HEADER_SIZE)
 			throw new ArchiveError("Invalid ar archive: truncated member header");
 		const header = parseHeader(readMemoryRange(bytes, position, position + HEADER_SIZE));
@@ -255,7 +255,7 @@ async function readUnixArImpl(source: ByteSource, options: FormatReadOptions): P
 	const records: RawArMember[] = [];
 	let longNames: Uint8Array | undefined;
 	let metadataSize = 0;
-	for (let position = SIGNATURE.length; position < source.size; ) {
+	for (let position = SIGNATURE.length; position < source.size;) {
 		const headerBytes = await readExact(source, position, position + HEADER_SIZE, "member header");
 		const header = parseHeader(headerBytes);
 		metadataSize += HEADER_SIZE;

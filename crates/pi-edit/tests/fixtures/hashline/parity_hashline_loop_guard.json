@@ -1,0 +1,20 @@
+{
+	"source": "packages/coding-agent/test/core/hashline-loop-guard.test.ts",
+	"cases": [
+		{
+			"name": "returns the soft hint for the first NOOP_HARD_LIMIT - 1 attempts"
+		},
+		{
+			"name": "escalates to a thrown ToolError on the Nth consecutive byte-identical no-op"
+		},
+		{
+			"name": "does not accumulate across distinct canonical paths"
+		},
+		{
+			"name": "resets the counter after a successful (non-noop) commit on the same path"
+		},
+		{
+			"name": "isolates state per ToolSession (no cross-session leakage)"
+		}
+	]
+}

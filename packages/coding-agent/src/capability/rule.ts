@@ -21,6 +21,8 @@ export const BUILTIN_DEFAULTS_PROVIDER_ID = "builtin-defaults";
  * Parsed frontmatter from rule files.
  */
 export interface RuleFrontmatter {
+	/** Whether discovery should omit this rule. */
+	enabled?: boolean;
 	description?: string;
 	globs?: string[];
 	alwaysApply?: boolean;
@@ -28,8 +30,12 @@ export interface RuleFrontmatter {
 	condition?: string | string[];
 	/** TTSR match condition(s) expressed as ast-grep patterns (edit/write streams only). */
 	astCondition?: string | string[];
+	/** Natural-language yes/no question a judge model answers on each completed in-scope output. */
+	question?: string;
 	/** New key for TTSR stream scope. */
 	scope?: string | string[];
+	/** Agent-name globs this rule applies to; absent = every agent. `main` targets the top-level session. */
+	agents?: string[] | string;
 	/** Per-rule TTSR interrupt mode override. */
 	interruptMode?: "never" | "prose-only" | "tool-only" | "always";
 	[key: string]: unknown;
@@ -55,8 +61,16 @@ export interface Rule {
 	condition?: string[];
 	/** ast-grep pattern condition(s) that can trigger TTSR interruption (edit/write streams only). */
 	astCondition?: string[];
+	/**
+	 * Judged-rule question: asked of the `judge` model role once an in-scope output completes,
+	 * never mid-stream. A yes delivers the rule as a non-interrupting warning; `condition` /
+	 * `astCondition`, when also set, only gate whether the question is asked.
+	 */
+	question?: string;
 	/** Optional stream scope tokens (for example: text, thinking, tool:edit(*.ts)). */
 	scope?: string[];
+	/** Lowercased agent-name globs this rule applies to (absent = every agent). */
+	agents?: string[];
 	/** Per-rule TTSR interrupt mode override (falls back to global ttsr.interruptMode). */
 	interruptMode?: "never" | "prose-only" | "tool-only" | "always";
 	/** Source metadata */
@@ -175,6 +189,43 @@ function normalizeScopeField(value: unknown): string[] | undefined {
 	}
 	return Array.from(new Set(tokens));
 }
+
+/**
+ * Parse the `agents` frontmatter field into lowercased agent-name glob patterns.
+ * Reuses the scope tokenizer for comma-separated spellings; `{a,b}` groups survive.
+ */
+export function parseRuleAgents(value: unknown): string[] | undefined {
+	const tokens = normalizeScopeField(value);
+	if (!tokens) {
+		return undefined;
+	}
+	return Array.from(new Set(tokens.map(token => token.replace(/\s*,\s*/g, ",").toLowerCase())));
+}
+
+/** Agent name used for the top-level (non-sub) session when evaluating `agents`. */
+export const MAIN_AGENT_RULE_NAME = "main";
+
+/** Fallback agent name used for a subagent session with no explicit `agentName` (see sdk.ts). */
+export const SUB_AGENT_RULE_NAME = "sub";
+
+/**
+ * Whether a rule's `agents` scope admits `agentName`. A rule without `agents`
+ * applies everywhere; `agentName === undefined` disables scoping entirely
+ * (used by CLI inventory listings that must show every rule).
+ */
+export function ruleAppliesToAgent(rule: Pick<Rule, "agents">, agentName: string | undefined): boolean {
+	const patterns = rule.agents;
+	if (!patterns || patterns.length === 0 || agentName === undefined) {
+		return true;
+	}
+	const name = agentName.trim().toLowerCase();
+	return patterns.some(pattern => {
+		if (pattern === name) {
+			return true;
+		}
+		return new Bun.Glob(pattern).match(name);
+	});
+}
 /**
  * Heuristic for condition shorthand that looks like a file glob (for example `*.rs`).
  */
@@ -196,7 +247,7 @@ function isLikelyFileGlob(value: string): boolean {
 }
 
 /**
- * Parse `condition` + `scope` from rule frontmatter.
+ * Parse the TTSR trigger fields (`condition`, `astCondition`, `question`) and `scope` from rule frontmatter.
  *
  * - `condition` accepts string or string[]
  * - `scope` accepts string or string[]
@@ -204,10 +255,11 @@ function isLikelyFileGlob(value: string): boolean {
  * - condition tokens that look like file globs become scope shorthands:
  *   `*.rs` => `tool:edit(*.rs)`, `tool:write(*.rs)` and a catch-all condition `.*`
  * - `astCondition` holds ast-grep patterns and is kept verbatim (no glob inference)
+ * - `question` accepts a single non-empty string
  */
 export function parseRuleConditionAndScope(
 	frontmatter: RuleFrontmatter,
-): Pick<Rule, "condition" | "astCondition" | "scope"> {
+): Pick<Rule, "condition" | "astCondition" | "question" | "scope"> {
 	const rawCondition = frontmatter.condition ?? frontmatter.ttsr_trigger ?? frontmatter.ttsrTrigger;
 	const parsedCondition = normalizeRuleField(rawCondition);
 	const astCondition = normalizeRuleField(frontmatter.astCondition);
@@ -233,6 +285,7 @@ export function parseRuleConditionAndScope(
 	return {
 		condition: condition.length > 0 ? Array.from(new Set(condition)) : undefined,
 		astCondition,
+		question: typeof frontmatter.question === "string" ? frontmatter.question.trim() || undefined : undefined,
 		scope: scope.length > 0 ? Array.from(new Set(scope)) : undefined,
 	};
 }
@@ -242,6 +295,59 @@ const INLINE_FLAG_PREFIX = /^\(\?([a-z]+)\)/;
 
 /** Inline flags that map cleanly onto native `RegExp` flags. */
 const TRANSLATABLE_INLINE_FLAGS = /^[ims]+$/;
+
+/**
+ * A sequence of positive lookaheads whose bodies all begin with greedy `[\s\S]*`
+ * has the same result at index zero as it does at any later index. Each body
+ * can consume the prefix itself before testing its predicate, so asking the
+ * RegExp engine to retry the sequence at every character only repeats work.
+ * Lazy `[\s\S]*?` prefixes are excluded because captures chosen by one
+ * lookahead can make a later backreference depend on the starting position.
+ */
+function canMatchWholeBufferFromStart(source: string): boolean {
+	let offset = 0;
+	let lookaheads = 0;
+	const prefix = "(?=[\\s\\S]*";
+	while (source.startsWith(prefix, offset) && source[offset + prefix.length] !== "?") {
+		let depth = 1;
+		let inCharacterClass = false;
+		let end = -1;
+		for (let index = offset + 3; index < source.length; index++) {
+			const char = source[index];
+			if (char === "\\") {
+				index++;
+				continue;
+			}
+			if (inCharacterClass) {
+				if (char === "]") inCharacterClass = false;
+				continue;
+			}
+			if (char === "[") {
+				inCharacterClass = true;
+				continue;
+			}
+			if (char === "(") {
+				depth++;
+				continue;
+			}
+			if (char !== ")") continue;
+			depth--;
+			if (depth === 0) {
+				end = index + 1;
+				break;
+			}
+		}
+		if (end === -1) return false;
+		offset = end;
+		lookaheads++;
+	}
+	return lookaheads > 0 && offset === source.length;
+}
+
+function optimizeRuleCondition(condition: RegExp): RegExp {
+	if (condition.sticky || !canMatchWholeBufferFromStart(condition.source)) return condition;
+	return new RegExp(condition.source, `${condition.flags}y`);
+}
 
 /**
  * Compile a rule `condition` into a `RegExp`, translating a leading PCRE-style
@@ -258,9 +364,9 @@ export function compileRuleCondition(pattern: string): RegExp {
 	const match = INLINE_FLAG_PREFIX.exec(pattern);
 	if (match && TRANSLATABLE_INLINE_FLAGS.test(match[1])) {
 		const flags = Array.from(new Set(match[1])).join("");
-		return new RegExp(pattern.slice(match[0].length), flags);
+		return optimizeRuleCondition(new RegExp(pattern.slice(match[0].length), flags));
 	}
-	return new RegExp(pattern);
+	return optimizeRuleCondition(new RegExp(pattern));
 }
 
 let activeRules: readonly Rule[] = [];

@@ -1,3 +1,4 @@
+import type { MCPContent, MCPImageContent, MCPResourceContent, MCPTextContent } from "@oh-my-pi/pi-tui/tools/mcp";
 /**
  * MCP (Model Context Protocol) type definitions.
  *
@@ -108,6 +109,8 @@ export interface MCPStdioServerConfig extends MCPServerConfigBase {
 	 * (`${PLUGIN_ROOT}`/`${PLUGIN_DATA}`).
 	 */
 	envPolicy?: "literal";
+	/** Env keys whose values are final package data; auth resolution keeps them verbatim. */
+	envLiteralKeys?: string[];
 	cwd?: string;
 }
 
@@ -258,30 +261,6 @@ export interface MCPToolCallParams {
 	arguments?: Record<string, unknown>;
 }
 
-/** Content types in tool results */
-export interface MCPTextContent {
-	type: "text";
-	text: string;
-}
-
-export interface MCPImageContent {
-	type: "image";
-	data: string; // base64
-	mimeType: string;
-}
-
-export interface MCPResourceContent {
-	type: "resource";
-	resource: {
-		uri: string;
-		mimeType?: string;
-		text?: string;
-		blob?: string;
-	};
-}
-
-export type MCPContent = MCPTextContent | MCPImageContent | MCPResourceContent;
-
 /** Structured authentication challenge returned in a tool result. */
 export interface MCPAuthChallenge {
 	/** Values from `_meta["mcp/www_authenticate"]`. */
@@ -292,6 +271,12 @@ export interface MCPAuthChallenge {
 export interface MCPToolCallResult {
 	content: MCPContent[];
 	isError?: boolean;
+	/**
+	 * Machine-readable payload channel (MCP spec 2025-06-18, Tools → Structured
+	 * Content). Servers may return their data here while keeping `content`
+	 * minimal; the bridge surfaces it so it reaches the model.
+	 */
+	structuredContent?: Record<string, unknown>;
 	_meta?: Record<string, unknown>;
 }
 

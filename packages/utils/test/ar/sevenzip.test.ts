@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import * as crypto from "node:crypto";
 import { ArchiveError } from "../../src/ar/error";
 import { DEFAULT_ARCHIVE_LIMITS } from "../../src/ar/limits";
 import { readSevenZip, sniffSevenZip } from "../../src/ar/sevenzip";
@@ -26,7 +25,7 @@ async function extract(entry: ArchiveIndexEntry): Promise<Uint8Array> {
 }
 
 function sha256(bytes: Uint8Array): string {
-	return crypto.createHash("sha256").update(bytes).digest("hex");
+	return Bun.SHA256.hash(bytes, "hex");
 }
 
 describe("7z container", () => {

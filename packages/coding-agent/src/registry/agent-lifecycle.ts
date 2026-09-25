@@ -9,7 +9,7 @@
  * {@link AgentLifecycleManager.ensureLive}. Only this manager flips
  * `parked` ↔ `idle`.
  *
- * Park/dispose is gated against concurrent ensureLive/hub-send:
+ * Park/dispose is gated against concurrent ensureLive/peer sends:
  * - A disposing session is never handed out.
  * - ensureLive during an in-flight park either cancels the park (session still
  *   live) or waits for detach+park and then revives.
@@ -57,14 +57,17 @@ export type PersistedSubagentReviverFactory = (ref: AgentRef) => Promise<AgentRe
 export interface AdoptOptions {
 	/** TTL before an idle agent is parked. <= 0 disables parking. */
 	idleTtlMs: number;
-	/** Recreates a live AgentSession from the ref's sessionFile. Absent => not resumable after park (e.g. isolated runs). */
+	/** Recreates a live AgentSession from the ref's sessionFile after parking. */
 	revive?: AgentReviver;
+	/** Releases resources that must survive parking but end with the agent lifecycle. */
+	onRelease?: () => Promise<void>;
 }
 
 interface AdoptedAgent {
 	ref: AgentRef;
 	idleTtlMs: number;
 	revive?: AgentReviver;
+	onRelease?: () => Promise<void>;
 	timer?: NodeJS.Timeout;
 }
 
@@ -90,27 +93,42 @@ export class AgentLifecycleManager {
 	static #global: AgentLifecycleManager | undefined;
 
 	static global(): AgentLifecycleManager {
-		if (!AgentLifecycleManager.#global) {
-			AgentLifecycleManager.#global = new AgentLifecycleManager();
+		const current = AgentLifecycleManager.#global;
+		if (current) {
+			// The manager captures its registry at construction and subscribes to
+			// it for the manager's lifetime. A test that swaps the global registry
+			// (`AgentRegistry.resetGlobalForTests`) without also resetting this
+			// manager would strand it on the dead instance: terminal transitions
+			// (`release`) would mutate the old registry while consumers subscribe
+			// to the new one, so `status_changed` never reaches them (issue #11432).
+			// Rebind by retiring the stale manager and reconstructing against the
+			// current global registry. In production the registry is never reset, so
+			// this always short-circuits and the singleton is stable.
+			if (current.#registry === AgentRegistry.global()) return current;
+			current.#retire();
 		}
+		AgentLifecycleManager.#global = new AgentLifecycleManager();
 		return AgentLifecycleManager.#global;
 	}
 
 	/** Reset the global manager. Test-only. */
 	static resetGlobalForTests(): void {
 		const current = AgentLifecycleManager.#global;
-		if (current) {
-			current.#unsubscribe?.();
-			current.#unsubscribe = undefined;
-			for (const adopted of current.#adopted.values()) {
-				clearTimeout(adopted.timer);
-			}
-			current.#adopted.clear();
-			current.#revivals.clear();
-			current.#parks.clear();
-			current.#persistedReviverFactory = undefined;
-		}
+		if (current) current.#retire();
 		AgentLifecycleManager.#global = undefined;
+	}
+
+	/** Detach from the registry and cancel every pending timer/park/revival. */
+	#retire(): void {
+		this.#unsubscribe?.();
+		this.#unsubscribe = undefined;
+		for (const adopted of this.#adopted.values()) {
+			clearTimeout(adopted.timer);
+		}
+		this.#adopted.clear();
+		this.#revivals.clear();
+		this.#parks.clear();
+		this.#persistedReviverFactory = undefined;
 	}
 
 	readonly #registry: AgentRegistry;
@@ -161,7 +179,12 @@ export class AgentLifecycleManager {
 		}
 		const existing = this.#adopted.get(id);
 		clearTimeout(existing?.timer);
-		const adopted: AdoptedAgent = { ref, idleTtlMs: opts.idleTtlMs, revive: opts.revive };
+		const adopted: AdoptedAgent = {
+			ref,
+			idleTtlMs: opts.idleTtlMs,
+			revive: opts.revive,
+			onRelease: opts.onRelease,
+		};
 		this.#adopted.set(id, adopted);
 		this.#armTimer(id, adopted);
 	}
@@ -236,7 +259,7 @@ export class AgentLifecycleManager {
 	 * agent `parked`. No-op unless the id is adopted and live.
 	 *
 	 * The session is detached (and status flipped to `parked`) *before*
-	 * `session.dispose()` so concurrent {@link ensureLive}/hub-send never
+	 * `session.dispose()` so concurrent {@link ensureLive}/peer sends never
 	 * observe or inject into a disposing session. A concurrent ensureLive that
 	 * arrives before detach cancels the park and keeps the live session.
 	 */
@@ -422,6 +445,7 @@ export class AgentLifecycleManager {
 		const adoptedMatches =
 			adopted && (expected === undefined || adopted.ref === expected || adopted.ref.session === expected);
 		const ref = currentMatches ? current : adoptedMatches ? adopted.ref : undefined;
+		const onRelease = adopted && adopted.ref === ref ? adopted.onRelease : undefined;
 		if (!ref) return false;
 		if (adopted?.ref === ref) {
 			clearTimeout(adopted.timer);
@@ -435,20 +459,43 @@ export class AgentLifecycleManager {
 			await park.promise;
 		}
 
-		if (options?.tombstone) {
-			// Persist the terminal decision before detaching the session. The
-			// sidecar prevents a later discovery pass from reviving this transcript
-			// as a fresh parked ref.
-			if (ref.sessionFile) await persistAgentTombstone(ref.sessionFile);
-			this.#registry.setStatus(id, "aborted", ref);
-		}
 		const live = this.#registry.get(id) === ref ? ref.session : null;
-		if (options?.tombstone) this.#registry.detachSession(id, ref);
-		if (live) {
+		if (options?.tombstone) {
+			// Apply the terminal transition synchronously, before any await. The
+			// dying session's own dispose path calls unregisterUnlessParked
+			// (sdk.ts), which spares a ref only when it is already `aborted` AND
+			// already detached; awaiting persistAgentTombstone before this
+			// transition left a window in which that unregister deleted the ref
+			// (issue #10531). Persisting the sidecar afterward is safe: within the
+			// process the still-registered `aborted` row already blocks re-adoption
+			// via the `if (!registry.get(id))` discovery guard, and the sidecar
+			// only needs to exist before a later cross-restart discovery pass —
+			// release awaits the write below before returning.
+			// Detach before publishing `aborted`: setStatus emits synchronously, so
+			// every subscriber must observe a terminal ref with session === null.
+			if (!this.#registry.detachSession(id, ref) || !this.#registry.setStatus(id, "aborted", ref)) {
+				logger.warn("AgentLifecycleManager.release: terminal transition rejected", { id });
+			}
+		}
+		try {
+			if (options?.tombstone && ref.sessionFile) await persistAgentTombstone(ref.sessionFile);
+		} finally {
+			// Detaching removes the registry's only route to the live session. Always
+			// dispose the captured session, even when tombstone persistence fails.
+			if (live) {
+				try {
+					await live.dispose();
+				} catch (error) {
+					logger.warn("AgentLifecycleManager.release: session dispose failed", { id, error: String(error) });
+				}
+			}
 			try {
-				await live.dispose();
+				await onRelease?.();
 			} catch (error) {
-				logger.warn("AgentLifecycleManager.release: session dispose failed", { id, error: String(error) });
+				logger.warn("AgentLifecycleManager.release: owned resource cleanup failed", {
+					id,
+					error: String(error),
+				});
 			}
 		}
 		if (!options?.tombstone) this.#registry.unregister(id, ref);

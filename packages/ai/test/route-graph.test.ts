@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { RouteRegistry } from "@oh-my-pi/pi-ai/auth-gateway";
+import { pickInitialRouteTarget, RouteRegistry } from "@oh-my-pi/pi-ai/auth-gateway";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
 function fakeModel(id: string) {
@@ -26,12 +26,13 @@ describe("RouteRegistry", () => {
 	it("wraps a known id as a single TargetNode", () => {
 		const registry = new RouteRegistry(id => (id === "gpt-5" ? fakeModel("gpt-5") : undefined));
 		const route = registry.resolve("gpt-5");
-		expect(route).toEqual({
+		expect(route).toMatchObject({
 			generation: 1,
 			id: "gpt-5",
 			root: { type: "target", model: "gpt-5" },
 			targets: ["gpt-5"],
 			fallbacks: {},
+			fallbackByTarget: {},
 		});
 	});
 
@@ -60,7 +61,7 @@ describe("RouteRegistry", () => {
 		});
 		const route = registry.resolve("quota-route");
 		expect(registry.generation).toBe(2);
-		expect(route).toEqual({
+		expect(route).toMatchObject({
 			generation: 2,
 			id: "quota-route",
 			root: {
@@ -73,6 +74,7 @@ describe("RouteRegistry", () => {
 			},
 			targets: ["gpt-5", "gpt-4o"],
 			fallbacks: { credential_quota: ["gpt-4o"] },
+			fallbackByTarget: { "gpt-5": { credential_quota: ["gpt-4o"] } },
 		});
 	});
 
@@ -96,26 +98,58 @@ describe("RouteRegistry", () => {
 		expect(registry.resolve("cyclic")).toBeUndefined();
 	});
 
-	it("allows sibling reuse of the same model id under a fallback", () => {
+	it("rejects ambiguous cross-branch reuse of the same model id", () => {
 		const registry = new RouteRegistry(() => undefined);
-		registry.register({
-			id: "sibling-reuse",
-			root: {
-				type: "fallback",
-				on: ["credential_quota"],
-				children: [
-					{ type: "target", model: "a" },
-					{
-						type: "fallback",
-						on: ["context_overflow"],
-						children: [{ type: "target", model: "a" }],
-					},
-				],
-			},
-		});
-		const route = registry.resolve("sibling-reuse");
-		expect(route?.targets).toEqual(["a", "a"]);
-		expect(registry.generation).toBe(2);
+		expect(() =>
+			registry.register({
+				id: "sibling-reuse",
+				root: {
+					type: "fallback",
+					on: ["credential_quota"],
+					children: [
+						{ type: "target", model: "a" },
+						{
+							type: "fallback",
+							on: ["context_overflow"],
+							children: [{ type: "target", model: "a" }],
+						},
+					],
+				},
+			}),
+		).toThrow(/ambiguous cross-branch reuse/i);
+		expect(registry.resolve("sibling-reuse")).toBeUndefined();
+	});
+
+	it("rejects domain sibling reuse that would merge distinct fallback contexts", () => {
+		const registry = new RouteRegistry(() => undefined);
+		expect(() =>
+			registry.register({
+				id: "domain-reuse",
+				root: {
+					type: "domain",
+					name: "outer",
+					children: [
+						{
+							type: "fallback",
+							on: ["context_overflow"],
+							children: [
+								{ type: "target", model: "A" },
+								{ type: "target", model: "B" },
+							],
+						},
+						{
+							type: "fallback",
+							on: ["provider_unavailable"],
+							children: [
+								{ type: "target", model: "A" },
+								{ type: "target", model: "C" },
+							],
+						},
+					],
+				},
+			}),
+		).toThrow(/ambiguous cross-branch reuse/i);
+		expect(registry.generation).toBe(1);
 	});
 
 	it("rejects a nested path that repeats a target model id", () => {
@@ -164,12 +198,13 @@ describe("RouteRegistry", () => {
 			root: { type: "target", model: "other" },
 		});
 		const route = registry.resolve("gpt-5");
-		expect(route).toEqual({
+		expect(route).toMatchObject({
 			generation: 2,
 			id: "gpt-5",
 			root: { type: "target", model: "gpt-5" },
 			targets: ["gpt-5"],
 			fallbacks: {},
+			fallbackByTarget: {},
 		});
 	});
 
@@ -198,6 +233,43 @@ describe("RouteRegistry", () => {
 		expect(route?.fallbacks.credential_quota).toEqual(["quota-backup"]);
 		expect(route?.fallbacks.context_overflow).toEqual(["overflow-backup"]);
 		expect(route?.fallbacks.context_overflow ?? []).not.toContain("quota-backup");
+	});
+
+	it("keeps nested fallback edges scoped away from sibling branches", () => {
+		const registry = new RouteRegistry(() => undefined);
+		registry.register({
+			id: "scoped",
+			root: {
+				type: "balance",
+				strategy: "rr",
+				children: [
+					{ type: "target", model: "A" },
+					{
+						type: "fallback",
+						on: ["credential_quota"],
+						children: [
+							{ type: "target", model: "B" },
+							{ type: "target", model: "C" },
+						],
+					},
+				],
+			},
+		});
+		const route = registry.resolve("scoped");
+		expect(route?.targets).toEqual(["A", "B", "C"]);
+		expect(route?.fallbacks.credential_quota).toEqual(["C"]);
+		expect(route?.fallbackByTarget?.A?.credential_quota).toBeUndefined();
+		expect(route?.fallbackByTarget?.B?.credential_quota).toEqual(["C"]);
+	});
+
+	it("preserves provider-qualified model ids as the compiled target", () => {
+		const registry = new RouteRegistry(id => {
+			const bare = id.includes("/") ? id.slice(id.indexOf("/") + 1) : id;
+			return bare === "gpt-5" ? fakeModel("gpt-5") : undefined;
+		});
+		const compiled = registry.resolve("openai/gpt-5");
+		expect(compiled?.root).toEqual({ type: "target", model: "openai/gpt-5" });
+		expect(compiled?.id).toBe("openai/gpt-5");
 	});
 
 	it("get returns registered virtual routes and ignores catalog models (negative)", () => {
@@ -266,7 +338,7 @@ describe("RouteRegistry", () => {
 		expect(registry.resolve("vision")?.targets).toEqual(["vision-model", "text-model"]);
 	});
 
-	it("treats domain as compile-time grouping", () => {
+	it("retains domain grouping metadata", () => {
 		const registry = new RouteRegistry(() => undefined);
 		registry.register({
 			id: "coding",
@@ -378,4 +450,74 @@ describe("RouteRegistry", () => {
 		expect(registry.get("ok")).toBeUndefined();
 		expect(registry.get("bad")).toBeUndefined();
 	});
+
+	it("replaceAll resolves alias-before-base against the complete incoming set", () => {
+		const registry = new RouteRegistry(() => undefined);
+		registry.register({ id: "base", root: { type: "target", model: "stale" } });
+		registry.replaceAll([
+			{ id: "alias", root: { type: "route-ref", route: "base" } },
+			{ id: "base", root: { type: "target", model: "fresh" } },
+		]);
+		expect(registry.get("alias")?.targets).toEqual(["fresh"]);
+		expect(registry.get("alias")?.root).toEqual({ type: "target", model: "fresh" });
+		expect(registry.get("base")?.targets).toEqual(["fresh"]);
+	});
+
+	it("pickInitialRouteTarget rotates rr and prefers weighted children", () => {
+		const registry = new RouteRegistry(() => undefined);
+		registry.register({
+			id: "rr",
+			root: {
+				type: "balance",
+				strategy: "rr",
+				children: [
+					{ type: "target", model: "a" },
+					{ type: "target", model: "b" },
+				],
+			},
+		});
+		registry.register({
+			id: "weighted",
+			root: {
+				type: "balance",
+				strategy: "weighted",
+				children: [
+					{ type: "target", model: "low", weight: 1 },
+					{ type: "target", model: "high", weight: 5 },
+				],
+			},
+		});
+		const rr = registry.resolve("rr");
+		const weighted = registry.resolve("weighted");
+		expect(rr).toBeDefined();
+		expect(weighted).toBeDefined();
+		expect(pickInitialRouteTarget(rr!, 0)).toBe("a");
+		expect(pickInitialRouteTarget(rr!, 1)).toBe("b");
+		expect(pickInitialRouteTarget(weighted!)).toBe("high");
+	});
+});
+
+it("selects conditional branches per request without mutating shared registry state", () => {
+	const registry = new RouteRegistry(() => undefined);
+	registry.register({
+		id: "conditional",
+		root: {
+			type: "conditional",
+			when: { vision: true },
+			children: [
+				{ type: "target", model: "vision" },
+				{ type: "target", model: "text" },
+			],
+		},
+	});
+	expect(registry.resolve("conditional", { vision: true })?.targets).toEqual(["vision"]);
+	expect(registry.resolve("conditional", { vision: false })?.targets).toEqual(["text"]);
+	expect(registry.get("conditional")?.targets).toEqual(["vision", "text"]);
+});
+
+it("rejects route IDs erased by URL normalization", () => {
+	const registry = new RouteRegistry(() => undefined);
+	for (const id of [".", ".."])
+		expect(() => registry.register({ id, root: { type: "target", model: "target" } })).toThrow(/dot segment/);
+	expect(registry.list()).toEqual([]);
 });

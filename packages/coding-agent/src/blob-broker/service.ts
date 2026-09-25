@@ -586,7 +586,7 @@ export function resolveBlobBrokerConfigs(settings: Settings, projectDir: string)
 		configs.push({
 			kind: destination,
 			options,
-			credentials: { ...(credentialsByDestination[destination] ?? {}) },
+			credentials: { ...credentialsByDestination[destination] },
 			publicBaseUrl:
 				typeof configuredBaseUrl === "string"
 					? configuredBaseUrl || undefined

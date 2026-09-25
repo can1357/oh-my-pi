@@ -133,7 +133,7 @@ describe("compound command interception", () => {
 		for (const command of [
 			'echo "$(git commit -m message)"',
 			"echo `git commit -m message`",
-			// biome-ignore lint/suspicious/noTemplateCurlyInString: literal shell parameter expansion under test
+			// oxlint-disable-next-line no-template-curly-in-string -- literal shell parameter expansion under test
 			"echo ${x:-foo;git commit -m message}",
 			"( git commit -m message )",
 			"echo start; { true; git commit -m message; }",
@@ -243,15 +243,15 @@ describe("default grep rule and pipeline stdin", () => {
 	});
 });
 
-describe("default hub start rules", () => {
-	const tools = ["hub"];
+describe("default bash service rules", () => {
+	const tools = ["bash"];
 
 	it.each(["bun run dev", "vite --host 0.0.0.0", "lldb ./app", "bun test --watch", "nohup server", "server &"])(
-		"routes %s to hub start",
+		"routes %s to named bash service mode",
 		command => {
 			const result = checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES);
 			expect(result.block).toBe(true);
-			expect(result.suggestedTool).toBe("hub");
+			expect(result.suggestedTool).toBe("bash");
 		},
 	);
 

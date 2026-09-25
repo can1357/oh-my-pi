@@ -97,6 +97,11 @@ export interface MCPStoredOAuthCredential extends OAuthCredential {
 const DEFAULT_PORT = 3000;
 const CALLBACK_PATH = "/callback";
 
+function isGoogleAuthorizationHost(hostname: string): boolean {
+	const host = hostname.toLowerCase();
+	return host === "accounts.google.com" || host.endsWith(".accounts.google.com");
+}
+
 function hasOAuthScope(scopes: string | null | undefined, scope: string): boolean {
 	return !!scopes && scopes.split(/\s+/).includes(scope);
 }
@@ -439,13 +444,21 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 		if (prompt && !params.get("prompt")) {
 			params.set("prompt", prompt);
 		}
+		// Google only mints refresh tokens when access_type=offline is requested;
+		// without it Google-hosted MCP servers can never refresh (#12438).
+		// Other providers ignore the unknown parameter, so scope the default to
+		// Google issuers and never override an explicit value.
+		if (!params.get("access_type") && isGoogleAuthorizationHost(authUrl.hostname)) {
+			params.set("access_type", "offline");
+		}
 		const existingResource = params.get("resource")?.trim();
-		if (existingResource) {
-			// A resource already embedded in the provider's authorization URL is
-			// provider-authored, not OMP's server-URL fallback. Preserve same-host
-			// values here even when the caller marked its separate
-			// `config.resource` as fallback; gateway-hosted MCP servers can use
-			// origin-only or path-scoped values as the token audience.
+		if (this.#resource && !this.config.stripSameOriginResource) {
+			// Protected-resource or authorization-server metadata identifies the
+			// requested audience; a query carried by the endpoint URL does not.
+			params.set("resource", this.#resource);
+		} else if (existingResource) {
+			// An embedded resource outranks OMP's server-URL fallback. Gateway-
+			// hosted MCP servers can use origin-only or path-scoped audiences.
 			const filtered = filterResourceIndicator(resolveResourceUri(existingResource), this.config.authorizationUrl);
 			if (filtered) {
 				this.#resource = filtered;

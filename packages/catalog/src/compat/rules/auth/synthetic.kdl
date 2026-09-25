@@ -1,0 +1,9 @@
+auth "synthetic" {
+	name "Synthetic"
+	login "api-key" {
+		auth-url "https://dev.synthetic.new/docs/api/overview"
+		instructions "Copy your API key from the Synthetic dashboard"
+		prompt "Paste your Synthetic API key" placeholder="sk-..."
+		validate "models-endpoint" url="https://api.synthetic.new/openai/v1/models"
+	}
+}

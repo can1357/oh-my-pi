@@ -2,6 +2,39 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Improved the web client’s performance by ensuring production builds use the optimized React runtime.
+- Improved large-session browsing and reconnect behavior: recent transcript entries load quickly, earlier entries can be loaded on demand without losing your place, and the existing transcript remains visible while reconnecting with download progress shown.
+
+## [18.3.0] - 2026-09-24
+
+### Added
+
+- Added support for rendering coordinated job and messaging views through the `wait` tool.
+
+### Removed
+
+- Removed the obsolete `hub` tool renderer.
+
+## [18.2.1] - 2026-09-15
+
+### Fixed
+
+- Browser collab guests now automatically rejoin when a transient host network drop recreates the relay room ([#11858](https://github.com/can1357/oh-my-pi/issues/11858)).
+
+## [18.1.17] - 2026-09-10
+
+### Fixed
+
+- Transcript links are now allowed by the scheme the browser will actually resolve, so a destination that only becomes `javascript:` after URL normalization is dropped like any other unsafe scheme ([#11562](https://github.com/can1357/oh-my-pi/pull/11562) by [@alphastorm](https://github.com/alphastorm)).
+
+## [18.1.3] - 2026-09-02
+
+### Fixed
+
+- The guest transcript now returns to the latest message after an initial connection or reconnect.
+
 ## [18.0.8] - 2026-08-27
 
 ### Added

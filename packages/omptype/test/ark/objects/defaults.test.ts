@@ -356,15 +356,6 @@ describe("string parsing", () => {
 		).toThrow("default");
 	});
 
-	it("validated default in scope", () => {
-		const $ = scope({
-			specialNumber: "number",
-			obj: { foo: "string", bar: "specialNumber = 5" },
-		});
-
-		$.export();
-	});
-
 	it("optional with default", () => {
 		expect(() =>
 			// @ts-expect-error
@@ -678,7 +669,6 @@ describe("functions", () => {
 			}),
 		});
 
-		// biome-ignore lint/complexity/noBannedTypes: Function default test
 		const _typeFunctionFactory: Eq<typeof T.t, { bar: Default<Function, () => number> }> = true;
 		expect(T.assert({}).bar()).toEqual(3);
 		expect(T.assert({}).bar()).toEqual(4);

@@ -14,8 +14,10 @@ import {
 	type ProtocolHandler,
 } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import * as sshFileTransfer from "@oh-my-pi/pi-coding-agent/ssh/file-transfer";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { GlobTool } from "../../src/tools/glob";
@@ -200,6 +202,38 @@ describe("GrepTool internal URL resolution", () => {
 		expect(getResultText(findResult)).toContain("guide.md");
 	});
 
+	it("greps the caller-bound full current branch without materializing a session file", async () => {
+		const settings = Settings.isolated({ "grep.contextBefore": 0, "grep.contextAfter": 0 });
+		settings.set("compaction.experimentalContextManagement", true);
+		const branch = [
+			{
+				type: "message",
+				id: "compacted-source",
+				parentId: null,
+				timestamp: new Date().toISOString(),
+				message: { role: "user", content: "searchable pre-compaction needle", timestamp: 1 },
+			},
+		] as unknown as SessionEntry[];
+		const manager = {
+			getBranch: () => branch,
+			getSessionId: () => "grep-current-session",
+		} as unknown as NonNullable<ToolSession["sessionManager"]>;
+		const tool = new GrepTool(
+			createSession({
+				settings,
+				getSessionId: () => "grep-current-session",
+				sessionManager: manager,
+			}),
+		);
+
+		const result = await tool.execute("current-history-search", {
+			pattern: "pre-compaction needle",
+			path: "history://current/full",
+		});
+
+		expect(getResultText(result)).toContain("searchable pre-compaction needle");
+	});
+
 	it("resolves artifact:// URL to backing file and greps it", async () => {
 		const content = "line one\nfound the needle here\nline three\n";
 		await Bun.write(path.join(artifactsDir, "5.bash.log"), content);
@@ -289,6 +323,24 @@ describe("GrepTool internal URL resolution", () => {
 		expect(getResultText(result)).toContain("needle");
 	});
 
+	it("truncates a multibyte virtual match by UTF-8 bytes and labels the notice bytes", async () => {
+		// Regression for #10888: virtual-resource matches must truncate in the
+		// same unit as native on-disk matches (bytes), and the notice must say so.
+		// "needle " + "é"*300 is 307 chars but 607 bytes; a char cap of 512 would
+		// leave it whole, the byte cap trims it.
+		const line = `needle ${"é".repeat(300)}`;
+		registerVirtualDocs(new Map([["mb.md", `${line}\n`]]));
+		const result = await new GrepTool(createSession()).execute("mb-virtual", {
+			pattern: "needle",
+			path: "virtual://mb.md",
+		});
+		const text = getResultText(result);
+		expect(text).toContain("…");
+		expect((text.match(/é/g) ?? []).length).toBeLessThan(300);
+		expect(result.details?.meta?.limits?.columnTruncated).toEqual({ maxColumn: 512, unit: "bytes" });
+		expect(formatOutputNotice(result.details?.meta)).toContain("Some lines truncated to 512 bytes");
+	});
+
 	it("rejects a malformed selector on a selector-capable internal URL instead of widening the search", async () => {
 		const session = createSession();
 		const tool = new GrepTool(session);
@@ -312,8 +364,9 @@ describe("GrepTool internal URL resolution", () => {
 		const session = createSession();
 		const read = new ReadTool(session);
 		// read.ts rejects a peeled internal-URL selector whose parseSel kind is "none"
-		// before resolving the resource, so artifact 5 need not exist.
-		await expect(read.execute("read-bad-neg", { path: "artifact://5:-10" })).rejects.toThrow(/invalid selector/i);
+		// before resolving the resource, so artifact 5 need not exist. (`:-10` alone is
+		// a valid read tail; search rejects it because it cannot filter by tail.)
+		await expect(read.execute("read-bad-neg", { path: "artifact://5:-10-3" })).rejects.toThrow(/invalid selector/i);
 		await expect(read.execute("read-bad-multi", { path: "artifact://5:1-1:1-2" })).rejects.toThrow(
 			/invalid selector/i,
 		);

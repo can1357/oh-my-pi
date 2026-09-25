@@ -6,26 +6,10 @@ import { type } from "@oh-my-pi/omptype";
 import { getAntigravityUserAgent } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import * as AIError from "../../error";
 import { raceWithSignal } from "../../utils/abort";
-import { oauthFetch, runGoogleOAuthLogin, throwIfLoginCancelled } from "./google-oauth-shared";
-import type { OAuthController, OAuthCredentials } from "./types";
+import { extractGoogleValidationUrl, formatGoogleValidationRequiredMessage } from "../../utils/google-validation";
+import type { AfterExchangeHook } from "../hooks/types";
+import { oauthFetch, throwIfLoginCancelled } from "./google-oauth-shared";
 
-const CLIENT_ID = atob(
-	"MTA3MTAwNjA2MDU5MS10bWhzc2luMmgyMWxjcmUyMzV2dG9sb2poNGc0MDNlcC5hcHBzLmdvb2dsZXVzZXJjb250ZW50LmNvbQ==",
-);
-const CLIENT_SECRET = atob("R09DU1BYLUs1OEZXUjQ4NkxkTEoxbUxCOHNYQzR6NnFEQWY=");
-const CALLBACK_PORT = 51121;
-const CALLBACK_PATH = "/oauth-callback";
-
-const SCOPES = [
-	"https://www.googleapis.com/auth/cloud-platform",
-	"https://www.googleapis.com/auth/userinfo.email",
-	"https://www.googleapis.com/auth/userinfo.profile",
-	"https://www.googleapis.com/auth/cclog",
-	"https://www.googleapis.com/auth/experimentsandconfigs",
-];
-
-const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
-const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const CLOUD_CODE_ASSIST_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 const LOAD_CODE_ASSIST_URL = `${CLOUD_CODE_ASSIST_ENDPOINT}/v1internal:loadCodeAssist`;
 const ONBOARD_USER_URL = `${CLOUD_CODE_ASSIST_ENDPOINT}/v1internal:onboardUser`;
@@ -315,51 +299,33 @@ async function discoverProject(
 	}
 }
 
-/** Authenticate an Antigravity account and resolve its Cloud Code Assist project. */
-export async function loginAntigravity(ctrl: OAuthController): Promise<OAuthCredentials> {
-	return runGoogleOAuthLogin(ctrl, {
-		provider: "google-antigravity",
-		clientId: CLIENT_ID,
-		clientSecret: CLIENT_SECRET,
-		authUrl: AUTH_URL,
-		tokenUrl: TOKEN_URL,
-		scopes: SCOPES,
-		callbackPort: CALLBACK_PORT,
-		callbackPath: CALLBACK_PATH,
-		discoverProject,
-	});
-}
-
-/**
- * Refresh Antigravity token
- */
-export async function refreshAntigravityToken(refreshToken: string, projectId: string): Promise<OAuthCredentials> {
-	const response = await fetch(TOKEN_URL, {
-		method: "POST",
-		headers: { "Content-Type": "application/x-www-form-urlencoded" },
-		body: new URLSearchParams({
-			client_id: CLIENT_ID,
-			client_secret: CLIENT_SECRET,
-			refresh_token: refreshToken,
-			grant_type: "refresh_token",
-		}),
-	});
-
-	if (!response.ok) {
-		const error = await response.text();
-		throw new AIError.OAuthError(`Antigravity token refresh failed: ${error}`, { kind: "token-refresh" });
+/** Resolves the Antigravity project after login and preserves it across refresh responses. */
+export const googleAntigravityProjectHook: AfterExchangeHook = async (credentials, context) => {
+	if (context.phase === "refresh") {
+		return context.stored?.projectId ? { ...credentials, projectId: context.stored.projectId } : credentials;
 	}
-
-	const data = (await response.json()) as {
-		access_token: string;
-		expires_in: number;
-		refresh_token?: string;
-	};
-
-	return {
-		refresh: data.refresh_token || refreshToken,
-		access: data.access_token,
-		expires: Date.now() + data.expires_in * 1000 - 5 * 60 * 1000,
-		projectId,
-	};
-}
+	const raw = context.raw;
+	if (
+		raw === null ||
+		typeof raw !== "object" ||
+		typeof (raw as Record<string, unknown>).refresh_token !== "string" ||
+		(raw as Record<string, unknown>).refresh_token === ""
+	) {
+		throw new AIError.OAuthError("No refresh token received. Please try again.", {
+			kind: "validation",
+			provider: context.provider,
+		});
+	}
+	let projectId: string;
+	try {
+		projectId = await discoverProject(credentials.access, context.onProgress, context.signal);
+	} catch (error) {
+		const validationUrl = extractGoogleValidationUrl(error instanceof Error ? error.message : String(error));
+		if (!validationUrl) throw error;
+		throw new AIError.OAuthError(
+			formatGoogleValidationRequiredMessage(validationUrl, "sign in again", credentials.email),
+			{ kind: "validation", provider: context.provider },
+		);
+	}
+	return { ...credentials, projectId };
+};

@@ -1,0 +1,28 @@
+{
+	"useTabs": true,
+	"tabWidth": 3,
+	"printWidth": 120,
+	"singleQuote": false,
+	"jsxSingleQuote": false,
+	"quoteProps": "as-needed",
+	"trailingComma": "all",
+	"semi": true,
+	"arrowParens": "avoid",
+	"bracketSameLine": false,
+	"bracketSpacing": true,
+	"ignorePatterns": [
+		"packages/natives/native/**/*",
+		"packages/metaharness/adapters/**/*",
+		"packages/browser-relay/extension/**/*",
+		"packages/snapcompact/research/**/*",
+		"**/vendor/**/*",
+		"**/node_modules/**/*",
+		"**/test-sessions.ts",
+		"**/agent_pb.ts",
+		"**/devin-gen/**/*",
+		"packages/catalog/src/discovery/cursor-proto.ts",
+		"packages/catalog/src/discovery/devin-proto.ts",
+		".worktrees/**/*",
+		".wt/**/*"
+	]
+}

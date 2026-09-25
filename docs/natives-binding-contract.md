@@ -9,7 +9,7 @@ This page defines the public JS/TS boundary between `@oh-my-pi/pi-natives` calle
 3. `gen-enums.ts` reads the declarations, rewrites napi-rs `const enum` declarations to runtime-usable declarations, and replaces the marked block in `native/index.js` with explicit class/function exports and literal enum objects.
 4. `native/index.js` loads the addon and binds that generated root surface.
 
-There is no `NativeBindings` declaration-merging lifecycle or `packages/natives/src/<module>` wrapper convention. The loader validates only a release-version sentinel for install/compiled loads, not every public symbol.
+There is no `NativeBindings` declaration-merging lifecycle or `packages/natives/src/<module>` wrapper convention. The loader validates only a release-version sentinel for install/compiled loads, not every public symbol; a function export the loaded addon omits is `missingNativeExport(name)` — `undefined` on a current addon, and on a stale workspace addon a throwing stub that names the addon and the rebuild command (`bun run build:native`).
 
 ## Public entrypoints
 
@@ -36,7 +36,7 @@ Do not import unexported `native/*` implementation paths from package consumers.
 | Audio and live media     | `AudioCapture`, `AudioPlayback`, `LiveWebRtcPeer`                                                                                                                 | `audio.rs`, `live.rs`                                                 | classes/mixed        |
 | Text and highlighting    | `wrapTextWithAnsi`, `truncateToWidth`, `sliceWithWidth`, `extractSegments`, `visibleWidth`, `setHangulCompatJamoWidthOverride`, `highlightCode`, `HighlightStream`, language queries | `text.rs`, `highlight.rs`                                             | sync                 |
 | Conversion and rendering | `htmlToMarkdown`, `pdfToMarkdown`, `rasterizeSvg`, `encodeSixel`, `renderSnapcompactPng`, `snapcompactSupportedChars`                                              | `html.rs`, `pdf.rs`, `svg.rs`, `sixel.rs`, `snapcompact.rs`           | mixed sync/promise   |
-| Tokens and system        | `countTokens`, macOS appearance/power exports, `getWorkProfile`, `deviceCheckGenerateToken`                                                                       | `tokens.rs`, `appearance.rs`, `power.rs`, `prof.rs`, `devicecheck.rs` | mixed                |
+| Tokens and system        | `countTokens`, macOS appearance, cross-platform power exports, `getWorkProfile`, `deviceCheckGenerateToken`                                                                       | `tokens.rs`, `appearance.rs`, `power.rs`, `prof.rs`, `devicecheck.rs` | mixed                |
 | Spelling (macOS)         | `macOSCheckSpelling`, `macOSCompleteWord`, `macOSAutocorrectWord`, `macOSSpellingGuesses`, `macOSSpellCheckerAvailable`                                            | `spelling.rs`                                                         | mixed sync/promise   |
 | Version control          | `vcsDiscover`, `vcsGitClone`, `vcsDetachGitDir`, `vcsJoinPatches`, `vcsValidateHunkSelections`, `VcsRepo`, `VcsGitRepo`, `VcsJjWorkspace`                          | `vcs.rs`                                                              | mixed sync/promise   |
 | Terminal output          | `TtyWriter`                                                                                                                                                       | `tty_writer.rs`                                                       | class                |

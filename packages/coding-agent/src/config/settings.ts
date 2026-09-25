@@ -11,6 +11,7 @@
  *   const isolated = Settings.isolated({ "compaction.enabled": false });
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -22,6 +23,7 @@ import {
 	getAgentDir,
 	getLastChangelogVersionPath,
 	getProjectDir,
+	getProjectAgentDir,
 	isEnoent,
 	logger,
 	MAIN_CONFIG_FILENAMES,
@@ -29,21 +31,32 @@ import {
 	setWorktreesDir,
 } from "@oh-my-pi/pi-utils";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
+import { setShimmerMode } from "@oh-my-pi/pi-tui/theme/shimmer";
+import { setChatTranscriptDisplayPreferences } from "@oh-my-pi/pi-tui/chat/display-preferences";
+import { setEditorGapComposerShape } from "@oh-my-pi/pi-tui/prompt/editor-top-gap";
+import { setEmojiAutocompleteEnabled } from "@oh-my-pi/pi-tui/prompt/prompt-action-autocomplete";
+import { setMcpRenderMarkdownResults } from "@oh-my-pi/pi-tui/tools/mcp";
+import { isLightTheme, setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "@oh-my-pi/pi-tui/theme/theme";
 import { JSONC, YAML } from "bun";
 import { invalidate as invalidateCapabilityFsCache } from "../capability/fs";
 import { type Settings as SettingsCapabilityItem, settingsCapability } from "../capability/settings";
 import type { ModelRole } from "../config/model-roles";
 import { loadCapability } from "../discovery";
-import { isLightTheme, setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "../modes/theme/theme";
 import { AgentStorage } from "../session/agent-storage";
 import { type CompactionMethod, DEFAULT_COMPACTION_METHOD_ORDER } from "../session/compaction-methods";
-import { AUTO_IMAGE_PROVIDER_ORDER, isImageProviderId } from "../tools/image-providers";
-import { applyHyperlinkSetting } from "../tui/hyperlink";
+import MODEL_PRIO from "../priority.json" with { type: "json" };
+import { applyHyperlinkSetting } from "@oh-my-pi/pi-tui/render/hyperlink";
+import {
+	setFeedModelBadgeEnabled,
+	setInlineImageMaxColumns,
+	setInlineImageMaxRows,
+} from "@oh-my-pi/pi-tui/render/render-utils";
 import { replaceFileAtomically } from "../utils/atomic-file";
-import { type EditMode, normalizeEditMode } from "../utils/edit-mode";
-import { INSPECT_IMAGE_MODES } from "../utils/inspect-image-mode";
-import { isSearchProviderId, SEARCH_PROVIDER_ORDER } from "../web/search/types";
-import { stringifyYamlConfig } from "./config-file";
+import { type EditMode } from "@oh-my-pi/pi-tui/tools/edit";
+import { normalizeEditMode } from "../utils/edit-mode";
+import { stringifyYamlConfig } from "@oh-my-pi/pi-utils/yaml-config";
+import { validateAgentServiceTierOverrides } from "./service-tier";
+import { STATUS_LINE_SEGMENT_IDS } from "@oh-my-pi/pi-tui/status-line/schema";
 import {
 	type BashInterceptorRule,
 	type GroupPrefix,
@@ -57,6 +70,30 @@ import {
 // Re-export types that callers need
 export type * from "./settings-schema";
 export * from "./settings-schema";
+
+const STATUS_LINE_SEGMENT_PATHS = ["statusLine.leftSegments", "statusLine.rightSegments"] as const;
+const warnedUnknownStatusLineSegments = new Set<string>();
+
+function getUnknownStatusLineSegments(value: unknown): string[] {
+	if (!Array.isArray(value)) return [];
+	const unknown = new Set<string>();
+	for (const segment of value) {
+		if (!STATUS_LINE_SEGMENT_IDS.some(id => id === segment)) {
+			unknown.add(typeof segment === "string" ? JSON.stringify(segment) : String(segment));
+		}
+	}
+	return [...unknown];
+}
+
+function assertKnownStatusLineSegments(path: SettingPath, value: unknown): void {
+	if (path !== "statusLine.leftSegments" && path !== "statusLine.rightSegments") return;
+	const unknown = getUnknownStatusLineSegments(value);
+	if (unknown.length === 0) return;
+	const noun = unknown.length === 1 ? "segment" : "segments";
+	throw new Error(
+		`Unknown status line ${noun}: ${unknown.join(", ")}. Valid segments: ${STATUS_LINE_SEGMENT_IDS.join(", ")}`,
+	);
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Types
@@ -178,6 +215,24 @@ const SETTING_PATH_SEGMENTS: Record<SettingPath, readonly string[]> = Object.fro
 ) as unknown as Record<SettingPath, readonly string[]>;
 
 /**
+ * Schema members for each typed group, computed once. `getGroup` is hot during
+ * startup and status rendering; it must not walk the full schema on every
+ * settings instance or effective-layer revision.
+ */
+const SETTING_GROUP_MEMBERS: Record<GroupPrefix, readonly [suffix: string, path: SettingPath][]> = (() => {
+	const members: Partial<Record<GroupPrefix, [suffix: string, path: SettingPath][]>> = {};
+	for (const rawPath in SETTINGS_SCHEMA) {
+		const path = rawPath as SettingPath;
+		const dot = path.indexOf(".");
+		if (dot === -1) continue;
+		const prefix = path.slice(0, dot) as GroupPrefix;
+		const group = members[prefix] ?? (members[prefix] = []);
+		group.push([path.slice(dot + 1), path]);
+	}
+	return members as Record<GroupPrefix, readonly [suffix: string, path: SettingPath][]>;
+})();
+
+/**
  * Set a nested value in an object by path segments.
  * Creates intermediate objects as needed.
  */
@@ -265,7 +320,7 @@ export function validateProviderMaxInFlightRequests(value: unknown): Record<stri
 	return normalized;
 }
 
-const PATH_SCOPED_ARRAY_SETTINGS = new Set<SettingPath>(["enabledModels", "disabledProviders"]);
+const PATH_SCOPED_ARRAY_SETTINGS = new Set<SettingPath>(["enabledModels", "disabledProviders", "enabledProviders"]);
 type PathScopedStringArrayEntry = {
 	path?: unknown;
 	paths?: unknown;
@@ -428,6 +483,44 @@ function resolvePathScopedStringArray(settingPath: SettingPath, value: unknown, 
 	return resolved;
 }
 
+/**
+ * Upper bound on symlink hops while resolving a dangling config chain by hand.
+ * `realpath()` already rejects a fully-linked cycle with ELOOP; this caps the
+ * manual walk so a chain that turns cyclic AFTER realpath reported ENOENT (a
+ * concurrent retarget mid-walk) surfaces a bounded ELOOP instead of spinning
+ * forever. Matches Linux's MAXSYMLINKS (40).
+ */
+const MAX_SYMLINK_HOPS = 40;
+
+/**
+ * Split a dangling symlink target into the physical path segments the flush
+ * walk should follow. Two platform-correctness rules that a naive
+ * `target.split(/[\\/]+/)` gets wrong:
+ *
+ *  1. Root double-count. An ABSOLUTE target seeds the accumulator at
+ *     `parse(target).root` — `C:\` on Windows, the `\\server\share\` prefix of
+ *     a UNC path, `/` on POSIX. The root must therefore be STRIPPED from the
+ *     string before splitting; otherwise it is re-emitted as a leading segment
+ *     and `C:\managed\final.yml` resolves to `C:\` + `C:` + `managed` + … =
+ *     `C:\C:\managed\final.yml`, so the flush fails against a dangling absolute
+ *     link on Windows. (POSIX escaped this by luck: the leading `/` splits to an
+ *     empty leading segment that the walk already skips.) A RELATIVE target
+ *     seeds at the link's real parent dir and keeps every segment unchanged.
+ *  2. Separator set. `\` is a separator only on Windows. On POSIX it is a valid
+ *     filename character, so a target literally named `managed\config.yml` must
+ *     stay ONE segment, not two. Split on the platform separator set: `/` only
+ *     on POSIX, `/` or `\` on Windows. Keyed off `pathApi.sep` so the rule is
+ *     driven by the platform, not a hardcoded cross-platform class.
+ *
+ * `pathApi` is injectable so the platform-specific behavior is testable off the
+ * host OS (drive with `path.win32` / `path.posix`); it defaults to the host.
+ */
+function physicalTargetSegments(target: string, pathApi: typeof path = path): string[] {
+	const separator = pathApi.sep === "\\" ? /[\\/]+/ : /\/+/;
+	const body = pathApi.isAbsolute(target) ? target.slice(pathApi.parse(target).root.length) : target;
+	return body.split(separator);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Settings Class
 // ═══════════════════════════════════════════════════════════════════════════
@@ -451,14 +544,21 @@ export class Settings {
 	#configOverlay: RawSettings = {};
 	/** Project settings file that most recently supplied shellPath. */
 	#projectShellPathSource: string | undefined;
+	/** Capability warnings already surfaced for the current project scope; reloads stay quiet. */
+	#projectSettingsWarningsSeen = new Set<string>();
 	/** Explicit config overlay that most recently supplied shellPath. */
 	#overlayShellPathSource: string | undefined;
 	/** Runtime overrides (not persisted) */
 	#overrides: RawSettings = {};
 	/** Merged view (global + project + overrides) */
 	#merged: RawSettings = {};
+	/** Monotonic revision of merged layers and cwd-scoped resolution. */
+	#revision = 0;
 	/** Cached resolved values from the merged view, including defaults/path scoping */
 	#resolvedCache = new Map<SettingPath, unknown>();
+	/** Typed group snapshots for the current merged layers and cwd scope. */
+	#groupCache = new Map<GroupPrefix, unknown>();
+	#effectiveChangeListeners = new Set<(path: SettingPath, value: unknown, previous: unknown) => void>();
 	#editVariantCache: readonly EditVariantEntry[] | undefined;
 
 	/** Paths modified during this session (for partial save) */
@@ -587,6 +687,11 @@ export class Settings {
 		return globalInstance;
 	}
 
+	/** Return the initialized or in-flight global settings without starting a writable load. */
+	static get current(): Promise<Settings> | null {
+		return globalInstancePromise;
+	}
+
 	// ─────────────────────────────────────────────────────────────────────────
 	// Core API
 	// ─────────────────────────────────────────────────────────────────────────
@@ -621,6 +726,7 @@ export class Settings {
 	 * Triggers hooks for settings that have side effects.
 	 */
 	set<P extends SettingPath>(path: P, value: SettingValue<P>): void {
+		assertKnownStatusLineSegments(path, value);
 		const prev = this.get(path);
 		const segments = path.split(".");
 		this.#captureGlobalMutation(path, this.#modifiedPathMutations, getByPath(this.#global, segments));
@@ -650,7 +756,9 @@ export class Settings {
 		const segments = path.split(".");
 		setByPath(this.#overrides, segments, value);
 		this.#rebuildMerged();
-		this.#fireEffectiveSettingChanged(path, this.get(path), prev);
+		const next = this.get(path);
+		SETTING_HOOKS[path]?.(next, prev);
+		this.#fireEffectiveSettingChanged(path, next, prev);
 	}
 
 	/**
@@ -670,7 +778,9 @@ export class Settings {
 		}
 		delete current[segments[segments.length - 1]];
 		this.#rebuildMerged();
-		this.#fireEffectiveSettingChanged(path, this.get(path), prev);
+		const next = this.get(path);
+		SETTING_HOOKS[path]?.(next, prev);
+		this.#fireEffectiveSettingChanged(path, next, prev);
 	}
 
 	/** Effective values of every setting that repartitions the Code Mode surface. */
@@ -686,6 +796,13 @@ export class Settings {
 
 	#fireEffectiveSettingChanged(path: SettingPath, value: unknown, prev: unknown): void {
 		if (Object.is(value, prev)) return;
+		for (const listener of Array.from(this.#effectiveChangeListeners)) {
+			try {
+				listener(path, value, prev);
+			} catch (error) {
+				logger.warn("Settings: effective-change listener failed", { path, error: String(error) });
+			}
+		}
 		if (path === "statusLine.sessionAccent") {
 			statusLineSessionAccentSignal.fire();
 		}
@@ -695,6 +812,14 @@ export class Settings {
 		if (CODE_MODE_SIGNAL_PATHS.includes(path)) {
 			codeModeSignal.fire();
 		}
+	}
+
+	/** Observe effective changes on this settings instance. */
+	onEffectiveChange(listener: (path: SettingPath, value: unknown, previous: unknown) => void): () => void {
+		this.#effectiveChangeListeners.add(listener);
+		return () => {
+			this.#effectiveChangeListeners.delete(listener);
+		};
 	}
 
 	/** Set once this instance is discarded; background saves become no-ops. */
@@ -885,6 +1010,36 @@ export class Settings {
 		return this.#agentDir;
 	}
 
+	/**
+	 * Monotonic revision for consumers caching derived effective settings.
+	 * Changes after every merged-layer or cwd-scope rebuild, including overlays
+	 * and path-scoped array re-resolution.
+	 */
+	get revision(): number {
+		return this.#revision;
+	}
+
+	/**
+	 * Raw global settings layer (`config.yml`/`config.yaml`), deep-cloned.
+	 *
+	 * Exposes arbitrary namespaced keys (e.g. an extension's own `piVim` block)
+	 * that the typed, schema-bound {@link get} cannot reach. Used by the legacy
+	 * pi `SettingsManager` shim to match upstream Pi's `getGlobalSettings()`.
+	 * The clone means callers cannot mutate internal state.
+	 */
+	getGlobalSettings(): RawSettings {
+		return structuredClone(this.#global);
+	}
+
+	/**
+	 * Raw project settings layer (`.claude/settings.yml`, `.omp/config.yml`,
+	 * etc.), deep-cloned. Companion to {@link getGlobalSettings} for the legacy
+	 * pi `SettingsManager` shim's `getProjectSettings()`.
+	 */
+	getProjectSettings(): RawSettings {
+		return structuredClone(this.#project);
+	}
+
 	getPlansDirectory(): string {
 		return path.join(this.#agentDir, "plans");
 	}
@@ -925,16 +1080,22 @@ export class Settings {
 
 	/**
 	 * Get all settings in a group with full type safety.
+	 *
+	 * The returned snapshot is stable until any effective settings layer or cwd
+	 * scope is rebuilt. Defaults remain instance-local because each member still
+	 * resolves through {@link get}, which clones array/record defaults.
 	 */
 	getGroup<G extends GroupPrefix>(prefix: G): GroupTypeMap[G] {
+		const cached = this.#groupCache.get(prefix);
+		if (cached !== undefined) return cached as GroupTypeMap[G];
+
 		const result: Record<string, unknown> = {};
-		for (const key of Object.keys(SETTINGS_SCHEMA) as SettingPath[]) {
-			if (key.startsWith(`${prefix}.`)) {
-				const suffix = key.slice(prefix.length + 1);
-				result[suffix] = this.get(key);
-			}
+		for (const [suffix, path] of SETTING_GROUP_MEMBERS[prefix] ?? []) {
+			result[suffix] = this.get(path);
 		}
-		return result as unknown as GroupTypeMap[G];
+		const snapshot = Object.freeze(result);
+		this.#groupCache.set(prefix, snapshot);
+		return snapshot as unknown as GroupTypeMap[G];
 	}
 
 	/**
@@ -1264,6 +1425,20 @@ export class Settings {
 	}
 
 	/**
+	 * Get enabled providers (for compatibility with discovery system).
+	 */
+	getEnabledProviders(): string[] {
+		return this.get("enabledProviders");
+	}
+
+	/**
+	 * Set enabled providers (for compatibility with discovery system).
+	 */
+	setEnabledProviders(ids: string[]): void {
+		this.set("enabledProviders", ids);
+	}
+
+	/**
 	 * Set disabled providers (for compatibility with discovery system).
 	 */
 	setDisabledProviders(ids: string[]): void {
@@ -1404,14 +1579,215 @@ export class Settings {
 			if (!isEnoent(error)) throw error;
 		}
 
-		// realpath fails for a dangling symlink. Resolve its immediate target so
-		// recreating a quarantined config repairs the target without replacing
-		// the user-managed link.
+		// realpath fails for a dangling symlink. Resolve its target so recreating
+		// a quarantined config repairs the target without replacing the
+		// user-managed link. Walk the symlink chain hop by hop: realpath already
+		// handled the case where every referent exists, so we only reach here when
+		// the final referent is missing. Follow each existing intermediate link
+		// until the referent is a non-symlink or does not exist, so the write
+		// lands on the final target and preserves every intermediate link instead
+		// of clobbering one into a regular file.
 		try {
-			const stat = await fs.promises.lstat(filePath);
-			if (stat.isSymbolicLink()) {
-				const target = await fs.promises.readlink(filePath);
-				return path.resolve(path.dirname(filePath), target);
+			if ((await fs.promises.lstat(filePath)).isSymbolicLink()) {
+				let current = filePath;
+				for (let hops = 0; ; hops++) {
+					// realpath() rejects a fully-linked cycle up front, so we only
+					// reach the manual walk on a chain that dangles today. It can
+					// still turn cyclic mid-walk if another process retargets an
+					// intermediate link, at which point readlink() would alternate
+					// forever. Cap the hops and surface an ELOOP so a cycle has
+					// bounded behavior instead of hanging flush().
+					if (hops >= MAX_SYMLINK_HOPS) {
+						const cyclic = new Error(
+							`ELOOP: symlink chain for ${filePath} exceeds ${MAX_SYMLINK_HOPS} hops (possible cycle)`,
+						) as Error & { code?: string };
+						cyclic.code = "ELOOP";
+						throw cyclic;
+					}
+					let target: string;
+					try {
+						target = await fs.promises.readlink(current);
+					} catch (error) {
+						if (!isEnoent(error)) throw error;
+						// An intermediate link vanished mid-walk: it was confirmed a
+						// symlink by the lstat below on the prior hop, then removed
+						// before this readlink. Land on the deepest hop we resolved
+						// rather than collapsing to the chain head, which would let the
+						// atomic rename replace the first user-managed symlink.
+						return current === filePath ? path.resolve(filePath) : current;
+					}
+					// Resolve the target one physical segment at a time so an
+					// intermediate directory symlink is followed by the filesystem
+					// BEFORE a later `..` pops its PHYSICAL parent. Both absolute and
+					// relative targets take the same walk: normalizing the whole
+					// string up front (path.resolve) collapses `alias/..` lexically
+					// to the anchor, but the kernel follows `alias` first and then
+					// pops its real parent, so the two disagree whenever an alias
+					// precedes a `..` — the lexical result can escape to an unrelated
+					// sibling and let the write clobber a foreign file. An absolute
+					// target seeds the accumulator at its filesystem anchor; a
+					// relative one seeds at the link's REAL parent dir.
+					let acc: string;
+					if (path.isAbsolute(target)) {
+						acc = path.parse(target).root;
+					} else {
+						const lexicalDir = path.dirname(current);
+						acc = lexicalDir;
+						try {
+							acc = await fs.promises.realpath(lexicalDir);
+						} catch (error) {
+							if (!isEnoent(error)) throw error;
+						}
+					}
+					// realpath() on the deepest existing prefix keeps `acc` canonical so
+					// each `..` pops the real parent. Once a NAMED component does not
+					// exist on disk the walk is FROZEN: the remainder is joined
+					// lexically, but nothing past the miss was physically traversable,
+					// so any construct that requires ENTERING the frozen component — a
+					// `..`, or a trailing `/` or `/.` that demands it be a directory —
+					// cannot be satisfied by the filesystem and must surface ENOTDIR
+					// rather than lexically landing a regular file at a mislocated path.
+					let frozen = false;
+					for (const segment of physicalTargetSegments(target)) {
+						if (segment === "" || segment === ".") {
+							if (frozen) {
+								// A trailing `/` (empty segment) or `/.` demands the
+								// preceding component be a traversable directory. Before the
+								// freeze that component was confirmed on disk, so the
+								// requirement holds and the segment is inert. After the
+								// freeze the component is a nonexistent/dangling name that
+								// can never be a directory (`config.yml -> missing/`):
+								// dropping the segment and writing a regular file there
+								// mislocates and falsely reports success while the logical
+								// config path stays unusable with ENOTDIR. Surface it.
+								const notDir = new Error(
+									`ENOTDIR: symlink target requires an unresolved component to be a directory for ${filePath}`,
+								) as Error & { code?: string };
+								notDir.code = "ENOTDIR";
+								throw notDir;
+							}
+							// The walk is not frozen, so `acc` was resolved by realpath()
+							// and exists on disk — but existence is not enough. A trailing
+							// `/` or `/.` demands `acc` be a directory, and a concurrent
+							// process can win a TOCTOU race: the initial realpath(filePath)
+							// saw the target missing, then the target was created as a
+							// REGULAR FILE before this segment walk reached it, so
+							// realpath(candidate) succeeded and left `frozen` false. The
+							// preceding component is now a regular file, not a directory,
+							// and dropping the segment would land the atomic rename on top
+							// of it while the logical config path is really ENOTDIR. Verify
+							// the requirement holds instead of assuming it.
+							let accStat: fs.Stats;
+							try {
+								accStat = await fs.promises.stat(acc);
+							} catch (error) {
+								// `acc` was resolved by realpath() moments ago, but a
+								// concurrent process can remove the component between that
+								// realpath and this stat (`config.yml -> dir/../final.yml`
+								// while `dir` is deleted). The trailing `/` or `/.` still
+								// requires `acc` to be a traversable directory, and that
+								// requirement provably cannot hold once the component is
+								// gone. Surface ENOTDIR here instead of letting the ENOENT
+								// reach the outer catch, which would swallow it and return
+								// the chain head — clobbering config.yml itself.
+								if (!isEnoent(error)) throw error;
+								const notDir = new Error(
+									`ENOTDIR: symlink target requires a directory but ${acc} is gone for ${filePath}`,
+								) as Error & { code?: string };
+								notDir.code = "ENOTDIR";
+								throw notDir;
+							}
+							if (!accStat.isDirectory()) {
+								const notDir = new Error(
+									`ENOTDIR: symlink target requires a directory but ${acc} is not one for ${filePath}`,
+								) as Error & { code?: string };
+								notDir.code = "ENOTDIR";
+								throw notDir;
+							}
+							continue;
+						}
+						if (segment === "..") {
+							if (frozen) {
+								// `..` after a component that could not be physically
+								// traversed — a missing name or a dangling symlink — whether
+								// the `..` follows it immediately (`link/..`) or after further
+								// lexical names (`missing/child/..`). The kernel cannot take
+								// the parent of a path it never entered: `missing/child/..`
+								// fails because `missing` was never a directory to descend,
+								// so the lexically appended `child` is not a real component to
+								// pop. Popping and continuing would leave `acc` on a
+								// mislocated path and land a regular file there while
+								// reporting success. Surface the ENOTDIR the filesystem
+								// raises instead.
+								const notDir = new Error(
+									`ENOTDIR: cannot resolve '..' past an unresolved component in symlink target for ${filePath}`,
+								) as Error & { code?: string };
+								notDir.code = "ENOTDIR";
+								throw notDir;
+							}
+							// `acc` was resolved by realpath() and exists on disk, but a
+							// `..` demands it be a traversable directory to pop its parent.
+							// A concurrent process can win a TOCTOU race: the initial
+							// realpath(filePath) saw the component missing, then it was
+							// created as a REGULAR FILE before realpath(candidate) reached
+							// it, so that call succeeded and left `frozen` false. The
+							// kernel cannot take the parent of `regularfile/..` — it fails
+							// with ENOTDIR — so lexically popping and continuing would let
+							// the atomic rename land on a mislocated sibling
+							// (`config.yml -> racetarget/../victim.yml`) while the logical
+							// config path is really ENOTDIR. Verify before popping.
+							let accStat: fs.Stats;
+							try {
+								accStat = await fs.promises.stat(acc);
+							} catch (error) {
+								// `acc` was resolved by realpath() moments ago, but a
+								// concurrent process can remove the component between that
+								// realpath and this stat. The `..` still requires `acc` to
+								// be a traversable directory to pop its parent, and that
+								// requirement provably cannot hold once the component is
+								// gone. Surface ENOTDIR here instead of letting the ENOENT
+								// reach the outer catch, which would swallow it and return
+								// the chain head — clobbering config.yml itself.
+								if (!isEnoent(error)) throw error;
+								const notDir = new Error(
+									`ENOTDIR: symlink target requires a directory but ${acc} is gone for ${filePath}`,
+								) as Error & { code?: string };
+								notDir.code = "ENOTDIR";
+								throw notDir;
+							}
+							if (!accStat.isDirectory()) {
+								const notDir = new Error(
+									`ENOTDIR: symlink target requires a directory but ${acc} is not one for ${filePath}`,
+								) as Error & { code?: string };
+								notDir.code = "ENOTDIR";
+								throw notDir;
+							}
+							acc = path.dirname(acc);
+							continue;
+						}
+						if (frozen) {
+							acc = path.join(acc, segment);
+							continue;
+						}
+						const candidate = path.join(acc, segment);
+						try {
+							acc = await fs.promises.realpath(candidate);
+						} catch (error) {
+							if (!isEnoent(error)) throw error;
+							acc = candidate;
+							frozen = true;
+						}
+					}
+					const resolved = acc;
+					let nextIsSymlink = false;
+					try {
+						nextIsSymlink = (await fs.promises.lstat(resolved)).isSymbolicLink();
+					} catch (error) {
+						if (!isEnoent(error)) throw error;
+					}
+					if (!nextIsSymlink) return resolved;
+					current = resolved;
+				}
 			}
 		} catch (error) {
 			if (!isEnoent(error)) throw error;
@@ -1519,10 +1895,36 @@ export class Settings {
 	}
 
 	async #readProjectSettings(quarantineInvalid: boolean): Promise<ProjectSettingsReadResult> {
+		// Resolve once: capability discovery, fs-cache invalidation, and the
+		// warning prefix below must all derive from the same absolute scope so
+		// relative cwds (e.g. ".") produce absolute provider paths that match.
+		const discoveryCwd = path.resolve(this.#cwd);
+		const projectConfigDir = getProjectAgentDir(this.#cwd);
+		const projectConfigPath = path.join(projectConfigDir, "config.yml");
+		invalidateCapabilityFsCache(projectConfigPath);
+		invalidateCapabilityFsCache(path.join(projectConfigDir, "settings.json"));
+		invalidateCapabilityFsCache(path.join(discoveryCwd, ".claude", "settings.json"));
 		let shellPathSource: string | undefined;
 		let merged: RawSettings = {};
 		try {
-			const result = await loadCapability(settingsCapability.id, { cwd: this.#cwd });
+			const result = await loadCapability(settingsCapability.id, { cwd: discoveryCwd });
+			// `loadCapability` aggregates warnings across every level, but this
+			// method only merges project items — user-level parse failures belong
+			// to the global layer and would misattribute here. Warnings embed
+			// their source file's absolute path, so keep only warnings rooted at
+			// the discovery cwd (a bare substring would over-match relative
+			// scopes such as `cwd: "."` and sibling dir prefixes). Remember what
+			// was surfaced so reloads stay quiet while new failures still log.
+			// Level attribution below the path layer (e.g. a user-scoped dir
+			// mounted inside the project) needs warning metadata from the
+			// providers, which `LoadResult.warnings` does not carry.
+			const cwdRoot = discoveryCwd.endsWith(path.sep) ? discoveryCwd : discoveryCwd + path.sep;
+			const projectWarnings = (result.warnings ?? []).filter(warning => warning.includes(cwdRoot));
+			for (const warning of projectWarnings) {
+				if (this.#projectSettingsWarningsSeen.has(warning)) continue;
+				logger.warn(`Settings: ${warning}`);
+			}
+			this.#projectSettingsWarningsSeen = new Set(projectWarnings);
 			for (const item of result.items as SettingsCapabilityItem[]) {
 				if (item.level === "project") {
 					merged = this.#deepMerge(merged, dropSettingsGroupShadows(item.data as RawSettings, item.path));
@@ -1534,7 +1936,6 @@ export class Settings {
 			// Capability discovery is best-effort; the native project config below
 			// remains authoritative for its model-role layer and must not be hidden.
 		}
-		const projectConfigPath = path.join(this.#cwd, ".omp", "config.yml");
 		const nativeProject = quarantineInvalid
 			? await this.#loadYaml(projectConfigPath)
 			: (this.#unwrapYamlLoadResult(projectConfigPath, await this.#loadYamlIfPresent(projectConfigPath, false)) ??
@@ -1608,35 +2009,65 @@ export class Settings {
 
 		let settings: RawSettings = {};
 		let migrated = false;
+		let migratedSettingsJson = false;
 
-		// 1. Migrate from settings.json
 		const settingsJsonPath = path.join(this.#agentDir, "settings.json");
 		try {
 			const parsed: unknown = JSONC.parse(await Bun.file(settingsJsonPath).text());
 			if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
 				settings = this.#deepMerge(settings, this.#migrateRawSettings(parsed as RawSettings));
 				migrated = true;
-				try {
-					fs.renameSync(settingsJsonPath, `${settingsJsonPath}.bak`);
-				} catch {}
+				migratedSettingsJson = true;
+			} else {
+				logger.warn("Settings: ignoring non-object legacy settings.json", { path: settingsJsonPath });
 			}
-		} catch {}
+		} catch (error) {
+			if (!isEnoent(error)) {
+				logger.warn("Settings: failed to read legacy settings.json", {
+					path: settingsJsonPath,
+					error: String(error),
+				});
+			}
+		}
 
-		// 2. Migrate from agent.db
 		try {
 			const dbSettings = this.#storage?.getSettings();
 			if (dbSettings) {
 				settings = this.#deepMerge(settings, this.#migrateRawSettings(dbSettings as RawSettings));
 				migrated = true;
 			}
-		} catch {}
+		} catch (error) {
+			logger.warn("Settings: failed to read legacy agent.db settings", { error: String(error) });
+		}
 
-		// 3. Write merged settings
 		if (migrated && Object.keys(settings).length > 0) {
 			try {
 				await this.#writeYamlAtomically(this.#configPath, settings);
 				logger.debug("Settings: migrated to config.yml", { path: this.#configPath });
-			} catch {}
+			} catch (error) {
+				logger.warn("Settings: failed to write migrated config.yml", {
+					path: this.#configPath,
+					error: String(error),
+				});
+				return;
+			}
+
+			if (migratedSettingsJson) {
+				try {
+					await fs.promises.rename(settingsJsonPath, `${settingsJsonPath}.bak`);
+				} catch (error) {
+					logger.warn("Settings: failed to archive settings.json after migration", {
+						path: settingsJsonPath,
+						error: String(error),
+					});
+				}
+			}
+
+			try {
+				this.#storage?.clearMigratedSettings();
+			} catch (error) {
+				logger.warn("Settings: failed to clear migrated agent.db settings", { error: String(error) });
+			}
 		}
 	}
 
@@ -1646,6 +2077,12 @@ export class Settings {
 		if ("queueMode" in raw && !("steeringMode" in raw)) {
 			raw.steeringMode = raw.queueMode;
 			delete raw.queueMode;
+		}
+		// doubleEscapeAction: legacy "branch" -> "rewind". The old branch backtrack
+		// was superseded by the in-transcript rewind selector; "tree" survives as a
+		// current action (opens the session tree) beside "rewind" and "none".
+		if (raw.doubleEscapeAction === "branch") {
+			raw.doubleEscapeAction = "rewind";
 		}
 
 		// lastChangelogVersion moved out of config.yml into the
@@ -1683,14 +2120,6 @@ export class Settings {
 		delete raw.collapseChangelog;
 		delete raw["startup.changelogMode"];
 
-		// ask.timeout: ms -> seconds (if value > 1000, it's old ms format)
-		if (raw.ask && typeof (raw.ask as Record<string, unknown>).timeout === "number") {
-			const oldValue = (raw.ask as Record<string, unknown>).timeout as number;
-			if (oldValue > 1000) {
-				(raw.ask as Record<string, unknown>).timeout = Math.round(oldValue / 1000);
-			}
-		}
-
 		// Migrate old flat "theme" string to nested theme.dark/theme.light
 		if (typeof raw.theme === "string") {
 			const oldTheme = raw.theme;
@@ -1704,49 +2133,27 @@ export class Settings {
 			}
 		}
 
-		// inspect_image.enabled (boolean) -> inspect_image.mode (enum). Explicit
-		// user choices are preserved: true -> "on", false -> "off". Configs with
-		// no legacy key get the new "auto" default, which hides the tool for
-		// models with native image input. Handles nested and quoted-dotted
-		// ("inspect_image.enabled") sources; the target is always the nested
-		// form, which is the only shape the resolver reads.
+		// Remove the retired image-tool mode settings and preserve its request
+		// timeout under the read image-question setting. Nested values win over
+		// quoted-dotted legacy values; an existing new setting wins over both.
 		const inspectImageObj = isRecord(raw.inspect_image) ? (raw.inspect_image as Record<string, unknown>) : undefined;
-		const legacyEnabled =
-			typeof inspectImageObj?.enabled === "boolean"
-				? inspectImageObj.enabled
-				: typeof raw["inspect_image.enabled"] === "boolean"
-					? (raw["inspect_image.enabled"] as boolean)
+		const legacyQuestionTimeoutMs =
+			typeof inspectImageObj?.timeoutMs === "number"
+				? inspectImageObj.timeoutMs
+				: typeof raw["inspect_image.timeoutMs"] === "number"
+					? (raw["inspect_image.timeoutMs"] as number)
 					: undefined;
-		if (legacyEnabled !== undefined) {
-			if (!inspectImageObj) {
-				raw.inspect_image = {};
-			}
-			const target = raw.inspect_image as Record<string, unknown>;
-			const flatMode = raw["inspect_image.mode"];
-			if (target.mode === undefined) {
-				// A quoted-dotted explicit mode wins over the legacy boolean but
-				// must be normalized into the nested form the resolver reads.
-				target.mode =
-					typeof flatMode === "string" && (INSPECT_IMAGE_MODES as readonly string[]).includes(flatMode)
-						? flatMode
-						: legacyEnabled
-							? "on"
-							: "off";
-			}
-			delete target.enabled;
-			delete raw["inspect_image.enabled"];
-			delete raw["inspect_image.mode"];
+		const imagesObj = isRecord(raw.images) ? (raw.images as Record<string, unknown>) : undefined;
+		if (legacyQuestionTimeoutMs !== undefined && imagesObj?.questionTimeoutMs === undefined) {
+			raw.images = { ...imagesObj, questionTimeoutMs: legacyQuestionTimeoutMs };
 		}
+		delete raw.inspect_image;
+		delete raw["inspect_image.enabled"];
+		delete raw["inspect_image.mode"];
+		delete raw["inspect_image.timeoutMs"];
 
-		// task.isolation.enabled (boolean) -> task.isolation.mode (enum)
 		const taskObj = raw.task as Record<string, unknown> | undefined;
 		const isolationObj = taskObj?.isolation as Record<string, unknown> | undefined;
-		if (isolationObj && "enabled" in isolationObj) {
-			if (typeof isolationObj.enabled === "boolean") {
-				isolationObj.mode = isolationObj.enabled ? "auto" : "none";
-			}
-			delete isolationObj.enabled;
-		}
 
 		// task.simple: removed — the task tool no longer accepts a per-call
 		// schema (workflows drive structured output via eval agent()) and the
@@ -1769,7 +2176,7 @@ export class Settings {
 		// `true` reproduced the previous small-model-classified behavior, which is
 		// now "smart"; `false` maps to "none" so explicitly disabled configs remain
 		// off rather than inheriting the new "mechanical" default.
-		// Handles nested and quoted-dotted sources, like inspect_image above.
+		// Handles nested and quoted-dotted sources, like the legacy image settings above.
 		const featuresObj = isRecord(raw.features) ? (raw.features as Record<string, unknown>) : undefined;
 		const legacyUnexpectedStop =
 			typeof featuresObj?.unexpectedStopDetection === "boolean"
@@ -1789,22 +2196,56 @@ export class Settings {
 			}
 			delete raw["features.unexpectedStopDetection"];
 		}
-		// task.isolation.mode: legacy values from before the pi-iso PAL refactor.
-		// `worktree` was git worktree → now lives under `rcopy`. `fuse-overlay`
-		// and `fuse-projfs` are now the platform-named `overlayfs` / `projfs`
-		// kinds; the PAL falls back internally when the chosen one isn't
-		// available, so we don't need the old TS-side platform guards.
-		if (isolationObj && typeof isolationObj.mode === "string") {
-			const legacy: Record<string, string> = {
-				worktree: "rcopy",
-				"fuse-overlay": "overlayfs",
-				"fuse-projfs": "projfs",
-			};
-			const mapped = legacy[isolationObj.mode as string];
-			if (mapped !== undefined) {
-				isolationObj.mode = mapped;
-			}
+		// Split the legacy combined isolation setting into enablement and backend.
+		// Handle both nested YAML and quoted dotted keys. Explicit enabled and
+		// backend values win; legacy backend names are normalized everywhere.
+		const legacyIsolationBackends: Record<string, string> = {
+			worktree: "rcopy",
+			"fuse-overlay": "overlayfs",
+			"fuse-projfs": "projfs",
+		};
+		const legacyIsolationModePath = ["task", "isolation", "mode"].join(".");
+		const legacyIsolationMode =
+			typeof isolationObj?.mode === "string"
+				? isolationObj.mode
+				: typeof raw[legacyIsolationModePath] === "string"
+					? (raw[legacyIsolationModePath] as string)
+					: undefined;
+		const flatIsolationEnabled = raw["task.isolation.enabled"];
+		const explicitIsolationEnabled =
+			typeof isolationObj?.enabled === "boolean"
+				? isolationObj.enabled
+				: typeof flatIsolationEnabled === "boolean"
+					? flatIsolationEnabled
+					: undefined;
+		if (legacyIsolationMode !== undefined || explicitIsolationEnabled !== undefined) {
+			if (!isRecord(raw.task)) raw.task = {};
+			const targetTask = raw.task as Record<string, unknown>;
+			if (!isRecord(targetTask.isolation)) targetTask.isolation = {};
+			const targetIsolation = targetTask.isolation as Record<string, unknown>;
+			targetIsolation.enabled = explicitIsolationEnabled ?? legacyIsolationMode !== "none";
+			delete targetIsolation.mode;
 		}
+		delete raw[legacyIsolationModePath];
+		delete raw["task.isolation.enabled"];
+
+		const rootIsolation = isRecord(raw.isolation) ? (raw.isolation as Record<string, unknown>) : undefined;
+		const configuredBackend =
+			typeof rootIsolation?.backend === "string"
+				? rootIsolation.backend
+				: typeof raw["isolation.backend"] === "string"
+					? (raw["isolation.backend"] as string)
+					: undefined;
+		const derivedBackend =
+			legacyIsolationMode === undefined || legacyIsolationMode === "none"
+				? undefined
+				: (legacyIsolationBackends[legacyIsolationMode] ?? legacyIsolationMode);
+		const backend = configuredBackend ?? derivedBackend;
+		if (backend !== undefined) {
+			if (!rootIsolation) raw.isolation = {};
+			(raw.isolation as Record<string, unknown>).backend = legacyIsolationBackends[backend] ?? backend;
+		}
+		delete raw["isolation.backend"];
 
 		// edit.mode: removed "atom" and "vim" variants map back to "hashline"
 		const editObj = raw.edit as Record<string, unknown> | undefined;
@@ -1893,6 +2334,17 @@ export class Settings {
 			raw.inlineToolDescriptors = raw.inlineToolDescriptors ? "on" : "off";
 		}
 
+		// find.enabled: boolean -> enum (auto | on | off). Preserve an explicit
+		// choice; unset installs get `auto`, which enables `find` only when the
+		// judge role resolves to a native System One model.
+		const findObj = isRecord(raw.find) ? raw.find : undefined;
+		if (findObj && typeof findObj.enabled === "boolean") {
+			findObj.enabled = findObj.enabled ? "on" : "off";
+		}
+		if (typeof raw["find.enabled"] === "boolean") {
+			raw["find.enabled"] = raw["find.enabled"] ? "on" : "off";
+		}
+
 		// statusLine: rename "plan_mode" segment to "mode"
 		const statusLineObj = raw.statusLine as Record<string, unknown> | undefined;
 		if (statusLineObj) {
@@ -1920,10 +2372,36 @@ export class Settings {
 		}
 		delete raw["providers.parallelFetch"];
 
-		// codexResets.autoRedeem: boolean -> tri-state enum.
-		// Existing explicit false keeps the old "do not run" behavior; missing
-		// config now falls through to the new "unset" default, which asks before
-		// the first eligible spend.
+		// Retired local title models (replaced by the LFM2.5/Falcon refresh) map to
+		// their closest current equivalents. Without this a pinned retired key
+		// passes through as a stale string and title generation silently skips
+		// every turn instead of falling back (no online fallback by design).
+		const RETIRED_TINY_TITLE_MODELS: Record<string, string> = {
+			"lfm2-350m": "lfm2.5-350m",
+			"lfm2-700m": "lfm2.5-350m",
+			"qwen3-0.6b": "lfm2.5-350m",
+			"qwen2.5-0.5b": "lfm2.5-230m",
+			"gemma-270m": "falcon-h1-90m",
+		};
+		const migrateTinyModelValue = (value: unknown): string | undefined =>
+			typeof value === "string" ? RETIRED_TINY_TITLE_MODELS[value] : undefined;
+		// Quoted-dotted flat keys (`"providers.tinyModel"` in YAML/legacy JSON)
+		// promote into the nested setting; nested wins when both are present.
+		const flatTinyModel = migrateTinyModelValue(raw["providers.tinyModel"]);
+		if (flatTinyModel !== undefined) {
+			const providersRoot = isRecord(raw.providers) ? raw.providers : {};
+			if (typeof providersRoot.tinyModel !== "string") providersRoot.tinyModel = flatTinyModel;
+			raw.providers = providersRoot;
+			delete raw["providers.tinyModel"];
+		}
+		if (providersObj) {
+			const migrated = migrateTinyModelValue(providersObj.tinyModel);
+			if (migrated !== undefined) providersObj.tinyModel = migrated;
+		}
+
+		// Saved-reset autoRedeem booleans -> tri-state enums. Existing explicit
+		// false keeps "do not run"; missing config falls through to "unset",
+		// which asks before the first eligible provider-specific spend.
 		const codexResetsObj = raw.codexResets as Record<string, unknown> | undefined;
 		if (codexResetsObj && typeof codexResetsObj.autoRedeem === "boolean") {
 			codexResetsObj.autoRedeem = codexResetsObj.autoRedeem ? "yes" : "no";
@@ -1984,6 +2462,10 @@ export class Settings {
 				}
 				delete hindsightObj.agentName;
 			}
+			// mentalModelRefreshIntervalMs removed: the mental-model block is now
+			// frozen for the session lifetime rather than re-listed on a timer that
+			// rewrote the cached prompt prefix mid-session (#11961).
+			delete hindsightObj.mentalModelRefreshIntervalMs;
 		}
 
 		// power.preventIdleSleep / power.preventSystemSleep / power.declareUserActive
@@ -2026,9 +2508,10 @@ export class Settings {
 			delete raw["power.preventDisplaySleep"];
 		}
 
-		// Migration for renamed settings grep.* and glob.* from search.* and find.*:
-		// 1. Nested settings: find -> glob, search -> grep (per-property merge to avoid clobbering)
-		const ensureRawObject = (key: "glob" | "grep"): Record<string, unknown> => {
+		// Migration for renamed settings grep.* from search.*. (`find.*` is no
+		// longer migrated to `glob.*`: `find` is the semantic search tool now.)
+		// 1. Nested settings: search -> grep (per-property merge to avoid clobbering)
+		const ensureRawObject = (key: "grep"): Record<string, unknown> => {
 			const current = raw[key];
 			if (isRecord(current)) {
 				return current;
@@ -2037,20 +2520,6 @@ export class Settings {
 			raw[key] = created;
 			return created;
 		};
-
-		if ("find" in raw) {
-			const findObj = raw.find;
-			if (isRecord(findObj)) {
-				const globObj = ensureRawObject("glob");
-				const findKeys: Array<"enabled"> = ["enabled"];
-				for (const key of findKeys) {
-					if (key in findObj && !(key in globObj)) {
-						globObj[key] = findObj[key];
-					}
-				}
-			}
-			delete raw.find;
-		}
 
 		if ("search" in raw) {
 			const searchObj = raw.search;
@@ -2071,13 +2540,6 @@ export class Settings {
 		}
 
 		// 2. Flat settings keys: map them to the proper nested target so get/set resolves them correctly
-		if ("find.enabled" in raw) {
-			const globObj = ensureRawObject("glob");
-			if (!("enabled" in globObj)) {
-				globObj.enabled = raw["find.enabled"];
-			}
-			delete raw["find.enabled"];
-		}
 		if ("search.enabled" in raw) {
 			const grepObj = ensureRawObject("grep");
 			if (!("enabled" in grepObj)) {
@@ -2235,44 +2697,237 @@ export class Settings {
 		delete raw["mcp.discoveryMode"];
 		delete raw["mcp.discoveryDefaultServers"];
 
-		// providers.webSearch / providers.image (single preferred provider) →
-		// providers.webSearchOrder / providers.imageOrder (priority lists). A
-		// concrete legacy choice becomes the head of the new list with every
-		// remaining provider appended in its built-in order, so the old
-		// preference stays #1 and the fallback chain is written out explicitly.
-		// "auto" (or an unknown id) just drops the key — the default chain.
-		const providerPrefsObj = raw.providers as Record<string, unknown> | undefined;
-		const migrateProviderPreference = (
-			legacyKey: string,
-			orderKey: string,
-			expand: (value: string) => string[] | undefined,
-		): void => {
-			const flatLegacyKey = `providers.${legacyKey}`;
-			const legacy = providerPrefsObj?.[legacyKey] ?? raw[flatLegacyKey];
-			if (legacy === undefined) return;
-			const existingOrder = providerPrefsObj?.[orderKey] ?? raw[`providers.${orderKey}`];
-			const orderAlreadySet = Array.isArray(existingOrder) && existingOrder.length > 0;
-			if (!orderAlreadySet && typeof legacy === "string") {
-				const expanded = expand(legacy);
-				if (expanded) {
-					const root = providerPrefsObj ?? {};
-					root[orderKey] = expanded;
-					raw.providers = root;
+		// Retired provider/model selectors now live in modelRoles plus explicit
+		// retry chains. Read nested and quoted-dotted forms from the same layer;
+		// an owned nested key wins even when its value is undefined. Every legacy
+		// key is removed after inspection so it cannot leak back into config.yml.
+		function migrateKindRoleSettings(): void {
+			const providerSettings = isRecord(raw.providers) ? raw.providers : undefined;
+			const ttsSettings = isRecord(raw.tts) ? raw.tts : undefined;
+			const sttSettings = isRecord(raw.stt) ? raw.stt : undefined;
+			const legacy = (root: Record<string, unknown> | undefined, key: string, flatKey: string): unknown =>
+				root && Object.hasOwn(root, key) ? root[key] : raw[flatKey];
+			const removeLegacy = (root: Record<string, unknown> | undefined, key: string, flatKey: string): void => {
+				if (root) delete root[key];
+				delete raw[flatKey];
+			};
+			const dedupe = (values: readonly string[]): string[] => [...new Set(values)];
+
+			const roles = isRecord(raw.modelRoles) ? raw.modelRoles : {};
+			const retrySettings = isRecord(raw.retry) ? raw.retry : {};
+			const fallbackChains = isRecord(retrySettings.fallbackChains) ? retrySettings.fallbackChains : {};
+			let rolesChanged = false;
+			let fallbackChainsChanged = false;
+			const setRoleChain = (role: string, candidates: readonly string[]): void => {
+				if (candidates.length === 0) return;
+				if (!Object.hasOwn(roles, role)) {
+					roles[role] = candidates[0];
+					rolesChanged = true;
 				}
+				if (!Object.hasOwn(fallbackChains, role)) {
+					fallbackChains[role] = candidates.slice(1);
+					fallbackChainsChanged = true;
+				}
+			};
+
+			const legacyWebSearch = legacy(providerSettings, "webSearch", "providers.webSearch");
+			const legacyWebOrder = legacy(providerSettings, "webSearchOrder", "providers.webSearchOrder");
+			const legacyWebExclude = legacy(providerSettings, "webSearchExclude", "providers.webSearchExclude");
+			const legacyGeminiModel = legacy(providerSettings, "webSearchGeminiModel", "providers.webSearchGeminiModel");
+			const webSelector = (provider: string, geminiModel: string): string | undefined => {
+				switch (provider) {
+					case "gemini":
+						return `google/${geminiModel}`;
+					case "anthropic":
+						return "anthropic/claude-haiku-4-5";
+					case "codex":
+						return "openai-codex/gpt-5.6-luna";
+					case "xai":
+						return "xai/grok-4.5";
+					case "auto":
+						return undefined;
+					default:
+						return MODEL_PRIO.web.includes(`web/${provider}`) ? `web/${provider}` : undefined;
+				}
+			};
+			const geminiModel =
+				typeof legacyGeminiModel === "string" && legacyGeminiModel.trim()
+					? legacyGeminiModel.trim()
+					: "gemini-2.5-flash";
+			const webDefaults = MODEL_PRIO.web.map(selector => {
+				if (selector === "google/gemini-2.5-flash") return `google/${geminiModel}`;
+				if (selector === "google-antigravity/gemini-2.5-flash") {
+					return `google-antigravity/${geminiModel}`;
+				}
+				return selector;
+			});
+			const excludedWebProviders = new Set(
+				Array.isArray(legacyWebExclude)
+					? legacyWebExclude.filter(
+							(value): value is string =>
+								typeof value === "string" && webSelector(value, geminiModel) !== undefined,
+						)
+					: [],
+			);
+			const isWebSelectorExcluded = (selector: string): boolean => {
+				if (excludedWebProviders.has("gemini") && /^(?:google|google-antigravity)\//.test(selector)) return true;
+				if (excludedWebProviders.has("anthropic") && selector.startsWith("anthropic/")) return true;
+				if (excludedWebProviders.has("codex") && selector.startsWith("openai-codex/")) return true;
+				if (excludedWebProviders.has("xai") && (selector.startsWith("xai/") || selector.startsWith("xai-oauth/"))) {
+					return true;
+				}
+				for (const provider of excludedWebProviders) {
+					if (selector === `web/${provider}`) return true;
+				}
+				return false;
+			};
+			const orderedWebProviders = Array.isArray(legacyWebOrder)
+				? legacyWebOrder
+				: typeof legacyWebSearch === "string" && legacyWebSearch !== "auto"
+					? [legacyWebSearch]
+					: [];
+			const orderedWebSelectors = orderedWebProviders.flatMap(value =>
+				typeof value === "string" ? (webSelector(value, geminiModel) ?? []) : [],
+			);
+			const shouldMigrateWeb =
+				orderedWebSelectors.length > 0 ||
+				excludedWebProviders.size > 0 ||
+				(typeof legacyGeminiModel === "string" && legacyGeminiModel.trim().length > 0);
+			if (shouldMigrateWeb) {
+				setRoleChain(
+					"web",
+					dedupe([...orderedWebSelectors, ...webDefaults]).filter(selector => !isWebSelectorExcluded(selector)),
+				);
 			}
-			if (providerPrefsObj) delete providerPrefsObj[legacyKey];
-			delete raw[flatLegacyKey];
-		};
-		migrateProviderPreference("webSearch", "webSearchOrder", value =>
-			value !== "auto" && isSearchProviderId(value)
-				? [value, ...SEARCH_PROVIDER_ORDER.filter(id => id !== value)]
-				: undefined,
-		);
-		migrateProviderPreference("image", "imageOrder", value =>
-			value !== "auto" && isImageProviderId(value)
-				? [value, ...AUTO_IMAGE_PROVIDER_ORDER.filter(id => id !== value)]
-				: undefined,
-		);
+
+			const legacyImage = legacy(providerSettings, "image", "providers.image");
+			const legacyImageOrder = legacy(providerSettings, "imageOrder", "providers.imageOrder");
+			const imageSelector = (provider: string): string | undefined => {
+				switch (provider) {
+					case "openai":
+						return "openai/gpt-image-1";
+					case "openai-codex":
+						return "openai-codex/gpt-image-1";
+					case "antigravity":
+						return "google-antigravity/gemini-3-pro-image";
+					case "xai":
+						return "xai/grok-imagine-image";
+					case "openrouter":
+						return "openrouter/google/gemini-3-pro-image-preview";
+					case "gemini":
+						return "google/gemini-3-pro-image-preview";
+					case "deepinfra":
+						return "deepinfra/black-forest-labs/FLUX-2-pro";
+					default:
+						return undefined;
+				}
+			};
+			const orderedImageProviders = Array.isArray(legacyImageOrder)
+				? legacyImageOrder
+				: typeof legacyImage === "string" && legacyImage !== "auto"
+					? [legacyImage]
+					: [];
+			const orderedImageSelectors = orderedImageProviders.flatMap(value =>
+				typeof value === "string" ? (imageSelector(value) ?? []) : [],
+			);
+			if (orderedImageSelectors.length > 0) {
+				setRoleChain("image", dedupe([...orderedImageSelectors, ...MODEL_PRIO.image]));
+			}
+
+			const legacyTtsProvider = legacy(providerSettings, "tts", "providers.tts");
+			const speechSelector =
+				legacyTtsProvider === "local"
+					? "local/kokoro"
+					: legacyTtsProvider === "xai"
+						? "xai/grok-tts"
+						: legacyTtsProvider === "deepinfra"
+							? "deepinfra/hexgrad/Kokoro-82M"
+							: undefined;
+			if (speechSelector) setRoleChain("speech", [speechSelector]);
+
+			const legacySttModel = legacy(sttSettings, "modelName", "stt.modelName");
+			const dictationSelector =
+				legacySttModel === "fast" || legacySttModel === "whisper-base"
+					? "local/whisper-base"
+					: legacySttModel === "balanced" || legacySttModel === "whisper-small"
+						? "local/whisper-small"
+						: legacySttModel === "turbo" || legacySttModel === "whisper-large-v3-turbo"
+							? "local/whisper-large-v3-turbo"
+							: undefined;
+			if (dictationSelector && !Object.hasOwn(roles, "dictation")) {
+				roles.dictation = dictationSelector;
+				rolesChanged = true;
+			}
+
+			const legacyJudgmentProvider = legacy(providerSettings, "judgmentProvider", "providers.judgmentProvider");
+			const legacyAutoThinkingModel = legacy(providerSettings, "autoThinkingModel", "providers.autoThinkingModel");
+			const legacyUnexpectedStopModel = legacy(
+				providerSettings,
+				"unexpectedStopModel",
+				"providers.unexpectedStopModel",
+			);
+			const nonDefaultJudge =
+				(typeof legacyJudgmentProvider === "string" && legacyJudgmentProvider !== "auto") ||
+				(typeof legacyAutoThinkingModel === "string" && legacyAutoThinkingModel !== "online") ||
+				(typeof legacyUnexpectedStopModel === "string" && legacyUnexpectedStopModel !== "online");
+			if (nonDefaultJudge) {
+				const judgeCandidates: string[] = [];
+				if (legacyJudgmentProvider !== "llm") judgeCandidates.push("typesafe/jev-latest");
+				if (typeof legacyAutoThinkingModel === "string" && legacyAutoThinkingModel !== "online") {
+					judgeCandidates.push(`local/${legacyAutoThinkingModel}`);
+				}
+				if (typeof legacyUnexpectedStopModel === "string" && legacyUnexpectedStopModel !== "online") {
+					judgeCandidates.push(`local/${legacyUnexpectedStopModel}`);
+				}
+				judgeCandidates.push("@tiny", "@smol", "@default");
+				setRoleChain("judge", dedupe(judgeCandidates));
+			}
+
+			const prependLocalRole = (role: "tiny" | "memory", model: unknown): void => {
+				if (typeof model !== "string" || model === "online" || model.length === 0) return;
+				const selector = `local/${model}`;
+				const configured = typeof roles[role] === "string" ? roles[role] : undefined;
+				const patterns = configured
+					? configured
+							.split(",")
+							.map(pattern => pattern.trim())
+							.filter(Boolean)
+					: [];
+				roles[role] = dedupe([selector, ...patterns]).join(",");
+				rolesChanged = true;
+			};
+			prependLocalRole("tiny", legacy(providerSettings, "tinyModel", "providers.tinyModel"));
+			prependLocalRole("memory", legacy(providerSettings, "memoryModel", "providers.memoryModel"));
+
+			for (const key of [
+				"webSearch",
+				"webSearchOrder",
+				"webSearchExclude",
+				"webSearchGeminiModel",
+				"image",
+				"imageOrder",
+				"tts",
+				"judgmentProvider",
+				"autoThinkingModel",
+				"unexpectedStopModel",
+				"tinyModel",
+				"memoryModel",
+			]) {
+				removeLegacy(providerSettings, key, `providers.${key}`);
+			}
+			removeLegacy(ttsSettings, "localModel", "tts.localModel");
+			removeLegacy(sttSettings, "modelName", "stt.modelName");
+
+			if (rolesChanged) raw.modelRoles = roles;
+			if (fallbackChainsChanged) {
+				retrySettings.fallbackChains = fallbackChains;
+				raw.retry = retrySettings;
+			}
+			if (providerSettings && Object.keys(providerSettings).length === 0) delete raw.providers;
+			if (ttsSettings && Object.keys(ttsSettings).length === 0) delete raw.tts;
+			if (sttSettings && Object.keys(sttSettings).length === 0) delete raw.stt;
+		}
+		migrateKindRoleSettings();
 
 		// Consolidate the retired Exa suite toggles onto the sole remaining
 		// provider switch. The old runtime required both `enabled` and
@@ -2319,6 +2974,8 @@ export class Settings {
 			}
 		}
 		delete raw["computer.backend"];
+
+		delete raw["hindsight.mentalModelRefreshIntervalMs"];
 
 		return raw;
 	}
@@ -2596,7 +3253,7 @@ export class Settings {
 	async #saveProjectNow(): Promise<void> {
 		if (this.#savesCancelled || !this.#persist || this.#modifiedProjectModelRoles.size === 0) return;
 
-		const projectConfigPath = path.join(this.#cwd, ".omp", "config.yml");
+		const projectConfigPath = path.join(getProjectAgentDir(this.#cwd), "config.yml");
 		const modifiedModelRoles = [...this.#modifiedProjectModelRoles];
 		this.#modifiedProjectModelRoles.clear();
 
@@ -2647,12 +3304,26 @@ export class Settings {
 		return filteredRoles ? { ...this.#project, modelRoles: filteredRoles } : this.#project;
 	}
 
+	#warnUnknownStatusLineSegments(): void {
+		for (const path of STATUS_LINE_SEGMENT_PATHS) {
+			const value = getByPath(this.#merged, SETTING_PATH_SEGMENTS[path]);
+			for (const segment of getUnknownStatusLineSegments(value)) {
+				if (warnedUnknownStatusLineSegments.has(segment)) continue;
+				warnedUnknownStatusLineSegments.add(segment);
+				logger.warn(`Settings: unknown status line segment ${segment}`, { setting: path });
+			}
+		}
+	}
+
 	#rebuildMerged(): void {
+		this.#revision++;
 		this.#merged = this.#deepMerge(this.#deepMerge({}, this.#global), this.#projectSettingsForMerge());
 		this.#merged = this.#deepMerge(this.#merged, this.#configOverlay);
 		this.#merged = this.#deepMerge(this.#merged, this.#overrides);
 		this.#resolvedCache.clear();
+		this.#groupCache.clear();
 		this.#editVariantCache = undefined;
+		this.#warnUnknownStatusLineSegments();
 	}
 
 	#fireAllHooks(): void {
@@ -2725,7 +3396,7 @@ class SettingSignal<A extends unknown[] = []> {
 	 * rest.
 	 */
 	fire(...args: A): void {
-		for (const cb of [...this.#listeners]) {
+		for (const cb of Array.from(this.#listeners)) {
 			try {
 				cb(...args);
 			} catch (err) {
@@ -2765,6 +3436,45 @@ const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
 	// track it the same instant path/resource links do. Runtime `/settings` edits
 	// also go through the selector controller to invalidate and repaint live views.
 	"tui.hyperlinks": value => applyHyperlinkSetting(value),
+	"display.hideToolActivity": value => {
+		if (typeof value === "boolean") setChatTranscriptDisplayPreferences({ hideToolActivity: value });
+	},
+	"read.toolResultPreview": value => {
+		if (typeof value === "boolean") setChatTranscriptDisplayPreferences({ readToolResultPreview: value });
+	},
+	"terminal.showImages": value => {
+		if (typeof value === "boolean") setChatTranscriptDisplayPreferences({ showImages: value });
+	},
+	"display.cacheMissMarker": value => {
+		if (typeof value === "boolean") setChatTranscriptDisplayPreferences({ cacheMissMarker: value });
+	},
+	"display.showTokenUsage": value => {
+		if (typeof value === "boolean") setChatTranscriptDisplayPreferences({ showTokenUsage: value });
+	},
+	"display.showTurnTime": value => {
+		if (typeof value === "boolean") setChatTranscriptDisplayPreferences({ showTurnTime: value });
+	},
+	"tui.maxInlineImageColumns": value => {
+		if (typeof value === "number") setInlineImageMaxColumns(value);
+	},
+	"tui.maxInlineImageRows": value => {
+		if (typeof value === "number") setInlineImageMaxRows(value);
+	},
+	"task.showResolvedModelBadge": value => {
+		if (typeof value === "boolean") setFeedModelBadgeEnabled(value);
+	},
+	"mcp.renderMarkdownResults": value => {
+		if (typeof value === "boolean") setMcpRenderMarkdownResults(value);
+	},
+	"display.shimmer": value => {
+		if (value === "classic" || value === "kitt" || value === "disabled") setShimmerMode(value);
+	},
+	"composer.shape": value => {
+		if (typeof value === "string") setEditorGapComposerShape(value);
+	},
+	emojiAutocomplete: value => {
+		if (typeof value === "boolean") setEmojiAutocompleteEnabled(value);
+	},
 	"provider.appendOnlyContext": value => {
 		if (typeof value === "string") {
 			appendOnlyModeSignal.fire(value);
@@ -2772,6 +3482,9 @@ const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
 	},
 	"providers.maxInFlightRequests": value => {
 		configureProviderMaxInFlightRequests(validateProviderMaxInFlightRequests(value));
+	},
+	"task.agentServiceTierOverrides": value => {
+		validateAgentServiceTierOverrides(value);
 	},
 	"secrets.enabled": value => {
 		configureCredentialRedaction(value === true);
@@ -2831,8 +3544,9 @@ const extendedContextSignal = new SettingSignal("extendedContext");
 
 /**
  * Subscribe to extended-context setting changes. Sessions re-derive their
- * model's effective context window (the registry clamps premium long-context
- * models to the standard-pricing threshold while the setting is off).
+ * model's effective context window (the registry restores default windows
+ * and caps premium long-context models at the standard-pricing threshold
+ * while the setting is off).
  * Returns an unsubscribe function.
  */
 export const onExtendedContextChanged = (cb: () => void) => extendedContextSignal.on(cb);
@@ -2872,6 +3586,20 @@ export const onHindsightScopeChanged = (cb: () => void) => hindsightScopeSignal.
  */
 const liveSettingsInstances = new Set<WeakRef<Settings>>();
 
+const activeSettingsScope = new AsyncLocalStorage<Settings>();
+
+/**
+ * Run extension-owned work with the settings instance of its active session.
+ *
+ * Legacy Pi extensions synchronously call `SettingsManager.create(ctx.cwd)`;
+ * `cwd` alone cannot distinguish concurrent sessions that use different
+ * settings for the same project. The async scope supplies that missing session
+ * identity without process-global mutation.
+ */
+export function withActiveSettings<T>(instance: Settings | undefined, fn: () => T): T {
+	return instance ? activeSettingsScope.run(instance, fn) : fn();
+}
+
 let globalInstance: Settings | null = null;
 let globalInstancePromise: Promise<Settings> | null = null;
 let boundSettingsInstance: Settings | null = null;
@@ -2887,6 +3615,36 @@ export function isSettingsInitialized(): boolean {
 }
 
 /**
+ * Resolve the settings visible to a legacy Pi `SettingsManager.create()` call.
+ *
+ * An active extension session is authoritative because `cwd`/`agentDir` cannot
+ * uniquely identify concurrent SDK sessions with per-session overrides. Outside
+ * extension execution, the most recently constructed matching instance is the
+ * best available scope; an unscoped lookup falls back to the global singleton.
+ */
+export function findScopedSettings(cwd?: string, agentDir?: string): Settings | undefined {
+	const active = activeSettingsScope.getStore();
+	if (active) return active;
+
+	const wantCwd = cwd === undefined ? undefined : path.normalize(cwd);
+	const wantAgentDir = agentDir === undefined ? undefined : path.normalize(agentDir);
+	if (wantCwd === undefined && wantAgentDir === undefined) return globalInstance ?? undefined;
+
+	let found: Settings | undefined;
+	for (const ref of liveSettingsInstances) {
+		const instance = ref.deref();
+		if (
+			instance &&
+			(wantCwd === undefined || instance.getCwd() === wantCwd) &&
+			(wantAgentDir === undefined || instance.getAgentDir() === wantAgentDir)
+		) {
+			found = instance;
+		}
+	}
+	return found;
+}
+
+/**
  * Reset the global singleton for testing.
  * @internal
  */
@@ -2899,12 +3657,22 @@ export function resetSettingsForTest(): void {
 		ref.deref()?.cancelPendingSaves();
 	}
 	liveSettingsInstances.clear();
+	warnedUnknownStatusLineSegments.clear();
 	globalInstance = null;
 	globalInstancePromise = null;
 	clearBoundSettingsMethods();
 	configureProviderMaxInFlightRequests(undefined);
 	configureCredentialRedaction(false);
 }
+
+/**
+ * Exposes the dangling-symlink target segment splitter for platform-specific
+ * tests: the root-double-count and POSIX-backslash bugs only reproduce with an
+ * explicit `path.win32` / `path.posix` engine, which cannot be forced from the
+ * host OS otherwise.
+ * @internal
+ */
+export const __physicalTargetSegmentsForTesting = physicalTargetSegments;
 
 /**
  * The global settings singleton.

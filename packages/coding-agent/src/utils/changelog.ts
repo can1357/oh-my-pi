@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import { getLastChangelogVersionPath, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { Lexer } from "@oh-my-pi/pi-utils/marked";
 import type { BunFile } from "bun";
 import bundledChangelogPath from "../../CHANGELOG.md" with { type: "file" };
 import type { SettingValue } from "../config/settings";
@@ -17,6 +18,35 @@ export const RECENT_CHANGELOG_ENTRY_LIMIT = 3;
 export const STARTUP_CHANGELOG_MAX_BYTES = 64 * 1024;
 /** Hint appended when automatic startup release notes are truncated. */
 export const STARTUP_CHANGELOG_FULL_HINT = "Use `/changelog full` to view the complete changelog.";
+/** Releases shown by `/changelog last` when no count is given. */
+export const DEFAULT_LAST_CHANGELOG_COUNT = 1;
+/** Usage line printed when `/changelog` arguments are not `full` or `last [N]`. */
+export const CHANGELOG_COMMAND_USAGE = "Usage: /changelog [full|last [N]]";
+
+/**
+ * Parsed `/changelog` view. `recent` is the bare default; `last` is an explicit count.
+ */
+export type ChangelogView = { kind: "full" } | { kind: "recent"; count: number } | { kind: "last"; count: number };
+
+/**
+ * Parse `/changelog` arguments. `{ error }` is a usage string callers should print instead of entries.
+ */
+export function parseChangelogView(args: string): ChangelogView | { error: string } {
+	const trimmed = args.trim().toLowerCase();
+	if (!trimmed) return { kind: "recent", count: RECENT_CHANGELOG_ENTRY_LIMIT };
+	if (trimmed === "full") return { kind: "full" };
+	const match = trimmed.match(/^last(?:\s+(\d+))?$/);
+	if (!match) return { error: CHANGELOG_COMMAND_USAGE };
+	if (match[1] === undefined) return { kind: "last", count: DEFAULT_LAST_CHANGELOG_COUNT };
+	const count = Number.parseInt(match[1], 10);
+	if (count < 1) return { error: `${CHANGELOG_COMMAND_USAGE} (N must be a positive integer)` };
+	return { kind: "last", count };
+}
+
+/** Newest-first slice for a parsed view. `full` returns a copy of every entry. */
+export function selectChangelogEntries(entries: readonly ChangelogEntry[], view: ChangelogView): ChangelogEntry[] {
+	return view.kind === "full" ? [...entries] : entries.slice(0, view.count);
+}
 
 /** Markdown generated from selected changelog entries and whether it hit a size cap. */
 export interface RenderedChangelog {
@@ -59,6 +89,9 @@ function emptyStartupSelection(persistCurrentVersion: boolean): StartupChangelog
 	};
 }
 
+/** Bucket for release bullets written above any `###` category heading, so the breakdown never loses them. */
+const UNCATEGORIZED_CHANGELOG_CATEGORY = "Other";
+
 function summarizeChangelogEntries(entries: readonly ChangelogEntry[]): {
 	changeCount: number;
 	categoryCounts: Record<string, number>;
@@ -67,16 +100,22 @@ function summarizeChangelogEntries(entries: readonly ChangelogEntry[]): {
 	let changeCount = 0;
 
 	for (const entry of entries) {
-		let category: string | undefined;
-		for (const line of entry.content.split("\n")) {
-			const heading = line.match(/^###\s+(.+?)\s*$/);
-			if (heading) {
-				category = heading[1];
+		let category = UNCATEGORIZED_CHANGELOG_CATEGORY;
+		// Count what the renderer shows: top-level list items per `###` section, straight
+		// from the shared lexer. There is no parallel list grammar left here to drift.
+		for (const token of Lexer.lex(entry.content)) {
+			if (token.type === "heading" && token.depth === 3) {
+				const name = token.text.trim();
+				category = name === "" ? UNCATEGORIZED_CHANGELOG_CATEGORY : name;
 				continue;
 			}
-			if (!category || !/^-\s+\S/.test(line)) continue;
-			categoryCounts[category] = (categoryCounts[category] ?? 0) + 1;
-			changeCount++;
+			if (token.type !== "list") continue;
+			for (const item of token.items) {
+				// A bare marker renders an empty item; it announces no change.
+				if (!item.task && item.text.trim() === "") continue;
+				categoryCounts[category] = (categoryCounts[category] ?? 0) + 1;
+				changeCount++;
+			}
 		}
 	}
 

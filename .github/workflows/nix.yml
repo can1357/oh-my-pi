@@ -57,3 +57,5 @@ jobs:
             accept-flake-config = true
       - name: Evaluate every supported system
         run: nix flake check --all-systems --no-build --show-trace
+      - name: Verify generated Bun dependencies
+        run: nix build --no-link .#checks.x86_64-linux.bun-lock --show-trace

@@ -13,12 +13,12 @@
 
 import { afterEach, beforeAll, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ImageContent, Message, Usage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { kStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
-import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext, RenderSessionContextOptions } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { SessionContext, StrippedToolCallsMarker } from "@oh-my-pi/pi-coding-agent/session/session-context";
@@ -152,7 +152,6 @@ function makeRenderCtx(
 ): { ctx: InteractiveModeContext; chatContainer: TranscriptContainer } {
 	const chatContainer = new TranscriptContainer();
 	chatContainer.setToolActivityVisible(!hideToolActivity);
-	let helpers: UiHelpers;
 	const ctx = {
 		chatContainer,
 		pendingMessagesContainer: new Container(),
@@ -163,7 +162,7 @@ function makeRenderCtx(
 		statusLine: { invalidate: vi.fn() },
 		updateEditorBorderColor: vi.fn(),
 		updateEditorTopBorder: vi.fn(),
-		ui: { requestRender: vi.fn(), imageBudget: undefined },
+		ui: { requestRender: vi.fn(), requestComponentRender: vi.fn(), imageBudget: undefined },
 		resetTranscript: () => {
 			ctx.transcriptMessageComponents = new WeakMap<AgentMessage, Component>();
 			ctx.chatContainer.disposeChildren();
@@ -184,6 +183,7 @@ function makeRenderCtx(
 		toolOutputExpanded: false,
 		hideToolActivity,
 		hideThinkingBlock: false,
+		assistantImagesVisible: showImages,
 		focusedAgentId: undefined,
 		editor: { addToHistory: vi.fn() },
 		viewSession: {
@@ -214,7 +214,6 @@ function makeRenderCtx(
 		},
 		addMessageToChat: (message: AgentMessage, options?: { imageLinks?: readonly (string | undefined)[] }) =>
 			helpers.addMessageToChat(message, options),
-		getUserMessageText: (message: Message) => helpers.getUserMessageText(message),
 		renderSessionContext: (context: SessionContext, options?: RenderSessionContextOptions) =>
 			helpers.renderSessionContext(context, options),
 		renderSessionContextIncrementally: (
@@ -224,7 +223,7 @@ function makeRenderCtx(
 		) => helpers.renderSessionContextIncrementally(context, options, renderChunk),
 		showStatus: vi.fn(),
 	} as unknown as InteractiveModeContext;
-	helpers = new UiHelpers(ctx);
+	const helpers = new UiHelpers(ctx);
 	return { ctx, chatContainer };
 }
 
@@ -409,6 +408,29 @@ describe("UiHelpers.renderInitialMessages — image replay", () => {
 
 		expect(hasImageComponent(chatContainer)).toBe(true);
 		expect(Bun.stripANSI(chatContainer.render(100).join("\n"))).toContain("display image 1: 1x1");
+	});
+
+	it("restores manual Bash image blocks from persisted message content", async () => {
+		await Settings.init({ inMemory: true, overrides: { "terminal.showImages": true } });
+		setTerminalImageProtocol(ImageProtocol.Sixel);
+		const transcript = transcriptWith([
+			{
+				role: "bashExecution",
+				command: "emit-image",
+				output: "generated",
+				exitCode: 0,
+				cancelled: false,
+				truncated: false,
+				images: [pngImage],
+				timestamp: 1,
+			},
+		]);
+		const { ctx, chatContainer } = makeRenderCtx(transcript);
+
+		await new UiHelpers(ctx).renderInitialMessages();
+
+		expect(countImageComponents(chatContainer)).toBe(1);
+		expect(Bun.stripANSI(chatContainer.render(100).join("\n"))).toContain("$ emit-image");
 	});
 
 	it("preserves hidden read images so enabling them later can replay the image", async () => {

@@ -13,7 +13,7 @@ Options:
   --host <host>            Proxy bind host (default: 127.0.0.1)
   --port <port>            Proxy bind port (default: 8080; use 0 for random)
   --timeout <ms>           Overall timeout in milliseconds (default: 120000)
-  --input-delay <ms>       Delay before sending input (default: 1000)
+  --input-delay <ms>       Delay before sending input (default: 3000)
   --json                   Print JSON instead of Markdown-ish text
   --upstream-insecure      Disable TLS verification for the upstream server
   -h, --help               Show this help

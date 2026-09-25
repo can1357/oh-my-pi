@@ -316,7 +316,7 @@ describe("mcp oauth flow", () => {
 		expect(authResource).toBe("https://mcp.example.com/mcp");
 		expect(tokenParams.get("resource")).toBe("https://mcp.example.com/mcp");
 	});
-	it("uses an authorization URL resource for the matching token request", async () => {
+	it("prefers the configured resource over one embedded in the authorization URL", async () => {
 		let authResource = "";
 		let tokenRequestBody = "";
 
@@ -349,8 +349,8 @@ describe("mcp oauth flow", () => {
 		await flow.login();
 		const tokenParams = new URLSearchParams(tokenRequestBody);
 
-		expect(authResource).toBe("https://auth-url-resource.example/mcp");
-		expect(tokenParams.get("resource")).toBe("https://auth-url-resource.example/mcp");
+		expect(authResource).toBe("https://config-resource.example/mcp");
+		expect(tokenParams.get("resource")).toBe("https://config-resource.example/mcp");
 	});
 
 	it("uses exact redirectUri and clientSecret for provider requests", async () => {
@@ -1283,5 +1283,35 @@ describe("mcp oauth flow", () => {
 
 			expect(tokenParams.get("resource")).toBe("https://token.example.com");
 		});
+	});
+});
+
+describe("mcp oauth google offline access (issue #12438)", () => {
+	it("requests access_type=offline from Google issuers", async () => {
+		const flow = new MCPOAuthFlow(
+			{
+				authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth",
+				tokenUrl: "https://oauth2.googleapis.com/token",
+				clientId: "test-client-id",
+			},
+			{},
+		);
+
+		const { url } = await flow.generateAuthUrl("test-state", "http://127.0.0.1:53172/callback");
+		expect(new URL(url).searchParams.get("access_type")).toBe("offline");
+	});
+
+	it("leaves access_type untouched for other issuers", async () => {
+		const flow = new MCPOAuthFlow(
+			{
+				authorizationUrl: "https://auth.example.com/oauth/authorize",
+				tokenUrl: "https://auth.example.com/oauth/token",
+				clientId: "test-client-id",
+			},
+			{},
+		);
+
+		const { url } = await flow.generateAuthUrl("test-state", "http://127.0.0.1:53172/callback");
+		expect(new URL(url).searchParams.get("access_type")).toBeNull();
 	});
 });

@@ -67,8 +67,8 @@ describe("pickQuotaShare", () => {
 
 describe("pickQuotaShare DRR fairness", () => {
 	it("alternates equally healthy accounts instead of hammering the top-ranked", () => {
-		const a = { id: "a", weight: 1, inFlight: 0, saturated: false };
-		const b = { id: "b", weight: 1, inFlight: 0, saturated: false };
+		const a: QuotaShareInput = { id: "a", weight: 1, inFlight: 0, saturated: false };
+		const b: QuotaShareInput = { id: "b", weight: 1, inFlight: 0, saturated: false };
 		const first = pickQuotaShare([a, b])!;
 		expect(first.id).toBe("a");
 		// persist the returned accounting
@@ -76,6 +76,17 @@ describe("pickQuotaShare DRR fairness", () => {
 		b.deficit = first.deficitUpdates.find(u => u.id === "b")!.deficit;
 		const second = pickQuotaShare([a, b])!;
 		expect(second.id).toBe("b");
+	});
+
+	it("lets accumulated deficit beat a higher weight peer", () => {
+		const light = { id: "light", weight: 1, inFlight: 0, saturated: false, deficit: 0 };
+		const heavy = { id: "heavy", weight: 3, inFlight: 0, saturated: false, deficit: 0 };
+		const first = pickQuotaShare([light, heavy])!;
+		expect(first.id).toBe("heavy");
+		light.deficit = first.deficitUpdates.find(u => u.id === "light")!.deficit;
+		heavy.deficit = first.deficitUpdates.find(u => u.id === "heavy")!.deficit;
+		const second = pickQuotaShare([light, heavy])!;
+		expect(second.id).toBe("light");
 	});
 
 	it("reproduces pure P2C when deficits are all zero (negative)", () => {

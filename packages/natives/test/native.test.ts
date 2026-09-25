@@ -22,10 +22,10 @@ import {
 	htmlToMarkdown,
 	invalidateFsScanCache,
 	listWorkspace,
-	MacOSPowerAssertion,
 	macOSCheckSpelling,
 	macOSSpellCheckerAvailable,
 	matchesKey,
+	PowerAssertion,
 	PtySession,
 	parseKey,
 	pdfToMarkdown,
@@ -1069,12 +1069,42 @@ console.log("ok");
 		}, 30_000);
 	});
 
-	describe("MacOSPowerAssertion", () => {
-		it("should create a stoppable power assertion handle", () => {
-			const assertion = MacOSPowerAssertion.start({ reason: "pi-natives test" });
-			assertion.stop();
-			assertion.stop();
+	describe("PowerAssertion", () => {
+		it("should create a stoppable power assertion handle, or surface a descriptive bus/service failure where the host cannot provide one", () => {
+			let assertion: PowerAssertion | undefined;
+			try {
+				assertion = PowerAssertion.start({ reason: "pi-natives test" });
+			} catch (error) {
+				// A host with no bus must fail in the documented bus/service vocabulary,
+				// so a wrong export or a no-op stub fails on any other message.
+				const message = error instanceof Error ? error.message : String(error);
+				expect(message).toMatch(/(system|session) bus|login1|screensaver|inhibit/i);
+				return;
+			}
+			assertion?.stop();
+			assertion?.stop();
 		});
+
+		it.skipIf(process.platform !== "linux" || !Bun.which("systemd-inhibit"))(
+			"registers a login1 inhibitor for the handle's lifetime",
+			() => {
+				const reason = `pi-natives ${crypto.randomUUID()}`;
+				const held = (): boolean =>
+					Bun.spawnSync(["systemd-inhibit", "--list", "--no-pager"]).stdout.toString().includes(reason);
+				let assertion: PowerAssertion;
+				try {
+					assertion = PowerAssertion.start({ reason, idle: true });
+				} catch {
+					return; // No system bus here; the failure vocabulary is covered above.
+				}
+				try {
+					expect(held()).toBe(true);
+				} finally {
+					assertion.stop();
+				}
+				expect(held()).toBe(false);
+			},
+		);
 	});
 
 	describe("astMatch", () => {

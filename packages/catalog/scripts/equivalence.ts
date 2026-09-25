@@ -1,3 +1,4 @@
+import { discoveryVocabulary } from "../src/compat/taxonomy";
 import {
 	getBracketStrippedModelIdCandidates,
 	getLongestModelLikeIdSegment,
@@ -48,43 +49,25 @@ interface ResolvedCanonicalModel {
 	source: CanonicalModelSource;
 }
 
-// Canonical-id trailing markers (routing/quantization/effort suffixes that do
-// not change model identity). `search` is intentionally excluded — canonical
-// coalescing treats e.g. `sonar-pro-search` as distinct from `sonar-pro`. This
-// is build-only (generator) code, so the vocabulary lives here rather than in
-// the runtime `identity/markers` module.
-const CANONICAL_TRAILING_MARKERS = [
-	"thinking",
-	"customtools",
-	"high",
-	"low",
-	"medium",
-	"minimal",
-	"xhigh",
-	"free",
-	"cloud",
-	"exacto",
-	"nitro",
-	"original",
-	"optimized",
-	"nvfp4",
-	"fp8",
-	"fp4",
-	"bf16",
-	"int8",
-	"int4",
-] as const;
+// Canonical-id trailing markers come from the compiled discovery vocabulary
+// (`trailing-marker` in `src/compat/rules/taxonomy/_discovery.kdl`).
+// `search`-style reference-only markers are intentionally excluded — canonical
+// coalescing treats e.g. `sonar-pro-search` as distinct from `sonar-pro`.
+const CANONICAL_TRAILING_MARKERS = discoveryVocabulary().trailingMarkers;
 const TRAILING_MARKER_PATTERN = new RegExp(`[-:](?:${CANONICAL_TRAILING_MARKERS.join("|")})$`, "i");
-const WRAPPER_PREFIXES = ["duo-chat-"] as const;
+const WRAPPER_PREFIXES = discoveryVocabulary().wrapperPrefixes;
 
 const EMPTY_COMPILED_EQUIVALENCE: CompiledEquivalenceConfig = {
 	overrides: new Map<string, string>(),
 	exclude: new Set<string>(),
 };
 const kResolutionCaches = Symbol("model-equivalence.resolutionCaches");
+// Vendor-lineage alternation from the compiled discovery vocabulary
+// (`canonical-family-token`); the o-series class stays algorithmic.
+const FAMILY_TOKEN_ALTERNATION = `${discoveryVocabulary().canonicalFamilyTokens.join("|")}|o[1345]`;
 const FAMILY_EXTRACTION_PATTERNS = [
-	/(?:^|[/:._-])((?:claude|gemini|gpt|grok|glm|qwen|minimax|kimi|deepseek|llama|gemma|nova|mistral|ministral|pixtral|codestral|devstral|magistral|ernie|doubao|seed|aion|olmo|molmo|nemotron|palmyra|command|codex|coder|o[1345])[-a-z0-9.]+)(?::|$)/i,
-	/(?:^|[/:._-])((?:claude|gemini|gpt|grok|glm|qwen|minimax|kimi|deepseek|llama|gemma|nova|mistral|ministral|pixtral|codestral|devstral|magistral|ernie|doubao|seed|aion|olmo|molmo|nemotron|palmyra|command|codex|coder|o[1345])[-a-z0-9.]+(?:[-_/][a-z0-9.]+)*)(?::|$)/i,
+	new RegExp(`(?:^|[/:._-])((?:${FAMILY_TOKEN_ALTERNATION})[-a-z0-9.]+)(?::|$)`, "i"),
+	new RegExp(`(?:^|[/:._-])((?:${FAMILY_TOKEN_ALTERNATION})[-a-z0-9.]+(?:[-_/][a-z0-9.]+)*)(?::|$)`, "i"),
 ] as const;
 
 function shouldReplaceReference(existing: Model<Api> | undefined, candidate: Model<Api>): boolean {
@@ -224,14 +207,21 @@ function lowercaseCandidate(candidate: string): string | undefined {
 	return lowercased !== candidate ? lowercased : undefined;
 }
 
-const STRIP_SYNTHETIC_PREFIX_PATTERN = /^hf:/i;
+const STRIP_SYNTHETIC_PREFIX_PATTERN = new RegExp(
+	`^(?:${discoveryVocabulary()
+		.syntheticPrefixes.map(prefix => prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+		.join("|")})`,
+	"i",
+);
 const STRIP_LATEST_SUFFIX_PATTERN = /-latest$/i;
 const STRIP_LEGACY_GLM_TURBO_PATTERN = /^(glm-4(?:\.\d+)?v?)-turbo$/i;
 const REORDER_ANTHROPIC_FAMILY_PATTERN = /^claude-(\d+(?:[.-]\d+)+)-(opus|sonnet|haiku)$/i;
 const STRIP_PROVIDER_VERSION_SUFFIX_PATTERN = /-v\d+(?::\d+)?$/i;
 const STRIP_DATE_SUFFIX_PATTERN = /-\d{8}$/i;
-const INSERT_ATTACHED_FAMILY_VERSION_SEPARATOR_PATTERN =
-	/(^|[/:._-])((?:claude|gemini|gpt|grok|glm|qwen|minimax|kimi|deepseek|llama|gemma|nova|mistral|ministral|pixtral|codestral|devstral|magistral|ernie|doubao|seed|aion|olmo|molmo|nemotron|palmyra|command|codex|coder))(\d+(?:[.-]\d+)*)(?=$|[-_/.:a-z])/gi;
+const INSERT_ATTACHED_FAMILY_VERSION_SEPARATOR_PATTERN = new RegExp(
+	`(^|[/:._-])((?:${discoveryVocabulary().canonicalFamilyTokens.join("|")}))(\\d+(?:[.-]\\d+)*)(?=$|[-_/.:a-z])`,
+	"gi",
+);
 const SERIES_MINOR_DOT_TO_DASH_PATTERN = /(^|[/:._-])([a-z])(\d)\.(\d)(?=$|[-_/.:a-z])/gi;
 const SERIES_MINOR_DASH_TO_DOT_PATTERN = /(^|[/:._-])([a-z])(\d)-(\d)(?=$|[-_/.:a-z])/gi;
 const EXPAND_COMPACT_SERIES_MINOR_PATTERN = /(^|[/:._-])([a-z])(\d)(\d)(?=$|[-_/.:a-z])/gi;

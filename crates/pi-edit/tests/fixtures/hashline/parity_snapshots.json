@@ -1,0 +1,18 @@
+{
+	"source": "packages/hashline/test/snapshots.test.ts",
+	"cases": [
+		{ "name": "derives the tag from whole-file content (matches computeFileHash)" },
+		{ "name": "fuses repeated reads of identical content onto one tag" },
+		{ "name": "mints a new tag when content changes and retains the prior version" },
+		{ "name": "promotes a re-observed older version back to head" },
+		{ "name": "bounds per-path history to maxVersionsPerPath (oldest dropped)" },
+		{ "name": "bounds tracked paths to maxPaths (cold path evicted)" },
+		{ "name": "keeps an early tag resolvable across a wide session at default capacity" },
+		{ "name": "rejects cross-path lookups" },
+		{ "name": "invalidate drops one path; clear drops everything" },
+		{ "name": "relocate moves version history and read provenance to a new path" },
+		{ "name": "findByHash returns every retained version with that tag across paths" },
+		{ "name": "keeps two colliding texts as separate versions with separate seenLines" },
+		{ "name": "still fuses identical repeated reads of one colliding text onto one snapshot" }
+	]
+}

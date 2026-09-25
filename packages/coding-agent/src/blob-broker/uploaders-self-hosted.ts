@@ -433,9 +433,12 @@ function createSeafileUploader(config: DestinationRuntimeConfig): BlobUploader {
 			if (!location) throw new Error("seafile share response did not include a Location URL");
 			const resultUrl = new URL(location, apiUrl);
 			if (raw) resultUrl.searchParams.set("raw", "1");
-			return publication("seafile", request, resultUrl.toString(), {
-				...(expiryInfo.expiresAt === undefined ? {} : { expiresAt: expiryInfo.expiresAt }),
-			});
+			return publication(
+				"seafile",
+				request,
+				resultUrl.toString(),
+				expiryInfo.expiresAt === undefined ? {} : { expiresAt: expiryInfo.expiresAt },
+			);
 		},
 	};
 }

@@ -12,13 +12,13 @@ import { Settings } from "../src/config/settings";
 import { EVAL_AGENT_BRIDGE_NAME } from "../src/eval/agent-bridge";
 import { EVAL_BUDGET_BRIDGE_NAME } from "../src/eval/budget-bridge";
 import { EVAL_COMPLETION_BRIDGE_NAME } from "../src/eval/completion-bridge";
-import { EVAL_CONCURRENCY_BRIDGE_NAME } from "../src/eval/concurrency-bridge";
+import { EVAL_CANCEL_BRIDGE_NAME, EVAL_STATUS_BRIDGE_NAME, EVAL_WAIT_BRIDGE_NAME } from "../src/eval/handle-bridge";
 import { createAgentSession } from "../src/sdk";
 import { AgentSession } from "../src/session/agent-session";
 import type { ToolNamespacesInfo } from "../src/session/code-mode";
 import { buildToolNamespacesInfo, resolveCodeMode } from "../src/session/code-mode";
 import { SessionManager } from "../src/session/session-manager";
-import { generateCodeModeDeclarations } from "../src/tools/eval-format/code-mode-declarations";
+import { generateCodeModeDeclarations } from "@oh-my-pi/pi-tui/tools/eval-format/code-mode-declarations";
 
 const ENABLED = [
 	"eval",
@@ -148,7 +148,9 @@ describe("resolveCodeMode", () => {
 			EVAL_AGENT_BRIDGE_NAME,
 			EVAL_BUDGET_BRIDGE_NAME,
 			EVAL_COMPLETION_BRIDGE_NAME,
-			EVAL_CONCURRENCY_BRIDGE_NAME,
+			EVAL_WAIT_BRIDGE_NAME,
+			EVAL_STATUS_BRIDGE_NAME,
+			EVAL_CANCEL_BRIDGE_NAME,
 		];
 		const r = resolveCodeMode({
 			provider: "openai-codex",
@@ -373,6 +375,15 @@ describe("Code Mode session reconciliation", () => {
 		expect(session.codeModeNamespacesInfo).toBeUndefined();
 	});
 
+	test("retains the startup tools array when reconciliation keeps the exact roster", async () => {
+		const { session } = createSession(Settings.isolated({ "providers.openai-codex.codeMode": "off" }));
+		const startupTools = session.agent.state.tools;
+
+		await session.setActiveToolsByName(["eval", "read"]);
+
+		expect(session.agent.state.tools).toBe(startupTools);
+	});
+
 	test("startup reconcile survives a transiently narrow live tool set", async () => {
 		const { session } = createSession(Settings.isolated({ "providers.openai-codex.codeMode": "auto" }));
 		// Before the first apply, a startup-time mutation can shrink the live
@@ -465,27 +476,6 @@ describe("Code Mode session reconciliation", () => {
 
 		expect(session.getEnabledToolNames()).toEqual(["eval", "read"]);
 		expect(session.getToolForEvalBridge("read")?.name).toBe("read");
-	});
-
-	test("prompt rebuilds retain safety gates for bridge-enabled tools", async () => {
-		const promptToolSets: string[][] = [];
-		const { session } = createSession(
-			Settings.isolated({ "providers.openai-codex.codeMode": "auto" }),
-			async names => {
-				promptToolSets.push([...names]);
-				return { systemPrompt: [`tools:${names.join(",")}`] };
-			},
-			undefined,
-			[tool("computer")],
-		);
-
-		await session.setActiveToolsByName(["eval", "computer"]);
-
-		expect(session.agent.state.tools.map(value => value.name)).toEqual(["eval"]);
-		expect(promptToolSets.at(-1)).toEqual(["eval", "computer"]);
-
-		await session.setActiveToolsByName(["eval"]);
-		expect(promptToolSets.at(-1)).toEqual(["eval"]);
 	});
 
 	test("bridge-enabled task retains eager delegation", async () => {

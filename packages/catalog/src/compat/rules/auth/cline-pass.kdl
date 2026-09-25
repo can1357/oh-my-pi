@@ -1,0 +1,12 @@
+auth "cline-pass" {
+	name "ClinePass"
+	login "api-key" {
+		auth-url "https://app.cline.bot/dashboard/account"
+		instructions "Create an API key in the Cline dashboard under Settings → API Keys"
+		prompt "Paste your Cline API key" placeholder="sk_..."
+		// Validate against the account identity route, not a probe completion: login
+		// must not couple to any roster model (roster churn can retire the probe's
+		// target) and must not consume subscription quota on a ping.
+		validate "models-endpoint" label="ClinePass" url="https://api.cline.bot/api/v1/users/me" headers-hook="cline-pass-client"
+	}
+}

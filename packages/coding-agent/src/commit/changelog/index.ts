@@ -70,6 +70,7 @@ export async function runChangelogFlow({
 	const boundaries = await detectChangelogBoundaries(cwd, stagedFiles);
 	if (boundaries.length === 0) return [];
 
+	const sessionId = Bun.randomUUIDv7();
 	const updated: string[] = [];
 	for (const boundary of boundaries) {
 		onProgress?.(`Generating entries for ${boundary.changelogPath}…`);
@@ -90,6 +91,7 @@ export async function runChangelogFlow({
 		const generated = await generateChangelogEntries({
 			model,
 			apiKey,
+			sessionId,
 			thinkingLevel,
 			changelogPath: boundary.changelogPath,
 			isPackageChangelog,

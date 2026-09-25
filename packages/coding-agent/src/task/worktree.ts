@@ -1,3 +1,4 @@
+import { type NestedRepoPatch } from "@oh-my-pi/pi-tui/tools/task";
 import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -6,6 +7,7 @@ import type { VcsCommitAuthor, VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { formatBytes, getWorktreeDir, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import type { SettingValue } from "../config/settings-schema";
 import { withRepoLock } from "../utils/repo-lock";
 import { writeIsolationOwner } from "./isolation-ownership";
 import { mapWithConcurrencyLimit } from "./parallel";
@@ -57,7 +59,7 @@ export async function getRepoRoot(cwd: string): Promise<string> {
 	// mutating the surrounding Git tree behind jj's back.
 	if (vcs.isPureJj(cwd)) {
 		throw new Error(
-			"Isolated task execution requires a Git checkout, but this workspace is pure Jujutsu (`.jj/` without a colocated `.git/`). Run `jj git init --colocate` to add a Git checkout, or set `task.isolation.mode: none` to disable task isolation.",
+			"Isolated task execution requires a Git checkout, but this workspace is pure Jujutsu (`.jj/` without a colocated `.git/`). Run `jj git init --colocate` to add a Git checkout, or set `task.isolation.enabled: false` to disable task isolation.",
 		);
 	}
 
@@ -122,26 +124,41 @@ async function discoverNestedRepos(repoRoot: string): Promise<string[]> {
  * --exclude-standard` already omits gitignored bulk, so this only trips on
  * pathological non-ignored content; when it does we refuse the isolated spawn
  * with an actionable error instead of trapping the host.
+ *
+ * The staged and unstaged diffs are rendered under this budget inside the
+ * native renderer (`diffText({ maxBytes })`): their size is unknowable before
+ * rendering and can dwarf the working tree itself (index-vs-HEAD of a jj
+ * conflict commit exported to git spans every conflict side), so the cap has
+ * to stop the renderer rather than measure its output afterwards. The budget
+ * bounds content, not RSS: a patch is briefly held twice while it crosses the
+ * native boundary, and each nested repo is captured against its own budget.
  */
 export const ISOLATION_BASELINE_MAX_CONTENT_BYTES = 1024 * 1024 * 1024;
 
 /**
- * Thrown when a repo's uncommitted content exceeds
- * {@link ISOLATION_BASELINE_MAX_CONTENT_BYTES}. Surfaced verbatim so the
- * caller can report the real cause (oversized working tree) rather than
- * masking it as a missing git repository.
+ * Thrown when a repo's uncommitted content exceeds the isolation-snapshot
+ * budget. Surfaced verbatim so the caller can report the real cause
+ * (oversized working tree) rather than masking it as a missing git repository.
+ *
+ * `contentBytes` is the measured total when the untracked stat pass tripped
+ * the budget, and `undefined` when a staged or unstaged diff crossed it while
+ * rendering — the renderer stops at the cap, so the full size is unknown.
  */
 export class IsolationBaselineTooLargeError extends Error {
 	constructor(
 		readonly repoRoot: string,
-		readonly contentBytes: number,
+		readonly contentBytes: number | undefined,
+		readonly budgetBytes: number = ISOLATION_BASELINE_MAX_CONTENT_BYTES,
 	) {
+		const measured =
+			contentBytes === undefined
+				? `more than ${formatBytes(budgetBytes)} of uncommitted content`
+				: `${formatBytes(contentBytes)} of uncommitted content, over the ${formatBytes(budgetBytes)} isolation-snapshot budget`;
 		super(
-			`Working tree at ${repoRoot} carries ${formatBytes(contentBytes)} of uncommitted content, ` +
-				`over the ${formatBytes(ISOLATION_BASELINE_MAX_CONTENT_BYTES)} isolation-snapshot budget. ` +
+			`Working tree at ${repoRoot} carries ${measured}. ` +
 				`Isolated task snapshots buffer this content in memory, so proceeding would exhaust the host. ` +
 				`Commit or gitignore the bulk (untracked files that aren't ignored are the usual culprit), ` +
-				`or set \`task.isolation.mode: none\` to run tasks without isolation.`,
+				`or set \`task.isolation.enabled: false\` to run tasks without isolation.`,
 		);
 		this.name = "IsolationBaselineTooLargeError";
 	}
@@ -181,21 +198,40 @@ async function captureUntrackedPatch(
 	return untrackedDiffs.filter((diff): diff is string => !!diff?.trim()).join("\n");
 }
 
-async function captureRepoBaseline(repoRoot: string): Promise<RepoBaseline> {
+/**
+ * Capture a repo's pre-spawn baseline: head, staged and unstaged binary diffs,
+ * and the untracked-file patch, keeping the buffered content under
+ * `budgetBytes`. The two diffs are rendered natively under the remaining
+ * budget, so an oversized change set fails inside the renderer instead of
+ * after the whole patch is in memory.
+ */
+async function captureRepoBaseline(repoRoot: string, budgetBytes: number): Promise<RepoBaseline> {
 	const repo = vcs.requireGit(repoRoot);
 	const headCommit = (await repo.headSha()) ?? "";
-	const staged = await repo.diffText({ binary: true, cached: true });
-	const unstaged = await repo.diffText({ binary: true });
+	let staged: string;
+	let unstaged: string;
+	try {
+		staged = await repo.diffText({ binary: true, cached: true, maxBytes: budgetBytes });
+		// The renderer's cap and the budget are UTF-8 bytes; a render that
+		// succeeded is at most `budgetBytes` of them, so the remainder is never
+		// negative.
+		unstaged = await repo.diffText({ binary: true, maxBytes: budgetBytes - Buffer.byteLength(staged) });
+	} catch (error) {
+		if (vcs.isVcsError(error) && error.code === "OutputTooLarge") {
+			throw new IsolationBaselineTooLargeError(repoRoot, undefined, budgetBytes);
+		}
+		throw error;
+	}
 	const untracked = await repo.lsFiles(true, true);
 	// Gate before capturing the untracked patch: that step embeds every
 	// untracked byte into one in-memory string, so an oversized tree must be
 	// refused here rather than after buffering gigabytes (#8939). Untracked
-	// bytes come from stat (no reads); staged/unstaged are already captured
-	// binary diffs, so their string length is their in-memory footprint.
+	// bytes come from stat (no reads); staged/unstaged are already rendered
+	// binary diffs, charged at their byte size.
 	const untrackedBytes = await sumUntrackedBytes(repoRoot, untracked);
-	const contentBytes = untrackedBytes + staged.length + unstaged.length;
-	if (contentBytes > ISOLATION_BASELINE_MAX_CONTENT_BYTES) {
-		throw new IsolationBaselineTooLargeError(repoRoot, contentBytes);
+	const contentBytes = untrackedBytes + Buffer.byteLength(staged) + Buffer.byteLength(unstaged);
+	if (contentBytes > budgetBytes) {
+		throw new IsolationBaselineTooLargeError(repoRoot, contentBytes, budgetBytes);
 	}
 	const untrackedPatch = await captureUntrackedPatch(repoRoot, untracked, repo);
 	return { repoRoot, headCommit, staged, unstaged, untracked, untrackedPatch };
@@ -229,12 +265,23 @@ async function writeSyntheticTree(
 	}
 }
 
-export async function captureBaseline(repoRoot: string): Promise<WorktreeBaseline> {
-	const [root, nestedPaths] = await Promise.all([captureRepoBaseline(repoRoot), discoverNestedRepos(repoRoot)]);
+/**
+ * Capture the baseline of `repoRoot` and every nested repo under it. Each repo
+ * baseline may buffer at most `budgetBytes` of uncommitted content (the
+ * isolation-snapshot budget, {@link ISOLATION_BASELINE_MAX_CONTENT_BYTES}).
+ */
+export async function captureBaseline(
+	repoRoot: string,
+	budgetBytes: number = ISOLATION_BASELINE_MAX_CONTENT_BYTES,
+): Promise<WorktreeBaseline> {
+	const [root, nestedPaths] = await Promise.all([
+		captureRepoBaseline(repoRoot, budgetBytes),
+		discoverNestedRepos(repoRoot),
+	]);
 	const nested = await Promise.all(
 		nestedPaths.map(async relativePath => ({
 			relativePath,
-			baseline: await captureRepoBaseline(path.join(repoRoot, relativePath)),
+			baseline: await captureRepoBaseline(path.join(repoRoot, relativePath), budgetBytes),
 		})),
 	);
 	return { root, nested };
@@ -264,11 +311,6 @@ async function captureRepoDeltaPatch(repoDir: string, rb: RepoBaseline, objectRe
 	]);
 
 	return diffTreeOrEmpty(objectRepo, baselineTree, currentTree);
-}
-
-export interface NestedRepoPatch {
-	relativePath: string;
-	patch: string;
 }
 
 function unquoteGitDiffPath(rawPath: string): string {
@@ -411,37 +453,15 @@ export async function applyNestedPatches(
 // returns the merged-view path together with the resolved kind.
 // ═══════════════════════════════════════════════════════════════════════════
 
-/**
- * User-facing isolation mode names exposed by the `task.isolation.mode`
- * setting. Mapped to a backend-kind hint via {@link parseIsolationMode};
- * the PAL's `iso_resolve` then falls back through the kind order
- * whenever the hint isn't available on the current host.
- */
-export type TaskIsolationMode =
-	| "none"
-	| "auto"
-	| "apfs"
-	| "btrfs"
-	| "zfs"
-	| "reflink"
-	| "overlayfs"
-	| "projfs"
-	| "block-clone"
-	| "rcopy"
-	// Legacy values, accepted for back-compat with pre-PAL settings files.
-	| "worktree"
-	| "fuse-overlay"
-	| "fuse-projfs";
+/** User-facing backend names exposed by the `isolation.backend` setting. */
+export type IsolationBackendSetting = SettingValue<"isolation.backend">;
 
 /**
- * Translate a {@link TaskIsolationMode} string to an [`IsoBackendKind`]
- * the PAL can act on. `"none"` returns `null` (caller skips isolation
- * entirely); `"auto"` returns `undefined` (no hint — let the resolver
- * pick). Anything else returns the matching kind.
+ * Translate an {@link IsolationBackendSetting} to the native backend hint.
+ * `"auto"` returns `undefined`, allowing the PAL resolver to pick.
  */
-export function parseIsolationMode(mode: TaskIsolationMode): IsoBackendKind | undefined {
-	switch (mode) {
-		case "none":
+export function parseIsolationBackend(backend: IsolationBackendSetting): IsoBackendKind | undefined {
+	switch (backend) {
 		case "auto":
 			return undefined;
 		case "apfs":
@@ -453,16 +473,35 @@ export function parseIsolationMode(mode: TaskIsolationMode): IsoBackendKind | un
 		case "reflink":
 			return IsoBackendKind.LinuxReflink;
 		case "overlayfs":
-		case "fuse-overlay":
 			return IsoBackendKind.Overlayfs;
 		case "projfs":
-		case "fuse-projfs":
 			return IsoBackendKind.Projfs;
 		case "block-clone":
 			return IsoBackendKind.WindowsBlockClone;
 		case "rcopy":
-		case "worktree":
 			return IsoBackendKind.Rcopy;
+	}
+}
+
+/** Return the canonical setting label for a resolved native backend. */
+export function formatIsolationBackend(backend: IsoBackendKind): Exclude<IsolationBackendSetting, "auto"> {
+	switch (backend) {
+		case IsoBackendKind.Apfs:
+			return "apfs";
+		case IsoBackendKind.Btrfs:
+			return "btrfs";
+		case IsoBackendKind.Zfs:
+			return "zfs";
+		case IsoBackendKind.LinuxReflink:
+			return "reflink";
+		case IsoBackendKind.Overlayfs:
+			return "overlayfs";
+		case IsoBackendKind.Projfs:
+			return "projfs";
+		case IsoBackendKind.WindowsBlockClone:
+			return "block-clone";
+		case IsoBackendKind.Rcopy:
+			return "rcopy";
 	}
 }
 
@@ -747,7 +786,7 @@ async function replayFilteredAgentCommits(opts: FilteredAgentReplayOptions): Pro
 
 	const tmpDir = path.join(os.tmpdir(), `omp-branch-${Snowflake.next()}`);
 	try {
-		await repo.worktreeAdd(tmpDir, opts.branchName, false);
+		await repo.worktreeAdd(tmpDir, opts.branchName, { detach: false, clone: false });
 		const agentCommits = await isolationRepo.revListRange(baselineSha, opts.isolationHead);
 		const baselineWip = [opts.baseline.root.staged, opts.baseline.root.unstaged, opts.baseline.root.untrackedPatch];
 		// Seed the parent ODB with the dirty-side blobs needed by `git apply
@@ -886,7 +925,7 @@ export async function commitToBranch(
 			if (leftoverPatch.trim()) {
 				const tmpDir = path.join(os.tmpdir(), `omp-branch-${Snowflake.next()}`);
 				try {
-					await repo.worktreeAdd(tmpDir, branchName, false);
+					await repo.worktreeAdd(tmpDir, branchName, { detach: false, clone: false });
 					const msg = (commitMessage && (await commitMessage(leftoverPatch))) || fallbackMessage;
 					await commitPatchToBranchWorktree(tmpDir, taskId, leftoverPatch, msg);
 				} finally {
@@ -901,7 +940,7 @@ export async function commitToBranch(
 		branchCreated = true;
 		const tmpDir = path.join(os.tmpdir(), `omp-branch-${Snowflake.next()}`);
 		try {
-			await repo.worktreeAdd(tmpDir, branchName, false);
+			await repo.worktreeAdd(tmpDir, branchName, { detach: false, clone: false });
 
 			const msg = (commitMessage && (await commitMessage(rootPatch))) || fallbackMessage;
 			const wip = baselineHasRootWip(baseline.root) ? baseline.root : undefined;

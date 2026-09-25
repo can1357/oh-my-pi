@@ -218,7 +218,7 @@ Two SSE paths exist:
 
 ## Malformed payload and disconnect handling
 
-SSE JSON parsing errors bubble out of `readSseJson` and reject request/listener.
+The shared `readSseEvents` decoder supports LF, CRLF, and lone CR, including delimiters split across chunks. JSON parsing errors in transport consumers reject the request/listener.
 
 - Request SSE parse errors reject the active request.
 - Background listener errors trigger `onError` (except AbortError), and an established listener ending while still connected triggers `onClose` so the manager can reconnect.
@@ -236,15 +236,14 @@ SSE JSON parsing errors bubble out of `readSseJson` and reject request/listener.
 
 ## `json-rpc.ts` utility vs transport abstraction
 
-`src/mcp/json-rpc.ts` provides `callMCP()` and `parseSSE()` helpers for direct HTTP MCP calls (used by Exa integration), not the `MCPTransport` abstraction used by `MCPClient`/`MCPManager`.
+`src/mcp/json-rpc.ts` provides `callMCP()` and `readMcpJsonRpcResponse()` for direct HTTP MCP calls used by Exa, separate from the `MCPTransport` abstraction used by `MCPClient`/`MCPManager`.
 
-Notable differences from `HttpTransport`:
-
-- parses entire response text first, then extracts first `data: ` line (`parseSSE`), with JSON fallback
-- optional caller `AbortSignal` (`CallMcpOptions`), with a hard 60s `AbortSignal.timeout` default when none is given; no session-id handling, no transport lifecycle
-- returns raw JSON-RPC envelope object
-
-This path is lightweight but less robust than full transport implementation.
+- `callMCP()` retains the posted request ID; `readMcpJsonRpcResponse(response, expectedId, signal?)` decodes JSON or SSE according to the response content type.
+- SSE uses the shared `readSseEvents` decoder, including multiline data and `data:` fields without a following space.
+- Only a result/error envelope matching the request ID completes the call. Valid notifications, server requests, and other response IDs are skipped; malformed messages or an exhausted stream without a matching response fail.
+- Caller cancellation remains an abort, not a missing-response error. A hard 60s timeout applies only when no caller signal is supplied.
+- The returned shared `JsonRpcResponse` has an `unknown` result; consumers narrow their payloads.
+- This lightweight path does not manage sessions, answer server requests, or resume streams.
 
 ## Retry/reconnect responsibilities
 

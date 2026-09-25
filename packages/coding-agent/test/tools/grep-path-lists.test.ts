@@ -1,3 +1,4 @@
+import { agentTranscriptSource } from "@oh-my-pi/pi-coding-agent/modes/agent-hub-runtime";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -5,23 +6,20 @@ import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { canonicalSnapshotKey } from "@oh-my-pi/pi-coding-agent/edit/file-snapshot-store";
+import { getEditStore } from "@oh-my-pi/pi-coding-agent/edit/store";
 import type { RenderResultOptions } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
-import { AgentTranscriptViewer } from "@oh-my-pi/pi-coding-agent/modes/components/agent-transcript-viewer";
-import { TreeSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tree-selector";
-import type {
-	ObservableSession,
-	SessionObserverRegistry,
-} from "@oh-my-pi/pi-coding-agent/modes/session-observer-registry";
-import type { Theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { AgentTranscriptViewer } from "@oh-my-pi/pi-tui/overlays/agent-transcript-viewer";
+import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
+import type { ObservableSession, SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
+import type { Theme } from "@oh-my-pi/pi-tui/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { SessionEntry, SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { ToolChoiceQueue } from "@oh-my-pi/pi-coding-agent/session/tool-choice-queue";
 import { createTools, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import type { Text } from "@oh-my-pi/pi-tui";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
-import { grepToolRenderer } from "../../src/tools/grep";
+import { grepToolRenderer } from "@oh-my-pi/pi-tui/tools/grep";
 
 function createTestSession(cwd: string, overrides: Partial<ToolSession> = {}): ToolSession {
 	return {
@@ -243,11 +241,8 @@ describe("tool path arrays", () => {
 		const tag = /^# apps\/\n## grep\.txt#([0-9A-F]{4})/m.exec(text)?.[1];
 		if (!tag) throw new Error("Missing search snapshot tag");
 
-		const snapshot = session.fileSnapshotStore?.byHash(
-			canonicalSnapshotKey(path.join(tempDir, "apps", "grep.txt")),
-			tag,
-		);
-		expect(snapshot?.text).toBe("shared-needle apps\n");
+		const snapshot = getEditStore(session).byHashText(path.join(tempDir, "apps", "grep.txt"), tag);
+		expect(snapshot).toBe("shared-needle apps\n");
 	});
 
 	it("search accepts a single string path through tool validation", async () => {
@@ -370,6 +365,7 @@ describe("tool path arrays", () => {
 		});
 
 		const viewer = new AgentTranscriptViewer({
+			transcript: agentTranscriptSource,
 			agentId: "search-overlay-session",
 			registry: agents,
 			observers,
@@ -528,12 +524,42 @@ describe("tool path arrays", () => {
 			path: "apps/grep.txt, packages/grep.txt",
 		});
 		const text = getText(result);
-		const details = result.details as { notes?: string[] } | undefined;
+		const details = result.details as { notes?: string[]; displayReadTargetLinks?: Array<string | null> } | undefined;
 
 		expect(text).toContain("Note: interpreted as 2 paths: apps/grep.txt, packages/grep.txt");
 		expect(text).toContain("shared-needle apps");
 		expect(text).toContain("shared-needle packages");
 		expect(details?.notes).toEqual(["Note: interpreted as 2 paths: apps/grep.txt, packages/grep.txt"]);
+		// Each grouped row must carry a resolved fs link target so the TUI hyperlinks it like a standalone read row (#11732).
+		expect(details?.displayReadTargetLinks).toEqual([
+			path.join(tempDir, "apps", "grep.txt"),
+			path.join(tempDir, "packages", "grep.txt"),
+		]);
+	});
+
+	it("flattens nested mixed-delimiter read targets and links", async () => {
+		const tools = await createTools(createTestSession(tempDir, { hasEditTool: false }));
+		const tool = tools.find(entry => entry.name === "read");
+		expect(tool).toBeDefined();
+		if (!tool) throw new Error("Missing read tool");
+
+		const result = await tool.execute("read-mixed-delimited", {
+			path: "apps/grep.txt, packages/grep.txt; phases/grep.txt",
+		});
+		const text = getText(result);
+		const details = result.details as
+			| { displayReadTargets?: string[]; displayReadTargetLinks?: Array<string | null> }
+			| undefined;
+
+		expect(text).toContain("shared-needle apps");
+		expect(text).toContain("shared-needle packages");
+		expect(text).toContain("shared-needle phases");
+		expect(details?.displayReadTargets).toEqual(["apps/grep.txt", "packages/grep.txt", "phases/grep.txt"]);
+		expect(details?.displayReadTargetLinks).toEqual([
+			path.join(tempDir, "apps", "grep.txt"),
+			path.join(tempDir, "packages", "grep.txt"),
+			path.join(tempDir, "phases", "grep.txt"),
+		]);
 	});
 
 	it("read treats semicolon lists as explicit scope before fuzzy suffix recovery", async () => {
@@ -572,7 +598,7 @@ describe("tool path arrays", () => {
 			path: "missing.txt, packages/grep.txt",
 		});
 		const text = getText(result);
-		const details = result.details as { notes?: string[] } | undefined;
+		const details = result.details as { notes?: string[]; displayReadTargetLinks?: Array<string | null> } | undefined;
 
 		expect(text).toContain("Note: interpreted as 2 paths: missing.txt, packages/grep.txt");
 		expect(text).toContain("shared-needle packages");
@@ -581,6 +607,8 @@ describe("tool path arrays", () => {
 			"Note: interpreted as 2 paths: missing.txt, packages/grep.txt",
 			"Could not read missing.txt: Path 'missing.txt' not found",
 		]);
+		// Alignment contract: an unreadable part gets a null link, the readable peer keeps its resolved fs path (#11732).
+		expect(details?.displayReadTargetLinks).toEqual([null, path.join(tempDir, "packages", "grep.txt")]);
 	});
 
 	it("ast_grep accepts quoted path and glob filters", async () => {

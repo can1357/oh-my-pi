@@ -8,14 +8,16 @@ import {
 import type { AssistantMessage, Model, ProviderResponseMetadata, Usage } from "@oh-my-pi/pi-ai";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
+import type { Settings } from "../config/settings";
 import type { ContextUsage } from "../extensibility/extensions/types";
 import {
 	computeNonMessageBreakdown,
 	computeNonMessageTokens,
 	type NonMessageTokenSource,
-} from "../modes/utils/context-usage";
+} from "@oh-my-pi/pi-tui/status-line/context-usage";
 import type { ContextUsageBreakdown, SessionStats } from "./agent-session-types";
 import { getLatestCompactionEntry } from "./session-context";
+import type { ModelUsageEntry, SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 
 interface PendingContextSnapshot {
@@ -32,7 +34,7 @@ interface PendingContextSnapshot {
 
 /** Capabilities the stats tracker borrows from its owning session. */
 export interface SessionStatsTrackerHost {
-	session: NonMessageTokenSource;
+	session: NonMessageTokenSource & { readonly settings?: Pick<Settings, "revision" | "get"> };
 	agent: Agent;
 	sessionManager: SessionManager;
 	modelRegistry: ModelRegistry;
@@ -43,6 +45,32 @@ export interface SessionStatsTrackerHost {
 function correctedPromptTokens(assistant: AssistantMessage): number {
 	const providerPromptTokens = assistant.contextSnapshot?.promptTokens ?? calculatePromptTokens(assistant.usage);
 	return Math.max(0, providerPromptTokens - (assistant.contextSnapshot?.historyRewriteTokensRemoved ?? 0));
+}
+
+function isUsageWindowBoundary(entry: SessionEntry): boolean {
+	return (
+		entry.type === "message" ||
+		entry.type === "custom_message" ||
+		entry.type === "branch_summary" ||
+		entry.type === "compaction" ||
+		entry.type === "reset_boundary"
+	);
+}
+
+/** Model calls belonging to the same active transcript window as `agent.state.messages`. */
+function activeModelUsageEntries(branch: SessionEntry[]): ModelUsageEntry[] {
+	const latestCompaction = getLatestCompactionEntry(branch);
+	const compactionIndex = latestCompaction ? branch.lastIndexOf(latestCompaction) : -1;
+	const resetIndex = branch.reduce((latest, entry, index) => (entry.type === "reset_boundary" ? index : latest), -1);
+	let startIndex = 0;
+	if (resetIndex > compactionIndex) {
+		startIndex = resetIndex + 1;
+	} else if (latestCompaction) {
+		const firstKeptIndex = branch.findIndex(entry => entry.id === latestCompaction.firstKeptEntryId);
+		startIndex = firstKeptIndex >= 0 ? firstKeptIndex : compactionIndex + 1;
+		while (startIndex > 0 && !isUsageWindowBoundary(branch[startIndex - 1])) startIndex--;
+	}
+	return branch.slice(startIndex).filter((entry): entry is ModelUsageEntry => entry.type === "model_usage");
 }
 
 /** Computes session totals and tracks the in-flight context estimate. */
@@ -83,9 +111,9 @@ export class SessionStatsTracker {
 	/** Returns aggregate message, token, and cost statistics for the session. */
 	getSessionStats(): SessionStats {
 		const state = this.#host.agent.state;
-		const userMessages = state.messages.filter(message => message.role === "user").length;
-		const assistantMessages = state.messages.filter(message => message.role === "assistant").length;
-		const toolResults = state.messages.filter(message => message.role === "toolResult").length;
+		let userMessages = 0;
+		let assistantMessages = 0;
+		let toolResults = 0;
 		let toolCalls = 0;
 		let totalInput = 0;
 		let totalOutput = 0;
@@ -100,52 +128,47 @@ export class SessionStatsTracker {
 		let committedAcuCost = 0;
 		let hasCredits = false;
 		const routedModels: Record<string, number> = {};
-		for (const message of state.messages) {
-			if (message.role === "assistant") {
-				const assistant = message;
-				toolCalls += assistant.content.filter(content => content.type === "toolCall").length;
-				// Persisted and imported transcripts can predate usage metadata despite the current message type.
-				const usage = assistant.usage;
-				if (!usage) continue;
-				totalInput += usage.input;
-				totalOutput += usage.output;
-				totalReasoning += usage.reasoningTokens ?? 0;
-				totalCacheRead += usage.cacheRead;
-				totalCacheWrite += usage.cacheWrite;
-				totalTokens += usage.totalTokens;
-				totalPremiumRequests += usage.premiumRequests ?? 0;
-				totalCost += usage.cost.total;
-				const credits = usage.credits;
-				if (credits !== undefined) {
-					hasCredits = true;
-					creditCost += credits.cost ?? 0;
-					committedCreditCost += credits.committedCost ?? 0;
-					committedAcuCost += credits.acuCost ?? 0;
-				}
-				if (assistant.upstreamModel !== undefined) {
-					routedModels[assistant.upstreamModel] = (routedModels[assistant.upstreamModel] ?? 0) + 1;
-				}
+		const addUsage = (usage: Usage): void => {
+			totalInput += usage.input;
+			totalOutput += usage.output;
+			totalReasoning += usage.reasoningTokens ?? 0;
+			totalCacheRead += usage.cacheRead;
+			totalCacheWrite += usage.cacheWrite;
+			totalTokens += usage.totalTokens;
+			totalPremiumRequests += usage.premiumRequests ?? 0;
+			totalCost += usage.cost.total;
+			const credits = usage.credits;
+			if (credits !== undefined) {
+				hasCredits = true;
+				creditCost += credits.cost ?? 0;
+				committedCreditCost += credits.committedCost ?? 0;
+				committedAcuCost += credits.acuCost ?? 0;
 			}
-			if (message.role === "toolResult" && message.toolName === "task") {
-				const usage = taskToolUsage(message.details);
+		};
+		for (const message of state.messages) {
+			if (message.role === "user") {
+				userMessages++;
+			} else if (message.role === "toolResult") {
+				toolResults++;
+				if (message.toolName === "task") {
+					const usage = taskToolUsage(message.details);
+					if (usage) addUsage(usage);
+				}
+			} else if (message.role === "assistant") {
+				assistantMessages++;
+				for (const content of message.content) {
+					if (content.type === "toolCall") toolCalls++;
+				}
+				// Persisted and imported transcripts can predate usage metadata despite the current message type.
+				const usage = message.usage;
 				if (!usage) continue;
-				totalInput += usage.input;
-				totalOutput += usage.output;
-				totalReasoning += usage.reasoningTokens ?? 0;
-				totalCacheRead += usage.cacheRead;
-				totalCacheWrite += usage.cacheWrite;
-				totalTokens += usage.totalTokens;
-				totalPremiumRequests += usage.premiumRequests ?? 0;
-				totalCost += usage.cost.total;
-				const credits = usage.credits;
-				if (credits !== undefined) {
-					hasCredits = true;
-					creditCost += credits.cost ?? 0;
-					committedCreditCost += credits.committedCost ?? 0;
-					committedAcuCost += credits.acuCost ?? 0;
+				addUsage(usage);
+				if (message.upstreamModel !== undefined) {
+					routedModels[message.upstreamModel] = (routedModels[message.upstreamModel] ?? 0) + 1;
 				}
 			}
 		}
+		for (const entry of activeModelUsageEntries(this.#host.sessionManager.getBranch())) addUsage(entry.usage);
 		return {
 			sessionFile: this.#host.sessionManager.getSessionFile(),
 			sessionId: this.#host.sessionId(),
@@ -188,9 +211,15 @@ export class SessionStatsTracker {
 		const { skillsTokens, toolsTokens, systemContextTokens, systemPromptTokens } = computeNonMessageBreakdown(
 			this.#host.session,
 			this.#tokenizer,
+			this.#host.session.settings?.revision,
+			this.#host.session.settings?.get("skillful"),
 		);
 		const categoryNonMessageTokens = skillsTokens + toolsTokens + systemContextTokens + systemPromptTokens;
-		const currentNonMessageTokens = computeNonMessageTokens(this.#host.session, this.#tokenizer);
+		const currentNonMessageTokens = computeNonMessageTokens(
+			this.#host.session,
+			this.#tokenizer,
+			this.#host.session.settings?.revision,
+		);
 		const branchEntries = this.#host.sessionManager.getBranch();
 		const latestCompaction = getLatestCompactionEntry(branchEntries);
 		const compactionIndex = latestCompaction ? branchEntries.lastIndexOf(latestCompaction) : -1;
@@ -230,7 +259,7 @@ export class SessionStatsTracker {
 		if (useAnchor && anchorAssistant) {
 			const nonMessageTokens =
 				anchorAssistant.contextSnapshot?.nonMessageTokens ??
-				computeNonMessageTokens(this.#host.session, this.#tokenizer);
+				computeNonMessageTokens(this.#host.session, this.#tokenizer, this.#host.session.settings?.revision);
 			anchored = true;
 			usedTokens = this.#anchoredUsedTokens(
 				correctedPromptTokens(anchorAssistant),
@@ -257,7 +286,7 @@ export class SessionStatsTracker {
 			if (liveAnchor) {
 				const nonMessageTokens =
 					liveAnchor.message.contextSnapshot?.nonMessageTokens ??
-					computeNonMessageTokens(this.#host.session, this.#tokenizer);
+					computeNonMessageTokens(this.#host.session, this.#tokenizer, this.#host.session.settings?.revision);
 				usedTokens = this.#anchoredUsedTokens(
 					correctedPromptTokens(liveAnchor.message),
 					nonMessageTokens,
@@ -337,7 +366,11 @@ export class SessionStatsTracker {
 			if (!assistant.contextSnapshot) {
 				assistant.contextSnapshot = {
 					promptTokens: calculatePromptTokens(assistant.usage),
-					nonMessageTokens: computeNonMessageTokens(this.#host.session, this.#tokenizer),
+					nonMessageTokens: computeNonMessageTokens(
+						this.#host.session,
+						this.#tokenizer,
+						this.#host.session.settings?.revision,
+					),
 					compactionEpoch: this.#compactionEpoch,
 				};
 			}
@@ -358,7 +391,11 @@ export class SessionStatsTracker {
 	rebaseAfterCompaction(): void {
 		this.#compactionEpoch++;
 		if (!this.#pendingContextSnapshot) return;
-		const nonMessageTokens = computeNonMessageTokens(this.#host.session, this.#tokenizer);
+		const nonMessageTokens = computeNonMessageTokens(
+			this.#host.session,
+			this.#tokenizer,
+			this.#host.session.settings?.revision,
+		);
 		const messages = this.#host.agent.state.messages;
 		this.setPendingSnapshot({
 			promptTokens: nonMessageTokens + this.#tokenizer.countMessages(messages),
@@ -371,9 +408,10 @@ export class SessionStatsTracker {
 	ingestProviderUsageHeaders(response: ProviderResponseMetadata, model?: Model): void {
 		const provider = model?.provider;
 		if (!provider) return;
-		this.#host.modelRegistry.authStorage.ingestUsageHeaders(provider, response.headers, {
+		this.#host.modelRegistry.authStorage.usage.ingestHeaders(provider, response.headers, {
 			sessionId: this.#host.agent.sessionId,
 			baseUrl: this.#host.modelRegistry.getProviderBaseUrl?.(provider),
+			responseStatus: response.status,
 		});
 	}
 }

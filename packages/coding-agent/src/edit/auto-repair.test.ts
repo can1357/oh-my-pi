@@ -1,8 +1,12 @@
 import { describe, expect, test } from "bun:test";
+import { summarizeCode } from "@oh-my-pi/pi-natives";
 import { computeRepairRegion, repairParseRegression } from "./auto-repair";
-import { sourceParses } from "./blackbox";
 
 const PATH = "/repo/src/sample.ts";
+
+function sourceParses(code: string): boolean {
+	return summarizeCode({ code: code.length === 0 ? "\n" : code, path: PATH }).parsed;
+}
 
 /** A parseable base file with distinct sections so multi-hunk edits stay apart. */
 const BASE = [
@@ -31,7 +35,7 @@ describe("computeRepairRegion", () => {
 			"const doubled = b * 2;",
 			"const doubled = (b * 2;",
 		);
-		expect(sourceParses(next, PATH)).toBe(false);
+		expect(sourceParses(next)).toBe(false);
 
 		const region = computeRepairRegion({ path: PATH, prev: BASE, next });
 		expect(region).toBeDefined();
@@ -49,7 +53,7 @@ describe("computeRepairRegion", () => {
 			...region.referenceText.split("\n"),
 			...lines.slice(region.bEnd),
 		].join("\n");
-		expect(sourceParses(spliced, PATH)).toBe(true);
+		expect(sourceParses(spliced)).toBe(true);
 	});
 
 	test("returns undefined when the broken span exceeds the region cap", () => {
@@ -58,8 +62,8 @@ describe("computeRepairRegion", () => {
 		// Break the opening line and mutate every body line so the culprit hunk
 		// spans the whole (oversized) function.
 		const next = `export function big(: void {\n${bigBody.replaceAll("const", "let")}\n}\n`;
-		expect(sourceParses(prev, PATH)).toBe(true);
-		expect(sourceParses(next, PATH)).toBe(false);
+		expect(sourceParses(prev)).toBe(true);
+		expect(sourceParses(next)).toBe(false);
 		expect(computeRepairRegion({ path: PATH, prev, next })).toBeUndefined();
 	});
 });
@@ -77,7 +81,7 @@ describe("repairParseRegression", () => {
 		expect(repair).toBeDefined();
 		if (!repair) throw new Error("unreachable");
 		expect(repair.attempts).toBe(1);
-		expect(sourceParses(repair.content, PATH)).toBe(true);
+		expect(sourceParses(repair.content)).toBe(true);
 		expect(repair.content).toContain("const doubled = (b * 2);");
 		// Untouched sections survive byte-for-byte.
 		expect(repair.content).toContain("export function alpha(a: number): number {");
@@ -107,7 +111,7 @@ describe("repairParseRegression", () => {
 		});
 		expect(repair).toBeDefined();
 		if (!repair) throw new Error("unreachable");
-		expect(sourceParses(repair.content, PATH)).toBe(true);
+		expect(sourceParses(repair.content)).toBe(true);
 		// Realignment restored original bytes for the echoed context lines; only
 		// the genuinely changed line keeps the model's (dedented) shape.
 		expect(repair.content).toContain("\treturn doubled;");
@@ -127,7 +131,7 @@ describe("repairParseRegression", () => {
 		expect(repair).toBeDefined();
 		if (!repair) throw new Error("unreachable");
 		expect(repair.attempts).toBe(2);
-		expect(sourceParses(repair.content, PATH)).toBe(true);
+		expect(sourceParses(repair.content)).toBe(true);
 	});
 
 	test("gives up after the retry when no candidate re-parses", async () => {

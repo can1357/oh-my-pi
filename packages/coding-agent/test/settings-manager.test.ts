@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
@@ -8,6 +9,7 @@ import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock
 import { __providerInFlightForTesting, streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context } from "@oh-my-pi/pi-ai/types";
 import {
+	__physicalTargetSegmentsForTesting,
 	onAppendOnlyModeChanged,
 	onCodeModeChanged,
 	onModelRolesChanged,
@@ -16,11 +18,11 @@ import {
 	type SettingPath,
 	Settings,
 } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { SETTINGS_SCHEMA } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
 import * as discovery from "@oh-my-pi/pi-coding-agent/discovery";
+import MODEL_PRIO from "../src/priority.json" with { type: "json" };
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
-import { AUTO_IMAGE_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/tools/image-providers";
-import { SEARCH_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/web/search/types";
-import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { getAgentDbPath, getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
 import * as fileLock from "@oh-my-pi/pi-utils/file-lock";
 import { YAML } from "bun";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
@@ -61,6 +63,8 @@ describe("Settings", () => {
 	});
 
 	const getConfigPath = () => path.join(agentDir, "config.yml");
+	const withCanonicalParent = async (filePath: string) =>
+		path.join(await fs.promises.realpath(path.dirname(filePath)), path.basename(filePath));
 
 	const writeSettings = async (settings: Record<string, unknown>) => {
 		await Bun.write(getConfigPath(), YAML.stringify(settings, null, 2));
@@ -84,6 +88,63 @@ describe("Settings", () => {
 		settingsState = undefined;
 		await Bun.sleep(0);
 		await tempDir?.remove();
+	});
+
+	describe("group cache", () => {
+		it("returns one immutable snapshot per merged settings revision", () => {
+			const settings = Settings.isolated();
+			const first = settings.getGroup("compaction");
+
+			expect(settings.getGroup("compaction")).toBe(first);
+			expect(Object.isFrozen(first)).toBe(true);
+
+			const revision = settings.revision;
+			settings.override("compaction.enabled", !first.enabled);
+			expect(settings.revision).toBeGreaterThan(revision);
+			const overridden = settings.getGroup("compaction");
+			expect(overridden).not.toBe(first);
+			expect(overridden.enabled).toBe(!first.enabled);
+			expect(settings.getGroup("compaction")).toBe(overridden);
+
+			settings.clearOverride("compaction.enabled");
+			const restored = settings.getGroup("compaction");
+			expect(restored).not.toBe(overridden);
+			expect(restored.enabled).toBe(first.enabled);
+		});
+
+		it("keeps cloned defaults independent across settings instances", () => {
+			const first = Settings.isolated().getGroup("compaction");
+			const second = Settings.isolated().getGroup("compaction");
+			expect(first).not.toBe(second);
+			expect(first.methodOrder).not.toBe(second.methodOrder);
+
+			const secondOrder = [...second.methodOrder];
+			first.methodOrder.push(first.methodOrder[0]);
+			expect(second.methodOrder).toEqual(secondOrder);
+		});
+
+		it("bumps the effective revision when cwd re-resolves scoped arrays", async () => {
+			const otherProject = tempDir.join("other-project");
+			fs.mkdirSync(otherProject);
+			const settings = await Settings.init({
+				cwd: projectDir,
+				agentDir,
+				inMemory: true,
+				overrides: {
+					enabledModels: [
+						{ path: projectDir, models: ["openai/first"] },
+						{ path: otherProject, models: ["openai/second"] },
+					],
+				},
+			});
+			const before = settings.revision;
+			expect(settings.get("enabledModels")).toEqual(["openai/first"]);
+
+			await settings.reloadForCwd(otherProject);
+
+			expect(settings.revision).toBeGreaterThan(before);
+			expect(settings.get("enabledModels")).toEqual(["openai/second"]);
+		});
 	});
 
 	describe("main config file selection", () => {
@@ -146,6 +207,29 @@ describe("Settings", () => {
 			const content = await Bun.file(getConfigPath()).text();
 			expect(content).not.toMatch(/: +$/m);
 			expect(YAML.parse(content)).toEqual({ custom, theme: { dark: "titanium" } });
+		});
+	});
+
+	describe("status line segment validation", () => {
+		it("logs each unknown configured segment once while preserving the config", async () => {
+			await writeSettings({
+				statusLine: {
+					preset: "custom",
+					leftSegments: ["modle", "git", "modle"],
+					rightSegments: ["usage", "sesion", "modle"],
+				},
+			});
+			const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(JSON.stringify(settings.get("statusLine.leftSegments"))).toBe('["modle","git","modle"]');
+			expect(
+				warn.mock.calls.filter(([message]) => String(message).startsWith("Settings: unknown status line segment")),
+			).toEqual([
+				['Settings: unknown status line segment "modle"', { setting: "statusLine.leftSegments" }],
+				['Settings: unknown status line segment "sesion"', { setting: "statusLine.rightSegments" }],
+			]);
 		});
 	});
 
@@ -314,13 +398,532 @@ describe("Settings", () => {
 			expect(YAML.parse(await Bun.file(managedConfigPath).text())).toEqual({ setupVersion: 2 });
 		});
 
+		it("writes through a dangling symlink chain to the final target, preserving every link", async () => {
+			// config.yml -> mid.yml -> final.yml where final.yml does not exist yet
+			// (first-run into a dotfiles/managed checkout). realpath throws ENOENT at
+			// the missing tail, so the write path must walk the chain hop by hop and
+			// land on final.yml — recreating it while leaving both links intact.
+			const finalPath = tempDir.join("final-config.yml");
+			const midPath = tempDir.join("mid-config.yml");
+			await fs.promises.symlink(finalPath, midPath, "file");
+			await fs.promises.symlink(midPath, getConfigPath(), "file");
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			settings.set("setupVersion", 3);
+			await settings.flush();
+
+			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
+			expect(fs.lstatSync(midPath).isSymbolicLink()).toBe(true);
+			expect(fs.lstatSync(finalPath).isSymbolicLink()).toBe(false);
+			expect(YAML.parse(await Bun.file(finalPath).text())).toEqual({ setupVersion: 3 });
+		});
+
+		it("lands on the deepest resolved hop when an intermediate link vanishes mid-walk", async () => {
+			// config.yml -> mid.yml -> final.yml (final dangling). The resolver
+			// confirms mid.yml is a symlink via lstat, then a concurrent process
+			// removes mid.yml before readlink(mid.yml) runs. The ENOENT must not
+			// collapse the write back to the chain head (config.yml) — that would
+			// let the atomic rename replace the first user-managed link.
+			const finalPath = tempDir.join("final-config.yml");
+			const midPath = tempDir.join("mid-config.yml");
+			await fs.promises.symlink(finalPath, midPath, "file");
+			await fs.promises.symlink(midPath, getConfigPath(), "file");
+			const canonicalMidPath = await withCanonicalParent(midPath);
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const readlink = fs.promises.readlink.bind(fs.promises);
+			let injected = false;
+			vi.spyOn(fs.promises, "readlink").mockImplementation((async (target: fs.PathLike) => {
+				if (!injected && String(target) === canonicalMidPath) {
+					injected = true;
+					await fs.promises.unlink(midPath);
+					throw new FsCodeError("ENOENT", "injected mid-chain link removal");
+				}
+				return readlink(target);
+			}) as typeof fs.promises.readlink);
+
+			settings.set("setupVersion", 4);
+			await settings.flush();
+
+			expect(injected).toBe(true);
+			// The chain head must survive as a symlink; the write lands on the
+			// deepest resolved hop (mid.yml), never clobbering config.yml.
+			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
+			expect(fs.lstatSync(midPath).isSymbolicLink()).toBe(false);
+			expect(YAML.parse(await Bun.file(midPath).text())).toEqual({ setupVersion: 4 });
+			expect(fs.existsSync(finalPath)).toBe(false);
+		});
+
+		it("resolves a relative intermediate target against the link's physical parent, not a symlinked alias", async () => {
+			// config.yml -> alias/sub/mid.yml, where `alias` is a symlinked
+			// directory (alias -> physical/deep) and mid.yml is a dangling link
+			// whose relative target has enough `..` to climb out of the alias.
+			// Popping `..` off the PHYSICAL parent lands on physical/final.yml; a
+			// lexical resolve would collapse `..` against the alias and clobber an
+			// unrelated sibling of the alias while leaving the real chain dangling.
+			const deepDir = tempDir.join("physical", "deep");
+			const subDir = path.join(deepDir, "sub");
+			fs.mkdirSync(subDir, { recursive: true });
+			const aliasDir = tempDir.join("alias");
+			await fs.promises.symlink(deepDir, aliasDir, "dir");
+
+			const midPath = path.join(aliasDir, "sub", "mid-config.yml");
+			await fs.promises.symlink("../../final-config.yml", midPath, "file");
+			await fs.promises.symlink(midPath, getConfigPath(), "file");
+
+			const physicalFinal = tempDir.join("physical", "final-config.yml");
+			const lexicalSibling = tempDir.join("final-config.yml");
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			settings.set("setupVersion", 7);
+			await settings.flush();
+
+			// The write lands on the physical target, recreating it, while the
+			// alias's lexical sibling (the mis-resolution) stays untouched.
+			expect(YAML.parse(await Bun.file(physicalFinal).text())).toEqual({ setupVersion: 7 });
+			expect(fs.existsSync(lexicalSibling)).toBe(false);
+			// Every user-managed link in the chain survives.
+			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
+			expect(fs.lstatSync(midPath).isSymbolicLink()).toBe(true);
+		});
+
+		it("throws a bounded ELOOP when the chain turns cyclic after realpath reports ENOENT", async () => {
+			// config.yml -> mid.yml -> final.yml (final missing), so the initial
+			// realpath() reports ENOENT and the manual chain walk runs. A
+			// concurrent process then retargets mid.yml back at the chain head, so
+			// readlink() alternates head<->mid forever. The resolver must cap its
+			// hops and throw an ELOOP-style error rather than hang flush().
+			const finalPath = tempDir.join("final-config.yml");
+			const midPath = tempDir.join("mid-config.yml");
+			await fs.promises.symlink(finalPath, midPath, "file");
+			await fs.promises.symlink(midPath, getConfigPath(), "file");
+			const canonicalMidPath = await withCanonicalParent(midPath);
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			const readlink = fs.promises.readlink.bind(fs.promises);
+			let readlinkCalls = 0;
+			// Bounded safety valve set far above the resolver's hop cap: the fixed
+			// resolver throws ELOOP well before this fires, so it never trips. An
+			// unbounded walk (pre-fix) only stops here, surfacing a distinct error
+			// that proves no ELOOP was raised — RED without hanging the suite.
+			const safetyValve = 500;
+			vi.spyOn(fs.promises, "readlink").mockImplementation((async (target: fs.PathLike) => {
+				readlinkCalls++;
+				if (readlinkCalls > safetyValve) {
+					throw new FsCodeError("ETESTVALVE", "unbounded symlink walk");
+				}
+				// Retarget mid back at the chain head to close the cycle.
+				if (String(target) === canonicalMidPath) return getConfigPath();
+				return readlink(target);
+			}) as typeof fs.promises.readlink);
+
+			settings.set("setupVersion", 5);
+			await expect(settings.flush()).rejects.toThrow(/ELOOP/);
+			expect(readlinkCalls).toBeLessThanOrEqual(safetyValve);
+		});
+
+		it("follows an intermediate directory symlink inside a relative target before applying ..", async () => {
+			// config.yml -> alias/../final.yml, where `alias` is a symlinked
+			// directory (alias -> elsewhere/deep) and final.yml is missing. The
+			// filesystem follows `alias` first and then pops its PHYSICAL parent,
+			// landing on elsewhere/final.yml. A lexical normalization of the whole
+			// target collapses `alias/..` to the config dir up front and would
+			// clobber <configdir>/final.yml while leaving the real chain dangling.
+			const elsewhereDir = tempDir.join("elsewhere");
+			const deepDir = path.join(elsewhereDir, "deep");
+			fs.mkdirSync(deepDir, { recursive: true });
+			const aliasDir = path.join(agentDir, "alias");
+			await fs.promises.symlink(deepDir, aliasDir, "dir");
+
+			await fs.promises.symlink("alias/../final-config.yml", getConfigPath(), "file");
+
+			const physicalFinal = path.join(elsewhereDir, "final-config.yml");
+			const lexicalSibling = path.join(agentDir, "final-config.yml");
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			settings.set("setupVersion", 8);
+			await settings.flush();
+
+			// The write lands on the physical target (fs semantics), recreating it,
+			// while the lexically collapsed sibling stays untouched.
+			expect(YAML.parse(await Bun.file(physicalFinal).text())).toEqual({ setupVersion: 8 });
+			expect(fs.existsSync(lexicalSibling)).toBe(false);
+			// The user-managed chain head survives as a symlink.
+			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
+		});
+
+		it("resolves an absolute target's intermediate directory symlink before applying ..", async () => {
+			// config.yml -> /base/alias/../final.yml (ABSOLUTE target), where
+			// `alias` is a symlinked directory (alias -> elsewhere/deep) and
+			// final.yml is missing. The filesystem follows `alias` first and then
+			// pops its PHYSICAL parent, landing on elsewhere/final.yml. Lexically
+			// collapsing the absolute string up front turns `/base/alias/..` into
+			// /base and would clobber /base/final.yml while leaving the real chain
+			// dangling — the same bug already fixed for relative targets.
+			const elsewhereDir = tempDir.join("elsewhere");
+			const deepDir = path.join(elsewhereDir, "deep");
+			fs.mkdirSync(deepDir, { recursive: true });
+			const baseDir = tempDir.join("base");
+			fs.mkdirSync(baseDir, { recursive: true });
+			const aliasDir = path.join(baseDir, "alias");
+			await fs.promises.symlink(deepDir, aliasDir, "dir");
+
+			// Build the target string manually so path.join does not collapse the
+			// `..` before the symlink can be written.
+			const absTarget = `${aliasDir}${path.sep}..${path.sep}final-config.yml`;
+			await fs.promises.symlink(absTarget, getConfigPath(), "file");
+
+			const physicalFinal = path.join(elsewhereDir, "final-config.yml");
+			const lexicalSibling = path.join(baseDir, "final-config.yml");
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			settings.set("setupVersion", 9);
+			await settings.flush();
+
+			// The write lands on the physical target (fs semantics), recreating it,
+			// while the lexically collapsed sibling stays untouched.
+			expect(YAML.parse(await Bun.file(physicalFinal).text())).toEqual({ setupVersion: 9 });
+			expect(fs.existsSync(lexicalSibling)).toBe(false);
+			// The user-managed chain head survives as a symlink.
+			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
+		});
+
+		it("does not write to an unrelated sibling when a non-final component is missing before ..", async () => {
+			// config.yml -> missing/../final.yml, where `missing` does not exist.
+			// Filesystem lookup fails at `missing`, so a following `..` must NOT
+			// pop a component that was never entered. Collapsing the target
+			// lexically instead pops `missing` and lands on <configdir>/final.yml,
+			// clobbering an unrelated sibling while the real (dangling) target is
+			// never written. The resolver must not escape to that sibling.
+			await fs.promises.symlink("missing/../final-config.yml", getConfigPath(), "file");
+			const lexicalSibling = path.join(agentDir, "final-config.yml");
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			settings.set("setupVersion", 10);
+			// The resolved path sits under the never-entered `missing` dir (fs
+			// semantics), whose parent does not exist, so the atomic write fails
+			// rather than clobbering the sibling.
+			await expect(settings.flush()).rejects.toThrow();
+
+			expect(fs.existsSync(lexicalSibling)).toBe(false);
+			// The user-managed chain head survives as a symlink.
+			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
+		});
+
+		it("does not mislocate when a dangling symlink component is followed by ..", async () => {
+			// config.yml -> link/.., where `link -> missing` and `missing` does
+			// not exist. The filesystem follows `link` to its missing referent, so
+			// looking up `link/..` fails: there is no parent of a path that was
+			// never entered. Leaving the accumulator on the dangling `link` and
+			// then following it to `missing` would create a regular file at the
+			// wrong path and report success while the config path still fails with
+			// ENOTDIR. The resolver must surface the failure instead.
+			await fs.promises.symlink("missing", path.join(agentDir, "link"), "file");
+			await fs.promises.symlink("link/..", getConfigPath(), "file");
+			const misplaced = path.join(agentDir, "missing");
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			settings.set("setupVersion", 11);
+			await expect(settings.flush()).rejects.toThrow();
+
+			// No regular file was landed at the wrong resolved location.
+			expect(fs.existsSync(misplaced)).toBe(false);
+			// The user-managed chain head survives as a symlink.
+			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
+		});
+
+		it("does not mislocate when a dangling component precedes further names then ..", async () => {
+			// config.yml -> missing/child/.., where `missing` does not exist. The
+			// walk freezes at `missing`, appends `child` lexically, then hits `..`.
+			// `missing` was never entered, so `child` is not a real component the
+			// kernel can pop: `missing/child/..` fails with ENOTDIR. Lexically
+			// popping `child` and returning `missing` would land a regular file at
+			// the wrong path and report success while config.yml stays unusable.
+			await fs.promises.symlink("missing/child/..", getConfigPath(), "file");
+			const misplaced = path.join(agentDir, "missing");
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			settings.set("setupVersion", 12);
+			await expect(settings.flush()).rejects.toThrow();
+
+			// No regular file was landed at the frozen component.
+			expect(fs.existsSync(misplaced)).toBe(false);
+			// The user-managed chain head survives as a symlink.
+			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
+		});
+
+		it("still pops correctly when a real child/.. was actually traversed", async () => {
+			// config.yml -> realdir/child/final.yml, where realdir and
+			// realdir/child both exist on disk and final.yml is missing. The `..`
+			// after `child` pops a component that WAS entered, so the write must
+			// still land on realdir/final.yml — proving the frozen-branch throw
+			// does not over-reject a legitimate physically traversed `..`.
+			const realDir = path.join(agentDir, "realdir");
+			const childDir = path.join(realDir, "child");
+			fs.mkdirSync(childDir, { recursive: true });
+			await fs.promises.symlink("realdir/child/../final-config.yml", getConfigPath(), "file");
+			const finalPath = path.join(realDir, "final-config.yml");
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			settings.set("setupVersion", 13);
+			await settings.flush();
+
+			expect(YAML.parse(await Bun.file(finalPath).text())).toEqual({ setupVersion: 13 });
+			// The user-managed chain head survives as a symlink.
+			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
+		});
+
+		it("does not mislocate when a dangling target ends in a trailing slash", async () => {
+			// config.yml -> missing/, where `missing` does not exist. The trailing
+			// slash demands `missing` be a traversable directory. Dropping the
+			// terminal empty segment and returning `missing` would land a regular
+			// file there and report success, while opening config.yml then fails
+			// with ENOTDIR because a file is not a directory. Surface the failure.
+			await fs.promises.symlink("missing/", getConfigPath(), "file");
+			const misplaced = path.join(agentDir, "missing");
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			settings.set("setupVersion", 14);
+			await expect(settings.flush()).rejects.toThrow();
+
+			// No regular file was landed at the frozen component.
+			expect(fs.existsSync(misplaced)).toBe(false);
+			// The user-managed chain head survives as a symlink.
+			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
+		});
+
+		it("rejects with ENOTDIR when a trailing-slash target is created as a regular file mid-walk", async () => {
+			// config.yml -> racetarget/, where `racetarget` does not exist when the
+			// initial realpath(config.yml) runs, so it reports ENOENT and the manual
+			// segment walk begins. A concurrent process then creates `racetarget` as
+			// a REGULAR FILE before the walk's realpath(candidate) reaches it, so
+			// that realpath succeeds and the walk stays UNFROZEN. The trailing slash
+			// still demands `racetarget` be a traversable directory; a regular file
+			// is not, so opening config.yml really fails with ENOTDIR. Dropping the
+			// terminal empty segment and returning the regular file would let the
+			// atomic rename overwrite it and falsely report success. Surface it.
+			await fs.promises.symlink("racetarget/", getConfigPath(), "file");
+			const raceTarget = path.join(agentDir, "racetarget");
+			const canonicalRaceTarget = await withCanonicalParent(raceTarget);
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const realpath = fs.promises.realpath.bind(fs.promises);
+			let injected = false;
+			vi.spyOn(fs.promises, "realpath").mockImplementation((async (target: fs.PathLike, ...rest: unknown[]) => {
+				if (!injected && String(target) === canonicalRaceTarget) {
+					injected = true;
+					// Win the race: materialize the target as a regular file so this
+					// realpath resolves it and the walk never freezes.
+					await Bun.write(raceTarget, "not a dir");
+				}
+				return (realpath as (t: fs.PathLike, ...r: unknown[]) => Promise<string>)(target, ...rest);
+			}) as typeof fs.promises.realpath);
+
+			settings.set("setupVersion", 15);
+			await expect(settings.flush()).rejects.toThrow(/ENOTDIR/);
+
+			expect(injected).toBe(true);
+			// The concurrently created regular file was NOT overwritten with YAML.
+			expect(await Bun.file(raceTarget).text()).toBe("not a dir");
+			// The user-managed chain head survives as a symlink.
+			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
+		});
+
+		it("rejects with ENOTDIR when a `..` target's component is created as a regular file mid-walk", async () => {
+			// config.yml -> racetarget/../victim.yml, where `racetarget` does not
+			// exist when the initial realpath(config.yml) runs, so it reports ENOENT
+			// and the manual segment walk begins. A concurrent process then creates
+			// `racetarget` as a REGULAR FILE before the walk's realpath(candidate)
+			// reaches it, so that realpath succeeds and the walk stays UNFROZEN. The
+			// following `..` demands `racetarget` be a traversable directory to pop
+			// its parent; a regular file is not, so opening config.yml really fails
+			// with ENOTDIR (the kernel rejects `regularfile/..`). Popping lexically
+			// and continuing would resolve to victim.yml in the parent dir and let
+			// the atomic rename overwrite an unrelated sibling while falsely
+			// reporting success. Surface it.
+			await fs.promises.symlink("racetarget/../victim.yml", getConfigPath(), "file");
+			const raceTarget = path.join(agentDir, "racetarget");
+			const canonicalRaceTarget = await withCanonicalParent(raceTarget);
+			const victim = path.join(agentDir, "victim.yml");
+			await Bun.write(victim, "keep: me");
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const realpath = fs.promises.realpath.bind(fs.promises);
+			let injected = false;
+			vi.spyOn(fs.promises, "realpath").mockImplementation((async (target: fs.PathLike, ...rest: unknown[]) => {
+				if (!injected && String(target) === canonicalRaceTarget) {
+					injected = true;
+					// Win the race: materialize the component as a regular file so this
+					// realpath resolves it and the walk never freezes.
+					await Bun.write(raceTarget, "not a dir");
+				}
+				return (realpath as (t: fs.PathLike, ...r: unknown[]) => Promise<string>)(target, ...rest);
+			}) as typeof fs.promises.realpath);
+
+			settings.set("setupVersion", 16);
+			await expect(settings.flush()).rejects.toThrow(/ENOTDIR/);
+
+			expect(injected).toBe(true);
+			// The unrelated sibling was NOT overwritten with YAML.
+			expect(await Bun.file(victim).text()).toBe("keep: me");
+			// The user-managed chain head survives as a symlink.
+			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
+		});
+
+		it("rejects with ENOTDIR when a trailing-slash target's directory is removed before the validation stat", async () => {
+			// config.yml -> racetarget/, where `racetarget` does not exist when the
+			// initial realpath(config.yml) runs, so the manual segment walk begins.
+			// A concurrent process creates `racetarget` as a real DIRECTORY before
+			// the walk's realpath(candidate) reaches it, so that realpath succeeds
+			// and the walk stays UNFROZEN, reaching the trailing-slash
+			// directory-requirement stat. The directory is then removed between that
+			// realpath and this stat, so the stat throws ENOENT. The requirement —
+			// `racetarget` must be a traversable directory — provably cannot hold
+			// now the component is gone. Letting the ENOENT reach the outer catch
+			// would swallow it and return path.resolve(config.yml), so the atomic
+			// rename would replace config.yml ITSELF with a regular file while the
+			// dangling symlink survives. Surface ENOTDIR instead.
+			await fs.promises.symlink("racetarget/", getConfigPath(), "file");
+			const raceTarget = path.join(agentDir, "racetarget");
+			const canonicalRaceTarget = await withCanonicalParent(raceTarget);
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const realpath = fs.promises.realpath.bind(fs.promises);
+			const stat = fs.promises.stat.bind(fs.promises);
+			let created = false;
+			let removed = false;
+			vi.spyOn(fs.promises, "realpath").mockImplementation((async (target: fs.PathLike, ...rest: unknown[]) => {
+				if (!created && String(target) === canonicalRaceTarget) {
+					created = true;
+					// Win the first half of the race: materialize the component as a
+					// real directory so this realpath resolves it and the walk stays
+					// unfrozen.
+					fs.mkdirSync(raceTarget);
+				}
+				return (realpath as (t: fs.PathLike, ...r: unknown[]) => Promise<string>)(target, ...rest);
+			}) as typeof fs.promises.realpath);
+			vi.spyOn(fs.promises, "stat").mockImplementation((async (target: fs.PathLike, ...rest: unknown[]) => {
+				if (!removed && String(target) === canonicalRaceTarget) {
+					removed = true;
+					// Win the second half: remove the required directory after
+					// realpath resolved it but before this validation stat inspects
+					// it, so the stat throws ENOENT.
+					fs.rmSync(raceTarget, { recursive: true, force: true });
+				}
+				return (stat as (t: fs.PathLike, ...r: unknown[]) => Promise<fs.Stats>)(target, ...rest);
+			}) as typeof fs.promises.stat);
+
+			settings.set("setupVersion", 17);
+			await expect(settings.flush()).rejects.toThrow(/ENOTDIR/);
+
+			expect(created).toBe(true);
+			expect(removed).toBe(true);
+			// config.yml itself was NOT clobbered into a regular file.
+			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
+		});
+
+		it("rejects with ENOTDIR when a `..` target's directory is removed before the validation stat", async () => {
+			// config.yml -> racetarget/../victim.yml, where `racetarget` does not
+			// exist when the initial realpath(config.yml) runs, so the manual walk
+			// begins. A concurrent process creates `racetarget` as a real DIRECTORY
+			// before the walk's realpath(candidate) reaches it, so that realpath
+			// succeeds and the walk stays UNFROZEN, reaching the `..`
+			// directory-requirement stat. The directory is then removed between that
+			// realpath and this stat, so the stat throws ENOENT. The `..` still
+			// requires `racetarget` to be a traversable directory to pop its parent,
+			// and that provably cannot hold now. Letting the ENOENT reach the outer
+			// catch would swallow it and return path.resolve(config.yml), clobbering
+			// config.yml itself while the dangling symlink survives. Surface ENOTDIR.
+			await fs.promises.symlink("racetarget/../victim.yml", getConfigPath(), "file");
+			const raceTarget = path.join(agentDir, "racetarget");
+			const canonicalRaceTarget = await withCanonicalParent(raceTarget);
+			const victim = path.join(agentDir, "victim.yml");
+			await Bun.write(victim, "keep: me");
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const realpath = fs.promises.realpath.bind(fs.promises);
+			const stat = fs.promises.stat.bind(fs.promises);
+			let created = false;
+			let removed = false;
+			vi.spyOn(fs.promises, "realpath").mockImplementation((async (target: fs.PathLike, ...rest: unknown[]) => {
+				if (!created && String(target) === canonicalRaceTarget) {
+					created = true;
+					// Win the first half of the race: materialize the component as a
+					// real directory so this realpath resolves it and the walk stays
+					// unfrozen.
+					fs.mkdirSync(raceTarget);
+				}
+				return (realpath as (t: fs.PathLike, ...r: unknown[]) => Promise<string>)(target, ...rest);
+			}) as typeof fs.promises.realpath);
+			vi.spyOn(fs.promises, "stat").mockImplementation((async (target: fs.PathLike, ...rest: unknown[]) => {
+				if (!removed && String(target) === canonicalRaceTarget) {
+					removed = true;
+					// Win the second half: remove the required directory after
+					// realpath resolved it but before this validation stat inspects
+					// it, so the stat throws ENOENT.
+					fs.rmSync(raceTarget, { recursive: true, force: true });
+				}
+				return (stat as (t: fs.PathLike, ...r: unknown[]) => Promise<fs.Stats>)(target, ...rest);
+			}) as typeof fs.promises.stat);
+
+			settings.set("setupVersion", 18);
+			await expect(settings.flush()).rejects.toThrow(/ENOTDIR/);
+
+			expect(created).toBe(true);
+			expect(removed).toBe(true);
+			// The unrelated sibling was NOT overwritten with YAML.
+			expect(await Bun.file(victim).text()).toBe("keep: me");
+			// config.yml itself was NOT clobbered into a regular file.
+			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
+		});
+
+		it("does not re-emit the filesystem root as a segment for an absolute Windows target", async () => {
+			// On Windows the flush walk seeds the accumulator at parse(target).root
+			// (`C:\`) and then walks the segments. If the root is left in the string
+			// that is split, it is re-emitted as a leading `C:` segment and joined
+			// on top of the seeded root — `C:\managed\final.yml` resolves to
+			// `C:\C:\managed\final.yml`, so flushing through a dangling absolute link
+			// fails. Drive the splitter with the win32 engine so the bug reproduces
+			// on this POSIX host.
+			const segments = __physicalTargetSegmentsForTesting("C:\\managed\\final.yml", path.win32).filter(
+				segment => segment !== "" && segment !== ".",
+			);
+			expect(segments).toEqual(["managed", "final.yml"]);
+			// A UNC target seeds at the `\\server\share\` root, which must likewise
+			// be stripped rather than re-walked as `server` / `share` segments.
+			const uncSegments = __physicalTargetSegmentsForTesting(
+				"\\\\server\\share\\managed\\final.yml",
+				path.win32,
+			).filter(segment => segment !== "" && segment !== ".");
+			expect(uncSegments).toEqual(["managed", "final.yml"]);
+			// A relative Windows target seeds at the link's real parent, so every
+			// segment is preserved unchanged.
+			expect(__physicalTargetSegmentsForTesting("managed\\final.yml", path.win32)).toEqual(["managed", "final.yml"]);
+		});
+
+		it("treats a backslash as a filename character on POSIX, not a separator", async () => {
+			// `\` is a valid filename character on POSIX. A dangling target literally
+			// named `managed\config.yml` must stay ONE segment; splitting it into
+			// `managed`/`config.yml` makes flush either fail on the missing dir or
+			// write an unrelated file while the real link stays dangling. Drive the
+			// splitter with the posix engine so the bug reproduces on any host.
+			expect(__physicalTargetSegmentsForTesting("managed\\config.yml", path.posix)).toEqual(["managed\\config.yml"]);
+			// Forward slashes still split, and the leading `/` of an absolute POSIX
+			// target strips to no extra segment (root seeded separately).
+			const absSegments = __physicalTargetSegmentsForTesting("/managed/final.yml", path.posix).filter(
+				segment => segment !== "" && segment !== ".",
+			);
+			expect(absSegments).toEqual(["managed", "final.yml"]);
+		});
+
 		it("falls back to move-aside replacement when Windows reports EPERM", async () => {
 			await writeSettings({ setupVersion: 1 });
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			const canonicalConfigPath = await fs.promises.realpath(getConfigPath());
-			const rename = fsp.rename.bind(fsp);
+			const rename = fs.promises.rename.bind(fs.promises);
 			let injected = false;
-			vi.spyOn(fsp, "rename").mockImplementation(async (source, target) => {
+			vi.spyOn(fs.promises, "rename").mockImplementation(async (source, target) => {
 				if (!injected && String(source).endsWith(".tmp") && String(target) === canonicalConfigPath) {
 					injected = true;
 					throw new FsCodeError("EPERM", "injected Windows replacement failure");
@@ -442,6 +1045,87 @@ describe("Settings", () => {
 			expect(settings.get("setupVersion")).toBe(1);
 			expect(settings.getModelRole("global_role")).toBe("openai/global");
 			expect(settings.getModelRole("project_role")).toBe("openai/project");
+		});
+		it("refreshes native project settings without changing overlay or runtime precedence", async () => {
+			await writeSettings({
+				task: { enableEffort: true, maxConcurrency: 2 },
+				retry: { modelFallback: true },
+			});
+			const overlayPath = tempDir.join("reload-overlay.yml");
+			await Bun.write(overlayPath, YAML.stringify({ task: { enableEffort: false } }, null, 2));
+			const reloadProjectDir = tempDir.join("reload-project");
+			await fsp.mkdir(reloadProjectDir, { recursive: true });
+			const projectConfigPath = path.join(getProjectAgentDir(reloadProjectDir), "config.yml");
+			const settings = await Settings.loadIsolated({
+				cwd: reloadProjectDir,
+				agentDir,
+				configFiles: [overlayPath],
+				overrides: { "task.maxConcurrency": 7 },
+			});
+
+			expect(await Bun.file(projectConfigPath).exists()).toBe(false);
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify(
+					{
+						task: {
+							agentModelOverrides: { task: "xai-oauth/grok-4.6:medium" },
+							enableEffort: true,
+							maxConcurrency: 3,
+						},
+						retry: { modelFallback: false },
+					},
+					null,
+					2,
+				),
+			);
+			await settings.reloadFromDisk();
+
+			expect(settings.get("task.agentModelOverrides")).toEqual({
+				task: "xai-oauth/grok-4.6:medium",
+			});
+			expect(settings.get("retry.modelFallback")).toBe(false);
+			expect(settings.get("task.enableEffort")).toBe(false);
+			expect(settings.get("task.maxConcurrency")).toBe(7);
+
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify(
+					{
+						task: {
+							agentModelOverrides: { task: "openai/gpt-4o" },
+							enableEffort: true,
+							maxConcurrency: 4,
+						},
+						retry: { modelFallback: true },
+					},
+					null,
+					2,
+				),
+			);
+			await settings.reloadFromDisk();
+
+			expect(settings.get("task.agentModelOverrides")).toEqual({ task: "openai/gpt-4o" });
+			expect(settings.get("retry.modelFallback")).toBe(true);
+			expect(settings.get("task.enableEffort")).toBe(false);
+			expect(settings.get("task.maxConcurrency")).toBe(7);
+
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify({ task: { enableEffort: true, maxConcurrency: 4 } }, null, 2),
+			);
+			await settings.reloadFromDisk();
+
+			expect(settings.get("task.agentModelOverrides")).toEqual({});
+			expect(settings.get("retry.modelFallback")).toBe(true);
+
+			await fsp.rm(projectConfigPath);
+			await settings.reloadFromDisk();
+
+			expect(settings.get("task.agentModelOverrides")).toEqual({});
+			expect(settings.get("retry.modelFallback")).toBe(true);
+			expect(settings.get("task.enableEffort")).toBe(false);
+			expect(settings.get("task.maxConcurrency")).toBe(7);
 		});
 		it("retries when a persisted setting changes while files are being read", async () => {
 			await writeSettings({ setupVersion: 1 });
@@ -590,6 +1274,25 @@ describe("Settings", () => {
 
 			isolated.clearOverride("display.showTokenUsage");
 			expect(isolated.get("display.showTokenUsage")).toBe(true);
+		});
+
+		it("isolates mutable defaults between instances and from the schema", () => {
+			const first = Settings.isolated();
+			const second = Settings.isolated();
+
+			first.get("enabledModels").push("openai/gpt-test");
+			first.get("providers.maxInFlightRequests").openai = 1;
+
+			expect(first.get("enabledModels")).toEqual(["openai/gpt-test"]);
+			expect(first.get("providers.maxInFlightRequests")).toEqual({ openai: 1 });
+			expect(second.get("enabledModels")).toEqual([]);
+			expect(second.get("providers.maxInFlightRequests")).toEqual({});
+			expect(SETTINGS_SCHEMA.enabledModels.default).toEqual([]);
+			expect(SETTINGS_SCHEMA["providers.maxInFlightRequests"].default).toEqual({});
+			expect(first.isConfigured("enabledModels")).toBe(false);
+			expect(first.isConfigured("providers.maxInFlightRequests")).toBe(false);
+			expect(second.isConfigured("enabledModels")).toBe(false);
+			expect(second.isConfigured("providers.maxInFlightRequests")).toBe(false);
 		});
 
 		it("re-resolves path-scoped arrays when cwd changes", async () => {
@@ -1076,57 +1779,252 @@ describe("Settings", () => {
 		});
 	});
 
-	describe("provider preference migration", () => {
-		it("expands a legacy providers.webSearch choice into the head of webSearchOrder", async () => {
-			await writeSettings({ providers: { webSearch: "exa" } });
+	describe("kind role settings migration", () => {
+		type LegacyMigrationCase = readonly [
+			name: string,
+			path: string,
+			value: unknown,
+			expectedRoles: Record<string, string>,
+			expectedChains: Record<string, string[]>,
+		];
 
-			const settings = await Settings.init({ cwd: projectDir, agentDir });
-
-			expect(settings.get("providers.webSearchOrder")).toEqual([
+		const webExaCandidates = ["web/exa", ...MODEL_PRIO.web.filter(selector => selector !== "web/exa")];
+		const webOrderedHead = [
+			"google/gemini-2.5-flash",
+			"anthropic/claude-haiku-4-5",
+			"openai-codex/gpt-5.6-luna",
+			"xai/grok-4.5",
+			"web/exa",
+		];
+		const webOrderedCandidates = [
+			...webOrderedHead,
+			...MODEL_PRIO.web.filter(selector => !webOrderedHead.includes(selector)),
+		];
+		const webExcludedCandidates = MODEL_PRIO.web.filter(
+			selector => selector !== "web/public" && !selector.startsWith("xai/") && !selector.startsWith("xai-oauth/"),
+		);
+		const webGeminiOverrideCandidates = MODEL_PRIO.web.map(selector =>
+			selector === "google/gemini-2.5-flash"
+				? "google/gemini-custom"
+				: selector === "google-antigravity/gemini-2.5-flash"
+					? "google-antigravity/gemini-custom"
+					: selector,
+		);
+		const imageOrderedHead = [
+			"openai/gpt-image-1",
+			"openai-codex/gpt-image-1",
+			"google-antigravity/gemini-3-pro-image",
+			"xai/grok-imagine-image",
+			"openrouter/google/gemini-3-pro-image-preview",
+			"google/gemini-3-pro-image-preview",
+			"deepinfra/black-forest-labs/FLUX-2-pro",
+		];
+		const imageOrderedCandidates = [
+			...imageOrderedHead,
+			...MODEL_PRIO.image.filter(selector => !imageOrderedHead.includes(selector)),
+		];
+		const imageXaiCandidates = [
+			"xai/grok-imagine-image",
+			...MODEL_PRIO.image.filter(selector => selector !== "xai/grok-imagine-image"),
+		];
+		const cases: LegacyMigrationCase[] = [
+			[
+				"web search order",
+				"providers.webSearchOrder",
+				["gemini", "anthropic", "codex", "xai", "exa"],
+				{ web: webOrderedCandidates[0] },
+				{ web: webOrderedCandidates.slice(1) },
+			],
+			[
+				"web search exclusions",
+				"providers.webSearchExclude",
+				["xai", "public"],
+				{ web: webExcludedCandidates[0] },
+				{ web: webExcludedCandidates.slice(1) },
+			],
+			[
+				"Gemini web model override",
+				"providers.webSearchGeminiModel",
+				"gemini-custom",
+				{ web: webGeminiOverrideCandidates[0] },
+				{ web: webGeminiOverrideCandidates.slice(1) },
+			],
+			[
+				"image order",
+				"providers.imageOrder",
+				["openai", "openai-codex", "antigravity", "xai", "openrouter", "gemini", "deepinfra"],
+				{ image: imageOrderedCandidates[0] },
+				{ image: imageOrderedCandidates.slice(1) },
+			],
+			["local speech provider", "providers.tts", "local", { speech: "local/kokoro" }, { speech: [] }],
+			["xAI speech provider", "providers.tts", "xai", { speech: "xai/grok-tts" }, { speech: [] }],
+			[
+				"DeepInfra speech provider",
+				"providers.tts",
+				"deepinfra",
+				{ speech: "deepinfra/hexgrad/Kokoro-82M" },
+				{ speech: [] },
+			],
+			[
+				"judgment provider",
+				"providers.judgmentProvider",
+				"llm",
+				{ judge: "@tiny" },
+				{ judge: ["@smol", "@default"] },
+			],
+			[
+				"auto-thinking model",
+				"providers.autoThinkingModel",
+				"qwen3-1.7b",
+				{ judge: "typesafe/jev-latest" },
+				{ judge: ["local/qwen3-1.7b", "@tiny", "@smol", "@default"] },
+			],
+			[
+				"unexpected-stop model",
+				"providers.unexpectedStopModel",
+				"gemma-3-1b",
+				{ judge: "typesafe/jev-latest" },
+				{ judge: ["local/gemma-3-1b", "@tiny", "@smol", "@default"] },
+			],
+			["tiny model", "providers.tinyModel", "lfm2.5-230m", { tiny: "local/lfm2.5-230m" }, {}],
+			["memory model", "providers.memoryModel", "lfm2-1.2b", { memory: "local/lfm2-1.2b" }, {}],
+			["local speech model", "tts.localModel", "kokoro", {}, {}],
+			["fast dictation model", "stt.modelName", "fast", { dictation: "local/whisper-base" }, {}],
+			["balanced dictation model", "stt.modelName", "balanced", { dictation: "local/whisper-small" }, {}],
+			["turbo dictation model", "stt.modelName", "turbo", { dictation: "local/whisper-large-v3-turbo" }, {}],
+			[
+				"older web search preference",
+				"providers.webSearch",
 				"exa",
-				...SEARCH_PROVIDER_ORDER.filter(id => id !== "exa"),
-			]);
-		});
-
-		it("drops legacy providers.webSearch auto without seeding an order", async () => {
-			await writeSettings({ providers: { webSearch: "auto" } });
-
-			const settings = await Settings.init({ cwd: projectDir, agentDir });
-
-			expect(settings.get("providers.webSearchOrder")).toEqual([]);
-		});
-
-		it("keeps an explicit webSearchOrder over the legacy webSearch preference", async () => {
-			await writeSettings({ providers: { webSearch: "exa", webSearchOrder: ["gemini"] } });
-
-			const settings = await Settings.init({ cwd: projectDir, agentDir });
-
-			expect(settings.get("providers.webSearchOrder")).toEqual(["gemini"]);
-		});
-
-		it("expands a legacy providers.image choice into the head of imageOrder", async () => {
-			await writeSettings({ providers: { image: "xai" } });
-
-			const settings = await Settings.init({ cwd: projectDir, agentDir });
-
-			expect(settings.get("providers.imageOrder")).toEqual([
+				{ web: webExaCandidates[0] },
+				{ web: webExaCandidates.slice(1) },
+			],
+			[
+				"older image preference",
+				"providers.image",
 				"xai",
-				...AUTO_IMAGE_PROVIDER_ORDER.filter(id => id !== "xai"),
-			]);
+				{ image: imageXaiCandidates[0] },
+				{ image: imageXaiCandidates.slice(1) },
+			],
+		];
+
+		it.each(cases)(
+			"migrates nested and flat %s settings",
+			async (_name, legacyPath, value, expectedRoles, expectedChains) => {
+				const [root, key] = legacyPath.split(".");
+				for (const input of [{ [root]: { [key]: value } }, { [legacyPath]: value }]) {
+					await writeSettings(input);
+					const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+					expect(settings.get("modelRoles")).toEqual(expectedRoles);
+					expect(settings.get("retry.fallbackChains")).toEqual(expectedChains);
+
+					settings.set("display.showTokenUsage", true);
+					await settings.flush();
+					const saved = await readSettings();
+					expect(saved.modelRoles ?? {}).toEqual(expectedRoles);
+					expect((saved.retry as Record<string, unknown> | undefined)?.fallbackChains ?? {}).toEqual(
+						expectedChains,
+					);
+					expect(Object.hasOwn(saved, legacyPath)).toBe(false);
+					expect(Object.hasOwn((saved[root] as Record<string, unknown> | undefined) ?? {}, key)).toBe(false);
+				}
+			},
+		);
+
+		it("drops legacy defaults without materializing kind roles", async () => {
+			await writeSettings({
+				providers: {
+					webSearch: "auto",
+					webSearchOrder: [],
+					webSearchExclude: [],
+					webSearchGeminiModel: "",
+					image: "auto",
+					imageOrder: [],
+					tts: "auto",
+					judgmentProvider: "auto",
+					autoThinkingModel: "online",
+					unexpectedStopModel: "online",
+					tinyModel: "online",
+					memoryModel: "online",
+				},
+				stt: { modelName: "parakeet" },
+			});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("modelRoles")).toEqual({});
+			expect(settings.get("retry.fallbackChains")).toEqual({});
+			settings.set("display.showTokenUsage", true);
+			await settings.flush();
+			const saved = await readSettings();
+			expect(saved.modelRoles).toBeUndefined();
+			expect(saved.retry).toBeUndefined();
+			expect(saved.providers).toBeUndefined();
+			expect(saved.stt).toBeUndefined();
+		});
+
+		it("prefers nested legacy values over flat forms", async () => {
+			await writeSettings({
+				providers: { webSearchOrder: ["exa"] },
+				"providers.webSearchOrder": ["gemini"],
+			});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.getModelRole("web")).toBe(webExaCandidates[0]);
+			expect(settings.get("retry.fallbackChains").web).toEqual(webExaCandidates.slice(1));
+		});
+
+		it("preserves explicit roles and empty chains while prepending local tiny and memory models", async () => {
+			await writeSettings({
+				modelRoles: {
+					web: "custom/web",
+					image: "custom/image",
+					speech: "custom/speech",
+					dictation: "custom/dictation",
+					judge: "custom/judge",
+					tiny: "custom/tiny,@smol",
+					memory: "custom/memory",
+				},
+				retry: {
+					fallbackChains: { web: [], image: [], speech: [], dictation: [], judge: [] },
+				},
+				providers: {
+					webSearchOrder: ["exa"],
+					imageOrder: ["xai"],
+					tts: "local",
+					judgmentProvider: "llm",
+					autoThinkingModel: "qwen3-1.7b",
+					unexpectedStopModel: "gemma-3-1b",
+					tinyModel: "lfm2.5-230m",
+					memoryModel: "lfm2-1.2b",
+				},
+				stt: { modelName: "fast" },
+			});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("modelRoles")).toEqual({
+				web: "custom/web",
+				image: "custom/image",
+				speech: "custom/speech",
+				dictation: "custom/dictation",
+				judge: "custom/judge",
+				tiny: "local/lfm2.5-230m,custom/tiny,@smol",
+				memory: "local/lfm2-1.2b,custom/memory",
+			});
+			expect(settings.get("retry.fallbackChains")).toEqual({
+				web: [],
+				image: [],
+				speech: [],
+				dictation: [],
+				judge: [],
+			});
 		});
 	});
 
 	describe("compaction method migration", () => {
-		it("defaults to server, snapcompact, handoff, shake, then soft compaction", () => {
-			expect(Settings.isolated().get("compaction.methodOrder")).toEqual([
-				"remote",
-				"snapcompact",
-				"handoff",
-				"shake",
-				"soft",
-			]);
-		});
-
 		it("migrates a local-only legacy strategy to soft compaction", async () => {
 			await writeSettings({ compaction: { strategy: "context-full", remoteEnabled: false } });
 
@@ -1136,6 +2034,66 @@ describe("Settings", () => {
 		});
 	});
 	describe("migrations", () => {
+		it("preserves current ask timeout seconds in overrides and persisted config", async () => {
+			expect(Settings.isolated({ "ask.timeout": 2000 }).get("ask.timeout")).toBe(2000);
+
+			await writeSettings({ ask: { timeout: 2000 } });
+			const loaded = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(loaded.get("ask.timeout")).toBe(2000);
+		});
+
+		it("moves the legacy image question timeout and removes its tool settings", async () => {
+			await writeSettings({ inspect_image: { mode: "on", timeoutMs: 42 } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("images.questionTimeoutMs")).toBe(42);
+			settings.set("display.showTokenUsage", true);
+			await settings.flush();
+			expect((await readSettings()).inspect_image).toBeUndefined();
+		});
+
+		it("migrates nested task isolation mode none to disabled", async () => {
+			await writeSettings({ task: { isolation: { mode: "none" } } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("task.isolation.enabled")).toBe(false);
+			expect(settings.get("isolation.backend")).toBe("auto");
+			settings.set("display.showTokenUsage", true);
+			await settings.flush();
+			const saved = await readSettings();
+			expect((saved.task as Record<string, Record<string, unknown>>).isolation).toEqual({ enabled: false });
+		});
+
+		it("migrates flat task isolation mode to enabled with its backend", async () => {
+			await writeSettings({ [["task", "isolation", "mode"].join(".")]: "reflink" });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("task.isolation.enabled")).toBe(true);
+			expect(settings.get("isolation.backend")).toBe("reflink");
+		});
+
+		it("renames legacy isolation backends during mode migration", async () => {
+			await writeSettings({ task: { isolation: { mode: "worktree" } }, isolation: { backend: "fuse-overlay" } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("task.isolation.enabled")).toBe(true);
+			expect(settings.get("isolation.backend")).toBe("overlayfs");
+		});
+
+		it("keeps explicit task isolation enabled over a legacy mode", async () => {
+			await writeSettings({ task: { isolation: { enabled: false, mode: "reflink" } } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("task.isolation.enabled")).toBe(false);
+			expect(settings.get("isolation.backend")).toBe("reflink");
+		});
+
 		it("consolidates legacy Exa suite toggles onto exa.enabled", async () => {
 			await writeSettings({
 				exa: {
@@ -1188,6 +2146,33 @@ describe("Settings", () => {
 			settings.set("display.showTokenUsage", true);
 			await settings.flush();
 			expect((await readSettings()).computer).toEqual({ enabled: true });
+		});
+
+		it("normalizes retired local tiny title models before role migration", async () => {
+			await writeSettings({ providers: { tinyModel: "lfm2-350m" } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.getModelRole("tiny")).toBe("local/lfm2.5-350m");
+			settings.set("display.showTokenUsage", true);
+			await settings.flush();
+			const saved = await readSettings();
+			expect(saved.modelRoles).toEqual({ tiny: "local/lfm2.5-350m" });
+			expect(saved.providers).toBeUndefined();
+		});
+
+		it("normalizes retired flat tiny title keys before role migration", async () => {
+			await Bun.write(getConfigPath(), '"providers.tinyModel": lfm2-350m\n');
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.getModelRole("tiny")).toBe("local/lfm2.5-350m");
+			settings.set("display.showTokenUsage", true);
+			await settings.flush();
+			const saved = await readSettings();
+			expect(saved.modelRoles).toEqual({ tiny: "local/lfm2.5-350m" });
+			expect(saved.providers).toBeUndefined();
+			expect("providers.tinyModel" in saved).toBe(false);
 		});
 
 		it("maps removed atom edit mode settings to hashline", async () => {
@@ -1358,9 +2343,8 @@ describe("Settings", () => {
 			expect(fs.readFileSync(path.join(agentDir, "last-changelog-version"), "utf8")).toBe("0.41.0");
 		});
 
-		it("migrates legacy find and search settings to glob and grep", async () => {
+		it("migrates legacy search settings to grep", async () => {
 			await writeSettings({
-				find: { enabled: false },
 				search: {
 					enabled: false,
 					contextBefore: 2,
@@ -1370,15 +2354,13 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("glob.enabled")).toBe(false);
 			expect(settings.get("grep.enabled")).toBe(false);
 			expect(settings.get("grep.contextBefore")).toBe(2);
 			expect(settings.get("grep.contextAfter")).toBe(5);
 		});
 
-		it("migrates flat legacy find and search settings keys to nested glob and grep", async () => {
+		it("migrates flat legacy search settings keys to nested grep", async () => {
 			await writeSettings({
-				"find.enabled": false,
 				"search.enabled": false,
 				"search.contextBefore": 2,
 				"search.contextAfter": 5,
@@ -1386,28 +2368,31 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("glob.enabled")).toBe(false);
 			expect(settings.get("grep.enabled")).toBe(false);
 			expect(settings.get("grep.contextBefore")).toBe(2);
 			expect(settings.get("grep.contextAfter")).toBe(5);
 		});
 
-		it("does not clobber existing glob/grep settings when migrating legacy find/search ones", async () => {
+		it("does not clobber existing grep settings when migrating legacy search ones", async () => {
 			await writeSettings({
-				find: { enabled: false },
-				glob: { enabled: true },
 				search: { enabled: false },
 				grep: { enabled: true },
-				"find.enabled": false,
-				"glob.enabled": true,
 				"search.enabled": false,
 				"grep.enabled": true,
 			});
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("glob.enabled")).toBe(true);
 			expect(settings.get("grep.enabled")).toBe(true);
+		});
+
+		it("migrates a boolean find.enabled to its explicit on/off mode without touching glob", async () => {
+			await writeSettings({ find: { enabled: true }, glob: { enabled: false } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("find.enabled")).toBe("on");
+			expect(settings.get("glob.enabled")).toBe(false);
 		});
 
 		it("migrates nested dev.autoqa.consent and todo.reminders.max without configuring parents", async () => {
@@ -1538,6 +2523,86 @@ describe("Settings", () => {
 			expect(fs.existsSync(jsonPath)).toBe(false);
 			expect(fs.existsSync(`${jsonPath}.bak`)).toBe(true);
 		});
+
+		it("does not resurrect agent.db settings after config.yml is deleted", async () => {
+			const dbPath = getAgentDbPath(agentDir);
+			const db = new Database(dbPath);
+			db.exec(`
+				CREATE TABLE settings (
+					key TEXT PRIMARY KEY,
+					value TEXT NOT NULL,
+					updated_at INTEGER NOT NULL DEFAULT 0
+				);
+			`);
+			db.prepare("INSERT INTO settings (key, value, updated_at) VALUES (?, ?, 1)").run(
+				"symbolPreset",
+				JSON.stringify("ascii"),
+			);
+			db.close();
+
+			const first = await Settings.init({ cwd: projectDir, agentDir });
+			expect(first.get("symbolPreset")).toBe("ascii");
+			expect((await readSettings()).symbolPreset).toBe("ascii");
+
+			const storage = await AgentStorage.open(dbPath);
+			expect(storage.getSettings()).toBeNull();
+
+			await fs.promises.unlink(getConfigPath());
+			AgentStorage.close();
+			resetSettingsForTest();
+
+			const second = await Settings.init({ cwd: projectDir, agentDir });
+			expect(second.get("symbolPreset")).toBe("unicode");
+			expect(second.isConfigured("symbolPreset")).toBe(false);
+			expect(await Bun.file(getConfigPath()).exists()).toBe(false);
+		});
+
+		it("keeps settings.json when the migrated config.yml write fails", async () => {
+			const jsonPath = path.join(agentDir, "settings.json");
+			await fs.promises.writeFile(jsonPath, JSON.stringify({ symbolPreset: "ascii", queueMode: "all" }));
+
+			const open = fs.promises.open.bind(fs.promises);
+			vi.spyOn(fs.promises, "open").mockImplementation(async (filePath, flags, mode) => {
+				if (String(filePath).includes(`${path.sep}config.yml.`) && String(filePath).endsWith(".tmp")) {
+					throw new FsCodeError("EACCES", "injected migration write failure");
+				}
+				return open(filePath, flags, mode);
+			});
+			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+			await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(fs.existsSync(jsonPath)).toBe(true);
+			expect(fs.existsSync(`${jsonPath}.bak`)).toBe(false);
+			expect(await Bun.file(getConfigPath()).exists()).toBe(false);
+			expect(JSON.parse(await fs.promises.readFile(jsonPath, "utf8"))).toEqual({
+				symbolPreset: "ascii",
+				queueMode: "all",
+			});
+			expect(warnSpy).toHaveBeenCalledWith(
+				"Settings: failed to write migrated config.yml",
+				expect.objectContaining({ path: getConfigPath() }),
+			);
+		});
+
+		it("does not resurrect archived legacy settings after config.yml is removed", async () => {
+			const jsonPath = path.join(agentDir, "settings.json");
+			await fs.promises.writeFile(jsonPath, JSON.stringify({ symbolPreset: "ascii", queueMode: "all" }));
+
+			await Settings.init({ cwd: projectDir, agentDir });
+			expect(await Bun.file(getConfigPath()).exists()).toBe(true);
+			expect(fs.existsSync(`${jsonPath}.bak`)).toBe(true);
+
+			await fs.promises.rm(getConfigPath());
+			resetSettingsForTest();
+			AgentStorage.close();
+			const reloaded = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(reloaded.get("symbolPreset")).not.toBe("ascii");
+			expect(await Bun.file(getConfigPath()).exists()).toBe(false);
+			expect(fs.existsSync(`${jsonPath}.bak`)).toBe(true);
+		});
+
 		it("migrates legacy power booleans with system=true to system level", async () => {
 			await writeSettings({
 				power: {
@@ -1709,6 +2774,85 @@ describe("Settings", () => {
 
 			settings.override("extensions", ["../override-ext"]);
 			expect(settings.extensionsSourceLevel()).toBe("user");
+		});
+	});
+
+	describe("project .claude/settings.json parse warnings", () => {
+		it("logs capability warnings when project settings.json fails to parse", async () => {
+			const claudeSettings = path.join(projectDir, ".claude", "settings.json");
+			await Bun.write(claudeSettings, '{ "symbolPreset": "ascii", }');
+
+			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir, inMemory: true });
+			expect(settings.get("symbolPreset")).toBe("unicode");
+			expect(warnSpy).toHaveBeenCalledWith(
+				expect.stringMatching(/Settings: \[Claude Code\] Failed to parse JSON in .*settings\.json/),
+			);
+
+			warnSpy.mockRestore();
+		});
+
+		it("drops user-level warnings that #readProjectSettings does not merge", async () => {
+			const projectSettingsJson = path.join(projectDir, ".claude", "settings.json");
+			vi.spyOn(discovery, "loadCapability").mockResolvedValue({
+				items: [],
+				all: [],
+				warnings: [
+					`[Claude Code] Failed to parse JSON in ${path.join(tempDir.path(), "home", ".claude", "settings.json")}`,
+					"[Claude Code] Failed to load: boom",
+					`[Claude Code] Failed to parse JSON in ${projectSettingsJson}`,
+				],
+				providers: [],
+			});
+			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+			await Settings.init({ cwd: projectDir, agentDir, inMemory: true });
+			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(projectSettingsJson));
+			expect(warnSpy.mock.calls.filter(args => String(args[0]).includes("home"))).toEqual([]);
+			expect(warnSpy.mock.calls.filter(args => String(args[0]).includes("Failed to load"))).toEqual([]);
+		});
+
+		it("logs project warnings when the cwd is a filesystem root", async () => {
+			const root = path.parse(projectDir).root;
+			const rootSettingsJson = path.join(root, ".claude", "settings.json");
+			vi.spyOn(discovery, "loadCapability").mockResolvedValue({
+				items: [],
+				all: [],
+				warnings: [`[Claude Code] Failed to parse JSON in ${rootSettingsJson}`],
+				providers: [],
+			});
+			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+			await Settings.init({ cwd: root, agentDir, inMemory: true });
+			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(rootSettingsJson));
+		});
+
+		it("logs a persistently malformed project file once across reloads", async () => {
+			const claudeSettings = path.join(projectDir, ".claude", "settings.json");
+			await Bun.write(claudeSettings, '{ "symbolPreset": "ascii", }');
+
+			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(warnSpy.mock.calls.filter(args => String(args[0]).includes("Failed to parse JSON"))).toHaveLength(1);
+
+			await settings.reloadFromDisk();
+			expect(warnSpy.mock.calls.filter(args => String(args[0]).includes("Failed to parse JSON"))).toHaveLength(1);
+		});
+
+		it("surfaces a project file that becomes malformed after startup", async () => {
+			const claudeSettings = path.join(projectDir, ".claude", "settings.json");
+
+			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(warnSpy.mock.calls.filter(args => String(args[0]).includes("Failed to parse JSON"))).toHaveLength(0);
+
+			await Bun.write(claudeSettings, '{ "symbolPreset": "ascii", }');
+			await settings.reloadFromDisk();
+
+			expect(settings.get("symbolPreset")).toBe("unicode");
+			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(claudeSettings));
 		});
 	});
 });

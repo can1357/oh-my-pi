@@ -1,12 +1,10 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
-import { isRecord } from "@oh-my-pi/pi-utils";
 
 import { installAgent } from "./agent";
-import type { AgentBinaries, GatewayConfig, TbTask, TrialResult, TrialUsage, VmonConfig } from "./types";
+import type { AgentBinaries, AgentConfig, GatewayConfig, TbTask, TrialResult, TrialUsage, VmonConfig } from "./types";
 import { TrialVm } from "./vmon";
 
 const EMPTY_USAGE: TrialUsage = {
@@ -17,8 +15,6 @@ const EMPTY_USAGE: TrialUsage = {
 	costUsd: 0,
 	turns: 0,
 };
-
-const TERMINAL_BENCH_TOOLS = "bash,read,write,edit,grep,glob,inspect_image";
 
 function elapsedMs(startedAt: number): number {
 	return Math.round(performance.now() - startedAt);
@@ -36,21 +32,6 @@ async function writeArtifact(dir: string, name: string, content: string): Promis
 	await Bun.write(path.join(dir, name), content);
 }
 
-function addDelegatedUsage(messages: AgentMessage[], usage: TrialUsage): void {
-	for (const message of messages) {
-		if (message.role !== "toolResult" || message.toolName !== "inspect_image" || !isRecord(message.details)) continue;
-		const delegated = message.details.usage;
-		if (!isRecord(delegated)) continue;
-		if (typeof delegated.input === "number") usage.input += delegated.input;
-		if (typeof delegated.output === "number") usage.output += delegated.output;
-		if (typeof delegated.cacheRead === "number") usage.cacheRead += delegated.cacheRead;
-		if (typeof delegated.cacheWrite === "number") usage.cacheWrite += delegated.cacheWrite;
-		if (isRecord(delegated.cost) && typeof delegated.cost.total === "number") {
-			usage.costUsd += delegated.cost.total;
-		}
-	}
-}
-
 function modelParts(value: string): { provider: string; model: string } {
 	const slash = value.indexOf("/");
 	if (slash <= 0 || slash === value.length - 1) throw new Error(`Model must be provider/model, got ${value}`);
@@ -62,6 +43,7 @@ export async function runTrial(opts: {
 	task: TbTask;
 	model: string;
 	binaries: AgentBinaries;
+	agent: AgentConfig;
 	gateway: GatewayConfig;
 	vmon: VmonConfig;
 	trialDir: string;
@@ -131,17 +113,19 @@ export async function runTrial(opts: {
 		opts.log?.("connect gateway");
 		const gatewayUrl = await beforeDeadline(vm.startGateway(opts.gateway.url));
 		opts.log?.("install agent");
-		const entrypoint = await beforeDeadline(installAgent(vm, opts.binaries, { ...opts.gateway, url: gatewayUrl }));
+		const entrypoint = await beforeDeadline(
+			installAgent(vm, opts.binaries, { ...opts.gateway, url: gatewayUrl }, opts.agent),
+		);
 		const logDirs = await vm.exec("mkdir -p /logs/agent /logs/verifier");
 		if (logDirs.exitCode !== 0) throw new Error(`Could not create log directories: ${logDirs.stderr.trim()}`);
 		checkDeadline();
 
 		const { provider, model } = modelParts(opts.model);
 		client = new RpcClient({
-			spawn: vm.rpcTransport(entrypoint, opts.task.agentTimeoutSec + 30),
+			spawn: vm.rpcTransport(entrypoint, opts.task.agentTimeoutSec + 30, opts.agent.env),
 			provider,
 			model,
-			args: ["--no-session", "--auto-approve", "--tools", TERMINAL_BENCH_TOOLS],
+			args: ["--no-session", "--auto-approve", "--tools", opts.agent.tools.join(",")],
 		});
 		let turns = 0;
 		const unsubscribe = client.onEvent(event => {
@@ -195,7 +179,6 @@ export async function runTrial(opts: {
 		let transcript = "[]\n";
 		try {
 			const messages = await client.getMessages();
-			addDelegatedUsage(messages, usage);
 			transcript = `${JSON.stringify(messages, null, 2)}\n`;
 		} catch (error) {
 			agentCollectionError ??= errorMessage(error);

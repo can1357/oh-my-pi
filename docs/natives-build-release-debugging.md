@@ -2,11 +2,11 @@
 
 This runbook describes how `@oh-my-pi/pi-natives` produces `.node` addons, generated declarations, and compiled-binary embedded payloads, and how to debug loader/build failures.
 
-Addon **artifacts are built by Bazel** (`rules_rust` + `crate_universe` + hermetic cc toolchains); the cargo workspace stays authoritative for local Rust iteration (rust-analyzer, `cargo nextest`) and for napi typedef regeneration. Runtime loading and embedding are unchanged.
+Release addons are built by Bazel (`rules_rust` + `crate_universe` + hermetic cc toolchains) except `win32-arm64`, which is built natively through Cargo/N-API on GitHub's Windows ARM64 runner. The cargo workspace stays authoritative for local Rust iteration (rust-analyzer, `cargo nextest`) and host builds. Runtime loading and embedding are unchanged.
 
 It follows the architecture terms from `docs/natives-architecture.md`:
 
-- **build-time artifact production** (Bazel `//:natives-<target>` via `scripts/bazel-natives.ts`)
+- **build-time artifact production** (Bazel `//:natives-<target>` or the Cargo-backed `host` target via `scripts/bazel-natives.ts`)
 - **embedded addon manifest generation** (`scripts/embed-native.ts`)
 - **runtime addon loading** (`native/index.js`, `native/loader-state.js`)
 
@@ -26,7 +26,7 @@ Build side:
 
 Package side (unchanged runtime/packaging):
 
-- `packages/natives/scripts/build-bindings.ts` — dev-only typedef regeneration
+- `packages/natives/scripts/build-bindings.ts` — host Cargo/N-API build and typedef regeneration
 - `packages/natives/scripts/embed-native.ts`, `gen-enums.ts`, `gen-npm-packages.ts`
 - `packages/natives/package.json`
 - `packages/natives/native/index.js`, `native/loader-state.js`
@@ -35,7 +35,7 @@ Package side (unchanged runtime/packaging):
 
 ### 1) `//:natives-<target>` addon targets
 
-Root `BUILD.bazel` instantiates one `native_addon` per shipped `(platform, arch, ISA-variant)`:
+Root `BUILD.bazel` instantiates one `native_addon` per Bazel-built `(platform, arch, ISA-variant)`:
 
 | Target                               | Platform                                    | Canonical output                      |
 | ------------------------------------ | ------------------------------------------- | ------------------------------------- |
@@ -50,6 +50,7 @@ Root `BUILD.bazel` instantiates one `native_addon` per shipped `(platform, arch,
 
 Notes:
 
+- Windows ARM64 has no Bazel target: the release matrix builds `host` through Cargo/N-API on `windows-11-arm`, producing `pi_natives.win32-arm64.node`.
 - musl addons **intentionally reuse** the plain `linux-<arch>` filenames — the loader never sees gnu and musl side by side; release jobs keep them in separate invocations/dest dirs (`scripts/bazel-natives.ts` hard-errors on a basename collision within one run).
 - Aggregates: `//:natives-linux-all` (all linux targets + the msvc cross build, i.e. everything buildable from a linux-x64 host) and `//:natives-darwin-all` (mac hosts only).
 
@@ -64,7 +65,7 @@ Notes:
 
 This mirrors the old cargo `ci` profile. Because the profile lives **in the transition**, a bare `bazel build //:natives-<t>` is always release-grade regardless of `-c`, and every addon shares one cache entry per (platform, source) pair. The rule then symlinks the produced shared library to the loader's canonical `pi_natives.<platform>-<arch>[-<variant>].node` name, scoped under the rule name (`bazel-bin/natives-<t>/…`) so gnu/musl outputs with identical basenames cannot collide at the package level.
 
-Per-target codegen that is not part of the transition lives in `crates/pi-natives/BUILD.bazel` `rustc_flags` selects: `-Ctarget-cpu=x86-64-v2` (baseline) / `x86-64-v3` (modern) via `//bazel/variants`, the napi link args (`-Wl,-undefined,dynamic_lookup` on macOS, `-Wl,-z,nodelete` on linux — `build.rs`/`napi_build::setup()` is deliberately not wired in), `-Ctarget-feature=-crt-static` for musl, and `-Ctarget-feature=+crt-static` for win32-x64 msvc (paired with the `static_link_msvcrt` cc feature enabled in the `native_addon` transition so the C deps compile `/MT` in lock-step — the shipped `.node` then imports no `VCRUNTIME140.dll` from the VC++ Redistributable).
+Per-target codegen that is not part of the transition lives in `crates/pi-natives/BUILD.bazel` `rustc_flags` selects: `-Ctarget-cpu=x86-64-v2` (baseline) / `x86-64-v3` (modern) via `//bazel/variants`, the napi link args (`-Wl,-undefined,dynamic_lookup` on macOS, `-Wl,-z,nodelete` on linux — `build.rs`/`napi_build::setup()` is deliberately not wired in), `-Ctarget-feature=-crt-static` for musl, and `-Ctarget-feature=+crt-static` for win32-x64 msvc (paired with the `static_link_msvcrt` cc feature enabled in the `native_addon` transition so the C deps compile `/MT` in lock-step — the shipped `.node` then imports no `VCRUNTIME140.dll` from the VC++ Redistributable). The Cargo host path applies the same `+crt-static` policy to Windows ARM64 in `build-bindings.ts`.
 
 ### 3) Platforms and toolchains
 
@@ -74,12 +75,13 @@ Per-target codegen that is not part of the transition lives in `crates/pi-native
 | linux musl (x64/arm64) | `@zig_sdk//libc_aware/toolchain:linux_*_musl`                              | dynamic CRT (`-Ctarget-feature=-crt-static` in the crate BUILD)                                       |
 | darwin (x64/arm64)     | host Xcode toolchain                                                       | Apple frameworks aren't redistributable; darwin addons build on mac hosts only                        |
 | win32-x64 msvc         | `//bazel/toolchains/msvc` (`@msvc_cc`): clang-cl + lld-link + xwin CRT/SDK | hermetic cross-link from linux-x64 CI pods and darwin dev hosts; **static CRT** (`+crt-static` + `static_link_msvcrt`) so the addon needs no VC++ Redistributable; see `bazel/toolchains/msvc/NOTES.md` |
+| win32-arm64 msvc       | Native Visual Studio ARM64 tools on `windows-11-arm`                      | Cargo/N-API host build with a static CRT; the resulting binary and addon are smoke-tested on the same runner |
 
 Rust toolchains are nightly (pinned in `MODULE.bazel`), with repo-local musl re-registrations in `//bazel/toolchains` carrying an explicit `@zig_sdk//libc:musl` constraint (rules_rust's generated gnu and musl toolchains otherwise share (os, cpu) constraints).
 
 ### 4) Third-party crates (`crate_universe`)
 
-`@crates//...` is generated from the workspace `Cargo.toml`/`Cargo.lock`, restricted to exactly the seven shipped triples. Crate-specific build fixes live as `crate.annotation`s in `MODULE.bazel` (see the debugging playbook below).
+`@crates//...` is generated from the workspace `Cargo.toml`/`Cargo.lock`, restricted to exactly the seven Bazel triples. The Windows ARM64 Cargo build resolves the same workspace lock directly. Crate-specific build fixes live as `crate.annotation`s in `MODULE.bazel` (see the debugging playbook below).
 
 The root module intentionally omits `crate_universe`'s optional rendering lock. The first evaluation after crate inputs change splices the workspace and generates external repository specs from the pinned `Cargo.lock`; Bazel records that extension result in `MODULE.bazel.lock`, so later clean output bases reuse it. Cargo manifest, lock, and annotation edits therefore require no separate repin step.
 
@@ -140,7 +142,7 @@ build --tls_certificate=infra/bazel-remote/ca.crt
 
 `.github/workflows/ci.yml` separates `rust_validate` from `native_addons`; TypeScript jobs depend only on `native_addons`.
 
-**Pull requests never build or validate Rust.** Native-affecting PRs are rare enough that they don't warrant a PR-side bazel build: `rust_validate` is skipped entirely (`if: github.event_name != 'pull_request'`), and `native_addons` fetches the latest release's Linux x64 addon pair from the `@oh-my-pi/pi-natives-linux-x64` npm leaf, smoke-loads both, and uploads them as the `native-addons` workflow artifact. The loader skips its version sentinel for workspace loads, so release-versioned addons load fine under a newer checkout. A PR whose TypeScript tests depend on changed native behavior fails visibly (and CI emits a notice on any native-touching PR); the Rust side is validated post-merge on main and again at release.
+**Pull requests never build or validate Rust.** Native-affecting PRs are rare enough that they don't warrant a PR-side bazel build: `rust_validate` is skipped entirely (`if: github.event_name != 'pull_request'`), and `native_addons` fetches the latest release's Linux x64 addon pair from the `@oh-my-pi/pi-natives-linux-x64` npm leaf, smoke-loads both, and uploads them as the `natives-linux-x64` workflow artifact. The loader skips its version sentinel for workspace loads, so release-versioned addons load fine under a newer checkout; a symbol added after that release is a throwing stub that names the addon and the rebuild command, rather than `undefined`. A PR whose TypeScript tests depend on changed native behavior fails visibly (and CI emits a notice on any native-touching PR); the Rust side is validated post-merge on main and again at release.
 
 On non-PR events both jobs run on `omp-kata` pods against the cluster remote cache. `rust_validate` runs:
 
@@ -158,13 +160,13 @@ bazelisk --bazelrc="$rc" build --config=rustfmt //crates/...
 - `--config=clippy` = rules_rust clippy aspect + `-Dwarnings`; `--config=clippy-strict` layers the generated `bazel/clippy.bazelrc` for crates with `[lints] workspace = true`.
 - `--config=rustfmt` = rustfmt aspect against the workspace `rustfmt.toml`.
 
-`native_addons` on main builds the six Linux-hosted targets one at a time to avoid concurrent-link OOMs, then builds `//:natives-linux-all` as an aggregate consistency check. It uploads every `.node` output as the `native-addons` workflow artifact. Downstream jobs use `.github/actions/native-artifacts` to download that artifact and install the requested target set without invoking Bazel.
+`native_addons` on main builds the six Linux-hosted targets one at a time to avoid concurrent-link OOMs, then builds `//:natives-linux-all` as an aggregate consistency check. It uploads the linux-x64 pair as the `natives-linux-x64` workflow artifact and every other `.node` output as `native-addons`, so the TS test jobs (which need only the pair) skip the larger download. Downstream jobs use `.github/actions/native-artifacts`, which always downloads `natives-linux-x64`, adds `native-addons` only when a requested target is outside that pair, and installs the requested target set without invoking Bazel.
 
-No toolchain setup steps are required for native jobs: bazelisk is on the GitHub images and baked into the kata runner image; Bazel fetches Rust/zig/LLVM/xwin hermetically.
+Bazel native jobs need no toolchain setup: bazelisk is on the GitHub images and baked into the kata runner image, while Bazel fetches Rust/zig/LLVM/xwin hermetically. The Windows ARM64 host build uses the Rust, Ninja, CMake, and Visual Studio ARM64 tools installed on `windows-11-arm`; `rust-toolchain.toml` selects the pinned nightly.
 
 ### Hosted cache warmer
 
-`.github/workflows/bazel-cache-warm.yml` seeds the GitHub-hosted caches that have no other reliable producer: the `release-darwin-*` bazel disk caches (built on the same macOS images as the `release_binary_darwin` matrix, so a release's bazel build is the version-bump delta instead of a ~40-min cold graph) and the shared bun store entry PR jobs restore but never save. It triggers only on pushes that can change those archives (crate/bazel/lock inputs, `bun.lock`, `.github/**`).
+`.github/workflows/bazel-cache-warm.yml` seeds the GitHub-hosted caches that have no other reliable producer: the `release-darwin-*` bazel disk caches (built on the same macOS images as the Darwin legs of the `release_binary_hosted` matrix, so a release's bazel build is the version-bump delta instead of a ~40-min cold graph) and the shared bun store entry PR jobs restore but never save. It triggers only on pushes that can change those archives (crate/bazel/lock inputs, `bun.lock`, `.github/**`).
 
 ### `bazel-cache` action (`.github/actions/bazel-cache`)
 
@@ -175,15 +177,15 @@ Single source of truth for cache wiring, emitted as a bazelrc fragment (its `rc`
 | omp-kata pod  | A temporary output root, `--config=ci`, the PVC-backed repository/xwin caches, `--config=cache-rw`, the in-cluster TLS remote-cache endpoint and masked Basic-auth header, plus `--remote_download_toplevel` |
 | GitHub-hosted | `--config=ci`, `--disk_cache=$HOME/.cache/omp-bazel-disk`, and `--repository_cache=$HOME/.cache/omp-bazel-repo`                                                                                              |
 
-Hosted disk caches use `bazel-disk-v3-<scope>-<os>-<arch>-<config-hash>-<source-hash>`. The config hash covers Cargo/Bazel/toolchain settings; the source hash covers `crates/**` and root `BUILD.bazel`. Restores fall back from the exact key to the config-scoped prefix, then to a bare `<scope>-<os>-<arch>` prefix — the bare fallback is what keeps release version bumps (which rewrite `Cargo.toml`/`Cargo.lock` and thus the config hash) from rebuilding cold; bazel's content-addressed action keys make a stale archive a partial hit, never a wrong output. An inexact restore permits one refreshed exact-key save. Before a hosted build, disk-cache files untouched for 14 days are pruned; repository-cache contents are deliberately not age-pruned because extracted files retain upstream mtimes. The remote endpoint resolves only inside the cluster.
+Hosted disk caches use `bazel-disk-v3-<scope>-<os>-<arch>-<config-hash>-<source-hash>`. The config hash covers Cargo/Bazel/toolchain settings; the source hash covers `crates/**` and root `BUILD.bazel`. Restores fall back from the exact key to the config-scoped prefix, then to a bare `<scope>-<os>-<arch>` prefix — the bare fallback is what keeps release version bumps (which rewrite `Cargo.toml`/`Cargo.lock` and thus the config hash) from rebuilding cold; bazel's content-addressed action keys make a stale archive a partial hit, never a wrong output. An inexact restore permits one refreshed exact-key save, and only on `main`: cache entries are scoped to the saving ref, so a tag- or branch-scoped archive is unreadable by later releases yet still counts against the 10 GB quota (a tag-dispatched v18.2.10 release saved a 5 GB darwin archive and evicted main's). The bun store saves follow the same main-only rule. Before a hosted build, disk-cache files untouched for 14 days are pruned; repository-cache contents are deliberately not age-pruned because extracted files retain upstream mtimes. The remote endpoint resolves only inside the cluster.
 
 ### Native artifact actions
 
-`.github/actions/bazel-natives` is the direct builder: `bazel-cache` → `OMP_BAZEL_RC=<rc> bun scripts/bazel-natives.ts <targets> --dest <dest>`, followed by a disk-cache save after a hosted miss. `.github/actions/native-artifacts` is the no-build consumer: download `native-addons` → run the same driver with `--source`.
+`.github/actions/bazel-natives` is the direct builder: `bazel-cache` → `OMP_BAZEL_RC=<rc> bun scripts/bazel-natives.ts <targets> --dest <dest>`, followed by a disk-cache save after a hosted miss. `.github/actions/native-artifacts` is the no-build consumer: download `natives-linux-x64` (plus `native-addons` for any other target) → run the same driver with `--source`.
 
 ### Release binary builds and publishing
 
-Binary builds are build-only and run in parallel with the test fan-out. `release_binary` (Linux + Windows matrices) needs only `native_addons`, whose workflow artifact supplies their addons. `release_binary_darwin` needs only `release_metadata` and starts the moment a release run is detected: darwin artifacts cannot be cross-built on Linux, so each macOS leg builds its own architecture through `bazel-natives` with scope `release-<target_id>` (seeded near HEAD by the warm workflow — normally just the version-bump delta), then `bun run ci:release:build-binaries` embeds and compiles the executable. Publishing is held behind `release_gate` (the aggregate of every validation job): `release_native_leaves` downloads all built addons and publishes the five `@oh-my-pi/pi-natives-<tag>` leaves from one linux runner, and the GitHub release / verify / core npm chain runs beside it.
+Binary builds are build-only and run in parallel with the test fan-out. `release_binary` (Linux plus cross-built win32-x64) needs only `native_addons`, whose workflow artifact supplies its addons. `release_binary_hosted` needs only `release_metadata` and starts when a release is detected: each Darwin leg builds through `bazel-natives` with scope `release-<target_id>` (seeded near HEAD by the warm workflow), while the `windows-11-arm` leg builds its native addon through Cargo/N-API. Every leg then runs `bun run ci:release:build-binaries` and smoke-tests the executable on its target architecture. Publishing is held behind `release_gate`: `release_native_leaves` downloads all built addons and publishes the six `@oh-my-pi/pi-natives-<tag>` leaves from one Linux runner, and the GitHub release / verify / core npm chain runs beside it.
 
 ## Debugging playbook
 
@@ -214,12 +216,12 @@ bazelisk build --nobuild //:natives-win32-x64-baseline
 | Symptom                                                                                        | Cause                                                                                                | Fix (in tree)                                                                                                                                                                  |
 | ---------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | musl build "succeeds" but emits no `.node`                                                     | musl defaults to `+crt-static`; rustc silently emits no cdylib                                       | `-Ctarget-feature=-crt-static` select in `crates/pi-natives/BUILD.bazel`                                                                                                       |
-| opus/cmake `try_compile` fails linking UBSan runtime                                           | zig cc enables UBSan by default; cmake's test exe links with the raw wrapper (no toolchain features) | `CFLAGS=-fno-sanitize=undefined` in the `audiopus_sys` annotation (`MODULE.bazel`)                                                                                             |
+| Opus objects pull the host UBSan runtime                                                       | zig cc enables UBSan by default                                                                      | `CFLAGS=-fno-sanitize=undefined` in the `opusic-sys` annotation (`MODULE.bazel`)                                                                                              |
 | `tree-sitter-just` scanner.c `#error` under opt                                                | scanner hard-errors when `NDEBUG` is set (opt-mode cc default)                                       | `CFLAGS=-UNDEBUG` annotation (cc-rs appends env CFLAGS last, so `-U` wins)                                                                                                     |
 | rstest macro: "Cargo.toml not found" in a vendored test                                        | rstest verifies `Cargo.toml` exists in the manifest dir                                              | `compile_data = ["Cargo.toml"]` on the `rust_test` (see `crates/vendor/uu-tail/BUILD.bazel`)                                                                                   |
 | vendored tests fail on bare `test_data/...` paths / symlink into srcs                          | tests assume cargo's cwd, incompatible with runfiles execution                                       | `tags = ["manual"]`; run via `cargo nextest` when touching the fork; hermetic sibling test covers the contract                   |
 | blake3 msvc: `ml64.exe` not found                                                              | cc-rs resolves MASM from build-script PATH on non-windows hosts                                      | `bin/ml64.exe → llvm-ml -m64` shim in `@msvc_cc`, prepended via the `blake3` annotation PATH                                                                                   |
-| audiopus_sys msvc: cmake demands VS generator / rc+mt tools; `try_compile` wants `msvcrtd.lib` | cross cmake on linux/mac hosts; Debug config → `/MDd` which the lean xwin splat lacks                | `CMAKE_GENERATOR_x86_64_pc_windows_msvc=Ninja` + `@msvc_cc`'s `toolchain.cmake` (`CMAKE_TOOLCHAIN_FILE_x86_64_pc_windows_msvc`) pinning wrappers + Release try-compile + `/MT` (static CRT, matches the addon policy) |
+| `opusic-sys` msvc needs the cross CMake toolchain                                               | bundled Opus is configured on Linux/macOS for the Windows target                                     | `@msvc_cc`'s `toolchain.cmake` via `CMAKE_TOOLCHAIN_FILE_x86_64_pc_windows_msvc`; the sys crate selects Ninja, static try-compile, and `/MT`                                  |
 | win32 link oddities generally                                                                  | —                                                                                                    | read `bazel/toolchains/msvc/NOTES.md` first: wrapper self-location, `lld-link` flavor/driver-link behavior, `LIB`, `/MD` CRT choice, xwin splat caveats                        |
 | `rust_test(crate = ...)` "can't find crate" at macro expansion                                 | rmeta-only pipelined deps break macro_rules re-export harness compiles                               | rust pipelined_compilation stays OFF (`.bazelrc` note)                                                                                                                         |
 | build script can't find cmake/ninja                                                            | `--incompatible_strict_action_env` — no host env leaks                                               | explicit `PATH` in the crate annotation (`MODULE.bazel`), not host env                                                                                                         |
@@ -310,7 +312,7 @@ Generated declarations currently include exports from these Rust modules:
 | AST/block/summary      | `astGrep`, `astEdit`, `blockRangeAt`, `summarizeCode`                                                                                   | `ast.rs`, `block.rs`, `summary.rs`                                           |
 | Text/highlight/tokens  | `visibleWidth`, `truncateToWidth`, `highlightCode`, `countTokens`                                                                       | `text.rs`, `highlight.rs`, `tokens.rs`                                       |
 | Shell/PTY/process/keys | `executeShell`, `Shell`, `PtySession`, `Process`, `parseKey`                                                                            | `shell.rs`, `pty.rs`, `ps.rs`, `keys.rs`                                     |
-| Media/system/iso       | `encodeSixel`, `copyToClipboard`, `detectMacOSAppearance`, `MacOSPowerAssertion`, `getWorkProfile`, `isoBackend`, `isoStart`, `isoDiff` | `sixel.rs`, `clipboard.rs`, `appearance.rs`, `power.rs`, `prof.rs`, `iso.rs` |
+| Media/system/iso       | `encodeSixel`, `copyToClipboard`, `detectMacOSAppearance`, `PowerAssertion`, `getWorkProfile`, `isoBackend`, `isoStart`, `isoDiff`      | `sixel.rs`, `clipboard.rs`, `appearance.rs`, `power.rs`, `prof.rs`, `iso.rs` |
 
 ## Failure behavior and diagnostics
 

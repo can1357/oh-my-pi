@@ -24,9 +24,13 @@ export const bandComposerStyle: ComposerStyle = {
 		return 0;
 	},
 
-	renderTop(ctx: ComposerChromeContext): string | undefined {
+	renderTop(ctx: ComposerChromeContext): string {
 		const { topBorder, width } = ctx;
-		if (!topBorder?.content) return undefined;
+		// The band always owns one chrome row (`verticalChrome: 1`): keep it
+		// reserved while the status line has nothing to show yet — the startup
+		// prepaint mounts the editor before the session-aware status line
+		// attaches — so the band fills in later without shifting the layout.
+		if (!topBorder?.content) return "";
 		// The band builder already sizes its groups + gauge to the full width;
 		// truncation only guards against a stale provider during resize.
 		return topBorder.width > width ? truncateToWidth(topBorder.content, width) : topBorder.content;

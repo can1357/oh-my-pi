@@ -19,12 +19,13 @@ import type {
 	AssistantMessage,
 	AssistantMessageEventStream,
 	Context,
+	ImageContent,
 	Message,
 	ServiceTier,
 	StopReason,
 	TextContent,
-	Tool,
-	TSchema,
+	ToolCall,
+	ToolResultMessage,
 } from "../types";
 
 export type { ParsedRequest };
@@ -59,6 +60,126 @@ function textFromGeminiParts(parts: unknown): string {
 		if (typeof part.text === "string") text += part.text;
 	}
 	return text;
+}
+
+function readInlineData(part: Record<string, unknown>): ImageContent | undefined {
+	const inline = part.inlineData ?? part.inline_data;
+	if (!isRecord(inline)) return undefined;
+	const mimeType =
+		typeof inline.mimeType === "string"
+			? inline.mimeType
+			: typeof inline.mime_type === "string"
+				? inline.mime_type
+				: undefined;
+	const data = typeof inline.data === "string" ? inline.data : undefined;
+	if (!mimeType || !data) return undefined;
+	return { type: "image", mimeType, data };
+}
+
+/** Map Gemini text/inlineData parts to user/assistant content. */
+function contentFromGeminiParts(parts: unknown): string | (TextContent | ImageContent)[] {
+	if (!Array.isArray(parts)) return "";
+	const blocks: (TextContent | ImageContent)[] = [];
+	let textOnly = "";
+	let hasImage = false;
+	for (const part of parts) {
+		if (!isRecord(part)) continue;
+		if (part.thought === true) continue;
+		if (typeof part.text === "string" && part.text.length > 0) {
+			textOnly += part.text;
+			blocks.push({ type: "text", text: part.text });
+			continue;
+		}
+		const image = readInlineData(part);
+		if (image) {
+			hasImage = true;
+			blocks.push(image);
+			continue;
+		}
+		if (part.fileData !== undefined || part.file_data !== undefined) {
+			throw new AIError.ValidationError(
+				"gemini-v1beta: unsupported part type (fileData); only text, inlineData, functionCall, and functionResponse are accepted",
+			);
+		}
+	}
+	if (!hasImage) return textOnly;
+	return blocks;
+}
+
+function readFunctionCall(
+	part: Record<string, unknown>,
+	lastCallIdByName?: Map<string, string[]>,
+): ToolCall | undefined {
+	const call = part.functionCall ?? part.function_call;
+	if (!isRecord(call)) return undefined;
+	const name = typeof call.name === "string" ? call.name : undefined;
+	if (!name) return undefined;
+	const id =
+		typeof call.id === "string" && call.id.length > 0
+			? call.id
+			: `gemini_call_${name}_${Math.random().toString(36).slice(2, 10)}`;
+	if (lastCallIdByName) {
+		const pending = lastCallIdByName.get(name) ?? [];
+		pending.push(id);
+		lastCallIdByName.set(name, pending);
+	}
+	const args = call.args ?? call.arguments;
+	return {
+		type: "toolCall",
+		id,
+		name,
+		arguments: isRecord(args) ? args : {},
+	};
+}
+
+function functionResponseToToolResult(
+	part: Record<string, unknown>,
+	timestamp: number,
+	lastCallIdByName?: Map<string, string[]>,
+): ToolResultMessage | undefined {
+	const resp = part.functionResponse ?? part.function_response;
+	if (!isRecord(resp)) return undefined;
+	const name = typeof resp.name === "string" ? resp.name : "unknown";
+	const pending = lastCallIdByName?.get(name);
+	const correlated = pending?.[0];
+	const id =
+		typeof resp.id === "string" && resp.id.length > 0
+			? resp.id
+			: (correlated ?? `gemini_resp_${name}_${Math.random().toString(36).slice(2, 10)}`);
+	if (pending) {
+		const index = pending.indexOf(id);
+		if (index >= 0) pending.splice(index, 1);
+		if (pending.length === 0) lastCallIdByName?.delete(name);
+	}
+	const response = resp.response;
+	let isError = false;
+	let text = "";
+	if (typeof response === "string") {
+		text = response;
+	} else if (isRecord(response)) {
+		if (typeof response.error === "string") {
+			isError = true;
+			text = response.error;
+		} else if (typeof response.output === "string") {
+			text = response.output;
+		} else {
+			try {
+				text = JSON.stringify(response);
+			} catch {
+				text = String(response);
+			}
+		}
+	} else if (response !== undefined) {
+		text = String(response);
+	}
+	return {
+		role: "toolResult",
+		toolCallId: id,
+		toolName: name,
+		content: text.length > 0 ? [{ type: "text", text }] : [],
+		isError,
+		timestamp,
+	};
 }
 
 function textFromOpenAiContent(content: unknown): string {
@@ -104,11 +225,22 @@ function classifyRole(role: unknown): "user" | "assistant" | "system" | undefine
 	return undefined;
 }
 
-function makeAssistantMessage(text: string, modelId: string, timestamp: number): AssistantMessage {
-	const content: TextContent[] = text.length > 0 ? [{ type: "text", text }] : [];
+function makeAssistantMessage(
+	content: string | (TextContent | ImageContent | ToolCall)[],
+	modelId: string,
+	timestamp: number,
+): AssistantMessage {
+	const blocks: (TextContent | ToolCall)[] =
+		typeof content === "string"
+			? content.length > 0
+				? [{ type: "text", text: content }]
+				: []
+			: content.filter(
+					(block): block is TextContent | ToolCall => block.type === "text" || block.type === "toolCall",
+				);
 	return {
 		role: "assistant",
-		content,
+		content: blocks,
 		api: GEMINI_API,
 		provider: GEMINI_PROVIDER,
 		model: modelId,
@@ -129,17 +261,30 @@ function pushTurn(
 	messages: Message[],
 	systemParts: string[],
 	role: "user" | "assistant" | "system",
-	text: string,
+	content: string | (TextContent | ImageContent | ToolCall)[],
 	modelId: string,
 	timestamp: number,
 ): void {
 	if (role === "system") {
+		const text =
+			typeof content === "string"
+				? content
+				: content
+						.filter((block): block is TextContent => block.type === "text")
+						.map(block => block.text)
+						.join("");
 		if (text.length > 0) systemParts.push(text);
 		return;
 	}
-	if (text.length === 0) return;
-	if (role === "user") messages.push({ role: "user", content: text, timestamp });
-	else messages.push(makeAssistantMessage(text, modelId, timestamp));
+	const empty = typeof content === "string" ? content.length === 0 : content.length === 0;
+	if (empty) return;
+	if (role === "user") {
+		const userContent: string | (TextContent | ImageContent)[] =
+			typeof content === "string"
+				? content
+				: content.filter((block): block is TextContent | ImageContent => block.type !== "toolCall");
+		messages.push({ role: "user", content: userContent, timestamp });
+	} else messages.push(makeAssistantMessage(content, modelId, timestamp));
 }
 
 function walkContents(
@@ -149,16 +294,45 @@ function walkContents(
 	modelId: string,
 	timestamp: number,
 ): void {
+	// Correlate id-less functionResponse parts with the preceding functionCall of the same name.
+	const lastCallIdByName = new Map<string, string[]>();
 	for (const item of contents) {
 		if (!isRecord(item)) continue;
-		pushTurn(
-			messages,
-			systemParts,
-			classifyRole(item.role) ?? "user",
-			textFromGeminiParts(item.parts),
-			modelId,
-			timestamp,
-		);
+		const role = classifyRole(item.role) ?? "user";
+		const parts = Array.isArray(item.parts) ? item.parts : [];
+		const toolCalls: ToolCall[] = [];
+		const toolResults: ToolResultMessage[] = [];
+		const mediaParts: unknown[] = [];
+		for (const part of parts) {
+			if (!isRecord(part)) continue;
+			const call = readFunctionCall(part, lastCallIdByName);
+			if (call) {
+				toolCalls.push(call);
+				continue;
+			}
+			const result = functionResponseToToolResult(part, timestamp, lastCallIdByName);
+			if (result) {
+				toolResults.push(result);
+				continue;
+			}
+			mediaParts.push(part);
+		}
+		const content = contentFromGeminiParts(mediaParts);
+		if (toolCalls.length > 0) {
+			const blocks: (TextContent | ImageContent | ToolCall)[] =
+				typeof content === "string"
+					? [...(content.length > 0 ? [{ type: "text" as const, text: content }] : []), ...toolCalls]
+					: [...content, ...toolCalls];
+			pushTurn(messages, systemParts, role === "system" ? "assistant" : role, blocks, modelId, timestamp);
+		} else {
+			const hasContent = !(typeof content === "string" ? content.length === 0 : content.length === 0);
+			if (hasContent) {
+				pushTurn(messages, systemParts, role, content, modelId, timestamp);
+			}
+		}
+		for (const result of toolResults) {
+			messages.push(result);
+		}
 	}
 }
 
@@ -214,24 +388,6 @@ function applyOpenAiSampling(options: ParsedRequest["options"], body: Record<str
 }
 
 
-function walkGeminiTools(tools: unknown): Tool[] | undefined {
-	if (!Array.isArray(tools)) return undefined;
-	const out: Tool[] = [];
-	for (const tool of tools) {
-		if (!isRecord(tool)) continue;
-		const decls = tool.functionDeclarations ?? tool.function_declarations;
-		if (!Array.isArray(decls)) continue;
-		for (const decl of decls) {
-			if (!isRecord(decl) || typeof decl.name !== "string" || decl.name.length === 0) continue;
-			out.push({
-				name: decl.name,
-				description: typeof decl.description === "string" ? decl.description : "",
-				parameters: (isRecord(decl.parameters) ? decl.parameters : {}) as TSchema,
-			});
-		}
-	}
-	return out.length > 0 ? out : undefined;
-}
 
 function mapGeminiToolChoice(toolConfig: unknown): ParsedRequest["options"]["toolChoice"] {
 	if (!isRecord(toolConfig)) return undefined;
@@ -253,7 +409,7 @@ function mapGeminiToolChoice(toolConfig: unknown): ParsedRequest["options"]["too
 // parseRequest
 // ---------------------------------------------------------------------------
 
-export function parseRequest(body: unknown, _headers?: Headers): ParsedRequest {
+export function parseRequest(body: unknown, _headers?: Headers, defaultStream = true): ParsedRequest {
 	if (!isRecord(body)) {
 		throw new AIError.ValidationError("gemini-v1beta: request body must be a JSON object");
 	}
@@ -270,7 +426,7 @@ export function parseRequest(body: unknown, _headers?: Headers): ParsedRequest {
 		throw new AIError.ValidationError("gemini-v1beta: messages must be an array");
 	}
 
-	const modelId = typeof body.model === "string" ? body.model : "";
+	const modelId = typeof body.model === "string" && body.model.length > 0 ? body.model : "";
 	const now = Date.now();
 	const messages: Message[] = [];
 	const systemParts: string[] = [];
@@ -288,9 +444,10 @@ export function parseRequest(body: unknown, _headers?: Headers): ParsedRequest {
 	if (isRecord(generationConfig)) applyGenerationConfig(options, generationConfig);
 	applyOpenAiSampling(options, body);
 
-	const tools = walkGeminiTools(body.tools);
+	const tools = buildToolsFromGeminiBody(body.tools);
 	const toolChoice = mapGeminiToolChoice(body.toolConfig ?? body.tool_config);
 	if (toolChoice !== undefined) options.toolChoice = toolChoice;
+
 
 	const context: Context = {
 		messages,
@@ -301,9 +458,33 @@ export function parseRequest(body: unknown, _headers?: Headers): ParsedRequest {
 	return {
 		modelId,
 		context,
-		stream: typeof body.stream === "boolean" ? body.stream : true,
+		stream: typeof body.stream === "boolean" ? body.stream : defaultStream,
 		options,
 	};
+}
+
+/** Translate Gemini `tools[].functionDeclarations` into canonical `Context.tools`. */
+function buildToolsFromGeminiBody(tools: unknown): Context["tools"] | undefined {
+	if (!Array.isArray(tools) || tools.length === 0) return undefined;
+	const out: NonNullable<Context["tools"]> = [];
+	for (const entry of tools) {
+		if (!isRecord(entry)) continue;
+		const decls = entry.functionDeclarations ?? entry.function_declarations;
+		if (!Array.isArray(decls)) continue;
+		for (const decl of decls) {
+			if (!isRecord(decl) || typeof decl.name !== "string" || decl.name.length === 0) continue;
+			const parameters = (decl.parametersJsonSchema ??
+				decl.parameters_json_schema ??
+				decl.parameters ??
+				{}) as NonNullable<Context["tools"]>[number]["parameters"];
+			out.push({
+				name: decl.name,
+				description: typeof decl.description === "string" ? decl.description : "",
+				parameters,
+			});
+		}
+	}
+	return out.length > 0 ? out : undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -382,6 +563,22 @@ export function encodeStream(
 
 	return new ReadableStream<Uint8Array>({
 		async start(controller) {
+			const emittedCalls = new Set<string>();
+			const emitCall = (call: ToolCall) => {
+				if (emittedCalls.has(call.id)) return;
+				emittedCalls.add(call.id);
+				writeSse(
+					controller,
+					{
+						...geminiCandidate(
+							[{ functionCall: { name: call.name, args: call.arguments, id: call.id } }],
+							undefined,
+						),
+						modelVersion: requestedModelId,
+					},
+					cancelled,
+				);
+			};
 			try {
 				if (cancelled) {
 					controller.close();
@@ -399,7 +596,13 @@ export function encodeStream(
 								);
 							}
 							break;
+						case "toolcall_end":
+							emitCall(event.toolCall);
+							break;
 						case "done":
+							for (const part of event.message.content) {
+								if (part.type === "toolCall") emitCall(part);
+							}
 							writeSse(
 								controller,
 								{

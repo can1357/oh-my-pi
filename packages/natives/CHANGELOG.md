@@ -2,6 +2,136 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed shell commands using `/dev/stdin`, `/dev/stdout`, `/dev/stderr`, `/dev/fd/N`, and `/dev/tty` so they now access the command's descriptors correctly, including preventing heredoc commands from hanging the TUI.
+- Fixed native operations such as grep, glob, AST, shell, and VCS calls so they promptly honor an `AbortSignal` that was already aborted when the operation starts.
+
+## [18.3.0] - 2026-09-24
+
+### Added
+
+- Added native bindings for Apple Foundation Models availability checks, text generation, and cancellation.
+- Added offline token counting support for TypeSafe Jev 1.13 `state` inputs via `Encoding.Jev` (excluding the request frame).
+
+## [18.2.11] - 2026-09-23
+
+### Changed
+
+- Improved `warmHighlighter()` so it prepares TypeScript, TSX, JavaScript, Bash, Python, Rust, and Markdown highlighting in the background, reducing delays on the first highlight for these languages.
+
+## [18.2.9] - 2026-09-22
+
+### Fixed
+
+- Fixed stale workspace addons failing when first used; the error now identifies the addon and provides the command to rebuild native addons.
+- Fixed background bash jobs hanging indefinitely when output forwarding stalls.
+
+## [18.2.7] - 2026-09-21
+
+### Added
+
+- Added `renderMermaidAscii`, a native Mermaid-to-ASCII/Unicode renderer supporting flowcharts, state, sequence, class, ER, and xychart diagrams with color modes, themes, and direction overrides.
+- Added a `default` package export condition so CommonJS consumers, including bytecode bundles, can load the native bindings.
+
+### Changed
+
+- Improved Mermaid flowchart rendering to respect dependency order, reduce crossings, align branches, and wrap long labels without truncation.
+
+### Fixed
+
+- Fixed Mermaid rendering issues involving arrowhead alignment and duplicate edge junctions around mixed-width node shapes.
+- Fixed sloppy edit grammar compatibility with Codex constrained decoding.
+
+## [18.2.1] - 2026-09-15
+
+### Added
+
+- Added `maxBytes` to `VcsGitRepo.diffText` options: rendering stops and the call rejects with an `OutputTooLarge` VcsError once the patch crosses the cap, so callers can bound the memory a large change set may consume ([#11454](https://github.com/can1357/oh-my-pi/pull/11454) by [@sjawhar](https://github.com/sjawhar)).
+- Native addon embedding now rejects stale release binaries before standalone builds can package them ([#11831](https://github.com/can1357/oh-my-pi/issues/11831)).
+- Fixed git repository discovery treating an unpopulated `.git` directory (no `HEAD`) as a checkout, which made `/wt` and isolated tasks fail with a raw "No such file or directory (os error 2)" instead of reporting that no Git repository was found. Discovery now skips such entries and keeps walking toward the root, matching `git rev-parse`.
+- Added `vcsDiscoverForDisplay` (`repoForDisplay`): like repository discovery, but equal-root jj+git ties prefer Jujutsu for the status line and footer. Git-safe automation must keep using `vcsDiscover` ([#11071](https://github.com/can1357/oh-my-pi/issues/11071), [#11325](https://github.com/can1357/oh-my-pi/pull/11325) by [@boazy](https://github.com/boazy)).
+- Shell and PTY command output on Windows now falls back from UTF-8 to the system ANSI code page (e.g. GBK on Chinese locales) instead of emitting replacement characters.
+
+### Changed
+
+- Workspace startup scans skip excluded build directories and retain a bounded set of entries and directory rules.
+- Limited newest-file searches use less memory on large directory trees when scan caching is disabled.
+
+### Fixed
+
+- Bounded filesystem scan cache memory and prevented stale scans from repopulating the cache after file changes. ([#11240](https://github.com/can1357/oh-my-pi/pull/11240) by [@iliaal](https://github.com/iliaal))
+- Fixed the embedded shell and PTY sessions inheriting `GIT_DIR`, `GIT_WORK_TREE`, and related repo-location overrides from the host process, which made `git` run in a secondary worktree mutate the primary one ([#11082](https://github.com/can1357/oh-my-pi/issues/11082)).
+- Added a vendored Astro grammar so `.astro` files highlight the `---` TypeScript frontmatter and `{…}` template expressions instead of falling back to plain HTML ([#11164](https://github.com/can1357/oh-my-pi/pull/11164) by [@byigitt](https://github.com/byigitt)).
+- Fixed the TUI sometimes stopping repainting while the agent continued running.
+- Fixed native Darwin OAuth helper compilation under sandboxed and custom build environments by respecting `$CC` ([#11869](https://github.com/can1357/oh-my-pi/pull/11869) by [@Malix-Labs](https://github.com/Malix-Labs)).
+
+## [18.1.17] - 2026-09-10
+
+### Fixed
+
+- Fixed Wayland computer-use clicks landing in the wrong place on scaled monitors by mapping captures through the portal's logical monitor geometry ([#11540](https://github.com/can1357/oh-my-pi/issues/11540)).
+
+## [18.1.15] - 2026-09-08
+
+### Fixed
+
+- Fixed C++ language inference excluding CUDA header (`.cuh`) files ([#10782](https://github.com/can1357/oh-my-pi/pull/10782) by [@alphastorm](https://github.com/alphastorm)).
+
+## [18.1.9] - 2026-09-04
+
+### Added
+
+- Added native Sixel-to-PNG decoding for terminal graphics returned by shell commands.
+- Added transactional native OAuth callback registration with one-shot callback delivery on macOS, Linux desktops, and Windows.
+
+### Fixed
+
+- Fixed native version-control cleanup to respect ignore rules and path boundaries while safely handling symlinks, nested repositories, and submodules.
+
+## [18.1.7] - 2026-09-03
+
+### Added
+
+- Added Windows ARM64 native addon support, including platform-specific npm packages.
+
+## [18.1.6] - 2026-09-03
+
+### Breaking Changes
+
+- Renamed `MacOSPowerAssertion` to `PowerAssertion` and `MacOSPowerAssertionOptions` to `PowerAssertionOptions`; the options and handle shapes are unchanged.
+
+### Added
+
+- Added edit-session and edit-store types and utilities for managing edit states, snapshots, hashline operations, edit modes, edit descriptions, editable notebook text, and inline sloppy regions.
+- Added cross-platform sleep inhibition to `PowerAssertion` on Linux and Windows.
+
+### Changed
+
+- `PowerAssertion.start` now reports acquisition failures on Linux and Windows instead of returning a handle that silently does nothing; platforms without an implementation continue to receive a no-op handle.
+
+### Fixed
+
+- Fixed native `git add` so staging an empty file list no longer stages macOS filename-normalization duplicates of tracked paths or files ignored only by a nested `.gitignore`.
+
+## [18.1.5] - 2026-09-03
+
+### Changed
+
+- Updated `worktreeAdd` to support additional worktree creation options, including preserving uncommitted changes.
+
+## [18.1.3] - 2026-09-02
+
+### Fixed
+
+- Fixed `grep` and `sed` treating basic regular expressions as extended ones, which silently matched every line for patterns like `^+` or `s/^\+/` and swapped the meanings of `+` and `\+` ([#10298](https://github.com/can1357/oh-my-pi/pull/10298) by [@mruangutai](https://github.com/mruangutai)).
+
+## [18.1.0] - 2026-09-01
+
+### Fixed
+
+- Fixed TTY output backpressure reporting so pending write progress is accurately reflected during large writes.
+
 ## [18.0.11] - 2026-08-29
 
 ### Fixed

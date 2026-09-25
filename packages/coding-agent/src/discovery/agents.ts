@@ -6,6 +6,7 @@
  * Project-level discovery walks up from cwd to repoRoot.
  */
 import * as path from "node:path";
+import { isWsl, windowsPathToWslMount } from "@oh-my-pi/pi-utils";
 import { registerProvider } from "../capability";
 import { type ContextFile, contextFileCapability } from "../capability/context-file";
 import { readFile } from "../capability/fs";
@@ -16,7 +17,7 @@ import { type SlashCommand, slashCommandCapability } from "../capability/slash-c
 import { type SystemPrompt, systemPromptCapability } from "../capability/system-prompt";
 import type { LoadContext, LoadResult } from "../capability/types";
 import {
-	buildRuleFromMarkdown,
+	discoverRuleFromMarkdown,
 	calculateDepth,
 	createSourceMeta,
 	loadFilesFromDir,
@@ -33,25 +34,6 @@ interface UserPathCandidateOptions {
 	env?: NodeJS.ProcessEnv;
 	windowsUserProfile?: () => string | undefined;
 	wslPath?: (windowsPath: string) => string | undefined;
-}
-
-const WINDOWS_DRIVE_PROFILE_PATTERN = /^([A-Za-z]):[\\/](.*)$/;
-
-function isWsl(platform: NodeJS.Platform, env: NodeJS.ProcessEnv): boolean {
-	return platform === "linux" && Boolean(env.WSL_DISTRO_NAME || env.WSL_INTEROP);
-}
-
-function convertWindowsPathToDefaultWslMount(windowsPath: string): string | undefined {
-	const trimmed = windowsPath.trim();
-	if (trimmed.length === 0) return undefined;
-	// The result is always a WSL (POSIX) path, so build it with posix
-	// semantics regardless of the host platform.
-	if (path.posix.isAbsolute(trimmed)) return path.posix.normalize(trimmed);
-	const match = WINDOWS_DRIVE_PROFILE_PATTERN.exec(trimmed);
-	if (!match) return undefined;
-	const [, drive, rest] = match;
-	const segments = rest.replace(/\\/g, "/").split("/").filter(Boolean);
-	return path.posix.join("/mnt", drive.toLowerCase(), ...segments);
 }
 
 /**
@@ -105,7 +87,10 @@ export function getWslWindowsHomeCandidate(options: UserPathCandidateOptions = {
 	if (!isWsl(platform, env)) return undefined;
 	const userProfile = env.USERPROFILE ?? (options.windowsUserProfile ?? resolveWindowsUserProfile)();
 	if (!userProfile) return undefined;
-	return (options.wslPath ?? resolveWithWslPath)(userProfile) ?? convertWindowsPathToDefaultWslMount(userProfile);
+	const interopPath = (options.wslPath ?? resolveWithWslPath)(userProfile);
+	if (interopPath !== undefined) return interopPath;
+	const trimmed = userProfile.trim();
+	return path.posix.isAbsolute(trimmed) ? path.posix.normalize(trimmed) : windowsPathToWslMount(trimmed);
 }
 
 /**
@@ -200,7 +185,7 @@ async function loadRules(ctx: LoadContext): Promise<LoadResult<Rule>> {
 		loadFilesFromDir<Rule>(ctx, dir, PROVIDER_ID, level, {
 			extensions: ["md", "mdc"],
 			transform: (name, content, filePath, source) =>
-				buildRuleFromMarkdown(name, content, filePath, source, { stripNamePattern: /\.(md|mdc)$/ }),
+				discoverRuleFromMarkdown(name, content, filePath, source, { stripNamePattern: /\.(md|mdc)$/ }),
 		});
 
 	const results = await Promise.all([
@@ -314,17 +299,23 @@ registerProvider<ContextFile>(contextFileCapability.id, {
 	load: loadContextFiles,
 });
 
-// System Prompt (SYSTEM.md)
+// System Prompt (SYSTEM.md, SYSTEM_TEMPLATE.md)
 async function loadSystemPrompt(ctx: LoadContext): Promise<LoadResult<SystemPrompt>> {
-	const load = async (filePath: string, level: "user" | "project"): Promise<SystemPrompt | null> => {
+	const load = async (
+		filePath: string,
+		level: "user" | "project",
+		kind: "text" | "template",
+	): Promise<SystemPrompt | null> => {
 		const content = await readFile(filePath);
 		if (!content) return null;
-		return { path: filePath, content, level, _source: createSourceMeta(PROVIDER_ID, filePath, level) };
+		return { path: filePath, content, kind, level, _source: createSourceMeta(PROVIDER_ID, filePath, level) };
 	};
 
 	const results = await Promise.all([
-		...getProjectPathCandidates(ctx, "SYSTEM.md").map(p => load(p, "project")),
-		...getUserPathCandidates(ctx, "SYSTEM.md").map(p => load(p, "user")),
+		...getProjectPathCandidates(ctx, "SYSTEM.md").map(p => load(p, "project", "text")),
+		...getProjectPathCandidates(ctx, "SYSTEM_TEMPLATE.md").map(p => load(p, "project", "template")),
+		...getUserPathCandidates(ctx, "SYSTEM.md").map(p => load(p, "user", "text")),
+		...getUserPathCandidates(ctx, "SYSTEM_TEMPLATE.md").map(p => load(p, "user", "template")),
 	]);
 
 	return { items: results.filter((r): r is SystemPrompt => r !== null), warnings: [] };
@@ -333,7 +324,7 @@ async function loadSystemPrompt(ctx: LoadContext): Promise<LoadResult<SystemProm
 registerProvider<SystemPrompt>(systemPromptCapability.id, {
 	id: PROVIDER_ID,
 	displayName: DISPLAY_NAME,
-	description: "Load SYSTEM.md from .agent and .agents (project walk-up + user home)",
+	description: "Load SYSTEM.md and SYSTEM_TEMPLATE.md from .agent and .agents (project walk-up + user home)",
 	priority: PRIORITY,
 	load: loadSystemPrompt,
 });

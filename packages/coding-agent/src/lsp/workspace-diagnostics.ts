@@ -171,6 +171,7 @@ async function mapWithConcurrency<T, R>(
 	limit: number,
 	run: (item: T) => Promise<R>,
 ): Promise<R[]> {
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const results: R[] = new Array(items.length);
 	let cursor = 0;
 

@@ -26,8 +26,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CustomTool } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
-import { IrcBus, type IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
-import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -111,7 +110,7 @@ describe("AgentSession plan-mode convergence", () => {
 	beforeAll(async () => {
 		authDir = TempDir.createSync("@pi-plan-converge-auth-");
 		authStorage = await AuthStorage.create(authDir.join("auth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage, authDir.join("models.yml"));
 	});
 
@@ -163,7 +162,6 @@ describe("AgentSession plan-mode convergence", () => {
 			: [askTool, writeTool, readTool];
 		let deviceOnlyWrite = options?.deviceOnlyWrite === true;
 		let pendingFullWriteDescription = false;
-		let currentAgent: Agent | undefined;
 		const xdev: XdevState | undefined = options?.xdev
 			? {
 					tools: toolRegistry,
@@ -184,7 +182,7 @@ describe("AgentSession plan-mode convergence", () => {
 			},
 			streamFn: mock.stream,
 		});
-		currentAgent = agent;
+		const currentAgent = agent;
 
 		let advisorMock: MockModel | undefined;
 		let advisorStreamFn: StreamFn | undefined;
@@ -279,31 +277,6 @@ describe("AgentSession plan-mode convergence", () => {
 		);
 		expect(sawIrc).toBe(true);
 		expect(harness.mock.calls.length).toBe(0);
-	});
-
-	it("T2b: an awaited idle IRC message gets a side-channel auto-reply without waking a turn", async () => {
-		const harness = await createPlanSession([], {
-			sideResponses: [{ content: ["still planning — full reply once the plan settles"] }],
-		});
-		const registry = AgentRegistry.global();
-		registry.register({ id: "peer", displayName: "peer", kind: "sub", session: null, status: "running" });
-		try {
-			const bus = IrcBus.global();
-			const replyPromise = bus.wait("peer", { from: "me" }, 0);
-			const msg: IrcMessage = { id: "m2", from: "peer", to: "me", body: "blocked on you — status?", ts: Date.now() };
-
-			const outcome = await harness.session.deliverIrcMessage(msg, { expectsReply: true });
-			expect(outcome).toBe("injected");
-
-			const reply = await replyPromise;
-			expect(reply?.replyTo).toBe("m2");
-			expect(reply?.body).toContain("still planning");
-			expect(harness.sideMock?.calls.length).toBe(1);
-			expect(harness.mock.calls.length).toBe(0);
-			expect(harness.session.agent.state.messages.some(m => m.role === "assistant")).toBe(false);
-		} finally {
-			registry.unregister("peer");
-		}
 	});
 
 	it("T3a: convergence reminders are bounded by the cap, then yield to the user", async () => {

@@ -27,7 +27,7 @@
 	"clangd": {
 		"command": "clangd",
 		"args": ["--background-index", "--clang-tidy", "--header-insertion=iwyu"],
-		"fileTypes": [".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hxx", ".m", ".mm"],
+		"fileTypes": [".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hxx", ".cu", ".cuh", ".m", ".mm"],
 		"rootMarkers": ["compile_commands.json", "CMakeLists.txt", ".clangd", ".clang-format", "Makefile"]
 	},
 	"zls": {
@@ -65,6 +65,12 @@
 				"includeInlayFunctionParameterTypeHints": true
 			}
 		}
+	},
+	"typescript-native": {
+		"command": "tsc",
+		"args": ["--lsp", "--stdio"],
+		"fileTypes": [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"],
+		"rootMarkers": ["package.json", "tsconfig.json", "jsconfig.json"]
 	},
 	"biome": {
 		"command": "biome",

@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import type {
 	SessionNotification,
 	SessionUpdate,
@@ -6,11 +7,11 @@ import type {
 	ToolCallLocation,
 	ToolKind,
 } from "@oh-my-pi/pi-utils/acp";
-import { parseXdUrl } from "../../internal-urls/xd-protocol";
+import { parseXdUrl } from "@oh-my-pi/pi-tui/tools/xd-url";
 import type { AgentSessionEvent } from "../../session/agent-session";
-import { resolveToCwd, splitPathAndSel, splitPathAndSelPreferringLiteralSync } from "../../tools/path-utils";
-import type { TodoStatus } from "../../tools/todo";
-import { canonicalizeMessage } from "../../utils/thinking-display";
+import { resolveToCwd, splitPathAndSelPreferringLiteralSync } from "../../tools/path-utils";
+import type { TodoStatus } from "@oh-my-pi/pi-tui/tools/todo";
+import { canonicalizeMessage } from "@oh-my-pi/pi-tui/chat/thinking-display";
 
 interface MessageProgress {
 	textEmitted: boolean;
@@ -58,6 +59,10 @@ interface BinaryLikeContent extends TypedValue {
 
 interface PathContainer {
 	path?: unknown;
+}
+
+interface ResolvedPathContainer {
+	resolvedPath?: unknown;
 }
 
 interface OldPathContainer {
@@ -141,37 +146,15 @@ function xdevDispatchDevice(toolName: string, args: unknown): string | undefined
 	return parseXdUrl(path)?.name ?? undefined;
 }
 
-/** Whether a Hub call carries peer-to-peer coordination rather than process control. */
-function isInternalHubMessageTool(toolName: string, args: unknown): boolean {
-	let hubArgs = args;
-	if (toolName !== "hub") {
-		if (xdevDispatchDevice(toolName, args) !== "hub" || typeof args !== "object" || args === null) {
-			return false;
-		}
-		const content = Reflect.get(args, "content");
-		if (typeof content !== "string") return false;
-		try {
-			hubArgs = JSON.parse(content);
-		} catch {
-			return false;
-		}
-	}
-	if (typeof hubArgs !== "object" || hubArgs === null) return false;
-	const op = Reflect.get(hubArgs, "op");
-	switch (op) {
-		case "list":
-		case "inbox":
-			return true;
-		case "send":
-			return typeof Reflect.get(hubArgs, "to") === "string";
-		case "wait":
-			// A bare wait or an `ids` wait settles on background-job delivery,
-			// whose snapshot IS the job result (hub.md) — keep those visible.
-			// Only a peer-scoped wait (`from`, no jobs) is internal messaging.
-			return typeof Reflect.get(hubArgs, "from") === "string" && Reflect.get(hubArgs, "ids") === undefined;
-		default:
-			return false;
-	}
+/** Peer-to-peer messages stay off the external ACP session stream. */
+function isInternalAgentMessageTool(toolName: string, args: unknown): boolean {
+	return (
+		toolName === "write" &&
+		typeof args === "object" &&
+		args !== null &&
+		typeof Reflect.get(args, "path") === "string" &&
+		/^agent:\/\//i.test(Reflect.get(args, "path"))
+	);
 }
 
 export function mapToolKind(toolName: string, args?: unknown): ToolKind {
@@ -179,7 +162,12 @@ export function mapToolKind(toolName: string, args?: unknown): ToolKind {
 	// clients render it as a file modification to a nonexistent path (and
 	// auto-approve it under edit-tier policies). Reads stay "read": listing
 	// devices or fetching docs is discovery.
-	if (toolName === "write" && xdevDispatchDevice(toolName, args)) return "execute";
+	if (
+		toolName === "write" &&
+		(xdevDispatchDevice(toolName, args) ||
+			/^proc:\/\//i.test(extractStringProperty<PathContainer>(args, "path") ?? ""))
+	)
+		return "execute";
 	switch (toolName) {
 		case "read":
 			return "read";
@@ -219,7 +207,7 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 		case "message_end":
 			return mapAssistantMessageEnd(event, sessionId, options);
 		case "tool_execution_start": {
-			if (isInternalHubMessageTool(event.toolName, event.args)) return [];
+			if (isInternalAgentMessageTool(event.toolName, event.args)) return [];
 			const update = buildToolCallStartUpdate({
 				toolCallId: event.toolCallId,
 				toolName: event.toolName,
@@ -230,7 +218,7 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 			return [toSessionNotification(sessionId, update)];
 		}
 		case "tool_execution_update": {
-			if (isInternalHubMessageTool(event.toolName, event.args)) return [];
+			if (isInternalAgentMessageTool(event.toolName, event.args)) return [];
 			const content = mergeToolUpdateContent(
 				buildToolStartContent(event.toolName, event.args),
 				extractToolCallContent(event.partialResult, options),
@@ -252,7 +240,7 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 		}
 		case "tool_execution_end": {
 			const args = getToolExecutionEndArgs(event, options);
-			if (isInternalHubMessageTool(event.toolName, args)) return [];
+			if (isInternalAgentMessageTool(event.toolName, args)) return [];
 			const resultContent = [
 				...extractDiffToolCallContent(event.result),
 				...extractToolCallContent(event.result, options),
@@ -642,23 +630,34 @@ function toAcpLocationPath(value: string, cwd?: string): string {
  */
 const INTERNAL_URL_SUBJECT = /^[a-z][a-z0-9+.-]*:\/\//i;
 
+function existingFileLocationPath(raw: string | undefined, cwd?: string): string | undefined {
+	if (!raw || INTERNAL_URL_SUBJECT.test(raw)) return undefined;
+	const resolved = toAcpLocationPath(raw, cwd);
+	try {
+		return fs.statSync(resolved).isFile() ? resolved : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 /**
- * For the `read` tool, peel a trailing read selector (`:1-20`, `:raw`,
- * `:1-20:raw`, comma-separated ranges) off the filesystem path so the ACP
- * location names the file actually accessed rather than the selector-bearing
- * expression — Zed Follow otherwise treats the selector as part of the
- * filename and opens an empty buffer. Literal POSIX filenames that legitimately
- * end in selector-shaped text (e.g. `report:1-20`) are preserved via the same
- * literal-path precedence the read tool uses. Non-read tools and internal URLs
- * pass through unchanged — colons in write/edit targets are valid filenames.
+ * Return the single existing file represented by a `read` argument.
+ *
+ * ACP locations are editor navigation targets, not tool inputs. Read inputs may
+ * name selectors, delimited paths, globs, directories, archive members, or
+ * internal resources, so only a path that resolves to a regular file is safe
+ * to publish. Literal selector-shaped filenames retain read-tool precedence.
  */
 function readLocationBasePath(
 	raw: string | undefined,
 	cwd: string | undefined,
 	toolName: string | undefined,
 ): string | undefined {
-	if (raw === undefined || toolName !== "read" || INTERNAL_URL_SUBJECT.test(raw)) return raw;
-	return cwd ? splitPathAndSelPreferringLiteralSync(raw, cwd).path : splitPathAndSel(raw).path;
+	if (raw === undefined || toolName !== "read") return raw;
+	if (!cwd || INTERNAL_URL_SUBJECT.test(raw)) return undefined;
+
+	const candidate = splitPathAndSelPreferringLiteralSync(raw, cwd).path;
+	return existingFileLocationPath(candidate, cwd);
 }
 
 function extractToolLocations(args: unknown, cwd?: string, toolName?: string): ToolCallLocation[] {
@@ -685,6 +684,13 @@ function extractToolLocationsFromResult(result: unknown, cwd?: string): ToolCall
 	const details = (result as { details?: unknown }).details;
 	if (typeof details !== "object" || details === null) return [];
 	const direct = extractToolLocations(details, cwd);
+	const resolvedFile = existingFileLocationPath(
+		extractStringProperty<ResolvedPathContainer>(details, "resolvedPath"),
+		cwd,
+	);
+	if (resolvedFile && !direct.some(location => location.path === resolvedFile)) {
+		direct.push({ path: resolvedFile });
+	}
 	const perFile = (details as { perFileResults?: unknown }).perFileResults;
 	if (!Array.isArray(perFile)) {
 		return direct;
@@ -1001,7 +1007,7 @@ function extractReadableText(value: unknown): string | undefined {
 		// A structured result envelope (`{ content: [...] }`) whose blocks carry no
 		// plain text has nothing readable to surface, and its data already rides the
 		// ACP frame as `rawOutput`. Serializing the whole envelope to JSON would just
-		// render a raw blob as the tool row (e.g. hub wait progress, issue #9511), so
+		// render a raw blob as the tool row (e.g. wait progress, issue #9511), so
 		// stop here instead of falling through to the JSON fallback.
 		return undefined;
 	}

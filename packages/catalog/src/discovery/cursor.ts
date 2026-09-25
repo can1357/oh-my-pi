@@ -1,7 +1,7 @@
 import * as http2 from "node:http2";
 import { type } from "@oh-my-pi/omptype";
-import { isKimiK3ModelId } from "../identity";
-import { bareModelId, parseGlmModel, semverGte } from "../identity/classify";
+import { compareRevision, parseRevision } from "../compat/revision";
+import { classifyModel } from "../compat/taxonomy";
 import { getBundledModels } from "../models";
 import { toModelSpec } from "../provider-models/bundled-references";
 import type { Model, ModelSpec } from "../types";
@@ -23,32 +23,9 @@ const DEFAULT_MAX_TOKENS = 64_000;
  * - the max-mode flag on Claude/Gemini ids, whose max-mode ceiling is 1M.
  */
 const CURSOR_1M_CONTEXT_WINDOW = 1_000_000;
+// residue: a display-name label is the only signal for these rows; ids carry
+// no marker the taxonomy could classify.
 const CURSOR_1M_NAME_PATTERN = /\b1m\b/i;
-const CURSOR_MAX_MODE_1M_ID_PATTERN = /claude|gemini/;
-/** Kimi's official bare K3 id (`k3`, `kimi/k3`); `k3-256k` is the 256k SKU and stays out. */
-const CURSOR_KIMI_K3_BARE_ID_PATTERN = /(^|\/)k3$/i;
-
-/**
- * Versioned Cursor Grok ids (`cursor-grok-4.5`, `cursor-grok-4.6-high`) are
- * reasoning models whose effort is carried in the per-tier sibling id.
- * `GetUsableModels` ships no `thinkingDetails` and the bundled references read
- * `reasoning: false`, so classification falls back to the id. The non-reasoning
- * `grok-code-fast-*` family deliberately stays out.
- */
-const CURSOR_GROK_REASONING_ID_PATTERN = /^cursor-grok-\d/i;
-
-/**
- * Cursor-only families verified to accept `selectedImages` even though
- * `GetUsableModels` does not advertise input modalities.
- */
-const CURSOR_GROK_4_MULTIMODAL_ID_PATTERN = /^cursor-grok-4(?:[.:_-]|$)/i;
-const CURSOR_COMPOSER_25_MULTIMODAL_ID_PATTERN = /^composer-2\.5(?:[.:_-]|$)/i;
-
-/**
- * Model-id families whose native catalogs (anthropic, openai/openai-codex,
- * google) are multimodal. Cursor-only verified families are handled separately.
- */
-const CURSOR_MULTIMODAL_ID_PATTERN = /claude|gemini|gpt-|codex/;
 
 const OptionalDisplayNameSchema = type("unknown").pipe(raw => (typeof raw === "string" ? raw : undefined));
 const CursorAliasesSchema = type("unknown").pipe(raw => {
@@ -273,6 +250,27 @@ function decodeConnectUnaryBody(payload: Uint8Array): Uint8Array | null {
 	return null;
 }
 
+function isCursorKimiK3(id: string): boolean {
+	const identity = classifyModel("cursor", id, { lenient: true });
+	return identity.class === "kimi" && identity.family === "k3";
+}
+function isCursorVersionedGrok(id: string): boolean {
+	const identity = classifyModel("cursor", id, { lenient: true });
+	if (identity.class !== "xai" || identity.revision === undefined) return false;
+	const revision = parseRevision(identity.revision);
+	const floor = parseRevision("4");
+	return revision !== undefined && floor !== undefined && compareRevision(revision, floor) >= 0;
+}
+
+function isCursorGlm52CodingModel(id: string): boolean {
+	const identity = classifyModel("cursor", id, { lenient: true });
+	if (identity.class !== "glm" || identity.revision === undefined) return false;
+	if (identity.family !== undefined && identity.family !== "air" && identity.family !== "turbo") return false;
+	const revision = parseRevision(identity.revision);
+	const floor = parseRevision("5.2");
+	return revision !== undefined && floor !== undefined && compareRevision(revision, floor) >= 0;
+}
+
 function normalizeCursorModels(
 	models: readonly unknown[] | undefined,
 	baseUrlOverride: string | undefined,
@@ -312,9 +310,14 @@ function normalizeCursorModel(
 
 	const name = pickModelDisplayName(details, id);
 	const reference = references.get(id);
+	// Versioned Cursor Grok ids (`cursor-grok-4.5`, `cursor-grok-4.6-high`)
+	// are reasoning models whose effort rides the per-tier sibling id;
+	// `GetUsableModels` ships no `thinkingDetails` for them and the bundled
+	// references read `reasoning: false`. The `grok-code-fast-*` family
+	// classifies below the 4.x floor and stays out.
 	const reasoning =
-		isKimiK3ModelId(id) ||
-		CURSOR_GROK_REASONING_ID_PATTERN.test(id) ||
+		isCursorKimiK3(id) ||
+		isCursorVersionedGrok(id) ||
 		Boolean(details.thinkingDetails) ||
 		reference?.reasoning === true;
 
@@ -359,31 +362,22 @@ function resolveCursorContextWindow(
 		[model.displayName, model.displayNameShort, model.displayModelId, ...model.aliases].some(
 			candidate => typeof candidate === "string" && CURSOR_1M_NAME_PATTERN.test(candidate),
 		);
-	if (labeled1M || isCursorNative1MModelId(id) || (model.maxMode && CURSOR_MAX_MODE_1M_ID_PATTERN.test(id))) {
+	const identity = classifyModel("cursor", id, { lenient: true });
+	const maxMode1M = model.maxMode && (identity.class === "anthropic" || identity.class === "gemini");
+	if (labeled1M || isCursorNative1MModelId(id) || maxMode1M) {
 		return Math.max(fallback ?? 0, CURSOR_1M_CONTEXT_WINDOW);
 	}
 	return fallback;
 }
 
 /**
- * Natively 1M-context families Cursor serves without a "1M" label: Kimi K3 and
- * GLM 5.2+ coding SKUs. The shared family parsers cover namespace forms
- * (`moonshotai/kimi-k3`, `z-ai/glm-5.2`) and future GLM versions (`glm-5.10`,
- * `glm-6`); vision and sub-1M variants stay out via the same gates as
- * `isGlm52ReasoningEffortModelId`.
+ * Natively 1M-context families Cursor serves without a "1M" label: GLM 5.2+
+ * base/air/turbo coding SKUs (structured family and revision gates exclude
+ * vision and sub-1M variants). K3 — including Cursor's bare `k3` alias — is
+ * rule-owned via `context-window-floor` in `providers/cursor.kdl`.
  */
 function isCursorNative1MModelId(id: string): boolean {
-	if (isKimiK3ModelId(id) || CURSOR_KIMI_K3_BARE_ID_PATTERN.test(id)) {
-		return true;
-	}
-	const glm = parseGlmModel(bareModelId(id));
-	if (!glm || glm.vision) {
-		return false;
-	}
-	if (glm.variant !== "base" && glm.variant !== "air" && glm.variant !== "turbo") {
-		return false;
-	}
-	return semverGte(glm.version, "5.2");
+	return isCursorGlm52CodingModel(id);
 }
 
 function pickModelDisplayName(model: CursorModelDetailsValue, fallbackId: string): string {
@@ -401,23 +395,18 @@ function pickModelDisplayName(model: CursorModelDetailsValue, fallbackId: string
 }
 
 /**
- * Resolves input modalities from a bundled reference when available, except
- * for Cursor-only families whose image support is known independently. Without
- * a reference, native multimodal families fall back to id classification.
+ * Resolves input modalities from a bundled reference when available. The
+ * Cursor-verified families (K3, grok-4, composer-2.5) are rule-owned via
+ * `input-modalities` in `providers/cursor.kdl` and corrected at build time.
+ * Without a reference, families whose native catalogs are multimodal
+ * (anthropic, gemini, openai) fall back to id classification.
  */
 export function resolveCursorInput(id: string, referenceInput?: ("text" | "image")[]): ("text" | "image")[] {
-	if (
-		isKimiK3ModelId(id) ||
-		CURSOR_KIMI_K3_BARE_ID_PATTERN.test(id) ||
-		CURSOR_GROK_4_MULTIMODAL_ID_PATTERN.test(id) ||
-		CURSOR_COMPOSER_25_MULTIMODAL_ID_PATTERN.test(id)
-	) {
-		return ["text", "image"];
-	}
 	if (referenceInput) {
 		return referenceInput;
 	}
-	if (CURSOR_MULTIMODAL_ID_PATTERN.test(id.toLowerCase())) {
+	const identity = classifyModel("cursor", id, { lenient: true });
+	if (identity.class === "anthropic" || identity.class === "gemini" || identity.class === "openai") {
 		return ["text", "image"];
 	}
 	return ["text"];

@@ -1,0 +1,111 @@
+// Provider-wire compat for "aiand"; regenerated from the frozen census using deployment contract selectors.
+
+provider "aiand" {
+	default-model "moonshotai/kimi-k2.7-code"
+	env "AIAND_API_KEY"
+	dynamic-models-authoritative #true
+	discovery label="ai&"
+
+	// Documented ai& catalog (docs.aiand.com/models/catalog, 2026-08) bundled so
+	// the provider is usable when generation and first boot have no live key.
+	// The org-scoped `/v1/models` response is authoritative once discovery runs.
+	seed api="openai-completions" base-url="https://api.aiand.com/v1" bundle="fallback" {
+		model "qwen/qwen3.6-27b" name="Qwen3.6 27B" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=262144
+			thinking-mode "effort"
+			thinking-efforts "low" "medium" "high"
+			thinking-default-level "medium"
+		}
+		model "deepseek-ai/deepseek-v4-flash" name="DeepSeek V4 Flash" {
+			reasoning #true
+			input "text"
+			cost input=0.15 output=0.25 cache-read=0 cache-write=0
+			limits context=1000000
+			thinking-mode "effort"
+			thinking-efforts "low" "medium" "high"
+			thinking-default-level "medium"
+		}
+		model "google/gemma-4-31b-it" name="Gemma 4 31B IT" {
+			reasoning #true
+			input "text" "image"
+			cost input=0.2 output=0.5 cache-read=0 cache-write=0
+			limits context=262144
+			thinking-mode "effort"
+			thinking-efforts "low" "medium" "high"
+			thinking-default-level "medium"
+		}
+		model "openai/gpt-oss-120b" name="GPT OSS 120B" {
+			reasoning #true
+			input "text"
+			cost input=0.15 output=0.6 cache-read=0 cache-write=0
+			limits context=131072
+			thinking-mode "effort"
+			thinking-efforts "low" "medium" "high"
+			thinking-default-level "medium"
+		}
+		model "deepseek-ai/deepseek-v4-pro" name="DeepSeek V4 Pro" {
+			reasoning #true
+			input "text"
+			cost input=1 output=2.5 cache-read=0 cache-write=0
+			limits context=1000000
+			thinking-mode "effort"
+			thinking-efforts "low" "medium" "high"
+			thinking-default-level "medium"
+		}
+		model "moonshotai/kimi-k2.7-code" name="Kimi K2.7 Code" {
+			reasoning #true
+			input "text" "image"
+			cost input=0.75 output=3.5 cache-read=0 cache-write=0
+			limits context=262144
+			thinking-mode "effort"
+			thinking-efforts "low" "medium" "high"
+			thinking-default-level "medium"
+		}
+		model "moonshotai/kimi-k2.6" name="Kimi K2.6" {
+			reasoning #true
+			input "text" "image"
+			cost input=0.85 output=3.5 cache-read=0 cache-write=0
+			limits context=262144
+			thinking-mode "effort"
+			thinking-efforts "low" "medium" "high"
+			thinking-default-level "medium"
+		}
+		model "zai-org/glm-5.2" name="GLM 5.2" {
+			reasoning #true
+			input "text"
+			cost input=1 output=4 cache-read=0 cache-write=0
+			limits context=1000000
+			thinking-mode "effort"
+			thinking-efforts "low" "medium" "high"
+			thinking-default-level "medium"
+		}
+		model "zai-org/glm-5.1" name="GLM 5.1" {
+			reasoning #true
+			input "text"
+			cost input=1.4 output=4.4 cache-read=0 cache-write=0
+			limits context=202752
+			thinking-mode "effort"
+			thinking-efforts "low" "medium" "high"
+			thinking-default-level "medium"
+		}
+	}
+
+	models "moonshotai/kimi-k3" "deepseek-ai/deepseek-v4-pro" \
+		"deepseek-ai/deepseek-v4-flash" "openai/gpt-oss-120b" "zai-org/glm-5.2" \
+		"google/gemma-4-31b-it" "moonshotai/kimi-k2.7-code" "qwen/qwen3.6-27b" \
+		"motif-technologies/motif-3" {
+		thinking-mode "effort"
+	}
+	models "deepseek-ai/deepseek-v4-pro" {
+		thinking-efforts "low" "high" "max"
+	}
+	models "motif-technologies/motif-3" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+	models "moonshotai/kimi-k2.7-code" "deepseek-ai/deepseek-v4-flash" {
+		edit-revision "sloppy.1"
+	}
+}

@@ -1,22 +1,22 @@
 /**
  * Tool wrappers for extensions.
  */
-import type {
-	AgentTool,
-	AgentToolContext,
-	AgentToolResult,
-	AgentToolUpdateCallback,
-	ToolLoadMode,
+import {
+	type AgentTool,
+	type AgentToolContext,
+	type AgentToolResult,
+	type AgentToolUpdateCallback,
+	isNonBlankContext,
+	type ToolLoadMode,
 } from "@oh-my-pi/pi-agent-core";
 import type { ComputerSafetyCheck, ImageContent, Static, TextContent, TSchema } from "@oh-my-pi/pi-ai";
 import { sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
-import type { Settings } from "../../config/settings";
-import type { Theme } from "../../modes/theme/theme";
+import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import {
-	type ApprovalMode,
 	denyError,
 	formatApprovalPrompt,
 	resolveApproval,
+	resolveApprovalFromContext,
 	truncateForPrompt,
 } from "../../tools/approval";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
@@ -149,9 +149,10 @@ function safetyCheckLines(checks: readonly ComputerSafetyCheck[]): string[] {
  * - Emits tool_call event before execution (can block)
  * - Emits tool_result event after execution (can modify result)
  */
-export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetails = unknown>
-	implements AgentTool<TParameters, TDetails>
-{
+export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetails = unknown> implements AgentTool<
+	TParameters,
+	TDetails
+> {
 	declare name: string;
 	declare description: string;
 	declare parameters: TParameters;
@@ -192,11 +193,9 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// runner is touched — an already-denied tool never emits `tool_call` — while the full gate below
 		// re-resolves against the (possibly revised) input so a handler cannot rewrite into a denied or
 		// newly prompt-gated command and have it run unapproved.
-		const cliAutoApprove = context?.autoApprove === true;
-		const settings: Settings | undefined = context?.settings;
-		const configuredMode = (settings?.get("tools.approvalMode") ?? "yolo") as ApprovalMode;
-		const approvalMode: ApprovalMode = cliAutoApprove ? "yolo" : configuredMode;
-		const userPolicies = (settings?.get("tools.approval") ?? {}) as Record<string, unknown>;
+		const { approvalMode, userPolicies } = resolveApprovalFromContext(
+			context ?? (this.runner.sessionSettings ? { settings: this.runner.sessionSettings } : undefined),
+		);
 		const preResolved = resolveApproval(this.tool, approvalArgs(params, context), approvalMode, userPolicies);
 		if (preResolved.policy === "deny") {
 			throw denyError(preResolved, this.tool.name);
@@ -206,6 +205,11 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// runs with. Doing this BEFORE the approval gate means approval (below) resolves against the
 		// input that actually executes, closing the "approve one thing, run another" gap: the prompt
 		// text, policy resolution, and provider safety checks all see `effectiveParams`.
+		// Passive context collected here is forwarded only once the call has run
+		// and produced a non-error result: a block, deny, user reject, fail-closed
+		// safety refusal, or failed execution never injects instructions. This
+		// matches the loop's rule for context prepared at arg-prep time.
+		let pendingAdditionalContext: string | undefined;
 		let effectiveParams = params;
 		if (!loopEmittedToolCall && this.runner.hasHandlers("tool_call")) {
 			try {
@@ -225,6 +229,9 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				if (callResult?.block) {
 					const reason = callResult.reason || "Tool execution was blocked by an extension";
 					throw new Error(reason);
+				}
+				if (isNonBlankContext(callResult?.additionalContext)) {
+					pendingAdditionalContext = callResult.additionalContext;
 				}
 				// A non-blocking handler may replace the execution input. The returned object is the raw
 				// input passed to `execute` (handler-owned; not re-normalized). Skipped for `computer`
@@ -252,18 +259,21 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			throw denyError(resolved, this.tool.name);
 		}
 		const pendingSafetyChecks = computerSafetyChecks(context);
-		// An xd:// device dispatch already cleared the write tool's outer gate at
-		// this tool's tier — re-prompting would double-ask for one action. The
-		// bypass only holds while the input is exactly what that outer gate
-		// approved: a handler revision here may have raised the tier, so revised
-		// input always faces the full gate. Explicit per-tool "prompt" policies
-		// and tool-demanded overrides still prompt. Provider safety checks are
-		// stronger: yolo, per-tool allow, and xdev approval never acknowledge
-		// them on the user's behalf.
+		// Outer approvals only cover the original input. `xd://` approval skips
+		// tier-only prompts while the same object flows through; ACP approval also
+		// satisfies explicit prompts, but compares against a deep snapshot because
+		// handlers can mutate the original argument object in place. Denies were
+		// enforced above, and provider safety checks remain independently required.
 		const explicitPrompt = resolved.override || Object.hasOwn(userPolicies, resolved.policyKey ?? this.tool.name);
 		const xdevBypass = context?.xdevApproved === true && effectiveParams === params;
+		const acpBypass =
+			context !== undefined &&
+			Object.hasOwn(context, "acpApprovedArgs") &&
+			Bun.deepEquals(effectiveParams, context.acpApprovedArgs);
 		const approvalCheck = {
-			required: pendingSafetyChecks.length > 0 || (resolved.policy === "prompt" && (explicitPrompt || !xdevBypass)),
+			required:
+				pendingSafetyChecks.length > 0 ||
+				(resolved.policy === "prompt" && !acpBypass && (explicitPrompt || !xdevBypass)),
 			reason: resolved.reason,
 		};
 
@@ -350,14 +360,14 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		let executionError: Error | undefined;
 
 		try {
-			// A denied file write or delete inside this tool can be brokered to an
-			// extension handler, and that registry is PROCESS-WIDE — so the session is
-			// named here, the one place where every tool's execution and the runner
-			// that owns the handlers are both in scope (`sdk.ts` wraps the whole tool
-			// registry with this class whenever a runner exists). Inert with no
-			// fallback registered: no scope is entered.
-			result = await withFileMutationSession(this.runner.sessionId, () =>
-				this.tool.execute(toolCallId, effectiveParams, signal, onUpdate, context),
+			// Name the owning session for process-wide file-mutation fallbacks and
+			// expose its settings to registered tools and any fallback handlers they
+			// trigger. `sdk.ts` wraps the whole tool registry with this class whenever
+			// a runner exists.
+			result = await this.runner.runScoped(() =>
+				withFileMutationSession(this.runner.sessionId, () =>
+					this.tool.execute(toolCallId, effectiveParams, signal, onUpdate, context),
+				),
 			);
 		} catch (err) {
 			executionError = err instanceof Error ? err : new Error(String(err));
@@ -379,7 +389,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				),
 				content: result.content,
 				details: result.details,
-				isError: !!executionError,
+				isError: !!executionError || result.isError === true,
 			});
 
 			if (resultResult) {
@@ -391,6 +401,9 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				// call's model-visible content/details while keeping it an error, flip a
 				// failure to success, or flag a success as an error.
 				const effectiveError = resultResult.isError ?? !!executionError;
+				if (!effectiveError && pendingAdditionalContext !== undefined) {
+					context?.addAdditionalContext?.(pendingAdditionalContext);
+				}
 
 				// Return the (possibly modified) result carrying the error flag rather than
 				// rethrowing the original exception. The agent loop honors
@@ -410,6 +423,9 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// No extension modification
 		if (executionError) {
 			throw executionError;
+		}
+		if (result.isError !== true && pendingAdditionalContext !== undefined) {
+			context?.addAdditionalContext?.(pendingAdditionalContext);
 		}
 		return result;
 	}

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { isGitHubCopilotPolicyDenial } from "@oh-my-pi/pi-ai/error";
 import { rewriteCopilotError } from "@oh-my-pi/pi-ai/utils/http-inspector";
 
 function errorWithStatus(
@@ -22,6 +23,19 @@ describe("rewriteCopilotError", () => {
 		expect(rewriteCopilotError("server error", err, "github-copilot")).toBe("server error");
 	});
 
+	it("keeps GitHub's 400 model rejection bodies verbatim", () => {
+		for (const [code, message] of [
+			["model_not_supported", "400 The requested model is not supported."],
+			[
+				"model_not_available_for_integrator",
+				'400 The requested model is not available for integrator "opencode". Available models: [gpt-4.1 claude-opus-4.7 gpt-5.5]',
+			],
+		] as const) {
+			const err = errorWithStatus(400, { message, code });
+			expect(rewriteCopilotError(message, err, "github-copilot")).toBe(message);
+		}
+	});
+
 	it("rewrites message for 401 with github-copilot provider", () => {
 		const err = errorWithStatus(401);
 		const result = rewriteCopilotError("401 Unauthorized: ...", err, "github-copilot");
@@ -37,37 +51,33 @@ describe("rewriteCopilotError", () => {
 		expect(result).not.toContain("/login github-copilot");
 	});
 
-	it("rewrites 400 model_not_supported with fleet-skew guidance", () => {
-		const err = errorWithStatus(400, {
-			message: "400 The requested model is not supported.",
-			code: "model_not_supported",
-		});
-		const result = rewriteCopilotError("original", err, "github-copilot");
-		expect(result).toContain("HTTP 400");
-		expect(result).toContain("only part of its fleet");
-		expect(result).not.toContain("authentication failed");
+	it("names the CLI client identity, the chat retry, and the COPILOT_INTEGRATION_ID escape hatch on 403", () => {
+		const err = errorWithStatus(403);
+		const result = rewriteCopilotError("403 Forbidden", err, "github-copilot");
+		expect(result).toContain("copilot-developer-cli");
+		expect(result).toContain("copilot-chat");
+		expect(result).toContain("COPILOT_INTEGRATION_ID");
+	});
+});
+
+describe("isGitHubCopilotPolicyDenial", () => {
+	it("exempts Copilot 403s by status so credentials survive plan/model denials", () => {
+		expect(isGitHubCopilotPolicyDenial("github-copilot", 403, "403 Forbidden")).toBe(true);
 	});
 
-	it("preserves per-integrator entitlement details and available models", () => {
-		const message =
-			'400 The requested model is not available for integrator "opencode". Available models: [gpt-4.1 claude-opus-4.7 gpt-5.5]';
-		const err = errorWithStatus(400, { message, code: "model_not_available_for_integrator" });
-		expect(rewriteCopilotError(message, err, "github-copilot")).toBe(message);
+	it("matches the 403 rewrite text when no status is attached", () => {
+		const rewritten = rewriteCopilotError("403 Forbidden", errorWithStatus(403), "github-copilot");
+		expect(isGitHubCopilotPolicyDenial("github-copilot", undefined, rewritten)).toBe(true);
 	});
 
-	it("leaves non-copilot 400 model_not_supported untouched", () => {
-		const err = errorWithStatus(400, {
-			message: "400 model_not_supported",
-			code: "model_not_supported",
-		});
-		expect(rewriteCopilotError("orig", err, "openai")).toBe("orig");
+	it("does not exempt Copilot 401s (revoked credentials must still be wiped)", () => {
+		const rewritten = rewriteCopilotError("401 Unauthorized", errorWithStatus(401), "github-copilot");
+		expect(isGitHubCopilotPolicyDenial("github-copilot", 401, rewritten)).toBe(false);
 	});
 
-	it("leaves 400 without model_not_supported code untouched", () => {
-		const err = errorWithStatus(400, {
-			message: "400 invalid request",
-			code: "invalid_request_body",
-		});
-		expect(rewriteCopilotError("orig", err, "github-copilot")).toBe("orig");
+	it("does not exempt other providers or non-403 Copilot failures", () => {
+		expect(isGitHubCopilotPolicyDenial("openai", 403, "403 Forbidden")).toBe(false);
+		expect(isGitHubCopilotPolicyDenial("github-copilot", 500, "server error")).toBe(false);
+		expect(isGitHubCopilotPolicyDenial("github-copilot", undefined, undefined)).toBe(false);
 	});
 });

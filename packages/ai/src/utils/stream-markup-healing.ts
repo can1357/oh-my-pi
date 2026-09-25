@@ -7,12 +7,11 @@
  * provider-facing compatibility wrapper and model/provider gating.
  */
 
-import { isDeepseekModelIdOrName } from "@oh-my-pi/pi-catalog/identity";
-
 import { createInbandScanner } from "../dialect/factory";
 import { QwenXmlInbandScanner } from "../dialect/qwen-xml";
 import { ThinkingInbandScanner } from "../dialect/thinking";
 import type { InbandScanEvent, InbandScanner } from "../dialect/types";
+import type { Model } from "../types";
 
 const KIMI_SECTION_END = "<|tool_calls_section_end|>";
 const DSML_TOOL_CALLS_CLOSE_FULLWIDTH = "</｜DSML｜tool_calls>";
@@ -206,6 +205,7 @@ export class StreamMarkupHealing {
 					break;
 				case "thinkingStart":
 				case "thinkingEnd":
+				case "impliedThinkingEnd": // never emitted: the thinking scanner runs without `impliedOpen`
 				case "toolStart":
 				case "toolArgDelta":
 					break;
@@ -219,27 +219,6 @@ function generateHealedToolCallId(): string {
 	return `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`;
 }
 
-/** Cheap model/provider gate for Kimi-K2 chat-template token leaks. */
-export function modelMayLeakKimiToolCalls(provider: string, modelId: string): boolean {
-	if (provider === "kimi-code" || provider === "moonshot") return true;
-	return /kimi[-/_.]?k2/i.test(modelId);
-}
-
-/** Cheap model/provider gate for DeepSeek DSML envelope leaks. */
-export function modelMayLeakDsmlToolCalls(provider: string, modelId: string): boolean {
-	if (!isDeepseekModelIdOrName(modelId)) return false;
-	return (
-		provider === "ollama" ||
-		provider === "ollama-cloud" ||
-		provider === "nvidia" ||
-		provider === "deepseek" ||
-		provider === "fireworks" ||
-		provider === "nanogpt" ||
-		provider === "opencode-go" ||
-		provider === "openrouter"
-	);
-}
-
 /**
  * Pick the leaked-markup healer for an OpenAI-compatible / Ollama visible-text
  * stream. Kimi chat-template tokens and DeepSeek DSML envelopes need their
@@ -247,8 +226,8 @@ export function modelMayLeakDsmlToolCalls(provider: string, modelId: string): bo
  * patterns run the generic {@link ThinkingInbandScanner}, so leaked reasoning
  * idioms (e.g. a Gemini ` ```thinking ` fence on OpenRouter) are always healed.
  */
-export function getStreamMarkupHealingPattern(provider: string, modelId: string): StreamMarkupHealingPattern {
-	if (modelMayLeakKimiToolCalls(provider, modelId)) return "kimi";
-	if (modelMayLeakDsmlToolCalls(provider, modelId)) return "dsml";
+export function getStreamMarkupHealingPattern(model: Model<"ollama-chat">): StreamMarkupHealingPattern {
+	if (model.identity.class === "kimi") return "kimi";
+	if (model.identity.class === "deepseek") return "dsml";
 	return "thinking";
 }

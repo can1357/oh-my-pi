@@ -112,7 +112,7 @@ describe("MCP incremental connectServers", () => {
 		const connection = manager.getConnection(SERVER_A);
 		expect(connection).toBeDefined();
 		connection?.transport.onClose?.();
-		expect(events.some(event => event.type === "connecting" && event.name === SERVER_A)).toBe(true);
+		expect(events.some(event => event.type === "reconnecting" && event.name === SERVER_A)).toBe(true);
 		stop();
 	}, 20_000);
 });

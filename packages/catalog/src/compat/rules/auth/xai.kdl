@@ -1,0 +1,9 @@
+auth "xai" {
+	name "xAI API"
+	login "api-key" {
+		auth-url "https://console.x.ai/team/default/api-keys"
+		instructions "Create or copy your API key from the xAI Console"
+		prompt "Paste your xAI API key" placeholder="xai-..."
+		validate "models-endpoint" label="xAI" url="https://api.x.ai/v1/models"
+	}
+}

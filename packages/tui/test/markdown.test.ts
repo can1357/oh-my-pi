@@ -3,6 +3,7 @@ import { stripVTControlCharacters } from "node:util";
 import {
 	autolinkSchemeScanIndex,
 	clearRenderCache,
+	extractMarkdownLinks,
 	Markdown,
 	renderInlineMarkdown,
 	urlTokenPossible,
@@ -50,6 +51,26 @@ describe("renderInlineMarkdown", () => {
 	it("applies baseColor to fallback for non-string input", () => {
 		const rendered = renderInlineMarkdown(null as unknown as string, defaultMarkdownTheme, t => `[${t}]`);
 		expect(rendered).toBe("[]");
+	});
+});
+
+describe("extractMarkdownLinks", () => {
+	it("returns formatted labels as visible text", () => {
+		expect(extractMarkdownLinks("[**bold** and _em_](https://example.com)")).toEqual([
+			{ text: "bold and em", href: "https://example.com" },
+		]);
+	});
+
+	it("collapses multiline labels to one row", () => {
+		expect(extractMarkdownLinks("[line one\nline two  \nline three](https://example.com)")).toEqual([
+			{ text: "line one line two line three", href: "https://example.com" },
+		]);
+	});
+
+	it("returns codespan labels without Markdown delimiters", () => {
+		expect(extractMarkdownLinks("[run `bun test`](https://example.com)")).toEqual([
+			{ text: "run bun test", href: "https://example.com" },
+		]);
 	});
 });
 
@@ -1295,6 +1316,31 @@ bar`,
 			// Should have italic from quote styling (\x1b[3m)
 			expect(allOutput.includes("\x1b[3m")).toBeTruthy();
 		});
+
+		it("preserves quote foreground color after inline code spans in blockquotes", () => {
+			const quoteFg = "\x1b[38;2;119;125;136m";
+			const codeFg = "\x1b[38;2;229;193;255m";
+			const testTheme = {
+				...defaultMarkdownTheme,
+				quote: (text: string) => `${quoteFg}${text}\x1b[39m`,
+				code: (text: string) => `${codeFg}${text}\x1b[39m`,
+			};
+
+			const markdown = new Markdown("> before `code` after", 0, 0, testTheme);
+			const [line] = markdown.render(80);
+
+			expect(line).toContain(`${codeFg}code\x1b[39m${quoteFg}`);
+
+			const multiMarkdown = new Markdown("> start `first` middle `second` end", 0, 0, testTheme);
+			const [multiLine] = multiMarkdown.render(80);
+			expect(multiLine).toContain(`${codeFg}first\x1b[39m${quoteFg}`);
+			expect(multiLine).toContain(`${codeFg}second\x1b[39m${quoteFg}`);
+
+			const htmlMarkdown = new Markdown("<blockquote>before <code>code</code> after</blockquote>", 0, 0, testTheme);
+			const [htmlLine] = htmlMarkdown.render(80);
+			expect(htmlLine).toContain(`${codeFg}code\x1b[39m${quoteFg}`);
+		});
+
 		it("should render list content inside blockquotes", () => {
 			const markdown = new Markdown("> 1. bla bla\n>    - nested bullet", 0, 0, defaultMarkdownTheme);
 
@@ -1361,7 +1407,7 @@ bar`,
 			let visible = "";
 			const targets: Array<string | null> = [];
 
-			for (let i = 0; i < line.length; ) {
+			for (let i = 0; i < line.length;) {
 				if (line.startsWith("\x1b]8;;", i)) {
 					const terminator = line.indexOf("\x07", i + 5);
 					activeTarget = line.slice(i + 5, terminator) || null;
@@ -1454,15 +1500,15 @@ bar`,
 			const labelStart = issueRow.visible.indexOf("#5860");
 			const separator = issueRow.visible.indexOf("|", labelStart);
 			expect(issueRow.targets.slice(labelStart, labelStart + "#5860".length)).toEqual(
-				new Array("#5860".length).fill(issueUrl),
+				Array.from({ length: "#5860".length }, () => issueUrl),
 			);
 			expect(issueRow.targets.slice(labelStart + "#5860".length, separator)).toEqual(
-				new Array(separator - labelStart - "#5860".length).fill(null),
+				Array.from({ length: separator - labelStart - "#5860".length }, () => null),
 			);
 
 			const titleStart = issueRow.visible.indexOf("feat(extensions)");
 			expect(issueRow.targets.slice(titleStart, titleStart + "feat(extensions)".length)).toEqual(
-				new Array("feat(extensions)".length).fill(null),
+				Array.from({ length: "feat(extensions)".length }, () => null),
 			);
 
 			const linkedText = lines
@@ -1506,10 +1552,12 @@ bar`,
 				[secondRow, "second"],
 			] as const) {
 				const start = row.visible.indexOf(label);
-				expect(row.targets.slice(start, start + label.length)).toEqual(new Array(label.length).fill(issueUrl));
+				expect(row.targets.slice(start, start + label.length)).toEqual(
+					Array.from({ length: label.length }, () => issueUrl),
+				);
 				const separator = row.visible.indexOf("|", start);
 				expect(row.targets.slice(start + label.length, separator)).toEqual(
-					new Array(separator - start - label.length).fill(null),
+					Array.from({ length: separator - start - label.length }, () => null),
 				);
 			}
 
@@ -1573,6 +1621,26 @@ bar`,
 
 			const output = markdown.render(80).join("\n");
 			expect(output.includes("\x1b]8;;http://www.example.com\x07")).toBe(true);
+		});
+
+		it("renders a reference link with a prototype-key label as plain text without crashing (issue #10283)", () => {
+			// A reference-style link whose label collides with an Object.prototype
+			// member used to resolve to an inherited non-definition, producing a
+			// link token with `href: undefined` that crashed the renderer at
+			// `token.href.startsWith` — fatal during transcript replay.
+			// `constructor`/`toString` render as literal label text; every case
+			// must avoid emitting an OSC 8 hyperlink and must not throw.
+			for (const label of ["constructor", "toString", "valueOf", "isPrototypeOf"]) {
+				const markdown = new Markdown(`See [${label}] for details`, 0, 0, defaultMarkdownTheme);
+				const output = markdown.render(80).join("\n");
+				expect(stripTerminalSequences(output).trim()).toBe(`See [${label}] for details`);
+				expect(output.includes("\x1b]8;;")).toBe(false);
+			}
+			// `__proto__`'s double underscores are legitimately parsed as emphasis;
+			// the contract here is only that it never becomes a link or crashes.
+			const protoOut = new Markdown("See [__proto__] for details", 0, 0, defaultMarkdownTheme).render(80).join("\n");
+			expect(protoOut.includes("\x1b]8;;")).toBe(false);
+			expect(stripTerminalSequences(protoOut)).toContain("proto");
 		});
 	});
 

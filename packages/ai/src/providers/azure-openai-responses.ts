@@ -33,6 +33,7 @@ import {
 import type { ResponseCreateParamsStreaming, ResponseStreamEvent } from "./openai-responses-wire";
 import {
 	applyCommonResponsesSamplingParams,
+	applyResponsesFormatParams,
 	applyResponsesReasoningParams,
 	buildResponsesInput,
 	createInitialResponsesAssistantMessage,
@@ -350,7 +351,7 @@ function buildAzureResponsesRequest(
 		apiKey = envKey;
 	}
 
-	const headers: Record<string, string> = { "api-key": apiKey, ...(model.headers ?? {}) };
+	const headers: Record<string, string> = { "api-key": apiKey, ...model.headers };
 	if (options?.headers) {
 		Object.assign(headers, options.headers);
 	}
@@ -381,6 +382,7 @@ function buildParams(
 		includeThinkingSignatures: true,
 		developerStringContent: true,
 		preserveAssistantMessageIds: true,
+		repairOrphanOutputs: true,
 	});
 
 	const params: AzureOpenAIResponsesSamplingParams = {
@@ -392,9 +394,14 @@ function buildParams(
 		// stateless responses, matching the openai provider.
 		store: false,
 	};
+	if (options?.parallelToolCalls !== undefined) params.parallel_tool_calls = options.parallelToolCalls;
 
 	applyCommonResponsesSamplingParams(params, options, model);
+	applyResponsesFormatParams(params, options?.responseFormat);
 	if (options?.include?.length) params.include = Array.from(new Set(options.include));
+	if (options?.previousResponseId) {
+		params.previous_response_id = options.previousResponseId;
+	}
 
 	if (context.tools) {
 		const serializedTools: NonNullable<AzureOpenAIResponsesSamplingParams["tools"]> = [];
