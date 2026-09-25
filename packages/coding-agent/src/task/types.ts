@@ -51,6 +51,17 @@ export const taskItemSchema = type({
 	task: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
+	// Explicit `isolated` must fail validation (not be silently stripped by
+	// `"+": "delete"`): the lenient fallthrough then feeds the raw args to
+	// execute(), where the nested-isolation preflight rejects with a clear
+	// error instead of quietly running the child non-isolated. A literal
+	// `false` keeps the wire schema provider-safe (`const: false`) — `never`
+	// would leak `{"not": true}`, which OpenAI/Google-class schemas reject.
+	// Caveat: the Google `parametersJsonSchema` normalizer degrades
+	// `{const: false}` to a bare `{type: "boolean"}`, so Gemini/Vertex
+	// advertise an undescribed optional `isolated` (validation still rejects
+	// any explicit value via the preflight; see packages/ai normalization).
+	"isolated?": "false",
 	"tools?": "string[]",
 	"+": "delete",
 });
@@ -81,17 +92,29 @@ const taskSchemaNoIsolation = type({
 	task: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
+	// See taskItemSchema: an explicit `isolated` must reject, not strip.
+	"isolated?": "false",
 	"tools?": "string[]",
 	"+": "delete",
 });
 const taskSchemaBatch = type({
 	context: "string",
 	tasks: taskItemSchemaIsolated.array(),
+	// A top-level `isolated` is not part of the batch shape; a flat-form call
+	// with `isolated` must reject (lenient raw-args fallthrough → preflight)
+	// rather than strip and silently run the batch non-isolated.
+	"isolated?": "false",
 	"+": "delete",
 });
 const taskSchemaBatchNoIsolation = type({
 	context: "string",
 	tasks: taskItemSchema.array(),
+	// A top-level `isolated` (flat-form key) must also reject, not strip: the
+	// batch wrapper otherwise accepts `{ context, tasks[], isolated: true }`
+	// with the key deleted, and the child spawns quietly run non-isolated.
+	// Rejection forces the lenient raw-args fallthrough so execute() surfaces
+	// the nested-isolation preflight (see taskItemSchema).
+	"isolated?": "false",
 	"+": "delete",
 });
 const ALL_TASK_SCHEMAS = [taskSchema, taskSchemaNoIsolation, taskSchemaBatch, taskSchemaBatchNoIsolation] as const;
@@ -138,6 +161,11 @@ function createTaskSchema(options: {
 			return type.raw({
 				context: "string",
 				tasks: item.array(),
+				// A top-level `isolated` is not part of the batch shape; a flat-form
+				// call with `isolated` must reject (lenient raw-args fallthrough →
+				// preflight) rather than strip and silently run the batch
+				// non-isolated.
+				"isolated?": "false",
 				"+": "delete",
 			});
 		}
@@ -148,12 +176,16 @@ function createTaskSchema(options: {
 			...effortField,
 			"outputSchema?": outputSchemaInputSchema,
 			"schemaMode?": '"permissive" | "strict"',
+			// Explicit `isolated` must reject, not strip (see taskItemSchema).
+			"isolated?": "false",
 			...toolsField,
 			"+": "delete",
 		});
 		return type.raw({
 			context: "string",
 			tasks: item.array(),
+			// Top-level `isolated` must reject, not strip (see taskItemSchema).
+			"isolated?": "false",
 			"+": "delete",
 		});
 	}
@@ -177,6 +209,8 @@ function createTaskSchema(options: {
 		...effortField,
 		"outputSchema?": outputSchemaInputSchema,
 		"schemaMode?": '"permissive" | "strict"',
+		// Explicit `isolated` must reject, not strip (see taskItemSchema).
+		"isolated?": "false",
 		...toolsField,
 		"+": "delete",
 	});

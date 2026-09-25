@@ -206,6 +206,7 @@ import { cfgSecretsEnabled } from "../secrets/settings";
 import { releaseSharpshooterSession } from "../sharpshooter/backend";
 import { flushSharpshooterExtraction } from "../sharpshooter/extract";
 import { toolReadsSkillUris } from "../system-prompt";
+import { isIsolationAvailable } from "../task/spawn-policy";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -817,6 +818,7 @@ export class AgentSession implements SettingsScope {
 	// Agent identity (registry id) used for IRC routing and job ownership.
 	#agentId: string | undefined;
 	#agentKind: "main" | "sub" = "main";
+	#isIsolated = false;
 	#scoutAllowedBySpawnPolicy = true;
 	#providerSessionId: string | undefined;
 	#freshProviderSessionId: string | undefined;
@@ -1852,6 +1854,7 @@ export class AgentSession implements SettingsScope {
 		this.#loopGuards = new LoopGuards(streamGuardsHost);
 		this.#agentId = config.agentId;
 		this.#agentKind = config.agentKind ?? "main";
+		this.#isIsolated = config.isIsolated ?? false;
 		// A subagent's streamed text reaches no output sink until the run settles
 		// (the parent sees only the yield), so a failed turn's partial prose is
 		// replay-safe and transient provider errors after it stay retryable —
@@ -2321,6 +2324,10 @@ export class AgentSession implements SettingsScope {
 
 	get asyncJobManager(): AsyncJobManager | undefined {
 		return this.#asyncJobManager;
+	}
+
+	get isIsolated(): boolean {
+		return this.#isIsolated;
 	}
 
 	getAgentId(): string | undefined {
@@ -6574,6 +6581,11 @@ export class AgentSession implements SettingsScope {
 				tools: this.getEnabledToolNames(),
 				taskBatch: cfgTaskBatch.get(this.settings),
 				scoutAvailable: this.#isScoutAvailable(),
+				// Same gate as the task/eval surfaces: a session that cannot spawn
+				// isolated (plan mode, isolation disabled, or an isolated session
+				// without allowNested) must not be told to pass
+				// `isolated`/`apply`/`merge` — the preflight rejects those calls.
+				isolationEnabled: isIsolationAvailable(this, this.#planModeState?.enabled === true),
 				evalTools: cfgEvalToolsEnabled.get(this.settings),
 			};
 			// A notice whose contract needs an inactive tool would demand an

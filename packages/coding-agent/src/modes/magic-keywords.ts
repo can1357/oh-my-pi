@@ -23,6 +23,8 @@ export interface MagicKeywordContext {
 	taskBatch: boolean;
 	/** Whether the `scout` agent can be dispatched. */
 	scoutAvailable: boolean;
+	/** Whether `isolated`/`apply`/`merge` controls may be advertised (same gate as the task/eval surfaces). */
+	isolationEnabled: boolean;
 	/** `eval.tools.enabled`: whether `@tool`-defined kernel tools exist. */
 	evalTools: boolean;
 }
@@ -60,9 +62,10 @@ export function renderOrchestrateNotice({ tools }: Pick<MagicKeywordContext, "to
 export function renderWorkflowNotice({
 	taskBatch,
 	scoutAvailable,
+	isolationEnabled,
 	evalTools,
-}: Pick<MagicKeywordContext, "taskBatch" | "scoutAvailable" | "evalTools">): string {
-	return prompt.render(workflowNotice, { taskBatch, scoutAvailable, evalTools }).trim();
+}: Pick<MagicKeywordContext, "taskBatch" | "scoutAvailable" | "isolationEnabled" | "evalTools">): string {
+	return prompt.render(workflowNotice, { taskBatch, scoutAvailable, isolationEnabled, evalTools }).trim();
 }
 
 export const MAGIC_KEYWORDS = [

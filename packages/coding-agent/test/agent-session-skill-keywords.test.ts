@@ -91,7 +91,10 @@ describe("AgentSession skill prompt keyword steering", () => {
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(tempDir.path()),
-			settings: Settings.isolated({ "compaction.enabled": false }),
+			// Non-isolated session with isolation enabled keeps the notice's
+			// isolation controls advertised, so the injected notice matches the
+			// renderWorkflowNotice default (isolationEnabled: true).
+			settings: Settings.isolated({ "compaction.enabled": false, "task.isolation.enabled": true }),
 			modelRegistry,
 		});
 	});
@@ -126,7 +129,7 @@ describe("AgentSession skill prompt keyword steering", () => {
 		if (!observedTurn) throw new Error("Expected prompt context to be captured");
 		expect(observedTurn.texts).toContain(`Skill body\n\n---\n\nSkill: ${skillPath}\nUser: ${details.args}`);
 		expect(observedTurn.texts).toContain(
-			renderWorkflowNotice({ taskBatch: true, scoutAvailable: true, evalTools: true }),
+			renderWorkflowNotice({ taskBatch: true, scoutAvailable: true, isolationEnabled: true, evalTools: true }),
 		);
 		expect(session.sessionManager.getTurnBudget()).toEqual({ total: 500_000, spent: 0, hard: true });
 	});

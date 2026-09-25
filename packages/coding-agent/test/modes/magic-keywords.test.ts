@@ -51,13 +51,42 @@ describe("orchestrate notice", () => {
 
 describe("workflow notice", () => {
 	it("defaults to workpools and hides eval-defined tools when disabled", () => {
-		const enabled = renderWorkflowNotice({ taskBatch: true, scoutAvailable: true, evalTools: true });
-		const disabled = renderWorkflowNotice({ taskBatch: true, scoutAvailable: true, evalTools: false });
+		const enabled = renderWorkflowNotice({
+			taskBatch: true,
+			scoutAvailable: true,
+			isolationEnabled: true,
+			evalTools: true,
+		});
+		const disabled = renderWorkflowNotice({
+			taskBatch: true,
+			scoutAvailable: true,
+			isolationEnabled: true,
+			evalTools: false,
+		});
 		expect(enabled).toContain("Default to `workpool()`");
 		expect(enabled).toContain("`@tool`");
 		expect(disabled).toContain("Default to `workpool()`");
 		expect(disabled).not.toContain("`@tool`");
 		expect(disabled).not.toContain("tools=None");
+	});
+
+	it("hides isolated controls when the session cannot spawn isolated", () => {
+		const gated = renderWorkflowNotice({
+			taskBatch: true,
+			scoutAvailable: true,
+			isolationEnabled: false,
+			evalTools: true,
+		});
+		expect(gated).not.toContain("isolated=None");
+		expect(gated).not.toContain("`isolated` requests a worktree");
+		const open = renderWorkflowNotice({
+			taskBatch: true,
+			scoutAvailable: true,
+			isolationEnabled: true,
+			evalTools: true,
+		});
+		expect(open).toContain("isolated=None");
+		expect(open).toContain("`isolated` requests a worktree");
 	});
 });
 
