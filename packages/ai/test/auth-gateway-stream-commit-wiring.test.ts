@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
-import { StreamCommitGate, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
+import { RouteRegistry, StreamCommitGate, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { createMockModel, MockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 
@@ -34,27 +34,58 @@ async function boot(mock: MockModel) {
 }
 
 describe("auth-gateway StreamCommitGate wiring", () => {
-	it("observes encoded Responses SSE through StreamCommitGate", async () => {
-		const classify = spyOn(StreamCommitGate.prototype, "classifyAndObserve");
-		const mock = createMockModel({ provider: "openrouter", id: "mock/commit-responses" });
-		mock.push({ content: ["hello"] });
-		const gw = await boot(mock);
+	it("holds a dead attempt's prelude and fails over through the compiled route", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-commit-wire-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey("openrouter", "test-key");
+		const primary = createMockModel({
+			provider: "openrouter",
+			id: "primary-id",
+			handler: () => {
+				throw new Error("service unavailable");
+			},
+		});
+		const backup = createMockModel({ provider: "openrouter", id: "backup-id", handler: { content: ["ok"] } });
+		const resolveModel = (id: string) =>
+			id === "primary-id" ? primary.model : id === "backup-id" ? backup.model : undefined;
+		const registry = new RouteRegistry(resolveModel);
+		registry.register({
+			id: "virtual-commit",
+			root: {
+				type: "fallback",
+				on: ["provider_unavailable", "provider_transient"],
+				children: [
+					{ type: "target", model: "primary-id" },
+					{ type: "target", model: "backup-id" },
+				],
+			},
+		});
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["t"],
+			storage,
+			resolveModel,
+			routeRegistry: registry,
+			version: "test",
+		});
 		try {
-			const res = await fetch(`${gw.url}/v1/responses`, {
+			const res = await fetch(`${handle.url}/v1/responses`, {
 				method: "POST",
 				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
-				body: JSON.stringify({
-					model: "mock/commit-responses",
-					input: "hi",
-					stream: true,
-				}),
+				body: JSON.stringify({ model: "virtual-commit", input: "hi", stream: true }),
 			});
 			expect(res.status).toBe(200);
-			await res.text();
-			expect(classify.mock.calls.length).toBeGreaterThan(0);
+			const body = await res.text();
+			// The contract: the client sees the surviving attempt complete, and none
+			// of the dead attempt's failure frames leak — the gate held its prelude.
+			expect(backup.calls.length).toBe(1);
+			expect(body).toContain("response.completed");
+			expect(body).not.toContain("response.failed");
 		} finally {
-			classify.mockRestore();
-			await gw.close();
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
 		}
 	});
 
