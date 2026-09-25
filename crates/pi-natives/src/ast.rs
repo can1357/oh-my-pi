@@ -1191,9 +1191,13 @@ fn ast_edit_blocking(
 	if !dry_run {
 		for write in &pending_writes {
 			ct.heartbeat()?;
-			fs.write(&write.absolute_path, &write.output).map_err(|err| {
-				Error::from_reason(format!("Failed to write {}: {err}", write.absolute_path.display()))
-			})?;
+			fs.write(&write.absolute_path, &write.output)
+				.map_err(|err| {
+					Error::from_reason(format!(
+						"Failed to write {}: {err}",
+						write.absolute_path.display()
+					))
+				})?;
 		}
 	}
 

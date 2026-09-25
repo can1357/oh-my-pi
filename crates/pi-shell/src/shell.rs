@@ -729,8 +729,8 @@ async fn create_session_for_run(
 	// implementations that run without spawning a process and resolve paths
 	// against the shell working directory. The whole set can be disabled
 	// (falling back to system binaries) via PI_DISABLE_UUTILS_BUILTINS; the
-	// destructive trio additionally honors PI_DISABLE_UUTILS_DESTRUCTIVE, and
-	// `rm`/`mv` have their own switches.
+	// destructive set (`rm`, `mv`, `cp`, `ln`) additionally honors
+	// PI_DISABLE_UUTILS_DESTRUCTIVE, and `rm`/`mv` have their own switches.
 	if !uutils_env_disabled(config, "PI_DISABLE_UUTILS_BUILTINS") {
 		let destructive_disabled = uutils_env_disabled(config, "PI_DISABLE_UUTILS_DESTRUCTIVE");
 		let rm_disabled =
@@ -741,8 +741,9 @@ async fn create_session_for_run(
 			let disabled = match name {
 				"rm" => rm_disabled,
 				"mv" => mv_disabled,
-				// ln can clobber existing files via -f; gate it with the destructive set.
-				"ln" => destructive_disabled,
+				// cp overwrites existing files, ln can clobber them via -f; gate
+				// both with the destructive set.
+				"cp" | "ln" => destructive_disabled,
 				_ => false,
 			};
 			if !disabled {
@@ -3804,6 +3805,7 @@ mod tests {
 			"cmp",
 			"combine",
 			"comm",
+			"cp",
 			"cut",
 			"date",
 			"diff",
