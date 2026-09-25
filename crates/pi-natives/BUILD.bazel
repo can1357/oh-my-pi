@@ -143,6 +143,7 @@ rust_shared_library(
         "//crates/pi-iso",
         "//crates/pi-shell",
         "//crates/pi-vcs",
+        "//crates/pi-vfs",
         "//crates/pi-voice",
         "//crates/pi-walker",
     ],

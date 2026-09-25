@@ -855,6 +855,14 @@ export interface CredentialDisabledEvent {
 	provider: string;
 	/** Verbatim error captured for forensics (truncated upstream). */
 	disabledCause: string;
+	/** Database row id of the disabled credential. */
+	credentialId?: number;
+	/** Account identity recorded on the disabled OAuth credential, when the provider supplied one. */
+	email?: string;
+	accountId?: string;
+	/** Organization/workspace the credential was scoped to. */
+	orgId?: string;
+	orgName?: string;
 }
 
 // ============================================================================
