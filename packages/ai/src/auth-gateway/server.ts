@@ -1371,7 +1371,6 @@ async function handleFormatEndpoint(
 				if (held.message.stopReason === "aborted") {
 					await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 					bootOpts.storage.releaseTurnReservation(requestId);
-					await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 					return formatError(499, "request_aborted", errorMessage);
 				}
 				const classified = classifyAssistantFailure(held.message);
@@ -1395,7 +1394,6 @@ async function handleFormatEndpoint(
 			}
 			await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 			bootOpts.storage.releaseTurnReservation(requestId);
-			await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 			return classifiedError(classified);
 		}
 		if (controller.signal.aborted) {
@@ -2059,7 +2057,6 @@ async function handlePiNative(
 				if (held.message.stopReason === "aborted") {
 					await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 					bootOpts.storage.releaseTurnReservation(requestId);
-					await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 					return formatError(499, "request_aborted", errorMessage);
 				}
 				const classified = classifyAssistantFailure(held.message);
@@ -2083,7 +2080,6 @@ async function handlePiNative(
 			}
 			await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 			bootOpts.storage.releaseTurnReservation(requestId);
-			await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 			return classifiedError(classified);
 		}
 		if (controller.signal.aborted) {
