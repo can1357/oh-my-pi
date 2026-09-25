@@ -36,7 +36,7 @@ import * as openaiChat from "../providers/openai-chat-server";
 import * as openaiResponses from "../providers/openai-responses-server";
 import * as piNative from "../providers/pi-native-server";
 import { completeSimple, streamSimple } from "../stream";
-import type { Api, AssistantMessageEventStream, Context, Model, SimpleStreamOptions } from "../types";
+import type { Api, AssistantMessage, AssistantMessageEventStream, Context, Model, SimpleStreamOptions } from "../types";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { parseBind } from "../utils/parse-bind";
 import { RouteDecisionTraceLog, redactedDecisionSummary } from "./decision-trace";
@@ -60,7 +60,7 @@ import {
 	withCors,
 } from "./http";
 import { RouteRegistry } from "./route-graph";
-import { commitGateObservesDownstreamSse, observeSseCommit, StreamCommitGate } from "./stream-commit-gate";
+import { commitGateObservesDownstreamSse, holdSseUntilCommit, pumpHeldSseAttempts, StreamCommitGate } from "./stream-commit-gate";
 import { handleEmbeddings } from "./routes/embeddings";
 import { handleImageEdits, handleImageGenerations } from "./routes/images";
 import { handleRerank } from "./routes/rerank";
@@ -219,7 +219,33 @@ export function applyParsedGatewayOptions(opts: SimpleStreamOptions, options: Au
 	if (options.responseFormat !== undefined) opts.responseFormat = options.responseFormat;
 }
 
+/** Total pre-commit attempts (initial + retries) for held Responses preludes. */
+const MAX_HELD_PRECOMMIT_ATTEMPTS = 3;
 
+/**
+ * Terminal `response.failed` frame for a held-prelude stream whose retry could
+ * not even be opened (e.g. `streamSimple` threw while still probing). Nothing
+ * has reached the client yet, so the honest terminal is synthesized in the
+ * Responses envelope shape the encoder emits for stream failures.
+ */
+function encodeResponsesFailedFrame(modelId: string, message: string): Uint8Array {
+	const frame = {
+		type: "response.failed",
+		sequence_number: 0,
+		response: {
+			id: `resp_${crypto.randomUUID().replaceAll("-", "")}`,
+			object: "response",
+			created_at: Math.floor(Date.now() / 1000),
+			status: "failed",
+			model: modelId,
+			output: [],
+			usage: null,
+			error: { message },
+			incomplete_details: null,
+		},
+	};
+	return new TextEncoder().encode(`event: response.failed\ndata: ${JSON.stringify(frame)}\n\n`);
+}
 
 function clientClosedResponse(route: { module: FormatModule }): Response {
 	return route.module.formatError(499, "request_aborted", "client closed request");
@@ -557,56 +583,123 @@ async function handleFormatEndpoint(
 	// happens, the `finally` below owns it.
 	let streamOwnsLease = false;
 	try {
-		let events: AssistantMessageEventStream;
-		try {
+		const holdsPrelude = commitGateObservesDownstreamSse(route.label);
+		let settled: Promise<AssistantMessage> | undefined;
+		const recordUsage = (events: AssistantMessageEventStream) => {
+			void events
+				.result()
+				.then(message =>
+					recordGatewayUsage(bootOpts.storage, model, client, message.usage, message.timestamp || undefined),
+				)
+				.catch(() => {});
+		};
+
+		let sseStream: ReadableStream<Uint8Array>;
+		if (holdsPrelude) {
+			// Held-prelude failover: the gate buffers metadata frames until first
+			// output so a pre-commit retryable terminal can be retried without the
+			// dead attempt's frames reaching the client. Each attempt gets its own
+			// abort scope — cancelling a dead attempt's encoder must not poison the
+			// shared request signal that a replacement attempt still needs.
+			const openHeldAttempt = (): ReadableStream<Uint8Array> => {
+				const attemptCtl = new AbortController();
+				const onParentAbort = () => attemptCtl.abort(controller.signal.reason);
+				if (controller.signal.aborted) attemptCtl.abort(controller.signal.reason);
+				else controller.signal.addEventListener("abort", onParentAbort, { once: true });
+				const attemptEvents = streamSimple(model, parsed.context, { ...streamOpts, signal: attemptCtl.signal });
+				recordUsage(attemptEvents);
+				settled = attemptEvents.result();
+				void settled
+					.catch(() => {})
+					.finally(() => controller.signal.removeEventListener("abort", onParentAbort));
+				return holdSseUntilCommit(
+					route.module.encodeStream(attemptEvents, parsed.modelId, parsed.options, {
+						signal: attemptCtl.signal,
+						onCancel: reason =>
+							attemptCtl.abort(reason instanceof Error ? reason : new Error("attempt stream cancelled")),
+					}),
+					commitGate,
+				);
+			};
 			if (controller.signal.aborted) {
 				bootOpts.storage.releaseTurnReservation(requestId);
 				return clientClosedResponse(route);
 			}
-			events = streamSimple(model, parsed.context, streamOpts);
-		} catch (error) {
-			bootOpts.storage.releaseTurnReservation(requestId);
-			const classified = classifyGatewayError(error);
-			logger.warn("auth-gateway streamSimple threw", { format: route.label, error: classified.message, peer });
-			return route.module.formatError(classified.status, classified.type, classified.message);
-		}
-		if (controller.signal.aborted) {
-			bootOpts.storage.releaseTurnReservation(requestId);
-			return clientClosedResponse(route);
-		}
-		const settled = events.result();
-		void settled
-			.then(message =>
-				recordGatewayUsage(bootOpts.storage, model, client, message.usage, message.timestamp || undefined),
-			)
-			.catch(() => {})
-			.finally(() => lease.release());
-		streamOwnsLease = true;
-		// Non-Responses formats may never feed onSseEvent; mirror pi-native and mark the
-		// commit gate from the canonical assistant result before EOF can settle a probe.
-		void settled
-			.then(message => {
-				if (message.stopReason === "error" || message.stopReason === "aborted") {
-					commitGate.classifyAndObserve("response.failed", 1);
-				} else {
-					commitGate.classifyAndObserve("response.output_text.delta", 1);
-					commitGate.classifyAndObserve("response.completed", 1);
-				}
-			})
-			.catch(() => {
-				commitGate.classifyAndObserve("response.failed", 1);
+			let firstSse: ReadableStream<Uint8Array>;
+			try {
+				firstSse = openHeldAttempt();
+			} catch (error) {
+				bootOpts.storage.releaseTurnReservation(requestId);
+				const classified = classifyGatewayError(error);
+				logger.warn("auth-gateway streamSimple threw", { format: route.label, error: classified.message, peer });
+				return route.module.formatError(classified.status, classified.type, classified.message);
+			}
+			if (controller.signal.aborted) {
+				bootOpts.storage.releaseTurnReservation(requestId);
+				return clientClosedResponse(route);
+			}
+			streamOwnsLease = true;
+			sseStream = pumpHeldSseAttempts(firstSse, openHeldAttempt, commitGate, {
+				maxAttempts: MAX_HELD_PRECOMMIT_ATTEMPTS,
+				onAbort: (error, attempt) =>
+					logger.info("auth-gateway held prelude ended pre-commit; retrying", {
+						route: route.label,
+						event: error.eventType,
+						attempt,
+						peer,
+					}),
+				synthesizeFailure: error => {
+					const classified = classifyGatewayError(error);
+					return encodeResponsesFailedFrame(parsed.modelId, classified.message);
+				},
+				onSettle: () => lease.release(),
 			});
-
-		let sseStream = route.module.encodeStream(events, parsed.modelId, parsed.options, {
-			signal: controller.signal,
-			onCancel: reason => {
-				if (!controller.signal.aborted) {
-					controller.abort(reason instanceof Error ? reason : new Error("client closed request"));
+		} else {
+			let events: AssistantMessageEventStream;
+			try {
+				if (controller.signal.aborted) {
+					bootOpts.storage.releaseTurnReservation(requestId);
+					return clientClosedResponse(route);
 				}
-			},
-		});
-		if (route.label === "openai-responses") {
-			sseStream = observeSseCommit(sseStream, commitGate);
+				events = streamSimple(model, parsed.context, streamOpts);
+			} catch (error) {
+				bootOpts.storage.releaseTurnReservation(requestId);
+				const classified = classifyGatewayError(error);
+				logger.warn("auth-gateway streamSimple threw", { format: route.label, error: classified.message, peer });
+				return route.module.formatError(classified.status, classified.type, classified.message);
+			}
+			if (controller.signal.aborted) {
+				bootOpts.storage.releaseTurnReservation(requestId);
+				return clientClosedResponse(route);
+			}
+			settled = events.result();
+			recordUsage(events);
+			void settled
+				.catch(() => {})
+				.finally(() => lease.release());
+			streamOwnsLease = true;
+			// Non-Responses formats may never feed onSseEvent; mark the
+			// commit gate from the canonical assistant result before EOF can settle a probe.
+			void settled
+				.then(message => {
+					if (message.stopReason === "error" || message.stopReason === "aborted") {
+						commitGate.classifyAndObserve("response.failed", 1);
+					} else {
+						commitGate.classifyAndObserve("response.output_text.delta", 1);
+						commitGate.classifyAndObserve("response.completed", 1);
+					}
+				})
+				.catch(() => {
+					commitGate.classifyAndObserve("response.failed", 1);
+				});
+			sseStream = route.module.encodeStream(events, parsed.modelId, parsed.options, {
+				signal: controller.signal,
+				onCancel: reason => {
+					if (!controller.signal.aborted) {
+						controller.abort(reason instanceof Error ? reason : new Error("client closed request"));
+					}
+				},
+			});
 		}
 		sseStream = releaseTurnOnStreamEnd(sseStream, bootOpts.storage, requestId, commitGate, settled);
 		return new Response(sseStream, {
