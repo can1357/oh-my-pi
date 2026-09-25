@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added optional two-key Insert→Normal escapes on `Editor` via `setVimEscapeSequence` / `setVimEscapeSequenceTimeoutMs` (e.g. `jk` / `jj`), matching common Vim `inoremap jk <Esc>` behavior.
 - Added an "OpenAI API" option to the setup wizard's web-search step; the existing ChatGPT-OAuth option is now labeled "OpenAI Codex" ([#13467](https://github.com/can1357/oh-my-pi/pull/13467) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 
 ## [18.3.3] - 2026-09-27
