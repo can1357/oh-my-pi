@@ -10,6 +10,7 @@ import { APP_NAME, getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Settings } from "../config/settings";
 import { buildMinimizerOptions } from "../exec/bash-executor";
+import { cfgShellMinimizer } from "../exec/settings";
 import { getOrCreateSnapshot } from "../utils/shell-snapshot";
 
 export interface ShellCommandArgs {
@@ -52,7 +53,7 @@ export async function runShellCommand(cmd: ShellCommandArgs): Promise<void> {
 	const settings = await Settings.init({ cwd });
 	const { shell, env: shellEnv } = settings.getShellConfig();
 	const snapshotPath = cmd.noSnapshot || !shell.includes("bash") ? null : await getOrCreateSnapshot(shell, shellEnv);
-	const minimizer = buildMinimizerOptions(settings.getGroup("shellMinimizer"));
+	const minimizer = buildMinimizerOptions(cfgShellMinimizer.get(settings));
 	const shellSession = new Shell({ sessionEnv: shellEnv, snapshotPath: snapshotPath ?? undefined, minimizer });
 
 	let active = false;

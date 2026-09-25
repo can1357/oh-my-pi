@@ -238,6 +238,13 @@ interface CatchupWaiter {
 	timer?: NodeJS.Timeout;
 }
 
+/**
+ * Synthetic message `AgentSession.#withEvalStateContext` appends at the tail of
+ * every display-context rebuild; its slot moves each time, so
+ * {@link AdvisorRuntime.rebaseDeliveredPrefix} does not align on it.
+ */
+const EVAL_STATE_CONTEXT_TYPE = "eval-state-context";
+
 interface DeliveredMessage {
 	message: AgentMessage;
 	fingerprint: bigint | undefined;
@@ -614,6 +621,48 @@ export class AdvisorRuntime {
 		this.#failureNotified = false;
 		this.#clearSeenContext();
 		this.#wakeAllWaiters();
+	}
+
+	/**
+	 * Re-align the delivered prefix with the primary transcript after an
+	 * in-place rewrite the advisor's own context already covers (the primary's
+	 * per-turn prune). Unlike {@link reset} nothing is cleared or replayed: the
+	 * stored identities are refreshed, so the next delta's prefix check compares
+	 * against the rewritten messages instead of stale pre-rewrite fingerprints.
+	 *
+	 * Positional: delivered slot i is re-pointed at current message i when the
+	 * two render the same, or when current i is the same tool result elided in
+	 * place (`prunedAt`). Delivered `eval-state-context` messages are skipped:
+	 * every display-context rebuild re-appends a fresh one at the tail, so the
+	 * old slot moving is not a rewrite (the fresh copy is delivered as new).
+	 * All or nothing: if any slot fails to align, or the current transcript is
+	 * shorter than the delivered prefix, nothing changes and the next delta's
+	 * prefix check resets the advisor exactly as it would have without a rebase.
+	 */
+	rebaseDeliveredPrefix(reason: string): void {
+		if (this.disposed) return;
+		const all = this.host.snapshotMessages();
+		const rebased: DeliveredMessage[] = [];
+		for (const delivered of this.#deliveredPrefix) {
+			const message = delivered.message;
+			if (message.role === "custom" && message.customType === EVAL_STATE_CONTEXT_TYPE) continue;
+			const current = all[rebased.length];
+			if (current === undefined) return;
+			const fingerprint = fingerprintMessage(current);
+			const prunedInPlace =
+				current.role === "toolResult" &&
+				current.prunedAt !== undefined &&
+				message.role === "toolResult" &&
+				message.toolCallId === current.toolCallId;
+			if (fingerprint === undefined || (fingerprint !== delivered.fingerprint && !prunedInPlace)) return;
+			rebased.push({ message: current, fingerprint });
+		}
+		this.#deliveredPrefix = rebased;
+		this.#lastCount = rebased.length;
+		// A quarantine re-prime replays `#latestMessages`; keep it on the rewritten
+		// transcript so the replay does not resurrect pre-prune tool output.
+		this.#latestMessages = all;
+		logger.debug("advisor delivered prefix rebased", { reason, lastCount: this.#lastCount });
 	}
 
 	#syncModelIdentity(): void {

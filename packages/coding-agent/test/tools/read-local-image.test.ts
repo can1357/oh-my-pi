@@ -1,11 +1,11 @@
 /**
- * `local://` is routed through the internal-URL handler, whose resource
- * contract is text-only (`content: string`). Before the image fast path, a
- * `local://photo.png` read UTF-8-decoded the PNG bytes into mojibake. These
- * lock the fix: genuine image files under the session local root decode into an
+ * `local://` URLs locate to real files, which `read` serves through the
+ * filesystem pipeline rather than the text-only resource contract
+ * (`content: string`) that once UTF-8-decoded PNG bytes into mojibake. These
+ * lock that: genuine image files under the session local root decode into an
  * inline image block, text files still read as text, and a file symlinked
- * outside the local root is rejected by the same realpath guard the router uses
- * (the fast path must not become a containment bypass).
+ * outside the local root is rejected by the handler's realpath guard (locating
+ * must not become a containment bypass).
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
@@ -54,6 +54,10 @@ function makeSession(testDir: string, textOnlyModel = false): ToolSession {
 		hasUI: false,
 		getSessionFile: () => sessionFile,
 		getArtifactsDir: () => artifactsDir,
+		localProtocolOptions: {
+			getArtifactsDir: () => path.join(testDir, "artifacts"),
+			getSessionId: () => "session-local-image",
+		},
 		getSessionSpawns: () => null,
 		getModelString: () => `${model.provider}/${model.id}`,
 		getActiveModelString: () => `${model.provider}/${model.id}`,
@@ -168,7 +172,7 @@ describe("read local:// images", () => {
 		expect(joinText(result.content)).toContain("<svg");
 	});
 
-	it("still reads a local:// text file as text (fast path falls through)", async () => {
+	it("still reads a local:// text file as text", async () => {
 		await Bun.write(path.join(localRoot, "notes.txt"), "hello world");
 		const tool = new ReadTool(makeSession(testDir));
 
@@ -216,8 +220,8 @@ describe("read local:// images", () => {
 		await fs.symlink(outsideDir, path.join(localRoot, "linked"));
 		const tool = new ReadTool(makeSession(testDir));
 
-		// The realpath/containment guard the router applies must still reject the
-		// escape; the image fast path must not silently read it.
+		// The handler's realpath/containment guard must reject the escape before
+		// the filesystem pipeline could read it.
 		await expect(tool.execute("call", { path: "local://linked/secret.png" })).rejects.toThrow(
 			"local:// URL escapes local root",
 		);
