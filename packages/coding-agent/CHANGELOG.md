@@ -4,6 +4,15 @@
 
 ### Added
 
+- Added `cp` builtin for native filesystem copy operations
+- Added native support for `local://` and `omp://` URLs in `find`, `glob`, `grep`, and AST tools
+- Added shared access to IDA databases across all omp processes in a project
+- Added project-scoped IDA host daemon management via broker
+- Added `InternalUrlFilesystem` for native shell-level resolution of virtual `scheme://` paths
+- Added support for shell execution in virtual working directories
+- Added `ida.maxOpen` setting to cap concurrent database workers, automatically evicting the least recently used idle database
+- Added `ida.idleCloseSec` setting to save and close databases idle beyond the configured duration
+- Added dirty-state tracking for automated autosave after database activity quiescence
 - Added `Always for this session` option to cfg:// approval prompts for session-wide changes
 - Added timeout handling for cfg:// approval prompts, aborting writes after 10 s with a clear error message
 - Added `providers.openaiLiveSteering` setting to toggle mid-response input delivery
@@ -41,6 +50,18 @@
 
 ### Changed
 
+- Enhanced `length` stop recovery to distinguish between output cap exhaustion and context window saturation, allowing truncated-but-actionable turns to be retained
+- Replaced temporary file materialization with direct `InternalUrlFilesystem` resolution for virtual URL tools
+- Migrated `find`, `ifne`, and `xargs` to perform command execution through the `InternalUrlFilesystem` and subshell host
+- Migrated database workers into independent, project-shared daemon processes
+- Integrated IDA daemon lifecycle with the project broker for improved resource management
+- Enhanced `list` output to show database initialization and busy status
+- Enabled automatic host cleanup via `omp ps` and broker idle-out
+- Replaced bash tool command-string URL expansion with native shell filesystem integration
+- Refactored database supervisor to use LRU eviction, idle autosave, and request-aware queueing
+- Hardened cross-request queueing with timeout-bounded waiting for busy database workers
+- Tightened async job visibility and cancellation to block cross-agent use
+- Restricted cancelAgentRegistration to only cancel agents spawned by the caller
 - Implemented sequential atomic configuration saves to prevent write overlaps
 - Refactored domain-specific settings to a type-safe registry supporting dynamic reactivity and layered environment variable overrides
 - Updated URL resolution to use a canonical router, replacing ad-hoc `normalizeLocalScheme` logic
@@ -54,6 +75,7 @@
 
 ### Fixed
 
+- Restricted concurrent access by enforcing file locking across all project processes
 - Fixed `vault://` paths resolving to a different spelling for bash than for reads on Windows when `TEMP` or the profile directory uses an 8.3 short name like `ADMINI~1` ([#7911](https://github.com/can1357/oh-my-pi/issues/7911), [#7938](https://github.com/can1357/oh-my-pi/pull/7938) by [@CoderTCY](https://github.com/CoderTCY))
 - Fixed the bash tool on Windows keeping 8.3 short-name spellings like `ADMINI~1` in its working directory; `pwd` and `$PWD` now report the long path ([#7938](https://github.com/can1357/oh-my-pi/pull/7938) by [@CoderTCY](https://github.com/CoderTCY))
 - Fixed RPC `abort_and_prompt` scheduling failures being reported only as a late error response; the prompt now also completes with a `prompt_result`.

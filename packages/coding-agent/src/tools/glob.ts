@@ -1,16 +1,17 @@
 import type { GlobToolDetails } from "@oh-my-pi/pi-tui/tools/glob";
 import * as fs from "node:fs";
-import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import * as natives from "@oh-my-pi/pi-natives";
 import { formatGroupedPaths, hasFsCode, isEnoent, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { InternalUrlRouter, sessionResolveContext } from "../internal-urls";
+import { InternalUrlFilesystem, type UrlFileStat } from "../internal-urls/url-filesystem";
 import globDescription from "../prompts/tools/glob.md" with { type: "text" };
 import { truncateHead } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { sessionDelegationBias } from "../task/prompt-policy";
 import { isScoutSpawnable } from "../task/spawn-policy";
 import type { ToolSession } from ".";
+import { resolveToolTier } from "./approval";
 import { isFindEnabled } from "./jfind";
 import { applyListLimit } from "@oh-my-pi/pi-tui/tools/list-limit";
 import {
@@ -20,7 +21,8 @@ import {
 	parseFindPattern,
 	partitionExistingPaths,
 	resolveExplicitFindPatterns,
-	resolveToCwd,
+	resolveSearchBase,
+	resolveSearchResultPath,
 } from "./path-utils";
 import { toPathList } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolAbortError, throwIfAborted } from "./tool-errors";
@@ -156,26 +158,12 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 				throw new ToolError("Searching from root directory '/' is not allowed");
 			}
 			const internalRouter = InternalUrlRouter.instance();
-			const resolveContext = sessionResolveContext(this.session, { signal });
-			const normalizedPatterns: string[] = [];
-			for (const rawPattern of aliasResolvedPatterns) {
-				if (!internalRouter.canHandle(rawPattern)) {
-					normalizedPatterns.push(rawPattern);
-					continue;
-				}
-				// Locating never contacts a remote host; schemes without local files fail uniformly.
-				if (internalRouter.isGlob(rawPattern)) {
-					const located = await internalRouter.locateGlob(rawPattern, resolveContext);
-					if (located === null) {
-						throw new ToolError(`Glob patterns are not supported for internal URLs: ${rawPattern}`);
-					}
-					normalizedPatterns.push(located);
-					continue;
-				}
-				normalizedPatterns.push(
-					await internalRouter.requireLocal(rawPattern, "glob", resolveContext, { directory: true }),
-				);
-			}
+			// Internal URLs resolve inside the native walk, bounded by the tier this call was approved at.
+			const urlFilesystem = new InternalUrlFilesystem({
+				context: sessionResolveContext(this.session, { signal }),
+				tier: resolveToolTier(this, params),
+			});
+			const normalizedPatterns = aliasResolvedPatterns.map(pattern => internalRouter.normalize(pattern));
 			if (normalizedPatterns.some(pattern => pattern.length === 0)) {
 				throw new ToolError("`path` must contain non-empty globs or paths");
 			}
@@ -187,7 +175,12 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			let missingPaths: string[] = [];
 			let effectivePatterns = normalizedPatterns;
 			if (normalizedPatterns.length > 1 && !this.#customOps) {
-				const partition = await partitionExistingPaths(normalizedPatterns, this.session.cwd, parseFindPattern);
+				const partition = await partitionExistingPaths(
+					normalizedPatterns,
+					this.session.cwd,
+					parseFindPattern,
+					urlFilesystem,
+				);
 				if (partition.valid.length === 0) {
 					throw new ToolError(`Path not found: ${partition.missing.join(", ")}`);
 				}
@@ -199,7 +192,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			const isSingle = !multiPattern;
 			const targets: GlobTarget[] = multiPattern
 				? multiPattern.targets.map(target => ({
-						searchPath: resolveToCwd(target.basePath, this.session.cwd),
+						searchPath: target.basePath,
 						globPattern: target.globPattern,
 						hasGlob: target.hasGlob,
 					}))
@@ -207,7 +200,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 						(() => {
 							const parsed = parseFindPattern(effectivePatterns[0] ?? ".");
 							return {
-								searchPath: resolveToCwd(parsed.basePath, this.session.cwd),
+								searchPath: resolveSearchBase(parsed.basePath, this.session.cwd),
 								globPattern: parsed.globPattern,
 								hasGlob: parsed.hasGlob,
 							};
@@ -233,8 +226,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 			const formatMatchPath = (matchPath: string, base: string, fileType?: natives.FileType): string => {
 				const hadTrailingSlash = matchPath.endsWith("/") || matchPath.endsWith("\\");
-				const absolutePath = path.isAbsolute(matchPath) ? matchPath : path.resolve(base, matchPath);
-				return formatPathRelativeToCwd(absolutePath, this.session.cwd, {
+				return formatPathRelativeToCwd(resolveSearchResultPath(base, matchPath), this.session.cwd, {
 					trailingSlash: fileType === natives.FileType.Dir || hadTrailingSlash,
 				});
 			};
@@ -337,25 +329,39 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			const preparedTargets: NativePreparedTarget[] = await Promise.all(
 				targets.map(async target => {
 					throwIfAborted(signal);
-					let stat: fs.Stats;
-					try {
-						stat = await this.#stat(target.searchPath);
-					} catch (err) {
-						// ENAMETOOLONG can never name a real target; surface a clean
-						// "Path not found" instead of leaking the raw errno (issue #7597).
-						if (isEnoent(err) || hasFsCode(err, "ENAMETOOLONG")) {
-							if (isSingle) throw new ToolError(`Path not found: ${scopePath}`);
-							return { target, result: [] };
+					let stat: UrlFileStat;
+					if (internalRouter.canHandle(target.searchPath)) {
+						// A URL failure carries its handler's diagnosis (`Artifact 9 not found. Available: 4`).
+						stat = await urlFilesystem.stat(target.searchPath).catch((err: unknown) => {
+							throw new ToolError(
+								`Cannot glob ${target.searchPath}: ${err instanceof Error ? err.message : String(err)}`,
+							);
+						});
+					} else {
+						try {
+							const hostStat = await this.#stat(target.searchPath);
+							stat = {
+								type: hostStat.isDirectory() ? "directory" : hostStat.isFile() ? "file" : "other",
+								size: hostStat.size,
+								mtimeMs: hostStat.mtimeMs,
+							};
+						} catch (err) {
+							// ENAMETOOLONG can never name a real target; surface a clean
+							// "Path not found" instead of leaking the raw errno (issue #7597).
+							if (isEnoent(err) || hasFsCode(err, "ENAMETOOLONG")) {
+								if (isSingle) throw new ToolError(`Path not found: ${scopePath}`);
+								return { target, result: [] };
+							}
+							throw err;
 						}
-						throw err;
 					}
-					if (!target.hasGlob && stat.isFile()) {
+					if (!target.hasGlob && stat.type === "file") {
 						return {
 							target,
 							result: [{ path: formatScopePath(target.searchPath), mtime: stat.mtimeMs }],
 						};
 					}
-					if (!stat.isDirectory()) {
+					if (stat.type !== "directory") {
 						if (isSingle) throw new ToolError(`Path is not a directory: ${target.searchPath}`);
 						return { target, result: [] };
 					}
@@ -423,6 +429,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 							recursive: false,
 							signal: combinedSignal,
 							timeoutMs,
+							filesystem: urlFilesystem.shellFilesystem(),
 						},
 						makeOnMatch(target.searchPath),
 					);

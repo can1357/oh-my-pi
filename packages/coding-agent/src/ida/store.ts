@@ -193,6 +193,11 @@ export interface IdbLocation {
 	fat?: FatSelection;
 }
 
+/** Reference `read` and `ida db=` resolve back to a database: the source path plus `:@<arch>` for a universal binary slice. */
+export function idbRef(loc: Pick<IdbLocation, "sourcePath" | "fat">): string {
+	return loc.fat ? `${loc.sourcePath}${SLICE_SEPARATOR}${loc.fat.slice.arch}` : loc.sourcePath;
+}
+
 /** Options for {@link locateIdb}. */
 export interface LocateIdbOptions {
 	/** Slice of a universal binary to analyze; defaults to the host architecture. Rejected for thin binaries and IDBs. */
@@ -255,8 +260,6 @@ export async function locateIdb(sourcePath: string, options: LocateIdbOptions = 
 	const fat = slices ? { slice: selectSlice(slices, options.arch), slices } : undefined;
 	const id = `${sha.slice(0, 16)}-${name}${fat ? `.${sanitizeIdbName(fat.slice.arch)}` : ""}`;
 	const dir = path.join(getAgentDir(), "idbs", id);
-	// The lock file lives inside `dir`, and the lock is taken before `prepareStoreDir`.
-	await fs.promises.mkdir(dir, { recursive: true });
 	return {
 		id,
 		dir,

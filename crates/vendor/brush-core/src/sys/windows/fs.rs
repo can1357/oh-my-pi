@@ -5,20 +5,8 @@ use std::{
 	path::{Path, PathBuf},
 	sync::LazyLock,
 };
-use std::os::windows::{
-	fs::OpenOptionsExt,
-	io::AsRawHandle,
-};
 
 use crate::error;
-// Selectively re-export items from stubs that we don't override.
-pub(crate) use crate::sys::stubs::fs::MetadataExt;
-use windows_sys::Win32::{
-	Foundation::HANDLE,
-	Storage::FileSystem::{
-		BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, GetFileInformationByHandle,
-	},
-};
 
 /// Cached list of executable extensions from the `PATHEXT` environment
 /// variable. Each entry retains its leading dot (e.g. `".exe"`) and is stored
@@ -73,7 +61,7 @@ fn pathext_entry_stem(entry: &str) -> &str {
 ///
 /// Performs case-insensitive comparison against the cached PATHEXT entries
 /// without allocating.
-fn has_executable_extension(path: &Path) -> bool {
+pub fn has_executable_extension(path: &Path) -> bool {
 	path.extension().is_some_and(|ext| {
 		PATHEXT_EXTENSIONS
 			.iter()
@@ -81,113 +69,10 @@ fn has_executable_extension(path: &Path) -> bool {
 	})
 }
 
-/// Returns true if `path` is, by itself, an existing executable file.
-///
-/// Used both for the initial check in [`resolve_executable`] and for
-/// [`PathExt::executable`].
-fn is_executable_file(path: &Path) -> bool {
-	has_executable_extension(path) && path.is_file()
-}
-
-/// Resolves an owned path to the actual on-disk executable file, if any.
-///
-/// If the path is already a file with a `PATHEXT` extension, it is returned
-/// unchanged (no allocation). Otherwise, each `PATHEXT` extension is appended
-/// in turn and the first existing file is returned.
-pub fn resolve_executable(path: PathBuf) -> Option<PathBuf> {
-	if is_executable_file(&path) {
-		return Some(path);
-	}
-	// Try appending each PATHEXT extension.
-	for ext in PATHEXT_EXTENSIONS.iter() {
-		let mut name = path.as_os_str().to_owned();
-		name.push(ext);
-		let candidate = PathBuf::from(name);
-		if candidate.is_file() {
-			return Some(candidate);
-		}
-	}
-	None
-}
-
-impl crate::sys::fs::PathExt for Path {
-	fn readable(&self) -> bool {
-		std::fs::OpenOptions::new().read(true).open(self).is_ok()
-	}
-
-	fn writable(&self) -> bool {
-		std::fs::OpenOptions::new().write(true).open(self).is_ok()
-	}
-
-	fn executable(&self) -> bool {
-		if is_executable_file(self) {
-			return true;
-		}
-		// Try each PATHEXT extension without allocating a separate PathBuf
-		// per candidate until one exists.
-		PATHEXT_EXTENSIONS.iter().any(|ext| {
-			let mut name = self.as_os_str().to_owned();
-			name.push(ext);
-			Self::new(&name).is_file()
-		})
-	}
-
-	fn exists_and_is_block_device(&self) -> bool {
-		false
-	}
-
-	fn exists_and_is_char_device(&self) -> bool {
-		false
-	}
-
-	fn exists_and_is_fifo(&self) -> bool {
-		false
-	}
-
-	fn exists_and_is_socket(&self) -> bool {
-		false
-	}
-
-	fn exists_and_is_setgid(&self) -> bool {
-		false
-	}
-
-	fn exists_and_is_setuid(&self) -> bool {
-		false
-	}
-
-	fn exists_and_is_sticky_bit(&self) -> bool {
-		false
-	}
-
-	fn get_device_and_inode(&self) -> Result<(u64, u64), crate::error::Error> {
-		let file = std::fs::OpenOptions::new()
-			.access_mode(0)
-			.custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-			.open(self)?;
-		let mut info = BY_HANDLE_FILE_INFORMATION {
-			// SAFETY: `BY_HANDLE_FILE_INFORMATION` is a plain C output buffer for
-			// `GetFileInformationByHandle`; all fields are overwritten before any
-			// successful read from the structure below.
-			..unsafe { std::mem::zeroed() }
-		};
-
-		let succeeded = {
-			// SAFETY: `file.as_raw_handle()` is a live file handle owned by `file`
-			// for the duration of the call, and `info` points to initialized writable
-			// storage for the API's output structure.
-			(unsafe {
-				GetFileInformationByHandle(file.as_raw_handle() as HANDLE, &mut info)
-			}) != 0
-		};
-		if !succeeded {
-			return Err(std::io::Error::last_os_error().into());
-		}
-
-		let file_index = (u64::from(info.nFileIndexHigh) << 32)
-			| u64::from(info.nFileIndexLow);
-		Ok((u64::from(info.dwVolumeSerialNumber), file_index))
-	}
+/// The `PATHEXT` extensions (lowercase, with leading dot) tried, in order,
+/// when completing a command name to an executable file.
+pub fn executable_extensions() -> &'static [String] {
+	&PATHEXT_EXTENSIONS
 }
 
 /// Splits a platform-specific PATH-like value into individual paths.
@@ -535,12 +420,5 @@ mod tests {
 		// Tolerant: entries without a leading dot are returned as-is.
 		assert_eq!(pathext_entry_stem("exe"), "exe");
 		assert_eq!(pathext_entry_stem(""), "");
-	}
-
-	#[test]
-	fn resolve_executable_for_nonexistent_returns_none() {
-		// A path that cannot exist on any test host.
-		let path = PathBuf::from(r"C:\__brush_test_definitely_missing__");
-		assert!(resolve_executable(path).is_none());
 	}
 }

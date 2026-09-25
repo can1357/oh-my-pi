@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `stops-output-at-context-window` compatibility flag, enabled for Claude 4.5 and newer models
 - Added `supports-steering` compatibility flag, enabled by default for GPT-6 and newer models
 
 ### Fixed

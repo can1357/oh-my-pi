@@ -99,7 +99,6 @@ export class SkillProtocolHandler implements ProtocolHandler {
 		immutable: true,
 		unbounded: true,
 		linkable: true,
-		shellOperand: true,
 	};
 
 	/** Advertised only when loaded skills are readable through an active tool. */

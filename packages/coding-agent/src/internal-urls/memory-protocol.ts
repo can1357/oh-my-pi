@@ -328,7 +328,6 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 		selectors: "lines",
 		immutable: true,
 		linkable: true,
-		shellOperand: true,
 	};
 
 	/** Advertised only when the session's memory backend owns the file-backed `memory://root` namespace. */
