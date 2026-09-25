@@ -43,13 +43,20 @@ The root object currently contains only `providers`; unknown root keys fail sche
 providers:
   my-provider:
     baseUrl: https://api.example.com/v1
-    apiKey: MY_PROVIDER_API_KEY
     api: openai-completions
     headers:
       X-Team: platform
     authHeader: true
-    auth: apiKey
+    auth: oauth
     disableStrictTools: false # set true for Anthropic-compatible endpoints that reject the strict field
+    oauth:
+      name: My Provider OAuth
+      clientId: MY_PROVIDER_OAUTH_CLIENT_ID
+      clientSecret: MY_PROVIDER_OAUTH_CLIENT_SECRET
+      authorizationUrl: https://accounts.example.com/oauth/authorize
+      tokenUrl: https://accounts.example.com/oauth/token
+      scopes: [openid, email]
+      redirectUri: http://127.0.0.1:8787/callback
     discovery:
       type: ollama
       timeoutMs: 10000 # optional per-provider HTTP probe timeout in milliseconds
@@ -122,7 +129,7 @@ selecting the extended window.
 
 ### Allowed auth/discovery values
 
-- `auth`: `apiKey` (default), `none`, or `oauth`; for `models.yml` custom models, `oauth` is accepted by schema but does not waive the `apiKey` requirement
+- `auth`: `apiKey` (default), `none`, or `oauth`; `oauth` controls request shaping, while an `oauth` block registers the browser login and token refresh flow
 - `discovery.type`: `ollama`, `llama.cpp`, `lm-studio`, `openai-models-list`, `proxy`, or `litellm`
 - `discovery.injectV1`: optional boolean, default `true`, for `openai-models-list`. Set `false` to fetch the model list from `{baseUrl}/models` without injecting `/v1` — for gateways that root their OpenAI-compatible surface at a versioned path (e.g. `https://api.opper.ai/v3/compat`) where the forced `/v1/models` returns a different, smaller model list. Query strings in `baseUrl` are ignored, matching the default mode.
 - `transport`: `pi-native` only. When set, every model under that provider is sent to an `omp auth-gateway` compatible `baseUrl` via `POST /v1/pi/stream`; `apiKey` is the gateway bearer.
@@ -136,7 +143,7 @@ selecting the extended window.
 Required:
 
 - `baseUrl`
-- `apiKey` unless `auth: none`
+- `apiKey`, an `oauth` block, or `auth: none`
 - `api` at provider level or each model
 
 ### Override-only provider (`models` missing or empty)
@@ -152,6 +159,41 @@ Must define at least one of:
 - `modelOverrides`
 - `discovery`
 - `remoteCompaction`
+- `oauth`
+
+### OAuth
+
+Configured provider OAuth uses the authorization-code flow. PKCE is enabled by default.
+The login opens the authorization URL, listens on a localhost callback, stores the tokens,
+and refreshes the access token before expiry.
+
+Configured OAuth is supported only in the user-level `models.yml` in the agent directory (default `~/.omp/agent/models.yml`),
+including when an SDK session loads that file. Other model config paths reject OAuth blocks because OAuth registration is process-wide.
+Provider IDs must not match a built-in provider.
+
+Required `oauth` fields:
+
+- `name`
+- `clientId`
+- `authorizationUrl`
+- `tokenUrl`
+- non-empty `scopes`
+
+Optional fields:
+
+- `clientSecret`
+- `tokenEndpointAuthMethod`: `client_secret_post` (default with a secret), `client_secret_basic`, or `none` (default without a secret)
+- `redirectUri`, or `callbackPort` and `callbackPath`
+- `useIdToken` to use `id_token` as the model bearer instead of `access_token`
+- `pkce` to disable PKCE for providers that do not accept it
+- `authorizationParams` and `tokenParams` for provider-specific form values
+- `issuer` when the OIDC issuer is not the authorization URL origin
+
+Token responses must use the standard OAuth fields. Providers with non-standard token protocols require an extension.
+
+`clientId`, `clientSecret`, `authorizationParams`, and `tokenParams` use the same
+environment-or-literal and `!command` resolution as provider API keys and headers.
+They resolve when a login or token refresh starts, so a failing `!command` fails that login or refresh.
 
 ### Discovery
 

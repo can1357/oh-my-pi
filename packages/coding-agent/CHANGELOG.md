@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added declarative authorization-code OAuth for custom providers in the user `models.yml`, including PKCE browser login through `/login` and `omp login`, localhost callbacks, validated standard token responses, token refresh, and environment- or command-resolved client credentials ([#7336](https://github.com/can1357/oh-my-pi/pull/7336) by [@Adrastopoulos](https://github.com/Adrastopoulos))
+
 ### Fixed
 
 - Fixed the Windows bash tool exporting `TEMP`, `TMP`, and `TMPDIR` with 8.3 short names such as `ADMINI~1`, so they now match the long-form `pwd`/`$PWD` after `cd "$TEMP"` ([#13265](https://github.com/can1357/oh-my-pi/pull/13265) by [@CoderTCY](https://github.com/CoderTCY))

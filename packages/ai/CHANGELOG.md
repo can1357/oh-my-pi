@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `createConfiguredOAuthProvider`, a reusable authorization-code OAuth provider backed by `oauth4webapi` with PKCE, localhost callbacks, standard token validation, `client_secret_post`/`client_secret_basic` client authentication, and refresh support ([#7336](https://github.com/can1357/oh-my-pi/pull/7336) by [@Adrastopoulos](https://github.com/Adrastopoulos))
+
 ### Fixed
 
 - Fixed capped Anthropic and Bedrock Claude requests with thinking enabled, including on-demand compaction, ending at `max_tokens` with no answer; every capped request now gets its effort's thinking budget on top of the requested output ([#13300](https://github.com/can1357/oh-my-pi/pull/13300) by [@alphastorm](https://github.com/alphastorm))

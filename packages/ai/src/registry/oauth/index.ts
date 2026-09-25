@@ -15,6 +15,7 @@ import type {
 } from "./types";
 
 export * from "./anthropic";
+export * from "./configured";
 export * from "./device-code";
 export type * from "./types";
 

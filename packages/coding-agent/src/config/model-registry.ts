@@ -1,7 +1,13 @@
 import * as path from "node:path";
 import type { ApiKeyResolver, FetchImpl, ResolvedApiKey, UsageProvider } from "@oh-my-pi/pi-ai";
 import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
-import { registerOAuthProvider, unregisterOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
+import {
+	createConfiguredOAuthProvider,
+	getOAuthProvider,
+	registerOAuthProvider,
+	unregisterOAuthProvider,
+	unregisterOAuthProviders,
+} from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
 import { setCodexAttestationProvider } from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
@@ -44,12 +50,12 @@ import {
 } from "@oh-my-pi/pi-catalog/provider-models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import { modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
-import { getAgentDir, isBunTestRuntime, logger, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
+import { getAgentDir, isBunTestRuntime, logger, untilAborted, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
 import { resolveProviderModelReference } from "../config/model-resolver";
 import { generateCodexAttestation } from "../live/attestation";
 import type { AuthStorage } from "../session/auth-storage";
 import { type ApiKeyResolverModel, type ApiKeyResolverOptions, createApiKeyResolver } from "./api-key-resolver";
-import type { ConfigError, ConfigFile } from "./config-file";
+import { ConfigError, type ConfigFile } from "./config-file";
 import {
 	buildCustomModelOverlay,
 	type CustomModelDefinitionLike,
@@ -236,6 +242,30 @@ export type ResolvedRequestAuth =
 	  }
 	| { ok: false; error: string };
 
+/** OAuth registration source for providers declared in models.yml. */
+const CONFIGURED_OAUTH_SOURCE = "models-config";
+
+type ProviderOAuthConfig = NonNullable<NonNullable<ModelsConfig["providers"]>[string]["oauth"]>;
+
+/**
+ * Build the request-time resolver for a declared OAuth block's client values.
+ * `!command` values run when a login or refresh starts, never during the models.yml parse.
+ */
+function configuredOAuthClientResolver(config: ProviderOAuthConfig) {
+	return async (signal?: AbortSignal) => {
+		const clientId = await untilAborted(signal, () => resolveConfigValue(config.clientId));
+		const clientSecret = config.clientSecret
+			? await untilAborted(signal, () => resolveConfigValue(config.clientSecret!))
+			: undefined;
+		return {
+			clientId: clientId ?? "",
+			clientSecret,
+			authorizationParams: await resolveConfigHeaders(config.authorizationParams, signal),
+			tokenParams: await resolveConfigHeaders(config.tokenParams, signal),
+		};
+	};
+}
+
 /**
  * Model registry - loads and manages models, resolves API keys via AuthStorage.
  */
@@ -306,6 +336,9 @@ export class ModelRegistry {
 	// Keyed by provider name; use the same SQLite cache path as builtins.
 	#runtimeModelManagers: Map<string, { options: ModelManagerOptions<Api>; sourceId: string }> = new Map();
 	#ignoreLocalModelConfig: boolean;
+	#allowConfiguredOAuth: boolean;
+	/** Provider IDs this registry currently owns under source `models-config`. */
+	#configuredOAuthIds: string[] = [];
 	#fetch: FetchImpl;
 	#settings: Settings | undefined;
 
@@ -421,10 +454,19 @@ export class ModelRegistry {
 			/** Model discovery cache database. Defaults beside an explicit models config. */
 			cacheDbPath?: string;
 			fetch?: FetchImpl;
+			/**
+			 * Whether a provider may declare OAuth in models.yml. Defaults to true
+			 * only for the user-level `<agentDir>/models.yml`, because other config
+			 * files must not register process-wide browser logins.
+			 */
+			allowConfiguredOAuth?: boolean;
 		},
 	) {
 		this.#ignoreLocalModelConfig = options?.ignoreLocalModelConfig ?? false;
 		this.#settings = options?.settings;
+		const userModelsPath = path.join(getAgentDir(), "models.yml");
+		this.#allowConfiguredOAuth =
+			options?.allowConfiguredOAuth ?? path.resolve(modelsPath ?? userModelsPath) === path.resolve(userModelsPath);
 		this.#fetch =
 			options?.fetch ??
 			(isBunTestRuntime()
@@ -786,6 +828,10 @@ export class ModelRegistry {
 		this.#customProviderApiKeys.clear();
 		this.#keylessProviders.clear();
 		this.#discoverableProviders = [];
+		if (this.#allowConfiguredOAuth) {
+			for (const id of this.#configuredOAuthIds) unregisterOAuthProvider(id);
+			this.#configuredOAuthIds = [];
+		}
 		// Drop config-sourced apiKeys from AuthStorage before reload; entries
 		// removed from models.yml must actually disappear from the resolver, not
 		// linger from the previous parse. The post-load setters below repopulate.
@@ -1525,6 +1571,8 @@ export class ModelRegistry {
 		const discoverableProviders: DiscoveryProviderConfig[] = [];
 		const providerEntries = Object.entries(value.providers ?? {});
 		const configuredProviders = new Set(Object.keys(value.providers ?? {}));
+		let oauthError: ConfigError | undefined;
+		const registeredOAuthIds: string[] = [];
 		for (const [providerName, providerConfig] of providerEntries) {
 			const commandConfigs = new Set<string>();
 			this.#collectCommandConfigValues(commandConfigs, providerConfig.apiKey, providerConfig.headers);
@@ -1583,6 +1631,48 @@ export class ModelRegistry {
 			if (authMode === "none") {
 				keylessProviders.add(providerName);
 			}
+			if (providerConfig.oauth) {
+				let oauthFailure: Error | undefined;
+				if (getProviderDefinition(providerName)) {
+					oauthFailure = new Error(
+						`Provider ${providerName}: configured OAuth cannot replace a built-in provider.`,
+					);
+				} else if (!this.#allowConfiguredOAuth) {
+					oauthFailure = new Error(
+						`Provider ${providerName}: configured OAuth is supported only in the user models.yml.`,
+					);
+				} else {
+					const existing = getOAuthProvider(providerName);
+					if (existing && existing.sourceId !== CONFIGURED_OAUTH_SOURCE) {
+						oauthFailure = new Error(
+							`Provider ${providerName}: OAuth is already registered by source "${existing.sourceId ?? "unknown"}".`,
+						);
+					}
+				}
+				if (oauthFailure) {
+					oauthError = new ConfigError("models", undefined, { err: oauthFailure, stage: "OAuth" });
+					break;
+				}
+				const { clientId, clientSecret, authorizationParams, tokenParams, ...oauth } = providerConfig.oauth;
+				for (const value of [
+					clientId,
+					clientSecret,
+					...Object.values(authorizationParams ?? {}),
+					...Object.values(tokenParams ?? {}),
+				]) {
+					if (isCommandConfigValue(value)) commandConfigs.add(value);
+				}
+				registerOAuthProvider({
+					...createConfiguredOAuthProvider(providerName, {
+						...oauth,
+						resolveClient: configuredOAuthClientResolver(providerConfig.oauth),
+						fetch: this.#fetch,
+					}),
+					id: providerName,
+					sourceId: CONFIGURED_OAUTH_SOURCE,
+				});
+				registeredOAuthIds.push(providerName);
+			}
 
 			if (providerConfig.discovery && (providerConfig.api || providerConfig.discovery.type === "proxy")) {
 				const disableStrictCompat = providerConfig.disableStrictTools ? { disableStrictTools: true } : undefined;
@@ -1622,6 +1712,21 @@ export class ModelRegistry {
 			}
 			if (commandConfigs.size > 0) this.#commandConfigsByProvider.set(providerName, commandConfigs);
 		}
+
+		if (oauthError) {
+			for (const id of registeredOAuthIds) unregisterOAuthProvider(id);
+			return {
+				models: [],
+				overrides: new Map(),
+				modelOverrides: new Map(),
+				keylessProviders: new Set(),
+				discoverableProviders: [],
+				configuredProviders: new Set(),
+				error: oauthError,
+				found: true,
+			};
+		}
+		if (this.#allowConfiguredOAuth) this.#configuredOAuthIds = registeredOAuthIds;
 
 		return {
 			models: this.#parseModels(value),
