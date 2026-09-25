@@ -86,6 +86,13 @@ import { cfgEvalJs } from "@oh-my-pi/pi-coding-agent/eval/settings";
 /** Lets microtask-coalesced setting listeners run. */
 const tick = () => Promise.resolve();
 
+/**
+ * Windows collapses `.` and `..` inside a symlink target lexically before following any component; POSIX follows
+ * each component physically. `alias/..`, `missing/..`, and `racetarget/..` targets therefore name different files
+ * per platform, and a config write must land on the one the host filesystem resolves.
+ */
+const symlinkDotsCollapseLexically = process.platform === "win32";
+
 function context(): Context {
 	return {
 		systemPrompt: [],
@@ -558,13 +565,14 @@ describe("Settings", () => {
 			expect(readlinkCalls).toBeLessThanOrEqual(safetyValve);
 		});
 
-		it("follows an intermediate directory symlink inside a relative target before applying ..", async () => {
+		it("lands a relative `alias/..` target where the filesystem resolves it", async () => {
 			// config.yml -> alias/../final.yml, where `alias` is a symlinked
-			// directory (alias -> elsewhere/deep) and final.yml is missing. The
-			// filesystem follows `alias` first and then pops its PHYSICAL parent,
-			// landing on elsewhere/final.yml. A lexical normalization of the whole
-			// target collapses `alias/..` to the config dir up front and would
-			// clobber <configdir>/final.yml while leaving the real chain dangling.
+			// directory (alias -> elsewhere/deep) and final.yml is missing. POSIX
+			// follows `alias` first and then pops its PHYSICAL parent, landing on
+			// elsewhere/final.yml; Windows collapses `alias\..` lexically and lands
+			// on <configdir>/final.yml. Resolving with the other platform's rule
+			// writes a file the link never reads — clobbering whatever lives there —
+			// while the real chain stays dangling.
 			const elsewhereDir = tempDir.join("elsewhere");
 			const deepDir = path.join(elsewhereDir, "deep");
 			fs.mkdirSync(deepDir, { recursive: true });
@@ -575,27 +583,33 @@ describe("Settings", () => {
 
 			const physicalFinal = path.join(elsewhereDir, "final-config.yml");
 			const lexicalSibling = path.join(agentDir, "final-config.yml");
+			const [resolvedFinal, strayFinal] = symlinkDotsCollapseLexically
+				? [lexicalSibling, physicalFinal]
+				: [physicalFinal, lexicalSibling];
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			cfgSetupVersion.set(settings, 8);
 			await settings.flush();
 
-			// The write lands on the physical target (fs semantics), recreating it,
-			// while the lexically collapsed sibling stays untouched.
-			expect(YAML.parse(await Bun.file(physicalFinal).text())).toEqual({ setupVersion: 8 });
-			expect(fs.existsSync(lexicalSibling)).toBe(false);
+			// The write recreates the target the link resolves to — reading back
+			// through the link proves it — while the other candidate stays untouched.
+			expect(YAML.parse(await Bun.file(resolvedFinal).text())).toEqual({ setupVersion: 8 });
+			expect(YAML.parse(await Bun.file(getConfigPath()).text())).toEqual({ setupVersion: 8 });
+			expect(fs.existsSync(strayFinal)).toBe(false);
 			// The user-managed chain head survives as a symlink.
 			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
 		});
 
-		it("resolves an absolute target's intermediate directory symlink before applying ..", async () => {
+		it("lands an absolute `alias/..` target where the filesystem resolves it", async () => {
 			// config.yml -> /base/alias/../final.yml (ABSOLUTE target), where
 			// `alias` is a symlinked directory (alias -> elsewhere/deep) and
-			// final.yml is missing. The filesystem follows `alias` first and then
-			// pops its PHYSICAL parent, landing on elsewhere/final.yml. Lexically
-			// collapsing the absolute string up front turns `/base/alias/..` into
-			// /base and would clobber /base/final.yml while leaving the real chain
-			// dangling — the same bug already fixed for relative targets.
+			// final.yml is missing. POSIX stores the target verbatim, follows
+			// `alias`, and pops its PHYSICAL parent, landing on elsewhere/final.yml;
+			// lexically collapsing the absolute string up front would clobber
+			// /base/final.yml while leaving the real chain dangling — the same bug
+			// already fixed for relative targets. Windows normalizes an absolute
+			// target when the link is created (and collapses `..` lexically
+			// anyway), so there the link itself names /base/final.yml.
 			const elsewhereDir = tempDir.join("elsewhere");
 			const deepDir = path.join(elsewhereDir, "deep");
 			fs.mkdirSync(deepDir, { recursive: true });
@@ -611,56 +625,75 @@ describe("Settings", () => {
 
 			const physicalFinal = path.join(elsewhereDir, "final-config.yml");
 			const lexicalSibling = path.join(baseDir, "final-config.yml");
+			const [resolvedFinal, strayFinal] = symlinkDotsCollapseLexically
+				? [lexicalSibling, physicalFinal]
+				: [physicalFinal, lexicalSibling];
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			cfgSetupVersion.set(settings, 9);
 			await settings.flush();
 
-			// The write lands on the physical target (fs semantics), recreating it,
-			// while the lexically collapsed sibling stays untouched.
-			expect(YAML.parse(await Bun.file(physicalFinal).text())).toEqual({ setupVersion: 9 });
-			expect(fs.existsSync(lexicalSibling)).toBe(false);
+			// The write recreates the target the link resolves to — reading back
+			// through the link proves it — while the other candidate stays untouched.
+			expect(YAML.parse(await Bun.file(resolvedFinal).text())).toEqual({ setupVersion: 9 });
+			expect(YAML.parse(await Bun.file(getConfigPath()).text())).toEqual({ setupVersion: 9 });
+			expect(fs.existsSync(strayFinal)).toBe(false);
 			// The user-managed chain head survives as a symlink.
 			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
 		});
 
 		it("does not write to an unrelated sibling when a non-final component is missing before ..", async () => {
 			// config.yml -> missing/../final.yml, where `missing` does not exist.
-			// Filesystem lookup fails at `missing`, so a following `..` must NOT
-			// pop a component that was never entered. Collapsing the target
-			// lexically instead pops `missing` and lands on <configdir>/final.yml,
-			// clobbering an unrelated sibling while the real (dangling) target is
-			// never written. The resolver must not escape to that sibling.
+			// POSIX lookup fails at `missing`, so a following `..` must NOT pop a
+			// component that was never entered. Collapsing the target lexically
+			// instead pops `missing` and lands on <configdir>/final.yml, clobbering
+			// an unrelated sibling while the real (dangling) target is never
+			// written. Windows collapses `missing\..` lexically before any lookup,
+			// so there that sibling IS the link's target and the write belongs on it.
 			await fs.promises.symlink("missing/../final-config.yml", getConfigPath(), "file");
 			const lexicalSibling = path.join(agentDir, "final-config.yml");
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			cfgSetupVersion.set(settings, 10);
-			// The resolved path sits under the never-entered `missing` dir (fs
-			// semantics), whose parent does not exist, so the atomic write fails
-			// rather than clobbering the sibling.
-			await expect(settings.flush()).rejects.toThrow();
-
-			expect(fs.existsSync(lexicalSibling)).toBe(false);
+			if (symlinkDotsCollapseLexically) {
+				await settings.flush();
+				expect(YAML.parse(await Bun.file(lexicalSibling).text())).toEqual({ setupVersion: 10 });
+				expect(YAML.parse(await Bun.file(getConfigPath()).text())).toEqual({ setupVersion: 10 });
+			} else {
+				// The resolved path sits under the never-entered `missing` dir (fs
+				// semantics), whose parent does not exist, so the atomic write fails
+				// rather than clobbering the sibling.
+				await expect(settings.flush()).rejects.toThrow();
+				expect(fs.existsSync(lexicalSibling)).toBe(false);
+			}
 			// The user-managed chain head survives as a symlink.
 			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
 		});
 
 		it("does not mislocate when a dangling symlink component is followed by ..", async () => {
 			// config.yml -> link/.., where `link -> missing` and `missing` does
-			// not exist. The filesystem follows `link` to its missing referent, so
-			// looking up `link/..` fails: there is no parent of a path that was
-			// never entered. Leaving the accumulator on the dangling `link` and
-			// then following it to `missing` would create a regular file at the
-			// wrong path and report success while the config path still fails with
-			// ENOTDIR. The resolver must surface the failure instead.
+			// not exist. POSIX follows `link` to its missing referent, so looking
+			// up `link/..` fails: there is no parent of a path that was never
+			// entered. Leaving the accumulator on the dangling `link` and then
+			// following it to `missing` would create a regular file at the wrong
+			// path and report success while the config path still fails with
+			// ENOTDIR. The resolver must surface the failure instead. Windows
+			// collapses `link\..` lexically to the link's own directory, so there
+			// config.yml names a directory and startup refuses to read it rather
+			// than falling back to silent defaults.
 			await fs.promises.symlink("missing", path.join(agentDir, "link"), "file");
 			await fs.promises.symlink("link/..", getConfigPath(), "file");
 			const misplaced = path.join(agentDir, "missing");
 
-			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			cfgSetupVersion.set(settings, 11);
-			await expect(settings.flush()).rejects.toThrow();
+			if (symlinkDotsCollapseLexically) {
+				await expect(Settings.init({ cwd: projectDir, agentDir })).rejects.toThrow(
+					"Failed to read settings config",
+				);
+			} else {
+				const settings = await Settings.init({ cwd: projectDir, agentDir });
+				cfgSetupVersion.set(settings, 11);
+				await expect(settings.flush()).rejects.toThrow();
+			}
 
 			// No regular file was landed at the wrong resolved location.
 			expect(fs.existsSync(misplaced)).toBe(false);
@@ -668,22 +701,30 @@ describe("Settings", () => {
 			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
 		});
 
-		it("does not mislocate when a dangling component precedes further names then ..", async () => {
-			// config.yml -> missing/child/.., where `missing` does not exist. The
-			// walk freezes at `missing`, appends `child` lexically, then hits `..`.
-			// `missing` was never entered, so `child` is not a real component the
-			// kernel can pop: `missing/child/..` fails with ENOTDIR. Lexically
-			// popping `child` and returning `missing` would land a regular file at
-			// the wrong path and report success while config.yml stays unusable.
+		it("lands a dangling `missing/child/..` target only where the filesystem resolves it", async () => {
+			// config.yml -> missing/child/.., where `missing` does not exist. On
+			// POSIX the walk freezes at `missing`, appends `child` lexically, then
+			// hits `..`. `missing` was never entered, so `child` is not a real
+			// component the kernel can pop: `missing/child/..` fails with ENOTDIR.
+			// Lexically popping `child` and returning `missing` would land a regular
+			// file at the wrong path and report success while config.yml stays
+			// unusable. Windows collapses `missing\child\..` to `missing` before any
+			// lookup, so there `missing` IS the link's target and the write belongs
+			// on it.
 			await fs.promises.symlink("missing/child/..", getConfigPath(), "file");
-			const misplaced = path.join(agentDir, "missing");
+			const frozenComponent = path.join(agentDir, "missing");
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			cfgSetupVersion.set(settings, 12);
-			await expect(settings.flush()).rejects.toThrow();
-
-			// No regular file was landed at the frozen component.
-			expect(fs.existsSync(misplaced)).toBe(false);
+			if (symlinkDotsCollapseLexically) {
+				await settings.flush();
+				expect(YAML.parse(await Bun.file(frozenComponent).text())).toEqual({ setupVersion: 12 });
+				expect(YAML.parse(await Bun.file(getConfigPath()).text())).toEqual({ setupVersion: 12 });
+			} else {
+				await expect(settings.flush()).rejects.toThrow();
+				// No regular file was landed at the frozen component.
+				expect(fs.existsSync(frozenComponent)).toBe(false);
+			}
 			// The user-managed chain head survives as a symlink.
 			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
 		});
@@ -765,18 +806,21 @@ describe("Settings", () => {
 			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
 		});
 
-		it("rejects with ENOTDIR when a `..` target's component is created as a regular file mid-walk", async () => {
+		it("lands a `..` target only where the filesystem resolves it when a component turns into a regular file mid-walk", async () => {
 			// config.yml -> racetarget/../victim.yml, where `racetarget` does not
-			// exist when the initial realpath(config.yml) runs, so it reports ENOENT
-			// and the manual segment walk begins. A concurrent process then creates
-			// `racetarget` as a REGULAR FILE before the walk's realpath(candidate)
-			// reaches it, so that realpath succeeds and the walk stays UNFROZEN. The
-			// following `..` demands `racetarget` be a traversable directory to pop
-			// its parent; a regular file is not, so opening config.yml really fails
-			// with ENOTDIR (the kernel rejects `regularfile/..`). Popping lexically
-			// and continuing would resolve to victim.yml in the parent dir and let
-			// the atomic rename overwrite an unrelated sibling while falsely
-			// reporting success. Surface it.
+			// exist when the initial realpath(config.yml) runs, so on POSIX it
+			// reports ENOENT and the manual segment walk begins. A concurrent
+			// process then creates `racetarget` as a REGULAR FILE before the walk's
+			// realpath(candidate) reaches it, so that realpath succeeds and the walk
+			// stays UNFROZEN. The following `..` demands `racetarget` be a
+			// traversable directory to pop its parent; a regular file is not, so
+			// opening config.yml really fails with ENOTDIR (the kernel rejects
+			// `regularfile/..`). Popping lexically and continuing would resolve to
+			// victim.yml in the parent dir and let the atomic rename overwrite an
+			// unrelated sibling while falsely reporting success. Surface it. Windows
+			// collapses `racetarget\..` lexically, so there the link names
+			// victim.yml whatever `racetarget` is: startup loads it through the link
+			// and the save must land back on it without consulting `racetarget`.
 			await fs.promises.symlink("racetarget/../victim.yml", getConfigPath(), "file");
 			const raceTarget = path.join(agentDir, "racetarget");
 			const canonicalRaceTarget = await withCanonicalParent(raceTarget);
@@ -797,11 +841,17 @@ describe("Settings", () => {
 			}) as typeof fs.promises.realpath);
 
 			cfgSetupVersion.set(settings, 16);
-			await expect(settings.flush()).rejects.toThrow(/ENOTDIR/);
-
-			expect(injected).toBe(true);
-			// The unrelated sibling was NOT overwritten with YAML.
-			expect(await Bun.file(victim).text()).toBe("keep: me");
+			if (symlinkDotsCollapseLexically) {
+				await settings.flush();
+				expect(injected).toBe(false);
+				// victim.yml IS the config here: its content survives the merge.
+				expect(YAML.parse(await Bun.file(getConfigPath()).text())).toEqual({ keep: "me", setupVersion: 16 });
+			} else {
+				await expect(settings.flush()).rejects.toThrow(/ENOTDIR/);
+				expect(injected).toBe(true);
+				// The unrelated sibling was NOT overwritten with YAML.
+				expect(await Bun.file(victim).text()).toBe("keep: me");
+			}
 			// The user-managed chain head survives as a symlink.
 			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
 		});
@@ -858,18 +908,21 @@ describe("Settings", () => {
 			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
 		});
 
-		it("rejects with ENOTDIR when a `..` target's directory is removed before the validation stat", async () => {
+		it("lands a `..` target only where the filesystem resolves it when its directory is removed before the validation stat", async () => {
 			// config.yml -> racetarget/../victim.yml, where `racetarget` does not
-			// exist when the initial realpath(config.yml) runs, so the manual walk
-			// begins. A concurrent process creates `racetarget` as a real DIRECTORY
-			// before the walk's realpath(candidate) reaches it, so that realpath
-			// succeeds and the walk stays UNFROZEN, reaching the `..`
+			// exist when the initial realpath(config.yml) runs, so on POSIX the
+			// manual walk begins. A concurrent process creates `racetarget` as a
+			// real DIRECTORY before the walk's realpath(candidate) reaches it, so
+			// that realpath succeeds and the walk stays UNFROZEN, reaching the `..`
 			// directory-requirement stat. The directory is then removed between that
 			// realpath and this stat, so the stat throws ENOENT. The `..` still
 			// requires `racetarget` to be a traversable directory to pop its parent,
 			// and that provably cannot hold now. Letting the ENOENT reach the outer
 			// catch would swallow it and return path.resolve(config.yml), clobbering
 			// config.yml itself while the dangling symlink survives. Surface ENOTDIR.
+			// Windows collapses `racetarget\..` lexically, so there the link names
+			// victim.yml whatever `racetarget` is: startup loads it through the link
+			// and the save must land back on it without consulting `racetarget`.
 			await fs.promises.symlink("racetarget/../victim.yml", getConfigPath(), "file");
 			const raceTarget = path.join(agentDir, "racetarget");
 			const canonicalRaceTarget = await withCanonicalParent(raceTarget);
@@ -903,12 +956,19 @@ describe("Settings", () => {
 			}) as typeof fs.promises.stat);
 
 			cfgSetupVersion.set(settings, 18);
-			await expect(settings.flush()).rejects.toThrow(/ENOTDIR/);
-
-			expect(created).toBe(true);
-			expect(removed).toBe(true);
-			// The unrelated sibling was NOT overwritten with YAML.
-			expect(await Bun.file(victim).text()).toBe("keep: me");
+			if (symlinkDotsCollapseLexically) {
+				await settings.flush();
+				expect(created).toBe(false);
+				expect(removed).toBe(false);
+				// victim.yml IS the config here: its content survives the merge.
+				expect(YAML.parse(await Bun.file(getConfigPath()).text())).toEqual({ keep: "me", setupVersion: 18 });
+			} else {
+				await expect(settings.flush()).rejects.toThrow(/ENOTDIR/);
+				expect(created).toBe(true);
+				expect(removed).toBe(true);
+				// The unrelated sibling was NOT overwritten with YAML.
+				expect(await Bun.file(victim).text()).toBe("keep: me");
+			}
 			// config.yml itself was NOT clobbered into a regular file.
 			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
 		});
@@ -950,6 +1010,24 @@ describe("Settings", () => {
 				segment => segment !== "" && segment !== ".",
 			);
 			expect(absSegments).toEqual(["managed", "final.yml"]);
+		});
+
+		it("collapses a Windows target's dot segments lexically but keeps them for the POSIX walk", async () => {
+			// Windows resolves `alias\..\final.yml` to the link directory's
+			// final.yml without following `alias`; walking the raw `..` pops the
+			// alias's PHYSICAL parent and writes a file the link never reads. Drive
+			// the splitter with each engine so both rules reproduce on any host.
+			expect(__physicalTargetSegmentsForTesting("alias\\..\\final.yml", path.win32)).toEqual(["final.yml"]);
+			// A leading `..` still pops the link's real parent, and a trailing
+			// separator survives so the walk still demands a directory there.
+			expect(__physicalTargetSegmentsForTesting("..\\..\\final.yml", path.win32)).toEqual(["..", "..", "final.yml"]);
+			expect(__physicalTargetSegmentsForTesting("missing\\", path.win32)).toEqual(["missing", ""]);
+			// POSIX follows `alias` physically, so `..` stays for the walk to pop.
+			expect(__physicalTargetSegmentsForTesting("alias/../final.yml", path.posix)).toEqual([
+				"alias",
+				"..",
+				"final.yml",
+			]);
 		});
 
 		it("falls back to move-aside replacement when Windows reports EPERM", async () => {

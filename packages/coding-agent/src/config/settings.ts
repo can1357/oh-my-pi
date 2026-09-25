@@ -483,7 +483,7 @@ const MAX_SYMLINK_HOPS = 40;
 
 /**
  * Split a dangling symlink target into the physical path segments the flush
- * walk should follow. Two platform-correctness rules that a naive
+ * walk should follow. Three platform-correctness rules that a naive
  * `target.split(/[\\/]+/)` gets wrong:
  *
  *  1. Root double-count. An ABSOLUTE target seeds the accumulator at
@@ -500,13 +500,25 @@ const MAX_SYMLINK_HOPS = 40;
  *     stay ONE segment, not two. Split on the platform separator set: `/` only
  *     on POSIX, `/` or `\` on Windows. Keyed off `pathApi.sep` so the rule is
  *     driven by the platform, not a hardcoded cross-platform class.
+ *  3. Dot segments. POSIX follows each component physically, so `..` stays a
+ *     raw segment and the walk pops the REAL parent of whatever `alias`
+ *     resolved to. Windows collapses `.` and `..` inside a symlink target
+ *     lexically before following any component: `alias\..\final.yml` names the
+ *     link directory's `final.yml` even when `alias` is a directory link, and
+ *     `missing\..\final.yml` never consults `missing`. Only a leading `..` of a
+ *     relative target still pops the link's real parent, and a trailing
+ *     separator survives to demand a directory. Walking raw `..` segments there
+ *     writes a file the link never reads — possibly an unrelated one — so the
+ *     Windows target is normalized first.
  *
  * `pathApi` is injectable so the platform-specific behavior is testable off the
  * host OS (drive with `path.win32` / `path.posix`); it defaults to the host.
  */
 function physicalTargetSegments(target: string, pathApi: typeof path = path): string[] {
-	const separator = pathApi.sep === "\\" ? /[\\/]+/ : /\/+/;
-	const body = pathApi.isAbsolute(target) ? target.slice(pathApi.parse(target).root.length) : target;
+	const windows = pathApi.sep === "\\";
+	const separator = windows ? /[\\/]+/ : /\/+/;
+	const spelled = windows ? pathApi.normalize(target) : target;
+	const body = pathApi.isAbsolute(spelled) ? spelled.slice(pathApi.parse(spelled).root.length) : spelled;
 	return body.split(separator);
 }
 
@@ -1872,12 +1884,14 @@ export class Settings {
 					// BEFORE a later `..` pops its PHYSICAL parent. Both absolute and
 					// relative targets take the same walk: normalizing the whole
 					// string up front (path.resolve) collapses `alias/..` lexically
-					// to the anchor, but the kernel follows `alias` first and then
+					// to the anchor, but a POSIX kernel follows `alias` first and then
 					// pops its real parent, so the two disagree whenever an alias
 					// precedes a `..` — the lexical result can escape to an unrelated
-					// sibling and let the write clobber a foreign file. An absolute
-					// target seeds the accumulator at its filesystem anchor; a
-					// relative one seeds at the link's REAL parent dir.
+					// sibling and let the write clobber a foreign file. Windows does
+					// collapse them lexically; physicalTargetSegments() applies the
+					// host's rule. An absolute target seeds the accumulator at its
+					// filesystem anchor; a relative one seeds at the link's REAL
+					// parent dir.
 					let acc: string;
 					if (path.isAbsolute(target)) {
 						acc = path.parse(target).root;
