@@ -45,15 +45,22 @@ const MODEL_NOT_SUPPORTED_BODY = {
 describe("GitHub Copilot Anthropic model rejection", () => {
 	// Regression: this 400 was classified as transient fleet skew, rerolled
 	// eight times per request, and then re-run by the agent-level retry with a
-	// hardcoded message replacing GitHub's body (#7819).
-	it("surfaces GitHub's 400 body after a single request and marks it terminal", async () => {
-		const fetchMock = vi.fn(
-			async () =>
-				new Response(JSON.stringify(MODEL_NOT_SUPPORTED_BODY), {
-					status: 400,
-					headers: { "Content-Type": "application/json" },
-				}),
-		);
+	// hardcoded message replacing GitHub's body (#7819). It now takes exactly
+	// one bounded CLI-identity retry (#11669) before surfacing GitHub's real
+	// body as terminal — never the unbounded reroll.
+	it("retries once as the Copilot CLI, then surfaces GitHub's 400 body as terminal", async () => {
+		const seenIntegrationIds: (string | null)[] = [];
+		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+			const header =
+				input instanceof Request
+					? input.headers.get("Copilot-Integration-Id")
+					: new Headers(init?.headers).get("Copilot-Integration-Id");
+			seenIntegrationIds.push(header);
+			return new Response(JSON.stringify(MODEL_NOT_SUPPORTED_BODY), {
+				status: 400,
+				headers: { "Content-Type": "application/json" },
+			});
+		});
 
 		const result = await streamAnthropic(makeCopilotClaudeModel(), testContext, {
 			apiKey: "ghu_test_copilot_token",
@@ -61,7 +68,8 @@ describe("GitHub Copilot Anthropic model rejection", () => {
 			providerRetryWait: async () => {},
 		}).result();
 
-		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(seenIntegrationIds).toEqual(["copilot-chat", "copilot-developer-cli"]);
 		expect(result.stopReason).toBe("error");
 		expect(result.errorStatus).toBe(400);
 		expect(result.errorMessage).toContain("The requested model is not supported.");

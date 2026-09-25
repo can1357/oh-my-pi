@@ -4,6 +4,7 @@ import { compileCompatRules, renderAuthIds } from "../scripts/compat-compiler";
 import { compileAuth } from "../scripts/compat-compiler/compile-auth";
 import { compileBehavior } from "../scripts/compat-compiler/compile-behavior";
 import { compileCascade } from "../scripts/compat-compiler/compile-cascade";
+import { compileProviders } from "../scripts/compat-compiler/compile-providers";
 import { compileTaxonomy } from "../scripts/compat-compiler/compile-taxonomy";
 import committed from "../src/compat/rules.json";
 
@@ -23,6 +24,60 @@ describe("compat compiler grammar", () => {
 		expect(() =>
 			compileCascade([{ file: "classes/test.kdl", text: 'class "openai" {\n\tnot-an-axis #true\n}' }]),
 		).toThrow(/classes\/test\.kdl:2.*unknown directive `not-an-axis`/);
+	});
+
+	test("root on-api compiles into an api-scoped catalog rule", () => {
+		const compiled = compileCascade([
+			{ file: "providers/test.kdl", text: 'on-api "cursor-agent" {\n\trequires-native-tools #true\n}' },
+		]);
+		expect(compiled.rules).toHaveLength(1);
+		expect(compiled.rules[0]).toMatchObject({
+			apis: ["cursor-agent"],
+			catalog: { requiresNativeTools: true },
+		});
+	});
+
+	test("root on-api accepts class and models children", () => {
+		const compiled = compileCascade([
+			{
+				file: "providers/test.kdl",
+				text: [
+					'on-api "bedrock-converse-stream" {',
+					'\tclass "anthropic" {',
+					'\t\tmodels "claude-*" {',
+					"\t\t\trequires-tool-free-history-for-tool-opt-out #true",
+					"\t\t}",
+					"\t}",
+					"}",
+				].join("\n"),
+			},
+		]);
+		expect(compiled.rules[0]).toMatchObject({
+			apis: ["bedrock-converse-stream"],
+			class: "anthropic",
+			models: [{ kind: "glob", value: "claude-*" }],
+			catalog: { requiresToolFreeHistoryForToolOptOut: true },
+		});
+	});
+
+	test("root on-api rejects catalog-entry directives it does not own", () => {
+		expect(() =>
+			compileCascade([{ file: "providers/test.kdl", text: 'on-api "cursor-agent" {\n\tdefault-model "m"\n}' }]),
+		).toThrow(/providers\/test\.kdl:2.*unknown directive `default-model`/);
+	});
+
+	test("boolean-valued axes reject non-boolean scalars", () => {
+		// KDL rejects a bare `false` keyword already, but a quoted `"false"` is a
+		// string: `=== true` / `!== false` consumers would read it as the opposite
+		// intent, so the vocabulary has to reject it at compile time.
+		expect(() =>
+			compileCascade([
+				{
+					file: "providers/test.kdl",
+					text: 'on-api "cursor-agent" {\n\tpreserves-max-output-tokens "false"\n}',
+				},
+			]),
+		).toThrow(/providers\/test\.kdl:2.*axis `preserves-max-output-tokens` rejects value `false`/);
 	});
 
 	test("malformed scalar shape is rejected", () => {
@@ -81,6 +136,14 @@ describe("compat compiler grammar", () => {
 		).toThrow(/malformed value/);
 	});
 
+	test("exclude-discovery-modes compiles exact provider mode exclusions", () => {
+		const compiled = compileBehavior({
+			file: "runtime/behavior.kdl",
+			text: 'behavior {\n\texclude-discovery-modes "embedding" "moderation" provider="litellm"\n}',
+		});
+		expect(compiled.excludeDiscoveryModes).toEqual([{ provider: "litellm", modes: ["embedding", "moderation"] }]);
+	});
+
 	test("duplicate axis in one block is rejected", () => {
 		expect(() =>
 			compileCascade([
@@ -122,6 +185,40 @@ describe("compat compiler grammar", () => {
 				),
 			),
 		).toThrow(/duplicate override pair/);
+	});
+
+	test("identity override selectors are mutually exclusive", () => {
+		const required = 'class="dup" rationale="r" provenance="p"';
+		expect(() =>
+			compileTaxonomy(
+				taxonomySources(
+					`class "dup" { bounded "dup"\noverride id="both" model="opaque" glob="opaque*" ${required} }`,
+				),
+			),
+		).toThrow(/malformed value/);
+		expect(() =>
+			compileTaxonomy(taxonomySources(`class "dup" { bounded "dup"\noverride id="neither" ${required} }`)),
+		).toThrow(/malformed value/);
+	});
+
+	test("glob override selectors compile case-insensitively and reject duplicate provider patterns", () => {
+		const compiled = compileTaxonomy(
+			taxonomySources(
+				'class "dup" { bounded "dup"\noverride id="one" provider="host" glob="Opaque-27B*" class="dup" rationale="r" provenance="p" }',
+			),
+		);
+		expect(compiled.classes[0]?.overrides[0]).toMatchObject({
+			id: "one",
+			provider: "host",
+			glob: "opaque-27b*",
+		});
+		expect(() =>
+			compileTaxonomy(
+				taxonomySources(
+					'class "dup" { bounded "dup"\noverride id="one" provider="host" glob="Opaque*" class="dup" rationale="r" provenance="p"\noverride id="two" provider="HOST" glob="opaque*" class="dup" rationale="r" provenance="p" }',
+				),
+			),
+		).toThrow(/duplicate override glob/);
 	});
 
 	test("missing collapse definition is rejected", () => {
@@ -185,6 +282,32 @@ describe("auth grammar", () => {
 		expect(renderAuthIds(compiled)).toContain('export type AuthProviderId = "a" | "b";');
 	});
 
+	test("provider-owned authentication APIs compile into auth policy", () => {
+		const compiled = compileAuth([
+			{
+				file: "auth/x.kdl",
+				text: 'auth "x" {\n\tname "X"\n\tnative-auth-api "bedrock-converse-stream" "openai-responses"\n}',
+			},
+			order(),
+		]);
+		expect(compiled.providers[0]?.nativeAuthApis).toEqual(["bedrock-converse-stream", "openai-responses"]);
+	});
+
+	test("auth identity and OAuth env policy preserve explicit false and reject empty token lists", () => {
+		const compiled = compileAuth([
+			{
+				file: "auth/x.kdl",
+				text: 'auth "x" {\n\tname "X"\n\torg-scoped-identity #false\n\toauth-token-env "X_OAUTH" "X_BACKUP"\n}',
+			},
+			order(),
+		]);
+		expect(compiled.providers[0]?.orgScopedIdentity).toBe(false);
+		expect(compiled.providers[0]?.oauthTokenEnv).toEqual(["X_OAUTH", "X_BACKUP"]);
+		expect(() => compileAuth([{ file: "auth/x.kdl", text: 'auth "x" {\n\tname "X"\n\toauth-token-env\n}' }])).toThrow(
+			/auth\/x\.kdl:3.*malformed value/,
+		);
+	});
+
 	test("oauth-code derives callback-port and paste-code; refresh inherits the login token request", () => {
 		const compiled = compileAuth([
 			{
@@ -221,6 +344,185 @@ describe("auth grammar", () => {
 			token: { url: { value: "https://t" }, body: "json", standard: true, params: {} },
 			credential: { expires: { fromPath: "created_at" } },
 		});
+	});
+});
+
+describe("provider catalog grammar", () => {
+	const row = [
+		'\t\tmodel "m" name="M" {',
+		"\t\t\treasoning #true",
+		'\t\t\tinput "text"',
+		"\t\t\tcost input=1 output=2 cache-read=0.1 cache-write=0",
+		"\t\t\tlimits context=1000",
+		"$AXES",
+		"\t\t}",
+	];
+	const provider = (id: string, nodes: string[]) => `provider "${id}" {\n${nodes.join("\n")}\n}`;
+	const seed = (header: string, axes = "") =>
+		[`\tseed ${header} {`, ...row.map(line => (line === "$AXES" ? axes : line)), "\t}"].join("\n");
+	const src = (text: string) => [{ file: "providers/p.kdl", text }];
+
+	test("entry nodes compile alongside cascade rules; catalog membership requires default-model", () => {
+		const compiled = compileProviders(
+			src(
+				provider("p", [
+					'\tdefault-model "m"',
+					'\tenv "P_KEY" "P_ALT"',
+					"\tdynamic-models-authoritative #true",
+					'\tdiscovery label="P" oauth-provider="p" allow-unauthenticated=#true { env "P_GEN" }',
+					"\tsupports-store #false",
+				]),
+			),
+		);
+		expect(compiled.p).toEqual({
+			id: "p",
+			defaultModel: "m",
+			envVars: ["P_KEY", "P_ALT"],
+			dynamicModelsAuthoritative: true,
+			discovery: { label: "P", oauthProvider: "p", allowUnauthenticated: true, envVars: ["P_GEN"] },
+		});
+		// The cascade sees only the axis; catalog nodes are not directives.
+		const cascade = compileCascade(
+			src(provider("p", ['\tdefault-model "m"', '\tenv "P_KEY"', "\tsupports-store #false"])),
+		);
+		expect(cascade.rules).toEqual([
+			{ source: "providers/p.kdl:1", providers: ["p"], wire: { supportsStore: false } },
+		]);
+		// Wire-compat-only files (custom provider ids) are not catalog entries…
+		expect(compileProviders(src(provider("llama.cpp", ["\tsupports-store #false"])))).toEqual({});
+		// …but a stray catalog node without default-model is an error, not a silent drop.
+		expect(() => compileProviders(src(provider("p", ['\tenv "P_KEY"'])))).toThrow(
+			/providers\/p\.kdl:1.*has catalog nodes but no default-model/,
+		);
+	});
+
+	test("runner seeds and per-kind APIs compile without entering the cascade", () => {
+		const model = (id: string, name: string, api?: string) =>
+			[
+				`\t\tmodel "${id}" name="${name}"${api === undefined ? "" : ` api="${api}"`} {`,
+				"\t\t\treasoning #false",
+				'\t\t\tinput "text"',
+				"\t\t\tcost input=0 output=0 cache-read=0 cache-write=0",
+				"\t\t\tlimits",
+				"\t\t}",
+			].join("\n");
+		const text = provider("p", [
+			'\tdefault-model "local"',
+			'\tkind-apis {\n\t\timage "openai-responses"\n\t\ttts "xai-tts"\n\t\tstt "openai-speech"\n\t}',
+			[
+				'\tseed api="local-inference" base-url="local://inference" {',
+				model("local", "Local"),
+				model("image", "Image", "openai-images"),
+				model("speech", "Speech", "xai-tts"),
+				"\t}",
+			].join("\n"),
+		]);
+		const { p } = compileProviders(src(text));
+		expect(p.kindApis).toEqual({
+			image: "openai-responses",
+			tts: "xai-tts",
+			stt: "openai-speech",
+		});
+		expect(p.seed?.models.map(entry => [entry.id, entry.api])).toEqual([
+			["local", "local-inference"],
+			["image", "openai-images"],
+			["speech", "xai-tts"],
+		]);
+		expect(compileCascade(src(text)).rules).toEqual([]);
+	});
+
+	test("kind-apis rejects duplicate, unsupported, malformed, and unknown API declarations", () => {
+		const compileKindApis = (body: string) =>
+			compileProviders(src(provider("p", ['\tdefault-model "m"', `\tkind-apis {\n${body}\n\t}`])));
+		expect(() => compileKindApis('\t\timage "openai-images"\n\t\timage "openai-responses"')).toThrow(
+			/directive `image` has a malformed value/,
+		);
+		expect(() => compileKindApis('\t\tjudge "openai-images"')).toThrow(/unexpected node `judge` under `kind-apis`/);
+		expect(() => compileKindApis('\t\timage "openai-images" "openai-responses"')).toThrow(
+			/directive `image` has a malformed value/,
+		);
+		expect(() => compileKindApis('\t\timage "not-an-api"')).toThrow(/unknown api `not-an-api`/);
+		expect(() =>
+			compileProviders(
+				src(
+					provider("p", [
+						'\tdefault-model "m"',
+						'\tkind-apis {\n\t\timage "openai-images"\n\t}',
+						'\tkind-apis {\n\t\ttts "xai-tts"\n\t}',
+					]),
+				),
+			),
+		).toThrow(/directive `kind-apis` has a malformed value/);
+	});
+
+	test("seed APIs reject values outside the known and runner API sets", () => {
+		expect(() =>
+			compileProviders(src(provider("p", ['\tdefault-model "m"', seed('api="not-an-api" base-url="https://x"')]))),
+		).toThrow(/unknown api `not-an-api`/);
+	});
+
+	test("seed axis directives split into thinking/compat; catalog axes and foreign wire axes are rejected", () => {
+		const { p } = compileProviders(
+			src(
+				provider("p", [
+					'\tdefault-model "m"',
+					seed(
+						'api="openai-completions" base-url="https://x" bundle="fallback"',
+						'\t\t\tthinking-mode "effort"\n\t\t\tthinking-efforts "low" "high"\n\t\t\tsupports-developer-role #false',
+					),
+				]),
+			),
+		);
+		expect(p.seed?.bundle).toBe("fallback");
+		expect(p.seed?.precedence).toBe("upstream");
+		expect(p.seed?.models[0]).toMatchObject({
+			id: "m",
+			provider: "p",
+			api: "openai-completions",
+			baseUrl: "https://x",
+			maxTokens: null,
+			thinking: { mode: "effort", efforts: ["low", "high"] },
+			compat: { supportsDeveloperRole: false },
+		});
+		const seeded = (header: string, axes: string) => src(provider("p", ['\tdefault-model "m"', seed(header, axes)]));
+		expect(() =>
+			compileProviders(seeded('api="openai-completions" base-url="https://x"', '\t\t\tedit-revision "x"')),
+		).toThrow(/providers\/p\.kdl:9.*catalog axis `edit-revision` is rule-owned/);
+		expect(() =>
+			compileProviders(seeded('api="local-inference" base-url="local://inference"', '\t\t\tkind "tiny"')),
+		).toThrow(/catalog axis `kind` is rule-owned/);
+		expect(() =>
+			compileProviders(seeded('api="openai-completions" base-url="https://x"', '\t\t\tweb-search "openrouter"')),
+		).toThrow(/catalog axis `web-search` is rule-owned/);
+		expect(() =>
+			compileProviders(seeded('api="anthropic-messages" base-url="https://x"', "\t\t\tsupports-store #true")),
+		).toThrow(/wire axis `supports-store` does not apply to api `anthropic-messages`/);
+		expect(() =>
+			compileProviders(seeded('api="openai-completions" base-url="https://x"', '\t\t\tthinking-efforts "low"')),
+		).toThrow(/need both thinking-mode and thinking-efforts/);
+		expect(() =>
+			compileProviders(seeded('api="openai-completions" base-url="https://x" bundle="sometimes"', "")),
+		).toThrow(/seed bundle must be one of/);
+	});
+
+	test("models-from copies rows under the inheriting provider; entries are keyed and sorted by id", () => {
+		const compiled = compileProviders([
+			{
+				file: "providers/q.kdl",
+				text: provider("q", ['\tdefault-model "m"', '\tseed { models-from "p" }']),
+			},
+			{
+				file: "providers/p.kdl",
+				text: provider("p", ['\tdefault-model "m"', seed('api="openai-completions" base-url="https://x"')]),
+			},
+		]);
+		expect(Object.keys(compiled)).toEqual(["p", "q"]);
+		expect(compiled.q.seed?.models).toEqual([{ ...compiled.p.seed!.models[0], provider: "q" }]);
+		expect(() =>
+			compileProviders([
+				{ file: "providers/q.kdl", text: provider("q", ['\tdefault-model "m"', '\tseed { models-from "p" }']) },
+			]),
+		).toThrow(/models-from `p` must name a provider seed with its own model rows/);
 	});
 });
 

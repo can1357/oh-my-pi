@@ -111,9 +111,10 @@ mod platform {
 		let mut ranges = Vec::new();
 		for result in &results {
 			let range = result.range();
-			// With `automaticallyIdentifiesLanguages`, `checkString:` also returns an
-			// orthography result spanning the entire string; only spelling results
-			// mark misspellings (rendering them as typo ranges doubled editor text).
+			// With `automaticallyIdentifiesLanguages`, `checkString:` also returns
+			// an orthography result spanning the entire string; only spelling
+			// results mark misspellings (rendering them as typo ranges doubled
+			// editor text).
 			if result.resultType() != NSTextCheckingType::Spelling {
 				continue;
 			}
