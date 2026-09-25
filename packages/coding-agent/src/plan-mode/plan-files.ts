@@ -2,7 +2,6 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { InternalUrlRouter, type LocalProtocolOptions, resolveLocalRoot } from "../internal-urls";
-import { normalizeLocalScheme } from "../internal-urls/parse";
 import { resolveToCwd } from "../tools/path-utils";
 
 /**
@@ -13,10 +12,12 @@ export function resolvePlanFilePath(
 	planFilePath: string,
 	options: { localProtocolOptions: LocalProtocolOptions; cwd: string },
 ): string {
-	const url = normalizeLocalScheme(planFilePath);
 	const router = InternalUrlRouter.instance();
-	if (!router.canHandle(url)) return resolveToCwd(planFilePath, options.cwd);
-	const located = router.locateSync(url, { cwd: options.cwd, localProtocolOptions: options.localProtocolOptions });
+	if (!router.canHandle(planFilePath)) return resolveToCwd(planFilePath, options.cwd);
+	const located = router.locateSync(planFilePath, {
+		cwd: options.cwd,
+		localProtocolOptions: options.localProtocolOptions,
+	});
 	if (located === undefined) throw new Error(`No local file backs plan path ${planFilePath}`);
 	return located;
 }

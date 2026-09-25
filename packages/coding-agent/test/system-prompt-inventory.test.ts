@@ -14,8 +14,6 @@ import {
 import { createTools, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { cleanupTempHome } from "./helpers/temp-home-cleanup";
 
-import { cfgSkillful } from "@oh-my-pi/pi-coding-agent/session/settings";
-
 const EMPTY_TREE = {
 	rootPath: "",
 	rendered: "",
@@ -817,10 +815,9 @@ describe("system prompt tool inventory", () => {
 		expect(bash.description).not.toContain("skill://");
 	});
 
-	it("advertises loaded skills through real provider tool definitions", async () => {
+	it("advertises loaded skills in the SDK system prompt built from real tools", async () => {
 		const session = {
 			...makeToolSession(Settings.isolated()),
-			skillHintVisible: undefined as boolean | undefined,
 			skills: [
 				{
 					name: "provider-skill",
@@ -832,7 +829,6 @@ describe("system prompt tool inventory", () => {
 			],
 		};
 		const tools = await createTools(session, ["read", "bash"]);
-		const bash = tools.find(tool => tool.name === "bash")!;
 		const { systemPrompt } = await buildSdkSystemPrompt({
 			cwd: tempDir,
 			contextFiles: [],
@@ -840,15 +836,7 @@ describe("system prompt tool inventory", () => {
 			tools,
 		});
 
-		expect(bash.description).toContain("skill://");
 		expect(systemPrompt.join("\n\n")).toContain("`skill://<name>`");
-
-		// Standalone sessions derive visibility; an explicit managed snapshot wins.
-		session.skillHintVisible = false;
-		expect(bash.description).not.toContain("skill://");
-		cfgSkillful.set(session.settings, false);
-		session.skillHintVisible = true;
-		expect(bash.description).toContain("skill://");
 	});
 
 	it("keeps visible skills when no tools map is provided", async () => {

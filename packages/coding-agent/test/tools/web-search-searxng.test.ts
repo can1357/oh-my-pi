@@ -336,6 +336,35 @@ describe("SearXNG web search provider", () => {
 		expect(captured.headers?.get("Authorization")).toBe("Bearer bearer-token");
 	});
 
+	it("falls back to SEARXNG_ENDPOINT/SEARXNG_TOKEN when config.yml leaves them blank or null", async () => {
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "searxng-blank-"));
+		try {
+			await Bun.write(path.join(agentDir, "config.yml"), ["searxng:", '  endpoint: ""', "  token:", ""].join("\n"));
+			await Settings.init({ agentDir });
+			process.env.SEARXNG_ENDPOINT = "https://searx-env.example.org";
+			process.env.SEARXNG_TOKEN = "env-token";
+
+			const captured: { url?: URL; headers?: Headers } = {};
+			const fetchMock: FetchImpl = (input, init) => {
+				captured.url = new URL(input.toString());
+				captured.headers = new Headers(init?.headers);
+				return Promise.resolve(
+					new Response(JSON.stringify({ results: [] }), {
+						status: 200,
+						headers: { "Content-Type": "application/json" },
+					}),
+				);
+			};
+
+			await searchSearXNG({ query: "blank config", fetch: fetchMock });
+
+			expect(captured.url?.origin).toBe("https://searx-env.example.org");
+			expect(captured.headers?.get("Authorization")).toBe("Bearer env-token");
+		} finally {
+			await removeWithRetries(agentDir);
+		}
+	});
+
 	it("resolves engine shortcuts via /config into canonical names for the engines parameter", async () => {
 		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "searxng-engines-"));
 		try {

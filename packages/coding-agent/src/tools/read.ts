@@ -41,7 +41,6 @@ import {
 	extractUriScheme,
 	type InternalResource,
 	InternalUrlRouter,
-	normalizeLocalScheme,
 	type SchemeSpec,
 	sessionResolveContext,
 } from "../internal-urls";
@@ -639,15 +638,27 @@ interface LocatedRead {
 	spec: SchemeSpec;
 }
 
-/** `?q=` asks a vision model about an image: plain paths and file-backed URLs only; other URLs own their query. */
-function supportsImageQuestion(readPath: string): boolean {
-	if (!readPath.includes("://")) return true;
-	const scheme = extractUriScheme(readPath);
-	return scheme !== undefined && InternalUrlRouter.instance().spec(scheme)?.backing === "file";
+/**
+ * Workflow hint for a large located file: page it through its URL, search/copy its backing
+ * file. `rawBlocked` explains a refused whole-file `:raw` read.
+ */
+function formatLocatedFileNotice(url: string, backingPath: string, size: number, rawBlocked: boolean): string {
+	const workflows = `Use ${url}:raw:1-3000 for bounded verbatim chunks, ${url}:1-3000 for numbered exploration, and the backing file path for search/copy workflows`;
+	return rawBlocked
+		? `Unbounded raw read blocked for ${url} (${formatBytes(size)}). Reading the whole file verbatim can exhaust memory. ${workflows}: ${shortenPath(backingPath)}`
+		: `Backing file: ${shortenPath(backingPath)} (${formatBytes(size)}). ${workflows}.`;
 }
 
+/**
+ * Peel `?q=<question>` (ask a vision model about an image) from a plain path or a URL whose
+ * scheme declares {@link SchemeSpec.imageQuestion}; every other URL owns its query string.
+ */
 export function splitImageQuestionTarget(readPath: string): { path: string; question?: string } {
-	if (!supportsImageQuestion(readPath) || parseSqlitePathCandidates(readPath).length > 0) return { path: readPath };
+	if (readPath.includes("://")) {
+		const scheme = extractUriScheme(readPath);
+		if (!scheme || !InternalUrlRouter.instance().spec(scheme)?.imageQuestion) return { path: readPath };
+	}
+	if (parseSqlitePathCandidates(readPath).length > 0) return { path: readPath };
 
 	const queryIndex = readPath.indexOf("?");
 	if (queryIndex === -1) return { path: readPath };
@@ -779,7 +790,6 @@ async function assessLocalReadSpeculation(
 	if (
 		target.sel !== undefined ||
 		args.path.startsWith("www.") ||
-		/^[a-z][a-z0-9+.-]*:\/\//i.test(args.path) ||
 		args.path.includes(":") ||
 		args.path.includes("?") ||
 		args.path.includes("#")
@@ -880,10 +890,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 	/** Live `read.defaultLimit`, clamped to `[1, DEFAULT_MAX_LINES]`. */
 	get #defaultLimit(): number {
-		return Math.max(
-			1,
-			Math.min(cfgReadDefaultLimit.get(this.session.settings) ?? DEFAULT_MAX_LINES, DEFAULT_MAX_LINES),
-		);
+		return Math.max(1, Math.min(cfgReadDefaultLimit.get(this.session.settings), DEFAULT_MAX_LINES));
 	}
 
 	async #executeSpeculativeRead(
@@ -1567,7 +1574,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		if (delimitedInternalResult) return delimitedInternalResult;
 
 		let located: LocatedRead | undefined;
-		const normalizedPath = normalizeLocalScheme(readPath);
+		const normalizedPath = internalRouter.normalize(readPath);
 		if (internalRouter.canResolve(normalizedPath)) {
 			// Reject a malformed peeled selector before any handler resolves the URL.
 			const peeled = internalRouter.split(normalizedPath);
@@ -1812,11 +1819,8 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		// Located files are often large session storage (spilled tool output): a bare
 		// `:raw` read inlines one only below the budget; bigger ones page with ranges.
 		if (located && !located.spec.unbounded && parsed.kind === "raw" && fileSize > MAX_URL_RAW_INLINE_BYTES) {
-			const backingPath = shortenPath(absolutePath);
 			return toolResult<ReadToolDetails>({ resolvedPath: absolutePath })
-				.text(
-					`Unbounded raw read blocked for ${located.url} (${formatBytes(fileSize)}). Reading the whole file verbatim can exhaust memory. Use ${located.url}:raw:1-3000 for bounded verbatim chunks, ${located.url}:1-3000 for numbered exploration, and the backing file path for search/copy workflows: ${backingPath}`,
-				)
+				.text(formatLocatedFileNotice(located.url, absolutePath, fileSize, true))
 				.done();
 		}
 
@@ -1860,6 +1864,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		let content: Array<TextContent | ImageContent> | undefined;
 		let details: ReadToolDetails = {};
 		let sourcePath: string | undefined;
+		let pagedSource = false;
 		let columnTruncated = 0;
 		let truncationInfo:
 			| {
@@ -2455,6 +2460,16 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					content = [{ type: "text", text: outputText }];
 				}
 			}
+			// A page of artifact storage is re-readable with selectors: spilling it would only
+			// duplicate it into another artifact. Every other located read spills like a plain file.
+			if (located?.spec.artifactStore) pagedSource = true;
+			// Immutable sources have no write path, so the hint never lands in a written-back file.
+			if (located && immutable && !isRawSelector(parsed) && fileSize > MAX_URL_RAW_INLINE_BYTES) {
+				const firstText = content.find((c): c is TextContent => c.type === "text");
+				if (firstText) {
+					firstText.text += `\n\n[${formatLocatedFileNotice(located.url, absolutePath, fileSize, false)}]`;
+				}
+			}
 		}
 
 		details.fileSize = fileSize;
@@ -2473,6 +2488,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const resultBuilder = toolResult(details).content(content);
 		if (sourcePath) {
 			resultBuilder.sourcePath(sourcePath);
+		}
+		if (pagedSource) {
+			resultBuilder.pagedSource();
 		}
 		if (truncationInfo) {
 			resultBuilder.truncation(truncationInfo.result, truncationInfo.options);

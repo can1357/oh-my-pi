@@ -17,6 +17,7 @@ import skillDoc from "../prompts/internal-urls/skill.md" with { type: "text" };
 import {
 	buildDirectoryResource,
 	contentTypeForPath,
+	ensureCreatableWithinRoot,
 	UrlContainmentError,
 	validateRelativePath,
 } from "./filesystem-resource";
@@ -30,29 +31,6 @@ import type {
 	SchemeSpec,
 	UrlCompletion,
 } from "./types";
-
-/**
- * Would-be path for a missing plugin-skill target: the nearest existing
- * ancestor must canonically resolve inside the plugin root, and no entry on
- * the way may be a dangling symlink a write would follow out of the package.
- */
-async function containedCreatePath(containRoot: string, target: string, href: string): Promise<string> {
-	for (let current = target; ; current = path.dirname(current)) {
-		const contained = await resolveContainedPath(containRoot, current);
-		if (contained.status === "outside") {
-			throw new UrlContainmentError(`skill:// path resolves outside the plugin root: ${href}`);
-		}
-		if (contained.status === "ok") return target;
-		try {
-			await fs.lstat(current);
-		} catch (error) {
-			if (!isEnoent(error)) throw error;
-			if (path.dirname(current) === current) return target;
-			continue;
-		}
-		throw new UrlContainmentError(`skill:// path goes through a dangling symlink: ${href}`);
-	}
-}
 
 /**
  * Path a skill:// URL addresses, after traversal and plugin-root containment
@@ -95,12 +73,19 @@ async function skillTargetPath(
 	// file and base directory, must canonically resolve within the plugin root.
 	// Symlinks may target other files inside the same package.
 	if (!skill.containRoot) return resolvedPath;
+	const escape = `skill:// path resolves outside the plugin root: ${url.href}`;
 	const contained = await resolveContainedPath(skill.containRoot, resolvedPath);
-	if (contained.status === "outside") {
-		throw new UrlContainmentError(`skill:// path resolves outside the plugin root: ${url.href}`);
-	}
+	if (contained.status === "outside") throw new UrlContainmentError(escape);
 	if (contained.status === "ok") return contained.realPath;
-	return create ? containedCreatePath(skill.containRoot, resolvedPath, url.href) : resolvedPath;
+	if (create) {
+		try {
+			await ensureCreatableWithinRoot(resolvedPath, skill.containRoot, "skill", url.href);
+		} catch (error) {
+			// Same wording as the read path: the plugin root, not a per-skill root, bounds the package.
+			throw error instanceof UrlContainmentError ? new UrlContainmentError(escape) : error;
+		}
+	}
+	return resolvedPath;
 }
 
 /**
@@ -152,14 +137,13 @@ export class SkillProtocolHandler implements ProtocolHandler {
 		};
 	}
 
-	/** Skill file or directory; `options.directory` maps a bare `skill://<name>` to the skill base dir. */
+	/**
+	 * Skill file or directory; `options.directory` maps a bare `skill://<name>` to the skill base dir.
+	 * Null for a missing entry (or dangling symlink) without `create`, plugin skill or not.
+	 */
 	async locate(url: InternalUrl, context?: ResolveContext, options?: LocateOptions): Promise<string | null> {
-		const targetPath = await skillTargetPath(
-			url,
-			context?.skills ?? getActiveSkills(),
-			options?.directory === true,
-			options?.create === true,
-		);
+		const skills = context?.skills ?? getActiveSkills();
+		const targetPath = await skillTargetPath(url, skills, options?.directory === true, options?.create === true);
 		if (options?.create) return targetPath;
 		try {
 			await fs.stat(targetPath);

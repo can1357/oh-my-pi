@@ -59,16 +59,23 @@ const FOREIGN_USER_PROVIDERS: Record<string, true> = {
 	github: true,
 };
 
-/** Settings instance provider switches are read from and persisted to (if bound). */
-let settings: Settings | null = null;
+/** Outstanding {@link initializeWithSettings} holds, oldest first; the newest one is bound. */
+const settingsHolds: { settings: Settings }[] = [];
+
+/** Settings instance provider switches are read from and persisted to (the newest hold), if any. */
+function boundSettings(): Settings | undefined {
+	return settingsHolds.at(-1)?.settings;
+}
 
 /** Disabled provider IDs in effect: the bound settings' live value, else the unbound set. */
 function disabledProviders(): ReadonlySet<string> {
+	const settings = boundSettings();
 	return settings ? cfgDisabledProviderSet.get(settings) : unboundDisabledProviders;
 }
 
 /** Explicitly enabled provider IDs in effect: the bound settings' live value, else the unbound set. */
 function enabledProviders(): ReadonlySet<string> {
+	const settings = boundSettings();
 	return settings ? cfgEnabledProviderSet.get(settings) : unboundEnabledProviders;
 }
 
@@ -139,6 +146,7 @@ async function loadImpl<T>(
 	const disabledItems = new Set<T & { _source: SourceMeta; _shadowed?: boolean }>();
 	const allWarnings: string[] = [];
 	const contributingProviders: string[] = [];
+	const settings = boundSettings();
 	const disabledExtensionIds = new Set<string>(
 		options.disabledExtensions ?? (settings ? cfgDisabledExtensions.get(settings) : undefined) ?? [],
 	);
@@ -372,11 +380,18 @@ export function disableUserSource(providerId: string): void {
 /**
  * Bind the capability system to `activeSettings`: provider switches are read live
  * from its `enabledProviders`/`disabledProviders` (settings UI, `set()` from any
- * caller, on-disk reloads — the next discovery pass sees them) and persisted to it,
- * until the next call replaces it.
+ * caller, on-disk reloads — the next discovery pass sees them) and persisted to it.
+ * Holds stack: the newest outstanding hold is bound, and releasing it (the returned
+ * function) hands the binding back to the previous hold. The release is idempotent
+ * and never ends another holder's hold.
  */
-export function initializeWithSettings(activeSettings: Settings): void {
-	settings = activeSettings;
+export function initializeWithSettings(activeSettings: Settings): () => void {
+	const hold = { settings: activeSettings };
+	settingsHolds.push(hold);
+	return () => {
+		const index = settingsHolds.indexOf(hold);
+		if (index !== -1) settingsHolds.splice(index, 1);
+	};
 }
 
 /**
@@ -413,6 +428,7 @@ export function getDisabledProviders(): string[] {
  * Set disabled providers from a list (replaces current set), persisting to the bound settings.
  */
 export function setDisabledProviders(providerIds: string[]): void {
+	const settings = boundSettings();
 	if (settings) cfgDisabledProviders.set(settings, [...new Set(providerIds)]);
 	else unboundDisabledProviders = new Set(providerIds);
 }
@@ -428,6 +444,7 @@ export function getEnabledProviders(): string[] {
  * Set enabled providers from a list (replaces current set), persisting to the bound settings.
  */
 export function setEnabledProviders(providerIds: string[]): void {
+	const settings = boundSettings();
 	if (settings) cfgEnabledProviders.set(settings, [...new Set(providerIds)]);
 	else unboundEnabledProviders = new Set(providerIds);
 }
@@ -542,7 +559,7 @@ export function reset(): void {
  * Reset capability registry settings and provider state. Test-only.
  */
 export function resetCapabilityForTests(): void {
-	settings = null;
+	settingsHolds.length = 0;
 	unboundDisabledProviders = new Set();
 	unboundEnabledProviders = new Set();
 	clearFsCache();

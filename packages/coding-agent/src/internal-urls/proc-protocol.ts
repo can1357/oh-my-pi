@@ -39,8 +39,7 @@ function target(url: InternalUrl): { id: string; action: "stdin" | "mode" | "kil
 }
 
 function ownerJobs(session: ToolSession): AsyncJob[] {
-	const ownerId = session.getAgentId?.() ?? undefined;
-	return session.asyncJobManager?.getAllJobs(ownerId ? { ownerId } : undefined) ?? [];
+	return session.asyncJobManager?.getAllJobs({ ownerId: session.getAgentId?.() ?? undefined }) ?? [];
 }
 
 function textResource(
@@ -69,6 +68,7 @@ export class ProcProtocolHandler implements ProtocolHandler {
 		selectors: "lines",
 		immutable: true,
 		write: {
+			via: "handler",
 			payload: "verbatim",
 			scope: "workspace",
 			tier: () => "exec",

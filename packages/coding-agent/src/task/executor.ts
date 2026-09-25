@@ -27,6 +27,7 @@ import {
 import type { PromptTemplate } from "../config/prompt-templates";
 import {
 	buildServiceTierByFamily,
+	isServiceTierForFamily,
 	resolveAgentServiceTierOverride,
 	resolveSubagentServiceTier,
 	type ServiceTierInheritSettingValue,
@@ -122,6 +123,7 @@ import {
 	cfgTierAnthropic,
 	cfgTierOpenai,
 	cfgRetryFallbackChains,
+	cfgDefaultThinkingLevel,
 } from "../session/settings";
 import { cfgModelRoles, cfgDisabledProviders } from "../config/model-settings";
 import { cfgCompactionThresholdPercent, cfgCompactionThresholdTokens } from "../session/context-settings";
@@ -987,17 +989,28 @@ export function createMCPProxyTools(mcpManager: MCPManager): CustomTool[] {
 	});
 }
 
+/**
+ * Per-family tiers a subagent inherits: the parent's live tiers when a live session supplied
+ * them, else its configured `tier.*`. Live entries a family can't realize (a resumed session
+ * file may carry `{anthropic: "flex"}`) are dropped — the subagent overlay rejects them.
+ */
 function inheritedSubagentServiceTiers(
 	baseSettings: Settings,
 	inheritedServiceTier?: ServiceTierByFamily | null,
 ): ServiceTierByFamily {
-	return inheritedServiceTier === undefined
-		? buildServiceTierByFamily(
-				cfgTierOpenai.get(baseSettings),
-				cfgTierAnthropic.get(baseSettings),
-				cfgTierGoogle.get(baseSettings),
-			)
-		: (inheritedServiceTier ?? {});
+	if (inheritedServiceTier === undefined) {
+		return buildServiceTierByFamily(
+			cfgTierOpenai.get(baseSettings),
+			cfgTierAnthropic.get(baseSettings),
+			cfgTierGoogle.get(baseSettings),
+		);
+	}
+	const tiers: ServiceTierByFamily = {};
+	for (const family of ["openai", "anthropic", "google"] as const) {
+		const tier = inheritedServiceTier?.[family];
+		if (isServiceTierForFamily(family, tier)) tiers[family] = tier;
+	}
+	return tiers;
 }
 
 /**
@@ -1008,8 +1021,10 @@ function inheritedSubagentServiceTiers(
  */
 const kRootCompactionThresholds = Symbol("task.rootCompactionThresholds");
 
-/** Settings, tagged with the root's compaction thresholds when created by {@link createSubagentSettings}. */
-type SubagentChainSettings = Settings & { [kRootCompactionThresholds]?: CompactionThresholdPair };
+/** Settings from {@link createSubagentSettings}, tagged with its chain's root compaction thresholds. */
+interface SubagentChainSettings extends Settings {
+	[kRootCompactionThresholds]?: CompactionThresholdPair;
+}
 
 /** Settings overrides applying an exact-name compaction threshold entry to one subagent. */
 export function compactionThresholdSettings(
@@ -1044,6 +1059,9 @@ export function createSubagentSettings(
 	// Every other setting reads through to the parent live; writes on the overlay stay local.
 	const subagentSettings: SubagentChainSettings = baseSettings.overlay({
 		...compactionThresholdSettings(inheritedRootThresholds),
+		// A subagent's thinking level is chosen at spawn (agent definition, `effort`, or this
+		// snapshot of the parent default); a later parent default edit must not re-steer it.
+		defaultThinkingLevel: cfgDefaultThinkingLevel.get(baseSettings),
 		"tier.openai": subagentTiers.openai ?? "none",
 		"tier.anthropic": subagentTiers.anthropic ?? "none",
 		"tier.google": subagentTiers.google ?? "none",
@@ -3441,20 +3459,14 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		},
 		options.parentServiceTier,
 	);
-	const maxRecursionDepth = cfgTaskMaxRecursionDepth.get(settings) ?? 2;
-	const maxRuntimeMs = Math.max(
-		0,
-		Math.trunc(Number(options.maxRuntimeMs ?? cfgTaskMaxRuntimeMs.get(settings) ?? 0) || 0),
-	);
+	const maxRecursionDepth = cfgTaskMaxRecursionDepth.get(settings);
+	const maxRuntimeMs = Math.max(0, Math.trunc(Number(options.maxRuntimeMs ?? cfgTaskMaxRuntimeMs.get(settings)) || 0));
 	// TTL before an adopted idle subagent is parked by the lifecycle manager.
 	// <= 0 disables parking (the session stays live until process teardown).
-	const agentIdleTtlMs = Math.trunc(Number(cfgTaskAgentIdleTtlMs.get(settings) ?? 420_000) || 0);
-	const configuredDefaultBudget = Math.max(
-		0,
-		Math.trunc(Number(cfgTaskSoftRequestBudget.get(settings) ?? SOFT_REQUEST_BUDGET.default) || 0),
-	);
+	const agentIdleTtlMs = Math.trunc(Number(cfgTaskAgentIdleTtlMs.get(settings)) || 0);
+	const configuredDefaultBudget = Math.max(0, Math.trunc(Number(cfgTaskSoftRequestBudget.get(settings)) || 0));
 	const softRequestBudget = resolveSoftRequestBudget(agent.name, configuredDefaultBudget);
-	const softRequestBudgetNotice = cfgTaskSoftRequestBudgetNotice.get(settings) ?? false;
+	const softRequestBudgetNotice = cfgTaskSoftRequestBudgetNotice.get(settings);
 	const parentDepth = options.taskDepth ?? 0;
 	const childDepth = parentDepth + 1;
 	const atMaxDepth = maxRecursionDepth >= 0 && childDepth >= maxRecursionDepth;

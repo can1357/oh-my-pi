@@ -77,6 +77,14 @@ export type SchemeWriteScope = "workspace" | "sandbox" | "coordination" | "devic
 /** Write policy for a writable scheme. Absent on read-only schemes. */
 export interface SchemeWritePolicy {
 	/**
+	 * Who performs the write.
+	 * - `file`: tools (`write`, `edit`, `ast_edit`) write the file {@link ProtocolHandler.locate}
+	 *   returns with `{ create: true }`; the handler has no `write` hook.
+	 * - `handler`: {@link ProtocolHandler.write} performs it (messages, stdin, settings, remote
+	 *   hosts, devices); file-editing tools refuse the URL even when it locates a backing file.
+	 */
+	via: "file" | "handler";
+	/**
 	 * `text`: model-authored text; `write` strips copied hashline display prefixes and, unless the
 	 * scheme is a `device`, rejects content that ends with a read-truncation notice.
 	 * `verbatim`: raw payload (messages, stdin, setting values); neither transform applies.
@@ -98,8 +106,12 @@ export interface SchemeSpec {
 	selectors: SchemeSelectors;
 	/** A trailing `:N` with no path after the authority is a port, not a selector (ssh://host:2222). */
 	portAuthority?: boolean;
+	/** The authority is the first path segment under one root (local://a/b), so a glob may start there; other schemes' authority is an id. */
+	pathAuthority?: true;
 	/** Default immutability of resolved resources; a resource may override it per URL. */
 	immutable: boolean;
+	/** Resources are session artifact storage (artifact://); located read pages skip the artifact spill. */
+	artifactStore?: true;
 	/** Approval tier for reading/searching this scheme. Default `read`; ssh:// is `exec`. */
 	readTier?: ToolTier;
 	/** Read output bypasses result truncation limits (skill:// instructions). */
@@ -108,6 +120,10 @@ export interface SchemeSpec {
 	linkable?: boolean;
 	/** Transcript read cards collapse like plain files instead of expanding (xd://). */
 	compactTranscript?: boolean;
+	/** `read` peels a trailing `?q=<question>` as an image question (local://, attachment://); other schemes own their query. */
+	imageQuestion?: true;
+	/** The single-slash `scheme:/x` spelling is an alias of `scheme://x` (local:/). */
+	singleSlashAlias?: true;
 	write?: SchemeWritePolicy;
 }
 
@@ -132,7 +148,8 @@ export interface SchemeHost {
 	/** Active `memory.backend` id; undefined when memory is off. */
 	memoryBackend?: string;
 	securityEnabled: boolean;
-	experimentalContextManagement: boolean;
+	/** The user approves `cfg://` writes for this session (top-level TUI session). */
+	settingsApproval: boolean;
 }
 
 /**
@@ -161,8 +178,8 @@ export interface InternalResource {
 		display?: { text: string; startLine: number; lineNumbers?: Array<number | null> };
 	};
 	/**
-	 * `value` marks a discrete extracted value (agent://<id>/<json-path>, `?q=`
-	 * extraction) that `read` returns as-is: no line selectors, no paging.
+	 * `value` marks a discrete extracted value (agent://<id>/<json-path>) that
+	 * `read` returns as-is: no line selectors, no paging.
 	 * Default `document`.
 	 */
 	shape?: "document" | "value";
@@ -344,12 +361,10 @@ export interface ProtocolHandler {
 	 */
 	resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource>;
 	/**
-	 * Optional write hook. When present, the write tool dispatches
-	 * `write(url, content)` to this handler instead of writing to a filesystem
-	 * path. The handler is responsible for any persistence and validation.
-	 *
-	 * Handlers that omit this method are treated as read-only; the write tool
-	 * surfaces a clear "not writable" error when invoked against them.
+	 * Handler-owned write hook: present exactly when `spec.write.via` is
+	 * `"handler"` (the router enforces this at registration). The write tool
+	 * dispatches `write(url, content)` here instead of writing a filesystem
+	 * path; the handler owns persistence and validation.
 	 *
 	 * A returned result replaces the write tool's default "Successfully wrote
 	 * N bytes" result and may carry transcript-only display details.
@@ -394,7 +409,7 @@ export interface ProtocolHandler {
 	 * One-line system-prompt entry (rendered from `prompts/internal-urls/<scheme>.md`)
 	 * when the scheme is usable in the session described by `host`; `undefined`
 	 * omits the scheme. Schemes documented only by the tool that emits their URLs
-	 * (artifact://, conflict://, attachment://) omit this method.
+	 * (conflict://, attachment://) omit this method.
 	 */
 	promptDoc?(host: SchemeHost): string | undefined;
 }

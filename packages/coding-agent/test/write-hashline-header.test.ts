@@ -89,6 +89,26 @@ describe("write tool hashline header", () => {
 		expect(final).toBe("export const enabled = true;\n");
 	});
 
+	it("names a local:// write by its URL, and the header round-trips through edit and write", async () => {
+		const session = createSession(tmpDir);
+		const backingPath = path.join(tmpDir, "artifacts", "local", "notes.ts");
+		const content = "export const enabled = false;\n";
+
+		const writeResult = await new WriteTool(session).execute("call-1", { path: "local://notes.ts", content });
+		const [headerLine = "", writeLine] = resultText(writeResult).split("\n");
+		expect(HASHLINE_HEADER_LINE.exec(headerLine)?.[1]).toBe("local://notes.ts");
+		expect(writeLine).toBe(`Successfully wrote ${content.length} bytes to local://notes.ts`);
+
+		await new EditTool(session, "hashline").execute("call-2", {
+			input: `${headerLine}\nPUT 1-1:\n+export const enabled = true;\n`,
+		});
+		expect(await fs.readFile(backingPath, "utf8")).toBe("export const enabled = true;\n");
+
+		// The URL-form header also addresses the same file as a `write` path.
+		await new WriteTool(session).execute("call-3", { path: headerLine, content: "export const v = 2;\n" });
+		expect(await fs.readFile(backingPath, "utf8")).toBe("export const v = 2;\n");
+	});
+
 	it("omits the hashline header when the edit mode is not hashline", async () => {
 		const filePath = path.join(tmpDir, "plain.txt");
 		const session = createSession(tmpDir);

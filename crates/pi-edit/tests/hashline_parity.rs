@@ -936,6 +936,31 @@ async fn block_replace_cases_resolve_syntax_end_to_end() {
 }
 
 #[tokio::test]
+async fn block_cut_on_leading_go_statement_keeps_following_siblings() {
+	let source = "package p\n\nfunc f() error {\n\tif err := step(); err != nil {\n\t\treturn \
+	              err\n\t}\n\tother()\n\treturn nil\n}\n";
+	let workspace = Workspace::new(EditMode::Hashline);
+	workspace.write("x.go", source);
+	let tag = workspace.snapshot("x.go", source, None);
+	let args = json!({ "input": format!("[x.go#{tag}]\nCUT 4*") });
+	let result = workspace
+		.apply_json(&args, &common::DiskWriter::default())
+		.await
+		.expect("deletes the leading `if` block");
+	assert_eq!(
+		workspace.read("x.go").as_deref(),
+		Some("package p\n\nfunc f() error {\n\tother()\n\treturn nil\n}\n")
+	);
+	assert!(
+		result
+			.text
+			.contains("CUT 4* → resolved lines 4-6 (3 lines)"),
+		"{}",
+		result.text
+	);
+}
+
+#[tokio::test]
 async fn seen_line_guard_rejects_hidden_anchors_and_accepts_seen_anchors() {
 	let root = fixture("parity_seen_line_guard.json");
 	assert_eq!(root["cases"].as_array().expect("seen line cases").len(), 15);

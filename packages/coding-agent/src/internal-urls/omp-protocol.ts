@@ -54,7 +54,7 @@ export class OmpProtocolHandler implements ProtocolHandler {
 			if (entries.length === 0) {
 				throw new Error("No documentation files found");
 			}
-			return entries.map(entry => ({ url: entry.url, content: entry.content }));
+			return entries;
 		}
 		const resource = await this.#readDoc(docPath, ompDocFilename(url), url);
 		return [{ url: `omp://${docPath}`, content: resource.content }];

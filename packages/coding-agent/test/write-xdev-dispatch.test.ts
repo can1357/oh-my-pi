@@ -281,14 +281,14 @@ describe("read and write route xd:// device URLs", () => {
 			if (typeof approval !== "function") throw new Error("expected a function approval");
 			const tier = (path: string, content: string) => approval({ path, content });
 
-			// ast_edit on a filesystem path → write; on internal URLs only → read.
+			// ast_edit on a filesystem path → write; on read-tier sandbox URLs only → read.
 			const astFsPath = JSON.stringify({
 				ops: [{ pat: "legacyWrap($A, $B)", out: "modernWrap($A, $B)" }],
 				paths: [filePath],
 			});
 			const astInternalPath = JSON.stringify({
 				ops: [{ pat: "a", out: "b" }],
-				paths: ["artifact://abc"],
+				paths: ["local://notes.ts"],
 			});
 			expect(tier("xd://ast_edit", astFsPath)).toEqual({ tier: "write", policyKey: "ast_edit" });
 			expect(tier("xd://ast_edit", astInternalPath)).toEqual({ tier: "read", policyKey: "ast_edit" });
@@ -309,7 +309,11 @@ describe("read and write route xd:// device URLs", () => {
 			expect(tier("xd://ast_edit", "{ not json")).toBe("exec");
 			expect(tier("xd://ast_edit", "[1,2,3]")).toBe("exec");
 			expect(tier("xd://ast_edit", '"a string"')).toBe("exec");
-			expect(tier("xd://ast_edit", JSON.stringify({ paths: [null] }))).toBe("exec");
+			// ast_edit's own approval fails a malformed path entry closed at exec.
+			expect(tier("xd://ast_edit", JSON.stringify({ paths: [null] }))).toEqual({
+				tier: "exec",
+				policyKey: "ast_edit",
+			});
 			expect(approval({ path: "xd://ast_edit" })).toBe("exec");
 			expect(tier("xd://no_such_device", "{}")).toBe("exec");
 		} finally {

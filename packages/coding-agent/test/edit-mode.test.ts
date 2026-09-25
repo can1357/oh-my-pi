@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgEditFuzzyMatch } from "@oh-my-pi/pi-coding-agent/edit/settings";
 import { type EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import { type EditModeSessionLike, resolveEditMode } from "@oh-my-pi/pi-coding-agent/utils/edit-mode";
 
@@ -130,5 +131,28 @@ describe("resolveEditMode", () => {
 		expect(resolveEditMode(createSession({ activeModel: "openrouter/moonshotai/Kimi-K2-Instruct" }))).toBe(
 			"hashline",
 		);
+	});
+});
+
+describe("PI_EDIT_FUZZY", () => {
+	const originalEditFuzzy = Bun.env.PI_EDIT_FUZZY;
+
+	afterEach(() => {
+		if (originalEditFuzzy === undefined) delete Bun.env.PI_EDIT_FUZZY;
+		else Bun.env.PI_EDIT_FUZZY = originalEditFuzzy;
+	});
+
+	test("forces fuzzy matching with 1/true and 0/false, deferring to edit.fuzzyMatch for auto or other text", () => {
+		const fuzzyWith = (raw: string, configured: boolean) => {
+			Bun.env.PI_EDIT_FUZZY = raw;
+			return cfgEditFuzzyMatch.get(Settings.isolated({ "edit.fuzzyMatch": configured }));
+		};
+		expect(fuzzyWith("1", false)).toBe(true);
+		expect(fuzzyWith("true", false)).toBe(true);
+		expect(fuzzyWith("0", true)).toBe(false);
+		expect(fuzzyWith("false", true)).toBe(false);
+		expect(fuzzyWith("auto", true)).toBe(true);
+		expect(fuzzyWith("auto", false)).toBe(false);
+		expect(fuzzyWith("bogus", true)).toBe(true);
 	});
 });

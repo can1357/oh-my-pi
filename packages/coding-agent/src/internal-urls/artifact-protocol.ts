@@ -43,6 +43,9 @@ function parseArtifactId(url: InternalUrl): string {
 	return id;
 }
 
+/** An artifact id no session artifacts dir backs; `locate` maps it to null, `resolve` surfaces it. */
+class MissingArtifactError extends Error {}
+
 /** Resolve an `artifact://` URL to its backing file without reading artifact bytes. */
 async function resolveArtifactFile(url: InternalUrl, context?: ResolveContext): Promise<ResolvedArtifactFile> {
 	const id = parseArtifactId(url);
@@ -59,7 +62,7 @@ async function resolveArtifactFile(url: InternalUrl, context?: ResolveContext): 
 	}
 
 	if (dirs.length === 0) {
-		throw new Error("No session - artifacts unavailable");
+		throw new MissingArtifactError("No session - artifacts unavailable");
 	}
 
 	let foundPath: string | undefined;
@@ -87,13 +90,13 @@ async function resolveArtifactFile(url: InternalUrl, context?: ResolveContext): 
 	}
 
 	if (!anyDirExists) {
-		throw new Error("No artifacts directory found");
+		throw new MissingArtifactError("No artifacts directory found");
 	}
 
 	if (!foundPath) {
 		const sorted = [...availableIds].sort((a, b) => Number(a) - Number(b));
 		const availableStr = sorted.length > 0 ? sorted.join(", ") : "none";
-		throw new Error(`Artifact ${id} not found. Available: ${availableStr}`);
+		throw new MissingArtifactError(`Artifact ${id} not found. Available: ${availableStr}`);
 	}
 
 	const stat = await Bun.file(foundPath).stat();
@@ -105,21 +108,32 @@ async function resolveArtifactFile(url: InternalUrl, context?: ResolveContext): 
 
 export class ArtifactProtocolHandler implements ProtocolHandler {
 	readonly scheme = "artifact";
-	readonly spec: SchemeSpec = { backing: "file", selectors: "lines", immutable: true, linkable: true };
+	readonly spec: SchemeSpec = {
+		backing: "file",
+		selectors: "lines",
+		immutable: true,
+		artifactStore: true,
+		linkable: true,
+	};
 
 	promptDoc(): string {
 		return artifactDoc.trim();
 	}
 
-	/** Backing artifact file; throws the resolve errors for malformed, unknown, or missing ids. */
-	async locate(url: InternalUrl, context?: ResolveContext): Promise<string> {
-		return (await resolveArtifactFile(url, context)).path;
+	/** Backing artifact file; null for unknown ids, throws the resolve errors for malformed ones. */
+	async locate(url: InternalUrl, context?: ResolveContext): Promise<string | null> {
+		try {
+			return (await resolveArtifactFile(url, context)).path;
+		} catch (error) {
+			if (error instanceof MissingArtifactError) return null;
+			throw error;
+		}
 	}
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
 		const artifact = await resolveArtifactFile(url, context);
 
-		// Path consumers (search, bash URL expansion) use `locate`, which never
+		// Path consumers (search, the shell filesystem) use `locate`, which never
 		// reads the bytes; only content materialization is size-gated.
 		if (artifact.size > MAX_INLINE_ARTIFACT_BYTES) {
 			throw new Error(

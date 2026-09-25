@@ -97,7 +97,7 @@ export async function readBinary(
 		const fat = db.fat;
 		const p = fat ? `${bin}${SLICE_SEPARATOR}${fat.slice.arch}` : bin;
 		const slices = fat
-			? `; universal slices: ${fat.slices.map(s => (s === fat.slice ? `${s.arch} (shown)` : s.arch)).join(", ")}, pick via ${bin}${SLICE_SEPARATOR}<arch>`
+			? `; universal slices: ${fat.slices.map(s => (s.arch === fat.slice.arch ? `${s.arch} (shown)` : s.arch)).join(", ")}, pick via ${bin}${SLICE_SEPARATOR}<arch>`
 			: "";
 		output = `[${db.id}${slices}; views: ${p}:<func|0xaddr> pseudocode, ${p}:<func>:asm, :imports, :exports, :strings, :xrefs:<func|0xaddr>]\n${text}`;
 	}

@@ -177,16 +177,16 @@ describe("write tool read projection guard", () => {
 	});
 
 	it("rejects actual bounded mutable-resource output before internal URL dispatch", async () => {
-		const url = "vault://document";
+		const url = "fixture://document";
 		let resourceContent = `${Array.from({ length: 60 }, (_, index) => `resource ${index + 1}`).join("\n")}\n`;
 		let writeCalled = false;
 		const handler: ProtocolHandler = {
-			scheme: "vault",
+			scheme: "fixture",
 			spec: {
 				backing: "virtual",
 				selectors: "lines",
 				immutable: false,
-				write: { payload: "text", scope: "workspace", tier: () => "write" },
+				write: { via: "handler", payload: "text", scope: "workspace", tier: () => "write" },
 			},
 			resolve: async resolvedUrl => ({
 				url: resolvedUrl.href,
@@ -210,6 +210,46 @@ describe("write tool read projection guard", () => {
 		);
 		expect(writeCalled).toBe(false);
 		expect(resourceContent).toContain("resource 60");
+	});
+
+	it("rejects write-back of a summarized read of a large local:// code file", async () => {
+		const localRoot = path.join(tmpDir, "artifacts", "local");
+		await fs.mkdir(localRoot, { recursive: true });
+		const filePath = path.join(localRoot, "big.ts");
+		const original = Array.from(
+			{ length: 1200 },
+			(_, index) =>
+				`export function handler${index}(input: number): number {\n\tconst doubled = input * 2;\n\treturn doubled + ${index};\n}\n`,
+		).join("\n");
+		await Bun.write(filePath, original);
+		const session = createSession(tmpDir);
+
+		const projection = resultText(
+			await wrapToolWithMetaNotice(new ReadTool(session)).execute("read-local", { path: "local://big.ts" }),
+		);
+		expect(projection.length).toBeLessThan(original.length);
+
+		await expect(
+			new WriteTool(session).execute("write-local", { path: "local://big.ts", content: projection }),
+		).rejects.toThrow("incomplete read projection");
+		expect(await Bun.file(filePath).text()).toBe(original);
+	});
+
+	it("round-trips a single-page read of a large local:// file without read metadata", async () => {
+		const localRoot = path.join(tmpDir, "artifacts", "local");
+		await fs.mkdir(localRoot, { recursive: true });
+		const filePath = path.join(localRoot, "notes.txt");
+		const original = `${Array.from({ length: 250 }, (_, index) => `note ${index + 1} ${"x".repeat(250)}`).join("\n")}\n`;
+		await Bun.write(filePath, original);
+		const session = createSession(tmpDir);
+
+		const projection = resultText(
+			await wrapToolWithMetaNotice(new ReadTool(session)).execute("read-local", { path: "local://notes.txt" }),
+		);
+
+		// A writable scheme's read carries no backing-file hint that a write-back would persist.
+		await new WriteTool(session).execute("write-local", { path: "local://notes.txt", content: projection });
+		expect((await Bun.file(filePath).text()).trimEnd()).toBe(original.trimEnd());
 	});
 
 	it("compares against the ACP buffer before bridge writes", async () => {

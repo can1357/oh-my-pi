@@ -40,7 +40,7 @@ export interface FindRange {
 
 /** A file whose verified passages cleared the threshold; `ranges` are merged positive spans, strongest first. */
 export interface FindHit {
-	/** Display path relative to {@link FindToolDetails.cwd}, or an `omp://` doc URL for docs scopes. */
+	/** Display path relative to {@link FindToolDetails.cwd}, or an internal URL under URL scopes. */
 	rel: string;
 	/** Filename judgment, when the name batch answered. */
 	nameScore?: number;
@@ -86,7 +86,7 @@ export interface FindToolDetails {
 	elapsedMs: number;
 	/** Session cwd; hit paths are relative to it. */
 	cwd: string;
-	/** Display form of the searched directory when narrower than cwd. */
+	/** Display form of the searched directory or file when narrower than cwd. */
 	scopePath?: string;
 	meta?: OutputMeta;
 }

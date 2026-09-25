@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
@@ -7,11 +7,13 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { rebindMemoryBackendForCwd } from "@oh-my-pi/pi-coding-agent/hindsight/backend";
+import { hindsightBackend, rebindMemoryBackendForCwd } from "@oh-my-pi/pi-coding-agent/hindsight/backend";
 import { MEMORY_BACKEND_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/memory-backend/tool-names";
 import { computeMnemopiBankScope } from "@oh-my-pi/pi-coding-agent/mnemopi/config";
+import { mnemopiBackend } from "@oh-my-pi/pi-coding-agent/mnemopi/backend";
 import { getMnemopiSessionState } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
@@ -46,7 +48,6 @@ describe("AgentSession memory backend lifecycle", () => {
 	beforeEach(() => {
 		tempDir = TempDir.createSync("@memory-backend-lifecycle-");
 		authStorage = createInMemoryAuthStorage();
-		authStorage.keys.setRuntime("anthropic", "test-key");
 		settings = Settings.isolated({
 			"compaction.enabled": false,
 			"memory.backend": "off",
@@ -60,6 +61,8 @@ describe("AgentSession memory backend lifecycle", () => {
 		session = undefined;
 		resetMemoryForTests();
 		authStorage.close();
+		// `Settings.loadIsolated` opens agent.db under tempDir; close it before the directory goes away.
+		AgentStorage.close();
 		tempDir.removeSync();
 	});
 
@@ -76,6 +79,9 @@ describe("AgentSession memory backend lifecycle", () => {
 			contextWindow: 8192,
 			maxTokens: 2048,
 		});
+		// AgentSession validates the prompt key through the registry for the session model's provider;
+		// without a runtime key it falls back to ambient env/~/.env credentials.
+		authStorage.keys.setRuntime(model.provider, "test-key");
 		const read = createTool("read");
 		const agent = new Agent({
 			getApiKey: () => "test-key",
@@ -375,6 +381,95 @@ describe("AgentSession memory backend lifecycle", () => {
 				}
 			} finally {
 				setProjectDir(originalProjectDir);
+			}
+		},
+	);
+
+	// The re-scope's settings listener starts the backend switch; the rebind must
+	// judge the destination only once that switch settled, however many
+	// microtasks separate the reload from the rebind.
+	it.each([0, 1].flatMap(hops => [[hops, true] as const, [hops, false] as const]))(
+		"headless /move from Hindsight settles a pending Mnemopi switch (%i reload hops, destination usable: %p)",
+		async (hops, usable) => {
+			const sourceCwd = tempDir.path();
+			const destinationCwd = path.join(sourceCwd, "destination");
+			const destinationDbPath = path.join(destinationCwd, "memory.db");
+			await Bun.write(
+				path.join(getProjectAgentDir(sourceCwd), "config.yml"),
+				Bun.YAML.stringify({
+					memory: { backend: "hindsight" },
+					hindsight: { apiUrl: "http://127.0.0.1:1", mentalModelsEnabled: false },
+				}),
+			);
+			await Bun.write(
+				path.join(getProjectAgentDir(destinationCwd), "config.yml"),
+				Bun.YAML.stringify({
+					memory: { backend: "mnemopi" },
+					mnemopi: {
+						scoping: "global",
+						autoRetain: false,
+						noEmbeddings: true,
+						llmMode: "none",
+						// An existing directory is not a SQLite database.
+						dbPath: usable ? destinationDbPath : sourceCwd,
+					},
+				}),
+			);
+			settings = await Settings.loadIsolated({ cwd: sourceCwd, agentDir: path.join(sourceCwd, "agent") });
+			const current = createSession(async () => [
+				createTool(cfgMemoryBackend.get(settings) === "hindsight" ? "recall" : "retain"),
+			]);
+			await current.applyMemoryBackend();
+			const sourceBank = current.getHindsightSessionState()?.bankId;
+			const sourcePrompt = current.systemPrompt;
+			expect(sourceBank).toBeDefined();
+
+			// Park every backend startup behind a macrotask, so the switch the
+			// re-scope starts is still pending wherever the rebind first looks.
+			const startSpies = [mnemopiBackend, hindsightBackend].map(backend => {
+				const start = backend.start;
+				return spyOn(backend, "start").mockImplementation(async options => {
+					await new Promise<void>(resolve => setImmediate(resolve));
+					await start.call(backend, options);
+				});
+			});
+			const reload = settings.reloadForCwd;
+			const reloadSpy = spyOn(settings, "reloadForCwd").mockImplementation(async cwd => {
+				await reload.call(settings, cwd);
+				for (let i = 0; i < hops; i++) await Promise.resolve();
+			});
+			const output: string[] = [];
+			const originalProjectDir = getProjectDir();
+			try {
+				await executeAcpBuiltinSlashCommand("/move " + destinationCwd, {
+					session: current,
+					sessionManager: current.sessionManager,
+					settings,
+					cwd: sourceCwd,
+					output: text => {
+						output.push(text);
+					},
+					refreshCommands: () => {},
+					reloadPlugins: async () => {},
+				});
+			} finally {
+				for (const spy of startSpies) spy.mockRestore();
+				reloadSpy.mockRestore();
+				setProjectDir(originalProjectDir);
+			}
+			if (usable) {
+				expect(output.join("\n")).not.toContain("Move failed");
+				expect(current.sessionManager.getCwd()).toBe(destinationCwd);
+				expect(current.getHindsightSessionState()).toBeUndefined();
+				expect(getMnemopiSessionState(current)?.memory.dbPath).toBe(destinationDbPath);
+				expect(current.getActiveToolNames()).toEqual(["read", "retain"]);
+			} else {
+				expect(output).toContainEqual(expect.stringMatching(/Move failed:.*Mnemopi/));
+				expect(current.sessionManager.getCwd()).toBe(sourceCwd);
+				expect(getMnemopiSessionState(current)).toBeUndefined();
+				expect(current.getHindsightSessionState()?.bankId).toBe(sourceBank);
+				expect(current.getActiveToolNames()).toEqual(["read", "recall"]);
+				expect(current.systemPrompt).toEqual(sourcePrompt);
 			}
 		},
 	);

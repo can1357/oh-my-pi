@@ -506,8 +506,9 @@ Schemes are case-insensitive on the wire and normalized to lowercase before
 the response is sent. Re-sending `set_host_uri_schemes` replaces the entire
 previous set — schemes missing from the new list are unregistered.
 
-`security://` is reserved for OMP's producer-neutral software-security resource
-store. RPC hosts cannot register or shadow that scheme.
+Every built-in scheme (`local://`, `skill://`, `artifact://`, `security://`,
+`mcp://`, …) is reserved: RPC hosts cannot register or shadow one, and the
+request fails with `Host URI scheme is reserved by OMP: <scheme>://`.
 
 ## Event Stream Schema
 

@@ -16,7 +16,7 @@ function coordinationErrorResult(text: string, details: CoordinationDetails): Ag
 /** Messaging is available to subagents and to top-level sessions able to spawn peers. */
 export function isIrcEnabled(settings: Settings, taskDepth: number): boolean {
 	if (taskDepth > 0) return true;
-	const maxDepth = cfgTaskMaxRecursionDepth.get(settings) ?? 2;
+	const maxDepth = cfgTaskMaxRecursionDepth.get(settings);
 	return canSpawnAtDepth(maxDepth, taskDepth);
 }
 

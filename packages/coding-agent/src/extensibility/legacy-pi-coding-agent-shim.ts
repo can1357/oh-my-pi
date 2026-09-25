@@ -844,8 +844,8 @@ export class DefaultPackageManager {
 	/** Resolve enabled extension paths with their OMP plugin provenance. */
 	async resolve(_onMissing?: (source: string) => Promise<MissingSourceAction>): Promise<ResolvedPaths> {
 		const settings = await this.#settingsManager;
-		const configuredPaths = cfgExtensions.get(settings) ?? [];
-		const disabledExtensionIds = cfgDisabledExtensions.get(settings) ?? [];
+		const configuredPaths = cfgExtensions.get(settings);
+		const disabledExtensionIds = cfgDisabledExtensions.get(settings);
 		const [extensionPaths, plugins] = await Promise.all([
 			discoverExtensionPaths(configuredPaths, this.#cwd, disabledExtensionIds),
 			getEnabledPlugins(this.#cwd),
@@ -1103,7 +1103,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 					? Promise.resolve({ skills: [], warnings: [] })
 					: discoverSkills(cwd, agentDir, {
 							...cfgSkills.get(settings),
-							disabledExtensions: cfgDisabledExtensions.get(settings) ?? [],
+							disabledExtensions: cfgDisabledExtensions.get(settings),
 						}),
 				this.#loadAdditionalSkills(),
 				options.noPromptTemplates ? Promise.resolve([]) : discoverPromptTemplates(cwd, agentDir),

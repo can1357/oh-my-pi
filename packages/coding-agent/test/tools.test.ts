@@ -1084,6 +1084,84 @@ describe("Coding Agent Tools", () => {
 			}
 		});
 
+		it("spills oversized URL reads like plain files, except pages of artifact storage", async () => {
+			const payload = Array.from({ length: 3000 }, (_, index) => `payload line ${index}`).join("\n");
+			const skillDir = path.join(testDir, "skills", "demo");
+			fs.mkdirSync(skillDir, { recursive: true });
+			fs.writeFileSync(path.join(skillDir, "SKILL.md"), "---\nname: demo\ndescription: d\n---\nBody\n");
+			fs.writeFileSync(path.join(skillDir, "ref.md"), payload);
+			const spillSettings = Settings.isolated({
+				"tools.artifactSpillThreshold": 20,
+				"tools.artifactTailBytes": 1,
+				"tools.artifactTailLines": 10,
+				"tools.artifactHeadBytes": 1,
+			});
+			const spillManager = SessionManager.create(testDir, path.join(testDir, "url-spill-sessions"));
+			await spillManager.ensureOnDisk();
+			const artifactsDir = spillManager.getArtifactsDir();
+			if (!artifactsDir) throw new Error("expected an on-disk artifacts dir");
+			fs.mkdirSync(artifactsDir, { recursive: true });
+			fs.writeFileSync(path.join(artifactsDir, "Worker.md"), JSON.stringify({ report: payload }));
+			fs.writeFileSync(path.join(artifactsDir, "Lines.md"), payload);
+			fs.mkdirSync(path.join(artifactsDir, "local"), { recursive: true });
+			fs.writeFileSync(path.join(artifactsDir, "local", "big.md"), payload);
+			const spillReadTool = wrapToolWithMetaNotice(
+				new ReadTool(
+					createTestToolSession(testDir, spillSettings, {
+						getSessionFile: () => spillManager.getSessionFile() ?? null,
+						getArtifactsDir: () => artifactsDir,
+						localProtocolOptions: {
+							getArtifactsDir: () => artifactsDir,
+							getSessionId: () => spillManager.getSessionId(),
+						},
+						skills: [
+							{
+								name: "demo",
+								description: "d",
+								filePath: path.join(skillDir, "SKILL.md"),
+								baseDir: skillDir,
+								source: "test",
+							},
+						],
+					}),
+				),
+			);
+			const context = {
+				...createTestToolContext(["read"]),
+				settings: spillSettings,
+				sessionManager: spillManager,
+			};
+
+			try {
+				for (const url of [
+					"skill://demo/ref.md",
+					"agent://Worker/report",
+					"local://big.md:1-3000",
+					"agent://Lines:1-3000",
+				]) {
+					const result = await spillReadTool.execute(`spill-${url}`, { path: url }, undefined, undefined, context);
+					const output = getTextOutput(result);
+					expect(result.details?.meta?.truncation?.artifactId).toBeDefined();
+					expect(Buffer.byteLength(output, "utf-8")).toBeLessThan(20 * 1024);
+				}
+
+				const artifactId = await spillManager.saveArtifact(payload, "read");
+				const saveArtifact = vi.spyOn(spillManager, "saveArtifact");
+				const artifactPage = await spillReadTool.execute(
+					"spill-artifact-page",
+					{ path: `artifact://${artifactId}:1-3000` },
+					undefined,
+					undefined,
+					context,
+				);
+				expect(artifactPage.details?.meta?.truncation?.artifactId).toBeUndefined();
+				expect(getTextOutput(artifactPage)).toContain("payload line 2999");
+				expect(saveArtifact).not.toHaveBeenCalled();
+			} finally {
+				await spillManager.close();
+			}
+		});
+
 		it("should strip payloads duplicated by structured MCP blocks (#9687)", async () => {
 			// MCP results carry a second copy of the payload under `details.rawContent`.
 			// Everything already stored elsewhere must be pruned so it cannot re-inflate
@@ -1936,9 +2014,9 @@ describe("Coding Agent Tools", () => {
 
 			const result = await writeTool.execute("test-call-4-local", { path: localPath, content });
 
-			expect(getTextOutput(result)).toContain(
-				`Successfully wrote ${content.length} bytes to session/local/handoffs/new-output.json`,
-			);
+			// The result names the URL the model wrote, not the session's backing path.
+			expect(getTextOutput(result)).toContain(localPath);
+			expect(getTextOutput(result)).not.toContain(path.join("session", "local"));
 			expect(fs.existsSync(expectedPath)).toBe(true);
 			expect(fs.readFileSync(expectedPath, "utf-8")).toBe(content);
 		});
