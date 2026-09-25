@@ -10,7 +10,7 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
 import { initializeWithSettings } from "../discovery";
-import { closeAllIdaDatabases } from "../ida";
+import { releaseIdaDatabases } from "../ida";
 import { loadSkills } from "../extensibility/skills";
 import { extractUriScheme } from "../internal-urls/parse";
 import { InternalUrlRouter } from "../internal-urls/router";
@@ -136,9 +136,9 @@ export async function runReadCommand(cmd: ReadCommandArgs): Promise<void> {
 			if (MCPManager.instance() === mcpManager) MCPManager.setInstance(undefined);
 		}
 		authStorage?.close();
+		// Saves unsaved IDA changes and drops the host sockets that would keep the event loop alive.
+		await releaseIdaDatabases();
 		await closeDaemonClients();
-		// Worker processes spawned for executable views keep the event loop alive.
-		await closeAllIdaDatabases();
 	}
 
 	if (failed) process.exit(1);

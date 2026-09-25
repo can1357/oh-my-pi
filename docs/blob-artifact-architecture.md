@@ -157,7 +157,7 @@ Handled by `ArtifactProtocolHandler` over registered active session artifact dir
 - when missing, reports available numeric artifact IDs
 - refuses to materialize a full artifact larger than 8 MiB; use bounded `read` selectors or the reported backing path for search/copy workflows
 
-`locate` returns the backing file path at any size without loading its bytes; `read`, search, and bash URL expansion go through it.
+`locate` returns the backing file path at any size without loading its bytes; `read`, search, and the bash URL filesystem go through it.
 
 Failure behavior:
 

@@ -157,6 +157,41 @@ describe("proc:// background jobs", () => {
 		}
 	});
 
+	it("scopes a caller without an agent id to unowned jobs and parentless agents", async () => {
+		const manager = new AsyncJobManager({});
+		const pending = Promise.withResolvers<string>();
+		manager.register(
+			"bash",
+			"main's work",
+			async ({ signal }) => {
+				signal.addEventListener("abort", () => pending.resolve("cancelled"), { once: true });
+				return pending.promise;
+			},
+			{ id: "owned-job", ownerId: "Main" },
+		);
+		manager.register("bash", "unowned work", async () => "done", { id: "unowned-job" });
+		const registry = new AgentRegistry();
+		registry.register({ id: "Foreign", displayName: "Foreign", kind: "sub", parentId: "Main", session: null });
+		const session = toolSession(process.cwd(), manager, { launch: false });
+		session.getAgentId = () => null;
+		session.agentRegistry = registry;
+		const protocol = new ProcProtocolHandler();
+		try {
+			const list = await protocol.resolve(parseInternalUrl("proc://"), { session });
+			expect(list.details?.proc?.jobs).toMatchObject([{ id: "unowned-job" }]);
+			await expect(protocol.resolve(parseInternalUrl("proc://owned-job"), { session })).rejects.toThrow("not found");
+			await expect(protocol.write(parseInternalUrl("proc://owned-job/kill"), "", { session })).rejects.toThrow(
+				"not found",
+			);
+			expect(manager.getJob("owned-job")?.status).toBe("running");
+			const denied = await protocol.write(parseInternalUrl("proc://Foreign/kill"), "", { session });
+			expect(denied.details?.proc).toMatchObject({ cancelled: [{ id: "Foreign", status: "not_found" }] });
+			expect(registry.get("Foreign")?.status).toBe("running");
+		} finally {
+			await manager.dispose();
+		}
+	});
+
 	it.each([false, true])("kills only owned jobless agents (job manager: %s)", async withManager => {
 		const manager = withManager ? new AsyncJobManager({}) : undefined;
 		const registry = new AgentRegistry();

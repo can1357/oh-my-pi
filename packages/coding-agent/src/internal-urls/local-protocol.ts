@@ -202,8 +202,13 @@ async function buildListing(url: InternalUrl, localRoot: string): Promise<Intern
 	};
 }
 
+const LOCAL_AUTHORITY_RE = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i;
+
 function extractRelativePath(url: InternalUrl): string {
-	const host = url.rawHost || url.hostname;
+	// The authority is the first path segment, decoded below with the rest, so take it as
+	// written: `rawHost` is already decoded (a second decode corrupts names containing `%`),
+	// and WHATWG `hostname` drops `user@` / `:port` parts of names like `a@b` or `a:1`.
+	const host = url.rawHref?.match(LOCAL_AUTHORITY_RE)?.[1] ?? url.hostname;
 	const pathname = url.rawPathname ?? url.pathname;
 
 	const combined = host
@@ -419,7 +424,6 @@ export class LocalProtocolHandler implements ProtocolHandler {
 		pathAuthority: true,
 		linkable: true,
 		imageQuestion: true,
-		shellOperand: true,
 		singleSlashAlias: true,
 		write: { via: "file", payload: "text", scope: "sandbox", tier: () => "read" },
 	};

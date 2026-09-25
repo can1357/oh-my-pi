@@ -39,8 +39,7 @@ function target(url: InternalUrl): { id: string; action: "stdin" | "mode" | "kil
 }
 
 function ownerJobs(session: ToolSession): AsyncJob[] {
-	const ownerId = session.getAgentId?.() ?? undefined;
-	return session.asyncJobManager?.getAllJobs(ownerId ? { ownerId } : undefined) ?? [];
+	return session.asyncJobManager?.getAllJobs({ ownerId: session.getAgentId?.() ?? undefined }) ?? [];
 }
 
 function textResource(

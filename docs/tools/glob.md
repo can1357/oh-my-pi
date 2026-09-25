@@ -6,7 +6,8 @@
 - Entry: `packages/coding-agent/src/tools/glob.ts`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/glob.md`
 - Key collaborators:
-  - `packages/coding-agent/src/tools/path-utils.ts` — normalize inputs; split base path vs glob.
+  - `packages/coding-agent/src/tools/path-utils.ts` — normalize inputs; split base path vs glob (host paths and internal URLs).
+  - `packages/coding-agent/src/internal-urls/url-filesystem.ts` — `InternalUrlFilesystem`, the URL filesystem native glob walks through.
   - `packages/coding-agent/src/tools/list-limit.ts` — apply result-count caps.
   - `packages/coding-agent/src/session/streaming-output.ts` — truncate text output at byte cap.
   - `packages/coding-agent/src/tools/tool-result.ts` — build `content` and `details.meta`.
@@ -18,7 +19,7 @@
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `path` | `string` | No | Glob, file, directory, or path-backed internal URL — or several of those as a semicolon-delimited list (`"src/**/*.ts; test/**/*.ts"`); omitted or empty defaults to `.`. Empty entries are rejected. Semicolon-delimited lists split unconditionally; entries accidentally joined with comma or whitespace are expanded only after existence validation; existing paths containing delimiters remain literal. Each target becomes its own walk root and multi-target scans run concurrently. `memory://` alone supports internal-URL glob patterns; `ssh://` is rejected because it has no local backing path. |
+| `path` | `string` | No | Glob, file, directory, internal URL, or internal-URL glob — or several of those as a semicolon-delimited list (`"src/**/*.ts; test/**/*.ts"`); omitted or empty defaults to `.`. Empty entries are rejected. Semicolon-delimited lists split unconditionally; entries accidentally joined with comma or whitespace are expanded only after existence validation; existing paths containing delimiters remain literal. Each target becomes its own walk root and multi-target scans run concurrently. Internal URLs glob below their root (`local://*.md`, `omp://**/*.md`); `ssh://` is rejected because its read tier (`exec`) exceeds this tool's `read` approval. |
 | `hidden` | `boolean` | No | Include hidden files. Defaults to `true`. |
 | `gitignore` | `boolean` | No | Respect `.gitignore` during local native globbing. Defaults to `true`; set `false` to include gitignored files. |
 | `limit` | `number` | No | Max returned paths. Defaults to `200`; finite positive inputs are floored then clamped to `1..200`. |
@@ -44,19 +45,20 @@ The tool returns a single text block plus structured `details`.
 ## Flow
 
 1. `GlobTool.execute()` converts the optional semicolon-delimited `path` string into roots (default `.`). Unless custom operations are injected, it expands the roots with `expandDelimitedPathEntries(..., parseFindPattern)`: existing delimiter-containing paths stay intact, semicolon-delimited lists split unconditionally, comma splits are accepted when at least one part resolves, and whitespace splits only when every part resolves.
-2. The tool normalizes each entry with `normalizePathLikeInput()` and `/\\/g -> "/"`. Empty normalized entries fail with `` `path` must contain non-empty globs or paths ``.
-3. For multi-path local calls, `partitionExistingPaths(..., parseFindPattern)` (`packages/coding-agent/src/tools/path-utils.ts`) stats each base path. Missing entries are skipped; if all are missing, the tool throws `Path not found: ...`. Single missing paths still hard-fail.
+2. The tool normalizes each entry with `normalizePathLikeInput()`, `/\\/g -> "/"`, and `router.normalize()` (single-slash URL aliases). Empty normalized entries fail with `` `path` must contain non-empty globs or paths ``. It builds one `InternalUrlFilesystem` from `sessionResolveContext()` at the call's approval tier (`read`).
+3. For multi-path local calls, `partitionExistingPaths(..., parseFindPattern, urlFilesystem)` (`packages/coding-agent/src/tools/path-utils.ts`) stats each base path through the URL filesystem. Missing entries are skipped; if all are missing, the tool throws `Path not found: ...`. Single missing paths still hard-fail.
 4. The tool calls `resolveExplicitFindPatterns()` for multi-entry calls; it parses each entry into its own `(basePath, globPattern, hasGlob)` target so every path is walked as its own root (collapsing to a shared ancestor would scan unrelated siblings). Single-entry calls parse with `parseFindPattern()` directly.
 5. `parseFindPattern()` determines `(basePath, globPattern, hasGlob)`:
    - no glob chars (`*`, `?`, `[`, `{`) => search that path with implicit `**/*`.
    - glob in the first segment => search from `.` and, unless the pattern already starts with `**/`, prefix it with `**/`.
    - glob later in the path => split at the first glob-bearing segment.
-6. `resolveToCwd()` converts the base path to an absolute path under the session cwd. A resolved `/` is rejected with `Searching from root directory '/' is not allowed`.
+   - internal URL => split below its `scheme://` root like a later-segment glob (`local://*.md` → base `local://`, non-recursive `*.md`); the glob tail is percent-decoded with encoded metacharacters kept literal, and `router.isGlob()` keeps queries, fragments, and host authorities out of the glob.
+6. `resolveSearchBase()` converts the base path to an absolute path under the session cwd; internal URLs stay URLs. A resolved `/` is rejected with `Searching from root directory '/' is not allowed`.
 7. `limit` defaults to `DEFAULT_LIMIT` (`200`), must be positive and finite, is floored, then clamped to `MAX_LIMIT` (`200`). `hidden` and `gitignore` both default to `true`. An internal timeout of `5` seconds (`5000` ms) is built via `AbortSignal.timeout(...)`.
 8. Execution then branches:
    - **Custom operations branch**: if `GlobToolOptions.operations.glob` exists, the tool checks existence with `operations.exists()`, short-circuits exact-file inputs via `operations.stat()` when available, then calls `operations.glob(globPattern, searchPath, { ignore: ["**/node_modules/**", "**/.git/**"], limit })`.
-   - **Built-in local branch**: the tool stats each target's `searchPath`. Exact-file inputs return immediately. Directory inputs call `natives.glob()` with `hidden`, `maxResults: effectiveLimit`, `sortByMtime: true`, `gitignore: useGitignore`, `recursive: false` (recursion comes from the `**/` prefix `parseFindPattern()` adds), and the combined abort signal; multi-target calls run their globs concurrently.
-9. In the local branch, optional `onMatch` callbacks convert each match to a cwd-relative display path and emit throttled progress updates.
+   - **Built-in local branch**: the tool stats each target's `searchPath` (URL targets through the URL filesystem). Exact-file inputs return immediately. Directory inputs call `natives.glob()` with `hidden`, `maxResults: effectiveLimit`, `sortByMtime: true`, `gitignore: useGitignore`, `recursive: false` (recursion comes from the `**/` prefix `parseFindPattern()` adds), the combined abort signal, and `filesystem: urlFilesystem.shellFilesystem()` so URL roots walk natively; multi-target calls run their globs concurrently.
+9. In the local branch, optional `onMatch` callbacks convert each match to a display path (cwd-relative for host paths, a full URL with percent-encoded segments below a URL root via `resolveSearchResultPath()`) and emit throttled progress updates.
 10. After native glob returns, JS merges per-target results, deduplicates repeated display paths, and sorts the merged list by `mtime` descending before formatting paths.
 11. `buildResult()` applies `applyListLimit()` to cap the array again at `effectiveLimit`, formats paths with `formatGroupedPaths()` (from `@oh-my-pi/pi-utils`), appends notices, then runs `truncateHead()` with `maxLines: Number.MAX_SAFE_INTEGER`. In practice this leaves the 50 KB byte cap in place while disabling the default 3000-line cap.
 12. `toolResult()` packages text plus `details`, and records result-limit / truncation metadata for renderers.
@@ -67,7 +69,7 @@ The tool returns a single text block plus structured `details`.
 - **Single glob path**: one input parsed by `parseFindPattern()`.
 - **Multi-path search**: multiple inputs resolved by `resolveExplicitFindPatterns()` into per-entry targets, each walked as its own root concurrently and merged afterwards.
 - **Partial multi-path search with missing inputs**: local multi-path calls skip missing base paths and surface them as `missingPaths` / `Skipped missing paths: ...`.
-- **Internal URL input**: URLs are located through `InternalUrlRouter` (never resolved, so remote schemes are never contacted). Exact URLs use `requireLocal(…, { directory: true })` (`skill://<name>` walks the skill directory); URLs with glob metacharacters in the path use `locateGlob()`, which expands the glob tail under the located base of any locatable scheme (`memory://root/**/*.md`, `local://notes/*.md`). Percent-encoded metacharacters stay literal; `..` and encoded separators in the glob tail are rejected.
+- **Internal URL input**: native glob walks URLs through the URL filesystem: file-backed schemes (`skill://<name>` walks the skill directory, `local://notes/*.md`, `memory://root/**/*.md`) redirect to their host files, virtual schemes list their rendered entries (`omp://tools/*.md`). Results are full URLs. Schemes above the `read` tier (`ssh://`) are refused before any handler resolves them, so remote hosts are never contacted.
 - **Custom delegated search**: uses injected `GlobOperations` instead of local fs + native glob.
 
 ## Side Effects
@@ -99,9 +101,7 @@ The tool returns a single text block plus structured `details`.
   - `Limit must be a positive number`
   - `Path is not a directory: ...`
   - timeout result text is `glob timed out after <seconds>s; returning <N> partial matches — narrow the pattern instead of retrying blindly` and is returned as a successful, truncated partial result rather than an error.
-  - `Glob patterns are not supported for internal URLs: ...` when a URL glob's base does not locate to a local directory.
-  - `Globs are not supported in <scheme>:// ids: ...` for a glob in an id authority (`skill://*/SKILL.md`, `artifact://*`); only `local://` globs from its first segment.
-  - `Cannot glob <scheme>:// URL: no local file backs ...` for exact URLs with no local file (remote/virtual schemes add a `read` hint). Unknown ids of locatable read-only schemes report the handler's own error instead (`Cannot glob artifact://9: Artifact 9 not found. Available: …`).
+  - `Cannot glob <url>: <reason>` when a URL target cannot be stat'ed through the URL filesystem: the handler's diagnosis (`Cannot glob artifact://9: Artifact 9 not found. Available: …`; `skill:// URL requires a skill name` for `skill://*/SKILL.md`) or the tier refusal (`ssh:// access needs exec approval; …`).
 - If the caller aborts, the local branch converts `AbortError` into `ToolAbortError`.
 - Non-`ENOENT` stat failures and other unexpected errors are rethrown.
 - Empty matches are not errors; they return the no-files text result.

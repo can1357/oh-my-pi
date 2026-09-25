@@ -63,7 +63,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		const senderId = this.session.getAgentId?.() ?? undefined;
 		const messaging = registry && senderId ? { registry, senderId } : undefined;
 		const manager = this.session.asyncJobManager;
-		const ownerFilter = senderId ? { ownerId: senderId } : undefined;
+		const ownerFilter = { ownerId: senderId };
 
 		const pending = takeQueuedMessage(messaging);
 		if (pending && messaging) return messageResult(messaging.senderId, pending);

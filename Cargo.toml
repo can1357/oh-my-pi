@@ -12,6 +12,7 @@ members = [
    "crates/pi-natives",
    "crates/pi-shell",
    "crates/pi-vcs",
+   "crates/pi-vfs",
    "crates/pi-voice",
    "crates/pi-walker",
    "crates/vendor/brush-core",
@@ -222,6 +223,7 @@ pi-shell = { path = "crates/pi-shell" }
 pi-voice = { path = "crates/pi-voice" }
 pi-walker = { path = "crates/pi-walker" }
 pi-vcs = { path = "crates/pi-vcs" }
+pi-vfs = { path = "crates/pi-vfs" }
 brush-core = { path = "crates/vendor/brush-core" }
 pi-builtins = { path = "crates/pi-builtins" }
 

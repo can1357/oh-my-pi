@@ -122,8 +122,6 @@ export interface SchemeSpec {
 	compactTranscript?: boolean;
 	/** `read` peels a trailing `?q=<question>` as an image question (local://, attachment://); other schemes own their query. */
 	imageQuestion?: true;
-	/** `bash` expands unquoted/quoted URLs of this scheme to their located file paths. */
-	shellOperand?: true;
 	/** The single-slash `scheme:/x` spelling is an alias of `scheme://x` (local:/). */
 	singleSlashAlias?: true;
 	write?: SchemeWritePolicy;

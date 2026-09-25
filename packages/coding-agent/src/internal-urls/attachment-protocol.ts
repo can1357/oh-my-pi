@@ -18,7 +18,6 @@ export class AttachmentProtocolHandler implements ProtocolHandler {
 		selectors: "none",
 		immutable: true,
 		imageQuestion: true,
-		shellOperand: true,
 	};
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
