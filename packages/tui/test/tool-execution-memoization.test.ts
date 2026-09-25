@@ -142,6 +142,22 @@ describe("ToolExecutionComponent tool-result render memoization", () => {
 		component.updateArgs(sameArgs);
 		expect(callSpy.mock.calls.length).toBe(afterReal);
 	});
+
+	it("renders passive context as one sanitized dim line", () => {
+		const ui = { requestRender() {}, requestComponentRender() {} } as unknown as TUI;
+		const component = new ToolExecutionComponent("probe", {}, {}, undefined, ui, process.cwd());
+		component.updateResult(finalResult("done"), false);
+
+		component.setAdditionalContext("first\tinstruction\nsecond instruction\u001b[31m");
+
+		const rawFrame = component.render(120).join("\n");
+		expect(rawFrame).not.toContain("\u001b[31m");
+		const frame = stripVTControlCharacters(rawFrame);
+		const contextLines = frame.split("\n").filter(line => line.includes("Context:"));
+		expect(contextLines).toHaveLength(1);
+		expect(contextLines[0]).toContain("first instruction second instruction");
+		expect(contextLines[0]).not.toContain("\t");
+	});
 	// Regression: freezing a backgrounded task (seal()) flips #backgroundTaskFrozen,
 	// which the render context consumes (context.frozen) — so it must be in the memo
 	// key. The bug: the key omitted it, so once the display was built seal()'s
