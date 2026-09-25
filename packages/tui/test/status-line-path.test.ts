@@ -339,4 +339,22 @@ describe("status line path segment in a linked worktree", () => {
 		expect(label.startsWith("…")).toBe(true);
 		expect(label.endsWith("feature")).toBe(true);
 	});
+
+	it("strips a configured projectRoots entry (issue #12207)", () => {
+		const customRoot = fs.mkdtempSync(path.join(os.tmpdir(), "omp-status-line-custom-"));
+		const projectDir = path.join(customRoot, "myproj");
+		fs.mkdirSync(projectDir, { recursive: true });
+		try {
+			setProjectDir(projectDir);
+			const ctx = createPathContext();
+			ctx.options.path = { ...ctx.options.path, projectRoots: [customRoot] };
+			const rendered = renderSegment("path", ctx);
+			expect(rendered.visible).toBe(true);
+			expect(rendered.content).toContain("myproj");
+			expect(rendered.content).not.toContain(customRoot);
+		} finally {
+			setProjectDir(originalProjectDir);
+			removeSyncWithRetries(customRoot);
+		}
+	});
 });
