@@ -7,6 +7,7 @@ import {
 } from "@oh-my-pi/pi-ai/auth-storage";
 import type { CredentialRankingStrategy, UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import { claudeRankingStrategy } from "@oh-my-pi/pi-ai/usage/claude";
+import { claudeResetClearedBlockScopes } from "../src/usage/claude-reset";
 
 /**
  * A reactive Fable 429 blocks the credential until the reset that error
@@ -36,6 +37,16 @@ function tierLimit(tier: string, usedFraction: number): UsageLimit {
 		window: { id: "7d", label: "7d", resetsAt: Date.now() + 24 * 60 * 60_000 },
 		amount: { usedFraction, unit: "percent" },
 		status: usedFraction >= 1 ? "exhausted" : "ok",
+	};
+}
+function extraLimit(used: number, limit: number): UsageLimit {
+	const usedFraction = used / limit;
+	return {
+		id: "anthropic:extra",
+		label: "Claude Extra Usage",
+		scope: { provider: "anthropic", windowId: "extra" },
+		amount: { used, limit, usedFraction, unit: "usd" },
+		status: used >= limit ? "exhausted" : "ok",
 	};
 }
 
@@ -319,6 +330,37 @@ describe("claude usage-block healing", () => {
 		const selected = await storage.keys.get("anthropic", "s-opus-exhausted", { modelId: "claude-opus-5-5" });
 		expect(clearedScopes).not.toContain("");
 		expect(selected).toBe("access-2");
+	});
+	it("keeps an unscoped block when Extra Usage is exhausted even with plan headroom", async () => {
+		const { storage, clearedScopes } = makeHarness(
+			claudeReport([sharedLimit("5h", "5h", 0.02), sharedLimit("7d", "7d", 0.05), extraLimit(52, 50)]),
+			"",
+		);
+		storages.push(storage);
+		await storage.credentials.reload();
+
+		const selected = await storage.keys.get("anthropic", "s-opus-extra-exhausted", { modelId: "claude-opus-5-5" });
+		expect(clearedScopes).not.toContain("");
+		expect(selected).toBe("access-2");
+	});
+
+	it("lifts an unscoped block when Extra Usage is present and has headroom", async () => {
+		const { storage, clearedScopes } = makeHarness(
+			claudeReport([sharedLimit("5h", "5h", 0.02), sharedLimit("7d", "7d", 0.05), extraLimit(10, 50)]),
+			"",
+		);
+		storages.push(storage);
+		await storage.credentials.reload();
+
+		const selected = await storage.keys.get("anthropic", "s-opus-extra-healthy", { modelId: "claude-opus-5-5" });
+		expect(clearedScopes).toContain("");
+		expect(selected).toBe("access-1");
+	});
+
+	it("does not clear unscoped block scope via reset credit when Extra Usage is exhausted", () => {
+		const report = claudeReport([sharedLimit("5h", "5h", 1.0), sharedLimit("7d", "7d", 0.05), extraLimit(52, 50)]);
+		const cleared = claudeResetClearedBlockScopes(["anthropic:5h"], report);
+		expect(cleared).not.toContain(undefined);
 	});
 
 	it("keeps an unscoped block when the report omits the 7d shared gate", async () => {
