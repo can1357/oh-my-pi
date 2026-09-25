@@ -17,6 +17,7 @@ export interface ExecutionState {
 	fallbackCount: number;
 	committed: boolean;
 	currentTarget: string;
+	/** True after a sibling-credential retry for the current target failed. */
 	siblingsExhausted: boolean;
 }
 
@@ -103,26 +104,29 @@ export function decideAttempt(args: {
 	}
 
 	const { disposition } = classification;
+	const candidates = route.fallbackByTarget
+		? route.fallbackByTarget[state.currentTarget]?.[disposition]
+		: route.fallbacks[disposition];
 	switch (disposition) {
 		case "cancelled":
 		case "request_terminal":
 		case "policy_terminal":
 		case "gateway_terminal":
-		case "credential_permanent":
 			return { type: "terminal" };
+		case "credential_permanent":
 		case "credential_quota":
 		case "credential_transient": {
 			if (!state.siblingsExhausted) {
 				return { type: "sibling_credential" };
 			}
-			const next = firstUnused(fallbackTargets(route, state.currentTarget, disposition), state.attemptedTargets);
+			const next = firstUnused(candidates, state.attemptedTargets);
 			return next === undefined ? { type: "terminal" } : { type: "fallback_target", targetModelId: next };
 		}
 		case "provider_transient":
 		case "provider_unavailable":
 		case "model_unavailable":
 		case "context_overflow": {
-			const next = firstUnused(fallbackTargets(route, state.currentTarget, disposition), state.attemptedTargets);
+			const next = firstUnused(candidates, state.attemptedTargets);
 			return next === undefined ? { type: "terminal" } : { type: "fallback_target", targetModelId: next };
 		}
 		default: {

@@ -87,6 +87,8 @@ export class RouteRegistry {
 
 	/** Register/replace a virtual route. Bumps generation. Rejects cycles and empty fallback children. */
 	register(definition: RouteDefinition): void {
+		if (definition.id === "" || definition.id === "." || definition.id === "..")
+			throw new AIError.ValidationError("Route ID cannot be a URL dot segment");
 		const compiled = compileDefinition(definition, id => this.#routes.get(id)?.root, this.#generation + 1);
 		this.#generation += 1;
 		this.#routes.set(definition.id, compiled);

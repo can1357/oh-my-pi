@@ -1,126 +1,71 @@
-import { beforeAll, describe, expect, it } from "bun:test";
-import { hasMagicKeyword, highlightMagicKeywords } from "@oh-my-pi/pi-coding-agent/modes/magic-keywords";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { describe, expect, it } from "bun:test";
+import {
+	MAGIC_KEYWORDS,
+	renderOrchestrateNotice,
+	renderWorkflowNotice,
+} from "@oh-my-pi/pi-coding-agent/modes/magic-keywords";
+import { clearBundledCommandsCache, loadBundledCommands } from "@oh-my-pi/pi-coding-agent/task/commands";
 
-beforeAll(async () => {
-	// Gradient palettes read the active theme's color mode.
-	await initTheme(false);
-});
-
-describe("highlightMagicKeywords", () => {
-	it("paints every magic keyword in a single prose pass, preserving visible text", () => {
-		const input = "first ultrathink then orchestrate the workflowz";
-		const decorated = highlightMagicKeywords(input);
-		expect(decorated).not.toBe(input);
-		expect(decorated).toContain("\x1b[38");
-		expect(Bun.stripANSI(decorated)).toBe(input);
-		// Each keyword is gradient-painted character-by-character, so none survives as a
-		// contiguous run in the decorated output.
-		for (const keyword of ["ultrathink", "orchestrate", "workflowz"]) {
-			expect(decorated).not.toContain(keyword);
-			expect(Bun.stripANSI(decorated)).toContain(keyword);
-		}
-	});
-
-	it("paints punctuation-adjacent prose keywords without changing visible text", () => {
-		const input = 'first "ultrathink," then orchestrate. Finally workflowz!';
-		const decorated = highlightMagicKeywords(input);
-		expect(decorated).not.toBe(input);
-		expect(Bun.stripANSI(decorated)).toBe(input);
-		for (const keyword of ["ultrathink", "orchestrate", "workflowz"]) {
-			expect(decorated).not.toContain(keyword);
-		}
-	});
-
-	it("never paints keywords inside code spans, fenced blocks, or XML sections", () => {
-		const input = "`ultrathink`\n```\norchestrate\n```\n<x>workflowz</x>";
-		expect(highlightMagicKeywords(input)).toBe(input);
-	});
-
-	it("paints only the prose occurrence when the keyword also appears in code", () => {
-		const decorated = highlightMagicKeywords("`orchestrate` but please orchestrate now");
-		// The code-span occurrence stays literal; the prose one is split by gradient escapes.
-		expect(decorated).toContain("`orchestrate`");
-		expect(Bun.stripANSI(decorated)).toBe("`orchestrate` but please orchestrate now");
-		// Exactly one prose occurrence painted ⇒ one contiguous "orchestrate" remains (the code one).
-		expect(decorated.split("orchestrate").length - 1).toBe(1);
-	});
-
-	it("restores the supplied foreground after each painted keyword", () => {
-		const reset = "\x1b[38;2;1;2;3m";
-		const decorated = highlightMagicKeywords("go orchestrate go", reset);
-		expect(decorated).toContain(reset);
-		// The reset must land before the trailing prose so it keeps the bubble color.
-		expect(decorated.endsWith(`${reset} go`)).toBe(true);
-	});
-
-	it("shifts the gradient when phase advances — same visible text, different SGR bytes", () => {
-		const text = "go ultrathink now";
-		const frame0 = highlightMagicKeywords(text, undefined, 0);
-		const frame1 = highlightMagicKeywords(text, undefined, 0.5);
-		expect(Bun.stripANSI(frame0)).toBe(text);
-		expect(Bun.stripANSI(frame1)).toBe(text);
-		// The visible output is unchanged width-wise but the painted bytes differ
-		// because the per-stop palette has cycled.
-		expect(frame0).not.toBe(frame1);
-	});
-
-	it("treats out-of-range phase values as wrapping into [0, 1)", () => {
-		const text = "do ultrathink please";
-		// 1.0 wraps back to 0, so the painted output must match.
-		expect(highlightMagicKeywords(text, undefined, 1)).toBe(highlightMagicKeywords(text, undefined, 0));
-		// Negative phase wraps too — -0.25 ≡ 0.75.
-		expect(highlightMagicKeywords(text, undefined, -0.25)).toBe(highlightMagicKeywords(text, undefined, 0.75));
+describe("magic keyword registry", () => {
+	it("keeps ids and words unique so notice types and settings keys cannot collide", () => {
+		expect(new Set(MAGIC_KEYWORDS.map(keyword => keyword.id)).size).toBe(MAGIC_KEYWORDS.length);
+		expect(new Set(MAGIC_KEYWORDS.map(keyword => keyword.word)).size).toBe(MAGIC_KEYWORDS.length);
 	});
 });
 
-describe("hasMagicKeyword", () => {
-	it("detects every standalone keyword in prose", () => {
-		expect(hasMagicKeyword("please ultrathink this")).toBe(true);
-		expect(hasMagicKeyword("now orchestrate everything")).toBe(true);
-		expect(hasMagicKeyword("just workflowz the steps")).toBe(true);
+describe("orchestrate notice", () => {
+	it("is a self-contained system notice carrying the orchestration contract", () => {
+		const notice = renderOrchestrateNotice({
+			tools: ["read", "task", "edit", "write", "lsp", "bash", "todo"],
+		});
+		expect(notice.startsWith("<system-notice>")).toBe(true);
+		expect(notice.endsWith("</system-notice>")).toBe(true);
+		expect(notice).toContain("orchestrator");
+		// The contract must not retain the slash-command input placeholder.
+		expect(notice).not.toContain("$@");
 	});
 
-	it("detects standalone keywords beside prose punctuation and quotes", () => {
-		for (const text of ["please ultrathink.", 'say "orchestrate" now', "then workflowz, please"]) {
-			expect(hasMagicKeyword(text)).toBe(true);
-		}
+	it("omits tool-budget mentions for tools absent from the session", () => {
+		const notice = renderOrchestrateNotice({ tools: ["read"] });
+		expect(notice).not.toContain("`task` for dispatch");
+		expect(notice).not.toContain("`edit`");
+		expect(notice).not.toContain("`write`");
+		expect(notice).not.toContain("`lsp diagnostics`");
+		expect(notice).not.toContain("via `bash`");
+		expect(notice).not.toContain("`todo` for tracking");
 	});
 
-	it("rejects keywords used as code symbols or calls", () => {
-		for (const text of [
-			"ultrathink()",
-			"orchestrate()",
-			"workflowz()",
-			"foo::ultrathink",
-			"foo::orchestrate",
-			"foo::workflowz",
-		]) {
-			expect(hasMagicKeyword(text)).toBe(false);
-			expect(highlightMagicKeywords(text)).toBe(text);
-		}
+	it("does not name edit when only write is available", () => {
+		const writeOnly = renderOrchestrateNotice({ tools: ["read", "write"] });
+		expect(writeOnly).toContain("with `write`");
+		expect(writeOnly).not.toContain("`edit`/`write`");
+		expect(writeOnly).not.toContain("with `edit`");
 	});
 
-	it("rejects casing, inflections, old workflow names, and paths", () => {
-		expect(hasMagicKeyword("Ultrathink")).toBe(false);
-		expect(hasMagicKeyword("ORCHESTRATE")).toBe(false);
-		expect(hasMagicKeyword("workflow")).toBe(false);
-		expect(hasMagicKeyword("workflows")).toBe(false);
-		expect(hasMagicKeyword("ultrathinking is fun")).toBe(false);
-		expect(hasMagicKeyword("workflowzed already")).toBe(false);
-		expect(hasMagicKeyword("src/modes/ultrathink.ts")).toBe(false);
-		expect(hasMagicKeyword("orchestrate.ts is a file")).toBe(false);
-		expect(hasMagicKeyword("packages/coding-agent/test/modes/workflowz.test.ts")).toBe(false);
+	it("does not name write when only edit is available", () => {
+		const editOnly = renderOrchestrateNotice({ tools: ["read", "edit"] });
+		expect(editOnly).toContain("with `edit`");
+		expect(editOnly).not.toContain("`edit`/`write`");
 	});
+});
 
-	it("rejects keywords inside code spans, fences, and xml sections", () => {
-		expect(hasMagicKeyword("`ultrathink`")).toBe(false);
-		expect(hasMagicKeyword("```\norchestrate\n```")).toBe(false);
-		expect(hasMagicKeyword("<x>workflowz</x>")).toBe(false);
+describe("workflow notice", () => {
+	it("defaults to workpools and hides eval-defined tools when disabled", () => {
+		const enabled = renderWorkflowNotice({ taskBatch: true, scoutAvailable: true, evalTools: true });
+		const disabled = renderWorkflowNotice({ taskBatch: true, scoutAvailable: true, evalTools: false });
+		expect(enabled).toContain("Default to `workpool()`");
+		expect(enabled).toContain("`@tool`");
+		expect(disabled).toContain("Default to `workpool()`");
+		expect(disabled).not.toContain("`@tool`");
+		expect(disabled).not.toContain("tools=None");
 	});
+});
 
-	it("returns false for empty / keyword-free text", () => {
-		expect(hasMagicKeyword("")).toBe(false);
-		expect(hasMagicKeyword("plain message with no keywords")).toBe(false);
+describe("orchestrate slash command removal", () => {
+	it("is no longer bundled as a slash command", () => {
+		clearBundledCommandsCache();
+		const names = loadBundledCommands().map(command => command.name);
+		expect(names).not.toContain("orchestrate");
+		expect(names).toContain("init");
 	});
 });

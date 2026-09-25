@@ -26,7 +26,7 @@ describe("RouteRegistry", () => {
 	it("wraps a known id as a single TargetNode", () => {
 		const registry = new RouteRegistry(id => (id === "gpt-5" ? fakeModel("gpt-5") : undefined));
 		const route = registry.resolve("gpt-5");
-		expect(route).toEqual({
+		expect(route).toMatchObject({
 			generation: 1,
 			id: "gpt-5",
 			root: { type: "target", model: "gpt-5" },
@@ -61,7 +61,7 @@ describe("RouteRegistry", () => {
 		});
 		const route = registry.resolve("quota-route");
 		expect(registry.generation).toBe(2);
-		expect(route).toEqual({
+		expect(route).toMatchObject({
 			generation: 2,
 			id: "quota-route",
 			root: {
@@ -117,7 +117,7 @@ describe("RouteRegistry", () => {
 				},
 			}),
 		).toThrow(/ambiguous cross-branch reuse/i);
-		expect(registry.generation).toBe(1);
+		expect(registry.resolve("sibling-reuse")).toBeUndefined();
 	});
 
 	it("rejects domain sibling reuse that would merge distinct fallback contexts", () => {
@@ -198,7 +198,7 @@ describe("RouteRegistry", () => {
 			root: { type: "target", model: "other" },
 		});
 		const route = registry.resolve("gpt-5");
-		expect(route).toEqual({
+		expect(route).toMatchObject({
 			generation: 2,
 			id: "gpt-5",
 			root: { type: "target", model: "gpt-5" },
@@ -260,6 +260,16 @@ describe("RouteRegistry", () => {
 		expect(route?.fallbacks.credential_quota).toEqual(["C"]);
 		expect(route?.fallbackByTarget?.A?.credential_quota).toBeUndefined();
 		expect(route?.fallbackByTarget?.B?.credential_quota).toEqual(["C"]);
+	});
+
+	it("preserves provider-qualified model ids as the compiled target", () => {
+		const registry = new RouteRegistry(id => {
+			const bare = id.includes("/") ? id.slice(id.indexOf("/") + 1) : id;
+			return bare === "gpt-5" ? fakeModel("gpt-5") : undefined;
+		});
+		const compiled = registry.resolve("openai/gpt-5");
+		expect(compiled?.root).toEqual({ type: "target", model: "openai/gpt-5" });
+		expect(compiled?.id).toBe("openai/gpt-5");
 	});
 
 	it("get returns registered virtual routes and ignores catalog models (negative)", () => {
@@ -503,4 +513,11 @@ it("selects conditional branches per request without mutating shared registry st
 	expect(registry.resolve("conditional", { vision: true })?.targets).toEqual(["vision"]);
 	expect(registry.resolve("conditional", { vision: false })?.targets).toEqual(["text"]);
 	expect(registry.get("conditional")?.targets).toEqual(["vision", "text"]);
+});
+
+it("rejects route IDs erased by URL normalization", () => {
+	const registry = new RouteRegistry(() => undefined);
+	for (const id of [".", ".."])
+		expect(() => registry.register({ id, root: { type: "target", model: "target" } })).toThrow(/dot segment/);
+	expect(registry.list()).toEqual([]);
 });

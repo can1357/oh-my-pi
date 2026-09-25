@@ -96,7 +96,11 @@ const MUX_SIGNALS = [
 	"CMUX_WORKSPACE_ID",
 	"CMUX_SURFACE_ID",
 	"CMUX_REMOTE_TRANSPORT",
+	"WMUX",
+	"WMUX_SURFACE_ID",
 	"TERM",
+	"TERM_PROGRAM",
+	"PI_TUI_RESIZE_IN_PLACE",
 ] as const;
 
 function useDirectTerminalEnv() {

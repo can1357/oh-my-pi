@@ -1,7 +1,9 @@
 import { buildEvalUrlRoots, type LocalProtocolOptions } from "../internal-urls";
+import type { OutputArtifactError } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import type { ToolSession } from "../tools";
 import type { BackendProbeOptions } from "./probe";
-import type { EvalDisplayOutput, EvalLanguage, EvalStatusEvent } from "./types";
+import type { EvalLanguage, EvalStatusEvent } from "@oh-my-pi/pi-tui/tools/eval";
+import type { EvalDisplayOutput } from "./types";
 
 /** Per-cell execute() options. */
 export interface ExecutorBackendExecOptions {
@@ -21,6 +23,12 @@ export interface ExecutorBackendExecOptions {
 	 */
 	idleTimeoutMs?: number;
 	reset: boolean;
+	/** Absolute filename for file-backed cells; preserves import and traceback locations. */
+	filename?: string;
+	/** Explicit distribution requirements installed before executing the cell. */
+	packages?: string[];
+	/** Managed scratch environment by default; project mutations require explicit selection. */
+	environment?: "managed" | "project";
 	onChunk: (chunk: string) => void;
 	/**
 	 * Live status events (read/write/agent/…) delivered as they are emitted,
@@ -38,6 +46,7 @@ export interface ExecutorBackendResult {
 	cancelled: boolean;
 	truncated: boolean;
 	artifactId: string | undefined;
+	artifactError?: OutputArtifactError;
 	totalLines: number;
 	totalBytes: number;
 	outputLines: number;
@@ -64,9 +73,15 @@ export interface ExecutorBackend {
  * eval `write("local://x")` and a later `read local://x` agree on the location.
  */
 export function resolveEvalUrlRoots(session: ToolSession): Record<string, string> {
-	const options: LocalProtocolOptions = session.localProtocolOptions ?? {
-		getArtifactsDir: () => session.getArtifactsDir?.() ?? null,
-		getSessionId: () => session.getSessionId?.() ?? null,
-	};
-	return buildEvalUrlRoots(options);
+	return buildEvalUrlRoots(resolveEvalLocalProtocolOptions(session));
+}
+
+/** Keep file-backed eval and prelude helpers on the calling session's local URL root. */
+export function resolveEvalLocalProtocolOptions(session: ToolSession): LocalProtocolOptions {
+	return (
+		session.localProtocolOptions ?? {
+			getArtifactsDir: () => session.getArtifactsDir?.() ?? null,
+			getSessionId: () => session.getSessionId?.() ?? null,
+		}
+	);
 }

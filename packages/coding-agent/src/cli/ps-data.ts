@@ -1,6 +1,6 @@
 /**
  * Data layer shared by the `omp ps` renderers (plain CLI and interactive TUI):
- * broker-scope discovery, daemon snapshot collection, and display cells.
+ * broker-scope discovery and daemon snapshot collection.
  *
  * Collection never spawns a broker: live scopes are queried over the broker
  * socket, dead scopes are read from the persisted per-daemon `meta.json`
@@ -10,61 +10,29 @@ import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
-	formatDuration,
 	getDaemonRuntimeRoot,
 	getGlobalDaemonRuntimeDir,
 	getGlobalDaemonRuntimeRoot,
 	getProjectDir,
 	isEnoent,
 } from "@oh-my-pi/pi-utils";
-import chalk from "@oh-my-pi/pi-utils/chalk";
 import { createDaemonBrokerClient, type DaemonBrokerClient } from "../launch/client";
 import { canonicalProjectDir, daemonRuntimeDir, readDaemonScopeMeta } from "../launch/paths";
 import { readLiveDaemonBrokerPid } from "../launch/presence";
+import type { DaemonSnapshot, DaemonSpec } from "@oh-my-pi/pi-tui/tools/daemon";
 import {
-	type DaemonSnapshot,
-	type DaemonSpec,
-	type DaemonState,
-	parseDaemonSnapshot,
-	parseDaemonSpec,
-} from "../launch/protocol";
-
-/** One broker scope: a project runtime dir or a machine-global service dir. */
-export interface PsScope {
-	kind: "project" | "global";
-	runtimeDir: string;
-	/** Canonical project dir when known; used to connect and displayed as the scope label. */
-	projectDir?: string;
-	/** Global service name (`kind === "global"`). */
-	service?: string;
-	/** Live broker PID; undefined when no broker owns the scope. */
-	brokerPid?: number;
-}
-
-export interface PsDaemonRow {
-	snapshot: DaemonSnapshot;
-	/** Launch command from the persisted spec, when readable. */
-	command?: string;
-	cwd?: string;
-	/** False when the snapshot came from disk with no live broker supervising it. */
-	supervised: boolean;
-}
-
-export interface PsScopeReport {
-	scope: PsScope;
-	daemons: PsDaemonRow[];
-}
-
-/** Scope selector shared by every ps action: current project, `--dir`, or `--global`. */
-export interface PsTarget {
-	dir?: string;
-	global?: string;
-}
+	formatCommand,
+	TERMINAL_STATES,
+	type PsScope,
+	type PsDaemonRow,
+	type PsScopeReport,
+	type PsTarget,
+} from "@oh-my-pi/pi-tui/apps/ps-data";
+import { parseDaemonSnapshot, parseDaemonSpec } from "../launch/protocol";
 
 const PROJECT_SCOPE_KEY = /^[0-9a-f]{16}$/;
 /** Hard SIGTERM->SIGKILL grace used by `kill`; effectively immediate. */
 export const KILL_GRACE_MS = 100;
-export const TERMINAL_STATES: Partial<Record<DaemonState, true>> = { exited: true, failed: true };
 
 // ---------------------------------------------------------------------------
 // Scope discovery
@@ -265,79 +233,4 @@ export async function collectReports(all: boolean, target: PsTarget): Promise<Ps
 	const scopes = all ? await discoverScopes() : [await targetScope(target)];
 	const reports = await Promise.all(scopes.map(collectScope));
 	return reports.filter(report => !all || report.daemons.length > 0 || report.scope.brokerPid !== undefined);
-}
-
-// ---------------------------------------------------------------------------
-// Display cells (shared by the plain table and the interactive TUI)
-// ---------------------------------------------------------------------------
-
-export function formatCommand(spec: DaemonSpec | undefined): string | undefined {
-	return spec ? [spec.application, ...spec.args].join(" ") : undefined;
-}
-
-/** Collapse a launch command to one display line (inline scripts embed newlines/tabs). */
-export function collapseCommand(command: string | undefined): string {
-	return command ? command.replaceAll(/\s+/gu, " ").trim() : "";
-}
-
-/** One-line daemon summary used by action results and detail views. */
-export function daemonLabel(daemon: DaemonSnapshot): string {
-	const pid = daemon.pid === undefined ? "" : ` pid=${daemon.pid}`;
-	const exit = daemon.exitCode === undefined ? "" : ` exit=${daemon.exitCode}`;
-	return `${daemon.name}: ${daemon.state}${pid}${exit}`;
-}
-
-/** Colored STATE cell, e.g. `ready`, `exited(143)`. */
-export function stateCell(row: PsDaemonRow): string {
-	const { snapshot } = row;
-	let text: string = snapshot.state;
-	if (TERMINAL_STATES[snapshot.state] && snapshot.exitCode !== undefined) text += `(${snapshot.exitCode})`;
-	const paint =
-		snapshot.state === "ready" || snapshot.state === "running"
-			? chalk.green
-			: snapshot.state === "failed"
-				? chalk.red
-				: TERMINAL_STATES[snapshot.state]
-					? chalk.dim
-					: chalk.yellow;
-	return paint(text);
-}
-
-export function flagsCell(row: PsDaemonRow): string {
-	const parts: string[] = [];
-	if (row.snapshot.detached) parts.push("detached");
-	else if (row.snapshot.persist) parts.push("persist");
-	if (!row.supervised && !TERMINAL_STATES[row.snapshot.state]) parts.push("unsupervised");
-	return parts.join(",");
-}
-
-export function uptimeCell(snapshot: DaemonSnapshot): string {
-	if (TERMINAL_STATES[snapshot.state]) return "-";
-	return formatDuration(Date.now() - snapshot.startedAt);
-}
-
-export const TABLE_HEADER = ["NAME", "STATE", "PID", "UPTIME", "RESTARTS", "FLAGS", "COMMAND"];
-
-/** Raw (possibly colored) cells for one daemon row, aligned with {@link TABLE_HEADER}. */
-export function tableCells(row: PsDaemonRow): string[] {
-	return [
-		row.snapshot.name,
-		stateCell(row),
-		row.snapshot.pid !== undefined && !TERMINAL_STATES[row.snapshot.state] ? String(row.snapshot.pid) : "-",
-		uptimeCell(row.snapshot),
-		String(row.snapshot.restartCount),
-		flagsCell(row),
-		collapseCommand(row.command),
-	];
-}
-
-/** Scope heading, e.g. `project /work/pi — broker pid 1234`. */
-export function scopeHeader(scope: PsScope): string {
-	const label =
-		scope.kind === "global"
-			? `global ${chalk.bold(scope.service ?? path.basename(scope.runtimeDir))}`
-			: `project ${chalk.bold(scope.projectDir ?? path.basename(scope.runtimeDir))}`;
-	const broker =
-		scope.brokerPid !== undefined ? chalk.green(`broker pid ${scope.brokerPid}`) : chalk.dim("broker not running");
-	return `${label} ${chalk.dim("—")} ${broker}`;
 }

@@ -42,13 +42,13 @@ const UNAUTH_ENDPOINTS: Array<{ method: string; path: string }> = [
 
 async function withManagementGateway(
 	run: (ctx: { url: string; storage: AuthStorage; traces: RouteDecisionTraceLog }) => Promise<void>,
-	setup?: (storage: AuthStorage, traces: RouteDecisionTraceLog) => void,
+	setup?: (storage: AuthStorage, traces: RouteDecisionTraceLog) => void | Promise<void>,
 ): Promise<void> {
 	registerMockApi();
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-mgmt-"));
 	const storage = await AuthStorage.create(path.join(dir, "auth.db"));
 	const traces = new RouteDecisionTraceLog();
-	setup?.(storage, traces);
+	await setup?.(storage, traces);
 	const primary = createMockModel({ provider: "openrouter", id: primaryId });
 	const handle = startAuthGateway({
 		bind: "127.0.0.1:0",
@@ -164,9 +164,9 @@ describe("auth-gateway management endpoints", () => {
 				expect(serialized).not.toContain(oauthAccess);
 				expect(serialized).not.toContain("refresh-secret");
 			},
-			storage => {
-				storage.upsertCredential("openrouter", { type: "api_key", key: apiKeySecret });
-				storage.upsertCredential("anthropic", {
+			async storage => {
+				await storage.upsertCredential("openrouter", { type: "api_key", key: apiKeySecret });
+				await storage.upsertCredential("anthropic", {
 					type: "oauth",
 					access: oauthAccess,
 					refresh: "refresh-secret",
@@ -208,8 +208,8 @@ describe("auth-gateway management endpoints", () => {
 				const listedBody = (await listed.json()) as ListBody<CredentialRow>;
 				expect(listedBody.data).toEqual([]);
 			},
-			storage => {
-				storage.upsertCredential("openrouter", { type: "api_key", key: apiKeySecret });
+			async storage => {
+				await storage.upsertCredential("openrouter", { type: "api_key", key: apiKeySecret });
 			},
 		);
 	});
@@ -241,8 +241,8 @@ describe("auth-gateway management endpoints", () => {
 				const body = (await res.json()) as OkBody;
 				expect(body.ok).toBe(true);
 			},
-			storage => {
-				storage.upsertCredential("anthropic", {
+			async storage => {
+				await storage.upsertCredential("anthropic", {
 					type: "oauth",
 					access: oauthAccess,
 					refresh: "refresh-secret",
