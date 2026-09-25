@@ -744,6 +744,80 @@ export const cfgTuiVimModeDisplay = register({
 	},
 });
 
+export const cfgTuiVimEscapeSequence = register({
+	id: "tui.vimEscapeSequence",
+	type: "string",
+	default: "",
+	normalize: (value: unknown) => {
+		if (value == null) return "";
+		if (typeof value !== "string") {
+			throw new Error('tui.vimEscapeSequence must be a string such as "jk" or "jk,jj"');
+		}
+		const parts = value
+			.split(/[,\s]+/)
+			.map(part => part.trim())
+			.filter(Boolean);
+		for (const part of parts) {
+			if (!/^[A-Za-z]{2}$/.test(part)) {
+				throw new Error(
+					`tui.vimEscapeSequence entries must be exactly two ASCII letters (got ${JSON.stringify(part)})`,
+				);
+			}
+		}
+		return [...new Set(parts)].join(",");
+	},
+	validate: (raw: unknown) => {
+		if (raw == null || raw === "") return;
+		if (typeof raw !== "string") {
+			throw new Error('tui.vimEscapeSequence must be a string such as "jk" or "jk,jj"');
+		}
+		for (const part of raw
+			.split(/[,\s]+/)
+			.map(p => p.trim())
+			.filter(Boolean)) {
+			if (!/^[A-Za-z]{2}$/.test(part)) {
+				throw new Error(
+					`tui.vimEscapeSequence entries must be exactly two ASCII letters (got ${JSON.stringify(part)})`,
+				);
+			}
+		}
+	},
+	ui: {
+		tab: "interaction",
+		group: "Input",
+		label: "Vim Escape Sequence",
+		description:
+			'Optional two-letter Insert→Normal sequences such as "jk" or "jk,jj". Empty keeps only Escape. The first letter is typed pending the second (timeout below)',
+		condition: "vimModeEnabled",
+	},
+});
+
+export const cfgTuiVimEscapeSequenceTimeoutMs = register({
+	id: "tui.vimEscapeSequenceTimeoutMs",
+	type: "number",
+	default: 300,
+	normalize: (value: unknown) => {
+		const n = typeof value === "number" ? value : Number(value);
+		if (!Number.isFinite(n)) {
+			throw new Error("tui.vimEscapeSequenceTimeoutMs must be a finite number");
+		}
+		return Math.min(2000, Math.max(50, Math.floor(n)));
+	},
+	ui: {
+		tab: "interaction",
+		group: "Input",
+		label: "Vim Escape Timeout (ms)",
+		description: "How long to wait for the second key of Vim Escape Sequence (50–2000, default 300)",
+		condition: "vimModeEnabled",
+		options: [
+			{ value: "200", label: "200 ms" },
+			{ value: "300", label: "300 ms" },
+			{ value: "500", label: "500 ms" },
+			{ value: "1000", label: "1000 ms" },
+		],
+	},
+});
+
 export const cfgLoopMode = register({
 	id: "loop.mode",
 	type: "enum",
