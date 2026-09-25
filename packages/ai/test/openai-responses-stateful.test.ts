@@ -1,6 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
-import type { Context, FetchImpl, Model, ModelSpec, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
+import type {
+	AssistantMessage,
+	Context,
+	FetchImpl,
+	Model,
+	ModelSpec,
+	ProviderSessionState,
+	ToolResultMessage,
+} from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
@@ -227,6 +235,84 @@ describe("openai-responses stateful chaining", () => {
 		);
 		expect(replay).not.toContainEqual(expect.objectContaining({ role: "assistant", phase: "final_answer" }));
 	});
+
+	it.each([false, true])(
+		"preserves tool-output cache markers through append and edited replay, images=%s",
+		async images => {
+			const sentRequests: Array<Record<string, unknown>> = [];
+			const options = {
+				apiKey: "test-key",
+				sessionId: "stateful-tool-cache-session",
+				providerSessionState: new Map<string, ProviderSessionState>(),
+				statefulResponses: true,
+				promptCache: { mode: "explicit" as const },
+				fetch: createCapturingFetch(sentRequests),
+			};
+			const requestModel: Model<"openai-responses"> = { ...explicitPromptCacheModel, input: ["text", "image"] };
+			const call: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "toolCall", id: "call_read", name: "read", arguments: {} }],
+				api: "openai-responses",
+				provider: "openai",
+				model: requestModel.id,
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				timestamp: 1,
+			};
+			const result: ToolResultMessage = {
+				role: "toolResult",
+				toolCallId: "call_read",
+				toolName: "read",
+				content: [{ type: "text", text: "original file" }],
+				isError: false,
+				timestamp: 2,
+			};
+			if (images) result.content.push({ type: "image", data: "aW1hZ2U=", mimeType: "image/png" });
+			const context: Context = {
+				messages: [{ role: "user", content: "read files", timestamp: 0 }, call, result],
+			};
+			const first = await streamOpenAIResponses(requestModel, context, options).result();
+			expect(first.stopReason).toBe("stop");
+			expect(JSON.stringify(sentRequests[0]?.input)).toContain("prompt_cache_breakpoint");
+			context.messages.push(
+				first,
+				{
+					...call,
+					content: [{ type: "toolCall", id: "call_next", name: "read", arguments: {} }],
+				},
+				{ ...result, toolCallId: "call_next", content: [{ type: "text", text: "next file" }] },
+			);
+			const second = await streamOpenAIResponses(requestModel, context, options).result();
+			expect(second.stopReason).toBe("stop");
+			expect(sentRequests[1]?.previous_response_id).toBe("resp_1");
+			expect(sentRequests[1]?.input).toEqual([
+				expect.objectContaining({ type: "function_call", call_id: "call_next" }),
+				{ type: "function_call_output", call_id: "call_next", output: "next file" },
+			]);
+			result.content[0] = { type: "text", text: "edited file" };
+			context.messages.push(second, { role: "user", content: "read edited files", timestamp: 3 });
+			const third = await streamOpenAIResponses(requestModel, context, options).result();
+			expect(third.stopReason).toBe("stop");
+			expect(sentRequests[2]?.previous_response_id).toBeUndefined();
+			expect(JSON.stringify(sentRequests[2]?.input)).toContain("edited file");
+			expect(JSON.stringify(sentRequests[2]?.input)).toContain("prompt_cache_breakpoint");
+			context.messages.push(third, { role: "user", content: "continue", timestamp: 4 });
+			const fourth = await streamOpenAIResponses(requestModel, context, options).result();
+			expect(fourth.stopReason).toBe("stop");
+			expect(sentRequests).toHaveLength(4);
+			expect(sentRequests[3]?.previous_response_id).toBe("resp_3");
+			expect(sentRequests[3]?.input).toEqual([
+				{ role: "user", content: [{ type: "input_text", text: "continue" }] },
+			]);
+		},
+	);
 
 	it("keeps the automatic explicit cache breakpoint stable across chained turns", async () => {
 		const sentRequests: Array<Record<string, unknown>> = [];

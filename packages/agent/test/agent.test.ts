@@ -9,10 +9,13 @@ import {
 	TOOL_RESULT_ADDITIONAL_CONTEXT,
 	type ToolResultWithAdditionalContext,
 } from "@oh-my-pi/pi-agent-core";
-import type { Context, SimpleStreamOptions, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import { agentLoop } from "@oh-my-pi/pi-agent-core/agent-loop";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core/types";
+import type { Context, Message, SimpleStreamOptions, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { createAssistantMessage, createUserMessage } from "./helpers";
 
 describe("Agent", () => {
@@ -1546,6 +1549,68 @@ describe("Agent", () => {
 
 		expect(mock.calls[0]?.options?.sessionId).toBe("provider-lineage");
 		expect(mock.calls[0]?.options?.promptCacheKey).toBe("parent-cache");
+	});
+
+	it.each(["gpt-5.6", "gpt-6-sol", "gpt-6-luna"])("keeps explicit prompt caching opt-in for %s", async modelId => {
+		const model = getBundledModel("openai", modelId);
+		if (!model) throw new Error(`Expected bundled ${modelId} model`);
+		const mock = createMockModel({ responses: [{ content: ["ok"] }] });
+		const agent = new Agent({ initialState: { model, messages: [] }, streamFn: mock.stream });
+
+		await agent.prompt("run");
+
+		expect(mock.calls[0]?.options?.promptCache).toBeUndefined();
+	});
+
+	it("preserves a caller-supplied prompt-cache policy", async () => {
+		const model = getBundledModel("openai", "gpt-5.6");
+		if (!model) throw new Error("Expected bundled GPT-5.6 model");
+		const mock = createMockModel({ responses: [{ content: ["ok"] }] });
+		const config = {
+			model,
+			convertToLlm: (messages: AgentMessage[]) =>
+				messages.filter(
+					message => message.role === "user" || message.role === "assistant" || message.role === "toolResult",
+				) as Message[],
+			promptCache: { mode: "explicit" as const, breakpoint: "none" as const },
+		};
+
+		await agentLoop(
+			[createUserMessage("run")],
+			{ systemPrompt: [], messages: [] },
+			config,
+			undefined,
+			mock.stream,
+		).result();
+
+		expect(mock.calls[0]?.options?.promptCache).toEqual({ mode: "explicit", breakpoint: "none" });
+	});
+
+	it("keeps models without the declared cache capability markerless", async () => {
+		const capableModel = getBundledModel("openai", "gpt-5.6");
+		if (!capableModel) throw new Error("Expected bundled GPT-5.6 model");
+		const model = structuredClone(capableModel);
+		if (!model.compat || !("supportsPromptCacheBreakpoints" in model.compat)) {
+			throw new Error("Expected OpenAI prompt-cache capability metadata");
+		}
+		model.compat.supportsPromptCacheBreakpoints = false;
+		const mock = createMockModel({ responses: [{ content: ["ok"] }] });
+
+		await agentLoop(
+			[createUserMessage("run")],
+			{ systemPrompt: [], messages: [] },
+			{
+				model,
+				convertToLlm: (messages: AgentMessage[]) =>
+					messages.filter(
+						message => message.role === "user" || message.role === "assistant" || message.role === "toolResult",
+					) as Message[],
+			},
+			undefined,
+			mock.stream,
+		).result();
+
+		expect(mock.calls[0]?.options?.promptCache).toBeUndefined();
 	});
 
 	it("forwards the live cwd from cwdResolver to the stream, overriding the static cwd", async () => {

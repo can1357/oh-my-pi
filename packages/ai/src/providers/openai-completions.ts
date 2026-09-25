@@ -587,7 +587,7 @@ export interface OpenAICompletionsOptions extends StreamOptions {
 	 * with the variant baked in).
 	 */
 	openrouterVariant?: string;
-	/** Opt-in GPT-5.6+ prompt-cache policy. Unsupported explicit mode fails locally. */
+	/** Prompt-cache policy. Explicit caching is opt-in. */
 	promptCache?: OpenAIPromptCacheOptions;
 }
 
@@ -1734,6 +1734,32 @@ function isChatCompletionsPromptCacheableContentBlock(
 }
 
 function markLatestStableChatCompletionsCacheBreakpoint(messages: ChatCompletionMessageParam[]): boolean {
+	const markMessage = (message: ChatCompletionMessageParam): boolean => {
+		if (
+			message.role !== "user" &&
+			message.role !== "developer" &&
+			message.role !== "system" &&
+			message.role !== "assistant" &&
+			message.role !== "tool"
+		)
+			return false;
+		if (typeof message.content === "string") {
+			if (message.content.length === 0) return false;
+			Object.assign(message, {
+				content: [{ type: "text", text: message.content, prompt_cache_breakpoint: { mode: "explicit" } }],
+			});
+			return true;
+		}
+		if (!Array.isArray(message.content)) return false;
+		for (let j = message.content.length - 1; j >= 0; j--) {
+			const block = message.content[j];
+			if (!isChatCompletionsPromptCacheableContentBlock(block)) continue;
+			Object.assign(block, { prompt_cache_breakpoint: { mode: "explicit" } });
+			return true;
+		}
+		return false;
+	};
+
 	let latestInputMessage = -1;
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const message = messages[i];
@@ -1742,24 +1768,13 @@ function markLatestStableChatCompletionsCacheBreakpoint(messages: ChatCompletion
 			break;
 		}
 	}
+	for (let i = messages.length - 1; i > latestInputMessage; i--) {
+		if (markMessage(messages[i]!)) return true;
+	}
 	if (latestInputMessage <= 0) return false;
 
 	for (let i = latestInputMessage - 1; i >= 0; i--) {
-		const message = messages[i];
-		if (message.role !== "user" && message.role !== "developer" && message.role !== "system") continue;
-		if (typeof message.content === "string") {
-			messages[i] = {
-				...message,
-				content: [{ type: "text", text: message.content, prompt_cache_breakpoint: { mode: "explicit" } }],
-			};
-			return true;
-		}
-		for (let j = message.content.length - 1; j >= 0; j--) {
-			const block = message.content[j];
-			if (!isChatCompletionsPromptCacheableContentBlock(block)) continue;
-			Object.assign(block, { prompt_cache_breakpoint: { mode: "explicit" } });
-			return true;
-		}
+		if (markMessage(messages[i]!)) return true;
 	}
 	return false;
 }

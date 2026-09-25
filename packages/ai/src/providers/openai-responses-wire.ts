@@ -2925,6 +2925,8 @@ export interface ResponseInputFileContent {
 	 * The name of the file to be sent to the model.
 	 */
 	filename?: string | null;
+	/** Explicit OpenAI prompt-cache breakpoint. */
+	prompt_cache_breakpoint?: { mode: "explicit" };
 }
 /**
  * An image input to the model. Learn about
@@ -2975,6 +2977,8 @@ export interface ResponseInputImageContent {
 	 * encoded image in a data URL.
 	 */
 	image_url?: string | null;
+	/** Explicit OpenAI prompt-cache breakpoint. */
+	prompt_cache_breakpoint?: { mode: "explicit" };
 }
 /**
  * A message input to the model with a role indicating instruction following
@@ -3684,6 +3688,8 @@ export interface ResponseInputTextContent {
 	 * The type of the input item. Always `input_text`.
 	 */
 	type: "input_text";
+	/** Explicit OpenAI prompt-cache breakpoint. */
+	prompt_cache_breakpoint?: { mode: "explicit" };
 }
 /**
  * Represents the use of a local environment to perform shell actions.

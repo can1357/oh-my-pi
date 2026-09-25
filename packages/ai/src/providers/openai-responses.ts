@@ -69,6 +69,7 @@ import type {
 	Tool as OpenAITool,
 	ReasoningEffort,
 	ResponseCreateParamsStreaming,
+	ResponseFunctionCallOutputItem,
 	ResponseInput,
 	ResponseInputContent,
 	ResponseStreamEvent,
@@ -161,7 +162,7 @@ export interface OpenAIResponsesOptions extends StreamOptions {
 	 * prompt_cache_key for prompt-cache routing).
 	 */
 	extraBody?: Record<string, unknown>;
-	/** Opt-in GPT-5.6+ prompt-cache policy. Unsupported explicit mode fails locally. */
+	/** Prompt-cache policy. Explicit caching is opt-in. */
 	promptCache?: OpenAIPromptCacheOptions;
 }
 
@@ -1019,14 +1020,14 @@ function isStableStringResponsesInstruction(item: unknown): item is ResponsesStr
 	);
 }
 
-function matchesResponsesCacheBaseline(
-	baseline: ResponsesPromptCacheableMessage,
-	current: ResponsesPromptCacheableMessage,
+function matchesResponsesCacheContent(
+	baseline: (ResponseInputContent | ResponseFunctionCallOutputItem)[],
+	current: (ResponseInputContent | ResponseFunctionCallOutputItem)[],
 ): boolean {
-	if (baseline.role !== current.role || baseline.content.length !== current.content.length) return false;
-	for (let index = 0; index < baseline.content.length; index++) {
-		const baselineBlock = baseline.content[index];
-		const currentBlock = current.content[index];
+	if (baseline.length !== current.length) return false;
+	for (let index = 0; index < baseline.length; index++) {
+		const baselineBlock = baseline[index];
+		const currentBlock = current[index];
 		if (!baselineBlock || !currentBlock) return false;
 		const breakpoint = baselineBlock.prompt_cache_breakpoint;
 		if (breakpoint) {
@@ -1047,6 +1048,23 @@ function restoreResponsesCacheBreakpointsFromBaseline(
 	for (let i = 0; i < baseline.length && i < input.length; i++) {
 		const baselineMessage = baseline[i];
 		const message = input[i];
+		if (
+			baselineMessage?.type === "function_call_output" &&
+			message?.type === "function_call_output" &&
+			baselineMessage.call_id === message.call_id &&
+			Array.isArray(baselineMessage.output) &&
+			baselineMessage.output.some(block => block.prompt_cache_breakpoint !== undefined)
+		) {
+			const output =
+				typeof message.output === "string"
+					? [{ type: "input_text" as const, text: message.output }]
+					: message.output;
+			if (matchesResponsesCacheContent(baselineMessage.output, output)) {
+				message.output = baselineMessage.output.map(block => ({ ...block }));
+				restored = true;
+			}
+			continue;
+		}
 		if (!isResponsesPromptCacheableMessage(baselineMessage)) continue;
 
 		if (isStableStringResponsesInstruction(message)) {
@@ -1071,7 +1089,11 @@ function restoreResponsesCacheBreakpointsFromBaseline(
 			continue;
 		}
 
-		if (!isResponsesPromptCacheableMessage(message) || !matchesResponsesCacheBaseline(baselineMessage, message))
+		if (
+			!isResponsesPromptCacheableMessage(message) ||
+			baselineMessage.role !== message.role ||
+			!matchesResponsesCacheContent(baselineMessage.content, message.content)
+		)
 			continue;
 		for (let j = 0; j < baselineMessage.content.length; j++) {
 			const baselineBlock = baselineMessage.content[j];
@@ -1086,11 +1108,18 @@ function restoreResponsesCacheBreakpointsFromBaseline(
 
 function hasResponsesCacheBreakpoint(input: ResponseInput | undefined): boolean {
 	return (
-		input?.some(
-			message =>
+		input?.some(message => {
+			if (
+				message.type === "function_call_output" &&
+				Array.isArray(message.output) &&
+				message.output.some(block => block.prompt_cache_breakpoint !== undefined)
+			)
+				return true;
+			return (
 				isResponsesPromptCacheableMessage(message) &&
-				message.content.some(block => block.prompt_cache_breakpoint !== undefined),
-		) ?? false
+				message.content.some(block => block.prompt_cache_breakpoint !== undefined)
+			);
+		}) ?? false
 	);
 }
 
@@ -1118,10 +1147,25 @@ function markLatestStableResponsesCacheBreakpoint(
 			break;
 		}
 	}
-	if (latestInputMessage <= 0) return false;
-
-	for (let i = latestInputMessage - 1; i >= 0; i--) {
+	for (let i = input.length - 1; i >= 0; i--) {
 		const message = input[i];
+		if (message.type === "function_call_output") {
+			if (typeof message.output === "string") {
+				if (message.output.length === 0) continue;
+				message.output = [
+					{ type: "input_text", text: message.output, prompt_cache_breakpoint: { mode: "explicit" } },
+				];
+				return true;
+			}
+			for (let j = message.output.length - 1; j >= 0; j--) {
+				const block = message.output[j];
+				if (!isResponsesPromptCacheableContentBlock(block)) continue;
+				Object.assign(block, { prompt_cache_breakpoint: { mode: "explicit" } });
+				return true;
+			}
+			continue;
+		}
+		if (i >= latestInputMessage) continue;
 		if (isStableStringResponsesInstruction(message)) {
 			const text = message.content;
 			Object.assign(message, {

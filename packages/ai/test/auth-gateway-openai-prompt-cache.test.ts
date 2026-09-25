@@ -65,6 +65,27 @@ describe("auth-gateway explicit OpenAI prompt cache controls", () => {
 					"openai-responses: prompt_cache_options and prompt_cache_breakpoint are unsupported by this auth-gateway route; use /v1/pi/stream with options.promptCache instead",
 			});
 
+			const nestedResponsesResponse = await fetch(`${handle.url}/v1/responses`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+				body: JSON.stringify({
+					model: "gateway-prompt-cache",
+					input: [
+						{ type: "function_call", call_id: "call_1", name: "lookup", arguments: "{}" },
+						{
+							type: "function_call_output",
+							call_id: "call_1",
+							output: [{ type: "input_text", text: "done", prompt_cache_breakpoint: { mode: "explicit" } }],
+						},
+					],
+				}),
+			});
+			const nestedResponsesBody = (await nestedResponsesResponse.json()) as {
+				error?: { type?: string; message?: string };
+			};
+			expect(nestedResponsesResponse.status).toBe(400);
+			expect(nestedResponsesBody.error).toEqual(responsesBody.error);
+
 			const piResponse = await fetch(`${handle.url}/v1/pi/stream`, {
 				method: "POST",
 				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },

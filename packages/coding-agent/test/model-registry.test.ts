@@ -781,6 +781,7 @@ describe("ModelRegistry", () => {
 						api: "openai-responses",
 						compat: {
 							supportsConfigurationUpdate: false,
+							supportsPromptCacheBreakpoints: true,
 						},
 						models: [
 							{
@@ -927,6 +928,11 @@ describe("ModelRegistry", () => {
 			expect(getOpenAICompat(model)?.supportsConfigurationUpdate).toBe(false);
 			// …and beats the gpt-6-astra class rule on the resolved view the driver reads.
 			expect(getSupportsConfigurationUpdate(model)).toBe(false);
+		});
+
+		test("custom Responses providers can declare explicit prompt-cache breakpoints", () => {
+			const model = customAstraProxyCompat.find("astra-proxy", "gpt-6-astra");
+			expect(getOpenAICompat(model)?.supportsPromptCacheBreakpoints).toBe(true);
 		});
 
 		test("custom Responses providers preserve compaction config", () => {

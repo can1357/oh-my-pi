@@ -91,11 +91,14 @@ function hasUnsupportedExplicitPromptCacheFields(body: unknown): boolean {
 	if ("prompt_cache_options" in body || "prompt_cache_breakpoint" in body) return true;
 	if (!Array.isArray(body.input)) return false;
 
-	return body.input.some(item => {
-		if (!isObj(item)) return false;
-		if ("prompt_cache_breakpoint" in item) return true;
-		return Array.isArray(item.content) && item.content.some(part => isObj(part) && "prompt_cache_breakpoint" in part);
-	});
+	const containsMarker = (value: unknown): boolean => {
+		if (Array.isArray(value)) return value.some(containsMarker);
+		if (!isObj(value)) return false;
+		if ("prompt_cache_breakpoint" in value) return true;
+		return containsMarker(value.content) || containsMarker(value.output);
+	};
+
+	return body.input.some(containsMarker);
 }
 
 function rejectUnsupportedExplicitPromptCacheFields(body: unknown): void {
