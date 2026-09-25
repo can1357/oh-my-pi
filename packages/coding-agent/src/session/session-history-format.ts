@@ -45,8 +45,9 @@ export interface HistoryFormatOptions {
 	 * Append the unified diff (from a tool result's `details.diff`) below
 	 * edit/apply_patch tool lines, instead of just the path. The advisor sets
 	 * this so it sees what changed without re-reading the file. Bounded by the
-	 * same per-tool budget as expanded tool IO: a huge diff is middle-truncated
-	 * rather than admitted whole.
+	 * same byte budget as expanded tool IO but its own, higher line cap
+	 * ({@link EXPANDED_DIFF_MAX_LINES}): a huge diff is middle-truncated rather
+	 * than admitted whole.
 	 */
 	expandEditDiffs?: boolean;
 	/**
@@ -81,6 +82,8 @@ const PRIMARY_ARG_MAX = 120;
 /** Per-tool budget for expanded advisor input/output. */
 const EXPANDED_TOOL_IO_MAX_BYTES = 8 * 1024;
 const EXPANDED_TOOL_IO_MAX_LINES = 80;
+/** Diffs get more lines than generic tool IO (same byte cap) so mid-edit hunks reach the advisor. */
+const EXPANDED_DIFF_MAX_LINES = 300;
 const EXPANDED_ASK_FIELD_MAX_BYTES = 2 * 1024;
 const EXPANDED_ASK_FIELD_MAX_LINES = 20;
 
@@ -229,7 +232,7 @@ function boundedAskJson(value: unknown, transform?: (text: string) => string): s
 	);
 }
 
-function boundedFencedToolContext(text: string, language: string): string {
+function boundedFencedToolContext(text: string, language: string, maxLines = EXPANDED_TOOL_IO_MAX_LINES): string {
 	const longestFence = text.match(/`+/g)?.reduce((max, run) => Math.max(max, run.length), 0) ?? 0;
 	// A pathological run can make Markdown fences larger than the whole budget.
 	// Use indented code in that case: constant wrapper cost and no delimiter collision.
@@ -237,7 +240,7 @@ function boundedFencedToolContext(text: string, language: string): string {
 		const marker = "[…content elided to fit advisor context…]";
 		const truncated = truncateMiddle(text, {
 			maxBytes: EXPANDED_TOOL_IO_MAX_BYTES - Buffer.byteLength(marker) - 2,
-			maxLines: EXPANDED_TOOL_IO_MAX_LINES,
+			maxLines,
 		});
 		const bounded = truncated.truncated ? `${marker}\n${truncated.content}` : truncated.content;
 		return bounded.replace(/^/gm, "    ");
@@ -246,7 +249,7 @@ function boundedFencedToolContext(text: string, language: string): string {
 	return fencedText(
 		truncateMiddle(text, {
 			maxBytes: Math.max(1, EXPANDED_TOOL_IO_MAX_BYTES - fenceBytes),
-			maxLines: EXPANDED_TOOL_IO_MAX_LINES,
+			maxLines,
 		}).content,
 		language,
 	);
@@ -326,7 +329,7 @@ function toolCallLine(
 	if (expandEditDiffs) {
 		const diff = (result?.details as { diff?: unknown } | undefined)?.diff;
 		if (typeof diff === "string" && diff.trim()) {
-			base = `${base}\n${boundedFencedToolContext(transformExpandedToolIO?.(diff) ?? diff, "diff")}`;
+			base = `${base}\n${boundedFencedToolContext(transformExpandedToolIO?.(diff) ?? diff, "diff", EXPANDED_DIFF_MAX_LINES)}`;
 		}
 	}
 

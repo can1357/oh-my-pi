@@ -37,6 +37,7 @@ import { getConfigRootDir, isEnoent, logger, VERSION } from "@oh-my-pi/pi-utils"
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
 import { isSettingsInitialized, Settings } from "../config/settings";
+import { cfgAuthGatewayRoutesFile } from "./auth-gateway-settings";
 import {
 	type AuthBrokerClientConfig,
 	loadEffectiveAuthAccountPolicyConfig,
@@ -342,7 +343,7 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	let configRoutesFile: string | undefined;
 	if (flags.routes === undefined) {
 		const loaded = isSettingsInitialized() ? Settings.instance : await Settings.loadReadOnly();
-		configRoutesFile = loaded.get("auth.gateway.routesFile");
+		configRoutesFile = cfgAuthGatewayRoutesFile.get(loaded);
 	}
 	const routePath = resolveAuthGatewayRoutesPath(flags.routes, configRoutesFile);
 	const routes = routePath !== undefined ? await loadRouteDefinitionsFile(routePath) : undefined;
