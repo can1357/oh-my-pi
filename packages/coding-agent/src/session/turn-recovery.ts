@@ -97,9 +97,7 @@ const SIBLING_UNBLOCK_BUFFER_MS = 1_000;
 const NON_WHITESPACE_RE = /\S/;
 const USAGE_PREFLIGHT_BLOCKED_PREFIX = "Usage preflight blocked:";
 const STREAM_STALL_ERROR_RE = /stream stall/i;
-/** Hidden custom message appended after a preserved text-only stream stall so the
- *  scheduled continuation has a legal (non-assistant) tail and the model resumes
- *  mid-answer instead of restarting or repeating committed text. */
+/** Resume note appended so a preserved text-only stall turn can be continued. */
 const STREAM_STALL_RESUME_TYPE = "stream-stall-resume";
 const STREAM_STALL_RESUME_NOTICE =
 	"The provider stream stalled mid-generation and your reply above was cut off. " +
@@ -1505,13 +1503,10 @@ export class TurnRecovery {
 	/**
 	 * Classify a reasonless abort, idle stream stall, HTTP/2 stream reset, or
 	 * premature stream close whose emitted tool calls all have results — or a
-	 * stream stall that cut off a text-only turn after it committed output. The
-	 * failed assistant/tool-result pair stays in context so continuation cannot
-	 * replay completed side effects; synthetic results tell the next turn that
-	 * an unexecuted call must be reissued. A committed-text turn cannot be
-	 * replayed (the model would re-render what the user already saw) and has no
-	 * synthetic results, so it is preserved as-is and #handleRetryableError
-	 * appends a hidden resume note to give the continuation a legal tail.
+	 * stream stall that cut off a text-only turn after it committed output. A
+	 * committed-text turn cannot be replayed and has no synthetic results, so it
+	 * is preserved as-is and a hidden resume note is appended to give the
+	 * continuation a legal tail.
 	 */
 	classifyResolvedInterruptedToolTurn(message: AssistantMessage): "reasonless-abort" | "stream-stall" | undefined {
 		const id = this.#classifyRetryMessage(message);
@@ -1538,12 +1533,9 @@ export class TurnRecovery {
 			resolvedToolCallIds.push(block.id);
 		}
 		if (resolvedToolCallIds.length === 0) {
-			// Text-only turn: no synthetic tool results exist to make the preserved
-			// tail legal for continue(). Only an idle watchdog stall after committed
-			// output lands here; replay-safe turns (nothing committed) already retry
-			// via the standard replay path, and the other transport-death classes
-			// (HTTP/2 reset, premature close) deliberately keep the replay veto for
-			// committed text (turn-recovery-replay-unsafe tests).
+			// Text-only turn: no synthetic results exist, so only an idle stall
+			// with committed output is preserved for continuation; the other
+			// transport-death classes keep the replay veto.
 			return streamStall && this.#hasReplayUnsafeOutput(message) ? "stream-stall" : undefined;
 		}
 
@@ -2813,13 +2805,9 @@ export class TurnRecovery {
 		if (!preserveFailedTurn && this.#host.promptGeneration() === generation) {
 			this.#stripFailedAssistantTail();
 		}
-		// A preserved text-only stall keeps the errored assistant as the active
-		// tail, which Agent.continue() rejects ("Cannot continue from message
-		// role: assistant"). Append the hidden resume note so the tail is the
-		// custom message; resolved tool turns already end in synthetic tool
-		// results that continue() accepts, so they need nothing. Checked after
-		// the backoff (not at scheduling time) because context rebuilds during
-		// the sleep can recreate the failed turn's message object.
+		// A preserved text-only turn still ends in the errored assistant, which
+		// continue() rejects. Append a hidden resume note so the tail is legal.
+		// Check after the backoff because context rebuilds can recreate the message.
 		if (preserveFailedTurn && this.#host.promptGeneration() === generation) {
 			const tail = this.#host.agent.state.messages.at(-1);
 			if (tail?.role === "assistant" && (tail.stopReason === "error" || tail.stopReason === "aborted")) {
