@@ -717,9 +717,9 @@ export class MnemopiSessionState {
 			await memory.flushExtractions();
 			if (options.sleep === false) continue;
 			if (options.full) {
-				memory.sleepAllSessions(false);
+				await memory.sleepAllSessionsAsync(false);
 			} else {
-				memory.sleep(false);
+				await memory.sleepAsync(false);
 			}
 		}
 	}
