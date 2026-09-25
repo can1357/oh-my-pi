@@ -27,6 +27,7 @@
 
 import type { Stats } from "node:fs";
 import { accessSync, constants, readFileSync, realpathSync, statfsSync, statSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import * as path from "node:path";
 
 /** Internal variable carrying the resolved placement path to child processes. */
@@ -40,6 +41,34 @@ const CGROUP2_SUPER_MAGIC = 0x63677270;
 
 /** Interpreter used by the frozen bootstrap. */
 const PLACEMENT_SHELL = "/bin/sh";
+
+/**
+ * Flags for the bootstrap invocation, decided once from what the interpreter
+ * actually accepts.
+ *
+ * `-p` is the reason it is probed rather than assumed: it is a bash/ksh option,
+ * and dash or busybox ash reject it outright (exit 2, no placement, no
+ * diagnostic). The flag stops bash from sourcing `BASH_ENV` and from importing
+ * function definitions before membership is written. Shells that reject it do
+ * not honour either mechanism — `BASH_ENV` is bash-only and exported function
+ * definitions are a bash/ksh feature — so the plain POSIX form is equivalent
+ * there, and `canonicalizeTarget` verifies whichever form we chose actually
+ * runs, keeping the fail-closed gate intact on both.
+ */
+let shellFlags: string[] | undefined;
+
+function placementShellFlags(): string[] {
+	if (shellFlags) return shellFlags;
+	let accepted = false;
+	try {
+		const probe = spawnSync(PLACEMENT_SHELL, ["-p", "-c", ":"], { stdio: "ignore", timeout: 10_000 });
+		accepted = probe.status === 0;
+	} catch {
+		accepted = false;
+	}
+	shellFlags = accepted ? ["-p"] : [];
+	return shellFlags;
+}
 
 /** `$0` of the bootstrap; it exists only so shell diagnostics are readable. */
 const PLACEMENT_PROGRAM = "omp-workload";
@@ -81,7 +110,11 @@ export function configureToolCgroup(target?: string): void {
 	const requested = target?.trim() || undefined;
 	const inherited = process.env[TOOL_CGROUP_ENV]?.trim() || undefined;
 
-	if (requested && inherited && requested !== inherited) {
+	// Compare the targets themselves, not their spellings: this process writes a
+	// canonical path into the environment, so a nested omp launched with the same
+	// leaf written differently (trailing slash, symlinked ancestor) must agree
+	// rather than abort.
+	if (requested && inherited && requested !== inherited && !sameTarget(requested, inherited)) {
 		throw new Error(
 			`tool cgroup conflict: --tool-cgroup=${requested} contradicts inherited ${TOOL_CGROUP_ENV}=${inherited}`,
 		);
@@ -97,7 +130,7 @@ export function configureToolCgroup(target?: string): void {
 	// accepting a second, different target would widen an allowance that is
 	// already in effect for this process tree.
 	if (configured) {
-		if (configured.path === effective) return;
+		if (sameTarget(configured.path, effective)) return;
 		throw new Error(
 			`tool cgroup conflict: already configured with ${configured.path}, refusing ${canonicalizeTarget(effective)}`,
 		);
@@ -138,7 +171,7 @@ export function resolveToolCgroup(): string | undefined {
 export function wrapToolCommand(command: readonly string[]): string[] {
 	const target = resolveToolCgroup();
 	if (!target) return [...command];
-	return [PLACEMENT_SHELL, "-p", "-c", PLACEMENT_SCRIPT, PLACEMENT_PROGRAM, target, ...command];
+	return [PLACEMENT_SHELL, ...placementShellFlags(), "-c", PLACEMENT_SCRIPT, PLACEMENT_PROGRAM, target, ...command];
 }
 
 /**
@@ -147,6 +180,20 @@ export function wrapToolCommand(command: readonly string[]): string[] {
  * Every check fails closed: an unvalidated target could otherwise be accepted
  * by the bootstrap and silently widen or void containment.
  */
+/**
+ * Whether two spellings name the same leaf. An unusable spelling cannot be proven
+ * equal, so the conflict stands — the check stays fail-closed while no longer
+ * rejecting a target that is merely written differently.
+ */
+function sameTarget(left: string, right: string): boolean {
+	if (left === right) return true;
+	try {
+		return canonicalizeTarget(left) === canonicalizeTarget(right);
+	} catch {
+		return false;
+	}
+}
+
 function canonicalizeTarget(candidate: string): string {
 	if (process.platform !== "linux") {
 		throw new Error(`tool cgroup ${candidate}: cgroup-v2 placement is Linux-only (got ${process.platform})`);
@@ -246,6 +293,23 @@ function canonicalizeTarget(candidate: string): string {
 		accessSync(PLACEMENT_SHELL, constants.X_OK);
 	} catch {
 		throw new Error(`tool cgroup ${candidate}: ${PLACEMENT_SHELL} is missing or not executable`);
+	}
+	// Executable is not enough: the chosen flags have to be accepted too, or every
+	// placed spawn would fail before writing membership and the documented exit 125
+	// contract would never be reached.
+	try {
+		const probe = spawnSync(PLACEMENT_SHELL, [...placementShellFlags(), "-c", ":"], {
+			stdio: "ignore",
+			timeout: 10_000,
+		});
+		if (probe.status !== 0) {
+			throw new Error(`exit ${probe.status ?? probe.signal ?? "unknown"}`);
+		}
+	} catch (error) {
+		throw new Error(
+			`tool cgroup ${candidate}: ${PLACEMENT_SHELL} ${placementShellFlags().join(" ")} cannot run the ` +
+				`placement bootstrap (${(error as Error).message}); placement would fail open`,
+		);
 	}
 
 	return canonical;

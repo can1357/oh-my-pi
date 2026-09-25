@@ -1,5 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
@@ -109,6 +119,32 @@ describe.skipIf(!leaf)("delegated leaf", () => {
 		expect(readFileSync(marker, "utf8")).toContain(within(canonical!));
 		expect(existsSync(grandchildMarker)).toBe(true);
 		expect(readFileSync(grandchildMarker, "utf8")).toContain(within(canonical!));
+	});
+
+	it("accepts the same leaf written differently instead of claiming a conflict", () => {
+		// This module writes a canonical path into the inherited variable, so a
+		// nested omp that spells the same leaf with a trailing slash or through a
+		// symlinked ancestor has to agree — refusing it would break nested launches
+		// while telling the operator about a conflict that does not exist.
+		const alias = path.join(scratch("omp-alias-"), "leaf");
+		symlinkSync(leaf!, alias, "dir");
+		resetPlacement();
+		process.env[TOOL_CGROUP_ENV] = leaf;
+		expect(() => configureToolCgroup(`${alias}/`)).not.toThrow();
+		expect(resolveToolCgroup()).toBe(realpathSync(leaf!));
+	});
+
+	it("runs the bootstrap through an interpreter invocation this host accepts", () => {
+		// `-p` is bash/ksh only: dash and busybox ash exit 2 on it, which would fail
+		// every placed spawn before membership was written. Whatever flags are
+		// chosen must therefore actually run here.
+		configureToolCgroup(leaf);
+		const argv = wrapToolCommand(["true"]);
+		const dashC = argv.indexOf("-c");
+		expect(argv[0]).toBe("/bin/sh");
+		expect(dashC).toBeGreaterThan(0);
+		const probe = spawnSync(argv[0]!, [...argv.slice(1, dashC), "-c", ":"], { stdio: "ignore" });
+		expect(probe.status).toBe(0);
 	});
 
 	it("keeps arguments literal, cwd, stdio and a payload's own exit status", () => {
