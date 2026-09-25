@@ -33,6 +33,7 @@ import type { Settings } from "../config/settings";
 import type { RetryErrorUpdate } from "../extensibility/shared-events";
 import emptyStopRetryTemplate from "../prompts/system/empty-stop-retry.md" with { type: "text" };
 import malformedFunctionCallRetryTemplate from "../prompts/system/malformed-function-call-retry.md" with { type: "text" };
+import streamStallContinueTemplate from "../prompts/system/stream-stall-continue.md" with { type: "text" };
 import thinkingLoopRedirectTemplate from "../prompts/system/thinking-loop-redirect.md" with { type: "text" };
 import unexpectedStopRetryTemplate from "../prompts/system/unexpected-stop-retry.md" with { type: "text" };
 import {
@@ -89,6 +90,7 @@ const UNEXPECTED_STOP_MAX_RETRIES = 3;
 const UNEXPECTED_STOP_TIMEOUT_MS = 4000;
 const EMPTY_STOP_MAX_RETRIES = 3;
 const MALFORMED_FUNCTION_CALL_MAX_RETRIES = 3;
+const STREAM_STALL_CONTINUE_MAX_RETRIES = 3;
 const SIBLING_UNBLOCK_BUFFER_MS = 1_000;
 const NON_WHITESPACE_RE = /\S/;
 const USAGE_PREFLIGHT_BLOCKED_PREFIX = "Usage preflight blocked:";
@@ -303,6 +305,7 @@ export class TurnRecovery {
 	#emptyStopRetryCount = 0;
 	#unexpectedStopRetryCount = 0;
 	#malformedFunctionCallRetryCount = 0;
+	#streamStallContinueCount = 0;
 	#acceptTerminalEmptyStopForPrompt = false;
 	// Three fields sit near the word "serve" and are deliberately distinct:
 	// `#activeRetryFallback.served` gates the one-shot `retry_fallback_succeeded`
@@ -436,6 +439,7 @@ export class TurnRecovery {
 		this.#emptyStopRetryCount = 0;
 		this.#unexpectedStopRetryCount = 0;
 		this.#malformedFunctionCallRetryCount = 0;
+		this.#streamStallContinueCount = 0;
 		this.#acceptTerminalEmptyStopForPrompt = false;
 		this.#activeFallbackCreditRedemption = undefined;
 	}
@@ -593,6 +597,70 @@ export class TurnRecovery {
 		});
 		this.#host.scheduleAgentContinue({
 			source: "malformed-function-call-retry",
+			generation: this.#host.promptGeneration(),
+		});
+		return true;
+	}
+
+	/**
+	 * Continue past a mid-stream transport failure (idle stall, HTTP/2 reset,
+	 * premature close) that hit a text-only turn after its text rendered.
+	 * {@link isRetryableError} refuses to replay committed text, and
+	 * {@link classifyResolvedInterruptedToolTurn} only resumes turns with tool
+	 * calls, so the session used to stop on a pinned error. Resuming from the
+	 * trailing assistant message would be a prefill, which newer Claude models
+	 * reject: keep the partial turn in context, append a developer reminder to
+	 * pick up where the text stopped, and continue. Honors `retry.enabled`;
+	 * bounded per prompt, past the cap the error surfaces as before.
+	 */
+	handleCommittedTextStreamStall(message: AssistantMessage): boolean {
+		const id = this.#classifyRetryMessage(message);
+		if (!this.#isMidStreamTransportFailure(message, id)) {
+			this.#streamStallContinueCount = 0;
+			return false;
+		}
+		if (!this.autoRetryEnabled || this.#host.abortInProgress() || this.#host.isDisposed()) return false;
+		if (!this.#host.textOutputCommitted()) return false;
+		let hasText = false;
+		for (const block of message.content) {
+			if (block.type === "toolCall" || block.type === "image" || block.type === "anthropicServerTool") return false;
+			if (block.type === "text" && hasNonWhitespace(block.text)) hasText = true;
+		}
+		if (!hasText) return false;
+
+		this.#streamStallContinueCount++;
+		if (this.#streamStallContinueCount > STREAM_STALL_CONTINUE_MAX_RETRIES) {
+			logger.warn("Stream kept stalling after committed text past retry cap", {
+				attempts: this.#streamStallContinueCount - 1,
+				model: message.model,
+				provider: message.provider,
+			});
+			this.#streamStallContinueCount = 0;
+			return false;
+		}
+
+		logger.info("Stream failed after committed text; continuing with resume reminder", {
+			attempt: this.#streamStallContinueCount,
+			model: message.model,
+			provider: message.provider,
+			errorMessage: message.errorMessage,
+		});
+		this.#host.agent.appendMessage({
+			role: "developer",
+			content: [
+				{
+					type: "text",
+					text: prompt.render(streamStallContinueTemplate, {
+						retryCount: this.#streamStallContinueCount,
+						maxRetries: STREAM_STALL_CONTINUE_MAX_RETRIES,
+					}),
+				},
+			],
+			attribution: "agent",
+			timestamp: Date.now(),
+		});
+		this.#host.scheduleAgentContinue({
+			source: "stream-stall-continue",
 			generation: this.#host.promptGeneration(),
 		});
 		return true;
@@ -1427,30 +1495,7 @@ export class TurnRecovery {
 			!this.#host.isDisposed() &&
 			!this.#host.streamingEditAbortTriggered() &&
 			((message.stopReason === "aborted" && AIError.is(id, AIError.Flag.Abort)) || genericAbort);
-		const errorMessage = message.errorMessage ?? "";
-		const streamStall =
-			message.stopReason === "error" && STREAM_STALL_ERROR_RE.test(errorMessage) && AIError.retriable(id);
-		const transportReset =
-			message.stopReason === "error" &&
-			(HTTP2_STREAM_RESET_ERROR_RE.test(errorMessage) ||
-				AIError.PYTHON_HTTP2_STREAM_RESET_PATTERN.test(errorMessage) ||
-				AIError.PYTHON_HTTP_INCOMPLETE_CHUNK_PATTERN.test(errorMessage)) &&
-			AIError.retriable(id) &&
-			!this.#host.abortInProgress() &&
-			!this.#host.isDisposed() &&
-			!this.#host.streamingEditAbortTriggered();
-		// A premature gateway close (no finish_reason/terminal event) is the same
-		// transport-failure class as the stall/reset cases: mid-generation death.
-		// Preserved-turn continuation lets the retry resume after the partial
-		// output instead of surfacing the error or replaying rendered content.
-		const prematureClose =
-			message.stopReason === "error" &&
-			PREMATURE_STREAM_CLOSE_ERROR_RE.test(errorMessage) &&
-			AIError.retriable(id) &&
-			!this.#host.abortInProgress() &&
-			!this.#host.isDisposed() &&
-			!this.#host.streamingEditAbortTriggered();
-		if (!reasonlessAbort && !streamStall && !transportReset && !prematureClose) return undefined;
+		if (!reasonlessAbort && !this.#isMidStreamTransportFailure(message, id)) return undefined;
 		if (reasonlessAbort && genericAbort) message.errorId = AIError.create(AIError.Flag.Abort);
 
 		// Idle stall and HTTP/2 RST both close the Cursor Connect stream:
@@ -1484,6 +1529,28 @@ export class TurnRecovery {
 		}
 		if (unresolvedToolCallIds.size > 0) return undefined;
 		return reasonlessAbort ? "reasonless-abort" : "stream-stall";
+	}
+
+	/**
+	 * Mid-generation transport death: the local idle watchdog's stream stall, an
+	 * HTTP/2 stream reset, or a gateway close without the terminal event. A
+	 * premature close (no finish_reason/terminal event) is the same failure
+	 * class as a stall or reset. Resets and closes are ignored while a
+	 * deliberate abort, disposal, or streaming-edit abort owns the stream.
+	 */
+	#isMidStreamTransportFailure(message: AssistantMessage, id: number): boolean {
+		if (message.stopReason !== "error" || !AIError.retriable(id)) return false;
+		const errorMessage = message.errorMessage ?? "";
+		if (STREAM_STALL_ERROR_RE.test(errorMessage)) return true;
+		if (this.#host.abortInProgress() || this.#host.isDisposed() || this.#host.streamingEditAbortTriggered()) {
+			return false;
+		}
+		return (
+			HTTP2_STREAM_RESET_ERROR_RE.test(errorMessage) ||
+			AIError.PYTHON_HTTP2_STREAM_RESET_PATTERN.test(errorMessage) ||
+			AIError.PYTHON_HTTP_INCOMPLETE_CHUNK_PATTERN.test(errorMessage) ||
+			PREMATURE_STREAM_CLOSE_ERROR_RE.test(errorMessage)
+		);
 	}
 	/**
 	 * Retried turns remove the failed assistant message from active context.

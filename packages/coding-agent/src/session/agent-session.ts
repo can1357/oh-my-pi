@@ -3985,6 +3985,13 @@ export class AgentSession implements SettingsScope {
 				maintenanceRoute("malformed-function-call-handled");
 				await emitAgentEndNotification({ willContinue: true });
 				return;
+			} else if (!requestBodyTimeoutTerminal && this.#recovery.handleCommittedTextStreamStall(msg)) {
+				// The stream died after text rendered: replay would duplicate it and
+				// a trailing assistant prefill is rejected, so keep the partial turn
+				// and continue from where it stopped.
+				maintenanceRoute("committed-text-stream-stall-continued");
+				await emitAgentEndNotification({ willContinue: true });
+				return;
 			} else if (!requestBodyTimeoutTerminal && this.#recovery.isHardErrorFallbackEligible(msg)) {
 				// A non-retryable hard error on a model covered by a configured
 				// fallback chain: retrying the SAME model is pointless, but a
