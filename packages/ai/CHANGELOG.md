@@ -21,6 +21,9 @@
 
 - Fixed account selection for OpenCode Go and SuperGrok (xai-oauth) so accounts without available funds or included quota are skipped in favor of eligible accounts.
 - Improved visibility into automatically disabled authentication credentials by logging a warning and including the affected account details in credential-disabled events.
+- Fixed stale unscoped Claude OAuth rate-limit blocks so healthy live usage reports can lift them before clock expiry, allowing recovered accounts to be re-selected.
+- Fixed multi-account provider selection for OpenCode Go and SuperGrok (xai-oauth), so accounts with insufficient funds or exhausted included quota are skipped in favor of eligible accounts with available billing headroom.
+- Automatic credential disables (definitive OAuth refresh failure, upstream token invalidation, auth-broker disable) are now logged as an `Auth credential disabled` warning, and `credential_disabled` events carry the disabled row's id and the account's email, account id, and organization ([#13190](https://github.com/can1357/oh-my-pi/pull/13190) by [@alphastorm](https://github.com/alphastorm)).
 
 ## [18.3.0] - 2026-09-24
 
