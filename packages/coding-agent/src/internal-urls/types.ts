@@ -106,8 +106,12 @@ export interface SchemeSpec {
 	selectors: SchemeSelectors;
 	/** A trailing `:N` with no path after the authority is a port, not a selector (ssh://host:2222). */
 	portAuthority?: boolean;
+	/** The authority is the first path segment under one root (local://a/b), so a glob may start there; other schemes' authority is an id. */
+	pathAuthority?: true;
 	/** Default immutability of resolved resources; a resource may override it per URL. */
 	immutable: boolean;
+	/** Resources are session artifact storage (artifact://); located read pages skip the artifact spill. */
+	artifactStore?: true;
 	/** Approval tier for reading/searching this scheme. Default `read`; ssh:// is `exec`. */
 	readTier?: ToolTier;
 	/** Read output bypasses result truncation limits (skill:// instructions). */
@@ -118,8 +122,6 @@ export interface SchemeSpec {
 	compactTranscript?: boolean;
 	/** `read` peels a trailing `?q=<question>` as an image question (local://, attachment://); other schemes own their query. */
 	imageQuestion?: true;
-	/** `bash` expands unquoted/quoted URLs of this scheme to their located file paths. */
-	shellOperand?: true;
 	/** The single-slash `scheme:/x` spelling is an alias of `scheme://x` (local:/). */
 	singleSlashAlias?: true;
 	write?: SchemeWritePolicy;

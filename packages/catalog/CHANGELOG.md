@@ -5,8 +5,19 @@
 ### Fixed
 
 - Fixed QwenCloud Token Plan dropping every effort selection on discovered Qwen 3.8 models that lack curated rows (e.g. `qwen3.8-plus`): the OpenAI `reasoning_effort` dialect and reasoning-history replay now apply to the whole Qwen 3.8 revision instead of only the exact `qwen3.8-max`/`qwen3.8-flash` ids, with `qwen3.8-max-preview` still pinned to the binary `enable_thinking` toggle ([#12376](https://github.com/can1357/oh-my-pi/issues/12376)).
+## [18.3.1] - 2026-09-25
+
+### Added
+
+- Added compatibility flags for models that stop output at the context-window limit and models that support steering, including defaults for Claude 4.5+ and GPT-6+ models.
+
+### Fixed
+
 - Fixed Claude Opus 5.5 requests that force tool use, preventing turn failures and allowing forced tool selections to fall back to automatic tool selection when required.
 - Yolo-Auto Qwen3.8 models now offer the `xhigh` reasoning level the provider advertises ([#13160](https://github.com/can1357/oh-my-pi/pull/13160) by [@H4vC](https://github.com/H4vC)).
+- Fixed forced-tool requests for Claude Opus 5.5 so tool selection falls back gracefully when necessary.
+- Added the provider-advertised `xhigh` reasoning level for Yolo-Auto Qwen3.8 models.
+- Fixed Devin Fusion pairing requests failing with `no API providers are available` by routing them through the lead model with the lead's limits and pricing; pairings without an available lead are no longer listed ([#13000](https://github.com/can1357/oh-my-pi/pull/13000) by [@DarkPhilosophy](https://github.com/DarkPhilosophy)).
 
 ## [18.3.0] - 2026-09-24
 
@@ -34,10 +45,6 @@
 
 - Updated default models for anthropic, amazon-bedrock, cloudflare-ai-gateway, kilo, litellm, opencode-zen, vercel-ai-gateway, and zenmux to claude-opus-5-5
 - Updated default model for commandcode to claude-sonnet-5
-
-### Fixed
-
-- Fixed Devin Fusion pairing requests failing with `no API providers are available` by routing them through the lead model with the lead's limits and pricing; pairings without an available lead are no longer listed ([#13000](https://github.com/can1357/oh-my-pi/pull/13000) by [@DarkPhilosophy](https://github.com/DarkPhilosophy)).
 
 ## [18.2.9] - 2026-09-22
 

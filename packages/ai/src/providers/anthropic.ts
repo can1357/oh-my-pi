@@ -77,6 +77,11 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import { isFoundryEnabled } from "../utils/foundry";
 import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
 import { getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
+import {
+	ANTHROPIC_SLOW_USAGE_LIMIT,
+	ANTHROPIC_USAGE_LIMIT_HEADER,
+	parseAnthropicSlowModeHeaders,
+} from "./anthropic-slow-mode";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { getHeadersFromError, getRetryAfterMsFromHeaders } from "../utils/retry-after";
 import { COMBINATOR_KEYS, NO_STRICT, toolWireSchema } from "../utils/schema";
@@ -2520,6 +2525,26 @@ const streamAnthropicOnce = (
 				if (usingFallbackCredit) forfeitFallbackCredit(streamFailure);
 				return prepareParams();
 			};
+			// Subscription slow mode (Claude Code `/low-priority`): first-party OAuth
+			// requests only. Capacity waits are tracked per request so the caller's
+			// max-wait budget covers the whole wait, not one attempt.
+			const slowMode =
+				options?.anthropicSlowMode !== undefined &&
+				model.provider === "anthropic" &&
+				isOAuthToken &&
+				!options.client &&
+				isOfficialAnthropicApiUrl(baseUrl)
+					? options.anthropicSlowMode
+					: undefined;
+			// Slow-lane state is per Claude account: key it by the stored credential
+			// that served this request, else by a digest of the bearer.
+			const slowLane =
+				options?.credentialId !== undefined
+					? `cred:${options.credentialId}`
+					: `key:${Bun.hash(apiKey).toString(36)}`;
+			let slowWaitSinceMs: number | undefined;
+			let slowWaitAttempts = 0;
+			let sentSlow = false;
 			while (true) {
 				activeAbortTracker = createAbortSourceTracker(options?.signal);
 				const { requestSignal } = activeAbortTracker;
@@ -2561,12 +2586,14 @@ const streamAnthropicOnce = (
 						);
 					}
 				}
+				sentSlow = slowMode?.isActive(slowLane) === true;
 				let perRequestHeaders: Record<string, string> | undefined =
-					umansGatewayWebSearchHeader || injectedClientBetaHeaders || options?.userProfileId
+					umansGatewayWebSearchHeader || injectedClientBetaHeaders || options?.userProfileId || sentSlow
 						? {
 								...umansGatewayWebSearchHeader,
 								...injectedClientBetaHeaders,
 								...(options?.userProfileId ? { "anthropic-user-profile-id": options.userProfileId } : {}),
+								...(sentSlow ? { [ANTHROPIC_USAGE_LIMIT_HEADER]: ANTHROPIC_SLOW_USAGE_LIMIT } : {}),
 							}
 						: undefined;
 				if (usingFallbackCredit && options?.fallbackCreditRedemption?.betaHeader) {
@@ -2621,6 +2648,10 @@ const streamAnthropicOnce = (
 						if (requestTimeout !== undefined) clearTimeout(requestTimeout);
 					}
 					await notifyProviderResponse(options, response, model, requestId);
+					if (slowMode) {
+						const slowSignal = parseAnthropicSlowModeHeaders(response.headers);
+						if (slowSignal) slowMode.observe(slowSignal, slowLane);
+					}
 					let sawEvent = false;
 					let sawMessageStart = false;
 					let sawTerminalEnvelope = false;
@@ -3394,6 +3425,46 @@ const streamAnthropicOnce = (
 						output.stopReason = "stop";
 						firstTokenTime = undefined;
 						continue;
+					}
+					if (
+						slowMode &&
+						firstTokenTime === undefined &&
+						!streamedReplayUnsafeContent &&
+						!activeAbortTracker.wasCallerAbort()
+					) {
+						const failureStatus = (streamFailure as { status?: unknown } | null)?.status;
+						const httpStatus = typeof failureStatus === "number" ? failureStatus : undefined;
+						const failureText = streamFailure instanceof Error ? streamFailure.message : String(streamFailure);
+						const slowRetry = await slowMode.onFailure({
+							lane: slowLane,
+							httpStatus,
+							overloaded: httpStatus === 529 || failureText.includes("overloaded_error"),
+							signal: parseAnthropicSlowModeHeaders(getHeadersFromError(streamFailure)),
+							sentSlow,
+							waitedMs: slowWaitSinceMs === undefined ? 0 : Date.now() - slowWaitSinceMs,
+							attempts: slowWaitAttempts,
+						});
+						if (slowRetry) {
+							if (slowRetry.capacityWait) {
+								slowWaitSinceMs ??= Date.now();
+								slowWaitAttempts++;
+							}
+							logger.debug("anthropic: slow mode retry", {
+								model: model.id,
+								status: httpStatus,
+								delayMs: slowRetry.delayMs,
+								attempt: slowWaitAttempts,
+							});
+							if (slowRetry.delayMs > 0) {
+								if (options?.providerRetryWait) {
+									await options.providerRetryWait(slowRetry.delayMs, options.signal);
+								} else {
+									await scheduler.wait(slowRetry.delayMs, { signal: options?.signal });
+								}
+							}
+							resetStreamOutputState();
+							continue;
+						}
 					}
 					const isTransientEnvelopeFailure =
 						AIError.isTransientStreamParseError(streamFailure) || AIError.isStreamEnvelopeError(streamFailure);

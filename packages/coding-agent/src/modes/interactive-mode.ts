@@ -154,7 +154,7 @@ import {
 	truncateToWidth,
 } from "@oh-my-pi/pi-tui/render/render-utils";
 import { setAutoQaConsentHandler } from "../tools/report-tool-issue";
-import { type CfgChangeRequest, setCfgApprovalHost } from "../internal-urls/cfg-protocol";
+import { type CfgApproval, type CfgChangeRequest, setCfgApprovalHost } from "../internal-urls/cfg-protocol";
 import {
 	createTodoHudStateData,
 	getTodoHudVisibility,
@@ -506,6 +506,12 @@ const PLAN_KEEP_CONTEXT_OPTION_INDEX = 2;
 const PLAN_KEEP_CONTEXT_DISABLE_THRESHOLD_PERCENT = 95;
 const PLAN_SAVE_AND_QUIT_OPTION = "Save and quit";
 const PLAN_SAVE_TITLE_LINE_LIMIT = 6;
+
+/** How long a `cfg://` approval prompt waits for an answer before the write fails as unanswered. */
+const CFG_APPROVAL_TIMEOUT_MS = 10_000;
+const CFG_APPROVE_SESSION = "Always for this session";
+const CFG_APPROVE_ONCE = "Allow once";
+const CFG_DENY = "Deny";
 
 const PLAN_FILENAME_SYSTEM_PROMPT = prompt.render(planFilenamePrompt);
 
@@ -1378,7 +1384,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.settings = session.settings;
 		const preferences = {
 			quiet: cfgStartupQuiet.get(settings),
-			composerShape: cfgComposerShape.get(settings) ?? "band",
+			composerShape: cfgComposerShape.get(settings),
 			...this.#liveComposerPreferences(),
 		};
 		const wasStarted = composer?.started ?? false;
@@ -1762,30 +1768,35 @@ export class InteractiveMode implements InteractiveModeContext {
 		});
 		this.composer.setStatusComponent(this.statusLine);
 
-		this.composer.setRuntimeChildren([
-			this.chatContainer,
-			this.pendingMessagesContainer,
-			this.todoContainer,
-			this.subagentContainer,
-			this.btwContainer,
-			this.omfgContainer,
-			this.cleanseContainer,
-			this.errorBannerContainer,
-			this.modelCycleContainer,
-			this.deferredCommandContainer,
-			// Judge batches stay editor-anchored and update independently of eval
-			// transcript output, directly above the working/throughput/title row.
-			this.judgmentBatchProgressContainer,
-			// Working loader / transient status sits below the sticky todo + subagent
-			// HUDs, just above the editor's hook-widget top margin — so it reads next to
-			// the prompt while keeping the one-line gap above the editor (the band
-			// composer collapses that gap so its status band sits flush).
-			this.statusContainer,
-			this.attachmentChipsContainer,
-			this.hookWidgetContainerAbove,
-			this.editorContainer,
-			this.hookWidgetContainerBelow,
-		]);
+		this.composer.setRuntimeChildren(
+			[
+				this.chatContainer,
+				this.pendingMessagesContainer,
+				this.todoContainer,
+				this.subagentContainer,
+				this.btwContainer,
+				this.omfgContainer,
+				this.cleanseContainer,
+				this.errorBannerContainer,
+				this.modelCycleContainer,
+				this.deferredCommandContainer,
+				// Judge batches stay editor-anchored and update independently of eval
+				// transcript output, directly above the working/throughput/title row.
+				this.judgmentBatchProgressContainer,
+				// Working loader / transient status sits below the sticky todo + subagent
+				// HUDs, just above the editor's hook-widget top margin — so it reads next to
+				// the prompt while keeping the one-line gap above the editor (the band
+				// composer collapses that gap so its status band sits flush).
+				this.statusContainer,
+				this.attachmentChipsContainer,
+				this.hookWidgetContainerAbove,
+				this.editorContainer,
+				this.hookWidgetContainerBelow,
+			],
+			// Inline dialogs and a tall multi-line draft swap into the editor
+			// container and collapse again; everything else is turn-scoped.
+			{ transient: [this.editorContainer] },
+		);
 		this.ui.setFocus(this.editor);
 		this.syncComposerShape();
 
@@ -3100,7 +3111,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		});
 	}
 	syncComposerShape(): void {
-		const shape = cfgComposerShape.get(settings) ?? "band";
+		const shape = cfgComposerShape.get(settings);
 		const style = getComposerStyle(shape);
 		this.composer.setPreferences({ composerShape: shape });
 		this.statusLine.setAutocompleteActiveProbe(() => this.editor.isAutocompleteActive());
@@ -3131,7 +3142,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	 */
 	#persistComposerStatus(): void {
 		if (!this.sessionManager.getSessionFile()) return;
-		const shape = cfgComposerShape.get(settings) ?? "band";
+		const shape = cfgComposerShape.get(settings);
 		const style = getComposerStyle(shape);
 		const terminalWidth = this.ui.terminal.columns;
 		const availableWidth = this.editor.getTopBorderAvailableWidth(terminalWidth);
@@ -5949,36 +5960,41 @@ export class InteractiveMode implements InteractiveModeContext {
 	 */
 	static #AUTOQA_CONSENT_PROMPTS: ReadonlyArray<readonly [string, string]> = [
 		[
-			"😤 Your agent is fuming about a tool.",
-			"Wanna let it vent to the devs? Just the tool name + what set it off, nothing personal.",
+			"🧾 Your agent drafted a strongly worded letter to one of its tools.",
+			"Mail it to the devs? Just the tool name + the grievance, nothing personal.",
 		],
 		[
-			"😵‍💫 Your agent is having an existential crisis over a tool.",
-			"Forward the dread to the devs? Tool + what broke its little mind, no personal info.",
+			"🕵️ Your agent caught a tool acting suspicious.",
+			"Tip off the devs? Tool name + the evidence, no personal info.",
 		],
 		[
-			"😭 Your agent wants to cry about a misbehaving tool.",
-			"Let it cry to the devs? Tool + the tears, never anything personal.",
+			"👻 Your agent swears one of its tools is haunted.",
+			"Call in the devs for an exorcism? Tool name + the spooky bit, nothing personal.",
+		],
+		["🫖 Your agent has tea about a tool.", "Spill it to the devs? Tool name + the tea, never anything personal."],
+		[
+			"🦆 Your agent explained a tool to its rubber duck. The duck is also confused.",
+			"Escalate past the duck to the devs? Tool name + the confusion, no personal info.",
 		],
 		[
-			"🤬 Your agent is BIG MAD at one of the tools.",
-			"Pass the rant along? Just the tool name and what enraged it, nothing personal.",
+			"📟 Your agent is asking to speak to a tool's manager.",
+			"Put the call through to the devs? Tool name + the complaint, nothing personal.",
 		],
 		[
-			"🫠 Your agent is melting down over a tool.",
-			"Mop up by alerting the devs? Tool + what melted it, no personal info.",
+			"🧂 Your agent is extremely salty about a tool.",
+			"Let it salt the devs' inbox? Tool name + what soured it, no personal info.",
 		],
 		[
-			"🤯 Your agent's brain broke at a tool's nonsense.",
-			"Ship the pieces to the devs? Tool name + the confusion, never anything personal.",
+			"🐛 Your agent found a bug. A real one. In a tool.",
+			"Hand the specimen to the devs? Tool name + where it crawled out, nothing personal.",
 		],
 		[
-			"😩 Your agent is begging to file a complaint about a tool.",
-			"Hand it the form? Tool + what wronged it, nothing personal.",
+			"🍿 Your agent just watched a tool pull a plot twist nobody asked for.",
+			"Send the devs a spoiler? Tool name + what happened, never anything personal.",
 		],
 		[
-			"🥲 Your agent put on a brave face but a tool did it dirty.",
-			"Let it tell the devs the truth? Tool name + the dirt, no personal info.",
+			"📉 Your agent's opinion of a tool just crashed.",
+			"Send the post-mortem to the devs? Tool name + what tanked it, no personal info.",
 		],
 	];
 
@@ -5994,16 +6010,36 @@ export class InteractiveMode implements InteractiveModeContext {
 		return choice === "Yes";
 	}
 
-	/** Ask the user to approve one `cfg://` settings change; dismissing the dialog denies it. */
-	async #promptCfgChange(request: CfgChangeRequest): Promise<boolean> {
+	/**
+	 * Ask the user to approve one `cfg://` settings change. Dismissing the dialog denies it;
+	 * leaving it unanswered for {@link CFG_APPROVAL_TIMEOUT_MS} (any keypress restarts the
+	 * countdown) drops it as `timeout`.
+	 */
+	async #promptCfgChange(request: CfgChangeRequest): Promise<CfgApproval> {
 		const headline = request.save
 			? `💾 Your agent wants to save \`${request.path}\` to your config.`
 			: `⚙️ Your agent wants to change \`${request.path}\` for this session.`;
-		const choice = await this.showHookSelector(`${headline}\n${request.previous} → ${request.value}`, [
-			"Allow",
-			"Deny",
-		]);
-		return choice === "Allow";
+		const warning = request.shadowedBy
+			? `\n⚠️ Overridden by your ${request.shadowedBy}: the saved value won't take effect here.`
+			: "";
+		let timedOut = false;
+		const choice = await this.showHookSelector(
+			`${headline}\n${request.previous} → ${request.value}${warning}`,
+			[CFG_APPROVE_SESSION, CFG_APPROVE_ONCE, CFG_DENY],
+			{
+				// A reflexive Enter approves this change only, never the whole session.
+				initialIndex: 1,
+				timeout: CFG_APPROVAL_TIMEOUT_MS,
+				// The selector auto-picks the highlighted option on expiry; an unanswered prompt approves nothing.
+				onTimeout: () => {
+					timedOut = true;
+				},
+			},
+		);
+		if (timedOut) return "timeout";
+		if (choice === CFG_APPROVE_SESSION) return "session";
+		if (choice === CFG_APPROVE_ONCE) return "once";
+		return "deny";
 	}
 
 	stop(): void {

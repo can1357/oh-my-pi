@@ -72,7 +72,7 @@ export interface OutputMeta {
 	/** Capture failure of this output itself; aggregate reports keep source failures on their entries. */
 	artifactError?: OutputArtifactError;
 	source?: SourceMeta;
-	/** The output is a bounded page of a file its `source` re-reads with line selectors; spill-to-artifact skips it. */
+	/** The output is a bounded page of session artifact storage its `source` re-reads with line selectors; spill-to-artifact skips it. */
 	pagedSource?: true;
 	diagnostics?: DiagnosticMeta;
 	limits?: LimitsMeta;

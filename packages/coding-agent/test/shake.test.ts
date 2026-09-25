@@ -669,15 +669,18 @@ describe("AgentSession shake", () => {
 			);
 		});
 
-		it("keeps a no-op incomplete shake retry committed before rollback can restore the length tail", async () => {
+		it("keeps an incomplete shake retry committed before rollback can restore the length tail", async () => {
 			cfgCompactionMethodOrder.set(session.settings, ["shake", "soft"]);
+			// Over threshold: the window, not the output cap, ran out, so recovery compacts.
+			cfgCompactionThresholdTokens.set(session.settings, 10_000);
 			cfgContextPromotionEnabled.set(session.settings, false);
 			vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
 			vi.spyOn(session.agent, "continue").mockResolvedValue();
 			vi.spyOn(session, "getContextUsage").mockReturnValue({ tokens: 1000, contextWindow: 200000, percent: 0.5 });
 			const shakeSpy = vi
 				.spyOn(session, "shake")
-				.mockResolvedValue({ mode: "elide", toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 });
+				// Reclaims back under the recovery band, so shake retries instead of falling back.
+				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 20_000 });
 
 			const assistantMessage: AssistantMessage = {
 				role: "assistant",

@@ -54,7 +54,8 @@ export function stripWriteContent(session: ToolSession, content: string): { text
 /**
  * Record a snapshot of the freshly-written `content` for `absolutePath`
  * so subsequent hashline edits address the new file with a current tag,
- * and return the matching `[displayPath#TAG]` header. Returns `undefined`
+ * and return the matching `[displayPath#TAG]` header (`displayPath` defaults to
+ * `absolutePath` relative to cwd; URL writes pass their URL). Returns `undefined`
  * when the session is not in hashline mode so callers can no-op cheaply.
  *
  * Mirrors the post-commit snapshot recording the hashline patcher performs
@@ -68,9 +69,10 @@ export function maybeWriteSnapshotHeader(
 	session: ToolSession,
 	absolutePath: string,
 	content: string,
+	displayPath = formatPathRelativeToCwd(absolutePath, session.cwd),
 ): string | undefined {
 	if (!resolveFileDisplayMode(session).hashLines) return undefined;
 	const normalized = normalizeToLF(content);
 	const tag = getEditStore(session).recordSnapshot(absolutePath, normalized, []);
-	return formatHashlineHeader(formatPathRelativeToCwd(absolutePath, session.cwd), tag);
+	return formatHashlineHeader(displayPath, tag);
 }

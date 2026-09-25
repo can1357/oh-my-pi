@@ -42,9 +42,12 @@ import {
 	type AnySetting,
 	all as allSettings,
 	bindEffects,
+	inheritWarnings,
 	lookup as lookupSetting,
 	resetRegistryForTest,
+	settingValuesEqual,
 	type ValueCacheEntry,
+	type WarnState,
 } from "./registry";
 // Registers every setting before any instance is read (definitions live next to their domains).
 import "./all-settings";
@@ -131,6 +134,8 @@ type ProjectSettingsReadResult = {
 	shellPathSource: string | undefined;
 	/** Files that supplied merged project-level settings items. */
 	sourcePaths: string[];
+	/** Project warnings surfaced for this read; commit with the layer as `#projectSettingsWarningsSeen`. */
+	warningsSeen: Set<string>;
 };
 
 /** `strict` rejects on any unreadable layer; `keep-last-good` keeps each failed layer's previous value. */
@@ -247,6 +252,14 @@ interface OwnLayers {
 	project: RawSettings;
 	configOverlay: RawSettings;
 	overrides: RawSettings;
+}
+
+/** A persisted layer re-read from disk: its new value, the file(s) it came from, and the read-side state it commits. */
+interface LayerRefresh {
+	layer: "global" | "project" | "configOverlay";
+	settings: RawSettings;
+	source: string;
+	commit(): void;
 }
 
 /**
@@ -539,6 +552,8 @@ export class Settings {
 	 * `Derived.slot` and validated against {@link revision}; see `config/registry.ts`.
 	 */
 	readonly valueCache: (ValueCacheEntry | undefined)[] = [];
+	/** Registry-owned warn-once diagnostics of this instance; see `config/registry.ts`. */
+	readonly warnState: WarnState = { invalid: new Map(), items: new Map() };
 	/** Change listeners bucketed by the `slot` of the setting they observe ({@link onEffectiveChange}). */
 	#changeListeners: (Set<SettingChangeListener> | undefined)[] = [];
 	/** Forwarders of every change into live {@link overlay} children. */
@@ -697,6 +712,7 @@ export class Settings {
 		const child = new Settings({ inMemory: true, cwd: this.#cwd, agentDir: this.#agentDir, overrides });
 		child.#storage = this.#storage;
 		child.#parent = this;
+		inheritWarnings(child, this);
 		child.#rebuildMerged();
 		// The parent holds only a weak reference, so a discarded child is collected without an
 		// explicit dispose; its listener unsubscribes on the next parent change.
@@ -793,9 +809,9 @@ export class Settings {
 
 	/**
 	 * Registry plumbing behind `Setting.set` / `Setting.override`: writes `value` for `setting` to the
-	 * global layer (persisted in the background) or the runtime-override layer, then notifies change
-	 * listeners (process-wide effects apply synchronously). On an {@link overlay} both layers are
-	 * local to the overlay.
+	 * global layer (persisted in the background; releases a soft pin, see {@link pinDefaultValue}) or
+	 * the runtime-override layer, then notifies change listeners (process-wide effects apply
+	 * synchronously). On an {@link overlay} both layers are local to the overlay.
 	 *
 	 * @throws Error when the value does not fit the definition's type or fails its `items`/`validate` check.
 	 */
@@ -812,6 +828,7 @@ export class Settings {
 			setByPath(this.#global, segments, value);
 			this.#persistedMutationGeneration++;
 			this.#modified.add(setting.id);
+			this.#releaseSoftPin(setting);
 		} else {
 			setByPath(this.#overrides, segments, value);
 		}
@@ -822,26 +839,37 @@ export class Settings {
 
 	/**
 	 * Registry plumbing behind `Setting.unset`: removes `setting` from the global layer (the removal
-	 * is persisted in the background), so lower layers and the default apply again.
+	 * is persisted in the background) and releases its soft pin, so the remaining layers — or else
+	 * the default — supply the value.
 	 */
 	unsetGlobalValue(setting: AnySetting): void {
 		const segments = setting.segments;
 		const current = getByPath(this.#global, segments);
-		if (current === undefined) return;
+		if (current === undefined && !this.#softPins.has(setting)) return;
 		const prev = setting.get(this);
-		this.#captureGlobalMutation(setting.id, this.#modifiedPathMutations, current);
-		deleteByPath(this.#global, segments);
-		this.#persistedMutationGeneration++;
-		this.#modified.add(setting.id);
+		this.#releaseSoftPin(setting);
+		if (current !== undefined) {
+			this.#captureGlobalMutation(setting.id, this.#modifiedPathMutations, current);
+			deleteByPath(this.#global, segments);
+			this.#persistedMutationGeneration++;
+			this.#modified.add(setting.id);
+		}
 		this.#rebuildMerged();
-		this.#queueSave();
+		if (current !== undefined) this.#queueSave();
 		this.#fireIfChanged(setting, prev);
+	}
+
+	/** Drops `setting`'s soft-pinned default override, if any (the caller rebuilds the merged view). */
+	#releaseSoftPin(setting: AnySetting): void {
+		if (!this.#softPins.delete(setting)) return;
+		deleteByPath(this.#overrides, setting.segments);
 	}
 
 	/**
 	 * Registry plumbing behind `Setting.pinDefault`: overrides `setting` with its default unless a
-	 * layer configures it, keeping the override soft — a disk reload or re-scope that makes a
-	 * persisted layer configure the setting drops it, and an explicit override/clear ends it.
+	 * layer configures it, keeping the override soft — a global write or unset of the setting, or a
+	 * disk reload or re-scope that makes a persisted layer configure it, drops it, and an explicit
+	 * override/clear ends it.
 	 */
 	pinDefaultValue(setting: AnySetting): void {
 		const value = setting.default;
@@ -893,7 +921,7 @@ export class Settings {
 		const settings = allSettings();
 		for (let i = 0; i < previous.length; i++) {
 			const setting = settings[i];
-			if (!Bun.deepEquals(setting.get(this), previous[i])) this.#notifyChange(setting);
+			if (!settingValuesEqual(setting.get(this), previous[i])) this.#notifyChange(setting);
 		}
 	}
 
@@ -941,8 +969,8 @@ export class Settings {
 	/**
 	 * Apply on-disk edits live: watch the directories holding config.yml, the
 	 * project settings files, and `--config` overlays, and run a debounced
-	 * keep-last-good reload (a file that fails to parse keeps its layer's last
-	 * good values). Only the persisting process-global instance watches; other
+	 * keep-last-good reload (a file that fails to parse or validate keeps its
+	 * layer's last good values). Only the persisting process-global instance watches; other
 	 * instances ignore the call. Stopped by {@link stopWatching} /
 	 * {@link cancelPendingSaves}.
 	 */
@@ -1076,7 +1104,7 @@ export class Settings {
 			await this.#projectSavePromise;
 		}
 		if (this.#modified.size > 0 || this.#modifiedGlobalModelRoles.size > 0) {
-			await this.#saveNow();
+			await this.#chainSave();
 		}
 		if (this.#modifiedProjectModelRoles.size > 0) {
 			await this.#saveProjectNow();
@@ -1116,6 +1144,7 @@ export class Settings {
 		for (const setting of cloned.#settlePins(layers)) cloned.#softPins.delete(setting);
 		cloned.#overrides = layers.overrides;
 		cloned.#rebuildMerged();
+		inheritWarnings(cloned, this);
 		cloned.#validateAll();
 		return cloned;
 	}
@@ -1178,39 +1207,82 @@ export class Settings {
 				});
 			}
 
-			const candidate: OwnLayers = {
-				global: globalResult.status === "fulfilled" ? (globalResult.value.settings ?? {}) : this.#global,
-				project: projectResult.status === "fulfilled" ? projectResult.value.settings : this.#project,
-				configOverlay: overlayResult.status === "fulfilled" ? overlayResult.value.settings : this.#configOverlay,
-				overrides: this.#overrides,
-			};
-			const settled = this.#settlePins(candidate);
-			try {
-				this.#validateAll(this.#mergeOverParent(this.#mergeOwnLayers(candidate)), this.#cwd);
-			} catch (error) {
-				if (!keepLastGood) throw error;
-				logger.warn("Settings: keeping last good config; on-disk change is invalid", { error: String(error) });
-				return;
+			const refreshed: LayerRefresh[] = [];
+			if (globalResult.status === "fulfilled") {
+				const { settings, configPath } = globalResult.value;
+				refreshed.push({
+					layer: "global",
+					settings: settings ?? {},
+					source: configPath ?? path.join(this.#agentDir, MAIN_CONFIG_FILENAMES[0]),
+					commit: () => {
+						this.#configPath = configPath;
+					},
+				});
 			}
-
-			const previous = this.#snapshot();
-			if (globalResult.status === "fulfilled") this.#configPath = globalResult.value.configPath;
 			if (projectResult.status === "fulfilled") {
-				this.#projectFileSettings = projectResult.value.fileSettings;
-				this.#projectShellPathSource = projectResult.value.shellPathSource;
-				this.#projectSourcePaths = projectResult.value.sourcePaths;
+				const project = projectResult.value;
+				refreshed.push({
+					layer: "project",
+					settings: project.settings,
+					source: project.sourcePaths.join(", ") || getProjectAgentDir(this.#cwd),
+					commit: () => this.#commitProjectRead(project),
+				});
 			}
 			if (overlayResult.status === "fulfilled") {
-				this.#overlayShellPathSource = overlayResult.value.shellPathSource;
+				const { settings, shellPathSource } = overlayResult.value;
+				refreshed.push({
+					layer: "configOverlay",
+					settings,
+					source: this.#configFiles.join(", "),
+					commit: () => {
+						this.#overlayShellPathSource = shellPathSource;
+					},
+				});
 			}
-			this.#global = candidate.global;
-			this.#project = candidate.project;
-			this.#configOverlay = candidate.configOverlay;
-			this.#overrides = candidate.overrides;
+
+			// Keep-last-good adopts each refreshed layer only when it validates over the layers
+			// accepted so far: an invalid file keeps its own layer's last good values while the
+			// other layers still refresh. Strict validates the whole refresh and throws.
+			let layers = this.#ownLayers();
+			const adopted: LayerRefresh[] = [];
+			for (const refresh of refreshed) {
+				const trial: OwnLayers = { ...layers, [refresh.layer]: refresh.settings };
+				if (keepLastGood && !this.#acceptsLayers(trial, refresh.source)) continue;
+				layers = trial;
+				adopted.push(refresh);
+			}
+			const settled = this.#settlePins(layers);
+			if (!keepLastGood) this.#validateAll(this.#mergeOverParent(this.#mergeOwnLayers(layers)), this.#cwd);
+
+			const previous = this.#snapshot();
+			for (const refresh of adopted) refresh.commit();
+			this.#global = layers.global;
+			this.#project = layers.project;
+			this.#configOverlay = layers.configOverlay;
+			this.#overrides = layers.overrides;
 			for (const setting of settled) this.#softPins.delete(setting);
 			this.#rebuildMerged();
 			this.#fireChangesSince(previous);
 			return;
+		}
+	}
+
+	/**
+	 * Whether `layers`, as they would be committed (soft pins they configure dropped), pass every
+	 * definition's `validate` check; otherwise logs that the last good config stays, naming `source`.
+	 */
+	#acceptsLayers(layers: OwnLayers, source: string): boolean {
+		const committed = { ...layers };
+		this.#settlePins(committed);
+		try {
+			this.#validateAll(this.#mergeOverParent(this.#mergeOwnLayers(committed)), this.#cwd);
+			return true;
+		} catch (error) {
+			logger.warn("Settings: keeping last good config; on-disk change is invalid", {
+				path: source,
+				error: String(error),
+			});
+			return false;
 		}
 	}
 
@@ -1262,9 +1334,7 @@ export class Settings {
 			this.#savedRuntimeModelRoleOverrides.clear();
 			if (project) {
 				this.#project = project.settings;
-				this.#projectFileSettings = project.fileSettings;
-				this.#projectShellPathSource = project.shellPathSource;
-				this.#projectSourcePaths = project.sourcePaths;
+				this.#commitProjectRead(project);
 			}
 			this.#rebuildMerged();
 			this.#fireChangesSince(previous);
@@ -2076,10 +2146,12 @@ export class Settings {
 	}
 
 	/**
-	 * `rejectNewWarnings` fails the read (without logging or recording the
-	 * warnings) when a project settings file newly fails to parse, so a
-	 * keep-last-good reload can retain the previous project layer. `cwd`
-	 * (default: the current scope) selects the project to read.
+	 * `rejectNewWarnings` fails the read (without logging the warnings) when a
+	 * project settings file newly fails to parse, so a keep-last-good reload can
+	 * retain the previous project layer. `cwd` (default: the current scope)
+	 * selects the project to read. The read leaves the project fields untouched:
+	 * the caller commits the result (`#commitProjectRead`, `warningsSeen`
+	 * included) only when it adopts the layer.
 	 */
 	async #readProjectSettings(
 		quarantineInvalid: boolean,
@@ -2100,6 +2172,7 @@ export class Settings {
 		let merged: RawSettings = {};
 		const sourcePaths: string[] = [];
 		let rejectedWarnings: string[] | undefined;
+		let warningsSeen = this.#projectSettingsWarningsSeen;
 		try {
 			const result = await loadCapability(settingsCapability.id, { cwd: discoveryCwd });
 			// `loadCapability` aggregates warnings across every level, but this
@@ -2119,7 +2192,7 @@ export class Settings {
 				rejectedWarnings = newWarnings;
 			} else {
 				for (const warning of newWarnings) logger.warn(`Settings: ${warning}`);
-				this.#projectSettingsWarningsSeen = new Set(projectWarnings);
+				warningsSeen = new Set(projectWarnings);
 				for (const item of result.items as SettingsCapabilityItem[]) {
 					if (item.level === "project") {
 						merged = this.#deepMerge(merged, dropSettingsGroupShadows(item.data as RawSettings, item.path));
@@ -2149,15 +2222,22 @@ export class Settings {
 			fileSettings: structuredClone(nativeProject),
 			shellPathSource,
 			sourcePaths,
+			warningsSeen,
 		};
 	}
 
 	async #loadProjectSettings(): Promise<RawSettings> {
 		const result = await this.#readProjectSettings(true);
+		this.#commitProjectRead(result);
+		return result.settings;
+	}
+
+	/** Adopts the read-side state of a project read whose layer is being committed. */
+	#commitProjectRead(result: ProjectSettingsReadResult): void {
 		this.#projectFileSettings = result.fileSettings;
 		this.#projectShellPathSource = result.shellPathSource;
 		this.#projectSourcePaths = result.sourcePaths;
-		return result.settings;
+		this.#projectSettingsWarningsSeen = result.warningsSeen;
 	}
 
 	async #readConfigOverlays(captureLegacyChangelogVersion = true): Promise<ConfigOverlayReadResult> {
@@ -3238,19 +3318,25 @@ export class Settings {
 		clearTimeout(this.#saveTimer);
 		this.#saveTimer = setTimeout(() => {
 			this.#saveTimer = undefined;
-			const previousSave = this.#savePromise;
-			const savePromise = previousSave ? previousSave.then(() => this.#saveNow()) : this.#saveNow();
-			this.#savePromise = savePromise;
-			savePromise
-				.catch(err => {
-					logger.warn("Settings: background save failed", { error: String(err) });
-				})
-				.finally(() => {
-					if (this.#savePromise === savePromise) {
-						this.#savePromise = undefined;
-					}
-				});
+			this.#chainSave().catch(err => {
+				logger.warn("Settings: background save failed", { error: String(err) });
+			});
 		}, 100);
+	}
+
+	/**
+	 * Runs {@link #saveNow} after the in-flight save, so saves never overlap: every global write
+	 * made after a save's snapshot is still pending when that save adopts the file.
+	 */
+	#chainSave(): Promise<void> {
+		const previousSave = this.#savePromise;
+		const savePromise = previousSave ? previousSave.then(() => this.#saveNow()) : this.#saveNow();
+		this.#savePromise = savePromise;
+		const settle = () => {
+			if (this.#savePromise === savePromise) this.#savePromise = undefined;
+		};
+		savePromise.then(settle, settle);
+		return savePromise;
 	}
 
 	async #saveNow(): Promise<void> {
@@ -3263,7 +3349,6 @@ export class Settings {
 		const modifiedPathMutations = new Map(this.#modifiedPathMutations);
 		const modifiedModelRoleMutations = new Map(this.#modifiedGlobalModelRoleMutations);
 		const globalRolesAtStart = this.#modelRolesFromLayer(this.#global);
-		const previous = this.#snapshot();
 		this.#modified.clear();
 		this.#modifiedGlobalModelRoles.clear();
 		this.#modifiedPathMutations.clear();
@@ -3278,6 +3363,7 @@ export class Settings {
 				const current =
 					loaded.settings ?? (this.#quarantinedYamlTargets.has(configPath) ? structuredClone(this.#global) : {});
 				let shouldWrite = false;
+				const appliedPaths: string[] = [];
 
 				// Apply pending changes unless a newer file generation also
 				// changed that setting. Disjoint external edits still merge.
@@ -3299,6 +3385,7 @@ export class Settings {
 					const value = getByPath(this.#global, segments);
 					if (value === undefined) deleteByPath(current, segments);
 					else setByPath(current, segments, value);
+					appliedPaths.push(modPath);
 					shouldWrite = true;
 				}
 
@@ -3353,12 +3440,21 @@ export class Settings {
 					shouldWrite = true;
 				}
 
-				// Update our global with any external changes we preserved.
-				this.#global = current;
 				if (shouldWrite) {
-					await this.#writeYamlAtomically(writePath, this.#global);
+					await this.#writeYamlAtomically(writePath, current);
 				}
 				this.#quarantinedYamlTargets.delete(configPath);
+				// A path written again after this save's snapshot was merged at its newer live value.
+				// Drop it from pending unless it changed again while the write was in flight, so the
+				// next save doesn't take this save's write for a stale external edit.
+				for (const modPath of appliedPaths) {
+					if (!this.#modified.has(modPath)) continue;
+					const segments = modPath.split(".");
+					if (!settingValuesEqual(getByPath(this.#global, segments), getByPath(current, segments))) continue;
+					this.#modified.delete(modPath);
+					this.#modifiedPathMutations.delete(modPath);
+				}
+				this.#adoptSavedGlobal(current, configPath);
 				// These pending roles were included in this write. Remove each
 				// only if no newer local change arrived while the write was in flight.
 				const globalRolesAfterWrite = this.#modelRolesFromLayer(this.#global);
@@ -3403,13 +3499,42 @@ export class Settings {
 					);
 				}
 			}
-			this.#rebuildMerged();
 			throw error;
 		}
+	}
 
+	/**
+	 * Adopts `saved` (config.yml as a save just wrote it) as the live global layer, first
+	 * re-applying every global write still pending — made after that save's snapshot, since saves
+	 * never overlap ({@link #chainSave}) — so a live value never regresses to its on-disk one. An
+	 * invalid result keeps the live layer, which is last good and already holds the save's writes,
+	 * like a keep-last-good reload; the file keeps the external edit for the user to fix.
+	 * Notifies every setting whose effective value changed.
+	 */
+	#adoptSavedGlobal(saved: RawSettings, source: string): void {
+		if (this.#modifiedGlobalModelRoles.size > 0) {
+			const liveRoles = getByPath(this.#global, ["modelRoles"]);
+			const savedRoles = getByPath(saved, ["modelRoles"]);
+			const roles: Record<string, unknown> = isRecord(savedRoles) ? savedRoles : {};
+			for (const role of this.#modifiedGlobalModelRoles) {
+				if (isRecord(liveRoles) && Object.hasOwn(liveRoles, role)) roles[role] = liveRoles[role];
+				else delete roles[role];
+			}
+			setByPath(saved, ["modelRoles"], roles);
+		}
+		for (const id of this.#modified) {
+			const segments = id.split(".");
+			const value = getByPath(this.#global, segments);
+			if (value === undefined) deleteByPath(saved, segments);
+			else setByPath(saved, segments, value);
+		}
+		if (!this.#acceptsLayers({ ...this.#ownLayers(), global: saved }, source)) return;
+		const previous = this.#snapshot();
+		this.#global = saved;
 		this.#rebuildMerged();
 		this.#fireChangesSince(previous);
 	}
+
 	#queueProjectSave(): void {
 		if (!this.#persist) return;
 
@@ -3502,7 +3627,7 @@ export class Settings {
 	 * definition: `validate` throws, unknown `items` warn. Defaults to the live layers.
 	 */
 	#validateAll(merged: RawSettings = this.#mergedView(), cwd: string = this.#cwd): void {
-		for (const setting of allSettings()) setting.checkConfigured(configuredValue(merged, setting, cwd));
+		for (const setting of allSettings()) setting.checkConfigured(this, configuredValue(merged, setting, cwd));
 	}
 
 	/**
