@@ -45,6 +45,38 @@ describe("SettingsList", () => {
 		expect(changes).toEqual([["mode", "on"]]);
 	});
 
+	it("activates action rows while disabled actions remain inert", () => {
+		const activated: string[] = [];
+		const list = new SettingsList(
+			[
+				{
+					id: "save",
+					label: "Save",
+					currentValue: "",
+					onActivate: () => activated.push("save"),
+				},
+				{
+					id: "remove",
+					label: "Remove",
+					currentValue: "",
+					disabled: true,
+					onActivate: () => activated.push("remove"),
+				},
+			],
+			5,
+			testTheme,
+			() => {},
+			() => {},
+		);
+
+		list.handleInput("\n");
+		list.handleInput("\x1b[B");
+		list.handleInput("\n");
+		list.handleInput(" ");
+
+		expect(activated).toEqual(["save"]);
+	});
+
 	it("passes changed state to item label and value renderers", () => {
 		const themed: SettingsListTheme = {
 			label: (text: string, _selected: boolean, changed: boolean) => (changed ? `[changed-label]${text}` : text),

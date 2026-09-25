@@ -71,6 +71,7 @@ export const cfgDisabledProviders = register({
 
 export const cfgModelRoleStorage = register({
 	id: "modelRoleStorage",
+	machineLocal: true,
 	type: "enum",
 	values: ["global", "project"] as const,
 	default: "global",

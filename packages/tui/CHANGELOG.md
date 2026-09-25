@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Replaced `AgentsHubDeps.setDisabledAgents`/`setOverrides` with `setAgentDisabled(name, disabled)` and `setAgentOverride(property, name, value)`, so each hub edit persists only the agent it changes; `PropertyKind` is exported ([#13308](https://github.com/can1357/oh-my-pi/pull/13308) by [@Vortex727](https://github.com/Vortex727))
+
+### Added
+
+- Added a composed settings surface that hosts embedded tabs such as Profiles, native section-sidebar row helpers, and a focused single-role model-hub editor ([#12993](https://github.com/can1357/oh-my-pi/pull/12993) by [@Vortex727](https://github.com/Vortex727))
+- Exported the model browser's context, cost, intelligence, and measured-performance formatters, and the usage dashboard's quota bar and status-color helpers, for reuse ([#12993](https://github.com/can1357/oh-my-pi/pull/12993) by [@Vortex727](https://github.com/Vortex727))
+- Added `SettingsSelectorComponent.clearSearch()` so embedded editors can reveal errors hidden by a search filter ([#12993](https://github.com/can1357/oh-my-pi/pull/12993) by [@Vortex727](https://github.com/Vortex727))
+
+### Changed
+
+- `AgentsHubDeps.generateAgent`/`saveAgent` are optional and the hub offers no agent creation without them; `AgentsHubComponent.create` accepts `{ title, initialAgent }` ([#12993](https://github.com/can1357/oh-my-pi/pull/12993) by [@Vortex727](https://github.com/Vortex727))
 ## [18.3.1] - 2026-09-25
 
 ### Breaking Changes

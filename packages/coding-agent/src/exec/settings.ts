@@ -93,6 +93,7 @@ export const cfgBashEnabled = register({
 
 export const cfgBashAllowCompoundCommands = register({
 	id: "bash.allowCompoundCommands",
+	safetySensitive: true,
 	type: "boolean",
 	default: false,
 	ui: {

@@ -40,6 +40,7 @@ import type { EvalExecutionComponent } from "@oh-my-pi/pi-tui/chat/eval-executio
 import type { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
 import type { HookInputComponent } from "@oh-my-pi/pi-tui/overlays/hook-input";
 import type { HookSelectorComponent, HookSelectorOptions } from "@oh-my-pi/pi-tui/overlays/hook-selector";
+import type { SettingsNavigationTab } from "@oh-my-pi/pi-tui/overlays/settings-selector";
 import type { ServedModelTracker } from "@oh-my-pi/pi-tui/chat/served-model-marker";
 import type { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
 import type { ToolExecutionHandle } from "@oh-my-pi/pi-tui/chat/tool-execution";
@@ -419,6 +420,8 @@ export interface InteractiveModeContext {
 	handleAdvisorDumpCommand(isRaw?: boolean): void;
 	handleDebugTranscriptCommand(): Promise<void>;
 	handleClearCommand(): Promise<void>;
+	/** Run the `/new` flow with a custom status label; false when a hook or vibe mode blocked it. */
+	startNewSession(label: string): Promise<boolean>;
 	handleFreshCommand(): Promise<void>;
 	handleResetContextCommand(): Promise<void>;
 	handleDeleteCommand(): Promise<void>;
@@ -459,7 +462,7 @@ export interface InteractiveModeContext {
 	applyCwdChange(newCwd: string): Promise<boolean>;
 
 	// Selector handling
-	showSettingsSelector(): void;
+	showSettingsSelector(initialTab?: SettingsNavigationTab): Promise<void>;
 	/** Open the fullscreen `/usage` dashboard overlay for the given reports. */
 	showUsageDashboard(reports: UsageReport[]): void;
 	showAdvisorConfigure(): void;
@@ -484,7 +487,7 @@ export interface InteractiveModeContext {
 	showSessionPinSelector(): Promise<void>;
 	showResetUsageSelector(): Promise<void>;
 	showProviderSetup(): Promise<void>;
-	showHookConfirm(title: string, message: string): Promise<boolean>;
+	showHookConfirm(title: string, message: string, dialogOptions?: ExtensionUIDialogOptions): Promise<boolean>;
 	showDebugSelector(): Promise<void>;
 	showAgentHub(options?: AgentHubOpenOptions): void;
 	resetObserverRegistry(): void;
@@ -568,7 +571,11 @@ export interface InteractiveModeContext {
 		dialogOptions?: InteractiveSelectorDialogOptions,
 	): Promise<string | undefined>;
 	hideHookSelector(): void;
-	showHookInput(title: string, placeholder?: string): Promise<string | undefined>;
+	showHookInput(
+		title: string,
+		placeholder?: string,
+		dialogOptions?: ExtensionUIDialogOptions,
+	): Promise<string | undefined>;
 	hideHookInput(): void;
 	showHookEditor(
 		title: string,

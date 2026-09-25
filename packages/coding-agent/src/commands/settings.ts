@@ -45,6 +45,7 @@ export const cfgShareStore = register({
 
 export const cfgShareRedactSecrets = register({
 	id: "share.redactSecrets",
+	safetySensitive: true,
 	type: "boolean",
 	default: true,
 	ui: {

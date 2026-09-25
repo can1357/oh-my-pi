@@ -7,6 +7,7 @@ import {
 	getModelMatchPreferences,
 	type ResolvedModelRoleValue,
 	resolveModelRoleValue,
+	type SessionModelRoleLookup,
 } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 
@@ -62,6 +63,17 @@ export function resolveCompactionConfiguredTarget(currentModel: Model, available
 	return resolveConfiguredModelTarget(currentModel.compactionModel, currentModel, availableModels);
 }
 
+/**
+ * Role lookup of a session running `currentModel`: an Automatic `default` role (unset or masked by
+ * `null`) runs as the active model, so explicit `@default` aliases in other roles resolve to it too.
+ */
+export function sessionModelRoleLookup(settings: Settings, currentModel: Model | undefined): SessionModelRoleLookup {
+	return {
+		getModelRole: role => settings.getModelRole(role),
+		automaticDefault: currentModel ? `${currentModel.provider}/${currentModel.id}` : undefined,
+	};
+}
+
 /** Resolves a model role and its explicit thinking selection. */
 export function resolveRoleModelFull(
 	settings: Settings,
@@ -69,16 +81,17 @@ export function resolveRoleModelFull(
 	availableModels: Model[],
 	currentModel: Model | undefined,
 ): ResolvedModelRoleValue {
+	const roleLookup = sessionModelRoleLookup(settings, currentModel);
 	const roleModelStr =
 		role === "default"
-			? (settings.getModelRole("default") ??
-				(currentModel ? `${currentModel.provider}/${currentModel.id}` : undefined))
+			? (settings.getModelRole("default") ?? roleLookup.automaticDefault)
 			: settings.getModelRole(role);
 	if (!roleModelStr) {
 		return { model: undefined, thinkingLevel: undefined, explicitThinkingLevel: false, warning: undefined };
 	}
 	return resolveModelRoleValue(roleModelStr, availableModels, {
 		settings,
+		roleLookup,
 		matchPreferences: getModelMatchPreferences(settings),
 	});
 }

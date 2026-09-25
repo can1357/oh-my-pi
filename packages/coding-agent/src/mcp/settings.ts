@@ -8,6 +8,7 @@ import { effect, register } from "../config/registry";
 // MCP
 export const cfgMcpEnableProjectConfig = register({
 	id: "mcp.enableProjectConfig",
+	safetySensitive: true,
 	type: "boolean",
 	default: true,
 	ui: {

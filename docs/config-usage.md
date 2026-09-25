@@ -155,9 +155,10 @@ Each setting is declared once with `register({ id, type, default, env?, protocol
 - `cfgX.get(scope)` — effective value; `scope` is a `Settings` instance or anything carrying one (`AgentSession`, `ToolSession`). Reads are memoized per scope.
 - `cfgX.set(scope, v)` — writes the **global** layer and queues a background save; values the definition's type rejects throw.
 - `cfgX.unset(scope)` — removes the key from the global layer (what `omp config reset` and clearing a settings-panel text field do), so later default changes still apply.
+- `cfgX.setEntry(scope, key, v)` / `cfgX.setMember(scope, item, member)` — write one entry of a record setting (`undefined` removes it) or add/remove one item of a list setting in the global layer; the save changes only that entry or item in `config.yml`, so entries another layer (a `--config` overlay) supplies never land there.
 - `cfgX.override(scope, v)` / `cfgX.clearOverride(scope)` — runtime-only override, never persisted.
 - `cfgX.map(fn)` / `combine({...}, fn)` — memoized derived values; `.listen(scope, cb)` observes changes of a handle or derivation.
-- `cfgX.provenance(scope)` — layer supplying the value: `"env" | "runtime" | "overlay" | "project" | "global" | "default"`.
+- `cfgX.provenance(scope)` — layer supplying the value: `"env" | "runtime" | "setup" | "overlay" | "project" | "global" | "default"`.
 - `cfgX.layered(scope)` — the value from the settings layers alone, ignoring the environment variable (what the settings panel shows and edits).
 
 A configured value that does not fit the declared type (or enum values) is ignored with a warning and the default is used; a definition's `validate` rejects malformed values on load, on every reload, and before every write. A keep-last-good watcher reload, and a save that merges external edits to `config.yml`, keep only the invalid file's layer at its last good values (the warning names the file) while the other layers still refresh. A configured `null` counts as unset everywhere.
@@ -168,18 +169,21 @@ Effective precedence, highest first:
 
 1. Environment variable declared on the definition (`env: "NAME"`), parsed by the setting's type; unparseable text counts as unset. Booleans follow `parseFlag`: empty is unset, `1`/`y`/`true`/`yes`/`on` (lower or upper case) is true, any other text is false
 2. Runtime overrides: in-memory, non-persistent
-3. Config overlays: `PI_CONFIG_FILES` (platform path-list), followed by repeated `omp --config <path>` files; all are loaded as `config.yml`-style YAML for this process only
-4. Project settings: discovered via the settings capability (`settings.json` and `config.yml` from providers)
-5. Global settings: the first present file among `~/.omp/agent/config.yml` and `config.yaml`
-6. Definition default
+3. Session setup: a loaded profile's settings (`Settings.applySetupLayer`), in-memory and never persisted. A persisted write releases exactly what it touches from it: `set`/`unset` the setting, `setEntry` that entry, `setMember` that item (the rest of a setup list keeps applying), a model-role write that role
+4. Config overlays: `PI_CONFIG_FILES` (platform path-list), followed by repeated `omp --config <path>` files; all are loaded as `config.yml`-style YAML for this process only
+5. Project settings: discovered via the settings capability (`settings.json` and `config.yml` from providers)
+6. Global settings: the first present file among `~/.omp/agent/config.yml` and `config.yaml`
+7. Definition default
 
 A definition may instead declare `env: { name, fallback: true }`: that variable only replaces the default, and any layer configuring a non-null value wins over it (used by `SEARXNG_BASIC_*`). `fallback: "blank"` also lets the variable win over a configured empty or whitespace string (used by `SEARXNG_ENDPOINT`, `SEARXNG_TOKEN`, and `MNEMOPI_EMBEDDING_MODEL`).
 
 Within the overlay list, later files override earlier files (`PI_CONFIG_FILES` entries load before `--config` files). Overlay paths are resolved relative to the active project directory (after `~` expansion).
 
-Definitions with `protocolDefault: ["rpc", "acp"]` make RPC/ACP hosts start from the definition default: at startup `applyProtocolDefaults` (`src/main.ts`) pins the default as a soft runtime override unless the value is already configured. The pin is released by a `cfgX.set`/`cfgX.unset` of that setting (settings panel, agents hub, `cfg://`), by a reload that finds a persisted layer configuring it (a `config.yml` edit picked up by the RPC file watcher), and by a re-scope or clone into a project that configures it (an ACP session's own project config).
+`settings.previewSetup(config)` returns a detached, read-only copy of the instance with `config` as its session setup, showing what applying it would make effective without firing listeners or saving.
 
-Subagents receive `parent.overlay(overrides)`: reads fall through to the parent live, while the overrides and any later writes stay in the child and are never persisted.
+Definitions with `protocolDefault: ["rpc", "acp"]` make RPC/ACP hosts start from the definition default: at startup `applyProtocolDefaults` (`src/main.ts`) pins the default as a soft runtime override unless the value is already configured. The pin is released by a `cfgX.set`/`cfgX.unset`/`cfgX.setEntry`/`cfgX.setMember` of that setting (settings panel, agents hub, `cfg://`), by a reload that finds a persisted layer configuring it (a `config.yml` edit picked up by the RPC file watcher), by a re-scope or clone into a project that configures it (an ACP session's own project config), and by a session setup that configures it.
+
+Subagents receive `parent.overlay(overrides)`: reads fall through to the parent live (including its session setup), while the overrides and any later writes stay in the child and are never persisted.
 
 Project settings and config overlays are read-only from the settings API.
 

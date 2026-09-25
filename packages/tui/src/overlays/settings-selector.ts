@@ -16,11 +16,13 @@ import {
 	SelectList,
 	type SettingItem,
 	SettingsList,
+	type MouseRoutable,
 	type SgrMouseEvent,
 	type Tab,
 	TabBar,
 	truncateToWidth,
 	visibleWidth,
+	wrapTextWithAnsi,
 } from "../index";
 import type { ShapeTarget } from "@oh-my-pi/snapcompact";
 import type {
@@ -414,10 +416,10 @@ class ProviderLimitsSubmenu extends Container {
 	}
 }
 
-/** Stable sidebar width derived from the host's complete schema. */
-function settingsSidebarWidth(entries: readonly SettingsDisplayEntry[]): number {
+/** Stable sidebar width derived from the tabs exposed by this selector. */
+function settingsSidebarWidth(entries: readonly SettingsDisplayEntry[], tabs: readonly SettingTab[]): number {
 	let nameWidth = 0;
-	for (const tab of SETTING_TABS) {
+	for (const tab of tabs) {
 		for (const def of getSettingsForTab(entries, tab)) {
 			if (def.group) nameWidth = Math.max(nameWidth, visibleWidth(def.group));
 		}
@@ -425,15 +427,34 @@ function settingsSidebarWidth(entries: readonly SettingsDisplayEntry[]): number 
 	return Math.min(22, nameWidth) + 4;
 }
 
-function getSettingsTabs(): Tab[] {
-	return [
-		...SETTING_TABS.map(id => {
-			const meta = TAB_METADATA[id];
-			const icon = theme.symbol(meta.icon);
-			return { id, label: `${icon} ${meta.label}`, short: icon };
-		}),
-		{ id: "plugins", label: `${theme.icon.package} Plugins`, short: theme.icon.package },
-	];
+export type SettingsNavigationTab = SettingTab | "plugins" | "profiles";
+
+export interface SettingsTabContent extends Component {
+	/**
+	 * `sidebarWidth` is the host's stable native settings-sidebar width, for
+	 * embedded content that composes its own split pane.
+	 */
+	render(width: number, height?: number, sidebarWidth?: number): readonly string[];
+}
+
+function getSettingsTabs(
+	availableTabs: readonly SettingTab[],
+	includePlugins: boolean,
+	includeProfiles: boolean,
+): Tab[] {
+	const tabs: Tab[] = availableTabs.map(id => {
+		const meta = TAB_METADATA[id];
+		const icon = theme.symbol(meta.icon);
+		return { id, label: `${icon} ${meta.label}`, short: icon };
+	});
+	if (includePlugins) {
+		tabs.push({ id: "plugins", label: `${theme.icon.package} Plugins`, short: theme.icon.package });
+	}
+	if (includeProfiles) {
+		const icon = theme.symbol("tab.profiles");
+		tabs.push({ id: "profiles", label: `${icon} Profiles`, short: icon });
+	}
+	return tabs;
 }
 
 /**
@@ -442,7 +463,8 @@ function getSettingsTabs(): Tab[] {
  */
 export interface SettingsRuntimeContext {
 	settings: SettingsHost;
-	plugins: PluginSettingsHost;
+	/** Plugin host is optional for isolated/schema-only settings surfaces. */
+	plugins?: PluginSettingsHost;
 	/** Available thinking levels (from session) */
 	availableThinkingLevels: Effort[];
 	/** Current thinking level (from session) */
@@ -472,6 +494,19 @@ export interface StatusLinePreviewSettings {
 	transparent?: boolean;
 	compactThinkingLevel?: boolean;
 }
+/** A native section in an opt-in continuous settings surface. */
+export interface SettingsSelectorSection {
+	id: string;
+	label: string;
+	items: readonly (
+		| SettingItem
+		| {
+				setting: string;
+				disabled?: boolean;
+				descriptionSuffix?: string;
+		  }
+	)[];
+}
 
 export interface SettingsCallbacks {
 	/** Called when any setting value changes */
@@ -484,21 +519,53 @@ export interface SettingsCallbacks {
 	getStatusLinePreview?: () => string;
 	/** Called when plugins change */
 	onPluginsChanged?: () => void | Promise<void>;
+	/** Called when the embedded Profiles tab is entered. */
+	onProfilesSelected?: () => void;
+	/** Accept changes and return to an embedding surface. Omit on global Settings. */
+	onDone?: () => void;
+	/** Save an embedding surface. Invoked by Ctrl+S only from the composed main list. */
+	onSave?: () => void;
+	/** Called when the selected composed row changes. */
+	onSelectionChange?: (id: string | undefined) => void;
 	/** Called when settings panel is closed */
 	onCancel: () => void;
 }
 
+export interface SettingsSelectorOptions {
+	/** Schema tabs available on this surface, in display order. */
+	availableTabs?: readonly SettingTab[];
+	/** Initial tab. Defaults to the first available schema tab. */
+	initialTab?: SettingsNavigationTab;
+	/** Include the plugin settings tab when a plugin host is available. */
+	includePlugins?: boolean;
+	/** Frame title for embedded settings surfaces. */
+	title?: string;
+	/** Explicit terminal height for embedded/supervised surfaces. */
+	terminalHeight?: number;
+	/** Explanatory copy pinned above the editable content. */
+	notice?: string;
+	/** Content rendered directly inside the Profiles tab. Omit to hide the tab. */
+	profiles?: SettingsTabContent;
+	/**
+	 * Render one continuous native settings list grouped under these sections.
+	 * Supplying sections removes the local tab bar; schema references and raw
+	 * action rows share the same searchable list.
+	 */
+	sections?: () => readonly SettingsSelectorSection[];
+}
+
 /**
- * Main tabbed settings selector component.
- * Uses declarative settings definitions from settings-defs.ts.
+ * Settings selector with the ordinary tabbed surface and an opt-in continuous,
+ * sectioned surface. Both use the same native definition and field editors.
  */
 export class SettingsSelectorComponent implements Component {
 	#tabBar: TabBar;
 	#currentList: SettingsList | null = null;
 	#searchList: SettingsList | null = null;
 	#pluginComponent: PluginSettingsComponent | null = null;
-	#currentTabId: SettingTab | "plugins" = "appearance";
-	#preSearchTabId: SettingTab | "plugins" = "appearance";
+	#profilesContent: SettingsTabContent | undefined;
+	#currentTabId: SettingsNavigationTab;
+	#preSearchTabId: SettingsNavigationTab;
 	#searchQuery = "";
 	/** Single-line editor backing the search banner (cursor, word ops, paste). */
 	#searchInput = new Input();
@@ -513,20 +580,62 @@ export class SettingsSelectorComponent implements Component {
 	#tabRowCount = 0;
 	#contentRowStart = 0;
 	#contentRowCount = 0;
+	#contentColCount = 0;
+	#doneActionRow = -1;
+	#doneActionEnd = 0;
 	#sidebarWidth: number;
+	readonly #availableTabs: readonly SettingTab[];
+	readonly #includePlugins: boolean;
+	readonly #includeProfiles: boolean;
+	readonly #title: string;
+	readonly #terminalHeight: number | undefined;
+	readonly #notice: string | undefined;
 	readonly #context: SettingsRuntimeContext;
 	readonly #callbacks: SettingsCallbacks;
+	readonly #sections: (() => readonly SettingsSelectorSection[]) | undefined;
+	readonly #composedMode: boolean;
 
-	constructor(context: SettingsRuntimeContext, callbacks: SettingsCallbacks) {
+	constructor(context: SettingsRuntimeContext, callbacks: SettingsCallbacks, options: SettingsSelectorOptions = {}) {
 		this.#context = context;
 		this.#callbacks = callbacks;
-		this.#sidebarWidth = settingsSidebarWidth(context.settings.entries);
-		// No label prefix (the frame title already says Settings) and no
+		this.#sections = options.sections;
+		this.#composedMode = this.#sections !== undefined;
+		const requestedTabs = options.availableTabs ?? SETTING_TABS;
+		const availableTabs = SETTING_TABS.filter(tab => requestedTabs.includes(tab));
+		if (availableTabs.length === 0 && !this.#composedMode) {
+			throw new Error("Settings selector requires at least one settings tab");
+		}
+		// TabBar remains an internal implementation detail in composed mode;
+		// keep one hidden tab so its ordinary-mode invariant stays intact.
+		this.#availableTabs = availableTabs.length > 0 ? availableTabs : [SETTING_TABS[0]!];
+		this.#includePlugins = !this.#composedMode && options.includePlugins !== false && context.plugins !== undefined;
+		this.#includeProfiles = !this.#composedMode && options.profiles !== undefined;
+		this.#profilesContent = options.profiles;
+		this.#title = options.title ?? "Settings";
+		this.#terminalHeight = options.terminalHeight;
+		this.#notice = options.notice;
+		const tabs = getSettingsTabs(this.#availableTabs, this.#includePlugins, this.#includeProfiles);
+		const requestedInitialTab = options.initialTab;
+		let initialTab: SettingsNavigationTab = this.#availableTabs[0]!;
+		if (requestedInitialTab && tabs.some(tab => tab.id === requestedInitialTab)) {
+			initialTab = requestedInitialTab;
+		}
+		this.#currentTabId = initialTab;
+		this.#preSearchTabId = initialTab;
+		if (this.#sections) {
+			let nameWidth = 0;
+			for (const section of this.#sections()) nameWidth = Math.max(nameWidth, visibleWidth(section.label));
+			this.#sidebarWidth = Math.min(22, nameWidth) + 4;
+		} else {
+			this.#sidebarWidth = settingsSidebarWidth(context.settings.entries, this.#availableTabs);
+		}
+		// No label prefix (the frame title already names this surface) and no
 		// "(tab to cycle)" hint (folded into the footer hint line).
-		this.#tabBar = new TabBar("", getSettingsTabs(), getTabBarTheme());
+		this.#tabBar = new TabBar("", tabs, getTabBarTheme());
 		this.#tabBar.showHint = false;
+		this.#tabBar.setActiveById(initialTab);
 		this.#tabBar.onTabChange = () => {
-			const tabId = this.#tabBar.getActiveTab().id as SettingTab | "plugins";
+			const tabId = this.#tabBar.getActiveTab().id as SettingsNavigationTab;
 			if (this.#searchList) {
 				// While searching, tabs act as jump targets into the result list.
 				const firstId = this.#searchFirstMatch.get(tabId);
@@ -536,8 +645,11 @@ export class SettingsSelectorComponent implements Component {
 			this.#switchToTab(tabId);
 		};
 
-		// Initialize with first tab
-		this.#switchToTab("appearance");
+		if (this.#composedMode) {
+			this.#showComposedSections();
+		} else {
+			this.#switchToTab(initialTab);
+		}
 	}
 
 	invalidate(): void {
@@ -545,6 +657,48 @@ export class SettingsSelectorComponent implements Component {
 		this.#currentList?.invalidate();
 		this.#searchList?.invalidate();
 		this.#pluginComponent?.invalidate();
+		this.#profilesContent?.invalidate?.();
+	}
+	/** Replace the retained content rendered inside the Profiles tab. */
+	setProfilesContent(content: SettingsTabContent): void {
+		this.#profilesContent = content;
+	}
+
+	/** Select one of the tabs exposed by this Settings surface. */
+	selectTab(tab: SettingsNavigationTab): void {
+		if (this.#composedMode) return;
+		if (!this.#tabBar.setActiveById(tab) || (tab === this.#currentTabId && !this.#searchList)) return;
+		this.#switchToTab(tab);
+	}
+
+	/** Re-evaluate live conditions and replace the visible items without resetting list state. */
+	refreshItems(): void {
+		if (this.#composedMode) {
+			this.#refreshComposedItems();
+		} else if (this.#searchList) {
+			this.#setSearchQuery(this.#searchQuery);
+		} else if (this.#currentTabId !== "plugins" && this.#currentTabId !== "profiles") {
+			this.#refreshCurrentTabItems(getSettingsForTab(this.#context.settings.entries, this.#currentTabId));
+		}
+	}
+
+	/** Select a visible schema or action row by its stable id. */
+	selectItem(id: string): boolean {
+		return (this.#searchList ?? this.#currentList)?.selectItem(id) ?? false;
+	}
+
+	/** Clear either the composed list filter or the cross-tab search without closing the selector. */
+	clearSearch(): void {
+		if (this.#composedMode) {
+			this.#currentList?.clearSearch();
+		} else if (this.#searchList) {
+			this.#endSearch(false);
+		}
+	}
+
+	/** True while a native field editor owns input. */
+	hasOpenSubmenu(): boolean {
+		return (this.#searchList ?? this.#currentList)?.hasOpenSubmenu() ?? false;
 	}
 
 	/** Swap the active content (per-tab list, search list, or plugins). */
@@ -555,29 +709,48 @@ export class SettingsSelectorComponent implements Component {
 		build();
 	}
 
-	#switchToTab(tabId: SettingTab | "plugins"): void {
+	#switchToTab(tabId: SettingsNavigationTab): void {
 		this.#currentTabId = tabId;
 		this.#setContent(() => {
 			if (tabId === "plugins") {
 				this.#showPluginsTab();
+			} else if (tabId === "profiles") {
+				this.#hasSectionJump = false;
 			} else {
 				this.#showSettingsTab(tabId);
 			}
 		});
+		if (tabId === "profiles") this.#callbacks.onProfilesSelected?.();
 	}
 
-	#footerHintText(): string {
+	#footerHintText(width = Number.POSITIVE_INFINITY): string {
+		if (this.#composedMode) {
+			const save = this.#callbacks.onSave ? "Ctrl+S save · " : "";
+			if (this.#currentList?.sectionFocused) {
+				const detailed = `↑/↓ sections · Tab/Enter settings · ${save}Esc cancel`;
+				if (visibleWidth(detailed) <= width) return detailed;
+				return `Enter settings · ${save}Esc cancel`;
+			}
+			const detailed = `Enter/Space change · ${this.#hasSectionJump ? "Tab sections · " : ""}${save}Esc cancel`;
+			if (visibleWidth(detailed) <= width) return detailed;
+			return `Enter change · ${save}Esc cancel`;
+		}
 		if (this.#searchList) {
 			return "Enter to change · Tab to jump tabs · Esc to exit search";
 		}
 		if (this.#currentTabId === "plugins") {
 			return "Tab to switch tabs · Esc to close";
 		}
+		if (this.#currentTabId === "profiles") {
+			return "←/→ to switch tabs";
+		}
 		if (this.#currentList?.sectionFocused) {
-			return "↑/↓ to jump sections · Tab/Enter to settings · ←/→ to switch tabs · Esc to close";
+			const close = this.#callbacks.onDone ? "Esc discards draft" : "Esc to close";
+			return `↑/↓ to jump sections · Tab/Enter to settings · ←/→ to switch tabs · ${close}`;
 		}
 		const nav = this.#hasSectionJump ? "Tab to jump sections · ←/→ to switch tabs" : "Tab to switch tabs";
-		return `Enter/Space to change · ${nav} · Type to search · Esc to close`;
+		const close = this.#callbacks.onDone ? "Esc discards draft" : "Esc to close";
+		return `Enter/Space to change · ${nav} · Type to search · ${close}`;
 	}
 
 	/** Single-line search banner: accent icon, editable query with live cursor, right-aligned match count. */
@@ -599,32 +772,36 @@ export class SettingsSelectorComponent implements Component {
 	 * then a footer hint pinned above the bottom border.
 	 */
 	render(width: number): readonly string[] {
-		const height = Math.max(14, process.stdout.rows || 40);
+		const height = Math.max(14, this.#terminalHeight ?? process.stdout.rows ?? 40);
 		const innerWidth = Math.max(1, width - 4);
 
-		const tabLines = this.#tabBar.render(innerWidth);
+		const tabLines = this.#composedMode ? [] : this.#tabBar.render(innerWidth);
 		const searching = this.#searchList !== null;
-		const showPreview = !searching && this.#currentTabId === "appearance";
+		const showPreview = !this.#composedMode && !searching && this.#currentTabId === "appearance";
 		const previewLines = showPreview ? ["", theme.fg("muted", "Preview:"), this.#getStatusPreviewString()] : [];
+		const noticeLines = this.#notice ? wrapTextWithAnsi(theme.fg("dim", this.#notice), innerWidth) : [];
 
-		// Fixed chrome: top border, tabs, divider, [search row], divider, hint, bottom border.
-		const fixedRows = 1 + tabLines.length + 1 + (searching ? 1 : 0) + 1 + 1 + 1;
-		const contentRows = Math.max(7, height - fixedRows - previewLines.length);
+		// Fixed chrome: top border, tabs, divider, [search row], notice, divider, hint, bottom border.
+		const fixedRows = 1 + tabLines.length + 1 + (searching ? 1 : 0) + noticeLines.length + 1 + 1 + 1;
+		const contentRows = Math.max(4, height - fixedRows - previewLines.length);
 
 		const list = this.#searchList ?? this.#currentList;
 		let contentLines: readonly string[];
 		if (list) {
-			// SettingsList pads itself to viewport + blank + 3 description rows.
-			list.setMaxVisible(contentRows - 4);
+			// Composed lists retain their own search status row; tabbed lists
+			// use the selector-owned search banner.
+			list.setMaxVisible(contentRows - (this.#composedMode ? 5 : 4));
 			contentLines = list.render(innerWidth);
 		} else if (this.#pluginComponent) {
 			contentLines = this.#pluginComponent.render(innerWidth);
+		} else if (this.#currentTabId === "profiles" && this.#profilesContent) {
+			contentLines = this.#profilesContent.render(innerWidth, contentRows, this.#sidebarWidth);
 		} else {
 			contentLines = [];
 		}
 
 		const out: string[] = [];
-		out.push(topBorder(width, "Settings"));
+		out.push(topBorder(width, this.#title));
 		this.#tabRowStart = out.length;
 		this.#tabRowCount = tabLines.length;
 		for (const line of tabLines) {
@@ -634,7 +811,11 @@ export class SettingsSelectorComponent implements Component {
 		if (searching) {
 			out.push(row(this.#renderSearchBanner(innerWidth), width));
 		}
+		for (const line of noticeLines) {
+			out.push(row(line, width));
+		}
 		this.#contentRowStart = out.length;
+		this.#contentColCount = innerWidth;
 		this.#contentRowCount = contentRows;
 		for (let i = 0; i < contentRows; i++) {
 			out.push(row(contentLines[i] ?? "", width));
@@ -643,17 +824,23 @@ export class SettingsSelectorComponent implements Component {
 			out.push(row(line, width));
 		}
 		out.push(divider(width));
-		out.push(row(theme.fg("dim", this.#footerHintText()), width));
+		const doneAction = "[Ctrl+S Use group changes]";
+		const showDoneAction = !this.#composedMode && this.#callbacks.onDone !== undefined;
+		this.#doneActionRow = showDoneAction ? out.length : -1;
+		this.#doneActionEnd = showDoneAction ? visibleWidth(doneAction) : 0;
+		const footerHint = this.#footerHintText(this.#composedMode ? innerWidth : undefined);
+		const footer = showDoneAction
+			? `${theme.fg("accent", doneAction)}  ${theme.fg("dim", footerHint)}`
+			: theme.fg("dim", footerHint);
+		out.push(row(footer, width));
 		out.push(bottomBorder(width));
 		return out;
 	}
 
 	/**
 	 * Route an SGR mouse report against the frame geometry of the last render.
-	 * Wheel scrolls the focused list, motion drives the hover highlights (tabs
-	 * and rows), and a left click activates: tabs switch (or jump, while
-	 * searching), a row click selects, and a click on the already-selected row
-	 * activates it (toggle / open submenu).
+	 * Tabs and settings lists keep their existing hit testing; the embedded
+	 * Profiles pane receives every pointer report in child-local coordinates.
 	 */
 	#handleMouse(data: string): boolean {
 		return routeSgrMouseInput(data, event => this.#routeMouseEvent(event));
@@ -661,6 +848,7 @@ export class SettingsSelectorComponent implements Component {
 
 	#routeMouseEvent(event: SgrMouseEvent): boolean {
 		const list = this.#searchList ?? this.#currentList;
+		const profilesContent = this.#profilesContent;
 		// row() insets content by the border column plus a space.
 		const contentColInset = 2;
 		const innerCol = event.col - contentColInset;
@@ -672,13 +860,31 @@ export class SettingsSelectorComponent implements Component {
 			list.routeSubmenuMouse(event, contentLine, innerCol);
 			return true;
 		}
+		if (
+			this.#callbacks.onDone &&
+			event.leftClick &&
+			event.row === this.#doneActionRow &&
+			innerCol >= 0 &&
+			innerCol < this.#doneActionEnd
+		) {
+			this.#callbacks.onDone();
+			return true;
+		}
 
 		const tabLine = event.row - this.#tabRowStart;
 		const overTabs = tabLine >= 0 && tabLine < this.#tabRowCount;
 		const overContent = contentLine >= 0 && contentLine < this.#contentRowCount;
+		const overProfilesContent =
+			overContent &&
+			innerCol >= 0 &&
+			innerCol < this.#contentColCount &&
+			this.#currentTabId === "profiles" &&
+			profilesContent !== undefined;
 
 		if (event.wheel !== null) {
-			if (overContent) {
+			if (overProfilesContent) {
+				this.#routeProfilesMouse(profilesContent, event, contentLine, innerCol);
+			} else if (overContent) {
 				list?.handleWheelAt(event.wheel, contentLine, innerCol);
 			}
 			return true;
@@ -687,18 +893,26 @@ export class SettingsSelectorComponent implements Component {
 		if (event.motion) {
 			const hovered = overTabs ? this.#tabBar.tabAt(tabLine, innerCol) : undefined;
 			this.#tabBar.setHoverTab(hovered && !hovered.muted ? hovered.id : null);
-			// hoverTest: never light up pane rows while the pointer is on the
-			// sidebar — only rows the pointer is actually on.
-			list?.setHoverItem(overContent ? (list.hoverTest(contentLine, innerCol) ?? null) : null);
+			if (overProfilesContent) {
+				this.#routeProfilesMouse(profilesContent, event, contentLine, innerCol);
+			} else {
+				// hoverTest: never light up pane rows while the pointer is on the
+				// sidebar — only rows the pointer is actually on.
+				list?.setHoverItem(overContent ? (list.hoverTest(contentLine, innerCol) ?? null) : null);
+			}
 			return true;
 		}
-		if (!event.leftClick) return true;
 
-		if (overTabs) {
+		if (overTabs && event.leftClick) {
 			const tab = this.#tabBar.tabAt(tabLine, innerCol);
 			if (tab) this.#tabBar.selectTab(tab.id);
 			return true;
 		}
+		if (overProfilesContent) {
+			this.#routeProfilesMouse(profilesContent, event, contentLine, innerCol);
+			return true;
+		}
+		if (!event.leftClick) return true;
 		if (overContent && list) {
 			const itemId = list.hoverTest(contentLine, innerCol);
 			const id = itemId ?? list.hitTest(contentLine, innerCol);
@@ -710,6 +924,12 @@ export class SettingsSelectorComponent implements Component {
 			}
 		}
 		return true;
+	}
+
+	#routeProfilesMouse(content: SettingsTabContent, event: SgrMouseEvent, contentLine: number, innerCol: number): void {
+		if ("routeMouse" in content && typeof content.routeMouse === "function") {
+			(content as SettingsTabContent & MouseRoutable).routeMouse(event, contentLine, innerCol);
+		}
 	}
 
 	// ═══════════════════════════════════════════════════════════════════════
@@ -761,7 +981,7 @@ export class SettingsSelectorComponent implements Component {
 		const tabResults: { tab: SettingTab; matched: SettingItem[]; bestScore: number; order: number }[] = [];
 		this.#searchFirstMatch.clear();
 		let total = 0;
-		for (const tab of SETTING_TABS) {
+		for (const tab of this.#availableTabs) {
 			const candidates: SettingItem[] = [];
 			for (const def of getSettingsForTab(this.#context.settings.entries, tab)) {
 				const item = this.#defToItem(def);
@@ -776,7 +996,7 @@ export class SettingsSelectorComponent implements Component {
 				tab,
 				matched,
 				bestScore: ranked[0]?.score ?? 0,
-				order: SETTING_TABS.indexOf(tab),
+				order: this.#availableTabs.indexOf(tab),
 			});
 		}
 
@@ -813,12 +1033,15 @@ export class SettingsSelectorComponent implements Component {
 		if (!this.#searchList) return;
 		const selected = jumpToSelection ? this.#searchList.getSelectedItem() : undefined;
 		const selectedDef = selected ? getSettingDef(this.#context.settings.entries, selected.id) : undefined;
-		const targetTab: SettingTab | "plugins" = selectedDef?.tab ?? this.#preSearchTabId;
+		const targetTab: SettingsNavigationTab = selectedDef?.tab ?? this.#preSearchTabId;
 
 		this.#searchQuery = "";
 		this.#searchFirstMatch.clear();
 		this.#searchMatchCount = 0;
-		this.#tabBar.setTabs(getSettingsTabs(), targetTab);
+		this.#tabBar.setTabs(
+			getSettingsTabs(this.#availableTabs, this.#includePlugins, this.#includeProfiles),
+			targetTab,
+		);
 		this.#switchToTab(targetTab);
 		if (selectedDef) {
 			this.#currentList?.selectItem(selectedDef.path);
@@ -838,19 +1061,25 @@ export class SettingsSelectorComponent implements Component {
 				matched.push({ id, label: `${icon} ${meta.label} (${count})`, short: `${icon} ${count}` });
 			}
 		}
-		for (const id of SETTING_TABS) {
+		for (const id of this.#availableTabs) {
 			if (matchedIds.has(id)) continue;
 			const meta = TAB_METADATA[id];
 			const icon = theme.symbol(meta.icon);
 			empty.push({ id, label: `${icon} ${meta.label}`, short: icon, muted: true });
 		}
 		// Plugins hosts its own UI; it is not part of the schema-backed search.
-		empty.push({
-			id: "plugins",
-			label: `${theme.icon.package} Plugins`,
-			short: theme.icon.package,
-			muted: true,
-		});
+		if (this.#includePlugins) {
+			empty.push({
+				id: "plugins",
+				label: `${theme.icon.package} Plugins`,
+				short: theme.icon.package,
+				muted: true,
+			});
+		}
+		if (this.#includeProfiles) {
+			const icon = theme.symbol("tab.profiles");
+			empty.push({ id: "profiles", label: `${icon} Profiles`, short: icon, muted: true });
+		}
 		return [...matched, ...empty];
 	}
 
@@ -1216,9 +1445,89 @@ export class SettingsSelectorComponent implements Component {
 		}
 	}
 
-	/**
-	 * Show a settings tab using definitions.
-	 */
+	/** Build condition-filtered schema fields and raw action rows for the continuous surface. */
+	#buildComposedItems(): SettingItem[] {
+		const items: SettingItem[] = [];
+		for (const section of this.#sections?.() ?? []) {
+			const sectionItems: SettingItem[] = [];
+			for (const entry of section.items) {
+				if ("setting" in entry) {
+					const def = getSettingDef(this.#context.settings.entries, entry.setting);
+					if (!def) {
+						// A valid host entry may intentionally be config-file-only
+						// (for example a number without declared choices). Match
+						// ordinary Settings by omitting it from the native surface.
+						if (this.#context.settings.entries.some(candidate => candidate.path === entry.setting)) continue;
+						throw new Error(`Unknown setting: ${entry.setting}`);
+					}
+					const item = this.#defToItem(def);
+					if (!item) continue;
+					const suffix = entry.descriptionSuffix?.trim();
+					sectionItems.push({
+						...item,
+						description: suffix
+							? item.description
+								? `${item.description}\n${suffix}`
+								: suffix
+							: item.description,
+						disabled: item.disabled === true || entry.disabled === true,
+					});
+				} else {
+					sectionItems.push({ ...entry });
+				}
+			}
+			if (sectionItems.length === 0) continue;
+			items.push({
+				id: `__section:${section.id}`,
+				label: section.label,
+				currentValue: "",
+				heading: true,
+			});
+			items.push(...sectionItems);
+		}
+		return items;
+	}
+
+	#showComposedSections(): void {
+		const items = this.#buildComposedItems();
+		this.#hasSectionJump = items.filter(item => item.heading).length >= 2;
+		this.#setContent(() => {
+			const list = new SettingsList(
+				items,
+				10,
+				getSettingsListTheme(),
+				(id, newValue) => this.#onComposedSettingChange(id, newValue),
+				() => this.#callbacks.onCancel(),
+				{ hint: "", sidebarWidth: this.#sidebarWidth },
+			);
+			list.onSelectionChange = item => this.#callbacks.onSelectionChange?.(item?.id);
+			this.#currentList = list;
+		});
+	}
+
+	#refreshComposedItems(): void {
+		if (!this.#currentList) return;
+		const items = this.#buildComposedItems();
+		this.#hasSectionJump = items.filter(item => item.heading).length >= 2;
+		this.#currentList.setItems(items);
+	}
+
+	#onComposedSettingChange(path: string, newValue: string): void {
+		const def = getSettingDef(this.#context.settings.entries, path);
+		if (def?.type === "boolean") {
+			const boolValue = newValue === "true";
+			this.#context.settings.set(path, boolValue);
+			this.#callbacks.onChange(path, boolValue);
+		} else if (def?.type === "enum") {
+			this.#context.settings.set(path, newValue);
+			this.#callbacks.onChange(path, newValue);
+		} else if (!def) {
+			this.#callbacks.onChange(path, newValue);
+		}
+		if (def?.tab === "appearance") this.#triggerStatusLinePreview();
+		this.#refreshComposedItems();
+	}
+
 	#showSettingsTab(tabId: SettingTab): void {
 		const defs = getSettingsForTab(this.#context.settings.entries, tabId);
 
@@ -1287,7 +1596,9 @@ export class SettingsSelectorComponent implements Component {
 
 	/** Re-evaluate condition gates against the current settings and refresh the active list. */
 	#refreshCurrentTabItems(defs: SettingDef[]): void {
-		if (this.#currentTabId === "plugins" || !this.#currentList) return;
+		if (this.#currentTabId === "plugins" || this.#currentTabId === "profiles" || !this.#currentList) {
+			return;
+		}
 		this.#currentList.setItems(this.#buildItemsForDefs(defs));
 	}
 
@@ -1317,7 +1628,9 @@ export class SettingsSelectorComponent implements Component {
 	}
 
 	#showPluginsTab(): void {
-		this.#pluginComponent = new PluginSettingsComponent(this.#context.plugins, {
+		const plugins = this.#context.plugins;
+		if (!plugins) return;
+		this.#pluginComponent = new PluginSettingsComponent(plugins, {
 			onClose: () => this.#callbacks.onCancel(),
 			onPluginChanged: () => this.#callbacks.onPluginsChanged?.(),
 			requestRender: this.#context.requestRender,
@@ -1345,9 +1658,38 @@ export class SettingsSelectorComponent implements Component {
 			activeList.handleInput(data);
 			return;
 		}
+		if (this.#composedMode) {
+			if (this.#callbacks.onSave && matchesKey(data, "ctrl+s")) {
+				this.#callbacks.onSave();
+				return;
+			}
+			if (
+				(matchesKey(data, "tab") || matchesKey(data, "shift+tab")) &&
+				this.#currentList?.hasSectionFocusTargets()
+			) {
+				this.#currentList.toggleSectionFocus();
+				return;
+			}
+			this.#currentList?.handleInput(data);
+			return;
+		}
 
 		if (this.#searchList) {
 			this.#handleSearchModeInput(data, this.#searchList);
+			return;
+		}
+		if (this.#currentTabId === "profiles") {
+			if (matchesKey(data, "left") || matchesKey(data, "right")) {
+				this.#tabBar.handleInput(data);
+			} else if (this.#profilesContent?.handleInput) {
+				this.#profilesContent.handleInput(data);
+			} else if (getKeybindings().matches(data, "tui.select.cancel")) {
+				this.#callbacks.onCancel();
+			}
+			return;
+		}
+		if (this.#callbacks.onDone && matchesKey(data, "ctrl+s")) {
+			this.#callbacks.onDone();
 			return;
 		}
 
@@ -1366,8 +1708,8 @@ export class SettingsSelectorComponent implements Component {
 			return;
 		}
 
-		// Printable characters start a search across every settings tab. The
-		// plugins tab keeps its own local filtering instead.
+		// Printable characters start a search across every schema-backed
+		// settings tab. Virtual action/plugin tabs do not enter global search.
 		if (this.#currentTabId !== "plugins") {
 			const printable = extractPrintableText(data);
 			if (printable !== undefined && printable.trim().length > 0) {

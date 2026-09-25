@@ -1027,14 +1027,34 @@ function modelRoleAliasPrefixLength(value: string): number | undefined {
 	return MODEL_ROLE_ALIAS_PREFIXES.find(prefix => value.startsWith(prefix))?.length;
 }
 
-function getModelRoleAlias(value: string, settings?: ModelRoleLookup): string | undefined {
+/** Role name `value` (a selector without its thinking suffix) aliases, before checking that the role exists. */
+function modelRoleAliasCandidate(value: string): string | undefined {
 	const normalized = value.trim();
 	const prefixLength = modelRoleAliasPrefixLength(normalized);
 	if (prefixLength === undefined) return undefined;
+	return normalized === DEFAULT_MODEL_ROLE_ALIAS ? DEFAULT_MODEL_ROLE : normalized.slice(prefixLength);
+}
 
-	const candidate = normalized === DEFAULT_MODEL_ROLE_ALIAS ? DEFAULT_MODEL_ROLE : normalized.slice(prefixLength);
+function getModelRoleAlias(value: string, settings?: ModelRoleLookup): string | undefined {
+	const candidate = modelRoleAliasCandidate(value);
+	if (candidate === undefined) return undefined;
 	if (isModelRole(candidate) || settings?.getModelRole(candidate) !== undefined) return candidate;
 	return undefined;
+}
+
+/**
+ * The role one selector pattern (`@role`, `pi/role`, or `*`, each with an optional `:level`) aliases,
+ * parsed exactly as role resolution parses it but without checking that the role exists;
+ * `undefined` for any other pattern.
+ */
+export function modelRoleAliasTarget(pattern: string): string | undefined {
+	const normalized = pattern.trim();
+	const { base } = splitThinkingSuffix(
+		normalized,
+		modelRoleAliasPrefixLength(normalized) ?? LEGACY_MODEL_ROLE_ALIAS_PREFIX.length,
+		MAX_THINKING_SUFFIX_OPTIONS,
+	);
+	return modelRoleAliasCandidate(base);
 }
 
 /** Normalize comma-separated or array model selectors into an ordered pattern list. */
@@ -1120,11 +1140,20 @@ export function rolePriorityDefaults(role: string): string[] {
 	return hasOwnKey(MODEL_PRIO, key) ? normalizeModelPatternList(MODEL_PRIO[key]) : [];
 }
 
+/**
+ * Role lookup of a live session. `automaticDefault` is what an explicit `default` alias (`@default`, `*`)
+ * resolves to while the `default` role is Automatic (unset or masked by `null`), such as the session's active
+ * model. Roles that merely inherit `default` never see it and keep their own fallbacks.
+ */
+export interface SessionModelRoleLookup extends ModelRoleLookup {
+	automaticDefault?: string;
+}
+
 /** Resolve aliases inside a configured pattern list without leaking cycles to model matching. */
 function resolveNestedRolePatterns(
 	value: string,
 	roleDefaults: string[],
-	settings: ModelRoleLookup | undefined,
+	settings: SessionModelRoleLookup | undefined,
 	visited: Set<string>,
 ): string[] {
 	const resolved: string[] = [];
@@ -1158,7 +1187,7 @@ function resolveDefaultInheritedPatterns(
 	role: ModelRole,
 	configuredDefault: string | undefined,
 	roleDefaults: string[],
-	settings: ModelRoleLookup | undefined,
+	settings: SessionModelRoleLookup | undefined,
 	visited: Set<string>,
 ): string[] {
 	if (!shouldInheritDefaultBeforePriority(role) || !configuredDefault) return [];
@@ -1167,7 +1196,7 @@ function resolveDefaultInheritedPatterns(
 
 function resolveConfiguredRolePattern(
 	value: string,
-	settings?: ModelRoleLookup,
+	settings?: SessionModelRoleLookup,
 	visited: Set<string> = new Set(),
 ): string[] | undefined {
 	const normalized = value.trim();
@@ -1183,8 +1212,11 @@ function resolveConfiguredRolePattern(
 	if (visited.has(role)) return undefined;
 	visited.add(role);
 
-	const configured = settings?.getModelRole(role)?.trim();
 	const configuredDefault = settings?.getModelRole(DEFAULT_MODEL_ROLE)?.trim();
+	const configured =
+		role === DEFAULT_MODEL_ROLE
+			? configuredDefault || settings?.automaticDefault?.trim()
+			: settings?.getModelRole(role)?.trim();
 	const roleDefaults = isModelRole(role) ? rolePriorityDefaults(role) : [];
 	const configuredFallback = isModelRole(role) ? ROLE_CONFIGURED_FALLBACK[role] : undefined;
 	const fallbackPatterns =
@@ -1225,7 +1257,7 @@ export function expandRoleAlias(value: string, settings?: ModelRoleLookup): stri
 
 export function resolveConfiguredModelPatterns(
 	value: string | string[] | undefined,
-	settings?: ModelRoleLookup,
+	settings?: SessionModelRoleLookup,
 ): string[] {
 	const patterns = normalizeModelPatternList(value);
 	return patterns.flatMap(pattern => {
@@ -1389,7 +1421,7 @@ export interface ResolvedModelRoleValue {
 export function resolveModelRoleValue(
 	roleValue: string | undefined,
 	availableModels: Model<Api>[],
-	options?: { settings?: Settings; roleLookup?: ModelRoleLookup; matchPreferences?: ModelMatchPreferences },
+	options?: { settings?: Settings; roleLookup?: SessionModelRoleLookup; matchPreferences?: ModelMatchPreferences },
 ): ResolvedModelRoleValue {
 	if (!roleValue) {
 		return { model: undefined, thinkingLevel: undefined, explicitThinkingLevel: false, warning: undefined };

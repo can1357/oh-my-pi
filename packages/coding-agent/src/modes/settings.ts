@@ -990,6 +990,7 @@ export const cfgUpdateChannel = register({
 
 export const cfgMarketplaceAutoUpdate = register({
 	id: "marketplace.autoUpdate",
+	safetySensitive: true,
 	type: "enum",
 	values: ["off", "notify", "auto"] as const,
 	default: "notify",

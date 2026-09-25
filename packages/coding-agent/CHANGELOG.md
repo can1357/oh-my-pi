@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added **Profiles** to Settings (also `/profiles`): save models, agents, and chosen settings groups as named profiles, preview and edit them as drafts, and load one into this conversation (models only) or a new session (everything, applied live) without rewriting your configuration; `u` unloads it ([#12993](https://github.com/can1357/oh-my-pi/pull/12993) by [@Vortex727](https://github.com/Vortex727))
+- Added profile export and import through a file or the clipboard; imports can be reviewed before saving, and safety settings such as the tool approval mode are never exported or imported ([#12993](https://github.com/can1357/oh-my-pi/pull/12993) by [@Vortex727](https://github.com/Vortex727))
+- Added quota to every profile's overview in the Profiles tab: the remaining quota on each provider that profile's models use, and which roles use it, so profiles can be compared before switching ([#12993](https://github.com/can1357/oh-my-pi/pull/12993) by [@Vortex727](https://github.com/Vortex727))
+
+### Fixed
+
+- Fixed editing one fallback chain in the model hub, or one agent in `/agents`, saving every chain or agent a `--config` overlay supplies into `config.yml` ([#13308](https://github.com/can1357/oh-my-pi/pull/13308) by [@Vortex727](https://github.com/Vortex727))
+
 ## [18.3.2] - 2026-09-25
 
 ### Added

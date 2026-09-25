@@ -359,9 +359,26 @@ export function formatActivityErrorDetail(error: string, homeDir = os.homedir())
 
 const CARD_MIN_WIDTH = 32;
 const CARD_GUTTER = 3;
-const CARD_MAX_WINDOWS = 4;
+/** Quota buckets shown per provider before the rest collapse into "+N more". */
+export const CARD_MAX_WINDOWS = 4;
 const CARD_MIN_BAR_WIDTH = 12;
 const CARD_MAX_LABEL_LINES = 2;
+
+/** Theme color for a usage limit status. */
+export function usageStatusColor(status: UsageLimit["status"]): "success" | "warning" | "error" | "dim" {
+	if (status === "exhausted") return "error";
+	if (status === "warning") return "warning";
+	if (status === "ok") return "success";
+	return "dim";
+}
+
+/** Used-fraction bar: filled cells are used quota, colored by status. */
+export function renderUsageBar(fraction: number | undefined, status: UsageLimit["status"], width: number): string {
+	if (fraction === undefined) return theme.fg("dim", "·".repeat(width));
+	const clamped = Math.min(Math.max(fraction, 0), 1);
+	const filled = Math.round(clamped * width);
+	return `${theme.fg(usageStatusColor(status), "█".repeat(filled))}${theme.fg("dim", "░".repeat(width - filled))}`;
+}
 
 interface CardRowLayout {
 	labelWidth: number;
@@ -444,22 +461,6 @@ export class UsageDashboardComponent implements Component {
 		return theme.fg("dim", theme.status.info);
 	}
 
-	#statusColor(status: UsageLimit["status"]): "success" | "warning" | "error" | "dim" {
-		if (status === "exhausted") return "error";
-		if (status === "warning") return "warning";
-		if (status === "ok") return "success";
-		return "dim";
-	}
-
-	#miniBar(fraction: number | undefined, status: UsageLimit["status"], width: number): string {
-		if (fraction === undefined) return theme.fg("dim", "·".repeat(width));
-		const clamped = Math.min(Math.max(fraction, 0), 1);
-		const filled = Math.round(clamped * width);
-		const bar = "█".repeat(filled);
-		const empty = "░".repeat(width - filled);
-		return `${theme.fg(this.#statusColor(status), bar)}${theme.fg("dim", empty)}`;
-	}
-
 	#renderCardLines(card: ProviderCard, width: number, labels: string[][], layout: CardRowLayout): string[] {
 		const lines: string[] = [];
 		const cardStatus = card.unlimited ? "ok" : aggregateStatus(card.windows);
@@ -517,11 +518,11 @@ export class UsageDashboardComponent implements Component {
 				continue;
 			}
 			const freePct = Math.max(0, Math.round((1 - window.fraction) * 100));
-			const pctText = theme.fg(this.#statusColor(window.status), `${freePct}%`.padStart(5));
+			const pctText = theme.fg(usageStatusColor(window.status), `${freePct}%`.padStart(5));
 			const resetPlain = window.resetMs !== undefined ? formatDuration(window.resetMs) : "";
 			const resetText = resetWidth > 0 ? ` ${theme.fg("dim", resetPlain.padStart(resetWidth))}` : "";
 			for (const line of wrapTextWithAnsi(
-				`${prefix}${this.#miniBar(window.fraction, window.status, barWidth)}${pctText}${resetText}`,
+				`${prefix}${renderUsageBar(window.fraction, window.status, barWidth)}${pctText}${resetText}`,
 				contentWidth,
 			)) {
 				lines.push(`  ${line}`);

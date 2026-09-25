@@ -34,10 +34,14 @@ export interface SettingItem {
 	values?: string[];
 	/** If provided, Enter opens this submenu. Receives current value and done callback. */
 	submenu?: (currentValue: string, done: (selectedValue?: string) => void) => Component;
+	/** If provided, Enter/Space activates this action. */
+	onActivate?: () => void;
 	/** True when the displayed setting differs from its default value. */
 	changed?: boolean;
 	/** Render as a non-interactive section heading. Skipped by navigation and search. */
 	heading?: boolean;
+	/** Block activation while retaining keyboard focus, search, and the description. */
+	disabled?: boolean;
 }
 
 export interface SettingsListTheme {
@@ -56,6 +60,31 @@ export interface SettingsListTheme {
 	section?: (text: string, active: boolean) => string;
 	/** Hover band applied to the full row under the mouse pointer. */
 	hovered?: (text: string) => string;
+}
+
+/** Width used by the native settings section sidebar: two-column indent plus two-column trailing gap. */
+export function measureSettingsSidebarWidth(labels: readonly string[]): number {
+	let nameWidth = 0;
+	for (const label of labels) nameWidth = Math.max(nameWidth, visibleWidth(label));
+	return Math.min(22, nameWidth) + 4;
+}
+
+/** Render one native settings section-sidebar row. */
+export function renderSettingsSidebarRow(
+	label: string,
+	width: number,
+	active: boolean,
+	focused: boolean,
+	theme: SettingsListTheme,
+): string {
+	const shown = truncateToWidth(label, Math.max(0, width - 4), Ellipsis.Omit);
+	const prefix = focused ? theme.cursor : "  ";
+	const styled = theme.section
+		? theme.section(shown, active)
+		: active
+			? theme.label(shown, true, false)
+			: theme.hint(shown);
+	return `${prefix}${styled}${padding(Math.max(0, width - visibleWidth(prefix) - visibleWidth(shown)))}`;
 }
 
 /** A contiguous run of items under one heading, derived from the item list. */
@@ -522,8 +551,14 @@ export class SettingsList implements Component {
 		}
 		const warningStyle = this.#theme.warning ?? this.#theme.description;
 		const labelText =
-			this.#theme.label(item.label, isSelected, item.changed === true) + (mark ? warningStyle(mark) : "") + labelPad;
-		const valueText = this.#theme.value(valuePlain, isSelected, item.changed === true);
+			(item.disabled
+				? this.#theme.hint(item.label)
+				: this.#theme.label(item.label, isSelected, item.changed === true)) +
+			(mark ? warningStyle(mark) : "") +
+			labelPad;
+		const valueText = item.disabled
+			? this.#theme.hint(valuePlain)
+			: this.#theme.value(valuePlain, isSelected, item.changed === true);
 		const text = truncateToWidth(prefix + labelText + separator + valueText, Math.max(0, rowWidth));
 		// Pointer hover paints a band behind the whole row, distinct from the
 		// keyboard selection (cursor glyph + accent) which stays where it is.
@@ -655,9 +690,7 @@ export class SettingsList implements Component {
 	 */
 	#renderSplitList(width: number, sections: SettingSection[]): string[] | null {
 		const sectionNames = sections.map(section => section.name || "Other");
-		let nameWidth = 0;
-		for (const name of sectionNames) nameWidth = Math.max(nameWidth, visibleWidth(name));
-		const sidebarWidth = this.#options.sidebarWidth ?? Math.min(22, nameWidth) + 4; // 2-space indent + 2-space gap
+		const sidebarWidth = this.#options.sidebarWidth ?? measureSettingsSidebarWidth(sectionNames);
 		const paneWidth = width - sidebarWidth - 2; // "│ " separator
 		// Below this the value column starves (2 prefix + 30 label + 2 gap + ~25 value).
 		if (paneWidth < 60) return null;
@@ -665,16 +698,15 @@ export class SettingsList implements Component {
 		const activeIndex = this.#activeSectionIndex(sections);
 		const active = sections[activeIndex];
 
-		const sectionStyle =
-			this.#theme.section ??
-			((text: string, isActive: boolean) =>
-				isActive ? this.#theme.label(text, true, false) : this.#theme.hint(text));
-		const sidebarRows = sectionNames.map((name, i) => {
-			const label = truncateToWidth(name, sidebarWidth - 4, Ellipsis.Omit);
-			// Section focus parks the cursor glyph on the active sidebar entry.
-			const prefix = this.#sectionFocus && i === activeIndex ? this.#theme.cursor : "  ";
-			return `${prefix}${sectionStyle(label, i === activeIndex)}${padding(sidebarWidth - visibleWidth(prefix) - visibleWidth(label))}`;
-		});
+		const sidebarRows = sectionNames.map((name, i) =>
+			renderSettingsSidebarRow(
+				name,
+				sidebarWidth,
+				i === activeIndex,
+				this.#sectionFocus && i === activeIndex,
+				this.#theme,
+			),
+		);
 
 		// Right pane: the whole list, continuously scrollable. The active
 		// section's heading row belongs to its dim-exempt range.
@@ -780,9 +812,11 @@ export class SettingsList implements Component {
 
 	#activateItem(): void {
 		const item = this.#filteredItems[this.#selectedIndex];
-		if (!item || item.heading) return;
+		if (!item || item.heading || item.disabled) return;
 
-		if (item.submenu) {
+		if (item.onActivate) {
+			item.onActivate();
+		} else if (item.submenu) {
 			// Open submenu, passing current value so it can pre-select correctly
 			this.#submenuItemId = item.id;
 			this.#submenuComponent = item.submenu(item.currentValue, (selectedValue?: string) => {

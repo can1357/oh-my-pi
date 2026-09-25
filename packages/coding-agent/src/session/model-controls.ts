@@ -324,20 +324,10 @@ export class ModelControls {
 
 		const currentModel = this.#model;
 		if (!currentModel) return undefined;
-		const matchPreferences = getModelMatchPreferences(this.#host.settings);
 		const models: ResolvedRoleModel[] = [];
 
 		for (const role of roleOrder) {
-			const roleModelStr =
-				role === "default"
-					? (this.#host.settings.getModelRole("default") ?? `${currentModel.provider}/${currentModel.id}`)
-					: this.#host.settings.getModelRole(role);
-			if (!roleModelStr) continue;
-
-			const resolved = resolveModelRoleValue(roleModelStr, availableModels, {
-				settings: this.#host.settings,
-				matchPreferences,
-			});
+			const resolved = resolveRoleModelFull(this.#host.settings, role, availableModels, currentModel);
 			if (!resolved.model) continue;
 
 			models.push({

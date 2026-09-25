@@ -107,9 +107,10 @@ export class HubFrame {
 		this.#stack.invalidate();
 	}
 
-	/** Measure labels and annotations within this hub's sidebar width bounds. */
+	/** Measure the title, labels, and annotations within this hub's sidebar width bounds. */
 	sidebarWidth(entries: readonly SidebarEntry<string>[]): number {
-		let longest = 0;
+		// The top border paints ` title ` over the sidebar column, one column in.
+		let longest = visibleWidth(this.#title) + 1;
 		for (const entry of entries) {
 			longest = Math.max(longest, visibleWidth(entry.label) + visibleWidth(entry.annotation ?? "") + 5);
 		}

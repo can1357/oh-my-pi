@@ -597,6 +597,120 @@ describe("ModelHub", () => {
 		});
 	});
 
+	describe("focused role editor", () => {
+		test("opens directly in assignment for one role and returns after keeping thinking", () => {
+			const current = makeModel("test", "current-model");
+			const replacement = makeModel("test", "replacement-model");
+			const settings = Settings.isolated({ modelRoles: { smol: "test/current-model" } });
+			const { hub, onAssign, onCancel } = createHub({
+				models: [current, replacement],
+				scoped: true,
+				settings,
+				hub: { initialAssignRole: "smol" },
+			});
+
+			expect(normalize(hub.render(220))).toContain("Assigning SMOL");
+			expect(footerLine(hub.render(220))).toContain("Delete clear");
+			hub.handleInput("replacement-model");
+			hub.handleInput("\n");
+
+			expect(onAssign).toHaveBeenCalledTimes(1);
+			expect(onAssign.mock.calls[0]?.[0]).toBe(replacement);
+			expect(onAssign.mock.calls[0]?.[1]).toBe("smol");
+			expect(footerLine(hub.render(220))).toContain("inherit");
+
+			hub.handleInput(ESC);
+			expect(onCancel).toHaveBeenCalledTimes(1);
+		});
+
+		test("awaits a focused async clear before returning to the host", async () => {
+			const model = makeModel("test", "configured-model");
+			const settings = Settings.isolated({ modelRoles: { smol: "test/configured-model" } });
+			const cleared = Promise.withResolvers<boolean>();
+			const onUnassign = vi.fn(() => cleared.promise);
+			const onCancel = vi.fn();
+			const { hub } = createHub({
+				models: [model],
+				scoped: true,
+				settings,
+				hub: { initialAssignRole: "smol" },
+				callbacks: { onUnassign, onCancel },
+			});
+
+			hub.handleInput("\x7f");
+			expect(onUnassign).toHaveBeenCalledWith("smol");
+			expect(normalize(hub.render(220))).toContain("Applying model");
+			expect(onCancel).not.toHaveBeenCalled();
+
+			cleared.resolve(true);
+			await cleared.promise;
+			await Promise.resolve();
+			expect(onCancel).toHaveBeenCalledTimes(1);
+		});
+
+		test("clears a role whose configured model no longer resolves, in the scope that stores it", () => {
+			const available = makeModel("test", "available-model");
+			const globalStorage = Settings.isolated({ modelRoles: { smol: "test/missing-model" } });
+			const projectStorage = Settings.isolated({ modelRoleStorage: "project" });
+			projectStorage.setModelRole("smol", "test/missing-global");
+			projectStorage.setProjectModelRole("smol", "test/missing-project");
+			const openFocused = (settings: Settings) => {
+				const onCancel = vi.fn();
+				// Emulate the controller: clearing deletes the persisted role from its scope.
+				const onUnassign: ModelHubCallbacks["onUnassign"] = (role, scope) => {
+					if (scope === "project") settings.clearProjectModelRole(role);
+					else settings.setModelRole(role, undefined);
+				};
+				const { hub } = createHub({
+					models: [available],
+					scoped: true,
+					settings,
+					hub: { initialAssignRole: "smol" },
+					callbacks: { onUnassign, onCancel },
+				});
+				hub.handleInput("\x1b[3~");
+				return onCancel;
+			};
+
+			expect(openFocused(globalStorage)).toHaveBeenCalledTimes(1);
+			expect(globalStorage.getModelRole("smol")).toBeUndefined();
+
+			expect(openFocused(projectStorage)).toHaveBeenCalledTimes(1);
+			expect(projectStorage.getProjectModelRole("smol")).toBeUndefined();
+			expect(projectStorage.getGlobalModelRole("smol")).toBe("test/missing-global");
+		});
+
+		test("returns to the host when a focused assignment fails", () => {
+			const model = makeModel("test", "failed-model");
+			const onAssign = vi.fn(() => false);
+			const onCancel = vi.fn();
+			const { hub } = createHub({
+				models: [model],
+				scoped: true,
+				hub: { initialAssignRole: "default" },
+				callbacks: { onAssign, onCancel },
+			});
+
+			hub.handleInput("\n");
+			expect(onAssign).toHaveBeenCalledTimes(1);
+			expect(footerLine(hub.render(220))).not.toContain("inherit");
+			expect(onCancel).toHaveBeenCalledTimes(1);
+		});
+
+		test("cancels a focused role editor without assigning", () => {
+			const model = makeModel("test", "unchanged-model");
+			const { hub, onAssign, onCancel } = createHub({
+				models: [model],
+				scoped: true,
+				hub: { initialAssignRole: "default" },
+			});
+
+			hub.handleInput(ESC);
+			expect(onAssign).not.toHaveBeenCalled();
+			expect(onCancel).toHaveBeenCalledTimes(1);
+		});
+	});
+
 	describe("assignment strips", () => {
 		test("Enter opens the role strip; assigning fires onAssign and opens the thinking strip", () => {
 			const model = getBundledModel("openai", "gpt-5.5");

@@ -31,6 +31,7 @@ export const cfgBrowserCdpUrl = register({
 
 export const cfgBrowserRelay = register({
 	id: "browser.relay",
+	safetySensitive: true,
 	type: "boolean",
 	default: false,
 	ui: {

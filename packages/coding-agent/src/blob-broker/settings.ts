@@ -24,6 +24,7 @@ const BLOB_BACKEND_CHOICES = BUILTIN_BLOB_DESTINATION_METADATA.filter(
 
 export const cfgImagesUrlsEnabled = register({
 	id: "images.urls.enabled",
+	machineLocal: true,
 	type: "boolean",
 	default: false,
 	ui: {
@@ -89,6 +90,7 @@ export const cfgImagesUrlsPublicBaseUrl = register({
 
 export const cfgImagesUrlsTtlHours = register({
 	id: "images.urls.ttlHours",
+	machineLocal: true,
 	type: "number",
 	default: 72,
 	ui: {
@@ -126,6 +128,7 @@ export const cfgImagesUrlsSshTarget = register({
 
 export const cfgImagesUrlsSshRemotePort = register({
 	id: "images.urls.sshRemotePort",
+	machineLocal: true,
 	type: "number",
 	default: 8787,
 	ui: {

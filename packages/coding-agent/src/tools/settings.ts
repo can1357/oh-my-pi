@@ -289,6 +289,7 @@ export const cfgToolsApproval = register({
 //   "yolo"       — auto-approves every tier.
 export const cfgToolsApprovalMode = register({
 	id: "tools.approvalMode",
+	safetySensitive: true,
 	type: "enum",
 	values: ["always-ask", "write", "yolo"] as const,
 	default: "yolo",
@@ -572,6 +573,7 @@ export const cfgGenerateImageEnabled = register({
 
 export const cfgComputerEnabled = register({
 	id: "computer.enabled",
+	safetySensitive: true,
 	type: "boolean",
 	default: false,
 	ui: {
