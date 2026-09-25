@@ -18,8 +18,8 @@ below.
 uutils coreutils (https://github.com/uutils/coreutils), MIT
 --------------------------------------------------------------------------------
 Covers: base32, base64, basename, cat, cksum (shared checksum machinery),
-b2sum, md5sum, sha1sum, sha224sum, sha256sum, sha384sum, sha512sum, comm, cut,
-date, dirname, head, hostname, ln, ls, mkdir, mktemp, mv, nproc, paste,
+b2sum, md5sum, sha1sum, sha224sum, sha256sum, sha384sum, sha512sum, comm, cp,
+cut, date, dirname, head, hostname, ln, ls, mkdir, mktemp, mv, nproc, paste,
 printenv, readlink, realpath, rm, seq, sort, stat, tac, tail, tee, touch, tr,
 truncate, uname, uniq, wc, whoami, yes.
 

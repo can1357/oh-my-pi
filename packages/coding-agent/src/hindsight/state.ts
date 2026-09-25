@@ -240,12 +240,6 @@ export class HindsightSessionState {
 	mentalModelsLoadPromise?: Promise<void>;
 	#mentalModelsLoadGeneration = 0;
 	unsubscribe?: () => void;
-	/**
-	 * Releases the `onHindsightScopeChanged` subscription that drives live
-	 * rebuilds when `hindsight.bankId` / `bankIdPrefix` / `scoping` change.
-	 * Only set on primary states; aliases inherit the parent's subscription.
-	 */
-	unsubscribeScope?: () => void;
 	/** Alias states delegate persistence config to a primary parent state. */
 	aliasOf?: HindsightSessionState;
 	readonly retainQueue: HindsightRetainQueue;
@@ -603,8 +597,6 @@ export class HindsightSessionState {
 		this.#mentalModelsLoadGeneration++;
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
-		this.unsubscribeScope?.();
-		this.unsubscribeScope = undefined;
 		this.retainQueue.dispose();
 	}
 

@@ -8,7 +8,7 @@
 - Local worker client: `packages/coding-agent/src/tts/tts-client.ts`
 - Session injection: `packages/coding-agent/src/sdk.ts` (`speechgen.enabled`)
 
-The SDK registers this write-approved custom tool only when `speechgen.enabled=true` (default `false`).
+The SDK registers this write-approved custom tool only when `speechgen.enabled=true` (default `false`); toggling the setting registers or removes it in the running session.
 
 ## Inputs
 
