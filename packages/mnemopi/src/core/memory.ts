@@ -556,6 +556,13 @@ export class Mnemopi {
 	sleepAllSessions(dryRun = false): SleepResult {
 		return this.#withRuntimeOptions("mnemopi.consolidate", () => this.beam.sleepAllSessions(dryRun));
 	}
+	async sleepAsync(dryRun = false): Promise<SleepResult> {
+		return this.#withRuntimeOptions("mnemopi.consolidate", () => this.beam.sleepAsync(dryRun));
+	}
+
+	async sleepAllSessionsAsync(dryRun = false): Promise<SleepResult> {
+		return this.#withRuntimeOptions("mnemopi.consolidate", () => this.beam.sleepAllSessionsAsync(dryRun));
+	}
 
 	scratchpadWrite(content: string): string {
 		return this.#withRuntimeOptions("mnemopi.retain", () => this.beam.scratchpadWrite(content));

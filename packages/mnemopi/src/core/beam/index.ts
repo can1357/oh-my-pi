@@ -19,6 +19,8 @@ import {
 	memoriaRetrieve,
 	sleep,
 	sleepAllSessions,
+	sleepAllSessionsAsync,
+	sleepAsync,
 } from "./consolidate";
 import { factRecall, formatContext, recall, recallEnhanced } from "./recall";
 import { initBeam } from "./schema";
@@ -336,6 +338,14 @@ export class BeamMemory implements BeamMemoryState {
 
 	sleepAllSessions(dryRun = false): SleepResult {
 		return sleepAllSessions(this, dryRun);
+	}
+
+	async sleepAsync(dryRun = false): Promise<SleepResult> {
+		return sleepAsync(this, dryRun);
+	}
+
+	async sleepAllSessionsAsync(dryRun = false): Promise<SleepResult> {
+		return sleepAllSessionsAsync(this, dryRun);
 	}
 
 	getConsolidationLog(limit = 10): unknown[] {
