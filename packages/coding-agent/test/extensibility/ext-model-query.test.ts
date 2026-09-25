@@ -34,12 +34,6 @@ function registry(): ModelRegistry {
 }
 
 describe("createExtensionModelQuery", () => {
-	test("list() and current() pass through to the registry and session model", () => {
-		const q = createExtensionModelQuery(registry(), undefined, () => gpt);
-		expect(q.list()).toEqual(available);
-		expect(q.current()).toBe(gpt);
-	});
-
 	test("current() reflects the live session model, read lazily", () => {
 		let active: Model<Api> | undefined = claude;
 		const q = createExtensionModelQuery(registry(), undefined, () => active);

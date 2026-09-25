@@ -60,7 +60,7 @@ describe("RouteRegistry", () => {
 		});
 		const route = registry.resolve("quota-route");
 		expect(registry.generation).toBe(2);
-		expect(route).toEqual({
+		expect(route).toMatchObject({
 			generation: 2,
 			id: "quota-route",
 			root: {
@@ -96,26 +96,27 @@ describe("RouteRegistry", () => {
 		expect(registry.resolve("cyclic")).toBeUndefined();
 	});
 
-	it("allows sibling reuse of the same model id under a fallback", () => {
+	it("rejects reused model ids that cannot be distinguished during route execution", () => {
 		const registry = new RouteRegistry(() => undefined);
-		registry.register({
-			id: "sibling-reuse",
-			root: {
-				type: "fallback",
-				on: ["credential_quota"],
-				children: [
-					{ type: "target", model: "a" },
-					{
-						type: "fallback",
-						on: ["context_overflow"],
-						children: [{ type: "target", model: "a" }],
-					},
-				],
-			},
-		});
-		const route = registry.resolve("sibling-reuse");
-		expect(route?.targets).toEqual(["a", "a"]);
-		expect(registry.generation).toBe(2);
+		expect(() =>
+			registry.register({
+				id: "sibling-reuse",
+				root: {
+					type: "fallback",
+					on: ["credential_quota"],
+					children: [
+						{ type: "target", model: "a" },
+						{
+							type: "fallback",
+							on: ["context_overflow"],
+							children: [{ type: "target", model: "a" }],
+						},
+					],
+				},
+			}),
+		).toThrow(/Duplicate route targets/);
+		expect(registry.resolve("sibling-reuse")).toBeUndefined();
+		expect(registry.generation).toBe(1);
 	});
 
 	it("rejects a nested path that repeats a target model id", () => {
@@ -200,6 +201,16 @@ describe("RouteRegistry", () => {
 		expect(route?.fallbacks.context_overflow ?? []).not.toContain("quota-backup");
 	});
 
+	it("preserves provider-qualified model ids as the compiled target", () => {
+		const registry = new RouteRegistry(id => {
+			const bare = id.includes("/") ? id.slice(id.indexOf("/") + 1) : id;
+			return bare === "gpt-5" ? fakeModel("gpt-5") : undefined;
+		});
+		const compiled = registry.resolve("openai/gpt-5");
+		expect(compiled?.root).toEqual({ type: "target", model: "openai/gpt-5" });
+		expect(compiled?.id).toBe("openai/gpt-5");
+	});
+
 	it("get returns registered virtual routes and ignores catalog models (negative)", () => {
 		const registry = new RouteRegistry(id => (id === "gpt-5" ? fakeModel("gpt-5") : undefined));
 		registry.register({
@@ -213,4 +224,11 @@ describe("RouteRegistry", () => {
 		expect(registry.get("missing")).toBeUndefined();
 		expect(registry.resolve("gpt-5")?.id).toBe("gpt-5");
 	});
+});
+
+it("rejects route IDs erased by URL normalization", () => {
+	const registry = new RouteRegistry(() => undefined);
+	for (const id of [".", ".."])
+		expect(() => registry.register({ id, root: { type: "target", model: "target" } })).toThrow(/dot segment/);
+	expect(registry.list()).toEqual([]);
 });

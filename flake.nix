@@ -77,7 +77,7 @@
         in
         {
           bun = pkgs.callPackage (nix-bun.outPath + "/package.nix") {
-            sourcesFile = nix-bun.outPath + "/versions/1.4.0.json";
+            sourcesFile = nix-bun.outPath + "/versions/1.4.2.json";
           };
           bun2nix = bun2nixFor system;
           rustToolchain = rustToolchainFor system;

@@ -138,9 +138,8 @@ describe("bench run metrics", () => {
 });
 
 describe("bench challenge mix", () => {
-	it("defaults to mix and rotates challenge kinds with per-kind output budgets", async () => {
-		const { summary, captured } = await runProfiled({ runs: 3, par: 1 });
-		expect(summary.profile).toBe("mix");
+	it("mix rotates challenge kinds with per-kind output budgets", async () => {
+		const { summary, captured } = await runProfiled({ profile: "mix", runs: 3, par: 1 });
 		expect(summary.models[0].results.map(run => run.challenge)).toEqual(["chat", "prefill", "generation"]);
 		expect(captured.map(request => request.options?.maxTokens)).toEqual([512, 64, 2048]);
 		// Per-kind aggregates exist for every kind that ran.
@@ -148,7 +147,7 @@ describe("bench challenge mix", () => {
 	});
 
 	it("--max-tokens overrides every challenge kind", async () => {
-		const { captured } = await runProfiled({ runs: 3, par: 1, maxTokens: 128 });
+		const { captured } = await runProfiled({ profile: "mix", runs: 3, par: 1, maxTokens: 128 });
 		expect(captured.map(request => request.options?.maxTokens)).toEqual([128, 128, 128]);
 	});
 
@@ -188,6 +187,6 @@ describe("bench challenge mix", () => {
 	});
 
 	it("rejects --prompt when challenges are mixed", async () => {
-		await expect(runProfiled({ prompt: "hello" })).rejects.toThrow("--prompt");
+		await expect(runProfiled({ profile: "mix", prompt: "hello" })).rejects.toThrow("--prompt");
 	});
 });

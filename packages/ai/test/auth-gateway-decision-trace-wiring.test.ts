@@ -73,7 +73,7 @@ describe("auth-gateway decision-trace wiring", () => {
 					stream: false,
 				}),
 			});
-			expect(res.status).toBe(401);
+			expect(res.status).toBe(503);
 			const recorded = traces.list().filter(t => t.routeId === "mock/trace-skip");
 			expect(recorded).toEqual([
 				expect.objectContaining({

@@ -40,3 +40,17 @@ export function stripWindowsExtendedLengthPathPrefix(
 
 	return filePath;
 }
+
+/**
+ * Test whether a path is fully qualified and drive-independent.
+ * On Windows, requires a drive letter with separator (e.g. `C:\`) or UNC (`\\server\share` or `//server/share`).
+ * On POSIX, requires an absolute path.
+ */
+export function isFullyQualifiedPath(filePath: string, platform: NodeJS.Platform = process.platform): boolean {
+	const p = platform === "win32" ? path.win32 : path.posix;
+	if (!p.isAbsolute(filePath)) return false;
+	if (platform === "win32") {
+		return /^[a-zA-Z]:[/\\]/.test(filePath) || /^[\\/]{2}[^\\/]/.test(filePath);
+	}
+	return true;
+}
