@@ -10,6 +10,8 @@
 
 ### Fixed
 
+- Regenerated Cursor `cursor-proto.ts` from the vendored `agent.proto` (`bun run gen:proto`): `AgentRunRequest` gains fields 10–28 (capability flags, session ids, subagent/harness members) plus new server messages (`ttftBreakdown`, …).
+- Cursor discovery records the verbatim roster id as `requestModelId` on the `auto` entry so the provider echoes it instead of the synthetic `default` wire id.
 - Fixed forced-tool requests for Claude Opus 5.5 so tool selection falls back gracefully when necessary.
 - Added the provider-advertised `xhigh` reasoning level for Yolo-Auto Qwen3.8 models.
 - Fixed Devin Fusion pairing requests failing with `no API providers are available` by routing them through the lead model with the lead's limits and pricing; pairings without an available lead are no longer listed ([#13000](https://github.com/can1357/oh-my-pi/pull/13000) by [@DarkPhilosophy](https://github.com/DarkPhilosophy)).
