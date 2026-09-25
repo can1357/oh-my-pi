@@ -20,6 +20,9 @@ import { isEnoent, isEnotdir } from "./fs-error";
 /** App name (e.g. "omp") */
 export const APP_NAME: string = "omp";
 
+/** Public homepage that inference gateways (OpenRouter, Vercel AI Gateway) credit omp traffic to. */
+export const APP_URL: string = "https://omp.sh/";
+
 /** Config directory name (e.g. ".omp") */
 export const CONFIG_DIR_NAME: string = ".omp";
 
