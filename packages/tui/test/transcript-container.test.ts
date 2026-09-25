@@ -274,6 +274,9 @@ describe("TranscriptContainer", () => {
 		block.finalize(["complete"]);
 		expect(transcript.peekFinalizedBatch(80, 0)).toBeUndefined();
 		expect(transcript.blockStates()).toEqual(["committed"]);
+		expect(transcript.render(80)).toEqual(["complete"]);
+		transcript.beginReplay();
+		expect(transcript.peekReplayBatch(80)?.rows).toEqual(["complete", ""]);
 	});
 
 	it("replays and retires semantic stable rows after they reflow at a new width", () => {
