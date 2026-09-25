@@ -773,12 +773,13 @@ describe("streamSimple resolver auth retry", () => {
 		expect(keys).toEqual(["credential-A", "credential-B"]);
 	});
 
-	it("rotates before emitting content for Codex quota payloads", async () => {
+	it("rotates before emitting content for quota and billing-cap payloads", async () => {
 		const payloads: Array<{ message: string; status?: number }> = [
 			{ message: "429", status: 429 },
 			{ message: '{"error":{"code":"insufficient_quota","message":"quota exhausted"}}' },
 			{ message: '{"error":{"code":"usage_limit_exceeded","message":"usage limit exceeded"}}' },
 			{ message: '{"error":{"code":"usage_limit_reached","message":"usage limit reached"}}' },
+			{ message: "Upstream request failed: Insufficient account funds", status: 402 },
 		];
 		let activePayload = payloads[0]!;
 		let keys: unknown[] = [];

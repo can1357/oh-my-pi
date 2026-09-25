@@ -12,6 +12,9 @@ import { toolFileHeaderDescription } from "./inspector-runtime";
 import { applyMcpToggleRuntime } from "./mcp-runtime";
 import { loadAllExtensions, toggleProvider, toggleUserSource } from "./state-manager";
 
+import { cfgDisabledExtensions } from "../../../extensibility/settings";
+import { cfgMcpEnableProjectConfig } from "../../../mcp/settings";
+
 /** Bind the dashboard's display-only contract to the live application. */
 export function createExtensionDashboardRuntime(options: {
 	cwd: string;
@@ -23,8 +26,8 @@ export function createExtensionDashboardRuntime(options: {
 }): ExtensionDashboardRuntime {
 	const { cwd, settings, mcpManager, eventBus, onMcpToolsChanged, browserMcpFilterEnabled } = options;
 	return {
-		getDisabledExtensions: () => settings.get("disabledExtensions") ?? [],
-		setDisabledExtensions: ids => settings.set("disabledExtensions", ids),
+		getDisabledExtensions: () => cfgDisabledExtensions.get(settings),
+		setDisabledExtensions: ids => cfgDisabledExtensions.set(settings, ids),
 		getProviders: () =>
 			getAllProvidersInfo().map(provider => ({
 				...provider,
@@ -51,7 +54,7 @@ export function createExtensionDashboardRuntime(options: {
 				manager: mcpManager,
 				session: onMcpToolsChanged ? { refreshMCPTools: onMcpToolsChanged } : undefined,
 				discovery: {
-					enableProjectConfig: settings.get("mcp.enableProjectConfig") ?? true,
+					enableProjectConfig: cfgMcpEnableProjectConfig.get(settings),
 					filterExa: true,
 					filterBrowser: browserMcpFilterEnabled?.() ?? false,
 				},

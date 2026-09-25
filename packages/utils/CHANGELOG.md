@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.3.1] - 2026-09-25
+
+### Fixed
+
+- Fixed log rotation near local-day boundaries so dated log files are consistently assigned to the correct local date.
+
 ## [18.2.7] - 2026-09-21
 
 ### Changed

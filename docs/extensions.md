@@ -367,7 +367,7 @@ is not requeued, and explicitly cleared or replaced queues are not resurrected.
 
 ### Tool lifecycle
 
-- `tool_call` (pre-exec, may block, or revise the tool's execution `input`; for model-issued calls it fires at arg-prep time in the agent loop, so a revision is revalidated and seen by concurrency scheduling, execution events, the persisted assistant message, and the approval gate alike)
+- `tool_call` (pre-exec, may block, revise the tool's execution `input`, or return passive `additionalContext`; for model-issued calls it fires at arg-prep time in the agent loop, so a revision is revalidated and seen by concurrency scheduling, execution events, the persisted assistant message, and the approval gate alike; passive context from non-blocking handlers is delivered after the batch's tool results in assistant call order, before the next provider request)
 - `tool_result` (post-exec, may patch content/details/isError)
 - `tool_execution_start` / `tool_execution_update` / `tool_execution_end` (observability)
 - `tool_approval_requested` / `tool_approval_resolved` (observability; emitted by `wrapper.ts` only when a tool requires approval and an approval handler is registered)
@@ -432,6 +432,36 @@ execute(
 	ctx,
 ): Promise<AgentToolResult>
 ```
+
+### Adding passive context after a tool call
+
+A `tool_call` handler can return `additionalContext` without changing the tool result:
+
+```ts
+pi.on("tool_call", async event => {
+  if (event.toolName === "search") {
+    return { additionalContext: "Use this result before searching again." };
+  }
+});
+```
+
+`additionalContext` carries trusted handler-authored instructions for the next provider request. The
+host emits them after the tool results with developer/system priority where the selected transport
+supports it. Raw tool output and other untrusted data must stay in the ordinary tool result.
+
+Non-empty context from every non-blocking handler is preserved in registration order. OMP waits
+until the tool batch settles, then emits the context after the corresponding tool results in
+assistant tool-call order and before the next provider request. Handler context is delivered only when
+the call actually runs and returns a non-error result: if the call is blocked by this or a later
+handler, denied at the approval prompt, skipped by an interrupt, or fails, its collected context is
+discarded.
+
+Registered tools can add context during execution through
+`ctx.addAdditionalContext?.("...")`. Context a tool adds itself is kept even when the tool then
+returns an error. Within one call, the tool's own context (including tools reached through nested
+`xd://` dispatch) comes before `tool_call` handler context.
+Calls Cursor executes on its exec channel deliver context after their buffered results, on the next
+provider request.
 
 ### Delegating to a native built-in (`ctx.invokeTool`)
 
@@ -660,7 +690,7 @@ Unsupported/no-op in RPC implementation:
 
 ### Print/headless/subagent paths
 
-When no UI context is supplied to runner init, `ctx.hasUI` is `false` and methods are no-op/default-returning.
+When no UI context is supplied to runner init, `ctx.hasUI` is `false` and methods are no-op/default-returning. `--mode rpc --no-ui` takes this path too, for RPC hosts that cannot answer dialogs.
 
 ### ACP mode
 

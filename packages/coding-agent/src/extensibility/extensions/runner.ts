@@ -27,6 +27,7 @@ import type { AsyncJobSnapshot } from "../../session/agent-session";
 import type { SessionManager } from "../../session/session-manager";
 import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
+import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shared-events";
 import { ManagedTimers } from "./managed-timers";
 import { createExtensionModelQuery } from "./model-api";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
@@ -83,6 +84,8 @@ import type {
 	UserPythonEvent,
 	UserPythonEventResult,
 } from "./types";
+
+import { cfgExtensionHandlersToolCallTimeoutMs } from "../settings";
 
 /** Combined result from all before_agent_start handlers */
 interface BeforeAgentStartCombinedResult {
@@ -470,6 +473,9 @@ export class ExtensionRunner {
 	#toolRegistrationScope = new AsyncLocalStorage<ToolRegistrationScope>();
 	#toolRegistrationBarrier: Promise<void> | undefined;
 	#initialized = false;
+	/** Full load order, captured on the first {@link setSuspendedExtensions} call. */
+	#loadOrder: Extension[] | undefined;
+	#suspendedExtensions = new Set<Extension>();
 	/**
 	 * Buffer for `credential_disabled` events received via {@link emitCredentialDisabled}
 	 * before {@link initialize} has run. Drained through {@link emit} once initialize sets
@@ -739,7 +745,8 @@ export class ExtensionRunner {
 		// accumulate duplicate global registrations — drop the prior generation before
 		// installing this one's trampolines.
 		this.disposeFileFallbacks();
-		for (const ext of this.extensions) {
+		// Suspended extensions keep a (gated) trampoline so resuming them needs no rewire.
+		for (const ext of this.getLoadedExtensions()) {
 			// Nothing registered by this extension means no trampoline, so a host with
 			// no fallback-registering extension leaves the seam genuinely empty and
 			// `hasFileWriteFallback()`/`hasFileDeleteFallback()` false — the invariant
@@ -769,6 +776,7 @@ export class ExtensionRunner {
 			if (ext.fileWriteFallbackHandlers.length > 0) {
 				this.#fileFallbackDisposers.push(
 					addFileWriteFallback(async req => {
+						if (this.#suspendedExtensions.has(ext)) return false;
 						const ctx = this.createContext();
 						for (const handler of ext.fileWriteFallbackHandlers) {
 							try {
@@ -787,6 +795,7 @@ export class ExtensionRunner {
 			if (ext.fileDeleteFallbackHandlers.length > 0) {
 				this.#fileFallbackDisposers.push(
 					addFileDeleteFallback(async req => {
+						if (this.#suspendedExtensions.has(ext)) return false;
 						const ctx = this.createContext();
 						for (const handler of ext.fileDeleteFallbackHandlers) {
 							try {
@@ -917,6 +926,47 @@ export class ExtensionRunner {
 
 	getExtensionPaths(): string[] {
 		return this.extensions.map(e => e.path);
+	}
+
+	/** Every extension this runner loaded, in load order, including suspended ones. */
+	getLoadedExtensions(): readonly Extension[] {
+		return this.#loadOrder ?? this.extensions;
+	}
+
+	/** Whether the extension loaded from `extensionPath` is present and not suspended. */
+	isExtensionActive(extensionPath: string): boolean {
+		return this.extensions.some(ext => ext.path === extensionPath);
+	}
+
+	/**
+	 * Suspend or resume loaded extensions in place (e.g. after a live `disabledExtensions`
+	 * edit). A suspended extension keeps its module state but stops contributing event
+	 * handlers, commands, tools, message renderers, shortcuts, flags, and file fallbacks
+	 * until resumed. Returns the extensions whose state changed.
+	 */
+	setSuspendedExtensions(shouldSuspend: (extension: Extension) => boolean): {
+		suspended: Extension[];
+		resumed: Extension[];
+	} {
+		this.#loadOrder ??= [...this.extensions];
+		const suspended: Extension[] = [];
+		const resumed: Extension[] = [];
+		for (const extension of this.#loadOrder) {
+			const suspend = shouldSuspend(extension);
+			if (suspend === this.#suspendedExtensions.has(extension)) continue;
+			if (suspend) {
+				this.#suspendedExtensions.add(extension);
+				suspended.push(extension);
+			} else {
+				this.#suspendedExtensions.delete(extension);
+				resumed.push(extension);
+			}
+		}
+		if (suspended.length > 0 || resumed.length > 0) {
+			const active = this.#loadOrder.filter(extension => !this.#suspendedExtensions.has(extension));
+			this.extensions.splice(0, this.extensions.length, ...active);
+		}
+		return { suspended, resumed };
 	}
 
 	/** Get all registered tools from all extensions. */
@@ -1255,6 +1305,7 @@ export class ExtensionRunner {
 			setInterval: (callback, ms, ...args) => this.#managedTimers.setInterval(callback, ms, ...args),
 			setTimeout: (callback, ms, ...args) => this.#managedTimers.setTimeout(callback, ms, ...args),
 			clearTimer: timer => this.#managedTimers.clear(timer),
+			addAdditionalContext: delegation?.context?.addAdditionalContext,
 			invokeTool:
 				delegation !== undefined && this.hasNativeTool(delegation.toolName)
 					? (params, options) =>
@@ -1536,16 +1587,18 @@ export class ExtensionRunner {
 	async emitToolCall(event: ToolCallEvent, signal?: AbortSignal): Promise<ToolCallEventResult | undefined> {
 		const ctx = this.createContext();
 		const timeoutMs = normalizeHandlerTimeout(
-			this.settings?.get("extensionHandlers.toolCallTimeoutMs") ?? extensionHandlerTimeoutMs,
+			(this.settings ? cfgExtensionHandlersToolCallTimeoutMs.get(this.settings) : undefined) ??
+				extensionHandlerTimeoutMs,
 		);
 		let result: ToolCallEventResult | undefined;
+		const aggregated = { input: undefined as ToolCallEventResult["input"], additionalContext: [] as string[] };
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("tool_call");
 			if (!handlers || handlers.length === 0) continue;
 
 			for (const handler of handlers) {
-				const handlerResult = await this.#runHandlerWithTimeout(
+				const handlerResult = (await this.#runHandlerWithTimeout(
 					handler,
 					event,
 					ctx,
@@ -1559,21 +1612,22 @@ export class ExtensionRunner {
 								: `Extension ${ext.path} failed: ${message}`,
 					}),
 					signal,
-				);
+				)) as ToolCallEventResult | undefined;
 
-				if (handlerResult) {
-					result = handlerResult;
-					if (result.block) {
-						return result;
-					}
+				if (!handlerResult) continue;
+				if (handlerResult.block) {
+					return handlerResult;
 				}
+				const { additionalContext: _context, input: _input, ...controlResult } = handlerResult;
+				accumulateToolCallResult(aggregated, handlerResult);
+				result = controlResult;
 			}
 		}
 
 		if (signal?.aborted) {
 			return { block: true, reason: `Tool execution was cancelled while an extension handler was pending` };
 		}
-		return result;
+		return buildAggregatedToolCallResult(result, aggregated);
 	}
 
 	async emitUserBash(event: UserBashEvent): Promise<UserBashEventResult | undefined> {

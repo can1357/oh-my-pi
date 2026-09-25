@@ -10,22 +10,81 @@ import { __providerInFlightForTesting, streamSimple } from "@oh-my-pi/pi-ai/stre
 import type { Context } from "@oh-my-pi/pi-ai/types";
 import {
 	__physicalTargetSegmentsForTesting,
-	onAppendOnlyModeChanged,
-	onCodeModeChanged,
-	onModelRolesChanged,
-	onStatusLineSessionAccentChanged,
 	resetSettingsForTest,
-	type SettingPath,
 	Settings,
 } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { SETTINGS_SCHEMA } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
+import { bindEffects } from "@oh-my-pi/pi-coding-agent/config/registry";
+
 import * as discovery from "@oh-my-pi/pi-coding-agent/discovery";
+import { editVariantForModel } from "@oh-my-pi/pi-coding-agent/utils/edit-mode";
 import MODEL_PRIO from "../src/priority.json" with { type: "json" };
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { getAgentDbPath, getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
 import * as fileLock from "@oh-my-pi/pi-utils/file-lock";
 import { YAML } from "bun";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
+import {
+	cfgSymbolPreset,
+	cfgDisplayShowTokenUsage,
+	cfgAskTimeout,
+	cfgThemeDark,
+	cfgTerminalShowProgress,
+	cfgSetupVersion,
+	cfgStatusLineLeftSegments,
+} from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { cfgExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
+import {
+	cfgProvidersMaxInFlightRequests,
+	cfgPowerSleepPrevention,
+	cfgFeaturesUnexpectedStopDetection,
+	cfgRetryFallbackChains,
+	cfgProviderAppendOnlyContext,
+	cfgCodeModeInputs,
+	cfgDefaultThinkingLevel,
+	cfgInlineToolDescriptors,
+	cfgProvidersOpenaiCodexCodeMode,
+	cfgProvidersOpenaiCodexCodeModeDirectTools,
+	cfgRetryModelFallback,
+} from "@oh-my-pi/pi-coding-agent/session/settings";
+import {
+	cfgToolsXdev,
+	cfgTodoReminders,
+	cfgTodoRemindersMax,
+	cfgDevAutoqa,
+	cfgDevAutoqaConsent,
+	cfgGlobEnabled,
+	cfgFindEnabled,
+	cfgGrepEnabled,
+	cfgGrepContextAfter,
+	cfgGrepContextBefore,
+	cfgTodoEager,
+	cfgComputerEnabled,
+	cfgImagesQuestionTimeoutMs,
+} from "@oh-my-pi/pi-coding-agent/tools/settings";
+import {
+	cfgTaskEager,
+	cfgIsolationBackend,
+	cfgTaskIsolationEnabled,
+	cfgTaskMaxConcurrency,
+	cfgTaskEnableEffort,
+	cfgTaskAgentModelOverrides,
+} from "@oh-my-pi/pi-coding-agent/task/settings";
+import { cfgMnemopiDbPath, cfgMnemopiScoping } from "@oh-my-pi/pi-coding-agent/mnemopi/settings";
+import { cfgMemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/settings";
+import { cfgHindsightBankId, cfgHindsightScoping } from "@oh-my-pi/pi-coding-agent/hindsight/settings";
+import { cfgEditMode } from "@oh-my-pi/pi-coding-agent/edit/settings";
+import { cfgExaEnabled } from "@oh-my-pi/pi-coding-agent/web/settings";
+import {
+	cfgCompaction,
+	cfgCompactionMethodOrder,
+	cfgSnapcompactSystemPrompt,
+} from "@oh-my-pi/pi-coding-agent/session/context-settings";
+import { cfgModelRoles, cfgDisabledProviders, cfgEnabledModels } from "@oh-my-pi/pi-coding-agent/config/model-settings";
+import { cfgShellPath } from "@oh-my-pi/pi-coding-agent/exec/settings";
+import { cfgEvalJs } from "@oh-my-pi/pi-coding-agent/eval/settings";
+
+/** Lets microtask-coalesced setting listeners run. */
+const tick = () => Promise.resolve();
 
 function context(): Context {
 	return {
@@ -90,37 +149,12 @@ describe("Settings", () => {
 		await tempDir?.remove();
 	});
 
-	describe("group cache", () => {
-		it("returns one immutable snapshot per merged settings revision", () => {
-			const settings = Settings.isolated();
-			const first = settings.getGroup("compaction");
-
-			expect(settings.getGroup("compaction")).toBe(first);
-			expect(Object.isFrozen(first)).toBe(true);
-
-			const revision = settings.revision;
-			settings.override("compaction.enabled", !first.enabled);
-			expect(settings.revision).toBeGreaterThan(revision);
-			const overridden = settings.getGroup("compaction");
-			expect(overridden).not.toBe(first);
-			expect(overridden.enabled).toBe(!first.enabled);
-			expect(settings.getGroup("compaction")).toBe(overridden);
-
-			settings.clearOverride("compaction.enabled");
-			const restored = settings.getGroup("compaction");
-			expect(restored).not.toBe(overridden);
-			expect(restored.enabled).toBe(first.enabled);
-		});
-
+	describe("effective values", () => {
 		it("keeps cloned defaults independent across settings instances", () => {
-			const first = Settings.isolated().getGroup("compaction");
-			const second = Settings.isolated().getGroup("compaction");
+			const first = cfgCompaction.get(Settings.isolated());
+			const second = cfgCompaction.get(Settings.isolated());
 			expect(first).not.toBe(second);
 			expect(first.methodOrder).not.toBe(second.methodOrder);
-
-			const secondOrder = [...second.methodOrder];
-			first.methodOrder.push(first.methodOrder[0]);
-			expect(second.methodOrder).toEqual(secondOrder);
 		});
 
 		it("bumps the effective revision when cwd re-resolves scoped arrays", async () => {
@@ -138,12 +172,12 @@ describe("Settings", () => {
 				},
 			});
 			const before = settings.revision;
-			expect(settings.get("enabledModels")).toEqual(["openai/first"]);
+			expect(cfgEnabledModels.get(settings)).toEqual(["openai/first"]);
 
 			await settings.reloadForCwd(otherProject);
 
 			expect(settings.revision).toBeGreaterThan(before);
-			expect(settings.get("enabledModels")).toEqual(["openai/second"]);
+			expect(cfgEnabledModels.get(settings)).toEqual(["openai/second"]);
 		});
 	});
 
@@ -153,9 +187,9 @@ describe("Settings", () => {
 			await Bun.write(yamlConfigPath, YAML.stringify({ setupVersion: 1 }, null, 2));
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			expect(settings.get("setupVersion")).toBe(1);
+			expect(cfgSetupVersion.get(settings)).toBe(1);
 
-			settings.set("setupVersion", 2);
+			cfgSetupVersion.set(settings, 2);
 			await settings.flush();
 
 			const savedSettings = YAML.parse(await Bun.file(yamlConfigPath).text()) as Record<string, unknown>;
@@ -170,7 +204,7 @@ describe("Settings", () => {
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			const cloned = await settings.cloneForCwd(tempDir.join("other-project"));
 
-			cloned.set("setupVersion", 2);
+			cfgSetupVersion.set(cloned, 2);
 			await cloned.flush();
 
 			const savedSettings = YAML.parse(await Bun.file(yamlConfigPath).text()) as Record<string, unknown>;
@@ -182,7 +216,7 @@ describe("Settings", () => {
 			const yamlConfigPath = path.join(agentDir, "config.yaml");
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			settings.set("setupVersion", 1);
+			cfgSetupVersion.set(settings, 1);
 			await settings.flush();
 
 			expect(await Bun.file(getConfigPath()).exists()).toBe(true);
@@ -201,7 +235,7 @@ describe("Settings", () => {
 			await writeSettings({ custom, theme: { dark: "anthracite" } });
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			settings.set("theme.dark", "titanium");
+			cfgThemeDark.set(settings, "titanium");
 			await settings.flush();
 
 			const content = await Bun.file(getConfigPath()).text();
@@ -211,7 +245,7 @@ describe("Settings", () => {
 	});
 
 	describe("status line segment validation", () => {
-		it("logs each unknown configured segment once while preserving the config", async () => {
+		it("logs each unknown configured segment once per setting while preserving the config", async () => {
 			await writeSettings({
 				statusLine: {
 					preset: "custom",
@@ -223,12 +257,13 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(JSON.stringify(settings.get("statusLine.leftSegments"))).toBe('["modle","git","modle"]');
+			expect(JSON.stringify(cfgStatusLineLeftSegments.get(settings))).toBe('["modle","git","modle"]');
 			expect(
 				warn.mock.calls.filter(([message]) => String(message).startsWith("Settings: unknown status line segment")),
 			).toEqual([
 				['Settings: unknown status line segment "modle"', { setting: "statusLine.leftSegments" }],
 				['Settings: unknown status line segment "sesion"', { setting: "statusLine.rightSegments" }],
+				['Settings: unknown status line segment "modle"', { setting: "statusLine.rightSegments" }],
 			]);
 		});
 	});
@@ -333,7 +368,7 @@ describe("Settings", () => {
 			const corrupted = 'auth:\n  broker:\n    token: TOP-SECRET\nmodelRoles:\n  default: "unterminated\n';
 			await Bun.write(getConfigPath(), corrupted);
 
-			settings.set("theme.dark", "anthracite");
+			cfgThemeDark.set(settings, "anthracite");
 			await expect(settings.flush()).rejects.toThrow("Settings config is invalid");
 
 			expect(await Bun.file(getConfigPath()).exists()).toBe(false);
@@ -391,7 +426,7 @@ describe("Settings", () => {
 			await fs.promises.symlink(managedConfigPath, getConfigPath(), "file");
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			settings.set("setupVersion", 2);
+			cfgSetupVersion.set(settings, 2);
 			await settings.flush();
 
 			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
@@ -409,7 +444,7 @@ describe("Settings", () => {
 			await fs.promises.symlink(midPath, getConfigPath(), "file");
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			settings.set("setupVersion", 3);
+			cfgSetupVersion.set(settings, 3);
 			await settings.flush();
 
 			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
@@ -442,7 +477,7 @@ describe("Settings", () => {
 				return readlink(target);
 			}) as typeof fs.promises.readlink);
 
-			settings.set("setupVersion", 4);
+			cfgSetupVersion.set(settings, 4);
 			await settings.flush();
 
 			expect(injected).toBe(true);
@@ -475,7 +510,7 @@ describe("Settings", () => {
 			const lexicalSibling = tempDir.join("final-config.yml");
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			settings.set("setupVersion", 7);
+			cfgSetupVersion.set(settings, 7);
 			await settings.flush();
 
 			// The write lands on the physical target, recreating it, while the
@@ -518,7 +553,7 @@ describe("Settings", () => {
 				return readlink(target);
 			}) as typeof fs.promises.readlink);
 
-			settings.set("setupVersion", 5);
+			cfgSetupVersion.set(settings, 5);
 			await expect(settings.flush()).rejects.toThrow(/ELOOP/);
 			expect(readlinkCalls).toBeLessThanOrEqual(safetyValve);
 		});
@@ -542,7 +577,7 @@ describe("Settings", () => {
 			const lexicalSibling = path.join(agentDir, "final-config.yml");
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			settings.set("setupVersion", 8);
+			cfgSetupVersion.set(settings, 8);
 			await settings.flush();
 
 			// The write lands on the physical target (fs semantics), recreating it,
@@ -578,7 +613,7 @@ describe("Settings", () => {
 			const lexicalSibling = path.join(baseDir, "final-config.yml");
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			settings.set("setupVersion", 9);
+			cfgSetupVersion.set(settings, 9);
 			await settings.flush();
 
 			// The write lands on the physical target (fs semantics), recreating it,
@@ -600,7 +635,7 @@ describe("Settings", () => {
 			const lexicalSibling = path.join(agentDir, "final-config.yml");
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			settings.set("setupVersion", 10);
+			cfgSetupVersion.set(settings, 10);
 			// The resolved path sits under the never-entered `missing` dir (fs
 			// semantics), whose parent does not exist, so the atomic write fails
 			// rather than clobbering the sibling.
@@ -624,7 +659,7 @@ describe("Settings", () => {
 			const misplaced = path.join(agentDir, "missing");
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			settings.set("setupVersion", 11);
+			cfgSetupVersion.set(settings, 11);
 			await expect(settings.flush()).rejects.toThrow();
 
 			// No regular file was landed at the wrong resolved location.
@@ -644,7 +679,7 @@ describe("Settings", () => {
 			const misplaced = path.join(agentDir, "missing");
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			settings.set("setupVersion", 12);
+			cfgSetupVersion.set(settings, 12);
 			await expect(settings.flush()).rejects.toThrow();
 
 			// No regular file was landed at the frozen component.
@@ -666,7 +701,7 @@ describe("Settings", () => {
 			const finalPath = path.join(realDir, "final-config.yml");
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			settings.set("setupVersion", 13);
+			cfgSetupVersion.set(settings, 13);
 			await settings.flush();
 
 			expect(YAML.parse(await Bun.file(finalPath).text())).toEqual({ setupVersion: 13 });
@@ -684,7 +719,7 @@ describe("Settings", () => {
 			const misplaced = path.join(agentDir, "missing");
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			settings.set("setupVersion", 14);
+			cfgSetupVersion.set(settings, 14);
 			await expect(settings.flush()).rejects.toThrow();
 
 			// No regular file was landed at the frozen component.
@@ -720,7 +755,7 @@ describe("Settings", () => {
 				return (realpath as (t: fs.PathLike, ...r: unknown[]) => Promise<string>)(target, ...rest);
 			}) as typeof fs.promises.realpath);
 
-			settings.set("setupVersion", 15);
+			cfgSetupVersion.set(settings, 15);
 			await expect(settings.flush()).rejects.toThrow(/ENOTDIR/);
 
 			expect(injected).toBe(true);
@@ -761,7 +796,7 @@ describe("Settings", () => {
 				return (realpath as (t: fs.PathLike, ...r: unknown[]) => Promise<string>)(target, ...rest);
 			}) as typeof fs.promises.realpath);
 
-			settings.set("setupVersion", 16);
+			cfgSetupVersion.set(settings, 16);
 			await expect(settings.flush()).rejects.toThrow(/ENOTDIR/);
 
 			expect(injected).toBe(true);
@@ -814,7 +849,7 @@ describe("Settings", () => {
 				return (stat as (t: fs.PathLike, ...r: unknown[]) => Promise<fs.Stats>)(target, ...rest);
 			}) as typeof fs.promises.stat);
 
-			settings.set("setupVersion", 17);
+			cfgSetupVersion.set(settings, 17);
 			await expect(settings.flush()).rejects.toThrow(/ENOTDIR/);
 
 			expect(created).toBe(true);
@@ -867,7 +902,7 @@ describe("Settings", () => {
 				return (stat as (t: fs.PathLike, ...r: unknown[]) => Promise<fs.Stats>)(target, ...rest);
 			}) as typeof fs.promises.stat);
 
-			settings.set("setupVersion", 18);
+			cfgSetupVersion.set(settings, 18);
 			await expect(settings.flush()).rejects.toThrow(/ENOTDIR/);
 
 			expect(created).toBe(true);
@@ -931,7 +966,7 @@ describe("Settings", () => {
 				await rename(source, target);
 			});
 
-			settings.set("setupVersion", 2);
+			cfgSetupVersion.set(settings, 2);
 			await settings.flush();
 
 			expect(injected).toBe(true);
@@ -950,7 +985,7 @@ describe("Settings", () => {
 			);
 			await Bun.write(getConfigPath(), original);
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			settings.set("theme.dark", "anthracite");
+			cfgThemeDark.set(settings, "anthracite");
 			const readSpy = vi.spyOn(fs.promises, "readFile");
 			readSpy.mockRejectedValueOnce(new FsCodeError("EIO", "injected read failure"));
 
@@ -1042,7 +1077,7 @@ describe("Settings", () => {
 			expect(
 				fs.readdirSync(path.dirname(projectConfigPath)).some(name => name.startsWith("config.yml.broken-")),
 			).toBe(false);
-			expect(settings.get("setupVersion")).toBe(1);
+			expect(cfgSetupVersion.get(settings)).toBe(1);
 			expect(settings.getModelRole("global_role")).toBe("openai/global");
 			expect(settings.getModelRole("project_role")).toBe("openai/project");
 		});
@@ -1081,12 +1116,12 @@ describe("Settings", () => {
 			);
 			await settings.reloadFromDisk();
 
-			expect(settings.get("task.agentModelOverrides")).toEqual({
+			expect(cfgTaskAgentModelOverrides.get(settings)).toEqual({
 				task: "xai-oauth/grok-4.6:medium",
 			});
-			expect(settings.get("retry.modelFallback")).toBe(false);
-			expect(settings.get("task.enableEffort")).toBe(false);
-			expect(settings.get("task.maxConcurrency")).toBe(7);
+			expect(cfgRetryModelFallback.get(settings)).toBe(false);
+			expect(cfgTaskEnableEffort.get(settings)).toBe(false);
+			expect(cfgTaskMaxConcurrency.get(settings)).toBe(7);
 
 			await Bun.write(
 				projectConfigPath,
@@ -1105,10 +1140,10 @@ describe("Settings", () => {
 			);
 			await settings.reloadFromDisk();
 
-			expect(settings.get("task.agentModelOverrides")).toEqual({ task: "openai/gpt-4o" });
-			expect(settings.get("retry.modelFallback")).toBe(true);
-			expect(settings.get("task.enableEffort")).toBe(false);
-			expect(settings.get("task.maxConcurrency")).toBe(7);
+			expect(cfgTaskAgentModelOverrides.get(settings)).toEqual({ task: "openai/gpt-4o" });
+			expect(cfgRetryModelFallback.get(settings)).toBe(true);
+			expect(cfgTaskEnableEffort.get(settings)).toBe(false);
+			expect(cfgTaskMaxConcurrency.get(settings)).toBe(7);
 
 			await Bun.write(
 				projectConfigPath,
@@ -1116,16 +1151,16 @@ describe("Settings", () => {
 			);
 			await settings.reloadFromDisk();
 
-			expect(settings.get("task.agentModelOverrides")).toEqual({});
-			expect(settings.get("retry.modelFallback")).toBe(true);
+			expect(cfgTaskAgentModelOverrides.get(settings)).toEqual({});
+			expect(cfgRetryModelFallback.get(settings)).toBe(true);
 
 			await fsp.rm(projectConfigPath);
 			await settings.reloadFromDisk();
 
-			expect(settings.get("task.agentModelOverrides")).toEqual({});
-			expect(settings.get("retry.modelFallback")).toBe(true);
-			expect(settings.get("task.enableEffort")).toBe(false);
-			expect(settings.get("task.maxConcurrency")).toBe(7);
+			expect(cfgTaskAgentModelOverrides.get(settings)).toEqual({});
+			expect(cfgRetryModelFallback.get(settings)).toBe(true);
+			expect(cfgTaskEnableEffort.get(settings)).toBe(false);
+			expect(cfgTaskMaxConcurrency.get(settings)).toBe(7);
 		});
 		it("retries when a persisted setting changes while files are being read", async () => {
 			await writeSettings({ setupVersion: 1 });
@@ -1145,12 +1180,12 @@ describe("Settings", () => {
 
 			const reload = settings.reloadFromDisk();
 			await projectLoadStarted.promise;
-			settings.set("setupVersion", 2);
+			cfgSetupVersion.set(settings, 2);
 			releaseProjectLoad.resolve();
 			await reload;
 			await settings.flush();
 
-			expect(settings.get("setupVersion")).toBe(2);
+			expect(cfgSetupVersion.get(settings)).toBe(2);
 			expect((await readSettings()).setupVersion).toBe(2);
 		});
 
@@ -1159,17 +1194,19 @@ describe("Settings", () => {
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			settings.overrideModelRoles({ runtime: "openai/runtime" });
 			let signalCount = 0;
-			const unsubscribe = onModelRolesChanged(() => {
+			const unsubscribe = cfgModelRoles.listen(settings, () => {
 				signalCount++;
 			});
 
 			try {
 				await settings.reloadFromDisk();
+				await tick();
 				expect(signalCount).toBe(0);
 				expect(settings.getModelRole("runtime")).toBe("openai/runtime");
 
 				await writeSettings({ modelRoles: { default: "openai/updated" } });
 				await settings.reloadFromDisk();
+				await tick();
 
 				expect(signalCount).toBe(1);
 				expect(settings.getModelRole("default")).toBe("openai/updated");
@@ -1183,18 +1220,20 @@ describe("Settings", () => {
 			await writeSettings({ providers: { "openai-codex": { codeMode: "off" } }, eval: { js: true } });
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			let signalCount = 0;
-			const unsubscribe = onCodeModeChanged(() => {
+			const unsubscribe = cfgCodeModeInputs.listen(settings, () => {
 				signalCount++;
 			});
 
 			try {
 				await settings.reloadFromDisk();
+				await tick();
 				expect(signalCount).toBe(0);
 
 				await writeSettings({ providers: { "openai-codex": { codeMode: "on" } }, eval: { js: true } });
 				await settings.reloadFromDisk();
+				await tick();
 
-				expect(settings.get("providers.openai-codex.codeMode")).toBe("on");
+				expect(cfgProvidersOpenaiCodexCodeMode.get(settings)).toBe("on");
 				expect(signalCount).toBe(1);
 
 				// A single reload that changes several partition inputs signals once.
@@ -1203,9 +1242,10 @@ describe("Settings", () => {
 					eval: { js: false },
 				});
 				await settings.reloadFromDisk();
+				await tick();
 
-				expect(settings.get("eval.js")).toBe(false);
-				expect(settings.get("providers.openai-codex.codeModeDirectTools")).toEqual(["bash"]);
+				expect(cfgEvalJs.get(settings)).toBe(false);
+				expect(cfgProvidersOpenaiCodexCodeModeDirectTools.get(settings)).toEqual(["bash"]);
 				expect(signalCount).toBe(2);
 
 				// `edit.mode` renames the direct edit tool on the wire.
@@ -1215,8 +1255,9 @@ describe("Settings", () => {
 					edit: { mode: "apply_patch" },
 				});
 				await settings.reloadFromDisk();
+				await tick();
 
-				expect(settings.get("edit.mode")).toBe("apply_patch");
+				expect(cfgEditMode.get(settings)).toBe("apply_patch");
 				expect(signalCount).toBe(3);
 			} finally {
 				unsubscribe();
@@ -1232,14 +1273,15 @@ describe("Settings", () => {
 				YAML.stringify({ providers: { "openai-codex": { codeMode: "on" } } }, null, 2),
 			);
 			let signalCount = 0;
-			const unsubscribe = onCodeModeChanged(() => {
+			const unsubscribe = cfgCodeModeInputs.listen(settings, () => {
 				signalCount++;
 			});
 
 			try {
 				await settings.reloadForCwd(otherProject);
+				await tick();
 
-				expect(settings.get("providers.openai-codex.codeMode")).toBe("on");
+				expect(cfgProvidersOpenaiCodexCodeMode.get(settings)).toBe("on");
 				expect(signalCount).toBe(1);
 			} finally {
 				unsubscribe();
@@ -1256,43 +1298,55 @@ describe("Settings", () => {
 				enabledModels: [],
 			});
 
-			expect(isolated.get("display.showTokenUsage")).toBe(false);
-			expect(isolated.get("setupVersion")).toBe(0);
-			expect(isolated.get("shellPath")).toBe("");
-			expect(isolated.get("enabledModels")).toEqual([]);
+			expect(cfgDisplayShowTokenUsage.get(isolated)).toBe(false);
+			expect(cfgSetupVersion.get(isolated)).toBe(0);
+			expect(cfgShellPath.get(isolated)).toBe("");
+			expect(cfgEnabledModels.get(isolated)).toEqual([]);
+		});
+
+		it("treats a config key written without a value as unset", async () => {
+			// YAML parses a valueless key as null. `get()` returned it verbatim, so
+			// `resolveRoleChain` crashed the process at startup on
+			// `settings.get("retry.fallbackChains")[role]` (#13183).
+			await Bun.write(getConfigPath(), "retry:\n  fallbackChains:\ninlineToolDescriptors:\n");
+
+			const settings = await Settings.loadIsolated({ cwd: projectDir, agentDir });
+
+			expect(cfgRetryFallbackChains.get(settings)).toEqual({});
+			expect(cfgInlineToolDescriptors.get(settings)).toBe("auto");
 		});
 
 		it("invalidates cached resolved values after set, override, and clearOverride", () => {
 			const isolated = Settings.isolated();
 
-			expect(isolated.get("display.showTokenUsage")).toBe(false);
-			isolated.set("display.showTokenUsage", true);
-			expect(isolated.get("display.showTokenUsage")).toBe(true);
+			expect(cfgDisplayShowTokenUsage.get(isolated)).toBe(false);
+			cfgDisplayShowTokenUsage.set(isolated, true);
+			expect(cfgDisplayShowTokenUsage.get(isolated)).toBe(true);
 
-			isolated.override("display.showTokenUsage", false);
-			expect(isolated.get("display.showTokenUsage")).toBe(false);
+			cfgDisplayShowTokenUsage.override(isolated, false);
+			expect(cfgDisplayShowTokenUsage.get(isolated)).toBe(false);
 
-			isolated.clearOverride("display.showTokenUsage");
-			expect(isolated.get("display.showTokenUsage")).toBe(true);
+			cfgDisplayShowTokenUsage.clearOverride(isolated);
+			expect(cfgDisplayShowTokenUsage.get(isolated)).toBe(true);
 		});
 
 		it("isolates mutable defaults between instances and from the schema", () => {
 			const first = Settings.isolated();
 			const second = Settings.isolated();
 
-			first.get("enabledModels").push("openai/gpt-test");
-			first.get("providers.maxInFlightRequests").openai = 1;
+			cfgEnabledModels.get(first).push("openai/gpt-test");
+			cfgProvidersMaxInFlightRequests.get(first).openai = 1;
 
-			expect(first.get("enabledModels")).toEqual(["openai/gpt-test"]);
-			expect(first.get("providers.maxInFlightRequests")).toEqual({ openai: 1 });
-			expect(second.get("enabledModels")).toEqual([]);
-			expect(second.get("providers.maxInFlightRequests")).toEqual({});
-			expect(SETTINGS_SCHEMA.enabledModels.default).toEqual([]);
-			expect(SETTINGS_SCHEMA["providers.maxInFlightRequests"].default).toEqual({});
-			expect(first.isConfigured("enabledModels")).toBe(false);
-			expect(first.isConfigured("providers.maxInFlightRequests")).toBe(false);
-			expect(second.isConfigured("enabledModels")).toBe(false);
-			expect(second.isConfigured("providers.maxInFlightRequests")).toBe(false);
+			expect(cfgEnabledModels.get(first)).toEqual(["openai/gpt-test"]);
+			expect(cfgProvidersMaxInFlightRequests.get(first)).toEqual({ openai: 1 });
+			expect(cfgEnabledModels.get(second)).toEqual([]);
+			expect(cfgProvidersMaxInFlightRequests.get(second)).toEqual({});
+			expect(cfgEnabledModels.definition.default).toEqual([]);
+			expect(cfgProvidersMaxInFlightRequests.definition.default).toEqual({});
+			expect(cfgEnabledModels.isConfigured(first)).toBe(false);
+			expect(cfgProvidersMaxInFlightRequests.isConfigured(first)).toBe(false);
+			expect(cfgEnabledModels.isConfigured(second)).toBe(false);
+			expect(cfgProvidersMaxInFlightRequests.isConfigured(second)).toBe(false);
 		});
 
 		it("re-resolves path-scoped arrays when cwd changes", async () => {
@@ -1317,73 +1371,43 @@ describe("Settings", () => {
 				},
 			});
 
-			expect(settings.get("enabledModels")).toEqual(["always-model", "project-model"]);
-			expect(settings.get("disabledProviders")).toEqual(["always-provider", "project-provider"]);
+			expect(cfgEnabledModels.get(settings)).toEqual(["always-model", "project-model"]);
+			expect(cfgDisabledProviders.get(settings)).toEqual(["always-provider", "project-provider"]);
 
 			await settings.reloadForCwd(otherDir);
 
-			expect(settings.get("enabledModels")).toEqual(["always-model", "other-model"]);
-			expect(settings.get("disabledProviders")).toEqual(["always-provider", "other-provider"]);
+			expect(cfgEnabledModels.get(settings)).toEqual(["always-model", "other-model"]);
+			expect(cfgDisabledProviders.get(settings)).toEqual(["always-provider", "other-provider"]);
 		});
 
-		it("migrates legacy snapcompact system prompt booleans to scoped modes", () => {
-			expect(Settings.isolated({ "snapcompact.systemPrompt": true }).get("snapcompact.systemPrompt")).toBe("all");
-			const nestedLegacy = { snapcompact: { systemPrompt: false } } as Partial<Record<SettingPath, unknown>>;
-			expect(Settings.isolated(nestedLegacy).get("snapcompact.systemPrompt")).toBe("none");
+		it("migrates legacy snapcompact system prompt booleans to scoped modes", async () => {
+			expect(cfgSnapcompactSystemPrompt.get(Settings.isolated({ "snapcompact.systemPrompt": true }))).toBe("all");
+			await writeSettings({ snapcompact: { systemPrompt: false } });
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(cfgSnapcompactSystemPrompt.get(settings)).toBe("none");
 		});
 
 		it("migrates legacy inlineToolDescriptors booleans to the on/off enum", () => {
-			expect(Settings.isolated({ inlineToolDescriptors: true }).get("inlineToolDescriptors")).toBe("on");
-			expect(Settings.isolated({ inlineToolDescriptors: false }).get("inlineToolDescriptors")).toBe("off");
-			expect(Settings.isolated().get("inlineToolDescriptors")).toBe("auto");
+			expect(cfgInlineToolDescriptors.get(Settings.isolated({ inlineToolDescriptors: true }))).toBe("on");
+			expect(cfgInlineToolDescriptors.get(Settings.isolated({ inlineToolDescriptors: false }))).toBe("off");
+			expect(cfgInlineToolDescriptors.get(Settings.isolated())).toBe("auto");
 		});
 	});
 
-	describe("statusLine.sessionAccent hooks", () => {
-		it("notifies subscribers only when the effective value changes", () => {
-			const isolated = Settings.isolated();
-			const values: boolean[] = [];
-			const unsubscribe = onStatusLineSessionAccentChanged(() => {
-				values.push(isolated.get("statusLine.sessionAccent"));
-			});
-
-			try {
-				isolated.set("statusLine.sessionAccent", true);
-				expect(values).toEqual([]);
-
-				isolated.set("statusLine.sessionAccent", false);
-				expect(values).toEqual([false]);
-
-				isolated.override("statusLine.sessionAccent", false);
-				expect(values).toEqual([false]);
-
-				isolated.override("statusLine.sessionAccent", true);
-				expect(values).toEqual([false, true]);
-
-				isolated.clearOverride("statusLine.sessionAccent");
-				expect(values).toEqual([false, true, false]);
-			} finally {
-				unsubscribe();
-			}
-
-			isolated.set("statusLine.sessionAccent", true);
-			expect(values).toEqual([false, true, false]);
-		});
-	});
-
-	describe("provider.appendOnlyContext hooks", () => {
-		it("isolates a throwing listener so the rest still receive the value", () => {
+	describe("handle listeners", () => {
+		it("isolates a throwing listener so the rest still receive the value", async () => {
 			const isolated = Settings.isolated();
 			const received: string[] = [];
-			const unsubscribeThrower = onAppendOnlyModeChanged(() => {
+			const unsubscribeThrower = cfgProviderAppendOnlyContext.listen(isolated, () => {
 				throw new Error("boom");
 			});
-			const unsubscribeOk = onAppendOnlyModeChanged(value => {
+			const unsubscribeOk = cfgProviderAppendOnlyContext.listen(isolated, value => {
 				received.push(value);
 			});
 
 			try {
-				isolated.set("provider.appendOnlyContext", "on");
+				cfgProviderAppendOnlyContext.set(isolated, "on");
+				await tick();
 				expect(received).toEqual(["on"]);
 			} finally {
 				unsubscribeThrower();
@@ -1413,7 +1437,7 @@ describe("Settings", () => {
 			});
 
 			// Settings saves a change - should merge, not overwrite
-			settings.set("defaultThinkingLevel", Effort.High);
+			cfgDefaultThinkingLevel.set(settings, Effort.High);
 			await settings.flush();
 
 			const savedSettings = await readSettings();
@@ -1427,7 +1451,7 @@ describe("Settings", () => {
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			expect(await readSettings()).toEqual({});
 
-			settings.set("terminal.showProgress", true);
+			cfgTerminalShowProgress.set(settings, true);
 			await settings.flush();
 
 			const savedSettings = await readSettings();
@@ -1454,13 +1478,13 @@ describe("Settings", () => {
 			});
 
 			const workSettings = await Settings.init({ cwd: workDir, agentDir });
-			expect(workSettings.get("enabledModels")).toEqual(["claude-sonnet-4-5", "anthropic/claude-opus-4-5"]);
-			expect(workSettings.get("disabledProviders")).toEqual(["ollama", "openai"]);
+			expect(cfgEnabledModels.get(workSettings)).toEqual(["claude-sonnet-4-5", "anthropic/claude-opus-4-5"]);
+			expect(cfgDisabledProviders.get(workSettings)).toEqual(["ollama", "openai"]);
 
 			resetSettingsForTest();
 			const privateSettings = await Settings.init({ cwd: privateDir, agentDir });
-			expect(privateSettings.get("enabledModels")).toEqual(["claude-sonnet-4-5", "openai/gpt-5.2-codex"]);
-			expect(privateSettings.get("disabledProviders")).toEqual(["ollama", "anthropic"]);
+			expect(cfgEnabledModels.get(privateSettings)).toEqual(["claude-sonnet-4-5", "openai/gpt-5.2-codex"]);
+			expect(cfgDisabledProviders.get(privateSettings)).toEqual(["ollama", "anthropic"]);
 		});
 
 		it("should preserve custom settings when changing theme", async () => {
@@ -1476,7 +1500,7 @@ describe("Settings", () => {
 				extensions: ["/path/to/extension.ts"],
 			});
 
-			settings.set("theme.dark", "anthracite");
+			cfgThemeDark.set(settings, "anthracite");
 			await settings.flush();
 
 			const savedSettings = await readSettings();
@@ -1497,7 +1521,7 @@ describe("Settings", () => {
 				defaultThinkingLevel: Effort.Low,
 			});
 
-			settings.set("defaultThinkingLevel", Effort.High);
+			cfgDefaultThinkingLevel.set(settings, Effort.High);
 			await settings.flush();
 
 			const savedSettings = await readSettings();
@@ -1510,7 +1534,7 @@ describe("Settings", () => {
 			});
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			settings.set("defaultThinkingLevel", Effort.High);
+			cfgDefaultThinkingLevel.set(settings, Effort.High);
 
 			await writeSettings({
 				defaultThinkingLevel: Effort.Medium,
@@ -1518,7 +1542,7 @@ describe("Settings", () => {
 			await settings.flush();
 
 			expect((await readSettings()).defaultThinkingLevel).toBe(Effort.Medium);
-			expect(settings.get("defaultThinkingLevel")).toBe(Effort.Medium);
+			expect(cfgDefaultThinkingLevel.get(settings)).toBe(Effort.Medium);
 		});
 
 		it("merges a pending local change with a later disjoint external edit", async () => {
@@ -1527,7 +1551,7 @@ describe("Settings", () => {
 			});
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			settings.set("defaultThinkingLevel", Effort.High);
+			cfgDefaultThinkingLevel.set(settings, Effort.High);
 
 			await writeSettings({
 				defaultThinkingLevel: Effort.Low,
@@ -1546,18 +1570,20 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			const received: string[] = [];
-			const unsubscribe = onAppendOnlyModeChanged(value => {
+			const unsubscribe = cfgProviderAppendOnlyContext.listen(settings, value => {
 				received.push(value);
 			});
 
 			try {
-				settings.set("provider.appendOnlyContext", "on");
+				cfgProviderAppendOnlyContext.set(settings, "on");
+				await tick();
 				await writeSettings({
 					provider: { appendOnlyContext: "off" },
 				});
 				await settings.flush();
+				await tick();
 
-				expect(settings.get("provider.appendOnlyContext")).toBe("off");
+				expect(cfgProviderAppendOnlyContext.get(settings)).toBe("off");
 				expect(received).toEqual(["on", "off"]);
 			} finally {
 				unsubscribe();
@@ -1694,7 +1720,7 @@ describe("Settings", () => {
 			settings.overrideModelRoles({ default: "openai/gpt-5.2-codex" });
 			expect(settings.getModelRole("default")).toBe("openai/gpt-5.2-codex");
 
-			settings.clearOverride("modelRoles");
+			cfgModelRoles.clearOverride(settings);
 
 			expect(settings.getModelRole("default")).toBe("anthropic/claude-sonnet-4-5");
 		});
@@ -1709,7 +1735,7 @@ describe("Settings", () => {
 
 			expect(settings.getModelRole("default")).toBe("anthropic/claude-opus-4-5");
 
-			settings.clearOverride("modelRoles");
+			cfgModelRoles.clearOverride(settings);
 
 			expect(settings.getModelRole("default")).toBe("anthropic/claude-opus-4-5");
 		});
@@ -1740,7 +1766,7 @@ describe("Settings", () => {
 		});
 	});
 
-	describe("getEditVariantForModel", () => {
+	describe("editVariantForModel", () => {
 		it("matches configured model variants case-insensitively", async () => {
 			await writeSettings({
 				edit: {
@@ -1752,7 +1778,7 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.getEditVariantForModel("openrouter/moonshotai/Kimi-K2-Instruct")).toBe("hashline");
+			expect(editVariantForModel(settings, "openrouter/moonshotai/Kimi-K2-Instruct")).toBe("hashline");
 		});
 
 		it("refreshes cached model variants when the active project settings change", async () => {
@@ -1770,12 +1796,12 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.getEditVariantForModel("openrouter/moonshotai/Kimi-K2-Instruct")).toBe("hashline");
+			expect(editVariantForModel(settings, "openrouter/moonshotai/Kimi-K2-Instruct")).toBe("hashline");
 
 			await settings.reloadForCwd(otherProjectDir);
 
-			expect(settings.getEditVariantForModel("openrouter/moonshotai/Kimi-K2-Instruct")).toBeNull();
-			expect(settings.getEditVariantForModel("openai/gpt-5.2-codex")).toBe("apply_patch");
+			expect(editVariantForModel(settings, "openrouter/moonshotai/Kimi-K2-Instruct")).toBeUndefined();
+			expect(editVariantForModel(settings, "openai/gpt-5.2-codex")).toBe("apply_patch");
 		});
 	});
 
@@ -1788,8 +1814,21 @@ describe("Settings", () => {
 			expectedChains: Record<string, string[]>,
 		];
 
-		const webExaCandidates = ["web/exa", ...MODEL_PRIO.web.filter(selector => selector !== "web/exa")];
+		const webDefaultCandidates = MODEL_PRIO.web.flatMap(selector => {
+			if (selector === "google/gemini-2.5-flash") {
+				return [
+					"google-gemini-cli/gemini-2.5-flash",
+					"google-antigravity/gemini-2.5-flash",
+					"google/gemini-2.5-flash",
+				];
+			}
+			if (selector === "google-antigravity/gemini-2.5-flash") return [];
+			return [selector];
+		});
+		const webExaCandidates = ["web/exa", ...webDefaultCandidates.filter(selector => selector !== "web/exa")];
 		const webOrderedHead = [
+			"google-gemini-cli/gemini-2.5-flash",
+			"google-antigravity/gemini-2.5-flash",
 			"google/gemini-2.5-flash",
 			"anthropic/claude-haiku-4-5",
 			"openai-codex/gpt-5.6-luna",
@@ -1798,18 +1837,18 @@ describe("Settings", () => {
 		];
 		const webOrderedCandidates = [
 			...webOrderedHead,
-			...MODEL_PRIO.web.filter(selector => !webOrderedHead.includes(selector)),
+			...webDefaultCandidates.filter(selector => !webOrderedHead.includes(selector)),
 		];
-		const webExcludedCandidates = MODEL_PRIO.web.filter(
+		const webExcludedCandidates = webDefaultCandidates.filter(
 			selector => selector !== "web/public" && !selector.startsWith("xai/") && !selector.startsWith("xai-oauth/"),
 		);
-		const webGeminiOverrideCandidates = MODEL_PRIO.web.map(selector =>
-			selector === "google/gemini-2.5-flash"
-				? "google/gemini-custom"
-				: selector === "google-antigravity/gemini-2.5-flash"
-					? "google-antigravity/gemini-custom"
-					: selector,
-		);
+		const webGeminiOverrideCandidates = MODEL_PRIO.web.flatMap(selector => {
+			if (selector === "google/gemini-2.5-flash") {
+				return ["google-gemini-cli/gemini-custom", "google-antigravity/gemini-custom", "google/gemini-custom"];
+			}
+			if (selector === "google-antigravity/gemini-2.5-flash") return [];
+			return [selector];
+		});
 		const imageOrderedHead = [
 			"openai/gpt-image-1",
 			"openai-codex/gpt-image-1",
@@ -1916,10 +1955,10 @@ describe("Settings", () => {
 					await writeSettings(input);
 					const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-					expect(settings.get("modelRoles")).toEqual(expectedRoles);
-					expect(settings.get("retry.fallbackChains")).toEqual(expectedChains);
+					expect(cfgModelRoles.get(settings)).toEqual(expectedRoles);
+					expect(cfgRetryFallbackChains.get(settings)).toEqual(expectedChains);
 
-					settings.set("display.showTokenUsage", true);
+					cfgDisplayShowTokenUsage.set(settings, true);
 					await settings.flush();
 					const saved = await readSettings();
 					expect(saved.modelRoles ?? {}).toEqual(expectedRoles);
@@ -1931,6 +1970,23 @@ describe("Settings", () => {
 				}
 			},
 		);
+
+		it("keeps a legacy Gemini wire tier ahead of non-Gemini fallbacks", async () => {
+			await writeSettings({
+				providers: {
+					webSearch: "gemini",
+					webSearchGeminiModel: "gemini-3.8-flash-high",
+				},
+			});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect([settings.getModelRole("web"), ...cfgRetryFallbackChains.get(settings).web.slice(0, 2)]).toEqual([
+				"google-gemini-cli/gemini-3.8-flash-high",
+				"google-antigravity/gemini-3.8-flash-high",
+				"google/gemini-3.8-flash-high",
+			]);
+		});
 
 		it("drops legacy defaults without materializing kind roles", async () => {
 			await writeSettings({
@@ -1953,9 +2009,9 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("modelRoles")).toEqual({});
-			expect(settings.get("retry.fallbackChains")).toEqual({});
-			settings.set("display.showTokenUsage", true);
+			expect(cfgModelRoles.get(settings)).toEqual({});
+			expect(cfgRetryFallbackChains.get(settings)).toEqual({});
+			cfgDisplayShowTokenUsage.set(settings, true);
 			await settings.flush();
 			const saved = await readSettings();
 			expect(saved.modelRoles).toBeUndefined();
@@ -1973,7 +2029,7 @@ describe("Settings", () => {
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
 			expect(settings.getModelRole("web")).toBe(webExaCandidates[0]);
-			expect(settings.get("retry.fallbackChains").web).toEqual(webExaCandidates.slice(1));
+			expect(cfgRetryFallbackChains.get(settings).web).toEqual(webExaCandidates.slice(1));
 		});
 
 		it("preserves explicit roles and empty chains while prepending local tiny and memory models", async () => {
@@ -2005,7 +2061,7 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("modelRoles")).toEqual({
+			expect(cfgModelRoles.get(settings)).toEqual({
 				web: "custom/web",
 				image: "custom/image",
 				speech: "custom/speech",
@@ -2014,7 +2070,7 @@ describe("Settings", () => {
 				tiny: "local/lfm2.5-230m,custom/tiny,@smol",
 				memory: "local/lfm2-1.2b,custom/memory",
 			});
-			expect(settings.get("retry.fallbackChains")).toEqual({
+			expect(cfgRetryFallbackChains.get(settings)).toEqual({
 				web: [],
 				image: [],
 				speech: [],
@@ -2030,17 +2086,17 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("compaction.methodOrder")).toEqual(["soft"]);
+			expect(cfgCompactionMethodOrder.get(settings)).toEqual(["soft"]);
 		});
 	});
 	describe("migrations", () => {
 		it("preserves current ask timeout seconds in overrides and persisted config", async () => {
-			expect(Settings.isolated({ "ask.timeout": 2000 }).get("ask.timeout")).toBe(2000);
+			expect(cfgAskTimeout.get(Settings.isolated({ "ask.timeout": 2000 }))).toBe(2000);
 
 			await writeSettings({ ask: { timeout: 2000 } });
 			const loaded = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(loaded.get("ask.timeout")).toBe(2000);
+			expect(cfgAskTimeout.get(loaded)).toBe(2000);
 		});
 
 		it("moves the legacy image question timeout and removes its tool settings", async () => {
@@ -2048,8 +2104,8 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("images.questionTimeoutMs")).toBe(42);
-			settings.set("display.showTokenUsage", true);
+			expect(cfgImagesQuestionTimeoutMs.get(settings)).toBe(42);
+			cfgDisplayShowTokenUsage.set(settings, true);
 			await settings.flush();
 			expect((await readSettings()).inspect_image).toBeUndefined();
 		});
@@ -2059,9 +2115,9 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("task.isolation.enabled")).toBe(false);
-			expect(settings.get("isolation.backend")).toBe("auto");
-			settings.set("display.showTokenUsage", true);
+			expect(cfgTaskIsolationEnabled.get(settings)).toBe(false);
+			expect(cfgIsolationBackend.get(settings)).toBe("auto");
+			cfgDisplayShowTokenUsage.set(settings, true);
 			await settings.flush();
 			const saved = await readSettings();
 			expect((saved.task as Record<string, Record<string, unknown>>).isolation).toEqual({ enabled: false });
@@ -2072,8 +2128,8 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("task.isolation.enabled")).toBe(true);
-			expect(settings.get("isolation.backend")).toBe("reflink");
+			expect(cfgTaskIsolationEnabled.get(settings)).toBe(true);
+			expect(cfgIsolationBackend.get(settings)).toBe("reflink");
 		});
 
 		it("renames legacy isolation backends during mode migration", async () => {
@@ -2081,8 +2137,8 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("task.isolation.enabled")).toBe(true);
-			expect(settings.get("isolation.backend")).toBe("overlayfs");
+			expect(cfgTaskIsolationEnabled.get(settings)).toBe(true);
+			expect(cfgIsolationBackend.get(settings)).toBe("overlayfs");
 		});
 
 		it("keeps explicit task isolation enabled over a legacy mode", async () => {
@@ -2090,8 +2146,8 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("task.isolation.enabled")).toBe(false);
-			expect(settings.get("isolation.backend")).toBe("reflink");
+			expect(cfgTaskIsolationEnabled.get(settings)).toBe(false);
+			expect(cfgIsolationBackend.get(settings)).toBe("reflink");
 		});
 
 		it("consolidates legacy Exa suite toggles onto exa.enabled", async () => {
@@ -2106,8 +2162,8 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("exa.enabled")).toBe(false);
-			settings.set("display.showTokenUsage", true);
+			expect(cfgExaEnabled.get(settings)).toBe(false);
+			cfgDisplayShowTokenUsage.set(settings, true);
 			await settings.flush();
 			expect((await readSettings()).exa).toEqual({ enabled: false });
 		});
@@ -2120,8 +2176,8 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("exa.enabled")).toBe(false);
-			settings.set("display.showTokenUsage", true);
+			expect(cfgExaEnabled.get(settings)).toBe(false);
+			cfgDisplayShowTokenUsage.set(settings, true);
 			await settings.flush();
 			expect((await readSettings()).exa).toEqual({ enabled: false });
 		});
@@ -2131,8 +2187,8 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("exa.enabled")).toBe(true);
-			settings.set("display.showTokenUsage", true);
+			expect(cfgExaEnabled.get(settings)).toBe(true);
+			cfgDisplayShowTokenUsage.set(settings, true);
 			await settings.flush();
 			expect((await readSettings()).exa).toBeUndefined();
 		});
@@ -2142,8 +2198,8 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("computer.enabled")).toBe(true);
-			settings.set("display.showTokenUsage", true);
+			expect(cfgComputerEnabled.get(settings)).toBe(true);
+			cfgDisplayShowTokenUsage.set(settings, true);
 			await settings.flush();
 			expect((await readSettings()).computer).toEqual({ enabled: true });
 		});
@@ -2154,7 +2210,7 @@ describe("Settings", () => {
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
 			expect(settings.getModelRole("tiny")).toBe("local/lfm2.5-350m");
-			settings.set("display.showTokenUsage", true);
+			cfgDisplayShowTokenUsage.set(settings, true);
 			await settings.flush();
 			const saved = await readSettings();
 			expect(saved.modelRoles).toEqual({ tiny: "local/lfm2.5-350m" });
@@ -2167,7 +2223,7 @@ describe("Settings", () => {
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
 			expect(settings.getModelRole("tiny")).toBe("local/lfm2.5-350m");
-			settings.set("display.showTokenUsage", true);
+			cfgDisplayShowTokenUsage.set(settings, true);
 			await settings.flush();
 			const saved = await readSettings();
 			expect(saved.modelRoles).toEqual({ tiny: "local/lfm2.5-350m" });
@@ -2188,9 +2244,9 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("edit.mode")).toBe("hashline");
-			expect(settings.getEditVariantForModel("claude-opus-4-5")).toBe("hashline");
-			expect(settings.getEditVariantForModel("gpt-5.2")).toBe("apply_patch");
+			expect(cfgEditMode.get(settings)).toBe("hashline");
+			expect(editVariantForModel(settings, "claude-opus-4-5")).toBe("hashline");
+			expect(editVariantForModel(settings, "gpt-5.2")).toBe("apply_patch");
 		});
 
 		it("maps legacy hindsight.dynamicBankId=true onto hindsight.scoping=per-project", async () => {
@@ -2200,7 +2256,7 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("hindsight.scoping")).toBe("per-project");
+			expect(cfgHindsightScoping.get(settings)).toBe("per-project");
 		});
 
 		it("does not override an explicit hindsight.scoping when migrating", async () => {
@@ -2210,7 +2266,7 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("hindsight.scoping")).toBe("global");
+			expect(cfgHindsightScoping.get(settings)).toBe("global");
 		});
 
 		it("promotes legacy hindsight.agentName onto hindsight.bankId when bankId is unset", async () => {
@@ -2220,7 +2276,7 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("hindsight.bankId")).toBe("ada-cli");
+			expect(cfgHindsightBankId.get(settings)).toBe("ada-cli");
 		});
 
 		it("migrates the legacy mnemosyne memory backend to mnemopi", async () => {
@@ -2231,9 +2287,9 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("memory.backend")).toBe("mnemopi");
-			expect(settings.get("mnemopi.dbPath")).toBe("/tmp/old.db");
-			expect(settings.get("mnemopi.scoping")).toBe("global");
+			expect(cfgMemoryBackend.get(settings)).toBe("mnemopi");
+			expect(cfgMnemopiDbPath.get(settings)).toBe("/tmp/old.db");
+			expect(cfgMnemopiScoping.get(settings)).toBe("global");
 		});
 
 		it("does not clobber an explicit mnemopi block when the legacy mnemosyne block is also present", async () => {
@@ -2244,7 +2300,7 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("mnemopi.dbPath")).toBe("/tmp/new.db");
+			expect(cfgMnemopiDbPath.get(settings)).toBe("/tmp/new.db");
 		});
 
 		it("migrates boolean task.eager/todo.eager true to always", async () => {
@@ -2256,8 +2312,8 @@ describe("Settings", () => {
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
 			// `true` reproduced the previous "on" behavior, now `always`.
-			expect(settings.get("task.eager")).toBe("always");
-			expect(settings.get("todo.eager")).toBe("always");
+			expect(cfgTaskEager.get(settings)).toBe("always");
+			expect(cfgTodoEager.get(settings)).toBe("always");
 		});
 
 		it("migrates boolean task.eager/todo.eager false to default", async () => {
@@ -2270,8 +2326,8 @@ describe("Settings", () => {
 
 			// Load-bearing direction: consumers treat any non-`default` value as enabled
 			// (`false !== "default"`), so an un-coerced boolean `false` would read as ON.
-			expect(settings.get("task.eager")).toBe("default");
-			expect(settings.get("todo.eager")).toBe("default");
+			expect(cfgTaskEager.get(settings)).toBe("default");
+			expect(cfgTodoEager.get(settings)).toBe("default");
 		});
 
 		it("migrates legacy features.unexpectedStopDetection=true to smart", async () => {
@@ -2280,7 +2336,7 @@ describe("Settings", () => {
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
 			// `true` reproduced the previous small-model-classified guard, now "smart".
-			expect(settings.get("features.unexpectedStopDetection")).toBe("smart");
+			expect(cfgFeaturesUnexpectedStopDetection.get(settings)).toBe("smart");
 		});
 
 		it("maps legacy features.unexpectedStopDetection=false to none", async () => {
@@ -2288,7 +2344,7 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("features.unexpectedStopDetection")).toBe("none");
+			expect(cfgFeaturesUnexpectedStopDetection.get(settings)).toBe("none");
 		});
 
 		it("resolves unconfigured features.unexpectedStopDetection to the mechanical default", async () => {
@@ -2296,7 +2352,7 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("features.unexpectedStopDetection")).toBe("mechanical");
+			expect(cfgFeaturesUnexpectedStopDetection.get(settings)).toBe("mechanical");
 		});
 
 		it("normalizes a quoted-dotted legacy unexpected-stop boolean", async () => {
@@ -2304,7 +2360,7 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("features.unexpectedStopDetection")).toBe("smart");
+			expect(cfgFeaturesUnexpectedStopDetection.get(settings)).toBe("smart");
 		});
 
 		it("keeps an explicit unexpected-stop mode over a legacy dotted boolean", async () => {
@@ -2315,7 +2371,7 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("features.unexpectedStopDetection")).toBe("smart");
+			expect(cfgFeaturesUnexpectedStopDetection.get(settings)).toBe("smart");
 		});
 
 		it("moves legacy lastChangelogVersion out of config.yml into the marker file", async () => {
@@ -2327,7 +2383,7 @@ describe("Settings", () => {
 			expect(fs.readFileSync(path.join(agentDir, "last-changelog-version"), "utf8")).toBe("0.40.0");
 
 			// Key stripped from config.yml on the next save.
-			settings.set("display.showTokenUsage", true);
+			cfgDisplayShowTokenUsage.set(settings, true);
 			await settings.flush();
 			const onDisk = await readSettings();
 			expect("lastChangelogVersion" in onDisk).toBe(false);
@@ -2354,9 +2410,9 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("grep.enabled")).toBe(false);
-			expect(settings.get("grep.contextBefore")).toBe(2);
-			expect(settings.get("grep.contextAfter")).toBe(5);
+			expect(cfgGrepEnabled.get(settings)).toBe(false);
+			expect(cfgGrepContextBefore.get(settings)).toBe(2);
+			expect(cfgGrepContextAfter.get(settings)).toBe(5);
 		});
 
 		it("migrates flat legacy search settings keys to nested grep", async () => {
@@ -2368,9 +2424,9 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("grep.enabled")).toBe(false);
-			expect(settings.get("grep.contextBefore")).toBe(2);
-			expect(settings.get("grep.contextAfter")).toBe(5);
+			expect(cfgGrepEnabled.get(settings)).toBe(false);
+			expect(cfgGrepContextBefore.get(settings)).toBe(2);
+			expect(cfgGrepContextAfter.get(settings)).toBe(5);
 		});
 
 		it("does not clobber existing grep settings when migrating legacy search ones", async () => {
@@ -2383,7 +2439,7 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("grep.enabled")).toBe(true);
+			expect(cfgGrepEnabled.get(settings)).toBe(true);
 		});
 
 		it("migrates a boolean find.enabled to its explicit on/off mode without touching glob", async () => {
@@ -2391,8 +2447,8 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("find.enabled")).toBe("on");
-			expect(settings.get("glob.enabled")).toBe(false);
+			expect(cfgFindEnabled.get(settings)).toBe("on");
+			expect(cfgGlobEnabled.get(settings)).toBe(false);
 		});
 
 		it("migrates nested dev.autoqa.consent and todo.reminders.max without configuring parents", async () => {
@@ -2403,12 +2459,12 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("dev.autoqaConsent")).toBe("granted");
-			expect(settings.get("dev.autoqa")).toBe(true);
-			expect(settings.isConfigured("dev.autoqa")).toBe(false);
-			expect(settings.get("todo.remindersMax")).toBe(5);
-			expect(settings.get("todo.reminders")).toBe(true);
-			expect(settings.isConfigured("todo.reminders")).toBe(false);
+			expect(cfgDevAutoqaConsent.get(settings)).toBe("granted");
+			expect(cfgDevAutoqa.get(settings)).toBe(true);
+			expect(cfgDevAutoqa.isConfigured(settings)).toBe(false);
+			expect(cfgTodoRemindersMax.get(settings)).toBe(5);
+			expect(cfgTodoReminders.get(settings)).toBe(true);
+			expect(cfgTodoReminders.isConfigured(settings)).toBe(false);
 		});
 
 		it("migrates quoted dotted legacy keys for consent and reminders max", async () => {
@@ -2416,10 +2472,10 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("dev.autoqaConsent")).toBe("denied");
-			expect(settings.isConfigured("dev.autoqa")).toBe(false);
-			expect(settings.get("todo.remindersMax")).toBe(2);
-			expect(settings.get("todo.reminders")).toBe(true);
+			expect(cfgDevAutoqaConsent.get(settings)).toBe("denied");
+			expect(cfgDevAutoqa.isConfigured(settings)).toBe(false);
+			expect(cfgTodoRemindersMax.get(settings)).toBe(2);
+			expect(cfgTodoReminders.get(settings)).toBe(true);
 		});
 
 		it("lets explicit new keys win over legacy nested consent/max values", async () => {
@@ -2430,10 +2486,10 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("dev.autoqaConsent")).toBe("granted");
-			expect(settings.isConfigured("dev.autoqa")).toBe(false);
-			expect(settings.get("todo.remindersMax")).toBe(9);
-			expect(settings.get("todo.reminders")).toBe(true);
+			expect(cfgDevAutoqaConsent.get(settings)).toBe("granted");
+			expect(cfgDevAutoqa.isConfigured(settings)).toBe(false);
+			expect(cfgTodoRemindersMax.get(settings)).toBe(9);
+			expect(cfgTodoReminders.get(settings)).toBe(true);
 		});
 
 		it("preserves recoverable parent booleans alongside legacy leaf keys", async () => {
@@ -2444,19 +2500,18 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("dev.autoqa")).toBe(true);
-			expect(settings.get("dev.autoqaConsent")).toBe("unset");
-			expect(settings.get("todo.reminders")).toBe(false);
-			expect(settings.get("todo.remindersMax")).toBe(4);
+			expect(cfgDevAutoqa.get(settings)).toBe(true);
+			expect(cfgDevAutoqaConsent.get(settings)).toBe("unset");
+			expect(cfgTodoReminders.get(settings)).toBe(false);
+			expect(cfgTodoRemindersMax.get(settings)).toBe(4);
 		});
 
-		it("migrates denied/granted/unset consent values through isolated overrides", () => {
+		it("migrates denied/granted/unset legacy consent values", async () => {
 			for (const consent of ["denied", "granted", "unset"] as const) {
-				const settings = Settings.isolated({
-					"dev.autoqa.consent": consent,
-				} as Partial<Record<SettingPath, unknown>>);
-				expect(settings.get("dev.autoqaConsent")).toBe(consent);
-				expect(settings.isConfigured("dev.autoqa")).toBe(false);
+				await writeSettings({ "dev.autoqa.consent": consent });
+				const settings = await Settings.loadIsolated({ cwd: projectDir, agentDir });
+				expect(cfgDevAutoqaConsent.get(settings)).toBe(consent);
+				expect(cfgDevAutoqa.isConfigured(settings)).toBe(false);
 			}
 		});
 
@@ -2467,11 +2522,11 @@ describe("Settings", () => {
 			});
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			expect(settings.get("dev.autoqaConsent")).toBe("denied");
-			expect(settings.get("todo.remindersMax")).toBe(1);
+			expect(cfgDevAutoqaConsent.get(settings)).toBe("denied");
+			expect(cfgTodoRemindersMax.get(settings)).toBe(1);
 
 			// Touch an unrelated key so the migrated tree is written back.
-			settings.set("display.showTokenUsage", true);
+			cfgDisplayShowTokenUsage.set(settings, true);
 			await settings.flush();
 
 			const onDisk = await readSettings();
@@ -2485,10 +2540,10 @@ describe("Settings", () => {
 			expect(onDisk["todo.reminders.max"]).toBeUndefined();
 
 			const reloaded = await Settings.loadIsolated({ cwd: projectDir, agentDir });
-			expect(reloaded.get("dev.autoqaConsent")).toBe("denied");
-			expect(reloaded.isConfigured("dev.autoqa")).toBe(false);
-			expect(reloaded.get("todo.remindersMax")).toBe(1);
-			expect(reloaded.get("todo.reminders")).toBe(true);
+			expect(cfgDevAutoqaConsent.get(reloaded)).toBe("denied");
+			expect(cfgDevAutoqa.isConfigured(reloaded)).toBe(false);
+			expect(cfgTodoRemindersMax.get(reloaded)).toBe(1);
+			expect(cfgTodoReminders.get(reloaded)).toBe(true);
 		});
 
 		it("drops dead BM25-discovery keys and leaves tools.xdev at its default", async () => {
@@ -2501,8 +2556,8 @@ describe("Settings", () => {
 
 			// No migration mapping: legacy discovery intent is discarded, xdev
 			// keeps its own default. An explicit xdev value is untouched.
-			expect(settings.get("tools.xdev")).toBe(true);
-			expect(settings.isConfigured("tools.xdev")).toBe(false);
+			expect(cfgToolsXdev.get(settings)).toBe(true);
+			expect(cfgToolsXdev.isConfigured(settings)).toBe(false);
 		});
 
 		it("migrates from settings.json containing comments", async () => {
@@ -2519,7 +2574,7 @@ describe("Settings", () => {
 			);
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			expect(settings.get("display.showTokenUsage")).toBe(true);
+			expect(cfgDisplayShowTokenUsage.get(settings)).toBe(true);
 			expect(fs.existsSync(jsonPath)).toBe(false);
 			expect(fs.existsSync(`${jsonPath}.bak`)).toBe(true);
 		});
@@ -2541,7 +2596,7 @@ describe("Settings", () => {
 			db.close();
 
 			const first = await Settings.init({ cwd: projectDir, agentDir });
-			expect(first.get("symbolPreset")).toBe("ascii");
+			expect(cfgSymbolPreset.get(first)).toBe("ascii");
 			expect((await readSettings()).symbolPreset).toBe("ascii");
 
 			const storage = await AgentStorage.open(dbPath);
@@ -2552,8 +2607,8 @@ describe("Settings", () => {
 			resetSettingsForTest();
 
 			const second = await Settings.init({ cwd: projectDir, agentDir });
-			expect(second.get("symbolPreset")).toBe("unicode");
-			expect(second.isConfigured("symbolPreset")).toBe(false);
+			expect(cfgSymbolPreset.get(second)).toBe("unicode");
+			expect(cfgSymbolPreset.isConfigured(second)).toBe(false);
 			expect(await Bun.file(getConfigPath()).exists()).toBe(false);
 		});
 
@@ -2598,7 +2653,7 @@ describe("Settings", () => {
 			AgentStorage.close();
 			const reloaded = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(reloaded.get("symbolPreset")).not.toBe("ascii");
+			expect(cfgSymbolPreset.get(reloaded)).not.toBe("ascii");
 			expect(await Bun.file(getConfigPath()).exists()).toBe(false);
 			expect(fs.existsSync(`${jsonPath}.bak`)).toBe(true);
 		});
@@ -2613,7 +2668,7 @@ describe("Settings", () => {
 				},
 			});
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			expect(settings.get("power.sleepPrevention")).toBe("system");
+			expect(cfgPowerSleepPrevention.get(settings)).toBe("system");
 		});
 
 		it("migrates legacy power booleans with display=true to display level", async () => {
@@ -2626,7 +2681,7 @@ describe("Settings", () => {
 				},
 			});
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			expect(settings.get("power.sleepPrevention")).toBe("display");
+			expect(cfgPowerSleepPrevention.get(settings)).toBe("display");
 		});
 
 		it("migrates legacy power booleans with declareUserActive=true to system level", async () => {
@@ -2639,7 +2694,7 @@ describe("Settings", () => {
 				},
 			});
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			expect(settings.get("power.sleepPrevention")).toBe("system");
+			expect(cfgPowerSleepPrevention.get(settings)).toBe("system");
 		});
 
 		it("preserves old idle default when only non-idle keys are set", async () => {
@@ -2649,7 +2704,7 @@ describe("Settings", () => {
 				power: { preventDisplaySleep: false },
 			});
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			expect(settings.get("power.sleepPrevention")).toBe("idle");
+			expect(cfgPowerSleepPrevention.get(settings)).toBe("idle");
 		});
 
 		it("migrates all-false power booleans to off", async () => {
@@ -2662,7 +2717,7 @@ describe("Settings", () => {
 				},
 			});
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			expect(settings.get("power.sleepPrevention")).toBe("off");
+			expect(cfgPowerSleepPrevention.get(settings)).toBe("off");
 		});
 
 		it("migrates flat-key power booleans to the enum", async () => {
@@ -2671,7 +2726,7 @@ describe("Settings", () => {
 				"power.preventDisplaySleep": true,
 			});
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			expect(settings.get("power.sleepPrevention")).toBe("display");
+			expect(cfgPowerSleepPrevention.get(settings)).toBe("display");
 		});
 
 		it("does not overwrite an explicit power.sleepPrevention", async () => {
@@ -2679,12 +2734,13 @@ describe("Settings", () => {
 				power: { sleepPrevention: "off", preventIdleSleep: true },
 			});
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			expect(settings.get("power.sleepPrevention")).toBe("off");
+			expect(cfgPowerSleepPrevention.get(settings)).toBe("off");
 		});
 
 		describe("provider request limits", () => {
-			it("uses the effective merged value when configuring hooks", async () => {
+			it("applies the effective merged value as the process-wide limit", async () => {
 				const settings = Settings.isolated({ "providers.maxInFlightRequests": { openai: 1 } });
+				bindEffects(settings);
 				__providerInFlightForTesting.setRoot(tempDir.join("provider-inflight"));
 				registerMockApi();
 				const firstStarted = Promise.withResolvers<void>();
@@ -2710,7 +2766,7 @@ describe("Settings", () => {
 					},
 				});
 
-				settings.set("providers.maxInFlightRequests", { openai: 4 });
+				cfgProvidersMaxInFlightRequests.set(settings, { openai: 4 });
 
 				const first = streamSimple(mock.model, context());
 				const firstResult = first.result();
@@ -2718,7 +2774,7 @@ describe("Settings", () => {
 				const second = streamSimple(mock.model, context());
 				await Bun.sleep(20);
 
-				expect(settings.get("providers.maxInFlightRequests")).toEqual({ openai: 1 });
+				expect(cfgProvidersMaxInFlightRequests.get(settings)).toEqual({ openai: 1 });
 				expect(mock.calls).toHaveLength(1);
 
 				releaseFirst.resolve();
@@ -2763,7 +2819,7 @@ describe("Settings", () => {
 			fs.writeFileSync(claudeSettings, JSON.stringify({ extensions: ["../claude-ext"] }));
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			expect(settings.get("extensions")).toContain("../claude-ext");
+			expect(cfgExtensions.get(settings)).toContain("../claude-ext");
 			expect(settings.extensionsSourceLevel()).toBe("project");
 		});
 
@@ -2772,7 +2828,7 @@ describe("Settings", () => {
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			expect(settings.extensionsSourceLevel()).toBe("user");
 
-			settings.override("extensions", ["../override-ext"]);
+			cfgExtensions.override(settings, ["../override-ext"]);
 			expect(settings.extensionsSourceLevel()).toBe("user");
 		});
 	});
@@ -2785,7 +2841,7 @@ describe("Settings", () => {
 			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir, inMemory: true });
-			expect(settings.get("symbolPreset")).toBe("unicode");
+			expect(cfgSymbolPreset.get(settings)).toBe("unicode");
 			expect(warnSpy).toHaveBeenCalledWith(
 				expect.stringMatching(/Settings: \[Claude Code\] Failed to parse JSON in .*settings\.json/),
 			);
@@ -2851,7 +2907,7 @@ describe("Settings", () => {
 			await Bun.write(claudeSettings, '{ "symbolPreset": "ascii", }');
 			await settings.reloadFromDisk();
 
-			expect(settings.get("symbolPreset")).toBe("unicode");
+			expect(cfgSymbolPreset.get(settings)).toBe("unicode");
 			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(claudeSettings));
 		});
 	});
