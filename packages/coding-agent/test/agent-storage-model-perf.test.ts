@@ -241,6 +241,9 @@ describe("AgentStorage model perf aggregates", () => {
 			OMP_PROFILE: "",
 			PI_CODING_AGENT_DIR: agentDir,
 			PI_PROFILE: "",
+			// os.homedir() on Windows reads USERPROFILE, not HOME: without this
+			// the probe resolves the real ~/.omp and writes its fixture stats.db there.
+			USERPROFILE: homeDir,
 			XDG_CACHE_HOME: tempDir.join("xdg-cache"),
 			XDG_CONFIG_HOME: tempDir.join("xdg-config"),
 			XDG_DATA_HOME: tempDir.join("xdg-data"),
