@@ -10,11 +10,11 @@ use async_trait::async_trait;
 
 use crate::{
 	diff_string::{CompactDiffOptions, build_compact_diff_preview},
-	engine::{EditMode, FileOp, HeaderKind, ModeEngine, PreviewFile, StagedFile},
+	engine::{EditMode, FileOp, FileOpIntent, HeaderKind, ModeEngine, PreviewFile, StagedFile},
 	error::{EditError, EditResult},
 	files::{FileCache, FileSource},
 	notebook,
-	path_policy::{PathPolicy, canonical_key},
+	path_policy::{PathPolicy, UrlResolution, canonical_key},
 	store::{EditStore, Snapshot, file_hash, seen_lines_from_body},
 	stream_json::ArgStream,
 	text::{normalize_to_lf, strip_bom, utf16_len},
@@ -130,6 +130,8 @@ pub struct Session {
 	/// Generation the last preview was computed for.
 	previewed:       u32,
 	final_pass_done: bool,
+	/// Apply began: URL answers provided from here on belong to apply.
+	applying:        bool,
 }
 
 impl Session {
@@ -150,6 +152,7 @@ impl Session {
 			generation: 0,
 			previewed: 0,
 			final_pass_done: false,
+			applying: false,
 		}
 	}
 
@@ -192,6 +195,60 @@ impl Session {
 		self.generation != self.previewed || (self.args.is_finished() && !self.final_pass_done)
 	}
 
+	/// Drain internal URLs that missed the resolution table since the last
+	/// call (deduped, first-seen order). Streaming passes record misses too:
+	/// the host answers half-streamed URLs like any other (locating has no
+	/// side effects), so previews never wait for the arguments to finish.
+	pub fn take_unresolved(&mut self) -> Vec<String> {
+		self.files.take_unresolved()
+	}
+
+	/// Record the host answer for `url`; clears cached reads/resolutions for
+	/// it and makes [`Self::preview_pending`] true. Answers provided before
+	/// the apply phase serve previews only.
+	pub fn provide(&mut self, url: String, resolution: UrlResolution) {
+		self.files.provide(url, resolution);
+		self.generation += 1;
+	}
+
+	/// Enter the apply phase (idempotent) and list the internal URL targets
+	/// the finished arguments name — section paths and move destinations,
+	/// deduped in payload order — so the host can answer them all in one
+	/// pass before [`Self::apply`] instead of one staging retry per URL.
+	/// Entering the phase drops every preview-time answer: those were
+	/// resolved before approval and without the call's abort signal. Empty
+	/// while the arguments are incomplete.
+	pub fn begin_apply_url_targets(&mut self) -> Vec<String> {
+		self.begin_apply();
+		let snapshot = self.args.snapshot();
+		if !snapshot.complete {
+			return Vec::new();
+		}
+		let inspection = self.engine.inspect(&snapshot);
+		let moves = inspection.file_ops.iter().filter_map(|op| match op {
+			FileOpIntent::Move { to, .. } => Some(to),
+			FileOpIntent::Delete { .. } => None,
+		});
+		let policy = &self.config.policy;
+		let mut targets: Vec<String> = Vec::new();
+		for authored in inspection.paths.iter().chain(moves) {
+			if let Some(url) = policy.url_target(authored)
+				&& !targets.iter().any(|known| *known == url)
+			{
+				targets.push(url.into_owned());
+			}
+		}
+		targets
+	}
+
+	/// Switch to the apply phase once, forgetting preview-time URL answers.
+	fn begin_apply(&mut self) {
+		if !self.applying {
+			self.applying = true;
+			self.files.forget_urls();
+		}
+	}
+
 	/// Compute the preview for the current buffer. While streaming, trailing
 	/// removal-only tails are trimmed so additions never visibly "catch up".
 	pub fn preview(&mut self) -> PreviewBatch {
@@ -220,12 +277,19 @@ impl Session {
 	/// failure aborts before the first write), enforce the plan-mode guard
 	/// for every file, then write in payload order. A writer failure aborts
 	/// the loop; files already written stay written and the error is
-	/// returned verbatim.
+	/// returned verbatim. URL targets never reuse preview-time answers (see
+	/// [`Self::begin_apply_url_targets`]).
+	///
+	/// # Errors
+	/// Staging and plan-mode failures, all raised before the first write —
+	/// including [`EditError::UnresolvedUrl`], after which the host may
+	/// [`Self::provide`] the URL and retry — or the writer's error.
 	pub async fn apply(
 		&mut self,
 		request: ApplyRequest,
 		writer: &dyn EditWriter,
 	) -> EditResult<ApplyOutcome> {
+		self.begin_apply();
 		self.files.clear();
 		let snapshot = self.args.snapshot();
 		if !snapshot.complete {
@@ -233,7 +297,7 @@ impl Session {
 		}
 		let staged = self.engine.stage(&snapshot, &mut self.files, &self.store)?;
 		for file in &staged {
-			self.config.policy.enforce_write(
+			self.files.enforce_write(
 				&file.display,
 				file.op,
 				file.move_to.as_ref().map(|m| m.display.as_str()),
@@ -397,6 +461,8 @@ fn carried_seen_lines(before: &str, after: &str, prior: Option<&Snapshot>) -> Ve
 		.count();
 	let unchanged = u32::try_from(unchanged).unwrap_or(u32::MAX);
 	match prior.and_then(|snapshot| snapshot.seen_lines.as_ref()) {
+		// `range(1..=0)` panics; a first-line change carries nothing.
+		_ if unchanged == 0 => Vec::new(),
 		Some(seen) if !seen.is_empty() => seen.range(1..=unchanged).copied().collect(),
 		_ => (1..=unchanged).collect(),
 	}

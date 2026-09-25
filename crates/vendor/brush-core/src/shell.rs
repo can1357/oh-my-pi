@@ -71,8 +71,14 @@ pub struct Shell<SE: extensions::ShellExtensions = extensions::DefaultShellExten
 	/// Manages files opened and accessible via redirection operators.
 	open_files: openfiles::OpenFiles,
 
-	/// The current working directory.
+	/// The current working directory. May be a virtual (`scheme://`) path
+	/// served by [`Shell::filesystem`].
 	working_dir: PathBuf,
+
+	/// Filesystem through which all shell-owned path access goes (redirects,
+	/// `cd`, tests, globbing, sourcing, command lookup). Native by default.
+	#[cfg_attr(feature = "serde", serde(skip))]
+	filesystem: pi_vfs::Fs,
 
 	/// The shell environment, containing shell variables.
 	env: ShellEnvironment,
@@ -157,6 +163,7 @@ impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
 			traps: self.traps.clone(),
 			open_files: self.open_files.clone(),
 			working_dir: self.working_dir.clone(),
+			filesystem: self.filesystem.clone(),
 			env: self.env.clone(),
 			funcs: self.funcs.clone(),
 			options: self.options.clone(),
@@ -234,6 +241,7 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 				options.working_dir,
 				std::env::current_dir(),
 			)?),
+			filesystem: options.filesystem.unwrap_or_default(),
 			builtins: options.builtins,
 			parser_impl: options.parser,
 			key_bindings: options.key_bindings,
@@ -260,14 +268,6 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 		// Set any provided variables.
 		for (var_name, var_value) in options.vars {
 			shell.env.set_global(var_name, var_value)?;
-		}
-
-		// Set up history, if relevant. Do NOT fail if we can't load history.
-		if shell.options.enable_command_history {
-			shell.history = shell
-				.load_history()
-				.unwrap_or_default()
-				.or_else(|| Some(crate::history::History::default()));
 		}
 
 		Ok(shell)
@@ -546,6 +546,18 @@ impl<SE: extensions::ShellExtensions> ShellState for Shell<SE> {
 		self.key_bindings = key_bindings;
 	}
 
+	/// Returns the filesystem the shell resolves user paths through.
+	pub fn filesystem(&self) -> &pi_vfs::Fs {
+		&self.filesystem
+	}
+
+	/// Replaces the filesystem the shell resolves user paths through. Takes
+	/// effect for subsequent operations; files already open stay bound to the
+	/// filesystem that opened them.
+	pub fn set_filesystem(&mut self, filesystem: pi_vfs::Fs) {
+		self.filesystem = filesystem;
+	}
+
 	/// Returns the shell's current working directory.
 	pub fn working_dir(&self) -> &Path {
 		&self.working_dir
@@ -560,6 +572,31 @@ impl<SE: extensions::ShellExtensions> ShellState for Shell<SE> {
 	/// Returns the product display name for this shell.
 	pub fn product_display_str(&self) -> Option<&str> {
 		self.product_display_str.as_deref()
+	}
+}
+
+impl<SE: extensions::ShellExtensions> Shell<SE> {
+	/// Returns a copy of this shell at the same depth and call stack (not a
+	/// subshell) for running a builtin off the async runtime. The copy has an
+	/// empty job table: jobs own their processes, so they never leave this
+	/// shell. Adopt its final state with [`Self::settle_lease`]; if it is never
+	/// settled, this shell is unchanged.
+	pub(crate) fn lease(&self) -> Self {
+		let mut lease = self.clone();
+		lease.depth = self.depth;
+		lease.call_stack = self.call_stack.clone();
+		lease
+	}
+
+	/// Adopts the state a builtin left in a [`Self::lease`], keeping this
+	/// shell's jobs and taking over any jobs the builtin started.
+	pub(crate) fn settle_lease(&mut self, mut lease: Self) {
+		let started = std::mem::take(&mut lease.jobs);
+		lease.jobs = std::mem::take(&mut self.jobs);
+		*self = lease;
+		for job in started.jobs {
+			self.jobs.add_as_current(job);
+		}
 	}
 }
 
