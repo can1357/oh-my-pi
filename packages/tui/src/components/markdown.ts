@@ -11,6 +11,7 @@ import { mathBlockAt, mathSpanAt, mathStartIndex } from "@oh-my-pi/pi-utils/math
 import { latexToBlock } from "../latex-block";
 import { isBareMathEnvironment, latexToUnicode } from "../latex-to-unicode";
 import type { SymbolTheme } from "../symbols";
+import { isHyperlinkRenderingDetected } from "../render/hyperlink";
 import { TERMINAL } from "../terminal-capabilities";
 import type { Component } from "../tui";
 import {
@@ -3241,7 +3242,10 @@ export class Markdown implements Component {
 					// text="foo@bar.com" but href="mailto:foo@bar.com")
 					const hrefForComparison = href.startsWith("mailto:") ? href.slice(7) : href;
 					const labelCarriesHref =
-						clickableLinkText !== styledLinkText && target === href && /^https?:\/\//i.test(href);
+						clickableLinkText !== styledLinkText &&
+						target === href &&
+						/^https?:\/\//i.test(href) &&
+						isHyperlinkRenderingDetected();
 					if (!href || labelCarriesHref || token.text === href || token.text === hrefForComparison)
 						result += clickableLinkText + stylePrefix;
 					else {
