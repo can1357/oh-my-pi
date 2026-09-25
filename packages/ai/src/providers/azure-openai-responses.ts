@@ -396,6 +396,41 @@ function buildParams(
 
 	applyCommonResponsesSamplingParams(params, options, model);
 	if (options?.include?.length) params.include = Array.from(new Set(options.include));
+	if (options?.previousResponseId !== undefined) params.previous_response_id = options.previousResponseId;
+	if (options?.store === true) params.store = true;
+	if (options?.parallelToolCalls !== undefined) params.parallel_tool_calls = options.parallelToolCalls;
+	if (options?.user !== undefined) params.user = options.user;
+	// `seed` is a Chat Completions parameter — the Responses API has no such
+	// field and rejects it as an unknown parameter.
+	const responseFormat = options?.responseFormat;
+	if (responseFormat !== undefined && typeof responseFormat === "object" && responseFormat !== null) {
+		const format = responseFormat as {
+			type?: string;
+			json_schema?: { name?: string; description?: string; schema?: unknown; strict?: boolean };
+		};
+		if (
+			format.type === "json_schema" &&
+			format.json_schema &&
+			(format.json_schema.name !== undefined || format.json_schema.schema !== undefined)
+		) {
+			// Chat Completions nests `{ name, description, schema, strict }` under
+			// `json_schema`; Responses `text.format` requires those fields flat.
+			params.text = {
+				...params.text,
+				format: {
+					type: "json_schema",
+					name: format.json_schema.name ?? "response",
+					...(format.json_schema.description !== undefined
+						? { description: format.json_schema.description }
+						: {}),
+					schema: format.json_schema.schema,
+					...(format.json_schema.strict !== undefined ? { strict: format.json_schema.strict } : {}),
+				} as never,
+			};
+		} else {
+			params.text = { ...params.text, format: responseFormat as never };
+		}
+	}
 
 	if (context.tools) {
 		const serializedTools: NonNullable<AzureOpenAIResponsesSamplingParams["tools"]> = [];
