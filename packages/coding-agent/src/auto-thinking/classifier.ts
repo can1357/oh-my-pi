@@ -20,6 +20,8 @@ import { type JudgmentUsage, resolveJudge } from "../judgment";
 import { clampAutoThinkingEffort } from "@oh-my-pi/pi-tui/thinking";
 import { preprocessTinyMessage } from "../tiny/message-preproc";
 
+import { cfgProvidersAutoThinkingMaxEffort } from "../session/settings";
+
 type Level = "low" | "medium" | "high" | "xhigh" | "max";
 type Bucket = "trivial" | "moderate" | "hard";
 
@@ -92,7 +94,7 @@ export interface ClassifyDifficultyDeps {
  * `ultrathink` reaches {@link Effort.Max}.
  */
 function autoEffortCeiling(deps: ClassifyDifficultyDeps): Effort {
-	if (deps.settings.get("providers.autoThinkingMaxEffort") !== Effort.Max) return Effort.XHigh;
+	if (cfgProvidersAutoThinkingMaxEffort.get(deps.settings) !== Effort.Max) return Effort.XHigh;
 	return getSupportedEfforts(deps.model).includes(Effort.Max) ? Effort.Max : Effort.XHigh;
 }
 

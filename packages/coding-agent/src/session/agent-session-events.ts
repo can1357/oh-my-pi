@@ -15,6 +15,12 @@ export type AgentSessionEvent =
 	| (Extract<AgentEvent, { type: "agent_end" }> & {
 			/** False when an async delivery will resume the session before its true final settle. */
 			isTerminal?: boolean;
+			/**
+			 * True when the agent finished its turn: the end is terminal, or the session resumes
+			 * only for queued input or background-job results. False while the agent continues its
+			 * own work (retry, compaction continuation, stop-time reminders).
+			 */
+			yielded?: boolean;
 	  })
 	| {
 			type: "auto_compaction_start";

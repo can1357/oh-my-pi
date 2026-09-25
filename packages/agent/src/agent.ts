@@ -279,6 +279,11 @@ export interface AgentOptions {
 	/** Owned tool-calling dialect. Undefined keeps provider-native tool calling. */
 	dialect?: Dialect;
 	/**
+	 * Per-request owned-dialect resolver, consulted with the model being requested.
+	 * Authoritative when set (like {@link serviceTierResolver}): replaces {@link dialect}.
+	 */
+	dialectResolver?: (model: Model) => Dialect | undefined;
+	/**
 	 * When owned tool calling is active and the model fabricates a tool result
 	 * mid-turn: `true` (default) aborts the provider request immediately; `false`
 	 * drains the request and discards the fabricated continuation. Forwarded to
@@ -453,6 +458,7 @@ export class Agent {
 	#intentTracing: boolean;
 	#pruneToolDescriptions: boolean;
 	#dialect?: Dialect;
+	#dialectResolver?: (model: Model) => Dialect | undefined;
 	#abortOnFabricatedToolResult?: boolean;
 	#getToolChoice?: () => ToolChoiceDirective | undefined;
 	#onToolChoiceUnavailable?: () => void;
@@ -552,6 +558,7 @@ export class Agent {
 		this.#intentTracing = opts.intentTracing === true;
 		this.#pruneToolDescriptions = opts.pruneToolDescriptions === true;
 		this.#dialect = opts.dialect;
+		this.#dialectResolver = opts.dialectResolver;
 		this.#abortOnFabricatedToolResult = opts.abortOnFabricatedToolResult;
 		this.#getToolChoice = opts.getToolChoice;
 		this.#onToolChoiceUnavailable = opts.onToolChoiceUnavailable;
@@ -761,6 +768,33 @@ export class Agent {
 		this.#hideThinkingSummary = value;
 	}
 
+	/** Strip tool descriptions from provider-bound specs; read per request. */
+	get pruneToolDescriptions(): boolean {
+		return this.#pruneToolDescriptions;
+	}
+
+	set pruneToolDescriptions(value: boolean) {
+		this.#pruneToolDescriptions = value;
+	}
+
+	/** Inject/strip the intent field on tool calls; applies from the next prompt run. */
+	get intentTracing(): boolean {
+		return this.#intentTracing;
+	}
+
+	set intentTracing(value: boolean) {
+		this.#intentTracing = value;
+	}
+
+	/** Abort the provider request on a fabricated tool result; applies from the next prompt run. */
+	get abortOnFabricatedToolResult(): boolean | undefined {
+		return this.#abortOnFabricatedToolResult;
+	}
+
+	set abortOnFabricatedToolResult(value: boolean | undefined) {
+		this.#abortOnFabricatedToolResult = value;
+	}
+
 	/**
 	 * Get the current max retry delay in milliseconds.
 	 */
@@ -841,7 +875,9 @@ export class Agent {
 	): Promise<Context> {
 		const model = this.#state.model;
 		if (!model) throw new Error("No active model on agent");
-		const ownedDialect = this.#dialect ?? resolveOwnedDialectFromEnv(Bun.env.PI_DIALECT);
+		const ownedDialect =
+			(this.#dialectResolver ? this.#dialectResolver(model) : this.#dialect) ??
+			resolveOwnedDialectFromEnv(Bun.env.PI_DIALECT);
 		const messages = normalizeMessagesForProvider(llmMessages, model);
 		const tools = ownedDialect
 			? []
@@ -1639,6 +1675,7 @@ export class Agent {
 			intentTracing: this.#intentTracing,
 			pruneToolDescriptions: this.#pruneToolDescriptions,
 			dialect: this.#dialect,
+			getDialect: this.#dialectResolver,
 			abortOnFabricatedToolResult: this.#abortOnFabricatedToolResult,
 			appendOnlyContext: this.#appendOnlyContext,
 			beforeToolCall: this.beforeToolCall ? (ctx, signal) => this.beforeToolCall?.(ctx, signal) : undefined,
