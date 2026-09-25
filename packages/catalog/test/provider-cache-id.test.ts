@@ -16,6 +16,7 @@ test("lightweight cache resolver matches scoped descriptor inputs", () => {
 		{ providerId: "opencode-go", baseUrl: "https://opencode.example/go" },
 		{ providerId: "opencode-zen", baseUrl: "https://opencode.example/zen/v1/" },
 		{ providerId: "vllm", baseUrl: "http://vllm.example:8000/v1" },
+		{ providerId: "grokbot", baseUrl: "https://api2.cursor.sh" },
 	] as const;
 	for (const { providerId, baseUrl } of cases) {
 		const descriptor = PROVIDER_DESCRIPTORS.find(candidate => candidate.providerId === providerId);
@@ -24,6 +25,53 @@ test("lightweight cache resolver matches scoped descriptor inputs", () => {
 		const options = descriptor.createModelManagerOptions(config);
 		expect(resolveModelCacheProviderId(providerId, config)).toBe(options.cacheProviderId ?? providerId);
 	}
+});
+
+test("grokbot cache namespace partitions by renewer credential and client identity", () => {
+	const base = { apiKey: "renewer-a", baseUrl: "https://api2.cursor.sh" } as const;
+	const a = resolveModelCacheProviderId("grokbot", { ...base, namespace: "prod", clientVersion: "0.30.0" });
+	const b = resolveModelCacheProviderId("grokbot", { ...base, namespace: "dev", clientVersion: "0.30.0" });
+	const c = resolveModelCacheProviderId("grokbot", {
+		apiKey: "renewer-b",
+		baseUrl: "https://api2.cursor.sh",
+		namespace: "prod",
+		clientVersion: "0.30.0",
+	});
+	expect(a).not.toBe(b);
+	expect(a).not.toBe(c);
+	expect(a).toBe(resolveModelCacheProviderId("grokbot", { ...base, namespace: "prod", clientVersion: "0.30.0" }));
+});
+
+test("grokbot cache namespace partitions by discovery headers", () => {
+	const base = {
+		apiKey: "renewer-a",
+		baseUrl: "https://api2.cursor.sh",
+	} as const;
+	const prod = resolveModelCacheProviderId("grokbot", { ...base, namespace: "prod", clientVersion: "0.30.0" });
+	const lab = resolveModelCacheProviderId("grokbot", { ...base, namespace: "lab", clientVersion: "0.30.0-lab" });
+	const stamped = resolveModelCacheProviderId("grokbot", {
+		...base,
+		namespace: "prod",
+		clientVersion: "0.31.0-pre.1",
+	});
+	expect(prod).not.toBe(lab);
+	expect(prod).not.toBe(stamped);
+	expect(prod).toBe(resolveModelCacheProviderId("grokbot", { ...base, namespace: "prod", clientVersion: "0.30.0" }));
+});
+
+test("grokbot cache namespace partitions by configured request headers", () => {
+	const base = {
+		apiKey: "renewer-a",
+		baseUrl: "https://proxy.example/grokbot",
+		namespace: "prod",
+		clientVersion: "0.30.0",
+	} as const;
+	const tenantA = resolveModelCacheProviderId("grokbot", { ...base, headers: { "X-Tenant": "a" } });
+	const tenantB = resolveModelCacheProviderId("grokbot", { ...base, headers: { "X-Tenant": "b" } });
+	const noHeaders = resolveModelCacheProviderId("grokbot", base);
+	expect(tenantA).not.toBe(tenantB);
+	expect(tenantA).not.toBe(noHeaders);
+	expect(tenantA).toBe(resolveModelCacheProviderId("grokbot", { ...base, headers: { "X-Tenant": "a" } }));
 });
 
 test("Muse Code cache scope changes with subscription credentials and endpoints", () => {

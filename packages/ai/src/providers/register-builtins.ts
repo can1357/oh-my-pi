@@ -23,6 +23,7 @@ import * as DevinProvider from "./devin";
 import * as GoogleProvider from "./google";
 import * as GoogleGeminiCliProvider from "./google-gemini-cli";
 import * as GoogleVertexProvider from "./google-vertex";
+import * as GrokbotProvider from "./grokbot";
 import * as OllamaProvider from "./ollama";
 import * as OpenAICodexResponsesProvider from "./openai-codex-responses";
 import * as OpenAICompletionsProvider from "./openai-completions";
@@ -287,6 +288,11 @@ export const streamCursor = createProviderStream<"cursor-agent">((model, context
 /** Stream Devin through the shared watchdog. */
 export const streamDevin = createProviderStream<"devin-agent">((model, context, options) =>
 	DevinProvider.streamDevin(model, context, options),
+);
+
+/** Stream Grok Bot (InferenceService Stream) through the shared watchdog. */
+export const streamGrokBot = createProviderStream<"grokbot-sand">((model, context, options) =>
+	GrokbotProvider.streamGrokBot(model, context, options),
 );
 
 /** Stream Apple's on-device Foundation Model through the shared watchdog. */

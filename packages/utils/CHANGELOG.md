@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `parseEnvFileAsync` for non-blocking dotenv reads on login/discovery/stream paths.
 ## [18.3.1] - 2026-09-25
 
 ### Fixed
@@ -128,7 +131,6 @@
 
 ## [18.1.11] - 2026-09-05
 
-### Fixed
 
 - Fixed `extractRetryHint` dropping the longer timing signal when an error body carries both an account reset and an appended retry hint: competing signals now merge by longest window instead of first match, so retries honor the provider's full backoff.
 

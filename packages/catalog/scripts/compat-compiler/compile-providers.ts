@@ -60,6 +60,7 @@ const KNOWN_APIS = [
 	"gitlab-duo-agent",
 	"devin-agent",
 	"apple-foundation-models",
+	"grokbot-sand",
 ] as const satisfies readonly KnownApi[];
 type _MissingKnownApis = Exclude<KnownApi, (typeof KNOWN_APIS)[number]>;
 true satisfies _MissingKnownApis extends never ? true : ["KNOWN_APIS is missing KnownApi values", _MissingKnownApis];

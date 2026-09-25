@@ -70,8 +70,10 @@ function isInputModalities(value: unknown): value is ("text" | "image")[] {
  * `context-window-floor`) overwrite upstream values; selection metadata
  * (`priority`, `apply-patch-tool-type`, `service-tier-cost`,
  * `requires-cursor-tool-schema-projection`, `requires-tool-result-image-hoisting`,
- * `supports-assistant-prefill`) is rule-owned; `context-promotion-target` fills
- * only when the spec left it unset.
+ * `supports-assistant-prefill`, `sand-parameter-ids`) is
+ * rule-owned; `context-promotion-target` and `sand-parameter-ids` fill
+ * only when the spec left them unset (live AvailableModels wins for
+ * sand params).
  */
 function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: Record<string, unknown>): void {
 	const kind = MODEL_KINDS.find(value => value === catalog.kind);
@@ -126,18 +128,83 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 	if (typeof contextPromotionTarget === "string" && model.contextPromotionTarget === undefined) {
 		model.contextPromotionTarget = contextPromotionTarget;
 	}
+	const sandParameterIds = catalog.sandParameterIds;
+	// Live AvailableModels owns parameter ids when present; only fill from KDL when absent.
+	if (Array.isArray(sandParameterIds) && model.sandParameterIds === undefined) {
+		model.sandParameterIds = sandParameterIds.filter((entry): entry is string => typeof entry === "string");
+	}
+	// KDL-owned Sand policy must always win over stale cached values so a
+	// rebuilt row after a rule change does not keep a removed retry/wire policy.
+	const sandToolsWire = catalog.sandToolsWire;
+	if (
+		sandToolsWire === "parent-chat" ||
+		sandToolsWire === "automation" ||
+		sandToolsWire === "keep-model" ||
+		sandToolsWire === "error" ||
+		sandToolsWire === "native" ||
+		sandToolsWire === "sand-default-fallback"
+	) {
+		model.sandToolsWire = sandToolsWire;
+	} else {
+		delete model.sandToolsWire;
+	}
+	const sandEmptyToolsRetryWire = catalog.sandEmptyToolsRetryWire;
+	if (
+		sandEmptyToolsRetryWire === "parent-chat" ||
+		sandEmptyToolsRetryWire === "automation" ||
+		sandEmptyToolsRetryWire === "keep-model" ||
+		sandEmptyToolsRetryWire === "error" ||
+		sandEmptyToolsRetryWire === "native" ||
+		sandEmptyToolsRetryWire === "sand-default-fallback"
+	) {
+		model.sandEmptyToolsRetryWire = sandEmptyToolsRetryWire;
+	} else {
+		delete model.sandEmptyToolsRetryWire;
+	}
+	const sandWireModelId = catalog.sandWireModelId;
+	const requestModelId = catalog.requestModelId;
+	if (typeof requestModelId === "string" && requestModelId.trim() && model.requestModelId === undefined) {
+		model.requestModelId = requestModelId.trim();
+	}
+	if (typeof sandWireModelId === "string" && sandWireModelId.trim()) {
+		model.sandWireModelId = sandWireModelId.trim();
+	} else {
+		delete model.sandWireModelId;
+	}
+	const sandWireModelIdWhen = catalog.sandWireModelIdWhen;
+	if (sandWireModelIdWhen === "tools") {
+		model.sandWireModelIdWhen = "tools";
+	} else {
+		delete model.sandWireModelIdWhen;
+	}
+	if (catalog.sandPromoteJsonTextTools === true) {
+		model.sandPromoteJsonTextTools = true;
+	} else {
+		delete model.sandPromoteJsonTextTools;
+	}
+	if (catalog.sandAcceptEmptyWriteFollowup === true) {
+		model.sandAcceptEmptyWriteFollowup = true;
+	} else {
+		delete model.sandAcceptEmptyWriteFollowup;
+	}
+	const sandNativeToolSchema = catalog.sandNativeToolSchema;
+	if (sandNativeToolSchema === "google" || sandNativeToolSchema === "strict") {
+		model.sandNativeToolSchema = sandNativeToolSchema;
+	} else {
+		delete model.sandNativeToolSchema;
+	}
 }
 
 /**
  * Applies reviewed catalog-data value corrections (`cost-patch`,
  * `limits-patch`, `long-context-cost`, `context-window-floor`,
- * `input-modalities`) onto an upstream-sourced spec. Applied by
+ * `input-modalities`, `supports-tools`, `reasoning`) onto an upstream-sourced spec. Applied by
  * `buildModel` to every upstream-sourced spec; user-authored overrides are
  * recomposed after building by the override applicators, so explicit user
  * limits and pricing still win.
  */
 export function applyCatalogCorrections(
-	model: Pick<ModelSpec<Api>, "cost" | "contextWindow" | "maxTokens" | "input">,
+	model: Pick<ModelSpec<Api>, "cost" | "contextWindow" | "maxTokens" | "input" | "supportsTools" | "reasoning">,
 	catalog: Record<string, unknown>,
 ): void {
 	const longContext = objectPayload(catalog.longContext);
@@ -228,6 +295,12 @@ export function applyCatalogCorrections(
 	if (isInputModalities(inputModalities)) {
 		model.input = inputModalities;
 	}
+	if (typeof catalog.supportsTools === "boolean") {
+		model.supportsTools = catalog.supportsTools;
+	}
+	if (typeof catalog.reasoning === "boolean") {
+		model.reasoning = catalog.reasoning;
+	}
 }
 
 /**
@@ -301,7 +374,23 @@ export function buildDiscoveredModel(spec: ModelSpec<Api>, providerType: string)
  * this only runs for discovered/custom/override specs.
  */
 export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi> {
-	const policy = resolveModelPolicy(spec);
+	// Variant/legacy selectors keep opaque `id` for lookup but resolve the full
+	// model policy (identity, thinking, compat, catalog assignments/corrections)
+	// against the canonical `requestModelId` when present — otherwise opaque
+	// aliases of e.g. grok-4.5 miss supports-tools=false and gemini-3-flash
+	// misses sand-wire-model-id. Opaque deployment aliases (Azure deployment
+	// names, Bedrock ARNs) carry no lineage: when the wire id is unclassifiable
+	// but the catalog `id` resolves to a concrete class, keep the catalog
+	// identity rather than letting the alias erase reviewed knowledge.
+	const requestModelId = spec.requestModelId?.trim();
+	let policy = resolveModelPolicy(spec);
+	if (requestModelId && requestModelId !== spec.id) {
+		const wirePolicy = resolveModelPolicy({ ...spec, id: requestModelId });
+		if (wirePolicy.identity.class !== "unknown" || policy.identity.class === "unknown") {
+			policy = wirePolicy;
+		}
+	}
+	const identity = policy.identity;
 	const supportsComputerUseConfig = explicitComputerUseConfig(spec);
 	const model: Model<TApi> = {
 		...spec,
@@ -314,12 +403,22 @@ export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi>
 		requiresGlyphTokenization: policy.identity.class === "anthropic",
 		tokenizer: spec.tokenizer ?? resolveModelTokenizer(spec.requestModelId ?? spec.id, spec.provider),
 		thinking: policy.thinking,
-		supportsComputerUse: supportsOpenAIGAComputerUse(spec, policy.identity, supportsComputerUseConfig),
+		supportsComputerUse: supportsOpenAIGAComputerUse(spec, identity, supportsComputerUseConfig),
 		supportsComputerUseConfig,
 		compat: policy.compat,
 		compatConfig: spec.compat,
 	};
 	applyCatalogAssignments(model, policy.catalog);
 	applyCatalogCorrections(model, policy.catalog);
+	// Discovery can mark non-reasoning / unrecognized-only vocabularies with an
+	// explicit empty thinking ladder. Catalog `reasoning` must not OR-upgrade
+	// that surface after resolveThinkingPolicy already preserved the absence.
+	if (
+		policy.catalog.preserveAuthoredThinking === true &&
+		spec.thinking !== undefined &&
+		spec.thinking.efforts.length === 0
+	) {
+		model.reasoning = Boolean(spec.reasoning);
+	}
 	return model;
 }

@@ -262,16 +262,16 @@ export function getDotenvEnvValues(
  * only shell-identifier names and spawn-safe values before mirroring valid
  * `OMP_` variables to their `PI_` aliases.
  */
-export function parseEnvFile(filePath: string): Record<string, string> {
+function parseEnvContent(content: string): Record<string, string> {
 	const result: Record<string, string> = {};
 	try {
-		const parsed = parseEnv(fs.readFileSync(filePath, "utf-8"));
+		const parsed = parseEnv(content);
 		for (const key in parsed) {
 			const value = parsed[key];
 			if (value !== undefined && isValidEnvName(key) && isSafeEnvValue(value)) result[key] = value;
 		}
 	} catch {
-		// File doesn't exist or can't be read - return empty result
+		// Malformed dotenv content - return empty result
 	}
 
 	// OMP_ overrides PI_
@@ -282,6 +282,33 @@ export function parseEnvFile(filePath: string): Record<string, string> {
 	}
 
 	return result;
+}
+
+/**
+ * Parses a .env file synchronously into key-value string pairs using the
+ * runtime's dotenv grammar, then mirrors valid `OMP_` variables to their
+ * `PI_` aliases.
+ */
+export function parseEnvFile(filePath: string): Record<string, string> {
+	try {
+		return parseEnvContent(fs.readFileSync(filePath, "utf-8"));
+	} catch {
+		// File doesn't exist or can't be read - return empty result
+		return {};
+	}
+}
+
+/**
+ * Asynchronous {@link parseEnvFile}: prefer this on login/discovery/stream paths
+ * so a slow home/agent filesystem does not block the event loop. Missing files
+ * still return `{}`.
+ */
+export async function parseEnvFileAsync(filePath: string): Promise<Record<string, string>> {
+	try {
+		return parseEnvContent(await Bun.file(filePath).text());
+	} catch {
+		return {};
+	}
 }
 
 // Eagerly parse the user's $HOME/.env and the current project's .env (from cwd)

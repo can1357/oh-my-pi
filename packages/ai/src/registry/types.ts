@@ -22,8 +22,7 @@ import type { OAuthController, OAuthCredentials } from "./oauth/types";
  */
 export type KeyResolver = string | (() => string | undefined);
 
-/** Credentials are resolved by the provider transport rather than used as a bearer string. */
-export const AUTHENTICATED_SENTINEL = "<authenticated>";
+export * from "@oh-my-pi/pi-utils/auth";
 
 export interface PreparedProviderRequest {
 	readonly model: Model<Api>;

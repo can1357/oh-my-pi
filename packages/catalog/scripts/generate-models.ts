@@ -20,8 +20,13 @@ import { buildModel } from "../src/build";
 import { isRetiredProvider } from "../src/compat/behavior";
 import { collapseVariants } from "../src/compat/collapse";
 import { providerEntries, providerEntry, seedModels } from "../src/compat/providers";
+import { isCredentialScopedCatalogProvider, resolveModelPolicy } from "../src/compat/resolve";
 import type { CompiledProvider } from "../src/compat/types";
 import { ANTIGRAVITY_PRIMARY_ENDPOINT, fetchAntigravityDiscoveryModels } from "../src/discovery/antigravity";
+import {
+	resolveGrokbotCacheCredentialAsync,
+	resolveGrokbotDiscoveryIdentityAsync,
+} from "../src/discovery/grokbot-auth";
 import { createModelManager } from "../src/model-manager";
 import prevModelsJson from "../src/models.json" with { type: "json" };
 import { toModelSpec } from "../src/provider-models/bundled-references";
@@ -74,16 +79,16 @@ const packageRoot = path.join(import.meta.dir, "..");
 const DISCOVERY_ONLY_PROVIDERS = new Set(["ollama", "vllm", "lm-studio", "litellm"]);
 /**
  * Credential-scoped catalogs (Devin's Cascade roster is gated per account/team
- * via `allowed_model_uids`). Fetching them during generation would bake one
- * private account's entitlements into the shared bundle, and those rows then
- * survive forever as previous-snapshot zombies: a later regen without that
- * credential can never mark the provider authoritative to prune them. These
- * providers are never fetched at generation time and their previous-snapshot
- * rows are dropped — the curated static seed is the only bundled surface, and
- * runtime discovery is authoritative per credential (mirrors the GitLab Duo
- * fallback-only policy below).
+ * via `allowed_model_uids`; Grok Bot AvailableModels is renewer-account entitlements).
+ * Fetching them during generation would bake one private account's entitlements
+ * into the shared bundle, and those rows then survive forever as previous-snapshot
+ * zombies: a later regen without that credential can never mark the provider
+ * authoritative to prune them. These providers are never fetched at generation
+ * time and their previous-snapshot rows are dropped — the curated static seed is
+ * the only bundled surface, and runtime discovery is authoritative per credential
+ * (mirrors the GitLab Duo fallback-only policy below). Exclusion is derived from
+ * KDL `credential-scoped-catalog` via {@link isCredentialScopedCatalogProvider}.
  */
-const CREDENTIAL_SCOPED_PROVIDERS = new Set(["devin"]);
 
 /**
  * The rows one provider's authored seed (`rules/providers/<id>.kdl`) contributes
@@ -145,9 +150,9 @@ export function mergePreviousSnapshotModels(
 			if (
 				!fetchedKeys.has(`${model.provider}/${model.id}`) &&
 				!DISCOVERY_ONLY_PROVIDERS.has(model.provider) &&
-				!CREDENTIAL_SCOPED_PROVIDERS.has(model.provider) &&
-				// Yolo-Auto's documented static seed is the complete fallback
-				// catalog; never resurrect retired ids from the previous snapshot.
+				resolveModelPolicy(model).catalog.credentialScopedCatalog !== true &&
+				// Yolo-Auto documented static seeds are the complete offline fallback;
+				// never resurrect retired ids from the previous snapshot.
 				model.provider !== "yolo-auto" &&
 				!isRetiredProvider(model.provider) &&
 				!excludedProviders.has(model.provider)
@@ -213,7 +218,17 @@ async function fetchProviderModelsFromCatalog(
 		const discoveryConfig = { apiKey };
 		const preparedConfig =
 			getProviderDefinition(descriptor.providerId)?.prepareModelDiscovery?.(discoveryConfig) ?? discoveryConfig;
-		const managerOptions = descriptor.createModelManagerOptions(preparedConfig);
+		const managerConfig =
+			descriptor.providerId === "grokbot"
+				? {
+						...preparedConfig,
+						...(await resolveGrokbotDiscoveryIdentityAsync()),
+						cacheCredential: await resolveGrokbotCacheCredentialAsync(
+							typeof preparedConfig.apiKey === "string" ? preparedConfig.apiKey : undefined,
+						),
+					}
+				: preparedConfig;
+		const managerOptions = descriptor.createModelManagerOptions(managerConfig);
 		const manager = createModelManager(managerOptions);
 		const result = await manager.refresh("online");
 		// `stale: true` means the dynamic fetch failed and the manager fell back
@@ -295,7 +310,8 @@ function applyGlobalModelsDevFallback(
 			model.provider === "meta" ||
 			// Providers whose discovery is the deployment truth and whose
 			// corrections live in KDL opt out of same-id reference fills.
-			providerEntry(model.provider)?.skipCrossProviderReferenceFills === true
+			providerEntry(model.provider)?.skipCrossProviderReferenceFills === true ||
+			resolveModelPolicy(model).catalog.credentialScopedCatalog === true
 		) {
 			return model;
 		}
@@ -562,7 +578,7 @@ async function generateModels() {
 		(descriptor): descriptor is CatalogProviderDescriptor =>
 			isCatalogDescriptor(descriptor) &&
 			!DISCOVERY_ONLY_PROVIDERS.has(descriptor.providerId) &&
-			!CREDENTIAL_SCOPED_PROVIDERS.has(descriptor.providerId),
+			!isCredentialScopedCatalogProvider(descriptor.providerId),
 	);
 	const catalogProviderModelBatches = await Promise.all(
 		catalogProviderDescriptors.map(async descriptor => ({

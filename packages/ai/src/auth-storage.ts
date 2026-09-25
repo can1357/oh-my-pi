@@ -259,6 +259,48 @@ export class AuthStorage {
 		this.#modules.pool.close();
 	}
 
+	// Key overrides ------------------------------------------------------------
+
+	setRuntimeApiKey(provider: string, apiKey: string): void {
+		this.keys.setRuntime(provider, apiKey);
+	}
+
+	removeRuntimeApiKey(provider: string): void {
+		this.keys.removeRuntime(provider);
+	}
+
+	setConfigApiKey(provider: string, apiKeyConfig: string): void {
+		this.keys.setConfig(provider, apiKeyConfig);
+	}
+
+	removeConfigApiKey(provider: string): void {
+		this.keys.removeConfig(provider);
+	}
+
+	clearConfigApiKeys(): void {
+		this.keys.clearConfig();
+	}
+
+	setConfigValueResolver(resolver: (config: string) => Promise<string | undefined>): void {
+		this.keys.setResolver(resolver);
+	}
+
+	peekApiKey(provider: string): Promise<string | undefined> {
+		return this.keys.peek(provider);
+	}
+
+	/**
+	 * Sync peek of runtime/config override credentials only.
+	 *
+	 * Mirrors the first two legs of the {@link AuthStorage.keys} cascade
+	 * (CLI `--api-key`, then `models.yml` `providers.*.apiKey`) so synchronous
+	 * callers — e.g. credential-scoped startup cache hashing — share the same
+	 * precedence without inventing a second ordering.
+	 */
+	peekApiKeyOverrides(provider: string): string | undefined {
+		return this.#overrides.runtimeKey(provider) ?? this.#overrides.configKey(provider);
+	}
+
 	/**
 	 * Legacy redirect for callers of the pre-namespace flat API (e.g. repo scripts).
 	 * @deprecated Use {@link AuthStorage.keys}`.get`.

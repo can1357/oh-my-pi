@@ -1,3 +1,8 @@
+import {
+	GROKBOT_BACKEND,
+	resolveGrokbotCacheCredential,
+	resolveGrokbotDiscoveryIdentity,
+} from "../discovery/grokbot-auth";
 import { CHARM_HYPER_API_BASE_URL, normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
 import { CODEX_CLIENT_VERSION } from "../wire/codex";
 import { PERSONAL_GITHUB_COPILOT_BASE_URL } from "../wire/github-copilot";
@@ -10,18 +15,40 @@ import {
 export interface ModelCacheProviderIdOptions {
 	apiKey?: string;
 	baseUrl?: string;
+	/** Grok Bot: `x-sand-box-namespace` sent on AvailableModels. */
+	namespace?: string;
+	/** Grok Bot: `x-cursor-client-version` sent on AvailableModels. */
+	clientVersion?: string;
+	/** Grok Bot: configured discovery/proxy headers that select the catalog. */
+	headers?: Record<string, string>;
+	/**
+	 * Grok Bot: pre-expanded renewer for cache scoping. When set (including after
+	 * async secrets load), skips the synchronous secrets-file read that would
+	 * otherwise expand `<authenticated>`.
+	 */
+	cacheCredential?: string;
+}
+
+/** Stable fingerprint of header bag for cache scoping (sorted key=value). */
+export function fingerprintModelCacheHeaders(headers?: Record<string, string>): string {
+	if (!headers) return "";
+	const keys = Object.keys(headers).sort();
+	if (keys.length === 0) return "";
+	return keys.map(key => `${key}=${headers[key] ?? ""}`).join("\u0001");
 }
 
 const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = {
 	"opencode-go": true,
 	"opencode-zen": true,
 	"github-copilot": true,
+	grokbot: true,
 	"muse-code": true,
 	// Both SingularityAPI rosters are issued per key, so the namespace must be
 	// resolved with the credential (`hydrateCredentialScopedModelCaches`) rather
 	// than from the synchronous, credential-less startup read.
 	"singularityapi-dev": true,
 	"singularityapi-tech": true,
+	cursor: true,
 };
 
 /** Whether a provider's model-cache namespace requires its resolved credential. */
@@ -74,11 +101,16 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			return `${providerId}:${CODEX_CLIENT_VERSION}`;
 		case "ollama":
 			return resolveOllamaModelCacheProviderId(providerId, options.baseUrl);
-		case "cursor":
+		case "cursor": {
 			// v4: Grok 4.5/4.6 rows cached before the effort-less default-tier fix
 			// carry `requestModelId: *-low`, which the Start plan refuses; refetch
 			// so the collapsed default is re-pointed to `-medium` (issue #9478).
-			return "cursor:default-effort-v4";
+			// v5: GetUsableModels rosters are credential-scoped (a second account
+			// must miss the first account's cache and re-run discovery instead of
+			// being served its roster). Key the namespace on the credential hash.
+			const scope = `${options.apiKey ?? ""}`;
+			return `cursor:models-v5:${Bun.hash(scope).toString(36)}`;
+		}
 		case "charm-hyper": {
 			// Discovery is authoritative for this gateway, so a warm cache is served
 			// for its full TTL without re-probing: the namespace must follow the
@@ -166,6 +198,33 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			const baseUrl = options.baseUrl ?? PERSONAL_GITHUB_COPILOT_BASE_URL;
 			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
 			return `github-copilot:models-v2:${Bun.hash(scope).toString(36)}`;
+		}
+		case "grokbot": {
+			// AvailableModels is renewer-scoped and marked authoritative. Discovery
+			// also sends namespace + client-version headers (`grokbotClientHeaders`)
+			// from env *or* secrets/grokbot.env, so resolve identity through the
+			// shared helper that mirrors loadGrokbotConfig — unless the caller
+			// already passed a fully resolved identity (no second secrets read).
+			const baseUrl = options.baseUrl ?? GROKBOT_BACKEND;
+			const ns = options.namespace?.trim();
+			const ver = options.clientVersion?.trim();
+			const identity =
+				ns && ver
+					? { namespace: ns, clientVersion: ver }
+					: resolveGrokbotDiscoveryIdentity({
+							namespace: options.namespace,
+							clientVersion: options.clientVersion,
+						});
+			const headerScope = fingerprintModelCacheHeaders(options.headers);
+			// Expand `<authenticated>` to the real renewer so secrets-file accounts
+			// do not share one authoritative cache namespace. Prefer a precomputed
+			// cacheCredential from async catalog prep to avoid sync agent-dir I/O.
+			const credential =
+				options.cacheCredential !== undefined
+					? options.cacheCredential
+					: resolveGrokbotCacheCredential(options.apiKey);
+			const scope = `${credential}\u0000${baseUrl}\u0000${identity.namespace}\u0000${identity.clientVersion}\u0000${headerScope}`;
+			return `grokbot:models-v4:${Bun.hash(scope).toString(36)}`;
 		}
 		case "openrouter":
 			return "openrouter:pseudo-api";

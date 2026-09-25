@@ -6,12 +6,15 @@ import { type CodexModelDiscoveryResult, fetchCodexModels } from "../discovery/c
 import type { DevinModelDiscoveryOptions } from "../discovery/devin";
 import { fetchTypeSafeModels, TYPESAFE_DEFAULT_BASE_URL } from "../discovery/typesafe";
 import { buildGitLabDuoWorkflowFallbackModel, fetchGitLabDuoWorkflowModels } from "../discovery/gitlab-duo-workflow";
+import { fetchGrokbotAvailableModels } from "../discovery/grokbot";
+import { GROKBOT_AUTHENTICATED_SENTINEL, resolveGrokbotDiscoveryIdentity } from "../discovery/grokbot-auth";
 import type { ModelManagerOptions } from "../model-manager";
 import { getBundledModel } from "../models";
 import type { Api, FetchImpl, Model, ModelSpec } from "../types";
 import { DEVIN_DEFAULT_BASE_URL } from "../wire/devin";
 import { toModelSpec } from "./bundled-references";
 import { resolveModelCacheProviderId } from "./cache-provider-id";
+import { buildGrokbotStaticSeed } from "./grokbot";
 
 // ---------------------------------------------------------------------------
 // OpenAI Codex
@@ -131,7 +134,7 @@ export function cursorModelManagerOptions(config: CursorModelManagerConfig = {})
 	const { apiKey, baseUrl, clientVersion } = config;
 	return {
 		providerId: "cursor",
-		cacheProviderId: resolveModelCacheProviderId("cursor"),
+		cacheProviderId: resolveModelCacheProviderId("cursor", { apiKey }),
 		...(apiKey
 			? {
 					fetchDynamicModels: async () => {
@@ -148,6 +151,19 @@ const cursorDiscovery = once(() => import("../discovery/cursor"));
 // ---------------------------------------------------------------------------
 // GitLab Duo Chat
 // ---------------------------------------------------------------------------
+
+export const CURSOR_AUTO_MODEL: Model<"cursor-agent"> = buildModel({
+	id: "auto",
+	name: "Cursor Auto",
+	api: "cursor-agent",
+	provider: "cursor",
+	baseUrl: "https://api2.cursor.sh",
+	reasoning: true,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 200_000,
+	maxTokens: 16_384,
+});
 
 const GITLAB_DUO_ANTHROPIC_BASE_URL = "https://cloud.gitlab.com/ai/v1/proxy/anthropic/";
 const GITLAB_DUO_OPENAI_BASE_URL = "https://cloud.gitlab.com/ai/v1/proxy/openai/v1";
@@ -364,6 +380,78 @@ export function devinModelManagerOptions(config: DevinModelManagerConfig = {}): 
 }
 
 const devinDiscovery = once(() => import("../discovery/devin"));
+
+// ---------------------------------------------------------------------------
+// Grok Bot provider (InferenceService Stream)
+// ---------------------------------------------------------------------------
+
+export interface GrokbotModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+	/** Override `x-sand-box-namespace` for cache scoping (defaults to GROKBOT_NAMESPACE). */
+	namespace?: string;
+	/** Override `x-cursor-client-version` for cache scoping (defaults to GROKBOT_CLIENT_VERSION). */
+	clientVersion?: string;
+	/** Caller/model headers forwarded to AvailableModels mint + request. */
+	headers?: Record<string, string>;
+	/**
+	 * Pre-expanded renewer for model-cache scoping. Catalog refresh should pass
+	 * the async-resolved value so construction never sync-reads secrets.
+	 */
+	cacheCredential?: string;
+}
+
+export function grokbotModelManagerOptions(
+	config: GrokbotModelManagerConfig = {},
+): ModelManagerOptions<"grokbot-sand"> {
+	const { apiKey, baseUrl, fetch, headers } = config;
+	// Prefer a fully resolved identity from async prep (catalog refresh) so
+	// construction never sync-reads secrets/grokbot.env on the TUI event loop.
+	const ns = config.namespace?.trim();
+	const ver = config.clientVersion?.trim();
+	const identity =
+		ns && ver
+			? { namespace: ns, clientVersion: ver }
+			: resolveGrokbotDiscoveryIdentity({
+					namespace: config.namespace,
+					clientVersion: config.clientVersion,
+				});
+	return {
+		providerId: "grokbot",
+		cacheProviderId: resolveModelCacheProviderId("grokbot", {
+			apiKey,
+			baseUrl,
+			namespace: identity.namespace,
+			clientVersion: identity.clientVersion,
+			headers,
+			...(config.cacheCredential !== undefined ? { cacheCredential: config.cacheCredential } : undefined),
+		}),
+		staticModels: buildGrokbotStaticSeed(baseUrl),
+		...(apiKey
+			? {
+					dynamicModelsAuthoritative: true,
+					fetchDynamicModels: async () => {
+						// When apiKey is the file-backed sentinel, mint/discovery must
+						// use the same expanded renewer that scoped cacheProviderId —
+						// never re-read ambient secrets (profile can change mid-flight).
+						const discoveryApiKey =
+							apiKey === GROKBOT_AUTHENTICATED_SENTINEL && config.cacheCredential?.trim()
+								? config.cacheCredential.trim()
+								: apiKey;
+						return fetchGrokbotAvailableModels({
+							apiKey: discoveryApiKey,
+							baseUrl,
+							fetch,
+							headers,
+							namespace: identity.namespace,
+							clientVersion: identity.clientVersion,
+						});
+					},
+				}
+			: undefined),
+	};
+}
 
 // ---------------------------------------------------------------------------
 // Synthetic role providers

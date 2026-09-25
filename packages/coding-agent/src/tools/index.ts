@@ -616,14 +616,24 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 	const enableLsp = session.enableLsp ?? true;
 	const requestedTools = restrictToolNames
 		? normalizeToolNames(toolNames ?? [])
-		: toolNames
+		: toolNames !== undefined
 			? normalizeToolNames(toolNames)
 			: undefined;
+	// Explicit empty whitelist (`--no-tools`) must stay empty — do not widen with
+	// feature-owned tools (autolearn, memory, goal, external thinking, yield).
+	const emptyExplicitWhitelist = Array.isArray(requestedTools) && requestedTools.length === 0;
+	// createTools may be called more than once for the same ToolSession. A later
+	// explicit (or full-set) write request is a real grant and must upgrade any
+	// device-only transport left by an earlier read-only call.
+	if (requestedTools === undefined || requestedTools.includes("write")) {
+		session.deviceOnlyWrite = undefined;
+		session.pendingFullWriteDescription = undefined;
+	}
 	const goalEnabled = cfgGoalEnabled.get(session.settings);
 	const goalModeActive = !restrictToolNames && goalEnabled && session.getGoalModeState?.()?.enabled === true;
 	const externalThinkingActive =
 		cfgExternalThinking.get(session.settings) && supportsExternalThinking(session.getActiveModel?.());
-	if (goalModeActive && requestedTools && !requestedTools.includes("goal")) {
+	if (goalModeActive && requestedTools && !emptyExplicitWhitelist && !requestedTools.includes("goal")) {
 		requestedTools.push("goal");
 	}
 	const backends = resolveEvalBackends(session);
@@ -669,7 +679,8 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 	}
 	// Auto-include AST counterparts when their text-based sibling is present.
 	// Restricted callers own the active list and must not have it widened.
-	if (requestedTools && !restrictToolNames) {
+	// Explicit empty `--no-tools` whitelist must also stay empty.
+	if (requestedTools && !restrictToolNames && !emptyExplicitWhitelist) {
 		if (
 			cfgCompactionExperimentalContextManagement.get(session.settings) &&
 			requestedTools.includes("read") &&
@@ -788,7 +799,7 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 		}
 		return true;
 	};
-	if (includeYield && requestedTools && !requestedTools.includes("yield")) {
+	if (includeYield && requestedTools && !emptyExplicitWhitelist && !requestedTools.includes("yield")) {
 		requestedTools.push("yield");
 	}
 
