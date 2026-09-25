@@ -230,6 +230,11 @@ export class EventController {
 	#readToolCallArgs = new Map<string, Record<string, unknown>>();
 	#readToolCallAssistantComponents = new Map<string, AssistantMessageComponent>();
 	#toolTimelineComponents = new Map<string, Component>();
+	// Whether a tool batch is open for passive context: set when a tool settles,
+	// cleared by any non-tool message so context never lands on an earlier,
+	// unrelated card. The target is the batch's last card in call order,
+	// matching transcript replay.
+	#passiveContextBatchOpen = false;
 	// Stable identity for a streamed tool call while its assistant message is
 	// live: maps the tool-call block's position in the streaming message to the
 	// id last seen at that position. A streamed id can CHANGE across cumulative
@@ -1222,6 +1227,9 @@ export class EventController {
 
 	async #handleMessageStart(event: Extract<AgentSessionEvent, { type: "message_start" }>): Promise<void> {
 		this.#ensureWorkingLoaderWhileStreaming();
+		if (event.message.role !== "toolResult" && !isPassiveToolContextMessage(event.message)) {
+			this.#passiveContextBatchOpen = false;
+		}
 		if (event.message.role === "hookMessage" || event.message.role === "custom") {
 			if (event.message.role === "custom" && !this.ctx.initialChatRendered && !this.ctx.viewSession.isStreaming) {
 				// Idle custom append while no transcript render has committed (e.g. a startup
@@ -1327,7 +1335,9 @@ export class EventController {
 			this.ctx.ui.requestRender(true);
 		} else if (event.message.role === "developer") {
 			if (isPassiveToolContextMessage(event.message)) {
-				const target = [...this.#toolTimelineComponents.values()].at(-1);
+				const target = this.#passiveContextBatchOpen
+					? [...this.#toolTimelineComponents.values()].at(-1)
+					: undefined;
 				if (target instanceof ToolExecutionComponent || target instanceof ReadToolGroupComponent) {
 					target.setAdditionalContext(textContent(event.message.content));
 					this.ctx.ui.requestRender();
@@ -2200,6 +2210,7 @@ export class EventController {
 		if (this.#retractedToolCallIds.delete(event.toolCallId)) return;
 		this.#executionStartedCallIds.delete(event.toolCallId);
 		this.#showToolReplies(event.toolCallId, event.result.details);
+		this.#passiveContextBatchOpen = true;
 		// A synthetic aborted/error completion (agent-loop's placeholder for a
 		// never-run call on a terminal error/abort) settles the card in place so a
 		// terminal failure stays visible. Remember it so `#handleAutoRetryStart`

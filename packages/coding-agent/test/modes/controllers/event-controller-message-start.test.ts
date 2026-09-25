@@ -201,6 +201,45 @@ describe("EventController message_start (user role)", () => {
 			resetSettingsForTest();
 		}
 	});
+
+	it("does not attach live passive context across a non-tool message", async () => {
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true });
+		try {
+			const ctx = createInteractiveModeContext();
+			const controller = new EventController(ctx);
+			const toolCallId = "passive-context-stale";
+			await controller.handleEvent({
+				type: "tool_execution_start",
+				toolCallId,
+				toolName: "bash",
+				args: { command: "printf done" },
+			} as Extract<AgentSessionEvent, { type: "tool_execution_start" }>);
+			await controller.handleEvent({
+				type: "tool_execution_end",
+				toolCallId,
+				toolName: "bash",
+				result: { content: [{ type: "text", text: "done" }] },
+				isError: false,
+			} as Extract<AgentSessionEvent, { type: "tool_execution_end" }>);
+			await controller.handleEvent({ type: "message_start", message: createUserMessage("steer") });
+
+			await controller.handleEvent({
+				type: "message_start",
+				message: {
+					role: "developer",
+					content: [{ type: "text", text: "orphaned context" }],
+					attribution: "agent",
+					passiveToolContext: true,
+					timestamp: Date.now(),
+				} satisfies DeveloperMessage,
+			});
+
+			expect(Bun.stripANSI(ctx.chatContainer.render(120).join("\n"))).not.toContain("Context:");
+		} finally {
+			resetSettingsForTest();
+		}
+	});
 });
 
 function createIrcMessage(timestamp: number): CustomMessage<{ from: string; message: string }> {

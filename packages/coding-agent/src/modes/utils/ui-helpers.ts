@@ -806,6 +806,7 @@ export class UiHelpers {
 						if (!hasText && cfgTerminalShowImages.get(settings)) {
 							if (pendingReadComponent) {
 								pendingReadComponent.updateResult(message, false, message.toolCallId);
+								toolComponents.set(message.toolCallId, pendingReadComponent);
 								this.ctx.pendingTools.delete(message.toolCallId);
 							}
 							readToolCallArgs.delete(message.toolCallId);
