@@ -750,6 +750,38 @@ describe("openai-responses parseRequest", () => {
 			}),
 		).toThrow(/computer_call|call_id|valid bridged Responses input item/);
 	});
+
+	it("parses seed, response_format, parallel_tool_calls, previous_response_id, and user onto options", () => {
+		const parsed = parseRequest({
+			model: "gpt-5.4",
+			input: "hi",
+			seed: 7,
+			response_format: { type: "json_object" },
+			parallel_tool_calls: false,
+			previous_response_id: "resp_prev",
+			user: "user-1",
+			logit_bias: { "42": -1 },
+		});
+		expect(parsed.options.seed).toBe(7);
+		expect(parsed.options.responseFormat).toEqual({ type: "json_object" });
+		expect(parsed.options.parallelToolCalls).toBe(false);
+		expect(parsed.options.previousResponseId).toBe("resp_prev");
+		expect(parsed.options.user).toBe("user-1");
+		expect(parsed.options.logitBias).toEqual({ "42": -1 });
+	});
+
+	it("leaves omitted seed, response_format, parallel_tool_calls, previous_response_id, and user undefined (negative)", () => {
+		const parsed = parseRequest({
+			model: "gpt-5.4",
+			input: "hi",
+		});
+		expect(parsed.options.seed).toBeUndefined();
+		expect(parsed.options.responseFormat).toBeUndefined();
+		expect(parsed.options.parallelToolCalls).toBeUndefined();
+		expect(parsed.options.previousResponseId).toBeUndefined();
+		expect(parsed.options.user).toBeUndefined();
+		expect(parsed.options.logitBias).toBeUndefined();
+	});
 });
 
 describe("openai-responses encodeResponse", () => {
@@ -1427,6 +1459,43 @@ describe("auth-gateway OpenAI Responses multimodal tool outputs", () => {
 			clearCustomApis();
 		}
 	});
+	for (const role of ["user", "developer"]) {
+		it(`rejects ${role} image file IDs before dispatching to a non-Responses upstream`, async () => {
+			registerMockApi();
+			const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-responses-file-id-"));
+			const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+			storage.setRuntimeApiKey("openai", "test-key");
+			const mock = createMockModel({ provider: "openai", id: "mock/file-id" });
+			mock.push({ content: ["unexpected provider call"] });
+			const gateway = startAuthGateway({
+				bind: "127.0.0.1:0",
+				bearerTokens: ["test-token"],
+				storage,
+				resolveModel: () => mock.model,
+				version: "test",
+			});
+
+			try {
+				const response = await fetch(`${gateway.url}/v1/responses`, {
+					method: "POST",
+					headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
+					body: JSON.stringify({
+						model: "mock/file-id",
+						input: [{ role, content: [{ type: "input_image", file_id: "file_normal_image" }] }],
+					}),
+				});
+				expect(response.status).toBe(400);
+				const body = (await response.json()) as { error: { message: string } };
+				expect(body.error.message).toContain("require a Responses-compatible upstream model");
+				expect(mock.calls).toHaveLength(0);
+			} finally {
+				await gateway.close();
+				storage.close();
+				await fs.rm(dir, { recursive: true, force: true });
+				clearCustomApis();
+			}
+		});
+	}
 });
 describe("auth-gateway OpenAI Responses computer option bridge", () => {
 	it("preserves the native tool, forced choice, and include in stream options", async () => {

@@ -610,6 +610,9 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	}
 	if (data.presence_penalty !== undefined) options.presencePenalty = data.presence_penalty;
 	if (data.frequency_penalty !== undefined) options.frequencyPenalty = data.frequency_penalty;
+	if (data.seed !== undefined) options.seed = data.seed;
+	if (data.logit_bias !== undefined) options.logitBias = data.logit_bias;
+	if (data.response_format !== undefined) options.responseFormat = data.response_format;
 	if (data.parallel_tool_calls !== undefined) options.parallelToolCalls = data.parallel_tool_calls;
 	if (Array.isArray(data.include)) options.include = data.include.filter(isOpenAIResponseInclude);
 	const cacheKey = resolvePromptCacheKey(body, headers);
@@ -617,8 +620,16 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	if (data.previous_response_id !== undefined) options.previousResponseId = data.previous_response_id;
 	if (data.user !== undefined) options.user = data.user;
 	if (isObj(data.metadata)) options.metadata = data.metadata;
-	// `store` is a stateful-storage hint that omp's gateway doesn't honour;
-	// silently accepted by the schema. No typed slot — drop.
+	// Responses structured outputs arrive as `text.format` (not Chat
+	// Completions `response_format`). Forward into options.responseFormat so
+	// applyParsedGatewayOptions / providers see the schema.
+	if (isObj(data.text) && "format" in data.text && data.text.format !== undefined) {
+		options.responseFormat = data.text.format;
+	}
+	// `store` persists the response server-side — required for a later
+	// client-supplied `previous_response_id` to resolve (platform chaining only
+	// resolves stored responses). Forward it into provider options.
+	if (data.store !== undefined) options.store = data.store === true;
 
 	return {
 		modelId: data.model,
@@ -884,7 +895,10 @@ export function encodeResponse(message: AssistantMessage, requestedModelId: stri
 	return buildResponseEnvelope(
 		message,
 		requestedModelId,
-		makeRespId(),
+		// Expose the upstream response id so a client's next
+		// `previous_response_id` refers to a response the provider actually
+		// stored; mint a local id only when upstream did not supply one.
+		message.responseId ?? makeRespId(),
 		responseStatusForStopReason(message),
 		items,
 		buildUsage(message),
@@ -941,7 +955,12 @@ export function encodeStream(
 	control?: AuthGatewayStreamControl,
 ): ReadableStream<Uint8Array> {
 	const encoder = new TextEncoder();
-	const responseId = makeRespId();
+	// Resolved lazily: the upstream response id lands on `partial.responseId`
+	// once the provider's own `response.created` is processed, so defer minting
+	// a local id until the first frame must go out. A client that later chains
+	// via `previous_response_id` must name a response the provider stored.
+	let responseId: string | undefined;
+	let responseStarted = false;
 	let sequenceNumber = 0;
 	let cancelled = control?.signal?.aborted === true;
 	const markCancelled = () => {
@@ -975,8 +994,25 @@ export function encodeStream(
 			const openItemForContentIndex = (contentIndex: number): OpenItem | null =>
 				openItemsByContentIndex.get(contentIndex) ?? null;
 
+			// `response.created`/`response.in_progress` go out together the first
+			// time a frame is needed. When `partial` already carries the upstream
+			// response id (the provider's own `response.created` was processed
+			// before this event), the emitted envelope names that real id so a
+			// later `previous_response_id` resolves against the provider's store;
+			// otherwise a local id is minted once and kept for the whole stream.
+			const ensureResponseStarted = (partial?: AssistantMessage): void => {
+				if (responseStarted) return;
+				responseStarted = true;
+				responseId = partial?.responseId ?? makeRespId();
+				createdAt = Math.floor((partial?.timestamp || Date.now()) / 1000);
+				emit("response.created", { response: responseSnapshot("in_progress", []) });
+				// response.in_progress — mirrors real OpenAI; some clients gate
+				// on it before reading items.
+				emit("response.in_progress", { response: responseSnapshot("in_progress", []) });
+			};
+
 			const responseSnapshot = (status: ResponseStatus, output: OutputItem[] | []) => ({
-				id: responseId,
+				id: (responseId ??= makeRespId()),
 				object: "response",
 				created_at: createdAt,
 				status,
@@ -985,7 +1021,6 @@ export function encodeStream(
 				usage: null,
 				incomplete_details: incompleteDetailsForStatus(status),
 			});
-
 			const openMessage = (signature: MessageSignature | undefined, sourceContentIndex: number): OpenMessage => {
 				const itemOutputIndex = allocateOutputIndex();
 				const itemId = signature?.id ?? makeMsgId();
@@ -1215,14 +1250,15 @@ export function encodeStream(
 				}
 				for await (const ev of events) {
 					if (cancelled) return;
+					// `start` usually fires before the provider's own
+					// `response.created` was processed, so its partial has no
+					// upstream id yet — hold the envelope until the next event
+					// rather than minting an id the client cannot continue from.
+					const idCarrier =
+						ev.type === "done" ? ev.message : ev.type === "error" ? ev.error : ev.partial;
+					if (ev.type !== "start" || idCarrier.responseId) ensureResponseStarted(idCarrier);
 					switch (ev.type) {
 						case "start": {
-							createdAt = Math.floor((ev.partial.timestamp || Date.now()) / 1000);
-							// response.created — initial envelope.
-							emit("response.created", { response: responseSnapshot("in_progress", []) });
-							// response.in_progress — mirrors real OpenAI; some clients gate
-							// on it before reading items.
-							emit("response.in_progress", { response: responseSnapshot("in_progress", []) });
 							break;
 						}
 						case "text_start": {
@@ -1418,6 +1454,7 @@ export function encodeStream(
 
 				if (failureMessage) {
 					closeAllOpenItems();
+					responseId ??= failureMessage.responseId;
 					controller.enqueue(
 						encoder.encode(
 							sseEvent("response.failed", {
@@ -1437,7 +1474,6 @@ export function encodeStream(
 
 				closeAllOpenItems();
 				const message = finalMessage ?? ((await events.result().catch(() => null)) as AssistantMessage | null);
-
 				// Build the canonical output from the final message so non-streaming
 				// readers see the exact same shape they'd get from encodeResponse().
 				const items = message ? buildOutputItems(message) : finishedItems;
@@ -1455,7 +1491,7 @@ export function encodeStream(
 							type: terminalEvent,
 							sequence_number: seq(),
 							response: {
-								id: responseId,
+								id: (responseId ??= message?.responseId ?? makeRespId()),
 								object: "response",
 								created_at: createdAt,
 								status,
@@ -1480,7 +1516,7 @@ export function encodeStream(
 								type: "response.failed",
 								sequence_number: seq(),
 								response: {
-									id: responseId,
+									id: (responseId ??= makeRespId()),
 									object: "response",
 									created_at: Math.floor(Date.now() / 1000),
 									status: "failed",

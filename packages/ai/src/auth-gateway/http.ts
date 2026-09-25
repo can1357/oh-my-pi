@@ -7,7 +7,7 @@
 import { timingSafeEqual as nodeTimingSafeEqual } from "node:crypto";
 import * as os from "node:os";
 import { getInstallId } from "@oh-my-pi/pi-utils";
-import type { Api, Model } from "../types";
+import type { Api, AssistantMessage, Model } from "../types";
 import type { ClientUsageIdentity } from "../usage";
 
 const JSON_HEADERS = {
@@ -34,7 +34,7 @@ export function json(status: number, body: unknown, headers?: Record<string, str
  */
 export function gatewayResponseHeaders(
 	model: Model<Api>,
-	info: { requestId: string; costUsd?: number; startedAt?: number },
+	info: { requestId: string; message?: AssistantMessage; costUsd?: number; startedAt?: number },
 ): Record<string, string> {
 	const headers: Record<string, string> = {
 		"x-request-id": info.requestId,
@@ -42,7 +42,8 @@ export function gatewayResponseHeaders(
 		"x-litellm-model-id": model.id,
 	};
 	if (model.baseUrl) headers["x-litellm-model-api-base"] = model.baseUrl;
-	if (info.costUsd !== undefined) headers["x-litellm-response-cost"] = info.costUsd.toString();
+	const costUsd = info.costUsd ?? info.message?.usage.cost.total;
+	if (costUsd !== undefined) headers["x-litellm-response-cost"] = costUsd.toString();
 	if (info.startedAt !== undefined) {
 		const elapsed = (performance.now() - info.startedAt).toFixed(0);
 		headers["x-litellm-response-duration-ms"] = elapsed;
@@ -221,7 +222,7 @@ export function resolvePromptCacheKey(body: unknown, headers?: Headers): string 
 
 const CORS_HEADERS: Record<string, string> = {
 	"Access-Control-Allow-Origin": "*",
-	"Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+	"Access-Control-Allow-Methods": "GET, PUT, DELETE, POST, OPTIONS",
 	"Access-Control-Allow-Headers":
 		"authorization, content-type, anthropic-version, anthropic-beta, anthropic-user-profile-id, openai-organization, openai-project, x-stainless-*, x-api-key",
 	"Access-Control-Expose-Headers":
