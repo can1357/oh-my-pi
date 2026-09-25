@@ -121,10 +121,17 @@ function renderDocs(inst: Tool, heading = "#", descriptionCap?: number): string 
  * Parse and validate a device write's JSON `content` against the wrapped
  * tool's wire schema. Strips a habitual top-level `i` (intent) unless the
  * schema declares one. Throws ToolError; schema-mismatch errors carry `docs()`
- * for repair.
+ * for repair. A device with `lenientArgValidation` receives the raw args on a
+ * schema mismatch instead — the same contract the agent loop and the eval
+ * tool bridge honor (`AgentTool.lenientArgValidation`) — so a tool that owns
+ * its own refusal/repair (e.g. `todo` inferring an omitted `op`) is never
+ * pre-empted by the host's generic wording plus the full docs. Lenience covers
+ * schema mismatch only: malformed JSON and non-object content still throw. The
+ * `__parseError`/`__rawJson` strip mirrors the agent loop so a payload cannot
+ * forge the loop's parse-failure sentinels.
  */
 function parseDeviceArgs(
-	device: AiTool,
+	device: Tool,
 	content: string,
 	toolCallId: string,
 	docs: () => string,
@@ -154,6 +161,12 @@ function parseDeviceArgs(
 			arguments: args,
 		});
 	} catch (error) {
+		if (device.lenientArgValidation) {
+			const fallback = { ...args };
+			delete fallback.__parseError;
+			delete fallback.__rawJson;
+			return fallback;
+		}
 		const message = error instanceof Error ? error.message : String(error);
 		throw new ToolError(`Invalid args for ${XD_URL_PREFIX}${device.name}: ${message}\n\n${docs()}`);
 	}
@@ -221,6 +234,8 @@ export interface XdevState {
 	readonly builtInNames: Set<string>;
 	/** Whether a name is active at the top level. */
 	readonly isActive: (name: string) => boolean;
+	/** Canonical renderer for a dispatched device name; mirrors {@link resolveXdevTool}. */
+	readonly resolve?: (name: string) => Tool | undefined;
 	/** Optional execution-only decorator, such as the ACP permission gate. */
 	decorateExecution?(tool: Tool): Tool;
 }
@@ -301,44 +316,68 @@ export function xdevDocs(state: XdevState, name: string): string {
 	return renderDocs(resolveRequiredXdevTool(state, name));
 }
 
+/** Mounted-device placement in the system prompt: inlined docs sections, then one-line catalog entries. */
+export interface XdevPromptDocs {
+	readonly sections: readonly string[];
+	/** Catalog summary for each device listed as a one-line entry, in presentation order. */
+	readonly catalog: ReadonlyMap<string, string>;
+}
+
+/**
+ * Place mounted devices under the configured prompt-doc policy and budgets.
+ * A device the policy does not inline, or whose docs exceed a cap, becomes a
+ * catalog entry.
+ */
+export function planXdevPromptDocs(
+	state: XdevState,
+	mode: XdevDocsMode = "inline",
+	inlinePatterns: readonly string[] = [],
+): XdevPromptDocs {
+	const sections: string[] = [];
+	const catalog = new Map<string, string>();
+	const inlineGlobs = compileInlineGlobs(inlinePatterns);
+	let used = 0;
+	for (const tool of listXdevTools(state)) {
+		const descriptionCap = state.builtInNames.has(tool.name) ? undefined : XDEV_EXTERNAL_DESCRIPTION_CAP;
+		if (shouldInlineXdevTool(state, tool, mode, inlineGlobs)) {
+			const docs = renderDocs(tool, "##", descriptionCap);
+			if (docs.length <= XDEV_DOCS_PER_DEVICE_CAP && used + docs.length <= XDEV_DOCS_TOTAL_BUDGET) {
+				used += docs.length;
+				sections.push(docs);
+				continue;
+			}
+		}
+		catalog.set(tool.name, promptCatalogSummary(tool, descriptionCap));
+	}
+	return { sections, catalog };
+}
+
+/**
+ * Render planned `xd://` prompt docs. Devices in `listedElsewhere` get no
+ * catalog line: the caller lists them itself, with their catalog summary.
+ */
+export function renderXdevPromptDocs(docs: XdevPromptDocs, listedElsewhere?: ReadonlySet<string>): string {
+	const lines: string[] = [];
+	for (const [name, summary] of docs.catalog) {
+		if (!listedElsewhere?.has(name)) lines.push(`- ${XD_URL_PREFIX}${name} — ${summary}`);
+	}
+	if (lines.length === 0) return docs.sections.join("\n\n");
+	const catalogSection = [
+		"## Additional devices (docs on demand)",
+		...lines,
+		"",
+		`Read ${XD_URL_PREFIX}<tool> for full docs + JSON schema before first use.`,
+	].join("\n");
+	return [...docs.sections, catalogSection].join("\n\n");
+}
+
 /** Docs + schema for mounted devices under the configured prompt-doc policy. */
 export function xdevDocsAll(
 	state: XdevState,
 	mode: XdevDocsMode = "inline",
 	inlinePatterns: readonly string[] = [],
 ): string {
-	const sections: string[] = [];
-	const overflow: Tool[] = [];
-	const inlineGlobs = compileInlineGlobs(inlinePatterns);
-	let used = 0;
-	for (const tool of listXdevTools(state)) {
-		if (!shouldInlineXdevTool(state, tool, mode, inlineGlobs)) {
-			overflow.push(tool);
-			continue;
-		}
-		const descriptionCap = state.builtInNames.has(tool.name) ? undefined : XDEV_EXTERNAL_DESCRIPTION_CAP;
-		const docs = renderDocs(tool, "##", descriptionCap);
-		if (docs.length > XDEV_DOCS_PER_DEVICE_CAP || used + docs.length > XDEV_DOCS_TOTAL_BUDGET) {
-			overflow.push(tool);
-			continue;
-		}
-		used += docs.length;
-		sections.push(docs);
-	}
-	if (overflow.length > 0) {
-		sections.push(
-			[
-				"## Additional devices (docs on demand)",
-				...overflow.map(tool => {
-					const maxBytes = state.builtInNames.has(tool.name) ? undefined : XDEV_EXTERNAL_DESCRIPTION_CAP;
-					return `- ${XD_URL_PREFIX}${tool.name} — ${promptCatalogSummary(tool, maxBytes)}`;
-				}),
-				"",
-				`Read ${XD_URL_PREFIX}<tool> for full docs + JSON schema before first use.`,
-			].join("\n"),
-		);
-	}
-	return sections.join("\n\n");
+	return renderXdevPromptDocs(planXdevPromptDocs(state, mode, inlinePatterns));
 }
 
 /** Docs for selected mounted devices under the configured prompt-doc policy. */
@@ -406,7 +445,7 @@ export async function dispatchXdevTool(
 			};
 		}
 
-		const validated = parseDeviceArgs(canonical as AiTool, content, toolCallId, () => renderDocs(canonical));
+		const validated = parseDeviceArgs(canonical, content, toolCallId, () => renderDocs(canonical));
 		// Record the wrapped tool's approval tier so the prewalk coordinator can
 		// tell a read-only device call (e.g. `lsp` navigation) from a real
 		// workspace mutation without re-decoding the payload. Best-effort: a

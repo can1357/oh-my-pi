@@ -23,6 +23,15 @@ impl<SE: extensions::ShellExtensions, S: shell_builder::IsComplete> ShellBuilder
 		// Construct the shell.
 		let mut shell = Shell::new(options)?;
 
+		// Set up history, if relevant. Do NOT fail if we can't load history.
+		if shell.options().enable_command_history {
+			shell.history = shell
+				.load_history()
+				.await
+				.unwrap_or_default()
+				.or_else(|| Some(crate::history::History::default()));
+		}
+
 		// Load profiles/configuration, unless skipped.
 		if !profile.skip() || !rc.skip() {
 			shell.load_config(&profile, &rc).await?;
@@ -191,6 +200,9 @@ pub struct CreateOptions<SE: extensions::ShellExtensions = extensions::DefaultSh
 	/// Initial working dir for the shell. If left unspecified, will be populated
 	/// from the host environment.
 	pub working_dir: Option<PathBuf>,
+	/// Filesystem the shell resolves user paths through. Defaults to the native
+	/// host filesystem.
+	pub filesystem: Option<pi_vfs::Fs>,
 	/// Whether the shell is in POSIX compliance mode.
 	#[builder(default)]
 	pub posix: bool,
@@ -243,6 +255,7 @@ impl<SE: extensions::ShellExtensions> Default for Shell<SE> {
 			traps: traps::TrapHandlerConfig::default(),
 			open_files: openfiles::OpenFiles::default(),
 			working_dir: PathBuf::default(),
+			filesystem: pi_vfs::Fs::default(),
 			env: env::ShellEnvironment::default(),
 			funcs: functions::FunctionEnv::default(),
 			options: options::RuntimeOptions::default(),

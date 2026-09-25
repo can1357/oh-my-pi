@@ -650,7 +650,7 @@ function collectMessageRegexSecretValues(obfuscator: SecretObfuscator, messages:
  * image bytes are never walked.
  */
 export function obfuscateMessages(obfuscator: SecretObfuscator, messages: Message[]): Message[] {
-	if (!obfuscator.hasSecrets()) return messages;
+	if (!obfuscator.obfuscates()) return messages;
 	const sharedRegexSecretValues = collectMessageRegexSecretValues(obfuscator, messages);
 	let changed = false;
 	const result = messages.map((message): Message => {
@@ -702,7 +702,7 @@ export function obfuscateMessages(obfuscator: SecretObfuscator, messages: Messag
  * the static system prompt and tool schemas pass through unchanged.
  */
 export function obfuscateProviderContext(obfuscator: SecretObfuscator | undefined, context: Context): Context {
-	if (!obfuscator?.hasSecrets()) return context;
+	if (!obfuscator?.obfuscates()) return context;
 	const messages = obfuscateMessages(obfuscator, context.messages);
 	return messages === context.messages ? context : { ...context, messages };
 }

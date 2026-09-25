@@ -13,6 +13,14 @@ import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
+import {
+	cfgTierAdvisor,
+	cfgTierAnthropic,
+	cfgTierGoogle,
+	cfgTierOpenai,
+	cfgTierSubagent,
+} from "@oh-my-pi/pi-coding-agent/session/settings";
+
 function requiredBundledModel(provider: "openai-codex" | "anthropic" | "google", id: string) {
 	const model = getBundledModel(provider, id);
 	if (!model) throw new Error(`Expected bundled model ${provider}/${id}`);
@@ -58,26 +66,26 @@ describe("serviceTier → tier.* settings migration", () => {
 
 	it("expands unscoped priority to every family", async () => {
 		const settings = await loadWith({ serviceTier: "priority" });
-		expect(settings.get("tier.openai")).toBe("priority");
-		expect(settings.get("tier.anthropic")).toBe("priority");
-		expect(settings.get("tier.google")).toBe("priority");
+		expect(cfgTierOpenai.get(settings)).toBe("priority");
+		expect(cfgTierAnthropic.get(settings)).toBe("priority");
+		expect(cfgTierGoogle.get(settings)).toBe("priority");
 	});
 
 	it("scopes openai-only/claude-only to a single family", async () => {
 		const openai = await loadWith({ serviceTier: "openai-only" });
-		expect(openai.get("tier.openai")).toBe("priority");
-		expect(openai.get("tier.anthropic")).toBe("none");
-		expect(openai.get("tier.google")).toBe("none");
+		expect(cfgTierOpenai.get(openai)).toBe("priority");
+		expect(cfgTierAnthropic.get(openai)).toBe("none");
+		expect(cfgTierGoogle.get(openai)).toBe("none");
 
 		const claude = await loadWith({ serviceTier: "claude-only" });
-		expect(claude.get("tier.anthropic")).toBe("priority");
-		expect(claude.get("tier.openai")).toBe("none");
+		expect(cfgTierAnthropic.get(claude)).toBe("priority");
+		expect(cfgTierOpenai.get(claude)).toBe("none");
 	});
 
 	it("maps plain OpenAI tiers onto the OpenAI family", async () => {
 		const settings = await loadWith({ serviceTier: "flex" });
-		expect(settings.get("tier.openai")).toBe("flex");
-		expect(settings.get("tier.anthropic")).toBe("none");
+		expect(cfgTierOpenai.get(settings)).toBe("flex");
+		expect(cfgTierAnthropic.get(settings)).toBe("none");
 	});
 
 	it("carries subagent/advisor over and drops scoped sentinels", async () => {
@@ -85,15 +93,15 @@ describe("serviceTier → tier.* settings migration", () => {
 			serviceTierSubagent: "claude-only",
 			serviceTierAdvisor: "flex",
 		});
-		expect(settings.get("tier.subagent")).toBe("priority"); // claude-only → priority
-		expect(settings.get("tier.advisor")).toBe("flex");
+		expect(cfgTierSubagent.get(settings)).toBe("priority"); // claude-only → priority
+		expect(cfgTierAdvisor.get(settings)).toBe("flex");
 	});
 
 	it("leaves a fresh config on the per-family defaults", async () => {
 		const settings = await loadWith({});
-		expect(settings.get("tier.openai")).toBe("none");
-		expect(settings.get("tier.subagent")).toBe("inherit");
-		expect(settings.get("tier.advisor")).toBe("none");
+		expect(cfgTierOpenai.get(settings)).toBe("none");
+		expect(cfgTierSubagent.get(settings)).toBe("inherit");
+		expect(cfgTierAdvisor.get(settings)).toBe("none");
 	});
 });
 

@@ -11,9 +11,8 @@ use std::{
 	borrow::Cow,
 	cell::RefCell,
 	fmt,
-	fs::File,
 	io::{self, Read},
-	path::{Path, PathBuf},
+	path::Path,
 	sync::{
 		LazyLock,
 		atomic::{AtomicU64, Ordering},
@@ -33,9 +32,10 @@ use napi::{
 };
 use napi_derive::napi;
 use parking_lot::Mutex;
+use pi_vfs::{BlockingFs, File};
 use smallvec::SmallVec;
 
-use crate::{glob_util, iofs, task};
+use crate::{glob_util, iofs, shell::vfs::ShellFilesystem, task};
 
 const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
 /// PCRE2 JIT toggle: `OMP_PCRE2_JIT=1` forces JIT on, `0`/`false` forces it
@@ -94,11 +94,11 @@ pub struct SearchOptions {
 }
 
 /// Options for searching files on disk.
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 pub struct GrepOptions<'env> {
 	/// Regex pattern to search for.
 	pub pattern:            String,
-	/// Directory or file to search.
+	/// Directory or file to search: a host path or an absolute `scheme://` URL.
 	pub path:               String,
 	/// Glob filter for filenames (e.g., "*.ts").
 	pub glob:               Option<String>,
@@ -134,6 +134,9 @@ pub struct GrepOptions<'env> {
 	pub signal:             Option<Unknown<'env>>,
 	/// Timeout in milliseconds for the operation.
 	pub timeout_ms:         Option<u32>,
+	/// Filesystem every path is stat'ed, walked, and read through (native when
+	/// absent).
+	pub filesystem:         Option<ShellFilesystem>,
 }
 
 /// A context line (before or after a match).
@@ -436,16 +439,6 @@ const fn parse_output_mode(mode: Option<GrepOutputMode>) -> OutputMode {
 	}
 }
 
-fn resolve_search_path(path: &str) -> Result<PathBuf> {
-	let candidate = PathBuf::from(path);
-	if candidate.is_absolute() {
-		return Ok(candidate);
-	}
-	let cwd = std::env::current_dir()
-		.map_err(|err| Error::from_reason(format!("Failed to resolve cwd: {err}")))?;
-	Ok(cwd.join(candidate))
-}
-
 fn resolve_type_filter(type_name: Option<&str>) -> Option<TypeFilter> {
 	let normalized = type_name
 		.map(str::trim)
@@ -489,14 +482,16 @@ fn resolve_type_filter(type_name: Option<&str>) -> Option<TypeFilter> {
 }
 
 fn matches_type_filter(path: &Path, filter: &TypeFilter) -> bool {
-	let base_name = path
-		.file_name()
-		.and_then(|name| name.to_str())
-		.unwrap_or("");
+	// URL paths carry encoded segments; match on the decoded raw name.
+	let Some(name) = pi_vfs::file_name(path) else {
+		return false;
+	};
+	let name = Path::new(&*name);
+	let base_name = name.to_str().unwrap_or("");
 	if filter.match_name(base_name) {
 		return true;
 	}
-	let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+	let ext = name.extension().and_then(|ext| ext.to_str()).unwrap_or("");
 	if ext.is_empty() {
 		return false;
 	}
@@ -688,17 +683,18 @@ fn read_owned_prefix(
 }
 
 /// Read file bytes, distinguishing oversized files from other skips.
-fn read_file_bytes(path: &Path, buffer: &mut Vec<u8>) -> io::Result<ReadFile> {
-	read_file_bytes_with_size(path, None, buffer)
+fn read_file_bytes(fs: &BlockingFs, path: &Path, buffer: &mut Vec<u8>) -> io::Result<ReadFile> {
+	read_file_bytes_with_size(fs, path, None, buffer)
 }
 
 /// Read file bytes with an optional size hint from directory traversal.
 fn read_file_bytes_with_size(
+	fs: &BlockingFs,
 	path: &Path,
 	size_hint: Option<u64>,
 	buffer: &mut Vec<u8>,
 ) -> io::Result<ReadFile> {
-	let file = match File::open(path) {
+	let file = match fs.open(path) {
 		Ok(file) => file,
 		Err(err)
 			if matches!(err.kind(), io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied) =>
@@ -815,6 +811,8 @@ pub(crate) struct GrepConfig {
 	pub(crate) max_columns:        Option<u32>,
 	pub(crate) mode:               Option<GrepOutputMode>,
 	pub(crate) max_count_per_file: Option<u32>,
+	/// Filesystem the search path is resolved, walked, and read through.
+	pub(crate) filesystem:         BlockingFs,
 }
 
 // ---------------------------------------------------------------------------
@@ -1114,6 +1112,7 @@ fn search_file_bytes<M: Matcher + Sync>(
 }
 
 fn build_grep_walk_request(
+	fs: &BlockingFs,
 	search_path: &Path,
 	glob: Option<&str>,
 	include_hidden: bool,
@@ -1130,6 +1129,7 @@ fn build_grep_walk_request(
 	}
 
 	Ok(pi_walker::WalkRequest::new(search_path)
+		.filesystem(fs.clone())
 		.hidden(include_hidden)
 		.gitignore(use_gitignore)
 		.skip_git(true)
@@ -1146,6 +1146,7 @@ fn build_grep_walk_request(
 }
 
 fn collect_grep_candidates(
+	fs: &BlockingFs,
 	search_path: &Path,
 	glob: Option<&str>,
 	type_filter: Option<&TypeFilter>,
@@ -1156,6 +1157,7 @@ fn collect_grep_candidates(
 	ct: &task::CancelToken,
 ) -> Result<Option<Vec<pi_walker::FileCandidate>>> {
 	let request = build_grep_walk_request(
+		fs,
 		search_path,
 		glob,
 		include_hidden,
@@ -1205,13 +1207,27 @@ enum FileOutcome {
 ///
 /// `results` is drained between passes; `deferred` is filled by pass 1 and
 /// consumed by pass 2; the counters accumulate across both.
-#[derive(Default)]
 struct PassState {
+	/// Filesystem every candidate is read through.
+	fs:                BlockingFs,
 	results:           Mutex<Vec<FileSearchResult>>,
 	deferred:          Mutex<Vec<pi_walker::FileCandidate>>,
 	files_searched:    AtomicU64,
 	skipped_oversized: AtomicU64,
 	emitted:           AtomicU64,
+}
+
+impl PassState {
+	fn new(fs: &BlockingFs) -> Self {
+		Self {
+			fs:                fs.clone(),
+			results:           Mutex::default(),
+			deferred:          Mutex::default(),
+			files_searched:    AtomicU64::default(),
+			skipped_oversized: AtomicU64::default(),
+			emitted:           AtomicU64::default(),
+		}
+	}
 }
 /// Read the first [`MAX_FILE_BYTES`] of a file into owned bytes for searching.
 ///
@@ -1219,8 +1235,8 @@ struct PassState {
 /// only over their leading window; the remainder is dropped. The bounded owned
 /// read avoids mmap page faults when the backing file is rewritten
 /// concurrently.
-fn read_file_prefix(path: &Path, buffer: &mut Vec<u8>) -> io::Result<ReadFile> {
-	let file = match File::open(path) {
+fn read_file_prefix(fs: &BlockingFs, path: &Path, buffer: &mut Vec<u8>) -> io::Result<ReadFile> {
+	let file = match fs.open(path) {
 		Ok(file) => file,
 		Err(err)
 			if matches!(err.kind(), io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied) =>
@@ -1245,6 +1261,7 @@ fn read_file_prefix(path: &Path, buffer: &mut Vec<u8>) -> io::Result<ReadFile> {
 
 /// Read one candidate per `policy` and search it, classifying the result.
 fn search_one_file<M: Matcher + Sync>(
+	fs: &BlockingFs,
 	worker: &mut SearchWorker,
 	matcher: &M,
 	file: &pi_walker::FileCandidate,
@@ -1253,9 +1270,9 @@ fn search_one_file<M: Matcher + Sync>(
 ) -> FileOutcome {
 	let read = match policy {
 		ReadPolicy::Full => {
-			read_file_bytes_with_size(&file.path, file_size_hint(file.size), &mut worker.buffer)
+			read_file_bytes_with_size(fs, &file.path, file_size_hint(file.size), &mut worker.buffer)
 		},
-		ReadPolicy::Prefix => read_file_prefix(&file.path, &mut worker.buffer),
+		ReadPolicy::Prefix => read_file_prefix(fs, &file.path, &mut worker.buffer),
 	};
 	match read {
 		Ok(ReadFile::Read) => {},
@@ -1297,7 +1314,7 @@ fn handle_file<M: Matcher + Sync>(
 	{
 		return Ok(());
 	}
-	match search_one_file(worker, matcher, file, file_params, policy) {
+	match search_one_file(&state.fs, worker, matcher, file, file_params, policy) {
 		FileOutcome::Defer => {
 			state.deferred.lock().push(file.clone());
 		},
@@ -1379,6 +1396,7 @@ fn run_pass<M: Matcher + Sync>(
 /// satisfied match budget skip the oversized pass entirely. Normal results
 /// always precede oversized results; each group is path-sorted internally.
 fn process_candidates<M: Matcher + Sync>(
+	fs: &BlockingFs,
 	candidates: Vec<pi_walker::FileCandidate>,
 	matcher: &M,
 	params: SearchParams,
@@ -1387,7 +1405,7 @@ fn process_candidates<M: Matcher + Sync>(
 	ct: &task::CancelToken,
 ) -> Result<(Vec<FileSearchResult>, u64, u64)> {
 	let file_params = per_file_params(params);
-	let state = PassState::default();
+	let state = PassState::new(fs);
 
 	// Partition oversized-by-hint files out of pass 1 up front; files without a
 	// size hint stay in pass 1 and are deferred at read time if oversized.
@@ -1440,6 +1458,7 @@ fn process_candidates<M: Matcher + Sync>(
 }
 
 fn run_sequential_grep<M: Matcher + Sync>(
+	fs: &BlockingFs,
 	search_path: &Path,
 	matcher: &M,
 	glob: Option<&str>,
@@ -1452,6 +1471,7 @@ fn run_sequential_grep<M: Matcher + Sync>(
 	stop_after_matches: Option<u64>,
 ) -> Result<(Vec<FileSearchResult>, u64, u64)> {
 	let Some(candidates) = collect_grep_candidates(
+		fs,
 		search_path,
 		glob,
 		type_filter,
@@ -1464,7 +1484,7 @@ fn run_sequential_grep<M: Matcher + Sync>(
 	else {
 		return Ok((Vec::new(), 0, 0));
 	};
-	process_candidates(candidates, matcher, params, false, stop_after_matches, ct)
+	process_candidates(fs, candidates, matcher, params, false, stop_after_matches, ct)
 }
 
 #[allow(
@@ -1472,6 +1492,7 @@ fn run_sequential_grep<M: Matcher + Sync>(
 	reason = "matches options structure of underlying walk candidates collector"
 )]
 fn run_parallel_streaming_grep<M: Matcher + Sync>(
+	fs: &BlockingFs,
 	search_path: &Path,
 	matcher: &M,
 	glob: Option<&str>,
@@ -1483,6 +1504,7 @@ fn run_parallel_streaming_grep<M: Matcher + Sync>(
 	ct: &task::CancelToken,
 ) -> Result<(Vec<FileSearchResult>, u64, u64)> {
 	let request = build_grep_walk_request(
+		fs,
 		search_path,
 		glob,
 		include_hidden,
@@ -1491,7 +1513,7 @@ fn run_parallel_streaming_grep<M: Matcher + Sync>(
 		pi_walker::WalkOrder::Unordered,
 	)?;
 	let file_params = per_file_params(params);
-	let state = PassState::default();
+	let state = PassState::new(fs);
 
 	request
 		.for_each_file_candidate_parallel(
@@ -1562,6 +1584,7 @@ fn flush_stream_window<M: Matcher + Sync>(
 	reason = "matches options structure of underlying walk candidates collector"
 )]
 fn run_windowed_streaming_grep<M: Matcher + Sync>(
+	fs: &BlockingFs,
 	search_path: &Path,
 	matcher: &M,
 	glob: Option<&str>,
@@ -1574,6 +1597,7 @@ fn run_windowed_streaming_grep<M: Matcher + Sync>(
 	stop_after_matches: u64,
 ) -> Result<(Vec<FileSearchResult>, u64, u64)> {
 	let request = build_grep_walk_request(
+		fs,
 		search_path,
 		glob,
 		include_hidden,
@@ -1582,7 +1606,7 @@ fn run_windowed_streaming_grep<M: Matcher + Sync>(
 		pi_walker::WalkOrder::Path,
 	)?;
 	let file_params = per_file_params(params);
-	let state = PassState::default();
+	let state = PassState::new(fs);
 	let mut window = Vec::with_capacity(GREP_STREAM_WINDOW);
 	let mut results = Vec::new();
 
@@ -1657,6 +1681,7 @@ fn run_windowed_streaming_grep<M: Matcher + Sync>(
 }
 
 fn run_streaming_grep<M: Matcher + Sync>(
+	fs: &BlockingFs,
 	search_path: &Path,
 	matcher: &M,
 	glob: Option<&str>,
@@ -1670,6 +1695,7 @@ fn run_streaming_grep<M: Matcher + Sync>(
 	let stop_after_matches = streaming_stop_after(params);
 	match stop_after_matches {
 		None => run_parallel_streaming_grep(
+			fs,
 			search_path,
 			matcher,
 			glob,
@@ -1682,6 +1708,7 @@ fn run_streaming_grep<M: Matcher + Sync>(
 		),
 		Some(stop) if stop <= ORDERED_STREAMING_STOP_MAX_COUNT || pi_walker::walk_workers() <= 1 => {
 			run_sequential_grep(
+				fs,
 				search_path,
 				matcher,
 				glob,
@@ -1695,6 +1722,7 @@ fn run_streaming_grep<M: Matcher + Sync>(
 			)
 		},
 		Some(stop) => run_windowed_streaming_grep(
+			fs,
 			search_path,
 			matcher,
 			glob,
@@ -1901,8 +1929,10 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 	ct: task::CancelToken,
 	matcher: &M,
 ) -> Result<GrepResult> {
-	let search_path = resolve_search_path(&options.path)?;
-	let metadata = std::fs::metadata(&search_path)
+	let fs = &options.filesystem;
+	let search_path = iofs::absolute_search_path(&options.path)?;
+	let metadata = fs
+		.metadata(&search_path)
 		.map_err(|err| Error::from_reason(format!("Path not found: {err}")))?;
 	let multiline = options.multiline.unwrap_or(false);
 	let output_mode = parse_output_mode(options.mode);
@@ -1960,9 +1990,9 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 		}
 
 		let mut buffer = Vec::new();
-		let bytes = match read_file_bytes(&search_path, &mut buffer) {
+		let bytes = match read_file_bytes(fs, &search_path, &mut buffer) {
 			Ok(ReadFile::Read) => &buffer,
-			Ok(ReadFile::Oversized) => match read_file_prefix(&search_path, &mut buffer) {
+			Ok(ReadFile::Oversized) => match read_file_prefix(fs, &search_path, &mut buffer) {
 				Ok(ReadFile::Read) => &buffer,
 				_ => {
 					return Ok(GrepResult {
@@ -2080,6 +2110,7 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 
 	let mentions_node_modules = glob.is_some_and(|g| g.contains("node_modules"));
 	let results = run_streaming_grep(
+		fs,
 		&search_path,
 		matcher,
 		glob,
@@ -2223,9 +2254,11 @@ pub fn grep(
 		max_count_per_file,
 		timeout_ms,
 		signal,
+		filesystem,
 	} = options;
 
 	let config = GrepConfig {
+		filesystem: ShellFilesystem::blocking(filesystem),
 		pattern,
 		path,
 		glob,
@@ -2260,6 +2293,8 @@ mod tests {
 	};
 
 	use grep_matcher::Matcher;
+	#[cfg(unix)]
+	use pi_vfs::BlockingFs;
 
 	#[cfg(unix)]
 	use super::{GrepConfig, GrepOutputMode, grep_sync};
@@ -2335,6 +2370,7 @@ mod tests {
 			max_columns:        None,
 			mode:               None,
 			max_count_per_file: None,
+			filesystem:         BlockingFs::native(),
 		}
 	}
 
@@ -2443,6 +2479,42 @@ mod tests {
 			assert_eq!(result.matches[0].line_number, 1);
 			assert_eq!(result.matches[0].line, line);
 		}
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn grep_sync_searches_provider_url_tree() {
+		let (_mem, filesystem) = crate::testing::MemFs::with_files(&[
+			("mem://root/dir/a.txt", "before\nneedle one\n"),
+			("mem://root/dir/sub/b%20c.txt", "needle two\n"),
+			("mem://root/dir/skip.txt", "haystack\n"),
+			("mem://root/outside.txt", "needle outside\n"),
+		]);
+
+		let mut config = base_grep_config(Path::new("mem://root/dir"));
+		config.filesystem = filesystem.clone();
+		let result = grep_sync(config, None, task::CancelToken::default())
+			.expect("grep over a URL directory succeeds");
+		let mut hits: Vec<_> = result
+			.matches
+			.iter()
+			.map(|matched| (matched.path.as_str(), matched.line.as_str()))
+			.collect();
+		hits.sort_unstable();
+		assert_eq!(hits, [("a.txt", "needle one"), ("sub/b c.txt", "needle two")]);
+		assert_eq!(result.files_searched, 3);
+
+		// A single-file URL root reports its path as given; type filters still
+		// apply to it.
+		let mut config = base_grep_config(Path::new("mem://root/dir/sub/b%20c.txt"));
+		config.filesystem = filesystem;
+		config.type_filter = Some("txt".to_string());
+		let result = grep_sync(config, None, task::CancelToken::default())
+			.expect("grep over a URL file succeeds");
+		assert_eq!(result.files_searched, 1);
+		assert_eq!(result.matches.len(), 1);
+		assert_eq!(result.matches[0].path, "mem://root/dir/sub/b%20c.txt");
+		assert_eq!(result.matches[0].line, "needle two");
 	}
 
 	#[cfg(unix)]
@@ -2794,6 +2866,7 @@ mod tests {
 	fn sequential_reference_result(root: &Path, params: super::SearchParams) -> super::GrepResult {
 		let matcher = super::build_matcher("needle", false, false).expect("build test matcher");
 		let (results, skipped_oversized, files_searched) = super::run_sequential_grep(
+			&BlockingFs::native(),
 			root,
 			&matcher,
 			None,
@@ -2839,6 +2912,7 @@ mod tests {
 		let params = unlimited_params(super::OutputMode::Content, 1);
 
 		let parallel = super::run_streaming_grep(
+			&BlockingFs::native(),
 			root.path(),
 			&matcher,
 			None,
@@ -2851,6 +2925,7 @@ mod tests {
 		)
 		.expect("parallel streaming grep should succeed");
 		let sequential = super::run_sequential_grep(
+			&BlockingFs::native(),
 			root.path(),
 			&matcher,
 			None,
@@ -3006,6 +3081,7 @@ mod tests {
 		let params = content_search_params(1, None);
 
 		let (results, skipped_oversized, files_searched) = super::run_streaming_grep(
+			&BlockingFs::native(),
 			root.path(),
 			&matcher,
 			None,
@@ -3036,6 +3112,7 @@ mod tests {
 		let params = content_search_params(3, Some(1));
 
 		let (results, skipped_oversized, files_searched) = super::run_streaming_grep(
+			&BlockingFs::native(),
 			root.path(),
 			&matcher,
 			None,
@@ -3076,6 +3153,7 @@ mod tests {
 		let params = content_search_params(budget, None);
 
 		let (results, skipped_oversized, files_searched) = super::run_streaming_grep(
+			&BlockingFs::native(),
 			root.path(),
 			&matcher,
 			None,
@@ -3215,7 +3293,8 @@ mod tests {
 		fs::write(&path, vec![b'a'; oversized_len]).expect("write original oversized file");
 
 		let mut buffer = Vec::new();
-		let outcome = super::read_file_prefix(&path, &mut buffer).expect("read oversized prefix");
+		let outcome = super::read_file_prefix(&BlockingFs::native(), &path, &mut buffer)
+			.expect("read oversized prefix");
 		assert!(matches!(outcome, super::ReadFile::Read));
 		assert_eq!(buffer.len(), prefix_len);
 

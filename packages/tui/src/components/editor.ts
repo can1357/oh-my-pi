@@ -528,8 +528,6 @@ export class Editor implements Component, Focusable {
 
 	/** When set, replaces the normal cursor glyph at end-of-text with this ANSI-styled string. */
 	cursorOverride: string | undefined;
-	/** Display width of the cursorOverride glyph (needed because override may contain ANSI escapes). */
-	cursorOverrideWidth: number | undefined;
 	/** Optional hook that decorates displayed user text after source-text layout.
 	 *  Width-changing output is allowed on lines without the cursor; it is truncated
 	 *  to the content width rather than reflowed. Cursor glyphs and inline hints are excluded. */
@@ -1304,7 +1302,7 @@ export class Editor implements Component, Focusable {
 				if (hasCursor && !this.#useTerminalCursor) {
 					const zeroWidthCursorBudget = visibleWidth(gutterText);
 					const zeroWidthCursorReplacement = this.cursorOverride
-						? { text: this.cursorOverride, width: this.cursorOverrideWidth ?? 1 }
+						? { text: this.cursorOverride, width: visibleWidth(this.cursorOverride) }
 						: this.#getStyledInputCursor();
 					if (showPromptGutter && zeroWidthCursorBudget > 0) {
 						// Keep the leading prompt glyph visible when the gutter consumes the whole row.
@@ -1405,7 +1403,7 @@ export class Editor implements Component, Focusable {
 					// displayWidth stays the same - we're replacing, not adding
 				} else if (this.cursorOverride) {
 					// Cursor override replaces the normal end-of-text cursor glyph
-					const overrideWidth = this.cursorOverrideWidth ?? 1;
+					const overrideWidth = visibleWidth(this.cursorOverride);
 					if (!isSideBordered && displayWidth + overrideWidth > lineContentWidth) {
 						// Borderless editors have no spare padding cell for an end-of-line cursor glyph.
 						// Preserve cursorOverride by replacing the tail of the line with it.

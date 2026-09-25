@@ -12,12 +12,14 @@ import { $env, getAgentDir, getProjectDir, hasFsCode, isEnoent, logger, prompt }
 import { contextFileCapability } from "./capability/context-file";
 import { systemPromptCapability } from "./capability/system-prompt";
 import { findConfigFile } from "./config";
-import type { Personality, SkillsSettings } from "./config/settings";
+import type { SkillsSettings } from "./extensibility/settings";
+import type { Personality } from "./session/settings";
 import { type ContextFile, loadCapability, type SystemPrompt as SystemPromptFile } from "./discovery";
 import { expandAtImports } from "./discovery/at-imports";
 import { SkillDescriptionCatalog } from "./extensibility/skill-descriptions";
 import { loadSkills, type Skill } from "./extensibility/skills";
-import { hasObsidian } from "./internal-urls/vault-protocol";
+import { InternalUrlRouter } from "./internal-urls/router";
+import type { SchemeHost } from "./internal-urls/types";
 import activeRepoContextTemplate from "./prompts/system/active-repo-context.md" with { type: "text" };
 import computerSafetyPrompt from "./prompts/system/computer-safety.md" with { type: "text" };
 import customSystemPromptTemplate from "./prompts/system/custom-system-prompt.md" with { type: "text" };
@@ -28,9 +30,63 @@ import projectPromptTemplate from "./prompts/system/project-prompt.md" with { ty
 import systemPromptTemplate from "./prompts/system/system-prompt.md" with { type: "text" };
 import { normalizeConcurrencyLimit } from "./task/parallel";
 import type { ActiveRepoContext } from "@oh-my-pi/pi-tui/status-line/host";
+import { XD_URL_PREFIX } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { resolveActiveRepoContext } from "./utils/active-repo-context";
 import { normalizePromptPath } from "./utils/prompt-path";
 import { AGENTS_MD_LIMIT, buildWorkspaceTree, type WorkspaceTree } from "./workspace-tree";
+import { combine } from "./config/registry";
+import { cfgBashAutoBackgroundEnabled } from "./exec/settings";
+import { cfgEvalAutoBackgroundEnabled } from "./eval/settings";
+import { cfgTtsrBuiltinRules, cfgTtsrDisabledRules, cfgTtsrEnabled } from "./export/ttsr-settings";
+import { cfgTuiReactions, cfgTuiRenderMermaid } from "./modes/settings";
+import { cfgSecretsEnabled } from "./secrets/settings";
+import { cfgToolsFormat } from "./session/context-settings";
+import {
+	cfgIncludeModelInPrompt,
+	cfgIncludeWorkspaceTree,
+	cfgInlineToolDescriptors,
+	cfgPersonality,
+} from "./session/settings";
+import { cfgTaskBatch, cfgTaskEager } from "./task/settings";
+import {
+	cfgAsyncEnabled,
+	cfgToolsIntentTracing,
+	cfgToolsXdevDocs,
+	cfgToolsXdevInlineDevices,
+	cfgVaultEnabled,
+} from "./tools/settings";
+
+/**
+ * Settings the system prompt renders from (`secrets.enabled` via the obfuscator state it
+ * reports). A session rebuilds its prompt once per coalesced change of this value, so a bulk
+ * settings change rebuilds once. Settings that change the tool set, skills, memory, or workspace
+ * roots rebuild through their own reconcile instead.
+ */
+export const cfgSystemPromptInputs = combine({
+	personality: cfgPersonality,
+	includeModelInPrompt: cfgIncludeModelInPrompt,
+	includeWorkspaceTree: cfgIncludeWorkspaceTree,
+	inlineToolDescriptors: cfgInlineToolDescriptors,
+	toolsFormat: cfgToolsFormat,
+	intentTracing: cfgToolsIntentTracing,
+	xdevDocs: cfgToolsXdevDocs,
+	xdevInlineDevices: cfgToolsXdevInlineDevices,
+	vaultEnabled: cfgVaultEnabled,
+	renderMermaid: cfgTuiRenderMermaid,
+	reactions: cfgTuiReactions,
+	// Rendered into the bash/eval/task tool descriptions (inline catalog) or read by
+	// the prompt builder (eager/batch delegation).
+	asyncEnabled: cfgAsyncEnabled,
+	bashAutoBackground: cfgBashAutoBackgroundEnabled,
+	evalAutoBackground: cfgEvalAutoBackgroundEnabled,
+	taskEager: cfgTaskEager,
+	taskBatch: cfgTaskBatch,
+	// Rule bucketing (TTSR registrations, rulebook, always-apply) runs at rebuild time.
+	ttsrEnabled: cfgTtsrEnabled,
+	ttsrBuiltinRules: cfgTtsrBuiltinRules,
+	ttsrDisabledRules: cfgTtsrDisabledRules,
+	secretsEnabled: cfgSecretsEnabled,
+});
 
 /** Bundled personality specs, keyed by the `personality` setting value. */
 const PERSONALITY_SPECS: Record<Exclude<Personality, "none">, string> = {
@@ -496,10 +552,12 @@ export interface BuildSystemPromptOptions {
 	secretsEnabled?: boolean;
 	/** Pre-loaded workspace tree (skips discovery if provided). May be a Promise to allow early kick-off. */
 	workspaceTree?: WorkspaceTree | Promise<WorkspaceTree>;
-	/** Whether the local memory://root summary is active. */
-	memoryRootEnabled?: boolean;
+	/** Active `memory.backend` id; undefined when memory is off. */
+	memoryBackend?: string;
 	/** Whether the read-only security:// resource namespace is active. */
 	securityEnabled?: boolean;
+	/** Whether the user approves `cfg://` writes for this session; gates advertising `cfg://`. */
+	settingsApproval?: boolean;
 	/** Whether the browser eval prelude is enabled for this session. */
 	browserEnabled?: boolean;
 	/** Whether the computer eval prelude is enabled for this session. */
@@ -603,8 +661,9 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		workspaceTree: providedWorkspaceTree,
 		scoutAvailable = true,
 		delegationBias = "eager",
-		memoryRootEnabled = false,
+		memoryBackend,
 		securityEnabled = false,
+		settingsApproval = false,
 		browserEnabled = false,
 		computerEnabled = false,
 		model,
@@ -828,10 +887,10 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	// Build tool descriptions for system prompt rendering.
 	const toolPromptNames = new Map<string, string>(toolNames.map(name => [name, tools?.get(name)?.wireName ?? name]));
 	// xd://-mounted tools count as present for prompt gates ({{#has tools "lsp"}})
-	// and resolve their own name as the reference — the xd:// section explains
-	// the access path. The Tool Inventory list stays limited to real defs.
+	// and resolve to their `xd://<name>` URL, the only way to reach them. The
+	// Tool Inventory list stays limited to real defs.
 	for (const mounted of xdevTools) {
-		if (!toolPromptNames.has(mounted.name)) toolPromptNames.set(mounted.name, mounted.name);
+		if (!toolPromptNames.has(mounted.name)) toolPromptNames.set(mounted.name, `${XD_URL_PREFIX}${mounted.name}`);
 	}
 	const toolRefs = Object.fromEntries(toolPromptNames.entries());
 	const xdevToolNames = new Set(xdevTools.map(mounted => mounted.name));
@@ -875,6 +934,13 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 			: toolNames.some(name => toolReadsSkillUris(tools.get(name))) ||
 				xdevTools.some(entry => toolReadsSkillUris(tools.get(entry.name)));
 	const hasSkillUriAccess = hasSkillReader && skills.length > 0;
+	const schemeHost: SchemeHost = {
+		skillUriAccess: hasSkillUriAccess,
+		ruleCount: rules?.length ?? 0,
+		memoryBackend,
+		securityEnabled,
+		settingsApproval,
+	};
 	const filteredSkills = (options.skillDescriptions ?? new SkillDescriptionCatalog()).render(
 		hasSkillReader ? skills.filter(skill => skill.hide !== true) : [],
 	);
@@ -908,6 +974,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		agentsMdSearch: { files: agentsMdFiles },
 		workspaceTree,
 		hasSkillUriAccess,
+		internalUrls: InternalUrlRouter.instance().describe(schemeHost),
 		skills: filteredSkills,
 		rules: rules ?? [],
 		alwaysApplyRules: injectedAlwaysApplyRules,
@@ -920,16 +987,15 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		intentField: intentField ?? "",
 		eagerTasks,
 		eagerTasksAlways,
+		// Restrained bias yields to an explicit eager-tasks mode.
+		inlineFirstDelegation: delegationBias === "restrained" && !eagerTasks,
 		taskBatch,
 		MAX_CONCURRENCY: normalizeConcurrencyLimit(taskMaxConcurrency),
 		scoutAvailable,
 		taskIrcEnabled,
 		secretsEnabled,
-		hasMemoryRoot: memoryRootEnabled,
-		securityEnabled,
 		browserEnabled,
 		computerEnabled,
-		hasObsidian: hasObsidian(),
 		includeWorkspaceTree,
 		renderMermaid,
 		reactions,

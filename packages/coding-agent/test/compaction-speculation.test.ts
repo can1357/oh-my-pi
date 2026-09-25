@@ -12,6 +12,8 @@ import { SessionMaintenance, type SessionMaintenanceHost } from "@oh-my-pi/pi-co
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as snapcompactModule from "@oh-my-pi/snapcompact";
 
+import { cfgCompactionMethodOrder } from "@oh-my-pi/pi-coding-agent/session/context-settings";
+
 const CONTEXT_WINDOW = 100_000;
 const THRESHOLD = 50_000;
 const SPECULATION_BAND_START = THRESHOLD - 8_192;
@@ -98,7 +100,7 @@ describe("async speculative compaction", () => {
 				throw new Error("The compact seam should be used instead of the side stream");
 			},
 			providerSessionState: new Map(),
-			preferWebsockets: undefined,
+			preferWebsockets: () => undefined,
 			model: () => model,
 			thinkingLevel: () => undefined,
 			isDisposed: () => false,
@@ -599,7 +601,7 @@ describe("async speculative compaction", () => {
 		await waitForState("armed");
 		// Method order changed after arming: the real pass now runs the instant
 		// local method, and the stale LLM summary must not override it.
-		maintenanceSettings.override("compaction.methodOrder", ["snapcompact"]);
+		cfgCompactionMethodOrder.override(maintenanceSettings, ["snapcompact"]);
 
 		await maintenance.runAutoCompaction("threshold", false, false, false, { triggerContextTokens: THRESHOLD });
 
