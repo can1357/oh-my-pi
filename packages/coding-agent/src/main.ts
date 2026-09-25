@@ -43,7 +43,12 @@ import {
 	resolveModelRoleValue,
 	resolveModelScope,
 	type ScopedModel,
+	sameScopedModelCycle,
+	toSessionScopedModels,
 } from "./config/model-resolver";
+
+export { toSessionScopedModels };
+
 import { ModelsConfigFile } from "./config/models-config";
 import { serviceTierSettingToTier } from "./config/service-tier";
 import { all, combine, type ProtocolHost, type SettingValueOf } from "./config/registry";
@@ -113,7 +118,6 @@ import {
 import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
 import { registerLocalInferenceApi } from "./tiny/local-inference-api";
-import { concreteThinkingLevel, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { LspStartupServerInfo } from "./tools";
 import { sanitizeDisplayWarnings } from "@oh-my-pi/pi-tui/render/render-utils";
 import { getChangelogPath, resolveStartupChangelogForDisplay, type StartupChangelogSelection } from "./utils/changelog";
@@ -146,13 +150,7 @@ import {
 	cfgTuiResizeScrollback,
 	cfgUpdateChannel,
 } from "./modes/settings";
-import {
-	cfgDefaultThinkingLevel,
-	cfgExternalThinking,
-	cfgHideThinkingBlock,
-	cfgOmitThinking,
-	cfgPrewalkEnabled,
-} from "./session/settings";
+import { cfgExternalThinking, cfgHideThinkingBlock, cfgOmitThinking, cfgPrewalkEnabled } from "./session/settings";
 import { cfgDisabledProviders, cfgEnabledModels } from "./config/model-settings";
 import { cfgTaskAgentIdleTtlMs } from "./task/settings";
 import { cfgSkillsIncludeSkills } from "./extensibility/settings";
@@ -942,34 +940,6 @@ export async function resolveScopedModels(
 	return await resolveModelScope(modelPatterns, modelRegistry, preferences, activeSettings);
 }
 
-/**
- * Map resolver scope entries to the session's Ctrl+P cycle shape, filling in the
- * configured default thinking level for entries without an explicit `:level`
- * suffix. `auto` is session-level only, so it is coerced to a concrete default here.
- */
-export function toSessionScopedModels(
-	scopedModels: readonly ScopedModel[],
-	activeSettings: Settings,
-): Array<{ model: Model; thinkingLevel?: ThinkingLevel }> {
-	if (scopedModels.length === 0) return [];
-	const defaultThinkingLevel = concreteThinkingLevel(
-		parseConfiguredThinkingLevel(cfgDefaultThinkingLevel.get(activeSettings)),
-	);
-	return scopedModels.map(scopedModel => ({
-		model: scopedModel.model,
-		thinkingLevel: scopedModel.explicitThinkingLevel
-			? (scopedModel.thinkingLevel ?? defaultThinkingLevel)
-			: defaultThinkingLevel,
-	}));
-}
-
-/** Whether two scope lists reference the same set of models (order-independent). */
-function sameScopedModelSet(a: ReadonlyArray<{ model: Model }>, b: ReadonlyArray<{ model: Model }>): boolean {
-	if (a.length !== b.length) return false;
-	const keys = new Set(a.map(entry => `${entry.model.provider}/${entry.model.id}`));
-	return b.every(entry => keys.has(`${entry.model.provider}/${entry.model.id}`));
-}
-
 /** Minimal session surface the post-discovery scope rebuild mutates. */
 export interface ScopedModelSink {
 	readonly isDisposed: boolean;
@@ -1008,7 +978,7 @@ export async function rebuildScopedModelsAfterDiscovery(
 		activeSettings,
 	);
 	const mapped = toSessionScopedModels(rebuilt, activeSettings);
-	if (mapped.length === 0 || sameScopedModelSet(session.scopedModels, mapped)) return;
+	if (mapped.length === 0 || sameScopedModelCycle(session.scopedModels, mapped)) return;
 	session.setScopedModels(mapped);
 }
 
@@ -1044,7 +1014,7 @@ export function watchScopedModelSettings(
 						activeSettings,
 					);
 		const mapped = toSessionScopedModels(rebuilt, activeSettings);
-		if (sameScopedModelSet(session.scopedModels, mapped)) return;
+		if (sameScopedModelCycle(session.scopedModels, mapped)) return;
 		session.setScopedModels(mapped);
 	});
 	session.addDisposer(stop);
@@ -1262,6 +1232,13 @@ export async function buildSessionOptions(
 	const settingsDirs = cfgWorkspaceAdditionalDirectories.get(activeSettings);
 	if (cliDirs.length > 0 || settingsDirs.length > 0) {
 		options.additionalDirectories = [...new Set([...cliDirs, ...settingsDirs])];
+	}
+	if (cliDirs.length > 0) {
+		// Provenance rides with the roots: without it sdk.ts seeds the merged
+		// list settings-owned and a reload that withdraws the same path from
+		// workspace.additionalDirectories would revoke a root the user passed
+		// on the command line.
+		options.sessionSuppliedDirectories = cliDirs;
 	}
 	if (parsed.maxTime !== undefined) {
 		options.deadline = Date.now() + parsed.maxTime * 1000;
@@ -1598,6 +1575,10 @@ export async function buildSessionOptions(
 	if (scopedModels.length > 0) {
 		options.scopedModels = toSessionScopedModels(scopedModels, activeSettings);
 	}
+	// Frozen CLI `--models` scope for /reload-settings: when present the CLI scope
+	// never re-resolves (highest precedence); when absent the session is
+	// settings-derived and refreshScopedModels reads the live enabledModels value.
+	options.cliModelScope = parsed.models && parsed.models.length > 0 ? parsed.models : undefined;
 
 	// API key from CLI - set in authStorage
 	// (handled by caller before createAgentSession)

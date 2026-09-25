@@ -30,6 +30,7 @@ import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 import { cfgAdvisorEnabled, cfgAdvisorMaxNotesPerUpdate } from "@oh-my-pi/pi-coding-agent/advisor/settings";
 import { cfgCompactionKeepRecentTokens } from "@oh-my-pi/pi-coding-agent/session/context-settings";
+import { cfgTierAdvisor, cfgTierOpenai } from "@oh-my-pi/pi-coding-agent/session/settings";
 
 describe("AgentSession advisor toggle", () => {
 	let authStorage: AuthStorage;
@@ -1275,5 +1276,23 @@ describe("AgentSession advisor toggle", () => {
 		// Settings (2) overrides the default (4) when shared and per-advisor are undefined.
 		expect(session.applyAdvisorConfigs([{ name: "SettingsOnly" }], undefined, undefined)).toBe(1);
 		await exerciseBudget("settings", 2);
+	});
+	it("rebuilds the running advisor when tier.advisor changes on reload", () => {
+		// The advisor's service-tier resolver captures tier.advisor per runtime
+		// build; /reload-settings calls reapplyModelRoles(), so the runtime
+		// signature must treat a tier.advisor change as a rebuild trigger.
+		const advisor = enableAdvisor();
+		expect(advisor).toBeDefined();
+
+		// Unrelated tier changes must not churn the running advisor.
+		cfgTierOpenai.set(session.settings, "priority");
+		session.reapplyModelRoles();
+		expect(session.getAdvisorAgent()).toBe(advisor);
+
+		cfgTierAdvisor.set(session.settings, "priority");
+		session.reapplyModelRoles();
+		const rebuilt = session.getAdvisorAgent();
+		expect(rebuilt).toBeDefined();
+		expect(rebuilt).not.toBe(advisor);
 	});
 });

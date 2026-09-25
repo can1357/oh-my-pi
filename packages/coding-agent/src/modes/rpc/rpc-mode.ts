@@ -32,6 +32,12 @@ import {
 	type SkillPromptInput,
 } from "../../extensibility/skills";
 import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
+import { MCPManager } from "../../mcp";
+import {
+	type SettingSideEffectOptions,
+	replaySessionSettingSideEffects,
+	snapshotReplaySettings,
+} from "../controllers/setting-side-effects";
 import type { AgentSession } from "../../session/agent-session";
 import { findMostRecentNonEmptySession } from "../../session/session-listing";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
@@ -227,6 +233,27 @@ export async function tryRunRpcSkillCommand(
 	if (!invocation) return false;
 	await runRpcSkillCommand(session, invocation, streamingBehavior);
 	return { agentInvoked: true };
+}
+
+/**
+ * Applies the reload allowlist's changed session-level side effects and
+ * resolves after they have settled, then emits the RPC `config_update` frame
+ * — the host's acknowledgment must not precede the mutations (think tool,
+ * memory backend) landing, or the next prompt runs against the old tool set.
+ * RunRpcMode wires this as the builtin runtime's `notifyConfigChanged` with a
+ * `snapshotReplaySettings` snapshot taken before the command runs, mirroring
+ * the TUI adapter's replay-before-notify contract, and the process MCP manager
+ * instance so a changed `mcp.notifications` reuses `setNotificationsEnabled`
+ * on the live connections; exported for tests.
+ */
+export async function emitRpcConfigUpdate(
+	session: AgentSession,
+	output: (obj: object) => void,
+	beforeReplay: ReadonlyMap<string, unknown>,
+	options: SettingSideEffectOptions = {},
+): Promise<void> {
+	await replaySessionSettingSideEffects(session, beforeReplay, options);
+	output({ type: "config_update", model: session.model, thinkingLevel: session.thinkingLevel });
 }
 
 /**
@@ -1145,6 +1172,9 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					if (skillResult) {
 						return success(id, "prompt", skillResult);
 					}
+					// Snapshot before the command runs so the replay only applies
+					// settings the command actually changed (TUI-adapter parity).
+					const beforeReplay = snapshotReplaySettings(session.settings);
 					const builtinResult = await executeAcpBuiltinSlashCommand(command.message, {
 						session,
 						sessionManager: session.sessionManager,
@@ -1157,9 +1187,8 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 						notifyTitleChanged: async () => {
 							output({ type: "session_info_update", title: session.sessionName, sessionId: session.sessionId });
 						},
-						notifyConfigChanged: async () => {
-							output({ type: "config_update", model: session.model, thinkingLevel: session.thinkingLevel });
-						},
+						notifyConfigChanged: () =>
+							emitRpcConfigUpdate(session, output, beforeReplay, { mcpManager: MCPManager.instance() }),
 					});
 					if (builtinResult !== false) {
 						if ("prompt" in builtinResult) {

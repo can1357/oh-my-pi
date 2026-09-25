@@ -846,6 +846,11 @@ export function setTerminalTitleStateEnabled(enabled: boolean): void {
 	emitTerminalTitle();
 }
 
+/** Current run-state separator gate; mirrors the `tui.titleState` setting's applied value. */
+export function getTerminalTitleStateEnabled(): boolean {
+	return terminalTitleRuntime.enabled;
+}
+
 /**
  * Select the working-state spinner glyph set (driven by `tui.titleSpinner`).
  * Unknown values fall back to `braille`; switching style resets the frame so a

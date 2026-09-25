@@ -1,11 +1,17 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgImagesAutoResize } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { cfgReadDefaultLimit } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import * as imageLoading from "@oh-my-pi/pi-coding-agent/utils/image-loading";
 import { formatTruncationMetaNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+
+const TINY_PNG_BASE64 =
+	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
 
 function getTextOutput(result: { content: Array<{ type: string; text?: string }> }): string {
 	return result.content
@@ -152,5 +158,70 @@ describe("read tool raw range exactness", () => {
 		expect(notice).toContain("(partial,");
 		expect(notice).not.toMatch(/Showing 0 of/);
 		expect(notice).not.toContain("0B limit");
+	});
+});
+
+describe("read tool live settings", () => {
+	function makeReconfigureSession(cwd: string): ToolSession {
+		// Initial values go through handles on an empty isolated instance so a
+		// later override stays visible: the tool resolves both settings on
+		// every execute rather than snapshotting them at construction.
+		const settings = Settings.isolated();
+		cfgReadDefaultLimit.set(settings, 20);
+		cfgImagesAutoResize.set(settings, false);
+		return {
+			cwd,
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			settings,
+		};
+	}
+
+	it("truncates at the reloaded default limit after a handle override", async () => {
+		const testDir = await fs.mkdtemp(path.join(os.tmpdir(), "read-reconfigure-"));
+		try {
+			const filePath = path.join(testDir, "data.txt");
+			await Bun.write(
+				filePath,
+				Array.from({ length: 60 }, (_, index) => `L${String(index + 1).padStart(2, "0")}`).join("\n"),
+			);
+			const session = makeReconfigureSession(testDir);
+			const tool = new ReadTool(session);
+
+			const before = await tool.execute("call-reconfigure-before", { path: filePath });
+			const beforeLines = new Set(getTextOutput(before).match(/\bL\d{2}\b/g) ?? []);
+			expect(beforeLines.size).toBe(20);
+
+			cfgReadDefaultLimit.override(session.settings, 5);
+
+			const after = await tool.execute("call-reconfigure-after", { path: filePath });
+			const afterLines = new Set(getTextOutput(after).match(/\bL\d{2}\b/g) ?? []);
+			expect(afterLines.size).toBe(5);
+		} finally {
+			await fs.rm(testDir, { recursive: true, force: true });
+		}
+	});
+
+	it("hands a live images.autoResize flip to the image loader on the next read", async () => {
+		const testDir = await fs.mkdtemp(path.join(os.tmpdir(), "read-autoresize-"));
+		const loadSpy = vi.spyOn(imageLoading, "loadImageInput");
+		try {
+			const filePath = path.join(testDir, "tiny.png");
+			await Bun.write(filePath, Buffer.from(TINY_PNG_BASE64, "base64"));
+			const session = makeReconfigureSession(testDir);
+			const tool = new ReadTool(session);
+
+			await tool.execute("call-autoresize-before", { path: filePath });
+			expect(loadSpy.mock.calls.at(-1)?.[0].autoResize).toBe(false);
+
+			cfgImagesAutoResize.override(session.settings, true);
+
+			await tool.execute("call-autoresize-after", { path: filePath });
+			expect(loadSpy.mock.calls.at(-1)?.[0].autoResize).toBe(true);
+		} finally {
+			loadSpy.mockRestore();
+			await fs.rm(testDir, { recursive: true, force: true });
+		}
 	});
 });

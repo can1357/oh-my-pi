@@ -1190,8 +1190,15 @@ export class Settings {
 	async #reloadPersistedLayers(mode: PersistedReloadMode): Promise<void> {
 		const keepLastGood = mode === "keep-last-good";
 		for (;;) {
-			await this.flush();
+			// Sample the mutation generation BEFORE draining. A mutation that
+			// lands while flush() persists — or in the window between flush and
+			// the disk reads — bumps the generation since this sample and forces
+			// another pass, so the installed layers can never be older than an
+			// in-memory write whose debounced save has not fired yet. Sampling
+			// after flush() instead hides that window: the bump is counted in the
+			// sample itself and the stale read installs unchanged.
 			const mutationGeneration = this.#persistedMutationGeneration;
+			await this.flush();
 
 			const [globalResult, projectResult, overlayResult] = await Promise.allSettled([
 				this.#readExistingMainYaml(false),

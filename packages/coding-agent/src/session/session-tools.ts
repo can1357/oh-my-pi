@@ -1708,6 +1708,17 @@ export class SessionTools {
 		);
 	}
 
+	/**
+	 * Reconciles the private `think` scratchpad with an OVERRIDE of the
+	 * external-thinking setting rather than the live read that
+	 * {@link reconcileThinkTool} performs.
+	 *
+	 * @returns false when enabling was requested but this session cannot build the tool.
+	 */
+	reconcileThinkToolWith(enabled: boolean): Promise<boolean> {
+		return enabled ? this.#setThinkToolActive(true) : this.#setThinkToolActive(false);
+	}
+
 	#setThinkToolActive(enabled: boolean): Promise<boolean> {
 		return this.runToolRegistryMutation(async () => {
 			const active = this.getEnabledToolNames();
@@ -1762,6 +1773,50 @@ export class SessionTools {
 			}
 			if (!refreshPrompt && !xdevChanged && delta.added.length === 0 && delta.removed.length === 0) return;
 			await this.#applyActiveToolsByName([...enabled], true);
+		});
+	}
+
+	/**
+	 * Re-reads async-execution settings into the live bash tool after a
+	 * settings reload. The tool snapshots its schema and description at
+	 * construction, so without this push a reloaded `async.enabled` /
+	 * `bash.autoBackground.*` value would take effect only on restart.
+	 *
+	 * @returns false when this session has no live bash tool to reconfigure.
+	 */
+	reconcileBashToolSettings(): Promise<boolean> {
+		return this.runToolRegistryMutation(async () => {
+			const bashTool = this.#toolRegistry.get("bash") as { reconfigure?: () => boolean } | undefined;
+			if (!bashTool?.reconfigure) return false;
+			const changed = bashTool.reconfigure();
+			if (!changed) return true;
+			// The changed values render into the bash description, so the applied
+			// tool signature differs and the base prompt rebuilds below.
+			await this.#applyActiveToolsByName(this.getEnabledToolNames());
+			return true;
+		});
+	}
+
+	/**
+	 * Re-reads the settings the read and write tools snapshot at construction
+	 * (`read.defaultLimit`, `images.autoResize`, `lsp.*OnWrite`) into the live
+	 * tools; see {@link SessionTools.reconcileBashToolSettings}.
+	 * @returns false when this session has no live read or write tool.
+	 */
+	reconcileToolSettings(): Promise<boolean> {
+		return this.runToolRegistryMutation(async () => {
+			const tools = ["read", "write"]
+				.map(name => this.#toolRegistry.get(name) as { reconfigure?: () => boolean } | undefined)
+				.filter((tool): tool is { reconfigure: () => boolean } => typeof tool?.reconfigure === "function");
+			if (tools.length === 0) return false;
+			let changed = false;
+			for (const tool of tools) {
+				changed = tool.reconfigure() || changed;
+			}
+			// The read description embeds the default limit, so the applied tool
+			// signature differs and the base prompt rebuilds below.
+			if (changed) await this.#applyActiveToolsByName(this.getEnabledToolNames());
+			return true;
 		});
 	}
 

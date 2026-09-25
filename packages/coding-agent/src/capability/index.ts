@@ -395,6 +395,19 @@ export function initializeWithSettings(activeSettings: Settings): () => void {
 }
 
 /**
+ * Re-seed the provider switches from `activeSettings` after a settings reload.
+ * A bound instance reads `enabledProviders`/`disabledProviders` live through
+ * {@link disabledProviders}/{@link enabledProviders} (their derived values
+ * recompute when the settings revision bumps), so only the unbound fallback
+ * used before a hold is taken can still reflect the startup view.
+ */
+export function reconcileProviderSets(activeSettings: Settings): void {
+	if (boundSettings()) return;
+	unboundDisabledProviders = new Set(cfgDisabledProviders.get(activeSettings));
+	unboundEnabledProviders = new Set(cfgEnabledProviders.get(activeSettings));
+}
+
+/**
  * Disable a provider globally (across all capabilities).
  */
 export function disableProvider(providerId: string): void {

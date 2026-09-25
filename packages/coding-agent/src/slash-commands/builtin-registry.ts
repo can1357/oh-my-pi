@@ -1,5 +1,11 @@
 import type { AutocompleteItem } from "@oh-my-pi/pi-tui";
 import { COLLAB_GUEST_ALLOWED_COMMANDS } from "../collab/guest";
+import { lookup } from "../config/registry";
+import {
+	applySettingSideEffectsAwaitingCompletion,
+	REPLAYED_SETTING_IDS,
+	snapshotReplaySettings,
+} from "../modes/controllers/setting-side-effects";
 import { BUILTIN_COLLABORATION_SLASH_COMMANDS } from "./builtin-collaboration";
 import {
 	buildArgumentCompletions,
@@ -15,6 +21,7 @@ import { BUILTIN_MARKETPLACE_SLASH_COMMANDS, reloadTuiPluginState } from "./buil
 import { BUILTIN_MODE_SLASH_COMMANDS } from "./builtin-modes";
 import { BUILTIN_SESSION_SLASH_COMMANDS } from "./builtin-session";
 import { BUILTIN_SKILLS_SLASH_COMMANDS } from "./builtin-skills";
+import { BUILTIN_SETTINGS_SLASH_COMMANDS } from "./builtin-settings";
 import { parseSlashCommand } from "./helpers/parse";
 import type {
 	BuiltinSlashCommand,
@@ -44,6 +51,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	...BUILTIN_MARKETPLACE_SLASH_COMMANDS,
 	...BUILTIN_SKILLS_SLASH_COMMANDS,
 	...BUILTIN_CONTROL_SLASH_COMMANDS,
+	...BUILTIN_SETTINGS_SLASH_COMMANDS,
 ];
 
 const BUILTIN_SLASH_COMMAND_LOOKUP = new Map<string, SlashCommandSpec>();
@@ -154,6 +162,10 @@ export async function executeBuiltinSlashCommand(
 		// dispatcher without forcing every TUI test to construct the full
 		// `SlashCommandRuntime` shape.
 		const ctx = runtime.ctx;
+		// Snapshot the replay ids before the command runs so notifyConfigChanged
+		// can replay only what the command actually changed. Contexts without a
+		// readable settings object (read-only builtins) never reach the replay.
+		const beforeReplay = ctx.settings ? snapshotReplaySettings(ctx.settings) : undefined;
 		const adapted: SlashCommandRuntime = {
 			session: ctx.session,
 			sessionManager: ctx.sessionManager,
@@ -164,6 +176,22 @@ export async function executeBuiltinSlashCommand(
 			},
 			refreshCommands: () => ctx.refreshSlashCommandState(),
 			reloadPlugins: () => reloadTuiPluginState(ctx),
+			notifyConfigChanged: async () => {
+				if (!beforeReplay) return;
+				// Replay the settings that components and agent fields cache at
+				// construction; a layer swap alone leaves them stale until the
+				// next editor swap. Only ids whose value changed during this
+				// command replay: a no-op reload replaying every id would clobber
+				// session-only overrides such as a Shift+Tab model-control
+				// thinking level (defaultThinkingLevel). Queue modes are
+				// reconciled by the handler itself with persist=false, so they
+				// stay out of the replay list.
+				for (const id of REPLAYED_SETTING_IDS) {
+					const next = lookup(id)?.get(ctx.settings);
+					if (Bun.deepEquals(beforeReplay.get(id), next)) continue;
+					await applySettingSideEffectsAwaitingCompletion(ctx, id, next, { persist: false });
+				}
+			},
 		};
 		const result = await command.handle(parsed, adapted);
 		ctx.editor.setText("");

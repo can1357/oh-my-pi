@@ -8,6 +8,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
+import { cfgMemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/settings";
 import {
 	ACP_BOOTSTRAP_RACE_GUARD_MS,
 	AcpAgent,
@@ -20,6 +21,7 @@ import type {
 	UsageFallbackConfirmation,
 } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SILENT_ABORT_MARKER } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { cfgExternalThinking } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -194,6 +196,52 @@ class FakeAgentSession {
 			}
 		}
 	}
+
+	setThinkToolEnabledCalls: boolean[] = [];
+	async setThinkToolEnabled(enabled: boolean): Promise<boolean> {
+		this.setThinkToolEnabledCalls.push(enabled);
+		return true;
+	}
+
+	applyMemoryBackendCalls = 0;
+	async applyMemoryBackend(): Promise<void> {
+		this.applyMemoryBackendCalls++;
+	}
+
+	refreshBaseSystemPromptCalls = 0;
+	async refreshBaseSystemPrompt(): Promise<void> {
+		this.refreshBaseSystemPromptCalls++;
+	}
+
+	advisorEnabled = false;
+	isAdvisorEnabled(): boolean {
+		return this.advisorEnabled;
+	}
+	setAdvisorEnabled(enabled: boolean): void {
+		this.advisorEnabled = enabled;
+	}
+
+	steeringMode = "one-at-a-time" as "all" | "one-at-a-time";
+	followUpMode = "one-at-a-time" as "all" | "one-at-a-time";
+	interruptMode = "wait" as "immediate" | "wait";
+	setSteeringMode(mode: "all" | "one-at-a-time"): void {
+		this.steeringMode = mode;
+	}
+	setFollowUpMode(mode: "all" | "one-at-a-time"): void {
+		this.followUpMode = mode;
+	}
+	setInterruptMode(mode: "immediate" | "wait"): void {
+		this.interruptMode = mode;
+	}
+	reapplyModelRolesCalls = 0;
+	reapplyModelRoles(): void {
+		this.reapplyModelRolesCalls++;
+	}
+
+	serviceTierByFamily: Record<string, unknown> = {};
+	setServiceTierFamily(_family: "openai" | "anthropic" | "google", _tier: unknown): void {}
+
+	async refreshModels(): Promise<void> {}
 
 	setSlashCommands(_commands: unknown[]): void {
 		// no-op for tests
@@ -1864,6 +1912,32 @@ describe("ACP agent", () => {
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
+	});
+
+	it("does not reset session-only state when /reload-settings changes nothing", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId);
+		if (!session) throw new Error("Expected session to exist");
+		// Disk values already match what a reload loads, so the reload is a
+		// no-op: the before/after filter must replay nothing. The old
+		// replay-all path clobbered a session-only thinking level (and emitted
+		// a spurious thinking_level_change) on every reload.
+		cfgExternalThinking.set(Settings.instance, true);
+		cfgMemoryBackend.set(Settings.instance, "local");
+		session.setThinkingLevel("high");
+
+		await harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000007",
+			prompt: [{ type: "text", text: "/reload-settings" }],
+		} as PromptRequest);
+
+		expect(session.thinkingLevel).toBe("high");
+		expect(session.setThinkToolEnabledCalls).toEqual([]);
+		expect(session.applyMemoryBackendCalls).toBe(0);
+		expect(session.reapplyModelRolesCalls).toBe(1);
+		harness.abortController.abort();
 	});
 
 	it("includes extension-registered commands in available_commands_update and excludes ACP-builtin collisions", async () => {

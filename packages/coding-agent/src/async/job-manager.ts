@@ -258,7 +258,7 @@ export class AsyncJobManager {
 	#nextAutoId = 1;
 	readonly #deliverySinks = new Map<string, AsyncJobDeliverySink>();
 	readonly #onJobComplete: AsyncJobManagerOptions["onJobComplete"];
-	readonly #maxRunningJobsOption: AsyncJobManagerOptions["maxRunningJobs"];
+	#maxRunningJobsOption: AsyncJobManagerOptions["maxRunningJobs"];
 	readonly #retentionMs: number;
 	readonly #retainedArtifactsCleanupGraceMs: number;
 	readonly #retainedArtifactsCleanupMaxWaitMs: number;
@@ -280,6 +280,10 @@ export class AsyncJobManager {
 		return this.#filterJobs(this.#jobs.values(), filter).filter(job => !job.foreground);
 	}
 
+	#clampMaxRunningJobs(value: number): number {
+		return Math.min(100, Math.max(1, Math.floor(value)));
+	}
+
 	constructor(options: AsyncJobManagerOptions) {
 		this.#onJobComplete = options.onJobComplete;
 		this.#maxRunningJobsOption = options.maxRunningJobs;
@@ -298,11 +302,16 @@ export class AsyncJobManager {
 		);
 	}
 
-	/** Effective running-job cap (at least 1), resolved at check time. */
+	/** Effective running-job cap (at least 1, at most 100), resolved at check time. */
 	get #maxRunningJobs(): number {
 		const option = this.#maxRunningJobsOption;
 		const value = typeof option === "function" ? option() : option;
-		return Math.max(1, Math.floor(value ?? DEFAULT_MAX_RUNNING_JOBS));
+		return this.#clampMaxRunningJobs(value ?? DEFAULT_MAX_RUNNING_JOBS);
+	}
+
+	/** Updates the live running-job cap; applies at the next capacity check. */
+	setMaxRunningJobs(value: number): void {
+		this.#maxRunningJobsOption = this.#clampMaxRunningJobs(value);
 	}
 
 	/** True when the running-job count has reached the configured cap. */
