@@ -37,6 +37,7 @@ import {
 	disabledProviderIds,
 	expandRoleAlias,
 	getModelMatchPreferences,
+	resolveAgentModelSelection,
 	resolveCliModel,
 	resolveConfiguredModelPatterns,
 	type ResolveCliModelResult,
@@ -111,6 +112,8 @@ import {
 	resolvePromptInput,
 } from "./system-prompt";
 import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
+import { discoverAgents, getAgent } from "./task/discovery";
+import type { AgentDefinition } from "./task/types";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
 import { registerLocalInferenceApi } from "./tiny/local-inference-api";
 import { concreteThinkingLevel, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
@@ -1272,21 +1275,34 @@ export async function buildSessionOptions(
 		throw new Error("--system-prompt and --system-prompt-template cannot be combined");
 	}
 	const cwd = options.cwd;
+	let agent: AgentDefinition | undefined;
+	if (parsed.agent) {
+		const discoveredAgents = await discoverAgents(cwd ?? getProjectDir());
+		agent = getAgent(discoveredAgents.agents, parsed.agent);
+		if (!agent) {
+			const available = discoveredAgents.agents.map(a => a.name).join(", ") || "none";
+			throw new Error(`Unknown agent "${parsed.agent}". Available agents: ${available}`);
+		}
+	}
 	const discoveredOverride =
 		parsed.systemPrompt === undefined && parsed.systemPromptTemplate === undefined
 			? await discoverSystemPromptOverride(cwd)
 			: undefined;
 	const systemPromptSource =
-		parsed.systemPrompt ?? (discoveredOverride?.kind === "text" ? discoveredOverride.path : undefined);
+		parsed.systemPrompt
+		?? (agent && !restoringSession ? agent.systemPrompt : undefined)
+		?? (discoveredOverride?.kind === "text" ? discoveredOverride.path : undefined);
 	const templatePath =
 		parsed.systemPromptTemplate ?? (discoveredOverride?.kind === "template" ? discoveredOverride.path : undefined);
 	const appendPromptSource = parsed.appendSystemPrompt ?? discoverAppendSystemPromptFile();
 	const titleSystemPromptSource = discoverTitleSystemPromptFile(cwd);
 	const [resolvedSystemPrompt, resolvedAppendPrompt, titleSystemPrompt, resolvedSystemPromptTemplate] =
 		await Promise.all([
-			discoveredOverride?.kind === "text"
-				? Promise.resolve(discoveredOverride.content)
-				: resolvePromptInput(systemPromptSource, "system prompt"),
+			agent && !restoringSession
+				? Promise.resolve(agent.systemPrompt)
+				: discoveredOverride?.kind === "text"
+					? Promise.resolve(discoveredOverride.content)
+					: resolvePromptInput(systemPromptSource, "system prompt"),
 			resolvePromptInput(appendPromptSource, "append system prompt"),
 			resolvePromptInput(titleSystemPromptSource, "title system prompt"),
 			// Discovered templates arrive pre-loaded from the capability; only
@@ -1338,6 +1354,31 @@ export async function buildSessionOptions(
 	// createAgentSession's post-extension re-resolution (issue #6694); the
 	// scoped thinking-level seed below must be deferred along with the model.
 	let deferredDefaultRole = false;
+	// Applies the agent's ordered model list through the deferred `modelPattern`
+	// path a task sub-agent uses: the first available selector wins after
+	// extension discovery and the rest install as runtime fallbacks under the
+	// `agent:<name>` role. Low-priority by design — an explicit `--model`, a
+	// remembered default that resolves (or defers) within the scope, and an
+	// explicit CLI `--models` scope all outrank it. Returns whether it applied;
+	// skipped when restoring, so a resumed session keeps its own model.
+	const applyAgentModelPattern = (): boolean => {
+		if (!agent?.model?.length || restoringSession) {
+			return false;
+		}
+		const selection = resolveAgentModelSelection({
+			agentModel: agent.model,
+			settings: activeSettings,
+		});
+		if (selection.patterns.length === 0) {
+			return false;
+		}
+		options.modelPattern = selection.patterns;
+		options.modelPatternFallbackRole = `agent:${agent.name}`;
+		if (agent.thinkingLevel) {
+			options.modelPatternDefaultThinkingLevel = agent.thinkingLevel;
+		}
+		return true;
+	};
 	if (parsed.model) {
 		const resolved = resolveCliModel({
 			cliProvider: parsed.provider,
@@ -1428,8 +1469,14 @@ export async function buildSessionOptions(
 		// escape it — keep pinning the first scoped model there.
 		deferredDefaultRole = !options.model && Boolean(remembered) && !((parsed.models?.length ?? 0) > 0);
 		if (!options.model && !deferredDefaultRole) {
-			options.model = scopedModels[0].model;
-			options.rebindModelAfterDiscovery = true;
+			// The agent model outranks a settings-derived `enabledModels` scope;
+			// an explicit CLI `--models` scope still outranks the agent model.
+			// `scopedModels` stays on the options below for Ctrl+P cycling.
+			const agentModelApplied = (parsed.models?.length ?? 0) === 0 && applyAgentModelPattern();
+			if (!agentModelApplied) {
+				options.model = scopedModels[0].model;
+				options.rebindModelAfterDiscovery = true;
+			}
 		}
 	} else if ((parsed.models?.length ?? 0) > 0 && !restoringSession) {
 		// A CLI `--models` scope that resolved to zero models at startup: its
@@ -1442,6 +1489,8 @@ export async function buildSessionOptions(
 		// instead of an unrelated fallback. The fire-and-forget rebuild then
 		// activates the scoped list once discovery settles (issue #9220).
 		options.modelPattern = parsed.models;
+	} else {
+		applyAgentModelPattern();
 	}
 
 	if (parsed.noPrewalk && (parsed.prewalk || parsed.prewalkInto !== undefined)) {
@@ -1589,9 +1638,17 @@ export async function buildSessionOptions(
 		// thinking suffix) after extensions register; seeding the fallback
 		// scoped model's level here would override it in createAgentSession.
 		!deferredDefaultRole &&
-		!restoringSession
+		!restoringSession &&
+		// An applied agent model list owns the startup effort through its
+		// selected selector; the settings-derived scope must not override it.
+		!(agent?.model?.length && options.modelPattern)
 	) {
 		options.thinkingLevel = scopedModels[0].thinkingLevel;
+	} else if (agent?.thinkingLevel && !restoringSession && !(agent.model?.length && options.modelPattern)) {
+		// Agents with a deferred model list carry their thinking default on
+		// `modelPatternDefaultThinkingLevel` instead, so it cannot outrank the
+		// selected selector's explicit effort suffix.
+		options.thinkingLevel = agent.thinkingLevel;
 	}
 
 	// Scoped models for Ctrl+P cycling — fill in default thinking levels when not explicit.
@@ -1620,6 +1677,15 @@ export async function buildSessionOptions(
 		options.toolNames = parsed.tools && parsed.tools.length > 0 ? parsed.tools : [];
 	} else if (parsed.tools) {
 		options.toolNames = parsed.tools;
+	} else if (agent?.tools?.length && !restoringSession) {
+		options.toolNames = agent.tools;
+	}
+	if (agent?.output !== undefined && !restoringSession) {
+		options.outputSchema = agent.output;
+		// The SDK appends `yield` to the active tool list when this is set, so
+		// structured output stays deliverable even when the agent's tools are
+		// an explicit list without `yield`.
+		options.requireYieldTool = true;
 	}
 
 	if (parsed.noLsp) {

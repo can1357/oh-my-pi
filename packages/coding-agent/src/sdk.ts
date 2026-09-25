@@ -538,6 +538,8 @@ export interface CreateAgentSessionOptions {
 	modelPatternFallbackRole?: string;
 	/** Validated default retry chain to install when a deferred singleton pattern resolves. */
 	modelPatternDefaultFallbackChain?: string[];
+	/** Default thinking level for deferred `modelPattern` resolution (e.g. an agent's `thinking-level`). Lower priority than an explicit selected selector suffix; higher than default-role, model, and global defaults. */
+	modelPatternDefaultThinkingLevel?: ConfiguredThinkingLevel;
 	/** Thinking selector. Default: from settings, else unset */
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Hard ceiling on the session's thinking effort (e.g. a task spawn's `task.maxEffort`-capped hint); retry-fallback recovery re-clamps to it. */
@@ -1819,7 +1821,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 	// Resolves the session/agent thinking level using the same precedence we
 	// apply at startup: explicit option → persisted session entry → restored
-	// model selector suffix → default role's explicit selector → selected
+	// model selector suffix → deferred pattern default → default role's selector → selected
 	// model's defaultLevel → global settings default. Run again after extension
 	// role reclaim so the final model's own defaults aren't masked by an earlier
 	// fallback model's.
@@ -1832,6 +1834,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 		if (level === undefined && !hasThinkingEntry && restoredSessionThinkingLevel !== undefined) {
 			level = restoredSessionThinkingLevel;
+		}
+		// Deferred model patterns (e.g. an agent launch's selector list) carry
+		// their own default, below an explicit selected selector suffix and
+		// above default-role, model, and global defaults.
+		if (level === undefined && options.modelPatternDefaultThinkingLevel !== undefined) {
+			level = options.modelPatternDefaultThinkingLevel;
 		}
 		if (level === undefined && !hasExplicitModel && !hasThinkingEntry && defaultRoleSpec.explicitThinkingLevel) {
 			level = defaultRoleSpec.thinkingLevel;

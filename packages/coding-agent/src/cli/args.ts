@@ -31,6 +31,8 @@ export interface Args {
 	allowHome?: boolean;
 	provider?: string;
 	model?: string;
+	/** Agent to run as. Loads that agent's definition (system prompt, model, thinking level, tools, output) into this session. */
+	agent?: string;
 	config?: string[];
 	smol?: string;
 	slow?: string;
