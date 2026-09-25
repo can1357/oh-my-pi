@@ -11,6 +11,9 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
+import { cfgCompactionEnabled } from "@oh-my-pi/pi-coding-agent/session/context-settings";
+import { cfgRetryEnabled } from "@oh-my-pi/pi-coding-agent/session/settings";
+
 /**
  * Regression guard for #11431: `set_auto_compaction`/`set_auto_retry` (which drive
  * `AgentSession.setAutoCompactionEnabled`/`setAutoRetryEnabled`) must configure only
@@ -59,8 +62,8 @@ describe("AgentSession auto-maintenance controls are session-scoped by default",
 		await settings.flush();
 
 		// Value is live for this session.
-		expect(settings.get("compaction.enabled")).toBe(false);
-		expect(settings.get("retry.enabled")).toBe(false);
+		expect(cfgCompactionEnabled.get(settings)).toBe(false);
+		expect(cfgRetryEnabled.get(settings)).toBe(false);
 
 		// ...but it never touched the persisted global layer or disk.
 		expect(settings.getGlobalSettings()).toEqual({});
@@ -74,8 +77,8 @@ describe("AgentSession auto-maintenance controls are session-scoped by default",
 		session.setAutoRetryEnabled(true, true);
 		await settings.flush();
 
-		expect(settings.get("compaction.enabled")).toBe(true);
-		expect(settings.get("retry.enabled")).toBe(true);
+		expect(cfgCompactionEnabled.get(settings)).toBe(true);
+		expect(cfgRetryEnabled.get(settings)).toBe(true);
 		expect(settings.getGlobalSettings()).toMatchObject({
 			compaction: { enabled: true },
 			retry: { enabled: true },

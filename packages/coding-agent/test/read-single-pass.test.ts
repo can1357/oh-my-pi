@@ -19,6 +19,8 @@ import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { formatBytes } from "@oh-my-pi/pi-tui/render/render-utils";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
+import { cfgReadSummarizeEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
+
 function textOutput(result: AgentToolResult<ReadToolDetails>): string {
 	return result.content
 		.filter(c => c.type === "text")
@@ -30,7 +32,7 @@ function createSession(cwd: string): ToolSession {
 	const settings = Settings.isolated();
 	// Structural summarization would answer whole-file reads from the summarizer
 	// instead of the range path under test.
-	settings.set("read.summarize.enabled", false);
+	cfgReadSummarizeEnabled.set(settings, false);
 	return {
 		cwd,
 		hasUI: false,
