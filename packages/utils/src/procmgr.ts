@@ -4,8 +4,10 @@ import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import type { Subprocess } from "bun";
 import { getAgentDir, MAIN_CONFIG_FILENAMES } from "./dirs";
 import { $env, filterChildShellEnv } from "./env";
+import { isExecutable } from "./executable";
 import { $which } from "./which";
 
+export { isExecutable };
 export interface ShellConfig {
 	shell: string;
 	args: string[];
@@ -19,18 +21,6 @@ export interface ShellConfigOptions {
 	configSource?: string;
 }
 let cachedShellConfig: ShellConfig | null = null;
-
-/**
- * Check if a shell binary is executable.
- */
-export function isExecutable(path: string): boolean {
-	try {
-		fs.accessSync(path, fs.constants.X_OK);
-		return true;
-	} catch {
-		return false;
-	}
-}
 
 /**
  * Build the spawn environment (cached).
@@ -80,6 +70,13 @@ export function isCmdShell(shell: string): boolean {
 export function isPowerShell(shell: string): boolean {
 	const basename = shell.replace(/\\/g, "/").split("/").pop()?.toLowerCase();
 	return basename === "powershell.exe" || basename === "powershell" || basename === "pwsh.exe" || basename === "pwsh";
+}
+
+const POSIX_SHELL_PATTERN = /(?:^|[\\/])(?:sh|bash|dash|ash|ksh|zsh)(?:\.exe)?$/i;
+
+/** Whether the executable is a known shell whose command language uses POSIX quoting. */
+export function isPosixShell(shell: string): boolean {
+	return POSIX_SHELL_PATTERN.test(shell);
 }
 
 /**

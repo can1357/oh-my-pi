@@ -6,14 +6,15 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 
 const probePath = path.resolve(import.meta.dir, "fixtures", "legacy-pi-extension-cache-probe.ts");
 const healthProbePath = path.resolve(import.meta.dir, "fixtures", "legacy-pi-extension-cache-health-probe.ts");
+const cjsProbePath = path.resolve(import.meta.dir, "fixtures", "legacy-pi-extension-cjs-cache-probe.ts");
 const tempDirs: TempDir[] = [];
 
-async function runProbe(cacheRoot: string, script: string = probePath): Promise<string> {
+async function runProbe(cacheRoot: string, script: string = probePath, args: string[] = []): Promise<string> {
 	const env: Record<string, string | undefined> = { ...process.env, XDG_CACHE_HOME: cacheRoot };
 	for (const key of ["PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE", "PI_CONFIG_DIR"]) {
 		delete env[key];
 	}
-	const proc = Bun.spawn([process.execPath, script], {
+	const proc = Bun.spawn([process.execPath, script, ...args], {
 		cwd: path.resolve(import.meta.dir, "../.."),
 		env,
 		stderr: "pipe",
@@ -32,7 +33,7 @@ afterEach(async () => {
 	for (const dir of tempDirs.splice(0)) await dir.remove();
 });
 
-test("legacy extension analysis persists and reads its SQLite parse cache", async () => {
+test("warm extension analysis preserves import rewriting without reparsing", async () => {
 	const tempDir = TempDir.createSync("@legacy-pi-extension-cache-");
 	tempDirs.push(tempDir);
 	const cacheRoot = tempDir.path();
@@ -40,17 +41,61 @@ test("legacy extension analysis persists and reads its SQLite parse cache", asyn
 
 	expect(await runProbe(cacheRoot)).toBe('import value from "./dependency.js?mtime=7";\n');
 
-	const cachePath = path.join(cacheRoot, "omp", "cache", "legacy-pi-extension-cache.db");
-	const db = new Database(cachePath);
-	const result = db.run(
-		"UPDATE extension_parse_cache SET [references] = '[]' WHERE [references] LIKE '%dependency.js%'",
+	// Each real load uses a fresh tag; the warm run must still hit the cache.
+	expect(await runProbe(cacheRoot, probePath, ["--expect-cache-hit", "--tag=8"])).toBe(
+		'import value from "./dependency.js?mtime=8";\n',
 	);
-	expect(result.changes).toBeGreaterThan(0);
-	db.close();
+});
 
-	// A fresh process has no memory cache. The unchanged output proves it read
-	// the deliberately altered persisted row instead of parsing the source again.
-	expect(await runProbe(cacheRoot)).toBe('import value from "./dependency.js";\n');
+test("warm CommonJS classification of type-less script dependencies does not reparse", async () => {
+	const tempDir = TempDir.createSync("@legacy-pi-extension-cjs-cache-");
+	tempDirs.push(tempDir);
+	const cacheRoot = path.join(tempDir.path(), "cache");
+	await fs.mkdir(path.join(cacheRoot, "omp"), { recursive: true });
+	// No `type` in package.json forces the source-level CommonJS syntax check
+	// on `dep.js`, the path every type-less npm dependency takes.
+	const extensionDir = path.join(tempDir.path(), "extension");
+	await fs.mkdir(extensionDir, { recursive: true });
+	await Bun.write(path.join(extensionDir, "package.json"), '{"name":"cjs-cache-probe"}\n');
+	await Bun.write(path.join(extensionDir, "dep.js"), "module.exports = { value: 42 };\n");
+	await Bun.write(
+		path.join(extensionDir, "index.mjs"),
+		'import dep from "./dep.js";\nexport const result = dep.value;\n',
+	);
+	const entry = path.join(extensionDir, "index.mjs");
+
+	expect(await runProbe(cacheRoot, cjsProbePath, [entry])).toBe("42\n");
+	expect(await runProbe(cacheRoot, cjsProbePath, [entry, "--expect-cache-hit"])).toBe("42\n");
+});
+
+test("legacy extension parse cache drops obsolete CommonJS export-analysis columns", async () => {
+	const tempDir = TempDir.createSync("@legacy-pi-extension-cache-schema-");
+	tempDirs.push(tempDir);
+	const cacheRoot = tempDir.path();
+	const cachePath = path.join(cacheRoot, "omp", "cache", "legacy-pi-extension-cache.db");
+	await fs.mkdir(path.dirname(cachePath), { recursive: true });
+
+	const seed = new Database(cachePath, { create: true });
+	seed.run(
+		"CREATE TABLE extension_parse_cache (cache_key TEXT PRIMARY KEY, source_type TEXT NOT NULL, [references] TEXT NOT NULL, commonjs_named_exports TEXT NOT NULL, commonjs_reexport_specifiers TEXT NOT NULL)",
+	);
+	seed.run("PRAGMA user_version = 1");
+	seed.close();
+
+	expect((await runProbe(cacheRoot, healthProbePath)).trim()).toBe("AVAILABLE");
+
+	const migrated = new Database(cachePath);
+	try {
+		const columns = migrated
+			.query<{ name: string }, []>("PRAGMA table_info(extension_parse_cache)")
+			.all()
+			.map(column => column.name);
+		const schemaVersion = migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version;
+		expect(columns).toEqual(["cache_key", "source_type", "references", "commonjs_syntax"]);
+		expect(schemaVersion).toBe(3);
+	} finally {
+		migrated.close();
+	}
 });
 
 test("legacy extension parse cache opens in WAL mode (#9549)", async () => {
@@ -85,9 +130,10 @@ test("oversized-cache eviction keeps the parse cache usable when a concurrent pr
 	// Seed a cache whose main db file exceeds the 8 MiB eviction cap.
 	const seed = new Database(cachePath, { create: true });
 	seed.run(
-		"CREATE TABLE extension_parse_cache (cache_key TEXT PRIMARY KEY, source_type TEXT NOT NULL, [references] TEXT NOT NULL, commonjs_named_exports TEXT NOT NULL, commonjs_reexport_specifiers TEXT NOT NULL)",
+		"CREATE TABLE extension_parse_cache (cache_key TEXT PRIMARY KEY, source_type TEXT NOT NULL, [references] TEXT NOT NULL, commonjs_syntax INTEGER NOT NULL)",
 	);
-	seed.run("INSERT INTO extension_parse_cache VALUES ('big', 'module', ?, '[]', '[]')", ["x".repeat(9 * 1024 * 1024)]);
+	seed.run("PRAGMA user_version = 3");
+	seed.run("INSERT INTO extension_parse_cache VALUES ('big', 'module', ?, 0)", ["x".repeat(9 * 1024 * 1024)]);
 	seed.close();
 
 	// A concurrent omp process holds the cache open in WAL mode with
@@ -97,9 +143,7 @@ test("oversized-cache eviction keeps the parse cache usable when a concurrent pr
 	try {
 		concurrent.run("PRAGMA busy_timeout = 5000");
 		concurrent.run("PRAGMA journal_mode=WAL");
-		const insert = concurrent.prepare(
-			"INSERT OR REPLACE INTO extension_parse_cache VALUES (?, 'module', ?, '[]', '[]')",
-		);
+		const insert = concurrent.prepare("INSERT OR REPLACE INTO extension_parse_cache VALUES (?, 'module', ?, 0)");
 		for (let i = 0; i < 500; i++) insert.run(`live-${i}`, "y".repeat(4096));
 
 		// The probe opens the cache, sees the oversized main file, and evicts.

@@ -312,9 +312,10 @@ export async function listOmpExtensionRoots(ctx: LoadContext): Promise<OmpExtens
 				: await readConfiguredExtensions(ctx);
 		candidates = [
 			...candidates,
-			...(configured?.entries.map(
-				(raw): InjectedRoot => ({ path: resolveAgainst(raw, ctx), level: configured.level }),
-			) ?? []),
+			...(configured?.entries.map((raw): InjectedRoot => ({
+				path: resolveAgainst(raw, ctx),
+				level: configured.level,
+			})) ?? []),
 			...installedPlugins,
 		];
 	}

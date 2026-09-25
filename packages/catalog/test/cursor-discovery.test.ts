@@ -4,6 +4,7 @@ import * as http2 from "node:http2";
 import type * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
+import { buildModel } from "../src/build";
 // Import from source, not the package specifier: the workspace `node_modules`
 // copy resolves to the primary checkout, not this worktree.
 import { fetchCursorUsableModels } from "../src/discovery/cursor";
@@ -279,7 +280,10 @@ describe("fetchCursorUsableModels", () => {
 
 		const models = await fetchCursorUsableModels({ apiKey: "test-token", baseUrl: nativeBaseUrl, timeoutMs: 1_000 });
 
-		expect(models).toEqual([
+		// The bare-`k3` spellings are rule-owned (`providers/cursor.kdl`
+		// context-window-floor) and reach 1M once the spec is built.
+		const built = models?.map(model => buildModel(model));
+		expect(built).toEqual([
 			expect.objectContaining({ id: "glm-5.10-high", contextWindow: 1_000_000 }),
 			expect.objectContaining({ id: "glm-5.2-max", contextWindow: 1_000_000 }),
 			expect.objectContaining({ id: "glm-6-max", contextWindow: 1_000_000 }),
@@ -287,6 +291,52 @@ describe("fetchCursorUsableModels", () => {
 			expect.objectContaining({ id: "kimi-k3-max", contextWindow: 1_000_000 }),
 			expect.objectContaining({ id: "kimi/k3", contextWindow: 1_000_000 }),
 			expect.objectContaining({ id: "moonshotai/kimi-k3", contextWindow: 1_000_000 }),
+		]);
+	});
+
+	it("raises documented Cursor context-window floors at buildModel time", async () => {
+		// Discovered models that match bundled references receive the
+		// reference's contextWindow (256k Grok, 262k Kimi, 272k GPT-5.6).
+		// Unbundled preview ids stay on the 200k discovery fallback, then
+		// `providers/cursor.kdl` context-window-floor applies once the spec
+		// is built. A labeled gpt-5.6 row stays at 1M.
+		const response = create(GetUsableModelsResponseSchema, {
+			models: [
+				create(ModelDetailsSchema, { modelId: "cursor-grok-4.6" }),
+				create(ModelDetailsSchema, { modelId: "cursor-grok-4.5" }),
+				create(ModelDetailsSchema, { modelId: "default" }),
+				create(ModelDetailsSchema, { modelId: "kimi-k2.7-code" }),
+				create(ModelDetailsSchema, { modelId: "gpt-5.6-sol-fast" }),
+				create(ModelDetailsSchema, { modelId: "claude-opus-5-preview" }),
+				create(ModelDetailsSchema, { modelId: "claude-fable-5-preview" }),
+				create(ModelDetailsSchema, { modelId: "gpt-5.6-sol-medium", displayName: "GPT-5.6 Sol 1M" }),
+			],
+		});
+		const floorBaseUrl = await startCursorDiscoveryServer(toBinary(GetUsableModelsResponseSchema, response));
+
+		const models = await fetchCursorUsableModels({ apiKey: "test-token", baseUrl: floorBaseUrl, timeoutMs: 1_000 });
+
+		expect(models).toEqual([
+			expect.objectContaining({ id: "claude-fable-5-preview", contextWindow: 200_000 }),
+			expect.objectContaining({ id: "claude-opus-5-preview", contextWindow: 200_000 }),
+			expect.objectContaining({ id: "cursor-grok-4.5", contextWindow: 256_000 }),
+			expect.objectContaining({ id: "cursor-grok-4.6", contextWindow: 256_000 }),
+			expect.objectContaining({ id: "default", contextWindow: 256_000 }),
+			expect.objectContaining({ id: "gpt-5.6-sol-fast", contextWindow: 272_000 }),
+			expect.objectContaining({ id: "gpt-5.6-sol-medium", contextWindow: 1_000_000 }),
+			expect.objectContaining({ id: "kimi-k2.7-code", contextWindow: 262_000 }),
+		]);
+
+		const built = models?.map(model => buildModel(model));
+		expect(built).toEqual([
+			expect.objectContaining({ id: "claude-fable-5-preview", contextWindow: 300_000 }),
+			expect.objectContaining({ id: "claude-opus-5-preview", contextWindow: 300_000 }),
+			expect.objectContaining({ id: "cursor-grok-4.5", contextWindow: 256_000 }),
+			expect.objectContaining({ id: "cursor-grok-4.6", contextWindow: 256_000 }),
+			expect.objectContaining({ id: "default", contextWindow: 256_000 }),
+			expect.objectContaining({ id: "gpt-5.6-sol-fast", contextWindow: 272_000 }),
+			expect.objectContaining({ id: "gpt-5.6-sol-medium", contextWindow: 1_000_000 }),
+			expect.objectContaining({ id: "kimi-k2.7-code", contextWindow: 262_000 }),
 		]);
 	});
 

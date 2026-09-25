@@ -915,12 +915,12 @@ function markGitLabDuoWorkflowSettingsEnsured(apiKey: string, baseUrl: string, c
 function hasGitLabDuoWorkflowExplicitNamespace(options: GitLabDuoWorkflowOptions): boolean {
 	return Boolean(
 		nonEmptyString(options.rootNamespaceId) ??
-			nonEmptyString(options.namespaceId) ??
-			nonEmptyString(Bun.env.GITLAB_DUO_NAMESPACE_ID) ??
-			nonEmptyString(options.projectId) ??
-			nonEmptyString(options.projectPath) ??
-			nonEmptyString(Bun.env.GITLAB_DUO_PROJECT_ID) ??
-			nonEmptyString(Bun.env.GITLAB_DUO_PROJECT_PATH),
+		nonEmptyString(options.namespaceId) ??
+		nonEmptyString(Bun.env.GITLAB_DUO_NAMESPACE_ID) ??
+		nonEmptyString(options.projectId) ??
+		nonEmptyString(options.projectPath) ??
+		nonEmptyString(Bun.env.GITLAB_DUO_PROJECT_ID) ??
+		nonEmptyString(Bun.env.GITLAB_DUO_PROJECT_PATH),
 	);
 }
 
@@ -1846,12 +1846,10 @@ function defaultGitLabDuoWorkflowWebSocketFactory(
 	url: string,
 	options: GitLabDuoWorkflowWebSocketFactoryOptions,
 ): GitLabDuoWorkflowWebSocketLike {
-	return new (
-		WebSocket as unknown as new (
-			url: string,
-			options: Bun.WebSocketOptions,
-		) => GitLabDuoWorkflowWebSocketLike
-	)(url, { headers: options.headers });
+	return new (WebSocket as unknown as new (
+		url: string,
+		options: Bun.WebSocketOptions,
+	) => GitLabDuoWorkflowWebSocketLike)(url, { headers: options.headers });
 }
 
 export function runGitLabDuoWorkflowSocket(

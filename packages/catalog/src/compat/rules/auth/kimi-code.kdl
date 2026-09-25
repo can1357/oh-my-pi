@@ -1,0 +1,18 @@
+auth "kimi-code" {
+    name "Kimi Code"
+    login "device-code" {
+        client-id "17e5f671-d194-4dfb-9706-5516cb48c098"
+        base-url "https://auth.kimi.com" {
+            env "KIMI_CODE_OAUTH_HOST" "KIMI_OAUTH_HOST"
+        }
+        headers-hook "kimi-fingerprint"
+        device url="{base}/api/oauth/device_authorization"
+        token url="{base}/api/oauth/token"
+        response user-code="user_code" device-code="device_code" verification-uri="verification_uri" verification-uri-complete="verification_uri_complete" interval="interval" expires-in="expires_in"
+        instructions "Enter code: {user_code}"
+        credential {
+            account-id claim="user_id|sub"
+        }
+    }
+    refresh {}
+}

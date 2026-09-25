@@ -9,7 +9,7 @@ import type {
 	ExtensionUIContext,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext, RenderSessionContextOptions } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import { buildSessionContext, type SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
@@ -71,7 +71,6 @@ interface Harness {
 function createHarness(): Harness {
 	const entries: SessionEntry[] = [];
 	let capturedActions: ExtensionActions | undefined;
-	let helpers!: UiHelpers;
 	const fakeRunner = {
 		initialize: (
 			a: ExtensionActions,
@@ -160,7 +159,7 @@ function createHarness(): Harness {
 			helpers.renderSessionContext(buildSessionContext(entries));
 		},
 	} as unknown as InteractiveModeContext;
-	helpers = new UiHelpers(ctx);
+	const helpers = new UiHelpers(ctx);
 
 	const controller = new ExtensionUiController(ctx);
 

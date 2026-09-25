@@ -76,7 +76,7 @@ describe("provider context image budgets", () => {
 			messages: Array.from({ length: 11 }, (_, index) => ({
 				role: "toolResult",
 				toolCallId: `call-${index}`,
-				toolName: "inspect_image",
+				toolName: "read",
 				content: [image(`image-${index}`)],
 				isError: false,
 				timestamp: index,

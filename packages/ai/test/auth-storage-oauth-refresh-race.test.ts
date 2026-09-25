@@ -53,7 +53,7 @@ describe("AuthStorage OAuth refresh race", () => {
 
 		// Seed the shared DB with one expired OAuth credential; this simulates the
 		// state two cooperating omp processes both load from the persisted row.
-		await authStorage.set("anthropic", [
+		await authStorage.credentials.set("anthropic", [
 			{
 				type: "oauth",
 				access: "stale-access",
@@ -88,13 +88,13 @@ describe("AuthStorage OAuth refresh race", () => {
 		});
 
 		await withEnv(SUPPRESS_ANTHROPIC_ENV, async () => {
-			const apiKey = await authStorage!.getApiKey("anthropic", "session-race");
+			const apiKey = await authStorage!.keys.get("anthropic", "session-race");
 
 			// We should have picked up the rotated credential instead of disabling
 			// the row that the peer just updated.
 			expect(apiKey).toBe("fresh-access-from-peer");
 			expect(events).toHaveLength(0);
-			expect(authStorage!.list()).toContain("anthropic");
+			expect(authStorage!.credentials.has("anthropic")).toBe(true);
 
 			// The row must still be active in storage; before the fix it would be
 			// soft-deleted with disabled_cause set to the invalid_grant error.
@@ -111,7 +111,7 @@ describe("AuthStorage OAuth refresh race", () => {
 	test("does not disable when peer rotates between pre-check and CAS disable", async () => {
 		if (!authStorage || !store) throw new Error("test setup failed");
 
-		await authStorage.set("anthropic", [
+		await authStorage.credentials.set("anthropic", [
 			{
 				type: "oauth",
 				access: "stale-access",
@@ -155,7 +155,7 @@ describe("AuthStorage OAuth refresh race", () => {
 			});
 
 		await withEnv(SUPPRESS_ANTHROPIC_ENV, async () => {
-			const apiKey = await authStorage!.getApiKey("anthropic", "session-cas-race");
+			const apiKey = await authStorage!.keys.get("anthropic", "session-cas-race");
 
 			// CAS lost → reload → pick up the peer-rotated credential.
 			expect(apiKey).toBe("fresh-access-from-peer");
@@ -179,7 +179,7 @@ describe("AuthStorage OAuth refresh race", () => {
 
 		// Single-process scenario: refresh genuinely fails and no peer updated the
 		// row. The credential should still be soft-deleted.
-		await authStorage.set("anthropic", [
+		await authStorage.credentials.set("anthropic", [
 			{
 				type: "oauth",
 				access: "expired-access",
@@ -193,7 +193,7 @@ describe("AuthStorage OAuth refresh race", () => {
 		});
 
 		await withEnv(SUPPRESS_ANTHROPIC_ENV, async () => {
-			const apiKey = await authStorage!.getApiKey("anthropic", "session-real-failure");
+			const apiKey = await authStorage!.keys.get("anthropic", "session-real-failure");
 
 			expect(apiKey).toBeUndefined();
 			expect(events).toHaveLength(1);
@@ -225,12 +225,12 @@ describe("AuthStorage OAuth refresh race", () => {
 			},
 		});
 
-		await authStorage.set("unit-oauth-preflight", [
+		await authStorage.credentials.set("unit-oauth-preflight", [
 			{ type: "oauth", access: "access-a", refresh: "refresh-a", expires },
 			{ type: "oauth", access: "access-b", refresh: "refresh-b", expires },
 		]);
 
-		const apiKey = await authStorage.getApiKey("unit-oauth-preflight");
+		const apiKey = await authStorage.keys.get("unit-oauth-preflight");
 		expect(apiKey).toBe("access-a-rotated");
 
 		const stored = store.listAuthCredentials("unit-oauth-preflight");
@@ -266,17 +266,19 @@ describe("AuthStorage OAuth refresh race", () => {
 				const row = rows.find(entry => entry.id === id);
 				if (row) row.credential = credential;
 			},
-			deleteAuthCredential() {},
+			async deleteAuthCredential() {
+				return false;
+			},
 			tryDisableAuthCredentialIfMatches() {
 				return false;
 			},
-			replaceAuthCredentialsForProvider() {
+			async replaceAuthCredentials() {
 				return rows;
 			},
-			upsertAuthCredentialForProvider() {
+			async upsertAuthCredential() {
 				return rows;
 			},
-			deleteAuthCredentialsForProvider() {},
+			async deleteAuthCredentials() {},
 			getCache(key) {
 				const entry = cache.get(key);
 				if (!entry) return null;
@@ -324,9 +326,9 @@ describe("AuthStorage OAuth refresh race", () => {
 				events.push(event);
 			},
 		});
-		await storage.reload();
+		await storage.credentials.reload();
 
-		const apiKey = await storage.getApiKey("unit-oauth-preflight-rotate", "session-preflight-rotate");
+		const apiKey = await storage.keys.get("unit-oauth-preflight-rotate", "session-preflight-rotate");
 
 		// The single stored credential was peer-rotated during preflight refresh. The
 		// resolve pass must pick up the reloaded fresh credential instead of adding the
@@ -376,12 +378,12 @@ describe("AuthStorage OAuth refresh race", () => {
 			},
 		});
 
-		await authStorage.set("unit-oauth-mutex", [
+		await authStorage.credentials.set("unit-oauth-mutex", [
 			{ type: "oauth", access: "access-old", refresh: "refresh-old", expires },
 		]);
 
-		const first = authStorage.getApiKey("unit-oauth-mutex", "same-session");
-		const second = authStorage.getApiKey("unit-oauth-mutex", "same-session");
+		const first = authStorage.keys.get("unit-oauth-mutex", "same-session");
+		const second = authStorage.keys.get("unit-oauth-mutex", "same-session");
 
 		await refreshStarted.promise;
 		allowRefresh.resolve();
@@ -425,17 +427,17 @@ describe("AuthStorage OAuth refresh race", () => {
 			},
 		});
 
-		await authStorage.set("unit-oauth-cross-process", [
+		await authStorage.credentials.set("unit-oauth-cross-process", [
 			{ type: "oauth", access: "access-old", refresh: "refresh-old", expires },
 		]);
 
 		const secondStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
 		const secondStorage = new AuthStorage(secondStore);
-		await secondStorage.reload();
+		await secondStorage.credentials.reload();
 		try {
 			const [first, second] = await Promise.all([
-				authStorage.getApiKey("unit-oauth-cross-process", "session-first"),
-				secondStorage.getApiKey("unit-oauth-cross-process", "session-second"),
+				authStorage.keys.get("unit-oauth-cross-process", "session-first"),
+				secondStorage.keys.get("unit-oauth-cross-process", "session-second"),
 			]);
 
 			expect(first).toBe("access-rotated");
@@ -453,7 +455,6 @@ describe("AuthStorage OAuth refresh race", () => {
 
 		const expires = Date.now() - 60_000;
 		const refreshedExpires = Date.now() + 60 * 60_000;
-		let credentialId: number | undefined;
 
 		oauthUtils.registerOAuthProvider({
 			id: "unit-oauth-post-lease-race",
@@ -482,13 +483,13 @@ describe("AuthStorage OAuth refresh race", () => {
 			},
 		});
 
-		await authStorage.set("unit-oauth-post-lease-race", [
+		await authStorage.credentials.set("unit-oauth-post-lease-race", [
 			{ type: "oauth", access: "access-old", refresh: "refresh-old", expires },
 		]);
-		credentialId = store.listAuthCredentials("unit-oauth-post-lease-race")[0]?.id;
+		const credentialId = store.listAuthCredentials("unit-oauth-post-lease-race")[0]?.id;
 		expect(credentialId).toBeDefined();
 
-		const apiKey = await authStorage.getApiKey("unit-oauth-post-lease-race", "session-post-lease");
+		const apiKey = await authStorage.keys.get("unit-oauth-post-lease-race", "session-post-lease");
 		expect(apiKey).toBe("access-from-this-process");
 		const persisted = store.listAuthCredentials("unit-oauth-post-lease-race")[0]?.credential;
 		expect(persisted?.type).toBe("oauth");
@@ -502,7 +503,7 @@ describe("AuthStorage OAuth refresh race", () => {
 		if (!authStorage || !store) throw new Error("test setup failed");
 
 		const expires = Date.now() - 60_000;
-		await authStorage.set("unit-oauth-cas-loss", [
+		await authStorage.credentials.set("unit-oauth-cas-loss", [
 			{ type: "oauth", access: "access-first", refresh: "refresh-first", expires },
 			{ type: "oauth", access: "access-target", refresh: "refresh-target", expires },
 		]);
@@ -510,7 +511,7 @@ describe("AuthStorage OAuth refresh race", () => {
 		expect(credentialId).toBeDefined();
 		if (credentialId === undefined) return;
 
-		const result = await authStorage.refreshStoredOAuthCredential("unit-oauth-cas-loss", {
+		const result = await authStorage.oauth.refreshStored("unit-oauth-cas-loss", {
 			credentialId,
 			forceRefresh: true,
 			credentialFromRow: credential => credential,
@@ -557,7 +558,7 @@ describe("AuthStorage OAuth refresh race", () => {
 			},
 		});
 
-		await authStorage.set("unit-oauth-peer-sync", [
+		await authStorage.credentials.set("unit-oauth-peer-sync", [
 			{ type: "oauth", access: "access-old", refresh: "refresh-old", expires },
 		]);
 		const storedBefore = store.listAuthCredentials("unit-oauth-peer-sync");
@@ -570,7 +571,7 @@ describe("AuthStorage OAuth refresh race", () => {
 			refresh: "refresh-peer",
 			expires,
 		});
-		const apiKey = await authStorage.getApiKey("unit-oauth-peer-sync", "session-peer-sync");
+		const apiKey = await authStorage.keys.get("unit-oauth-peer-sync", "session-peer-sync");
 		expect(apiKey).toBe("access-peer");
 		expect(refreshCalls).toBe(0);
 
@@ -580,7 +581,7 @@ describe("AuthStorage OAuth refresh race", () => {
 			refresh: "refresh-peer-force",
 			expires,
 		});
-		const forcedKey = await authStorage.getApiKey("unit-oauth-peer-sync", "session-peer-sync", {
+		const forcedKey = await authStorage.keys.get("unit-oauth-peer-sync", "session-peer-sync", {
 			forceRefresh: true,
 		});
 		expect(forcedKey).toBe("access-peer-force");
@@ -600,7 +601,7 @@ describe("AuthStorage OAuth refresh race", () => {
 		}
 		if (!sessionId) throw new Error("could not find test session id");
 
-		await authStorage.set("unit-oauth-rotation", [
+		await authStorage.credentials.set("unit-oauth-rotation", [
 			{
 				type: "oauth",
 				access: "access-a",
@@ -621,15 +622,15 @@ describe("AuthStorage OAuth refresh race", () => {
 			return { newCredentials: credential, apiKey: credential.access };
 		});
 
-		const firstKey = await authStorage.getApiKey("unit-oauth-rotation", sessionId);
+		const firstKey = await authStorage.keys.get("unit-oauth-rotation", sessionId);
 		expect(firstKey).toBe("access-a");
 
-		const invalidated = await authStorage.invalidateCredentialMatching("unit-oauth-rotation", "access-a", {
+		const invalidated = await authStorage.limits.invalidateMatching("unit-oauth-rotation", "access-a", {
 			sessionId,
 		});
 		expect(invalidated).toBe(true);
 
-		const retryKey = await authStorage.getApiKey("unit-oauth-rotation", sessionId);
+		const retryKey = await authStorage.keys.get("unit-oauth-rotation", sessionId);
 		expect(retryKey).toBe("access-b");
 	});
 
@@ -637,7 +638,7 @@ describe("AuthStorage OAuth refresh race", () => {
 		if (!authStorage || !store) throw new Error("test setup failed");
 		const now = Date.now();
 		// Three distinct expired accounts → index order A, B, C by id ascending.
-		await authStorage.set("anthropic", [
+		await authStorage.credentials.set("anthropic", [
 			{ type: "oauth", access: "a-acc", refresh: "a-ref", expires: now - 60_000, accountId: "acc-a", email: "a@x" },
 			{ type: "oauth", access: "b-acc", refresh: "b-ref", expires: now - 60_000, accountId: "acc-b", email: "b@x" },
 			{ type: "oauth", access: "c-acc", refresh: "c-ref", expires: now - 60_000, accountId: "acc-c", email: "c@x" },
@@ -654,7 +655,7 @@ describe("AuthStorage OAuth refresh race", () => {
 		// C untouched.
 		vi.spyOn(oauthUtils, "refreshOAuthToken").mockImplementation(async (_provider, credential) => {
 			if (credential.refresh === "b-ref") {
-				authStorage!.disableCredentialById(idA, "test: concurrent disable");
+				await authStorage!.credentials.disable(idA, "test: concurrent disable");
 				return {
 					access: "b-fresh",
 					refresh: "b-fresh-ref",
@@ -667,7 +668,7 @@ describe("AuthStorage OAuth refresh race", () => {
 		});
 
 		await withEnv(SUPPRESS_ANTHROPIC_ENV, async () => {
-			const refreshed = await authStorage!.forceRefreshCredentialById(idB);
+			const refreshed = await authStorage!.oauth.refresh(idB);
 			expect(refreshed.id).toBe(idB);
 		});
 
@@ -683,7 +684,7 @@ describe("AuthStorage OAuth refresh race", () => {
 	test("propagates CAS update storage errors instead of treating them as peer refresh wins", async () => {
 		if (!authStorage || !store) throw new Error("test setup failed");
 
-		await authStorage.set("unit-oauth-cas-update-error", [
+		await authStorage.credentials.set("unit-oauth-cas-update-error", [
 			{
 				type: "oauth",
 				access: "access-old",
@@ -698,7 +699,7 @@ describe("AuthStorage OAuth refresh race", () => {
 		});
 
 		await expect(
-			authStorage.refreshStoredOAuthCredential("unit-oauth-cas-update-error", {
+			authStorage.oauth.refreshStored("unit-oauth-cas-update-error", {
 				credentialFromRow: row => row,
 				forceRefresh: true,
 				refresh: async credential => ({
@@ -722,7 +723,7 @@ describe("AuthStorage OAuth refresh race", () => {
 	test("propagates CAS disable storage errors instead of treating them as peer rotations", async () => {
 		if (!authStorage || !store) throw new Error("test setup failed");
 
-		await authStorage.set("unit-oauth-cas-disable-error", [
+		await authStorage.credentials.set("unit-oauth-cas-disable-error", [
 			{
 				type: "oauth",
 				access: "access-old",
@@ -737,7 +738,7 @@ describe("AuthStorage OAuth refresh race", () => {
 		});
 
 		await expect(
-			authStorage.refreshStoredOAuthCredential("unit-oauth-cas-disable-error", {
+			authStorage.oauth.refreshStored("unit-oauth-cas-disable-error", {
 				credentialFromRow: row => row,
 				forceRefresh: true,
 				refresh: async () => {
@@ -763,7 +764,7 @@ describe("AuthStorage OAuth refresh race", () => {
 
 		const now = Date.parse("2026-07-10T12:00:00.000Z");
 		setSystemTime(new Date(now));
-		await authStorage.set("unit-oauth-lease-update", [
+		await authStorage.credentials.set("unit-oauth-lease-update", [
 			{
 				type: "oauth",
 				access: "access-old",
@@ -778,7 +779,7 @@ describe("AuthStorage OAuth refresh race", () => {
 		if (!stealLease) throw new Error("test store does not support refresh leases");
 		const updateSpy = vi.spyOn(store, "tryUpdateAuthCredentialIfMatches");
 
-		const result = await authStorage.refreshStoredOAuthCredential("unit-oauth-lease-update", {
+		const result = await authStorage.oauth.refreshStored("unit-oauth-lease-update", {
 			credentialFromRow: row => row,
 			forceRefresh: true,
 			refresh: async credential => {
@@ -817,7 +818,7 @@ describe("AuthStorage OAuth refresh race", () => {
 
 		const now = Date.parse("2026-07-10T12:30:00.000Z");
 		setSystemTime(new Date(now));
-		await authStorage.set("unit-oauth-lease-disable", [
+		await authStorage.credentials.set("unit-oauth-lease-disable", [
 			{
 				type: "oauth",
 				access: "access-old",
@@ -832,7 +833,7 @@ describe("AuthStorage OAuth refresh race", () => {
 		if (!stealLease) throw new Error("test store does not support refresh leases");
 		const disableSpy = vi.spyOn(store, "tryDisableAuthCredentialIfMatches");
 
-		const result = await authStorage.refreshStoredOAuthCredential("unit-oauth-lease-disable", {
+		const result = await authStorage.oauth.refreshStored("unit-oauth-lease-disable", {
 			credentialFromRow: row => row,
 			forceRefresh: true,
 			refresh: async () => {
@@ -869,7 +870,7 @@ describe("AuthStorage OAuth refresh race", () => {
 
 		const now = Date.parse("2026-07-10T13:00:00.000Z");
 		setSystemTime(new Date(now));
-		await authStorage.set("unit-oauth-observed-mismatch-expired", [
+		await authStorage.credentials.set("unit-oauth-observed-mismatch-expired", [
 			{
 				type: "oauth",
 				access: "stored-access-expired",
@@ -892,7 +893,7 @@ describe("AuthStorage OAuth refresh race", () => {
 		};
 
 		let refreshCalled = false;
-		const result = await authStorage.refreshStoredOAuthCredential("unit-oauth-observed-mismatch-expired", {
+		const result = await authStorage.oauth.refreshStored("unit-oauth-observed-mismatch-expired", {
 			observedCredential: observed,
 			credentialFromRow: row => row,
 			forceRefresh: false,
@@ -920,7 +921,7 @@ describe("AuthStorage OAuth refresh race", () => {
 
 		const now = Date.parse("2026-07-10T13:30:00.000Z");
 		setSystemTime(new Date(now));
-		await authStorage.set("unit-oauth-observed-mismatch-fresh", [
+		await authStorage.credentials.set("unit-oauth-observed-mismatch-fresh", [
 			{
 				type: "oauth",
 				access: "peer-rotated-access",
@@ -941,7 +942,7 @@ describe("AuthStorage OAuth refresh race", () => {
 		};
 
 		let refreshCalled = false;
-		const result = await authStorage.refreshStoredOAuthCredential("unit-oauth-observed-mismatch-fresh", {
+		const result = await authStorage.oauth.refreshStored("unit-oauth-observed-mismatch-fresh", {
 			observedCredential: observed,
 			credentialFromRow: row => row,
 			forceRefresh: false,
@@ -959,7 +960,7 @@ describe("AuthStorage OAuth refresh race", () => {
 	test("stops after a definitive refresh failure loses its disable CAS", async () => {
 		if (!authStorage || !store) throw new Error("test setup failed");
 
-		await authStorage.set("unit-oauth-definitive-cas-loss", [
+		await authStorage.credentials.set("unit-oauth-definitive-cas-loss", [
 			{
 				type: "oauth",
 				access: "access-old",
@@ -988,7 +989,7 @@ describe("AuthStorage OAuth refresh race", () => {
 		vi.spyOn(store, "tryDisableAuthCredentialIfMatches").mockReturnValue(false);
 
 		await expect(
-			authStorage.getApiKey("unit-oauth-definitive-cas-loss", "session-cas-loss", {
+			authStorage.keys.get("unit-oauth-definitive-cas-loss", "session-cas-loss", {
 				signal: controller.signal,
 			}),
 		).resolves.toBeUndefined();

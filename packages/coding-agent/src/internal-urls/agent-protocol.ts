@@ -7,22 +7,45 @@
  * the shared context.
  *
  * URL forms:
- * - agent://<id> - Full output content
- * - agent://<id>/<child> - Nested subagent output (hierarchy separator; the
- *   registry allocates a subagent's own children as dot-qualified ids, so
- *   `agent://Parent/Child` resolves `Parent.Child.md`)
- * - agent://<id>/<path> - JSON extraction via path form (fallback when no
- *   nested output matches the path)
- * - agent://<id>?q=<query> - JSON extraction via query form
+ * - agent://<id> - Full output content. Nested subagent outputs are
+ *   dot-qualified ids (`agent://Parent.Child` resolves `Parent.Child.md`).
+ * - agent://<id>/<path> - JSON extraction: each segment is an object key, or
+ *   an array index when the current value is an array
+ *   (`agent://Parent.Child/reports/0/data`)
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { AgentRegistry } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
-import { applyQuery, pathToQuery } from "./json-query";
+import { executeSend, isIrcEnabled } from "../irc/messaging";
 import { artifactsDirsFromRegistry } from "./registry-helpers";
-import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, UrlCompletion } from "./types";
+import type {
+	InternalResource,
+	InternalWriteResult,
+	InternalUrl,
+	ProtocolHandler,
+	ResolveContext,
+	UrlCompletion,
+	WriteContext,
+} from "./types";
+
+/**
+ * Walk `segments` into a JSON value: object segments index by key, array
+ * segments by numeric index. Returns `undefined` once a segment misses.
+ */
+function extractJsonPath(data: unknown, segments: string[]): unknown {
+	let current: unknown = data;
+	for (const segment of segments) {
+		if (current === null || typeof current !== "object") return undefined;
+		if (Array.isArray(current)) {
+			current = /^\d+$/.test(segment) ? current[Number(segment)] : undefined;
+			continue;
+		}
+		current = (current as Record<string, unknown>)[segment];
+	}
+	return current;
+}
 
 /**
  * Handler for agent:// URLs.
@@ -34,20 +57,45 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	readonly scheme = "agent";
 	readonly immutable = true;
 
+	async write(url: InternalUrl, content: string, context?: WriteContext): Promise<InternalWriteResult> {
+		const session = context?.session;
+		if (!session) throw new Error("agent:// messaging requires a tool session");
+		const registry = session.agentRegistry;
+		const senderId = session.getAgentId?.();
+		if (
+			!registry ||
+			!senderId ||
+			session.enableIrc === false ||
+			!isIrcEnabled(session.settings, session.taskDepth ?? 0)
+		) {
+			throw new Error("Peer messaging is unavailable in this session.");
+		}
+		const to = url.rawHost || url.hostname;
+		if (!to) throw new Error("agent:// URL requires a recipient: agent://<id>");
+		if (url.pathname !== "" && url.pathname !== "/") {
+			throw new Error("agent:// message target cannot have a JSON-path suffix.");
+		}
+		if (!content.trim()) throw new Error("agent:// messages require non-empty content.");
+		const result = await executeSend(
+			{ registry, senderId, sessionFileHint: session.getSessionFile?.() },
+			{ to, message: content },
+		);
+		return {
+			text: result.content.find(item => item.type === "text")?.text ?? "Message delivery failed.",
+			details: { message: result.details },
+			isError: result.isError,
+		};
+	}
+
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
 		const outputId = url.rawHost || url.hostname;
+		if (outputId === "all") throw new Error("agent://all is write-only; use it to broadcast a message.");
 		if (!outputId) {
 			throw new Error("agent:// URL requires an output ID: agent://<id>");
 		}
 
 		const urlPath = url.pathname;
-		const queryParam = url.searchParams.get("q");
 		const hasPathExtraction = urlPath && urlPath !== "/" && urlPath !== "";
-		const hasQueryExtraction = queryParam !== null && queryParam !== "";
-
-		if (hasPathExtraction && hasQueryExtraction) {
-			throw new Error("agent:// URL cannot combine path extraction with ?q=");
-		}
 
 		const registry = AgentRegistry.global();
 		const rootSessionFile = context?.sessionFile
@@ -68,11 +116,6 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			throw new Error("No session - agent outputs unavailable");
 		}
 
-		// A subagent allocates its own children as dot-qualified ids
-		// (`Parent.Child`), so the slash path form is first tried as a hierarchy
-		// separator: `agent://Parent/Child` resolves `Parent.Child.md`. Only when
-		// no such nested output exists does the path fall back to jq-style JSON
-		// extraction on `<outputId>.md`. Query form (`?q=`) is always extraction.
 		const pathSegments = hasPathExtraction ? urlPath.split("/").filter(Boolean) : [];
 		const decodedSegments = pathSegments.map(segment => {
 			try {
@@ -81,19 +124,14 @@ export class AgentProtocolHandler implements ProtocolHandler {
 				return segment;
 			}
 		});
-		const nestedId =
-			decodedSegments.length > 0 && decodedSegments.every(segment => !segment.includes("."))
-				? [outputId, ...decodedSegments].join(".")
-				: undefined;
 
-		const scan = await this.#findOutput(dirs, nestedId ? [nestedId, outputId] : [outputId]);
+		const scan = await this.#findOutput(dirs, outputId);
 		if (!scan.anyDirExists) {
 			throw new Error("No artifacts directory found");
 		}
 		if (!scan.foundPath) {
-			const target = nestedId ?? outputId;
 			const availableStr = scan.availableIds.size > 0 ? [...scan.availableIds].join(", ") : "none";
-			throw new Error(`Not found: ${target}\nAvailable: ${availableStr}`);
+			throw new Error(`Not found: ${outputId}\nAvailable: ${availableStr}`);
 		}
 
 		const rawContent = await Bun.file(scan.foundPath).text();
@@ -101,31 +139,43 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		let content = rawContent;
 		let contentType: InternalResource["contentType"] = "text/markdown";
 
-		// Extraction applies only when the URL did NOT resolve to a nested output
-		// (a slash that named a real child is a hierarchy hop, not a jq path).
-		const extract = hasQueryExtraction || (hasPathExtraction && scan.matchedId !== nestedId);
-		if (extract) {
+		let extractedFrom = scan.foundPath;
+		if (hasPathExtraction) {
 			let jsonValue: unknown;
-			try {
-				jsonValue = JSON.parse(rawContent);
-			} catch (err) {
-				const message = err instanceof Error ? err.message : String(err);
-				throw new Error(`Output ${scan.matchedId} is not valid JSON: ${message}`);
+			let parsed = false;
+			if (scan.jsonPath) {
+				try {
+					jsonValue = JSON.parse(await Bun.file(scan.jsonPath).text());
+					extractedFrom = scan.jsonPath;
+					parsed = true;
+				} catch {
+					// Corrupt or partially written sidecar: fall back to <id>.md.
+				}
+			}
+			if (!parsed) {
+				try {
+					jsonValue = JSON.parse(rawContent);
+				} catch (err) {
+					const message = err instanceof Error ? err.message : String(err);
+					throw new Error(`Output ${outputId} is not valid JSON: ${message}`);
+				}
 			}
 
-			const query = hasQueryExtraction ? queryParam! : pathToQuery(urlPath);
-			if (query) {
-				const extracted = applyQuery(jsonValue, query);
+			const extracted = extractJsonPath(jsonValue, decodedSegments);
+			if (typeof extracted === "string") {
+				// A string field (e.g. a scout's markdown `report`) reads as prose,
+				// not as a JSON-escaped single line.
+				content = extracted;
+			} else {
 				try {
 					content = JSON.stringify(extracted, null, 2) ?? "null";
 				} catch {
 					content = String(extracted);
 				}
-				notes.push(`Extracted: ${query}`);
-			} else {
-				content = JSON.stringify(jsonValue, null, 2);
+				contentType = "application/json";
 			}
-			contentType = "application/json";
+			notes.push(`Extracted: /${decodedSegments.join("/")}`);
+			if (parsed) notes.push(`Source: ${path.basename(extractedFrom!)}`);
 		}
 
 		return {
@@ -133,25 +183,27 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			content,
 			contentType,
 			size: Buffer.byteLength(content, "utf-8"),
-			sourcePath: scan.foundPath,
+			sourcePath: extractedFrom,
 			notes,
 		};
 	}
 
 	/**
-	 * Scan every registered artifacts dir for the first `<id>.md` among
-	 * `candidateIds` (tried in order, so a hierarchy match wins over the base
-	 * id). Returns the resolved path and the id it matched, plus the set of
-	 * available ids gathered from the scanned dirs for the not-found message.
+	 * Scan every registered artifacts dir (in priority order) for `<id>.md`.
+	 * Returns the resolved path and its same-dir `.json` sidecar, plus the set
+	 * of available ids gathered from the scanned dirs for the not-found message.
 	 */
 	async #findOutput(
 		dirs: string[],
-		candidateIds: string[],
-	): Promise<{ foundPath?: string; matchedId?: string; anyDirExists: boolean; availableIds: Set<string> }> {
-		// Build a full id→path map across every registered dir before picking, so
-		// candidate priority is global: a nested id in a deeper dir must win over
-		// the base id even when the base id's dir is scanned first.
+		id: string,
+	): Promise<{
+		foundPath?: string;
+		jsonPath?: string;
+		anyDirExists: boolean;
+		availableIds: Set<string>;
+	}> {
 		const byId = new Map<string, string>();
+		const jsonById = new Map<string, string>();
 		let anyDirExists = false;
 		for (const dir of dirs) {
 			let files: string[];
@@ -163,18 +215,26 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			}
 			anyDirExists = true;
 			for (const f of files) {
+				if (f.endsWith(".json")) {
+					const jsonId = f.slice(0, -5);
+					if (!jsonById.has(jsonId)) jsonById.set(jsonId, path.join(dir, f));
+					continue;
+				}
 				if (!f.endsWith(".md")) continue;
 				const id = f.slice(0, -3);
 				if (!byId.has(id)) byId.set(id, path.join(dir, f));
 			}
 		}
-		for (const id of candidateIds) {
-			const foundPath = byId.get(id);
-			if (foundPath) {
-				return { foundPath, matchedId: id, anyDirExists, availableIds: new Set(byId.keys()) };
-			}
-		}
-		return { anyDirExists, availableIds: new Set(byId.keys()) };
+		const availableIds = new Set(byId.keys());
+		const foundPath = byId.get(id);
+		if (!foundPath) return { anyDirExists, availableIds };
+		// Pair the sidecar with the SAME dir as the matched `<id>.md`: two
+		// coexisting roots can both hold `Worker`, and a first-hit sidecar
+		// from the other root would answer with a foreign agent's payload
+		// (see the `preferredDir` comment above and caller-root-ab.test.ts).
+		const sidecar = jsonById.get(id);
+		const jsonPath = sidecar && path.dirname(sidecar) === path.dirname(foundPath) ? sidecar : undefined;
+		return { foundPath, jsonPath, anyDirExists, availableIds };
 	}
 
 	async complete(): Promise<UrlCompletion[]> {

@@ -14,10 +14,17 @@ import {
 	acquireTab,
 	initializeTabWorkerForTest,
 	releaseTab,
+	runInTab,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
-import { chromiumAvailable } from "./chromium-probe";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
+import { chromiumAvailable, visibleBrowserAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
+// Headful launches additionally need a display; `CHROMIUM_AVAILABLE` only
+// checks headless CDP on Linux, which does not require an X server.
+// Never open a desktop window during ordinary test runs; exercise this manual
+// viewport smoke test only with OMP_TEST_VISIBLE_BROWSER=1.
+const VISIBLE_BROWSER_AVAILABLE = process.env.OMP_TEST_VISIBLE_BROWSER === "1" && (await visibleBrowserAvailable());
 
 class FakeStartupWorker {
 	#errorHandlers = new Set<(error: Error) => void>();
@@ -125,7 +132,7 @@ describe("browser tab worker startup", () => {
 
 		await expect(pending).rejects.toThrow("Timed out waiting for tab worker setup");
 
-		// 5 s remain → guard min(10 s, 5 s / 3) = 1.67 s → floored to 2 s.
+		// 5 s remain -> guard min(10 s, 5 s / 3) = 1.67 s -> floored to 2 s.
 		// A fresh (un-carried) budget would guard for 10 s.
 		expect(performance.now() - startedAt).toBeLessThan(8_000);
 	});
@@ -179,7 +186,7 @@ describe("browser init deadline carry-over", () => {
 				// the original init error — never the wrapped inline-fallback error.
 				const deadlineStart = performance.now() - 60_000;
 				const started = performance.now();
-				// Mirror BrowserTool's outer acquisition lease. Its timeout can
+				// Mirror the browser prelude host's outer acquisition lease. Its timeout can
 				// release this lease before acquireTab spends the supervisor's
 				// phase floors, but acquireTab must retain its own hold so target
 				// cleanup still has a connected Puppeteer handle.
@@ -216,8 +223,148 @@ describe("browser init deadline carry-over", () => {
 		30_000,
 	);
 });
-describe("visible OMP-owned browser tabs", () => {
+
+describe("OMP-owned browser evaluation", () => {
 	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"adopts isolated element arguments into the main world without consuming caller handles",
+		async () => {
+			const browser = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
+			if (!("browser" in browser)) throw new Error("Expected a Puppeteer browser");
+			const name = `handle-evaluate-${process.pid}`;
+			const session = {
+				cwd: process.cwd(),
+				hasUI: false,
+				settings: { get: () => undefined },
+				getSessionFile: () => null,
+			} as unknown as ToolSession;
+			try {
+				await acquireTab(name, browser, {
+					url: `data:text/html,${encodeURIComponent('<button id="first">First</button><button id="second">Second</button>')}`,
+					timeoutMs: 30_000,
+				});
+				const result = await runInTab(name, {
+					code: `
+						await tab.evaluate("globalThis.__ompPageMarker = 'main-world'");
+						const first = await tab.waitForSelector("#first");
+						const second = await tab.waitForSelector("#second");
+						if (!first || !second) throw new Error("Expected both buttons");
+
+						const mainElement = await page.evaluateHandle(() => {
+							//!world=main
+							return document.querySelector("#first");
+						});
+						const mainObject = await page.evaluateHandle(() => {
+							//!world=main
+							return { value: 9 };
+						});
+						const plain = { asElement: "ordinary-data", nested: { value: 4 } };
+
+						const evaluated = await tab.evaluate(
+							(firstElement, secondElement, existingMainElement, existingMainObject, data) => ({
+								marker: globalThis.__ompPageMarker,
+								texts: [firstElement.textContent, secondElement.textContent],
+								mainText: existingMainElement.textContent,
+								mainValue: existingMainObject.value,
+								plain: data,
+							}),
+							first,
+							second,
+							mainElement,
+							mainObject,
+							plain,
+						);
+
+						let callbackFailure = "";
+						try {
+							await tab.evaluate(() => {
+								throw new Error("expected callback failure");
+							}, first, second);
+						} catch (error) {
+							callbackFailure = error instanceof Error ? error.message : String(error);
+						}
+
+						const stringMarker = await tab.evaluate("globalThis.__ompPageMarker", first, second);
+						const handlesAfterward = [
+							await first.evaluate(element => element.textContent),
+							await second.evaluate(element => element.textContent),
+							await mainElement.evaluate(element => element.textContent),
+							await mainObject.evaluate(object => object.value),
+						];
+						await Promise.all([first.dispose(), second.dispose(), mainElement.dispose(), mainObject.dispose()]);
+						return { evaluated, callbackFailure, stringMarker, handlesAfterward };
+					`,
+					timeoutMs: 15_000,
+					session,
+				});
+				expect(result.returnValue).toEqual({
+					evaluated: {
+						marker: "main-world",
+						texts: ["First", "Second"],
+						mainText: "First",
+						mainValue: 9,
+						plain: { asElement: "ordinary-data", nested: { value: 4 } },
+					},
+					callbackFailure: expect.stringContaining("expected callback failure"),
+					stringMarker: "main-world",
+					handlesAfterward: ["First", "Second", "First", 9],
+				});
+			} finally {
+				await releaseTab(name, { kill: true });
+				if (browser.browser.connected) await releaseBrowser(browser, { kill: true });
+			}
+		},
+		45_000,
+	);
+});
+
+describe("OMP-owned browser input", () => {
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"clicks background tabs through selector, observed handle, and raw Puppeteer actions",
+		async () => {
+			const browser = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
+			if (!("browser" in browser)) throw new Error("Expected a Puppeteer browser");
+			const name = `background-input-${process.pid}`;
+			const session = {
+				cwd: process.cwd(),
+				hasUI: false,
+				settings: { get: () => undefined },
+				getSessionFile: () => null,
+			} as unknown as ToolSession;
+			try {
+				await acquireTab(name, browser, {
+					url: `data:text/html,${encodeURIComponent("<button onclick=\"document.querySelector('output').textContent++\">Increment</button><output>0</output>")}`,
+					timeoutMs: 30_000,
+				});
+				const foreground = await browser.browser.newPage();
+				try {
+					await foreground.bringToFront();
+					const result = await runInTab(name, {
+						code: `
+							await wait(500);
+							await tab.click("button");
+							const observation = await tab.observe();
+							await (await tab.id(observation.elements[0].id)).click();
+							await page.click("button");
+							return await page.$eval("output", element => element.textContent);
+						`,
+						timeoutMs: 15_000,
+						session,
+					});
+					expect(result.returnValue).toBe("3");
+				} finally {
+					await foreground.close();
+				}
+			} finally {
+				await releaseTab(name, { kill: true });
+				if (browser.browser.connected) await releaseBrowser(browser, { kill: true });
+			}
+		},
+		45_000,
+	);
+});
+
+describe("visible OMP-owned browser tabs", () => {
+	it.skipIf(!VISIBLE_BROWSER_AVAILABLE)(
 		"creates independent pages without pinning the resizable window viewport",
 		async () => {
 			let browser: BrowserHandle | undefined;
@@ -225,16 +372,22 @@ describe("visible OMP-owned browser tabs", () => {
 			try {
 				browser = await acquireBrowser({ kind: "headless", headless: false }, { cwd: process.cwd() });
 				if (!("browser" in browser)) throw new Error("Expected a Puppeteer browser");
-				// Shared broker launches use --no-startup-window. Mirror that empty
-				// target set even though bun tests use the process-local launcher.
-				for (const page of await browser.browser.pages()) await page.close();
-				expect(await browser.browser.pages()).toHaveLength(0);
 
 				const firstName = `visible-owned-a-${process.pid}-${Math.random().toString(36).slice(2)}`;
 				const firstUrl = `data:text/html,<title>${firstName}</title><main>first</main>`;
 				const first = await acquireTab(firstName, browser, { url: firstUrl, timeoutMs: 30_000 });
 				names.push(firstName);
-				const firstPage = (await browser.browser.pages()).find(page => page.url() === firstUrl);
+
+				// Shared broker launches use --no-startup-window. Mirror that
+				// OMP-owned-only target set, but only after the owned page exists:
+				// a headful Chromium quits when its last window closes, so closing
+				// every page first would kill the browser this test still needs.
+				for (const page of await browser.browser.pages()) {
+					if (page.url() !== firstUrl) await page.close();
+				}
+				const remaining = await browser.browser.pages();
+				expect(remaining.map(page => page.url())).toEqual([firstUrl]);
+				const firstPage = remaining[0];
 				if (!firstPage) throw new Error("Expected the first managed page");
 
 				const before = await firstPage.evaluate(() => ({ width: innerWidth, height: innerHeight }));

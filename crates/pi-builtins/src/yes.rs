@@ -54,9 +54,10 @@ impl Utility for Yes {
 		prepare_buffer(&mut buffer);
 
 		match exec(&buffer, host) {
-			// A process `yes` normally dies from SIGPIPE when its consumer closes.
-			// The builtin must instead recognize EPIPE and end without a diagnostic.
-			ExecStop::Io(error) if error.kind() == io::ErrorKind::BrokenPipe => 0,
+			// Stop the infinite producer once the reader is gone.
+			ExecStop::Io(error) if error.kind() == io::ErrorKind::BrokenPipe => {
+				crate::host::SIGPIPE_EXIT_CODE
+			},
 			ExecStop::Io(error) => {
 				host.error(format!("standard output: {}", strip_errno(&error)), 1);
 				1
@@ -242,10 +243,10 @@ mod tests {
 		let parsed = Yes::try_parse_from(argv).expect("test arguments should parse");
 		let (mut host, capture) = Host::for_test("yes", Vec::new(), Path::new("/"));
 		let state = Arc::new(Mutex::new(WriterState { bytes: Vec::new(), remaining: budget }));
-		host.stdout = OpenFile::Stream(Box::new(FailingWriter {
+		host.set_test_stdout(OpenFile::Stream(Box::new(FailingWriter {
 			state: Arc::clone(&state),
 			fail_kind,
-		}));
+		})));
 
 		let code = parsed.run(&mut host);
 		let stdout = String::from_utf8(state.lock().bytes.clone()).expect("yes output is UTF-8");
@@ -257,12 +258,12 @@ mod tests {
 		// Failure mode: clap rejecting `yes -n` / `yes --no` / `yes -1` as
 		// unknown options where GNU yes echoes them.
 		let (code, stdout, stderr) = run_with(&["-n"], 6, io::ErrorKind::BrokenPipe);
-		assert_eq!(code, 0);
+		assert_eq!(code, crate::host::SIGPIPE_EXIT_CODE);
 		assert_eq!(stdout, "-n\n-n\n");
 		assert_eq!(stderr, "");
 
 		let (code, stdout, _) = run_with(&["--no", "-1"], 16, io::ErrorKind::BrokenPipe);
-		assert_eq!(code, 0);
+		assert_eq!(code, crate::host::SIGPIPE_EXIT_CODE);
 		assert_eq!(stdout, "--no -1\n--no -1\n");
 	}
 
@@ -270,7 +271,7 @@ mod tests {
 	fn help_is_special_only_as_sole_argument() {
 		// Failure mode: `yes --help me` rendering help; GNU echoes "--help me".
 		let (code, stdout, _) = run_with(&["--help", "me"], 20, io::ErrorKind::BrokenPipe);
-		assert_eq!(code, 0);
+		assert_eq!(code, crate::host::SIGPIPE_EXIT_CODE);
 		assert_eq!(stdout, "--help me\n--help me\n");
 	}
 
@@ -282,7 +283,7 @@ mod tests {
 
 		// Failure mode: `yes --version x` printing the version banner.
 		let (code, stdout, _) = run_with(&["--version", "x"], 24, io::ErrorKind::BrokenPipe);
-		assert_eq!(code, 0);
+		assert_eq!(code, crate::host::SIGPIPE_EXIT_CODE);
 		assert_eq!(stdout, "--version x\n--version x\n");
 	}
 
@@ -290,18 +291,18 @@ mod tests {
 	fn leading_double_dash_is_operand_separator() {
 		// Failure mode: the rewrite doubling `--` so `yes --` echoes "--".
 		let (code, stdout, _) = run_with(&["--"], 4, io::ErrorKind::BrokenPipe);
-		assert_eq!(code, 0);
+		assert_eq!(code, crate::host::SIGPIPE_EXIT_CODE);
 		assert_eq!(stdout, "y\ny\n");
 
 		let (code, stdout, _) = run_with(&["--", "--help"], 14, io::ErrorKind::BrokenPipe);
-		assert_eq!(code, 0);
+		assert_eq!(code, crate::host::SIGPIPE_EXIT_CODE);
 		assert_eq!(stdout, "--help\n--help\n");
 	}
 
 	#[test]
-	fn broken_pipe_is_clean_exit() {
+	fn broken_pipe_stops_with_sigpipe_status() {
 		let (code, stdout, stderr) = run_with(&[], 100, io::ErrorKind::BrokenPipe);
-		assert_eq!(code, 0);
+		assert_eq!(code, crate::host::SIGPIPE_EXIT_CODE);
 		assert!(stdout.starts_with("y\ny\n"), "expected default 'y' lines, got {stdout:?}");
 		assert_eq!(stdout.len(), 100);
 		assert_eq!(stderr, "");
@@ -311,7 +312,7 @@ mod tests {
 	fn custom_operands_join_with_spaces_and_repeat() {
 		let (code, stdout, stderr) =
 			run_with(&["hello", "world"], 12 * 100, io::ErrorKind::BrokenPipe);
-		assert_eq!(code, 0);
+		assert_eq!(code, crate::host::SIGPIPE_EXIT_CODE);
 		assert_eq!(stdout.lines().count(), 100);
 		for line in stdout.lines() {
 			assert_eq!(line, "hello world");

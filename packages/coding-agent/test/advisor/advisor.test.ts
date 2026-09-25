@@ -1,13 +1,25 @@
 import { describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { type AgentMessage, type AgentTelemetryConfig, Tokenizer } from "@oh-my-pi/pi-agent-core";
+import {
+	buildOpenAiNativeHistory,
+	createCompactionSummaryMessage,
+	defaultConvertToLlm,
+} from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import type {
+	ResponseFileSearchToolCall,
+	ResponseFunctionWebSearch,
+	ResponseInput,
+	ResponseToolSearchOutputItemParam,
+} from "@oh-my-pi/pi-ai/providers/openai-responses-wire";
+import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
-import type { TUI } from "@oh-my-pi/pi-tui";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	AdviseTool,
 	type AdvisorAgent,
+	AdvisorEmissionGuard,
 	type AdvisorNote,
 	AdvisorOutputQuarantinedError,
 	AdvisorRuntime,
@@ -22,14 +34,12 @@ import {
 	isInterruptingSeverity,
 	quarantineAdvisorUnsafeOutput,
 	resolveAdvisorDeliveryChannel,
-	type WatchdogConfigDoc,
 } from "../../src/advisor";
-import type { ModelRegistry } from "../../src/config/model-registry";
-import type { Settings } from "../../src/config/settings";
-import { type AdvisorConfigDeps, AdvisorConfigOverlayComponent } from "../../src/modes/components/advisor-config";
-import { createAdvisorMessageCard } from "../../src/modes/components/advisor-message";
-import { getThemeByName, setThemeInstance } from "../../src/modes/theme/theme";
+import { createAdvisorMessageCard } from "@oh-my-pi/pi-tui/chat/advisor-message";
+import { getThemeByName } from "@oh-my-pi/pi-tui/theme";
+import { obfuscateMessages } from "../../src/secrets/message-transform";
 import { SecretObfuscator } from "../../src/secrets/obfuscator";
+import { getOpenAiRemoteCompactionPayload } from "../../src/session/session-context";
 import { formatSessionHistoryMarkdown } from "../../src/session/session-history-format";
 import { YieldQueue } from "../../src/session/yield-queue";
 
@@ -54,6 +64,23 @@ function promptText(input: string | AgentMessage[]): string {
 			return String(m);
 		})
 		.join("\n");
+}
+
+/** High-entropy secret with no repeated 8-char window, so any surviving window is a leak. */
+function distinctSecret(length: number): string {
+	let secret = "";
+	for (let i = 0; secret.length < length; i++) secret += Bun.hash(`secret-${i}`).toString(36);
+	return secret.slice(0, length);
+}
+
+/** 8-char windows of `secret` present in `text`: a truncation cut leaks a secret as fragments, not whole. */
+function leakedSecretPieces(text: string, secret: string): string[] {
+	const pieces: string[] = [];
+	for (let i = 0; i + 8 <= secret.length; i++) {
+		const piece = secret.slice(i, i + 8);
+		if (text.includes(piece)) pieces.push(piece);
+	}
+	return pieces;
 }
 
 describe("advisor", () => {
@@ -298,6 +325,277 @@ describe("advisor", () => {
 		});
 	});
 
+	describe("formatSessionHistoryMarkdown expandToolIO", () => {
+		const askCall = {
+			role: "assistant",
+			content: [
+				{
+					type: "toolCall",
+					id: "ask-1",
+					name: "ask",
+					arguments: {
+						questions: [
+							{
+								id: "deploy",
+								question: "Authorize deployment?",
+								options: [{ label: "Yes" }, { label: "No" }],
+							},
+						],
+					},
+				},
+			],
+			timestamp: 1,
+		} as unknown as AgentMessage;
+		const askResult = {
+			role: "toolResult",
+			toolCallId: "ask-1",
+			toolName: "ask",
+			content: [{ type: "text", text: "User selected: Yes" }],
+			details: { selectedOptions: ["Yes"] },
+			isError: false,
+			timestamp: 2,
+		} as unknown as AgentMessage;
+
+		it("includes the full ask question and user answer for advisor reviews", () => {
+			const compact = formatSessionHistoryMarkdown([askCall, askResult], { watchedRoles: true });
+			const expanded = formatSessionHistoryMarkdown([askCall, askResult], {
+				watchedRoles: true,
+				expandToolIO: true,
+			});
+
+			expect(compact).not.toContain("User selected: Yes");
+			expect(expanded).toContain('"question": "Authorize deployment?"');
+			expect(expanded).toContain('"label": "Yes"');
+			expect(expanded).toContain("User selected: Yes");
+		});
+
+		it("bounds long ask questions and custom answers with visible head and tail context", () => {
+			const questionEnd = "question-at-end";
+			const answerEnd = "answer-at-end";
+			const longQuestion = {
+				...(askCall as unknown as { content: { arguments: { questions: unknown[] } }[] }),
+				content: [
+					{
+						...(askCall as unknown as { content: Record<string, unknown>[] }).content[0],
+						arguments: {
+							questions: [
+								{
+									id: "deploy",
+									question: `question-start ${"context ".repeat(1200)}${questionEnd}`,
+									options: [{ label: "Custom" }],
+								},
+							],
+						},
+					},
+				],
+			} as unknown as AgentMessage;
+			const longAnswer = {
+				...(askResult as unknown as Record<string, unknown>),
+				content: [{ type: "text", text: `answer-start ${"detail ".repeat(1200)}${answerEnd}` }],
+			} as unknown as AgentMessage;
+
+			const expanded = formatSessionHistoryMarkdown([longQuestion, longAnswer], { expandToolIO: true });
+
+			expect(expanded).toContain("question-start");
+			expect(expanded).toContain(questionEnd);
+			expect(expanded).toContain("answer-start");
+			expect(expanded).toContain(answerEnd);
+			expect(expanded.match(/elided/g)?.length).toBeGreaterThanOrEqual(2);
+			expect(Buffer.byteLength(expanded)).toBeLessThan(18 * 1024);
+		});
+
+		it("recovers questions from orphaned ask result details", () => {
+			const orphan = {
+				role: "toolResult",
+				toolCallId: "ask-orphan",
+				toolName: "ask",
+				content: [{ type: "text", text: "deploy: Yes" }],
+				details: {
+					results: [
+						{
+							id: "deploy",
+							question: "Authorize production deployment?",
+							options: ["Yes", "No"],
+							multi: false,
+							selectedOptions: ["Yes"],
+						},
+					],
+				},
+				isError: false,
+				timestamp: 2,
+			} as unknown as AgentMessage;
+
+			const expanded = formatSessionHistoryMarkdown([orphan], { expandToolIO: true });
+
+			expect(expanded).toContain("Authorize production deployment?");
+			expect(expanded).toContain("deploy: Yes");
+		});
+
+		it("bounds expanded tool results with visible head and tail context", () => {
+			const result = {
+				role: "toolResult",
+				toolCallId: "read-1",
+				toolName: "read",
+				content: [{ type: "text", text: `first\n${"middle\n".repeat(2000)}last` }],
+				isError: false,
+				timestamp: 2,
+			} as unknown as AgentMessage;
+
+			const expanded = formatSessionHistoryMarkdown([result], { expandToolIO: true });
+
+			expect(expanded).toContain("first");
+			expect(expanded).toContain("last");
+			expect(expanded).toContain("elided");
+			expect(Buffer.byteLength(expanded)).toBeLessThan(9 * 1024);
+		});
+
+		it("counts adaptive Markdown fences inside the result budget", () => {
+			const result = {
+				role: "toolResult",
+				toolCallId: "read-fence",
+				toolName: "read",
+				content: [{ type: "text", text: "`".repeat(8_000) }],
+				isError: false,
+				timestamp: 2,
+			} as unknown as AgentMessage;
+
+			const expanded = formatSessionHistoryMarkdown([result], { expandToolIO: true });
+
+			expect(expanded).toContain("Tool result:");
+			expect(Buffer.byteLength(expanded)).toBeLessThan(9 * 1024);
+		});
+
+		it("does not mark complete pathological fence content as elided", () => {
+			const result = {
+				role: "toolResult",
+				toolCallId: "read-fence-complete",
+				toolName: "read",
+				content: [{ type: "text", text: "`".repeat(3_000) }],
+				isError: false,
+				timestamp: 2,
+			} as unknown as AgentMessage;
+
+			const expanded = formatSessionHistoryMarkdown([result], { expandToolIO: true });
+
+			expect(expanded).not.toContain("elided");
+			expect(expanded).toContain("`".repeat(3_000));
+		});
+
+		it("preserves head and tail for oversized single-line results", () => {
+			const result = {
+				role: "toolResult",
+				toolCallId: "read-1",
+				toolName: "read",
+				content: [{ type: "text", text: `head-${"x".repeat(20_000)}-tail` }],
+				isError: false,
+				timestamp: 2,
+			} as unknown as AgentMessage;
+
+			const expanded = formatSessionHistoryMarkdown([result], { expandToolIO: true });
+
+			expect(expanded).toContain("head-");
+			expect(expanded).toContain("elided");
+			expect(expanded).toContain("-tail");
+			expect(Buffer.byteLength(expanded)).toBeLessThan(9 * 1024);
+		});
+
+		it("still adds its own head-tail marker when retained output contains an upstream elision marker", () => {
+			const result = {
+				role: "toolResult",
+				toolCallId: "read-1",
+				toolName: "read",
+				content: [{ type: "text", text: `head-${"x".repeat(20_000)}-[…9B elided…]-tail` }],
+				isError: false,
+				timestamp: 2,
+			} as unknown as AgentMessage;
+
+			const expanded = formatSessionHistoryMarkdown([result], { expandToolIO: true });
+
+			expect(expanded).toContain("head-");
+			expect(expanded).toContain("-tail");
+			expect(expanded.match(/elided/g)).toHaveLength(2);
+		});
+
+		it("keeps failure details alongside a partial edit diff", () => {
+			const result = {
+				role: "toolResult",
+				toolCallId: "edit-1",
+				toolName: "edit",
+				content: [{ type: "text", text: "Applied first file.\nFailed to match second file; no later edits ran." }],
+				details: { diff: "--- a/first.ts\n+++ b/first.ts\n@@\n-old\n+new" },
+				isError: true,
+				timestamp: 2,
+			} as unknown as AgentMessage;
+
+			const expanded = formatSessionHistoryMarkdown([result], {
+				expandEditDiffs: true,
+				expandToolIO: true,
+			});
+
+			expect(expanded).toContain("+++ b/first.ts");
+			expect(expanded).toContain("Failed to match second file");
+		});
+
+		it("keeps successful edit results when no textual diff was rendered", () => {
+			const result = {
+				role: "toolResult",
+				toolCallId: "edit-1",
+				toolName: "edit",
+				content: [{ type: "text", text: "Moved to src/new-name.ts" }],
+				details: { diff: "" },
+				isError: false,
+				timestamp: 2,
+			} as unknown as AgentMessage;
+
+			const expanded = formatSessionHistoryMarkdown([result], {
+				expandEditDiffs: true,
+				expandToolIO: true,
+			});
+
+			expect(expanded).toContain("Moved to src/new-name.ts");
+		});
+
+		it("keeps warnings alongside a successful edit diff", () => {
+			const result = {
+				role: "toolResult",
+				toolCallId: "edit-1",
+				toolName: "edit",
+				content: [{ type: "text", text: "[a.ts]\n-old\n+new\n\nWarnings:\nMatched ambiguous context." }],
+				details: { diff: "--- a/a.ts\n+++ b/a.ts\n@@\n-old\n+new" },
+				isError: false,
+				timestamp: 2,
+			} as unknown as AgentMessage;
+
+			const expanded = formatSessionHistoryMarkdown([result], {
+				expandEditDiffs: true,
+				expandToolIO: true,
+			});
+
+			expect(expanded).toContain("+++ b/a.ts");
+			expect(expanded).toContain("Warnings:\nMatched ambiguous context.");
+		});
+
+		it("keeps rename metadata alongside a successful edit diff", () => {
+			const result = {
+				role: "toolResult",
+				toolCallId: "edit-1",
+				toolName: "edit",
+				content: [{ type: "text", text: "[src/old.ts]\nMoved to src/new.ts\n-old\n+new" }],
+				details: { diff: "@@\n-old\n+new", move: "src/new.ts" },
+				isError: false,
+				timestamp: 2,
+			} as unknown as AgentMessage;
+
+			const expanded = formatSessionHistoryMarkdown([result], {
+				expandEditDiffs: true,
+				expandToolIO: true,
+			});
+
+			expect(expanded).toContain("@@\n-old\n+new");
+			expect(expanded).toContain("Moved to src/new.ts");
+		});
+	});
+
 	describe("advisor yield-queue dispatcher", () => {
 		it("batches advice notes into one custom message", async () => {
 			const injected: AgentMessage[] = [];
@@ -387,15 +685,6 @@ describe("advisor", () => {
 	});
 
 	describe("AdviseTool", () => {
-		it("forwards advice to the callback and returns details", async () => {
-			const onAdvice = vi.fn();
-			const tool = new AdviseTool(onAdvice);
-			const result = await tool.execute("tc-1", { note: "x", severity: "concern" });
-			expect(onAdvice).toHaveBeenCalledWith("x", "concern");
-			expect(result.details).toEqual({ note: "x", severity: "concern" });
-			expect(result.useless).toBe(true);
-		});
-
 		it("suppresses duplicate advice notes from the same advisor session", async () => {
 			const onAdvice = vi.fn();
 			const tool = new AdviseTool(onAdvice);
@@ -440,21 +729,55 @@ describe("advisor", () => {
 			expect(onAdvice).toHaveBeenNthCalledWith(3, note, "blocker");
 		});
 
-		it("defers non-blockers during in-progress updates and flushes them on the next completed update", async () => {
+		it("routes a same-text blocker escalation of an already-delivered note with the production guard", async () => {
+			// Reproduced failure: a nit that already reached the primary, re-raised
+			// as a blocker, was rejected by guard dedupe and never routed. Dedupe is
+			// rank-aware: strictly-higher severity is a real escalation, while equal
+			// or lower retags of the same text stay suppressed.
+			const delivered: { note: string; severity?: string }[] = [];
+			const tool = new AdviseTool(
+				(note, severity) => delivered.push({ note, severity }),
+				new AdvisorEmissionGuard(),
+			);
+			const note = "The migration drops the users table without a backup.";
+
+			await tool.execute("e-0", { note, severity: "nit" });
+			const blocker = await tool.execute("e-1", {
+				note: "THE MIGRATION DROPS THE USERS TABLE WITHOUT A BACKUP!",
+				severity: "blocker",
+			});
+			expect(delivered).toEqual([
+				{ note, severity: "nit" },
+				{ note: "THE MIGRATION DROPS THE USERS TABLE WITHOUT A BACKUP!", severity: "blocker" },
+			]);
+			expect(JSON.stringify(blocker.content)).toContain("Delivered.");
+
+			// Equal/lower retags of the delivered blocker are duplicates.
+			const concern = await tool.execute("e-2", { note, severity: "concern" });
+			const nit = await tool.execute("e-3", { note, severity: "nit" });
+			expect(JSON.stringify(concern.content)).toContain("Dropped: already raised");
+			expect(JSON.stringify(nit.content)).toContain("Dropped: already raised");
+			expect(delivered).toHaveLength(2);
+		});
+
+		it("defers non-blockers per update and flushes the backlog on the next completed update", async () => {
 			const onAdvice = vi.fn();
 			const tool = new AdviseTool(onAdvice);
 			const note = "The result still needs a focused regression test.";
 
 			tool.beginUpdate(true);
 			const deferred = await tool.execute("tc-1", { note, severity: "concern" });
-			await tool.execute("tc-2", { note: "Minor naming cleanup.", severity: "nit" });
-			await tool.execute("tc-3", { note: "A destructive command is running.", severity: "blocker" });
+			await tool.execute("tc-2", { note: "A destructive command is running.", severity: "blocker" });
 
 			// Deferred notes are NOT delivered mid-turn; blocker still goes through.
 			expect(onAdvice).toHaveBeenCalledTimes(1);
 			expect(onAdvice).toHaveBeenCalledWith("A destructive command is running.", "blocker");
 			// The tool tells the advisor the note is deferred, not silently "Recorded.".
-			expect(JSON.stringify(deferred.content)).toContain("Deferred");
+			expect(JSON.stringify(deferred.content)).toContain("Queued for the end of the turn");
+
+			// A second distinct concern in a later in-progress update queues its own slot.
+			tool.beginUpdate(true);
+			await tool.execute("tc-3", { note: "Minor naming cleanup.", severity: "nit" });
 
 			// Completing the turn deterministically flushes both withheld notes,
 			// oldest first — no reliance on the advisor model re-raising them.
@@ -497,122 +820,343 @@ describe("advisor", () => {
 			expect(onAdvice).toHaveBeenCalledWith("Same point raised repeatedly.", "concern");
 		});
 
+		it("flushes one deferred concern per update past the per-update emission budget on a late catch-up", async () => {
+			// Regression for #10271 ("The Advisor is Late"): in yolo mode the primary
+			// is continuously mid-turn, so the advisor runs many in-progress updates
+			// (one concern each) and the whole backlog is replayed in a single catch-up
+			// flush. Each note cleared the emission guard when it was emitted, so the
+			// flush must deliver the full backlog instead of collapsing it to one note.
+			const delivered: string[] = [];
+			// Mirror AgentSession: admission (filter + per-update budget) runs at
+			// emission; routing never re-filters.
+			const tool = new AdviseTool(note => delivered.push(note), new AdvisorEmissionGuard());
+			const concerns = [
+				"Bare `location` cannot work outside the page; inspect with `await page.url()`.",
+				"Scope navigation to the visualizer's own `.viz-container`.",
+				'BFS uses `progressType="bar"`, so it has no `.viz-pill` controls.',
+				"Tab switching delegates from a trusted click; a dispatched KeyboardEvent is untrusted.",
+			];
+
+			// Each concern arrives in its own in-progress advisor update.
+			for (const [i, note] of concerns.entries()) {
+				tool.beginUpdate(true);
+				await tool.execute(`c-${i}`, { note, severity: "concern" });
+			}
+			// All withheld mid-turn — nothing reaches the primary yet.
+			expect(delivered).toEqual([]);
+
+			// Turn completes: the deferred backlog flushes, oldest first, in full.
+			tool.beginUpdate(false);
+			expect(delivered).toEqual(concerns);
+		});
+
+		it("caps an in-progress prompt spraying distinct notes and says so without promising delivery", async () => {
+			// A single in-progress advisor prompt that emits several distinct notes
+			// spends the update's one budget slot on the first; the rest are dropped
+			// at emission, so the flush cannot deliver an unbounded batch (#3520).
+			// The rejected calls must be told they were dropped — the previous
+			// unconditional "will be delivered automatically" promised delivery for
+			// notes the guard had already rejected, and the advice was lost.
+			const delivered: string[] = [];
+			const tool = new AdviseTool(note => delivered.push(note), new AdvisorEmissionGuard({ budgetPerUpdate: 1 }));
+
+			tool.beginUpdate(true);
+			const accepted = await tool.execute("x-0", { note: "First mid-turn concern.", severity: "concern" });
+			const rejected = await tool.execute("x-1", { note: "Second mid-turn concern.", severity: "concern" });
+			const rejected2 = await tool.execute("x-2", { note: "Third mid-turn concern.", severity: "concern" });
+			expect(JSON.stringify(accepted.content)).toContain("Queued for the end of the turn");
+			for (const result of [rejected, rejected2]) {
+				const text = JSON.stringify(result.content);
+				expect(text).toContain("Dropped:");
+				expect(text).toContain("budget");
+				expect(text).not.toContain("delivered automatically");
+				expect(text).not.toContain("queued");
+			}
+			tool.beginUpdate(false);
+			expect(delivered).toEqual(["First mid-turn concern."]);
+		});
+
+		it("flushes only the concern when it displaces a pending nit from the same in-progress update", async () => {
+			// Rank escalation inside one in-progress update is not a flood: the
+			// concern takes the update's slot and the guard names the displaced
+			// pending nit, which must not be flushed alongside it.
+			const delivered: { note: string; severity?: string }[] = [];
+			const tool = new AdviseTool(
+				(note, severity) => delivered.push({ note, severity }),
+				new AdvisorEmissionGuard({ budgetPerUpdate: 1 }),
+			);
+
+			tool.beginUpdate(true);
+			await tool.execute("e-0", { note: "Nit: rename the helper.", severity: "nit" });
+			await tool.execute("e-1", { note: "Concern: the helper drops the lock early.", severity: "concern" });
+			// A blocker in the same update delivers live without touching the slot.
+			await tool.execute("e-2", { note: "Blocker: the write path is broken.", severity: "blocker" });
+			expect(delivered).toEqual([{ note: "Blocker: the write path is broken.", severity: "blocker" }]);
+
+			tool.beginUpdate(false);
+			expect(delivered).toEqual([
+				{ note: "Blocker: the write path is broken.", severity: "blocker" },
+				{ note: "Concern: the helper drops the lock early.", severity: "concern" },
+			]);
+		});
+
+		it("keeps a prior update's pending reservation when the current update displaces its own", async () => {
+			// Displacement is scoped to the update that owns the budget slot: an
+			// older update's accepted reservation holds no slot in the current
+			// update and must survive its eviction rounds.
+			const delivered: { note: string; severity?: string }[] = [];
+			const tool = new AdviseTool(
+				(note, severity) => delivered.push({ note, severity }),
+				new AdvisorEmissionGuard({ budgetPerUpdate: 1 }),
+			);
+
+			tool.beginUpdate(true);
+			await tool.execute("p-0", { note: "Nit from the first review.", severity: "nit" });
+			tool.beginUpdate(true);
+			await tool.execute("p-1", { note: "Nit from the second review.", severity: "nit" });
+			const escalation = await tool.execute("p-2", { note: "Concern from the second review.", severity: "concern" });
+			// The concern was admitted — the SECOND review's nit paid for it.
+			expect(JSON.stringify(escalation.content)).toContain("Queued for the end of the turn");
+
+			tool.beginUpdate(false);
+			expect(delivered).toEqual([
+				{ note: "Nit from the first review.", severity: "nit" },
+				{ note: "Concern from the second review.", severity: "concern" },
+			]);
+		});
+
+		it("accepts multiple deferred notes up to budget and evicts lowest-rank at capacity", async () => {
+			// With budget > 1, the guard accepts multiple same-update notes into
+			// free slots. When full, a higher-severity note displaces the
+			// lowest-rank PENDING entry — not the first one, never a routed one.
+			const delivered: { note: string; severity?: string }[] = [];
+			const tool = new AdviseTool(
+				(note, severity) => delivered.push({ note, severity }),
+				new AdvisorEmissionGuard({ budgetPerUpdate: 3 }),
+			);
+
+			tool.beginUpdate(true);
+			// Three free slots: nit, nit, concern all accepted.
+			await tool.execute("b-0", { note: "Nit: naming.", severity: "nit" });
+			await tool.execute("b-1", { note: "Nit: formatting.", severity: "nit" });
+			await tool.execute("b-2", { note: "Concern: lock leak.", severity: "concern" });
+			// Budget full (3/3). New concern evicts the lowest-rank entry (a nit),
+			// not the first note or the existing concern.
+			await tool.execute("b-3", { note: "Concern: null deref.", severity: "concern" });
+
+			tool.beginUpdate(false);
+			// Flush delivers 3 notes: the surviving nit, first concern, second concern.
+			// The evicted nit (lowest-rank at capacity) must NOT appear.
+			expect(delivered).toHaveLength(3);
+			const notes = delivered.map(d => d.note);
+			expect(notes).toContain("Concern: lock leak.");
+			expect(notes).toContain("Concern: null deref.");
+			// Exactly one nit survived (either one — both are rank 1).
+			const nits = notes.filter(n => n.startsWith("Nit:"));
+			expect(nits).toHaveLength(1);
+		});
+
+		it("rate-limits an equal-rank newcomer after a pending note escalates in place", async () => {
+			// When a deferred note is re-emitted at higher severity, the tool
+			// escalates it in place and the guard's slot tracks the real rank —
+			// so an equal-rank newcomer at a full budget is rate-limited instead
+			// of displacing the genuinely-escalated note.
+			const delivered: { note: string; severity?: string }[] = [];
+			const tool = new AdviseTool(
+				(note, severity) => delivered.push({ note, severity }),
+				new AdvisorEmissionGuard({ budgetPerUpdate: 2 }),
+			);
+
+			tool.beginUpdate(true);
+			// Slot 1: "A" admitted as nit.
+			await tool.execute("d-0", { note: "Issue A.", severity: "nit" });
+			// Re-emit "A" as concern — escalates in place; the slot's rank follows.
+			await tool.execute("d-1", { note: "Issue A.", severity: "concern" });
+			// Slot 2: "B" admitted as concern.
+			await tool.execute("d-2", { note: "Issue B.", severity: "concern" });
+			// Budget full (2/2), all slots at concern rank: "C" displaces nothing.
+			const rejected = await tool.execute("d-3", { note: "Issue C.", severity: "concern" });
+			expect(JSON.stringify(rejected.content)).toContain("Dropped:");
+
+			tool.beginUpdate(false);
+			// Flush delivers the escalated "A" at its concern severity, then "B".
+			expect(delivered).toEqual([
+				{ note: "Issue A.", severity: "concern" },
+				{ note: "Issue B.", severity: "concern" },
+			]);
+		});
+
+		it("does not let a suppressed phrase burn the deferred slot ahead of a real concern", async () => {
+			// A noise phrase emitted before a substantive concern in the same
+			// in-progress update must not consume the update's slot. The emission
+			// guard filters it out at emission without spending the budget, so the
+			// following concern is still reserved and flushed — and the noise call
+			// is told it carried no content.
+			const delivered: string[] = [];
+			const tool = new AdviseTool(note => delivered.push(note), new AdvisorEmissionGuard({ budgetPerUpdate: 1 }));
+
+			tool.beginUpdate(true);
+			const noise = await tool.execute("n-0", { note: "Stop.", severity: "concern" });
+			expect(JSON.stringify(noise.content)).toContain("nothing actionable");
+			await tool.execute("n-1", {
+				note: "The migration drops the users table without a backup.",
+				severity: "concern",
+			});
+			tool.beginUpdate(false);
+			expect(delivered).toEqual(["The migration drops the users table without a backup."]);
+		});
+
+		it("labels a live over-budget note as rate-limited, not a duplicate", async () => {
+			// Live path with an explicit budget of 1: the first distinct concern is
+			// routed; the second is rejected for budget, and the acknowledgment
+			// must say so — mislabeling it "Duplicate advice ignored." told the
+			// advisor the note had already landed, so it never re-raised.
+			const delivered: string[] = [];
+			const tool = new AdviseTool(note => delivered.push(note), new AdvisorEmissionGuard({ budgetPerUpdate: 1 }));
+
+			tool.beginUpdate(false);
+			const first = await tool.execute("s-0", { note: "First distinct live concern.", severity: "concern" });
+			const second = await tool.execute("s-1", { note: "Second distinct live concern.", severity: "concern" });
+			const third = await tool.execute("s-2", { note: "Third distinct live concern.", severity: "concern" });
+			expect(JSON.stringify(first.content)).toContain("Delivered.");
+			for (const result of [second, third]) {
+				const text = JSON.stringify(result.content);
+				expect(text).toContain("budget");
+				expect(text).not.toContain("Duplicate");
+			}
+			expect(delivered).toEqual(["First distinct live concern."]);
+		});
+
+		it("cannot create an extra live slot by escalating past a delivered nit", async () => {
+			// A delivered (routed) nit keeps its budget slot: delivery cannot be
+			// retracted. A distinct higher-severity note later in the same update
+			// is rate-limited instead of producing a second over-budget delivery.
+			const delivered: { note: string; severity?: string }[] = [];
+			const tool = new AdviseTool(
+				(note, severity) => delivered.push({ note, severity }),
+				new AdvisorEmissionGuard({ budgetPerUpdate: 1 }),
+			);
+
+			tool.beginUpdate(false);
+			await tool.execute("r-0", { note: "Nit: rename the helper.", severity: "nit" });
+			const concern = await tool.execute("r-1", {
+				note: "Concern: the helper drops the lock early.",
+				severity: "concern",
+			});
+			expect(JSON.stringify(concern.content)).toContain("Dropped:");
+			expect(delivered).toEqual([{ note: "Nit: rename the helper.", severity: "nit" }]);
+		});
+
+		it("delivers a blocker escalation of a reserved note live instead of dropping it as already seen", async () => {
+			// A note reserved as a nit/concern during an in-progress update, then
+			// escalated to blocker before the backlog flushes, even with
+			// casing/punctuation changed, must reuse its normalized reservation and
+			// interrupt at blocker severity now — not be rejected as already-seen
+			// and arrive late at the lower deferred severity.
+			const delivered: { note: string; severity?: string }[] = [];
+			const tool = new AdviseTool(
+				(note, severity) => delivered.push({ note, severity }),
+				new AdvisorEmissionGuard({ budgetPerUpdate: 1 }),
+			);
+			const note = "The migration drops the users table without a backup.";
+			const escalatedNote = "THE MIGRATION DROPS THE USERS TABLE WITHOUT A BACKUP!";
+
+			tool.beginUpdate(true);
+			await tool.execute("e-0", { note, severity: "concern" });
+			// Reserved, not delivered.
+			expect(delivered).toEqual([]);
+
+			tool.beginUpdate(true);
+			await tool.execute("e-1", { note: escalatedNote, severity: "blocker" });
+			// The blocker escalation is delivered live, at blocker severity.
+			expect(delivered).toEqual([{ note: escalatedNote, severity: "blocker" }]);
+
+			// The consumed reservation is not re-delivered as a stale concern at flush.
+			tool.beginUpdate(false);
+			expect(delivered).toEqual([{ note: escalatedNote, severity: "blocker" }]);
+		});
+
+		it("flushDeferredNotes delivers the backlog without resetting the update budget", async () => {
+			// The terminal-boundary flush is not a new advisor update: reserved
+			// notes route immediately and stay charged to the current update as
+			// routed (non-displaceable), so a follow-up emission in the same
+			// update still faces the spent budget. The next beginUpdate resets it.
+			const delivered: { note: string; severity?: string }[] = [];
+			const tool = new AdviseTool(
+				(note, severity) => delivered.push({ note, severity }),
+				new AdvisorEmissionGuard({ budgetPerUpdate: 1 }),
+			);
+
+			tool.beginUpdate(true);
+			await tool.execute("f-0", { note: "Nit held behind the turn.", severity: "nit" });
+			expect(delivered).toEqual([]);
+
+			tool.flushDeferredNotes();
+			expect(delivered).toEqual([{ note: "Nit held behind the turn.", severity: "nit" }]);
+
+			// Same update continues: the flushed nit's slot is charged and routed,
+			// so a distinct concern is rate-limited — no second delivery.
+			const concern = await tool.execute("f-1", { note: "Concern after the flush.", severity: "concern" });
+			expect(JSON.stringify(concern.content)).toContain("budget");
+			expect(delivered).toHaveLength(1);
+
+			// The next advisor update starts with a fresh budget.
+			tool.beginUpdate(false);
+			await tool.execute("f-2", { note: "Concern after the flush.", severity: "concern" });
+			expect(delivered).toEqual([
+				{ note: "Nit held behind the turn.", severity: "nit" },
+				{ note: "Concern after the flush.", severity: "concern" },
+			]);
+		});
+
+		it("resetDeliveredNotes resets the guard and the pending backlog together", async () => {
+			const delivered: string[] = [];
+			const tool = new AdviseTool(note => delivered.push(note), new AdvisorEmissionGuard({ budgetPerUpdate: 1 }));
+
+			tool.beginUpdate(true);
+			await tool.execute("q-0", { note: "Queued but never flushed.", severity: "concern" });
+			tool.resetDeliveredNotes();
+
+			// The pending reservation is gone: no flush replay after the reset.
+			tool.flushDeferredNotes();
+			expect(delivered).toEqual([]);
+
+			// The guard's dedupe memory is gone too: the same note admits again.
+			await tool.execute("q-1", { note: "Queued but never flushed.", severity: "concern" });
+			expect(delivered).toEqual(["Queued but never flushed."]);
+		});
+
 		it("validates parameters using ArkType", () => {
 			const onAdvice = vi.fn();
 			const tool = new AdviseTool(onAdvice);
 			const valid = tool.parameters({ note: "x", severity: "concern" });
 			expect(valid instanceof type.errors).toBe(false);
 
-			const invalid = tool.parameters({ note: 123, severity: "invalid" as any });
+			const invalid = tool.parameters({ note: 123, severity: "invalid" });
 			expect(invalid instanceof type.errors).toBe(true);
 		});
 	});
 
 	describe("advisor unsafe-output quarantine", () => {
-		it("sanitizes unavailable tool calls before the advisor response reaches context", () => {
+		it("still quarantines a destructive note when the turn also delivers advice", () => {
 			const message = {
 				role: "assistant",
 				content: [
-					{ type: "text", text: "Tell Jack about the hospital newborn registration workflow." },
-					{ type: "toolCall", id: "tc-1", name: "mcp__hospital__notify_parent", arguments: {} },
-				],
-				providerPayload: {
-					type: "openaiResponsesHistory",
-					provider: "openai",
-					items: [{ type: "message", content: [{ type: "output_text", text: "Tell Jack about the hospital." }] }],
-				},
-				stopDetails: { type: "tool_use", explanation: "Tell Jack about the hospital." },
-				stopReason: "toolUse",
-			} as unknown as AssistantMessage;
-
-			const errorMessage = quarantineAdvisorUnsafeOutput(message, new Set(["advise", "read"]));
-			if (errorMessage === undefined) throw new Error("expected unavailable tool quarantine");
-
-			expect(errorMessage).toBe(
-				"Advisor response quarantined: requested unavailable tool mcp__hospital__notify_parent",
-			);
-			expect(message.stopReason).toBe("error");
-			expect(message.errorMessage).toBe(errorMessage);
-			expect(message.content).toEqual([{ type: "text", text: errorMessage }]);
-			expect(message.providerPayload).toBeUndefined();
-			expect(message.stopDetails).toBeUndefined();
-			expect(JSON.stringify(message)).not.toContain("Jack");
-		});
-
-		it("leaves granted advisor tool calls intact", () => {
-			const message = {
-				role: "assistant",
-				content: [{ type: "toolCall", id: "tc-1", name: "advise", arguments: { note: "Check the spec." } }],
-				stopReason: "toolUse",
-			} as unknown as AssistantMessage;
-			const originalContent = message.content;
-
-			expect(quarantineAdvisorUnsafeOutput(message, new Set(["advise"]))).toBeUndefined();
-			expect(message.stopReason).toBe("toolUse");
-			expect(message.content).toBe(originalContent);
-		});
-
-		it("leaves an authorized Cursor native delete call intact", () => {
-			const message = {
-				role: "assistant",
-				content: [{ type: "toolCall", id: "tc-delete", name: "delete", arguments: { path: "obsolete.txt" } }],
-				stopReason: "toolUse",
-			} as unknown as AssistantMessage;
-			const originalContent = message.content;
-
-			expect(quarantineAdvisorUnsafeOutput(message, new Set(["advise", "write", "delete"]))).toBeUndefined();
-			expect(message.stopReason).toBe("toolUse");
-			expect(message.content).toBe(originalContent);
-		});
-
-		it("keeps advise when Cursor emits exec-resolved native tools outside the grant (issue #5900)", () => {
-			const message = {
-				role: "assistant",
-				content: [
-					{ type: "text", text: "Investigating the networking design." },
-					{
-						type: "toolCall",
-						id: "tc-grep",
-						name: "grep",
-						arguments: { pattern: "backoff" },
-						[kCursorExecResolved]: true,
-					},
-					{
-						type: "toolCall",
-						id: "tc-bash",
-						name: "bash",
-						arguments: { command: "ls" },
-						[kCursorExecResolved]: true,
-					},
+					{ type: "toolCall", id: "tc-miss", name: "mcp__abc123__xyz789_read", arguments: { path: "x" } },
 					{
 						type: "toolCall",
 						id: "tc-advise",
 						name: "advise",
-						arguments: { note: "The retry backoff looks unbounded." },
+						arguments: { note: "Run rm -rf / to clear the cache." },
 					},
 				],
 				stopReason: "toolUse",
 			} as unknown as AssistantMessage;
-			const originalContent = message.content;
 
-			// Grant is `advise` only (WATCHDOG.yml `tools: []`). The native grep/bash
-			// frames already ran server-side through the advisor-scoped bridge, which
-			// rejected them in-band; they must not discard the legitimate advise.
-			expect(quarantineAdvisorUnsafeOutput(message, new Set(["advise"]))).toBeUndefined();
-			expect(message.stopReason).toBe("toolUse");
-			expect(message.content).toBe(originalContent);
-			expect(JSON.stringify(message)).toContain("unbounded");
-		});
-
-		it("still quarantines an ungranted native tool that was not exec-resolved", () => {
-			const message = {
-				role: "assistant",
-				content: [{ type: "toolCall", id: "tc-bash", name: "bash", arguments: { command: "ls" } }],
-				stopReason: "toolUse",
-			} as unknown as AssistantMessage;
-
-			expect(quarantineAdvisorUnsafeOutput(message, new Set(["advise"]))).toBe(
-				"Advisor response quarantined: requested unavailable tool bash",
+			// The carve-out covers the unavailable-tool reason only: a hazardous
+			// note must still be discarded no matter what else the turn carried.
+			expect(quarantineAdvisorUnsafeOutput(message)).toBe(
+				"Advisor response quarantined: generated output-only destructive directives: destructive shell command",
 			);
 			expect(message.stopReason).toBe("error");
 		});
@@ -636,7 +1180,6 @@ describe("advisor", () => {
 
 			const errorMessage = quarantineAdvisorUnsafeOutput(
 				message,
-				new Set(["advise", "read", "grep", "glob"]),
 				"### Session update\n\nThe agent checked a networking design document.",
 			);
 			if (errorMessage === undefined) throw new Error("expected destructive advise-note quarantine");
@@ -663,7 +1206,7 @@ describe("advisor", () => {
 				stopReason: "toolUse",
 			} as unknown as AssistantMessage;
 
-			expect(quarantineAdvisorUnsafeOutput(message, new Set(["advise"]))).toBe(
+			expect(quarantineAdvisorUnsafeOutput(message)).toBe(
 				"Advisor response quarantined: generated output-only destructive directives: destructive shell command",
 			);
 		});
@@ -685,13 +1228,7 @@ describe("advisor", () => {
 				stopReason: "toolUse",
 			} as unknown as AssistantMessage;
 
-			expect(
-				quarantineAdvisorUnsafeOutput(
-					message,
-					new Set(["advise"]),
-					"User asked whether `rm -rf .` would be destructive.",
-				),
-			).toBe(
+			expect(quarantineAdvisorUnsafeOutput(message, "User asked whether `rm -rf .` would be destructive.")).toBe(
 				"Advisor response quarantined: generated output-only destructive directives: instruction override, destructive shell command",
 			);
 		});
@@ -716,7 +1253,6 @@ describe("advisor", () => {
 
 			const errorMessage = quarantineAdvisorUnsafeOutput(
 				message,
-				new Set(["advise", "read", "grep", "glob"]),
 				"### Session update\n\nGrep found the networking document is internally consistent.",
 			);
 			if (errorMessage === undefined) throw new Error("expected destructive-output quarantine");
@@ -755,7 +1291,7 @@ describe("advisor", () => {
 			} as unknown as AssistantMessage;
 			const originalContent = message.content;
 
-			expect(quarantineAdvisorUnsafeOutput(message, new Set(["advise"]), sourceText)).toBeUndefined();
+			expect(quarantineAdvisorUnsafeOutput(message, sourceText)).toBeUndefined();
 			expect(message.stopReason).toBe("stop");
 			expect(message.content).toBe(originalContent);
 		});
@@ -800,7 +1336,7 @@ describe("advisor", () => {
 
 			expect(sourceText).toContain("README contains");
 			expect(sourceText).not.toContain("fabricated assistant");
-			expect(quarantineAdvisorUnsafeOutput(message, new Set(["advise"]), sourceText)).toBeUndefined();
+			expect(quarantineAdvisorUnsafeOutput(message, sourceText)).toBeUndefined();
 			expect(message.content).toBe(originalContent);
 		});
 	});
@@ -943,7 +1479,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "first", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host);
 
@@ -963,6 +1498,49 @@ describe("advisor", () => {
 			expect(promptText(promptInputs[1])).toContain("second");
 		});
 
+		it("clears the review latch on reset so a re-primed advisor is not yielded", async () => {
+			// Review feedback on #10463: after a successful review the runtime is
+			// yielded, but reset() (/new, branch, session switch, rewrites) must
+			// drop the latch — the advisor has not reviewed the new conversation,
+			// so the eye stays open until its first post-reset review, and an
+			// aborted prior drain cannot emit a stale advisor_yielded.
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const idleNotifications: number[] = [];
+			const agent: AdvisorAgent = {
+				prompt: async input => {
+					promptInputs.push(input);
+					// Complete the review: an assistant message makes the runtime's
+					// turn-error check see a finished turn.
+					agent.state.messages.push({
+						role: "assistant",
+						content: [{ type: "text", text: "no issues" }],
+						stopReason: "stop",
+					} as AssistantMessage);
+				},
+				abort: () => {},
+				reset: () => {},
+				state: { messages: [] },
+			};
+			const messages: AgentMessage[] = [{ role: "user", content: "work", timestamp: 1 } as AgentMessage];
+			const host: AdvisorRuntimeHost = {
+				snapshotMessages: () => messages,
+				notifyIdle: () => idleNotifications.push(1),
+			};
+			const runtime = new AdvisorRuntime(agent, host);
+
+			expect(runtime.yielded).toBe(false); // nothing reviewed yet
+
+			runtime.onTurnEnd(messages);
+			await runtime.waitForCatchup(1000, 1);
+			expect(runtime.yielded).toBe(true); // review completed
+			expect(idleNotifications).toHaveLength(1);
+
+			runtime.reset("conversation-boundary");
+			expect(runtime.yielded).toBe(false); // re-primed: nothing reviewed in the new conversation
+			await Promise.resolve();
+			expect(idleNotifications).toHaveLength(1); // no stale idle notification after reset
+		});
+
 		it("waits for an in-flight review within the catch-up deadline", async () => {
 			const promptStarted = Promise.withResolvers<void>();
 			const releasePrompt = Promise.withResolvers<void>();
@@ -978,7 +1556,6 @@ describe("advisor", () => {
 			};
 			const runtime = new AdvisorRuntime(agent, {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			});
 
 			runtime.onTurnEnd();
@@ -1010,7 +1587,6 @@ describe("advisor", () => {
 			};
 			const runtime = new AdvisorRuntime(agent, {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			});
 
 			runtime.onTurnEnd();
@@ -1028,7 +1604,6 @@ describe("advisor", () => {
 			releasePrompt.resolve();
 			await settleUntil(() => runtime.backlog === 0);
 		});
-
 		it("preserves the next user turn when an accepted empty stop is pruned", async () => {
 			const promptInputs: Array<string | AgentMessage[]> = [];
 			const agent = makeAgent(promptInputs);
@@ -1037,7 +1612,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host);
 
@@ -1098,7 +1672,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "first", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				maintainContext: async () => {
 					maintainCalls++;
 					if (maintainCalls === 1) {
@@ -1151,7 +1724,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 				maintainContext: async () => {
 					maintainCalls++;
@@ -1186,11 +1758,9 @@ describe("advisor", () => {
 			const promptInputs: Array<string | AgentMessage[]> = [];
 			const { promise: promptStarted, resolve: startPrompt } = Promise.withResolvers<void>();
 			let maintainCalls = 0;
-			let runtime!: AdvisorRuntime;
 			const messages: AgentMessage[] = [{ role: "user", content: "t0", timestamp: 0 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				maintainContext: async () => {
 					maintainCalls++;
 					// Only push new turns during the FIRST drain cycle (first 3 calls)
@@ -1215,7 +1785,7 @@ describe("advisor", () => {
 				reset: () => {},
 				state: { messages: [] },
 			};
-			runtime = new AdvisorRuntime(agent, host);
+			const runtime = new AdvisorRuntime(agent, host);
 
 			runtime.onTurnEnd(messages);
 			await promptStarted;
@@ -1250,7 +1820,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "turn1", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				maintainContext: async () => {
 					maintainCalls++;
 					if (maintainCalls === 1) {
@@ -1303,7 +1872,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "t1", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				maintainContext: async () => {
 					maintainCalls++;
 					if (maintainCalls === 1) {
@@ -1361,7 +1929,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "hello", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				beginAdvisorUpdate: inProgress => updateStates.push(inProgress),
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -1390,7 +1957,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "done", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				beginAdvisorUpdate: inProgress => updateStates.push(inProgress),
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -1419,7 +1985,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "first", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				maintainContext: async () => {
 					throw new Error("maintenance failed");
 				},
@@ -1451,7 +2016,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host);
 			runtime.onTurnEnd();
@@ -1470,7 +2034,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: `token ${secret}`, timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -1493,7 +2056,6 @@ describe("advisor", () => {
 			];
 			const runtime = new AdvisorRuntime(agent, {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			});
 
@@ -1523,7 +2085,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -1552,7 +2113,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -1584,7 +2144,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -1621,7 +2180,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -1662,7 +2220,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -1674,7 +2231,7 @@ describe("advisor", () => {
 			expect(promptText(promptInputs[0])).toContain("$$TOKABC123_");
 			expect(promptText(promptInputs[0])).not.toContain("tok_abc123");
 		});
-		it("does not scan advisor-hidden successful tool-result bodies", async () => {
+		it("obfuscates advisor-visible successful tool-result bodies", async () => {
 			const obfuscator = new SecretObfuscator([
 				{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },
 				{ type: "regex", content: "tok_[a-z0-9]+" },
@@ -1694,7 +2251,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -1703,8 +2259,72 @@ describe("advisor", () => {
 			await Promise.resolve();
 
 			expect(promptInputs).toHaveLength(1);
-			expect(promptText(promptInputs[0])).toContain("$$TOKABC123_");
+			expect(promptText(promptInputs[0])).toContain("$$");
 			expect(promptText(promptInputs[0])).not.toContain("tok_abc123");
+		});
+
+		it("redacts expanded tool results before middle truncation", async () => {
+			const secret = `BEGIN_SECRET_${"x".repeat(5_000)}_END_SECRET`;
+			const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+			const placeholder = obfuscator.obfuscate(secret);
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const agent = makeAgent(promptInputs);
+			const messages: AgentMessage[] = [
+				{
+					role: "toolResult",
+					toolCallId: "c1",
+					toolName: "read",
+					content: `${"head".repeat(1_000)}${secret}${"tail".repeat(1_000)}`,
+					isError: false,
+					timestamp: 1,
+				} as unknown as AgentMessage,
+			];
+			const runtime = new AdvisorRuntime(agent, {
+				snapshotMessages: () => messages,
+				obfuscator,
+			});
+
+			runtime.onTurnEnd();
+			await runtime.waitForCatchup(1_000, 1);
+
+			const rendered = promptText(promptInputs[0]);
+			expect(rendered).toContain(placeholder);
+			expect(rendered).not.toContain("BEGIN_SECRET_");
+			expect(rendered).not.toContain("_END_SECRET");
+		});
+
+		it("redacts an expanded edit diff before middle truncation", async () => {
+			// One giant diff line; the secret straddles the tail window's cut, so
+			// truncating first would leave its suffix, which no redaction pass can match.
+			const secret = distinctSecret(2_000);
+			const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+			const diff = `--- a/big.ts\n+++ b/big.ts\n@@ -1 +1 @@\n+${".".repeat(10_000)}${secret}${".".repeat(3_000)}`;
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const agent = makeAgent(promptInputs);
+			const messages: AgentMessage[] = [
+				{
+					role: "assistant",
+					content: [{ type: "toolCall", id: "c1", name: "edit", arguments: { path: "big.ts" } }],
+					timestamp: 1,
+				} as unknown as AgentMessage,
+				{
+					role: "toolResult",
+					toolCallId: "c1",
+					toolName: "edit",
+					content: "ok",
+					details: { diff },
+					isError: false,
+					timestamp: 2,
+				} as unknown as AgentMessage,
+			];
+			const runtime = new AdvisorRuntime(agent, { snapshotMessages: () => messages, obfuscator });
+
+			runtime.onTurnEnd();
+			await runtime.waitForCatchup(1_000, 1);
+
+			const rendered = promptText(promptInputs[0]);
+			expect(rendered).toContain("elided");
+			expect(leakedSecretPieces(rendered, secret)).toEqual([]);
 		});
 		it("does not scan tool-call arguments hidden by the primary-argument preview", async () => {
 			const obfuscator = new SecretObfuscator([
@@ -1725,7 +2345,6 @@ describe("advisor", () => {
 			];
 			const runtime = new AdvisorRuntime(agent, {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			});
 			runtime.onTurnEnd();
@@ -1734,7 +2353,7 @@ describe("advisor", () => {
 			expect(promptText(promptInputs[0])).not.toContain("tok_abc123");
 		});
 
-		it("does not scan failed tool-result text beyond its visible preview", async () => {
+		it("obfuscates failed tool-result text beyond its one-line preview", async () => {
 			const obfuscator = new SecretObfuscator([
 				{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },
 				{ type: "regex", content: "tok_[a-z0-9]+", mode: "replace" },
@@ -1754,12 +2373,11 @@ describe("advisor", () => {
 			];
 			const runtime = new AdvisorRuntime(agent, {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			});
 			runtime.onTurnEnd();
 			await runtime.waitForCatchup(1000, 1);
-			expect(promptText(promptInputs[0])).toContain("$$TOKABC123_");
+			expect(promptText(promptInputs[0])).toContain("$$");
 			expect(promptText(promptInputs[0])).not.toContain("tok_abc123");
 		});
 
@@ -1789,7 +2407,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -1826,7 +2443,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -1857,7 +2473,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -1892,7 +2507,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -1944,7 +2558,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -1979,7 +2592,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "first tok_abc123", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -2018,7 +2630,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -2039,6 +2650,423 @@ describe("advisor", () => {
 			expect(promptInputs).toHaveLength(2);
 			expect(firstStoredPrompt()).not.toContain("TOKABC123_");
 			expect(promptText(promptInputs[1])).not.toContain("TOKABC123_");
+		});
+
+		it.each(["v1", "v2", "codex"])(
+			"scrubs native %s replay and next-compaction history after a later friendly-prefix collision",
+			async version => {
+				const obfuscator = new SecretObfuscator([
+					{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },
+					{ type: "regex", content: "tok_[a-z0-9]+", mode: "replace" },
+				]);
+				const model = getBundledModel("openai", "gpt-5.4");
+				if (!model) throw new Error("Expected bundled OpenAI replay model");
+				const replayModel =
+					version === "codex"
+						? { ...model, provider: "openai-codex" as const, api: "openai-codex-responses" as const }
+						: model;
+				const promptInputs: Array<string | AgentMessage[]> = [];
+				const agent = makeAgent(promptInputs);
+				const messages: AgentMessage[] = [{ role: "user", content: "remember OTHERSECRET", timestamp: 1 }];
+				const maintenanceInputs: Array<Array<Record<string, unknown>>> = [];
+				const runtime = new AdvisorRuntime(agent, {
+					snapshotMessages: () => messages,
+					obfuscator,
+					maintainContext: async () => {
+						const summary = agent.state.messages[0];
+						if (summary?.role === "compactionSummary") {
+							const payload = getOpenAiRemoteCompactionPayload(
+								summary as typeof summary & { preserveData?: Record<string, unknown> },
+							);
+							maintenanceInputs.push(buildOpenAiNativeHistory([], replayModel, payload?.items));
+						}
+						return false;
+					},
+				});
+
+				runtime.onTurnEnd();
+				await runtime.waitForCatchup(1000, 1);
+				const retainedPrompt = promptText(promptInputs[0]!);
+				expect(retainedPrompt).toContain("TOKABC123_");
+				const staleToken = obfuscator.obfuscate("OTHERSECRET");
+				const searchItemsFor = (
+					secret: string,
+				): Array<Omit<ResponseFileSearchToolCall, "id"> | Omit<ResponseFunctionWebSearch, "id">> => [
+					{
+						type: "file_search_call",
+						status: "completed",
+						queries: [`file query ${secret}`, "public query"],
+						results: [
+							{
+								file_id: staleToken,
+								filename: `${secret}.txt`,
+								text: `retrieved ${secret}`,
+								attributes: { label: secret, count: 3, enabled: true },
+								score: 0.75,
+							},
+							{
+								file_id: "file-public",
+								filename: "public.txt",
+								text: "public result",
+								attributes: null,
+								score: 0,
+							},
+						],
+					},
+					{
+						type: "web_search_call",
+						status: "completed",
+						action: {
+							type: "search",
+							queries: [`web query ${secret}`, "public query"],
+							query: `legacy ${secret}`,
+							sources: [{ type: "url", url: `https://example.test/${secret}` }],
+						},
+					},
+					{
+						type: "web_search_call",
+						status: "completed",
+						action: { type: "open_page", url: `https://example.test/${secret}` },
+					},
+					{
+						type: "web_search_call",
+						status: "completed",
+						action: { type: "find_in_page", url: `https://example.test/${secret}`, pattern: `find ${secret}` },
+					},
+				];
+				const searchItems = searchItemsFor(staleToken).map((item, index) => ({
+					...item,
+					id: `native-search-${index}`,
+				}));
+				const searchSnapshot = structuredClone(searchItems);
+				const compactionItem = {
+					type: "compaction",
+					id: "opaque-native-state",
+					encrypted_content: "OTHERSECRET TOKABC123_ tok_opaque",
+				};
+				const replacementHistory = buildOpenAiNativeHistory(
+					[{ role: "user", content: retainedPrompt, timestamp: 1 }],
+					replayModel,
+				);
+				replacementHistory.push(...searchItems, compactionItem);
+				const preserveData = {
+					openaiRemoteCompaction: {
+						provider: replayModel.provider,
+						replacementHistory,
+						...(version === "v2"
+							? { version: "v2", usedTokens: 100, retainedImageCount: 0 }
+							: { compactionItem }),
+					},
+				};
+				const originalSummary = {
+					...createCompactionSummaryMessage("Native compaction", 100, new Date(1).toISOString(), {
+						providerPayload: getOpenAiRemoteCompactionPayload({ preserveData }),
+					}),
+					preserveData,
+				};
+				agent.state.messages.push(originalSummary);
+				messages.push({ role: "user", content: "later tok_abc123", timestamp: 2 });
+				runtime.onTurnEnd();
+				await runtime.waitForCatchup(1000, 1);
+
+				const encoded = buildResponsesInput({
+					model: replayModel,
+					context: { messages: defaultConvertToLlm(agent.state.messages) },
+					strictResponsesPairing: false,
+					supportsImageDetailOriginal: false,
+					nativeHistory: { replay: true, filterReasoning: false },
+				});
+				const redactedToken = obfuscator.obfuscate(
+					staleToken,
+					obfuscator.collectRegexSecretValuesForObfuscation("tok_abc123"),
+				);
+				expect(redactedToken).not.toContain("TOKABC123_");
+				for (const history of [encoded, ...maintenanceInputs]) {
+					const retained = history.filter(item => item.type === "message");
+					const plaintext = JSON.stringify(retained);
+					expect(plaintext).toContain("remember");
+					expect(plaintext).not.toContain("TOKABC123_");
+					expect(plaintext).not.toContain("OTHERSECRET");
+					expect(obfuscator.deobfuscate(plaintext)).toContain("OTHERSECRET");
+					const searches = history.filter(
+						item => item.type === "file_search_call" || item.type === "web_search_call",
+					);
+					expect(searches).toHaveLength(searchItems.length);
+					// Assert every schema-defined search plaintext slot, without pinning output IDs stripped by encoders.
+					expect(searches).toMatchObject(searchItemsFor(redactedToken));
+					expect(history.find(item => item.type === "compaction")).toMatchObject({
+						encrypted_content: compactionItem.encrypted_content,
+					});
+				}
+				expect(maintenanceInputs).toHaveLength(1);
+				expect(JSON.stringify(replacementHistory[0])).toContain("TOKABC123_");
+				expect(searchItems).toEqual(searchSnapshot);
+				expect(agent.state.messages[0]).not.toBe(originalSummary);
+			},
+		);
+
+		it.each([
+			{ source: "retained", kind: "file_search_call" },
+			{ source: "maintenance", kind: "file_search_call" },
+			{ source: "maintenance", kind: "tool_search_output" },
+		])(
+			"collects $kind-only collisions from $source history before replay and pending compaction input",
+			async ({ source, kind }) => {
+				const obfuscator = new SecretObfuscator([
+					{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },
+					{ type: "regex", content: "tok_[a-z0-9]+", mode: "replace", replacement: "[hidden]" },
+				]);
+				const model = getBundledModel("openai", "gpt-5.4");
+				if (!model) throw new Error("Expected bundled OpenAI replay model");
+				const stalePrompt = obfuscator.obfuscate("remember OTHERSECRET");
+				expect(stalePrompt).toContain("TOKABC123_");
+				const compactionItem = { type: "compaction", encrypted_content: "opaque TOKABC123_" };
+				const searchItemFor = (text: string) =>
+					kind === "file_search_call"
+						? ({ type: "file_search_call", status: "completed", queries: [text] } satisfies Omit<
+								ResponseFileSearchToolCall,
+								"id"
+							>)
+						: ({
+								type: "tool_search_output",
+								execution: "server",
+								status: "completed",
+								tools: [
+									{
+										type: "namespace",
+										name: "workspace",
+										description: "Workspace tools",
+										tools: [
+											{
+												type: "custom",
+												name: "lookup",
+												description: `Use ${text}`,
+												format: { type: "text" },
+											},
+										],
+									},
+								],
+							} satisfies ResponseToolSearchOutputItemParam);
+				const searchItem = { ...searchItemFor("tok_abc123"), id: "search-only-collision" };
+				const replacementHistory = buildOpenAiNativeHistory(
+					[{ role: "user", content: stalePrompt, timestamp: 1 }],
+					model,
+				);
+				replacementHistory.push(searchItem, compactionItem);
+				const preserveData = {
+					openaiRemoteCompaction: { provider: model.provider, replacementHistory, compactionItem },
+				};
+				const summary = {
+					...createCompactionSummaryMessage("Native compaction", 100, new Date(1).toISOString(), {
+						providerPayload: getOpenAiRemoteCompactionPayload({ preserveData }),
+					}),
+					preserveData: structuredClone(preserveData),
+				};
+				const originalSummary = structuredClone(summary);
+				const promptInputs: Array<string | AgentMessage[]> = [];
+				const encodedPrompts: ResponseInput[] = [];
+				const maintenanceInputs: Array<Array<Record<string, unknown>>> = [];
+				const maintenancePreviews: string[] = [];
+				const agent = makeAgent(promptInputs);
+				if (source === "retained") agent.state.messages.push(summary);
+				agent.prompt = async input => {
+					promptInputs.push(input);
+					const incoming: AgentMessage[] =
+						typeof input === "string" ? [{ role: "user", content: input, timestamp: 2 }] : input;
+					encodedPrompts.push(
+						buildResponsesInput({
+							model,
+							context: {
+								messages: obfuscateMessages(
+									obfuscator,
+									defaultConvertToLlm([...agent.state.messages, ...incoming]),
+								),
+							},
+							strictResponsesPairing: false,
+							supportsImageDetailOriginal: false,
+							nativeHistory: { replay: true, filterReasoning: false },
+						}),
+					);
+				};
+				const { promise: maintenanceStarted, resolve: startMaintenance } = Promise.withResolvers<void>();
+				const { promise: maintenanceReleased, resolve: releaseMaintenance } = Promise.withResolvers<void>();
+				const messages: AgentMessage[] = [{ role: "user", content: "review OTHERSECRET", timestamp: 2 }];
+				const runtime = new AdvisorRuntime(agent, {
+					snapshotMessages: () => messages,
+					obfuscator,
+					maintainContext: async incoming => {
+						maintenancePreviews.push(promptText([incoming]));
+						if (maintenancePreviews.length === 1) {
+							startMaintenance();
+							await maintenanceReleased;
+							if (source === "maintenance") agent.state.messages.push(summary);
+						} else {
+							maintenanceInputs.push(buildOpenAiNativeHistory(defaultConvertToLlm(agent.state.messages), model));
+							const retained = agent.state.messages[0] as typeof summary;
+							maintenanceInputs.push(
+								buildOpenAiNativeHistory([], model, getOpenAiRemoteCompactionPayload(retained)?.items),
+							);
+						}
+						return false;
+					},
+				});
+				runtime.onTurnEnd();
+				await maintenanceStarted;
+				messages.push({ role: "user", content: "queued OTHERSECRET", timestamp: 3 });
+				runtime.onTurnEnd();
+				releaseMaintenance();
+				await runtime.waitForCatchup(1000, 1);
+
+				expect(maintenancePreviews).toHaveLength(2);
+				expect(maintenancePreviews[1]).not.toContain("TOKABC123_");
+				expect(obfuscator.deobfuscate(maintenancePreviews[1]!)).toContain("queued OTHERSECRET");
+				expect(promptInputs).toHaveLength(1);
+				expect(promptText(promptInputs[0])).not.toContain("TOKABC123_");
+				expect(maintenanceInputs).toHaveLength(2);
+				for (const history of [encodedPrompts[0]!, ...maintenanceInputs]) {
+					const plaintext = JSON.stringify(history.filter(item => item.type !== "compaction"));
+					expect(plaintext).not.toContain("TOKABC123_");
+					expect(plaintext).not.toContain("tok_abc123");
+					expect(plaintext).not.toContain("OTHERSECRET");
+					expect(obfuscator.deobfuscate(plaintext)).toContain("remember OTHERSECRET");
+					expect(history.find(item => item.type === kind)).toMatchObject(searchItemFor("[hidden]"));
+					expect(history.filter(item => item.type === "compaction")).toEqual([compactionItem]);
+				}
+				expect(summary).toEqual(originalSummary);
+			},
+		);
+
+		it("scrubs a stale assistant native snapshot committed after a collision arrives during maintenance", async () => {
+			const obfuscator = new SecretObfuscator([
+				{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },
+				{ type: "regex", content: "tok_[a-z0-9]+", mode: "replace" },
+			]);
+			const model = getBundledModel("openai", "gpt-5.4");
+			if (!model) throw new Error("Expected bundled OpenAI replay model");
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const encodedPrompts: ResponseInput[] = [];
+			const maintenanceInputs: Array<Array<Record<string, unknown>>> = [];
+			const agent = makeAgent(promptInputs);
+			agent.prompt = async input => {
+				promptInputs.push(input);
+				const incoming: AgentMessage[] =
+					typeof input === "string" ? [{ role: "user", content: input, timestamp: 1 }] : input;
+				encodedPrompts.push(
+					buildResponsesInput({
+						model,
+						context: {
+							messages: obfuscateMessages(
+								obfuscator,
+								defaultConvertToLlm([...agent.state.messages, ...incoming]),
+							),
+						},
+						strictResponsesPairing: false,
+						supportsImageDetailOriginal: false,
+						nativeHistory: { replay: true, filterReasoning: false },
+					}),
+				);
+			};
+			const { promise: maintenanceStarted, resolve: startMaintenance } = Promise.withResolvers<void>();
+			const { promise: maintenanceReleased, resolve: releaseMaintenance } = Promise.withResolvers<void>();
+			const staleHistory: AgentMessage[] = [];
+			let maintenanceCalls = 0;
+			const messages: AgentMessage[] = [{ role: "user", content: "remember OTHERSECRET", timestamp: 1 }];
+			const runtime = new AdvisorRuntime(agent, {
+				snapshotMessages: () => messages,
+				obfuscator,
+				maintainContext: async () => {
+					maintenanceCalls++;
+					if (maintenanceCalls === 2) {
+						startMaintenance();
+						await maintenanceReleased;
+						// The result was produced from a snapshot taken before the late delta.
+						agent.state.messages.splice(0, agent.state.messages.length, ...staleHistory);
+					} else if (maintenanceCalls === 3) {
+						maintenanceInputs.push(buildOpenAiNativeHistory(defaultConvertToLlm(agent.state.messages), model));
+						const summary = agent.state.messages[0] as AgentMessage & { preserveData?: Record<string, unknown> };
+						maintenanceInputs.push(
+							buildOpenAiNativeHistory([], model, getOpenAiRemoteCompactionPayload(summary)?.items),
+						);
+					}
+					return false;
+				},
+			});
+			runtime.onTurnEnd();
+			await runtime.waitForCatchup(1000, 1);
+			const stalePrompt = promptText(promptInputs[0]!);
+			expect(stalePrompt).toContain("TOKABC123_");
+			const compactionItem = { type: "compaction", encrypted_content: "opaque TOKABC123_" };
+			const replacementHistory = buildOpenAiNativeHistory(
+				[{ role: "user", content: stalePrompt, timestamp: 1 }],
+				model,
+			);
+			replacementHistory.push(compactionItem);
+			const preserveData = {
+				openaiRemoteCompaction: { provider: model.provider, replacementHistory, compactionItem },
+			};
+			staleHistory.push({
+				...createCompactionSummaryMessage("Native compaction", 100, new Date(1).toISOString(), {
+					providerPayload: getOpenAiRemoteCompactionPayload({ preserveData }),
+				}),
+				preserveData,
+			} as AgentMessage);
+			const assistantSnapshot: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: "visible response" }],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				stopReason: "stop",
+				timestamp: 2,
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				providerPayload: {
+					type: "openaiResponsesHistory",
+					provider: model.provider,
+					dt: false,
+					items: [
+						...replacementHistory,
+						{
+							type: "message",
+							role: "assistant",
+							id: "snapshot-tail",
+							content: [{ type: "output_text", text: `assistant snapshot ${stalePrompt}`, annotations: [] }],
+						},
+					],
+				},
+			};
+			staleHistory.push(assistantSnapshot);
+			agent.state.messages.push(...staleHistory);
+			messages.push({ role: "user", content: "continue reviewing", timestamp: 2 });
+			runtime.onTurnEnd();
+			await maintenanceStarted;
+			messages.push({ role: "user", content: "later tok_abc123", timestamp: 3 });
+			runtime.onTurnEnd();
+			releaseMaintenance();
+			await runtime.waitForCatchup(1000, 1);
+
+			expect(encodedPrompts).toHaveLength(2);
+			expect(maintenanceInputs).toHaveLength(2);
+			for (const history of [encodedPrompts[1]!, ...maintenanceInputs]) {
+				const plaintext = JSON.stringify(
+					history.filter(item => item.type === "message" || item.type === undefined),
+				);
+				expect(plaintext).toContain("remember");
+				expect(plaintext).not.toContain("TOKABC123_");
+				expect(plaintext).not.toContain("tok_abc123");
+				expect(plaintext).not.toContain("OTHERSECRET");
+				expect(obfuscator.deobfuscate(plaintext)).toContain("OTHERSECRET");
+				expect(history.filter(item => item.type === "compaction")).toEqual([compactionItem]);
+			}
+			expect(JSON.stringify(encodedPrompts[1])).toContain("assistant snapshot");
+			expect(JSON.stringify(maintenanceInputs[0])).toContain("assistant snapshot");
+			expect(agent.state.messages[1]).not.toBe(assistantSnapshot);
 		});
 
 		it("redacts secrets inside assistant thinking blocks, honoring the whole-delta friendly-prefix collision set", async () => {
@@ -2077,7 +3105,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -2114,7 +3141,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "later tok_abc123", timestamp: 2 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -2155,7 +3181,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -2188,7 +3213,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -2222,7 +3246,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				obfuscator,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -2258,7 +3281,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host);
 
@@ -2320,7 +3342,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
 
@@ -2375,7 +3396,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host);
 			runtime.onTurnEnd();
@@ -2401,7 +3421,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host);
 			runtime.onTurnEnd();
@@ -2430,7 +3449,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host);
 			runtime.onTurnEnd();
@@ -2473,7 +3491,6 @@ describe("advisor", () => {
 			let shouldResetContext = false;
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				maintainContext: async incoming => {
 					// The host receives the pending update itself and sizes it with its
 					// own model's tokenizer, so it must arrive as a non-empty message.
@@ -2520,7 +3537,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "bbb", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				maintainContext: async () => {
 					maintenanceCalls++;
 					if (maintenanceCalls !== 1) return false;
@@ -2563,7 +3579,6 @@ describe("advisor", () => {
 			let shouldResetContext = false;
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				maintainContext: async () => shouldResetContext,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
@@ -2623,7 +3638,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
 			runtime.seedTo(messages.length);
@@ -2714,7 +3728,6 @@ describe("advisor", () => {
 				agent,
 				{
 					snapshotMessages: () => messages,
-					enqueueAdvice: () => {},
 					maintainContext: async incoming => {
 						maintenanceTokens.push(new Tokenizer().countMessage(incoming));
 						if (maintenanceTokens.length === 4) fourthMaintenance.resolve();
@@ -2772,7 +3785,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "seed-primary", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
 			runtime.seedTo(messages.length);
@@ -2848,7 +3860,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "ancient-primary", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
 			runtime.seedTo(messages.length);
@@ -2899,7 +3910,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "ancient-history", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				notifyFailure: error => failures.push(error),
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
@@ -2951,7 +3961,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host);
 
@@ -3005,7 +4014,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host);
 			const controller = new AbortController();
@@ -3047,7 +4055,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
 
@@ -3072,7 +4079,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
 
@@ -3101,7 +4107,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				notifyFailure: error => failures.push(error),
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
@@ -3158,7 +4163,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				notifyFailure: error => failures.push(error),
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
@@ -3199,7 +4203,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "t1", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				notifyFailure: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
@@ -3248,7 +4251,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				onTurnError: () => new Promise<undefined>(() => {}),
 			};
 			const runtime = new AdvisorRuntime(agent, host, 60_000);
@@ -3263,6 +4265,82 @@ describe("advisor", () => {
 			const again = performance.now();
 			await runtime.waitForCatchup(60_000, 1);
 			expect(performance.now() - again).toBeLessThan(100);
+			runtime.dispose();
+		}, 10_000);
+
+		it("holds a recovery-aware catch-up through the failure but releases it on a terminal quota pause", async () => {
+			// Headless shutdown drains wait through a failing turn so disposal cannot
+			// abort the host's fallback switch. A recovery that ends in a quota pause
+			// can never drain, so the waiter must be released then — not held to its
+			// (ten-minute, in print mode) deadline.
+			const agent: AdvisorAgent = {
+				prompt: async () => {
+					throw new Error("insufficient_quota: you have exceeded your rate limit");
+				},
+				abort: () => {},
+				reset: () => {},
+				state: { messages: [] },
+			};
+			const messages: AgentMessage[] = [{ role: "user", content: "quota-turn", timestamp: 1 } as AgentMessage];
+			const recoveryStarted = Promise.withResolvers<void>();
+			const recoveryResult = Promise.withResolvers<boolean>();
+			const host: AdvisorRuntimeHost = {
+				snapshotMessages: () => messages,
+				onTurnError: () => {
+					recoveryStarted.resolve();
+					return recoveryResult.promise;
+				},
+				notifyQuotaExhausted: () => {},
+			};
+			const runtime = new AdvisorRuntime(agent, host, 0);
+
+			runtime.onTurnEnd(messages);
+			let settled = false;
+			const catchup = runtime.waitForCatchup(60_000, 1, undefined, { waitThroughRecovery: true }).then(caughtUp => {
+				settled = true;
+				return caughtUp;
+			});
+			// A failure-released waiter settles before onTurnError runs, so its
+			// continuation is already queued ahead of this one.
+			await recoveryStarted.promise;
+			expect(settled).toBe(false);
+
+			// No fallback available: the runtime latches its quota pause.
+			const released = performance.now();
+			recoveryResult.resolve(false);
+			expect(await catchup).toBe(false);
+			expect(performance.now() - released).toBeLessThan(2_000);
+			expect(runtime.quotaExhausted).toBe(true);
+			runtime.dispose();
+		}, 10_000);
+
+		it("releases a recovery-aware catch-up created while a session transition is paused", async () => {
+			// A paused runtime cannot drain until the transition resumes, which never
+			// happens on a shutdown path. A drain waiter created after the pause must
+			// release at once instead of parking for its (ten-minute) budget.
+			let abortPrompt: ((reason: unknown) => void) | undefined;
+			const agent: AdvisorAgent = {
+				prompt: () => {
+					const { promise, reject } = Promise.withResolvers<void>();
+					abortPrompt = reject;
+					return promise;
+				},
+				abort: reason => abortPrompt?.(new Error(String(reason))),
+				reset: () => {},
+				state: { messages: [] },
+			};
+			const messages: AgentMessage[] = [{ role: "user", content: "paused-turn", timestamp: 1 } as AgentMessage];
+			const host: AdvisorRuntimeHost = { snapshotMessages: () => messages };
+			const runtime = new AdvisorRuntime(agent, host, 0);
+
+			runtime.onTurnEnd(messages);
+			await settleUntil(() => abortPrompt !== undefined);
+			await runtime.pauseForSessionTransition();
+			expect(runtime.backlog).toBeGreaterThan(0);
+
+			const started = performance.now();
+			expect(await runtime.waitForCatchup(60_000, 1, undefined, { waitThroughRecovery: true })).toBe(false);
+			expect(performance.now() - started).toBeLessThan(100);
 			runtime.dispose();
 		}, 10_000);
 
@@ -3283,7 +4361,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
 			runtime.onTurnEnd(messages);
@@ -3353,7 +4430,6 @@ describe("advisor", () => {
 				const messages = Array.from({ length: 2000 }, (_, i) => bigMessage(i));
 				const host: AdvisorRuntimeHost = {
 					snapshotMessages: () => messages,
-					enqueueAdvice: () => {},
 				};
 				const runtime = new AdvisorRuntime(agent, host, 0);
 				runtime.onTurnEnd(messages);
@@ -3398,7 +4474,6 @@ describe("advisor", () => {
 				} as AgentMessage;
 				const host: AdvisorRuntimeHost = {
 					snapshotMessages: () => messages,
-					enqueueAdvice: () => {},
 				};
 				const runtime = new AdvisorRuntime(agent, host, 0);
 				runtime.onTurnEnd(messages);
@@ -3425,7 +4500,6 @@ describe("advisor", () => {
 				const messages: AgentMessage[] = [{ role: "user", content: "before", timestamp: 1 } as AgentMessage];
 				const host: AdvisorRuntimeHost = {
 					snapshotMessages: () => messages,
-					enqueueAdvice: () => {},
 				};
 				const runtime = new AdvisorRuntime(agent, host, 0);
 				runtime.onTurnEnd(messages);
@@ -3459,7 +4533,6 @@ describe("advisor", () => {
 				const messages = Array.from({ length: 400 }, (_, i) => bigMessage(i));
 				const host: AdvisorRuntimeHost = {
 					snapshotMessages: () => messages,
-					enqueueAdvice: () => {},
 				};
 				const runtime = new AdvisorRuntime(agent, host, 0);
 				runtime.onTurnEnd(messages);
@@ -3488,7 +4561,6 @@ describe("advisor", () => {
 				const messages = Array.from({ length: 300 }, (_, i) => bigMessage(i));
 				const host: AdvisorRuntimeHost = {
 					snapshotMessages: () => messages,
-					enqueueAdvice: () => {},
 				};
 				const runtime = new AdvisorRuntime(agent, host, 0);
 				runtime.onTurnEnd(messages);
@@ -3537,7 +4609,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				notifyFailure: error => failures.push(error),
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
@@ -3569,7 +4640,6 @@ describe("advisor", () => {
 		it("accepts a zero-usage empty stop as a successful silent review", async () => {
 			const turnErrors: unknown[] = [];
 			const failures: unknown[] = [];
-			const adviceNotes: string[] = [];
 			const rollbackCalls: number[] = [];
 			const state: { messages: AgentMessage[]; error?: string } = { messages: [] };
 			let promptCalls = 0;
@@ -3604,7 +4674,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: note => adviceNotes.push(note),
 				onTurnError: error => {
 					turnErrors.push(error);
 				},
@@ -3623,7 +4692,6 @@ describe("advisor", () => {
 			expect(turnErrors).toEqual([]);
 			expect(failures).toEqual([]);
 			expect(rollbackCalls).toEqual([]);
-			expect(adviceNotes).toEqual([]);
 			expect(state.messages).toHaveLength(2);
 			expect(runtime.backlog).toBe(0);
 		});
@@ -3663,7 +4731,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "turn-0", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				onTurnError: error => {
 					turnErrors.push(error);
 				},
@@ -3691,7 +4758,6 @@ describe("advisor", () => {
 		it("treats a content-less stop that generated output tokens as a successful silent review", async () => {
 			const turnErrors: unknown[] = [];
 			const failures: unknown[] = [];
-			const adviceNotes: string[] = [];
 			const state: { messages: AgentMessage[]; error?: string } = { messages: [] };
 			let promptCalls = 0;
 			const agent: AdvisorAgent = {
@@ -3736,7 +4802,6 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: note => adviceNotes.push(note),
 				onTurnError: error => {
 					turnErrors.push(error);
 				},
@@ -3753,7 +4818,6 @@ describe("advisor", () => {
 			expect(promptCalls).toBe(1);
 			expect(turnErrors).toEqual([]);
 			expect(failures).toEqual([]);
-			expect(adviceNotes).toEqual([]);
 			expect(runtime.backlog).toBe(0);
 		});
 
@@ -3808,7 +4872,6 @@ describe("advisor", () => {
 				agent,
 				{
 					snapshotMessages: () => messages,
-					enqueueAdvice: () => {},
 					notifyFailure: error => failures.push(error),
 				},
 				0,
@@ -3863,7 +4926,6 @@ describe("advisor", () => {
 				agent,
 				{
 					snapshotMessages: () => messages,
-					enqueueAdvice: () => {},
 					notifyFailure: error => failures.push(error),
 				},
 				0,
@@ -3931,7 +4993,6 @@ describe("advisor", () => {
 				agent,
 				{
 					snapshotMessages: () => messages,
-					enqueueAdvice: () => {},
 					notifyFailure: error => failures.push(error),
 					onTurnError: async () => {
 						fallbackCalls++;
@@ -3991,7 +5052,6 @@ describe("advisor", () => {
 				agent,
 				{
 					snapshotMessages: () => messages,
-					enqueueAdvice: () => {},
 					notifyFailure: error => failures.push(error),
 					onTurnError: async () => {
 						fallbackCalls++;
@@ -4066,7 +5126,6 @@ describe("advisor", () => {
 				agent,
 				{
 					snapshotMessages: () => messages,
-					enqueueAdvice: () => {},
 					notifyFailure: error => failures.push(error),
 					getModelIdentity: () => identity,
 					onTurnError: async () => {
@@ -4131,7 +5190,6 @@ describe("advisor", () => {
 				agent,
 				{
 					snapshotMessages: () => messages,
-					enqueueAdvice: () => {},
 					notifyFailure: error => failures.push(error),
 					getModelIdentity: () => identity,
 					onTurnError: async () => {
@@ -4202,7 +5260,6 @@ describe("advisor", () => {
 				agent,
 				{
 					snapshotMessages: () => messages,
-					enqueueAdvice: () => {},
 					notifyFailure: error => failures.push(error),
 				},
 				0,
@@ -4239,7 +5296,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				onTurnError: error => {
 					turnErrors.push(error);
 					events.push(`hook:${error instanceof Error ? error.message : String(error)}`);
@@ -4282,7 +5338,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				onTurnError: error => {
 					turnErrors.push(error);
 					events.push(`hook:${error instanceof Error ? error.message : String(error)}`);
@@ -4341,7 +5396,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				onTurnError: async error => {
 					turnErrors.push(error);
 					events.push(`hook:${error instanceof Error ? error.message : String(error)}`);
@@ -4410,7 +5464,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				onTurnError: error => {
 					turnErrors.push(error);
 				},
@@ -4479,7 +5532,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				onTurnAbandoned: () => {
 					abandonedTurns++;
 				},
@@ -4560,7 +5612,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
 
@@ -4605,7 +5656,6 @@ describe("advisor", () => {
 				agent,
 				{
 					snapshotMessages: () => messages,
-					enqueueAdvice: () => {},
 				},
 				0,
 			);
@@ -4665,7 +5715,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				notifyFailure: err => notifyFailures.push(err instanceof Error ? err.message : String(err)),
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
@@ -4718,7 +5767,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "old-conversation", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
 
@@ -4767,7 +5815,6 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "keep me", timestamp: 1 } as AgentMessage];
 			const runtime = new AdvisorRuntime(agent, {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			});
 
 			runtime.onTurnEnd(messages);
@@ -4787,7 +5834,6 @@ describe("advisor", () => {
 			const maintenancePaused = Promise.withResolvers<void>();
 			const prompted = Promise.withResolvers<void>();
 			let maintenanceCalls = 0;
-			let runtime: AdvisorRuntime;
 			const agent: AdvisorAgent = {
 				prompt: async input => {
 					promptInputs.push(input);
@@ -4807,9 +5853,8 @@ describe("advisor", () => {
 					timestamp: 2,
 				} as AgentMessage,
 			];
-			runtime = new AdvisorRuntime(agent, {
+			const runtime = new AdvisorRuntime(agent, {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				maintainContext: async () => {
 					if (++maintenanceCalls === 1) {
 						void runtime.pauseForSessionTransition();
@@ -4853,7 +5898,6 @@ describe("advisor", () => {
 				};
 				const runtime = new AdvisorRuntime(agent, {
 					snapshotMessages: () => [],
-					enqueueAdvice: () => {},
 					...(hookKind === "success"
 						? { onTurnSuccess: blockHook }
 						: {
@@ -4891,7 +5935,6 @@ describe("advisor", () => {
 				agent,
 				{
 					snapshotMessages: () => [],
-					enqueueAdvice: () => {},
 					onTurnError: () => {
 						recoveryStarted.resolve();
 						return false;
@@ -4925,7 +5968,6 @@ describe("advisor", () => {
 			};
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => [],
-				enqueueAdvice: () => {},
 				notifyFailure: () => {
 					failureNotified = true;
 				},
@@ -4965,7 +6007,6 @@ describe("advisor", () => {
 			};
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => [],
-				enqueueAdvice: () => {},
 				notifyFailure: error => failures.push(error),
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
@@ -4993,7 +6034,6 @@ describe("advisor", () => {
 			};
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => [],
-				enqueueAdvice: () => {},
 				notifyQuotaExhausted: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
@@ -5033,7 +6073,6 @@ describe("advisor", () => {
 			};
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => [],
-				enqueueAdvice: () => {},
 				notifyQuotaExhausted: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
@@ -5066,7 +6105,6 @@ describe("advisor", () => {
 			let quotaNotified = false;
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => [],
-				enqueueAdvice: () => {},
 				onTurnError: async () => true,
 				notifyQuotaExhausted: () => {
 					quotaNotified = true;
@@ -5106,7 +6144,6 @@ describe("advisor", () => {
 			const hookErrors: unknown[] = [];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => [],
-				enqueueAdvice: () => {},
 				onTurnError: async error => {
 					hookErrors.push(error);
 					return hookErrors.length === 1;
@@ -5136,7 +6173,6 @@ describe("advisor", () => {
 			let quotaNotified = false;
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => [],
-				enqueueAdvice: () => {},
 				onTurnError: async () => false,
 				notifyQuotaExhausted: () => {
 					quotaNotified = true;
@@ -5172,7 +6208,6 @@ describe("advisor", () => {
 			const { promise: hookEntered, resolve: allowHook } = Promise.withResolvers<void>();
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => [],
-				enqueueAdvice: () => {},
 				maintainContext: async (_incoming, signal) => {
 					maintenanceSignals.push(signal);
 					return false;
@@ -5222,7 +6257,6 @@ describe("advisor", () => {
 			};
 			const runtime = new AdvisorRuntime(agent, {
 				snapshotMessages: () => [],
-				enqueueAdvice: () => {},
 				onTurnError: async (_error, _failedMessages, signal) => {
 					recoverySignal = signal;
 					hookEntered.resolve();
@@ -5262,7 +6296,6 @@ describe("advisor", () => {
 			let quotaNotified = false;
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => [],
-				enqueueAdvice: () => {},
 				onTurnError: async error => {
 					hookErrors.push(error);
 					return hookErrors.length === 1 ? true : undefined;
@@ -5308,7 +6341,6 @@ describe("advisor", () => {
 			let quotaNotified = false;
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => [],
-				enqueueAdvice: () => {},
 				onTurnError: async error => {
 					hookErrors.push(error);
 					return hookErrors.length === 1 ? true : undefined;
@@ -5351,7 +6383,6 @@ describe("advisor", () => {
 			let quotaNotified = false;
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => [],
-				enqueueAdvice: () => {},
 				onTurnError: async error => {
 					hookErrors.push(error);
 					return true;
@@ -5636,119 +6667,6 @@ describe("advisor", () => {
 			expect(isAdvisorTranscriptName("__advisor-2.jsonl")).toBe(false);
 			expect(isAdvisorTranscriptName("Foo.jsonl")).toBe(false);
 			expect(isAdvisorTranscriptName("__advisor.arch.bak")).toBe(false);
-		});
-	});
-
-	describe("AdvisorConfigOverlayComponent", () => {
-		const deps = {
-			modelRegistry: {} as unknown as ModelRegistry,
-			settings: {} as unknown as Settings,
-			scopedModels: [],
-			availableToolNames: ["read", "grep", "glob", "lsp", "web_search"],
-		};
-		const callbacks = {
-			loadDoc: async () => ({ advisors: [] }),
-			save: async () => {},
-			close: () => {},
-			requestRender: () => {},
-			notify: () => {},
-		};
-		const strip = (lines: readonly string[]): string => lines.join("\n").replace(/\x1b\[[0-9;]*m/g, "");
-		const make = (doc: WatchdogConfigDoc, extra?: Partial<AdvisorConfigDeps>): AdvisorConfigOverlayComponent =>
-			new AdvisorConfigOverlayComponent({} as unknown as TUI, { ...deps, ...extra }, "project", doc, callbacks);
-		const fullHeight = Math.max(14, process.stdout.rows || 40);
-
-		it("paints a full-screen split frame: roster sidebar + selected-advisor preview", async () => {
-			const uiTheme = await getThemeByName("dark");
-			if (!uiTheme) throw new Error("theme unavailable");
-			setThemeInstance(uiTheme);
-			const overlay = make({
-				instructions: "shared baseline",
-				advisors: [
-					{ name: "Architecture", model: "x-ai/grok-code-fast:high" },
-					{ name: "Security", tools: ["read", "web_search"] },
-				],
-			});
-			const frame = overlay.render(200);
-			// Fills the screen top-to-bottom (the fix for the bottom-anchored frame
-			// whose offset broke mouse hit-testing and wasted the upper space).
-			expect(frame.length).toBe(fullHeight);
-			const text = strip(frame);
-			expect(text).toContain("Advisor configuration");
-			expect(text).toContain("project");
-			expect(text).toContain("Architecture");
-			expect(text).toContain("Security");
-			expect(text).toContain("+ Add advisor");
-			expect(text).toContain("Save & apply");
-			// Right preview reflects the highlighted (first) advisor.
-			expect(text).toContain("x-ai/grok-code-fast:high");
-			expect(text).toContain("read, grep, glob (default)");
-		});
-
-		it("renders an explicit no-tools advisor distinctly from the omitted default", async () => {
-			const uiTheme = await getThemeByName("dark");
-			if (!uiTheme) throw new Error("theme unavailable");
-			setThemeInstance(uiTheme);
-			const overlay = make({
-				advisors: [{ name: "Blank", tools: [] }],
-			});
-
-			const text = strip(overlay.render(200));
-			expect(text.toLowerCase()).toContain("no tools");
-			expect(text).not.toContain("read, grep, glob (default)");
-		});
-
-		it("moves the preview with keyboard selection and preserves an explicit tool set", async () => {
-			const uiTheme = await getThemeByName("dark");
-			if (!uiTheme) throw new Error("theme unavailable");
-			setThemeInstance(uiTheme);
-			const overlay = make({
-				advisors: [{ name: "Architecture" }, { name: "Security", tools: ["read", "web_search"] }],
-			});
-			overlay.render(200);
-			overlay.handleInput("\x1b[B"); // arrow down → highlight Security
-			expect(strip(overlay.render(200))).toContain("read, web_search");
-		});
-
-		it("opens an advisor's detail editor on a left click in the sidebar", async () => {
-			const uiTheme = await getThemeByName("dark");
-			if (!uiTheme) throw new Error("theme unavailable");
-			setThemeInstance(uiTheme);
-			const overlay = make({ advisors: [{ name: "Architecture" }, { name: "Security" }] });
-			// Render once so the frame geometry is recorded; the first advisor sits on
-			// the first body row (0-based screen row 1 → SGR 1-based row 2).
-			overlay.render(120);
-			overlay.handleInput("\x1b[<0;4;2M"); // left-button press, col 4, row 2
-			const text = strip(overlay.render(120));
-			expect(text).toContain("Editing");
-			expect(text).toContain("Architecture");
-		});
-
-		it("seeds a visible default advisor (labeled with the role model) when the config is empty", async () => {
-			const uiTheme = await getThemeByName("dark");
-			if (!uiTheme) throw new Error("theme unavailable");
-			setThemeInstance(uiTheme);
-			const overlay = make({ advisors: [] }, { defaultModelLabel: "anthropic/claude-opus" });
-			const text = strip(overlay.render(200));
-			expect(text).toContain("default");
-			expect(text).toContain("anthropic/claude-opus");
-		});
-		it("shows disabled advisors with a dim circle marker and toggles them in the detail editor", async () => {
-			const uiTheme = await getThemeByName("dark");
-			if (!uiTheme) throw new Error("theme unavailable");
-			setThemeInstance(uiTheme);
-			const overlay = make({
-				advisors: [
-					{ name: "Active", model: "x-ai/grok-code-fast:high" },
-					{ name: "Disabled", model: "openai/gpt-4", enabled: false },
-				],
-			});
-			const text = strip(overlay.render(200));
-			// The list shows ● for enabled and ○ for disabled.
-			expect(text).toContain("● Active");
-			expect(text).toContain("○ Disabled");
-			// The preview of the highlighted (first) advisor shows its enabled status.
-			expect(text).toContain("● on");
 		});
 	});
 });

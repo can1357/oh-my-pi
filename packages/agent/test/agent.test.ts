@@ -1,7 +1,15 @@
 import { describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
-import { Agent, AgentBusyError, type AgentEvent, type AgentTool, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { SimpleStreamOptions, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import {
+	Agent,
+	AgentBusyError,
+	type AgentEvent,
+	type AgentTool,
+	ThinkingLevel,
+	TOOL_RESULT_ADDITIONAL_CONTEXT,
+	type ToolResultWithAdditionalContext,
+} from "@oh-my-pi/pi-agent-core";
+import type { Context, SimpleStreamOptions, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
@@ -21,17 +29,18 @@ describe("Agent", () => {
 	it("classifies agent-authored steering as a parent steering message", async () => {
 		const toolSchema = type({ value: type("string") });
 		const executed: string[] = [];
-		let agent: Agent;
+		const agentRef = {} as { current: Agent };
 		const tool: AgentTool<typeof toolSchema, { value: string }> = {
 			name: "echo",
 			label: "Echo",
 			description: "Echo tool",
 			parameters: toolSchema,
 			concurrency: "exclusive",
+			interruptible: true,
 			async execute(_toolCallId, params) {
 				executed.push(params.value);
 				if (params.value === "first") {
-					agent.steer({
+					agentRef.current.steer({
 						role: "user",
 						content: "parent steering",
 						attribution: "agent",
@@ -55,11 +64,12 @@ describe("Agent", () => {
 				{ content: ["done"] },
 			],
 		});
-		agent = new Agent({
+		const agent = new Agent({
 			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [tool], messages: [] },
 			streamFn: mock.stream,
 			interruptMode: "immediate",
 		});
+		agentRef.current = agent;
 		const events: AgentEvent[] = [];
 		const unsubscribe = agent.subscribe(event => events.push(event));
 
@@ -84,17 +94,18 @@ describe("Agent", () => {
 	it("classifies user-attributed custom steering as a queued user message", async () => {
 		const toolSchema = type({ value: type("string") });
 		const executed: string[] = [];
-		let agent: Agent;
+		const agentRef = {} as { current: Agent };
 		const tool: AgentTool<typeof toolSchema, { value: string }> = {
 			name: "echo",
 			label: "Echo",
 			description: "Echo tool",
 			parameters: toolSchema,
 			concurrency: "exclusive",
+			interruptible: true,
 			async execute(_toolCallId, params) {
 				executed.push(params.value);
 				if (params.value === "first") {
-					agent.steer({
+					agentRef.current.steer({
 						role: "custom",
 						customType: "visible-user-steer",
 						content: "visible custom steering",
@@ -102,7 +113,7 @@ describe("Agent", () => {
 						attribution: "user",
 						timestamp: Date.now(),
 					});
-					agent.steer({
+					agentRef.current.steer({
 						role: "user",
 						content: "normal user steering",
 						timestamp: Date.now(),
@@ -126,12 +137,13 @@ describe("Agent", () => {
 				{ content: ["done"] },
 			],
 		});
-		agent = new Agent({
+		const agent = new Agent({
 			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [tool], messages: [] },
 			streamFn: mock.stream,
 			steeringMode: "one-at-a-time",
 			interruptMode: "immediate",
 		});
+		agentRef.current = agent;
 		const events: AgentEvent[] = [];
 		const unsubscribe = agent.subscribe(event => events.push(event));
 
@@ -213,26 +225,27 @@ describe("Agent", () => {
 		for (const scenario of cases) {
 			const toolSchema = type({ value: type("string") });
 			const executed: string[] = [];
-			let agent: Agent;
+			const agentRef = {} as { current: Agent };
 			const tool: AgentTool<typeof toolSchema, { value: string }> = {
 				name: "echo",
 				label: "Echo",
 				description: "Echo tool",
 				parameters: toolSchema,
 				concurrency: "exclusive",
+				interruptible: true,
 				async execute(_toolCallId, params) {
 					executed.push(params.value);
 					if (params.value === "first") {
 						for (const source of scenario.order) {
 							if (source === "agent") {
-								agent.steer({
+								agentRef.current.steer({
 									role: "user",
 									content: "parent steering",
 									attribution: "agent",
 									timestamp: Date.now(),
 								});
 							} else {
-								agent.steer({
+								agentRef.current.steer({
 									role: "custom",
 									customType: "advisor",
 									content: "advisor steering",
@@ -261,11 +274,12 @@ describe("Agent", () => {
 					{ content: ["done"] },
 				],
 			});
-			agent = new Agent({
+			const agent = new Agent({
 				initialState: { model: mock.model, systemPrompt: ["Test"], tools: [tool], messages: [] },
 				streamFn: mock.stream,
 				interruptMode: "immediate",
 			});
+			agentRef.current = agent;
 			const events: AgentEvent[] = [];
 			const unsubscribe = agent.subscribe(event => events.push(event));
 
@@ -930,6 +944,107 @@ describe("Agent", () => {
 		expect(toolResults[0]).toMatchObject({ toolCallId: toolCall.id, toolName: toolCall.name });
 	});
 
+	it("injects Cursor-carried passive context after the buffered results on success and provider error", async () => {
+		for (const outcome of ["done", "fail"] as const) {
+			const mock = createMockModel({ responses: [] });
+			const toolCall = {
+				type: "toolCall" as const,
+				id: `cursor-context-${outcome}`,
+				name: "shell",
+				arguments: { command: "pwd" },
+				[kCursorExecResolved]: true,
+			};
+			const started = createAssistantMessage([toolCall]);
+			const realToolResult: ToolResultWithAdditionalContext = {
+				role: "toolResult",
+				toolCallId: toolCall.id,
+				toolName: toolCall.name,
+				content: [{ type: "text", text: "/workspace" }],
+				isError: false,
+				timestamp: Date.now(),
+				[TOOL_RESULT_ADDITIONAL_CONTEXT]: "cursor passive context",
+			};
+			const agent = new Agent({
+				initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+				// A transformer replacing the message must not lose the carrier.
+				cursorOnToolResult: message => ({ ...message, content: [{ type: "text" as const, text: "rewritten" }] }),
+				streamFn: (_model, _context, options) => {
+					const stream = new AssistantMessageEventStream();
+					queueMicrotask(async () => {
+						await options?.cursorOnToolResult?.(realToolResult);
+						stream.push({ type: "start", partial: started });
+						if (outcome === "done") stream.push({ type: "done", reason: "stop", message: started });
+						else stream.fail(new Error("connection reset after Cursor exec"));
+					});
+					return stream;
+				},
+			});
+
+			await agent.prompt("trigger");
+
+			const roles = agent.state.messages.map(message => message.role);
+			expect(roles.slice(-3)).toEqual(["assistant", "toolResult", "developer"]);
+			expect(agent.state.messages.at(-1)).toMatchObject({
+				role: "developer",
+				content: [{ type: "text", text: "cursor passive context" }],
+			});
+		}
+	});
+
+	it("sends passive tool context with the default LLM conversion", async () => {
+		const toolSchema = type({ value: type("string") });
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params, _signal, _onUpdate, toolContext) {
+				toolContext?.addAdditionalContext?.(`tool context for ${params.value}`);
+				return {
+					content: [{ type: "text", text: `echoed: ${params.value}` }],
+					details: { value: params.value },
+				};
+			},
+		};
+		let secondRequest: Context | undefined;
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [{ type: "toolCall", id: "tool-default-context", name: "echo", arguments: { value: "hi" } }],
+				},
+				request => {
+					secondRequest = request;
+					return { content: ["done"] };
+				},
+			],
+		});
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [tool], messages: [] },
+			streamFn: mock.stream,
+			getToolContext: toolCall => ({ addAdditionalContext: toolCall?.addAdditionalContext }),
+		});
+		agent.beforeToolCall = async ({ args }) => ({
+			additionalContext: `prepared context for ${args.value}`,
+		});
+
+		await agent.prompt("run echo");
+
+		expect(secondRequest?.messages.map(message => message.role)).toEqual([
+			"user",
+			"assistant",
+			"toolResult",
+			"developer",
+		]);
+		const developer = secondRequest?.messages.at(-1);
+		expect(developer?.role).toBe("developer");
+		expect(developer?.content).toEqual([
+			{
+				type: "text",
+				text: "tool context for hi\n\nprepared context for hi",
+			},
+		]);
+	});
+
 	it("keeps the reserved result when the transformer rejects", async () => {
 		// `cursorOnToolResult` is a supported option returning a Promise, and the
 		// provider dispatches decoded messages with `void handleServerMessage(...)`.
@@ -982,7 +1097,7 @@ describe("Agent", () => {
 		});
 	});
 
-	it("persists the transformed payload when the transformer resolves after message_end", async () => {
+	it("keeps the latest Cursor result observable while a transform delays the assistant drain", async () => {
 		// The transformer is awaited by the provider's fire-and-forget dispatch,
 		// so `message_end` decoded from the same chunk can reach the drain while
 		// it is still pending. Buffering the call is not enough: a transformer
@@ -1016,9 +1131,11 @@ describe("Agent", () => {
 		// Gating on the `message_end` event instead would deadlock: that event is
 		// emitted from inside the drain that now waits on this promise.
 		const gate = Promise.withResolvers<void>();
+		const transformStarted = Promise.withResolvers<void>();
 		const agent = new Agent({
 			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
 			cursorOnToolResult: async message => {
+				transformStarted.resolve();
 				await gate.promise;
 				return { ...message, content: [{ type: "text" as const, text: "transformed" }] };
 			},
@@ -1034,19 +1151,86 @@ describe("Agent", () => {
 				return stream;
 			},
 		});
+		let snapshotDuringEmission: readonly ToolResultMessage[] = [];
+		agent.subscribe(event => {
+			if (event.type === "message_end" && event.message.role === "assistant") {
+				snapshotDuringEmission = agent.getPendingToolResults();
+			}
+		});
 
 		const turn = agent.prompt("trigger");
+		await transformStarted.promise;
 		// Let the stream drain as far as it can while the transformer is blocked.
 		// An unawaited drain finishes the turn here, with the original payload.
 		for (let i = 0; i < 50; i++) await Promise.resolve();
+		const suspendedSnapshot = agent.getPendingToolResults();
 		gate.resolve();
 		await turn;
+		expect(suspendedSnapshot).toEqual([realToolResult]);
+		expect(snapshotDuringEmission).toMatchObject([
+			{ toolCallId: toolCall.id, content: [{ type: "text", text: "transformed" }] },
+		]);
+		expect(agent.getPendingToolResults()).toEqual([]);
 
 		const toolResults = agent.state.messages.filter(message => message.role === "toolResult");
 		expect(toolResults).toHaveLength(1);
 		expect(toolResults[0]).toMatchObject({
 			toolCallId: toolCall.id,
 			content: [{ type: "text", text: "transformed" }],
+		});
+	});
+
+	it("exposes buffered Cursor results until the assistant drain empties them", async () => {
+		const mock = createMockModel({ responses: [] });
+		const toolCall = {
+			type: "toolCall" as const,
+			id: "cursor-tool-pending",
+			name: "shell",
+			arguments: { command: "pwd" },
+			[kCursorExecResolved]: true,
+		};
+		const started = createAssistantMessage([toolCall]);
+		const realToolResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: toolCall.id,
+			toolName: toolCall.name,
+			content: [{ type: "text", text: "/workspace" }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+		const buffered = Promise.withResolvers<void>();
+		const finish = Promise.withResolvers<void>();
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			cursorOnToolResult: message => message,
+			streamFn: (_model, _context, options) => {
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(async () => {
+					await options?.cursorOnToolResult?.(realToolResult);
+					buffered.resolve();
+					await finish.promise;
+					stream.push({ type: "start", partial: started });
+					stream.push({ type: "done", reason: "stop", message: started });
+				});
+				return stream;
+			},
+		});
+
+		const turn = agent.prompt("trigger");
+		await buffered.promise;
+
+		expect(agent.getPendingToolResults()).toEqual([realToolResult]);
+
+		finish.resolve();
+		await turn;
+
+		expect(agent.getPendingToolResults()).toEqual([]);
+		const toolResults = agent.state.messages.filter(message => message.role === "toolResult");
+		expect(toolResults).toHaveLength(1);
+		expect(toolResults[0]).toMatchObject({
+			toolCallId: toolCall.id,
+			toolName: toolCall.name,
+			content: [{ type: "text", text: "/workspace" }],
 		});
 	});
 

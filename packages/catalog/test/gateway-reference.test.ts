@@ -4,10 +4,31 @@ import { getBundledModelReferenceIndex } from "../src/identity/bundled";
 import { inheritReferenceThinking, resolveModelReference } from "../src/identity/reference";
 import type { ModelSpec } from "../src/types";
 
+describe("Bundled model references", () => {
+	test("excludes providers isolated from cross-provider bare-id enrichment", () => {
+		const reference = resolveModelReference("glm-5.3-flash", getBundledModelReferenceIndex());
+
+		expect(reference).toBeDefined();
+		expect(reference?.provider).not.toBe("cline-pass");
+	});
+});
+
 describe("Portkey gateway model references", () => {
 	test("@modal ids do not fuzzy-match bundled catalog entries", () => {
 		const index = getBundledModelReferenceIndex();
 		expect(resolveModelReference("@modal/GLM-5-2-FP8", index)).toBeUndefined();
+	});
+
+	test("strips compiled discovery and collapse markers for proxy recovery", () => {
+		const index = getBundledModelReferenceIndex();
+		for (const id of [
+			"claude-opus-4-6-fp8",
+			"claude-opus-4-6-search",
+			"claude-opus-4-6-thinking",
+			"claude-opus-4-6-free",
+		]) {
+			expect(resolveModelReference(id, index)?.id).toBe("claude-opus-4-6");
+		}
 	});
 
 	test("cross-provider references do not inherit wire routing thinking", () => {

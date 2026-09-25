@@ -105,7 +105,7 @@ export class EventTarget {
 	dispatchEvent(event: Event): boolean {
 		if (!event.target) event.target = this;
 		event.currentTarget = this;
-		for (const listener of [...(this.#listeners.get(event.type) ?? [])]) {
+		for (const listener of Array.from(this.#listeners.get(event.type) ?? [])) {
 			if (typeof listener === "function") listener.call(this, event);
 			else listener.handleEvent(event);
 			if (event.propagationStopped) break;
@@ -196,7 +196,7 @@ export class Node extends EventTarget {
 		const node: Node = child;
 		if (node === this || node.contains(this)) throw new Error("The new child is an ancestor of this node");
 		if (child instanceof DocumentFragment) {
-			for (const nested of [...child.childNodes]) this.appendChild(nested);
+			for (const nested of Array.from(child.childNodes)) this.appendChild(nested);
 			return child;
 		}
 		child.parentNode?.removeChild(child);
@@ -212,7 +212,7 @@ export class Node extends EventTarget {
 		const index = this.childNodes.indexOf(reference);
 		if (index < 0) throw new Error("The reference node is not a child of this node");
 		if (child instanceof DocumentFragment) {
-			for (const nested of [...child.childNodes]) this.insertBefore(nested, reference);
+			for (const nested of Array.from(child.childNodes)) this.insertBefore(nested, reference);
 			return child;
 		}
 		child.parentNode?.removeChild(child);
@@ -681,7 +681,7 @@ export class Element extends Node {
 		const parent = this.parentNode;
 		if (!parent) return;
 		const fragment = parseFragment(value, this.documentForCreation(), this.parentElement?.localName);
-		for (const child of [...fragment.childNodes]) parent.insertBefore(child, this);
+		for (const child of Array.from(fragment.childNodes)) parent.insertBefore(child, this);
 		parent.removeChild(this);
 	}
 

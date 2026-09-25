@@ -5,12 +5,22 @@
  * SigV4 signing and decodes the `application/vnd.amazon.eventstream` response.
  * No `@aws-sdk/*`, no `@smithy/*`, no `proxy-agent`. Proxies are honored via
  * Bun's native `HTTPS_PROXY` support.
+ *
+ * A `models.yml` `baseUrl` is the request origin verbatim (VPC endpoint, gateway, …);
+ * only AWS's own regional host is re-pointed at the resolved region. SigV4 unaffected.
  */
 
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { mapEffortToAnthropicAdaptiveEffort, requireSupportedEffort } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
-import { $flag, fetchWithRetry, parseStreamingJson, parseStreamingJsonThrottled } from "@oh-my-pi/pi-utils";
+import {
+	$flag,
+	fetchWithRetry,
+	logger,
+	parseStreamingJson,
+	parseStreamingJsonThrottled,
+	USER_AGENT,
+} from "@oh-my-pi/pi-utils";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
 import { resolveAwsBearerToken } from "../registry/aws";
@@ -30,7 +40,7 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 } from "../types";
-import { normalizeSystemPrompts, normalizeToolCallId, resolveCacheRetention } from "../utils";
+import { isRecord, normalizeSystemPrompts, normalizeToolCallId, resolveCacheRetention } from "../utils";
 import { resolveAwsAmbientRegion } from "../utils/aws-profile";
 import {
 	clearStreamingPartialJson,
@@ -45,6 +55,7 @@ import { toolWireSchema } from "../utils/schema/wire";
 import { invalidateAwsCredentialCache, resolveAwsCredentials } from "./aws-credentials";
 import { decodeEventStream } from "./aws-eventstream";
 import { signRequest } from "./aws-sigv4";
+import { parseAnthropicInputTransformations, THINKING_BINDING_CONTROLS_BETA } from "./anthropic-wire";
 import { transformMessages } from "./transform-messages";
 
 /**
@@ -59,6 +70,43 @@ const SIGNER_OWNED_HEADERS = new Set(["host", "x-amz-date", "x-amz-content-sha25
 // body, so a caller value would be signed but not sent, and AWS rejects the
 // mismatch.
 const BEDROCK_RESERVED_HEADERS = new Set(["content-type", "accept", "authorization", "content-length"]);
+
+/**
+ * HTTP status for a ConverseStream in-stream failure, keyed by lowercased
+ * exception shape name. Exception and error frames ride inside an HTTP 200
+ * event stream, so the shape name in `:exception-type` / `:error-code` is the
+ * only evidence of what actually failed upstream. Values come from the
+ * bedrock-runtime service model (the same source the AWS SDKs deserialize
+ * against): without them every in-stream failure would be stamped 400, which
+ * the retry classifier reads as a deterministic client rejection and refuses
+ * to replay — making a transient `internalServerException` (500) terminal.
+ * Shapes absent from the map keep 400 so an unrecognized rejection is never
+ * retried by accident.
+ */
+const BEDROCK_STREAM_EXCEPTION_STATUS: Record<string, number> = {
+	accessdeniedexception: 403,
+	conflictexception: 400,
+	internalserverexception: 500,
+	modelerrorexception: 424,
+	modelnotreadyexception: 429,
+	modelstreamerrorexception: 424,
+	modeltimeoutexception: 408,
+	resourcenotfoundexception: 404,
+	servicequotaexceededexception: 400,
+	serviceunavailableexception: 503,
+	throttlingexception: 429,
+	validationexception: 400,
+};
+
+/**
+ * Resolve the service-model status for an in-stream exception/error code.
+ * Frame headers carry the bare shape name in either camelCase
+ * (`internalServerException`) or PascalCase (`InternalServerException`); both
+ * normalize to the same map key. Unknown shapes default to 400.
+ */
+export function bedrockStreamExceptionStatus(code: string): number {
+	return BEDROCK_STREAM_EXCEPTION_STATUS[code.trim().toLowerCase()] ?? 400;
+}
 
 export type BedrockThinkingDisplay = "summarized" | "omitted";
 
@@ -101,6 +149,13 @@ export interface BedrockOptions extends StreamOptions {
 	 * we omit it for them.
 	 */
 	thinkingDisplay?: BedrockThinkingDisplay;
+	/**
+	 * Per-request Bedrock invocation-log tags. Merged over `model.requestMetadata`
+	 * (per-call entries win on key collision). AWS caps the result at 16 entries;
+	 * keys 1-256 chars, values 0-256 chars, both limited to
+	 * `[a-zA-Z0-9\s:_@$#=/+,-.]`. Entries outside those limits are dropped.
+	 */
+	requestMetadata?: Record<string, string>;
 }
 
 function resolveBearerToken(options: BedrockOptions): string | undefined {
@@ -129,6 +184,13 @@ const INFERENCE_PROFILE_GEO_DEFAULT_REGION: Record<string, string> = {
 	au: "ap-southeast-2",
 	jp: "ap-northeast-1",
 };
+
+/**
+ * AWS's own regional host, which every bundled catalog entry carries as a required
+ * placeholder `baseUrl` — no routing info, so its region segment is re-derived.
+ * FIPS, VPC-endpoint and gateway hosts don't match and are used as configured.
+ */
+const AWS_REGIONAL_BEDROCK_HOST = /^bedrock-runtime\.[a-z0-9-]+\.amazonaws\.com$/;
 
 /** Geo prefix of a cross-region inference-profile id, e.g. `eu.anthropic.…` → `eu`. */
 function inferenceProfileGeo(modelId: string): string | undefined {
@@ -235,7 +297,7 @@ interface WireMessage {
 }
 
 interface WireToolSpec {
-	toolSpec: { name: string; description: string; inputSchema: { json: unknown } };
+	toolSpec: { name: string; description?: string; inputSchema: { json: unknown } };
 }
 interface WireToolChoice {
 	auto?: Record<string, never>;
@@ -282,6 +344,8 @@ interface ConverseStreamRequest {
 	toolConfig?: WireToolConfig;
 	guardrailConfig?: WireGuardrailConfig;
 	additionalModelRequestFields?: Record<string, unknown>;
+	requestMetadata?: Record<string, string>;
+	additionalModelResponseFieldPaths?: string[];
 }
 
 // Streaming events (snake_case matches the JSON envelope key, but Bedrock uses camelCase).
@@ -305,6 +369,7 @@ interface ContentBlockStopEvent {
 }
 interface MessageStopEvent {
 	stopReason?: string;
+	additionalModelResponseFields?: unknown;
 }
 interface MetadataEvent {
 	usage?: {
@@ -314,6 +379,41 @@ interface MetadataEvent {
 		cacheWriteInputTokens?: number;
 		totalTokens?: number;
 	};
+}
+
+const REQUEST_METADATA_PATTERN = /^[a-zA-Z0-9\s:_@$#=/+,\-.]*$/;
+const REQUEST_METADATA_MAX_ENTRIES = 16;
+const REQUEST_METADATA_MAX_LENGTH = 256;
+
+/**
+ * Bedrock rejects the whole invocation on a malformed `requestMetadata` entry.
+ * Attribution tags must never cost a turn, so invalid and excess entries are
+ * dropped with a warning instead of failing the request. Returns `undefined`
+ * for an empty result so the field is omitted from the body entirely.
+ */
+function sanitizeRequestMetadata(raw: unknown): Record<string, string> | undefined {
+	if (!isRecord(raw)) return undefined;
+	const out: Record<string, string> = {};
+	const dropped: string[] = [];
+	let kept = 0;
+	for (const [key, value] of Object.entries(raw)) {
+		if (
+			typeof value !== "string" ||
+			key.length < 1 ||
+			key.length > REQUEST_METADATA_MAX_LENGTH ||
+			!REQUEST_METADATA_PATTERN.test(key) ||
+			value.length > REQUEST_METADATA_MAX_LENGTH ||
+			!REQUEST_METADATA_PATTERN.test(value) ||
+			kept >= REQUEST_METADATA_MAX_ENTRIES
+		) {
+			dropped.push(key);
+			continue;
+		}
+		out[key] = value;
+		kept++;
+	}
+	if (dropped.length > 0) logger.warn("Bedrock requestMetadata entries dropped", { keys: dropped });
+	return kept > 0 ? out : undefined;
 }
 
 export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
@@ -354,15 +454,27 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 			const promptCachePolicy = resolvePromptCachePolicy(model, cacheRetention);
 			const convertedMessages = convertMessages(context, model, promptCachePolicy);
 			const toolPlan = planToolConfig(context.tools, options.toolChoice, convertedMessages);
-			const toolConfig = toolPlan.toolConfig;
+			let toolConfig = toolPlan.toolConfig;
 			const sentinelInjected = toolPlan.sentinelInjected;
 			let additionalModelRequestFields = buildAdditionalModelRequestFields(model, options);
+			const prefixMismatchBehavior = model.thinking?.prefixBinding
+				? (options.anthropicPrefixMismatchBehavior ?? "drop_block")
+				: undefined;
 
-			// Bedrock rejects thinking + forced tool_choice ("any" or specific tool).
-			// When tool_choice forces tool use, disable thinking to avoid API errors.
+			// Bedrock rejects thinking + forced tool_choice. Fable's adaptive
+			// thinking cannot be disabled, so downgrade its forced choice instead.
 			if (toolConfig?.toolChoice && additionalModelRequestFields) {
 				const tc = toolConfig.toolChoice;
-				if (tc.any || tc.tool) additionalModelRequestFields = undefined;
+				if (tc.any || tc.tool) {
+					if (prefixMismatchBehavior) toolConfig = { ...toolConfig, toolChoice: { auto: {} } };
+					else additionalModelRequestFields = undefined;
+				}
+			}
+			if (prefixMismatchBehavior) {
+				additionalModelRequestFields = applyBedrockThinkingBinding(
+					additionalModelRequestFields,
+					prefixMismatchBehavior,
+				);
 			}
 
 			let commandInput: ConverseStreamRequest = {
@@ -376,13 +488,27 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 				toolConfig,
 				guardrailConfig: buildGuardrailConfig(options),
 				additionalModelRequestFields,
+				requestMetadata:
+					model.requestMetadata || options.requestMetadata
+						? { ...model.requestMetadata, ...options.requestMetadata }
+						: undefined,
+				...(prefixMismatchBehavior ? { additionalModelResponseFieldPaths: ["/input_transformations"] } : {}),
 			};
 			const replacementInput = await options?.onPayload?.(commandInput, model);
 			if (replacementInput !== undefined) commandInput = replacementInput as ConverseStreamRequest;
+			// After the hook so extension-injected tags are validated too, and before the
+			// raw dump so the inspector shows exactly what was sent.
+			commandInput = { ...commandInput, requestMetadata: sanitizeRequestMetadata(commandInput.requestMetadata) };
 
-			const host = `bedrock-runtime.${region}.amazonaws.com`;
-			const url = `https://${host}/model/${encodeURIComponent(model.id)}/converse-stream`;
-			const urlPath = `/model/${encodeURIComponent(model.id)}/converse-stream`;
+			// `baseUrl` is the origin verbatim, path prefix (and query, for gateways
+			// that authenticate via a query parameter) included, so a gateway mounted
+			// under a path works. AWS's own host is re-pointed: the catalog can't know the region.
+			const base = new URL(model.baseUrl || `https://bedrock-runtime.${region}.amazonaws.com`);
+			if (AWS_REGIONAL_BEDROCK_HOST.test(base.host)) base.host = `bedrock-runtime.${region}.amazonaws.com`;
+			const host = base.host;
+			const urlPath = `${base.pathname.replace(/\/+$/, "")}/model/${encodeURIComponent(model.id)}/converse-stream`;
+			const query = base.search.slice(1) || undefined;
+			const url = `${base.origin}${urlPath}${base.search}`;
 			rawRequestDump = {
 				provider: model.provider,
 				api: output.api,
@@ -413,11 +539,21 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 			// comma-joined wire header, so AWS validates different bytes than were
 			// signed and rejects the request.
 			const callerHeaders: Record<string, string> = {};
-			for (const [name, value] of Object.entries(options?.headers ?? {})) {
-				const field = name.toLowerCase();
-				if (SIGNER_OWNED_HEADERS.has(field) || BEDROCK_RESERVED_HEADERS.has(field)) continue;
-				callerHeaders[field] = value;
+			// `model.headers` first, `options.headers` second: `StreamOptions.headers` is
+			// documented (types.ts:431-435) as merged ON TOP of model-defined headers.
+			// Both pass the same filter, so a config-authored `Host`/`Content-Type`
+			// cannot desync the signature either.
+			for (const source of [model.headers, options?.headers]) {
+				for (const [name, value] of Object.entries(source ?? {})) {
+					const field = name.toLowerCase();
+					if (SIGNER_OWNED_HEADERS.has(field) || BEDROCK_RESERVED_HEADERS.has(field)) continue;
+					callerHeaders[field] = value;
+				}
 			}
+			// SigV4 never signs `user-agent` (UNSIGNABLE in aws-sigv4.ts:42-58), so this
+			// default cannot break the signature. Without it Bun's fetch sends
+			// `Bun/<version>`, and that is what CloudTrail records for every request.
+			callerHeaders["user-agent"] ??= USER_AGENT;
 			const baseHeaders: Record<string, string> = {
 				...callerHeaders,
 				"content-type": "application/json",
@@ -444,6 +580,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 					method: "POST",
 					host,
 					path: urlPath,
+					query,
 					body,
 					region,
 					service: "bedrock",
@@ -505,12 +642,16 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 					const payload = safeParsePayload(message.payload) as { message?: string } | undefined;
 					const errorMessage = payload?.message || new TextDecoder().decode(message.payload);
 					const text = `${exceptionType}: ${errorMessage}`;
-					throw new AIError.BedrockApiError(text, 400, { code: exceptionType });
+					throw new AIError.BedrockApiError(text, bedrockStreamExceptionStatus(exceptionType), {
+						code: exceptionType,
+					});
 				}
 				if (messageType === "error") {
 					const code = message.headers[":error-code"] || "UnknownError";
 					const errorMessage = message.headers[":error-message"] || new TextDecoder().decode(message.payload);
-					throw new AIError.BedrockApiError(`${code}: ${errorMessage}`, 400, { code });
+					throw new AIError.BedrockApiError(`${code}: ${errorMessage}`, bedrockStreamExceptionStatus(code), {
+						code,
+					});
 				}
 				if (messageType !== "event") continue;
 
@@ -546,6 +687,20 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 					}
 					case "messageStop": {
 						const ev = payload as MessageStopEvent;
+						const responseFields = isRecord(ev.additionalModelResponseFields)
+							? ev.additionalModelResponseFields
+							: undefined;
+						const transformations = parseAnthropicInputTransformations(responseFields?.input_transformations);
+						if (transformations.length > 0) {
+							output.inputTransformations = transformations;
+							for (const transformation of transformations) {
+								if (transformation.reason !== "prefix_binding_mismatch") continue;
+								logger.warn("bedrock: dropped thinking block after conversation prefix changed", {
+									model: model.id,
+									path: transformation.path,
+								});
+							}
+						}
 						// A sentinel-only request must never surface a tool-use stop:
 						// no real tool exists for the agent to dispatch.
 						output.stopReason =
@@ -739,7 +894,7 @@ function handleMetadata(event: MetadataEvent, model: Model<"bedrock-converse-str
 		output.usage.cacheRead = event.usage.cacheReadInputTokens || 0;
 		output.usage.cacheWrite = event.usage.cacheWriteInputTokens || 0;
 		output.usage.totalTokens = event.usage.totalTokens || output.usage.input + output.usage.output;
-		calculateCost(model, output.usage);
+		calculateCost(model, output.usage, output.timestamp);
 	}
 }
 
@@ -799,6 +954,8 @@ function resolvePromptCachePolicy(
 	}
 
 	return {
+		// This emitter has only two placement sites (final user and system); the
+		// provider's wire-level maximum remains authoritative in catalog compat.
 		remainingCheckpoints: Math.min(configuredMaximum, 2),
 		...(cacheRetention === "long" && model.compat.supportsLongPromptCacheRetention ? { ttl: "1h" } : {}),
 	};
@@ -823,6 +980,41 @@ function buildSystemPrompt(
 	if (cachePoint) blocks.push(cachePoint);
 
 	return blocks;
+}
+
+function buildToolResultBlock(
+	message: ToolResultMessage,
+	model: Model<"bedrock-converse-stream">,
+	hoistedImages: ImageBlockWire[],
+): ToolResultBlockWire {
+	const content: Array<TextBlockWire | ImageBlockWire> = [];
+	// Bedrock's Anthropic Claude models reject an error toolResult that carries a
+	// non-text block ("all content must be type `text` if `is_error` is true"),
+	// so images inside an error result must always be hoisted out regardless of
+	// the model's requiresToolResultImageHoisting flag (no `class "anthropic"`
+	// rule sets it). Mirrors anthropic.ts buildToolResultBlock. Re-serializing a
+	// previously-persisted poisoned result on a later turn repairs it in place.
+	const hoistImages = message.isError || model.requiresToolResultImageHoisting;
+	for (const block of message.content) {
+		if (block.type === "image") {
+			const image: ImageBlockWire = { image: createImageBlock(block.mimeType, block.data) };
+			if (hoistImages) {
+				content.push({ text: "(see attached image)" });
+				hoistedImages.push(image);
+			} else {
+				content.push(image);
+			}
+		} else {
+			content.push({ text: block.text.toWellFormed() });
+		}
+	}
+	return {
+		toolResult: {
+			toolUseId: normalizeToolCallId(message.toolCallId),
+			content,
+			status: message.isError ? "error" : "success",
+		},
+	};
 }
 
 function convertMessages(
@@ -887,8 +1079,8 @@ function convertMessages(
 							});
 							break;
 						case "thinking":
-							// Skip empty thinking blocks
-							if (c.thinking.trim().length === 0) continue;
+							// Hidden thinking has empty display text but a load-bearing signature.
+							if (c.thinking.trim().length === 0 && !c.thinkingSignature) continue;
 							// A captured signature is authoritative even when the model id is an opaque ARN:
 							// only a model that itself streamed a signature (Claude) can have one, so replay
 							// it as signed reasoningContent regardless of how the id is spelled.
@@ -923,38 +1115,20 @@ function convertMessages(
 			case "toolResult": {
 				// Collect all consecutive toolResult messages into a single user message —
 				// Bedrock requires all tool results to be in one message.
-				const toolResults: ToolResultBlockWire[] = [];
-				toolResults.push({
-					toolResult: {
-						toolUseId: normalizeToolCallId(m.toolCallId),
-						content: m.content.map(c =>
-							c.type === "image"
-								? { image: createImageBlock(c.mimeType, c.data) }
-								: { text: c.text.toWellFormed() },
-						),
-						status: m.isError ? "error" : "success",
-					},
-				});
+				const contentBlocks: UserContent[] = [];
+				const hoistedImages: ImageBlockWire[] = [];
+				contentBlocks.push(buildToolResultBlock(m, model, hoistedImages));
 
 				let j = i + 1;
 				while (j < transformedMessages.length && transformedMessages[j].role === "toolResult") {
 					const nextMsg = transformedMessages[j] as ToolResultMessage;
-					toolResults.push({
-						toolResult: {
-							toolUseId: normalizeToolCallId(nextMsg.toolCallId),
-							content: nextMsg.content.map(c =>
-								c.type === "image"
-									? { image: createImageBlock(c.mimeType, c.data) }
-									: { text: c.text.toWellFormed() },
-							),
-							status: nextMsg.isError ? "error" : "success",
-						},
-					});
+					contentBlocks.push(buildToolResultBlock(nextMsg, model, hoistedImages));
 					j++;
 				}
 				i = j - 1;
 
-				result.push({ role: "user", content: toolResults });
+				contentBlocks.push(...hoistedImages);
+				result.push({ role: "user", content: contentBlocks });
 				break;
 			}
 			default:
@@ -988,7 +1162,9 @@ function convertToolSpec(tool: Tool): WireToolSpec {
 	return {
 		toolSpec: {
 			name: tool.name,
-			description: tool.description || "",
+			// Descriptions may be pruned into the system prompt. Bedrock permits
+			// omission, but rejects an explicitly empty description (minLength: 1).
+			description: tool.description || undefined,
 			inputSchema: { json: toolWireSchema(tool) },
 		},
 	};
@@ -1062,6 +1238,24 @@ function buildGuardrailConfig(options: BedrockOptions): WireGuardrailConfig | un
 		guardrailVersion: options.guardrailVersion ?? "DRAFT",
 		...(options.guardrailTrace === undefined ? {} : { trace: options.guardrailTrace }),
 	};
+}
+
+function applyBedrockThinkingBinding(
+	fields: Record<string, unknown> | undefined,
+	behavior: "drop_block" | "error",
+): Record<string, unknown> {
+	const result = { ...fields };
+	const thinking: Record<string, unknown> = isRecord(result.thinking) ? { ...result.thinking } : { type: "adaptive" };
+	thinking.block_binding = { prefix_mismatch_behavior: behavior };
+	result.thinking = thinking;
+	const betas = Array.isArray(result.anthropic_beta)
+		? result.anthropic_beta.filter((beta): beta is string => typeof beta === "string")
+		: [];
+	if (!betas.includes(THINKING_BINDING_CONTROLS_BETA)) {
+		betas.push(THINKING_BINDING_CONTROLS_BETA);
+	}
+	result.anthropic_beta = betas;
+	return result;
 }
 
 function buildAdditionalModelRequestFields(

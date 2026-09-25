@@ -6,9 +6,10 @@
  *
  * Two rules under test:
  * - `blocked-account` (trigger `blocked` only): eligibility comes from the
- *   exact exhausted chat windows — 5h primary and/or weekly secondary; a
- *   banked reset also clears a 5h-only block (openai/codex#28525). The
- *   natural unblock is the LATEST reset among the exhausted windows.
+ *   exact exhausted normalized chat windows — 5h and/or weekly, regardless of
+ *   which base limit slot carries them; a banked reset also clears a 5h-only
+ *   block (openai/codex#28525). The natural unblock is the LATEST reset among
+ *   the exhausted windows.
  *   Candidates span ALL accounts, active first.
  * - `expiring-credit` (any trigger): use-it-or-lose-it salvage of credits
  *   whose `expiresAt` falls inside the horizon, gated only by the window
@@ -19,7 +20,6 @@
 import { describe, expect, it } from "bun:test";
 import type { UsageReport } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { SETTINGS_SCHEMA } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
 import {
 	blockedAttemptKey,
 	type CodexResetPlanInput,
@@ -27,8 +27,6 @@ import {
 	planCodexResetRedemptions,
 	SALVAGE_MIN_USED_FRACTION,
 	salvageAttemptKey,
-	shouldEvaluateCodexAutoRedeem,
-	shouldPromptCodexAutoRedeem,
 } from "@oh-my-pi/pi-coding-agent/session/codex-auto-reset";
 
 // Epoch ms divisible by 60_000 so minute-boundary reset/expiry times let the
@@ -38,6 +36,14 @@ const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 const ACCOUNT_ID = "acct-123";
 const EMAIL = "user@example.com";
+const CREDENTIAL_ID = 1;
+const ACCOUNT_KEY = `openai-codex|-|${CREDENTIAL_ID}`;
+const CREDENTIAL_ID_BY_ACCOUNT: Record<string, number> = {
+	[ACCOUNT_ID]: CREDENTIAL_ID,
+	"acct-sib": 2,
+	"acct-a": 3,
+	"acct-b": 4,
+};
 const IDENTITY = { accountId: ACCOUNT_ID, email: EMAIL };
 
 interface AccountOpts {
@@ -51,12 +57,17 @@ interface AccountOpts {
 	primaryUsed?: number;
 	/** Primary `resetsAt = NOW + this`; `undefined` omits the timestamp. */
 	primaryResetInMs?: number | undefined;
+	/** Normalized primary window id; defaults to `5h`. */
+	primaryWindowId?: string;
+	/** Normalized primary window duration, when reported. */
+	primaryWindowDurationMs?: number;
 	/** `availableCount`; `undefined` omits `resetCredits` (older broker / parse failure). */
 	credits?: number | undefined;
 	/** Per-credit `expiresAt = NOW + offset` (ISO). */
 	creditExpiries?: (number | undefined)[];
 	/** Per-credit status, paired with `creditExpiries`. */
 	creditStatuses?: string[];
+	credentialId?: number;
 	limitReached?: boolean;
 	fetchedAgoMs?: number;
 }
@@ -69,14 +80,16 @@ function report(opts: AccountOpts = {}): UsageReport {
 	const weeklyResetInMs = "weeklyResetInMs" in opts ? opts.weeklyResetInMs : 3 * DAY;
 	const primaryResetInMs = "primaryResetInMs" in opts ? opts.primaryResetInMs : 2 * HOUR;
 	const credits = "credits" in opts ? opts.credits : 1;
+	const primaryWindowId = opts.primaryWindowId ?? "5h";
 	const limits: UsageReport["limits"] = [
 		{
 			id: "openai-codex:primary",
-			label: "5 Hour",
-			scope: { provider: "openai-codex", accountId },
+			label: primaryWindowId === "7d" ? "7 Days" : "5 Hour",
+			scope: { provider: "openai-codex", accountId, windowId: primaryWindowId },
 			window: {
-				id: "5h",
-				label: "5 Hour",
+				id: primaryWindowId,
+				label: primaryWindowId === "7d" ? "7 Days" : "5 Hour",
+				...(opts.primaryWindowDurationMs === undefined ? {} : { durationMs: opts.primaryWindowDurationMs }),
 				...(primaryResetInMs === undefined ? {} : { resetsAt: NOW + primaryResetInMs }),
 			},
 			amount: { usedFraction: opts.primaryUsed ?? 0.5, unit: "percent" },
@@ -109,7 +122,12 @@ function report(opts: AccountOpts = {}): UsageReport {
 							expiresAt: offset === undefined ? undefined : new Date(NOW + offset).toISOString(),
 						})),
 					},
-		metadata: { accountId, email, limitReached: opts.limitReached ?? true },
+		metadata: {
+			accountId,
+			email,
+			resetCreditCredentialId: opts.credentialId ?? CREDENTIAL_ID_BY_ACCOUNT[accountId ?? ""] ?? 100,
+			limitReached: opts.limitReached ?? true,
+		},
 	};
 }
 
@@ -136,9 +154,14 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		expect(plan.actions).toEqual([
 			{
 				reason: "blocked-account",
-				target: { accountId: ACCOUNT_ID, email: EMAIL },
-				accountKey: ACCOUNT_ID,
-				attemptKey: blockedAttemptKey(ACCOUNT_ID, NOW + 3 * DAY),
+				target: {
+					provider: "openai-codex",
+					credentialId: CREDENTIAL_ID,
+					accountId: ACCOUNT_ID,
+					email: EMAIL,
+				},
+				accountKey: ACCOUNT_KEY,
+				attemptKey: blockedAttemptKey(ACCOUNT_KEY, NOW + 3 * DAY),
 				label: EMAIL,
 				availableCount: 1,
 				weeklyUsedFraction: 1.0,
@@ -150,12 +173,33 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		]);
 	});
 
+	it("restores a weekly block reported in the primary limit slot", () => {
+		const plan = planCodexResetRedemptions(
+			input([
+				report({
+					primaryUsed: 1,
+					primaryResetInMs: 42 * HOUR,
+					primaryWindowId: "7d",
+					primaryWindowDurationMs: 7 * DAY,
+					weeklyUsed: undefined,
+				}),
+			]),
+		);
+		expect(plan.actions).toEqual([
+			expect.objectContaining({
+				remainingMs: 42 * HOUR,
+				blockedWindows: ["weekly"],
+				weeklyUsedFraction: 1,
+			}),
+		]);
+	});
+
 	it("restores a 5h-only block: a banked reset clears it too (openai/codex#28525)", () => {
 		const plan = planCodexResetRedemptions(input([report({ primaryUsed: 1.0, weeklyUsed: 0.8 })]));
 		expect(plan.actions).toEqual([
 			expect.objectContaining({
 				reason: "blocked-account",
-				attemptKey: blockedAttemptKey(ACCOUNT_ID, NOW + 2 * HOUR),
+				attemptKey: blockedAttemptKey(ACCOUNT_KEY, NOW + 2 * HOUR),
 				remainingMs: 2 * HOUR,
 				blockedWindows: ["5h"],
 			}),
@@ -167,7 +211,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		expect(plan.actions).toEqual([
 			expect.objectContaining({
 				remainingMs: 3 * DAY,
-				attemptKey: blockedAttemptKey(ACCOUNT_ID, NOW + 3 * DAY),
+				attemptKey: blockedAttemptKey(ACCOUNT_KEY, NOW + 3 * DAY),
 				blockedWindows: ["5h", "weekly"],
 			}),
 		]);
@@ -182,7 +226,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		const plan = planCodexResetRedemptions(input([report({ weeklyUsed: 0.4, primaryUsed: 0.9 })]));
 		expect(plan.actions).toEqual([]);
 		expect(plan.skipped).toContainEqual({
-			accountKey: ACCOUNT_ID,
+			accountKey: ACCOUNT_KEY,
 			rule: "blocked-account",
 			reason: "no-exhausted-window",
 		});
@@ -196,7 +240,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 	it("skips when the provider omitted the weekly limit and 5h has headroom", () => {
 		const plan = planCodexResetRedemptions(input([report({ weeklyUsed: undefined })]));
 		expect(plan.skipped).toContainEqual({
-			accountKey: ACCOUNT_ID,
+			accountKey: ACCOUNT_KEY,
 			rule: "blocked-account",
 			reason: "no-exhausted-window",
 		});
@@ -206,7 +250,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		const plan = planCodexResetRedemptions(input([report({ limitReached: false })]));
 		expect(plan.actions).toEqual([]);
 		expect(plan.skipped).toContainEqual({
-			accountKey: ACCOUNT_ID,
+			accountKey: ACCOUNT_KEY,
 			rule: "blocked-account",
 			reason: "not-limit-reached",
 		});
@@ -215,7 +259,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 	it("skips when the natural unblock is only minutes away (weekly)", () => {
 		const plan = planCodexResetRedemptions(input([report({ weeklyResetInMs: 2 * 60_000 })]));
 		expect(plan.skipped).toContainEqual({
-			accountKey: ACCOUNT_ID,
+			accountKey: ACCOUNT_KEY,
 			rule: "blocked-account",
 			reason: "reset-too-soon",
 		});
@@ -227,7 +271,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		);
 		expect(plan.actions).toEqual([]);
 		expect(plan.skipped).toContainEqual({
-			accountKey: ACCOUNT_ID,
+			accountKey: ACCOUNT_KEY,
 			rule: "blocked-account",
 			reason: "reset-too-soon",
 		});
@@ -236,7 +280,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 	it("skips a reset already in the past (treated as too-soon)", () => {
 		const plan = planCodexResetRedemptions(input([report({ weeklyResetInMs: -60_000 })]));
 		expect(plan.skipped).toContainEqual({
-			accountKey: ACCOUNT_ID,
+			accountKey: ACCOUNT_KEY,
 			rule: "blocked-account",
 			reason: "reset-too-soon",
 		});
@@ -245,7 +289,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 	it("skips an implausibly distant weekly reset (more than one window length away)", () => {
 		const plan = planCodexResetRedemptions(input([report({ weeklyResetInMs: 8 * DAY })]));
 		expect(plan.skipped).toContainEqual({
-			accountKey: ACCOUNT_ID,
+			accountKey: ACCOUNT_KEY,
 			rule: "blocked-account",
 			reason: "reset-implausible",
 		});
@@ -256,7 +300,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 			input([report({ primaryUsed: 1.0, weeklyUsed: 0.8, primaryResetInMs: 8 * HOUR })]),
 		);
 		expect(plan.skipped).toContainEqual({
-			accountKey: ACCOUNT_ID,
+			accountKey: ACCOUNT_KEY,
 			rule: "blocked-account",
 			reason: "reset-implausible",
 		});
@@ -265,18 +309,22 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 	it("skips when any exhausted window lacks a reset timestamp", () => {
 		const both = report({ primaryUsed: 1.0, weeklyUsed: 1.0, weeklyResetInMs: undefined });
 		const plan = planCodexResetRedemptions(input([both]));
-		expect(plan.skipped).toContainEqual({ accountKey: ACCOUNT_ID, rule: "blocked-account", reason: "no-reset-time" });
+		expect(plan.skipped).toContainEqual({
+			accountKey: ACCOUNT_KEY,
+			rule: "blocked-account",
+			reason: "no-reset-time",
+		});
 	});
 
 	it("skips an account with zero credits", () => {
 		const plan = planCodexResetRedemptions(input([report({ credits: 0 })]));
 		expect(plan.actions).toEqual([]);
-		expect(plan.skipped).toContainEqual({ accountKey: ACCOUNT_ID, rule: "account", reason: "no-credits" });
+		expect(plan.skipped).toContainEqual({ accountKey: ACCOUNT_KEY, rule: "account", reason: "no-credits" });
 	});
 
 	it("skips when resetCredits is undefined (cannot verify availability)", () => {
 		const plan = planCodexResetRedemptions(input([report({ credits: undefined })]));
-		expect(plan.skipped).toContainEqual({ accountKey: ACCOUNT_ID, rule: "account", reason: "credits-unknown" });
+		expect(plan.skipped).toContainEqual({ accountKey: ACCOUNT_KEY, rule: "account", reason: "credits-unknown" });
 	});
 
 	it("respects the reserve: 1 credit with keepCredits 1 is held back", () => {
@@ -284,7 +332,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 			input([report()], { settings: { enabled: true, minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 0 } }),
 		);
 		expect(plan.actions).toEqual([]);
-		expect(plan.skipped).toContainEqual({ accountKey: ACCOUNT_ID, rule: "blocked-account", reason: "reserve" });
+		expect(plan.skipped).toContainEqual({ accountKey: ACCOUNT_KEY, rule: "blocked-account", reason: "reserve" });
 	});
 
 	it("restores above the reserve: 2 credits with keepCredits 1", () => {
@@ -298,11 +346,11 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 
 	it("skips a block episode that was already attempted", () => {
 		const plan = planCodexResetRedemptions(
-			input([report()], { attemptedKeys: new Set([blockedAttemptKey(ACCOUNT_ID, NOW + 3 * DAY)]) }),
+			input([report()], { attemptedKeys: new Set([blockedAttemptKey(ACCOUNT_KEY, NOW + 3 * DAY)]) }),
 		);
 		expect(plan.actions).toEqual([]);
 		expect(plan.skipped).toContainEqual({
-			accountKey: ACCOUNT_ID,
+			accountKey: ACCOUNT_KEY,
 			rule: "blocked-account",
 			reason: "already-attempted",
 		});
@@ -311,11 +359,11 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 	it("treats +20s resetsAt jitter as the same block bucket", () => {
 		const plan = planCodexResetRedemptions(
 			input([report({ weeklyResetInMs: 3 * DAY + 20_000 })], {
-				attemptedKeys: new Set([blockedAttemptKey(ACCOUNT_ID, NOW + 3 * DAY)]),
+				attemptedKeys: new Set([blockedAttemptKey(ACCOUNT_KEY, NOW + 3 * DAY)]),
 			}),
 		);
 		expect(plan.skipped).toContainEqual({
-			accountKey: ACCOUNT_ID,
+			accountKey: ACCOUNT_KEY,
 			rule: "blocked-account",
 			reason: "already-attempted",
 		});
@@ -324,21 +372,21 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 	it("falls back to the per-account cooldown when jitter crosses the minute boundary", () => {
 		const plan = planCodexResetRedemptions(
 			input([report({ weeklyResetInMs: 3 * DAY + 40_000 })], {
-				attemptedKeys: new Set([blockedAttemptKey(ACCOUNT_ID, NOW + 3 * DAY)]),
-				lastAttemptAtByAccount: new Map([[ACCOUNT_ID, NOW - 10_000]]),
+				attemptedKeys: new Set([blockedAttemptKey(ACCOUNT_KEY, NOW + 3 * DAY)]),
+				lastAttemptAtByAccount: new Map([[ACCOUNT_KEY, NOW - 10_000]]),
 			}),
 		);
 		expect(plan.actions).toEqual([]);
-		expect(plan.skipped).toContainEqual({ accountKey: ACCOUNT_ID, rule: "blocked-account", reason: "cooldown" });
+		expect(plan.skipped).toContainEqual({ accountKey: ACCOUNT_KEY, rule: "blocked-account", reason: "cooldown" });
 	});
 
 	it("parks a deferred episode until its retry time, then allows it again", () => {
-		const key = blockedAttemptKey(ACCOUNT_ID, NOW + 3 * DAY);
+		const key = blockedAttemptKey(ACCOUNT_KEY, NOW + 3 * DAY);
 		const parked = planCodexResetRedemptions(
 			input([report()], { deferredUntilByKey: new Map([[key, NOW + 60_000]]) }),
 		);
 		expect(parked.actions).toEqual([]);
-		expect(parked.skipped).toContainEqual({ accountKey: ACCOUNT_ID, rule: "blocked-account", reason: "deferred" });
+		expect(parked.skipped).toContainEqual({ accountKey: ACCOUNT_KEY, rule: "blocked-account", reason: "deferred" });
 		const resumed = planCodexResetRedemptions(input([report()], { deferredUntilByKey: new Map([[key, NOW - 1]]) }));
 		expect(resumed.actions).toHaveLength(1);
 	});
@@ -354,8 +402,8 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		expect(plan.actions).toEqual([
 			expect.objectContaining({
 				reason: "blocked-account",
-				accountKey: ACCOUNT_ID,
-				attemptKey: blockedAttemptKey(ACCOUNT_ID, NOW + 3 * DAY),
+				accountKey: ACCOUNT_KEY,
+				attemptKey: blockedAttemptKey(ACCOUNT_KEY, NOW + 3 * DAY),
 				remainingMs: 3 * DAY,
 				blockedWindows: ["weekly"],
 				active: true,
@@ -374,13 +422,13 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		const soon = planCodexResetRedemptions(input([staleFlag], { activeBlockUnblockAtMs: NOW + 30 * 60_000 }));
 		expect(soon.actions).toEqual([]);
 		expect(soon.skipped).toContainEqual({
-			accountKey: ACCOUNT_ID,
+			accountKey: ACCOUNT_KEY,
 			rule: "blocked-account",
 			reason: "reset-too-soon",
 		});
 		const absurd = planCodexResetRedemptions(input([staleFlag], { activeBlockUnblockAtMs: NOW + 9 * DAY }));
 		expect(absurd.skipped).toContainEqual({
-			accountKey: ACCOUNT_ID,
+			accountKey: ACCOUNT_KEY,
 			rule: "blocked-account",
 			reason: "reset-implausible",
 		});
@@ -393,7 +441,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		expect(plan.actions).toMatchObject([{ remainingMs: 3 * DAY, blockedWindows: ["weekly"] }]);
 	});
 
-	it("applies live evidence to the active account only — a sibling never inherits it", () => {
+	it("applies live evidence only to the active report, never a sibling", () => {
 		const sibling = report({
 			accountId: "acct-sib",
 			email: "sib@example.com",
@@ -401,72 +449,25 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 			limitReached: false,
 		});
 		const plan = planCodexResetRedemptions(input([sibling], { activeBlockUnblockAtMs: NOW + 3 * DAY }));
-		// The healthy sibling is skipped on its own (stale-proof) evidence…
+		expect(plan.actions).toEqual([]);
 		expect(plan.skipped).toContainEqual({
-			accountKey: "acct-sib",
+			accountKey: "openai-codex|-|2",
 			rule: "blocked-account",
 			reason: "not-limit-reached",
 		});
-		// …while the report-less ACTIVE account synthesizes from the live 429.
-		expect(plan.actions).toMatchObject([{ reason: "blocked-account", accountKey: ACCOUNT_ID, active: true }]);
 	});
 
-	it("synthesizes the active candidate when the report is stale-dropped", () => {
-		const stale = report({ fetchedAgoMs: 11 * 60_000 });
-		const plan = planCodexResetRedemptions(input([stale], { activeBlockUnblockAtMs: NOW + 3 * DAY }));
-		expect(plan.actions).toEqual([
-			{
-				reason: "blocked-account",
-				target: { accountId: ACCOUNT_ID, email: EMAIL },
-				accountKey: ACCOUNT_ID,
-				attemptKey: blockedAttemptKey(ACCOUNT_ID, NOW + 3 * DAY),
-				label: EMAIL,
-				availableCount: undefined,
-				weeklyUsedFraction: undefined,
-				remainingMs: 3 * DAY,
-				expiresInMs: undefined,
-				blockedWindows: ["weekly"],
-				active: true,
-			},
-		]);
-	});
-
-	it("synthesizes the active candidate when there are no reports at all", () => {
-		const plan = planCodexResetRedemptions(input(null, { activeBlockUnblockAtMs: NOW + 3 * DAY }));
-		expect(plan.actions).toMatchObject([
-			{ reason: "blocked-account", accountKey: ACCOUNT_ID, availableCount: undefined, active: true },
-		]);
-	});
-
-	it("refuses to synthesize against a reserve (unknown balance cannot honor keepCredits)", () => {
-		const plan = planCodexResetRedemptions(
-			input(null, {
-				activeBlockUnblockAtMs: NOW + 3 * DAY,
-				settings: { enabled: true, minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 0 },
-			}),
+	it("does not invent a credential target from stale or missing usage", () => {
+		const stale = planCodexResetRedemptions(
+			input([report({ fetchedAgoMs: 11 * 60_000 })], { activeBlockUnblockAtMs: NOW + 3 * DAY }),
 		);
-		expect(plan.actions).toEqual([]);
-		expect(plan.skipped).toContainEqual({
-			accountKey: ACCOUNT_ID,
-			rule: "blocked-account",
-			reason: "credits-unknown",
+		expect(stale.actions).toEqual([]);
+		expect(stale.skipped).toContainEqual({
+			accountKey: ACCOUNT_KEY,
+			rule: "account",
+			reason: "stale-report",
 		});
-	});
-
-	it("does not synthesize when a fresh report proves the account has no credits", () => {
-		const fresh = report({ credits: 0, limitReached: false });
-		const plan = planCodexResetRedemptions(input([fresh], { activeBlockUnblockAtMs: NOW + 3 * DAY }));
-		expect(plan.actions).toEqual([]);
-	});
-
-	it("does not synthesize on the sweep trigger or without identity", () => {
-		expect(
-			planCodexResetRedemptions(input(null, { trigger: "sweep", activeBlockUnblockAtMs: NOW + 3 * DAY })).actions,
-		).toEqual([]);
-		const plan = planCodexResetRedemptions(
-			input(null, { identity: undefined, activeBlockUnblockAtMs: NOW + 3 * DAY }),
-		);
-		expect(plan.actions).toEqual([]);
+		expect(planCodexResetRedemptions(input(null, { activeBlockUnblockAtMs: NOW + 3 * DAY })).actions).toEqual([]);
 	});
 
 	it("disables the rule for Spark models (reset vs Spark meter is unknown)", () => {
@@ -498,7 +499,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 	it("skips a stale usage report", () => {
 		const plan = planCodexResetRedemptions(input([report({ fetchedAgoMs: 11 * 60_000 })]));
 		expect(plan.actions).toEqual([]);
-		expect(plan.skipped).toContainEqual({ accountKey: ACCOUNT_ID, rule: "account", reason: "stale-report" });
+		expect(plan.skipped).toContainEqual({ accountKey: ACCOUNT_KEY, rule: "account", reason: "stale-report" });
 	});
 
 	it("plans without an active identity (pool-wide, account marked inactive)", () => {
@@ -511,7 +512,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		const sibling = report({ accountId: "acct-sib", email: "sib@example.com", credits: 2 });
 		const plan = planCodexResetRedemptions(input([active, sibling]));
 		expect(plan.actions).toMatchObject([
-			{ reason: "blocked-account", accountKey: "acct-sib", label: "sib@example.com", active: false },
+			{ reason: "blocked-account", accountKey: "openai-codex|-|2", label: "sib@example.com", active: false },
 		]);
 	});
 
@@ -519,14 +520,14 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		const active = report({ credits: 1 });
 		const sibling = report({ accountId: "acct-sib", email: "sib@example.com", credits: 3 });
 		const plan = planCodexResetRedemptions(input([active, sibling]));
-		expect(plan.actions[0]).toMatchObject({ accountKey: ACCOUNT_ID, active: true });
+		expect(plan.actions[0]).toMatchObject({ accountKey: ACCOUNT_KEY, active: true });
 	});
 
 	it("breaks sibling ties by soonest credit expiry", () => {
 		const a = report({ accountId: "acct-a", email: "a@example.com", creditExpiries: [5 * DAY] });
 		const b = report({ accountId: "acct-b", email: "b@example.com", creditExpiries: [2 * DAY] });
 		const plan = planCodexResetRedemptions(input([a, b], { identity: undefined }));
-		expect(plan.actions[0]).toMatchObject({ accountKey: "acct-b" });
+		expect(plan.actions[0]).toMatchObject({ accountKey: "openai-codex|-|4" });
 	});
 
 	it("emits at most one restore action even with several blocked candidates", () => {
@@ -551,9 +552,14 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 		expect(plan.actions).toEqual([
 			{
 				reason: "expiring-credit",
-				target: { accountId: ACCOUNT_ID, email: EMAIL },
-				accountKey: ACCOUNT_ID,
-				attemptKey: salvageAttemptKey(ACCOUNT_ID, NOW + 2 * HOUR),
+				target: {
+					provider: "openai-codex",
+					credentialId: CREDENTIAL_ID,
+					accountId: ACCOUNT_ID,
+					email: EMAIL,
+				},
+				accountKey: ACCOUNT_KEY,
+				attemptKey: salvageAttemptKey(ACCOUNT_KEY, NOW + 2 * HOUR),
 				label: EMAIL,
 				availableCount: 1,
 				weeklyUsedFraction: 0.8,
@@ -578,7 +584,7 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 		);
 		expect(plan.actions).toEqual([]);
 		expect(plan.skipped).toContainEqual({
-			accountKey: ACCOUNT_ID,
+			accountKey: ACCOUNT_KEY,
 			rule: "expiring-credit",
 			reason: "no-expiring-credit",
 		});
@@ -605,7 +611,7 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 			input([report({ weeklyUsed: 0.8, creditExpiries: [undefined] })], { trigger: "sweep" }),
 		);
 		expect(plan.skipped).toContainEqual({
-			accountKey: ACCOUNT_ID,
+			accountKey: ACCOUNT_KEY,
 			rule: "expiring-credit",
 			reason: "no-expiring-credit",
 		});
@@ -617,7 +623,7 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 		);
 		expect(plan.actions).toEqual([]);
 		expect(plan.skipped).toContainEqual({
-			accountKey: ACCOUNT_ID,
+			accountKey: ACCOUNT_KEY,
 			rule: "expiring-credit",
 			reason: "window-mostly-free",
 		});
@@ -650,7 +656,7 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 			input([report({ weeklyUsed: undefined, primaryUsed: 0, creditExpiries: [2 * HOUR] })], { trigger: "sweep" }),
 		);
 		expect(bothMissing.skipped).toContainEqual({
-			accountKey: ACCOUNT_ID,
+			accountKey: ACCOUNT_KEY,
 			rule: "expiring-credit",
 			reason: "window-mostly-free",
 		});
@@ -670,25 +676,25 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 		const plan = planCodexResetRedemptions(
 			input([report({ weeklyUsed: 0.8, creditExpiries: [2 * HOUR] })], {
 				trigger: "sweep",
-				attemptedKeys: new Set([salvageAttemptKey(ACCOUNT_ID, NOW + 2 * HOUR)]),
+				attemptedKeys: new Set([salvageAttemptKey(ACCOUNT_KEY, NOW + 2 * HOUR)]),
 			}),
 		);
 		expect(plan.actions).toEqual([]);
 		expect(plan.skipped).toContainEqual({
-			accountKey: ACCOUNT_ID,
+			accountKey: ACCOUNT_KEY,
 			rule: "expiring-credit",
 			reason: "already-attempted",
 		});
 	});
 
 	it("parks a deferred salvage (e.g. after nothing_to_reset) until its retry time", () => {
-		const key = salvageAttemptKey(ACCOUNT_ID, NOW + 2 * HOUR);
+		const key = salvageAttemptKey(ACCOUNT_KEY, NOW + 2 * HOUR);
 		const base = [report({ weeklyUsed: 0.8, creditExpiries: [2 * HOUR] })];
 		const parked = planCodexResetRedemptions(
 			input(base, { trigger: "sweep", deferredUntilByKey: new Map([[key, NOW + 60_000]]) }),
 		);
 		expect(parked.actions).toEqual([]);
-		expect(parked.skipped).toContainEqual({ accountKey: ACCOUNT_ID, rule: "expiring-credit", reason: "deferred" });
+		expect(parked.skipped).toContainEqual({ accountKey: ACCOUNT_KEY, rule: "expiring-credit", reason: "deferred" });
 		const resumed = planCodexResetRedemptions(
 			input(base, { trigger: "sweep", deferredUntilByKey: new Map([[key, NOW - 1]]) }),
 		);
@@ -709,7 +715,7 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 		const a = report({ accountId: "acct-a", email: "a@example.com", weeklyUsed: 0.9, creditExpiries: [5 * HOUR] });
 		const b = report({ accountId: "acct-b", email: "b@example.com", weeklyUsed: 0.7, creditExpiries: [2 * HOUR] });
 		const plan = planCodexResetRedemptions(input([a, b], { trigger: "sweep", identity: undefined }));
-		expect(plan.actions.map(action => action.accountKey)).toEqual(["acct-b", "acct-a"]);
+		expect(plan.actions.map(action => action.accountKey)).toEqual(["openai-codex|-|4", "openai-codex|-|3"]);
 	});
 
 	it("does not double-spend an account the blocked rule already restores", () => {
@@ -723,8 +729,8 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 		});
 		const plan = planCodexResetRedemptions(input([blocked, sibling]));
 		expect(plan.actions).toMatchObject([
-			{ reason: "blocked-account", accountKey: ACCOUNT_ID },
-			{ reason: "expiring-credit", accountKey: "acct-sib" },
+			{ reason: "blocked-account", accountKey: ACCOUNT_KEY },
+			{ reason: "expiring-credit", accountKey: "openai-codex|-|2" },
 		]);
 	});
 });
@@ -743,20 +749,7 @@ describe("codexResets policy plumbing", () => {
 		expect(isTerminalRedeemOutcome("credit_list_failed")).toBe(false);
 	});
 
-	it("maps the tri-state policy onto evaluate/prompt gates", () => {
-		// The public setting defaults to prompt-on-eligibility, not silent spend.
-		expect(SETTINGS_SCHEMA["codexResets.autoRedeem"].default).toBe("unset");
-		expect(SETTINGS_SCHEMA["codexResets.salvageHorizonHours"].default).toBe(12);
-		expect(shouldEvaluateCodexAutoRedeem("unset")).toBe(true);
-		expect(shouldPromptCodexAutoRedeem("unset")).toBe(true);
-		expect(shouldEvaluateCodexAutoRedeem("yes")).toBe(true);
-		expect(shouldPromptCodexAutoRedeem("yes")).toBe(false);
-		expect(shouldEvaluateCodexAutoRedeem("no")).toBe(false);
-		expect(shouldPromptCodexAutoRedeem("no")).toBe(false);
-	});
-
 	it("migrates legacy boolean autoRedeem config to the tri-state policy", () => {
-		expect(Settings.isolated().get("codexResets.autoRedeem")).toBe("unset");
 		expect(Settings.isolated({ "codexResets.autoRedeem": true }).get("codexResets.autoRedeem")).toBe("yes");
 		expect(Settings.isolated({ "codexResets.autoRedeem": false }).get("codexResets.autoRedeem")).toBe("no");
 	});

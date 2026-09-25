@@ -2,13 +2,14 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import type { VcsGitRepo, VcsWorktreeEntry } from "@oh-my-pi/pi-natives";
+import type { IsoBackendKind, VcsGitRepo, VcsWorktreeEntry } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { getWorktreeDir, hashPath, isEnoent } from "@oh-my-pi/pi-utils";
+import { getWorktreeDir, hashPath, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { github } from "../utils/github";
+import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
 import { withRepoLock } from "../utils/repo-lock";
 import type { ToolSession } from ".";
-import type { GhPrCheckoutSummary, GhToolDetails } from "./gh";
+import type { GhPrCheckoutSummary, GhToolDetails } from "@oh-my-pi/pi-tui/tools/github";
 import {
 	appendRepoFlag,
 	buildTextResult,
@@ -20,15 +21,16 @@ import {
 	normalizeText,
 	parsePullRequestUrl,
 	parseRepoRef,
-	pushLine,
 	requireCurrentGitBranch,
 	requireNonEmpty,
 } from "./gh-common";
-import { formatShortSha } from "./gh-format";
+import { pushLine } from "@oh-my-pi/pi-tui/tools/gh-format";
+import { formatShortSha } from "@oh-my-pi/pi-tui/tools/gh-format";
 import type { GhPrViewData, GhRepoViewData, GithubInput } from "./gh-types";
 import { GH_PR_FIELDS_NO_COMMENTS } from "./gh-view";
 import { invalidateAllForNumber } from "./github-cache";
-import { ToolError, throwIfAborted } from "./tool-errors";
+import { throwIfAborted } from "./tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 export const GH_REPO_CLONE_FIELDS = ["nameWithOwner", "sshUrl", "url"];
 export const GH_PR_CHECKOUT_FIELDS = [
@@ -255,8 +257,9 @@ export function formatPrCheckoutResult(options: {
 	remoteName: string;
 	remoteUrl: string;
 	reused: boolean;
+	clonedWith?: IsoBackendKind;
 }): string {
-	const { data, localBranch, worktreePath, remoteName, remoteUrl, reused } = options;
+	const { data, localBranch, worktreePath, remoteName, remoteUrl, reused, clonedWith } = options;
 	const lines: string[] = [
 		reused ? `# Pull Request #${data.number ?? "?"} Worktree` : `# Checked Out Pull Request #${data.number ?? "?"}`,
 		"",
@@ -266,7 +269,11 @@ export function formatPrCheckoutResult(options: {
 	pushLine(lines, "Base", data.baseRefName);
 	pushLine(lines, "Head", data.headRefName);
 	pushLine(lines, "Local branch", localBranch);
-	pushLine(lines, "Worktree", worktreePath);
+	pushLine(
+		lines,
+		"Worktree",
+		clonedWith != null ? `${worktreePath} (cloned via ${formatIsolationBackend(clonedWith)})` : worktreePath,
+	);
 	pushLine(lines, "Remote", remoteName);
 	pushLine(lines, "Remote URL", remoteUrl);
 	pushLine(lines, "Cross repository", data.isCrossRepository);
@@ -386,6 +393,7 @@ export interface PrCheckoutOutcome {
 	remoteUrl: string;
 	headRefName: string;
 	reused: boolean;
+	clonedWith?: IsoBackendKind;
 }
 
 export async function checkoutPullRequest(
@@ -483,10 +491,27 @@ export async function checkoutPullRequest(
 			);
 
 			let finalWorktreePath = existingWorktree?.path ?? worktreePath;
+			let clonedWith: IsoBackendKind | undefined;
 			if (!existingWorktree) {
 				finalWorktreePath = await resolveAvailableWorktreePath(worktreePath, existingWorktrees);
 				await fs.mkdir(path.dirname(finalWorktreePath), { recursive: true });
-				await repository.worktreeAdd(finalWorktreePath, localBranch, false, signal);
+				const result = await repository.worktreeAdd(
+					finalWorktreePath,
+					localBranch,
+					{
+						detach: false,
+						clone: session.settings.get("worktree.clone"),
+						backend: parseIsolationBackend(session.settings.get("isolation.backend")),
+					},
+					signal,
+				);
+				clonedWith = result.clonedWith ?? undefined;
+				if (result.cloneError) {
+					logger.warn("worktree clone fell back to plain checkout", {
+						path: finalWorktreePath,
+						error: result.cloneError,
+					});
+				}
 			}
 			const resolvedWorktreePath = await fs.realpath(finalWorktreePath);
 
@@ -498,6 +523,7 @@ export async function checkoutPullRequest(
 				remoteUrl: remote.url,
 				headRefName,
 				reused: Boolean(existingWorktree),
+				clonedWith,
 			};
 		},
 		signal,
@@ -513,6 +539,7 @@ export function outcomeToSummary(outcome: PrCheckoutOutcome): GhPrCheckoutSummar
 		remote: outcome.remoteName,
 		remoteBranch: outcome.headRefName,
 		reused: outcome.reused,
+		clonedWith: outcome.clonedWith,
 	};
 }
 

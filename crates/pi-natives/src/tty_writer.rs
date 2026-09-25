@@ -59,13 +59,17 @@ const MAX_TTY_WRITE_CHUNK_BYTES: usize = 16 * 1024;
 fn write_all_with(
 	mut write: impl FnMut(&[u8]) -> std::io::Result<usize>,
 	buf: &[u8],
+	mut on_progress: impl FnMut(usize),
 ) -> std::io::Result<()> {
 	let mut off = 0usize;
 	while off < buf.len() {
 		let end = (off + MAX_TTY_WRITE_CHUNK_BYTES).min(buf.len());
 		match write(&buf[off..end]) {
 			Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
-			Ok(written) => off += written,
+			Ok(written) => {
+				off += written;
+				on_progress(written);
+			},
 			Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {},
 			Err(err) => return Err(err),
 		}
@@ -74,7 +78,7 @@ fn write_all_with(
 }
 
 #[cfg(unix)]
-fn write_all(fd: i32, buf: &[u8]) -> std::io::Result<()> {
+fn write_all(fd: i32, buf: &[u8], on_progress: impl FnMut(usize)) -> std::io::Result<()> {
 	write_all_with(
 		|chunk| {
 			// SAFETY: `chunk` is a valid initialized slice; `fd` is owned by
@@ -86,6 +90,7 @@ fn write_all(fd: i32, buf: &[u8]) -> std::io::Result<()> {
 			Ok(rc as usize)
 		},
 		buf,
+		on_progress,
 	)
 }
 
@@ -103,23 +108,28 @@ fn pump_loop(fd: i32, inner: &Inner) {
 			}
 			std::mem::swap(&mut *back, &mut front);
 		}
-		let result = if inner.dead.load(Ordering::Acquire) {
+		if inner.dead.load(Ordering::Acquire) {
 			// Dead fd: drain-drop so enqueuers observing `pending` never wedge.
-			Ok(())
-		} else {
-			write_all(fd, &front)
-		};
-		if result.is_err() {
-			inner.dead.store(true, Ordering::Release);
-			// Queued output can never be delivered; account it as gone.
-			let mut back = inner.back.lock();
-			let dropped = back.len();
-			back.clear();
-			inner
-				.pending
-				.fetch_sub(dropped + front.len(), Ordering::AcqRel);
-		} else {
 			inner.pending.fetch_sub(front.len(), Ordering::AcqRel);
+		} else {
+			// Account each chunk as it reaches the fd so `pending()` tracks real
+			// drain progress, not just whole-batch completion — the TUI's stall
+			// watchdog and frame gate read a shrinking `pending()` as the sole
+			// liveness signal for a slow-but-alive terminal (#10430).
+			let mut written = 0usize;
+			let result = write_all(fd, &front, |n| {
+				written += n;
+				inner.pending.fetch_sub(n, Ordering::AcqRel);
+			});
+			if result.is_err() {
+				inner.dead.store(true, Ordering::Release);
+				// Chunks already written were subtracted above; drop the rest —
+				// the unwritten front remainder plus everything still queued.
+				let mut back = inner.back.lock();
+				let dropped = back.len() + (front.len() - written);
+				back.clear();
+				inner.pending.fetch_sub(dropped, Ordering::AcqRel);
+			}
 		}
 		front.clear();
 		// Wake `flushSync` waiters parked on the same condvar.
@@ -208,11 +218,15 @@ impl TtyWriter {
 	/// Append into the back buffer under its lock, account the added bytes,
 	/// and wake the pump. `fill` returns the byte count it appended.
 	fn append(&self, fill: impl FnOnce(&mut Vec<u8>) -> usize) -> u32 {
-		let added = {
+		{
 			let mut back = self.inner.back.lock();
-			fill(&mut back)
-		};
-		self.inner.pending.fetch_add(added, Ordering::AcqRel);
+			let added = fill(&mut back);
+			// Publish the pending-byte accounting while `back` is still locked.
+			// Once this lock is released, the pump may claim and drain the buffer;
+			// accounting afterward lets its `fetch_sub` win the race and underflow
+			// the counter, permanently pinning JS-side render backpressure on.
+			self.inner.pending.fetch_add(added, Ordering::AcqRel);
+		}
 		self.inner.cv.notify_all();
 		self.pending()
 	}
@@ -296,6 +310,7 @@ mod tests {
 		let frame = vec![b'x'; MAX_TTY_WRITE_CHUNK_BYTES * 2 + 7];
 		let mut requested = Vec::new();
 		let mut output = Vec::new();
+		let mut progress = Vec::new();
 		write_all_with(
 			|chunk| {
 				requested.push(chunk.len());
@@ -303,10 +318,13 @@ mod tests {
 				Ok(chunk.len())
 			},
 			&frame,
+			|n| progress.push(n),
 		)
 		.unwrap();
 
 		assert_eq!(requested, [MAX_TTY_WRITE_CHUNK_BYTES, MAX_TTY_WRITE_CHUNK_BYTES, 7]);
+		// Progress is reported per completed chunk and sums to the whole frame.
+		assert_eq!(progress, [MAX_TTY_WRITE_CHUNK_BYTES, MAX_TTY_WRITE_CHUNK_BYTES, 7]);
 		assert_eq!(output, frame);
 	}
 
@@ -377,6 +395,85 @@ mod tests {
 		assert_eq!(reader.join().unwrap(), 512 * 1024);
 		// SAFETY: closing test-owned fd.
 		unsafe { libc::close(read_fd) };
+	}
+
+	#[test]
+	fn pending_tracks_partial_drain_progress() {
+		let (read_fd, write_fd) = pipe_pair();
+		let mut writer = TtyWriter::new(write_fd).unwrap();
+		// Far larger than any kernel pipe buffer, so the pump writes what fits
+		// and then blocks on the remainder with no reader draining.
+		let total = 1024 * 1024;
+		push(&writer, &vec![b'x'; total]);
+		// Wait until the pump has written at least one chunk, but remains blocked
+		// on the undrained tail. Do not treat one unchanged sample as stability:
+		// under full-suite load the pump thread may not be scheduled before the
+		// first poll.
+		let deadline = Instant::now() + Duration::from_secs(2);
+		loop {
+			std::thread::sleep(Duration::from_millis(20));
+			let pending = writer.pending();
+			if pending > 0 && pending < total as u32 {
+				break;
+			}
+			assert!(
+				Instant::now() < deadline,
+				"pump made no observable partial progress; pending {pending} of {total}"
+			);
+		}
+		// Drain the rest so stop() can join the pump thread.
+		let reader = std::thread::spawn(move || {
+			let mut buf = vec![0u8; 64 * 1024];
+			let mut got = 0usize;
+			while got < total {
+				// SAFETY: buf is a valid out-buffer for read(2).
+				let n = unsafe { libc::read(read_fd, buf.as_mut_ptr().cast(), buf.len()) };
+				if n <= 0 {
+					break;
+				}
+				got += n as usize;
+			}
+			got
+		});
+		assert!(writer.flush_sync(5_000));
+		writer.stop(1_000);
+		// SAFETY: closing the test-owned write fd unblocks the reader at EOF.
+		unsafe { libc::close(write_fd) };
+		assert_eq!(reader.join().unwrap(), total);
+		// SAFETY: closing test-owned fd.
+		unsafe { libc::close(read_fd) };
+	}
+
+	#[test]
+	fn rapid_small_writes_never_underflow_pending_accounting() {
+		let (read_fd, write_fd) = pipe_pair();
+		let mut writer = TtyWriter::new(write_fd).unwrap();
+		const WRITES: usize = 100_000;
+		let reader = std::thread::spawn(move || {
+			let mut buf = [0u8; 4096];
+			let mut total = 0usize;
+			while total < WRITES {
+				// SAFETY: buf is a valid out-buffer and read_fd stays open for this loop.
+				let n = unsafe { libc::read(read_fd, buf.as_mut_ptr().cast(), buf.len()) };
+				if n <= 0 {
+					break;
+				}
+				total += n as usize;
+			}
+			// SAFETY: the reader thread owns read_fd.
+			unsafe { libc::close(read_fd) };
+			total
+		});
+
+		for _ in 0..WRITES {
+			push(&writer, b"x");
+		}
+		assert!(writer.flush_sync(5_000));
+		assert_eq!(writer.pending(), 0);
+		writer.stop(1_000);
+		// SAFETY: closing the test-owned original write fd lets the reader observe EOF.
+		unsafe { libc::close(write_fd) };
+		assert_eq!(reader.join().unwrap(), WRITES);
 	}
 
 	#[test]

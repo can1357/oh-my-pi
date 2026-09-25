@@ -1,0 +1,41 @@
+// Provider-wire compat for "firepass"; regenerated from the frozen census using deployment contract selectors.
+
+provider "firepass" {
+	default-model "glm-5.2-fast"
+	env "FIREPASS_API_KEY"
+
+	// Pricing and limits are the published Fire Pass router tariff
+	// (https://docs.fireworks.ai/firepass), not upstream-discoverable: dedicated
+	// `fpk_…` keys never authorize `/v1/models`, so this seed is the authoritative
+	// source. cacheRead is 0.1x input; cacheWrite stays 0 (not billed separately).
+	seed api="openai-completions" base-url="https://api.fireworks.ai/inference/v1" bundle="fallback" {
+		model "glm-5.2-fast" name="GLM 5.2 Fast (Fire Pass)" {
+			reasoning #true
+			input "text"
+			cost input=2.1 output=6.6 cache-read=0.21 cache-write=0
+			limits context=1048576 max-tokens=131072
+		}
+		model "kimi-k3-fast" name="Kimi K3 Fast (Fire Pass)" {
+			reasoning #true
+			input "text" "image"
+			cost input=4.5 output=22.5 cache-read=0.45 cache-write=0
+			limits context=1048576 max-tokens=131072
+		}
+	}
+
+	// Replaces the Fireworks-hosted minimal-effort remap for Fire Pass.
+	thinking-effort-map {
+		minimal "none"
+	}
+	// Replaces the Fire Pass wire-model-id dispatch baseline.
+	wire-model-id-mode "firepass"
+	class "glm" priority=1 {
+		thinking-mode "effort"
+		thinking-efforts "minimal" "low" "medium" "high" "max"
+	}
+
+	class "kimi" priority=1 {
+		thinking-mode "effort"
+		thinking-efforts "low" "high" "max"
+	}
+}

@@ -1,3 +1,11 @@
+import {
+	type VibeSessionState,
+	type VibeScreenSnapshot,
+	type VibeSpawnOutcome,
+	type VibeSendOutcome,
+	type VibeKillOutcome,
+	type VibeWaitOutcome,
+} from "@oh-my-pi/pi-tui/tools/vibe";
 /**
  * Vibe mode worker-session runtime.
  *
@@ -30,22 +38,23 @@ import { getBundledAgent } from "../task/agents";
 import { type ExecutorOptions, runSubagentFollowUpTurn, runSubprocess } from "../task/executor";
 import { generateTaskName } from "../task/name-generator";
 import { AgentOutputManager } from "../task/output-manager";
-import { type AgentDefinition, type AgentProgress, oneLineLabel, type SingleResult } from "../task/types";
+import { type AgentDefinition } from "../task/types";
+import { type AgentProgress, oneLineLabel, type SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "../tools";
-import { formatDuration } from "../tools/render-utils";
-import { ToolError } from "../tools/tool-errors";
+import { formatDuration } from "@oh-my-pi/pi-tui/render/render-utils";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { calculateTokensPerSecond } from "../utils/token-rate";
 
 import {
 	parseLifecycleEvent,
 	VIBE_LIFECYCLE_CUSTOM_TYPE,
 	VIBE_LIFECYCLE_VERSION,
-	type VibeCli,
 	type VibeLifecycleBase,
 	type VibeLifecycleEvent,
 	type VibeSpawnLifecycleEvent,
 	type VibeTombstoneReason,
 } from "./lifecycle";
+import { type VibeCli } from "@oh-my-pi/pi-tui/tools/vibe";
 /**
  * CLI flavor → bundled agent type. This IS the model-tier mapping: `sonic`
  * carries `model: "@smol"` (the configured fast/low-latency role) and `task`
@@ -57,9 +66,6 @@ export const VIBE_CLI_AGENT: Record<VibeCli, string> = {
 	fast: "sonic",
 	good: "task",
 };
-
-/** Worker session lifecycle as shown to the director. */
-export type VibeSessionState = "starting" | "running" | "idle" | "dead";
 
 /** One completed tool call in the per-turn activity trace. */
 interface VibeTraceEntry {
@@ -163,64 +169,6 @@ interface VibeRecord {
 	terminalPersisted: boolean;
 }
 
-/**
- * Live per-session "screen" for rich rendering: what the worker is doing right
- * now (tool trace, current tool, streamed text tail) plus roster metadata.
- * Every string is already one-line sanitized.
- */
-export interface VibeScreenSnapshot {
-	id: string;
-	cli: VibeCli;
-	state: VibeSessionState;
-	model?: string;
-	turns: number;
-	queued: number;
-	/** Start of the in-flight turn, when running. */
-	turnStartedAt?: number;
-	/** Gist of the message that started the in-flight turn. */
-	turnMessage?: string;
-	currentTool?: string;
-	currentToolArgs?: string;
-	lastIntent?: string;
-	/** Completed tool calls of the in-flight turn, oldest first (tail). */
-	trace: string[];
-	/** Latest streamed worker text lines, oldest first. */
-	outputTail: string[];
-	lastActivity?: string;
-	lastActivityAt: number;
-}
-
-export interface VibeSpawnOutcome {
-	id: string;
-	jobId: string;
-}
-
-export interface VibeSendOutcome {
-	id: string;
-	/**
-	 * - `turn`: a new background turn was started (`jobId` set).
-	 * - `steered`: worker was mid-turn and streaming; delivered as steering.
-	 * - `queued`: worker was mid-turn but not steerable; drained into the next turn.
-	 */
-	mode: "turn" | "steered" | "queued";
-	jobId?: string;
-}
-
-export interface VibeKillOutcome {
-	id: string;
-	/** True when an in-flight turn job was cancelled along the way. */
-	cancelledTurn: boolean;
-}
-
-export interface VibeWaitOutcome {
-	/** Watched sessions whose snapshotted turn settled during (or before) the wait.
-	 * May overlap `stillRunning` when a queued follow-up turn already started. */
-	settled: Array<{ id: string; jobId: string; status: "completed" | "failed" | "cancelled"; resultText: string }>;
-	/** Watched sessions with a turn in flight when the wait returned. */
-	stillRunning: string[];
-	timedOut: boolean;
-}
-
 type VibeTeardownStatus = "pending" | "settled" | "failed";
 
 interface TrackedVibeTeardown {
@@ -247,7 +195,7 @@ function trackVibeTeardown(promise: Promise<unknown>, onError: (error: unknown) 
 
 /** Wait for cleanup only until the caller's shared absolute deadline. */
 async function waitForVibeTeardown(tasks: readonly TrackedVibeTeardown[], deadline: number): Promise<boolean> {
-	if (tasks.length === 0 || tasks.every(task => task.status() !== "pending")) return true;
+	if (tasks.every(task => task.status() !== "pending")) return true;
 	const remainingMs = deadline - Date.now();
 	if (remainingMs <= 0) return false;
 	const timeout = Promise.withResolvers<void>();
@@ -948,7 +896,7 @@ export class VibeSessionRegistry {
 		if (record.turn) {
 			const live = registered?.session;
 			if (live?.isStreaming) {
-				await live.steer(message);
+				await live.steer(message, undefined, { attribution: "agent" });
 				record.lastActivityAt = Date.now();
 				return { id: record.id, mode: "steered" };
 			}
@@ -1050,7 +998,7 @@ export class VibeSessionRegistry {
 		}
 
 		const settled = collectSettled();
-		manager.acknowledgeDeliveries(settled.map(entry => entry.jobId));
+		manager.consumeJobResults(settled.map(entry => entry.jobId));
 		// Current in-flight state, independent of the snapshot: a session whose
 		// watched turn settled may already be mid queued follow-up.
 		const stillRunning = watched.filter(record => record.turn !== undefined).map(record => record.id);

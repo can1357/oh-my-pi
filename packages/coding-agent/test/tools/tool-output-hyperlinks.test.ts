@@ -4,14 +4,16 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { editToolRenderer } from "@oh-my-pi/pi-coding-agent/edit/renderer";
-import { getThemeByName, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { editToolRenderer } from "@oh-my-pi/pi-tui/tools/edit";
+import { getThemeByName, initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { astGrepToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/ast-grep";
-import { ReadTool, readToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/read";
-import { WriteTool, writeToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/write";
+import { astGrepToolRenderer } from "@oh-my-pi/pi-tui/tools/ast-grep";
+import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { readToolRenderer } from "@oh-my-pi/pi-tui/tools/read";
+import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
+import { writeToolRenderer } from "@oh-my-pi/pi-tui/tools/write";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
-import { grepToolRenderer } from "../../src/tools/grep";
+import { grepToolRenderer } from "@oh-my-pi/pi-tui/tools/grep";
 
 // 1x1 PNG so the read tool takes its image branch.
 const TINY_PNG_BASE64 =
@@ -134,11 +136,8 @@ describe("tool output OSC 8 file:// hyperlinks", () => {
 			.render(240)
 			.join("\n");
 		const interactiveModeUri = url.pathToFileURL(path.resolve(interactiveModePath)).href;
-		const interactiveModeLineUri = new URL(interactiveModeUri);
-		interactiveModeLineUri.searchParams.set("line", "12");
 		const uris = extractLinkUris(rendered);
-		expect(uris).toContain(interactiveModeUri);
-		expect(uris).toContain(interactiveModeLineUri.href);
+		expect(uris.filter(uri => uri === interactiveModeUri)).toHaveLength(2);
 		expect(uris.some(uri => uri.includes("/src/src/"))).toBe(false);
 	});
 

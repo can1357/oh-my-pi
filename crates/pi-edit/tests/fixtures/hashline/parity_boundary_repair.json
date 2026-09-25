@@ -1,0 +1,1788 @@
+{
+	"source": "packages/hashline/test/boundary-repair.test.ts",
+	"cases": [
+		{
+			"name": "restores a uniformly omitted base indent from unchanged structural rows",
+			"parse": [
+				{
+					"input": "PUT 2.=6:\n+  result = error;\n+} else if (value > 70) {\n+  result = warning;\n+} else {\n+  result = plain;",
+					"expect": {
+						"editCount": 10,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "    if (value > 90) {\n      result = error;\n    } else if (value > 70) {\n      result = plain;\n    } else {\n      result = warning;\n    }",
+					"input": "PUT 2.=6:\n+  result = error;\n+} else if (value > 70) {\n+  result = warning;\n+} else {\n+  result = plain;",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "    if (value > 90) {\n      result = error;\n    } else if (value > 70) {\n      result = warning;\n    } else {\n      result = plain;\n    }",
+						"firstChangedLine": 2,
+						"warnings": [
+							"Auto-indented a replacement body to match unchanged structural rows in its source range."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "preserves intentional indentation-only replacements",
+			"parse": [
+				{
+					"input": "PUT 1.=2:\n+first();\n+second();",
+					"expect": {
+						"editCount": 4,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "    first();\n    second();",
+					"input": "PUT 1.=2:\n+first();\n+second();",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "first();\nsecond();",
+						"firstChangedLine": 1
+					}
+				}
+			]
+		},
+		{
+			"name": "retains a swallowed opening comment fence when syntax and indentation prove the boundary",
+			"parse": [
+				{
+					"input": "PUT 2-4:\n+\t * New summary.\n+\t */",
+					"expect": {
+						"editCount": 5,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "class C {\n\t/**\n\t * Old summary.\n\t */\n\tmethod() {}\n}",
+					"input": "PUT 2-4:\n+\t * New summary.\n+\t */",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "class C {\n\t/**\n\t * New summary.\n\t */\n\tmethod() {}\n}",
+						"firstChangedLine": 3,
+						"warnings": [
+							"Auto-repaired replacement boundaries at line 2: retained 1 syntax-essential source boundary row(s) selected by the range. The result was verified by the syntax probe — re-issue with the range covering exactly the changed lines and the body as their complete final content."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "drops a duplicated multi-line closing block (the Root.tsx incident)",
+			"parse": [
+				{
+					"input": "PUT 7-16:\n+\treturn (\n+\t\t<>\n+\t\t\t<Composition\n+\t\t\t\tid=\"Sizzle\"\n+\t\t\t\tcomponent={Sizzle}\n+\t\t\t\tdurationInFrames={durationInFrames}\n+\t\t\t\twidth={1920}\n+\t\t\t\tdefaultProps={{ layout: \"landscape\" } satisfies SizzleProps}\n+\t\t\t/>\n+\t\t</>\n+\t);",
+					"expect": {
+						"editCount": 21,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "import type React from \"react\";\nimport { Composition } from \"remotion\";\nimport { Sizzle, type SizzleProps } from \"./compositions/Sizzle\";\nimport { FPS, totalDurationInFrames } from \"./lib/scenes\";\n\nexport const RemotionRoot: React.FC = () => {\n\tconst durationInFrames = totalDurationInFrames();\n\treturn (\n\t\t<>\n\t\t\t<Composition\n\t\t\t\tid=\"Sizzle\"\n\t\t\t\tcomponent={Sizzle}\n\t\t\t\tdurationInFrames={durationInFrames}\n\t\t\t\twidth={1920}\n\t\t\t\tdefaultProps={{ layout: \"landscape\" }}\n\t\t\t/>\n\t\t</>\n\t);\n};",
+					"input": "PUT 7-16:\n+\treturn (\n+\t\t<>\n+\t\t\t<Composition\n+\t\t\t\tid=\"Sizzle\"\n+\t\t\t\tcomponent={Sizzle}\n+\t\t\t\tdurationInFrames={durationInFrames}\n+\t\t\t\twidth={1920}\n+\t\t\t\tdefaultProps={{ layout: \"landscape\" } satisfies SizzleProps}\n+\t\t\t/>\n+\t\t</>\n+\t);",
+					"path": "fixture.tsx",
+					"expect": {
+						"text": "import type React from \"react\";\nimport { Composition } from \"remotion\";\nimport { Sizzle, type SizzleProps } from \"./compositions/Sizzle\";\nimport { FPS, totalDurationInFrames } from \"./lib/scenes\";\n\nexport const RemotionRoot: React.FC = () => {\n\treturn (\n\t\t<>\n\t\t\t<Composition\n\t\t\t\tid=\"Sizzle\"\n\t\t\t\tcomponent={Sizzle}\n\t\t\t\tdurationInFrames={durationInFrames}\n\t\t\t\twidth={1920}\n\t\t\t\tdefaultProps={{ layout: \"landscape\" } satisfies SizzleProps}\n\t\t\t/>\n\t\t</>\n\t);\n};",
+						"firstChangedLine": 7,
+						"warnings": [
+							"Auto-repaired replacement boundaries at line 7: dropped 2 body row(s) duplicated just outside the range. The result was verified by the syntax probe — re-issue with the range covering exactly the changed lines and the body as their complete final content."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "drops a single duplicated structural closer (`});`)",
+			"parse": [
+				{
+					"input": "PUT 2-3:\n+\tsetup2();\n+\trun2();\n+});",
+					"expect": {
+						"editCount": 5,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "it('a', () => {\n\tsetup();\n\trun();\n});\nafter();",
+					"input": "PUT 2-3:\n+\tsetup2();\n+\trun2();\n+});",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "it('a', () => {\n\tsetup2();\n\trun2();\n});\nafter();",
+						"firstChangedLine": 2,
+						"warnings": [
+							"Auto-repaired a replacement boundary echo at line 2: dropped 1 trailing body line(s) already present outside the range. Issue the body as final content for the selected range only."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "drops a single duplicated structural opener (`planRender(`)",
+			"parse": [
+				{
+					"input": "PUT 4-6:\n+\tplanRender(\n+\t\ta: string[],\n+\t\tb: boolean,\n+\t\tc: number,\n+\t): Intent {",
+					"expect": {
+						"editCount": 8,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "class Foo {\n\t/** doc */\n\tplanRender(\n\t\ta: string[],\n\t\tb: boolean,\n\t): Intent {\n\t\treturn x;\n\t}\n}",
+					"input": "PUT 4-6:\n+\tplanRender(\n+\t\ta: string[],\n+\t\tb: boolean,\n+\t\tc: number,\n+\t): Intent {",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "class Foo {\n\t/** doc */\n\tplanRender(\n\t\ta: string[],\n\t\tb: boolean,\n\t\tc: number,\n\t): Intent {\n\t\treturn x;\n\t}\n}",
+						"firstChangedLine": 4,
+						"warnings": [
+							"Auto-repaired a replacement boundary echo at line 4: dropped 1 leading body line(s) already present outside the range. Issue the body as final content for the selected range only."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "preserves a duplicated opener when it does not account for the imbalance",
+			"parse": [
+				{
+					"input": "PUT 2-2:\n+if (a) {\n+\tif (b) {\n+\t\tfoo();",
+					"expect": {
+						"editCount": 4,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "if (a) {\n\tfoo();\n}\nbar();",
+					"input": "PUT 2-2:\n+if (a) {\n+\tif (b) {\n+\t\tfoo();",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "if (a) {\nif (a) {\n\tif (b) {\n\t\tfoo();\n}\nbar();",
+						"firstChangedLine": 2,
+						"warnings": [
+							"This edit introduced a syntax error near line 2: the file parsed before the patch and no longer does. It was applied exactly as written, so a line number or range endpoint is likely wrong — re-read the touched region and re-issue a correcting edit."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "spares the deleted closing line when the payload omits it",
+			"parse": [
+				{
+					"input": "PUT 5-5:\n+\tb() {\n+\t\treturn 2;\n+\t},",
+					"expect": {
+						"editCount": 4,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "const handlers = {\n\ta() {\n\t\treturn 1;\n\t},\n};",
+					"input": "PUT 5-5:\n+\tb() {\n+\t\treturn 2;\n+\t},",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "const handlers = {\n\ta() {\n\t\treturn 1;\n\t},\n\tb() {\n\t\treturn 2;\n\t},\n};",
+						"firstChangedLine": 5,
+						"warnings": [
+							"Auto-repaired replacement boundaries at line 5: retained 1 syntax-essential source boundary row(s) selected by the range. The result was verified by the syntax probe — re-issue with the range covering exactly the changed lines and the body as their complete final content."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "does not spare a deleted closing line that the payload already restates",
+			"parse": [
+				{
+					"input": "PUT 1-4:\n+class Foo {\n+\tok();\n+}",
+					"expect": {
+						"editCount": 7,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "class Foo {\n\tok();\n\t}\n}",
+					"input": "PUT 1-4:\n+class Foo {\n+\tok();\n+}",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "class Foo {\n\tok();\n}",
+						"firstChangedLine": 1
+					}
+				}
+			]
+		},
+		{
+			"name": "drops duplicated leading and trailing boundary lines around a range replacement",
+			"parse": [
+				{
+					"input": "PUT 2-3:\n+func _cmd_travel_homeworld():\n+\tvar destination = find_homeworld()\n+\ttravel_to(destination)\n+\tprint_status()",
+					"expect": {
+						"editCount": 6,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "func _cmd_travel_homeworld():\n\tvar destination = get_homeworld()\n\ttravel_to(destination)\n\tprint_status()",
+					"input": "PUT 2-3:\n+func _cmd_travel_homeworld():\n+\tvar destination = find_homeworld()\n+\ttravel_to(destination)\n+\tprint_status()",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "func _cmd_travel_homeworld():\n\tvar destination = find_homeworld()\n\ttravel_to(destination)\n\tprint_status()",
+						"firstChangedLine": 2,
+						"warnings": [
+							"Auto-repaired a replacement boundary echo at line 2: dropped 1 leading and 1 trailing body line(s) already present outside the range. Issue the body as final content for the selected range only."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "preserves payloads where multi-line boundary echoes cover every line",
+			"parse": [
+				{
+					"input": "PUT 3-3:\n+A\n+B\n+C\n+D",
+					"expect": {
+						"editCount": 5,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "A\nB\nold\nC\nD",
+					"input": "PUT 3-3:\n+A\n+B\n+C\n+D",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "A\nB\nA\nB\nC\nD\nC\nD",
+						"firstChangedLine": 3
+					}
+				}
+			]
+		},
+		{
+			"name": "preserves payloads made only of lines matching both replacement neighbors",
+			"parse": [
+				{
+					"input": "PUT 2-2:\n+a\n+c",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nold\nc",
+					"input": "PUT 2-2:\n+a\n+c",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "a\na\nc\nc",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "preserves balance-shifting boundary echoes that do not explain the delta",
+			"parse": [
+				{
+					"input": "PUT 2-2:\n+}\n+if (a) {\n+if (b) {\n+x();\n+}",
+					"expect": {
+						"editCount": 6,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "}\nold();\n}",
+					"input": "PUT 2-2:\n+}\n+if (a) {\n+if (b) {\n+x();\n+}",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "}\n}\nif (a) {\nif (b) {\nx();\n}\n}",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "still drops a balance-neutral wrapper echo",
+			"parse": [
+				{
+					"input": "PUT 2-2:\n+function f() {\n+fresh();\n+}",
+					"expect": {
+						"editCount": 4,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "function f() {\nold();\n}",
+					"input": "PUT 2-2:\n+function f() {\n+fresh();\n+}",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "function f() {\nfresh();\n}",
+						"firstChangedLine": 2,
+						"warnings": [
+							"Auto-repaired a replacement boundary echo at line 2: dropped 1 leading and 1 trailing body line(s) already present outside the range. Issue the body as final content for the selected range only."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "leaves a balance-preserving replacement alone (no false positive)",
+			"parse": [
+				{
+					"input": "PUT 2-2:\n+qux();\n+bar();",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "foo();\nbar();\nbar();\nbaz();",
+					"input": "PUT 2-2:\n+qux();\n+bar();",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "foo();\nqux();\nbar();\nbar();\nbaz();",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "does not drop a balance-neutral duplicated statement",
+			"parse": [
+				{
+					"input": "PUT 1-1:\n+a = 1;\n+b = 2;",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a = 1;\nb = 2;\nc = 3;",
+					"input": "PUT 1-1:\n+a = 1;\n+b = 2;",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "a = 1;\nb = 2;\nb = 2;\nc = 3;",
+						"firstChangedLine": 1
+					}
+				}
+			]
+		},
+		{
+			"name": "ignores brackets inside string literals",
+			"parse": [
+				{
+					"input": "PUT 2-2:\n+const b = \"}}}\";",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "const a = \"}\";\nconst b = \"x\";\nconst c = \"y\";",
+					"input": "PUT 2-2:\n+const b = \"}}}\";",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "const a = \"}\";\nconst b = \"}}}\";\nconst c = \"y\";",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "drops a one-sided trailing keeper echo in a multi-line rewrite",
+			"parse": [
+				{
+					"input": "PUT 2-3:\n+  a2();\n+  b2();\n+  const out = [];",
+					"expect": {
+						"editCount": 5,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "function f() {\n  a();\n  b();\n  const out = [];\n  return out;\n}",
+					"input": "PUT 2-3:\n+  a2();\n+  b2();\n+  const out = [];",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "function f() {\n  a2();\n  b2();\n  const out = [];\n  return out;\n}",
+						"firstChangedLine": 2,
+						"warnings": [
+							"Auto-repaired a replacement boundary echo at line 2: dropped 1 trailing body line(s) already present outside the range. Issue the body as final content for the selected range only."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "drops a one-sided JSX closer echo in a single-line expansion",
+			"parse": [
+				{
+					"input": "PUT 3-3:\n+    <New />\n+  </section>",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "const view = (\n  <section>\n    <Old />\n  </section>\n);",
+					"input": "PUT 3-3:\n+    <New />\n+  </section>",
+					"path": "fixture.tsx",
+					"expect": {
+						"text": "const view = (\n  <section>\n    <New />\n  </section>\n);",
+						"firstChangedLine": 3,
+						"warnings": [
+							"Auto-repaired replacement boundaries at line 3: dropped 1 body row(s) duplicated just outside the range. The result was verified by the syntax probe — re-issue with the range covering exactly the changed lines and the body as their complete final content."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "drops a JSX closer echo after a self-closing tag with a greater-than prop expression",
+			"parse": [
+				{
+					"input": "PUT 3-3:\n+<Foo value={a > b} />\n+</Foo>",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "const view = (\n<Foo>\nold text\n</Foo>\n);",
+					"input": "PUT 3-3:\n+<Foo value={a > b} />\n+</Foo>",
+					"path": "fixture.tsx",
+					"expect": {
+						"text": "const view = (\n<Foo>\n<Foo value={a > b} />\n</Foo>\n);",
+						"firstChangedLine": 3,
+						"warnings": [
+							"Auto-repaired replacement boundaries at line 3: dropped 1 body row(s) duplicated just outside the range. The result was verified by the syntax probe — re-issue with the range covering exactly the changed lines and the body as their complete final content."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "preserves a nested JSX closer that matches the surviving parent closer",
+			"parse": [
+				{
+					"input": "PUT 3-3:\n+<section>\n+new text\n+</section>",
+					"expect": {
+						"editCount": 4,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "const view = (\n<section className=\"outer\">\nold text\n</section>\n);",
+					"input": "PUT 3-3:\n+<section>\n+new text\n+</section>",
+					"path": "fixture.tsx",
+					"expect": {
+						"text": "const view = (\n<section className=\"outer\">\n<section>\nnew text\n</section>\n</section>\n);",
+						"firstChangedLine": 3
+					}
+				}
+			]
+		},
+		{
+			"name": "preserves a nested JSX closer when the opener spans payload lines",
+			"parse": [
+				{
+					"input": "PUT 3-3:\n+<section\n+  className=\"inner\"\n+>\n+new text\n+</section>",
+					"expect": {
+						"editCount": 6,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "const view = (\n<section className=\"outer\">\nold text\n</section>\n);",
+					"input": "PUT 3-3:\n+<section\n+  className=\"inner\"\n+>\n+new text\n+</section>",
+					"path": "fixture.tsx",
+					"expect": {
+						"text": "const view = (\n<section className=\"outer\">\n<section\n  className=\"inner\"\n>\nnew text\n</section>\n</section>\n);",
+						"firstChangedLine": 3
+					}
+				}
+			]
+		},
+		{
+			"name": "drops a one-sided leading keeper echo in a multi-line rewrite",
+			"parse": [
+				{
+					"input": "PUT 3-4:\n+a();\n+B();\n+C();",
+					"expect": {
+						"editCount": 5,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "setup();\na();\nb();\nc();",
+					"input": "PUT 3-4:\n+a();\n+B();\n+C();",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "setup();\na();\nB();\nC();",
+						"firstChangedLine": 3,
+						"warnings": [
+							"Auto-repaired a replacement boundary echo at line 3: dropped 1 leading body line(s) already present outside the range. Issue the body as final content for the selected range only."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "rejects a leading keeper echo when the payload cannot fill the widened range",
+			"parse": [
+				{
+					"input": "PUT 3-4:\n+    auto* handle = payloadFor<PyThreadHandle>(self);\n+    if (!handle || !handle.isStarted())",
+					"expect": {
+						"editCount": 4,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "{\n    auto* handle = payloadFor<PyThreadHandle>(self);\n    if (!handle)\n        return threadError(globalObject, \"thread not started\");\n    handle.setDone();\n}",
+					"input": "PUT 3-4:\n+    auto* handle = payloadFor<PyThreadHandle>(self);\n+    if (!handle || !handle.isStarted())",
+					"path": "fixture.ts",
+					"error": "Error: `PUT 3.=4:` rejected: the body opens by restating the 1 line(s) just above the range, but is too short to be the full final content of the selected range. Re-issue with the range covering exactly the lines that change and the body as their complete final content."
+				}
+			]
+		},
+		{
+			"name": "rejects a trailing keeper echo when the payload cannot fill the widened range",
+			"parse": [
+				{
+					"input": "PUT 2-3:\n+B();\n+keep();",
+					"expect": {
+						"editCount": 4,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a();\nb();\nc();\nkeep();",
+					"input": "PUT 2-3:\n+B();\n+keep();",
+					"path": "fixture.ts",
+					"error": "Error: `PUT 2.=3:` rejected: the body ends by restating the 1 line(s) just below the range, but is too short to be the full final content of the selected range. Re-issue with the range covering exactly the lines that change and the body as their complete final content."
+				}
+			]
+		},
+		{
+			"name": "rejects sparing a deleted closer when the payload claims no position inside the block",
+			"parse": [
+				{
+					"input": "PUT 4-4:\n+        after();",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "        if (!global) {\n            handle.setDone();\n            return;\n        }\n        handle.setIdent(currentIdent());",
+					"input": "PUT 4-4:\n+        after();",
+					"path": "fixture.ts",
+					"error": "Error: `PUT 4.=4:` rejected: a selected boundary row is required for the file to parse, but the body indentation does not establish whether it belongs before or after that row. Re-read the region and re-issue with a range that excludes every unchanged boundary row."
+				}
+			]
+		},
+		{
+			"name": "still spares a closer when the payload indentation claims the block interior",
+			"parse": [
+				{
+					"input": "PUT 4-4:\n+    setIdent();",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "if (!global) {\n    setDone();\n    return;\n}\nafter();",
+					"input": "PUT 4-4:\n+    setIdent();",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "if (!global) {\n    setDone();\n    return;\n    setIdent();\n}\nafter();",
+						"firstChangedLine": 4,
+						"warnings": [
+							"Auto-repaired replacement boundaries at line 4: retained 1 syntax-essential source boundary row(s) selected by the range. The result was verified by the syntax probe — re-issue with the range covering exactly the changed lines and the body as their complete final content."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "does not keep a deleted closer when another hunk removes its opener (#3142)",
+			"parse": [
+				{
+					"input": "CUT 1\nPUT 2-3:\n+Text(\"New\")",
+					"expect": {
+						"editCount": 5,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "if enabled {\n\tText(\"Old\")\n}\n\tText(\"Tail\")",
+					"input": "CUT 1\nPUT 2-3:\n+Text(\"New\")",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "Text(\"New\")\n\tText(\"Tail\")",
+						"firstChangedLine": 1
+					}
+				}
+			]
+		},
+		{
+			"name": "spends the missing-closer residual on the genuine hunk, not an earlier wrapper removal",
+			"parse": [
+				{
+					"input": "CUT 1\nPUT 2-3:\n+Text(\"New\")\nPUT 6-6:\n+\tb: 2,",
+					"expect": {
+						"editCount": 7,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "if enabled {\n\tText(\"Old\")\n}\nconst config = {\n\ta: 1,\n};",
+					"input": "CUT 1\nPUT 2-3:\n+Text(\"New\")\nPUT 6-6:\n+\tb: 2,",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "Text(\"New\")\nconst config = {\n\ta: 1,\n\tb: 2,\n};",
+						"firstChangedLine": 1,
+						"warnings": [
+							"Auto-repaired replacement boundaries at line 6: retained 1 syntax-essential source boundary row(s) selected by the range. The result was verified by the syntax probe — re-issue with the range covering exactly the changed lines and the body as their complete final content."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "keeps the closer when the matching opener is replaced rather than removed",
+			"parse": [
+				{
+					"input": "PUT 1-1:\n+if (b) {\nPUT 2-3:\n+\tfresh();",
+					"expect": {
+						"editCount": 5,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "if (a) {\n\told();\n}",
+					"input": "PUT 1-1:\n+if (b) {\nPUT 2-3:\n+\tfresh();",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "if (b) {\n\tfresh();\n}",
+						"firstChangedLine": 1,
+						"warnings": [
+							"Auto-repaired replacement boundaries at line 2: retained 1 syntax-essential source boundary row(s) selected by the range. The result was verified by the syntax probe — re-issue with the range covering exactly the changed lines and the body as their complete final content."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "does not keep deleted closer suffixes whose tail the payload already restates",
+			"parse": [
+				{
+					"input": "PUT 3-6:\n+function supportsDevinThinking(config: ClientModelConfig): boolean {\n+\tif (NO_REASONING_LABEL_PATTERN.test(config.label)) return false;\n+\treturn config.supportsThinking === true;\n+}",
+					"expect": {
+						"editCount": 8,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "const REASONING_LABEL_PATTERN = /think/i;\nconst NO_REASONING_LABEL_PATTERN = /no/i;\n\n\treturn config.supportsThinking === true;\n}\n}",
+					"input": "PUT 3-6:\n+function supportsDevinThinking(config: ClientModelConfig): boolean {\n+\tif (NO_REASONING_LABEL_PATTERN.test(config.label)) return false;\n+\treturn config.supportsThinking === true;\n+}",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "const REASONING_LABEL_PATTERN = /think/i;\nconst NO_REASONING_LABEL_PATTERN = /no/i;\nfunction supportsDevinThinking(config: ClientModelConfig): boolean {\n\tif (NO_REASONING_LABEL_PATTERN.test(config.label)) return false;\n\treturn config.supportsThinking === true;\n}",
+						"firstChangedLine": 3
+					}
+				}
+			]
+		},
+		{
+			"name": "keeps only the non-restated outer closer for a nested deleted suffix",
+			"parse": [
+				{
+					"input": "PUT 2-4:\n+\tnewMethod() {\n+\t\treturn 1;\n+\t}",
+					"expect": {
+						"editCount": 6,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "class C {\n\told();\n\t}\n}",
+					"input": "PUT 2-4:\n+\tnewMethod() {\n+\t\treturn 1;\n+\t}",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "class C {\n\tnewMethod() {\n\t\treturn 1;\n\t}\n}",
+						"firstChangedLine": 2,
+						"warnings": [
+							"Auto-repaired replacement boundaries at line 2: retained 1 syntax-essential source boundary row(s) selected by the range. The result was verified by the syntax probe — re-issue with the range covering exactly the changed lines and the body as their complete final content."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "ignores non-contiguously deleted openers when choosing which closer to keep",
+			"parse": [
+				{
+					"input": "CUT 1\nPUT 3-4:\n+\tfresh();\nPUT 7-7:\n+\tb: 2,",
+					"expect": {
+						"editCount": 7,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "if (a) {\n\told();\n\tmore();\n}\nconst obj = {\n\ta: 1,\n};",
+					"input": "CUT 1\nPUT 3-4:\n+\tfresh();\nPUT 7-7:\n+\tb: 2,",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "\told();\n\tfresh();\nconst obj = {\n\ta: 1,\n\tb: 2,\n};",
+						"firstChangedLine": 1,
+						"warnings": [
+							"Auto-repaired replacement boundaries at line 7: retained 1 syntax-essential source boundary row(s) selected by the range. The result was verified by the syntax probe — re-issue with the range covering exactly the changed lines and the body as their complete final content."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "counts earlier kept closers in later projected prefixes",
+			"parse": [
+				{
+					"input": "PUT 2-3:\n+\tfresh();\nPUT 4-6:\n+function supportsDevinThinking(config: ClientModelConfig): boolean {\n+\treturn config.supportsThinking === true;\n+}",
+					"expect": {
+						"editCount": 9,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "if (a) {\n\told();\n}\nconst NO_REASONING_LABEL_PATTERN = /no/i;\n\treturn config.supportsThinking === true;\n\t}",
+					"input": "PUT 2-3:\n+\tfresh();\nPUT 4-6:\n+function supportsDevinThinking(config: ClientModelConfig): boolean {\n+\treturn config.supportsThinking === true;\n+}",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "if (a) {\n\tfresh();\n}\nfunction supportsDevinThinking(config: ClientModelConfig): boolean {\n\treturn config.supportsThinking === true;\n}",
+						"firstChangedLine": 2,
+						"warnings": [
+							"Auto-repaired replacement boundaries at line 2: retained 1 syntax-essential source boundary row(s) selected by the range. The result was verified by the syntax probe — re-issue with the range covering exactly the changed lines and the body as their complete final content."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "does not let an earlier kept closer cover a later orphan closer",
+			"parse": [
+				{
+					"input": "PUT 2-3:\n+\tfresh();\nPUT 4-4:\n+after();",
+					"expect": {
+						"editCount": 5,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "if (a) {\n\told();\n}\n}",
+					"input": "PUT 2-3:\n+\tfresh();\nPUT 4-4:\n+after();",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "if (a) {\n\tfresh();\n}\nafter();",
+						"firstChangedLine": 2,
+						"warnings": [
+							"Auto-repaired replacement boundaries at line 2: retained 1 syntax-essential source boundary row(s) selected by the range. The result was verified by the syntax probe — re-issue with the range covering exactly the changed lines and the body as their complete final content."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "does not keep a deleted outer closer when one survives below the range",
+			"parse": [
+				{
+					"input": "PUT 2-5:\n+\tmethod() {\n+\t\tfresh();\n+\t}",
+					"expect": {
+						"editCount": 7,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "class C {\n\tmethod() {\n\t\told();\n\t}\n}\n}",
+					"input": "PUT 2-5:\n+\tmethod() {\n+\t\tfresh();\n+\t}",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "class C {\n\tmethod() {\n\t\tfresh();\n\t}\n}",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "keeps an omitted inner closer when the outer closer survives below",
+			"parse": [
+				{
+					"input": "PUT 2-5:\n+\tmethod() {\n+\t\tfresh();",
+					"expect": {
+						"editCount": 6,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "class C {\n\tmethod() {\n\t\told();\n\t}\n}\n}",
+					"input": "PUT 2-5:\n+\tmethod() {\n+\t\tfresh();",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "class C {\n\tmethod() {\n\t\tfresh();\n\t}\n}",
+						"firstChangedLine": 2,
+						"warnings": [
+							"Auto-repaired replacement boundaries at line 2: retained 1 syntax-essential source boundary row(s) selected by the range. The result was verified by the syntax probe — re-issue with the range covering exactly the changed lines and the body as their complete final content."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "counts head insertions before replacement payloads in original coordinates",
+			"parse": [
+				{
+					"input": "PUT <1:\n+if (a) {\nPUT 1-2:\n+\tfresh();",
+					"expect": {
+						"editCount": 4,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "\told();\n}",
+					"input": "PUT <1:\n+if (a) {\nPUT 1-2:\n+\tfresh();",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "if (a) {\n\tfresh();\n}",
+						"firstChangedLine": 1,
+						"warnings": [
+							"Auto-repaired replacement boundaries at line 1: retained 1 syntax-essential source boundary row(s) selected by the range. The result was verified by the syntax probe — re-issue with the range covering exactly the changed lines and the body as their complete final content."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "counts a separately inserted closer immediately below the range",
+			"parse": [
+				{
+					"input": "PUT 2-3:\n+\tfresh();\nPUT <4:\n+}\nPUT 7-7:\n+\tb: 2,",
+					"expect": {
+						"editCount": 6,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "class C {\n\told();\n}\nafter();\nconst obj = {\n\ta: 1,\n};",
+					"input": "PUT 2-3:\n+\tfresh();\nPUT <4:\n+}\nPUT 7-7:\n+\tb: 2,",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "class C {\n\tfresh();\n}\nafter();\nconst obj = {\n\ta: 1,\n\tb: 2,\n};",
+						"firstChangedLine": 2,
+						"warnings": [
+							"Auto-repaired replacement boundaries at line 7: retained 1 syntax-essential source boundary row(s) selected by the range. The result was verified by the syntax probe — re-issue with the range covering exactly the changed lines and the body as their complete final content."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "keeps an omitted outer closer even when the payload restates an inner closer",
+			"parse": [
+				{
+					"input": "PUT 1-5:\n+if (a) {\n+\tif (c) {\n+\t\tfresh();\n+\t}",
+					"expect": {
+						"editCount": 9,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "if (a) {\n\tif (b) {\n\t\told();\n\t}\n}\nafter();",
+					"input": "PUT 1-5:\n+if (a) {\n+\tif (c) {\n+\t\tfresh();\n+\t}",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "if (a) {\n\tif (c) {\n\t\tfresh();\n\t}\n}\nafter();",
+						"firstChangedLine": 1,
+						"warnings": [
+							"Auto-repaired replacement boundaries at line 1: retained 1 syntax-essential source boundary row(s) selected by the range. The result was verified by the syntax probe — re-issue with the range covering exactly the changed lines and the body as their complete final content."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "still keeps a missing closer when another hunk's dupSuffix repair masks the raw delta",
+			"parse": [
+				{
+					"input": "PUT 2-3:\n+\tsetup();\n+\tfoo();\n+\tbar();\n+});\nPUT 8-8:\n+\tb: 2,",
+					"expect": {
+						"editCount": 8,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "addEventListener(\"click\", () => {\n\tfoo();\n\tbar();\n});\n\nconst config = {\n\ta: 1,\n};",
+					"input": "PUT 2-3:\n+\tsetup();\n+\tfoo();\n+\tbar();\n+});\nPUT 8-8:\n+\tb: 2,",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "addEventListener(\"click\", () => {\n\tsetup();\n\tfoo();\n\tbar();\n});\n\nconst config = {\n\ta: 1,\n\tb: 2,\n};",
+						"firstChangedLine": 2,
+						"warnings": [
+							"Auto-repaired a replacement boundary echo at line 2: dropped 1 trailing body line(s) already present outside the range. Issue the body as final content for the selected range only.",
+							"Auto-repaired replacement boundaries at line 8: retained 1 syntax-essential source boundary row(s) selected by the range. The result was verified by the syntax probe — re-issue with the range covering exactly the changed lines and the body as their complete final content."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "does not let an unterminated template in one hunk mask a missing closer in another",
+			"parse": [
+				{
+					"input": "PUT 1-1:\n+const log = createLog(`\nPUT 5-6:\n+\ta: 2",
+					"expect": {
+						"editCount": 5,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "const log = makeLog(`\nprefix\n`);\nconst obj = {\n\ta: 1\n};",
+					"input": "PUT 1-1:\n+const log = createLog(`\nPUT 5-6:\n+\ta: 2",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "const log = createLog(`\nprefix\n`);\nconst obj = {\n\ta: 2\n};",
+						"firstChangedLine": 1,
+						"warnings": [
+							"Auto-repaired replacement boundaries at line 5: retained 1 syntax-essential source boundary row(s) selected by the range. The result was verified by the syntax probe — re-issue with the range covering exactly the changed lines and the body as their complete final content."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "spares a leading closer the range swallowed when the payload claims sibling depth",
+			"parse": [
+				{
+					"input": "PUT 4-6:\n+\tlet mask = new1();\n+\tlet lead = new2();\n+\tlet t4 = new3();",
+					"expect": {
+						"editCount": 6,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "fn f() {\n\tif a {\n\t\treturn;\n\t}\n\tlet lead = old1();\n\tlet t4 = old2();\n\tlet done = old3();\n}",
+					"input": "PUT 4-6:\n+\tlet mask = new1();\n+\tlet lead = new2();\n+\tlet t4 = new3();",
+					"path": "fixture.rs",
+					"expect": {
+						"text": "fn f() {\n\tif a {\n\t\treturn;\n\t}\n\tlet mask = new1();\n\tlet lead = new2();\n\tlet t4 = new3();\n\tlet done = old3();\n}",
+						"firstChangedLine": 5,
+						"warnings": [
+							"Auto-repaired replacement boundaries at line 4: retained 1 syntax-essential source boundary row(s) selected by the range. The result was verified by the syntax probe — re-issue with the range covering exactly the changed lines and the body as their complete final content."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "rejects a swallowed leading closer when the payload claims the block interior",
+			"parse": [
+				{
+					"input": "PUT 4-5:\n+\t\tcompute();\n+\t\tstore();",
+					"expect": {
+						"editCount": 4,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "fn f() {\n\tif a {\n\t\treturn;\n\t}\n\tlet lead = old1();\n}",
+					"input": "PUT 4-5:\n+\t\tcompute();\n+\t\tstore();",
+					"path": "fixture.rs",
+					"error": "Error: `PUT 4.=5:` rejected: a selected boundary row is required for the file to parse, but the body indentation does not establish whether it belongs before or after that row. Re-read the region and re-issue with a range that excludes every unchanged boundary row."
+				}
+			]
+		},
+		{
+			"name": "does not spare a leading closer whose opener another hunk removes",
+			"parse": [
+				{
+					"input": "PUT 2-2:\n+\tguard();\nPUT 4-5:\n+\tlet lead = new1();",
+					"expect": {
+						"editCount": 5,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "fn f() {\n\tif a {\n\t\treturn;\n\t}\n\tlet lead = old1();\n}",
+					"input": "PUT 2-2:\n+\tguard();\nPUT 4-5:\n+\tlet lead = new1();",
+					"path": "fixture.rs",
+					"expect": {
+						"text": "fn f() {\n\tguard();\n\t\treturn;\n\tlet lead = new1();\n}",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "warns when a balanced payload's range ends mid-block",
+			"parse": [
+				{
+					"input": "PUT 1-3:\n+fn new(a: u32) -> bool {\n+\tlet x = a + 2;\n+\tx > 0\n+}",
+					"expect": {
+						"editCount": 7,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "fn old(a: u32) -> bool {\n\tlet x = a + 1;\n\tlet y = x * 2;\n\tlet z = y - 3;\n\tz > 0\n}",
+					"input": "PUT 1-3:\n+fn new(a: u32) -> bool {\n+\tlet x = a + 2;\n+\tx > 0\n+}",
+					"path": "fixture.rs",
+					"expect": {
+						"text": "fn new(a: u32) -> bool {\n\tlet x = a + 2;\n\tx > 0\n}\n\tlet z = y - 3;\n\tz > 0\n}",
+						"firstChangedLine": 1,
+						"warnings": [
+							"This edit introduced a syntax error near line 1: the file parsed before the patch and no longer does. It was applied exactly as written, so a line number or range endpoint is likely wrong — re-read the touched region and re-issue a correcting edit."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "applies a prose edit that deletes a literal opening brace in Markdown",
+			"parse": [
+				{
+					"input": "PUT 1-2:\n+Revised",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "Intro {\nbody\n}",
+					"input": "PUT 1-2:\n+Revised",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "Revised\n}",
+						"firstChangedLine": 1
+					}
+				}
+			]
+		},
+		{
+			"name": "does not warn for a net-closing payload that repairs a broken file",
+			"parse": [
+				{
+					"input": "PUT 3-3:\n+\t\treturn;\n+\t}",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "fn f() {\n\tif a {\n\t\treturn;\n\tdone();\n}",
+					"input": "PUT 3-3:\n+\t\treturn;\n+\t}",
+					"path": "fixture.rs",
+					"expect": {
+						"text": "fn f() {\n\tif a {\n\t\treturn;\n\t}\n\tdone();\n}",
+						"firstChangedLine": 3
+					}
+				}
+			]
+		},
+		{
+			"name": "does not warn when deleting a surplus opener from an already-broken file",
+			"parse": [
+				{
+					"input": "PUT 2-2:\n+\tprepare();",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "fn f() {\n\tif a {\n\t\twork();\n}",
+					"input": "PUT 2-2:\n+\tprepare();",
+					"path": "fixture.rs",
+					"expect": {
+						"text": "fn f() {\n\tprepare();\n\t\twork();\n}",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "does not warn when replacing a regex literal whose braces fooled the balance scanner",
+			"parse": [
+				{
+					"input": "PUT 1-1:\n+const open = /x/;",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "const open = /{/;\nconst close = /}/;",
+					"input": "PUT 1-1:\n+const open = /x/;",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "const open = /x/;\nconst close = /}/;",
+						"firstChangedLine": 1
+					}
+				}
+			]
+		},
+		{
+			"name": "does not warn for a regex-literal replacement inside a real block",
+			"parse": [
+				{
+					"input": "PUT 2-2:\n+\tconst open = /x/;",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "function setup() {\n\tconst open = /{/;\n\tconst close = /}/;\n}",
+					"input": "PUT 2-2:\n+\tconst open = /x/;",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "function setup() {\n\tconst open = /x/;\n\tconst close = /}/;\n}",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "applies a prose edit verbatim when the range deletes a literal leading brace",
+			"parse": [
+				{
+					"input": "PUT 2-3:\n+Revised",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "Intro {\n}\nold",
+					"input": "PUT 2-3:\n+Revised",
+					"path": "fixture.md",
+					"expect": {
+						"text": "Intro {\nRevised",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "applies a prose edit verbatim when the range deletes a literal trailing brace",
+			"parse": [
+				{
+					"input": "PUT 1-2:\n+Revised",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "old\n}\nOutro",
+					"input": "PUT 1-2:\n+Revised",
+					"path": "fixture.md",
+					"expect": {
+						"text": "Revised\nOutro",
+						"firstChangedLine": 1
+					}
+				}
+			]
+		},
+		{
+			"name": "spares the swallowed leading closer when the authored edit does not parse",
+			"parse": [
+				{
+					"input": "PUT 4-5:\n+\tlet lead = new1();",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "fn f() {\n\tif a {\n\t\treturn;\n\t}\n\tlet lead = old1();\n}",
+					"input": "PUT 4-5:\n+\tlet lead = new1();",
+					"path": "fixture.rs",
+					"expect": {
+						"text": "fn f() {\n\tif a {\n\t\treturn;\n\t}\n\tlet lead = new1();\n}",
+						"firstChangedLine": 5,
+						"warnings": [
+							"Auto-repaired replacement boundaries at line 4: retained 1 syntax-essential source boundary row(s) selected by the range. The result was verified by the syntax probe — re-issue with the range covering exactly the changed lines and the body as their complete final content."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "applies as authored when no path is supplied, since no repair can be proven",
+			"parse": [
+				{
+					"input": "PUT 4-5:\n+\tlet lead = fresh1();",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "fn f() {\n\tif a {\n\t\treturn;\n\t}\n\tlet lead = old1();\n}",
+					"input": "PUT 4-5:\n+\tlet lead = fresh1();",
+					"expect": {
+						"text": "fn f() {\n\tif a {\n\t\treturn;\n\tlet lead = fresh1();\n}",
+						"firstChangedLine": 4
+					}
+				}
+			]
+		},
+		{
+			"name": "applies as authored for a language the parser does not know",
+			"parse": [
+				{
+					"input": "PUT 4-5:\n+\tlet lead = fresh1();",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "fn f() {\n\tif a {\n\t\treturn;\n\t}\n\tlet lead = old1();\n}",
+					"input": "PUT 4-5:\n+\tlet lead = fresh1();",
+					"path": "fixture.unknownlang",
+					"expect": {
+						"text": "fn f() {\n\tif a {\n\t\treturn;\n\tlet lead = fresh1();\n}",
+						"firstChangedLine": 4
+					}
+				}
+			]
+		},
+		{
+			"name": "still rejects a too-short one-sided echo on a language the parser cannot read",
+			"parse": [
+				{
+					"input": "PUT 2-4:\n+alpha\n+fresh1",
+					"expect": {
+						"editCount": 5,
+						"warnings": []
+					}
+				},
+				{
+					"input": "PUT 2-4:\n+alpha\n+fresh1",
+					"expect": {
+						"editCount": 5,
+						"warnings": []
+					}
+				},
+				{
+					"input": "PUT 2-4:\n+alpha\n+fresh1",
+					"expect": {
+						"editCount": 5,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "alpha\nbeta\ngamma\ndelta\neps",
+					"input": "PUT 2-4:\n+alpha\n+fresh1",
+					"error": "Error: `PUT 2.=4:` rejected: the body opens by restating the 1 line(s) just above the range, but is too short to be the full final content of the selected range. Re-issue with the range covering exactly the lines that change and the body as their complete final content."
+				},
+				{
+					"text": "alpha\nbeta\ngamma\ndelta\neps",
+					"input": "PUT 2-4:\n+alpha\n+fresh1",
+					"path": "fixture.unknownlang",
+					"error": "Error: `PUT 2.=4:` rejected: the body opens by restating the 1 line(s) just above the range, but is too short to be the full final content of the selected range. Re-issue with the range covering exactly the lines that change and the body as their complete final content."
+				},
+				{
+					"text": "alpha\nbeta\ngamma\ndelta\neps",
+					"input": "PUT 2-4:\n+alpha\n+fresh1",
+					"path": "fixture.ts",
+					"error": "Error: `PUT 2.=4:` rejected: the body opens by restating the 1 line(s) just above the range, but is too short to be the full final content of the selected range. Re-issue with the range covering exactly the lines that change and the body as their complete final content."
+				}
+			]
+		},
+		{
+			"name": "de-duplicates a closer while recovering from a drifted file",
+			"parse": [
+				{
+					"input": "PUT 4-5:\n+\tsetup2();\n+\trun2();\n+});",
+					"expect": {
+						"editCount": 5,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "flags a range that swallows a lifetime-carrying signature line",
+			"parse": [
+				{
+					"input": "PUT 11.=16:\n+\t\tself.into()",
+					"expect": {
+						"editCount": 7,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "/// Archive container format.\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum Format {\n   Zip,\n   Tar,\n   TarGz,\n}\n\nimpl Format {\n   /// Returns the canonical filename extension for this format.\n   pub const fn extension(self) -> &'static str {\n      match self {\n         Self::Zip => \"zip\",\n         Self::Tar => \"tar\",\n         Self::TarGz => \"tar.gz\",\n      }\n   }\n}",
+					"input": "PUT 11.=16:\n+\t\tself.into()",
+					"path": "fixture.rs",
+					"expect": {
+						"text": "/// Archive container format.\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum Format {\n   Zip,\n   Tar,\n   TarGz,\n}\n\nimpl Format {\n   /// Returns the canonical filename extension for this format.\n\t\tself.into()\n   }\n}",
+						"firstChangedLine": 11,
+						"warnings": [
+							"This edit introduced a syntax error near line 11: the file parsed before the patch and no longer does. It was applied exactly as written, so a line number or range endpoint is likely wrong — re-read the touched region and re-issue a correcting edit."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "does not resurrect a swallowed signature when body indentation matches",
+			"parse": [
+				{
+					"input": "PUT 11.=16:\n+      self.into()",
+					"expect": {
+						"editCount": 7,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "/// Archive container format.\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum Format {\n   Zip,\n   Tar,\n   TarGz,\n}\n\nimpl Format {\n   /// Returns the canonical filename extension for this format.\n   pub const fn extension(self) -> &'static str {\n      match self {\n         Self::Zip => \"zip\",\n         Self::Tar => \"tar\",\n         Self::TarGz => \"tar.gz\",\n      }\n   }\n}",
+					"input": "PUT 11.=16:\n+      self.into()",
+					"path": "fixture.rs",
+					"expect": {
+						"text": "/// Archive container format.\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum Format {\n   Zip,\n   Tar,\n   TarGz,\n}\n\nimpl Format {\n   /// Returns the canonical filename extension for this format.\n      self.into()\n   }\n}",
+						"firstChangedLine": 11,
+						"warnings": [
+							"This edit introduced a syntax error near line 11: the file parsed before the patch and no longer does. It was applied exactly as written, so a line number or range endpoint is likely wrong — re-read the touched region and re-issue a correcting edit."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "stays silent for the correct whole-construct replacement",
+			"parse": [
+				{
+					"input": "PUT 11.=17:\n+   pub const fn extension(self) -> &'static str {\n+      self.into()\n+   }",
+					"expect": {
+						"editCount": 10,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "/// Archive container format.\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum Format {\n   Zip,\n   Tar,\n   TarGz,\n}\n\nimpl Format {\n   /// Returns the canonical filename extension for this format.\n   pub const fn extension(self) -> &'static str {\n      match self {\n         Self::Zip => \"zip\",\n         Self::Tar => \"tar\",\n         Self::TarGz => \"tar.gz\",\n      }\n   }\n}",
+					"input": "PUT 11.=17:\n+   pub const fn extension(self) -> &'static str {\n+      self.into()\n+   }",
+					"path": "fixture.rs",
+					"expect": {
+						"text": "/// Archive container format.\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum Format {\n   Zip,\n   Tar,\n   TarGz,\n}\n\nimpl Format {\n   /// Returns the canonical filename extension for this format.\n   pub const fn extension(self) -> &'static str {\n      self.into()\n   }\n}",
+						"firstChangedLine": 11
+					}
+				}
+			]
+		},
+		{
+			"name": "stays silent editing below a multi-lifetime signature",
+			"parse": [
+				{
+					"input": "PUT 2.=2:\n+   let out = format!(\"{left}-{right}\");",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "fn join<'a>(left: &'a str, right: &'a str) -> String {\n   let out = format!(\"{left}{right}\");\n   out\n}",
+					"input": "PUT 2.=2:\n+   let out = format!(\"{left}-{right}\");",
+					"path": "fixture.rs",
+					"expect": {
+						"text": "fn join<'a>(left: &'a str, right: &'a str) -> String {\n   let out = format!(\"{left}-{right}\");\n   out\n}",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "still lexes rust char literals as literals",
+			"parse": [
+				{
+					"input": "PUT 7.=7:\n+   n + 1",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "fn depth(c: char, mut n: i32) -> i32 {\n   match c {\n      '{' => n += 1,\n      '}' => n -= 1,\n      _ => {},\n   }\n   n\n}",
+					"input": "PUT 7.=7:\n+   n + 1",
+					"path": "fixture.rs",
+					"expect": {
+						"text": "fn depth(c: char, mut n: i32) -> i32 {\n   match c {\n      '{' => n += 1,\n      '}' => n -= 1,\n      _ => {},\n   }\n   n + 1\n}",
+						"firstChangedLine": 7
+					}
+				}
+			]
+		},
+		{
+			"name": "warns when a balance-neutral edit stops the file parsing",
+			"parse": [
+				{
+					"input": "PUT 7.=7:\n+\t\t\treturn tar::resolve_alias_path(&self.entries, path, self.limits);",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "impl A {\n   fn write_all(&self) -> Result<()> {\n      let paths: Vec<_> = self\n         .entries\n         .iter()\n         .filter(|entry| !entry.is_directory())\n         .map(|entry| entry.path.clone())\n         .collect();\n      Ok(())\n   }\n\n   fn resolve_path(&self, path: Str) -> Result<Str> {\n      if matches!(self.format, Format::Tar | Format::TarGz) {\n         return tar::resolve_alias_path(&self.entries, path);\n      }\n      Ok(path)\n   }\n}",
+					"input": "PUT 7.=7:\n+\t\t\treturn tar::resolve_alias_path(&self.entries, path, self.limits);",
+					"path": "fixture.rs",
+					"expect": {
+						"text": "impl A {\n   fn write_all(&self) -> Result<()> {\n      let paths: Vec<_> = self\n         .entries\n         .iter()\n         .filter(|entry| !entry.is_directory())\n\t\t\treturn tar::resolve_alias_path(&self.entries, path, self.limits);\n         .collect();\n      Ok(())\n   }\n\n   fn resolve_path(&self, path: Str) -> Result<Str> {\n      if matches!(self.format, Format::Tar | Format::TarGz) {\n         return tar::resolve_alias_path(&self.entries, path);\n      }\n      Ok(path)\n   }\n}",
+						"firstChangedLine": 7,
+						"warnings": [
+							"This edit introduced a syntax error near line 7: the file parsed before the patch and no longer does. It was applied exactly as written, so a line number or range endpoint is likely wrong — re-read the touched region and re-issue a correcting edit."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "stays silent when the same statement lands on the intended line",
+			"parse": [
+				{
+					"input": "PUT 14.=14:\n+         return tar::resolve_alias_path(&self.entries, path, self.limits);",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "impl A {\n   fn write_all(&self) -> Result<()> {\n      let paths: Vec<_> = self\n         .entries\n         .iter()\n         .filter(|entry| !entry.is_directory())\n         .map(|entry| entry.path.clone())\n         .collect();\n      Ok(())\n   }\n\n   fn resolve_path(&self, path: Str) -> Result<Str> {\n      if matches!(self.format, Format::Tar | Format::TarGz) {\n         return tar::resolve_alias_path(&self.entries, path);\n      }\n      Ok(path)\n   }\n}",
+					"input": "PUT 14.=14:\n+         return tar::resolve_alias_path(&self.entries, path, self.limits);",
+					"path": "fixture.rs",
+					"expect": {
+						"text": "impl A {\n   fn write_all(&self) -> Result<()> {\n      let paths: Vec<_> = self\n         .entries\n         .iter()\n         .filter(|entry| !entry.is_directory())\n         .map(|entry| entry.path.clone())\n         .collect();\n      Ok(())\n   }\n\n   fn resolve_path(&self, path: Str) -> Result<Str> {\n      if matches!(self.format, Format::Tar | Format::TarGz) {\n         return tar::resolve_alias_path(&self.entries, path, self.limits);\n      }\n      Ok(path)\n   }\n}",
+						"firstChangedLine": 14
+					}
+				}
+			]
+		},
+		{
+			"name": "casts no advisory when the baseline was already broken",
+			"parse": [
+				{
+					"input": "PUT 3.=3:\n+   let x = 2;",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "impl A {\n   fn half(\n   let x = 1;",
+					"input": "PUT 3.=3:\n+   let x = 2;",
+					"path": "fixture.rs",
+					"expect": {
+						"text": "impl A {\n   fn half(\n   let x = 2;",
+						"firstChangedLine": 3
+					}
+				}
+			]
+		},
+		{
+			"name": "casts no advisory for languages the probe cannot parse",
+			"parse": [
+				{
+					"input": "PUT 4.=4:\n+Still { unbalanced",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "# Title\n\nUses { braces } freely.\nDone.",
+					"input": "PUT 4.=4:\n+Still { unbalanced",
+					"path": "fixture.md",
+					"expect": {
+						"text": "# Title\n\nUses { braces } freely.\nStill { unbalanced",
+						"firstChangedLine": 4
+					}
+				}
+			]
+		},
+		{
+			"name": "drops a trailing attribute echo in a single-line replacement",
+			"parse": [
+				{
+					"input": "PUT 2.=2:\n+/// semantics. `context` defaults to 4 like jsdiff.\n+#[napi]",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "/// Unified-diff hunks with jsdiff\n/// `structuredPatch(_, _, oldText, newText, _, _, { context }).hunks`\n#[napi]\npub fn structured_patch_hunks() {}",
+					"input": "PUT 2.=2:\n+/// semantics. `context` defaults to 4 like jsdiff.\n+#[napi]",
+					"path": "fixture.rs",
+					"expect": {
+						"text": "/// Unified-diff hunks with jsdiff\n/// semantics. `context` defaults to 4 like jsdiff.\n#[napi]\npub fn structured_patch_hunks() {}",
+						"firstChangedLine": 2,
+						"warnings": [
+							"Auto-repaired a replacement boundary echo at line 2: dropped 1 trailing body line(s) already present outside the range. Issue the body as final content for the selected range only."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "drops the echo when the body carries several new doc rows",
+			"parse": [
+				{
+					"input": "PUT 2.=2:\n+///\n+/// Returns UTF-16 lines with active SGR codes carried across line boundaries.\n+#[napi]",
+					"expect": {
+						"editCount": 4,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "/// Wrap text to a visible width, preserving ANSI escape codes across line\n/// breaks.\n#[napi]\npub fn wrap_text_with_ansi() {}",
+					"input": "PUT 2.=2:\n+///\n+/// Returns UTF-16 lines with active SGR codes carried across line boundaries.\n+#[napi]",
+					"path": "fixture.rs",
+					"expect": {
+						"text": "/// Wrap text to a visible width, preserving ANSI escape codes across line\n///\n/// Returns UTF-16 lines with active SGR codes carried across line boundaries.\n#[napi]\npub fn wrap_text_with_ansi() {}",
+						"firstChangedLine": 2,
+						"warnings": [
+							"Auto-repaired a replacement boundary echo at line 2: dropped 1 trailing body line(s) already present outside the range. Issue the body as final content for the selected range only."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "drops a leading attribute echo in a single-line replacement",
+			"parse": [
+				{
+					"input": "PUT 2.=2:\n+#[napi]\n+/// New summary.",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "#[napi]\n/// Old summary.\npub fn f() {}",
+					"input": "PUT 2.=2:\n+#[napi]\n+/// New summary.",
+					"path": "fixture.rs",
+					"expect": {
+						"text": "#[napi]\n/// New summary.\npub fn f() {}",
+						"firstChangedLine": 2,
+						"warnings": [
+							"Auto-repaired a replacement boundary echo at line 2: dropped 1 leading body line(s) already present outside the range. Issue the body as final content for the selected range only."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "rejects a single-line annotation echo whose body cannot fill the range",
+			"parse": [
+				{
+					"input": "PUT 1.=1:\n+#[napi]",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "/// Old doc.\n#[napi]\npub fn f() {}",
+					"input": "PUT 1.=1:\n+#[napi]",
+					"path": "fixture.rs",
+					"error": "Error: `PUT 1.=1:` rejected: the body ends by restating the 1 line(s) just below the range, but is too short to be the full final content of the selected range. Re-issue with the range covering exactly the lines that change and the body as their complete final content."
+				}
+			]
+		},
+		{
+			"name": "drops a trailing decorator echo in a single-line replacement",
+			"parse": [
+				{
+					"input": "PUT 1.=1:\n+/** Creates request-scoped services. */\n+@Injectable()",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "/** Old summary. */\n@Injectable()\nclass Service {}",
+					"input": "PUT 1.=1:\n+/** Creates request-scoped services. */\n+@Injectable()",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "/** Creates request-scoped services. */\n@Injectable()\nclass Service {}",
+						"firstChangedLine": 1,
+						"warnings": [
+							"Auto-repaired a replacement boundary echo at line 1: dropped 1 trailing body line(s) already present outside the range. Issue the body as final content for the selected range only."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "keeps a trailing statement echo literal on a single-line range",
+			"parse": [
+				{
+					"input": "PUT 2.=2:\n+fresh();\n+bar();",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "foo();\nold();\nbar();",
+					"input": "PUT 2.=2:\n+fresh();\n+bar();",
+					"path": "fixture.ts",
+					"expect": {
+						"text": "foo();\nfresh();\nbar();\nbar();",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		}
+	]
+}

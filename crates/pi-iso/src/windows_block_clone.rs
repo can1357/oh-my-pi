@@ -49,6 +49,18 @@ impl IsolationBackend for WindowsBlockCloneBackend {
 		}
 	}
 
+	fn clone_tree(&self, lower: &Path, merged: &Path, skip: &[&std::ffi::OsStr]) -> IsoResult<()> {
+		#[cfg(windows)]
+		{
+			imp::clone_tree(lower, merged, skip)
+		}
+		#[cfg(not(windows))]
+		{
+			let _ = (lower, merged, skip);
+			Err(IsoError::unavailable("Windows block-clone isolation is only available on Windows"))
+		}
+	}
+
 	fn stop(&self, merged: &Path) -> IsoResult<()> {
 		#[cfg(windows)]
 		{
@@ -95,6 +107,22 @@ mod imp {
 		prepare_destination(merged)?;
 
 		let result = recursive_block_clone(&lower, merged);
+		if result.is_err() {
+			let _ = remove_path(merged);
+		}
+		result
+	}
+
+	pub fn clone_tree(lower: &Path, merged: &Path, skip: &[&std::ffi::OsStr]) -> IsoResult<()> {
+		let lower = canonical_existing_dir(lower)?;
+		prepare_destination(merged)?;
+		let result = (|| {
+			fs::create_dir_all(merged)
+				.map_err(|err| IsoError::other(format!("create {}: {err}", merged.display())))?;
+			clone_dir_contents(&lower, merged, Some(skip))?;
+			copy_metadata_best_effort(&lower, merged);
+			Ok(())
+		})();
 		if result.is_err() {
 			let _ = remove_path(merged);
 		}
@@ -162,8 +190,9 @@ mod imp {
 		}
 		let mut permissions = meta.permissions();
 		if permissions.readonly() {
-			// This backend only removes a temporary Windows block-clone tree; clearing
-			// the readonly file attribute is required so removal can proceed.
+			// This backend only removes a temporary Windows block-clone tree;
+			// clearing the readonly file attribute is required so removal can
+			// proceed.
 			#[allow(
 				clippy::permissions_set_readonly_false,
 				reason = "Windows block-clone cleanup must clear the readonly file attribute before \
@@ -177,17 +206,24 @@ mod imp {
 	fn recursive_block_clone(lower: &Path, merged: &Path) -> IsoResult<()> {
 		fs::create_dir_all(merged)
 			.map_err(|err| IsoError::other(format!("create {}: {err}", merged.display())))?;
-		clone_dir_contents(lower, merged)?;
+		clone_dir_contents(lower, merged, None)?;
 		copy_metadata_best_effort(lower, merged);
 		Ok(())
 	}
 
-	fn clone_dir_contents(src: &Path, dst: &Path) -> IsoResult<()> {
+	fn clone_dir_contents(
+		src: &Path,
+		dst: &Path,
+		skip: Option<&[&std::ffi::OsStr]>,
+	) -> IsoResult<()> {
 		let entries = fs::read_dir(src)
 			.map_err(|err| IsoError::other(format!("read_dir {}: {err}", src.display())))?;
 		for entry in entries {
 			let entry = entry
 				.map_err(|err| IsoError::other(format!("dir entry in {}: {err}", src.display())))?;
+			if skip.is_some_and(|names| names.contains(&entry.file_name().as_os_str())) {
+				continue;
+			}
 			let file_type = entry.file_type().map_err(|err| {
 				IsoError::other(format!("file_type {}: {err}", entry.path().display()))
 			})?;
@@ -200,7 +236,7 @@ mod imp {
 			} else if file_type.is_dir() {
 				fs::create_dir_all(&dst_path)
 					.map_err(|err| IsoError::other(format!("create {}: {err}", dst_path.display())))?;
-				clone_dir_contents(&src_path, &dst_path)?;
+				clone_dir_contents(&src_path, &dst_path, None)?;
 				copy_metadata_best_effort(&src_path, &dst_path);
 			} else if file_type.is_file() {
 				clone_regular_file(&src_path, &dst_path)?;
@@ -275,8 +311,9 @@ mod imp {
 			.expect("DUPLICATE_EXTENTS_DATA size fits u32");
 
 		// SAFETY: `dst_file` and `src_file` own valid handles for the duration of
-		// the call. `data` points to an initialized DUPLICATE_EXTENTS_DATA buffer,
-		// and no output buffer is required by FSCTL_DUPLICATE_EXTENTS_TO_FILE.
+		// the call. `data` points to an initialized DUPLICATE_EXTENTS_DATA
+		// buffer, and no output buffer is required by
+		// FSCTL_DUPLICATE_EXTENTS_TO_FILE.
 		let ok = unsafe {
 			DeviceIoControl(
 				dst_file.as_raw_handle() as _,
@@ -346,9 +383,9 @@ mod imp {
 		opts.write(true);
 		opts.custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
 		let Ok(file) = opts.open(path) else { return };
-		// SAFETY: `file` owns the HANDLE for the duration of the call. The optional
-		// FILETIME pointers either reference stack locals that outlive the call or
-		// are null when the corresponding timestamp is unavailable.
+		// SAFETY: `file` owns the HANDLE for the duration of the call. The
+		// optional FILETIME pointers either reference stack locals that outlive
+		// the call or are null when the corresponding timestamp is unavailable.
 		let _ = unsafe {
 			SetFileTime(
 				file.as_raw_handle() as _,

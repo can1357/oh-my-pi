@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
-import { ToolError } from "../../tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
@@ -336,6 +336,7 @@ export class CmuxSocketClient {
 
 	#nextLine(timeoutMs: number): Promise<string> {
 		const { promise, resolve, reject } = Promise.withResolvers<string>();
+		// oxlint-disable-next-line prefer-const -- captured by the timeout closure before assignment
 		let waiter: LineWaiter;
 		const timer = setTimeout(() => {
 			const index = this.#lineWaiters.indexOf(waiter);

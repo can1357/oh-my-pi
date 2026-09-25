@@ -2,14 +2,16 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { raceWithSignal } from "@oh-my-pi/pi-ai/utils/abort";
-import { type CursorExecResolvedCarrier, kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { logger } from "@oh-my-pi/pi-utils";
-import { obfuscateToolArguments } from "../secrets/message-transform";
+import {
+	collectNativeReplayRegexSecretValues,
+	obfuscateNativeReplay,
+	obfuscateToolArguments,
+} from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import {
 	formatExecutionSourcePreview,
 	formatSessionHistoryMarkdown,
-	formatToolResultErrorPreview,
 	PRIMARY_CONTEXT_CUSTOM_TYPES,
 } from "../session/session-history-format";
 import { ADVISOR_RENDER_OPTIONS, renderAdvisorDeltaChunks } from "./delta-split";
@@ -37,8 +39,6 @@ export interface AdvisorAgent {
 export interface AdvisorRuntimeHost {
 	/** Live primary transcript (use `agent.state.messages`). */
 	snapshotMessages(): AgentMessage[];
-	/** Surface one advice note to the primary (enqueues into the session YieldQueue). */
-	enqueueAdvice(note: string, severity?: "nit" | "concern" | "blocker"): void;
 	/** Redact primary transcript bytes before they reach the advisor model. */
 	obfuscator?: SecretObfuscator;
 	/**
@@ -87,6 +87,10 @@ export interface AdvisorRuntimeHost {
 	notifyQuotaExhausted?(): void;
 	/** Stable identity for the live advisor model. Used to restore full transcript rendering after a model switch. */
 	getModelIdentity?(): string;
+	/** Called once the runtime finishes draining its review backlog (or
+	 *  hard-stops), so the host can repaint UI that reflects whether the
+	 *  advisor is still going to comment on the current yield. */
+	notifyIdle?(): void;
 }
 
 /**
@@ -130,45 +134,23 @@ const ADVISOR_OUTPUT_ONLY_HAZARDS: readonly AdvisorOutputHazard[] = [
 ];
 
 /**
- * Replaces an advisor assistant turn that requested unavailable tools or generated
- * output-only destructive directives with a sanitized error before dispatch.
+ * Replaces an advisor assistant turn that generated output-only destructive
+ * directives with a sanitized error before dispatch.
  *
  * The agent loop records assistant turns before dispatching tools. Without this
- * pre-dispatch rewrite, an advisor hallucination can leave unrelated text in the
- * advisor transcript even though the action itself never executes.
+ * pre-dispatch rewrite, a hazardous advisor turn would stay in the advisor
+ * transcript as model-visible context. Calls to tools the advisor was not
+ * granted are not a quarantine matter: the loop answers them with a
+ * self-correcting `Tool <name> not found` result.
  */
-export function quarantineAdvisorUnsafeOutput(
-	message: AssistantMessage,
-	availableToolNames: ReadonlySet<string>,
-	sourceText = "",
-): string | undefined {
+export function quarantineAdvisorUnsafeOutput(message: AssistantMessage, sourceText = ""): string | undefined {
 	const reasons: string[] = [];
-	const unavailableToolNames = new Set<string>();
 	const generatedParts: string[] = [];
 	for (const block of message.content) {
-		// Cursor exec-channel native blocks (bash/read/grep/...) are stamped
-		// kCursorExecResolved: they already ran server-side through the
-		// advisor-scoped CursorExecHandlers bridge, which rejects ungranted
-		// tools in-band ("Tool not available") and lets the model self-correct.
-		// Quarantining them would discard the legitimate advise emitted in the
-		// same turn (issue #5900). The scoped bridge is the grant gate here, not
-		// this pre-dispatch check.
-		if (
-			block.type === "toolCall" &&
-			!availableToolNames.has(block.name) &&
-			(block as CursorExecResolvedCarrier)[kCursorExecResolved] !== true
-		) {
-			unavailableToolNames.add(block.name);
-		}
 		if (block.type === "toolCall" && block.name === "advise" && typeof block.arguments.note === "string") {
 			generatedParts.push(block.arguments.note);
 		}
 		if (block.type === "text") generatedParts.push(block.text);
-	}
-	if (unavailableToolNames.size > 0) {
-		const names = [...unavailableToolNames].sort();
-		const toolLabel = names.length === 1 ? "tool" : "tools";
-		reasons.push(`requested unavailable ${toolLabel} ${names.join(", ")}`);
 	}
 
 	const generatedText = generatedParts.join("\n");
@@ -250,9 +232,18 @@ interface PendingDelta {
 
 interface CatchupWaiter {
 	threshold: number;
+	/** Stay parked while a failed turn is retried or recovered via the host's fallback chain. */
+	waitThroughRecovery: boolean;
 	finish: (caughtUp: boolean) => void;
 	timer?: NodeJS.Timeout;
 }
+
+/**
+ * Synthetic message `AgentSession.#withEvalStateContext` appends at the tail of
+ * every display-context rebuild; its slot moves each time, so
+ * {@link AdvisorRuntime.rebaseDeliveredPrefix} does not align on it.
+ */
+const EVAL_STATE_CONTEXT_TYPE = "eval-state-context";
 
 interface DeliveredMessage {
 	message: AgentMessage;
@@ -316,6 +307,13 @@ export class AdvisorRuntime {
 	 * explicit {@link reset} (config rebuild, /new, session restart).
 	 */
 	#halted = false;
+	/**
+	 * Whether the runtime has completed at least one review (a drain batch that
+	 * ended in a successful advisor turn). Gates {@link yielded} so the
+	 * status-line eye stays open until a review actually completes — a fresh
+	 * runtime with an empty backlog has not "finished" anything yet.
+	 */
+	#hasReviewed = false;
 	/** True from the moment an advisor turn fails until one succeeds (or an
 	 *  explicit reset/seed). While set, {@link waitForCatchup} resolves
 	 *  immediately: the primary agent NEVER parks on a failing advisor. */
@@ -355,6 +353,22 @@ export class AdvisorRuntime {
 	get halted(): boolean {
 		return this.#halted;
 	}
+	/**
+	 * True once the runtime has completed at least one review and has no queued
+	 * or in-flight review work left, or has hard-stopped (halted/quota-paused/
+	 * disposed): the advisor is not going to add any more comments until a new
+	 * primary turn (or an explicit reset). A fresh runtime that has never
+	 * reviewed anything is NOT yielded — the eye stays open until the first
+	 * review completes. Drives the status-line closed-eye state.
+	 */
+	get yielded(): boolean {
+		return (
+			this.disposed ||
+			this.#quotaExhausted ||
+			this.#halted ||
+			(this.#hasReviewed && !this.#busy && this.#backlog === 0 && this.#pending.length === 0)
+		);
+	}
 
 	/**
 	 * Called after each primary turn ends. Renders the incremental delta and
@@ -390,7 +404,7 @@ export class AdvisorRuntime {
 			this.#seenContext.clear();
 			for (const [key, value] of seenBefore) this.#seenContext.set(key, value);
 			this.#failing = true;
-			this.#wakeAllWaiters();
+			this.#releaseFailureWaiters();
 			logger.warn("advisor delta render failed", { err: String(err) });
 		}
 		if (rendered) {
@@ -406,22 +420,38 @@ export class AdvisorRuntime {
 	 *
 	 * Returns `false` when the deadline, abort signal, or a runtime failure releases
 	 * the waiter before the requested backlog was drained.
+	 *
+	 * By default a failing advisor turn releases the waiter at once, so the primary
+	 * agent never parks on a broken advisor. `waitThroughRecovery` is for callers
+	 * that must observe the outcome of that failure — a headless shutdown drain
+	 * about to dispose the session: the waiter stays parked while the runtime
+	 * retries or the host switches to a fallback model, and is released only by
+	 * catch-up, the deadline, the signal, or a terminal stop (halt, quota pause,
+	 * reset, session transition, dispose).
 	 */
-	waitForCatchup(maxMs: number, threshold: number, signal?: AbortSignal): Promise<boolean> {
+	waitForCatchup(
+		maxMs: number,
+		threshold: number,
+		signal?: AbortSignal,
+		options?: { waitThroughRecovery?: boolean },
+	): Promise<boolean> {
+		const waitThroughRecovery = options?.waitThroughRecovery === true;
 		if (
 			this.disposed ||
 			signal?.aborted ||
 			this.#backlog < threshold ||
 			this.#quotaExhausted ||
 			this.#halted ||
+			// A paused runtime cannot drain until the transition resumes; release
+			// every waiter, as `pauseForSessionTransition` does for existing ones.
+			this.#sessionTransitionPaused ||
 			// An advisor mid-failure/retry must NEVER gate the primary agent:
 			// its backlog cannot drain until the retry cycle resolves, and the
 			// primary would otherwise park for the full catch-up budget.
-			this.#failing
+			(this.#failing && !waitThroughRecovery)
 		)
 			return Promise.resolve(this.#backlog < threshold);
 		const { promise, resolve } = Promise.withResolvers<boolean>();
-		let waiter!: CatchupWaiter;
 		const finish = (caughtUp: boolean): void => {
 			const idx = this.#waiters.indexOf(waiter);
 			if (idx >= 0) this.#waiters.splice(idx, 1);
@@ -430,8 +460,9 @@ export class AdvisorRuntime {
 			resolve(caughtUp);
 		};
 		const abort = (): void => finish(false);
-		waiter = {
+		const waiter: CatchupWaiter = {
 			threshold,
+			waitThroughRecovery,
 			finish,
 			timer: setTimeout(abort, maxMs),
 		};
@@ -558,6 +589,10 @@ export class AdvisorRuntime {
 		this.#sessionTransitionPaused = false;
 		this.#quotaExhausted = false;
 		this.#halted = false;
+		// A re-primed advisor has not reviewed the (new) conversation yet — drop
+		// the latch so the eye stays open until the first post-reset review, and
+		// so an aborted prior drain cannot emit a stale advisor_yielded.
+		this.#hasReviewed = false;
 		this.#failing = false;
 		this.#droppedBacklogs = 0;
 		this.#consecutiveQuarantines = 0;
@@ -588,6 +623,48 @@ export class AdvisorRuntime {
 		this.#wakeAllWaiters();
 	}
 
+	/**
+	 * Re-align the delivered prefix with the primary transcript after an
+	 * in-place rewrite the advisor's own context already covers (the primary's
+	 * per-turn prune). Unlike {@link reset} nothing is cleared or replayed: the
+	 * stored identities are refreshed, so the next delta's prefix check compares
+	 * against the rewritten messages instead of stale pre-rewrite fingerprints.
+	 *
+	 * Positional: delivered slot i is re-pointed at current message i when the
+	 * two render the same, or when current i is the same tool result elided in
+	 * place (`prunedAt`). Delivered `eval-state-context` messages are skipped:
+	 * every display-context rebuild re-appends a fresh one at the tail, so the
+	 * old slot moving is not a rewrite (the fresh copy is delivered as new).
+	 * All or nothing: if any slot fails to align, or the current transcript is
+	 * shorter than the delivered prefix, nothing changes and the next delta's
+	 * prefix check resets the advisor exactly as it would have without a rebase.
+	 */
+	rebaseDeliveredPrefix(reason: string): void {
+		if (this.disposed) return;
+		const all = this.host.snapshotMessages();
+		const rebased: DeliveredMessage[] = [];
+		for (const delivered of this.#deliveredPrefix) {
+			const message = delivered.message;
+			if (message.role === "custom" && message.customType === EVAL_STATE_CONTEXT_TYPE) continue;
+			const current = all[rebased.length];
+			if (current === undefined) return;
+			const fingerprint = fingerprintMessage(current);
+			const prunedInPlace =
+				current.role === "toolResult" &&
+				current.prunedAt !== undefined &&
+				message.role === "toolResult" &&
+				message.toolCallId === current.toolCallId;
+			if (fingerprint === undefined || (fingerprint !== delivered.fingerprint && !prunedInPlace)) return;
+			rebased.push({ message: current, fingerprint });
+		}
+		this.#deliveredPrefix = rebased;
+		this.#lastCount = rebased.length;
+		// A quarantine re-prime replays `#latestMessages`; keep it on the rewritten
+		// transcript so the replay does not resurrect pre-prune tool output.
+		this.#latestMessages = all;
+		logger.debug("advisor delivered prefix rebased", { reason, lastCount: this.#lastCount });
+	}
+
 	#syncModelIdentity(): void {
 		const identity = this.host.getModelIdentity?.();
 		if (identity === undefined || identity === this.#modelIdentity) return;
@@ -608,9 +685,9 @@ export class AdvisorRuntime {
 	 * Shared obfuscation side effects for BOTH render paths (single-block
 	 * {@link #renderPreparedDelta} and multi-message
 	 * {@link #formatRawDeltaMessageChunks}): collect regex secret values from
-	 * primary-context custom messages and the rendered markdown, scrub the
-	 * advisor's own history, and refresh pending placeholder prefixes when new
-	 * secrets appear. Returns whether new secret values were discovered.
+	 * primary-context custom messages, rendered markdown and native advisor history
+	 * before scrubbing that history, then refresh pending placeholder prefixes.
+	 * Returns whether new secret values were discovered.
 	 * Idempotent across the two calls one drain makes for the same prepared
 	 * list: the second call discovers nothing new and skips the strip.
 	 */
@@ -623,6 +700,15 @@ export class AdvisorRuntime {
 				discoveredNewRegexSecretValue = true;
 			}
 		};
+		const addTextualContent = (content: TextualContent): void => {
+			if (typeof content === "string") {
+				addRegexValues(content);
+				return;
+			}
+			for (const block of content) {
+				if (block.type === "text") addRegexValues(block.text);
+			}
+		};
 		for (const message of delta) {
 			if (
 				message.role === "custom" &&
@@ -631,16 +717,23 @@ export class AdvisorRuntime {
 			) {
 				addRegexValues(message.content);
 			}
+			if (message.role === "toolResult") addTextualContent(message.content as TextualContent);
 		}
 		addRegexValues(renderedMd);
-		scrubAdvisorHistory(obfuscator, this.agent.state.messages, this.#advisorRegexSecretValues);
+		discoveredNewRegexSecretValue =
+			scrubAdvisorHistory(obfuscator, this.agent.state.messages, this.#advisorRegexSecretValues) ||
+			discoveredNewRegexSecretValue;
 		if (discoveredNewRegexSecretValue) {
-			this.#pending = this.#pending.map(delta => ({
-				...delta,
-				text: obfuscator.stripUnsafeFriendlyPlaceholderPrefixes(delta.text, this.#advisorRegexSecretValues),
-			}));
+			this.#refreshPendingSecretPrefixes(obfuscator);
 		}
 		return discoveredNewRegexSecretValue;
+	}
+
+	#refreshPendingSecretPrefixes(obfuscator: SecretObfuscator): void {
+		this.#pending = this.#pending.map(delta => ({
+			...delta,
+			text: obfuscator.stripUnsafeFriendlyPlaceholderPrefixes(delta.text, this.#advisorRegexSecretValues),
+		}));
 	}
 
 	/**
@@ -746,6 +839,7 @@ export class AdvisorRuntime {
 			md = formatSessionHistoryMarkdown(this.#obfuscatePrimaryContextMessages(obfuscator, delta), {
 				...ADVISOR_RENDER_OPTIONS,
 				includeThinking: this.#includeThinking,
+				transformExpandedToolIO: text => obfuscator.obfuscate(text, this.#advisorRegexSecretValues),
 			});
 			md = obfuscator.obfuscate(md, this.#advisorRegexSecretValues);
 		}
@@ -845,8 +939,20 @@ export class AdvisorRuntime {
 	}
 
 	#wakeAllWaiters(): void {
-		for (const w of [...this.#waiters]) {
+		for (const w of Array.from(this.#waiters)) {
 			w.finish(false);
+		}
+	}
+
+	/**
+	 * Release waiters that must not park on a failing advisor. Recovery-aware
+	 * waiters stay parked: the failed batch is retried or recovered, and either
+	 * outcome still reaches them through {@link #notifyWaiters} (drained or
+	 * dropped batch) or {@link #wakeAllWaiters} (terminal stop).
+	 */
+	#releaseFailureWaiters(): void {
+		for (const w of Array.from(this.#waiters)) {
+			if (!w.waitThroughRecovery) w.finish(false);
 		}
 	}
 
@@ -940,6 +1046,16 @@ export class AdvisorRuntime {
 				// Epoch guard — a reset/dispose during the maintainContext await
 				// invalidates this batch.
 				if (this.#epoch !== epoch) return null;
+				// Maintenance can commit unseen native plaintext or a snapshot predating
+				// concurrent collisions. Collect before scrubbing and refresh both queues
+				// before another round can send history or the popped batch to compaction.
+				const obfuscator = this.host.obfuscator;
+				if (obfuscator?.hasSecrets()) {
+					if (scrubAdvisorHistory(obfuscator, this.agent.state.messages, this.#advisorRegexSecretValues)) {
+						this.#refreshPendingSecretPrefixes(obfuscator);
+					}
+					batchText = obfuscator.stripUnsafeFriendlyPlaceholderPrefixes(batchText, this.#advisorRegexSecretValues);
+				}
 
 				if (shouldResetContext) {
 					// Once coalescing has begun (round > 0), deltas that arrived during
@@ -1161,6 +1277,7 @@ export class AdvisorRuntime {
 					if (turnError) throw turnError;
 					success = true;
 					this.#seenContextInFlight = undefined;
+					this.#hasReviewed = true;
 					this.#failing = false;
 					this.#consecutiveFailures = 0;
 					this.#failureNotified = false;
@@ -1186,9 +1303,11 @@ export class AdvisorRuntime {
 					// Release any parked primary-agent waiters IMMEDIATELY — before
 					// the async onTurnError hook or any retry sleep — and refuse new
 					// parks until a turn succeeds. A failing advisor must never hold
-					// the primary on the catch-up gate.
+					// the primary on the catch-up gate. Recovery-aware waiters (the
+					// headless shutdown drain) stay parked so disposal cannot abort
+					// the fallback switch below.
 					this.#failing = true;
-					this.#wakeAllWaiters();
+					this.#releaseFailureWaiters();
 					const failedMessages = this.agent.state.messages.slice(messageSnapshot);
 					const terminalFailure = this.#terminalAssistantFailure(messageSnapshot);
 					const rawErrorId = AIError.classify(err);
@@ -1439,6 +1558,18 @@ export class AdvisorRuntime {
 		} finally {
 			this.#iterationAbort = undefined;
 			this.#busy = false;
+			// Notify on EVERY path that lands the runtime in the yielded state —
+			// not just an empty backlog. The quota branch requeues the failed
+			// batch (backlog/pending stay non-empty) yet `yielded` is true via
+			// the quota latch, and the eye must close without waiting for an
+			// unrelated repaint. Same for halt.
+			if (!this.disposed && this.yielded) {
+				try {
+					this.host.notifyIdle?.();
+				} catch (err) {
+					logger.debug("advisor idle notification failed", { err: String(err) });
+				}
+			}
 		}
 	}
 }
@@ -1481,29 +1612,6 @@ function obfuscateTextualContent(
 		return { ...block, text };
 	});
 	return changed ? result : content;
-}
-
-function firstAdvisorToolResultErrorLine(content: TextualContent): string | undefined {
-	if (typeof content === "string") return content.split("\n", 1)[0];
-	const first = content[0];
-	if (first?.type !== "text") return undefined;
-	return first.text.split("\n", 1)[0];
-}
-
-function obfuscateAdvisorToolResultErrorContent(
-	obfuscator: SecretObfuscator,
-	content: TextualContent,
-	sharedRegexSecretValues: ReadonlySet<string>,
-): TextualContent {
-	const firstLine = firstAdvisorToolResultErrorLine(content);
-	if (firstLine === undefined) return content;
-	const preview = formatToolResultErrorPreview(content);
-	const obfuscatedPreview = obfuscator.obfuscate(preview, sharedRegexSecretValues);
-	if (obfuscatedPreview === firstLine) return content;
-	if (typeof content === "string") return obfuscatedPreview + content.slice(firstLine.length);
-	const first = content[0]!;
-	if (first.type !== "text") return content;
-	return [{ ...first, text: obfuscatedPreview + first.text.slice(firstLine.length) }, ...content.slice(1)];
 }
 
 function obfuscateAssistantMessage(
@@ -1569,9 +1677,7 @@ function obfuscateAdvisorMessage(
 				details?: Record<string, unknown>;
 				isError?: boolean;
 			};
-			const content = msg.isError
-				? obfuscateAdvisorToolResultErrorContent(obfuscator, msg.content, sharedRegexSecretValues)
-				: msg.content;
+			const content = obfuscateTextualContent(obfuscator, msg.content, sharedRegexSecretValues);
 			let details = msg.details;
 			if (typeof details?.diff === "string") {
 				const diff = obfuscator.obfuscate(details.diff, sharedRegexSecretValues);
@@ -1639,11 +1745,32 @@ function obfuscateAdvisorMessage(
 function scrubAdvisorHistory(
 	obfuscator: SecretObfuscator,
 	messages: AgentMessage[],
-	sharedRegexSecretValues: ReadonlySet<string>,
-): void {
+	sharedRegexSecretValues: Set<string>,
+): boolean {
+	const previousSize = sharedRegexSecretValues.size;
+	// Collect across the entire history first: redacting a search-only regex
+	// value would otherwise erase the evidence needed to scrub an earlier prefix.
+	for (const message of messages) {
+		if (
+			message.role === "user" ||
+			message.role === "developer" ||
+			message.role === "assistant" ||
+			message.role === "compactionSummary"
+		) {
+			collectNativeReplayRegexSecretValues(obfuscator, message, sharedRegexSecretValues);
+		}
+	}
 	for (let index = 0; index < messages.length; index++) {
 		const message = messages[index]!;
-		const next = obfuscateAdvisorMessage(obfuscator, message, sharedRegexSecretValues);
+		const replay =
+			message.role === "user" ||
+			message.role === "developer" ||
+			message.role === "assistant" ||
+			message.role === "compactionSummary"
+				? obfuscateNativeReplay(obfuscator, message, sharedRegexSecretValues)
+				: message;
+		const next = obfuscateAdvisorMessage(obfuscator, replay, sharedRegexSecretValues);
 		if (next !== message) messages[index] = next;
 	}
+	return sharedRegexSecretValues.size !== previousSize;
 }

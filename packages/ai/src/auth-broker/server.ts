@@ -89,7 +89,7 @@ export interface AuthBrokerServerHandle {
 function json(status: number, body: unknown, headers?: Record<string, string>): Response {
 	return new Response(JSON.stringify(body), {
 		status,
-		headers: { "Content-Type": "application/json", ...(headers ?? {}) },
+		headers: { "Content-Type": "application/json", ...headers },
 	});
 }
 
@@ -202,7 +202,7 @@ class GenerationGate {
 
 	constructor(storage: AuthStorage, pollIntervalMs: number) {
 		this.#storage = storage;
-		this.#unsubscribe = storage.onGenerationChanged(generation => this.#wake(generation));
+		this.#unsubscribe = storage.credentials.onGeneration(generation => this.#wake(generation));
 		this.#pollTimer = setInterval(() => {
 			void this.#pollExternalChanges();
 		}, pollIntervalMs);
@@ -211,7 +211,7 @@ class GenerationGate {
 	}
 
 	waitForChange(afterGeneration: number, signal: AbortSignal): Promise<"changed" | "aborted"> {
-		if (this.#storage.getGeneration() !== afterGeneration) return Promise.resolve("changed");
+		if (this.#storage.credentials.generation !== afterGeneration) return Promise.resolve("changed");
 		if (signal.aborted) return Promise.resolve("aborted");
 
 		const done = Promise.withResolvers<"changed" | "aborted">();
@@ -251,7 +251,7 @@ class GenerationGate {
 		if (this.#pollInFlight) return;
 		this.#pollInFlight = true;
 		try {
-			await this.#storage.pollExternalChanges();
+			await this.#storage.credentials.poll();
 		} catch (error) {
 			logger.debug("Auth broker external store change poll failed", { error: String(error) });
 		} finally {
@@ -260,9 +260,9 @@ class GenerationGate {
 	}
 
 	#wake(generation: number): void {
-		for (const [waitingFor, waiters] of [...this.#waiters]) {
+		for (const [waitingFor, waiters] of Array.from(this.#waiters)) {
 			if (generation <= waitingFor) continue;
-			for (const resolve of [...waiters]) resolve();
+			for (const resolve of Array.from(waiters)) resolve();
 		}
 	}
 }
@@ -395,11 +395,11 @@ function buildSnapshot(
 	clientSupportsCodexMeterBlockScopes: boolean,
 ): SnapshotResponse {
 	const serverNowMs = Date.now();
-	const base = storage.exportSnapshot();
+	const base = storage.credentials.snapshot();
 	const { wire, nextSweepAt } = resolveRefresherSchedule(refresher, serverNowMs);
 	const credentialIds = base.credentials.map(entry => entry.id);
 	const blocksByCredentialId = buildCredentialBlockGroups(
-		storage.listCredentialBlocks(credentialIds),
+		storage.blocks.list(credentialIds),
 		serverNowMs,
 		clientSupportsCodexMeterBlockScopes,
 	);
@@ -425,9 +425,9 @@ async function serveSnapshot(
 	refresher: AuthBrokerRefresher | undefined,
 	peer: string,
 ): Promise<Response> {
-	await storage.reload();
+	await storage.credentials.reload();
 	const clientSupportsCodexMeterBlockScopes = supportsCodexMeterBlockScopes(req);
-	let currentGeneration = storage.getGeneration();
+	let currentGeneration = storage.credentials.generation;
 	const clientGeneration = parseGenerationTag(req.headers.get("if-none-match"));
 	const waitMs = parseWaitMs(url);
 
@@ -449,8 +449,8 @@ async function serveSnapshot(
 	waitController.abort();
 	if (result === "aborted" || req.signal.aborted) return empty(499, snapshotHeaders(currentGeneration));
 
-	await storage.reload();
-	currentGeneration = storage.getGeneration();
+	await storage.credentials.reload();
+	currentGeneration = storage.credentials.generation;
 	if (currentGeneration !== clientGeneration) {
 		const body = buildSnapshot(storage, refresher, clientSupportsCodexMeterBlockScopes);
 		logger.info("auth-broker snapshot long-poll changed", {
@@ -554,7 +554,7 @@ function serveSnapshotStream(
 		try {
 			do {
 				pendingBumps = 0;
-				await storage.reload();
+				await storage.credentials.reload();
 				if (closed) return;
 				const snapshot = buildSnapshot(storage, refresher, clientSupportsCodexMeterBlockScopes);
 				// Generation must move forward; a duplicate listener firing without a
@@ -588,7 +588,7 @@ function serveSnapshotStream(
 						generation: snapshot.generation,
 					});
 				}
-				for (const id of [...lastByCredId.keys()]) {
+				for (const id of Array.from(lastByCredId.keys())) {
 					if (seenIds.has(id)) continue;
 					lastByCredId.delete(id);
 					const payload: SnapshotStreamRemovedEvent = {
@@ -610,7 +610,7 @@ function serveSnapshotStream(
 	const stream = new ReadableStream<Uint8Array>({
 		async start(c) {
 			controller = c;
-			await storage.reload();
+			await storage.credentials.reload();
 			const initial = buildSnapshot(storage, refresher, clientSupportsCodexMeterBlockScopes);
 			lastGeneration = initial.generation;
 			for (const entry of initial.credentials) lastByCredId.set(entry.id, fingerprintEntry(entry));
@@ -620,7 +620,7 @@ function serveSnapshotStream(
 				write(": keepalive\n\n");
 			}, keepaliveMs);
 			keepaliveTimer.unref?.();
-			unsubscribe = storage.onGenerationChanged(() => {
+			unsubscribe = storage.credentials.onGeneration(() => {
 				void processGenerationBump();
 			});
 			abortHandler = (): void => cleanup();
@@ -693,7 +693,7 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 						// last fetch instead of hitting provider endpoints repeatedly.
 						// `req.signal` propagates HTTP-client disconnects all the way to the
 						// per-caller cancel without touching the shared upstream fetch.
-						const reports = (await opts.storage.fetchUsageReports?.({ signal: req.signal })) ?? [];
+						const reports = (await opts.storage.usage.reports?.({ signal: req.signal })) ?? [];
 						// Drop the `raw` field — it's the provider-specific upstream body,
 						// large and unstable. Everything UI-relevant lives in `limits` and
 						// `metadata`.
@@ -712,7 +712,7 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 					const sinceMs =
 						sinceMsParsed !== undefined && Number.isFinite(sinceMsParsed) ? sinceMsParsed : undefined;
 					const provider = url.searchParams.get("provider") ?? undefined;
-					const entries = opts.storage.listUsageHistory({ sinceMs, provider });
+					const entries = opts.storage.usage.history({ sinceMs, provider });
 					logger.info("auth-broker usage history served", { peer, entries: entries.length, sinceMs, provider });
 					return json(200, { generatedAt: Date.now(), entries });
 				}
@@ -723,7 +723,7 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 					// Array.prototype.entries; the schema already validated the shape.
 					const report = parsed.data as ClientUsageReportRequest;
 					try {
-						const recorded = opts.storage.recordClientUsage(report);
+						const recorded = opts.storage.usage.recordClient(report);
 						if (!recorded) return json(501, { error: "broker store does not persist client usage" });
 						logger.debug("auth-broker client usage recorded", {
 							peer,
@@ -741,12 +741,12 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 				if (req.method === "GET" && pathname === "/v1/usage/clients") {
 					const sinceMsRaw = url.searchParams.get("sinceMs");
 					const sinceMsParsed = sinceMsRaw === null ? Number.NaN : Number.parseInt(sinceMsRaw, 10);
-					const summary = opts.storage.getClientUsageSummary(Number.isFinite(sinceMsParsed) ? sinceMsParsed : 0);
+					const summary = opts.storage.usage.clientSummary(Number.isFinite(sinceMsParsed) ? sinceMsParsed : 0);
 					return json(200, { generatedAt: Date.now(), clients: summary.clients });
 				}
 				if (req.method === "POST" && pathname === "/v1/usage/stale") {
 					try {
-						await opts.storage.invalidateUsageCache?.();
+						await opts.storage.usage.invalidate?.();
 						logger.info("auth-broker usage cache invalidated", { peer });
 						return json(200, { ok: true });
 					} catch (error) {
@@ -757,7 +757,7 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 				}
 				if (req.method === "GET" && pathname === "/v1/credentials/disabled") {
 					const provider = url.searchParams.get("provider") ?? undefined;
-					const disabled = await opts.storage.listDisabledCredentials(provider, req.signal);
+					const disabled = await opts.storage.credentials.listDisabled(provider, req.signal);
 					const body: DisabledCredentialsResponse = { generatedAt: Date.now(), disabled };
 					return json(200, body);
 				}
@@ -765,7 +765,7 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 				if (refreshMatch) {
 					const id = Number.parseInt(refreshMatch[1], 10);
 					try {
-						const entry = await opts.storage.refreshCredentialById(id, req.signal);
+						const entry = await opts.storage.oauth.refresh(id, req.signal);
 						const body: CredentialRefreshResponse = { entry };
 						logger.info("auth-broker credential refreshed", {
 							id,
@@ -790,7 +790,7 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 					if (!parsed.ok) return parsed.response;
 					const cause =
 						parsed.data.cause && parsed.data.cause.length > 0 ? parsed.data.cause : "disabled via auth-broker";
-					const ok = opts.storage.disableCredentialById(id, cause);
+					const ok = await opts.storage.credentials.disable(id, cause);
 					if (!ok) {
 						logger.info("auth-broker disable miss", { id, peer, cause });
 						return json(404, { error: `No credential with id=${id}` });
@@ -810,12 +810,12 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 						blockScope: parsed.data.blockScope,
 						blockedUntilMs: parsed.data.blockedUntilMs,
 					};
-					if (!opts.storage.exportSnapshot().credentials.some(entry => entry.id === id)) {
+					if (!opts.storage.credentials.snapshot().credentials.some(entry => entry.id === id)) {
 						logger.info("auth-broker credential block miss", { id, peer });
 						return json(404, { error: `No credential with id=${id}` });
 					}
 					try {
-						opts.storage.upsertCredentialBlock(block);
+						opts.storage.blocks.upsert(block);
 						const response: CredentialBlockResponse = { ok: true };
 						logger.info("auth-broker credential block upserted", {
 							id,
@@ -835,12 +835,12 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 				const blocksDeleteMatch = req.method === "DELETE" ? pathname.match(BLOCKS_ROUTE) : null;
 				if (blocksDeleteMatch) {
 					const id = Number.parseInt(blocksDeleteMatch[1], 10);
-					if (!opts.storage.exportSnapshot().credentials.some(entry => entry.id === id)) {
+					if (!opts.storage.credentials.snapshot().credentials.some(entry => entry.id === id)) {
 						logger.info("auth-broker credential blocks delete miss", { id, peer });
 						return json(404, { error: `No credential with id=${id}` });
 					}
 					try {
-						opts.storage.deleteCredentialBlocks(id);
+						opts.storage.blocks.deleteAll(id);
 						const response: CredentialBlocksDeleteResponse = { ok: true };
 						logger.info("auth-broker credential blocks deleted", { id, peer });
 						return json(200, response);
@@ -856,7 +856,7 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 					if (!parsed.ok) return parsed.response;
 					const { provider, credential } = parsed.data;
 					try {
-						const entries = opts.storage.upsertCredential(provider, credential);
+						const entries = await opts.storage.credentials.upsert(provider, credential);
 						const identity =
 							credential.type === "oauth"
 								? (credential.email ?? credential.accountId ?? credential.projectId ?? "(no identity)")

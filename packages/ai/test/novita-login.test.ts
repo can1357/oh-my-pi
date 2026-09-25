@@ -1,14 +1,10 @@
 import { describe, expect, test, vi } from "bun:test";
-import { loginNovita } from "../src/registry/novita";
-import { getOAuthProviders } from "../src/registry/oauth";
+import { getProviderDefinition } from "../src/registry/registry";
 import type { FetchImpl } from "../src/types";
 
-describe("Novita login", () => {
-	test("registers Novita as an available API-key provider", () => {
-		const provider = getOAuthProviders().find(item => item.id === "novita");
-		expect(provider).toMatchObject({ id: "novita", name: "Novita", available: true });
-	});
+const loginNovita = getProviderDefinition("novita")!.login!;
 
+describe("Novita login", () => {
 	test("validates the pasted key against the OpenAI-compatible chat completions endpoint", async () => {
 		const authEvents: Array<{ url: string; instructions?: string }> = [];
 		const prompts: Array<{ message: string; placeholder?: string }> = [];

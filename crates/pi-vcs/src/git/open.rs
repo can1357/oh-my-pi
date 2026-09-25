@@ -114,6 +114,18 @@ pub(crate) fn load_index_or_empty(
 	}
 }
 
+/// Start a status query over an explicitly supplied index.
+pub(crate) fn status_with_index<'repo>(
+	repo: &'repo gix::Repository,
+	op: &'static str,
+	index: gix::index::File,
+) -> Result<gix::status::Platform<'repo, gix::progress::Discard>> {
+	Ok(repo
+		.status(gix::progress::Discard)
+		.map_err(|err| Error::backend(op, err))?
+		.index(index.into()))
+}
+
 /// Start a status query with an index loaded directly from disk.
 ///
 /// Supplying the index is required even after other read paths bypass the
@@ -123,11 +135,7 @@ pub(crate) fn status_with_fresh_index<'repo>(
 	repo: &'repo gix::Repository,
 	op: &'static str,
 ) -> Result<gix::status::Platform<'repo, gix::progress::Discard>> {
-	let index = load_index_or_empty(repo, op)?;
-	Ok(repo
-		.status(gix::progress::Discard)
-		.map_err(|err| Error::backend(op, err))?
-		.index(index.into()))
+	status_with_index(repo, op, load_index_or_empty(repo, op)?)
 }
 
 /// Open options for repositories the agent operates on.

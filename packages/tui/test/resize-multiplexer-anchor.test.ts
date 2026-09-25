@@ -90,10 +90,17 @@ const MUX_SIGNALS = [
 	"STY",
 	"ZELLIJ",
 	"HERDR_ENV",
+	"HERDR_PANE_ID",
+	"HERDR_TAB_ID",
+	"HERDR_WORKSPACE_ID",
 	"CMUX_WORKSPACE_ID",
 	"CMUX_SURFACE_ID",
 	"CMUX_REMOTE_TRANSPORT",
+	"WMUX",
+	"WMUX_SURFACE_ID",
 	"TERM",
+	"TERM_PROGRAM",
+	"PI_TUI_RESIZE_IN_PLACE",
 ] as const;
 
 function useDirectTerminalEnv() {

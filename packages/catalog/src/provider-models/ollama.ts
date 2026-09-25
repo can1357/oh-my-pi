@@ -1,8 +1,6 @@
 import { fetchWithRetry } from "@oh-my-pi/pi-utils";
-import { Effort } from "../effort";
-import { isGlm52ReasoningEffortModelId } from "../identity/family";
 import type { ModelManagerOptions } from "../model-manager";
-import type { FetchImpl, ModelSpec, ThinkingConfig } from "../types";
+import type { FetchImpl, ModelSpec } from "../types";
 import { discoveryFetch } from "../utils";
 import { createBundledReferenceMap, createReferenceResolver } from "./bundled-references";
 
@@ -53,11 +51,6 @@ export function isOllamaCloudOutputCapped(id: string): boolean {
 	return OLLAMA_CLOUD_OUTPUT_CAPPED_BASE_IDS[baseId] === true;
 }
 
-const OLLAMA_CLOUD_GLM_52_THINKING: ThinkingConfig = {
-	mode: "effort",
-	efforts: [Effort.High, Effort.Max],
-};
-
 function trimTrailingSlash(value: string): string {
 	return value.endsWith("/") ? value.slice(0, -1) : value;
 }
@@ -92,15 +85,6 @@ function getContextWindow(modelInfo: Record<string, unknown> | undefined): numbe
 	}
 }
 
-function getThinkingConfig(modelId: string, capabilities: string[] | undefined): ThinkingConfig | undefined {
-	if (!capabilities?.includes("thinking")) {
-		return undefined;
-	}
-	if (isGlm52ReasoningEffortModelId(modelId)) {
-		return OLLAMA_CLOUD_GLM_52_THINKING;
-	}
-	return { mode: "effort", efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High] };
-}
 async function fetchShowMetadata(
 	baseUrl: string,
 	apiKey: string,
@@ -169,7 +153,16 @@ export function ollamaCloudModelManagerOptions(
 					// reference limit, falling back to the historical safe cap otherwise.
 					const contextWindow = discoveredContextWindow ?? 128000;
 					const reasoning = capabilities ? capabilities.includes("thinking") : (reference?.reasoning ?? false);
-					const thinking = capabilities ? getThinkingConfig(id, capabilities) : reference?.thinking;
+					// `/api/show` reports only a boolean `thinking` capability, never a
+					// tier vocabulary, so the effort ladder is left to the compat rules
+					// (which own every other host's ladder too). Synthesizing one here
+					// shadowed the rules: discovery rows carry explicit `thinking`, and
+					// `resolveThinkingPolicy` treats explicit metadata as authoritative
+					// over the KDL, so a fabricated `minimal..high` ladder overrode the
+					// DeepSeek V4 `low/high/max` contract and silently clamped `max`
+					// down to `high` (#8334 regression). Models whose ladder the rules
+					// do not know still fall back to the generic four-tier default.
+					const thinking = capabilities ? undefined : reference?.thinking;
 					const input = capabilities
 						? capabilities.includes("vision")
 							? (["text", "image"] as Array<"text" | "image">)

@@ -2,7 +2,13 @@ import { partialSuffixOverlapAny } from "./coercion";
 import { FencedThinkingScanner } from "./fenced-thinking";
 import type { InbandScanEvent, InbandScanner } from "./types";
 
-type Tag = { readonly open: string; readonly close: string; readonly fenced?: boolean };
+type Tag = {
+	readonly open: string;
+	readonly close: string;
+	readonly fenced?: boolean;
+	/** Chat templates prefill this opener into the prompt, so a bare close can imply it. */
+	readonly impliedOpen?: boolean;
+};
 
 /**
  * Every dialect's in-band thinking section in its canonical `renderThinking`
@@ -16,7 +22,10 @@ type Tag = { readonly open: string; readonly close: string; readonly fenced?: bo
  * anthropic-dialect parser, not this text-channel healing fallback.
  */
 const TAGS: readonly Tag[] = [
-	{ open: "<think>", close: "</think>" }, // deepseek, glm, hermes, kimi, qwen3 (and anthropic/minimax/xml)
+	// deepseek, glm, hermes, kimi, qwen3 (and anthropic/minimax/xml). DeepSeek-R1
+	// and Qwen3-Thinking templates prefill the opener, so the model streams only
+	// the close when the host does not split reasoning into its own field.
+	{ open: "<think>", close: "</think>", impliedOpen: true },
 	{ open: "<thinking>", close: "</thinking>" }, // anthropic, minimax, xml
 	{ open: "<scratchpad>", close: "</scratchpad>" }, // anthropic
 	{ open: "```thinking\n", close: "```", fenced: true }, // gemini fenced thinking
@@ -25,8 +34,20 @@ const TAGS: readonly Tag[] = [
 	{ open: "<|channel|>analysis<|message|>", close: "<|end|>" }, // harmony analysis (bare leak)
 ];
 const OPENS = TAGS.map(tag => tag.open);
+const IMPLIED_OPEN_TAGS = TAGS.filter(tag => tag.impliedOpen);
+const IMPLIED_OPEN_DELIMITERS = [...OPENS, ...IMPLIED_OPEN_TAGS.map(tag => tag.close)];
+
+export interface ThinkingInbandScannerOptions {
+	/**
+	 * Report a bare reasoning close tag (no open seen) as an `impliedThinkingEnd`
+	 * event instead of passing it through as text. Off by default: only a
+	 * consumer that owns the whole message can reclassify the text before it.
+	 */
+	readonly impliedOpen?: boolean;
+}
 
 export class ThinkingInbandScanner implements InbandScanner {
+	readonly #impliedOpen: boolean;
 	#buffer = "";
 	#closeTag = "";
 	#thinking = "";
@@ -42,6 +63,10 @@ export class ThinkingInbandScanner implements InbandScanner {
 	 * stream — or one indented ≤3 spaces, as CommonMark allows — is recognized.
 	 */
 	#lineIndent = 0;
+
+	constructor(options: ThinkingInbandScannerOptions = {}) {
+		this.#impliedOpen = options.impliedOpen === true;
+	}
 
 	feed(text: string): InbandScanEvent[] {
 		if (text.length === 0) return [];
@@ -101,7 +126,7 @@ export class ThinkingInbandScanner implements InbandScanner {
 				break;
 			}
 
-			const hit = scanVisible(this.#buffer, final);
+			const hit = scanVisible(this.#buffer, final, this.#impliedOpen);
 			if (hit.kind === "none") {
 				this.#emitText(this.#buffer, events);
 				this.#buffer = "";
@@ -111,6 +136,11 @@ export class ThinkingInbandScanner implements InbandScanner {
 			if (hit.kind === "hold") {
 				this.#buffer = this.#buffer.slice(hit.index);
 				break;
+			}
+			if (hit.kind === "impliedClose") {
+				this.#buffer = this.#buffer.slice(hit.index + hit.tag.close.length);
+				events.push({ type: "impliedThinkingEnd" });
+				continue;
 			}
 			if (hit.kind === "code") {
 				const fenced = hit.ticks >= 3 && this.#lineIndent >= 0 && this.#lineIndent <= 3;
@@ -193,26 +223,33 @@ export class ThinkingInbandScanner implements InbandScanner {
 /** Outcome of scanning idle visible text for the next reasoning-tag or code-span boundary. */
 type VisibleHit =
 	| { readonly kind: "tag"; readonly index: number; readonly tag: Tag }
+	| { readonly kind: "impliedClose"; readonly index: number; readonly tag: Tag }
 	| { readonly kind: "code"; readonly index: number; readonly ticks: number }
 	| { readonly kind: "hold"; readonly index: number }
 	| { readonly kind: "none" };
 
 /**
  * Walk idle visible text for the earliest boundary: a leaked reasoning-tag open,
- * a Markdown code-span/fence opener (a backtick run), or — when more chunks may
- * follow — a held partial delimiter at the buffer tail.
+ * a bare close of an implied-open tag (when `impliedOpen`), a Markdown
+ * code-span/fence opener (a backtick run), or — when more chunks may follow — a
+ * held partial delimiter at the buffer tail.
  *
  * Reasoning tags win at any position so the gemini ` ```thinking ` fence is
  * healed instead of being read as a code fence. Backtick runs enter code mode so
  * a literal `<think>` inside inline code or a fenced block stays visible text.
  */
-function scanVisible(buffer: string, final: boolean): VisibleHit {
+function scanVisible(buffer: string, final: boolean, impliedOpen: boolean): VisibleHit {
+	const delimiters = impliedOpen ? IMPLIED_OPEN_DELIMITERS : OPENS;
 	for (let i = 0; i < buffer.length; i++) {
 		const tag = TAGS.find(candidate => buffer.startsWith(candidate.open, i));
 		if (tag) return { kind: "tag", index: i, tag };
+		if (impliedOpen) {
+			const closed = IMPLIED_OPEN_TAGS.find(candidate => buffer.startsWith(candidate.close, i));
+			if (closed) return { kind: "impliedClose", index: i, tag: closed };
+		}
 		if (!final) {
 			const rest = buffer.slice(i);
-			if (OPENS.some(open => open.length > rest.length && open.startsWith(rest))) {
+			if (delimiters.some(delimiter => delimiter.length > rest.length && delimiter.startsWith(rest))) {
 				return { kind: "hold", index: i };
 			}
 		}
@@ -272,7 +309,7 @@ function trailingLineIndent(text: string, prior: number): number {
  * extend it into a non-fence line).
  */
 function findFenceCloseEnd(buffer: string, ticks: number, final: boolean): number {
-	for (let start = 0; start <= buffer.length; ) {
+	for (let start = 0; start <= buffer.length;) {
 		const nl = buffer.indexOf("\n", start);
 		const terminated = nl !== -1;
 		const line = buffer.slice(start, terminated ? nl : buffer.length).trim();

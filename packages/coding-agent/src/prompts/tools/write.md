@@ -1,14 +1,4 @@
-Creates or overwrites file at specified path.
-
-<conditions>
-- Creating new files explicitly required by task
-- Replacing entire file contents when editing would be more complex
-- Supports `.zip` (and ZIP-based `.jar`/`.war`/`.ear`/`.apk`), `.tar`, `.tar.gz`/`.tgz`, `.tar.zst`, and `.asar` archive entries via `archive.ext:path/inside/archive`; other archive formats (`.rar`, `.7z`, `.iso`, …) are read-only
-- Supports SQLite row operations via `db.sqlite:table` (insert), `db.sqlite:table:key` (update with JSON content, delete with empty content)
-</conditions>
-
-<critical>
-- You SHOULD use Edit tool for modifying existing files
-- You NEVER create documentation files (*.md, README) unless explicitly requested
-- You NEVER use emojis unless requested
-</critical>
+SHOULD `edit` existing files; `write` for required new files or whole-file replacement. NEVER create docs or emojis unless requested.
+`archive.ext:member`: ZIP/tar families and `.asar` writable, others read-only. `db.sqlite:table`: insert; `db.sqlite:table:key`: JSON update, empty content deletes.
+Cancel a job or stop a service: `{"path":"proc://<id>/kill"}` (`content` ignored). Bare `proc://<id>` writes send service stdin, including empty input. All writes except `/kill` require `content`.
+`proc://<id>/mode`: `persist`|`session`|`detached`.

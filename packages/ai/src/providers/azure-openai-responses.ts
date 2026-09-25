@@ -351,7 +351,7 @@ function buildAzureResponsesRequest(
 		apiKey = envKey;
 	}
 
-	const headers: Record<string, string> = { "api-key": apiKey, ...(model.headers ?? {}) };
+	const headers: Record<string, string> = { "api-key": apiKey, ...model.headers };
 	if (options?.headers) {
 		Object.assign(headers, options.headers);
 	}
@@ -382,6 +382,7 @@ function buildParams(
 		includeThinkingSignatures: true,
 		developerStringContent: true,
 		preserveAssistantMessageIds: true,
+		repairOrphanOutputs: true,
 	});
 
 	const params: AzureOpenAIResponsesSamplingParams = {

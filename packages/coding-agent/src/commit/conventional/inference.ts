@@ -1,7 +1,7 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, ApiKey, AssistantMessage, AuthStorage, Model } from "@oh-my-pi/pi-ai";
 import { completeSimple } from "@oh-my-pi/pi-ai";
-import { toReasoningEffort } from "../../thinking";
+import { toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
 import type { ResolvedCommitModel } from "../model-selection";
 import { type CommitInferenceCache, computeCommitCacheKey } from "./cache";
 import type { ConventionalGenerationConfig } from "./config";
@@ -50,6 +50,7 @@ export class OmpCommitInference implements CommitInference {
 	readonly #authStorage: AuthStorage | null;
 	readonly #onProgress?: CommitProgress;
 	readonly #signal?: AbortSignal;
+	readonly #sessionId = Bun.randomUUIDv7();
 
 	constructor(options: {
 		primary: ResolvedCommitModel;
@@ -123,6 +124,7 @@ export class OmpCommitInference implements CommitInference {
 					},
 					{
 						apiKey: target.apiKey,
+						sessionId: this.#sessionId,
 						maxTokens: 16_384,
 						reasoning,
 						signal,

@@ -1,0 +1,4 @@
+// These transports do not encode caller output limits, regardless of provider or model name.
+on-api "openai-codex-responses" "cursor-agent" "gitlab-duo-agent" {
+	omit-max-output-tokens #true
+}

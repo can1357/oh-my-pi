@@ -28,6 +28,7 @@ const TOOLS = new Map<string, SystemPromptToolMetadata>([
 		{
 			label: "Read",
 			description: "Reads files from disk.",
+			readsSkillUris: true,
 			parameters: { type: "object", properties: { path: { type: "string" } } },
 		},
 	],
@@ -36,6 +37,7 @@ const TOOLS = new Map<string, SystemPromptToolMetadata>([
 		{
 			label: "Bash",
 			description: "Executes a shell command.",
+			readsSkillUris: true,
 			parameters: { type: "object", properties: { command: { type: "string" } } },
 		},
 	],
@@ -95,6 +97,31 @@ describe("system prompt tool inventory", () => {
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
 			nativeTools: opts.nativeTools,
 			inlineToolDescriptors: opts.inlineToolDescriptors,
+		});
+		return systemPrompt.join("\n\n");
+	}
+
+	async function renderPrompt(opts: {
+		toolNames: string[];
+		tools: Map<string, SystemPromptToolMetadata>;
+	}): Promise<string> {
+		const { systemPrompt } = await buildSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			skills: [
+				{
+					name: "mounted-skill",
+					description: "Readable through mounted fetch",
+					filePath: path.join(tempDir, "SKILL.md"),
+					baseDir: tempDir,
+					source: "test",
+				},
+			],
+			rules: [],
+			toolNames: opts.toolNames,
+			tools: opts.tools,
+			xdevTools: [{ name: "fetch", summary: "Fetches URLs." }],
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
 		});
 		return systemPrompt.join("\n\n");
 	}
@@ -172,6 +199,61 @@ describe("system prompt tool inventory", () => {
 			parameters: { type: "object", properties: {} },
 			wireName: "sdk_custom_wire",
 		});
+	});
+
+	it("omits skill URL guidance when an override suppresses the skill URI reader", async () => {
+		const tools = buildSystemPromptToolMetadata(
+			new Map([["read", { ...SDK_TOOL, name: "read", readsSkillUris: true }]]),
+			{ read: { readsSkillUris: false } },
+		);
+		const { systemPrompt } = await buildSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			skills: [
+				{
+					name: "overridden-skill",
+					description: "Unreadable after override",
+					filePath: path.join(tempDir, "SKILL.md"),
+					baseDir: tempDir,
+					source: "test",
+				},
+			],
+			rules: [],
+			toolNames: ["read"],
+			tools,
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+		});
+		const text = systemPrompt.join("\n\n");
+
+		expect(text).toContain("# Internal URLs");
+		expect(text).not.toContain("`skill://<name>`");
+	});
+
+	it("renders skill URL guidance when an override declares a skill URI reader", async () => {
+		const tools = buildSystemPromptToolMetadata(new Map([["custom-read", { ...SDK_TOOL, name: "custom-read" }]]), {
+			"custom-read": { readsSkillUris: true },
+		});
+		const { systemPrompt } = await buildSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			skills: [
+				{
+					name: "override-skill",
+					description: "Readable after override",
+					filePath: path.join(tempDir, "SKILL.md"),
+					baseDir: tempDir,
+					source: "test",
+				},
+			],
+			rules: [],
+			toolNames: ["custom-read"],
+			tools,
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+		});
+		const text = systemPrompt.join("\n\n");
+
+		expect(text).toContain("override-skill");
+		expect(text).toContain("`skill://<name>`");
 	});
 
 	it("snapshots every full metadata getter once per rebuild and keeps fresh values", async () => {
@@ -419,26 +501,65 @@ describe("system prompt tool inventory", () => {
 		expect(text).not.toContain("Reads files from disk.");
 	});
 
-	it("keeps enabled computer routing explicit in compact native-tool mode", async () => {
-		const tools = new Map(TOOLS);
-		tools.set("computer", {
-			label: "Computer",
-			description: "Controls the host desktop.",
-			parameters: { type: "object", properties: {} },
-		});
+	it("references xd://-only tools by their xd:// URL", async () => {
 		const { systemPrompt } = await buildSystemPrompt({
 			cwd: tempDir,
 			contextFiles: [],
 			skills: [],
 			rules: [],
-			toolNames: ["read", "computer"],
-			tools,
+			toolNames: ["read", "bash"],
+			tools: TOOLS,
+			xdevTools: [{ name: "lsp", summary: "Language server." }],
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+		});
+		const text = systemPrompt.join("\n\n");
+		expect(text).toContain("MUST use `xd://lsp` for definitions");
+		expect(text).toContain("MUST run `xd://lsp` references first");
+		expect(text).not.toContain("`lsp`");
+	});
+
+	it("renders exactly one of the map-unknown-code and inline-first delegation rules per bias", async () => {
+		const renderDelegation = async (delegationBias: "eager" | "restrained" | "gated", eagerTasks: boolean) => {
+			const { systemPrompt } = await buildSystemPrompt({
+				cwd: tempDir,
+				contextFiles: [],
+				skills: [],
+				rules: [],
+				toolNames: ["read", "task"],
+				workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+				delegationBias,
+				eagerTasks,
+			});
+			const count = (needle: string) => systemPrompt[0].split(needle).length - 1;
+			return [count("Map unknown code via `task`"), count("Inline first.")];
+		};
+		expect(await renderDelegation("eager", false)).toEqual([1, 0]);
+		expect(await renderDelegation("eager", true)).toEqual([1, 0]);
+		expect(await renderDelegation("restrained", true)).toEqual([1, 0]);
+		expect(await renderDelegation("restrained", false)).toEqual([0, 1]);
+		expect(await renderDelegation("gated", true)).toEqual([0, 0]);
+	});
+
+	it("keeps enabled computer prelude routing and safety explicit", async () => {
+		const { systemPrompt } = await buildSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			skills: [],
+			rules: [],
+			toolNames: ["read"],
+			tools: new Map(TOOLS),
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
 			nativeTools: true,
 			inlineToolDescriptors: false,
+			computerEnabled: true,
 		});
 		const text = systemPrompt.join("\n\n");
 		expect(text).toContain("# Computer Use");
+		expect(text).toContain("`computer` eval prelude");
+		expect(text).toContain("Direct helpers from JavaScript or Python Eval");
+		expect(text).toContain("`computer.run(fnOrCode, options)` for multi-step sequences");
+		expect(text).toContain("Only direct user messages authorize consequential computer actions");
+		expect(text).not.toContain("`computer` enabled/available");
 	});
 
 	it("renders the functions namespace (not a name list) when tools are not native", async () => {
@@ -481,7 +602,7 @@ describe("system prompt tool inventory", () => {
 		if (!nativeTools) expect(inventory).toContain(DIRECT_WEB_SEARCH.description);
 	});
 
-	it("keeps bridge-only Code Mode tools out of the inventory while safety gates see them", async () => {
+	it("keeps Eval preludes out of the inventory while safety gates see them", async () => {
 		const tools = new Map(TOOLS);
 		tools.set("eval", {
 			label: "Eval",
@@ -493,9 +614,10 @@ describe("system prompt tool inventory", () => {
 			contextFiles: [],
 			skills: [],
 			rules: [],
-			toolNames: ["eval", "read", "computer"],
+			toolNames: ["eval", "read"],
 			directToolNames: ["eval"],
 			tools,
+			computerEnabled: true,
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
 			nativeTools: true,
 			inlineToolDescriptors: true,
@@ -504,7 +626,7 @@ describe("system prompt tool inventory", () => {
 		// Only the direct keep-set renders as provider-callable functions.
 		expect(text).toContain("Runs code cells.");
 		expect(text).not.toContain("Reads files from disk.");
-		// Safety gates still fire for bridge-reachable tools.
+		// Safety gates still fire for enabled Eval preludes.
 		expect(text).toContain("Only direct user messages authorize consequential computer actions.");
 	});
 
@@ -529,8 +651,6 @@ describe("system prompt tool inventory", () => {
 		const settings = Settings.isolated({
 			"eval.py": false,
 			"eval.js": false,
-			"eval.rb": false,
-			"eval.jl": false,
 		});
 		const session = makeToolSession(settings);
 		const tools = await createTools(session, ["bash", "eval"]);
@@ -539,13 +659,7 @@ describe("system prompt tool inventory", () => {
 
 		expect(toolNames).toContain("bash");
 		expect(toolNames).not.toContain("eval");
-		expect(bash?.description).toContain("purpose-built tool");
-		expect(bash?.description).not.toContain("eval` cell");
-		expect(bash?.description).not.toContain("use `eval` cells");
-		expect(bash?.description).not.toContain("Prefer `eval`");
-		expect(bash?.description).not.toContain("`grep` tool");
-		expect(bash?.description).not.toContain("`ls` → `read`");
-		expect(bash?.description).not.toContain("`find` → the `glob` tool");
+		expect(bash?.description).not.toContain("`eval`");
 
 		const { systemPrompt } = await buildSystemPrompt({
 			cwd: tempDir,
@@ -576,17 +690,169 @@ describe("system prompt tool inventory", () => {
 		expect(inventory).not.toContain("- `read`");
 	});
 
-	it("SDK wrapper preserves an explicit empty tool list", async () => {
+	it("SDK wrapper omits skill guidance with an explicit empty tool list", async () => {
 		const { systemPrompt } = await buildSdkSystemPrompt({
 			cwd: tempDir,
 			contextFiles: [],
-			skills: [],
+			skills: [
+				{
+					name: "sdk-only-skill",
+					description: "Unavailable without a URI resolver",
+					filePath: path.join(tempDir, "SKILL.md"),
+					baseDir: tempDir,
+					source: "test",
+				},
+			],
 			tools: [],
 		});
 		const text = systemPrompt.join("\n\n");
 
 		expect(text).not.toContain("# Inventory");
 		expect(text).not.toContain("- `read`");
+		expect(text).not.toContain("`skill://<name>`");
+	});
+
+	it("does not treat a custom tool named read as a skill URI reader", async () => {
+		const { systemPrompt } = await buildSdkSystemPrompt({
+			cwd: tempDir,
+			customPrompt: "Custom instructions.",
+			contextFiles: [],
+			skills: [
+				{
+					name: "hidden-sdk-skill",
+					description: "Unavailable through the custom read tool",
+					filePath: path.join(tempDir, "synthesized.md"),
+					baseDir: tempDir,
+					source: "test",
+					hide: true,
+				},
+			],
+			tools: [{ ...SDK_TOOL, name: "read" }],
+		});
+		const text = systemPrompt.join("\n\n");
+
+		expect(text).toContain("Custom instructions.");
+		expect(text).not.toContain("`skill://<name>`");
+	});
+
+	it("keeps skill URL guidance for a custom declared skill URI reader", async () => {
+		const tools = new Map(TOOLS);
+		tools.set("fetch", {
+			label: "Fetch",
+			description: "Fetches URLs.",
+			parameters: { type: "object", properties: { url: { type: "string" } } },
+			readsSkillUris: true,
+		});
+		const { systemPrompt } = await buildSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			skills: [
+				{
+					name: "fetch-skill",
+					description: "Readable through fetch",
+					filePath: path.join(tempDir, "SKILL.md"),
+					baseDir: tempDir,
+					source: "test",
+				},
+			],
+			rules: [],
+			toolNames: ["fetch"],
+			tools,
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+		});
+		const text = systemPrompt.join("\n\n");
+
+		expect(text).toContain("fetch-skill");
+		expect(text).toContain("`skill://<name>`");
+	});
+
+	it("keeps skill URL guidance for a mounted skill URI reader", async () => {
+		const registry = new Map([["fetch", { ...SDK_TOOL, name: "fetch", readsSkillUris: true }]]);
+		const directNames: string[] = [];
+		// Production compact projection (sdk.ts) joins mounted names into the
+		// direct names; the inventory stays driven by `toolNames` below.
+		const tools = projectSystemPromptToolMetadata(registry, {
+			mode: "compact",
+			toolNames: [...directNames, "fetch"],
+		});
+		const text = await renderPrompt({ toolNames: directNames, tools });
+
+		expect(text).toContain("mounted-skill");
+		expect(text).toContain("`skill://<name>`");
+	});
+
+	it("omits skill URL guidance when compact projection drops the mounted reader", async () => {
+		const registry = new Map([["fetch", { ...SDK_TOOL, name: "fetch", readsSkillUris: true }]]);
+		// Pre-fix production boundary: compact over direct names only.
+		const tools = projectSystemPromptToolMetadata(registry, { mode: "compact", toolNames: [] });
+		const text = await renderPrompt({ toolNames: [], tools });
+
+		expect(text).toContain("# Internal URLs");
+		expect(text).not.toContain("`skill://<name>`");
+	});
+
+	it("omits skill URL guidance when no skills are loaded", async () => {
+		const { systemPrompt } = await buildSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			skills: [],
+			rules: [],
+			toolNames: ["read"],
+			tools: TOOLS,
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+		});
+		const text = systemPrompt.join("\n\n");
+
+		expect(text).toContain("# Internal URLs");
+		expect(text).not.toContain("`skill://<name>`");
+	});
+
+	it("keeps real provider tool definitions free of skill URL guidance", async () => {
+		const session = { ...makeToolSession(Settings.isolated()), skills: [] };
+		const tools = await createTools(session, ["read", "bash"]);
+		const read = tools.find(tool => tool.name === "read")!;
+		const bash = tools.find(tool => tool.name === "bash")!;
+
+		expect(JSON.stringify(read.parameters.toJsonSchema())).not.toContain("skill://");
+		expect(bash.description).not.toContain("skill://");
+	});
+
+	it("advertises loaded skills through real provider tool definitions", async () => {
+		const session = {
+			...makeToolSession(Settings.isolated()),
+			skillHintVisible: undefined as boolean | undefined,
+			skills: [
+				{
+					name: "provider-skill",
+					description: "Available without a system prompt",
+					filePath: path.join(tempDir, "SKILL.md"),
+					baseDir: tempDir,
+					source: "test",
+				},
+			],
+		};
+		const tools = await createTools(session, ["read", "bash"]);
+		const read = tools.find(tool => tool.name === "read")!;
+		const bash = tools.find(tool => tool.name === "bash")!;
+		const { systemPrompt } = await buildSdkSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			skills: session.skills,
+			tools,
+		});
+
+		expect(JSON.stringify(read.parameters.toJsonSchema())).toContain("skill://");
+		expect(bash.description).toContain("skill://");
+		expect(systemPrompt.join("\n\n")).toContain("`skill://<name>`");
+
+		// Standalone sessions derive visibility; an explicit managed snapshot wins.
+		session.skillHintVisible = false;
+		expect(JSON.stringify(read.parameters.toJsonSchema())).not.toContain("skill://");
+		expect(bash.description).not.toContain("skill://");
+		session.settings.set("skillful", false);
+		session.skillHintVisible = true;
+		expect(JSON.stringify(read.parameters.toJsonSchema())).toContain("skill://");
+		expect(bash.description).toContain("skill://");
 	});
 
 	it("keeps visible skills when no tools map is provided", async () => {
@@ -609,15 +875,14 @@ describe("system prompt tool inventory", () => {
 
 		expect(text).toContain("- prompt-authoring: Prompt authoring workflow");
 	});
-
-	it("omits skills when active tool names exclude read", async () => {
+	it("keeps skill URL guidance when bash is the only skill reader", async () => {
 		const { systemPrompt } = await buildSystemPrompt({
 			cwd: tempDir,
 			contextFiles: [],
 			skills: [
 				{
-					name: "search-only-skill",
-					description: "Should not render without read",
+					name: "bash-only-skill",
+					description: "Readable through bash",
 					filePath: path.join(tempDir, "SKILL.md"),
 					baseDir: tempDir,
 					source: "test",
@@ -630,10 +895,35 @@ describe("system prompt tool inventory", () => {
 		});
 		const text = systemPrompt.join("\n\n");
 
-		expect(text).not.toContain("search-only-skill");
+		expect(text).toContain("bash-only-skill");
+		expect(text).toContain("`skill://<name>`");
 	});
 
-	it("omits hidden skills even when read is active", async () => {
+	it("omits skill URL guidance when glob is the only active resolver", async () => {
+		const { systemPrompt } = await buildSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			skills: [
+				{
+					name: "glob-only-skill",
+					description: "Cannot be read through glob",
+					filePath: path.join(tempDir, "SKILL.md"),
+					baseDir: tempDir,
+					source: "test",
+				},
+			],
+			rules: [],
+			toolNames: ["glob"],
+			tools: TOOLS,
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+		});
+		const text = systemPrompt.join("\n\n");
+
+		expect(text).not.toContain("glob-only-skill");
+		expect(text).not.toContain("`skill://<name>`");
+	});
+
+	it("keeps hidden skills out of the catalog while preserving URL guidance", async () => {
 		const { systemPrompt } = await buildSystemPrompt({
 			cwd: tempDir,
 			contextFiles: [],
@@ -655,6 +945,51 @@ describe("system prompt tool inventory", () => {
 		const text = systemPrompt.join("\n\n");
 
 		expect(text).not.toContain("hidden-workflow");
+		expect(text).toContain("`skill://<name>`");
+	});
+
+	it("preserves hidden skill URL guidance with a custom prompt", async () => {
+		const { systemPrompt } = await buildSystemPrompt({
+			cwd: tempDir,
+			resolvedCustomPrompt: "Custom instructions.",
+			contextFiles: [],
+			skills: [
+				{
+					name: "hidden-workflow",
+					description: "Hidden prompt workflow",
+					filePath: path.join(tempDir, "SKILL.md"),
+					baseDir: tempDir,
+					source: "test",
+					hide: true,
+				},
+			],
+			rules: [],
+			toolNames: ["read"],
+			tools: TOOLS,
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+		});
+		const text = systemPrompt.join("\n\n");
+
+		expect(text).toContain("Custom instructions.");
+		expect(text).not.toContain("hidden-workflow");
+		expect(text).toContain("`skill://<name>`");
+	});
+
+	it("omits skill URL guidance from a custom prompt without loaded skills", async () => {
+		const { systemPrompt } = await buildSystemPrompt({
+			cwd: tempDir,
+			resolvedCustomPrompt: "Custom instructions.",
+			contextFiles: [],
+			skills: [],
+			rules: [],
+			toolNames: ["read"],
+			tools: TOOLS,
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+		});
+		const text = systemPrompt.join("\n\n");
+
+		expect(text).toContain("Custom instructions.");
+		expect(text).not.toContain("`skill://<name>`");
 	});
 
 	it("tells the agent to read matching skills before work", async () => {
@@ -706,53 +1041,8 @@ describe("system prompt tool inventory", () => {
 			})
 		).systemPrompt.join("\n\n");
 
-		expect(withScout).toContain("one read-only scout while working is allowed");
+		expect(withScout).toContain("read-only scout");
 		expect(withoutScout).not.toContain("read-only scout");
-	});
-
-	it("does not require browser verification when the browser tool is absent (issue #8139)", async () => {
-		const opts = {
-			cwd: tempDir,
-			contextFiles: [],
-			skills: [],
-			rules: [],
-			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
-		};
-		const tools = new Map(TOOLS);
-		const withoutBrowser = (
-			await buildSystemPrompt({
-				...opts,
-				toolNames: ["read", "bash"],
-				tools,
-				nativeTools: true,
-				inlineToolDescriptors: false,
-			})
-		).systemPrompt.join("\n\n");
-
-		expect(withoutBrowser).not.toContain("browser-drive with `browser`");
-		expect(withoutBrowser).not.toContain("browser-drive with browser");
-		expect(withoutBrowser).toContain("TUI/CLI");
-		expect(withoutBrowser).toContain("behavioral test or smoke test");
-
-		tools.set("browser", {
-			label: "Browser",
-			description: "Drives a real Chromium tab.",
-			parameters: { type: "object", properties: {} },
-		});
-		const withBrowser = (
-			await buildSystemPrompt({
-				...opts,
-				toolNames: ["read", "bash", "browser"],
-				tools,
-				nativeTools: true,
-				inlineToolDescriptors: false,
-			})
-		).systemPrompt.join("\n\n");
-
-		expect(withBrowser).toContain("browser-drive with `browser`");
-		// A browser-only session still needs the smoke-test fallback for
-		// native-desktop surfaces (no computer tool).
-		expect(withBrowser).toContain("behavioral test or smoke test");
 	});
 
 	it("omits todo workflow guidance when the todo tool is absent", async () => {
@@ -767,12 +1057,11 @@ describe("system prompt tool inventory", () => {
 			inlineToolDescriptors: false,
 		};
 		const withoutTodo = (await buildSystemPrompt({ ...opts, toolNames: ["read", "bash"] })).systemPrompt.join("\n\n");
-		expect(withoutTodo).not.toContain("Todo calls NEVER alone");
-		expect(withoutTodo).not.toContain("batch each with turn's real calls");
+		expect(withoutTodo).not.toContain("todo-only turn");
 
 		const withTodo = (await buildSystemPrompt({ ...opts, toolNames: ["read", "bash", "todo"] })).systemPrompt.join(
 			"\n\n",
 		);
-		expect(withTodo).toContain("Todo calls NEVER alone");
+		expect(withTodo).toContain("todo-only turn");
 	});
 });

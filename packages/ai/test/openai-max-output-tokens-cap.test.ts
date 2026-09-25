@@ -51,8 +51,12 @@ async function drainResponses(
 	if (model.api === "openrouter") Bun.env.PI_OPENROUTER_RESPONSES = "1";
 	try {
 		const { fetchMock, captured } = captureResponsesBody();
+		const apiKey =
+			model.provider === "muse-code"
+				? JSON.stringify({ oauthAccessToken: "meta-account-access", apiKey: "muse-subscription-key" })
+				: "k";
 		const stream = streamSimple(model, ctx, {
-			apiKey: "k",
+			apiKey,
 			...(maxTokens === undefined ? {} : { maxTokens }),
 			fetch: fetchMock,
 		});
@@ -158,6 +162,23 @@ function directCompletionsModel(maxTokens: number): Model<"openai-completions"> 
 	});
 }
 
+// First-party DeepSeek Flash: synthetic spec exercises the KDL clamp rule via
+// buildModel instead of the bundled snapshot.
+function deepseekFlashModel(id: string): Model<"openai-completions"> {
+	return buildModel({
+		id,
+		name: id,
+		api: "openai-completions",
+		provider: "deepseek",
+		baseUrl: "https://api.deepseek.com",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1_000_000,
+		maxTokens: 384_000,
+	});
+}
+
 // Kimi via OpenRouter stays exempt from the omit (TPM rate limits need max_tokens).
 function kimiOpenRouterModel(maxTokens: number): Model<"openai-completions"> {
 	return buildModel({
@@ -166,6 +187,40 @@ function kimiOpenRouterModel(maxTokens: number): Model<"openai-completions"> {
 		api: "openai-completions",
 		provider: "openrouter",
 		baseUrl: "https://openrouter.ai/api/v1",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 131_072,
+		maxTokens,
+	});
+}
+
+function localCompletionsModel(
+	provider: string,
+	baseUrl: string,
+	maxTokens: number | null,
+): Model<"openai-completions"> {
+	return buildModel({
+		id: "local-model",
+		name: "Local Model",
+		api: "openai-completions",
+		provider,
+		baseUrl,
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 131_072,
+		maxTokens,
+	});
+}
+
+function localResponsesModel(provider: string, baseUrl: string, maxTokens: number | null): Model<"openai-responses"> {
+	return buildModel({
+		id: "local-model",
+		name: "Local Model",
+		api: "openai-responses",
+		provider,
+		baseUrl,
 		reasoning: false,
 		input: ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -187,8 +242,11 @@ describe("OpenAI-family output-token cap", () => {
 		expect(body.max_output_tokens).toBe(OPENAI_MAX_OUTPUT_TOKENS);
 	});
 
-	it("lets native Meta Responses requests use the advertised model cap", async () => {
-		const model = getBundledModel("meta", "muse-spark-1.1") as Model<"openai-responses">;
+	it.each([
+		["Meta Model API", "meta"],
+		["Muse Code", "muse-code"],
+	] as const)("lets %s Responses requests use the advertised model cap", async (_label, provider) => {
+		const model = getBundledModel(provider, "muse-spark-1.1") as Model<"openai-responses">;
 		const body = await drainResponses(model);
 		expect(body.max_output_tokens).toBe(131_072);
 	});
@@ -202,6 +260,15 @@ describe("OpenAI-family output-token cap", () => {
 		const body = await drainResponses(openRouterResponsesModel(131_072), 2_048);
 		expect(body.max_output_tokens).toBe(2_048);
 	});
+
+	it.each(["deepseek-flash", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp"])(
+		"lets first-party DeepSeek %s requests use the documented 384k output cap",
+		async id => {
+			const model = deepseekFlashModel(id);
+			const body = await captureCompletionsBody(model, model.maxTokens ?? undefined);
+			expect(body.max_tokens).toBe(384_000);
+		},
+	);
 
 	it("clamps non-aggregator completions output to the 64k ceiling", async () => {
 		const body = await captureCompletionsBody(directCompletionsModel(131_072), 131_072);
@@ -232,5 +299,53 @@ describe("OpenAI-family output-token cap", () => {
 	it("still sends max_tokens for Kimi via OpenRouter (TPM rate-limit requirement)", async () => {
 		const body = await captureCompletionsBody(kimiOpenRouterModel(131_072));
 		expect(body.max_completion_tokens ?? body.max_tokens).toBe(OPENAI_MAX_OUTPUT_TOKENS);
+	});
+
+	it.each([
+		["llama.cpp", "llama.cpp", "http://127.0.0.1:8080/v1"],
+		["lm-studio", "lm-studio", "http://127.0.0.1:1234/v1"],
+		["vllm", "vllm", "http://127.0.0.1:8000/v1"],
+		["ollama through OpenAI completions", "ollama", "http://127.0.0.1:11434/v1"],
+		["loopback custom", "custom", "http://127.0.0.1:8080/v1"],
+	] as const)("lets %s completions use model.maxTokens above 64k", async (_label, provider, baseUrl) => {
+		const model = localCompletionsModel(provider, baseUrl, 131_072);
+		const body = await captureCompletionsBody(model, 131_072);
+		expect(body.max_completion_tokens ?? body.max_tokens).toBe(131_072);
+	});
+
+	it("still clamps LiteLLM completions to the 64k ceiling", async () => {
+		const model = localCompletionsModel("litellm", "http://127.0.0.1:4000/v1", 131_072);
+		const body = await captureCompletionsBody(model, 131_072);
+		expect(body.max_completion_tokens ?? body.max_tokens).toBe(OPENAI_MAX_OUTPUT_TOKENS);
+	});
+
+	it("keeps the 64k fallback when a local model has null maxTokens", async () => {
+		const model = localCompletionsModel("llama.cpp", "http://127.0.0.1:8080/v1", null);
+		const body = await captureCompletionsBody(model, 100_000);
+		expect(body.max_completion_tokens ?? body.max_tokens).toBe(OPENAI_MAX_OUTPUT_TOKENS);
+	});
+
+	it.each([
+		["llama.cpp", "llama.cpp", "http://127.0.0.1:8080/v1"],
+		["lm-studio", "lm-studio", "http://127.0.0.1:1234/v1"],
+		["vllm", "vllm", "http://127.0.0.1:8000/v1"],
+		["ollama", "ollama", "http://127.0.0.1:11434/v1"],
+		["loopback custom", "custom", "http://127.0.0.1:8080/v1"],
+	] as const)("lets %s Responses hosts use model.maxTokens above 64k", async (_label, provider, baseUrl) => {
+		const model = localResponsesModel(provider, baseUrl, 131_072);
+		const body = await drainResponses(model, 131_072);
+		expect(body.max_output_tokens).toBe(131_072);
+	});
+
+	it("still clamps LiteLLM Responses to the 64k ceiling", async () => {
+		const model = localResponsesModel("litellm", "http://127.0.0.1:4000/v1", 131_072);
+		const body = await drainResponses(model, 131_072);
+		expect(body.max_output_tokens).toBe(OPENAI_MAX_OUTPUT_TOKENS);
+	});
+
+	it("keeps the 64k Responses fallback when a local model has null maxTokens", async () => {
+		const model = localResponsesModel("llama.cpp", "http://127.0.0.1:8080/v1", null);
+		const body = await drainResponses(model, 100_000);
+		expect(body.max_output_tokens).toBe(OPENAI_MAX_OUTPUT_TOKENS);
 	});
 });

@@ -2,7 +2,11 @@ import { describe, expect, it } from "bun:test";
 import type { AssistantMessage, SessionEntry } from "@oh-my-pi/pi-wire";
 import { renderToStaticMarkup } from "react-dom/server";
 import "./transcript-dom-shim";
-import { Transcript } from "../src/components/transcript/Transcript";
+import {
+	followTranscriptTail,
+	Transcript,
+	updateTranscriptTailLock,
+} from "../src/components/transcript/Transcript";
 import type { ActiveTool } from "../src/lib/client";
 
 const TOOL_CALL_ID = "call-running-tool";
@@ -143,5 +147,48 @@ describe("Transcript message Markdown", () => {
 
 		expect(countElements(html, ".tr-row--user .tr-md code")).toBe(1);
 		expect(countElements(html, ".tr-row--user .tr-md strong")).toBe(1);
+	});
+});
+
+describe("Transcript tail-follow scroll operations", () => {
+	it("restores tail-follow when a connection becomes live", () => {
+		const element = { scrollTop: 0, scrollHeight: 1_000, clientHeight: 200 };
+		const lock = { current: false };
+
+		followTranscriptTail(element, lock, true);
+		expect(lock.current).toBe(true);
+		expect(element.scrollTop).toBe(1_000);
+
+		element.scrollTop = 600;
+		updateTranscriptTailLock(element, lock);
+		expect(lock.current).toBe(false);
+
+		element.scrollHeight = 1_200;
+		followTranscriptTail(element, lock);
+		expect(element.scrollTop).toBe(600);
+
+		followTranscriptTail(element, lock, true);
+		expect(lock.current).toBe(true);
+		expect(element.scrollTop).toBe(1_200);
+	});
+});
+
+describe("Transcript windowing", () => {
+	it("mounts only the newest 100 entries and offers the rest", () => {
+		const entries: SessionEntry[] = Array.from({ length: 250 }, (_, i) => ({
+			type: "message",
+			id: `m${i}`,
+			parentId: i === 0 ? null : `m${i - 1}`,
+			timestamp: "2026-07-15T00:00:00Z",
+			message: { role: "user", content: `message-${i}-end`, timestamp: i },
+		}));
+
+		const html = renderTranscript({ entries, working: false });
+
+		expect(countElements(html, ".tr-row--user")).toBe(100);
+		expect(html).toContain("message-249-end");
+		expect(html).toContain("message-150-end");
+		expect(html).not.toContain("message-149-end");
+		expect(html).toContain("show 150 earlier");
 	});
 });

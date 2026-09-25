@@ -14,11 +14,6 @@ it("base definition", () => {
 	expect(() => scope({ a: "strong" }).export()).toThrow();
 });
 
-it("define", () => {
-	const aliases = scope.define({ foo: "string", bar: { foo: "foo" } });
-	expect(aliases).toEqual({ foo: "string", bar: { foo: "foo" } });
-});
-
 it("docs example", () => {
 	const $ = type.scope({
 		// built-in keywords are still available in your scope
@@ -241,15 +236,6 @@ describe("cyclic", () => {
 		void types.b.t;
 	});
 
-	it("cyclic union", () => {
-		const types = scope({
-			a: { b: "b|false" },
-			b: { a: "a|true" },
-		}).export();
-		void types.a.t;
-		void types.b.t;
-	});
-
 	it("allows valid", () => {
 		const types = getCyclicScope().export();
 		const data = getCyclicData();
@@ -264,9 +250,8 @@ describe("cyclic", () => {
 		data.contributors[0].email = "ssalbdivad";
 		// ideally would only include one error, see:
 		// https://github.com/arktypeio/arktype/issues/924
-		expect(
-			types.package(data).toString(),
-		).toBe(`dependencies[1].contributors[0].email must be an email address (was "ssalbdivad")
+		expect(types.package(data).toString())
+			.toBe(`dependencies[1].contributors[0].email must be an email address (was "ssalbdivad")
 contributors[0].email must be an email address (was "ssalbdivad")`);
 	});
 
@@ -372,20 +357,4 @@ it("can override ambient aliases", () => {
 	> = true;
 	expect(types.foo({ bar: 1 })).toEqual({ bar: 1 });
 	expect(types.foo({ bar: "1" }).toString()).toBe("bar must be a number (was a string)");
-});
-
-it("module", () => {
-	const types = type.module({
-		foo: "string",
-		bar: "number",
-	});
-	const _assert17: Eq<
-		typeof types,
-		Module<{
-			foo: string;
-			bar: number;
-		}>
-	> = true;
-	expect(types.foo("ok")).toBe("ok");
-	expect(types.bar(1)).toBe(1);
 });

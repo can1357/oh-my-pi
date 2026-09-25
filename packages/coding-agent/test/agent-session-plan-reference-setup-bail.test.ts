@@ -89,7 +89,7 @@ describe("AgentSession plan-reference delivery tracking (issue #4094)", () => {
 	beforeAll(async () => {
 		fixtureDir = TempDir.createSync("@pi-agent-session-plan-ref-setup-bail-fixture-");
 		authStorage = await AuthStorage.create(path.join(fixtureDir.path(), "testauth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage, path.join(fixtureDir.path(), "models.yml"));
 	});
 
@@ -126,7 +126,6 @@ describe("AgentSession plan-reference delivery tracking (issue #4094)", () => {
 		});
 		const sessionManager = SessionManager.inMemory(tempDir.path());
 
-		let session: AgentSession;
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
@@ -144,7 +143,7 @@ describe("AgentSession plan-reference delivery tracking (issue #4094)", () => {
 			},
 		});
 
-		session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
+		const session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
 
 		cleanups.push(() => session.dispose());
 		return { session, sessionManager, observedCalls };

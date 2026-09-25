@@ -87,13 +87,30 @@ impl From<()> for CancelToken {
 	}
 }
 
+/// Returns whether a JavaScript abort signal has already been aborted.
+///
+/// Invalid values are tolerated so optional cancellation never rejects an
+/// otherwise valid native operation.
+pub fn signal_aborted(signal: &Unknown) -> bool {
+	signal
+		.coerce_to_object()
+		.and_then(|object| object.get_named_property::<bool>("aborted"))
+		.unwrap_or(false)
+}
+
 impl CancelToken {
 	/// Create a new cancel token from optional timeout and abort signal.
 	pub fn new(timeout_ms: Option<u32>, signal: Option<Unknown>) -> Self {
 		let mut result = Self { core: core_cancel::CancelToken::new(timeout_ms) };
-		if let Some(signal) = signal.and_then(|value| AbortSignal::from_unknown(value).ok()) {
-			let abort_token = result.emplace_abort_token();
-			signal.on_abort(move || abort_token.abort(AbortReason::Signal));
+		if let Some(raw_signal) = signal {
+			// `on_abort` only fires for a future JS `abort` event. Do not wrap an
+			// already-aborted signal: napi's wrapper replaces its `onabort` handler.
+			if signal_aborted(&raw_signal) {
+				result.emplace_abort_token().abort(AbortReason::Signal);
+			} else if let Ok(signal) = AbortSignal::from_unknown(raw_signal) {
+				let abort_token = result.emplace_abort_token();
+				signal.on_abort(move || abort_token.abort(AbortReason::Signal));
+			}
 		}
 		result
 	}
@@ -226,7 +243,7 @@ where
 /// cost; aborting the whole host process is not. `forget` on a
 /// `Box<dyn Any + Send>` is always memory-safe (it only skips the destructor
 /// and leaks the allocation).
-fn dispose_panic_payload(payload: Box<dyn std::any::Any + Send>) {
+pub(crate) fn dispose_panic_payload(payload: Box<dyn std::any::Any + Send>) {
 	if let Err(secondary) = catch_unwind(AssertUnwindSafe(|| {
 		crate::crash_handler::blocking_task_panic_scope(|| drop(payload));
 	})) {

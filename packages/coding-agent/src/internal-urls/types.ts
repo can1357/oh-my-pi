@@ -1,12 +1,29 @@
 /**
  * Types for the internal URL routing system.
  *
- * Internal URLs (`agent://`, `artifact://`, `history://`, `issue://`, `local://`, `mcp://`, `memory://`, `omp://`, `pr://`, `rule://`, `security://`, `skill://`, `ssh://`, `vault://`, and `xd://`) are resolved by tools like read,
+ * Internal URLs (`agent://`, `artifact://`, `history://`, `issue://`, `local://`, `mcp://`, `memory://`, `omp://`, `pr://`, `proc://`, `rule://`, `security://`, `skill://`, `ssh://`, `vault://`, and `xd://`) are resolved by tools like read,
  * providing access to agent outputs and server resources without exposing filesystem paths.
  */
 
+import type { Rule } from "../capability/rule";
 import type { Skill } from "../extensibility/skills";
+import type { AgentRegistry } from "../registry/agent-registry";
 import type { LocalProtocolOptions } from "./local-protocol";
+import type { SessionEntry } from "../session/session-entries";
+import type { ToolSession } from "../tools";
+import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
+import type { ProcReadDetails, ProcWriteDetails } from "@oh-my-pi/pi-tui/tools/proc-render";
+
+export interface InternalWriteDetails {
+	message?: CoordinationDetails;
+	proc?: ProcWriteDetails;
+}
+
+export interface InternalWriteResult {
+	text: string;
+	details?: InternalWriteDetails;
+	isError?: boolean;
+}
 
 /**
  * Raw resource payload returned by protocol handlers. The `immutable` flag is
@@ -26,6 +43,8 @@ export interface InternalResource {
 	sourcePath?: string;
 	/** Additional notes about resolution */
 	notes?: string[];
+	/** Structured process snapshot used only for transcript rendering. */
+	details?: { proc: ProcReadDetails };
 	/**
 	 * True when the resolved content cannot be edited by the agent (e.g. sealed
 	 * artifacts, harness docs, machine-generated memory summaries). Hashline
@@ -98,10 +117,31 @@ export interface ResolveContext {
 	 * file: those handlers keep their existing in-memory behavior.
 	 */
 	sessionFile?: string;
+	/**
+	 * Calling session's stable session-manager id. Sessions that have no
+	 * session file yet (SDK, embedded, `-p`) are only addressable by this id,
+	 * so handlers that must bind a URL to its caller (`memory://`) accept it
+	 * as a second exact identity alongside {@link sessionFile}.
+	 */
+	sessionId?: string;
+	/** Registry that owns the calling session; defaults to the process-wide registry. */
+	agentRegistry?: AgentRegistry;
 	/** Settings of the calling session (used by `issue://`/`pr://` for cache TTLs). */
 	settings?: unknown;
 	/** Caller's abort signal. */
 	signal?: AbortSignal;
+	/**
+	 * Whether experimental context-management resources are enabled for this
+	 * caller. This is passed explicitly so resource resolution cannot infer a
+	 * feature gate from process-global settings.
+	 */
+	experimentalContextManagement?: boolean;
+	/**
+	 * Current live branch owned by the caller's session. `history://current/full`
+	 * uses only this callback; it never falls back to a registry entry, session
+	 * file, or on-disk transcript.
+	 */
+	getSessionBranch?: () => readonly SessionEntry[];
 	/**
 	 * Calling session's `local://` root mapping. When present, the local-protocol
 	 * handler resolves the URL against THIS session's artifacts dir instead of
@@ -115,9 +155,25 @@ export interface ResolveContext {
 	localProtocolOptions?: LocalProtocolOptions;
 	/** Calling session's loaded skills. Prefer this over process-global skill state. */
 	skills?: readonly Skill[];
+	/**
+	 * Calling session's agent-scoped applicable rule set (rulebook + always-apply
+	 * + triggered TTSR rules, already bucketed by `agents` frontmatter). Prefer
+	 * this over the process-global snapshot — the global one reflects only the
+	 * top-level session, so a subagent-only rule is unresolvable through it
+	 * even though the subagent's own system prompt tells it to read
+	 * `rule://<name>`.
+	 */
+	rules?: readonly Rule[];
+	/**
+	 * Calling tool session. Session-bound schemes (`proc://`) require it and
+	 * throw when it is absent.
+	 */
+	session?: ToolSession;
 	/** Session-bound `xd://` documentation resolver. */
 	xd?: {
 		read(name: string | null): Promise<string>;
+		/** Resolve an `xd://<tool>/<topic>` doc topic; independent of device mounting. */
+		topic(name: string, topic: string): Promise<string>;
 	};
 	/**
 	 * When set, handlers that would otherwise materialize an expensive directory
@@ -150,6 +206,11 @@ export interface WriteContext {
 	signal?: AbortSignal;
 	/** Calling session's `local://` root mapping — see {@link ResolveContext.localProtocolOptions}. */
 	localProtocolOptions?: LocalProtocolOptions;
+	/**
+	 * Calling tool session. Session-bound writes (`agent://` messages,
+	 * `proc://` stdin/stop/mode) require it and throw when it is absent.
+	 */
+	session?: ToolSession;
 	/** Session-bound `xd://` device dispatcher. */
 	xd?: {
 		write(name: string | null, content: string): Promise<void>;
@@ -186,8 +247,11 @@ export interface ProtocolHandler {
 	 *
 	 * Handlers that omit this method are treated as read-only; the write tool
 	 * surfaces a clear "not writable" error when invoked against them.
+	 *
+	 * A returned result replaces the write tool's default "Successfully wrote
+	 * N bytes" result and may carry transcript-only display details.
 	 */
-	write?(url: InternalUrl, content: string, context?: WriteContext): Promise<void>;
+	write?(url: InternalUrl, content: string, context?: WriteContext): Promise<InternalWriteResult | void>;
 	/**
 	 * Optional autocomplete hook. Returns candidate completions for the
 	 * host/path portion of a `scheme://` URL while the user composes a prompt.
