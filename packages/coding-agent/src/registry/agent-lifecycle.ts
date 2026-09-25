@@ -143,8 +143,8 @@ export class AgentLifecycleManager {
 	readonly #revivals = new Map<string, RevivingAgent>();
 	#unsubscribe: (() => void) | undefined;
 	#persistedReviverFactory: PersistedSubagentReviverFactory | undefined;
-	/** TTL applied when a cold-revived ref is adopted on demand. */
-	#persistedReviveTtlMs = 0;
+	/** Resolves the TTL applied when a cold-revived ref is adopted on demand (read per revive). */
+	#persistedReviveTtlMs: () => number = () => 0;
 	/** Set once {@link dispose} runs; blocks late revivals from adopting into a torn-down manager. */
 	#disposed = false;
 
@@ -157,9 +157,10 @@ export class AgentLifecycleManager {
 	 * Install the factory used to cold-revive `parked` refs restored from disk
 	 * (Agent Hub scan, collab mirror, resumed process) — they carry a sessionFile
 	 * but no adoption. Set by the top-level session, which owns the ambient deps
-	 * (auth, models, MCP, artifacts) the factory needs at revive time.
+	 * (auth, models, MCP, artifacts) the factory needs at revive time. `idleTtlMs`
+	 * is resolved per revive so a live `task.agentIdleTtlMs` change applies.
 	 */
-	setPersistedSubagentReviverFactory(factory: PersistedSubagentReviverFactory, idleTtlMs: number): void {
+	setPersistedSubagentReviverFactory(factory: PersistedSubagentReviverFactory, idleTtlMs: () => number): void {
 		this.#persistedReviverFactory = factory;
 		this.#persistedReviveTtlMs = idleTtlMs;
 	}
@@ -400,7 +401,7 @@ export class AgentLifecycleManager {
 				);
 			}
 			if (revive) {
-				adoption = { ref, idleTtlMs: this.#persistedReviveTtlMs, revive };
+				adoption = { ref, idleTtlMs: this.#persistedReviveTtlMs(), revive };
 				this.#adopted.set(id, adoption);
 				coldAdopted = true;
 			}
