@@ -887,18 +887,24 @@ function findClaudeSecondaryLimit(
 
 /**
  * Limits that gate an unscoped (Opus/Sonnet) Claude request: shared umbrella
- * windows (5h, 7d) plus Opus and Sonnet tier weekly rows.
+ * windows (5h, 7d), Opus and Sonnet tier weekly rows, plus Extra Usage
+ * (`anthropic:extra`) when present.
  *
- * Extra Usage (`anthropic:extra`, window `extra`) is scoped `{ provider: "anthropic", windowId: "extra" }`
- * in `buildClaudeExtraUsageLimit` with `shared` unset. Even if extra usage were marked shared, an
- * exhausted extra-usage cap must not keep a plan-healthy credential blocked when subscription windows
- * have headroom, so extra usage is explicitly excluded from the gating set.
+ * 429 errors from account spend caps ("This request would exceed your account's
+ * monthly spend limit") reflect the Extra Usage cap rather than base plan
+ * windows, but arrive as unscoped blocks indistinguishable from plan-window
+ * blocks. When Extra Usage is reported, an exhausted extra row must keep the
+ * unscoped block so the client does not clear the block on healthy 5h/7d rows
+ * only to immediately fail and re-block on the next request. When absent or
+ * below limit, the account heals from plan-window headroom alone.
  */
 export function claudeUnscopedGatingLimits(report: UsageReport): UsageLimit[] {
 	return report.limits.filter(
 		limit =>
-			limit.id !== "anthropic:extra" &&
-			(limit.scope.shared === true || limit.scope.tier === "opus" || limit.scope.tier === "sonnet"),
+			limit.scope.shared === true ||
+			limit.scope.tier === "opus" ||
+			limit.scope.tier === "sonnet" ||
+			limit.id === "anthropic:extra",
 	);
 }
 
