@@ -50,6 +50,7 @@ import subprocess
 import sys
 import threading
 import time
+import tokenize
 import traceback
 from pathlib import Path
 from typing import Any, Callable
@@ -932,22 +933,24 @@ def transform_cell(source: str) -> str:
       (cell magic must be the first non-whitespace token of a top-level line and
       consumes the remainder of the cell)
 
-    Lines inside strings or comments are left alone — we operate on the raw
-    text before parsing, but the scanner only fires on the first token of each
-    physical line and never touches the body of triple-quoted strings because
-    those bodies are never first tokens themselves.
+    Python logical statements are tokenized before advancing to the next line,
+    so string contents and continued expressions cannot become magic commands.
     """
 
     if "%" not in source and "!" not in source:
         return source
 
-    lines = source.splitlines()
+    lines = source.split("\n")
     out: list[str] = []
     i = 0
     while i < len(lines):
         line = lines[i]
         stripped = line.lstrip()
         indent = line[: len(line) - len(stripped)]
+        if not stripped or stripped.startswith("#"):
+            out.append(line)
+            i += 1
+            continue
 
         # Cell magic — consumes from here to EOF.
         if stripped.startswith("%%"):
@@ -1004,8 +1007,18 @@ def transform_cell(source: str) -> str:
                 i += 1
                 continue
 
-        out.append(line)
-        i += 1
+        python_lines = (lines[index] + "\n" for index in range(i, len(lines)))
+        end = len(lines)
+        try:
+            for token in tokenize.generate_tokens(lambda: next(python_lines, "")):
+                if token.type == tokenize.NEWLINE:
+                    end = i + token.end[0]
+                    break
+        except (tokenize.TokenError, IndentationError, SyntaxError):
+            # Leave invalid Python intact for the normal compiler diagnostic.
+            pass
+        out.extend(lines[index] for index in range(i, end))
+        i = end
 
     return "\n".join(out)
 
