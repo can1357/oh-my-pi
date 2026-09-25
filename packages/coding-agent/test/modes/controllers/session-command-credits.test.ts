@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { SessionStats } from "@oh-my-pi/pi-coding-agent/session/agent-session-types";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
@@ -23,7 +24,7 @@ async function renderSessionCredits(stats: SessionStats): Promise<string> {
 	let output = "";
 	const ctx = {
 		session: { getSessionStats: () => stats, model: undefined },
-		settings: { get: () => undefined },
+		settings: Settings.isolated(),
 		showSessionInfo: (text: string) => {
 			output = text;
 		},
