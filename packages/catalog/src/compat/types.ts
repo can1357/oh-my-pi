@@ -325,6 +325,11 @@ export interface CompiledPricingPeer {
 	aliases: { model: string; peerId: string }[];
 }
 
+export interface CompiledGatewaySurface {
+	name: string;
+	allow: { any: boolean; match: CompiledMatchList; exclude: CompiledMatchList }[];
+}
+
 /** Provider timezone assumption for offset-less absolute retry-reset timestamps. */
 export interface CompiledRetryResetTimezone {
 	provider: string;
@@ -333,6 +338,7 @@ export interface CompiledRetryResetTimezone {
 
 /** Compiled runtime behavior vocabulary (`runtime/behavior.kdl`). */
 export interface CompiledBehavior {
+	gatewaySurfaces?: CompiledGatewaySurface[];
 	openaiResponsesHeuristic?: CompiledResponsesHeuristic;
 	modelOperations: CompiledModelOperations[];
 	cursorEffort?: CompiledCursorEffort;

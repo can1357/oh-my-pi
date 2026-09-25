@@ -47,6 +47,12 @@ export interface AuthGatewayParsedRequestOptions {
 	logitBias?: Record<string, number>;
 	/** OpenAI `response_format` (text | json_object | json_schema). Opaque passthrough. */
 	responseFormat?: unknown;
+	/** Gemini `generationConfig.responseMimeType` (e.g. `application/json`). */
+	responseMimeType?: string;
+	/** Gemini `generationConfig.responseSchema`. */
+	responseSchema?: Record<string, unknown>;
+	/** Gemini `generationConfig.responseJsonSchema`. */
+	responseJsonSchema?: Record<string, unknown>;
 
 	// ── Tools ─────────────────────────────────────────────────────────────
 	toolChoice?: AuthGatewayToolChoice;
@@ -89,6 +95,8 @@ export interface AuthGatewayParsedRequestOptions {
 	promptCacheKey?: string;
 	/** OpenAI Responses `previous_response_id` for response chaining. */
 	previousResponseId?: string;
+	/** OpenAI Responses `store`: persist the response so a later `previous_response_id` can resolve it. */
+	store?: boolean;
 	/** OpenAI / abuse-tracking `user` field. */
 	user?: string;
 
