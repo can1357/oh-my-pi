@@ -5,19 +5,20 @@ import * as path from "node:path";
 import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { StreamCommitGate, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
-import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import { createMockModel, MockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 
 afterEach(() => {
 	clearCustomApis();
 });
 
-async function boot(id: string) {
+async function boot(idOrMock: string | MockModel) {
 	registerMockApi();
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-commit-wire-"));
 	const storage = await AuthStorage.create(path.join(dir, "auth.db"));
 	storage.setRuntimeApiKey("openrouter", "test-key");
-	const mock = createMockModel({ provider: "openrouter", id });
-	mock.push({ content: ["hello"] });
+	const mock =
+		typeof idOrMock === "string" ? createMockModel({ provider: "openrouter", id: idOrMock }) : idOrMock;
+	if (typeof idOrMock === "string") mock.push({ content: ["hello"] });
 	const handle = startAuthGateway({
 		bind: "127.0.0.1:0",
 		bearerTokens: ["t"],
@@ -33,6 +34,15 @@ async function boot(id: string) {
 			await fs.rm(dir, { recursive: true, force: true });
 		},
 	};
+}
+
+
+async function postResponses(url: string, model: string): Promise<Response> {
+	return fetch(`${url}/v1/responses`, {
+		method: "POST",
+		headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+		body: JSON.stringify({ model, input: "hi", stream: true }),
+	});
 }
 
 describe("auth-gateway StreamCommitGate wiring", () => {
@@ -111,4 +121,5 @@ describe("auth-gateway StreamCommitGate wiring", () => {
 			await fs.rm(dir, { recursive: true, force: true });
 		}
 	});
+
 });
