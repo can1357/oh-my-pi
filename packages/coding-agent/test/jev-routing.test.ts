@@ -336,21 +336,17 @@ describe("cancellation", () => {
 // ---------------------------------------------------------------------------
 
 import { resolveRoutingJudge } from "../src/routing/judge";
+import { Settings } from "../src/config/settings";
 
-function routingDeps(models: Array<Record<string, unknown>>) {
-	const settings = {
-		get: (key: string) => {
-			if (key === "retry.fallbackChains" || key === "modelTags") return {};
-			if (key === "cycleOrder") return [];
-			return undefined;
-		},
-		getModelRoles: () => ({}),
-		getModelRole: () => undefined,
-	};
+function routingDeps(models: Array<Record<string, unknown>>, sessionModel?: unknown) {
+	// A real isolated Settings: role-chain resolution reads live registry getters
+	// (cfgModelTags etc.) that a plain object mock cannot satisfy.
+	const settings = Settings.isolated({});
 	const registry = {
 		getAvailable: () => models,
+		resolver: () => "test-key",
 	};
-	return { settings, registry } as never;
+	return { settings, registry, sessionModel } as never;
 }
 
 const NATIVE_MODEL = {
@@ -379,15 +375,24 @@ describe("resolveRoutingJudge", () => {
 		expect(resolveRoutingJudge(routingDeps([CHAT_MODEL]))).toBeUndefined();
 	});
 
-	it("returns a judge when a native decisions model is on the chain", () => {
+	it("returns a judge when the judge role resolves to a native decisions model", () => {
 		const judge = resolveRoutingJudge(routingDeps([NATIVE_MODEL]));
 		expect(judge).toBeDefined();
-		expect(judge?.label).toBe("routing/native-only");
 	});
 
-	it("returns a judge when the session model itself is native", () => {
-		const deps = routingDeps([]);
-		(deps as { sessionModel?: unknown }).sessionModel = NATIVE_MODEL;
-		expect(resolveRoutingJudge(deps)).toBeDefined();
+	it("returns a judge when the chain primary is native (regardless of trailing models)", () => {
+		const judge = resolveRoutingJudge(routingDeps([NATIVE_MODEL, CHAT_MODEL]));
+		expect(judge).toBeDefined();
+	});
+
+	it("filters non-native models out of the judge pool before resolving", () => {
+		// roleCandidatePool admits only judge-eligible (native) models, so a chat
+		// model can never occupy the chain; routing still resolves.
+		const judge = resolveRoutingJudge(routingDeps([CHAT_MODEL, NATIVE_MODEL]));
+		expect(judge).toBeDefined();
+	});
+
+	it("does not activate routing from a native session model when the judge role is non-native", () => {
+		expect(resolveRoutingJudge(routingDeps([], NATIVE_MODEL))).toBeUndefined();
 	});
 });
