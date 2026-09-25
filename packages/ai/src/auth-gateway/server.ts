@@ -328,6 +328,10 @@ async function handleFormatEndpoint(
 	req: Request,
 	peer: string,
 	sessionStates: AuthGatewaySessionStateStore,
+	responseSessions?: {
+		get: (responseId: string) => string | undefined;
+		record: (responseId: string | undefined, sessionId: string) => void;
+	},
 ): Promise<Response> {
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
@@ -411,12 +415,32 @@ async function handleFormatEndpoint(
 		);
 	}
 
+	// `openai-codex-responses` cannot honour a caller-owned
+	// `previous_response_id`: its chaining lives in websocket session state and
+	// the SSE transport cannot carry the field at all. Silently dropping it
+	// would answer from only the new input — reject loudly instead.
+	if (model.api === "openai-codex-responses" && parsed.options.previousResponseId !== undefined) {
+		return route.module.formatError(
+			400,
+			"invalid_request_error",
+			"previous_response_id is not supported for openai-codex-responses models",
+		);
+	}
+
 	// Sticky credential id: honour the client's `prompt_cache_key` when
-	// supplied (so external session ids align), otherwise derive from
+	// supplied (so external session ids align), then a remembered
+	// `previous_response_id` chain key (a continuation's context holds only the
+	// new input, so content derivation cannot reproduce the original session —
+	// without this lookup each hop can land on a different account whose store
+	// does not know the referenced response), otherwise derive from
 	// modelId + system + tools + first message. Mirrored into
 	// streamOpts.sessionId / promptCacheKey by `buildStreamOptions`.
 	const clientKey = normalizeClientSessionKey(parsed.options.promptCacheKey);
-	const sessionId = clientKey ?? deriveSessionId(parsed.modelId, parsed.context);
+	const chainKey =
+		parsed.options.previousResponseId !== undefined
+			? responseSessions?.get(parsed.options.previousResponseId)
+			: undefined;
+	const sessionId = clientKey ?? chainKey ?? deriveSessionId(parsed.modelId, parsed.context);
 	parsed.options.promptCacheKey = sessionId;
 
 	// pi-ai's stream() does NOT consult AuthStorage — the caller (us) is
@@ -538,6 +562,7 @@ async function handleFormatEndpoint(
 		try {
 			if (controller.signal.aborted) return clientClosedResponse(route);
 			const message = await completeSimple(model, parsed.context, streamOpts);
+			responseSessions?.record(message.responseId, sessionId);
 			recordGatewayUsage(bootOpts.storage, model, client, message.usage, message.timestamp || undefined);
 			if (message.stopReason === "aborted" || message.stopReason === "error") {
 				const errorMessage =
@@ -587,9 +612,10 @@ async function handleFormatEndpoint(
 		const recordUsage = (events: AssistantMessageEventStream) => {
 			void events
 				.result()
-				.then(message =>
-					recordGatewayUsage(bootOpts.storage, model, client, message.usage, message.timestamp || undefined),
-				)
+				.then(message => {
+					responseSessions?.record(message.responseId, sessionId);
+					recordGatewayUsage(bootOpts.storage, model, client, message.usage, message.timestamp || undefined);
+				})
 				.catch(() => {});
 		};
 		// `releaseProbeOnStreamEnd` awaits the visible attempt's canonical result
@@ -741,6 +767,10 @@ async function handlePiNative(
 	req: Request,
 	peer: string,
 	sessionStates: AuthGatewaySessionStateStore,
+	responseSessions?: {
+		get: (responseId: string) => string | undefined;
+		record: (responseId: string | undefined, sessionId: string) => void;
+	},
 ): Promise<Response> {
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
@@ -776,6 +806,16 @@ async function handlePiNative(
 	}
 	const kindRejection = chatRouteRejection(model);
 	if (kindRejection) return piNative.formatError(400, "invalid_request_error", kindRejection);
+	// Mirror of the format-endpoint guard: Codex continuation is websocket
+	// session state, so a caller-owned `previous_response_id` can never reach
+	// the wire — dropping it would answer from only the new input.
+	if (model.api === "openai-codex-responses" && parsed.options.previousResponseId !== undefined) {
+		return piNative.formatError(
+			400,
+			"invalid_request_error",
+			"previous_response_id is not supported for openai-codex-responses models",
+		);
+	}
 	const client = resolveClientIdentity(req.headers);
 	// Pi-native already parsed `streamOpts.sessionId` (when set by the
 	// client); fall back to the derived key so credential-stickiness lines
@@ -783,7 +823,14 @@ async function handlePiNative(
 	// the next turn of this conversation reuses the same credential until
 	// it hits a usage cap, then markUsageLimitReached can hand off.
 	const clientKey = normalizeClientSessionKey(parsed.options.sessionId);
-	const sessionId = clientKey ?? deriveSessionId(parsed.modelId, parsed.context);
+	// `previous_response_id` chains stick to the session that stored the
+	// referenced response — the continuation's context holds only the new
+	// input, so content derivation can't reproduce the original key.
+	const chainKey =
+		parsed.options.previousResponseId !== undefined
+			? responseSessions?.get(parsed.options.previousResponseId)
+			: undefined;
+	const sessionId = clientKey ?? chainKey ?? deriveSessionId(parsed.modelId, parsed.context);
 	parsed.options.sessionId = sessionId;
 
 	let apiKey: string | undefined;
@@ -902,6 +949,7 @@ async function handlePiNative(
 		try {
 			if (controller.signal.aborted) return aborted();
 			const message = await completeSimple(model, parsed.context, streamOpts);
+			responseSessions?.record(message.responseId, sessionId);
 			recordGatewayUsage(bootOpts.storage, model, client, message.usage, message.timestamp || undefined);
 			if (message.stopReason === "aborted" || message.stopReason === "error") {
 				const errorMessage =
@@ -962,9 +1010,10 @@ async function handlePiNative(
 		}
 		const settled = events.result();
 		void settled
-			.then(message =>
-				recordGatewayUsage(bootOpts.storage, model, client, message.usage, message.timestamp || undefined),
-			)
+			.then(message => {
+				responseSessions?.record(message.responseId, sessionId);
+				recordGatewayUsage(bootOpts.storage, model, client, message.usage, message.timestamp || undefined);
+			})
 			.catch(() => {})
 			.finally(() => lease.release());
 		streamOwnsLease = true;
@@ -1097,6 +1146,20 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 	const tokens = new Set<string>(boot.bearerTokens);
 	const version = boot.version;
 	const sessionStates = new AuthGatewaySessionStateStore();
+	// Upstream response ids live under the credential+session that created
+	// them; a later `previous_response_id` must re-resolve to the same session
+	// key or the stored chain can't be found (each OAuth account has its own
+	// provider-side store). Bounded FIFO — chains only need short memory.
+	const responseSessionIds = new Map<string, string>();
+	const recordResponseSession = (responseId: string | undefined, sessionId: string): void => {
+		if (!responseId) return;
+		responseSessionIds.delete(responseId);
+		if (responseSessionIds.size >= 4096) {
+			const oldest = responseSessionIds.keys().next().value;
+			if (oldest !== undefined) responseSessionIds.delete(oldest);
+		}
+		responseSessionIds.set(responseId, sessionId);
+	};
 
 	const server = Bun.serve({
 		hostname: bind.hostname,
@@ -1137,13 +1200,25 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 				// Provider-format dispatch.
 				const formatRoute = FORMAT_ROUTES[pathname];
 				if (formatRoute && req.method === "POST") {
-					return withCors(await handleFormatEndpoint(formatRoute, boot, req, peer, sessionStates), req);
+					return withCors(
+						await handleFormatEndpoint(formatRoute, boot, req, peer, sessionStates, {
+							get: responseId => responseSessionIds.get(responseId),
+							record: recordResponseSession,
+						}),
+						req,
+					);
 				}
 
 				// Pi-native fast path. Same auth + provider plumbing as the
 				// foreign-wire routes, just without the wire-format translation.
 				if (req.method === "POST" && pathname === "/v1/pi/stream") {
-					return withCors(await handlePiNative(boot, req, peer, sessionStates), req);
+					return withCors(
+						await handlePiNative(opts, req, peer, sessionStates, {
+							get: responseId => responseSessionIds.get(responseId),
+							record: recordResponseSession,
+						}),
+						req,
+					);
 				}
 
 				// TypeSafe System One judgments (jev). TypeSafe SDKs and omp's own
