@@ -28,14 +28,13 @@ export function json(status: number, body: unknown, headers?: Record<string, str
  * `request-id` (surfaced as `_request_id` by the OpenAI and Anthropic SDKs,
  * matches the gateway log line), LiteLLM's model-resolution and cost headers,
  * and OpenAI's `openai-processing-ms`. Model/request-id headers are always
- * present; `message` — the final assistant message, available only on
- * non-streaming responses — adds the computed cost, and `startedAt` the wall
- * time. Streaming responses send headers before usage exists, so they carry
- * only the identity headers.
+ * present; `costUsd` — known only once a non-streaming response has settled —
+ * adds the computed cost, and `startedAt` the wall time. Streaming responses
+ * send headers before usage exists, so they carry only the identity headers.
  */
 export function gatewayResponseHeaders(
 	model: Model<Api>,
-	info: { requestId: string; message?: AssistantMessage; startedAt?: number },
+	info: { requestId: string; message?: AssistantMessage; costUsd?: number; startedAt?: number },
 ): Record<string, string> {
 	const headers: Record<string, string> = {
 		"x-request-id": info.requestId,
@@ -43,7 +42,8 @@ export function gatewayResponseHeaders(
 		"x-litellm-model-id": model.id,
 	};
 	if (model.baseUrl) headers["x-litellm-model-api-base"] = model.baseUrl;
-	if (info.message) headers["x-litellm-response-cost"] = info.message.usage.cost.total.toString();
+	const costUsd = info.costUsd ?? info.message?.usage.cost.total;
+	if (costUsd !== undefined) headers["x-litellm-response-cost"] = costUsd.toString();
 	if (info.startedAt !== undefined) {
 		const elapsed = (performance.now() - info.startedAt).toFixed(0);
 		headers["x-litellm-response-duration-ms"] = elapsed;
@@ -105,6 +105,7 @@ export function isAuthorized(req: Request, tokens: ReadonlySet<string>): boolean
 const PASSTHROUGH_HEADER_NAMES: Record<string, true> = {
 	"anthropic-beta": true,
 	"anthropic-version": true,
+	"anthropic-user-profile-id": true,
 	"openai-organization": true,
 	"openai-project": true,
 	"openai-beta": true,
@@ -223,7 +224,7 @@ const CORS_HEADERS: Record<string, string> = {
 	"Access-Control-Allow-Origin": "*",
 	"Access-Control-Allow-Methods": "GET, PUT, DELETE, POST, OPTIONS",
 	"Access-Control-Allow-Headers":
-		"authorization, content-type, anthropic-version, anthropic-beta, openai-organization, openai-project, x-stainless-*, x-api-key",
+		"authorization, content-type, anthropic-version, anthropic-beta, anthropic-user-profile-id, openai-organization, openai-project, x-stainless-*, x-api-key",
 	"Access-Control-Expose-Headers":
 		"x-request-id, request-id, x-litellm-model-id, x-litellm-model-api-base, x-litellm-response-cost, x-litellm-response-duration-ms, openai-processing-ms",
 	"Access-Control-Max-Age": "86400",

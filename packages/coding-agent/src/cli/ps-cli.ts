@@ -3,7 +3,7 @@
  * daemon broker from outside the harness.
  *
  * A bare `omp ps` on a TTY opens the interactive alt-screen monitor
- * (`ps-tui.ts`); `--plain`, `--json`, and non-TTY outputs use the static
+ * (`pi-tui/apps/ps-top`); `--plain`, `--json`, and non-TTY outputs use the static
  * listing. Actions (`stop`, `kill`, `restart`, `logs`, `info`) connect through
  * the regular client, which revives a dead broker so it can re-adopt detached
  * daemons before acting on them.
@@ -18,19 +18,19 @@ import {
 	daemonClientForGlobal,
 	daemonClientForProject,
 } from "../launch/client";
-import type { DaemonSnapshot } from "../launch/protocol";
+import type { DaemonSnapshot } from "@oh-my-pi/pi-tui/tools/daemon";
 import {
-	collectReports,
 	daemonLabel,
 	formatCommand,
-	KILL_GRACE_MS,
 	type PsDaemonRow,
+	type PsScope,
 	scopeHeader,
 	TABLE_HEADER,
 	TERMINAL_STATES,
 	tableCells,
-} from "./ps-data";
-import { runPsTop } from "./ps-tui";
+} from "@oh-my-pi/pi-tui/apps/ps-data";
+import { runPsTop, type PsTopHost } from "@oh-my-pi/pi-tui/apps/ps-top";
+import { collectReports, KILL_GRACE_MS, scopeClient } from "./ps-data";
 
 export type PsAction = "list" | "info" | "logs" | "stop" | "kill" | "restart";
 
@@ -61,12 +61,68 @@ export interface PsCommandArgs {
 	};
 }
 
+function createPsTopHost(): PsTopHost {
+	const clients = new Map<string, DaemonBrokerClient>();
+	let closed = false;
+	const clientFor = async (scope: PsScope): Promise<DaemonBrokerClient> => {
+		const cached = clients.get(scope.runtimeDir);
+		if (cached) return cached;
+		const client = await scopeClient(scope);
+		if (!client) throw new Error("Scope is not addressable from this machine");
+		if (closed) {
+			client.close();
+			throw new Error("Process monitor closed");
+		}
+		clients.set(scope.runtimeDir, client);
+		return client;
+	};
+	return {
+		collectReports,
+		async act(scope, name, verb) {
+			const client = await clientFor(scope);
+			const result = await client.request(
+				verb === "restart"
+					? { op: "restart", name }
+					: { op: "stop", name, timeoutMs: verb === "kill" ? KILL_GRACE_MS : 5_000 },
+			);
+			if (result.op !== "restart" && result.op !== "stop") throw new Error(`Unexpected response ${result.op}`);
+			return result.daemon;
+		},
+		async describe(scope, name) {
+			const client = await clientFor(scope);
+			const result = await client.request({ op: "describe", name });
+			if (result.op !== "describe") throw new Error(`Unexpected response ${result.op}`);
+			return { daemon: result.daemon, spec: result.spec };
+		},
+		async logs(scope, name, lines) {
+			const client = await clientFor(scope);
+			const result = await client.request({
+				op: "logs",
+				name,
+				lines,
+				head: false,
+				follow: false,
+				renderTerminalRows: true,
+				timeoutMs: 10_000,
+			});
+			if (result.op !== "logs") throw new Error(`Unexpected response ${result.op}`);
+			return result;
+		},
+		close() {
+			closed = true;
+			for (const client of clients.values()) client.close();
+			clients.clear();
+		},
+	};
+}
+
+/** Run process listing or a named broker action. */
 export async function runPsCommand(cmd: PsCommandArgs): Promise<void> {
 	try {
 		if (cmd.action === "list") {
 			const interactive =
 				!cmd.flags.json && !cmd.flags.plain && process.stdout.isTTY === true && process.stdin.isTTY === true;
-			if (interactive) await runPsTop(cmd.flags);
+			if (interactive) await runPsTop(cmd.flags, createPsTopHost());
 			else await runList(cmd);
 			return;
 		}

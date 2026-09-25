@@ -50,7 +50,7 @@ describe("auth-gateway protocol routes over HTTP", () => {
 			const json = await fetch(`${url}/v1beta/models/known-model:generateContent`, {
 				method: "POST",
 				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
-				body: JSON.stringify({}),
+				body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: "hello" }] }] }),
 			});
 			expect(json.status).toBe(200);
 			expect(json.headers.get("content-type")).toContain("application/json");
@@ -58,7 +58,7 @@ describe("auth-gateway protocol routes over HTTP", () => {
 			const stream = await fetch(`${url}/v1beta/models/known-model:streamGenerateContent`, {
 				method: "POST",
 				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
-				body: JSON.stringify({}),
+				body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: "hello" }] }] }),
 			});
 			expect(stream.status).toBe(200);
 			expect(stream.headers.get("content-type")).toContain("text/event-stream");
@@ -188,3 +188,21 @@ describe("auth-gateway protocol HTTP routes", () => {
 		);
 	});
 });
+
+for (const operation of ["generateContent", "streamGenerateContent"]) {
+	it(`accepts Gemini ${operation} with its model only in the URL`, async () => {
+		await withProtocolGateway(async ({ url }) => {
+			const response = await fetch(`${url}/v1beta/models/known-model:${operation}`, {
+				method: "POST",
+				headers: { Authorization: "Bearer t", "Content-Type": "application/json" },
+				body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: "hello" }] }] }),
+			});
+			expect(response.status).toBe(200);
+			expect(response.headers.get("content-type")?.includes("text/event-stream")).toBe(
+				operation === "streamGenerateContent",
+			);
+			const output = await response.text();
+			expect(output).toContain('"text":"ok"');
+		});
+	});
+}

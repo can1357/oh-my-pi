@@ -352,19 +352,29 @@ export function vecAvailable(db: Database): boolean {
 	return tableExists(db, "vec_episodes");
 }
 
+// Per-Database memo for the vec table shape: schema is fixed at open, so
+// probing sqlite_master on every insert/search is pure overhead. WeakMap
+// keeps no Database alive.
+const vecTypeMemo = new WeakMap<Database, "float32" | "int8" | "bit">();
+
 export function effectiveVecType(db: Database): "float32" | "int8" | "bit" {
-	if (!vecAvailable(db)) return "float32";
-	try {
-		const row = db.query("SELECT sql FROM sqlite_master WHERE type='table' AND name='vec_episodes'").get() as {
-			sql?: string;
-		} | null;
-		const sql = row?.sql ?? "";
-		if (sql.includes("int8")) return "int8";
-		if (sql.includes("bit")) return "bit";
-	} catch {
-		return "float32";
+	const cached = vecTypeMemo.get(db);
+	if (cached !== undefined) return cached;
+	let resolved: "float32" | "int8" | "bit" = "float32";
+	if (vecAvailable(db)) {
+		try {
+			const row = db.query("SELECT sql FROM sqlite_master WHERE type='table' AND name='vec_episodes'").get() as {
+				sql?: string;
+			} | null;
+			const sql = row?.sql ?? "";
+			if (sql.includes("int8")) resolved = "int8";
+			else if (sql.includes("bit")) resolved = "bit";
+		} catch {
+			resolved = "float32";
+		}
 	}
-	return "float32";
+	vecTypeMemo.set(db, resolved);
+	return resolved;
 }
 
 export function vecInsert(db: Database, rowid: number, embedding: readonly number[]): void {
@@ -794,15 +804,31 @@ async function runEmbedding(beam: BeamMemoryState, items: readonly EmbedItem[]):
 		using insertEmbedding = beam.db.prepare(
 			"INSERT OR REPLACE INTO memory_embeddings(memory_id, embedding_json, model) VALUES (?, ?, ?)",
 		);
+		let committed = 0;
 		const insertMany = beam.db.transaction((rows: readonly EmbedItem[]) => {
 			for (let i = 0; i < rows.length; i += 1) {
 				const vector = matrix[i];
 				const item = rows[i];
 				if (vector === undefined || item === undefined) continue;
 				insertEmbedding.run(item.memoryId, JSON.stringify(Array.from(vector)), model);
+				committed += 1;
 			}
 		});
 		insertMany(items);
+		// A recall taken while these vectors were still generating cached an FTS-only ranking, and
+		// committing vectors changes what recall returns -- so that cache must be dropped, or the
+		// pre-embedding order keeps being served for the whole cache TTL. Gated on `committed`: a
+		// batch whose provider returned a short or empty matrix inserts nothing, changes no ranking,
+		// and invalidating there would only discard a still-valid cache. Only the query cache is
+		// affected; the polyphonic subject dictionary is built from facts/gists, which an embedding
+		// batch never touches.
+		if (committed > 0) {
+			const caches = beam.caches as
+				| { queryCache?: { invalidate?: () => void }; _queryCache?: { invalidate?: () => void } }
+				| undefined;
+			caches?.queryCache?.invalidate?.();
+			caches?._queryCache?.invalidate?.();
+		}
 	} catch (error) {
 		// Background embedding generation is best-effort: a failing provider, a closed DB
 		// during shutdown, or a transient API error must never disrupt the synchronous

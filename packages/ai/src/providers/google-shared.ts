@@ -617,7 +617,13 @@ export async function consumeGoogleStream<T extends GoogleApiType>(args: {
 
 	for await (const chunk of googleStream) {
 		if (chunk.error) {
-			const detail = chunk.error.message || chunk.error.status || "unknown error";
+			// Keep the RPC status alongside the message: an in-band quota failure
+			// is classified from this text, and `RESOURCE_EXHAUSTED` is the only
+			// account-exhaustion signal some of these chunks carry (#13090).
+			const detail =
+				chunk.error.message && chunk.error.status
+					? `${chunk.error.message} (${chunk.error.status})`
+					: chunk.error.message || chunk.error.status || "unknown error";
 			const message = `Google API stream error: ${detail}`;
 			throw typeof chunk.error.code === "number" && chunk.error.code >= 400
 				? new AIError.GoogleApiError(message, chunk.error.code)
@@ -755,7 +761,7 @@ export async function consumeGoogleStream<T extends GoogleApiType>(args: {
 					total: 0,
 				},
 			};
-			calculateCost(model, output.usage);
+			calculateCost(model, output.usage, output.timestamp);
 		}
 	}
 
@@ -781,18 +787,6 @@ export async function consumeGoogleStream<T extends GoogleApiType>(args: {
 }
 
 /**
- * Generation/sampling fields that map directly onto Gemini's `GenerateContentConfig`.
- * Excludes any provider-specific extensions (`topP`/`topK`/etc are all forwarded as-is).
- */
-interface GoogleGenerationConfig extends GenerateContentConfig {
-	topP?: number;
-	topK?: number;
-	minP?: number;
-	presencePenalty?: number;
-	repetitionPenalty?: number;
-}
-
-/**
  * Build the `GenerateContentParameters` payload for the public Gemini API and Vertex AI.
  * Both surfaces accept the same `GenerateContentConfig` shape — every numeric/string knob,
  * tool-config, thinking-config, and system-instruction conversion is identical.
@@ -809,14 +803,16 @@ export function buildGoogleGenerateContentParams<T extends "google-generative-ai
 	const systemPrompts = normalizeSystemPrompts(context.systemPrompt);
 	const contents = convertMessages(model, context);
 
-	const generationConfig: GoogleGenerationConfig = {};
+	const generationConfig: GenerateContentConfig = {};
 	if (options.temperature !== undefined) generationConfig.temperature = options.temperature;
 	if (options.maxTokens !== undefined) generationConfig.maxOutputTokens = options.maxTokens;
 	if (options.topP !== undefined) generationConfig.topP = options.topP;
 	if (options.topK !== undefined) generationConfig.topK = options.topK;
-	if (options.minP !== undefined) generationConfig.minP = options.minP;
 	if (options.presencePenalty !== undefined) generationConfig.presencePenalty = options.presencePenalty;
 	if (options.repetitionPenalty !== undefined) generationConfig.repetitionPenalty = options.repetitionPenalty;
+	if (options.responseMimeType !== undefined) generationConfig.responseMimeType = options.responseMimeType;
+	if (options.responseSchema !== undefined) generationConfig.responseSchema = options.responseSchema;
+	if (options.responseJsonSchema !== undefined) generationConfig.responseJsonSchema = options.responseJsonSchema;
 
 	const config: GenerateContentConfig = {
 		...(Object.keys(generationConfig).length > 0 && generationConfig),
@@ -983,7 +979,7 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 				if (!response.ok) {
 					const errorText = await response.text().catch(() => "");
 					throw new AIError.GoogleApiError(
-						`Google API error (${response.status}): ${extractGoogleErrorMessage(errorText)}`,
+						`Google API error (${response.status}): ${extractGoogleErrorMessage(errorText, response.status)}`,
 						response.status,
 						{ headers: response.headers },
 					);
@@ -1111,20 +1107,34 @@ function paramsToWireBody(params: GenerateContentParameters): Record<string, unk
 	if (config.responseJsonSchema !== undefined) gen.responseJsonSchema = config.responseJsonSchema;
 	if (config.responseModalities !== undefined) gen.responseModalities = config.responseModalities;
 	if (config.thinkingConfig !== undefined) gen.thinkingConfig = config.thinkingConfig;
-	const generationConfig = config as unknown as { minP?: number; repetitionPenalty?: number };
-	if (generationConfig.minP !== undefined) gen.minP = generationConfig.minP;
-	if (generationConfig.repetitionPenalty !== undefined) gen.repetitionPenalty = generationConfig.repetitionPenalty;
 	if (Object.keys(gen).length > 0) body.generationConfig = gen;
 	return body;
 }
 
-function extractGoogleErrorMessage(errorText: string): string {
+/**
+ * Human-readable message for a non-2xx Google response.
+ *
+ * On a usage-limit status the RPC `status`/`details` residue is kept after the
+ * message: `parseGoogleRpcRateLimitReason` reads `RESOURCE_EXHAUSTED` plus the
+ * `google.rpc.ErrorInfo` reason to tell an account billing cap (terminal) from
+ * a per-minute throttle (retryable), and reducing the body to `error.message`
+ * hid both, so every billing 429 replayed as a transient rate limit (#13090).
+ * The Cloud Code Assist path keeps the whole raw body for the same reason.
+ */
+function extractGoogleErrorMessage(errorText: string, status: number): string {
 	if (!errorText) return "Unknown error";
 	try {
-		const parsed = JSON.parse(errorText) as { error?: { message?: string } };
-		if (parsed.error?.message) return parsed.error.message;
+		const parsed = JSON.parse(errorText) as {
+			error?: { message?: string; status?: string; details?: unknown[] };
+		};
+		const error = parsed.error;
+		if (!error?.message) return errorText;
+		if (!AIError.isUsageLimitStatus(status)) return error.message;
+		const residue = { error: { status: error.status, details: error.details } };
+		return error.status === undefined && error.details === undefined
+			? error.message
+			: `${error.message} ${JSON.stringify(residue)}`;
 	} catch {
-		// fall through to raw text
+		return errorText;
 	}
-	return errorText;
 }

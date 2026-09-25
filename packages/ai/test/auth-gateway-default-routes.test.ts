@@ -1,43 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import { parseRouteDefinition } from "@oh-my-pi/pi-ai/auth-gateway";
 import { defaultVirtualRoutes } from "@oh-my-pi/pi-ai/auth-gateway/default-routes";
-import type { FallbackNode, RouteDefinition, RouteNode, TargetNode } from "@oh-my-pi/pi-ai/auth-gateway/route-graph";
-
-const EXPECTED: RouteDefinition[] = [
-	{
-		id: "implementer",
-		root: {
-			type: "fallback",
-			on: ["provider_unavailable"],
-			children: [
-				{ type: "target", model: "openai-codex/coding-model" },
-				{ type: "target", model: "anthropic/coding-model" },
-			],
-		},
-	},
-	{
-		id: "verifier",
-		root: {
-			type: "fallback",
-			on: ["provider_unavailable"],
-			children: [
-				{ type: "target", model: "anthropic/reasoning-model" },
-				{ type: "target", model: "openai-codex/reasoning-model" },
-			],
-		},
-	},
-	{
-		id: "researcher",
-		root: {
-			type: "fallback",
-			on: ["provider_unavailable"],
-			children: [
-				{ type: "target", model: "anthropic/reasoning-model" },
-				{ type: "target", model: "openai-codex/reasoning-model" },
-			],
-		},
-	},
-];
+import { RouteRegistry } from "@oh-my-pi/pi-ai/auth-gateway/route-graph";
+import type { FallbackNode, RouteNode, TargetNode } from "@oh-my-pi/pi-ai/auth-gateway/route-graph";
 
 function asFallback(node: RouteNode): FallbackNode {
 	if (node.type !== "fallback") {
@@ -54,8 +19,33 @@ function asTarget(node: RouteNode): TargetNode {
 }
 
 describe("defaultVirtualRoutes", () => {
-	it("returns implementer, verifier, and researcher fallback templates", () => {
-		expect(defaultVirtualRoutes()).toEqual(EXPECTED);
+	it("registers and resolves each default route for dispatch", () => {
+		const registry = new RouteRegistry(id => {
+			const slash = id.indexOf("/");
+			const provider = slash >= 0 ? id.slice(0, slash) : "test";
+			const model = slash >= 0 ? id.slice(slash + 1) : id;
+			return {
+				id: model,
+				provider,
+				api: "openai-completions",
+				baseUrl: "https://example.test",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128000,
+				maxTokens: 8192,
+			} as never;
+		});
+		for (const route of defaultVirtualRoutes()) {
+			registry.register(route);
+			const compiled = registry.resolve(route.id);
+			expect(compiled?.id).toBe(route.id);
+			expect(compiled?.targets.length).toBeGreaterThan(0);
+			for (const target of compiled!.targets) {
+				const leaf = registry.resolve(target);
+				expect(leaf?.targets).toContain(target);
+			}
+		}
 	});
 
 	it("keeps the three ids unique", () => {

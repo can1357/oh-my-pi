@@ -28,7 +28,7 @@ import {
 	type ReleaseInfo,
 	type RenameMigrationSteps,
 } from "../../src/cli/update-cli";
-import { initTheme } from "../../src/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 
 const OLD_PKG = "omp-rename-fixture-old";
 const NEW_PKG = "omp-rename-fixture-new";
@@ -79,6 +79,7 @@ const RELEASE: ReleaseInfo = {
 	tag: `v${NEW_VERSION}`,
 	version: NEW_VERSION,
 	packages: { pkg: NEW_PKG, natives: "@oh-my-pi/pi-natives" },
+	registry: "https://registry.npmjs.org/",
 };
 
 describe.skipIf(process.platform === "win32" || !$which("npm"))("rename migration over real npm", () => {

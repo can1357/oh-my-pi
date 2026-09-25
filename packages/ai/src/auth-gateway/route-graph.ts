@@ -1,5 +1,5 @@
 import * as AIError from "../error";
-import type { GatewayErrorDisposition } from "../error/gateway";
+import { type GatewayErrorDisposition, RETRYABLE_GATEWAY_DISPOSITIONS } from "../error/gateway";
 import type { Api, Model } from "../types";
 import type { AffinityLevel, StatePortability } from "./affinity";
 
@@ -96,10 +96,11 @@ export class RouteRegistry {
 	replaceAll(defs: readonly RouteDefinition[]): void {
 		const nextGeneration = this.#generation + 1;
 		const pending = new Map<string, CompiledRoute>();
+		const definitions = new Map(defs.map(definition => [definition.id, definition]));
 		for (const definition of defs) {
 			const compiled = compileDefinition(
 				definition,
-				id => pending.get(id)?.root ?? this.#routes.get(id)?.root,
+				id => definitions.get(id)?.root ?? this.#routes.get(id)?.root,
 				nextGeneration,
 			);
 			pending.set(definition.id, compiled);
@@ -178,6 +179,9 @@ function compileDefinition(
 	lookup: (id: string) => RouteNode | undefined,
 	generation: number,
 ): CompiledRoute {
+	if (definition.id === "" || definition.id === "." || definition.id === "..") {
+		throw new AIError.ValidationError("Route id cannot be empty or a dot segment");
+	}
 	const root = resolveRouteRefs(definition.root, lookup);
 	const compiled = compileNode(root, new Set());
 	return {
@@ -217,9 +221,10 @@ function compileScopedFallbacks(root: RouteNode): NonNullable<CompiledRoute["fal
 		if (node.type === "route-ref") return;
 		for (let i = 0; i < node.children.length; i++) {
 			const next: Edges = { ...inherited };
-			if (node.type === "fallback") {
+			if (node.type === "fallback" || node.type === "domain") {
 				const later = node.children.slice(i + 1).flatMap(entries);
-				for (const key of node.on) next[key] = [...later, ...(inherited[key] ?? [])];
+				for (const key of node.type === "fallback" ? node.on : RETRYABLE_GATEWAY_DISPOSITIONS)
+					next[key] = [...later, ...(inherited[key] ?? [])];
 			} else if (node.type === "balance") {
 				const siblings = node.children.filter((_, index) => index !== i).flatMap(entries);
 				for (const key of Object.keys(inherited) as GatewayErrorDisposition[])
@@ -232,14 +237,19 @@ function compileScopedFallbacks(root: RouteNode): NonNullable<CompiledRoute["fal
 	return Object.freeze(Object.fromEntries([...byTarget].map(([id, edges]) => [id, freezeFallbacks(edges)])));
 }
 
-function resolveRouteRefs(node: RouteNode, lookup: (id: string) => RouteNode | undefined): RouteNode {
+function resolveRouteRefs(
+	node: RouteNode,
+	lookup: (id: string) => RouteNode | undefined,
+	ancestors: ReadonlySet<string> = new Set(),
+): RouteNode {
 	switch (node.type) {
 		case "route-ref": {
+			if (ancestors.has(node.route)) throw new AIError.ValidationError("Route reference cycle");
 			const resolved = lookup(node.route);
 			if (resolved === undefined) {
 				throw new AIError.ValidationError("Unresolved route-ref");
 			}
-			return copyNode(resolved);
+			return resolveRouteRefs(resolved, lookup, new Set([...ancestors, node.route]));
 		}
 		case "target":
 			return node.weight === undefined
@@ -249,25 +259,25 @@ function resolveRouteRefs(node: RouteNode, lookup: (id: string) => RouteNode | u
 			return {
 				type: "fallback",
 				on: node.on,
-				children: node.children.map(child => resolveRouteRefs(child, lookup)),
+				children: node.children.map(child => resolveRouteRefs(child, lookup, ancestors)),
 			};
 		case "balance":
 			return {
 				type: "balance",
 				strategy: node.strategy,
-				children: node.children.map(child => resolveRouteRefs(child, lookup)),
+				children: node.children.map(child => resolveRouteRefs(child, lookup, ancestors)),
 			};
 		case "conditional":
 			return {
 				type: "conditional",
 				when: { ...node.when },
-				children: node.children.map(child => resolveRouteRefs(child, lookup)),
+				children: node.children.map(child => resolveRouteRefs(child, lookup, ancestors)),
 			};
 		case "domain":
 			return {
 				type: "domain",
 				name: node.name,
-				children: node.children.map(child => resolveRouteRefs(child, lookup)),
+				children: node.children.map(child => resolveRouteRefs(child, lookup, ancestors)),
 			};
 	}
 }
@@ -286,8 +296,12 @@ function compileNode(node: RouteNode, seenOnPath: ReadonlySet<string>): NodeComp
 			return compileFallback(node, seenOnPath);
 		case "balance":
 		case "conditional":
-		case "domain":
 			return compileFlatten(node.children, seenOnPath);
+		case "domain":
+			return compileFallback(
+				{ type: "fallback", on: RETRYABLE_GATEWAY_DISPOSITIONS, children: node.children },
+				seenOnPath,
+			);
 	}
 }
 
@@ -394,13 +408,13 @@ function freezeFallbacks(
 	return Object.freeze(out);
 }
 
-/** Choose the first dispatch target, honouring a root balance strategy when present. */
 function initialBalancedTargets(node: RouteNode): string[] {
 	if (node.type === "target" || node.type === "route-ref") return [];
 	if (node.type === "balance") return compileNode(node, new Set()).targets;
 	return node.children[0] ? initialBalancedTargets(node.children[0]) : [];
 }
 
+/** Choose an initial leaf using each encountered balance node's strategy. */
 export function pickInitialRouteTarget(compiled: CompiledRoute, salt = 0): string | undefined {
 	const choose = (node: RouteNode): string | undefined => {
 		if (node.type === "target") return node.model;

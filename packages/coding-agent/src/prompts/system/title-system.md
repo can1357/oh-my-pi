@@ -1,16 +1,3 @@
-Write a ~5 word title for the next user message.
+Write a ~5 word title using only the task described in the next user message.
 - You MUST ONLY answer with the title, inside the <title> tag.
-- If the message is only a greeting, answer `<title/>`.
-
-{{#if includeExamples}}
-<examples>
-[User] <user>the login button is broken on mobile somehow, can you fix?</user>
-[AI]   <title>Fix login button on mobile</title>
----
-[User] <user>why does quuxdb segfault on startup since yesterday?</user>
-[AI]   <title>Fix quuxdb startup segfault</title>
----
-[User] <user>hey</user>
-[AI]   <title/>
-</examples>
-{{/if}}
+- If the message names no concrete task, answer `<title/>`. This covers greetings and requests too vague to title without context you cannot see (e.g. "help", "fix this", "what's wrong?" about an attachment). NEVER guess the task.

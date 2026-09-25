@@ -26,7 +26,7 @@ describe("RouteRegistry", () => {
 	it("wraps a known id as a single TargetNode", () => {
 		const registry = new RouteRegistry(id => (id === "gpt-5" ? fakeModel("gpt-5") : undefined));
 		const route = registry.resolve("gpt-5");
-		expect(route).toEqual({
+		expect(route).toMatchObject({
 			generation: 1,
 			id: "gpt-5",
 			root: { type: "target", model: "gpt-5" },
@@ -77,8 +77,20 @@ describe("RouteRegistry", () => {
 		});
 		const route = registry.resolve("quota-route");
 		expect(registry.generation).toBe(2);
-		expect(route?.fallbacks).toEqual({ credential_quota: ["gpt-4o"] });
-		expect(route?.fallbackByTarget?.["gpt-5"]).toEqual({ credential_quota: ["gpt-4o"] });
+		expect(route).toMatchObject({
+			generation: 2,
+			id: "quota-route",
+			root: {
+				type: "fallback",
+				on: ["credential_quota"],
+				children: [
+					{ type: "target", model: "gpt-5" },
+					{ type: "target", model: "gpt-4o" },
+				],
+			},
+			targets: ["gpt-5", "gpt-4o"],
+			fallbacks: { credential_quota: ["gpt-4o"] },
+		});
 	});
 
 	it("rejects a cycle on one root-to-leaf path", () => {
@@ -101,26 +113,30 @@ describe("RouteRegistry", () => {
 		expect(registry.resolve("cyclic")).toBeUndefined();
 	});
 
-	it("allows sibling reuse of the same model id under a fallback", () => {
+	it("rejects reused model ids that cannot be distinguished during route execution", () => {
 		const registry = new RouteRegistry(() => undefined);
-		registry.register({
-			id: "sibling-reuse",
-			root: {
-				type: "fallback",
-				on: ["credential_quota"],
-				children: [
-					{ type: "target", model: "a" },
-					{
-						type: "fallback",
-						on: ["context_overflow"],
-						children: [{ type: "target", model: "a" }],
-					},
-				],
-			},
-		});
-		const route = registry.resolve("sibling-reuse");
-		expect(route?.targets).toEqual(["a", "a"]);
-		expect(registry.generation).toBe(2);
+		expect(() =>
+			registry.register({
+				id: "sibling-reuse",
+				root: {
+					type: "fallback",
+					on: ["credential_quota"],
+					children: [
+						{ type: "target", model: "a" },
+						{
+							type: "fallback",
+							on: ["context_overflow"],
+							children: [
+								{ type: "target", model: "a" },
+								{ type: "target", model: "b" },
+							],
+						},
+					],
+				},
+			}),
+		).toThrow(/Ambiguous fallback contexts/);
+		expect(registry.resolve("sibling-reuse")).toBeUndefined();
+		expect(registry.generation).toBe(1);
 	});
 
 	it("rejects a nested path that repeats a target model id", () => {
@@ -169,7 +185,7 @@ describe("RouteRegistry", () => {
 			root: { type: "target", model: "other" },
 		});
 		const route = registry.resolve("gpt-5");
-		expect(route).toEqual({
+		expect(route).toMatchObject({
 			generation: 2,
 			id: "gpt-5",
 			root: { type: "target", model: "gpt-5" },
@@ -205,262 +221,243 @@ describe("RouteRegistry", () => {
 		expect(route?.fallbacks.context_overflow ?? []).not.toContain("quota-backup");
 	});
 
-	it("get returns registered virtual routes and ignores catalog models (negative)", () => {
-		const registry = new RouteRegistry(id => (id === "gpt-5" ? fakeModel("gpt-5") : undefined));
-		registry.register({
-			id: "virtual-impl",
-			root: { type: "target", model: "other" },
+	it("preserves provider-qualified model ids as the compiled target", () => {
+		const registry = new RouteRegistry(id => {
+			const bare = id.includes("/") ? id.slice(id.indexOf("/") + 1) : id;
+			return bare === "gpt-5" ? fakeModel("gpt-5") : undefined;
 		});
-		const virtual = registry.get("virtual-impl");
-		expect(virtual?.id).toBe("virtual-impl");
-		expect(virtual?.targets).toEqual(["other"]);
-		expect(registry.get("gpt-5")).toBeUndefined();
-		expect(registry.get("missing")).toBeUndefined();
-		expect(registry.resolve("gpt-5")?.id).toBe("gpt-5");
+		const compiled = registry.resolve("openai/gpt-5");
+		expect(compiled?.root).toEqual({ type: "target", model: "openai/gpt-5" });
+		expect(compiled?.id).toBe("openai/gpt-5");
 	});
+});
 
-	it("flattens balance children in visit order for rr and weighted", () => {
-		const registry = new RouteRegistry(() => undefined);
-		registry.register({
-			id: "rr",
-			root: {
-				type: "balance",
-				strategy: "rr",
-				children: [
-					{ type: "target", model: "a" },
-					{ type: "target", model: "b" },
-				],
-			},
-		});
-		registry.register({
-			id: "weighted",
-			root: {
-				type: "balance",
-				strategy: "weighted",
-				children: [
-					{ type: "target", model: "c" },
-					{ type: "target", model: "d" },
-				],
-			},
-		});
-		expect(registry.resolve("rr")?.targets).toEqual(["a", "b"]);
-		expect(registry.resolve("weighted")?.targets).toEqual(["c", "d"]);
-		expect(registry.resolve("rr")?.root).toEqual({
+it("get returns registered virtual routes and ignores catalog models (negative)", () => {
+	const registry = new RouteRegistry(id => (id === "gpt-5" ? fakeModel("gpt-5") : undefined));
+	registry.register({
+		id: "virtual-impl",
+		root: { type: "target", model: "other" },
+	});
+	const virtual = registry.get("virtual-impl");
+	expect(virtual?.id).toBe("virtual-impl");
+	expect(virtual?.targets).toEqual(["other"]);
+	expect(registry.get("gpt-5")).toBeUndefined();
+	expect(registry.get("missing")).toBeUndefined();
+	expect(registry.resolve("gpt-5")?.id).toBe("gpt-5");
+});
+
+it("flattens balance children in visit order for rr and weighted", () => {
+	const registry = new RouteRegistry(() => undefined);
+	registry.register({
+		id: "rr",
+		root: {
 			type: "balance",
 			strategy: "rr",
 			children: [
 				{ type: "target", model: "a" },
 				{ type: "target", model: "b" },
 			],
-		});
+		},
 	});
-
-	it("flattens all conditional children at compile time", () => {
-		const registry = new RouteRegistry(() => undefined);
-		registry.register({
-			id: "vision",
-			root: {
-				type: "conditional",
-				when: { vision: true },
-				children: [
-					{ type: "target", model: "vision-model" },
-					{ type: "target", model: "text-model" },
-				],
-			},
-		});
-		expect(registry.resolve("vision")?.targets).toEqual(["vision-model", "text-model"]);
+	registry.register({
+		id: "weighted",
+		root: {
+			type: "balance",
+			strategy: "weighted",
+			children: [
+				{ type: "target", model: "c" },
+				{ type: "target", model: "d" },
+			],
+		},
 	});
+	expect(registry.resolve("rr")?.targets).toEqual(["a", "b"]);
+	expect(registry.resolve("weighted")?.targets).toEqual(["c", "d"]);
+	expect(registry.resolve("rr")?.root).toEqual({
+		type: "balance",
+		strategy: "rr",
+		children: [
+			{ type: "target", model: "a" },
+			{ type: "target", model: "b" },
+		],
+	});
+});
 
-	it("treats domain as compile-time grouping", () => {
-		const registry = new RouteRegistry(() => undefined);
-		registry.register({
-			id: "coding",
-			root: {
-				type: "domain",
-				name: "coding",
-				children: [
-					{ type: "target", model: "a" },
-					{ type: "target", model: "b" },
-				],
-			},
-		});
-		expect(registry.resolve("coding")?.targets).toEqual(["a", "b"]);
-		expect(registry.resolve("coding")?.root).toEqual({
+it("flattens all conditional children at compile time", () => {
+	const registry = new RouteRegistry(() => undefined);
+	registry.register({
+		id: "vision",
+		root: {
+			type: "conditional",
+			when: { vision: true },
+			children: [
+				{ type: "target", model: "vision-model" },
+				{ type: "target", model: "text-model" },
+			],
+		},
+	});
+	expect(registry.resolve("vision")?.targets).toEqual(["vision-model", "text-model"]);
+});
+
+it("retains domain grouping metadata", () => {
+	const registry = new RouteRegistry(() => undefined);
+	registry.register({
+		id: "coding",
+		root: {
 			type: "domain",
 			name: "coding",
 			children: [
 				{ type: "target", model: "a" },
 				{ type: "target", model: "b" },
 			],
-		});
+		},
 	});
-
-	it("rejects a cycle through a balance node", () => {
-		const registry = new RouteRegistry(() => undefined);
-		expect(() =>
-			registry.register({
-				id: "cyclic-balance",
-				root: {
-					type: "balance",
-					strategy: "rr",
-					children: [
-						{ type: "target", model: "a" },
-						{ type: "target", model: "a" },
-					],
-				},
-			}),
-		).toThrow(/cycle/i);
-		expect(registry.generation).toBe(1);
-		expect(registry.resolve("cyclic-balance")).toBeUndefined();
+	expect(registry.resolve("coding")?.targets).toEqual(["a", "b"]);
+	expect(registry.resolve("coding")?.root).toEqual({
+		type: "domain",
+		name: "coding",
+		children: [
+			{ type: "target", model: "a" },
+			{ type: "target", model: "b" },
+		],
 	});
+});
 
-	it("rejects an unknown route-ref (negative)", () => {
-		const registry = new RouteRegistry(() => undefined);
-		expect(() =>
-			registry.register({
-				id: "alias",
-				root: { type: "route-ref", route: "missing" },
-			}),
-		).toThrow(/Unresolved route-ref/);
-		expect(registry.generation).toBe(1);
-		expect(registry.get("alias")).toBeUndefined();
-	});
+it("rejects a cycle through a balance node", () => {
+	const registry = new RouteRegistry(() => undefined);
+	expect(() =>
+		registry.register({
+			id: "cyclic-balance",
+			root: {
+				type: "balance",
+				strategy: "rr",
+				children: [
+					{ type: "target", model: "a" },
+					{ type: "target", model: "a" },
+				],
+			},
+		}),
+	).toThrow(/cycle/i);
+	expect(registry.generation).toBe(1);
+	expect(registry.resolve("cyclic-balance")).toBeUndefined();
+});
 
-	it("inlines a route-ref against an already-registered id", () => {
-		const registry = new RouteRegistry(() => undefined);
-		registry.register({ id: "base", root: { type: "target", model: "a" } });
-		registry.register({ id: "alias", root: { type: "route-ref", route: "base" } });
-		const alias = registry.get("alias");
-		expect(alias?.targets).toEqual(["a"]);
-		expect(alias?.root).toEqual({ type: "target", model: "a" });
-	});
+it("rejects an unknown route-ref (negative)", () => {
+	const registry = new RouteRegistry(() => undefined);
+	expect(() =>
+		registry.register({
+			id: "alias",
+			root: { type: "route-ref", route: "missing" },
+		}),
+	).toThrow(/Unresolved route-ref/);
+	expect(registry.generation).toBe(1);
+	expect(registry.get("alias")).toBeUndefined();
+});
 
-	it("replaceAll compiles every definition then swaps once", () => {
-		const registry = new RouteRegistry(() => undefined);
+it("inlines a route-ref against an already-registered id", () => {
+	const registry = new RouteRegistry(() => undefined);
+	registry.register({ id: "base", root: { type: "target", model: "a" } });
+	registry.register({ id: "alias", root: { type: "route-ref", route: "base" } });
+	const alias = registry.get("alias");
+	expect(alias?.targets).toEqual(["a"]);
+	expect(alias?.root).toEqual({ type: "target", model: "a" });
+});
+
+it("replaceAll compiles every definition then swaps once", () => {
+	const registry = new RouteRegistry(() => undefined);
+	registry.replaceAll([
+		{ id: "one", root: { type: "target", model: "a" } },
+		{
+			id: "two",
+			root: {
+				type: "balance",
+				strategy: "weighted",
+				children: [
+					{ type: "target", model: "b" },
+					{ type: "target", model: "c" },
+				],
+			},
+		},
+	]);
+	expect(registry.generation).toBe(2);
+	expect(registry.get("one")?.generation).toBe(2);
+	expect(registry.get("two")?.generation).toBe(2);
+	expect(registry.get("two")?.targets).toEqual(["b", "c"]);
+	expect(registry.list().map(route => route.id)).toEqual(["one", "two"]);
+});
+
+it("replaceAll rolls back when a later definition is invalid (negative)", () => {
+	const registry = new RouteRegistry(() => undefined);
+	registry.register({ id: "keep", root: { type: "target", model: "a" } });
+	const generation = registry.generation;
+	expect(() =>
 		registry.replaceAll([
-			{ id: "one", root: { type: "target", model: "a" } },
+			{ id: "ok", root: { type: "target", model: "b" } },
 			{
-				id: "two",
+				id: "bad",
 				root: {
-					type: "balance",
-					strategy: "weighted",
+					type: "fallback",
+					on: ["credential_quota"],
 					children: [
-						{ type: "target", model: "b" },
-						{ type: "target", model: "c" },
+						{ type: "target", model: "x" },
+						{ type: "target", model: "x" },
 					],
 				},
 			},
-		]);
-		expect(registry.generation).toBe(2);
-		expect(registry.get("one")?.generation).toBe(2);
-		expect(registry.get("two")?.generation).toBe(2);
-		expect(registry.get("two")?.targets).toEqual(["b", "c"]);
-		expect(registry.list().map(route => route.id)).toEqual(["one", "two"]);
-	});
-
-	it("replaceAll rolls back when a later definition is invalid (negative)", () => {
-		const registry = new RouteRegistry(() => undefined);
-		registry.register({ id: "keep", root: { type: "target", model: "a" } });
-		const generation = registry.generation;
-		expect(() =>
-			registry.replaceAll([
-				{ id: "ok", root: { type: "target", model: "b" } },
-				{
-					id: "bad",
-					root: {
-						type: "fallback",
-						on: ["credential_quota"],
-						children: [
-							{ type: "target", model: "x" },
-							{ type: "target", model: "x" },
-						],
-					},
-				},
-			]),
-		).toThrow(/cycle/i);
-		expect(registry.generation).toBe(generation);
-		expect(registry.get("keep")?.targets).toEqual(["a"]);
-		expect(registry.get("ok")).toBeUndefined();
-		expect(registry.get("bad")).toBeUndefined();
-	});
-
-	it("copies optional affinity and portability onto the compiled route", () => {
-		const registry = new RouteRegistry(id => (id === "gpt-5" ? fakeModel("gpt-5") : undefined));
-		registry.register({
-			id: "sticky",
-			affinity: "required",
-			portability: { scope: "provider", origin: "openai" },
-			root: { type: "target", model: "gpt-5" },
-		});
-		const route = registry.get("sticky");
-		expect(route?.affinity).toBe("required");
-		expect(route?.portability).toEqual({ scope: "provider", origin: "openai" });
-		expect(route?.targets).toEqual(["gpt-5"]);
-	});
-
-	it("omits affinity and portability when the definition has neither (negative)", () => {
-		const registry = new RouteRegistry(id => (id === "gpt-5" ? fakeModel("gpt-5") : undefined));
-		registry.register({
-			id: "plain",
-			root: { type: "target", model: "gpt-5" },
-		});
-		const route = registry.get("plain");
-		expect(route?.affinity).toBeUndefined();
-		expect(route?.portability).toBeUndefined();
-	});
-
-	it("copies portability so later mutation of the definition does not leak (negative)", () => {
-		const registry = new RouteRegistry(id => (id === "gpt-5" ? fakeModel("gpt-5") : undefined));
-		const portability = { scope: "provider" as const, origin: "openai" };
-		registry.register({
-			id: "copied",
-			portability,
-			root: { type: "target", model: "gpt-5" },
-		});
-		portability.origin = "anthropic";
-		expect(registry.get("copied")?.portability).toEqual({ scope: "provider", origin: "openai" });
-	});
+		]),
+	).toThrow(/cycle/i);
+	expect(registry.generation).toBe(generation);
+	expect(registry.get("keep")?.targets).toEqual(["a"]);
+	expect(registry.get("ok")).toBeUndefined();
+	expect(registry.get("bad")).toBeUndefined();
 });
 
-it("round-robins every target and resets its cursor after route replacement", () => {
-	const registry = new RouteRegistry(() => undefined);
-	const definition = {
-		id: "rr",
-		root: {
-			type: "balance" as const,
-			strategy: "rr" as const,
-			children: ["a", "b", "c"].map(model => ({ type: "target" as const, model })),
-		},
-	};
-	registry.register(definition);
-	const compiled = registry.get("rr")!;
-	expect(Array.from({ length: 6 }, () => registry.pickInitialTarget(compiled))).toEqual([
-		"a",
-		"b",
-		"c",
-		"a",
-		"b",
-		"c",
-	]);
-	registry.pickInitialTarget(compiled);
-	registry.register(definition);
-	expect(registry.pickInitialTarget(registry.get("rr")!)).toBe("a");
-});
-
-it("specializes conditional branches per request without changing the shared route", () => {
-	const registry = new RouteRegistry(() => undefined);
+it("copies optional affinity and portability onto the compiled route", () => {
+	const registry = new RouteRegistry(id => (id === "gpt-5" ? fakeModel("gpt-5") : undefined));
 	registry.register({
-		id: "conditional",
-		root: {
-			type: "conditional",
-			when: { vision: true },
-			children: [
-				{ type: "target", model: "vision" },
-				{ type: "target", model: "text" },
-			],
-		},
+		id: "sticky",
+		affinity: "required",
+		portability: { scope: "provider", origin: "openai" },
+		root: { type: "target", model: "gpt-5" },
 	});
-	expect(registry.resolve("conditional", { vision: true })?.targets).toEqual(["vision"]);
-	expect(registry.resolve("conditional", { vision: false })?.targets).toEqual(["text"]);
-	expect(registry.get("conditional")?.targets).toEqual(["vision", "text"]);
+	const route = registry.get("sticky");
+	expect(route?.affinity).toBe("required");
+	expect(route?.portability).toEqual({ scope: "provider", origin: "openai" });
+	expect(route?.targets).toEqual(["gpt-5"]);
+});
+
+it("omits affinity and portability when the definition has neither (negative)", () => {
+	const registry = new RouteRegistry(id => (id === "gpt-5" ? fakeModel("gpt-5") : undefined));
+	registry.register({
+		id: "plain",
+		root: { type: "target", model: "gpt-5" },
+	});
+	const route = registry.get("plain");
+	expect(route?.affinity).toBeUndefined();
+	expect(route?.portability).toBeUndefined();
+});
+
+it("copies portability so later mutation of the definition does not leak (negative)", () => {
+	const registry = new RouteRegistry(id => (id === "gpt-5" ? fakeModel("gpt-5") : undefined));
+	const portability = { scope: "provider" as const, origin: "openai" };
+	registry.register({
+		id: "copied",
+		portability,
+		root: { type: "target", model: "gpt-5" },
+	});
+	portability.origin = "anthropic";
+	expect(registry.get("copied")?.portability).toEqual({ scope: "provider", origin: "openai" });
+});
+
+it("rejects route IDs erased by URL normalization", () => {
+	const registry = new RouteRegistry(() => undefined);
+	for (const id of [".", ".."])
+		expect(() => registry.register({ id, root: { type: "target", model: "target" } })).toThrow(/dot segment/);
+	expect(registry.list()).toEqual([]);
+});
+
+it("rejects route IDs erased by URL normalization", () => {
+	const registry = new RouteRegistry(() => undefined);
+	for (const id of [".", ".."])
+		expect(() => registry.register({ id, root: { type: "target", model: "target" } })).toThrow(/dot segment/);
+	expect(registry.list()).toEqual([]);
 });

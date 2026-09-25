@@ -192,6 +192,155 @@ describe("auth-gateway conductor wiring", () => {
 		}
 	});
 
+	it("skips an unresolved primary target and dispatches the next resolved target", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-conductor-wire-unresolved-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey("backup-provider", "test-key");
+		const backup = createMockModel({
+			provider: "backup-provider",
+			id: "backup-id",
+			handler: { content: ["ok"] },
+		});
+		const resolveModel = (id: string) => (id === "backup-id" ? backup.model : undefined);
+		const registry = new RouteRegistry(resolveModel);
+		registry.register({
+			id: "virtual-impl",
+			root: {
+				type: "fallback",
+				on: ["model_unavailable"],
+				children: [
+					{ type: "target", model: "missing-id" },
+					{ type: "target", model: "backup-id" },
+				],
+			},
+		});
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["t"],
+			storage,
+			resolveModel,
+			routeRegistry: registry,
+			version: "test",
+		});
+		try {
+			const res = await fetch(`${handle.url}/v1/chat/completions`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+				body: JSON.stringify({
+					model: "virtual-impl",
+					messages: [{ role: "user", content: "hi" }],
+					stream: false,
+				}),
+			});
+			expect(res.status).toBe(200);
+			expect(backup.calls).toHaveLength(1);
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("skips a credentialless primary target and dispatches the next eligible target", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-conductor-wire-credentialless-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey("backup-provider", "test-key");
+		const primary = createMockModel({
+			provider: "primary-provider",
+			id: "primary-id",
+			handler: { content: ["bad"] },
+		});
+		const backup = createMockModel({
+			provider: "backup-provider",
+			id: "backup-id",
+			handler: { content: ["ok"] },
+		});
+		const resolveModel = (id: string) => {
+			if (id === "primary-id") return primary.model;
+			if (id === "backup-id") return backup.model;
+			return undefined;
+		};
+		const registry = new RouteRegistry(resolveModel);
+		registry.register({
+			id: "virtual-impl",
+			root: {
+				type: "fallback",
+				on: ["provider_unavailable"],
+				children: [
+					{ type: "target", model: "primary-id" },
+					{ type: "target", model: "backup-id" },
+				],
+			},
+		});
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["t"],
+			storage,
+			resolveModel,
+			routeRegistry: registry,
+			version: "test",
+		});
+		try {
+			const res = await fetch(`${handle.url}/v1/chat/completions`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+				body: JSON.stringify({
+					model: "virtual-impl",
+					messages: [{ role: "user", content: "hi" }],
+					stream: false,
+				}),
+			});
+			expect(res.status).toBe(200);
+			expect(primary.calls).toHaveLength(0);
+			expect(backup.calls).toHaveLength(1);
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("returns the credential error when every route target is credentialless", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-conductor-wire-no-credential-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		const primary = createMockModel({
+			provider: "primary-provider",
+			id: "primary-id",
+			handler: { content: ["bad"] },
+		});
+		const resolveModel = (id: string) => (id === "primary-id" ? primary.model : undefined);
+		const registry = new RouteRegistry(resolveModel);
+		registry.register({ id: "virtual-impl", root: { type: "target", model: "primary-id" } });
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["t"],
+			storage,
+			resolveModel,
+			routeRegistry: registry,
+			version: "test",
+		});
+		try {
+			const res = await fetch(`${handle.url}/v1/chat/completions`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+				body: JSON.stringify({
+					model: "virtual-impl",
+					messages: [{ role: "user", content: "hi" }],
+					stream: false,
+				}),
+			});
+			expect(res.status).toBe(503);
+			expect(primary.calls).toHaveLength(0);
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("does not call backup after completeSimple usage then error (negative)", async () => {
 		registerMockApi();
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-conductor-wire-usage-"));
@@ -383,6 +532,66 @@ describe("auth-gateway conductor wiring", () => {
 		}
 	});
 
+	it("does not use an overflow-only fallback for a credentialless target", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-conductor-wire-credentialless-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey("backup-provider", "test-key");
+		const primary = createMockModel({
+			provider: "primary-provider",
+			id: "primary-id",
+			handler: { content: ["bad"] },
+		});
+		const backup = createMockModel({
+			provider: "backup-provider",
+			id: "backup-id",
+			handler: { content: ["ok"] },
+		});
+		const resolveModel = (id: string) => {
+			if (id === "primary-id") return primary.model;
+			if (id === "backup-id") return backup.model;
+			return undefined;
+		};
+		const registry = new RouteRegistry(resolveModel);
+		registry.register({
+			id: "virtual-impl",
+			root: {
+				type: "fallback",
+				on: ["context_overflow"],
+				children: [
+					{ type: "target", model: "primary-id" },
+					{ type: "target", model: "backup-id" },
+				],
+			},
+		});
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["t"],
+			storage,
+			resolveModel,
+			routeRegistry: registry,
+			version: "test",
+		});
+		try {
+			const res = await fetch(`${handle.url}/v1/chat/completions`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+				body: JSON.stringify({
+					model: "virtual-impl",
+					messages: [{ role: "user", content: "hi" }],
+					stream: false,
+				}),
+			});
+			expect(res.status).toBe(503);
+			expect(primary.calls).toHaveLength(0);
+			expect(backup.calls).toHaveLength(0);
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("prefers the remembered prompt-cache model on the next matching request", async () => {
 		registerMockApi();
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-conductor-wire-cache-"));
@@ -458,7 +667,6 @@ describe("auth-gateway conductor wiring", () => {
 			await fs.rm(dir, { recursive: true, force: true });
 		}
 	});
-
 	it("prefers remembered model when cache identity is only a header (negative if remember ignores headers)", async () => {
 		registerMockApi();
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-conductor-wire-cache-hdr-"));
@@ -525,11 +733,6 @@ describe("auth-gateway conductor wiring", () => {
 			expect(second.status).toBe(200);
 			expect(primary.calls.length).toBe(1);
 			expect(backup.calls.length).toBe(2);
-
-			const other = await post("other");
-			expect(other.status).toBe(200);
-			expect(primary.calls.length).toBe(2);
-			expect(primary.calls.length).not.toBe(1);
 		} finally {
 			await handle.close();
 			storage.close();
@@ -537,9 +740,9 @@ describe("auth-gateway conductor wiring", () => {
 		}
 	});
 
-	it("records each non-streaming provider failure once so two failovers do not open the circuit", async () => {
+	it("reuses derived conversation affinity without an explicit cache key", async () => {
 		registerMockApi();
-		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-conductor-wire-health-once-"));
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-conductor-wire-cache-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
 		storage.setRuntimeApiKey("openrouter", "test-key");
 		const primary = createMockModel({
@@ -579,25 +782,32 @@ describe("auth-gateway conductor wiring", () => {
 			routeRegistry: registry,
 			version: "test",
 		});
-		const post = async (): Promise<Response> =>
+		const post = async (promptCacheKey: string | undefined): Promise<Response> =>
 			fetch(`${handle.url}/v1/chat/completions`, {
 				method: "POST",
 				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
 				body: JSON.stringify({
 					model: "virtual-impl",
-					prompt_cache_key: crypto.randomUUID(),
 					messages: [{ role: "user", content: "hi" }],
 					stream: false,
+					prompt_cache_key: promptCacheKey,
 				}),
 			});
 		try {
-			expect((await post()).status).toBe(200);
-			expect((await post()).status).toBe(200);
-			// Two single-recorded failures leave the circuit degraded, so the third
-			// request still attempts primary. Double-recording would have opened it.
-			const third = await post();
-			expect(third.status).toBe(200);
-			expect(primary.calls.length).toBe(3);
+			const first = await post(undefined);
+			expect(first.status).toBe(200);
+			expect(primary.calls.length).toBe(1);
+			expect(backup.calls.length).toBe(1);
+
+			const second = await post(undefined);
+			expect(second.status).toBe(200);
+			expect(primary.calls.length).toBe(1);
+			expect(backup.calls.length).toBe(2);
+
+			const other = await post("other");
+			expect(other.status).toBe(200);
+			expect(primary.calls.length).toBe(2);
+			expect(primary.calls.length).not.toBe(1);
 			expect(backup.calls.length).toBe(3);
 		} finally {
 			await handle.close();
@@ -605,143 +815,6 @@ describe("auth-gateway conductor wiring", () => {
 			await fs.rm(dir, { recursive: true, force: true });
 		}
 	});
-
-	it("opens the health circuit for repeated model_unavailable failures", async () => {
-		registerMockApi();
-		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-conductor-wire-model-health-"));
-		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-		storage.setRuntimeApiKey("openrouter", "test-key");
-		const err = Object.assign(new Error("model not found"), { status: 404 });
-		const primary = createMockModel({
-			provider: "openrouter",
-			id: "primary-id",
-			handler: () => {
-				throw err;
-			},
-		});
-		const backup = createMockModel({
-			provider: "openrouter",
-			id: "backup-id",
-			handler: { content: ["ok"] },
-		});
-		const resolveModel = (id: string) => {
-			if (id === "primary-id") return primary.model;
-			if (id === "backup-id") return backup.model;
-			return undefined;
-		};
-		const registry = new RouteRegistry(resolveModel);
-		registry.register({
-			id: "virtual-impl",
-			root: {
-				type: "fallback",
-				on: ["model_unavailable"],
-				children: [
-					{ type: "target", model: "primary-id" },
-					{ type: "target", model: "backup-id" },
-				],
-			},
-		});
-		const handle = startAuthGateway({
-			bind: "127.0.0.1:0",
-			bearerTokens: ["t"],
-			storage,
-			resolveModel,
-			routeRegistry: registry,
-			version: "test",
-		});
-		const post = async (): Promise<Response> =>
-			fetch(`${handle.url}/v1/chat/completions`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
-				body: JSON.stringify({
-					model: "virtual-impl",
-					prompt_cache_key: crypto.randomUUID(),
-					messages: [{ role: "user", content: "hi" }],
-					stream: false,
-				}),
-			});
-		try {
-			expect((await post()).status).toBe(200);
-			expect((await post()).status).toBe(200);
-			expect((await post()).status).toBe(200);
-			expect(primary.calls.length).toBe(3);
-			const fourth = await post();
-			expect(fourth.status).toBe(200);
-			// Circuit open: primary skipped, only backup runs.
-			expect(primary.calls.length).toBe(3);
-			expect(backup.calls.length).toBe(4);
-		} finally {
-			await handle.close();
-			storage.close();
-			await fs.rm(dir, { recursive: true, force: true });
-		}
-	});
-
-	it("resets sibling exhaustion when falling back so the next target gets a sibling retry", async () => {
-		registerMockApi();
-		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-conductor-wire-sibling-reset-"));
-		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-		storage.setRuntimeApiKey("openrouter", "test-key");
-		const primary = createMockModel({
-			provider: "openrouter",
-			id: "primary-id",
-			handler: () => {
-				throw new Error("You have hit your ChatGPT usage limit (pro plan). Try again in ~158 min.");
-			},
-		});
-		const backup = createMockModel({
-			provider: "openrouter",
-			id: "backup-id",
-			handler: () => {
-				throw new Error("You have hit your ChatGPT usage limit (pro plan). Try again in ~158 min.");
-			},
-		});
-		const resolveModel = (id: string) => {
-			if (id === "primary-id") return primary.model;
-			if (id === "backup-id") return backup.model;
-			return undefined;
-		};
-		const registry = new RouteRegistry(resolveModel);
-		registry.register({
-			id: "virtual-impl",
-			root: {
-				type: "fallback",
-				on: ["credential_quota"],
-				children: [
-					{ type: "target", model: "primary-id" },
-					{ type: "target", model: "backup-id" },
-				],
-			},
-		});
-		const handle = startAuthGateway({
-			bind: "127.0.0.1:0",
-			bearerTokens: ["t"],
-			storage,
-			resolveModel,
-			routeRegistry: registry,
-			version: "test",
-		});
-		try {
-			const res = await fetch(`${handle.url}/v1/chat/completions`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
-				body: JSON.stringify({
-					model: "virtual-impl",
-					messages: [{ role: "user", content: "hi" }],
-					stream: false,
-				}),
-			});
-			expect(res.status).not.toBe(200);
-			expect(primary.calls.length).toBe(2);
-			// Without resetting siblingsExhausted, backup would only be attempted once.
-			expect(backup.calls.length).toBe(2);
-		} finally {
-			await handle.close();
-			storage.close();
-			await fs.rm(dir, { recursive: true, force: true });
-		}
-	});
-});
 
 it("uses normalized image content to select conditional targets across both gateway paths", async () => {
 	registerMockApi();
@@ -827,6 +900,319 @@ it("uses normalized image content to select conditional targets across both gate
 	}
 });
 
+for (const endpoint of ["/v1/chat/completions", "/v1/pi/stream"]) {
+	it(`dispatches the selected weighted target on ${endpoint}`, async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-weight-review-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey("openrouter", "test-key");
+		const first = createMockModel({ provider: "openrouter", id: "light", handler: { content: ["wrong"] } });
+		const selected = createMockModel({ provider: "openrouter", id: "heavy", handler: { content: ["selected"] } });
+		const resolveModel = (id: string) => (id === "light" ? first.model : id === "heavy" ? selected.model : undefined);
+		const registry = new RouteRegistry(resolveModel);
+		registry.register({
+			id: "weighted",
+			root: {
+				type: "balance",
+				strategy: "weighted",
+				children: [
+					{ type: "target", model: "light", weight: 1 },
+					{ type: "target", model: "heavy", weight: 10 },
+				],
+			},
+		});
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["t"],
+			storage,
+			resolveModel,
+			routeRegistry: registry,
+			version: "test",
+		});
+		try {
+			const body =
+				endpoint === "/v1/pi/stream"
+					? {
+							modelId: "weighted",
+							context: { messages: [{ role: "user", content: "hello", timestamp: 0 }] },
+							stream: false,
+						}
+					: { model: "weighted", messages: [{ role: "user", content: "hello" }], stream: false };
+			const response = await fetch(`${handle.url}${endpoint}`, {
+				method: "POST",
+				headers: { Authorization: "Bearer t", "Content-Type": "application/json" },
+				body: JSON.stringify(body),
+			});
+			expect(response.status).toBe(200);
+			await response.text();
+			expect(selected.calls.length).toBe(1);
+			expect(first.calls.length).toBe(0);
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+}
+
+it("enforces deployment affinity using the resolved model endpoint on both gateway paths", async () => {
+	registerMockApi();
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-deployment-review-"));
+	const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+	storage.setRuntimeApiKey("openrouter", "test-key");
+	const model = createMockModel({ provider: "openrouter", id: "endpoint", handler: { content: ["ok"] } });
+	const resolveModel = (id: string) => (id === "endpoint" ? model.model : undefined);
+	const registry = new RouteRegistry(resolveModel);
+	for (const matching of [true, false])
+		registry.register({
+			id: matching ? "matching" : "foreign",
+			affinity: "required",
+			portability: { scope: "deployment", origin: matching ? model.model.baseUrl : "https://foreign.example/v1" },
+			root: { type: "target", model: "endpoint" },
+		});
+	const handle = startAuthGateway({
+		bind: "127.0.0.1:0",
+		bearerTokens: ["t"],
+		storage,
+		resolveModel,
+		routeRegistry: registry,
+		version: "test",
+	});
+	try {
+		for (const native of [false, true])
+			for (const matching of [true, false]) {
+				const route = matching ? "matching" : "foreign";
+				const body = native
+					? {
+							modelId: route,
+							context: { messages: [{ role: "user", content: "hello", timestamp: 0 }] },
+							stream: false,
+						}
+					: { model: route, messages: [{ role: "user", content: "hello" }], stream: false };
+				const response = await fetch(`${handle.url}${native ? "/v1/pi/stream" : "/v1/chat/completions"}`, {
+					method: "POST",
+					headers: { Authorization: "Bearer t", "Content-Type": "application/json" },
+					body: JSON.stringify(body),
+				});
+				expect(response.status === 200).toBe(matching);
+				await response.text();
+			}
+		expect(model.calls.length).toBe(2);
+	} finally {
+		await handle.close();
+		storage.close();
+		await fs.rm(dir, { recursive: true, force: true });
+	}
+});
+
+	it("records each non-streaming provider failure once so two failovers do not open the circuit", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-conductor-wire-health-once-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey("openrouter", "test-key");
+		const primary = createMockModel({
+			provider: "openrouter",
+			id: "primary-id",
+			handler: () => {
+				throw new Error("service unavailable");
+			},
+		});
+		const backup = createMockModel({
+			provider: "openrouter",
+			id: "backup-id",
+			handler: { content: ["ok"] },
+		});
+		const resolveModel = (id: string) => {
+			if (id === "primary-id") return primary.model;
+			if (id === "backup-id") return backup.model;
+			return undefined;
+		};
+		const registry = new RouteRegistry(resolveModel);
+		registry.register({
+			id: "virtual-impl",
+			root: {
+				type: "fallback",
+				on: ["provider_unavailable"],
+				children: [
+					{ type: "target", model: "primary-id" },
+					{ type: "target", model: "backup-id" },
+				],
+			},
+		});
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["t"],
+			storage,
+			resolveModel,
+			routeRegistry: registry,
+			version: "test",
+		});
+		const post = async (): Promise<Response> =>
+			fetch(`${handle.url}/v1/chat/completions`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+				body: JSON.stringify({
+					model: "virtual-impl",
+					prompt_cache_key: crypto.randomUUID(),
+					messages: [{ role: "user", content: "hi" }],
+					stream: false,
+				}),
+			});
+		try {
+			expect((await post()).status).toBe(200);
+			expect((await post()).status).toBe(200);
+			// Two single-recorded failures leave the circuit degraded, so the third
+			// request still attempts primary. Double-recording would have opened it.
+			const third = await post();
+			expect(third.status).toBe(200);
+			expect(primary.calls.length).toBe(3);
+			expect(backup.calls.length).toBe(3);
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+
+	it("opens the health circuit for repeated model_unavailable failures", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-conductor-wire-model-health-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey("openrouter", "test-key");
+		const err = Object.assign(new Error("model not found"), { status: 404 });
+		const primary = createMockModel({
+			provider: "openrouter",
+			id: "primary-id",
+			handler: () => {
+				throw err;
+			},
+		});
+		const backup = createMockModel({
+			provider: "openrouter",
+			id: "backup-id",
+			handler: { content: ["ok"] },
+		});
+		const resolveModel = (id: string) => {
+			if (id === "primary-id") return primary.model;
+			if (id === "backup-id") return backup.model;
+			return undefined;
+		};
+		const registry = new RouteRegistry(resolveModel);
+		registry.register({
+			id: "virtual-impl",
+			root: {
+				type: "fallback",
+				on: ["model_unavailable"],
+				children: [
+					{ type: "target", model: "primary-id" },
+					{ type: "target", model: "backup-id" },
+				],
+			},
+		});
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["t"],
+			storage,
+			resolveModel,
+			routeRegistry: registry,
+			version: "test",
+		});
+		const post = async (): Promise<Response> =>
+			fetch(`${handle.url}/v1/chat/completions`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+				body: JSON.stringify({
+					model: "virtual-impl",
+					prompt_cache_key: crypto.randomUUID(),
+					messages: [{ role: "user", content: "hi" }],
+					stream: false,
+				}),
+			});
+		try {
+			expect((await post()).status).toBe(200);
+			expect((await post()).status).toBe(200);
+			expect((await post()).status).toBe(200);
+			expect(primary.calls.length).toBe(3);
+			const fourth = await post();
+			expect(fourth.status).toBe(200);
+			// Circuit open: primary skipped, only backup runs.
+			expect(primary.calls.length).toBe(3);
+			expect(backup.calls.length).toBe(4);
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+
+	it("resets sibling exhaustion when falling back so the next target gets a sibling retry", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-conductor-wire-sibling-reset-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey("openrouter", "test-key");
+		const primary = createMockModel({
+			provider: "openrouter",
+			id: "primary-id",
+			handler: () => {
+				throw new Error("You have hit your ChatGPT usage limit (pro plan). Try again in ~158 min.");
+			},
+		});
+		const backup = createMockModel({
+			provider: "openrouter",
+			id: "backup-id",
+			handler: () => {
+				throw new Error("You have hit your ChatGPT usage limit (pro plan). Try again in ~158 min.");
+			},
+		});
+		const resolveModel = (id: string) => {
+			if (id === "primary-id") return primary.model;
+			if (id === "backup-id") return backup.model;
+			return undefined;
+		};
+		const registry = new RouteRegistry(resolveModel);
+		registry.register({
+			id: "virtual-impl",
+			root: {
+				type: "fallback",
+				on: ["credential_quota"],
+				children: [
+					{ type: "target", model: "primary-id" },
+					{ type: "target", model: "backup-id" },
+				],
+			},
+		});
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["t"],
+			storage,
+			resolveModel,
+			routeRegistry: registry,
+			version: "test",
+		});
+		try {
+			const res = await fetch(`${handle.url}/v1/chat/completions`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+				body: JSON.stringify({
+					model: "virtual-impl",
+					messages: [{ role: "user", content: "hi" }],
+					stream: false,
+				}),
+			});
+			expect(res.status).not.toBe(200);
+			expect(primary.calls.length).toBe(2);
+			// Without resetting siblingsExhausted, backup would only be attempted once.
+			expect(backup.calls.length).toBe(2);
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+});
+
 it("shares the round-robin cursor across chat and native HTTP requests", async () => {
 	registerMockApi();
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-rr-http-"));
@@ -882,6 +1268,7 @@ it("shares the round-robin cursor across chat and native HTTP requests", async (
 		await fs.rm(dir, { recursive: true, force: true });
 	}
 });
+
 
 it("recovers the primary after a cached backup becomes unavailable", async () => {
 	registerMockApi();

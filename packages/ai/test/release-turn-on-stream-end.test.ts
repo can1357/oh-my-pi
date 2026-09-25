@@ -1,8 +1,10 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { releaseTurnOnStreamEnd } from "@oh-my-pi/pi-ai/auth-gateway/server";
+import { releaseTurnOnStreamEnd, renewReservationUntilSettled } from "@oh-my-pi/pi-ai/auth-gateway/server";
+import { StreamCommitGate } from "@oh-my-pi/pi-ai/auth-gateway/stream-commit-gate";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai/types";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import { removeWithRetries } from "../../utils/src/temp";
 
@@ -82,5 +84,77 @@ describe("releaseTurnOnStreamEnd", () => {
 			requestId: "req-after-close",
 		});
 		expect(after.ok).toBe(true);
+	});
+	it("waits for canonical completion before reporting successful settlement", async () => {
+		if (!storage) throw new Error("setup failed");
+		const ended = Promise.withResolvers<void>();
+		const settled = Promise.withResolvers<AssistantMessage>();
+		const outcomes: boolean[] = [];
+		const upstream = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				controller.close();
+				ended.resolve();
+			},
+		});
+		const wrapped = releaseTurnOnStreamEnd(upstream, storage, "settled", undefined, settled.promise, outcome => {
+			outcomes.push(outcome.ok);
+		});
+		const read = wrapped.getReader().read();
+		await ended.promise;
+		expect(outcomes).toEqual([]);
+		settled.resolve({
+			role: "assistant",
+			content: [],
+			api: "openai-responses",
+			provider: "openai",
+			model: "test",
+			stopReason: "stop",
+			timestamp: 0,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+		});
+		await read;
+		expect(outcomes).toEqual([true]);
+	});
+
+	it("reports cancellation as unsuccessful even after stream commit without waiting for a hung provider", async () => {
+		if (!storage) throw new Error("setup failed");
+		const gate = new StreamCommitGate();
+		gate.classifyAndObserve("response.output_text.delta", 1);
+		const settled = Promise.withResolvers<AssistantMessage>();
+		const outcomes: boolean[] = [];
+		const wrapped = releaseTurnOnStreamEnd(
+			new ReadableStream<Uint8Array>(),
+			storage,
+			"cancelled",
+			gate,
+			settled.promise,
+			outcome => {
+				outcomes.push(outcome.ok);
+			},
+		);
+		await wrapped.cancel("client cancelled");
+		expect(outcomes).toEqual([false]);
+	});
+	it("renews an active inference reservation past its TTL and stops after settlement", async () => {
+		if (!storage) throw new Error("setup failed");
+		vi.useFakeTimers();
+		storage.tryAcquireTurnReservation({ credentialId: 99, incarnation: 1, requestId: "long" });
+		const deferred = Promise.withResolvers<void>();
+		const pending = renewReservationUntilSettled(storage, "long", deferred.promise);
+		vi.advanceTimersByTime(300_000);
+		expect(storage.tryAcquireTurnReservation({ credentialId: 99, incarnation: 1, requestId: "other" }).ok).toBe(
+			false,
+		);
+		deferred.resolve();
+		await pending;
+		vi.advanceTimersByTime(300_000);
+		expect(storage.tryAcquireTurnReservation({ credentialId: 99, incarnation: 1, requestId: "other" }).ok).toBe(true);
 	});
 });

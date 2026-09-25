@@ -47,7 +47,7 @@ import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
  * decided whether to fire the stop-time passes. No wall-clock sleeps needed.
  */
 const sharedAuthStorage = createInMemoryAuthStorage();
-sharedAuthStorage.setRuntimeApiKey("anthropic", "test-key");
+sharedAuthStorage.keys.setRuntime("anthropic", "test-key");
 const sharedModelRegistry = new ModelRegistry(sharedAuthStorage);
 
 afterAll(() => {

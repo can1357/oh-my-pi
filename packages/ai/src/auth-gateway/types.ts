@@ -47,6 +47,12 @@ export interface AuthGatewayParsedRequestOptions {
 	logitBias?: Record<string, number>;
 	/** OpenAI `response_format` (text | json_object | json_schema). Opaque passthrough. */
 	responseFormat?: unknown;
+	/** Gemini `generationConfig.responseMimeType` (e.g. `application/json`). */
+	responseMimeType?: string;
+	/** Gemini `generationConfig.responseSchema`. */
+	responseSchema?: Record<string, unknown>;
+	/** Gemini `generationConfig.responseJsonSchema`. */
+	responseJsonSchema?: Record<string, unknown>;
 
 	// ── Tools ─────────────────────────────────────────────────────────────
 	toolChoice?: AuthGatewayToolChoice;
@@ -59,6 +65,11 @@ export interface AuthGatewayParsedRequestOptions {
 	reasoning?: Effort;
 	/** Force-disable reasoning (Anthropic `thinking: { type: "disabled" }`). */
 	disableReasoning?: boolean;
+	/**
+	 * Preserve an explicit wire-level reasoning-off request through providers
+	 * that distinguish it from the generic disable hint.
+	 */
+	forceReasoningOff?: boolean;
 	/**
 	 * Explicit Anthropic `thinking.budget_tokens`. Mirrors Rust's
 	 * `resolve_thinking_budget`: pins onto whichever effort the client
@@ -94,6 +105,8 @@ export interface AuthGatewayParsedRequestOptions {
 	 * free-form bag. The gateway forwards as-is.
 	 */
 	metadata?: Record<string, unknown>;
+	/** Anthropic User Profile attribution from the inbound request header. */
+	userProfileId?: string;
 	/**
 	 * Captured allow-listed passthrough headers (anthropic-beta,
 	 * anthropic-version, openai-organization, openai-project, openai-beta,

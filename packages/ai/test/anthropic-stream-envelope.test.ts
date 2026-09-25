@@ -1381,6 +1381,15 @@ describe("anthropic stream envelope handling", () => {
 				{ status: 400 },
 			),
 		],
+		[
+			"a strict tool schema a translating gateway forwarded to an OpenAI upstream",
+			Object.assign(
+				new Error(
+					"400 {\"error\":{\"message\":\"Invalid schema for function 'bash': In context=(), 'required' is required to be supplied and to be an array including every key in properties. Missing 'timeout'.\"}}",
+				),
+				{ status: 400 },
+			),
+		],
 	])("retries without strict tools when the endpoint rejects %s", async (_case, rejection) => {
 		const toolContext: Context = {
 			...context,

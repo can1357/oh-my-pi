@@ -232,7 +232,7 @@ describe("ACP initialize conformance", () => {
 		expect(response.agentInfo).toEqual(
 			expect.objectContaining({
 				name: "oh-my-pi",
-				title: "Oh My Pi",
+				title: "omp",
 				version: VERSION,
 			}),
 		);

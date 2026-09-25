@@ -29,7 +29,7 @@ describe("handleCountTokens", () => {
 		const messages = [{ role: "user", content: "hello" }];
 		const res = await handleCountTokens(post(JSON.stringify({ model: "claude-sonnet", messages })), resolveKnown);
 		expect(res.status).toBe(200);
-		const expected = Math.ceil(JSON.stringify(messages).length / 4);
+		const expected = Math.ceil(JSON.stringify({ messages }).length / 4);
 		expect(expected).toBeGreaterThanOrEqual(0);
 		expect(await res.json()).toEqual({ input_tokens: expected });
 	});
@@ -38,4 +38,18 @@ describe("handleCountTokens", () => {
 		const res = await handleCountTokens(post("{"), resolveKnown);
 		expect(res.status).toBe(400);
 	});
+});
+
+it("counts system and tool content while excluding output-budget metadata", async () => {
+	const body = {
+		model: "claude-sonnet",
+		messages: [],
+		system: "s".repeat(4000),
+		tools: [{ name: "tool", description: "t".repeat(4000), input_schema: { type: "object" } }],
+	};
+	const response = await handleCountTokens(post(JSON.stringify(body)), resolveKnown);
+	const counted = (await response.json()) as { input_tokens: number };
+	expect(counted.input_tokens).toBeGreaterThanOrEqual(2000);
+	const metadata = await handleCountTokens(post(JSON.stringify({ ...body, max_tokens: 1000000 })), resolveKnown);
+	expect(await metadata.json()).toEqual(counted);
 });

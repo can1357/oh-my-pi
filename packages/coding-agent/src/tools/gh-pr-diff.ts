@@ -4,7 +4,7 @@ import { github } from "../utils/github";
 import { appendRepoFlag, ghApiHostArgs, parseRepoRef } from "./gh-common";
 import type { ViewLookupResult } from "./gh-view";
 import { getOrFetchView, resolveGithubCacheAuthKey } from "./github-cache";
-import { ToolError } from "./tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 export const PR_DIFF_FILES_PAGE_SIZE = 100;
 export const PR_DIFF_FILES_MAX = 3000;

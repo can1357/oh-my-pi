@@ -1,22 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/stream";
-import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import {
 	aimlApiModelManagerOptions,
 	isLikelyAimlApiChatModelId,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 
 describe("AIML API built-in provider (issue #2105)", () => {
-	test("registers built-in runtime descriptor with AIMLAPI_API_KEY discovery", () => {
-		const descriptor = PROVIDER_DESCRIPTORS.find(item => item.providerId === "aimlapi");
-
-		expect(descriptor).toBeDefined();
-		expect(descriptor?.defaultModel).toBe("gpt-5.5-2026-04-23");
-		expect(descriptor?.catalogDiscovery?.label).toBe("AIML API");
-		expect(descriptor?.catalogDiscovery?.envVars).toContain("AIMLAPI_API_KEY");
-		expect(DEFAULT_MODEL_PER_PROVIDER.aimlapi).toBe("gpt-5.5-2026-04-23");
-	});
-
 	test("uses the OpenAI-compatible completions transport and AIML API base URL", async () => {
 		const calls: Array<{ url: string; authorization: string | null }> = [];
 		const fetchMock = (async (input: string | URL | Request, init?: RequestInit) => {

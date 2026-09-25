@@ -148,4 +148,28 @@ describe("AuthStorage in-flight turn reservations", () => {
 		const key = await storage.getApiKey(PROVIDER, "holder-session", { requestId: "holder" });
 		expect(key).toBe("access-a");
 	});
+	it("tries the next ranked API key when a concurrent selector reserves its first choice", async () => {
+		if (!store) throw new Error("setup failed");
+		const ranked = new AuthStorage(store, {
+			rankingStrategyResolver: () => ({
+				findWindowLimits: () => ({}),
+				windowDefaults: { primaryMs: 60000, secondaryMs: 60000 },
+			}),
+			configValueResolver: async value => value,
+		});
+		try {
+			await ranked.set(PROVIDER, [
+				{ type: "api_key", key: "key-a" },
+				{ type: "api_key", key: "key-b" },
+			]);
+			const selected = await Promise.all([
+				ranked.getApiKey(PROVIDER, "same-session", { requestId: "first" }),
+				ranked.getApiKey(PROVIDER, "same-session", { requestId: "second" }),
+			]);
+			expect(selected.sort()).toEqual(["key-a", "key-b"]);
+		} finally {
+			ranked.releaseTurnReservation("first");
+			ranked.releaseTurnReservation("second");
+		}
+	});
 });

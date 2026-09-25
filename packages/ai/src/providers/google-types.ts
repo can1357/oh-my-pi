@@ -126,6 +126,7 @@ export interface GenerateContentConfig {
 	stopSequences?: string[];
 	presencePenalty?: number;
 	frequencyPenalty?: number;
+	repetitionPenalty?: number;
 	seed?: number;
 	responseMimeType?: string;
 	responseSchema?: Record<string, unknown>;

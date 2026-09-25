@@ -14,7 +14,9 @@
  *    message delta is a cache miss each turn.
  */
 
+import type { AgentTool } from "./types";
 import type { Context, Message, Tool } from "@oh-my-pi/pi-ai";
+import { toolWireSchema } from "@oh-my-pi/pi-ai";
 import { normalizeTools } from "./agent-loop";
 import { messageEstimateVersion } from "./compaction/message-cache";
 import type { AgentContext, AgentMessage } from "./types";
@@ -22,6 +24,52 @@ import type { AgentContext, AgentMessage } from "./types";
 // ---------------------------------------------------------------------------
 // StablePrefix (formerly ImmutablePrefix)
 // ---------------------------------------------------------------------------
+
+/**
+ * Cheap per-tool wire-identity key: every field normalizeTools and
+ * computeFingerprint read. The resolved parameters contribute by object
+ * identity — the wire-schema memo is stamp-keyed on the parameters object,
+ * so identity equals normalized bytes (modulo intent injection, a pure
+ * function of the mode flags compared separately). `customFormat` and
+ * `examples` contribute by reference: both are treated as immutable config
+ * (a registry swap replaces the object), matching how the snapshot consumes
+ * them. `intent` functions are compared by reference — same closure means
+ * same mode resolution.
+ */
+function toolKeyForPrefix(tool: AgentTool): string {
+	const params = toolWireSchema(tool);
+	const customFormat = tool.customFormat;
+	const examples = (tool as { examples?: unknown }).examples;
+	// Identity strings for objects (Map-assigned ids, no string-build cost
+	// on the hot path beyond the first sighting per object).
+	return [
+		tool.name ?? "",
+		tool.description ?? "",
+		String(tool.strict ?? ""),
+		tool.customWireName ?? "",
+		typeof tool.intent === "function" ? `fn:${objectId(tool.intent)}` : `mode:${tool.intent ?? "require"}`,
+		objectId(params),
+		objectId(customFormat),
+		objectId(examples),
+	].join("\u0000");
+}
+
+const objectIds = new WeakMap<object, number>();
+let nextObjectId = 1;
+
+function objectId(obj: unknown): number {
+	if (obj === null || obj === undefined || (typeof obj !== "object" && typeof obj !== "function")) {
+		// Primitives contribute by value below via String(); the id path is
+		// only for reference-identity comparison of config objects.
+		return 0;
+	}
+	let id = objectIds.get(obj);
+	if (id === undefined) {
+		id = nextObjectId++;
+		objectIds.set(obj, id);
+	}
+	return id;
+}
 
 /** Frozen system prompt + tool spec snapshot. */
 export interface StablePrefixSnapshot {
@@ -63,10 +111,42 @@ export class StablePrefix {
 	/**
 	 * Build or rebuild from live context.
 	 * Returns `true` if the prefix actually changed (cache miss imminent).
+	 *
+	 * Steady-state fast path: when the live prompt reference is unchanged
+	 * AND every tool resolves to the same normalized parameters identity as
+	 * last build, the fingerprint cannot have changed, so the full snapshot
+	 * + stringify is skipped. Comparing resolved parameters (not the tool
+	 * container) is load-bearing: tools like ReadTool expose `parameters` as
+	 * a getter over live settings (`skillful`, `memory.backend`), so the
+	 * schema can swap under stable tool references when a setting toggles.
+	 * Any other in-place mutation must go through `invalidate()`.
 	 */
+	#lastPrompt: readonly string[] | undefined;
+	// Joined prompt bytes snapshot: the prompt array is caller-owned and
+	// mutable in place (Agent.setSystemPrompt stores the caller's array;
+	// anyone holding it can push/splice), so reference equality alone cannot
+	// prove the bytes are unchanged. Compared by value on the fast path.
+	#lastPromptText: string | undefined;
+	// Per-tool wire-identity snapshot: every field normalizeTools and
+	// computeFingerprint read (name, description, resolved parameters,
+	// strict, customFormat, customWireName, intent mode, examples
+	// reference). A registry swap that keeps name/description/parameters
+	// but changes any of these must miss the fast path.
+	#lastToolKey: readonly string[] | undefined;
+	#lastIntentTracing: boolean | undefined;
+	#lastPruneToolDescriptions: boolean | undefined;
+
 	build(context: AgentContext, options: BuildOptions): boolean {
+		const prev = this.#snapshot;
+		if (prev !== null && this.#fastPathHit(context, options)) {
+			return false;
+		}
 		const snapshot = takeSnapshot(context, options);
-		if (this.#snapshot && this.#snapshot.fingerprint === snapshot.fingerprint) {
+		this.#recordFastPathKey(context, options, snapshot.tools);
+		if (prev && prev.fingerprint === snapshot.fingerprint) {
+			// Identity changed but bytes did not (e.g. equivalent rebuild):
+			// keep serving the cached snapshot so downstream memo identity
+			// (stamp-keyed schema caches) stays stable.
 			return false;
 		}
 		this.#snapshot = snapshot;
@@ -74,9 +154,50 @@ export class StablePrefix {
 		return true;
 	}
 
+	/** True when the cheap key matches: prompt + per-tool resolved identity. */
+	#fastPathHit(context: AgentContext, options: BuildOptions): boolean {
+		if (
+			this.#lastIntentTracing !== options.intentTracing ||
+			this.#lastPruneToolDescriptions !== options.pruneToolDescriptions
+		) {
+			return false;
+		}
+		// Prompt by reference first (steady state), then by joined bytes so
+		// an in-place push/splice of the same array still misses.
+		if (this.#lastPrompt !== context.systemPrompt) return false;
+		if (this.#lastPromptText !== undefined) {
+			const text = context.systemPrompt.join("\u0000");
+			if (text !== this.#lastPromptText) return false;
+		}
+		const tools = context.tools ?? [];
+		if (this.#lastToolKey === undefined || this.#lastToolKey.length !== tools.length) {
+			return false;
+		}
+		for (let i = 0; i < tools.length; i++) {
+			if (this.#lastToolKey[i] !== toolKeyForPrefix(tools[i]!)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	#recordFastPathKey(context: AgentContext, options: BuildOptions, normalized: Tool[]): void {
+		this.#lastPrompt = context.systemPrompt;
+		this.#lastPromptText = context.systemPrompt.join("\u0000");
+		this.#lastIntentTracing = options.intentTracing;
+		this.#lastPruneToolDescriptions = options.pruneToolDescriptions;
+		this.#lastToolKey = (context.tools ?? []).map(tool => toolKeyForPrefix(tool));
+		void normalized;
+	}
+
 	/** Force rebuild on the next `build()` call. */
 	invalidate(): void {
 		this.#snapshot = null;
+		this.#lastPrompt = undefined;
+		this.#lastPromptText = undefined;
+		this.#lastToolKey = undefined;
+		this.#lastIntentTracing = undefined;
+		this.#lastPruneToolDescriptions = undefined;
 	}
 
 	/**

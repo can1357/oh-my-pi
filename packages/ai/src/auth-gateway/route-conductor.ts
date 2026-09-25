@@ -17,6 +17,7 @@ export interface ExecutionState {
 	fallbackCount: number;
 	committed: boolean;
 	currentTarget: string;
+	/** True after a sibling-credential retry for the current target failed. */
 	siblingsExhausted: boolean;
 }
 
@@ -27,7 +28,38 @@ export interface ExecutionState {
 type ConductorRoute = CompiledRoute & {
 	targets: readonly string[];
 	fallbacks: Readonly<Partial<Record<GatewayErrorDisposition, readonly string[]>>>;
+	fallbackByTarget?: Readonly<
+		Partial<Record<string, Readonly<Partial<Record<GatewayErrorDisposition, readonly string[]>>>>>
+	>;
 };
+
+const balanceRrCursor = new Map<string, number>();
+
+function pickBalanceTarget(route: ConductorRoute, attempted: ReadonlySet<string>): string | undefined {
+	if (route.root.type !== "balance") return undefined;
+	const unused = route.targets.filter(id => !attempted.has(id));
+	if (unused.length === 0) return undefined;
+	if (route.root.strategy === "weighted") {
+		let best: string | undefined;
+		let bestWeight = Number.NEGATIVE_INFINITY;
+		for (const child of route.root.children) {
+			if (child.type !== "target") continue;
+			if (attempted.has(child.model)) continue;
+			const weight = child.weight ?? 1;
+			if (weight > bestWeight) {
+				bestWeight = weight;
+				best = child.model;
+			}
+		}
+		return best ?? unused[0];
+	}
+
+	const key = `${route.id}:${route.generation}:${route.root.strategy}`;
+	const cursor = balanceRrCursor.get(key) ?? 0;
+	const pick = unused[cursor % unused.length]!;
+	balanceRrCursor.set(key, cursor + 1);
+	return pick;
+}
 
 function firstUnused(ids: readonly string[] | undefined, attempted: ReadonlySet<string>): string | undefined {
 	if (!ids) return undefined;
@@ -56,12 +88,16 @@ export function decideAttempt(args: {
 	}
 
 	if (!classification) {
-		const next =
+		const preferred =
 			preferredTargetId !== undefined &&
 			route.targets.includes(preferredTargetId) &&
 			!state.attemptedTargets.has(preferredTargetId)
 				? preferredTargetId
-				: firstUnused(route.targets, state.attemptedTargets);
+				: undefined;
+		const next =
+			preferred ??
+			pickBalanceTarget(route, state.attemptedTargets) ??
+			firstUnused(route.targets, state.attemptedTargets);
 		return next === undefined ? { type: "terminal" } : { type: "dispatch", targetModelId: next };
 	}
 
@@ -74,8 +110,8 @@ export function decideAttempt(args: {
 		case "request_terminal":
 		case "policy_terminal":
 		case "gateway_terminal":
-		case "credential_permanent":
 			return { type: "terminal" };
+		case "credential_permanent":
 		case "credential_quota":
 		case "credential_transient": {
 			if (!state.siblingsExhausted) {

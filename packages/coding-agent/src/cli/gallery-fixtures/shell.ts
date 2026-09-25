@@ -1,4 +1,4 @@
-/** Gallery fixtures for the shell tools (bash, eval, launch). */
+/** Gallery fixtures for shell and supervised-service tools. */
 import type { GalleryFixture } from "./types";
 
 export const shellFixtures: Record<string, GalleryFixture> = {
@@ -56,85 +56,25 @@ export const shellFixtures: Record<string, GalleryFixture> = {
 		},
 	},
 
-	hub_start: {
-		label: "Hub start",
-		renderer: "hub",
-		streamingArgs: { op: "start", name: "web" },
+	bash_service: {
+		label: "Bash service",
+		renderer: "bash",
+		streamingArgs: { command: "bun run dev", name: "web" },
 		args: {
-			op: "start",
+			command: "bun run dev",
 			name: "web",
-			application: "bun",
-			args: ["run", "dev"],
 			ready: { log: "Local:.*http", port: 5173, timeout: 30 },
 		},
 		result: {
-			content: [
-				{
-					type: "text",
-					text: "Started web: ready pid=51234 uptime=1.2s restarts=0\nReady: Local: http://localhost:5173",
-				},
-			],
+			content: [{ type: "text", text: "web: ready pid=51234 ready\nLocal: http://localhost:5173" }],
 			details: {
-				op: "start",
-				daemon: {
-					name: "web",
-					id: "d-1",
-					state: "ready",
-					pid: 51234,
-					createdAt: 0,
-					startedAt: Date.now() - 1_200,
-					readyAt: Date.now(),
-					restartCount: 0,
-					outputBytes: 2048,
-					readyMatch: "Local:   http://localhost:5173/",
-					persist: false,
-					detached: false,
-				},
-				timedOut: false,
+				service: { name: "web", state: "ready", ready: true, timedOut: false, pid: 51234 },
 			},
 		},
 		errorResult: {
-			content: [{ type: "text", text: "start requires application" }],
+			content: [{ type: "text", text: "web: failed — process exited before readiness" }],
 			isError: true,
-			details: { op: "start" },
-		},
-	},
-
-	hub_logs: {
-		label: "Hub logs",
-		renderer: "hub",
-		args: { op: "logs", name: "comp-debug", lines: 100, follow: true, cursor: 233_512, timeout: 30 },
-		result: {
-			content: [
-				{
-					type: "text",
-					text: [
-						"Breakpoint 1: 3 locations.",
-						"(lldb) run",
-						"Process 726 launched: '/tmp/compiler'",
-						"frame #0: 0x0000000100012f80 compiler`parse_expression",
-						"[comp-debug: ready; cursor=233797]",
-					].join("\n"),
-				},
-			],
-			details: {
-				op: "logs",
-				cursor: 233_797,
-				timedOut: false,
-				state: "ready",
-				terminalRows: [
-					"\x1b[0mBreakpoint 1: 3 locations.",
-					"\x1b[0m(lldb) run",
-					"\x1b[0mProcess 726 launched: '/tmp/compiler'",
-					"\x1b[0mframe #0: 0x0000000100012f80 compiler`parse_expression",
-					"\x1b[0m\x1b[1;38;5;2m(lldb)\x1b[0m ",
-				],
-			},
-		},
-		errorResult: {
-			content: [{ type: "text", text: "No daemon named web" }],
-			isError: true,
-			details: { op: "logs" },
+			details: { service: { name: "web", state: "failed", ready: false, timedOut: false } },
 		},
 	},
 
