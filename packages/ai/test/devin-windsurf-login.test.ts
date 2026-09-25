@@ -109,6 +109,126 @@ describe("devin-windsurf login hook", () => {
 		await expect(exchangeWindsurfPkceCode(CODE, VERIFIER, impl)).rejects.toThrow(/omitted the session key/);
 	});
 
+	// Decision table: response field partitions -> credential mapping.
+	// field 1 is required; fields 2/3 are optional with defaults. Empty and
+	// omitted collapse to the same observable outcome for fields 2/3.
+	it.each([
+		{
+			case: "gsk- prefixed key, all optional fields",
+			f1: TOKEN,
+			f2: USER_NAME,
+			f3: API_ENDPOINT,
+			apiKey: TOKEN.slice(1),
+			orgName: USER_NAME,
+			apiEndpoint: API_ENDPOINT,
+		},
+		{
+			case: "key already unprefixed is stored as-is",
+			f1: "sk-ws-01-already-raw",
+			f2: "Some User",
+			f3: API_ENDPOINT,
+			apiKey: "sk-ws-01-already-raw",
+			orgName: "Some User",
+			apiEndpoint: API_ENDPOINT,
+		},
+		{
+			case: "field 2 omitted -> orgName undefined",
+			f1: TOKEN,
+			f3: API_ENDPOINT,
+			apiKey: TOKEN.slice(1),
+			orgName: undefined,
+			apiEndpoint: API_ENDPOINT,
+		},
+		{
+			case: "field 2 empty -> orgName undefined",
+			f1: TOKEN,
+			f2: "",
+			f3: API_ENDPOINT,
+			apiKey: TOKEN.slice(1),
+			orgName: undefined,
+			apiEndpoint: API_ENDPOINT,
+		},
+		{
+			case: "field 3 omitted -> default API endpoint",
+			f1: TOKEN,
+			f2: USER_NAME,
+			apiKey: TOKEN.slice(1),
+			orgName: USER_NAME,
+			apiEndpoint: "https://server.enterprise.windsurf.com",
+		},
+		{
+			case: "field 3 empty -> default API endpoint",
+			f1: TOKEN,
+			f2: USER_NAME,
+			f3: "",
+			apiKey: TOKEN.slice(1),
+			orgName: USER_NAME,
+			apiEndpoint: "https://server.enterprise.windsurf.com",
+		},
+	])("maps response fields: $case", async ({ f1, f2, f3, apiKey, orgName, apiEndpoint }) => {
+		const chunks: number[] = [];
+		for (const [field, value] of [
+			[1, f1],
+			[2, f2],
+			[3, f3],
+		] as Array<[number, string | undefined]>) {
+			if (value === undefined) continue;
+			chunks.push((field << 3) | 2, value.length);
+			for (let index = 0; index < value.length; index++) chunks.push(value.charCodeAt(index));
+		}
+		const impl: FetchImpl = async () => new Response(Uint8Array.from(chunks), { status: 200 });
+
+		const exchange = await exchangeWindsurfPkceCode(CODE, VERIFIER, impl);
+		expect(exchange.apiKey).toBe(apiKey);
+		expect(exchange.userName).toBe(orgName ?? "");
+		expect(exchange.apiEndpoint).toBe(apiEndpoint);
+	});
+
+	it("treats an empty session-key field like a missing one", async () => {
+		const chunks = [0x0a, 0x00];
+		const impl: FetchImpl = async () => new Response(Uint8Array.from(chunks), { status: 200 });
+		await expect(exchangeWindsurfPkceCode(CODE, VERIFIER, impl)).rejects.toThrow(/omitted the session key/);
+	});
+
+	it("encodes field lengths above 127 as multi-byte varints", async () => {
+		const longVerifier = "v".repeat(128);
+		let captured: Uint8Array | undefined;
+		const impl: FetchImpl = async (_input, init) => {
+			captured = new Uint8Array(await new Request("https://exchange.test/", init).arrayBuffer());
+			return new Response(Uint8Array.from([0x0a, 0x03, 97, 98, 99]), { status: 200 });
+		};
+
+		await exchangeWindsurfPkceCode(CODE, longVerifier, impl);
+
+		// Field 1: tag 0x0a + 1-byte length + 43-byte code = 45 bytes; field 2
+		// length 128 then continues as varint 0x80 0x01.
+		expect(captured).toBeDefined();
+		expect(captured![45]).toBe(0x12);
+		expect(Array.from(captured!.slice(46, 48))).toEqual([0x80, 0x01]);
+	});
+
+	it("propagates network failures unwrapped", async () => {
+		const impl: FetchImpl = async () => {
+			throw new Error("connection refused");
+		};
+		await expect(exchangeWindsurfPkceCode(CODE, VERIFIER, impl)).rejects.toThrow(/^connection refused$/);
+	});
+
+	it("keeps the OAuthError when the error body is unreadable", async () => {
+		const impl: FetchImpl = async () =>
+			({
+				ok: false,
+				status: 503,
+				text: () => Promise.reject(new Error("stream aborted")),
+			}) as unknown as Response;
+		await expect(exchangeWindsurfPkceCode(CODE, VERIFIER, impl)).rejects.toThrow(/503 <unreadable>/);
+	});
+
+	it("rejects malformed protobuf wire types", async () => {
+		const impl: FetchImpl = async () => new Response(Uint8Array.from([0x08, 0x01]), { status: 200 });
+		await expect(exchangeWindsurfPkceCode(CODE, VERIFIER, impl)).rejects.toThrow(/Unexpected wire type/);
+	});
+
 	it("surfaces exchange failures with status and body", async () => {
 		const impl: FetchImpl = async () =>
 			new Response('{"code":"unauthenticated","message":"invalid code"}', {
