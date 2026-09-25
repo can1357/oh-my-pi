@@ -214,7 +214,7 @@ describe("Anthropic on-demand compaction requests", () => {
 		});
 	});
 
-	it("uses model and deployment policy, including Foundry and Claude Platform on AWS but not Bedrock", async () => {
+	it("uses model and deployment policy, including Foundry and Claude Platform on AWS but not Bedrock Converse", async () => {
 		const oldModel = buildModel({ ...spec, id: "claude-sonnet-4-5" });
 		const bedrock = buildModel({
 			...spec,
@@ -237,6 +237,21 @@ describe("Anthropic on-demand compaction requests", () => {
 			const response = await captureRequest(model, { anthropicCompaction: {} });
 			expect(response.payload.compaction).toBeUndefined();
 		});
+	});
+
+	it("sends on-demand compaction on Bedrock Mantle's Anthropic Messages route only", async () => {
+		const mantle = buildModel({
+			...spec,
+			id: "anthropic.claude-opus-5-5",
+			provider: "bedrock-mantle",
+			baseUrl: "https://bedrock-mantle.us-east-1.api.aws/anthropic",
+		});
+		expect(mantle.compat.supportsServerCompaction).toBe(true);
+		const response = await captureRequest(mantle, { anthropicCompaction: {} });
+		expect(response.payload.compaction).toEqual({ type: "summarize" });
+		expect(response.beta).toContain("compact-2026-09-04");
+		expect(supportsAnthropicCompaction(mantle, "https://bedrock-mantle.us-east-1.api.aws/openai/v1")).toBe(false);
+		expect(supportsAnthropicCompaction(mantle, "https://bedrock-mantle.us-east-1.api.aws")).toBe(false);
 	});
 });
 
