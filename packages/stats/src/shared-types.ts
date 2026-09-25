@@ -158,6 +158,7 @@ export interface DashboardStats {
 	byModel: ModelStats[];
 	byFolder: FolderStats[];
 	byAgentType: AgentTypeStats[];
+	cacheMisses: CacheMissStats[];
 	timeSeries: TimeSeriesPoint[];
 	modelSeries: ModelTimeSeriesPoint[];
 	modelPerformanceSeries: ModelPerformancePoint[];
@@ -191,6 +192,35 @@ export interface AgentTypeStats {
 	totalCacheWriteTokens: number;
 	/** Total cost */
 	totalCost: number;
+}
+
+/**
+ * Unexpected prompt-cache misses for one provider + {@link AgentType}.
+ *
+ * Consecutive requests in one transcript form a pair when the cache should
+ * still be warm: same provider and model, neither errored, both prompts
+ * >= 1024 tokens, the prompt did not shrink below 97% of its predecessor
+ * (compaction/pruning), and the predecessor finished under 5 minutes earlier.
+ * Models that never reported a cache read (all-time) are excluded: there is no
+ * warm cache to miss. The smaller of the two prompts is the expected cache hit.
+ */
+export interface CacheMissStats {
+	provider: string;
+	agentType: AgentType;
+	/** Warm-cache request pairs examined. */
+	pairs: number;
+	/** Pairs missing more than max(2048, 10% of expected) tokens. */
+	badPairs: number;
+	/** Prompt tokens the provider should have served from cache. */
+	expectedTokens: number;
+	/** Expected tokens the provider did not read from cache. */
+	missedTokens: number;
+	/** missedTokens / expectedTokens (0-1). */
+	missRate: number;
+	/** badPairs / pairs (0-1). */
+	badPairRate: number;
+	/** API-equivalent cost of the misses: missed tokens x (input - cache-read) rate. */
+	avoidableCost: number;
 }
 
 /**
