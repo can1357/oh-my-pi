@@ -2549,8 +2549,6 @@ function b() {
 
 			expect(result.details?.async?.state).toBe("running");
 			expect(result.details?.async?.type).toBe("bash");
-			expect(getTextOutput(result)).toContain("Backgrounded as job");
-
 			const jobId = result.details?.async?.jobId;
 			if (!jobId) {
 				throw new Error("expected an auto-backgrounded job id");

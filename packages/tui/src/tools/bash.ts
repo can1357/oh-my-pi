@@ -11,6 +11,7 @@ import {
 	previewWindowRows,
 	replaceTabs,
 } from "../render/render-utils";
+import { displayDaemonExitReason } from "./daemon";
 import {
 	formatStyledTruncationWarning,
 	type OutputMeta,
@@ -23,9 +24,26 @@ import type { RenderResultOptions, ToolRenderer } from "./renderer";
 /** Default collapsed shell output preview height. */
 export const BASH_DEFAULT_PREVIEW_LINES = DEFAULT_TERMINAL_PREVIEW_LINES;
 
-/** LLM-facing footer appended when a tool call becomes a background job. */
-export function formatBackgroundNotice(jobId: string): string {
-	return `Backgrounded as job ${jobId}; its output is injected into the conversation as a follow-up the moment it finishes. Do NOT poll for it (no \`sleep\`, \`ps\`, \`pgrep\`, \`top\`, \`pidwait\`, log tailing): every poll is a wasted turn. Do other work, or end your reply and wait to be woken.`;
+const BACKGROUND_NOTICE_SUFFIX =
+	"; its output is injected into the conversation as a follow-up the moment it finishes. Do NOT poll for it (no `sleep`, `ps`, `pgrep`, `top`, `pidwait`, log tailing): every poll is a wasted turn. Do other work, or end your reply and wait to be woken.";
+
+/**
+ * LLM-facing footer appended when a tool call becomes a background job.
+ * The optional label keeps parallel jobs attributable in completion order.
+ */
+export function formatBackgroundNotice(jobId: string, label?: string): string {
+	return `Backgrounded as job ${jobId}${label ? ` (${label})` : ""}${BACKGROUND_NOTICE_SUFFIX}`;
+}
+
+/** Finds the exact trailing background notice for `jobId`, including an optional label. */
+export function findBackgroundNotice(text: string, jobId: string): string | undefined {
+	const prefix = `Backgrounded as job ${jobId}`;
+	const start = text.lastIndexOf(prefix);
+	if (start === -1) return undefined;
+	const lineEnd = text.indexOf("\n", start);
+	const line = text.slice(start, lineEnd === -1 ? text.length : lineEnd);
+	const hasExpectedBoundary = line.startsWith(`${prefix};`) || line.startsWith(`${prefix} (`);
+	return hasExpectedBoundary && line.endsWith(BACKGROUND_NOTICE_SUFFIX) ? line : undefined;
 }
 
 /** Shell execution metadata used by transcript rendering. */
@@ -47,6 +65,12 @@ export interface BashToolDetails {
 		ready: boolean;
 		timedOut: boolean;
 		pid?: number;
+		/** Terminal launch diagnostic, independent of the output preview. */
+		exitReason?: string;
+		/** Live output monitor delivery attached at start; absent when unmonitored. */
+		progress?: "wake" | "ambient";
+		/** Reason live output monitoring stopped; progress is absent once stopped. */
+		monitorStopped?: string;
 	};
 	async?: {
 		state: "running" | "completed" | "failed";
@@ -157,6 +181,17 @@ export function formatWallTimeNotice(wallTimeMs: number): string {
 /** Formats the model-facing command exit status notice. */
 export function formatExitCodeNotice(exitCode: number): string {
 	return `Command exited with code ${exitCode}`;
+}
+
+/**
+ * Strip the background notice this result was tagged with. The notice carries
+ * the job label, so it is located in the text instead of reconstructed from the
+ * id alone.
+ */
+function stripBackgroundNotice(text: string, async: BashToolDetails["async"] | undefined): string {
+	if (async?.state !== "running") return text;
+	const notice = findBackgroundNotice(text, async.jobId);
+	return notice === undefined ? text : stripTrailingNotice(text, notice);
 }
 
 /** Shell arguments used to build a command preview. */
@@ -342,10 +377,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 					) {
 						return cachedSnapshot;
 					}
-					const withoutBackground =
-						details?.async?.state === "running"
-							? stripTrailingNotice(rawOutput, formatBackgroundNotice(details.async.jobId))
-							: rawOutput;
+					const withoutBackground = stripBackgroundNotice(rawOutput, details?.async);
 					const strippedOutput = stripOutputNotice(withoutBackground, details?.meta);
 					const withoutExit =
 						details?.exitCode === undefined
@@ -374,6 +406,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 						statsParts.push(`Service: ${service.name}`, `State: ${service.state}`);
 						statsParts.push(`Ready: ${service.ready ? "yes" : service.timedOut ? "timed out" : "no"}`);
 						if (service.pid !== undefined) statsParts.push(`PID: ${service.pid}`);
+						if (service.progress) statsParts.push(`Progress: ${service.progress}`);
 					}
 					if (wallTimeMs !== undefined) {
 						statsParts.push(`Wall: ${formatWallTimeSeconds(wallTimeMs)}s`);
@@ -428,6 +461,12 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 						uiTheme,
 					);
 					const outputLines: string[] = [...formatted.lines];
+					const serviceReason = displayDaemonExitReason(details?.service?.exitReason);
+					if (serviceReason) outputLines.push(uiTheme.fg("error", `Reason: ${serviceReason}`));
+					const monitorStopped = displayDaemonExitReason(details?.service?.monitorStopped);
+					if (monitorStopped) {
+						outputLines.push(uiTheme.fg("warning", `Progress monitoring stopped: ${monitorStopped}`));
+					}
 					if (timeoutLine) outputLines.push(timeoutLine);
 					if (warningLine) outputLines.push(warningLine);
 

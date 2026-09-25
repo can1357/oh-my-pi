@@ -2,7 +2,7 @@ import type { AgentOptions, AgentTelemetryConfig, AgentTool, AgentToolContext } 
 import type { EditStore } from "@oh-my-pi/pi-natives";
 import type { FetchImpl, ImageContent, Model, ServiceTierByFamily, ToolChoice } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
-import type { AsyncJobManager } from "../async/job-manager";
+import type { AsyncJobManager, AsyncJobProgressDelivery } from "../async/job-manager";
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { EvalPreludeDefinition } from "../eval/preludes";
@@ -21,7 +21,7 @@ import type { GoalModeState, GoalRuntime } from "../goals";
 import { GoalTool } from "../goals/tools/goal-tool";
 import type { HindsightSessionState } from "../hindsight/state";
 import type { LocalProtocolOptions } from "../internal-urls";
-import type { DaemonCompletionNotification } from "../launch/protocol";
+import type { DaemonCompletionNotification, DaemonOutputNotification } from "../launch/protocol";
 import { LspTool } from "../lsp";
 import type { MCPManager } from "../mcp";
 import { MEMORY_BACKEND_TOOL_NAMES } from "../memory-backend/tool-names";
@@ -204,7 +204,22 @@ export interface DeferredDiagnosticsEntry {
 	isStale(): boolean;
 }
 
+/**
+ * Why a session is replacing the conversation beneath its live launch
+ * subscriptions. Broker-retained completions survive disposal and transitions
+ * to another conversation, but a reset discards the wiped context's completions.
+ */
+export type LaunchContextBoundary =
+	/** Same session id, transcript wiped (`/clear`): nothing can legitimately resume the old context. */
+	| "reset"
+	/** A freshly minted session id takes over (`/new`, fork, branch): the old id is left behind. */
+	| "new"
+	/** An existing session is adopted (`/resume`): the outgoing one stays on disk and resumable. */
+	| "switch";
+
 /** Session context for tool factories */
+export type ProcessProgressMode = "session" | "unavailable";
+
 export interface ToolSession {
 	/** Current working directory */
 	cwd: string;
@@ -216,6 +231,13 @@ export interface ToolSession {
 	canPromptUser?: boolean;
 	/** The user approves `cfg://` writes for this session (top-level TUI session only). */
 	settingsApproval?: boolean;
+	/**
+	 * Delivery surface for supervised-process progress. `session` routes monitor
+	 * events through this ToolSession's own queue; `unavailable` forbids monitored
+	 * start/monitor operations while leaving unmonitored process operations intact.
+	 * An omitted mode is treated as unavailable.
+	 */
+	processProgressMode?: ProcessProgressMode;
 	/** Whether this session has begun disposal. */
 	isDisposed?: () => boolean;
 	/**
@@ -517,12 +539,32 @@ export interface ToolSession {
 
 	/** Queue a hidden message to be injected at the next agent turn. */
 	queueDeferredMessage?(message: CustomMessage): void;
-	/** Queue a broker supervised-process completion for the owning session. */
-	queueLaunchCompletion?(notification: DaemonCompletionNotification): Promise<void>;
+	/** Queue a broker completion under its operation's captured epoch; omitted epochs use the current context. */
+	queueLaunchCompletion?(notification: DaemonCompletionNotification, epoch?: number): Promise<void>;
+	/** Capture the session generation that owns a supervised-process incarnation. */
+	captureLaunchProgressEpoch?(): number;
+	/** Queue a live supervised-process output batch for the owning session. */
+	queueLaunchProgress?(
+		notification: DaemonOutputNotification,
+		delivery: AsyncJobProgressDelivery,
+		startedAt: number,
+		epoch: number,
+		artifactId?: string,
+	): void;
+	/** Carry a monitor's queued ambient output into the wake queue when it is retuned to `wake`. */
+	promoteLaunchProgress?(daemonId: string, epoch: number): void;
+	/** Discard this registration's queued process progress on explicit monitoring off, not terminal cleanup. */
+	discardLaunchProgress?(monitorId: string, epoch: number): void;
+	/** Track live monitors so subagent quiescence waits for their terminal event. */
+	setLaunchMonitorActive?(monitorId: string, delivery: AsyncJobProgressDelivery, active: boolean, epoch: number): void;
 	/** Register cleanup that runs when this session is disposed; returns a handle that removes the cleanup. */
 	registerDisposeCallback?(callback: () => void): (() => void) | void;
-	/** Register cleanup that runs when this ToolSession adopts a different session ID. */
-	registerSessionChangeCallback?(callback: () => void): (() => void) | void;
+	/**
+	 * Register cleanup that runs when this ToolSession replaces its conversation
+	 * beneath live launch subscriptions; returns a handle that removes the cleanup.
+	 * Fires once per boundary and forgets the callback afterwards.
+	 */
+	registerContextBoundaryCallback?(callback: (boundary: LaunchContextBoundary) => void): (() => void) | void;
 	/** Queue late LSP diagnostics (arrived after an edit/write returned) to be shown
 	 *  in the transcript and delivered to the model at the next yield, like background
 	 *  job results. */
