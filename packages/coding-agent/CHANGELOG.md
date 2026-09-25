@@ -2,41 +2,75 @@
 
 ## [Unreleased]
 
-### Added
-
-- Added trusted additional context support for extension and hook tool results, including `ctx.addAdditionalContext()` for registered tools, allowing instructions to be passed to the model without altering the tool result.
-- Added dictation support to `/btw` follow-up input, including microphone controls on the follow-up line.
-- Added opt-in CUDA support to the Nix package for tiny-model inference with the ONNX Runtime CUDA execution provider.
-- Added support for multiple simultaneous browser instances, allowing tabs from browsers such as Chrome and Edge to remain connected and usable at the same time.
-
-### Changed
-
-- Shortened the default system prompt by removing redundant rules and empty sections, reducing token usage by about 150 tokens with default settings.
-
 ### Fixed
 
 - Python eval preserves multiline strings containing magic-looking lines such as `!cmd` or `%%bash`. ([#12334](https://github.com/can1357/oh-my-pi/pull/12334) by [@iliaal](https://github.com/iliaal))
-- `omp update` and the startup update check now use your configured npm registry (`.npmrc`, `npm_config_registry`, or bunfig, including scoped registries and auth tokens) instead of always querying registry.npmjs.org ([#13115](https://github.com/can1357/oh-my-pi/pull/13115) by [@H4vC](https://github.com/H4vC))
-- Fixed auto-QA grievance pushes getting stuck forever behind one report the collector rejects: tool names are clamped to the collector's 128-byte limit, rejected reports are set aside with the server's error (shown in `omp grievances list` and `push`), and the rest of the queue keeps sending ([#13091](https://github.com/can1357/oh-my-pi/issues/13091), [#13119](https://github.com/can1357/oh-my-pi/pull/13119) by [@NaC-L](https://github.com/NaC-L))
-- Fixed advisors configured with `auto` thinking running at `medium` instead of following the main session's current effort. An `auto` advisor now runs at the effort the main session uses for the current turn (the classifier's pick under `auto`, the set level otherwise, `medium` when thinking is off), updated at each review without rebuilding the advisor; on a retry-fallback model it keeps the fallback's effort until its main model is restored ([#13130](https://github.com/can1357/oh-my-pi/pull/13130) by [@alnaggar-dev](https://github.com/alnaggar-dev)).
-- Fixed large edit diffs being sent whole in advisor reviews; they are now redacted and cut to the same 8 KiB / 80-line budget as other tool output ([#13129](https://github.com/can1357/oh-my-pi/pull/13129) by [@alnaggar-dev](https://github.com/alnaggar-dev)).
-- Updated `omp update` and the startup update check to use the configured npm registry, including scoped registries and authentication tokens.
-- Fixed auto-QA grievance uploads so an invalid report no longer blocks the rest of the queue; rejected reports are now reported with the server error.
-- Fixed Windows `read` failures for existing files when a line selector such as `:1-40` is used.
-- Fixed memory storage error reporting so failed `retain`, `learn`, and backend saves identify the failed item and include the underlying storage error.
-- Fixed malformed user-level `mcp.json` files disabling all MCP sources; valid sources now continue loading with a warning.
-- Fixed retry fallback loops that could retry indefinitely when a fallback resolved to the same effective request.
-- Fixed the setup wizard incorrectly reporting Gemini web search as unconfigured when Antigravity OAuth is active.
-- Fixed headless print mode abandoning the advisor's final review when the review model fails and a configured fallback reviewer is available.
-- Fixed embedded shell startup when the inherited working directory has been deleted.
-- Fixed Codex usage displays showing a stale subscription plan after the account plan changed.
-- Fixed explicit model or provider selections from bypassing `disabledProviders`; disabled providers are now refused and skipped during fallback.
-- Fixed usage views incorrectly combining model-specific quota limits with shared quota windows; each limit is now shown separately.
-- Fixed `write xd://<tool>` handling of devices with lenient argument validation so tools can provide their own precise responses for schema mismatches.
-- Fixed Anthropic server-side fallback requests failing because of an invalid fallback model name.
-- Fixed requests to large-output models failing near the context limit; the output allowance now adjusts to fit the remaining context.
-- Fixed system prompts that referenced tools by bare names when those tools were available only through `xd://` devices, including Hindsight and Mnemopi memory tools.
-- Fixed dictation remaining active when recording was restarted while the previous clip was still transcribing.
+- Fixed the Windows bash tool exporting `TEMP`, `TMP`, and `TMPDIR` with 8.3 short names such as `ADMINI~1`, so they now match the long-form `pwd`/`$PWD` after `cd "$TEMP"` ([#13265](https://github.com/can1357/oh-my-pi/pull/13265) by [@CoderTCY](https://github.com/CoderTCY))
+- `edit` and `write` no longer refuse handwritten files named `generated.go`, `generated.ts`, `generated.js`, or `generated.py`; these are treated as auto-generated only when their header carries a generated-code marker ([#13138](https://github.com/can1357/oh-my-pi/issues/13138), [#13139](https://github.com/can1357/oh-my-pi/pull/13139) by [@radkawar](https://github.com/radkawar))
+- Fixed the `edit` tool warning that valid Go 1.26 `new(expr)` calls (e.g. `new(f(x))`) introduced a syntax error, and `ast_grep`/`ast_edit` reporting parse errors on them ([#13148](https://github.com/can1357/oh-my-pi/issues/13148), [#13149](https://github.com/can1357/oh-my-pi/pull/13149) by [@radkawar](https://github.com/radkawar))
+- Fixed hashline `PUT N*` / `CUT N*` on the first statement of a block (for example a Go or Python function that opens with an `if`) also replacing or deleting every statement after it ([#13153](https://github.com/can1357/oh-my-pi/issues/13153), [#13154](https://github.com/can1357/oh-my-pi/pull/13154) by [@radkawar](https://github.com/radkawar))
+- Fixed the `Full output: artifact://` link on large background bash and eval results pointing at a truncated copy with `[…elided…]` gaps instead of the complete output ([#13142](https://github.com/can1357/oh-my-pi/issues/13142), [#13143](https://github.com/can1357/oh-my-pi/pull/13143) by [@radkawar](https://github.com/radkawar))
+- Fixed `grep` paths like `dir/*.go` also matching files in subdirectories of `dir` ([#13146](https://github.com/can1357/oh-my-pi/issues/13146), [#13150](https://github.com/can1357/oh-my-pi/pull/13150) by [@radkawar](https://github.com/radkawar))
+
+## [18.3.1] - 2026-09-25
+
+### Added
+
+- Added native filesystem support for `local://` and `omp://` URLs across file-search, content-search, AST, shell, and related tools, including support for virtual working directories.
+- Added a native `cp` builtin for filesystem copy operations.
+- Added IDA Pro integration for opening executables and IDA databases, browsing pseudocode, assembly, imports, exports, strings, and cross-references, and performing database-aware actions such as renaming, commenting, type editing, function creation, saving, and persistent Python execution.
+- Added shared, project-scoped IDA database access with broker-managed host processes, configurable concurrency and idle cleanup via `ida.maxOpen` and `ida.idleCloseSec`, automatic autosaving, and universal Mach-O architecture selection with `:@<arch>` syntax and host-architecture detection. IDA features can be configured with `ida.enabled`, `ida.python`, and `ida.installDir`.
+- Added the `/slow [on|off|status]` command for opting into lower-priority service tiers on OpenAI, Google, and Anthropic subscription sessions, including automatic continuation when Anthropic session limits are reached.
+- Added the `providers.openaiLiveSteering` setting to control whether input can be delivered while a response is in progress.
+- Added session-wide approval for configuration changes through an `Always for this session` option in `cfg://` prompts, with clear timeout handling for unanswered prompts.
+- Added the `cfg://` protocol and a configuration registry for reading, modifying, unsetting, and reactively managing layered agent settings with approval and precedence feedback.
+- Added paged reading for large files, with metadata that allows clients to recover and continue displaying results.
+- Added per-agent compaction thresholds for task and evaluation subagents, configurable as percentages or fixed token limits without changing the main session threshold.
+- Added trusted additional context for extension and hook tool results, including `ctx.addAdditionalContext()`, allowing instructions to reach the model without altering displayed tool results.
+- Added dictation support to `/btw` follow-up input.
+- Added support for multiple simultaneous browser instances, including concurrent Chrome and Edge connections.
+- Added detailed benchmark phases for measuring single-user throughput, parallel scaling, and prefill performance, with automatic prefill sizing based on model context limits.
+- Added opt-in CUDA support to the Nix package for tiny-model inference through ONNX Runtime.
+- Added reliable RPC prompt lifecycle reporting with `prompt_result`, structured provider errors, session-settled state, prompt identifiers, event filtering, and `--no-ui` support for non-interactive hosts.
+- Added RPC session management through `open_session`, plus corresponding TypeScript and Python client APIs including `openSession`, `setEventFilter`, `onPromptResult`, `onSessionSettled`, and `waitForSettled`.
+- Added `attachment://` and `conflict://` resource URL handlers.
+- Added a per-server MCP `instructions: false` option to keep a server's guidance out of the system prompt while retaining its tools.
+
+### Changed
+
+- Improved recovery from output-length and context-window limits so truncated but actionable turns can be retained and retries are handled more accurately.
+- Shortened the default system prompt by approximately 150 tokens while preserving its guidance.
+- Improved Anthropic fallback handling so credit tokens and signed thinking context are preserved across same-provider fallbacks.
+- Improved filesystem safety and path consistency across virtual URL protocols, including symlink and containment validation and correct Windows long-path reporting.
+- Improved IDA database resource management with project sharing, bounded concurrency, idle cleanup, autosave, and clearer database status in listings.
+- Improved runtime configuration behavior with type-safe layered settings, live updates, and safe sequential saves.
+- Improved authentication and credential management to support live broker and credential-store changes.
+
+### Fixed
+
+- Fixed concurrent project access by enforcing file locking across processes.
+- Fixed Windows file reads with line selectors such as `:1-40`.
+- Fixed `omp update` and startup update checks to honor configured npm registries, including scoped registries and authentication tokens.
+- Fixed invalid auto-QA grievance reports blocking the rest of the upload queue; rejected reports are now surfaced with the server error while other reports continue.
+- Fixed advisor reviews making unnecessary follow-up requests, losing context after pruning, using the wrong thinking effort, or sending excessively large edit diffs.
+- Fixed `/login` crashes in source-link and development installs after extension loading.
+- Fixed retry fallback loops that could continue indefinitely when the fallback resolved to the same effective request.
+- Fixed setup wizard detection for Gemini web search when Antigravity OAuth is active.
+- Fixed headless print mode failing to complete an advisor review when a configured fallback reviewer was available.
+- Fixed embedded shell startup when the inherited working directory had been deleted.
+- Fixed Codex usage displays showing stale subscription plans and corrected usage views that combined separate quota limits.
+- Fixed explicit model and provider selections bypassing `disabledProviders`; disabled providers are now refused and skipped during fallback.
+- Fixed memory storage errors so failed items and underlying storage failures are identified.
+- Fixed malformed user-level `mcp.json` files preventing valid MCP sources from loading.
+- Fixed Anthropic server-side fallback requests using invalid model names.
+- Fixed large-output model requests failing near the context limit by adjusting the output allowance to the remaining context.
+- Fixed tool references in system prompts for tools exposed only through `xd://` devices.
+- Fixed dictation remaining active after a recording restart during transcription.
+- Fixed automatic account sign-outs going unannounced; sessions now report the affected account and login action through interactive, print, JSON, and RPC output.
+- Fixed duplicate MCP tool listings in the system prompt.
+- Fixed supervised service exits being missed or repeatedly replayed instead of being delivered to the session that started the service.
+- Fixed memory backend failures to identify the affected item and underlying storage error.
+- Fixed `write xd://<tool>` validation behavior so devices can return precise schema-mismatch responses.
 
 ## [18.3.0] - 2026-09-24
 

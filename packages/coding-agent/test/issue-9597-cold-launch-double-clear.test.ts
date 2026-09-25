@@ -11,6 +11,19 @@ import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 import { assistantMsg, createTestSession, userMsg } from "./utilities";
 
+import {
+	cfgAutocompleteMaxVisible,
+	cfgComposerShape,
+	cfgShowHardwareCursor,
+	cfgSpellingAutocomplete,
+	cfgSpellingAutocorrect,
+	cfgSpellingTypoDetection,
+	cfgStartupQuiet,
+	cfgTuiImeSafeCursor,
+	cfgTuiMaxInlineImages,
+	cfgTuiResizeScrollback,
+} from "@oh-my-pi/pi-coding-agent/modes/settings";
+
 // Every destructive reset emits one erase-scrollback (ED3). Count that
 // operation without coupling this regression to the ED2/ED3 ordering.
 const ERASE_SCROLLBACK = "\x1b[3J";
@@ -44,16 +57,16 @@ describe("issue #9597 — cold-launch welcome duplication", () => {
 		await initTheme();
 		settings = await Settings.init({ inMemory: true });
 		config = {
-			quiet: settings.get("startup.quiet"),
-			composerShape: settings.get("composer.shape") ?? "box",
-			showHardwareCursor: settings.get("showHardwareCursor"),
-			maxInlineImages: settings.get("tui.maxInlineImages"),
-			resizeScrollback: settings.get("tui.resizeScrollback"),
-			imeSafeCursor: settings.get("tui.imeSafeCursor"),
-			autocompleteMaxVisible: settings.get("autocompleteMaxVisible"),
-			spellingTypoDetection: settings.get("spelling.typoDetection"),
-			spellingAutocomplete: settings.get("spelling.autocomplete"),
-			spellingAutocorrect: settings.get("spelling.autocorrect"),
+			quiet: cfgStartupQuiet.get(settings),
+			composerShape: cfgComposerShape.get(settings) ?? "box",
+			showHardwareCursor: cfgShowHardwareCursor.get(settings),
+			maxInlineImages: cfgTuiMaxInlineImages.get(settings),
+			resizeScrollback: cfgTuiResizeScrollback.get(settings),
+			imeSafeCursor: cfgTuiImeSafeCursor.get(settings),
+			autocompleteMaxVisible: cfgAutocompleteMaxVisible.get(settings),
+			spellingTypoDetection: cfgSpellingTypoDetection.get(settings),
+			spellingAutocomplete: cfgSpellingAutocomplete.get(settings),
+			spellingAutocorrect: cfgSpellingAutocorrect.get(settings),
 		};
 	});
 

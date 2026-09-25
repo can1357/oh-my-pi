@@ -36,6 +36,8 @@ import {
 	type SearchResultDetails,
 } from "./types";
 
+import { cfgProvidersAntigravityEndpoint, cfgProvidersWebSearchTimeoutSeconds } from "../../session/settings";
+
 /** Web search tool parameters schema */
 export const webSearchSchema = type({
 	query: "string",
@@ -144,7 +146,9 @@ async function executeSearch(
 	const candidates = params.model
 		? (() => {
 				const resolved = resolveModelRoleValue(params.model, pool, { settings });
-				return resolved.model ? [{ model: resolved.model, explicit: true }] : [];
+				return resolved.model
+					? [{ model: resolved.model, explicit: true, thinkingLevel: resolved.thinkingLevel }]
+					: [];
 			})()
 		: resolveRoleChain("web", settings, pool);
 
@@ -153,14 +157,14 @@ async function executeSearch(
 	// Invariant across candidates; resolve once before walking the role chain.
 	let antigravityEndpointMode: "auto" | "production" | "sandbox" | undefined;
 	try {
-		antigravityEndpointMode = settings.get("providers.antigravityEndpoint");
+		antigravityEndpointMode = cfgProvidersAntigravityEndpoint.get(settings);
 	} catch {
 		antigravityEndpointMode = undefined;
 	}
 
 	let timeoutMs = DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS * 1_000;
 	try {
-		const configuredSeconds = settings.get("providers.webSearchTimeoutSeconds");
+		const configuredSeconds = cfgProvidersWebSearchTimeoutSeconds.get(settings);
 		if (Number.isFinite(configuredSeconds) && configuredSeconds > 0) {
 			timeoutMs = Math.ceil(Math.min(configuredSeconds, MAX_WEB_SEARCH_TIMEOUT_SECONDS) * 1_000);
 		}
@@ -211,6 +215,7 @@ async function executeSearch(
 				timeoutMs,
 				authStorage,
 				model: candidate.model,
+				thinkingLevel: candidate.thinkingLevel,
 				modelRegistry,
 				explicit: candidate.explicit,
 				sessionId,
