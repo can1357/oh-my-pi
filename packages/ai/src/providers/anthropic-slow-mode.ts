@@ -8,6 +8,10 @@
  * capacity right now" with a 429 `slot_busy` or a 529 overload that the client
  * retries after the server-stated interval.
  *
+ * Before the slow lane, the server may grant a small wrap-up allowance (drawn
+ * from the weekly limit) past the session limit: 2xx responses then carry
+ * `anthropic-ratelimit-unified-grace-{5h,7d}-utilization` above zero.
+ *
  * This module owns the wire contract only (header names, parsing). The mode's
  * state machine lives with the caller, which plugs into the Anthropic provider
  * through {@link AnthropicSlowModeHooks}.
@@ -55,6 +59,14 @@ export interface AnthropicSlowModeSignal {
 	unifiedLimitClaim: boolean;
 	/** True when extra usage (overage) is serving this account. */
 	overageInUse: boolean;
+	/**
+	 * Wrap-up allowance usage (0..1) past the 5-hour and weekly limits; any
+	 * value above zero means the request ran on the allowance. Present only on
+	 * responses carrying `anthropic-ratelimit-unified-status`.
+	 */
+	graceUtilization?: { fiveHour: number; sevenDay: number };
+	/** True when `anthropic-ratelimit-unified-overage-status` lets extra usage serve requests. */
+	overageAllowed?: boolean;
 }
 
 /** One pre-content failure the provider hands to {@link AnthropicSlowModeHooks.onFailure}. */
@@ -125,6 +137,12 @@ function readNonNegative(headers: HeadersLike, name: string): number | undefined
 	return Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
+/** Utilization header clamped to 0..1; absent or malformed reads as 0. */
+function readUtilization(headers: HeadersLike, name: string): number {
+	const value = readNonNegative(headers, name);
+	return value === undefined ? 0 : Math.min(1, value);
+}
+
 function parseStatus(raw: string | undefined): AnthropicSlowStatus | undefined {
 	if (raw === undefined) return undefined;
 	switch (raw.trim()) {
@@ -168,6 +186,15 @@ export function parseAnthropicSlowModeHeaders(headers: HeadersLike): AnthropicSl
 		readHeader(headers, "anthropic-ratelimit-unified-overage-status"),
 	);
 	const overageInUse = readHeader(headers, "anthropic-ratelimit-unified-overage-in-use")?.trim() === "true";
+	const overageStatus = readHeader(headers, "anthropic-ratelimit-unified-overage-status")?.trim();
+	const overageAllowed = overageStatus === "allowed" || overageStatus === "allowed_warning";
+	const graceUtilization =
+		readHeader(headers, "anthropic-ratelimit-unified-status") === undefined
+			? undefined
+			: {
+					fiveHour: readUtilization(headers, "anthropic-ratelimit-unified-grace-5h-utilization"),
+					sevenDay: readUtilization(headers, "anthropic-ratelimit-unified-grace-7d-utilization"),
+				};
 	const signal: AnthropicSlowModeSignal = {
 		...(offer !== undefined ? { offer } : {}),
 		...(status !== undefined ? { status } : {}),
@@ -180,6 +207,8 @@ export function parseAnthropicSlowModeHeaders(headers: HeadersLike): AnthropicSl
 		...(weeklyResetAtSec !== undefined ? { weeklyResetAtSec } : {}),
 		unifiedLimitClaim,
 		overageInUse,
+		...(overageAllowed ? { overageAllowed } : {}),
+		...(graceUtilization !== undefined ? { graceUtilization } : {}),
 	};
 	const hasSlowFacts =
 		offer !== undefined ||
@@ -188,7 +217,15 @@ export function parseAnthropicSlowModeHeaders(headers: HeadersLike): AnthropicSl
 		maxWaitSec !== undefined ||
 		budgetUtilization !== undefined ||
 		budgetResetAtSec !== undefined;
-	if (!hasSlowFacts && !unifiedLimitClaim && fiveHourResetAtSec === undefined && unifiedResetAtSec === undefined) {
+	// A unified-status response always carries wrap-up facts, even when both
+	// grace readings are zero: that is how the controller sees the window close.
+	if (
+		!hasSlowFacts &&
+		graceUtilization === undefined &&
+		!unifiedLimitClaim &&
+		fiveHourResetAtSec === undefined &&
+		unifiedResetAtSec === undefined
+	) {
 		return undefined;
 	}
 	return signal;

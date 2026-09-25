@@ -854,8 +854,9 @@ export const cfgProvidersAnthropicServerSideFallback = register({
 /**
  * Anthropic subscription slow mode (`off` | `auto`). Deliberately has no
  * `/settings` UI: `/slow on|off` on an Anthropic model is the only switch.
- * `auto` switches to lower-priority service automatically when a Claude
- * subscription hits its 5-hour limit and Anthropic offers it.
+ * `auto` switches to low priority automatically when a Claude subscription
+ * hits its 5-hour limit and Anthropic offers it. Wrap-up allowance tracking
+ * runs either way; this only gates the low-priority lane.
  */
 export const cfgProvidersAnthropicSlowMode = register({
 	id: "providers.anthropic.slowMode",
