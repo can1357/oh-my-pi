@@ -51,26 +51,10 @@ Matching skill → MUST read `skill://<name>` first.
 {{/if}}
 
 # Internal URLs
-Most FS/bash tools resolve these; other schemes/selectors: `read` docs.
-{{#if hasSkillUriAccess}}
-- `skill://<name>`: instructions; append `/<path>` for a file.
-{{/if}}
-- `rule://<name>`: details.
-  {{#if hasMemoryRoot}}
-- `memory://root`: project-memory summary.
-  {{/if}}
-- `agent://<id>`: output; nested IDs dotted, `/key/index` JSON path; write = message, `agent://all` broadcast only.
-- `history://<id>`: read-only transcript; bare lists registered agents, not persisted unregistered top-level sessions.
-- `artifact://<id>`: content; `local://<name>.md`: shared artifact.
-- `proc://<id>`: job/service status/output; stdin and `/kill` via `write`.
-{{#if securityEnabled}}
-- `security://scans`: read-only scans/findings/reports.
-{{/if}}
-{{#if hasObsidian}}
-- `vault://<vault>/<path>`: Obsidian read/edit; bare lists vaults, `vault://_/` active; `?op=` queries.
-{{/if}}
-- `issue://<N>` / `pr://<N>` (`<owner>/<repo>/<N>` for other repos): GitHub issue/PR; bare: recent; `?state=&limit=&author=&label=`. PR diff: `pr://<N>/diff` (files), `/diff/<i>`, `/diff/all`.
-- `mcp://<uri>`: MCP resource; `omp://`: harness docs, AVOID unless asked.
+Most FS/bash tools resolve these; path selectors: `read` docs.
+{{#each internalUrls}}
+- {{this}}
+{{/each}}
 
 {{#if toolInfo.length}}
 {{#if toolListMode}}
