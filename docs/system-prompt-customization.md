@@ -75,11 +75,25 @@ user-supplied text, the text is rendered under its own `## User Instructions` he
 so it cannot read as a trailing paragraph of a server-owned section. On its own — no
 generated block — the append text is emitted unchanged, without a heading.
 
+## Inputs by session type
+
+Which automatic inputs reach each kind of session. An input applies only when it exists or is enabled, and Personality means the default template's personality block. Advisors build a dedicated prompt that also carries memory instructions and the shared and per-advisor instructions; `@path` imports in `WATCHDOG.md` are expanded.
+
+| Session type     | `AGENTS.md`   | `CLAUDE.md` / `GEMINI.md` | `APPEND_SYSTEM.md` / `--append-system-prompt` | MCP tools | MCP server instructions | `WATCHDOG.md` | Personality |
+| ---------------- | ------------- | ------------------------- | --------------------------------------------- | --------- | ----------------------- | ------------- | ----------- |
+| Main session     | Discovered    | Discovered                | Yes                                           | Yes       | Yes                     | No            | Configured  |
+| Task subagent    | Not inherited | Inherited                 | No                                            | Inherited | Inherited               | No            | `none`      |
+| Advisor/watchdog | Inherited     | Inherited                 | No                                            | No        | No                      | Yes           | None        |
+
+1. Task spawning drops inherited context files whose basename is `agents.md` (case-insensitive). Text pulled in through `@` imports is not filtered, and additional workspace roots are discovered separately.
+2. Context discovery selects one user file and one project file per directory depth, and higher-priority providers win. A standalone `CLAUDE.md` is supported; `GEMINI.md` is read from the user and project `.gemini` directories.
+3. A task agent's `tools:` list does not remove MCP tools or server instructions: the tools stay available top-level or under `xd://`. Plan-mode tasks and children of restricted sessions run with `restrictToolNames`, which drops both.
+
 ## Handlebars template route
 
 `SYSTEM_TEMPLATE.md` and `--system-prompt-template <path>` select raw Handlebars source from a file. Programmatic callers can instead pass raw Handlebars source through `CreateAgentSessionOptions.systemPromptTemplate` or `buildSystemPrompt({ systemPromptTemplate })`; those programmatic options are the template itself, not a path. Each route is rendered instead of the bundled `system-prompt.md` with the same live data and registered helpers as that bundled template.
 
-Generated blocks that are outside block 0 remain normal: the project/environment footer (including generated context and append material), computer safety, active nested-repository context, and provider tool schemas are retained. Data-driven sections that normally live inside the bundled template are not appended by magic. `skills`, `rules`, `alwaysApplyRules`, `toolInventory`, `xdevTools`, and `xdevDocs` are available to the template, but each is emitted only if the template references it. In particular, omitting `{{toolInventory}}` or `{{xdevDocs}}` omits that in-block catalog. Mount-notice dedupe follows the rendered output: a template whose block 0 contains an `xd://` reference claims the catalog, one that omits it does not.
+Generated blocks that are outside block 0 remain normal: the project/environment footer (including generated context and append material), computer safety, active nested-repository context, and provider tool schemas are retained. Data-driven sections that normally live inside the bundled template are not appended by magic. `skills`, `rules`, `alwaysApplyRules`, `toolInventory`, `internalUrls` (one rendered line per internal URL scheme available in the session), `xdevTools`, and `xdevDocs` are available to the template, but each is emitted only if the template references it. In particular, omitting `{{toolInventory}}` or `{{xdevDocs}}` omits that in-block catalog. Mount-notice dedupe follows the rendered output: a template whose block 0 contains an `xd://` reference claims the catalog, one that omits it does not.
 
 The generated project/footer route already renders `contextFiles` and `appendPrompt` once. A template SHOULD NOT render those fields in block 0 unless it intentionally wants duplicate copies.
 
@@ -100,7 +114,7 @@ Working in
 {{cwd}}
 on
 {{date}}.
-{{#if hasMemoryRoot}}Memory enabled.{{/if}}
+{{#if internalUrls.length}}Internal URLs available.{{/if}}
 ```
 
 those characters reach the model literally. Internal values such as `cwd`, `skills`, `rules`, and `toolRefs` remain private implementation details for the plain route. The calendar date is deliberately not exposed as a template value anymore — it rides the per-request first-turn reminder instead (see above).

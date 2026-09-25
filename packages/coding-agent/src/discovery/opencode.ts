@@ -42,6 +42,8 @@ import {
 	scanSkillsFromDir,
 } from "./helpers";
 
+import { cfgCommandsEnableOpencodeProject, cfgCommandsEnableOpencodeUser } from "../extensibility/settings";
+
 const PROVIDER_ID = "opencode";
 const DISPLAY_NAME = "OpenCode";
 const PRIORITY = 55;
@@ -408,8 +410,8 @@ async function loadExtensionModules(ctx: LoadContext): Promise<LoadResult<Extens
 function readOpencodeCommandToggles(): { enableUser: boolean; enableProject: boolean } {
 	try {
 		return {
-			enableUser: settings.get("commands.enableOpencodeUser") === true,
-			enableProject: settings.get("commands.enableOpencodeProject") ?? true,
+			enableUser: cfgCommandsEnableOpencodeUser.get(settings) === true,
+			enableProject: cfgCommandsEnableOpencodeProject.get(settings),
 		};
 	} catch {
 		return { enableUser: false, enableProject: true };

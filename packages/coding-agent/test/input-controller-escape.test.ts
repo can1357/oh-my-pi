@@ -8,6 +8,8 @@ import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages
 import { vocalizer } from "@oh-my-pi/pi-coding-agent/tts/vocalizer";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 
+import { cfgDoubleEscapeAction } from "@oh-my-pi/pi-coding-agent/modes/settings";
+
 type Spy = Mock<(...args: unknown[]) => unknown>;
 type StartPendingSubmissionSpy = Mock<InteractiveModeContext["startPendingSubmission"]>;
 type FakeEditor = {
@@ -697,7 +699,7 @@ describe("InputController escape behavior", () => {
 	});
 
 	it("ignores double-Esc when the action is disabled", () => {
-		Settings.instance.override("doubleEscapeAction", "none");
+		cfgDoubleEscapeAction.override(Settings.instance, "none");
 		const { ctx, editor, spies } = createContext();
 		const controller = new InputController(ctx);
 
@@ -711,7 +713,7 @@ describe("InputController escape behavior", () => {
 	});
 
 	it("opens the session tree on double-Esc when the action is tree", () => {
-		Settings.instance.override("doubleEscapeAction", "tree");
+		cfgDoubleEscapeAction.override(Settings.instance, "tree");
 		const { ctx, editor, spies } = createContext();
 		const controller = new InputController(ctx);
 
