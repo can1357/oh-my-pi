@@ -133,6 +133,9 @@ import { ModelsConfigFile, type ProviderValidationModel, validateProviderConfigu
 import type { ModelOverride, ModelsConfig, ProviderAuthMode } from "./models-config-schema";
 import { type Settings, settings } from "./settings";
 
+import { cfgDisabledProviders } from "./model-settings";
+import { cfgExtendedContext } from "../session/context-settings";
+
 // DeviceCheck attestation (`x-oai-attestation`) for ChatGPT-OAuth Codex
 // requests; the pi-ai provider resolves it just-in-time per request.
 setCodexAttestationProvider(generateCodexAttestation);
@@ -197,7 +200,7 @@ type ModifyModelsHook = (models: Model<Api>[], credentials: OAuthCredentials) =>
 
 function getDisabledProviderIdsFromSettings(settingsInstance?: Settings): Set<string> {
 	try {
-		return new Set((settingsInstance ?? settings).get("disabledProviders"));
+		return new Set(cfgDisabledProviders.get(settingsInstance ?? settings));
 	} catch {
 		return new Set();
 	}
@@ -212,7 +215,7 @@ function getDisabledProviderIdsFromSettings(settingsInstance?: Settings): Set<st
  */
 function isExtendedContextEnabledFromSettings(settingsInstance?: Settings): boolean {
 	try {
-		return (settingsInstance ?? settings).get("extendedContext");
+		return cfgExtendedContext.get(settingsInstance ?? settings);
 	} catch {
 		return false;
 	}

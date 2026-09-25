@@ -689,7 +689,7 @@ Unsupported/no-op in RPC implementation:
 
 ### Print/headless/subagent paths
 
-When no UI context is supplied to runner init, `ctx.hasUI` is `false` and methods are no-op/default-returning.
+When no UI context is supplied to runner init, `ctx.hasUI` is `false` and methods are no-op/default-returning. `--mode rpc --no-ui` takes this path too, for RPC hosts that cannot answer dialogs.
 
 ### ACP mode
 

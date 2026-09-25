@@ -1,5 +1,5 @@
 import type { Component } from "../tui";
-import { createCachedComponent, Ellipsis, renderStatusLine, renderTreeList, truncateToWidth } from "../render";
+import { Ellipsis, renderStatusLine, renderTreeList, truncateToWidth } from "../render";
 import {
 	cappedHeadLines,
 	formatBadge,
@@ -8,7 +8,6 @@ import {
 	formatStatusIcon,
 	PREVIEW_LIMITS,
 	TRUNCATE_LENGTHS,
-	replaceTabs,
 	type ToolUIColor,
 } from "../render/render-utils";
 import type { Theme } from "../theme/theme";
@@ -17,6 +16,7 @@ import type { AgentActivitySnapshot, CoordinationDetails, JobSnapshot } from "./
 import type { IrcDeliveryReceipt } from "./irc";
 import type { DaemonSnapshot } from "./daemon";
 import { styleTerminalRow } from "./terminal-output";
+import { card, type CardToolResult as ToolResult, firstText, safe } from "./result-card";
 
 export interface ProcReadDetails {
 	jobs?: JobSnapshot[];
@@ -34,30 +34,6 @@ export type ProcWriteDetails =
 
 /** Process operation selected by a write URL, independent of its content. */
 export type ProcWriteAction = "stdin" | "mode" | "kill";
-
-interface ToolResult {
-	content: Array<{ type: string; text?: string }>;
-	isError?: boolean;
-}
-
-function firstText(result: ToolResult): string {
-	return result.content.find(item => item.type === "text")?.text ?? "";
-}
-
-function safe(value: string): string {
-	return replaceTabs(value).replace(/\r/g, "");
-}
-
-function card(lines: (width: number, expanded: boolean) => string[], options: RenderResultOptions): Component {
-	return createCachedComponent(
-		() => Boolean(options.expanded),
-		(width, expanded) =>
-			lines(width, expanded)
-				.flatMap(line => line.split("\n"))
-				.map(line => truncateToWidth(safe(line), width, Ellipsis.Unicode)),
-		{ paddingX: 1 },
-	);
-}
 
 function preview(body: string, expanded: boolean, theme: Theme, tone: "dim" | "toolOutput" = "dim"): string[] {
 	if (!body.trim()) return [];

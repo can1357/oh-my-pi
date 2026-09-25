@@ -22,20 +22,41 @@ export function matchesAuthAccountSelector(selector: AuthAccountSelector, identi
 /** Validated per-account routing policies (priority/reserve) plus the global reserve fallback. */
 export class AccountPolicies {
 	#accountPolicies: AuthAccountPolicies;
-	readonly defaultReservePct: number;
+	#defaultReservePct: number;
 
 	constructor(policies: AuthAccountPolicies, defaultReservePct: number | undefined) {
+		AccountPolicies.#validateAccountPolicyConfiguration(policies);
 		this.#accountPolicies = policies;
-		this.defaultReservePct =
+		this.#defaultReservePct =
 			typeof defaultReservePct === "number" && Number.isFinite(defaultReservePct)
 				? Math.max(0, Math.min(100, defaultReservePct))
 				: DEFAULT_USAGE_RESERVE_PCT;
-		this.#validateAccountPolicyConfiguration();
 	}
 
-	#validateAccountPolicyConfiguration(): void {
-		for (let index = 0; index < this.#accountPolicies.length; index += 1) {
-			const policy = this.#accountPolicies[index]!;
+	/** Global usage reserve (0–100) for accounts without a per-account `reservePct`. */
+	get defaultReservePct(): number {
+		return this.#defaultReservePct;
+	}
+
+	/**
+	 * Replace the policy set and global reserve in place (live settings change).
+	 * Validates the configuration and every provider in `storedCredentials` before
+	 * committing; on error the previous policies stay active.
+	 */
+	replace(
+		policies: AuthAccountPolicies,
+		defaultReservePct: number | undefined,
+		storedCredentials: ReadonlyMap<string, readonly AuthCredential[]> = new Map(),
+	): void {
+		const next = new AccountPolicies(policies, defaultReservePct);
+		for (const [provider, credentials] of storedCredentials) next.validateFor(provider, credentials);
+		this.#accountPolicies = next.#accountPolicies;
+		this.#defaultReservePct = next.#defaultReservePct;
+	}
+
+	static #validateAccountPolicyConfiguration(accountPolicies: AuthAccountPolicies): void {
+		for (let index = 0; index < accountPolicies.length; index += 1) {
+			const policy = accountPolicies[index]!;
 			const path = `auth.accountPolicies[${index}]`;
 			if (
 				typeof policy.provider !== "string" ||

@@ -480,6 +480,13 @@ export interface OpenAICompat {
 	 * sent as the top-level `reasoning.effort`.
 	 */
 	supportsConfigurationUpdate?: boolean;
+	/**
+	 * Whether the Responses WebSocket accepts `response.steer`, which queues user
+	 * input into the in-flight response (GPT-6 family). Default: rule-detected.
+	 * Set `false` for proxies that reject the event; steering then waits for the
+	 * next request boundary.
+	 */
+	supportsSteering?: boolean;
 	/** Whether streamed reasoning deltas for the same field may repeat the full cumulative text snapshot. Default: false. */
 	reasoningDeltasMayBeCumulative?: boolean;
 	/** Strip leaked DeepSeek chat-template special tokens from visible content deltas. Default: auto-detected. */
@@ -876,6 +883,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "strictResponsesPairing"
 			| "supportsImageDetailOriginal"
 			| "supportsConfigurationUpdate"
+			| "supportsSteering"
 			| "stripImageInput"
 			| "thinkingLoopGuard"
 			| "whenThinking"
@@ -915,6 +923,11 @@ export interface ResolvedOpenAIResponsesCompat extends ResolvedOpenAISharedCompa
 	 * the item type with 400.
 	 */
 	supportsConfigurationUpdate: boolean;
+	/**
+	 * Whether the WebSocket transport may send `response.steer` to deliver user
+	 * input into the in-flight response. Rule-owned: GPT-6 family.
+	 */
+	supportsSteering: boolean;
 	/** Inject the `# Juice: 0 !important` developer item when reasoning is forced off (gpt-5.6+). */
 	requiresReasoningOffJuiceInstruction: boolean;
 	/**

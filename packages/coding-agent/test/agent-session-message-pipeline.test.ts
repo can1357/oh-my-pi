@@ -1037,9 +1037,8 @@ describe("AgentSession message pipeline", () => {
 				},
 			}),
 			sessionManager,
-			settings: Settings.isolated({ "compaction.enabled": false }),
+			settings: Settings.isolated({ "compaction.enabled": false, "providers.openaiWebsockets": "on" }),
 			modelRegistry,
-			preferWebsockets: true,
 		});
 		sessions.push(session);
 		const cacheSessionId = session.sessionId;
