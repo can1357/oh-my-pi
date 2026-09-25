@@ -16,6 +16,8 @@ import { isUsageLimitOutcome } from "../error/rate-limit";
 import type { Api, FetchImpl, Model, Usage } from "../types";
 import type { ClientUsageIdentity } from "../usage";
 import { extractProviderRetryHint } from "../utils/retry-after";
+import type { RouteDecisionTraceLog } from "./decision-trace";
+import type { RouteDefinition, RouteRegistry } from "./route-graph";
 import type { AuthGatewayServerOptions } from "./types";
 
 export type ModelResolver = (modelId: string) => Model<Api> | undefined;
@@ -33,6 +35,19 @@ export interface AuthGatewayBootOptions extends AuthGatewayServerOptions {
 	listModels?: () => Iterable<Model<Api>>;
 	/** Upstream transport for every provider call; defaults to global `fetch`. Test seam. */
 	fetch?: FetchImpl;
+	/**
+	 * Compiled-route registry. Constructed by {@link startAuthGateway} when omitted.
+	 * When supplied, it remains the registry object; {@link routes} are still registered onto it.
+	 */
+	routeRegistry?: RouteRegistry;
+	/**
+	 * Optional virtual route definitions registered at boot.
+	 * Applied onto {@link routeRegistry} even when that object is caller-supplied.
+	 * An empty list is a no-op.
+	 */
+	routes?: readonly RouteDefinition[];
+	/** Bounded decision-trace ring buffer; constructed by {@link startAuthGateway} when omitted. */
+	decisionTraces?: RouteDecisionTraceLog;
 }
 
 /**
@@ -103,6 +118,8 @@ export async function resolveGatewayApiKey(
 		status: 401,
 		type: "authentication_error",
 		message: `No credential available for provider ${model.provider}`,
+		owner: "credential",
+		disposition: "credential_permanent",
 	};
 }
 
@@ -138,6 +155,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 	signal: AbortSignal,
 	format: string,
 	peer: string,
+	requestId?: string,
 ): Promise<string | undefined> {
 	const message = error instanceof Error ? error.message : String(error);
 	const status = extractHttpStatusFromError(error);
@@ -161,7 +179,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 			error: message,
 		});
 		if (!switched) return undefined;
-		return storage.keys.get(provider, sessionId, modelKeyOptions(model, signal));
+		return storage.keys.get(provider, sessionId, modelKeyOptions(model, signal, requestId));
 	}
 	await storage.limits.invalidateMatching(provider, oldKey, { sessionId, signal });
 	logger.debug("auth-gateway retrying provider request after credential invalidation", {
@@ -170,12 +188,17 @@ async function refreshGatewayApiKeyAfterAuthError(
 		peer,
 		error: message,
 	});
-	return storage.keys.get(provider, sessionId, modelKeyOptions(model, signal));
+	return storage.keys.get(provider, sessionId, modelKeyOptions(model, signal, requestId));
 }
 
 /** Model-scoped key options: usage ranking by model id, routing to accounts discovery saw serve it. */
-function modelKeyOptions(model: Model<Api>, signal: AbortSignal): AuthApiKeyOptions {
-	return { modelId: model.id, accountIds: model.accountAccess && Object.keys(model.accountAccess), signal };
+function modelKeyOptions(model: Model<Api>, signal: AbortSignal, requestId?: string): AuthApiKeyOptions {
+	return {
+		modelId: model.id,
+		accountIds: model.accountAccess && Object.keys(model.accountAccess),
+		signal,
+		requestId,
+	};
 }
 
 /**
@@ -202,6 +225,7 @@ export function buildGatewayApiKeyResolver(
 	format: string,
 	peer: string,
 	onResolvedKey?: (apiKey: string) => void,
+	requestId?: string,
 ): ApiKeyResolver {
 	let lastKey = initialKey;
 	return async ({ lastChance, error, signal }) => {
@@ -212,7 +236,7 @@ export function buildGatewayApiKeyResolver(
 		}
 		if (!lastChance) {
 			const refreshed = await storage.keys.get(model.provider, sessionId, {
-				...modelKeyOptions(model, sig),
+				...modelKeyOptions(model, sig, requestId),
 				forceRefresh: true,
 			});
 			lastKey = refreshed ?? lastKey;
@@ -229,6 +253,7 @@ export function buildGatewayApiKeyResolver(
 			sig,
 			format,
 			peer,
+			requestId,
 		);
 		lastKey = next ?? lastKey;
 		if (next) onResolvedKey?.(next);
