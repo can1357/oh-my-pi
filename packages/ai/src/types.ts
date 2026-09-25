@@ -524,7 +524,11 @@ export interface StreamOptions {
 	 * internal chain state (`statefulResponses` / lastResponseId) for this request.
 	 */
 	previousResponseId?: string;
-	/** Persist Responses for later previous_response_id continuation. */
+	/**
+	 * OpenAI Responses `store`: persist the response server-side so a later
+	 * `previous_response_id` continuation can resolve it. Platform chaining only
+	 * resolves stored responses.
+	 */
 	store?: boolean;
 	/** OpenAI `parallel_tool_calls`. */
 	parallelToolCalls?: boolean;
