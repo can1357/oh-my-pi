@@ -40,6 +40,8 @@ import type { OAuthCredentials } from "./registry/oauth/types";
 import type {
 	AuthAccountPolicies,
 	AuthApiKeyOptions,
+	AuthCredential,
+	AuthCredentialEntry,
 	AuthCredentialSnapshot,
 	AuthCredentialSnapshotEntry,
 	AuthStorageOptions,
