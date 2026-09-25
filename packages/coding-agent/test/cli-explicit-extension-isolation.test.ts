@@ -9,6 +9,7 @@ import { buildSessionOptions } from "@oh-my-pi/pi-coding-agent/main";
 import { loadSessionExtensions } from "@oh-my-pi/pi-coding-agent/sdk";
 import { discoverAgents, getAgent } from "@oh-my-pi/pi-coding-agent/task";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { cfgExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
@@ -91,7 +92,7 @@ test("file-form trusted extension contributes its package root to --agent discov
 	const effectiveRoots = options.extensionRoots?.() ?? {
 		explicit: options.additionalExtensionPaths ?? [],
 		mode: options.disableExtensionDiscovery ? ("explicit-only" as const) : ("merge" as const),
-		configured: settings.get("extensions") ?? [],
+		configured: cfgExtensions.get(settings),
 		configuredLevel: settings.extensionsSourceLevel(),
 	};
 	const discovery = await discoverAgents(tempDir.path(), undefined, effectiveRoots);

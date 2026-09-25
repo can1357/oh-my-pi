@@ -20,18 +20,16 @@ import {
 } from "@oh-my-pi/pi-utils/ar";
 import { getEditStore } from "../edit/store";
 import { formatHashlineHeader } from "@oh-my-pi/pi-tui/tools/hashline-format";
-import type { LocalProtocolOptions } from "../internal-urls/local-protocol";
-import { isOmpDocsRoot, ompDocsScopeEntries } from "../internal-urls/omp-scope";
+import { sessionResolveContext } from "../internal-urls/context";
+import { extractUriScheme } from "../internal-urls/parse";
 import { InternalUrlRouter } from "../internal-urls/router";
-import { tryResolveInternalUrlSync } from "../internal-urls/hyperlink-targets";
-import type { InternalResource, ResolveContext } from "../internal-urls/types";
+import type { ResolveContext } from "../internal-urls/types";
 import grepDescription from "../prompts/tools/grep.md" with { type: "text" };
 import { DEFAULT_MAX_COLUMN, truncateHead, truncateLineBytes } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { sessionDelegationBias } from "../task/prompt-policy";
 import { isScoutSpawnable } from "../task/spawn-policy";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import type { ToolSession } from ".";
-import { getExperimentalContextSession } from "./context-notes";
 import { materializeReadUrlToFile, parseReadUrlTarget } from "./fetch";
 import { createFileRecorder, formatResultPath } from "./file-recorder";
 import { formatGroupedFiles } from "@oh-my-pi/pi-tui/tools/grouped-file-output";
@@ -41,7 +39,6 @@ import {
 	expandDelimitedPathEntries,
 	hasGlobPathChars,
 	isLineInRanges,
-	pathTargetsSsh,
 	probeLiteralPathExists,
 	type ResolvedSearchTarget,
 	resolveReadPath,
@@ -55,6 +52,9 @@ import { isRawSelector } from "./read-selector";
 import { formatCodeFrameLine } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
+
+import { cfgGrepContextAfter, cfgGrepContextBefore } from "./settings";
+import { cfgTaskDisabledAgents } from "../task/settings";
 
 const searchSchema = type({
 	pattern: type("string"),
@@ -133,9 +133,9 @@ function isReadSelectorGrammar(sel: string): boolean {
 async function parsePathSpecs(rawEntries: readonly string[], cwd: string): Promise<GrepPathSpec[]> {
 	const specs: GrepPathSpec[] = [];
 	for (const entry of rawEntries) {
-		// Internal URLs (`artifact://`, `skill://`, …) use the URL-aware splitter,
-		// which peels selector-shaped tails only for selector-capable schemes and
-		// leaves opaque ones (`mcp://`) intact. Unlike filesystem paths, their
+		// Internal URLs use the URL-aware splitter, which peels selector-shaped
+		// tails only for schemes declaring line selectors and leaves opaque
+		// server-defined URIs intact. Unlike filesystem paths, their
 		// verbatim/index display modes (`raw`, `conflicts`) carry no meaning for
 		// content search, so we accept them — searching the whole resource — and
 		// still honor any embedded line range as a match filter.
@@ -711,38 +711,35 @@ function mergeGrepResults(left: GrepResult, right: GrepResult, maxCount: number)
 	};
 }
 
-async function expandVirtualInternalResource(
+/**
+ * Searchable documents behind an internal URL with no local file: the
+ * handler's `enumerate` expansion when it has one (a virtual container such as
+ * a docs root), else the resolved resource content under the URL itself.
+ */
+async function resolveVirtualInternalResource(
 	rawPath: string,
-	resource: InternalResource,
 	context: ResolveContext,
 	ranges: readonly LineRange[] | undefined,
 ): Promise<VirtualSearchResource[]> {
-	if (isOmpDocsRoot(rawPath)) {
-		const entries = await ompDocsScopeEntries(context);
-		if (entries.length > 0) {
-			return entries.map(entry => ({ path: entry.url, content: entry.content, ranges }));
-		}
+	const internalRouter = InternalUrlRouter.instance();
+	const entries = await internalRouter.enumerate(rawPath, context);
+	if (entries) return entries.map(entry => ({ path: entry.url, content: entry.content, ranges }));
+	const resource = await internalRouter.resolve(rawPath, context);
+	// A directory listing with no local path (e.g. a remote dir) has no real
+	// contents to grep — searching its listing text would be misleading.
+	if (resource.isDirectory) {
+		throw new ToolError(
+			`grep cannot recurse the directory listing at ${rawPath}; grep a specific file under it (e.g. ${rawPath.replace(/\/+$/, "")}/<file>) or read ${rawPath} to list its entries`,
+		);
 	}
-
 	return [{ path: rawPath, content: resource.content, ranges }];
 }
 
 async function resolveInternalSearchInputs(opts: {
 	pathSpecs: readonly GrepPathSpec[];
 	resolvedPaths: string[];
-	cwd: string;
-	settings: unknown;
-	signal?: AbortSignal;
 	archiveDisplayMap: ReadonlyMap<string, string>;
-	localProtocolOptions?: LocalProtocolOptions;
-	skills?: ResolveContext["skills"];
-	rules?: ResolveContext["rules"];
-	sessionFile?: string;
-	experimentalContextManagement: boolean;
-	getSessionBranch: ResolveContext["getSessionBranch"];
-	sessionId?: string;
-	agentRegistry?: ResolveContext["agentRegistry"];
-	session?: ResolveContext["session"];
+	context: ResolveContext;
 }): Promise<InternalSearchInputResolution> {
 	const internalRouter = InternalUrlRouter.instance();
 	const paths = opts.resolvedPaths.slice();
@@ -751,64 +748,31 @@ async function resolveInternalSearchInputs(opts: {
 	const virtualInputIndexes = new Set<number>();
 	const immutableSourcePaths = new Set<string>();
 	let virtualScopePath: string | undefined;
-	const context: ResolveContext = {
-		cwd: opts.cwd,
-		settings: opts.settings,
-		signal: opts.signal,
-		sessionFile: opts.sessionFile,
-		sessionId: opts.sessionId,
-		agentRegistry: opts.agentRegistry,
-		session: opts.session,
-		localProtocolOptions: opts.localProtocolOptions,
-		skills: opts.skills,
-		rules: opts.rules,
-		experimentalContextManagement: opts.experimentalContextManagement,
-		getSessionBranch: opts.getSessionBranch,
-		skipDirectoryListing: true,
-		// Try path-only first so large artifacts (and any other handler that
-		// separates path from content) resolve without materializing bytes.
-		// Handlers that ignore the flag still return content, and virtual
-		// resources without a sourcePath fall through to a second resolve.
-		pathOnly: true,
-	};
 
 	for (let idx = 0; idx < paths.length; idx++) {
 		const rawPath = paths[idx];
 		if (!rawPath || opts.archiveDisplayMap.has(rawPath) || !internalRouter.canHandle(rawPath)) {
 			continue;
 		}
-		// `ssh://[::1]/path` carries `[`/`]` in the IPv6 authority — glob metacharacters
-		// — so check only the path portion for ssh:// (the SSH handler reads a single
-		// remote file; there is no glob expansion). A glob in the remote path still trips.
-		const globTarget = /^ssh:\/\//i.test(rawPath) ? rawPath.replace(/^ssh:\/\/[^/]*/i, "") : rawPath;
-		if (hasGlobPathChars(globTarget)) {
-			throw new ToolError(`Glob patterns are not supported for internal URLs: ${rawPath}`);
+		const spec = opts.pathSpecs[idx];
+		const ranges = spec?.ranges;
+		// URL globs stay for the scope resolver, which expands them over a
+		// locatable base or rejects them.
+		if (internalRouter.isGlob(rawPath)) {
+			if (ranges) throw new ToolError(`Line-range selector requires a single file, not a glob: ${spec?.original}`);
+			continue;
 		}
-		let resource = await internalRouter.resolve(rawPath, context);
-		// A directory listing with no backing local path (e.g. a remote ssh:// dir)
-		// has no real contents to grep — searching its listing text would be
-		// misleading. Local/skill/vault dir resources set `sourcePath` and skip this.
-		if (resource.isDirectory && !resource.sourcePath) {
-			throw new ToolError(
-				`grep cannot recurse the directory listing at ${rawPath}; grep a specific file under it (e.g. ${rawPath.replace(/\/+$/, "")}/<file>) or read ${rawPath} to list its entries`,
-			);
-		}
-		if (resource.sourcePath) {
-			paths[idx] = resource.sourcePath;
-			if (resource.immutable) {
-				immutableSourcePaths.add(path.resolve(resource.sourcePath));
+		const scheme = extractUriScheme(rawPath);
+		if (!scheme) continue;
+		const located = await internalRouter.locate(rawPath, opts.context, { directory: true });
+		if (located !== null) {
+			paths[idx] = located;
+			if (internalRouter.spec(scheme)?.immutable) {
+				immutableSourcePaths.add(path.resolve(located));
 			}
 			continue;
 		}
-
-		// No sourcePath: this handler needs its content materialized so the
-		// virtual expansion can search it. Re-resolve without pathOnly.
-		if (context.pathOnly) {
-			resource = await internalRouter.resolve(rawPath, { ...context, pathOnly: false });
-		}
-
-		const ranges = opts.pathSpecs[idx]?.ranges;
-		const expanded = await expandVirtualInternalResource(rawPath, resource, { ...context, pathOnly: false }, ranges);
+		const expanded = await resolveVirtualInternalResource(rawPath, opts.context, ranges);
 		virtualInputIndexes.add(idx);
 		for (const virtual of expanded) {
 			virtualResources.push(virtual);
@@ -850,7 +814,8 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 	readonly name = "grep";
 	readonly approval = (args: unknown): ToolTier => {
 		const a = args as { path?: string | string[]; paths?: string | string[] };
-		return toPathList(a.path ?? a.paths).some(pathTargetsSsh) ? "exec" : "read";
+		// Substring scan over the raw entries: delimited lists are only split after approval.
+		return InternalUrlRouter.instance().readTier(toPathList(a.path ?? a.paths).join("\n"));
 	};
 	readonly label = "Grep";
 	readonly loadMode = "discoverable";
@@ -865,7 +830,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 			scoutAvailable:
 				this.session.isScoutSpawnable?.() ??
 				isScoutSpawnable(
-					this.session.settings.get("task.disabledAgents") as string[] | undefined,
+					cfgTaskDisabledAgents.get(this.session.settings),
 					this.session.getSessionSpawns?.() ?? "*",
 				),
 		});
@@ -932,23 +897,13 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				cleanup: cleanupArchiveScratch,
 			} = await resolveArchiveSearchPaths(pathSpecs, this.session.cwd);
 			try {
+				// Directory resources without a local path are rejected, so never drain their listings.
+				const resolveContext = sessionResolveContext(this.session, { signal, skipDirectoryListing: true });
 				const internalResolution = await resolveInternalSearchInputs({
 					pathSpecs,
 					resolvedPaths,
-					cwd: this.session.cwd,
 					archiveDisplayMap,
-					settings: this.session.settings,
-					signal,
-					localProtocolOptions: this.session.localProtocolOptions,
-					skills: this.session.skills,
-					rules: this.session.activeRules,
-					sessionFile: this.session.getSessionFile() ?? undefined,
-					experimentalContextManagement:
-						this.session.settings.get("compaction.experimentalContextManagement") === true,
-					getSessionBranch: () => getExperimentalContextSession(this.session).getBranch(),
-					sessionId: this.session.sessionManager?.getSessionId?.() ?? this.session.getSessionId?.() ?? undefined,
-					agentRegistry: this.session.agentRegistry,
-					session: this.session,
+					context: resolveContext,
 				});
 				const searchablePaths = internalResolution.paths;
 				const { virtualResources, virtualPathSet, virtualInputIndexes } = internalResolution;
@@ -967,8 +922,8 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 							`or pass a UTF-8 text member.`,
 					);
 				}
-				const normalizedContextBefore = this.#contextOverride ?? this.session.settings.get("grep.contextBefore");
-				const normalizedContextAfter = this.#contextOverride ?? this.session.settings.get("grep.contextAfter");
+				const normalizedContextBefore = this.#contextOverride ?? cfgGrepContextBefore.get(this.session.settings);
+				const normalizedContextAfter = this.#contextOverride ?? cfgGrepContextAfter.get(this.session.settings);
 				const ignoreCase = !(caseSensitive ?? true);
 				const useGitignore = gitignore ?? true;
 				const patternHasNewline = normalizedPattern.includes("\n") || normalizedPattern.includes("\\n");
@@ -987,14 +942,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 						rawPaths: searchablePaths,
 						cwd: this.session.cwd,
 						internalUrlAction: "search",
-						settings: this.session.settings,
-						localProtocolOptions: this.session.localProtocolOptions,
-						skills: this.session.skills,
-						rules: this.session.activeRules,
-						sessionFile: this.session.getSessionFile() ?? undefined,
-						sessionId:
-							this.session.sessionManager?.getSessionId?.() ?? this.session.getSessionId?.() ?? undefined,
-						agentRegistry: this.session.agentRegistry,
+						context: resolveContext,
 						resolveExternalUrl: materializeExternalUrlForSearch,
 						trackImmutableSources: true,
 						surfaceExactFilePaths: true,
@@ -1526,7 +1474,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					const header = /^#+\s+([a-z][a-z0-9+.-]*:\/\/.*)$/i.exec(line);
 					if (!header) continue;
 					const target = header[1]!.trimEnd().replace(/\s+\([^)]*\)\s*$/, "");
-					const resolved = tryResolveInternalUrlSync(target);
+					const resolved = InternalUrlRouter.instance().locateSync(target);
 					if (resolved) (displayTargets ??= {})[target] = resolved;
 				}
 				const truncated = Boolean(

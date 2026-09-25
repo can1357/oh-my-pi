@@ -12,13 +12,14 @@
  * `enableMCP: false`, regardless of what `baseOptions` carries.
  */
 
-import { afterAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, describe, expect, it } from "bun:test";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAcpSessionFactory } from "@oh-my-pi/pi-coding-agent/main";
 import type { CreateAgentSessionOptions, CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { cfgExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 const authStorage = createInMemoryAuthStorage();
@@ -28,12 +29,22 @@ afterAll(() => {
 	authStorage.close();
 });
 
+// The factory registers each session's process-effect binding release here; run them so
+// no binding outlives its test.
+const sessionDisposers: Array<() => void> = [];
+const addDisposer = (dispose: () => void): void => {
+	sessionDisposers.push(dispose);
+};
+afterEach(() => {
+	for (const dispose of sessionDisposers.splice(0)) dispose();
+});
+
 describe("createAcpSessionFactory MCP isolation (issue #1234)", () => {
 	it("forces enableMCP=false even when baseOptions opts in", async () => {
 		const tempDir = TempDir.createSync("@pi-acp-mcp-isolation-");
 		try {
 			const settings = Settings.isolated({});
-			const fakeSession = {} as AgentSession;
+			const fakeSession = { addDisposer } as AgentSession;
 			const captured: CreateAgentSessionOptions[] = [];
 			const createSession = async (options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> => {
 				captured.push(options);
@@ -114,7 +125,7 @@ describe("createAcpSessionFactory MCP isolation (issue #1234)", () => {
 
 			// The SESSION's own settings (the clone the factory made), reloaded
 			// with a configured extension — the next provider read must carry it.
-			captured?.settings?.override("extensions", [tempDir.join("configured-pkg")]);
+			if (captured?.settings) cfgExtensions.override(captured.settings, [tempDir.join("configured-pkg")]);
 			expect(provider().configured).toEqual([tempDir.join("configured-pkg")]);
 		} finally {
 			await tempDir.remove();
@@ -129,6 +140,7 @@ describe("createAcpSessionFactory MCP isolation (issue #1234)", () => {
 			const fakeSession = {
 				extensionRunner: undefined,
 				getAllToolNames: () => ["read"],
+				addDisposer,
 				dispose: async () => {
 					disposed = true;
 				},
@@ -167,7 +179,7 @@ describe("createAcpSessionFactory MCP isolation (issue #1234)", () => {
 				`import { writeFileSync } from "node:fs"; export default function (pi) { pi.events.on("acp-session-live", () => writeFileSync(${JSON.stringify(firedPath)}, "fired")); }`,
 			);
 			let captured: CreateAgentSessionOptions | undefined;
-			const fakeSession = {} as AgentSession;
+			const fakeSession = { addDisposer } as AgentSession;
 			const factory = createAcpSessionFactory({
 				baseOptions: {
 					disableExtensionDiscovery: true,
@@ -243,7 +255,7 @@ describe("createAcpSessionFactory TITLE_SYSTEM.md per-cwd resolution (PR #3736)"
 			const projectDir = tempDir.join("project");
 			await Bun.write(`${projectDir}/.omp/TITLE_SYSTEM.md`, "Project-specific title policy.");
 
-			const fakeSession = {} as AgentSession;
+			const fakeSession = { addDisposer } as AgentSession;
 			const captured: CreateAgentSessionOptions[] = [];
 			const createSession = async (options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> => {
 				captured.push(options);

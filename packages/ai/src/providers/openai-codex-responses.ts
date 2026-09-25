@@ -1636,6 +1636,8 @@ async function openInitialCodexEventStream(
 				break;
 			}
 		}
+	} else if (websocketState) {
+		releaseIdleCodexWebSocket(websocketState);
 	}
 	try {
 		return await openCodexSseTransport(model, requestContext, requestSetup, options, websocketState, transformedBody);
@@ -3241,6 +3243,19 @@ function recordCodexWebSocketFailure(state: CodexWebSocketSessionState, activate
 	}
 }
 
+/**
+ * WebSocket not selected for this request (e.g. the preference was switched off
+ * mid-session): close an idle cached socket so it stops heartbeating and is
+ * never reused against a transcript advanced over SSE.
+ */
+function releaseIdleCodexWebSocket(state: CodexWebSocketSessionState): void {
+	const connection = state.connection;
+	if (!connection || connection.isBusy()) return;
+	connection.close("transport_not_selected");
+	state.connection = undefined;
+	resetCodexWebSocketAppendState(state);
+}
+
 function shouldUseCodexWebSocket(
 	model: Model<"openai-codex-responses">,
 	state: CodexWebSocketSessionState | undefined,
@@ -3685,6 +3700,11 @@ class CodexWebSocketConnection {
 	/** True while a handshake (possibly started by another caller) is still in flight. */
 	isConnecting(): boolean {
 		return this.#connectPromise !== undefined;
+	}
+
+	/** True while a handshake or a request stream is in flight on this socket. */
+	isBusy(): boolean {
+		return this.#activeRequest || this.#connectPromise !== undefined;
 	}
 
 	/**

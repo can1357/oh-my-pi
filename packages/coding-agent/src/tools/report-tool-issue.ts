@@ -18,7 +18,7 @@
  * wired by `InteractiveMode` to a Yes/No popup — is invoked exactly once and
  * the decision is persisted; a denial (or dismissal) drops the pending report
  * without touching the database. Subsequent calls (including from subagents)
- * read the cached decision without prompting. `PI_AUTO_QA_PUSH=1` bypasses
+ * read the persisted decision live without prompting. `PI_AUTO_QA_PUSH=1` bypasses
  * the dialog for headless environments.
  *
  * When the user grants consent, push is automatically active against the
@@ -43,6 +43,8 @@ import type { XdevDispatch } from "./xdev";
 
 import { REPORT_ISSUE_DEVICE_NAME, REPORT_ISSUE_DEVICE_PATH } from "@oh-my-pi/pi-tui/tools/report-tool-issue";
 import { truncateHeadBytes } from "@oh-my-pi/pi-tui/tools/streaming-output";
+
+import { cfgDevAutoqa, cfgDevAutoqaConsent, cfgDevAutoqaPushEndpoint, cfgDevAutoqaPushToken } from "./settings";
 
 /** Usage text for `read xd://report_issue`. */
 export function reportIssueDeviceUsage(): string {
@@ -101,20 +103,17 @@ function parseReportIssueBody(text: string): { tool: string; report: string } {
 /**
  * Whether Auto-QA is active for this session.
  *
- * Precedence: `PI_AUTO_QA` env flag > explicit `dev.autoqa` setting >
+ * Precedence: explicit `dev.autoqa` (env `PI_AUTO_QA` or any settings layer) >
  * default-on unless the user previously denied consent. The denial veto only
  * applies to the default: explicitly configuring `dev.autoqa: true` re-enables
- * injection (recording still no-ops until consent is granted).
+ * injection (recording still no-ops until consent is granted). Without settings,
+ * only the env flag can enable it.
  */
 export function isAutoQaEnabled(settings?: Settings): boolean {
-	let fallback = false;
-	if (settings) {
-		const enabled = !!settings.get("dev.autoqa");
-		fallback = settings.isConfigured("dev.autoqa")
-			? enabled
-			: enabled && settings.get("dev.autoqaConsent") !== "denied";
-	}
-	return $flag("PI_AUTO_QA", fallback);
+	if (!settings) return cfgDevAutoqa.envValue() ?? false;
+	const enabled = cfgDevAutoqa.get(settings);
+	if (cfgDevAutoqa.isConfigured(settings)) return enabled;
+	return enabled && cfgDevAutoqaConsent.get(settings) !== "denied";
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -149,16 +148,6 @@ let consentHandler: AutoQaConsentHandler | null = null;
  */
 let persistentConsentSettings: Settings | null = null;
 /**
- * Process-global cache of the resolved consent decision. Survives across
- * subagent boundaries (subagents share this module instance), so a grant in
- * the parent applies immediately to children — including children that spawned
- * BEFORE the grant and would otherwise see a stale snapshot of
- * `dev.autoqaConsent` in their isolated `Settings`.
- *
- * `null` = never asked, never cached.
- */
-let cachedConsent: boolean | null = null;
-/**
  * Single-flight in-flight consent request. While the dialog is open, every
  * concurrent `report_issue` call (main + every subagent) awaits this promise
  * instead of stacking duplicate popups.
@@ -182,13 +171,12 @@ export function setAutoQaConsentHandler(
 export function __resetAutoQaConsentForTests(): void {
 	consentHandler = null;
 	persistentConsentSettings = null;
-	cachedConsent = null;
 	consentInFlight = null;
 }
 
 function readPersistedConsent(settings: Settings | undefined): boolean | null {
 	if (!settings) return null;
-	const stored = settings.get("dev.autoqaConsent");
+	const stored = cfgDevAutoqaConsent.get(settings);
 	if (stored === "granted") return true;
 	if (stored === "denied") return false;
 	return null;
@@ -197,13 +185,13 @@ function readPersistedConsent(settings: Settings | undefined): boolean | null {
 function persistConsent(localSettings: Settings | undefined, granted: boolean): void {
 	const value = granted ? "granted" : "denied";
 	try {
-		localSettings?.set("dev.autoqaConsent", value);
+		if (localSettings) cfgDevAutoqaConsent.set(localSettings, value);
 	} catch (error) {
 		logger.warn("Failed to persist auto-QA consent to local settings snapshot", { error: String(error) });
 	}
 	if (persistentConsentSettings && persistentConsentSettings !== localSettings) {
 		try {
-			persistentConsentSettings.set("dev.autoqaConsent", value);
+			cfgDevAutoqaConsent.set(persistentConsentSettings, value);
 		} catch (error) {
 			logger.warn("Failed to persist auto-QA consent to persistent settings", { error: String(error) });
 		}
@@ -213,35 +201,26 @@ function persistConsent(localSettings: Settings | undefined, granted: boolean): 
 /**
  * Resolve the user's consent for Auto-QA grievances.
  *
- * Priority:
- * 1. module cache (`cachedConsent`) — process-global, survives subagent boundaries
+ * Read live on every call so a `/settings` or config edit to
+ * `dev.autoqaConsent` applies to the next report. Priority:
+ * 1. persisted setting on the registered persistent settings instance — the
+ *    user's authoritative choice, which a subagent's isolated `Settings`
+ *    snapshot may predate
  * 2. persisted setting on the caller's `Settings`
- * 3. persisted setting on the registered persistent settings instance
- * 4. registered UI handler (single-flight)
- * 5. default `false` (no handler / non-interactive)
+ * 3. registered UI handler (single-flight)
+ * 4. default `false` (no handler / non-interactive)
  */
 export async function resolveAutoQaConsent(settings: Settings | undefined): Promise<boolean> {
-	if (cachedConsent !== null) return cachedConsent;
+	const globalPersisted = readPersistedConsent(persistentConsentSettings ?? undefined);
+	if (globalPersisted !== null) return globalPersisted;
 	const localPersisted = readPersistedConsent(settings);
-	if (localPersisted !== null) {
-		cachedConsent = localPersisted;
-		return localPersisted;
-	}
-	const globalPersisted =
-		persistentConsentSettings && persistentConsentSettings !== settings
-			? readPersistedConsent(persistentConsentSettings)
-			: null;
-	if (globalPersisted !== null) {
-		cachedConsent = globalPersisted;
-		return globalPersisted;
-	}
+	if (localPersisted !== null) return localPersisted;
 	if (!consentHandler) return false;
 	if (consentInFlight) return consentInFlight;
 	consentInFlight = (async () => {
 		try {
 			const result = await consentHandler!();
 			if (result === null) return false;
-			cachedConsent = result;
 			persistConsent(settings, result);
 			return result;
 		} catch {
@@ -398,14 +377,16 @@ function resolvePushConfig(settings: Settings | undefined, bypassConsent: boolea
 	// user clearly intends to ship regardless of dialog state. The
 	// `PI_AUTO_QA_PUSH` env flag stays as a CI/headless override too.
 	if (!bypassConsent) {
-		const consented = settings?.get("dev.autoqaConsent") === "granted";
+		const consented = (settings ? cfgDevAutoqaConsent.get(settings) : undefined) === "granted";
 		if (!consented && !$flag("PI_AUTO_QA_PUSH")) return null;
 	}
 
-	const endpoint = envOverrideString("PI_AUTO_QA_PUSH_URL") ?? settings?.get("dev.autoqaPush.endpoint");
+	const endpoint =
+		envOverrideString("PI_AUTO_QA_PUSH_URL") ?? (settings ? cfgDevAutoqaPushEndpoint.get(settings) : undefined);
 	if (!endpoint || endpoint.trim().length === 0) return null;
 
-	const token = envOverrideString("PI_AUTO_QA_PUSH_TOKEN") ?? settings?.get("dev.autoqaPush.token");
+	const token =
+		envOverrideString("PI_AUTO_QA_PUSH_TOKEN") ?? (settings ? cfgDevAutoqaPushToken.get(settings) : undefined);
 	return { endpoint: endpoint.trim(), token: token && token.length > 0 ? token : undefined };
 }
 

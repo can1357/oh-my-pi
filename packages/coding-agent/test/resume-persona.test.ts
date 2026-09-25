@@ -31,6 +31,9 @@ import { PersonaRuntime } from "@oh-my-pi/pi-coding-agent/session/persona-runtim
 import { SessionToolPolicy } from "@oh-my-pi/pi-coding-agent/session/tool-policy";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { cfgStartupQuiet } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { cfgGoalEnabled } from "@oh-my-pi/pi-coding-agent/goals/settings";
+import { cfgPlanEnabled } from "@oh-my-pi/pi-coding-agent/plan-mode/settings";
 import { InteractiveMode } from "../src/modes/interactive-mode";
 import { discoverAgents, getAgent } from "../src/task";
 
@@ -62,7 +65,7 @@ describe("InteractiveMode persona resume reconcile", () => {
 		resetSettingsForTest();
 		tempDir = TempDir.createSync("@omp-resume-persona-");
 		await Settings.init({ inMemory: true, cwd: tempDir.path() });
-		Settings.instance.set("startup.quiet", true);
+		cfgStartupQuiet.set(Settings.instance, true);
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -974,7 +977,7 @@ Beta.`,
 		await writeFixtureAgent(READER_AGENT_MD);
 		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
 		const liveSession = createSession(manager);
-		liveSession.settings.set("goal.enabled", true);
+		cfgGoalEnabled.set(liveSession.settings, true);
 		const created = spyStatus(createMode(liveSession));
 		await created.init({ suppressWelcomeIntro: true });
 		const warnings: string[] = [];
@@ -1203,7 +1206,7 @@ Alpha.`,
 
 		const resumedManager = await SessionManager.open(sessionFile, path.join(tempDir.path(), "sessions"));
 		const resumedSession = createSession(resumedManager);
-		resumedSession.settings.set("plan.enabled", true);
+		cfgPlanEnabled.set(resumedSession.settings, true);
 		const resumed = spyStatus(createMode(resumedSession));
 		await resumed.init({ suppressWelcomeIntro: true });
 		expect(resumedSession.getPersonaRuntime()!.policy.isPersonaActive()).toBe(true);
@@ -1452,7 +1455,7 @@ Alpha.`,
 		// plan.enabled lets the restored plan entry re-enter; it happens AFTER
 		// the persona reconcile, so the plan snapshot captures the
 		// persona-narrowed presentation.
-		liveSession.settings.set("plan.enabled", true);
+		cfgPlanEnabled.set(liveSession.settings, true);
 		const created = spyStatus(createMode(liveSession));
 		await created.init({ suppressWelcomeIntro: true });
 		expect(created.planModeEnabled).toBe(true);
