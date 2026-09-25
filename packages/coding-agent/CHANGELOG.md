@@ -388,6 +388,7 @@
 
 - `providers.anthropic.slowMode` now controls only the low-priority lane; the usage-limit wrap-up allowance is tracked for every first-party Claude subscription account ([#13340](https://github.com/can1357/oh-my-pi/pull/13340) by [@H4vC](https://github.com/H4vC))
 - Enter on the `/model` hub sidebar now moves focus to the model list (like →) instead of acting on the highlighted row ([#13347](https://github.com/can1357/oh-my-pi/pull/13347) by [@H4vC](https://github.com/H4vC))
+- Added a `devin-windsurf` login for Windsurf Enterprise seats that cannot complete the Devin-native flow: it drives the Windsurf editor authorize endpoint directly, exchanges the PKCE code through Windsurf's Connect API, and stores the raw seat key under the `devin` provider ([#13116](https://github.com/can1357/oh-my-pi/issues/13116), [#13288](https://github.com/can1357/oh-my-pi/pull/13288) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
 
 ### Fixed
 
