@@ -6,12 +6,22 @@ import type { Settings } from "../config/settings";
 import eagerTaskPrompt from "../prompts/system/eager-task.md" with { type: "text" };
 import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
 import midRunTodoNudgePrompt from "../prompts/system/mid-run-todo-nudge.md" with { type: "text" };
+import postCompactionIncompleteTodosPrompt from "../prompts/system/post-compaction-incomplete-todos.md" with { type: "text" };
 import todoCompletionReminderPrompt from "../prompts/system/todo-completion-reminder.md" with { type: "text" };
 import { resolveLeadingCdChain } from "../tools/shell-tokenize";
 import { resolveToCwd } from "../tools/path-utils";
-import { getLatestTodoPhasesFromEntries, isTodoPhase, type TodoItem, type TodoPhase } from "../tools/todo";
+import { getLatestTodoPhasesFromEntries, isTodoPhase } from "../tools/todo";
+import { type TodoItem, type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { AgentSessionEvent } from "./agent-session-events";
+import {
+	capIncompleteTodoRows,
+	collectIncompleteTodoRows,
+	formatIncompleteTodoSnapshotLines,
+	formatIncompleteTodosSection,
+	groupIncompleteTodoRowsByPhase,
+	upsertIncompleteTodosSection,
+} from "./incomplete-todos";
 import type { SessionManager } from "./session-manager";
 import {
 	isParentVerifyCwdInMergedTree,
@@ -329,8 +339,7 @@ export class TodoTracker {
 					// New incarnation of this job id — allow a fresh early terminal.
 					this.#finishedVerifyJobIds.delete(jobId);
 					const early =
-						this.#takeEarlyAsyncTerminal(toolCallId, jobId) ??
-						this.#takeEarlyAsyncTerminal(jobId, jobId);
+						this.#takeEarlyAsyncTerminal(toolCallId, jobId) ?? this.#takeEarlyAsyncTerminal(jobId, jobId);
 					if (early !== undefined) {
 						this.#markFinishedVerifyJob(jobId);
 						this.#applyAsyncVerifyClear(withCwd, early.jobType, early.status);
@@ -575,11 +584,52 @@ export class TodoTracker {
 		};
 	}
 
+	/**
+	 * Structured incomplete-todo lines for the compaction summarizer input
+	 * (`SummaryOptions.extraContext`), so the contract survives the cut.
+	 */
+	buildIncompleteTodosCompactionContext(): string[] {
+		const rows = collectIncompleteTodoRows(this.#phases);
+		if (rows.length === 0) return [];
+		return [
+			"Incomplete todos that MUST survive compaction (pending/in_progress/model-abandoned; a text-only stop is not completion):",
+			...formatIncompleteTodoSnapshotLines(rows),
+		];
+	}
+
+	/**
+	 * Upserts the incomplete todo list into a compaction summary so it remains
+	 * durable text after snapcompact/LLM summarization. A later compact rewrites
+	 * the section from the live list (including a standing `(none)` when empty).
+	 */
+	appendIncompleteTodosToSummary(summary: string): string {
+		const rows = collectIncompleteTodoRows(this.#phases);
+		return upsertIncompleteTodosSection(summary, formatIncompleteTodosSection(rows));
+	}
+
 	/** Builds reminder-only eager preludes after compaction. */
 	buildPostCompactionEagerNudges(): AgentMessage[] {
 		const nudges: AgentMessage[] = [];
-		const todo = this.createEagerTodoPrelude(undefined);
-		if (todo) nudges.push(todo.message);
+		// Keep blocked rows in durable snapshots / settle gates, but do not nudge
+		// the model to continue work that is waiting on user or external input.
+		const rows = collectIncompleteTodoRows(this.#phases).filter(row => row.status !== "blocked");
+		if (rows.length > 0) {
+			const capped = capIncompleteTodoRows(rows);
+			nudges.push({
+				role: "custom",
+				customType: "post-compaction-incomplete-todos",
+				content: prompt.render(postCompactionIncompleteTodosPrompt, {
+					phases: groupIncompleteTodoRowsByPhase(capped.rows),
+					overflow: capped.overflow,
+				}),
+				display: false,
+				attribution: "agent",
+				timestamp: Date.now(),
+			});
+		} else {
+			const todo = this.createEagerTodoPrelude(undefined);
+			if (todo) nudges.push(todo.message);
+		}
 		const task = this.createEagerTaskPrelude(undefined);
 		if (task) nudges.push(task);
 		return nudges;

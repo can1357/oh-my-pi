@@ -1,10 +1,10 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
-import { splitReaction } from "@oh-my-pi/pi-coding-agent/modes/components/reaction";
-import { UserMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/user-message";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { splitReaction } from "@oh-my-pi/pi-tui/chat/reaction";
+import { UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { Container, Text } from "@oh-my-pi/pi-tui";
 
 const W = 60;

@@ -101,6 +101,66 @@ describe("worktree isolation helpers", () => {
 		expect((error as Error).message).toContain("task.isolation.enabled: false");
 	});
 
+	// Regression: the staged and unstaged diffs were rendered in full before the
+	// #8939 gate ran, so a working tree whose index-vs-HEAD diff was enormous
+	// (a jj conflict commit exported to git materialises every side as a
+	// `.jjconflict-*` subtree) grew one omp process to 141 GB and took the host
+	// down. The renderer now stops at the budget; the caller sees the same typed
+	// refusal it gets for oversized untracked content, with no measured total.
+	it("refuses to snapshot a working tree whose staged diff exceeds the isolation budget", async () => {
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "test@example.com"]);
+		await runGit(repo, ["config", "user.name", "Test User"]);
+		await fs.writeFile(path.join(repo, "README.md"), "hi\n");
+		await runGit(repo, ["add", "README.md"]);
+		await runGit(repo, ["commit", "-q", "-m", "init"]);
+		await fs.writeFile(path.join(repo, "staged.txt"), "staged content that outgrows a tiny budget\n".repeat(64));
+		await runGit(repo, ["add", "staged.txt"]);
+
+		const budget = 256;
+		const error = await captureBaseline(repo, budget).then(
+			() => null,
+			(err: unknown) => err,
+		);
+		expect(error).toBeInstanceOf(IsolationBaselineTooLargeError);
+		expect((error as IsolationBaselineTooLargeError).budgetBytes).toBe(budget);
+		expect((error as IsolationBaselineTooLargeError).contentBytes).toBeUndefined();
+		expect((error as Error).message).toContain("task.isolation.enabled: false");
+
+		const within = await captureBaseline(repo);
+		expect(within.root.staged).toContain("+++ b/staged.txt");
+	});
+
+	// The unstaged diff is rendered against what the staged diff left of the
+	// budget. If that remaining-budget arithmetic regressed to the full budget,
+	// a large-but-admissible staged patch followed by a large unstaged patch
+	// would buffer nearly twice the budget before anything refused.
+	it("charges the unstaged diff against the budget the staged diff left", async () => {
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "test@example.com"]);
+		await runGit(repo, ["config", "user.name", "Test User"]);
+		await fs.writeFile(path.join(repo, "README.md"), "hi\n");
+		await fs.writeFile(path.join(repo, "tracked.txt"), "tracked\n");
+		await runGit(repo, ["add", "README.md", "tracked.txt"]);
+		await runGit(repo, ["commit", "-q", "-m", "init"]);
+		await fs.writeFile(path.join(repo, "staged.txt"), "staged line\n".repeat(20));
+		await runGit(repo, ["add", "staged.txt"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), "unstaged line\n".repeat(20));
+
+		const { staged, unstaged } = (await captureBaseline(repo)).root;
+		// Each patch fits on its own; only their sum crosses the budget.
+		const budget = Math.max(staged.length, unstaged.length) + 16;
+		expect(staged.length + unstaged.length).toBeGreaterThan(budget);
+
+		const error = await captureBaseline(repo, budget).then(
+			() => null,
+			(err: unknown) => err,
+		);
+		expect(error).toBeInstanceOf(IsolationBaselineTooLargeError);
+		expect((error as IsolationBaselineTooLargeError).contentBytes).toBeUndefined();
+		expect(unstaged).toContain("+unstaged line");
+	});
+
 	it("sizes an untracked symlink itself rather than its target", async () => {
 		if (process.platform === "win32") return;
 		const repo = await createGitRepo();
@@ -767,6 +827,7 @@ describe("detachGitDir", () => {
 		const origin = await fs.mkdtemp(path.join(os.tmpdir(), "omp-detach-origin-"));
 		tempDirs.push(origin);
 		await runGit(origin, ["init", "-q", "-b", "main"]);
+		await runGit(origin, ["config", "core.fsmonitor", "false"]);
 		await runGit(origin, ["config", "user.email", "src@example.com"]);
 		await runGit(origin, ["config", "user.name", "Source User"]);
 		await fs.writeFile(path.join(origin, "one.txt"), "one\n");
@@ -778,16 +839,18 @@ describe("detachGitDir", () => {
 
 		const clone = path.join(origin, "..", `${path.basename(origin)}-shallow`);
 		tempDirs.push(clone);
-		await runGit(origin, ["clone", "-q", "--depth", "1", `file://${origin}`, clone]);
+		await runGit(origin, ["-c", "core.fsmonitor=false", "clone", "-q", "--depth", "1", `file://${origin}`, clone]);
 		await runGit(clone, ["config", "user.email", "src@example.com"]);
 		await runGit(clone, ["config", "user.name", "Source User"]);
 		await runGit(clone, ["config", "core.fileMode", "false"]);
+		// Git's fsmonitor/split-index interaction can crash during fixture setup.
+		await runGit(clone, ["config", "core.fsmonitor", "false"]);
 		await runGit(clone, ["config", "core.splitIndex", "true"]);
 		const wt = path.join(origin, "..", `${path.basename(origin)}-shallow-wt`);
 		tempDirs.push(wt);
 		await runGit(clone, ["worktree", "add", "-q", wt, "-b", "feature/parent", "HEAD"]);
 		// Split the worktree's own index so it references a sharedindex.* file.
-		await runGit(wt, ["update-index", "--split-index"]);
+		await runGit(wt, ["-c", "core.fsmonitor=false", "update-index", "--split-index"]);
 		const commonDir = path.resolve(
 			(await runGit(clone, ["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim(),
 		);
@@ -797,6 +860,8 @@ describe("detachGitDir", () => {
 
 		// filemode parity: an explicit core.fileMode=false survives re-init.
 		expect(await runGit(iso, ["config", "core.fileMode"])).toBe("false");
+		// The detached repo must not inherit an unrelated global fsmonitor daemon.
+		await runGit(iso, ["config", "core.fsmonitor", "false"]);
 		// Split index: status works (sharedindex.* was carried) and stays clean.
 		expect(await runGit(iso, ["status", "--porcelain=v1"])).toBe("");
 		// Shallow boundary: history traversal stops cleanly instead of failing
@@ -877,6 +942,10 @@ describe("applyNestedPatches", () => {
 		await runGit(fixtureParent, ["init", "-q", "-b", "main"]);
 		await runGit(fixtureParent, ["config", "user.email", "test@example.com"]);
 		await runGit(fixtureParent, ["config", "user.name", "Test User"]);
+		// beforeEach copies both repos with fs.cp; auto maintenance would race
+		// the copy the same way as in the commitToBranch fixture below.
+		await runGit(fixtureParent, ["config", "maintenance.auto", "false"]);
+		await runGit(fixtureParent, ["config", "gc.auto", "0"]);
 		await fs.writeFile(path.join(fixtureParent, ".gitignore"), "sub/\n");
 		await runGit(fixtureParent, ["add", "."]);
 		await runGit(fixtureParent, ["commit", "-q", "-m", "parent-init"]);
@@ -886,6 +955,8 @@ describe("applyNestedPatches", () => {
 		await runGit(fixtureNested, ["init", "-q", "-b", "main"]);
 		await runGit(fixtureNested, ["config", "user.email", "test@example.com"]);
 		await runGit(fixtureNested, ["config", "user.name", "Test User"]);
+		await runGit(fixtureNested, ["config", "maintenance.auto", "false"]);
+		await runGit(fixtureNested, ["config", "gc.auto", "0"]);
 		await fs.writeFile(path.join(fixtureNested, "file.txt"), "v1\n");
 		await runGit(fixtureNested, ["add", "."]);
 		await runGit(fixtureNested, ["commit", "-q", "-m", "nested-init"]);
@@ -1001,6 +1072,12 @@ describe("commitToBranch preserves agent commits", () => {
 		await runGit(fixtureRepo, ["init", "-q", "-b", "main"]);
 		await runGit(fixtureRepo, ["config", "user.email", "test@example.com"]);
 		await runGit(fixtureRepo, ["config", "user.name", "Test User"]);
+		// `git commit` kicks off `git maintenance run --auto`, which writes
+		// `.git/objects/maintenance.lock` and removes it again. beforeEach copies
+		// this repo with fs.cp, and a lock that disappears between readdir and
+		// lstat fails the copy with ENOENT.
+		await runGit(fixtureRepo, ["config", "maintenance.auto", "false"]);
+		await runGit(fixtureRepo, ["config", "gc.auto", "0"]);
 		await fs.writeFile(
 			path.join(fixtureRepo, "EXP_CLEAN_COMMIT.txt"),
 			"line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n",

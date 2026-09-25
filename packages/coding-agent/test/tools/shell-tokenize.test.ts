@@ -1,12 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import * as path from "node:path";
-import {
-	extractLeadingCdTarget,
-	hasTopLevelShellBackground,
-	hasTopLevelStatusMaskingOperator,
-	hasUnresolvableLeadingCdPrefix,
-	resolveLeadingCdChain,
-} from "@oh-my-pi/pi-coding-agent/tools/shell-tokenize";
+import { extractLeadingCdTarget, readShellWord } from "@oh-my-pi/pi-coding-agent/tools/shell-tokenize";
 
 describe("extractLeadingCdTarget", () => {
 	it("extracts a bare cd target and returns the remainder", () => {
@@ -53,10 +46,8 @@ describe("extractLeadingCdTarget", () => {
 		expect(extractLeadingCdTarget("cd `pwd` && ls")).toBeNull();
 	});
 
-	it("accepts top-level && or ; separators", () => {
+	it("accepts sequential separators but rejects conditional failure and background separators", () => {
 		expect(extractLeadingCdTarget("cd /tmp; echo ok")).toEqual({ path: "/tmp", rest: "echo ok" });
-		expect(extractLeadingCdTarget("cd /tmp;bun test")).toEqual({ path: "/tmp", rest: "bun test" });
-		expect(extractLeadingCdTarget("cd /tmp ; bun test")).toEqual({ path: "/tmp", rest: "bun test" });
 		expect(extractLeadingCdTarget("cd /foo || echo fail")).toBeNull();
 		expect(extractLeadingCdTarget("cd /tmp &echo")).toBeNull();
 	});
@@ -68,67 +59,49 @@ describe("extractLeadingCdTarget", () => {
 	});
 });
 
-describe("hasUnresolvableLeadingCdPrefix", () => {
-	it("is true when cd is present but extractLeadingCdTarget declines", () => {
-		expect(hasUnresolvableLeadingCdPrefix("cd /tmp 2>/dev/null && bun test")).toBe(true);
-		expect(hasUnresolvableLeadingCdPrefix("cd $HOME && bun test")).toBe(true);
-		expect(hasUnresolvableLeadingCdPrefix("FOO=1 cd /tmp >/dev/null && bun test")).toBe(true);
+describe("readShellWord", () => {
+	it("reads a bare whitespace-delimited token", () => {
+		expect(readShellWord("bun test extra")).toEqual({ value: "bun", rest: "test extra" });
 	});
 
-	it("is false for clean extractable cd or commands without cd", () => {
-		expect(hasUnresolvableLeadingCdPrefix("cd /tmp && bun test")).toBe(false);
-		expect(hasUnresolvableLeadingCdPrefix("cd /tmp; bun test")).toBe(false);
-		expect(hasUnresolvableLeadingCdPrefix("FOO=1 cd /tmp && bun test")).toBe(false);
-		expect(hasUnresolvableLeadingCdPrefix("bun test")).toBe(false);
-		expect(hasUnresolvableLeadingCdPrefix("pwd")).toBe(false);
-	});
-});
-
-describe("resolveLeadingCdChain", () => {
-	it("strips env/sudo and uses the last cd in a chain", () => {
-		expect(resolveLeadingCdChain("FOO=1 cd /repo && cd /tmp && bun test")).toEqual({ path: "/tmp" });
-		expect(resolveLeadingCdChain("sudo cd /tmp && bun test")).toEqual({ path: "/tmp" });
-		expect(resolveLeadingCdChain("  cd /tmp && bun test")).toEqual({ path: "/tmp" });
+	it("reads a fully quoted value and preserves internal whitespace", () => {
+		expect(readShellWord('"bun test" fix it')).toEqual({ value: "bun test", rest: "fix it" });
+		expect(readShellWord("'bun test' fix it")).toEqual({ value: "bun test", rest: "fix it" });
 	});
 
-	it("resolves relative cd targets against the preceding cwd", () => {
-		expect(resolveLeadingCdChain("cd /tmp && cd project && bun test")).toEqual({
-			path: path.join("/tmp", "project"),
+	// Regression: an `indexOf`-based scanner treats an escaped instance of the
+	// outer delimiter as the closing quote, silently truncating the value.
+	it("keeps an escaped instance of the outer delimiter inside the value", () => {
+		expect(readShellWord(`"node -e \\"process.exit(0)\\"" fix it`)).toEqual({
+			value: 'node -e "process.exit(0)"',
+			rest: "fix it",
 		});
-		expect(resolveLeadingCdChain("cd packages && cd foo && bun test")).toEqual({
-			path: path.join("packages", "foo"),
-		});
-		expect(resolveLeadingCdChain("cd /tmp && cd /other && bun test")).toEqual({ path: "/other" });
-	});
-
-	it("marks unresolvable when any leading cd cannot be extracted", () => {
-		expect(resolveLeadingCdChain("cd /repo && cd /tmp 2>/dev/null && bun test")).toEqual({
-			unresolvable: true,
+		expect(readShellWord(`"test \\"$READY\\" = yes" continue`)).toEqual({
+			value: 'test "$READY" = yes',
+			rest: "continue",
 		});
 	});
 
-	it("marks unresolvable when cwd changes hide inside a shell group", () => {
-		expect(resolveLeadingCdChain("(cd /tmp && bun test)")).toEqual({ unresolvable: true });
-		expect(resolveLeadingCdChain("{ cd /tmp; bun test; }")).toEqual({ unresolvable: true });
-		expect(resolveLeadingCdChain("bun test")).toEqual({});
+	// Regression: a scanner that only checks space/tab does not end a quoted
+	// value at a newline, so a multiline invocation folds the next line's
+	// prompt text into the condition command.
+	it("stops on a newline or carriage return, not just space and tab", () => {
+		expect(readShellWord("'bun test'\nfix the tests")).toEqual({ value: "bun test", rest: "fix the tests" });
+		expect(readShellWord("bun\ntest")).toEqual({ value: "bun", rest: "test" });
+		expect(readShellWord("bun\r\ntest")).toEqual({ value: "bun", rest: "test" });
 	});
-});
 
-describe("hasTopLevelShellBackground", () => {
-	it("detects a top-level background operator", () => {
-		expect(hasTopLevelShellBackground("bun test & true")).toBe(true);
-		expect(hasTopLevelShellBackground("bun test&")).toBe(true);
-		expect(hasTopLevelShellBackground("bun test && true")).toBe(false);
-		expect(hasTopLevelShellBackground('echo "a & b" && bun test')).toBe(false);
+	it("does not un-escape inside single quotes", () => {
+		expect(readShellWord(String.raw`'a\"b' rest`)).toEqual({ value: 'a\\"b', rest: "rest" });
 	});
-});
 
-describe("hasTopLevelStatusMaskingOperator", () => {
-	it("detects status-masking operators but not &&", () => {
-		expect(hasTopLevelStatusMaskingOperator("bun test || true")).toBe(true);
-		expect(hasTopLevelStatusMaskingOperator("bun test; true")).toBe(true);
-		expect(hasTopLevelStatusMaskingOperator("bun test | cat")).toBe(true);
-		expect(hasTopLevelStatusMaskingOperator("bun test && true")).toBe(false);
-		expect(hasTopLevelStatusMaskingOperator('echo "a | b" && bun test')).toBe(false);
+	it("reports an unterminated quote", () => {
+		expect(readShellWord('"bun test')).toBe("unterminated");
+		expect(readShellWord("'bun test")).toBe("unterminated");
+	});
+
+	it("returns undefined for empty or all-whitespace input", () => {
+		expect(readShellWord("")).toBeUndefined();
+		expect(readShellWord("   ")).toBeUndefined();
 	});
 });

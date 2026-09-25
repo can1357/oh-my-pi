@@ -702,7 +702,7 @@ pub struct InlineSloppyRegion {
 	pub payload: String,
 }
 
-/// Locate `<SM:EDIT path="…">` payloads the model emitted as plain text.
+/// Locate `*** Edit File: path` payloads the model emitted as plain text.
 #[napi]
 pub fn extract_inline_sloppy_regions(text: String) -> Vec<InlineSloppyRegion> {
 	sloppy::parse::extract_inline_sloppy_regions(&text)
@@ -738,6 +738,12 @@ pub fn hashline_format_numbered_lines(text: String, start_line: Option<u32>) -> 
 #[napi]
 pub fn hashline_strip_prefixes(lines: Vec<String>) -> Vec<String> {
 	hashline::prefixes::strip_hashline_prefixes(&lines)
+}
+
+/// Whether a row is a truncation notice emitted by `read`.
+#[napi]
+pub fn hashline_is_read_truncation_notice(line: String) -> bool {
+	hashline::prefixes::is_read_truncation_notice(&line)
 }
 
 /// Count of one canonical hashline op header shape in a payload.

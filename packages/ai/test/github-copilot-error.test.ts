@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { isGitHubCopilotPolicyDenial } from "@oh-my-pi/pi-ai/error";
 import { rewriteCopilotError } from "@oh-my-pi/pi-ai/utils/http-inspector";
 
 function errorWithStatus(
@@ -48,5 +49,35 @@ describe("rewriteCopilotError", () => {
 		expect(result).toContain("GitHub Copilot access denied (HTTP 403)");
 		expect(result).not.toContain("GitHub Copilot authentication failed");
 		expect(result).not.toContain("/login github-copilot");
+	});
+
+	it("names the CLI client identity, the chat retry, and the COPILOT_INTEGRATION_ID escape hatch on 403", () => {
+		const err = errorWithStatus(403);
+		const result = rewriteCopilotError("403 Forbidden", err, "github-copilot");
+		expect(result).toContain("copilot-developer-cli");
+		expect(result).toContain("copilot-chat");
+		expect(result).toContain("COPILOT_INTEGRATION_ID");
+	});
+});
+
+describe("isGitHubCopilotPolicyDenial", () => {
+	it("exempts Copilot 403s by status so credentials survive plan/model denials", () => {
+		expect(isGitHubCopilotPolicyDenial("github-copilot", 403, "403 Forbidden")).toBe(true);
+	});
+
+	it("matches the 403 rewrite text when no status is attached", () => {
+		const rewritten = rewriteCopilotError("403 Forbidden", errorWithStatus(403), "github-copilot");
+		expect(isGitHubCopilotPolicyDenial("github-copilot", undefined, rewritten)).toBe(true);
+	});
+
+	it("does not exempt Copilot 401s (revoked credentials must still be wiped)", () => {
+		const rewritten = rewriteCopilotError("401 Unauthorized", errorWithStatus(401), "github-copilot");
+		expect(isGitHubCopilotPolicyDenial("github-copilot", 401, rewritten)).toBe(false);
+	});
+
+	it("does not exempt other providers or non-403 Copilot failures", () => {
+		expect(isGitHubCopilotPolicyDenial("openai", 403, "403 Forbidden")).toBe(false);
+		expect(isGitHubCopilotPolicyDenial("github-copilot", 500, "server error")).toBe(false);
+		expect(isGitHubCopilotPolicyDenial("github-copilot", undefined, undefined)).toBe(false);
 	});
 });

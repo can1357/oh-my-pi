@@ -3,9 +3,10 @@ import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Effort } from "@oh-my-pi/pi-ai";
 import type { Rule } from "../capability/rule";
 import type { RetryErrorUpdate } from "../extensibility/shared-events";
-import type { Goal, GoalModeState } from "../goals/state";
-import type { ConfiguredThinkingLevel } from "../thinking";
-import type { TodoItem } from "../tools/todo";
+import type { Goal } from "@oh-my-pi/pi-tui/tools/goal";
+import type { GoalModeState } from "../goals/state";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import type { TodoItem } from "@oh-my-pi/pi-tui/tools/todo";
 import type { CustomMessage } from "./messages";
 
 /** Session-specific events that extend the core AgentEvent. */
@@ -45,7 +46,7 @@ export type AgentSessionEvent =
 			finalError?: string;
 			retryErrors?: RetryErrorUpdate[];
 	  }
-	| { type: "retry_fallback_applied"; from: string; to: string; role: string }
+	| { type: "retry_fallback_applied"; from: string; to: string; role: string; reason?: string }
 	| { type: "retry_fallback_succeeded"; model: string; role: string }
 	| { type: "model_changed" }
 	| { type: "config_warnings_changed" }

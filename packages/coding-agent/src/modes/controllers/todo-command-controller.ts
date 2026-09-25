@@ -5,11 +5,9 @@ import {
 	markdownToPhases,
 	phasesToMarkdown,
 	resolveTodoMarkdownPath,
-	stampUserMarkdownAbandoned,
-	type TodoItem,
-	type TodoPhase,
 	USER_TODO_EDIT_CUSTOM_TYPE,
 } from "../../tools/todo";
+import { type TodoItem, type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { copyToClipboard } from "../../utils/clipboard";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import type { InteractiveModeContext } from "../types";
@@ -159,7 +157,7 @@ export class TodoCommandController {
 
 		switch (verb) {
 			case "expand":
-				if (!this.ctx.todoExpanded) this.ctx.toggleTodoExpansion();
+				this.ctx.setTodoExpanded(true);
 				return;
 			case "collapse":
 				if (this.ctx.todoExpanded) this.ctx.toggleTodoExpansion();
@@ -257,7 +255,7 @@ export class TodoCommandController {
 			this.ctx.showError(`Could not parse ${source}:\n  ${errors.join("\n  ")}`);
 			return;
 		}
-		this.#commit(stampUserMarkdownAbandoned(phases), `/todo import ${source}`);
+		this.#commit(phases, `/todo import ${source}`);
 		const taskCount = phases.reduce((sum, p) => sum + p.tasks.length, 0);
 		this.ctx.showStatus(`Imported ${phases.length} phase(s), ${taskCount} task(s) from ${source}.`);
 	}
@@ -332,12 +330,11 @@ export class TodoCommandController {
 
 	#mutateStatus(rest: string, target: "completed" | "abandoned"): void {
 		const op = target === "completed" ? "done" : "drop";
-		const dropOpts = op === "drop" ? { userDrop: true as const } : undefined;
 		const current = this.#currentPhases();
 		const trimmed = rest.trim();
 		if (!trimmed) {
 			// no-arg: apply to all
-			const { phases, errors } = applyOpsToPhases(current, [{ op }], dropOpts);
+			const { phases, errors } = applyOpsToPhases(current, [{ op }]);
 			if (errors.length > 0) {
 				this.ctx.showError(errors.join("; "));
 				return;
@@ -349,7 +346,7 @@ export class TodoCommandController {
 
 		const taskHit = findTaskFuzzy(current, trimmed);
 		if (taskHit) {
-			const { phases, errors } = applyOpsToPhases(current, [{ op, task: taskHit.task.content }], dropOpts);
+			const { phases, errors } = applyOpsToPhases(current, [{ op, task: taskHit.task.content }]);
 			if (errors.length > 0) {
 				this.ctx.showError(errors.join("; "));
 				return;
@@ -361,7 +358,7 @@ export class TodoCommandController {
 
 		const phaseHit = findPhaseFuzzy(current, trimmed);
 		if (phaseHit) {
-			const { phases, errors } = applyOpsToPhases(current, [{ op, phase: phaseHit.name }], dropOpts);
+			const { phases, errors } = applyOpsToPhases(current, [{ op, phase: phaseHit.name }]);
 			if (errors.length > 0) {
 				this.ctx.showError(errors.join("; "));
 				return;
@@ -384,9 +381,7 @@ export class TodoCommandController {
 		}
 		const taskHit = findTaskFuzzy(current, trimmed);
 		if (taskHit) {
-			const { phases, errors } = applyOpsToPhases(current, [{ op: "rm", task: taskHit.task.content }], {
-				userDrop: true,
-			});
+			const { phases, errors } = applyOpsToPhases(current, [{ op: "rm", task: taskHit.task.content }]);
 			if (errors.length > 0) {
 				this.ctx.showError(errors.join("; "));
 				return;
@@ -397,9 +392,7 @@ export class TodoCommandController {
 		}
 		const phaseHit = findPhaseFuzzy(current, trimmed);
 		if (phaseHit) {
-			const { phases, errors } = applyOpsToPhases(current, [{ op: "rm", phase: phaseHit.name }], {
-				userDrop: true,
-			});
+			const { phases, errors } = applyOpsToPhases(current, [{ op: "rm", phase: phaseHit.name }]);
 			if (errors.length > 0) {
 				this.ctx.showError(errors.join("; "));
 				return;
@@ -436,7 +429,7 @@ export class TodoCommandController {
 				this.ctx.showError(`Could not parse Markdown:\n  ${errors.join("\n  ")}`);
 				return;
 			}
-			this.#commit(stampUserMarkdownAbandoned(parsed), "/todo edit");
+			this.#commit(parsed, "/todo edit");
 			const taskCount = parsed.reduce((sum, p) => sum + p.tasks.length, 0);
 			this.ctx.showStatus(`Todos updated from editor: ${parsed.length} phase(s), ${taskCount} task(s).`);
 		} catch (error) {
@@ -450,12 +443,10 @@ export class TodoCommandController {
 	}
 
 	#commit(nextPhases: TodoPhase[], action: string, opts?: { removed?: boolean }): void {
-		// 1. In-memory + UI state
+		// Persist first so HUD visibility binds to the new canonical source.
 		this.ctx.session.setTodoPhases(nextPhases);
-		this.ctx.setTodos(nextPhases);
-
-		// 2. Persist for reload survival via custom session entry.
 		this.ctx.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: nextPhases });
+		this.ctx.setTodos(nextPhases);
 
 		// 3. Inject system reminder so the agent learns about the change next turn.
 		//    Removals carry explicit intent so the agent does not rebuild the

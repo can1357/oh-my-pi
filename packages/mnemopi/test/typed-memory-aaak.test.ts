@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { CATEGORY_MAP, encode, PHRASE_MAP, STRUCTURAL_REPLACEMENTS } from "@oh-my-pi/pi-mnemopi/core/aaak";
+import { encode } from "@oh-my-pi/pi-mnemopi/core/aaak";
 import {
 	classifyBatch,
 	classifyMemory,
@@ -70,12 +70,6 @@ describe("typed memory classification", () => {
 });
 
 describe("AAAK encoding", () => {
-	it("exports the Python public maps", () => {
-		expect(CATEGORY_MAP.PREFERENCE).toBe("PREF");
-		expect(PHRASE_MAP["User requested "]).toBe("REQ ");
-		expect(STRUCTURAL_REPLACEMENTS).toContainEqual([" and ", "+"]);
-	});
-
 	it("compresses category prefixes, phrases, structure, and parentheses like Python", () => {
 		expect(encode("PREFERENCE: Imperial units for GPS, 12-hour time format ( 5:30 PM )")).toBe(
 			"PREF|Imperial units→GPS | 12-hour time format (5:30 PM)",

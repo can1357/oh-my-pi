@@ -1,11 +1,11 @@
-import type { TodoPhase } from "../../tools/todo";
+import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import {
 	applyOpsToPhases,
-	getLatestTodoPhasesFromEntries,
+	applyUserMarkdownPhases,
 	markdownToPhases,
 	phasesToMarkdown,
 	resolveTodoMarkdownPath,
-	stampUserMarkdownAbandoned,
+	selectAuthoritativeTodoPhases,
 	USER_TODO_EDIT_CUSTOM_TYPE,
 } from "../../tools/todo";
 import type { ParsedSlashCommand, SlashCommandResult, SlashCommandRuntime } from "../types";
@@ -92,8 +92,8 @@ function findTaskFuzzy(phases: TodoPhase[], query: string): TodoTaskMatch | unde
 }
 
 function currentPhases(runtime: SlashCommandRuntime): TodoPhase[] {
-	const fromEntries = getLatestTodoPhasesFromEntries(runtime.sessionManager.getBranch());
-	return fromEntries.length > 0 ? fromEntries : runtime.session.getTodoPhases();
+	// Live cache is authoritative, including explicit empty after RPC clear.
+	return selectAuthoritativeTodoPhases(runtime.session.getTodoPhases());
 }
 
 function commitTodos(runtime: SlashCommandRuntime, phases: TodoPhase[]): void {
@@ -150,9 +150,12 @@ async function handleTodoImportCommand(restArgs: string, runtime: SlashCommandRu
 	} catch (err) {
 		return usage(`Failed to read todos: ${errorMessage(err)}`, runtime);
 	}
-	const { phases, errors } = markdownToPhases(content);
+	const { phases: parsed, errors } = markdownToPhases(content);
 	if (errors.length > 0) return usage(`Could not parse ${target}:\n  ${errors.join("\n  ")}`, runtime);
-	commitTodos(runtime, stampUserMarkdownAbandoned(phases));
+	// Import replaces the list from a user-authored file: stamp every abandoned
+	// marker as a user cancel independently of the replaced in-memory list.
+	const phases = applyUserMarkdownPhases([], parsed);
+	commitTodos(runtime, phases);
 	const taskCount = phases.reduce((sum, phase) => sum + phase.tasks.length, 0);
 	await runtime.output(`Imported ${phases.length} phase(s), ${taskCount} task(s) from ${target}.`);
 	return commandConsumed();
@@ -211,8 +214,7 @@ async function handleTodoMutationCommand(
 			await runtime.output("Cleared all todos.");
 			return commandConsumed();
 		}
-		const dropOpts = verb === "drop" ? { userDrop: true as const } : undefined;
-		const { phases } = applyOpsToPhases(current, [{ op: verb }], dropOpts);
+		const { phases } = applyOpsToPhases(current, [{ op: verb }], { userAuthored: verb === "drop" });
 		commitTodos(runtime, phases);
 		await runtime.output(verb === "done" ? "Marked all tasks completed." : "Marked all tasks abandoned.");
 		return commandConsumed();
@@ -220,8 +222,9 @@ async function handleTodoMutationCommand(
 
 	const taskHit = findTaskFuzzy(current, trimmedArg);
 	if (taskHit) {
-		const dropOpts = verb === "drop" || verb === "rm" ? { userDrop: true as const } : undefined;
-		const { phases } = applyOpsToPhases(current, [{ op: verb, task: taskHit.task.content }], dropOpts);
+		const { phases } = applyOpsToPhases(current, [{ op: verb, task: taskHit.task.content }], {
+			userAuthored: verb === "drop" || verb === "rm",
+		});
 		commitTodos(runtime, phases);
 		const label = verb === "done" ? "Marked completed" : verb === "drop" ? "Marked abandoned" : "Removed";
 		await runtime.output(`${label}: ${taskHit.task.content}`);
@@ -230,8 +233,9 @@ async function handleTodoMutationCommand(
 
 	const phaseHit = findPhaseFuzzy(current, trimmedArg);
 	if (phaseHit) {
-		const dropOpts = verb === "drop" || verb === "rm" ? { userDrop: true as const } : undefined;
-		const { phases } = applyOpsToPhases(current, [{ op: verb, phase: phaseHit.name }], dropOpts);
+		const { phases } = applyOpsToPhases(current, [{ op: verb, phase: phaseHit.name }], {
+			userAuthored: verb === "drop" || verb === "rm",
+		});
 		commitTodos(runtime, phases);
 		const message =
 			verb === "done"

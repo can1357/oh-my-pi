@@ -1,8 +1,9 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { beforeAll, describe, expect, it, spyOn } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-utils";
 // Import from source, not the package specifier: the workspace `node_modules`
 // copy resolves to the primary checkout, not this worktree.
 import { buildModel } from "../src/build";
+import { seedModels } from "../src/compat/providers";
 import { fetchDevinModels } from "../src/discovery/devin";
 import {
 	type ClientModelConfig,
@@ -22,8 +23,8 @@ import {
 } from "../src/discovery/devin-proto";
 import { create, fromBinary, toBinary } from "../src/discovery/protobuf";
 import { Effort } from "../src/effort";
-import { CATALOG_PROVIDERS } from "../src/provider-models/descriptors";
-import { DEVIN_STATIC_MODELS, devinModelManagerOptions } from "../src/provider-models/special";
+import { providerEntry } from "../src/compat/providers";
+import { devinModelManagerOptions } from "../src/provider-models/special";
 import type { ModelSpec, ThinkingConfig } from "../src/types";
 
 /** `DISPLAY_OPTION_INTERNAL_DEFAULT`, absent from the vendored descriptor's enum. */
@@ -37,6 +38,8 @@ interface ConfigInit {
 	disabled?: boolean;
 	displayOption?: DisplayOption;
 	isModelRouter?: boolean;
+	/** `ModelInfo.harnessUids` — non-empty marks a harness-backed composite, not an AssignModel slot. */
+	harnessUids?: string[];
 	/** `ClientModelConfig.maxTokens` — the context window. */
 	contextWindow?: number;
 	maxOutputTokens?: number;
@@ -47,7 +50,7 @@ interface ConfigInit {
 		supportsImages?: boolean;
 	};
 	supportsImages?: boolean;
-	dimensions?: readonly { label: string; value: number; denominator?: string }[];
+	dimensions?: readonly { label: string; value: number; denominator?: string; kind?: ModelDimensionKind }[];
 	/** `modelFamilyMetadata.modelFamilyLabel`. */
 	family?: string;
 	/** `Reasoning Effort` entry name; omitted means the family has no effort axis. */
@@ -128,7 +131,7 @@ function config(init: ConfigInit): ClientModelConfig {
 				label: dimension.label,
 				value: dimension.value,
 				denominator: dimension.denominator ?? "1M tokens",
-				kind: ModelDimensionKind.COST,
+				kind: dimension.kind ?? ModelDimensionKind.COST,
 			}),
 		),
 		...(init.family !== undefined
@@ -147,6 +150,7 @@ function config(init: ConfigInit): ClientModelConfig {
 						displayOption: init.displayOption ?? DisplayOption.UNSPECIFIED,
 						maxOutputTokens: init.maxOutputTokens ?? 64_000,
 						isModelRouter: init.isModelRouter ?? false,
+						harnessUids: init.harnessUids ?? [],
 						...(init.features !== undefined ? { modelFeatures: create(ModelFeaturesSchema, init.features) } : {}),
 					}),
 				}),
@@ -278,6 +282,43 @@ const FIXTURE_CONFIGS: readonly ClientModelConfig[] = [
 		family: "Adaptive",
 		effort: "Medium",
 	}),
+	// Harness-backed composite: router-flagged but a valid chat uid itself, so
+	// `AssignModel` must not be used. Its `modelDimensions` flatten the composite
+	// rate card plus each dispatched component's card, separated by `Sidekick`
+	// markers — only the headline card is priced.
+	config({
+		uid: "fusion",
+		label: "Fusion",
+		displayOption: DisplayOption.MODEL_ROUTER,
+		isModelRouter: true,
+		harnessUids: ["fusion"],
+		dimensions: [
+			{ label: "Input", value: 10 },
+			{ label: "Cached input", value: 0.25 },
+			{ label: "Output", value: 50 },
+			{ label: "Sidekick", value: 0, kind: ModelDimensionKind.UNSPECIFIED },
+			{ label: "Input", value: 3 },
+			{ label: "Cached input", value: 0.3 },
+			{ label: "Output", value: 15 },
+		],
+	}),
+	// Sparse headline card: no `Cached input` of its own, so a repeated-label
+	// heuristic would consume the component's cache rate as the composite's.
+	config({
+		uid: "fusion-sparse",
+		label: "Fusion Sparse",
+		displayOption: DisplayOption.MODEL_ROUTER,
+		isModelRouter: true,
+		harnessUids: ["fusion"],
+		dimensions: [
+			{ label: "Input", value: 10 },
+			{ label: "Output", value: 50 },
+			{ label: "Sidekick", value: 0, kind: ModelDimensionKind.UNSPECIFIED },
+			{ label: "Cached input", value: 0.3 },
+			{ label: "Input", value: 3 },
+			{ label: "Output", value: 15 },
+		],
+	}),
 	// Internal display slots: requested so the server reveals them, never exposed.
 	config({ uid: "quick-review-internal", displayOption: DisplayOption.QUICK_REVIEW }),
 	config({ uid: "internal-default", displayOption: DISPLAY_OPTION_INTERNAL_DEFAULT }),
@@ -389,6 +430,42 @@ describe("devin native discovery request", () => {
 		expect(requestMetadata?.apiKey).toBe("devin-session-token$fixture-token");
 	});
 
+	it("falls back to the legacy Windsurf identity when native discovery returns only the seed", async () => {
+		const nativePayload = toBinary(
+			GetCliModelConfigsResponseSchema,
+			create(GetCliModelConfigsResponseSchema, {
+				clientModelConfigs: [config({ uid: "swe-1-6" }), config({ uid: "swe-1-6-fast" })],
+			}),
+		);
+		const legacyPayload = toBinary(
+			GetCliModelConfigsResponseSchema,
+			create(GetCliModelConfigsResponseSchema, {
+				clientModelConfigs: [
+					config({ uid: "swe-1-6" }),
+					config({ uid: "swe-1-6-fast" }),
+					config({ uid: "glm-5-2" }),
+				],
+			}),
+		);
+		const requests: Metadata[] = [];
+		const fetchImpl: FetchImpl = async (_input, init) => {
+			const metadata = fromBinary(
+				GetCliModelConfigsRequestSchema,
+				new Uint8Array(init?.body as Uint8Array),
+			).metadata;
+			if (metadata === undefined) throw new Error("expected discovery metadata");
+			requests.push(metadata);
+			const payload = metadata.ideName === "windsurf" ? legacyPayload : nativePayload;
+			return new Response(payload, { status: 200, headers: { "content-type": "application/proto" } });
+		};
+
+		const discovered = await fetchDevinModels({ apiKey: "legacy-key", fetch: fetchImpl });
+
+		expect(discovered?.map(entry => entry.id)).toEqual(["glm-5-2", "swe-1-6", "swe-1-6-fast"]);
+		expect(requests.map(metadata => metadata.ideName)).toEqual(["chisel", "windsurf"]);
+		expect(requests[1]?.apiKey).toBe("legacy-key");
+	});
+
 	it("treats an empty-but-200 catalog as failed discovery so the seed survives", async () => {
 		const emptyPayload = toBinary(
 			GetCliModelConfigsResponseSchema,
@@ -430,6 +507,82 @@ describe("devin native display filtering", () => {
 		expect(adaptive.contextWindow).toBe(200_000);
 		expect(adaptive.maxTokens).toBe(64_000);
 		expect(adaptive.baseUrl).toBe("https://server.codeium.com");
+	});
+
+	it("surfaces a harness-backed composite as a direct-chat model, not an AssignModel router", () => {
+		const fusion = model("fusion");
+		expect(fusion.compat?.modelRouter).toBeUndefined();
+		// Composite dims flatten the composite card plus each component's card;
+		// only the headline card is the model's own rate.
+		expect(fusion.cost).toEqual({ input: 10, output: 50, cacheRead: 0.25, cacheWrite: 0 });
+	});
+
+	it("sends Fusion pairings through an available lead rather than the composite uid", async () => {
+		const pairing = (uid: string, init: Partial<ConfigInit> = {}) =>
+			config({ uid, isModelRouter: true, harnessUids: ["fusion"], ...init });
+		const configs = [
+			config({
+				uid: "gpt-6-sol-high",
+				contextWindow: 400_000,
+				maxOutputTokens: 128_000,
+				features: { supportsToolCalls: true, supportsImages: true },
+				dimensions: [
+					{ label: "Input", value: 2 },
+					{ label: "Output", value: 8 },
+				],
+			}),
+			config({ uid: "gpt-6-sol-high-priority" }),
+			config({ uid: "claude-opus-5-high" }),
+			config({ uid: "claude-opus-5-high-priority", disabled: true }),
+			config({ uid: "swe-1-6-fast" }),
+			config({ uid: "swe-1-6-priority" }),
+			config({ uid: "swe-2-high" }),
+			config({ uid: "kimi-k3", disabled: true }),
+			pairing("fusion-gpt-6-sol-high-sidekick-swe-2-high", {
+				contextWindow: 1_000_000,
+				maxOutputTokens: 256_000,
+				dimensions: [
+					{ label: "Input", value: 10 },
+					{ label: "Output", value: 50 },
+				],
+			}),
+			pairing("fusion-gpt-6-sol-high-fast-sidekick-swe-2-high"),
+			pairing("fusion-claude-opus-5-high-fast-sidekick-swe-2-high"),
+			pairing("fusion-swe-1-6-fast-sidekick-swe-2-high"),
+			pairing("fusion-kimi-k3-sidekick-swe-2-high"),
+			pairing("fusion-sidekick-swe-2-high"),
+			pairing("fusion"),
+		];
+		const payload = toBinary(
+			GetCliModelConfigsResponseSchema,
+			create(GetCliModelConfigsResponseSchema, { clientModelConfigs: configs }),
+		);
+		const fetched = await fetchDevinModels({
+			apiKey: "fixture-token",
+			fetch: async () => new Response(payload, { status: 200, headers: { "content-type": "application/proto" } }),
+		});
+		const find = (id: string) => fetched?.find(entry => entry.id === id);
+		const wireId = (id: string) => find(id)?.requestModelId;
+		expect(wireId("fusion-gpt-6-sol-high-sidekick-swe-2-high")).toBe("gpt-6-sol-high");
+		expect(wireId("fusion-gpt-6-sol-high-fast-sidekick-swe-2-high")).toBe("gpt-6-sol-high-priority");
+		expect(wireId("fusion-claude-opus-5-high-fast-sidekick-swe-2-high")).toBe("claude-opus-5-high");
+		// A lead whose own uid ends in `-fast` routes as written, not to a `-priority` lane.
+		expect(wireId("fusion-swe-1-6-fast-sidekick-swe-2-high")).toBe("swe-1-6-fast");
+		// No live lead: the composite uid is unservable, so the pairing is not listed.
+		expect(find("fusion-kimi-k3-sidekick-swe-2-high")).toBeUndefined();
+		expect(wireId("fusion-sidekick-swe-2-high")).toBeUndefined();
+		expect(wireId("fusion")).toBeUndefined();
+		// Only the lead runs, so limits and pricing are the lead's, not the composite card's.
+		const routed = find("fusion-gpt-6-sol-high-sidekick-swe-2-high");
+		expect(routed?.contextWindow).toBe(400_000);
+		expect(routed?.maxTokens).toBe(128_000);
+		expect(routed?.input).toEqual(["text", "image"]);
+		expect(routed?.cost).toEqual({ input: 2, output: 8, cacheRead: 0, cacheWrite: 0 });
+	});
+
+	it("stops composite pricing at the Sidekick marker even with a sparse headline card", () => {
+		const fusion = model("fusion-sparse");
+		expect(fusion.cost).toEqual({ input: 10, output: 50, cacheRead: 0, cacheWrite: 0 });
 	});
 });
 
@@ -588,12 +741,12 @@ describe("devin server-declared family collapsing", () => {
 
 describe("devin catalog seed", () => {
 	it("seeds both live SWE-1.6 lanes so the descriptor default resolves offline", () => {
-		const descriptor = CATALOG_PROVIDERS.find(entry => entry.id === "devin");
+		const descriptor = providerEntry("devin");
 		expect(descriptor?.defaultModel).toBe("swe-1-6");
-		expect(DEVIN_STATIC_MODELS.map(model => model.id)).toEqual(["swe-1-6-fast", "swe-1-6"]);
-		expect(DEVIN_STATIC_MODELS.some(model => model.id === descriptor?.defaultModel)).toBe(true);
+		expect(seedModels("devin").map(model => model.id)).toEqual(["swe-1-6-fast", "swe-1-6"]);
+		expect(seedModels("devin").some(model => model.id === descriptor?.defaultModel)).toBe(true);
 
-		const fast = buildModel(DEVIN_STATIC_MODELS[0] as ModelSpec<"devin-agent">);
+		const fast = buildModel(seedModels("devin")[0] as ModelSpec<"devin-agent">);
 		expect(fast.cost).toEqual({ input: 0.3, output: 1.5, cacheRead: 0.03, cacheWrite: 0 });
 		expect(fast.contextWindow).toBe(200_000);
 		expect(fast.maxTokens).toBe(128_000);
@@ -607,11 +760,54 @@ describe("devin catalog seed", () => {
 	});
 
 	it("pins the seed to a configured Cascade host", () => {
-		expect(devinModelManagerOptions().staticModels).toBe(DEVIN_STATIC_MODELS);
+		expect(devinModelManagerOptions().staticModels).toBe(seedModels("devin"));
 		const scoped = devinModelManagerOptions({ baseUrl: "https://cascade.internal" });
 		expect(scoped.staticModels?.map(model => model.baseUrl)).toEqual([
 			"https://cascade.internal",
 			"https://cascade.internal",
 		]);
+	});
+});
+
+describe("devin cost-fallback", () => {
+	const zero = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+
+	function spec(id: string, cost = zero): ModelSpec<"devin-agent"> {
+		return {
+			id,
+			name: id,
+			api: "devin-agent",
+			provider: "devin",
+			baseUrl: "https://server.codeium.com",
+			reasoning: true,
+			input: ["text"],
+			supportsTools: true,
+			cost,
+			contextWindow: 200_000,
+			maxTokens: 128_000,
+		};
+	}
+
+	it("prices plan-included SWE-2 at the promo fallback without a recurring tariff", () => {
+		const model = buildModel(spec("swe-2"));
+		expect(model.cost).toMatchObject({ input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0.75 });
+		expect(model.cost.timeBased).toBeUndefined();
+	});
+
+	it("switches the SWE-2 fallback to list after the promo ends", () => {
+		const clock = spyOn(Date, "now").mockReturnValue(Date.parse("2027-01-01T00:00:00Z"));
+		try {
+			const model = buildModel(spec("swe-2"));
+			expect(model.cost).toMatchObject({ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3 });
+			expect(model.cost.timeBased).toBeUndefined();
+		} finally {
+			clock.mockRestore();
+		}
+	});
+
+	it("does not overwrite a discovery row that already has token prices", () => {
+		const model = buildModel(spec("swe-2", { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3 }));
+		expect(model.cost).toMatchObject({ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3 });
+		expect(model.cost.timeBased).toBeUndefined();
 	});
 });

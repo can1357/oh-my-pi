@@ -1,6 +1,11 @@
 // Provider-wire compat for "cline-pass".
 
 provider "cline-pass" {
+	default-model "kimi-k3"
+	env "CLINE_API_KEY"
+	dynamic-models-authoritative #true
+	discovery label="ClinePass" allow-unauthenticated=#true
+
 	// Replaces the Cline Pass wire-model-id dispatch branch.
 	wire-model-id-mode "cline-pass"
 	// Replaces the Cline Pass thinking-format branch.

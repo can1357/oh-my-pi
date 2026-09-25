@@ -12,13 +12,14 @@
  * carry subsystem-specific message types — lives in the per-subsystem
  * `types.ts` files and is documented there.
  */
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, isNonBlankContext } from "@oh-my-pi/pi-agent-core";
 import type { CompactionPreparation, CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantRetryRecovery, ImageContent, TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import type { Rule } from "../capability/rule";
-import type { Goal, GoalModeState } from "../goals/state";
+import type { Goal } from "@oh-my-pi/pi-tui/tools/goal";
+import type { GoalModeState } from "../goals/state";
 import type { BranchSummaryEntry, CompactionEntry, SessionEntry } from "../session/session-entries";
-import type { TodoItem } from "../tools/todo";
+import type { TodoItem } from "@oh-my-pi/pi-tui/tools/todo";
 
 // ============================================================================
 // Session Events
@@ -272,6 +273,8 @@ export interface RetryFallbackAppliedEvent {
 	from: string;
 	to: string;
 	role: string;
+	/** Decision-time cause, including whether the source request was skipped. */
+	reason?: string;
 }
 
 /** Fired when a request succeeds on the fallback model applied by auto-retry. */
@@ -331,6 +334,50 @@ export interface ToolCallEventResult {
 	 * write gate's approval and faces the full prompt again.
 	 */
 	input?: Record<string, unknown>;
+	/**
+	 * Trusted handler-authored instructions for the next provider request. The
+	 * host emits them after tool results with developer/system priority where
+	 * supported. Raw tool output and other untrusted data must stay in the tool
+	 * result. Non-empty values from every non-blocking handler are preserved in
+	 * registration order; ignored when this or a later handler blocks the call.
+	 */
+	additionalContext?: string;
+}
+
+/**
+ * Merge one handler's `tool_call` result into the running aggregation.
+ * Non-blank `additionalContext` values accumulate in registration order and
+ * join with a blank line at the end; `input` stays last-wins. A `block`
+ * result short-circuits the caller, discarding everything collected so far.
+ */
+export function accumulateToolCallResult(
+	aggregated: { input?: Record<string, unknown>; additionalContext: string[] },
+	handlerResult: ToolCallEventResult,
+): void {
+	if (isNonBlankContext(handlerResult.additionalContext)) {
+		aggregated.additionalContext.push(handlerResult.additionalContext);
+	}
+	if (handlerResult.input !== undefined) {
+		aggregated.input = handlerResult.input;
+	}
+}
+
+/**
+ * Build the aggregated `tool_call` result from collected context and input.
+ * Returns undefined when there is nothing to carry beyond the control result.
+ */
+export function buildAggregatedToolCallResult(
+	result: ToolCallEventResult | undefined,
+	aggregated: { input?: Record<string, unknown>; additionalContext: string[] },
+): ToolCallEventResult | undefined {
+	const { input, additionalContext } = aggregated;
+	if (additionalContext.length === 0 && input === undefined) return result;
+	const { additionalContext: _dropped, input: _droppedInput, ...controlResult } = result ?? {};
+	return {
+		...controlResult,
+		...(input !== undefined ? { input } : {}),
+		...(additionalContext.length > 0 ? { additionalContext: additionalContext.join("\n\n") } : {}),
+	};
 }
 
 /**
