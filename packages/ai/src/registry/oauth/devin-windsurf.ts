@@ -136,7 +136,14 @@ export async function exchangeWindsurfPkceCode(
 		body: encodeTwoStringProto(code, codeVerifier),
 	});
 	if (!response.ok) {
-		const detail = await response.text();
+		// The error body is a detail, not the failure: an unreadable stream must
+		// not replace the OAuthError with a raw read error.
+		let detail = "";
+		try {
+			detail = await response.text();
+		} catch {
+			detail = "<unreadable>";
+		}
 		throw new AIError.OAuthError(`Windsurf PKCE exchange failed: ${response.status} ${detail}`.trim(), {
 			kind: "validation",
 			provider: "devin-windsurf",
