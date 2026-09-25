@@ -344,6 +344,31 @@ describe("pi-natives", () => {
 	});
 
 	describe("grep", () => {
+		it("delivers a completed result after the JS thread resumes past its deadline", async () => {
+			const pending = grep({
+				pattern: "TODO",
+				path: testDir,
+				timeoutMs: 1_000,
+			});
+			Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1_200);
+
+			await expect(pending).resolves.toMatchObject({ totalMatches: 1 });
+		});
+
+		it("discards a completed result when an AbortSignal fires before settlement", async () => {
+			const controller = new AbortController();
+			const pending = grep({
+				pattern: "TODO",
+				path: testDir,
+				timeoutMs: 5_000,
+				signal: controller.signal,
+			});
+			Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+			controller.abort();
+
+			await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+		});
+
 		it("should find patterns in files", async () => {
 			const result = await grep({
 				pattern: "TODO",

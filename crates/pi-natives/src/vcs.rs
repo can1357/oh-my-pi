@@ -40,6 +40,10 @@ fn rich_error(env: Env, err: pi_vcs::Error) -> napi::Error {
 	})();
 	built.unwrap_or_else(|_| napi::Error::from_reason(message))
 }
+
+fn canceled_error(env: Env, _reason: task::AbortReason) -> napi::Error {
+	rich_error(env, pi_vcs::Error::Canceled)
+}
 /// Run a tokio-backed VCS future, rejecting with the rich `VcsError` built on
 /// the JS thread. A deferred promise is used because napi future rejections
 /// can only carry a message string; the deferred resolver runs with `Env` and
@@ -462,7 +466,7 @@ fn blocking<T: Send + 'static + ToNapiValue + TypeName>(
 	f: impl FnOnce(&pi_vcs::git::GitRepo) -> pi_vcs::Result<T> + Send + 'static,
 ) -> Promise<T> {
 	let ct = task::CancelToken::new(None, signal);
-	task::blocking_mapped(tag, ct, rich_error, move |ct| {
+	task::blocking_mapped(tag, ct, rich_error, canceled_error, move |ct| {
 		if ct.heartbeat().is_err() {
 			return Err(pi_vcs::Error::Canceled);
 		}
@@ -476,7 +480,7 @@ fn repo_blocking<T: Send + 'static + ToNapiValue + TypeName>(
 	f: impl FnOnce(&pi_vcs::Repo) -> pi_vcs::Result<T> + Send + 'static,
 ) -> Promise<T> {
 	let ct = task::CancelToken::new(None, signal);
-	task::blocking_mapped(tag, ct, rich_error, move |ct| {
+	task::blocking_mapped(tag, ct, rich_error, canceled_error, move |ct| {
 		if ct.heartbeat().is_err() {
 			return Err(pi_vcs::Error::Canceled);
 		}
@@ -1390,7 +1394,7 @@ pub fn vcs_detach_git_dir(
 	signal: Option<Unknown>,
 ) -> Promise<String> {
 	let ct = task::CancelToken::new(None, signal);
-	task::blocking_mapped("vcs.detachGitDir", ct, rich_error, move |ct| {
+	task::blocking_mapped("vcs.detachGitDir", ct, rich_error, canceled_error, move |ct| {
 		if ct.heartbeat().is_err() {
 			return Err(pi_vcs::Error::Canceled);
 		}
@@ -1451,7 +1455,7 @@ fn jj_blocking<T: Send + 'static + ToNapiValue + TypeName>(
 	f: impl FnOnce(&pi_vcs::jj::JjWorkspace) -> pi_vcs::Result<T> + Send + 'static,
 ) -> Promise<T> {
 	let ct = task::CancelToken::new(None, signal);
-	task::blocking_mapped(tag, ct, rich_error, move |ct| {
+	task::blocking_mapped(tag, ct, rich_error, canceled_error, move |ct| {
 		if ct.heartbeat().is_err() {
 			return Err(pi_vcs::Error::Canceled);
 		}

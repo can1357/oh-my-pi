@@ -100,6 +100,15 @@ impl CancelToken {
 		Ok(())
 	}
 
+	/// Return the explicit abort flag reason, excluding an elapsed deadline.
+	///
+	/// Completion callbacks use this to distinguish an `AbortSignal` from a
+	/// timeout that elapsed only while the JavaScript thread was busy settling
+	/// a result that had already completed within budget.
+	pub fn abort_reason(&self) -> Option<AbortReason> {
+		self.flag.as_ref().and_then(|flag| flag.cause())
+	}
+
 	pub async fn wait(&self) -> AbortReason {
 		if let Some(flag) = self.flag.as_ref().and_then(|flag| flag.cause()) {
 			return flag;
@@ -160,5 +169,23 @@ impl AbortToken {
 		{
 			flag.abort(reason);
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::time::Duration;
+
+	use super::{AbortReason, CancelToken};
+
+	#[test]
+	fn abort_reason_ignores_an_elapsed_deadline_but_reports_an_explicit_abort() {
+		let expired = CancelToken::with_timeout(Some(Duration::ZERO));
+		assert!(expired.heartbeat().is_err());
+		assert!(expired.abort_reason().is_none());
+
+		let mut signaled = CancelToken::default();
+		signaled.emplace_abort_token().abort(AbortReason::Signal);
+		assert!(matches!(signaled.abort_reason(), Some(AbortReason::Signal)));
 	}
 }
