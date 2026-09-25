@@ -5,7 +5,7 @@
  * when a woken subagent re-yields, so a parent reads the same shape (status,
  * preview, `agent://` pointer) regardless of which path delivered it.
  */
-import { prompt } from "@oh-my-pi/pi-utils";
+import { prompt, truncate } from "@oh-my-pi/pi-utils";
 import taskSummaryTemplate from "../prompts/tools/task-summary.md" with { type: "text" };
 import { AgentRegistry } from "../registry/agent-registry";
 import { formatBytes, formatDuration } from "@oh-my-pi/pi-tui/render/render-utils";
@@ -52,9 +52,10 @@ export function formatTaskResultSummary(
 	const output = formatResultOutputFallback(result);
 	// The preview prefers `output` over `stderr`, so a run that failed after
 	// streaming prose (provider stream error, missing yield) would otherwise
-	// show only the half-written text and no reason. Aborts carry their own
-	// <abort-reason>; an empty output already previews the error itself.
-	const error = result.exitCode !== 0 && !result.aborted && result.output.trim().length > 0 ? result.error : undefined;
+	// show only the half-written text and no reason. Merge failures also keep
+	// the child's output. Aborts carry their own <abort-reason>; do not repeat
+	// an error already shown by the output fallback.
+	const error = !result.aborted && result.error?.trim() !== output ? result.error : undefined;
 	const outputCharCount = result.outputMeta?.charCount ?? output.length;
 	const truncated = outputCharCount > FULL_OUTPUT_THRESHOLD && result.outputPath !== undefined;
 	const preview = truncated ? previewHead(output) : output;
@@ -70,7 +71,8 @@ export function formatTaskResultSummary(
 		status,
 		duration: formatDuration(options.totalDurationMs),
 		abortReason: result.aborted ? result.abortReason : undefined,
-		error,
+		error: error ? truncate(error, 2000) : undefined,
+		failedOutput: (result.exitCode !== 0 || !!result.error) && !!result.outputPath,
 		resumable,
 		preview,
 		truncated,
