@@ -133,7 +133,7 @@ pub(crate) struct Host {
 	/// set [`Utility::RUNS_COMMANDS`].
 	commands:              Option<flume::Sender<CommandRequest>>,
 	/// Resource placement inherited by external children, never this builtin's thread.
-	spawn_placement:       Option<Arc<dyn SpawnPlacement>>,
+	spawn_placement:        Option<Arc<dyn SpawnPlacement>>,
 }
 
 fn output_handle(file: &OpenFile) -> Option<OpenFile> {
