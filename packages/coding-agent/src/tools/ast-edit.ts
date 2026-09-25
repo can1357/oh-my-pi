@@ -1,25 +1,32 @@
 import type { AstEditToolDetails } from "@oh-my-pi/pi-tui/tools/ast-edit";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import type {
+	AgentTool,
+	AgentToolContext,
+	AgentToolResult,
+	AgentToolUpdateCallback,
+	ToolApprovalDecision,
+} from "@oh-my-pi/pi-agent-core";
 import type { ToolExample } from "@oh-my-pi/pi-ai";
 import { type AstReplaceChange, type AstReplaceFileChange, astEdit } from "@oh-my-pi/pi-natives";
 
-import { $envpos, prompt, untilAborted } from "@oh-my-pi/pi-utils";
+import { $envpos, isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { getEditStore } from "../edit/store";
 import { normalizeToLF } from "../edit/normalize";
+import { InternalUrlRouter, sessionResolveContext } from "../internal-urls";
 import { formatHashlineHeader } from "@oh-my-pi/pi-tui/tools/hashline-format";
 
 import astEditDescription from "../prompts/tools/ast-edit.md" with { type: "text" };
 
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import type { ToolSession } from ".";
-import { truncateForPrompt } from "./approval";
+import { strictestApproval, truncateForPrompt } from "./approval";
 import { parseReadUrlTarget } from "./fetch";
 import { createFileRecorder, formatResultPath } from "./file-recorder";
 import { formatGroupedFiles } from "@oh-my-pi/pi-tui/tools/grouped-file-output";
 
-import { isInternalUrlPath, resolveToolSearchScope } from "./path-utils";
+import { resolveToolSearchScope } from "./path-utils";
 import {
 	capParseErrors,
 	formatCodeFrameLine,
@@ -141,11 +148,18 @@ type AstEditSchemaInfer = typeof astEditSchema.infer;
 
 export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolDetails> {
 	readonly name = "ast_edit";
-	readonly approval = (args: unknown) => {
-		const paths = Array.isArray((args as Partial<AstEditSchemaInfer>).paths)
-			? ((args as Partial<AstEditSchemaInfer>).paths as string[])
-			: [];
-		return paths.length > 0 && paths.every(path => isInternalUrlPath(path)) ? "read" : "write";
+	/** Strictest write decision ({@link strictestApproval}) over every path; "write" when none is given. */
+	readonly approval = (args: unknown): ToolApprovalDecision => {
+		const paths = isRecord(args) ? args.paths : undefined;
+		if (!Array.isArray(paths) || paths.length === 0) return "write";
+		const router = InternalUrlRouter.instance();
+		const decisions: ToolApprovalDecision[] = [];
+		for (const target of paths) {
+			// A malformed entry fails closed rather than reaching a tier decision.
+			if (typeof target !== "string") return "exec";
+			decisions.push(router.writeTier(target, undefined, undefined));
+		}
+		return strictestApproval(decisions);
 	};
 	readonly formatApprovalDetails = (args: unknown): string[] => {
 		const params = args as Partial<AstEditSchemaInfer>;
@@ -247,18 +261,13 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 			const normalizedRewrites = Object.fromEntries(ops);
 			const maxFiles = $envpos("PI_MAX_AST_FILES", 1000);
 
+			const resolveContext = sessionResolveContext(this.session, { signal });
 			const scope = await resolveToolSearchScope({
 				rawPaths: params.paths,
 				cwd: this.session.cwd,
 				internalUrlAction: "rewrite",
-				settings: this.session.settings,
-				signal,
-				sessionFile: this.session.getSessionFile() ?? undefined,
-				sessionId: this.session.sessionManager?.getSessionId?.() ?? this.session.getSessionId?.() ?? undefined,
-				agentRegistry: this.session.agentRegistry,
-				localProtocolOptions: this.session.localProtocolOptions,
-				skills: this.session.skills,
-				rules: this.session.activeRules,
+				context: resolveContext,
+				fileWritableOnly: true,
 				resolveExternalUrl: async rawPath => {
 					if (!parseReadUrlTarget(rawPath)) return undefined;
 					throw new ToolError(

@@ -281,6 +281,7 @@ interface RawMcpServer {
 	requestIdFormat?: unknown;
 	enabledTools?: unknown;
 	disabledTools?: unknown;
+	instructions?: unknown;
 	command?: string;
 	args?: string[];
 	env?: Record<string, string>;
@@ -372,12 +373,24 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 			const requestIdFormat = parseRequestIdFormat(
 				cfg.requestIdFormat === undefined ? undefined : expandEnvVarsDeep(cfg.requestIdFormat, pluginRootEnv),
 			);
+			if (requestIdFormat === undefined && cfg.requestIdFormat != null) {
+				logger.warn(
+					`[omp-plugins] MCP server "${serverName}" in ${mcpPath}: invalid requestIdFormat ${JSON.stringify(cfg.requestIdFormat)}, ignoring`,
+				);
+			}
+			const instructions = typeof cfg.instructions === "boolean" ? cfg.instructions : undefined;
+			if (instructions === undefined && cfg.instructions != null) {
+				logger.warn(
+					`[omp-plugins] MCP server "${serverName}" in ${mcpPath}: invalid instructions ${JSON.stringify(cfg.instructions)}, ignoring`,
+				);
+			}
 			items.push({
 				name: serverName,
 				...(pluginEnabled !== undefined && { enabled: pluginEnabled }),
 				...(pluginTimeout !== undefined && { timeout: pluginTimeout }),
 				...(requestIdFormat !== undefined && { requestIdFormat }),
 				...parseMCPToolFilters(serverName, cfg),
+				...(instructions !== undefined && { instructions }),
 				...(rooted.command !== undefined && { command: rooted.command }),
 				...(cfg.args !== undefined && { args: expandEnvVarsDeep(cfg.args, pluginRootEnv) }),
 				...(cfg.env !== undefined && { env: expandEnvVarsDeep(cfg.env, pluginRootEnv) }),

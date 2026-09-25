@@ -21,6 +21,8 @@ export interface MCPServer {
 	timeout?: number;
 	/** Encoding for outgoing JSON-RPC request ids (default: `"number"`) */
 	requestIdFormat?: MCPRequestIdFormat;
+	/** Include server-provided instructions in the system prompt (default: true) */
+	instructions?: boolean;
 	/** Per-server tool allowlist (globs over raw advertised names). */
 	enabledTools?: string[];
 	/** Per-server tool denylist; wins over `enabledTools`. */

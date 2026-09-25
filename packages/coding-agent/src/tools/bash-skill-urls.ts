@@ -1,201 +1,33 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { resolveContainedPath, type ContainedPathResolution } from "../discovery/contained-path";
-import type { Rule } from "../capability/rule";
-import type { Skill } from "../extensibility/skills";
-import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
-import { validateRelativePath } from "../internal-urls/skill-protocol";
-import type { InternalResource, ResolveContext } from "../internal-urls/types";
-import type { ImageAttachmentEntry } from ".";
-import { normalizeLocalScheme } from "./path-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { InternalUrlRouter } from "../internal-urls";
+import { extractUriScheme } from "../internal-urls/parse";
+import type { ResolveContext } from "../internal-urls/types";
 
-/**
- * A `skill://` URL that resolves outside its plugin root or to a missing target.
- * Unlike other resolution failures, containment violations MUST fail closed:
- * `expandInternalUrls` rethrows them instead of leaving the token for the
- * shell (which would read it as a relative path).
- */
-export class SkillContainmentError extends ToolError {
-	constructor(message: string) {
-		super(message);
-		this.name = "SkillContainmentError";
-	}
-}
+// Candidate `scheme://…` tokens (quoted or bare), plus the single-slash
+// `scheme:/…` spelling normalized below. Bare tokens stop before shell syntax
+// so expansion cannot quote an adjacent operator or substitution into the
+// resolved path; the bare single-slash form only starts at a token boundary so
+// it never matches inside a filesystem path or a longer word.
+const INTERNAL_URL_TOKEN_PATTERN =
+	/'[a-z][a-z0-9+.-]*:\/[^'\s")`\\]+'|"[a-z][a-z0-9+.-]*:\/[^"\s')`\\]+"|[a-z][a-z0-9+.-]*:\/\/[^\s'")`\\;&|<>($]+|(?<![./\\\w-])[a-z][a-z0-9+.-]*:\/(?!\/)[^\s'")`\\;&|<>($]+/gi;
 
-// Unquoted URLs stop before shell syntax so expansion cannot quote an adjacent
-// operator or substitution into the resolved path.
-const INTERNAL_URL_PATTERN_INCLUDING_NORMALIZED_LOCAL =
-	/'(?:skill|agent|artifact|plan|memory|rule|local|attachment):\/\/[^'\s")`\\]+'|"(?:skill|agent|artifact|plan|memory|rule|local|attachment):\/\/[^"\s')`\\]+"|(?:skill|agent|artifact|plan|memory|rule|local|attachment):\/\/[^\s'")`\\;&|<>($]+|'local:\/[^'\s")`\\]+'|"local:\/[^"\s')`\\]+"|(?<![./\\\\\w-])local:\/[^\s'")`\\;&|<>($]+/g;
-
-const SUPPORTED_INTERNAL_SCHEMES = [
-	"skill",
-	"agent",
-	"artifact",
-	"plan",
-	"memory",
-	"rule",
-	"local",
-	"attachment",
-] as const;
-
-type SupportedInternalScheme = (typeof SUPPORTED_INTERNAL_SCHEMES)[number];
-
-interface InternalUrlResolver {
-	canHandle(input: string): boolean;
-	resolve(input: string, context?: ResolveContext): Promise<InternalResource>;
-}
+// A heredoc operator and its delimiter word (`<<EOF`, `<<-'EOF'`, `<< "END"`), matched at a `<<`.
+const HEREDOC_OPERATOR_RE = /<<(-?)[ \t]*((?:[^\s;&|<>()'"\\]|\\.|'[^']*'|"[^"]*")+)/y;
 
 export interface InternalUrlExpansionOptions {
-	skills: readonly Skill[];
-	attachments?: readonly ImageAttachmentEntry[];
+	/** Calling session's resolve context, handed to every scheme's `locate`. */
+	context: ResolveContext;
+	/** Substitute raw paths instead of shell-escaped ones (e.g. for a cwd value). */
 	noEscape?: boolean;
-	internalRouter?: InternalUrlResolver;
-	localOptions?: LocalProtocolOptions;
-	cwd?: string;
-	sessionFile?: string;
-	sessionId?: string;
-	agentRegistry?: ResolveContext["agentRegistry"];
-	ensureLocalParentDirs?: boolean;
-	/** Resolve bare skill:// URIs to the skill base directory instead of the instruction file. */
-	skillUrlForDirectory?: boolean;
-	/** Calling session's agent-scoped applicable rules — lets rule:// resolve without process-global state. */
-	rules?: readonly Rule[];
-}
-
-/**
- * Parse a skill:// URL into its structural pieces — validated skill match,
- * bare-URI target, or traversal-validated relative path — shared by the sync
- * and async resolvers so the security contract cannot diverge. Only the
- * containment operation varies between the two entry points.
- */
-function parseSkillUrlTarget(
-	url: string,
-	skills: readonly Skill[],
-	forDirectory: boolean,
-): { skill: Skill; target: string } {
-	const parsed = /^skill:\/\/([^/?#]+)(\/[^?#]*)?(?:[?#].*)?$/.exec(url);
-	if (!parsed) {
-		throw new ToolError(`Invalid skill:// URL: ${url}`);
-	}
-
-	let rawSkillSegment = parsed[1];
-	if (!rawSkillSegment) {
-		throw new ToolError(`skill:// URL requires a skill name: ${url}`);
-	}
-	// Decode percent-encoded colons (%3A) used for namespaced skill names
-	try {
-		rawSkillSegment = decodeURIComponent(rawSkillSegment);
-	} catch {
-		// Leave as-is if decoding fails
-	}
-
-	// Resolve skill name by longest-prefix match against registered skills.
-	// This handles namespaced skills ("plugin:skill") where the URI may also
-	// carry a colon-delimited suffix (e.g., ":1-5" line range).
-	const { skill, suffix } = matchSkillName(rawSkillSegment, skills);
-	if (!skill) {
-		const available = skills.map(s => s.name);
-		const availableStr = available.length > 0 ? available.join(", ") : "none";
-		throw new ToolError(`Unknown skill: ${rawSkillSegment}. Available: ${availableStr}`);
-	}
-
-	// Combine any colon suffix (line range like ":1-5") with the path segment
-	const rawPath = (parsed[2] ?? "") + (suffix ? `/${suffix}` : "");
-	const hasRelativePath = rawPath !== "" && rawPath !== "/";
-	if (!hasRelativePath) {
-		// A bare URI addresses the skill's configured instruction file, or its
-		// base directory for directory-oriented callers (bash cwd).
-		return { skill, target: path.resolve(forDirectory ? skill.baseDir : skill.filePath) };
-	}
-	let relativePath: string;
-	try {
-		relativePath = decodeURIComponent(rawPath.slice(1));
-	} catch {
-		throw new ToolError(`Invalid skill:// URL path encoding: ${url}`);
-	}
-	try {
-		validateRelativePath(relativePath);
-	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		throw new ToolError(message);
-	}
-
-	const targetPath = path.join(skill.baseDir, relativePath);
-	const resolvedPath = path.resolve(targetPath);
-	const resolvedBaseDir = path.resolve(skill.baseDir);
-	if (!resolvedPath.startsWith(resolvedBaseDir + path.sep) && resolvedPath !== resolvedBaseDir) {
-		throw new ToolError("Path traversal is not allowed in skill:// URLs");
-	}
-	return { skill, target: resolvedPath };
-}
-
-/** Throw the fail-closed SkillContainmentError unless the target is contained. */
-function skillContainOrThrow(url: string, contained: ContainedPathResolution): string {
-	if (contained.status === "outside") {
-		throw new SkillContainmentError(`skill:// path resolves outside the plugin root: ${url}`);
-	}
-	if (contained.status === "missing") {
-		throw new SkillContainmentError(`skill:// path does not exist: ${url}`);
-	}
-	return contained.realPath;
-}
-
-/**
- * Async variant for the production `expandInternalUrls` path: containment runs
- * the ASYNC resolver, so a slow or stalled network/FUSE plugin filesystem
- * cannot block the TUI/RPC event loop and cancellation can interrupt the
- * lookup.
- */
-export async function resolveSkillUrlToPathAsync(
-	url: string,
-	skills: readonly Skill[],
-	options: { forDirectory?: boolean } = {},
-): Promise<string> {
-	const { skill, target } = parseSkillUrlTarget(url, skills, options.forDirectory === true);
-	if (!skill.containRoot) return target;
-	return skillContainOrThrow(url, await resolveContainedPath(skill.containRoot, target));
-}
-
-/**
- * Match a raw skill segment against registered skills using longest-prefix match.
- * Handles colons in both skill names (namespacing) and suffixes (line ranges).
- *
- * For "superpowers:brainstorming:1-5" with skill "superpowers:brainstorming":
- *   -> skill = superpowers:brainstorming, suffix = "1-5"
- * For "brainstorming" with skill "brainstorming":
- *   -> skill = brainstorming, suffix = undefined
- */
-function matchSkillName(
-	rawSegment: string,
-	skills: readonly Skill[],
-): { skill: Skill | undefined; suffix: string | undefined } {
-	// Exact match first (most common case)
-	const exact = skills.find(s => s.name === rawSegment);
-	if (exact) return { skill: exact, suffix: undefined };
-
-	// Try stripping colon-delimited suffixes from the right
-	let candidate = rawSegment;
-	while (true) {
-		const lastColon = candidate.lastIndexOf(":");
-		if (lastColon <= 0) break;
-		candidate = candidate.slice(0, lastColon);
-		const match = skills.find(s => s.name === candidate);
-		if (match) {
-			const suffix = rawSegment.slice(lastColon + 1);
-			return { skill: match, suffix };
-		}
-	}
-
-	return { skill: undefined, suffix: undefined };
-}
-
-function extractScheme(url: string): SupportedInternalScheme | undefined {
-	const match = /^([a-z][a-z0-9+.-]*):\/\//i.exec(url);
-	if (!match) return undefined;
-	const scheme = match[1].toLowerCase();
-	if (!SUPPORTED_INTERNAL_SCHEMES.includes(scheme as SupportedInternalScheme)) return undefined;
-	return scheme as SupportedInternalScheme;
+	/**
+	 * Operands may be write targets: missing entries of mutable schemes locate to
+	 * their would-be path and get their parent directory created.
+	 */
+	create?: boolean;
+	/** Locate the directory form where a scheme distinguishes it (a bare skill URL → its base dir). */
+	directory?: boolean;
 }
 
 function unquoteToken(token: string): string {
@@ -205,7 +37,14 @@ function unquoteToken(token: string): string {
 	return token;
 }
 
-function isInsideShellQuote(command: string, index: number): boolean {
+/** Offset range `[start, end)` of shell text that is data, not operands ({@link shellDataRanges}). */
+interface DataRange {
+	start: number;
+	end: number;
+}
+
+/** Whether `index` sits inside quotes; data ranges are skipped, so a heredoc's `it's` opens no quote. */
+function isInsideShellQuote(command: string, index: number, dataRanges: readonly DataRange[]): boolean {
 	type ShellQuote = "'" | '"' | undefined;
 	interface CommandSubstitution {
 		/** `$(` … `)` tracks paren depth; `` ` `` … `` ` `` is a plain toggle. */
@@ -217,6 +56,11 @@ function isInsideShellQuote(command: string, index: number): boolean {
 	let quote: ShellQuote;
 	const substitutions: CommandSubstitution[] = [];
 	for (let i = 0; i < index; i++) {
+		const data = dataRanges.find(range => range.start === i);
+		if (data) {
+			i = data.end - 1;
+			continue;
+		}
 		const char = command[i];
 		// Inside a backtick substitution nested in double quotes, bash treats `\"`
 		// as a quote delimiter for the inner command, not as an escaped literal.
@@ -276,9 +120,81 @@ function isInsideShellQuote(command: string, index: number): boolean {
 	return quote !== undefined;
 }
 
-function isEmbeddedInQuotedText(command: string, token: string, index: number): boolean {
+function isEmbeddedInQuotedText(
+	command: string,
+	token: string,
+	index: number,
+	dataRanges: readonly DataRange[],
+): boolean {
 	if (token.startsWith("'") || token.startsWith('"')) return false;
-	return isInsideShellQuote(command, index);
+	return isInsideShellQuote(command, index, dataRanges);
+}
+
+/**
+ * Offset ranges `[start, end)` of `command` that are data, not operands: heredoc bodies
+ * (through their delimiter line) and `#` comments. URL mentions there are never expanded,
+ * so a heredoc writing a note that cites `artifact://99` passes through verbatim. `<<`
+ * inside quotes, here-strings (`<<<`), and arithmetic (`$((1<<2))`) open no heredoc.
+ */
+function shellDataRanges(command: string): DataRange[] {
+	const ranges: DataRange[] = [];
+	const pending: Array<{ delimiter: string; stripTabs: boolean }> = [];
+	let quote: "'" | '"' | undefined;
+	let arithmetic = 0;
+	for (let i = 0; i < command.length; i++) {
+		const char = command[i];
+		if (quote === "'") {
+			if (char === "'") quote = undefined;
+			continue;
+		}
+		if (char === "\\") {
+			i++;
+			continue;
+		}
+		if (quote === '"') {
+			if (char === '"') quote = undefined;
+			continue;
+		}
+		if (char === "'" || char === '"') {
+			quote = char;
+		} else if (char === "(" && command[i + 1] === "(") {
+			arithmetic++;
+			i++;
+		} else if (char === ")" && command[i + 1] === ")" && arithmetic > 0) {
+			arithmetic--;
+			i++;
+		} else if (char === "#" && (i === 0 || /[\s;&|()]/.test(command[i - 1]))) {
+			const newline = command.indexOf("\n", i);
+			const end = newline === -1 ? command.length : newline;
+			ranges.push({ start: i, end });
+			// Resume at the newline so a pending heredoc body still starts there.
+			i = end - 1;
+		} else if (command.startsWith("<<<", i)) {
+			i += 2;
+		} else if (char === "<" && command[i + 1] === "<" && arithmetic === 0) {
+			HEREDOC_OPERATOR_RE.lastIndex = i;
+			const operator = HEREDOC_OPERATOR_RE.exec(command);
+			if (!operator) continue;
+			pending.push({ delimiter: operator[2].replace(/['"\\]/g, ""), stripTabs: operator[1] === "-" });
+			i = HEREDOC_OPERATOR_RE.lastIndex - 1;
+		} else if (char === "\n" && pending.length > 0) {
+			// Bodies follow the operator line back to back, each through its delimiter line.
+			let position = i + 1;
+			for (const { delimiter, stripTabs } of pending) {
+				while (position < command.length) {
+					const newline = command.indexOf("\n", position);
+					const lineEnd = newline === -1 ? command.length : newline;
+					const line = command.slice(position, lineEnd);
+					position = lineEnd + 1;
+					if ((stripTabs ? line.replace(/^\t+/, "") : line) === delimiter) break;
+				}
+			}
+			ranges.push({ start: i + 1, end: Math.min(position, command.length) });
+			pending.length = 0;
+			i = position - 1;
+		}
+	}
+	return ranges;
 }
 
 /** Shell-escape a path using single quotes. */
@@ -286,91 +202,48 @@ function shellEscape(p: string): string {
 	return `'${p.replace(/'/g, "'\\''")}'`;
 }
 
-async function resolveInternalUrlToPath(
-	rawUrl: string,
-	skills: readonly Skill[],
-	attachments: readonly ImageAttachmentEntry[],
-	internalRouter?: InternalUrlResolver,
-	localOptions?: LocalProtocolOptions,
-	ensureLocalParentDirs?: boolean,
-	cwd?: string,
-	sessionFile?: string,
-	sessionId?: string,
-	agentRegistry?: ResolveContext["agentRegistry"],
-	rules?: readonly Rule[],
-	skillUrlForDirectory?: boolean,
-): Promise<string> {
-	const url = normalizeLocalScheme(rawUrl);
-	const scheme = extractScheme(url);
-	if (!scheme) {
-		throw new ToolError(`Unsupported internal URL in bash command: ${url}`);
-	}
-
-	if (scheme === "skill") {
-		return resolveSkillUrlToPathAsync(url, skills, { forDirectory: skillUrlForDirectory });
-	}
-
-	if (scheme === "attachment") {
-		const attachment = attachments.find(entry => entry.uri === url);
-		if (!attachment) {
-			throw new ToolError(`Unknown attachment URL in bash command: ${url}`);
-		}
-		return path.resolve(attachment.sourcePath);
-	}
-
-	if (scheme === "local") {
-		if (!localOptions) {
-			throw new ToolError(
-				"Cannot resolve local:// URL in bash command: local protocol options are unavailable for this session.",
-			);
-		}
-		const resolvedLocalPath = resolveLocalUrlToPath(url, localOptions);
-		if (ensureLocalParentDirs) {
-			await fs.mkdir(path.dirname(resolvedLocalPath), { recursive: true });
-		}
-		return resolvedLocalPath;
-	}
-
-	if (!internalRouter?.canHandle(url)) {
-		throw new ToolError(
-			`Cannot resolve ${scheme}:// URL in bash command: ${url}\n` +
-				"Internal URL router is unavailable for this protocol in the current session.",
-		);
-	}
-
-	let resource: InternalResource;
+/**
+ * Local path backing a shell-operand URL ({@link SchemeSpec.shellOperand}); null for other
+ * schemes, which stay for the shell. A shell operand never reaches the shell raw (it would
+ * read `scheme:/…` as a relative path), so a line selector (bash addresses whole files), a
+ * missing target, and a locate failure throw ToolError. Only mutable schemes create missing
+ * targets: immutable backings (skill packages, artifacts) are never written into.
+ */
+async function locateOperand(
+	router: InternalUrlRouter,
+	token: string,
+	options: InternalUrlExpansionOptions,
+): Promise<string | null> {
+	const scheme = extractUriScheme(token);
+	const spec = scheme === undefined ? undefined : router.spec(scheme);
+	if (!spec?.shellOperand) return null;
+	const url = router.peelWriteSelector(token, "bash");
+	const create = options.create === true && !spec.immutable;
+	let located: string | null;
 	try {
-		resource = await internalRouter.resolve(url, {
-			cwd,
-			pathOnly: true,
-			sessionFile,
-			sessionId,
-			agentRegistry,
-			rules,
-		});
+		located = await router.locate(url, options.context, { directory: options.directory, create });
 	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		throw new ToolError(`Failed to resolve ${scheme}:// URL in bash command: ${url}\n${message}`);
+		if (options.context.signal?.aborted || error instanceof ToolError) throw error;
+		throw new ToolError(error instanceof Error ? error.message : String(error));
 	}
-
-	if (!resource.sourcePath) {
-		throw new ToolError(`${scheme}:// URL resolved without a filesystem path and cannot be used in bash: ${url}`);
-	}
-
-	return path.resolve(resource.sourcePath);
+	if (located === null) throw new ToolError(`${url} does not exist as a local file`);
+	if (create) await fs.mkdir(path.dirname(located), { recursive: true });
+	return located;
 }
 
 /**
- * Expand supported internal URLs in a bash command string to shell-escaped absolute paths.
- * Unresolvable URLs and literal mentions inside larger quoted text are left unchanged.
- * Supported schemes: skill://, agent://, artifact://, memory://, rule://, local://, attachment://
+ * Expand shell-operand internal URLs ({@link SchemeSpec.shellOperand}) in a bash command
+ * string to shell-escaped absolute paths. Other schemes, literal mentions inside larger
+ * quoted text, heredoc bodies, and comments are left unchanged; a shell operand that cannot
+ * be located throws ({@link locateOperand}).
  */
 export async function expandInternalUrls(command: string, options: InternalUrlExpansionOptions): Promise<string> {
-	if (!command.includes("://") && !command.includes("local:/")) return command;
+	if (!command.includes(":/")) return command;
 
-	const matches = Array.from(command.matchAll(INTERNAL_URL_PATTERN_INCLUDING_NORMALIZED_LOCAL));
+	const router = InternalUrlRouter.instance();
+	const matches = Array.from(command.matchAll(INTERNAL_URL_TOKEN_PATTERN));
 	if (matches.length === 0) return command;
-
+	const dataRanges = shellDataRanges(command);
 	let expanded = command;
 	for (let i = matches.length - 1; i >= 0; i--) {
 		const match = matches[i];
@@ -378,33 +251,13 @@ export async function expandInternalUrls(command: string, options: InternalUrlEx
 		const index = match.index;
 		if (index === undefined) continue;
 
-		if (isEmbeddedInQuotedText(command, token, index)) continue;
+		if (dataRanges.some(range => index >= range.start && index < range.end)) continue;
+		if (isEmbeddedInQuotedText(command, token, index, dataRanges)) continue;
 
-		const rawUrl = unquoteToken(token);
-		const url = normalizeLocalScheme(rawUrl);
-		let resolvedPath: string;
-		try {
-			resolvedPath = await resolveInternalUrlToPath(
-				url,
-				options.skills,
-				options.attachments ?? [],
-				options.internalRouter,
-				options.localOptions,
-				options.ensureLocalParentDirs,
-				options.cwd,
-				options.sessionFile,
-				options.sessionId,
-				options.agentRegistry,
-				options.rules,
-				options.skillUrlForDirectory,
-			);
-		} catch (error) {
-			// Containment violations fail closed: never hand the raw token to the
-			// shell, which would read it as a relative path. Other resolution
-			// failures keep the legacy pass-through behavior.
-			if (error instanceof SkillContainmentError) throw error;
-			continue;
-		}
+		const url = router.normalize(unquoteToken(token));
+		if (!router.canHandle(url)) continue;
+		const resolvedPath = await locateOperand(router, url, options);
+		if (resolvedPath === null) continue;
 		const replacement = options.noEscape ? resolvedPath : shellEscape(resolvedPath);
 		expanded = `${expanded.slice(0, index)}${replacement}${expanded.slice(index + token.length)}`;
 	}

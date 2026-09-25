@@ -29,6 +29,7 @@ interface MCPConfigFile {
 			requestIdFormat?: "string" | "number";
 			enabledTools?: unknown;
 			disabledTools?: unknown;
+			instructions?: boolean;
 			command?: string;
 			args?: string[];
 			env?: Record<string, string>;
@@ -94,12 +95,21 @@ function transformMCPConfig(config: MCPConfigFile, source: SourceMeta): MCPServe
 				});
 			}
 
+			const instructions = typeof serverConfig.instructions === "boolean" ? serverConfig.instructions : undefined;
+			if (instructions === undefined && serverConfig.instructions !== undefined) {
+				logger.warn("MCP server has invalid 'instructions' value, ignoring", {
+					name,
+					value: serverConfig.instructions,
+				});
+			}
+
 			const server: MCPServer = {
 				name,
 				enabled,
 				timeout,
 				requestIdFormat,
 				...parseMCPToolFilters(name, serverConfig),
+				instructions,
 				command: serverConfig.command,
 				args: serverConfig.args,
 				env: serverConfig.env,

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { createHash } from "node:crypto";
 import { RelayBridge, type RelaySocket } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/bridge";
 import type {
 	RelayRpcRequest,
@@ -6,16 +7,26 @@ import type {
 	TabSnapshot,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/protocol";
 
+/** Same derivation as the bridge: target ids embed this per-instance code. */
+function instanceCode(instanceId: string): string {
+	return createHash("sha256").update(instanceId).digest("base64url").slice(0, 8);
+}
+
+const ANON = instanceCode("anon");
+
 /** A relay→extension RPC narrowed to one op, tabIds/title/etc. included. */
 type ExtRpc<Op extends RelayRpcRequest["op"]> = { t: "rpc"; id: number } & Extract<RelayRpcRequest, { op: Op }>;
 
 class FakeExtSocket implements RelaySocket {
 	readonly messages: RelayToExtMessage[] = [];
 	readonly #acked = new Set<number>();
+	closed = false;
 	send(text: string): void {
 		this.messages.push(JSON.parse(text) as RelayToExtMessage);
 	}
-	close(): void {}
+	close(): void {
+		this.closed = true;
+	}
 	rpcs<Op extends RelayRpcRequest["op"]>(op: Op): Array<ExtRpc<Op>> {
 		return this.messages.filter((msg): msg is ExtRpc<Op> => msg.t === "rpc" && msg.op === op);
 	}
@@ -80,6 +91,27 @@ function connect(bridge: RelayBridge, socket: FakeExtSocket, tabs: TabSnapshot[]
 	);
 }
 
+function connectInstance(
+	bridge: RelayBridge,
+	socket: FakeExtSocket,
+	instanceId: string,
+	tabs: TabSnapshot[],
+	attachedTabIds: number[] = [],
+): void {
+	bridge.extConnected(socket);
+	bridge.extMessage(
+		socket,
+		JSON.stringify({
+			t: "hello",
+			instanceId,
+			userAgent: "test",
+			browserVersion: instanceId === "edge" ? "Edg/151.0.0.0" : "Chrome/151.0.0.0",
+			tabs,
+			attachedTabIds,
+		}),
+	);
+}
+
 /** Answer every unanswered extension RPC of `op` with `ok: true` and `result`. */
 function ack(bridge: RelayBridge, socket: FakeExtSocket, op: RelayRpcRequest["op"], result: unknown = {}): void {
 	for (const rpc of socket.pending(op)) {
@@ -110,6 +142,7 @@ async function attachPage(
 	cdp: FakeCdpSocket,
 	connId: number,
 	tabId: number,
+	instanceId = "anon",
 ): Promise<string> {
 	const attachId = ++msgSeq;
 	bridge.cdpMessage(
@@ -117,7 +150,7 @@ async function attachPage(
 		JSON.stringify({
 			id: attachId,
 			method: "Target.attachToTarget",
-			params: { targetId: `PAGE${tabId}`, flatten: true },
+			params: { targetId: `PAGE${instanceCode(instanceId)}.${tabId}`, flatten: true },
 		}),
 	);
 	ack(bridge, ext, "attach");
@@ -159,15 +192,15 @@ describe("RelayBridge target discovery", () => {
 			| { targetInfos: Array<{ targetId: string; type: string }> }
 			| undefined;
 		expect(first?.targetInfos.map(info => [info.targetId, info.type]).sort()).toEqual([
-			["PAGE1", "page"],
-			["PAGE2", "page"],
+			[`PAGE${ANON}.1`, "page"],
+			[`PAGE${ANON}.2`, "page"],
 		]);
 		bridge.extMessage(ext, JSON.stringify({ t: "tabRemoved", tabId: 2 }));
 		bridge.cdpMessage(connId, JSON.stringify({ id: 2, method: "Target.getTargets" }));
 		const second = cdp.messages.find(message => message.id === 2)?.result as
 			| { targetInfos: Array<{ targetId: string }> }
 			| undefined;
-		expect(second?.targetInfos.map(info => info.targetId)).toEqual(["PAGE1"]);
+		expect(second?.targetInfos.map(info => info.targetId)).toEqual([`PAGE${ANON}.1`]);
 		expect(ext.messages.filter(message => message.t === "rpc")).toEqual([]);
 	});
 });
@@ -532,7 +565,7 @@ describe("RelayBridge attachment release", () => {
 		const reattachId = ++msgSeq;
 		bridge.cdpMessage(
 			connId,
-			JSON.stringify({ id: reattachId, method: "Target.attachToTarget", params: { targetId: "PAGE1" } }),
+			JSON.stringify({ id: reattachId, method: "Target.attachToTarget", params: { targetId: `PAGE${ANON}.1` } }),
 		);
 		ack(bridge, ext, "attach");
 		await flush();
@@ -556,7 +589,7 @@ describe("RelayBridge attachment release", () => {
 		const reattachId = ++msgSeq;
 		bridge.cdpMessage(
 			connId,
-			JSON.stringify({ id: reattachId, method: "Target.attachToTarget", params: { targetId: "PAGE1" } }),
+			JSON.stringify({ id: reattachId, method: "Target.attachToTarget", params: { targetId: `PAGE${ANON}.1` } }),
 		);
 		await flush();
 		// Only the initial attach has reached the extension while detach is pending.
@@ -670,7 +703,7 @@ describe("RelayBridge attachment release", () => {
 		const reattachId = ++msgSeq;
 		bridge.cdpMessage(
 			connId,
-			JSON.stringify({ id: reattachId, method: "Target.attachToTarget", params: { targetId: "PAGE1" } }),
+			JSON.stringify({ id: reattachId, method: "Target.attachToTarget", params: { targetId: `PAGE${ANON}.1` } }),
 		);
 		await flush();
 		expect(replacement.pending("attach")).toHaveLength(1);
@@ -687,7 +720,7 @@ describe("RelayBridge attachment release", () => {
 		const connId = bridge.cdpConnected(cdp);
 		bridge.cdpMessage(
 			connId,
-			JSON.stringify({ id: ++msgSeq, method: "Target.attachToTarget", params: { targetId: "PAGE1" } }),
+			JSON.stringify({ id: ++msgSeq, method: "Target.attachToTarget", params: { targetId: `PAGE${ANON}.1` } }),
 		);
 		expect(ext.pending("attach")).toHaveLength(1);
 
@@ -698,7 +731,7 @@ describe("RelayBridge attachment release", () => {
 		const retryId = ++msgSeq;
 		bridge.cdpMessage(
 			connId,
-			JSON.stringify({ id: retryId, method: "Target.attachToTarget", params: { targetId: "PAGE1" } }),
+			JSON.stringify({ id: retryId, method: "Target.attachToTarget", params: { targetId: `PAGE${ANON}.1` } }),
 		);
 		await flush();
 		expect(replacement.pending("attach")).toHaveLength(1);
@@ -726,7 +759,7 @@ describe("RelayBridge attachment release", () => {
 		const reattachId = ++msgSeq;
 		bridge.cdpMessage(
 			connId,
-			JSON.stringify({ id: reattachId, method: "Target.attachToTarget", params: { targetId: "PAGE1" } }),
+			JSON.stringify({ id: reattachId, method: "Target.attachToTarget", params: { targetId: `PAGE${ANON}.1` } }),
 		);
 		await flush();
 
@@ -889,5 +922,151 @@ describe("RelayBridge attachment release", () => {
 				message => message.sessionId === sessionId && message.method === "Runtime.executionContextCreated",
 			),
 		).toEqual([]);
+	});
+});
+
+describe("RelayBridge multiple extension instances", () => {
+	it("keeps each browser's tabs listed when two instances connect", () => {
+		const bridge = new RelayBridge({});
+		const chrome = new FakeExtSocket();
+		const edge = new FakeExtSocket();
+		connectInstance(bridge, chrome, "chrome", [
+			tab({ tabId: 1, title: "Chrome tab", url: "https://chrome.example/" }),
+		]);
+		connectInstance(bridge, edge, "edge", [tab({ tabId: 1, title: "Edge tab", url: "https://edge.example/" })]);
+		expect(
+			bridge
+				.listTargets()
+				.map(t => [t.title, t.id])
+				.sort(),
+		).toEqual([
+			["Chrome tab", `PAGE${instanceCode("chrome")}.1`],
+			["Edge tab", `PAGE${instanceCode("edge")}.1`],
+		]);
+	});
+
+	it("scopes the hello GC to the reconnecting instance", () => {
+		const bridge = new RelayBridge({});
+		const chrome = new FakeExtSocket();
+		connectInstance(bridge, chrome, "chrome", [
+			tab({ tabId: 1, title: "Chrome tab", url: "https://chrome.example/" }),
+		]);
+		const edge = new FakeExtSocket();
+		connectInstance(bridge, edge, "edge", [tab({ tabId: 1, title: "Edge tab", url: "https://edge.example/" })]);
+		// Edge reconnects without its tab: its own tab goes, Chrome's tab stays.
+		bridge.extClosed(edge);
+		const edge2 = new FakeExtSocket();
+		connectInstance(bridge, edge2, "edge", []);
+		expect(bridge.listTargets().map(t => t.title)).toEqual(["Chrome tab"]);
+	});
+
+	it("replaces the socket, resets runtime state, and keeps the registry when the same instance reconnects", async () => {
+		const bridge = new RelayBridge({});
+		const first = new FakeExtSocket();
+		connectInstance(bridge, first, "chrome", [
+			tab({ tabId: 1, title: "Chrome tab", url: "https://chrome.example/" }),
+		]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const session = await attachPage(bridge, first, cdp, connId, 1, "chrome");
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, sessionId: session, method: "Runtime.enable" }));
+		await flush();
+		ack(bridge, first, "send");
+		await flush();
+		ack(bridge, first, "send");
+		await flush();
+		expect(first.rpcs("send").map(rpc => rpc.method)).toEqual(["Runtime.disable", "Runtime.enable"]);
+		// Service-worker restart: a new socket helloes for the same instance.
+		const second = new FakeExtSocket();
+		connectInstance(bridge, second, "chrome", [
+			tab({ tabId: 1, title: "Chrome tab", url: "https://chrome.example/" }),
+		]);
+		expect(first.closed).toBe(true);
+		// One listing per physical tab, not one per connection.
+		expect(bridge.listTargets()).toHaveLength(1);
+		// The runtime reset must reach the replacement socket: a fresh
+		// Runtime.enable has to re-run the disable/enable cycle instead of
+		// short-circuiting on stale rootRuntimeEnabled state.
+		const newSession = await attachPage(bridge, second, cdp, connId, 1, "chrome");
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, sessionId: newSession, method: "Runtime.enable" }));
+		await flush();
+		expect(second.pending("send").map(rpc => rpc.method)).toEqual(["Runtime.disable"]);
+		ack(bridge, second, "send");
+		await flush();
+		expect(second.pending("send").map(rpc => rpc.method)).toEqual(["Runtime.enable"]);
+	});
+
+	it("routes rpcs to the browser instance that owns the tab", async () => {
+		const bridge = new RelayBridge({});
+		const chrome = new FakeExtSocket();
+		const edge = new FakeExtSocket();
+		connectInstance(bridge, chrome, "chrome", [
+			tab({ tabId: 1, title: "Chrome tab", url: "https://chrome.example/" }),
+		]);
+		connectInstance(bridge, edge, "edge", [tab({ tabId: 1, title: "Edge tab", url: "https://edge.example/" })]);
+		const chromeCdp = new FakeCdpSocket();
+		const chromeConn = bridge.cdpConnected(chromeCdp);
+		const edgeCdp = new FakeCdpSocket();
+		const edgeConn = bridge.cdpConnected(edgeCdp);
+		// Same chrome tabId (1) in both browsers: routing must disambiguate by instance.
+		const chromeSession = await attachPage(bridge, chrome, chromeCdp, chromeConn, 1, "chrome");
+		const edgeSession = await attachPage(bridge, edge, edgeCdp, edgeConn, 1, "edge");
+		bridge.cdpMessage(
+			chromeConn,
+			JSON.stringify({ id: ++msgSeq, sessionId: chromeSession, method: "Runtime.enable" }),
+		);
+		bridge.cdpMessage(edgeConn, JSON.stringify({ id: ++msgSeq, sessionId: edgeSession, method: "Runtime.enable" }));
+		await flush();
+		const chromeSends = chrome.rpcs("send").map(rpc => rpc.tabId);
+		const edgeSends = edge.rpcs("send").map(rpc => rpc.tabId);
+		expect(chromeSends).toEqual([1]);
+		expect(edgeSends).toEqual([1]);
+	});
+});
+
+describe("RelayBridge last-hello fallback and offline instance pruning", () => {
+	it("falls back to a live instance for browser-wide requests when the last hello goes offline", async () => {
+		const bridge = new RelayBridge({});
+		const chrome = new FakeExtSocket();
+		const edge = new FakeExtSocket();
+		connectInstance(bridge, chrome, "chrome", [
+			tab({ tabId: 1, title: "Chrome tab", url: "https://chrome.example/" }),
+		]);
+		connectInstance(bridge, edge, "edge", [tab({ tabId: 1, title: "Edge tab", url: "https://edge.example/" })]);
+		bridge.extClosed(edge);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				method: "Target.createTarget",
+				params: { url: "https://example.com/" },
+			}),
+		);
+		expect(chrome.rpcs("createTab")).toHaveLength(1);
+		expect(edge.rpcs("createTab")).toHaveLength(0);
+		ack(bridge, chrome, "createTab", {
+			tab: tab({ tabId: 9, title: "Created", url: "https://example.com/9" }),
+		});
+		await flush();
+		expect(bridge.versionInfo("ws://relay").Browser).toBe("Chrome/151.0.0.0");
+		expect(bridge.listTargets().map(t => t.title)).toContain("Created");
+	});
+
+	it("hides tabs of an instance whose socket went offline", () => {
+		const bridge = new RelayBridge({});
+		const chrome = new FakeExtSocket();
+		const edge = new FakeExtSocket();
+		connectInstance(bridge, chrome, "chrome", [
+			tab({ tabId: 1, title: "Chrome tab", url: "https://chrome.example/" }),
+		]);
+		connectInstance(bridge, edge, "edge", [tab({ tabId: 1, title: "Edge tab", url: "https://edge.example/" })]);
+		bridge.extClosed(edge);
+		expect(bridge.listTargets().map(t => t.title)).toEqual(["Chrome tab"]);
+		// The registry survives for the reconnect; the hello re-adds the tab.
+		const edge2 = new FakeExtSocket();
+		connectInstance(bridge, edge2, "edge", [tab({ tabId: 1, title: "Edge tab", url: "https://edge.example/" })]);
+		expect(bridge.listTargets().map(t => t.title)).toEqual(["Chrome tab", "Edge tab"]);
 	});
 });

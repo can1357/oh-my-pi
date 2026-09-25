@@ -42,6 +42,8 @@ import {
 } from "./helpers";
 import { resolvePluginStdioPaths } from "./substitute-plugin-root";
 
+import { cfgSkillsEnableCodexUser } from "../extensibility/settings";
+
 const PROVIDER_ID = "codex";
 const DISPLAY_NAME = "OpenAI Codex";
 const PRIORITY = 70;
@@ -63,7 +65,7 @@ function getUserCodexDir(ctx: LoadContext, capabilityToggle = false): string | n
 /** Legacy `skills.enableCodexUser` toggle; off by default and without initialized settings. */
 function readCodexUserSkillsToggle(): boolean {
 	try {
-		return activeSettings.get("skills.enableCodexUser") === true;
+		return cfgSkillsEnableCodexUser.get(activeSettings) === true;
 	} catch {
 		return false;
 	}

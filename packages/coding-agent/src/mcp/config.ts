@@ -4,14 +4,14 @@
  * Uses the capability system to load MCP servers from multiple sources.
  */
 
-import { getMCPConfigPath } from "@oh-my-pi/pi-utils";
+import { getMCPConfigPath, logger } from "@oh-my-pi/pi-utils";
 import { mcpCapability } from "../capability/mcp";
 import type { EffectiveExtensionRoots, SourceMeta } from "../capability/types";
 import type { MCPServer } from "../discovery";
 import { loadCapability } from "../discovery";
-import { readDisabledServers, readEnabledServers } from "./config-writer";
+import { readMCPConfigFile } from "./config-writer";
 import { filterMCPTools } from "./tool-filter";
-import type { MCPServerConfig } from "./types";
+import type { MCPConfigFile, MCPServerConfig } from "./types";
 
 /** Options for loading MCP configs */
 export interface LoadMCPConfigsOptions {
@@ -45,6 +45,7 @@ function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
 		enabled: server.enabled,
 		timeout: server.timeout,
 		requestIdFormat: server.requestIdFormat,
+		instructions: server.instructions,
 		auth: server.auth,
 		oauth: server.oauth,
 		enabledTools: server.enabledTools,
@@ -109,11 +110,26 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 
 	// Load user-level disable/force-enable lists. The denylist always wins; the
 	// allowlist overrides a non-writable source config's `enabled: false`.
+	// A malformed or unreadable user mcp.json must not take down the whole MCP
+	// stack (docs/mcp-config.md: the file simply contributes no entries): its
+	// servers are already skipped by the mcp-json provider with a warning, so
+	// the lists degrade to empty here instead of rejecting every source.
 	const userPath = getMCPConfigPath("user", cwd);
-	const [disabledServers, forcedEnabled] = await Promise.all([
-		readDisabledServers(userPath).then(list => new Set(list)),
-		readEnabledServers(userPath).then(list => new Set(list)),
-	]);
+	let userConfig: MCPConfigFile;
+	try {
+		const config: unknown = await readMCPConfigFile(userPath);
+		// JSON.parse also accepts bare `null`, numbers, strings, and arrays;
+		// only an object carries the server map and the lists read below.
+		if (config === null || typeof config !== "object" || Array.isArray(config)) {
+			throw new Error("user MCP config must be a JSON object");
+		}
+		userConfig = config as MCPConfigFile;
+	} catch (error) {
+		logger.warn("Ignoring unreadable user MCP config for server lists", { path: userPath, error: String(error) });
+		userConfig = { mcpServers: {} };
+	}
+	const disabledServers = new Set(Array.isArray(userConfig.disabledServers) ? userConfig.disabledServers : []);
+	const forcedEnabled = new Set(Array.isArray(userConfig.enabledServers) ? userConfig.enabledServers : []);
 
 	// Scope exclusions drop entries entirely BEFORE deduplication: with project
 	// config disabled, a project entry must not shadow anything.

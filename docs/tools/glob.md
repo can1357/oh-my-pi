@@ -67,7 +67,7 @@ The tool returns a single text block plus structured `details`.
 - **Single glob path**: one input parsed by `parseFindPattern()`.
 - **Multi-path search**: multiple inputs resolved by `resolveExplicitFindPatterns()` into per-entry targets, each walked as its own root concurrently and merged afterwards.
 - **Partial multi-path search with missing inputs**: local multi-path calls skip missing base paths and surface them as `missingPaths` / `Skipped missing paths: ...`.
-- **Internal URL input**: exact path-backed URLs are supported. `memory://` additionally supports glob patterns against its backing tree. Other internal-URL globs and every `ssh://` input are rejected.
+- **Internal URL input**: URLs are located through `InternalUrlRouter` (never resolved, so remote schemes are never contacted). Exact URLs use `requireLocal(…, { directory: true })` (`skill://<name>` walks the skill directory); URLs with glob metacharacters in the path use `locateGlob()`, which expands the glob tail under the located base of any locatable scheme (`memory://root/**/*.md`, `local://notes/*.md`). Percent-encoded metacharacters stay literal; `..` and encoded separators in the glob tail are rejected.
 - **Custom delegated search**: uses injected `GlobOperations` instead of local fs + native glob.
 
 ## Side Effects
@@ -99,9 +99,9 @@ The tool returns a single text block plus structured `details`.
   - `Limit must be a positive number`
   - `Path is not a directory: ...`
   - timeout result text is `glob timed out after <seconds>s; returning <N> partial matches — narrow the pattern instead of retrying blindly` and is returned as a successful, truncated partial result rather than an error.
-  - `find cannot operate on a remote ssh:// path: ...` for SSH inputs.
-  - `Glob patterns are not supported for internal URLs: ...` except for `memory://` patterns.
-  - `Cannot find internal URL without a backing file: ...` for virtual-only resources.
+  - `Glob patterns are not supported for internal URLs: ...` when a URL glob's base does not locate to a local directory.
+  - `Globs are not supported in <scheme>:// ids: ...` for a glob in an id authority (`skill://*/SKILL.md`, `artifact://*`); only `local://` globs from its first segment.
+  - `Cannot glob <scheme>:// URL: no local file backs ...` for exact URLs with no local file (remote/virtual schemes add a `read` hint). Unknown ids of locatable read-only schemes report the handler's own error instead (`Cannot glob artifact://9: Artifact 9 not found. Available: …`).
 - If the caller aborts, the local branch converts `AbortError` into `ToolAbortError`.
 - Non-`ENOENT` stat failures and other unexpected errors are rethrown.
 - Empty matches are not errors; they return the no-files text result.

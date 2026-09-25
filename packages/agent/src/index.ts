@@ -6,6 +6,8 @@ export * from "./agent-loop";
 export * from "./append-only-context";
 // Compaction
 export * from "./compaction";
+// Output cap sized to the remaining context window
+export * from "./output-budget";
 // Process-global pause gate
 export * from "./pause";
 // Proxy utilities

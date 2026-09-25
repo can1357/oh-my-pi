@@ -126,6 +126,11 @@
           "enum": ["string", "number"],
           "description": "Encoding for outgoing JSON-RPC request ids (default: \"number\"). Use \"string\" for servers that need collision-resistant snowflake string ids instead of per-transport integers. OMP-specific: set it in an OMP-owned config (`.omp/mcp.json`, `~/.omp/agent/mcp.json`, a project `mcp.json`/`.mcp.json`, or an OMP plugin). Servers imported from another tool's config (Claude, Cursor, VS Code, Gemini, OpenCode, Windsurf) ignore it, since that key is not part of those formats."
         },
+        "instructions": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include server-provided instructions in the system prompt. Set false to omit them without disabling the server or its tools. OMP-specific: supported by native config, standalone mcp.json/.mcp.json, and OMP extension packages; imported tool configs ignore it."
+        },
         "auth": {
           "$ref": "#/$defs/authConfig"
         },
@@ -160,6 +165,12 @@
           "additionalProperties": false,
           "required": ["command"],
           "properties": {
+            "enabled": {},
+            "timeout": {},
+            "requestIdFormat": {},
+            "instructions": {},
+            "auth": {},
+            "oauth": {},
             "type": {
               "type": "string",
               "enum": ["stdio"],
@@ -223,6 +234,12 @@
           "additionalProperties": false,
           "required": ["type", "url"],
           "properties": {
+            "enabled": {},
+            "timeout": {},
+            "requestIdFormat": {},
+            "instructions": {},
+            "auth": {},
+            "oauth": {},
             "type": {
               "type": "string",
               "enum": ["http"],
@@ -275,6 +292,12 @@
           "additionalProperties": false,
           "required": ["type", "url"],
           "properties": {
+            "enabled": {},
+            "timeout": {},
+            "requestIdFormat": {},
+            "instructions": {},
+            "auth": {},
+            "oauth": {},
             "type": {
               "type": "string",
               "enum": ["sse"],
