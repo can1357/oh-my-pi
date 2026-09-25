@@ -47,7 +47,7 @@ import { AskTool } from "./ask";
 import { AstEditTool } from "./ast-edit";
 import { AstGrepTool } from "./ast-grep";
 import { BashTool } from "./bash";
-import { type BuiltinToolName, type HiddenToolName, normalizeToolNames } from "./builtin-names";
+import { type BuiltinToolName, type HiddenToolName, normalizeToolNames, withSiblingTools } from "./builtin-names";
 import { type CheckpointState, CheckpointTool, type CompletedRewindState, RewindTool } from "./checkpoint";
 import { ContextNotesTool, NewContextTool } from "./context-notes";
 import { DebugTool } from "./debug";
@@ -360,6 +360,14 @@ export interface ToolSession {
 	getCodeModeDirectToolNames?: () => readonly string[] | undefined;
 	/** Return whether a built-in tool is active in this turn's tool set. */
 	isToolActive?: (name: string) => boolean;
+	/**
+	 * Whether an MCP server's resources may be listed or read under this
+	 * session's tool scope. `read mcp://…` resolves through a process-global
+	 * protocol router that has no session, so the gate has to live on the
+	 * session the read tool is bound to — otherwise a scoped subagent can read
+	 * any connected server's resources by URI despite the scope.
+	 */
+	isMCPServerResourceAllowed?: (serverName: string) => boolean;
 	/** Update the active built-in tool predicate when a session changes tools mid-run. */
 	setActiveToolNames?: (names: Iterable<string>) => void;
 	/** Canonical map containing every registered tool exactly once. */
@@ -614,7 +622,7 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 	const restrictToolNames = session.restrictToolNames === true;
 	const includeYield = session.requireYieldTool === true;
 	const enableLsp = session.enableLsp ?? true;
-	const requestedTools = restrictToolNames
+	let requestedTools = restrictToolNames
 		? normalizeToolNames(toolNames ?? [])
 		: toolNames
 			? normalizeToolNames(toolNames)
@@ -661,11 +669,7 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 	// Unlike the AST/auto-learn convenience auto-includes below, this is a
 	// safety pairing — it applies to restricted sessions too.
 	if (requestedTools && cfgCheckpointEnabled.get(session.settings)) {
-		if (requestedTools.includes("checkpoint") && !requestedTools.includes("rewind")) {
-			requestedTools.push("rewind");
-		} else if (requestedTools.includes("rewind") && !requestedTools.includes("checkpoint")) {
-			requestedTools.push("checkpoint");
-		}
+		requestedTools = withSiblingTools(requestedTools);
 	}
 	// Auto-include AST counterparts when their text-based sibling is present.
 	// Restricted callers own the active list and must not have it widened.

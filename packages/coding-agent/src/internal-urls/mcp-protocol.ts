@@ -21,7 +21,8 @@ function getUriTemplateMatchScore(
 	return { literalChars, expressionCount };
 }
 
-function extractResourceUri(url: InternalUrl): string {
+/** The resource URI an internal `mcp://` URL addresses, unwrapped from the scheme. */
+export function extractResourceUri(url: InternalUrl): string {
 	const scheme = url.protocol.replace(/:$/, "").toLowerCase();
 	if (scheme !== "mcp") {
 		// Server-advertised native URI (hierarchical or opaque). Preserve the
@@ -41,7 +42,13 @@ function extractResourceUri(url: InternalUrl): string {
 	return uri;
 }
 
-function resolveTargetServer(mcpManager: MCPManager, uri: string): string | undefined {
+/**
+ * The server a resource URI belongs to, by exact URI match or template. Shared
+ * with the read-tool scope gate so both decide "which server owns this URI"
+ * identically — a divergent second implementation would let a scoped read
+ * resolve a server the router's own lookup would not.
+ */
+export function resolveTargetServer(mcpManager: MCPManager, uri: string): string | undefined {
 	const servers = mcpManager.getConnectedServers();
 	for (const name of servers) {
 		const serverResources = mcpManager.getServerResources(name);

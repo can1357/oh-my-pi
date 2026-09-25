@@ -19,8 +19,12 @@ import type {
 import { extractUriScheme } from "../internal-urls/parse";
 import { InternalUrlRouter } from "../internal-urls/router";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
+
+import { sanitizeMCPToolNamePart } from "../tools/builtin-names";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { schemaDeclaresIntentField } from "../utils/tool-schema";
+
+export { sanitizeMCPToolNamePart };
 import { callTool } from "./client";
 import { formatMCPToolFailure, MCPTransportError } from "./errors";
 import { renderMCPCall, renderMCPResult } from "@oh-my-pi/pi-tui/tools/mcp";
@@ -382,24 +386,6 @@ async function reconnectWithAbort(
 }
 
 /**
- * Create a unique tool name for an MCP tool.
- *
- * Prefixes with server name to avoid conflicts. If the tool name already
- * starts with the server name (e.g., server "puppeteer" with tool
- * "puppeteer_screenshot"), strips the redundant prefix to produce
- * "mcp__puppeteer_screenshot" instead of "mcp__puppeteer_puppeteer_screenshot".
- */
-function sanitizeMCPToolNamePart(value: string, fallback: string, keepDigits: boolean): string {
-	const sanitized = value
-		.toLowerCase()
-		.replace(keepDigits ? /[^a-z0-9_]+/g : /[^a-z_]+/g, "_")
-		.replace(/_+/g, "_")
-		.replace(/^_+|_+$/g, "");
-
-	return sanitized.length > 0 ? sanitized : fallback;
-}
-
-/**
  * Shared mint pipeline. `keepDigits` selects the sanitizer variant: the
  * current mint keeps `0-9`, the legacy variant strips them exactly as the
  * pre-fix `sanitizeMCPToolNamePart` did. Both halves route through this one
@@ -458,6 +444,14 @@ function capMCPToolNameLength(name: string): string {
 	return `${name.slice(0, keep)}_${hash}`;
 }
 
+/**
+ * Create a unique tool name for an MCP tool.
+ *
+ * Prefixes with server name to avoid conflicts. If the tool name already
+ * starts with the server name (e.g., server "puppeteer" with tool
+ * "puppeteer_screenshot"), strips the redundant prefix to produce
+ * "mcp__puppeteer_screenshot" instead of "mcp__puppeteer_puppeteer_screenshot".
+ */
 export function createMCPToolName(serverName: string, toolName: string): string {
 	return mintMCPToolName(serverName, toolName, true);
 }

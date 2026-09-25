@@ -22,6 +22,9 @@ import { getEditStore } from "../edit/store";
 import { formatHashlineHeader } from "@oh-my-pi/pi-tui/tools/hashline-format";
 import { sessionResolveContext } from "../internal-urls/context";
 import { InternalUrlRouter } from "../internal-urls/router";
+import { parseInternalUrl } from "../internal-urls/parse";
+import { extractResourceUri, resolveTargetServer } from "../internal-urls/mcp-protocol";
+import { MCPManager } from "../mcp/manager";
 import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
 import grepDescription from "../prompts/tools/grep.md" with { type: "text" };
 import { DEFAULT_MAX_COLUMN, truncateHead } from "@oh-my-pi/pi-tui/tools/streaming-output";
@@ -302,11 +305,11 @@ function isImmutableSourcePath(filePath: string, immutableSourcePaths: ReadonlyS
 
 /**
  * Per-file native fetch budget that guarantees the JS range filter can still
- * surface `perFileKeep` in-range hits. Matches arrive one entry per matched
+ * surface`perFileKeep` in -range hits.Matches arrive one entry per matched
  * line in line order, so a bounded range's hits all sit within the first
- * `endLine` entries, and an open-ended range starting at S is preceded by at
- * most S-1 out-of-range entries — S-1+perFileKeep entries cover the kept
- * window or exhaust the file. Clamped to the native file-size ceiling (a
+ * `endLine` entries, and an open - ended range starting at S is preceded by at
+ * most S - 1 out - of - range entries — S - 1 + perFileKeep entries cover the kept
+ * window or exhaust the file.Clamped to the native file - size ceiling(a
  * ≤4 MiB file cannot have more matched lines than bytes), which also keeps
  * the scaled global budget inside the native layer's u32 bounds.
  */
@@ -321,6 +324,74 @@ function lineRangeFetchCap(pathSpecs: readonly GrepPathSpec[], perFileKeep: numb
 	return Math.min(cap, NATIVE_GREP_MAX_FILE_BYTES);
 }
 
+/**
+ * Session gate for `grep <mcp-resource>`: mirrors read's `#handleInternalUrl` gate.
+ * `mcp://<uri>` (and server-advertised native URIs like `ags://secret`) resolve
+ * through the process-global router, which has no session, so a scoped subagent
+ * could otherwise search any connected server's resource contents by URI even
+ * though the scope excludes that server everywhere else. Resolution mirrors the
+ * handler's own settle+re-resolve so both agree on which server owns the URI.
+ */
+async function gateMcpResourceRead(router: InternalUrlRouter, rawPath: string, session: ToolSession): Promise<void> {
+	if (!router.routesToMcpResources(rawPath)) return;
+	const mcpManager = MCPManager.instance();
+	if (!mcpManager) return;
+	const urlMeta = parseInternalUrl(rawPath);
+	const uri = extractResourceUri(urlMeta);
+	let serverName = resolveTargetServer(mcpManager, uri);
+	if (serverName === undefined) {
+		await mcpManager.waitForPendingConnections();
+		await Promise.allSettled(mcpManager.getConnectedServers().map(name => mcpManager.ensureServerResources(name)));
+		serverName = resolveTargetServer(mcpManager, uri);
+	}
+	if (serverName !== undefined && session.isMCPServerResourceAllowed?.(serverName) === false) {
+		throw new ToolError(`No MCP server has resource "${rawPath}".`);
+	}
+}
+
+async function resolveInternalSearchInputs(opts: {
+	signal?: AbortSignal;
+	archiveDisplayMap: ReadonlyMap<string, string>;
+	session: ToolSession;
+	resolvedPaths: string[];
+}): Promise<{ paths: string[]; immutableSourcePaths: Set<string> }> {
+	const internalRouter = InternalUrlRouter.instance();
+	const paths = opts.resolvedPaths.slice();
+	const immutableSourcePaths = new Set<string>();
+	const context = sessionResolveContext(opts.session, { signal: opts.signal, skipDirectoryListing: true });
+
+	for (let idx = 0; idx < paths.length; idx++) {
+		const rawPath = paths[idx];
+		if (!rawPath || opts.archiveDisplayMap.has(rawPath) || !internalRouter.canResolve(rawPath)) {
+			continue;
+		}
+		await gateMcpResourceRead(internalRouter, rawPath, opts.session);
+		// `ssh://[::1]/path` carries `[`/`]` in the IPv6 authority — glob metacharacters
+		// — so check only the path portion for ssh:// (the SSH handler reads a single
+		// remote file; there is no glob expansion). A glob in the remote path still trips.
+		const globTarget = /^ssh:\/\//i.test(rawPath) ? rawPath.replace(/^ssh:\/\/[^/]*/i, "") : rawPath;
+		if (hasGlobPathChars(globTarget)) {
+			throw new ToolError(`Glob patterns are not supported for internal URLs: ${rawPath}`);
+		}
+		const resource = await internalRouter.resolve(rawPath, context);
+		// A directory listing with no backing local path (e.g. a remote ssh:// dir)
+		// has no real contents to grep — searching its listing text would be
+		// misleading. Local/skill/vault dir resources set `sourcePath` and skip this.
+		if (resource.isDirectory && !resource.sourcePath) {
+			throw new ToolError(
+				`grep cannot recurse the directory listing at ${rawPath}; grep a specific file under it (e.g. ${rawPath.replace(/\/+$/, "")}/<file>) or read ${rawPath} to list its entries`,
+			);
+		}
+		if (resource.sourcePath) {
+			paths[idx] = resource.sourcePath;
+			if (resource.immutable) {
+				immutableSourcePaths.add(path.resolve(resource.sourcePath));
+			}
+		}
+	}
+
+	return { paths, immutableSourcePaths };
+}
 type SearchParams = typeof searchSchema.infer;
 
 /**
@@ -431,6 +502,15 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				cleanup: cleanupArchiveScratch,
 			} = await resolveArchiveSearchPaths(pathSpecs, this.session.cwd);
 			try {
+				const internalResolution = await resolveInternalSearchInputs({
+					resolvedPaths,
+					archiveDisplayMap,
+					signal,
+					session: this.session,
+				});
+				const searchablePaths = internalResolution.paths;
+				const internalImmutableSourcePaths = internalResolution.immutableSourcePaths;
+
 				const rangesByAbsPath = new Map<string, LineRange[]>();
 
 				if (archiveUnreadable.length > 0 && resolvedPaths.length === archiveUnreadable.length) {
@@ -450,7 +530,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				const effectiveMultiline = patternHasNewline;
 
 				const scope = await resolveToolSearchScope({
-					rawPaths: resolvedPaths,
+					rawPaths: searchablePaths,
 					cwd: this.session.cwd,
 					internalUrlAction: "search",
 					filesystem: urlFilesystem,
@@ -461,7 +541,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					multipathStatHint: " (`path` list entries must each exist relative to cwd)",
 				});
 				const { searchPath, isDirectory, multiTargets, exactFilePaths, missingPaths, globFilter } = scope;
-				const immutableSourcePaths = scope.immutableSourcePaths;
+				const immutableSourcePaths = new Set([...internalImmutableSourcePaths, ...scope.immutableSourcePaths]);
 				// Build the per-file line-range filter after URL materialization has run:
 				// archive entries are keyed by scratch path, external URL entries by read-cache
 				// content path, internal URLs by their URL, and ordinary files by their resolved path.

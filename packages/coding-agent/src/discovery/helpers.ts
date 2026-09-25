@@ -289,6 +289,7 @@ export interface ParsedAgentFields {
 	name: string;
 	description: string;
 	tools?: string[];
+	disallowedTools?: string[];
 	spawns?: string[] | "*";
 	model?: string[];
 	output?: unknown;
@@ -332,6 +333,9 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 	if (tools && !tools.includes("yield")) {
 		tools = [...tools, "yield"];
 	}
+
+	let disallowedTools = parseArrayOrCSV(frontmatter.disallowedTools);
+	if (disallowedTools) disallowedTools = normalizeToolNames(disallowedTools);
 
 	// Parse spawns field (array, "*", or CSV)
 	let spawns: string[] | "*" | undefined;
@@ -384,6 +388,7 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		name,
 		description,
 		tools,
+		disallowedTools,
 		spawns,
 		model,
 		output,

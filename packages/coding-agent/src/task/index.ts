@@ -32,6 +32,7 @@ import taskSpecializationAdvisoryTemplate from "../prompts/tools/task-specializa
 import taskFollowUpTemplate from "../prompts/tools/task-follow-up.md" with { type: "text" };
 import { TASK_EFFORTS, type TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import { truncateForPrompt } from "../tools/approval";
+import { type EvalBackendsAllowance, resolveEvalBackends } from "../tools/eval-backends";
 import { hasWaitTool } from "../tools/wait";
 import { isIrcEnabled } from "../irc/messaging";
 import { isReadOnlyAgent } from "./read-only-policy";
@@ -143,6 +144,7 @@ interface TaskDescriptionOptions {
 	asyncEnabled: boolean;
 	ircEnabled: boolean;
 	parentSpawns: string;
+	evalBackends: EvalBackendsAllowance;
 }
 
 /** Render the tool description from a cached agent list and current settings. */
@@ -161,7 +163,7 @@ function renderDescription(options: TaskDescriptionOptions): string {
 	const renderedAgents = filteredAgents.map(agent => ({
 		name: agent.name,
 		description: agent.description,
-		readOnly: isReadOnlyAgent(agent),
+		readOnly: isReadOnlyAgent(agent, options.evalBackends),
 		blocking: agent.blocking === true,
 	}));
 	const scoutAvailable = isScoutSpawnable(options.disabledAgents, options.parentSpawns);
@@ -623,6 +625,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			asyncEnabled: cfgAsyncEnabled.get(this.session.settings),
 			ircEnabled: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
 			parentSpawns: this.session.getSessionSpawns() ?? "*",
+			evalBackends: resolveEvalBackends(this.session),
 		});
 	}
 	private constructor(
