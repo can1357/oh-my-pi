@@ -15,6 +15,8 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
+import { cfgShellPath } from "@oh-my-pi/pi-coding-agent/exec/settings";
+
 const bashResult = {
 	output: "old-output",
 	exitCode: 0,
@@ -121,7 +123,7 @@ describe("AgentSession bash session ownership", () => {
 		// BashRunner delegates execution to the global Settings-backed executor, so
 		// keep this extension-env contract independent of the developer's shell rc.
 		const shell = process.platform === "win32" ? (Bun.env.ComSpec ?? "cmd.exe") : "/bin/sh";
-		Settings.instance.set("shellPath", shell);
+		cfgShellPath.set(Settings.instance, shell);
 		vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
 			shell,
 			args: process.platform === "win32" ? ["/c"] : ["-c"],
@@ -163,7 +165,7 @@ describe("AgentSession bash session ownership", () => {
 		// filtered spawn env) never contained it — so user shells lost the
 		// variable entirely (the secretsd session-token incident).
 		const shell = process.platform === "win32" ? (Bun.env.ComSpec ?? "cmd.exe") : "/bin/sh";
-		Settings.instance.set("shellPath", shell);
+		cfgShellPath.set(Settings.instance, shell);
 		vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
 			shell,
 			args: process.platform === "win32" ? ["/c"] : ["-c"],
@@ -208,7 +210,7 @@ describe("AgentSession bash session ownership", () => {
 		// value again, it now looks unchanged against the poisoned baseline,
 		// and the adapter silently drops it from the forwarded env.
 		const shell = process.platform === "win32" ? (Bun.env.ComSpec ?? "cmd.exe") : "/bin/sh";
-		Settings.instance.set("shellPath", shell);
+		cfgShellPath.set(Settings.instance, shell);
 		const cachedShellConfig = {
 			shell,
 			args: process.platform === "win32" ? ["/c"] : ["-c"],

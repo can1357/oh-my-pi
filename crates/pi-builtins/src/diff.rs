@@ -8,7 +8,6 @@ use std::{
 	borrow::Cow,
 	collections::BTreeSet,
 	ffi::{OsStr, OsString},
-	fs,
 	io::{Read, Write},
 	ops::Range,
 	path::{Path, PathBuf},
@@ -275,10 +274,9 @@ fn diff_main(files: &[OsString], opts: Options<'_>, host: &mut Host) -> Result<i
 /// Replaces a directory operand with `<dir>/<basename of other>` for the GNU
 /// dir-vs-file comparison form.
 fn descend(dir: &Path, other: &Path) -> Result<PathBuf, String> {
-	let base = other
-		.file_name()
+	let base = pi_vfs::file_name(other)
 		.ok_or_else(|| format!("cannot compare {} to a directory", other.display()))?;
-	Ok(dir.join(base))
+	Ok(pi_vfs::child_path(dir, &base))
 }
 
 fn classify(name: &Path, new_file: bool, host: &Host) -> Result<Operand, String> {
@@ -288,7 +286,7 @@ fn classify(name: &Path, new_file: bool, host: &Host) -> Result<Operand, String>
 	// Keep `name` for diagnostics and headers; only filesystem access uses the
 	// path resolved against the shell working directory.
 	let resolved = host.resolve(name);
-	match fs::metadata(&resolved) {
+	match host.fs().metadata(&resolved) {
 		Ok(meta) if meta.is_dir() => Ok(Operand::Dir(resolved)),
 		Ok(_) => Ok(Operand::File(resolved)),
 		Err(err) if err.kind() == std::io::ErrorKind::NotFound && new_file => Ok(Operand::Absent),
@@ -313,9 +311,11 @@ fn read_operand(
 			Ok((buf, None))
 		},
 		Operand::File(resolved) => {
-			let bytes = fs::read(resolved)
+			let fs = host.fs();
+			let bytes = fs
+				.read(resolved)
 				.map_err(|err| format!("{}: {}", name.display(), io_msg(&err)))?;
-			let mtime = fs::metadata(resolved).ok().and_then(|meta| meta.modified().ok());
+			let mtime = fs.metadata(resolved).ok().and_then(|meta| meta.modified().ok());
 			Ok((bytes, mtime))
 		},
 		Operand::Dir(_) => unreachable!("directories are handled by diff_dirs"),
@@ -742,7 +742,9 @@ fn diff_dirs(
 ) -> Result<bool, String> {
 	let mut names: BTreeSet<OsString> = BTreeSet::new();
 	for (dir_name, dir_res) in [(name_a, res_a), (name_b, res_b)] {
-		let entries = fs::read_dir(dir_res)
+		let entries = host
+			.fs()
+			.read_dir(dir_res)
 			.map_err(|err| format!("{}: {}", dir_name.display(), io_msg(&err)))?;
 		for entry in entries {
 			let entry = entry.map_err(|err| format!("{}: {}", dir_name.display(), io_msg(&err)))?;
@@ -758,13 +760,14 @@ fn diff_dirs(
 		if host.is_cancelled() {
 			return Err("interrupted".to_string());
 		}
-		let (child_name_a, child_name_b) = (name_a.join(&name), name_b.join(&name));
+		let (child_name_a, child_name_b) =
+			(pi_vfs::join_path(name_a, Path::new(&name)), pi_vfs::join_path(name_b, Path::new(&name)));
 		// Resolve every recursively discovered display path through the host too;
 		// the process's current directory is unrelated to the shell's.
 		let child_res_a = host.resolve(&child_name_a);
 		let child_res_b = host.resolve(&child_name_b);
-		let meta_a = fs::metadata(&child_res_a).ok();
-		let meta_b = fs::metadata(&child_res_b).ok();
+		let meta_a = host.fs().metadata(&child_res_a).ok();
+		let meta_b = host.fs().metadata(&child_res_b).ok();
 		match (meta_a.as_ref(), meta_b.as_ref()) {
 			(Some(ma), Some(mb)) if ma.is_dir() && mb.is_dir() => {
 				if opts.recursive {
@@ -804,9 +807,13 @@ fn diff_dirs(
 				differed = true;
 			},
 			(Some(ma), Some(mb)) => {
-				let bytes_a = fs::read(&child_res_a)
+				let bytes_a = host
+					.fs()
+					.read(&child_res_a)
 					.map_err(|err| format!("{}: {}", child_name_a.display(), io_msg(&err)))?;
-				let bytes_b = fs::read(&child_res_b)
+				let bytes_b = host
+					.fs()
+					.read(&child_res_b)
 					.map_err(|err| format!("{}: {}", child_name_b.display(), io_msg(&err)))?;
 				let prefix = pair_prefix(&child_name_a, &child_name_b, opts);
 				differed |= diff_pair(
@@ -829,7 +836,9 @@ fn diff_dirs(
 					} else {
 						(&child_name_b, &child_res_b)
 					};
-					let bytes = fs::read(present_res)
+					let bytes = host
+						.fs()
+						.read(present_res)
 						.map_err(|err| format!("{}: {}", present_name.display(), io_msg(&err)))?;
 					let prefix = pair_prefix(&child_name_a, &child_name_b, opts);
 					let present_mtime = meta.modified().ok();

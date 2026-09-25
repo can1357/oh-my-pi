@@ -4,8 +4,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { resolveAuthGatewayRoutesPath } from "@oh-my-pi/pi-coding-agent/cli/auth-gateway-cli";
+import { cfgAuthGatewayRoutesFile } from "@oh-my-pi/pi-coding-agent/cli/auth-gateway-settings";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { SETTINGS_SCHEMA } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 describe("resolveAuthGatewayRoutesPath", () => {
@@ -46,10 +46,11 @@ describe("resolveAuthGatewayRoutesPath", () => {
 });
 
 describe("auth.gateway.routesFile setting", () => {
-	test("is an optional hidden string in the schema", () => {
-		const def = SETTINGS_SCHEMA["auth.gateway.routesFile"];
-		expect(def).toEqual({ type: "string", default: undefined });
-		expect("ui" in def).toBe(false);
+	test("is an optional hidden string in the registry", () => {
+		expect(cfgAuthGatewayRoutesFile.id).toBe("auth.gateway.routesFile");
+		expect(cfgAuthGatewayRoutesFile.type).toBe("string");
+		expect(cfgAuthGatewayRoutesFile.default).toBeUndefined();
+		expect(cfgAuthGatewayRoutesFile.ui).toBeUndefined();
 	});
 
 	test("loadReadOnly reads nested config.yml", async () => {
@@ -60,7 +61,7 @@ describe("auth.gateway.routesFile setting", () => {
 				"auth:\n  gateway:\n    routesFile: /tmp/from-config.json5\n",
 			);
 			const loaded = await Settings.loadReadOnly({ agentDir, cwd: agentDir });
-			expect(loaded.get("auth.gateway.routesFile")).toBe("/tmp/from-config.json5");
+			expect(cfgAuthGatewayRoutesFile.get(loaded)).toBe("/tmp/from-config.json5");
 		} finally {
 			resetSettingsForTest();
 			await removeWithRetries(agentDir);
@@ -72,7 +73,7 @@ describe("auth.gateway.routesFile setting", () => {
 		try {
 			await Bun.write(path.join(agentDir, "config.yml"), "setupVersion: 0\n");
 			const loaded = await Settings.loadReadOnly({ agentDir, cwd: agentDir });
-			expect(loaded.get("auth.gateway.routesFile")).toBeUndefined();
+			expect(cfgAuthGatewayRoutesFile.get(loaded)).toBeUndefined();
 		} finally {
 			resetSettingsForTest();
 			await removeWithRetries(agentDir);

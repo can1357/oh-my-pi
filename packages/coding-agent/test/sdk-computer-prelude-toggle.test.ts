@@ -12,6 +12,9 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
+import { cfgBrowserEnabled } from "@oh-my-pi/pi-coding-agent/tools/browser/settings";
+import { cfgComputerEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
+
 // Guards the SDK/session boundary: browser and computer stay outside the tool
 // registry while their eval preludes follow live, session-local settings.
 describe("AgentSession eval preludes", () => {
@@ -60,19 +63,22 @@ describe("AgentSession eval preludes", () => {
 		expect(session.getEnabledToolNames()).not.toContain("browser");
 		expect(session.getEvalPreludes()).toEqual([]);
 
-		session.settings.override("computer.enabled", true);
+		cfgComputerEnabled.override(session.settings, true);
 		expect(session.getEvalPreludes().map(definition => definition.name)).toEqual(["computer"]);
 		expect(session.getAllToolNames()).not.toContain("computer");
+		// Setting listeners queue the prompt refresh on the next microtask; the no-op mutation serializes behind it.
+		await Promise.resolve();
 		await session.runToolRegistryMutation(async () => undefined);
 		expect(session.agent.state.systemPrompt.join("\n\n")).toContain("# Computer Use");
 		expect(session.agent.state.systemPrompt.join("\n\n")).toContain("`computer` eval prelude");
 
-		session.settings.override("computer.enabled", false);
+		cfgComputerEnabled.override(session.settings, false);
 		expect(session.getEvalPreludes()).toEqual([]);
+		await Promise.resolve();
 		await session.runToolRegistryMutation(async () => undefined);
 		expect(session.agent.state.systemPrompt.join("\n\n")).not.toContain("# Computer Use");
 
-		session.settings.override("browser.enabled", true);
+		cfgBrowserEnabled.override(session.settings, true);
 		expect(session.getEvalPreludes().map(definition => definition.name)).toEqual(["browser"]);
 		expect(session.getAllToolNames()).not.toContain("browser");
 
@@ -137,7 +143,8 @@ describe("AgentSession eval preludes", () => {
 		});
 		sessions.push(session);
 
-		settings.override("browser.enabled", true);
+		cfgBrowserEnabled.override(settings, true);
+		await Promise.resolve();
 		expect(reconcile).toHaveBeenLastCalledWith(true);
 		const enableReconcile = reconcile.mock.results.at(-1);
 		if (!enableReconcile || enableReconcile.type !== "return") throw new Error("Expected browser MCP reconcile");
@@ -145,7 +152,8 @@ describe("AgentSession eval preludes", () => {
 		await session.runToolRegistryMutation(async () => undefined);
 		expect(session.getEvalPreludes().some(definition => definition.name === "browser")).toBe(true);
 
-		settings.override("browser.enabled", false);
+		cfgBrowserEnabled.override(settings, false);
+		await Promise.resolve();
 		expect(reconcile).toHaveBeenLastCalledWith(false);
 		const disableReconcile = reconcile.mock.results.at(-1);
 		if (!disableReconcile || disableReconcile.type !== "return") throw new Error("Expected browser MCP reconcile");

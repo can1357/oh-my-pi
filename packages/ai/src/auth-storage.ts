@@ -45,7 +45,10 @@ import type { ApiKeyResolver } from "./auth-retry";
 import * as AIError from "./error";
 import type { OAuthCredentials } from "./registry/oauth/types";
 import type {
+	AuthAccountPolicies,
 	AuthApiKeyOptions,
+	AuthCredential,
+	AuthCredentialEntry,
 	AuthCredentialSnapshot,
 	AuthCredentialSnapshotEntry,
 	AuthStorageOptions,
@@ -99,131 +102,122 @@ export { isSqliteBusyError, isSqliteCorruptionError, SqliteAuthCredentialStore }
 export * from "./auth/store";
 export * from "./auth/types";
 
-const USAGE_RANKING_METRIC_EPSILON = 1e-9;
-/**
- * Primary (short, e.g. 5h) window used-fraction at or above which a candidate
- * is demoted behind cooler siblings during ranking: a nearly exhausted short
- * window means an imminent mid-session block, so drain urgency defers to it.
- */
-const PRIMARY_WINDOW_HOT_FRACTION = 0.85;
-const OAUTH_BEARER_FINGERPRINT_HISTORY_LIMIT = 8;
-
-/** SHA-256 bearer fingerprint, so superseded OAuth token bytes never enter the identity cache. */
-function fingerprintOAuthBearer(bearer: string): string {
-	return createHash("sha256").update(bearer).digest("base64url");
+/** Store-bound credential modules; rebuilt as a unit by {@link AuthStorage.replaceStore}. */
+interface AuthStorageModules {
+	pool: CredentialPool;
+	coordination: CredentialCoordination;
+	keys: KeyCascade;
+	oauth: OAuthAccounts;
+	sessions: SessionAffinity;
+	usage: UsageService;
+	health: CredentialHealth;
+	limits: RateLimits;
+	resets: ResetCredits;
+	blocks: CredentialBlocks;
 }
-
-/** Stable identity of an OAuth row. Missing/malformed fields yield null (not a switch). */
-function fingerprintOAuthPhysicalIdentity(credential: AuthCredential): string | null {
-	if (credential.type !== "oauth") return null;
-	const parts: string[] = [];
-	const accountId = credential.accountId?.trim();
-	const email = credential.email?.trim().toLowerCase();
-	const orgId = credential.orgId?.trim();
-	if (accountId) parts.push(`account:${accountId}`);
-	if (email) parts.push(`email:${email}`);
-	if (orgId) parts.push(`org:${orgId}`);
-	if (parts.length === 0) return null;
-	return parts.join("|");
-}
-
-function identityFieldMap(fingerprint: string): Map<string, string> {
-	const fields = new Map<string, string>();
-	for (const part of fingerprint.split("|")) {
-		const sep = part.indexOf(":");
-		if (sep <= 0) continue;
-		fields.set(part.slice(0, sep), part.slice(sep + 1));
-	}
-	return fields;
-}
-
-/**
- * True when fingerprints do not conflict: shared keys match, and keys present
- * on only one side are inconclusive (enrichment or temporary field omission).
- */
-function isConservativeIdentityEnrichment(oldFingerprint: string, newFingerprint: string): boolean {
-	const oldFields = identityFieldMap(oldFingerprint);
-	const newFields = identityFieldMap(newFingerprint);
-	for (const [key, value] of oldFields) {
-		const next = newFields.get(key);
-		if (next !== undefined && next !== value) return false;
-	}
-	return true;
-}
-
-function turnReservationKey(credentialId: number, incarnation: number): string {
-	return `${credentialId}:${incarnation}`;
-}
-
-function anonymousProbeRequestKey(credentialId: number, blockScope: string): string {
-	return `anon-probe:${credentialId}:${blockScope}`;
-}
-
-const WORKSPACE_DEACTIVATED_PATTERN = /\bdeactivated_workspace\b|\bdeactivated[_ ](?:org|organization|workspace)\b/i;
-const SESSION_STICKY_CACHE_PREFIX = "session:sticky:";
-/**
- * Anthropic-only idle window after which a session's pinned credential no
- * longer suppresses usage-based re-ranking. Anthropic caps OAuth prompt-cache
- * retention at `ttl: "1h"` (ephemeral ~5min otherwise), so after this long
- * without an Anthropic resolve the conversation-prefix cache is no longer
- * guaranteed warm. Other providers retain indefinite stickiness until their
- * own cache lifetimes are verified.
- */
-const ANTHROPIC_SESSION_STICKY_CACHE_WARM_MS = 60 * 60_000;
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Credential Types
-// ─────────────────────────────────────────────────────────────────────────────
-
-export type ApiKeyCredential = {
-	type: "api_key";
-	key: string;
-	source?: "login";
-};
-
-export type OAuthCredential = {
-	type: "oauth";
-} & OAuthCredentials;
-
-export type AuthCredential = ApiKeyCredential | OAuthCredential;
-
-export type AuthCredentialEntry = AuthCredential | AuthCredential[];
-
-export type AuthStorageData = Record<string, AuthCredentialEntry>;
 
 /**
  * Credential management over an {@link AuthCredentialStore}: multi-account
  * selection with usage-aware ranking, rate-limit blocks, OAuth refresh, and
  * usage reporting. See the module doc for the namespace layout.
+ *
+ * Namespaces resolve against the current store on every access, so holders of
+ * this instance follow {@link AuthStorage.replaceStore} without re-wiring.
  */
 export class AuthStorage {
-	/** Stored credential rows, change/disable events, broker snapshot. */
-	readonly credentials: CredentialsApi;
-	/** Provider auth cascade and key overrides. */
-	readonly keys: KeysApi;
-	/** OAuth login, account access, listings, refresh. */
-	readonly oauth: OAuthApi;
-	/** Session → account pins. */
-	readonly sessions: SessionsApi;
-	/** Usage reports, header ingestion, history. */
-	readonly usage: UsageApi;
-	/** Model pool health and per-credential probes. */
-	readonly health: HealthApi;
-	/** Usage-limit marking and credential rotation. */
-	readonly limits: LimitsApi;
-	/** Saved rate-limit resets. */
-	readonly resets: ResetsApi;
-	/** Persisted rate-limit blocks (auth-broker server seam). */
-	readonly blocks: BlocksApi;
-	#pool: CredentialPool;
-	#overrides: KeyOverrides;
-	#coordination: CredentialCoordination;
+	readonly #options: AuthStorageOptions;
+	readonly #overrides: KeyOverrides;
+	readonly #policies: AccountPolicies;
+	#modules: AuthStorageModules;
 	#generationUnsubscribes = new Map<(generation: number) => void, () => void>();
 
 	constructor(store: AuthCredentialStore, options: AuthStorageOptions = {}) {
-		const overrides = new KeyOverrides(options.configValueResolver);
-		const policies = new AccountPolicies(options.accountPolicies ?? [], options.defaultReservePct);
-		const blockHealth = new BlockStoreHealth(options.sourceLabel);
+		this.#options = options;
+		this.#overrides = new KeyOverrides(options.configValueResolver);
+		this.#policies = new AccountPolicies(options.accountPolicies ?? [], options.defaultReservePct);
+		this.#modules = this.#compose(store, options.sourceLabel);
+		if (options.onCredentialDisabled) this.#modules.pool.onDisabled(options.onCredentialDisabled);
+	}
+
+	/** Stored credential rows, change/disable events, broker snapshot. */
+	get credentials(): CredentialsApi {
+		return this.#modules.pool;
+	}
+	/** Provider auth cascade and key overrides. */
+	get keys(): KeysApi {
+		return this.#modules.keys;
+	}
+	/** OAuth login, account access, listings, refresh. */
+	get oauth(): OAuthApi {
+		return this.#modules.oauth;
+	}
+	/** Session → account pins. */
+	get sessions(): SessionsApi {
+		return this.#modules.sessions;
+	}
+	/** Usage reports, header ingestion, history. */
+	get usage(): UsageApi {
+		return this.#modules.usage;
+	}
+	/** Model pool health and per-credential probes. */
+	get health(): HealthApi {
+		return this.#modules.health;
+	}
+	/** Usage-limit marking and credential rotation. */
+	get limits(): LimitsApi {
+		return this.#modules.limits;
+	}
+	/** Saved rate-limit resets. */
+	get resets(): ResetsApi {
+		return this.#modules.resets;
+	}
+	/** Persisted rate-limit blocks (auth-broker server seam). */
+	get blocks(): BlocksApi {
+		return this.#modules.blocks;
+	}
+
+	/**
+	 * Apply new account routing policy (live `auth.accountPolicies` /
+	 * `retry.usageReservePct` change). Throws a configuration error, leaving the
+	 * active policy untouched, when the policy is malformed or does not match the
+	 * stored OAuth accounts.
+	 */
+	setAccountPolicies(config: { accountPolicies: AuthAccountPolicies; defaultReservePct: number }): void {
+		const pool = this.#modules.pool;
+		const stored = new Map<string, AuthCredential[]>();
+		for (const provider of pool.providers()) stored.set(provider, pool.credentials(provider));
+		this.#policies.replace(config.accountPolicies, config.defaultReservePct, stored);
+	}
+
+	/**
+	 * Swap the backing credential store in place (live `auth.broker.url` change).
+	 * Loads `store` into fresh store-bound state — pins, blocks, and usage caches are
+	 * keyed by the old store's row ids — then closes the previous store. Runtime key
+	 * overrides, account policies, usage-provider overrides, and credential event
+	 * subscribers carry over. On a load failure `store` is closed and the current
+	 * store stays active.
+	 */
+	async replaceStore(store: AuthCredentialStore, options: { sourceLabel?: string } = {}): Promise<void> {
+		const next = this.#compose(store, options.sourceLabel ?? this.#options.sourceLabel);
+		try {
+			await next.pool.reload();
+		} catch (error) {
+			next.pool.close();
+			throw error;
+		}
+		const previous = this.#modules;
+		next.pool.adoptSubscribers(previous.pool);
+		next.usage.adoptRuntimeProviders(previous.usage);
+		this.#modules = next;
+		previous.pool.close();
+		next.pool.bump("store-replaced");
+	}
+
+	#compose(store: AuthCredentialStore, sourceLabel: string | undefined): AuthStorageModules {
+		const options = this.#options;
+		const overrides = this.#overrides;
+		const policies = this.#policies;
+		const blockHealth = new BlockStoreHealth(sourceLabel);
 		const strategies = options.rankingStrategyResolver ?? defaultRankingStrategy;
 		const probeBook = new QuotaProbeLeaseBook();
 		const pool = new CredentialPool(store, {
@@ -287,34 +281,33 @@ export class AuthStorage {
 			affinity,
 			coordination,
 			rotate: (provider, sessionId, rotateOptions) => limits.rotate(provider, sessionId, rotateOptions),
-			sourceLabel: options.sourceLabel,
+			sourceLabel,
 		});
 		const oauth = new OAuthAccounts({ pool, overrides, policies, selector, affinity, refresher });
 
-		this.#pool = pool;
-		this.#overrides = overrides;
-		this.#coordination = coordination;
-		this.credentials = pool;
-		this.keys = keys;
-		this.oauth = oauth;
-		this.sessions = affinity;
-		this.usage = usage;
-		this.health = new CredentialHealth({
-			store,
+		return {
 			pool,
+			coordination,
 			keys,
-			policies,
-			blocks,
-			affinity,
+			oauth,
+			sessions: affinity,
 			usage,
-			refresher,
-			overrides,
-			strategies,
-		});
-		this.limits = limits;
-		this.resets = new ResetCredits({ store, pool, oauth, usage, usageCache, blocks });
-		this.blocks = blocks;
-		if (options.onCredentialDisabled) pool.onDisabled(options.onCredentialDisabled);
+			health: new CredentialHealth({
+				store,
+				pool,
+				keys,
+				policies,
+				blocks,
+				affinity,
+				usage,
+				refresher,
+				overrides,
+				strategies,
+			}),
+			limits,
+			resets: new ResetCredits({ store, pool, oauth, usage, usageCache, blocks }),
+			blocks,
+		};
 	}
 
 	/** Open the SQLite store at `dbPath` and wrap it (standalone use, e.g. the pi-ai CLI). */
@@ -325,7 +318,7 @@ export class AuthStorage {
 
 	/** Close the underlying credential store; the instance must not be reused. */
 	close(): void {
-		this.#pool.close();
+		this.#modules.pool.close();
 	}
 
 	// ─────────────────────────────────────────────────────────────────────────────
@@ -715,28 +708,28 @@ export class AuthStorage {
 	 * undefined for quota reasons rather than missing auth).
 	 */
 	hasCoolingDownCredentials(provider: string, modelId?: string): boolean {
-		return this.#coordination.hasCoolingDownCredentials(provider, modelId);
+		return this.#modules.coordination.hasCoolingDownCredentials(provider, modelId);
 	}
 
 	getCredentialIncarnation(credentialId: number): number {
-		return this.#coordination.getCredentialIncarnation(credentialId);
+		return this.#modules.coordination.getCredentialIncarnation(credentialId);
 	}
 
 	tryAcquireQuotaProbeLease(credentialId: number, blockScope: string): string | null {
-		return this.#coordination.tryAcquireQuotaProbeLease(credentialId, blockScope);
+		return this.#modules.coordination.tryAcquireQuotaProbeLease(credentialId, blockScope);
 	}
 
 	recordQuotaProbeSuccess(credentialId: number, blockScope: string, leaseId: string | null): boolean {
-		return this.#coordination.recordQuotaProbeSuccess(credentialId, blockScope, leaseId);
+		return this.#modules.coordination.recordQuotaProbeSuccess(credentialId, blockScope, leaseId);
 	}
 
 	noteTransientSoftAvoid(credentialId: number, blockScope: string, untilMs: number): void {
-		this.#coordination.noteTransientSoftAvoid(credentialId, blockScope, untilMs);
+		this.#modules.coordination.noteTransientSoftAvoid(credentialId, blockScope, untilMs);
 	}
 
 	/** Extend every live reservation held by `requestId` so long streams outlive the idle TTL. */
 	renewTurnReservation(requestId: string, ttlMs: number = DEFAULT_TURN_RESERVATION_TTL_MS): void {
-		this.#coordination.renewTurnReservation(requestId, ttlMs);
+		this.#modules.coordination.renewTurnReservation(requestId, ttlMs);
 	}
 
 	/**
@@ -745,21 +738,21 @@ export class AuthStorage {
 	 * request can acquire a fresh lease.
 	 */
 	clearQuotaProbe(requestId: string): void {
-		this.#coordination.clearQuotaProbe(requestId);
+		this.#modules.coordination.clearQuotaProbe(requestId);
 	}
 
 	settleQuotaProbeSuccess(requestId: string): boolean {
-		return this.#coordination.settleQuotaProbeSuccess(requestId);
+		return this.#modules.coordination.settleQuotaProbeSuccess(requestId);
 	}
 
 	/** Drop an anonymous (requestId-less) inflight probe without clearing cooldown. */
 	clearAnonymousQuotaProbe(credentialId: number, blockScope: string): void {
-		this.#coordination.clearAnonymousQuotaProbe(credentialId, blockScope);
+		this.#modules.coordination.clearAnonymousQuotaProbe(credentialId, blockScope);
 	}
 
 	/** Record a requestId-less probe vend as successful: clears the cooldown lease. */
 	settleAnonymousQuotaProbe(credentialId: number, blockScope: string): boolean {
-		return this.#coordination.settleAnonymousQuotaProbe(credentialId, blockScope);
+		return this.#modules.coordination.settleAnonymousQuotaProbe(credentialId, blockScope);
 	}
 
 	tryAcquireTurnReservation(args: {
@@ -768,10 +761,10 @@ export class AuthStorage {
 		requestId: string;
 		ttlMs?: number;
 	}): TurnReservationResult {
-		return this.#coordination.tryAcquireTurnReservation(args);
+		return this.#modules.coordination.tryAcquireTurnReservation(args);
 	}
 
 	releaseTurnReservation(requestId: string): void {
-		this.#coordination.releaseTurnReservation(requestId);
+		this.#modules.coordination.releaseTurnReservation(requestId);
 	}
 }

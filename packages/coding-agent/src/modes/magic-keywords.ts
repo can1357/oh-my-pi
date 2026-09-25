@@ -9,7 +9,7 @@ import workflowNotice from "../prompts/system/workflow-notice.md" with { type: "
  * append a hidden, user-attributed notice for that turn and glow in the TUI.
  *
  * This table is the single source of truth. Every downstream surface derives
- * from it: the `magicKeywords.<id>` settings (settings-schema), the notice
+ * from it: the `magicKeywords.<id>` settings (`modes/settings.ts`), the notice
  * injection and `<id>-notice` message types (agent-session, queued-messages),
  * and the editor/bubble gradients (`setMagicKeywords` in pi-tui). Adding a
  * keyword means one row here plus its notice template under `prompts/system/`.
