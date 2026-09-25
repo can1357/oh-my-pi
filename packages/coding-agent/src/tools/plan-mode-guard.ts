@@ -7,20 +7,13 @@ import {
 	HL_FILE_SUFFIX,
 } from "@oh-my-pi/pi-tui/tools/hashline-format";
 import { isEnoent } from "@oh-my-pi/pi-utils";
-import { InternalUrlRouter, type ResolveContext } from "../internal-urls";
-import { contextLocalProtocolOptions } from "../internal-urls/context";
+import { InternalUrlRouter } from "../internal-urls";
+import { sessionResolveContext } from "../internal-urls/context";
 import type { ToolSession } from ".";
 import { resolveToCwd } from "./path-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 const HL_TRAILING_TAG_RE = new RegExp(`${HL_FILE_HASH_SEP}[0-9A-Fa-f]{${HL_FILE_HASH_LENGTH}}$`);
-
-/** Locate context for plan-path resolution: the session's cwd and the same `local://`
- *  mapping its reads use (`sessionResolveContext`), so a plan write and a later read of
- *  one URL land on one file — including sessions without artifact wiring. */
-function planResolveContext(session: ToolSession): ResolveContext {
-	return { cwd: session.cwd, session, localProtocolOptions: contextLocalProtocolOptions(session) };
-}
 
 /** Where a write to `absolutePath` lands: its deepest existing ancestor realpathed, with
  *  the missing tail re-appended. `undefined` when the path goes through a dangling
@@ -82,12 +75,16 @@ export function unwrapHashlineHeaderPath(targetPath: string): string {
  *  internal URLs, and bare absolute paths). Files inside the sandbox are not
  *  part of the working tree, so plan mode treats them as freely writable
  *  scratch/plan space — and tag-based path recovery may rebind onto them. */
-export async function targetsLocalSandbox(session: ToolSession, targetPath: string): Promise<boolean> {
-	const roots = InternalUrlRouter.instance().sandboxRoots(planResolveContext(session));
+export async function targetsLocalSandbox(
+	session: ToolSession,
+	targetPath: string,
+	signal?: AbortSignal,
+): Promise<boolean> {
+	const roots = InternalUrlRouter.instance().sandboxRoots(sessionResolveContext(session, { signal }));
 	if (roots.length === 0) return false;
 	let resolved: string;
 	try {
-		resolved = await resolvePlanPath(session, targetPath);
+		resolved = await resolvePlanPath(session, targetPath, signal);
 	} catch {
 		return false;
 	}
@@ -109,13 +106,14 @@ export async function targetsLocalSandbox(session: ToolSession, targetPath: stri
  * local file backs throw the router's uniform error. Plain paths resolve
  * against the session cwd. Bracketed hashline headers (`[path#TAG]`) are
  * unwrapped first so the inner filesystem path drives resolution — keeping the
- * plan-mode guard and the eventual write in lockstep.
+ * plan-mode guard and the eventual write in lockstep. Locating uses the session's
+ * read context (same `local://` mapping), and `signal` aborts a vault root lookup.
  */
-export async function resolvePlanPath(session: ToolSession, targetPath: string): Promise<string> {
+export async function resolvePlanPath(session: ToolSession, targetPath: string, signal?: AbortSignal): Promise<string> {
 	const router = InternalUrlRouter.instance();
 	const normalized = router.normalize(unwrapHashlineHeaderPath(targetPath));
 	if (router.canHandle(normalized)) {
-		return router.requireLocal(normalized, "write", planResolveContext(session), { create: true });
+		return router.requireLocal(normalized, "write", sessionResolveContext(session, { signal }), { create: true });
 	}
 	return resolveToCwd(normalized, session.cwd);
 }
@@ -129,7 +127,7 @@ export async function resolvePlanPath(session: ToolSession, targetPath: string):
 export async function enforcePlanModeWrite(
 	session: ToolSession,
 	targetPath: string,
-	options?: { move?: string; op?: "create" | "update" | "delete" },
+	options?: { move?: string; op?: "create" | "update" | "delete"; signal?: AbortSignal },
 ): Promise<void> {
 	const state = session.getPlanModeState?.();
 	if (!state?.enabled) return;
@@ -142,7 +140,7 @@ export async function enforcePlanModeWrite(
 		throw new ToolError("Plan mode: deleting files is not allowed.");
 	}
 
-	if (await targetsLocalSandbox(session, targetPath)) return;
+	if (await targetsLocalSandbox(session, targetPath, options?.signal)) return;
 
 	throw new ToolError(
 		"Plan mode: the working tree is read-only. Write your plan to a local://<slug>-plan.md file instead.",

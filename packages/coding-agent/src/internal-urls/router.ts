@@ -75,10 +75,11 @@ interface RegisteredUrl {
 }
 
 const SINGLE_SLASH_ALIAS_RE = /^([a-z][a-z0-9+.-]*):\/(?!\/)/i;
-// Glob metacharacters in a path segment. In the authority, `?` starts the query of an
-// authority-only URL (`vault://_?op=search`), so only `*`, `[`, `{` make it a glob.
 const GLOB_CHARS_RE = /[*?[{]/;
-const AUTHORITY_GLOB_CHARS_RE = /[*[{]/;
+// A `?` opening `key=value` pairs starts a URL query (`?op=search`, `?state=closed`); any other `?` is a glob.
+const QUERY_START_RE = /\?[\w.-]*=/;
+// Selectors a mutating tool accepts: whole-file display modes that do not change which bytes are addressed.
+const WHOLE_FILE_SELECTOR_RE = /^(?:raw|conflicts)$/i;
 
 /** Bracket-escape glob metacharacters so a literal path survives glob expansion. */
 function escapeGlob(literal: string): string {
@@ -105,6 +106,8 @@ export class InternalUrlRouter {
 	#handlers = new Map<string, ProtocolHandler>();
 	/** Scheme whose handler resolves resources of unregistered custom schemes (MCP resource URIs). */
 	readonly #resourceFallbackScheme: string;
+	/** Schemes the constructor registers: OMP-owned, never replaced by hosts. */
+	readonly #builtinSchemes: ReadonlySet<string>;
 
 	constructor() {
 		const resourceFallback = new McpProtocolHandler();
@@ -130,6 +133,7 @@ export class InternalUrlRouter {
 		this.register(new XdProtocolHandler());
 		this.register(new AttachmentProtocolHandler());
 		this.register(new ConflictProtocolHandler());
+		this.#builtinSchemes = new Set(this.#handlers.keys());
 	}
 
 	/** Process-global router instance. */
@@ -145,18 +149,37 @@ export class InternalUrlRouter {
 
 	/**
 	 * Install (or replace) the handler for `handler.scheme`. Throws when the spec's write
-	 * policy disagrees with the handler: `write()` exists exactly for `write.via: "handler"`,
-	 * and `write.via: "file"` needs a file-backed spec with `locate()`.
+	 * policy disagrees with the handler: `write()` exists exactly for `write.via: "handler"`;
+	 * `write.via: "file"` needs a mutable file-backed spec with `locate()`; a `sandbox` scope
+	 * needs a linkable `locateSync()` so {@link sandboxRoots} can locate its root.
 	 */
 	register(handler: ProtocolHandler): void {
-		const via = handler.spec.write?.via;
-		if ((via === "handler") !== (handler.write !== undefined)) {
-			throw new Error(`${handler.scheme}:// handler must define write() exactly when spec.write.via is "handler"`);
+		const { scheme, spec } = handler;
+		const via = spec.write?.via;
+		if (via === "handler" && !handler.write) {
+			throw new Error(`${scheme}:// spec.write.via is "handler" but the handler lacks write()`);
 		}
-		if (via === "file" && (handler.spec.backing !== "file" || !handler.locate)) {
-			throw new Error(`${handler.scheme}:// spec.write.via "file" requires backing "file" and a locate() hook`);
+		if (via !== "handler" && handler.write) {
+			throw new Error(
+				`${scheme}:// handler has write() but spec.write.via is ${via === undefined ? "absent" : `"${via}"`}`,
+			);
 		}
-		this.#handlers.set(handler.scheme.toLowerCase(), handler);
+		if (via === "file") {
+			if (spec.backing !== "file") {
+				throw new Error(`${scheme}:// spec.write.via "file" requires backing "file", not "${spec.backing}"`);
+			}
+			if (!handler.locate) throw new Error(`${scheme}:// spec.write.via "file" requires a locate() hook`);
+			if (spec.immutable) throw new Error(`${scheme}:// spec.write.via "file" contradicts spec.immutable`);
+		}
+		if (spec.write?.scope === "sandbox" && (!spec.linkable || !handler.locateSync)) {
+			throw new Error(`${scheme}:// spec.write.scope "sandbox" requires spec.linkable and a locateSync() hook`);
+		}
+		this.#handlers.set(scheme.toLowerCase(), handler);
+	}
+
+	/** Whether the router constructor registered `scheme` (case-insensitive): an OMP-owned scheme hosts may not replace. */
+	isBuiltin(scheme: string): boolean {
+		return this.#builtinSchemes.has(scheme.toLowerCase());
 	}
 
 	/** Remove a scheme's handler; true when one was registered. */
@@ -227,14 +250,32 @@ export class InternalUrlRouter {
 		return handler.complete(query, context);
 	}
 
-	/** Peel a trailing read selector per spec.selectors (+portAuthority). Non-URLs / unknown schemes pass through unchanged. */
+	/**
+	 * {@link normalize} `input`, then peel a trailing read selector per spec.selectors (+portAuthority).
+	 * Non-URLs and unknown schemes pass through unchanged.
+	 */
 	split(input: string): { path: string; sel?: string } {
-		return splitInternalUrlSel(input, scheme => this.spec(scheme));
+		return splitInternalUrlSel(this.normalize(input), scheme => this.spec(scheme));
+	}
+
+	/**
+	 * A mutating tool's URL target ({@link normalize}d) with a whole-file display selector
+	 * (`:raw`/`:conflicts`) peeled, so it names the file `read` does. Any other selector — a line
+	 * range, `raw:1-20`, a malformed `:-10` — throws ToolError: the tool addresses a whole file, and
+	 * dropping the selector would mutate a file the caller never named. Non-URLs pass through.
+	 */
+	peelWriteSelector(input: string, tool: string): string {
+		const { path, sel } = this.split(input);
+		if (sel === undefined || WHOLE_FILE_SELECTOR_RE.test(sel)) return path;
+		throw new ToolError(
+			`${tool} does not accept the trailing selector ":${sel}" — it addresses a whole file. ` +
+				`Remove ":${sel}", or if the filename truly ends with it, percent-encode the ":" as %3A.`,
+		);
 	}
 
 	/** Route a read/search target. null when input is not a router URL (after MCP fallback). */
 	async target(input: string, context?: ResolveContext): Promise<UrlTarget | null> {
-		const { path: bare, sel } = this.split(this.normalize(input));
+		const { path: bare, sel } = this.split(input);
 		const scheme = extractUriScheme(bare);
 		if (!scheme) return null;
 		// Registered handlers only accept the hierarchical `scheme://` form.
@@ -262,7 +303,9 @@ export class InternalUrlRouter {
 	}
 
 	/**
-	 * locate or throw ToolError `Cannot ${action} ${scheme}:// URL: no local file backs ${input}`
+	 * locate or throw ToolError. A locatable, immutable, non-remote scheme resolves from session-local
+	 * stores, so its resolve error diagnoses the miss (`Cannot find artifact://9: Artifact 9 not found.
+	 * Available: …`); otherwise `Cannot ${action} ${scheme}:// URL: no local file backs ${input}`
 	 * (+ a `read` hint for remote/virtual schemes).
 	 */
 	async requireLocal(
@@ -273,19 +316,28 @@ export class InternalUrlRouter {
 	): Promise<string> {
 		const located = await this.locate(input, context, options);
 		if (located !== null) return located;
+		const registered = this.#registered(input);
+		const spec = registered?.handler.spec;
+		if (registered?.handler.locate && spec?.immutable && spec.backing !== "remote") {
+			try {
+				await registered.handler.resolve(parseInternalUrl(this.split(registered.url).path), context);
+			} catch (error) {
+				if (context?.signal?.aborted) throw error;
+				throw new ToolError(`Cannot ${action} ${input}: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		}
 		const scheme = extractUriScheme(this.normalize(input));
 		const message = `Cannot ${action} ${scheme ?? input}:// URL: no local file backs ${input}`;
-		const backing = scheme ? this.spec(scheme)?.backing : undefined;
-		if (backing === "remote" || backing === "virtual") {
+		if (spec?.backing === "remote" || spec?.backing === "virtual") {
 			throw new ToolError(`${message}. Use \`read ${input}\` to inspect it.`);
 		}
 		throw new ToolError(message);
 	}
 
 	/**
-	 * Whether `input` is a registered URL with a glob segment. The authority counts as the
-	 * first path segment (`local://*.md`) unless the scheme's authority is a host
-	 * ({@link SchemeSpec.portAuthority}).
+	 * Whether `input` is a registered URL with a glob segment. The authority counts as the first
+	 * segment unless it is a host ({@link SchemeSpec.portAuthority}). The query (`?key=…`) and
+	 * fragment never glob, so `issue://?search=fix*` is no glob while `memory://root/?.md` is.
 	 */
 	isGlob(input: string): boolean {
 		const glob = this.#globSegments(input);
@@ -296,12 +348,16 @@ export class InternalUrlRouter {
 	 * Glob over a locatable directory: splits `scheme://base/**\/*.md` at the first glob
 	 * segment ({@link isGlob}), locates the base as a directory, returns `<abs-base>/<glob-tail>`
 	 * with the base glob-escaped. null when `input` is no glob or its base is not locatable.
+	 * Throws ToolError for a glob in an id authority (`skill://*\/SKILL.md`, no {@link SchemeSpec.pathAuthority}).
 	 */
 	async locateGlob(input: string, context?: ResolveContext): Promise<string | null> {
 		const glob = this.#globSegments(input);
 		if (!glob || glob.firstGlob === -1) return null;
 		const { scheme, handler, segments, firstGlob } = glob;
 		if (!handler.locate) return null;
+		if (firstGlob === 0 && !handler.spec.pathAuthority) {
+			throw new ToolError(`Globs are not supported in ${scheme}:// ids: ${input}`);
+		}
 
 		const rawTail = segments.slice(firstGlob);
 		if (rawTail.some(segment => /%(?:2f|5c)/i.test(segment))) {
@@ -335,7 +391,10 @@ export class InternalUrlRouter {
 		return registered.handler.locateSync(parsed, context);
 	}
 
-	/** Absolute roots of every `sandbox`-scope writable scheme (plan mode keeps them writable), located for `context`. */
+	/**
+	 * Absolute roots of every `sandbox`-scope writable scheme (plan mode keeps them writable), located
+	 * for `context` through {@link locateSync}; {@link register} requires such schemes to be linkable.
+	 */
 	sandboxRoots(context?: ResolveContext): string[] {
 		const roots: string[] = [];
 		for (const [scheme, handler] of this.#handlers) {
@@ -374,13 +433,14 @@ export class InternalUrlRouter {
 	}
 
 	/**
-	 * Approval tier for writing `input`: its scheme's `spec.write.tier`. Non-URLs and schemes
-	 * without `spec.write` fail closed to "write"; tools refuse writes to the latter anyway.
+	 * Approval decision for writing `input`: its scheme's `spec.write.tier`. Non-URLs are "write";
+	 * a registered scheme without `spec.write` is denied at the gate as read-only, never prompted.
 	 */
 	writeTier(input: string, content: string | undefined, session: ToolSession | undefined): ToolApprovalDecision {
 		const registered = this.#registered(input);
-		const policy = registered?.handler.spec.write;
-		if (!registered || !policy) return "write";
+		if (!registered) return "write";
+		const policy = registered.handler.spec.write;
+		if (!policy) return { tier: "write", policy: "deny", reason: `${registered.scheme}:// URLs are read-only` };
 		return policy.tier(parseInternalUrl(registered.url), content, session);
 	}
 
@@ -422,15 +482,21 @@ export class InternalUrlRouter {
 		return handler && split ? { url, scheme: split.scheme, handler } : undefined;
 	}
 
-	/** Authority + path segments of a registered URL and the index of the first glob segment (-1: none). */
+	/**
+	 * Authority + path segments of a registered URL, query and fragment cut ({@link isGlob}),
+	 * and the index of the first glob segment (-1: none).
+	 */
 	#globSegments(input: string): (RegisteredUrl & { segments: string[]; firstGlob: number }) | undefined {
 		const registered = this.#registered(input);
 		if (!registered) return undefined;
-		const segments = registered.url.slice(registered.scheme.length + 3).split("/");
-		const authorityGlob = !registered.handler.spec.portAuthority && AUTHORITY_GLOB_CHARS_RE.test(segments[0]);
-		const firstGlob = authorityGlob
-			? 0
-			: segments.findIndex((segment, index) => index > 0 && GLOB_CHARS_RE.test(segment));
+		const rest = registered.url.slice(registered.scheme.length + 3);
+		const fragment = rest.indexOf("#");
+		const beforeFragment = fragment === -1 ? rest : rest.slice(0, fragment);
+		const query = beforeFragment.search(QUERY_START_RE);
+		const segments = (query === -1 ? beforeFragment : beforeFragment.slice(0, query)).split("/");
+		const firstGlob = segments.findIndex(
+			(segment, index) => (index > 0 || !registered.handler.spec.portAuthority) && GLOB_CHARS_RE.test(segment),
+		);
 		return { ...registered, segments, firstGlob };
 	}
 

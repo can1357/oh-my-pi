@@ -46,7 +46,7 @@ import {
 	splitPathAndSelPreferringLiteral,
 } from "./path-utils";
 import { type LineRange, parseLineRanges, selectorLineRanges } from "@oh-my-pi/pi-tui/tools/line-ranges";
-import { splitInternalUrlSel, splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
+import { splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
 import { toPathList } from "@oh-my-pi/pi-tui/render/render-utils";
 import { isRawSelector } from "./read-selector";
 import { formatCodeFrameLine } from "@oh-my-pi/pi-tui/render/render-utils";
@@ -132,14 +132,15 @@ function isReadSelectorGrammar(sel: string): boolean {
 
 async function parsePathSpecs(rawEntries: readonly string[], cwd: string): Promise<GrepPathSpec[]> {
 	const specs: GrepPathSpec[] = [];
+	const router = InternalUrlRouter.instance();
 	for (const entry of rawEntries) {
-		// Internal URLs use the URL-aware splitter, which peels selector-shaped
-		// tails only for schemes declaring line selectors and leaves opaque
-		// server-defined URIs intact. Unlike filesystem paths, their
+		// Internal URLs (single-slash aliases included) use the router's splitter,
+		// which peels selector-shaped tails only for schemes declaring line
+		// selectors and leaves opaque server-defined URIs intact. Unlike filesystem paths, their
 		// verbatim/index display modes (`raw`, `conflicts`) carry no meaning for
 		// content search, so we accept them — searching the whole resource — and
 		// still honor any embedded line range as a match filter.
-		const internalSplit = splitInternalUrlSel(entry);
+		const internalSplit = router.split(entry);
 		if (internalSplit.sel !== undefined) {
 			// Reject selectors read's parseSel would reject (`:1-1:1-2`, `:conflicts:1-1`)
 			// plus read-only tails (`:-10`) instead of silently widening the search or

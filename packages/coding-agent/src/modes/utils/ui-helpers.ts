@@ -296,7 +296,11 @@ export class UiHelpers {
 								message,
 								this.ctx.viewSession.sessionManager.putBlobSync.bind(this.ctx.viewSession.sessionManager),
 							);
-						userComponent = new UserMessageComponent(userText, { synthetic: isSynthetic, imageLinks });
+						userComponent = new UserMessageComponent(userText, {
+							synthetic: isSynthetic,
+							imageLinks,
+							liveSteered: message.role === "user" && message.liveSteered === true,
+						});
 						this.ctx.transcriptMessageComponents.set(message, userComponent);
 					}
 					this.ctx.chatContainer.addChild(userComponent);

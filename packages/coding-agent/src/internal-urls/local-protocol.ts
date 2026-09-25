@@ -299,7 +299,7 @@ export function resolveLocalUrlToPath(
 	}
 
 	const resolved = path.resolve(localRoot, relativePath);
-	ensureWithinRoot(resolved, localRoot, "local");
+	ensureWithinRoot(resolved, localRoot, "local", url.href);
 	return resolved;
 }
 
@@ -345,13 +345,13 @@ async function resolveLocalTarget(url: InternalUrl, opts: LocalProtocolOptions):
 
 	const relativePath = extractRelativePath(url);
 	const targetPath = relativePath ? path.resolve(resolvedRoot, relativePath) : resolvedRoot;
-	ensureWithinRoot(targetPath, resolvedRoot, "local");
+	ensureWithinRoot(targetPath, resolvedRoot, "local", url.href);
 
 	if (targetPath === resolvedRoot) {
 		return { kind: "listing", root: resolvedRoot };
 	}
 
-	const realTargetPath = await containedRealPath(targetPath, resolvedRoot, "local");
+	const realTargetPath = await containedRealPath(targetPath, resolvedRoot, "local", url.href);
 	if (realTargetPath === undefined) {
 		throw new Error(`Local file not found: ${url.href}`);
 	}
@@ -370,8 +370,9 @@ async function resolveLocalTarget(url: InternalUrl, opts: LocalProtocolOptions):
  * Locate a local:// URL without creating anything. With `create`, returns the
  * lexical path under the session root (writes land where `resolveLocalUrlToPath`
  * points) once creating it provably stays inside the root — the deepest existing
- * ancestor must realpath inside it and no entry may be a dangling symlink.
- * Otherwise returns the realpath of an existing target, else null.
+ * ancestor must realpath inside it and no entry may be a dangling symlink (the
+ * root included; a merely missing root is created on write). Otherwise returns
+ * the realpath of an existing target, else null.
  */
 async function locateLocalTarget(
 	url: InternalUrl,
@@ -381,21 +382,24 @@ async function locateLocalTarget(
 	const localRoot = path.resolve(resolveLocalRoot(opts));
 	const relativePath = extractRelativePath(url);
 	const targetPath = relativePath ? path.resolve(localRoot, relativePath) : localRoot;
-	ensureWithinRoot(targetPath, localRoot, "local");
+	ensureWithinRoot(targetPath, localRoot, "local", url.href);
 
 	let realRoot: string;
 	try {
 		realRoot = await fs.realpath(localRoot);
 	} catch (error) {
-		if (isEnoent(error)) return create ? targetPath : null;
-		throw error;
+		if (!isEnoent(error)) throw error;
+		if (!create) return null;
+		// Missing root: nothing to escape through unless the root itself is a dangling symlink.
+		await ensureCreatableWithinRoot(targetPath, localRoot, "local", url.href);
+		return targetPath;
 	}
 	const underRealRoot = relativePath ? path.resolve(realRoot, relativePath) : realRoot;
 	if (create) {
-		await ensureCreatableWithinRoot(underRealRoot, realRoot, "local");
+		await ensureCreatableWithinRoot(underRealRoot, realRoot, "local", url.href);
 		return targetPath;
 	}
-	return (await containedRealPath(underRealRoot, realRoot, "local")) ?? null;
+	return (await containedRealPath(underRealRoot, realRoot, "local", url.href)) ?? null;
 }
 
 /**
@@ -412,6 +416,7 @@ export class LocalProtocolHandler implements ProtocolHandler {
 		backing: "file",
 		selectors: "lines",
 		immutable: false,
+		pathAuthority: true,
 		linkable: true,
 		imageQuestion: true,
 		shellOperand: true,

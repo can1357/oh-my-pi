@@ -4,8 +4,15 @@
 
 ### Added
 
+- Added `Always for this session` option to cfg:// approval prompts for session-wide changes
+- Added timeout handling for cfg:// approval prompts, aborting writes after 10 s with a clear error message
+- Added `providers.openaiLiveSteering` setting to toggle mid-response input delivery
+- Added explicit memory backend settlement for reliable cross-project CWD transitions
+- Added automatic prevention of user session overrides shadowed by environment variables
+- Added configuration approval UI signals for saved settings shadowed by higher-precedence layers
 - Added support for paged reading of large files with metadata signaling for UI recovery
 - Added `unset` capability to the configuration registry for removing overrides and reverting to defaults
+- Added `/slow [on|off|status]`: on OpenAI and Google models it switches the session to the `flex` service tier; on Anthropic it is the only switch for subscription slow mode (not in `/settings`). While on, when a Claude subscription hits its 5-hour session limit and Anthropic offers lower-priority service, omp switches over automatically and keeps working on spare capacity until the limit resets instead of waiting. `/slow on` also continues right away if the offer is already available, `/slow off` stops it, and the status line shows `low priority until HH:MM` while it's on ([#13222](https://github.com/can1357/oh-my-pi/pull/13222) by [@H4vC](https://github.com/H4vC)).
 - Added support for universal (fat) Mach-O binaries in IDA tool, allowing selection of specific architecture slices via the `:@<arch>` syntax
 - Added automatic slice detection for universal binaries, defaulting to the host CPU architecture
 - Added case-sensitive per-agent compaction thresholds for task/eval subagents, with percentage or fixed-token limits that leave the main session threshold unchanged ([#13107](https://github.com/can1357/oh-my-pi/pull/13107) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
@@ -34,6 +41,7 @@
 
 ### Changed
 
+- Implemented sequential atomic configuration saves to prevent write overlaps
 - Refactored domain-specific settings to a type-safe registry supporting dynamic reactivity and layered environment variable overrides
 - Updated URL resolution to use a canonical router, replacing ad-hoc `normalizeLocalScheme` logic
 - Hardened filesystem access across `local://`, `memory://`, and `vault://` protocols with robust symlink and containment validation

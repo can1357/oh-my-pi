@@ -112,6 +112,7 @@ export class ArtifactProtocolHandler implements ProtocolHandler {
 		backing: "file",
 		selectors: "lines",
 		immutable: true,
+		artifactStore: true,
 		linkable: true,
 		shellOperand: true,
 	};

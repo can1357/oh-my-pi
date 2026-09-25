@@ -1,15 +1,19 @@
 //! Path resolution and write authorization for edit targets.
 //!
 //! Plain paths resolve against the session `cwd`/`home_dir`. Internal URLs
-//! (any `scheme://` registered in [`PathPolicy::url_schemes`], or its
-//! single-slash `scheme:/` spelling) are opaque here: their backing files
-//! come from host answers ([`UrlResolution`]) keyed by the canonical
-//! `scheme://` URL.
+//! (any `scheme://` registered in [`PathPolicy::url_schemes`], or the
+//! single-slash `scheme:/` spelling of a [`PathPolicy::url_alias_schemes`]
+//! entry) are opaque here: their backing files come from host answers
+//! ([`UrlResolution`]) keyed by the canonical `scheme://` URL. Any other
+//! URI-shaped target (`scheme:/x` of a non-alias scheme, an unregistered
+//! `scheme://x` other than `file://`) is refused the way `write` refuses it,
+//! never edited as a working-tree path.
 
 use std::{
 	borrow::Cow,
 	collections::HashMap,
-	path::{Component, Path, PathBuf},
+	ffi::OsString,
+	path::{Component, Path, PathBuf, Prefix},
 	time::{Duration, Instant},
 };
 
@@ -42,6 +46,9 @@ pub struct PathPolicy {
 	/// Registered internal URL schemes, lowercase, without `://` (host
 	/// router's spec keys).
 	pub url_schemes:          Vec<String>,
+	/// The [`Self::url_schemes`] whose single-slash `scheme:/x` spelling
+	/// aliases `scheme://x` (host spec `singleSlashAlias`).
+	pub url_alias_schemes:    Vec<String>,
 	/// Plain-path roots that stay writable in plan mode (sandbox directories).
 	pub plan_writable_roots:  Vec<PathBuf>,
 	pub plan_active:          bool,
@@ -52,8 +59,8 @@ impl PathPolicy {
 	/// The internal URL `authored` names: the hashline-header-unwrapped
 	/// target (minus one leading `@` mention marker) when it starts with a
 	/// registered `scheme://` (case-insensitive), with the single-slash
-	/// `scheme:/x` spelling rewritten to `scheme://x`. This is the
-	/// resolution table key and the URL handed to the host.
+	/// `scheme:/x` spelling of an alias scheme rewritten to `scheme://x`.
+	/// This is the resolution table key and the URL handed to the host.
 	pub fn url_target<'a>(&self, authored: &'a str) -> Option<Cow<'a, str>> {
 		self.url_key(unwrap_hashline_header_path(authored))
 	}
@@ -69,16 +76,18 @@ impl PathPolicy {
 	///
 	/// # Errors
 	/// [`EditError::UnresolvedUrl`] when a URL target has no entry in `urls`;
-	/// [`EditError::Apply`] with the host refusal verbatim, or
-	/// `No local file backs <url>` when the host found no backing file.
+	/// [`EditError::Apply`] with the host refusal verbatim,
+	/// `No local file backs <url>` when the host found no backing file, or
+	/// `Unknown URI-like edit target …` for a URI-shaped target that is
+	/// neither an internal URL nor a filesystem path.
 	pub fn resolve(
 		&self,
 		authored: &str,
 		urls: &HashMap<String, UrlResolution>,
 	) -> EditResult<Resolved> {
 		let display = unwrap_hashline_header_path(authored).to_owned();
-		let absolute = match self.url_key(&display) {
-			Some(url) => {
+		let absolute = match self.address(&display) {
+			Address::Url(url) => {
 				let resolution = urls
 					.get(url.as_ref())
 					.ok_or_else(|| EditError::UnresolvedUrl(url.as_ref().to_owned()))?;
@@ -90,27 +99,61 @@ impl PathPolicy {
 					.clone()
 					.ok_or_else(|| EditError::apply(format!("No local file backs {url}")))?
 			},
-			None => self.resolve_path(&display),
+			Address::Path => self.resolve_path(&display),
+			Address::Refused(message) => return Err(EditError::apply(message)),
 		};
 		Ok(Resolved { absolute, display })
 	}
 
 	/// [`Self::url_target`] for an already-unwrapped display path.
 	fn url_key<'a>(&self, display: &'a str) -> Option<Cow<'a, str>> {
+		match self.address(display) {
+			Address::Url(url) => Some(url),
+			Address::Path | Address::Refused(_) => None,
+		}
+	}
+
+	/// How an already-unwrapped display path is addressed. URI-shaped
+	/// targets (`scheme:/…`, optionally behind one `@`) are URLs only for
+	/// registered schemes — the single-slash spelling only for alias schemes;
+	/// Windows drives (`C:/…`) and `file://` stay filesystem paths; anything
+	/// else is refused with `write`'s wording.
+	fn address<'a>(&self, display: &'a str) -> Address<'a> {
 		let url = display.strip_prefix('@').unwrap_or(display);
-		let (scheme, rest) = url.split_once(':')?;
-		if !self
-			.url_schemes
-			.iter()
-			.any(|known| known.eq_ignore_ascii_case(scheme))
-		{
-			return None;
+		let Some((scheme, rest)) = url.split_once(':') else {
+			return Address::Path;
+		};
+		let Some(path) = rest.strip_prefix('/') else {
+			return Address::Path;
+		};
+		let listed = |schemes: &[String]| {
+			schemes
+				.iter()
+				.any(|known| known.eq_ignore_ascii_case(scheme))
+		};
+		if listed(&self.url_schemes) {
+			if path.starts_with('/') {
+				return Address::Url(Cow::Borrowed(url));
+			}
+			if listed(&self.url_alias_schemes) {
+				return Address::Url(Cow::Owned(format!("{scheme}://{path}")));
+			}
+			let suggestion = format!("{}://{path}", scheme.to_ascii_lowercase());
+			return Address::Refused(unknown_uri_target(display, Some(&suggestion)));
 		}
-		if rest.starts_with("//") {
-			return Some(Cow::Borrowed(url));
+		let is_scheme = scheme
+			.bytes()
+			.next()
+			.is_some_and(|first| first.is_ascii_alphabetic())
+			&& scheme
+				.bytes()
+				.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'.' | b'-'));
+		let local =
+			scheme.len() == 1 || (scheme.eq_ignore_ascii_case("file") && path.starts_with('/'));
+		if !is_scheme || local {
+			return Address::Path;
 		}
-		let path = rest.strip_prefix('/')?;
-		Some(Cow::Owned(format!("{scheme}://{path}")))
+		Address::Refused(unknown_uri_target(display, None))
 	}
 
 	/// Resolve a filesystem path (never a URL) against `cwd` and `home_dir`,
@@ -186,11 +229,12 @@ impl PathPolicy {
 			return Err(EditError::Plan("Plan mode: deleting files is not allowed.".into()));
 		}
 		let display = unwrap_hashline_header_path(display);
-		let writable = match self.url_key(display) {
-			Some(url) => urls
+		let writable = match self.address(display) {
+			Address::Url(url) => urls
 				.get(url.as_ref())
 				.is_some_and(|resolution| resolution.plan_writable),
-			None => self.in_plan_writable_root(&self.resolve_path(display)),
+			Address::Path => self.in_plan_writable_root(&self.resolve_path(display)),
+			Address::Refused(_) => false,
 		};
 		if writable {
 			return Ok(());
@@ -216,9 +260,9 @@ impl PathPolicy {
 	}
 
 	/// Whether hashline tag recovery may rebind `authored` onto `recovered`.
-	/// URL targets never rebind.
+	/// Only filesystem paths rebind; URL-shaped targets never do.
 	pub fn allow_tag_path_recovery(&self, authored: &str, recovered: &Path) -> bool {
-		if self.is_internal_url(authored) {
+		if !matches!(self.address(unwrap_hashline_header_path(authored)), Address::Path) {
 			return false;
 		}
 		let recovered = lexical_absolute(recovered, &self.cwd);
@@ -242,6 +286,26 @@ impl PathPolicy {
 			 to the source\n3. Regenerate the file"
 		))
 	}
+}
+
+/// How [`PathPolicy::address`] classifies an unwrapped edit target.
+enum Address<'a> {
+	/// Internal URL, keyed by its canonical `scheme://` spelling.
+	Url(Cow<'a, str>),
+	/// Filesystem path.
+	Path,
+	/// URI-shaped but neither: the model-facing refusal.
+	Refused(String),
+}
+
+/// `write`'s refusal for a URI-shaped target it cannot address, reworded
+/// for edit; `suggestion` is the registered `scheme://` spelling.
+fn unknown_uri_target(display: &str, suggestion: Option<&str>) -> String {
+	let hint = suggestion.map_or_else(String::new, |url| format!(" Did you mean '{url}'?"));
+	format!(
+		"Unknown URI-like edit target '{display}'.{hint} Prefix the path with './' to edit it as a \
+		 filesystem path."
+	)
 }
 
 /// Strip a strict `[path]` / `[path#XXXX]` hashline header wrapper.
@@ -372,29 +436,57 @@ fn is_windows_drive(value: &str) -> bool {
 		&& value.as_bytes().get(1) == Some(&b':')
 }
 
-/// Drop a Windows verbatim prefix: `\\?\UNC\server\share…` →
-/// `\\server\share…`, `\\?\C:\…` → `C:\…`; anything else is unchanged.
+/// Drop a Windows verbatim prefix that has a plain spelling:
+/// `\\?\C:\…` → `C:\…`, `\\?\UNC\server\share…` → `\\server\share…`.
+/// Other verbatim forms (`\\?\GLOBALROOT\…`, `\\?\Volume{…}\…`) have none
+/// and are unchanged.
 fn strip_windows_verbatim(value: &str) -> Cow<'_, str> {
-	const UNC: &str = r"\\?\UNC\";
-	if value
-		.get(..UNC.len())
-		.is_some_and(|prefix| prefix.eq_ignore_ascii_case(UNC))
+	let Some(rest) = value.strip_prefix(r"\\?\") else {
+		return Cow::Borrowed(value);
+	};
+	if rest
+		.get(..4)
+		.is_some_and(|unc| unc.eq_ignore_ascii_case(r"UNC\"))
 	{
-		let rest = &value[UNC.len()..];
-		return Cow::Owned(format!(r"\\{rest}"));
+		return Cow::Owned(format!(r"\\{}", &rest[4..]));
 	}
-	Cow::Borrowed(value.strip_prefix(r"\\?\").unwrap_or(value))
+	if is_windows_drive(rest) && rest.as_bytes().get(2) == Some(&b'\\') {
+		return Cow::Borrowed(rest);
+	}
+	Cow::Borrowed(value)
 }
 
-/// [`strip_windows_verbatim`] for a path; paths without the prefix are
-/// returned as-is (never round-tripped through lossy UTF-8).
+/// [`strip_windows_verbatim`] for a path, rebuilt from its components (never
+/// round-tripped through lossy UTF-8). Only Windows paths carry prefixes.
 fn strip_windows_verbatim_path(path: PathBuf) -> PathBuf {
-	let stripped = {
-		let text = path.to_string_lossy();
-		let stripped = strip_windows_verbatim(&text);
-		(stripped.len() != text.len()).then(|| PathBuf::from(stripped.as_ref()))
+	let mut components = path.components();
+	let Some(Component::Prefix(prefix)) = components.next() else {
+		return path;
 	};
-	stripped.unwrap_or(path)
+	let rooted = components.clone().next() == Some(Component::RootDir);
+	let Some(plain) = plain_prefix(prefix.kind(), rooted) else {
+		return path;
+	};
+	let mut plain = PathBuf::from(plain);
+	plain.extend(components);
+	plain
+}
+
+/// The plain spelling of a verbatim path prefix that has one (the forms
+/// `dunce` strips): a rooted `\\?\C:` → `C:`, `\\?\UNC\server\share` →
+/// `\\server\share`. `None` for every other prefix.
+fn plain_prefix(prefix: Prefix<'_>, rooted: bool) -> Option<OsString> {
+	match prefix {
+		Prefix::VerbatimDisk(letter) if rooted => Some(format!("{}:", char::from(letter)).into()),
+		Prefix::VerbatimUNC(server, share) => {
+			let mut unc = OsString::from(r"\\");
+			unc.push(server);
+			unc.push(r"\");
+			unc.push(share);
+			Some(unc)
+		},
+		_ => None,
+	}
 }
 
 fn percent_decode(value: &str) -> Result<String, String> {
@@ -588,6 +680,7 @@ mod tests {
 			cwd:                  root.to_owned(),
 			home_dir:             root.join("home"),
 			url_schemes:          vec!["sbx".into(), "ro".into()],
+			url_alias_schemes:    vec!["sbx".into()],
 			plan_writable_roots:  vec![root.join("sandbox")],
 			plan_active:          false,
 			block_auto_generated: true,
@@ -618,10 +711,11 @@ mod tests {
 			p.resolve("file:///tmp/a%20b", &urls).unwrap().absolute,
 			PathBuf::from("/tmp/a b")
 		);
-		// Unregistered schemes and scheme-colon names without a slash are plain
-		// paths.
-		assert_eq!(p.resolve("other://x", &urls).unwrap().absolute, tmp.path().join("other:/x"));
+		// Scheme-colon names without a slash, Windows drives, and `./`-prefixed
+		// URI-shaped names are plain paths.
 		assert_eq!(p.resolve("sbx:x", &urls).unwrap().absolute, tmp.path().join("sbx:x"));
+		assert_eq!(p.resolve("./other://x", &urls).unwrap().absolute, tmp.path().join("other:/x"));
+		assert!(p.resolve("C:/x", &urls).is_ok());
 		assert!(matches!(
 			p.resolve("[@SBX://x.md#AB12]", &urls),
 			Err(EditError::UnresolvedUrl(url)) if url == "SBX://x.md"
@@ -629,34 +723,28 @@ mod tests {
 	}
 
 	#[test]
-	fn single_slash_urls_resolve_through_the_host_never_the_working_tree() {
+	fn uri_shaped_targets_are_host_urls_or_refused_never_working_tree_paths() {
 		let tmp = tempfile::tempdir().unwrap();
 		let p = policy(tmp.path());
 		let urls = HashMap::new();
-		// `sbx:/../x` must reach the host (which refuses traversal) instead of
-		// lexically collapsing to `<cwd>/x`.
-		for (authored, url) in [
-			("sbx:/notes.md", "sbx://notes.md"),
-			("@SBX:/notes.md", "SBX://notes.md"),
-			("[sbx:/notes.md#AB12]", "sbx://notes.md"),
-			("sbx:/../src/main.rs", "sbx://../src/main.rs"),
-		] {
-			assert!(
-				matches!(p.resolve(authored, &urls), Err(EditError::UnresolvedUrl(missed)) if missed == url),
-				"{authored}"
-			);
+		// Alias scheme: `sbx:/../x` reaches the host (which refuses traversal)
+		// instead of lexically collapsing to `<cwd>/x`.
+		assert!(matches!(
+			p.resolve("[sbx:/../src/main.rs#AB12]", &urls),
+			Err(EditError::UnresolvedUrl(url)) if url == "sbx://../src/main.rs"
+		));
+		// Registered scheme without the alias, and an unregistered scheme: refused
+		// like `write` refuses them.
+		for (authored, suggestion) in [("ro:/a.md", Some("'ro://a.md'")), ("bogus://a.md", None)] {
+			let Err(EditError::Apply(message)) = p.resolve(authored, &urls) else {
+				panic!("{authored} must be refused");
+			};
+			assert!(message.contains(&format!("'{authored}'")), "{message}");
+			if let Some(suggestion) = suggestion {
+				assert!(message.contains(suggestion), "{message}");
+			}
+			assert!(p.url_target(authored).is_none(), "{authored}");
 		}
-		let backing = tmp.path().join("sandbox/notes.md");
-		let urls =
-			HashMap::from([("sbx://notes.md".to_owned(), answer(Some(backing.clone()), None, true))]);
-		assert_eq!(p.resolve("sbx:/notes.md", &urls).unwrap().absolute, backing);
-		let mut plan = p;
-		plan.plan_active = true;
-		assert!(
-			plan
-				.enforce_write("sbx:/notes.md", FileOp::Create, None, &urls)
-				.is_ok()
-		);
 	}
 
 	#[test]
@@ -666,6 +754,34 @@ mod tests {
 		assert_eq!(strip_windows_verbatim(r"\\?\unc\server\share"), r"\\server\share");
 		assert_eq!(strip_windows_verbatim(r"\\server\share"), r"\\server\share");
 		assert_eq!(expand_path(r"\\?\UNC\server\share\a.rs", Path::new("")), r"\\server\share\a.rs");
+		// Verbatim forms without a plain spelling keep their prefix: stripped, they
+		// would become relative paths naming a different file.
+		for kept in [
+			r"\\?\GLOBALROOT\Device\HarddiskVolume1\a.rs",
+			r"\\?\Volume{0b1c2d3e-0000-0000-0000-100000000000}\a.rs",
+			r"\\?\C:",
+		] {
+			assert_eq!(strip_windows_verbatim(kept), kept);
+		}
+	}
+
+	#[test]
+	fn plain_prefix_rebuilds_only_disk_and_unc_verbatim_prefixes() {
+		use std::ffi::OsStr;
+		assert_eq!(plain_prefix(Prefix::VerbatimDisk(b'C'), true), Some("C:".into()));
+		assert_eq!(
+			plain_prefix(Prefix::VerbatimUNC(OsStr::new("server"), OsStr::new("share")), true),
+			Some(r"\\server\share".into())
+		);
+		assert_eq!(plain_prefix(Prefix::VerbatimDisk(b'C'), false), None);
+		for kept in [
+			Prefix::Verbatim(OsStr::new("GLOBALROOT")),
+			Prefix::Verbatim(OsStr::new("Volume{0b1c2d3e-0000-0000-0000-100000000000}")),
+			Prefix::Disk(b'C'),
+			Prefix::UNC(OsStr::new("server"), OsStr::new("share")),
+		] {
+			assert_eq!(plain_prefix(kept, true), None);
+		}
 	}
 
 	#[cfg(unix)]

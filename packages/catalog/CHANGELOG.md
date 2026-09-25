@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `supports-steering` compatibility flag, enabled by default for GPT-6 and newer models
+
 ### Fixed
 
 - Fixed Claude Opus 5.5 requests that force tool use, preventing turn failures and allowing forced tool selections to fall back to automatic tool selection when required.

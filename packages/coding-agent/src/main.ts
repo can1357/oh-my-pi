@@ -46,7 +46,7 @@ import {
 } from "./config/model-resolver";
 import { ModelsConfigFile } from "./config/models-config";
 import { serviceTierSettingToTier } from "./config/service-tier";
-import { all, bindEffects, combine, type ProtocolHost, type SettingValueOf } from "./config/registry";
+import { all, combine, type ProtocolHost, type SettingValueOf } from "./config/registry";
 import { Settings, settings } from "./config/settings";
 import { initializeWithSettings } from "./discovery";
 import {
@@ -511,35 +511,26 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 				`Trusted extension failed to load: ${trustedExtensions.errors.map(item => item.error).join("; ")}`,
 			);
 		}
-		// The newest live ACP session drives process-wide effects (credential redaction,
-		// `worktree.base`, request limits) from its own project's settings; disposing it
-		// hands them back to the previous holder.
-		const releaseEffects = bindEffects(nextSettings);
-		let created: CreateAgentSessionResult;
-		try {
-			created = await args.createSession({
-				...args.baseOptions,
-				cwd,
-				sessionManager: nextSessionManager,
-				settings: nextSettings,
-				authStorage: args.authStorage,
-				modelRegistry: args.modelRegistry,
-				agentId,
-				// ACP defers the `ask` capability and reserve-policy confirmation until
-				// client capabilities are known, without enabling other UI-only behavior.
-				interactivePrompts: factoryOptions?.interactivePrompts,
-				deferUsageReserveConfirmation: true,
-				enableMCP: false,
-				titleSystemPrompt,
-				eventBus,
-				preloadedExtensions: trustedExtensions,
-			});
-		} catch (error) {
-			releaseEffects();
-			throw error;
-		}
-		const { session: nextSession, setToolUIContext } = created;
-		nextSession.addDisposer(releaseEffects);
+		// Like every top-level session, it holds process-wide effects (`worktree.base`, request
+		// limits, …) on its own project's settings until disposed; its requests redact credentials
+		// per that project's `secrets.enabled` regardless of which session holds the effects.
+		const { session: nextSession, setToolUIContext } = await args.createSession({
+			...args.baseOptions,
+			cwd,
+			sessionManager: nextSessionManager,
+			settings: nextSettings,
+			authStorage: args.authStorage,
+			modelRegistry: args.modelRegistry,
+			agentId,
+			// ACP defers the `ask` capability and reserve-policy confirmation until
+			// client capabilities are known, without enabling other UI-only behavior.
+			interactivePrompts: factoryOptions?.interactivePrompts,
+			deferUsageReserveConfirmation: true,
+			enableMCP: false,
+			titleSystemPrompt,
+			eventBus,
+			preloadedExtensions: trustedExtensions,
+		});
 		if (args.parsedArgs.apiKey && !args.baseOptions.model && nextSession.model) {
 			args.authStorage.keys.setRuntime(nextSession.model.provider, args.parsedArgs.apiKey);
 		}
@@ -1903,7 +1894,7 @@ export async function runRootCommand(
 
 		applyStartupComposerPreferences({
 			quiet: cfgStartupQuiet.get(settingsInstance),
-			composerShape: cfgComposerShape.get(settingsInstance) ?? "band",
+			composerShape: cfgComposerShape.get(settingsInstance),
 			showHardwareCursor: cfgShowHardwareCursor.get(settingsInstance),
 			maxInlineImages: cfgTuiMaxInlineImages.get(settingsInstance),
 			resizeScrollback: cfgTuiResizeScrollback.get(settingsInstance),

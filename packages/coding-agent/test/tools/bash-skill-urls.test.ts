@@ -50,6 +50,8 @@ let tempDir: string;
 let skill: Skill;
 let localOptions: LocalProtocolOptions;
 let context: ResolveContext;
+/** Session artifact #0 (`artifact://0`). */
+let artifactLog: string;
 
 beforeAll(async () => {
 	tempDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "bash-url-expand-")));
@@ -64,6 +66,9 @@ beforeAll(async () => {
 		baseDir,
 		source: "test",
 	};
+	artifactLog = path.join(tempDir, "artifacts", "0.bash.log");
+	await fs.mkdir(path.dirname(artifactLog), { recursive: true });
+	await fs.writeFile(artifactLog, "log\n");
 	localOptions = {
 		getArtifactsDir: () => path.join(tempDir, "artifacts"),
 		getSessionId: () => "session-1",
@@ -125,16 +130,68 @@ describe("expandInternalUrls", () => {
 		);
 	});
 
-	it("leaves unlocatable, failing, and unregistered-scheme URLs unchanged", async () => {
-		for (const command of [
-			"cat fixture://unknown",
-			"cat fixture://missing",
-			"cat fixture://escape-text",
-			"curl https://example.com/a",
-			"cat nosuchscheme://x",
-		]) {
+	it("leaves unregistered-scheme URLs unchanged", async () => {
+		for (const command of ["curl https://example.com/a", "cat nosuchscheme://x"]) {
 			await expect(expandInternalUrls(command, { context })).resolves.toBe(command);
 		}
+	});
+
+	it("fails closed on shell operands that locate nothing or fail to locate", async () => {
+		// Passed through raw, the shell would read `scheme:/…` as a relative path.
+		await expect(expandInternalUrls("cat fixture://unknown", { context })).rejects.toThrow(
+			"fixture://unknown does not exist",
+		);
+		await expect(expandInternalUrls("cat fixture://missing", { context })).rejects.toThrow("Fixture file not found");
+		await expect(expandInternalUrls("cat fixture://escape-text", { context })).rejects.toThrow(
+			"fixture:// URL escapes fixture root",
+		);
+	});
+
+	it("fails closed on a missing artifact:// operand", async () => {
+		await expect(expandInternalUrls("cat artifact://99", { context })).rejects.toThrow(
+			"artifact://99 does not exist",
+		);
+	});
+
+	it("leaves URL mentions in heredoc bodies and comments verbatim while expanding real operands", async () => {
+		const artifact0 = shellEscape(artifactLog);
+		const cases: Array<[string, string]> = [
+			[
+				"cat > notes.md <<EOF\nsee artifact://99 and artifact://0\nEOF\ncat artifact://0",
+				`cat > notes.md <<EOF\nsee artifact://99 and artifact://0\nEOF\ncat ${artifact0}`,
+			],
+			[
+				"cat > notes.md <<-'END'\n\tartifact://99\n\tEND\ncat artifact://0",
+				`cat > notes.md <<-'END'\n\tartifact://99\n\tEND\ncat ${artifact0}`,
+			],
+			["cat artifact://0 # artifact://99 is gone", `cat ${artifact0} # artifact://99 is gone`],
+			// An apostrophe in data text opens no quote that would hide later operands.
+			[
+				"cat > a.md <<EOF\nit's artifact://99\nEOF\ncat artifact://0",
+				`cat > a.md <<EOF\nit's artifact://99\nEOF\ncat ${artifact0}`,
+			],
+			["true # don't\ncat artifact://0", `true # don't\ncat ${artifact0}`],
+			// Arithmetic shifts and here-strings open no heredoc.
+			["echo $((1<<2)); cat artifact://0", `echo $((1<<2)); cat ${artifact0}`],
+			["grep x <<< hi; cat artifact://0", `grep x <<< hi; cat ${artifact0}`],
+		];
+		for (const [command, expected] of cases) {
+			await expect(expandInternalUrls(command, { context })).resolves.toBe(expected);
+		}
+	});
+
+	it("refuses line selectors on shell operands instead of silently addressing the whole file", async () => {
+		for (const command of [
+			"echo x > local://out.txt:5",
+			"cat local://notes.md:1-5",
+			"cat skill://valid-skill/SKILL.md:1-5",
+		]) {
+			await expect(expandInternalUrls(command, { context, create: true })).rejects.toThrow(/whole file/);
+		}
+		await expect(fs.stat(resolveLocalUrlToPath("local://out.txt", localOptions))).rejects.toThrow();
+		await expect(expandInternalUrls("cat skill://valid-skill/SKILL.md:raw", { context })).resolves.toBe(
+			`cat ${shellEscape(skill.filePath)}`,
+		);
 	});
 
 	it("fails closed on containment violations instead of passing the token through", async () => {
@@ -221,9 +278,11 @@ describe("expandInternalUrls", () => {
 	});
 
 	it("never creates inside immutable schemes", async () => {
-		const command = "tee skill://valid-skill/new-dir/out.txt";
-
-		await expect(expandInternalUrls(command, { context, create: true })).resolves.toBe(command);
+		for (const command of ["tee skill://valid-skill/new-dir/out.txt", "mkdir -p skill://valid-skill/new-dir"]) {
+			await expect(expandInternalUrls(command, { context, create: true })).rejects.toThrow(
+				"skill://valid-skill/new-dir",
+			);
+		}
 		await expect(fs.stat(path.join(skill.baseDir, "new-dir"))).rejects.toThrow();
 	});
 

@@ -149,10 +149,7 @@ describe("advisor memory context", () => {
 					pattern: "Advisor project summary marker",
 				}),
 			).rejects.toThrow(unavailableRoot);
-			// glob only locates: the backend-bound root has no local file behind it.
-			await expect(glob.execute("advisor-root-glob", { path: "memory://root" })).rejects.toThrow(
-				"no local file backs memory://root",
-			);
+			await expect(glob.execute("advisor-root-glob", { path: "memory://root" })).rejects.toThrow(unavailableRoot);
 			await expect(glob.execute("advisor-root-glob", { path: "memory://root/*.md" })).rejects.toThrow(
 				"Glob patterns are not supported for internal URLs: memory://root/*.md",
 			);

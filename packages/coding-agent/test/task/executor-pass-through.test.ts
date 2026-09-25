@@ -630,6 +630,32 @@ describe("runSubprocess per-agent service-tier overrides", () => {
 		]).toEqual(["flex", "none", "flex"]);
 	});
 
+	it("drops inherited live tiers a family can't realize instead of failing the spawn", async () => {
+		const model = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!model) throw new Error("Expected gpt-5.6-sol model to exist");
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		// A resumed parent session file can carry a live tier its family never realizes.
+		const result = await runSubprocess({
+			...baseOptions,
+			agent: { ...baseAgent, name: "scout", model: [`${model.provider}/${model.id}`] },
+			id: "subagent-inherited-unrealizable-tier",
+			settings: Settings.isolated({ "tier.subagent": "inherit" }),
+			parentServiceTier: { openai: "flex", anthropic: "flex" },
+			modelRegistry: createModelRegistry(model),
+		});
+
+		expect(result.exitCode).toBe(0);
+		const childSettings = spy.mock.calls[0]?.[0]?.settings;
+		if (!childSettings) throw new Error("Expected createAgentSession to receive settings");
+		expect([
+			cfgTierOpenai.get(childSettings),
+			cfgTierAnthropic.get(childSettings),
+			cfgTierGoogle.get(childSettings),
+		]).toEqual(["flex", "none", "none"]);
+	});
+
 	it("lets an unsupported concrete override beat the global tier without crossing families", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");

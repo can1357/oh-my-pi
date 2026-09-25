@@ -543,6 +543,42 @@ describe("GrepTool internal URL resolution", () => {
 		expect(getResultText(searchResult)).toContain("beta needle line");
 	});
 
+	it("honors a line selector on the single-slash local:/ spelling in search", async () => {
+		const localRoot = path.join(artifactsDir, "local");
+		await fs.mkdir(localRoot, { recursive: true });
+		await Bun.write(path.join(localRoot, "notes.md"), "first needle\nsecond needle\nthird needle\n");
+		LocalProtocolHandler.setOverride({ getArtifactsDir: () => artifactsDir, getSessionId: () => "session" });
+
+		const text = getResultText(
+			await new GrepTool(createSession()).execute("search-alias-selector", {
+				pattern: "needle",
+				path: "local:/notes.md:2-2",
+			}),
+		);
+
+		expect(text).toContain("second needle");
+		expect(text).not.toContain("first needle");
+		expect(text).not.toContain("third needle");
+	});
+
+	it("names the unknown artifact id and the available ones when find cannot locate it", async () => {
+		await Bun.write(path.join(artifactsDir, "4.bash.log"), "log\n");
+
+		await expect(
+			new GlobTool(createSession()).execute("find-missing-artifact", { path: "artifact://9" }),
+		).rejects.toThrow("Artifact 9 not found. Available: 4");
+	});
+
+	it("reports a glob in a skill:// name as unsupported instead of a parse error", async () => {
+		await registerSkillDirectory();
+
+		for (const tool of [new GlobTool(createSession()), new GrepTool(createSession())]) {
+			await expect(tool.execute("id-glob", { pattern: "needle", path: "skill://*/SKILL.md" })).rejects.toThrow(
+				"Globs are not supported in skill:// ids",
+			);
+		}
+	});
+
 	it("expands a glob in the first local:// segment for find and search", async () => {
 		const localRoot = path.join(artifactsDir, "local");
 		await fs.mkdir(localRoot, { recursive: true });

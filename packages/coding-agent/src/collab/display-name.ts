@@ -5,7 +5,7 @@ import { cfgCollabDisplayName } from "./settings";
 
 /** Display name for this process's user in collab sessions. */
 export function collabDisplayName(ctx: InteractiveModeContext): string {
-	const configured = (cfgCollabDisplayName.get(ctx.settings) ?? "").trim();
+	const configured = cfgCollabDisplayName.get(ctx.settings).trim();
 	if (configured) return configured;
 	try {
 		return os.userInfo().username;

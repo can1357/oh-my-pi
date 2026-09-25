@@ -47,7 +47,7 @@ export async function materializeUrlScope(rawInput: string, context?: ResolveCon
 	// `find` searches whole files, so a trailing `:N-M` would silently be
 	// ignored downstream — reject it with the reason instead.
 	const router = InternalUrlRouter.instance();
-	const { path: url, sel } = router.split(router.normalize(input));
+	const { path: url, sel } = router.split(input);
 	if (sel !== undefined) {
 		throw new ToolError(`find searches whole files; line-range selectors are not supported: ${input}`);
 	}

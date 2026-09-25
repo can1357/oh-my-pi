@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added live steering support for GPT-6 models, allowing queued user messages to be delivered into an active streaming response
+- Added the `anthropicSlowMode` stream option: first-party Claude OAuth requests can send `anthropic-usage-limit: slow`, report the `anthropic-ratelimit-unified-slow-*` response headers per account, and wait out `slot_busy`/overloaded capacity responses at the server's pace ([#13222](https://github.com/can1357/oh-my-pi/pull/13222) by [@H4vC](https://github.com/H4vC)).
 - Added support for Anthropic fallback credit token capture and redemption, including the 3-step rejection ladder for prompt-cache repricing on classifier refusals.
 - Added Vercel AI Gateway app attribution: requests now send `http-referer: https://omp.sh/` and `x-title: omp` unless you set those headers yourself.
 
