@@ -113,6 +113,7 @@ describe("session-owned supervised services", () => {
 		let sessionId = "old-session";
 		const callbacks: Array<() => void> = [];
 		const deliveries: Array<[string, DaemonCompletionNotification]> = [];
+		const delivered = Promise.withResolvers<void>();
 		const session: ToolSession = {
 			cwd: projectDir,
 			hasUI: false,
@@ -126,6 +127,7 @@ describe("session-owned supervised services", () => {
 			},
 			queueLaunchCompletion: notification => {
 				deliveries.push([sessionId, notification]);
+				delivered.resolve();
 				return Promise.resolve();
 			},
 		};
@@ -149,8 +151,9 @@ describe("session-owned supervised services", () => {
 			expect(deliveries).toEqual([]);
 
 			switchTo("old-session");
-			// The broker writes the replay before the list response, so the sink has already run.
+			// Exit state is visible before persistence and completion delivery finish.
 			await listServices(session);
+			await delivered.promise;
 			expect(
 				deliveries.map(([receiver, { owner, daemon }]) => [receiver, owner, daemon.name, daemon.state]),
 			).toEqual([["old-session", "old-session", "old-service", "failed"]]);
