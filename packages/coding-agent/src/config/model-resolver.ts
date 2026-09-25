@@ -1,5 +1,6 @@
 import {
 	MAX_THINKING_SUFFIX_OPTIONS,
+	formatModelSelectorValue,
 	parseThinkingSuffix,
 	splitThinkingSuffix,
 	parseModelString,
@@ -506,6 +507,20 @@ export interface ModelMatchPreferences {
 }
 
 export type ModelLookupRegistry = Pick<ModelRegistry, "getAvailable">;
+export type StrictModelResolverRegistry = Pick<ModelRegistry, "getAvailable" | "getAll" | "getApiKey">;
+
+export type StrictModelFailureReason = "unknown" | "disabled-provider" | "missing-credentials";
+
+export interface StrictModelCandidateFailure {
+	pattern: string;
+	reason: StrictModelFailureReason;
+}
+
+export interface StrictModelCandidateResolution {
+	patterns: string[];
+	models: Model<Api>[];
+	failures: StrictModelCandidateFailure[];
+}
 type CliModelRegistry = Pick<ModelRegistry, "getAll" | "getAvailable">;
 type InitialModelRegistry = Pick<ModelRegistry, "getAvailable" | "find" | "hasConcreteAuth">;
 type RestorableModelRegistry = Pick<ModelRegistry, "getAvailable" | "find" | "getApiKey" | "hasConcreteAuth">;
@@ -1234,9 +1249,11 @@ export function resolveConfiguredModelPatterns(
 	});
 }
 export interface AgentModelPatternResolutionOptions {
-	/** Highest-priority request selector, when supplied by a caller. */
+	/** Per-spawn selector, below configured agent policy but above bundled defaults. */
 	requestModel?: string | string[];
 	settingsOverride?: string | string[];
+	/** A custom agent definition (or explicitly configured role) takes precedence over the request. */
+	agentModelPriority?: boolean;
 	agentModel?: string | string[];
 	settings?: Settings;
 	activeModelPattern?: string;
@@ -1245,41 +1262,53 @@ export interface AgentModelPatternResolutionOptions {
 
 interface EffectiveAgentModelSelection {
 	source?: string | string[];
+	origin: "settings" | "agent" | "request" | "session";
 	patterns: string[];
 }
 
 function resolveEffectiveAgentModelSelection(
 	options: AgentModelPatternResolutionOptions,
 ): EffectiveAgentModelSelection {
-	const { requestModel, settingsOverride, agentModel, settings, activeModelPattern, fallbackModelPattern } = options;
-
-	const requestPatterns = resolveConfiguredModelPatterns(requestModel, settings);
-	if (requestPatterns.length > 0) {
-		return { source: requestModel, patterns: requestPatterns };
-	}
+	const {
+		requestModel,
+		settingsOverride,
+		agentModel,
+		agentModelPriority,
+		settings,
+		activeModelPattern,
+		fallbackModelPattern,
+	} = options;
 
 	const overridePatterns = resolveConfiguredModelPatterns(settingsOverride, settings);
 	if (overridePatterns.length > 0) {
-		return { source: settingsOverride, patterns: overridePatterns };
+		return { source: settingsOverride, origin: "settings", patterns: overridePatterns };
 	}
+
+	const requestPatterns = resolveConfiguredModelPatterns(requestModel, settings);
 
 	const normalizedAgentPatterns = normalizeModelPatternList(agentModel);
 	const configuredAgentPatterns = resolveConfiguredModelPatterns(agentModel, settings);
 	const singleAgentPattern = normalizedAgentPatterns.length === 1 ? normalizedAgentPatterns[0] : undefined;
 	const agentInheritsSessionModel = singleAgentPattern ? isSessionInheritedAgentPattern(singleAgentPattern) : false;
-	if (configuredAgentPatterns.length > 0) {
-		if (
+	const agentPatternsAvailable =
+		configuredAgentPatterns.length > 0 &&
+		(agentModelPriority ||
+			!agentInheritsSessionModel ||
 			singleAgentPattern === formatModelRoleAlias("task") ||
-			singleAgentPattern === `${LEGACY_MODEL_ROLE_ALIAS_PREFIX}task`
-		) {
-			return { source: agentModel, patterns: configuredAgentPatterns };
-		}
-		if (!agentInheritsSessionModel) return { source: agentModel, patterns: configuredAgentPatterns };
+			singleAgentPattern === `${LEGACY_MODEL_ROLE_ALIAS_PREFIX}task`);
+	if (agentModelPriority && agentPatternsAvailable) {
+		return { source: agentModel, origin: "agent", patterns: configuredAgentPatterns };
+	}
+	if (requestPatterns.length > 0) {
+		return { source: requestModel, origin: "request", patterns: requestPatterns };
+	}
+	if (agentPatternsAvailable) {
+		return { source: agentModel, origin: "agent", patterns: configuredAgentPatterns };
 	}
 
 	const fallback =
 		activeModelPattern?.trim() || fallbackModelPattern?.trim() || settings?.getModelRole("default")?.trim() || "";
-	return { patterns: resolveConfiguredModelPatterns(fallback, settings) };
+	return { origin: "session", patterns: resolveConfiguredModelPatterns(fallback, settings) };
 }
 
 /** Effective agent model patterns paired with the pre-expansion role alias behind them. */
@@ -1288,6 +1317,8 @@ export interface AgentModelSelection {
 	patterns: string[];
 	/** Role alias the patterns came from (`@task` -> `task`), when the source named one. */
 	role: string | undefined;
+	/** Provenance determines whether per-spawn candidates require strict preflight. */
+	origin: EffectiveAgentModelSelection["origin"];
 }
 
 /**
@@ -1297,8 +1328,8 @@ export interface AgentModelSelection {
  * discards, and deriving the two halves separately is how they drift apart.
  */
 export function resolveAgentModelSelection(options: AgentModelPatternResolutionOptions): AgentModelSelection {
-	const { source, patterns } = resolveEffectiveAgentModelSelection(options);
-	return { patterns, role: resolveExplicitModelRole(source, options.settings) };
+	const { source, origin, patterns } = resolveEffectiveAgentModelSelection(options);
+	return { patterns, role: resolveExplicitModelRole(source, options.settings), origin };
 }
 
 /** Effective agent model patterns alone, for callers with no interest in role identity. */
@@ -1615,6 +1646,58 @@ export function resolveModelOverride(
  */
 export function disabledProviderIds(settings?: Settings): ReadonlySet<string> {
 	return new Set(settings ? cfgDisabledProviders.get(settings) : undefined);
+}
+
+/**
+ * Resolve caller-owned candidates without introducing any fallback source.
+ * Every input pattern is checked in order and must resolve to an available
+ * model with live credentials (or the keyless sentinel).
+ */
+export async function resolveStrictModelCandidates(
+	modelPatterns: readonly string[],
+	modelRegistry: StrictModelResolverRegistry,
+	settings?: Settings,
+	sessionId?: string,
+): Promise<StrictModelCandidateResolution> {
+	const disabledProviders = disabledProviderIds(settings);
+	const availableRegistry: ModelLookupRegistry = {
+		getAvailable: () => modelRegistry.getAvailable().filter(model => !disabledProviders.has(model.provider)),
+	};
+	const allRegistry: ModelLookupRegistry = { getAvailable: () => modelRegistry.getAll() };
+	const patterns: string[] = [];
+	const models: Model<Api>[] = [];
+	const failures: StrictModelCandidateFailure[] = [];
+	for (const pattern of modelPatterns) {
+		const resolved = resolveModelOverride([pattern], availableRegistry, settings);
+		const available = resolved.model;
+		if (!available) {
+			const known = resolveModelOverride([pattern], allRegistry, settings).model;
+			if (!known) {
+				failures.push({ pattern, reason: "unknown" });
+				continue;
+			}
+			if (disabledProviders.has(known.provider)) {
+				failures.push({ pattern, reason: "disabled-provider" });
+				continue;
+			}
+			const key = await modelRegistry.getApiKey(known, sessionId);
+			failures.push({
+				pattern,
+				reason: key === kNoAuth || isAuthenticated(key) ? "unknown" : "missing-credentials",
+			});
+			continue;
+		}
+		const key = await modelRegistry.getApiKey(available, sessionId);
+		if (key !== kNoAuth && !isAuthenticated(key)) {
+			failures.push({ pattern, reason: "missing-credentials" });
+			continue;
+		}
+		const concretePattern = formatModelSelectorValue(formatModelStringWithRouting(available), resolved.thinkingLevel);
+		if (patterns.includes(concretePattern)) continue;
+		patterns.push(concretePattern);
+		models.push(available);
+	}
+	return { patterns, models, failures };
 }
 
 /**

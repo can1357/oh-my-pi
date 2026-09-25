@@ -55,7 +55,18 @@ describe("eval js agent() handle", () => {
 		) => Promise<unknown>;
 		const schema = { type: "object", properties: { ok: { type: "boolean" } } };
 
-		await positionalAgent("scout", "reviewer", "Legacy", schema, true, false, true, "strict", ["read"]);
+		await positionalAgent(
+			"scout",
+			"reviewer",
+			"Legacy",
+			schema,
+			true,
+			false,
+			true,
+			"strict",
+			["read"],
+			["p/one", "p/two"],
+		);
 
 		expect(seenArgs).toEqual({
 			prompt: "scout",
@@ -67,7 +78,18 @@ describe("eval js agent() handle", () => {
 			merge: true,
 			schemaMode: "strict",
 			tools: ["read"],
+			model: ["p/one", "p/two"],
 		});
+	});
+
+	it("forwards a model selector from trailing options", async () => {
+		let seenArgs: Record<string, unknown> | undefined;
+		const sandbox = loadPrelude(async (_name, args) => {
+			seenArgs = args as Record<string, unknown>;
+			return { id: "modelled", agent: "task" };
+		});
+		await (sandbox.agent as AgentHelper)("work", { model: "p/model" });
+		expect(seenArgs).toEqual({ prompt: "work", model: "p/model" });
 	});
 
 	it("throws when the bridge omits the handle id", async () => {
