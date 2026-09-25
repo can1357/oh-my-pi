@@ -25,6 +25,9 @@ export * from "./tool-cache";
 // Transports
 export * from "./transports/http";
 export * from "./transports/stdio";
+// Server
+export * from "./server";
+export { OhMyPiMcpServer } from "./server";
 // Types
 export * from "./types";
 
