@@ -1,4 +1,4 @@
-import { isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
+import { isBedrockAnthropicRoute, isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
 import type { Model } from "../types";
 import type { AnthropicMessagesClientLike } from "./anthropic-client";
 import { normalizeAnthropicBaseUrl, resolveDirectAnthropicBaseUrl } from "./anthropic-state";
@@ -13,14 +13,11 @@ function isSupportedCompactionEndpoint(baseUrl: string | undefined): boolean {
 	if (!baseUrl) return false;
 	try {
 		const { hostname, pathname } = new URL(baseUrl);
-		const anthropicPath = pathname === "/anthropic" || pathname.startsWith("/anthropic/");
 		return (
 			/^(?:[a-z0-9-]+[-.])?aiplatform\.googleapis\.com$/.test(hostname) ||
-			(hostname.endsWith(".services.ai.azure.com") && (pathname === "/" || anthropicPath)) ||
-			/^aws-external-anthropic\.[a-z0-9-]+\.api\.aws$/.test(hostname) ||
-			// Bedrock Mantle serves the Anthropic Messages API under `/anthropic`;
-			// its `/openai` routes speak a different wire and never compact here.
-			(/^bedrock-mantle\.[a-z0-9-]+\.api\.aws$/.test(hostname) && anthropicPath)
+			(hostname.endsWith(".services.ai.azure.com") &&
+				(pathname === "/" || pathname === "/anthropic" || pathname.startsWith("/anthropic/"))) ||
+			/^aws-external-anthropic\.[a-z0-9-]+\.api\.aws$/.test(hostname)
 		);
 	} catch {
 		return false;
@@ -49,11 +46,12 @@ export function supportsAnthropicCompaction(model: Model<"anthropic-messages">, 
 		(model.provider === "anthropic"
 			? resolveDirectAnthropicBaseUrl(model)
 			: normalizeAnthropicBaseUrl(model.baseUrl));
+	// Bedrock's own `/anthropic` routes are AWS endpoints, not gateways.
+	if (isBedrockAnthropicRoute(route)) return true;
 	return (
 		isSupportedCompactionEndpoint(route) &&
 		(model.compat.firstPartyProvider === true ||
 			model.provider === "google-vertex" ||
-			model.provider === "bedrock-mantle" ||
 			model.remoteCompaction?.enabled === true)
 	);
 }

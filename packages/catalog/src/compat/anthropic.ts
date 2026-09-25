@@ -26,6 +26,25 @@ const CLOUDFLARE_ANTHROPIC_GATEWAY_URL_MARKER = /gateway\.ai\.cloudflare\.com\/.
 const VERTEX_ANTHROPIC_URL_MARKER = /aiplatform\.googleapis\.com\/.+\/publishers\/anthropic\//i;
 const BEDROCK_ANTHROPIC_URL_MARKER = /(?:^|\/\/|\.)bedrock-runtime\.[a-z0-9-]+\.amazonaws\.com/i;
 const AZURE_ANTHROPIC_URL_MARKER = /(?:^|\/\/|\.)[a-z0-9-]+\.(?:inference|services)\.ai\.azure\.com/i;
+const BEDROCK_RUNTIME_HOST = /^bedrock-runtime\.[a-z0-9-]+\.amazonaws\.com$/i;
+// Mantle requests fill in a `{region}` template before dispatch.
+const BEDROCK_MANTLE_HOST = /^bedrock-mantle\.(?:[a-z0-9-]+|\{region\})\.api\.aws$/i;
+
+/**
+ * Amazon Bedrock's Anthropic Messages API: the `/anthropic` path on the
+ * bedrock-runtime or bedrock-mantle endpoint.
+ */
+export function isBedrockAnthropicRoute(baseUrl?: string): boolean {
+	if (!baseUrl) return false;
+	let url: URL;
+	try {
+		url = new URL(baseUrl);
+	} catch {
+		return false;
+	}
+	if (url.pathname !== "/anthropic" && !url.pathname.startsWith("/anthropic/")) return false;
+	return BEDROCK_RUNTIME_HOST.test(url.hostname) || BEDROCK_MANTLE_HOST.test(url.hostname);
+}
 
 /**
  * Azure AI Inference / Foundry Anthropic route
@@ -53,6 +72,7 @@ export function isAnthropicSigningProxyUrl(baseUrl?: string): boolean {
 			(CLOUDFLARE_ANTHROPIC_GATEWAY_URL_MARKER.test(baseUrl) ||
 				VERTEX_ANTHROPIC_URL_MARKER.test(baseUrl) ||
 				BEDROCK_ANTHROPIC_URL_MARKER.test(baseUrl))) ||
+		isBedrockAnthropicRoute(baseUrl) ||
 		isAzureAnthropicRoute(baseUrl)
 	);
 }

@@ -687,6 +687,57 @@ region — set `AWS_REGION` or use a region-scoped model id/ARN if the endpoint 
 one. A gateway that accepts a bearer token instead of SigV4 needs no region at all: set the
 provider's `apiKey` (or `AWS_BEARER_TOKEN_BEDROCK`) and signing is skipped.
 
+### Claude on Bedrock's Anthropic Messages API (`/anthropic`)
+
+Amazon Bedrock also serves Claude through the Anthropic Messages API, under `/anthropic` on both of
+its endpoints. AWS recommends `bedrock-runtime` for new applications
+([Inference using Anthropic Messages API](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-messages-api.html)).
+Claude Opus 4.7 and later are served here; Opus 4.6 and earlier stay on Converse
+([Claude in Amazon Bedrock](https://platform.claude.com/docs/en/build-with-claude/claude-in-amazon-bedrock)).
+
+| Route | Base URL | Provider | Model id |
+| --- | --- | --- | --- |
+| bedrock-runtime | `https://bedrock-runtime.<region>.amazonaws.com/anthropic` | `amazon-bedrock` | inference profile, e.g. `us.anthropic.claude-opus-5-5` |
+| bedrock-mantle | `https://bedrock-mantle.<region>.api.aws/anthropic` | `bedrock-mantle` | `anthropic.claude-opus-5-5` |
+
+Define the model under the provider shown in the table, with `api: anthropic-messages`. Those two
+provider ids carry the catalog rule that enables Claude's on-demand compaction
+([Compaction](./compaction.md)). Set `auth: apiKey` so OMP sends plain API-key requests; without
+it, custom `anthropic-messages` models get Claude Code request shaping. The examples authenticate
+with an [Amazon Bedrock API key](https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys.html);
+OMP does not sign runtime-route requests with SigV4. Write the region into the runtime URL. Mantle
+URLs may keep `{region}`, which OMP fills in from your AWS region settings.
+
+```yaml
+providers:
+  amazon-bedrock:
+    baseUrl: https://bedrock-runtime.us-east-1.amazonaws.com
+    apiKey: AWS_BEARER_TOKEN_BEDROCK
+    auth: apiKey
+    models:
+      - id: us.anthropic.claude-opus-5-5
+        api: anthropic-messages
+        baseUrl: https://bedrock-runtime.us-east-1.amazonaws.com/anthropic
+        reasoning: true
+        input: [text, image]
+  bedrock-mantle:
+    baseUrl: https://bedrock-mantle.{region}.api.aws/openai/v1
+    apiKey: AWS_BEARER_TOKEN_BEDROCK
+    auth: apiKey
+    models:
+      - id: anthropic.claude-opus-5-5
+        api: anthropic-messages
+        baseUrl: https://bedrock-mantle.{region}.api.aws/anthropic
+        reasoning: true
+        input: [text, image]
+```
+
+Both routes reject the tool `strict` field, so OMP drops it. OMP also fits `metadata.user_id` to
+Bedrock's [request-metadata pattern](https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Converse.html),
+which the runtime route enforces: a value that fits is kept, otherwise its session id is sent,
+otherwise it is left out. Both routes verify thinking signatures, so by default OMP does not replay
+unsigned thinking to them.
+
 ### Strict tool schemas (`disableStrictTools`)
 
 Anthropic's API supports a `strict` field on tool definitions that forces the model to always follow the provided schema exactly. OMP enables it by default for a small allowlist of high-frequency built-in `anthropic-messages` tools (`bash`, `python`, `edit`, and `find`) whose schemas fit Anthropic's strict grammar limits; other tools still send normalized schemas but omit `strict`.

@@ -7,12 +7,11 @@ class "anthropic" {
 			thinking-prefix-binding #true
 		}
 	}
-	// On-demand compaction (compact-2026-09-04) is available on the Claude
-	// API, Vertex, and Bedrock Mantle's Anthropic Messages route (`/anthropic`),
-	// not the Bedrock Converse API or unverified gateway deployments.
+	// On-demand compaction (compact-2026-09-04) works on the Claude API, Vertex,
+	// and Amazon Bedrock's `/anthropic` routes, not Bedrock Converse.
 	// Foundry / Claude Platform on AWS are first-party Anthropic routes whose
 	// effective URLs are checked at request time.
-	on "anthropic" "google-vertex" "bedrock-mantle" {
+	on "anthropic" "google-vertex" "amazon-bedrock" "bedrock-mantle" {
 		family "fable" {
 			revision ">=5" {
 				supports-server-compaction #true

@@ -214,7 +214,7 @@ describe("Anthropic on-demand compaction requests", () => {
 		});
 	});
 
-	it("uses model and deployment policy, including Foundry and Claude Platform on AWS but not Bedrock Converse", async () => {
+	it("uses model and deployment policy, including Foundry and Claude Platform on AWS but not Bedrock's other routes", async () => {
 		const oldModel = buildModel({ ...spec, id: "claude-sonnet-4-5" });
 		const bedrock = buildModel({
 			...spec,
@@ -222,7 +222,6 @@ describe("Anthropic on-demand compaction requests", () => {
 			baseUrl: "https://bedrock-mantle.us-west-2.api.aws",
 		});
 		expect(oldModel.compat.supportsServerCompaction).toBe(false);
-		expect(bedrock.compat.supportsServerCompaction).toBe(false);
 		for (const blocked of [oldModel, bedrock]) {
 			const response = await captureRequest(blocked, { anthropicCompaction: {} });
 			expect(response.payload.compaction).toBeUndefined();
@@ -239,19 +238,18 @@ describe("Anthropic on-demand compaction requests", () => {
 		});
 	});
 
-	it("sends on-demand compaction on Bedrock Mantle's Anthropic Messages route only", async () => {
-		const mantle = buildModel({
-			...spec,
-			id: "anthropic.claude-opus-5-5",
-			provider: "bedrock-mantle",
-			baseUrl: "https://bedrock-mantle.us-east-1.api.aws/anthropic",
-		});
-		expect(mantle.compat.supportsServerCompaction).toBe(true);
-		const response = await captureRequest(mantle, { anthropicCompaction: {} });
+	it.each([
+		["amazon-bedrock", "https://bedrock-runtime.us-east-1.amazonaws.com/anthropic", "us.anthropic.claude-opus-5-5"],
+		["bedrock-mantle", "https://bedrock-mantle.us-east-1.api.aws/anthropic", "anthropic.claude-opus-5-5"],
+		["bedrock-mantle", "https://bedrock-mantle.{region}.api.aws/anthropic", "anthropic.claude-opus-5-5"],
+	])("sends on-demand compaction for %s at %s", async (provider, baseUrl, id) => {
+		const bedrock = buildModel({ ...spec, id, provider, baseUrl });
+		const response = await captureRequest(bedrock, { anthropicCompaction: {} });
 		expect(response.payload.compaction).toEqual({ type: "summarize" });
 		expect(response.beta).toContain("compact-2026-09-04");
-		expect(supportsAnthropicCompaction(mantle, "https://bedrock-mantle.us-east-1.api.aws/openai/v1")).toBe(false);
-		expect(supportsAnthropicCompaction(mantle, "https://bedrock-mantle.us-east-1.api.aws")).toBe(false);
+		const origin = new URL(baseUrl).origin;
+		expect(supportsAnthropicCompaction(bedrock, origin)).toBe(false);
+		expect(supportsAnthropicCompaction(bedrock, `${origin}/openai/v1`)).toBe(false);
 	});
 });
 
