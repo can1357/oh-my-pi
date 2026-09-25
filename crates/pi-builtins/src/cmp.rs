@@ -4,7 +4,6 @@
 
 use std::{
 	ffi::{OsStr, OsString},
-	fs::{self, File},
 	io::{self, BufRead, BufReader, Cursor, Read, Seek, SeekFrom, Write},
 	path::Path,
 	sync::{
@@ -14,6 +13,7 @@ use std::{
 
 use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command};
+use pi_vfs::{BlockingFs, File};
 
 use crate::host::{Host, Stdin, Utility, format_usage, matches_parser, util};
 
@@ -62,9 +62,18 @@ impl Read for InputReader<'_> {
 
 impl InputReader<'_> {
 	fn skip(&mut self, count: u64) -> io::Result<()> {
+		if count == 0 {
+			return Ok(());
+		}
 		match self {
 			Self::File(file) => {
-				file.seek(SeekFrom::Start(count))?;
+				match file.seek(SeekFrom::Start(count)) {
+					Ok(_) => {},
+					Err(error) if matches!(error.kind(), io::ErrorKind::Unsupported | io::ErrorKind::NotSeekable) => {
+						io::copy(&mut file.take(count), &mut io::sink())?;
+					},
+					Err(error) => return Err(error),
+				}
 			},
 			Self::Bytes(bytes) => {
 				let length = u64::try_from(bytes.get_ref().len()).unwrap_or(u64::MAX);
@@ -220,10 +229,13 @@ fn compare(matches: &ArgMatches, host: &mut Host) -> Result<i32, String> {
 	let path1 = (name1 != OsStr::new("-")).then(|| host.resolve(name1));
 	let path2 = (name2 != OsStr::new("-")).then(|| host.resolve(name2));
 	let cancel = host.cancel_flag();
+	// Cloned so file inputs do not hold a `host` borrow alongside the
+	// `&mut host.stdin` input.
+	let fs = host.fs().clone();
 
 	if name1 == OsStr::new("-") {
 		let input1 = stdin_input(&mut host.stdin);
-		let input2 = open_input(name2, path2.as_deref().unwrap(), options.no_follow)?;
+		let input2 = open_input(&fs, name2, path2.as_deref().unwrap(), options.no_follow)?;
 		compare_inputs(
 			input1,
 			input2,
@@ -235,7 +247,7 @@ fn compare(matches: &ArgMatches, host: &mut Host) -> Result<i32, String> {
 			&cancel,
 		)
 	} else if name2 == OsStr::new("-") {
-		let input1 = open_input(name1, path1.as_deref().unwrap(), options.no_follow)?;
+		let input1 = open_input(&fs, name1, path1.as_deref().unwrap(), options.no_follow)?;
 		let input2 = stdin_input(&mut host.stdin);
 		compare_inputs(
 			input1,
@@ -248,8 +260,8 @@ fn compare(matches: &ArgMatches, host: &mut Host) -> Result<i32, String> {
 			&cancel,
 		)
 	} else {
-		let input1 = open_input(name1, path1.as_deref().unwrap(), options.no_follow)?;
-		let input2 = open_input(name2, path2.as_deref().unwrap(), options.no_follow)?;
+		let input1 = open_input(&fs, name1, path1.as_deref().unwrap(), options.no_follow)?;
+		let input2 = open_input(&fs, name2, path2.as_deref().unwrap(), options.no_follow)?;
 		compare_inputs(
 			input1,
 			input2,
@@ -338,15 +350,15 @@ fn stdin_input(stdin: &mut Stdin) -> Input<'_> {
 	}
 }
 
-fn open_input<'a>(name: &OsStr, path: &Path, no_follow: bool) -> Result<Input<'a>, String> {
+fn open_input<'a>(fs: &BlockingFs, name: &OsStr, path: &Path, no_follow: bool) -> Result<Input<'a>, String> {
 	let metadata = if no_follow {
-		fs::symlink_metadata(path)
+		fs.symlink_metadata(path)
 	} else {
-		fs::metadata(path)
+		fs.metadata(path)
 	}
 	.map_err(|err| input_error(name, &err))?;
 	if no_follow && metadata.file_type().is_symlink() {
-		let target = fs::read_link(path).map_err(|err| input_error(name, &err))?;
+		let target = fs.read_link(path).map_err(|err| input_error(name, &err))?;
 		return Ok(Input {
 			reader:      BufReader::with_capacity(
 				BUFFER_SIZE,
@@ -359,7 +371,7 @@ fn open_input<'a>(name: &OsStr, path: &Path, no_follow: bool) -> Result<Input<'a
 		return Err(format!("{}: Is a directory", display_name(name)));
 	}
 	let regular_len = metadata.is_file().then_some(metadata.len());
-	let file = File::open(path).map_err(|err| input_error(name, &err))?;
+	let file = fs.open(path).map_err(|err| input_error(name, &err))?;
 	Ok(Input { reader: BufReader::with_capacity(BUFFER_SIZE, InputReader::File(file)), regular_len })
 }
 

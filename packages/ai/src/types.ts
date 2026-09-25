@@ -2,6 +2,7 @@ export * from "@oh-my-pi/pi-catalog/effort";
 export * from "@oh-my-pi/pi-catalog/types";
 
 import type { Type } from "@oh-my-pi/omptype";
+import type { AnthropicSlowModeHooks } from "./providers/anthropic-slow-mode";
 import type {
 	DeleteArgs,
 	DeleteResult,
@@ -545,6 +546,13 @@ export interface StreamOptions {
 	 * Providers can use this to persist transport/session state between turns.
 	 */
 	providerSessionState?: Map<string, ProviderSessionState>;
+	/**
+	 * Source of user steering a provider may deliver into the response it is
+	 * streaming (OpenAI Responses `response.steer` over the Codex WebSocket).
+	 * Providers without mid-response input ignore it; unclaimed steering stays
+	 * with the caller for its next request.
+	 */
+	liveSteering?: LiveSteering;
 	/** Canonical Codex compaction classification; ignored by other providers. */
 	codexCompaction?: CodexCompactionRequestContext;
 	/** Codex Code Mode tool exposure snapshot emitted as `tool_namespaces_info` turn metadata; ignored by other providers. */
@@ -640,6 +648,41 @@ export interface StreamOptions {
 
 	/** Cursor exec/MCP tool handlers (cursor-agent only). */
 	execHandlers?: CursorExecHandlers;
+	/**
+	 * Anthropic fallback credit redemption handle from a prior classifier refusal.
+	 * When present, the Anthropic provider replays the frozen request body and betas with
+	 * the new model and `fallback_credit_token` to redeem prompt cache credit.
+	 */
+	fallbackCreditRedemption?: AnthropicFallbackCreditHandle;
+	/**
+	 * Anthropic subscription slow-mode state machine (Claude Code `/low-priority`).
+	 * Consulted only for first-party OAuth `anthropic` requests: stamps
+	 * `anthropic-usage-limit: slow` while active and decides capacity waits.
+	 */
+	anthropicSlowMode?: AnthropicSlowModeHooks;
+}
+
+/**
+ * Caller-owned queue of user steering that a provider pulls from while a
+ * response streams. See {@link StreamOptions.liveSteering}.
+ */
+export interface LiveSteering {
+	/** Resolves once steering may be claimable, or when `signal` aborts. Never consumes input. */
+	wait(signal: AbortSignal): Promise<void>;
+	/** Takes the queued steering as provider messages; `undefined` when none is deliverable now. */
+	claim(signal: AbortSignal): Promise<LiveSteerClaim | undefined>;
+}
+
+/**
+ * Steering taken from a {@link LiveSteering} source. The provider settles it
+ * exactly once; later calls are ignored.
+ */
+export interface LiveSteerClaim {
+	readonly messages: readonly UserMessage[];
+	/** The server owns the input: the caller records it right after the current response. */
+	accept(): void;
+	/** Not delivered: the caller sends the input with its next request. */
+	reject(): void;
 }
 
 // Unified options with reasoning passed to streamSimple() and completeSimple()
@@ -1004,6 +1047,8 @@ export interface UserMessage {
 	synthetic?: boolean;
 	/** True when injected mid-turn as a steer; consumed by the agent's pre-LLM transform to wrap it for emphasis. Never rendered. */
 	steering?: boolean;
+	/** True when the provider delivered this steer into the response it was streaming (`response.steer`). Display-only; never sent. */
+	liveSteered?: boolean;
 	/** Timestamp of a client-side history rewrite represented by this message. */
 	historyRewriteAt?: number;
 	/** Who initiated this message for billing/attribution semantics. */
@@ -1135,6 +1180,8 @@ export interface AssistantMessage {
 	requestControls?: AnthropicRequestControls;
 	/** Provider-specific opaque payload used to reconstruct transport-native history. */
 	providerPayload?: ProviderPayload;
+	/** In-memory fallback credit handle attached when a refusal response carries a fallback credit token. */
+	fallbackCreditHandle?: AnthropicFallbackCreditHandle;
 	timestamp: number; // Unix timestamp in milliseconds
 	duration?: number; // Request duration in milliseconds
 	ttft?: number; // Time to first token in milliseconds
@@ -1473,3 +1520,14 @@ export type AssistantMessageEvent =
 			reason: Extract<StopReason, "aborted" | "error">;
 			error: AssistantMessage;
 	  };
+
+export interface AnthropicFallbackCreditHandle {
+	token: string;
+	prefillClaim?: boolean | null;
+	params: unknown;
+	betas?: readonly string[];
+	betaHeader?: string;
+	expiresAt: number;
+	/** The refused response's content, in `AssistantMessage` block form. */
+	refusedContent?: AssistantMessage["content"];
+}

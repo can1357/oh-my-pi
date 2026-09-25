@@ -7,15 +7,50 @@
  */
 import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { buildPathTree, type PathTreeInput, walkPathTree } from "@oh-my-pi/pi-utils";
+import { InternalUrlRouter } from "../../internal-urls/router";
+import { type InternalUrlFilesystem, type UrlFileStat, UrlFsError } from "../../internal-urls/url-filesystem";
+import { resolveSearchBase, resolveSearchResultPath } from "../path-utils";
 
 /** One eligible file under the search root. */
 export interface FileEntry {
-	/** Absolute path. */
+	/** Absolute host path or internal URL. */
 	path: string;
-	/** Root-relative display path with `/` separators. */
+	/** Root-relative display path with `/` separators; a file root's own {@link path}. */
 	rel: string;
 	size: number;
+}
+
+/** Validated `find` scope: a directory to walk, or one file searched alone. */
+export type SearchRoot = { path: string; type: "directory" } | { path: string; type: "file"; size: number };
+
+/**
+ * Resolve a `find` scope (empty = `cwd`) to an existing directory or file,
+ * host path or internal URL alike, through `filesystem`.
+ * @throws {ToolError} line-range selector, missing path, or neither file nor directory.
+ */
+export async function resolveSearchRoot(
+	filesystem: InternalUrlFilesystem,
+	input: string,
+	cwd: string,
+): Promise<SearchRoot> {
+	if (input.length === 0) return { path: path.resolve(cwd), type: "directory" };
+	// `find` judges whole files, so a trailing `:N-M` would silently be ignored.
+	if (InternalUrlRouter.instance().split(input).sel !== undefined) {
+		throw new ToolError(`find searches whole files; line-range selectors are not supported: ${input}`);
+	}
+	const root = resolveSearchBase(input, cwd);
+	let stat: UrlFileStat;
+	try {
+		stat = await filesystem.stat(root);
+	} catch (error) {
+		if (error instanceof UrlFsError && error.code === "ENOENT") throw new ToolError(`Path not found: ${input}`);
+		throw error;
+	}
+	if (stat.type === "directory") return { path: root, type: "directory" };
+	if (stat.type === "file") return { path: root, type: "file", size: stat.size };
+	throw new ToolError(`Path is neither a file nor a directory: ${input}`);
 }
 
 const DENY_DIRS: Record<string, true> = {
@@ -205,31 +240,41 @@ export function eligibleFile(rel: string, size: number, includeHidden: boolean):
 
 export interface ListFilesOptions {
 	includeHidden: boolean;
+	/** Filesystem URL roots and their entries resolve through. */
+	filesystem: natives.ShellFilesystem;
 	signal?: AbortSignal;
 }
 
 /**
  * Every eligible, non-gitignored regular file under `root`, in path order.
- * Symlinks are never followed.
+ * Symlinks are never followed. A file root is its only entry unless it is
+ * credential material, a binary, or empty; being named explicitly admits it
+ * even when hidden.
  */
-export async function listFiles(root: string, options: ListFilesOptions): Promise<FileEntry[]> {
+export async function listFiles(root: SearchRoot, options: ListFilesOptions): Promise<FileEntry[]> {
+	if (root.type === "file") {
+		return eligibleFile(path.basename(root.path), root.size, true)
+			? [{ path: root.path, rel: root.path, size: root.size }]
+			: [];
+	}
 	// `sortByMtime` is the walker mode that stats entries, which is the only
 	// way the native glob reports sizes; the order is re-established below.
 	const result = await natives.glob({
 		pattern: "*",
-		path: root,
+		path: root.path,
 		recursive: true,
 		fileType: natives.FileType.File,
 		hidden: options.includeHidden,
 		gitignore: true,
 		sortByMtime: true,
+		filesystem: options.filesystem,
 		signal: options.signal,
 	});
 	const entries: FileEntry[] = [];
 	for (const match of result.matches) {
 		const size = match.size ?? 0;
 		if (!eligibleFile(match.path, size, options.includeHidden)) continue;
-		entries.push({ path: path.join(root, match.path), rel: match.path, size });
+		entries.push({ path: resolveSearchResultPath(root.path, match.path), rel: match.path, size });
 	}
 	entries.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
 	return entries;
