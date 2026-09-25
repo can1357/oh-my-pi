@@ -285,9 +285,11 @@ import type {
 } from "./agent-session-types";
 import { writeArtifact } from "./artifacts";
 import { formatArtifactErrorNotice, type OutputMeta, stripOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { truncateMiddle } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import {
 	ASYNC_INLINE_RESULT_MAX_CHARS,
 	ASYNC_PREVIEW_MAX_CHARS,
+	ASYNC_PREVIEW_TAIL_CHARS,
 	ASYNC_RESULT_MESSAGE_TYPE,
 	type AsyncResultEntry,
 	buildAsyncResultBatchMessage,
@@ -2720,6 +2722,18 @@ export class AgentSession implements SettingsScope {
 		const body = meta?.artifactError ? stripOutputNotice(result, meta).trimEnd() : result;
 		const preview = `${body.slice(0, ASYNC_PREVIEW_MAX_CHARS)}\n\n[Output truncated. Showing first ${ASYNC_PREVIEW_MAX_CHARS.toLocaleString()} characters.]`;
 		if (meta?.artifactError) return `${preview}\n[${formatArtifactErrorNotice(meta.artifactError)}]`;
+		// The producing tool's output sink already mirrored the raw stream to an
+		// artifact; `result` is its elided inline body, so link the raw capture.
+		// The capture lacks notices the tool appended after the stream (exit code,
+		// wall time, timeout), so the preview keeps `result`'s tail as well.
+		const rawArtifactId = meta?.truncation?.artifactId ?? meta?.limits?.columnTruncated?.artifactId;
+		if (rawArtifactId) {
+			const headTail = truncateMiddle(result, {
+				maxBytes: ASYNC_PREVIEW_MAX_CHARS,
+				maxHeadBytes: ASYNC_PREVIEW_MAX_CHARS - ASYNC_PREVIEW_TAIL_CHARS,
+			}).content;
+			return `${headTail}\nFull output: artifact://${rawArtifactId}`;
+		}
 		try {
 			const { path: artifactPath, id: artifactId } = await this.sessionManager.allocateArtifactPath("async");
 			if (artifactPath && artifactId) {
