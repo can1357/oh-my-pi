@@ -104,6 +104,8 @@
 ### Fixed
 
 - Prevented magic keywords from triggering spelling autocorrect and underlining
+- Added kind-filtered image, web, speech, dictation, and judge role selection with editable default fallback chains in the model hub.
+- Added `Shift+Left` / `Shift+Right` navigation across visible `/tree` branches and nested fork depths ([#12623](https://github.com/can1357/oh-my-pi/pull/12623) by [@azain47](https://github.com/azain47)).
 
 ## [18.2.5] - 2026-09-17
 

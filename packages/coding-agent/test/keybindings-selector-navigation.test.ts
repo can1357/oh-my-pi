@@ -76,6 +76,19 @@ function createAgentMessageNode(id: string, parentId: string | null, message: Ag
 	};
 }
 
+function createModelNode(id: string, parentId: string | null): SessionTreeNode {
+	return {
+		entry: {
+			type: "model_change",
+			id,
+			parentId,
+			timestamp: "2024-01-01T00:00:00Z",
+			model: "test/model",
+		},
+		children: [],
+	};
+}
+
 function createExtension(id: string, displayName: string): Extension {
 	return {
 		id,
@@ -278,6 +291,96 @@ describe("selector navigation keybindings", () => {
 		selector.handleInput("\n");
 
 		expect(selected).toEqual(["inactive-branch", "root"]);
+	});
+
+	it("uses Shift+Left and Shift+Right to cycle visible branches through filtered heads", () => {
+		const root = createMessageNode("root", null, "Root");
+		const activeBranch = createMessageNode("active-branch", "root", "Active branch");
+		const filteredBranch = createModelNode("filtered-branch", "root");
+		const promotedHead = createModelNode("promoted-head", "root");
+		const promotedMessage = createMessageNode("promoted-message", "promoted-head", "Promoted branch");
+		promotedHead.children.push(promotedMessage);
+		root.children.push(activeBranch, filteredBranch, promotedHead);
+
+		const selected: string[] = [];
+		const selector = new TreeSelectorComponent(
+			[root],
+			"active-branch",
+			40,
+			id => selected.push(id),
+			() => {},
+		);
+
+		selector.handleInput("\x1b[1;2C");
+		selector.handleInput("\n");
+		selector.handleInput("\x1b[1;2D");
+		selector.handleInput("\n");
+
+		expect(selected).toEqual(["promoted-message", "active-branch"]);
+	});
+
+	it("enters the first or last visible child when selection is a fork", () => {
+		const root = createMessageNode("root", null, "Root");
+		const activeBranch = createMessageNode("active-branch", "root", "Active branch");
+		const filteredBranch = createModelNode("filtered-branch", "root");
+		const promotedHead = createModelNode("promoted-head", "root");
+		const promotedMessage = createMessageNode("promoted-message", "promoted-head", "Promoted branch");
+		promotedHead.children.push(promotedMessage);
+		root.children.push(activeBranch, filteredBranch, promotedHead);
+
+		const movedRight: string[] = [];
+		const rightSelector = new TreeSelectorComponent(
+			[root],
+			"root",
+			40,
+			id => movedRight.push(id),
+			() => {},
+		);
+		rightSelector.handleInput("\x1b[1;2C");
+		rightSelector.handleInput("\n");
+
+		const movedLeft: string[] = [];
+		const leftSelector = new TreeSelectorComponent(
+			[root],
+			"root",
+			40,
+			id => movedLeft.push(id),
+			() => {},
+		);
+		leftSelector.handleInput("\x1b[1;2D");
+		leftSelector.handleInput("\n");
+
+		expect(movedRight).toEqual(["active-branch"]);
+		expect(movedLeft).toEqual(["promoted-message"]);
+	});
+	it("continues branch navigation across nested fork depths", () => {
+		const root = createMessageNode("root", null, "Root");
+		const outerActive = createMessageNode("outer-active", "root", "Outer active branch");
+		const outerSibling = createMessageNode("outer-sibling", "root", "Outer sibling branch");
+		const innerActive = createMessageNode("inner-active", "outer-active", "Inner active branch");
+		const innerLeaf = createMessageNode("inner-leaf", "inner-active", "Inner active leaf");
+		const innerSibling = createMessageNode("inner-sibling", "outer-active", "Inner sibling branch");
+		innerActive.children.push(innerLeaf);
+		outerActive.children.push(innerActive, innerSibling);
+		root.children.push(outerActive, outerSibling);
+
+		const selected: string[] = [];
+		const selector = new TreeSelectorComponent(
+			[root],
+			"inner-leaf",
+			40,
+			id => selected.push(id),
+			() => {},
+		);
+
+		selector.handleInput("\x1b[1;2C");
+		selector.handleInput("\n");
+		selector.handleInput("\x1b[1;2C");
+		selector.handleInput("\n");
+		selector.handleInput("\x1b[1;2D");
+		selector.handleInput("\n");
+
+		expect(selected).toEqual(["inner-sibling", "outer-sibling", "inner-sibling"]);
 	});
 
 	it("uses PageUp and PageDown to move by a visible page in the session tree", () => {
