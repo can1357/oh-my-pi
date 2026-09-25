@@ -497,6 +497,19 @@ export const cfgTuiHyperlinks = register({
 // effective value, so pi-tui renderers gating on the shared flag track it the same instant path links do.
 effect(cfgTuiHyperlinks, applyHyperlinkSetting);
 
+export const cfgTuiShowLinkUrl = register({
+	id: "tui.showLinkUrl",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Link URLs",
+		description:
+			"Show the target URL in parentheses after named markdown links (the link label stays clickable either way)",
+	},
+});
+
 export const cfgTuiMouse = register({
 	id: "tui.mouse",
 	type: "boolean",

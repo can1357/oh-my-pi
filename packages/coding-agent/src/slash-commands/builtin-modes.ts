@@ -18,6 +18,7 @@ import { cfgComputerDisplay, cfgComputerEnabled, cfgComputerMaxHeight, cfgComput
 import { cfgSkillful } from "../session/settings";
 import { formatSlowModeResetClock } from "../session/anthropic-slow-mode";
 import { cfgExtendedContext } from "../session/context-settings";
+import { cfgTuiShowLinkUrl } from "../modes/settings";
 import { cfgGoalEnabled } from "../goals/settings";
 import { cfgPlanEnabled } from "../plan-mode/settings";
 
@@ -115,25 +116,42 @@ function formatExtendedContextStatus(settings: Settings): string {
 	return cfgExtendedContext.get(settings) ? "on" : "off";
 }
 
+/** Shared on/off/toggle handling for boolean-setting commands; `status` wording stays with each command. */
+function applyBooleanSettingToggle(
+	settings: Settings,
+	cfg: { get(settings: Settings): boolean; set(settings: Settings, value: boolean): void },
+	label: string,
+	args: string,
+): string | undefined {
+	const arg = args.trim().toLowerCase();
+	if (arg === "on") {
+		cfg.set(settings, true);
+		return `${label} enabled.`;
+	}
+	if (arg === "off") {
+		cfg.set(settings, false);
+		return `${label} disabled.`;
+	}
+	if (!arg || arg === "toggle") {
+		const next = !cfg.get(settings);
+		cfg.set(settings, next);
+		return `${label} ${next ? "enabled" : "disabled"}.`;
+	}
+	return undefined;
+}
+
 /** Applies an `/extended-context` argument and returns its operator feedback. */
 function applyExtendedContextCommand(settings: Settings, args: string): string | undefined {
 	const arg = args.trim().toLowerCase();
-	const current = cfgExtendedContext.get(settings);
-	if (!arg || arg === "toggle") {
-		const enabled = !current;
-		cfgExtendedContext.set(settings, enabled);
-		return `Extended context ${enabled ? "enabled" : "disabled"}.`;
-	}
-	if (arg === "on") {
-		cfgExtendedContext.set(settings, true);
-		return "Extended context enabled.";
-	}
-	if (arg === "off") {
-		cfgExtendedContext.set(settings, false);
-		return "Extended context disabled.";
-	}
 	if (arg === "status") return `Extended context is ${formatExtendedContextStatus(settings)}.`;
-	return undefined;
+	return applyBooleanSettingToggle(settings, cfgExtendedContext, "Extended context", arg);
+}
+
+/** Applies a `/link-url` argument and returns its operator feedback. */
+function applyLinkUrlCommand(settings: Settings, args: string): string | undefined {
+	const arg = args.trim().toLowerCase();
+	if (arg === "status") return `Link URLs are ${cfgTuiShowLinkUrl.get(settings) ? "on" : "off"}.`;
+	return applyBooleanSettingToggle(settings, cfgTuiShowLinkUrl, "Link URLs", arg);
 }
 
 /** Detailed, session-effective `/computer status` diagnostics. */
@@ -629,6 +647,34 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			const output = applyExtendedContextCommand(runtime.ctx.settings, command.args);
 			refreshStatusLine(runtime.ctx);
 			runtime.ctx.showStatus(output ?? "Usage: /extended-context [on|off|status]");
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "link-url",
+		icon: "globe",
+		description: "Toggle the URL shown in parentheses after markdown links",
+		acpDescription: "Toggle link URLs",
+		acpInputHint: "[on|off|status]",
+		subcommands: [
+			{ name: "on", description: "Show target URLs after named links" },
+			{ name: "off", description: "Show only the link label" },
+			{ name: "status", description: "Show link URL status" },
+		],
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime =>
+			`Link URLs: ${cfgTuiShowLinkUrl.get(runtime.ctx.settings) ? "on" : "off"}`,
+		handle: async (command, runtime) => {
+			const output = applyLinkUrlCommand(runtime.settings, command.args);
+			if (!output) return usage("Usage: /link-url [on|off|status]", runtime);
+			await runtime.output(output);
+			return commandConsumed();
+		},
+		handleTui: (command, runtime) => {
+			const output = applyLinkUrlCommand(runtime.ctx.settings, command.args);
+			runtime.ctx.ui.invalidate();
+			runtime.ctx.ui.requestRender();
+			runtime.ctx.showStatus(output ?? "Usage: /link-url [on|off|status]");
 			runtime.ctx.editor.setText("");
 		},
 	},
