@@ -104,6 +104,73 @@ describe("Editor vim mode", () => {
 		});
 	});
 
+	describe("escape sequences", () => {
+		it("leaves insert via jk and removes the pending j", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setVimMode(true);
+			editor.setVimEscapeSequence("jk");
+			editor.handleInput("hello");
+			editor.handleInput("j");
+			expect(editor.getText()).toBe("helloj");
+			editor.handleInput("k");
+			expect(editor.vimMode).toBe("normal");
+			expect(editor.getText()).toBe("hello");
+		});
+
+		it("supports jj as well as jk", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setVimMode(true);
+			editor.setVimEscapeSequence("jk,jj");
+			editor.handleInput("ab");
+			editor.handleInput("j");
+			editor.handleInput("j");
+			expect(editor.vimMode).toBe("normal");
+			expect(editor.getText()).toBe("ab");
+		});
+
+		it("keeps both characters when the second key mismatches", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setVimMode(true);
+			editor.setVimEscapeSequence(["jk"]);
+			editor.handleInput("j");
+			editor.handleInput("x");
+			expect(editor.vimMode).toBe("insert");
+			expect(editor.getText()).toBe("jx");
+		});
+
+		it("keeps a lone j after the timeout", async () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setVimMode(true);
+			editor.setVimEscapeSequence("jk");
+			editor.setVimEscapeSequenceTimeoutMs(50);
+			editor.handleInput("j");
+			expect(editor.getText()).toBe("j");
+			// Async sleep so the pending setTimeout can fire.
+			await Bun.sleep(80);
+			editor.handleInput("k");
+			expect(editor.vimMode).toBe("insert");
+			expect(editor.getText()).toBe("jk");
+		});
+
+		it("handles a batched jk chunk", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setVimMode(true);
+			editor.setVimEscapeSequence("jk");
+			editor.handleInput("pre");
+			editor.handleInput("jk");
+			expect(editor.vimMode).toBe("normal");
+			expect(editor.getText()).toBe("pre");
+		});
+
+		it("does nothing when vim mode is off", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setVimEscapeSequence("jk");
+			editor.handleInput("jk");
+			expect(editor.getText()).toBe("jk");
+			expect(editor.vimMode).toBe("insert");
+		});
+	});
+
 	describe("motions", () => {
 		it("moves with h/j/k/l without editing the buffer", () => {
 			const editor = vimEditor("alfa\nbeta");

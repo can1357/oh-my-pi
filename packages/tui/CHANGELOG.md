@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added optional two-key Insert→Normal escapes on `Editor` via `setVimEscapeSequence` / `setVimEscapeSequenceTimeoutMs` (e.g. `jk` / `jj`), matching common Vim `inoremap jk <Esc>` behavior.
+
 ## [18.3.1] - 2026-09-25
 
 ### Breaking Changes

@@ -73,6 +73,30 @@ function sanitizeLoadedText(text: string): string {
 
 const segmenter = getSegmenter();
 
+const DEFAULT_VIM_ESCAPE_TIMEOUT_MS = 300;
+const MIN_VIM_ESCAPE_TIMEOUT_MS = 50;
+const MAX_VIM_ESCAPE_TIMEOUT_MS = 2000;
+
+/** Parse `jk` / `jk,jj` (or a string list) into unique two-letter ASCII sequences. */
+export function normalizeVimEscapeSequences(raw: string | readonly string[] | null | undefined): string[] {
+	const parts = Array.isArray(raw) ? raw.map(String) : typeof raw === "string" ? raw.split(/[,\s]+/) : [];
+	const cleaned: string[] = [];
+	for (const part of parts) {
+		const seq = part.trim();
+		if (!seq) continue;
+		if (!/^[A-Za-z]{2}$/.test(seq)) {
+			throw new Error(`vim escape sequence must be exactly two ASCII letters, got ${JSON.stringify(seq)}`);
+		}
+		cleaned.push(seq);
+	}
+	return [...new Set(cleaned)];
+}
+
+export function clampVimEscapeTimeoutMs(ms: number): number {
+	if (!Number.isFinite(ms)) return DEFAULT_VIM_ESCAPE_TIMEOUT_MS;
+	return Math.min(MAX_VIM_ESCAPE_TIMEOUT_MS, Math.max(MIN_VIM_ESCAPE_TIMEOUT_MS, Math.floor(ms)));
+}
+
 /**
  * Represents a chunk of text for word-wrap layout.
  * Tracks the text content, its position in the original line, and its exact
@@ -562,6 +586,11 @@ export class Editor implements Component, Focusable {
 	/** Vim-style modal editing (opt-in, see the `tui.vimMode` setting). `null` when disabled, in
 	 *  which case every code path below behaves exactly as it did before the mode existed. */
 	#vim: VimState | null = null;
+	/** Optional two-key Insert→Normal escapes (`jk`/`jj`), keyed by first letter → second letters. */
+	#vimEscapeSecondsByFirst = new Map<string, Set<string>>();
+	#vimEscapeTimeoutMs = DEFAULT_VIM_ESCAPE_TIMEOUT_MS;
+	#vimEscapePending: { char: string } | null = null;
+	#vimEscapeTimer: ReturnType<typeof setTimeout> | null = null;
 	/** Called with the selected text when Visual mode yanks, so hosts can reach the system
 	 *  clipboard — `packages/tui` deliberately has no clipboard dependency of its own. */
 	onYank?: (text: string) => void;
@@ -780,9 +809,34 @@ export class Editor implements Component, Focusable {
 	 *  never left in a state where ordinary typing does nothing. */
 	setVimMode(enabled: boolean): void {
 		if (enabled === (this.#vim !== null)) return;
+		this.#clearVimEscapePending();
 		this.#vim = enabled ? new VimState() : null;
 		if (this.#vim) this.#vim.mode = "insert";
 		this.invalidate();
+	}
+
+	/**
+	 * Optional two-letter Insert→Normal sequences (`"jk"` or `["jk","jj"]`). Empty/omitted keeps only
+	 * Escape. Sequences are case-sensitive ASCII letters; the first key is inserted pending the second.
+	 */
+	setVimEscapeSequence(raw: string | readonly string[] | null | undefined): void {
+		this.#clearVimEscapePending();
+		this.#vimEscapeSecondsByFirst = new Map();
+		for (const seq of normalizeVimEscapeSequences(raw ?? [])) {
+			const first = seq[0]!;
+			const second = seq[1]!;
+			let set = this.#vimEscapeSecondsByFirst.get(first);
+			if (!set) {
+				set = new Set();
+				this.#vimEscapeSecondsByFirst.set(first, set);
+			}
+			set.add(second);
+		}
+	}
+
+	/** How long to wait for the second key of an escape sequence (clamped to 50..2000, default 300). */
+	setVimEscapeSequenceTimeoutMs(ms: number): void {
+		this.#vimEscapeTimeoutMs = clampVimEscapeTimeoutMs(ms);
 	}
 
 	/** Current modal state; always `"insert"` when Vim mode is off. */
@@ -1976,6 +2030,78 @@ export class Editor implements Component, Focusable {
 		}
 	}
 
+	#clearVimEscapePending(): void {
+		if (this.#vimEscapeTimer !== null) {
+			clearTimeout(this.#vimEscapeTimer);
+			this.#vimEscapeTimer = null;
+		}
+		this.#vimEscapePending = null;
+	}
+
+	/** Delete the pending first letter (still under the cursor) and switch Insert → Normal. */
+	#completeVimEscapeSequence(vim: VimState): void {
+		this.#clearVimEscapePending();
+		this.deleteBeforeCursor(1);
+		this.#runVimKey("escape", vim);
+	}
+
+	/**
+	 * Pending two-key Insert→Normal escapes. The first letter is inserted immediately so ordinary
+	 * typing of `j` is not delayed; completing the sequence within the timeout removes it and leaves
+	 * Normal mode (same idea as better-escape.nvim jk/jj: https://github.com/max397574/better-escape.nvim).
+	 */
+	#tryVimEscapeSequence(data: string): boolean {
+		const vim = this.#vim;
+		if (vim === null || this.#vimEscapeSecondsByFirst.size === 0) return false;
+		if (this.isShowingAutocomplete()) {
+			this.#clearVimEscapePending();
+			return false;
+		}
+
+		const printable = extractPrintableText(data);
+		if (!printable) {
+			// Control chords / non-text keys cancel the wait but stay with the ordinary dispatch.
+			this.#clearVimEscapePending();
+			return false;
+		}
+
+		let consumed = false;
+		for (const seg of segmenter.segment(printable)) {
+			const ch = seg.segment;
+			if (this.#vimEscapePending) {
+				const seconds = this.#vimEscapeSecondsByFirst.get(this.#vimEscapePending.char);
+				if (seconds?.has(ch)) {
+					this.#completeVimEscapeSequence(vim);
+					const rest = printable.slice(seg.index + ch.length);
+					if (rest) this.#handleVimInput(rest, undefined);
+					return true;
+				}
+				// Mismatch: keep the typed first letter and insert the rest normally.
+				this.#clearVimEscapePending();
+				this.#insertCharacter(printable.slice(seg.index));
+				return true;
+			}
+
+			if (/^[A-Za-z]$/.test(ch) && this.#vimEscapeSecondsByFirst.has(ch)) {
+				this.#insertCharacter(ch);
+				this.#vimEscapePending = { char: ch };
+				this.#vimEscapeTimer = setTimeout(() => {
+					this.#vimEscapeTimer = null;
+					this.#vimEscapePending = null;
+				}, this.#vimEscapeTimeoutMs);
+				consumed = true;
+				continue;
+			}
+
+			if (consumed) {
+				this.#insertCharacter(printable.slice(seg.index));
+				return true;
+			}
+			return false;
+		}
+		return consumed;
+	}
+
 	/**
 	 * Route one input chunk through the Vim state machine. Returns true when it was consumed.
 	 *
@@ -1991,9 +2117,12 @@ export class Editor implements Component, Focusable {
 		// An open autocomplete popup still gets the first Escape though — dismissing it is what
 		// the user means, and a second Escape then switches modes.
 		if (canonical === "escape") {
+			this.#clearVimEscapePending();
 			return this.isShowingAutocomplete() ? false : this.#runVimKey("escape", vim);
 		}
-		if (vim.mode === "insert") return false;
+		if (vim.mode === "insert") {
+			return this.#tryVimEscapeSequence(data);
+		}
 
 		const mapped = canonical === undefined ? undefined : VIM_NAV_KEYS[canonical];
 		if (mapped !== undefined) return this.#runVimKey(mapped, vim);

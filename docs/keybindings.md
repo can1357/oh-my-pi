@@ -71,13 +71,15 @@ Off by default. Turn it on with **Vim Editing Mode** in `/settings` (Interaction
 
 ```yaml
 tui.vimMode: true
+# tui.vimEscapeSequence: jk,jj
+# tui.vimEscapeSequenceTimeoutMs: 300
 ```
 
 The prompt then starts in Insert mode and behaves exactly as it always has. `Escape` switches to Normal mode; the prompt border changes color so the current mode is visible at a glance. While Vim mode is on, Insert draws a bar cursor and Normal/Visual a block — the software cursor always, the real terminal cursor via DECSCUSR under `PI_HARDWARE_CURSOR` — overriding the terminal's configured shape until the session restores it on exit. This is a useful subset of Vim, not a full implementation — enough for keyboard-only navigation and selection without adding more `Ctrl` chords that terminals, shells, and tmux already claim.
 
 | Mode        | Enter with              | Leave with                                              |
 | ----------- | ----------------------- | ------------------------------------------------------- |
-| Insert      | `i` `a` `I` `A` `o` `O` | `Escape`                                                |
+| Insert      | `i` `a` `I` `A` `o` `O` | `Escape`, or optional `tui.vimEscapeSequence` (e.g. `jk`) |
 | Normal      | `Escape` from Insert    | any Insert-mode key                                     |
 | Visual      | `v`                     | `Escape`, or an operator (`y` `d` `c`)                  |
 | Visual line | `V`                     | `Escape`, or an operator (`y` `d` `c`)                  |
@@ -124,6 +126,7 @@ A selection that would cut through an attachment placeholder such as `[Image #1,
 `Escape` is shared with the app-level interrupt, so Vim mode takes it only when it has something to do:
 
 - **Insert mode** → switch to Normal mode.
+- Optional **`tui.vimEscapeSequence`** (e.g. `jk` or `jk,jj`) also leaves Insert: the first letter is inserted pending the second; completing the sequence within `tui.vimEscapeSequenceTimeoutMs` (default `300`) removes that letter and enters Normal. Empty/omitted keeps only Escape.
 - **Visual mode**, or a half-typed count or operator → cancel back to a quiet Normal mode.
 - **Normal mode with nothing pending** → falls through to its usual meaning (dismiss autocomplete, abort the running turn, clear the draft).
 
